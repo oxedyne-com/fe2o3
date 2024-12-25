@@ -4,8 +4,7 @@ Hematite is a collection of crates built from first principles, providing founda
 
 ## This crate
 
-This crate provides a terminal user interface (TUI) library and the Ironic Interactive Console. The library 
-offers abstractions for building terminal-based applications with features like:
+This crate provides a terminal user interface (TUI) library and the Iron Interactive Console (Ironic). The library offers abstractions for building terminal-based applications with features like:
 
 - Modal editing inspired by Vi/Vim
 - Windowing system with draggable/resizable windows 

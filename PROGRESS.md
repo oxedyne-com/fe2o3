@@ -61,3 +61,9 @@ This is a dynamic document, and shows the latest goals of development work.
 - [ ] Integration of database with server
 - [ ] Create an `fe2o3_syntax` for network messages
 - [ ] Demonstrate a small peer to peer network on the open internet including discovery
+
+## Ironic app: `fe2o3_tui`
+
+- [ ] Split code into app and library like `fe2o3_steel`, move app out of ./examples
+- ...
+- [ ] Demonstrate development of Hematite in Ironic as a vim replacement

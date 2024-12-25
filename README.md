@@ -6,8 +6,6 @@ Hematite is a collection of Rust crates that grew from an exploration into datab
 - **JDAT**: A superset of JSON adding types, combining human-readable and binary formats.
 - **Shield**: A secure peer-to-peer protocol and app built on UDP.
 - **Namex**: A distributed universal name codex for schemes and specifications.
-- **Steel**: A TCP server implementation with HTTP, HTTPS, WebSocket, and SMTPS support.
-- **Ironic**: A terminal user interface.
 
 Oxedize is my Rust/Web development shop.
 
@@ -31,7 +29,7 @@ Hematite started as a Rust learning experience, and one of my objectives has bee
 
 The code aims mostly to be correct, readable, and maintainable rather than super-fast or clever.  While I have always strived for economy and efficiency, I'm looking forward to community contributions that help make better use of Rust features, and lead to more aggressive optimisation.
 
-One of the initial motivations for the library was to improve my personal developer experience, which has involved a range of experiments particularly around error handling and logging.  The code avoids the use of `unsafe` and `unwrap`.  The `?` propogator is avoided in favour of macros that are more explicitly function-like such as the directly replacement `ok!`, the match-based `res!` and the closure `catch!` which capture unwind panics.  Eventually any impacts on performance will be properly assessed.  Tags were built into the `fe2o3_core::error::Error` type which offers a foundation for theoretical benefits but the practical value remains to be seen.
+One of the initial motivations for the library was to improve my personal developer experience, which has involved a range of experiments particularly around error handling and logging.  The code avoids the use of `unsafe` and `unwrap`.  The `?` propogator is avoided in favour of macros that are more explicitly function-like such as the directly replacement `ok!`, the match-based `res!` and the closure `catch!` which tries to capture unwind panics.  Eventually any impacts on performance will be properly assessed.  Tags were built into the `fe2o3_core::error::Error` type which offers a foundation for theoretical benefits but the practical value remains to be seen.
 
 ## Supporting Development
 
@@ -146,6 +144,7 @@ use oxedize_fe2o3_jdat;
 ## Highlights
 
 ### Ozone Database
+
 O3db aims to:
 - Write data quickly to log-structured files,
 - Offer a high degree of parallalism using operating system threads,
@@ -154,6 +153,7 @@ O3db aims to:
 - Simple, familiar key-value interface.
 
 ### JDAT
+
 JDAT extends JSON to support:
 - Type annotations including multiple number formats,
 - Binary encoding and decoding,
@@ -161,11 +161,43 @@ JDAT extends JSON to support:
 - Any type as map keys.
 
 ### Shield Protocol
+
 Shield stands for Signed Hash In Every Little Datagram and provides:
 - UDP-based messaging,
 - Secure and authenticated peer-to-peer communication,
 - Post-quantum cryptography options, and
 - Mitigates DOS attacks through use of proof of work in all packets.
+
+### Namex
+
+Namex aims to enable:
+- A decentralised, versionless database for mapping 32-byte identifiers to entities
+- Support for over 4 billion identifier families, each with over 65,000 variants
+- JDAT-based storage format with human-readable export options
+- Rich entity metadata including names, descriptions, timestamps, and cross-references
+- Language-aware naming with alternative name support
+- Hierarchical tagging system for flexible categorisation
+
+### Steel Web Server
+
+Steel includes:
+- A robust HTTPS server with WebSocket upgrade support
+- Development mode with hot reloading and self-signed certificates 
+- Production mode with Let's Encrypt certificate automation
+- Built-in static file serving and route configuration
+- Clean separation between server and application layers
+- JavaScript/TypeScript bundling and SASS compilation in development mode
+
+### Iron Interactive Console
+
+Ironic aims to offer:
+- Modal editing inspired by Vi/Vim
+- Windowing system with draggable/resizable windows 
+- Tab-based interface for organizing content
+- Customisable styles and colours
+- Scrollbars and status indicators
+- File tree navigation
+- Support for both static and editable text views
 
 ## License
 
