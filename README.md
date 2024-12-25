@@ -29,13 +29,13 @@ See the detailed [project progress](PROGRESS.md) for recently completed and upco
 
 Hematite started as a Rust learning experience, and one of my objectives has been to minimise third-party dependencies. However, despite every effort to reinvent lots of wheels, it still depends on many crates directly and indirectly.  So I am very grateful to all their authors and contributors.
 
-The code aims mostly to be correct, readable, and maintainable rather than super-fast or clever.  While I have always strived for economy and efficiency, I'm looking forward to community contributions that help make better of Rust features, and lead to more aggressive optimisation.
+The code aims mostly to be correct, readable, and maintainable rather than super-fast or clever.  While I have always strived for economy and efficiency, I'm looking forward to community contributions that help make better use of Rust features, and lead to more aggressive optimisation.
 
-One of the initial motivations for the library was to improve my personal developer experience, which has involved a range of experiments particularly around error handling and logging.  The code avoids the use of `unsafe` and `unwrap`.  The `?` propogator is avoided in favour of macros that are more explicitly function-like such as the match-based `ok!` and the closure `res!` which tries to also capture a class of panics.  Eventually any impacts on performance will be properly assessed.  Tags were built into the `fe2o3_core::error::Error` type which offers a foundation for theoretical benefits but the practical value remains to be seen.
+One of the initial motivations for the library was to improve my personal developer experience, which has involved a range of experiments particularly around error handling and logging.  The code avoids the use of `unsafe` and `unwrap`.  The `?` propogator is avoided in favour of macros that are more explicitly function-like such as the directly replacement `ok!`, the match-based `res!` and the closure `catch!` which capture unwind panics.  Eventually any impacts on performance will be properly assessed.  Tags were built into the `fe2o3_core::error::Error` type which offers a foundation for theoretical benefits but the practical value remains to be seen.
 
 ## Supporting Development
 
-This project is developed and maintained through GitHub Sponsors. If you find Hematite valuable for your work or interesting as a project, consider supporting its continued development. No special perks or privileges - just sustainable open source development of innovative Rust infrastructure and apps.
+This project is developed and maintained through GitHub Sponsors. If you find Hematite valuable for your work or interesting as a project, consider supporting it to increase the pace of development. No special perks or privileges - just sustainable open source development of innovative Rust infrastructure and apps.
 
 ![GitHub Sponsors](https://img.shields.io/github/sponsors/Oxedize)
 
