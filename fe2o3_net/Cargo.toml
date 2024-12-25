@@ -1,0 +1,34 @@
+[package]
+name = "oxedize_fe2o3_net"
+version = "0.5.0"
+authors = ["h00gs <hello@oxedize.com>"]
+edition = "2021"
+license = "BSD-2-Clause/Apache-2.0"
+description = "Hematite networking library."
+repository = "https://github.com/Oxedize/fe2o3"
+
+[dependencies]
+oxedize_fe2o3_bot 					= { path = "../fe2o3_bot" }
+oxedize_fe2o3_core 					= { path = "../fe2o3_core" }
+oxedize_fe2o3_crypto				= { path = "../fe2o3_crypto" }
+oxedize_fe2o3_data 					= { path = "../fe2o3_data" }
+oxedize_fe2o3_jdat 					= { path = "../fe2o3_jdat" }
+oxedize_fe2o3_hash 					= { path = "../fe2o3_hash" }
+oxedize_fe2o3_iop_crypto			= { path = "../fe2o3_iop_crypto" }
+oxedize_fe2o3_iop_db 				= { path = "../fe2o3_iop_db" }
+oxedize_fe2o3_iop_hash 				= { path = "../fe2o3_iop_hash" }
+oxedize_fe2o3_stds 					= { path = "../fe2o3_stds" }
+oxedize_fe2o3_syntax				= { path = "../fe2o3_syntax" }
+oxedize_fe2o3_text					= { path = "../fe2o3_text" }
+
+base64 = "0.13.0"
+chrono = "0.4"
+lettre = "0.10.0-rc.3"
+secrecy = "0.8.0"
+sha1 = "0.10.6"
+strum = { version = "0.25", features = ["derive"] }
+tokio = { version = "1.35", features = ["full"] }
+tokio-rustls = "0.25"
+
+[dev-dependencies]
+oxedize_fe2o3_data 					= { path = "../fe2o3_data" }

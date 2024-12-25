@@ -1,0 +1,27 @@
+# Rust
+/target/
+Cargo.lock
+**/*.rs.bk
+
+# Source code text file bundles
+fe2o3_*.txt
+
+# Vim
+*.swp
+*.swo
+*~
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+
+# OS specific
+.DS_Store
+.directory
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.iml

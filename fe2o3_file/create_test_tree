@@ -1,0 +1,21 @@
+#!/bin/bash
+root=test_tree
+rm -fr $root
+mkdir -p $root/A
+mkdir -p $root/E
+mkdir -p $root/E/G
+mkdir -p $root/E/G/H
+mkdir -p $root/M
+touch $root/A/B.txt
+touch $root/A/C.txt
+touch $root/A/D.txt
+touch $root/E/F.txt
+touch $root/E/G/H/I.txt
+touch $root/E/G/H/J.txt
+touch $root/E/G/H/K.txt
+touch $root/E/G/L.txt
+touch $root/M/N.txt
+touch $root/M/P.txt
+touch $root/Q.txt
+echo "Created $root:"
+tree $root

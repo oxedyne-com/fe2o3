@@ -1,0 +1,79 @@
+this is
+a
+test
+tes
+another
+test
+hello
+this is a
+test
+and
+this
+ls
+poo
+pwd
+pwd
+the
+pwd
+pwd
+this
+none
+exit
+pwd
+exit
+pwd
+this
+ls
+exit
+this
+exit
+pwd
+this
+exit
+pwd
+ls
+exit
+pwd
+ls
+exit
+pwd
+pwd
+echo hi
+echo hi
+echo hi
+pwd
+echo
+echo poo
+echo poo poo
+echo "poo jkjfkldfj sdlfkjsd"
+echo "hjkhwejkrwe wkejrhkwjerh"
+this
+echo hi there
+help
+echo poo
+ls
+ls -sort type
+echo poo
+s is
+echo this is a test
+echo this i
+echo this is s jkdjfgkjgdf
+echo thuis'
+echo this
+echo what hell is the 
+echo this is a test
+echo this
+echo this was a test
+ls
+pwd
+pewd
+pwd
+exit
+help
+ls
+pwd
+echo this is a test
+ls -s type
+ls -b -s type
+ls  -s type
+help

@@ -1,0 +1,445 @@
+{
+  (b32|"cBK+9vSPBc/iN3hW067gNNhyWGllITruhBGV60JiT+U="): {
+    (nams): (vek|[
+      "RSA",
+    ]),
+    (lang): "English",
+    (desc): "RSA (Rivest–Shamir–Adleman) is a public-key cryptosystem, \
+      one of the oldest that is widely used for secure data \
+      transmission. The initialism "RSA" comes from the surnames of \
+      Ron Rivest, Adi Shamir and Leonard Adleman, who publicly \
+      described the algorithm in 1977. An equivalent system was \
+      developed secretly in 1973 at Government Communications \
+      Headquarters (GCHQ), the British signals intelligence agency, \
+      by the English mathematician Clifford Cocks. That system was \
+      declassified in 1997.",
+    (tim1): "1197802",
+    (tags): (vek|[
+      "Algorithm",
+      "Encryption",
+      "Asymmetric",
+      "Transformation",
+    ]),
+    (alts): {
+      "iod": "1.2.840.113549.1.1.1",
+    },
+  },
+  (b32|"jQkDJ+bpsbvZJ6ykRYax8pacAKJrM6YxQMHtUkNc/dw="): {
+    (nams): (vek|[
+      "AES",
+    ]),
+    (lang): "English",
+    (desc): "The Advanced Encryption Standard, also known by its original \
+      name Rijndael is a specification for the encryption of electronic \
+      data established by NIST in 2001.",
+    (tim1): "12001",
+    (tags): (vek|[
+      "Algorithm",
+      "Encryption",
+      "Symmetric",
+      "Transformation",
+    ]),
+  },
+  (b32|"4IaH4F8elJw60EkIr2N9+S1avkvUDHX5IaH1GkEKoXQ="): {
+    (nams): (vek|[
+      "AES-256-GCM",
+      "AES256GCM",
+    ]),
+    (lang): "English",
+    (desc): "Galois/Counter Mode is a mode of operation for symmetric-key \
+      cryptographic block ciphers providing authentication.",
+    (tim1): "12001",
+    (lnks): {
+      (b32|"jQkDJ+bpsbvZJ6ykRYax8pacAKJrM6YxQMHtUkNc/dw="): "variant of",
+    },
+    (tags): (vek|[
+      "Algorithm",
+      "Authentication",
+      "Block Cipher",
+    ]),
+  },
+  (b32|"u4exjFVVFwYK/c5AeDsAgqe5MUIfp5asov30Qb0pwmA="): {
+    (nams): (vek|[
+      "Argon",
+    ]),
+    (lang): "English",
+    (desc): "Argon is a family of memory-hard password hashing algorithms.",
+    (tags): (vek|[
+      "Algorithm",
+      "Hash",
+      "KeyDerivation",
+      "Transformation",
+      "Verifiable",
+    ]),
+  },
+  (b32|"sl6UqXw8nwjEzDMyO9TMlCzwUKtNDHgpDq+DOYjUukU="): {
+    (nams): (vek|[
+      "Argon2d_v0x10",
+    ]),
+    (lang): "English",
+    (lnks): {
+      (b32|"u4exjFVVFwYK/c5AeDsAgqe5MUIfp5asov30Qb0pwmA="): "variant of",
+    },
+  },
+  (b32|"cu9pC9q0wONz80OCjaxtMJiyv4zqMUuljhDKMOiUE4o="): {
+    (nams): (vek|[
+      "Argon2i_v0x10",
+    ]),
+    (lang): "English",
+    (lnks): {
+      (b32|"u4exjFVVFwYK/c5AeDsAgqe5MUIfp5asov30Qb0pwmA="): "variant of",
+    },
+  },
+  (b32|"D4NkV8upthkHwlPrkfq/wqo+S4dnXwU7EkM4vg4h4jo="): {
+    (nams): (vek|[
+      "Argon2id_v0x10",
+    ]),
+    (lang): "English",
+    (lnks): {
+      (b32|"u4exjFVVFwYK/c5AeDsAgqe5MUIfp5asov30Qb0pwmA="): "variant of",
+    },
+  },
+  (b32|"bbj8wR0HwO6JJoWDWgauLWOacUfLfJZVnoWEyTYIfqI="): {
+    (nams): (vek|[
+      "Argon2d_v0x13",
+    ]),
+    (lang): "English",
+    (lnks): {
+      (b32|"u4exjFVVFwYK/c5AeDsAgqe5MUIfp5asov30Qb0pwmA="): "variant of",
+    },
+  },
+  (b32|"6UQjGIfYSHD7/2mcr27mtB8B9IyQBRpye0ABSH9/YCo="): {
+    (nams): (vek|[
+      "Argon2i_v0x13",
+    ]),
+    (lang): "English",
+    (lnks): {
+      (b32|"u4exjFVVFwYK/c5AeDsAgqe5MUIfp5asov30Qb0pwmA="): "variant of",
+    },
+  },
+  (b32|"M/dnApVP4FC91bbNYeKy73V6j3NVfwW7qcVspx53zl8="): {
+    (nams): (vek|[
+      "Argon2id_v0x13",
+    ]),
+    (lang): "English",
+    (lnks): {
+      (b32|"u4exjFVVFwYK/c5AeDsAgqe5MUIfp5asov30Qb0pwmA="): "variant of",
+    },
+  },
+  (b32|"+n9EN0dPKFF7q6iiwjtkgAUyT3odnl95JwnQd4z+jfw="): {
+    (nams): (vek|[
+      "CRC",
+    ]),
+    (lang): "English",
+    (desc): "Cyclic redundancy check",
+    (tags): (vek|[
+      "Algorithm",
+      "Checksum",
+      "Hash",
+      "Transformation",
+      "Verifiable",
+    ]),
+  },
+  (b32|"9m5ja11mi86oosyB7LG4Kvcx83ln3stpD0/8Pnq01tE="): {
+    (nams): (vek|[
+      "CRC32",
+    ]),
+    (lang): "English",
+    (lnks): {
+      (b32|"+n9EN0dPKFF7q6iiwjtkgAUyT3odnl95JwnQd4z+jfw="): "variant of",
+    },
+  },
+  (b32|"K0rUHer60cFxE01/50yDDiSFULi9E1Tp4/1bup743lc="): {
+    (nams): (vek|[
+      "Australia",
+      "Commonwealth of Australia",
+    ]),
+    (lang): "English",
+    (desc): "The world's sixth largest country and the oldest, flattest and \
+      driest inhabited continent.",
+    (tags): (vek|[
+      "Region",
+      "Earth",
+      "Country",
+      "Continent",
+    ]),
+  },
+  (b32|"zPQbBR9QUW8HFxEr3vRx3BqBKKrS8Huh+Kbtur5hgJQ="): {
+    (nams): (vek|[
+      "Julia Millicent Citizen",
+      "jules",
+    ]),
+    (lang): "English",
+    (tim1): "11987",
+    (tags): (vek|[
+      "Person",
+    ]),
+  },
+  (b32|"mlW69HS3ZqI8F5dNgKuPBx0JRV5kcluxVnNrNnxwGVQ="): {
+    (nams): (vek|[
+      "Hematite",
+      "fe2o3",
+      "Fe2O3",
+    ]),
+    (lang): "English",
+    (desc): "A software library in the Rust language.",
+    (lnks): {
+      (b32|"zPQbBR9QUW8HFxEr3vRx3BqBKKrS8Huh+Kbtur5hgJQ="): "created by",
+    },
+    (tags): (vek|[
+      "Software",
+      "Library",
+      "Open Source",
+    ]),
+  },
+  (b32|"PbuqJaY/3EQAXgH5XTlArR1duvLlcO5UDGaI1KN/QxM="): {
+    (nams): (vek|[
+      "Dilithium",
+    ]),
+    (lang): "English",
+    (desc): "Post quantum digital signature algorithm based \
+      on the hardness of lattice problems over module \
+      lattices.",
+    (tags): (vek|[
+      "Algorithm",
+      "Asymmetric",
+      "Encryption",
+      "Transformation",
+    ]),
+  },
+  (b32|"W4+qt2Gd+9RQBxllcx10b4h/Ih3g9m76C+mj17TwUNw="): {
+    (nams): (vek|[
+      "Dilithium2",
+    ]),
+    (lang): "English",
+    (lnks): {
+      (b32|"PbuqJaY/3EQAXgH5XTlArR1duvLlcO5UDGaI1KN/QxM="): "variant of",
+    },
+  },
+  (b32|"tJSJgXe8jU8PGqFNmBJUwFqU1GpO2NGpDjRBOCxeTXk="): {
+    (nams): (vek|[
+      "Dilithium3",
+    ]),
+    (lang): "English",
+    (lnks): {
+      (b32|"PbuqJaY/3EQAXgH5XTlArR1duvLlcO5UDGaI1KN/QxM="): "variant of",
+    },
+  },
+  (b32|"atwpejMudApM4BMcBYhDrjZVu9aP6ZaCqzaVro5MqKQ="): {
+    (nams): (vek|[
+      "Dilithium5",
+    ]),
+    (lang): "English",
+    (lnks): {
+      (b32|"PbuqJaY/3EQAXgH5XTlArR1duvLlcO5UDGaI1KN/QxM="): "variant of",
+    },
+  },
+  (b32|"8te+vL2m7B3PJLGs20M6LWUnQLnVWSnW2frTGp4fnV0="): {
+    (nams): (vek|[
+      "Dilithium2_AES",
+    ]),
+    (lang): "English",
+    (lnks): {
+      (b32|"PbuqJaY/3EQAXgH5XTlArR1duvLlcO5UDGaI1KN/QxM="): "variant of",
+    },
+  },
+  (b32|"TfYW5Va3t+ZIJ9ql2asP20S9ACF1O+52yVJvV54DrF8="): {
+    (nams): (vek|[
+      "Dilithium3_AES",
+    ]),
+    (lang): "English",
+    (lnks): {
+      (b32|"PbuqJaY/3EQAXgH5XTlArR1duvLlcO5UDGaI1KN/QxM="): "variant of",
+    },
+  },
+  (b32|"asX21Hj43Ff+xXazoKY3pVQXvmAF6FH7m4ajLt3yuzc="): {
+    (nams): (vek|[
+      "Dilithium5_AES",
+    ]),
+    (lang): "English",
+    (lnks): {
+      (b32|"PbuqJaY/3EQAXgH5XTlArR1duvLlcO5UDGaI1KN/QxM="): "variant of",
+    },
+  },
+  (b32|"zkSGGwLauv5FLpNoCse+3D7bKIdNh7PeBsfbjv/TSvQ="): {
+    (nams): (vek|[
+      "Dilithium2_fe2o3",
+    ]),
+    (lang): "English",
+    (lnks): {
+      (b32|"PbuqJaY/3EQAXgH5XTlArR1duvLlcO5UDGaI1KN/QxM="): "variant of",
+    },
+  },
+  (b32|"ssXKMEZ55yiMvme8ugkdiLvAEBhEKTwj3+IEg5YHIh0="): {
+    (nams): (vek|[
+      "EdDSA",
+    ]),
+    (lang): "English",
+    (desc): "Edwards-curve Digital Signature Algorithm is a digital \
+      signature scheme using a variant of Schnorr signature \
+      based on twisted Edwards curves.",
+    (tags): (vek|[
+      "Algorithm",
+      "Asymmetric",
+      "Signature",
+      "Transformation",
+      "Verifiable",
+    ]),
+  },
+  (b32|"9UQvATp4Zbv8IbWOivdhiQnex+ELo7sxOr8ntEZphMc="): {
+    (nams): (vek|[
+      "Ed25519",
+    ]),
+    (lang): "English",
+    (lnks): {
+      (b32|"ssXKMEZ55yiMvme8ugkdiLvAEBhEKTwj3+IEg5YHIh0="): "variant of",
+    },
+  },
+  (b32|"miDRfrTDbbSUE2HZe60ut1ek96ieyDkO34Ene7KWLJs="): {
+    (nams): (vek|[
+      "Empty",
+      "void",
+    ]),
+    (lang): "English",
+    (desc): "The empty set",
+    (tags): (vek|[
+      "Mathematics",
+      "Set",
+    ]),
+  },
+  (b32|"2AsUAMWta6DafRiLjBIz/lnZbQILzIidv+mLzT+G+EI="): {
+    (nams): (vek|[
+      "HTTP",
+      "http",
+    ]),
+    (lang): "English",
+    (desc): "The Hypertext Transfer Protocol is an application layer \
+      protocol in the Internet protocol suite model for distributed, \
+      collaborative, hypermedia information systems.",
+    (tags): (vek|[
+      "https://www.rfc-editor.org/rfc/rfc9110.html",
+    ]),
+  },
+  (b32|"YLhiuV3kTZLe5CLhUMChayUYothcmCKTCCfnCRnf2k8="): {
+    (nams): (vek|[
+      "Http/2",
+    ]),
+    (lang): "English",
+    (lnks): {
+      (b32|"2AsUAMWta6DafRiLjBIz/lnZbQILzIidv+mLzT+G+EI="): "variant of",
+    },
+  },
+  (b32|"6yhzBUiSBXZUGqsZhmSzPexuh1iJDsr0IorFTZ4YjfE="): {
+    (nams): (vek|[
+      "Https",
+      "https",
+    ]),
+    (lang): "English",
+    (lnks): {
+      (b32|"2AsUAMWta6DafRiLjBIz/lnZbQILzIidv+mLzT+G+EI="): "variant of",
+    },
+  },
+  (b32|"bBUust/mGJstzU/9gPrn3TtRRvp/vnhyEzHKZhXTH9E="): {
+    (nams): (vek|[
+      "Identity",
+    ]),
+    (lang): "English",
+    (desc): "A transformation that preserves the original.",
+    (tags): (vek|[
+      "Algorithm",
+      "Transformation",
+    ]),
+  },
+  (b32|"jUOA+grTLhZwpaYcSFS7mOgbY4D+V6bOLZ0UEDvsPX0="): {
+    (nams): (vek|[
+      "SABER",
+    ]),
+    (lang): "English",
+    (desc): "SABER is an IND-CCA2 secure Key Encapsulation Mechanism whose \
+      security relies on the hardness of the Module Learning With \
+      Rounding problem and remains secure even against quantum computers.",
+    (tags): (vek|[
+      "Algorithm",
+      "Asymmetric",
+      "Encryption",
+      "Transformation",
+    ]),
+  },
+  (b32|"SWfFDn+zM5nroo8TlFC4Wmr79XMUNuek6T41KB+8XkY="): {
+    (nams): (vek|[
+      "LightSaber",
+    ]),
+    (lang): "English",
+    (lnks): {
+      (b32|"jUOA+grTLhZwpaYcSFS7mOgbY4D+V6bOLZ0UEDvsPX0="): "variant of",
+    },
+  },
+  (b32|"/oxxQAGmpxXLZFbgWwW2zGlGWMqHu0gIrMrrLUXGkHs="): {
+    (nams): (vek|[
+      "Saber",
+    ]),
+    (lang): "English",
+    (lnks): {
+      (b32|"jUOA+grTLhZwpaYcSFS7mOgbY4D+V6bOLZ0UEDvsPX0="): "variant of",
+    },
+  },
+  (b32|"nb68Os+ihmMixsBrsV5K+OzgCJrtxQ1L3e1FJ7KOvPk="): {
+    (nams): (vek|[
+      "FireSaber",
+    ]),
+    (lang): "English",
+    (lnks): {
+      (b32|"jUOA+grTLhZwpaYcSFS7mOgbY4D+V6bOLZ0UEDvsPX0="): "variant of",
+    },
+  },
+  (b32|"O/3zgxf8/f6mjc0RBau1MMtkfNi9B1eeFB5Q9f6ZfAM="): {
+    (nams): (vek|[
+      "Seahash",
+    ]),
+    (lang): "English",
+    (desc): "A portable, high performance non-cryptographic hash function.,
+    (tags): (vek|[
+      "Algorithm",
+      "Hash",
+      "Non-Cryptographic",
+      "Transformation",
+    ]),
+  },
+  (b32|"/TmhhCg6oJazKJxaQePSwhzvjuMSnjU5bucC9kH+TCs="): {
+    (nams): (vek|[
+      "SHA",
+    ]),
+    (lang): "English",
+    (desc): "The Secure Hash Algorithms are a family of cryptographic hash \
+      functions published by the National Institute of Standards and \
+      Technology.,
+    (tags): (vek|[
+      "Algorithm",
+      "Cryptographic",
+      "Hash",
+      "Transformation",
+    ]),
+  },
+  (b32|"VybbHNWeNXeTqTrXj66TzZScbSTsEFVy0W79QnbroFA="): {
+    (nams): (vek|[
+      "SHA_256",
+    ]),
+    (lang): "English",
+    (lnks): {
+      (b32|"/TmhhCg6oJazKJxaQePSwhzvjuMSnjU5bucC9kH+TCs="): "variant of",
+    },
+  },
+  (b32|"QByizewdCnRH/E6ksx4rOnqv5lFuB6PX1EA4Z5kNQwA="): {
+    (nams): (vek|[
+      "Ozone Database",
+      "O3db",
+    ]),
+    (lang): "English",
+    (desc): "A log-structured in-memory key-value database written in the Rust \
+			programming language, and inpired by BitCask.",
+    (tags): (vek|[
+      "Software",
+      "Database",
+    ]),
+  },
+}

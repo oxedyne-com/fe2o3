@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+/* Split the screen in half */
+.split {
+  height: 100%;
+  width: 50%;
+  position: fixed;
+  z-index: 1;
+  top: 0;
+  overflow-x: hidden;
+  padding-top: 20px;
+}
+
+/* Control the left side */
+.left {
+  left: 0;
+	color: white;
+  background-color: black;
+	margin-left: 50 px;
+}
+
+/* Control the right side */
+.right {
+  right: 0;
+  background-color: white;
+}
+
+</style>
+</head>
+<body>
+<div class="split right">
+  <h1 style="text-align:center;">An O3db zone from 1,000 ft</h1>
+	<img width=100%; src="../svg/zone_detail.svg" />
+</div>
+<div class="split left">
+	<h1>O3db zone details</h1>
+	<p>Cache and file bots have some special features.  Each cbot exclusively manages the cached data for an equal share of keys, while each fbot exclusively manages state data for an equal share (or "shard") of zone files. These worker bots listen on two separate channels, for reading and writing.</p>
+	<p>The two main jobs for an fbot are to insert the location of new data in live file states, and to schedule deletions of old data in all file states.  The only updates made to the more numerous non-live file states are deletions, with all of these generated only by new live file data.</p> 
+	<p>By manually (e.g. via configuration file changes) or automatically adjusting the number of zones, the number of bots per zone, and the way cbots and fbots bias their attention between read vs write messages, overall performance can be tuned for the workload and available resources.  In addition to rezoning the other main kind of database transformation is <em>recaching</em> which is triggered when the number of cbots per zone is changed.  In this case, all the data in the caches must be reallocated across the new set of cbots for each zone, but unlike rezoning there is no change to the files.</p>
+	<h2>Writing</h2>
+	<ol>
+		<li>A randomly chosen wbot is asked by a caller to store a key-value pair and given an ephemeral responder channel resp_w1.  A hash of the key determines its association with a cbot.</li>
+		<li>If the live file size is expected to grow beyond the configured limit, the wbot starts a new live file in the sequence.  If not, the wbot skips to database insertion.</li>
+	</ol>
+	<h3>New live file</h3>
+	<ol start="3">
+		<li>The wbot asks the zbot for the next file number in the sequence, sending responder resp_w2.</li>
+		<li>The zbot replies via the responder.</li>
+		<li>The wbot advises the fbot associated with the previous live file of the change, passing to it a responder channel resp_w3.</li>
+		<li>The fbot downgrades the file state from live, allowing its garbage to be collected.</li>
+		<li>The fbot advises the fbot associated with the new live file number (which could be itself) to create a new file state.</li>
+		<li>The file state for the new live file is created.</li>
+		<li>The fbot informs the wbot via resp_w3 that the new live file state is ready.</li>
+	</ol>
+	<h3>Database insertion</h3>
+	<ol start="10">
+		<li>The wbot appends the data to its live file.</li>
+		<li>With the data committed to a persistent form in the live file, the wbot selects a cbot using the key and sends the data and its location.</li>
+		<li>The key-selected cbot inserts the file location and value into its cache.  If the data is new, it collects the file location of any existing value as old data.  If the data for insertion is itself old, it is treated as old data.</li>
+		<li>This cbot advises the original caller via resp_w1 that the data has been successfully committed to file and a cache.  Completion of resp_w1 transmission is indicated with a finish message.</li>
+		<li>This cbot selects a fbot using the file location of the new data (which could be itself) and asks it to update the file state(s) with the new and possibly old data.</li>
+		<li>The fbot adds the new location to the file state data map.</li>
+		<li>The fbot selects the fbot (which could be itself) associated with the file location of the old data and advises to schedule it for deletion.</li>
+		<li>The fbot schedules the old data for deletion and initiates garbage collection if conditions are met (e.g. the file must contain a certain amount of old data, must not be live etc.).</li>
+	</ol>
+	<p>The natural ordering of operations that message queues provide helps us avoid ordering errors that can occur when threads instead share data structures.  Examples include inserting data into a new live file state that has not yet been created, or scheduling data for deletion in a file state data map before it has been inserted.</p>
+	<h2>Initialisation and Garbage collection</h2>
+	<p>The functions of conceptually separate garbage collectors (gbots) and initialisers (ibots) is combined into igbots.
+	<h3>Garbage collection</h3>
+	<p>The use of dedicated igbots in the following scheme allows fbots to continue to serve file states not undergoing garbage collection (gc), while also ensuring correct treatment of messages waiting for gc to finish.</p> 
+	<p>The basic idea is to transcribe (re-write) the data file, skipping sections scheduled for deletion.  If a new value for a key in the file is created during garbage collection, a read request during this time could erroneously return the old value.  So during garbage collection, deletion and read requests can continue to queue up on the fbot channel, temporarily stored in a buffer.  It is therefore necessary to create a "move map" in the file state which translates the old data locations to their new locations in the garbage collected file, later allowing those queued messages to correctly apply to the new locations.</p>
+	<ol start="18">
+		<li>The fbot instructs a random igbot to perform garbage collection on the file, passing it a copy of the file state, and creating a message buffer.  Subsequent write and read messages associated with the file state are stored temporarily in the buffer while garbage collection takes place.</li>
+		<li>The igbot performs the transcription to a new data file.</li>
+		<li>The igbot updates caches from the old to new file locations, sending batched updates and a responder resp_g1 to all the cbots.  Upon receipt of these messages, the cbots update their caches.  If a key has since been updated with a new value in another file, the old location in the garbage collected file is added to a list which is sent back to the igbot via resp_g1.</li>
+   	<li>The igbot waits for responses and scrubs the file state of move map entries associated with keys that cbots advise have new values in other files.</li>
+		<li>The igbot sends the modified file state back to the fbot via its channel, representing a confirmation of completion.</li>
+		<li>When the fbot receives confirmation of completion from the igbot, buffering of messages related to reading the file state cease and the buffer is processed.  This processing uses the file state move map to translate old to new data locations in the file.  All subsequent messages to the fbot for the file state require no such translation because the cache was updated before processing commenced.</li>
+	</ol>
+	<p>Over time, garbage collection whittles down files until some are completely deleted.</p>
+	<h3>Initialisation</h3>
+	<ol>
+		<li>A randomly chosen igbot is asked to cache an index file or the associated data file.</li>
+		<li>The igbot reads the index file, or if there is a problem or no such file exists, it reads the data file and creates an index file.  Unlike wbots, igbots buffer file writing.</li>
+		<li>The igbot uses the same insertion pipeline starting as a wbot from steps 9 to 15, however, garbage collection is deactivated during initialisation.</li>
+	</ol>
+	<h2>Reading</h2>
+	<ol>
+		<li>A caller asks a randomly chosen rbot to fetch the value for a specified key, providing a responder resp_r1.</li>
+		<li>The rbot asks the key-selected cbot for the value or file location, via its channel, sending a new responder resp_r2.</li>
+		<li>The cbot accesses its cache.</li>
+		<li>In the case where only the file location is available, the cbot sends the read request (including resp_r2) to the file-selected fbot.</li>
+		<li>The fbot either responds immediately giving the rbot permission to read the file because it is not being garbage collected, incrementing the file state reader count, or else adds the request to a buffer so that permission can be granted later when garbage collection is complete.</li>
+		<li>The rbot waits to receive either the value (via the cbot) or the file location (via the fbot) through resp_r2.  If garbage collection has just been performed, there is a chance that the value was updated during the process.  A flag in the returned value message allows the caller to decide if they want to try the read again, or accept the possibility of an old value.
+		<li>If necessary the rbot reads the file location.</li>
+		<li>Once reading is complete, a finish message is sent to the channel of the file's fbot.</li>
+		<li>The fbot decrements the reader count for the file state.</li>
+		<li>The rbot returns the value to the caller using resp_r1.</li>
+	</ol>
+</div>
+</body>
+</html> 

@@ -1,0 +1,162 @@
+#!/bin/bash
+
+# Check if an action argument is provided.
+if [ "$#" -ne 1 ] || [[ ! "$1" =~ ^(publish|yank)$ ]]; then
+    echo "Usage: $0 <publish|yank>"
+    exit 1
+fi
+
+# Configuration.
+ACTION=$1
+TEST_VERSION="0.0.1"
+TEMP_DIR="test_publish"
+YANK_DELAY=10     # 10 seconds between yanks.
+
+# List of crates to process - edit this list as needed.
+CRATES=(
+    "fe2o3_bot"
+    "fe2o3_core"
+    "fe2o3_crypto"
+    "fe2o3_data"
+    "fe2o3_file"
+    "fe2o3_geom"
+    "fe2o3_hash"
+    "fe2o3_iop_crypto"
+    "fe2o3_iop_db"
+    "fe2o3_iop_hash"
+    "fe2o3_jdat"
+    "fe2o3_namex"
+    "fe2o3_net"
+    "fe2o3_num"
+    "fe2o3_o3db"
+    "fe2o3_shield"
+    "fe2o3_stds"
+    "fe2o3_steel"
+    "fe2o3_syntax"
+    "fe2o3_test"
+    "fe2o3_text"
+    "fe2o3_tui"
+    "fe2o3_units"
+)
+
+echo "Found ${#CRATES[@]} crates to process."
+
+# Create temporary directory for test publishing.
+if [ "$ACTION" = "publish" ]; then
+    rm -rf "$TEMP_DIR"
+    mkdir -p "$TEMP_DIR"
+fi
+
+# Function to create dummy crate.
+create_dummy_crate() {
+    local CRATE_NAME=$1
+    local CRATE_DIR="$TEMP_DIR/$CRATE_NAME"
+
+    echo "Creating dummy crate for $CRATE_NAME..."
+    mkdir -p "$CRATE_DIR/src"
+
+    # Create lib.rs with a simple dummy function.
+    cat > "$CRATE_DIR/src/lib.rs" << EOF
+pub fn dummy() -> &'static str {
+    "test publish for $CRATE_NAME"
+}
+EOF
+
+    # Create Cargo.toml with workspace to make it independent.
+    cat > "$CRATE_DIR/Cargo.toml" << EOF
+[package]
+name = "oxedize_$CRATE_NAME"
+version = "$TEST_VERSION"
+authors = ["Jason Daniel Hoogland <hello@oxedize.com>"]
+edition = "2021"
+license = "BSD-2-Clause/Apache-2.0"
+description = "Test publish for $CRATE_NAME - to be yanked"
+repository = "https://github.com/Oxedize/fe2o3"
+
+[workspace]
+EOF
+}
+
+# Function to handle publishing with rate limit handling.
+handle_publish() {
+    local CRATE_NAME=$1
+    local CRATE_DIR="$TEMP_DIR/$CRATE_NAME"
+    local MAX_RETRIES=3
+    local RETRY=0
+
+    while [ $RETRY -lt $MAX_RETRIES ]; do
+        echo "Publishing oxedize_$CRATE_NAME v$TEST_VERSION..."
+        cd "$CRATE_DIR"
+
+        OUTPUT=$(cargo publish 2>&1)
+        RESULT=$?
+
+        if [ $RESULT -eq 0 ]; then
+            echo "Successfully published oxedize_$CRATE_NAME."
+            cd - > /dev/null
+            return 0
+        else
+            echo "$OUTPUT"
+            if [[ "$OUTPUT" =~ "429 Too Many Requests" ]]; then
+                echo "Rate limit hit. Waiting 15 minutes before retrying..."
+                sleep 900
+                RETRY=$((RETRY + 1))
+                continue
+            fi
+            echo "Failed to publish oxedize_$CRATE_NAME."
+            cd - > /dev/null
+            return 1
+        fi
+    done
+
+    echo "Failed to publish after $MAX_RETRIES retries."
+    return 1
+}
+
+# Function to handle yanking.
+handle_yank() {
+    local CRATE_NAME=$1
+
+    echo "Yanking oxedize_$CRATE_NAME v$TEST_VERSION..."
+    if cargo yank --vers "$TEST_VERSION" "oxedize_$CRATE_NAME"; then
+        echo "Successfully yanked oxedize_$CRATE_NAME."
+        return 0
+    else
+        echo "Failed to yank oxedize_$CRATE_NAME."
+        return 1
+    fi
+}
+
+# Process each crate.
+for CRATE_NAME in "${CRATES[@]}"; do
+    case "$ACTION" in
+        publish)
+            create_dummy_crate "$CRATE_NAME"
+            handle_publish "$CRATE_NAME"
+            if [ $? -ne 0 ]; then
+                echo "Error processing $CRATE_NAME. Stopping."
+                exit 1
+            fi
+            ;;
+        yank)
+            handle_yank "$CRATE_NAME"
+            if [ $? -ne 0 ]; then
+                echo "Error processing $CRATE_NAME. Stopping."
+                exit 1
+            fi
+
+            if [ ! "$CRATE_NAME" = "${CRATES[-1]}" ]; then
+                echo "Waiting $YANK_DELAY seconds before next yank..."
+                sleep $YANK_DELAY
+            fi
+            ;;
+    esac
+done
+
+if [ "$ACTION" = "publish" ]; then
+    echo "All crates published. You may want to yank them later with: $0 yank"
+    echo "Cleaning up temporary directory..."
+    rm -rf "$TEMP_DIR"
+else
+    echo "All crates yanked."
+fi

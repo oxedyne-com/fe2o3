@@ -1,0 +1,19 @@
+#V2
+help
+ls
+who
+a = b
+who
+a = 3 + 2
+who
+help
+pwd
+a = 3
+who
+b = 4
+a + b
+c = a + b
+who
+ls
+exit
+help

@@ -1,0 +1,72 @@
+ <!DOCTYPE html>
+<html>
+<body>
+
+<h1>Ozone at a glance</h1>
+<p>Ozone is a key-value database designed to be capable of high throughput.  It works by appending key-value pairs to operating system files, and efficiently using available resources by deleting old file values and retaining as much data in faster volatile memory as possible. It was inspired by <a href="https://riak.com/assets/bitcask-intro.pdf?source=post_page---------------------------">Bitcask</a>.</p>
+<h2>Design</h2>
+<p>Ozone assigns data randomly across one or more completely independent file directories, or zones, based on key hashes.  Key-value pairs along with metadata are appended to data files.  Each data file has an accompanying index file to which each key and data file location are appended.  These are not essential but help with data integrity and speeding up initialisation and rezoning.  Rezoning is the process of mapping data from one set of zones to another.  Files are limited in size and accumulate or vanish over time, depending on the extent to which values are replaced.</p>
+<p>For each zone, two main shared data structures are maintained in volatile memory: </p>
+<ol>
+	<li>Every file is associated with a file state which includes a map of the position of data.</li>
+	<li>A set of data caches maps keys to the most current file location, and possibly to an in-memory copy of the value.</li>
+</ol>
+<p>Each zone is associated with pools of worker threads (bots) dedicated to performing specific operations:</p>
+<ol>
+	<li>Cache bots (cbots) correctly schedule operations.</li>
+	<li>Writer bots (wbots) append key-value data to live files.</li>
+	<li>Garbage bots (gbots) perform garbage collection on files as requested by cbots.</li>
+	<li>Reader bots (rbots) retrieve values.</li>
+	<li>Initialisation bots (ibots) read data from files and fill the file states and caches during start up and rezoning.</li>
+</ol>
+<p>The number of caches is tied to the number of cbots.  By adjusting the number of zones and bots of each kind manually or automatically, performance can be tuned for the workload.  The zone file states are shared by the cbots, gbots and rbots, while cbots share their associated caches with rbots.  The system relies on buffered message passing and locking of shared data, and aims to permit flexibility in pursuit of minimal wait times.</p>
+<p>In the accompanying diagram, the caches consist of keys associated with a file location and possibly a value, and file states are associated with files.  Various configuration options including the number of zones and the number of worker bots in each zone can be adjusted dynamically.</p>
+<p>
+<img src="ozone2.svg" />
+<h2>Writing</h2>
+<ol>
+	<li>A randomly chosen wbot is asked to store a key-value pair.  A hash of the key determines its association with a cbot.</li>
+	<li>If the live file size is expected to grow beyond the configured limit, the wbot starts a new live file in the sequence.  If not, the wbot skips to database insertion.</li>
+</ol>
+<h3>New live file</h3>
+<ol start="3">
+	<li>The wbot advises the cbot of the live file change.</li>
+	<li>The cbot downgrades the file state from live, allowing its garbage to be collected.</li>
+	<li>The cbot advises the cbot associated with the new live file number (which could be itself) to create a new file state.</li>
+	<li>The file state for the new live file is created.</li>
+	<li>The cbot informs the wbot via a responder that the new live file state is ready.</li>
+</ol>
+<h3>Database insertion</h3>
+<ol start="8">
+	<li>The wbot appends the data to its live file.</li>
+	<li>With the data committed to a persistent form in the live file, the wbot selects a cbot using the key and sends the data and its location.</li>
+	<li>The key-selected cbot inserts the file location and value into its cache.  If the data is new, it collects the file location of any existing value as old data.  If the data for insertion is itself old, it is treated as old data.</li>
+	<li>This cbot advises the original caller via a responder that the data has been successfully committed to file and a cache.</li>
+	<li>This cbot selects a cbot using the file location of the new data (which could be itself) and asks it to update the file state.</li>
+	<li>The file-selected cbot adds the new location to the file state data map.</li>
+	<li>The key-selected cbot selects a cbot using the file location of the old data (which could be itself) and asks it to schedule a deletion.</li>
+	<li>The file-selected cbot schedules the old data for deletion and checks to see if the file requires garbage collection.</li>
+</ol>
+<p>By allocating file state actions to specific cbot queues, we can avoid ordering problems such as might occur if a new live file state has not yet been created, or when old data in a file state data map is scheduled for deletion before it has been inserted.</p>
+<h2>Garbage collection</h2>
+<ol start="16">
+	<li>The cbot instructs a random gbot to perform garbage collection on the file.</li>
+	<li>The gbot waits for a write lock (depicted in red) and performs the transcription to remove old file data, re-creating the index file.</li>
+	<li>The gbot resets the file state and releases its lock.</li>
+</ol>
+<p>Over time, garbage collection can lead to complete deletion of files.</p>
+<h2>Reading</h2>
+<ol>
+	<li>A randomly chosen rbot is asked to retrieve the value for a specified key.</li>
+	<li>The rbot waits for the lock on the key-selected cache and reads the entry.</li>
+	<li>If there is no value and only a file location, the rbot waits for the lock for reading (depicted in green) on the file and reads the value.</li>
+	<li>The rbot returns the value to the caller.</li>
+</ol>
+<h2>Initialisation</h2>
+<ol>
+	<li>A randomly chosen ibot is asked to cache an index file or the associated data file.</li>
+	<li>The ibot reads the index file, or if there is a problem or no such file exists, it reads the data file and creates an index file.  Unlike wbots, ibots buffer file writing.</li>
+	<li>The ibot uses the same insertion pipeline starting with step 9 of the writing process, that is, sending the data and file location to the key-selected cbot.</li>
+</ol>
+</body>
+</html> 

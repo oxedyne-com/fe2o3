@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+/* Split the screen in half */
+.split {
+  height: 100%;
+  width: 50%;
+  position: fixed;
+  z-index: 1;
+  top: 0;
+  overflow-x: hidden;
+  padding-top: 20px;
+}
+
+/* Control the left side */
+.left {
+  left: 0;
+	color: white;
+  background-color: black;
+	margin-left: 50 px;
+}
+
+/* Control the right side */
+.right {
+  right: 0;
+  background-color: white;
+}
+
+</style>
+</head>
+<body>
+<div class="split right">
+  <h1>O3db from 10,000 ft</h1>
+	<img width=100%; src="../svg/zone_config.svg" />
+</div>
+<div class="split left">
+	<h1>Starting and changing Ozone</h1>
+	<p>The most basic database settings are controlled via a Config structure.  This is initialised in three possible ways:</p>
+	<ol>
+		<li>by being provided directly to the instance,</li>
+		<li>by providing the path to a text file in Jason's Data And Type (jdat) format,</li>
+		<li>by opting for a default configuration.</li>
+	</ol>
+	<p>The O3db instance must then be manually started by the user, invoking the creation of a supervisor bot.</p>
+	<h2>Initialisation</h2>
+	<p>Since the supervisor is responsible for starting and stopping bots while the database is running, it is also given the task of coordinating the initialisation process:</p>
+	<ol>
+		<li>The supervisor starts all required bots, and panics if there is a problem.  This is the last point at which an Ozone database should panic, as all subsequent errors should be reported to the log file.  Automated garbage collection is initially inactive.</li>
+		<li>All bots are initialised with the (mostly validated) configuration.  The zone bots wait for notification of their directories.  The config bot validates any configuration zone override information during its own initialisation, and notifies zone bots of their directories.</li>
+		<li>The zone bots then ensure that their directories can be created (if not, defaulting to the root directory) and survey all existing files.</li>
+		<li>The zone bots then use their init and cache bots to fill the caches using file data, recreating absent or incomplete index files if necessary.</li>
+		<li>The database itself contains a user register, which the supervisor now proceeds to read and distribute to the server and all cbots.</li> 
+		<li>Automated garbage collection is activated.</li>
+	</ol>
+	<h2>Configuration</h2>
+	<p>The configuration can be changed via the configuration file, or API messages.  The solo config bot (cfgbot) checks the file on a regular basis.  When there is a change, it reads the file, decodes the text to a ConfigDat struct and compares it with its current copy of ConfigDat.</p>
+	<p>The configuration specifies the number of zones, and the path to the database container directory.  This path can be absolute or relative to the caller's working directory.  By default, as an example, a three zone database has zone directories located at root/003_zone/, that is, root/003_zone/zone_001, root/003_zone/zone_002 and root/003_zone/zone_003.  However, non-default container directories for each zone can also be specified.  In our example, we might want zone 2 to be located inside directory A, in which case the zone directory path would become A/003_zone/zone_002.</p>  
+	</ol>
+	<h3>Change to one or more existing zone container directories</h3>
+	<p> When there is a change to these container directories and no change to the number of zones, the system must pause all activity and simply move the directories:</p>
+	<ol>
+		<li>The cfgbot identifies which zone directories must be moved and sends the information to the supervisor.</li>
+		<li>The supervisor creates the new container directories if they do not exist.
+			<li>The supervisor sends a <em>MoveDirectory</em> message including an updated configuration and responder channels to all bots in each affected zone.  The bots pause and messages may continue to accumulate in their buffers.</li>
+		<li>The zbots listen for all their worker bots confirm that they are idle.</li>
+		<li>The zbots then move the directories.</li>
+		<li>The zbots confirm the move to the supervisor and the worker bots, which resume operations.</li>
+	</ol>
+	<h3>Change in number of zones -- rezoning</h3>
+	<p>Since all data is sharded in the first instance across zones according to key hashes, a change in the number of zones requires all existing data to be reallocated across a new set of zone directories.  This requires the full participation of the existing worker bots, meaning all incoming messages at the API level must be paused.  We cannot easily repurpose existing worker bots to perform this reallocation -- a new set of bots must be created.  The whole process begins when the cfgbot detects the change:<p> 
+	<ol>
+		<li>If the new number of zones is valid and consistent in the ConfigDat, the cfgbot sends the new zone arrangement to the supervisor.</li>
+		<li>The supervisor sends a Rezone message to the sbot, including an updated configuration and responder, in order to start choking the worker bots of new incoming messages.  Messages may continue to accumulate in the sbot channels.</li>
+		<li>The supervisor creates the new container directories if they do not exist.</li>
+		<li>The supervisor creates a new set of channels, bots and handles for the new zones.</li>
+		<li>The supervisor waits for confirmation that the sbot has paused all database inputs.</li>
+		<li>The supervisor waits for all existing worker bot message queue lengths to remain at zero for a sustained period.</li>
+		<li>The supervisor sends a Rezone message to the <em>existing</em> cbots, including responders and the list of new wbot channels, instructing them to loop through their caches and write values to the new zones.  When a cache contains only the location, the cbot activates an existing rbot to read the data, but when a value is available, it can be sent immediately to the appropropriate wbot.</li>
+		<li>The supervisor waits for all existing cbots to notify completion.</li>
+		<li>The supervisor all bots for existing zones, and waits for confirmation.</li>
+		<li>The supervisor sends the new channels to the sbot, instructing it to resume operations.</li>
+	</ol>
+	<h3>Change in number of cbots per zone -- recaching</h3>
+	<p>Recaching is simpler than rezoning since it does not involve any change to directories and files.  In each zone, the existing cbots must reallocate all their contents to the new cbots.  When the cfgbot detects the relevant change:
+	<ol>
+		<li>If the new number of cbots per zone is valid, the cfgbot sends a Recache message to the supervisor.</li>
+		<li>The supervisor sends a Recache message, including the new number of cbots per zone and responders, to all rbots and wbots.  This pauses the bots and messages may continue to accumulate in their buffers.</li>
+		<li>The supervisor creates a new set of cbots for each zone.</li>
+		<li>The supervisor advises all other relevant bots of the new cbots.</li>
+		<li>The supervisor waits until the message queue lengths for the existing cbots remain at zero for a sustained period.</li>
+		<li>The supervisor then instructs existing cbots to loop through their caches and send the data to the new cbots.  There is no involvement from any other worker bots.</li>
+		<li>The supervisor waits for all cbots to indicate completion.</li>
+		<li>The supervisor waits for all other relevant bots to confirm their knowledge of the new cbots.</li>
+		<li>The supervisor issues a Resume message to the rbots and wbots.</li>
+	</ol>
+</div>
+</body>
+</html> 

@@ -1,0 +1,18 @@
+#!/bin/bash
+# Cp the certificate files into place and run.
+
+user=$(whoami)
+app_domain=powls.com.au
+trg=~/usr/code/web/apps/test/tls/
+cert=fullchain.pem
+key=privkey.pem
+src=/etc/letsencrypt/live
+echo "Permission needed to copy TLS certificate files..."
+sudo cp $src/$app_domain/$cert $trg
+sudo cp $src/$app_domain/$key $trg
+sudo chown $user:$user ${trg}${cert}
+sudo chown $user:$user ${trg}${key}
+echo "Copied TLS certificate and private key from $src to $trg"
+
+clear
+cargo test server -- --nocapture

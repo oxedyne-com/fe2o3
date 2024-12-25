@@ -1,0 +1,26 @@
+#!/bin/bash
+rm lib*saber.a
+schemes="firesaber saber lightsaber"
+for scheme in $schemes
+do
+	case "$scheme" in
+	"firesaber")
+		echo $scheme
+		sed 's/^#STATIC=libfiresaber.a/STATIC=libfiresaber.a/' build_src > build
+		sed 's/^\/\/#define SABER_L 4/#define SABER_L 4/' SABER_params_src.h > SABER_params.h
+		./build
+		;;
+	"saber")
+		echo $scheme
+		sed 's/^#STATIC=libsaber.a/STATIC=libsaber.a/' build_src > build
+		sed 's/^\/\/#define SABER_L 3/#define SABER_L 3/' SABER_params_src.h > SABER_params.h
+		./build
+		;;
+	"lightsaber")
+		echo $scheme
+		sed 's/^#STATIC=liblightsaber.a/STATIC=liblightsaber.a/' build_src > build
+		sed 's/^\/\/#define SABER_L 2/#define SABER_L 2/' SABER_params_src.h > SABER_params.h
+		./build
+		;;
+	esac
+done

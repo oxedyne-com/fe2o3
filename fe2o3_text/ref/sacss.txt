@@ -1,0 +1,22 @@
+This is a description of the Streaming Algorithm for Composable, Stateful Search, or SACSS.
+
+* Rust API
+    
+	use fe2o3_text::pattern::Sacss;
+
+    let search = Sacss::new("hello world hello")
+		.starts_with("he");
+	while let Some((start, end, substr)) = search.next() {
+    	println!("({}, {}) '{}'", start, end, substr);  	
+	}
+
+should return
+
+    (0, 2) 'he'
+	(0, 12) 'hello world '
+	(0, 17) 'hello world hello'
+	(12, 17) 'hello'
+
+The Sacss matcher is matcher, represented by a tree where the nodes are boolean ops and, or, not and the leaves are of type SacssOp variants StartsWith, EndsWith, Contains.  The aim is to minimise iterating through the input.  Characters are read one at a time from an input stream.  Each character read starts a new cycle whereby the tree is traverses, its state is updated, and one or more matching substrings are identified and pushed onto the output result.  The key question is the nature of this cycle.  The read characters go into a buffer allowing "look back", which we aim to minimise.  To help construct the reasoning, it might be best to take an example input "hello world hello" and start with a simple matcher starts_with("he").  "h" is read first and appended to the buffer.  The starts_with leaf maintains state.  We traverse the tree leaves from L to R.  The starts_with leaf is currently looking for a match from position 0 in the buffer.  "h" matches the first character is "he" so a watch flag is set to true, and with no more leaves, the next character is read.  The buffer becomes "he", and the starts_with leaf, which we see is watching, now completes a match, generates the first tuple (0, 2) to append to the output, and changes state by spawning its own matching index to signify a match at the position 0 of the buffer.  It's watching state is turned off.  Reading continues with the buffer becoming "hel", "hell", ..., whereby the starts_with leaf watching state stays off, until we get to the second "h".  The second "he" in the buffer triggers the starts_with leaf to go through all its matching indices and, using the current index, push a new output result consisting of the start and end indices for "hello world ".  It spawns a new matching index for the start of the second "he", so its list of matching indices now has length two.  When the last characters is read, all the matching indices in the starts_with leaf can be closed out by generating new output substrings.  So the final result is [(0, 2), (0, 12), (12, 17), (0, 17)].
+
+The buffer will be retained during development but the ultimate goal is to discard it once all the necessary information is captured in the leaf states.

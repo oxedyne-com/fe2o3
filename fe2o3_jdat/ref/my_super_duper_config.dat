@@ -1,0 +1,31 @@
+(MAP|{
+    (STR|"cache_size_limit_mb"): (U64|1000),
+    (STR|"data_file_max_bytes"): (U64|1000),
+    (STR|"index_file_max_bytes"): (U64|1000),
+    (STR|"num_caches"): (U16|3),
+    (STR|"num_readers"): (U16|3),
+    (STR|"num_zones"): (U16|3),
+    (STR|"zones"): (MAP|{
+        (LIST|[
+            (U16|0),
+        ]): (LIST|[
+            (STR|"./"),
+            (U8|1),
+            (U16|100),
+        ]),
+        (LIST|[
+            (U16|1),
+        ]): (LIST|[
+            (STR|"./"),
+            (U8|1),
+            (U16|100),
+        ]),
+        (LIST|[
+            (U16|1),
+        ]): (LIST|[
+            (STR|"./"),
+            (U8|1),
+            (U16|100),
+        ]),
+    }),
+})

@@ -1,0 +1,60 @@
+[package]
+name = "oxedize_fe2o3_crypto"
+version = "0.5.0"
+authors = ["h00gs <hello@oxedize.com>"]
+edition = "2021"
+license = "BSD-2-Clause/Apache-2.0"
+description = "Hematite cryptographic library."
+repository = "https://github.com/Oxedize/fe2o3"
+
+build = "build.rs"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[features]
+default = [ "mode2" ]
+mode0 = []
+mode1 = []
+mode2 = []
+mode3 = []
+
+[dependencies]
+oxedize_fe2o3_core 				= { path = "../fe2o3_core" }
+oxedize_fe2o3_data 				= { path = "../fe2o3_data" }
+oxedize_fe2o3_iop_crypto		= { path = "../fe2o3_iop_crypto" }
+oxedize_fe2o3_jdat 				= { path = "../fe2o3_jdat" }
+oxedize_fe2o3_namex				= { path = "../fe2o3_namex" }
+
+# std reqd to activate impl std::error::Error for aead::Error
+aes-gcm = { version = "0.10.3", features = ["std"] }
+
+console_error_panic_hook= "0.1.6"
+ed25519-dalek = "1.0.1"
+pqcrypto-dilithium = "0.4.5"
+pqcrypto-traits = "0.3.4"
+rand_core = { version = "0.6.3", features = ["std"] }
+rand = { version = "0.8.4" }
+secrecy = "0.8.0"
+tiny-keccak = { version = "2.0.2", features = ["sha3", "shake"] }
+wasm-bindgen = "0.2.71"
+zeroize = { version = "1.4.2", features = ["zeroize_derive"] }
+
+###### Dilithium
+arrayref = "0.3"
+itertools = "0.7"
+byteorder = "1"
+sha3 = "0.7"
+digest = "0.7"
+# Needed for Dilithium _and_ ed25519-dalek
+rand_core_old = { package = "rand_core", version = "0.5.0", features = ["std"] }
+rand_old = { package = "rand", version = "0.7.0" }
+
+[dev-dependencies]
+oxedize_fe2o3_text = { path = "../fe2o3_text" }
+libc = "0.2"
+# Dilithium
+hex = "0.3"
+
+[build-dependencies]
+bindgen = "0.66.1"

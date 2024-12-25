@@ -1,0 +1,42 @@
+#V2
+ls
+ls -b
+exit
+ls
+ls -b
+ls
+pwd
+ls
+help
+ls
+help
+ls
+pwd
+cd ..
+la
+ls
+cd
+ls
+a = b
+ls
+a = b
+c = d
+who
+a = b
+c = 20
+who
+ls
+help
+pwd
+exit
+help
+ls
+help
+ls
+pwd
+help
+pwd
+ls
+ls -s size
+ls -s type
+ls -s type -r

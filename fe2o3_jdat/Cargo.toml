@@ -1,0 +1,26 @@
+[package]
+name = "oxedize_fe2o3_jdat"
+version = "0.5.0"
+authors = ["h00gs <hello@oxedize.com>"]
+edition = "2021"
+license = "BSD-2-Clause/Apache-2.0"
+description = "Hematite library for daticles, a simple type extension layer providing serialisation and deserialisation, and Jason's Data and Type (jdat) text format, a superset of JSON."
+repository = "https://github.com/Oxedize/fe2o3"
+
+[dependencies]
+oxedize_fe2o3_core 		   		= { path = "../fe2o3_core" }
+oxedize_fe2o3_num 				= { path = "../fe2o3_num" }
+oxedize_fe2o3_text 				= { path = "../fe2o3_text" }
+dat_map 						= { path = "dat_map" }
+
+bigdecimal = "0.2.0"
+num-bigint = "0.3"
+rand_core = { version = "0.6.3", features = ["std"] }
+
+[dev-dependencies]
+oxedize_fe2o3_hash 				= { path = "../fe2o3_hash" }
+oxedize_fe2o3_test 				= { path = "../fe2o3_test" }
+
+num-bigint = "0.3"
+syn = "1.0"
+quote = "1.0"

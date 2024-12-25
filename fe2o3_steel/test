@@ -1,0 +1,45 @@
+#!/bin/bash
+
+clear
+set -e  # Exit immediately if a command exits with a non-zero status.
+
+user=$(whoami)
+home=/home/$user
+trg=$home/usr/code/web/apps/test/tls/
+mkdir -p $trg
+
+cert_file="$trg/fullchain.pem"
+key_file="$trg/privkey.pem"
+days_valid=365
+
+need_new_cert=false
+
+# Check if certificate files exist
+if [ ! -f "$cert_file" ] || [ ! -f "$key_file" ]; then
+    echo "Certificate or key file missing. Will create new ones."
+    need_new_cert=true
+else
+    # Check certificate expiration
+    exp_date=$(openssl x509 -enddate -noout -in "$cert_file" | cut -d= -f2)
+    exp_epoch=$(date -d "$exp_date" +%s)
+    now_epoch=$(date +%s)
+    days_left=$(( ($exp_epoch - $now_epoch) / 86400 ))
+
+    if [ $days_left -lt 30 ]; then
+        echo "Certificate will expire in $days_left days. Will create new one."
+        need_new_cert=true
+    else
+        echo "Certificate is valid for $days_left more days."
+    fi
+fi
+
+if $need_new_cert; then
+    openssl req -x509 -newkey rsa:4096 -keyout "$key_file" -out "$cert_file" \
+    -days $days_valid -nodes -config tests/openssl.cnf
+    echo "Created new TLS certificate"
+else
+    echo "Using existing TLS certificate"
+fi
+
+echo "Running integrated test..."
+cargo test integrated -- --nocapture

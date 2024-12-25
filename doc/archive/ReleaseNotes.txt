@@ -1,0 +1,46 @@
+# 0.1.0
+
+The Hematite library and Ozone database have reached the most basic state of functionality.  Ozone provides persistent key-value storage and retrieval with automated chunking, but absent resource management.  `fe2o3_core` provides a `res!` macro that replaces `?` for `Result` propagation, which allows for more informative `fe2o3_core::error::Error` chaining.  However `fe2o3_dat::protocol::Protocol` shows how this approach does not play nice with the builder pattern.  Hence I'll replace `fe2o3_dat::protocol` with a simpler, more explicit way to build `Protocol`s before implementing the Ozone network server.
+
+# 0.2.0
+
+Added encryption to Ozone and clarifies the data storage scheme.  All values must be `Daticle`s, although this requirement doesn't necessarily apply to keys, which are now hashed.  A fast, small 32-bit hasher is used for non-encrypted keys (via https://crates.io/crates/seahash), but a custom hasher can be used when encrypting (e.g. 256-bit SHA3).  `BtreeMap` continues to be used for the caches despite this hashing, for its potentially faster read performance. 
+
+* Created `fe2o3_crypto::enc::EncryptionScheme` which currently provides AES_GCM symmetric key encryption, using https://crates.io/crates/aes-gcm, and the Firesaber asymmetric key exchange mechanism implementation in `fe2o3_crypto::saber`.  aes-gcm is quite a weighty dependency, with a noticable increase in fe2o3 compilation time.
+* Created `fe2o3_crypto::hash::HashScheme` which currently provides only SHA3 via https://crates.io/crates/tiny-keccak .  
+* Integrated these objects into Ozone database encryption, which is now functional.
+* Created `fe2o3_crypto::kdf::KeyDerivFn` which currently provides only Argon2 via https://crates.io/crates/argon2
+* argon2 is not currently integrated into Ozone, but I have established how to store the hashing configuration (`fe2o3_crypto::kdf::tests::test_argon2_00`).  This was frustratingly and surprisingly clunky with the provided API.
+* Continued work on documentation particularly in `fe2o3_o3db::db`.
+* Refactored `fe2o3_dat::protocol` so that `Protocol`, `Cmd` and `Arg` contain stateless configuration structs `ProtocolConfig`, `CmdConfig` and `ArgConfig`, allowing them to be initialised explicitly, and avoiding the mess that `fe2o3_core::res!` causes when using the builder pattern.  `fe2o3_dat::protocol` builder method were not removed, but all tests and the example repl were upgraded to reflect the new initialisation style which is a little more verbose but I think much better.
+
+# 0.3.0
+
+* Replaced the `Timestamp` with a `fe2o3_o3db::cache::Meta` in Ozone, which now records `fe2o3_o3db::id::UserId` during writes and returns the `Meta` for reads.
+* Added Daticle::Opt(Option<Daticle>) in fe2o3_dat.
+* Added sign module in fe2o3_crypto, including ed25519_dalek.
+* Incorporated Dilithium pure Rust implementation by https://quininer.github.io/.  Similar to Saber, Dilithium is a finalist in the NIST post quantum cryptography competition in the category of digital signatures.  I collected the implementation into a single file.
+* Created a fe2o3_o3db::user module that adds basic functionality to Ozone.
+* Applied some basic cryptographic hygiene to the secret keys in the user functionality via https://crates.io/crates/secrecy and its use of https://crates.io/crates/zeroize.
+* Spun out data chunking functionality from fe2o3_o3db::db::store_with_responder to fe2o3_o3db::chunk::Chunker in preparation for setting up net server functionality.
+* Changed Daticle::Byt length information from Daticle::VU64 to a raw u64 to allow predictability of wrapper size, so that chunks can be of a strictly fixed size.  To now, the specified chunk size pertains only to the data, so that additional processing (encryption, Daticle::Byt wrapper) results in a larger, and variable chunk size.  This has been fine because the re-assembly process in fe2o3_o3db::db::fetch_chunks first negates this processing to reveal the original data with the originally specified chunk size.  In preparation for networking, I want a strictly deterministic chunk size that doesn't grow.  I have not changed any other variable length daticles, yet.  The inconsistency is not great, but the use of VU64 acts as a form of data compression that I'll leave intact until it becomes an issue.
+
+# 0.4.0
+
+Ozone has now achieved MVP status.  A user can store, retrieve and delete data with encryption, chunking, proper garbage collection, resource reporting and management and rudimentary performance benchmarking.  These features are showcased in the integration tests `basic` (API) and `gc` (correctness and performance).  Testing is incomplete, so there are likely to be plenty of bugs.  Networking has been removed from the Ozone roadmap -- this can be done by an accompanying app.  The priorities for Ozone should now be more extensive testing and logic correction, and performance measurement and optimisation.
+
+* Refactored `fe2o3_core::error` to allow cloning and a better `fe2o3_core::err!` interface incorporating both the `Local` and `Upstream` variants.  Replaced `Box` encapsulation of upstream errors with `Arc`. 
+* Implementation of garbage collection with the mapping of `FileState` to each zone data file, and automated scheduling of the deletion of old data by `GarbCollBot`s.
+* Addition of a simple key deletion functionality.
+* Addition of `bot_configwatcher::ConfigWatcher` with associated changes to `config::Config` to place `ConfigData` inside an `Arc<RwLock<ConfigData>>` wrapper along with `Result` returning config data getters, allows Ozone to detect, validate and update changes to the configuration parameters resulting from a modified config file.
+* Removed cross-over of `Simplex` channels in `fe2o3_core::channels::FullDuplex` as it was not inuitive enough.  `FullDuplex` now consists of two ordinary `Simplex` channels.  This also takes advantage of the addition of a thread-safe internal counter of the pending message queue to `Simplex`.
+* Development of a rough but flexible performance benchmark for Ozone in the `gc` integration test.
+* Addition of `fe2o3_core::macros::trytyp`, `tryadd` and `trysub` as conveniences which respectively perform a `TryInto` conversion and add and subtract integers with overflow and underflow checking.  `trytyp` was motivated by the desire to bring as many integer type casts into non-panicking error propagation as possible.
+* Created a `fe2o3_o3db::prelude` to streamline imports by other Ozone modules.
+* Modified `fe2o3_log` to allow different message formatting for console and file out put in order to permit removal of ANSI terminal codes for file output.  Specified a `fe2o3_core::error::Error` `Debug` implementation differing from `Display`, and modified the `fe2o3_log::error` macro so that logging of errors honour this split. 
+* Buffered caching of index and data files for ibots, since caching of index files, at least, can be aborted by design, leaving out-of-order pending file state insertions and deletions when caching commences on the data file.  There should also be a small speed improvement. 
+* Moved some generic bits of code from an Ozone integeration test into the new fe2o3 crate `fe2o3_test`.
+* Swapped out `crossbeam-channel` for `flume` in `fe2o3_core::channels`.
+* Revised design by giving cbots exclusive ownership and access to caches and file states.
+* Converted all channels to Simplex, except cbots which retained FullDuplex as two incoming channels for writing (fwd) and reading (rev).
+

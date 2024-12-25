@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+/* Split the screen in half */
+.split {
+  height: 100%;
+  width: 50%;
+  position: fixed;
+  z-index: 1;
+  top: 0;
+  overflow-x: hidden;
+  padding-top: 20px;
+}
+
+/* Control the left side */
+.left {
+  left: 0;
+	color: white;
+  background-color: black;
+	margin-left: 50 px;
+}
+
+/* Control the right side */
+.right {
+  right: 0;
+  background-color: white;
+}
+
+</style>
+</head>
+<body>
+<div class="split right">
+  <h1 style="text-align:center;">Ozone from 30,000 ft</h1>
+	<img width=100%; src="../svg/zone_overview.svg" />
+</div>
+<div class="split left">
+	<h1>Ozone overview</h1>
+	<p>A general purpose database must contend with variable read and write workloads and resource limits.  Ozone approaches the trade-offs by pursuing:
+	<ul>
+		<li>a high degree of flexibility for optimising performance on the fly,</li>
+		<li>throughput that scales very well,</li>
+		<li>relatively low (but not minimal) system overhead, and</li>
+		<li>intuitive, well documented and maintainable code.</li>
+	</ul>
+	<p>Inspired by the log-structured hash table (<a href="https://riak.com/assets/bitcask-intro.pdf?source=post_page---------------------------">Bitcask</a>) and a future where digital storage becomes super abundant, Ozone's primary goal is to persist an incoming fire hose of data as quickly as possible.  It is locally sharded across two levels to provide flexible performance tuning.  It leans heavily on the operating system by appending key-value pairs to files and making efficient use of this persistent resource by regularly deleting old file values.  Ozone's secondary goal is to maximise reading performance by caching as much value data as possible in faster volatile memory.</p>
+	<h2>Design</h2>
+	<p>Ozone assigns data across two levels and relies on two main kinds of non-shared data structures.  At the first level one or more completely independent file directories, or <em>zones</em>, shard data according to key hashes.  The second level sees data sharded into caches using the same hashes within each zone.  Caches are the primary structures holding keys and values, and are controlled by dedicated threads.  These threads are called "bots" because they listen for messages on at least one channel and respond to commands.</p>
+	<p>Key-value pairs along with metadata are appended to sequentially numbered data files for persistence.  Each data file has an accompanying and usually much smaller index file to which key and data file locations are appended.  The state of each data/index file pair within each zone is tracked by the second main kind of data structure, a map from file numbers to file states.  This map is sharded across dedicated file bots.</p>
+	<p>Index files are not essential but help with data integrity and speeding up initialisation and <em>rezoning</em>.  Rezoning is the process of mapping data from one set of zones to another.  Files are limited in size and accumulate or vanish over time, depending on the extent to which values are replaced.</p>
+	<p>Each zone contains pools of worker threads dedicated to performing specific operations:</p>
+	<ol>
+		<li>Cache bots (cbots) control cache access.</li>
+		<li>File bots (fbots) correctly make and schedule file state changes.</li>
+		<li>Writer bots (wbots) append key-value data to live files.</li>
+		<li>Garbage bots (gbots) perform garbage collection on files as requested by fbots.</li>
+		<li>Reader bots (rbots) retrieve values via cbots and fbots.</li>
+		<li>Initialisation bots (ibots) read data from files and use the same data insertion scheme as wbots to fill the file states and caches during start up.</li>
+	</ol>
+	<h1>Control</h1>
+	<p>When a user creates an O3db instance, they pass it a channel to a hypervisor, or else one is created by default.  The O3db instance, running in the user thread, does not listen for messages and is therefore not a bot.  It performs some initial configuration checks, creates an initial set of communication channels and passes these to a newly created supervisor, the first solo bot.</p>
+	<p>The supervisor controls and monitors the operation of the database.  It initialises the database including the creation of all solo and worker bots, and propagates new configuration information which may involve the creation and termination of bots, rezoning and recaching operations.  A hypervisor provides a back up mechanism in case communication with one of its supervisors is lost.  Supervisors regularly send a clone of themselves to the hypervisor, which can be used to reboot the database.</p> 
+	<p>Bots can be shut down via a message to their main channel.  But a supplementary mechanism is also available.  Upon creation, bots are equipped with a special control channel with a transmission end (the <em>semaphore</em>) and receiver end (the <em>sentinel</em>).  This channel can be used to determine the state of the thread, or to stop it.</p>
+	<h1>Interface</h1>
+	<p>The supervisor starts a server that listens to both a specific network port and a native channel, formulating and/or forwarding messages to the bots.  The user can thus interact with the database via the application programming interface (API) comprising a <em>network interface</em> and a <em>native interface</em> using the O3db instance (identified as the <em>master</em>) while it remains active.</p>
+	<h1>Channels</h1>
+	<p>Ozone minimises shared references to data and relies largely on message passing via channels.  The ordering imposed by message queues makes for more readily understandable and transparent logical consistency that tends to justify the overhead as the system becomes more complex.</p>  
+	<h1>Users</h1>
+	<p>An Ozone database maintains a register of users within the database itself which is read during initialisation.  There are two levels of user control and monitoring.  At the global level, the server bot logs users in and filters their ability to issue create and delete keys, read and modify values, and other requests.  At the local level of existing individual keys, the cache bots control whether a user can read and modify a value or delete the key by maintaining key-associated user lists.  User access actions can be recorded at the global and local levels.  There is no global user filter for the native interface, but filtering can be achieved by sending messages directly (via channel) or indirectly (via the supervisor or network port) to the server.</p>  
+</div>
+</body>
+</html> 

@@ -1,0 +1,17 @@
+[package]
+name = "new"
+version = "0.5.0"
+authors = ["h00gs <hello@oxedize.com>"]
+edition = "2021"
+license = "BSD-2-Clause/Apache-2.0"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+proc-macro = true
+
+[dependencies]
+#fe2o3_core 		   		= { path = "../../fe2o3_core" }
+syn = { version = "1.0", features = ["full"] }
+quote = "1.0"
+proc-macro2 = "1.0"

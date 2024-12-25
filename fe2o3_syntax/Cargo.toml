@@ -1,0 +1,21 @@
+[package]
+name = "oxedize_fe2o3_syntax"
+version = "0.5.0"
+authors = ["h00gs <hello@oxedize.com>"]
+edition = "2021"
+license = "BSD-2-Clause/Apache-2.0"
+description = "Hematite syntax library, providing a simple user-defined protocol on the wire and the command line."
+repository = "https://github.com/Oxedize/fe2o3"
+
+[dependencies]
+oxedize_fe2o3_core 		   		= { path = "../fe2o3_core" }
+oxedize_fe2o3_jdat 				= { path = "../fe2o3_jdat" }
+oxedize_fe2o3_stds 				= { path = "../fe2o3_stds" }
+oxedize_fe2o3_text 				= { path = "../fe2o3_text" }
+oxedize_fe2o3_units 			= { path = "../fe2o3_units" }
+
+levenshtein = "1.0.5"
+
+[dev-dependencies]
+oxedize_fe2o3_test 				= { path = "../fe2o3_test" }
+num-bigint = "0.3"

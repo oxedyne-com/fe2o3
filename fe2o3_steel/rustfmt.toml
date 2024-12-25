@@ -1,0 +1,25 @@
+# https://rust-lang.github.io/rustfmt/?version=v1.7.1&search=
+
+# TODO JDH: I had trouble making this work, it needs more attention.
+
+edition = "2021"
+
+binop_separator = "Front"
+
+use_small_heuristics = "Off"
+
+imports_layout = "Vertical"
+imports_granularity = "Preserve"
+
+fn_params_layout = "Vertical"
+fn_single_line = true
+brace_style = "AlwaysNextLine"
+
+struct_field_align_threshold = 0
+#struct_lit_style = "Block"
+#struct_lit_multiline_style = "ForceMultiline"
+
+format_strings = true
+tab_spaces = 4
+max_width = 100
+match_arm_blocks = false

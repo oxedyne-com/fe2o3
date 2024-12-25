@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+/* Split the screen in half */
+.split {
+  height: 100%;
+  width: 50%;
+  position: fixed;
+  z-index: 1;
+  top: 0;
+  overflow-x: hidden;
+  padding-top: 20px;
+}
+
+/* Control the left side */
+.left {
+  left: 0;
+	color: white;
+  background-color: black;
+	margin-left: 50 px;
+}
+
+/* Control the right side */
+.right {
+  right: 0;
+  background-color: white;
+}
+
+.centered {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  text-align: center;
+}
+</style>
+</head>
+<body>
+<div class="split right">
+  <div class="centered">
+    <h1>An O3db zone from 1,000 ft</h1>
+		<img src="ozone3.svg" />
+  </div>
+</div>
+<div class="split left">
+	<h1>Ozone database</h1>
+	<p>A general purpose database must contend with variable read and write workloads and resource limits.  A suitable compromise amongst several trade-offs must be found.  Ozone aims to offer:
+	<ul>
+		<li>a high degree of flexibility for optimising performance on the fly,</li>
+		<li>throughput that scales well,</li>
+		<li>relatively low system overhead, and</li>
+		<li>intuitive, well documented and maintainable code.</li>
+	</ul>
+	<p>Ozone is a key-value database based on a log-structured hash table (<a href="https://riak.com/assets/bitcask-intro.pdf?source=post_page---------------------------">Bitcask</a>) that is locally sharded across two levels to provide flexible performance tuning.  It works by appending key-value pairs to operating system files, and aims to efficiently use available resources by deleting old file values and caching as much data in volatile memory as possible.</p>
+	<h2>Design</h2>
+	<p>Ozone assigns data across two levels and relies on two main kinds of non-shared data structures.  At the first level one or more completely independent file directories, or zones, shard data according to key hashes.  The second level sees data sharded into caches using the same hashes within each zone.  Caches are the primary structures holding keys and values, and are controlled by dedicated threads or cache "bots".</p>
+	<p>Key-value pairs along with metadata are appended to sequentially numbered data files for persistence.  Each data file has an accompanying index file to which key and data file locations are appended.  The state of each data/index file pair within each zone is tracked by the second main kind of data structure, a file state map.  This map is divided amongst the cache bots, and sharded by the file number.</p>
+	<p>Index files are not essential but help with data integrity and speeding up initialisation and rezoning.  Rezoning is the process of mapping data from one set of zones to another.  Files are limited in size and accumulate or vanish over time, depending on the extent to which values are replaced.</p>
+	<p>Each zone is associated with pools of worker threads dedicated to performing specific operations:</p>
+	<ol>
+		<li>Cache bots (cbots) correctly schedule operations and data access.</li>
+		<li>Writer bots (wbots) append key-value data to live files.</li>
+		<li>Garbage bots (gbots) perform garbage collection on files as requested by cbots.</li>
+		<li>Reader bots (rbots) retrieve values via cbots.</li>
+		<li>Initialisation bots (ibots) read data from files and use the same data insertion scheme as wbots to fill the file states and caches during start up and rezoning.</li>
+	</ol>
+	<h1>Ozone mechanics</h1>
+	<p>Cache bots have some special features.  The number of caches is tied to the number of cbots.  Each cbot has exclusive access to a cache and a zone file state shard.  Finally, unlike other worker bots which have a single incoming message channel, cbots have separate channels for reading and writing related messages.</p>
+	<p>By manually (via configuration file changes) or automatically adjusting the number of zones, the number of bots per zone, and the way cbots handle incoming messages, overall performance can be tuned for the workload and available resources.  In addition to rezoning the other main kind of database transformation is recaching which is triggered when the number of cbots per zone is changed.  In this case, all the data in the caches and file states must be reallocated across the new set of cbots for each zone, but unlike rezoning there is no change to the files.</p>
+	<p>Ozone relies on buffered message passing for data operations and locks for shared configuration information.  In the accompanying diagram, the caches consist of keys associated with a file location and possibly a value, and file states are associated with files.  Various configuration options including the number of zones and the number of worker bots in each zone can be adjusted dynamically.</p>
+	<h2>Writing</h2>
+	<ol>
+		<li>A randomly chosen wbot is asked by a caller to store a key-value pair and given an ephemeral responder channel.  A hash of the key determines its association with a cbot.</li>
+		<li>If the live file size is expected to grow beyond the configured limit, the wbot starts a new live file in the sequence.  If not, the wbot skips to database insertion.</li>
+	</ol>
+	<h3>New live file</h3>
+	<ol start="3">
+		<li>The wbot advises the cbot associated with the previous live file of the change, passing to it a responder channel.</li>
+		<li>The cbot downgrades the file state from live, allowing its garbage to be collected.</li>
+		<li>The cbot advises the cbot associated with the new live file number (which could be itself) to create a new file state.</li>
+		<li>The file state for the new live file is created.</li>
+		<li>The cbot informs the wbot via the responder channel that the new live file state is ready.</li>
+	</ol>
+	<h3>Database insertion</h3>
+	<ol start="8">
+		<li>The wbot appends the data to its live file.</li>
+		<li>With the data committed to a persistent form in the live file, the wbot selects a cbot using the key and sends the data and its location.</li>
+		<li>The key-selected cbot inserts the file location and value into its cache.  If the data is new, it collects the file location of any existing value as old data.  If the data for insertion is itself old, it is treated as old data.</li>
+		<li>This cbot advises the original caller via their responder channel that the data has been successfully committed to file and a cache.</li>
+		<li>This cbot selects a cbot using the file location of the new data (which could be itself) and asks it to update the file state.</li>
+		<li>The file-selected cbot adds the new location to the file state data map.</li>
+		<li>The key-selected cbot selects a cbot using the file location of the old data (which could be itself) and asks it to schedule a deletion.</li>
+		<li>The file-selected cbot schedules the old data for deletion and checks to see if the file requires garbage collection, waiting for a write lock on the file if it does.</li>
+	</ol>
+	<p>By allocating file state actions to specific cbot queues, we can avoid logical ordering problems such as inserting data into a new live file state that has not yet been created, or scheduling data for deletion in a file state data map before it has been inserted.</p>
+	<h2>Garbage collection</h2>
+	<ol start="16">
+		<li>The cbot instructs a random gbot to perform garbage collection on the file, passing it a copy of the file state and sending a responder, before waiting for confirmation.</li>
+		<li>The gbot performs the transcription to remove old file data, re-creating the index file.</li>
+		<li>The gbot returns the new file state using the responder.</li>
+		<li>The cbot resets the file state and unlocks the file.</li>
+	</ol>
+	<p>Over time, garbage collection whittles down files until some are completely deleted.</p>
+	<h2>Reading</h2>
+	<ol>
+		<li>A caller asks a randomly chosen rbot to fetch the value for a specified key, providing a responder.</li>
+		<li>The rbot asks the key-selected cbot for the value or file location, via its read channel.</li>
+		<li>The cbot accesses its cache.</li>
+		<li>In the case where only the file location is available, the cbot waits for a read lock on the file preventing garbage collection.</li>
+		<li>The cbot replies to the rbot with the value or the file location using the responder.</li>
+		<li>The rbot reads the file location, if the value has not been provided.</li>
+		<li>The rbot returns the value to the caller.</li>
+		<li>The rbot informs the cbot that the read is complete.</li>
+		<li>The cbot unlocks the file.</li>
+	</ol>
+	<h2>Initialisation</h2>
+	<ol>
+		<li>A randomly chosen ibot is asked to cache an index file or the associated data file.</li>
+		<li>The ibot reads the index file, or if there is a problem or no such file exists, it reads the data file and creates an index file.  Unlike wbots, ibots buffer file writing.</li>
+		<li>The ibot uses the same insertion pipeline starting as a wbot from steps 9 to 15, however, garbage collection is deactivated during initialisation.</li>
+	</ol>
+</div>
+</body>
+</html> 

@@ -1,0 +1,24 @@
+(omap|{
+    (str|"num_zones"): (u16|2),
+    (str|"num_caches"): (u16|2),
+    (str|"num_readers"): (u16|2),
+    (str|"cache_size_limit_mb"): (u64|1000),
+    (str|"data_file_max_bytes"): (u64|1000),
+    (str|"index_file_max_bytes"): (u64|1000),
+    (str|"zones"): (omap|{
+        (list|[
+            (u16|0),
+        ]): (list|[
+            (str|"./"),
+            (u8|1),
+            (u16|100),
+        ]),
+        (list|[
+            (u16|1),
+        ]): (list|[
+            (str|"./"),
+            (u8|1),
+            (u16|100),
+        ]),
+    }),
+})

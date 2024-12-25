@@ -1,0 +1,20 @@
+Stdout>>>>>>>>>>>>>
+firesaber
+saber
+lightsaber
+Stderr>>>>>>>>>>>>>
+SABER_indcpa.c: In function ‘indcpa_kem_keypair’:
+SABER_indcpa.c:22:19: warning: unused variable ‘k’ [-Wunused-variable]
+   22 |         int i, j, k;
+      |                   ^
+gcc: warning: rng.o: linker input file unused because linking not done
+SABER_indcpa.c: In function ‘indcpa_kem_keypair’:
+SABER_indcpa.c:22:19: warning: unused variable ‘k’ [-Wunused-variable]
+   22 |         int i, j, k;
+      |                   ^
+gcc: warning: rng.o: linker input file unused because linking not done
+SABER_indcpa.c: In function ‘indcpa_kem_keypair’:
+SABER_indcpa.c:22:19: warning: unused variable ‘k’ [-Wunused-variable]
+   22 |         int i, j, k;
+      |                   ^
+gcc: warning: rng.o: linker input file unused because linking not done

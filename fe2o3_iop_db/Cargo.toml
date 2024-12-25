@@ -1,0 +1,18 @@
+[package]
+name = "oxedize_fe2o3_iop_db"
+version = "0.5.0"
+authors = ["h00gs <hello@oxedize.com>"]
+edition = "2021"
+license = "BSD-2-Clause/Apache-2.0"
+description = "Hematite interoperability library for databases."
+repository = "https://github.com/Oxedize/fe2o3"
+
+[dependencies]
+oxedize_fe2o3_core 		   		= { path = "../fe2o3_core" }
+oxedize_fe2o3_crypto	   		= { path = "../fe2o3_crypto" }
+oxedize_fe2o3_data 		   		= { path = "../fe2o3_data" }
+oxedize_fe2o3_hash 		   		= { path = "../fe2o3_hash" }
+oxedize_fe2o3_iop_crypto   		= { path = "../fe2o3_iop_crypto" }
+oxedize_fe2o3_iop_hash   		= { path = "../fe2o3_iop_hash" }
+oxedize_fe2o3_jdat				= { path = "../fe2o3_jdat" }
+oxedize_fe2o3_namex				= { path = "../fe2o3_namex" }

@@ -1,0 +1,7 @@
+#!/bin/bash
+#cargo rustdoc --examples --lib --bins
+cargo doc --all --no-deps
+echo "Docs built in ./target/doc"
+#ln -s $(pwd)/target/doc/fe2o3/index.html index.html
+echo "Point browser to file://$(pwd)/index.html"
+firefox "file://$(pwd)/index.html"

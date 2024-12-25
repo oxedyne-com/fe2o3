@@ -1,0 +1,25 @@
+[package]
+name = "oxedize_fe2o3_tui"
+version = "0.5.0"
+authors = ["h00gs <hello@oxedize.com>"]
+edition = "2021"
+license = "BSD-2-Clause/Apache-2.0"
+description = "Hematite text user interface library."
+repository = "https://github.com/Oxedize/fe2o3"
+
+[dependencies]
+oxedize_fe2o3_core 		   	= { path = "../fe2o3_core" }
+oxedize_fe2o3_file			= { path = "../fe2o3_file" }
+oxedize_fe2o3_geom 		   	= { path = "../fe2o3_geom" }
+oxedize_fe2o3_hash			= { path = "../fe2o3_hash" }
+oxedize_fe2o3_iop_hash		= { path = "../fe2o3_iop_hash" }
+oxedize_fe2o3_jdat 		   	= { path = "../fe2o3_jdat" }
+oxedize_fe2o3_stds	   		= { path = "../fe2o3_stds" }
+oxedize_fe2o3_syntax	   	= { path = "../fe2o3_syntax" }
+oxedize_fe2o3_text	   		= { path = "../fe2o3_text" }
+oxedize_fe2o3_units	   		= { path = "../fe2o3_units" }
+
+crossterm = "0.27"
+secrecy = "0.8.0"
+
+[dev-dependencies]

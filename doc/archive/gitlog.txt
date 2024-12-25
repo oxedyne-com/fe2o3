@@ -1,0 +1,101 @@
+commit 212c8906d865ad6f3501a213e11e5ae8ad0c9c34
+Author: h00gs <hello@oxedize.com>
+Date:   Wed Aug 26 09:19:11 2020 +0800
+
+    Rewrote tree::TreeMap to get rid of DataOrKey
+    
+    - Now recursive dereferencing of TreeMap is built in, automatic.
+    - That is, you can insert keys in data stores, and get_store_ref and get_data_ref will dereference (recursively if needed).
+    - get_store_mut does not perform this dereferencing.
+    - Its magic power is to create all nodes touched by any key it receives.
+    - Got rid of Default requirement in TreeMap and Stack.
+    - Got rid of protocol::MessageProcessor and use of protocol callback functions because of the problem that trait objects are unsized, but new TreeMap nodes need to instantiate them.
+
+commit c0634113313657298bcb0860bd9b79d0f2bbc3a6
+Author: h00gs <hello@oxedize.com>
+Date:   Sun Aug 23 21:03:48 2020 +0800
+
+    Reworked protocol message reading functionality
+    
+    - Complete required-argument and name collision functionality.
+    - Allow arguments without "-" or "--" prefix.
+    - Created tree::NodeOption and store_exists() function for one-one and many-one TreeMaps.
+
+commit 984e5044a9a631b2a2e87cdc62e5c7cae83ab2bc
+Author: h00gs <hello@oxedize.com>
+Date:   Tue Aug 18 10:24:00 2020 +0800
+
+    Basic protocol message reading functionality installed
+    
+    - Created Daticle::from_string_with_config() with separation of DaticleStringDecoderState and DaticleStringDecoderCfg.
+    - Quote protection for both single and double quotes in daticle string decoding.
+    - Basic parsing and validation of text message according to protocol (validation incomplete).
+
+commit 0be5611010f18f5575dc322f5940a06c4dee0b59
+Author: h00gs <hello@oxedize.com>
+Date:   Fri Jul 31 10:20:14 2020 +0800
+
+    Added many-to-one recursive mapping feature to tree::TreeMap
+    
+    - Removed Clone requirement from tree::TreeMap, too restrictive and not really necessary.
+    - Removed internal references in tree::ByteKey and tree::ByteKeyIter to give them ownership, requiring the user to clone ByteKey where necessary and avoid borrowing complications within TreeMap methods.
+    - Created tree:KeyDeref, tree::DataOrKey, tree::OneToOne and tree::ManyToOne to allow user to choose whether their tree::TreeMap simply returns a tree::NodeStore pointed to by a tree::ByteKey naively (OneToOne), or uses NodeStores that are also of type KeyDeref (such as the provided DataOrKey) that may contain either data or another key, which can be dereferenced recursively to yield the ultimate NodeStore.  Either OneToOne or ManyToOne must be explicitly brought into the user scope.
+
+commit 87ba5f7c5d315940f73501a8bafdffd33807fa7f
+Author: h00gs <hello@oxedize.com>
+Date:   Sat Jul 18 10:12:23 2020 +0800
+
+    Created protocol::Message
+    
+    - Realised type inference probably not possible with TreeMap instantiation, i.e. can't write TreeMap::new(), requires NodeStore type, e.g. TreeMap::<u8>::new() or TreeMap::<Stack<u8>>::new(), etc..
+    - Created protocol::Message and first text reading test.
+
+commit e636520abf89e7498f55fb9cff66fa77c52691ae
+Author: h00gs <hello@oxedize.com>
+Date:   Fri Jul 17 22:13:51 2020 +0800
+
+    Some revisions to tree module, created protocol module
+    
+    - Renamed tree::Tree to tree::TreeMap to more obviously reflect nature.
+    - Renamed tree::TreeList to tree::NodeStore (and generic parameter L -> S) upon realising it accomodates not just S<D> but plain D as well.
+    - Add TreeMap test for plain A struct.
+    - Created protocol module, including working use of TreeMaps.
+
+commit 69196f0e4af977a8ce20bf4a639e58f2f123066a
+Author: h00gs <hello@oxedize.com>
+Date:   Fri Jul 17 00:46:28 2020 +0800
+
+    Made tree::Tree generic via tree::TreeList
+    
+    Removed hardwiring of stack::Stack<D> as node list, to any implementor
+    of TreeList.
+
+commit 0fe4652eec59a7b4cb411b67894891882a76f1ba
+Author: h00gs <hello@oxedize.com>
+Date:   Wed Jul 15 08:54:41 2020 +0800
+
+    Experimented with uing AsRef and From traits to accept a variety of
+    argument types for ByteKey into Tree method insert (a bit like Path),
+             but opted to keep ByteKey and implement From for Daticle and
+             &Daticle, since it is not possible to originate a reference
+             from a conversion function.  Changed ByteKey to hold a Vec<u8>
+             instead of a &'a [u8].  So in the end stuck with Tree.insert
+             using a reference to the key, and consuming the value.
+
+commit 8d3a63b17c12cf731ecdb0c7d186fa84aee0577b
+Author: h00gs <hello@oxedize.com>
+Date:   Fri Jul 10 07:22:07 2020 +0800
+
+    Working toward creating the o3 database, got the basics of fe2o3::Tree sorted with basic writing and reading.
+
+commit 9d5d27baf99a713929c46050c60ce76d5c505535
+Author: h00gs <hello@oxedize.com>
+Date:   Sun May 31 10:44:20 2020 -0400
+
+    Best to use a common .gitignore
+
+commit 7e05281eaf9ed5ca62360916716a9be5dcb9afbd
+Author: h00gs <hello@oxedize.com>
+Date:   Sun May 31 10:34:18 2020 -0400
+
+    Let's write some code!

@@ -1,0 +1,63 @@
+use fe2o3_core::prelude::*;
+
+use std::{
+    str::FromStr,
+};
+
+use lettre::{
+    self,
+    message,
+    //Message, // name clash with fe2o3_core::error::Message in res! macro
+    SmtpTransport,
+    transport::smtp::authentication::Credentials,
+    Transport,
+};
+use secrecy::{
+    ExposeSecret,
+    Secret,
+};
+
+pub struct EmailFwd {
+    pub addr:   String,
+    pub user:   String,
+    pub pass:   Secret<String>,
+}
+
+pub struct Email<'a> {
+    pub from:       &'a str,
+    pub reply_to:   &'a str,
+    pub to:         &'a str,
+    pub subject:    &'a str,
+    pub body:       &'a str,
+}
+
+impl<'a> Email<'a> {
+    
+    pub fn send(&self, fwd: EmailFwd) -> Outcome<()> {
+        // 1. Create the message.
+        let mut mb = lettre::Message::builder();
+        mb = mb.from(res!(message::Mailbox::from_str(self.from)));
+        mb = mb.reply_to(res!(message::Mailbox::from_str(self.reply_to)));
+        mb = mb.to(res!(message::Mailbox::from_str(self.to)));
+        mb = mb.subject(self.subject);
+        let msg = res!(mb.body(self.body.to_string()));
+        
+        // 2. Create the credentials for email forwarding.
+        let esec = fwd.pass.expose_secret();
+        let creds = Credentials::new(fwd.user, esec.to_string());
+        
+        // 3. Open a remote connection to the relay forwarding server.
+        let mailer = res!(SmtpTransport::relay(&fwd.addr))
+            .credentials(creds)
+            .build();
+        
+        // 4. Send the email.
+        res!(mailer.send(&msg));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //use super::*;
+}
