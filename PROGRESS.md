@@ -67,3 +67,9 @@ This is a dynamic document, and shows the latest goals of development work.
 - [ ] Split code into app and library like `fe2o3_steel`, move app out of ./examples
 - ...
 - [ ] Demonstrate development of Hematite in Ironic as a vim replacement
+
+## Cryptographic functionality: `fe2o3_crypto`
+
+- [ ] Remove all `unsafe` blocks
+- [ ] Migrate tests from Rust std to Hematite format
+

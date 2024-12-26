@@ -26,8 +26,11 @@ use std::{
 };
 
 use ed25519_dalek::{
-    Signer as _,
-    Verifier as _,
+    Signature,
+    SigningKey,
+    Signer as DalekSigner,
+    Verifier,
+    VerifyingKey,
 };
 
 use pqcrypto_dilithium::dilithium2;
@@ -37,6 +40,7 @@ use pqcrypto_traits::sign::{
     SecretKey as _,
 };
 use rand_core_old::OsRng as OsRng_old;
+use rand_core::OsRng;
 use secrecy::{
     ExposeSecret,
     Secret,
@@ -128,11 +132,13 @@ impl Signer for SignatureScheme {
             Self::Ed25519(keys) => match keys {
                 Keys { pk: Some(pk), sks: Some(sks) } => { 
                     let skv = sks.expose_secret();
-                    let keypair = ed25519_dalek::Keypair { // the secret field is automatically zeroized on drop
-                        public: res!(ed25519_dalek::PublicKey::from_bytes(&pk[..])), // pity, shouldn't need this
-                        secret: res!(ed25519_dalek::SecretKey::from_bytes(&skv[..])),
-                    };
-                    let result = keypair.sign(msg).to_bytes().to_vec();
+                    let sk_byts = res!(<[u8; Self::ED25519_SK_LEN]>::try_from(&skv[..]));
+                    let signing_key = SigningKey::from_bytes(&sk_byts);
+                    let verifying_key = signing_key.verifying_key();
+                    if verifying_key.to_bytes() != pk[..] {
+                        return Err(err!(errmsg!("Public key mismatch."), Invalid, Configuration));
+                    }
+                    let result = signing_key.sign(msg).to_bytes().to_vec();
                     Ok(result)
                 },
                 _ => Err(err!(errmsg!("Require both keys to sign."), Missing, Configuration)),
@@ -164,9 +170,9 @@ impl Signer for SignatureScheme {
         Ok(match self {
             Self::Ed25519(keys) => match keys {
                 Keys { pk: Some(pk), .. } => { 
-                    let pk = res!(ed25519_dalek::PublicKey::from_bytes(&pk[..]));
-                    let sig = res!(ed25519_dalek::Signature::from_bytes(sig));
-                    match pk.verify(msg, &sig) {
+                    let verifying_key = res!(VerifyingKey::from_bytes(pk));
+                    let signature = res!(Signature::from_slice(sig));
+                    match verifying_key.verify(msg, &signature) {
                         Ok(()) => true,
                         _ => false,
                     }
@@ -363,10 +369,10 @@ impl SignatureScheme {
     pub const DILITHIUM2_FE2O3_SIG_LEN: usize = dilithium2_fe2o3::params::SIG_SIZE_PACKED;
 
     pub fn new_ed25519() -> Self {
-        let keypair = ed25519_dalek::Keypair::generate(&mut OsRng_old);
+        let signing_key = SigningKey::generate(&mut OsRng);
         let keys = Keys {
-            pk: Some(keypair.public.to_bytes()),
-            sks: Some(Secret::new(keypair.secret.to_bytes())),
+            pk: Some(signing_key.verifying_key().to_bytes()),
+            sks: Some(Secret::new(signing_key.to_bytes())),
         };
         Self::Ed25519(keys)
     }
@@ -406,46 +412,4 @@ impl SignatureScheme {
     pub fn empty_dilithium2_fe2o3() -> Self {
         Self::Dilithium2_fe2o3(Keys::default())
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    //#[test]
-    //fn test_zeroize_00() -> Outcome<()> {
-    //    let mut ptr_pk: *const Vec<u8> = std::ptr::null();
-    //    let mut ptr_sk: *const Vec<u8> = std::ptr::null();
-    //    let mut pk_copy = Vec::new();
-    //    let mut sk_copy = Vec::new();
-    //    {
-    //        let scheme = SignatureScheme::new_ed25519();
-    //        if let SignatureScheme::Ed25519(pk, sk) = &scheme {
-    //            let ptr_pk = pk.as_ptr();
-    //            let ptr_sk = sk.as_ptr();
-    //            pk_copy = pk.clone();
-    //            sk_copy = sk.clone();
-    //            msg!("Public key: vec of {} bytes", pk.len());
-    //            msg!("Public key: {:?}", pk);
-    //            msg!("Public key: ptr {:p}", ptr_pk);
-    //            msg!("Secret key: vec of {} bytes", sk.len());
-    //            msg!("Secret key: {:?}", sk);
-    //            msg!("Secret key: ptr {:p}", ptr_sk);
-    //        }
-    //    }
-    //    msg!("Keys dropped");
-    //    msg!("Clone of public key: {:?}", pk_copy);
-    //    msg!("Clone of secret key: {:?}", sk_copy);
-    //    let zpk = unsafe {
-    //        core::slice::from_raw_parts(ptr_pk, pk_copy.len())
-    //    };
-    //    let zsk = unsafe {
-    //        core::slice::from_raw_parts(ptr_sk, sk_copy.len())
-    //    };
-    //    msg!("Public key: ptr {:p} is_null = {}", ptr_pk, ptr_pk.is_null());
-    //    msg!("Secret key: ptr {:p} is_null = {}", ptr_sk, ptr_sk.is_null());
-    //    msg!("Memory for public key: {:?}", zpk);
-    //    msg!("Memory for secret key: {:?}", zsk);
-    //    Ok(())
-    //}
 }

@@ -63,6 +63,12 @@ fn main() {
         },
     }
 
+    println!("cargo:rustc-check-cfg=cfg(SABER_SCHEME, \
+        values(\"LIGHTSABER\", \"SABER\", \"FIRESABER\"))");
+
+    println!("cargo:rustc-link-lib=ssl");
+    println!("cargo:rustc-link-lib=crypto");
+
     let wrapper_path = Path::new(&dir).join("src/c/bindgen_wrapper.h");
     println!(
         "cargo:rerun-if-changed={}",

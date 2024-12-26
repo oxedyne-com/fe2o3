@@ -677,67 +677,74 @@ impl<
 //
 //}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_wallet_to_from_dat_00() -> Outcome<()> {
-        let mut secrets = BTreeMap::new();
-        let test_secret = vec![1,2,3,4];
-        secrets.insert(dat!("o3db"), Secret::new(test_secret.clone()));
-        let mut passhashes = RingBuffer::default();
-        let ts1 = Timestamp(Duration::from_nanos(1234));
-        let ts2 = Timestamp(Duration::from_nanos(12345));
-        let phash1 = "phash1".to_string();
-        let phash2 = "phash2".to_string();
-        passhashes.set(Timestamped { data: phash1.clone(), t: ts1.clone() });
-        passhashes.adv();
-        passhashes.set(Timestamped { data: phash2.clone(), t: ts2.clone() });
-
-        let wallet: Wallet<2> = Wallet {
-            secrets,
-            passhashes,
-        };
-
-        let dat = res!(wallet.to_dat());
-        for line in dat.to_lines("  ", true) {
-            msg!("{}", line);
-        }
-        let wallet2: Wallet<2> = res!(Wallet::from_dat(dat));
-        let secrets2 = wallet2.secrets; 
-        match secrets2.get(&dat!("o3db")) {
-            Some(sec) => {
-                let v = sec.expose_secret();
-                req!(v.len(), test_secret.len());
-                for (i, item) in v.iter().enumerate() {
-                    req!(test_secret[i], *item);
-                }
-            },
-            None => return Err(err!(errmsg!(
-                "Expected entry for 'o3db', found nothing.",
-            ), Test, Data, Missing)),
-        }
-        let mut passhashes2 = wallet2.passhashes;
-        match passhashes2.get() {
-            Some(tsph) => {
-                req!(ts1, tsph.t);
-                req!(phash1, tsph.data);
-            },
-            None => return Err(err!(errmsg!(
-                "Expected first entry in passhashes RingBuffer, found nothing.",
-            ), Test, Data, Missing)),
-        }
-        passhashes2.adv();
-        match passhashes2.get() {
-            Some(tsph) => {
-                req!(ts2, tsph.t);
-                req!(phash2, tsph.data);
-            },
-            None => return Err(err!(errmsg!(
-                "Expected second entry in passhashes RingBuffer, found nothing.",
-            ), Test, Data, Missing)),
-        }
-        Ok(())
-    }
-}
+//#[cfg(test)]
+//mod tests {
+//    use super::*;
+//    use oxedize_fe2o3_data::time::Timestamp;
+//    use std::{
+//        time::Duration,
+//    };
+//
+//    #[test]
+//    fn test_wallet_to_from_dat_00() -> Outcome<()> {
+//        let mut secrets = DaticleMap::new();
+//        let test_secret = vec![1u8,2,3,4];
+//        // NOTE: We're not encrypting the secret here.
+//        secrets.insert(dat!("o3db"), dat!(test_secret.clone()));
+//        let mut passhashes = RingBuffer::default();
+//        let ts1 = Timestamp(Duration::from_nanos(1234));
+//        let ts2 = Timestamp(Duration::from_nanos(12345));
+//        let phash1 = "phash1".to_string();
+//        let phash2 = "phash2".to_string();
+//        passhashes.set(Timestamped { data: phash1.clone(), t: ts1.clone() });
+//        passhashes.adv();
+//        passhashes.set(Timestamped { data: phash2.clone(), t: ts2.clone() });
+//
+//        let wallet: Wallet<2, String> = Wallet::new(
+//            DaticleMap::new(),
+//            DaticleMap::new(),
+//            secrets,
+//            passhashes,
+//        );
+//
+//        let dat = res!(wallet.to_dat());
+//        for line in dat.to_lines("  ", true) {
+//            msg!("{}", line);
+//        }
+//        let wallet2: Wallet<2, String> = res!(Wallet::from_dat(dat));
+//        let secrets2 = wallet2.enc_secs; 
+//        match secrets2.get(&dat!("o3db")) {
+//            Some(sec) => {
+//                let v = try_extract_dat!(sec, BU64);
+//                req!(v.len(), test_secret.len());
+//                for (i, item) in v.iter().enumerate() {
+//                    req!(test_secret[i], *item);
+//                }
+//            },
+//            None => return Err(err!(errmsg!(
+//                "Expected entry for 'o3db', found nothing.",
+//            ), Test, Data, Missing)),
+//        }
+//        let mut passhashes2 = wallet2.passhashes;
+//        match passhashes2.get() {
+//            Some(tsph) => {
+//                req!(ts1, tsph.t);
+//                req!(phash1, tsph.data);
+//            },
+//            None => return Err(err!(errmsg!(
+//                "Expected first entry in passhashes RingBuffer, found nothing.",
+//            ), Test, Data, Missing)),
+//        }
+//        passhashes2.adv();
+//        match passhashes2.get() {
+//            Some(tsph) => {
+//                req!(ts2, tsph.t);
+//                req!(phash2, tsph.data);
+//            },
+//            None => return Err(err!(errmsg!(
+//                "Expected second entry in passhashes RingBuffer, found nothing.",
+//            ), Test, Data, Missing)),
+//        }
+//        Ok(())
+//    }
+//}

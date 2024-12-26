@@ -1295,7 +1295,7 @@ mod test_mul {
     use poly::Poly;
     use params::{ N, Q };
     use rand_core_old::{
-        OsRng,
+        OsRng as OsRng_old,
         RngCore,
     };
     
@@ -1327,9 +1327,9 @@ mod test_mul {
         let (mut a, mut b) = ([0; N], [0; N]);
     
         for _ in 0..NTESTS {
-            OsRng.fill_bytes(&mut rndbuf);
+            OsRng_old.fill_bytes(&mut rndbuf);
             poly::uniform(&mut a, &rndbuf);
-            OsRng.fill_bytes(&mut rndbuf);
+            OsRng_old.fill_bytes(&mut rndbuf);
             poly::uniform(&mut b, &rndbuf);
     
             poly_naivemul(&mut c1, &a, &b);
@@ -1520,14 +1520,15 @@ mod test_sign {
     use std::time::Instant;
 
     use ed25519_dalek::{
-        self,
-        Signer as _,
-        Verifier as _,
+        Signer as DalekSigner,
+        SigningKey,
+        Verifier,
     };
     use rand_core_old::{
-        OsRng,
+        OsRng as OsRng_old,
         RngCore,
     };
+    use rand_core::OsRng;
     
     const BATCH_SIZE: usize = 1000;
     const MSG_SIZE: usize = 32;
@@ -1538,34 +1539,31 @@ mod test_sign {
         let mut msgs = Vec::new();
         for _ in 0..BATCH_SIZE {
             let mut msg = [0; MSG_SIZE];
-            OsRng.fill_bytes(&mut msg);
+            OsRng_old.fill_bytes(&mut msg);
             msgs.push(msg);
         }
 
         msg!("Creating Dilithium key pair...");
         let (mut pk, mut sk) = ([0; PUBLICKEYBYTES], [0; SECRETKEYBYTES]);
-        keypair(&mut OsRng, &mut pk, &mut sk);
+        keypair(&mut OsRng_old, &mut pk, &mut sk);
         let t0 = Instant::now();
         msg!("Sign and verify {} messages...", BATCH_SIZE);
         for i in 0..BATCH_SIZE {
             let sig = sign(&msgs[i], &sk);
             assert!(verify(&msgs[i], &sig, &pk));
-            //msgs[i][2] ^= 42;
-            //assert!(!verify(&msgs[i], &sig, &pk));
         }
         let dt = t0.elapsed().as_millis();
         msg!("Dilithium signatures and verifications:  {} [ms]/loop.",
             (dt as f64) / (BATCH_SIZE as f64));
 
         msg!("Creating ED25519 key pair...");
-        let keypair = ed25519_dalek::Keypair::generate(&mut OsRng);
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let verifying_key = signing_key.verifying_key();
         let t0 = Instant::now();
         msg!("Sign and verify {} messages...", BATCH_SIZE);
         for i in 0..BATCH_SIZE {
-            let sig = keypair.sign(&msgs[i]);
-            assert!(keypair.public.verify(&msgs[i], &sig).is_ok());
-            //msgs[i][2] ^= 42;
-            //assert!(keypair.public.verify(&msgs[i], &sig).is_err());
+            let sig = signing_key.sign(&msgs[i]);
+            assert!(verifying_key.verify(&msgs[i], &sig).is_ok());
         }
         let dt = t0.elapsed().as_millis();
         msg!("ED25519 signatures and verifications:  {} [ms]/loop.",
@@ -1578,7 +1576,7 @@ mod test_sign {
         let mut msgs = Vec::new();
         for _ in 0..BATCH_SIZE {
             let mut msg = [0; MSG_SIZE];
-            OsRng.fill_bytes(&mut msg);
+            OsRng_old.fill_bytes(&mut msg);
             msgs.push(msg);
         }
 
@@ -1590,8 +1588,6 @@ mod test_sign {
         for i in 0..BATCH_SIZE {
             let sig = res!(scheme.sign(&msgs[i]));
             assert!(res!(scheme.verify(&msgs[i], &sig)));
-            //msgs[i][2] ^= 42;
-            //assert!(!res!(scheme.verify(&msgs[i], &sig)));
         }
         let dt = t0.elapsed().as_millis();
         msg!("Dilithium signatures and verifications:  {} [ms]/loop.",
@@ -1604,8 +1600,6 @@ mod test_sign {
         for i in 0..BATCH_SIZE {
             let sig = res!(scheme.sign(&msgs[i]));
             assert!(res!(scheme.verify(&msgs[i], &sig)));
-            //msgs[i][2] ^= 42;
-            //assert!(!res!(scheme.verify(&msgs[i], &sig)));
         }
         let dt = t0.elapsed().as_millis();
         msg!("ED25519 signatures and verifications:  {} [ms]/loop.",

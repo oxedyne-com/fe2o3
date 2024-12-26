@@ -30,7 +30,8 @@ oxedize_fe2o3_namex				= { path = "../fe2o3_namex" }
 aes-gcm = { version = "0.10.3", features = ["std"] }
 
 console_error_panic_hook= "0.1.6"
-ed25519-dalek = "1.0.1"
+#ed25519-dalek = "1.0.1"
+ed25519-dalek = { version = "2.0.0", features = ["rand_core"] } 
 pqcrypto-dilithium = "0.4.5"
 pqcrypto-traits = "0.3.4"
 rand_core = { version = "0.6.3", features = ["std"] }
@@ -51,7 +52,8 @@ rand_core_old = { package = "rand_core", version = "0.5.0", features = ["std"] }
 rand_old = { package = "rand", version = "0.7.0" }
 
 [dev-dependencies]
-oxedize_fe2o3_text = { path = "../fe2o3_text" }
+oxedize_fe2o3_data 				= { path = "../fe2o3_data" }
+oxedize_fe2o3_text 				= { path = "../fe2o3_text" }
 libc = "0.2"
 # Dilithium
 hex = "0.3"

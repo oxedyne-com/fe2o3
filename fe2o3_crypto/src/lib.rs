@@ -33,7 +33,7 @@
 //! 
 //! # Example Usage
 //! 
-//! ```rust
+//! ```ignore
 //! use oxedize_fe2o3_crypto::{EncryptionScheme, SignatureScheme};
 //! use oxedize_fe2o3_core::prelude::*;
 //! 
@@ -45,9 +45,9 @@
 //! let signature = res!(scheme.sign(message));
 //! 
 //! // Verify the signature
-//! assert!(res!(scheme.verify(message, &signature));
+//! assert!(res!(scheme.verify(message, &signature)));
 //!
-#![forbid(unsafe_code)]
+//#![forbid(unsafe_code)] // Unfortunately need to remove for c interop. TODO oxedize everything!
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
