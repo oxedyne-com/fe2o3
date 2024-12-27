@@ -1,3 +1,10 @@
 #!/bin/bash
 
-git add . && git add -u && git commit -a && git push -u origin main
+MSG_FILE=".commit_msg.txt"
+
+git add . && \
+git add -u && \
+git commit -a -F "$MSG_FILE" && \
+git push -u origin main && \
+rm $MSG_FILE && \
+touch $MSG_FILE

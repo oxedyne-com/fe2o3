@@ -75,12 +75,6 @@ impl AppShellContext {
     )
         -> Outcome<Evaluation>
     {
-        if self.stat.first {
-            return Ok(Evaluation::Error(fmt!(
-                "You should update values in {} before running the server.",
-                app_const::CONFIG_NAME,
-            )));
-        }
         let root_path = Path::new(&self.app_cfg.app_root)
             .normalise() // Now a NormPathBuf.
             .absolute();
@@ -101,6 +95,13 @@ impl AppShellContext {
                 info!("Running in development mode with self-signed certificates.");
                 res!(dev_cfg.validate(&root_path));
             }
+        }
+
+        if self.stat.first && !dev_mode {
+            return Ok(Evaluation::Error(fmt!(
+                "You should update values in {} before running the server in production mode.",
+                app_const::CONFIG_NAME,
+            )));
         }
 
         // ┌───────────────────────┐

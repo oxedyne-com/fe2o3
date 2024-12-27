@@ -1,0 +1,4 @@
+- fe2o3:
+ - Added .commit_msg.txt to commit script
+- fe2o3_steel:
+ - Only show "you should update config.jdat..." msg for first time server cmd only if not in dev mode
