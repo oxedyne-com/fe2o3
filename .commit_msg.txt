@@ -1,8 +1,1 @@
-Mainly refactor of err!
-
-README.md
-- Added logo.
-fe2o3_core:
-- Added line and file numbering directly into err! so err!(errmsg!(...)) now should be just err!(..).  Refactored library.  Landed on preferred formatting update of err! statements, a bit inconsistently applied at the moment, see fe2o3_o3db where it's generally implemented.
-fe2o3_steel:
-- "localhost" -> "localhost." for default domain name in server cfg.
+Added Oxedize logo to README.

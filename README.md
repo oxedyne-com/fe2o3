@@ -1,4 +1,8 @@
 <p align="center">
+    <img src="img/oxedize_display_white_opt.svg" width="150"/>
+</p>
+
+<p align="center">
     <img src="img/fe2o3_display_white_opt.svg" width="200"/>
 </p>
 
