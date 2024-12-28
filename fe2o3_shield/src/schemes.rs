@@ -223,7 +223,7 @@ impl<
     //pub fn clone_syntax(&self) -> Outcome<SyntaxRef> {
     //    match &self.syntax {
     //        DefAlt::Given(inner) | DefAlt::Default(inner) => Ok(inner.clone()),
-    //        DefAlt::None => Err(err!(errmsg!(
+    //        DefAlt::None => Err(err!(
     //            "The wire syntax protocol should never be DefAlt::None.",
     //        ), Bug, Missing, Data)),
     //    }

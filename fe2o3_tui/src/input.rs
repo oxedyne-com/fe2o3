@@ -72,10 +72,10 @@ impl UserInput {
             }
             count += 1;
             if count > max_attempts {
-                return Err(err!(errmsg!(
+                return Err(err!(
                     "Number of failed attempts to repeat passphrase exceeded limit of {}.",
-                    max_attempts,
-                ), Input, Invalid, Excessive, String));
+                    max_attempts;
+                Input, Invalid, Excessive, String));
             }
         };
         Ok(pass)

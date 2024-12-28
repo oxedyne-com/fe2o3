@@ -214,7 +214,9 @@ impl<
         let src_addr_str = fmt!("{:?}", src_addr);
         match self.get_process_result::<MIDL, UIDL, MID, UID>(buf, n, src_addr, syntax) {//buf) {
             Err(e) => {
-                let e2 = err!(e, fmt!("While processing incoming packet from {}.", src_addr_str));
+                let e2 = err!(e,
+                    "While processing incoming packet from {}.", src_addr_str;
+                    IO, Network);
                 error!(e2.clone());
                 Err(e2)
             },
@@ -319,10 +321,10 @@ impl<
                             alog.data.my_zbits
                         }
                     } else {
-                        return Err(err!(errmsg!(
+                        return Err(err!(
                             "No AddressLog entry for {:?}, which should have been created \
-                            by the AddressGuard::drop_packet call.", src_addr,
-                        ), Bug, Missing));
+                            by the AddressGuard::drop_packet call.", src_addr;
+                            Bug, Missing));
                     }
                 };
                 let code = {
@@ -330,10 +332,10 @@ impl<
                     if let Some(ulog) = unlocked_umap.get(&ukey) {
                         ulog.data.code.clone().unwrap_or([0; C])
                     } else {
-                        return Err(err!(errmsg!(
+                        return Err(err!(
                             "No UserLog entry for {:?}, which should have been created \
-                            by the UserGuard::drop_packet call.", meta.uid,
-                        ), Bug, Missing));
+                            by the UserGuard::drop_packet call.", meta.uid;
+                            Bug, Missing));
                     }
                 };
                 let pristine = res!(PowPristine::<
@@ -367,11 +369,11 @@ impl<
                     match &ulog.data.sigtpk_opt {
                         Some(sigtpk) => {
                             if sigtpk.sts.id != signer_nid {
-                                return Err(err!(errmsg!(
+                                return Err(err!(
                                     "Local scheme id, {:?}, for public signing key of user, {:02x?}, does not \
                                     match the nid for the current packet signing scheme, {:?}.",
-                                    sigtpk.sts.id, meta.uid, signer_nid,
-                                )));
+                                    sigtpk.sts.id, meta.uid, signer_nid;
+                                    Name, Mismatch));
                             }
                             // Update the signer with the public key I have for you.
                             *signer = res!(signer.clone_with_keys(Some(&sigtpk.key[..]), None));
@@ -379,10 +381,10 @@ impl<
                         None => (),
                     }
                 } else {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "No UserLog entry for {:02x?}, which should have been created \
-                        by the UserGuard::drop_packet call.", meta.uid,
-                    ), Bug, Missing));
+                        by the UserGuard::drop_packet call.", meta.uid;
+                        Bug, Missing));
                 }
             },
             _ => (),
@@ -398,9 +400,9 @@ impl<
                     artefact,
                 ));
             },
-            None => return Err(err!(errmsg!(
-                "Proof of work validation missing artefact.",
-            ), Bug, Configuration, Missing)),
+            None => return Err(err!(
+                "Proof of work validation missing artefact.";
+                Bug, Configuration, Missing)),
         }
         ////////
         
@@ -480,10 +482,10 @@ impl<
                                 None => (), // TODO FINISHME I can't remember what is supposed to happen here!!!
                             }
                         } else {
-                            return Err(err!(errmsg!(
+                            return Err(err!(
                                 "No UserLog entry for {:?}, which should have been created \
-                                by the UserGuard::drop_packet call.", meta.uid,
-                            ), Bug, Missing));
+                                by the UserGuard::drop_packet call.", meta.uid;
+                                Bug, Missing));
                         }
                     },
                     None => (), // The packet signature was valid, using the public key I possess.
@@ -588,9 +590,9 @@ impl<
                     //    //        &src_addr,
                     //    //    )
                     //    //},
-                        _ => return Err(err!(errmsg!(
-                            "Unrecognised message command '{}'.", cmd_name,
-                        ), Bug, Unimplemented)),
+                        _ => return Err(err!(
+                            "Unrecognised message command '{}'.", cmd_name;
+                            Bug, Unimplemented)),
                     }
                 }
             }, // Read payload.
@@ -702,15 +704,15 @@ impl<
 
     fn go(&mut self) {
         if !self.inited {
-            error!(err!(errmsg!(
-                "Attempt to start {} before running init().", self.label(),
-            ), Init, Missing));
+            error!(err!(
+                "Attempt to start {} before running init().", self.label();
+                Init, Missing));
         } else {
             debug!("HELLO");
             match tokio::runtime::Runtime::new() {
-                Err(e) => error!(err!(e, errmsg!(
-                    "Failed to start Tokio runtime.",
-                ), Init)),
+                Err(e) => error!(err!(e,
+                    "Failed to start Tokio runtime.";
+                    Init)),
                 Ok(rt) => rt.block_on(async {
                     self.now_listening();
                     loop {
@@ -790,7 +792,7 @@ impl<
         match self.sock.recv_from(&mut buf) { // Receive udp packet, non-blocking.
             Err(e) => {
                 //match self.timer.write() {
-                //    Err(e) => self.error(err!(errmsg!(
+                //    Err(e) => self.error(err!(
                 //        "While locking timer for writing: {}.", e), Poisoned)),
                 //    Ok(mut unlocked_timer) => { unlocked_timer.update(); },
                 //}
@@ -810,8 +812,8 @@ impl<
                 ));
                 match handle.await {
                     Ok(result) => self.result(&result),
-                    Err(e) => self.error(
-                        err!(e, errmsg!("While waiting for request processor to finish"))),
+                    Err(e) => self.error(err!(e,
+                        "While waiting for request processor to finish"; Thread)),
                 }
             },
         } // Receive udp packet.

@@ -113,9 +113,8 @@ impl Certificate {
         let mut cert_reader = BufReader::new(cert_file);
         let certs: Result<Vec<CertificateDer>, _> =
             rustls_pemfile::certs(&mut cert_reader)
-            .map(|cert_result| cert_result.map_err(|e| err!(e, errmsg!(
-                "Error reading cert at {:?}.", cert_path,
-            ), File)))
+            .map(|cert_result| cert_result.map_err(|e| err!(e,
+                "Error reading cert at {:?}.", cert_path; File)))
             .collect();
         let certs = res!(certs);
     
@@ -124,15 +123,14 @@ impl Certificate {
         let mut key_reader = BufReader::new(key_file);
         let keys: Result<Vec<PrivatePkcs8KeyDer>, _> =
             rustls_pemfile::pkcs8_private_keys(&mut key_reader)
-            .map(|key_result| key_result.map_err(|e| err!(e, errmsg!(
-                "Error reading private key at {:?}.", key_path,
-            ), File)))
+            .map(|key_result| key_result.map_err(|e| err!(e,
+                "Error reading private key at {:?}.", key_path; File)))
             .collect();
         let keys = res!(keys);
     
         let private_key: PrivateKeyDer<'_> = match keys.into_iter().next() {
             Some(key) => key.into(),
-            None => return Err(err!(errmsg!("No keys found in key file."), Missing, Input, File)),
+            None => return Err(err!("No keys found in key file."; Missing, Input, File)),
         };
     
         let server_cfg = res!(rustls::server::ServerConfig::builder()
@@ -195,9 +193,9 @@ impl Certificate {
         // Create directories if they don't exist.
         let dir_path = match cert_path.parent() {
             Some(p) => p,
-            None => return Err(err!(errmsg!(
-                "Could not get parent directory from {:?}.", cert_path,
-            ), Path)),
+            None => return Err(err!(
+                "Could not get parent directory from {:?}.", cert_path;
+                Path)),
         };
 
         res!(create_dir_all(dir_path));
@@ -292,10 +290,9 @@ impl Certificate {
         let output = res!(cmd.output());
     
         if !output.status.success() {
-            return Err(err!(errmsg!(
-                "Certificate creation failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ), IO, File));
+            return Err(err!(
+                "Certificate creation failed: {}", String::from_utf8_lossy(&output.stderr);
+                IO, File));
         }
     
         // Copy certs from /etc/letsencrypt/live/{domain}/ to tls/
@@ -359,10 +356,9 @@ impl Certificate {
             .output());
 
         if !output.status.success() {
-            return Err(err!(errmsg!(
-                "Certificate creation failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ), IO, File));
+            return Err(err!(
+                "Certificate creation failed: {}", String::from_utf8_lossy(&output.stderr);
+                IO, File));
         }
 
         // Convert PFX to PEM format
@@ -379,10 +375,9 @@ impl Certificate {
             .output());
 
         if !output.status.success() {
-            return Err(err!(errmsg!(
-                "PFX to PEM conversion failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ), IO, File));
+            return Err(err!(
+                "PFX to PEM conversion failed: {}", String::from_utf8_lossy(&output.stderr);
+                IO, File));
         }
 
         // Split the combined PEM into separate cert and key files
@@ -403,10 +398,9 @@ impl Certificate {
             .output());
 
         if !output.status.success() {
-            return Err(err!(errmsg!(
-                "Certificate splitting failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ), IO, File));
+            return Err(err!(
+                "Certificate splitting failed: {}", String::from_utf8_lossy(&output.stderr);
+                IO, File));
         }
 
         // Clean up intermediate files
@@ -418,10 +412,9 @@ impl Certificate {
         let key_path = tls_dir.join("privkey.pem");
 
         if !cert_path.exists() || !key_path.exists() {
-            return Err(err!(errmsg!(
-                "Certificate files were not created properly at {:?}",
-                tls_dir
-            ), IO, File, Missing));
+            return Err(err!(
+                "Certificate files were not created properly at {:?}", tls_dir;
+                IO, File, Missing));
         }
 
         Ok(())
@@ -451,10 +444,9 @@ impl Certificate {
         let output = res!(cmd.output());
     
         if !output.status.success() {
-            return Err(err!(errmsg!(
-                "Certificate creation failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ), IO, File));
+            return Err(err!(
+                "Certificate creation failed: {}", String::from_utf8_lossy(&output.stderr);
+                IO, File));
         }
     
         // Copy certs from /etc/letsencrypt/live/{domain}/ to tls/
@@ -481,9 +473,9 @@ impl Certificate {
                 .map_or(false, |output| output.status.success());
     
             if !has_certbot {
-                return Err(err!(errmsg!(
-                    "Certbot not found. Please install via: sudo apt-get install certbot",
-                ), System, Missing));
+                return Err(err!(
+                    "Certbot not found. Please install via: sudo apt-get install certbot";
+                    System, Missing));
             }
         }
     
@@ -491,9 +483,9 @@ impl Certificate {
         {
             // Check for admin rights
             if !is_elevated::is_elevated() {
-                return Err(err!(errmsg!(
-                    "Administrator privileges required. Please run as administrator.",
-                ), System, Missing));
+                return Err(err!(
+                    "Administrator privileges required. Please run as administrator.";
+                    System, Missing));
             }
         
             // Check for win-acme
@@ -503,9 +495,9 @@ impl Certificate {
                 .map_or(false, |output| output.status.success());
         
             if !has_wacs {
-                return Err(err!(errmsg!(
-                    "win-acme (WACS) not found. Please install from https://www.win-acme.com",
-                ), System, Missing));
+                return Err(err!(
+                    "win-acme (WACS) not found. Please install from https://www.win-acme.com";
+                    System, Missing));
             }
         
             // Check for OpenSSL
@@ -515,9 +507,9 @@ impl Certificate {
                 .map_or(false, |output| output.status.success());
         
             if !has_openssl {
-                return Err(err!(errmsg!(
-                    "OpenSSL not found. Please install OpenSSL and add it to your PATH.",
-                ), System, Missing));
+                return Err(err!(
+                    "OpenSSL not found. Please install OpenSSL and add it to your PATH.";
+                    System, Missing));
             }
         }
     
@@ -530,9 +522,9 @@ impl Certificate {
                 .map_or(false, |output| output.status.success());
     
             if !has_brew {
-                return Err(err!(errmsg!(
-                    "Homebrew not found. Please install from https://brew.sh",
-                ), System, Missing));
+                return Err(err!(
+                    "Homebrew not found. Please install from https://brew.sh";
+                    System, Missing));
             }
         }
     

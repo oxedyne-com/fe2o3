@@ -30,10 +30,10 @@ impl TryFrom<u8> for DifficultyProfile {
     fn try_from(n: u8) -> std::result::Result<Self, Self::Error> {
         match n {
             0 => Ok(Self::Linear),
-            _ => Err(err!(errmsg!(
+            _ => Err(err!(
                 "'{}' not recognised as a valid server_rps_zbits_profile configuration value, \
-                use a value in the range 0..0.", n,
-            ), Invalid, Input)),
+                use a value in the range 0..0.", n;
+                Invalid, Input)),
         }
     }
 }
@@ -110,10 +110,10 @@ impl<
     /// Pad IPv4 addresses out to the length of an IPv6 address by repetition.  Append the code.
     fn prefix(&self, byts: &mut [u8]) -> Outcome<usize> {
         if byts.len() < Self::PREFIX_BYTE_LEN {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "Cannot fit {} address bytes into given slice of length {}.",
-                Self::PREFIX_BYTE_LEN, byts.len(), 
-            ), Bug, Input, TooSmall));
+                Self::PREFIX_BYTE_LEN, byts.len(); 
+                Bug, Input, TooSmall));
         }
         let mut i: usize = 0;
         let addr = self.src_addr;
@@ -143,10 +143,10 @@ impl<
     /// Check that the timestamp in the artefact is less than the given time horizon in seconds.
     fn timestamp_valid(&self, artefact: &[u8]) -> Outcome<bool> {
         if artefact.len() < Self::TIMESTAMP_LEN {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "Artefact slice length {} must be at least a timestamp length, {}.",
-                artefact.len(), Self::TIMESTAMP_LEN,
-            ), Input, TooSmall));
+                artefact.len(), Self::TIMESTAMP_LEN;
+                Input, TooSmall));
         }
         let t0 = u64::from_be_bytes(
             res!(<[u8; 8]>::try_from(&artefact[..8]), Decode, Bytes)
@@ -179,10 +179,10 @@ impl<
         -> Outcome<Self>
     {
         if P0 >= P1 {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "The pristine prefix length {} must be less than the pristine length, {}.",
-                P0, P1,
-            ), Input, Mismatch));
+                P0, P1;
+                Input, Mismatch));
         }
         // TODO Other checks?
         Ok(Self {

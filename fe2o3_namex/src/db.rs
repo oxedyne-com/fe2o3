@@ -219,9 +219,9 @@ impl<
             "alts"  => UsrKindId::new(65, Some("alts"), None),
             "lnks"  => UsrKindId::new(70, Some("lnks"), None),
             "tags"  => UsrKindId::new(80, Some("tags"), None),
-            _ => return Err(err!(errmsg!(
-                "Unrecognised usr key '{}'.", label,
-            ), Input, Invalid, Unknown, Bug)),
+            _ => return Err(err!(
+                "Unrecognised usr key '{}'.", label;
+            Input, Invalid, Unknown, Bug)),
         })
     }
 
@@ -249,18 +249,18 @@ impl<
                         }
                         entity.nams = vecstr;
                     },
-                    _ => return Err(err!(errmsg!(
-                        "The key {:?} is missing required attribute 'nams'.", kdat,
-                    ), Input, Missing)),
+                    _ => return Err(err!(
+                        "The key {:?} is missing required attribute 'nams'.", kdat;
+                    Input, Missing)),
                 }
                 match res!(vdat.map_get_type(
                     &res!(Dat::try_from((res!(Self::usr_key("lang")), None))),
                     &[&Kind::Str],
                 )) {
                     Some(Dat::Str(s)) => entity.lang = s.clone(),
-                    _ => return Err(err!(errmsg!(
-                        "The key {:?} is missing required attribute 'lang'.", kdat,
-                    ), Input, Missing)),
+                    _ => return Err(err!(
+                        "The key {:?} is missing required attribute 'lang'.", kdat;
+                    Input, Missing)),
                 }
                 if let Some(Dat::Str(s)) = res!(vdat.map_get_type(
                     &res!(Dat::try_from((res!(Self::usr_key("desc")), None))),
@@ -372,9 +372,9 @@ impl<
                 map: map2,
             })
         } else {
-            Err(err!(errmsg!(
-                "Require a Daticle::Map, found a {}.", dat.kind(),
-            ), Invalid, Input))
+            Err(err!(
+                "Require a Daticle::Map, found a {}.", dat.kind();
+            Invalid, Input))
         }
     }
 

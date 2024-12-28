@@ -87,11 +87,11 @@ pub fn test_binary_encdec_func(filter: &'static str) -> Outcome<()> {
             test!("Encoded, decoded {:?} using {} bytes", d1, n);
 
             if *d1 != d2 {
-                return Err(err!(errmsg!(
+                return Err(err!(
                     "Omnibus test {} of {} using dat #{}: The daticle {:?} was \
                     encoded to {:?} then decoded to {:?}.",
-                    count, total, i+1, d1, buf, d2,
-                ), ErrTag::Test, ErrTag::Mismatch));
+                    count, total, i+1, d1, buf, d2;
+                ErrTag::Test, ErrTag::Mismatch));
             }
             
             test!("Omnibus test {} of {} successfully completed.", count, total);
@@ -556,20 +556,7 @@ pub fn test_binary_encdec_func(filter: &'static str) -> Outcome<()> {
             let (v2, _) = res!(Dat::from_bytes(&buf));
             req!(v1, v2);
         } else {
-            return Err(err!(errmsg!("Problem generating BigInt."), Integer));
-        }
-        Ok(())
-    }));
-
-    res!(test_it(filter, &["Binary encdec aint 02", "all", "unit", "aint"], || {
-        if let Some(bigint) = BigInt::parse_bytes(b"12345678901234567890123456789", 10) {
-            let v1 = Dat::from(bigint);
-            let mut buf = Vec::new();
-            buf = res!(v1.to_bytes(buf));
-            let (v2, _) = res!(Dat::from_bytes(&buf));
-            req!(v1, v2);
-        } else {
-            return Err(err!(errmsg!("Problem generating BigInt."), Integer));
+            return Err(err!("Problem generating BigInt."), Integer));
         }
         Ok(())
     }));

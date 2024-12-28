@@ -89,9 +89,9 @@ impl<
         match &self.0 {
             DefAlt::Default(inner) => inner.name_id(),
             DefAlt::Given(inner) => inner.name_id(),
-            DefAlt::None => Err(err!(errmsg!(
-                "No Namex id can be specified for DefAlt::None.",
-            ), Missing, Bug)),
+            DefAlt::None => Err(err!(
+                "No Namex id can be specified for DefAlt::None.";
+            Missing, Bug)),
         }
     }
 
@@ -138,9 +138,9 @@ impl<
         match &self.0 {
             DefAlt::Default(inner) => inner.encrypt(data),
             DefAlt::Given(inner) => inner.encrypt(data),
-            DefAlt::None => Err(err!(errmsg!(
-                "Can't encrypt, encrypter not specified.",
-            ), Configuration, Missing)),
+            DefAlt::None => Err(err!(
+                "Can't encrypt, encrypter not specified.";
+            Configuration, Missing)),
         }
     }
 
@@ -148,9 +148,9 @@ impl<
         match &self.0 {
             DefAlt::Default(inner) => inner.decrypt(data),
             DefAlt::Given(inner) => inner.decrypt(data),
-            DefAlt::None => Err(err!(errmsg!(
-                "Can't decrypt, encrypter not specified.",
-            ), Configuration, Missing)),
+            DefAlt::None => Err(err!(
+                "Can't decrypt, encrypter not specified.";
+            Configuration, Missing)),
         }
     }
 
@@ -187,9 +187,9 @@ impl<
         match &self.0 {
             DefAlt::Default(inner) => inner.get_public_key(),
             DefAlt::Given(inner) => inner.get_public_key(),
-            DefAlt::None => Err(err!(errmsg!(
-                "Can't get public key, signature not specified.",
-            ), Configuration, Missing)),
+            DefAlt::None => Err(err!(
+                "Can't get public key, signature not specified.";
+            Configuration, Missing)),
         }
     }
 
@@ -197,9 +197,9 @@ impl<
         match &self.0 {
             DefAlt::Default(inner) => inner.get_secret_key(),
             DefAlt::Given(inner) => inner.get_secret_key(),
-            DefAlt::None => Err(err!(errmsg!(
-                "Can't get secret key, signature not specified.",
-            ), Configuration, Missing)),
+            DefAlt::None => Err(err!(
+                "Can't get secret key, signature not specified.";
+            Configuration, Missing)),
         }
     }
 
@@ -211,9 +211,9 @@ impl<
             DefAlt::Given(inner) => Ok(Self(
                 DefAlt::Given(res!(inner.set_public_key(pk))),
             )),
-            DefAlt::None => Err(err!(errmsg!(
-                "Can't set public key, signature not specified.",
-            ), Configuration, Missing)),
+            DefAlt::None => Err(err!(
+                "Can't set public key, signature not specified.";
+            Configuration, Missing)),
         }
     }
 
@@ -225,9 +225,9 @@ impl<
             DefAlt::Given(inner) => Ok(Self(
                 DefAlt::Given(res!(inner.set_secret_key(sk))),
             )),
-            DefAlt::None => Err(err!(errmsg!(
-                "Can't set secret key, signature not specified.",
-            ), Configuration, Missing)),
+            DefAlt::None => Err(err!(
+                "Can't set secret key, signature not specified.";
+            Configuration, Missing)),
         }
     }
 }

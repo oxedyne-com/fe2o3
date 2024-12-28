@@ -59,20 +59,20 @@ impl<
         // INTERNAL
         match self.chan_in().recv_timeout(constant::SERVER_INT_CHANNEL_CHECK_INTERVAL) {
             Recv::Empty => (),
-            Recv::Result(Err(e)) => self.err_cannot_receive(err!(e, errmsg!(
-                "{}: Waiting for message on internal channel.", self.ozid(),
-            ), Channel, Read)),
+            Recv::Result(Err(e)) => self.err_cannot_receive(err!(e,
+                "{}: Waiting for message on internal channel.", self.ozid();
+                Channel, Read)),
             Recv::Result(Ok(msg)) => match msg {
                 OzoneMsg::Get { key, schms2, resp } => {
                     match self.api().get_wait(&key, schms2.as_ref()) {
-                        Err(e) => self.error(err!(e, errmsg!(
-                            "{}: While trying to get value for key {:?}", self.ozid(), key,
-                        ), Data)),
+                        Err(e) => self.error(err!(e,
+                            "{}: While trying to get value for key {:?}", self.ozid(), key;
+                            Data, Read)),
                         Ok(result) => match resp.send(OzoneMsg::GetResult(result)) {
-                            Err(e) => self.err_cannot_send(err!(e, errmsg!(
+                            Err(e) => self.err_cannot_send(err!(e,
                                 "{}: While sending an OzoneMsg::GetResult back via a responder.",
-                                self.ozid(),
-                            ), Data, Channel)),
+                                self.ozid();
+                                Data, Channel)),
                             Ok(()) => (),
                         },
                     }
@@ -86,9 +86,9 @@ impl<
                         schms2.as_ref(),
                         resp,
                     ) {
-                        Err(e) => self.error(err!(e, errmsg!(
-                            "{}: While trying to put value.", self.ozid(),
-                        ), Data)),
+                        Err(e) => self.error(err!(e,
+                            "{}: While trying to put value.", self.ozid();
+                            Data, Write)),
                         Ok(_nchunks) => (),
                     }
                 },
@@ -103,7 +103,7 @@ impl<
         //match self.sock.recv_from(&mut self.buf) { // Receive udp packet, non-blocking.
         //    Err(e) => {
         //        match self.timer.write() {
-        //            Err(e) => self.error(err!(errmsg!(
+        //            Err(e) => self.error(err!(
         //                "While locking timer for writing: {}.", e), ErrTag::Poisoned)),
         //            Ok(mut unlocked_timer) => { unlocked_timer.update(); },
         //        }

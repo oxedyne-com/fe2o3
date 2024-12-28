@@ -200,9 +200,9 @@ impl AppShellContext {
                 rt.spawn(async move {
                     debug!("Starting dev refresh file watcher.");
                     if let Err(e) = manager_clone.watch() {
-                        error!(err!(e, errmsg!(
-                            "Failed to start development file watcher.",
-                        )));
+                        error!(err!(e,
+                            "Failed to start development file watcher.";
+                            Init));
                     }
                 });
                 Some(refresh_manager)

@@ -191,9 +191,9 @@ impl<
                     );
                     cfg
                 }
-                None => return Err(err!(errmsg!(
-                    "You must supply an OzoneConfig.",
-                ), Input, Missing)),
+                None => return Err(err!(
+                    "You must supply an OzoneConfig.";
+                    Input, Missing)),
             }
         };
 
@@ -265,10 +265,10 @@ impl<
                         self.api.cfg = cfg;
                     },
                     _ => {
-                        return Err(err!(errmsg!(
+                        return Err(err!(
                             "{}: Unrecognised channel update message: {:?}.",
-                            self.ozid(), msg,
-                        ), Invalid, Input, Channel));
+                            self.ozid(), msg;
+                            Invalid, Input, Channel));
                     },
                 }
             }
@@ -376,19 +376,19 @@ impl<
         if let Err(e) = self.chans().sup().send(
             OzoneMsg::Shutdown(self_id.clone(), resp.clone())
         ) {
-            return Err(err!(e, errmsg!(
-                "{}: Cannot send shutdown request to supervisor.", self_id,
-            ), Channel, Write));
+            return Err(err!(e,
+                "{}: Cannot send shutdown request to supervisor.", self_id;
+                Channel, Write));
         }
         warn!("Shutdown: Waiting for response from supervisor...");
         match res!(resp.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
-            OzoneMsg::Error(e) => return Err(err!(e, errmsg!(
-                "{}: The supervisor had a problem during shutdown.", self_id,
-            ))),
+            OzoneMsg::Error(e) => return Err(err!(e,
+                "{}: The supervisor had a problem during shutdown.", self_id;
+                Thread)),
             OzoneMsg::Ok => (),
-            msg => return Err(err!(errmsg!(
-                "{}: Unexpected response from supervisor during shutdown: {:?}", self_id, msg,
-            ))),
+            msg => return Err(err!(
+                "{}: Unexpected response from supervisor during shutdown: {:?}", self_id, msg;
+                Channel, Unexpected)),
         }
         warn!("Shutdown: Succesfully completed by supervisor, waiting for final \
             verification of termination of all threads...");

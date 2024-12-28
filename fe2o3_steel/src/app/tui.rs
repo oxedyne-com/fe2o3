@@ -88,14 +88,14 @@ pub fn run() -> Outcome<()> {
 
     let mut app_status = AppStatus::default();
     let cwd = res!(std::env::current_dir());
-    let cwd_str = res!(cwd.to_str().ok_or(err!(errmsg!(
-        "Converting the current working directory path '{:?}' to a string.", cwd,
-    ), Conversion, String)));
+    let cwd_str = res!(cwd.to_str().ok_or(err!(
+        "Converting the current working directory path '{:?}' to a string.", cwd;
+        Conversion, String)));
     let err_str = fmt!("Failed to obtain the directory name from the current working path '{:?}'.",
         cwd);
     let this_dir = res!(
-        res!(cwd.file_name().ok_or(err!(errmsg!("{}", &err_str), Conversion, String)))
-        .to_str().ok_or(err!(errmsg!("{}", &err_str), Conversion, String))
+        res!(cwd.file_name().ok_or(err!("{}", &err_str; Conversion, String)))
+        .to_str().ok_or(err!("{}", &err_str; Conversion, String))
     );
 
     // ┌───────────────────────────────────────────────────────────────────────────────────────────┐
@@ -198,9 +198,9 @@ pub fn run() -> Outcome<()> {
         let wallet = res!(Wallet::<{PH}, Dat>::load(wallet_path, Some(DecoderConfig::<(), ()>::default())));
         let kdf_map_dat = match wallet.kdf_cfgs().get(&dat!("default")) {
             Some(map_dat) => map_dat,
-            None => return Err(err!(errmsg!(
-                "The wallet does not contain a 'default' KDF entry.",
-            ), Data, Configuration, Missing)),
+            None => return Err(err!(
+                "The wallet does not contain a 'default' KDF entry.";
+                Data, Configuration, Missing)),
         };
         let db_default_kdf_name = try_extract_dat!(
             res!(kdf_map_dat.map_get_must(&dat!("kdf_name"))),
@@ -219,10 +219,10 @@ pub fn run() -> Outcome<()> {
                 res!(app_kdf.decode_from_string(kdf_hash));
                 app_kdf
             }
-            None => return Err(err!(errmsg!(
+            None => return Err(err!(
                 "The current passhash is None in {}.",
-                constant::WALLET_NAME,
-            ), Data, Configuration, Missing)),
+                constant::WALLET_NAME;
+                Data, Configuration, Missing)),
         };
         let pass = res!(UserInput::ask_for_secret(None));
         let pass = pass.expose_secret().as_bytes();
@@ -297,9 +297,9 @@ pub fn run() -> Outcome<()> {
                 println!("Thank you, {:?} created.", wallet_path);
                 (wallet, db_default_enc_key)
             },
-            _ => return Err(err!(errmsg!(
-                "Invalid response, goodbye!",
-            ), Invalid, Input)),
+            _ => return Err(err!(
+                "Invalid response, goodbye!";
+                Invalid, Input)),
         }
     };
 
@@ -318,9 +318,7 @@ pub fn run() -> Outcome<()> {
                 warn!("{}", s);
             }
         }
-        Err(e) => return Err(err!(e, errmsg!(
-            "While setting up dev environment.",
-        ), Init)),
+        Err(e) => return Err(err!(e, "While setting up dev environment."; Init)),
     }
 
     let invocation_cmds: Vec<String> = std::env::args().skip(1).collect();

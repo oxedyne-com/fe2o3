@@ -17,13 +17,7 @@ impl MboxEmailIterator {
         let file = match tokio::fs::File::open(file_path).await {
             Ok(file) => file,
             Err(e) => {
-                return Err(err!(
-                    e,
-                    errmsg!("While opening mbox file.",),
-                    IO,
-                    File,
-                    Read
-                ))
+                return Err(err!(e, "While opening mbox file."; IO, File, Read));
             }
         };
         let reader = BufReader::new(file);

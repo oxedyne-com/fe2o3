@@ -135,9 +135,9 @@ impl<M: 'static + Debug + Send + Sync> Simplex<M> {
     pub fn try_recv(&self) -> Recv<M> {
         match self.rx().try_recv() {
             Err(TryRecvError::Empty) => Recv::Empty,
-            Err(e) => Recv::Result(Err(err!(e, errmsg!(
-                "While trying to read channel without waiting.",
-            ), Channel, Read))),
+            Err(e) => Recv::Result(Err(err!(e,
+                "While trying to read channel without waiting.";
+            Channel, Read))),
             Ok(msg) => Recv::Result(Ok(msg)),
         }
     }
@@ -145,9 +145,9 @@ impl<M: 'static + Debug + Send + Sync> Simplex<M> {
     pub fn recv_timeout(&self, sleep: Duration) -> Recv<M> {
         match self.rx().recv_timeout(sleep) {
             Err(RecvTimeoutError::Timeout) => Recv::Empty,
-            Err(e) => Recv::Result(Err(err!(e, errmsg!(
-                "While reading channel with a timeout of {:?}.", sleep,
-            ), Channel, Read))),
+            Err(e) => Recv::Result(Err(err!(e,
+                "While reading channel with a timeout of {:?}.", sleep;
+            Channel, Read))),
             Ok(msg) => Recv::Result(Ok(msg)),
         }
     }

@@ -121,7 +121,7 @@ impl HttpMessage {
                 *old_status = status;
                 Ok(())
             },
-            _ => Err(err!(errmsg!("HTTP message is not a response."), Invalid, Mismatch)),
+            _ => Err(err!("HTTP message is not a response."; Invalid, Mismatch)),
         }
     }
 
@@ -131,7 +131,7 @@ impl HttpMessage {
                 *status = res!(HttpStatus::from_str(code));
                 Ok(())
             },
-            _ => Err(err!(errmsg!("HTTP message is not a response."), Invalid, Mismatch)),
+            _ => Err(err!("HTTP message is not a response."; Invalid, Mismatch)),
         }
     }
 

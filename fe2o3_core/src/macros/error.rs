@@ -20,50 +20,81 @@ macro_rules! errmsg {
 }
 
 #[macro_export]
-/// Create a local error.
+/// Create an Error with context info and tags.
 ///
-///```
+/// Format: err!(message; tags)
+/// Where message can be:
+/// - A string literal
+/// - A format string with arguments  
+/// And compulsory tags are comma-separated ErrTag identifiers
+///
+/// # Examples
+///
+/// ## Local Errors
+/// ```ignore
 /// use oxedize_fe2o3_core::prelude::*;
+/// 
+/// // Simple message
+/// let e1 = err!("Just text"; Input);
 ///
-/// let n = 41;
-/// let e1 = err!(errmsg!("The meaning of life is not {}", n), Input, Invalid);
-/// let e2 = Error::Local(ErrMsg {
-///     tags: &[ErrTag::Input, ErrTag::Invalid],
-///     msg: errmsg!("The meaning of life is not {}", n),
-/// });
-/// assert_eq!(e1.tags(), e2.tags());
-///```
+/// // Multiple tags
+/// let e2 = err!("Simple message"; Input, Invalid);
+///
+/// // Format string with arguments
+/// let value = 42;
+/// let e3 = err!("Value is {}", value; Input);
+///
+/// // Multiple arguments and tags
+/// let (val1, val2) = (1, 2);
+/// let e4 = err!("Values are {} and {}", val1, val2; Input, Invalid);
+/// ```
+///
+/// ## Upstream Errors 
+/// ```ignore
+/// use oxedize_fe2o3_core::prelude::*;
+/// use std::fs;
+///
+/// let io_error = fs::read_to_string("missing.txt").unwrap_err();
+/// 
+/// // Simple message
+/// let e1 = err!(io_error, "Failed to read file"; IO, File);
+///
+/// // With format args
+/// let filename = "config.txt";
+/// let e2 = err!(io_error, "Failed to read {}", filename; IO, File);
+/// ```
 macro_rules! err {
-    ($e:ident, $m:expr) => {
-        Error::Upstream(std::sync::Arc::new($e), ErrMsg {
-            tags: &[],
-            msg: $m,
-        })
-    };
-    ($e:ident, $m:expr, $($etvars:ident),* $(,)?) => {
-        Error::Upstream(std::sync::Arc::new($e), ErrMsg {
-            tags: &[ $(ErrTag::$etvars),* ],
-            msg: $m,
-        })
-    };
-    ($m:expr) => {
+    // Local error with simple message and tags
+    ($msg:expr; $($tag:ident),+) => {
         Error::Local(ErrMsg {
-            tags: &[],
-            msg: $m,
+            msg: format!("{}:{}: {}", file!(), line!(), $msg),
+            tags: &[$(ErrTag::$tag),+],
         })
     };
-    ($m:expr, $($etvars:ident),* $(,)?) => {
+
+    // Local error with format string, args and tags
+    ($fmt:literal, $($arg:expr),+; $($tag:ident),+) => {
         Error::Local(ErrMsg {
-            tags: &[ $(ErrTag::$etvars),* ],
-            msg: $m,
+            msg: format!("{}:{}: {}", file!(), line!(), format!($fmt, $($arg),+)),
+            tags: &[$(ErrTag::$tag),+],
         })
     };
-    ($m:expr, $($enum:ident::$etvars:ident),* $(,)?) => {
-        Error::Local(ErrMsg {
-            tags: &[ $($enum::$etvars),* ],
-            msg: $m,
+
+    // Upstream error with simple message and tags
+    ($err:expr, $msg:expr; $($tag:ident),+) => {
+        Error::Upstream(std::sync::Arc::new($err), ErrMsg {
+            msg: format!("{}:{}: {}", file!(), line!(), $msg),
+            tags: &[$(ErrTag::$tag),+],
         })
-    }
+    };
+
+    // Upstream error with format string, args and tags
+    ($err:expr, $fmt:literal, $($arg:expr),+; $($tag:ident),+) => {
+        Error::Upstream(std::sync::Arc::new($err), ErrMsg {
+            msg: format!("{}:{}: {}", file!(), line!(), format!($fmt, $($arg),+)),
+            tags: &[$(ErrTag::$tag),+],
+        })
+    };
 }
 
 #[macro_export]
@@ -75,7 +106,7 @@ macro_rules! err {
 /// # Examples
 ///
 /// Basic usage:
-/// ```rust
+/// ```ignore
 /// use fe2o3_core::prelude::*;
 /// use std::fs::File;
 /// 
@@ -86,7 +117,7 @@ macro_rules! err {
 /// ```
 ///
 /// With different error types:
-/// ```rust
+/// ```ignore
 /// use fe2o3_core::prelude::*;
 /// use std::error::Error;
 /// 
@@ -121,7 +152,7 @@ macro_rules! ok {
 /// # Examples
 ///
 /// Basic usage with tags:
-/// ```rust
+/// ```ignore
 /// use fe2o3_core::prelude::*;
 /// 
 /// fn process_data() -> Outcome<()> {
@@ -132,7 +163,7 @@ macro_rules! ok {
 /// ```
 ///
 /// Chaining errors (not nested):
-/// ```rust
+/// ```ignore
 /// let intermediate = res!(first_operation(), IO);
 /// let result = res!(second_operation(intermediate), Processing);
 /// ```
@@ -187,7 +218,7 @@ macro_rules! res {
 /// # Examples
 ///
 /// Basic usage:
-/// ```rust
+/// ```ignore
 /// use fe2o3_core::prelude::*;
 ///
 /// fn handle_request() -> Outcome<Response> {

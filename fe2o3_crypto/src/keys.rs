@@ -311,9 +311,9 @@ impl<
                 passhashes: res!(RingBuffer::from_dat(ring_buf_dat)),
             })
         } else {
-            Err(err!(errmsg!(
-                "Wallet must be a Dat::OrdMap, found a {:?}.", dat.kind(),
-            ), Input, Invalid, Mismatch))
+            Err(err!(
+                "Wallet must be a Dat::OrdMap, found a {:?}.", dat.kind();
+            Input, Invalid, Mismatch))
         }
     }
 }
@@ -721,7 +721,7 @@ impl<
 //                    req!(test_secret[i], *item);
 //                }
 //            },
-//            None => return Err(err!(errmsg!(
+//            None => return Err(err!(
 //                "Expected entry for 'o3db', found nothing.",
 //            ), Test, Data, Missing)),
 //        }
@@ -731,7 +731,7 @@ impl<
 //                req!(ts1, tsph.t);
 //                req!(phash1, tsph.data);
 //            },
-//            None => return Err(err!(errmsg!(
+//            None => return Err(err!(
 //                "Expected first entry in passhashes RingBuffer, found nothing.",
 //            ), Test, Data, Missing)),
 //        }
@@ -741,7 +741,7 @@ impl<
 //                req!(ts2, tsph.t);
 //                req!(phash2, tsph.data);
 //            },
-//            None => return Err(err!(errmsg!(
+//            None => return Err(err!(
 //                "Expected second entry in passhashes RingBuffer, found nothing.",
 //            ), Test, Data, Missing)),
 //        }

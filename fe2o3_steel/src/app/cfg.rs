@@ -74,10 +74,10 @@ impl AppConfig {
         let level_str = if let Some(dat) = self.server_cfg.get(&dat!("log_level")) {
             try_extract_dat!(dat, Str)
         } else {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "Log level key not found in server configuration: {:?}.",
-                self.server_cfg,
-            ), Configuration, Missing, Key));
+                self.server_cfg;
+            Configuration, Missing, Key));
         };
         let level = res!(LogLevel::from_str(&level_str));
         Ok((level, level_str.clone()))

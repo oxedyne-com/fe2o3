@@ -197,9 +197,9 @@ impl InNamex for KeyDerivationScheme {
 	            ("Argon2i_v0x13", "6UQjGIfYSHD7/2mcr27mtB8B9IyQBRpye0ABSH9/YCo="),
 	            ("Argon2id_v0x13", "M/dnApVP4FC91bbNYeKy73V6j3NVfwW7qcVspx53zl8="),
             ],
-            _ => return Err(err!(errmsg!(
-                "The Namex group name '{}' is not recognised for KeyDerivationScheme.", gname,
-            ), Invalid, Input)),
+            _ => return Err(err!(
+                "The Namex group name '{}' is not recognised for KeyDerivationScheme.", gname;
+            Invalid, Input)),
         };
         Ok(if ids.len() == 0 {
             None
@@ -220,9 +220,9 @@ impl str::FromStr for KeyDerivationScheme {
             "Argon2d_v0x13"     => Self::default_argon2("Argon2d", 0x13),
             "Argon2i_v0x13"     => Self::default_argon2("Argon2i", 0x13),
             "Argon2id_v0x13"    => Self::default_argon2("Argon2id", 0x13),
-            _ => Err(err!(errmsg!(
-                "The key derivation scheme '{}' is not recognised.", name,
-            ), Invalid, Input)),
+            _ => Err(err!(
+                "The key derivation scheme '{}' is not recognised.", name;
+            Invalid, Input)),
         }
     }
 }
@@ -238,9 +238,9 @@ impl TryFrom<LocalId> for KeyDerivationScheme {
             LocalId(4) => Self::default_argon2("Argon2d", 0x13),
             LocalId(5) => Self::default_argon2("Argon2i", 0x13),
             LocalId(6) => Self::default_argon2("Argon2id", 0x13),
-            _ => Err(err!(errmsg!(
-                "The key derivation scheme with local id {} is not recognised.", n,
-            ), Invalid, Input)),
+            _ => Err(err!(
+                "The key derivation scheme with local id {} is not recognised.", n;
+            Invalid, Input)),
         }
     }
 }
@@ -367,9 +367,9 @@ impl Argon2State {
     {
         let encoded = match encoded.strip_prefix('$') {
             Some(s) => s,
-            None => return Err(err!(errmsg!(
-                "Encoded Argon2 string '{}' does not begin with a '$'.", encoded,
-            ), Invalid, Input)),
+            None => return Err(err!(
+                "Encoded Argon2 string '{}' does not begin with a '$'.", encoded;
+            Invalid, Input)),
         };
         let (n_complete, n_v0x10) = if expect_hash { (5, 4) } else { (4, 3) };
         let parts: Vec<&str> = encoded.split('$').collect();
@@ -401,10 +401,10 @@ impl Argon2State {
             }
             Ok(())
         } else {
-            Err(err!(errmsg!(
+            Err(err!(
                 "The Argon2 string should have {} or {} parts separated by the '$' \
-                character. {} were found.", parts.len() - 1, n_v0x10, n_complete,
-            ), Decode, String, Invalid, Input))
+                character. {} were found.", parts.len() - 1, n_v0x10, n_complete;
+            Decode, String, Invalid, Input))
         }
     }
 
@@ -420,16 +420,15 @@ impl Argon2State {
             if parts[0] == name {
                 Ok(parts[1])
             } else {
-                Err(err!(errmsg!(
-                    "The Argon2 {} substring key must be '{}'.", err_str, name,
-                ), Missing, Decode, String,
-                Invalid, Input))
+                Err(err!(
+                    "The Argon2 {} substring key must be '{}'.", err_str, name;
+                Missing, Decode, String, Invalid, Input))
             }
         } else {
-            Err(err!(errmsg!(
+            Err(err!(
                 "The Argon2 {} substring '{}' should have 2 parts separated by the '=' \
-                character. {} were found.", err_str, s, parts.len(),
-            ), Decode, String, Invalid, Input))
+                character. {} were found.", err_str, s, parts.len();
+            Decode, String, Invalid, Input))
         }
     }
 
@@ -438,10 +437,10 @@ impl Argon2State {
         if parts.len() == 3 {
             Ok(parts)
         } else {
-            Err(err!(errmsg!(
+            Err(err!(
                 "The Argon2 options substring '{}' should have 3 parts separated by the ',' \
-                character. {} were found.", s, parts.len(),
-            ), Decode, String, Invalid, Input))
+                character. {} were found.", s, parts.len();
+            Decode, String, Invalid, Input))
         }
     }
 }
@@ -455,9 +454,9 @@ impl KeyDeriver for KeyDerivationScheme {
                 None => (),
             },
         }
-        Err(err!(errmsg!(
-            "{}: Expected hash to be be present, found none.", self,
-        ), Data, Missing))
+        Err(err!(
+            "{}: Expected hash to be be present, found none.", self;
+        Data, Missing))
     }
 
     fn set_rand_salt(&mut self, n: usize) -> Outcome<()> {
@@ -480,9 +479,7 @@ impl KeyDeriver for KeyDerivationScheme {
                     state.hash = Some(hash);
                     Ok(())
                 },
-                Err(e) => Err(err!(e, errmsg!(
-                    "While performing Argon2 hash.",
-                ), Invalid, Input)),
+                Err(e) => Err(err!(e, "While performing Argon2 hash."; Invalid, Input)),
             },
         }
     }
@@ -496,7 +493,7 @@ impl KeyDeriver for KeyDerivationScheme {
                     &hash,
                     &state.to_argon2_config(),
                 ))),
-                None => Err(err!(errmsg!("Hash has not been created."), Missing)),
+                None => Err(err!("Hash has not been created."; Missing)),
             },
         }
     }
@@ -511,7 +508,7 @@ impl KeyDeriver for KeyDerivationScheme {
                     res!(self.encode_cfg_to_string()),
                     base64::encode_config(&hash, base64::STANDARD_NO_PAD),
                 )),
-                None => Err(err!(errmsg!("Hash has not been created."), Missing)),
+                None => Err(err!("Hash has not been created."; Missing)),
             },
         }
     }
@@ -608,9 +605,9 @@ impl<
         match &self.0 {
             DefAlt::Default(inner) => inner.name_id(),
             DefAlt::Given(inner) => inner.name_id(),
-            DefAlt::None => Err(err!(errmsg!(
-                "No Namex id can be specified for DefAlt::None.",
-            ), Missing, Bug)),
+            DefAlt::None => Err(err!(
+                "No Namex id can be specified for DefAlt::None.";
+            Missing, Bug)),
         }
     }
 
@@ -658,16 +655,16 @@ impl<
             DefAlt::Given(inner) => return inner.get_hash(),
             DefAlt::None => (),
         }
-        Err(err!(errmsg!(
-            "{}: Expected hash to be be present, found none.", self,
-        ), Data, Missing))
+        Err(err!(
+            "{}: Expected hash to be be present, found none.", self;
+        Data, Missing))
     }
 
     fn set_rand_salt(&mut self, n: usize) -> Outcome<()> {
         match &mut self.0 {
             DefAlt::Default(inner) => inner.set_rand_salt(n),
             DefAlt::Given(inner) => inner.set_rand_salt(n),
-            DefAlt::None => Err(err!(errmsg!("{}", Self::KDF_MISSING_MSG),
+            DefAlt::None => Err(err!("{}", Self::KDF_MISSING_MSG;
                 Configuration, Missing)),
         }
     }
@@ -676,7 +673,7 @@ impl<
         match &mut self.0 {
             DefAlt::Default(inner) => inner.derive(pass),
             DefAlt::Given(inner) => inner.derive(pass),
-            DefAlt::None => Err(err!(errmsg!("{}", Self::KDF_MISSING_MSG),
+            DefAlt::None => Err(err!("{}", Self::KDF_MISSING_MSG;
                 Configuration, Missing)),
         }
     }
@@ -685,7 +682,7 @@ impl<
         match &self.0 {
             DefAlt::Default(inner) => inner.verify(pass),
             DefAlt::Given(inner) => inner.verify(pass),
-            DefAlt::None => Err(err!(errmsg!("{}", Self::KDF_MISSING_MSG),
+            DefAlt::None => Err(err!("{}", Self::KDF_MISSING_MSG;
                 Configuration, Missing)),
         }
     }
@@ -694,7 +691,7 @@ impl<
         match &self.0 {
             DefAlt::Default(inner) => inner.encode_to_string(),
             DefAlt::Given(inner) => inner.encode_to_string(),
-            DefAlt::None => Err(err!(errmsg!("{}", Self::KDF_MISSING_MSG),
+            DefAlt::None => Err(err!("{}", Self::KDF_MISSING_MSG;
                 Configuration, Missing)),
         }
     }
@@ -703,7 +700,7 @@ impl<
         match &self.0 {
             DefAlt::Default(inner) => inner.encode_cfg_to_string(),
             DefAlt::Given(inner) => inner.encode_cfg_to_string(),
-            DefAlt::None => Err(err!(errmsg!("{}", Self::KDF_MISSING_MSG),
+            DefAlt::None => Err(err!("{}", Self::KDF_MISSING_MSG;
                 Configuration, Missing)),
         }
     }
@@ -712,7 +709,7 @@ impl<
         match &mut self.0 {
             DefAlt::Default(inner) => inner.decode_from_string(s),
             DefAlt::Given(inner) => inner.decode_from_string(s),
-            DefAlt::None => Err(err!(errmsg!("{}", Self::KDF_MISSING_MSG),
+            DefAlt::None => Err(err!("{}", Self::KDF_MISSING_MSG;
                 Configuration, Missing)),
         }
     }
@@ -721,7 +718,7 @@ impl<
         match &mut self.0 {
             DefAlt::Default(inner) => inner.decode_cfg_from_string(s),
             DefAlt::Given(inner) => inner.decode_cfg_from_string(s),
-            DefAlt::None => Err(err!(errmsg!("{}", Self::KDF_MISSING_MSG),
+            DefAlt::None => Err(err!("{}", Self::KDF_MISSING_MSG;
                 Configuration, Missing)),
         }
     }
@@ -745,20 +742,20 @@ impl<
                 DefAlt::None => (),
             },
         }
-        Err(err!(errmsg!(
-            "{}: Expected hash to be be present, found none.", self,
-        ), Data, Missing))
+        Err(err!(
+            "{}: Expected hash to be be present, found none.", self;
+        Data, Missing))
     }
 
     pub fn or_set_rand_salt<OR: KeyDeriver>(&mut self, n: usize, mut alt: &mut Alt<OR>) -> Outcome<()> {
         match &mut alt {
             Alt::Specific(Some(inner)) => inner.set_rand_salt(n),
-            Alt::Specific(None) => Err(err!(errmsg!("{}", Self::KDF_MISSING_MSG),
+            Alt::Specific(None) => Err(err!("{}", Self::KDF_MISSING_MSG;
                 Configuration, Missing)),
             Alt::Unspecified => match &mut self.0 {
                 DefAlt::Default(inner) => inner.set_rand_salt(n),
                 DefAlt::Given(inner) => inner.set_rand_salt(n),
-                DefAlt::None => Err(err!(errmsg!("{}", Self::KDF_MISSING_MSG),
+                DefAlt::None => Err(err!("{}", Self::KDF_MISSING_MSG;
                     Configuration, Missing)),
             },
         }
@@ -767,12 +764,12 @@ impl<
     pub fn or_derive<OR: KeyDeriver>(&mut self, pass: &[u8], mut alt: &mut Alt<OR>) -> Outcome<()> {
         match &mut alt {
             Alt::Specific(Some(inner)) => inner.derive(pass),
-            Alt::Specific(None) => Err(err!(errmsg!("{}", Self::KDF_MISSING_MSG),
+            Alt::Specific(None) => Err(err!("{}", Self::KDF_MISSING_MSG;
                 Configuration, Missing)),
             Alt::Unspecified => match &mut self.0 {
                 DefAlt::Default(inner) => inner.derive(pass),
                 DefAlt::Given(inner) => inner.derive(pass),
-                DefAlt::None => Err(err!(errmsg!("{}", Self::KDF_MISSING_MSG),
+                DefAlt::None => Err(err!("{}", Self::KDF_MISSING_MSG;
                     Configuration, Missing)),
             },
         }
@@ -781,12 +778,12 @@ impl<
     pub fn or_verify<OR: KeyDeriver>(&self, pass: &[u8], alt: &Alt<OR>) -> Outcome<bool> {
         match &alt {
             Alt::Specific(Some(inner)) => inner.verify(pass),
-            Alt::Specific(None) => Err(err!(errmsg!("{}", Self::KDF_MISSING_MSG),
+            Alt::Specific(None) => Err(err!("{}", Self::KDF_MISSING_MSG;
                 Configuration, Missing)),
             Alt::Unspecified => match &self.0 {
                 DefAlt::Default(inner) => inner.verify(pass),
                 DefAlt::Given(inner) => inner.verify(pass),
-                DefAlt::None => Err(err!(errmsg!("{}", Self::KDF_MISSING_MSG),
+                DefAlt::None => Err(err!("{}", Self::KDF_MISSING_MSG;
                     Configuration, Missing)),
             },
         }
@@ -795,12 +792,12 @@ impl<
     pub fn or_encode_to_string<OR: KeyDeriver>(&self, alt: &Alt<OR>) -> Outcome<String> {
         match &alt {
             Alt::Specific(Some(inner)) => inner.encode_to_string(),
-            Alt::Specific(None) => Err(err!(errmsg!("{}", Self::KDF_MISSING_MSG),
+            Alt::Specific(None) => Err(err!("{}", Self::KDF_MISSING_MSG;
                 Configuration, Missing)),
             Alt::Unspecified => match &self.0 {
                 DefAlt::Default(inner) => inner.encode_to_string(),
                 DefAlt::Given(inner) => inner.encode_to_string(),
-                DefAlt::None => Err(err!(errmsg!("{}", Self::KDF_MISSING_MSG),
+                DefAlt::None => Err(err!("{}", Self::KDF_MISSING_MSG;
                     Configuration, Missing)),
             },
         }
@@ -809,12 +806,12 @@ impl<
     pub fn or_encode_cfg_to_string<OR: KeyDeriver>(&self, alt: &Alt<OR>) -> Outcome<String> {
         match &alt {
             Alt::Specific(Some(inner)) => inner.encode_cfg_to_string(),
-            Alt::Specific(None) => Err(err!(errmsg!("{}", Self::KDF_MISSING_MSG),
+            Alt::Specific(None) => Err(err!("{}", Self::KDF_MISSING_MSG;
                 Configuration, Missing)),
             Alt::Unspecified => match &self.0 {
                 DefAlt::Default(inner) => inner.encode_cfg_to_string(),
                 DefAlt::Given(inner) => inner.encode_cfg_to_string(),
-                DefAlt::None => Err(err!(errmsg!("{}", Self::KDF_MISSING_MSG),
+                DefAlt::None => Err(err!("{}", Self::KDF_MISSING_MSG;
                     Configuration, Missing)),
             },
         }
@@ -823,12 +820,12 @@ impl<
     pub fn or_decode_from_string<OR: KeyDeriver>(&mut self, s: &str, mut alt: &mut Alt<OR>) -> Outcome<()> {
         match &mut alt {
             Alt::Specific(Some(inner)) => inner.decode_from_string(s),
-            Alt::Specific(None) => Err(err!(errmsg!("{}", Self::KDF_MISSING_MSG),
+            Alt::Specific(None) => Err(err!("{}", Self::KDF_MISSING_MSG;
                 Configuration, Missing)),
             Alt::Unspecified => match &mut self.0 {
                 DefAlt::Default(inner) => inner.decode_from_string(s),
                 DefAlt::Given(inner) => inner.decode_from_string(s),
-                DefAlt::None => Err(err!(errmsg!("{}", Self::KDF_MISSING_MSG),
+                DefAlt::None => Err(err!("{}", Self::KDF_MISSING_MSG;
                     Configuration, Missing)),
             },
         }
@@ -837,12 +834,12 @@ impl<
     pub fn or_decode_cfg_from_string<OR: KeyDeriver>(&mut self, s: &str, mut alt: &mut Alt<OR>) -> Outcome<()> {
         match &mut alt {
             Alt::Specific(Some(inner)) => inner.decode_from_string(s),
-            Alt::Specific(None) => Err(err!(errmsg!("{}", Self::KDF_MISSING_MSG),
+            Alt::Specific(None) => Err(err!("{}", Self::KDF_MISSING_MSG;
                 Configuration, Missing)),
             Alt::Unspecified => match &mut self.0 {
                 DefAlt::Default(inner) => inner.decode_from_string(s),
                 DefAlt::Given(inner) => inner.decode_from_string(s),
-                DefAlt::None => Err(err!(errmsg!("{}", Self::KDF_MISSING_MSG),
+                DefAlt::None => Err(err!("{}", Self::KDF_MISSING_MSG;
                     Configuration, Missing)),
             },
         }
@@ -862,14 +859,14 @@ mod tests {
         res!(kdf.derive(pass));
         let encoded_cfg = res!(kdf.encode_cfg_to_string());
         let encoded_with_hash = res!(kdf.encode_to_string());
-        let hash = res!(kdf.get_hash().ok_or(err!(errmsg!("Missing hash."), Bug, Missing)));
+        let hash = res!(kdf.get_hash().ok_or(err!("Missing hash."; Bug, Missing)));
         msg!("hash = '{:02x?}'", hash);
         msg!("encoded cfg = '{}'", encoded_cfg);
         msg!("encoded with hash = '{}'", encoded_with_hash);
         match kdf.verify(b"The meaning is 43") {
-            Ok(()) => return Err(err!(errmsg!(
-                "The verification should have failed for a differing passphrase.",
-            ))),
+            Ok(()) => return Err(err!(
+                "The verification should have failed for a differing passphrase.";
+            Test, Unexpected)),
             Err(_) => (),
         }
         let mut kdf2 = res!(KeyDerivationScheme::default_argon2("Argon2id", 0x13));
@@ -894,7 +891,7 @@ mod tests {
         pass.append(&mut tstamp);
         loop { 
             res!(kdf.derive(&pass));
-            let hash = res!(kdf.get_hash().ok_or(err!(errmsg!("Missing hash."), Bug, Missing)));
+            let hash = res!(kdf.get_hash().ok_or(err!("Missing hash."; Bug, Missing)));
             msg!("count = {} hash = {:02x?}", count, &hash[0..prefix.len()]);
             if hash.starts_with(&prefix) { break; }
             count += 1;

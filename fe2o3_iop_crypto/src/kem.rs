@@ -107,9 +107,9 @@ impl<
         match &self.0 {
             DefAlt::Default(inner) => inner.name_id(),
             DefAlt::Given(inner) => inner.name_id(),
-            DefAlt::None => Err(err!(errmsg!(
-                "No Namex id can be specified for DefAlt::None.",
-            ), Missing, Bug)),
+            DefAlt::None => Err(err!(
+                "No Namex id can be specified for DefAlt::None.";
+            Missing, Bug)),
         }
     }
 
@@ -167,9 +167,9 @@ impl<
         match &self.0 {
             DefAlt::Default(inner) => inner.encap(pk),
             DefAlt::Given(inner) => inner.encap(pk),
-            DefAlt::None => Err(err!(errmsg!(
-                "Can't encapsulate, key exchanger not specified.",
-            ), Configuration, Missing)),
+            DefAlt::None => Err(err!(
+                "Can't encapsulate, key exchanger not specified.";
+            Configuration, Missing)),
         }
     }
 
@@ -187,9 +187,9 @@ impl<
         match &self.0 {
             DefAlt::Default(inner) => inner.decap(ciphertext),
             DefAlt::Given(inner) => inner.decap(ciphertext),
-            DefAlt::None => Err(err!(errmsg!(
-                "Can't de-encapsulate, key exchanger not specified.",
-            ), Configuration, Missing)),
+            DefAlt::None => Err(err!(
+                "Can't de-encapsulate, key exchanger not specified.";
+            Configuration, Missing)),
         }
     }
 }
@@ -220,15 +220,15 @@ impl<
     {
         match alt {
             Alt::Specific(Some(inner)) => inner.encap(pk),      // Type OR KeyExchanger
-            Alt::Specific(None) => Err(err!(errmsg!(
-                "Can't encapsulate, key exchanger not specified.",
-            ), Configuration, Missing)),
+            Alt::Specific(None) => Err(err!(
+                "Can't encapsulate, key exchanger not specified.";
+            Configuration, Missing)),
             Alt::Unspecified => match &self.0 {
                 DefAlt::Default(inner) => inner.encap(pk),  // Type D KeyExchanger
                 DefAlt::Given(inner) => inner.encap(pk),    // Type G KeyExchanger
-                DefAlt::None => Err(err!(errmsg!(
-                    "Can't encapsulate, key exchanger not specified.",
-                ), Configuration, Missing)),
+                DefAlt::None => Err(err!(
+                    "Can't encapsulate, key exchanger not specified.";
+                Configuration, Missing)),
             },
         }
     }
@@ -251,15 +251,15 @@ impl<
     {
         match alt {
             Alt::Specific(Some(inner)) => inner.decap(ciphertext),      // Type OR KeyExchanger
-            Alt::Specific(None) => Err(err!(errmsg!(
-                "Can't de-encapsulate, key-exchanger not specified.",
-            ), Configuration, Missing)),
+            Alt::Specific(None) => Err(err!(
+                "Can't de-encapsulate, key-exchanger not specified.";
+            Configuration, Missing)),
             Alt::Unspecified => match &self.0 {
                 DefAlt::Default(inner) => inner.decap(ciphertext),  // Type D KeyExchanger
                 DefAlt::Given(inner) => inner.decap(ciphertext),    // Type G KeyExchanger
-                DefAlt::None => Err(err!(errmsg!(
-                    "Can't de-encapsulate, key-exchanger not specified.",
-                ), Configuration, Missing)),
+                DefAlt::None => Err(err!(
+                    "Can't de-encapsulate, key-exchanger not specified.";
+                Configuration, Missing)),
             },
         }
     }

@@ -16,8 +16,7 @@ use std::{
 pub fn byte_slices_equal(a: &[u8], b: &[u8]) -> Outcome<()> {
     for (i, ai) in a.iter().enumerate() {
         if *ai != b[i] {
-            return Err(err!(errmsg!("Mismatch detected"),
-                Input, Mismatch));
+            return Err(err!("Mismatch detected"; Input, Mismatch));
         }
     }
     Ok(())
@@ -43,15 +42,15 @@ impl ParseId<32> for B32 {
     fn parse_id(s: &str) -> Outcome<Self> {
         let s = s.trim_start_matches("0x");
         if s.len() != 64 {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "The hexadecimal string '{}' has length {}, but it should be 64 for a B32.",
-                s, s.len(),
-            ), Invalid, Input, String, Size));
+                s, s.len();
+            Invalid, Input, String, Size));
         }
         if !s.is_ascii() {
-            return Err(err!(errmsg!(
-                "The hexadecimal string '{}' contains at least one non-ASCII character.", s,
-            ), Invalid, Input, String));
+            return Err(err!(
+                "The hexadecimal string '{}' contains at least one non-ASCII character.", s;
+            Invalid, Input, String));
         }
 
         let mut result = [0u8; 32];
@@ -62,19 +61,19 @@ impl ParseId<32> for B32 {
             count += 1;
             let hc = match hex_chars.next() {
                 Some(c) => c,
-                None => return Err(err!(errmsg!(
+                None => return Err(err!(
                     "Expecting a character at position {} in the hexadecimal string '{}', \
-                    but it was not found.", count, s,
-                ), Invalid, Input, String)),
+                    but it was not found.", count, s;
+                Invalid, Input, String)),
             };
             let high_nibble = res!(parse_hex_char(hc));
             count += 1;
             let hc = match hex_chars.next() {
                 Some(c) => c,
-                None => return Err(err!(errmsg!(
+                None => return Err(err!(
                     "Expecting a character at position {} in the hexadecimal string '{}', \
-                    but it was not found.", count, s,
-                ), Invalid, Input, String)),
+                    but it was not found.", count, s;
+                Invalid, Input, String)),
             };
             let low_nibble = res!(parse_hex_char(hc));
             *byt = high_nibble << 4 | low_nibble;
@@ -128,7 +127,7 @@ pub trait FromBytes {
     {
         err!(fmt!("{}:{}: Only {} byte{}, require at least {} to decode the {}.",
             file, line, nbyts, if nbyts == 1 { "" } else { "s" }, minbyts, desc,
-        ), Bytes, Input, Decode, Missing)
+        ); Bytes, Input, Decode, Missing)
     }
 }
 
@@ -168,11 +167,11 @@ impl FromBytes for B32 {
     fn from_bytes(buf: &[u8]) -> Outcome<(Self, usize)> {
         const BYTE_LEN: usize = 32;
         if buf.len() < BYTE_LEN {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "Not enough bytes to decode, require at least {} \
                 for a {}, slice is of length {}.",
-                BYTE_LEN, std::any::type_name::<Self>(), buf.len(),
-            ), Bytes, Invalid, Input, Decode, Missing));
+                BYTE_LEN, std::any::type_name::<Self>(), buf.len();
+            Bytes, Invalid, Input, Decode, Missing));
         }
         let n = Self(res!(
             <[u8; BYTE_LEN]>::try_from(&buf[0..BYTE_LEN]),
@@ -186,11 +185,11 @@ impl FromByteArray for B32 {
     fn from_byte_array<const L: usize>(buf: [u8; L]) -> Outcome<Self> {
         const BYTE_LEN: usize = 32;
         if L < BYTE_LEN {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "Not enough bytes to decode, require at least {} \
                 for a {}, array is of length {}.",
-                BYTE_LEN, std::any::type_name::<Self>(), L,
-            ), Bytes, Invalid, Input, Decode, Missing));
+                BYTE_LEN, std::any::type_name::<Self>(), L;
+            Bytes, Invalid, Input, Decode, Missing));
         }
         Ok(Self(res!(
             <[u8; BYTE_LEN]>::try_from(&buf[0..BYTE_LEN]),

@@ -416,11 +416,11 @@ impl Dat {
             pre.push(Self::BU64_CODE);
             pre.extend_from_slice(&(byts.len() as u64).to_be_bytes());
         } else {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "The byte length of {}, which exceeds the maximum u64::MAX = {},
                 cannot be represented a variable size Dat byte wrapper.",
-                len, u64::MAX,
-            ), Size, TooBig));
+                len, u64::MAX;
+            Size, TooBig));
         }
         pre.append(&mut byts);
         Ok(pre)
@@ -432,11 +432,11 @@ impl Dat {
         else if len <= u32::MAX as usize { Ok(5) }
         else if len <= u64::MAX as usize { Ok(9) }
         else {
-            Err(err!(errmsg!(
+            Err(err!(
                 "The byte length of {}, which exceeds the maximum u64::MAX = {},
                 cannot be represented a variable size Dat byte wrapper.",
-                len, u64::MAX,
-            ), Size, TooBig))
+                len, u64::MAX;
+            Size, TooBig))
         }
     }
 

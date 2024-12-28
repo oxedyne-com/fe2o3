@@ -53,18 +53,20 @@ pub fn simple<
         resp.clone(),
     ));
     match res!(resp.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
-        OzoneMsg::Chunks(n) =>
-            if n != 1 {
-                return Err(err!(errmsg!("There should only be one chunk."), Test, Size));
-            },
-        msg => return Err(err!(errmsg!("Unrecognised response: {:?}", msg), Test, Unexpected)),
+        OzoneMsg::Chunks(n) => if n != 1 {
+            return Err(err!("There should only be one chunk."; Test, Size));
+        },
+        msg => return Err(err!(
+            "Unrecognised response: {:?}", msg;
+            Test, Channel, Read, Unexpected)),
     }
     match res!(resp.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
-        OzoneMsg::KeyExists(b) =>
-            if b == true {
-                return Err(err!(errmsg!("This key should not exist."), Test, Unexpected));
-            },
-        msg => return Err(err!(errmsg!("Unrecognised response: {:?}", msg), Test, Unexpected)),
+        OzoneMsg::KeyExists(b) => if b == true {
+            return Err(err!("This key should not exist."; Test, Unexpected));
+        },
+        msg => return Err(err!(
+            "Unrecognised response: {:?}", msg;
+            Test, Channel, Read, Unexpected)),
     }
 
     thread::sleep(Duration::from_secs(1));
@@ -79,14 +81,22 @@ pub fn simple<
         schms2,
     ));
     match res!(resp.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
-        OzoneMsg::Chunks(n) =>
-            if n != 1 { return Err(err!(errmsg!("There should only be one chunk."), Test, Size)) },
-        msg => return Err(err!(errmsg!("Unrecognised response: {:?}", msg))),
+        OzoneMsg::Chunks(n) => if n != 1 {
+            return Err(err!("There should only be one chunk."; Test, Size));
+        },
+        msg => return Err(err!(
+            "Unrecognised response: {:?}", msg;
+            Test, Channel, Read, Unexpected)),
     }
     match res!(resp.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
-        OzoneMsg::KeyExists(b) =>
-            if b == false { return Err(err!(errmsg!("This key should exist."), Test, Unexpected)) },
-        msg => return Err(err!(errmsg!("Unrecognised response: {:?}", msg), Test, Unexpected)),
+        OzoneMsg::KeyExists(b) => if b == false {
+            return Err(err!(
+                "This key should exist.";
+                Test, Data, Missing));
+        },
+        msg => return Err(err!(
+            "Unrecognised response: {:?}", msg;
+            Test, Channel, Read, Unexpected)),
     }
 
     // Now retrieve it.
@@ -100,19 +110,19 @@ pub fn simple<
 
         let result = res!(resp.recv_daticle(enc, or_enc));
         match result {
-            (None, _) => return Err(err!(errmsg!(
-                "This key should exist, instead received {:?}.", result,
-            ), Test, Unexpected)),
+            (None, _) => return Err(err!(
+                "This key should exist, instead received {:?}.", result;
+                Test, Unexpected)),
             (Some((dat, meta2)), _) => {
                 if dat != expected {
-                    return Err(err!(errmsg!(
-                        "Expected value {:?}, received {:?}.", expected, dat,
-                    ), Test, Unexpected));
+                    return Err(err!(
+                        "Expected value {:?}, received {:?}.", expected, dat;
+                        Test, Unexpected));
                 }
                 if meta2.user != user {
-                    return Err(err!(errmsg!(
-                        "Expected user {:?}, received {:?}.", user, meta2.user,
-                    ), Test, Unexpected));
+                    return Err(err!(
+                        "Expected user {:?}, received {:?}.", user, meta2.user;
+                        Test, Unexpected));
                 }
             },
         }
@@ -140,23 +150,23 @@ pub fn simple<
     let enc = db.api().schemes().encrypter();
     let or_enc = schms2.map(|s| s.encrypter());
     match res!(resp.recv_daticle(enc, or_enc)) {
-        (None, _) => return Err(err!(errmsg!("Could not find oats data."))),
+        (None, _) => return Err(err!("Could not find oats data."; Test, Data, Missing)),
         (Some((Dat::Map(map), meta2)), _) => {
             match map.get(&dat!("prot")) {
                 Some(Dat::I32(25)) => (),
-                result => return Err(err!(errmsg!(
-                    "Unexpected value for field 'prot' in map: {:?}", result,
-                ), Test, Unexpected)),
+                result => return Err(err!(
+                    "Unexpected value for field 'prot' in map: {:?}", result;
+                    Test, Unexpected)),
             }
             if meta2.user != user {
-                return Err(err!(errmsg!(
-                    "Expected user {:?}, received {:?}.", user, meta2.user,
-                ), Test, Unexpected));
+                return Err(err!(
+                    "Expected user {:?}, received {:?}.", user, meta2.user;
+                    Test, Unexpected));
             }
         },
-        (Some((dat, meta2)), _) => return Err(err!(errmsg!(
-            "Unexpected Dat {:?} and meta {:?} returned.", dat, meta2,
-        ), Test, Unexpected)),
+        (Some((dat, meta2)), _) => return Err(err!(
+            "Unexpected Dat {:?} and meta {:?} returned.", dat, meta2;
+            Test, Unexpected)),
     }
 
     test!("Wow, it worked");
@@ -185,7 +195,7 @@ pub fn simple_api<
     if let Some((v2, _meta2)) = result {
         req!(v, v2);
     } else {
-        return Err(err!(errmsg!("Expected value."), Test, Missing, Data)); 
+        return Err(err!("Expected value."; Test, Missing, Data)); 
     }
 
     Ok(())
@@ -232,7 +242,7 @@ pub fn store_chunked_data<
         match msg {
             OzoneMsg::KeyChunkExists(b, 0) => {
                 if b != false {
-                    return Err(err!(errmsg!("This key should not exist."), Test, Unexpected));
+                    return Err(err!("This key should not exist."; Test, Unexpected));
                 }
                 break;
             },
@@ -268,14 +278,15 @@ pub fn fetch_chunked_data<
         let enc = db.api().schemes().encrypter();
         let or_enc = schms2.map(|s| s.encrypter());
         match res!(resp.recv_daticle(enc, or_enc)) {
-            (None, _) => return Err(err!(errmsg!(
-                "Could not find data for key {:?} {:02x?}.", key,key.as_bytes()))),
+            (None, _) => return Err(err!(
+                "Could not find data for key {:?} {:02x?}.", key,key.as_bytes();
+                Test, Data, Missing)),
             (Some((Dat::Tup5u64(tup), meta2)), _) => {
                 // Quick check on the metadata
                 if meta2.user != user {
-                    return Err(err!(errmsg!(
-                        "Expected user {:?}, received {:?}.", user, meta2.user,
-                    )));
+                    return Err(err!(
+                        "Expected user {:?}, received {:?}.", user, meta2.user;
+                        Unexpected, Data, Mismatch));
                 }
                 // Fetch the chunks.
                 match res!(db.api().fetch_chunks(&Dat::Tup5u64(tup), schms2)) {
@@ -284,24 +295,24 @@ pub fn fetch_chunked_data<
                     Dat::BU32(v)  |
                     Dat::BU64(v)  => {
                         if val.len() != v.len() {
-                            return Err(err!(errmsg!(
+                            return Err(err!(
                                 "Original length = {}, retrieved length = {}.",
-                                val.len(), v.len(),
-                            ))); 
+                                val.len(), v.len();
+                                Test, Size, Mismatch)); 
                         }
                         for j in 0..val.len() {
                             if val[j] != v[j] {
-                                return Err(err!(errmsg!(
+                                return Err(err!(
                                     "Failed at byte {} of {}. Original value {}, \
                                     retrieved value {}.",
-                                    j, val.len(), val[j], v[j],
-                                ))); 
+                                    j, val.len(), val[j], v[j];
+                                    Test, Data, Mismatch)); 
                             }
                         }
                     },
-                    dat => return Err(err!(errmsg!(
-                        "Unexpected Dat {:?} returned.", dat,
-                    ))),
+                    dat => return Err(err!(
+                        "Unexpected Dat {:?} returned.", dat;
+                        Unexpected, Data)),
                 }
             },
             (Some((Dat::BU8(v), _)), _)   |
@@ -310,15 +321,15 @@ pub fn fetch_chunked_data<
             (Some((Dat::BU64(v), _)), _)  => {
                 // Should only get here if the data was not chunked.
                 if val.len() != v.len() {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "Original length = {}, retrieved length = {}.",
-                        val.len(), v.len(),
-                    ))); 
+                        val.len(), v.len();
+                        Test, Size, Mismatch)); 
                 }
             },
-            (Some((dat, meta2)), _) => return Err(err!(errmsg!(
-                "Unexpected Dat {:?} and meta {:?} returned.", dat, meta2,
-            ))),
+            (Some((dat, meta2)), _) => return Err(err!(
+                "Unexpected Dat {:?} and meta {:?} returned.", dat, meta2;
+                Test, Data, Unexpected)),
         }
         res!(db.api().clear_cache_values(constant::USER_REQUEST_WAIT));
     }
@@ -398,10 +409,10 @@ pub fn fetch<
     // 2. Retrieve values from files.
     let n = ks.len();
     if mask.len() != n {
-        return Err(err!(errmsg!(
+        return Err(err!(
             "Mask length {} does not match number of keys {}",
-            mask.len(), n,
-        ))); 
+            mask.len(), n;
+            Mismatch)); 
     }
 
     let mut result = Vec::new();
@@ -431,7 +442,7 @@ pub fn fetch<
             }
         }
         if err_cnt > 0 {
-            error!(err!(fmt!("Could not find data for {} items.", err_cnt)));
+            error!(err!("Could not find data for {} items.", err_cnt; Test, Data, Missing));
         } else {
             test!("All data retrieved successfully.");
         }

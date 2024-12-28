@@ -17,9 +17,9 @@ macro_rules! try_into {
     ($typ:tt, $expr:expr) => {
         match TryInto::<$typ>::try_into($expr) {
             Ok(v) => v,
-            Err(e) => return Err(err!(e, errmsg!(
-                "Could not convert {:?} into {:?}.", $expr, std::any::type_name::<$typ>(),
-            ), Bug, Conversion)),
+            Err(e) => return Err(err!(e,
+                "Could not convert {:?} into {:?}.", $expr, std::any::type_name::<$typ>();
+            Bug, Conversion)),
         }
     }
 }
@@ -41,10 +41,10 @@ macro_rules! try_add {
     ($n1:expr, $n2:expr $(,)?) => {
         match $n1.checked_add($n2) {
             Some(result) => result,
-            None => return Err(err!(errmsg!(
+            None => return Err(err!(
                 "Attempt to add {} and {} (type {}) resulted in integer overflow.",
-                $n1, $n2, fmt_typ!($n1),
-            ), Integer, Overflow)),
+                $n1, $n2, fmt_typ!($n1);
+            Integer, Overflow)),
         }
     }
 }
@@ -66,10 +66,10 @@ macro_rules! try_sub {
     ($n1:expr, $n2:expr $(,)?) => {
         match $n1.checked_sub($n2) {
             Some(result) => result,
-            None => return Err(err!(errmsg!(
+            None => return Err(err!(
                 "Attempt to subtract {} from {} (type {}) resulted in integer underflow.",
-                $n2, $n1, fmt_typ!($n1),
-            ), Integer, Underflow)),
+                $n2, $n1, fmt_typ!($n1);
+            Integer, Underflow)),
         }
     }
 }
@@ -91,10 +91,10 @@ macro_rules! try_mul {
     ($n1:expr, $n2:expr $(,)?) => {
         match $n1.checked_mul($n2) {
             Some(result) => result,
-            None => return Err(err!(errmsg!(
+            None => return Err(err!(
                 "Attempt to multiply {} and {} (type {}) resulted in integer overflow.",
-                $n1, $n2, fmt_typ!($n1),
-            ), Integer, Overflow)),
+                $n1, $n2, fmt_typ!($n1);
+            Integer, Overflow)),
         }
     }
 }
@@ -116,10 +116,10 @@ macro_rules! try_div {
     ($n1:expr, $n2:expr $(,)?) => {
         match $n1.checked_div($n2) {
             Some(result) => result,
-            None => return Err(err!(errmsg!(
+            None => return Err(err!(
                 "Attempt to divide {} by {} (type {}).",
-                $n1, $n2, fmt_typ!($n1),
-            ), Integer, ZeroDenominator)),
+                $n1, $n2, fmt_typ!($n1);
+            Integer, ZeroDenominator)),
         }
     }
 }
@@ -141,10 +141,10 @@ macro_rules! try_rem {
     ($n1:expr, $n2:expr $(,)?) => {
         match $n1.checked_rem($n2) {
             Some(result) => result,
-            None => return Err(err!(errmsg!(
+            None => return Err(err!(
                 "Attempt to find the remainder when {} is divided by {} (type {}).",
-                $n1, $n2, fmt_typ!($n1),
-            ), Integer, ZeroDenominator)),
+                $n1, $n2, fmt_typ!($n1);
+            Integer, ZeroDenominator)),
         }
     }
 }
@@ -168,9 +168,9 @@ macro_rules! try_range {
     ($n:expr, $min:expr, $max:expr $(,)?) => {
         match (&$n, &$min, &$max) {
             (n, min, max) if std::cmp::PartialOrd::lt(n, min) || std::cmp::PartialOrd::gt(n, max) => {
-                return Err(err!(errmsg!(
-                    "{} is outside range [{}, {}].", $n, $min, $max,
-                ), Numeric, Range));
+                return Err(err!(
+                    "{} is outside range [{}, {}].", $n, $min, $max;
+                Numeric, Range));
             }
             _ => $n,
         }
@@ -186,11 +186,11 @@ macro_rules! impls_for_native_integer {
             fn from_bytes(buf: &[u8]) -> Outcome<(Self, usize)> {
                 const BYTE_LEN: usize = std::mem::size_of::<$t>();
                 if buf.len() < BYTE_LEN {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "Not enough bytes to decode, require at least {} \
                         for a {}, slice is of length {}.",
-                        BYTE_LEN, std::any::type_name::<Self>(), buf.len(),
-                    ), Bytes, Invalid, Input, Decode, Missing));
+                        BYTE_LEN, std::any::type_name::<Self>(), buf.len();
+                    Bytes, Invalid, Input, Decode, Missing));
                 }
                 let n = <$t>::from_be_bytes(res!(
                     <[u8; BYTE_LEN]>::try_from(&buf[0..BYTE_LEN]),
@@ -204,11 +204,11 @@ macro_rules! impls_for_native_integer {
             fn from_byte_array<const L: usize>(buf: [u8; L]) -> Outcome<Self> {
                 const BYTE_LEN: usize = std::mem::size_of::<$t>();
                 if L < BYTE_LEN {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "Not enough bytes to decode, require at least {} \
                         for a {}, array is of length {}.",
-                        BYTE_LEN, std::any::type_name::<Self>(), L,
-                    ), Bytes, Invalid, Input, Decode, Missing));
+                        BYTE_LEN, std::any::type_name::<Self>(), L;
+                    Bytes, Invalid, Input, Decode, Missing));
                 }
                 Ok(<$t>::from_be_bytes(res!(
                     <[u8; BYTE_LEN]>::try_from(&buf[0..BYTE_LEN]),

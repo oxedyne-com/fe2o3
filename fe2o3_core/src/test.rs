@@ -12,9 +12,9 @@ pub fn test_it<
     -> Outcome<()>
 {
     if tags.len() == 0 {
-        return Err(err!(errmsg!(
-            "The test must have at least one tag, being the title.",
-        ), Invalid, Input, Missing, Bug));
+        return Err(err!(
+            "The test must have at least one tag, being the title.";
+        Invalid, Input, Missing, Bug));
     }
     for tag in tags {
         if (*tag).starts_with(filter) {

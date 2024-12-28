@@ -81,9 +81,9 @@ impl InNamex for KeyExchangeScheme {
             "schemes" => [
                 ("FireSaber", "nb68Os+ihmMixsBrsV5K+OzgCJrtxQ1L3e1FJ7KOvPk="),
             ],
-            _ => return Err(err!(errmsg!(
-                "The Namex group name '{}' is not recognised for KeyExchangeScheme.", gname,
-            ), Invalid, Input)),
+            _ => return Err(err!(
+                "The Namex group name '{}' is not recognised for KeyExchangeScheme.", gname;
+            Invalid, Input)),
         };
         Ok(if ids.len() == 0 {
             None
@@ -119,9 +119,9 @@ impl KeyExchanger for KeyExchangeScheme {
                     let sess_key2 = res!(<[u8; SESSION_KEY_LEN]>::try_from(&sess_key1[..]));
                     Ok((sess_key2, ct3))
                 },
-                _ => Err(err!(errmsg!(
-                    "Require public key to encapsulate.",
-                ), Missing, Configuration)),
+                _ => Err(err!(
+                    "Require public key to encapsulate.";
+                Missing, Configuration)),
             },
         }
     }
@@ -145,9 +145,9 @@ impl KeyExchanger for KeyExchangeScheme {
                     let sess_key2 = res!(<[u8; SESSION_KEY_LEN]>::try_from(&sess_key1[..]));
                     Ok(sess_key2)
                 },
-                _ => Err(err!(errmsg!(
-                    "Require secret key to de-encapsulate.",
-                ), Missing, Configuration)),
+                _ => Err(err!(
+                    "Require secret key to de-encapsulate.";
+                Missing, Configuration)),
             },
         }
     }
@@ -159,9 +159,9 @@ impl str::FromStr for KeyExchangeScheme {
     fn from_str(name: &str) -> std::result::Result<Self, Self::Err> {
         match name {
             "FireSaber" => Ok(Self::new_firesaber()),
-            _ => Err(err!(errmsg!(
-                "The key exchange scheme '{}' is not recognised.", name,
-            ), Invalid, Input)),
+            _ => Err(err!(
+                "The key exchange scheme '{}' is not recognised.", name;
+            Invalid, Input)),
         }
     }
 }
@@ -172,9 +172,9 @@ impl TryFrom<LocalId> for KeyExchangeScheme {
     fn try_from(n: LocalId) -> std::result::Result<Self, Self::Error> {
         match n {
             LocalId(1) => Ok(Self::new_firesaber()),
-            _ => Err(err!(errmsg!(
-                "The key exchange scheme with local id {} is not recognised.", n,
-            ), Invalid, Input)),
+            _ => Err(err!(
+                "The key exchange scheme with local id {} is not recognised.", n;
+            Invalid, Input)),
         }
     }
 }

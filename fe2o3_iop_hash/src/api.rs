@@ -135,10 +135,10 @@ impl HashForm {
         match self {
             Self::Identity(v) | Self::Bytes(v) => {
                 if v.len() < 4 {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "With only {} bytes, the HashForm has too few to create \
-                        a u32 (4).", v.len(),
-                    ), TooSmall, Conversion));
+                        a u32 (4).", v.len();
+                    TooSmall, Conversion));
                 }
                 Ok(u32::from_be_bytes(res!(<[u8; 4]>::try_from(&v[..4]), Decode, Bytes)))
             },

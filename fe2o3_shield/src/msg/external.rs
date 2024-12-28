@@ -172,12 +172,12 @@ impl Message {
         let (mut chunks, _) = res!(chunker.chunk(&msg_byts));
         let nc = chunks.len();
         if nc > PacketCount::MAX as usize {
-            return Err(err!(errmsg!("Message type {} of length {} bytes, \
+            return Err(err!("Message type {} of length {} bytes, \
                 when broken into chunks of {} bytes creates {} packets, \
                 exceeding the limit of {}.  Reduce the message length or \
                 increase the packet size.",
-                msg_name, msg_byts.len(), size, nc, PacketCount::MAX,
-            ), Invalid, Configuration));
+                msg_name, msg_byts.len(), size, nc, PacketCount::MAX;
+            Invalid, Configuration));
         }
 
         let mut packets = Vec::new();

@@ -199,10 +199,10 @@ impl<ETAG: GenTag> LogBot<ETAG>
         let mut unlocked_cfg = lock_write!(self.cfg);
         self.file = res!(unlocked_cfg.update_file());
         if unlocked_cfg.console.is_none() && self.file.is_none() {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "LogBot must output to either a file or a console channel, but \
-                neither has been specified.",
-            ), Init, Invalid));
+                neither has been specified.";
+            Init, Invalid));
         }
         Ok(())
     }
@@ -335,9 +335,9 @@ impl<ETAG: GenTag> LogBot<ETAG>
                     let (msg_console_opt, _msg_file_opt) = Self::format_msg(
                         LogLevel::Error,
                         src,
-                        Err(err!(errmsg!(
-                            "Could access log configuration: {}", e,
-                        ), Poisoned, Configuration)),
+                        Err(err!(
+                            "Could access log configuration: {}", e;
+                        Poisoned, Configuration)),
                         for_console,
                         for_file,
                     );
@@ -360,9 +360,9 @@ impl<ETAG: GenTag> LogBot<ETAG>
         if let Some(f) = self.file.as_mut() {
             if let Some(msg) = msg_file_opt {
                 match writeln!(f, "{}", msg) {
-                    Err(e) => msg!("{}", err!(e, errmsg!(
-                        "Error writing '{}' to the log file.", msg,
-                    ), IO, File, Write)),
+                    Err(e) => msg!("{}", err!(e,
+                        "Error writing '{}' to the log file.", msg;
+                    IO, File, Write)),
                     _ => (),
                 }
             }
@@ -414,9 +414,9 @@ impl<ETAG: GenTag> LogBot<ETAG>
             if let Some(console_chan) = console_chan {
                 if let Some(msg) = msg_console_opt {
                     match console_chan.send(Msg::Console(msg.clone())) {
-                        Err(e) => msg!("{}", err!(e, errmsg!(
-                            "Error writing '{}' to the console channel.", msg,
-                        ), IO, Channel, Write)),
+                        Err(e) => msg!("{}", err!(e,
+                            "Error writing '{}' to the console channel.", msg;
+                        IO, Channel, Write)),
                         _ => (),
                     }
                 }
@@ -424,9 +424,9 @@ impl<ETAG: GenTag> LogBot<ETAG>
             if let Some(f) = self.file.as_mut() {
                 if let Some(msg) = msg_file_opt {
                     match writeln!(f, "{}", msg) {
-                        Err(e) => msg!("{}", err!(e, errmsg!(
-                            "Error writing '{}' to the log file {:?}.", msg, path_opt,
-                        ), IO, File, Write)),
+                        Err(e) => msg!("{}", err!(e,
+                            "Error writing '{}' to the log file {:?}.", msg, path_opt;
+                        IO, File, Write)),
                         _ => (),
                     }
                 }
@@ -447,9 +447,9 @@ impl<ETAG: GenTag> LogBot<ETAG>
     fn listen(&mut self) -> bool {
         match self.chan.recv() {
             Err(e) => {
-                let e = err!(e, errmsg!(
-                    "Error while LogBot attempted to receive a message.",
-                ), IO, Channel, Read);
+                let e = err!(e,
+                    "Error while LogBot attempted to receive a message.";
+                IO, Channel, Read);
                 let src = Source {
                     tid: std::thread::current().id(),
                     file: file!(),
@@ -477,9 +477,9 @@ impl<ETAG: GenTag> LogBot<ETAG>
                 Err(e) => self.write_err(&src, e),
             }
             Ok(msg) => {
-                let e = err!(errmsg!(
-                    "Message handling for {:?} currently not implemented.", msg,
-                ), IO, Channel, Read, Unimplemented);
+                let e = err!(
+                    "Message handling for {:?} currently not implemented.", msg;
+                IO, Channel, Read, Unimplemented);
                 let src = Source {
                     tid: std::thread::current().id(),
                     file: file!(),

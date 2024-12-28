@@ -53,10 +53,10 @@ pub trait Unsigned {}
 /// Credit: https://stackoverflow.com/questions/2745074/fast-ceiling-of-an-integer-division-in-c-c
 pub fn usize_ceil_div(dividend: usize, divisor: usize) -> Outcome<usize> {
     if divisor == 0 {
-        Err(err!(errmsg!(
+        Err(err!(
             "Attempt to divide {} by {}, latter cannot be zero",
-            dividend, divisor,
-        ), Numeric, Input, Invalid))
+            dividend, divisor;
+        Numeric, Input, Invalid))
     } else if dividend == 0 {
         Ok(0)
     } else {

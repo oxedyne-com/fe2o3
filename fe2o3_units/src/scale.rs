@@ -308,9 +308,9 @@ impl Mag {
 
     pub fn new(val: f64, scale: Scale, sf: u8) -> Outcome<Self> {
         if sf == 0 {
-            return Err(err!(errmsg!(
-                "Number of significant figures must be > 0.",
-            ), ErrTag::Input, ErrTag::Invalid));
+            return Err(err!(
+                "Number of significant figures must be > 0.";
+            Input, Invalid));
         }
         Ok(Self {
             val:    val,

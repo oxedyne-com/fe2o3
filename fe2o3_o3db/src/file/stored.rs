@@ -95,9 +95,9 @@ impl<
         match r.read_exact(&mut chash) {
             Err(e) => match e.kind() {
                 std::io::ErrorKind::UnexpectedEof => return Ok(None),
-                _ => return Err(err!(e, errmsg!(
-                    "While trying to read cache hash from the start of a new key.",
-                ), Decode, Bytes)),
+                _ => return Err(err!(e,
+                    "While trying to read cache hash from the start of a new key.";
+                    Decode, Bytes)),
             }
             _ => (),
         }
@@ -115,16 +115,16 @@ impl<
                 match **boxoptd {
                     Some(Dat::U64(i)) => Some(try_into!(usize, i)),
                     None => None,
-                    _ => return Err(err!(errmsg!(
-                        "Expected Dat::Opt(Dat::U64), decoded {:?}.", dat_cind,
-                    ), Invalid, Input)),
+                    _ => return Err(err!(
+                        "Expected Dat::Opt(Dat::U64), decoded {:?}.", dat_cind;
+                    Invalid, Input)),
                 }
             },
             _ => {
                 //debug!("chash={:02x?} keybyts={:02x?} cind_byts={:02x?}",chash,keybyts,cind_byts);
-                return Err(err!(errmsg!(
-                    "Expected Dat::Opt(Dat::U64), decoded {:?}.", dat_cind,
-                ), Invalid, Input));
+                return Err(err!(
+                    "Expected Dat::Opt(Dat::U64), decoded {:?}.", dat_cind;
+                Invalid, Input));
             },
         };
         skey.extend_from_slice(&cind_byts);

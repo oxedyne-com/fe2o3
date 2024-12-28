@@ -156,7 +156,7 @@ impl<'a> Text<'a> {
     //    let mut result: Vec<Vec<Vec<usize>>> = Vec::new();
     //    let (partitions, oflow) = 2usize.overflowing_pow(n-1);
     //    if oflow {
-    //        return Err(err!(errmsg!(
+    //        return Err(err!(
     //            "Size of sequence, {}, is too large to enumerate ordered \
     //            subsequences.",
     //            n,
@@ -208,7 +208,7 @@ impl<'a> Text<'a> {
     //                }
     //                let (err, oflow) = (width_first - len).overflowing_pow(2);
     //                if oflow {
-    //                    return Err(err!(errmsg!(
+    //                    return Err(err!(
     //                        "The line configuration {:?} caused a numerical overflow, \
     //                        most likely because the first line width {} provided is \
     //                        too large",
@@ -230,7 +230,7 @@ impl<'a> Text<'a> {
     //                }
     //                let (err, oflow) = (width_rest - len).overflowing_pow(2);
     //                if oflow {
-    //                    return Err(err!(errmsg!(
+    //                    return Err(err!(
     //                        "The line configuration {:?} caused a numerical overflow, \
     //                        most likely because the main line width {} provided is \
     //                        too large",
@@ -259,7 +259,7 @@ impl<'a> Text<'a> {
     //        }
     //    }
     //    if !found_valid_lines {
-    //        return Err(err!(errmsg!(
+    //        return Err(err!(
     //            "Could not find a valid set of lines for which the given text will \
     //            fit into the widths specified (first: {}, rest: {}).",
     //            width_first,
@@ -310,12 +310,12 @@ impl<'a> Text<'a> {
     /// The width vector must first be set correctly.
     pub fn arrange(&self) -> Outcome<(Vec<Vec<usize>>, usize)> {
         if self.widths.len() != self.words.len() {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "Only {} line widths have been specified, number of widths must match \
                 the number of words {}",
                 self.widths.len(),
-                self.words.len(),
-            ), Input, Mismatch));
+                self.words.len();
+            Input, Mismatch));
         }
         let mut len = 0;
         let mut dl: usize;

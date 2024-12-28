@@ -117,10 +117,10 @@ impl FileState {
     pub fn inc_readers(&mut self) -> Outcome<()> {
         let (new, oflow) = self.readers().overflowing_add(1);
         if oflow {
-            Err(err!(errmsg!(
+            Err(err!(
                 "Attempt to increment the number of readers for the file state. \
-                The number, {}, is already at maximum.", self.readers(),
-            ), Bug, Overflow, Integer))
+                The number, {}, is already at maximum.", self.readers();
+            Bug, Overflow, Integer))
         } else {
             self.readers = new;
             Ok(())
@@ -129,10 +129,10 @@ impl FileState {
     pub fn dec_readers(&mut self) -> Outcome<()> {
         let (new, uflow) = self.readers().overflowing_sub(1);
         if uflow {
-            Err(err!(errmsg!(
+            Err(err!(
                 "Attempt to decrement the number of readers for the file state. \
-                The number, {}, is already at minimum.", self.readers(),
-            ), Bug, Underflow, Integer))
+                The number, {}, is already at minimum.", self.readers();
+            Bug, Underflow, Integer))
         } else {
             self.readers = new;
             Ok(())
@@ -200,10 +200,10 @@ impl FileState {
             None => {
                 let old_dat_size = self.dat_size;
                 self.dat_size = usize::MAX;
-                return Err(err!(errmsg!(
+                return Err(err!(
                     "When inserting the new {:?}, the data file size, {}, overflowed. \
-                    It has been set to the maximum {}.", floc, old_dat_size, usize::MAX,
-                ), Bug, Overflow, Integer));
+                    It has been set to the maximum {}.", floc, old_dat_size, usize::MAX;
+                Bug, Overflow, Integer));
             },
         }
         let ind_len = try_into!(usize, floc.klen) + ilen;
@@ -212,19 +212,19 @@ impl FileState {
             None => {
                 let old_ind_size = self.ind_size;
                 self.ind_size = usize::MAX;
-                return Err(err!(errmsg!(
+                return Err(err!(
                     "When inserting the new {:?}, the index file size, {}, overflowed. \
-                    It has been set to the maximum {}.", floc, old_ind_size, usize::MAX,
-                ), Bug, Overflow, Integer));
+                    It has been set to the maximum {}.", floc, old_ind_size, usize::MAX;
+                Bug, Overflow, Integer));
             },
         }
         match dat_len.checked_add(ind_len) {
             Some(sum) => Ok(sum),
-            None => Err(err!(errmsg!(
+            None => Err(err!(
                 "When inserting the new {:?}, the sum of the data file size, {}, \
                 and the index file size, {}, overflowed.",
-                floc, self.dat_size, self.ind_size,
-            ), Bug, Overflow, Integer)),
+                floc, self.dat_size, self.ind_size;
+            Bug, Overflow, Integer)),
         }
     }
 
@@ -239,11 +239,11 @@ impl FileState {
             None => {
                 let old_ind_size = self.ind_size;
                 self.ind_size = usize::MAX;
-                return Err(err!(errmsg!(
+                return Err(err!(
                     "When incrementing the size of the index file, {}, by {}, \
                     an overflow occurred. It has been set to the maximum {}.",
-                    old_ind_size, len, usize::MAX,
-                ), Bug, Overflow, Integer));
+                    old_ind_size, len, usize::MAX;
+                Bug, Overflow, Integer));
             },
         }
         Ok(len)
@@ -267,25 +267,25 @@ impl FileState {
         match self.dmap.insert(dloc.start, DataState::Old) {
             Some(DataState::Cur) => (),
             Some(DataState::Old) => {
-                return Err(err!(errmsg!(
-                    "{:?} has already been marked as old.", dloc,
-                ), Bug, Mismatch, Data));
+                return Err(err!(
+                    "{:?} has already been marked as old.", dloc;
+                Bug, Mismatch, Data));
             }
-            None => return Err(err!(errmsg!(
+            None => return Err(err!(
                 "While attempting to flag {:?} as old, a data entry starting \
-                at position {} in the FileState was not found.", dloc, dloc.start,
-            ), Bug, Missing, Data)),
+                at position {} in the FileState was not found.", dloc, dloc.start;
+            Bug, Missing, Data)),
         }
         match self.oldsum.checked_add(dloc.len) {
             Some(sum) => self.oldsum = sum,
             None => {
                 let old_oldsum = self.oldsum;
                 self.oldsum = u64::MAX;
-                return Err(err!(errmsg!(
+                return Err(err!(
                     "When registering the old {:?}, the sum of old data sizes, \
                     {} overflowed. It has been set to the maximum {}.",
-                    dloc, old_oldsum, u64::MAX,
-                ), Bug, Overflow, Integer));
+                    dloc, old_oldsum, u64::MAX;
+                Bug, Overflow, Integer));
             },
         }
         match self.oldcnt.checked_add(1) {
@@ -293,11 +293,11 @@ impl FileState {
             None => {
                 let old_oldcnt = self.oldcnt;
                 self.oldcnt = usize::MAX;
-                return Err(err!(errmsg!(
+                return Err(err!(
                     "When registering the old {:?}, the count of old data entries, \
                     {} overflowed. It has been set to the maximum {}.",
-                    dloc, old_oldcnt, usize::MAX,
-                ), Bug, Overflow, Integer));
+                    dloc, old_oldcnt, usize::MAX;
+                Bug, Overflow, Integer));
             },
         }
         Ok(())
@@ -314,26 +314,26 @@ impl FileState {
         if self.dat_size >= dat_len {
             self.dat_size -= dat_len;
         } else {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "While retiring {:?} from {:?}, the data file size, {}, will become negative.",
-                dloc, self, self.dat_size,
-            ), Bug, Underflow, Integer));
+                dloc, self, self.dat_size;
+            Bug, Underflow, Integer));
         }
         if self.oldsum >= dloc.len {
             self.oldsum -= dloc.len;
         } else {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "While retiring {:?} from {:?}, oldsum, {}, will become negative.",
-                dloc, self, self.oldsum,
-            ), Bug, Underflow, Integer));
+                dloc, self, self.oldsum;
+            Bug, Underflow, Integer));
         }
         if self.oldcnt > 0 {
             self.oldcnt -= 1;
         } else {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "While retiring {:?} from {:?}, oldcnt, {}, will become negative.",
-                dloc, self, self.oldcnt,
-            ), Bug, Underflow, Integer));
+                dloc, self, self.oldcnt;
+            Bug, Underflow, Integer));
         }
         Ok(dat_len)
     }
@@ -378,18 +378,18 @@ impl FileStateMap {
     pub fn get_state(&self, fnum: FileNum) -> Outcome<&FileState> {
         match self.map.get(&fnum) {
             Some(fstat) => Ok(fstat),
-            None => Err(err!(errmsg!(
-                "No state entry for file number {}.", fnum,
-            ), Bug, Missing, Data)),
+            None => Err(err!(
+                "No state entry for file number {}.", fnum;
+            Bug, Missing, Data)),
         }
     }
 
     pub fn get_state_mut(&mut self, fnum: FileNum) -> Outcome<&mut FileState> {
         match self.map.get_mut(&fnum) {
             Some(fstat) => Ok(fstat),
-            None => Err(err!(errmsg!(
-                "No state entry for file number {}.", fnum,
-            ), Bug, Missing, Data)),
+            None => Err(err!(
+                "No state entry for file number {}.", fnum;
+            Bug, Missing, Data)),
         }
     }
 

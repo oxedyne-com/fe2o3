@@ -91,17 +91,17 @@ impl<
         -> Outcome<Self>
     {
         if C > Self::MAX_CAPACITY {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "The specified capacity {} exceeds the (arbitrary) capacity limit of {}.",
-                C, Self::MAX_CAPACITY,
-            ), TooBig, Configuration));
+                C, Self::MAX_CAPACITY;
+            TooBig, Configuration));
         }
         let n = n as usize;
         if n > C {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "The specified number of maps {} exceeds the capacity of {}.",
-                n, C,
-            ), TooBig, Input));
+                n, C;
+            TooBig, Input));
         }
         let mut result = Self {
             n,
@@ -136,7 +136,7 @@ impl<
     //            let mut unlocked_map = lock_write!(locked_map);
     //            Ok((*unlocked_map).insert(key, value))
     //        },
-    //        None => return Err(err!(errmsg!(
+    //        None => return Err(err!(
     //            "Shard {} has not been initialised in a \
     //            ShardMap with size {} and capacity {}.",
     //            modulus, self.n, C,
@@ -161,11 +161,11 @@ impl<
                 let _value_opt = (*unlocked_map).insert(key, value);
                 Ok(existing_opt)
             },
-            None => return Err(err!(errmsg!(
+            None => return Err(err!(
                 "Shard {} has not been initialised in a \
                 ShardMap with size {} and capacity {}.",
-                modulus, self.n, C,
-            ), Bug, Configuration)),
+                modulus, self.n, C;
+            Bug, Configuration)),
         }
     }
     /// Returns the hashed key and the lock on the map.  If you want to access just a reference, get
@@ -204,11 +204,11 @@ impl<
         let modulus = res!(self.modulus(&key));
         match &self.shards[modulus] {
             Some(locked_map) => Ok(locked_map),
-            None => return Err(err!(errmsg!(
+            None => return Err(err!(
                 "Bin {} has not been initialised in a \
                 ShardMap with size {} and capacity {}.",
-                modulus, self.n, C,
-            ), Bug, Configuration)),
+                modulus, self.n, C;
+            Bug, Configuration)),
         }
     }
 
@@ -225,19 +225,19 @@ impl<
                                 let mut unlocked_map2 = lock_write!(locked_map2);
                                 unlocked_map2.insert(k.clone(), v.clone());
                             },
-                            None => return Err(err!(errmsg!(
+                            None => return Err(err!(
                                 "Bin {} has not been initialised in the new \
                                 ShardMap with size {} and capacity {}.",
-                                modulus, result.n, C,
-                            ), Bug, Configuration)),
+                                modulus, result.n, C;
+                            Bug, Configuration)),
                         }
                     }
                 },
-                None => return Err(err!(errmsg!(
+                None => return Err(err!(
                     "Bin {} has not been initialised in the existing \
                     ShardMap with size {} and capacity {}.",
-                    i, self.n, C,
-                ), Bug, Configuration)),
+                    i, self.n, C;
+                Bug, Configuration)),
             }
         }
         Ok(result)

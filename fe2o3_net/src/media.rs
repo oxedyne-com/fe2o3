@@ -103,13 +103,13 @@ impl FromStr for MediaType {
                 "model"         => Self::Model(res!(Model::from_str(right))),
                 "text"          => Self::Text(res!(Text::from_str(right))),
                 "multipart"     => Self::Multipart(res!(Multipart::from_str(right))),
-                _ => return Err(err!(errmsg!(
-                    "Unrecognised Media type '{}' in '{}'.", left, s,
-                ), IO, Network, Unknown, Input)),
+                _ => return Err(err!(
+                    "Unrecognised Media type '{}' in '{}'.", left, s;
+                IO, Network, Unknown, Input)),
             },
-            _ => return Err(err!(errmsg!(
-                "Invalid Media type '{}', '/' character not found.", s,
-            ), IO, Network, Invalid, Input)),
+            _ => return Err(err!(
+                "Invalid Media type '{}', '/' character not found.", s;
+            IO, Network, Invalid, Input)),
         })
     }
 }
@@ -193,9 +193,9 @@ impl FromStr for Application {
             "xml"                                                           => Self::Xml,                   
             "zip"                                                           => Self::Zip,                   
             "zstd"                                                          => Self::Zstd,                  
-            _ => return Err(err!(errmsg!(
-                "Unrecognised Application Media subtype '{}'.", s,
-            ), IO, Network, Unknown, Input)),
+            _ => return Err(err!(
+                "Unrecognised Application Media subtype '{}'.", s;
+            IO, Network, Unknown, Input)),
         })
     }
 }
@@ -226,9 +226,9 @@ impl FromStr for Audio {
         Ok(match s {
             "mpeg"          => Self::Mpeg,                  
             "ogg"           => Self::Ogg,               
-            _ => return Err(err!(errmsg!(
-                "Unrecognised Audio Media subtype '{}'.", s,
-            ), IO, Network, Unknown, Input)),
+            _ => return Err(err!(
+                "Unrecognised Audio Media subtype '{}'.", s;
+            IO, Network, Unknown, Input)),
         })
     }
 }
@@ -271,9 +271,9 @@ impl FromStr for Font {
             "ttf"               => Self::Ttf,
             "woff"              => Self::Woff,
             "woff2"             => Self::Woff2,
-            _ => return Err(err!(errmsg!(
-                "Unrecognised Font Media subtype '{}'.", s,
-            ), IO, Network, Unknown, Input)),
+            _ => return Err(err!(
+                "Unrecognised Font Media subtype '{}'.", s;
+            IO, Network, Unknown, Input)),
         })
     }
 }
@@ -316,9 +316,9 @@ impl FromStr for Image {
             "png"           => Self::Png,    
             "svg+xml"       => Self::SvgXml,
             "tiff"          => Self::Tiff,   
-            _ => return Err(err!(errmsg!(
-                "Unrecognised Image Media subtype '{}'.", s,
-            ), IO, Network, Unknown, Input)),
+            _ => return Err(err!(
+                "Unrecognised Image Media subtype '{}'.", s;
+            IO, Network, Unknown, Input)),
         })
     }
 }
@@ -346,9 +346,9 @@ impl FromStr for Model {
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         Ok(match s {
             "obj"           => Self::Obj,               
-            _ => return Err(err!(errmsg!(
-                "Unrecognised Model Media subtype '{}'.", s,
-            ), IO, Network, Unknown, Input)),
+            _ => return Err(err!(
+                "Unrecognised Model Media subtype '{}'.", s;
+            IO, Network, Unknown, Input)),
         })
     }
 }
@@ -376,9 +376,9 @@ impl FromStr for Multipart {
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         Ok(match s {
             "form-data"         => Self::FormData,               
-            _ => return Err(err!(errmsg!(
-                "Unrecognised Multipart Media subtype '{}'.", s,
-            ), IO, Network, Unknown, Input)),
+            _ => return Err(err!(
+                "Unrecognised Multipart Media subtype '{}'.", s;
+            IO, Network, Unknown, Input)),
         })
     }
 }
@@ -421,9 +421,9 @@ impl FromStr for Text {
             "html"              => Self::Html,
             "javascript"        => Self::Javascript,
             "xml"               => Self::Xml,
-            _ => return Err(err!(errmsg!(
-                "Unrecognised Text Media subtype '{}'.", s,
-            ), IO, Network, Unknown, Input)),
+            _ => return Err(err!(
+                "Unrecognised Text Media subtype '{}'.", s;
+            IO, Network, Unknown, Input)),
         })
     }
 }

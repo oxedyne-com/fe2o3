@@ -1,3 +1,7 @@
+<p align="center">
+    <img src="img/fe2o3_display_white_opt.svg" width="200"/>
+</p>
+
 # Oxedize Hematite (fe2o3)
 
 Hematite is a collection of Rust crates that grew from an exploration into database design and key data structures.  The project includes several innovative components:

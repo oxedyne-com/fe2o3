@@ -203,9 +203,9 @@ impl OzoneConfig {
     pub fn check_zone_index(&self, z: usize) -> Outcome<()> {
         let nz = self.num_zones as usize;
         if z >= nz {
-            Err(err!(errmsg!(
-                "{} cannot be used to index a zone, with {} zone(s) at present.", z, nz,
-            )))
+            Err(err!(
+                "{} cannot be used to index a zone, with {} zone(s) at present.", z, nz;
+                Configuration))
         } else {
             Ok(())
         }
@@ -232,15 +232,15 @@ impl OzoneConfig {
     pub fn canonicalize_path(pbuf: PathBuf) -> Outcome<String> {
         let canonical = match (&pbuf).canonicalize() {
             Ok(pbuf) => pbuf,
-            Err(e) => return Err(err!(e, errmsg!(
-                "The path {:?} does not exist and must be created.", pbuf,
-            ), Invalid, Input)),
+            Err(e) => return Err(err!(e,
+                "The path {:?} does not exist and must be created.", pbuf;
+                Configuration, Invalid, Input)),
         };
         match canonical.into_os_string().into_string() {
             Ok(s) => Ok(s),
-            _ => return Err(err!(errmsg!(
-                "Could not canonicalize {:?}, it may contain non-UTF-8 encoding.", pbuf,
-            ))),
+            _ => return Err(err!(
+                "Could not canonicalize {:?}, it may contain non-UTF-8 encoding.", pbuf;
+                Configuration, String, Conversion)),
         }
     }
 
@@ -279,41 +279,41 @@ impl OzoneConfig {
         let max_file_size = self.data_file_max_bytes as f64;
         let chunk_threshold = chunk_cfg.threshold_bytes as f64;
         if chunk_threshold >= constant::MAX_FILE_TO_CHUNKING_THRESHOLD_RATIO * max_file_size {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "The size threshold before file keys and values are chunked, \
                 supplied in the configuration, of {} bytes, is too large compared \
                 to the specified maximum data file size of {} bytes. The ratio \
                 should not exceed {:.1}%.",
                 chunk_cfg.threshold_bytes, self.data_file_max_bytes,
-                constant::MAX_FILE_TO_CHUNKING_THRESHOLD_RATIO * 100.0,
-            ), TooBig, Configuration));
+                constant::MAX_FILE_TO_CHUNKING_THRESHOLD_RATIO * 100.0;
+                TooBig, Configuration));
         }
         if chunk_cfg.chunk_size < constant::MIN_CHUNK_SIZE {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "Chunk size of {} is less than the current minimum of {}.",
-                chunk_cfg.chunk_size, constant::MIN_CHUNK_SIZE,
-            ), TooSmall, Configuration));
+                chunk_cfg.chunk_size, constant::MIN_CHUNK_SIZE;
+                TooSmall, Configuration));
         }
         let chunk_size = chunk_cfg.chunk_size as f64;
         if chunk_size * constant::MAX_FILE_TO_CHUNK_SIZE_RATIO >= max_file_size {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "The chunk size, supplied in the configuration, of {} bytes, is \
                 too large compared to the specified maximum data file size of {} \
                 bytes. The ratio should not exceed {:.1}%.",
                 chunk_cfg.chunk_size, self.data_file_max_bytes,
-                constant::MAX_FILE_TO_CHUNK_SIZE_RATIO * 100.0,
-            ), TooBig, Configuration));
+                constant::MAX_FILE_TO_CHUNK_SIZE_RATIO * 100.0;
+                TooBig, Configuration));
         }
         Ok(())
     }
 
     pub fn check_file_size(&self) -> Outcome<()> {
         if self.data_file_max_bytes > constant::MAX_FILE_BYTES {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "The configured maximum data file size in bytes of {} is too big, \
                 for safety it cannot exceed {}.",
-                self.data_file_max_bytes, constant::MAX_FILE_BYTES,
-            ), Invalid, Input));
+                self.data_file_max_bytes, constant::MAX_FILE_BYTES;
+                Invalid, Input));
         }
         Ok(())
     }

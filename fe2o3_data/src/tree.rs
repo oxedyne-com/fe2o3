@@ -646,10 +646,10 @@ impl<R, D: NodeData> Tree<R, D> {
         if let Some(current) = self.get_focal_node_mut() {
             current.set_node_focus(focus);
         } else {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "Could not find a tree node matching the current focus \
-                with path {:?}.", self.focus_path,
-            ), Data, Missing));
+                with path {:?}.", self.focus_path;
+            Data, Missing));
         }
 
         Ok(())

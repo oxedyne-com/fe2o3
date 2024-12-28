@@ -59,7 +59,7 @@ impl FromStr for SmtpCommand {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let parts: Vec<&str> = s.split_whitespace().collect();
         if parts.is_empty() {
-            return Err(err!(errmsg!("Message is empty."), Invalid, Input, Missing));
+            return Err(err!("Message is empty."; Invalid, Input, Missing));
         }
 
         if let Ok(code) = SmtpResponseCode::from_str(parts[0]) {
@@ -72,9 +72,9 @@ impl FromStr for SmtpCommand {
         match cmd.as_str() {
             "HELO" => {
                 if parts.len() != 2 {
-                    Err(err!(errmsg!(
-                        "'{}' invalid: {} command requires a single address.", s, cmd,
-                    ), Invalid, Input, Mismatch))
+                    Err(err!(
+                        "'{}' invalid: {} command requires a single address.", s, cmd;
+                    Invalid, Input, Mismatch))
                 } else {
                     let fqdn = parts[1].trim();
                     Ok(Self::Helo(res!(Fqdn::new(fqdn.to_string()))))
@@ -82,9 +82,9 @@ impl FromStr for SmtpCommand {
             }
             "EHLO" => {
                 if parts.len() != 2 {
-                    Err(err!(errmsg!(
-                        "'{}' invalid: {} command requires a single address.", s, cmd,
-                    ), Invalid, Input, Mismatch))
+                    Err(err!(
+                        "'{}' invalid: {} command requires a single address.", s, cmd;
+                    Invalid, Input, Mismatch))
                 } else {
                     let fqdn = parts[1].trim();
                     Ok(Self::Ehlo(res!(Fqdn::new(fqdn.to_string()))))
@@ -92,9 +92,9 @@ impl FromStr for SmtpCommand {
             }
             "MAIL" => {
                 if parts.len() != 2 || !parts[1].to_uppercase().starts_with("FROM:") {
-                    Err(err!(errmsg!(
-                        "'{}' invalid: {} command requires 'FROM:' followed by an address.", s, cmd,
-                    ), Invalid, Input))
+                    Err(err!(
+                        "'{}' invalid: {} command requires 'FROM:' followed by an address.", s, cmd;
+                    Invalid, Input))
                 } else {
                     let address = parts[1].trim_start_matches("FROM:<").trim_end_matches('>').to_string();
                     Ok(SmtpCommand::MailFrom(address))
@@ -102,9 +102,9 @@ impl FromStr for SmtpCommand {
             }
             "RCPT" => {
                 if parts.len() != 2 || !parts[1].to_uppercase().starts_with("TO:") {
-                    Err(err!(errmsg!(
-                        "'{}' invalid: {} command requires 'FROM:' followed by an address.", s, cmd,
-                    ), Invalid, Input))
+                    Err(err!(
+                        "'{}' invalid: {} command requires 'FROM:' followed by an address.", s, cmd;
+                    Invalid, Input))
                 } else {
                     let address = parts[1].trim_start_matches("TO:<").trim_end_matches('>').to_string();
                     Ok(SmtpCommand::RcptTo(address))
@@ -112,36 +112,36 @@ impl FromStr for SmtpCommand {
             }
             "DATA" => {
                 if parts.len() != 1 {
-                    Err(err!(errmsg!(
-                        "'{}' invalid: {} command should have no additional arguments.", s, cmd,
-                    ), Invalid, Input, Excessive))
+                    Err(err!(
+                        "'{}' invalid: {} command should have no additional arguments.", s, cmd;
+                    Invalid, Input, Excessive))
                 } else {
                     Ok(SmtpCommand::Data)
                 }
             }
             "QUIT" => {
                 if parts.len() != 1 {
-                    Err(err!(errmsg!(
-                        "'{}' invalid: {} command should have no additional arguments.", s, cmd,
-                    ), Invalid, Input, Excessive))
+                    Err(err!(
+                        "'{}' invalid: {} command should have no additional arguments.", s, cmd;
+                    Invalid, Input, Excessive))
                 } else {
                     Ok(SmtpCommand::Quit)
                 }
             }
             "RSET" => {
                 if parts.len() != 1 {
-                    Err(err!(errmsg!(
-                        "'{}' invalid: {} command should have no additional arguments.", s, cmd,
-                    ), Invalid, Input, Excessive))
+                    Err(err!(
+                        "'{}' invalid: {} command should have no additional arguments.", s, cmd;
+                    Invalid, Input, Excessive))
                 } else {
                     Ok(SmtpCommand::Rset)
                 }
             }
             "VRFY" => {
                 if parts.len() != 2 {
-                    Err(err!(errmsg!(
-                        "'{}' invalid: {} command requires a single argument.", s, cmd,
-                    ), Invalid, Input, Mismatch))
+                    Err(err!(
+                        "'{}' invalid: {} command requires a single argument.", s, cmd;
+                    Invalid, Input, Mismatch))
                 } else {
                     let address = parts[1].trim().to_string();
                     Ok(SmtpCommand::Vrfy(address))
@@ -149,9 +149,9 @@ impl FromStr for SmtpCommand {
             }
             "EXPN" => {
                 if parts.len() != 2 {
-                    Err(err!(errmsg!(
-                        "'{}' invalid: {} command requires a single argument.", s, cmd,
-                    ), Invalid, Input, Mismatch))
+                    Err(err!(
+                        "'{}' invalid: {} command requires a single argument.", s, cmd;
+                    Invalid, Input, Mismatch))
                 } else {
                     let address = parts[1].trim().to_string();
                     Ok(SmtpCommand::Expn(address))
@@ -164,25 +164,25 @@ impl FromStr for SmtpCommand {
                     let topic = parts[1].trim().to_string();
                     Ok(SmtpCommand::Help(Some(topic)))
                 } else {
-                    Err(err!(errmsg!(
-                        "'{}' invalid: {} command allows at most one argument.", s, cmd,
-                    ), Invalid, Input, Excessive))
+                    Err(err!(
+                        "'{}' invalid: {} command allows at most one argument.", s, cmd;
+                    Invalid, Input, Excessive))
                 }
             }
             "NOOP" => {
                 if parts.len() != 1 {
-                    Err(err!(errmsg!(
-                        "'{}' invalid: {} command should have no additional arguments.", s, cmd,
-                    ), Invalid, Input, Excessive))
+                    Err(err!(
+                        "'{}' invalid: {} command should have no additional arguments.", s, cmd;
+                    Invalid, Input, Excessive))
                 } else {
                     Ok(SmtpCommand::Noop)
                 }
             }
             "AUTH" => {
                 if parts.len() != 2 {
-                    Err(err!(errmsg!(
-                        "'{}' invalid: {} command requires a single argument.", s, cmd,
-                    ), Invalid, Input, Mismatch))
+                    Err(err!(
+                        "'{}' invalid: {} command requires a single argument.", s, cmd;
+                    Invalid, Input, Mismatch))
                 } else {
                     let mechanism = parts[1].trim().to_string();
                     Ok(SmtpCommand::Auth(mechanism))
@@ -190,14 +190,14 @@ impl FromStr for SmtpCommand {
             }
             "STARTTLS" => {
                 if parts.len() != 1 {
-                    Err(err!(errmsg!(
-                        "'{}' invalid: {} command should have no additional arguments.", s, cmd,
-                    ), Invalid, Input, Excessive))
+                    Err(err!(
+                        "'{}' invalid: {} command should have no additional arguments.", s, cmd;
+                    Invalid, Input, Excessive))
                 } else {
                     Ok(SmtpCommand::StartTls)
                 }
             }
-            _ => Err(err!(errmsg!("Unrecognised command in '{}'.", s), Unknown, Input)),
+            _ => Err(err!("Unrecognised command in '{}'.", s; Unknown, Input)),
         }
     }
 }

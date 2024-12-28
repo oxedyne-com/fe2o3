@@ -34,9 +34,9 @@ impl ErrorWhen {
 
     pub fn inc(&mut self) -> Outcome<()> {
         if self.cnt == self.lim.saturating_sub(1) {
-            Err(err!(errmsg!(
-                "Counter reached limit of {}.", self.lim,
-            ), LimitReached))
+            Err(err!(
+                "Counter reached limit of {}.", self.lim;
+            LimitReached))
         } else {
             self.cnt += 1;
             Ok(())
@@ -144,16 +144,16 @@ impl<
         -> Outcome<Self>
     {
         if start >= end {
-            return Err(err!(errmsg!(
-                "The end {} should be after the start {}.", end, start,
-            ), Input, Invalid, Order, Integer));
+            return Err(err!(
+                "The end {} should be after the start {}.", end, start;
+            Input, Invalid, Order, Integer));
         }
         let d = (end - start) / delta;
         if start + d * delta != end {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "The range [{}, {}] is not divisible by the given delta {}.",
-                start, end, delta,
-            ), Input, Invalid, Divisibility, Integer));
+                start, end, delta;
+            Input, Invalid, Divisibility, Integer));
         }
         Ok(Self {
             start,
@@ -263,16 +263,16 @@ impl<
         -> Outcome<Self>
     {
         if start >= end {
-            return Err(err!(errmsg!(
-                "The end {} should be after the start {}.", end, start,
-            ), Input, Invalid, Order, Integer));
+            return Err(err!(
+                "The end {} should be after the start {}.", end, start;
+            Input, Invalid, Order, Integer));
         }
         let d = (end - start) / delta;
         if start + d * delta != end {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "The range [{}, {}] is not divisible by the given delta {}.",
-                start, end, delta,
-            ), Input, Invalid, Divisibility, Integer));
+                start, end, delta;
+            Input, Invalid, Divisibility, Integer));
         }
         Ok(Self {
             start,

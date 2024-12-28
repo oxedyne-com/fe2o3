@@ -41,25 +41,25 @@ impl PathState {
     {
         let rel_path = Path::new(rel_path).normalise();
         if rel_path.escapes() {
-            return Err(err!(errmsg!(
-                "The relative path '{:?}' escapes the root directory.", rel_path,
-            ), Invalid, Input, Path));
+            return Err(err!(
+                "The relative path '{:?}' escapes the root directory.", rel_path;
+            Invalid, Input, Path));
         }
         let abs_path = root.clone().join(rel_path).normalise().absolute();
         if abs_path.exists() {
             if let Self::DirMustExist = self {
                 if !abs_path.is_dir() {
-                    return Err(err!(errmsg!(
-                        "Path '{:?}' exists but is not a directory.", root,
-                    ), Input, Invalid, File, Path));
+                    return Err(err!(
+                        "Path '{:?}' exists but is not a directory.", root;
+                    Input, Invalid, File, Path));
                 }
             }
         } else {
             match self {
                 Self::DirMustExist |
-                Self::FileMustExist => return Err(err!(errmsg!(
-                    "The path '{:?}' must exist but was not found.", abs_path,
-                ), Path, File, Missing)),
+                Self::FileMustExist => return Err(err!(
+                    "The path '{:?}' must exist but was not found.", abs_path;
+                Path, File, Missing)),
                 Self::Create => res!(fs::create_dir_all(&abs_path)),
             }
         }

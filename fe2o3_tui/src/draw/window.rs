@@ -320,9 +320,9 @@ impl Window {
     {
         if cfg.typ == WindowType::Dynamic {
             if let RectView::AlwaysRelative(_) = view {
-                return Err(err!(errmsg!(
-                    "A dynamic window view cannot be set as {:?}.", view,
-                    ), Input, Invalid));
+                return Err(err!(
+                    "A dynamic window view cannot be set as {:?}.", view;
+                Input, Invalid));
             }
         }
         Ok(Self {

@@ -102,24 +102,24 @@ impl DocKey {
         // Length limit.
         let len = s.chars().count();
         if len > constant::DOC_PATH_LEN_LIMIT {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "The doc path '{}' of length {} exceeds the limit of {}.",
-                s, len, constant::DOC_PATH_LEN_LIMIT,
-            ), Invalid, Input, String, TooBig));
+                s, len, constant::DOC_PATH_LEN_LIMIT;
+            Invalid, Input, String, TooBig));
         }
         // Must start with a '/'.
         if !s.starts_with('/') {
-            return Err(err!(errmsg!(
-                "The doc path '{}' does not start with a '/'.", s,
-            ), Invalid, Input, String, Missing));
+            return Err(err!(
+                "The doc path '{}' does not start with a '/'.", s;
+            Invalid, Input, String, Missing));
         }
         // No parts with zero length.
         for (i, part) in s.split('/').enumerate() {
             if part.chars().count() == 0 && i > 0 {
-                return Err(err!(errmsg!(
+                return Err(err!(
                     "Zero length part of path '{}' not allowed in components {:?}",
-                    s, s.split('/').collect::<Vec<_>>(),
-                ), Invalid, Input, String, TooSmall));
+                    s, s.split('/').collect::<Vec<_>>();
+                Invalid, Input, String, TooSmall));
             }
         }
         Ok(())

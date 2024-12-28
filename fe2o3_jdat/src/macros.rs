@@ -771,10 +771,10 @@ macro_rules! try_extract_dat {
             $(
             Dat::$var(v) => v,
             )*
-            unknown => return Err(err!(errmsg!(
+            unknown => return Err(err!(
                 "Expected one of a {} found {:?}.",
-                stringify!($(Dat::$var,)*), unknown,
-            ), Daticle, Input, Invalid)),
+                stringify!($(Dat::$var,)*), unknown;
+            Daticle, Input, Invalid)),
         }
     };
 }
@@ -807,10 +807,10 @@ macro_rules! try_extract_dat_as {
             $(
             Dat::$var(v) => v as $trg,
             )*
-            unknown => return Err(err!(errmsg!(
+            unknown => return Err(err!(
                 "Expected a {} found {:?}.",
-                stringify!($(Dat::$var,)*), unknown,
-            ), Daticle, Input, Invalid)),
+                stringify!($(Dat::$var,)*), unknown;
+            Daticle, Input, Invalid)),
         }
     };
 }
@@ -836,16 +836,16 @@ macro_rules! try_extract_listdat {
                 if v.len() == $n {
                     v
                 } else {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "Number of Dat::List items should be {}, found {}.",
-                        $n, v.len(),
-                    ), Daticle, Input, Invalid));
+                        $n, v.len();
+                    Daticle, Input, Invalid));
                 }
             },
-            unknown => return Err(err!(errmsg!(
+            unknown => return Err(err!(
                 "Expected a Dat::List, found {:?}.",
-                unknown,
-            ), Daticle, Input, Invalid)),
+                unknown;
+            Daticle, Input, Invalid)),
         }
     };
 }
@@ -875,15 +875,15 @@ macro_rules! try_extract_tup2dat {
                 if v.len() == 2 {
                     *v
                 } else {
-                    return Err(err!(errmsg!(
-                        "Number of Dat::Tup2 items should be 2, found {}.", v.len(),
-                    ), Daticle, Input, Invalid));
+                    return Err(err!(
+                        "Number of Dat::Tup2 items should be 2, found {}.", v.len();
+                    Daticle, Input, Invalid));
                 }
             },
-            unknown => return Err(err!(errmsg!(
+            unknown => return Err(err!(
                 "Expected a Dat::Tup2, found {:?}.",
-                unknown,
-            ), Daticle, Input, Invalid)),
+                unknown;
+            Daticle, Input, Invalid)),
         }
     };
 }
@@ -914,15 +914,15 @@ macro_rules! try_extract_tup3dat {
                 if v.len() == 3 {
                     *v
                 } else {
-                    return Err(err!(errmsg!(
-                        "Number of Dat::Tup3 items should be 3, found {}.", v.len(),
-                    ), Daticle, Input, Invalid));
+                    return Err(err!(
+                        "Number of Dat::Tup3 items should be 3, found {}.", v.len();
+                    Daticle, Input, Invalid));
                 }
             },
-            unknown => return Err(err!(errmsg!(
+            unknown => return Err(err!(
                 "Expected a Dat::Tup3, found {:?}.",
-                unknown,
-            ), Daticle, Input, Invalid)),
+                unknown;
+            Daticle, Input, Invalid)),
         }
     };
 }
@@ -954,15 +954,15 @@ macro_rules! try_extract_tup4dat {
                 if v.len() == 4 {
                     *v
                 } else {
-                    return Err(err!(errmsg!(
-                        "Number of Dat::Tup4 items should be 4, found {}.", v.len(),
-                    ), Daticle, Input, Invalid));
+                    return Err(err!(
+                        "Number of Dat::Tup4 items should be 4, found {}.", v.len();
+                    Daticle, Input, Invalid));
                 }
             },
-            unknown => return Err(err!(errmsg!(
+            unknown => return Err(err!(
                 "Expected a Dat::Tup4, found {:?}.",
-                unknown,
-            ), Daticle, Input, Invalid)),
+                unknown;
+            Daticle, Input, Invalid)),
         }
     };
 }
@@ -995,15 +995,15 @@ macro_rules! try_extract_tup5dat {
                 if v.len() == 5 {
                     *v
                 } else {
-                    return Err(err!(errmsg!(
-                        "Number of Dat::Tup5 items should be 5, found {}.", v.len(),
-                    ), Daticle, Input, Invalid));
+                    return Err(err!(
+                        "Number of Dat::Tup5 items should be 5, found {}.", v.len();
+                    Daticle, Input, Invalid));
                 }
             },
-            unknown => return Err(err!(errmsg!(
+            unknown => return Err(err!(
                 "Expected a Dat::Tup5, found {:?}.",
-                unknown,
-            ), Daticle, Input, Invalid)),
+                unknown;
+            Daticle, Input, Invalid)),
         }
     };
 }
@@ -1037,15 +1037,15 @@ macro_rules! try_extract_tup6dat {
                 if v.len() == 6 {
                     *v
                 } else {
-                    return Err(err!(errmsg!(
-                        "Number of Dat::Tup6 items should be 6, found {}.", v.len(),
-                    ), Daticle, Input, Invalid));
+                    return Err(err!(
+                        "Number of Dat::Tup6 items should be 6, found {}.", v.len();
+                    Daticle, Input, Invalid));
                 }
             },
-            unknown => return Err(err!(errmsg!(
+            unknown => return Err(err!(
                 "Expected a Dat::Tup6, found {:?}.",
-                unknown,
-            ), Daticle, Input, Invalid)),
+                unknown;
+            Daticle, Input, Invalid)),
         }
     };
 }
@@ -1080,15 +1080,15 @@ macro_rules! try_extract_tup7dat {
                 if v.len() == 7 {
                     *v
                 } else {
-                    return Err(err!(errmsg!(
-                        "Number of Dat::Tup7 items should be 7, found {}.", v.len(),
-                    ), Daticle, Input, Invalid));
+                    return Err(err!(
+                        "Number of Dat::Tup7 items should be 7, found {}.", v.len();
+                    Daticle, Input, Invalid));
                 }
             },
-            unknown => return Err(err!(errmsg!(
+            unknown => return Err(err!(
                 "Expected a Dat::Tup7, found {:?}.",
-                unknown,
-            ), Daticle, Input, Invalid)),
+                unknown;
+            Daticle, Input, Invalid)),
         }
     };
 }
@@ -1124,15 +1124,15 @@ macro_rules! try_extract_tup8dat {
                 if v.len() == 8 {
                     *v
                 } else {
-                    return Err(err!(errmsg!(
-                        "Number of Dat::Tup8 items should be 8, found {}.", v.len(),
-                    ), Daticle, Input, Invalid));
+                    return Err(err!(
+                        "Number of Dat::Tup8 items should be 8, found {}.", v.len();
+                    Daticle, Input, Invalid));
                 }
             },
-            unknown => return Err(err!(errmsg!(
+            unknown => return Err(err!(
                 "Expected a Dat::Tup8, found {:?}.",
-                unknown,
-            ), Daticle, Input, Invalid)),
+                unknown;
+            Daticle, Input, Invalid)),
         }
     };
 }
@@ -1169,15 +1169,15 @@ macro_rules! try_extract_tup9dat {
                 if v.len() == 9 {
                     *v
                 } else {
-                    return Err(err!(errmsg!(
-                        "Number of Dat::Tup9 items should be 9, found {}.", v.len(),
-                    ), Daticle, Input, Invalid));
+                    return Err(err!(
+                        "Number of Dat::Tup9 items should be 9, found {}.", v.len();
+                    Daticle, Input, Invalid));
                 }
             },
-            unknown => return Err(err!(errmsg!(
+            unknown => return Err(err!(
                 "Expected a Dat::Tup9, found {:?}.",
-                unknown,
-            ), Daticle, Input, Invalid)),
+                unknown;
+            Daticle, Input, Invalid)),
         }
     };
 }
@@ -1215,15 +1215,15 @@ macro_rules! try_extract_tup10dat {
                 if v.len() == 10 {
                     *v
                 } else {
-                    return Err(err!(errmsg!(
-                        "Number of Dat::Tup10 items should be 10, found {}.", v.len(),
-                    ), Daticle, Input, Invalid));
+                    return Err(err!(
+                        "Number of Dat::Tup10 items should be 10, found {}.", v.len();
+                    Daticle, Input, Invalid));
                 }
             },
-            unknown => return Err(err!(errmsg!(
+            unknown => return Err(err!(
                 "Expected a Dat::Tup10, found {:?}.",
-                unknown,
-            ), Daticle, Input, Invalid)),
+                unknown;
+            Daticle, Input, Invalid)),
         }
     };
 }
@@ -1444,9 +1444,9 @@ macro_rules! string_decode_heterogenous_tuple {
         return Ok(Dat::$target(Box::new(
             match $list.try_into() {
                 Ok(a) => a,
-                Err(_) => return Err(err!(errmsg!(
-                    "Length of {} string is {}.", $state.kind_outer, $len,
-                ), Input, Invalid)),
+                Err(_) => return Err(err!(
+                    "Length of {} string is {}.", $state.kind_outer, $len;
+                Input, Invalid)),
             }
         )))
 
@@ -1460,20 +1460,19 @@ macro_rules! string_decode_int_tuple {
         
         {
             if $list.len() != $len {
-                return Err(err!(errmsg!(
-                    "Length of {} string is {}.", $state.kind_outer, $len,
-                ), Input, Invalid));
+                return Err(err!(
+                    "Length of {} string is {}.", $state.kind_outer, $len;
+                Input, Invalid));
             }
             let mut a: [$typ; $len] = [0; $len];
             let mut i: usize = 0;
             for d in $list {
                 match d {
                     Dat::$kind(n) => a[i] = n,
-                    _ => return Err(err!(errmsg!(
+                    _ => return Err(err!(
                         "Expecting a daticle of kind {:?}, found {:?}.",
-                        Kind::$kind, d,
-                        ), Input, Mismatch, Unexpected, Bug,
-                    )),
+                        Kind::$kind, d;
+                    Input, Mismatch, Unexpected, Bug)),
                 }
                 i += 1;
             }

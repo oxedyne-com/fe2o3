@@ -905,11 +905,11 @@ pub trait SaberAlgorithm: fmt::Display {
 
     fn verify(a: &[u8], b: &[u8]) -> Outcome<bool> {
         if a.len() != b.len() {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "First slice length = {}, second slice length = {}.",
                 a.len(),
-                b.len(),
-            ), Index, Mismatch));
+                b.len();
+            Index, Mismatch));
         }
         let mut r: u64 = 0;
         for i in 0..a.len() {

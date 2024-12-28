@@ -38,9 +38,9 @@ pub fn test_path(filter: &'static str) -> Outcome<()> {
             test!(" string: {:?}", result);
             match result {
                 Some(pstr) => req!(expected, &pstr),
-                None => return Err(err!(errmsg!(
-                    "Normalising the path '{}' produced {:?}.", input, result,
-                ), Test, Mismatch)),
+                None => return Err(err!(
+                    "Normalising the path '{}' produced {:?}.", input, result;
+                Test, Mismatch)),
             }
         }
         Ok(())
@@ -62,9 +62,9 @@ pub fn test_path(filter: &'static str) -> Outcome<()> {
                     test!("result: {}", s);
                     req!(expected, &s, "(L: expected)");
                 },
-                Err(oss) => return Err(err!(errmsg!(
-                    "Could not convert '{:?}' to string.", oss,
-                ), Test, String, Conversion)),
+                Err(oss) => return Err(err!(
+                    "Could not convert '{:?}' to string.", oss;
+                Test, String, Conversion)),
             }
         }
         Ok(())
@@ -87,9 +87,9 @@ pub fn test_path(filter: &'static str) -> Outcome<()> {
                     test!("result: {}", s);
                     req!(expected, &s, "(L: expected)");
                 },
-                Err(oss) => return Err(err!(errmsg!(
-                    "Could not convert '{:?}' to string.", oss,
-                ), Test, String, Conversion)),
+                Err(oss) => return Err(err!(
+                    "Could not convert '{:?}' to string.", oss;
+                Test, String, Conversion)),
             }
         }
         Ok(())

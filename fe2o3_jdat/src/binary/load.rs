@@ -92,9 +92,9 @@ impl Dat {
         match r.read_exact(&mut dcode) {
             Err(e) => match e.kind() {
                 std::io::ErrorKind::UnexpectedEof => return Ok(()),
-                _ => return Err(err!(e, errmsg!(
-                    "While trying to read Dat code from reader.",
-                ), Decode, Bytes)),
+                _ => return Err(err!(e,
+                    "While trying to read Dat code from reader.";
+                Decode, Bytes)),
             },
             Ok(()) => (),
         }
@@ -295,11 +295,11 @@ impl Dat {
                 res!(r.read_exact(&mut c64code));
                 byts.extend_from_slice(&c64code[..]);
                 if c64code[0] < Self::C64_CODE_START || c64code[0] > Self::C64_CODE_START + 8 {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "Expected a valid Dat::C64 code between {} and {} inclusive, \
                         instead found {}.", Self::C64_CODE_START, Self::C64_CODE_START + 8,
-                        c64code[0],
-                    ), Invalid, Input, Decode, Bytes));
+                        c64code[0];
+                    Invalid, Input, Decode, Bytes));
                 }
                 if c64code[0] == Self::C64_CODE_START {
                     return Ok(());
@@ -338,11 +338,11 @@ impl Dat {
                 //   c64
                 //
                 if dcode[0] < Self::C64_CODE_START || dcode[0] > Self::C64_CODE_START + 8 {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "Expected a valid Dat::C64 code between {} and {} inclusive, \
                         instead found {}.", Self::C64_CODE_START, Self::C64_CODE_START + 8,
-                        dcode[0],
-                    ), Invalid, Input, Decode, Bytes));
+                        dcode[0];
+                    Invalid, Input, Decode, Bytes));
                 }
                 if dcode[0] == Self::C64_CODE_START {
                     return Ok(());
@@ -604,9 +604,9 @@ impl Dat {
             Self::TUP9_U64_CODE     => binary_load_byte_tuple! { Tup9u64, u64, 9, r, byts },
             Self::TUP10_U64_CODE    => binary_load_byte_tuple! { Tup10u64, u64, 10, r, byts },
 
-            code => return Err(err!(errmsg!(
-                "Dat identification code {} not recognised.", code,
-            ), Invalid, Input)),
+            code => return Err(err!(
+                "Dat identification code {} not recognised.", code;
+            Invalid, Input)),
         }
     }
 }

@@ -60,16 +60,16 @@ impl<
         ));
         let num_chunks = match res!(resp.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
             OzoneMsg::Chunks(n) => n,
-            msg => return Err(err!(errmsg!(
-                "Expected an OzoneMsg::Chunks message, received a: {:?}", msg,
-            ), Bug, Unexpected)),
+            msg => return Err(err!(
+                "Expected an OzoneMsg::Chunks message, received a: {:?}", msg;
+            Bug, Unexpected)),
         };
         if num_chunks == 1 {
             match res!(resp.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
                 OzoneMsg::KeyExists(exists) => return Ok((exists, 1)),
-                msg => return Err(err!(errmsg!(
-                    "Expected an OzoneMsg::KeyExists message, received a: {:?}", msg,
-                ), Bug, Unexpected)),
+                msg => return Err(err!(
+                    "Expected an OzoneMsg::KeyExists message, received a: {:?}", msg;
+                Bug, Unexpected)),
             }
         } else {
             let (_, msgs) = res!(resp.recv_number(num_chunks, constant::USER_REQUEST_WAIT));
@@ -114,9 +114,9 @@ impl<
         ));
         match res!(resp.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
             OzoneMsg::KeyExists(b) => Ok(b),
-            msg => Err(err!(errmsg!(
-                "Expected an OzoneMsg::KeyExists message, received a: {:?}", msg,
-            ), Bug, Unexpected)),
+            msg => Err(err!(
+                "Expected an OzoneMsg::KeyExists message, received a: {:?}", msg;
+            Bug, Unexpected)),
         }
     }
 }
@@ -193,16 +193,16 @@ impl<
         ));
         let num_chunks = match res!(resp.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
             OzoneMsg::Chunks(n) => n,
-            msg => return Err(err!(errmsg!(
-                "Expected an OzoneMsg::Chunks message, received a: {:?}", msg,
-            ), Bug, Unexpected)),
+            msg => return Err(err!(
+                "Expected an OzoneMsg::Chunks message, received a: {:?}", msg;
+            Bug, Unexpected)),
         };
         if num_chunks == 1 {
             match res!(resp.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
                 OzoneMsg::KeyExists(exists) => return Ok((exists, 1)),
-                msg => return Err(err!(errmsg!(
-                    "Expected an OzoneMsg::KeyExists message, received a: {:?}", msg,
-                ), Bug, Unexpected)),
+                msg => return Err(err!(
+                    "Expected an OzoneMsg::KeyExists message, received a: {:?}", msg;
+                Bug, Unexpected)),
             }
         } else {
             let (_, msgs) = res!(resp.recv_number(num_chunks, constant::USER_REQUEST_WAIT));
@@ -249,9 +249,9 @@ impl<
         ));
         match res!(resp.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
             OzoneMsg::KeyExists(b) => Ok(b),
-            msg => Err(err!(errmsg!(
-                "Expected an OzoneMsg::KeyExists message, received a: {:?}", msg,
-            ), Bug, Unexpected)),
+            msg => Err(err!(
+                "Expected an OzoneMsg::KeyExists message, received a: {:?}", msg;
+            Bug, Unexpected)),
         }
     }
 }

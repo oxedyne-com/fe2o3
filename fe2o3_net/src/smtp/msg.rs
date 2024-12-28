@@ -65,9 +65,9 @@ impl SmtpMessage {
                 // Remove the '-' prefix and append the line to the previous command.
                 let mut last_command = match message.pop() {
                     Some(command) => command,
-                    None => return Err(err!(errmsg!(
-                        "Unexpected end of message",
-                    ), Unexpected, Input, Missing)),
+                    None => return Err(err!(
+                        "Unexpected end of message";
+                    Unexpected, Input, Missing)),
                 };
                 let multiline_response = line[1..].trim();
                 match last_command {
@@ -75,9 +75,9 @@ impl SmtpMessage {
                         msg.push('\n');
                         msg.push_str(multiline_response);
                     }
-                    _ => return Err(err!(errmsg!(
-                        "Unexpected multiline response: {}", line,
-                    ), Invalid, Input)),
+                    _ => return Err(err!(
+                        "Unexpected multiline response: {}", line;
+                    Invalid, Input)),
                 }
                 message.push(last_command);
                 continue;
@@ -99,9 +99,9 @@ impl SmtpMessage {
                         message.push(command);
                     }
                 },
-                Err(e) => return Err(err!(e, errmsg!(
-                    "Invalid SMTP command: {}", line,
-                ), Invalid, Input)),
+                Err(e) => return Err(err!(e,
+                    "Invalid SMTP command: {}", line;
+                Invalid, Input)),
             }
         }
 

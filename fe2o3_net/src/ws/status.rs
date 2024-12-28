@@ -44,9 +44,9 @@ impl TryFrom<u16> for WebSocketStatusCode {
             1012 => WebSocketStatusCode::ServiceRestart,
             1013 => WebSocketStatusCode::TryAgainLater,
             1015 => WebSocketStatusCode::TlsHandshake,
-            _ => return Err(err!(errmsg!(
-                "Unrecognised websocket status code {}.", value,
-            ), Conversion, Integer)),
+            _ => return Err(err!(
+                "Unrecognised websocket status code {}.", value;
+            Conversion, Integer)),
         })
     }
 }

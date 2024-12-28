@@ -66,9 +66,9 @@ impl<ETAG: GenTag> Logger<ETAG>
         let unlocked_chan_out = lock_read!(self.chan_out);
         match unlocked_chan_out.chan.send(msg.clone()) {
             Ok(()) => Ok(()),
-            Err(e) => Err(err!(e, errmsg!(
-                "While trying to send message: {:?}", msg,
-            ), IO, Channel, Write)),
+            Err(e) => Err(err!(e,
+                "While trying to send message: {:?}", msg;
+            IO, Channel, Write)),
         }
     }
 
@@ -214,10 +214,10 @@ impl FromStr for LogLevel {
             "test"  => Ok(LogLevel::Test),
             "debug" => Ok(LogLevel::Debug),
             "trace" => Ok(LogLevel::Trace),
-            _ => Err(err!(errmsg!(
+            _ => Err(err!(
                 "The LogLevel '{}' is not recognised, use 'trace', 'debug', \
-                'info', 'warn', or 'error'.", s,
-            ), Invalid, Input)),
+                'info', 'warn', or 'error'.", s;
+            Invalid, Input)),
         }
     }
 }

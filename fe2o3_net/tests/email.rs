@@ -89,14 +89,14 @@ Sender\r
                 test!("{:?}", email);
             }
             Some(Err(e)) => {
-                return Err(err!(e, errmsg!(
-                    "While reading first email from mbox file.",
-                ), Test, IO, File, Read)); 
+                return Err(err!(e,
+                    "While reading first email from mbox file.";
+                Test, IO, File, Read)); 
             }
             None => {
-                return Err(err!(errmsg!(
-                    "Expected to read an email from the mbox file.",
-                ), Test, Missing, Data)); 
+                return Err(err!(
+                    "Expected to read an email from the mbox file.";
+                Test, Missing, Data)); 
             }
         }
         Ok(())

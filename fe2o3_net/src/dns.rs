@@ -22,47 +22,44 @@ impl Fqdn {
     /// (IETF) document RFC 1035, "Domain Names - Implementation and Specification." Section 2.3.1.
     pub fn validate(fqdn: &str) -> Outcome<()> {
         if fqdn.is_empty() {
-            return Err(err!(errmsg!("Name is empty."), Invalid, Input, Missing));
-        }
-        if fqdn.len() > 255 {
-            return Err(err!(errmsg!(
-                "'{}': Domain name length of {} exceeds 255.", fqdn, fqdn.len(),
-            ), Invalid, Input, Size));
+            return Err(err!(
+                "'{}': Domain name length of {} exceeds 255.", fqdn, fqdn.len();
+            Invalid, Input, Size));
         }
         // Split the FQDN into domain labels.
         let labels: Vec<&str> = fqdn.split('.').collect();
         // Check if the FQDN has at least two labels (e.g., "example.com").
         if labels.len() < 2 {
-            return Err(err!(errmsg!(
-                "'{}': Domain name must have at least one '.'.", fqdn,
-            ), Invalid, Input));
+            return Err(err!(
+                "'{}': Domain name must have at least one '.'.", fqdn;
+            Invalid, Input));
         }
         // Validate each domain label
         for label in labels {
             // Check if the label is empty.
             if label.is_empty() {
-                return Err(err!(errmsg!(
-                    "'{}': Empty domain label.", label,
-                ), Invalid, Input, Missing));
+                return Err(err!(
+                    "'{}': Empty domain label.", label;
+                Invalid, Input, Missing));
             }
             // Check if the label exceeds the maximum length (63 characters).
             if label.len() > 63 {
-                return Err(err!(errmsg!(
-                    "'{}': Domain name label length of {} exceeds 63.", label, label.len(),
-                ), Invalid, Input, Size));
+                return Err(err!(
+                    "'{}': Domain name label length of {} exceeds 63.", label, label.len();
+                Invalid, Input, Size));
             }
             // Check if the label contains only allowed characters.
             if !label.chars().all(|c| c.is_alphanumeric() || c == '-') {
-                return Err(err!(errmsg!(
+                return Err(err!(
                     "'{}': Domain name label can only contain alphanumeric or '-' characters.",
-                    label,
-                ), Invalid, Input, String));
+                    label;
+                Invalid, Input, String));
             }
             // Check if the label starts or ends with a hyphen
             if label.starts_with('-') || label.ends_with('-') {
-                return Err(err!(errmsg!(
-                    "'{}': Domain name label must not begin or end with a '-'.", label,
-                ), Invalid, Input, String));
+                return Err(err!(
+                    "'{}': Domain name label must not begin or end with a '-'.", label;
+                Invalid, Input, String));
             }
         }
         Ok(())

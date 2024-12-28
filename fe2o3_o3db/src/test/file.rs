@@ -95,9 +95,9 @@ pub fn corrupt_an_index_file(zone_dirs: &BTreeMap<ZoneInd, ZoneDir>) -> Outcome<
             }
         }
     } else {
-        return Err(err!(errmsg!(
-            "Could not obtain the directory for the first zone.",
-        ), Missing, Data));
+        return Err(err!(
+            "Could not obtain the directory for the first zone.";
+        Missing, Data));
     }
     
     Ok(())
@@ -164,9 +164,9 @@ pub fn save_single_file<
                 let istored = sfloc.buf;
                 res!(file.write(&istored));
             },
-            _ => return Err(err!(errmsg!(
-                "Expecting OzoneMsg::Write, got {:?}", msg,
-            ), Unreachable, Bug)),
+            _ => return Err(err!(
+                "Expecting OzoneMsg::Write, got {:?}", msg;
+            Unreachable, Bug)),
         }
     }
 
@@ -249,9 +249,9 @@ pub fn save_multiple_files<
                 //}
                 i += 1;
             },
-            _ => return Err(err!(errmsg!(
-                "Expecting OzoneMsg::Write, got {:?}", msg,
-            ), Unreachable, Bug)),
+            _ => return Err(err!(
+                "Expecting OzoneMsg::Write, got {:?}", msg;
+            Unreachable, Bug)),
         }
     }
 

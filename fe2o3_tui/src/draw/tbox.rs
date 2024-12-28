@@ -152,9 +152,9 @@ impl TextBox {
         -> Outcome<Self>
     {
         if cfg.highlight_styles.len() == 0 {
-            return Err(err!(errmsg!(
-                "TextBoxConfig highlight_styles vector is empty.",
-            ), Input, Invalid, Missing));
+            return Err(err!(
+                "TextBoxConfig highlight_styles vector is empty.";
+            Input, Invalid, Missing));
         }
         Ok(Self {
             cfg,

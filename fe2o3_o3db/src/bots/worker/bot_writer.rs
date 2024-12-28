@@ -108,9 +108,9 @@ impl<
 
     fn listen(&mut self) -> LoopBreak {
         match self.chan_in().recv() {
-            Err(e) => self.err_cannot_receive(err!(e, errmsg!(
-                "{}: Waiting for message.", self.ozid(),
-            ), IO, Channel)),
+            Err(e) => self.err_cannot_receive(err!(e,
+                "{}: Waiting for message.", self.ozid();
+                IO, Channel)),
             Ok(msg) => {
                 if let Some(msg) = self.listen_worker(msg) {
                     match msg {
@@ -299,20 +299,20 @@ impl<
         // [3] Ask zbot for next live file number.
         let resp = Responder::new(Some(self.ozid()));
         match self.zbot() {
-            None => return Err(err!(errmsg!(
-                "{}: Could not get zbot work channel.", self.ozid(),
-            ), Missing, Data)),
+            None => return Err(err!(
+                "{}: Could not get zbot work channel.", self.ozid();
+                Missing, Data)),
             Some(zbot) => 
                 res!(zbot.send(OzoneMsg::NextLiveFile(resp.clone()))),
         }
         let fnum_new = match resp.recv_timeout(constant::BOT_REQUEST_TIMEOUT) {
-            Err(e) => return Err(err!(e, errmsg!(
-                "While getting next live file info from zbot.",
-            ), IO, Channel, Read)),
+            Err(e) => return Err(err!(e,
+                "While getting next live file info from zbot.";
+                IO, Channel, Read)),
             Ok(OzoneMsg::UseLiveFile(fnum)) => fnum,
-            Ok(msg) => return Err(err!(errmsg!(
-                "Unrecognised new live file request response: {:?}", msg,
-            ), Bug, Invalid, Input)),
+            Ok(msg) => return Err(err!(
+                "Unrecognised new live file request response: {:?}", msg;
+                Bug, Invalid, Input)),
         };
 
         self.lpair.close();
@@ -332,13 +332,13 @@ impl<
         }));
         // [9] Wait to hear when the new live file is ready to go.
         match resp_w3.recv_timeout(constant::BOT_REQUEST_TIMEOUT) {
-            Err(e) => return Err(err!(e, errmsg!(
-                "While advising fbot to update live file states.",
-            ), IO, Channel, Read)),
+            Err(e) => return Err(err!(e,
+                "While advising fbot to update live file states.";
+                IO, Channel, Read)),
             Ok(OzoneMsg::Ok) => (),
-            Ok(msg) => return Err(err!(errmsg!(
-                "Unrecognised response after advising fbot to update live file states: {:?}", msg)),
-            ),
+            Ok(msg) => return Err(err!(
+                "Unrecognised response after advising fbot to update live file states: {:?}", msg;
+                Channel)),
         }
 
         Ok((fnum_new, start))
@@ -373,11 +373,11 @@ impl<
         }
         let max_file_len = self.cfg().data_file_max_bytes as usize;
         if vlen > max_file_len {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "Attempt to store {:?} value of length {} bytes \
                 exceeds the config setting of {}.",
-                typ, vlen, max_file_len,
-            ), IO, File, Write, Input, TooBig));
+                typ, vlen, max_file_len;
+                IO, File, Write, Input, TooBig));
         }
 
         // [2.2] If the current live file is full, start a new one before anything is written.
@@ -400,15 +400,17 @@ impl<
                         Some(file) => {
                             match file.write(vi) {
                                 Err(e) => {
-                                    error!(err!(e, fmt!("{}: while writing to file, rewinding.", self.ozid())));
+                                    error!(err!(e,
+                                        "{}: while writing to file, rewinding.", self.ozid();
+                                        IO, File, Write));
                                     break;
                                 },
                                 Ok(n) => bytes_written += n,
                             }
                         },
-                        None => return Err(err!(errmsg!(
-                            "{}: The data file should not be None.", self.ozid(),
-                        ), Unreachable)),
+                        None => return Err(err!(
+                            "{}: The data file should not be None.", self.ozid();
+                            Unreachable)),
                     }
                 }
                 if bytes_written < vlen {
@@ -431,15 +433,15 @@ impl<
                             format!("{} An attempt to recover file space also failed, \
                                 again with no impact on database integrity", msg,
                         ))),
-                        None => return Err(err!(errmsg!(
-                            "{}: The data file should not be None.", self.ozid(),
-                        ), Unreachable, Bug)),
+                        None => return Err(err!(
+                            "{}: The data file should not be None.", self.ozid();
+                            Unreachable, Bug)),
                     }
 
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "{} The {} bytes of file space were fully recovered.",
-                        msg, bytes_written,
-                    ), IO, File, Write));
+                        msg, bytes_written;
+                        IO, File, Write));
                 } else {
                     // [10.2] Good write, refresh the cached data file length.
                     self.lpair_mut().dat.size = res!(self.lpair().dat.get_file_len());
@@ -453,18 +455,20 @@ impl<
                     match self.lpair_mut().ind.file.as_mut() {
                         Some(file) => match file.write(vi) {
                             Err(e) => {
-                                error!(err!(e, fmt!("{}: while writing to file, rewinding.", self.ozid())));
+                                error!(err!(e, 
+                                    "{}: while writing to file, rewinding.", self.ozid();
+                                    IO, File, Write));
                                 break;
                             },
                             Ok(n) => bytes_written += n,
                         },
-                        None => return Err(err!(errmsg!(
-                            "{}: The index file should not be None.", self.ozid(),
-                        ), Unreachable, Bug)),
+                        None => return Err(err!(
+                            "{}: The index file should not be None.", self.ozid();
+                            Unreachable, Bug)),
                     }
                 }
                 if bytes_written < vlen {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "{}: Only {} of {} bytes was written to index file {:?}, but \
                         the process has been aborted with no adverse effect on the \
                         integrity of the database{} The corruption will be detected on \
@@ -472,8 +476,8 @@ impl<
                         data file and a re-write of the index file.",
                         self.ozid(), bytes_written, vlen, self.lpair().dat.path,
                         if new_file { " (although a new file was started)" }
-                            else { "." },
-                    ), IO, File, Write));
+                            else { "." };
+                        IO, File, Write));
                     // Retain the corrupted index data, it will be detected and dealt
                     // with on re-start.
                 }
@@ -491,13 +495,13 @@ impl<
         -> Outcome<()>
     {
         match file.seek(SeekFrom::Start(orig_pos)) {
-            Err(e) => Err(err!(e, errmsg!("{}.", msg), IO, File, Seek)),
+            Err(e) => Err(err!(e, "{}.", msg; IO, File, Seek)),
             Ok(actual_pos) => {
                 if actual_pos != orig_pos {
-                    Err(err!(errmsg!(
+                    Err(err!(
                         "{}, the file cursor only rewound {} of the required {} bytes.",
-                        msg, actual_pos-orig_pos, bytes_written,
-                    ), IO, File, Seek))
+                        msg, actual_pos-orig_pos, bytes_written;
+                        IO, File, Seek))
                 } else {
                     Ok(())
                 }

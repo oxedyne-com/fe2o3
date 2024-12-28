@@ -115,9 +115,9 @@ impl<
                         if let Err(e) = zbot.send(
                             OzoneMsg::ShardFileSize(self.wind().b(), self.states().get_size())
                         ) {
-                            self.result(&Err(err!(e, errmsg!(
-                                "{}: Cannot send cache size update to zbot.", self.ozid(),
-                            ), Channel, Write)));
+                            self.result(&Err(err!(e,
+                                "{}: Cannot send cache size update to zbot.", self.ozid();
+                                Channel, Write)));
                         }
                     }
                 }
@@ -133,9 +133,9 @@ impl<
 
     fn listen(&mut self) -> LoopBreak {
         match self.chan_in().recv_timeout(self.cfg().zone_state_update_interval()) {
-            Recv::Result(Err(e)) => self.err_cannot_receive(err!(e, errmsg!(
-                "{}: Waiting for message.", self.ozid(),
-            ), IO, Channel)),
+            Recv::Result(Err(e)) => self.err_cannot_receive(err!(e,
+                "{}: Waiting for message.", self.ozid();
+                IO, Channel)),
             Recv::Result(Ok(msg)) => {
                 if let Some(msg) = self.listen_worker(msg) {
                     if self.listen_work(&msg) {
@@ -253,11 +253,11 @@ impl<
                         );
                     }
                     Err(e) => {
-                        self.error(err!(e, errmsg!(
+                        self.error(err!(e,
                             "{}: Cannot update file state for file {} after garbage collection \
                             because it cannot be found in the file state map.",
-                            self.ozid(), fnum,
-                        ), Bug, Missing, Data));
+                            self.ozid(), fnum;
+                            Bug, Missing, Data));
                         return false;
                     },
                 };
@@ -271,9 +271,9 @@ impl<
                     self.wind().clone(),
                     self.states().clone(),
                 )) {
-                    self.err_cannot_send(err!(e, errmsg!(
-                        "{}: Responding to {:?} with file states dump.", self.ozid(), resp.ozid(),
-                    ), Data, IO, Channel));
+                    self.err_cannot_send(err!(e,
+                        "{}: Responding to {:?} with file states dump.", self.ozid(), resp.ozid();
+                        Data, IO, Channel));
                 }
             }
             OzoneMsg::ReadFileRequest(fnum, mloc, resp_r2) => {
@@ -304,9 +304,9 @@ impl<
                         },
                         Err(e) => (
                             Ok(()),
-                            OzoneMsg::Error(err!(e, errmsg!(
-                                "Read file request for file {}.", fnum,
-                            ), Bug, Missing, Data)),
+                            OzoneMsg::Error(err!(e,
+                                "Read file request for file {}.", fnum;
+                                Bug, Missing, Data)),
                         ),
                     };
                     self.result(&result);
@@ -432,10 +432,10 @@ impl<
                             process_buffer = true;
                         }
                     },
-                    None => self.error(err!(errmsg!(
+                    None => self.error(err!(
                         "{}: A gc buffer exists for file {} but no file state exists. \
-                        Could not buffer the received {:?}.", self.ozid(), fnum, msg,
-                    ), Bug, Missing, Data)),
+                        Could not buffer the received {:?}.", self.ozid(), fnum, msg;
+                        Bug, Missing, Data)),
                 }
                 true
             },
@@ -465,9 +465,9 @@ impl<
         // [17] Schedule the old file location for deletion.
         // [17.1] Update the current data in the file state data map to old.
         match self.states_mut().get_state_mut(floc.file_number()) {
-            Err(e) => return Err(err!(e, errmsg!(
-                "{:?}: Request from {:?} to delete {:?}.", self_id, from, floc,
-            ), Bug, Missing, Data)),
+            Err(e) => return Err(err!(e,
+                "{:?}: Request from {:?} to delete {:?}.", self_id, from, floc;
+                Bug, Missing, Data)),
             Ok(fstat) => {
                 // Perform mapping to new start position, resulting from scheduling messages which
                 // have backed up during previous garbage collection.
@@ -478,7 +478,7 @@ impl<
 
                 // Register data as old.
                 if let Err(e) = fstat.register_old(&floc2.keyval()) {
-                    return Err(err!(e, errmsg!( "{:?}: file {}.", self_id, floc2.file_number())));
+                    return Err(err!(e, "{:?}: file {}.", self_id, floc2.file_number(); Data));
                 }
             },
         }
@@ -529,9 +529,9 @@ impl<
                         }
                     }
                 },
-                Err(e) => return Err(err!(e, errmsg!(
-                    "{:?}: Request from {:?} to schedule old {:?}.", self_id, from, floc,
-                ), Bug, Missing, Data)),
+                Err(e) => return Err(err!(e,
+                    "{:?}: Request from {:?} to schedule old {:?}.", self_id, from, floc;
+                    Bug, Missing, Data)),
             }
             // [#] Moved out to here due to borrow checker.
             if gc_activated {
@@ -556,9 +556,9 @@ impl<
     {
         // [15] Add new data to the given live file state.
         match self.states_mut().insert_new(floc_new, ilen) {
-            Err(e) => return Err(err!(e, errmsg!(
-                "{:?}: Request from {:?} to insert {:?}.", self.ozid(), from, floc_new,
-            ))),
+            Err(e) => return Err(err!(e,
+                "{:?}: Request from {:?} to insert {:?}.", self.ozid(), from, floc_new;
+                Data)),
             Ok(()) => (),
         };
 
@@ -599,9 +599,9 @@ impl<
             // [6] Update the state of the previous live file.
             match self.states_mut().get_state_mut(fnum_old) {
                 Ok(fstat) => fstat.set_live(false),
-                Err(e) => return Err(err!(e, errmsg!(
-                    "{}: Request to close old live file {} state.", self.ozid(), fnum_old,
-                ), Bug, Missing, Data)),
+                Err(e) => return Err(err!(e,
+                    "{}: Request to close old live file {} state.", self.ozid(), fnum_old;
+                    Bug, Missing, Data)),
             }
         }
 

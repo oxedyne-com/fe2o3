@@ -27,9 +27,9 @@ impl FromStr for Float32 {
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s.parse::<f32>() {
             Ok(f) => Ok(Float32(f)),
-            Err(e) => Err(err!(e, errmsg!(
-                "While parsing '{}' as an f32", s,
-            ), String, Input, Decode, Numeric)),
+            Err(e) => Err(err!(e,
+                "While parsing '{}' as an f32", s;
+            String, Input, Decode, Numeric)),
         }
     }
 }
@@ -46,9 +46,9 @@ impl FromStr for Float64 {
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s.parse::<f64>() {
             Ok(f) => Ok(Float64(f)),
-            Err(e) => Err(err!(e, errmsg!(
-                "While parsing '{}' as an f64", s,
-            ), String, Input, Decode, Numeric)),
+            Err(e) => Err(err!(e,
+                "While parsing '{}' as an f64", s;
+            String, Input, Decode, Numeric)),
         }
     }
 }
@@ -157,11 +157,11 @@ impl NumberString {
             digits.push(match s {
                 '0'..='9' => (s as u8) - Self::CHAR_ZERO,
                 'a'..='z' => (s as u8) - Self::CHAR_A_LOWER + 10,
-                _ => return Err(err!(errmsg!(
+                _ => return Err(err!(
                     "Character '{}' at position {} is not recognised as a \
                     potential numerical digit.  Use characters '0'..'9' or \
-                    'a'..'z'.", s, i, 
-                ), String, Decode, Invalid, Input)),
+                    'a'..'z'.", s, i; 
+                String, Decode, Invalid, Input)),
             });
         }
         Ok(digits)
@@ -197,9 +197,9 @@ impl NumberString {
             self.radix,
         ) {
             Some(n) => Ok(n),
-            None => Err(err!(errmsg!(
-                "Could not interpret the number {:?} as a BigInt.", self,
-            ), Conversion, Integer)),
+            None => Err(err!(
+                "Could not interpret the number {:?} as a BigInt.", self;
+            Conversion, Integer)),
         }
     }
 
@@ -208,9 +208,9 @@ impl NumberString {
         if self.exp.len() > 0 {
             match <i64>::from_str_radix(&self.exp, self.radix) {
                 Ok(n) => exp = n,
-                Err(e) => return Err(err!(e, errmsg!(
-                    "While trying to convert exp in {:?} to i64", self,
-                ), String, Input, Decode, Numeric)),
+                Err(e) => return Err(err!(e,
+                    "While trying to convert exp in {:?} to i64", self;
+                String, Input, Decode, Numeric)),
             }
         }
         let flen = self.sigfrac.len() - self.ftz;
@@ -237,7 +237,7 @@ impl NumberString {
                     self.radix,
                 ) {
                     Some(n) => n,
-                    None => return Err(err!(errmsg!(
+                    None => return Err(err!(
                         "The conversion of a NumberString with significand \
                         '{}.{}' to a digit vector {:?} using sign {:?} and radix {} \
                         resulted in a None BigInt",
@@ -245,8 +245,8 @@ impl NumberString {
                         self.sigfrac,
                         &digits,
                         self.sign_bigint(),
-                        self.radix,
-                    ), String, Encode, Numeric)),
+                        self.radix;
+                    String, Encode, Numeric)),
                 },
                 (flen as i64)-exp,
             )
@@ -343,15 +343,15 @@ impl NumberString {
                                 flags.prev_char_zero = false;
                                 if radix == 2 && c != '1' {
                                     // Binary numbers can only contain 0 or 1.
-                                    return Err(err!(errmsg!("{}", Self::errmsg(c, i, &s,
-                                        fmt!("but is not valid in base {}", radix),
-                                    )), String, Encode, Numeric, Mismatch));
+                                    return Err(err!("{}", Self::errmsg(c, i, &s,
+                                        fmt!("but is not valid in base {}", radix));
+                                    String, Encode, Numeric, Mismatch));
                                 }
                                 if radix == 8 && (c == '8' || c == '9') {
                                     // Octal numbers can only contain 0..7.
-                                    return Err(err!(errmsg!("{}", Self::errmsg(c, i, &s,
-                                        fmt!("but is not valid in base {}", radix),
-                                    )), String, Encode, Numeric, Mismatch));
+                                    return Err(err!("{}", Self::errmsg(c, i, &s,
+                                        fmt!("but is not valid in base {}", radix));
+                                    String, Encode, Numeric, Mismatch));
                                 }
                                 sigint.push(c);
                                 sigint_digit_count += 1;
@@ -376,9 +376,9 @@ impl NumberString {
                     if flags.sig_capture_active {
                         if (c == 'e' || c == 'E') && radix == 10 {
                             if flags.exp_detected {
-                                return Err(err!(errmsg!("{}", Self::errmsg(c, i, &s,
-                                    fmt!("but an exp symbol had already been detected"),
-                                )), String, Encode, Numeric, Mismatch));
+                                return Err(err!("{}", Self::errmsg(c, i, &s,
+                                    fmt!("but an exp symbol had already been detected"));
+                                String, Encode, Numeric, Mismatch));
                             } else {
                                 flags.exp_detected = true;
                                 flags.sig_capture_active = false;
@@ -391,35 +391,35 @@ impl NumberString {
                             sigint.push(c.to_ascii_lowercase());
                             sigint_digit_count += 1;
                         } else {
-                            return Err(err!(errmsg!("{}", Self::errmsg(c, i, &s,
+                            return Err(err!("{}", Self::errmsg(c, i, &s,
                                 fmt!("which is expected to represent a base {} \
-                                    number, but is only valid in a base 16 integer", radix),
-                            )), String, Encode, Numeric, Mismatch));
+                                    number, but is only valid in a base 16 integer", radix));
+                            String, Encode, Numeric, Mismatch));
                         }
                         flags.prev_char_zero = false;
                         continue;
                     } else {
-                        return Err(err!(errmsg!("{}", Self::errmsg(c, i, &s,
+                        return Err(err!("{}", Self::errmsg(c, i, &s,
                             fmt!("which is expected to represent a base {} \
-                                number, but is only valid in a base 16 integer", radix),
-                        )), String, Encode, Numeric, Mismatch));
+                                number, but is only valid in a base 16 integer", radix));
+                        String, Encode, Numeric, Mismatch));
                     }
                 },
                 '+' | '-' => {
                     if flags.sig_capture_active {
                         if sigint_digit_count > 0 {
-                            return Err(err!(errmsg!("{}", Self::errmsg(c, i, &s,
-                                fmt!("but the sign should be the first character"),
-                            )), String, Encode, Numeric, Mismatch));
+                            return Err(err!("{}", Self::errmsg(c, i, &s,
+                                fmt!("but the sign should be the first character"));
+                            String, Encode, Numeric, Mismatch));
                         } else if flags.sig_sign_detected {
-                            return Err(err!(errmsg!("{}", Self::errmsg(c, i, &s,
-                                fmt!("but a sign had already been detected"),
-                            )), String, Encode, Numeric, Mismatch));
+                            return Err(err!("{}", Self::errmsg(c, i, &s,
+                                fmt!("but a sign had already been detected"));
+                            String, Encode, Numeric, Mismatch));
                         } else if radix != 10 {
-                            return Err(err!(errmsg!("{}", Self::errmsg(c, i, &s,
+                            return Err(err!("{}", Self::errmsg(c, i, &s,
                                 fmt!("with expected base {}, but signs are generally only used \
-                                    with base 10, other bases use non-signed negation", radix),
-                            )), String, Encode, Numeric, Mismatch));
+                                    with base 10, other bases use non-signed negation", radix));
+                            String, Encode, Numeric, Mismatch));
                         } else {
                             flags.sig_sign_detected = true;
                             if c == '-' {
@@ -430,13 +430,13 @@ impl NumberString {
                         }
                     } else {
                         if exp_digit_count > 0 {
-                            return Err(err!(errmsg!("{}", Self::errmsg(c, i, &s,
-                                fmt!("but the sign should be the first character of the exponent"),
-                            )), String, Encode, Numeric, Mismatch));
+                            return Err(err!("{}", Self::errmsg(c, i, &s,
+                                fmt!("but the sign should be the first character of the exponent"));
+                            String, Encode, Numeric, Mismatch));
                         } else if flags.exp_sign_detected {
-                            return Err(err!(errmsg!("{}", Self::errmsg(c, i, &s,
-                                fmt!("but a sign had already been detected in the exponent"),
-                            )), String, Encode, Numeric, Mismatch));
+                            return Err(err!("{}", Self::errmsg(c, i, &s,
+                                fmt!("but a sign had already been detected in the exponent"));
+                            String, Encode, Numeric, Mismatch));
                         } else {
                             flags.exp_sign_detected = true;
                             if c == '-' {
@@ -450,14 +450,14 @@ impl NumberString {
                 '.' => {
                     if flags.sig_capture_active {
                         if flags.point_detected {
-                            return Err(err!(errmsg!("{}", Self::errmsg(c, i, &s,
-                                fmt!("but a decimal point had already been detected"),
-                            )), String, Encode, Numeric, Mismatch));
+                            return Err(err!("{}", Self::errmsg(c, i, &s,
+                                fmt!("but a decimal point had already been detected"));
+                            String, Encode, Numeric, Mismatch));
                         } else if radix != 10 {
-                            return Err(err!(errmsg!("{}", Self::errmsg(c, i, &s,
+                            return Err(err!("{}", Self::errmsg(c, i, &s,
                                 fmt!("which appears to be base {}, and does not generally support \
-                                    decimal notation", radix),
-                            )), String, Encode, Numeric, Mismatch));
+                                    decimal notation", radix));
+                            String, Encode, Numeric, Mismatch));
                         } else {
                             flags.point_detected = true;
                             flags.sigfrac_capture_active = true;
@@ -469,18 +469,18 @@ impl NumberString {
                             continue;
                         }
                     } else {
-                        return Err(err!(errmsg!("{}", Self::errmsg(c, i, &s,
-                            fmt!("but this implementation does not support fractional exps"),
-                        )), String, Encode, Numeric, NoImpl));
+                        return Err(err!("{}", Self::errmsg(c, i, &s,
+                            fmt!("but this implementation does not support fractional exps"));
+                        String, Encode, Numeric, NoImpl));
                     }
                 },
                 '_' => { // valid space characters
                     flags.prev_char_zero = false;
                 },
                 _ => {
-                    return Err(err!(errmsg!("{}", Self::errmsg(c, i, &s,
-                        fmt!("but is not valid for a number"),
-                    )), String, Encode, Numeric, Invalid));
+                    return Err(err!("{}", Self::errmsg(c, i, &s,
+                        fmt!("but is not valid for a number"));
+                    String, Encode, Numeric, Invalid));
                 },
             }
         }
@@ -493,7 +493,7 @@ impl NumberString {
         }
 
         //if sigint_digit_count < 1 && !flags.sig_nonzero_lead_detected {
-        //    return Err(err!(errmsg!(
+        //    return Err(err!(
         //        "The string '{}' does not represent a \
         //        number", s,
         //    ), String, Decode, Input, Numeric))
@@ -563,10 +563,10 @@ mod tests {
     fn test_empty_00() -> Outcome<()> {
         let s = String::from("");
         match NumberString::validate(&s) {
-            Ok(ns) => Err(err!(errmsg!(
+            Ok(ns) => Err(err!(
                 "The empty string '{}' should have triggered an error but the result was \
-                ns = {:?}", s, ns,
-            ), String, Decode)),
+                ns = {:?}", s, ns;
+            String, Decode)),
             Err(_) => Ok(()),
         }
     }
@@ -575,10 +575,10 @@ mod tests {
     fn test_empty_01() -> Outcome<()> {
         let s = String::from("-");
         match NumberString::validate(&s) {
-            Ok(ns) => Err(err!(errmsg!(
+            Ok(ns) => Err(err!(
                 "The empty string '{}' should have triggered an error but the result was \
-                ns = {:?}", s, ns,
-            ), String, Decode)),
+                ns = {:?}", s, ns;
+            String, Decode)),
             Err(_) => Ok(()),
         }
     }
@@ -686,10 +686,10 @@ mod tests {
         // Space should trigger error
         let s = String::from("-");
         match NumberString::validate(&s) {
-            Ok(ns) => Err(err!(errmsg!(
+            Ok(ns) => Err(err!(
                 "The string '{}' should have triggered an error but the result was \
-                ns = {:?}", s, ns,
-            ), String, Decode)),
+                ns = {:?}", s, ns;
+            String, Decode)),
             Err(_) => Ok(()),
         }
     }
@@ -699,10 +699,10 @@ mod tests {
         // Space should trigger error
         let s = String::from("+");
         match NumberString::validate(&s) {
-            Ok(ns) => Err(err!(errmsg!(
+            Ok(ns) => Err(err!(
                 "The string '{}' should have triggered an error but the result was \
-                ns = {:?}", s, ns,
-            ), String, Decode)),
+                ns = {:?}", s, ns;
+            String, Decode)),
             Err(_) => Ok(()),
         }
     }
@@ -712,10 +712,10 @@ mod tests {
         // Space should trigger error
         let s = String::from("++10");
         match NumberString::validate(&s) {
-            Ok(ns) => Err(err!(errmsg!(
+            Ok(ns) => Err(err!(
                 "The extra sign in '{}' should have triggered an error but the result was \
-                ns = {:?}", s, ns,
-            ), String, Decode)),
+                ns = {:?}", s, ns;
+            String, Decode)),
             Err(_) => Ok(()),
         }
     }
@@ -725,10 +725,10 @@ mod tests {
         // Space should trigger error
         let s = String::from("--10");
         match NumberString::validate(&s) {
-            Ok(ns) => Err(err!(errmsg!(
+            Ok(ns) => Err(err!(
                 "The extra sign in '{}' should have triggered an error but the result was \
-                ns = {:?}", s, ns,
-            ), String, Decode)),
+                ns = {:?}", s, ns;
+            String, Decode)),
             Err(_) => Ok(()),
         }
     }
@@ -738,10 +738,10 @@ mod tests {
         // Space should trigger error
         let s = String::from("-+10");
         match NumberString::validate(&s) {
-            Ok(ns) => Err(err!(errmsg!(
+            Ok(ns) => Err(err!(
                 "The extra sign in '{}' should have triggered an error but the result was \
-                ns = {:?}", s, ns,
-            ), String, Decode)),
+                ns = {:?}", s, ns;
+            String, Decode)),
             Err(_) => Ok(()),
         }
     }
@@ -751,10 +751,10 @@ mod tests {
         // Space should trigger error
         let s = String::from("-1+0");
         match NumberString::validate(&s) {
-            Ok(ns) => Err(err!(errmsg!(
+            Ok(ns) => Err(err!(
                 "The extra sign in '{}' should have triggered an error but the result was \
-                ns = {:?}", s, ns,
-            ), String, Decode)),
+                ns = {:?}", s, ns;
+            String, Decode)),
             Err(_) => Ok(()),
         }
     }
@@ -764,10 +764,10 @@ mod tests {
         // Space should trigger error
         let s = String::from("-1000+");
         match NumberString::validate(&s) {
-            Ok(ns) => Err(err!(errmsg!(
+            Ok(ns) => Err(err!(
                 "The extra sign in '{}' should have triggered an error but the result was \
-                ns = {:?}", s, ns,
-            ), String, Decode)),
+                ns = {:?}", s, ns;
+            String, Decode)),
             Err(_) => Ok(()),
         }
     }
@@ -777,10 +777,10 @@ mod tests {
         // Space should trigger error
         let s = String::from("1 234 567");
         match NumberString::validate(&s) {
-            Ok(ns) => Err(err!(errmsg!(
+            Ok(ns) => Err(err!(
                 "The first space in '{}' should have triggered an error but the result was \
-                ns = {:?}", s, ns,
-            ), String, Decode)),
+                ns = {:?}", s, ns;
+            String, Decode)),
             Err(_) => Ok(()),
         }
     }
@@ -820,10 +820,10 @@ mod tests {
         // Invalid binary digit
         let s = String::from("0b2");
         match NumberString::validate(&s) {
-            Ok(ns) => Err(err!(errmsg!(
+            Ok(ns) => Err(err!(
                 "The non-binary digit 2 in '{}' should have triggered an error but the result was \
-                ns = {:?}", s, ns,
-            ), String, Decode)),
+                ns = {:?}", s, ns;
+            String, Decode)),
             Err(_) => Ok(()),
         }
     }
@@ -848,10 +848,10 @@ mod tests {
         // Invalid octal digit
         let s = String::from("0o8");
         match NumberString::validate(&s) {
-            Ok(ns) => Err(err!(errmsg!(
+            Ok(ns) => Err(err!(
                 "The non-octal digit 8 in '{}' should have triggered an error but the result was \
-                ns = {:?}", s, ns,
-            ), String, Decode)),
+                ns = {:?}", s, ns;
+            String, Decode)),
             Err(_) => Ok(()),
         }
     }
@@ -876,10 +876,10 @@ mod tests {
         // Invalid hex digit
         let s = String::from("0xg");
         match NumberString::validate(&s) {
-            Ok(ns) => Err(err!(errmsg!(
+            Ok(ns) => Err(err!(
                 "The non-hex digit g in '{}' should have triggered an error but the result was \
-                ns = {:?}", s, ns,
-            ), String, Decode)),
+                ns = {:?}", s, ns;
+            String, Decode)),
             Err(_) => Ok(()),
         }
     }
@@ -889,10 +889,10 @@ mod tests {
         // Invalid hex digit
         let s = String::from("0xo");
         match NumberString::validate(&s) {
-            Ok(ns) => Err(err!(errmsg!(
+            Ok(ns) => Err(err!(
                 "The non-hex digit o in '{}' should have triggered an error but the result was \
-                ns = {:?}", s, ns,
-            ), String, Decode)),
+                ns = {:?}", s, ns;
+            String, Decode)),
             Err(_) => Ok(()),
         }
     }
@@ -902,10 +902,10 @@ mod tests {
         // Invalid hex digit
         let s = String::from("0x__o");
         match NumberString::validate(&s) {
-            Ok(ns) => Err(err!(errmsg!(
+            Ok(ns) => Err(err!(
                 "The non-hex digit o in '{}' should have triggered an error but the result was \
-                ns = {:?}", s, ns,
-            ), String, Decode)),
+                ns = {:?}", s, ns;
+            String, Decode)),
             Err(_) => Ok(()),
         }
     }
@@ -915,10 +915,10 @@ mod tests {
         // Invalid hex digit
         let s = String::from("0xx");
         match NumberString::validate(&s) {
-            Ok(ns) => Err(err!(errmsg!(
+            Ok(ns) => Err(err!(
                 "The non-hex digit x in '{}' should have triggered an error but the result was \
-                ns = {:?}", s, ns,
-            ), String, Decode)),
+                ns = {:?}", s, ns;
+            String, Decode)),
             Err(_) => Ok(()),
         }
     }
@@ -928,10 +928,10 @@ mod tests {
         // Invalid hex digit
         let s = String::from("0x___x");
         match NumberString::validate(&s) {
-            Ok(ns) => Err(err!(errmsg!(
+            Ok(ns) => Err(err!(
                 "The non-hex digit x in '{}' should have triggered an error but the result was \
-                ns = {:?}", s, ns,
-            ), String, Decode)),
+                ns = {:?}", s, ns;
+            String, Decode)),
             Err(_) => Ok(()),
         }
     }
@@ -941,10 +941,10 @@ mod tests {
         // Invalid hex digit
         let s = String::from("afe123");
         match NumberString::validate(&s) {
-            Ok(ns) => Err(err!(errmsg!(
+            Ok(ns) => Err(err!(
                 "The hex number '{}' should have triggered an error because of the absence of \
-                a '0x' prefix but the result was ns = {:?}", s, ns,
-            ), String, Decode)),
+                a '0x' prefix but the result was ns = {:?}", s, ns;
+            String, Decode)),
             Err(_) => Ok(()),
         }
     }
@@ -1169,10 +1169,10 @@ mod tests {
     fn test_sci_100() -> Outcome<()> {
         let s = String::from("0.0f0");
         match NumberString::validate(&s) {
-            Ok(ns) => Err(err!(errmsg!(
+            Ok(ns) => Err(err!(
                 "The invalid exp designator f in '{}' should have triggered an error but \
-                the result was ns = {:?}", s, ns,
-            ), String, Decode)),
+                the result was ns = {:?}", s, ns;
+            String, Decode)),
             Err(_) => Ok(()),
         }
     }

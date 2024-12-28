@@ -80,9 +80,9 @@ impl Dat {
         match rs.read_exact(&mut dcode) {
             Err(e) => match e.kind() {
                 std::io::ErrorKind::UnexpectedEof => return Ok(()),
-                _ => return Err(err!(e, errmsg!(
-                    "While trying to read Dat code from reader.",
-                ), Decode, Bytes)),
+                _ => return Err(err!(e,
+                    "While trying to read Dat code from reader.";
+                Decode, Bytes)),
             },
             Ok(()) => (),
         }
@@ -271,11 +271,11 @@ impl Dat {
                 res!(rs.read_exact(&mut c64code));
                 *count += 1;
                 if c64code[0] < Self::C64_CODE_START || c64code[0] > Self::C64_CODE_START + 8 {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "Expected a valid Dat::C64 code between {} and {} inclusive, \
                         instead found {}.", Self::C64_CODE_START, Self::C64_CODE_START + 8,
-                        c64code[0],
-                    ), Invalid, Input, Decode, Bytes));
+                        c64code[0];
+                    Invalid, Input, Decode, Bytes));
                 }
                 if c64code[0] == Self::C64_CODE_START {
                     return Ok(());
@@ -284,11 +284,11 @@ impl Dat {
                 let (vlen, c64len) = res!(Self::count_c64(&mut rs, c64code[0]));
                 *count += c64len + vlen;
                 if vlen > i64::MAX as usize {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "The size of the payload (the value contained in the Dat::C64), \
                         {} bytes, exceeds the maximum increment that can be added to the \
-                        reader cursor position of {}.", vlen, i64::MAX,
-                    ), Invalid, Input, Decode, Bytes));
+                        reader cursor position of {}.", vlen, i64::MAX;
+                    Invalid, Input, Decode, Bytes));
                 }
                 res!(rs.seek(SeekFrom::Current(vlen as i64)));
                 return Ok(())
@@ -320,11 +320,11 @@ impl Dat {
                 //   c64
                 //
                 if dcode[0] < Self::C64_CODE_START || dcode[0] > Self::C64_CODE_START + 8 {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "Expected a valid Dat::C64 code between {} and {} inclusive, \
                         instead found {}.", Self::C64_CODE_START, Self::C64_CODE_START + 8,
-                        dcode[0],
-                    ), Invalid, Input, Decode, Bytes));
+                        dcode[0];
+                    Invalid, Input, Decode, Bytes));
                 }
                 if dcode[0] == Self::C64_CODE_START {
                     return Ok(());
@@ -492,11 +492,11 @@ impl Dat {
                 ) as usize;
                 *count += 8 + vlen;
                 if vlen > i64::MAX as usize {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "The size of the payload (the value contained in the u64), \
                         {} bytes, exceeds the maximum increment that can be added to the \
-                        reader cursor position of {}.", vlen, i64::MAX,
-                    ), Invalid, Input, Decode, Bytes));
+                        reader cursor position of {}.", vlen, i64::MAX;
+                    Invalid, Input, Decode, Bytes));
                 }
                 res!(rs.seek(SeekFrom::Current(vlen as i64)));
                 return Ok(())
@@ -544,9 +544,9 @@ impl Dat {
             Self::TUP9_U64_CODE     => binary_count_byte_tuple! { u64,  9, rs, count },
             Self::TUP10_U64_CODE    => binary_count_byte_tuple! { u64, 10, rs, count },
 
-            code => return Err(err!(errmsg!(
-                "Dat identification code {} not recognised.", code,
-            ), Invalid, Input)),
+            code => return Err(err!(
+                "Dat identification code {} not recognised.", code;
+            Invalid, Input)),
         }
     }
 }

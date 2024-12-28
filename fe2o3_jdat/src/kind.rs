@@ -1098,9 +1098,9 @@ impl FromStr for Kind {
             "t9u64"     => Ok(Self::Tup9u64),
             "t10u64"    => Ok(Self::Tup10u64),
 
-            _ => Err(err!(errmsg!(
-                "Daticle kind label not recognised as standard: '{}'", s,
-            ), Input, String, Unknown)),
+            _ => Err(err!(
+                "Daticle kind label not recognised as standard: '{}'", s;
+            Input, String, Unknown)),
         }
     }
 }

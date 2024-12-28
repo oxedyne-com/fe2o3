@@ -58,11 +58,11 @@ impl Timestamp {
     pub fn now() -> Outcome<Self> {
         match SystemTime::now().duration_since(UNIX_EPOCH) {
             Ok(n) => Ok(Self(n)),
-            Err(_) => Err(err!(errmsg!(
+            Err(_) => Err(err!(
                 "The current SystemTime {:?} is before the Unix epoch {:?}, \
                 there is a problem with the system clock!  Try resetting it.",
-                SystemTime::now(), UNIX_EPOCH,
-            ), System)),
+                SystemTime::now(), UNIX_EPOCH;
+            System)),
         }
     }
 

@@ -153,23 +153,23 @@ pub fn test_string_encdec_func(filter: &'static str) -> Outcome<()> {
                                         (d1.kind().is_usr() && *hide_usr_types)
                                     {
                                         if d2.kind() != *k2 {
-                                            return Err(err!(errmsg!(
+                                            return Err(err!(
                                                 "Omnibus test {} of {} using dat #{}: The daticle {:?} was \
                                                 encoded to '{}' then decoded to {:?} using {:?} and {:?}, \
                                                 but since the type scope is {:?}, {:?} was expected.",
                                                 count, total, i+1, d1, d1_str, d2,
-                                                enc_cfg, dec_cfg, kind_scope, k2,
-                                            ), ErrTag::Test, ErrTag::Mismatch));
+                                                enc_cfg, dec_cfg, kind_scope, k2;
+                                            ErrTag::Test, ErrTag::Mismatch));
                                         }
                                     } else {
                                         if *d1 != d2 {
-                                            return Err(err!(errmsg!(
+                                            return Err(err!(
                                                 "Omnibus test {} of {} using dat #{}: The daticle {:?} was \
                                                 encoded to '{}' then decoded to {:?} (kind: {:?}) using {:?} \
                                                 and {:?}.",
                                                 count, total, i+1, d1, d1_str,
-                                                d2, d2.kind(), enc_cfg, dec_cfg,
-                                            ), ErrTag::Test, ErrTag::Mismatch));
+                                                d2, d2.kind(), enc_cfg, dec_cfg;
+                                            ErrTag::Test, ErrTag::Mismatch));
                                         }
                                     }
                                     //test!("Omnibus test {} of {} successfully completed.", count, total);
@@ -396,48 +396,7 @@ pub fn test_string_encdec_func(filter: &'static str) -> Outcome<()> {
 
     res!(test_it(filter, &["String decoding 080", "all", "empty"], || {
         match Dat::decode_string("(Empty|)") {
-            Ok(_) => return Err(err!(errmsg!(
-                "Decoder should have detected superfluous '|' char.",
-            ))),
-            Err(e) => test!("Correctly detected error: {}", e),
-        };
-        Ok(())
-    }));
-
-    res!(test_it(filter, &["String decoding 090", "all", "empty"], || {
-        let d = res!(Dat::decode_string("()"));
-        let expected = dat!(());
-        req!(d, expected);
-        Ok(())
-    }));
-
-    res!(test_it(filter, &["String decoding 100", "all", "bool"], || {
-        let d = res!(Dat::decode_string("(TRUE)"));
-        let expected = dat!(true);
-        req!(d, expected);
-        Ok(())
-    }));
-
-    res!(test_it(filter, &["String decoding 110", "all", "bool"], || {
-        match Dat::decode_string("(true|)") {
-            Ok(_) => return Err(err!(errmsg!(
-                "Decoder should have detected superfluous '|' char.",
-            ))),
-            Err(e) => test!("Correctly detected error: {}", e),
-        };
-        Ok(())
-    }));
-
-    res!(test_it(filter, &["String decoding 120", "all", "bool"], || {
-        let d = res!(Dat::decode_string("(FALSE)"));
-        let expected = dat!(false);
-        req!(d, expected);
-        Ok(())
-    }));
-
-    res!(test_it(filter, &["String decoding 130", "all", "bool"], || {
-        match Dat::decode_string("(\nfalse  | )") {
-            Ok(_) => return Err(err!(errmsg!(
+            Ok(_) => return Err(err!(
                 "Decoder should have detected superfluous '|' char.",
             ))),
             Err(e) => test!("Correctly detected error: {}", e),
@@ -525,7 +484,7 @@ pub fn test_string_encdec_func(filter: &'static str) -> Outcome<()> {
 
     res!(test_it(filter, &["String decoding 230", "all", "u8", "str"], || {
         match Dat::decode_string("(U8|\"42\")") {
-            Ok(d) => return Err(err!(errmsg!(
+            Ok(d) => return Err(err!(
                 "String decoding should have rejected the attempt to \
                 coerce a string to {:?}.", d,
             ))),
@@ -558,305 +517,7 @@ pub fn test_string_encdec_func(filter: &'static str) -> Outcome<()> {
     
     res!(test_it(filter, &["String decoding 310", "all", "list"], || {
         match Dat::decode_string("[1,2,3,4") {
-            Ok(_) => return Err(err!(errmsg!(
-                "String decoding should have detected incomplete list.",
-            ))),
-            Err(e) => test!("Correctly detected error: {}", e),
-        };
-        Ok(())
-    }));
-    
-    res!(test_it(filter, &["String decoding 320", "all", "list"], || {
-        match Dat::decode_string("1,2,3,4") {
-            Ok(_) => return Err(err!(errmsg!(
-                "String decoding should have detected incomplete list.",
-            ))),
-            Err(e) => test!("Correctly detected error: {}", e),
-        };
-        Ok(())
-    }));
-    
-    res!(test_it(filter, &["String decoding 330", "all", "list"], || {
-        match Dat::decode_string("1,2,3,4]") {
-            Ok(_) => return Err(err!(errmsg!(
-                "String decoding should have detected incomplete list.",
-            ))),
-            Err(e) => test!("Correctly detected error: {}", e),
-        };
-        Ok(())
-    }));
-    
-    res!(test_it(filter, &["String decoding 340", "all", "list"], || {
-        // nested list at begining
-        let d = res!(Dat::decode_string("[[1,2],3,-408]"));
-        let expected = listdat![listdat![1u8,2u8],3u8,-408i16];
-        req!(d, expected);
-        Ok(())
-    }));
-    
-    res!(test_it(filter, &["String decoding 350", "all", "list"], || {
-        // nested list in middle
-        let d = res!(Dat::decode_string("[1,[2,3],408]"));
-        let expected = listdat![1u8,listdat![2u8,3u8],408u16];
-        req!(d, expected);
-        Ok(())
-    }));
-    
-    res!(test_it(filter, &["String decoding 360", "all", "list"], || {
-        // nested list at end
-        let d = res!(Dat::decode_string("[1,2,[3,-4]]"));
-        let expected = listdat![1u8,2u8,listdat![3u8,-4i8]];
-        req!(d, expected);
-        Ok(())
-    }));
-    
-    res!(test_it(filter, &["String decoding 370", "all", "list"], || {
-        // trailing comma
-        let d = res!(Dat::decode_string("[1,2,3,4,]"));
-        let expected = listdat![dat!(1u8),dat!(2u8),dat!(3u8),dat!(4u8)];
-        req!(d, expected);
-        Ok(())
-    }));
-    
-    res!(test_it(filter, &["String decoding 380", "all", "list"], || {
-        // triple nesting
-        let d = res!(Dat::decode_string("[1,[2,[3,4]],5]"));
-        let expected = listdat![1u8,listdat![2u8,listdat![3u8,4u8]],5u8];
-        req!(d, expected);
-        Ok(())
-    }));
-    
-    res!(test_it(filter, &["String decoding 390", "all", "list"], || {
-        let d = res!(Dat::decode_string("(LIST|[1,2,3,4])"));
-        let expected = listdat![1u8,2u8,3u8,4u8];
-        req!(d, expected);
-        Ok(())
-    }));
-    
-    res!(test_it(filter, &["String decoding 400", "all", "list"], || {
-        let d = res!(Dat::decode_string("[(U8|1),(I32|2),(STR|3),(I64|-4)]"));
-        let expected = listdat![1u8,2i32,"3".to_string(),-4i64];
-        req!(d, expected);
-        Ok(())
-    }));
-    
-    res!(test_it(filter, &["String decoding 410", "all", "list"], || {
-        let d = res!(Dat::decode_string("(LIST|[(U8|1),(I32|2),(STR|3),(I64|-4)])"));
-        let expected = listdat![1u8,2i32,"3".to_string(),-4i64];
-        req!(d, expected);
-        Ok(())
-    }));
-    
-    res!(test_it(filter, &["String decoding 420", "all", "list"], || {
-        let d = res!(Dat::decode_string("[1,[2,(LIST|[(U16|3),4])],5]"));
-        let expected = listdat![1u8,listdat![2u8,listdat![3u16,4u8]],5u8];
-        req!(d, expected);
-        Ok(())
-    }));
-    
-    res!(test_it(filter, &["String decoding 430", "all", "list"], || {
-        let d = res!(Dat::decode_string("[1,(FALSE)]"));
-        let expected = listdat![1u8,dat!(false)];
-        req!(d, expected);
-        Ok(())
-    }));
-    
-    res!(test_it(filter, &["String decoding 440", "all", "list"], || {
-        let d = res!(Dat::decode_string("[(FALSE),1]"));
-        let expected = listdat![dat!(false),1u8];
-        req!(d, expected);
-        Ok(())
-    }));
-
-    res!(test_it(filter, &["String decoding 450", "all", "list"], || {
-        let d = res!(Dat::decode_string("[(),1]"));
-        let expected = listdat![dat!(()),1u8];
-        req!(d, expected);
-        Ok(())
-    }));
-
-    res!(test_it(filter, &["String decoding 460", "all", "list"], || {
-        let d = res!(Dat::decode_string("[(U8|42),1]"));
-        let expected = listdat![42u8,1u8];
-        req!(d, expected);
-        Ok(())
-    }));
-
-    res!(test_it(filter, &["String decoding 470", "all", "tuple"], || {
-        match Dat::decode_string("(T2|[1, ])") {
-            Ok(_) => return Err(err!(errmsg!(
-                "String decoding should have detected incorrect list length.",
-            ))),
-            Err(e) => test!("Correctly detected error: {}", e),
-        }
-        let d = res!(Dat::decode_string("(T2|[1, 2])"));
-        let expected = tup2dat![1u8,2u8,];
-        req!(d, expected);
-        Ok(())
-    }));
-
-    res!(test_it(filter, &["String decoding 480", "all", "tuple"], || {
-        match Dat::decode_string("(T3|[1, 2, ])") {
-            Ok(_) => return Err(err!(errmsg!(
-                "String decoding should have detected incorrect list length.",
-            ))),
-            Err(e) => test!("Correctly detected error: {}", e),
-        }
-        let d = res!(Dat::decode_string("(T3|[1, 2, 3])"));
-        let expected = tup3dat![1u8,2u8,3u8];
-        req!(d, expected);
-        Ok(())
-    }));
-
-    res!(test_it(filter, &["String decoding 490", "all", "tuple"], || {
-        match Dat::decode_string("(T4|[1, 2, ])") {
-            Ok(_) => return Err(err!(errmsg!(
-                "String decoding should have detected incorrect list length.",
-            ))),
-            Err(e) => test!("Correctly detected error: {}", e),
-        }
-        let d = res!(Dat::decode_string("(T4|[1, 2, 3, 4])"));
-        let expected = tup4dat![1u8,2u8,3u8,4u8];
-        req!(d, expected);
-        Ok(())
-    }));
-
-    res!(test_it(filter, &["String decoding 500", "all", "tuple"], || {
-        match Dat::decode_string("(T5|[1, 2, ])") {
-            Ok(_) => return Err(err!(errmsg!(
-                "String decoding should have detected incorrect list length.",
-            ))),
-            Err(e) => test!("Correctly detected error: {}", e),
-        }
-        let d = res!(Dat::decode_string("(T5|[1, 2, 3, 4, 5])"));
-        let expected = tup5dat![1u8,2u8,3u8,4u8,5u8];
-        req!(d, expected);
-        Ok(())
-    }));
-
-    res!(test_it(filter, &["String decoding 510", "all", "tuple"], || {
-        match Dat::decode_string("(T6|[1, 2, ])") {
-            Ok(_) => return Err(err!(errmsg!(
-                "String decoding should have detected incorrect list length.",
-            ))),
-            Err(e) => test!("Correctly detected error: {}", e),
-        }
-        let d = res!(Dat::decode_string("(T6|[1, 2, 3, 4, 5, 6])"));
-        let expected = tup6dat![1u8,2u8,3u8,4u8,5u8,6u8];
-        req!(d, expected);
-        Ok(())
-    }));
-
-    res!(test_it(filter, &["String decoding 520", "all", "tuple"], || {
-        match Dat::decode_string("(T7|[1, 2, ])") {
-            Ok(_) => return Err(err!(errmsg!(
-                "String decoding should have detected incorrect list length.",
-            ))),
-            Err(e) => test!("Correctly detected error: {}", e),
-        }
-        let d = res!(Dat::decode_string("(T7|[1, 2, 3, 4, 5, 6, 7])"));
-        let expected = tup7dat![1u8,2u8,3u8,4u8,5u8,6u8,7u8];
-        req!(d, expected);
-        Ok(())
-    }));
-
-    res!(test_it(filter, &["String decoding 530", "all", "tuple"], || {
-        match Dat::decode_string("(T8|[1, 2, ])") {
-            Ok(_) => return Err(err!(errmsg!(
-                "String decoding should have detected incorrect list length.",
-            ))),
-            Err(e) => test!("Correctly detected error: {}", e),
-        }
-        let d = res!(Dat::decode_string("(T8|[1, 2, 3, 4, 5, 6, 7, 8])"));
-        let expected = tup8dat![1u8,2u8,3u8,4u8,5u8,6u8,7u8,8u8];
-        req!(d, expected);
-        Ok(())
-    }));
-
-    res!(test_it(filter, &["String decoding 540", "all", "tuple"], || {
-        match Dat::decode_string("(T9|[1, 2, ])") {
-            Ok(_) => return Err(err!(errmsg!(
-                "String decoding should have detected incorrect list length.",
-            ))),
-            Err(e) => test!("Correctly detected error: {}", e),
-        }
-        let d = res!(Dat::decode_string("(T9|[1, 2, 3, 4, 5, 6, 7, 8, 9])"));
-        let expected = tup9dat![1u8,2u8,3u8,4u8,5u8,6u8,7u8,8u8,9u8];
-        req!(d, expected);
-        Ok(())
-    }));
-
-    res!(test_it(filter, &["String decoding 550", "all", "tuple"], || {
-        match Dat::decode_string("(T10|[1, 2, ])") {
-            Ok(_) => return Err(err!(errmsg!(
-                "String decoding should have detected incorrect list length.",
-            ))),
-            Err(e) => test!("Correctly detected error: {}", e),
-        }
-        let d = res!(Dat::decode_string("(T10|[1, 2, 3, 4, 5, 6, 7, 8, 9, 10])"));
-        let expected = tup10dat![1u8,2u8,3u8,4u8,5u8,6u8,7u8,8u8,9u8,10u8];
-        req!(d, expected, "(L: actual, R: expected)");
-        Ok(())
-    }));
-
-    res!(test_it(filter, &["String decoding 560", "all", "list", "tuple"], || {
-        // combining default LIST with a fixed length list, nested in middle
-        let d = res!(Dat::decode_string("[1,(T2|[2,3]),4]"));
-        let expected = listdat![1u8,tup2dat![2u8,3u8],4u8];
-        req!(d, expected, "(L: actual, R: expected)");
-        Ok(())
-    }));
-    
-    res!(test_it(filter, &["String decoding 562", "all", "list", "tuple"], || {
-        // Infer tuple without kindicle.
-        let d = res!(Dat::decode_string("(1,2,3)"));
-        let expected = tup3dat![ 1u8, 2u8, 3u8 ];
-        req!(d, expected, "(L: actual, R: expected)");
-        Ok(())
-    }));
-    
-    res!(test_it(filter, &["String decoding 564", "all", "list", "tuple"], || {
-        // Infer tuple without kindicle.
-        let d = res!(Dat::decode_string("((u8|1),2,(i16|3))"));
-        let expected = tup3dat![ 1u8, 2u8, 3i16 ];
-        req!(d, expected, "(L: actual, R: expected)");
-        Ok(())
-    }));
-    
-    res!(test_it(filter, &["String decoding 570", "all", "map"], || {
-        let d = res!(Dat::decode_string("{1:2,3:4,5:6}"));
-        let expected = mapdat!{
-            1u8 => 2u8,
-            3u8 => 4u8,
-            5u8 => 6u8,
-        };
-        req!(d, expected);
-        Ok(())
-    }));
-    
-    res!(test_it(filter, &["String decoding 580", "all", "map"], || {
-        match Dat::decode_string("{1:2,3:4") {
-            Ok(_) => return Err(err!(errmsg!(
-                "String decoding should have detected incomplete map.",
-            ))),
-            Err(e) => test!("Correctly detected error: {}", e),
-        };
-        Ok(())
-    }));
-    
-    res!(test_it(filter, &["String decoding 590", "all", "map"], || {
-        match Dat::decode_string("1:2,3:4") {
-            Ok(_) => return Err(err!(errmsg!(
-                "String decoding should have detected incomplete map.",
-            ))),
-            Err(e) => test!("Correctly detected error: {}", e),
-        };
-        Ok(())
-    }));
-
-    res!(test_it(filter, &["String decoding 600", "all", "map"], || {
-        match Dat::decode_string("1:2,3:4}") {
-            Ok(_) => return Err(err!(errmsg!(
+            Ok(_) => return Err(err!(
                 "String decoding should have detected incomplete map.",
             ))),
             Err(e) => test!("Correctly detected error: {}", e),
@@ -1191,9 +852,9 @@ pub fn test_string_encdec_func(filter: &'static str) -> Outcome<()> {
                 };
                 req!(dat, expected);
             },
-            Err(e) => return Err(err!(errmsg!(
-                "Error while reading {:?}: {}", path, e,
-            ), ErrTag::File, ErrTag::Read)),
+            Err(e) => return Err(err!(
+                "Error while reading {:?}: {}", path, e;
+            ErrTag::File, ErrTag::Read)),
         }
         Ok(())
     }));

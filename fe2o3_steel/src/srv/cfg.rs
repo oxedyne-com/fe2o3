@@ -79,7 +79,7 @@ impl Default for ServerConfig {
             tls_cert_name:                  fmt!("fullchain"),
             tls_cert_address:               fmt!("0.0.0.0"),
             domain_names:                   vec![
-                fmt!("localhost"),
+                fmt!("localhost."),
             ],
             // Server
             log_level:                      fmt!("debug"),
@@ -116,10 +116,10 @@ impl ServerConfig {
     {
         let path = Path::new(&self.public_dir_rel).normalise();
         if path.escapes() {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "ServerConfig: public directory {} escapes the directory {:?}.",
-                self.public_dir_rel, root,
-            ), Invalid, Input, Path));
+                self.public_dir_rel, root;
+                Invalid, Input, Path));
         }
         res!(PathState::DirMustExist.validate(
             root,
@@ -144,10 +144,10 @@ impl ServerConfig {
     {
         let path = Path::new(&self.public_dir_rel).normalise();
         if path.escapes() {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "ServerConfig: public directory {} escapes the directory {:?}.",
-                self.public_dir_rel, root,
-            ), Invalid, Input, Path));
+                self.public_dir_rel, root;
+                Invalid, Input, Path));
         }
         let path = root.clone().join(path).normalise().absolute().as_pathbuf();
         res!(PathState::DirMustExist.validate(
@@ -192,25 +192,25 @@ impl ServerConfig {
         for (route_dat, path_dat) in &self.static_route_paths_rel {
             let route = try_extract_dat!(route_dat, Str).clone();
             if route.is_empty() {
-                return Err(err!(errmsg!(
-                    "ServerConfig: Static route key is empty.",
-                ), Invalid, Input, Path));
+                return Err(err!(
+                    "ServerConfig: Static route key is empty.";
+                    Invalid, Input, Path));
             }
             let path_str = try_extract_dat!(path_dat, Str);
             if path_str.is_empty() {
-                return Err(err!(errmsg!(
-                    "ServerConfig: Static route path is empty.",
-                ), Invalid, Input, Path));
+                return Err(err!(
+                    "ServerConfig: Static route path is empty.";
+                    Invalid, Input, Path));
             }
             let is_dir = path_str.ends_with("/");
             // Ensure that the file into which the javascript will be bundled stays within the root
             // directory.
             let path = Path::new(&path_str).normalise();
             if path.escapes() {
-                return Err(err!(errmsg!(
+                return Err(err!(
                     "ServerConfig: route {} target path {} escapes the directory {:?}.",
-                    route, path_str, root,
-                ), Invalid, Input, Path));
+                    route, path_str, root;
+                    Invalid, Input, Path));
             }
             let path = root.clone().join(path).normalise().absolute();
             if is_dir {
@@ -229,11 +229,11 @@ impl ServerConfig {
                     Ok(()) => {
                         map.insert(route, OsPath::File(path.as_pathbuf()));
                     }
-                    Err(e) => return Err(err!(e, errmsg!(
+                    Err(e) => return Err(err!(e,
                         "ServerConfig: if the route {} target path {} is meant to refer \
                         to a directory, ensure it ends with a '/'.",
-                        route, path_str, 
-                    ), Invalid, Input, Path)),
+                        route, path_str; 
+                        Invalid, Input, Path)),
                 }
             }
         }
@@ -249,17 +249,17 @@ impl ServerConfig {
         let mut result = Vec::new();
         for filename in &self.default_index_files {
             if filename.is_empty() {
-                return Err(err!(errmsg!(
-                    "ServerConfig: Default index file entry is empty.",
-                ), Invalid, Input, Path));
+                return Err(err!(
+                    "ServerConfig: Default index file entry is empty.";
+                    Invalid, Input, Path));
             }
             if path::is_filename(filename) {
                 result.push(filename.clone());
             } else {
-                return Err(err!(errmsg!(
+                return Err(err!(
                     "ServerConfig: The default index file '{}' must be a standalone file \
-                    and not a path.", filename,
-                ), Invalid, Input, String));
+                    and not a path.", filename;
+                    Invalid, Input, String));
             }
         }
         Ok(result)
@@ -267,19 +267,25 @@ impl ServerConfig {
 
     pub fn get_domain_names(&self) -> Outcome<Vec<Fqdn>> {
         if self.domain_names.len() == 0 {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "ServerConfig: There must be at least one entry in the domain_names field, \
-                such as 'localhost'.",
-            ), Invalid, Input, Missing));
+                such as 'localhost'.";
+                Invalid, Input, Missing));
         }
         let mut result = Vec::new();
         for domain_name in &self.domain_names {
             if domain_name.is_empty() {
-                return Err(err!(errmsg!(
-                    "ServerConfig: Domain name entry is empty.",
-                ), Invalid, Input, Path));
+                return Err(err!(
+                    "ServerConfig: Domain name entry is empty.";
+                    Invalid, Input, Path));
             }
-            result.push(res!(Fqdn::new(domain_name)));
+            let fqdn = match Fqdn::new(domain_name) {
+                Ok(fqdn) => fqdn,
+                Err(e) => return Err(err!(
+                    "While trying to validate domain name '{}'.", domain_name;
+                Network)),
+            };
+            result.push(fqdn);
         }
         Ok(result)
     }
@@ -293,16 +299,16 @@ impl ServerConfig {
     {
         let tls_dir_str = &self.tls_dir_rel;
         if tls_dir_str.is_empty() {
-            return Err(err!(errmsg!(
-                "ServerConfig: TLS directory is empty.",
-            ), Invalid, Input, Missing));
+            return Err(err!(
+                "ServerConfig: TLS directory is empty.";
+                Invalid, Input, Missing));
         }
         let tls_dir = Path::new(tls_dir_str).normalise();
         if tls_dir.escapes() {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "ServerConfig: TLS directory {} escapes the directory {:?}.",
-                tls_dir_str, root,
-            ), Invalid, Input, Path));
+                tls_dir_str, root;
+                Invalid, Input, Path));
         }
         let tls_dir = root.clone().join(tls_dir).normalise().absolute().as_pathbuf();
         let tls_dir = if dev_mode {
@@ -319,14 +325,14 @@ impl ServerConfig {
             tls_dir.join(constant::TLS_DIR_PROD)
         };
         if self.tls_cert_name.is_empty() {
-            return Err(err!(errmsg!(
-                "ServerConfig: TLS certificate name is empty.",
-            ), Invalid, Input, Missing));
+            return Err(err!(
+                "ServerConfig: TLS certificate name is empty.";
+                Invalid, Input, Missing));
         }
         if self.tls_private_key_name.is_empty() {
-            return Err(err!(errmsg!(
-                "ServerConfig: TLS private_key_name is empty.",
-            ), Invalid, Input, Missing));
+            return Err(err!(
+                "ServerConfig: TLS private_key_name is empty.";
+                Invalid, Input, Missing));
         }
         let cert_path = tls_dir.join(&self.tls_cert_name).with_extension("pem");
         let key_path = tls_dir.join(&self.tls_private_key_name).with_extension("pem");

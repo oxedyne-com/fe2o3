@@ -102,20 +102,20 @@ pub fn from_datmap(input: TokenStream) -> TokenStream {
                             // parse out primitive value from generic type using typed call
                             let value = match entry.get().#typecalls() {
                                 Some(val) => val,
-                                None => return Err(err!(errmsg!(
+                                None => return Err(err!(
                                     "from_datmap: The key for the Dat::Map pair {:?} matches \
                                     the required struct field '{}' but the value is not a \
                                     recognised type.",
-                                    entry, #keys,
-                                ), Invalid, Input)),
+                                    entry, #keys;
+                                Invalid, Input)),
                             };
                             st.#idents = value;
                         },
                         _ => if #raise_error_if_missing {
-                                return Err(err!(errmsg!(
+                                return Err(err!(
                                 "from_datmap: The required struct field '{}' cannot be found \
-                                in the given Dat::Map {:?}.", #keys, map,
-                            ), Invalid, Input));
+                                in the given Dat::Map {:?}.", #keys, map;
+                                Invalid, Input));
                         },
                     }
                 )*

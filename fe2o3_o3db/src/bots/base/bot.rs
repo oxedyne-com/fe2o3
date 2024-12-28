@@ -83,9 +83,9 @@ pub trait OzoneBot<
     // Provided.
     fn no_init(&self) -> bool {
         if !self.inited() {
-            error!(err!(errmsg!(
-                "Attempt to start {} before running init()", self.label(),
-            ), Init, Missing));
+            error!(err!(
+                "Attempt to start {} before running init()", self.label();
+            Init, Missing));
             return true;
         }
         false
@@ -107,7 +107,7 @@ pub trait OzoneBot<
                     msg, resp.ticket(),
                 );
                 if let Err(e) = simplex.send(msg) {
-                    self.err_cannot_send(err!(e, errmsg!("{}", err_msg), Channel, Write));
+                    self.err_cannot_send(err!(e, "{}", err_msg; Channel, Write));
                 }
             },
         }
@@ -143,14 +143,12 @@ pub trait OzoneBot<
             },
             OzoneMsg::Ping(id, resp) => {
                 if let Err(e) = resp.send(OzoneMsg::Pong(self.ozid().clone())) {
-                    self.err_cannot_send(err!(e, errmsg!(
-                        "Attempt to return a ping from {:?} failed", id,
-                    ), IO, Channel));
+                    self.err_cannot_send(err!(e,
+                        "Attempt to return a ping from {:?} failed", id;
+                        IO, Channel));
                 }
             },
-            _ => error!(err!(fmt!(
-                "{}: Message {:?} not recognised.", self.ozid(), msg,
-            ), Invalid, Input)),
+            _ => error!(err!("{}: Message {:?} not recognised.", self.ozid(), msg; Invalid, Input)),
         }
         LoopBreak(false)
     }

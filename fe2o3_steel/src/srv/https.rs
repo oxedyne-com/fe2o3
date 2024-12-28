@@ -137,9 +137,9 @@ impl<
                         Some(msg) => {
                             match msg.write_all(&mut write_stream).await {
                                 Ok(()) => (),
-                                Err(e) => return Err(err!(e, errmsg!(
-                                    "{}: Could not send response.", id,
-                                ), IO, Network, Wire, Write)),
+                                Err(e) => return Err(err!(e,
+                                    "{}: Could not send response.", id;
+                                    IO, Network, Wire, Write)),
                             }
                         }
                         None => log!(log_level, " None"),

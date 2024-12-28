@@ -21,14 +21,14 @@ impl LiveFile {
     pub fn get_file_len(&self) -> Outcome<u64> {
         match &self.file {
             Some(file) => match file.metadata() {
-                Err(e) => Err(err!(e, errmsg!(
-                    "Could not read metadata for file {:?}.", self.path,
-                ), File, Read)),
+                Err(e) => Err(err!(e,
+                    "Could not read metadata for file {:?}.", self.path;
+                    IO, File, Read)),
                 Ok(metadata) => Ok(metadata.len()),
             },
-            None => Err(err!(errmsg!(
-                "Attempt to get length of a live file {:?} but the file is None.", self.path,
-            ), Invalid, Input)),
+            None => Err(err!(
+                "Attempt to get length of a live file {:?} but the file is None.", self.path;
+                Invalid, Input)),
         }
     }
 

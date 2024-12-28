@@ -43,10 +43,10 @@ impl<PR: Hasher> ChooseCache<PR> {
                         &h[..constant::CACHE_HASH_BYTES]));
                     Ok((alias::ChooseHashUint::from_be_bytes(byts), byts))
                 } else {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "The hash length of {} does not meet the minimum requirement of {}.",
-                        h.len(), constant::CACHE_HASH_BYTES,
-                    ), Input, Invalid, Bug));
+                        h.len(), constant::CACHE_HASH_BYTES;
+                    Input, Invalid, Bug));
                 }
             },
             HashForm::Bytes32(a32) => {

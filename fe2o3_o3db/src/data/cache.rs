@@ -310,14 +310,14 @@ impl<
                 *mloc = MetaLocation { meta, floc };
                 Ok(())
             },
-            Some(CacheEntry::Deleted(_)) => Err(err!(errmsg!(
+            Some(CacheEntry::Deleted(_)) => Err(err!(
                 "Key starting with {:?} has been deleted from cache.",
-                if k.len() > 8 { &k[..8] } else { &k },
-            ))),
-            None => Err(err!(errmsg!(
+                if k.len() > 8 { &k[..8] } else { &k };
+                Missing, Data)),
+            None => Err(err!(
                 "Key starting with {:?} not present in cache.",
-                if k.len() > 8 { &k[..8] } else { &k },
-            ))),
+                if k.len() > 8 { &k[..8] } else { &k };
+                Unknown, Data)),
         }
     }
 

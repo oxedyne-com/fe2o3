@@ -144,9 +144,9 @@ impl<T> Gnomon<T> {
     pub fn required(&self, value_name: &str) -> Outcome<&T> {
         match self {
             Self::Known(v) => Ok(v),
-            Self::Unknown => Err(err!(errmsg!(
-                "A known value of {} is required.", value_name,
-            ), Data, Missing)),
+            Self::Unknown => Err(err!(
+                "A known value of {} is required.", value_name;
+            Data, Missing)),
         }
     }
 }

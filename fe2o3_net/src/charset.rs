@@ -801,9 +801,9 @@ impl FromStr for Charset {
             "windows-1258"                                  => Self::Windows_1258,
             "tis-620"                                       => Self::Tis_620,
             "cp50220"                                       => Self::Cp50220,
-            _ => return Err(err!(errmsg!(
-                "Unrecognised charset '{}'.", s,
-            ), IO, Network, Unknown, Input)),
+            _ => return Err(err!(
+                "Unrecognised charset '{}'.", s;
+            IO, Network, Unknown, Input)),
         })
     }
 }

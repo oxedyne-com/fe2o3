@@ -120,10 +120,10 @@ impl SassBundle {
         // Get directory containing the current file for import resolution.
         let import_dir = match file_path.parent() {
             Some(dir) => dir,
-            None => return Err(err!(errmsg!(
+            None => return Err(err!(
                 "Could not get parent directory of {:?}.",
-                file_path,
-            ), Path)),
+                file_path;
+                Path)),
         };
         options = options.load_path(import_dir);
     
@@ -139,9 +139,9 @@ impl SassBundle {
             &options,
         ) {
             Ok(css) => css,
-            Err(e) => return Err(err!(e, errmsg!(
-                "Why trying to compile Sass file {:?}", file_path,
-            ), IO, Format)),
+            Err(e) => return Err(err!(e,
+                "Why trying to compile Sass file {:?}", file_path;
+                IO, Format)),
         };
     
         self.styles.push(StyleInfo {

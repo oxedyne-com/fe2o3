@@ -128,17 +128,17 @@ impl ShellContext for AppShellContext {
                     let lhs = res!(Dat::decode_string(parts[0].val_ref()));
                     let rhs = res!(Dat::decode_string(parts[1].val_ref()));
                     if lhs.kind() != Kind::Str {
-                        return Err(err!(errmsg!(
+                        return Err(err!(
                             "The left hand side of the assignment is a {:?} but must be a Kind::Str.",
-                            lhs.kind(),
-                        ), ErrTag::Input, ErrTag::Mismatch));
+                            lhs.kind();
+                            Input, Mismatch));
                     }
                     self.ws.insert(lhs, rhs);
                     continue;
                 },
-                _ => return Err(err!(errmsg!(
-                    "Only single assignment such as a = b is permitted.",
-                ), ErrTag::Input, ErrTag::Mismatch)),
+                _ => return Err(err!(
+                    "Only single assignment such as a = b is permitted.";
+                    Input, Mismatch)),
             }
             // 2. Try syntax command
             // Split into words and downgrade from phrases to string iterator.
@@ -306,7 +306,7 @@ impl AppShellContext {
                     sec_str.zeroize();
                 }
             } else {
-                return Err(err!(errmsg!("Missing message command."), Invalid, Input, Missing));
+                return Err(err!("Missing message command."; Invalid, Input, Missing));
             }
         }
         Ok(Evaluation::None)

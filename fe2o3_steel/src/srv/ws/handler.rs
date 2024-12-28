@@ -89,9 +89,9 @@ impl<
         );
         match ws.connect_as_server(request).await {
             Ok(()) => (),
-            Err(e) => return Err(err!(e, errmsg!(
-                "{}: WebSocket handshake failed.", id,
-            ), IO, Network, Wire)),
+            Err(e) => return Err(err!(e,
+                "{}: WebSocket handshake failed.", id;
+                IO, Network, Wire)),
         };
 
         ws.listen(
@@ -144,33 +144,33 @@ impl AppWebSocketHandler {
             Some(cmd) => {
                 let cmdcfg = cmd.config();
                 if msgcmd.vals.len() != cmdcfg.vals.len() {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "The syntax '{}' command '{}' expects {} value(s), found {}.",
                         syntax.config().name,
                         msgcmd.name,
                         cmdcfg.vals.len(),
-                        msgcmd.vals.len(),
-                    ), Input, Network, Mismatch));
+                        msgcmd.vals.len();
+                        Input, Network, Mismatch));
                 }
                 for (i, (kind, _)) in cmdcfg.vals.iter().enumerate() {
                     if *kind != Kind::Unknown && *kind != msgcmd.vals[i].kind() {
-                        return Err(err!(errmsg!(
+                        return Err(err!(
                             "The syntax '{}' command '{}' expects value {} to be a '{:?}, found {:?}.",
                             syntax.config().name,
                             msgcmd.name,
                             i,
                             kind,
-                            msgcmd.vals[i].kind(),
-                        ), Input, Network, Mismatch));
+                            msgcmd.vals[i].kind();
+                            Input, Network, Mismatch));
                     }
                 }
             }
             None => {
-                return Err(err!(errmsg!(
+                return Err(err!(
                     "No command '{}' found in syntax '{}'.",
                     msgcmd.name,
-                    syntax.config().name,
-                ), Input, Network, Unknown));
+                    syntax.config().name;
+                    Input, Network, Unknown));
             }
         }
         Ok(())
@@ -207,10 +207,10 @@ impl WebSocketHandler for AppWebSocketHandler {
         };
 
         if msgrx.cmds.len() != 1 {
-            let err = err!(errmsg!(
+            let err = err!(
                 "Expected one command from syntax '{}', found {}.",
-                syntax.config().name, msgrx.cmds.len(),
-            ), Invalid, Network, Input);
+                syntax.config().name, msgrx.cmds.len();
+                Invalid, Network, Input);
             error!(err.clone());
             return Self::response_text(syntax, "error", vec![dat!(err.to_string())]);
         }
@@ -255,9 +255,9 @@ impl WebSocketHandler for AppWebSocketHandler {
                     if let Some((ref db, uid)) = db {
                         let db = match db.write() {
                             Err(_err) => {
-                                let err = err!(errmsg!(
-                                    "While trying to access database.",
-                                ), Lock, Poisoned, Write);
+                                let err = err!(
+                                    "While trying to access database.";
+                                    Lock, Poisoned, Write);
                                 error!(err.clone());
                                 return Self::response_text(syntax,
                                     "error", vec![dat!(err.to_string())]);
@@ -294,9 +294,9 @@ impl WebSocketHandler for AppWebSocketHandler {
                             }
                         }
                     }
-                    let err = err!(errmsg!(
-                        "Database not accessible for 'insert' command.",
-                    ), Invalid, Network, Input);
+                    let err = err!(
+                        "Database not accessible for 'insert' command.";
+                        Invalid, Network, Input);
                     error!(err.clone());
                     return Self::response_text(syntax, "error", vec![dat!(err.to_string())]);
                 }
@@ -304,9 +304,9 @@ impl WebSocketHandler for AppWebSocketHandler {
                     if let Some((ref db, _uid)) = db {
                         let db = match db.read() {
                             Err(_err) => {
-                                let err = err!(errmsg!(
-                                    "While trying to access database.",
-                                ), Lock, Poisoned, Read);
+                                let err = err!(
+                                    "While trying to access database.";
+                                    Lock, Poisoned, Read);
                                 error!(err.clone());
                                 return Self::response_text(syntax,
                                     "error", vec![dat!(err.to_string())]);
@@ -330,9 +330,9 @@ impl WebSocketHandler for AppWebSocketHandler {
                             }
                         }
                     }
-                    let err = err!(errmsg!(
-                        "Database not accessible for 'get_data' command.",
-                    ), Invalid, Network, Input);
+                    let err = err!(
+                        "Database not accessible for 'get_data' command.";
+                        Invalid, Network, Input);
                     error!(err.clone());
                     return Self::response_text(syntax, "error", vec![dat!(err.to_string())]);
                 }

@@ -62,8 +62,8 @@ pub fn parse_hex_char(c: char) -> Outcome<u8> {
         '0'..='9' => Ok(c as u8 - b'0'),
         'a'..='f' => Ok(c as u8 - b'a' + 10),
         'A'..='F' => Ok(c as u8 - b'A' + 10),
-        _ => Err(err!(errmsg!(
-            "'{}' is not a valid hexadecimal digit.", c,
-        ), Invalid, Input, String, Decode)),
+        _ => Err(err!(
+            "'{}' is not a valid hexadecimal digit.", c;
+        Invalid, Input, String, Decode)),
     }
 }

@@ -199,9 +199,9 @@ pub fn test_docs(filter: &'static str) -> Outcome<()> {
             test!("Yes! It worked! Daticle is: {:?}", dat);
             req!(val, dat, "(L: expected, R: actual)");
         } else {
-            return Err(err!(errmsg!(
-                "Expected to find key {:?}, but found nothing.", key,
-            ), Data, Missing));
+            return Err(err!(
+                "Expected to find key {:?}, but found nothing.", key;
+            Data, Missing));
         }
 
         //test!("Listing files...");

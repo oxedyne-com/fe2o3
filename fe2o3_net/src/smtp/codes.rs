@@ -173,9 +173,9 @@ impl FromStr for SmtpResponseCode {
             "554" => Self::TransactionFailed,
             "555" => Self::MailFromRcptToParametersNotRecognizedOrImplemented,
             "556" => Self::AuthenticationMechanismNotAvailable,
-            _ => return Err(err!(errmsg!(
-                "SMTP code '{}' not recognised.", code,
-            ), IO, Network, Wire, Unknown, Input)),
+            _ => return Err(err!(
+                "SMTP code '{}' not recognised.", code;
+            IO, Network, Wire, Unknown, Input)),
         })
     }
 }

@@ -79,9 +79,9 @@ impl InNamex for HashScheme {
 	            ("SHA3_256", "VybbHNWeNXeTqTrXj66TzZScbSTsEFVy0W79QnbroFA="),
 	            ("Seahash", "O/3zgxf8/f6mjc0RBau1MMtkfNi9B1eeFB5Q9f6ZfAM="),
             ],
-            _ => return Err(err!(errmsg!(
-                "The Namex group name '{}' is not recognised for HashScheme.", gname,
-            ), Invalid, Input)),
+            _ => return Err(err!(
+                "The Namex group name '{}' is not recognised for HashScheme.", gname;
+            Invalid, Input)),
         };
         Ok(if ids.len() == 0 {
             None
@@ -132,9 +132,9 @@ impl str::FromStr for HashScheme {
         match name {
             "SHA3_256" => Ok(Self::new_sha3_256()),
             "Seahash" => Ok(Self::new_seahash()),
-            _ => Err(err!(errmsg!(
-                "The hash scheme '{}' is not recognised.", name,
-            ), Invalid, Input)),
+            _ => Err(err!(
+                "The hash scheme '{}' is not recognised.", name;
+            Invalid, Input)),
         }
     }
 }
@@ -154,9 +154,9 @@ impl TryFrom<LocalId> for HashScheme {
         match n {
             LocalId(1) => Ok(Self::new_sha3_256()),
             LocalId(2) => Ok(Self::new_seahash()),
-            _ => Err(err!(errmsg!(
-                "The hash scheme with local id {} is not recognised.", n,
-            ), Invalid, Input)),
+            _ => Err(err!(
+                "The hash scheme with local id {} is not recognised.", n;
+            Invalid, Input)),
         }
     }
 }
@@ -240,9 +240,9 @@ impl<
         match &self.0 {
             DefAlt::Default(inner) => inner.name_id(),
             DefAlt::Given(inner) => inner.name_id(),
-            DefAlt::None => Err(err!(errmsg!(
-                "No Namex id can be specified for DefAlt::None.",
-            ), Missing, Bug)),
+            DefAlt::None => Err(err!(
+                "No Namex id can be specified for DefAlt::None.";
+            Missing, Bug)),
         }
     }
 

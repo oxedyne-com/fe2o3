@@ -57,9 +57,9 @@ impl FromStr for HttpVersion {
             "HTTP/1.1" => Self::Http1_1,
             "HTTP/2" => Self::Http2_0,
             "HTTP/3" => Self::Http3_0,
-            _ => return Err(err!(errmsg!(
-                "Unrecognised HTTP version {}.", s,
-            ), IO, Network, Unknown, Input))
+            _ => return Err(err!(
+                "Unrecognised HTTP version {}.", s;
+            IO, Network, Unknown, Input))
         })
     }
 }
@@ -135,15 +135,15 @@ impl HttpHeadline {
                                     version,
                                 ));
                             },
-                            Err(_) => return Err(err!(errmsg!(
-                                "HTTP message headline '{}' begins with an unrecognised word.", line,
-                            ), IO, Network, Invalid, Input)),
+                            Err(_) => return Err(err!(
+                                "HTTP message headline '{}' begins with an unrecognised word.", line;
+                            IO, Network, Invalid, Input)),
                         },
                     }
                 }
-                Err(err!(errmsg!(
-                    "HTTP request headline '{}' invalid, expected at least 3 components.", line,
-                ), IO, Network, Missing, Input))
+                Err(err!(
+                    "HTTP request headline '{}' invalid, expected at least 3 components.", line;
+                IO, Network, Missing, Input))
             },
         }
     }
@@ -164,9 +164,9 @@ impl HttpHeadline {
                 }
             }
         }
-        Err(err!(errmsg!(
-            "HTTP request headline '{}' invalid, expected at least 3 components.", line,
-        ), IO, Network, Missing, Input))
+        Err(err!(
+            "HTTP request headline '{}' invalid, expected at least 3 components.", line;
+        IO, Network, Missing, Input))
     }
 
     /// Used when the caller knows the message is a response.
@@ -182,9 +182,9 @@ impl HttpHeadline {
                 ));
             }
         }
-        Err(err!(errmsg!(
-            "HTTP response headline '{}' invalid, expected at least 3 components.", line,
-        ), IO, Network, Missing, Input))
+        Err(err!(
+            "HTTP response headline '{}' invalid, expected at least 3 components.", line;
+        IO, Network, Missing, Input))
     }
 
 }
@@ -301,9 +301,9 @@ impl HttpHeader {
     fn parse_header_str(header_bytes: &[u8]) -> Outcome<(String, usize)> {
         let header_str = match std::str::from_utf8(header_bytes) {
             Ok(s) => s.to_string(),
-            Err(e) => return Err(err!(e, errmsg!(
-                "Invalid UTF-8 sequence in header bytes.",
-            ), IO, Network, Invalid, Input)),
+            Err(e) => return Err(err!(e,
+                "Invalid UTF-8 sequence in header bytes.";
+            IO, Network, Invalid, Input)),
         };
     
         let header = res!(Self::parse(header_str.clone(), None));
@@ -328,9 +328,9 @@ impl HttpHeader {
         let mut lines = header_str.lines();
         let (headline, version) = match lines.next() {
             Some(line) => res!(HttpHeadline::parse(line, is_request)),
-            None => return Err(err!(errmsg!(
-                "HTTP request missing headline.",
-            ), IO, Network, Missing, Input)),
+            None => return Err(err!(
+                "HTTP request missing headline.";
+            IO, Network, Missing, Input)),
         };
     
         header.version = version;
@@ -352,21 +352,21 @@ impl HttpHeader {
                         continue;
                     }
                 } else {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "The HTTP header '{}' has stretched across {} lines, exceeding \
                         the limit for this server.", current_header,
-                        constant::HTTP_HEADER_MAX_MULTILINES,
-                    ), IO, Network, Invalid, Input));
+                        constant::HTTP_HEADER_MAX_MULTILINES;
+                    IO, Network, Invalid, Input));
                 }
             }
     
             if !current_header.is_empty() {
                 // Check for exceeding max fields
                 if i > constant::HTTP_HEADER_MAX_FIELDS {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "Number of header fields exceeds limit of {}.",
-                        constant::HTTP_HEADER_MAX_FIELDS,
-                    ), IO, Network, Invalid, Input));
+                        constant::HTTP_HEADER_MAX_FIELDS;
+                    IO, Network, Invalid, Input));
                 }
                 let hf = res!(HeaderField::new(&current_header, Some(i)));
                 header.fields.insert(hf.name, hf.value, Some(i));

@@ -97,17 +97,17 @@ impl<
     pub fn some_ozid(&self) -> Outcome<OzoneBotId> {
         match &self.ozid {
             Some(ozid) => Ok(ozid.clone()),
-            None => Err(err!(errmsg!(
-                "Handle contains no id as expected.",
-            ), Identifier, Missing)),
+            None => Err(err!(
+                "Handle contains no id as expected.";
+                Identifier, Missing)),
         }
     }
     pub fn some_chan(&self) -> Outcome<Simplex<OzoneMsg<UIDL, UID, ENC, KH>>> {
         match &self.chan {
             Some(chan) => Ok(chan.clone()),
-            None => Err(err!(errmsg!(
-                "Handle contains no channel as expected.",
-            ), Channel, Missing)),
+            None => Err(err!(
+                "Handle contains no channel as expected.";
+                Channel, Missing)),
         }
     }
 }
@@ -302,10 +302,10 @@ impl<
 
     fn check_zone_index(&self, ind: usize) -> Outcome<()> {
         if ind > self.nz {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "Zone index {} into BotHandles exceeds number of zones {}.",
-                ind, self.nz,
-            ), Bug, Excessive));
+                ind, self.nz;
+                Bug, Excessive));
         }
         Ok(())
     }
@@ -409,9 +409,9 @@ impl<
                     Ok(_) => {
                         all_bot_ids.push(ozid);
                     }
-                    Err(e) => error!(err!(e, errmsg!(
-                        "While sending ping to bot {:?}", ozid,
-                    ), Channel, Write))
+                    Err(e) => error!(err!(e,
+                        "While sending ping to bot {:?}", ozid;
+                        Channel, Write))
                 }
             }
         }
@@ -420,10 +420,10 @@ impl<
         // Track responses and build set of responsive bots.
         let (_, responsive) = res!(resp.recv_pongs(wait));
         if responsive.len() > expected {
-            error!(err!(errmsg!(
+            error!(err!(
                 "Expecting {} messages via responder, received {} after \
-                {:?}.", responsive.len(), expected, timeout,
-            ), Input, Mismatch, Size));
+                {:?}.", responsive.len(), expected, timeout;
+                Input, Mismatch, Size));
         }
     
         // Collect unresponsive bot IDs by comparing against those that responded.

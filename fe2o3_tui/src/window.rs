@@ -366,9 +366,9 @@ impl<'a> WindowManager<'a> {
         if let Some(next_label) = self.state.next_label.next() {
             Ok(WindowId::User(next_label))
         } else {
-            Err(err!(errmsg!(
-                "Window count limit of {} has been reached.", self.cfg.window_count_limit,
-            ), Excessive))
+            Err(err!(
+                "Window count limit of {} has been reached.", self.cfg.window_count_limit;
+            Excessive))
         }
     }
 
@@ -419,9 +419,9 @@ impl<'a> WindowManager<'a> {
         let win = res!(result);
         match &mut win.state.text_boxes {
             TextBoxesState::Single(_tbox) => {
-                return Err(err!(errmsg!(
-                    "Cannot add text box to an existing single, untabbed container.",
-                ), Input, Invalid, Mismatch));
+                return Err(err!(
+                    "Cannot add text box to an existing single, untabbed container.";
+                Input, Invalid, Mismatch));
             }
             TextBoxesState::Tabbed(tmgr) => {
                 tmgr.tboxes.push(ttbox);
@@ -535,9 +535,9 @@ impl<'a> WindowManager<'a> {
             self.focus = id.clone();
             Ok(())
         } else {
-            Err(err!(errmsg!(
-                "There is no window with id {:?}.", id,
-            ), Key, NotFound))
+            Err(err!(
+                "There is no window with id {:?}.", id;
+            Key, NotFound))
         }
     }
 
@@ -549,9 +549,9 @@ impl<'a> WindowManager<'a> {
                 return Ok(());
             }
         }
-        Err(err!(errmsg!(
-            "There is no window with label '{}'.", label,
-        ), Data, NotFound))
+        Err(err!(
+            "There is no window with label '{}'.", label;
+        Data, NotFound))
     }
 
     //pub fn list_windows(&self) -> Vec<(String, String)> {
@@ -581,12 +581,12 @@ impl<'a> WindowManager<'a> {
             if let Some(window) = self.windows.get(&self.focus) {
                 Ok(window)
             } else {
-                Err(err!(errmsg!(
-                    "There is no window corresponding to the focus id {:?}.", self.focus,
-                ), Bug, Key, NotFound))
+                Err(err!(
+                    "There is no window corresponding to the focus id {:?}.", self.focus;
+                Bug, Key, NotFound))
             }
         } else {
-            Err(err!(errmsg!("There are no windows yet."), Bug, Data, Missing))
+            Err(err!("There are no windows yet."; Bug, Data, Missing))
         }
     }
 
@@ -595,12 +595,12 @@ impl<'a> WindowManager<'a> {
             if let Some(window) = self.windows.get_mut(&self.focus) {
                 Ok(window)
             } else {
-                Err(err!(errmsg!(
-                    "There is no window corresponding to the focus id {:?}.", self.focus,
-                ), Bug, Key, NotFound))
+                Err(err!(
+                    "There is no window corresponding to the focus id {:?}.", self.focus;
+                Bug, Key, NotFound))
             }
         } else {
-            Err(err!(errmsg!("There are no windows yet."), Bug, Data, Missing))
+            Err(err!("There are no windows yet."; Bug, Data, Missing))
         }
     }
 
@@ -608,9 +608,9 @@ impl<'a> WindowManager<'a> {
         if let Some(window) = self.windows.get(id) {
             Ok(window)
         } else {
-            Err(err!(errmsg!(
-                "There is no window with id {:?}.", id,
-            ), Key, NotFound))
+            Err(err!(
+                "There is no window with id {:?}.", id;
+            Key, NotFound))
         }
     }
 
@@ -618,9 +618,9 @@ impl<'a> WindowManager<'a> {
         if let Some(window) = self.windows.get_mut(id) {
             Ok(window)
         } else {
-            Err(err!(errmsg!(
-                "There is no window with id {:?}.", id,
-            ), Key, NotFound))
+            Err(err!(
+                "There is no window with id {:?}.", id;
+            Key, NotFound))
         }
     }
 

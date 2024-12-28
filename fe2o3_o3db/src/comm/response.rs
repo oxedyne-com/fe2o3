@@ -90,12 +90,12 @@ impl<
 
     pub fn recv_block(&self) -> Outcome<OzoneMsg<UIDL, UID, ENC, KH>> {
         match self.channel() {
-            None => Err(err!(errmsg!("This responder does not have a channel."))),
+            None => Err(err!("This responder does not have a channel."; Channel, Missing)),
             Some(ref simplex) => {
                 match simplex.recv() {
-                    Err(e) => return Err(err!(e, errmsg!(
-                        "Could not read from responder channel",
-                    ), Channel, Read)),
+                    Err(e) => return Err(err!(e,
+                        "Could not read from responder channel";
+                        Channel, Read)),
                     Ok(OzoneMsg::Error(e)) => return Err(e),
                     Ok(msg) => Ok(msg),
                 }
@@ -103,18 +103,10 @@ impl<
         }
     }
 
-    //pub fn recv_message_count(&self, emsg: String) -> Outcome<usize> {
-    //    match res!(self.recv()) {
-    //        OzoneMsg::Error(e) => Err(err!(e, errmsg!("{}", emsg))),
-    //        OzoneMsg::MessageCount(n) => Ok(n),
-    //        msg => Err(err!(errmsg!("{}: {:?}", emsg, msg))),
-    //    }
-    //}
-
     pub fn send(&self, msg: OzoneMsg<UIDL, UID, ENC, KH>) -> Outcome<()> {
         match self.channel() {
             Some(chan) => chan.send(msg),
-            None => return Err(err!(errmsg!("This responder has no channel."), Channel, Write)),
+            None => return Err(err!("This responder has no channel."; Channel, Missing)),
         }
     }
 
@@ -130,16 +122,16 @@ impl<
         -> Outcome<(Option<(Dat, Meta<UIDL, UID>)>, bool)>
     {
         match self.channel() {
-            None => Err(err!(errmsg!("This responder does not have a channel."), Missing, Data)),
+            None => Err(err!("This responder does not have a channel."; Channel, Missing)),
             Some(ref simplex) => {
                 match simplex.recv_timeout(constant::USER_REQUEST_TIMEOUT) {
-                    Recv::Empty => Err(err!(errmsg!(
+                    Recv::Empty => Err(err!(
                         "Failed to receive a message via responder within {:.2} [s].",
-                        constant::USER_REQUEST_TIMEOUT.as_secs_f32(),
-                    ), Missing, Data)),
-                    Recv::Result(Err(e)) => return Err(err!(e, errmsg!(
-                        "Could not read from responder channel",
-                    ), Channel, Read)),
+                        constant::USER_REQUEST_TIMEOUT.as_secs_f32();
+                        Missing, Data)),
+                    Recv::Result(Err(e)) => return Err(err!(e,
+                        "Could not read from responder channel";
+                        Channel, Read)),
                     Recv::Result(Ok(msg)) => match msg {
                         OzoneMsg::Error(e) => return Err(e),
                         OzoneMsg::Value(Value::Complete(Some((dat, meta)), postgc)) => {
@@ -153,20 +145,20 @@ impl<
                             let val = try_extract_dat!(dat, BU8, BU16, BU32, BU64);
                             let plain = res!(enc.or_decrypt(&val, or));
                             match Dat::from_bytes(&plain) {
-                                Err(e) => return Err(err!(e, errmsg!(
+                                Err(e) => return Err(err!(e,
                                     "Could not form a Dat from the value bytes, \
                                     this could be due to the use of an encryption scheme \
-                                    differing from the one provided ({}).", enc.or_debug(or),
-                                ), Decode, Bytes)),
+                                    differing from the one provided ({}).", enc.or_debug(or);
+                                    Decode, Bytes)),
                                 Ok((dat, _)) => return Ok((Some((dat, meta)), postgc)),
                             }
                         },
                         OzoneMsg::Value(Value::Complete(None, _)) |
                         OzoneMsg::Value(Value::Chunk(None, ..)) => Ok((None, false)),
-                        msg => return Err(err!(errmsg!(
+                        msg => return Err(err!(
                             "Expected a OzoneMsg::Value containing a Value::Complete \
-                            wrapping a Dat::BU64 but received a {:?}.", msg,
-                        ), Unexpected, Input)),
+                            wrapping a Dat::BU64 but received a {:?}.", msg;
+                            Unexpected, Input)),
                     }
                 }
             },
@@ -176,16 +168,16 @@ impl<
     /// Collect one and only one reply within a given time, otherwise return an error.
     pub fn recv_timeout(&self, timeout: Duration) -> Outcome<OzoneMsg<UIDL, UID, ENC, KH>> {
         match self.channel() {
-            None => Err(err!(errmsg!("This responder does not have a channel."))),
+            None => Err(err!("This responder does not have a channel."; Channel, Missing)),
             Some(simplex) => {
                 match simplex.recv_timeout(timeout) {
-                    Recv::Empty => Err(err!(errmsg!(
+                    Recv::Empty => Err(err!(
                         "Failed to receive a message via responder within {:.2} [s].",
-                        timeout.as_secs_f32(),
-                    ), Missing, Data)),
-                    Recv::Result(Err(e)) => Err(err!(e, errmsg!(
-                        "Could not read from responder channel.",
-                    ), Channel, Read)),
+                        timeout.as_secs_f32();
+                        Missing, Data)),
+                    Recv::Result(Err(e)) => Err(err!(e,
+                        "Could not read from responder channel.";
+                        Channel, Read)),
                     Recv::Result(Ok(msg)) => Ok(msg),
                 }
             },
@@ -204,16 +196,16 @@ impl<
         let start = Instant::now();
         let mut count: usize = 0;
         match self.channel() {
-            None => return Err(err!(errmsg!(
-                "This responder does not have a channel.",
-            ), Missing, Data)),
+            None => return Err(err!(
+                "This responder does not have a channel.";
+            Missing, Data)),
             Some(chan) => {
                 loop {
                     match chan.recv_timeout(wait.check_interval) {
                         Recv::Empty => (),
-                        Recv::Result(Err(e)) => return Err(err!(e, errmsg!(
-                            "Could not read from responder channel.",
-                        ), Channel, Read)),
+                        Recv::Result(Err(e)) => return Err(err!(e,
+                            "Could not read from responder channel.";
+                            Channel, Read)),
                         Recv::Result(Ok(OzoneMsg::Finish)) => {
                             continue; // Don't count Finish messages.
                         }
@@ -227,19 +219,19 @@ impl<
                     }
                     if start.elapsed() > wait.max_wait {
                         if count < n {
-                            return Err(err!(errmsg!(
+                            return Err(err!(
                                 "Expecting {} messages via responder, received {} when \
-                                timed out after {:?}.", n, count, wait.max_wait,
-                            ), Input, Mismatch, Size));
+                                timed out after {:?}.", n, count, wait.max_wait;
+                            Input, Mismatch, Size));
                         } else {
                             break;
                         }
                     }
                     if count > n {
-                        return Err(err!(errmsg!(
+                        return Err(err!(
                             "Expecting {} messages via responder, received {} after \
-                            {:?}.", count, n, start.elapsed(),
-                        ), Input, Mismatch, Size));
+                            {:?}.", count, n, start.elapsed();
+                        Input, Mismatch, Size));
                     }
                 }
             },
@@ -257,23 +249,23 @@ impl<
         let mut ozids = HashSet::new();
         let start = Instant::now();
         match self.channel() {
-            None => return Err(err!(errmsg!(
-                "This responder does not have a channel.",
-            ), Missing, Data)),
+            None => return Err(err!(
+                "This responder does not have a channel.";
+            Missing, Data)),
             Some(chan) => {
                 loop {
                     match chan.recv_timeout(wait.check_interval) {
                         Recv::Empty => {}
-                        Recv::Result(Err(e)) => return Err(err!(e, errmsg!(
-                            "Could not read from responder channel.",
-                        ), Channel, Read)),
+                        Recv::Result(Err(e)) => return Err(err!(e,
+                            "Could not read from responder channel.";
+                            Channel, Read)),
                         Recv::Result(Ok(OzoneMsg::Pong(ozid))) => {
                             ozids.insert(ozid);
                         }
                         Recv::Result(Ok(msg)) => {
-                            error!(err!(errmsg!(
-                                "Expecting an OzoneMsg::Pong, received a {:?}.", msg,
-                            ), Input, Mismatch, Unexpected));
+                            error!(err!(
+                                "Expecting an OzoneMsg::Pong, received a {:?}.", msg;
+                            Input, Mismatch, Unexpected));
                         }
                     }
                     if start.elapsed() > wait.max_wait {
@@ -296,16 +288,16 @@ impl<
         let mut msgs = Vec::new();
         let start = Instant::now();
         match self.channel() {
-            None => return Err(err!(errmsg!(
-                "This responder does not have a channel.",
-            ), Missing, Data)),
+            None => return Err(err!(
+                "This responder does not have a channel.";
+            Missing, Data)),
             Some(chan) => {
                 loop {
                     match chan.recv_timeout(wait.check_interval) {
                         Recv::Empty => (),
-                        Recv::Result(Err(e)) => return Err(err!(e, errmsg!(
-                            "Could not read from responder channel.",
-                        ), Channel, Read)),
+                        Recv::Result(Err(e)) => return Err(err!(e,
+                            "Could not read from responder channel.";
+                            Channel, Read)),
                         Recv::Result(Ok(OzoneMsg::Finish)) => {
                             complete = true;
                             break;
@@ -322,31 +314,6 @@ impl<
         }
         Ok((start, complete, msgs))
     }
-
-    ///// Wait to receive all all replies associated with chunked data, but respond with only a
-    ///// single message.  This really only makes sense for responses to a Write request.
-    //pub fn recv_write_response(&self, num_chunks: usize) -> Outcome<OzoneMsg<UIDL, UID, ENC, KH>> {
-    //    let mut msg = OzoneMsg::None;
-    //    match self.channel() {
-    //        None => return Err(err!(errmsg!("This responder does not have a channel."))),
-    //        Some(ref simplex) => {
-    //            for _ in 0..num_chunks+1 {
-    //                match simplex.recv() {
-    //                    Err(e) => return Err(err!(e, errmsg!(
-    //                        "Could not read from responder channel",
-    //                    ), Channel, Read)),
-    //                    Ok(OzoneMsg::Error(e)) => return Err(err!(e, errmsg!(
-    //                        "While gathering data chunks",
-    //                    ), "ozone", "response")),
-    //                    //Ok(OzoneMsg::KeyExists(b, cind)) => msg = OzoneMsg::KeyExists(b, cind),
-    //                    //Ok(OzoneMsg::Value(optdatmeta, cind)) => msg = OzoneMsg::Value(optdatmeta, cind),
-    //                    _ => (),
-    //                }
-    //            }
-    //        },
-    //    }
-    //    Ok(msg)
-    //}
 }
 
 pub struct Wait {
@@ -372,10 +339,10 @@ impl Wait {
         -> Outcome<Self>
     {
         if check_interval > max_wait {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "The given check interval, {:?}, should not be larger than the \
-                given max wait, {:?}.", check_interval, max_wait,
-            ), Invalid, Input));
+                given max wait, {:?}.", check_interval, max_wait;
+            Invalid, Input));
         }
         Ok(Self {
             max_wait,

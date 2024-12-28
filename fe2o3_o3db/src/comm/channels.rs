@@ -104,7 +104,7 @@ impl<
     
     fn check_index(&self, ind: usize) -> Outcome<()> {
         if ind > self.pool.len() {
-            return Err(err!(errmsg!("Index {} exceeds pool size {}.", ind, self.pool.len())));
+            return Err(err!("Index {} exceeds pool size {}.", ind, self.pool.len(); Index, TooBig));
         }
         Ok(())
     }
@@ -467,7 +467,9 @@ impl<
 
     pub fn get_zwbots(&self, zind: &ZoneInd) -> Outcome<&ZoneWorkerChannels<UIDL, UID, ENC, KH>> {
         if **zind > self.zwbots.len() {
-            return Err(err!(errmsg!("Index {} exceeds number of zones {}.", **zind, self.zwbots.len())));
+            return Err(err!(
+                "Index {} exceeds number of zones {}.", **zind, self.zwbots.len();
+                Index, TooBig));
         }
         Ok(&self.zwbots[**zind])
     }
@@ -494,9 +496,9 @@ impl<
                 res!(res!(self.get_zwbots(zind))[&WorkerType::Reader].get_bot(**bpind)),
             OzoneBotId::WriterBot(_, zind, bpind) =>
                 res!(res!(self.get_zwbots(zind))[&WorkerType::Writer].get_bot(**bpind)),
-            _ => return Err(err!(errmsg!(
-                "Cannot return channel for {:?}.", ozid,
-            ), Bug, Invalid)),
+            _ => return Err(err!(
+                "Cannot return channel for {:?}.", ozid;
+                Bug, Invalid)),
         })
     }
 
@@ -543,10 +545,10 @@ impl<
 
     fn check_zone_index(&self, ind: usize) -> Outcome<()> {
         if ind > self.nz {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "Zone index {} into BotChannels exceeds number of zones {}.",
-                ind, self.nz,
-            )));
+                ind, self.nz;
+                Index, TooBig));
         }
         Ok(())
     }

@@ -108,9 +108,9 @@ impl<
                             Err(_) => continue,
                         }
                     }
-                    return Err(err!(errmsg!(
-                        "{}: Default files not found in directory {:?}.", id, path,
-                    ), File, NotFound)); 
+                    return Err(err!(
+                        "{}: Default files not found in directory {:?}.", id, path;
+                        File, NotFound)); 
                 }
                 // The path has already been normalised and made absolute.
                 OsPath::File(path) => return Ok(path.clone()),
@@ -119,10 +119,10 @@ impl<
                 // TODO consider dynamic routes.
                 let path = Path::new(route).normalise();
                 if path.escapes() {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "ServerConfig: route path {} escapes the public directory {:?}.",
-                        route, self.public_dir,
-                    ), Invalid, Path));
+                        route, self.public_dir;
+                        Invalid, Path));
                 }
                 return Ok(self.public_dir.clone().join(path));
             }
@@ -233,9 +233,9 @@ impl<
                     Ok(http_msg) => Ok(Some(http_msg)),
                     Err(e) => Err(e),
                 },
-                Err(e) => Err(err!(e, errmsg!(
-                    "{}: Error while executing async file read.", id,
-                ), IO, File, Read)),
+                Err(e) => Err(err!(e,
+                    "{}: Error while executing async file read.", id;
+                    IO, File, Read)),
             }
         }        
         

@@ -201,7 +201,7 @@ impl FromStr for EmailHeader {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let parts: Vec<&str> = s.splitn(2, ':').map(str::trim).collect();
         if parts.len() != 2 {
-            return Err(err!(errmsg!("Invalid email header format: {}", s), Invalid, Input));
+            return Err(err!("Invalid email header format: {}", s; Invalid, Input));
         }
 
         let name = parts[0].to_lowercase();
@@ -289,9 +289,9 @@ impl FromStr for ContentDisposition {
                     Ok(ContentDisposition::Attachment(None))
                 }
             }
-            _ => Err(err!(errmsg!(
-                "Invalid Content-Disposition value: {}", s,
-            ), Invalid, Input)),
+            _ => Err(err!(
+                "Invalid Content-Disposition value: {}", s;
+            Invalid, Input)),
         }
     }
 }

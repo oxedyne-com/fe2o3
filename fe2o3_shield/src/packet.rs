@@ -64,17 +64,15 @@ impl FromBytes for PacketChunkState {
     fn from_bytes(buf: &[u8]) -> Outcome<(Self, usize)> {
         let mut result = Self::default();
         if buf.len() < Self::BYTE_LEN {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "Not enough bytes to decode, require at least {}, found only {}.",
-                Self::BYTE_LEN, buf.len(),
-            ), Bytes, Input,
-            Decode, Missing));
+                Self::BYTE_LEN, buf.len();
+                Bytes, Input, Decode, Missing));
         }
         let mut n: usize = 0;
         result.index = PacketCount::from_be_bytes(res!(
-            <[u8; PACKET_COUNT_BYTE_LEN]>::try_from(
-                &buf[n..n + PACKET_COUNT_BYTE_LEN]
-        ), Decode, Bytes));
+            <[u8; PACKET_COUNT_BYTE_LEN]>::try_from(&buf[n..n + PACKET_COUNT_BYTE_LEN]),
+            Decode, Bytes));
         n += PACKET_COUNT_BYTE_LEN;
 
         result.num_chunks = PacketCount::from_be_bytes(res!(
@@ -183,11 +181,10 @@ impl<
     fn from_bytes(buf: &[u8]) -> Outcome<(Self, usize)> {
         let mut result = Self::default();
         if buf.len() < Self::BYTE_LEN {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "Not enough bytes to decode, require at least {}, found only {}.",
-                Self::BYTE_LEN, buf.len(),
-            ), Bytes, Input,
-            Decode, Missing));
+                Self::BYTE_LEN, buf.len();
+                Bytes, Input, Decode, Missing));
         }
 
         let mut n = constant::MSG_TYPE_BYTE_LEN;
@@ -247,9 +244,9 @@ impl TryFrom<u8> for PacketValidatorId {
             1 => Ok(Self::Pow),
             2 => Ok(Self::BareSignature),
             3 => Ok(Self::SignatureWithKey),
-            _ => Err(err!(errmsg!(
-                "Number {} not recognised as a PacketValidatorId.", n,
-            ), Input, Invalid)),
+            _ => Err(err!(
+                "Number {} not recognised as a PacketValidatorId.", n;
+                Input, Invalid)),
         }
     }
 }
@@ -325,12 +322,12 @@ impl FromBytes for PacketValidationArtefactRelativeIndices {
                             let sig_rng = n..n + sig_len;
                             n += sig_len;
                             if sigval_rng.end != sig_rng.end {
-                                return Err(err!(errmsg!(
+                                return Err(err!(
                                     "The end point of the overall relative signature artefact range, \
                                     {:?}, should match the end point of the relative range of the actual \
                                     signature, {:?}, when the public key (range {:?}) is included.",
-                                    sigval_rng, sig_rng, pk_rng,
-                                ), Bug, Index, Mismatch));
+                                    sigval_rng, sig_rng, pk_rng;
+                                    Bug, Index, Mismatch));
                             }
                             Some((pk_rng, sig_rng))
                         } else {
@@ -412,10 +409,10 @@ impl<
                         return Err(e);
                     }
                     if !found {
-                        return Err(err!(errmsg!(
+                        return Err(err!(
                             "Proof of work validator: search timed out after {:?}.",
-                            elapsed,
-                        ), Timeout, Missing));
+                            elapsed;
+                            Timeout, Missing));
                     }
 
                     /////// Debugging only.
@@ -439,9 +436,9 @@ impl<
                     let mut sig = res!(signer.sign(&buf));
                     let pk = match res!(signer.get_public_key()) {
                         Some(k) => k,
-                        None => return Err(err!(errmsg!(
-                            "Signature validator: public key not available.",
-                        ), Bug, Configuration, Missing)),
+                        None => return Err(err!(
+                            "Signature validator: public key not available.";
+                            Bug, Configuration, Missing)),
                     };
                     let mut artefact = Vec::new();
                     artefact.extend_from_slice(&(pk.len() as u16).to_be_bytes());
@@ -482,9 +479,9 @@ impl<
     {
         let pow = match self.pow {
             Some(power) => {
-                let powvars = res!(powvars.ok_or(err!(errmsg!(
-                    "Proof of work validation missing requirements.",
-                ), Bug, Configuration, Missing)));
+                let powvars = res!(powvars.ok_or(err!(
+                    "Proof of work validation missing requirements.";
+                    Bug, Configuration, Missing)));
                 match afact_rel_ind.pow {
                     Some(range) => {
                         Some(res!(power.validate(
@@ -492,9 +489,9 @@ impl<
                             &buf[n0 + range.start..n0 + range.end],
                         )))
                     }
-                    None => return Err(err!(errmsg!(
-                        "Proof of work validation missing artefact.",
-                    ), Bug, Configuration, Missing)),
+                    None => return Err(err!(
+                        "Proof of work validation missing artefact.";
+                        Bug, Configuration, Missing)),
                 }
             },
             None => None,
@@ -531,9 +528,9 @@ impl<
                         Some((signer.local_id(), pk)),
                     ))
                 },
-                None => return Err(err!(errmsg!(
-                    "Validator requires a signature but no artefact has been included.",
-                ), Bug, Configuration, Missing)),
+                None => return Err(err!(
+                    "Validator requires a signature but no artefact has been included.";
+                    Bug, Configuration, Missing)),
             },
             None => None,
         };
@@ -578,9 +575,9 @@ impl<
                             hlen, &artefact[h_start..],
                         );
                     },
-                    None => return Err(err!(errmsg!(
-                        "Proof of work validation missing requirements.",
-                    ), Bug, Configuration, Missing)),
+                    None => return Err(err!(
+                        "Proof of work validation missing requirements.";
+                        Bug, Configuration, Missing)),
                 }
             },
             None => trace!("No proof of work hasher provided."),

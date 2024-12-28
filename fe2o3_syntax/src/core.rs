@@ -100,10 +100,9 @@ impl Syntax {
         match counter.checked_add(1) {
             Some(i) => Ok(i),
             None => {
-                return Err(err!(errmsg!(
-                    "The id counter for {} has reached its upper \
-                    limit of {}", desc, u16::MAX,
-                ), ErrTag::Counter, ErrTag::Overflow));
+                return Err(err!(
+                    "The id counter for {} has reached its upper limit of {}", desc, u16::MAX;
+                Counter, Overflow));
             },
         }
     }

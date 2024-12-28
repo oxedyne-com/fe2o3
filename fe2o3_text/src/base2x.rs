@@ -135,51 +135,51 @@ impl<
         -> Outcome<Self>
     {
         if X < 2 || X > MAX_X {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "The token size X provided, {}, must be at least 2 and no \
-                more than {}.", X, MAX_X,
-            ), Invalid, Input));
+                more than {}.", X, MAX_X;
+            Invalid, Input));
         }
         let padding_reqd = !(X == 2 || X == 4 || X == 8);
         if !padding_reqd && padding.is_some() {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "Padding is not required for a token size of {}, so padding parameters \
-                should be set to None.", X,
-            ), Invalid, Input, Mismatch));
+                should be set to None.", X;
+            Invalid, Input, Mismatch));
         }
         if padding_reqd && padding.is_none() {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "Padding is required for a token size {} but no padding characters \
-                were provided.", X,
-            ), Invalid, Input, Missing));
+                were provided.", X;
+            Invalid, Input, Missing));
         }
         let x = match Self::validate_size(A) {
             Some(x) => x,
-            None => return Err(err!(errmsg!(
+            None => return Err(err!(
                 "Alphabet length {} must be a power of 2, and less than {}",
-                A, MAX_A,
-            ), Invalid, Input)),
+                A, MAX_A;
+            Invalid, Input)),
         };
         if x != X {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "The alphabet length {} must equal 2^X ({}) where the X \
-                supplied is {}.", A, 2_usize.pow(X as u32), X,
-            ), Invalid, Input));
+                supplied is {}.", A, 2_usize.pow(X as u32), X;
+            Invalid, Input));
         }
         let non_unique = Self::find_non_unique_chars(&alphabet, &padding.map(|(c, _)| c));
         if non_unique.len() > 0 {
-            return Err(err!(errmsg!(
-                "Alphabet characters must be unique, these ones repeat: {:?}.", non_unique,
-            ), Invalid, Input));
+            return Err(err!(
+                "Alphabet characters must be unique, these ones repeat: {:?}.", non_unique;
+            Invalid, Input));
         }
         if padding_reqd {
             if let Some(p) = padding {
                 let non_unique = Self::find_non_unique_chars(&p.1, &Some(p.0));
                 if non_unique.len() > 0 {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "Padding set characters must be unique, these ones repeat: {:?}.",
-                        non_unique,
-                    ), Invalid, Input));
+                        non_unique;
+                    Invalid, Input));
                 }
             }
         }
@@ -227,16 +227,16 @@ impl<
     pub fn prepare_alphabet(s: &str) -> Outcome<[char; A]> {
         let chars: Vec<char> = s.chars().collect();
         if chars.len() != A {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "The number of characters in the given alphabet, {}, does not match \
-                your generic parameter, {}.", chars.len(), A,
-            ), Invalid, Size, Input, Mismatch));
+                your generic parameter, {}.", chars.len(), A;
+            Invalid, Size, Input, Mismatch));
         }
         match chars.try_into() {
             Ok(a) => Ok(a),
-            Err(_) => Err(err!(errmsg!(
-                "Failed to convert Vec<char> to [char; {}].", A,
-            ), Conversion)),
+            Err(_) => Err(err!(
+                "Failed to convert Vec<char> to [char; {}].", A;
+            Conversion)),
         }
     }
 
@@ -244,16 +244,16 @@ impl<
     pub fn prepare_pad_set(s: &str) -> Outcome<[char; X]> {
         let chars: Vec<char> = s.chars().collect();
         if chars.len() != X {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "The number of characters in the padding set, {}, does not match \
-                your generic parameter, {}.", chars.len(), X,
-            ), Invalid, Size, Input, Mismatch));
+                your generic parameter, {}.", chars.len(), X;
+            Invalid, Size, Input, Mismatch));
         }
         match chars.try_into() {
             Ok(a) => Ok(a),
-            Err(_) => Err(err!(errmsg!(
-                "Failed to convert Vec<char> to [char; {}].", X,
-            ), Conversion)),
+            Err(_) => Err(err!(
+                "Failed to convert Vec<char> to [char; {}].", X;
+            Conversion)),
         }
     }
 
@@ -382,9 +382,9 @@ impl<
             let index = self.get_token(c);
             match index {
                 Some(i) => tokens.push(i),
-                None => return Err(err!(errmsg!(
-                    "Character '{}' not recognised by this Base2x alphabet.", c,
-                ), Unknown, Invalid, Input, String, Decode)),
+                None => return Err(err!(
+                    "Character '{}' not recognised by this Base2x alphabet.", c;
+                Unknown, Invalid, Input, String, Decode)),
             }
         }
         Ok(tokens)
@@ -412,10 +412,10 @@ impl<
         if padding > 0 {
             //trace!("validation: padding = {} bits = {}", padding, bits);
             if bits % 8 != 0 {
-                return Err(err!(errmsg!(
+                return Err(err!(
                     "The padding of {} zero bits is not valid because string decoding \
-                    will lead to a total bit length that is not divisible by 8.", padding,
-                ), Invalid, Input, Mismatch, String, Decode));
+                    will lead to a total bit length that is not divisible by 8.", padding;
+                Invalid, Input, Mismatch, String, Decode));
             }
         }
         Ok(())
@@ -443,10 +443,10 @@ impl<
                     if encoded.pop() == Some(pad_sep) {
                         match self.get_padding_bits(padding_amount_char) {
                             Some(padding) => return Ok((encoded, padding + 1)),
-                            None => return Err(err!(errmsg!(
+                            None => return Err(err!(
                                 "Padding character '{}' is invalid, must be in the \
-                                set {}.", padding_amount_char, self.fmt_pad_set(),
-                            ), Invalid, Input, String, Decode)),
+                                set {}.", padding_amount_char, self.fmt_pad_set();
+                            Invalid, Input, String, Decode)),
                         }
                     } else {
                         unreachable!()

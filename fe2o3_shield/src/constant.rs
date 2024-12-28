@@ -21,7 +21,7 @@ use std::{
 impl ShieldConfig {
     pub fn check_constants() -> Outcome<()> {
         //if CHECK_INTERVAL > USER_REQUEST_TIMEOUT {
-        //    return Err(err!(errmsg!(
+        //    return Err(err!(
         //        "The prescribed constant check interval, {:?}, should not be larger than the \
         //        constant maximum wait, {:?}.", CHECK_INTERVAL,
         //        USER_REQUEST_TIMEOUT,

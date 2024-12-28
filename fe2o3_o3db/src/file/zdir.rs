@@ -94,7 +94,8 @@ impl ZoneDir {
                 .read(true)
                 .open(p)
             {
-                Err(e) => Err(err!(e, errmsg!("While opening file {:?} for {:?}", p, access),
+                Err(e) => Err(err!(e,
+                    "While opening file {:?} for {:?}", p, access;
                     IO, File, Read)),
                 Ok(file) => Ok(file),
             },
@@ -105,7 +106,8 @@ impl ZoneDir {
                 .append(true)
                 .open(p)
             {
-                Err(e) => Err(err!(e, errmsg!("While opening file {:?} for {:?}", p, access),
+                Err(e) => Err(err!(e,
+                    "While opening file {:?} for {:?}", p, access;
                     IO, File, Write, Create)),
                 Ok(file) => Ok(file),
             },
@@ -114,40 +116,39 @@ impl ZoneDir {
     
     pub fn ozone_file_number_and_type(path: &Path) -> Outcome<(FileNum, FileType)> {
         let stem_str = match path.file_stem() {
-            None => return Err(err!(errmsg!(
+            None => return Err(err!(
                 "File {:?} has an invalid file name.  Ozone zone directories \
-                should not contain files with names like this.", path,
-            ), IO, File, Path, Invalid)),
+                should not contain files with names like this.", path;
+                IO, File, Path, Invalid)),
             Some(os_str) => match os_str.to_str() {
-                None => return Err(err!(errmsg!(
-                    "File {:?} file name is not valid Unicode", path,
-                ), IO, File, Path, Decode, Invalid)),
+                None => return Err(err!(
+                    "File {:?} file name is not valid Unicode", path;
+                    IO, File, Path, Decode, Invalid)),
                 Some(s) => s.replace("_", ""),
             },
         };
         let fnum = res!(stem_str.parse::<FileNum>());
         if fnum == 0 {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "File {:?} has an invalid file number.  Ozone data and index \
-                file numbers start from 1.", path,
-            ), IO, File, Path, Invalid));
+                file numbers start from 1.", path;
+                IO, File, Path, Invalid));
         }
         let ftyp = match path.extension() {
-            None => return Err(err!(errmsg!(
+            None => return Err(err!(
                 "File {:?} has an invalid file extension.  Ozone zone directories \
-                should not contain files of this type.", path,
-            ), IO, File, Path, Invalid)),
+                should not contain files of this type.", path;
+                IO, File, Path, Invalid)),
             Some(os_str) => match os_str.to_str() {
-                None => return Err(err!(errmsg!(
-                    "File {:?} file extension is not valid Unicode", path,
-                ), IO, File, Path, Decode, Invalid)),
+                None => return Err(err!(
+                    "File {:?} file extension is not valid Unicode", path;
+                    IO, File, Path, Decode, Invalid)),
                 Some(s) => match s {
                     constant::DATA_FILE_EXT => FileType::Data,
                     constant::INDEX_FILE_EXT => FileType::Index,
-                    _ => return Err(err!(errmsg!(
-                        "File {:?} extension not valid for Ozone database",
-                        path,
-                    ))),
+                    _ => return Err(err!(
+                        "File {:?} extension not valid for Ozone database", path;
+                        IO, File, Name, Invalid)),
                 },
             },
         };

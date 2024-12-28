@@ -95,9 +95,9 @@ impl ActionData {
         if let Some(term) = self.term {
             Ok(term)
         } else {
-            Err(err!(errmsg!(
-                "Terminal view is missing from ActionData.",
-            ), Bug, Data, Missing))
+            Err(err!(
+                "Terminal view is missing from ActionData.";
+            Bug, Data, Missing))
         }
     }
 
@@ -105,9 +105,9 @@ impl ActionData {
         if let Some(c) = self.c {
             Ok(c)
         } else {
-            Err(err!(errmsg!(
-                "Character is missing from ActionData.",
-            ), Bug, Data, Missing))
+            Err(err!(
+                "Character is missing from ActionData.";
+            Bug, Data, Missing))
         }
     }
 }
@@ -118,9 +118,9 @@ impl WindowManager<'_> {
         if let Some(data) = data {
             data.must_get_term()
         } else {
-            Err(err!(errmsg!(
-                "ActionData is missing.",
-            ), Bug, Data, Missing))
+            Err(err!(
+                "ActionData is missing.";
+            Bug, Data, Missing))
         }
     }
 
@@ -128,9 +128,9 @@ impl WindowManager<'_> {
         if let Some(data) = data {
             data.must_get_char()
         } else {
-            Err(err!(errmsg!(
-                "ActionData is missing.",
-            ), Bug, Data, Missing))
+            Err(err!(
+                "ActionData is missing.";
+            Bug, Data, Missing))
         }
     }
 

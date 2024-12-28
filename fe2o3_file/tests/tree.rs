@@ -90,9 +90,9 @@ pub fn test_tree(filter: &'static str) -> Outcome<()> {
             if let Some(focal_node) = tree.get_focal_node() {
                 req!(focal_node.name().as_str(), expected[i], "L: result, R: expected");
             } else {
-                return Err(err!(errmsg!(
-                    "Could not obtain focal node.",
-                ), Test, Data, Missing));
+                return Err(err!(
+                    "Could not obtain focal node.";
+                Test, Data, Missing));
             }
             res!(tree.inc_focus());
         }
@@ -126,9 +126,9 @@ pub fn test_tree(filter: &'static str) -> Outcome<()> {
             if let Some(focal_node) = tree.get_focal_node() {
                 req!(focal_node.name().as_str(), expected[i], "L: result, R: expected");
             } else {
-                return Err(err!(errmsg!(
-                    "Could not obtain focal node.",
-                ), Test, Data, Missing));
+                return Err(err!(
+                    "Could not obtain focal node.";
+                Test, Data, Missing));
             }
             res!(tree.dec_focus());
         }

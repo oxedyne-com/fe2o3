@@ -54,11 +54,9 @@ impl Cmd {
     pub fn new<S: Into<String>>(name: S) -> Outcome<Self> {
         let name = name.into();
         if name.starts_with('-') || name.contains(' ') {
-            Err(err!(errmsg!(
-                "Command name '{}' should not start with a hyphen or contain \
-                spaces",
-                name,
-            ), ErrTag::Input, ErrTag::Invalid))
+            Err(err!(
+                "Command name '{}' should not start with a hyphen or contain spaces", name;
+            Input, Invalid))
         } else {
             let cfg = CmdConfig {
                 name: name,

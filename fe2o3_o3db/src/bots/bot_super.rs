@@ -101,16 +101,16 @@ impl<
                 resp.clone(),
             )
         ) {
-            self.err_cannot_send(err!(e, errmsg!(
-                "{}: Sending channels to master", self.ozid(),
-            ), IO, Channel));
+            self.err_cannot_send(err!(e,
+                "{}: Sending channels to master", self.ozid();
+                IO, Channel));
         }
         match resp.recv_timeout(constant::BOT_REQUEST_TIMEOUT) {
             Err(e) => self.error(e),
             Ok(OzoneMsg::ChannelsReceived(_)) => (),
-            m => self.error(err!(errmsg!(
-                "{}: Received {:?}, expecting ChannelsReceived confirmation.", self.ozid(), m,
-            ))),
+            m => self.error(err!(
+                "{}: Received {:?}, expecting ChannelsReceived confirmation.", self.ozid(), m;
+                Channel)),
         }
         self.now_listening();
         loop {
@@ -126,9 +126,9 @@ impl<
             self.trep = now;
         }
         match self.chan_in().recv() {
-            Err(e) => self.err_cannot_receive(err!(e, errmsg!(
-                "{}: Waiting for message.", self.ozid(),
-            ), IO, Channel)),
+            Err(e) => self.err_cannot_receive(err!(e,
+                "{}: Waiting for message.", self.ozid();
+                IO, Channel)),
             Ok(msg) => match msg {
                 OzoneMsg::ClearCache(_)              |
                 OzoneMsg::DumpCacheRequest(_)        |
@@ -153,20 +153,20 @@ impl<
                         self.respond(self.shutdown(fmt!("{}", ozid)), &resp);
                         return LoopBreak(true);
                     } else {
-                        self.respond(Err(err!(errmsg!(
+                        self.respond(Err(err!(
                             "{} attempted to shut down database, but only the Master \
-                            can do this.", ozid,
-                        ))), &resp);
+                            can do this.", ozid;
+                            Unauthorised)), &resp);
                     }
                 },
                 OzoneMsg::ZoneState(z, zstat) => {
                     //debug!("{}: zone {} state received: {:?}",self.ozid(),z,zstat);
                     if z+1 > self.ozone_state().len() {
-                        self.error(err!(errmsg!(
+                        self.error(err!(
                             "{}: The ZoneInd for a zone state update, {}, exceeds the \
-                            number of zbot slots {}.", self.ozid(), z,
-                            self.ozone_state().len(),
-                        ), Bug, Mismatch, Size));
+                            number of zbot slots {}.",
+                            self.ozid(), z, self.ozone_state().len();
+                            Bug, Mismatch, Size));
                     } else {
                         self.ozone_state_mut()[z] = zstat;
                     }
@@ -295,9 +295,9 @@ impl<
                 OzoneMsg::ChannelsReceived(ozid) => {
                     info!("{}: Channels received by {}", self.ozid(), ozid);
                 },
-                m => self.error(err!(errmsg!(
-                    "Received {:?}, expecting ChannelsReceived confirmation.", m,
-                ))),
+                m => self.error(err!(
+                    "Received {:?}, expecting ChannelsReceived confirmation.", m;
+                    Channel, Read, Unexpected)),
             }
         }
 
@@ -483,9 +483,9 @@ impl<
             }
             let dead = res!(self.handles.get_dead_bots());
             if dead.len() > 0 {
-                error!(err!(errmsg!(
-                    "{} out of {} bots are dead:", dead.len(), expected,
-                ), Thread, Missing));
+                error!(err!(
+                    "{} out of {} bots are dead:", dead.len(), expected;
+                    Thread, Missing));
                 for ozid in &unresponsive {
                     fault!(" {:?} is dead", ozid);
                 }

@@ -245,9 +245,9 @@ impl DevRefreshManager {
                                     let rt = match tokio::runtime::Runtime::new() {
                                         Ok(rt) => rt,
                                         Err(e) => {
-                                            error!(err!(e, errmsg!(
-                                                "Failed to create Tokio runtime for bundling."
-                                            )));
+                                            error!(err!(e,
+                                                "Failed to create Tokio runtime for bundling.";
+                                                Init));
                                             return;
                                         }
                                     };
@@ -260,10 +260,9 @@ impl DevRefreshManager {
                                         path,
                                     )) {
                                         // Continue serving if there is a failure.
-                                        error!(err!(e, errmsg!(
-                                            "Error processing source file change: {:?}",
-                                            path
-                                        )));
+                                        error!(err!(e,
+                                            "Error processing source file change: {:?}", path;
+                                            IO, File));
                                     }
                                 }
                             }

@@ -187,9 +187,9 @@ impl<
                 Some(key) => {
                     self.connect_as_client(request, key).await
                 }
-                None => Err(err!(errmsg!(
-                    "Expected a key string, received: {:?}", key,
-                ), Input, Missing)),
+                None => Err(err!(
+                    "Expected a key string, received: {:?}", key;
+                Input, Missing)),
             }
         } else {
             self.connect_as_server(request).await
@@ -218,17 +218,17 @@ impl<
                 if response.is_websocket_handshake(&accept_key) {
                     info!("Client connection successfully upgraded to a websocket.");
                 } else {
-                    return Err(err!(errmsg!(
-                        "While checking server websocket upgrade response.",
-                    ), IO, Network));
+                    return Err(err!(
+                        "While checking server websocket upgrade response.";
+                    IO, Network));
                 }
             },
-            Err(e) => return Err(err!(e, errmsg!(
-                "While checking server websocket upgrade response.",
-            ), IO, Network, Wire, Read)),
-            Ok((None, _)) => return Err(err!(errmsg!(
-                "UnexpectedEof indicates connection closure.",
-            ), IO, Network, Wire, Read)),
+            Err(e) => return Err(err!(e,
+                "While checking server websocket upgrade response.";
+            IO, Network, Wire, Read)),
+            Ok((None, _)) => return Err(err!(
+                "UnexpectedEof indicates connection closure.";
+            IO, Network, Wire, Read)),
         }
 
         Ok(())
@@ -255,21 +255,21 @@ impl<
             Ok(HeaderFieldValue::SecWebSocketKey(key)) => { 
                 let key_byts = match base64::decode(key) {
                     Ok(byts) => byts,
-                    Err(e) => return Err(err!(e, errmsg!(
-                        "The websocket key provided is not valid base64.",
-                    ), IO, Network, Invalid, Input, String, Conversion)),
+                    Err(e) => return Err(err!(e,
+                        "The websocket key provided is not valid base64.";
+                    IO, Network, Invalid, Input, String, Conversion)),
                 };
                 if key_byts.len() == 16 {
                     key
                 } else {
-                    return Err(err!(errmsg!(
-                        "The websocket key is {} bytes long, expected 16.", key_byts.len(),
-                    ), IO, Network, Invalid, Input, Mismatch, Size));
+                    return Err(err!(
+                        "The websocket key is {} bytes long, expected 16.", key_byts.len();
+                    IO, Network, Invalid, Input, Mismatch, Size));
                 }
             },
-            _ => return Err(err!(errmsg!(
-                "The websocket key string is missing.",
-            ), IO, Network, Input, Missing)),
+            _ => return Err(err!(
+                "The websocket key string is missing.";
+            IO, Network, Input, Missing)),
         };
 
         let accept_key = Self::accept_key(&key);
@@ -284,9 +284,9 @@ impl<
 
         match self.stream.write_all(response.as_bytes()).await {
             Ok(()) => (),
-            Err(e) => return Err(err!(e, errmsg!(
-                "Could not send websocket handshake response.",
-            ), IO, Network, Wire, Write)),
+            Err(e) => return Err(err!(e,
+                "Could not send websocket handshake response.";
+            IO, Network, Wire, Write)),
         }
 
         info!("Server connection successfully upgraded to a websocket.");
@@ -307,9 +307,9 @@ impl<
                 Err(e) if e.kind() == tokio::io::ErrorKind::UnexpectedEof => {
                     return Ok(None);
                 }
-                Err(e) => return Err(err!(e, errmsg!(
-                    "While trying to read first byte of the frame header.",
-                ), IO, Network, Read, Wire)),
+                Err(e) => return Err(err!(e,
+                    "While trying to read first byte of the frame header.";
+                IO, Network, Read, Wire)),
             }
     
             // Extract the FIN bit and opcode from the header byte.
@@ -327,9 +327,9 @@ impl<
                 Err(e) if e.kind() == tokio::io::ErrorKind::UnexpectedEof => {
                     return Ok(None);
                 }
-                Err(e) => return Err(err!(e, errmsg!(
-                    "While trying to read second byte of the frame header.",
-                ), IO, Network, Read, Wire)),
+                Err(e) => return Err(err!(e,
+                    "While trying to read second byte of the frame header.";
+                IO, Network, Read, Wire)),
             }
         
             // Extract the payload length and mask flag from the length byte.
@@ -344,9 +344,9 @@ impl<
                         Err(e) if e.kind() == tokio::io::ErrorKind::UnexpectedEof => {
                             return Ok(None);
                         }
-                        Err(e) => return Err(err!(e, errmsg!(
-                            "While trying to read second byte of the frame header.",
-                        ), IO, Network, Read, Wire)),
+                        Err(e) => return Err(err!(e,
+                            "While trying to read second byte of the frame header.";
+                        IO, Network, Read, Wire)),
                     }
                     u64::from_be_bytes(extended_length_bytes) as usize
                 }
@@ -359,9 +359,9 @@ impl<
                         Err(e) if e.kind() == tokio::io::ErrorKind::UnexpectedEof => {
                             return Ok(None);
                         }
-                        Err(e) => return Err(err!(e, errmsg!(
-                            "While trying to read second byte of the frame header.",
-                        ), IO, Network, Read, Wire)),
+                        Err(e) => return Err(err!(e,
+                            "While trying to read second byte of the frame header.";
+                        IO, Network, Read, Wire)),
                     }
                     u16::from_be_bytes(extended_length_bytes) as usize
                 }
@@ -377,9 +377,9 @@ impl<
                     Err(e) if e.kind() == tokio::io::ErrorKind::UnexpectedEof => {
                         return Ok(None);
                     }
-                    Err(e) => return Err(err!(e, errmsg!(
-                        "While trying to read second byte of the frame header.",
-                    ), IO, Network, Read, Wire)),
+                    Err(e) => return Err(err!(e,
+                        "While trying to read second byte of the frame header.";
+                    IO, Network, Read, Wire)),
                 }
             }
         
@@ -410,9 +410,9 @@ impl<
                     Err(e) if e.kind() == tokio::io::ErrorKind::UnexpectedEof => {
                         return Ok(None);
                     }
-                    Err(e) => return Err(err!(e, errmsg!(
-                        "While trying to read payload chunk.",
-                    ), IO, Network, Read, Wire)),
+                    Err(e) => return Err(err!(e,
+                        "While trying to read payload chunk.";
+                    IO, Network, Read, Wire)),
                 }
             }
 
@@ -465,7 +465,7 @@ impl<
             }
             _ => {
                 // Unknown opcode.
-                return Err(err!(errmsg!("Unknown opcode: {}", opcode), IO, Network, Invalid, Input));
+                return Err(err!("Unknown opcode: {}", opcode; IO, Network, Invalid, Input));
             }
         };
     
@@ -670,22 +670,22 @@ impl<
             if let Some(WebSocketMessage::Close(client_status_code, client_reason)) = close_response {
                 if let Some(code) = status_code {
                     if client_status_code != Some(code) {
-                        return Err(err!(errmsg!(
-                            "Received unexpected close status code from client: {:?}", client_status_code,
-                        ), IO, Network, Invalid, Input));
+                        return Err(err!(
+                            "Received unexpected close status code from client: {:?}", client_status_code;
+                        IO, Network, Invalid, Input));
                     }
                 }
                 if let Some(reason_str) = reason {
                     if client_reason != Some(reason_str) {
-                        return Err(err!(errmsg!(
-                            "Received unexpected close reason from client: {:?}", client_reason,
-                        ), IO, Network, Invalid, Input));
+                        return Err(err!(
+                            "Received unexpected close reason from client: {:?}", client_reason;
+                        IO, Network, Invalid, Input));
                     }
                 }
             } else {
-                return Err(err!(errmsg!(
-                    "Expected close frame response from client, but received: {:?}", close_response,
-                ), IO, Network, Invalid, Input));
+                return Err(err!(
+                    "Expected close frame response from client, but received: {:?}", close_response;
+                IO, Network, Invalid, Input));
             }
         } else {
             // Client-side: Read the close frame response from the server
@@ -716,22 +716,22 @@ impl<
             if let Some(WebSocketMessage::Close(server_status_code, server_reason)) = close_response {
                 if let Some(code) = status_code {
                     if server_status_code != Some(code) {
-                        return Err(err!(errmsg!(
-                            "Received unexpected close status code from server: {:?}", server_status_code,
-                        ), IO, Network, Invalid, Input));
+                        return Err(err!(
+                            "Received unexpected close status code from server: {:?}", server_status_code;
+                        IO, Network, Invalid, Input));
                     }
                 }
                 if let Some(reason_str) = reason {
                     if server_reason != Some(reason_str) {
-                        return Err(err!(errmsg!(
-                            "Received unexpected close reason from server: {:?}", server_reason,
-                        ), IO, Network, Invalid, Input));
+                        return Err(err!(
+                            "Received unexpected close reason from server: {:?}", server_reason;
+                        IO, Network, Invalid, Input));
                     }
                 }
             } else {
-                return Err(err!(errmsg!(
-                    "Expected close frame response from server, but received: {:?}", close_response,
-                ), IO, Network, Invalid, Input));
+                return Err(err!(
+                    "Expected close frame response from server, but received: {:?}", close_response;
+                IO, Network, Invalid, Input));
             }
         }
     
@@ -759,10 +759,10 @@ impl<
                     if let Err(e) = result {
                         *err_count += 1;
                         if *err_count > max_errors {
-                            let e = err!(e, errmsg!(
+                            let e = err!(e,
                                 "{}: The number of websocket handler errors has exceeded the limit of {}, \
-                                the connection will now be terminated.", id, max_errors,
-                            ), IO, Network, Wire, Excessive);
+                                the connection will now be terminated.", id, max_errors;
+                            IO, Network, Wire, Excessive);
                             error!(e.clone());
                             return Err(e);
                         } else {
@@ -777,10 +777,10 @@ impl<
             Err(e) => {
                 *err_count += 1;
                 if *err_count > max_errors {
-                    let e = err!(e, errmsg!(
+                    let e = err!(e,
                         "{}: The number of websocket handler errors has exceeded the limit of {}, \
-                        the connection will now be terminated.", id, max_errors,
-                    ), IO, Network, Wire, Excessive);
+                        the connection will now be terminated.", id, max_errors;
+                    IO, Network, Wire, Excessive);
                     error!(e.clone());
                     return Err(e);
                 } else {
@@ -887,23 +887,10 @@ impl<
                                 WebSocketMessage::Close(status_code, reason) => {
                                     let result = self.close(status_code, reason).await;
                                     if let Err(e) = result {
-                                        error!(err!(e, errmsg!(
-                                            "{}: Error during WebSocket close:", id,
-                                        ), IO, Network, Wire, Write));
+                                        error!(err!(e,
+                                            "{}: Error during WebSocket close:", id;
+                                        IO, Network, Wire, Write));
                                     }
-                                    //if let Err(e) = result {
-                                    //    let e = err!(e, errmsg!(
-                                    //        "{}: Error during WebSocket close:", id,
-                                    //    ), IO, Network, Wire, Write);
-                                    //    let result = self.response_handler(
-                                    //        Err(e),
-                                    //        &mut err_count,
-                                    //        max_errors,
-                                    //        "",
-                                    //        id,
-                                    //    ).await;
-                                    //    res!(result);
-                                    //}
                                     break;
                                 }
                             }
@@ -912,9 +899,9 @@ impl<
                             break;
                         }
                         Err(e) => {
-                            let e = err!(e, errmsg!(
-                                "{}: Error reading websocket message:", id,
-                            ), IO, Network, Wire, Read);
+                            let e = err!(e,
+                                "{}: Error reading websocket message:", id;
+                            IO, Network, Wire, Read);
                             let result = self.response_handler(
                                 Err(e),
                                 &mut err_count,
@@ -943,9 +930,9 @@ impl<
                     let refresh = WebSocketMessage::Text(WSH::DEV_REFRESH_MSG.to_string());
                     debug!("{}: POO Sending {:?}", id, refresh);
                     if let Err(e) = self.send(&refresh).await {
-                        error!(err!(e, errmsg!(
-                            "{}: Error sending refresh message:", id,
-                        ), IO, Network, Wire, Write));
+                        error!(err!(e,
+                            "{}: Error sending refresh message:", id;
+                        IO, Network, Wire, Write));
                     }
                 }
                 // Pings.
@@ -963,11 +950,10 @@ impl<
                         let ping = WebSocketMessage::Ping(ping_data);
                         let result = self.send(&ping).await;
                         if let Err(e) = result {
-                            let e = err!(e, errmsg!(
-                                "{}: Error sending ping message:", id,
-                            ), IO, Network, Wire, Write);
+                            let e = err!(e,
+                                "{}: Error sending ping message:", id;
+                            IO, Network, Wire, Write);
                             let result = self.response_handler(Err(e), &mut err_count, max_errors, "", id).await;
-                            //res!(result);
                             if let Err(e) = result {
                                 error!(e);
                                 continue;

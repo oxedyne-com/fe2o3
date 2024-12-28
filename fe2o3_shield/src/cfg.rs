@@ -223,10 +223,10 @@ impl ShieldConfig {
 
     pub fn check_wire_chunk_config(&self, chunk_cfg: &ChunkConfig) -> Outcome<()> {
         if chunk_cfg.chunk_size > u16::MAX as usize {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "Chunk size of {} is less than the current minimum of {}.",
-                chunk_cfg.chunk_size, constant::MIN_CHUNK_SIZE,
-            ), TooBig, Configuration));
+                chunk_cfg.chunk_size, constant::MIN_CHUNK_SIZE;
+            TooBig, Configuration));
         }
         Ok(())
     }
@@ -280,7 +280,7 @@ impl ShieldConfig {
     //                        count_lim: constant::POW_CREATE_COUNT_LIM,
     //                    },
     //                ),
-    //                None => return Err(err!(errmsg!(
+    //                None => return Err(err!(
     //                    "The configuration currently requires a proof of work validator, \
     //                    but the PowVars supplied is None.",
     //                ), Bug, Configuration)),
@@ -297,7 +297,7 @@ impl ShieldConfig {
     //                        count_lim: constant::POW_CREATE_COUNT_LIM,
     //                    },
     //                ),
-    //                None => return Err(err!(errmsg!(
+    //                None => return Err(err!(
     //                    "The configuration currently requires a proof of work validator, \
     //                    but the PowVars supplied is None.",
     //                ), Bug, Configuration)),

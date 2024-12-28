@@ -89,7 +89,7 @@ impl<
             let (mut stream, src_addr) = match result {
                 Ok((stream, src_addr)) => (stream, src_addr),
                 Err(e) => {
-                    error!(err!(e, errmsg!("TCP connection aborted.")));
+                    error!(err!(e, "TCP connection aborted."; IO, Network));
                     continue;
                 }
             };
@@ -112,16 +112,16 @@ impl<
                                             ws_syntax,
                                             src_addr,
                                         ).await {
-                                            error!(err!(e, errmsg!(
-                                                "Error handling HTTPS connection."
-                                            )));
+                                            error!(err!(e,
+                                                "Error handling HTTPS connection.";
+                                                IO, Network));
                                         }
                                     });
                                 }
                             }
                         }
                         Err(e) => {
-                            error!(err!(e, errmsg!("TLS handshake aborted.")));
+                            error!(err!(e, "TLS handshake aborted."; IO, Network, Init));
                             continue;
                         }
                     }
@@ -137,7 +137,7 @@ impl<
                         This server requires HTTPS. Please use https://localhost:8443 instead";
     
                     if let Err(e) = stream.write_all(response.as_bytes()).await {
-                        error!(err!(e, errmsg!("Failed to send HTTPS redirect")));
+                        error!(err!(e, "Failed to send HTTPS redirect"; IO, Network, Write));
                     }
                     continue;
                 }

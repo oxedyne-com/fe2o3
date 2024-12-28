@@ -56,9 +56,9 @@ Sec-Fetch-User: ?1\r\n\r\n";
                 req!(&body_str, body);
                 test!("Successfully parsed HTTP request.");
             } else {
-                return Err(err!(errmsg!(
-                    "Message reading should not have returned None.",
-                ), Missing, Test));
+                return Err(err!(
+                    "Message reading should not have returned None.";
+                Missing, Test));
             }
         },
         _ => (),

@@ -31,7 +31,7 @@ impl FromBytes for Dat {
     /// tuple.
     fn from_bytes(buf: &[u8]) -> Outcome<(Self, usize)> {
         if buf.len() == 0 {
-            return Err(err!(errmsg!("No bytes to decode."), Input, Invalid));
+            return Err(err!("No bytes to decode."; Input, Invalid));
         }
         match buf[0] {
             // Atomic Kinds ===========================
@@ -357,12 +357,12 @@ impl FromBytes for Dat {
                                 ));
                             }
                         }
-                        _ => return Err(err!(errmsg!(
+                        _ => return Err(err!(
                             "{} code was not followed by a code for a Dat::C64 in the correct \
                             range {}..{}, the code found was {}.",
                             Self::code_name(buf[0]), Self::C64_CODE_START, Self::C64_CODE_END,
-                            buf[1],
-                        ), Bytes, Input, Decode, Missing)),
+                            buf[1];
+                        Bytes, Input, Decode, Missing)),
                     }
                 } else {
                     return Err(<Dat as FromBytes>::too_few(
@@ -408,12 +408,12 @@ impl FromBytes for Dat {
                                 ));
                             }
                         }
-                        _ => return Err(err!(errmsg!(
+                        _ => return Err(err!(
                             "{} code was not followed by a code for a Dat::C64 in the correct \
                             range {}..{}, the code found was {}.",
                             Self::code_name(buf[0]), Self::C64_CODE_START, Self::C64_CODE_END,
-                            buf[1],
-                        ), Bytes, Input, Decode, Missing)),
+                            buf[1];
+                        Bytes, Input, Decode, Missing)),
                     }
                 } else {
                     return Err(<Dat as FromBytes>::too_few(
@@ -458,12 +458,12 @@ impl FromBytes for Dat {
                                 ));
                             }
                         }
-                        _ => return Err(err!(errmsg!(
+                        _ => return Err(err!(
                             "{} code was not followed by a code for a Dat::C64 in the correct \
                             range {}..{}, the code found was {}.",
                             Self::code_name(buf[0]), Self::C64_CODE_START, Self::C64_CODE_END,
-                            buf[1],
-                        ), Bytes, Input, Decode, Missing)),
+                            buf[1];
+                        Bytes, Input, Decode, Missing)),
                     }
                 } else {
                     return Err(<Dat as FromBytes>::too_few(
@@ -513,12 +513,12 @@ impl FromBytes for Dat {
                                 ));
                             }
                         }
-                        _ => return Err(err!(errmsg!(
+                        _ => return Err(err!(
                             "{} code was not followed by a code for a Dat::C64 in the correct \
                             range {}..{}, the code found was {}.",
                             Self::code_name(buf[0]), Self::C64_CODE_START, Self::C64_CODE_END,
-                            buf[1],
-                        ), Bytes, Input, Decode, Missing)),
+                            buf[1];
+                        Bytes, Input, Decode, Missing)),
                     }
                 } else {
                     return Err(<Dat as FromBytes>::too_few(
@@ -563,11 +563,11 @@ impl FromBytes for Dat {
                                 2 + CODE_LEN + n,
                             ));
                         }
-                        _ => return Err(err!(errmsg!(
+                        _ => return Err(err!(
                             "Expecting an option code {} (for none) or {} (for some), \
                             instead found code {}.",
-                            Self::OPT_NONE_CODE, Self::OPT_SOME_CODE, opt_code,
-                        ), Bytes, Input, Decode, Missing)),
+                            Self::OPT_NONE_CODE, Self::OPT_SOME_CODE, opt_code;
+                        Bytes, Input, Decode, Missing)),
                     }
                 } else {
                     return Err(<Dat as FromBytes>::too_few(
@@ -666,12 +666,12 @@ impl FromBytes for Dat {
                                 ));
                             }
                         }
-                        _ => return Err(err!(errmsg!(
+                        _ => return Err(err!(
                             "{} code was not followed by a code for a Dat::C64 in the correct \
                             range {}..{}, the code found was {}.",
                             Self::code_name(buf[0]), Self::C64_CODE_START, Self::C64_CODE_END,
-                            buf[start],
-                        ), Bytes, Input, Decode, Missing)),
+                            buf[start];
+                        Bytes, Input, Decode, Missing)),
                     }
                 } else {
                     return Err(<Dat as FromBytes>::too_few(
@@ -721,14 +721,14 @@ impl FromBytes for Dat {
                             }
                         }
                         _ => {
-                            return Err(err!(errmsg!(
+                            return Err(err!(
                                 "Dat::List code was not followed by a code for a \
                                 Dat::C64 in the correct range {}..{}, the code found \
                                 was {}",
                                 Self::C64_CODE_START,
                                 Self::C64_CODE_END,
-                                buf[1],
-                            ), Bytes, Input, Decode, Missing));
+                                buf[1];
+                            Bytes, Input, Decode, Missing));
                         }
                     }
                 } else {
@@ -988,12 +988,12 @@ impl FromBytes for Dat {
                                     let (key, n) = res!(Dat::from_bytes(&buf[i..]));
                                     i += n;
                                     if i >= byt_len {
-                                        return Err(err!(errmsg!(
+                                        return Err(err!(
                                             "Not enough bytes to decode the required value \
                                             for key {:?} in the {:?}, after successfully \
                                             decoding {} key-value pairs.",
-                                            key, Self::code_name(buf[0]), count,
-                                        ), Bytes, Input, Decode, Missing));
+                                            key, Self::code_name(buf[0]), count;
+                                        Bytes, Input, Decode, Missing));
                                     }
                                     let (val, n) = res!(Dat::from_bytes(&buf[i..]));
                                     i += n;
@@ -1005,21 +1005,21 @@ impl FromBytes for Dat {
                                     byt_len,
                                 ));
                             } else {
-                                return Err(err!(errmsg!(
+                                return Err(err!(
                                     "Not enough bytes to decode the {:?} bytes.  \
                                     The map length is {} bytes, but the remaining buffer \
                                     length is {} bytes.",
-                                    Self::code_name(buf[0]), payload_len, buf.len() - 1 - n,
-                                ), Bytes, Input, Decode, Missing));
+                                    Self::code_name(buf[0]), payload_len, buf.len() - 1 - n;
+                                Bytes, Input, Decode, Missing));
                             }
                         }
                         _ => {
-                            return Err(err!(errmsg!(
+                            return Err(err!(
                                 "{:?} code was not followed by a code for a \
                                 Dat::C64 in the correct range {}..{}, the code found \
                                 was {}",
-                                Self::code_name(buf[0]), Self::C64_CODE_START, Self::C64_CODE_END, buf[1],
-                            ), Bytes, Input, Decode, Missing));
+                                Self::code_name(buf[0]), Self::C64_CODE_START, Self::C64_CODE_END, buf[1];
+                            Bytes, Input, Decode, Missing));
                         }
                     }
                 } else {
@@ -1055,12 +1055,12 @@ impl FromBytes for Dat {
                                     let (key, n) = res!(Dat::from_bytes(&buf[i..]));
                                     i += n;
                                     if i >= byt_len {
-                                        return Err(err!(errmsg!(
+                                        return Err(err!(
                                             "Not enough bytes to decode the required value \
                                             for key {:?} in the {:?}, after successfully \
                                             decoding {} key-value pairs.",
-                                            key, Self::code_name(buf[0]), count,
-                                        ), Bytes, Input, Decode, Missing));
+                                            key, Self::code_name(buf[0]), count;
+                                        Bytes, Input, Decode, Missing));
                                     }
                                     let (val, n) = res!(Dat::from_bytes(&buf[i..]));
                                     i += n;
@@ -1073,21 +1073,21 @@ impl FromBytes for Dat {
                                     byt_len,
                                 ));
                             } else {
-                                return Err(err!(errmsg!(
+                                return Err(err!(
                                     "Not enough bytes to decode the {:?} bytes.  \
                                     The map length is {} bytes, but the remaining buffer \
                                     length is {} bytes.",
-                                    Self::code_name(buf[0]), payload_len, buf.len() - 1 - n,
-                                ), Bytes, Input, Decode, Missing));
+                                    Self::code_name(buf[0]), payload_len, buf.len() - 1 - n;
+                                Bytes, Input, Decode, Missing));
                             }
                         }
                         _ => {
-                            return Err(err!(errmsg!(
+                            return Err(err!(
                                 "{:?} code was not followed by a code for a \
                                 Dat::C64 in the correct range {}..{}, the code found \
                                 was {}",
-                                Self::code_name(buf[0]), Self::C64_CODE_START, Self::C64_CODE_END, buf[1],
-                            ), Bytes, Input, Decode, Missing));
+                                Self::code_name(buf[0]), Self::C64_CODE_START, Self::C64_CODE_END, buf[1];
+                            Bytes, Input, Decode, Missing));
                         }
                     }
                 } else {
@@ -1269,9 +1269,9 @@ impl FromBytes for Dat {
             Self::TUP9_U64_CODE     => binary_decode_byte_tuple! { Tup9u64, u64, 9, buf },
             Self::TUP10_U64_CODE    => binary_decode_byte_tuple! { Tup10u64, u64, 10, buf },
 
-            code => return Err(err!(errmsg!(
-                "Byte code 0x{:02x} not implemented.", code,
-            ), Unimplemented, Input)),
+            code => return Err(err!(
+                "Byte code 0x{:02x} not implemented.", code;
+            Unimplemented, Input)),
         }
     }
 }
@@ -1284,9 +1284,9 @@ impl Dat {
     pub fn read_c64(buf: &[u8]) -> Outcome<(u64, usize)> {
         let len = (buf[0] - Dat::C64_CODE_START) as usize;
         if buf.len() < len + 1 {
-            return Err(err!(errmsg!(
-                "Not enough bytes to decode the Dat::C64.",
-            ), Bytes, Input, Decode, Missing));
+            return Err(err!(
+                "Not enough bytes to decode the Dat::C64.";
+            Bytes, Input, Decode, Missing));
         }
         let mut byts = [0_u8; 8];
         let offset = 8-len;

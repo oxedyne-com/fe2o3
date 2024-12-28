@@ -48,15 +48,15 @@ impl<
         match self {
             AccessibleText::ThreadShared(locked) => match locked.write() {
                 Ok(guard) => Ok(guard),
-                Err(_) => Err(err!(errmsg!(
-                    "Failed to acquire write lock.",
-                ), Poisoned, Lock)),
+                Err(_) => Err(err!(
+                    "Failed to acquire write lock.";
+                Poisoned, Lock)),
             }
             AccessibleText::Shared(locked) => match locked.write() {
                 Ok(guard) => Ok(guard),
-                Err(_) => Err(err!(errmsg!(
-                    "Failed to acquire write lock.",
-                ), Poisoned, Lock)),
+                Err(_) => Err(err!(
+                    "Failed to acquire write lock.";
+                Poisoned, Lock)),
             }
         }
     }
@@ -65,15 +65,15 @@ impl<
         match self {
             AccessibleText::ThreadShared(locked) => match locked.write() {
                 Ok(guard) => Ok(guard),
-                Err(_) => Err(err!(errmsg!(
-                    "Failed to acquire write lock.",
-                ), Poisoned, Lock)),
+                Err(_) => Err(err!(
+                    "Failed to acquire write lock.";
+                Poisoned, Lock)),
             }
             AccessibleText::Shared(locked) => match locked.write() {
                 Ok(guard) => Ok(guard),
-                Err(_) => Err(err!(errmsg!(
-                    "Failed to acquire write lock.",
-                ), Poisoned, Lock)),
+                Err(_) => Err(err!(
+                    "Failed to acquire write lock.";
+                Poisoned, Lock)),
             }
         }
     }

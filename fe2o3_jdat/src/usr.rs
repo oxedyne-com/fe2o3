@@ -115,21 +115,21 @@ impl UsrKindId {
             if rest.starts_with("0x") {
                 match UsrKindCode::from_str_radix(&rest[2..], 16) {
                     Ok(code) => Ok(code),
-                    Err(e) => Err(err!(e, errmsg!(
+                    Err(e) => Err(err!(e,
                         "Suffix '{}' of label '{}' cannot be interpreted as a u{}.",
-                        rest, label, Self::CODE_BYTE_LEN * 8,
-                    ), Input, Invalid, String)),
+                        rest, label, Self::CODE_BYTE_LEN * 8;
+                    Input, Invalid, String)),
                 }
             } else {
-                Err(err!(errmsg!(
-                    "The code in label '{}' should start with a '0x'.", label,
-                ), Input, Invalid, String))
+                Err(err!(
+                    "The code in label '{}' should start with a '0x'.", label;
+                Input, Invalid, String))
             }
         } else {
-            Err(err!(errmsg!(
+            Err(err!(
                 "Label '{}' does not start with prefix '{}'.",
-                label, prefix,
-            ), Input, Invalid, String))
+                label, prefix;
+            Input, Invalid, String))
         }
     }
 
@@ -200,15 +200,15 @@ impl<
         let code = ukid.code();
         let label = ukid.label().to_string();
         match Kind::from_str(&label) {
-            Ok(k) => Err(err!(errmsg!(
+            Ok(k) => Err(err!(
                 "Label '{}' matches existing standard JDAT type, which \
-                represents '{}'", label, k.desc(),
-            ), Input, Exists, Invalid)),
+                represents '{}'", label, k.desc();
+            Input, Exists, Invalid)),
             Err(_) => {
                 if self.c2k.contains_key(&code) {
-                    Err(err!(errmsg!(
-                        "{:?} is already registered as a user kind.", ukid,
-                    ), Input, Exists))
+                    Err(err!(
+                        "{:?} is already registered as a user kind.", ukid;
+                    Input, Exists))
                 } else {
                     self.c2k.insert(code, ukid.ukind.clone());
                     self.s2i.insert(label, UsrKindId {

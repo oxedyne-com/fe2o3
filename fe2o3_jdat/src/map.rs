@@ -70,11 +70,11 @@ impl Dat {
                     .filter(|(mk, _)| mk.dat() == key)
                     .collect();
                 if entries.len() > 1 {
-                    Err(err!(errmsg!(
+                    Err(err!(
                         "There are {} entries, {:?} with the same given daticle \
                         {:?} in the MapKey, which is not allowed.",
-                        entries.len(), entries, key,
-                    ), Invalid, Input, Exists))
+                        entries.len(), entries, key;
+                    Invalid, Input, Exists))
                 } else if entries.len() == 0 {
                     Ok(None)
                 } else {
@@ -97,11 +97,11 @@ impl Dat {
                     .filter(|(mk, _)| mk.dat() == key)
                     .collect();
                 if entries.len() > 1 {
-                    Err(err!(errmsg!(
+                    Err(err!(
                         "There are {} entries, {:?} with the same given daticle \
                         {:?} in the MapKey, which is not allowed.",
-                        entries.len(), entries, key,
-                    ), Invalid, Input, Exists))
+                        entries.len(), entries, key;
+                    Invalid, Input, Exists))
                 } else if entries.len() == 0 {
                     Ok(None)
                 } else {
@@ -119,9 +119,9 @@ impl Dat {
     pub fn map_get_must(&self, key: &Self) -> Outcome<&Self> {
         match res!(self.map_get(key)) {
             Some(dat) => Ok(dat),
-            None => Err(err!(errmsg!(
-                "The key {:?} does not map to any value, as expected.", key,
-            ), Input, Missing)),
+            None => Err(err!(
+                "The key {:?} does not map to any value, as expected.", key;
+            Input, Missing)),
         }
     }
 
@@ -130,9 +130,9 @@ impl Dat {
     pub fn map_remove_must(&mut self, key: &Self) -> Outcome<Self> {
         match res!(self.map_remove(key)) {
             Some(dat) => Ok(dat),
-            None => Err(err!(errmsg!(
-                "The key {:?} does not map to any value, as expected.", key,
-            ), Input, Missing)),
+            None => Err(err!(
+                "The key {:?} does not map to any value, as expected.", key;
+            Input, Missing)),
         }
     }
 
@@ -153,11 +153,11 @@ impl Dat {
                             return Ok(Some(val));
                         }
                     }
-                    Err(err!(errmsg!(
+                    Err(err!(
                         "The key {} maps to a value of kind {:?}, \
                         which does not correspond with any of {:?}.",
-                        key, val.kind(), kinds,
-                    ), Input, Mismatch))
+                        key, val.kind(), kinds;
+                    Input, Mismatch))
                 },
                 None => Ok(None),
             },
@@ -182,15 +182,15 @@ impl Dat {
                             return Ok(val);
                         }
                     }
-                    Err(err!(errmsg!(
+                    Err(err!(
                         "The key {} maps to a value of kind {:?}, \
                         which does not correspond with any of {:?}.",
-                        key, val.kind(), kinds,
-                    ), Input, Mismatch))
+                        key, val.kind(), kinds;
+                    Input, Mismatch))
                 },
-                None => Err(err!(errmsg!(
-                    "The key {:?} does not map to any value, as expected.", key,
-                ), Input, Missing)),
+                None => Err(err!(
+                    "The key {:?} does not map to any value, as expected.", key;
+                Input, Missing)),
             },
             Err(e) => Err(e),
         }
@@ -206,23 +206,23 @@ impl Dat {
                         return Ok(d);
                     }
                 }
-                return Err(err!(errmsg!(
+                return Err(err!(
                     "The key {} maps to a value of kind {:?}, \
                     which does not correspond with any of {:?}.",
-                    key, d.kind(), kinds,
-                ), Input, Mismatch));
+                    key, d.kind(), kinds;
+                Input, Mismatch));
             } else {
-                return Err(err!(errmsg!(
+                return Err(err!(
                     "The key {} does not map to any value, as \
                     required.",
-                    key,
-                ), Input, Missing));
+                    key;
+                Input, Missing));
             }
         } else {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "Dat {} must be a map.",
-                self,
-            ), Input, Mismatch));
+                self;
+            Input, Mismatch));
         }
     }
 
@@ -258,12 +258,12 @@ impl Dat {
                 }
                 Ok(Some(current))
             }
-            (Dat::Map(_) | Dat::OrdMap(_), _) => Err(err!(errmsg!(
-                "Expected a Dat::List argument.",
-            ), Input, Invalid, Mismatch)),
-            _ => Err(err!(errmsg!(
-                "This method requires a map kind (Dat::Map or Dat::OrdMap).",
-            ), Input, Invalid, Mismatch)),
+            (Dat::Map(_) | Dat::OrdMap(_), _) => Err(err!(
+                "Expected a Dat::List argument.";
+            Input, Invalid, Mismatch)),
+            _ => Err(err!(
+                "This method requires a map kind (Dat::Map or Dat::OrdMap).";
+            Input, Invalid, Mismatch)),
         }
     }
 

@@ -366,9 +366,9 @@ impl MsgPow {
     pub fn from_msg(msg: &mut SyntaxMsg) -> Outcome<Self> {
         let zbits = match msg.get_arg_vals_mut("-zb") {
             Some(v) => try_extract_dat_as!(v[0].extract(), ZeroBits, U8, U16, U32),
-            None => return Err(err!(errmsg!(
-                "No proof of work zero bits specified in message arguments (-zb).",
-            ), Input, Missing)),
+            None => return Err(err!(
+                "No proof of work zero bits specified in message arguments (-zb).";
+                Input, Missing)),
         };
         //let code = match msg.get_arg_vals_mut("-pc") {
         //    Some(v) => {
@@ -408,7 +408,7 @@ impl<
     pub fn from_msg(uid: IdDat<UIDL, UID>, msg: &mut SyntaxMsg) -> Outcome<Self> {
         //let uid = match msg.get_arg_vals_mut("-u") {
         //    Some(v) => try_extract_dat_as!(v[0].extract(), IdDat, U128),
-        //    None => return Err(err!(errmsg!(
+        //    None => return Err(err!(
         //        "No user id value in message arguments (-u).",
         //    ), Input, Missing)),
         //};

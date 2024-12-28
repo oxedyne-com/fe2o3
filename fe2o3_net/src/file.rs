@@ -87,7 +87,7 @@ impl RequestPath {
         }
 
         if path.len() > 0 && self.path.ends_with('/') {
-            return Err(err!(errmsg!("Path must not end with  '/'"), IO, Network, Invalid, Input));
+            return Err(err!("Path must not end with  '/'"; IO, Network, Invalid, Input));
         }
 
         if path.len() == 0 {
@@ -98,9 +98,9 @@ impl RequestPath {
         for component in path.components() {
             match component {
                 Component::CurDir | Component::ParentDir => {
-                    return Err(err!(errmsg!(
-                        "Path must not contain relative components '.' or '..'",
-                    ), IO, Network, Invalid, Input));
+                    return Err(err!(
+                        "Path must not contain relative components '.' or '..'";
+                    IO, Network, Invalid, Input));
                 }
                 _ => ()
             }

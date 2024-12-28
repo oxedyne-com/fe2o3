@@ -274,10 +274,10 @@ impl TryFrom<usize> for Dat {
             4   => Self::U32(n as u32),
             8   => Self::U64(n as u64),
             16  => Self::U128(n as u128),
-            s   => return Err(err!(errmsg!(
+            s   => return Err(err!(
                 "The usize for this machine is {}, which has not yet been \
-                mapped to a daticle kind.", s,
-            ), System, Unimplemented)),
+                mapped to a daticle kind.", s;
+            System, Unimplemented)),
         })
     }
 }
@@ -292,10 +292,10 @@ impl TryFrom<isize> for Dat {
             4   => Self::I32(n as i32),
             8   => Self::I64(n as i64),
             16  => Self::I128(n as i128),
-            s   => return Err(err!(errmsg!(
+            s   => return Err(err!(
                 "The isize for this machine is {}, which has not yet been \
-                mapped to a daticle kind.", s,
-            ), System, Unimplemented)),
+                mapped to a daticle kind.", s;
+            System, Unimplemented)),
         })
     }
 }
@@ -355,9 +355,9 @@ impl TryFrom<Dat> for Vec<String> {
     type Error = Error<ErrTag>;
 
     fn try_from(dat: Dat) -> Result<Self, Self::Error> {
-        dat.get_string_list().ok_or(err!(errmsg!(
-            "Daticle '{:?}' is not a list or vek of strings.", dat,
-        ), Conversion, String))
+        dat.get_string_list().ok_or(err!(
+            "Daticle '{:?}' is not a list or vek of strings.", dat;
+        Conversion, String))
     }
 }
 
@@ -365,9 +365,9 @@ impl<'a> TryFrom<&'a Dat> for Vec<String> {
     type Error = Error<ErrTag>;
 
     fn try_from(dat: &'a Dat) -> Result<Self, Self::Error> {
-        dat.get_string_list().ok_or(err!(errmsg!(
-            "Daticle '{:?}' is not a list or vek of strings.", dat,
-        ), Conversion, String))
+        dat.get_string_list().ok_or(err!(
+            "Daticle '{:?}' is not a list or vek of strings.", dat;
+        Conversion, String))
     }
 }
 
@@ -386,10 +386,10 @@ impl TryFrom<(UsrKindId, Option<Dat>)> for Dat {
             },
         };
         if !ok {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "Usr daticle requires kind {:?} but {:?} received.",
-                ukid.kind(), optd,
-            ), Input, Invalid, Mismatch));
+                ukid.kind(), optd;
+            Input, Invalid, Mismatch));
         }
         Ok(Self::Usr(ukid, match optd {
             None => None,
@@ -407,11 +407,11 @@ impl TryFrom<Vec<Dat>> for Vek {
             let mut count: usize = 2;
             for d in v.iter().skip(1) {
                 if !d.kind().equals(&kind) {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "Cannot construct a Vek from the given Vec because the \
                         kind of item {}, {:?} differs from the kind, {:?} of the \
-                        first item.", count, d.kind(), kind,
-                    ), Input, Invalid, Mismatch));
+                        first item.", count, d.kind(), kind;
+                    Input, Invalid, Mismatch));
                 }
                 count += 1;
             }

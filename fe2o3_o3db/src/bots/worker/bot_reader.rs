@@ -144,9 +144,9 @@ impl<
 
     fn listen(&mut self) -> LoopBreak {
         match self.chan_in().recv() {
-            Err(e) => self.err_cannot_receive(err!(e, errmsg!(
-                "{}: Waiting for message.", self.ozid(),
-            ), IO, Channel)),
+            Err(e) => self.err_cannot_receive(err!(e,
+                "{}: Waiting for message.", self.ozid();
+                IO, Channel)),
             Ok(msg) => {
                 if let Some(msg) = self.listen_worker(msg) {
                     match msg {
@@ -275,9 +275,9 @@ impl<
 
         // <6> We receive either the value or the file location from the cbot or fbot.
         let (floc, meta, postgc) = match resp_r2.recv_timeout(constant::BOT_REQUEST_TIMEOUT) {
-            Err(e) => return Err(err!(e, errmsg!(
-                "While waiting on value or location from cbot or fbot.",
-            ), IO, Channel, Read)),
+            Err(e) => return Err(err!(e,
+                "While waiting on value or location from cbot or fbot.";
+                IO, Channel, Read)),
             Ok(OzoneMsg::ReadResult(readres)) => {
                 match readres {
                     // <10> Return result to caller via resp_r1.
@@ -305,9 +305,9 @@ impl<
                     },
                 }
             },
-            Ok(msg) => return Err(err!(errmsg!(
-                "Unrecognised response from cbot to read request: {:?}", msg,
-            ), Bug, Invalid, Input)),
+            Ok(msg) => return Err(err!(
+                "Unrecognised response from cbot to read request: {:?}", msg;
+            Bug, Invalid, Input)),
         };
         
 
@@ -346,36 +346,36 @@ impl<
         );
 
         match file_write.seek(SeekFrom::Start(floc.val().start)) {
-            Err(e) => return Err(err!(e, errmsg!(
+            Err(e) => return Err(err!(e,
                 "{}: attempt to move to position {} in data file {}.",
-                self.ozid(), floc.val().start, floc.file_number(),
-            ), IO, File, Seek)),
+                self.ozid(), floc.val().start, floc.file_number();
+                IO, File, Seek)),
             Ok(actual_pos) => {
                 if actual_pos != floc.val().start {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "{}: attempt to move to position {} in data file {} \
                         but only moved to {}.",
-                        self.ozid(), floc.val().start, floc.file_number(), actual_pos,
-                    ), IO, File, Seek));
+                        self.ozid(), floc.val().start, floc.file_number(), actual_pos;
+                        IO, File, Seek));
                 }
                 let mut v = vec![0; floc.val().len as usize];
                 let file_clone = res!((*file_write).try_clone());
                 let mut reader = BufReader::new(file_clone);
                 match reader.read(&mut v) {
                     Err(e) => {
-                        return Err(err!(e, errmsg!(
+                        return Err(err!(e,
                             "{}: attempt to read {} bytes from position {} in data file {}.",
-                            self.ozid(), floc.val().len, floc.val().start, floc.file_number(),
-                        ), IO, File, Read));
+                            self.ozid(), floc.val().len, floc.val().start, floc.file_number();
+                            IO, File, Read));
                     },
                     Ok(actually_read) => {
                         if actually_read != floc.val().len as usize {
-                            return Err(err!(errmsg!(
+                            return Err(err!(
                                 "{:?}: attempt to read {} bytes from position {} \
                                 in data file {}, but only read {} bytes.",
                                 self.ozid(), floc.val().len, floc.val().start, floc.file_number(),
-                                actually_read,
-                            ), IO, File, Read));
+                                actually_read;
+                                IO, File, Read));
                         }
                         return Ok(v);
                     },

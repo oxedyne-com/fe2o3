@@ -207,10 +207,10 @@ how Gilgamesh went
             test!("{}", line);
             let len = line.chars().count();
             if len > width {
-                return Err(err!(errmsg!(
+                return Err(err!(
                     "'{}' is {} characters wide, more than the maximum {}.",
-                    line, len, width,
-                ), Test, String, TooBig));
+                    line, len, width;
+                Test, String, TooBig));
             }
             req!(expected[i], *line, "(L: expected, R: wrapped)");
         }

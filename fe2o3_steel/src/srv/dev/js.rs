@@ -82,9 +82,9 @@ impl FromStr for FileType {
             "ts"    => Ok(Self::TypeScript),
             "mts"   => Ok(Self::TypeScriptModule),
             "tsx"   => Ok(Self::TypeScriptReact),
-            _ => Err(err!(errmsg!(
-                "Unknown file type extension: {}", s
-            ), Invalid, Input, String, Conversion))
+            _ => Err(err!(
+                "Unknown file type extension: {}", s;
+                Invalid, Input, String, Conversion))
         }
     }
 }
@@ -296,24 +296,24 @@ impl Load for ModuleLoader {
         let fm = match filename {
             FileName::Real(path) => {
                 if !path.exists() {
-                    return Err(anyhow::anyhow!(err!(errmsg!(
+                    return Err(anyhow::anyhow!(err!(
                         "Module not found: {:?}. Check import paths in requesting module.",
-                        path,
-                    ), IO, File, Missing)));
+                        path;
+                        IO, File, Missing)));
                 }
                 match self.cm.load_file(path) {
                     Ok(fm) => {
                         debug!("Successfully loaded file: {}", module_path);
                         fm
                     },
-                    Err(e) => return Err(anyhow::anyhow!(err!(e, errmsg!(
-                        "Failed to load file: {:?}", path,
-                    ), IO, File, Read))),
+                    Err(e) => return Err(anyhow::anyhow!(err!(e,
+                        "Failed to load file: {:?}", path;
+                        IO, File, Read))),
                 }
             },
-            _ => return Err(anyhow::anyhow!(err!(errmsg!(
-                "Unsupported module type: {:?}", filename,
-            ), IO, File))),
+            _ => return Err(anyhow::anyhow!(err!(
+                "Unsupported module type: {:?}", filename;
+                IO, File))),
         };
 
         // Determine syntax based on file extension and config
@@ -341,9 +341,9 @@ impl Load for ModuleLoader {
                 debug!("Successfully parsed module");
                 m
             },
-            Err(e) => return Err(anyhow::anyhow!(err!(errmsg!(
-                "Failed to parse module {}: {:?}", fm.name, e,
-            ), IO, Format))),
+            Err(e) => return Err(anyhow::anyhow!(err!(
+                "Failed to parse module {}: {:?}", fm.name, e;
+                IO, Format))),
         };
 
         Ok(ModuleData {
@@ -403,9 +403,9 @@ impl JsBundle {
                 
             // Verify entry file exists
             if !js_bundle_map.0.exists() {
-                return Err(err!(errmsg!(
-                    "Entry point file not found: {:?}", js_bundle_map.0,
-                ), IO, File, Missing));
+                return Err(err!(
+                    "Entry point file not found: {:?}", js_bundle_map.0;
+                    IO, File, Missing));
             }
     
             let mut entries = HashMap::new();
@@ -476,28 +476,27 @@ impl JsBundle {
                         };
 
                         if let Err(e) = emitter.emit_module(&bundle.module) {
-                            return Err(err!(e, errmsg!(
+                            return Err(err!(e,
                                 "Failed to emit bundle module {} for entry point {:?}",
-                                idx, js_bundle_map.0,
-                            ), IO, Format));
+                                idx, js_bundle_map.0;
+                                IO, Format));
                         }
                     }
 
                     match String::from_utf8(buf) {
                         Ok(s) => combined.push_str(&s),
-                        Err(e) => return Err(err!(e, errmsg!(
-                            "Generated invalid UTF-8 in bundle module {}",
-                            idx,
-                        ), IO, Format)),
+                        Err(e) => return Err(err!(e,
+                            "Generated invalid UTF-8 in bundle module {}", idx;
+                            IO, Format)),
                     };
                     combined.push('\n');
                 }
 
                 // Write bundle with error context
                 if let Err(e) = std::fs::write(&js_bundle_map.1, combined) {
-                    return Err(err!(e, errmsg!(
-                        "Failed to write bundle to {:?}", js_bundle_map.1,
-                    ), IO, File, Write));
+                    return Err(err!(e,
+                        "Failed to write bundle to {:?}", js_bundle_map.1;
+                        IO, File, Write));
                 }
 
                 info!("Successfully bundled {:?}", js_bundle_map.0);

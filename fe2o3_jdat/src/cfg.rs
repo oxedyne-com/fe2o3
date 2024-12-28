@@ -19,9 +19,9 @@ pub trait Config:
 {
     // Required.
     fn check_and_fix(&mut self) -> Outcome<()> {
-        Err(err!(errmsg!(
-            "Don't forget to implement checks on the configuration.",
-        ), Unimplemented, Configuration))
+        Err(err!(
+            "Don't forget to implement checks on the configuration.";
+        Unimplemented, Configuration))
     }
 
     // Provided.

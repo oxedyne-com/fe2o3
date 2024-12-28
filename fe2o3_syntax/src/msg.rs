@@ -133,7 +133,7 @@ impl ToBytes for Msg {
                 }
             },
             Encoding::UTF8 => buf.extend_from_slice(self.to_string().as_bytes()),
-            _ => return Err(err!(errmsg!("Unimplemented message encoding {:?}.", encoding),
+            _ => return Err(err!("Unimplemented message encoding {:?}.", encoding;
                 Unimplemented, Encode)),
         }
         debug!("{:02x?}", buf);
@@ -180,10 +180,10 @@ impl Msg {
         ->  Outcome<&'a Arg>
     {
         let arg_name = arg_name.into();
-        self.syntax().args.get_recursive(&Key::Str(arg_name.clone())).ok_or_else(|| err!(errmsg!(
+        self.syntax().args.get_recursive(&Key::Str(arg_name.clone())).ok_or_else(|| err!(
             "Cannot find this message argument '{}' in the syntax '{}'.",
-            arg_name, self.sname,
-        ), Missing))
+            arg_name, self.sname;
+        Missing))
     }
 
     pub fn add_cmd(
@@ -194,10 +194,10 @@ impl Msg {
     {
         let name = msgcmd.name.clone();
         if !self.syntax().cmds.contains_key(&Key::Str(name.clone())) {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "Can't find command '{}' in syntax '{}'.",
-                name, self.sname,
-            ), Invalid, Input));
+                name, self.sname;
+            Invalid, Input));
         }
         self.cmds.insert(name, msgcmd);
         Ok(self)
@@ -212,16 +212,16 @@ impl Msg {
         let arg_name = arg_name.into();
         // Make sure the argument exists in the syntax.
         if !self.syntax().args.contains_key(&Key::Str(arg_name.clone())) {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "Can't find message argument '{}' in syntax '{}'.",
-                arg_name, self.sname,
-            ), Invalid, Input));
+                arg_name, self.sname;
+            Invalid, Input));
         }
         // Check whether it has already been added to the Msg.
         if self.args.contains_key(&arg_name) {
-            return Err(err!(errmsg!(
-                "Argument '{}' has already been added to message.", arg_name,
-            ), Invalid, Input, Exists));
+            return Err(err!(
+                "Argument '{}' has already been added to message.", arg_name;
+            Invalid, Input, Exists));
         }
         self.args.insert(arg_name, Vec::new());
         Ok(self)
@@ -269,9 +269,9 @@ impl Msg {
                     self.args.insert(arg_name.clone(), Vec::new());
                     match self.args.get_mut(&arg_name) {
                         Some(v) => v,
-                        None => return Err(err!(errmsg!(
-                            "Argument '{}' was just created, but no longer present.", arg_name,
-                        ), Bug, Unreachable)),
+                        None => return Err(err!(
+                            "Argument '{}' was just created, but no longer present.", arg_name;
+                        Bug, Unreachable)),
                     }
                 },
             },
@@ -279,9 +279,9 @@ impl Msg {
         };
 
         if v.len() >= exp_vals.len() {
-            return Err(err!(errmsg!(
-                "Message already has all {} of its expected values.", v.len(),
-            ), Invalid, Input, Exists));
+            return Err(err!(
+                "Message already has all {} of its expected values.", v.len();
+            Invalid, Input, Exists));
         }
 
         match val_opt {
@@ -289,10 +289,10 @@ impl Msg {
                 if val.kind() == exp_vals[v.len()].0 {
                     v.push(val);
                 } else {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "Message already has {} values, and the next one must be a {:?}, \
-                        not a {:?}.", v.len(), exp_vals[v.len()], val.kind(),
-                    ), Invalid, Input));
+                        not a {:?}.", v.len(), exp_vals[v.len()], val.kind();
+                    Invalid, Input));
                 }
             },
             None => (),
@@ -356,13 +356,13 @@ impl Msg {
         let a = a.into();
         let has = self.args.contains_key(&a);
         if self.args.len() > 1 {
-            Err(err!(errmsg!(
+            Err(err!(
                 "The argument '{}' {}", a, if has {
                     "does not exist and there are other arguments."    
                 } else {
                     "does exist but there are other arguments."
-                },
-            ), Input, Invalid, Excessive))
+                };
+            Input, Invalid, Excessive))
         } else {
             Ok(has)
         }
@@ -402,19 +402,19 @@ impl Msg {
     pub fn validate(&self) -> Outcome<()> {
         let syntax = self.syntax();
         if self.vals.len() != syntax.config().vals.len() {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "The syntax '{}' requires {} message values, the message has {}.",
                 syntax,
                 syntax.config().vals.len(),
-                self.vals.len(),
-            ), Input, Invalid));
+                self.vals.len();
+            Input, Invalid));
         } else if self.args.len() < syntax.config().rargs.len() {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "The syntax '{}' requires {} message arguments, the message has {}.",
                 syntax,
                 syntax.config().rargs.len(),
-                self.args.len(),
-            ), Input, Invalid));
+                self.args.len();
+            Input, Invalid));
         }
 
         res!(self.check_rargs(
@@ -445,11 +445,11 @@ impl Msg {
                     }
                 }
                 if !found {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "The required {} '{}' was not found in the message.",
                         desc,
-                        arg_name,
-                    ), Input, Invalid, Missing));
+                        arg_name;
+                    Input, Invalid, Missing));
                 }
             }
         }
@@ -544,18 +544,18 @@ impl Msg {
     {
         if rargs.len() > 0 {
             match active_cmd {
-                Some(cmd) => return Err(err!(errmsg!(
+                Some(cmd) => return Err(err!(
                     "The syntax '{}' requires the presence of the arguments {:?} \
                     for command '{}', but the following were not detected before the \
                     presence of a command: {:?}",
-                    self.syntax().config().name, cmd.config().rargs, cmd.config().name, rargs,
-                ), Input, Missing)),
-                None => return Err(err!(errmsg!(
+                    self.syntax().config().name, cmd.config().rargs, cmd.config().name, rargs;
+                Input, Missing)),
+                None => return Err(err!(
                     "The syntax '{}' requires the presence of the commandless \
                     arguments {:?}, but the following were not detected before the \
                     presence of a command: {:?}",
-                    self.syntax().config().name, self.syntax().config().rargs, rargs,
-                ), Input, Missing)),
+                    self.syntax().config().name, self.syntax().config().rargs, rargs;
+                Input, Missing)),
             }
         }
         Ok(())
@@ -599,20 +599,20 @@ impl Msg {
                         }
                     }
                     if let Some(suggestion) = closest {
-                        return Err(err!(errmsg!(
+                        return Err(err!(
                             "Did you mean '{}'?. The word '{}' is not an argument, but \
                             neither was it recognised as a command in the '{}' syntax.",
-                            suggestion, word, self.syntax().config().name,
-                        ), Input, Invalid, Suggestion))
+                            suggestion, word, self.syntax().config().name;
+                        Input, Invalid, Suggestion))
                     }
                 }
             }
         }
-        Err(err!(errmsg!(
+        Err(err!(
             "The word '{:?}' is not an argument, but neither was it \
             recognised as a command in the '{}' syntax.",
-            word, self.syntax().config().name,
-        ), Input, Invalid))
+            word, self.syntax().config().name;
+        Input, Invalid))
     }
 
     /// If the given argument is on the given list of required arguments, the argument is removed
@@ -682,7 +682,7 @@ impl Msg {
             if collecting_vals != Collecting::None {
                 // VAL block
                 if let Some(vkiter) = val_kind_iter.as_mut() {
-                    //match res!(val_kind_iter.as_mut().ok_or_else(|| err!(errmsg!(
+                    //match res!(val_kind_iter.as_mut().ok_or_else(|| err!(
                     //    "val_kind_iter should not be None here.",
                     //), Bug, Unexpected))).next() {
                     match vkiter.next() {
@@ -691,29 +691,29 @@ impl Msg {
                             if active_cmd.is_none() {
                                 // Is the word a recognised message arg?
                                 if self.syntax().args.contains_key(&word_key) {
-                                    return Err(err!(errmsg!(
+                                    return Err(err!(
                                         "The syntax '{}' expects a value of kind '{:?}' but \
                                         found a message argument '{}'.",
-                                        self.syntax().config().name, kind, word,
-                                    ), Input, Missing));
+                                        self.syntax().config().name, kind, word;
+                                    Input, Missing));
                                 }
                                 // Is the word a recognised command?
                                 if self.syntax().cmds.contains_key(&word_key) {
-                                    return Err(err!(errmsg!(
+                                    return Err(err!(
                                         "The syntax '{}' expects a value of kind '{:?}' but \
                                         found a command '{}'.",
-                                        self.syntax().config().name, kind, word,
-                                    ), Input, Missing));
+                                        self.syntax().config().name, kind, word;
+                                    Input, Missing));
                                 }
                             } else {
                                 // Is the word a recognised command arg?
                                 if let Some(cmd) = active_cmd.as_ref() {
                                     if cmd.args.contains_key(&word_key) {
-                                        return Err(err!(errmsg!(
+                                        return Err(err!(
                                             "The syntax '{}' expects a value of kind '{:?}' but \
                                             found a command argument '{}'.",
-                                            self.syntax().config().name, kind, word,
-                                        ), Input, Missing));
+                                            self.syntax().config().name, kind, word;
+                                        Input, Missing));
                                     }
                                 }
                             }
@@ -801,11 +801,11 @@ impl Msg {
                                 }
                                 continue;
                             } else {
-                                return Err(err!(errmsg!(
+                                return Err(err!(
                                     "The syntax '{}' expects a value of kind '{:?}' \
                                     but the kind for received value '{}' is '{:?}'.",
-                                    self.syntax().config().name, kind, word, d.kind(),
-                                ), Input, Invalid));
+                                    self.syntax().config().name, kind, word, d.kind();
+                                Input, Invalid));
                             }
                         },
                         None => {
@@ -818,9 +818,9 @@ impl Msg {
                         },
                     }
                 } else {
-                    return Err(err!(errmsg!(
-                        "val_kind_iter should not be None here.",
-                    ), Bug, Unexpected));
+                    return Err(err!(
+                        "val_kind_iter should not be None here.";
+                    Bug, Unexpected));
                 }
             }
             if active_arg.is_none() {
@@ -832,11 +832,11 @@ impl Msg {
                             // We found it in the syntax, it's a command argument.
                             if let Some(cmdrx) = msgrx.get_cmd_mut(&cmd.config().name) {
                                 if cmdrx.has_arg(&arg.canonical_name()) {
-                                    return Err(err!(errmsg!(
+                                    return Err(err!(
                                         "The argument '{}' for command '{}' in the \
                                         syntax '{}' has already been detected.",
-                                        word, cmd.config().name, self.syntax().config().name,
-                                    ), Input, Invalid));
+                                        word, cmd.config().name, self.syntax().config().name;
+                                    Input, Invalid));
                                 } else {
                                     cmdrx.args.insert(arg.canonical_name(), Vec::new());    
                                 }
@@ -852,11 +852,11 @@ impl Msg {
                         if let Some(arg) = self.syntax().args.get_recursive(&word_key) {
                             // We found it in the syntax, it's a message argument.
                             if msgrx.args.contains_key(&arg.canonical_name()) {
-                                return Err(err!(errmsg!(
+                                return Err(err!(
                                     "The message argument '{}' in the syntax \
                                     '{}' has already been detected.",
-                                    word, self.syntax().config().name,
-                                ), Input, Invalid));
+                                    word, self.syntax().config().name;
+                                Input, Invalid));
                             } else {
                                 msgrx.args.insert(arg.canonical_name(), Vec::new());    
                             }
@@ -981,7 +981,7 @@ impl Msg {
         -> Outcome<Self>
     {
         if buf.len() <= 1 {
-            return Err(err!(errmsg!("No bytes to decode."), Input, Missing));
+            return Err(err!("No bytes to decode."; Input, Missing));
         }
         let msgrx = match Encoding::from(buf[0]) {
             Encoding::Binary => res!(self.from_bytes_binary(&buf[1..])),
@@ -989,8 +989,7 @@ impl Msg {
                 let msg_str = res!(std::str::from_utf8(&buf[1..]), Decode, UTF8);
                 res!(self.from_str(msg_str, similarity_threshold))
             },
-            _ => return Err(err!(errmsg!("Unknown message encoding."),
-                Unknown, Encode)),
+            _ => return Err(err!("Unknown message encoding."; Unknown, Encode)),
         };
         Ok(msgrx)
     }
@@ -1074,11 +1073,11 @@ impl Msg {
                             last_cmd = Some(cmd.config().name.clone());
                         }
                     } else {
-                        return Err(err!(errmsg!(
+                        return Err(err!(
                             "The binary message refers to a command with \
                             id {} but no such command exists in the '{}' syntax.",
-                            cmd_id, self.syntax().config().name,
-                        ), Input, Invalid));
+                            cmd_id, self.syntax().config().name;
+                        Input, Invalid));
                     }
                 }
             }
@@ -1115,13 +1114,13 @@ impl Msg {
         let a = try_extract_dat!(dat, C64);
         let narg = a as usize;
         if narg < rargs.len() {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "The syntax '{}' requires {} {} argument(s), found {}.",
                 self.syntax().config().name,
                 rargs.len(),
                 Self::msg_or_cmd_string(active_cmd),
-                narg,
-            ), Input, Missing));
+                narg;
+            Input, Missing));
         }
         let mut map = BTreeMap::new();
         for i in 0..narg {
@@ -1148,11 +1147,11 @@ impl Msg {
                     last_arg = Some(arg.canonical_name());
                 }
             } else {
-                return Err(err!(errmsg!(
+                return Err(err!(
                     "The binary message refers to a {:?} with \
                     id {} but no such argument exists in the syntax '{}'.",
-                    coll, arg_id, self.syntax().config().name,
-                ), Input, Invalid));
+                    coll, arg_id, self.syntax().config().name;
+                Input, Invalid));
             }
         }
         res!(self.check_required_bin_args(
@@ -1179,13 +1178,13 @@ impl Msg {
             required_args.remove(arg);
         }
         if required_args.len() > 0 {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "The syntax '{}' expects {} arguments '{:?}' which \
                 were not found.",
                 self.syntax().config().name,
                 Self::msg_or_cmd_string(active_cmd),
-                required_args,
-            ), Input, Missing));
+                required_args;
+            Input, Missing));
         }
         Ok(())
     }
@@ -1199,25 +1198,25 @@ impl Msg {
         -> Outcome<()>
     {
         if expected_vals.len() != actual_vals.len() {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "The syntax '{}' expects {} {} value(s), found {}.",
                 self.syntax().config().name,
                 expected_vals.len(),
                 Self::msg_or_cmd_string(active_cmd),
-                actual_vals.len(),
-            ), Input, Missing));
+                actual_vals.len();
+            Input, Missing));
         }
         for i in 0..expected_vals.len() {
             if expected_vals[i].0 != actual_vals[i].kind() {
-                return Err(err!(errmsg!(
+                return Err(err!(
                     "The syntax '{}' expects {} value {} to be a '{:?}', \
                     {:?} was found.",
                     self.syntax().config().name,
                     Self::msg_or_cmd_string(active_cmd),
                     actual_vals[i],
                     expected_vals[i].0,
-                    actual_vals[i].kind(),
-                ), Input, Missing));
+                    actual_vals[i].kind();
+                Input, Missing));
             }
         }
         Ok(())
@@ -1272,10 +1271,10 @@ impl MsgCmd {
         let name = name.into();
         let sname = syntax.config().name.clone();
         res!(syntax.cmds.get_recursive(&Key::Str(name.clone()))
-            .ok_or_else(|| err!(errmsg!(
+            .ok_or_else(|| err!(
                 "Cannot find this message command '{}' in the syntax '{}'.",
-                name.clone(), sname,
-            ), Invalid, Mismatch))
+                name.clone(), sname;
+            Invalid, Mismatch))
         );
         Ok(Self {
             syntax,
@@ -1293,10 +1292,10 @@ impl MsgCmd {
     )
         ->  Outcome<&'a Cmd>
     {
-        self.syntax().cmds.get_recursive(&Key::Str(self.name.clone())).ok_or_else(|| err!(errmsg!(
+        self.syntax().cmds.get_recursive(&Key::Str(self.name.clone())).ok_or_else(|| err!(
             "Cannot find this message command '{}' in the syntax '{}'.",
-            self.name, self.sname,
-        ), Invalid, Mismatch))
+            self.name, self.sname;
+        Invalid, Mismatch))
     }
 
     fn get_syntax_arg<'a, S: Into<String>>(
@@ -1307,10 +1306,10 @@ impl MsgCmd {
     {
         let arg_name = arg_name.into();
         res!(self.get_syntax_cmd()).args.get_recursive(&Key::Str(arg_name.clone()))
-            .ok_or_else(|| err!(errmsg!(
+            .ok_or_else(|| err!(
                 "Cannot find this command '{}' argument '{}' in the syntax '{}'.",
-                self.name, arg_name, self.sname,
-            ), Invalid, Mismatch))
+                self.name, arg_name, self.sname;
+            Invalid, Mismatch))
     }
 
     pub fn add_arg<S: Into<String>>(
@@ -1322,17 +1321,17 @@ impl MsgCmd {
         let arg_name = arg_name.into();
         // Make sure the argument exists in the syntax.
         if !res!(self.get_syntax_cmd()).args.contains_key(&Key::Str(arg_name.clone())) {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "Can't find command '{}' argument '{}' in syntax '{}'.",
-                self.name, arg_name, self.sname,
-            ), Invalid, Input));
+                self.name, arg_name, self.sname;
+            Invalid, Input));
         }
         // Check whether it has already been added to the MsgCmd.
         if self.args.contains_key(&arg_name) {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "Command '{}' argument '{}' has already been added to message.",
-                self.name, arg_name,
-            ), Invalid, Input, Exists));
+                self.name, arg_name;
+            Invalid, Input, Exists));
         }
         self.args.insert(arg_name, Vec::new());
         Ok(self)
@@ -1380,9 +1379,9 @@ impl MsgCmd {
                     self.args.insert(arg_name.clone(), Vec::new());
                     match self.args.get_mut(&arg_name) {
                         Some(v) => v,
-                        None => return Err(err!(errmsg!(
-                            "Argument '{}' was just created, but no longer present.", arg_name,
-                        ), Bug, Unreachable)),
+                        None => return Err(err!(
+                            "Argument '{}' was just created, but no longer present.", arg_name;
+                        Bug, Unreachable)),
                     }
                 },
             },
@@ -1390,10 +1389,10 @@ impl MsgCmd {
         };
 
         if v.len() >= exp_vals.len() {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "Command '{}' {}already has all {} of its \
-                expected values.", self.name, arg_name, v.len(),
-            ), Invalid, Input, Exists));
+                expected values.", self.name, arg_name, v.len();
+            Invalid, Input, Exists));
         }
 
         match val_opt {
@@ -1401,11 +1400,11 @@ impl MsgCmd {
                 if exp_vals[v.len()].0 == Kind::Unknown || val.kind() == exp_vals[v.len()].0 {
                     v.push(val);
                 } else {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "Command '{}' {}already has {} values, and \
                         the next one must be a {:?}, not a {:?}.",
-                        self.name, arg_name, v.len(), exp_vals[v.len()], val.kind(),
-                    ), Invalid, Input));
+                        self.name, arg_name, v.len(), exp_vals[v.len()], val.kind();
+                    Invalid, Input));
                 }
             },
             None => (),
@@ -1466,13 +1465,13 @@ impl MsgCmd {
         let a = a.into();
         let has = self.args.contains_key(&a);
         if self.args.len() > 1 {
-            Err(err!(errmsg!(
+            Err(err!(
                 "The argument '{}' {}", a, if has {
                     "does not exist and there are other arguments."    
                 } else {
                     "does exist but there are other arguments."
-                },
-            ), Input, Invalid, Excessive))
+                };
+            Input, Invalid, Excessive))
         } else {
             Ok(has)
         }

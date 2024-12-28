@@ -109,9 +109,9 @@ impl<
                                 self.cache().get_ancillary_size(),
                             )
                         ) {
-                            self.result(&Err(err!(e, errmsg!(
-                                "{}: Cannot send cache size update to zbot.", self.ozid(),
-                            ), Channel, Write)));
+                            self.result(&Err(err!(e,
+                                "{}: Cannot send cache size update to zbot.", self.ozid();
+                                Channel, Write)));
                         }
                     }
                 }
@@ -127,9 +127,9 @@ impl<
 
     fn listen(&mut self) -> LoopBreak {
         match self.chan_in().recv_timeout(self.cfg().zone_state_update_interval()) {
-            Recv::Result(Err(e)) => self.err_cannot_receive(err!(e, errmsg!(
-                "{}: Waiting for message.", self.ozid(),
-            ), IO, Channel)),
+            Recv::Result(Err(e)) => self.err_cannot_receive(err!(e,
+                "{}: Waiting for message.", self.ozid();
+                IO, Channel)),
             Recv::Result(Ok(msg)) => {
                 if let Some(msg) = self.listen_worker(msg) {
                     match msg {
@@ -152,9 +152,9 @@ impl<
                             if let Err(e) = resp_g1.send(
                                 OzoneMsg::GcCacheUpdateResponse(old_flocs)
                             ) {
-                                self.err_cannot_send(err!(e, errmsg!(
-                                    "{}: Sending cache update response back to gbot.", self.ozid(),
-                                ), IO, Channel));
+                                self.err_cannot_send(err!(e,
+                                    "{}: Sending cache update response back to gbot.", self.ozid();
+                                    IO, Channel));
                             }
                         },
                         OzoneMsg::Insert(key, val, cind, floc, ilen, meta, resp_w1) => {
@@ -167,9 +167,9 @@ impl<
                                 self.wind().clone(),
                                 self.cache().clone(),
                             )) {
-                                self.err_cannot_send(err!(e, errmsg!(
-                                    "{}: Responding to {:?} with cache dump.", self.ozid(), resp.ozid(),
-                                ), Data, IO, Channel));
+                                self.err_cannot_send(err!(e,
+                                    "{}: Responding to {:?} with cache dump.", self.ozid(), resp.ozid();
+                                    Data, IO, Channel));
                             }
                         },
                         //OzoneMsg::GetUsers(resp) => {
@@ -189,12 +189,12 @@ impl<
                         //                                Dat::U128(id) => {
                         //                                    kuserdat.push((id, kdat.clone()));
                         //                                },
-                        //                                dat => self.error(err!(errmsg!(
+                        //                                dat => self.error(err!(
                         //                                    "Custom Usr daticle should contain a \
                         //                                    Dat::U128 but found {:?}.", dat,
                         //                                ), Bug, Invalid, Input)),
                         //                            },
-                        //                            None => self.error(err!(errmsg!(
+                        //                            None => self.error(err!(
                         //                                "Custom Usr daticle should contain \
                         //                                something but None was found.",
                         //                            ), Bug, Invalid, Input)),

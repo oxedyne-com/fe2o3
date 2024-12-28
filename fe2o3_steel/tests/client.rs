@@ -233,15 +233,13 @@ pub async fn test_client(filter: &'static str) -> Outcome<()> {
                     test!("Received text message: '{}'", txt2);
                     req!(txt2, txt);
                 }
-                Err(e) => return Err(err!(e, errmsg!(
-                    "Error receiving message.",
-                ), IO, Network, Read, Wire)),
-                Ok(None) => return Err(err!(errmsg!(
-                    "The server has closed the connection unexpectedly.",
-                ), IO, Network, Read, Wire)),
-                Ok(Some(msg)) => return Err(err!(errmsg!(
-                    "Expecting text message from server, received: {:?}", msg,
-                ), IO, Network, Unexpected, Read)),
+                Err(e) => return Err(err!(e, "Error receiving message."; IO, Network, Read, Wire)),
+                Ok(None) => return Err(err!(
+                    "The server has closed the connection unexpectedly.";
+                IO, Network, Read, Wire)),
+                Ok(Some(msg)) => return Err(err!(
+                    "Expecting text message from server, received: {:?}", msg;
+                IO, Network, Unexpected, Read)),
             }
             
             // Send a small websocket binary message..
@@ -257,15 +255,13 @@ pub async fn test_client(filter: &'static str) -> Outcome<()> {
                     test!("Received binary message: {:02x?}", byts2);
                     req!(byts2, byts);
                 }
-                Err(e) => return Err(err!(e, errmsg!(
-                    "Error receiving message.",
-                ), IO, Network, Read, Wire)),
-                Ok(None) => return Err(err!(errmsg!(
-                    "The server has closed the connection unexpectedly.",
-                ), IO, Network, Read, Wire)),
-                Ok(Some(msg)) => return Err(err!(errmsg!(
-                    "Expecting binary message from server, received: {:?}", msg,
-                ), IO, Network, Unexpected, Read)),
+                Err(e) => return Err(err!(e, "Error receiving message."; IO, Network, Read, Wire)),
+                Ok(None) => return Err(err!(
+                    "The server has closed the connection unexpectedly.";
+                IO, Network, Read, Wire)),
+                Ok(Some(msg)) => return Err(err!(
+                    "Expecting binary message from server, received: {:?}", msg;
+                IO, Network, Unexpected, Read)),
             }
             
             // Send a large websocket binary message..
@@ -286,15 +282,13 @@ pub async fn test_client(filter: &'static str) -> Outcome<()> {
                     test!("Received binary message: {:02x?}", byts2);
                     req!(byts2, byts);
                 }
-                Err(e) => return Err(err!(e, errmsg!(
-                    "Error receiving message.",
-                ), IO, Network, Read, Wire)),
-                Ok(None) => return Err(err!(errmsg!(
-                    "The server has closed the connection unexpectedly.",
-                ), IO, Network, Read, Wire)),
-                Ok(Some(msg)) => return Err(err!(errmsg!(
-                    "Expecting binary message from server, received: {:?}", msg,
-                ), IO, Network, Unexpected, Read)),
+                Err(e) => return Err(err!(e, "Error receiving message."; IO, Network, Read, Wire)),
+                Ok(None) => return Err(err!(
+                    "The server has closed the connection unexpectedly.";
+                IO, Network, Read, Wire)),
+                Ok(Some(msg)) => return Err(err!(
+                    "Expecting binary message from server, received: {:?}", msg;
+                IO, Network, Unexpected, Read)),
             }
             
             // Send some data as text to store..
@@ -310,15 +304,13 @@ pub async fn test_client(filter: &'static str) -> Outcome<()> {
                 Ok(Some(WebSocketMessage::Text(txt2))) => {
                     test!("Received text message: '{}'", txt2);
                 }
-                Err(e) => return Err(err!(e, errmsg!(
-                    "Error receiving message.",
-                ), IO, Network, Read, Wire)),
-                Ok(None) => return Err(err!(errmsg!(
-                    "The server has closed the connection unexpectedly.",
-                ), IO, Network, Read, Wire)),
-                Ok(Some(msg)) => return Err(err!(errmsg!(
-                    "Expecting binary message from server, received: {:?}", msg,
-                ), IO, Network, Unexpected, Read)),
+                Err(e) => return Err(err!(e, "Error receiving message."; IO, Network, Read, Wire)),
+                Ok(None) => return Err(err!(
+                    "The server has closed the connection unexpectedly.";
+                IO, Network, Read, Wire)),
+                Ok(Some(msg)) => return Err(err!(
+                    "Expecting binary message from server, received: {:?}", msg;
+                IO, Network, Unexpected, Read)),
             }
 
             thread::sleep(Duration::from_secs(1));
@@ -336,15 +328,13 @@ pub async fn test_client(filter: &'static str) -> Outcome<()> {
                 Ok(Some(WebSocketMessage::Text(txt2))) => {
                     test!("Received text message: '{}'", txt2);
                 }
-                Err(e) => return Err(err!(e, errmsg!(
-                    "Error receiving message.",
-                ), IO, Network, Read, Wire)),
-                Ok(None) => return Err(err!(errmsg!(
-                    "The server has closed the connection unexpectedly.",
-                ), IO, Network, Read, Wire)),
-                Ok(Some(msg)) => return Err(err!(errmsg!(
-                    "Expecting binary message from server, received: {:?}", msg,
-                ), IO, Network, Unexpected, Read)),
+                Err(e) => return Err(err!(e, "Error receiving message."; IO, Network, Read, Wire)),
+                Ok(None) => return Err(err!(
+                    "The server has closed the connection unexpectedly.";
+                IO, Network, Read, Wire)),
+                Ok(Some(msg)) => return Err(err!(
+                    "Expecting binary message from server, received: {:?}", msg;
+                IO, Network, Unexpected, Read)),
             }
             
             // Now listen to the websocket..

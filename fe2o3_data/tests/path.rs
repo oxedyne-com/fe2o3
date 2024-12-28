@@ -40,10 +40,10 @@ pub fn test_path(filter: &'static str) -> Outcome<()> {
             ("./folder/file.txt", false),  
         ];
         if inputs.len() != expected.len() {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "The number of inputs is {} which doesn't match the number of expected \
-                outputs {}.", inputs.len(), expected.len(),
-            ), Test, Mismatch));
+                outputs {}.", inputs.len(), expected.len();
+            Test, Mismatch));
         }
         for (i, input) in inputs.iter().enumerate() {
             debug!("input: {}", input);
@@ -54,9 +54,9 @@ pub fn test_path(filter: &'static str) -> Outcome<()> {
             debug!(" string: {:?}", result);
             match result {
                 Some(pstr) => req!(expected[i].0, &pstr),
-                None => return Err(err!(errmsg!(
-                    "Normalising the path '{}' produced {:?}.", input, result,
-                ), Test, Mismatch)),
+                None => return Err(err!(
+                    "Normalising the path '{}' produced {:?}.", input, result;
+                Test, Mismatch)),
             }
         }
         Ok(())
@@ -78,10 +78,10 @@ pub fn test_path(filter: &'static str) -> Outcome<()> {
             "a",
         ];
         if inputs.len() != expected.len() {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "The number of inputs is {} which doesn't match the number of expected \
-                outputs {}.", inputs.len(), expected.len(),
-            ), Test, Mismatch));
+                outputs {}.", inputs.len(), expected.len();
+            Test, Mismatch));
         }
         for (i, input) in inputs.iter().enumerate() {
             debug!("input: {}", input);
@@ -91,9 +91,9 @@ pub fn test_path(filter: &'static str) -> Outcome<()> {
                     debug!("result: {}", s);
                     req!(expected[i], s);
                 },
-                Err(oss) => return Err(err!(errmsg!(
-                    "Could not convert '{:?}' to string.", oss,
-                ), Test, String, Conversion)),
+                Err(oss) => return Err(err!(
+                    "Could not convert '{:?}' to string.", oss;
+                Test, String, Conversion)),
             }
         }
         Ok(())
@@ -115,10 +115,10 @@ pub fn test_path(filter: &'static str) -> Outcome<()> {
             "/a",
         ];
         if inputs.len() != expected.len() {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "The number of inputs is {} which doesn't match the number of expected \
-                outputs {}.", inputs.len(), expected.len(),
-            ), Test, Mismatch));
+                outputs {}.", inputs.len(), expected.len();
+            Test, Mismatch));
         }
         for (i, input) in inputs.iter().enumerate() {
             debug!("input: {}", input);
@@ -128,9 +128,9 @@ pub fn test_path(filter: &'static str) -> Outcome<()> {
                     debug!("result: {}", s);
                     req!(expected[i], s);
                 },
-                Err(oss) => return Err(err!(errmsg!(
-                    "Could not convert '{:?}' to string.", oss,
-                ), Test, String, Conversion)),
+                Err(oss) => return Err(err!(
+                    "Could not convert '{:?}' to string.", oss;
+                Test, String, Conversion)),
             }
         }
         Ok(())

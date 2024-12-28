@@ -62,9 +62,9 @@ impl InNamex for ChecksumScheme {
             "schemes" => [
 	            ("CRC32", "9m5ja11mi86oosyB7LG4Kvcx83ln3stpD0/8Pnq01tE="),
             ],
-            _ => return Err(err!(errmsg!(
-                "The Namex group name '{}' is not recognised for ChecksumScheme.", gname,
-            ), Invalid, Input)),
+            _ => return Err(err!(
+                "The Namex group name '{}' is not recognised for ChecksumScheme.", gname;
+            Invalid, Input)),
         };
         Ok(if ids.len() == 0 {
             None
@@ -108,11 +108,11 @@ impl Checksummer for ChecksumScheme {
     fn copy(&self, buf: &[u8]) -> Outcome<Vec<u8>> {
         let clen = res!(self.len());
         if buf.len() < clen {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "Cannot snip checksum from given byte slice of length {} \
                 because it is less than the required minimum {}.",
-                buf.len(), clen,
-            ), Input, Mismatch))
+                buf.len(), clen;
+            Input, Mismatch))
         }
         Ok(buf[buf.len() - clen..].to_vec())
     }
@@ -128,11 +128,11 @@ impl Checksummer for ChecksumScheme {
     fn verify(self, buf: &[u8]) -> Outcome<Vec<u8>> {
         let clen = res!(self.len());
         if buf.len() < clen {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "A request to verify the checksum of a slice of bytes of length {} \
                 requires the slice to be at least the length of a checksum, {}.",
-                buf.len(), clen,
-            ), Input, Mismatch))
+                buf.len(), clen;
+            Input, Mismatch))
         }
         let csum1 = res!(self.calculate(&buf[..buf.len() - clen]));
         let csum2 = &buf[buf.len() - clen..];
@@ -160,9 +160,9 @@ impl str::FromStr for ChecksumScheme {
     fn from_str(name: &str) -> std::result::Result<Self, Self::Err> {
         match name {
             "CRC32" => Ok(Self::new_crc32()),
-            _ => Err(err!(errmsg!(
-                "The checksum scheme '{}' is not recognised.", name,
-            ), Invalid, Input)),
+            _ => Err(err!(
+                "The checksum scheme '{}' is not recognised.", name;
+            Invalid, Input)),
         }
     }
 }
@@ -173,9 +173,9 @@ impl TryFrom<LocalId> for ChecksumScheme {
     fn try_from(n: LocalId) -> std::result::Result<Self, Self::Error> {
         match n {
             LocalId(1) => Ok(Self::new_crc32()),
-            _ => Err(err!(errmsg!(
-                "The checksum scheme with local id {} is not recognised.", n,
-            ), Invalid, Input)),
+            _ => Err(err!(
+                "The checksum scheme with local id {} is not recognised.", n;
+            Invalid, Input)),
         }
     }
 }
@@ -188,7 +188,7 @@ impl ChecksumScheme {
     //pub fn new(name: &str) -> Outcome<Self> {
     //    match name {
     //        "CRC32" => Ok(Self::new_crc32()),
-    //        _ => Err(err!(errmsg!(
+    //        _ => Err(err!(
     //            "The checksum scheme '{}' is not recognised.", name,
     //        ), Invalid, Input)),
     //    }
@@ -267,9 +267,9 @@ impl<
         match &self.0 {
             DefAlt::Default(inner) => inner.name_id(),
             DefAlt::Given(inner) => inner.name_id(),
-            DefAlt::None => Err(err!(errmsg!(
-                "No Namex id can be specified for DefAlt::None.",
-            ), Missing, Bug)),
+            DefAlt::None => Err(err!(
+                "No Namex id can be specified for DefAlt::None.";
+            Missing, Bug)),
         }
     }
 
@@ -315,7 +315,7 @@ impl<
         match &self.0 {
             DefAlt::Default(inner) => inner.len(),
             DefAlt::Given(inner) => inner.len(),
-            DefAlt::None => Err(err!(errmsg!("{}", Self::HASHER_MISSING_MSG),
+            DefAlt::None => Err(err!("{}", Self::HASHER_MISSING_MSG;
                 Configuration, Missing)),
         }
     }
@@ -324,7 +324,7 @@ impl<
         match self.0 {
             DefAlt::Default(inner) => inner.calculate(buf),
             DefAlt::Given(inner) => inner.calculate(buf),
-            DefAlt::None => Err(err!(errmsg!("{}", Self::HASHER_MISSING_MSG),
+            DefAlt::None => Err(err!("{}", Self::HASHER_MISSING_MSG;
                 Configuration, Missing)),
         }
     }
@@ -333,7 +333,7 @@ impl<
         match &mut self.0 {
             DefAlt::Default(inner) => inner.update(buf),
             DefAlt::Given(inner) => inner.update(buf),
-            DefAlt::None => Err(err!(errmsg!("{}", Self::HASHER_MISSING_MSG),
+            DefAlt::None => Err(err!("{}", Self::HASHER_MISSING_MSG;
                 Configuration, Missing)),
         }
     }
@@ -342,7 +342,7 @@ impl<
         match self.0 {
             DefAlt::Default(inner) => inner.finalize(),
             DefAlt::Given(inner) => inner.finalize(),
-            DefAlt::None => Err(err!(errmsg!("{}", Self::HASHER_MISSING_MSG),
+            DefAlt::None => Err(err!("{}", Self::HASHER_MISSING_MSG;
                 Configuration, Missing)),
         }
     }
@@ -351,7 +351,7 @@ impl<
         match &self.0 {
             DefAlt::Default(inner) => inner.copy(buf),
             DefAlt::Given(inner) => inner.copy(buf),
-            DefAlt::None => Err(err!(errmsg!("{}", Self::HASHER_MISSING_MSG),
+            DefAlt::None => Err(err!("{}", Self::HASHER_MISSING_MSG;
                 Configuration, Missing)),
         }
     }
@@ -360,7 +360,7 @@ impl<
         match self.0 {
             DefAlt::Default(inner) => inner.append(buf),
             DefAlt::Given(inner) => inner.append(buf),
-            DefAlt::None => Err(err!(errmsg!("{}", Self::HASHER_MISSING_MSG),
+            DefAlt::None => Err(err!("{}", Self::HASHER_MISSING_MSG;
                 Configuration, Missing)),
         }
     }
@@ -369,7 +369,7 @@ impl<
         match self.0 {
             DefAlt::Default(inner) => inner.verify(buf),
             DefAlt::Given(inner) => inner.verify(buf),
-            DefAlt::None => Err(err!(errmsg!("{}", Self::HASHER_MISSING_MSG),
+            DefAlt::None => Err(err!("{}", Self::HASHER_MISSING_MSG;
                 Configuration, Missing)),
         }
     }
@@ -378,7 +378,7 @@ impl<
         match &self.0 {
             DefAlt::Default(inner) => inner.read_bytes(r),
             DefAlt::Given(inner) => inner.read_bytes(r),
-            DefAlt::None => Err(err!(errmsg!("{}", Self::HASHER_MISSING_MSG),
+            DefAlt::None => Err(err!("{}", Self::HASHER_MISSING_MSG;
                 Configuration, Missing)),
         }
     }
@@ -395,12 +395,12 @@ impl<
     pub fn or_len<OR: Checksummer>(&self, alt: &Alt<OR>) -> Outcome<usize> {
         match &alt {
             Alt::Specific(Some(inner)) => inner.len(),
-            Alt::Specific(None) => Err(err!(errmsg!("{}", Self::HASHER_MISSING_MSG),
+            Alt::Specific(None) => Err(err!("{}", Self::HASHER_MISSING_MSG;
                 Configuration, Missing)),
             Alt::Unspecified => match &self.0 {
                 DefAlt::Default(inner) => inner.len(),
                 DefAlt::Given(inner) => inner.len(),
-                DefAlt::None => Err(err!(errmsg!("{}", Self::HASHER_MISSING_MSG),
+                DefAlt::None => Err(err!("{}", Self::HASHER_MISSING_MSG;
                     Configuration, Missing)),
             },
         }
@@ -409,12 +409,12 @@ impl<
     pub fn or_calculate<OR: Checksummer>(self, buf: &[u8], alt: Alt<OR>) -> Outcome<Vec<u8>> {
         match alt {
             Alt::Specific(Some(inner)) => inner.calculate(buf),
-            Alt::Specific(None) => Err(err!(errmsg!("{}", Self::HASHER_MISSING_MSG),
+            Alt::Specific(None) => Err(err!("{}", Self::HASHER_MISSING_MSG;
                 Configuration, Missing)),
             Alt::Unspecified => match self.0 {
                 DefAlt::Default(inner) => inner.calculate(buf),
                 DefAlt::Given(inner) => inner.calculate(buf),
-                DefAlt::None => Err(err!(errmsg!("{}", Self::HASHER_MISSING_MSG),
+                DefAlt::None => Err(err!("{}", Self::HASHER_MISSING_MSG;
                     Configuration, Missing)),
             },
         }
@@ -423,12 +423,12 @@ impl<
     pub fn or_update<OR: Checksummer>(&mut self, buf: &[u8], mut alt: &mut Alt<OR>) -> Outcome<()> {
         match &mut alt {
             Alt::Specific(Some(inner)) => inner.update(buf),
-            Alt::Specific(None) => Err(err!(errmsg!("{}", Self::HASHER_MISSING_MSG),
+            Alt::Specific(None) => Err(err!("{}", Self::HASHER_MISSING_MSG;
                 Configuration, Missing)),
             Alt::Unspecified => match &mut self.0 {
                 DefAlt::Default(inner) => inner.update(buf),
                 DefAlt::Given(inner) => inner.update(buf),
-                DefAlt::None => Err(err!(errmsg!("{}", Self::HASHER_MISSING_MSG),
+                DefAlt::None => Err(err!("{}", Self::HASHER_MISSING_MSG;
                     Configuration, Missing)),
             },
         }
@@ -437,12 +437,12 @@ impl<
     pub fn or_finalize<OR: Checksummer>(self, alt: Alt<OR>) -> Outcome<Vec<u8>> {
         match alt {
             Alt::Specific(Some(inner)) => inner.finalize(),
-            Alt::Specific(None) => Err(err!(errmsg!("{}", Self::HASHER_MISSING_MSG),
+            Alt::Specific(None) => Err(err!("{}", Self::HASHER_MISSING_MSG;
                 Configuration, Missing)),
             Alt::Unspecified => match self.0 {
                 DefAlt::Default(inner) => inner.finalize(),
                 DefAlt::Given(inner) => inner.finalize(),
-                DefAlt::None => Err(err!(errmsg!("{}", Self::HASHER_MISSING_MSG),
+                DefAlt::None => Err(err!("{}", Self::HASHER_MISSING_MSG;
                     Configuration, Missing)),
             },
         }
@@ -451,12 +451,12 @@ impl<
     pub fn or_copy<OR: Checksummer>(&self, buf: &[u8], alt: &Alt<OR>) -> Outcome<Vec<u8>>{
         match &alt {
             Alt::Specific(Some(inner)) => inner.copy(buf),
-            Alt::Specific(None) => Err(err!(errmsg!("{}", Self::HASHER_MISSING_MSG),
+            Alt::Specific(None) => Err(err!("{}", Self::HASHER_MISSING_MSG;
                 Configuration, Missing)),
             Alt::Unspecified => match &self.0 {
                 DefAlt::Default(inner) => inner.copy(buf),
                 DefAlt::Given(inner) => inner.copy(buf),
-                DefAlt::None => Err(err!(errmsg!("{}", Self::HASHER_MISSING_MSG),
+                DefAlt::None => Err(err!("{}", Self::HASHER_MISSING_MSG;
                     Configuration, Missing)),
             },
         }
@@ -465,12 +465,12 @@ impl<
     pub fn or_append<OR: Checksummer>(self, buf: Vec<u8>, alt: Alt<OR>) -> Outcome<(Vec<u8>, Vec<u8>)> {
         match alt {
             Alt::Specific(Some(inner)) => inner.append(buf),
-            Alt::Specific(None) => Err(err!(errmsg!("{}", Self::HASHER_MISSING_MSG),
+            Alt::Specific(None) => Err(err!("{}", Self::HASHER_MISSING_MSG;
                 Configuration, Missing)),
             Alt::Unspecified => match self.0 {
                 DefAlt::Default(inner) => inner.append(buf),
                 DefAlt::Given(inner) => inner.append(buf),
-                DefAlt::None => Err(err!(errmsg!("{}", Self::HASHER_MISSING_MSG),
+                DefAlt::None => Err(err!("{}", Self::HASHER_MISSING_MSG;
                     Configuration, Missing)),
             },
         }
@@ -479,12 +479,12 @@ impl<
     pub fn or_verify<OR: Checksummer>(self, buf: &[u8], alt: Alt<OR>) -> Outcome<Vec<u8>> {
         match alt {
             Alt::Specific(Some(inner)) => inner.verify(buf),
-            Alt::Specific(None) => Err(err!(errmsg!("{}", Self::HASHER_MISSING_MSG),
+            Alt::Specific(None) => Err(err!("{}", Self::HASHER_MISSING_MSG;
                 Configuration, Missing)),
             Alt::Unspecified => match self.0 {
                 DefAlt::Default(inner) => inner.verify(buf),
                 DefAlt::Given(inner) => inner.verify(buf),
-                DefAlt::None => Err(err!(errmsg!("{}", Self::HASHER_MISSING_MSG),
+                DefAlt::None => Err(err!("{}", Self::HASHER_MISSING_MSG;
                     Configuration, Missing)),
             },
         }
@@ -502,12 +502,12 @@ impl<
     {
         match &alt {
             Alt::Specific(Some(inner)) => inner.read_bytes(r),
-            Alt::Specific(None) => Err(err!(errmsg!("{}", Self::HASHER_MISSING_MSG),
+            Alt::Specific(None) => Err(err!("{}", Self::HASHER_MISSING_MSG;
                 Configuration, Missing)),
             Alt::Unspecified => match &self.0 {
                 DefAlt::Default(inner) => inner.read_bytes(r),
                 DefAlt::Given(inner) => inner.read_bytes(r),
-                DefAlt::None => Err(err!(errmsg!("{}", Self::HASHER_MISSING_MSG),
+                DefAlt::None => Err(err!("{}", Self::HASHER_MISSING_MSG;
                     Configuration, Missing)),
             },
         }

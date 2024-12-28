@@ -32,25 +32,25 @@ pub fn compare_values(i: usize, v1: &Vec<u8>, vorig: &Dat) -> Outcome<()> {
     // Get the associated data since we know vorig comes with a Dat byte wrapper
     if let Some(v2) = vorig.bytes_ref() {
         if v1.len() != v2.len() {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "Data {}: Original length = {}, retrieved length = {}.",
-                i, v2.len(), v1.len(),
-            ))); 
+                i, v2.len(), v1.len();
+                Test, Size, Mismatch)); 
         }
         for j in 0..v1.len() {
             if v1[j] != v2[j] {
                 debug!("i        = {}",i);
                 debug!("expected = {:02x?}",v2);
                 debug!("got      = {:02x?}",v1);
-                return Err(err!(errmsg!(
-                    "Data {}: Differs at position {}.", i, j,
-                ))); 
+                return Err(err!(
+                    "Data {}: Differs at position {}.", i, j;
+                    Data, Mismatch)); 
             }
         }
     } else {
-        return Err(err!(errmsg!(
-            "Given test value with index {} is not a Dat containing bytes.", i,
-        ), Invalid, Input)); 
+        return Err(err!(
+            "Given test value with index {} is not a Dat containing bytes.", i;
+            Invalid, Input)); 
     }
     Ok(())
 }

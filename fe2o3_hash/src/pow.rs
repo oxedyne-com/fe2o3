@@ -115,15 +115,15 @@ impl<
 
     pub fn new(hasher: H) -> Outcome<Self> {
         if hasher.is_identity() {
-            return Err(err!(errmsg!(
-                "The identity hash is not suitable for a proof of work.",
-            ), Invalid, Input));
+            return Err(err!(
+                "The identity hash is not suitable for a proof of work.";
+            Invalid, Input));
         }
         let len = match hasher.hash_length() {
             Gnomon::Known(len) => len,
-            _ => return Err(err!(errmsg!(
-                "The hash length is not known a priori.",
-            ), Invalid, Input)),
+            _ => return Err(err!(
+                "The hash length is not known a priori.";
+            Invalid, Input)),
         };
         Ok(Self { hasher, len })
     }
@@ -178,28 +178,28 @@ impl<
         -> Outcome<PowResult>
     {
         if zbits == 0 {
-            return Err(err!(errmsg!(
-                "You probably want to the number of zero bits to be more than zero.",
-            ), Invalid, Input));
+            return Err(err!(
+                "You probably want to the number of zero bits to be more than zero.";
+            Invalid, Input));
         }
         if N <= P1 {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "No room left for nonce with a pristine length {} and a specified input \
-                length of {}.  Make pristine smaller, or input length longer.", P1, N,
-            ), Invalid, Input));
+                length of {}.  Make pristine smaller, or input length longer.", P1, N;
+            Invalid, Input));
         }
         let zbits = zbits as usize;
         let hash_len = match hasher.hash_length() {
             Gnomon::Known(len) => len,
-            _ => return Err(err!(errmsg!(
-                "The hash length is not known a priori.",
-            ), Invalid, Input)),
+            _ => return Err(err!(
+                "The hash length is not known a priori.";
+            Invalid, Input)),
         };
         if zbits > 8 * hash_len {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "The number of zero bits specified, {}, exceeds the hash size of {} bits.",
-                zbits, 8 * hash_len,
-            ), Invalid, Input));
+                zbits, 8 * hash_len;
+            Invalid, Input));
         }
         let mut input = [0u8; N];
         let zbyts = zbits / 8;
@@ -429,7 +429,7 @@ impl<
                                 ),
                             };
                         },
-                        //msg => return Err(err!(errmsg!(
+                        //msg => return Err(err!(
                         //    "Unrecognised message {:?} from worker thread.", msg,
                         //), Bug, Unreachable)),
                     }
@@ -575,9 +575,9 @@ mod tests {
                         &pvars,
                         &mangled,
                     ) {
-                        Ok(true) => return Err(err!(errmsg!(
-                            "The proof of work, with one byte changed, should not have validated.",
-                        ), Input, Invalid)),
+                        Ok(true) => return Err(err!(
+                            "The proof of work, with one byte changed, should not have validated.";
+                        Input, Invalid)),
                         _ => (),
                     }
                 } else {

@@ -26,9 +26,9 @@ impl DataArrangement {
             Self::RepeatFillAndSeq{ n, rep, ..} =>
                 match n.checked_mul(*rep) {
                     Some(prod) => Ok(prod),
-                    None => Err(err!(errmsg!(
-                        "Product of n = {} and rep = {} produces usize overflow.", n, rep,
-                    ), ErrTag::Overflow, ErrTag::Integer)),
+                    None => Err(err!(
+                        "Product of n = {} and rep = {} produces usize overflow.", n, rep;
+                    Overflow, Integer)),
                 },
         }
     }
@@ -137,9 +137,9 @@ impl DataSpec {
                 let seq = res!(specbox.generate());
                 let s = seq.len();
                 if s > *n {
-                    return Err(err!(errmsg!(
-                        "The given sequence length, {}, must not exceed n, {}.", s, n,
-                    ), ErrTag::Invalid, ErrTag::Input));
+                    return Err(err!(
+                        "The given sequence length, {}, must not exceed n, {}.", s, n;
+                    Invalid, Input));
                 }
                 for _ in 0..*rep {
                     for _ in 0..(n - s) {
@@ -157,9 +157,9 @@ impl DataSpec {
 
     fn common_checks(&self, _n: &usize, rep: &usize) -> Outcome<()> {
         if *rep == 0 {
-            return Err(err!(errmsg!(
-                "Given repetitions, {}, must be > 0.", rep,
-            ), ErrTag::Invalid, ErrTag::Input));
+            return Err(err!(
+                "Given repetitions, {}, must be > 0.", rep;
+            Invalid, Input));
         }
         Ok(())
     }

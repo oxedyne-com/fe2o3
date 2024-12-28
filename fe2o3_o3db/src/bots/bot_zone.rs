@@ -110,9 +110,9 @@ impl<
                 if let Err(e) = self.chans().sup().send(
                     OzoneMsg::ZoneState(*self.zind, self.zone_state().clone())
                 ) {
-                    self.result(&Err(err!(e, errmsg!(
-                        "{}: Cannot send zone state update to supervisor.", self.ozid(),
-                    ), Channel, Write)));
+                    self.result(&Err(err!(e,
+                        "{}: Cannot send zone state update to supervisor.", self.ozid();
+                        Channel, Write)));
                 }
             }
 
@@ -122,9 +122,9 @@ impl<
 
     fn listen(&mut self) -> LoopBreak {
         match self.chan_in().recv_timeout(self.cfg().zone_state_update_interval()) {
-            Recv::Result(Err(e)) => self.err_cannot_receive(err!(e, errmsg!(
-                "{}: Waiting for message.", self.ozid(),
-            ), IO, Channel)),
+            Recv::Result(Err(e)) => self.err_cannot_receive(err!(e,
+                "{}: Waiting for message.", self.ozid();
+                IO, Channel)),
             Recv::Result(Ok(msg)) => match msg {
                 // COMMAND
                 OzoneMsg::Channels(chans, resp) => {
@@ -144,9 +144,9 @@ impl<
                                 match resp2.recv_timeout(constant::BOT_REQUEST_TIMEOUT) {
                                     Err(e) => self.error(e),
                                     Ok(OzoneMsg::ChannelsReceived(_)) => (),
-                                    m => self.error(err!(errmsg!(
-                                        "Received {:?}, expecting ChannelsReceived confirmation.", m,
-                                    ))),
+                                    m => self.error(err!(
+                                        "Received {:?}, expecting ChannelsReceived confirmation.", m;
+                                        Channel)),
                                 }
                             }
                         },
@@ -207,10 +207,10 @@ impl<
                 // WORK
                 OzoneMsg::CacheSize(b, size, ancillary_size) => {
                     if b+1 > self.zone_state().caches.len() {
-                        self.error(err!(errmsg!(
+                        self.error(err!(
                             "{}: The BotPoolInd for a cache size update, {}, exceeds the \
-                            number of cbot slots {}.", self.ozid(), b, self.zone_state().caches.len(),
-                        ), Bug, Mismatch, Index, Size));
+                            number of cbot slots {}.", self.ozid(), b, self.zone_state().caches.len();
+                        Bug, Mismatch, Index, Size));
                     } else {
                         match Timestamp::now() {
                             Err(e) => self.error(e),
@@ -255,10 +255,10 @@ impl<
                 },
                 OzoneMsg::ShardFileSize(b, size) => {
                     if b+1 > self.zone_state().files.len() {
-                        self.error(err!(errmsg!(
+                        self.error(err!(
                             "{}: The BotPoolInd for a file state shard size update, {}, exceeds the \
-                            number of fbot slots {}.", self.ozid(), b, self.zone_state().files.len(),
-                        ), Bug, Mismatch, Size));
+                            number of fbot slots {}.", self.ozid(), b, self.zone_state().files.len();
+                        Bug, Mismatch, Size));
                     } else {
                         match Timestamp::now() {
                             Err(e) => self.error(e),
@@ -442,13 +442,13 @@ impl<
 //                                        FileType::Index => fs.set_index_file_size(flen),
 //                                    }
 //                                } else {
-//                                    return Err(err!(errmsg!(
+//                                    return Err(err!(
 //                                        "The file {:?} has already been surveyed, the file system \
 //                                        should not permit such duplicate files.", path,
 //                                    ), Unreachable, Bug));
 //                                }
 //                            },
-//                            Present::Pair => return Err(err!(errmsg!(
+//                            Present::Pair => return Err(err!(
 //                                "The file {:?} has already been surveyed, the file system \
 //                                should not permit such duplicate files.", path,
 //                            ), Unreachable, Bug)),
@@ -551,16 +551,16 @@ impl<
                                         FileType::Index => fs.set_index_file_size(flen),
                                     }
                                 } else {
-                                    return Err(err!(errmsg!(
+                                    return Err(err!(
                                         "The file {:?} has already been surveyed, the file system \
-                                        should not permit such duplicate files.", path,
-                                    ), Unreachable, Bug));
+                                        should not permit such duplicate files.", path;
+                                    Unreachable, Bug));
                                 }
                             },
-                            Present::Pair => return Err(err!(errmsg!(
+                            Present::Pair => return Err(err!(
                                 "The file {:?} has already been surveyed, the file system \
-                                should not permit such duplicate files.", path,
-                            ), Unreachable, Bug)),
+                                should not permit such duplicate files.", path;
+                            Unreachable, Bug)),
                         }
                     },
                 }
@@ -623,13 +623,13 @@ impl<
         let (_, msgs) = res!(resp.recv_number(n_w, constant::BOT_REQUEST_WAIT));
         for msg in msgs {
             match msg {
-                OzoneMsg::Error(e) => return Err(err!(e, errmsg!(
-                    "{}: In response to NewLiveFile message.", self.ozid(),
-                ))),
+                OzoneMsg::Error(e) => return Err(err!(e,
+                    "{}: In response to NewLiveFile message.", self.ozid();
+                    Channel)),
                 OzoneMsg::Ok => (),
-                msg => return Err(err!(errmsg!(
-                    "{}: Unexpected response to NewLiveFile message: {:?}", self.ozid(), msg,
-                ))),
+                msg => return Err(err!(
+                    "{}: Unexpected response to NewLiveFile message: {:?}", self.ozid(), msg;
+                    Channel, Unexpected)),
             };
         }
     
@@ -710,9 +710,9 @@ impl<
                                 resp:       resp.clone(),
                             }
                         ) {
-                            return Err(err!(e, errmsg!(
-                                "Cannot send cache index file request to igbot {}", j,
-                            ), Channel, Write));
+                            return Err(err!(e,
+                                "Cannot send cache index file request to igbot {}", j;
+                                Channel, Write));
                         } else {
                             bot_requests += 1;
                         }
@@ -737,9 +737,9 @@ impl<
                                 resp:       resp.clone(),
                             }
                         ) {
-                            return Err(err!(e, errmsg!(
-                                "Cannot send cache data file request to igbot {}", j,
-                            ), Channel, Write));
+                            return Err(err!(e,
+                                "Cannot send cache data file request to igbot {}", j;
+                                Channel, Write));
                         } else {
                             bot_requests += 1;
                         }
@@ -766,13 +766,13 @@ impl<
         // 4. Wait for and collect all request responses.
         for _ in 0..bot_requests {
             match resp.recv_timeout(constant::BOT_REQUEST_TIMEOUT) {
-                Err(e) => return Err(err!(e, errmsg!(
-                    "While collecting cache initialisation request responses.",
-                ), IO, Channel, Read)),
+                Err(e) => return Err(err!(e,
+                    "While collecting cache initialisation request responses.";
+                    IO, Channel, Read)),
                 Ok(OzoneMsg::Ok) => (),
-                Ok(msg) => return Err(err!(errmsg!(
-                    "Unrecognised cache initialisation request response: {:?}", msg)),
-                ),
+                Ok(msg) => return Err(err!(
+                    "Unrecognised cache initialisation request response: {:?}", msg;
+                    Channel)),
             }
         }
 

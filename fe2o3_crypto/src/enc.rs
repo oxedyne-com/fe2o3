@@ -92,9 +92,9 @@ impl InNamex for EncryptionScheme {
             "schemes" => [
 	            ("AES-256-GCM", "4IaH4F8elJw60EkIr2N9+S1avkvUDHX5IaH1GkEKoXQ="),
             ],
-            _ => return Err(err!(errmsg!(
-                "The Namex group name '{}' is not recognised for EncryptionScheme.", gname,
-            ), Invalid, Input)),
+            _ => return Err(err!(
+                "The Namex group name '{}' is not recognised for EncryptionScheme.", gname;
+            Invalid, Input)),
         };
         Ok(if ids.len() == 0 {
             None
@@ -116,17 +116,18 @@ impl Encrypter for EncryptionScheme {
                     let nonce = Nonce::from_slice(&nbyts[..]);
                     let cipher = res!(Aes256Gcm::new_from_slice(&sk[..]));
                     let mut cipherdata = match cipher.encrypt(nonce, data) {
-                        Err(e) => return Err(err!(e, errmsg!(
-                            "While encrypting input of {} byts using scheme {:?}.", data.len(), self,
-                        ), Encrypt)),
+                        Err(e) => return Err(err!(e,
+                            "While encrypting input of {} byts using scheme {:?}.",
+                            data.len(), self;
+                        Encrypt)),
                         Ok(result) => result,
                     };
                     cipherdata.extend_from_slice(&nbyts[..]);
                     Ok(cipherdata)
                 },
-                _ => Err(err!(errmsg!(
-                    "Require secret key to encrypt.",
-                ), Missing, Configuration)),
+                _ => Err(err!(
+                    "Require secret key to encrypt.";
+                Missing, Configuration)),
             },
         }
     }
@@ -137,27 +138,27 @@ impl Encrypter for EncryptionScheme {
                 Keys { sks: Some(sks), .. } => { 
                     let sk = sks.expose_secret();
                     if data.len() < Self::AES_256_GCM_NONCE_BYTES {
-                        return Err(err!(errmsg!(
+                        return Err(err!(
                             "Data length only {}.  Data to be decrypted using \
                             this scheme must have a minimum length of {} bytes \
                             so as to include the appended nonce.",
-                            data.len(), Self::AES_256_GCM_NONCE_BYTES,
-                        ), Decrypt, Invalid, Input));
+                            data.len(), Self::AES_256_GCM_NONCE_BYTES;
+                        Decrypt, Invalid, Input));
                     }
                     let datlen = data.len() - Self::AES_256_GCM_NONCE_BYTES;
                     let nonce = Nonce::from_slice(&data[datlen..]);
                     let cipher = res!(Aes256Gcm::new_from_slice(&sk[..]));
                     match cipher.decrypt(nonce, &data[..datlen]) {
-                        Err(e) => Err(err!(e, errmsg!(
+                        Err(e) => Err(err!(e,
                             "While decrypting input of {} byts (minus nonce) \
-                            using scheme {:?}.", datlen, self,
-                        ), Decrypt)),
+                            using scheme {:?}.", datlen, self;
+                        Decrypt)),
                         Ok(result) => Ok(result),
                     }
                 },
-                _ => Err(err!(errmsg!(
-                    "Require secret key to decrypt.",
-                ), Missing, Configuration)),
+                _ => Err(err!(
+                    "Require secret key to decrypt.";
+                Missing, Configuration)),
             },
         }
     }
@@ -229,9 +230,9 @@ impl str::FromStr for EncryptionScheme {
     fn from_str(name: &str) -> std::result::Result<Self, Self::Err> {
         match name {
             "AES-256-GCM" => Ok(Self::new_aes_256_gcm()),
-            _ => Err(err!(errmsg!(
-                "The encryption scheme '{}' is not recognised.", name,
-            ), Invalid, Input)),
+            _ => Err(err!(
+                "The encryption scheme '{}' is not recognised.", name;
+            Invalid, Input)),
         }
     }
 }
@@ -242,9 +243,9 @@ impl TryFrom<&LocalId> for EncryptionScheme {
     fn try_from(n: &LocalId) -> std::result::Result<Self, Self::Error> {
         match *n {
             LocalId(1) => Ok(Self::new_aes_256_gcm()),
-            _ => Err(err!(errmsg!(
-                "The encryption scheme with local id {} is not recognised.", n,
-            ), Invalid, Input)),
+            _ => Err(err!(
+                "The encryption scheme with local id {} is not recognised.", n;
+            Invalid, Input)),
         }
     }
 }
@@ -258,9 +259,9 @@ impl TryFrom<(&LocalId, &[u8])> for EncryptionScheme {
                 let result = res!(Self::new_aes_256_gcm_with_key(sk));
                 Ok(result)
             },
-            _ => Err(err!(errmsg!(
-                "The encryption scheme with local id {} is not recognised.", n,
-            ), Invalid, Input)),
+            _ => Err(err!(
+                "The encryption scheme with local id {} is not recognised.", n;
+            Invalid, Input)),
         }
     }
 }

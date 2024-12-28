@@ -31,12 +31,12 @@
 //!
 //! fn validate_age(age: i32) -> Outcome<i32> {
 //!     if age < 0 {
-//!         return Err(err!(errmsg!(
+//!         return Err(err!(
 //!             "Age cannot be negative, got {}", age
 //!         ), Invalid, Input));
 //!     }
 //!     if age > 150 {
-//!         return Err(err!(errmsg!(
+//!         return Err(err!(
 //!             "Age seems unrealistic: {}", age
 //!         ), Invalid, Range));
 //!     }

@@ -27,9 +27,9 @@ pub fn test_base2x(filter: &'static str) -> Outcome<()> {
         let alphabet = res!(Base2x::<{A_LEN}, {X_LEN}>::prepare_alphabet("ABCabc123"));
         let pad_set = res!(Base2x::<{A_LEN}, {X_LEN}>::prepare_pad_set("12_"));
         match Base2x::<{A_LEN}, {X_LEN}>::new(alphabet, Some(('=', pad_set))) {
-            Ok(_base2x) => return Err(err!(errmsg!(
-                "Alphabet of length {} should be invalid.", alphabet.len(),
-            ), Invalid, Input, Test)),
+            Ok(_base2x) => return Err(err!(
+                "Alphabet of length {} should be invalid.", alphabet.len();
+            Invalid, Input, Test)),
             Err(e) => msg!("Correctly triggered: {}", e),
         };
         Ok(())
@@ -55,9 +55,9 @@ pub fn test_base2x(filter: &'static str) -> Outcome<()> {
         let alphabet = res!(Base2x::<{A_LEN}, {X_LEN}>::prepare_alphabet(&alphabet));
         let pad_set = res!(Base2x::<{A_LEN}, {X_LEN}>::prepare_pad_set("12_"));
         match Base2x::<{A_LEN}, {X_LEN}>::new(alphabet, Some(('=', pad_set))) {
-            Ok(_base2x) => return Err(err!(errmsg!(
-                "Alphabet of length {} should be invalid.", alphabet.len(),
-            ), Invalid, Input, Test)),
+            Ok(_base2x) => return Err(err!(
+                "Alphabet of length {} should be invalid.", alphabet.len();
+            Invalid, Input, Test)),
             Err(e) => test!("Correctly triggered: {}", e),
         };
         Ok(())

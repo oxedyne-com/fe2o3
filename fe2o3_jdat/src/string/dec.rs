@@ -454,9 +454,9 @@ impl Slurp {
                 }
                 ')' => return Ok(false),
                 _ => {
-                    return Err(err!(errmsg!(
-                        "Found unrecognised '{}' at position {} while capturing daticle kind.", c, i + 1,
-                    ), String, Input, Decode, Invalid));
+                    return Err(err!(
+                        "Found unrecognised '{}' at position {} while capturing daticle kind.", c, i + 1;
+                    String, Input, Decode, Invalid));
                 }
             }
         }
@@ -510,13 +510,11 @@ impl Kind {
             Err(e1) => match ukinds_opt {
                 Some(ukids) => match ukids.get_label(s) {
                     Some(ukid) => Ok(Self::Usr(ukid.clone())),
-                    None => Err(err!(errmsg!(
-                        "Daticle kind label not recognised as standard or custom: '{}'", s,
-                    ), Input, String, Unknown)),
+                    None => Err(err!(
+                        "Daticle kind label not recognised as standard or custom: '{}'", s;
+                    Input, String, Unknown)),
                 }
-                None => Err(err!(e1, errmsg!(
-                    "No custom user kinds supplied",
-                ), Input, String, Unknown)),
+                None => Err(err!(e1, "No custom user kinds supplied"; Input, String, Unknown)),
             }
         }
     }
@@ -525,40 +523,40 @@ impl Kind {
         match self {
             Kind::U8 => {
                 if ns.is_negative() {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                 	    "U8 '{}' cannot be negative",
-                        &ns.int_string(),
-                    ), String, Input, Decode, Invalid));
+                        &ns.int_string();
+                    String, Input, Decode, Invalid));
                 }
                 let n = res!(<u8>::from_str_radix(ns.abs_integer_str(), ns.radix()));
                 return Ok(Dat::U8(n));
             }
             Kind::U16 => {
                 if ns.is_negative() {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                 	    "U16 '{}' cannot be negative",
-                        &ns.int_string(),
-                    ), String, Input, Decode, Invalid));
+                        &ns.int_string();
+                    String, Input, Decode, Invalid));
                 }
                 let n = res!(<u16>::from_str_radix(ns.abs_integer_str(), ns.radix()));
                 return Ok(Dat::U16(n));
             }
             Kind::U32 => {
                 if ns.is_negative() {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                 	    "U32 '{}' cannot be negative",
-                        &ns.int_string(),
-                    ), String, Input, Decode, Invalid));
+                        &ns.int_string();
+                    String, Input, Decode, Invalid));
                 }
                 let n = res!(<u32>::from_str_radix(ns.abs_integer_str(), ns.radix()));
                 return Ok(Dat::U32(n));
             }
             Kind::U64 | Kind::C64 => {
                 if ns.is_negative() {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                 	    "U64 '{}' cannot be negative",
-                        &ns.int_string(),
-                    ), String, Input, Decode, Invalid));
+                        &ns.int_string();
+                    String, Input, Decode, Invalid));
                 }
                 let n = res!(<u64>::from_str_radix(ns.abs_integer_str(), ns.radix()));
                 if self == Kind::U64 {
@@ -569,10 +567,10 @@ impl Kind {
             }
             Kind::U128 => {
                 if ns.is_negative() {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                 	    "U128 '{}' cannot be negative",
-                        &ns.int_string(),
-                    ), String, Input, Decode, Invalid));
+                        &ns.int_string();
+                    String, Input, Decode, Invalid));
                 }
                 let n = res!(<u128>::from_str_radix(ns.abs_integer_str(), ns.radix()));
                 return Ok(Dat::U128(n));
@@ -605,22 +603,22 @@ impl Kind {
             }
             Kind::Aint => {
                 if ns.has_point() || ns.has_exp() {
-                    return Err(err!(errmsg!(
-                        "Decimal or scientific notation not accepted for AINT, use ADEC",
-                    ), String, Input, Decode, Invalid));
+                    return Err(err!(
+                        "Decimal or scientific notation not accepted for AINT, use ADEC";
+                    String, Input, Decode, Invalid));
                 }
                 match ns.as_bigint() {
                     Ok(n) => return Ok(Dat::Aint(n)),
-                    Err(e) => return Err(err!(e, errmsg!("While decoding an integer."))),
+                    Err(e) => return Err(err!(e, "While decoding an integer."; Decode, Integer)),
                 }
             }
             Kind::Adec => {
                 return Ok(Dat::Adec(res!(ns.as_bigdecimal())));
             }
-            _ => return Err(err!(errmsg!(
+            _ => return Err(err!(
                 "NumberString {:?} is of invalid kind {:?}",
-                ns, self,
-            ), String, Input, Decode, Invalid)),
+                ns, self;
+            String, Input, Decode, Invalid)),
         }
     }
 
@@ -878,10 +876,10 @@ impl Dat {
                                 }
                             }
                         } else {
-                            return Err(err!(errmsg!(
+                            return Err(err!(
                                 "Line comments currently only allowed in molecules \
-                                (lists and maps). ({})", cursor.borrow(),
-                            ), String, Input, Decode, Invalid));
+                                (lists and maps). ({})", cursor.borrow();
+                            String, Input, Decode, Invalid));
                         }
                     }
                     continue;
@@ -906,10 +904,10 @@ impl Dat {
             }
             match c {
                 '\t' => {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "Escaped tab characters are prohibited ({}).  Replace all tabs with spaces.",
-                        cursor.borrow(),
-                    ), String, Input, Decode, Invalid));
+                        cursor.borrow();
+                    String, Input, Decode, Invalid));
                 }
                 ' ' | '\n' | '\r' => {
                     res!(store.slurp.char_slurped((i, c), &mut state));
@@ -931,17 +929,17 @@ impl Dat {
                         //      ^ already expect k1 kind, invalid unless preceded by [ or {
                         match state.kind_outer.case() {
                             KindCase::MoleculeSame => {
-                                return Err(err!(errmsg!(
+                                return Err(err!(
                                     "Elements of a vector of kind {:?} are not daticles, \
                                     so no kind should be specified ({})",
-                                    state.kind_outer, cursor.borrow(),
-                                ), String, Input, Decode, Invalid));
+                                    state.kind_outer, cursor.borrow();
+                                String, Input, Decode, Invalid));
                             }
                             _ => {
-                                return Err(err!(errmsg!(
+                                return Err(err!(
                                     "The kind for the daticle has already been specified \
-                                    as {:?} ({})", state.kind_outer, cursor.borrow(),
-                                ), String, Input, Decode, Invalid));
+                                    as {:?} ({})", state.kind_outer, cursor.borrow();
+                                String, Input, Decode, Invalid));
                             }
                         }
                     }
@@ -957,10 +955,10 @@ impl Dat {
                         ));
                         if kind_inner.case() == KindCase::AtomLogic {
                             // An unused '|' separator is not valid, e.g. (true|), (EMPTY|)
-                            return Err(err!(errmsg!(
+                            return Err(err!(
                                 "The separation character \"|\" for {:?} is superfluous {}.",
-                                kind_inner, cursor.borrow(),
-                            ), String, Input, Decode, Invalid));
+                                kind_inner, cursor.borrow();
+                            String, Input, Decode, Invalid));
                         }
                         state.kind_capture = false;
                         let mut new_state = state.recurse();
@@ -1006,11 +1004,11 @@ impl Dat {
                             // (EMPTY), (TRUE), (FALSE), (NONE), (my_kind), etc. are valid.
                             let k = res!(Kind::from_label(&slurped, cfg.ukinds_opt.as_ref()));
                             if !k.is_dataless() {
-                                return Err(err!(errmsg!(
-                                        "The kind {:?} requires a separation character \"|\" \
-                                        ({})", k, cursor.borrow(),
-                                    ), String, Input, Decode, Invalid,
-                                ));
+                                return Err(err!(
+                                    "Closing ')' without a kindicle should have triggered \
+                                    set MolecularCapture::ListMixed, but instead the state is \
+                                    {:?}. ({})", state.molecular_capture, cursor.borrow();
+                                String, Input, Decode, Invalid));
                             }
                             k
                         };
@@ -1032,11 +1030,11 @@ impl Dat {
                         match state.molecular_capture {
                             Some(MolecularCapture::ListMixed) => {}
                             _ => {
-                                return Err(err!(errmsg!(
+                                return Err(err!(
                                     "Closing ')' without a kindicle should have triggered \
                                     set MolecularCapture::ListMixed, but instead the state is \
-                                    {:?}. ({})", state.molecular_capture, cursor.borrow(),
-                                ), String, Input, Decode, Invalid));
+                                    {:?}. ({})", state.molecular_capture, cursor.borrow();
+                                String, Input, Decode, Invalid));
                             }
                         }
                         // Complete the capture of the store.list by converting it to the correct
@@ -1072,98 +1070,91 @@ impl Dat {
                             0 => return Ok(Dat::Empty),
                             1 => return Ok(store.list[0].clone()),
                             2 => return Ok(Dat::Tup2(Box::new(
-                                res!(store.list.try_into().map_err(|_| err!(errmsg!(
-                                    "While decoding a 2-item tuple ({})", cursor.borrow(),
-                                ), String, Input, Decode, Invalid)))
+                                res!(store.list.try_into().map_err(|_| err!(
+                                    "While decoding a 2-item tuple ({})", cursor.borrow();
+                                String, Input, Decode, Invalid)))
                             ))),
                             3 => return Ok(Dat::Tup3(Box::new(
-                                res!(store.list.try_into().map_err(|_| err!(errmsg!(
-                                    "While decoding a 3-item tuple ({})", cursor.borrow(),
-                                ), String, Input, Decode, Invalid)))
+                                res!(store.list.try_into().map_err(|_| err!(
+                                    "While decoding a 3-item tuple ({})", cursor.borrow();
+                                String, Input, Decode, Invalid)))
                             ))),
                             4 => return Ok(Dat::Tup4(Box::new(
-                                res!(store.list.try_into().map_err(|_| err!(errmsg!(
-                                    "While decoding a 4-item tuple ({})", cursor.borrow(),
-                                ), String, Input, Decode, Invalid)))
+                                res!(store.list.try_into().map_err(|_| err!(
+                                    "While decoding a 4-item tuple ({})", cursor.borrow();
+                                String, Input, Decode, Invalid)))
                             ))),
                             5 => return Ok(Dat::Tup5(Box::new(
-                                res!(store.list.try_into().map_err(|_| err!(errmsg!(
-                                    "While decoding a 5-item tuple ({})", cursor.borrow(),
-                                ), String, Input, Decode, Invalid)))
+                                res!(store.list.try_into().map_err(|_| err!(
+                                    "While decoding a 5-item tuple ({})", cursor.borrow();
+                                String, Input, Decode, Invalid)))
                             ))),
                             6 => return Ok(Dat::Tup6(Box::new(
-                                res!(store.list.try_into().map_err(|_| err!(errmsg!(
-                                    "While decoding a 6-item tuple ({})", cursor.borrow(),
-                                ), String, Input, Decode, Invalid)))
+                                res!(store.list.try_into().map_err(|_| err!(
+                                    "While decoding a 6-item tuple ({})", cursor.borrow();
+                                String, Input, Decode, Invalid)))
                             ))),
                             7 => return Ok(Dat::Tup7(Box::new(
-                                res!(store.list.try_into().map_err(|_| err!(errmsg!(
-                                    "While decoding a 7-item tuple ({})", cursor.borrow(),
-                                ), String, Input, Decode, Invalid)))
+                                res!(store.list.try_into().map_err(|_| err!(
+                                    "While decoding a 7-item tuple ({})", cursor.borrow();
+                                String, Input, Decode, Invalid)))
                             ))),
                             8 => return Ok(Dat::Tup8(Box::new(
-                                res!(store.list.try_into().map_err(|_| err!(errmsg!(
-                                    "While decoding a 8-item tuple ({})", cursor.borrow(),
-                                ), String, Input, Decode, Invalid)))
+                                res!(store.list.try_into().map_err(|_| err!(
+                                    "While decoding a 8-item tuple ({})", cursor.borrow();
+                                String, Input, Decode, Invalid)))
                             ))),
                             9 => return Ok(Dat::Tup9(Box::new(
-                                res!(store.list.try_into().map_err(|_| err!(errmsg!(
-                                    "While decoding a 9-item tuple ({})", cursor.borrow(),
-                                ), String, Input, Decode, Invalid)))
+                                res!(store.list.try_into().map_err(|_| err!(
+                                    "While decoding a 9-item tuple ({})", cursor.borrow();
+                                String, Input, Decode, Invalid)))
                             ))),
                             10 => return Ok(Dat::Tup10(Box::new(
-                                res!(store.list.try_into().map_err(|_| err!(errmsg!(
-                                    "While decoding a 10-item tuple ({})", cursor.borrow(),
-                                ), String, Input, Decode, Invalid)))
+                                res!(store.list.try_into().map_err(|_| err!(
+                                    "While decoding a 10-item tuple ({})", cursor.borrow();
+                                String, Input, Decode, Invalid)))
                             ))),
-                            n => return Err(err!(errmsg!(
+                            n => return Err(err!(
                                 "Tuples are limited to 10 items, {} found ({}).",
-                                n, cursor.borrow(),
-                            ), String, Input, Decode, Invalid)),
+                                n, cursor.borrow();
+                            String, Input, Decode, Invalid)),
                         }
-                    }
+                    };
 
-                    //if kind == Kind::Unknown {
-                    //    // The kind was not recognised.
-                    //    return Err(err!(errmsg!(
-                    //            "Unexpected kind closure ({})", cursor.borrow(),
-                    //        ), String, Input, Decode, Invalid,
-                    //    ));
-                    //} else {
-                        match &kind {
-                            // No data is needed for these kinds, so create them here.
-                            Kind::Empty => store.val_opt = Some(Dat::Empty),
-                            Kind::True  => store.val_opt = Some(Dat::Bool(true)),
-                            Kind::False => store.val_opt = Some(Dat::Bool(false)),
-                            Kind::None  => store.val_opt = Some(Dat::Opt(Box::new(None))),
-                            Kind::Usr(ukid) if ukid.kind().is_none() =>
-                                store.val_opt = Some(Dat::Usr(ukid.clone(), None)),
-                            _ => (),
-                            // We don't necessarily return out of the method here because the
-                            // daticle might be part of a molecule, with the exception of the outer
-                            // kind being a Dat::ABox.
-                        }
-                        if let Kind::ABox(_) = state.kind_outer {
-                            match &store.val_opt {
-                                Some(dat) => {
-                                    if store.comment.len() > 0 {
-                                        return Ok(Dat::ABox(
-                                            store.note_config.clone(),
-                                            Box::new(dat.clone()),
-                                            store.comment,
-                                        ));
-                                    } else {
-                                        comment_required = true;
-                                    }
-                                }
-                                None => {
-                                    return Err(err!(errmsg!(
-                                        "Daticle missing in Dat::ABox ({})", cursor.borrow(),
-                                    ), String, Input, Decode, Invalid, Missing));
+                    match &kind {
+                        // No data is needed for these kinds, so create them here.
+                        Kind::Empty => store.val_opt = Some(Dat::Empty),
+                        Kind::True  => store.val_opt = Some(Dat::Bool(true)),
+                        Kind::False => store.val_opt = Some(Dat::Bool(false)),
+                        Kind::None  => store.val_opt = Some(Dat::Opt(Box::new(None))),
+                        Kind::Usr(ukid) if ukid.kind().is_none() =>
+                            store.val_opt = Some(Dat::Usr(ukid.clone(), None)),
+                        _ => (),
+                        // We don't necessarily return out of the method here because the
+                        // daticle might be part of a molecule, with the exception of the outer
+                        // kind being a Dat::ABox.
+                    }
+                    if let Kind::ABox(_) = state.kind_outer {
+                        match &store.val_opt {
+                            Some(dat) => {
+                                if store.comment.len() > 0 {
+                                    return Ok(Dat::ABox(
+                                        store.note_config.clone(),
+                                        Box::new(dat.clone()),
+                                        store.comment,
+                                    ));
+                                } else {
+                                    comment_required = true;
                                 }
                             }
+                            None => {
+                                return Err(err!(
+                                    "Daticle missing in Dat::ABox ({})", cursor.borrow();
+                                String, Input, Decode, Invalid, Missing));
+                            }
                         }
-                    //}
+                    }
+                    
                     if !comment_required && (
                         !kind.is_dataless() || state.molecular_capture == None
                     ) {
@@ -1189,10 +1180,10 @@ impl Dat {
                             if let Some(d) = store.val_opt {
                                 return Ok(d);
                             } else {
-                                return Err(err!(errmsg!(
+                                return Err(err!(
                                     "Failed to capture the daticle of kind {:?} ({})",
-                                    kind, cursor.borrow(),
-                                ), String, Input, Decode, Invalid));
+                                    kind, cursor.borrow();
+                                String, Input, Decode, Invalid));
                             }
                         }
                     }
@@ -1206,15 +1197,13 @@ impl Dat {
                             state.molecular_capture = Some(MolecularCapture::ListMixed);
                         } else {
                             match MolecularCapture::from_kind(&state.kind_outer) {
-                                Some(MolecularCapture::Map) => return Err(err!(errmsg!(
-                                        "Expecting a store.map bracket '{{' but found a '[' ({})", cursor.borrow(),
-                                    ), String, Input, Decode, Invalid,
-                                )),
-                                None => return Err(err!(errmsg!(
-                                        "Found a '[' which is incompatible with a {:?} ({})",
-                                        state.kind_outer, cursor.borrow(),
-                                    ), String, Input, Decode, Invalid,
-                                )),
+                                Some(MolecularCapture::Map) => return Err(err!(
+                                    "Expecting a store.map bracket '{{' but found a '[' ({})", cursor.borrow();
+                                String, Input, Decode, Invalid)),
+                                None => return Err(err!(
+                                    "Found a '[' which is incompatible with a {:?} ({})",
+                                    state.kind_outer, cursor.borrow();
+                                String, Input, Decode, Invalid)),
                                 _ => (),
                             }
                         }
@@ -1338,18 +1327,18 @@ impl Dat {
                                 Kind::Tup10u64  => string_decode_int_tuple! { Tup10u64, U64, u64, 10, store.list, state },
 
                                 _ => {
-                                    return Err(err!(errmsg!(
+                                    return Err(err!(
                                         "Unexpected outer kind {:?} case while concluding {:?}.",
-                                        state.kind_outer, state.molecular_capture,
-                                    ), Input, Mismatch, Unexpected, Bug,));
+                                        state.kind_outer, state.molecular_capture;
+                                    Input, Mismatch, Unexpected, Bug));
                                 }
                             }
                         }
                         _ => {
-                            return Err(err!(errmsg!(
+                            return Err(err!(
                                 "List capture was not actived with a '[' character ({})",
-                                cursor.borrow(),
-                            ), String, Input, Decode, Invalid));
+                                cursor.borrow();
+                            String, Input, Decode, Invalid));
                         }
                     }
                 }
@@ -1382,15 +1371,15 @@ impl Dat {
                         continue;
                     }
                     match state.molecular_capture {
-                        None => return Err(err!(errmsg!(
-                                "Map capture not active ({})", cursor.borrow(),
-                            ), String, Input, Decode, Invalid)),
+                        None => return Err(err!(
+                                "Map capture not active ({})", cursor.borrow();
+                        String, Input, Decode, Invalid)),
                         Some(MolecularCapture::ListMixed)   |
                         Some(MolecularCapture::ListSame)    |
                         Some(MolecularCapture::Bytes)       => {
-                            return Err(err!(errmsg!(
-                                "List capture active, incompatible character ({})", cursor.borrow(),
-                            ), String, Input, Decode, Invalid));
+                            return Err(err!(
+                                "List capture active, incompatible character ({})", cursor.borrow();
+                            String, Input, Decode, Invalid));
                         }
                         Some(MolecularCapture::Map) => {
                             // We're expecting to have a daticle to add to the store.map.
@@ -1446,13 +1435,13 @@ impl Dat {
                                 ));
                             }
                             (None, Some(dat)) => {
-                                return Err(err!(errmsg!(
+                                return Err(err!(
                                     "Unpaired value {:?} at end of store.map {} ({})",
                                     dat, match cfg.use_ordmaps {
                                         true => fmt!("{:?}", store.ordmap),
                                         false => fmt!("{:?}", store.map),
-                                    }, cursor.borrow(),
-                                ), String, Input, Decode, Invalid, Missing));
+                                    }, cursor.borrow();
+                                String, Input, Decode, Invalid, Missing));
                             }
                             (Some(key), None) => {
                                 if store.comment.len() > 0 {
@@ -1467,13 +1456,13 @@ impl Dat {
                                         (key, dat),
                                     ));
                                 } else {
-                                    return Err(err!(errmsg!(
+                                    return Err(err!(
                                         "Unpaired key {:?} at end of store.map {} ({})",
                                         key, match cfg.use_ordmaps {
                                             true => fmt!("{:?}", store.ordmap),
                                             false => fmt!("{:?}", store.map),
-                                        }, cursor.borrow(),
-                                    ), String, Input, Decode, Invalid, Missing));
+                                        }, cursor.borrow();
+                                    String, Input, Decode, Invalid, Missing));
                                 }
                             }
                             (None, None) => {}
@@ -1484,9 +1473,9 @@ impl Dat {
                             Dat::Map(store.map)
                         });
                     }
-                    return Err(err!(errmsg!(
-                        "Map capture was not actived with a '{{' character ({})", cursor.borrow(),
-                    ), String, Input, Decode, Invalid));
+                    return Err(err!(
+                        "Map capture was not actived with a '{{' character ({})", cursor.borrow();
+                    String, Input, Decode, Invalid));
                 }
                 _ => {
                     if res!(store.slurp.char_slurped((i, c), &mut state)) {
@@ -1504,10 +1493,10 @@ impl Dat {
             Some(MolecularCapture::ListMixed)  |
             Some(MolecularCapture::ListSame)   |
             Some(MolecularCapture::Bytes) =>
-                return Err(err!(errmsg!("Expected closure of a store.list with ']'"),
+                return Err(err!("Expected closure of a store.list with ']'";
                     String, Input, Decode, Missing)),
             Some(MolecularCapture::Map) =>
-                return Err(err!(errmsg!("Expected closure of a store.map with '}}'"),
+                return Err(err!("Expected closure of a store.map with '}}'";
                     String, Input, Decode, Missing)),
         }
     }
@@ -1525,9 +1514,9 @@ impl Dat {
     {
         match state.molecular_capture {
             None => {
-                return Err(err!(errmsg!(
-                    "List or map capture not active ({})", cursor.borrow(),
-                ), String, Input, Decode, Invalid));
+                return Err(err!(
+                    "List or map capture not active ({})", cursor.borrow();
+                String, Input, Decode, Invalid));
             }
             Some(MolecularCapture::Bytes) => {
                 // We're expecting a byte to add to the list.
@@ -1627,10 +1616,10 @@ impl Dat {
         match use_ordmap {
             true => {
                 if store.ordmap.iter().any(|(mk, _)| *mk.dat() == key) {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "The key {:?} already exists in the {:?} being \
-                        interpreted from the given string.", key, store.ordmap,
-                    ), Invalid, Input, Exists));
+                        interpreted from the given string.", key, store.ordmap;
+                    Invalid, Input, Exists));
                 }
                 let mkey = MapKey::new(store.map_count.order(), key);
                 store.ordmap.insert(mkey, dat);
@@ -1638,10 +1627,10 @@ impl Dat {
             }
             false => {
                 if store.map.contains_key(&key) {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "The key {:?} already exists in the {:?} being \
-                        interpreted from the given string.", key, store.map,
-                    ), Invalid, Input, Exists));
+                        interpreted from the given string.", key, store.map;
+                    Invalid, Input, Exists));
                 } else {
                     store.map.insert(key, dat);
                     res!(store.map_count.inc());
@@ -1696,17 +1685,15 @@ impl Dat {
                 if kind.case().accepts_strings() {
                     Dat::Str(slurp.clone_string())
                 } else {
-                    return Err(err!(errmsg!(
-                            "A quoted string '{}' is not compatible with {:?}.", slurp, kind,
-                        ), String, Input, Decode, Mismatch,
-                    ));
+                    return Err(err!(
+                        "A quoted string '{}' is not compatible with {:?}.", slurp, kind;
+                    String, Input, Decode, Mismatch));
                 }
             } else {
                 if slurp.len() == 0 {
-                    return Err(err!(errmsg!(
-                            "The kind {:?} requires data, but none was found.", kind,
-                        ), String, Input, Decode, Missing,
-                    ));
+                    return Err(err!(
+                        "The kind {:?} requires data, but none was found.", kind;
+                    String, Input, Decode, Missing));
                 } else {
                     // We allow a limited number of keywords that can be used a shorthand for kinds, with or
                     // without quotes.
@@ -1740,12 +1727,10 @@ impl Dat {
                                                             // represented by a BigInt.
                                                             match ns.as_bigint() {
                                                                 Ok(n) => Dat::Aint(n),
-                                                                Err(e) => return Err(err!(e, errmsg!(
-                                                                        "While interpreting '{}' with outer kind {:?}.",
-                                                                        slurp, kind,
-                                                                    ), String,
-                                                                    Input, Decode,
-                                                                )),
+                                                                Err(e) => return Err(err!(e,
+                                                                    "While interpreting '{}' with outer kind {:?}.",
+                                                                    slurp, kind;
+                                                                String, Input, Decode)),
                                                             }
                                                         } else {
                                                             // n E i128::MIN..0
@@ -1772,12 +1757,10 @@ impl Dat {
                                                 Err(_e) => {
                                                     match ns.as_bigint() {
                                                         Ok(n) => Dat::Aint(n),
-                                                        Err(e) => return Err(err!(e, errmsg!(
-                                                                "While interpreting '{}' with outer kind {:?}.",
-                                                                slurp, kind,
-                                                            ), String,
-                                                            Input, Decode,
-                                                        )),
+                                                        Err(e) => return Err(err!(e,
+                                                            "While interpreting '{}' with outer kind {:?}.",
+                                                            slurp, kind;
+                                                        String, Input, Decode)),
                                                     }
                                                 }
                                             }
@@ -1788,10 +1771,10 @@ impl Dat {
                             Err(e) => if *kind == Kind::Unknown {
                                 Dat::Str(slurp.take_string())
                             } else {
-                                return Err(err!(e, errmsg!(
+                                return Err(err!(e,
                                     "While interpreting '{}' with outer kind {:?}.",
-                                    slurp, kind,
-                                ), String, Input, Decode));
+                                    slurp, kind;
+                                String, Input, Decode));
                             }
                         }
                     }
@@ -1821,9 +1804,9 @@ impl Dat {
             Kind::B10   => Self::B10(res!(<[u8; 10]>::try_from(&v[..]), Decode, Bytes)),
             Kind::B16   => Self::B16(res!(<[u8; 16]>::try_from(&v[..]), Decode, Bytes)),
             Kind::B32   => Self::B32(res!(B32::from_bytes(&v[..])).0),
-            _ => return Err(err!(errmsg!(
-                "{:?} is not suitable for bytes.", k,
-            ), Input, Mismatch, Bug)),
+            _ => return Err(err!(
+                "{:?} is not suitable for bytes.", k;
+            Input, Mismatch, Bug)),
         })
     }
 }

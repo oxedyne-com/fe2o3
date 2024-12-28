@@ -78,9 +78,9 @@ impl<
     fn listen(&mut self) -> LoopBreak {
         match self.chan_in().recv_timeout(self.sleep) {
             Recv::Empty => (),
-            Recv::Result(Err(e)) => self.err_cannot_receive(err!(e, errmsg!(
-                "{}: Waiting for message.", self.ozid(),
-            ), IO, Channel)),
+            Recv::Result(Err(e)) => self.err_cannot_receive(err!(e,
+                "{}: Waiting for message.", self.ozid();
+                IO, Channel)),
             Recv::Result(Ok(OzoneMsg::ZoneInitTrigger)) => {
                 let result = self.zone_init();
                 self.result(&result);
@@ -156,9 +156,9 @@ impl<
             }
             let bot = res!(self.zbots().get_bot(z as usize));
             if let Err(e) = bot.send(OzoneMsg::ZoneInit(zdir, zcfg.clone())) {
-                self.err_cannot_send(err!(e, errmsg!(
-                    "{}: Sending init data to zone {:?}", self.ozid(), zind,
-                ), Init, IO, Channel));
+                self.err_cannot_send(err!(e,
+                    "{}: Sending init data to zone {:?}", self.ozid(), zind;
+                    Init, IO, Channel));
             }
         }
         Ok(())
@@ -169,20 +169,20 @@ impl<
     pub fn process_zone_overrides(&self) -> Outcome<BTreeMap<u16, ZoneDir>> {
         let zones = self.cfg().zone_overrides();
         if self.cfg().num_zones() < zones.len() {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "{}: There are {} zone overrides but only {} zones in the configuration.",
-                self.ozid(), zones.len(), self.cfg().num_zones,
-            ), Invalid, Input));
+                self.ozid(), zones.len(), self.cfg().num_zones;
+                Invalid, Input));
         }
         let mut zdirs = BTreeMap::new();
         for (zdat, zmapdat) in zones.iter() {
             match zdat {
                 Dat::U16(z) => {
                     if *z == 0 {
-                        return Err(err!(errmsg!(
+                        return Err(err!(
                             "{}: The configured zone {} override cannot index from 0, \
-                            zones are indexed from 1.", self.ozid(), z,
-                        ), Invalid, Input));
+                            zones are indexed from 1.", self.ozid(), z;
+                            Invalid, Input));
                     }
                     match zmapdat {
                         Dat::Map(zmap) => {
@@ -211,98 +211,18 @@ impl<
                             };
                             zdirs.insert(*z - 1, zdir);
                         },
-                        _ => return Err(err!(errmsg!(
+                        _ => return Err(err!(
                             "{}: The configured zone {} override '{:?}' is not a Dat::Map.",
-                            self.ozid(), z, zmapdat,
-                        ), Invalid, Input)),
+                            self.ozid(), z, zmapdat;
+                            Invalid, Input)),
                     }
                 },
-                _ => return Err(err!(errmsg!(
+                _ => return Err(err!(
                     "{}: The zone number in the configured zone override map, '{:?}',
-                    is not a Dat::U16.", self.ozid(), zdat,
-                ), Invalid, Input)),
+                    is not a Dat::U16.", self.ozid(), zdat;
+                    Invalid, Input)),
             }
         }
         Ok(zdirs)
     }
-
-    //fn open_file(&mut self) -> Outcome<File> {
-    //    match OpenOptions::new()
-    //        .read(true)
-    //        .open(&self.cfg.path)
-    //    {
-    //        Err(e) => Err(err!(e, errmsg!("While opening file {:?}", self.cfg.path),
-    //            IO, File, "read")),
-    //        Ok(file) => Ok(file),
-    //    }
-    //}
-
-    //fn check_file(&mut self) -> Outcome<()> {
-
-    //    // 1. Inspect the file metadata to see if it has been modified since last check.
-    //    // We cannot re-use an existing file handle because, at least in linux, this does not
-    //    // provide updated metadata.
-    //    match res!(self.open_file()).metadata() {
-    //        Err(e) => return Err(err!(e, errmsg!(
-    //            "Could not read metadata for file {:?}.", self.cfg.path,
-    //        ), File, "read")),
-    //        Ok(metadata) => match metadata.modified() {
-    //            Err(_) => {
-    //                // 1.1. This platform does not provide file modification time, so proceed to
-    //                //   read the file as if it has been modified.
-    //            },
-    //            Ok(modtime) => {
-    //                if modtime < self.last {
-    //                    // 1.1. File has not been modified since last check, nothing to be done.
-    //                    self.last = SystemTime::now();
-    //                    return Ok(());
-    //                }
-    //            },
-    //        },
-    //    }
-    //    
-    //    
-    //    self.last = SystemTime::now();
-
-    //    // 2. The file has been (or is assumed to have been) modified, so read it.
-    //    match std::fs::read_to_string(&self.cfg.path) {
-    //        Ok(s) => {
-    //            // 2.1. Ensure the data is a valid Dat.
-    //            if let Dat::Map(map) = Dat::decode_string(s)? {
-    //                let cfg_dat = ConfigData::from_datmap(map);
-    //                let mut cfgdat_write = lock_write!(self.cfg.dat,
-    //                    "While attempting to open the config data for writing.",
-    //                );
-
-    //                if *cfgdat_write == cfg_dat {
-    //                    // 2.2. There is no change in the config file.
-    //                    return Ok(());
-    //                }
-
-    //                info!("{}: Configuration file change detected, applying changes...",
-    //                    self.ozid());
-
-    //                // 3. TODO Manage changes.
-    //                // 3.1. Change to number of zones: re-initialise database, activate re-zoning
-    //                //   bots to re-allocate data.
-    //                // 3.2. Change to zone locations: re-initialise zones, activate re-zoning bots
-    //                //   to copy files.
-    //                // 3.3. Changes to number of bots: instruct supervisor to create/delete.
-    //                // 3.4. Other changes to flags and parameters, no special action required.
-    //                
-    //            } else {
-    //                return Err(err!(errmsg!(
-    //                    "O3db config file at '{:?}' must be a Dat::Map",
-    //                    self.cfg.path,
-    //                ), Input, Invalid));
-    //            }
-    //        },
-    //        Err(e) => return Err(err!(e, errmsg!(
-    //            "While trying to read configuration file {:?}.", self.cfg.path,
-    //        ), IO, File)),
-    //    }
-
-    //    Ok(())
-
-    //}
 }

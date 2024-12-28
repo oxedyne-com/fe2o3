@@ -21,10 +21,10 @@ pub fn wait_for_true(
     -> Outcome<(Instant, bool)>
 {
     if check_interval > max_wait {
-        return Err(err!(errmsg!(
+        return Err(err!(
             "The given check interval, {:?}, should not be larger than the \
-            given max wait, {:?}.", check_interval, max_wait,
-        ), Invalid, Input));
+            given max wait, {:?}.", check_interval, max_wait;
+        Invalid, Input));
     }
     let start = Instant::now();
     loop {

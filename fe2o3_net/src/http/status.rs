@@ -87,13 +87,11 @@ impl FromStr for HttpStatus {
         match s.parse::<u16>() {
             Ok(n) => match Self::from_repr(n) {
                 Some(status) => Ok(status),
-                None => Err(err!(errmsg!(
-                    "Unrecognised HTTP status code '{}'.", s,
-                ), IO, Network, Unknown, Input)),
+                None => Err(err!(
+                    "Unrecognised HTTP status code '{}'.", s;
+                IO, Network, Unknown, Input)),
             },
-            Err(e) => Err(err!(e, errmsg!(
-                "Code '{}' is not a u16.", s,
-            ), IO, Network, Mismatch, Input))
+            Err(e) => Err(err!(e, "Code '{}' is not a u16.", s; IO, Network, Mismatch, Input))
         }
     }
 }

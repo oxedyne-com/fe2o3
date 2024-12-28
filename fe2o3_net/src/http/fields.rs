@@ -862,9 +862,9 @@ impl FromStr for ConnectionType {
         Ok(match s {
             "close"         => Self::Close,
             "keep-alive"    => Self::KeepAlive,
-            _ => return Err(err!(errmsg!(
-                "Unrecognised connection type '{}'.", s,
-            ), IO, Network, Unknown, Input)),
+            _ => return Err(err!(
+                "Unrecognised connection type '{}'.", s;
+            IO, Network, Unknown, Input)),
         })
     }
 }
@@ -940,10 +940,10 @@ impl HeaderFieldValue {
                 for part in parts {
                     match ConnectionType::from_str(&part) {
                         Ok(ct) => if contyp_opt.is_some() {
-                            return Err(err!(errmsg!(
+                            return Err(err!(
                                 "Connection type '{:?}' already defined, '{}' is redundant.",
-                                contyp_opt, ct,
-                            ), Invalid, Input, Conflict));
+                                contyp_opt, ct;
+                            Invalid, Input, Conflict));
                         } else {
                             contyp_opt = Some(ct);
                         },
@@ -966,12 +966,12 @@ impl HeaderFieldValue {
                                 attrs: None,
                             });
                         },
-                        (Some(k), None) => return Err(err!(errmsg!(
-                            "Missing value for key '{}' in header field line '{}", k, value,
-                        ), Invalid, Input, Missing)),
-                        (None, Some(v)) => return Err(err!(errmsg!(
-                            "Missing key for value '{}' in header field line '{}", v, value,
-                        ), Invalid, Input, Missing)),
+                        (Some(k), None) => return Err(err!(
+                            "Missing value for key '{}' in header field line '{}", k, value;
+                        Invalid, Input, Missing)),
+                        (None, Some(v)) => return Err(err!(
+                            "Missing key for value '{}' in header field line '{}", v, value;
+                        Invalid, Input, Missing)),
                         _ => (),
                     }
                 }
@@ -979,9 +979,9 @@ impl HeaderFieldValue {
             },
             HeaderName::ContentLength => match value.parse() { 
                 Ok(n) => Self::ContentLength(n),
-                Err(e) => return Err(err!(e, errmsg!(
-                    "Could not parse the content length '{}'.", value,
-                ), Invalid, Input, String, Decode)),
+                Err(e) => return Err(err!(e,
+                    "Could not parse the content length '{}'.", value;
+                Invalid, Input, String, Decode)),
             },
             HeaderName::ContentType => { // A; B=C
                 let mut parts = value.split(';').map(str::trim).map(|w| w.to_lowercase());
@@ -1000,14 +1000,14 @@ impl HeaderFieldValue {
                                 match parts2.next() { // B
                                     Some(left) => match is_multipart {
                                         true => if left != "boundary" {
-                                            return Err(err!(errmsg!(
-                                                "Expected 'boundary' found '{}'.", left,
-                                            ), Invalid, Input, String, Decode));
+                                            return Err(err!(
+                                                "Expected 'boundary' found '{}'.", left;
+                                            Invalid, Input, String, Decode));
                                         },
                                         false => if left != "charset" {
-                                            return Err(err!(errmsg!(
-                                                "Expected 'charset' found '{}'.", left,
-                                            ), Invalid, Input, String, Decode));
+                                            return Err(err!(
+                                                "Expected 'charset' found '{}'.", left;
+                                            Invalid, Input, String, Decode));
                                         },
                                     },
                                     None => (),
@@ -1023,15 +1023,15 @@ impl HeaderFieldValue {
                                             Some(res!(Charset::from_str(&right))),
                                         ))),
                                     },
-                                    None => return Err(err!(errmsg!("Missing {} value in '{}'.",
-                                        if is_multipart { "boundary" } else { "charset" }, value,
-                                    ), Invalid, Input, String, Decode, Missing)),
+                                    None => return Err(err!("Missing {} value in '{}'.",
+                                        if is_multipart { "boundary" } else { "charset" }, value;
+                                    Invalid, Input, String, Decode, Missing)),
                                 }
                             },
                             None => match is_multipart {
-                                true => return Err(err!(errmsg!(
-                                    "A 'boundary=string' is required but is missing in {}'.", value,
-                                ), Invalid, Input, String, Decode, Missing)),
+                                true => return Err(err!(
+                                    "A 'boundary=string' is required but is missing in {}'.", value;
+                                Invalid, Input, String, Decode, Missing)),
                                 false => Self::ContentType(ContentTypeValue::MediaType((
                                     media_type,
                                     None,
@@ -1039,9 +1039,9 @@ impl HeaderFieldValue {
                             },
                         }
                     },
-                    None => return Err(err!(errmsg!(
-                        "Missing header field value for Content-Type.",
-                    ), Invalid, Input, String, Decode, Missing)),
+                    None => return Err(err!(
+                        "Missing header field value for Content-Type.";
+                    Invalid, Input, String, Decode, Missing)),
                 }
             },
             HeaderName::SecWebSocketKey     |
@@ -1076,17 +1076,17 @@ impl HeaderField {
         };
         let name = match parts.next() {
             Some(name) => HeaderName::from(&name.to_lowercase()),
-            None => return Err(err!(errmsg!(
+            None => return Err(err!(
                 "A name was not found for the HTTP header field in the header line '{}'{}",
-                line, line_msg,
-            ), Invalid, Input, Missing)),
+                line, line_msg;
+            Invalid, Input, Missing)),
         };
         let value = match parts.next() {
             Some(value) => res!(HeaderFieldValue::new(&name, value)),
-            None => return Err(err!(errmsg!(
+            None => return Err(err!(
                 "A value must be present for header field name '{}' in the header line '{}'{}",
-                name, line, line_msg,
-            ), Invalid, Input, Missing)),
+                name, line, line_msg;
+            Invalid, Input, Missing)),
         };
 
         Ok(Self {
@@ -1220,15 +1220,15 @@ impl HeaderFields {
                 if list.len() == 1 {
                     Ok(&list[0])
                 } else {
-                    Err(err!(errmsg!(
+                    Err(err!(
                         "Number of values for header field '{}', {} is not one.",
-                        nam, list.len(),
-                    ), IO, Network, Invalid, Input))
+                        nam, list.len();
+                    IO, Network, Invalid, Input))
                 }
             },
-            None => Err(err!(errmsg!(
-                "Value list for header field '{}' does not exist.", nam,
-            ), IO, Network, Invalid, Input)),
+            None => Err(err!(
+                "Value list for header field '{}' does not exist.", nam;
+            IO, Network, Invalid, Input)),
         }
     }
 

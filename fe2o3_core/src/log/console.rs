@@ -91,9 +91,9 @@ impl<ETAG: GenTag> LoggerConsole<ETAG> for StdoutLoggerConsole<ETAG>
                     println!("{}", msg)
                 }
                 _ => {
-                    println!("{}", err!(errmsg!(
-                        "Unexpected message type: {:?}", msg,
-                    ), Bug, Unexpected, Input));
+                    println!("{}", err!(
+                        "Unexpected message type: {:?}", msg;
+                    Bug, Unexpected, Input));
                 }
             }
         }

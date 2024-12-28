@@ -7,14 +7,14 @@ pub trait OptionRefVec<T> {
 impl<'a, T> OptionRefVec<T> for Option<&'a Vec<T>> {
     fn with_len<'b>(self, len: usize) -> Outcome<&'b [T]> where 'a: 'b {
         self.map_or_else(
-            || Err(err!(errmsg!("Expected {} values, found none.", len), Missing, Data)),
+            || Err(err!("Expected {} values, found none.", len; Missing, Data)),
             |vals| {
                 if vals.len() == len {
                     Ok(vals.as_slice())
                 } else {
-                    Err(err!(errmsg!(
-                        "Expected {} values, found {}.", len, vals.len(),
-                    ), Mismatch, Data, Size))
+                    Err(err!(
+                        "Expected {} values, found {}.", len, vals.len();
+                    Mismatch, Data, Size))
                 }
             }
         )
@@ -28,15 +28,15 @@ pub trait OptionMutVec<T> {
 impl<'a, T> OptionMutVec<T> for Option<&'a mut Vec<T>> {
     fn with_len<'b>(&'b mut self, len: usize) -> Outcome<&'b mut [T]> where 'a: 'b {
         self.as_deref_mut().map_or_else(
-            || Err(err!(errmsg!("Expected {} values, found none.", len), Missing, Data)),
+            || Err(err!("Expected {} values, found none.", len; Missing, Data)),
             |vals| {
                 let vals = vals.as_mut_slice();
                 if vals.len() == len {
                     Ok(vals)
                 } else {
-                    Err(err!(errmsg!(
-                        "Expected {} values, found {}.", len, vals.len(),
-                    ), Mismatch, Data, Size))
+                    Err(err!(
+                        "Expected {} values, found {}.", len, vals.len();
+                    Mismatch, Data, Size))
                 }
             }
         )

@@ -53,9 +53,9 @@ impl< K: Display + Hash + Eq, V> GetOrErr<K, V> for HashMap<K, V> {
     fn get_or_err(&self, k: &K) -> Outcome<&V> {
         match self.get(k) {
             Some(v) => Ok(v),
-            None => Err(err!(errmsg!(
-                "Map missing {}", k,
-            ), Missing, Key)),
+            None => Err(err!(
+                "Map missing {}", k;
+            Missing, Key)),
         }
     }
 }
@@ -66,9 +66,9 @@ impl< K: Display + Ord, V> GetOrErr<K, V> for BTreeMap<K, V> {
     fn get_or_err(&self, k: &K) -> Outcome<&V> {
         match self.get(k) {
             Some(v) => Ok(v),
-            None => Err(err!(errmsg!(
-                "Map missing {}", k,
-            ), Missing, Key)),
+            None => Err(err!(
+                "Map missing {}", k;
+            Missing, Key)),
         }
     }
 }

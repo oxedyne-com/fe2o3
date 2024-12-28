@@ -53,7 +53,7 @@ fn server() -> Outcome<()> {
 
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
-        Err(e) => return Err(err!(e, errmsg!("Failed to create Tokio runtime."), IO, Init)),
+        Err(e) => return Err(err!(e, "Failed to create Tokio runtime."; IO, Init)),
     };
 
     let outcome = runtime.block_on(async {
@@ -80,7 +80,7 @@ fn client() -> Outcome<()> {
 
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
-        Err(e) => return Err(err!(e, errmsg!("Failed to create Tokio runtime."), IO, Init)),
+        Err(e) => return Err(err!(e, "Failed to create Tokio runtime."; IO, Init)),
     };
 
     let outcome = runtime.block_on(async {

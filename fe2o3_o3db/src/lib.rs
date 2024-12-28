@@ -37,13 +37,9 @@
 //!     
 //!     // Handle potential errors during storage
 //!     match res!(resp.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
-//!         OzoneMsg::Error(e) => return Err(err!(e, errmsg!(
-//!             "Failed to store value",
-//!         ))),
+//!         OzoneMsg::Error(e) => return Err(err!(e, "Failed to store value"; IO, Data, Write)),
 //!         OzoneMsg::Ok => Ok(()),
-//!         msg => Err(err!(errmsg!(
-//!             "Unexpected response: {:?}", msg,
-//!         ), Unexpected)),
+//!         msg => Err(err!("Unexpected response: {:?}", msg; Channel, Unexpected)),
 //!     }
 //! }
 //! ```
@@ -58,9 +54,7 @@
 //!     ));
 //!     
 //!     match res!(resp.recv_daticle(db.api().schemes().encrypter(), None)) {
-//!         (None, _) => Err(err!(errmsg!(
-//!             "Value not found",
-//!         ), Missing, Data)),
+//!         (None, _) => Err(err!("Value not found"; Data, Missing)),
 //!         (Some((Dat::Tup5u64(tup), _)), _) => {
 //!             // Handle chunked data
 //!             res!(db.api().fetch_chunks(&Dat::Tup5u64(tup), None))

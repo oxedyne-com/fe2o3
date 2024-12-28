@@ -81,9 +81,9 @@ impl<
         match &self.0 {
             DefAlt::Default(inner) => inner.name_id(),
             DefAlt::Given(inner) => inner.name_id(),
-            DefAlt::None => Err(err!(errmsg!(
-                "No Namex id can be specified for DefAlt::None.",
-            ), Missing, Bug)),
+            DefAlt::None => Err(err!(
+                "No Namex id can be specified for DefAlt::None.";
+            Missing, Bug)),
         }
     }
 
@@ -129,9 +129,9 @@ impl<
         match &self.0 {
             DefAlt::Default(inner) => inner.sign(msg),
             DefAlt::Given(inner) => inner.sign(msg),
-            DefAlt::None => Err(err!(errmsg!(
-                "Can't sign, signature not specified.",
-            ), Configuration, Missing)),
+            DefAlt::None => Err(err!(
+                "Can't sign, signature not specified.";
+            Configuration, Missing)),
         }
     }
 
@@ -139,9 +139,9 @@ impl<
         match &self.0 {
             DefAlt::Default(inner) => inner.verify(msg, sig),
             DefAlt::Given(inner) => inner.verify(msg, sig),
-            DefAlt::None => Err(err!(errmsg!(
-                "Can't verify, signature not specified.",
-            ), Configuration, Missing)),
+            DefAlt::None => Err(err!(
+                "Can't verify, signature not specified.";
+            Configuration, Missing)),
         }
     }
 
@@ -171,9 +171,9 @@ impl<
         match &self.0 {
             DefAlt::Default(inner) => inner.get_public_key(),
             DefAlt::Given(inner) => inner.get_public_key(),
-            DefAlt::None => Err(err!(errmsg!(
-                "Can't get public key, signature not specified.",
-            ), Configuration, Missing)),
+            DefAlt::None => Err(err!(
+                "Can't get public key, signature not specified.";
+            Configuration, Missing)),
         }
     }
 
@@ -181,9 +181,9 @@ impl<
         match &self.0 {
             DefAlt::Default(inner) => inner.get_secret_key(),
             DefAlt::Given(inner) => inner.get_secret_key(),
-            DefAlt::None => Err(err!(errmsg!(
-                "Can't get secret key, signature not specified.",
-            ), Configuration, Missing)),
+            DefAlt::None => Err(err!(
+                "Can't get secret key, signature not specified.";
+            Configuration, Missing)),
         }
     }
 
@@ -195,9 +195,9 @@ impl<
             DefAlt::Given(inner) => Ok(Self(
                 DefAlt::Given(res!(inner.set_public_key(pk))),
             )),
-            DefAlt::None => Err(err!(errmsg!(
-                "Can't set public key, signature not specified.",
-            ), Configuration, Missing)),
+            DefAlt::None => Err(err!(
+                "Can't set public key, signature not specified.";
+            Configuration, Missing)),
         }
     }
 
@@ -209,9 +209,9 @@ impl<
             DefAlt::Given(inner) => Ok(Self(
                 DefAlt::Given(res!(inner.set_secret_key(sk))),
             )),
-            DefAlt::None => Err(err!(errmsg!(
-                "Can't set secret key, signature not specified.",
-            ), Configuration, Missing)),
+            DefAlt::None => Err(err!(
+                "Can't set secret key, signature not specified.";
+            Configuration, Missing)),
         }
     }
 }
@@ -228,15 +228,15 @@ impl<
     pub fn or_sign<OR: Signer>(&self, msg: &[u8], alt: &Alt<OR>) -> Outcome<Vec<u8>> {
         match alt {
             Alt::Specific(Some(inner)) => inner.sign(msg),  // Type OR Signer
-            Alt::Specific(None) => Err(err!(errmsg!(
-                "Can't sign, signature not specified.",
-            ), Configuration, Missing)),
+            Alt::Specific(None) => Err(err!(
+                "Can't sign, signature not specified.";
+            Configuration, Missing)),
             Alt::Unspecified => match &self.0 {
                 DefAlt::Default(inner) => inner.sign(msg),  // Type D Signer
                 DefAlt::Given(inner) => inner.sign(msg),    // Type G Signer
-                DefAlt::None => Err(err!(errmsg!(
-                    "Can't sign, signature not specified.",
-                ), Configuration, Missing)),
+                DefAlt::None => Err(err!(
+                    "Can't sign, signature not specified.";
+                Configuration, Missing)),
             },
         }
     }
@@ -247,15 +247,15 @@ impl<
     pub fn or_verify<OR: Signer>(&self, msg: &[u8], sig: &[u8], alt: &Alt<OR>) -> Outcome<bool> {
         match alt {
             Alt::Specific(Some(inner)) => inner.verify(msg, sig),   // Type OR Signer
-            Alt::Specific(None) => Err(err!(errmsg!(
-                "Can't verify, signature not specified.",
-            ), Configuration, Missing)),
+            Alt::Specific(None) => Err(err!(
+                "Can't verify, signature not specified.";
+            Configuration, Missing)),
             Alt::Unspecified => match &self.0 {
                 DefAlt::Default(inner) => inner.verify(msg, sig),   // Type D Signer
                 DefAlt::Given(inner) => inner.verify(msg, sig),     // Type G Signer
-                DefAlt::None => Err(err!(errmsg!(
-                    "Can't verify, signature not specified.",
-                ), Configuration, Missing)),
+                DefAlt::None => Err(err!(
+                    "Can't verify, signature not specified.";
+                Configuration, Missing)),
             },
         }
     }

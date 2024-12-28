@@ -186,7 +186,7 @@ impl<
         -> Outcome<(Vec<u8>, WorkerInd, alias::ChooseHash)>
     { 
         if kbuf.len() == 0 {
-            return Err(err!(errmsg!("Key has length zero."), Input, Invalid));
+            return Err(err!("Key has length zero."; Input, Invalid));
         }
 
         // Generate the hash.
@@ -219,7 +219,8 @@ impl<
     ///
     /// # Arguments
     /// * `k` - key `Dat`cle.
-    /// * `enc` - An optional `EncryptionScheme` that was used to store the value.  An error will be returned if the decryption does not yield a valid `Dat`icle.
+    /// * `enc` - An optional `EncryptionScheme` that was used to store the value.  An error will
+    /// be returned if the decryption does not yield a valid `Dat`icle.
     ///
     pub fn put(
         &self,
@@ -240,9 +241,9 @@ impl<
             schms2: schms2.cloned(),
             resp:   resp.clone(),
         }) {
-            Err(e) => Err(err!(e, errmsg!(
-                "{}: While sending put request to sbot {}.", self.ozid(), bpind,
-            ), Channel, Write)),
+            Err(e) => Err(err!(e,
+                "{}: While sending put request to sbot {}.", self.ozid(), bpind;
+                Channel, Write)),
             _ => Ok(resp),
         }
     }
@@ -461,10 +462,10 @@ impl<
         -> Outcome<Vec<(OzoneMsg<UIDL, UID, ENC, KH>, ZoneInd)>>
     {
         if vbuf.len() == 0 {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "{}: For key {:?}, the given value encoded length is zero.",
-                self.ozid(), k,
-            ), Input, Invalid));
+                self.ozid(), k;
+                Input, Invalid));
         }
 
         // 1. Normalise the key.
@@ -577,10 +578,10 @@ impl<
             let wbots = res!(self.chans().get_workers_of_type_in_zone(&WorkerType::Writer, &zind));
             let (bot, bpind) = wbots.choose_bot(&ChooseBot::Randomly);
             match bot.send(msg) {
-                Err(e) => return Err(err!(e, errmsg!(
+                Err(e) => return Err(err!(e,
                     "{}: While sending write request to wbot {}.",
-                    self.ozid(), WorkerInd::new(zind, bpind),
-                ), Channel, Write)),
+                    self.ozid(), WorkerInd::new(zind, bpind);
+                    Channel, Write)),
                 _ => (),
             }
         }
@@ -643,10 +644,10 @@ impl<
             cbpind: **cbwind.bpind(),
             resp,
         }) {
-            Err(e) => return Err(err!(e, errmsg!(
+            Err(e) => return Err(err!(e,
                 "{}: While sending delete request to wbot {}.",
-                self.ozid(), WorkerInd::new(*cbwind.zind(), bpind),
-            ), Channel, Write)),
+                self.ozid(), WorkerInd::new(*cbwind.zind(), bpind);
+                Channel, Write)),
             _ => Ok(()),
         }
     }
@@ -676,9 +677,10 @@ impl<
             schms2: schms2.cloned(),
             resp:   resp.clone(),
         }) {
-            Err(e) => Err(err!(e, errmsg!(
-                "{}: While sending get request to sbot {}.", self.ozid(), bpind,
-            ), Channel, Write)),
+            Err(e) => Err(err!(e,
+                "{}: While sending get request to sbot {}.",
+                self.ozid(), bpind;
+                Channel, Write)),
             _ => Ok(resp),
         }
     }
@@ -711,16 +713,16 @@ impl<
                     Dat::BU16(v)  |
                     Dat::BU32(v)  |
                     Dat::BU64(v)  => match Dat::from_bytes(&v) {
-                        Err(e) => Err(err!(e, errmsg!(
+                        Err(e) => Err(err!(e,
                             "Could not form a Dat from the chunked value bytes, \
                             this could be due to the use of an encryption scheme \
-                            differing from the one provided ({}).", enc.or_debug(or_enc),
-                        ), Decode, Bytes, Unexpected)),
+                            differing from the one provided ({}).",
+                            enc.or_debug(or_enc);
+                            Decode, Bytes, Unexpected)),
                         Ok((dat, _)) => Ok(Some((dat, meta))),
                     },
-                    dat => Err(err!(errmsg!(
-                        "Unexpected Dat {:?} returned.", dat,
-                    ), Decode, Bytes, Unexpected)),
+                    dat => Err(err!( "Unexpected Dat {:?} returned.", dat;
+                        Decode, Bytes, Unexpected)),
                 },
             // The data received was in a single piece.
             (Some((dat, meta)), _) => Ok(Some((dat, meta))),
@@ -830,10 +832,10 @@ impl<
         let (bot, bpind) = rbots.choose_bot(&ChooseBot::Randomly);
         // Send read request, with responder.
         match bot.send(OzoneMsg::Read(key, **cbwind.bpind(), resp)) {
-            Err(e) => return Err(err!(e, errmsg!(
+            Err(e) => return Err(err!(e,
                 "{}: While sending read request to rbot {}.",
-                self.ozid(), WorkerInd::new(*cbwind.zind(), bpind),
-            ), Channel, Write)),
+                self.ozid(), WorkerInd::new(*cbwind.zind(), bpind);
+                Channel, Write)),
             _ => Ok(()),
         }
     }
@@ -883,19 +885,19 @@ impl<
             Dat::Tup5u64(tup) => {
                 let pkey = PartKey(*tup);
                 if pkey.part_size() == 0 {
-                    return Err(err!(errmsg!(
-                        "{}: Chunk size must exceed zero.", self_id,
-                    ), Input, Invalid));
+                    return Err(err!(
+                        "{}: Chunk size must exceed zero.", self_id;
+                        Input, Invalid));
                 }
                 if pkey.num_parts() == 0 {
-                    return Err(err!(errmsg!(
-                        "{}: Number of chunks must exceed zero.", self_id,
-                    ), Input, Invalid));
+                    return Err(err!(
+                        "{}: Number of chunks must exceed zero.", self_id;
+                        Input, Invalid));
                 }
                 if pkey.index() != 0 {
-                    return Err(err!(errmsg!(
-                        "{}: Index in bunch key must be zero.", self_id,
-                    ), Input, Invalid));
+                    return Err(err!(
+                        "{}: Index in bunch key must be zero.", self_id;
+                        Input, Invalid));
                 }
                 // 1. Send requests for chunks.
                 let data_len = try_into!(usize, pkey.data_len());
@@ -916,10 +918,10 @@ impl<
                     let (bot, bpind) = rbots.choose_bot(&ChooseBot::Randomly);
                     let key = Key::Chunk(kbuf, try_into!(usize, i));
                     match bot.send(OzoneMsg::Read(key, **cbwind.bpind(), resp.clone())) {
-                        Err(e) => return Err(err!(e, errmsg!(
+                        Err(e) => return Err(err!(e,
                             "{}: While sending chunk {} read request to rbot {}.",
-                            self_id, i, WorkerInd::new(*cbwind.zind(), bpind),
-                        ), Channel, Write)),
+                            self_id, i, WorkerInd::new(*cbwind.zind(), bpind);
+                            Channel, Write)),
                         _ => (),
                     }
                 }
@@ -928,45 +930,45 @@ impl<
                 let mut joined = vec![0; capacity];
                 for _ in 0..num_chunks {
                     match resp.recv_timeout(constant::USER_REQUEST_TIMEOUT) {
-                        Err(e) => return Err(err!(e, errmsg!(
-                            "{}: Could not read from chunk collection responder channel.", self_id,
-                        ), IO, Channel, Read)),
+                        Err(e) => return Err(err!(e,
+                            "{}: Could not read from chunk collection responder channel.", self_id;
+                            IO, Channel, Read)),
                         Ok(OzoneMsg::Value(Value::Chunk(Some((Dat::BU8(v), _)), i, _)))    |
                         Ok(OzoneMsg::Value(Value::Chunk(Some((Dat::BU16(v), _)), i, _)))   |
                         Ok(OzoneMsg::Value(Value::Chunk(Some((Dat::BU32(v), _)), i, _)))   |
                         Ok(OzoneMsg::Value(Value::Chunk(Some((Dat::BU64(v), _)), i, _)))   => {
                             if i == 0 {
-                                return Err(err!(errmsg!(
+                                return Err(err!(
                                     "{}: For key {:?}, data chunk of size {} has an invalid \
                                     index of zero amongst an expected total of {} chunks.",
-                                    self_id, k, v.len(), num_chunks,
-                                ), Invalid, Input));
+                                    self_id, k, v.len(), num_chunks;
+                                    Invalid, Input));
                             }
                             if i > num_chunks {
-                                return Err(err!(errmsg!(
+                                return Err(err!(
                                     "{}: For key {:?}, data chunk of size {} with index {} \
                                     exceeds the expected number of chunks, {}.",
-                                    self_id, k, v.len(), i, num_chunks,
-                                ), Invalid, Input));
+                                    self_id, k, v.len(), i, num_chunks;
+                                    Invalid, Input));
                             }
                             let mut end = chunk_size * i;
                             let mut start = end - chunk_size;
                             if v.len() != chunk_size {
                                 if i < num_chunks {
-                                    return Err(err!(errmsg!(
+                                    return Err(err!(
                                         "{}: For key {:?}, data chunk {} of {} size of {} does \
                                         not match the size of {} specified by the \
                                         PartKey.",
-                                        self_id, k, i, num_chunks, v.len(), chunk_size,
-                                    ), Input, Size, Mismatch));
+                                        self_id, k, i, num_chunks, v.len(), chunk_size;
+                                        Input, Size, Mismatch));
                                 } else {
                                     if v.len() > chunk_size {
-                                        return Err(err!(errmsg!(
+                                        return Err(err!(
                                             "{}: For key {:?}, the final data chunk {} size \
                                             of {} must be less than the size of the {} other \
                                             chunks, {} bytes.", 
-                                            self_id, k, i, v.len(), num_chunks-1, chunk_size,
-                                        ), Input, Size, Invalid));
+                                            self_id, k, i, v.len(), num_chunks-1, chunk_size;
+                                            Input, Size, Invalid));
                                     } else {
                                         start = chunk_size * (i-1);
                                         end = start + v.len();
@@ -974,40 +976,38 @@ impl<
                                 }
                             }
                             if end > capacity {
-                                return Err(err!(errmsg!(
+                                return Err(err!(
                                     "{}: For key {:?}, end location {} for retrieved data \
                                     (chunk {} of {}) of length {} exceeds the end location \
                                     of the expected reassembled data, {}.",
-                                    self_id, k, end, i, num_chunks, chunk_size, capacity,
-                                ), Bug, Input, Size, Mismatch));
+                                    self_id, k, end, i, num_chunks, chunk_size, capacity;
+                                    Bug, Input, Size, Mismatch));
                             }
                             joined[start..end].copy_from_slice(&v[..]);
                         },
-                        Ok(OzoneMsg::Value(Value::Chunk(None, i, _))) => return Err(err!(errmsg!(
+                        Ok(OzoneMsg::Value(Value::Chunk(None, i, _))) => return Err(err!(
                             "{}: For key {:?}, data chunk {} of {} was not found.",
-                            self_id, k, i, num_chunks,
-                        ), Missing, Data)),
-                        Ok(msg) => return Err(err!(errmsg!(
-                            "{}: Unrecognised chunk request response: {:?}", self_id, msg,
-                        ), Invalid, Input)),
+                            self_id, k, i, num_chunks;
+                            Missing, Data)),
+                        Ok(msg) => return Err(err!(
+                            "{}: Unrecognised chunk request response: {:?}", self_id, msg;
+                            Invalid, Input)),
                     }
                 }
                 if encryption_on {
                     joined = res!(enc.or_decrypt(&joined[..data_len], or_enc)); 
                 }
                 match Dat::from_bytes(&joined) {
-                    Err(e) => return Err(err!(e, errmsg!(
+                    Err(e) => return Err(err!(e,
                         "{}: For key {:?}, a Dat could not be formed from the value bytes.  \
                         This could mean the data was not originally stored as a Dat, or the \
                         encrypter, {}, differs from that used to store the original data.",
-                        self_id, k, enc.or_debug(or_enc), 
-                    ), Decode, Bytes)),
+                        self_id, k, enc.or_debug(or_enc);
+                        Decode, Bytes)),
                     Ok((dat, _)) => return Ok(dat),
                 }
             },
-            _ => return Err(err!(errmsg!(
-                "{}: Key must be a PartKey.", self_id,
-            ), Input, Invalid)),
+            _ => return Err(err!("{}: Key must be a PartKey.", self_id; Input, Invalid)),
         }
     }
 
@@ -1019,20 +1019,20 @@ impl<
         if let Err(e) = self.chans().sup().send(
             OzoneMsg::GcControl(GcControl::On(on), resp.clone())
         ) {
-            return Err(err!(e, errmsg!(
-                "{}: Cannot send {} to supervisor.", self.ozid(), emsg,
-            ), Channel, Write));
+            return Err(err!(e,
+                "{}: Cannot send {} to supervisor.", self.ozid(), emsg;
+                Channel, Write));
         }
         let (_, msgs) = res!(resp.recv_number(self.cfg().num_zones(), constant::USER_REQUEST_WAIT));
         for msg in msgs {
             match msg {
-                OzoneMsg::Error(e) => return Err(err!(e, errmsg!(
-                    "{}: In response to {}.", self.ozid(), emsg,
-                ))),
+                OzoneMsg::Error(e) => return Err(err!(e,
+                    "{}: In response to {}.", self.ozid(), emsg;
+                    Channel)),
                 OzoneMsg::Ok => (),
-                msg => return Err(err!(errmsg!(
-                    "{}: Unexpected response to {}: {:?}", self.ozid(), emsg, msg,
-                ))),
+                msg => return Err(err!(
+                    "{}: Unexpected response to {}: {:?}", self.ozid(), emsg, msg;
+                    Channel)),
             };
         }
         Ok(())
@@ -1046,21 +1046,21 @@ impl<
         if let Err(e) = self.chans().sup().send(
             OzoneMsg::ClearCache(resp.clone())
         ) {
-            return Err(err!(e, errmsg!(
-                "{}: Cannot send clear cache command to supervisor.", self.ozid(),
-            ), Channel, Write));
+            return Err(err!(e,
+                "{}: Cannot send clear cache command to supervisor.", self.ozid();
+                Channel, Write));
         }
         let n = self.cfg().num_caches();
         let (_, msgs) = res!(resp.recv_number(n, wait));
         for msg in msgs {
             match msg {
-                OzoneMsg::Error(e) => return Err(err!(e, errmsg!(
-                    "{}: In response to clear cache command.", self.ozid(),
-                ))),
+                OzoneMsg::Error(e) => return Err(err!(e,
+                    "{}: In response to clear cache command.", self.ozid();
+                    Channel)),
                 OzoneMsg::Ok => (),
-                msg => return Err(err!(errmsg!(
-                    "{}: Unexpected response to clear cache command: {:?}", self.ozid(), msg,
-                ))),
+                msg => return Err(err!(
+                    "{}: Unexpected response to clear cache command: {:?}", self.ozid(), msg;
+                    Channel)),
             }
         }
         warn!("All {} caches successfully cleared.", n);
@@ -1074,24 +1074,24 @@ impl<
         if let Err(e) = self.chans().sup().send(
             OzoneMsg::DumpCacheRequest(resp.clone())
         ) {
-            return Err(err!(e, errmsg!(
-                "{}: Cannot send cache dump request to supervisor.", self.ozid(),
-            ), Channel, Write));
+            return Err(err!(e,
+                "{}: Cannot send cache dump request to supervisor.", self.ozid();
+                Channel, Write));
         }
         let n = self.cfg().num_caches();
         let (_, msgs) = res!(resp.recv_number(n, wait));
         let mut sorted = BTreeMap::new();
         for msg in msgs {
             match msg {
-                OzoneMsg::Error(e) => return Err(err!(e, errmsg!(
-                    "{}: In response to cache dump request.", self.ozid(),
-                ))),
+                OzoneMsg::Error(e) => return Err(err!(e,
+                    "{}: In response to cache dump request.", self.ozid();
+                    Channel)),
                 OzoneMsg::DumpCacheResponse(wind, cache) => {
                     sorted.insert(wind, cache);
                 },
-                msg => return Err(err!(errmsg!(
-                    "{}: Unexpected response to cache dump request: {:?}", self.ozid(), msg,
-                ))),
+                msg => return Err(err!(
+                    "{}: Unexpected response to cache dump request: {:?}", self.ozid(), msg;
+                    Channel)),
             }
         }
         // Display.
@@ -1157,21 +1157,21 @@ impl<
             _ => Key::Complete(kbuf),
         };
         match bot.send(OzoneMsg::ReadCache(key, resp.clone())) {
-            Err(e) => return Err(err!(e, errmsg!(
+            Err(e) => return Err(err!(e,
                 "{}: While sending cache entry info request to cbot {}.",
-                self.ozid(), cbwind,
-            ), Channel, Write)),
+                self.ozid(), cbwind;
+                Channel, Write)),
             _ => (),
         }
 
         match res!(resp.recv_timeout(timeout)) {
-            OzoneMsg::Error(e) => return Err(err!(e, errmsg!(
-                "{}: In response to cache entry info request.", self.ozid(),
-            ))),
+            OzoneMsg::Error(e) => return Err(err!(e,
+                "{}: In response to cache entry info request.", self.ozid();
+                Channel)),
             OzoneMsg::ReadResult(readres) => Ok(readres),
-            msg => Err(err!(errmsg!(
-                "{}: Unexpected response to cache entry info request: {:?}", self.ozid(), msg,
-            ))),
+            msg => Err(err!(
+                "{}: Unexpected response to cache entry info request: {:?}", self.ozid(), msg;
+                Channel)),
         }
     }
 
@@ -1182,24 +1182,24 @@ impl<
         if let Err(e) = self.chans().sup().send(
             OzoneMsg::DumpFileStatesRequest(resp.clone())
         ) {
-            return Err(err!(e, errmsg!(
-                "{}: Cannot send file state dump request to supervisor.", self.ozid(),
-            ), Channel, Write));
+            return Err(err!(e,
+                "{}: Cannot send file state dump request to supervisor.", self.ozid();
+                Channel, Write));
         }
         let n = self.cfg().num_filemaps();
         let (_, msgs) = res!(resp.recv_number(n, wait));
         let mut sorted = BTreeMap::new();
         for msg in msgs {
             match msg {
-                OzoneMsg::Error(e) => return Err(err!(e, errmsg!(
-                    "{}: In response to file state dump request.", self.ozid(),
-                ))),
+                OzoneMsg::Error(e) => return Err(err!(e,
+                    "{}: In response to file state dump request.", self.ozid();
+                    Channel)),
                 OzoneMsg::DumpFileStatesResponse(wind, fstates) => {
                     sorted.insert(wind, fstates);
                 },
-                msg => return Err(err!(errmsg!(
-                    "{}: Unexpected response to file states dump request: {:?}", self.ozid(), msg,
-                ))),
+                msg => return Err(err!(
+                    "{}: Unexpected response to file states dump request: {:?}", self.ozid(), msg;
+                    Channel)),
             }
         }
         // Display.
@@ -1233,18 +1233,18 @@ impl<
         if let Err(e) = self.chans().sup().send(
             OzoneMsg::OzoneStateRequest(resp.clone())
         ) {
-            return Err(err!(e, errmsg!(
-                "{}: Cannot send {} to supervisor.", self.ozid(), emsg,
-            ), Channel, Write));
+            return Err(err!(e,
+                "{}: Cannot send {} to supervisor.", self.ozid(), emsg;
+                Channel, Write));
         }
         match res!(resp.recv_timeout(wait.max_wait)) {
-            OzoneMsg::Error(e) => return Err(err!(e, errmsg!(
-                "{}: In response to {}.", self.ozid(), emsg,
-            ))),
+            OzoneMsg::Error(e) => return Err(err!(e,
+                "{}: In response to {}.", self.ozid(), emsg;
+                Channel)),
             OzoneMsg::OzoneStateResponse(zstats) => Ok(zstats),
-            msg => Err(err!(errmsg!(
-                "{}: Unexpected response to {}: {:?}", self.ozid(), emsg, msg,
-            ))),
+            msg => Err(err!(
+                "{}: Unexpected response to {}: {:?}", self.ozid(), emsg, msg;
+                Channel)),
         }
     }
 
@@ -1269,21 +1269,21 @@ impl<
         if let Err(e) = self.chans().sup().send(
             OzoneMsg::DumpFiles(resp.clone())
         ) {
-            return Err(err!(e, errmsg!(
-                "{}: Cannot send {} to supervisor.", self.ozid(), emsg,
-            ), Channel, Write));
+            return Err(err!(e,
+                "{}: Cannot send {} to supervisor.", self.ozid(), emsg;
+                Channel, Write));
         }
         let (_, msgs) = res!(resp.recv_number(self.cfg().num_zones(), wait));
         let mut map = BTreeMap::new();
         for msg in msgs {
             match msg {
-                OzoneMsg::Error(e) => return Err(err!(e, errmsg!(
-                    "{}: In response to {}.", self.ozid(), emsg,
-                ))),
+                OzoneMsg::Error(e) => return Err(err!(e,
+                    "{}: In response to {}.", self.ozid(), emsg;
+                    Channel)),
                 OzoneMsg::Files(zind, zmap) => map.insert(zind, zmap),
-                msg => return Err(err!(errmsg!(
-                    "{}: Unexpected response to {}: {:?}", self.ozid(), emsg, msg,
-                ))),
+                msg => return Err(err!(
+                    "{}: Unexpected response to {}: {:?}", self.ozid(), emsg, msg;
+                    Channel)),
             };
         }
         for (zind, zmap) in map {
@@ -1315,21 +1315,21 @@ impl<
         if let Err(e) = self.chans().sup().send(
             OzoneMsg::GetZoneDir(resp.clone())
         ) {
-            return Err(err!(e, errmsg!(
-                "{}: Cannot send {} to supervisor.", self.ozid(), emsg,
-            ), Channel, Write));
+            return Err(err!(e,
+                "{}: Cannot send {} to supervisor.", self.ozid(), emsg;
+                Channel, Write));
         }
         let (_, msgs) = res!(resp.recv_number(self.cfg().num_zones(), constant::USER_REQUEST_WAIT));
         let mut map = BTreeMap::new();
         for msg in msgs {
             match msg {
-                OzoneMsg::Error(e) => return Err(err!(e, errmsg!(
-                    "{}: In response to {}.", self.ozid(), emsg,
-                ))),
+                OzoneMsg::Error(e) => return Err(err!(e,
+                    "{}: In response to {}.", self.ozid(), emsg;
+                    Channel)),
                 OzoneMsg::ZoneDir(zind, zdir) => map.insert(zind, zdir),
-                msg => return Err(err!(errmsg!(
-                    "{}: Unexpected response to {}: {:?}", self.ozid(), emsg, msg,
-                ))),
+                msg => return Err(err!(
+                    "{}: Unexpected response to {}: {:?}", self.ozid(), emsg, msg;
+                    Channel)),
             };
         }
         Ok(map)
@@ -1343,20 +1343,20 @@ impl<
         if let Err(e) = self.chans().sup().send(
             OzoneMsg::NewLiveFile(None, resp.clone())
         ) {
-            return Err(err!(e, errmsg!(
-                "{}: Cannot send {} to supervisor.", self.ozid(), emsg,
-            ), Channel, Write));
+            return Err(err!(e,
+                "{}: Cannot send {} to supervisor.", self.ozid(), emsg;
+                Channel, Write));
         }
         let (_, msgs) = res!(resp.recv_number(self.cfg().num_wbots(), constant::USER_REQUEST_WAIT));
         for msg in msgs {
             match msg {
-                OzoneMsg::Error(e) => return Err(err!(e, errmsg!(
-                    "{}: In response to {}.", self.ozid(), emsg,
-                ))),
+                OzoneMsg::Error(e) => return Err(err!(e,
+                    "{}: In response to {}.", self.ozid(), emsg;
+                    Channel)),
                 OzoneMsg::Ok => (),
-                msg => return Err(err!(errmsg!(
-                    "{}: Unexpected response to {}: {:?}", self.ozid(), emsg, msg,
-                ))),
+                msg => return Err(err!(
+                    "{}: Unexpected response to {}: {:?}", self.ozid(), emsg, msg;
+                    Channel)),
             };
         }
         Ok(())

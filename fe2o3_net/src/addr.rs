@@ -13,9 +13,9 @@ impl PhoneNumbers {
     pub fn country_to_prefixes(c: &Country) -> Outcome<Vec<u16>> {
         match c {
             Country::Australia => Ok(vec![61]),
-            _ => Err(err!(errmsg!(
-                "No prefix defined for country {:?}.", c,
-            ))),
+            _ => Err(err!(
+                "No prefix defined for country {:?}.", c;
+            Invalid, Input, Missing)),
         }
     }
 
@@ -44,57 +44,57 @@ impl TryFrom<&str> for EmailAddress {
 
     fn try_from(s: &str) -> std::result::Result<Self, Self::Error> {
         if s.len() == 0 {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "Trying to interpret an email address from '{}': \
-                length is zero.", s,
-            ), ErrTag::Decode, ErrTag::String, ErrTag::Invalid, ErrTag::Input));
+                length is zero.", s;
+            Decode, String, Invalid, Input));
         }
         let mut at = None;
         for (i, c) in s.chars().enumerate() {
             match c {
                 '@' => match at {
                     None => at = Some(i),
-                    Some(j) => return Err(err!(errmsg!(
+                    Some(j) => return Err(err!(
                         "Trying to interpret an email address from '{}': '@' \
                         character found at position {} found previously at \
-                        position {}.", s, i, j,
-                    ), ErrTag::Decode, ErrTag::String, ErrTag::Invalid, ErrTag::Input)),
+                        position {}.", s, i, j;
+                    Decode, String, Invalid, Input)),
                 },
-                ' ' => return Err(err!(errmsg!(
+                ' ' => return Err(err!(
                     "Trying to interpret an email address from '{}': Space \
-                    characters are invalid, space found at position {}.", s, i,
-                ), ErrTag::Decode, ErrTag::String, ErrTag::Invalid, ErrTag::Input)),
+                    characters are invalid, space found at position {}.", s, i;
+                Decode, String, Invalid, Input)),
                 _ => (),
             }
         }
         match at {
-            None => Err(err!(errmsg!(
+            None => Err(err!(
                 "Trying to interpret an email address from '{}': '@' \
-                character not found.", s,
-            ), ErrTag::Decode, ErrTag::String, ErrTag::Invalid, ErrTag::Input)),
+                character not found.", s;
+            Decode, String, Invalid, Input)),
             Some(i) => {
                 let (left, right) = s.split_at(i);
                 if left.len() == 0 {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "Trying to interpret an email address from '{}': \
                         local (left) part of email address has length \
-                        zero.", s,
-                    ), ErrTag::Decode, ErrTag::String, ErrTag::Invalid, ErrTag::Input));
+                        zero.", s;
+                    Decode, String, Invalid, Input));
                 }
                 if right.len() == 0 {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "Trying to interpret an email address from '{}': \
                         domain (right) part of email address has length \
-                        zero.", s,
-                    ), ErrTag::Decode, ErrTag::String, ErrTag::Invalid, ErrTag::Input));
+                        zero.", s;
+                    Decode, String, Invalid, Input));
                 }
                 let right = &right[1..];
                 match right.find('@') {
-                    Some(j) => return Err(err!(errmsg!(
+                    Some(j) => return Err(err!(
                         "Trying to interpret an email address from '{}': \
                         invalid '@' character found at position {} in the \
-                        domain part '{}'.", s, j, right,
-                    ), ErrTag::Decode, ErrTag::String, ErrTag::Invalid, ErrTag::Input)),
+                        domain part '{}'.", s, j, right;
+                    Decode, String, Invalid, Input)),
                     None => (),
                 }
                 Ok(EmailAddress {
@@ -158,9 +158,9 @@ mod tests {
         let addr = res!(EmailAddress::try_from(email));
         let expected = EmailAddress { loc: fmt!("test"), dom: fmt!("my.domain") };
         if addr != expected {
-            return Err(err!(errmsg!(
-                "Decoding of address '{}' should produce '{:?}'.", email, expected,
-            ), ErrTag::Invalid, ErrTag::Input, ErrTag::Decode, ErrTag::String));
+            return Err(err!(
+                "Decoding of address '{}' should produce '{:?}'.", email, expected;
+            Invalid, Input, Decode, String));
         }
         Ok(())
     }
@@ -170,9 +170,9 @@ mod tests {
         let email = "test@my@domain";
         let result = EmailAddress::try_from(email);
         if result.is_ok() {
-            return Err(err!(errmsg!(
-                "Decoding of address '{}' should produce an error.", email,
-            ), ErrTag::Invalid, ErrTag::Input, ErrTag::Decode, ErrTag::String));
+            return Err(err!(
+                "Decoding of address '{}' should produce an error.", email;
+            Invalid, Input, Decode, String));
         }
         Ok(())
     }
@@ -182,9 +182,9 @@ mod tests {
         let email = "test @my.domain";
         let result = EmailAddress::try_from(email);
         if result.is_ok() {
-            return Err(err!(errmsg!(
-                "Decoding of address '{}' should produce an error.", email,
-            ), ErrTag::Invalid, ErrTag::Input, ErrTag::Decode, ErrTag::String));
+            return Err(err!(
+                "Decoding of address '{}' should produce an error.", email;
+            Invalid, Input, Decode, String));
         }
         Ok(())
     }

@@ -112,9 +112,9 @@ impl InNamex for SignatureScheme {
                 ("Dilithium2", "W4+qt2Gd+9RQBxllcx10b4h/Ih3g9m76C+mj17TwUNw="),
                 ("Dilithium2_fe2o3", "zkSGGwLauv5FLpNoCse+3D7bKIdNh7PeBsfbjv/TSvQ="),
             ],
-            _ => return Err(err!(errmsg!(
-                "The Namex group name '{}' is not recognised for SignatureScheme.", gname,
-            ), Invalid, Input)),
+            _ => return Err(err!(
+                "The Namex group name '{}' is not recognised for SignatureScheme.", gname;
+            Invalid, Input)),
         };
         Ok(if ids.len() == 0 {
             None
@@ -136,12 +136,12 @@ impl Signer for SignatureScheme {
                     let signing_key = SigningKey::from_bytes(&sk_byts);
                     let verifying_key = signing_key.verifying_key();
                     if verifying_key.to_bytes() != pk[..] {
-                        return Err(err!(errmsg!("Public key mismatch."), Invalid, Configuration));
+                        return Err(err!("Public key mismatch."; Invalid, Configuration));
                     }
                     let result = signing_key.sign(msg).to_bytes().to_vec();
                     Ok(result)
                 },
-                _ => Err(err!(errmsg!("Require both keys to sign."), Missing, Configuration)),
+                _ => Err(err!("Require both keys to sign."; Missing, Configuration)),
             },
             Self::Dilithium2(keys) => match keys {
                 Keys { sks: Some(sks), .. } => { 
@@ -151,7 +151,7 @@ impl Signer for SignatureScheme {
                     sk = res!(dilithium2::SecretKey::from_bytes(&vec![0; skv.len()])); // do it manually.
                     Ok(result)
                 },
-                _ => Err(err!(errmsg!("Require secret key to sign."), Missing, Configuration)),
+                _ => Err(err!("Require secret key to sign."; Missing, Configuration)),
             },
             Self::Dilithium2_fe2o3(keys) => match keys {
                 Keys { sks: Some(sks), .. } => { 
@@ -161,7 +161,7 @@ impl Signer for SignatureScheme {
                     sk.zeroize();
                     Ok(result)
                 },
-                _ => Err(err!(errmsg!("Require secret key to sign."), Missing, Configuration)),
+                _ => Err(err!("Require secret key to sign."; Missing, Configuration)),
             },
         }
     }
@@ -177,7 +177,7 @@ impl Signer for SignatureScheme {
                         _ => false,
                     }
                 },
-                _ => return Err(err!(errmsg!("Require public key to verify."), Missing, Configuration)),
+                _ => return Err(err!("Require public key to verify."; Missing, Configuration)),
             },
             Self::Dilithium2(keys) => match keys {
                 Keys { pk: Some(pk), .. } => { 
@@ -188,7 +188,7 @@ impl Signer for SignatureScheme {
                         _ => false,
                     }
                 },
-                _ => return Err(err!(errmsg!("Require public key to verify."), Missing, Configuration)),
+                _ => return Err(err!("Require public key to verify."; Missing, Configuration)),
             },
             Self::Dilithium2_fe2o3(keys) => match keys {
                 Keys { pk: Some(pk), .. } => { 
@@ -196,7 +196,7 @@ impl Signer for SignatureScheme {
                     let sig = res!(<[u8; Self::DILITHIUM2_FE2O3_SIG_LEN]>::try_from(&sig[..]));
                     dilithium2_fe2o3::sign::verify(msg, &sig, &pk)
                 },
-                _ => return Err(err!(errmsg!("Require public key to verify."), Missing, Configuration)),
+                _ => return Err(err!("Require public key to verify."; Missing, Configuration)),
             },
         })
     }
@@ -213,7 +213,9 @@ impl KeyManager for SignatureScheme {
                     None => None,
                 },
                 sks: match sk {
-                    Some(sk) => Some(Secret::new(res!(<[u8; Self::ED25519_SK_LEN]>::try_from(&sk[..])))),
+                    Some(sk) => Some(Secret::new(res!(
+                        <[u8; Self::ED25519_SK_LEN]>::try_from(&sk[..])
+                    ))),
                     None => None,
                 },
             }),
@@ -223,17 +225,23 @@ impl KeyManager for SignatureScheme {
                     None => None,
                 },
                 sks: match sk {
-                    Some(sk) => Some(Secret::new(res!(<[u8; Self::DILITHIUM2_SK_LEN]>::try_from(&sk[..])))),
+                    Some(sk) => Some(Secret::new(res!(
+                        <[u8; Self::DILITHIUM2_SK_LEN]>::try_from(&sk[..])
+                    ))),
                     None => None,
                 },
             }),
             Self::Dilithium2_fe2o3(..) => Self::Dilithium2_fe2o3(Keys {
                 pk: match pk {
-                    Some(pk) => Some(res!(<[u8; Self::DILITHIUM2_FE2O3_PK_LEN]>::try_from(&pk[..]))),
+                    Some(pk) => Some(res!(
+                        <[u8; Self::DILITHIUM2_FE2O3_PK_LEN]>::try_from(&pk[..])
+                    )),
                     None => None,
                 },
                 sks: match sk {
-                    Some(sk) => Some(Secret::new(res!(<[u8; Self::DILITHIUM2_FE2O3_SK_LEN]>::try_from(&sk[..])))),
+                    Some(sk) => Some(Secret::new(res!(
+                        <[u8; Self::DILITHIUM2_FE2O3_SK_LEN]>::try_from(&sk[..])
+                    ))),
                     None => None,
                 },
             }),
@@ -328,9 +336,9 @@ impl str::FromStr for SignatureScheme {
             "Ed25519" => Self::new_ed25519(),
             "Dilithium2" => res!(Self::new_dilithium2()),
             "Dilithium2_fe2o3" => Self::new_dilithium2_fe2o3(),
-            _ => return Err(err!(errmsg!(
-                "The signature scheme '{}' is not recognised.", name,
-            ), Invalid, Input)),
+            _ => return Err(err!(
+                "The signature scheme '{}' is not recognised.", name;
+            Invalid, Input)),
         })
     }
 }
@@ -343,9 +351,9 @@ impl TryFrom<&LocalId> for SignatureScheme {
             LocalId(1) => Self::new_ed25519(),
             LocalId(2) => res!(Self::new_dilithium2()),
             LocalId(3) => Self::new_dilithium2_fe2o3(),
-            _ => return Err(err!(errmsg!(
-                "The signature scheme with local id {} is not recognised.", n,
-            ), Invalid, Input)),
+            _ => return Err(err!(
+                "The signature scheme with local id {} is not recognised.", n;
+            Invalid, Input)),
         })
     }
 }

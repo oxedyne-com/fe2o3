@@ -73,12 +73,11 @@ impl Arg {
 
     pub fn hyphen_check(&self, s: &str) -> Outcome<()> {
         if s.starts_with('-') || s.contains(' ') {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "Single hyphen name '{}' for argument '{}' should not start with a \
                 hyphen or contain spaces",
-                s,
-                self.config().name,
-            ), ErrTag::Input, ErrTag::Invalid));
+                s, self.config().name;
+            Input, Invalid));
         }
         Ok(())
     }

@@ -203,23 +203,23 @@ pub fn test_msg(filter: &'static str) -> Outcome<()> {
         if let Some(list) = msgrx.get_arg_vals("Arg_a") {
             req!(*list, vec![ dat!("av1") ]);
         } else {
-            return Err(err!(errmsg!(
-                "Could not find the argument '-a'.",
-            ), Input, Missing));
+            return Err(err!(
+                "Could not find the argument '-a'.";
+            Input, Missing));
         }
 
         if let Some(cmdrx) = msgrx.get_cmd("cmd1") {
             if let Some(list) = cmdrx.get_arg_vals("Arg_c1a1") {
                 req!(*list, vec![ dat!(" c1a1v1  "), dat!(-945i16) ]);
             } else {
-                return Err(err!(errmsg!(
-                    "Could not find the command 'cmd1' argument '-c'.",
-                ), Input, Missing));
+                return Err(err!(
+                    "Could not find the command 'cmd1' argument '-c'.";
+                Input, Missing));
             }
         } else {
-            return Err(err!(errmsg!(
-                "Could not find the command 'cmd1'.",
-            ), Input, Missing));
+            return Err(err!(
+                "Could not find the command 'cmd1'.";
+            Input, Missing));
         }
         Ok(())
     }));
@@ -230,9 +230,9 @@ pub fn test_msg(filter: &'static str) -> Outcome<()> {
         let msgrx = Msg::new(p);
 
         match msgrx.from_str("-a av1 av2 -b cmd1 --c1a3 --c1a1 \" c1a1v1  \" (I16|-945)", None) {
-            Ok(_) => Err(err!(errmsg!(
-                "The additional value 'av2' should have triggered an error.",
-            ), Invalid, Output)),
+            Ok(_) => Err(err!(
+                "The additional value 'av2' should have triggered an error.";
+            Invalid, Output)),
             _ => Ok(()),
         }
     }));
@@ -243,10 +243,10 @@ pub fn test_msg(filter: &'static str) -> Outcome<()> {
         let msgrx = Msg::new(p);
 
         match msgrx.from_str("-a -b cmd1 --c1a3 --c1a1 \" c1a1v1  \" (I16|-945)", None) {
-            Ok(_) => Err(err!(errmsg!(
+            Ok(_) => Err(err!(
                 "The appearance of -b in the place of an expected value \
-                for -a should trigger an error.",
-            ), Invalid, Output)),
+                for -a should trigger an error.";
+            Invalid, Output)),
             _ => Ok(()),
         }
     }));
@@ -257,9 +257,9 @@ pub fn test_msg(filter: &'static str) -> Outcome<()> {
         let msgrx = Msg::new(p);
 
         match msgrx.from_str("-b cmd1 --c1a3 --c1a1 \" c1a1v1  \" (I16|-945)", None) {
-            Ok(_) => Err(err!(errmsg!(
-                "The missing message argument Arg_a should trigger an error",
-            ), Invalid, Output)),
+            Ok(_) => Err(err!(
+                "The missing message argument Arg_a should trigger an error";
+            Invalid, Output)),
             _ => Ok(()),
         }
     }));
@@ -270,9 +270,9 @@ pub fn test_msg(filter: &'static str) -> Outcome<()> {
         let msgrx = Msg::new(p);
 
         match msgrx.from_str("-a av1 -b cmd2", None) {
-            Ok(_) => Err(err!(errmsg!(
-                "The unknown word cmd2 should trigger an error.",
-            ), Invalid, Output)),
+            Ok(_) => Err(err!(
+                "The unknown word cmd2 should trigger an error.";
+            Invalid, Output)),
             _ => Ok(()),
         }
     }));
@@ -309,34 +309,34 @@ pub fn test_msg(filter: &'static str) -> Outcome<()> {
         let msgrx = Msg::new(p);
 
         if msgrx.from_str("-a -b", None).is_ok() {
-            return Err(err!(errmsg!(
-                "The syntax incorrectly accepted an empty -a value.",
-            ), Invalid, Output));
+            return Err(err!(
+                "The syntax incorrectly accepted an empty -a value.";
+            Invalid, Output));
         }
 
         let msgrx = res!(msgrx.from_str("Arg_a", None));
         if let Some(argrx) = &msgrx.end.arg {
             if argrx == &fmt!("Arg_a") {
                 if msgrx.end.vals.len() != 1 {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "The message processor correctly identified the \
                         incomplete argument but found {} outstanding \
                         arg values, when 1 was expected",
-                        msgrx.end.vals.len(),
-                    ), Invalid, Output));
+                        msgrx.end.vals.len();
+                    Invalid, Output));
                 }
             } else {
-                return Err(err!(errmsg!(
+                return Err(err!(
                     "The message processor incorrectly identified the \
                     outstanding argument as {}, it should have been '-a'",
-                    argrx,
-                ), Invalid, Output));
+                    argrx;
+                Invalid, Output));
             }
         } else {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "The message processor did not detect the incomplete argument: {:?}",
-                msgrx.end,
-            ), Invalid, Output));
+                msgrx.end;
+            Invalid, Output));
         }
         Ok(())
     }));
@@ -355,16 +355,16 @@ pub fn test_msg(filter: &'static str) -> Outcome<()> {
 
         let msgrx = res!(msgrx.from_str("  hello  ", None));
         if msgrx.end.vals.len() == 0 {
-            return Err(err!(errmsg!(
-                "The message processor did not detect the outstanding cmd value.",
-            ), Invalid, Output));
+            return Err(err!(
+                "The message processor did not detect the outstanding cmd value.";
+            Invalid, Output));
         }
 
         let msgrx = res!(msgrx.from_str("  ", None));
         if msgrx.end.vals.len() != 2 {
-            return Err(err!(errmsg!(
-                "The message processor did not detect the outstanding msg values.",
-            ), Invalid, Output));
+            return Err(err!(
+                "The message processor did not detect the outstanding msg values.";
+            Invalid, Output));
         }
 
         Ok(())
@@ -397,7 +397,7 @@ pub fn test_msg(filter: &'static str) -> Outcome<()> {
 
         let msgrx = res!(msgrx.from_str("hello 42 -a goodbye 1", None));
         req!(msgrx.vals, vec![dat!("hello"), dat!(42u8)]);  
-        let argrx_vals = res!(msgrx.get_arg_vals("Arg_a").ok_or(err!(errmsg!(
+        let argrx_vals = res!(msgrx.get_arg_vals("Arg_a").ok_or(err!(
             "Failed to detect message argument '-a'."), Invalid, Output)));
         req!(argrx_vals.len(), 2);
         req!(argrx_vals[0], dat!("goodbye"));
@@ -407,25 +407,25 @@ pub fn test_msg(filter: &'static str) -> Outcome<()> {
         if let Some(argrx) = &msgrx.end.arg {
             if argrx == &fmt!("Arg_a") {
                 if msgrx.end.vals.len() != 1 {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "The message processor correctly identified the \
                         incomplete argument but found {} outstanding \
                         arg values, when 1 was expected.",
-                        msgrx.end.vals.len(),
-                    ), Invalid, Output));
+                        msgrx.end.vals.len();
+                    Invalid, Output));
                 }
             } else {
-                return Err(err!(errmsg!(
+                return Err(err!(
                     "The message processor incorrectly identified the \
                     outstanding argument as {}, it should have been '-a'.",
-                    argrx,
-                ), Invalid, Output));
+                    argrx;
+                Invalid, Output));
             }
         } else {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "The message processor did not detect the incomplete argument: {:?}",
-                msgrx.end,
-            ), Invalid, Output));
+                msgrx.end;
+            Invalid, Output));
         }
         Ok(())
     }));
@@ -466,12 +466,12 @@ pub fn test_msg(filter: &'static str) -> Outcome<()> {
 
         let msgrx = res!(msgrx.from_str("hello 42 -a goodbye 1 cmd again -3", None));
         req!(msgrx.vals, vec![dat!("hello"), dat!(42u8)]);  
-        let argrx_vals = res!(msgrx.get_arg_vals("Arg_a").ok_or(err!(errmsg!(
+        let argrx_vals = res!(msgrx.get_arg_vals("Arg_a").ok_or(err!(
             "Failed to detect message argument '-a'."), Invalid, Output)));
         req!(argrx_vals.len(), 2);
         req!(argrx_vals[0], dat!("goodbye"));
         req!(argrx_vals[1], dat!(1i8));  
-        let cmdrx = res!(msgrx.get_cmd("cmd").ok_or(err!(errmsg!(
+        let cmdrx = res!(msgrx.get_cmd("cmd").ok_or(err!(
             "Failed to detect command 'cmd'."), Invalid, Output)));
         req!(cmdrx.vals.len(), 2);
         req!(cmdrx.vals[0], dat!("again"));
@@ -481,50 +481,50 @@ pub fn test_msg(filter: &'static str) -> Outcome<()> {
         if let Some(cmdrx) = &msgrx.end.cmd {
             if cmdrx == &fmt!("cmd") {
                 if msgrx.end.vals.len() != 1 {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "The message processor correctly identified the \
                         incomplete command but found {} outstanding \
                         cmd values, when 1 was expected.",
-                        msgrx.end.vals.len(),
-                    ), Invalid, Output));
+                        msgrx.end.vals.len();
+                    Invalid, Output));
                 }
             } else {
-                return Err(err!(errmsg!(
+                return Err(err!(
                     "The message processor incorrectly identified the \
                     outstanding command as {}, it should have been 'cmd'.",
-                    cmdrx,
-                ), Invalid, Output));
+                    cmdrx;
+                Invalid, Output));
             }
         } else {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "The message processor did not detect the incomplete command: {:?}.",
-                msgrx.end,
-            ), Invalid, Output));
+                msgrx.end;
+            Invalid, Output));
         }
 
         let msgrx = res!(msgrx.from_str("hello   42 --a0  goodbye 1 cmd ", None));
         if let Some(cmdrx) = &msgrx.end.cmd {
             if cmdrx == &fmt!("cmd") {
                 if msgrx.end.vals.len() != 2 {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "The message processor correctly identified the \
                         incomplete command but found {} outstanding \
                         cmd values, when 2 was expected.",
-                        msgrx.end.vals.len(),
-                    ), Invalid, Output));
+                        msgrx.end.vals.len();
+                    Invalid, Output));
                 }
             } else {
-                return Err(err!(errmsg!(
+                return Err(err!(
                     "The message processor incorrectly identified the \
                     outstanding command as {}, it should have been 'cmd'.",
-                    cmdrx,
-                ), Invalid, Output));
+                    cmdrx;
+                Invalid, Output));
             }
         } else {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "The message processor did not detect the incomplete command: {:?}.",
-                msgrx.end,
-            ), Invalid, Output));
+                msgrx.end;
+            Invalid, Output));
         }
 
         Ok(())
@@ -579,17 +579,17 @@ pub fn test_msg(filter: &'static str) -> Outcome<()> {
 
         let msgrx = res!(msgrx.from_str("hello 42 -a goodbye 1 cmd again -3 -b dejavu 42", None));
         req!(msgrx.vals, vec![dat!("hello"), dat!(42i128)]);  
-        let argrx_vals = res!(msgrx.get_arg_vals("Arg_a").ok_or(err!(errmsg!(
+        let argrx_vals = res!(msgrx.get_arg_vals("Arg_a").ok_or(err!(
             "Failed to detect message argument '-a'."), Invalid, Output)));
         req!(argrx_vals.len(), 2);
         req!(argrx_vals[0], dat!("goodbye"));
         req!(argrx_vals[1], dat!(1i32));  
-        let cmdrx = res!(msgrx.get_cmd("cmd").ok_or(err!(errmsg!(
+        let cmdrx = res!(msgrx.get_cmd("cmd").ok_or(err!(
             "Failed to detect command 'cmd'."), Invalid, Output)));
         req!(cmdrx.vals.len(), 2);
         req!(cmdrx.vals[0], dat!("again"));
         req!(cmdrx.vals[1], dat!(-3i16));  
-        let argrx_vals = res!(cmdrx.get_arg_vals("Arg_b").ok_or(err!(errmsg!(
+        let argrx_vals = res!(cmdrx.get_arg_vals("Arg_b").ok_or(err!(
             "Failed to detect command 'cmd' argument '-b'."), Invalid, Output)));
         req!(argrx_vals.len(), 2);
         req!(argrx_vals[0], dat!("dejavu"));
@@ -599,50 +599,50 @@ pub fn test_msg(filter: &'static str) -> Outcome<()> {
         if let Some(argrx) = &msgrx.end.arg {
             if argrx == &fmt!("Arg_b") {
                 if msgrx.end.vals.len() != 1 {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "The message processor correctly identified the \
                         incomplete argument but found {} outstanding \
                         arg values, when 1 was expected.",
-                        msgrx.end.vals.len(),
-                    ), Invalid, Output));
+                        msgrx.end.vals.len();
+                    Invalid, Output));
                 }
             } else {
-                return Err(err!(errmsg!(
+                return Err(err!(
                     "The message processor incorrectly identified the \
                     outstanding argument as {}, it should have been '-b'.",
-                    argrx,
-                ), Invalid, Output));
+                    argrx;
+                Invalid, Output));
             }
         } else {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "The message processor did not detect the incomplete argument: {:?}.",
-                msgrx.end,
-            ), Invalid, Output));
+                msgrx.end;
+            Invalid, Output));
         }
 
         let msgrx = res!(msgrx.from_str("hello   42 --a0  goodbye 1 cmd again -3 -b", None));
         if let Some(argrx) = &msgrx.end.arg {
             if argrx == &fmt!("Arg_b") {
                 if msgrx.end.vals.len() != 2 {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "The message processor correctly identified the \
                         incomplete argument but found {} outstanding \
                         arg values, when 2 was expected.",
-                        msgrx.end.vals.len(),
-                    ), Invalid, Output));
+                        msgrx.end.vals.len();
+                    Invalid, Output));
                 }
             } else {
-                return Err(err!(errmsg!(
+                return Err(err!(
                     "The message processor incorrectly identified the \
                     outstanding argument as {}, it should have been '-b'.",
-                    argrx,
-                ), Invalid, Output));
+                    argrx;
+                Invalid, Output));
             }
         } else {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "The message processor did not detect the incomplete argument: {:?}.",
-                msgrx.end,
-            ), Invalid, Output));
+                msgrx.end;
+            Invalid, Output));
         }
 
         Ok(())
@@ -697,32 +697,32 @@ pub fn test_msg(filter: &'static str) -> Outcome<()> {
 
         let msgrx = res!(msgrx.from_str("42 cmd1 hello cmd2 goodbye -42 -a1 --arg2 done    ", None));
         req!(msgrx.vals, vec![dat!(42u8)]);  
-        let cmdrx = res!(msgrx.get_cmd("cmd1").ok_or(err!(errmsg!(
+        let cmdrx = res!(msgrx.get_cmd("cmd1").ok_or(err!(
             "Failed to detect command 'cmd1'."), Invalid, Output)));
         req!(cmdrx.vals.len(), 1);
         req!(cmdrx.vals[0], dat!("hello"));
-        let cmdrx = res!(msgrx.get_cmd("cmd2").ok_or(err!(errmsg!(
+        let cmdrx = res!(msgrx.get_cmd("cmd2").ok_or(err!(
             "Failed to detect command 'cmd2'."), Invalid, Output)));
         req!(cmdrx.vals.len(), 2);
         req!(cmdrx.vals[0], dat!("goodbye"));
         req!(cmdrx.vals[1], dat!(-42i8));
         assert!(cmdrx.has_arg("arg1"));
-        let argrx_vals = res!(cmdrx.get_arg_vals("arg2").ok_or(err!(errmsg!(
-            "Failed to detect command 'cmd2' argument '-a2'.",
-        ), Invalid, Output)));
+        let argrx_vals = res!(cmdrx.get_arg_vals("arg2").ok_or(err!(
+            "Failed to detect command 'cmd2' argument '-a2'.";
+        Invalid, Output)));
         req!(argrx_vals.len(), 1);
         req!(argrx_vals[0], dat!("done"));
 
         if msgrx.from_str("hello   42 --a0  goodbye 1 cmd again -3 -b dejavu  ", None).is_ok() {
-            return Err(err!(errmsg!(
-                "The syntax incorrectly accepted too few values.",
-            ), Invalid, Output));
+            return Err(err!(
+                "The syntax incorrectly accepted too few values.";
+            Invalid, Output));
         }
 
         if msgrx.from_str("hello   42 --a0  goodbye 1 cmd again -3 -b", None).is_ok() {
-            return Err(err!(errmsg!(
-                "The syntax incorrectly accepted too few values.",
-            ), Invalid, Output));
+            return Err(err!(
+                "The syntax incorrectly accepted too few values.";
+            Invalid, Output));
         }
         Ok(())
     }));
@@ -793,19 +793,19 @@ pub fn test_msg(filter: &'static str) -> Outcome<()> {
                 req!(argrx_vals.len(), 1);
                 req!(argrx_vals[0], dat!("name"));
             } else {
-                return Err(err!(errmsg!(
-                    "Expected capture of command 'ls' argument '-s'.",
-                ), Invalid, Output));
+                return Err(err!(
+                    "Expected capture of command 'ls' argument '-s'.";
+                Invalid, Output));
             }
             if cmdrx.get_arg_vals("-r").is_some() {
-                return Err(err!(errmsg!(
-                    "Expected capture of command 'ls' argument '-r' with no values.",
-                ), Invalid, Output));
+                return Err(err!(
+                    "Expected capture of command 'ls' argument '-r' with no values.";
+                Invalid, Output));
             }
         } else {
-            return Err(err!(errmsg!(
-                "Expected capture of command 'ls'.",
-            ), Invalid, Output));
+            return Err(err!(
+                "Expected capture of command 'ls'.";
+            Invalid, Output));
         }
 
         Ok(())
@@ -894,9 +894,9 @@ pub fn test_msg(filter: &'static str) -> Outcome<()> {
                 req!(msgcmd.vals[0], Dat::from("hello"));
                 req!(msgcmd.args.len(), 0);
             },
-            None => return Err(err!(errmsg!(
-                "Expected command 'cmd1'.",
-            ), Input, Invalid)),
+            None => return Err(err!(
+                "Expected command 'cmd1'.";
+            Input, Invalid)),
         }
         match msgrx.get_cmd("cmd2") {
             Some(msgcmd) => {
@@ -905,24 +905,24 @@ pub fn test_msg(filter: &'static str) -> Outcome<()> {
                 req!(msgcmd.vals[1], Dat::from(-42i32));
                 req!(msgcmd.args.len(), 2);
                 if msgcmd.get_arg_vals("arg20").is_some() {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "Expected command 'cmd2' to have an argument \
-                        '-a20' but no values.",
-                    ), Input, Invalid));
+                        '-a20' but no values.";
+                    Input, Invalid));
                 }
                 match msgcmd.get_arg_vals("arg21") {
                     Some(vals) => {
                         req!(vals.len(), 1);
                         req!(vals[0], Dat::from("done"));
                     },
-                    None => return Err(err!(errmsg!(
-                        "Expected command 'cmd2' to have an argument '-a21'.",
-                    ), Input, Invalid)),
+                    None => return Err(err!(
+                        "Expected command 'cmd2' to have an argument '-a21'.";
+                    Input, Invalid)),
                 }
             },
-            None => return Err(err!(errmsg!(
-                "Expected command 'cmd2'.",
-            ), Input, Invalid)),
+            None => return Err(err!(
+                "Expected command 'cmd2'.";
+            Input, Invalid)),
         }
 
         Ok(())

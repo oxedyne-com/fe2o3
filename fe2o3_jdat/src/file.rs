@@ -52,9 +52,9 @@ pub trait JdatFile: FromDat + ToDat {
                 };
                 Self::from_dat(dat)
             },
-            Err(e) => return Err(err!(e, errmsg!(
-                "While trying to read file '{}' as a Dat.", path.display(),
-            ), IO, File, Read)),
+            Err(e) => return Err(err!(e,
+                "While trying to read file '{}' as a Dat.", path.display();
+            IO, File, Read)),
         }
     }
 
@@ -100,15 +100,15 @@ pub trait JdatMapFile: FromDatMap + ToDatMap + Clone {
                     let s = res!(Self::from_datmap(map));
                     Ok(s)
                 } else {
-                    return Err(err!(errmsg!(
+                    return Err(err!(
                         "Expected a daticle map at '{}', found a {:?}",
-                        path.display(), dat.kind(),
-                    ), Input, Invalid));
+                        path.display(), dat.kind();
+                    Input, Invalid));
                 }
             },
-            Err(e) => return Err(err!(e, errmsg!(
-                "While trying to read file '{}' as a Dat.", path.display(),
-            ), IO, File)),
+            Err(e) => return Err(err!(e,
+                "While trying to read file '{}' as a Dat.", path.display();
+            IO, File)),
         }
     }
 

@@ -44,9 +44,9 @@ impl str::FromStr for SemVer {
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         let parts: Vec<&str> = s.split('.').collect();
         if parts.len() != 3 {
-            return Err(err!(errmsg!(
-                "SemVer expects 3 numbers, found {}.", parts.len(),
-            ), Input, Invalid));
+            return Err(err!(
+                "SemVer expects 3 numbers, found {}.", parts.len();
+            Input, Invalid));
         }
 
         let major = res!(parts[0].parse::<u8>());
@@ -69,10 +69,10 @@ impl ToBytes for SemVer {
 impl FromBytes for SemVer {
     fn from_bytes(buf: &[u8]) -> Outcome<(Self, usize)> {
         if buf.len() < Self::BYTE_LEN {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "Not enough bytes to decode, require at least {}, found only {}.",
-                Self::BYTE_LEN, buf.len(),
-            ), Bytes, Input, Decode, Missing));
+                Self::BYTE_LEN, buf.len();
+            Bytes, Input, Decode, Missing));
         }
         Ok((Self {
             major: buf[0],

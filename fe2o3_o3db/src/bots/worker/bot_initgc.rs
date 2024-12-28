@@ -124,9 +124,9 @@ impl<
 
     fn listen(&mut self) -> LoopBreak {
         match self.chan_in().recv() {
-            Err(e) => self.err_cannot_receive(err!(e, errmsg!(
-                "{}: Waiting for message.", self.ozid(),
-            ), IO, Channel)),
+            Err(e) => self.err_cannot_receive(err!(e,
+                "{}: Waiting for message.", self.ozid();
+                IO, Channel)),
             Ok(msg) => {
                 if let Some(msg) = self.listen_worker(msg) {
                     match msg {
@@ -306,10 +306,10 @@ impl<
                 &mut reader,
                 self.api().schemes().checksummer().clone(),
             ) {
-                Err(e) => return Err(err!(e, errmsg!(
+                Err(e) => return Err(err!(e,
                     "{}: While reading from position {} in {:?} file {}.",
-                    self.ozid(), pos, typ, fnum,
-                ), IO, File, Read)),
+                    self.ozid(), pos, typ, fnum;
+                    IO, File, Read)),
                 Ok(None) => break, // We're done.
                 Ok(Some((skey, _, n))) => {
                     count += 1;
@@ -325,14 +325,14 @@ impl<
                 fnum,
                 self.api().schemes().checksummer().clone(),
             ) {
-                Err(e) => return Err(err!(e, errmsg!(
+                Err(e) => return Err(err!(e,
                     "{}: While reading from position {} in {:?} file {}.",
-                    self.ozid(), pos, typ, fnum,
-                ), IO, File, Read)),
-                Ok((None, _)) => return Err(err!(errmsg!(
+                    self.ozid(), pos, typ, fnum;
+                    IO, File, Read)),
+                Ok((None, _)) => return Err(err!(
                     "{}: Missing StoredIndex at end of {:?} file {}.",
-                    self.ozid(), typ, fnum,
-                ), Missing)),
+                    self.ozid(), typ, fnum;
+                    Missing)),
                 Ok((Some(sindex), n)) => {
                     count += 1;
                     pos += n;
@@ -370,18 +370,18 @@ impl<
 
         // 8. Do size check.
         if pos != ind_size {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "{}: After initial caching of data file {} using the index file, the \
                 index file data count came to {} bytes, but the originally surveyed file \
-                size was {}.", self.ozid(), fnum, pos, ind_size,
-            ), Mismatch, Data));
+                size was {}.", self.ozid(), fnum, pos, ind_size;
+                Mismatch, Data));
         }
         if dat_size1 != res!(usize::try_from(dat_size2)) {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "{}: After initial caching of data file {} using the index file, the \
                 file data count came to {} bytes, but the originally surveyed file \
-                size was {}.", self.ozid(), fnum, dat_size2, dat_size1,
-            ), Mismatch, Data));
+                size was {}.", self.ozid(), fnum, dat_size2, dat_size1;
+                Mismatch, Data));
         }
 
         Ok(())
@@ -430,11 +430,11 @@ impl<
                 &mut reader,
                 self.api().schemes().checksummer().clone(),
             ) {
-                Err(e) => return Err(err!(e, errmsg!(
+                Err(e) => return Err(err!(e,
                     "{}: While reading from position {} in {:?} file {}, \
                     having read {} items.",
-                    self.ozid(), pos, typ, fnum, count,
-                ), IO, File, Read)),
+                    self.ozid(), pos, typ, fnum, count;
+                    IO, File, Read)),
                 Ok(None) => break,
                 Ok(Some((skey, mut skbyts, n))) => {
                     count += 1;
@@ -454,15 +454,15 @@ impl<
                 &mut reader,
                 csum_len,
             ) {
-                Err(e) => return Err(err!(e, errmsg!(
+                Err(e) => return Err(err!(e,
                     "{}: While reading from position {} in {:?} file {}, \
                     having read {} items.",
-                    self.ozid(), pos, typ, fnum, count,
-                ), IO, File, Read)),
-                Ok(0) => return Err(err!(errmsg!(
+                    self.ozid(), pos, typ, fnum, count;
+                    IO, File, Read)),
+                Ok(0) => return Err(err!(
                     "{}: Missing value at end of {:?} file {}.",
-                    self.ozid(), typ, fnum,
-                ))),
+                    self.ozid(), typ, fnum;
+                    IO, File, Data, Missing)),
                 Ok(n) => {
                     // 5. Create the FileLocation.
                     let sfloc = res!(StoredFileLocation::new( // do this before incrementing pos
@@ -514,11 +514,11 @@ impl<
 
         // 8. Do size check.
         if pos != dat_size {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "{}: After initial caching of data file {}, the total data count \
                 came to {} bytes, but the originally surveyed file size was {}.",
-                self.ozid(), fnum, pos, dat_size,
-            ), Mismatch, Data));
+                self.ozid(), fnum, pos, dat_size;
+                Mismatch, Data));
         }
 
         // 10. Write the index file in one go.
@@ -629,12 +629,12 @@ impl<
                             let mut buf = vec![0u8; dloc.len as usize];
                             res!(data_reader.seek(SeekFrom::Start(dloc.start)));
                             match data_reader.read_exact(&mut buf) {
-                                Err(e) => return Err(err!(e, errmsg!(
+                                Err(e) => return Err(err!(e,
                                     "{}: While trying to read exactly {} bytes from position \
                                     {} in file {} of {} bytes length, {:?}.  The file state is {:?}.",
                                     self.ozid(), dloc.len, dloc.start, fnum,
-                                    data_file_len, data_path, fstat,
-                                ))),
+                                    data_file_len, data_path, fstat;
+                                    IO, File, Read)),
                                 Ok(()) => (),
                             }
                             res!(data_writer.write_all(&mut buf));
@@ -658,33 +658,33 @@ impl<
 
         // 4. Do some checks.
         if new_size > old_size {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "{}: The file {} has grown in size from {} to {} after garbage \
                 collection, this should not occur in Ozone.",
-                self.ozid(), fnum, old_size, new_size,
-            ), Bug, Missing, Data));
+                self.ozid(), fnum, old_size, new_size;
+                Bug, Missing, Data));
         }
         if old_sum != old_size - new_size {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "{}: The file {} was scheduled to remove {} bytes, but instead \
                 removed {} bytes, going from {} to {} bytes.", 
-                self.ozid(), fnum, old_sum, old_size - new_size, old_size, new_size,
-            ), Bug, Mismatch, Data));
+                self.ozid(), fnum, old_sum, old_size - new_size, old_size, new_size;
+                Bug, Mismatch, Data));
         }
         if !fstat.data_map_empty() {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "{}: Garbage collection for file {} should have cleared out the \
                 data map, instead it still contains entries, {:?}.",
-                self.ozid(), fnum, fstat.data_map(),
-            ), Bug, Mismatch, Data));
+                self.ozid(), fnum, fstat.data_map();
+                Bug, Mismatch, Data));
         }
 
         if new_size == 0 {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "{}: Garbage collection for file {} has deleted the entire data file, \
                 however this should have been done by the fbot.",
-                self.ozid(), fnum,
-            ), Bug, Mismatch, Data));
+                self.ozid(), fnum;
+                Bug, Mismatch, Data));
         }
 
         let mut dat_ind_file_size_decrease = old_sum;
@@ -694,8 +694,7 @@ impl<
         // 6. Re-create the index file by scanning the new data file.  Any values remaining in the
         //    data file are unique and we must handle a few scenarios.
         let file = match OpenOptions::new().read(true).open(&tmp_data_path) {
-            Err(e) => return Err(err!(e, errmsg!("While opening file {:?}", tmp_data_path),
-                IO, File, Read)),
+            Err(e) => return Err(err!(e, "While opening file {:?}", tmp_data_path; IO, File, Read)),
             Ok(f) => f,
         };
         let new_data_reader = BufReader::new(file);
@@ -706,12 +705,12 @@ impl<
         ));
 
         if fstat.get_index_file_size() > old_ind_size {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "{}: Indexing of the new data file {} after garbage collection \
                 has resulted in unexpected growth of the index file from {} to \
                 {} bytes.",
-                self.ozid(), fnum, old_ind_size, fstat.get_index_file_size(),
-            ), Bug, Mismatch, Data));
+                self.ozid(), fnum, old_ind_size, fstat.get_index_file_size();
+                Bug, Mismatch, Data));
         }
         dat_ind_file_size_decrease += old_ind_size - fstat.get_index_file_size();
 
@@ -731,10 +730,10 @@ impl<
                 dat_ind_file_size_decrease,
             )
         ) {
-            return Err(err!(e, errmsg!(
+            return Err(err!(e,
                 "{}: Cannot send updated file state for file number {} to fbot {}",
-                self.ozid(), fnum, fbot_index,
-            ), Channel, Write));
+                self.ozid(), fnum, fbot_index;
+                Channel, Write));
         }
         debug!("{}: Reduced file {} size by {:.1}% from {} to {} bytes.",
             self.ozid(),
@@ -796,11 +795,11 @@ impl<
                         &mut reader,
                         self.api().schemes().checksummer().clone(),
                     ) {
-                        Err(e) => return Err(err!(e, errmsg!(
+                        Err(e) => return Err(err!(e,
                             "{}: While reading from position {} in {:?} file {}, \
                             having read {} items.",
-                            self.ozid(), pos, typ, fnum, count,
-                        ), IO, File, Read)),
+                            self.ozid(), pos, typ, fnum, count;
+                            IO, File, Read)),
                         Ok(None) => break,
                         Ok(Some((skey, skbyts, n))) => {
                             count += 1;
@@ -820,15 +819,15 @@ impl<
                     &mut reader,
                     res!(self.api().schemes().checksummer().len()),
                 ) {
-                    Err(e) => return Err(err!(e, errmsg!(
+                    Err(e) => return Err(err!(e,
                         "{}: While reading from position {} in {:?} file {}, \
                         having read {} items.",
-                        self.ozid(), pos, typ, fnum, count,
-                    ), IO, File, Read)),
-                    Ok(0) => return Err(err!(errmsg!(
+                        self.ozid(), pos, typ, fnum, count;
+                        IO, File, Read)),
+                    Ok(0) => return Err(err!(
                         "{}: Missing value at end of {:?} file {}.",
-                        self.ozid(), typ, fnum,
-                    ))),
+                        self.ozid(), typ, fnum;
+                        Missing, IO, File)),
                     Ok(n) => {
                         let new_start = kpos as u64;
                         // 5. Create the FileLocation.
@@ -880,23 +879,23 @@ impl<
                         resp_g1.clone(),
                     )
                 ) {
-                    return Err(err!(e, errmsg!(
-                        "Cannot send gc cache update requests to cbot {}", i,
-                    ), Channel, Write));
+                    return Err(err!(e,
+                        "Cannot send gc cache update requests to cbot {}", i;
+                        Channel, Write));
                 }
             } else {
-                return Err(err!(errmsg!(
+                return Err(err!(
                     "The number of cache bots is {} should match the number of buffers, {}.",
-                    nc, nc - i,
-                ), Bug, Mismatch, Size));
+                    nc, nc - i;
+                    Bug, Mismatch, Size));
             }
         }
         // Wait for each response.
         for _ in 0..nc {
             match resp_g1.recv_timeout(constant::BOT_REQUEST_TIMEOUT) {
-                Err(e) => return Err(err!(e, errmsg!(
-                    "While collecting gc cache update response.",
-                ), IO, Channel, Read)),
+                Err(e) => return Err(err!(e,
+                    "While collecting gc cache update response.";
+                    IO, Channel, Read)),
                 Ok(OzoneMsg::GcCacheUpdateResponse(old_flocs)) => {
                     for old_floc in old_flocs {
                         // A cache update was performed, meaning the value in this file is still
@@ -910,9 +909,9 @@ impl<
                         fstat.map_and_remove(&old_floc.keyval());
                     }
                 },
-                Ok(msg) => return Err(err!(errmsg!(
-                    "Unrecognised cache initialisation request response: {:?}", msg)),
-                ),
+                Ok(msg) => return Err(err!(
+                    "Unrecognised cache initialisation request response: {:?}", msg;
+                    Channel, Unknown)),
             }
         }
         Ok(fstat)

@@ -63,10 +63,10 @@ impl UserInput {
             }
             count += 1;
             if count > constant::MAX_CREATE_PASS_ATTEMPTS {
-                return Err(err!(errmsg!(
+                return Err(err!(
                     "Number of failed attempts to repeat passphrase exceeded limit of {}.",
-                    constant::MAX_CREATE_PASS_ATTEMPTS,
-                ), Input, Invalid, Excessive, String));
+                    constant::MAX_CREATE_PASS_ATTEMPTS;
+                Input, Invalid, Excessive, String));
             }
         };
         Ok(pass)

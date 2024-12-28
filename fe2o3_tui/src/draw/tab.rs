@@ -47,10 +47,10 @@ impl TabStripConfig {
     pub fn new(styles: Vec<Style>) -> Outcome<Self> {
         let len = styles.len();
         if len < 3 {
-            return Err(err!(errmsg!(
+            return Err(err!(
                 "Please provide at least three tab styles, starting with the empty tab, \
-                only {} provided.", len,
-            ), Input, TooSmall, Init)); 
+                only {} provided.", len;
+            Input, TooSmall, Init)); 
         }
         let mut canvases = Vec::new();
         for style in styles {
@@ -188,16 +188,16 @@ impl TabbedTextManager {
         let mut set = HashSet::new();
         for (i, tabbed_tile) in tiled.iter().enumerate() {
             if !set.insert(tabbed_tile) {
-                return Err(err!(errmsg!(
+                return Err(err!(
                     "The {} tabbed tile {:?} duplicates an existing tabbed tile.",
-                    ord_string(i), tabbed_tile,
-                ), Input, Duplicate, Invalid));
+                    ord_string(i), tabbed_tile;
+                Input, Duplicate, Invalid));
             }
             if tabbed_tile.index >= num_tabs {
-                return Err(err!(errmsg!(
+                return Err(err!(
                     "The {} tabbed tile {:?} has an index exceeding the number \
-                    of tabs, {}.", ord_string(i), tabbed_tile, num_tabs,
-                ), Input, TooBig, Invalid));
+                    of tabs, {}.", ord_string(i), tabbed_tile, num_tabs;
+                Input, TooBig, Invalid));
             }
         }
         Ok(())

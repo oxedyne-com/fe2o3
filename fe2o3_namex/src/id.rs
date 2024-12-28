@@ -52,10 +52,10 @@ impl TryFrom<&Dat> for NamexId {
     fn try_from(dat: &Dat) -> std::result::Result<Self, Self::Error> {
         Ok(match dat {
             Dat::B32(a) => Self::from(a),
-            _ => return Err(err!(errmsg!(
+            _ => return Err(err!(
                 "Expected a daticle of kind {:?}, received a {:?}.",
-                Kind::B32, dat.kind(),
-            ), Invalid, Input, Mismatch)),
+                Kind::B32, dat.kind();
+            Invalid, Input, Mismatch)),
         })
     }
 }
@@ -70,10 +70,10 @@ impl FromDat for NamexId {
     fn from_dat(dat: Dat) -> Outcome<Self> {
         Ok(match dat {
             Dat::B32(a) => Self::from(a),
-            _ => return Err(err!(errmsg!(
+            _ => return Err(err!(
                 "Expected a daticle of kind {:?}, received a {:?}.",
-                Kind::B32, dat.kind(),
-            ), Invalid, Input, Mismatch)),
+                Kind::B32, dat.kind();
+            Invalid, Input, Mismatch)),
         })
     }
 }
@@ -209,7 +209,7 @@ pub trait InNamex {
     //                            }
     //                        }
     //                    },
-    //                    None => return Err(err!(errmsg!(
+    //                    None => return Err(err!(
     //                        "Namex entry '{}' does not have a (nams) field, which is required.",
     //                        Namex::<M1, M2>::id_to_string(&id),
     //                    ), Invalid, Input, Missing)),
