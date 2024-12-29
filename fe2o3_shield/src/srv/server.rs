@@ -1,4 +1,4 @@
-use crate::{
+use crate::srv::{
     constant,
     core::Protocol,
     guard::{
@@ -127,7 +127,6 @@ use std::{
     },
 };
 
-use tokio::task;
 
 /// Capture all necessary information, and nothing more, allowing a thread to process an incoming
 /// packet.  Rather than pass the entire struct atomically, use multiple interior atomic references
@@ -709,17 +708,17 @@ impl<
                 Init, Missing));
         } else {
             debug!("HELLO");
-            match tokio::runtime::Runtime::new() {
-                Err(e) => error!(err!(e,
-                    "Failed to start Tokio runtime.";
-                    Init)),
-                Ok(rt) => rt.block_on(async {
-                    self.now_listening();
-                    loop {
-                        if self.async_listen().await.must_end() { break; }
-                    }
-                }),
-            }
+            //match tokio::runtime::Runtime::new() {
+            //    Err(e) => error!(err!(e,
+            //        "Failed to start Tokio runtime.";
+            //        Init)),
+            //    Ok(rt) => rt.block_on(async {
+            //        self.now_listening();
+            //        loop {
+            //            if self.async_listen().await.must_end() { break; }
+            //        }
+            //    }),
+            //}
         }
     }
 

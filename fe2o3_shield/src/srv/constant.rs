@@ -1,5 +1,5 @@
-use crate::{
-    cfg::ShieldConfig,
+use crate::srv::{
+    cfg::ServerConfig,
     msg::external::MsgType,
     pow::DifficultyProfile,
 };
@@ -18,7 +18,7 @@ use std::{
     time::Duration,
 };
 
-impl ShieldConfig {
+impl ServerConfig {
     pub fn check_constants() -> Outcome<()> {
         //if CHECK_INTERVAL > USER_REQUEST_TIMEOUT {
         //    return Err(err!(

@@ -1,1 +1,6 @@
-Added Oxedize logo to README.
+Split fe2o3_shield/src into app and srv and copied fe2o3_steel files across.
+
+- Now in process of merging/harmonising
+- Tokio removed
+ - Steel is a single server with many short-lived interactions
+ - Shield can use a single os Bot thread for listening and Bot threads for each connection 

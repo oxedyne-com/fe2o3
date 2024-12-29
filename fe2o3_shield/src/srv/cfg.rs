@@ -1,4 +1,4 @@
-use crate::{
+use crate::srv::{
     constant,
     msg::syntax,
     //packet::PacketValidator,
@@ -48,7 +48,7 @@ use std::{
 
 
 #[derive(Clone, Debug, Eq, PartialEq, FromDatMap, ToDatMap)]
-pub struct ShieldConfig {
+pub struct ServerConfig {
     // Schemes
     pub schemes_db_path:                String,
     // Chunking
@@ -74,7 +74,7 @@ pub struct ShieldConfig {
     pub server_accept_unknown_users:    bool,
 }
 
-impl Config for ShieldConfig {
+impl Config for ServerConfig {
 
     fn check_and_fix(&mut self) -> Outcome<()> {
         // Checks that read only.
@@ -83,7 +83,7 @@ impl Config for ShieldConfig {
     }
 }
 
-impl Default for ShieldConfig {
+impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             // Schemes
@@ -111,7 +111,7 @@ impl Default for ShieldConfig {
     }
 }
 
-impl ShieldConfig {
+impl ServerConfig {
 
     pub fn try_default() -> Outcome<Self> {
         Ok(Self::default())

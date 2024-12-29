@@ -1,5 +1,5 @@
-use crate::{
-    cfg::ShieldConfig,
+use crate::srv::{
+    cfg::ServerConfig,
     constant,
     guard::{
         addr::{
@@ -122,19 +122,6 @@ use std::{
 use local_ip_address::local_ip;
 
 
-#[derive(Clone, Debug)]
-pub struct Protocol<
-    // Data on the wire
-	WENC:   Encrypter,          // Symmetric encryption of data on the wire.
-	WCS:    Checksummer,        // Checks integrity of data on the wire.
-    POWH:   Hasher + 'static,   // Packet validation proof of work hasher.
-	SGN:    Signer + 'static,   // Digitally signs wire packets.
-	HS:     Encrypter,          // Asymmetric encryption of symmetric encryption key during handshake.
-> {
-    pub cfg:    ShieldConfig,
-    pub schms:  WireSchemes<WENC, WCS, POWH, SGN, HS>,
-}
-
 impl<
 	WENC:   Encrypter,
 	WCS:    Checksummer,
@@ -151,13 +138,13 @@ impl<
         -> Outcome<Self>
     {
         // Check constants.
-        res!(ShieldConfig::check_constants());
+        res!(ServerConfig::check_constants());
 
         let mut cfg = match cfg_opt {
-            Some(path) => res!(ShieldConfig::load(&path.as_ref())),
+            Some(path) => res!(ServerConfig::load(&path.as_ref())),
             None => {
                 info!("No path to config file supplied: using default config.");
-                ShieldConfig::default()
+                ServerConfig::default()
             },
         };
 
@@ -170,16 +157,16 @@ impl<
         let no_chunker = schms_input.chnk.is_none();
         let mut schms = WireSchemes::from(schms_input);
         //// Initialise schemes using defaults.  Some of these can be updated in the config file.
-        //schms.powh = HasherDefAlt(res!(ShieldConfig::read_hash_scheme(
+        //schms.powh = HasherDefAlt(res!(ServerConfig::read_hash_scheme(
         //    &cfg.packet_pow_hash_scheme,
         //    &*HasherDefAlt::from(schms.powh),
-        //    ShieldConfig::default_packet_pow_hash_scheme,
+        //    ServerConfig::default_packet_pow_hash_scheme,
         //    "packet_pow_hash_scheme",
         //)));
-        //schms.sign = SignerDefAlt(res!(ShieldConfig::read_signature_scheme(
+        //schms.sign = SignerDefAlt(res!(ServerConfig::read_signature_scheme(
         //    &cfg.packet_signature_scheme,
         //    &*SignerDefAlt::from(schms.sign),
-        //    ShieldConfig::default_packet_signature_scheme,
+        //    ServerConfig::default_packet_signature_scheme,
         //    "packet_signature_scheme",
         //)));
         if no_chunker {

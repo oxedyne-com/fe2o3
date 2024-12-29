@@ -15,17 +15,7 @@
 //! change before the 1.0 release.
 //!
 #![forbid(unsafe_code)]
-pub mod constant;
-pub mod cfg;
-pub mod core;
-pub mod guard;
-//pub mod id;
-//pub mod keys;
-pub mod msg;
-pub mod packet;
-pub mod pow;
-pub mod schemes;
-pub mod server;
-//pub mod session;
+pub mod srv;
+pub mod app;
 
-pub use crate::core::Shield;
+pub use crate::srv::core::Shield;

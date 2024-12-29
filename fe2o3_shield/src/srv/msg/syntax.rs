@@ -124,8 +124,8 @@
 //!                             |                                               |
 //!     
 //!```
-use crate::{
-    cfg::ShieldConfig,
+use crate::srv::{
+    cfg::ServerConfig,
     constant,
     msg::external::{
         HandshakeType,
@@ -504,7 +504,7 @@ pub trait ServerCommand<
             &constant::VERSION,
             uid,
             //tstamp,
-            &ShieldConfig::chunker(builder.chunk_cfg.clone().set_pad_last(pad_last)),
+            &ServerConfig::chunker(builder.chunk_cfg.clone().set_pad_last(pad_last)),
             &builder.validator,
             &builder.powparams,
             inc_sigpk,

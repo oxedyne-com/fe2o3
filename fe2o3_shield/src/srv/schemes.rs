@@ -1,4 +1,4 @@
-use crate::msg::syntax;
+use crate::srv::msg::syntax;
 
 use oxedize_fe2o3_core::{
     prelude::*,
