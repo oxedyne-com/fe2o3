@@ -2,10 +2,13 @@ use crate::email::msg::EmailMessage;
 
 use oxedize_fe2o3_core::prelude::*;
 
+use std::path::Path;
+
 use tokio::{
     fs::File,
     io::{AsyncBufReadExt, BufReader},
 };
+
 
 pub struct MboxEmailIterator {
     reader: BufReader<File>,
@@ -13,8 +16,8 @@ pub struct MboxEmailIterator {
 }
 
 impl MboxEmailIterator {
-    pub async fn new(file_path: &str) -> Outcome<Self> {
-        let file = match tokio::fs::File::open(file_path).await {
+    pub async fn new<P: AsRef<Path>>(path: P) -> Outcome<Self> {
+        let file = match tokio::fs::File::open(path).await {
             Ok(file) => file,
             Err(e) => {
                 return Err(err!(e, "While opening mbox file."; IO, File, Read));

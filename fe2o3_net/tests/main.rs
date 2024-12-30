@@ -1,3 +1,4 @@
+mod dns;
 mod email;
 mod http;
 mod smtp;
@@ -24,8 +25,9 @@ fn main() -> Outcome<()> {
 
 fn run_tests() -> Outcome<()> {
 
-    let filter = "mbox";
+    let filter = "dns";
 
+    res!(dns::test_dns(filter));
     res!(email::test_email(filter));
     res!(http::test_http(filter));
     res!(smtp::test_smtp(filter));

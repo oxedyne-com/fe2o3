@@ -1,1 +1,1 @@
-Added Oxedize logo to README.
+fe2o3_net: fixed Fqdn validation, adding a dns test suite and verified correctness

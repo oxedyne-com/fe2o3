@@ -1,5 +1,5 @@
 use oxedize_fe2o3_net::{
-    dns::Fqdn,
+    //dns::Fqdn,
     email::{
         file::{
             MboxEmailIterator,
@@ -9,9 +9,9 @@ use oxedize_fe2o3_net::{
             EmailMessage,
         },
     },
-    smtp::{
-        cmd::SmtpCommand,
-    },
+    //smtp::{
+    //    cmd::SmtpCommand,
+    //},
 };
 
 use oxedize_fe2o3_core::{
@@ -78,7 +78,7 @@ Sender\r
         let rt = res!(tokio::runtime::Runtime::new());
 
         let home = res!(std::env::var("HOME"));
-        let path = Path::new(home).join("tmp/Inbox");
+        let path = Path::new(&home).join("tmp/Inbox");
         let result = rt.block_on(async {
             MboxEmailIterator::new(path).await
         });

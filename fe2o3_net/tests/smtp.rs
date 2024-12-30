@@ -1,10 +1,10 @@
 use oxedize_fe2o3_net::{
     //conc::AsyncReadIterator,
     dns::Fqdn,
-    email::msg::{
-        EmailHeader,
-        EmailMessage,
-    },
+    //email::msg::{
+    //    EmailHeader,
+    //    EmailMessage,
+    //},
     smtp::{
         cmd::SmtpCommand,
         //msg::SmtpMessageReader,
@@ -15,11 +15,11 @@ use oxedize_fe2o3_core::{
     prelude::*,
     test::test_it,
 };
-use oxedize_fe2o3_text::string::Stringer;
-
-use std::{
-    pin::Pin,
-};
+//use oxedize_fe2o3_text::string::Stringer;
+//
+//use std::{
+//    pin::Pin,
+//};
 
 
 pub fn test_smtp(filter: &'static str) -> Outcome<()> {

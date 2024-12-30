@@ -274,6 +274,7 @@ impl ServerConfig {
         }
         let mut result = Vec::new();
         for domain_name in &self.domain_names {
+            msg!("name='{}'",domain_name);
             if domain_name.is_empty() {
                 return Err(err!(
                     "ServerConfig: Domain name entry is empty.";
@@ -281,7 +282,7 @@ impl ServerConfig {
             }
             let fqdn = match Fqdn::new(domain_name) {
                 Ok(fqdn) => fqdn,
-                Err(e) => return Err(err!(
+                Err(e) => return Err(err!(e,
                     "While trying to validate domain name '{}'.", domain_name;
                 Network)),
             };

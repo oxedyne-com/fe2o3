@@ -15,3 +15,13 @@ pub const WEBSOCKET_GUID:                       &'static str = "258EAFA5-E914-47
 pub const WEBSOCKET_LATENCY_HISTORY_SIZE:       usize = 540; // 3 hrs @ 30 s intervals
 
 pub const READ_LOOP_SAFETY_LIMIT:               usize = 100;
+
+// DNS
+/// List of special case domains that are valid without dots. Based on RFC 6761 and common
+/// practice.
+pub const SPECIAL_DOMAINS: &[&str] = &[
+    "localhost",
+    "invalid",     // RFC 6761
+    "example",     // RFC 6761
+    "test",        // RFC 6761
+];

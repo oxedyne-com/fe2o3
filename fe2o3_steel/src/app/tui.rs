@@ -352,7 +352,7 @@ pub fn run() -> Outcome<()> {
                 }
             }
             Err(e) => {
-                println!("{} error: {}", cfg.app_human_name, e);
+                //println!("{} error: {}", cfg.app_human_name, e);
                 return Err(e);
             }
         }
