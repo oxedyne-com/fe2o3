@@ -1,10 +1,11 @@
 #!/bin/bash
 
 MSG_FILE=".commit_msg.txt"
+BRANCH=$(git branch --show-current)
 
 git add . && \
 git add -u && \
 git commit -a -F "$MSG_FILE" && \
-git push -u origin main && \
+git push -u origin "$BRANCH" && \
 rm $MSG_FILE && \
 touch $MSG_FILE
