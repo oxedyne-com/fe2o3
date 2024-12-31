@@ -1,1 +1,1 @@
-Renamed doc/ to dev/, added git cheatsheet, renamed commit to commit_all which now uses current branch.
+Added .commit_msg.txt to .gitignore.

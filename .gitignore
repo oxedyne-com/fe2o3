@@ -15,6 +15,7 @@ fe2o3_*.txt
 *.tmp
 *.temp
 *.bak
+.commit_msg.txt
 
 # OS specific
 .DS_Store
