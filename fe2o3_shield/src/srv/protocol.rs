@@ -121,13 +121,9 @@ pub struct Protocol<
     _sid_template:      SID,
     _uid_template:      UID,
 
-    pub test_mode:  bool,
+    pub test_mode:      bool,
+    pub schms:          WireSchemes<WENC, WCS, POWH, SGN, HS>,
 
-    // Old Protocol
-    //pub cfg:    ServerConfig,
-    pub schms:  WireSchemes<WENC, WCS, POWH, SGN, HS>,
-
-    // Old RxEnv
     pub timer:          Arc<RwLock<RingTimer<{ constant::REQ_TIMER_LEN }>>>,
     // Address protection.
     pub agrd:           Arc<AddressGuard<
@@ -304,13 +300,11 @@ impl<
             _mid_template,
             _sid_template,
             _uid_template,
-
-            //cfg,
+            test_mode,
             schms,
             timer:          Arc::new(RwLock::new(RingTimer::<{ constant::REQ_TIMER_LEN }>::default())),
             agrd:           agrd.clone(),
             ugrd:           ugrd.clone(),
-            // Packet validation.
             packval,
             gpzparams:      DifficultyParams {
                                 profile:    constant::POW_DIFFICULTY_PROFILE,
@@ -318,7 +312,6 @@ impl<
                                 min:        constant::POW_MIN_ZERO_BITS,
                                 rps_max:    constant::MAX_ALLOWED_AVG_REQ_PER_SEC,
                             },
-            // Message assembly.
             massembler:     Arc::new(res!(MsgAssembler::<
                                 { constant::MSG_ASSEMBLY_SHARDS },
                                 _, _,
@@ -335,15 +328,11 @@ impl<
                                 rep_tot_lim:    constant::MSG_ASSEMBLY_REP_TOTAL_LIM,
                                 rep_max_lim:    constant::MSG_ASSEMBLY_REP_PACKET_LIM,
                             },
-            // Policy configuration.
             pow_time_horiz: constant::POW_TIME_HORIZON_SEC,
             accept_unknown: true,
-
-            test_mode,
         })
     }
 
-    //pub async fn process<
     pub async fn handle(
         self,
         buf:        [u8; constant::UDP_BUFFER_SIZE], 
@@ -368,7 +357,6 @@ impl<
         }
     }
     
-    //fn get_process_result<
     fn handler(
         mut self,
         buf:        [u8; constant::UDP_BUFFER_SIZE], 
