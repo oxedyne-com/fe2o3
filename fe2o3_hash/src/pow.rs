@@ -98,8 +98,8 @@ pub struct PowVars<
 #[derive(Clone, Debug)]
 pub struct ProofOfWork<
     H: Hasher
-    + Send
-    + 'static
+    //+ Send
+    //+ 'static
 > {
     pub hasher: H,
     pub len: usize,

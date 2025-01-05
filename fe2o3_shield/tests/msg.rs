@@ -1,5 +1,5 @@
 use oxedize_fe2o3_shield::{
-    cfg::ShieldConfig,
+    cfg::ServerConfig,
     core::Shield,
     guard::{
         data::UserData,
@@ -55,8 +55,8 @@ pub fn test_msg(_filter: &'static str) -> Outcome<()> {
     pub type Uid = UserId<{UID_LEN}, UidTyp>;
 
     let server_id = BotId(Rand::rand_u64());
-    let chunk_cfg = ShieldConfig::new_chunk_cfg(1_000, 200, true, true);
-    let syntax = res!(ShieldConfig::syntax_default());
+    let chunk_cfg = ServerConfig::new_chunk_cfg(1_000, 200, true, true);
+    let syntax = res!(ServerConfig::syntax_default());
     let shield_params = Shield::params(
         [0u8; 8],
         Mid::default(),

@@ -1,0 +1,32 @@
+#!/bin/bash
+
+app="shield"
+# Default to debug unless release specified
+profile="debug"
+build_flag=""
+
+clear
+# Check if release argument provided
+if [ $# -eq 1 ]; then
+   if [ "$1" == "release" ]; then
+       profile="release"
+       build_flag="--release"
+   else
+       echo "Error: only valid argument is 'release'"
+       exit 1
+   fi
+fi
+
+rm -f ./$app
+
+# Run cargo build
+cargo build $build_flag
+
+# If build successful, copy executable
+if [ $? -eq 0 ]; then
+   cp "../target/$profile/$app" .
+   echo "Copied $app from ../target/$profile/"
+else
+   echo "Build failed"
+   exit 1
+fi

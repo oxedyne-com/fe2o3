@@ -1,5 +1,3 @@
-use crate::msg::syntax;
-
 use oxedize_fe2o3_core::{
     prelude::*,
     alt::{
@@ -48,9 +46,7 @@ use oxedize_fe2o3_iop_hash::{
     csum::Checksummer,
     //kdf::KeyDeriver,
 };
-use oxedize_fe2o3_syntax::core::SyntaxRef;
 
-use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub struct WireSchemesInput<
@@ -66,7 +62,6 @@ pub struct WireSchemesInput<
     pub sign:   Alt<SGN>,
     pub hsenc:  Alt<HS>,
     pub chnk:   Option<ChunkConfig>,
-    pub syntax: SyntaxRef,
 }
 
 impl<
@@ -86,7 +81,6 @@ impl<
             sign:   Alt::Unspecified,
             hsenc:  Alt::Unspecified,
             chnk:   None,
-            syntax: SyntaxRef(Arc::new(syntax::empty())),
         }
     }
 }
@@ -106,7 +100,6 @@ impl<
     pub fn ref_signer(&self)                -> &Alt<SGN>            { &self.sign }
     pub fn ref_handshake_encrypter(&self)   -> &Alt<HS>             { &self.hsenc }
     pub fn ref_chunk_config(&self)          -> &Option<ChunkConfig> { &self.chnk }
-    pub fn ref_syntax(&self)                -> SyntaxRef            { self.syntax.clone() }
 
     pub fn own_encrypter(&mut self)     -> Alt<WENC>    { std::mem::replace(&mut self.enc, Alt::Unspecified) }
     pub fn own_checksummer(&mut self)   -> Alt<WCS>     { std::mem::replace(&mut self.csum, Alt::Unspecified) }
@@ -126,10 +119,6 @@ impl<
         self.sign = Alt::Specific(signer);
         self
     }
-    pub fn set_syntax(mut self, syntax: SyntaxRef) -> Self {
-        self.syntax = syntax;
-        self
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -146,7 +135,6 @@ pub struct WireSchemes<
     pub sign:   SignerDefAlt<SignatureScheme, SGN>,
     pub hsenc:  EncrypterDefAlt<EncryptionScheme, HS>,
     pub chnk:   ChunkConfig,
-    pub syntax: SyntaxRef,
 }
 
 impl<
@@ -166,7 +154,6 @@ impl<
             sign:   SignerDefAlt(DefAlt::None),
             hsenc:  EncrypterDefAlt(DefAlt::None),
             chnk:   ChunkConfig::default(),
-            syntax: SyntaxRef(Arc::new(syntax::empty())),
         }
     }
 }
@@ -191,7 +178,6 @@ impl<
                 Some(cfg) => cfg,
                 None => ChunkConfig::default(),
             },
-            syntax: input.syntax,
         }
     }
 }
@@ -211,7 +197,6 @@ impl<
     pub fn ref_signer(&self)                -> &SignerDefAlt<SignatureScheme, SGN>      { &self.sign }
     pub fn ref_handshake_encrypter(&self)   -> &EncrypterDefAlt<EncryptionScheme, HS>   { &self.hsenc }
     pub fn ref_chunk_config(&self)          -> &ChunkConfig                             { &self.chnk }
-    pub fn ref_syntax(&self)                -> SyntaxRef                                { self.syntax.clone() }
 
     pub fn clone_encrypter(&self)           -> EncrypterDefAlt<EncryptionScheme, WENC>  { self.enc.clone() }
     pub fn clone_checksummer(&self)         -> ChecksummerDefAlt<ChecksumScheme, WCS>   { self.csum.clone() }
@@ -219,15 +204,6 @@ impl<
     pub fn clone_signer(&self)              -> SignerDefAlt<SignatureScheme, SGN>       { self.sign.clone() }
     pub fn clone_handshake_encrypter(&self) -> EncrypterDefAlt<EncryptionScheme, HS>    { self.hsenc.clone() }
     pub fn clone_chunk_config(&self)        -> ChunkConfig                              { self.chnk.clone() }
-
-    //pub fn clone_syntax(&self) -> Outcome<SyntaxRef> {
-    //    match &self.syntax {
-    //        DefAlt::Given(inner) | DefAlt::Default(inner) => Ok(inner.clone()),
-    //        DefAlt::None => Err(err!(
-    //            "The wire syntax protocol should never be DefAlt::None.",
-    //        ), Bug, Missing, Data)),
-    //    }
-    //}
 
     //pub fn set_chunk_config(mut self, chnk: Option<ChunkConfig>) -> Self {
     //    self.chnk = chnk;

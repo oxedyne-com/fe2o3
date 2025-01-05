@@ -1,6 +1,6 @@
-use crate::{
+use crate::srv::{
+    cfg::ServerConfig,
     constant,
-    core::Protocol,
     guard::{
         addr::{
             AddressGuard,
@@ -17,15 +17,10 @@ use crate::{
     },
     msg::{
         external::{
-            //HandshakeType,
-            //IdentifiedMessage,
-            //Message,
-            MsgAssemblyParams,
-            //MsgType,
             MsgAssembler,
+            MsgAssemblyParams,
             MsgState,
         },
-        internal::ServerMsg,
         syntax::{
             HReq1,
             MsgFmt,
@@ -39,53 +34,42 @@ use crate::{
         PacketValidator,
     },
     pow::{
-        PowPristine,
         DifficultyParams,
+        PowPristine,
+    },
+    schemes::{
+        WireSchemes,
+        WireSchemesInput,
     },
 };
 
-use oxedize_fe2o3_bot::{
-    bot::{
-        Bot,
-        LoopBreak,
-    },
-    handles::Handle,
-};
 use oxedize_fe2o3_core::{
     prelude::*,
-    byte::{
-        FromBytes,
-    },
-    channels::{
-        Simplex,
-        Recv,
-    },
-    thread::{
-        Semaphore,
-        Sentinel,
-    },
+    byte::FromBytes,
 };
 use oxedize_fe2o3_crypto::{
-    sign::SignatureScheme,
     keys::PublicKey,
-};
-use oxedize_fe2o3_data::ring::RingTimer;
-use oxedize_fe2o3_iop_crypto::{
-    enc::{
-        Encrypter,
-    },
-    keys::KeyManager,
-    sign::{
-        Signer,
-        SignerDefAlt,
-    },
+    sign::SignatureScheme,
 };
 use oxedize_fe2o3_hash::{
     hash::{
         HasherDefAlt,
         HashScheme,
     },
-    pow::PowVars,
+    map::ShardMap,
+    pow::{
+        PowVars,
+        ProofOfWork,
+    },
+};
+use oxedize_fe2o3_data::ring::RingTimer;
+use oxedize_fe2o3_iop_crypto::{
+    enc::Encrypter,
+    keys::KeyManager,
+    sign::{
+        Signer,
+        SignerDefAlt,
+    },
 };
 use oxedize_fe2o3_iop_hash::{
     api::{
@@ -94,52 +78,56 @@ use oxedize_fe2o3_iop_hash::{
     },
     csum::Checksummer,
 };
-use oxedize_fe2o3_jdat::id::{
-    IdDat,
-    NumIdDat,
-};
-use oxedize_fe2o3_namex::id::InNamex;
+use oxedize_fe2o3_jdat::id::NumIdDat;
+use oxedize_fe2o3_namex::InNamex;
 use oxedize_fe2o3_syntax::{
     core::SyntaxRef,
-    msg::{
-        Msg as SyntaxMsg,
-    },
+    msg::Msg,
 };
 use oxedize_fe2o3_text::string::Stringer;
 
 use std::{
     collections::BTreeMap,
-    io,
-    marker::PhantomData,
-    net::{
-        SocketAddr,
-        UdpSocket,
-    },
+    net::SocketAddr,
     sync::{
         Arc,
-        Mutex,
         RwLock,
-    },
-    thread,
-    time::{
-        Duration,
-        Instant,
     },
 };
 
-use tokio::task;
 
 /// Capture all necessary information, and nothing more, allowing a thread to process an incoming
 /// packet.  Rather than pass the entire struct atomically, use multiple interior atomic references
 /// to reduce sharing wait times.
 #[derive(Clone, Debug)]
-pub struct RxEnv<
+pub struct Protocol<
     const C: usize,
+    const MIDL: usize,
     const SIDL: usize,
+    const UIDL: usize,
+    MID:    NumIdDat<MIDL>,
     SID:    NumIdDat<SIDL>,
-	POWH:   Hasher + 'static,
-	SGN:    Signer + 'static,
+    UID:    NumIdDat<UIDL>,
+    // Data on the wire
+	WENC:   Encrypter,      // Symmetric encryption of data on the wire.
+	WCS:    Checksummer,    // Checks integrity of data on the wire.
+    POWH:   Hasher,         // Packet validation proof of work hasher.
+	SGN:    Signer,         // Digitally signs wire packets.
+	HS:     Encrypter,      // Asymmetric encryption of symmetric encryption key during handshake.
 >{
+    // Let user define these generic parameters.
+    _code_template:     [u8; C],
+    _mid_template:      MID,
+    _sid_template:      SID,
+    _uid_template:      UID,
+
+    pub test_mode:  bool,
+
+    // Old Protocol
+    //pub cfg:    ServerConfig,
+    pub schms:  WireSchemes<WENC, WCS, POWH, SGN, HS>,
+
+    // Old RxEnv
     pub timer:          Arc<RwLock<RingTimer<{ constant::REQ_TIMER_LEN }>>>,
     // Address protection.
     pub agrd:           Arc<AddressGuard<
@@ -190,19 +178,173 @@ pub struct RxEnv<
 
 impl<
     const C: usize,
+    const MIDL: usize,
     const SIDL: usize,
+    const UIDL: usize,
+    MID:    NumIdDat<MIDL>,
     SID:    NumIdDat<SIDL>,
-	POWH:   Hasher,
-	SGN:    Signer,
+    UID:    NumIdDat<UIDL>,
+	WENC:   Encrypter + 'static,
+	WCS:    Checksummer + 'static,
+    POWH:   Hasher + 'static,
+	SGN:    Signer + 'static,
+	HS:     Encrypter + 'static,
 >
-    RxEnv<C, SIDL, SID, POWH, SGN>
+    Protocol<C, MIDL, SIDL, UIDL, MID, SID, UID, WENC, WCS, POWH, SGN, HS>
 {
-    pub async fn process<
-        const MIDL: usize,
-        const UIDL: usize,
-        MID: NumIdDat<MIDL>,
-        UID: NumIdDat<UIDL>,
-    >(
+    pub fn new(
+        cfg:            &ServerConfig,
+        schms_input:    WireSchemesInput<WENC, WCS, POWH, SGN, HS>,
+        _code_template: [u8; C],
+        _mid_template:  MID,
+        _sid_template:  SID,
+        _uid_template:  UID,
+        test_mode:      bool,
+    )
+        -> Outcome<Self>
+    {
+        // Establish wire schemes.  The incoming WireSchemesInput uses Alt fields, allowing schemes
+        // to be unspecified.  The protocol maintains a WireSchemes using DefAlt fields, which must
+        // be specified.
+        let no_chunker = schms_input.chnk.is_none();
+        let mut schms = WireSchemes::from(schms_input);
+        //// Initialise schemes using defaults.  Some of these can be updated in the config file.
+        //schms.powh = HasherDefAlt(res!(ServerConfig::read_hash_scheme(
+        //    &cfg.packet_pow_hash_scheme,
+        //    &*HasherDefAlt::from(schms.powh),
+        //    ServerConfig::default_packet_pow_hash_scheme,
+        //    "packet_pow_hash_scheme",
+        //)));
+        //schms.sign = SignerDefAlt(res!(ServerConfig::read_signature_scheme(
+        //    &cfg.packet_signature_scheme,
+        //    &*SignerDefAlt::from(schms.sign),
+        //    ServerConfig::default_packet_signature_scheme,
+        //    "packet_signature_scheme",
+        //)));
+        if no_chunker {
+            schms.chnk = cfg.chunk_config(); // Rather than ChunkCOnfig::default()
+        }
+
+        let agrd_map_init = BTreeMap::<
+            HashForm,
+            AddressLog<
+                { constant::REQ_TIMER_LEN },
+                { constant::MAX_ALLOWED_AVG_REQ_PER_SEC },
+                AddressData,
+            >,
+        >::new();
+
+        let agrd = Arc::new(AddressGuard {
+            amap: res!(ShardMap::<
+                {constant::AGRD_SHARDMAP_INIT_SHARDS},
+                {constant::GUARD_SHARDMAP_SALT_LEN},
+                AddressLog<
+                    {constant::REQ_TIMER_LEN},
+                    {constant::MAX_ALLOWED_AVG_REQ_PER_SEC},
+                    AddressData,
+                >,
+                BTreeMap::<
+                    HashForm,
+                    AddressLog<
+                        {constant::REQ_TIMER_LEN},
+                        {constant::MAX_ALLOWED_AVG_REQ_PER_SEC},
+                        AddressData,
+                    >,
+                >,
+                HashScheme,
+            >::new(
+                constant::AGRD_SHARDMAP_INIT_SHARDS as u32,
+                constant::SALT8,
+                agrd_map_init,
+                res!(HashScheme::try_from("Seahash")),
+            )),
+            // Monitor
+            arps_max: constant::MAX_ALLOWED_AVG_REQ_PER_SEC,
+            // Throttle
+            tint_min: constant::THROTTLED_INTERVAL_MIN,   
+            tsunset: (
+                constant::ADDR_THROTTLE_SUNSET_SECS_MIN,
+                constant::ADDR_THROTTLE_SUNSET_SECS_MAX,
+            ),
+            blist_cnt: constant::THROTTLE_COUNT_BEFORE_BLACKLIST,
+            // Handshake
+            hreq_exp: constant::SESSION_REQUEST_EXPIRY,
+        });
+
+        let ugrd_map_init = BTreeMap::<
+            HashForm,
+            UserLog<UserData<SIDL, C, SID>>,
+        >::new();
+
+        let ugrd = Arc::new(UserGuard {
+            umap: res!(ShardMap::<
+                {constant::UGRD_SHARDMAP_INIT_SHARDS},
+                {constant::GUARD_SHARDMAP_SALT_LEN},
+                UserLog<UserData<SIDL, C, SID>>,
+                BTreeMap::<
+                    HashForm,
+                    UserLog<UserData<SIDL, C, SID>>,
+                >,
+                HashScheme,
+            >::new(
+                constant::UGRD_SHARDMAP_INIT_SHARDS as u32,
+                constant::SALT8,
+                ugrd_map_init,
+                res!(HashScheme::try_from("Seahash")),
+            )),
+        });
+
+        let packval = PacketValidator {
+            pow: Some(res!(ProofOfWork::new(schms.powh.clone()))),
+            sig: Some(schms.sign.clone()),
+        };
+        
+        Ok(Self {
+            _code_template,
+            _mid_template,
+            _sid_template,
+            _uid_template,
+
+            //cfg,
+            schms,
+            timer:          Arc::new(RwLock::new(RingTimer::<{ constant::REQ_TIMER_LEN }>::default())),
+            agrd:           agrd.clone(),
+            ugrd:           ugrd.clone(),
+            // Packet validation.
+            packval,
+            gpzparams:      DifficultyParams {
+                                profile:    constant::POW_DIFFICULTY_PROFILE,
+                                max:        constant::POW_MAX_ZERO_BITS,
+                                min:        constant::POW_MIN_ZERO_BITS,
+                                rps_max:    constant::MAX_ALLOWED_AVG_REQ_PER_SEC,
+                            },
+            // Message assembly.
+            massembler:     Arc::new(res!(MsgAssembler::<
+                                { constant::MSG_ASSEMBLY_SHARDS },
+                                _, _,
+                                {constant::GUARD_SHARDMAP_SALT_LEN},
+                            >::new(
+                                constant::MSG_ASSEMBLY_SHARDS as u32,
+                                constant::SALT8,
+                                BTreeMap::<HashForm, MsgState>::new(),
+                                res!(HashScheme::try_from("Seahash")),
+                            ))),
+            ma_params:      MsgAssemblyParams {
+                                msg_sunset:     constant::MSG_ASSEMBLY_SUNSET,
+                                idle_max:       constant::MSG_ASSEMBLY_IDLE_MAX,
+                                rep_tot_lim:    constant::MSG_ASSEMBLY_REP_TOTAL_LIM,
+                                rep_max_lim:    constant::MSG_ASSEMBLY_REP_PACKET_LIM,
+                            },
+            // Policy configuration.
+            pow_time_horiz: constant::POW_TIME_HORIZON_SEC,
+            accept_unknown: true,
+
+            test_mode,
+        })
+    }
+
+    //pub async fn process<
+    pub async fn handle(
         self,
         buf:        [u8; constant::UDP_BUFFER_SIZE], 
         n:          usize,
@@ -212,7 +354,7 @@ impl<
         -> Outcome<()>
     {
         let src_addr_str = fmt!("{:?}", src_addr);
-        match self.get_process_result::<MIDL, UIDL, MID, UID>(buf, n, src_addr, syntax) {//buf) {
+        match self.handler(buf, n, src_addr, syntax) {
             Err(e) => {
                 let e2 = err!(e,
                     "While processing incoming packet from {}.", src_addr_str;
@@ -226,12 +368,8 @@ impl<
         }
     }
     
-    fn get_process_result<
-        const MIDL: usize,
-        const UIDL: usize,
-        MID: NumIdDat<MIDL>,
-        UID: NumIdDat<UIDL>,
-    >(
+    //fn get_process_result<
+    fn handler(
         mut self,
         buf:        [u8; constant::UDP_BUFFER_SIZE], 
         n:          usize,
@@ -504,7 +642,7 @@ impl<
         )) { // Returns whether to drop the packet, and the potential syntax protocol message.
             (false, None) => return Ok(()), // Payload remains incomplete.
             (false, Some(msg_byts)) => { // We have a complete message.
-                let msgrx = SyntaxMsg::new(syntax.clone());
+                let msgrx = Msg::new(syntax.clone());
                 let mut msgrx = res!(msgrx.from_bytes(&msg_byts, None));
                 debug!("msgrx [{}]: {}", msg_byts.len(), msgrx);
                 // Gather the proof of work parameters required by the
@@ -601,232 +739,5 @@ impl<
             },
         } // Assemble payload packets.
         Ok(())
-    }
-}
-
-/// Ozone servers maintain an address map, tracking the communication requirements for Internet
-/// Protocol (IP) addresses of peers, and a user map, tracking trust level of users authenticated
-/// via Digital Signatures.  Server user data is persisted to and from the Ozone database itself.
-///
-/// # Denial of Service (DOS)
-///
-/// The server is address-agnostic, allowing any address to start a session via a handshake request
-/// (HREQ1).  This however leaves it exposed to DOS attack, which commonly relies on address
-/// spoofing.  The main defence is that every packet received must be prepended with a valid Proof
-/// of Work (POW), using a hash function that is very fast to validate.  The POW difficulty is
-/// determined by the number of leading zero bits in the hash.  The server calculates a global
-/// difficulty in real time as a function of the average requests per second.  Should this climb,
-/// indicating a heightened DOS risk, the global difficulty automatically increases.  At the same
-/// time, each address that has established a session can have a varying difficulty reflecting the
-/// address behaviour and trust in the user.  The difficulty required by the server for any packet
-/// is the higher of the global and session values.
-///
-/// The POW contains a code, which also has a global and session value.  The global value can be
-/// changed in response to a DOS attack, and shared to peers via sessions, and/or via a side
-/// channel to users.  The global value is only used in initial session-establishing HREQ1
-/// messages, and thus is called a prime code.
-///
-/// The server listens to both external UDP messages (defined by the `Syntax`) and internal
-/// messages of type `M` via a `Simplex` channel. 
-#[derive(Debug)]
-pub struct ServerBot<
-    const BIDL: usize,
-    const C: usize,
-    const MIDL: usize,
-    const SIDL: usize,
-    const UIDL: usize,
-    BID:    NumIdDat<BIDL>,
-    MID:    NumIdDat<MIDL>,
-    SID:    NumIdDat<SIDL>,
-    UID:    NumIdDat<UIDL>,
-	WENC:   Encrypter,
-	WCS:    Checksummer,
-	POWH:   Hasher + 'static,
-	SGN:    Signer + 'static,
-	HS:     Encrypter,
-> {
-    // Bot
-    pub id:         IdDat<BIDL, BID>,
-    pub protocol:   Protocol<WENC, WCS, POWH, SGN, HS>,
-    pub sem:        Semaphore,
-    pub errc:       Arc<Mutex<usize>>,
-    pub inited:     bool,
-    pub chan_in:    Simplex<ServerMsg>,
-    //pack_sigkeys:   Arc<BTreeMap<Vec<u8>, SecretKey>>, // My packet digital signature keys.
-    //msg_sigkeys:    Arc<BTreeMap<Vec<u8>, SecretKey>>, // My message digital signature keys.
-    pub rxenv:      RxEnv<C, SIDL, SID, POWH, SGN>,
-    pub pack_size:  usize,
-    pub sock:       UdpSocket,
-    pub sock_addr:  SocketAddr,
-    pub ma_gc_last: Instant,
-    pub ma_gc_int:  Duration,
-    pub phantom1:   PhantomData<MID>,
-    pub phantom2:   PhantomData<UID>,
-}
-
-impl<
-    const BIDL: usize,
-    const C: usize,
-    const MIDL: usize,
-    const SIDL: usize,
-    const UIDL: usize,
-    BID:    NumIdDat<BIDL> + 'static,
-    MID:    NumIdDat<MIDL> + 'static,
-    SID:    NumIdDat<SIDL> + 'static,
-    UID:    NumIdDat<UIDL> + 'static,
-	WENC:   Encrypter + 'static,
-	WCS:    Checksummer + 'static,
-	POWH:   Hasher + 'static,
-	SGN:    Signer + 'static,
-	HS:     Encrypter + 'static,
->
-    Bot<BIDL, BID, ServerMsg> for
-    ServerBot<BIDL, C, MIDL, SIDL, UIDL, BID, MID, SID, UID, WENC, WCS, POWH, SGN, HS>
-{
-    fn id(&self)        -> BID                  { *self.id }
-    fn errc(&self)      -> &Arc<Mutex<usize>>   { &self.errc }
-    fn chan_in(&self)   -> &Simplex<ServerMsg>  { &self.chan_in }
-    fn label(&self)     -> String               { fmt!("Shield Server {:?}", self.id()) }
-    fn err_count_warning(&self) -> usize        { constant::SERVER_BOT_ERROR_COUNT_WARNING }
-
-    fn set_chan_in(&mut self, chan_in: Simplex<ServerMsg>) {
-        self.chan_in = chan_in;
-    }
-
-
-    fn init(&mut self) -> Outcome<()> {
-        info!("{}: Now listening on UDP at {:?}.",
-            self.label(), res!(self.sock.local_addr()),
-        );
-        self.inited = true;
-        Ok(())
-    }
-
-    fn go(&mut self) {
-        if !self.inited {
-            error!(err!(
-                "Attempt to start {} before running init().", self.label();
-                Init, Missing));
-        } else {
-            debug!("HELLO");
-            match tokio::runtime::Runtime::new() {
-                Err(e) => error!(err!(e,
-                    "Failed to start Tokio runtime.";
-                    Init)),
-                Ok(rt) => rt.block_on(async {
-                    self.now_listening();
-                    loop {
-                        if self.async_listen().await.must_end() { break; }
-                    }
-                }),
-            }
-        }
-    }
-
-}
-
-impl<
-    const BIDL: usize,
-    const C: usize,
-    const MIDL: usize,
-    const SIDL: usize,
-    const UIDL: usize,
-    BID:    NumIdDat<BIDL> + 'static,
-    MID:    NumIdDat<MIDL> + 'static,
-    SID:    NumIdDat<SIDL> + 'static,
-    UID:    NumIdDat<UIDL> + 'static,
-	WENC:   Encrypter + 'static,
-	WCS:    Checksummer + 'static,
-	POWH:   Hasher + 'static,
-	SGN:    Signer + 'static,
-	HS:     Encrypter + 'static,
->
-    ServerBot<BIDL, C, MIDL, SIDL, UIDL, BID, MID, SID, UID, WENC, WCS, POWH, SGN, HS>
-{
-    pub fn start(mut self, sentinel: Sentinel) -> Outcome<Handle<()>> {
-        let id_string = self.id().to_string();
-        let builder = thread::Builder::new()
-            .name(id_string.clone())
-            .stack_size(constant::STACK_SIZE);
-        Ok(Handle::new(
-            id_string,
-            res!(builder.spawn(move || { self.go(); })),
-            sentinel,
-        ))
-    }
-
-    pub async fn async_listen(&mut self) -> LoopBreak {
-        // INTERNAL
-        match self.chan_in().recv_timeout(constant::SERVER_INT_CHANNEL_CHECK_INTERVAL) {
-            Recv::Empty => (),
-            Recv::Result(Err(e)) => self.err_cannot_receive(e),
-            Recv::Result(Ok(ServerMsg::Finish)) => {
-                trace!("Finish message received, {:?} finishing now.", self.id());
-                //if let Err(e) = self.chan_in().rev().send(ServerMsg::Finish) {
-                //    self.err_cannot_send(e, errmsg!("Attempt to return a finish message failed"));
-                //}
-                return LoopBreak(true);
-            },
-            Recv::Result(Ok(ServerMsg::Ready)) => {
-                info!("{:?} ready to receive messages now.", self.id());
-            },
-            //Recv::Result(Ok(ServerMsg::Marco(id::Mid::randef())) => {
-            //    trace!("{}: Ping received from owner, replying...", self.id());
-            //    if let Err(e) = self.chans().rev().send(ServerMsg::Polo) {
-            //        self.err_cannot_send(e, errmsg!("Attempt to return a ping failed"));
-            //    }
-            //},
-            //Recv::Result(Ok(ServerMsg::Polo(mid))) => {
-            //    trace!("{}: Ping received from owner, replying...", self.id());
-            //    if let Err(e) = self.chans().rev().send(ServerMsg::Polo) {
-            //        self.err_cannot_send(e, errmsg!("Attempt to return a ping failed"));
-            //    }
-            //},
-            //Recv::Result(Ok(msg)) => error!(err!(fmt!(
-            //    "{}: Message {:?} not recognised.", self.id(), msg,
-            //), Invalid, Input)),
-        }
-
-        let mut buf = [0u8; constant::UDP_BUFFER_SIZE]; 
-        // EXTERNAL
-        match self.sock.recv_from(&mut buf) { // Receive udp packet, non-blocking.
-            Err(e) => {
-                //match self.timer.write() {
-                //    Err(e) => self.error(err!(
-                //        "While locking timer for writing: {}.", e), Poisoned)),
-                //    Ok(mut unlocked_timer) => { unlocked_timer.update(); },
-                //}
-                ////self.timer.update();
-                match e.kind() {
-                    io::ErrorKind::WouldBlock | io::ErrorKind::InvalidInput => (),
-                    _ => self.err_cannot_receive(Error::from(e)),
-                }
-            },
-            Ok((n, src_addr)) => {
-                let rxenv = self.rxenv.clone();
-                let handle = task::spawn(rxenv.process::<MIDL, UIDL, MID, UID>(
-                    buf,
-                    n,
-                    src_addr,
-                    self.protocol.schms.syntax.clone(), // Arc
-                ));
-                match handle.await {
-                    Ok(result) => self.result(&result),
-                    Err(e) => self.error(err!(e,
-                        "While waiting for request processor to finish"; Thread)),
-                }
-            },
-        } // Receive udp packet.
-
-        // Message assembly garbage collection.
-        if self.ma_gc_last.elapsed() > self.ma_gc_int {
-            let result = self
-                .rxenv.massembler
-                .message_assembly_garbage_collection(&self.rxenv.ma_params);
-            self.result(&result);
-            self.ma_gc_last = Instant::now();
-        }
-
-        LoopBreak(false)
     }
 }
