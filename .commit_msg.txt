@@ -1,1 +1,0 @@
-Added .commit_msg.txt to .gitignore.
