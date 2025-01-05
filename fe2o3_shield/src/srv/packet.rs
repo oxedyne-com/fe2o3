@@ -362,7 +362,7 @@ impl PacketValidationArtefactRelativeIndices {
 #[derive(Clone, Debug, Default)]
 pub struct PacketValidator<
     // Proof of work validation.
-    H: Hasher + Send + 'static, // Proof of work hasher.
+    H: Hasher, // Proof of work hasher.
     //const N: usize, // Pristine + Nonce size.
     //const P0: usize, // Length of pristine prefix bytes (i.e. not included in artefact).
     //const P1: usize, // Length of pristine bytes (i.e. included in artefact).

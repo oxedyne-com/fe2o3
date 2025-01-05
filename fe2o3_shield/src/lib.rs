@@ -17,5 +17,3 @@
 #![forbid(unsafe_code)]
 pub mod srv;
 pub mod app;
-
-pub use crate::srv::core::Shield;

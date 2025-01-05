@@ -1,23 +1,22 @@
 use crate::{
     app::{
         constant as app_const,
-        //https::AppWebHandler,
         repl::AppShellContext,
     },
     srv::{
         cfg::ServerConfig,
         constant as srv_const,
-        context::{
-            Protocol,
-            ServerContext,
-        },
-        id,
+        context::ServerContext,
+        msg::syntax as srv_syntax,
+        protocol::Protocol,
+        schemes::WireSchemesInput,
         server::Server,
     },
 };
 
 use oxedize_fe2o3_core::{
     prelude::*,
+    alt::Alt,
     log::{
         bot::FileConfig,
         console::{
@@ -27,9 +26,19 @@ use oxedize_fe2o3_core::{
     },
     path::NormalPath,
 };
+use oxedize_fe2o3_crypto::{
+    enc::EncryptionScheme,
+    sign::SignatureScheme,
+};
+use oxedize_fe2o3_hash::{
+    csum::ChecksumScheme,
+    hash::HashScheme,
+};
 use oxedize_fe2o3_jdat::{
     prelude::*,
+    cfg::Config,
 };
+use oxedize_fe2o3_net::id;
 use oxedize_fe2o3_syntax::{
     msg::{
         MsgCmd,
@@ -43,14 +52,14 @@ use oxedize_fe2o3_tui::{
 };
 
 use std::{
-    collections::HashMap,
     path::{
         Path,
         PathBuf,
     },
-    sync::Arc,
     time::Duration,
 };
+
+use tokio;
 
 
 impl AppShellContext {
@@ -66,8 +75,9 @@ impl AppShellContext {
             .normalise() // Now a NormPathBuf.
             .absolute();
         debug!("Reading server config...");
-        let server_cfg = res!(ServerConfig::from_datmap(self.app_cfg.server_cfg.clone()));
+        let mut server_cfg = res!(ServerConfig::from_datmap(self.app_cfg.server_cfg.clone()));
         info!("Validating server config...");
+        res!(server_cfg.check_and_fix());
         res!(server_cfg.validate(&root_path));
 
         // ┌───────────────────────┐
@@ -77,8 +87,7 @@ impl AppShellContext {
         if let Some(msg_cmd) = cmd {
             if msg_cmd.has_arg("dev") {
                 test_mode = true;
-                info!("Running in development mode with self-signed certificates.");
-                res!(dev_cfg.validate(&root_path));
+                info!("Running in test mode.");
             }
         }
 
@@ -127,62 +136,27 @@ impl AppShellContext {
         info!("{} ping replies received in {:?}.", msgs.len(), start.elapsed());
 
         // ┌───────────────────────┐
-        // │ Use self-signed       │
-        // │ certificates.         │
-        // └───────────────────────┘
-        let (tls_dir, cert_path, key_path) = res!(server_cfg.get_tls_paths(&root_path, test_mode));
-        debug!("tls_dir = {:?}", tls_dir);
-        debug!("cert_path = {:?}", cert_path);
-        debug!("key_path = {:?}", key_path);
-        let domains = res!(server_cfg.get_domain_names());
-
-        if !cert_path.exists() || !key_path.exists() {
-            if test_mode {
-                info!("Development certificates not found - generating self-signed certificates.");
-                res!(Certificate::new_dev(
-                    &server_cfg,
-                    &root_path,
-                ));
-            } else {
-                info!("Production certificates not found - generating self-signed certificates.");
-                res!(Certificate::new_lets_encrypt(
-                    &domains,
-                    &tls_dir,
-                ));
-            }
-        }
-
-        if test_mode {
-            info!("Connect via: https://localhost:{}", server_cfg.server_port_tcp);
-        } else {
-            info!("Connect via: https://{}", domains[0].as_str());
-        }
-
-        // ┌───────────────────────┐
-        // │ Refresh the css and   │
-        // │ javascript bundles.   │
-        // └───────────────────────┘
-        let js_bundles_map = res!(dev_cfg.get_js_bundles_map(&root_path));
-        let js_import_aliases = res!(dev_cfg.get_js_import_aliases(&root_path));
-        let css_paths = res!(dev_cfg.get_css_paths(&root_path));
-        let refresh_manager = Arc::new(DevRefreshManager::new(
-            &root_path,
-            js_bundles_map,
-            js_import_aliases,
-            css_paths,
-        ));
-        res!(refresh_manager.refresh());
-
-        // ┌───────────────────────┐
         // │ Start server.         │
         // └───────────────────────┘
         
-        let protocol = Protocol::Web {
-            web_handler,
-            ws_handler,
-            ws_syntax,
+        let chunk_cfg = ServerConfig::new_chunk_cfg(1_000, 200, true, true);
+
+        let protocol = res!(Protocol::new(
+            &server_cfg,
+            WireSchemesInput {
+                enc:    Alt::Specific(None::<EncryptionScheme>),
+                csum:   Alt::Specific(None::<ChecksumScheme>),
+                powh:   Alt::Specific(None::<HashScheme>),
+                sign:   Alt::Specific(Some(SignatureScheme::new_ed25519())),
+                hsenc:  Alt::Specific(None::<EncryptionScheme>),
+                chnk:   Some(chunk_cfg),
+            },
+            [0u8; 8],
+            id::Mid::default(),
+            id::Sid::default(),
+            id::Uid::default(),
             test_mode,
-        };
+        ));
 
         let server_context = ServerContext::new(
             server_cfg,
@@ -191,20 +165,21 @@ impl AppShellContext {
             protocol,
         );
 
-        let server = Server::new(server_context);
+        let syntax = res!(srv_syntax::base_msg());
+        let mut server = Server::new(server_context, syntax.clone());
+        let rt = res!(tokio::runtime::Runtime::new());
 
         info!("Starting server...");
         for line in srv_const::SPLASH.lines() {
             info!("{}", line);
         }
 
-        //match rt.block_on(server.start()) {
-        //    Ok(()) => info!("Server stopped gracefully."),
-        //    Err(e) => error!(Error::Upstream(Arc::new(e), ErrMsg {
-        //        tags: &[ErrTag::IO, ErrTag::Thread],
-        //        msg: fmt!("Result of the attempt to execute the server within the Tokio runtime."),
-        //    })),
-        //}
+        match rt.block_on(server.start()) {
+            Ok(()) => info!("Server stopped gracefully."),
+            Err(e) => error!(err!(e,
+                "While running server within tokio runtime.";
+                IO, Thread)),
+        }
 
         log_finish_wait!();
 

@@ -106,3 +106,26 @@ pub const SALT32: [u8; 32] = [
     0xf9, 0x65, 0x4f, 0x04, 0xca, 0xd5, 0x8b, 0x73,
     0xb2, 0xfa, 0x72, 0x39, 0x21, 0x6b, 0x6c, 0x5f,
 ];
+
+// Credits:
+// Image: https://ascii-generator.site/
+// Text: https://www.asciiart.eu/text-to-ascii-art Nancyj Improved with touch ups.
+pub const SPLASH: &'static str =
+r#"
+                -
+             *******          
+        *****************     
+   ***************************
+   ***=:::::::::::::::::::=***     88888888b                  .o88888o.         
+   ***:                  :+***     88                        d8'     `8b        
+   *******+=.       .=+*******     88aaaa   .d8888b.         88       88        
+   **********       **********     88       88ooood8 d8888b. 88       88 d8888b.
+    ********=       =********      88       88.  ...     `88 Y8.     .8P     `88
+    *****+:.  .---.  .:+*****      dP       `88888P' .aaadP'  `888888P'   aaad8'
+     ****+   -*****-   =****                         88'                     `88
+      ****---*******---****                          Y88888P             d88888P
+        *****************                                     
+           ***********                                          
+               '"'                                    Shield Protocol and Server
+   
+"#;

@@ -25,7 +25,7 @@ pub struct AppConfig {
     pub app_log_level:      String,
     pub kdf_name:           String,
     pub enc_name:           String,
-    pub shield_cfg:         DaticleMap,
+    pub server_cfg:         DaticleMap,
 }
 
 impl Config for AppConfig {
@@ -46,7 +46,7 @@ impl Default for AppConfig {
             app_log_level:      fmt!("debug"),
             kdf_name:           fmt!("Argon2id_v0x13"),
             enc_name:           fmt!("AES-256-GCM"),
-            shield_cfg:         DaticleMap::new(),
+            server_cfg:         DaticleMap::new(),
         }
     }
 }
@@ -56,7 +56,7 @@ impl AppConfig {
     pub fn new() -> Outcome<Self> {
         let mut cfg = Self::default();
         cfg.app_root = fmt!("{}", res!(std::env::current_dir()).display());
-        cfg.shield_cfg = try_extract_dat!(
+        cfg.server_cfg = try_extract_dat!(
             ServerConfig::to_datmap(ServerConfig::default()),
             Map,
         );
@@ -64,12 +64,12 @@ impl AppConfig {
     }
 
     pub fn server_log_level(&self) -> Outcome<(LogLevel, String)> {
-        let level_str = if let Some(dat) = self.shield_cfg.get(&dat!("log_level")) {
+        let level_str = if let Some(dat) = self.server_cfg.get(&dat!("log_level")) {
             try_extract_dat!(dat, Str)
         } else {
             return Err(err!(
                 "Log level key not found in server configuration: {:?}.",
-                self.shield_cfg;
+                self.server_cfg;
             Configuration, Missing, Key));
         };
         let level = res!(LogLevel::from_str(&level_str));

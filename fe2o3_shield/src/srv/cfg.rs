@@ -1,6 +1,5 @@
 use crate::srv::{
     constant,
-    msg::syntax,
     //packet::PacketValidator,
     //schemes::{
     //    WireSchemes,
@@ -9,6 +8,7 @@ use crate::srv::{
 
 use oxedize_fe2o3_core::{
     prelude::*,
+    path::NormPathBuf,
     //alt::DefAlt,
 };
 use oxedize_fe2o3_crypto::sign::SignatureScheme;
@@ -39,11 +39,9 @@ use oxedize_fe2o3_hash::{
 //    api::Hasher,
 //    csum::Checksummer,
 //};
-use oxedize_fe2o3_syntax::core::SyntaxRef;
 
 use std::{
     collections::BTreeMap,
-    sync::Arc,
 };
 
 
@@ -113,14 +111,23 @@ impl Default for ServerConfig {
 
 impl ServerConfig {
 
+    pub fn validate(
+        &self,
+        _root: &NormPathBuf,
+    )
+        -> Outcome<()>
+    {
+        Ok(())
+    }
+
     pub fn try_default() -> Outcome<Self> {
         Ok(Self::default())
     }
 
-    pub fn syntax_default() -> Outcome<SyntaxRef> {
-        let syntax = SyntaxRef(Arc::new(res!(syntax::build())));
-        Ok(syntax)
-    }
+    //pub fn syntax_default() -> Outcome<SyntaxRef> {
+    //    let syntax = SyntaxRef(Arc::new(res!(syntax::build())));
+    //    Ok(syntax)
+    //}
 
     /// Hard-wired default proof of work hash scheme.
     pub fn default_packet_pow_hash_scheme() -> Option<HashScheme> {

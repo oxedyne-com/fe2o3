@@ -7,6 +7,13 @@ license = "BSD-2-Clause/Apache-2.0"
 description = "Hematite library for the Signed Hash In Every Little Datagram (SHIELD) networking protocol."
 repository = "https://github.com/Oxedize/fe2o3"
 
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "shield"
+path = "src/main.rs"
+
 [dependencies]
 oxedize_fe2o3_bot 				= { path = "../fe2o3_bot" }
 oxedize_fe2o3_core 				= { path = "../fe2o3_core" }
@@ -36,6 +43,7 @@ local-ip-address = "0.5.6"
 num_cpus = "1.0"
 rand = "0.8.5"
 rand_core = { version = "0.6.3", features = ["std"] }
+tokio = { version = "1", features = ["full"] }
 
 [dev-dependencies]
 oxedize_fe2o3_test 				= { path = "../fe2o3_test" }

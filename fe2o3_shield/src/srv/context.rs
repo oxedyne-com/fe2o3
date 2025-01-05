@@ -1,11 +1,10 @@
 use crate::srv::{
     cfg::ServerConfig,
-    id,
+    protocol::Protocol,
 };
 
 use oxedize_fe2o3_core::{
     prelude::*,
-    id::ParseId,
     path::NormPathBuf,
     rand::Rand,
 };
@@ -24,29 +23,16 @@ use oxedize_fe2o3_iop_hash::{
     csum::Checksummer,
 };
 use oxedize_fe2o3_jdat::id::NumIdDat;
-use oxedize_fe2o3_net::{
-    http::{
-        handler::WebHandler,
-        msg::HttpMessage,
-    },
-    id::Sid,
-    //smtp::handler::EmailHandler,
-    ws::{
-        WebSocket,
-        handler::WebSocketHandler,
-    },
-};
+use oxedize_fe2o3_net::id;
 use oxedize_fe2o3_o3db::{
     O3db,
     base::cfg::OzoneConfig,
     data::core::RestSchemesInput,
 };
-use oxedize_fe2o3_syntax::core::SyntaxRef;
 
 use std::{
     collections::BTreeMap,
     marker::PhantomData,
-    net::SocketAddr,
     path::Path,
     sync::{
         Arc,
@@ -56,21 +42,14 @@ use std::{
 
 
 #[derive(Clone, Debug)]
-pub struct Protocol<
-    // Data on the wire
-	WENC:   Encrypter,      // Symmetric encryption of data on the wire.
-	WCS:    Checksummer,    // Checks integrity of data on the wire.
-    POWH:   Hasher,         // Packet validation proof of work hasher.
-	SGN:    Signer,         // Digitally signs wire packets.
-	HS:     Encrypter,      // Asymmetric encryption of symmetric encryption key during handshake.
-> {
-    pub cfg:    ServerConfig,
-    pub schms:  WireSchemes<WENC, WCS, POWH, SGN, HS>,
-}
-
 pub struct ServerContext<
+    const C: usize, // Length of user secret pow code.
+    const MIDL: usize,
+    const SIDL: usize,
     const UIDL: usize,
-    UID:    NumIdDat<UIDL> + 'static,
+    MID:    NumIdDat<MIDL>,
+    SID:    NumIdDat<SIDL>,
+    UID:    NumIdDat<UIDL>,
     // Database
     ENC:    Encrypter,      // Symmetric encryption of database.
     KH:     Hasher,         // Hashes database keys.
@@ -78,21 +57,26 @@ pub struct ServerContext<
     // Wire
 	WENC:   Encrypter,
 	WCS:    Checksummer,
-    POWH:   Hasher + 'static,
-	SGN:    Signer + 'static,
+    POWH:   Hasher,
+	SGN:    Signer,
 	HS:     Encrypter,
 > {
     pub cfg:        ServerConfig,
     pub root:       NormPathBuf,
     pub db:         Option<(Arc<RwLock<DB>>, UID)>,
-    pub protocol:   Protocol<WENC, WCS, POWH, SGN, HS>,
+    pub protocol:   Protocol<C, MIDL, SIDL, UIDL, MID, SID, UID, WENC, WCS, POWH, SGN, HS>,
     phantom3:       PhantomData<ENC>,
     phantom4:       PhantomData<KH>,
 }
 
 impl<
+    const C: usize,
+    const MIDL: usize,
+    const SIDL: usize,
     const UIDL: usize,
-    UID:    NumIdDat<UIDL> + 'static,
+    MID:    NumIdDat<MIDL>,
+    SID:    NumIdDat<SIDL>,
+    UID:    NumIdDat<UIDL>,
     // Database
     ENC:    Encrypter + 'static,
     KH:     Hasher + 'static,
@@ -104,57 +88,29 @@ impl<
 	SGN:    Signer + 'static,
 	HS:     Encrypter + 'static,
 >
-    Clone for ServerContext<UIDL, UID, ENC, KH, DB, WENC, WCS,POWH, SGN, HS>
-{
-    fn clone(&self) -> Self {
-        Self {
-            cfg:        self.cfg.clone(),
-            root:       self.root.clone(),
-            db:         self.db.clone(),
-            protocol:   self.protocol.clone(),
-            phantom3:   PhantomData,
-            phantom4:   PhantomData,
-        }
-    }
-}
-
-impl<
-    const UIDL: usize,
-    UID:    NumIdDat<UIDL> + 'static,
-    // Database
-    ENC:    Encrypter + 'static,
-    KH:     Hasher + 'static,
-    DB:     Database<UIDL, UID, ENC, KH> + 'static, 
-    // Wire
-	WENC:   Encrypter + 'static,
-	WCS:    Checksummer + 'static,
-    POWH:   Hasher + 'static,
-	SGN:    Signer + 'static,
-	HS:     Encrypter + 'static,
->
-    ServerContext<UIDL, UID, ENC, KH, DB, WENC, WCS,POWH, SGN, HS>
+    ServerContext<C, MIDL, SIDL, UIDL, MID, SID, UID, ENC, KH, DB, WENC, WCS, POWH, SGN, HS>
 {
     pub fn new(
         cfg:        ServerConfig,
         root:       NormPathBuf,
         db:         Option<(DB, UID)>,
-        protocol:   Protocol<WENC, WCS, POWH, SGN, HS>,
+        protocol:   Protocol<C, MIDL, SIDL, UIDL, MID, SID, UID, WENC, WCS, POWH, SGN, HS>,
     )
         -> Self
     {
         Self {
             cfg,
             root,
-            db:         db.map(|(db, uid)| (Arc::new(RwLock::new(db)), uid)),
+            db: db.map(|(db, uid)| (Arc::new(RwLock::new(db)), uid)),
             protocol,
             phantom3:   PhantomData,
             phantom4:   PhantomData,
         }
     }
 
-    pub fn clone_self(&self) -> Self {
-        self.clone()
-    }
+    //pub fn clone_self(&self) -> Self {
+    //    self.clone()
+    //}
 
     pub fn err_id() -> String {
         Rand::generate_random_string(6, "abcdefghikmnpqrstuvw0123456789")

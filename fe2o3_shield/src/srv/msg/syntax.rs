@@ -189,18 +189,14 @@ use std::{
     },
 };
 
-pub fn empty() -> Syntax {
-    Syntax::from(SyntaxConfig {
+pub fn base_msg() -> Outcome<SyntaxRef> {
+
+    let mut s = Syntax::from(SyntaxConfig {
         name:   fmt!("Shield Protocol"),
         ver:    constant::VERSION.clone(),
-        about:  Some(fmt!("Signature and Hash In Every Little Datagram (SHIELD)")),
+        about:  Some(fmt!("Signed Hash In Every Little Datagram (SHIELD)")),
         ..Default::default()
-    })
-}
-
-pub fn build() -> Outcome<Syntax>
-{
-    let mut p = empty();
+    });
 
     // Reusable components ====================================================
     //
@@ -279,11 +275,11 @@ pub fn build() -> Outcome<Syntax>
 
     // Message arguments ======================================================
     //
-    //p = res!(p.add_arg(arg_uid.clone().required(true)));
-    //p = res!(p.add_arg(arg_pow_zbits.clone().required(true)));
-    //p = res!(p.add_arg(arg_pow_code.clone().required(true)));
-    p = res!(p.add_arg(arg_sid.clone().required(false)));
-    p = res!(p.add_arg(arg_pow_zbits.clone().required(true)));
+    //s = res!(s.add_arg(arg_uid.clone().required(true)));
+    //s = res!(s.add_arg(arg_pow_zbits.clone().required(true)));
+    //s = res!(s.add_arg(arg_pow_code.clone().required(true)));
+    s = res!(s.add_arg(arg_sid.clone().required(false)));
+    s = res!(s.add_arg(arg_pow_zbits.clone().required(true)));
 
     // HReq1 ==================================================================
     //
@@ -293,7 +289,7 @@ pub fn build() -> Outcome<Syntax>
         ..Default::default()
     });
     c = res!(c.add_arg(arg_your_pack_sign_pk.clone())); // My version of your signature public key.
-    p = res!(p.add_cmd(c));
+    s = res!(s.add_cmd(c));
 
     // HResp1 =================================================================
     //
@@ -311,7 +307,7 @@ pub fn build() -> Outcome<Syntax>
     //});
     c = res!(c.add_arg(arg_pow_zbits.clone().required(true)));
     c = res!(c.add_arg(arg_your_pack_sign_pk)); // My version of your signature public key.
-    p = res!(p.add_cmd(c));
+    s = res!(s.add_cmd(c));
 
     // HReq2 ==================================================================
     //
@@ -322,7 +318,7 @@ pub fn build() -> Outcome<Syntax>
     });
     //c = res!(c.add_arg(arg_sign_pk.clone().required(false)));
     //c = res!(c.add_arg(arg_sign.clone().required(true)));
-    p = res!(p.add_cmd(c));
+    s = res!(s.add_cmd(c));
 
     // HResp2 =================================================================
     //
@@ -340,10 +336,9 @@ pub fn build() -> Outcome<Syntax>
         ..Default::default()
     });
     c = res!(c.add_arg(arg_skey_enc.required(true)));
-    p = res!(p.add_cmd(c));
+    s = res!(s.add_cmd(c));
 
-    Ok(p)
-
+    Ok(SyntaxRef::new(s))
 }
 
 /// The MsgFmt captures the syntax protocol against which incoming and outgoing messages are
