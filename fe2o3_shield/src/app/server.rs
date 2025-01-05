@@ -26,14 +26,8 @@ use oxedize_fe2o3_core::{
     },
     path::NormalPath,
 };
-use oxedize_fe2o3_crypto::{
-    enc::EncryptionScheme,
-    sign::SignatureScheme,
-};
-use oxedize_fe2o3_hash::{
-    csum::ChecksumScheme,
-    hash::HashScheme,
-};
+use oxedize_fe2o3_crypto::enc::EncryptionScheme;
+use oxedize_fe2o3_hash::csum::ChecksumScheme;
 use oxedize_fe2o3_jdat::{
     prelude::*,
     cfg::Config,
@@ -146,8 +140,8 @@ impl AppShellContext {
             WireSchemesInput {
                 enc:    Alt::Specific(None::<EncryptionScheme>),
                 csum:   Alt::Specific(None::<ChecksumScheme>),
-                powh:   Alt::Specific(None::<HashScheme>),
-                sign:   Alt::Specific(Some(SignatureScheme::new_ed25519())),
+                powh:   Alt::Specific(ServerConfig::default_packet_pow_hash_scheme()),
+                sign:   Alt::Specific(ServerConfig::default_packet_signature_scheme()),
                 hsenc:  Alt::Specific(None::<EncryptionScheme>),
                 chnk:   Some(chunk_cfg),
             },

@@ -53,6 +53,7 @@ pub struct ServerConfig {
     pub wire_chunk_threshold:           u64, // applies only to values
     pub wire_chunk_bytes:               u64,
     // Server
+    pub log_level:                      String,
     pub server_address:                 String,
     pub server_port_udp:                u16,
     pub server_port_tcp:                u16,
@@ -90,6 +91,7 @@ impl Default for ServerConfig {
             wire_chunk_threshold:           1_500,
             wire_chunk_bytes:               1_000,
             // Server
+            log_level:                      fmt!("debug"),
             server_address:                 fmt!("127.0.0.1"),
             server_port_udp:                60000, // numeric keypad mapping for "o3db"
             server_port_tcp:                60000,

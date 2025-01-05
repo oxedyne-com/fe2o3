@@ -116,7 +116,7 @@ pub fn run() -> Outcome<()> {
         app_status.first = true;
         let mut cfg = res!(AppConfig::new());
 
-        println!("Welcome to the Hematite Steel Server, this appears to be a new app.");
+        println!("Welcome to the Hematite Shield Server, this appears to be a new app.");
         println!("You'll now be asked to enter a human name and a description...");
         for (field, prompt) in [
             (&mut cfg.app_human_name, "App human name"),

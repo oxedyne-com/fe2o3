@@ -63,7 +63,7 @@ pub fn new_shell(
     // ---------------------------------------------------------------------------------------------
     let mut cmd = Cmd::from(CmdConfig {
         name:   fmt!("server"),
-        help:   Some(fmt!("Start the app HTTPS server")),
+        help:   Some(fmt!("Start a UDP server instance")),
         cat:    fmt!("Control"),
         ..Default::default()
     });
