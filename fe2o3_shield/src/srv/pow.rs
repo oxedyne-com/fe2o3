@@ -68,6 +68,7 @@ pub struct PowPristine<
 > {
     pub code:       [u8; C],
     pub src_addr:   IpAddr,
+    pub trg_addr:   IpAddr,
     pub timestamp:  Duration,
     pub time_horiz: u64,
 }
@@ -83,6 +84,7 @@ impl<
         Self {
             code:       [0; C],
             src_addr:   IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            trg_addr:   IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             timestamp:  Duration::ZERO,
             time_horiz: 600,
         }
@@ -116,22 +118,23 @@ impl<
                 Bug, Input, TooSmall));
         }
         let mut i: usize = 0;
-        let addr = self.src_addr;
-        match addr {
-            IpAddr::V4(addr) => {
-                for _ in 0..4 {
+        for addr in [self.src_addr, self.trg_addr] {
+            match addr {
+                IpAddr::V4(addr) => {
+                    for _ in 0..4 { // Padded via 4 x copies.
+                        for b in addr.octets() {
+                            byts[i] = b;
+                            i += 1;
+                        }
+                    }
+                },
+                IpAddr::V6(addr) => {
                     for b in addr.octets() {
                         byts[i] = b;
                         i += 1;
                     }
-                }
-            },
-            IpAddr::V6(addr) => {
-                for b in addr.octets() {
-                    byts[i] = b;
-                    i += 1;
-                }
-            },
+                },
+            }
         }
         for b in self.code {
             byts[i] = b;
@@ -195,14 +198,26 @@ impl<
 
     pub fn trace(&self) -> Outcome<()> {
         let byts = res!(self.to_bytes());
-        trace!("\nPrefix   [{:>4}]: {:02x?}\
-            \n  Addr   [{:>4}]: {:02x?}\
-            \n  Code   [{:>4}]: {:02x?}\
+    
+        // P0 = 2*ADDR_LEN + C
+        // So if we work backwards from P0:
+        // code_start = P0 - C
+        // trg_start = P0 - C - ADDR_LEN
+        // src_start = P0 - C - 2*ADDR_LEN (which is 0)
+    
+        let code_start = P0 - C;
+        let trg_start = P0 - C - Self::ADDR_LEN;
+    
+        trace!("\nPrefix  [{:>4}]: {:02x?}\
+            \n  SrcAddr [{:>4}]: {:02x?}\
+            \n  TrgAddr [{:>4}]: {:02x?}\
+            \n  Code    [{:>4}]: {:02x?}\
             \nArtefact [{:>4}]: {:02x?}\
-            \n  Time   [{:>4}]: {:02x?}",
+            \n  Time    [{:>4}]: {:02x?}",
             P0, &byts[..P0],
-            P0-C, &byts[..P0-C],
-            C, self.code,
+            Self::ADDR_LEN, &byts[..Self::ADDR_LEN],
+            Self::ADDR_LEN, &byts[trg_start..code_start],
+            C, &byts[code_start..P0],
             P1-P0, &byts[P0..],
             P1-P0, &byts[P0..],
         );

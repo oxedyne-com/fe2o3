@@ -23,7 +23,6 @@ oxedize_fe2o3_text					= { path = "../fe2o3_text" }
 
 base64 = "0.13.0"
 chrono = "0.4"
-lettre = "0.10.0-rc.3"
 secrecy = "0.8.0"
 sha1 = "0.10.6"
 strum = { version = "0.25", features = ["derive"] }

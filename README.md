@@ -80,6 +80,12 @@ The crates can be organised by their level of internal cross-dependencies, curre
 
 Hematite is currently available via [GitHub]("https://github.com/Oxedize/fe2o3.git") and version 0.9.0 will be available on [crates.io](crates.io). You can use it in several ways:
 
+### Installation
+
+Note that Hematite is developed on linux.  Compilation of C static libraries for the post quantum cryptography scheme SABRE reference implementation (for testing) requires OpenSSL.  On ubuntu:
+
+    sudo apt-get install libssl-dev
+
 ### From GitHub
 
 For the latest development version, use git dependencies:

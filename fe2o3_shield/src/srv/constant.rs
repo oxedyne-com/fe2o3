@@ -49,11 +49,10 @@ pub const POW_CODE_LEN:                     usize = 8;
 pub const POW_ADDR_LEN:                     usize = 16;
 pub const POW_TIMESTAMP_LEN:                usize = 8;
 pub const POW_PREFIX_LEN: usize = 
-    POW_ADDR_LEN
+    2 * POW_ADDR_LEN
     + POW_CODE_LEN;
 pub const POW_PREIMAGE_LEN: usize = 
-    POW_ADDR_LEN
-    + POW_CODE_LEN
+    POW_PREFIX_LEN
     + POW_TIMESTAMP_LEN;
 pub const POW_INPUT_LEN: usize = 
     POW_PREIMAGE_LEN

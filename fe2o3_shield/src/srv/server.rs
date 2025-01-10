@@ -96,20 +96,20 @@ impl<
 
     pub async fn start(&mut self) -> Outcome<()> {
 
+        // Target (this machine).
         let port        = self.context.cfg.server_port_udp;
         let ip_addr     = res!(local_ip());
-        let sock_addr   = SocketAddr::new(ip_addr.clone(), port);
+        let trg_addr    = SocketAddr::new(ip_addr.clone(), port);
 
         info!("Server ip address = {}", ip_addr);
-        let sock = res!(UdpSocket::bind(sock_addr));
+        let trg = Arc::new(res!(UdpSocket::bind(trg_addr)));
 
         info!("test_mode = {}", self.context.protocol.test_mode);
-        info!("Listening on UDP at {:?}.", sock_addr);
+        info!("Listening on UDP at {:?}.", trg_addr);
     
         loop {
             let mut buf = [0u8; constant::UDP_BUFFER_SIZE]; 
-            // EXTERNAL
-            match sock.recv_from(&mut buf) { // Receive udp packet, non-blocking.
+            match trg.recv_from(&mut buf) { // Receive udp packet, non-blocking.
                 Err(e) => {
                     //match self.timer.write() {
                     //    Err(e) => self.error(err!(errmsg!(
@@ -128,6 +128,7 @@ impl<
                         buf,
                         n,
                         src_addr,
+                        trg.clone(),
                         self.syntax.clone(),
                     ));
                     match result.await {

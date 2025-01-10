@@ -1,14 +1,10 @@
 pub mod cfg;
-//pub mod core;
 pub mod constant;
 pub mod context;
 pub mod guard;
-//pub mod id;
-//pub mod keys;
 pub mod msg;
 pub mod packet;
 pub mod pow;
 pub mod protocol;
 pub mod schemes;
 pub mod server;
-//pub mod session;

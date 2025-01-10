@@ -16,22 +16,21 @@ use crate::srv::{
         },
     },
     msg::{
-        external::{
-            MsgAssembler,
-            MsgAssemblyParams,
-            MsgState,
-        },
-        syntax::{
-            HReq1,
+        core::{
             MsgFmt,
             MsgIds,
             MsgPow,
         },
-    },
-    packet::{
-        PacketMeta,
-        PacketValidationArtefactRelativeIndices,
-        PacketValidator,
+        handshake::HReq1,
+        packet::{
+            PacketMeta,
+            PacketValidationArtefactRelativeIndices,
+            PacketValidator,
+        },
+        protocol::{
+            Protocol,
+            ProtocolTypes,
+        },
     },
     pow::{
         DifficultyParams,
@@ -40,6 +39,7 @@ use crate::srv::{
     schemes::{
         WireSchemes,
         WireSchemesInput,
+        WireSchemeTypes,
     },
 };
 
@@ -88,7 +88,10 @@ use oxedize_fe2o3_text::string::Stringer;
 
 use std::{
     collections::BTreeMap,
-    net::SocketAddr,
+    net::{
+        SocketAddr,
+        UdpSocket,
+    },
     sync::{
         Arc,
         RwLock,
@@ -96,254 +99,33 @@ use std::{
 };
 
 
-/// Capture all necessary information, and nothing more, allowing a thread to process an incoming
-/// packet.  Rather than pass the entire struct atomically, use multiple interior atomic references
-/// to reduce sharing wait times.
-#[derive(Clone, Debug)]
-pub struct Protocol<
-    const C: usize,
-    const MIDL: usize,
-    const SIDL: usize,
-    const UIDL: usize,
-    MID:    NumIdDat<MIDL>,
-    SID:    NumIdDat<SIDL>,
-    UID:    NumIdDat<UIDL>,
-    // Data on the wire
-	WENC:   Encrypter,      // Symmetric encryption of data on the wire.
-	WCS:    Checksummer,    // Checks integrity of data on the wire.
-    POWH:   Hasher,         // Packet validation proof of work hasher.
-	SGN:    Signer,         // Digitally signs wire packets.
-	HS:     Encrypter,      // Asymmetric encryption of symmetric encryption key during handshake.
->{
-    // Let user define these generic parameters.
-    _code_template:     [u8; C],
-    _mid_template:      MID,
-    _sid_template:      SID,
-    _uid_template:      UID,
-
-    pub test_mode:      bool,
-    pub schms:          WireSchemes<WENC, WCS, POWH, SGN, HS>,
-
-    pub timer:          Arc<RwLock<RingTimer<{ constant::REQ_TIMER_LEN }>>>,
-    // Address protection.
-    pub agrd:           Arc<AddressGuard<
-                            { constant::AGRD_SHARDMAP_INIT_SHARDS },
-                            BTreeMap<
-                                HashForm,
-                                AddressLog<
-                                    { constant::REQ_TIMER_LEN },
-                                    { constant::MAX_ALLOWED_AVG_REQ_PER_SEC },
-                                    AddressData,
-                                >,
-                            >,
-                            HashScheme,
-                            { constant::GUARD_SHARDMAP_SALT_LEN },
-                            { constant::REQ_TIMER_LEN },
-                            { constant::MAX_ALLOWED_AVG_REQ_PER_SEC },
-                            AddressData,
-                        >>,
-    // User protection.
-    pub ugrd:           Arc<UserGuard<
-                            { constant::UGRD_SHARDMAP_INIT_SHARDS },
-                            BTreeMap<
-                                HashForm,
-                                UserLog<UserData<SIDL, C, SID>>,
-                            >,
-                            HashScheme,
-                            { constant::GUARD_SHARDMAP_SALT_LEN },
-                            UserData<SIDL, C, SID>,
-                        >>,
-    // Packet validation.
-    pub packval:        PacketValidator<
-                            HasherDefAlt<HashScheme, POWH>,
-                            SignerDefAlt<SignatureScheme, SGN>,
-                        >,
-    pub gpzparams:      DifficultyParams,
-    // Message assembly.
-    pub massembler:     Arc<MsgAssembler<
-                            { constant::MSG_ASSEMBLY_SHARDS },
-                            BTreeMap<HashForm, MsgState>,
-                            HashScheme,
-                            { constant::GUARD_SHARDMAP_SALT_LEN },
-                        >>,
-    pub ma_params:      MsgAssemblyParams,
-    // Policy configuration.
-    pub pow_time_horiz: u64,
-    pub accept_unknown: bool,
-}
-
 impl<
     const C: usize,
-    const MIDL: usize,
-    const SIDL: usize,
-    const UIDL: usize,
-    MID:    NumIdDat<MIDL>,
-    SID:    NumIdDat<SIDL>,
-    UID:    NumIdDat<UIDL>,
-	WENC:   Encrypter + 'static,
-	WCS:    Checksummer + 'static,
-    POWH:   Hasher + 'static,
-	SGN:    Signer + 'static,
-	HS:     Encrypter + 'static,
+    const ML: usize,
+    const SL: usize,
+    const UL: usize,
+    P: ProtocolTypes<ML, SL, UL>,
 >
-    Protocol<C, MIDL, SIDL, UIDL, MID, SID, UID, WENC, WCS, POWH, SGN, HS>
+    Protocol<C, ML, SL, UL>
 {
-    pub fn new(
-        cfg:            &ServerConfig,
-        schms_input:    WireSchemesInput<WENC, WCS, POWH, SGN, HS>,
-        _code_template: [u8; C],
-        _mid_template:  MID,
-        _sid_template:  SID,
-        _uid_template:  UID,
-        test_mode:      bool,
-    )
-        -> Outcome<Self>
-    {
-        // Establish wire schemes.  The incoming WireSchemesInput uses Alt fields, allowing schemes
-        // to be unspecified.  The protocol maintains a WireSchemes using DefAlt fields, which must
-        // be specified.
-        let no_chunker = schms_input.chnk.is_none();
-        let mut schms = WireSchemes::from(schms_input);
-        //// Initialise schemes using defaults.  Some of these can be updated in the config file.
-        //schms.powh = HasherDefAlt(res!(ServerConfig::read_hash_scheme(
-        //    &cfg.packet_pow_hash_scheme,
-        //    &*HasherDefAlt::from(schms.powh),
-        //    ServerConfig::default_packet_pow_hash_scheme,
-        //    "packet_pow_hash_scheme",
-        //)));
-        //schms.sign = SignerDefAlt(res!(ServerConfig::read_signature_scheme(
-        //    &cfg.packet_signature_scheme,
-        //    &*SignerDefAlt::from(schms.sign),
-        //    ServerConfig::default_packet_signature_scheme,
-        //    "packet_signature_scheme",
-        //)));
-        if no_chunker {
-            schms.chnk = cfg.chunk_config(); // Rather than ChunkCOnfig::default()
-        }
-
-        let agrd_map_init = BTreeMap::<
-            HashForm,
-            AddressLog<
-                { constant::REQ_TIMER_LEN },
-                { constant::MAX_ALLOWED_AVG_REQ_PER_SEC },
-                AddressData,
-            >,
-        >::new();
-
-        let agrd = Arc::new(AddressGuard {
-            amap: res!(ShardMap::<
-                {constant::AGRD_SHARDMAP_INIT_SHARDS},
-                {constant::GUARD_SHARDMAP_SALT_LEN},
-                AddressLog<
-                    {constant::REQ_TIMER_LEN},
-                    {constant::MAX_ALLOWED_AVG_REQ_PER_SEC},
-                    AddressData,
-                >,
-                BTreeMap::<
-                    HashForm,
-                    AddressLog<
-                        {constant::REQ_TIMER_LEN},
-                        {constant::MAX_ALLOWED_AVG_REQ_PER_SEC},
-                        AddressData,
-                    >,
-                >,
-                HashScheme,
-            >::new(
-                constant::AGRD_SHARDMAP_INIT_SHARDS as u32,
-                constant::SALT8,
-                agrd_map_init,
-                res!(HashScheme::try_from("Seahash")),
-            )),
-            // Monitor
-            arps_max: constant::MAX_ALLOWED_AVG_REQ_PER_SEC,
-            // Throttle
-            tint_min: constant::THROTTLED_INTERVAL_MIN,   
-            tsunset: (
-                constant::ADDR_THROTTLE_SUNSET_SECS_MIN,
-                constant::ADDR_THROTTLE_SUNSET_SECS_MAX,
-            ),
-            blist_cnt: constant::THROTTLE_COUNT_BEFORE_BLACKLIST,
-            // Handshake
-            hreq_exp: constant::SESSION_REQUEST_EXPIRY,
-        });
-
-        let ugrd_map_init = BTreeMap::<
-            HashForm,
-            UserLog<UserData<SIDL, C, SID>>,
-        >::new();
-
-        let ugrd = Arc::new(UserGuard {
-            umap: res!(ShardMap::<
-                {constant::UGRD_SHARDMAP_INIT_SHARDS},
-                {constant::GUARD_SHARDMAP_SALT_LEN},
-                UserLog<UserData<SIDL, C, SID>>,
-                BTreeMap::<
-                    HashForm,
-                    UserLog<UserData<SIDL, C, SID>>,
-                >,
-                HashScheme,
-            >::new(
-                constant::UGRD_SHARDMAP_INIT_SHARDS as u32,
-                constant::SALT8,
-                ugrd_map_init,
-                res!(HashScheme::try_from("Seahash")),
-            )),
-        });
-
-        let packval = PacketValidator {
-            pow: Some(res!(ProofOfWork::new(schms.powh.clone()))),
-            sig: Some(schms.sign.clone()),
-        };
-        
-        Ok(Self {
-            _code_template,
-            _mid_template,
-            _sid_template,
-            _uid_template,
-            test_mode,
-            schms,
-            timer:          Arc::new(RwLock::new(RingTimer::<{ constant::REQ_TIMER_LEN }>::default())),
-            agrd:           agrd.clone(),
-            ugrd:           ugrd.clone(),
-            packval,
-            gpzparams:      DifficultyParams {
-                                profile:    constant::POW_DIFFICULTY_PROFILE,
-                                max:        constant::POW_MAX_ZERO_BITS,
-                                min:        constant::POW_MIN_ZERO_BITS,
-                                rps_max:    constant::MAX_ALLOWED_AVG_REQ_PER_SEC,
-                            },
-            massembler:     Arc::new(res!(MsgAssembler::<
-                                { constant::MSG_ASSEMBLY_SHARDS },
-                                _, _,
-                                {constant::GUARD_SHARDMAP_SALT_LEN},
-                            >::new(
-                                constant::MSG_ASSEMBLY_SHARDS as u32,
-                                constant::SALT8,
-                                BTreeMap::<HashForm, MsgState>::new(),
-                                res!(HashScheme::try_from("Seahash")),
-                            ))),
-            ma_params:      MsgAssemblyParams {
-                                msg_sunset:     constant::MSG_ASSEMBLY_SUNSET,
-                                idle_max:       constant::MSG_ASSEMBLY_IDLE_MAX,
-                                rep_tot_lim:    constant::MSG_ASSEMBLY_REP_TOTAL_LIM,
-                                rep_max_lim:    constant::MSG_ASSEMBLY_REP_PACKET_LIM,
-                            },
-            pow_time_horiz: constant::POW_TIME_HORIZON_SEC,
-            accept_unknown: true,
-        })
-    }
-
     pub async fn handle(
         self,
         buf:        [u8; constant::UDP_BUFFER_SIZE], 
         n:          usize,
         src_addr:   SocketAddr,
+        trg:        Arc<UdpSocket>,
         syntax:     SyntaxRef,
     )
         -> Outcome<()>
     {
         let src_addr_str = fmt!("{:?}", src_addr);
-        match self.handler(buf, n, src_addr, syntax) {
+        match self.handler(
+            buf,
+            n, 
+            src_addr,
+            trg,
+            syntax,
+        ) {
             Err(e) => {
                 let e2 = err!(e,
                     "While processing incoming packet from {}.", src_addr_str;
@@ -362,6 +144,7 @@ impl<
         buf:        [u8; constant::UDP_BUFFER_SIZE], 
         n:          usize,
         src_addr:   SocketAddr,
+        trg:        Arc<UdpSocket>,
         syntax:     SyntaxRef,
     )
         -> Outcome<()>
@@ -387,7 +170,12 @@ impl<
         //                               chunk               artefacts
         //
         // 1. Read meta data.
-        let (meta, n1) = res!(PacketMeta::<MIDL, UIDL, MID, UID>::from_bytes(&buf[..n])); // Decode packet meta.
+        let (meta, n1) = res!(PacketMeta::<
+            ML,
+            UL,
+            <P::ID as IdTypes<ML, SL, UL>>::M,
+            <P::ID as IdTypes<ML, SL, UL>>::U,
+        >::from_bytes(&buf[..n])); // Decode packet meta.
         debug!("meta [{}]:", n1);
         for line in Stringer::new(fmt!("{:?}", meta)).to_lines("  ") {
             debug!("{}", line);
@@ -635,7 +423,12 @@ impl<
                 debug!("msgrx [{}]: {}", msg_byts.len(), msgrx);
                 // Gather the proof of work parameters required by the
                 // client.
-                let msgids: MsgIds<SIDL, UIDL, SID, UID> = res!(MsgIds::from_msg(
+                let msgids: MsgIds<
+                    SL,
+                    UL,
+                    <P::ID as IdTypes<ML, SL, UL>>::S,
+                    <P::ID as IdTypes<ML, SL, UL>>::U,
+                > = res!(MsgIds::from_msg(
                     meta.uid,
                     &mut msgrx,
                 ));
@@ -652,7 +445,12 @@ impl<
                     match cmd_name.as_str() {
                         "hreq1" => {
                             debug!("HREQ1");
-                            let mut scmd: HReq1<SIDL, UIDL, SID, UID> = HReq1 {
+                            let mut scmd: HReq1<
+                                SL,
+                                UL,
+                                <P::ID as IdTypes<ML, SL, UL>>::S,
+                                <P::ID as IdTypes<ML, SL, UL>>::U,
+                            > = HReq1 {
                                 fmt: msgfmt.clone(),
                                 pow: msgpow.clone(),
                                 mid: msgids.clone(),
@@ -664,7 +462,7 @@ impl<
                             let mut unlocked_amap = lock_write!(locked_amap);
                             if let Some(alog) = unlocked_amap.get_mut(&akey) {
                                 //if let Some(mut alog_data) = alog.data.as_mut() {
-                                    res!(scmd.server_process(
+                                    res!(scmd.respond(
                                         &mut msgcmd,
                                         //alog.data.as_mut(), // For pow parameters.
                                         &mut alog.data, // For pow parameters.
@@ -672,7 +470,7 @@ impl<
                                         // For sending HResp1.
                                         //&self.sock_addr,
                                         //Config::chunker(self.wschms.clone_chunk_config()),
-                                        //&self.sock,
+                                        trg.clone(),
                                         //&self.src_addr,
                                     ));
                                 //}

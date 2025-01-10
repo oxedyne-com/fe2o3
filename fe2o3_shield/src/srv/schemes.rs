@@ -48,30 +48,26 @@ use oxedize_fe2o3_iop_hash::{
 };
 
 
+pub trait WireSchemeTypes {
+	type ENC:   Encrypter;
+	type CS:    Checksummer;
+    type POWH:  Hasher;
+    type SGN:   Signer;
+    type HS:    Encrypter; // Handshake encryption.
+}
+
 #[derive(Clone, Debug)]
-pub struct WireSchemesInput<
-	WENC:   Encrypter, // wire encrypter
-	WCS:    Checksummer, // wire checksummer
-    POWH:   Hasher,
-    SGN:    Signer, // digital signature
-    HS:     Encrypter, // handshake encryption
->{
-    pub enc:    Alt<WENC>,
-    pub csum:   Alt<WCS>,
-    pub powh:   Alt<POWH>,
-    pub sign:   Alt<SGN>,
-    pub hsenc:  Alt<HS>,
+pub struct WireSchemesInput<W: WireSchemeTypes> {
+    pub enc:    Alt<W::ENC>,
+    pub csum:   Alt<W::CS>,
+    pub powh:   Alt<W::POWH>,
+    pub sign:   Alt<W::SGN>,
+    pub hsenc:  Alt<W::HS>,
     pub chnk:   Option<ChunkConfig>,
 }
 
-impl<
-	WENC:   Encrypter,
-	WCS:    Checksummer,
-    POWH:   Hasher,
-    SGN:    Signer,
-    HS:     Encrypter,
->
-    Default for WireSchemesInput<WENC, WCS, POWH, SGN, HS>
+impl<W: WireSchemeTypes>
+    Default for WireSchemesInput<W>
 {
     fn default() -> Self {
         Self {
@@ -85,66 +81,48 @@ impl<
     }
 }
 
-impl<
-	WENC:   Encrypter,
-	WCS:    Checksummer,
-    POWH:   Hasher,
-    SGN:    Signer,
-    HS:     Encrypter,
->
-    WireSchemesInput<WENC, WCS, POWH, SGN, HS>
+impl<W: WireSchemeTypes>
+    WireSchemesInput<W>
 {
-    pub fn ref_encrypter(&self)             -> &Alt<WENC>           { &self.enc }
-    pub fn ref_checksummer(&self)           -> &Alt<WCS>            { &self.csum }
-    pub fn ref_pow_hasher(&self)            -> &Alt<POWH>           { &self.powh }
-    pub fn ref_signer(&self)                -> &Alt<SGN>            { &self.sign }
-    pub fn ref_handshake_encrypter(&self)   -> &Alt<HS>             { &self.hsenc }
+    pub fn ref_encrypter(&self)             -> &Alt<W::ENC>         { &self.enc }
+    pub fn ref_checksummer(&self)           -> &Alt<W::CS>          { &self.csum }
+    pub fn ref_pow_hasher(&self)            -> &Alt<W::POWH>        { &self.powh }
+    pub fn ref_signer(&self)                -> &Alt<W::SGN>         { &self.sign }
+    pub fn ref_handshake_encrypter(&self)   -> &Alt<W::HS>          { &self.hsenc }
     pub fn ref_chunk_config(&self)          -> &Option<ChunkConfig> { &self.chnk }
 
-    pub fn own_encrypter(&mut self)     -> Alt<WENC>    { std::mem::replace(&mut self.enc, Alt::Unspecified) }
-    pub fn own_checksummer(&mut self)   -> Alt<WCS>     { std::mem::replace(&mut self.csum, Alt::Unspecified) }
-    pub fn own_pow_hasher(&mut self)    -> Alt<POWH>    { std::mem::replace(&mut self.powh, Alt::Unspecified) }
-    pub fn own_signer(&mut self)        -> Alt<SGN>     { std::mem::replace(&mut self.sign, Alt::Unspecified) }
-    pub fn own_handshake_encrypter(&mut self) -> Alt<HS> { std::mem::replace(&mut self.hsenc, Alt::Unspecified) }
+    pub fn own_encrypter(&mut self)     -> Alt<W::ENC>  { std::mem::replace(&mut self.enc, Alt::Unspecified) }
+    pub fn own_checksummer(&mut self)   -> Alt<W::CS>   { std::mem::replace(&mut self.csum, Alt::Unspecified) }
+    pub fn own_pow_hasher(&mut self)    -> Alt<W::POWH> { std::mem::replace(&mut self.powh, Alt::Unspecified) }
+    pub fn own_signer(&mut self)        -> Alt<W::SGN>  { std::mem::replace(&mut self.sign, Alt::Unspecified) }
+    pub fn own_handshake_encrypter(&mut self) -> Alt<W::HS> { std::mem::replace(&mut self.hsenc, Alt::Unspecified) }
     pub fn own_chunk_config(&mut self)  -> Option<ChunkConfig>  { std::mem::replace(&mut self.chnk, None) }
 
-    pub fn clone_encrypter(&self)           -> Alt<WENC>                { self.enc.clone() }
-    pub fn clone_checksummer(&self)         -> Alt<WCS>                 { self.csum.clone() }
-    pub fn clone_pow_hasher(&self)          -> Alt<POWH>                { self.powh.clone() }
-    pub fn clone_signer(&self)              -> Alt<SGN>                 { self.sign.clone() }
-    pub fn clone_handshake_encrypter(&self) -> Alt<HS>                  { self.hsenc.clone() }
-    pub fn clone_chunk_config(&self)        -> Option<ChunkConfig>      { self.chnk.clone() }
+    pub fn clone_encrypter(&self)           -> Alt<W::ENC>          { self.enc.clone() }
+    pub fn clone_checksummer(&self)         -> Alt<W::CS>           { self.csum.clone() }
+    pub fn clone_pow_hasher(&self)          -> Alt<W::POWH>         { self.powh.clone() }
+    pub fn clone_signer(&self)              -> Alt<W::SGN>          { self.sign.clone() }
+    pub fn clone_handshake_encrypter(&self) -> Alt<W::HS>           { self.hsenc.clone() }
+    pub fn clone_chunk_config(&self)        -> Option<ChunkConfig>  { self.chnk.clone() }
 
-    pub fn set_signer(mut self, signer: Option<SGN>) -> Self {
+    pub fn set_signer(mut self, signer: Option<W::SGN>) -> Self {
         self.sign = Alt::Specific(signer);
         self
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct WireSchemes<
-	WENC:   Encrypter, // wire encrypter
-	WCS:    Checksummer, // wire checksummer
-    POWH:   Hasher,
-    SGN:    Signer, // digital signature
-    HS:     Encrypter, // handshake encryption
->{
-    pub enc:    EncrypterDefAlt<EncryptionScheme, WENC>,
-    pub csum:   ChecksummerDefAlt<ChecksumScheme, WCS>,
-    pub powh:   HasherDefAlt<HashScheme, POWH>,
-    pub sign:   SignerDefAlt<SignatureScheme, SGN>,
-    pub hsenc:  EncrypterDefAlt<EncryptionScheme, HS>,
+pub struct WireSchemes {
+    pub enc:    EncrypterDefAlt<EncryptionScheme, W::ENC>,
+    pub csum:   ChecksummerDefAlt<ChecksumScheme, W::CS>,
+    pub powh:   HasherDefAlt<HashScheme, W::POWH>,
+    pub sign:   SignerDefAlt<SignatureScheme, W::SGN>,
+    pub hsenc:  EncrypterDefAlt<EncryptionScheme, W::HS>,
     pub chnk:   ChunkConfig,
 }
 
-impl<
-	WENC:   Encrypter,
-	WCS:    Checksummer,
-    POWH:   Hasher,
-    SGN:    Signer,
-    HS:     Encrypter,
->
-    Default for WireSchemes<WENC, WCS, POWH, SGN, HS>
+impl<W: WireSchemeTypes>
+    Default for WireSchemes<W>
 {
     fn default() -> Self {
         Self {
@@ -158,16 +136,10 @@ impl<
     }
 }
 
-impl<
-	WENC:   Encrypter,
-	WCS:    Checksummer,
-    POWH:   Hasher,
-    SGN:    Signer,
-    HS:     Encrypter,
->
-    From<WireSchemesInput<WENC, WCS, POWH, SGN, HS>> for WireSchemes<WENC, WCS, POWH, SGN, HS>
+impl<W: WireSchemeTypes>
+    From<WireSchemesInput<W>> for WireSchemes<W>
 {
-    fn from(input: WireSchemesInput<WENC, WCS, POWH, SGN, HS>) -> Self {
+    fn from(input: WireSchemesInput<W>) -> Self {
         Self {
             enc:    EncrypterDefAlt::from(input.enc),
             csum:   ChecksummerDefAlt::from(input.csum),
@@ -182,28 +154,22 @@ impl<
     }
 }
 
-impl<
-	WENC:   Encrypter,
-	WCS:    Checksummer,
-    POWH:   Hasher,
-    SGN:    Signer,
-    HS:     Encrypter,
->
-    WireSchemes<WENC, WCS, POWH, SGN, HS>
+impl<W: WireSchemeTypes>
+    WireSchemes<W>
 {
-    pub fn ref_encrypter(&self)             -> &EncrypterDefAlt<EncryptionScheme, WENC> { &self.enc }
-    pub fn ref_checksummer(&self)           -> &ChecksummerDefAlt<ChecksumScheme, WCS>  { &self.csum }
-    pub fn ref_pow_hasher(&self)            -> &HasherDefAlt<HashScheme, POWH>          { &self.powh }
-    pub fn ref_signer(&self)                -> &SignerDefAlt<SignatureScheme, SGN>      { &self.sign }
-    pub fn ref_handshake_encrypter(&self)   -> &EncrypterDefAlt<EncryptionScheme, HS>   { &self.hsenc }
-    pub fn ref_chunk_config(&self)          -> &ChunkConfig                             { &self.chnk }
+    pub fn ref_encrypter(&self)     -> &EncrypterDefAlt<EncryptionScheme, W::ENC>   { &self.enc }
+    pub fn ref_checksummer(&self)   -> &ChecksummerDefAlt<ChecksumScheme, W::CS>    { &self.csum }
+    pub fn ref_pow_hasher(&self)    -> &HasherDefAlt<HashScheme, W::POWH>           { &self.powh }
+    pub fn ref_signer(&self)        -> &SignerDefAlt<SignatureScheme, W::SGN>       { &self.sign }
+    pub fn ref_handshake_encrypter(&self) -> &EncrypterDefAlt<EncryptionScheme, W::HS> { &self.hsenc }
+    pub fn ref_chunk_config(&self) -> &ChunkConfig { &self.chnk }
 
-    pub fn clone_encrypter(&self)           -> EncrypterDefAlt<EncryptionScheme, WENC>  { self.enc.clone() }
-    pub fn clone_checksummer(&self)         -> ChecksummerDefAlt<ChecksumScheme, WCS>   { self.csum.clone() }
-    pub fn clone_pow_hasher(&self)          -> HasherDefAlt<HashScheme, POWH>           { self.powh.clone() }
-    pub fn clone_signer(&self)              -> SignerDefAlt<SignatureScheme, SGN>       { self.sign.clone() }
-    pub fn clone_handshake_encrypter(&self) -> EncrypterDefAlt<EncryptionScheme, HS>    { self.hsenc.clone() }
-    pub fn clone_chunk_config(&self)        -> ChunkConfig                              { self.chnk.clone() }
+    pub fn clone_encrypter(&self)   -> EncrypterDefAlt<EncryptionScheme, W::ENC>    { self.enc.clone() }
+    pub fn clone_checksummer(&self) -> ChecksummerDefAlt<ChecksumScheme, W::CS>     { self.csum.clone() }
+    pub fn clone_pow_hasher(&self)  -> HasherDefAlt<HashScheme, W::POWH>            { self.powh.clone() }
+    pub fn clone_signer(&self)      -> SignerDefAlt<SignatureScheme, W::SGN>        { self.sign.clone() }
+    pub fn clone_handshake_encrypter(&self) -> EncrypterDefAlt<EncryptionScheme, W::HS> { self.hsenc.clone() }
+    pub fn clone_chunk_config(&self) -> ChunkConfig { self.chnk.clone() }
 
     //pub fn set_chunk_config(mut self, chnk: Option<ChunkConfig>) -> Self {
     //    self.chnk = chnk;
