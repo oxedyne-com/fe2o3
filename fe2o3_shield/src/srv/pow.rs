@@ -177,6 +177,7 @@ impl<
     pub fn new_rx(
         code:       [u8; C],
         src_addr:   IpAddr,
+        trg_addr:   IpAddr,
         time_horiz: u64,
     )
         -> Outcome<Self>
@@ -191,6 +192,7 @@ impl<
         Ok(Self {
             code,
             src_addr,
+            trg_addr,
             timestamp:  Duration::ZERO,
             time_horiz,
         })

@@ -21,14 +21,15 @@ use crate::srv::{
             MsgAssemblyParams,
             MsgState,
         },
-        core::IdTypes,
+        core::{
+            DefaultIdTypes,
+            IdTypes,
+        },
         packet::PacketValidator,
     },
-    pow::{
-        DifficultyParams,
-        PowPristine,
-    },
+    pow::DifficultyParams,
     schemes::{
+        DefaultWireSchemes,
         WireSchemes,
         WireSchemesInput,
         WireSchemeTypes,
@@ -47,40 +48,18 @@ use oxedize_fe2o3_hash::{
         HashScheme,
     },
     map::ShardMap,
-    pow::{
-        PowCreateParams,
-        PowVars,
-        ProofOfWork,
-    },
+    pow::ProofOfWork,
 };
 use oxedize_fe2o3_data::ring::RingTimer;
-use oxedize_fe2o3_iop_crypto::{
-    enc::Encrypter,
-    sign::SignerDefAlt,
-};
-use oxedize_fe2o3_iop_hash::{
-    api::{
-        Hasher,
-        HashForm,
-    },
-    csum::Checksummer,
-};
-use oxedize_fe2o3_jdat::{
-    chunk::ChunkConfig,
-    id::NumIdDat,
-};
+use oxedize_fe2o3_iop_crypto::sign::SignerDefAlt;
+use oxedize_fe2o3_iop_hash::api::HashForm;
 
 use std::{
     collections::BTreeMap,
     fmt,
-    net::SocketAddr,
     sync::{
         Arc,
         RwLock,
-    },
-    time::{
-        SystemTime,
-        UNIX_EPOCH,
     },
 };
 
@@ -95,6 +74,25 @@ pub trait ProtocolTypes<
 {
     type ID: IdTypes<ML, SL, UL>;    
     type W: WireSchemeTypes;
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct DefaultProtocolTypes<
+    const ML: usize,
+    const SL: usize,
+    const UL: usize,
+>;
+
+impl<
+    const ML: usize,
+    const SL: usize,
+    const UL: usize,
+>
+    ProtocolTypes<ML, SL, UL> for DefaultProtocolTypes<ML, SL, UL>
+    where DefaultIdTypes<ML, SL, UL>: IdTypes<ML, SL, UL>,
+{
+    type ID = DefaultIdTypes<ML, SL, UL>;
+    type W = DefaultWireSchemes;
 }
 
 /// Capture all necessary information, and nothing more, allowing a thread to process an incoming
@@ -170,7 +168,7 @@ impl<
     const ML: usize,
     const SL: usize,
     const UL: usize,
-    P: ProtocolTypes<ML, SL, UL>,
+    P: ProtocolTypes<ML, SL, UL> + 'static,
 >
     Protocol<C, ML, SL, UL, P>
 {

@@ -1,58 +1,22 @@
-use crate::srv::{
-    packet::{
-        PacketChunkState,
-        PacketCount,
-        PacketMeta,
-        PacketValidator,
-    },
-};
-
 use oxedize_fe2o3_core::{
     prelude::*,
-    byte::{
-        ToBytes,
-        ToByteArray,
-    },
-    map::MapMut,
-    rand::RanDef,
+    byte::Encoding,
+    mem::Extract,
 };
-use oxedize_fe2o3_iop_crypto::sign::Signer;
 use oxedize_fe2o3_jdat::{
-    chunk::{
-        Chunker,
-        ChunkConfig,
-    },
-    id::{
-        IdDat,
-        NumIdDat,
-    },
-    version::SemVer,
+    prelude::*,
+    id::NumIdDat,
 };
-use oxedize_fe2o3_hash::{
-    map::ShardMap,
-    pow::{
-        PowCreateParams,
-        Pristine,
-    },
-};
-use oxedize_fe2o3_iop_hash::api::{
-    Hasher,
-    HashForm,
+use oxedize_fe2o3_hash::pow::ZeroBits;
+use oxedize_fe2o3_net::id;
+use oxedize_fe2o3_syntax::{
+    SyntaxRef,
+    msg::Msg,
 };
 
 use std::{
     clone::Clone,
-    collections::BTreeMap,
-    fmt::Debug,
-    net::{
-        SocketAddr,
-        UdpSocket,
-    },
-    sync::RwLock,
-    time::{
-        Duration,
-        Instant,
-    },
+    fmt,
 };
 
 
@@ -60,10 +24,37 @@ pub trait IdTypes<
     const ML: usize,
     const SL: usize,
     const UL: usize,
-> {
+>:
+    Clone
+    + Default
+    + fmt::Debug
+{
     type M: NumIdDat<ML>;
     type S: NumIdDat<SL>;
     type U: NumIdDat<UL>;
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct DefaultIdTypes<
+    const ML: usize,
+    const SL: usize,
+    const UL: usize,
+>;
+
+impl<
+    const ML: usize,
+    const SL: usize,
+    const UL: usize,
+>
+    IdTypes<ML, SL, UL> for DefaultIdTypes<ML, SL, UL>
+    where
+    id::Mid: NumIdDat<ML>,
+    id::Sid: NumIdDat<SL>,
+    id::Uid: NumIdDat<UL>,
+{
+    type M = id::Mid;
+    type S = id::Sid;
+    type U = id::Uid;
 }
 
 pub type MsgType = u16;
@@ -87,8 +78,7 @@ pub struct MsgPow {
 }
 
 impl MsgPow {
-
-    pub fn from_msg(msg: &mut SyntaxMsg) -> Outcome<Self> {
+    pub fn from_msg(msg: &mut Msg) -> Outcome<Self> {
         let zbits = match msg.get_arg_vals_mut("-zb") {
             Some(v) => try_extract_dat_as!(v[0].extract(), ZeroBits, U8, U16, U32),
             None => return Err(err!(
@@ -109,8 +99,8 @@ pub struct MsgIds<
     SID:    NumIdDat<SIDL>,
     UID:    NumIdDat<UIDL>,
 > {
-    pub sid_opt:    Option<IdDat<SIDL, SID>>,
-    pub uid:        IdDat<UIDL, UID>,
+    pub sid_opt:    Option<SID>,
+    pub uid:        UID,
 }
 
 impl<
@@ -121,7 +111,7 @@ impl<
 >
     MsgIds<SIDL, UIDL, SID, UID>
 {
-    pub fn from_msg(uid: IdDat<UIDL, UID>, msg: &mut SyntaxMsg) -> Outcome<Self> {
+    pub fn from_msg(uid: UID, msg: &mut Msg) -> Outcome<Self> {
         //let uid = match msg.get_arg_vals_mut("-u") {
         //    Some(v) => try_extract_dat_as!(v[0].extract(), IdDat, U128),
         //    None => return Err(err!(
@@ -129,48 +119,13 @@ impl<
         //    ), Input, Missing)),
         //};
         let sid_opt = match msg.get_arg_vals_mut("-s") {
-            Some(v) => Some(res!(IdDat::<SIDL, SID>::from_dat(v[0].extract()))),
+            Some(v) => Some(res!(SID::from_dat(v[0].extract()))),
             None => None, // not required
         };
         Ok(Self {
             uid,
             sid_opt,
         })
-    }
-}
-
-#[repr(u16)]
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub enum HandshakeType {
-    Unknown = 0,
-    Req1    = 1,
-    Resp1   = 2,
-    Req2    = 3,
-    Resp2   = 4,
-    Req3    = 5,
-    Resp3   = 6,
-}
-
-impl From<MsgType> for HandshakeType {
-    fn from(u: MsgType) -> Self {
-        match u {
-            1 =>    Self::Req1,
-            2 =>    Self::Resp1,
-            3 =>    Self::Req2,
-            4 =>    Self::Resp2,
-            5 =>    Self::Req3,
-            6 =>    Self::Resp3,
-            _ =>    Self::Unknown,
-        }
-    }
-}
-
-impl HandshakeType {
-    pub fn is_hreq2(&self) -> bool {
-        match self {
-            Self::Req2 => true,
-            _ => false,
-        }
     }
 }
 

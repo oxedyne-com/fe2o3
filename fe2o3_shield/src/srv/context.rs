@@ -1,6 +1,12 @@
 use crate::srv::{
     cfg::ServerConfig,
-    protocol::Protocol,
+    msg::{
+        core::IdTypes,
+        protocol::{
+            Protocol,
+            ProtocolTypes,
+        },
+    },
 };
 
 use oxedize_fe2o3_core::{
@@ -13,16 +19,9 @@ use oxedize_fe2o3_hash::{
     csum::ChecksumScheme,
     hash::HashScheme,
 };
-use oxedize_fe2o3_iop_crypto::{
-    enc::Encrypter,
-    sign::Signer,
-};
+use oxedize_fe2o3_iop_crypto::enc::Encrypter;
 use oxedize_fe2o3_iop_db::api::Database;
-use oxedize_fe2o3_iop_hash::{
-    api::Hasher,
-    csum::Checksummer,
-};
-use oxedize_fe2o3_jdat::id::NumIdDat;
+use oxedize_fe2o3_iop_hash::api::Hasher;
 use oxedize_fe2o3_net::id;
 use oxedize_fe2o3_o3db::{
     O3db,
@@ -44,57 +43,41 @@ use std::{
 #[derive(Clone, Debug)]
 pub struct ServerContext<
     const C: usize, // Length of user secret pow code.
-    const MIDL: usize,
-    const SIDL: usize,
-    const UIDL: usize,
-    MID:    NumIdDat<MIDL>,
-    SID:    NumIdDat<SIDL>,
-    UID:    NumIdDat<UIDL>,
+    const ML: usize,
+    const SL: usize,
+    const UL: usize,
+    P: ProtocolTypes<ML, SL, UL>,
     // Database
     ENC:    Encrypter,      // Symmetric encryption of database.
     KH:     Hasher,         // Hashes database keys.
-    DB:     Database<UIDL, UID, ENC, KH>, 
-    // Wire
-	WENC:   Encrypter,
-	WCS:    Checksummer,
-    POWH:   Hasher,
-	SGN:    Signer,
-	HS:     Encrypter,
+    DB:     Database<UL, <P::ID as IdTypes<ML, SL, UL>>::U, ENC, KH>, 
 > {
     pub cfg:        ServerConfig,
     pub root:       NormPathBuf,
-    pub db:         Option<(Arc<RwLock<DB>>, UID)>,
-    pub protocol:   Protocol<C, MIDL, SIDL, UIDL, MID, SID, UID, WENC, WCS, POWH, SGN, HS>,
+    pub db:         Option<(Arc<RwLock<DB>>, <P::ID as IdTypes<ML, SL, UL>>::U)>,
+    pub protocol:   Protocol<C, ML, SL, UL, P>,
     phantom3:       PhantomData<ENC>,
     phantom4:       PhantomData<KH>,
 }
 
 impl<
     const C: usize,
-    const MIDL: usize,
-    const SIDL: usize,
-    const UIDL: usize,
-    MID:    NumIdDat<MIDL>,
-    SID:    NumIdDat<SIDL>,
-    UID:    NumIdDat<UIDL>,
+    const ML: usize,
+    const SL: usize,
+    const UL: usize,
+    P: ProtocolTypes<ML, SL, UL> + 'static,
     // Database
     ENC:    Encrypter + 'static,
     KH:     Hasher + 'static,
-    DB:     Database<UIDL, UID, ENC, KH> + 'static, 
-    // Wire
-	WENC:   Encrypter + 'static,
-	WCS:    Checksummer + 'static,
-    POWH:   Hasher + 'static,
-	SGN:    Signer + 'static,
-	HS:     Encrypter + 'static,
+    DB:     Database<UL, <P::ID as IdTypes<ML, SL, UL>>::U, ENC, KH> + 'static, 
 >
-    ServerContext<C, MIDL, SIDL, UIDL, MID, SID, UID, ENC, KH, DB, WENC, WCS, POWH, SGN, HS>
+    ServerContext<C, ML, SL, UL, P, ENC, KH, DB>
 {
     pub fn new(
         cfg:        ServerConfig,
         root:       NormPathBuf,
-        db:         Option<(DB, UID)>,
-        protocol:   Protocol<C, MIDL, SIDL, UIDL, MID, SID, UID, WENC, WCS, POWH, SGN, HS>,
+        db:         Option<(DB, <P::ID as IdTypes<ML, SL, UL>>::U)>,
+        protocol:   Protocol<C, ML, SL, UL, P>,
     )
         -> Self
     {

@@ -1,22 +1,8 @@
 use crate::srv::{
-    cfg::ServerConfig,
     constant,
-    guard::{
-        addr::{
-            AddressGuard,
-            AddressLog,
-        },
-        data::{
-            AddressData,
-            UserData,
-        },
-        user::{
-            UserGuard,
-            UserLog,
-        },
-    },
     msg::{
         core::{
+            IdTypes,
             MsgFmt,
             MsgIds,
             MsgPow,
@@ -25,60 +11,22 @@ use crate::srv::{
         packet::{
             PacketMeta,
             PacketValidationArtefactRelativeIndices,
-            PacketValidator,
         },
         protocol::{
             Protocol,
             ProtocolTypes,
         },
     },
-    pow::{
-        DifficultyParams,
-        PowPristine,
-    },
-    schemes::{
-        WireSchemes,
-        WireSchemesInput,
-        WireSchemeTypes,
-    },
+    pow::PowPristine,
 };
 
 use oxedize_fe2o3_core::{
     prelude::*,
     byte::FromBytes,
 };
-use oxedize_fe2o3_crypto::{
-    keys::PublicKey,
-    sign::SignatureScheme,
-};
-use oxedize_fe2o3_hash::{
-    hash::{
-        HasherDefAlt,
-        HashScheme,
-    },
-    map::ShardMap,
-    pow::{
-        PowVars,
-        ProofOfWork,
-    },
-};
-use oxedize_fe2o3_data::ring::RingTimer;
-use oxedize_fe2o3_iop_crypto::{
-    enc::Encrypter,
-    keys::KeyManager,
-    sign::{
-        Signer,
-        SignerDefAlt,
-    },
-};
-use oxedize_fe2o3_iop_hash::{
-    api::{
-        Hasher,
-        HashForm,
-    },
-    csum::Checksummer,
-};
-use oxedize_fe2o3_jdat::id::NumIdDat;
+use oxedize_fe2o3_crypto::keys::PublicKey;
+use oxedize_fe2o3_hash::pow::PowVars;
+use oxedize_fe2o3_iop_crypto::keys::KeyManager;
 use oxedize_fe2o3_namex::InNamex;
 use oxedize_fe2o3_syntax::{
     core::SyntaxRef,
@@ -87,15 +35,11 @@ use oxedize_fe2o3_syntax::{
 use oxedize_fe2o3_text::string::Stringer;
 
 use std::{
-    collections::BTreeMap,
     net::{
         SocketAddr,
         UdpSocket,
     },
-    sync::{
-        Arc,
-        RwLock,
-    },
+    sync::Arc,
 };
 
 
@@ -104,9 +48,9 @@ impl<
     const ML: usize,
     const SL: usize,
     const UL: usize,
-    P: ProtocolTypes<ML, SL, UL>,
+    P: ProtocolTypes<ML, SL, UL> + 'static,
 >
-    Protocol<C, ML, SL, UL>
+    Protocol<C, ML, SL, UL, P>
 {
     pub async fn handle(
         self,
@@ -259,6 +203,7 @@ impl<
                 >::new_rx(
                     code,
                     src_addr.ip(),
+                    res!(trg.local_addr()).ip(),
                     self.pow_time_horiz, 
                 ));
                 trace!("POW Pristine rx:");
@@ -445,12 +390,7 @@ impl<
                     match cmd_name.as_str() {
                         "hreq1" => {
                             debug!("HREQ1");
-                            let mut scmd: HReq1<
-                                SL,
-                                UL,
-                                <P::ID as IdTypes<ML, SL, UL>>::S,
-                                <P::ID as IdTypes<ML, SL, UL>>::U,
-                            > = HReq1 {
+                            let mut scmd: HReq1<ML, SL, UL, P::ID> = HReq1 {
                                 fmt: msgfmt.clone(),
                                 pow: msgpow.clone(),
                                 mid: msgids.clone(),

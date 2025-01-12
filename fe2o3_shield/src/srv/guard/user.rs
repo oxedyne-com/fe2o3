@@ -7,10 +7,7 @@ use oxedize_fe2o3_iop_hash::api::{
     Hasher,
     HashForm,
 };
-use oxedize_fe2o3_jdat::id::{
-    IdDat,
-    NumIdDat,
-};
+use oxedize_fe2o3_jdat::id::NumIdDat;
 
 use std::{
     clone::Clone,
@@ -74,12 +71,12 @@ impl<
         UID: NumIdDat<UIDL>,
     >(
         &self,
-        uid:            &IdDat<UIDL, UID>,
+        uid:            &UID,
         accept_unknown: bool,
     )
         -> Outcome<bool>
     {
-        let (key, locked_map) = res!(self.get_locked_map(&uid));
+        let (key, locked_map) = res!(self.get_locked_map(uid));
         let mut unlocked_map = lock_write!(locked_map);
         match unlocked_map.get_mut(&key) {
             Some(_ulog) => {
@@ -102,7 +99,7 @@ impl<
         UID: NumIdDat<UIDL>,
     >(
         &self,
-        uid: &IdDat<UIDL, UID>,
+        uid: &UID,
     )
         -> Outcome<(HashForm, &RwLock<M>)>
     {

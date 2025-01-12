@@ -125,71 +125,74 @@
 //!     
 //!```
 use crate::srv::{
-    cfg::ServerConfig,
-    constant,
-    msg::external::{
-        HandshakeType,
-        IdentifiedMessage,
-        Message,
-        MsgBuilder,
-        MsgType,
+    msg::{
+        core::{
+            IdentifiedMessage,
+            IdTypes,
+            MsgType,
+            MsgFmt,
+            MsgIds,
+            MsgPow,
+        },
+        encode::ShieldCommand,
     },
     guard::data::AddressData,
 };
 
 use oxedize_fe2o3_core::{
     prelude::*,
-    byte::{
-        Encoding,
-        IntoBytes,
-    },
+    byte::IntoBytes,
     mem::Extract,
 };
-use oxedize_fe2o3_iop_crypto::sign::Signer;
-use oxedize_fe2o3_jdat::{
-    prelude::*,
-    try_extract_dat_as,
-    id::{
-        IdDat,
-        NumIdDat,
-    },
-};
-use oxedize_fe2o3_hash::{
-    pow::{
-        Pristine,
-        ZeroBits,
-    },
-};
-use oxedize_fe2o3_iop_hash::api::Hasher;
+use oxedize_fe2o3_jdat::prelude::*;
 use oxedize_fe2o3_syntax::{
     msg::{
-        Msg as SyntaxMsg,
-        MsgCmd as SyntaxMsgCmd,
-    },
-    arg::{
-        Arg,
-        ArgConfig,
-    },
-    cmd::{
-        Cmd,
-        CmdConfig,
-    },
-    core::{
-        Syntax,
-        SyntaxRef,
-        SyntaxConfig,
+        Msg,
+        MsgCmd,
     },
 };
 use oxedize_fe2o3_text::string::Stringer;
 
 use std::{
-    net::{
-        SocketAddr,
-        UdpSocket,
-    },
+    net::UdpSocket,
     sync::Arc,
 };
 
+
+#[repr(u16)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum HandshakeType {
+    Unknown = 0,
+    Req1    = 1,
+    Resp1   = 2,
+    Req2    = 3,
+    Resp2   = 4,
+    Req3    = 5,
+    Resp3   = 6,
+}
+
+impl From<MsgType> for HandshakeType {
+    fn from(u: MsgType) -> Self {
+        match u {
+            1 =>    Self::Req1,
+            2 =>    Self::Resp1,
+            3 =>    Self::Req2,
+            4 =>    Self::Resp2,
+            5 =>    Self::Req3,
+            6 =>    Self::Resp3,
+            _ =>    Self::Unknown,
+        }
+    }
+}
+
+impl HandshakeType {
+    pub fn is_hreq2(&self) -> bool {
+        match self {
+            Self::Req2 => true,
+            _ => false,
+        }
+    }
+}
 
 // HReq1 =======================================================================
 /// Initiate an encrypted session.  X is the sender, Y the receiver.
@@ -212,25 +215,25 @@ use std::{
 /// tend to choose a relatively high difficulty, disincentivising DOS attacks.
 #[derive(Clone, Debug, Default)]
 pub struct HReq1<
-    const SIDL: usize,
-    const UIDL: usize,
-    SID:    NumIdDat<SIDL>,
-    UID:    NumIdDat<UIDL>,
+    const ML: usize,
+    const SL: usize,
+    const UL: usize,
+    ID: IdTypes<ML, SL, UL>,
 > {
     pub fmt: MsgFmt,
     pub pow: MsgPow,
-    pub mid: MsgIds<SIDL, UIDL, SID, UID>,
+    pub mid: MsgIds<SL, UL, ID::S, ID::U>,
     // Command-specific
     pub peer_sigpk: Option<Vec<u8>>, // Your version of my signature public key.
 }
     
 impl<
-    const SIDL: usize,
-    const UIDL: usize,
-    SID:    NumIdDat<SIDL>,
-    UID:    NumIdDat<UIDL>,
+    const ML: usize,
+    const SL: usize,
+    const UL: usize,
+    ID: IdTypes<ML, SL, UL>,
 >
-    IntoBytes for HReq1<SIDL, UIDL, SID, UID>
+    IntoBytes for HReq1<ML, SL, UL, ID>
 {
     fn into_bytes(self, buf: Vec<u8>) -> Outcome<Vec<u8>> {
         res!(self.construct()).into_bytes(buf)
@@ -238,33 +241,33 @@ impl<
 }
 
 impl<
-    const SIDL: usize,
-    const UIDL: usize,
-    SID:    NumIdDat<SIDL>,
-    UID:    NumIdDat<UIDL>,
+    const ML: usize,
+    const SL: usize,
+    const UL: usize,
+    ID: IdTypes<ML, SL, UL>,
 >
-    IdentifiedMessage for HReq1<SIDL, UIDL, SID, UID>
+    IdentifiedMessage for HReq1<ML, SL, UL, ID>
 {
     fn typ(&self) -> MsgType { HandshakeType::Req1 as MsgType }
     fn name(&self) -> &'static str { "hreq1" }
 }
 
 impl<
-    const SIDL: usize,
-    const UIDL: usize,
-    SID:    NumIdDat<SIDL>,
-    UID:    NumIdDat<UIDL>,
+    const ML: usize,
+    const SL: usize,
+    const UL: usize,
+    ID: IdTypes<ML, SL, UL>,
 >
-    ShieldCommand<SIDL, UIDL, SID, UID> for HReq1<SIDL, UIDL, SID, UID>
+    ShieldCommand<ML, SL, UL, ID> for HReq1<ML, SL, UL, ID>
 {
     fn fmt(&self) -> &MsgFmt { &self.fmt }
     fn pow(&self) -> &MsgPow { &self.pow }
-    fn mid(&self) -> &MsgIds<SIDL, UIDL, SID, UID> { &self.mid }
+    fn mid(&self) -> &MsgIds<SL, UL, ID::S, ID::U> { &self.mid }
     fn inc_sigpk(&self) -> bool { true }
     fn pad_last(&self) -> bool { false }
 
-    fn construct(self) -> Outcome<SyntaxMsg> {
-        let mut msg = SyntaxMsg::new(self.syntax().clone()); // cloning ref
+    fn construct(self) -> Outcome<Msg> {
+        let mut msg = Msg::new(self.syntax().clone()); // cloning ref
         msg.set_encoding(*self.encoding());
         if let Some(sid) = self.sid_opt() {
             msg = res!(msg.add_arg_val("-s", Some(res!(sid.to_dat()))));
@@ -285,7 +288,7 @@ impl<
     
     fn deconstruct(
         &mut self,
-        mcmd: &mut SyntaxMsgCmd,
+        mcmd: &mut MsgCmd,
     )
         -> Outcome<()>
     {
@@ -303,58 +306,16 @@ impl<
 }
 
 impl<
-    const SIDL: usize,
-    const UIDL: usize,
-    SID:    NumIdDat<SIDL>,
-    UID:    NumIdDat<UIDL>,
+    const ML: usize,
+    const SL: usize,
+    const UL: usize,
+    ID: IdTypes<ML, SL, UL>,
 >
-    HReq1<SIDL, UIDL, SID, UID>
+    HReq1<ML, SL, UL, ID>
 {
-    pub fn send<
-        const MIDL: usize,
-        MID: NumIdDat<MIDL>,
-        // Proof of work validator.
-        H: Hasher + Send + 'static, // Proof of work hasher.
-        //const N: usize, // Pristine + Nonce size.
-        const P0: usize, // Length of pristine prefix bytes (i.e. not included in artefact).
-        const P1: usize, // Length of pristine bytes (i.e. included in artefact).
-        PRIS: Pristine<P0, P1>, // Pristine supplied to hasher.
-        // Digital signature validation.
-        S: Signer,
-    >(
-        syntax:     SyntaxRef,
-        builder:    &MsgBuilder<H, P0, P1, PRIS, S>,
-        _mid_opt:   Option<IdDat<MIDL, MID>>,
-        sid_opt:    Option<IdDat<SIDL, SID>>,
-        uid:        IdDat<UIDL, UID>,
-    )
-        -> Outcome<()>
-    {
-        let msg = Self { 
-            fmt: MsgFmt {
-                syntax,
-                encoding: constant::DEFAULT_MSG_ENCODING, // TODO allow client to change
-            },                                            
-            mid: MsgIds {
-                sid_opt,
-                uid,
-            },
-            pow: MsgPow {
-                zbits: builder.powparams.pvars.zbits,
-            },
-            ..Default::default()
-        };
-        let packets = res!(msg.build::<MIDL, MID, H, P0, P1, PRIS, S>(builder));
-        <HReq1<SIDL, UIDL, SID, UID> as ShieldCommand<SIDL, UIDL, SID, UID>>::send_udp(
-            &builder.src_sock,
-            &builder.trg_addr,
-            packets,
-        )
-    }
-
     pub fn respond(
         &mut self,
-        mcmd:       &mut SyntaxMsgCmd,
+        mcmd:       &mut MsgCmd,
         adata:      &mut AddressData, // For pow parameters.
         //mut udata:  &mut UserData<{ constant::POW_CODE_LEN }>, // For pow parameters.
         //ugrd:       &mut UserGuard<IdDat, UserData>, // For user signing pk.
@@ -408,14 +369,14 @@ impl<
 // HResp1 ======================================================================
 #[derive(Clone, Debug, Default)]
 pub struct HResp1<
-    const SIDL: usize,
-    const UIDL: usize,
-    SID:    NumIdDat<SIDL>,
-    UID:    NumIdDat<UIDL>,
+    const ML: usize,
+    const SL: usize,
+    const UL: usize,
+    ID: IdTypes<ML, SL, UL>,
 > {
     pub fmt:        MsgFmt,
     pub pow:        MsgPow,
-    pub mid:        MsgIds<SIDL, UIDL, SID, UID>,
+    pub mid:        MsgIds<SL, UL, ID::S, ID::U>,
     // Command-specific
     pub send_key:   bool,
 }
@@ -435,7 +396,7 @@ pub struct HResp1<
 //
 //    fn deconstruct(
 //        &mut self,
-//        mcmd: &mut SyntaxMsgCmd,
+//        mcmd: &mut MsgCmd,
 //    )
 //        -> Outcome<()>
 //    {
@@ -453,8 +414,8 @@ pub struct HResp1<
 //        Ok(())
 //    }
 //
-//    fn construct(self) -> Outcome<SyntaxMsg> {
-//        let mut msg = SyntaxMsg::new(self.syntax().clone()); // TODO do we have to clone here?
+//    fn construct(self) -> Outcome<Msg> {
+//        let mut msg = Msg::new(self.syntax().clone()); // TODO do we have to clone here?
 //        msg.set_encoding(*self.encoding());
 //        msg = res!(msg.add_arg_val("-u", Some(dat!(self.uid()))));
 //        let mut mcmd = res!(msg.new_cmd("hresp1"));
@@ -473,7 +434,7 @@ pub struct HResp1<
 //
 //    //pub fn client_process(
 //    //    &mut self,
-//    //    mcmd:     &mut SyntaxMsgCmd,
+//    //    mcmd:     &mut MsgCmd,
 //    //    mut ugrd:   &mut UserGuard<IdDat, UserData>, // For user signing pk.
 //    //    // For sending.
 //    //    src_addr:   SocketAddr,
@@ -512,8 +473,8 @@ pub struct HResp1<
 ////    fn fmt(&self) -> &MsgFmt { &self.fmt }
 ////    fn mid(&self) -> &MsgIds { &self.mid }
 ////
-////    fn construct(self) -> Outcome<SyntaxMsg> {
-////        let mut msg = SyntaxMsg::new(self.syntax().clone());
+////    fn construct(self) -> Outcome<Msg> {
+////        let mut msg = Msg::new(self.syntax().clone());
 ////        msg.set_encoding(*self.encoding());
 ////        let mut mcmd = res!(msg.new_cmd("hreq2"));
 ////        mcmd = res!(mcmd.add_arg_val("-pc", Daticle::BC64(self.pow_code)));
@@ -527,7 +488,7 @@ pub struct HResp1<
 ////
 ////    pub fn respond(
 ////        &mut self,
-////        mcmd:     &mut SyntaxMsgCmd,
+////        mcmd:     &mut MsgCmd,
 ////        mut adata:  &mut AddressData, // For pow parameters.
 ////        mut ugrd:   &mut UserGuard<IdDat, UserData>, // For user signing pk.
 ////        // For sending HResp1.

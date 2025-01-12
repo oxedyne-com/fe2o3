@@ -1,10 +1,7 @@
 use crate::srv::{
-    msg::external::{
-        //self,
-        HandshakeType,
-        //MsgId,
-        //MsgState,
-        MsgType,
+    msg::{
+        core::MsgType,
+        handshake::HandshakeType,
     },
 };
 
@@ -38,6 +35,7 @@ use rand::{
     self,
     Rng,
 };
+
 
 #[derive(Clone, Debug)]
 pub enum AddressState<

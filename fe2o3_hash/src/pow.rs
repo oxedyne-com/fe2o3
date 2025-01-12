@@ -47,6 +47,10 @@ pub struct PowSearchResult {
     pub err:            Option<Error<ErrTag>>,
 }
     
+/// A hash takes an input called the "pre-image".  For a proof of work this is made up of what we
+/// call the "pow pre-image", consisting of an unchanging "pristine" and the nonce, which is varied
+/// in order to achieve a hash with the desired properties (conventionally a given number of
+/// leading zero bits).
 pub trait Pristine<
     const P0: usize,
     const P1: usize,

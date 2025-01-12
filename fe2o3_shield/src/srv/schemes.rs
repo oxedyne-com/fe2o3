@@ -47,13 +47,26 @@ use oxedize_fe2o3_iop_hash::{
     //kdf::KeyDeriver,
 };
 
+use std::fmt;
 
-pub trait WireSchemeTypes {
+
+pub trait WireSchemeTypes: Clone + fmt::Debug {
 	type ENC:   Encrypter;
 	type CS:    Checksummer;
     type POWH:  Hasher;
     type SGN:   Signer;
     type HS:    Encrypter; // Handshake encryption.
+}
+
+#[derive(Clone, Debug)]
+pub struct DefaultWireSchemes;
+
+impl WireSchemeTypes for DefaultWireSchemes {
+    type ENC = EncryptionScheme;
+    type CS = ChecksumScheme;
+    type POWH = HashScheme;
+    type SGN = SignatureScheme;
+    type HS = EncryptionScheme;
 }
 
 #[derive(Clone, Debug)]
@@ -112,7 +125,7 @@ impl<W: WireSchemeTypes>
 }
 
 #[derive(Clone, Debug)]
-pub struct WireSchemes {
+pub struct WireSchemes<W: WireSchemeTypes> {
     pub enc:    EncrypterDefAlt<EncryptionScheme, W::ENC>,
     pub csum:   ChecksummerDefAlt<ChecksumScheme, W::CS>,
     pub powh:   HasherDefAlt<HashScheme, W::POWH>,

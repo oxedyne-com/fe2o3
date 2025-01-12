@@ -1,21 +1,16 @@
 use crate::srv::{
     constant,
     context::ServerContext,
+    msg::{
+        core::IdTypes,
+        protocol::ProtocolTypes,
+    },
 };
 
 use oxedize_fe2o3_core::prelude::*;
-use oxedize_fe2o3_iop_crypto::{
-    enc::Encrypter,
-    sign::{
-        Signer,
-    },
-};
+use oxedize_fe2o3_iop_crypto::enc::Encrypter;
 use oxedize_fe2o3_iop_db::api::Database;
-use oxedize_fe2o3_iop_hash::{
-    api::Hasher,
-    csum::Checksummer,
-};
-use oxedize_fe2o3_jdat::id::NumIdDat;
+use oxedize_fe2o3_iop_hash::api::Hasher;
 use oxedize_fe2o3_syntax::SyntaxRef;
 
 use std::{
@@ -24,6 +19,7 @@ use std::{
         SocketAddr,
         UdpSocket,
     },
+    sync::Arc,
     time::{
         Duration,
         Instant,
@@ -36,24 +32,16 @@ use tokio::task;
 
 pub struct Server<
     const C: usize,
-    const MIDL: usize,
-    const SIDL: usize,
-    const UIDL: usize,
-    MID:    NumIdDat<MIDL>,
-    SID:    NumIdDat<SIDL>,
-    UID:    NumIdDat<UIDL>,
+    const ML: usize,
+    const SL: usize,
+    const UL: usize,
+    P: ProtocolTypes<ML, SL, UL>,
     // Database
     ENC:    Encrypter,
     KH:     Hasher,
-    DB:     Database<UIDL, UID, ENC, KH>, 
-    // Wire
-	WENC:   Encrypter,
-	WCS:    Checksummer,
-    POWH:   Hasher,
-	SGN:    Signer,
-	HS:     Encrypter,
+    DB:     Database<UL, <P::ID as IdTypes<ML, SL, UL>>::U, ENC, KH>, 
 > {
-    context:    ServerContext<C, MIDL, SIDL, UIDL, MID, SID, UID, ENC, KH, DB, WENC, WCS, POWH, SGN, HS>,
+    context:    ServerContext<C, ML, SL, UL, P, ENC, KH, DB>,
     syntax:     SyntaxRef,
     ma_gc_last: Instant,
     ma_gc_int:  Duration,
@@ -61,28 +49,20 @@ pub struct Server<
 
 impl<
     const C: usize,
-    const MIDL: usize,
-    const SIDL: usize,
-    const UIDL: usize,
-    MID:    NumIdDat<MIDL> + 'static,
-    SID:    NumIdDat<SIDL> + 'static,
-    UID:    NumIdDat<UIDL> + 'static,
+    const ML: usize,
+    const SL: usize,
+    const UL: usize,
+    P: ProtocolTypes<ML, SL, UL> + 'static,
     // Database
     ENC:    Encrypter + 'static,
     KH:     Hasher + 'static,
-    DB:     Database<UIDL, UID, ENC, KH> + 'static, 
-    // Wire
-	WENC:   Encrypter + 'static,
-	WCS:    Checksummer + 'static,
-    POWH:   Hasher + 'static,
-	SGN:    Signer + 'static,
-	HS:     Encrypter + 'static,
+    DB:     Database<UL, <P::ID as IdTypes<ML, SL, UL>>::U, ENC, KH> + 'static, 
 >
-    Server<C, MIDL, SIDL, UIDL, MID, SID, UID, ENC, KH, DB, WENC, WCS, POWH, SGN, HS>
+    Server<C, ML, SL, UL, P, ENC, KH, DB>
 {
     pub fn new(
-       context: ServerContext<C, MIDL, SIDL, UIDL, MID, SID, UID, ENC, KH, DB, WENC, WCS, POWH, SGN, HS>,
-       syntax:  SyntaxRef,
+        context: ServerContext<C, ML, SL, UL, P, ENC, KH, DB>,
+        syntax: SyntaxRef,
     )
         -> Self
     {

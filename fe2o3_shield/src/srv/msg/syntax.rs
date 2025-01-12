@@ -1,45 +1,13 @@
 use crate::srv::{
-    cfg::ServerConfig,
     constant,
-    msg::external::{
-        HandshakeType,
-        IdentifiedMessage,
-        Message,
-        MsgBuilder,
-        MsgType,
-    },
-    guard::data::AddressData,
 };
 
 use oxedize_fe2o3_core::{
     prelude::*,
-    byte::{
-        Encoding,
-        IntoBytes,
-    },
-    mem::Extract,
+    //mem::Extract,
 };
-use oxedize_fe2o3_iop_crypto::sign::Signer;
-use oxedize_fe2o3_jdat::{
-    prelude::*,
-    try_extract_dat_as,
-    id::{
-        IdDat,
-        NumIdDat,
-    },
-};
-use oxedize_fe2o3_hash::{
-    pow::{
-        Pristine,
-        ZeroBits,
-    },
-};
-use oxedize_fe2o3_iop_hash::api::Hasher;
+use oxedize_fe2o3_jdat::prelude::*;
 use oxedize_fe2o3_syntax::{
-    msg::{
-        Msg as SyntaxMsg,
-        MsgCmd as SyntaxMsgCmd,
-    },
     arg::{
         Arg,
         ArgConfig,
@@ -54,14 +22,7 @@ use oxedize_fe2o3_syntax::{
         SyntaxConfig,
     },
 };
-use oxedize_fe2o3_text::string::Stringer;
 
-use std::{
-    net::{
-        SocketAddr,
-        UdpSocket,
-    },
-};
 
 pub fn base_msg() -> Outcome<SyntaxRef> {
 

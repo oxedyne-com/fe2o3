@@ -7,8 +7,13 @@ use crate::{
         cfg::ServerConfig,
         constant as srv_const,
         context::ServerContext,
-        msg::syntax as srv_syntax,
-        protocol::Protocol,
+        msg::{
+            protocol::{
+                DefaultProtocolTypes,
+                Protocol,
+            },
+            syntax as srv_syntax,
+        },
         schemes::WireSchemesInput,
         server::Server,
     },
@@ -135,22 +140,33 @@ impl AppShellContext {
         
         let chunk_cfg = ServerConfig::new_chunk_cfg(1_000, 200, true, true);
 
-        let protocol = res!(Protocol::new(
-            &server_cfg,
-            WireSchemesInput {
-                enc:    Alt::Specific(None::<EncryptionScheme>),
-                csum:   Alt::Specific(None::<ChecksumScheme>),
-                powh:   Alt::Specific(ServerConfig::default_packet_pow_hash_scheme()),
-                sign:   Alt::Specific(ServerConfig::default_packet_signature_scheme()),
-                hsenc:  Alt::Specific(None::<EncryptionScheme>),
-                chnk:   Some(chunk_cfg),
-            },
-            [0u8; 8],
-            id::Mid::default(),
-            id::Sid::default(),
-            id::Uid::default(),
-            test_mode,
-        ));
+        let protocol: Protocol<
+            8,
+            {id::MID_LEN},
+            {id::SID_LEN},
+            {id::UID_LEN},
+            DefaultProtocolTypes<
+                {id::MID_LEN},
+                {id::SID_LEN},
+                {id::UID_LEN},
+            >,
+        > =
+            res!(Protocol::new(
+                &server_cfg,
+                WireSchemesInput {
+                    enc:    Alt::Specific(None::<EncryptionScheme>),
+                    csum:   Alt::Specific(None::<ChecksumScheme>),
+                    powh:   Alt::Specific(ServerConfig::default_packet_pow_hash_scheme()),
+                    sign:   Alt::Specific(ServerConfig::default_packet_signature_scheme()),
+                    hsenc:  Alt::Specific(None::<EncryptionScheme>),
+                    chnk:   Some(chunk_cfg),
+                },
+                [0u8; 8],
+                id::Mid::default(),
+                id::Sid::default(),
+                id::Uid::default(),
+                test_mode,
+            ));
 
         let server_context = ServerContext::new(
             server_cfg,

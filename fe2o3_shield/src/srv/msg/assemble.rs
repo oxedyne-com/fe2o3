@@ -1,40 +1,16 @@
 use crate::srv::{
-    packet::{
-        PacketChunkState,
+    msg::packet::{
         PacketCount,
         PacketMeta,
-        PacketValidator,
     },
 };
 
 use oxedize_fe2o3_core::{
     prelude::*,
-    byte::{
-        ToBytes,
-        ToByteArray,
-    },
     map::MapMut,
-    rand::RanDef,
 };
-use oxedize_fe2o3_iop_crypto::sign::Signer;
-use oxedize_fe2o3_jdat::{
-    chunk::{
-        Chunker,
-        ChunkConfig,
-    },
-    id::{
-        IdDat,
-        NumIdDat,
-    },
-    version::SemVer,
-};
-use oxedize_fe2o3_hash::{
-    map::ShardMap,
-    pow::{
-        PowCreateParams,
-        Pristine,
-    },
-};
+use oxedize_fe2o3_jdat::id::NumIdDat;
+use oxedize_fe2o3_hash::map::ShardMap;
 use oxedize_fe2o3_iop_hash::api::{
     Hasher,
     HashForm,
@@ -44,10 +20,6 @@ use std::{
     clone::Clone,
     collections::BTreeMap,
     fmt::Debug,
-    net::{
-        SocketAddr,
-        UdpSocket,
-    },
     sync::RwLock,
     time::{
         Duration,
@@ -99,7 +71,7 @@ impl<
         MID: NumIdDat<MIDL>,
     >(
         &self,
-        mid: &IdDat<MIDL, MID>,
+        mid: &MID,
     )
         -> Outcome<(HashForm, &RwLock<M>)>
     {
@@ -147,7 +119,7 @@ impl<
         MID: NumIdDat<MIDL>,
     >(
         &self,
-        mid: &IdDat<MIDL, MID>,
+        mid: &MID,
     )
         -> Outcome<()>
     {

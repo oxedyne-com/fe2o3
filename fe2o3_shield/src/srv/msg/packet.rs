@@ -1,8 +1,8 @@
 use crate::srv::{
     constant,
-    msg::external::{
-        HandshakeType,
-        MsgType,
+    msg::{
+        core::MsgType,
+        handshake::HandshakeType,
     },
 };
 
@@ -15,10 +15,7 @@ use oxedize_fe2o3_core::{
 };
 use oxedize_fe2o3_iop_crypto::sign::Signer;
 use oxedize_fe2o3_jdat::{
-    id::{
-        IdDat,
-        NumIdDat,
-    },
+    id::NumIdDat,
     version::SemVer,
 };
 use oxedize_fe2o3_hash::{
@@ -113,8 +110,8 @@ pub struct PacketMeta<
 > {
     pub typ:    MsgType,
     pub ver:    SemVer,
-    pub mid:    IdDat<MIDL, MID>,
-    pub uid:    IdDat<UIDL, UID>,
+    pub mid:    MID,
+    pub uid:    UID,
     pub chnk:   PacketChunkState,
 }
 
@@ -130,8 +127,8 @@ impl<
         Self {
             typ:    0,
             ver:    SemVer::default(),
-            mid:    IdDat::<MIDL, MID>::default(),
-            uid:    IdDat::<UIDL, UID>::default(),
+            mid:    MID::default(),
+            uid:    UID::default(),
             chnk:   PacketChunkState::default(),
         }
     }
@@ -197,11 +194,11 @@ impl<
         result.ver = ver;
         n += n2;
 
-        let (mid, n_mid) = res!(IdDat::<MIDL, MID>::from_bytes(&buf[n..]));
+        let (mid, n_mid) = res!(MID::from_bytes(&buf[n..]));
         result.mid = mid;
         n += n_mid;
 
-        let (uid, n_uid) = res!(IdDat::<UIDL, UID>::from_bytes(&buf[n..]));
+        let (uid, n_uid) = res!(UID::from_bytes(&buf[n..]));
         result.uid = uid;
         n += n_uid;
 
@@ -363,10 +360,6 @@ impl PacketValidationArtefactRelativeIndices {
 pub struct PacketValidator<
     // Proof of work validation.
     H: Hasher, // Proof of work hasher.
-    //const N: usize, // Pristine + Nonce size.
-    //const P0: usize, // Length of pristine prefix bytes (i.e. not included in artefact).
-    //const P1: usize, // Length of pristine bytes (i.e. included in artefact).
-    //PRIS: Pristine<P0, P1>, // Pristine supplied to hasher.
     // Digital signature validation.
     S: Signer,
 > {

@@ -1,6 +1,6 @@
 use crate::srv::{
     cfg::ServerConfig,
-    msg::external::MsgType,
+    msg::core::MsgType,
     pow::DifficultyProfile,
 };
 
@@ -17,6 +17,7 @@ use std::{
     mem,
     time::Duration,
 };
+
 
 impl ServerConfig {
     pub fn check_constants() -> Outcome<()> {
