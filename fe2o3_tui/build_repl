@@ -1,6 +1,0 @@
-#!/bin/bash
-clear
-rm -f repl
-rm -f ../target/release/examples/repl
-cargo build --release --example repl
-cp ../target/release/examples/repl .

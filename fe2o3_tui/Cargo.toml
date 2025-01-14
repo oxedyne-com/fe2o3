@@ -7,6 +7,13 @@ license = "BSD-2-Clause/Apache-2.0"
 description = "Hematite text user interface library."
 repository = "https://github.com/Oxedize/fe2o3"
 
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "ironic"
+path = "src/main.rs"
+
 [dependencies]
 oxedize_fe2o3_core 		   	= { path = "../fe2o3_core" }
 oxedize_fe2o3_file			= { path = "../fe2o3_file" }
