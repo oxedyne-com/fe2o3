@@ -156,8 +156,9 @@ impl WindowManager<'_> {
                             highlighter.dec_focus();
                         }
                     }
-                    tbox.cursor_up();
+                    let _ = tbox.cursor_up();
                 }
+                return Ok(AppFlow::FullScreenRender);
             }
             Action::MoveCurrentMenuFocusDown => {
                 let result = self.get_window_by_id_mut(&WindowId::Menu);
@@ -172,6 +173,7 @@ impl WindowManager<'_> {
                     }
                     tbox.cursor_down();
                 }
+                return Ok(AppFlow::FullScreenRender);
             }
             Action::ExecuteCurrentMenuAction => {
                 let result = self.get_window_by_id_mut(&WindowId::Menu);
@@ -190,6 +192,7 @@ impl WindowManager<'_> {
                 if let Some(action) = execute_action {
                     return self.act(&action, data);
                 }
+                return Ok(AppFlow::FullScreenRender);
             }
             Action::ExitApp => {
                 return Ok(AppFlow::Quit);
@@ -199,6 +202,7 @@ impl WindowManager<'_> {
             // └─────────────────────────────┘
             Action::MoveToNextWindow => {
                 self.next_focus();
+                return Ok(AppFlow::FullScreenRender);
             }
             Action::EnterWindow => {
                 if self.key_state.is_empty() {
@@ -213,6 +217,7 @@ impl WindowManager<'_> {
                     }
                     self.key_state.clear();
                 }
+                return Ok(AppFlow::FullScreenRender);
             }
             Action::EnterWindowManagementMode => {
                 res!(self.set_mode_update_menu(WindowMode::WindowManagement, None));
@@ -227,6 +232,7 @@ impl WindowManager<'_> {
                         _ => {}
                     }
                 }
+                return Ok(AppFlow::FocalWindowRender);
             }
             Action::CreateNewWindow => {
                 let id = res!(self.next_id());
@@ -242,6 +248,7 @@ impl WindowManager<'_> {
                 res!(self.add_window(Some(id.clone()), cfg, view));
                 res!(self.set_state(&id, state));
                 res!(self.set_focus_by_id(&id));
+                return Ok(AppFlow::FullScreenRender);
             }
             // ┌─────────────────────────────┐
             // │ WINDOW MANAGEMENT MODE      │
@@ -255,6 +262,7 @@ impl WindowManager<'_> {
                     win.state.lines.mode = Some(BorderManagementMode::Adjust);
                     res!(self.set_mode_update_menu(WindowMode::BorderManagement, None));
                 }
+                return Ok(AppFlow::FocalWindowRender);
             }
             Action::SlideWindowUp => {
                 let result = self.get_focal_window_mut();
@@ -268,6 +276,7 @@ impl WindowManager<'_> {
                     }
                     _ => {}
                 }
+                return Ok(AppFlow::FullScreenRender);
             }
             Action::SlideWindowDown => {
                 let result = self.get_focal_window_mut();
@@ -282,6 +291,7 @@ impl WindowManager<'_> {
                     }
                     _ => {}
                 }
+                return Ok(AppFlow::FullScreenRender);
             }
             Action::SlideWindowRight => {
                 let result = self.get_focal_window_mut();
@@ -296,6 +306,7 @@ impl WindowManager<'_> {
                     }
                     _ => {}
                 }
+                return Ok(AppFlow::FullScreenRender);
             }
             Action::SlideWindowLeft => {
                 let result = self.get_focal_window_mut();
@@ -309,12 +320,18 @@ impl WindowManager<'_> {
                     }
                     _ => {}
                 }
+                return Ok(AppFlow::FullScreenRender);
             }
-            Action::CreateWindow => {}
-            Action::DeleteWindow => {}
+            Action::CreateWindow => {
+                return Ok(AppFlow::FullScreenRender);
+            }
+            Action::DeleteWindow => {
+                return Ok(AppFlow::FullScreenRender);
+            }
             Action::ReturnToWindowNavigationMode => {
                 res!(self.set_mode_update_menu(WindowMode::Navigation, None));
                 self.key_state.clear();
+                return Ok(AppFlow::FocalWindowRender);
             }
             // ┌─────────────────────────────┐
             // │ BORDER MANAGEMENT MODE      │
@@ -328,6 +345,7 @@ impl WindowManager<'_> {
                     }
                     _ => {}
                 }
+                return Ok(AppFlow::FocalWindowRender);
             }
             Action::DragBorderUp => {
                 let result = self.get_focal_window_mut();
@@ -363,6 +381,7 @@ impl WindowManager<'_> {
                     }
                     _ => {}
                 }
+                return Ok(AppFlow::FullScreenRender);
             }
             Action::DragBorderDown => {
                 let result = self.get_focal_window_mut();
@@ -399,6 +418,7 @@ impl WindowManager<'_> {
                     }
                     _ => {}
                 }
+                return Ok(AppFlow::FullScreenRender);
             }
             Action::DragBorderRight => {
                 let result = self.get_focal_window_mut();
@@ -435,6 +455,7 @@ impl WindowManager<'_> {
                     }
                     _ => {}
                 }
+                return Ok(AppFlow::FullScreenRender);
             }
             Action::DragBorderLeft => {
                 let result = self.get_focal_window_mut();
@@ -470,6 +491,7 @@ impl WindowManager<'_> {
                     }
                     _ => {}
                 }
+                return Ok(AppFlow::FullScreenRender);
             }
             Action::ReturnToWindowManagementMode => {
                 let result = self.get_focal_window_mut();
@@ -477,6 +499,7 @@ impl WindowManager<'_> {
                 win.state.lines.mode = None;
                 res!(self.set_mode_update_menu(WindowMode::WindowManagement, None));
                 self.key_state.clear();
+                return Ok(AppFlow::FocalWindowRender);
             }
             // ┌─────────────────────────────┐
             // │ INTERACTION MODE            │
@@ -511,6 +534,7 @@ impl WindowManager<'_> {
                         }
                     }
                 }
+                return Ok(AppFlow::FocalWindowRender);
             }
             Action::MoveCursorUp => {
                 let result = self.get_focal_window_text_box_mut();
@@ -522,7 +546,13 @@ impl WindowManager<'_> {
                             highlighter.dec_focus();
                         }
                     }
-                    tbox.cursor_up();
+                    if tbox.cursor_up() {
+                        return Ok(AppFlow::FocalWindowRender);
+                    } else {
+                        return Ok(AppFlow::CursorOnly);
+                    }
+                } else {
+                    return Ok(AppFlow::CursorOnly);
                 }
             }   
             Action::MoveCursorDown => {
@@ -535,19 +565,37 @@ impl WindowManager<'_> {
                             highlighter.inc_focus();
                         }
                     }
-                    tbox.cursor_down();
+                    if tbox.cursor_down() {
+                        return Ok(AppFlow::FocalWindowRender);
+                    } else {
+                        return Ok(AppFlow::CursorOnly);
+                    }
+                } else {
+                    return Ok(AppFlow::CursorOnly);
                 }
             }   
             Action::MoveCursorRight => {
                 let result = self.get_focal_window_text_box_mut();
                 if let Some(tbox) = res!(result) {
-                    tbox.cursor_right();
+                    if tbox.cursor_right() {
+                        return Ok(AppFlow::FocalWindowRender);
+                    } else {
+                        return Ok(AppFlow::CursorOnly);
+                    }
+                } else {
+                    return Ok(AppFlow::CursorOnly);
                 }
             }
             Action::MoveCursorLeft => {
                 let result = self.get_focal_window_text_box_mut();
                 if let Some(tbox) = res!(result) {
-                    tbox.cursor_left();
+                    if tbox.cursor_left() {
+                        return Ok(AppFlow::FocalWindowRender);
+                    } else {
+                        return Ok(AppFlow::CursorOnly);
+                    }
+                } else {
+                    return Ok(AppFlow::CursorOnly);
                 }
             }
             Action::PanTextViewUp => {
@@ -555,24 +603,28 @@ impl WindowManager<'_> {
                 if let Some(tbox) = res!(result) {
                     tbox.pan_up(Dim(2));
                 }
+                return Ok(AppFlow::FocalWindowRender);
             }
             Action::PanTextViewDown => {
                 let result = self.get_focal_window_text_box_mut();
                 if let Some(tbox) = res!(result) {
                     tbox.pan_down(Dim(2));
                 }
+                return Ok(AppFlow::FocalWindowRender);
             }
             Action::PanTextViewRight => {
                 let result = self.get_focal_window_text_box_mut();
                 if let Some(tbox) = res!(result) {
                     tbox.pan_right(Dim(3));
                 }
+                return Ok(AppFlow::FocalWindowRender);
             }
             Action::PanTextViewLeft => {
                 let result = self.get_focal_window_text_box_mut();
                 if let Some(tbox) = res!(result) {
                     tbox.pan_left(Dim(3));
                 }
+                return Ok(AppFlow::FocalWindowRender);
             }
             Action::EnterEditorInsertMode => {
                 let result = self.get_focal_window_mut();
@@ -585,6 +637,7 @@ impl WindowManager<'_> {
                         }
                     }
                 }
+                return Ok(AppFlow::FocalWindowRender);
             }
             Action::EnterEditorReplaceMode => {
                 let result = self.get_focal_window_mut();
@@ -597,6 +650,7 @@ impl WindowManager<'_> {
                         }
                     }
                 }
+                return Ok(AppFlow::FocalWindowRender);
             }
             Action::EnterEditorModifyMode => {
                 let result = self.get_focal_window_mut();
@@ -609,6 +663,7 @@ impl WindowManager<'_> {
                         }
                     }
                 }
+                return Ok(AppFlow::FocalWindowRender);
             }
             Action::ReturnToEditorNavigationMode => {
                 let result = self.get_focal_window_text_box_mut();
@@ -621,6 +676,7 @@ impl WindowManager<'_> {
                     }
                 }
                 self.key_state.clear();
+                return Ok(AppFlow::FocalWindowRender);
             }
             Action::CreateNewTextTab => {
                 let id = self.get_focus_id().clone();
@@ -631,9 +687,10 @@ impl WindowManager<'_> {
                     Ok(()) => {}
                     Err(e) => error!(e),
                 }
+                return Ok(AppFlow::FocalWindowRender);
             }
             //_ => {}
         }
-        Ok(AppFlow::Render)
+        //Ok(AppFlow::FocalWindowRender)
     }
 }

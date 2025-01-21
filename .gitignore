@@ -1,7 +1,15 @@
+# Ignore files that do not have an extension (typically executable files)
+*
+!*/
+!*.*
+
 # Rust
 /target/
 Cargo.lock
 **/*.rs.bk
+
+# Logs
+*.log
 
 # Source code text file bundles
 fe2o3_*.txt

@@ -255,7 +255,7 @@ impl StyleLibrary {
         let id = WindowId::Menu;
         let view = RectView::InitiallyRelative(RelRect::FixSize {
             top_left:   Position::Relative(RelativePosition::TopLeft),
-            size:       AbsSize::new((Dim(30), Dim(50))),
+            size:       AbsSize::new((Dim(50), Dim(50))),
         });
         let cfg = WindowConfig {
             typ:        WindowType::Fixed,

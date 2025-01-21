@@ -28,7 +28,9 @@ use crossterm::{
 pub enum AppFlow {
     Quit,
     Continue,
-    Render,
+    CursorOnly,
+    FocalWindowRender,
+    FullScreenRender,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -402,6 +404,6 @@ impl WindowManager<'_> {
             }
             _ => {}
         }
-        Ok(AppFlow::Render)
+        Ok(AppFlow::FullScreenRender)
     }
 }

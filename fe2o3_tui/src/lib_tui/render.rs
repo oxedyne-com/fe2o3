@@ -11,7 +11,10 @@ use crate::lib_tui::{
 use oxedize_fe2o3_core::prelude::*;
 use oxedize_fe2o3_geom::{
     dim::Coord,
-    rect::AbsSize,
+    rect::{
+        AbsRect,
+        AbsSize,
+    },
 };
 
 use crossterm;
@@ -134,6 +137,7 @@ pub trait Renderer<S: Sink>: Write {
     fn set_cursor_style(&mut self, style: CursorStyle, when: When)  -> Outcome<()>;
     // Terminal
     fn clear(&mut self) -> Outcome<()>;
+    fn clear_rect(&mut self, rect: AbsRect) -> Outcome<()>;
     fn off(&mut self)   -> Outcome<()>;
     fn on(&mut self)    -> Outcome<()>;
     fn size(&self)      -> Outcome<AbsSize>;
@@ -245,6 +249,28 @@ impl<S: Sink> Renderer<S> for CrosstermRenderer<S> {
             self.sink,
             crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
         ));
+        Ok(())
+    }
+
+    fn clear_rect(&mut self, rect: AbsRect) -> Outcome<()> {
+        let (x0, y0, w, h) = rect.tup();
+        let empty_line = " ".repeat(w.0 as usize);
+    
+        let x0 = x0.0 as u16;
+        let y0 = y0.0 as u16;
+        let h = h.0 as u16;
+
+        for y in y0..y0+h {
+            res!(crossterm::queue!(
+                self.sink,
+                crossterm::cursor::MoveTo(x0, y),
+                crossterm::style::SetAttributes(crossterm::style::Attributes::default()),
+                crossterm::style::ResetColor,
+                crossterm::style::Print(&empty_line)
+            ));
+        }
+        
+        res!(self.flush());
         Ok(())
     }
 
@@ -464,6 +490,11 @@ impl<S: Sink> Renderer<S> for DebugCrosstermRenderer<S> {
     
     fn clear(&mut self) -> Outcome<()> {
         debug!("clear");
+        Ok(())
+    }
+
+    fn clear_rect(&mut self, rect: AbsRect) -> Outcome<()> {
+        debug!("clear_rect {:?}", rect);
         Ok(())
     }
 

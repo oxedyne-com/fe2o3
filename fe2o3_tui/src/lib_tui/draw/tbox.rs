@@ -100,7 +100,7 @@ impl Drawable for TextBox {
             &self.cfg.cursor_position,
         ));
 
-        // Paint the canvas.
+        // Full redraw needed, paint the canvas.
         let mut canvas = Canvas::new(
             self.state.canvas.clone(),
             self.view,
@@ -222,56 +222,68 @@ impl TextBox {
 
     /// Move the cursor up one line, if possible.  This is infallible with the use of saturating
     /// arithmetic.
-    pub fn cursor_up(&mut self) {
+    pub fn cursor_up(&mut self) -> bool {
         if let Some(cursor) = self.tview.vtyp.get_cursor_mut() {
             if self.cfg.cursor_is_visible() && cursor.y > Dim(0) {
                 // Order important here, need to test whether cursor is at top of text view before
                 // moving it.
-                if cursor.y == self.tview.text_view.top() {
+                let needs_pan = cursor.y == self.tview.text_view.top();
+                if needs_pan {
                     self.tview.text_view.dec_y(Dim(1));
                 }
                 cursor.dec_y(Dim(1));
+                return needs_pan;
             }
         }
+        false
     }
 
     /// Move the cursor down one line, if possible.  This is infallible with the use of saturating
     /// arithmetic.
-    pub fn cursor_down(&mut self) {
+    pub fn cursor_down(&mut self) -> bool {
         if let Some(cursor) = self.tview.vtyp.get_cursor_mut() {
             if self.cfg.cursor_is_visible() && cursor.y < self.tview.extent.y {
                 cursor.inc_y(Dim(1));
-                if cursor.y == self.tview.text_view.bottom() {
+                let needs_pan = cursor.y == self.tview.text_view.bottom();
+                if needs_pan {
                     self.tview.text_view.inc_y(Dim(1));
                 }
+                return needs_pan;
             }
         }
+        false
     }
 
     /// Move the cursor left one character, if possible.  This is method is infallible.
-    pub fn cursor_left(&mut self) {
+    pub fn cursor_left(&mut self) -> bool {
         if let Some(cursor) = self.tview.vtyp.get_cursor_mut() {
             if self.cfg.cursor_is_visible() && cursor.x > Dim(0) {
                 // Order important here, need to test whether cursor is at the left of the text view
                 // before moving it.
-                if cursor.x == self.tview.text_view.left() {
+                let needs_pan = cursor.x == self.tview.text_view.left();
+                if needs_pan {
                     self.tview.text_view.dec_x(Dim(1));
                 }
                 cursor.dec_x(Dim(1));
+                return needs_pan;
             }
         }
+        false
     }
 
     /// Move the cursor right one character, if possible.  This is method is infallible.
-    pub fn cursor_right(&mut self) {
+    pub fn cursor_right(&mut self) -> bool {
         if let Some(cursor) = self.tview.vtyp.get_cursor_mut() {
             if self.cfg.cursor_is_visible() && cursor.x < self.tview.extent.x {
                 cursor.inc_x(Dim(1));
-                if cursor.x == self.tview.text_view.right() {
+                let needs_pan = cursor.x == self.tview.text_view.right();
+                if needs_pan {
                     self.tview.text_view.inc_x(Dim(1));
                 }
+                return needs_pan;
             }
         }
+        false
     }
 
     /// Returns the `ScrollBars` and scrollbar widths.

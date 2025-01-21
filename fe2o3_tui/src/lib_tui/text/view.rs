@@ -32,10 +32,10 @@ pub struct TextView {
     pub ctyp:           ContentType,
     pub vtyp:           TextViewType,
     pub atext:          AccessibleText<TextType, HighlightType>,
-    pub extent:         AbsSize, // A dynamic rectangle representing the extent of the text.
-    pub term_view:      AbsRect, // Current terminal view.
-    pub text_view:      AbsRect, // Current text view.
-    pub term_cursor:    Coord, // Cursor position in terminal coordinates.
+    pub extent:         AbsSize,    // A dynamic rectangle representing the extent of the text.
+    pub term_view:      AbsRect,    // Current terminal view.
+    pub text_view:      AbsRect,    // Current text view.
+    pub term_cursor:    Coord,      // Cursor position in terminal coordinates.
 }
 
 impl TextView {
@@ -209,6 +209,13 @@ impl TextView {
                 xt = cursor.x - wt;  
             }
             self.text_view.top_left = Coord::new((xt, yt));
+            self.term_cursor = self.term_view.top_left
+                + (*cursor - self.text_view.top_left);
+        }
+    }
+
+    pub fn update_cursor(&mut self) {
+        if let Some(cursor) = self.vtyp.get_cursor() {
             self.term_cursor = self.term_view.top_left
                 + (*cursor - self.text_view.top_left);
         }

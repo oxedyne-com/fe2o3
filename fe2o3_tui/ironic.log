@@ -1,2 +1,0 @@
-2025-01-14T03:31:40Z: ThreadId(    1) INFO main.rs:111 Logging at "/home/jason/usr/code/rust/fe2o3/fe2o3_tui/ironic.log"
-2025-01-14T03:34:54Z: ThreadId(    1) WARN fe2o3_tui/src/main.rs:145 Finish message received, LogBot finishing now.

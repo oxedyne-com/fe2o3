@@ -176,7 +176,6 @@ fn run<S: Sink, R: Renderer<S>>(
 
         // Render, if we need to.
         if refresh_render {
-
             res!(drawer.rend.clear());
             for window in app.win_mgr.iter_mut() {
                 if !window.focus {
@@ -212,7 +211,38 @@ fn run<S: Sink, R: Renderer<S>>(
                             res!(drawer.off());
                             return Err(e);
                         }
-                        Ok(AppFlow::Render) => refresh_render = true,
+                        Ok(AppFlow::CursorOnly) => {
+                            // Just update cursor position without full redraw.
+                            let result = app.win_mgr.get_focal_window_text_box_mut();
+                            if let Some(tbox) = res!(result) {
+                                tbox.tview.update_cursor();
+                                res!(drawer.rend.set_cursor(tbox.tview.term_cursor, When::Later));
+                                if let Some(cursor_style) = tbox.cfg.cursor_style {
+                                    res!(drawer.rend.set_cursor_style(cursor_style, When::Later));
+                                }
+                                res!(app.win_mgr.draw_cursor(&mut drawer, When::Later));
+                                res!(drawer.rend.flush());
+                            }
+                        }
+                        Ok(AppFlow::FocalWindowRender) => {
+                            let result = app.win_mgr.get_focal_window_mut();
+                            let focal_window = res!(result);
+
+                            let term = AbsRect::from(res!(drawer.rend.size()));
+                            if let Some(win_rect) = focal_window.view.relative_to(term) {
+                                // win_view is within the terminal view.
+                                res!(drawer.rend.clear_rect(win_rect));
+                            };
+
+                            res!(focal_window.render(&mut drawer, When::Later));
+                            res!(app.win_mgr.draw_cursor(&mut drawer, When::Later));
+                            res!(drawer.rend.flush());
+                        }
+                        Ok(AppFlow::FullScreenRender) => {
+                            // This code is pulled out into the top of the loop so as to provide
+                            // initialisation.
+                            refresh_render = true;
+                        }
                         _ => (),
                     }
                 }
