@@ -150,11 +150,12 @@ impl TextView {
         for line in &lines[rng] {
             let chars: Vec<char> = line.txt.chars().collect();
             let len = chars.len();
-            if len < x {
+            if len <= x {
                 result.push("");
             } else if len > x + w {
                 let start = line.txt.char_indices().nth(x.as_index()).map(|(i, _)| i).unwrap_or(0);
-                let end = line.txt.char_indices().nth((x + w).as_index()).map(|(i, _)| i).unwrap_or(line.txt.len());
+                let end = line.txt.char_indices().nth((x + w).as_index())
+                    .map(|(i, _)| i).unwrap_or(line.txt.len());
                 result.push(&line.txt[start..end]);
             } else {
                 let start = line.txt.char_indices().nth(x.as_index()).map(|(i, _)| i).unwrap_or(0);
