@@ -228,11 +228,11 @@ fn run<S: Sink, R: Renderer<S>>(
                             let result = app.win_mgr.get_focal_window_mut();
                             let focal_window = res!(result);
 
-                            let term = AbsRect::from(res!(drawer.rend.size()));
-                            if let Some(win_rect) = focal_window.view.relative_to(term) {
-                                // win_view is within the terminal view.
-                                res!(drawer.rend.clear_rect(win_rect));
-                            };
+                            //let term = AbsRect::from(res!(drawer.rend.size()));
+                            //if let Some(win_rect) = focal_window.view.relative_to(term) {
+                            //    // win_view is within the terminal view.
+                            //    res!(drawer.rend.clear_rect(win_rect));
+                            //};
 
                             res!(focal_window.render(&mut drawer, When::Later));
                             res!(app.win_mgr.draw_cursor(&mut drawer, When::Later));
