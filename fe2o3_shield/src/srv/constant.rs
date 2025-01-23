@@ -84,6 +84,8 @@ pub const SERVER_EXT_SOCKET_CHECK_INTERVAL:     Duration = Duration::from_nanos(
 
 pub const SERVER_BOT_ERROR_COUNT_WARNING:   usize = 10;
 
+pub const TRUSTED_SEEDS_MIN:                usize = 3;
+
 // Schemes =====================================================================
 // Chunking.
 // Min chunk size rationale:

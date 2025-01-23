@@ -40,7 +40,7 @@ use oxedize_fe2o3_syntax::{
     opt::OptionRefVec,
 };
 use oxedize_fe2o3_text::base2x;
-use oxedize_fe2o3_tui::{
+use oxedize_fe2o3_tui::lib_tui::{
     cmds,
     repl::{
         Evaluation,

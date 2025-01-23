@@ -42,6 +42,10 @@ use oxedize_fe2o3_hash::{
 
 use std::{
     collections::BTreeMap,
+    net::{
+        SocketAddr,
+        ToSocketAddrs,
+    },
 };
 
 
@@ -56,7 +60,6 @@ pub struct ServerConfig {
     pub log_level:                      String,
     pub server_address:                 String,
     pub server_port_udp:                u16,
-    pub server_port_tcp:                u16,
     pub server_rps_zbits_profile:       u8, // 0 = linear, ..
     pub server_pow_zbits_min:           u16, // min zero bits for all packet pows
     pub server_pow_zbits_max:           u16, // when rps reaches max, the reqd pow zbit reaches this level
@@ -71,6 +74,7 @@ pub struct ServerConfig {
     // An attacker can flood us with HReq1 messages with random uids and public keys.  A reasonable
     // defence is to set a relatively high difficulty for HReq1.
     pub server_accept_unknown_users:    bool,
+    pub trusted_seeds:                  Vec<String>,
 }
 
 impl Config for ServerConfig {
@@ -94,7 +98,6 @@ impl Default for ServerConfig {
             log_level:                      fmt!("debug"),
             server_address:                 fmt!("127.0.0.1"),
             server_port_udp:                60000, // numeric keypad mapping for "o3db"
-            server_port_tcp:                60000,
             server_rps_zbits_profile:       0, // 0 = linear, ..
             server_pow_zbits_min:           2, // all packets must have a proof of work with at least this many zero bits
             server_pow_zbits_max:           15, // when rps reaches max, the reqd pow zbit reaches this level
@@ -107,6 +110,7 @@ impl Default for ServerConfig {
             msg_assembler_map_bins:         128, // arbitrary
             // Server policy.
             server_accept_unknown_users:    false,
+            trusted_seeds:                  vec![],
         }
     }
 }
@@ -316,4 +320,30 @@ impl ServerConfig {
     //        }
     //    })
     //}
+    
+    pub fn get_trusted_seeds(&self) -> Outcome<Vec<SocketAddr>> {
+
+        if self.trusted_seeds.len() < constant::TRUSTED_SEEDS_MIN {
+            return Err(err!(
+                "ServerConfig: The number of trusted seeds must be at least {}.",
+                constant::TRUSTED_SEEDS_MIN;
+                Invalid, Input, TooSmall));
+        }
+
+        let mut result = Vec::new();
+        for seed in &self.trusted_seeds {
+            match fmt!("{}:{}", seed, self.server_port_udp).to_socket_addrs() {
+                Ok(mut addrs) => match addrs.next() {
+                    Some(addr) => result.push(addr),
+                    None => return Err(err!(
+                        "Could not resolve trusted seed '{}'.", seed;
+                        Invalid, Input, Network)),
+                },
+                Err(e) => return Err(err!(e,
+                    "Could not resolve trusted seed '{}'.", seed;
+                    Invalid, Input, Network)),
+            }
+        }
+        Ok(result)
+    }
 }
