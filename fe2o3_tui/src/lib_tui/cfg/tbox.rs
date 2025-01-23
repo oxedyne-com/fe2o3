@@ -93,10 +93,7 @@ impl StyleLibrary {
             cfg,
             res!(TextView::new(
                 ContentType::Menu,
-                TextViewType::FileTree(
-                    tree,
-                    Navigator::new(None),
-                ),
+                TextViewType::FileTree(Navigator::new(None)),
                 AccessibleText::Shared(Rc::new(RwLock::new(tlines))),
             )),
         )

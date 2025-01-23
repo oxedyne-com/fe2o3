@@ -39,7 +39,6 @@ use crate::lib_tui::{
 };
 
 use oxedize_fe2o3_core::prelude::*;
-use oxedize_fe2o3_file::tree::FileTree;
 use oxedize_fe2o3_geom::{
     dim::{
         Coord,
@@ -58,7 +57,6 @@ use oxedize_fe2o3_geom::{
 use oxedize_fe2o3_text::{
     Text,
     access::AccessibleText,
-    highlight::Highlighter,
     lines::TextLines,
 };
 
@@ -163,19 +161,7 @@ impl StyleLibrary {
                         tab: self.tab_with_label(Some(Symbol::Keyboard), "Keys"),
                     },
                     TabbedTextBox {
-                        tbox: res!(TextBox::new(
-                            self.navigable_text_box(),
-                            res!(TextView::new(
-                                ContentType::FileTree,
-                                TextViewType::FileTree(res!(FileTree::new(".")), Navigator::default()),
-                                AccessibleText::Shared(Rc::new(RwLock::new(
-                                    TextLines::new(
-                                        vec![], 
-                                        Some(Highlighter::default()),
-                                    ),
-                                ))),
-                            )),
-                        )),
+                        tbox: res!(self.file_tree_text_box()),
                         tab: self.tab_with_label(Some(Symbol::FileTree), "File Tree"),
                     },
                 ],

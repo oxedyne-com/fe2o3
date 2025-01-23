@@ -16,12 +16,12 @@ impl Default for PositionCursor {
 
 #[derive(Clone, Debug, Default)]
 pub struct Navigator {
-    pub cursor:         Coord,
+    pub cursor: Coord,
 }
 
 impl Navigator {
     pub fn new(
-        cursor:         Option<Coord>,
+        cursor: Option<Coord>,
     )
         -> Self
     {

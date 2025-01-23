@@ -9,7 +9,6 @@ use crate::lib_tui::{
     },
 };
 
-use oxedize_fe2o3_file::tree::FileTree;
 use oxedize_fe2o3_geom::dim::Coord;
 use oxedize_fe2o3_text::Text;
 
@@ -92,7 +91,7 @@ pub enum TextViewType {
     Static(Navigator),
     Menu(Navigator),
     WindowList(Navigator),
-    FileTree(FileTree, Navigator),
+    FileTree(Navigator),
 }
 
 impl Default for TextViewType {
@@ -106,20 +105,20 @@ impl TextViewType {
     pub fn get_cursor(&self) -> Option<&Coord> {
         Some(match self {
             Self::Editable(editor) => &editor.nav.cursor,
-            Self::Static(nav)           |
-            Self::Menu(nav)             |
-            Self::FileTree(_, nav)      |
-            Self::WindowList(nav)       => &nav.cursor,
+            Self::Static(nav)       |
+            Self::Menu(nav)         |
+            Self::FileTree(nav)     |
+            Self::WindowList(nav)   => &nav.cursor,
         })
     }
 
     pub fn get_cursor_mut(&mut self) -> Option<&mut Coord> {
         Some(match self {
             Self::Editable(editor) => &mut editor.nav.cursor,
-            Self::Static(nav)           |
-            Self::Menu(nav)             |
-            Self::FileTree(_, nav)      |
-            Self::WindowList(nav)       => &mut nav.cursor,
+            Self::Static(nav)       |
+            Self::Menu(nav)         |
+            Self::FileTree(nav)     |
+            Self::WindowList(nav)   => &mut nav.cursor,
         })
     }
 
