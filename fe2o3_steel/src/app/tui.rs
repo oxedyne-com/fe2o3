@@ -44,7 +44,7 @@ use oxedize_fe2o3_jdat::{
         enc::EncoderConfig,
     },
 };
-use oxedize_fe2o3_tui::{
+use oxedize_fe2o3_tui::lib_tui::{
     repl::{
         Evaluation,
         ShellConfig,

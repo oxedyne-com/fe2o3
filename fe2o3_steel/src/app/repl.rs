@@ -36,7 +36,7 @@ use oxedize_fe2o3_jdat::{
     string::enc::EncoderConfig,
 };
 use oxedize_fe2o3_net::dns::Fqdn;
-use oxedize_fe2o3_o3db::O3db;
+use oxedize_fe2o3_o3db_sync::O3db;
 use oxedize_fe2o3_syntax::{
     core::SyntaxRef,
     help::Help,
@@ -47,7 +47,7 @@ use oxedize_fe2o3_syntax::{
     opt::OptionRefVec,
 };
 use oxedize_fe2o3_text::base2x;
-use oxedize_fe2o3_tui::{
+use oxedize_fe2o3_tui::lib_tui::{
     cmds,
     repl::{
         Evaluation,

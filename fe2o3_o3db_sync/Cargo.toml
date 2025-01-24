@@ -1,5 +1,5 @@
 [package]
-name = "oxedize_fe2o3_o3db"
+name = "oxedize_fe2o3_o3db_sync"
 version = "0.5.0"
 authors = ["h00gs <hello@oxedize.com>"]
 edition = "2021"

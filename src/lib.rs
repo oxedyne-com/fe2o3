@@ -42,7 +42,7 @@ pub use oxedize_fe2o3_net           as net;
 pub use oxedize_fe2o3_num           as num;
 
 #[cfg(feature = "o3db")]
-pub use oxedize_fe2o3_o3db          as o3db;
+pub use oxedize_fe2o3_o3db_sync          as o3db;
 
 #[cfg(feature = "shield")]
 pub use oxedize_fe2o3_shield        as shield;

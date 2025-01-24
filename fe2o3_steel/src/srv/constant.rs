@@ -1,4 +1,4 @@
-use oxedize_fe2o3_o3db::{
+use oxedize_fe2o3_o3db_sync::{
     comm::response::Wait,
 };
 

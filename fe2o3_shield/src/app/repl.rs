@@ -29,7 +29,7 @@ use oxedize_fe2o3_jdat::{
     string::enc::EncoderConfig,
 };
 use oxedize_fe2o3_net::id;
-use oxedize_fe2o3_o3db::O3db;
+use oxedize_fe2o3_o3db_sync::O3db;
 use oxedize_fe2o3_syntax::{
     core::SyntaxRef,
     help::Help,

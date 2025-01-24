@@ -1,7 +1,7 @@
 //! Provides a simple foundation for code delegated to child threads.  A `Bot` is intended to be
 //! the main loop function for a child thread, `BaseMsg` and the `CtrlMsg` trait provide some
 //! baseline message types that can be elaborated in your application via composition (see
-//! `oxedize_fe2o3_o3db::bot`).
+//! `oxedize_fe2o3_o3db_sync::bot`).
 
 use crate::{
     prelude::*,

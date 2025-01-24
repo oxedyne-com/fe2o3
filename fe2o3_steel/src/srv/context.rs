@@ -30,7 +30,7 @@ use oxedize_fe2o3_net::{
         handler::WebSocketHandler,
     },
 };
-use oxedize_fe2o3_o3db::{
+use oxedize_fe2o3_o3db_sync::{
     O3db,
     base::cfg::OzoneConfig,
     data::core::RestSchemesInput,

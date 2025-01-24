@@ -70,10 +70,10 @@ use std::{
 /// command is customised so as to access only parameters needed from the server loop scope.
 /// Incoming server commands are encoded in a `oxedize_fe2o3_syntax::msg::MsgCmd` using the `Syntax`
 /// defined in `oxedize_fe2o3_shield::syntax`.  Each must be associated with a `struct` below that
-/// is accessed in `oxedize_fe2o3_o3db::bots::bot_server`.  This must capture some basic information (i.e.
+/// is accessed in `oxedize_fe2o3_o3db_sync::bots::bot_server`.  This must capture some basic information (i.e.
 /// `MsgFmt` and `MsgIds`) as well as the command-specific data.  The associated `struct` must have
 /// its own custom method for processing the incoming command (e.g.
-/// `oxedize_fe2o3_o3db::comm::wire::HReq1::process`), and should implement `ShieldCommand` in order to
+/// `oxedize_fe2o3_o3db_sync::comm::wire::HReq1::process`), and should implement `ShieldCommand` in order to
 /// access supporting methods.  There are plenty of examples to copy and modify.
 pub trait ShieldCommand<
     const ML: usize,

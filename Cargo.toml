@@ -34,7 +34,7 @@ all = [
 	"dep:oxedize_fe2o3_namex",
 	"dep:oxedize_fe2o3_net",
 	"dep:oxedize_fe2o3_num",
-	"dep:oxedize_fe2o3_o3db",
+	"dep:oxedize_fe2o3_o3db_sync",
 	"dep:oxedize_fe2o3_shield",
 	"dep:oxedize_fe2o3_stds",
 	"dep:oxedize_fe2o3_steel",
@@ -58,7 +58,7 @@ jdat 		= ["dep:oxedize_fe2o3_jdat"]
 namex 		= ["dep:oxedize_fe2o3_namex"]
 net 		= ["dep:oxedize_fe2o3_net"]
 num 		= ["dep:oxedize_fe2o3_num"]
-o3db 		= ["dep:oxedize_fe2o3_o3db"]
+o3db 		= ["dep:oxedize_fe2o3_o3db_sync"]
 shield 		= ["dep:oxedize_fe2o3_shield"]
 stds 		= ["dep:oxedize_fe2o3_stds"]
 steel 		= ["dep:oxedize_fe2o3_steel"]
@@ -91,7 +91,7 @@ oxedize_fe2o3_jdat =        { path = "fe2o3_jdat",			optional = true }
 oxedize_fe2o3_namex =       { path = "fe2o3_namex",			optional = true }
 oxedize_fe2o3_net =         { path = "fe2o3_net",			optional = true }
 oxedize_fe2o3_num =         { path = "fe2o3_num",			optional = true }
-oxedize_fe2o3_o3db =        { path = "fe2o3_o3db",			optional = true }
+oxedize_fe2o3_o3db_sync =        { path = "fe2o3_o3db_sync",			optional = true }
 oxedize_fe2o3_shield =      { path = "fe2o3_shield",		optional = true }
 oxedize_fe2o3_stds =        { path = "fe2o3_stds",			optional = true }
 oxedize_fe2o3_steel =       { path = "fe2o3_steel",			optional = true }

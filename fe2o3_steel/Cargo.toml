@@ -26,7 +26,7 @@ oxedize_fe2o3_iop_hash			= { path = "../fe2o3_iop_hash" }
 oxedize_fe2o3_jdat 				= { path = "../fe2o3_jdat" }
 oxedize_fe2o3_namex				= { path = "../fe2o3_namex" }
 oxedize_fe2o3_net				= { path = "../fe2o3_net" }
-oxedize_fe2o3_o3db 				= { path = "../fe2o3_o3db" }
+oxedize_fe2o3_o3db_sync 				= { path = "../fe2o3_o3db_sync" }
 oxedize_fe2o3_stds				= { path = "../fe2o3_stds" }
 oxedize_fe2o3_syntax			= { path = "../fe2o3_syntax" }
 oxedize_fe2o3_text				= { path = "../fe2o3_text" }

@@ -1,7 +1,7 @@
 use oxedize_fe2o3_core::prelude::*;
 use oxedize_fe2o3_crypto::enc::EncryptionScheme;
 use oxedize_fe2o3_jdat::prelude::*;
-use oxedize_fe2o3_o3db2::{
+use oxedize_fe2o3_o3db_sync2::{
     base::{
         cfg_db::ConfigInit,
     },

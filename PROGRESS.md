@@ -12,6 +12,10 @@ This is a dynamic document, and shows the latest goals of development work.
 
 ## Ozone database: `fe2o3_o3db`
 
+- [ ] Split into `fe2o3_o3db_sync` and `fe2o3_o3db_async` versions.
+
+### Sync version
+
 - [x] Basic functional database with (k, v) create, read, update and delete (CRUD)
 - [ ] Reliably functional garbage collection
 - [ ] Establish query functionality
@@ -28,6 +32,10 @@ This is a dynamic document, and shows the latest goals of development work.
     - [ ] Query results caching
     - [ ] Employ the `UndoManager` for atomic transactions
     - [ ] Query result streaming for large datasets
+
+### Async version
+
+- [ ] 
 
 ## Network functionality: `fe2o3_net`
 
@@ -55,17 +63,22 @@ This is a dynamic document, and shows the latest goals of development work.
 
 ## Shield protocol and app: `fe2o3_shield`
 
-- [ ] Split code into app and server like `fe2o3_steel`
+- [x] Split code into app and server like `fe2o3_steel`
+- [ ] Create test framework for local machine session message sequences using different ports
 - [ ] Complete handshake functionality
-- [ ] Create tests for session message sequences
 - [ ] Integration of database with server
 - [ ] Create an `fe2o3_syntax` for network messages
 - [ ] Demonstrate a small peer to peer network on the open internet including discovery
 
 ## Ironic app: `fe2o3_tui`
 
-- [ ] Split code into app and library like `fe2o3_steel`, move app out of ./examples
-- ...
+- [x] Split code into app and library like `fe2o3_steel`, move app out of ./examples
+- [x] Implement more selective rendering for less flickering
+- [ ] Implement file tree functionality
+    - [x] Display static flie tree
+    - [ ] Implement key movement highlighting up and down tree
+    - [ ] Implement sub tree display show and hide
+    - [ ] Link file/directory selection to placeholder actions
 - [ ] Demonstrate development of Hematite in Ironic as a vim replacement
 
 ## Cryptographic functionality: `fe2o3_crypto`

@@ -29,7 +29,7 @@ use oxedize_fe2o3_net::{
         status::WebSocketStatusCode,
     },
 };
-use oxedize_fe2o3_o3db::O3db;
+use oxedize_fe2o3_o3db_sync::O3db;
 
 use std::{
     fs::File,

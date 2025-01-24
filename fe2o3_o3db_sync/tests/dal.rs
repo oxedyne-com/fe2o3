@@ -23,7 +23,7 @@ use oxedize_fe2o3_jdat::{
     },
 };
 use oxedize_fe2o3_net::id::Uid;
-use oxedize_fe2o3_o3db::{
+use oxedize_fe2o3_o3db_sync::{
     base::{
         constant,
         index::ZoneInd,
