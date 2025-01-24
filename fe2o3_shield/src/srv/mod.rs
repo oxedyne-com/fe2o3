@@ -6,3 +6,4 @@ pub mod msg;
 pub mod pow;
 pub mod schemes;
 pub mod server;
+pub mod test;

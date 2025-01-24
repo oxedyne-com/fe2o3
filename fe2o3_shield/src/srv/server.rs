@@ -5,6 +5,7 @@ use crate::srv::{
         core::IdTypes,
         protocol::ProtocolTypes,
     },
+    test::TestCommand,
 };
 
 use oxedize_fe2o3_core::prelude::*;
@@ -27,7 +28,10 @@ use std::{
 };
 
 use local_ip_address::local_ip;
-use tokio::task;
+use tokio::{
+    sync::mpsc,
+    task,
+};
 
 
 pub struct Server<
@@ -45,6 +49,7 @@ pub struct Server<
     syntax:     SyntaxRef,
     ma_gc_last: Instant,
     ma_gc_int:  Duration,
+    test_chan:  Option<mpsc::Receiver<TestCommand>>,
 }
 
 impl<
@@ -64,14 +69,25 @@ impl<
         context: ServerContext<C, ML, SL, UL, P, ENC, KH, DB>,
         syntax: SyntaxRef,
     )
-        -> Self
+        -> (Self, Option<mpsc::Sender<TestCommand>>)
     {
-        Self {
-            context,
-            syntax,
-            ma_gc_last: Instant::now(),
-            ma_gc_int:  Duration::from_secs(300),
-        }
+        let (tx, rx) = if context.protocol.test_mode {
+            let (tx, rx) = mpsc::channel(32);
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
+
+        (
+            Self {
+                context,
+                syntax,
+                ma_gc_last: Instant::now(),
+                ma_gc_int:  Duration::from_secs(300),
+                test_chan:  rx,
+            },
+            tx,
+        )
     }
 
     pub async fn start(&mut self) -> Outcome<()> {
@@ -134,6 +150,10 @@ impl<
                     Ok(_) => {}
                 }
                 self.ma_gc_last = Instant::now();
+            }
+            while let Some(test_cmd) = self.test_chan.as_mut().and_then(|ch| ch.try_recv().ok()) {
+                //res!(self.handle_test_command(test_cmd));
+                test!("Test command received: {:?}", test_cmd);
             }
         }
     }

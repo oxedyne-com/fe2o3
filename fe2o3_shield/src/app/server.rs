@@ -176,7 +176,7 @@ impl AppShellContext {
         );
 
         let syntax = res!(srv_syntax::base_msg());
-        let mut server = Server::new(server_context, syntax.clone());
+        let (mut server, _test_chan_opt) = Server::new(server_context, syntax.clone());
         let rt = res!(tokio::runtime::Runtime::new());
 
         info!("Starting server...");

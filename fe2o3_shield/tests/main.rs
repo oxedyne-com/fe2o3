@@ -1,4 +1,5 @@
 mod msg;
+mod sim;
 
 use oxedize_fe2o3_core::prelude::*;
 
@@ -22,6 +23,7 @@ fn main() -> Outcome<()> {
 fn run_tests() -> Outcome<()> {
 
     res!(msg::test_msg("all"));
+    res!(sim::test_sim("all"));
 
     Ok(())
 }
