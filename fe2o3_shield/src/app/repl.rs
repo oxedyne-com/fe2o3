@@ -2,6 +2,7 @@ use crate::{
     app::{
         cfg::AppConfig,
         constant as app_const,
+        server,
         tui::AppStatus,
     },
 };
@@ -175,7 +176,15 @@ impl AppShellContext {
                 },
                 // Control
                 "exit"      => evals.push(res!(cmds::exit_shell(&shell_cfg.exit_msg))),
-                "server"    => evals.push(res!(self.start_server(&shell_cfg, Some(cmd), false))),
+                "server"    => {
+                    evals.push(res!(server::start_server(
+                        &self.app_cfg,
+                        &self.stat,
+                        self.db.clone(),
+                        Some(cmd),
+                        false,
+                    )));
+                }
                 "shell"     => evals.push(res!(self.start_shell(&shell_cfg, Some(cmd)))),
                 // Filesystem
                 "cd"        => evals.push(res!(cmds::change_directory(cmd))),
