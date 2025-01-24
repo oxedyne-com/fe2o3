@@ -11,6 +11,7 @@ use crate::{
             protocol::{
                 DefaultProtocolTypes,
                 Protocol,
+                ProtocolMode,
             },
             syntax as srv_syntax,
         },
@@ -65,8 +66,9 @@ impl AppShellContext {
 
     pub fn start_server(
         &mut self,
-        _shell_cfg:  &ShellConfig,
+        _shell_cfg: &ShellConfig,
         cmd:        Option<&MsgCmd>,
+        test_mode:  bool,
     )
         -> Outcome<Evaluation>
     {
@@ -82,15 +84,15 @@ impl AppShellContext {
         // ┌───────────────────────┐
         // │ Determine mode.       │
         // └───────────────────────┘
-        let mut test_mode = false;
+        let mut mode = ProtocolMode::Production;
         if let Some(msg_cmd) = cmd {
             if msg_cmd.has_arg("dev") {
-                test_mode = true;
-                info!("Running in test mode.");
+                mode = ProtocolMode::Dev;
+                info!("Running in dev mode.");
             }
         }
 
-        if self.stat.first && !test_mode {
+        if self.stat.first && matches!(mode, ProtocolMode::Production) {
             return Ok(Evaluation::Error(fmt!(
                 "You should update values in {} before running the server in production mode.",
                 app_const::CONFIG_NAME,
@@ -165,7 +167,7 @@ impl AppShellContext {
                 id::Mid::default(),
                 id::Sid::default(),
                 id::Uid::default(),
-                test_mode,
+                if test_mode { ProtocolMode::Test } else { mode },
             ));
 
         let server_context = ServerContext::new(

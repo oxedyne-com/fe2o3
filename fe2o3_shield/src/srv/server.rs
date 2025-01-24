@@ -3,7 +3,10 @@ use crate::srv::{
     context::ServerContext,
     msg::{
         core::IdTypes,
-        protocol::ProtocolTypes,
+        protocol::{
+            ProtocolMode,
+            ProtocolTypes,
+        },
     },
     test::TestCommand,
 };
@@ -71,7 +74,7 @@ impl<
     )
         -> (Self, Option<mpsc::Sender<TestCommand>>)
     {
-        let (tx, rx) = if context.protocol.test_mode {
+        let (tx, rx) = if matches!(context.protocol.mode, ProtocolMode::Test) {
             let (tx, rx) = mpsc::channel(32);
             (Some(tx), Some(rx))
         } else {
@@ -100,7 +103,7 @@ impl<
         info!("Server ip address = {}", ip_addr);
         let trg = Arc::new(res!(UdpSocket::bind(trg_addr)));
 
-        info!("test_mode = {}", self.context.protocol.test_mode);
+        info!("mode = {:?}", self.context.protocol.mode);
         info!("Listening on UDP at {:?}.", trg_addr);
     
         loop {

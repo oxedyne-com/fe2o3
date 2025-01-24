@@ -64,6 +64,13 @@ use std::{
 };
 
 
+#[derive(Clone, Debug)]
+pub enum ProtocolMode {
+    Production,
+    Dev,
+    Test,
+}
+
 pub trait ProtocolTypes<
     const ML: usize,
     const SL: usize,
@@ -112,7 +119,7 @@ pub struct Protocol<
     _sid_template:      <P::ID as IdTypes<ML, SL, UL>>::S,
     _uid_template:      <P::ID as IdTypes<ML, SL, UL>>::U,
 
-    pub test_mode:      bool,
+    pub mode:           ProtocolMode,
     pub schms:          WireSchemes<P::W>,
 
     pub timer:          Arc<RwLock<RingTimer<{ constant::REQ_TIMER_LEN }>>>,
@@ -179,7 +186,7 @@ impl<
         _mid_template:  <P::ID as IdTypes<ML, SL, UL>>::M,
         _sid_template:  <P::ID as IdTypes<ML, SL, UL>>::S,
         _uid_template:  <P::ID as IdTypes<ML, SL, UL>>::U,
-        test_mode:      bool,
+        mode:           ProtocolMode,
     )
         -> Outcome<Self>
     {
@@ -284,7 +291,7 @@ impl<
             _mid_template,
             _sid_template,
             _uid_template,
-            test_mode,
+            mode,
             schms,
             timer:          Arc::new(RwLock::new(RingTimer::<{ constant::REQ_TIMER_LEN }>::default())),
             agrd:           agrd.clone(),

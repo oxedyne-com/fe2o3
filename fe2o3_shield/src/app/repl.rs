@@ -175,7 +175,7 @@ impl AppShellContext {
                 },
                 // Control
                 "exit"      => evals.push(res!(cmds::exit_shell(&shell_cfg.exit_msg))),
-                "server"    => evals.push(res!(self.start_server(&shell_cfg, Some(cmd)))),
+                "server"    => evals.push(res!(self.start_server(&shell_cfg, Some(cmd), false))),
                 "shell"     => evals.push(res!(self.start_shell(&shell_cfg, Some(cmd)))),
                 // Filesystem
                 "cd"        => evals.push(res!(cmds::change_directory(cmd))),
