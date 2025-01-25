@@ -13,8 +13,22 @@ macro_rules! log {
             },
             erropt: None,
             msg: fmt!($($arg)*),
+            stream: String::new(),
         });
-    }
+    };
+    ($level:expr, $stream:expr, $($arg:tt)*) => {
+        LOG.send_in(bot_log::Msg::Log {
+            level: $level,
+            src: oxedize_fe2o3_core::log::base::Source {
+                tid: std::thread::current().id(),
+                file: file!(),
+                line: line!(),
+            },
+            erropt: None,
+            msg: fmt!($($arg)*),
+            stream: String::($stream),
+        });
+    };
 }
 
 #[macro_export]
@@ -35,6 +49,19 @@ macro_rules! error {
             msg: fmt!($($arg)*),
         });
     };
+    ($e:expr, $stream:expr, $($arg:tt)*) => {
+        LOG.send_in(bot_log::Msg::Log {
+            level: LogLevel::Error,
+            src: oxedize_fe2o3_core::log::base::Source {
+                tid: std::thread::current().id(),
+                file: file!(),
+                line: line!(),
+            },
+            erropt: Some($e),
+            msg: fmt!($($arg)*),
+            stream: String::($stream),
+        });
+    };
     ($e:expr) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Error,
@@ -45,6 +72,7 @@ macro_rules! error {
             },
             erropt: Some($e),
             msg: fmt!(""),
+            stream: String::new(),
         });
     };
 }
@@ -64,8 +92,22 @@ macro_rules! fault {
             },
             erropt: None,
             msg: fmt!($($arg)*),
+            stream: String::new(),
         });
-    }
+    };
+    ($stream:expr, $($arg:tt)*) => {
+        LOG.send_in(bot_log::Msg::Log {
+            level: LogLevel::Error,
+            src: oxedize_fe2o3_core::log::base::Source {
+                tid: std::thread::current().id(),
+                file: file!(),
+                line: line!(),
+            },
+            erropt: None,
+            msg: fmt!($($arg)*),
+            stream: String::($stream),
+        });
+    };
 }
 
 #[macro_export]
@@ -81,8 +123,22 @@ macro_rules! warn {
             },
             erropt: None,
             msg: fmt!($($arg)*),
+            stream: String::new(),
         });
-    }
+    };
+    ($stream:expr, $($arg:tt)*) => {
+        LOG.send_in(bot_log::Msg::Log {
+            level: LogLevel::Warn,
+            src: oxedize_fe2o3_core::log::base::Source {
+                tid: std::thread::current().id(),
+                file: file!(),
+                line: line!(),
+            },
+            erropt: None,
+            msg: fmt!($($arg)*),
+            stream: String::($stream),
+        });
+    };
 }
 
 #[macro_export]
@@ -98,8 +154,22 @@ macro_rules! info {
             },
             erropt: None,
             msg: fmt!($($arg)*),
+            stream: String::new(),
         });
-    }
+    };
+    ($stream:expr, $($arg:tt)*) => {
+        LOG.send_in(bot_log::Msg::Log {
+            level: LogLevel::Info,
+            src: oxedize_fe2o3_core::log::base::Source {
+                tid: std::thread::current().id(),
+                file: file!(),
+                line: line!(),
+            },
+            erropt: None,
+            msg: fmt!($($arg)*),
+            stream: String::($stream),
+        });
+    };
 }
 
 #[macro_export]
@@ -115,8 +185,22 @@ macro_rules! test {
             },
             erropt: None,
             msg: fmt!($($arg)*),
+            stream: String::new(),
         });
-    }
+    };
+    ($stream:expr, $($arg:tt)*) => {
+        LOG.send_in(bot_log::Msg::Log {
+            level: LogLevel::Test,
+            src: oxedize_fe2o3_core::log::base::Source {
+                tid: std::thread::current().id(),
+                file: file!(),
+                line: line!(),
+            },
+            erropt: None,
+            msg: fmt!($($arg)*),
+            stream: String::($stream),
+        });
+    };
 }
 
 #[macro_export]
@@ -132,8 +216,22 @@ macro_rules! debug {
             },
             erropt: None,
             msg: fmt!($($arg)*),
+            stream: String::new(),
         });
-    }
+    };
+    ($stream:expr, $($arg:tt)*) => {
+        LOG.send_in(bot_log::Msg::Log {
+            level: LogLevel::Debug,
+            src: oxedize_fe2o3_core::log::base::Source {
+                tid: std::thread::current().id(),
+                file: file!(),
+                line: line!(),
+            },
+            erropt: None,
+            msg: fmt!($($arg)*),
+            stream: String::($stream),
+        });
+    };
 }
 
 #[macro_export]
@@ -149,8 +247,22 @@ macro_rules! trace {
             },
             erropt: None,
             msg: fmt!($($arg)*),
+            stream: String::new(),
         });
-    }
+    };
+    ($stream:expr, $($arg:tt)*) => {
+        LOG.send_in(bot_log::Msg::Log {
+            level: LogLevel::Trace,
+            src: oxedize_fe2o3_core::log::base::Source {
+                tid: std::thread::current().id(),
+                file: file!(),
+                line: line!(),
+            },
+            erropt: None,
+            msg: fmt!($($arg)*),
+            stream: String::($stream),
+        });
+    };
 }
 
 #[macro_export]

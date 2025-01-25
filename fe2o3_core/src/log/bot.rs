@@ -45,7 +45,7 @@ pub use humantime::format_rfc3339_seconds as timefmt;
 #[derive(Clone, Debug)]
 pub enum Msg<ETAG: GenTag> where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error {
     Base(bot::BaseMsg<ETAG>),
-    Console(String),
+    Console((String, String)), // Stream key, Message
     Finish(Source),
     Level((Source, LogLevel)),
     Log {
@@ -53,6 +53,7 @@ pub enum Msg<ETAG: GenTag> where oxedize_fe2o3_core::error::Error<ETAG>: std::er
         src:    Source,
         erropt: Option<Error<ETAG>>,
         msg:    String,
+        stream: String,
     },
     Update(Source),
 }
@@ -374,6 +375,7 @@ impl<ETAG: GenTag> LogBot<ETAG>
         level:  LogLevel,
         src:    &Source,
         res:    Outcome<String>,
+        stream: String,
     ) {
         let mut path_opt = None;
         let mut console_chan = None;
@@ -413,7 +415,7 @@ impl<ETAG: GenTag> LogBot<ETAG>
             );
             if let Some(console_chan) = console_chan {
                 if let Some(msg) = msg_console_opt {
-                    match console_chan.send(Msg::Console(msg.clone())) {
+                    match console_chan.send(Msg::Console((stream, msg.clone()))) {
                         Err(e) => msg!("{}", err!(e,
                             "Error writing '{}' to the console channel.", msg;
                         IO, Channel, Write)),
@@ -460,17 +462,17 @@ impl<ETAG: GenTag> LogBot<ETAG>
             Ok(Msg::Finish(src)) => {
                 let msg = fmt!("Finish message received, LogBot finishing now.");
                 let level = LogLevel::Warn;
-                self.write(level, &src, Ok(msg));
+                self.write(level, &src, Ok(msg), String::new());
                 return true;
             }
             Ok(Msg::Base(bot::BaseMsg::Ready)) => msg!("LogBot now ready to receive messages."),
-            Ok(Msg::Log { level, src, erropt, msg }) => {
+            Ok(Msg::Log { level, src, erropt, msg, stream }) => {
                 let msg = if let Some(e) = erropt {
                     fmt!("{} {}", msg, e)
                 } else {
                     fmt!("{}", msg)
                 };
-                self.write(level, &src, Ok(msg));
+                self.write(level, &src, Ok(msg), stream);
             }
             Ok(Msg::Update(src)) => match self.update_file() {
                 Ok(()) => (),
@@ -495,7 +497,7 @@ impl<ETAG: GenTag> LogBot<ETAG>
                     file: file!(),
                     line: line!(),
                 };
-                self.write(LogLevel::Error, &src, Err(e));
+                self.write(LogLevel::Error, &src, Err(e), String::new());
             },
             _ => (),
         }
