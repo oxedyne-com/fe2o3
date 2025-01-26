@@ -3,7 +3,7 @@
 /// that an error message can be logged this way but you won't be able to provide an actual error
 /// object.  Instead, user `error!` directly.
 macro_rules! log {
-    ($level:expr, $($arg:tt)*) => {
+    ($level:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: $level,
             src: oxedize_fe2o3_core::log::base::Source {
@@ -12,11 +12,11 @@ macro_rules! log {
                 line: line!(),
             },
             erropt: None,
-            msg: fmt!($($arg)*),
+            msg: fmt!($lit $(, $arg)*),
             stream: String::new(),
         });
     };
-    ($level:expr, $stream:expr, $($arg:tt)*) => {
+    ($level:expr, $stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: $level,
             src: oxedize_fe2o3_core::log::base::Source {
@@ -25,8 +25,8 @@ macro_rules! log {
                 line: line!(),
             },
             erropt: None,
-            msg: fmt!($($arg)*),
-            stream: String::($stream),
+            msg: fmt!($lit $(, $arg)*),
+            stream: String::from($stream),
         });
     };
 }
@@ -37,7 +37,7 @@ macro_rules! log {
 /// parameters for string formatting.  In other words, it requires the caller to pass an `Error` or
 /// create one.
 macro_rules! error {
-    ($e:expr, $($arg:tt)*) => {
+    ($e:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Error,
             src: oxedize_fe2o3_core::log::base::Source {
@@ -46,10 +46,11 @@ macro_rules! error {
                 line: line!(),
             },
             erropt: Some($e),
-            msg: fmt!($($arg)*),
+            msg: fmt!($lit $(, $arg)*),
+            stream: String::new(),
         });
     };
-    ($e:expr, $stream:expr, $($arg:tt)*) => {
+    ($e:expr, $stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Error,
             src: oxedize_fe2o3_core::log::base::Source {
@@ -58,8 +59,8 @@ macro_rules! error {
                 line: line!(),
             },
             erropt: Some($e),
-            msg: fmt!($($arg)*),
-            stream: String::($stream),
+            msg: fmt!($lit $(, $arg)*),
+            stream: String::from($stream),
         });
     };
     ($e:expr) => {
@@ -82,7 +83,7 @@ macro_rules! error {
 /// getting the `error!` macro to also recognise a message without an error object is hard.  A
 /// `fault!` displays just like an `error!`.
 macro_rules! fault {
-    ($($arg:tt)*) => {
+    ($lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Error,
             src: oxedize_fe2o3_core::log::base::Source {
@@ -91,11 +92,11 @@ macro_rules! fault {
                 line: line!(),
             },
             erropt: None,
-            msg: fmt!($($arg)*),
+            msg: fmt!($lit $(, $arg)*),
             stream: String::new(),
         });
     };
-    ($stream:expr, $($arg:tt)*) => {
+    ($stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Error,
             src: oxedize_fe2o3_core::log::base::Source {
@@ -104,8 +105,8 @@ macro_rules! fault {
                 line: line!(),
             },
             erropt: None,
-            msg: fmt!($($arg)*),
-            stream: String::($stream),
+            msg: fmt!($lit $(, $arg)*),
+            stream: String::from($stream),
         });
     };
 }
@@ -113,7 +114,7 @@ macro_rules! fault {
 #[macro_export]
 /// Log a warning message by sending it to the `LogBot` instance.
 macro_rules! warn {
-    ($($arg:tt)*) => {
+    ($lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Warn,
             src: oxedize_fe2o3_core::log::base::Source {
@@ -122,11 +123,11 @@ macro_rules! warn {
                 line: line!(),
             },
             erropt: None,
-            msg: fmt!($($arg)*),
+            msg: fmt!($lit $(, $arg)*),
             stream: String::new(),
         });
     };
-    ($stream:expr, $($arg:tt)*) => {
+    ($stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Warn,
             src: oxedize_fe2o3_core::log::base::Source {
@@ -135,16 +136,15 @@ macro_rules! warn {
                 line: line!(),
             },
             erropt: None,
-            msg: fmt!($($arg)*),
-            stream: String::($stream),
+            msg: fmt!($lit $(, $arg)*),
+            stream: String::from($stream),
         });
     };
 }
 
 #[macro_export]
-/// Log an info message by sending it to the `LogBot` instance.
 macro_rules! info {
-    ($($arg:tt)*) => {
+    ($lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Info,
             src: oxedize_fe2o3_core::log::base::Source {
@@ -153,11 +153,11 @@ macro_rules! info {
                 line: line!(),
             },
             erropt: None,
-            msg: fmt!($($arg)*),
+            msg: fmt!($lit $(, $arg)*),
             stream: String::new(),
         });
     };
-    ($stream:expr, $($arg:tt)*) => {
+    ($stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Info,
             src: oxedize_fe2o3_core::log::base::Source {
@@ -166,8 +166,8 @@ macro_rules! info {
                 line: line!(),
             },
             erropt: None,
-            msg: fmt!($($arg)*),
-            stream: String::($stream),
+            msg: fmt!($lit $(, $arg)*),
+            stream: String::from($stream),
         });
     };
 }
@@ -175,7 +175,7 @@ macro_rules! info {
 #[macro_export]
 /// Log a test message by sending it to the `LogBot` instance.
 macro_rules! test {
-    ($($arg:tt)*) => {
+    ($lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Test,
             src: oxedize_fe2o3_core::log::base::Source {
@@ -184,11 +184,11 @@ macro_rules! test {
                 line: line!(),
             },
             erropt: None,
-            msg: fmt!($($arg)*),
+            msg: fmt!($lit $(, $arg)*),
             stream: String::new(),
         });
     };
-    ($stream:expr, $($arg:tt)*) => {
+    ($stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Test,
             src: oxedize_fe2o3_core::log::base::Source {
@@ -197,8 +197,8 @@ macro_rules! test {
                 line: line!(),
             },
             erropt: None,
-            msg: fmt!($($arg)*),
-            stream: String::($stream),
+            msg: fmt!($lit $(, $arg)*),
+            stream: String::from($stream),
         });
     };
 }
@@ -206,7 +206,7 @@ macro_rules! test {
 #[macro_export]
 /// Log a debug message by sending it to the `LogBot` instance.
 macro_rules! debug {
-    ($($arg:tt)*) => {
+    ($lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Debug,
             src: oxedize_fe2o3_core::log::base::Source {
@@ -215,11 +215,11 @@ macro_rules! debug {
                 line: line!(),
             },
             erropt: None,
-            msg: fmt!($($arg)*),
+            msg: fmt!($lit $(, $arg)*),
             stream: String::new(),
         });
     };
-    ($stream:expr, $($arg:tt)*) => {
+    ($stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Debug,
             src: oxedize_fe2o3_core::log::base::Source {
@@ -228,8 +228,8 @@ macro_rules! debug {
                 line: line!(),
             },
             erropt: None,
-            msg: fmt!($($arg)*),
-            stream: String::($stream),
+            msg: fmt!($lit $(, $arg)*),
+            stream: String::from($stream),
         });
     };
 }
@@ -237,7 +237,7 @@ macro_rules! debug {
 #[macro_export]
 /// Log a trace message by sending it to the `LogBot` instance.
 macro_rules! trace {
-    ($($arg:tt)*) => {
+    ($lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Trace,
             src: oxedize_fe2o3_core::log::base::Source {
@@ -246,11 +246,11 @@ macro_rules! trace {
                 line: line!(),
             },
             erropt: None,
-            msg: fmt!($($arg)*),
+            msg: fmt!($lit $(, $arg)*),
             stream: String::new(),
         });
     };
-    ($stream:expr, $($arg:tt)*) => {
+    ($stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Trace,
             src: oxedize_fe2o3_core::log::base::Source {
@@ -259,8 +259,8 @@ macro_rules! trace {
                 line: line!(),
             },
             erropt: None,
-            msg: fmt!($($arg)*),
-            stream: String::($stream),
+            msg: fmt!($lit $(, $arg)*),
+            stream: String::from($stream),
         });
     };
 }

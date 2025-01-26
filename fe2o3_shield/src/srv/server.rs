@@ -34,8 +34,17 @@ use local_ip_address::local_ip;
 use tokio::{
     sync::mpsc,
     task,
+    task_local,
 };
 
+
+task_local! {
+    pub static LOG_STREAM_ID: String;
+}
+
+pub fn log_stream() -> String {
+    LOG_STREAM_ID.try_with(|id| id.clone()).unwrap_or(fmt!("main"))
+}
 
 pub struct Server<
     const C: usize,
@@ -100,7 +109,7 @@ impl<
         let ip_addr     = res!(local_ip());
         let trg_addr    = SocketAddr::new(ip_addr.clone(), port);
 
-        info!("Server ip address = {}", ip_addr);
+        info!(log_stream(), "Server ip address = {}", ip_addr);
         let trg = Arc::new(res!(UdpSocket::bind(trg_addr)));
 
         info!("mode = {:?}", self.context.protocol.mode);

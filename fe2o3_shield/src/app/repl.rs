@@ -182,7 +182,7 @@ impl AppShellContext {
                         &self.stat,
                         self.db.clone(),
                         Some(cmd),
-                        false,
+                        None,
                     )));
                 }
                 "shell"     => evals.push(res!(self.start_shell(&shell_cfg, Some(cmd)))),

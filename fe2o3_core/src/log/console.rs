@@ -102,14 +102,14 @@ impl<ETAG: GenTag + fmt::Debug + Send + Sync> StdoutLoggerConsole<ETAG>
 }
 
 #[derive(Clone, Debug)]
-pub struct PooledLoggerConsole<ETAG: GenTag>
+pub struct MultiStreamLoggerConsole<ETAG: GenTag>
     where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
     pub chan:   Simplex<Msg<ETAG>>,
     pub pools:  HashMap<String, Vec<String>>,
 }
 
-impl<ETAG: GenTag> LoggerConsole<ETAG> for PooledLoggerConsole<ETAG>
+impl<ETAG: GenTag> LoggerConsole<ETAG> for MultiStreamLoggerConsole<ETAG>
     where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
     fn go(&mut self) -> SimplexThread<Msg<ETAG>> {
@@ -150,7 +150,7 @@ impl<ETAG: GenTag> LoggerConsole<ETAG> for PooledLoggerConsole<ETAG>
     }
 }
 
-impl<ETAG: GenTag + fmt::Debug + Send + Sync> PooledLoggerConsole<ETAG>
+impl<ETAG: GenTag + fmt::Debug + Send + Sync> MultiStreamLoggerConsole<ETAG>
     where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
     pub fn new() -> Self {

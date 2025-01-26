@@ -17,7 +17,10 @@ use crate::{
             syntax as srv_syntax,
         },
         schemes::WireSchemesInput,
-        server::Server,
+        server::{
+            LOG_STREAM_ID,
+            Server,
+        },
     },
 };
 
@@ -65,18 +68,18 @@ use tokio;
 
 
 pub fn start_server(
-    app_cfg:    &AppConfig,
-    stat:       &AppStatus,
-    mut db:     O3db<
-                    { id::UID_LEN },
-                    id::Uid,
-                    EncryptionScheme,
-                    HashScheme,
-                    HashScheme,
-                    ChecksumScheme,
-                >,
-    cmd:        Option<&MsgCmd>,
-    test_mode:  bool,
+    app_cfg:        &AppConfig,
+    stat:           &AppStatus,
+    mut db:         O3db<
+                        { id::UID_LEN },
+                        id::Uid,
+                        EncryptionScheme,
+                        HashScheme,
+                        HashScheme,
+                        ChecksumScheme,
+                    >,
+    cmd:            Option<&MsgCmd>,
+    test_stream:    Option<String>,
 )
     -> Outcome<Evaluation>
 {
@@ -175,7 +178,7 @@ pub fn start_server(
             id::Mid::default(),
             id::Sid::default(),
             id::Uid::default(),
-            if test_mode { ProtocolMode::Test } else { mode },
+            if test_stream.is_some() { ProtocolMode::Test } else { mode },
         ));
 
     let server_context = ServerContext::new(
@@ -194,7 +197,21 @@ pub fn start_server(
         info!("{}", line);
     }
 
-    match rt.block_on(server.start()) {
+    //match rt.block_on(server.start()) {
+    //    Ok(()) => info!("Server stopped gracefully."),
+    //    Err(e) => error!(err!(e,
+    //        "While running server within tokio runtime.";
+    //        IO, Thread)),
+    //}
+
+    match rt.block_on(LOG_STREAM_ID.scope(
+        if let Some(stream) = test_stream {
+            stream
+        } else {
+            fmt!("main")
+        },
+        server.start(),
+    )) {
         Ok(()) => info!("Server stopped gracefully."),
         Err(e) => error!(err!(e,
             "While running server within tokio runtime.";
