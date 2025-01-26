@@ -15,5 +15,6 @@
 //! change before the 1.0 release.
 //!
 #![forbid(unsafe_code)]
-pub mod srv;
 pub mod app;
+pub mod prelude;
+pub mod srv;

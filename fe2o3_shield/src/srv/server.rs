@@ -1,14 +1,16 @@
-use crate::srv::{
-    constant,
-    context::ServerContext,
-    msg::{
-        core::IdTypes,
-        protocol::{
-            ProtocolMode,
-            ProtocolTypes,
+use crate::{
+    srv::{
+        constant,
+        context::ServerContext,
+        msg::{
+            core::IdTypes,
+            protocol::{
+                ProtocolMode,
+                ProtocolTypes,
+            },
         },
+        test::TestCommand,
     },
-    test::TestCommand,
 };
 
 use oxedize_fe2o3_core::prelude::*;
@@ -112,8 +114,8 @@ impl<
         info!(log_stream(), "Server ip address = {}", ip_addr);
         let trg = Arc::new(res!(UdpSocket::bind(trg_addr)));
 
-        info!("mode = {:?}", self.context.protocol.mode);
-        info!("Listening on UDP at {:?}.", trg_addr);
+        info!(log_stream(), "mode = {:?}", self.context.protocol.mode);
+        info!(log_stream(), "Listening on UDP at {:?}.", trg_addr);
     
         loop {
             let mut buf = [0u8; constant::UDP_BUFFER_SIZE]; 
@@ -127,7 +129,8 @@ impl<
                     ////self.timer.update();
                     match e.kind() {
                         io::ErrorKind::WouldBlock | io::ErrorKind::InvalidInput => {}
-                        _ => error!(err!(e, "While trying to receive packet."; IO, Network)),
+                        _ => error!(log_stream(),
+                            err!(e, "While trying to receive packet."; IO, Network)),
                     }
                 },
                 Ok((n, src_addr)) => {
@@ -141,11 +144,11 @@ impl<
                     ));
                     match result.await {
                         Ok(result) => match result {
-                            Err(e) => error!(err!(e,
+                            Err(e) => error!(log_stream(), err!(e,
                                 "While handling incoming packet."; IO, Network)),
                             Ok(_) => {}
                         },
-                        Err(e) => error!(err!(e,
+                        Err(e) => error!(log_stream(), err!(e,
                             "While awaiting for packet handler."; IO, Network)),
                     }
                 },
@@ -156,7 +159,7 @@ impl<
                 let result = self.context.protocol.massembler
                     .message_assembly_garbage_collection(&self.context.protocol.ma_params);
                 match result {
-                    Err(e) => error!(err!(e,
+                    Err(e) => error!(log_stream(), err!(e,
                         "While attempting to collect message assembler garbage.";
                         IO, Network)),
                     Ok(_) => {}
@@ -165,7 +168,7 @@ impl<
             }
             while let Some(test_cmd) = self.test_chan.as_mut().and_then(|ch| ch.try_recv().ok()) {
                 //res!(self.handle_test_command(test_cmd));
-                test!("Test command received: {:?}", test_cmd);
+                test!(log_stream(), "Test command received: {:?}", test_cmd);
             }
         }
     }

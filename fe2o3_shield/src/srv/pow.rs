@@ -1,6 +1,7 @@
-pub use oxedize_fe2o3_core::{
+use crate::prelude::*;
+
+use oxedize_fe2o3_core::{
     prelude::*,
-    rand::Rand,
 };
 use oxedize_fe2o3_hash::pow::{
     Pristine,
@@ -210,7 +211,7 @@ impl<
         let code_start = P0 - C;
         let trg_start = P0 - C - Self::ADDR_LEN;
     
-        trace!("\nPrefix  [{:>4}]: {:02x?}\
+        trace!(log_stream(), "\nPrefix  [{:>4}]: {:02x?}\
             \n  SrcAddr [{:>4}]: {:02x?}\
             \n  TrgAddr [{:>4}]: {:02x?}\
             \n  Code    [{:>4}]: {:02x?}\

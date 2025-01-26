@@ -1,23 +1,26 @@
-use crate::srv::{
-    constant,
-    msg::{
-        core::{
-            IdTypes,
-            MsgFmt,
-            MsgIds,
-            MsgPow,
+use crate::{
+    prelude::*,
+    srv::{
+        constant,
+        msg::{
+            core::{
+                IdTypes,
+                MsgFmt,
+                MsgIds,
+                MsgPow,
+            },
+            handshake::HReq1,
+            packet::{
+                PacketMeta,
+                PacketValidationArtefactRelativeIndices,
+            },
+            protocol::{
+                Protocol,
+                ProtocolTypes,
+            },
         },
-        handshake::HReq1,
-        packet::{
-            PacketMeta,
-            PacketValidationArtefactRelativeIndices,
-        },
-        protocol::{
-            Protocol,
-            ProtocolTypes,
-        },
+        pow::PowPristine,
     },
-    pow::PowPristine,
 };
 
 use oxedize_fe2o3_core::{
@@ -97,9 +100,9 @@ impl<
             let mut unlocked_timer = lock_write!(self.timer);
             unlocked_timer.update();
         }
-        debug!("incoming [{}]:", n);
+        debug!(log_stream(), "incoming [{}]:", n);
         for line in dump!(" {:02x}", &buf[..n], 32) {
-            debug!("{}", line);
+            debug!(log_stream(), "{}", line);
         }
         // Packet:
         //                                                   validation
@@ -120,9 +123,9 @@ impl<
             <P::ID as IdTypes<ML, SL, UL>>::M,
             <P::ID as IdTypes<ML, SL, UL>>::U,
         >::from_bytes(&buf[..n])); // Decode packet meta.
-        debug!("meta [{}]:", n1);
+        debug!(log_stream(), "meta [{}]:", n1);
         for line in Stringer::new(fmt!("{:?}", meta)).to_lines("  ") {
-            debug!("{}", line);
+            debug!(log_stream(), "{}", line);
         }
         //let uid = alias::Uid::from_be_bytes(
         //    res!(<[u8; constant::USER_ID_BYTE_LEN]>::try_from(&meta.uid), Decode, Bytes)
@@ -144,14 +147,14 @@ impl<
         //    unknown and the request is an HREQ1.  This precedes validation because we want to
         //    collect any custom validation parameters for this address.
         if res!(self.agrd.drop_packet(meta.typ, &src_addr)) { // Accesses the address log.
-            debug!("Address guard dropping packet.");
+            debug!(log_stream(), "Address guard dropping packet.");
             return Ok(()); // Drop silently.
         }
         if res!(self.ugrd.drop_packet(&meta.uid, self.accept_unknown)) { // Accesses the user log.
-            debug!("User guard dropping packet.");
+            debug!(log_stream(), "User guard dropping packet.");
             return Ok(()); // Drop silently.
         }
-        debug!("");
+        debug!(log_stream(), "");
         let n2 = n1 + (meta.chnk.chunk_size as usize);
         let (afact_rel_ind, _) =
             res!(PacketValidationArtefactRelativeIndices::from_bytes(&buf[n2..n]));
@@ -161,7 +164,7 @@ impl<
         let (akey, locked_amap) = res!(self.agrd.get_locked_map(&src_addr));
         let (ukey, locked_umap) = res!(self.ugrd.get_locked_map(&meta.uid));
         
-        debug!("");
+        debug!(log_stream(), "");
         // What are our proof of work requirements for the packet?
         let powvars = match self.packval.pow {
             Some(..) => {
@@ -206,7 +209,7 @@ impl<
                     res!(trg.local_addr()).ip(),
                     self.pow_time_horiz, 
                 ));
-                trace!("POW Pristine rx:");
+                trace!(log_stream(), "POW Pristine rx:");
                 res!(pristine.trace());
 
                 Some(PowVars {
@@ -253,7 +256,7 @@ impl<
         match &afact_rel_ind.pow {
             Some(range) => {
                 let artefact = &buf[n2 + range.start..n2 + range.end];
-                trace!("POW rx:");
+                trace!(log_stream(), "POW rx:");
                 res!(self.packval.trace(
                     powvars.as_ref(),
                     artefact,
@@ -272,7 +275,7 @@ impl<
             powvars,
             meta.typ,
         ));
-        debug!("{:?}", validation);
+        debug!(log_stream(), "{:?}", validation);
         let validity = fmt!("pow {} sig {}", validation.pow_state(), validation.sig_state());
 
         match validation.is_valid() {
@@ -280,11 +283,11 @@ impl<
             // validation artefact.
             Some((valid, sigpk_opt)) => if !valid {
                 // TODO Take action on an invalid signature provided by this address and user id.
-                trace!("Dropping packet: {}", validity);
+                trace!(log_stream(), "Dropping packet: {}", validity);
                 return Ok(()); // Drop silently.
             } else {
                 // The packet signature was valid.
-                debug!("The packet is valid: {}", validity);
+                debug!(log_stream(), "The packet is valid: {}", validity);
                 match sigpk_opt {
                     Some((nid, sigpk_given)) => {
                         // A public signing key was supplied, and was used for verification.  My
@@ -355,7 +358,7 @@ impl<
         // Ok, we're almost done on a packet level.  Insert the message chunk into the AddressLog
         // partial message map, which returns the message when complete.  However, I may also have
         // to drop the packet if there is a problem.
-        debug!("");
+        debug!(log_stream(), "");
         match res!(self.massembler.get_msg( // Message checkpoint, drop the partial message?
             &meta,
             &buf[n1..n2], // payload + validator data
@@ -365,7 +368,7 @@ impl<
             (false, Some(msg_byts)) => { // We have a complete message.
                 let msgrx = Msg::new(syntax.clone());
                 let mut msgrx = res!(msgrx.from_bytes(&msg_byts, None));
-                debug!("msgrx [{}]: {}", msg_byts.len(), msgrx);
+                debug!(log_stream(), "msgrx [{}]: {}", msg_byts.len(), msgrx);
                 // Gather the proof of work parameters required by the
                 // client.
                 let msgids: MsgIds<
@@ -389,7 +392,7 @@ impl<
                 for (cmd_name, mut msgcmd) in msgrx.cmds {
                     match cmd_name.as_str() {
                         "hreq1" => {
-                            debug!("HREQ1");
+                            debug!(log_stream(), "HREQ1");
                             let mut scmd: HReq1<ML, SL, UL, P::ID> = HReq1 {
                                 fmt: msgfmt.clone(),
                                 pow: msgpow.clone(),
@@ -422,7 +425,7 @@ impl<
                     //            mid: msgid.clone(),
                     //            ..Default::default()
                     //        };
-                    //        debug!("hresp1 recvd");
+                    //        debug!(log_stream(), "hresp1 recvd");
                     //        Ok(())
                     //        //scmd.process(
                     //        //    &mut msgcmd,

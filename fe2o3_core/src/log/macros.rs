@@ -63,6 +63,19 @@ macro_rules! error {
             stream: String::from($stream),
         });
     };
+    ($stream:expr, $e:expr) => {
+        LOG.send_in(bot_log::Msg::Log {
+            level: LogLevel::Error,
+            src: oxedize_fe2o3_core::log::base::Source {
+                tid: std::thread::current().id(),
+                file: file!(),
+                line: line!(),
+            },
+            erropt: Some($e),
+            msg: fmt!(""),
+            stream: String::from($stream),
+        });
+    };
     ($e:expr) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Error,

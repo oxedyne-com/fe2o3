@@ -1,8 +1,11 @@
-use crate::srv::{
-    constant,
-    msg::{
-        core::MsgType,
-        handshake::HandshakeType,
+use crate::{
+    prelude::*,
+    srv::{
+        constant,
+        msg::{
+            core::MsgType,
+            handshake::HandshakeType,
+        },
     },
 };
 
@@ -409,7 +412,7 @@ impl<
                     }
 
                     /////// Debugging only.
-                    trace!("POW tx:");
+                    trace!(log_stream(), "POW tx:");
                     res!(self.trace(
                         Some(&powparams.pvars),
                         &artefact,
@@ -556,7 +559,7 @@ impl<
                         let h_start = alen - hlen;
                         let n_start = h_start - nlen;
                         let pristine = res!(powvars.pristine.to_bytes());
-                        trace!("\nPristine    [{:>4}]: {:02x?}\
+                        trace!(log_stream(), "\nPristine    [{:>4}]: {:02x?}\
                             \n  Prefix    [{:>4}]: {:02x?}\
                             \nArtefact    [{:>4}]: {:02x?}\
                             \n  Nonce     [{:>4}]: {:02x?}\
@@ -573,7 +576,7 @@ impl<
                         Bug, Configuration, Missing)),
                 }
             },
-            None => trace!("No proof of work hasher provided."),
+            None => trace!(log_stream(), "No proof of work hasher provided."),
         }
         Ok(())
     }

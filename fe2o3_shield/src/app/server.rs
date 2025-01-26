@@ -1,4 +1,5 @@
 use crate::{
+    prelude::*,
     app::{
         cfg::AppConfig,
         constant as app_const,
@@ -86,9 +87,9 @@ pub fn start_server(
     let root_path = Path::new(&app_cfg.app_root)
         .normalise() // Now a NormPathBuf.
         .absolute();
-    debug!("Reading server config...");
+    debug!(log_stream(), "Reading server config...");
     let mut server_cfg = res!(ServerConfig::from_datmap(app_cfg.server_cfg.clone()));
-    info!("Validating server config...");
+    info!(log_stream(), "Validating server config...");
     res!(server_cfg.check_and_fix());
     res!(server_cfg.validate(&root_path));
 
@@ -99,7 +100,7 @@ pub fn start_server(
     if let Some(msg_cmd) = cmd {
         if msg_cmd.has_arg("dev") {
             mode = ProtocolMode::Dev;
-            info!("Running in dev mode.");
+            info!(log_stream(), "Running in dev mode.");
         }
     }
 
@@ -125,17 +126,17 @@ pub fn start_server(
         0,
         Some(1_048_576), // Activate multiple log file archiving using this max size.
     ));
-    debug!("log_cfg = {:?}", log_cfg);
+    debug!(log_stream(), "log_cfg = {:?}", log_cfg);
     set_log_config!(log_cfg);
     println!("Server now logging at {:?}", get_log_file_path!());
-    info!("┌───────────────────────┐");
-    info!("│ New server session.   │");
-    info!("└───────────────────────┘");
+    info!(log_stream(), "┌───────────────────────┐");
+    info!(log_stream(), "│ New server session.   │");
+    info!(log_stream(), "└───────────────────────┘");
 
     // ┌───────────────────────┐
     // │ Start database.       │
     // └───────────────────────┘
-    info!("Starting database...");
+    info!(log_stream(), "Starting database...");
     res!(db.start());
     res!(ok!(db.updated_api()).activate_gc(true));
 
@@ -145,7 +146,7 @@ pub fn start_server(
 
     // Ping all bots.
     let (start, msgs) = res!(db.api().ping_bots(app_const::GET_DATA_WAIT));
-    info!("{} ping replies received in {:?}.", msgs.len(), start.elapsed());
+    info!(log_stream(), "{} ping replies received in {:?}.", msgs.len(), start.elapsed());
 
     // ┌───────────────────────┐
     // │ Start server.         │
@@ -192,13 +193,13 @@ pub fn start_server(
     let (mut server, _test_chan_opt) = Server::new(server_context, syntax.clone());
     let rt = res!(tokio::runtime::Runtime::new());
 
-    info!("Starting server...");
+    info!(log_stream(), "Starting server...");
     for line in srv_const::SPLASH.lines() {
-        info!("{}", line);
+        info!(log_stream(), "{}", line);
     }
 
     //match rt.block_on(server.start()) {
-    //    Ok(()) => info!("Server stopped gracefully."),
+    //    Ok(()) => info!(log_stream(), "Server stopped gracefully."),
     //    Err(e) => error!(err!(e,
     //        "While running server within tokio runtime.";
     //        IO, Thread)),
@@ -212,7 +213,7 @@ pub fn start_server(
         },
         server.start(),
     )) {
-        Ok(()) => info!("Server stopped gracefully."),
+        Ok(()) => info!(log_stream(), "Server stopped gracefully."),
         Err(e) => error!(err!(e,
             "While running server within tokio runtime.";
             IO, Thread)),

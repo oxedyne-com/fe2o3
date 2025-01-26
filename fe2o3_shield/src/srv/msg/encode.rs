@@ -1,27 +1,30 @@
-use crate::srv::{
-    constant,
-    cfg::ServerConfig,
-    schemes::{
-        WireSchemes,
-        WireSchemeTypes,
-    },
-    msg::{
-        core::{
-            IdentifiedMessage,
-            IdTypes,
-            MsgFmt,
-            MsgIds,
-            MsgPow,
+use crate::{
+    prelude::*,
+    srv::{
+        constant,
+        cfg::ServerConfig,
+        schemes::{
+            WireSchemes,
+            WireSchemeTypes,
         },
-        packet::{
-            PacketChunkState,
-            PacketCount,
-            PacketMeta,
-            PacketValidator,
+        msg::{
+            core::{
+                IdentifiedMessage,
+                IdTypes,
+                MsgFmt,
+                MsgIds,
+                MsgPow,
+            },
+            packet::{
+                PacketChunkState,
+                PacketCount,
+                PacketMeta,
+                PacketValidator,
+            },
         },
-    },
-    pow::{
-        PowPristine,
+        pow::{
+            PowPristine,
+        },
     },
 };
 
@@ -138,7 +141,7 @@ pub trait ShieldCommand<
             timestamp: res!(SystemTime::now().duration_since(UNIX_EPOCH)),
             time_horiz: constant::POW_TIME_HORIZON_SEC,
         };
-        trace!("POW Pristine tx:");
+        trace!(log_stream(), "POW Pristine tx:");
         res!(pristine.trace());
 
         let validator = PacketValidator {
@@ -157,7 +160,7 @@ pub trait ShieldCommand<
 
         let chunk_cfg = schms.chnk.clone();
         let chunker = ServerConfig::chunker(chunk_cfg.set_pad_last(pad_last));
-        trace!("{:?}", chunker);
+        trace!(log_stream(), "{:?}", chunker);
 
         let size = chunker.cfg.chunk_size;
         let meta_len = PacketMeta::<ML, UL, ID::M, ID::U>::BYTE_LEN;
@@ -215,15 +218,15 @@ pub trait ShieldCommand<
                 inc_sigpk,
             ));
             let validator_len = packet.len() - len;
-            trace!("Packet {} lengths: msg {}, meta {} chunk {} valid {} total {}",
+            trace!(log_stream(), "Packet {} lengths: msg {}, meta {} chunk {} valid {} total {}",
                 i, msg_len, meta_len, chunk_len, validator_len, packet.len(),
             );
-            trace!("  Chunk:      {}", chunks[i].len());
+            trace!(log_stream(), "  Chunk:      {}", chunks[i].len());
             packets.push(packet);
         }
 
         if let Some(warning) = warning {
-            warn!("{}", warning);
+            warn!(log_stream(), "{}", warning);
         }
         Ok(packets)
     }

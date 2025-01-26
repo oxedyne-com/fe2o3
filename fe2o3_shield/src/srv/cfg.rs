@@ -1,5 +1,6 @@
-use crate::srv::{
-    constant,
+use crate::{
+    prelude::*,
+    srv::constant,
     //packet::PacketValidator,
     //schemes::{
     //    WireSchemes,
@@ -247,7 +248,7 @@ impl ServerConfig {
     pub fn dump(self) -> Outcome<()> {
         let dat = Self::to_datmap(self);
         for line in dat.to_lines("    ", true) {
-            info!("{}", line);
+            info!(log_stream(), "{}", line);
         }
         Ok(())
     }
