@@ -26,11 +26,10 @@ use crate::{
 
 use std::{
     collections::HashMap,
-    fmt,
-    marker::{
-        Send,
-        Sync,
-    },
+    //marker::{
+    //    Send,
+    //    Sync,
+    //},
     sync::{
         Arc,
         Mutex,
@@ -42,6 +41,7 @@ use std::{
 pub trait LoggerConsole<ETAG: GenTag>
     where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
+    fn new() -> Self;
     fn go(&mut self) -> SimplexThread<Msg<ETAG>>;
     fn listen(&mut self);
 }
@@ -56,6 +56,12 @@ pub struct StdoutLoggerConsole<ETAG: GenTag>
 impl<ETAG: GenTag> LoggerConsole<ETAG> for StdoutLoggerConsole<ETAG>
     where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
+    fn new() -> Self {
+        Self {
+            chan: simplex(),
+        }
+    }
+
     fn go(&mut self) -> SimplexThread<Msg<ETAG>> {
         let (semaphore, _sentinel) = thread_channel();
         let semaphore_clone = semaphore.clone();
@@ -91,16 +97,6 @@ impl<ETAG: GenTag> LoggerConsole<ETAG> for StdoutLoggerConsole<ETAG>
     }
 }
 
-impl<ETAG: GenTag + fmt::Debug + Send + Sync> StdoutLoggerConsole<ETAG>
-    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
-{
-    pub fn new() -> Self {
-        Self {
-            chan: simplex(),
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct MultiStreamLoggerConsole<ETAG: GenTag>
     where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
@@ -112,6 +108,13 @@ pub struct MultiStreamLoggerConsole<ETAG: GenTag>
 impl<ETAG: GenTag> LoggerConsole<ETAG> for MultiStreamLoggerConsole<ETAG>
     where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
+    fn new() -> Self {
+        Self {
+            chan: simplex(),
+            pools: HashMap::new(),
+        }
+    }
+
     fn go(&mut self) -> SimplexThread<Msg<ETAG>> {
         let (semaphore, _sentinel) = thread_channel();
         let semaphore_clone = semaphore.clone();
@@ -149,15 +152,3 @@ impl<ETAG: GenTag> LoggerConsole<ETAG> for MultiStreamLoggerConsole<ETAG>
         }
     }
 }
-
-impl<ETAG: GenTag + fmt::Debug + Send + Sync> MultiStreamLoggerConsole<ETAG>
-    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
-{
-    pub fn new() -> Self {
-        Self {
-            chan: simplex(),
-            pools: HashMap::new(),
-        }
-    }
-}
-

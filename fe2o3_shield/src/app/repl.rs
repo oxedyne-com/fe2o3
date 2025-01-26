@@ -9,6 +9,9 @@ use crate::{
 
 use oxedize_fe2o3_core::{
     prelude::*,
+    log::console::{
+        StdoutLoggerConsole,
+    },
 };
 use oxedize_fe2o3_crypto::{
     enc::EncryptionScheme,
@@ -177,7 +180,7 @@ impl AppShellContext {
                 // Control
                 "exit"      => evals.push(res!(cmds::exit_shell(&shell_cfg.exit_msg))),
                 "server"    => {
-                    evals.push(res!(server::start_server(
+                    evals.push(res!(server::start_server::<StdoutLoggerConsole<_>>(
                         &self.app_cfg,
                         &self.stat,
                         self.db.clone(),

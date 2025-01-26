@@ -30,10 +30,7 @@ use oxedize_fe2o3_core::{
     alt::Alt,
     log::{
         bot::FileConfig,
-        console::{
-            LoggerConsole,
-            StdoutLoggerConsole,
-        },
+        console::LoggerConsole,
     },
     path::NormalPath,
 };
@@ -68,7 +65,9 @@ use std::{
 use tokio;
 
 
-pub fn start_server(
+pub fn start_server<
+    L: LoggerConsole<ErrTag>,
+>(
     app_cfg:        &AppConfig,
     stat:           &AppStatus,
     mut db:         O3db<
@@ -115,18 +114,24 @@ pub fn start_server(
     // │ Reconfigure logging.  │
     // └───────────────────────┘
     let mut log_cfg = get_log_config!();
-    let mut logger_console = StdoutLoggerConsole::new();
+    // Console:
+    let mut logger_console = L::new();
     let logger_console_thread = logger_console.go();
     log_cfg.console = Some(logger_console_thread.chan.clone());
+    // File::
+    if test_stream.is_none() {
+        log_cfg.file = Some(FileConfig::new(
+            PathBuf::from(&root_path).join("www").join("logs"),
+            app_cfg.app_name.clone(),
+            "log".to_string(),
+            0,
+            Some(1_048_576), // Activate multiple log file archiving using this max size.
+        ));
+    } else {
+        // Testing.
+        log_cfg.file = None;
+    };
     (log_cfg.level, _) = res!(app_cfg.server_log_level());
-    log_cfg.file = Some(FileConfig::new(
-        PathBuf::from(&root_path).join("www").join("logs"),
-        app_cfg.app_name.clone(),
-        "log".to_string(),
-        0,
-        Some(1_048_576), // Activate multiple log file archiving using this max size.
-    ));
-    debug!(log_stream(), "log_cfg = {:?}", log_cfg);
     set_log_config!(log_cfg);
     println!("Server now logging at {:?}", get_log_file_path!());
     info!(log_stream(), "┌───────────────────────┐");
