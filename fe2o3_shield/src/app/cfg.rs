@@ -40,9 +40,9 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             app_root:           String::new(),
-            app_name:           fmt!("steel"),
-            app_human_name:     fmt!("Steel Server"),
-            app_description:    fmt!("A Hematite Steel Server app."),
+            app_name:           fmt!("shield"),
+            app_human_name:     fmt!("Shield Server"),
+            app_description:    fmt!("A Hematite Shield Server app."),
             app_log_level:      fmt!("debug"),
             kdf_name:           fmt!("Argon2id_v0x13"),
             enc_name:           fmt!("AES-256-GCM"),

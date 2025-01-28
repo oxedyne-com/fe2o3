@@ -5,15 +5,21 @@ use crate::{
         msg::{
             core::IdTypes,
             protocol::{
-                ProtocolMode,
                 ProtocolTypes,
             },
         },
-        test::TestCommand,
+        cmd::Command,
     },
 };
 
-use oxedize_fe2o3_core::prelude::*;
+use oxedize_fe2o3_core::{
+    prelude::*,
+    channels::{
+        Recv,
+        simplex,
+        Simplex,
+    },
+};
 use oxedize_fe2o3_iop_crypto::enc::Encrypter;
 use oxedize_fe2o3_iop_db::api::Database;
 use oxedize_fe2o3_iop_hash::api::Hasher;
@@ -34,7 +40,6 @@ use std::{
 
 use local_ip_address::local_ip;
 use tokio::{
-    sync::mpsc,
     task,
     task_local,
 };
@@ -63,7 +68,7 @@ pub struct Server<
     syntax:     SyntaxRef,
     ma_gc_last: Instant,
     ma_gc_int:  Duration,
-    test_chan:  Option<mpsc::Receiver<TestCommand>>,
+    cmd_chan:   Simplex<Command>,
 }
 
 impl<
@@ -83,14 +88,10 @@ impl<
         context: ServerContext<C, ML, SL, UL, P, ENC, KH, DB>,
         syntax: SyntaxRef,
     )
-        -> (Self, Option<mpsc::Sender<TestCommand>>)
+        -> (Self, Simplex<Command>)
     {
-        let (tx, rx) = if matches!(context.protocol.mode, ProtocolMode::Test) {
-            let (tx, rx) = mpsc::channel(32);
-            (Some(tx), Some(rx))
-        } else {
-            (None, None)
-        };
+        let cmd_chan = simplex();
+        let cmd_chan_clone = cmd_chan.clone();
 
         (
             Self {
@@ -98,9 +99,9 @@ impl<
                 syntax,
                 ma_gc_last: Instant::now(),
                 ma_gc_int:  Duration::from_secs(300),
-                test_chan:  rx,
+                cmd_chan,
             },
-            tx,
+            cmd_chan_clone,
         )
     }
 
@@ -116,8 +117,12 @@ impl<
 
         info!(log_stream(), "mode = {:?}", self.context.protocol.mode);
         info!(log_stream(), "Listening on UDP at {:?}.", trg_addr);
+
+        res!(trg.set_read_timeout(Some(constant::SERVER_EXT_SOCKET_CHECK_INTERVAL)));
     
-        loop {
+        msg!("2000");
+        'main: loop {
+            // Check internet port.
             let mut buf = [0u8; constant::UDP_BUFFER_SIZE]; 
             match trg.recv_from(&mut buf) { // Receive udp packet, non-blocking.
                 Err(e) => {
@@ -153,6 +158,7 @@ impl<
                     }
                 },
             } // Receive udp packet.
+            msg!("2010");
 
             // Message assembly garbage collection.
             if self.ma_gc_last.elapsed() > self.ma_gc_int {
@@ -166,10 +172,21 @@ impl<
                 }
                 self.ma_gc_last = Instant::now();
             }
-            while let Some(test_cmd) = self.test_chan.as_mut().and_then(|ch| ch.try_recv().ok()) {
-                //res!(self.handle_test_command(test_cmd));
-                test!(log_stream(), "Test command received: {:?}", test_cmd);
+
+            msg!("2020");
+            // Check internal command channel.
+            'cmd: loop {
+                match self.cmd_chan.try_recv() {
+                    Recv::Empty => break 'cmd,
+                    Recv::Result(Ok(Command::Finish)) => break 'main,
+                    Recv::Result(Ok(cmd)) => test!(log_stream(), "Server command received: {:?}", cmd),
+                    Recv::Result(Err(e)) => error!(log_stream(), err!(e,
+                        "While reading command channel."; Channel, Read)),
+                }
             }
+            msg!("2030");
         }
+
+        Ok(())
     }
 }

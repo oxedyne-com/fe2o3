@@ -44,6 +44,7 @@ pub trait LoggerConsole<ETAG: GenTag>
     fn new() -> Self;
     fn go(&mut self) -> SimplexThread<Msg<ETAG>>;
     fn listen(&mut self);
+    fn get_stream(&self, _stream: &str) -> Option<Simplex<String>> { None }
 }
 
 #[derive(Clone, Debug)]
@@ -101,8 +102,8 @@ impl<ETAG: GenTag> LoggerConsole<ETAG> for StdoutLoggerConsole<ETAG>
 pub struct MultiStreamLoggerConsole<ETAG: GenTag>
     where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
-    pub chan:   Simplex<Msg<ETAG>>,
-    pub pools:  HashMap<String, Vec<String>>,
+    pub chan:       Simplex<Msg<ETAG>>,
+    pub streams:    HashMap<String, Simplex<String>>,
 }
 
 impl<ETAG: GenTag> LoggerConsole<ETAG> for MultiStreamLoggerConsole<ETAG>
@@ -110,8 +111,8 @@ impl<ETAG: GenTag> LoggerConsole<ETAG> for MultiStreamLoggerConsole<ETAG>
 {
     fn new() -> Self {
         Self {
-            chan: simplex(),
-            pools: HashMap::new(),
+            chan:       simplex(),
+            streams:    HashMap::new(),
         }
     }
 
@@ -122,8 +123,8 @@ impl<ETAG: GenTag> LoggerConsole<ETAG> for MultiStreamLoggerConsole<ETAG>
         let handle = thread::spawn(move || {
             semaphore.touch();
             let mut logger = Self {
-                chan: chan_clone,
-                pools: HashMap::new(),
+                chan:       chan_clone,
+                streams:    HashMap::new(),
             };
             logger.listen();
         });
@@ -141,7 +142,13 @@ impl<ETAG: GenTag> LoggerConsole<ETAG> for MultiStreamLoggerConsole<ETAG>
                     break;
                 }
                 Msg::Console((stream, msg)) => {
-                    self.pools.entry(stream).or_insert_with(Vec::new).push(msg);
+                    if let Some(chan) = self.streams.get(&stream) {
+                        if let Err(e) = chan.send(msg) {
+                            println!("{}", err!(e,
+                                "While trying to send to log stream '{}'", stream;
+                            Channel, Write));
+                        }
+                    }
                 }
                 _ => {
                     println!("{}", err!(
@@ -150,5 +157,9 @@ impl<ETAG: GenTag> LoggerConsole<ETAG> for MultiStreamLoggerConsole<ETAG>
                 }
             }
         }
+    }
+
+    fn get_stream(&self, stream: &str) -> Option<Simplex<String>> {
+        self.streams.get(stream).cloned()
     }
 }

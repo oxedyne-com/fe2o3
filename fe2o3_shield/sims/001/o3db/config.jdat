@@ -1,0 +1,17 @@
+(map|{
+    (str|"bytes_before_hashing"): (u64|32),
+    (str|"cache_size_limit_bytes"): (u64|100000000),
+    (str|"data_file_max_bytes"): (u64|1000000),
+    (str|"init_load_caches"): (true),
+    (str|"num_cbots_per_zone"): (u16|2),
+    (str|"num_fbots_per_zone"): (u16|2),
+    (str|"num_igbots_per_zone"): (u16|2),
+    (str|"num_rbots_per_zone"): (u16|2),
+    (str|"num_sbots"): (u16|2),
+    (str|"num_wbots_per_zone"): (u16|1),
+    (str|"num_zones"): (u16|2),
+    (str|"rest_chunk_bytes"): (u64|64),
+    (str|"rest_chunk_threshold"): (u64|1500),
+    (str|"zone_overrides"): (map|{}),
+    (str|"zone_state_update_secs"): (u8|1),
+})

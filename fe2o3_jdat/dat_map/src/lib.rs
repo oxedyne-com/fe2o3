@@ -17,6 +17,7 @@ use syn::{
     DeriveInput,
 };
 
+
 #[proc_macro_derive(FromDatMap, attributes(skip, optional, rename))]
 pub fn from_datmap(input: TokenStream) -> TokenStream {
     let ast = syn::parse_macro_input!(input as DeriveInput);

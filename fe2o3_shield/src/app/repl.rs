@@ -180,13 +180,14 @@ impl AppShellContext {
                 // Control
                 "exit"      => evals.push(res!(cmds::exit_shell(&shell_cfg.exit_msg))),
                 "server"    => {
-                    evals.push(res!(server::start_server::<StdoutLoggerConsole<_>>(
+                    let (eval, _cmd_chan) = res!(server::start_server::<StdoutLoggerConsole<_>>(
                         &self.app_cfg,
                         &self.stat,
                         self.db.clone(),
                         Some(cmd),
                         None,
-                    )));
+                    ));
+                    evals.push(eval);
                 }
                 "shell"     => evals.push(res!(self.start_shell(&shell_cfg, Some(cmd)))),
                 // Filesystem

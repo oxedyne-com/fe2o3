@@ -80,7 +80,7 @@ pub const SESSION_ID_KIND:                  Kind = Kind::U64;
 pub const MSG_TYPE_BYTE_LEN:                usize = mem::size_of::<MsgType>();
 
 pub const SERVER_INT_CHANNEL_CHECK_INTERVAL:    Duration = Duration::from_nanos(1_000);
-pub const SERVER_EXT_SOCKET_CHECK_INTERVAL:     Duration = Duration::from_nanos(999_000);
+pub const SERVER_EXT_SOCKET_CHECK_INTERVAL:     Duration = Duration::from_millis(100);
 
 pub const SERVER_BOT_ERROR_COUNT_WARNING:   usize = 10;
 

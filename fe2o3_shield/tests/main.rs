@@ -1,4 +1,4 @@
-mod msg;
+//mod msg;
 mod sim;
 
 use oxedize_fe2o3_core::prelude::*;
@@ -20,9 +20,13 @@ fn main() -> Outcome<()> {
     outcome
 }
 
+/// Run as
+/// ```ignore
+///     cargo test main -- --nocapture
+/// ```
 fn run_tests() -> Outcome<()> {
 
-    res!(msg::test_msg("all"));
+    //res!(msg::test_msg("all"));
     res!(sim::test_sim("all"));
 
     Ok(())

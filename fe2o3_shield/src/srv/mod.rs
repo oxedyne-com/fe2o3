@@ -1,4 +1,5 @@
 pub mod cfg;
+pub mod cmd;
 pub mod constant;
 pub mod context;
 pub mod guard;

@@ -7,6 +7,7 @@ use crate::{
     },
     srv::{
         cfg::ServerConfig,
+        cmd::Command,
         constant as srv_const,
         context::ServerContext,
         msg::{
@@ -28,6 +29,7 @@ use crate::{
 use oxedize_fe2o3_core::{
     prelude::*,
     alt::Alt,
+    channels::Simplex,
     log::{
         bot::FileConfig,
         console::LoggerConsole,
@@ -81,14 +83,20 @@ pub fn start_server<
     cmd:            Option<&MsgCmd>,
     test_stream:    Option<String>,
 )
-    -> Outcome<Evaluation>
+    -> Outcome<(
+        Evaluation,
+        Option<(
+            Simplex<Command>,
+            tokio::task::JoinHandle<Outcome<()>>,
+        )>,
+    )>
 {
     let root_path = Path::new(&app_cfg.app_root)
         .normalise() // Now a NormPathBuf.
         .absolute();
-    debug!(log_stream(), "Reading server config...");
+    debug!("Reading server config...");
     let mut server_cfg = res!(ServerConfig::from_datmap(app_cfg.server_cfg.clone()));
-    info!(log_stream(), "Validating server config...");
+    info!("Validating server config...");
     res!(server_cfg.check_and_fix());
     res!(server_cfg.validate(&root_path));
 
@@ -99,15 +107,18 @@ pub fn start_server<
     if let Some(msg_cmd) = cmd {
         if msg_cmd.has_arg("dev") {
             mode = ProtocolMode::Dev;
-            info!(log_stream(), "Running in dev mode.");
+            info!("Running in dev mode.");
         }
     }
 
     if stat.first && matches!(mode, ProtocolMode::Production) {
-        return Ok(Evaluation::Error(fmt!(
-            "You should update values in {} before running the server in production mode.",
-            app_const::CONFIG_NAME,
-        )));
+        return Ok((
+            Evaluation::Error(fmt!(
+                "You should update values in {} before running the server in production mode.",
+                app_const::CONFIG_NAME,
+            )),
+            None,
+        ));
     }
 
     // ┌───────────────────────┐
@@ -133,10 +144,15 @@ pub fn start_server<
     };
     (log_cfg.level, _) = res!(app_cfg.server_log_level());
     set_log_config!(log_cfg);
-    println!("Server now logging at {:?}", get_log_file_path!());
+    if test_stream.is_none() {
+        println!("Server now logging at {:?}", get_log_file_path!());
+    } else {
+        test!(log_stream(), "Server logs now streaming to multiple channels.");
+    }
     info!(log_stream(), "┌───────────────────────┐");
     info!(log_stream(), "│ New server session.   │");
     info!(log_stream(), "└───────────────────────┘");
+    msg!("1000");
 
     // ┌───────────────────────┐
     // │ Start database.       │
@@ -153,6 +169,7 @@ pub fn start_server<
     let (start, msgs) = res!(db.api().ping_bots(app_const::GET_DATA_WAIT));
     info!(log_stream(), "{} ping replies received in {:?}.", msgs.len(), start.elapsed());
 
+    msg!("1010");
     // ┌───────────────────────┐
     // │ Start server.         │
     // └───────────────────────┘
@@ -195,7 +212,7 @@ pub fn start_server<
     );
 
     let syntax = res!(srv_syntax::base_msg());
-    let (mut server, _test_chan_opt) = Server::new(server_context, syntax.clone());
+    let (mut server, cmd_chan) = Server::new(server_context, syntax.clone());
     let rt = res!(tokio::runtime::Runtime::new());
 
     info!(log_stream(), "Starting server...");
@@ -203,28 +220,18 @@ pub fn start_server<
         info!(log_stream(), "{}", line);
     }
 
-    //match rt.block_on(server.start()) {
-    //    Ok(()) => info!(log_stream(), "Server stopped gracefully."),
-    //    Err(e) => error!(err!(e,
-    //        "While running server within tokio runtime.";
-    //        IO, Thread)),
-    //}
-
-    match rt.block_on(LOG_STREAM_ID.scope(
+    msg!("1020");
+    let handle = rt.spawn(LOG_STREAM_ID.scope(
         if let Some(stream) = test_stream {
             stream
         } else {
             fmt!("main")
         },
-        server.start(),
-    )) {
-        Ok(()) => info!(log_stream(), "Server stopped gracefully."),
-        Err(e) => error!(err!(e,
-            "While running server within tokio runtime.";
-            IO, Thread)),
-    }
+        async move { server.start().await },
+    ));
 
-    log_finish_wait!();
+    //log_finish_wait!();
 
-    Ok(Evaluation::Exit)
+    msg!("1030");
+    Ok((Evaluation::Exit, Some((cmd_chan, handle))))
 }
