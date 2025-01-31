@@ -2,6 +2,7 @@ use crate::{
     app::{
         cfg::AppConfig,
         constant as app_const,
+        log::switch_to_logger_console,
         server,
         tui::AppStatus,
     },
@@ -9,9 +10,11 @@ use crate::{
 
 use oxedize_fe2o3_core::{
     prelude::*,
-    log::console::{
-        StdoutLoggerConsole,
+    log::{
+        bot::FileConfig,
+        console::StdoutLoggerConsole,
     },
+    path::NormalPath,
 };
 use oxedize_fe2o3_crypto::{
     enc::EncryptionScheme,
@@ -61,6 +64,7 @@ use std::{
     collections::BTreeMap,
     path::{
         Path,
+        PathBuf,
     },
 };
 
@@ -180,12 +184,38 @@ impl AppShellContext {
                 // Control
                 "exit"      => evals.push(res!(cmds::exit_shell(&shell_cfg.exit_msg))),
                 "server"    => {
-                    let (eval, _cmd_chan) = res!(server::start_server::<StdoutLoggerConsole<_>>(
-                        &self.app_cfg,
-                        &self.stat,
-                        self.db.clone(),
-                        Some(cmd),
-                        None,
+                    let root_path = Path::new(&self.app_cfg.app_root)
+                        .normalise() // Now a NormPathBuf.
+                        .absolute();
+                    // ┌───────────────────────┐
+                    // │ Reconfigure logging.  │
+                    // └───────────────────────┘
+                    info!("Reconfiguring log to stdout and file...");
+                    res!(switch_to_logger_console::<StdoutLoggerConsole<_>>());
+                    let mut log_cfg = log_get_config!();
+                    log_cfg.file = Some(FileConfig::new(
+                        PathBuf::from(&root_path).join("www").join("logs"),
+                        self.app_cfg.app_name.clone(),
+                        "log".to_string(),
+                        0,
+                        Some(1_048_576), // Activate multiple log file archiving using this max size.
+                    ));
+                    (log_cfg.level, _) = res!(self.app_cfg.server_log_level());
+                    log_set_config!(log_cfg);
+                    info!("Server now logging at {:?}", log_get_file_path!());
+                    info!("┌───────────────────────┐");
+                    info!("│ New server session.   │");
+                    info!("└───────────────────────┘");
+
+                    let rt = res!(tokio::runtime::Runtime::new());
+                    let (eval, _cmd_chan) = res!(rt.block_on(
+                        server::start_server(
+                            &self.app_cfg,
+                            &self.stat,
+                            self.db.clone(),
+                            Some(cmd),
+                            None,
+                        )
                     ));
                     evals.push(eval);
                 }

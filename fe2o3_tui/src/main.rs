@@ -95,7 +95,7 @@ impl App<'_> {
 }
 
 fn setup_log(log_level: LogLevel) -> Outcome<()> {
-    let mut log_cfg = get_log_config!();
+    let mut log_cfg = log_get_config!();
     log_cfg.level = log_level;
     log_cfg.console = None;
     let file_cfg = FileConfig::new(
@@ -107,7 +107,7 @@ fn setup_log(log_level: LogLevel) -> Outcome<()> {
     );
     let log_path = file_cfg.path();
     log_cfg.file = Some(file_cfg);
-    set_log_config!(log_cfg);
+    log_set_config!(log_cfg);
     info!("Logging at {:?}", log_path);
     Ok(())
 }

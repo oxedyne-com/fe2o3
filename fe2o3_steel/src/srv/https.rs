@@ -86,7 +86,7 @@ impl<
             match result {
                 Some(Ok(request)) => {
                     log!(log_level, "{}: Incoming from {:?}:", id, src_addr);
-                    request.log(get_log_level!());
+                    request.log(log_get_level!());
     
                     if request.is_websocket_upgrade() {
                         log!(log_level, "Connection upgrading to websocket...");

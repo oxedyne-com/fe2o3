@@ -120,7 +120,6 @@ impl<
 
         res!(trg.set_read_timeout(Some(constant::SERVER_EXT_SOCKET_CHECK_INTERVAL)));
     
-        msg!("2000");
         'main: loop {
             // Check internet port.
             let mut buf = [0u8; constant::UDP_BUFFER_SIZE]; 
@@ -158,7 +157,6 @@ impl<
                     }
                 },
             } // Receive udp packet.
-            msg!("2010");
 
             // Message assembly garbage collection.
             if self.ma_gc_last.elapsed() > self.ma_gc_int {
@@ -173,18 +171,18 @@ impl<
                 self.ma_gc_last = Instant::now();
             }
 
-            msg!("2020");
             // Check internal command channel.
             'cmd: loop {
                 match self.cmd_chan.try_recv() {
                     Recv::Empty => break 'cmd,
                     Recv::Result(Ok(Command::Finish)) => break 'main,
-                    Recv::Result(Ok(cmd)) => test!(log_stream(), "Server command received: {:?}", cmd),
+                    Recv::Result(Ok(cmd)) => {
+                        test!(log_stream(), "Server command received: {:?}", cmd);
+                    }
                     Recv::Result(Err(e)) => error!(log_stream(), err!(e,
                         "While reading command channel."; Channel, Read)),
                 }
             }
-            msg!("2030");
         }
 
         Ok(())

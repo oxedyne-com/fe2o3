@@ -14,7 +14,7 @@ use std::time::Duration;
 
 
 fn setup_log() -> Outcome<()> {
-    let mut log_cfg = get_log_config!();
+    let mut log_cfg = log_get_config!();
     log_cfg.level = res!(LogLevel::from_str("trace"));
     let file_cfg = FileConfig::new(
         res!(std::env::current_dir()),
@@ -25,7 +25,7 @@ fn setup_log() -> Outcome<()> {
     );
     let log_path = file_cfg.path();
     log_cfg.file = Some(file_cfg);
-    set_log_config!(log_cfg);
+    log_set_config!(log_cfg);
     info!("Logging at {:?}", log_path);
     Ok(())
 }

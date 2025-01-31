@@ -22,7 +22,7 @@ use oxedize_fe2o3_core::{
     },
     thread::{
         thread_channel,
-        SimplexThread,
+        ThreadController,
     },
 };
 use oxedize_fe2o3_text::lines::TextLines;
@@ -53,7 +53,7 @@ pub struct AppLoggerConsole<ETAG: GenTag>
 impl<ETAG: GenTag> LoggerConsole<ETAG> for AppLoggerConsole<ETAG>
     where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
-    fn go(&mut self) -> SimplexThread<Msg<ETAG>> {
+    fn go(&mut self) -> ThreadController<Msg<ETAG>> {
         // Logger console thread.  Listens for messages from the LogBot.
         let (semaphore, _sentinel) = thread_channel();
         let semaphore_clone = semaphore.clone();
@@ -62,7 +62,7 @@ impl<ETAG: GenTag> LoggerConsole<ETAG> for AppLoggerConsole<ETAG>
             semaphore.touch();
             logger_clone.listen();
         });
-        SimplexThread::new(
+        ThreadController::new(
             self.log_chan.clone(),
             Arc::new(Mutex::new(Some(handle))),
             semaphore_clone,

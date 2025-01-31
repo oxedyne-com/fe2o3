@@ -9,7 +9,7 @@
 //! - A flexible logging system via [`Logger`] supporting multiple output targets and
 //!   log levels with console and file support
 //!
-//! - Thread and bot management through [`SimplexThread`] and message passing primitives 
+//! - Thread and bot management through [`ThreadController`] and message passing primitives 
 //!   for reliable concurrent operations
 //!
 //! - Generic data structures and traits like [`Counter`], [`Map`], and [`Alt`] for 

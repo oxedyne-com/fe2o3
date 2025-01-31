@@ -21,7 +21,7 @@
 //! #[test]
 //! fn main() -> Outcome<()> {
 //!     // Set up logging before running tests
-//!     set_log_level!("test");
+//!     log_set_level!("test");
 //!     
 //!     let outcome = run_tests();
 //!     

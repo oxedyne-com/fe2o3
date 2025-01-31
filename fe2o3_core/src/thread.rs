@@ -32,13 +32,13 @@ pub fn thread_channel() -> (Semaphore, Sentinel) {
 }
 
 #[derive(Clone, Debug)]
-pub struct SimplexThread<T> {
+pub struct ThreadController<T> {
     pub chan: Simplex<T>,
     pub hopt: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
     pub sema: Semaphore,
 }
 
-impl<T> SimplexThread<T> {
+impl<T> ThreadController<T> {
     pub fn new(
         chan: Simplex<T>,
         hopt: Arc<Mutex<Option<thread::JoinHandle<()>>>>,

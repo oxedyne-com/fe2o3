@@ -14,7 +14,7 @@ fn main() -> Outcome<()> {
     // allow logger thread completion.  Otherwise, we may not see all the logger output before the
     // main thread finishes.
 
-    set_log_level!("test");
+    log_set_level!("test");
 
     let outcome = run_tests();
 

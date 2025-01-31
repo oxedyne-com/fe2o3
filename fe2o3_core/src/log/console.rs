@@ -20,7 +20,7 @@ use crate::{
     },
     thread::{
         thread_channel,
-        SimplexThread,
+        ThreadController,
     },
 };
 
@@ -33,6 +33,7 @@ use std::{
     sync::{
         Arc,
         Mutex,
+        RwLock,
     },
     thread,
 };
@@ -42,9 +43,9 @@ pub trait LoggerConsole<ETAG: GenTag>
     where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
     fn new() -> Self;
-    fn go(&mut self) -> SimplexThread<Msg<ETAG>>;
+    fn go(&mut self) -> ThreadController<Msg<ETAG>>;
     fn listen(&mut self);
-    fn get_stream(&self, _stream: &str) -> Option<Simplex<String>> { None }
+    fn get_streams(&self) -> HashMap<String, Simplex<String>> { HashMap::new() }
 }
 
 #[derive(Clone, Debug)]
@@ -63,7 +64,7 @@ impl<ETAG: GenTag> LoggerConsole<ETAG> for StdoutLoggerConsole<ETAG>
         }
     }
 
-    fn go(&mut self) -> SimplexThread<Msg<ETAG>> {
+    fn go(&mut self) -> ThreadController<Msg<ETAG>> {
         let (semaphore, _sentinel) = thread_channel();
         let semaphore_clone = semaphore.clone();
         let chan_clone = self.chan.clone();
@@ -72,7 +73,7 @@ impl<ETAG: GenTag> LoggerConsole<ETAG> for StdoutLoggerConsole<ETAG>
             let mut logger = Self { chan: chan_clone };
             logger.listen();
         });
-        SimplexThread::new(
+        ThreadController::new(
             self.chan.clone(),
             Arc::new(Mutex::new(Some(handle))),
             semaphore_clone,
@@ -85,12 +86,12 @@ impl<ETAG: GenTag> LoggerConsole<ETAG> for StdoutLoggerConsole<ETAG>
                 Msg::Finish(_src) => {
                     break;
                 }
-                Msg::Console((_stream, msg)) => {
+                Msg::Console(_stream, msg) => {
                     println!("{}", msg)
                 }
                 _ => {
                     println!("{}", err!(
-                        "Unexpected message type: {:?}", msg;
+                        "Unexpected log message type: {:?}", msg;
                     Bug, Unexpected, Input));
                 }
             }
@@ -103,7 +104,7 @@ pub struct MultiStreamLoggerConsole<ETAG: GenTag>
     where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
     pub chan:       Simplex<Msg<ETAG>>,
-    pub streams:    HashMap<String, Simplex<String>>,
+    pub streams:    Arc<RwLock<HashMap<String, Simplex<String>>>>,
 }
 
 impl<ETAG: GenTag> LoggerConsole<ETAG> for MultiStreamLoggerConsole<ETAG>
@@ -112,11 +113,11 @@ impl<ETAG: GenTag> LoggerConsole<ETAG> for MultiStreamLoggerConsole<ETAG>
     fn new() -> Self {
         Self {
             chan:       simplex(),
-            streams:    HashMap::new(),
+            streams:    Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    fn go(&mut self) -> SimplexThread<Msg<ETAG>> {
+    fn go(&mut self) -> ThreadController<Msg<ETAG>> {
         let (semaphore, _sentinel) = thread_channel();
         let semaphore_clone = semaphore.clone();
         let chan_clone = self.chan.clone();
@@ -124,11 +125,11 @@ impl<ETAG: GenTag> LoggerConsole<ETAG> for MultiStreamLoggerConsole<ETAG>
             semaphore.touch();
             let mut logger = Self {
                 chan:       chan_clone,
-                streams:    HashMap::new(),
+                streams:    Arc::new(RwLock::new(HashMap::new())),
             };
             logger.listen();
         });
-        SimplexThread::new(
+        ThreadController::new(
             self.chan.clone(),
             Arc::new(Mutex::new(Some(handle))),
             semaphore_clone,
@@ -137,29 +138,61 @@ impl<ETAG: GenTag> LoggerConsole<ETAG> for MultiStreamLoggerConsole<ETAG>
 
     fn listen(&mut self) {
         while let Ok(msg) = self.chan.recv() {
+            //match self.streams.read() {
+            //    Ok(streams) =>  {
+            //        let mut s = fmt!("");
+            //        for (k, v) in streams.iter() {
+            //            s.push_str(&fmt!(" k='{}' n={}",k,v.len()));
+            //        }
+            //        msg!("1000 {}", s);
+            //    }
+            //    Err(_) => println!("1000 Failed to acquire read lock on log streams."),
+            //}
             match msg {
                 Msg::Finish(_src) => {
                     break;
                 }
-                Msg::Console((stream, msg)) => {
-                    if let Some(chan) = self.streams.get(&stream) {
-                        if let Err(e) = chan.send(msg) {
-                            println!("{}", err!(e,
-                                "While trying to send to log stream '{}'", stream;
-                            Channel, Write));
+                Msg::Console(stream, msg) => {
+                    let chan = {
+                        match self.streams.write() {
+                            Ok(mut streams) => {
+                                streams.entry(stream.clone())
+                                    .or_insert_with(|| simplex())
+                                    .clone()
+                            }
+                            Err(_) => {
+                                println!("Failed to acquire write lock on log streams.");
+                                continue;
+                            }
                         }
+                    };
+                    if let Err(e) = chan.send(msg) {
+                        println!("Failed to send to log message to stream '{}': {}",
+                            stream, e);
                     }
+                }
+                Msg::AddStream(name, chan) => {
+                    if let Err(_) = self.streams.write().map(|mut streams| {
+                        streams.insert(name.clone(), chan);
+                    }) {
+                        println!("Failed to acquire write lock on log streams \
+                            in order to add stream channel '{}'.", name);
+                    }
+                }
+                Msg::GetStreams(responder) => {
+                    //msg!("1500");
+                    if let Err(e) = responder.send(self.streams.clone()) {
+                        println!("{}", err!(e,
+                            "While sending log streams map."; Channel, Write));
+                    }
+                    continue;
                 }
                 _ => {
                     println!("{}", err!(
-                        "Unexpected message type: {:?}", msg;
-                    Bug, Unexpected, Input));
+                        "Unexpected log message type: {:?}", msg;
+                        Bug, Unexpected, Input));
                 }
             }
         }
-    }
-
-    fn get_stream(&self, stream: &str) -> Option<Simplex<String>> {
-        self.streams.get(stream).cloned()
     }
 }

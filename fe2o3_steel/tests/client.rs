@@ -140,7 +140,7 @@ pub async fn test_client(filter: &'static str) -> Outcome<()> {
                 match result {
                     Ok((Some(response), remnant)) => {
                         trace!("Incoming Response:");
-                        response.log(get_log_level!());
+                        response.log(log_get_level!());
                         trace!("##### Remnant is {} bytes", remnant.len());
                     }
                     Ok((None, _)) => break,
@@ -191,7 +191,7 @@ pub async fn test_client(filter: &'static str) -> Outcome<()> {
                 match result {
                     Ok(response) => {
                         trace!("Incoming Response:");
-                        response.log(get_log_level!());
+                        response.log(log_get_level!());
                     }
                     Err(e) => {
                         return Err(e);

@@ -144,7 +144,7 @@ pub fn run() -> Outcome<()> {
     // ┌───────────────────────┐
     // │ Start logging.        │
     // └───────────────────────┘
-    let mut log_cfg = get_log_config!();
+    let mut log_cfg = log_get_config!();
     log_cfg.console = None;
     log_cfg.level = match LogLevel::from_str(&cfg.app_log_level) {
         Ok(level) => level,
@@ -157,8 +157,8 @@ pub fn run() -> Outcome<()> {
         0,
         None, // No multiple log file archiving, just use same file.
     ));
-    set_log_config!(log_cfg);
-    println!("Shell now logging at {:?}", get_log_file_path!());
+    log_set_config!(log_cfg);
+    println!("Shell now logging at {:?}", log_get_file_path!());
     info!(log_stream(), "┌───────────────────────┐");
     info!(log_stream(), "│ New shell session.    │");
     info!(log_stream(), "└───────────────────────┘");

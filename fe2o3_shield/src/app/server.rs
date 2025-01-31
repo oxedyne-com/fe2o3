@@ -30,10 +30,6 @@ use oxedize_fe2o3_core::{
     prelude::*,
     alt::Alt,
     channels::Simplex,
-    log::{
-        bot::FileConfig,
-        console::LoggerConsole,
-    },
     path::NormalPath,
 };
 use oxedize_fe2o3_crypto::enc::EncryptionScheme;
@@ -57,19 +53,14 @@ use oxedize_fe2o3_tui::lib_tui::{
 };
 
 use std::{
-    path::{
-        Path,
-        PathBuf,
-    },
+    path::Path,
     time::Duration,
 };
 
 use tokio;
 
 
-pub fn start_server<
-    L: LoggerConsole<ErrTag>,
->(
+pub async fn start_server(
     app_cfg:        &AppConfig,
     stat:           &AppStatus,
     mut db:         O3db<
@@ -81,7 +72,7 @@ pub fn start_server<
                         ChecksumScheme,
                     >,
     cmd:            Option<&MsgCmd>,
-    test_stream:    Option<String>,
+    test_stream:    Option<String>, // Constains log stream id.
 )
     -> Outcome<(
         Evaluation,
@@ -91,6 +82,7 @@ pub fn start_server<
         )>,
     )>
 {
+    msg!("log_stream = {}",log_stream());
     let root_path = Path::new(&app_cfg.app_root)
         .normalise() // Now a NormPathBuf.
         .absolute();
@@ -122,39 +114,6 @@ pub fn start_server<
     }
 
     // ┌───────────────────────┐
-    // │ Reconfigure logging.  │
-    // └───────────────────────┘
-    let mut log_cfg = get_log_config!();
-    // Console:
-    let mut logger_console = L::new();
-    let logger_console_thread = logger_console.go();
-    log_cfg.console = Some(logger_console_thread.chan.clone());
-    // File::
-    if test_stream.is_none() {
-        log_cfg.file = Some(FileConfig::new(
-            PathBuf::from(&root_path).join("www").join("logs"),
-            app_cfg.app_name.clone(),
-            "log".to_string(),
-            0,
-            Some(1_048_576), // Activate multiple log file archiving using this max size.
-        ));
-    } else {
-        // Testing.
-        log_cfg.file = None;
-    };
-    (log_cfg.level, _) = res!(app_cfg.server_log_level());
-    set_log_config!(log_cfg);
-    if test_stream.is_none() {
-        println!("Server now logging at {:?}", get_log_file_path!());
-    } else {
-        test!(log_stream(), "Server logs now streaming to multiple channels.");
-    }
-    info!(log_stream(), "┌───────────────────────┐");
-    info!(log_stream(), "│ New server session.   │");
-    info!(log_stream(), "└───────────────────────┘");
-    msg!("1000");
-
-    // ┌───────────────────────┐
     // │ Start database.       │
     // └───────────────────────┘
     info!(log_stream(), "Starting database...");
@@ -169,7 +128,6 @@ pub fn start_server<
     let (start, msgs) = res!(db.api().ping_bots(app_const::GET_DATA_WAIT));
     info!(log_stream(), "{} ping replies received in {:?}.", msgs.len(), start.elapsed());
 
-    msg!("1010");
     // ┌───────────────────────┐
     // │ Start server.         │
     // └───────────────────────┘
@@ -213,25 +171,16 @@ pub fn start_server<
 
     let syntax = res!(srv_syntax::base_msg());
     let (mut server, cmd_chan) = Server::new(server_context, syntax.clone());
-    let rt = res!(tokio::runtime::Runtime::new());
 
     info!(log_stream(), "Starting server...");
     for line in srv_const::SPLASH.lines() {
         info!(log_stream(), "{}", line);
     }
 
-    msg!("1020");
-    let handle = rt.spawn(LOG_STREAM_ID.scope(
-        if let Some(stream) = test_stream {
-            stream
-        } else {
-            fmt!("main")
-        },
+    let handle = tokio::spawn(LOG_STREAM_ID.scope(
+        test_stream.unwrap_or_else(|| fmt!("main")),
         async move { server.start().await },
     ));
 
-    //log_finish_wait!();
-
-    msg!("1030");
     Ok((Evaluation::Exit, Some((cmd_chan, handle))))
 }

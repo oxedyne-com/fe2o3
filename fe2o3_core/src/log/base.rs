@@ -22,7 +22,7 @@ use crate::{
     },
     thread::{
         thread_channel,
-        SimplexThread,
+        ThreadController,
     },
 };
 
@@ -45,8 +45,8 @@ use once_cell::sync::Lazy;
 pub struct Logger<ETAG: GenTag>
     where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
-    pub chan_in:    SimplexThread<Msg<ETAG>>,
-    pub chan_out:   Arc<RwLock<SimplexThread<Msg<ETAG>>>>,
+    pub chan_in:    ThreadController<Msg<ETAG>>,
+    pub chan_out:   Arc<RwLock<ThreadController<Msg<ETAG>>>>,
     pub cfg:        Arc<RwLock<Config<ETAG>>>,
 }
 
@@ -63,6 +63,7 @@ impl<ETAG: GenTag> Logger<ETAG>
     }
 
     pub fn send_out(&self, msg: Msg<ETAG>) -> Outcome<()> {
+        //msg!("6000 {:?}",msg);
         let unlocked_chan_out = lock_read!(self.chan_out);
         match unlocked_chan_out.chan.send(msg.clone()) {
             Ok(()) => Ok(()),
@@ -105,7 +106,7 @@ pub static LOG: Lazy<Logger<ErrTag>> = Lazy::new(|| {
         logbot.go();
     });
     Logger {
-        chan_in: SimplexThread::new(
+        chan_in: ThreadController::new(
             chan_in,
             Arc::new(Mutex::new(Some(handle))),
             semaphore_clone,

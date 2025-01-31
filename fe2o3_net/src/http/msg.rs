@@ -296,7 +296,7 @@ impl HttpMessage {
             HeaderFieldValue::ContentLength(self.body.len()),
             Some(HeaderFieldCategory::Entity as u16),
         );
-        self.log(get_log_level!());
+        self.log(log_get_level!());
         let result = stream.write_all(&self.header.as_vec()).await;
         res!(result);
         let result = stream.write_all(&self.body).await;

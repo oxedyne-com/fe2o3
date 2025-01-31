@@ -13,6 +13,7 @@ use crate::{
 use oxedize_fe2o3_stds::chars::Term;
 
 use std::{
+    collections::HashMap,
     fs::{
         File,
         OpenOptions,
@@ -44,10 +45,12 @@ pub use humantime::format_rfc3339_seconds as timefmt;
 /// Different messages can be sent to the console or file.
 #[derive(Clone, Debug)]
 pub enum Msg<ETAG: GenTag> where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error {
+    AddStream(String, Simplex<String>),
     Base(bot::BaseMsg<ETAG>),
-    Console((String, String)), // Stream key, Message
+    Console(String, String), // Stream key, Message
     Finish(Source),
-    Level((Source, LogLevel)),
+    GetStreams(Simplex<Arc<RwLock<HashMap<String, Simplex<String>>>>>),
+    Level(Source, LogLevel),
     Log {
         level:  LogLevel,
         src:    Source,
@@ -415,7 +418,7 @@ impl<ETAG: GenTag> LogBot<ETAG>
             );
             if let Some(console_chan) = console_chan {
                 if let Some(msg) = msg_console_opt {
-                    match console_chan.send(Msg::Console((stream, msg.clone()))) {
+                    match console_chan.send(Msg::Console(stream, msg.clone())) {
                         Err(e) => msg!("{}", err!(e,
                             "Error writing '{}' to the console channel.", msg;
                         IO, Channel, Write)),

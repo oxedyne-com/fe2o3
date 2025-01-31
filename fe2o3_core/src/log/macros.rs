@@ -380,7 +380,7 @@ macro_rules! log_finish_wait {
 #[macro_export]
 /// Set a new log level by accessing the global `LOG` instance configuration.  Because this is done
 /// via its write lock, this macro can return an error.
-macro_rules! set_log_level {
+macro_rules! log_set_level {
     ($level:literal) => {
         {
             let mut unlocked_cfg = lock_write!(LOG.cfg);
@@ -392,7 +392,7 @@ macro_rules! set_log_level {
 #[macro_export]
 /// Get the current log level by accessing the global `LOG` instance configuration.  Because this is done
 /// via its read lock, this macro can return an error.
-macro_rules! get_log_level {
+macro_rules! log_get_level {
     () => {
         {
             let unlocked_cfg = lock_read!(LOG.cfg);
@@ -404,7 +404,7 @@ macro_rules! get_log_level {
 #[macro_export]
 /// Set a new log `oxedize_fe2o3_core::log::bot::Config`.  Because this is done via its write lock, this
 /// macro can return an error.
-macro_rules! set_log_config {
+macro_rules! log_set_config {
     ($cfg:expr) => {
         {
             let mut unlocked_cfg = lock_write!(LOG.cfg);
@@ -421,7 +421,7 @@ macro_rules! set_log_config {
 #[macro_export]
 /// Get the current log `oxedize_fe2o3_core::log::bot::Config`.  Because this is done via its write lock,
 /// this macro can return an error.
-macro_rules! get_log_config {
+macro_rules! log_get_config {
     () => {
         {
             let unlocked_cfg = lock_read!(LOG.cfg);
@@ -431,7 +431,7 @@ macro_rules! get_log_config {
 }
 
 #[macro_export]
-/// Set a new `SimplexThread` to handle console messages sent out by the `Logger`.  Because this is
+/// Set a new `ThreadController` to handle console messages sent out by the `Logger`.  Because this is
 /// done via its write lock, this macro can return an error.
 macro_rules! set_log_out {
     ($simthread:expr) => {
@@ -451,7 +451,7 @@ macro_rules! set_log_out {
 #[macro_export]
 /// Get the current log file path.  Because this is done via its write lock, this macro can return
 /// an error.
-macro_rules! get_log_file_path {
+macro_rules! log_get_file_path {
     () => {
         {
             let unlocked_cfg = lock_read!(LOG.cfg);
@@ -463,4 +463,29 @@ macro_rules! get_log_file_path {
             }
         }
     }
+}
+
+#[macro_export]
+/// Attempts to get the map of streams if available from the current logger's console.
+///
+/// # Arguments
+/// * `wait` - A `std::time::Duration` specifying how long to wait for a response from the logger
+///
+/// # Returns
+/// * `Outcome<Option<Arc<RwLock<HashMap<String, Simplex<String>>>>>>` - Returns the map of streams if it exists,
+///   None if the map does not exist
+macro_rules! log_get_streams {
+    ($wait:expr) => {{
+        let simplex = oxedize_fe2o3_core::channels::simplex();
+        res!(LOG.send_out(bot_log::Msg::GetStreams(simplex.clone())));
+
+        match simplex.recv_timeout($wait) {
+            Recv::Empty => Ok(None),
+            Recv::Result(Err(e)) => Err(e),
+            Recv::Result(Ok(streams)) => Ok(Some(streams)),
+            Recv::Result(Ok(msg)) => Err(err!(
+                "Unexpected message received when requesting log streams map: {:?}", msg;
+                Bug, Unexpected, Input)),
+        }
+    }};
 }

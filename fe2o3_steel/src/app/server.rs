@@ -107,7 +107,7 @@ impl AppShellContext {
         // ┌───────────────────────┐
         // │ Reconfigure logging.  │
         // └───────────────────────┘
-        let mut log_cfg = get_log_config!();
+        let mut log_cfg = log_get_config!();
         let mut logger_console = StdoutLoggerConsole::new();
         let logger_console_thread = logger_console.go();
         log_cfg.console = Some(logger_console_thread.chan.clone());
@@ -120,8 +120,8 @@ impl AppShellContext {
             Some(1_048_576), // Activate multiple log file archiving using this max size.
         ));
         debug!("log_cfg = {:?}", log_cfg);
-        set_log_config!(log_cfg);
-        println!("Server now logging at {:?}", get_log_file_path!());
+        log_set_config!(log_cfg);
+        println!("Server now logging at {:?}", log_get_file_path!());
         info!("┌───────────────────────┐");
         info!("│ New server session.   │");
         info!("└───────────────────────┘");

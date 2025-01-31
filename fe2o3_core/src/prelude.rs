@@ -53,12 +53,13 @@ pub use crate::{
     log_finish_wait,
     log_in_finish_wait,
     log_out_finish_wait,
-    get_log_level,
-    get_log_config,
-    set_log_level,
-    set_log_config,
+    log_get_level,
+    log_get_config,
+    log_set_level,
+    log_set_config,
     set_log_out,
-    get_log_file_path,
+    log_get_file_path,
+    log_get_streams,
     log::{
         base::{
             LOG,
