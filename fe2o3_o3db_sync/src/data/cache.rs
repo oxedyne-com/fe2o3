@@ -228,7 +228,7 @@ impl<
                         _ => (),
                     }
                 }
-                trace!(
+                trace!(sync_log::stream(), 
                     "{:?}: Automatically jettisoned the oldest {} (~{:.1}%) cache values \
                     to reduce size from {} to {} bytes.",
                     self.ozid(), keys.len(),
@@ -242,7 +242,7 @@ impl<
             Some(CacheEntry::LocatedValue(mloc, val2)) => {
                 // 2.1 Only insert if the given data is newer.
                 if meta.time <= mloc.meta.time {
-                    warn!("{:?}: Attempt to insert new value at key = {:?} with timestamp = {:?}, \
+                    warn!(sync_log::stream(), "{:?}: Attempt to insert new value at key = {:?} with timestamp = {:?}, \
                         when existing timestamp is newer at {:?}",
                         self.ozid.clone(), kbyts, meta.time, mloc.meta.time,
                     );

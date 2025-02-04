@@ -1,5 +1,4 @@
 use crate::{
-    prelude::*,
     app::{
         cfg::AppConfig,
         constant as app_const,
@@ -20,7 +19,6 @@ use crate::{
         },
         schemes::WireSchemesInput,
         server::{
-            LOG_STREAM_ID,
             Server,
         },
     },
@@ -82,7 +80,7 @@ pub async fn start_server(
         )>,
     )>
 {
-    msg!("log_stream = {}",log_stream());
+    msg!("log_stream = {}",async_log::stream());
     let root_path = Path::new(&app_cfg.app_root)
         .normalise() // Now a NormPathBuf.
         .absolute();
@@ -116,8 +114,8 @@ pub async fn start_server(
     // ┌───────────────────────┐
     // │ Start database.       │
     // └───────────────────────┘
-    info!(log_stream(), "Starting database...");
-    res!(db.start());
+    info!(async_log::stream(), "Starting database...");
+    res!(db.start(test_stream.clone().unwrap_or_else(|| fmt!("main"))));
     res!(ok!(db.updated_api()).activate_gc(true));
 
     std::thread::sleep(Duration::from_secs(1));
@@ -126,7 +124,7 @@ pub async fn start_server(
 
     // Ping all bots.
     let (start, msgs) = res!(db.api().ping_bots(app_const::GET_DATA_WAIT));
-    info!(log_stream(), "{} ping replies received in {:?}.", msgs.len(), start.elapsed());
+    info!(async_log::stream(), "{} ping replies received in {:?}.", msgs.len(), start.elapsed());
 
     // ┌───────────────────────┐
     // │ Start server.         │
@@ -172,12 +170,12 @@ pub async fn start_server(
     let syntax = res!(srv_syntax::base_msg());
     let (mut server, cmd_chan) = Server::new(server_context, syntax.clone());
 
-    info!(log_stream(), "Starting server...");
+    info!(async_log::stream(), "Starting server...");
     for line in srv_const::SPLASH.lines() {
-        info!(log_stream(), "{}", line);
+        info!(async_log::stream(), "{}", line);
     }
 
-    let handle = tokio::spawn(LOG_STREAM_ID.scope(
+    let handle = tokio::spawn(async_log::LOG_STREAM_ID.scope(
         test_stream.unwrap_or_else(|| fmt!("main")),
         async move { server.start().await },
     ));

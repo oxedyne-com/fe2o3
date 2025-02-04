@@ -41,8 +41,9 @@ pub struct WriterBot<
     wind:       WorkerInd,
     wtyp:       WorkerType,
     // Bot
-    sem:        Semaphore,
-    errc:       Arc<Mutex<usize>>,
+    sem:            Semaphore,
+    errc:           Arc<Mutex<usize>>,
+    log_stream_id:  String,
     // Config
     zdir:       ZoneDir,
     // Comms
@@ -94,6 +95,9 @@ impl<
     bot_methods!();
 
     fn go(&mut self) {
+
+        sync_log::set_stream(self.log_stream_id());
+
         if self.no_init() { return; }
         self.now_listening();
         loop {
@@ -186,8 +190,9 @@ impl<
             wind:       args.wind,
             wtyp:       args.wtyp,
             // Bot
-            sem:        args.sem,
-            errc:       Arc::new(Mutex::new(0)),
+            sem:            args.sem,
+            errc:           Arc::new(Mutex::new(0)),
+            log_stream_id:  args.log_stream_id,
             // Config
             zdir:       ZoneDir::default(),
             // Comms
@@ -400,7 +405,7 @@ impl<
                         Some(file) => {
                             match file.write(vi) {
                                 Err(e) => {
-                                    error!(err!(e,
+                                    error!(sync_log::stream(), err!(e,
                                         "{}: while writing to file, rewinding.", self.ozid();
                                         IO, File, Write));
                                     break;
@@ -455,7 +460,7 @@ impl<
                     match self.lpair_mut().ind.file.as_mut() {
                         Some(file) => match file.write(vi) {
                             Err(e) => {
-                                error!(err!(e, 
+                                error!(sync_log::stream(), err!(e, 
                                     "{}: while writing to file, rewinding.", self.ozid();
                                     IO, File, Write));
                                 break;

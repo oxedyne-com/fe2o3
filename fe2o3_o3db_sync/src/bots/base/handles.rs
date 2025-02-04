@@ -37,10 +37,8 @@ pub struct Handle<
     UID:    NumIdDat<UIDL>,
     ENC:    Encrypter,
     KH:     Hasher,
-    THD,
 > {
     ozid:       Option<OzoneBotId>,
-    pub thread: Option<std::thread::JoinHandle<THD>>,
     sentinel:   Sentinel,
     chan:       Option<Simplex<OzoneMsg<UIDL, UID, ENC, KH>>>,
 }
@@ -50,14 +48,12 @@ impl<
     UID:    NumIdDat<UIDL> + 'static,
     ENC:    Encrypter + 'static,
     KH:     Hasher + 'static,
-    THD,
 >
-    Default for Handle<UIDL, UID, ENC, KH, THD>
+    Default for Handle<UIDL, UID, ENC, KH>
 {
     fn default() -> Self {
         Self {
             ozid: None,
-            thread: None,
             sentinel: Sentinel::default(),
             chan: None,
         }
@@ -69,13 +65,11 @@ impl<
     UID:    NumIdDat<UIDL> + 'static,
     ENC:    Encrypter + 'static,
     KH:     Hasher + 'static,
-    THD,
 >
-    Handle<UIDL, UID, ENC, KH, THD>
+    Handle<UIDL, UID, ENC, KH>
 {
     pub fn new(
         ozid:       Option<OzoneBotId>,
-        hand:       std::thread::JoinHandle<THD>,
         sentinel:   Sentinel,
         chan:       Option<Simplex<OzoneMsg<UIDL, UID, ENC, KH>>>,
     )
@@ -83,7 +77,6 @@ impl<
     {
         Self {
             ozid,
-            thread: Some(hand),
             sentinel,
             chan,
         }
@@ -121,14 +114,14 @@ pub struct BotHandles<
     KH:     Hasher,
 > {
     nz:     usize,
-    cbots:  Vec<Vec<Handle<UIDL, UID, ENC, KH, ()>>>,
-    fbots:  Vec<Vec<Handle<UIDL, UID, ENC, KH, ()>>>,
-    igbots: Vec<Vec<Handle<UIDL, UID, ENC, KH, ()>>>,
-    rbots:  Vec<Vec<Handle<UIDL, UID, ENC, KH, ()>>>,
-    wbots:  Vec<Vec<Handle<UIDL, UID, ENC, KH, ()>>>,
-    zbots:  Vec<Handle<UIDL, UID, ENC, KH, ()>>,
-    cfg:    Handle<UIDL, UID, ENC, KH, ()>,
-    sbots:  Vec<Handle<UIDL, UID, ENC, KH, ()>>,
+    cbots:  Vec<Vec<Handle<UIDL, UID, ENC, KH>>>,
+    fbots:  Vec<Vec<Handle<UIDL, UID, ENC, KH>>>,
+    igbots: Vec<Vec<Handle<UIDL, UID, ENC, KH>>>,
+    rbots:  Vec<Vec<Handle<UIDL, UID, ENC, KH>>>,
+    wbots:  Vec<Vec<Handle<UIDL, UID, ENC, KH>>>,
+    zbots:  Vec<Handle<UIDL, UID, ENC, KH>>,
+    cfg:    Handle<UIDL, UID, ENC, KH>,
+    sbots:  Vec<Handle<UIDL, UID, ENC, KH>>,
     wait_init: WaitGroup,
     wait_end:  WaitGroup,
 }
@@ -179,7 +172,7 @@ impl<
         for _ in 0..nz {
             let mut bots = Vec::new();
             for _ in 0..nc {
-                bots.push(Handle::<UIDL, UID, ENC, KH, ()>::default());
+                bots.push(Handle::<UIDL, UID, ENC, KH>::default());
             }
             cbots.push(bots);
         }
@@ -187,7 +180,7 @@ impl<
         for _ in 0..nz {
             let mut bots = Vec::new();
             for _ in 0..nf {
-                bots.push(Handle::<UIDL, UID, ENC, KH, ()>::default());
+                bots.push(Handle::<UIDL, UID, ENC, KH>::default());
             }
             fbots.push(bots);
         }
@@ -195,7 +188,7 @@ impl<
         for _ in 0..nz {
             let mut bots = Vec::new();
             for _ in 0..nig {
-                bots.push(Handle::<UIDL, UID, ENC, KH, ()>::default());
+                bots.push(Handle::<UIDL, UID, ENC, KH>::default());
             }
             igbots.push(bots);
         }
@@ -203,7 +196,7 @@ impl<
         for _ in 0..nz {
             let mut bots = Vec::new();
             for _ in 0..nr {
-                bots.push(Handle::<UIDL, UID, ENC, KH, ()>::default());
+                bots.push(Handle::<UIDL, UID, ENC, KH>::default());
             }
             rbots.push(bots);
         }
@@ -211,17 +204,17 @@ impl<
         for _ in 0..nz {
             let mut bots = Vec::new();
             for _ in 0..nw {
-                bots.push(Handle::<UIDL, UID, ENC, KH, ()>::default());
+                bots.push(Handle::<UIDL, UID, ENC, KH>::default());
             }
             wbots.push(bots);
         }
         let mut zbots = Vec::new();
         for _ in 0..nz {
-            zbots.push(Handle::<UIDL, UID, ENC, KH, ()>::default());
+            zbots.push(Handle::<UIDL, UID, ENC, KH>::default());
         }
         let mut sbots = Vec::new();
         for _ in 0..ns {
-            sbots.push(Handle::<UIDL, UID, ENC, KH, ()>::default());
+            sbots.push(Handle::<UIDL, UID, ENC, KH>::default());
         }
         Self {
             nz,
@@ -237,42 +230,42 @@ impl<
     }
 
     // Use
-    pub fn all_cbots(&self)     -> &Vec<Vec<Handle<UIDL, UID, ENC, KH, ()>>> { &self.cbots }
-    pub fn all_fbots(&self)     -> &Vec<Vec<Handle<UIDL, UID, ENC, KH, ()>>> { &self.fbots }
-    pub fn all_igbots(&self)    -> &Vec<Vec<Handle<UIDL, UID, ENC, KH, ()>>> { &self.igbots }
-    pub fn all_rbots(&self)     -> &Vec<Vec<Handle<UIDL, UID, ENC, KH, ()>>> { &self.rbots }
-    pub fn all_wbots(&self)     -> &Vec<Vec<Handle<UIDL, UID, ENC, KH, ()>>> { &self.wbots }
-    pub fn all_zbots(&self)     -> &Vec<Handle<UIDL, UID, ENC, KH, ()>>      { &self.zbots }
-    pub fn cfg(&self)           -> &Handle<UIDL, UID, ENC, KH, ()>           { &self.cfg }
-    pub fn all_sbots(&self)     -> &Vec<Handle<UIDL, UID, ENC, KH, ()>>      { &self.sbots }
+    pub fn all_cbots(&self)     -> &Vec<Vec<Handle<UIDL, UID, ENC, KH>>> { &self.cbots }
+    pub fn all_fbots(&self)     -> &Vec<Vec<Handle<UIDL, UID, ENC, KH>>> { &self.fbots }
+    pub fn all_igbots(&self)    -> &Vec<Vec<Handle<UIDL, UID, ENC, KH>>> { &self.igbots }
+    pub fn all_rbots(&self)     -> &Vec<Vec<Handle<UIDL, UID, ENC, KH>>> { &self.rbots }
+    pub fn all_wbots(&self)     -> &Vec<Vec<Handle<UIDL, UID, ENC, KH>>> { &self.wbots }
+    pub fn all_zbots(&self)     -> &Vec<Handle<UIDL, UID, ENC, KH>>      { &self.zbots }
+    pub fn cfg(&self)           -> &Handle<UIDL, UID, ENC, KH>           { &self.cfg }
+    pub fn all_sbots(&self)     -> &Vec<Handle<UIDL, UID, ENC, KH>>      { &self.sbots }
     pub fn wait_init_ref(&self) -> &WaitGroup                       { &self.wait_init }
     pub fn wait_end_ref(&self)  -> &WaitGroup                       { &self.wait_end }
 
-    pub fn get_zbot(&self, zind: &ZoneInd) -> Outcome<&Handle<UIDL, UID, ENC, KH, ()>> {
+    pub fn get_zbot(&self, zind: &ZoneInd) -> Outcome<&Handle<UIDL, UID, ENC, KH>> {
         res!(self.check_zone_index(**zind));
         Ok(&self.zbots[**zind])
     }
 
     // Mutate
-    pub fn cbots_mut(&mut self)     -> &mut Vec<Vec<Handle<UIDL, UID, ENC, KH, ()>>> { &mut self.cbots }
-    pub fn fbots_mut(&mut self)     -> &mut Vec<Vec<Handle<UIDL, UID, ENC, KH, ()>>> { &mut self.fbots }
-    pub fn igbots_mut(&mut self)    -> &mut Vec<Vec<Handle<UIDL, UID, ENC, KH, ()>>> { &mut self.igbots }
-    pub fn rbots_mut(&mut self)     -> &mut Vec<Vec<Handle<UIDL, UID, ENC, KH, ()>>> { &mut self.rbots }
-    pub fn wbots_mut(&mut self)     -> &mut Vec<Vec<Handle<UIDL, UID, ENC, KH, ()>>> { &mut self.wbots }
-    pub fn zbots_mut(&mut self)     -> &mut Vec<Handle<UIDL, UID, ENC, KH, ()>>      { &mut self.zbots }
-    pub fn cfg_mut(&mut self)       -> &mut Handle<UIDL, UID, ENC, KH, ()>           { &mut self.cfg }
-    pub fn sbots_mut(&mut self)     -> &mut Vec<Handle<UIDL, UID, ENC, KH, ()>>      { &mut self.sbots }
+    pub fn cbots_mut(&mut self)     -> &mut Vec<Vec<Handle<UIDL, UID, ENC, KH>>> { &mut self.cbots }
+    pub fn fbots_mut(&mut self)     -> &mut Vec<Vec<Handle<UIDL, UID, ENC, KH>>> { &mut self.fbots }
+    pub fn igbots_mut(&mut self)    -> &mut Vec<Vec<Handle<UIDL, UID, ENC, KH>>> { &mut self.igbots }
+    pub fn rbots_mut(&mut self)     -> &mut Vec<Vec<Handle<UIDL, UID, ENC, KH>>> { &mut self.rbots }
+    pub fn wbots_mut(&mut self)     -> &mut Vec<Vec<Handle<UIDL, UID, ENC, KH>>> { &mut self.wbots }
+    pub fn zbots_mut(&mut self)     -> &mut Vec<Handle<UIDL, UID, ENC, KH>>      { &mut self.zbots }
+    pub fn cfg_mut(&mut self)       -> &mut Handle<UIDL, UID, ENC, KH>           { &mut self.cfg }
+    pub fn sbots_mut(&mut self)     -> &mut Vec<Handle<UIDL, UID, ENC, KH>>      { &mut self.sbots }
 
-    pub fn set_sbot(&mut self, bpind: &BotPoolInd, hand: Handle<UIDL, UID, ENC, KH, ()>) -> Outcome<()> {
+    pub fn set_sbot(&mut self, bpind: &BotPoolInd, hand: Handle<UIDL, UID, ENC, KH>) -> Outcome<()> {
         self.sbots[**bpind] = hand;
         Ok(())
     }
-    pub fn set_zbot(&mut self, zind: &ZoneInd, hand: Handle<UIDL, UID, ENC, KH, ()>) -> Outcome<()> {
+    pub fn set_zbot(&mut self, zind: &ZoneInd, hand: Handle<UIDL, UID, ENC, KH>) -> Outcome<()> {
         res!(self.check_zone_index(**zind));
         self.zbots[**zind] = hand;
         Ok(())
     }
-    pub fn set_cfg(&mut self, hand: Handle<UIDL, UID, ENC, KH, ()>) { self.cfg = hand; }
+    pub fn set_cfg(&mut self, hand: Handle<UIDL, UID, ENC, KH>) { self.cfg = hand; }
 
     pub fn wait_init(self) {
         self.wait_init.wait();
@@ -285,7 +278,7 @@ impl<
         &mut self,
         wtyp:   &WorkerType,
         wind:   &WorkerInd,
-        hand:   Handle<UIDL, UID, ENC, KH, ()>,
+        hand:   Handle<UIDL, UID, ENC, KH>,
     )
         -> Outcome<()>
     {
@@ -409,7 +402,7 @@ impl<
                     Ok(_) => {
                         all_bot_ids.push(ozid);
                     }
-                    Err(e) => error!(err!(e,
+                    Err(e) => error!(sync_log::stream(), err!(e,
                         "While sending ping to bot {:?}", ozid;
                         Channel, Write))
                 }
@@ -420,7 +413,7 @@ impl<
         // Track responses and build set of responsive bots.
         let (_, responsive) = res!(resp.recv_pongs(wait));
         if responsive.len() > expected {
-            error!(err!(
+            error!(sync_log::stream(), err!(
                 "Expecting {} messages via responder, received {} after \
                 {:?}.", responsive.len(), expected, timeout;
                 Input, Mismatch, Size));
@@ -440,13 +433,14 @@ impl<
 
 /// Immutable iterator over all bot handles in a BotHandles collection.
 #[derive(Debug)]
-pub struct BotHandlesIter<'a, const UIDL: usize, UID, ENC, KH>
-where
+pub struct BotHandlesIter<
+    'iter,
+    const UIDL: usize,
     UID: NumIdDat<UIDL>,
     ENC: Encrypter,
     KH: Hasher,
-{
-    handles: &'a BotHandles<UIDL, UID, ENC, KH>,
+> {
+    handles: &'iter BotHandles<UIDL, UID, ENC, KH>,
     zone_index: usize,
     pool_type: usize,    // Index into the pool types (cbots, fbots, etc.).
     bot_index: usize,    // Index within the current pool.
@@ -463,13 +457,16 @@ enum IterStage {
     Done,       // Iteration complete.
 }
 
-impl<'a, const UIDL: usize, UID, ENC, KH> BotHandlesIter<'a, UIDL, UID, ENC, KH>
-where
+impl<
+    'iter,
+    const UIDL: usize,
     UID: NumIdDat<UIDL> + 'static,
     ENC: Encrypter + 'static,
     KH: Hasher + 'static,
+>
+    BotHandlesIter<'iter, UIDL, UID, ENC, KH>
 {
-    fn new(handles: &'a BotHandles<UIDL, UID, ENC, KH>) -> Self {
+    fn new(handles: &'iter BotHandles<UIDL, UID, ENC, KH>) -> Self {
         Self {
             handles,
             zone_index: 0,
@@ -480,7 +477,7 @@ where
     }
 
     /// Returns the next worker bot handle, if any remain in the current zone.
-    fn next_worker(&mut self) -> Option<&'a Handle<UIDL, UID, ENC, KH, ()>> {
+    fn next_worker(&mut self) -> Option<&'iter Handle<UIDL, UID, ENC, KH>> {
         let pools = [
             self.handles.all_cbots(),
             self.handles.all_fbots(),
@@ -516,13 +513,16 @@ where
     }
 }
 
-impl<'a, const UIDL: usize, UID, ENC, KH> Iterator for BotHandlesIter<'a, UIDL, UID, ENC, KH>
-where
+impl<
+    'iter,
+    const UIDL: usize,
     UID: NumIdDat<UIDL> + 'static,
     ENC: Encrypter + 'static,
     KH: Hasher + 'static,
+>
+    Iterator for BotHandlesIter<'iter, UIDL, UID, ENC, KH>
 {
-    type Item = &'a Handle<UIDL, UID, ENC, KH, ()>;
+    type Item = &'iter Handle<UIDL, UID, ENC, KH>;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.stage {
@@ -564,14 +564,16 @@ where
     }
 }
 
-impl<const UIDL: usize, UID, ENC, KH> BotHandles<UIDL, UID, ENC, KH>
-where
+impl<
+    const UIDL: usize,
     UID: NumIdDat<UIDL> + 'static,
     ENC: Encrypter + 'static,
     KH: Hasher + 'static,
+>
+    BotHandles<UIDL, UID, ENC, KH>
 {
     /// Returns an iterator over references to all bot handles.
-    pub fn iter(&self) -> BotHandlesIter<UIDL, UID, ENC, KH> {
+    pub fn iter<'iter>(&'iter self) -> BotHandlesIter<'iter, UIDL, UID, ENC, KH> {
         BotHandlesIter::new(self)
     }
 }

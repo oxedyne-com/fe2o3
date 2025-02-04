@@ -39,9 +39,9 @@ pub fn compare_values(i: usize, v1: &Vec<u8>, vorig: &Dat) -> Outcome<()> {
         }
         for j in 0..v1.len() {
             if v1[j] != v2[j] {
-                debug!("i        = {}",i);
-                debug!("expected = {:02x?}",v2);
-                debug!("got      = {:02x?}",v1);
+                debug!(sync_log::stream(), "i        = {}",i);
+                debug!(sync_log::stream(), "expected = {:02x?}",v2);
+                debug!(sync_log::stream(), "got      = {:02x?}",v1);
                 return Err(err!(
                     "Data {}: Differs at position {}.", i, j;
                     Data, Mismatch)); 
@@ -88,10 +88,10 @@ pub fn stopwatch(
 {
     let tps = (n as f64) / elapsed;
     let bw = ((byts as f64) / elapsed) * (8.0 / 1_000_000.0);
-    test!("Performance metrics:");
-    test!("  Elapsed:     {:10.4} [s]", elapsed);
-    test!("  TPS:         {:10.2}", tps);
-    test!("  Bandwidth:   {:10.3} [Mb]/[s]", bw);
+    test!(sync_log::stream(), "Performance metrics:");
+    test!(sync_log::stream(), "  Elapsed:     {:10.4} [s]", elapsed);
+    test!(sync_log::stream(), "  TPS:         {:10.2}", tps);
+    test!(sync_log::stream(), "  Bandwidth:   {:10.3} [Mb]/[s]", bw);
 
     (tps as u64, bw as u64)
 }
@@ -105,7 +105,7 @@ pub fn encode_daticles(
 {
     let n = ks.len();
 
-    test!("Start daticle encoding timing run...");
+    test!(sync_log::stream(), "Start daticle encoding timing run...");
     let start = Instant::now();
     for i in 0..n {
         let (_k, _v) = res!(Encode::encode_dat(ks[i].clone(), vs[i].clone()));
@@ -113,7 +113,7 @@ pub fn encode_daticles(
     let elapsed = start.elapsed().as_secs_f64();
     let (tps, bw) = stopwatch(elapsed, n, byts);
 
-    test!("Redoing encoding to collect bytes...");
+    test!(sync_log::stream(), "Redoing encoding to collect bytes...");
     let mut kbyts = Vec::new();
     let mut vbyts = Vec::new();
     for i in 0..n {
@@ -121,7 +121,7 @@ pub fn encode_daticles(
         kbyts.push(k);
         vbyts.push(v);
     }
-    test!("  Finished.");
+    test!(sync_log::stream(), "  Finished.");
 
     Ok((kbyts, vbyts, tps, bw))
 }
@@ -141,7 +141,7 @@ pub fn encode_daticles(
 //{
 //    let n = ks.len();
 //
-//    test!("Assemble wrapped KeyVals...");
+//    test!(sync_log::stream(), "Assemble wrapped KeyVals...");
 //    let mut keyvals = Vec::new();
 //    for i in 0..n {
 //        let mut chash = [0u8; 4];
@@ -157,7 +157,7 @@ pub fn encode_daticles(
 //        };
 //        keyvals.push(kv);
 //    }
-//    test!("Start write message encoding timing run...");
+//    test!(sync_log::stream(), "Start write message encoding timing run...");
 //    let start = Instant::now();
 //    for kv in keyvals {
 //        res!(Encode::encode(kv, csummer.clone()));
@@ -187,7 +187,7 @@ pub fn prepare_write_messages<
 {
     let n = ks.len();
 
-    test!("Encoding data for writing...");
+    test!(sync_log::stream(), "Encoding data for writing...");
     let mut msgs = Vec::new();
     let resp = Responder::none(None);
     let start = Instant::now();
@@ -204,13 +204,13 @@ pub fn prepare_write_messages<
         }
     }
     let elapsed = start.elapsed().as_secs_f64();
-    test!("  n = {}, msgs.len = {}", n, msgs.len());
+    test!(sync_log::stream(), "  n = {}, msgs.len = {}", n, msgs.len());
     let tps = (n as f64) / elapsed;
     let bw = ((byts as f64) / elapsed) * (8.0 / 1_000_000.0);
-    test!("Write preparation performance metrics:");
-    test!("  Elapsed:     {:10.4} [s]", elapsed);
-    test!("  TPS:         {:10.2}", tps);
-    test!("  Bandwidth:   {:10.3} [Mb]/[s]", bw);
+    test!(sync_log::stream(), "Write preparation performance metrics:");
+    test!(sync_log::stream(), "  Elapsed:     {:10.4} [s]", elapsed);
+    test!(sync_log::stream(), "  TPS:         {:10.2}", tps);
+    test!(sync_log::stream(), "  Bandwidth:   {:10.3} [Mb]/[s]", bw);
 
     Ok((n, msgs))
 }

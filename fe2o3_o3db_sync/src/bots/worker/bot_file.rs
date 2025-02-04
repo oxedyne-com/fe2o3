@@ -46,8 +46,9 @@ pub struct FileBot<
     wind:       WorkerInd,
     wtyp:       WorkerType,
     // Bot
-    sem:        Semaphore,
-    errc:       Arc<Mutex<usize>>,
+    sem:            Semaphore,
+    errc:           Arc<Mutex<usize>>,
+    log_stream_id:  String,
     // Config
     zdir:       ZoneDir,
     // Comms
@@ -103,6 +104,9 @@ impl<
     bot_methods!();
 
     fn go(&mut self) {
+
+        sync_log::set_stream(self.log_stream_id());
+
         if self.no_init() { return; }
         self.now_listening();
         loop {
@@ -170,8 +174,9 @@ impl<
             wind:       args.wind,
             wtyp:       args.wtyp,
             // Bot
-            sem:        args.sem,
-            errc:       Arc::new(Mutex::new(0)),
+            sem:            args.sem,
+            errc:           Arc::new(Mutex::new(0)),
+            log_stream_id:  args.log_stream_id,
             // Config
             zdir:       ZoneDir::default(),
             // Comms    
@@ -327,7 +332,7 @@ impl<
                             result
                         },
                         Err(_) => {
-                            warn!(
+                            warn!(sync_log::stream(), 
                                 "A read completion for file {} has been received, but the file state \
                                 no longer exists, ignoring.", fnum,
                             );
@@ -388,7 +393,7 @@ impl<
                 match gc_ctrl {
                     GcControl::On(state) => self.gc_on = state,
                     GcControl::Auto(state) => self.auto_gc = state,
-                    GcControl::Manual(_) => warn!("Manual gc not yet implemented."),
+                    GcControl::Manual(_) => warn!(sync_log::stream(), "Manual gc not yet implemented."),
                 }
             }
             _ => return self.listen_more(msg),
@@ -500,7 +505,7 @@ impl<
                         self.gc_auto_active()
                     {
                         // [18.1] Select a gbot to collect the garbage.
-                        debug!("{}: Automated garbage collection for file {}", self_id, fnum);
+                        debug!(sync_log::stream(), "{}: Automated garbage collection for file {}", self_id, fnum);
                         let bots = res!(self.igbots());
                         let (bot, _) = bots.choose_bot(&ChooseBot::Randomly);
                         if fstat.is_all_old() {
@@ -512,7 +517,7 @@ impl<
                                     res!(fs::remove_file(path));
                                 }
                             }
-                            debug!(
+                            debug!(sync_log::stream(), 
                                 "{}: All the data in file {} is old, the file has therefore been deleted.",
                                 self_id, fnum,
                             );

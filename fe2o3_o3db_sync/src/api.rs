@@ -482,7 +482,7 @@ impl<
         let chunk_threshold = chunk_config.threshold_bytes;
 
         let encryption_on = !(self.schemes().encrypter().or_is_identity(schms2.map(|s| s.encrypter())));
-        debug!("Encryption is on: {}", encryption_on);
+        debug!(sync_log::stream(), "Encryption is on: {}", encryption_on);
         if encryption_on {
             vbuf = res!(
                 self.schemes().encrypter().or_encrypt(&mut vbuf, schms2.map(|s| s.encrypter()))
@@ -1013,7 +1013,7 @@ impl<
 
     /// Activate garbage collection by sending a control message to the igbots via the zbots, via the supervisor.
     pub fn activate_gc(&self, on: bool) -> Outcome<()> {
-        info!("Activating garbage collection...");
+        info!(sync_log::stream(), "Activating garbage collection...");
         let emsg = "garbage collection activation";
         let resp = self.responder();
         if let Err(e) = self.chans().sup().send(
@@ -1063,7 +1063,7 @@ impl<
                     Channel)),
             }
         }
-        warn!("All {} caches successfully cleared.", n);
+        warn!(sync_log::stream(), "All {} caches successfully cleared.", n);
         Ok(())
     }
 
@@ -1095,23 +1095,23 @@ impl<
             }
         }
         // Display.
-        info!("Cache dump summary");
-        info!("+-----------+--------------+--------------+");
-        info!("|   Cache   |   Entries    |    Size [B]  |");
-        info!("+-----------+--------------+--------------+");
+        info!(sync_log::stream(), "Cache dump summary");
+        info!(sync_log::stream(), "+-----------+--------------+--------------+");
+        info!(sync_log::stream(), "|   Cache   |   Entries    |    Size [B]  |");
+        info!(sync_log::stream(), "+-----------+--------------+--------------+");
         for (wind, cache) in &sorted {
-            info!("|{:^11}|{:>13} |{:>13} |",
+            info!(sync_log::stream(), "|{:^11}|{:>13} |{:>13} |",
                 fmt!("{}", wind),
                 cache.map().len(),
                 cache.get_size(),
             ); 
         }
-        info!("+-----------+--------------+--------------+");
+        info!(sync_log::stream(), "+-----------+--------------+--------------+");
         for (wind, cache) in sorted {
             let mut total_size = 0;
-            info!("{} cache dump of {} entries:", wind, cache.map().len()); 
+            info!(sync_log::stream(), "{} cache dump of {} entries:", wind, cache.map().len()); 
             if cache.map().len() == 0 {
-                info!(" No cache entries."); 
+                info!(sync_log::stream(), " No cache entries."); 
             } else {
                 for (kbyt, centry) in cache.map() {
                     if let CacheEntry::LocatedValue(mloc, val) = centry {
@@ -1125,14 +1125,14 @@ impl<
                             vlen +
                             cache.mloc_size();
 
-                        info!(" kbyt = {:02x?} vlen = {} floc = {:?}",
+                        info!(sync_log::stream(), " kbyt = {:02x?} vlen = {} floc = {:?}",
                             kbyt, vlen, mloc.file_location(),
                         );
                         total_size += size;
                     }
                 }
             }
-            info!("{} cache size estimate: {} [B]", wind, total_size);
+            info!(sync_log::stream(), "{} cache size estimate: {} [B]", wind, total_size);
         }
             
         Ok(())
@@ -1204,12 +1204,12 @@ impl<
         }
         // Display.
         for (wind, fstates) in sorted {
-            info!("{} file states dump:", wind); 
+            info!(sync_log::stream(), "{} file states dump:", wind); 
             if fstates.map().len() == 0 {
-                info!(" None"); 
+                info!(sync_log::stream(), " None"); 
             } else {
                 for (fnum, fstat) in fstates.map() {
-                    info!(" {:10} {:?} old = {:.1}%",
+                    info!(sync_log::stream(), " {:10} {:?} old = {:.1}%",
                         fnum, fstat,
                         100.0 * (fstat.get_old_sum() as f64)
                         / (self.cfg().data_file_max_bytes as f64),
@@ -1258,11 +1258,11 @@ impl<
 
     pub fn list_files(&self, wait: Wait) -> Outcome<()> {
 
-        info!("Directory listing for {} zones, key:", self.cfg().num_zones());
-        info!(" Typ: f File | d Directory | s Symlink");
-        info!(" Size: in bytes");
-        info!(" Mod: seconds since last modified");
-        info!(" Name: object label");
+        info!(sync_log::stream(), "Directory listing for {} zones, key:", self.cfg().num_zones());
+        info!(sync_log::stream(), " Typ: f File | d Directory | s Symlink");
+        info!(sync_log::stream(), " Size: in bytes");
+        info!(sync_log::stream(), " Mod: seconds since last modified");
+        info!(sync_log::stream(), " Name: object label");
 
         let emsg = "list files request";
         let resp = self.responder();
@@ -1288,12 +1288,12 @@ impl<
         }
         for (zind, zmap) in map {
             let mut total_size = 0;
-            info!("{:?} directory", zind);
-            info!("+-----+--------------+--------------+-----------------------------------------------------");
-            info!("| Typ |   Size [B]   |    Mod [s]   | Name");
-            info!("+-----+--------------+--------------+-----------------------------------------------------");
+            info!(sync_log::stream(), "{:?} directory", zind);
+            info!(sync_log::stream(), "+-----+--------------+--------------+-----------------------------------------------------");
+            info!(sync_log::stream(), "| Typ |   Size [B]   |    Mod [s]   | Name");
+            info!(sync_log::stream(), "+-----+--------------+--------------+-----------------------------------------------------");
             for (_key, entry) in zmap {
-                info!(
+                info!(sync_log::stream(), 
                     "|  {}  |{:>13} |{:>13} | {}",
                     entry.typ,
                     entry.size,
@@ -1302,9 +1302,9 @@ impl<
                 );
                 total_size += entry.size;
             }
-            info!("+-----+--------------+--------------+-----------------------------------------------------");
-            info!("|     |{:>13} |              |", total_size);
-            info!("+-----+--------------+--------------+-----------------------------------------------------");
+            info!(sync_log::stream(), "+-----+--------------+--------------+-----------------------------------------------------");
+            info!(sync_log::stream(), "|     |{:>13} |              |", total_size);
+            info!(sync_log::stream(), "+-----+--------------+--------------+-----------------------------------------------------");
         }
         Ok(())
     }

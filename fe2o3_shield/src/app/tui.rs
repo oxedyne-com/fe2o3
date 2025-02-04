@@ -1,7 +1,5 @@
 #![forbid(unsafe_code)]
-
 use crate::{
-    prelude::*,
     app::{
         cfg::AppConfig,
         constant,
@@ -159,9 +157,9 @@ pub fn run() -> Outcome<()> {
     ));
     log_set_config!(log_cfg);
     println!("Shell now logging at {:?}", log_get_file_path!());
-    info!(log_stream(), "┌───────────────────────┐");
-    info!(log_stream(), "│ New shell session.    │");
-    info!(log_stream(), "└───────────────────────┘");
+    info!(async_log::stream(), "┌───────────────────────┐");
+    info!(async_log::stream(), "│ New shell session.    │");
+    info!(async_log::stream(), "└───────────────────────┘");
 
     // ┌───────────────────────┐
     // │ The config is loaded, │

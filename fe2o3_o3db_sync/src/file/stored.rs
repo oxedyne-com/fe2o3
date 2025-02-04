@@ -121,7 +121,7 @@ impl<
                 }
             },
             _ => {
-                //debug!("chash={:02x?} keybyts={:02x?} cind_byts={:02x?}",chash,keybyts,cind_byts);
+                //debug!(sync_log::stream(), "chash={:02x?} keybyts={:02x?} cind_byts={:02x?}",chash,keybyts,cind_byts);
                 return Err(err!(
                     "Expected Dat::Opt(Dat::U64), decoded {:?}.", dat_cind;
                 Invalid, Input));

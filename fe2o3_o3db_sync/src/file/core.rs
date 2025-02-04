@@ -65,10 +65,10 @@ fn search_recursively(
             let entry = res!(entry);
             let path = entry.path();
             if path.is_dir() {
-                debug!("Looking in {:?}", path);
+                debug!(sync_log::stream(), "Looking in {:?}", path);
                 res!(search_recursively(&path, re, matching_files));
             } else if let Some(file_name) = path.file_name() {
-                debug!("Found {:?}", path);
+                debug!(sync_log::stream(), "Found {:?}", path);
                 if let Some(file_name_str) = file_name.to_str() {
                     if re.is_match(file_name_str) {
                         matching_files.push(path);

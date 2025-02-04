@@ -50,7 +50,7 @@ use hostname;
 pub fn delete_all_index_files(zone_dirs: &BTreeMap<ZoneInd, ZoneDir>) -> Outcome<()> {
     for (_, zdir) in zone_dirs {
         let dir = &zdir.dir;
-        test!("Removing all index files from {:?}", dir);
+        test!(sync_log::stream(), "Removing all index files from {:?}", dir);
         for entry in res!(std::fs::read_dir(dir)) {
             let entry = res!(entry);
             let path = entry.path();
@@ -67,7 +67,7 @@ pub fn delete_all_index_files(zone_dirs: &BTreeMap<ZoneInd, ZoneDir>) -> Outcome
 }
 
 pub fn corrupt_an_index_file(zone_dirs: &BTreeMap<ZoneInd, ZoneDir>) -> Outcome<()> {
-    test!("Deliberately corrupting the first index file in the first zone.");
+    test!(sync_log::stream(), "Deliberately corrupting the first index file in the first zone.");
     if let Some(zdir) = zone_dirs.get(&ZoneInd::new(0usize)) {
         for entry in res!(std::fs::read_dir(&zdir.dir)) {
             let entry = res!(entry);
@@ -121,8 +121,8 @@ pub fn save_single_file<
 )
     -> Outcome<(u64, u64)>
 {
-    test!("Performing control experiment by saving data directly to a single disk file.");
-    test!("  RestSchemes: {:?}", schms2);
+    test!(sync_log::stream(), "Performing control experiment by saving data directly to a single disk file.");
+    test!(sync_log::stream(), "  RestSchemes: {:?}", schms2);
 
     let mut path = dir.clone();
     path.push("control_file");
@@ -145,7 +145,7 @@ pub fn save_single_file<
     ));
 
     let mut datsize: usize = 0;
-    test!("Saving {} key-value data pairs.", n);
+    test!(sync_log::stream(), "Saving {} key-value data pairs.", n);
     let start = Instant::now();
     for (msg, _zind) in msgs {
         match msg {
@@ -193,8 +193,8 @@ pub fn save_multiple_files<
 )
     -> Outcome<(u64, u64)>
 {
-    test!("Performing control experiment by saving data directly to multiple disk files.");
-    test!("  RestSchemes: {:?}", schms2);
+    test!(sync_log::stream(), "Performing control experiment by saving data directly to multiple disk files.");
+    test!(sync_log::stream(), "  RestSchemes: {:?}", schms2);
 
     let mut fnum: FileNum = 0;
     let mut datsize: usize = 0;
@@ -211,7 +211,7 @@ pub fn save_multiple_files<
     ));
 
     let mut i = 0;
-    test!("Saving {} key-value data pairs.", n);
+    test!(sync_log::stream(), "Saving {} key-value data pairs.", n);
     let start = Instant::now();
     for (msg, _zind) in msgs {
         match msg {
@@ -221,11 +221,11 @@ pub fn save_multiple_files<
                     datsize = 0;
                     let mut path = dir.clone();
                     path.push(ZoneDir::relative_file_path(&FileType::Data, fnum));
-                    test!("Creating file {:?}", path);
+                    test!(sync_log::stream(), "Creating file {:?}", path);
                     datfile = Some(res!(ZoneDir::open_file(&path, &FileAccess::Writing)));
                     let mut path = dir.clone();
                     path.push(ZoneDir::relative_file_path(&FileType::Index, fnum));
-                    test!("Creating file {:?}", path);
+                    test!(sync_log::stream(), "Creating file {:?}", path);
                     indfile = Some(res!(ZoneDir::open_file(&path, &FileAccess::Writing)));
                 }
                 if let Some(file) = &mut datfile {
@@ -245,7 +245,7 @@ pub fn save_multiple_files<
                     res!(file.write(&istored));
                 }
                 //if i % 100 == 0 {
-                //    debug!("Key {} data written {}", i, datsize);
+                //    debug!(sync_log::stream(), "Key {} data written {}", i, datsize);
                 //}
                 i += 1;
             },
@@ -284,7 +284,7 @@ pub fn append_table(
         ),
         fmt!(table_double_line!(), "", "", ""),
     ] {
-        test!("{}", line);
+        test!(sync_log::stream(), "{}", line);
         res!(file.write_all(fmt!("{}\n", line).as_bytes()));
     }
     for (s, tps, bw) in table {
@@ -292,7 +292,7 @@ pub fn append_table(
             fmt!(table_row!(), s, tps, bw),
             fmt!(table_single_line!(), "", "", ""),
         ] {
-            test!("{}", line);
+            test!(sync_log::stream(), "{}", line);
             res!(file.write_all(fmt!("{}\n", line).as_bytes()));
         }
     }

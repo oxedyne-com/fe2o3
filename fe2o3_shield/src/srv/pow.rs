@@ -1,5 +1,3 @@
-use crate::prelude::*;
-
 use oxedize_fe2o3_core::{
     prelude::*,
 };
@@ -211,7 +209,7 @@ impl<
         let code_start = P0 - C;
         let trg_start = P0 - C - Self::ADDR_LEN;
     
-        trace!(log_stream(), "\nPrefix  [{:>4}]: {:02x?}\
+        trace!(async_log::stream(), "\nPrefix  [{:>4}]: {:02x?}\
             \n  SrcAddr [{:>4}]: {:02x?}\
             \n  TrgAddr [{:>4}]: {:02x?}\
             \n  Code    [{:>4}]: {:02x?}\

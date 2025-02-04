@@ -69,8 +69,9 @@ pub struct ZoneBot<
     // Identity
     zind:       ZoneInd,
     // Bot
-    sem:        Semaphore,
-    errc:       Arc<Mutex<usize>>,
+    sem:            Semaphore,
+    errc:           Arc<Mutex<usize>>,
+    log_stream_id:  String,
     // Config
     zdir:       ZoneDir,
     // Comms
@@ -100,6 +101,9 @@ impl<
     bot_methods!();
 
     fn go(&mut self) {
+
+        sync_log::set_stream(self.log_stream_id());
+
         if self.no_init() { return; }
         self.now_listening();
         loop {
@@ -202,7 +206,7 @@ impl<
                         },
                         Err(e) => self.result(&Err(e)),
                     }
-                    info!("{}: Zone init complete", self.ozid());
+                    info!(sync_log::stream(), "{}: Zone {} init complete", self.ozid(), self.zind);
                 },
                 // WORK
                 OzoneMsg::CacheSize(b, size, ancillary_size) => {
@@ -313,8 +317,9 @@ impl<
             // Identity
             zind,
             // Bot
-            sem:        args.sem,
-            errc:       Arc::new(Mutex::new(0)),
+            sem:            args.sem,
+            errc:           Arc::new(Mutex::new(0)),
+            log_stream_id:  args.log_stream_id,
             // Config
             zdir:       ZoneDir::default(),
             // Comms
@@ -375,7 +380,7 @@ impl<
 //    /// Survey the existing data and index files and send the file state maps to the zone file bots.
 //    pub fn survey_files(&mut self) -> Outcome<Vec<FileStateMap>> {
 //
-//        info!("{}: Surveying files for zone {}...", self.ozid(), self.zind());
+//        info!(sync_log::stream(), "{}: Surveying files for zone {}...", self.ozid(), self.zind());
 //
 //        let mut shards = Vec::new();
 //        let nf = self.cfg().num_fbots_per_zone();
@@ -385,7 +390,7 @@ impl<
 //        // 1. Count the number of files in the zone directory.
 //        // <deleted>
 //
-//        trace!("{}: Initializing {} file state shards", self.ozid(), nf);
+//        trace!(sync_log::stream(), "{}: Initializing {} file state shards", self.ozid(), nf);
 //
 //        // 2. We will record whether both a data and index file are present for each file
 //        //    number (i.e. Present::Pair) or whether just one is present (i.e.
@@ -399,7 +404,7 @@ impl<
 //            let entry = res!(entry);
 //            let path = entry.path();
 //            if path.is_file() {
-//                trace!("{}: Processing file {:?}", self.ozid(), path);
+//                trace!(sync_log::stream(), "{}: Processing file {:?}", self.ozid(), path);
 //                // 4. We found a file, now extract the file number and type from the file name.
 //                let (fnum, ftyp) = res!(ZoneDir::ozone_file_number_and_type(&path));
 //                // 5. Get the file size.
@@ -479,7 +484,7 @@ impl<
     /// Survey the existing data and index files and send the file state maps to the zone file bots.
     pub fn survey_files(&mut self) -> Outcome<Vec<FileStateMap>> {
     
-        info!("{}: Surveying {} files...", self.ozid(), self.zind());
+        info!(sync_log::stream(), "{}: Surveying {} files...", self.ozid(), self.zind());
     
         let mut shards = Vec::new();
         let nf = self.cfg().num_fbots_per_zone();
@@ -489,7 +494,7 @@ impl<
         // Track incomplete data files for WriterBot initialization.
         let mut incomplete_files = Vec::new();
     
-        trace!("{}: Initializing {} file state shards", self.ozid(), nf);
+        trace!(sync_log::stream(), "{}: Initializing {} file state shards", self.ozid(), nf);
     
         // 2. We will record whether both a data and index file are present for each file
         //    number (i.e. Present::Pair) or whether just one is present (i.e.
@@ -503,7 +508,7 @@ impl<
             let entry = res!(entry);
             let path = entry.path();
             if path.is_file() {
-                trace!("{}: Processing file {:?}", self.ozid(), path);
+                trace!(sync_log::stream(), "{}: Processing file {:?}", self.ozid(), path);
                 // 4. We found a file, now extract the file number and type from the file name.
                 let (fnum, ftyp) = res!(ZoneDir::ozone_file_number_and_type(&path));
                 // 5. Get the file size.
@@ -602,7 +607,7 @@ impl<
         let n_w = self.cfg().num_wbots_per_zone as usize;
         let wbots = res!(self.get_zwbots())[&WorkerType::Writer].clone();
     
-        trace!("{}: Assigning live files to {} writer bots.", self.ozid(), n_w);
+        trace!(sync_log::stream(), "{}: Assigning live files to {} writer bots.", self.ozid(), n_w);
     
         let resp = Responder::new(Some(self.ozid()));
         for i in 0..n_w {
@@ -757,7 +762,7 @@ impl<
             // 3. Warn the user of missing data files.
             if let Some(missing) = missing_data_files {
                 for fnum in missing {
-                    warn!("{:?}: Data file {} is missing, suggesting loss of data.",
+                    warn!(sync_log::stream(), "{:?}: Data file {} is missing, suggesting loss of data.",
                         self.ozid(), fnum);
                 }
             }

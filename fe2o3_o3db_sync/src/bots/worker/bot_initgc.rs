@@ -64,8 +64,9 @@ pub struct InitGarbageBot<
     wind:       WorkerInd,
     wtyp:       WorkerType,
     // Bot
-    sem:        Semaphore,
-    errc:       Arc<Mutex<usize>>,
+    sem:            Semaphore,
+    errc:           Arc<Mutex<usize>>,
+    log_stream_id:  String,
     // Config
     zdir:       ZoneDir,
     // Comms
@@ -115,6 +116,9 @@ impl<
     bot_methods!();
 
     fn go(&mut self) {
+
+        sync_log::set_stream(self.log_stream_id());
+
         if self.no_init() { return; }
         self.now_listening();
         loop {
@@ -200,8 +204,9 @@ impl<
             wind:       args.wind,
             wtyp:       args.wtyp,
             // Bot
-            sem:        args.sem,
-            errc:       Arc::new(Mutex::new(0)),
+            sem:            args.sem,
+            errc:           Arc::new(Mutex::new(0)),
+            log_stream_id:  args.log_stream_id,
             // Config
             zdir:       ZoneDir::default(),
             // Comms    
@@ -234,7 +239,7 @@ impl<
             FileType::Index => {
                 if meta.len() == 0 {
                     // If there is nothing to cache, try caching the data file.
-                    warn!("{}: The index file {} is empty, trying data file...",
+                    warn!(sync_log::stream(), "{}: The index file {} is empty, trying data file...",
                         self.ozid(), fnum);
                     let (_, file) = res!(self.zdir().open_ozone_file(
                         fnum,
@@ -256,7 +261,7 @@ impl<
                     ) {
                         Err(e) => {
                             // If caching the index file fails, cache the data file.
-                            warn!("{}: Error caching index file {}, trying data file, caused by {}.",
+                            warn!(sync_log::stream(), "{}: Error caching index file {}, trying data file, caused by {}.",
                                 self.ozid(), fnum, e);
                             let (_, file) = res!(self.zdir().open_ozone_file(
                                 fnum,
@@ -492,7 +497,6 @@ impl<
                     let cbots = res!(self.cbots());
                     let bot = res!(cbots.get_bot(**cbwind.bpind()));
                     let ibuf = &sfloc.buf;
-                    debug!("++++++ data");
                     res!(bot.send(
                         OzoneMsg::Insert(
                             kbyts,
@@ -582,7 +586,7 @@ impl<
     {
         // [19] Perform transcription from data_reader to data_writer.
 
-        trace!("{}: Performing garbage collection on file {}...", self.ozid(), fnum);
+        trace!(sync_log::stream(), "{}: Performing garbage collection on file {}...", self.ozid(), fnum);
         let typ = FileType::Data;
         // 1. Open the data file for reading.
         let (data_path, file) = res!(self.zdir().open_ozone_file(
@@ -735,7 +739,7 @@ impl<
                 self.ozid(), fnum, fbot_index;
                 Channel, Write));
         }
-        debug!("{}: Reduced file {} size by {:.1}% from {} to {} bytes.",
+        debug!(sync_log::stream(), "{}: Reduced file {} size by {:.1}% from {} to {} bytes.",
             self.ozid(),
             fnum,
             100.0 * ((old_size - new_size) as f32) / (old_size as f32),

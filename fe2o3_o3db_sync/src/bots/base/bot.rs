@@ -38,11 +38,12 @@ macro_rules! bot_methods { () => {
     fn chan_in(&self)           -> &Simplex<OzoneMsg<UIDL, UID, ENC, KH>> { &self.chan_in }
     fn label(&self)             -> String               { fmt!("{}", self.ozid()) }
     fn err_count_warning(&self) -> usize                { constant::BOT_ERR_COUNT_WARNING }
+    fn log_stream_id(&self)     -> String               { self.log_stream_id.clone() }
     fn set_chan_in(&mut self, chan_in: Simplex<OzoneMsg<UIDL, UID, ENC, KH>>) {
         self.chan_in = chan_in;
     }
     fn init(&mut self) -> Outcome<()> {
-        info!("{:?}: Initialising.", self.ozid());
+        info!(sync_log::stream(), "{:?}: Initialising.", self.ozid());
         self.inited = true;
         Ok(())
     }
@@ -83,7 +84,7 @@ pub trait OzoneBot<
     // Provided.
     fn no_init(&self) -> bool {
         if !self.inited() {
-            error!(err!(
+            error!(sync_log::stream(), err!(
                 "Attempt to start {} before running init()", self.label();
             Init, Missing));
             return true;
@@ -117,10 +118,10 @@ pub trait OzoneBot<
     fn listen_more(&mut self, msg: OzoneMsg<UIDL, UID, ENC, KH>) -> LoopBreak {
         match msg {
             OzoneMsg::Finish => {
-                trace!("{}: Finish message received, finishing now.", self.ozid());
+                trace!(sync_log::stream(), "{}: Finish message received, finishing now.", self.ozid());
                 return LoopBreak(true);
             },
-            OzoneMsg::Ready => info!("{} ready to receive messages now.", self.ozid()),
+            OzoneMsg::Ready => info!(sync_log::stream(), "{} ready to receive messages now.", self.ozid()),
             OzoneMsg::Channels(chans, resp) => {
                 self.set_chans(chans);
                 match self.chans().get_bot(self.ozid()) {
@@ -139,7 +140,7 @@ pub trait OzoneBot<
                     },
                 }
                 self.respond(Ok(OzoneMsg::ChannelsReceived(self.ozid().clone())), &resp);
-                trace!("{}: Channel update received.", self.ozid());
+                trace!(sync_log::stream(), "{}: Channel update received.", self.ozid());
             },
             OzoneMsg::Ping(id, resp) => {
                 if let Err(e) = resp.send(OzoneMsg::Pong(self.ozid().clone())) {
@@ -148,7 +149,7 @@ pub trait OzoneBot<
                         IO, Channel));
                 }
             },
-            _ => error!(err!("{}: Message {:?} not recognised.", self.ozid(), msg; Invalid, Input)),
+            _ => error!(sync_log::stream(), err!("{}: Message {:?} not recognised.", self.ozid(), msg; Invalid, Input)),
         }
         LoopBreak(false)
     }
@@ -163,7 +164,8 @@ pub struct BotInitArgs<
     CS:     Checksummer,
 >{
     // Bot
-    pub sem:        Semaphore,
+    pub sem:            Semaphore,
+    pub log_stream_id:  String,
     // Comms
     pub chan_in:    Simplex<OzoneMsg<UIDL, UID, ENC, KH>>,
     // API

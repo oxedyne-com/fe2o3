@@ -41,17 +41,17 @@ use std::{
 use local_ip_address::local_ip;
 use tokio::{
     task,
-    task_local,
+    //task_local,
 };
 
 
-task_local! {
-    pub static LOG_STREAM_ID: String;
-}
-
-pub fn log_stream() -> String {
-    LOG_STREAM_ID.try_with(|id| id.clone()).unwrap_or(fmt!("main"))
-}
+//task_local! {
+//    pub static LOG_STREAM_ID: String;
+//}
+//
+//pub fn async_log::stream() -> String {
+//    LOG_STREAM_ID.try_with(|id| id.clone()).unwrap_or(fmt!("main"))
+//}
 
 pub struct Server<
     const C: usize,
@@ -112,11 +112,11 @@ impl<
         let ip_addr     = res!(local_ip());
         let trg_addr    = SocketAddr::new(ip_addr.clone(), port);
 
-        info!(log_stream(), "Server ip address = {}", ip_addr);
+        info!(async_log::stream(), "Server ip address = {}", ip_addr);
         let trg = Arc::new(res!(UdpSocket::bind(trg_addr)));
 
-        info!(log_stream(), "mode = {:?}", self.context.protocol.mode);
-        info!(log_stream(), "Listening on UDP at {:?}.", trg_addr);
+        info!(async_log::stream(), "mode = {:?}", self.context.protocol.mode);
+        info!(async_log::stream(), "Listening on UDP at {:?}.", trg_addr);
 
         res!(trg.set_read_timeout(Some(constant::SERVER_EXT_SOCKET_CHECK_INTERVAL)));
     
@@ -133,7 +133,7 @@ impl<
                     ////self.timer.update();
                     match e.kind() {
                         io::ErrorKind::WouldBlock | io::ErrorKind::InvalidInput => {}
-                        _ => error!(log_stream(),
+                        _ => error!(async_log::stream(),
                             err!(e, "While trying to receive packet."; IO, Network)),
                     }
                 },
@@ -148,11 +148,11 @@ impl<
                     ));
                     match result.await {
                         Ok(result) => match result {
-                            Err(e) => error!(log_stream(), err!(e,
+                            Err(e) => error!(async_log::stream(), err!(e,
                                 "While handling incoming packet."; IO, Network)),
                             Ok(_) => {}
                         },
-                        Err(e) => error!(log_stream(), err!(e,
+                        Err(e) => error!(async_log::stream(), err!(e,
                             "While awaiting for packet handler."; IO, Network)),
                     }
                 },
@@ -163,7 +163,7 @@ impl<
                 let result = self.context.protocol.massembler
                     .message_assembly_garbage_collection(&self.context.protocol.ma_params);
                 match result {
-                    Err(e) => error!(log_stream(), err!(e,
+                    Err(e) => error!(async_log::stream(), err!(e,
                         "While attempting to collect message assembler garbage.";
                         IO, Network)),
                     Ok(_) => {}
@@ -177,9 +177,9 @@ impl<
                     Recv::Empty => break 'cmd,
                     Recv::Result(Ok(Command::Finish)) => break 'main,
                     Recv::Result(Ok(cmd)) => {
-                        test!(log_stream(), "Server command received: {:?}", cmd);
+                        test!(async_log::stream(), "Server command received: {:?}", cmd);
                     }
-                    Recv::Result(Err(e)) => error!(log_stream(), err!(e,
+                    Recv::Result(Err(e)) => error!(async_log::stream(), err!(e,
                         "While reading command channel."; Channel, Read)),
                 }
             }

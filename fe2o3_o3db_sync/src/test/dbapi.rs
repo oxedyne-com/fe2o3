@@ -42,7 +42,7 @@ pub fn simple<
 )
     -> Outcome<()>
 {
-    test!("Storing and retrieving some simple data.");
+    test!(sync_log::stream(), "Storing and retrieving some simple data.");
 
     let resp = db.responder();
     res!(db.api().store_dat_using_responder(
@@ -169,7 +169,7 @@ pub fn simple<
             Test, Unexpected)),
     }
 
-    test!("Wow, it worked");
+    test!(sync_log::stream(), "Wow, it worked");
     Ok(())
 }
 
@@ -186,7 +186,7 @@ pub fn simple_api<
 )
     -> Outcome<()>
 {
-    test!("Storing and retrieving some simple data using the Database insert and get api.");
+    test!(sync_log::stream(), "Storing and retrieving some simple data using the Database insert and get api.");
 
     let k = dat!("Meaning of life");
     let v = dat!(42u8);
@@ -224,7 +224,7 @@ pub fn store_chunked_data<
         pad_last:           true,
     };
 
-    test!("Store and read data that is chunked.");
+    test!(sync_log::stream(), "Store and read data that is chunked.");
 
     let schms2 = match schms2 {
         Some(schms2) => schms2.clone(),
@@ -272,7 +272,7 @@ pub fn fetch_chunked_data<
     // 1. Retrieve values from caches,
     // 2. Retrieve values from files.
     for src in &["cache", "files"] {
-        test!("Retrieve values from {}.", src);
+        test!(sync_log::stream(), "Retrieve values from {}.", src);
         // First, fetch the bunch key.
         let resp = res!(db.api().fetch_using_schemes(key, schms2));
         let enc = db.api().schemes().encrypter();
@@ -334,7 +334,7 @@ pub fn fetch_chunked_data<
         res!(db.api().clear_cache_values(constant::USER_REQUEST_WAIT));
     }
 
-    test!("Wow, it worked");
+    test!(sync_log::stream(), "Wow, it worked");
 
     Ok(())
 }
@@ -356,15 +356,15 @@ pub fn store<
 )
     -> Outcome<(u64, u64)>
 {
-    test!("Starting some new live files to give us a clean slate...");
-    test!("  RestSchemes: {:?}", schms2);
+    test!(sync_log::stream(), "Starting some new live files to give us a clean slate...");
+    test!(sync_log::stream(), "  RestSchemes: {:?}", schms2);
     res!(db.api().new_live_files());
 
     let n = ks.len();
 
     // Almost all the data is stored in "firehose mode", where we don't ask for any database
     // feedback on the result.
-    test!("Storing {} key-value data pairs.", n);
+    test!(sync_log::stream(), "Storing {} key-value data pairs.", n);
     let start = Instant::now();
     for i in 0..(n - 1) {
         res!(db.api().store_blindly(
@@ -403,7 +403,7 @@ pub fn fetch<
 )
     -> Outcome<Vec<(String, u64, u64)>>
 {
-    test!("Fetching data.");
+    test!(sync_log::stream(), "Fetching data.");
     // Now retrieve it, twice.
     // 1. Retrieve values from caches,
     // 2. Retrieve values from files.
@@ -417,12 +417,12 @@ pub fn fetch<
 
     let mut result = Vec::new();
     for src in &["cache", "files"] {
-        test!("Retrieve values from {}.", src);
+        test!(sync_log::stream(), "Retrieve values from {}.", src);
         let mut err_cnt: usize = 0;
         let start = Instant::now();
         for i in 0..n {
             if mask[i] {
-                //debug!("Attempt to fetch key {}.", i);
+                //debug!(sync_log::stream(), "Attempt to fetch key {}.", i);
                 let resp = res!(db.api().fetch_using_schemes(&ks[i], schms2));
                 let enc = db.api().schemes().encrypter();
                 let or_enc = schms2.map(|s| s.encrypter());
@@ -442,9 +442,9 @@ pub fn fetch<
             }
         }
         if err_cnt > 0 {
-            error!(err!("Could not find data for {} items.", err_cnt; Test, Data, Missing));
+            error!(sync_log::stream(), err!("Could not find data for {} items.", err_cnt; Test, Data, Missing));
         } else {
-            test!("All data retrieved successfully.");
+            test!(sync_log::stream(), "All data retrieved successfully.");
         }
         let elapsed = start.elapsed().as_secs_f64();
         let (tps, bw) = stopwatch(elapsed, n, byts);

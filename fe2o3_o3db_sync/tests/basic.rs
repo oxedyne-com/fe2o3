@@ -95,15 +95,15 @@ pub fn test_basic(_filter: &'static str) -> Outcome<()> {
     let error_delay = 2;
 
     {
-        test!("+---------------------------------------------+");
-        test!("| NEW OZONE SESSION                           |");
-        test!("| Wipe all traces of previous test.           |");
-        test!("| Start database.                             |");
-        test!("| Store and fetch some simple data.           |");
-        test!("| Store and fetch some chunked data:          |");
-        test!("|  * Including one cycle wiping the cache.    |");
-        test!("| Gracefully shut down the database.          |");
-        test!("+---------------------------------------------+");
+        test!(sync_log::stream(), "+---------------------------------------------+");
+        test!(sync_log::stream(), "| NEW OZONE SESSION                           |");
+        test!(sync_log::stream(), "| Wipe all traces of previous test.           |");
+        test!(sync_log::stream(), "| Start database.                             |");
+        test!(sync_log::stream(), "| Store and fetch some simple data.           |");
+        test!(sync_log::stream(), "| Store and fetch some chunked data:          |");
+        test!(sync_log::stream(), "|  * Including one cycle wiping the cache.    |");
+        test!(sync_log::stream(), "| Gracefully shut down the database.          |");
+        test!(sync_log::stream(), "+---------------------------------------------+");
         // Wipe all traces of previous test.
         // Start database.
         let mut db = match setup::start_db(
@@ -161,10 +161,10 @@ pub fn test_basic(_filter: &'static str) -> Outcome<()> {
             Err(e) => return Err(delayed_error(e, error_delay)),
             _ => (),
         }
-        test!("Listing files...");
+        test!(sync_log::stream(), "Listing files...");
         res!(db.api().list_files(wait));
         //res!(db.dump_caches(constant::USER_REQUEST_WAIT));
-        test!("Shutting db down...");
+        test!(sync_log::stream(), "Shutting db down...");
         // Gracefully shut down the database.
         res!(db.shutdown());
     }
@@ -174,13 +174,13 @@ pub fn test_basic(_filter: &'static str) -> Outcome<()> {
     let zdirs: BTreeMap<ZoneInd, ZoneDir>;
 
     {
-        test!("+---------------------------------------------+");
-        test!("| NEW OZONE SESSION                           |");
-        test!("| Start database:                             |");
-        test!("|  * Including caching index files.           |");
-        test!("| Fetch chunked data from previous session.   |");
-        test!("| Gracefully shut down the database.          |");
-        test!("+---------------------------------------------+");
+        test!(sync_log::stream(), "+---------------------------------------------+");
+        test!(sync_log::stream(), "| NEW OZONE SESSION                           |");
+        test!(sync_log::stream(), "| Start database:                             |");
+        test!(sync_log::stream(), "|  * Including caching index files.           |");
+        test!(sync_log::stream(), "| Fetch chunked data from previous session.   |");
+        test!(sync_log::stream(), "| Gracefully shut down the database.          |");
+        test!(sync_log::stream(), "+---------------------------------------------+");
         let mut db = match setup::start_db(
             db_root.clone(),
             Some(cfg.clone()),
@@ -208,14 +208,14 @@ pub fn test_basic(_filter: &'static str) -> Outcome<()> {
             _ => (),
         }
 
-        test!("Demonstrating collecting the state of ozone resources, ");
-        test!("which is regularly reported by each zone to the supervisor.");
+        test!(sync_log::stream(), "Demonstrating collecting the state of ozone resources, ");
+        test!(sync_log::stream(), "which is regularly reported by each zone to the supervisor.");
         let zstats = res!(db.api().ozone_state(constant::USER_REQUEST_WAIT));
         for (i, zstat) in zstats.iter().enumerate() {
-            test!("Zone {} {:?}", i+1, zstat);
+            test!(sync_log::stream(), "Zone {} {:?}", i+1, zstat);
         }
 
-        test!("Shutting db down...");
+        test!(sync_log::stream(), "Shutting db down...");
         res!(db.shutdown());
     }
 
@@ -224,14 +224,14 @@ pub fn test_basic(_filter: &'static str) -> Outcome<()> {
     res!(delete_all_index_files(&zdirs));
 
     {
-        test!("+---------------------------------------------+");
-        test!("| NEW OZONE SESSION                           |");
-        test!("| Delete all index files.                     |");
-        test!("| Start database:                             |");
-        test!("|  * Including caching data files.            |");
-        test!("| Fetch chunked data from previous session.   |");
-        test!("| Gracefully shut down the database.          |");
-        test!("+---------------------------------------------+");
+        test!(sync_log::stream(), "+---------------------------------------------+");
+        test!(sync_log::stream(), "| NEW OZONE SESSION                           |");
+        test!(sync_log::stream(), "| Delete all index files.                     |");
+        test!(sync_log::stream(), "| Start database:                             |");
+        test!(sync_log::stream(), "|  * Including caching data files.            |");
+        test!(sync_log::stream(), "| Fetch chunked data from previous session.   |");
+        test!(sync_log::stream(), "| Gracefully shut down the database.          |");
+        test!(sync_log::stream(), "+---------------------------------------------+");
         let mut db = match setup::start_db(
             db_root.clone(),
             Some(cfg.clone()),
@@ -255,9 +255,9 @@ pub fn test_basic(_filter: &'static str) -> Outcome<()> {
             _ => (),
         }
 
-        test!("Listing files...");
+        test!(sync_log::stream(), "Listing files...");
         res!(db.api().list_files(wait));
-        test!("Shutting db down...");
+        test!(sync_log::stream(), "Shutting db down...");
         res!(db.shutdown());
     }
 
@@ -266,19 +266,19 @@ pub fn test_basic(_filter: &'static str) -> Outcome<()> {
     res!(corrupt_an_index_file(&zdirs));
 
     {
-        test!("+---------------------------------------------+");
-        test!("| NEW OZONE SESSION                           |");
-        test!("| Corrupt a single byte of one index file.    |");
-        test!("| Start database:                             |");
-        test!("|  * Including caching index files.           |");
-        test!("| Fetch chunked data from previous session.   |");
-        test!("| Gracefully shut down the database.          |");
-        test!("|                                             |");
-        test!("| Note: We are expecting one error when an    |");
-        test!("| igcbot discovers the corruption in the      |");
-        test!("| index file and switches to indexing the     |");
-        test!("| data file.                                  |");
-        test!("+---------------------------------------------+");
+        test!(sync_log::stream(), "+---------------------------------------------+");
+        test!(sync_log::stream(), "| NEW OZONE SESSION                           |");
+        test!(sync_log::stream(), "| Corrupt a single byte of one index file.    |");
+        test!(sync_log::stream(), "| Start database:                             |");
+        test!(sync_log::stream(), "|  * Including caching index files.           |");
+        test!(sync_log::stream(), "| Fetch chunked data from previous session.   |");
+        test!(sync_log::stream(), "| Gracefully shut down the database.          |");
+        test!(sync_log::stream(), "|                                             |");
+        test!(sync_log::stream(), "| Note: We are expecting one error when an    |");
+        test!(sync_log::stream(), "| igcbot discovers the corruption in the      |");
+        test!(sync_log::stream(), "| index file and switches to indexing the     |");
+        test!(sync_log::stream(), "| data file.                                  |");
+        test!(sync_log::stream(), "+---------------------------------------------+");
 
         let mut db = match setup::start_db(
             db_root.clone(),
@@ -292,10 +292,10 @@ pub fn test_basic(_filter: &'static str) -> Outcome<()> {
             Ok(db) => db,
         };
 
-        test!("We expected an error during initial caching of an index file.");
-        test!("This appears to have successfully resolved when the data file was instead cached.");
+        test!(sync_log::stream(), "We expected an error during initial caching of an index file.");
+        test!(sync_log::stream(), "This appears to have successfully resolved when the data file was instead cached.");
 
-        test!("Listing files...");
+        test!(sync_log::stream(), "Listing files...");
         res!(db.api().list_files(wait));
 
         match dbapi::fetch_chunked_data(
@@ -308,7 +308,7 @@ pub fn test_basic(_filter: &'static str) -> Outcome<()> {
             Err(e) => return Err(delayed_error(e, error_delay)),
             _ => (),
         }
-        test!("Shutting db down...");
+        test!(sync_log::stream(), "Shutting db down...");
         res!(db.shutdown());
     }
 

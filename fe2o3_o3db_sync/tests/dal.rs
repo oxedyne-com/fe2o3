@@ -102,14 +102,14 @@ pub fn test_docs(filter: &'static str) -> Outcome<()> {
 
         let error_delay = 2;
 
-        test!("+---------------------------------------------+");
-        test!("| NEW OZONE SESSION                           |");
-        test!("| Wipe all traces of previous test.           |");
-        test!("| Start database.                             |");
-        test!("| Store and retrieve data using the document  |");
-        test!("| Data Abstraction Layer (DAL).               |");
-        test!("| Gracefully shut down the database.          |");
-        test!("+---------------------------------------------+");
+        test!(sync_log::stream(), "+---------------------------------------------+");
+        test!(sync_log::stream(), "| NEW OZONE SESSION                           |");
+        test!(sync_log::stream(), "| Wipe all traces of previous test.           |");
+        test!(sync_log::stream(), "| Start database.                             |");
+        test!(sync_log::stream(), "| Store and retrieve data using the document  |");
+        test!(sync_log::stream(), "| Data Abstraction Layer (DAL).               |");
+        test!(sync_log::stream(), "| Gracefully shut down the database.          |");
+        test!(sync_log::stream(), "+---------------------------------------------+");
         // Wipe all traces of previous test.
         // Start database.
         let mut db = match setup::start_db(
@@ -126,7 +126,7 @@ pub fn test_docs(filter: &'static str) -> Outcome<()> {
             Ok(db) => db,
         };
 
-        test!("Listing files and cache before any user activity...");
+        test!(sync_log::stream(), "Listing files and cache before any user activity...");
         res!(db.api().list_files(wait));
         res!(db.api().dump_file_states(wait));
         res!(db.api().dump_caches(wait));
@@ -149,9 +149,9 @@ pub fn test_docs(filter: &'static str) -> Outcome<()> {
         ));
         let mut timer = Timer::new();
         res!(resp.recv_all(wait)); // Wait to ensure it was stored.
-        debug!("Storage confirmation delay: {:?}", res!(timer.split_micros()));
+        debug!(sync_log::stream(), "Storage confirmation delay: {:?}", res!(timer.split_micros()));
 
-        test!("Listing files and cache after direct insertion...");
+        test!(sync_log::stream(), "Listing files and cache after direct insertion...");
         res!(db.api().list_files(wait));
         res!(db.api().dump_file_states(wait));
         res!(db.api().dump_caches(wait));
@@ -169,9 +169,9 @@ pub fn test_docs(filter: &'static str) -> Outcome<()> {
         let mut timer = Timer::new();
         let resp = res!(db.api().put(key, val, user, None));
         res!(resp.recv_all(wait)); // Wait to ensure it was stored.
-        debug!("Storage confirmation: {:?}", res!(timer.split_micros()));
+        debug!(sync_log::stream(), "Storage confirmation: {:?}", res!(timer.split_micros()));
         
-        test!("Listing files and cache after insertion via server...");
+        test!(sync_log::stream(), "Listing files and cache after insertion via server...");
         res!(db.api().list_files(wait));
         res!(db.api().dump_file_states(wait));
         res!(db.api().dump_caches(wait));
@@ -180,23 +180,23 @@ pub fn test_docs(filter: &'static str) -> Outcome<()> {
         timer.reset();
         let resp = res!(db.api().put(key, val, user, None));
         res!(resp.recv_all(wait)); // Wait to ensure it was stored.
-        debug!("Storage confirmation: {:?}", res!(timer.split_micros()));
+        debug!(sync_log::stream(), "Storage confirmation: {:?}", res!(timer.split_micros()));
         
-        test!("Listing files and cache after repeat insertion via server...");
+        test!(sync_log::stream(), "Listing files and cache after repeat insertion via server...");
         res!(db.api().list_files(wait));
         res!(db.api().dump_file_states(wait));
         res!(db.api().dump_caches(wait));
 
-        ////test!("Pausing now to verify performance of health check.");
+        ////test!(sync_log::stream(), "Pausing now to verify performance of health check.");
         ////thread::sleep(Duration::from_secs(30));
 
         ////// Ping all bots.
         ////let missing = res!(db.api().ping_bots2(wait));
-        ////debug!("Ping not received from: {:?}.", missing);
+        ////debug!(sync_log::stream(), "Ping not received from: {:?}.", missing);
 
         let (key, val) = doc.clone().into_dats();
         if let Some((dat, _)) = res!(db.api().get_wait(&key, None)) {
-            test!("Yes! It worked! Daticle is: {:?}", dat);
+            test!(sync_log::stream(), "Yes! It worked! Daticle is: {:?}", dat);
             req!(val, dat, "(L: expected, R: actual)");
         } else {
             return Err(err!(
@@ -204,10 +204,10 @@ pub fn test_docs(filter: &'static str) -> Outcome<()> {
             Data, Missing));
         }
 
-        //test!("Listing files...");
+        //test!(sync_log::stream(), "Listing files...");
         //res!(db.api().list_files(wait));
         //res!(db.api().dump_caches(wait));
-        test!("Shutting db down...");
+        test!(sync_log::stream(), "Shutting db down...");
         // Gracefully shut down the database.
         res!(db.shutdown());
 

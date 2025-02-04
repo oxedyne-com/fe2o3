@@ -24,8 +24,9 @@ pub struct ServerBot<
     CS:     Checksummer,
 >{
     // Bot
-    sem:        Semaphore,
-    errc:       Arc<Mutex<usize>>,
+    sem:            Semaphore,
+    errc:           Arc<Mutex<usize>>,
+    log_stream_id:  String,
     // Comms
     chan_in:    Simplex<OzoneMsg<UIDL, UID, ENC, KH>>,
     // API
@@ -47,8 +48,11 @@ impl<
     bot_methods!();
 
     fn go(&mut self) {
+
+        sync_log::set_stream(self.log_stream_id());
+
         if self.no_init() { return; }
-        info!("{}: Listening for database requests.", self.ozid());
+        info!(sync_log::stream(), "{}: Listening for database requests.", self.ozid());
         self.now_listening();
         loop {
             if self.listen().must_end() { break; }
@@ -78,7 +82,7 @@ impl<
                     }
                 },
                 OzoneMsg::Put { key, val, user, schms2, resp } => {
-                    debug!("Store key: {:?}",key);
+                    debug!(sync_log::stream(), "Store key: {:?}",key);
                     match self.api().store_dat_using_responder(
                         key,
                         val,
@@ -194,8 +198,9 @@ impl<
     {
         Self {
             // Bot
-            sem:        args.sem,
-            errc:       Arc::new(Mutex::new(0)),
+            sem:            args.sem,
+            errc:           Arc::new(Mutex::new(0)),
+            log_stream_id:  args.log_stream_id,
             // Comms    
             chan_in:    args.chan_in,
             // API

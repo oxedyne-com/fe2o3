@@ -1,0 +1,1172 @@
+Cargo.toml:
+[package]
+name = "oxedize_fe2o3_o3db_sync"
+version = "0.5.0"
+authors = ["h00gs <hello@oxedize.com>"]
+edition = "2021"
+license = "BSD-2-Clause/Apache-2.0"
+description = "Hematite library for the Ozone database (o3db), a key-value store inspired by BitCask, designed for high throughput." 
+repository = "https://github.com/Oxedize/fe2o3"
+
+[dependencies]
+oxedize_fe2o3_bot 		   		= { path = "../fe2o3_bot" }
+oxedize_fe2o3_core 		   		= { path = "../fe2o3_core" }
+oxedize_fe2o3_crypto 			= { path = "../fe2o3_crypto" }
+oxedize_fe2o3_data 		   		= { path = "../fe2o3_data" }
+oxedize_fe2o3_hash 				= { path = "../fe2o3_hash" }
+oxedize_fe2o3_iop_crypto		= { path = "../fe2o3_iop_crypto" }
+oxedize_fe2o3_iop_db			= { path = "../fe2o3_iop_db" }
+oxedize_fe2o3_iop_hash 			= { path = "../fe2o3_iop_hash" }
+oxedize_fe2o3_jdat 				= { path = "../fe2o3_jdat" }
+oxedize_fe2o3_net 				= { path = "../fe2o3_net" }
+oxedize_fe2o3_num 				= { path = "../fe2o3_num" }
+oxedize_fe2o3_syntax 			= { path = "../fe2o3_syntax" }
+oxedize_fe2o3_stds 				= { path = "../fe2o3_stds" }
+oxedize_fe2o3_test 				= { path = "../fe2o3_test" }
+oxedize_fe2o3_text 				= { path = "../fe2o3_text" }
+oxedize_fe2o3_namex				= { path = "../fe2o3_namex" }
+
+crossbeam-utils = "0.8.5"
+hostname = "0.3.1"
+humantime = "2.1.0"
+lazy_static = "1.4.0"
+num_cpus = "1.0"
+rand = "0.8.5"
+rand_core = { version = "0.6.3", features = ["std"] }
+regex = "1.5"
+secrecy = "0.8.0"
+seahash = "4.0.1"
+
+[dev-dependencies]
+oxedize_fe2o3_test 				= { path = "../fe2o3_test" }
+
+bot_super.rs:
+use crate::{
+    prelude::*,
+    base::{
+        constant,
+        //id::OzoneBotType,
+        index::{
+            BotPoolInd,
+            ZoneInd,
+        },
+    },
+    bots::{
+        base::{
+            bot_deps::*,
+            handles::{
+                BotHandles,
+                Handle,
+            },
+        },
+        // Solo bots
+        bot_config::ConfigBot,
+        bot_server::ServerBot,
+        // Other bots
+        bot_zone::{
+            ZoneBot,
+            ZoneState,
+        },
+        worker::{
+            bot::ZoneWorkerInitArgs,
+            bot_cache::CacheBot,
+            bot_file::FileBot,
+            bot_initgc::InitGarbageBot,
+            bot_reader::ReaderBot,
+            bot_writer::WriterBot,
+            worker_deps::*,
+        },
+    },
+};
+
+use oxedize_fe2o3_bot::Bot;
+use oxedize_fe2o3_core::{
+    channels::simplex,
+    thread::thread_channel,
+};
+use oxedize_fe2o3_jdat::id::NumIdDat;
+
+use std::{
+    sync::Arc,
+    time::{
+        Duration,
+        Instant,
+    },
+    thread,
+};
+
+/// Manages the files and caches for an ozone database.
+#[derive(Debug)]
+pub struct Supervisor<
+    's,
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL>,
+    ENC:    Encrypter,
+    KH:     Hasher,
+	PR:     Hasher,
+    CS:     Checksummer,
+>{
+    // Bot
+    sem:        Semaphore,
+    errc:       Arc<Mutex<usize>>,
+    // Comms
+    chan_in:    Simplex<OzoneMsg<UIDL, UID, ENC, KH>>,
+    chan_out:   Simplex<OzoneMsg<UIDL, UID, ENC, KH>>, // to the Master.
+    // API
+    api:        OzoneApi<UIDL, UID, ENC, KH, PR, CS>,
+    // State
+    handles:    BotHandles<'s, UIDL, UID, ENC, KH>,
+    inited:     bool,
+    trep:       Instant,
+    zstats:     Vec<ZoneState>,
+}
+
+impl<
+    's,
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL> + 'static,
+    ENC:    Encrypter + 'static,
+    KH:     Hasher + 'static,
+    PR:     Hasher + 'static,
+    CS:     Checksummer + 'static,
+>
+    Bot<{ BID_LEN }, Bid, OzoneMsg<UIDL, UID, ENC, KH>> for
+        Supervisor<'s, UIDL, UID, ENC, KH, PR, CS>
+{
+    bot_methods!();
+
+    fn go(&mut self) {
+        if self.no_init() { return; }
+        let result = self.start_db();
+        self.result(&result);
+        // Send channels back to Master for the first time.
+        let resp = Responder::new(Some(&self.ozid()));
+        if let Err(e) = self.chan_out.send(
+            OzoneMsg::Channels(
+                self.chans().clone(),
+                resp.clone(),
+            )
+        ) {
+            self.err_cannot_send(err!(e,
+                "{}: Sending channels to master", self.ozid();
+                IO, Channel));
+        }
+        match resp.recv_timeout(constant::BOT_REQUEST_TIMEOUT) {
+            Err(e) => self.error(e),
+            Ok(OzoneMsg::ChannelsReceived(_)) => (),
+            m => self.error(err!(
+                "{}: Received {:?}, expecting ChannelsReceived confirmation.", self.ozid(), m;
+                Channel)),
+        }
+        self.now_listening();
+        loop {
+            if self.listen().must_end() { break; }
+        }
+    }
+
+    fn listen(&mut self) -> LoopBreak {
+        let now = Instant::now();
+        if now.duration_since(self.trep) >= constant::HEALTH_CHECK_INTERVAL {
+            let result = self.report_health();
+            self.result(&result);
+            self.trep = now;
+        }
+        match self.chan_in().recv() {
+            Err(e) => self.err_cannot_receive(err!(e,
+                "{}: Waiting for message.", self.ozid();
+                IO, Channel)),
+            Ok(msg) => match msg {
+                OzoneMsg::ClearCache(_)              |
+                OzoneMsg::DumpCacheRequest(_)        |
+                OzoneMsg::DumpFiles(_)               |
+                OzoneMsg::DumpFileStatesRequest(_)   |
+                OzoneMsg::GcControl(_, _)            |
+                OzoneMsg::GetZoneDir(_)              |
+                //OzoneMsg::GetUsers(_)                |
+                OzoneMsg::NewLiveFile(_, _)
+                => {
+                    match self.chans().fwd_to_all_zones(msg) {
+                        Err(e) => self.error(e),
+                        Ok(_) => (),
+                    }
+                },
+                OzoneMsg::OzoneStateRequest(resp) => {
+                    self.respond(Ok(OzoneMsg::OzoneStateResponse(
+                        self.ozone_state().clone())), &resp);
+                },
+                OzoneMsg::Shutdown(ozid, resp) => {
+                    if let OzoneBotId::Master(_) = ozid {
+                        self.respond(self.shutdown(fmt!("{}", ozid)), &resp);
+                        return LoopBreak(true);
+                    } else {
+                        self.respond(Err(err!(
+                            "{} attempted to shut down database, but only the Master \
+                            can do this.", ozid;
+                            Unauthorised)), &resp);
+                    }
+                },
+                OzoneMsg::ZoneState(z, zstat) => {
+                    //debug!("{}: zone {} state received: {:?}",self.ozid(),z,zstat);
+                    if z+1 > self.ozone_state().len() {
+                        self.error(err!(
+                            "{}: The ZoneInd for a zone state update, {}, exceeds the \
+                            number of zbot slots {}.",
+                            self.ozid(), z, self.ozone_state().len();
+                            Bug, Mismatch, Size));
+                    } else {
+                        self.ozone_state_mut()[z] = zstat;
+                    }
+                },
+                _ => return self.listen_more(msg),
+            },
+        }
+        LoopBreak(false)
+    }
+}
+
+impl<
+    's,
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL> + 'static,
+    ENC:    Encrypter + 'static,
+    KH:     Hasher + 'static,
+	PR:     Hasher + 'static,
+    CS:     Checksummer + 'static,
+>
+    OzoneBot<UIDL, UID, ENC, KH, PR, CS> for Supervisor<'s, UIDL, UID, ENC, KH, PR, CS>
+{
+    ozonebot_methods!();
+}
+
+impl<
+    's,
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL> + 'static,
+    ENC:    Encrypter + 'static,
+    KH:     Hasher + 'static,
+	PR:     Hasher + 'static,
+    CS:     Checksummer + 'static,
+>
+    Supervisor<'s, UIDL, UID, ENC, KH, PR, CS>
+{
+    pub fn new(
+        args:       BotInitArgs<UIDL, UID, ENC, KH, PR, CS>,
+        chan_out:   Simplex<OzoneMsg<UIDL, UID, ENC, KH>>,
+    )
+        -> Self
+    {
+        let handles = BotHandles::new(&args.api.cfg);
+        let zstats = vec![ZoneState::default(); args.api.cfg.num_zones()];
+        Self {
+            // Bot
+            sem:        args.sem,
+            errc:       Arc::new(Mutex::new(0)),
+            // Comms
+            chan_in:    args.chan_in,
+            chan_out,
+            // API
+            api:        args.api,
+            // State
+            handles,
+            inited:     false,
+            trep:       Instant::now(),
+            zstats,
+        }
+    }
+
+    pub fn schemes(&self)           -> &RestSchemes<ENC, KH, PR, CS>        { &self.api.schms }
+    pub fn handles(&self)           -> &BotHandles<'s, UIDL, UID, ENC, KH>  { &self.handles }
+    pub fn chans_mut(&mut self)     -> &mut BotChannels<UIDL, UID, ENC, KH> { &mut self.api.chans }
+    pub fn handles_mut(&mut self) -> &mut BotHandles<'s, UIDL, UID, ENC, KH> { &mut self.handles }
+
+    fn ozone_state(&self)           -> &Vec<ZoneState>      { &self.zstats }
+    fn ozone_state_mut(&mut self)   -> &mut Vec<ZoneState>  { &mut self.zstats }
+
+    pub fn start_db(&mut self) -> Outcome<()> {
+
+        info!("{}: Starting database...", self.label());
+
+        let nz = self.cfg().num_zones();
+        let ns = self.cfg().num_sbots();
+
+        res!(thread::scope(|s| -> Outcome<()> {
+
+            // Arise bots!
+            for xz in 0..nz {
+                let zind = ZoneInd::new(xz);
+                for wtyp in [
+                    WorkerType::Cache,
+                    WorkerType::File,
+                    WorkerType::InitGarbage,
+                    WorkerType::Reader,
+                    WorkerType::Writer,
+                ] {
+                    for b in 0..self.cfg().num_bots_per_zone(&wtyp) {
+                        let bpind = BotPoolInd::new(b);
+                        let wind = WorkerInd::new(zind, bpind);
+                        let handle = res!(self.start_new_worker(s, &wtyp, &wind));
+                        let chan = res!(handle.some_chan());
+                        res!(self.chans_mut().set_worker_bot(&wtyp, &wind, chan));
+                        res!(self.handles_mut().set_worker_bot(&wtyp, &wind, handle));
+                    }
+                }
+            }
+
+            // The zbots are initialised with cbot channels.
+            for xz in 0..nz {
+                let zind = ZoneInd::new(xz);
+                let handle = res!(self.start_new_zbot(s, &zind));
+                let chan = res!(handle.some_chan());
+                res!(self.chans_mut().set_zbot(&zind, chan));
+                res!(self.handles_mut().set_zbot(&zind, handle));
+            }
+
+            // Start cfgbot.
+            let handle = res!(self.start_new_cfgbot(s));
+            let chan = res!(handle.some_chan());
+            self.chans_mut().set_cfg(chan);
+            self.handles_mut().set_cfg(handle);
+
+            // Start srvbots.
+            for xs in 0..ns {
+                let bpind = BotPoolInd::new(xs);
+                let handle = res!(self.start_new_srvbot(s, bpind));
+                let chan = res!(handle.some_chan());
+                res!(self.chans_mut().set_sbot(&bpind, chan));
+                res!(self.handles_mut().set_sbot(&bpind, handle));
+            }
+            
+            // Broadcast updated BotChannels.
+            let resp = Responder::new(Some(self.ozid()));
+            let msg = OzoneMsg::Channels(self.chans().clone(), resp.clone());
+            res!(self.chans().cfg().send(msg.clone()));
+            res!(self.chans().fwd_to_all_zones(msg.clone()));
+            for _ in 0..nz+1 {
+                match res!(resp.recv_timeout(constant::BOT_REQUEST_TIMEOUT)) {
+                    OzoneMsg::ChannelsReceived(ozid) => {
+                        info!("{}: Channels received by {}", self.ozid(), ozid);
+                    },
+                    m => self.error(err!(
+                        "Received {:?}, expecting ChannelsReceived confirmation.", m;
+                        Channel, Read, Unexpected)),
+                }
+            }
+
+            res!(self.chans().cfg().send(OzoneMsg::ZoneInitTrigger));
+
+            Ok(())
+        }));
+
+        Ok(())
+    }
+
+    fn start_new_worker<'t>(
+        &self, 
+        scope:  &'t thread::Scope<'t, '_>,
+        wtyp:   &WorkerType,
+        wind:   &WorkerInd,
+    )
+        -> Outcome<Handle<'s, UIDL, UID, ENC, KH, ()>>
+    {
+        let chan = simplex();
+        let (semaphore, sentinel) = thread_channel();
+        let wg = self.handles().wait_end_ref().clone();
+        let api = OzoneApi::new(
+            OzoneBotId::new_worker(wtyp, wind),
+            self.db_root().to_path_buf(),
+            self.cfg().clone(),
+            self.chans().clone(),
+            self.schemes().clone(),
+        );
+        let args = ZoneWorkerInitArgs {
+            // Identity
+            wind:       wind.clone(),
+            wtyp:       wtyp.clone(),
+            // Bot
+            sem:        semaphore,
+            // Comms
+            chan_in:    chan.clone(),
+            // API
+            api,
+        };
+
+        let mut bot: Box<dyn WorkerBot<UIDL, UID, ENC, KH, PR, CS>> = match wtyp {
+            WorkerType::Cache       =>  Box::new(CacheBot::new(args)),
+            WorkerType::File        =>  Box::new(FileBot::new(args)),
+            WorkerType::InitGarbage =>  Box::new(InitGarbageBot::new(args)),
+            WorkerType::Reader      =>  Box::new(ReaderBot::new(args)),
+            WorkerType::Writer      =>  Box::new(WriterBot::new(args)),
+        };
+        res!(bot.init());
+        let builder = thread::Builder::new()
+            .name(bot.id().to_string())
+            .stack_size(constant::STACK_SIZE);
+
+        Ok(Handle::new(
+            Some(bot.ozid().clone()),
+            res!(builder.spawn_scoped(scope, move || {
+                bot.go();
+                drop(wg);
+            })),
+            sentinel,
+            Some(chan),
+        ))
+    }
+
+    /// A zbot is neither a solo nor worker bot, since there is one per zone.
+    fn start_new_zbot(
+        &'s self, 
+        scope:  &'s thread::Scope<'s, '_>,
+        zind:   &ZoneInd,
+    )
+        -> Outcome<Handle<'s, UIDL, UID, ENC, KH, ()>>
+    {
+        let chan = simplex();
+        let (semaphore, sentinel) = thread_channel();
+        let wg = self.handles().wait_end_ref().clone();
+        let api = OzoneApi::new(
+            OzoneBotId::ZoneBot(Bid::randef(), *zind),
+            self.db_root().to_path_buf(),
+            self.cfg().clone(),
+            self.chans().clone(),
+            self.schemes().clone(),
+        );
+        let args = BotInitArgs {
+            // Bot
+            sem:        semaphore,
+            // Comms
+            chan_in:    chan.clone(),
+            // API
+            api,
+        };
+        let mut bot = ZoneBot::new(args, *zind);
+        res!(bot.init());
+        let builder = thread::Builder::new()
+            .name(bot.id().to_string())
+            .stack_size(constant::STACK_SIZE);
+
+        Ok(Handle::new(
+            Some(bot.ozid().clone()),
+            res!(builder.spawn_scoped(scope, move || {
+                bot.go();
+                drop(wg);
+            })),
+            sentinel,
+            Some(chan),
+        ))
+    }
+
+    fn start_new_cfgbot(
+        &'s self, 
+        scope: &'s thread::Scope<'s, '_>,
+    )
+        -> Outcome<Handle<'s, UIDL, UID, ENC, KH, ()>>
+    {
+        let chan = simplex();
+        let (semaphore, sentinel) = thread_channel();
+        let wg = self.handles().wait_end_ref().clone();
+        let api = OzoneApi::new(
+            OzoneBotId::ConfigBot(Bid::randef()),
+            self.db_root().to_path_buf(),
+            self.cfg().clone(),
+            self.chans().clone(),
+            self.schemes().clone(),
+        );
+        let args = BotInitArgs {
+            // Bot
+            sem:        semaphore,
+            // Comms
+            chan_in:    chan.clone(),
+            // API
+            api,
+        };
+        let mut bot = ConfigBot::new(args);
+        res!(bot.init());
+        let builder = thread::Builder::new()
+            .name(bot.ozid().to_string())
+            .stack_size(constant::STACK_SIZE);
+
+        Ok(Handle::new(
+            Some(bot.ozid().clone()),
+            res!(builder.spawn_scoped(scope, move || {
+                bot.go();
+                drop(wg);
+            })),
+            sentinel,
+            Some(chan),
+        ))
+    }
+
+    fn start_new_srvbot(
+        &'s self, 
+        scope:  &'s thread::Scope<'s, '_>,
+        bpind:  BotPoolInd,
+    )
+        -> Outcome<Handle<'s, UIDL, UID, ENC, KH, ()>>
+    {
+        let chan = simplex();
+        let (semaphore, sentinel) = thread_channel();
+        let wg = self.handles().wait_end_ref().clone();
+        let api = OzoneApi::new(
+            OzoneBotId::ServerBot(Bid::randef(), bpind),
+            self.db_root().to_path_buf(),
+            self.cfg().clone(),
+            self.chans().clone(),
+            self.schemes().clone(),
+        );
+        let args = BotInitArgs {
+            // Bot
+            sem:        semaphore,
+            // Comms
+            chan_in:    chan.clone(),
+            // API
+            api,
+        };
+        let mut bot = ServerBot::new(args);
+        res!(bot.init());
+        let builder = thread::Builder::new()
+            .name(bot.ozid().to_string())
+            .stack_size(constant::STACK_SIZE);
+
+        Ok(Handle::new(
+            Some(bot.ozid().clone()),
+            res!(builder.spawn_scoped(scope, move || {
+                bot.go();
+                drop(wg);
+            })),
+            sentinel,
+            Some(chan),
+        ))
+    }
+
+    fn report_health(&self) -> Outcome<()> {
+        let (expected, unresponsive) =
+            res!(self.handles.get_unresponsive_bots(constant::PING_TIMEOUT));
+        if unresponsive.len() > 0 {
+            warn!("{} out of {} bots are unresponsive after {:?}:",
+                unresponsive.len(), expected, constant::PING_TIMEOUT);
+            for ozid in &unresponsive {
+                warn!(" {:?} is unresponsive", ozid);
+            }
+            let dead = res!(self.handles.get_dead_bots());
+            if dead.len() > 0 {
+                error!(err!(
+                    "{} out of {} bots are dead:", dead.len(), expected;
+                    Thread, Missing));
+                for ozid in &unresponsive {
+                    fault!(" {:?} is dead", ozid);
+                }
+            }
+        } else {
+            info!("{}: Ozone database health is good.", self.ozid());
+        }
+        Ok(())
+    }
+
+    /// Gracefully shut down the database.
+    pub fn shutdown(&self, requester: String) -> Outcome<OzoneMsg<UIDL, UID, ENC, KH>> {
+        warn!("{}: Shutdown requested by {}, commencing...", self.label(), requester);
+        res!(self.chans().finish_all());
+        thread::sleep(Duration::from_secs(1));
+        self.handles().report_status();
+        Ok(OzoneMsg::Ok)
+    }
+}
+
+handles.rs:
+use crate::{
+    prelude::*,
+    bots::worker::bot::WorkerType,
+    base::{
+        id::OzoneBotId,
+        index::{
+            BotPoolInd,
+            WorkerInd,
+            ZoneInd,
+        },
+    },
+    comm::{
+        msg::OzoneMsg,
+        response::{
+            Responder,
+            Wait,
+        },
+    },
+};
+
+use oxedize_fe2o3_core::{
+    channels::Simplex,
+    thread::Sentinel,
+};
+use oxedize_fe2o3_jdat::id::NumIdDat;
+
+use std::{
+    time::Duration,
+};
+
+use crossbeam_utils::sync::WaitGroup;
+
+
+#[derive(Debug)]
+pub struct Handle<
+    's,
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL>,
+    ENC:    Encrypter,
+    KH:     Hasher,
+    THD,
+> {
+    ozid:       Option<OzoneBotId>,
+    pub thread: Option<std::thread::ScopedJoinHandle<'s, THD>>,
+    sentinel:   Sentinel,
+    chan:       Option<Simplex<OzoneMsg<UIDL, UID, ENC, KH>>>,
+}
+
+impl<
+    's,
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL> + 'static,
+    ENC:    Encrypter + 'static,
+    KH:     Hasher + 'static,
+    THD,
+>
+    Default for Handle<'s, UIDL, UID, ENC, KH, THD>
+{
+    fn default() -> Self {
+        Self {
+            ozid: None,
+            thread: None,
+            sentinel: Sentinel::default(),
+            chan: None,
+        }
+    }
+}
+
+impl<
+    's,
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL> + 'static,
+    ENC:    Encrypter + 'static,
+    KH:     Hasher + 'static,
+    THD,
+>
+    Handle<'s, UIDL, UID, ENC, KH, THD>
+{
+    pub fn new(
+        ozid:       Option<OzoneBotId>,
+        hand:       std::thread::ScopedJoinHandle<'s, THD>,
+        sentinel:   Sentinel,
+        chan:       Option<Simplex<OzoneMsg<UIDL, UID, ENC, KH>>>,
+    )
+        -> Self
+    {
+        Self {
+            ozid,
+            thread: Some(hand),
+            sentinel,
+            chan,
+        }
+    }
+
+    pub fn ozid(&self)      -> &Option<OzoneBotId>  { &self.ozid }
+    pub fn sentinel(&self)  -> &Sentinel            { &self.sentinel }
+    pub fn chan(&self)      -> &Option<Simplex<OzoneMsg<UIDL, UID, ENC, KH>>> {
+        &self.chan
+    }
+    pub fn some_ozid(&self) -> Outcome<OzoneBotId> {
+        match &self.ozid {
+            Some(ozid) => Ok(ozid.clone()),
+            None => Err(err!(
+                "Handle contains no id as expected.";
+                Identifier, Missing)),
+        }
+    }
+    pub fn some_chan(&self) -> Outcome<Simplex<OzoneMsg<UIDL, UID, ENC, KH>>> {
+        match &self.chan {
+            Some(chan) => Ok(chan.clone()),
+            None => Err(err!(
+                "Handle contains no channel as expected.";
+                Channel, Missing)),
+        }
+    }
+}
+
+/// Contains handles for all the bots (except the `Supervisor`), for use by the `Supervisor`.
+#[derive(Debug)]
+pub struct BotHandles<
+    's,
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL>,
+    ENC:    Encrypter,
+    KH:     Hasher,
+> {
+    nz:     usize,
+    cbots:  Vec<Vec<Handle<'s, UIDL, UID, ENC, KH, ()>>>,
+    fbots:  Vec<Vec<Handle<'s, UIDL, UID, ENC, KH, ()>>>,
+    igbots: Vec<Vec<Handle<'s, UIDL, UID, ENC, KH, ()>>>,
+    rbots:  Vec<Vec<Handle<'s, UIDL, UID, ENC, KH, ()>>>,
+    wbots:  Vec<Vec<Handle<'s, UIDL, UID, ENC, KH, ()>>>,
+    zbots:  Vec<Handle<'s, UIDL, UID, ENC, KH, ()>>,
+    cfg:    Handle<'s, UIDL, UID, ENC, KH, ()>,
+    sbots:  Vec<Handle<'s, UIDL, UID, ENC, KH, ()>>,
+    wait_init: WaitGroup,
+    wait_end:  WaitGroup,
+}
+
+impl<
+    's,
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL> + 'static,
+    ENC:    Encrypter + 'static,
+    KH:     Hasher + 'static,
+>
+    Default for BotHandles<'s, UIDL, UID, ENC, KH>
+{
+    fn default() -> Self {
+        Self {
+            nz: 0,
+            cbots:      Vec::new(),
+            fbots:      Vec::new(),
+            igbots:     Vec::new(),
+            rbots:      Vec::new(),
+            wbots:      Vec::new(),
+            zbots:      Vec::new(),
+            cfg:        Handle::default(),
+            sbots:      Vec::new(),
+            wait_init:  WaitGroup::new(),
+            wait_end:   WaitGroup::new(),
+        }
+    }
+}
+
+impl<
+    's,
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL> + 'static,
+    ENC:    Encrypter + 'static,
+    KH:     Hasher + 'static,
+>
+    BotHandles<'s, UIDL, UID, ENC, KH>
+{
+    /// Create a full set of empty handles according to the given configuration.
+    pub fn new(cfg: &OzoneConfig) -> Self {
+        let nz = cfg.num_zones();
+        let ns = cfg.num_sbots();
+        let nc = cfg.num_bots_per_zone(&WorkerType::Cache);
+        let nf = cfg.num_bots_per_zone(&WorkerType::File);
+        let nig = cfg.num_bots_per_zone(&WorkerType::InitGarbage);
+        let nr = cfg.num_bots_per_zone(&WorkerType::Reader);
+        let nw = cfg.num_bots_per_zone(&WorkerType::Writer);
+        let mut cbots = Vec::new();
+        for _ in 0..nz {
+            let mut bots = Vec::new();
+            for _ in 0..nc {
+                bots.push(Handle::<'s, UIDL, UID, ENC, KH, ()>::default());
+            }
+            cbots.push(bots);
+        }
+        let mut fbots = Vec::new();
+        for _ in 0..nz {
+            let mut bots = Vec::new();
+            for _ in 0..nf {
+                bots.push(Handle::<'s, UIDL, UID, ENC, KH, ()>::default());
+            }
+            fbots.push(bots);
+        }
+        let mut igbots = Vec::new();
+        for _ in 0..nz {
+            let mut bots = Vec::new();
+            for _ in 0..nig {
+                bots.push(Handle::<'s, UIDL, UID, ENC, KH, ()>::default());
+            }
+            igbots.push(bots);
+        }
+        let mut rbots = Vec::new();
+        for _ in 0..nz {
+            let mut bots = Vec::new();
+            for _ in 0..nr {
+                bots.push(Handle::<'s, UIDL, UID, ENC, KH, ()>::default());
+            }
+            rbots.push(bots);
+        }
+        let mut wbots = Vec::new();
+        for _ in 0..nz {
+            let mut bots = Vec::new();
+            for _ in 0..nw {
+                bots.push(Handle::<'s, UIDL, UID, ENC, KH, ()>::default());
+            }
+            wbots.push(bots);
+        }
+        let mut zbots = Vec::new();
+        for _ in 0..nz {
+            zbots.push(Handle::<'s, UIDL, UID, ENC, KH, ()>::default());
+        }
+        let mut sbots = Vec::new();
+        for _ in 0..ns {
+            sbots.push(Handle::<'s, UIDL, UID, ENC, KH, ()>::default());
+        }
+        Self {
+            nz,
+            cbots,
+            fbots,
+            igbots,
+            rbots,
+            wbots,
+            zbots,
+            sbots,
+            ..Default::default()
+        }
+    }
+
+    // Use
+    pub fn all_cbots(&self)     -> &Vec<Vec<Handle<'s, UIDL, UID, ENC, KH, ()>>> { &self.cbots }
+    pub fn all_fbots(&self)     -> &Vec<Vec<Handle<'s, UIDL, UID, ENC, KH, ()>>> { &self.fbots }
+    pub fn all_igbots(&self)    -> &Vec<Vec<Handle<'s, UIDL, UID, ENC, KH, ()>>> { &self.igbots }
+    pub fn all_rbots(&self)     -> &Vec<Vec<Handle<'s, UIDL, UID, ENC, KH, ()>>> { &self.rbots }
+    pub fn all_wbots(&self)     -> &Vec<Vec<Handle<'s, UIDL, UID, ENC, KH, ()>>> { &self.wbots }
+    pub fn all_zbots(&self)     -> &Vec<Handle<'s, UIDL, UID, ENC, KH, ()>>      { &self.zbots }
+    pub fn cfg(&self)           -> &Handle<'s, UIDL, UID, ENC, KH, ()>           { &self.cfg }
+    pub fn all_sbots(&self)     -> &Vec<Handle<'s, UIDL, UID, ENC, KH, ()>>      { &self.sbots }
+    pub fn wait_init_ref(&self) -> &WaitGroup                       { &self.wait_init }
+    pub fn wait_end_ref(&self)  -> &WaitGroup                       { &self.wait_end }
+
+    pub fn get_zbot(&self, zind: &ZoneInd) -> Outcome<&Handle<'s, UIDL, UID, ENC, KH, ()>> {
+        res!(self.check_zone_index(**zind));
+        Ok(&self.zbots[**zind])
+    }
+
+    // Mutate
+    pub fn cbots_mut(&mut self)     -> &mut Vec<Vec<Handle<'s, UIDL, UID, ENC, KH, ()>>> { &mut self.cbots }
+    pub fn fbots_mut(&mut self)     -> &mut Vec<Vec<Handle<'s, UIDL, UID, ENC, KH, ()>>> { &mut self.fbots }
+    pub fn igbots_mut(&mut self)    -> &mut Vec<Vec<Handle<'s, UIDL, UID, ENC, KH, ()>>> { &mut self.igbots }
+    pub fn rbots_mut(&mut self)     -> &mut Vec<Vec<Handle<'s, UIDL, UID, ENC, KH, ()>>> { &mut self.rbots }
+    pub fn wbots_mut(&mut self)     -> &mut Vec<Vec<Handle<'s, UIDL, UID, ENC, KH, ()>>> { &mut self.wbots }
+    pub fn zbots_mut(&mut self)     -> &mut Vec<Handle<'s, UIDL, UID, ENC, KH, ()>>      { &mut self.zbots }
+    pub fn cfg_mut(&mut self)       -> &mut Handle<'s, UIDL, UID, ENC, KH, ()>           { &mut self.cfg }
+    pub fn sbots_mut(&mut self)     -> &mut Vec<Handle<'s, UIDL, UID, ENC, KH, ()>>      { &mut self.sbots }
+
+    pub fn set_sbot(&mut self, bpind: &BotPoolInd, hand: Handle<'s, UIDL, UID, ENC, KH, ()>) -> Outcome<()> {
+        self.sbots[**bpind] = hand;
+        Ok(())
+    }
+    pub fn set_zbot(&mut self, zind: &ZoneInd, hand: Handle<'s, UIDL, UID, ENC, KH, ()>) -> Outcome<()> {
+        res!(self.check_zone_index(**zind));
+        self.zbots[**zind] = hand;
+        Ok(())
+    }
+    pub fn set_cfg(&mut self, hand: Handle<'s, UIDL, UID, ENC, KH, ()>) { self.cfg = hand; }
+
+    pub fn wait_init(self) {
+        self.wait_init.wait();
+    }
+    pub fn wait_end(self) {
+        self.wait_end.wait();
+    }
+
+    pub fn set_worker_bot(
+        &mut self,
+        wtyp:   &WorkerType,
+        wind:   &WorkerInd,
+        hand:   Handle<'s, UIDL, UID, ENC, KH, ()>,
+    )
+        -> Outcome<()>
+    {
+        res!(self.check_zone_index(wind.z()));
+        match wtyp {
+            WorkerType::Cache       => self.cbots[wind.z()][wind.b()] = hand,
+            WorkerType::File        => self.fbots[wind.z()][wind.b()] = hand,
+            WorkerType::InitGarbage => self.igbots[wind.z()][wind.b()] = hand,
+            WorkerType::Reader      => self.rbots[wind.z()][wind.b()] = hand,
+            WorkerType::Writer      => self.wbots[wind.z()][wind.b()] = hand,
+        }
+        Ok(())
+    }
+
+    fn check_zone_index(&self, ind: usize) -> Outcome<()> {
+        if ind > self.nz {
+            return Err(err!(
+                "Zone index {} into BotHandles exceeds number of zones {}.",
+                ind, self.nz;
+                Bug, Excessive));
+        }
+        Ok(())
+    }
+
+    pub fn report_status(&self) {
+        for z in 0..self.nz {
+            for pool in [
+                &self.cbots[z],
+                &self.fbots[z],
+                &self.igbots[z],
+                &self.rbots[z],
+                &self.wbots[z],
+            ] {
+                for h in pool {
+                    if !h.sentinel().is_finished() {
+                        msg!("{:?} bot is not finished", h.ozid());
+                    }
+                }
+            }
+        }
+        for h in &self.zbots {
+            if !h.sentinel().is_finished() {
+                msg!("{:?} bot is not finished", h.ozid());
+            }
+        }
+        for h in &self.sbots {
+            if !h.sentinel().is_finished() {
+                msg!("{:?} bot is not finished", h.ozid());
+            }
+        }
+        for h in [&self.cfg] {
+            if !h.sentinel().is_finished() {
+                msg!("{:?} bot is not finished", h.ozid());
+            }
+        }
+    }
+
+    /// Returns the ids of bots threads that have finished.
+    pub fn get_dead_bots(&self) -> Outcome<Vec<OzoneBotId>> {
+
+        let mut finished = Vec::new();
+
+        for z in 0..self.nz {
+            for pool in [
+                &self.cbots[z],
+                &self.fbots[z],
+                &self.igbots[z],
+                &self.rbots[z],
+                &self.wbots[z],
+            ] {
+                for h in pool {
+                    if h.sentinel().is_finished() {
+                        finished.push(res!(h.some_ozid().clone()));
+                    }
+                }
+            }
+        }
+        for h in &self.zbots {
+            if h.sentinel().is_finished() {
+                finished.push(res!(h.some_ozid().clone()));
+            }
+        }
+        for h in &self.sbots {
+            if h.sentinel().is_finished() {
+                finished.push(res!(h.some_ozid().clone()));
+            }
+        }
+        for h in [&self.cfg] {
+            if h.sentinel().is_finished() {
+                finished.push(res!(h.some_ozid().clone()));
+            }
+        }
+
+        Ok(finished)
+    }
+
+    /// Returns the ids of bots that fail to respond to a ping within the specified timeout.
+    ///  
+    /// # Arguments
+    /// * `timeout` - The duration to wait for a response from each bot.
+    /// 
+    /// Returns a list of `OzoneBotIds` for bots that did not respond in time.
+    pub fn get_unresponsive_bots(
+        &self,
+        timeout: Duration,
+    )
+        -> Outcome<(usize, Vec<OzoneBotId>)>
+    {
+        let wait = Wait {
+            max_wait: timeout.clone(),
+            check_interval: constant::CHECK_INTERVAL,
+        };
+        let resp = Responder::new(None);
+        let mut all_bot_ids = Vec::new();
+    
+        // Send pings to all bots.
+        for handle in self.iter() {
+            if let Some(chan) = handle.chan() {
+                let ozid = res!(handle.some_ozid());
+                match chan.send(OzoneMsg::Ping(ozid.clone(), resp.clone())) {
+                    Ok(_) => {
+                        all_bot_ids.push(ozid);
+                    }
+                    Err(e) => error!(err!(e,
+                        "While sending ping to bot {:?}", ozid;
+                        Channel, Write))
+                }
+            }
+        }
+        let expected = all_bot_ids.len();
+    
+        // Track responses and build set of responsive bots.
+        let (_, responsive) = res!(resp.recv_pongs(wait));
+        if responsive.len() > expected {
+            error!(err!(
+                "Expecting {} messages via responder, received {} after \
+                {:?}.", responsive.len(), expected, timeout;
+                Input, Mismatch, Size));
+        }
+    
+        // Collect unresponsive bot IDs by comparing against those that responded.
+        let mut unresponsive = Vec::new();
+        for ozid in &all_bot_ids {
+            if !responsive.contains(ozid) {
+                unresponsive.push(ozid.clone());
+            }
+        }
+    
+        Ok((expected, unresponsive))
+    }
+}
+
+/// Immutable iterator over all bot handles in a BotHandles collection.
+#[derive(Debug)]
+pub struct BotHandlesIter<
+    'iter,
+    's,
+    const UIDL: usize,
+    UID: NumIdDat<UIDL>,
+    ENC: Encrypter,
+    KH: Hasher,
+> {
+    handles: &'iter BotHandles<'s, UIDL, UID, ENC, KH>,
+    zone_index: usize,
+    pool_type: usize,    // Index into the pool types (cbots, fbots, etc.).
+    bot_index: usize,    // Index within the current pool.
+    stage: IterStage,    // Tracks which group of bots we're iterating over.
+}
+
+/// Tracks the current stage of iteration through different bot types.
+#[derive(Debug, PartialEq)]
+enum IterStage {
+    Workers,    // Iterating through worker bot pools (cbots, fbots, etc.).
+    ZoneBots,   // Iterating through zone bots.
+    StoreBots,  // Iterating through store bots.
+    Config,     // Iterating through the config bot.
+    Done,       // Iteration complete.
+}
+
+impl<
+    'iter,
+    's,
+    const UIDL: usize,
+    UID: NumIdDat<UIDL> + 'static,
+    ENC: Encrypter + 'static,
+    KH: Hasher + 'static,
+>
+    BotHandlesIter<'iter, 's, UIDL, UID, ENC, KH>
+{
+    fn new(handles: &'iter BotHandles<'s, UIDL, UID, ENC, KH>) -> Self {
+        Self {
+            handles,
+            zone_index: 0,
+            pool_type: 0,
+            bot_index: 0,
+            stage: IterStage::Workers,
+        }
+    }
+
+    /// Returns the next worker bot handle, if any remain in the current zone.
+    fn next_worker(&mut self) -> Option<&'iter Handle<'s, UIDL, UID, ENC, KH, ()>> {
+        let pools = [
+            self.handles.all_cbots(),
+            self.handles.all_fbots(),
+            self.handles.all_igbots(),
+            self.handles.all_rbots(),
+            self.handles.all_wbots(),
+        ];
+
+        // Ensure we haven't exceeded available pools.
+        if self.pool_type >= pools.len() {
+            return None;
+        }
+
+        let current_pool = &pools[self.pool_type][self.zone_index];
+
+        // If we've exhausted the current pool.
+        if self.bot_index >= current_pool.len() {
+            self.bot_index = 0;
+            self.pool_type += 1;
+            return self.next_worker();
+        }
+
+        // If we've exhausted the current zone.
+        if self.zone_index >= self.handles.nz {
+            self.zone_index = 0;
+            self.pool_type += 1;
+            return self.next_worker();
+        }
+
+        let handle = &current_pool[self.bot_index];
+        self.bot_index += 1;
+        Some(handle)
+    }
+}
+
+impl<
+    'iter,
+    's,
+    const UIDL: usize,
+    UID: NumIdDat<UIDL> + 'static,
+    ENC: Encrypter + 'static,
+    KH: Hasher + 'static,
+>
+    Iterator for BotHandlesIter<'iter, 's, UIDL, UID, ENC, KH>
+{
+    type Item = &'iter Handle<'s, UIDL, UID, ENC, KH, ()>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.stage {
+            IterStage::Workers => {
+                if let Some(handle) = self.next_worker() {
+                    return Some(handle);
+                }
+                self.stage = IterStage::ZoneBots;
+                self.zone_index = 0;
+                self.next()
+            }
+            IterStage::ZoneBots => {
+                if self.zone_index < self.handles.nz {
+                    let handle = &self.handles.all_zbots()[self.zone_index];
+                    self.zone_index += 1;
+                    Some(handle)
+                } else {
+                    self.stage = IterStage::StoreBots;
+                    self.bot_index = 0;
+                    self.next()
+                }
+            }
+            IterStage::StoreBots => {
+                if self.bot_index < self.handles.all_sbots().len() {
+                    let handle = &self.handles.all_sbots()[self.bot_index];
+                    self.bot_index += 1;
+                    Some(handle)
+                } else {
+                    self.stage = IterStage::Config;
+                    self.next()
+                }
+            }
+            IterStage::Config => {
+                self.stage = IterStage::Done;
+                Some(self.handles.cfg())
+            }
+            IterStage::Done => None,
+        }
+    }
+}
+
+impl<
+    's,
+    const UIDL: usize,
+    UID: NumIdDat<UIDL> + 'static,
+    ENC: Encrypter + 'static,
+    KH: Hasher + 'static,
+>
+    BotHandles<'s, UIDL, UID, ENC, KH>
+{
+    /// Returns an iterator over references to all bot handles.
+    pub fn iter<'iter>(&'iter self) -> BotHandlesIter<'iter, 's, UIDL, UID, ENC, KH> {
+        BotHandlesIter::new(self)
+    }
+}

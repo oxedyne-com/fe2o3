@@ -1,5 +1,4 @@
 use crate::{
-    prelude::*,
     srv::{
         constant,
         cfg::ServerConfig,
@@ -141,7 +140,7 @@ pub trait ShieldCommand<
             timestamp: res!(SystemTime::now().duration_since(UNIX_EPOCH)),
             time_horiz: constant::POW_TIME_HORIZON_SEC,
         };
-        trace!(log_stream(), "POW Pristine tx:");
+        trace!(async_log::stream(), "POW Pristine tx:");
         res!(pristine.trace());
 
         let validator = PacketValidator {
@@ -160,7 +159,7 @@ pub trait ShieldCommand<
 
         let chunk_cfg = schms.chnk.clone();
         let chunker = ServerConfig::chunker(chunk_cfg.set_pad_last(pad_last));
-        trace!(log_stream(), "{:?}", chunker);
+        trace!(async_log::stream(), "{:?}", chunker);
 
         let size = chunker.cfg.chunk_size;
         let meta_len = PacketMeta::<ML, UL, ID::M, ID::U>::BYTE_LEN;
@@ -218,15 +217,15 @@ pub trait ShieldCommand<
                 inc_sigpk,
             ));
             let validator_len = packet.len() - len;
-            trace!(log_stream(), "Packet {} lengths: msg {}, meta {} chunk {} valid {} total {}",
+            trace!(async_log::stream(), "Packet {} lengths: msg {}, meta {} chunk {} valid {} total {}",
                 i, msg_len, meta_len, chunk_len, validator_len, packet.len(),
             );
-            trace!(log_stream(), "  Chunk:      {}", chunks[i].len());
+            trace!(async_log::stream(), "  Chunk:      {}", chunks[i].len());
             packets.push(packet);
         }
 
         if let Some(warning) = warning {
-            warn!(log_stream(), "{}", warning);
+            warn!(async_log::stream(), "{}", warning);
         }
         Ok(packets)
     }

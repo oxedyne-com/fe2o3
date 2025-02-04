@@ -67,9 +67,9 @@ fn generate_data(
 {
     let n = res!(keyspec.len());
 
-    test!("Generating {} data pairs using:", n);
-    test!(" keyspec: {:?}", keyspec);
-    test!(" valspec: {:?}", valspec);
+    test!(sync_log::stream(), "Generating {} data pairs using:", n);
+    test!(sync_log::stream(), " keyspec: {:?}", keyspec);
+    test!(sync_log::stream(), " valspec: {:?}", valspec);
     let k = res!(keyspec.generate());
     let v = res!(valspec.generate());
     //let n = k.len();
@@ -94,9 +94,9 @@ fn generate_data(
         vbyts += x.len();
         vdats.push(Dat::wrap_dat(v[i].clone()));
     }
-    test!("Completed generation of {} pairs with metrics:", n);
-    test!("  Key sizes: mean {} range {}..{}", kbyts / n, kminlen, kmaxlen);
-    test!("  Val sizes: mean {} range {}..{}", vbyts / n, vminlen, vmaxlen);
+    test!(sync_log::stream(), "Completed generation of {} pairs with metrics:", n);
+    test!(sync_log::stream(), "  Key sizes: mean {} range {}..{}", kbyts / n, kminlen, kmaxlen);
+    test!(sync_log::stream(), "  Val sizes: mean {} range {}..{}", vbyts / n, vminlen, vmaxlen);
     Ok((kdats, vdats, kbyts, vbyts))
 }
 
@@ -189,14 +189,14 @@ pub fn test_perf(_filter: &'static str) -> Outcome<()> {
                 _ => unimplemented!(),
             };
 
-            test!("+---------------------------------------------+");
-            test!("| NEW OZONE SESSION                           |");
-            test!("| Wipe all traces of previous test.           |");
-            test!("| Start database.                             |");
-            test!("| No gc and no user filtering.                |");
-            test!("| Store and fetch a standard data set.        |");
-            test!("| Gracefully shut down the database.          |");
-            test!("+---------------------------------------------+");
+            test!(sync_log::stream(), "+---------------------------------------------+");
+            test!(sync_log::stream(), "| NEW OZONE SESSION                           |");
+            test!(sync_log::stream(), "| Wipe all traces of previous test.           |");
+            test!(sync_log::stream(), "| Start database.                             |");
+            test!(sync_log::stream(), "| No gc and no user filtering.                |");
+            test!(sync_log::stream(), "| Store and fetch a standard data set.        |");
+            test!(sync_log::stream(), "| Gracefully shut down the database.          |");
+            test!(sync_log::stream(), "+---------------------------------------------+");
             let mut db = match setup::start_db(
                 db_root.clone(),
                 Some(cfg.clone()),
@@ -214,24 +214,24 @@ pub fn test_perf(_filter: &'static str) -> Outcome<()> {
             // Can use logger now.
             
             if mask_opt.is_none() {
-                test!("Creating mask for unique keys...");
+                test!(sync_log::stream(), "Creating mask for unique keys...");
                 let mut kbufs = Vec::new();
                 for kdat in &kdats {
                     let (kbuf, _, _) = res!(db.api().ozone_key_dat(&kdat, Some(&schms2)));
                     kbufs.push(kbuf);
                 }
                 mask_opt = Some(find_unique(&kbufs));
-                test!("  mask completed.");
+                test!(sync_log::stream(), "  mask completed.");
             }
 
             thread::sleep(Duration::from_secs(1));
-            test!("Begin...");
+            test!(sync_log::stream(), "Begin...");
 
             if *case == 0 {
 
                 let mut path = db_root.clone();
                 path.push("control_single_file");
-                test!("Creating {:?}", path);
+                test!(sync_log::stream(), "Creating {:?}", path);
                 res!(std::fs::create_dir(&path));
                 match save_single_file(
                     path,
@@ -250,7 +250,7 @@ pub fn test_perf(_filter: &'static str) -> Outcome<()> {
 
                 let mut path = db_root.clone();
                 path.push("control_multiple_files");
-                test!("Creating {:?}", path);
+                test!(sync_log::stream(), "Creating {:?}", path);
                 res!(std::fs::create_dir(&path));
                 match save_multiple_files(
                     path,
@@ -268,7 +268,7 @@ pub fn test_perf(_filter: &'static str) -> Outcome<()> {
 
             }
 
-            test!("Test {} {}", case, note);
+            test!(sync_log::stream(), "Test {} {}", case, note);
             thread::sleep(Duration::from_secs(3));
 
             match store(
@@ -305,7 +305,7 @@ pub fn test_perf(_filter: &'static str) -> Outcome<()> {
 
             thread::sleep(Duration::from_secs(3));
 
-            test!("Shutting db down...");
+            test!(sync_log::stream(), "Shutting db down...");
             res!(db.shutdown());
         }
     }

@@ -3,7 +3,6 @@ use oxedize_fe2o3_shield::{
     app::{
         cfg::AppConfig,
         constant,
-        log::switch_to_logger_console,
         server,
         tui::AppStatus,
     },
@@ -18,6 +17,7 @@ use oxedize_fe2o3_core::{
     channels::Recv,
     log::{
         console::{
+            switch_to_logger_console,
             MultiStreamLoggerConsole,
             StdoutLoggerConsole,
         },

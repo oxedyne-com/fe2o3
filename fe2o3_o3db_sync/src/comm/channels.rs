@@ -560,7 +560,7 @@ impl<
         res!(self.sbots.send_to_all(OzoneMsg::Finish));
 
         // Now wait for all bots to become idle.
-        warn!("Shutdown: Completion request sent to server, waiting up \
+        warn!(sync_log::stream(), "Shutdown: Completion request sent to server, waiting up \
             to {:?} for all other bots to become idle...", constant::SHUTDOWN_MAX_WAIT);
         let (start, timed_out) = res!(oxedize_fe2o3_core::time::wait_for_true(
             constant::CHECK_INTERVAL,
@@ -568,15 +568,15 @@ impl<
             || { self.msg_count().total_zone() == 0 },
         ));
         if !timed_out {
-            warn!("Shutdown: All zone bots are now idle after {:?}.", start.elapsed());
+            warn!(sync_log::stream(), "Shutdown: All zone bots are now idle after {:?}.", start.elapsed());
         } else {
-            warn!("Shutdown: There are still zone work messages pending after {:?}.", start.elapsed());
-            warn!("{:?}", self.msg_count());
-            warn!("Dumping pending messages...");
-            warn!("Zone bots:");
+            warn!(sync_log::stream(), "Shutdown: There are still zone work messages pending after {:?}.", start.elapsed());
+            warn!(sync_log::stream(), "{:?}", self.msg_count());
+            warn!(sync_log::stream(), "Dumping pending messages...");
+            warn!(sync_log::stream(), "Zone bots:");
             self.zbots.dump_pending_messages("zbot", None);
             for z in 0..self.nz {
-                warn!("Zone {} worker bots:", z+1);
+                warn!(sync_log::stream(), "Zone {} worker bots:", z+1);
                 self.zwbots[z].dump_pending_messages(Some(z));
             }
         }
@@ -634,14 +634,14 @@ impl<
         b:      Option<usize>,
     ) {
         match (z, b) {
-            (Some(z), Some(b)) => debug!(" Z{} B{} {} messages ({}):", z, b, label, lines.len()),
-            (Some(z), None) => debug!(" Z{} {} messages ({}):", z, label, lines.len()),
-            (None, None) => debug!(" {} messages ({}):", label, lines.len()),
+            (Some(z), Some(b)) => debug!(sync_log::stream(), " Z{} B{} {} messages ({}):", z, b, label, lines.len()),
+            (Some(z), None) => debug!(sync_log::stream(), " Z{} {} messages ({}):", z, label, lines.len()),
+            (None, None) => debug!(sync_log::stream(), " {} messages ({}):", label, lines.len()),
             _ => (),
         }
         if lines.len() > 0 {
             for line in lines {
-                debug!("  {}", line);
+                debug!(sync_log::stream(), "  {}", line);
             }
         }
     }

@@ -172,10 +172,10 @@ impl<
 
         let db_root = db_root.into();
         if !db_root.exists() {
-            warn!("Ozone database root directory {:?} does not exist, attempting to create...",
+            warn!(sync_log::stream(), "Ozone database root directory {:?} does not exist, attempting to create...",
                 db_root);
             res!(fs::create_dir_all(&db_root));
-            info!("{:?} created.", db_root);
+            info!(sync_log::stream(), "{:?} created.", db_root);
         }
 
         let cfg_path = OzoneConfig::config_path(&db_root);
@@ -185,7 +185,7 @@ impl<
             match cfg_opt {
                 Some(cfg) => {
                     res!(cfg.save(&cfg_path, "  ", true));
-                    warn!(
+                    warn!(sync_log::stream(), 
                         "Configuration file {:?} saved, using default configuration provided.",
                         cfg_path,
                     );
@@ -277,13 +277,22 @@ impl<
     }
 
     /// Start the Ozone database.
-    pub fn start(&mut self) -> Outcome<()> {
+    pub fn start<
+        S: Into<String>,
+    >(
+        &mut self,
+        log_stream_id: S,
+    )
+        -> Outcome<Handle< UIDL, UID, ENC, KH>>
+    {
+        let log_stream_id = log_stream_id.into();
+        sync_log::set_stream(log_stream_id.clone());
 
         for line in constant::SPLASH.split("\n") {
-            info!("{}", line);
+            info!(sync_log::stream(), "{}", line);
         }
         for line in Stringer::new(fmt!("{:?}", self.schemes())).to_lines("  ") {
-            info!("{}", line);
+            info!(sync_log::stream(), "{}", line);
         }
         // Write config to a file now that we have a directory structure.
         res!(self.cfg().write_config_file(self.db_root()));
@@ -300,6 +309,7 @@ impl<
         let args = BotInitArgs {
             // Bot
             sem:        semaphore,
+            log_stream_id,
             // Comms
             chan_in:    self.chans().sup().clone(),
             // API
@@ -312,26 +322,31 @@ impl<
         res!(sup.init()); // Starts all the other bots.
         self.wg_end = sup.handles().wait_end_ref().clone();
         let wg_end = self.wg_end.clone();
+
+        let sup_ozid = sup.ozid().clone();
+        
         let builder = thread::Builder::new()
-            .name(sup.ozid().to_string())
+            .name(sup_ozid.to_string())
             .stack_size(constant::STACK_SIZE);
-        Handle::new(
-            Some(sup.ozid().clone()),
-            res!(builder.spawn(move || {
-                sup.go();
-                drop(wg_end);
-            })),
+        res!(builder.spawn(move || {
+            sup.go();
+            drop(wg_end);
+        }));
+
+        let handle = Handle::new(
+            Some(sup_ozid),
             sentinel,
             Some(self.chans().sup().clone()),
         );
+        
         thread::sleep(Duration::from_secs(1));
 
         //// Initialise users.
         //res!(self.init_users());
 
-        info!("Database initialisation and activation complete.");
+        info!(sync_log::stream(), "Database initialisation and activation complete.");
         
-        Ok(())
+        Ok(handle)
     }
 
     /// Find all data and index files of the existing database.
@@ -340,11 +355,11 @@ impl<
         let mut found_files = Vec::new();
 
         let cur_dir = res!(std::env::current_dir());
-        info!("The current directory is {}", cur_dir.display());
+        info!(sync_log::stream(), "The current directory is {}", cur_dir.display());
         
         let db_root = &self.db_root;
         
-        info!("Searching for all data and index files in {:?}", db_root);
+        info!(sync_log::stream(), "Searching for all data and index files in {:?}", db_root);
 
         if db_root.exists() && db_root.is_dir() {                           
             let files = res!(find_files(&db_root));
@@ -356,7 +371,7 @@ impl<
         for (zind_dat, zone_dat) in self.cfg().zone_overrides() { 
             if let Ok(Some(Dat::Str(dir))) = zone_dat.map_get(&dat!("dir")) {
                 let dir = db_root.join(dir).normalise();
-                info!("Searching for all data and index files in zone {:?} override {:?}",
+                info!(sync_log::stream(), "Searching for all data and index files in zone {:?} override {:?}",
                     zind_dat, dir);
                 let files = res!(find_files(&dir));
                 for file in files {
@@ -380,7 +395,7 @@ impl<
                 "{}: Cannot send shutdown request to supervisor.", self_id;
                 Channel, Write));
         }
-        warn!("Shutdown: Waiting for response from supervisor...");
+        warn!(sync_log::stream(), "Shutdown: Waiting for response from supervisor...");
         match res!(resp.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
             OzoneMsg::Error(e) => return Err(err!(e,
                 "{}: The supervisor had a problem during shutdown.", self_id;
@@ -390,10 +405,10 @@ impl<
                 "{}: Unexpected response from supervisor during shutdown: {:?}", self_id, msg;
                 Channel, Unexpected)),
         }
-        warn!("Shutdown: Succesfully completed by supervisor, waiting for final \
+        warn!(sync_log::stream(), "Shutdown: Succesfully completed by supervisor, waiting for final \
             verification of termination of all threads...");
         self.wg_end.wait();
-        warn!("Shutdown: Verified.");
+        warn!(sync_log::stream(), "Shutdown: Verified.");
         Ok(())
     }
 

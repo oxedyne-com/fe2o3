@@ -93,7 +93,8 @@ pub struct ZoneWorkerInitArgs<
     pub wind:       WorkerInd,
     pub wtyp:       WorkerType,
     // Bot
-    pub sem:        Semaphore,
+    pub sem:            Semaphore,
+    pub log_stream_id:  String,
     // Comms
     pub chan_in:    Simplex<OzoneMsg<UIDL, UID, ENC, KH>>,
     // API

@@ -190,7 +190,7 @@ use rand_core::{
 //            meta = Meta::new(user_id);
 //
 //            thread::sleep(Duration::from_secs(1));
-//            info!("Begin...");
+//            info!(sync_log::stream(), "Begin...");
 //            let n = res!(keyspec.len());
 //            let valspec = DataSpec {
 //                size:   valsize,
@@ -198,9 +198,9 @@ use rand_core::{
 //                arr:    DataArrangement::PlainFill(n),
 //            };
 //
-//            info!("Generating {} data pairs using:", n);
-//            info!(" keyspec: {:?}", keyspec);
-//            info!(" valspec: {:?}", valspec);
+//            info!(sync_log::stream(), "Generating {} data pairs using:", n);
+//            info!(sync_log::stream(), " keyspec: {:?}", keyspec);
+//            info!(sync_log::stream(), " valspec: {:?}", valspec);
 //            let k = res!(keyspec.generate());
 //            let v = res!(valspec.generate());
 //            //let n = k.len();
@@ -225,10 +225,10 @@ use rand_core::{
 //                vbyts += x.len();
 //                vdats.push(Dat::Byt(v[i].clone()));
 //            }
-//            info!("Completed generation of {} pairs with metrics:", n);
-//            info!("  Key sizes: mean {} range {}..{}", kbyts / n, kminlen, kmaxlen);
-//            info!("  Val sizes: mean {} range {}..{}", vbyts / n, vminlen, vmaxlen);
-//            info!("ozone_keys:");
+//            info!(sync_log::stream(), "Completed generation of {} pairs with metrics:", n);
+//            info!(sync_log::stream(), "  Key sizes: mean {} range {}..{}", kbyts / n, kminlen, kmaxlen);
+//            info!(sync_log::stream(), "  Val sizes: mean {} range {}..{}", vbyts / n, vminlen, vmaxlen);
+//            info!(sync_log::stream(), "ozone_keys:");
 //            let mut kbufs = Vec::new();
 //            let mut zinds = Vec::new();
 //            for kdat in &kdats {
@@ -239,11 +239,11 @@ use rand_core::{
 //            let mask = find_unique(&kbufs);
 //
 //            //for (i, kbuf) in kbufs.iter().enumerate() {
-//            //    info!(" z={} len={} u={} kbuf={:02x?}", zinds[i], kbuf.len(), mask[i], kbuf);
+//            //    info!(sync_log::stream(), " z={} len={} u={} kbuf={:02x?}", zinds[i], kbuf.len(), mask[i], kbuf);
 //            //}
-//            //info!("value dats:");
+//            //info!(sync_log::stream(), "value dats:");
 //            //for vdat in &vdats {
-//            //    info!(" vdat={:?}", vdat);
+//            //    info!(sync_log::stream(), " vdat={:?}", vdat);
 //            //}
 //            //
 //
@@ -251,7 +251,7 @@ use rand_core::{
 //
 //                let mut path = PathBuf::from(&root_path);
 //                path.push("control");
-//                info!("Creating {:?}", path);
+//                info!(sync_log::stream(), "Creating {:?}", path);
 //                res!(std::fs::create_dir(&path));
 //                match save(
 //                    path,
@@ -269,7 +269,7 @@ use rand_core::{
 //
 //            }
 //
-//            info!("Test {} {}", case, note);
+//            info!(sync_log::stream(), "Test {} {}", case, note);
 //            thread::sleep(Duration::from_secs(3));
 //
 //            match store(
@@ -285,12 +285,12 @@ use rand_core::{
 //            }
 //
 //            thread::sleep(Duration::from_secs(5));
-//            info!("Ozone state:");
+//            info!(sync_log::stream(), "Ozone state:");
 //            let zstats = res!(db.ozone_state(db.default_wait()));
 //            for (i, zstat) in zstats.iter().enumerate() {
-//                info!("Zone {}", i+1);
+//                info!(sync_log::stream(), "Zone {}", i+1);
 //                for line in oxedize_fe2o3_text::string::to_lines(fmt!("{:?}", zstat), "  ") {
-//                    info!("{}", line);
+//                    info!(sync_log::stream(), "{}", line);
 //                }
 //            }
 //            res!(db.list_files());
@@ -312,7 +312,7 @@ use rand_core::{
 //
 //            thread::sleep(Duration::from_secs(3));
 //
-//            info!("Shutting db down...");
+//            info!(sync_log::stream(), "Shutting db down...");
 //            res!(db.shutdown());
 //        }
 //    }

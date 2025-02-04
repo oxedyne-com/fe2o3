@@ -263,7 +263,7 @@ impl<
                             ozids.insert(ozid);
                         }
                         Recv::Result(Ok(msg)) => {
-                            error!(err!(
+                            error!(sync_log::stream(), err!(
                                 "Expecting an OzoneMsg::Pong, received a {:?}.", msg;
                             Input, Mismatch, Unexpected));
                         }

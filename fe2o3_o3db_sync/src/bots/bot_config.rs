@@ -40,8 +40,9 @@ pub struct ConfigBot<
     CS:     Checksummer,
 >{
     // Bot
-    sem:        Semaphore,
-    errc:       Arc<Mutex<usize>>,
+    sem:            Semaphore,
+    errc:           Arc<Mutex<usize>>,
+    log_stream_id:  String,
     // Comms
     chan_in:    Simplex<OzoneMsg<UIDL, UID, ENC, KH>>,
     // API
@@ -65,8 +66,11 @@ impl<
     bot_methods!();
 
     fn go(&mut self) {
+
+        sync_log::set_stream(self.log_stream_id());
+
         if self.no_init() { return; }
-        info!("{}: Checking config file for changes every {:?}.", self.ozid(), self.sleep);
+        info!(sync_log::stream(), "{}: Checking config file for changes every {:?}.", self.ozid(), self.sleep);
         self.now_listening();
         loop {
             if self.listen().must_end() { break; }
@@ -122,8 +126,9 @@ impl<
     {
         Self {
             // Bot
-            sem:        args.sem,
-            errc:       Arc::new(Mutex::new(0)),
+            sem:            args.sem,
+            errc:           Arc::new(Mutex::new(0)),
+            log_stream_id:  args.log_stream_id,
             // Comms    
             chan_in:    args.chan_in,
             // API
@@ -144,7 +149,8 @@ impl<
             max_size:   constant::DEFAULT_MAX_ZONE_DIR_BYTES,
         };
         let zdirs = res!(self.process_zone_overrides());
-        for z in 0..self.cfg().num_zones {
+        let nz = self.cfg().num_zones;
+        for z in 0..nz {
             let zind = ZoneInd::new(z);
             let mut zdir = match zdirs.get(&z) {
                 None => default.clone(),
@@ -161,6 +167,7 @@ impl<
                     Init, IO, Channel));
             }
         }
+        info!(sync_log::stream(), "{}: Initialisation request sent to all {} zones.", self.ozid(), nz);
         Ok(())
     }
 

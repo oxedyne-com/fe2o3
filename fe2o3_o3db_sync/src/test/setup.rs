@@ -88,22 +88,22 @@ pub fn start_db<
         Uid::default(),
     ));
     let files = res!(db.find_all_data_files());
-    test!("Found {} existing data and index files.", files.len());
+    test!(sync_log::stream(), "Found {} existing data and index files.", files.len());
     if wipe {
         for file in files {
-            test!("  Deleting {:?}", file);
+            test!(sync_log::stream(), "  Deleting {:?}", file);
             res!(std::fs::remove_file(file));
         }
     }
-    test!("Starting db...");
-    res!(db.start());
+    test!(sync_log::stream(), "Starting db...");
+    res!(db.start("test"));
     res!(ok!(db.updated_api()).activate_gc(gc_on));
 
     thread::sleep(Duration::from_secs(1));
 
     // Ping all bots.
     let (start, msgs) = res!(db.api().ping_bots(constant::USER_REQUEST_WAIT));
-    test!("{} ping replies received in {:?}.", msgs.len(), start.elapsed());
+    test!(sync_log::stream(), "{} ping replies received in {:?}.", msgs.len(), start.elapsed());
     Ok(db)
 }
 

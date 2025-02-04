@@ -25,7 +25,7 @@ fn main() -> Outcome<()> {
 fn run_tests() -> Outcome<()> {
 
     let filter = "all";
-    //res!(basic::test_basic(filter));
+    res!(basic::test_basic(filter));
     res!(dal::test_docs(filter));
     //res!(perf::test_perf("all"));
 

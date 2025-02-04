@@ -125,7 +125,6 @@
 //!     
 //!```
 use crate::{
-    prelude::*,
     srv::{
         msg::{
             core::{
@@ -283,7 +282,7 @@ impl<
         //mcmd = res!(mcmd.add_arg_val("-zb", Some(dat!(self.pow_zbits()))));
         msg = res!(msg.add_cmd(mcmd));
         for line in Stringer::new(fmt!("{:?}", msg)).to_lines("  ") {
-            debug!(log_stream(), "{}", line);
+            debug!(async_log::stream(), "{}", line);
         }
         res!(msg.validate());
         Ok(msg)
@@ -333,7 +332,7 @@ impl<
     {
         res!(self.deconstruct(mcmd)); // We now have all command-specific data.
         adata.your_zbits = self.pow.zbits;
-        debug!(log_stream(), "Yay it worked!");
+        debug!(async_log::stream(), "Yay it worked!");
         //// Create a fresh pow code and assign to the source address.
         //let mut code = [0u8; constant::POW_CODE_LEN];
         //Rand::fill_u8(&mut code);
@@ -358,7 +357,7 @@ impl<
         //    mid: self.mid().clone(),
         //    req_send_key,
         //};
-        //debug!(log_stream(), "Sending hresp1: {}", res!(response.clone().construct()));
+        //debug!(async_log::stream(), "Sending hresp1: {}", res!(response.clone().construct()));
         //response.send(
         //    src_addr,
         //    chunker,

@@ -36,6 +36,7 @@ pub trait Bot<
     fn chan_in(&self)           -> &Simplex<M>;
     fn label(&self)             -> String;
     fn err_count_warning(&self) -> usize;
+    fn log_stream_id(&self)     -> String;
     // Setters.
     fn set_chan_in(&mut self, chan_in: Simplex<M>);
     // Procedures.

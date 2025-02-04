@@ -69,6 +69,10 @@ pub use crate::{
             self as bot_log,
             LogBot,
         },
+        stream::{
+            async_log,
+            sync_log,
+        },
     },
 };
 // Traits

@@ -2,7 +2,6 @@ use crate::{
     app::{
         cfg::AppConfig,
         constant as app_const,
-        log::switch_to_logger_console,
         server,
         tui::AppStatus,
     },
@@ -12,7 +11,10 @@ use oxedize_fe2o3_core::{
     prelude::*,
     log::{
         bot::FileConfig,
-        console::StdoutLoggerConsole,
+        console::{
+            switch_to_logger_console,
+            StdoutLoggerConsole,
+        },
     },
     path::NormalPath,
 };

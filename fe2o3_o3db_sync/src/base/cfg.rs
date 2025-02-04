@@ -173,12 +173,12 @@ impl OzoneConfig {
         let total_num_caches = self.num_caches();
         let cache_lim = self.cache_size_limit_bytes as usize;
         let per_cache_lim = cache_lim / total_num_caches;
-        info!(
+        info!(sync_log::stream(), 
             "Total size limit for all caches, {} [B], will be used to set the size \
             limit of {} [B] for {} caches across {} zones.",
             cache_lim, per_cache_lim, total_num_caches, nz,
         );
-        info!(
+        info!(sync_log::stream(), 
             "File data will {}be loaded into caches upon initialisation.",
             if self.init_load_caches { "" } else { "not" },
         );
@@ -219,9 +219,9 @@ impl OzoneConfig {
             line.push_str("\n");
             res!(file.write(line.as_bytes()));
         }
-        debug!("O3db configuration written to {:?}: ", path);
+        debug!(sync_log::stream(), "O3db configuration written to {:?}: ", path);
         for line in dat.to_lines("    ", true) {
-            debug!("{}", line);
+            debug!(sync_log::stream(), "{}", line);
         }
         Ok(())
     }

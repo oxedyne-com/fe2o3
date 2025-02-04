@@ -1,5 +1,4 @@
 use crate::{
-    prelude::*,
     srv::{
         constant,
         msg::{
@@ -412,7 +411,7 @@ impl<
                     }
 
                     /////// Debugging only.
-                    trace!(log_stream(), "POW tx:");
+                    trace!(async_log::stream(), "POW tx:");
                     res!(self.trace(
                         Some(&powparams.pvars),
                         &artefact,
@@ -559,7 +558,7 @@ impl<
                         let h_start = alen - hlen;
                         let n_start = h_start - nlen;
                         let pristine = res!(powvars.pristine.to_bytes());
-                        trace!(log_stream(), "\nPristine    [{:>4}]: {:02x?}\
+                        trace!(async_log::stream(), "\nPristine    [{:>4}]: {:02x?}\
                             \n  Prefix    [{:>4}]: {:02x?}\
                             \nArtefact    [{:>4}]: {:02x?}\
                             \n  Nonce     [{:>4}]: {:02x?}\
@@ -576,7 +575,7 @@ impl<
                         Bug, Configuration, Missing)),
                 }
             },
-            None => trace!(log_stream(), "No proof of work hasher provided."),
+            None => trace!(async_log::stream(), "No proof of work hasher provided."),
         }
         Ok(())
     }
