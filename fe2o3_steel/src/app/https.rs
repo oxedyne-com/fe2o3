@@ -7,7 +7,6 @@ use oxedize_fe2o3_core::{
     prelude::*,
     file::{
         OsPath,
-        PathState,
     },
     map::MapMut,
     path::NormalPath,
@@ -94,37 +93,54 @@ impl<
         -> Outcome<PathBuf>
     {
         let route = loc.path.as_string();
+
+        // First try configured static routes.
         match self.static_routes.get(route) {
             Some(os_path) => match os_path {
                 OsPath::Dir(path) => {
+                    // Path is already normalised and absolute.
                     for filename in &self.default_index_files {
-                        // path is already normalised and absolute.
-                        let path = path.clone().join(filename);
-                        match PathState::FileMustExist.validate(
-                            &path,
-                            "",
-                        ) {
-                            Ok(()) => return Ok(path),
-                            Err(_) => continue,
+                        let candidate = path.clone().join(filename);
+                        if candidate.exists() {
+                            return Ok(candidate);
                         }
                     }
                     return Err(err!(
-                        "{}: Default files not found in directory {:?}.", id, path;
+                        "{}: No default index files found in directory {:?}. \
+                        Tried: {:?}", id, path, self.default_index_files;
                         File, NotFound)); 
                 }
-                // The path has already been normalised and made absolute.
                 OsPath::File(path) => return Ok(path.clone()),
             }
             None => {
-                // TODO consider dynamic routes.
-                let path = Path::new(route).normalise();
+                // Fallback: try to serve directly from public directory.
+                let clean_path = if route.starts_with('/') {
+                    &route[1..]
+                } else {
+                    route
+                };
+                
+                let path = Path::new(clean_path).normalise();
                 if path.escapes() {
                     return Err(err!(
-                        "ServerConfig: route path {} escapes the public directory {:?}.",
-                        route, self.public_dir;
-                        Invalid, Path));
+                        "{}: Request path '{}' would escape the public directory.", 
+                        id, route;
+                        Invalid, Path, Security));
                 }
-                return Ok(self.public_dir.clone().join(path));
+                
+                let full_path = self.public_dir.clone().join(path);
+                
+                // If it's a directory, try index files.
+                if full_path.is_dir() {
+                    for filename in &self.default_index_files {
+                        let candidate = full_path.join(filename);
+                        if candidate.exists() {
+                            return Ok(candidate);
+                        }
+                    }
+                }
+                
+                return Ok(full_path);
             }
         }
     }

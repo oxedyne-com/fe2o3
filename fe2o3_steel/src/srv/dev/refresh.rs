@@ -81,14 +81,36 @@ impl DevRefreshManager {
     )
         -> Self
     {
-        let (sender, _) = broadcast::channel(16); // Buffer size of 16 should be plenty.
-        info!("DevRefreshManager initialised.");
+        // Buffer size of 16 should be plenty.
+        let (sender, _) = broadcast::channel(16);
+
+        // Validate inputs and filter out invalid ones.
+        let valid_js_bundles: Vec<(PathBuf, PathBuf)> = js_bundles_map
+            .into_iter()
+            .filter(|(src, _)| src.exists())
+            .collect();
+            
+        let valid_css_paths = if css_paths.0.exists() {
+            css_paths
+        } else {
+            (PathBuf::new(), PathBuf::new()) // Empty paths = disabled.
+        };
+        
+        info!("DevRefreshManager initialised with {} JS bundles, CSS: {}",
+            valid_js_bundles.len(),
+            if valid_css_paths.0.as_os_str().is_empty() {
+                "disabled"
+            } else {
+                "enabled"
+            }
+        );
+
         Self {
             sender,
             running:            Arc::new(AtomicBool::new(true)),
-            js_bundles_map,
+            js_bundles_map:     valid_js_bundles,
             js_import_aliases,
-            css_paths,
+            css_paths:          valid_css_paths,
             src_path:           root_path.join("www/src"),
             public_path:        root_path.join("www/public"),
         }
@@ -116,8 +138,20 @@ impl DevRefreshManager {
     }
 
     pub fn refresh(&self) -> Outcome<()> {
-        res!(self.bundle_js());
-        res!(self.bundle_sass());
+        // Only bundle JS if we have valid bundles configured.
+        if !self.js_bundles_map.is_empty() {
+            res!(self.bundle_js());
+        } else {
+            debug!("Skipping JS bundling - no bundles configured");
+        }
+        
+        // Only bundle SASS if we have valid CSS paths.
+        if !self.css_paths.0.as_os_str().is_empty() && self.css_paths.0.exists() {
+            res!(self.bundle_sass());
+        } else {
+            debug!("Skipping SASS bundling - no valid CSS source directory");
+        }
+        
         Ok(())
     }
 

@@ -60,17 +60,34 @@ impl DevConfig {
     )
         -> Outcome<()>
     {
-        // Ensure that the source directory exists.
-        res!(PathState::DirMustExist.validate(
-            root,
-            &self.src_path_rel,
-        ));
-
-        let _ = res!(self.get_js_bundles_map(root));
-        let _ = res!(self.get_css_paths(root));
-        let _ = res!(self.get_js_import_aliases(root));
-
+        // Only validate paths that exist - don't require all directories.
+        if !self.src_path_rel.is_empty() {
+            match PathState::DirMustExist.validate(root, &self.src_path_rel) {
+                Ok(()) => {
+                    let _ = self.get_js_bundles_map(root).unwrap_or_else(|e| {
+                        warn!("JS bundling configuration invalid: {}", e);
+                        Vec::new()
+                    });
+                    let _ = self.get_css_paths(root).unwrap_or_else(|e| {
+                        warn!("CSS bundling configuration invalid: {}", e);
+                        (PathBuf::new(), PathBuf::new())
+                    });
+                }
+                Err(_) => {
+                    info!("Source directory '{}' not found, bundling disabled.",
+                        self.src_path_rel);
+                }
+            }
+        }
         Ok(())
+    }
+
+    pub fn has_js_bundling(&self, root: &NormPathBuf) -> bool {
+        self.get_js_bundles_map(root).is_ok() && !self.js_bundles_rel.is_empty()
+    }
+
+    pub fn has_css_bundling(&self, root: &NormPathBuf) -> bool {
+        self.get_css_paths(root).is_ok() && !self.css_source_dir_rel.is_empty()
     }
 
     pub fn get_js_bundles_map(

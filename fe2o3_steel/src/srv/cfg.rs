@@ -93,12 +93,14 @@ impl Default for ServerConfig {
             public_dir_rel:                 fmt!("./www/public"),
             static_route_paths_rel:         mapdat!{
                 "/" => "./www/public/",
-                "/admin" => "./www/public/admin.html",
+                // User can add if they need:
+                //"/admin" => "./www/public/admin.html",
             }.get_map().unwrap_or(DaticleMap::new()),
             default_index_files:            vec![
                 fmt!("index.html"),
                 fmt!("index.htm"),
                 fmt!("default.html"),
+                fmt!("home.html"),
             ],
             // Server policy.
             server_accept_unknown_users:    false,
@@ -192,48 +194,48 @@ impl ServerConfig {
         for (route_dat, path_dat) in &self.static_route_paths_rel {
             let route = try_extract_dat!(route_dat, Str).clone();
             if route.is_empty() {
-                return Err(err!(
-                    "ServerConfig: Static route key is empty.";
-                    Invalid, Input, Path));
+                warn!("ServerConfig: Static route key is empty, skipping.");
+                continue;
             }
             let path_str = try_extract_dat!(path_dat, Str);
             if path_str.is_empty() {
-                return Err(err!(
-                    "ServerConfig: Static route path is empty.";
-                    Invalid, Input, Path));
+                warn!("ServerConfig: Static route '{}' path is empty, skipping.", route);
+                continue;
             }
+    
             let is_dir = path_str.ends_with("/");
-            // Ensure that the file into which the javascript will be bundled stays within the root
-            // directory.
             let path = Path::new(&path_str).normalise();
             if path.escapes() {
-                return Err(err!(
-                    "ServerConfig: route {} target path {} escapes the directory {:?}.",
-                    route, path_str, root;
-                    Invalid, Input, Path));
+                warn!("ServerConfig: route '{}' target path '{}' escapes the directory \
+                    {:?}, skipping.",
+                    route, path_str, root);
+                continue;
             }
+    
             let path = root.clone().join(path).normalise().absolute();
             if is_dir {
-                // Ensure directory exists.
-                res!(PathState::DirMustExist.validate(
-                    &path,
-                    "",
-                ));
-                map.insert(route, OsPath::Dir(path.as_pathbuf()));
+                match PathState::DirMustExist.validate(&path, "") {
+                    Ok(()) => {
+                        map.insert(route, OsPath::Dir(path.as_pathbuf()));
+                    }
+                    Err(_) => {
+                        warn!("ServerConfig: Directory '{}' for route '{}' not found, \
+                            skipping.",
+                            path_str, route);
+                        continue;
+                    }
+                }
             } else {
-                // Ensure file exists.
-                match PathState::FileMustExist.validate(
-                    &path,
-                    "",
-                ) {
+                match PathState::FileMustExist.validate(&path, "") {
                     Ok(()) => {
                         map.insert(route, OsPath::File(path.as_pathbuf()));
                     }
-                    Err(e) => return Err(err!(e,
-                        "ServerConfig: if the route {} target path {} is meant to refer \
-                        to a directory, ensure it ends with a '/'.",
-                        route, path_str; 
-                        Invalid, Input, Path)),
+                    Err(_) => {
+                        warn!("ServerConfig: File '{}' for route '{}' not found, skipping. \
+                            If this should be a directory, ensure it ends with '/'.",
+                            path_str, route);
+                        continue;
+                    }
                 }
             }
         }
@@ -313,13 +315,13 @@ impl ServerConfig {
         }
         let tls_dir = root.clone().join(tls_dir).normalise().absolute().as_pathbuf();
         let tls_dir = if dev_mode {
-            res!(PathState::DirMustExist.validate(
+            res!(PathState::Create.validate(
                 &tls_dir,
                 constant::TLS_DIR_DEV,
             ));
             tls_dir.join(constant::TLS_DIR_DEV)
         } else {
-            res!(PathState::DirMustExist.validate(
+            res!(PathState::Create.validate(
                 &tls_dir,
                 constant::TLS_DIR_PROD,
             ));

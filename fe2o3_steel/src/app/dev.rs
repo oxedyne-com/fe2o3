@@ -10,6 +10,39 @@ use std::{
 
 pub fn setup(app_root: &Path) -> Outcome<String> {
 
+    // Check if this looks like an existing website.
+    let existing_indicators = [
+        "www/public/index.html",
+        "www/src/index.html", 
+        "www/public/main.js",
+        "www/src/js",
+        "package.json",
+    ];
+    
+    let mut existing_files = Vec::new();
+    for &indicator in &existing_indicators {
+        let path = app_root.join(indicator);
+        if res!(fs::exists(&path)) {
+            existing_files.push(indicator);
+        }
+    }
+
+    if !existing_files.is_empty() {
+        info!("Detected existing website with: {:?}", existing_files);
+        return Ok(fmt!("Existing website detected, skipping dev initialisation. \
+            Found: {}", existing_files.join(", ")));
+    }
+
+    // Only create new structure if nothing exists.
+    for dir in constant::INIT_TREE_HALT.iter() {
+        let dir_path = app_root.join(dir);
+        if res!(fs::exists(&dir_path)) {
+            return Ok(fmt!("Directory {:?} exists, skipping dev setup.", dir_path));
+        }
+    }
+
+    info!("No existing website detected, creating development structure.");
+
     // Halt initialisation if certain existing directories are detected.
     for dir in constant::INIT_TREE_HALT.iter() {
         let dir_path = app_root.join(dir);
@@ -520,4 +553,45 @@ $status-bg: #f8f8f8;
     }
 
     Ok(fmt!(""))
+}
+
+pub fn ensure_compatibility(app_root: &Path) -> Outcome<()> {
+    info!("Ensuring compatibility with existing website structure...");
+
+    // Create any missing directories that Steel needs.
+    let required_dirs = [
+        "tls/dev",
+        "tls/prod",
+        "www/logs",
+    ];
+
+    for dir in &required_dirs {
+        let dir_path = app_root.join(dir);
+        if !dir_path.exists() {
+            res!(fs::create_dir_all(&dir_path));
+            info!("Created required directory: {}", dir);
+        }
+    }
+
+    // Create minimal missing files if needed
+    let index_path = app_root.join("www/public/index.html");
+    if !index_path.exists() {
+        warn!("No index.html found in www/public/. Creating minimal placeholder.");
+        let minimal_html = r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Steel Server</title>
+</head>
+<body>
+    <h1>Welcome</h1>
+    <p>Steel server is running. Please add your content to www/public/</p>
+</body>
+</html>"#;
+        res!(fs::write(&index_path, minimal_html));
+        info!("Created minimal index.html");
+    }
+
+    Ok(())
 }

@@ -1,5 +1,6 @@
 use crate::{
     app::{
+        self,
         //cfg::AppConfig,
         constant as app_const,
         https::AppWebHandler,
@@ -76,13 +77,13 @@ impl AppShellContext {
         -> Outcome<Evaluation>
     {
         let root_path = Path::new(&self.app_cfg.app_root)
-            .normalise() // Now a NormPathBuf.
+            .normalise()
             .absolute();
-        debug!("Reading server config...");
+
+        info!("Reading server config...");
         let server_cfg = res!(ServerConfig::from_datmap(self.app_cfg.server_cfg.clone()));
-        info!("Validating server config...");
-        res!(server_cfg.validate(&root_path));
-        debug!("Reading dev config...");
+
+        info!("Reading dev config...");
         let dev_cfg = res!(DevConfig::from_datmap(self.app_cfg.dev_cfg.clone()));
 
         // ┌───────────────────────┐
@@ -92,8 +93,30 @@ impl AppShellContext {
         if let Some(msg_cmd) = cmd {
             if msg_cmd.has_arg("dev") {
                 dev_mode = true;
-                info!("Running in development mode with self-signed certificates.");
-                res!(dev_cfg.validate(&root_path));
+                info!("Running in development mode.");
+            }
+        }
+
+        // Ensure compatibility with existing websites.
+        res!(app::dev::ensure_compatibility(&root_path));
+
+        info!("Validating server config...");
+        match server_cfg.validate(&root_path) {
+            Ok(()) => info!("Server configuration validated successfully."),
+            Err(e) => {
+                warn!("Server configuration validation issues: {}", e);
+                info!("Continuing with available routes...");
+            }
+        }
+
+        if dev_mode {
+            info!("Validating development config...");
+            match dev_cfg.validate(&root_path) {
+                Ok(()) => info!("Development configuration validated successfully."),
+                Err(e) => {
+                    warn!("Development configuration issues: {}", e);
+                    info!("Some development features may be disabled.");
+                }
             }
         }
 
@@ -107,6 +130,7 @@ impl AppShellContext {
         // ┌───────────────────────┐
         // │ Reconfigure logging.  │
         // └───────────────────────┘
+        
         let mut log_cfg = log_get_config!();
         let mut logger_console = StdoutLoggerConsole::new();
         let logger_console_thread = logger_console.go();
@@ -129,8 +153,9 @@ impl AppShellContext {
         // ┌───────────────────────┐
         // │ Start database.       │
         // └───────────────────────┘
+        
         info!("Starting database...");
-        res!(self.db.start());
+        res!(self.db.start("database"));
         res!(ok!(self.db.updated_api()).activate_gc(true));
 
         std::thread::sleep(Duration::from_secs(1));
@@ -145,10 +170,13 @@ impl AppShellContext {
         // │ Use self-signed       │
         // │ certificates.         │
         // └───────────────────────┘
+        
         let (tls_dir, cert_path, key_path) = res!(server_cfg.get_tls_paths(&root_path, dev_mode));
+
         debug!("tls_dir = {:?}", tls_dir);
         debug!("cert_path = {:?}", cert_path);
         debug!("key_path = {:?}", key_path);
+
         let domains = res!(server_cfg.get_domain_names());
 
         if !cert_path.exists() || !key_path.exists() {
@@ -177,9 +205,25 @@ impl AppShellContext {
         // │ Refresh the css and   │
         // │ javascript bundles.   │
         // └───────────────────────┘
-        let js_bundles_map = res!(dev_cfg.get_js_bundles_map(&root_path));
+        
+        let js_bundles_map = if dev_mode && dev_cfg.has_js_bundling(&root_path) {
+            info!("JavaScript bundling enabled.");
+            res!(dev_cfg.get_js_bundles_map(&root_path))
+        } else {
+            info!("JavaScript bundling disabled or not configured.");
+            Vec::new()
+        };
+
         let js_import_aliases = res!(dev_cfg.get_js_import_aliases(&root_path));
-        let css_paths = res!(dev_cfg.get_css_paths(&root_path));
+
+        let css_paths = if dev_mode && dev_cfg.has_css_bundling(&root_path) {
+            info!("CSS compilation enabled.");
+            res!(dev_cfg.get_css_paths(&root_path))
+        } else {
+            info!("CSS compilation disabled or not configured.");
+            (PathBuf::new(), PathBuf::new())
+        };
+        
         let refresh_manager = Arc::new(DevRefreshManager::new(
             &root_path,
             js_bundles_map,
@@ -192,6 +236,7 @@ impl AppShellContext {
         // │ Initialise the dev    │
         // │ refresh functionality.│
         // └───────────────────────┘
+        
         let rt = res!(tokio::runtime::Runtime::new());
 
         let ws_handler = AppWebSocketHandler::new(
@@ -214,6 +259,7 @@ impl AppShellContext {
         // ┌───────────────────────┐
         // │ Start server.         │
         // └───────────────────────┘
+        
         let ws_syntax = res!(WebSocketSyntax::new(
             &self.app_cfg.app_human_name,
             &app_const::VERSION,

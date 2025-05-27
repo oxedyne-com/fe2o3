@@ -151,6 +151,7 @@ pub enum ErrTag {
     Poisoned,
     Range,
     Read,
+    Security,
     Seek,
     Size,
     Slice,

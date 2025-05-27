@@ -15,7 +15,7 @@ Steel is Hematite's TCP server implementation providing HTTPS, WebSocket and SMT
 
 ## Linux iptables and Port Forwarding
 
-When you want to server to the internet using Linux, ports below 1024 are considered privileged, and only the root user can bind to them by default. This is a security feature to prevent unauthorized users from binding to well-known ports.
+When you want to serve to the internet using Linux, ports below 1024 are considered privileged, and only the root user can bind to them by default. This is a security feature to prevent unauthorised users from binding to well-known ports.
 
 If you prefer not to grant additional capabilities to your application, another approach is to use iptables to forward traffic from port 443 to a higher, non-privileged port that your application can bind to.
 
