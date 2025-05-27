@@ -1,0 +1,4393 @@
+File: Cargo.toml
+[package]
+name = "oxedize_fe2o3_core"
+version = "0.5.0"
+authors = ["h00gs <hello@oxedize.com>"]
+edition = "2021"
+license = "BSD-2-Clause/Apache-2.0"
+description = "Hematite core library, consisting mostly of relatively simple foundational types and macros."
+repository = "https:
+[dependencies]
+oxedize_fe2o3_stds 			= { path = "../fe2o3_stds" }
+new							= { path = "new" }
+base64 = "0.13.0"
+flume = "0.10.9" 
+rand = { version = "0.8.4" }
+rand_core = { version = "0.6.3", features = ["std"] }
+# Logging.
+flate2 = "1.0"
+humantime = "2.1.0"
+once_cell = "1.18.0"
+tokio = { version = "1", features = ["rt"] }
+[dev-dependencies]
+File: src/int.rs
+pub trait Bound {
+    fn max_size() -> Self;
+    fn min_size() -> Self;
+}
+macro_rules! impl_bound_for_ints {
+    ($(($t:ty, $max:expr, $min:expr)),+) => {
+        $(
+            impl Bound for $t {
+                fn max_size() -> Self {
+                    $max
+                }
+                fn min_size() -> Self {
+                    $min
+                }
+            }
+        )+
+    };
+}
+impl_bound_for_ints!(
+    (i8,    i8::MAX,    i8::MIN),
+    (i16,   i16::MAX,   i16::MIN),
+    (i32,   i32::MAX,   i32::MIN),
+    (i64,   i64::MAX,   i64::MIN),
+    (i128,  i128::MAX,  i128::MIN),
+    (u8,    u8::MAX,    u8::MIN),
+    (u16,   u16::MAX,   u16::MIN),
+    (u32,   u32::MAX,   u32::MIN),
+    (u64,   u64::MAX,   u64::MIN),
+    (u128,  u128::MAX,  u128::MIN),
+    (isize, isize::MAX, isize::MIN),
+    (usize, usize::MAX, usize::MIN)
+);
+pub trait One {
+    fn one() -> Self;
+}
+pub trait Zero {
+    fn zero() -> Self;
+}
+macro_rules! impl_one_zero_for_ints {
+    ($($t:ty),+) => {
+        $(
+            impl One for $t {
+                fn one() -> Self {
+                    1
+                }
+            }
+            impl Zero for $t {
+                fn zero() -> Self {
+                    0
+                }
+            }
+        )+
+    };
+}
+impl_one_zero_for_ints!(i8, i16, i32, i64, i128, u8, u16, u32, u64, u128, isize, usize);
+File: src/error.rs
+use crate::GenTag;
+use oxedize_fe2o3_stds::chars::Term;
+use std::{
+    fmt,
+    io,
+    num,
+    string,
+    sync::Arc,
+};
+use std::convert::From;
+#[allow(non_camel_case_types)] 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ErrTag {
+    Async,
+    Borrow,
+    Bug,
+    Bytes,
+    Binary,
+    Channel,
+    Checksum,
+    Configuration,
+    Conflict,
+    Conversion,
+    Counter,
+    Create,
+    Data,
+    Daticle,
+    Decode,
+    Decrypt,
+    Divisibility,
+    Duplicate,
+    Encode,
+    Encrypt,
+    Excessive,
+    Exists,
+    Fatal,
+    File,
+    Format,
+    Identifier,
+    Index,
+    Init,
+    Input,
+    Integer,
+    Interrupted,
+    Invalid,
+    IO,
+    Key,
+    LimitReached,
+    Lock,
+    Mismatch,
+    Missing,
+    Name,
+    Network,
+    NoImpl,
+    NotFound,
+    Numeric,
+    Order,
+    Output,
+    Overflow,
+    Panic,
+    Path,
+    Poisoned,
+    Range,
+    Read,
+    Seek,
+    Size,
+    Slice,
+    String,
+    Suggestion,
+    System,
+    Test,
+    Timeout,
+    Thread,
+    TooBig,
+    TooSmall,
+    Wire,
+    Write,
+    Unauthorised,
+    Underflow,
+    Unexpected,
+    Unimplemented,
+    Unknown,
+    Unreachable,
+    Upstream,
+    UTF8,
+    Value,
+    Version,
+    ZeroDenominator,
+}
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ErrMsg<T: GenTag> {
+    pub msg:    String,
+    pub tags:   &'static [T],
+}
+impl<T: GenTag> fmt::Display for ErrMsg<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+#[derive(Clone)]
+pub enum Error<T: GenTag> {
+    Local(ErrMsg<T>),
+    Other(ErrMsg<T>),
+    Upstream(Arc<dyn std::error::Error + Send + Sync>, ErrMsg<T>),
+    Collection(Vec<Box<Self>>),
+}
+impl<T: GenTag> Error<T> where Error<T>: std::error::Error {
+    pub fn tags(&self) -> Vec<T> {
+        match self {
+            Error::Local(ErrMsg { tags: t, ..}) |
+            Error::Other(ErrMsg { tags: t, ..}) => t.to_vec(),
+            Error::Upstream(_, ErrMsg { tags: t, ..}) => t.to_vec(),
+            Error::Collection(boxerrs) => {
+                let mut t = Vec::new();
+                for e in boxerrs {
+                    for tag in (*e).tags() {
+                        t.push(tag.clone())
+                    }
+                }
+                t
+            },
+        }
+    }
+    pub fn tags_display(tags: Vec<T>) -> String {
+        let mut result = String::new();
+        if tags.len() > 0 {
+            result.push('[');
+            let mut c = 0;
+            for tag in tags {
+                if c > 0 {
+                    result.push(' ');
+                }
+                result.push_str(&tag.to_string());
+                c += 1;
+            }
+            result.push(']');
+        }
+        result
+    }
+    fn fmt_debug_local(
+        f: &mut fmt::Formatter<'_>,
+        m: &str,
+        t: &'static [T],
+    )
+        -> fmt::Result
+    {
+        write!(f, "LocalErr{{{}{}}}",
+            Self::tags_display(t.to_vec()),
+            if m.len() > 0 {
+                if t.len() > 0 {
+                    fmt!(" \"{}\"", m)
+                } else {
+                    fmt!("\"{}\"", m)
+                }
+            } else {
+                String::new()
+            },
+        )
+    }
+    fn fmt_debug_upstream_specific(
+        f: &mut fmt::Formatter<'_>,
+        e: &Self,
+        m: &str,
+        t: &'static [T],
+    )
+        -> fmt::Result
+    {
+        write!(f, "UpstreamErr{{{}{}}}\n{}",
+            Self::tags_display(t.to_vec()),
+            if m.len() > 0 {
+                if t.len() > 0 {
+                    fmt!(" \"{}\"", m)
+                } else {
+                    fmt!("\"{}\"", m)
+                }
+            } else {
+                String::new()
+            },
+            e,
+        )
+    }
+    fn fmt_debug_upstream_general(
+        f:      &mut fmt::Formatter<'_>,
+        arc_e:  &Arc<dyn std::error::Error + Send + Sync>,
+        m:      &str,
+        t:      &'static [T],
+    )
+        -> fmt::Result
+    {
+        write!(f, "UpstreamErr{{{}{}}}",
+            Error::tags_display(t.to_vec()),
+            if m.len() > 0 {
+                if t.len() > 0 {
+                    fmt!(" \"{}\" \"{:?} {}\"",
+                        m,
+                        arc_e,
+                        arc_e,
+                    )
+                } else {
+                    fmt!("\"{}\" \"{:?} {}\"",
+                        m,
+                        arc_e,
+                        arc_e,
+                    )
+                }
+            } else {
+                String::new()
+            },
+        )
+    }
+    fn fmt_display_local(
+        f: &mut fmt::Formatter<'_>,
+        m: &str,
+        t: &'static [T],
+    )
+        -> fmt::Result
+    {
+        write!(f,
+            "{}{}LocalErr{{{}{}{}{}{}{}{}{}{}}}{}",
+            Term::SET_BRIGHT_FORE_RED,
+            Term::BOLD,
+            Term::RESET,
+            Term::FORE_MAGENTA,
+            Error::tags_display(t.to_vec()),
+            Term::RESET,
+            Term::SET_BRIGHT_FORE_YELLOW,
+            if m.len() > 0 {
+                if t.len() > 0 {
+                    fmt!(" \"{}\"", m)
+                } else {
+                    fmt!("\"{}\"", m)
+                }
+            } else {
+                String::new()
+            },
+            Term::RESET,
+            Term::SET_BRIGHT_FORE_RED,
+            Term::BOLD,
+            Term::RESET,
+        )
+    }
+    fn fmt_display_upstream_specific(
+        f: &mut fmt::Formatter<'_>,
+        e: &Self,
+        m: &str,
+        t: &'static [T],
+    )
+        -> fmt::Result
+    {
+        write!(f,
+            "{}{}UpstreamErr{{{}{}{}{}{}{}{}{}{}}}{}\n{}",
+            Term::SET_BRIGHT_FORE_RED,
+            Term::BOLD,
+            Term::RESET,
+            Term::FORE_MAGENTA,
+            Error::tags_display(t.to_vec()),
+            Term::RESET,
+            Term::SET_BRIGHT_FORE_CYAN,
+            if m.len() > 0 {
+                if t.len() > 0 {
+                    fmt!(" \"{}\"", m)
+                } else {
+                    fmt!("\"{}\"", m)
+                }
+            } else {
+                String::new()
+            },
+            Term::RESET,
+            Term::SET_BRIGHT_FORE_RED,
+            Term::BOLD,
+            Term::RESET,
+            e,
+        )
+    }
+    fn fmt_display_upstream_general(
+        f:      &mut fmt::Formatter<'_>,
+        arc_e:  &Arc<dyn std::error::Error + Send + Sync>,
+        m:      &str,
+        t:      &'static [T],
+    )
+        -> fmt::Result
+    {
+        write!(f,
+            "{}{}UpstreamErr{{{}{}{}{}{}{}{}{}{}}}{}",
+            Term::SET_BRIGHT_FORE_RED,
+            Term::BOLD,
+            Term::RESET,
+            Term::FORE_MAGENTA,
+            Error::tags_display(t.to_vec()),
+            Term::RESET,
+            Term::SET_BRIGHT_FORE_CYAN,
+            if m.len() > 0 {
+                if t.len() > 0 {
+                    fmt!(" \"{}\"{}{} {}\"{:?} {}\"{}",
+                        m,
+                        Term::RESET,
+                        Term::SET_BRIGHT_FORE_BLACK,
+                        Term::BACK_YELLOW,
+                        arc_e,
+                        arc_e,
+                        Term::RESET,
+                    )
+                } else {
+                    fmt!("\"{}\"{}{} {}\"{:?} {}\"{}",
+                        m,
+                        Term::RESET,
+                        Term::SET_BRIGHT_FORE_BLACK,
+                        Term::BACK_YELLOW,
+                        arc_e,
+                        arc_e,
+                        Term::RESET,
+                    )
+                }
+            } else {
+                String::new()
+            },
+            Term::RESET,
+            Term::SET_BRIGHT_FORE_RED,
+            Term::BOLD,
+            Term::RESET,
+        )
+    }
+}
+impl<T: GenTag> fmt::Debug for Error<T> where Error<T>: std::error::Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::Local(ErrMsg {msg:m, tags: t}) |
+            Error::Other(ErrMsg {msg:m, tags: t}) => Self::fmt_debug_local(f, m, t),
+            Error::Upstream(arc_e, ErrMsg{msg: m, tags: t}) => match arc_e.downcast_ref::<Error<T>>() {
+                Some(e) => Self::fmt_debug_upstream_specific(f, e, m, t),
+                None => Self::fmt_debug_upstream_general(f, arc_e, m, t),
+            },
+            Error::Collection(boxerrs) => {
+                writeln!(f, "Collection of {} errors:", boxerrs.len())?;
+                for (i, boxerr) in boxerrs.iter().enumerate() {
+                    writeln!(f, "{:04}: {:?}", i, *boxerr)?;
+                }
+                Ok(())
+            },
+        }
+    }
+}
+impl<T: GenTag> fmt::Display for Error<T> where Error<T>: std::error::Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::Local(ErrMsg {tags: t, msg: m}) |
+            Error::Other(ErrMsg {tags: t, msg: m}) => Self::fmt_display_local(f, m, t),
+            Error::Upstream(arc_e, ErrMsg{tags: t, msg: m}) => match arc_e.downcast_ref::<Error<T>>() {
+                Some(e) => Self::fmt_display_upstream_specific(f, e, m, t),
+                None => Self::fmt_display_upstream_general(f, arc_e, m, t),
+            },
+            Error::Collection(boxerrs) => {
+                writeln!(f, "Collection of {} errors:", boxerrs.len())?;
+                for (i, boxerr) in boxerrs.iter().enumerate() {
+                    writeln!(f, "{:04}: {}", i, *boxerr)?;
+                }
+                Ok(())
+            },
+        }
+    }
+}
+impl std::error::Error for Error<ErrTag> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Error::Upstream(arc_e, _) => Some(arc_e.as_ref()),
+            _ => None,
+        }
+    }
+}
+impl From<fmt::Error> for Error<ErrTag> {
+    fn from(e: fmt::Error) -> Self {
+        Error::Upstream(Arc::new(e), ErrMsg {
+            tags: &[ErrTag::Format],
+            msg: String::new(),
+        })
+    }
+}
+impl From<io::Error> for Error<ErrTag> {
+    fn from(e: io::Error) -> Self {
+        Error::Upstream(Arc::new(e), ErrMsg {
+            tags: &[ErrTag::IO],
+            msg: String::new(),
+        })
+    }
+}
+impl From<string::FromUtf8Error> for Error<ErrTag> {
+    fn from(e: string::FromUtf8Error) -> Self {
+        Error::Upstream(Arc::new(e), ErrMsg {
+            tags: &[ErrTag::Decode, ErrTag::UTF8, ErrTag::String],
+            msg: String::new(),
+        })
+    }
+}
+impl From<std::str::Utf8Error> for Error<ErrTag> {
+    fn from(e: std::str::Utf8Error) -> Self {
+        Error::Upstream(Arc::new(e), ErrMsg {
+            tags: &[ErrTag::Decode, ErrTag::UTF8, ErrTag::String],
+            msg: String::new(),
+        })
+    }
+}
+impl From<num::ParseIntError> for Error<ErrTag> {
+    fn from(e: num::ParseIntError) -> Self {
+        Error::Upstream(Arc::new(e), ErrMsg {
+            tags: &[ErrTag::Decode, ErrTag::Integer, ErrTag::String],
+            msg: String::new(),
+        })
+    }
+}
+impl From<std::array::TryFromSliceError> for Error<ErrTag> {
+    fn from(e: std::array::TryFromSliceError) -> Self {
+        Error::Upstream(Arc::new(e), ErrMsg {
+            tags: &[ErrTag::Conversion, ErrTag::Slice],
+            msg: String::new(),
+        })
+    }
+}
+impl From<std::time::SystemTimeError> for Error<ErrTag> {
+    fn from(e: std::time::SystemTimeError) -> Self {
+        Error::Upstream(Arc::new(e), ErrMsg {
+            tags: &[ErrTag::Conversion, ErrTag::Slice],
+            msg: String::new(),
+        })
+    }
+}
+impl<T> From<std::sync::PoisonError<T>> for Error<ErrTag> {
+    fn from(_e: std::sync::PoisonError<T>) -> Self {
+        Error::Local(ErrMsg {
+            tags: &[ErrTag::Poisoned],
+            msg: String::new(),
+        })
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        errmsg,
+        Outcome,
+    };
+    use std::{
+        fmt::write,
+        str::FromStr,
+    };
+    fn return_fmt_error() -> Outcome<i32> {
+        let mut output = String::new();
+        write(&mut output, format_args!("Hello {}!", "world"))?;
+        Ok(42)
+    }
+    #[test]
+    fn test_errctx() -> Outcome<()> {
+        let m = errmsg!("The meaning of life is {}", 42);
+        println!("ErrMsg = {}", m);
+        let m = errmsg!();
+        println!("ErrMsg = {}", m);
+        let n = 41;
+        let e = Error::Local(ErrMsg {
+            tags: &[ErrTag::Invalid],
+            msg: errmsg!("The meaning of life is not quite {}", n),
+        });
+        println!("This is a test of an Error: {}", e);
+        Ok(())
+    }
+    #[test]
+    fn test_errprop_00() -> Outcome<()> {
+        let res0 = Outcome::Ok(());
+        let res1 = res!(res0);
+        msg!("{:?}", res1);
+        Ok(())
+    }
+    #[test]
+    fn test_err_00() -> Outcome<()> {
+        let e0 = err!(fmt!("A test {}", 42), String, Invalid);
+        msg!("{:?}", e0);
+        let e1 = Error::Local(ErrMsg { tags: &[ErrTag::IO, ErrTag::Invalid], msg: errmsg!("A test 42") });
+        let e2 = Error::Upstream(Arc::new(e1), ErrMsg { tags: &[ErrTag::IO, ErrTag::File],  msg: errmsg!() });
+        let e3 = Error::Upstream(Arc::new(e2), ErrMsg { tags: &[ErrTag::Conversion], msg: errmsg!() });
+        msg!("\n{:?}", e3);
+        Ok(())
+    }
+    #[test]
+    fn test_err_01() -> Outcome<()> {
+        match u8::from_str("-1") {
+            Err(e0) => {
+                msg!("{}", e0);
+                let e1 = err!(e0, errmsg!("A test"),
+                    Decode, String, Invalid, Input);
+                msg!("{}", e1);
+                let e2 = err!(e1, errmsg!("Another level"), Bug);
+                msg!("{}", e2);
+            },
+            Ok(_) => (),
+        }
+        Ok(())
+    }
+}
+impl GenTag for ErrTag {}
+impl fmt::Display for ErrTag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+impl Default for ErrTag {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+File: src/lib.rs
+#![forbid(unsafe_code)]
+#![allow(dead_code)]
+#![allow(unused_assignments)]
+#[macro_use]
+pub mod macros {
+    #[macro_use]
+    pub mod error;
+    #[macro_use]
+    pub mod fallible;
+    #[macro_use]
+    pub mod meta;
+    #[macro_use]
+    pub mod string;
+    #[macro_use]
+    pub mod sync;
+    #[macro_use]
+    pub mod test;
+}
+pub mod alt;
+pub mod bool;
+pub mod bot;
+pub mod byte;
+pub mod channels;
+pub mod conv;
+pub mod count;
+pub mod error;
+pub mod file;
+pub mod id;
+pub mod int;
+pub mod log;
+pub mod map;
+pub mod mem;
+pub mod ord;
+pub mod path;
+pub mod prelude;
+pub mod rand;
+pub mod string;
+pub mod test;
+pub mod time;
+pub mod thread;
+use error::Error;
+pub use string::contains_str;
+pub type Outcome<V> = std::result::Result<V, Error<error::ErrTag>>;
+pub trait GenTag:
+    Clone
+    + std::fmt::Debug
+    + Default
+    + std::fmt::Display
+    + Send
+    + Sync
+    + 'static
+{}
+pub fn format_type<T>(_: T) -> String {
+    fmt!("{}", std::any::type_name::<T>())
+}
+pub use new::New;
+File: src/test.rs
+use crate::prelude::*;
+pub fn test_it<
+    F: Fn() -> Outcome<()> + 'static + Sync + Send
+>(
+    filter: &str,
+    tags: &[&str],
+    closure: F,
+)
+    -> Outcome<()>
+{
+    if tags.len() == 0 {
+        return Err(err!(
+            "The test must have at least one tag, being the title.";
+        Invalid, Input, Missing, Bug));
+    }
+    for tag in tags {
+        if (*tag).starts_with(filter) {
+            test!("'{}' test commencing...", tags[0]);
+            res!(closure());
+            test!("'{}' test completed.", tags[0]);
+            break;
+        }
+    }
+    Ok(())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_000() -> Outcome<()> {
+        let result = test_it("hello", &["MyTest 000", "hello"], || {
+            let n = 42;
+            test!("n = {}", n);
+            req!(n, 43);
+            Ok(())
+        });
+        test!("result = {:?}", result);
+        log_finish_wait!();
+        Ok(())
+    }
+}
+File: src/time.rs
+use crate::{
+    prelude::*,
+};
+use std::{
+    time::{
+        Duration,
+        Instant,    
+    },
+    thread,
+};
+pub fn wait_for_true(
+    check_interval: Duration,
+    max_wait:       Duration,
+    fn_true:        impl Fn() -> bool,
+) 
+    -> Outcome<(Instant, bool)>
+{
+    if check_interval > max_wait {
+        return Err(err!(
+            "The given check interval, {:?}, should not be larger than the \
+            given max wait, {:?}.", check_interval, max_wait;
+        Invalid, Input));
+    }
+    let start = Instant::now();
+    loop {
+        if fn_true() {
+            return Ok((start, false));
+        } else {
+            thread::sleep(check_interval);
+        }
+        if start.elapsed() > max_wait {
+            return Ok((start, true));
+        }
+    }
+}
+#[derive(Debug, PartialEq, Copy, Clone)]
+pub struct Timer {
+    t0:     Instant,
+    last:   usize, 
+}
+impl Timer {
+    pub fn new() -> Self {
+        Self {
+            t0:     Instant::now(),
+            last:   0,
+        }
+    }
+    pub fn reset(&mut self) {
+        self.t0 = Instant::now();
+        self.last = 0;
+    }
+    pub fn split_micros(&mut self) -> Outcome<usize> {
+        self.last = try_sub!(self.t0.elapsed().as_micros() as usize, self.last);
+        Ok(self.last)
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::thread::sleep;
+    #[test]
+    fn test_timer() -> Outcome<()> {
+        let mut t0 = Timer::new();
+        sleep(Duration::from_micros(1000));
+        let mut t = res!(t0.split_micros());
+        msg!("timer split: {}", t); 
+        sleep(Duration::from_micros(2000));
+        t = res!(t0.split_micros());
+        msg!("timer split: {}", t); 
+        Ok(())
+    }
+}
+File: src/conv.rs
+pub trait BestFrom<T>: Sized + std::convert::From<T> {
+    fn best_from(value: T) -> Self {
+        Self::from(value)
+    }
+}
+pub trait IntoInner {
+    type Inner;
+    fn into_inner(self) -> Self::Inner;
+}
+File: src/channels.rs
+use crate::{
+    prelude::*,
+    time::wait_for_true,
+};
+use std::{
+    fmt::Debug,
+    sync::{
+        Arc,
+        RwLock,
+    },
+    time::{
+        Duration,
+        Instant,
+    },
+};
+pub use flume::{
+    unbounded,
+    Sender,
+    Receiver,
+    TryRecvError,
+    RecvTimeoutError,
+};
+pub fn full_duplex<M>() -> FullDuplex<M> {
+    FullDuplex (
+        simplex(),
+        simplex(),
+    )
+}
+pub fn simplex<M>() -> Simplex<M> {
+    let (tx, rx) = unbounded();
+    Simplex {
+        tx: tx,
+        rx: rx,
+        open: Arc::new(RwLock::new(true)),
+    }
+}
+#[derive(Debug)]
+pub struct Simplex<M> {
+    pub tx: Sender<M>,
+    pub rx: Receiver<M>,
+    open:   Arc<RwLock<bool>>,
+}
+impl<M> Clone for Simplex<M> {
+    fn clone(&self) -> Self {
+        Self {
+            tx: self.tx.clone(),
+            rx: self.rx.clone(),
+            open: self.open.clone(),
+        }
+    }
+}
+impl<M> Default for Simplex<M> {
+    fn default() -> Self {
+        simplex::<M>()
+    }
+}
+impl<M> Simplex<M> {
+    pub fn tx(&self) -> &Sender<M> { &self.tx }
+    pub fn rx(&self) -> &Receiver<M> { &self.rx }
+}
+#[derive(Debug)]
+pub enum Recv<M> {
+    Result(Outcome<M>),
+    Empty,
+}
+impl<M: 'static + Debug + Send + Sync> Simplex<M> {
+    pub fn len(&self) -> usize {
+        self.tx.len()
+    }
+    pub fn len_non_zero(&self) -> bool {
+        self.len() > 0
+    }
+    pub fn is_open(&self) -> Outcome<bool> {
+        let open_read = lock_read!(self.open,
+            "While trying to read whether channel is open.",
+        );
+        Ok(*open_read)
+    }
+    pub fn close(&self) -> Outcome<bool> {
+        let mut open_write = lock_write!(self.open,
+            "While trying to close the channel.",
+        );
+        let is_open = *open_write;
+        *open_write = false;
+        Ok(is_open)
+    }
+    pub fn send(&self, msg: M) -> Outcome<()> {
+        res!(self.tx().send(msg));
+        Ok(())
+    }
+    pub fn recv(&self) -> Outcome<M> {
+        let msg = res!(self.rx().recv());
+        Ok(msg)
+    }
+    pub fn try_recv(&self) -> Recv<M> {
+        match self.rx().try_recv() {
+            Err(TryRecvError::Empty) => Recv::Empty,
+            Err(e) => Recv::Result(Err(err!(e,
+                "While trying to read channel without waiting.";
+            Channel, Read))),
+            Ok(msg) => Recv::Result(Ok(msg)),
+        }
+    }
+    pub fn recv_timeout(&self, sleep: Duration) -> Recv<M> {
+        match self.rx().recv_timeout(sleep) {
+            Err(RecvTimeoutError::Timeout) => Recv::Empty,
+            Err(e) => Recv::Result(Err(err!(e,
+                "While reading channel with a timeout of {:?}.", sleep;
+            Channel, Read))),
+            Ok(msg) => Recv::Result(Ok(msg)),
+        }
+    }
+    pub fn drain_messages(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        loop {
+            match self.try_recv() {
+                Recv::Empty => break,
+                Recv::Result(Err(e)) => lines.push(fmt!("<err>: {:?}", e)),
+                Recv::Result(Ok(m)) => lines.push(fmt!("{:?}", m)),
+            }
+        }
+        lines
+    }
+    pub fn wait_for_empty_channel(
+        &self,
+        check_interval: Duration,
+        max_wait:       Duration,
+    ) 
+        -> Outcome<(Instant, bool)>
+    {
+        wait_for_true(
+            check_interval,
+            max_wait,
+            || { self.len() == 0 },
+        )
+    }
+}
+#[derive(Debug)]
+pub struct FullDuplex<M> (
+    Simplex<M>,
+    Simplex<M>,
+);
+impl<M> Clone for FullDuplex<M> {
+    fn clone(&self) -> Self {
+        Self (
+            self.0.clone(),
+            self.1.clone(),
+        )
+    }
+}
+impl<M> FullDuplex<M> {
+    pub fn fwd(&self) -> &Simplex<M> { &self.0 }
+    pub fn rev(&self) -> &Simplex<M> { &self.1 }
+}
+impl<M: 'static + Debug + Send + Sync> FullDuplex<M> {
+    pub fn rx(&self) -> &Receiver<M> { &self.fwd().rx() }
+    pub fn tx(&self) -> &Sender<M> { &self.fwd().tx() }
+    pub fn send(&self, msg: M) -> Outcome<()> {
+        self.fwd().send(msg)
+    }
+    pub fn recv(&self) -> Outcome<M> {
+        self.fwd().recv()
+    }
+}
+impl<M> Default for FullDuplex<M> {
+    fn default() -> Self {
+        full_duplex::<M>()
+    }
+}
+File: src/bool.rs
+use std::fmt;
+#[derive(Clone, Debug)]
+pub enum BoolFormatter {
+    TrueFalse(bool),
+    OnOff(bool),
+    YesNo(bool),
+}
+impl fmt::Display for BoolFormatter {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::TrueFalse(b) => if *b {
+                write!(f, "true")
+            } else {
+                write!(f, "false")
+            },
+            Self::OnOff(b) => if *b {
+                write!(f, "on")
+            } else {
+                write!(f, "off")
+            },
+            Self::YesNo(b) => if *b {
+                write!(f, "yes")
+            } else {
+                write!(f, "no")
+            },
+        }
+    }
+}
+File: src/map.rs
+use crate::{
+    prelude::*,
+};
+use std::{
+    collections::{
+        btree_map,
+        hash_map,
+        BTreeMap,
+        HashMap,
+    },
+    fmt::Display,
+    hash::Hash,
+    marker::PhantomData,
+};
+pub trait GetOrErr<K, V> {
+    fn get_or_err(&self, k: &K) -> Outcome<&V>;
+}
+impl< K: Display + Hash + Eq, V> GetOrErr<K, V> for HashMap<K, V> {
+    #[inline(always)]
+    fn get_or_err(&self, k: &K) -> Outcome<&V> {
+        match self.get(k) {
+            Some(v) => Ok(v),
+            None => Err(err!(
+                "Map missing {}", k;
+            Missing, Key)),
+        }
+    }
+}
+impl< K: Display + Ord, V> GetOrErr<K, V> for BTreeMap<K, V> {
+    #[inline(always)]
+    fn get_or_err(&self, k: &K) -> Outcome<&V> {
+        match self.get(k) {
+            Some(v) => Ok(v),
+            None => Err(err!(
+                "Map missing {}", k;
+            Missing, Key)),
+        }
+    }
+}
+pub trait Map<K, V> {
+    type Iter<'iter>: Iterator<Item = (&'iter K, &'iter V)>
+        where Self: 'iter, K: 'iter, V: 'iter;
+    fn empty() -> Self;
+    fn len(&self) -> usize;
+    fn get(&self, k: &K) -> Option<&V>;
+    fn contains_key(&self, k: &K) -> bool;
+    fn iter<'a>(&'a self) -> Self::Iter<'a>;
+}
+pub trait MapMut<K, V>: Map<K, V> {
+    type IterMut<'iter>: Iterator<Item = (&'iter K, &'iter mut V)>
+        where Self: 'iter, K: 'iter, V: 'iter;
+    fn get_mut(&mut self, k: &K) -> Option<&mut V>;
+    fn insert(&mut self, k: K, v: V) -> Option<V>;
+    fn remove(&mut self, k: &K) -> Option<V>;
+    fn retain<F: FnMut(&K, &mut V) -> bool>(&mut self, f: F);
+    fn iter_mut<'a>(&'a mut self) -> Self::IterMut<'a>;
+}
+impl<K: Hash + Eq, V> Map<K, V> for HashMap<K, V> {
+    type Iter<'iter> = hash_map::Iter<'iter, K, V> where Self: 'iter;
+    #[inline(always)]
+    fn empty() -> Self { HashMap::new() }
+    #[inline(always)]
+    fn len(&self) -> usize { self.len() }
+    #[inline(always)]
+    fn get(&self, k: &K) -> Option<&V> { self.get(k) }
+    #[inline(always)]
+    fn contains_key(&self, k: &K) -> bool { self.contains_key(k) }
+    #[inline(always)]
+    fn iter<'a>(&'a self) -> Self::Iter<'a> { self.iter() }
+}
+impl<K: Hash + Eq, V> MapMut<K, V> for HashMap<K, V> {
+    type IterMut <'iter> = hash_map::IterMut<'iter, K, V> where Self: 'iter;
+    #[inline(always)]
+    fn get_mut(&mut self, k: &K) -> Option<&mut V> { self.get_mut(k) }
+    #[inline(always)]
+    fn insert(&mut self, k: K, v: V) -> Option<V> { self.insert(k, v) }
+    #[inline(always)]
+    fn remove(&mut self, k: &K) -> Option<V> { self.remove(k) }
+    #[inline(always)]
+    fn retain<F: FnMut(&K, &mut V) -> bool>(&mut self, f: F) { self.retain(f); }
+    #[inline(always)]
+    fn iter_mut<'a>(&'a mut self) -> Self::IterMut<'a> { self.iter_mut() }
+}
+impl<K: Ord, V> Map<K, V> for BTreeMap<K, V> {
+    type Iter<'iter> = btree_map::Iter<'iter, K, V> where Self: 'iter;
+    #[inline(always)]
+    fn empty() -> Self { BTreeMap::new() }
+    #[inline(always)]
+    fn len(&self) -> usize { self.len() }
+    #[inline(always)]
+    fn get(&self, k: &K) -> Option<&V> { self.get(k) }
+    #[inline(always)]
+    fn contains_key(&self, k: &K) -> bool { self.contains_key(k) }
+    #[inline(always)]
+    fn iter<'a>(&'a self) -> Self::Iter<'a> { self.iter() }
+}
+impl<K: Ord, V> MapMut<K, V> for BTreeMap<K, V> {
+    type IterMut <'iter> = btree_map::IterMut<'iter, K, V> where Self: 'iter;
+    #[inline(always)]
+    fn get_mut(&mut self, k: &K) -> Option<&mut V> { self.get_mut(k) }
+    #[inline(always)]
+    fn insert(&mut self, k: K, v: V) -> Option<V> { self.insert(k, v) }
+    #[inline(always)]
+    fn remove(&mut self, k: &K) -> Option<V> { self.remove(k) }
+    #[inline(always)]
+    fn retain<F: FnMut(&K, &mut V) -> bool>(&mut self, f: F) { self.retain(f); }
+    #[inline(always)]
+    fn iter_mut<'a>(&'a mut self) -> Self::IterMut<'a> { self.iter_mut() }
+}
+impl<K: 'static, V: 'static> Map<K, V> for () {
+    type Iter<'a> = EmptyIter<'a, K, V>;
+    #[inline(always)]
+    fn empty() -> Self { () }
+    #[inline(always)]
+    fn len(&self) -> usize { 0 }
+    #[inline(always)]
+    fn get(&self, _k: &K) -> Option<&V> { None }
+    #[inline(always)]
+    fn contains_key(&self, _k: &K) -> bool { false }
+    #[inline(always)]
+    fn iter<'a>(&'a self) -> Self::Iter<'a> {
+        EmptyIter(
+            PhantomData::<&()>,
+            PhantomData::<K>,
+            PhantomData::<V>,
+        )
+    }
+}
+impl<K: 'static, V: 'static> MapMut<K, V> for () {
+    type IterMut<'a> = EmptyIterMut<'a, K, V>;
+    #[inline(always)]
+    fn get_mut(&mut self, _k: &K) -> Option<&mut V> { None }
+    #[inline(always)]
+    fn insert(&mut self, _k: K, _v: V) -> Option<V> { None }
+    #[inline(always)]
+    fn remove(&mut self, _k: &K) -> Option<V> { None }
+    #[inline(always)]
+    fn retain<F>(&mut self, _f: F) where F: FnMut(&K, &mut V) -> bool, { }
+    #[inline(always)]
+    fn iter_mut<'a>(&'a mut self) -> Self::IterMut<'a> {
+        EmptyIterMut(
+            PhantomData::<&mut ()>,
+            PhantomData::<K>,
+            PhantomData::<V>,
+        )
+    }
+}
+pub struct EmptyIter<'a, K, V>(
+    PhantomData<&'a ()>,
+    PhantomData<K>,
+    PhantomData<V>,
+);
+impl<'a, K: 'a, V: 'a> Iterator for EmptyIter<'a, K, V> {
+    type Item = (&'a K, &'a V);
+    fn next(&mut self) -> Option<Self::Item> { None }
+}
+pub struct EmptyIterMut<'a, K, V>(
+    PhantomData<&'a mut ()>,
+    PhantomData<K>,
+    PhantomData<V>,
+);
+impl<'a, K: 'a, V: 'a> Iterator for EmptyIterMut<'a, K, V> {
+    type Item = (&'a K, &'a mut V);
+    fn next(&mut self) -> Option<Self::Item> { None }
+}
+pub trait KeyOrVal<K, V> {
+    fn key(&self) -> Option<&K>;
+    fn val(&self) -> Option<&V>;
+}
+pub trait MapRec<'a, K, V, KV>: Map<K, KV> where KV: KeyOrVal<K, V> + 'a {
+    fn get_recursive(&'a self, k: &K) -> Option<&'a V> {
+        match self.get(k) {
+            Some(kv) => match kv.key() {
+                Some(k2) => self.get_recursive(k2),
+                None => kv.val(),
+            },
+            None => None,
+        }
+    }
+}
+impl<'a, K: Hash + Eq, V, KV> MapRec<'a, K, V, KV> for HashMap<K, KV> where KV: KeyOrVal<K, V> + 'a {}
+impl<'a, K: Ord, V, KV> MapRec<'a, K, V, KV> for BTreeMap<K, KV> where KV: KeyOrVal<K, V> + 'a {}
+#[derive(Clone, Debug)]
+pub enum Recursive<K, V> {
+    Key(K),
+    Val(V),
+}
+impl<K, V> KeyOrVal<K, V> for Recursive<K, V> {
+    fn key(&self) -> Option<&K> {
+        match self {
+            Self::Key(k) => Some(k),
+            Self::Val(_) => None,
+        }
+    }
+    fn val(&self) -> Option<&V> {
+        match self {
+            Self::Key(_) => None,
+            Self::Val(v) => Some(v),
+        }
+    }
+}
+File: src/alt.rs
+use crate::prelude::*;
+use std::{
+    borrow::Cow,
+    fmt::Debug,
+};
+#[derive(Clone, Debug)]
+pub enum Alt<S> {
+    Specific(Option<S>),
+    Unspecified,
+}
+impl<S> Default for Alt<S> {
+    fn default() -> Self {
+        Alt::Unspecified
+    }
+}
+impl<S> From<Option<S>> for Alt<S> {
+    fn from(opt: Option<S>) -> Self {
+        Self::Specific(opt)
+    }
+}
+impl<S> Alt<S> {
+    pub fn is_unspecified(&self) -> bool {
+        match self {
+            Self::Unspecified => true,
+            _ => false,
+        }
+    }
+    pub fn is_none(&self) -> bool {
+        match self {
+            Self::Specific(None) => true,
+            _ => false,
+        }
+    }
+    pub fn is_some(&self) -> bool {
+        match self {
+            Self::Specific(Some(_)) => true,
+            _ => false,
+        }
+    }
+}
+#[derive(Clone, Debug)]
+pub enum DefAlt<D, G> {
+    Default(D),
+    Given(G),
+    None,
+}
+impl<D, G> Default for DefAlt<D, G> {
+    fn default() -> Self {
+        DefAlt::None
+    }
+}
+impl<D, G> From<Option<G>> for DefAlt<D, G> {
+    fn from(opt: Option<G>) -> Self {
+        match opt {
+            Some(g) => DefAlt::Given(g),
+            None => DefAlt::None,
+        }
+    }
+}
+impl<D, G> From<Alt<G>> for DefAlt<D, G> {
+    fn from(alt: Alt<G>) -> Self {
+        match alt {
+            Alt::Specific(Some(g)) => DefAlt::Given(g),
+            _ => DefAlt::None,
+        }
+    }
+}
+impl<D, G> DefAlt<D, G> {
+    pub fn is_none(&self) -> bool {
+        match self {
+            Self::None => true,
+            _ => false,
+        }
+    }
+    pub fn is_some(&self) -> bool {
+        match self {
+            Self::None => false,
+            _ => true,
+        }
+    }
+}
+impl<
+    D: Clone + Debug,
+    G: Clone + Debug,
+>
+    DefAlt<D, G>
+{
+    pub fn from_or<'a>(&'a self, or: Override<D, G>) -> Cow<'a, Self> {
+        match or {
+            Override::PassThrough       => Cow::Borrowed(self),
+            Override::Default(inner)    => Cow::Owned(Self::Default(inner)),
+            Override::Given(inner)      => Cow::Owned(Self::Given(inner)),
+            Override::None              => Cow::Owned(Self::None),
+        }
+    }
+}
+#[derive(Clone, Debug)]
+pub enum Override<D, G> {
+    PassThrough,
+    Default(D),
+    Given(G),
+    None,
+}
+impl<D, G> Override<D, G> {
+    pub fn is_some(&self) -> bool {
+        match self {
+            Self::None | Self::PassThrough => false,
+            _ => true,
+        }
+    }
+}
+#[derive(Clone, Debug)]
+pub enum Gnomon<T> {
+    Known(T),
+    Unknown,
+}
+impl<T> Gnomon<T> {
+    pub fn required(&self, value_name: &str) -> Outcome<&T> {
+        match self {
+            Self::Known(v) => Ok(v),
+            Self::Unknown => Err(err!(
+                "A known value of {} is required.", value_name;
+            Data, Missing)),
+        }
+    }
+}
+File: src/string.rs
+use crate::{
+    prelude::*,
+    byte::B32,
+};
+use std::fmt;
+pub fn contains_str(target: &'static str, list: &[&'static str]) -> bool {
+    for &s in list {
+        if s == target {
+            return true;
+        }
+    }
+    false
+}
+pub fn inspect(s: &str, n: usize) {
+    for (i, c) in s.chars().enumerate() {
+        println!("Character {}: '{}' (U+{:04X})", i, c, c as u32);
+        if i >= n {
+            break; 
+        }
+    }
+}
+pub trait ToHexString: std::fmt::LowerHex + Copy + Sized {
+    fn to_hex_string(&self) -> String {
+        to_hex_string(*self)
+    }
+}
+fn to_hex_string<T: std::fmt::LowerHex>(v: T) -> String {
+    let max_digits = std::mem::size_of::<T>() * 2;
+    format!("{:0width$x}", v, width = max_digits)
+}
+impl ToHexString for B32 {
+    fn to_hex_string(&self) -> String {
+        format!("{:x}", self)
+    }
+}
+impl fmt::LowerHex for B32 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for byt in &self.0 {
+            write!(f, "{:02x}", byt)?;
+        }
+        Ok(())
+    }
+}
+impl ToHexString for usize {
+    fn to_hex_string(&self) -> String {
+        format!("{:x}", self)
+    }
+}
+pub fn parse_hex_char(c: char) -> Outcome<u8> {
+    match c {
+        '0'..='9' => Ok(c as u8 - b'0'),
+        'a'..='f' => Ok(c as u8 - b'a' + 10),
+        'A'..='F' => Ok(c as u8 - b'A' + 10),
+        _ => Err(err!(
+            "'{}' is not a valid hexadecimal digit.", c;
+        Invalid, Input, String, Decode)),
+    }
+}
+File: src/count.rs
+use crate::{
+    prelude::*,
+    int::{
+        Bound,
+        One,
+        Zero,
+    },
+};
+use std::{
+    fmt,
+    ops::{
+        Add,
+        Div,
+        Mul,
+        Sub,
+    },
+};
+#[derive(Clone, Debug, Default)]
+pub struct ErrorWhen {
+    cnt: usize,   
+    lim: usize,   
+}
+impl ErrorWhen {
+    pub fn new(lim: usize) -> Self {
+        Self {
+            cnt: 0,
+            lim,
+        }
+    }
+    pub fn inc(&mut self) -> Outcome<()> {
+        if self.cnt == self.lim.saturating_sub(1) {
+            Err(err!(
+                "Counter reached limit of {}.", self.lim;
+            LimitReached))
+        } else {
+            self.cnt += 1;
+            Ok(())
+        }
+    }                                   
+}
+#[derive(Clone, Debug, Default)]
+pub struct TrueWhen {
+    cnt: usize,   
+    lim: usize,   
+}
+impl TrueWhen {
+    pub fn new(lim: usize) -> Self {
+        Self {
+            cnt: 0,
+            lim,
+        }
+    }
+    pub fn inc(&mut self) -> bool {
+        if self.cnt == self.lim.saturating_sub(1) {
+            true
+        } else {
+            self.cnt += 1;
+            false
+        }
+    }                                   
+}
+#[derive(Clone, Debug)]
+pub struct Counter<
+    T: Clone
+    + Copy
+    + fmt::Debug
+    + fmt::Display
+    + PartialOrd
+    + Ord
+    + Add<Output = T>
+    + Sub<Output = T>
+    + Mul<Output = T>
+    + Div<Output = T>
+    + Bound
+    + One
+    + Zero
+> {
+    start:      T,
+    end:        T,
+    delta:      T,
+    current:    T,
+}
+impl<
+    T: Clone
+    + Copy
+    + fmt::Debug
+    + fmt::Display
+    + PartialOrd
+    + Ord
+    + Add<Output = T>
+    + Sub<Output = T>
+    + Mul<Output = T>
+    + Div<Output = T>
+    + Bound
+    + One
+    + Zero
+>
+    Default for Counter<T>
+{
+    fn default() -> Self {
+        Self {
+            start:      T::zero(),
+            end:        T::max_size(),
+            delta:      T::one(),
+            current:    T::zero(),
+        }
+    }
+}
+impl<
+    T: Clone
+    + Copy
+    + fmt::Debug
+    + fmt::Display
+    + PartialOrd
+    + Ord
+    + Add<Output = T>
+    + Sub<Output = T>
+    + Mul<Output = T>
+    + Div<Output = T>
+    + Bound
+    + One
+    + Zero
+>
+    Counter<T>
+{
+    pub fn new(
+        start:  T,
+        end:    T,
+        delta:  T,
+    )
+        -> Outcome<Self>
+    {
+        if start >= end {
+            return Err(err!(
+                "The end {} should be after the start {}.", end, start;
+            Input, Invalid, Order, Integer));
+        }
+        let d = (end - start) / delta;
+        if start + d * delta != end {
+            return Err(err!(
+                "The range [{}, {}] is not divisible by the given delta {}.",
+                start, end, delta;
+            Input, Invalid, Divisibility, Integer));
+        }
+        Ok(Self {
+            start,
+            end,
+            delta,
+            current: start,
+        })
+    }
+    pub fn start(&self)     -> T { self.start }
+    pub fn end(&self)       -> T { self.end }
+    pub fn delta(&self)     -> T { self.delta }
+    pub fn current(&self)   -> T { self.current }
+    pub fn next(&mut self) -> Option<T> {
+        if self.current <= self.end - self.delta {
+            self.current = self.current + self.delta;
+            Some(self.current)
+        } else {
+            None
+        }
+    }
+    pub fn prev(&mut self) -> Option<T> {
+        if self.current >= self.start + self.delta {
+            self.current = self.current - self.delta;
+            Some(self.current)
+        } else {
+            None
+        }
+    }
+}
+#[derive(Clone, Debug)]
+pub struct CycleCounter<
+    T: Clone
+    + Copy
+    + fmt::Debug
+    + fmt::Display
+    + PartialOrd
+    + Ord
+    + Add<Output = T>
+    + Sub<Output = T>
+    + Mul<Output = T>
+    + Div<Output = T>
+    + Bound
+    + One
+    + Zero
+> {
+    start:      T,
+    end:        T,
+    delta:      T,
+    current:    T,
+}
+impl<
+    T: Clone
+    + Copy
+    + fmt::Debug
+    + fmt::Display
+    + PartialOrd
+    + Ord
+    + Add<Output = T>
+    + Sub<Output = T>
+    + Mul<Output = T>
+    + Div<Output = T>
+    + Bound
+    + One
+    + Zero
+>
+    Default for CycleCounter<T>
+{
+    fn default() -> Self {
+        Self {
+            start:      T::zero(),
+            end:        T::max_size(),
+            delta:      T::one(),
+            current:    T::zero(),
+        }
+    }
+}
+impl<
+    T: Clone
+    + Copy
+    + fmt::Debug
+    + fmt::Display
+    + PartialOrd
+    + Ord
+    + Add<Output = T>
+    + Sub<Output = T>
+    + Mul<Output = T>
+    + Div<Output = T>
+    + Bound
+    + One
+    + Zero
+>
+    CycleCounter<T>
+{
+    pub fn new(
+        start:  T,
+        end:    T,
+        delta:  T,
+    )
+        -> Outcome<Self>
+    {
+        if start >= end {
+            return Err(err!(
+                "The end {} should be after the start {}.", end, start;
+            Input, Invalid, Order, Integer));
+        }
+        let d = (end - start) / delta;
+        if start + d * delta != end {
+            return Err(err!(
+                "The range [{}, {}] is not divisible by the given delta {}.",
+                start, end, delta;
+            Input, Invalid, Divisibility, Integer));
+        }
+        Ok(Self {
+            start,
+            end,
+            delta,
+            current: start,
+        })
+    }
+    pub fn start(&self)     -> T { self.start }
+    pub fn end(&self)       -> T { self.end }
+    pub fn delta(&self)     -> T { self.delta }
+    pub fn current(&self)   -> T { self.current }
+    pub fn next(&mut self) -> T {
+        if self.current <= self.end - self.delta {
+            self.current = self.current + self.delta;
+            self.current
+        } else {
+            self.current = self.start;
+            self.current
+        }
+    }
+    pub fn prev(&mut self) -> T {
+        if self.current >= self.start + self.delta {
+            self.current = self.current - self.delta;
+            self.current
+        } else {
+            self.current = self.end;
+            self.current
+        }
+    }
+}
+File: src/macros/error.rs
+#[macro_export]
+macro_rules! errmsg {
+    () => (
+        format!("{}:{}", file!(), line!())
+    );
+    ($($arg:tt)*) => (
+        format!("{}:{}: {}", file!(), line!(), format!($($arg)*))
+    )
+}
+#[macro_export]
+macro_rules! err {
+    ($msg:expr; $($tag:ident),+) => {
+        Error::Local(ErrMsg {
+            msg: format!("{}:{}: {}", file!(), line!(), $msg),
+            tags: &[$(ErrTag::$tag),+],
+        })
+    };
+    ($fmt:literal, $($arg:expr),+; $($tag:ident),+) => {
+        Error::Local(ErrMsg {
+            msg: format!("{}:{}: {}", file!(), line!(), format!($fmt, $($arg),+)),
+            tags: &[$(ErrTag::$tag),+],
+        })
+    };
+    ($err:expr, $msg:expr; $($tag:ident),+) => {
+        Error::Upstream(std::sync::Arc::new($err), ErrMsg {
+            msg: format!("{}:{}: {}", file!(), line!(), $msg),
+            tags: &[$(ErrTag::$tag),+],
+        })
+    };
+    ($err:expr, $fmt:literal, $($arg:expr),+; $($tag:ident),+) => {
+        Error::Upstream(std::sync::Arc::new($err), ErrMsg {
+            msg: format!("{}:{}: {}", file!(), line!(), format!($fmt, $($arg),+)),
+            tags: &[$(ErrTag::$tag),+],
+        })
+    };
+}
+#[macro_export]
+macro_rules! ok {
+    ($expr:expr) => {
+        ($expr)?
+    };
+}
+#[macro_export]
+macro_rules! res {
+    ($res:expr, $($etvars:ident),* $(,)?) => {
+        match $res {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(Error::Upstream(std::sync::Arc::new(e), ErrMsg {
+                    tags: &[ $(ErrTag::$etvars),* ],
+                    msg: errmsg!(),
+                }));
+            },
+        }
+    };
+    ($res:expr, $($enum:ident::$etvars:ident),* $(,)?) => {
+        match $res {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(Error::Upstream(std::sync::Arc::new(e), ErrMsg {
+                    tags: &[ $($enum::$etvars),* ],
+                    msg: errmsg!(),
+                }));
+            },
+        }
+    };
+    ($res:expr) => {
+        match $res {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(Error::Upstream(std::sync::Arc::new(e), ErrMsg {
+                    tags: &[],
+                    msg: errmsg!(),
+                }));
+            },
+        }
+    }
+}
+#[macro_export]
+macro_rules! catch {
+    ($res:expr, $($etvars:ident),* $(,)?) => {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            $res
+        })) {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => return Err(Error::Upstream(std::sync::Arc::new(e), ErrMsg {
+                tags: &[ $(ErrTag::$etvars),* ],
+                msg: errmsg!(),
+            })),
+            Err(cause) => {
+                let msg = if let Some(s) = cause.downcast_ref::<&str>() {
+                    s
+                } else if let Some(s) = cause.downcast_ref::<String>() {
+                    s.as_str()
+                } else if let Some(box_any) = cause.downcast_ref::<Box<dyn std::any::Any + Send + Sync>>() {
+                    if let Some(string) = box_any.downcast_ref::<String>() {
+                        string.as_str()
+                    } else {
+                        "A panic occurred, but the message is not a string."
+                    }
+                } else {
+                    "A panic occurred, but the message could not be extracted."
+                };
+                return Err(Error::Local(ErrMsg {
+                    tags: &[ ErrTag::Panic, $(ErrTag::$etvars),* ],
+                    msg: errmsg!("A panic occurred: {}", msg),
+                }));
+            },
+        }
+    };
+    ($res:expr) => {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            $res
+        })) {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => {
+                return Err(Error::Upstream(std::sync::Arc::new(e), ErrMsg {
+                    tags: &[],
+                    msg: errmsg!(),
+                }));
+            },
+            Err(cause) => {
+                let msg = if let Some(s) = cause.downcast_ref::<&str>() {
+                    s
+                } else if let Some(s) = cause.downcast_ref::<String>() {
+                    s.as_str()
+                } else if let Some(box_any) = cause.downcast_ref::<Box<dyn std::any::Any + Send + Sync>>() {
+                    if let Some(string) = box_any.downcast_ref::<String>() {
+                        string.as_str()
+                    } else {
+                        "A panic occurred, but the message is not a string."
+                    }
+                } else {
+                    "A panic occurred, but the message could not be extracted."
+                };
+                return Err(Error::Local(ErrMsg {
+                    tags: &[ ErrTag::Panic ],
+                    msg: errmsg!("A panic occurred: {}", msg),
+                }));
+            },
+        }
+    }
+}
+#[macro_export]
+macro_rules! catch_other {
+    ($res:expr, $($etvars:ident),* $(,)?) => {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            $res
+        })) {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => return Err(Error::Other(
+                ErrMsg {
+                    tags: &[ErrTag::Upstream],
+                    msg: e.to_string(),
+                }
+            )),
+            Err(cause) => {
+                let msg = if let Some(s) = cause.downcast_ref::<&str>() {
+                    s
+                } else if let Some(s) = cause.downcast_ref::<String>() {
+                    s.as_str()
+                } else if let Some(box_any) = cause.downcast_ref::<Box<dyn std::any::Any + Send + Sync>>() {
+                    if let Some(string) = box_any.downcast_ref::<String>() {
+                        string.as_str()
+                    } else {
+                        "A panic occurred, but the message is not a string."
+                    }
+                } else {
+                    "A panic occurred, but the message could not be extracted."
+                };
+                return Err(Error::Local(ErrMsg {
+                    tags: &[ ErrTag::Panic, $(ErrTag::$etvars),* ],
+                    msg: errmsg!("A panic occurred: {}", msg),
+                }));
+            },
+        }
+    };
+    ($res:expr) => {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            $res
+        })) {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => return Err(Error::Other(
+                ErrMsg {
+                    tags: &[ErrTag::Upstream],
+                    msg: e.to_string(),
+                }
+            )),
+            Err(cause) => {
+                let msg = if let Some(s) = cause.downcast_ref::<&str>() {
+                    s
+                } else if let Some(s) = cause.downcast_ref::<String>() {
+                    s.as_str()
+                } else if let Some(box_any) = cause.downcast_ref::<Box<dyn std::any::Any + Send + Sync>>() {
+                    if let Some(string) = box_any.downcast_ref::<String>() {
+                        string.as_str()
+                    } else {
+                        "A panic occurred, but the message is not a string."
+                    }
+                } else {
+                    "A panic occurred, but the message could not be extracted."
+                };
+                return Err(Error::Local(ErrMsg {
+                    tags: &[ ErrTag::Panic ],
+                    msg: errmsg!("A panic occurred: {}", msg),
+                }));
+            },
+        }
+    }
+}
+File: src/macros/test.rs
+#[macro_export]
+macro_rules! test_it {
+    ($filter:expr, $name:literal, $($tag:literal),* $(,)? { $($code:tt)* }) => {
+        match $filter {
+            $($tag)|* | $name => {
+                test!("'{}' test...", $name);
+                let _outcome = res! ( Outcome::Ok( { $($code)* } ) );
+            },
+            _ => (),
+        }
+    };
+}
+#[macro_export]
+macro_rules! req {
+    ($left:expr, $right:expr, $($arg:tt)*) => {
+        if $left != $right {
+            return Err(Error::Local(ErrMsg {
+                tags: &[ErrTag::Test, ErrTag::Mismatch],
+                msg: errmsg!(
+                    "Left value {:?} does not match right value {:?}: {}",
+                    $left, $right, fmt!($($arg)*),
+                ),
+            }));
+        }
+    };
+    ($left:expr, $right:expr $(,)?) => {
+        if $left != $right {
+            return Err(Error::Local(ErrMsg {
+                tags: &[ErrTag::Test, ErrTag::Mismatch],
+                msg: errmsg!("Left value {:?} does not match right value {:?}", $left, $right),
+            }));
+        }
+    }
+}
+File: src/macros/sync.rs
+#[macro_export]
+macro_rules! lock_read {
+    ($locked:expr, $($arg:tt)*) => {
+        match $locked.read() {
+            Err(_) => {
+                return Err(Error::Local(ErrMsg {
+                    tags: &[ErrTag::Lock, ErrTag::Poisoned, ErrTag::Read],
+                    msg: errmsg!($($arg)*),
+                }));
+            },
+            Ok(v) => v,
+        }
+    };
+    ($locked:expr) => {
+        match $locked.read() {
+            Err(_) => {
+                return Err(Error::Local(ErrMsg {
+                    tags: &[ErrTag::Lock, ErrTag::Poisoned, ErrTag::Read],
+                    msg: errmsg!("While locking {:?} for reading", $locked),
+                }));
+            },
+            Ok(v) => v,
+        }
+    }
+}
+#[macro_export]
+macro_rules! lock_write {
+    ($locked:expr, $($arg:tt)*) => {
+        match $locked.write() {
+            Err(_) => {
+                return Err(Error::Local(ErrMsg {
+                    tags: &[ErrTag::Lock, ErrTag::Poisoned, ErrTag::Write],
+                    msg: errmsg!($($arg)*),
+                }));
+            },
+            Ok(v) => v,
+        }
+    };
+    ($locked:expr) => {
+        match $locked.write() {
+            Err(_) => {
+                return Err(Error::Local(ErrMsg {
+                    tags: &[ErrTag::Lock, ErrTag::Poisoned, ErrTag::Write],
+                    msg: errmsg!("While locking {:?} for writing", $locked),
+                }));
+            },
+            Ok(v) => v,
+        }
+    }
+}
+File: src/macros/string.rs
+#[macro_export]
+macro_rules! msg {
+    () => (println!("{}:{}\n",file!(),line!()));
+    ($($arg:tt)*) => ({
+        print!("{}:{}: ",file!(),line!());
+        println!($($arg)*);
+    })
+}
+#[macro_export]
+macro_rules! fmt {
+    () => (String::from(""));
+    ($($arg:tt)*) => (format!($($arg)*));
+}
+#[macro_export]
+macro_rules! fmt_typ {
+    () => (String::from(""));
+    ($v:expr) => (oxedize_fe2o3_core::format_type($v));
+}
+#[macro_export]
+macro_rules! str {
+    () => (Stringer::from(""));
+    ($($arg:tt)*) => (Stringer::new($($arg)*));
+}
+#[macro_export]
+macro_rules! dump {
+    ($f:tt, $b:expr, $c:expr) => {
+        {
+            let mut lines: Vec<String> = Vec::new();
+            let mut line = String::new();
+            let mut i: usize = 1;
+            for e in $b {
+                line.push_str(&format!($f, e));
+                if i % $c == 0 {
+                    lines.push(line);
+                    line = String::new();
+                }
+                i += 1;
+            }
+            if line.len() > 0 {
+                lines.push(line);
+            }
+            lines
+        }
+    };
+    ($f:tt, $b:expr) => {
+        dump!($f, $b, 8);
+    };
+}
+File: src/macros/fallible.rs
+#[macro_export]
+macro_rules! try_into {
+    ($typ:tt, $expr:expr) => {
+        match TryInto::<$typ>::try_into($expr) {
+            Ok(v) => v,
+            Err(e) => return Err(err!(e,
+                "Could not convert {:?} into {:?}.", $expr, std::any::type_name::<$typ>();
+            Bug, Conversion)),
+        }
+    }
+}
+#[macro_export]
+macro_rules! try_add {
+    ($n1:expr, $n2:expr $(,)?) => {
+        match $n1.checked_add($n2) {
+            Some(result) => result,
+            None => return Err(err!(
+                "Attempt to add {} and {} (type {}) resulted in integer overflow.",
+                $n1, $n2, fmt_typ!($n1);
+            Integer, Overflow)),
+        }
+    }
+}
+#[macro_export]
+macro_rules! try_sub {
+    ($n1:expr, $n2:expr $(,)?) => {
+        match $n1.checked_sub($n2) {
+            Some(result) => result,
+            None => return Err(err!(
+                "Attempt to subtract {} from {} (type {}) resulted in integer underflow.",
+                $n2, $n1, fmt_typ!($n1);
+            Integer, Underflow)),
+        }
+    }
+}
+#[macro_export]
+macro_rules! try_mul {
+    ($n1:expr, $n2:expr $(,)?) => {
+        match $n1.checked_mul($n2) {
+            Some(result) => result,
+            None => return Err(err!(
+                "Attempt to multiply {} and {} (type {}) resulted in integer overflow.",
+                $n1, $n2, fmt_typ!($n1);
+            Integer, Overflow)),
+        }
+    }
+}
+#[macro_export]
+macro_rules! try_div {
+    ($n1:expr, $n2:expr $(,)?) => {
+        match $n1.checked_div($n2) {
+            Some(result) => result,
+            None => return Err(err!(
+                "Attempt to divide {} by {} (type {}).",
+                $n1, $n2, fmt_typ!($n1);
+            Integer, ZeroDenominator)),
+        }
+    }
+}
+#[macro_export]
+macro_rules! try_rem {
+    ($n1:expr, $n2:expr $(,)?) => {
+        match $n1.checked_rem($n2) {
+            Some(result) => result,
+            None => return Err(err!(
+                "Attempt to find the remainder when {} is divided by {} (type {}).",
+                $n1, $n2, fmt_typ!($n1);
+            Integer, ZeroDenominator)),
+        }
+    }
+}
+#[macro_export]
+macro_rules! try_range {
+    ($n:expr, $min:expr, $max:expr $(,)?) => {
+        match (&$n, &$min, &$max) {
+            (n, min, max) if std::cmp::PartialOrd::lt(n, min) || std::cmp::PartialOrd::gt(n, max) => {
+                return Err(err!(
+                    "{} is outside range [{}, {}].", $n, $min, $max;
+                Numeric, Range));
+            }
+            _ => $n,
+        }
+    };
+}
+#[macro_export]
+macro_rules! impls_for_native_integer {
+    ($t:ty, $n:literal) => {
+        impl oxedize_fe2o3_core::byte::FromBytes for $t {
+            fn from_bytes(buf: &[u8]) -> Outcome<(Self, usize)> {
+                const BYTE_LEN: usize = std::mem::size_of::<$t>();
+                if buf.len() < BYTE_LEN {
+                    return Err(err!(
+                        "Not enough bytes to decode, require at least {} \
+                        for a {}, slice is of length {}.",
+                        BYTE_LEN, std::any::type_name::<Self>(), buf.len();
+                    Bytes, Invalid, Input, Decode, Missing));
+                }
+                let n = <$t>::from_be_bytes(res!(
+                    <[u8; BYTE_LEN]>::try_from(&buf[0..BYTE_LEN]),
+                    Decode, Bytes, Integer,
+                ));
+                Ok((n, BYTE_LEN))
+            }
+        }
+        impl oxedize_fe2o3_core::byte::FromByteArray for $t {
+            fn from_byte_array<const L: usize>(buf: [u8; L]) -> Outcome<Self> {
+                const BYTE_LEN: usize = std::mem::size_of::<$t>();
+                if L < BYTE_LEN {
+                    return Err(err!(
+                        "Not enough bytes to decode, require at least {} \
+                        for a {}, array is of length {}.",
+                        BYTE_LEN, std::any::type_name::<Self>(), L;
+                    Bytes, Invalid, Input, Decode, Missing));
+                }
+                Ok(<$t>::from_be_bytes(res!(
+                    <[u8; BYTE_LEN]>::try_from(&buf[0..BYTE_LEN]),
+                    Decode, Bytes, Integer,
+                )))
+            }
+        }
+        impl oxedize_fe2o3_core::byte::ToBytes for $t {
+            fn to_bytes(&self, mut buf: Vec<u8>) -> Outcome<Vec<u8>> {
+                buf.extend_from_slice(&self.to_be_bytes());
+                Ok(buf)
+            }
+        }
+        impl oxedize_fe2o3_core::byte::ToByteArray<$n> for $t {
+            fn to_byte_array(&self) -> [u8; $n] {
+                self.to_be_bytes()
+            }
+        }
+        impl oxedize_fe2o3_core::string::ToHexString for $t {}
+    }
+}
+File: src/macros/meta.rs
+#[macro_export]
+macro_rules! new_type {
+    ($newtyp:ident, $wrapped:ty, $($derive:ty),* $(,)?) => {
+        #[repr(transparent)]
+        #[derive($($derive),*)]
+        pub struct $newtyp(pub $wrapped);
+        impl std::ops::Deref for $newtyp {
+            type Target = $wrapped;
+            fn deref(&self) -> &Self::Target {
+                &self.0
+            }
+        }
+        impl std::ops::DerefMut for $newtyp {
+            fn deref_mut(&mut self) -> &mut Self::Target {
+                &mut self.0
+            }
+        }
+        impl oxedize_fe2o3_core::conv::IntoInner for $newtyp {
+            type Inner = $wrapped;
+            fn into_inner(self) -> Self::Inner {
+                self.0
+            }
+        }
+    };
+    ($newtyp:ident, $wrapped:ty) => {
+        #[repr(transparent)]
+        pub struct $newtyp(pub $wrapped);
+        impl std::ops::Deref for $newtyp {
+            type Target = $wrapped;
+            fn deref(&self) -> &Self::Target {
+                &self.0
+            }
+        }
+        impl std::ops::DerefMut for $newtyp {
+            fn deref_mut(&mut self) -> &mut Self::Target {
+                &mut self.0
+            }
+        }
+        impl oxedize_fe2o3_core::conv::IntoInner for $newtyp {
+            type Inner = $wrapped;
+            fn into_inner(self) -> Self::Inner {
+                self.0
+            }
+        }
+    };
+}
+#[macro_export]
+macro_rules! new_type_priv {
+    ($newtyp:ident, $wrapped:ty, $($derive:ty),* $(,)?) => {
+        #[repr(transparent)]
+        #[derive($($derive),*)]
+        pub struct $newtyp($wrapped);
+        impl std::ops::Deref for $newtyp {
+            type Target = $wrapped;
+            fn deref(&self) -> &Self::Target {
+                &self.0
+            }
+        }
+        impl oxedize_fe2o3_core::conv::IntoInner for $newtyp {
+            type Inner = $wrapped;
+            fn into_inner(self) -> Self::Inner {
+                self.0
+            }
+        }
+    };
+    ($newtyp:ident, $wrapped:ty) => {
+        #[repr(transparent)]
+        pub struct $newtyp($wrapped);
+        impl std::ops::Deref for $newtyp {
+            type Target = $wrapped;
+            fn deref(&self) -> &Self::Target {
+                &self.0
+            }
+        }
+        impl oxedize_fe2o3_core::conv::IntoInner for $newtyp {
+            type Inner = $wrapped;
+            fn into_inner(self) -> Self::Inner {
+                self.0
+            }
+        }
+    };
+}
+#[macro_export]
+macro_rules! new_type_gen {
+    ($newtyp:ident, $($bound:ident),* ; $($derive:ty),* $(,)? ) => {
+        #[derive($($derive),*)]
+        pub struct $newtyp<N: $($bound)+>(pub N);
+        impl<N: $($bound)+> std::ops::Deref for $newtyp<N> {
+            type Target = N;
+            fn deref(&self) -> &Self::Target {
+                &self.0
+            }
+        }
+    }
+}
+#[macro_export]
+macro_rules! new_enum {
+    ($name:ident; $($variant:ident $(($($field:expr),+))?,)*) => {
+        impl $name {
+            const fn variants() -> [$name; 0 $(+ (1 $(+ <[()]>::len(&[$($field),+]))?))*] {
+                [$($name::$variant $(($($field),+))?),*]
+            }
+            const fn num_of_variants() -> usize {
+                0 $(+ (1 $(+ <[()]>::len(&[$($field),+]))?))*
+            }
+        }
+    }
+}
+File: src/prelude.rs
+pub use crate::{
+    self as oxedize_fe2o3_core,
+    byte::B32,
+    Outcome,
+    GenTag,
+    err,
+    errmsg,
+    ok,
+    res,
+    catch,
+    catch_other,
+    try_into,
+    try_add,
+    try_sub,
+    try_mul,
+    try_div,
+    try_rem,
+    try_range,
+    new_enum,
+    new_type,
+    dump,
+    fmt,
+    fmt_typ,
+    msg,
+    str,
+    lock_read,
+    lock_write,
+    req,
+    test_it,
+};
+pub use crate::error::{
+    Error,
+    ErrMsg,
+    ErrTag,
+};
+pub use crate::{
+    log,
+    error,
+    fault,
+    warn,
+    info,
+    test,
+    debug,
+    trace,
+    log_finish,
+    log_finish_wait,
+    log_in_finish_wait,
+    log_out_finish_wait,
+    log_get_level,
+    log_get_config,
+    log_set_level,
+    log_set_config,
+    set_log_out,
+    log_get_file_path,
+    log_get_streams,
+    log::{
+        base::{
+            LOG,
+            LogLevel,
+        },
+        bot::{
+            self as bot_log,
+            LogBot,
+        },
+        stream::{
+            async_log,
+            sync_log,
+        },
+    },
+};
+pub use std::str::FromStr;
+pub use crate::conv::IntoInner;
+File: src/cfg.rs
+use crate::file::Loadable;
+use std::path::PathBuf;
+#[derive(Debug)]
+pub enum ConfigInit<C: Loadable> {
+    Data(C),
+    Path(PathBuf),
+}
+File: src/mem.rs
+pub trait Extract: Default {
+    fn extract(&mut self) -> Self;
+}
+impl<T: Default> Extract for T {
+    fn extract(&mut self) -> Self {
+        std::mem::replace(self, T::default())
+    }
+}
+File: src/ord.rs
+use std::cmp;
+#[derive(Debug, Eq, PartialEq, Copy, Clone)]
+pub enum Relation {
+    Less,
+    Equal,
+    Greater,
+    Complement,
+}
+impl Relation {
+    pub fn reverse(self) -> Self {
+        match self {
+            Self::Less => Self::Greater,
+            Self::Greater => Self::Less,
+            _ => self,
+        }
+    }
+    pub fn ordering(cmp: cmp::Ordering) -> Self {
+        match cmp {
+            cmp::Ordering::Less => Self::Less,
+            cmp::Ordering::Greater => Self::Greater,
+            cmp::Ordering::Equal => Self::Equal,
+        }
+    }
+}
+#[derive(Clone, Debug)]
+pub struct Ordered<V: Ord + PartialOrd, N: Ord + PartialOrd> {
+    val: V,
+    ord: N,
+}
+impl<
+    V: Ord + PartialOrd,
+    N: Ord + PartialOrd,
+>
+    Ordered<V, N>
+{
+    pub fn new(val: V, ord: N) -> Self {
+        Self {
+            val,
+            ord,
+        }
+    }
+}
+pub fn ord_string(n: usize) -> String {
+    let suffix = match n % 10 {
+        1 if n % 100 != 11 => "st",
+        2 if n % 100 != 12 => "nd",
+        3 if n % 100 != 13 => "rd",
+        _ => "th",
+    };
+    format!("{}{}", n, suffix)
+}
+File: src/path.rs
+use crate::{
+    prelude::*,
+    new_type_priv,
+};
+use std::{
+    ops::Deref,
+    path::{
+        Component,
+        Path,
+        PathBuf,
+    },
+};
+pub fn is_filename(name: &str) -> bool {
+    !name.contains(std::path::MAIN_SEPARATOR) &&
+    cfg!(not(windows)) || !name.contains('/')
+}
+pub trait NormalPath {
+    fn normalise(&self) -> NormPathBuf;
+}
+new_type_priv!(NormPathBuf, PathBuf, Clone, Debug);
+impl NormPathBuf {
+    pub fn escapes(&self) -> bool {
+        match self.components().next() {
+            Some(std::path::Component::ParentDir) => true,
+            _ => false,
+        }
+    }
+    pub fn remove_relative(self) -> Self {
+        let mut components = self.0.components();
+        let mut pbuf = PathBuf::new();
+        loop {
+            let component = components.next();
+            match component {
+                Some(Component::CurDir) | Some(Component::ParentDir) => continue,
+                _ => {
+                    pbuf.extend(component);
+                    pbuf.extend(components);
+                    break
+                },
+            }
+        }
+        Self(pbuf)
+    }
+    pub fn absolute(self) -> Self {
+        let path = self.remove_relative();
+        let mut components = path.0.components();
+        match components.next() {
+            Some(Component::RootDir) => path,
+            component => {
+                let mut pbuf = PathBuf::from("/");
+                pbuf.extend(component);
+                pbuf.extend(components);
+                Self(pbuf)
+            },
+        }
+    }
+    pub fn join(mut self, rel_path: Self) -> Self {
+        self.0.push(rel_path.0);
+        Self(self.0)
+    }
+    pub fn as_pathbuf(self) -> PathBuf { self.0 }
+}
+impl<T: ?Sized> AsRef<T> for NormPathBuf where <NormPathBuf as Deref>::Target: AsRef<T> {
+    fn as_ref(&self) -> &T {
+        self.deref().as_ref()
+    }
+}
+impl NormalPath for Path {
+    fn normalise(&self) -> NormPathBuf {
+        let mut normalised = PathBuf::new();
+        let mut first = true;
+        for component in self.components() {
+            match component {
+                Component::RootDir => {
+                    normalised.push(".");
+                },
+                Component::ParentDir => {
+                    if normalised.as_os_str().is_empty() || normalised == Path::new("..")
+                    {
+                        normalised.push(component.as_os_str());
+                    } else if normalised == Path::new(".") {
+                        normalised.pop();
+                        normalised.push(component.as_os_str());
+                    } else {
+                        normalised.pop();
+                    }
+                },
+                Component::CurDir => {
+                    if first {
+                        normalised.push(component.as_os_str());
+                    }
+                },
+                _ => { 
+                    if first {
+                        normalised.push(".");
+                    }
+                    normalised.push(component.as_os_str());
+                },
+            }
+            if first {
+                first = false;
+            }
+        }
+        NormPathBuf(normalised)
+    }
+}
+File: src/byte.rs
+use crate::{
+    prelude::*,
+    id::ParseId,
+    impls_for_native_integer,
+    string::{
+        parse_hex_char,
+        ToHexString,
+    },
+};
+use std::{
+    cmp::Ordering,
+    fmt,
+};
+pub fn byte_slices_equal(a: &[u8], b: &[u8]) -> Outcome<()> {
+    for (i, ai) in a.iter().enumerate() {
+        if *ai != b[i] {
+            return Err(err!("Mismatch detected"; Input, Mismatch));
+        }
+    }
+    Ok(())
+}
+new_type!(B32, [u8; 32], Clone, Default);
+impl std::marker::Copy for B32 {}
+impl fmt::Debug for B32 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.to_hex_string())
+    }
+}
+impl fmt::Display for B32 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self.0)
+    }
+}
+impl ParseId<32> for B32 {
+    fn parse_id(s: &str) -> Outcome<Self> {
+        let s = s.trim_start_matches("0x");
+        if s.len() != 64 {
+            return Err(err!(
+                "The hexadecimal string '{}' has length {}, but it should be 64 for a B32.",
+                s, s.len();
+            Invalid, Input, String, Size));
+        }
+        if !s.is_ascii() {
+            return Err(err!(
+                "The hexadecimal string '{}' contains at least one non-ASCII character.", s;
+            Invalid, Input, String));
+        }
+        let mut result = [0u8; 32];
+        let mut hex_chars = s.chars();
+        let mut count: usize = 0;
+        for byt in result.iter_mut() {
+            count += 1;
+            let hc = match hex_chars.next() {
+                Some(c) => c,
+                None => return Err(err!(
+                    "Expecting a character at position {} in the hexadecimal string '{}', \
+                    but it was not found.", count, s;
+                Invalid, Input, String)),
+            };
+            let high_nibble = res!(parse_hex_char(hc));
+            count += 1;
+            let hc = match hex_chars.next() {
+                Some(c) => c,
+                None => return Err(err!(
+                    "Expecting a character at position {} in the hexadecimal string '{}', \
+                    but it was not found.", count, s;
+                Invalid, Input, String)),
+            };
+            let low_nibble = res!(parse_hex_char(hc));
+            *byt = high_nibble << 4 | low_nibble;
+        }
+        Ok(Self(result))
+    }
+}
+impl Eq for B32 {}
+impl PartialEq for B32 {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl Ord for B32 {
+    fn cmp(&self, other: &Self) -> Ordering {
+        (self.0).iter().zip((other.0).iter()).fold(Ordering::Equal, |acc, (a, b)| {
+            if a < b {
+                Ordering::Less
+            } else if a > b {
+                Ordering::Greater
+            } else {
+                acc
+            }
+        })
+    }
+}
+impl PartialOrd for B32 {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+pub trait IntoBytes {
+    fn into_bytes(self, buf: Vec<u8>) -> Outcome<Vec<u8>>;
+}
+pub trait FromBytes {
+    fn from_bytes(buf: &[u8]) -> Outcome<(Self, usize)> where Self: Sized;
+    fn too_few(
+        nbyts:      usize,
+        minbyts:    usize,
+        desc:       &str,
+        file:       &'static str,
+        line:       u32,
+    )
+        -> Error<ErrTag>
+    {
+        err!(fmt!("{}:{}: Only {} byte{}, require at least {} to decode the {}.",
+            file, line, nbyts, if nbyts == 1 { "" } else { "s" }, minbyts, desc,
+        ); Bytes, Input, Decode, Missing)
+    }
+}
+pub trait ToBytes {
+    fn to_bytes(&self, buf: Vec<u8>) -> Outcome<Vec<u8>>;
+}
+pub trait FromByteArray: Sized {
+    fn from_byte_array<const L: usize>(buf: [u8; L]) -> Outcome<Self>;
+}
+pub trait ToByteArray<const L: usize> {
+    fn to_byte_array(&self) -> [u8; L];
+}
+impls_for_native_integer!(u8, 1);
+impls_for_native_integer!(u16, 2);
+impls_for_native_integer!(u32, 4);
+impls_for_native_integer!(u64, 8);
+impls_for_native_integer!(u128, 16);
+impls_for_native_integer!(i8, 1);
+impls_for_native_integer!(i16, 2);
+impls_for_native_integer!(i32, 4);
+impls_for_native_integer!(i64, 8);
+impls_for_native_integer!(i128, 16);
+impl ToBytes for B32 {
+    fn to_bytes(&self, mut buf: Vec<u8>) -> Outcome<Vec<u8>> {
+        buf.extend_from_slice(&self.0);
+        Ok(buf)
+    }
+}
+impl FromBytes for B32 {
+    fn from_bytes(buf: &[u8]) -> Outcome<(Self, usize)> {
+        const BYTE_LEN: usize = 32;
+        if buf.len() < BYTE_LEN {
+            return Err(err!(
+                "Not enough bytes to decode, require at least {} \
+                for a {}, slice is of length {}.",
+                BYTE_LEN, std::any::type_name::<Self>(), buf.len();
+            Bytes, Invalid, Input, Decode, Missing));
+        }
+        let n = Self(res!(
+            <[u8; BYTE_LEN]>::try_from(&buf[0..BYTE_LEN]),
+            Decode, Bytes, Integer,
+        ));
+        Ok((n, BYTE_LEN))
+    }
+}
+impl FromByteArray for B32 {
+    fn from_byte_array<const L: usize>(buf: [u8; L]) -> Outcome<Self> {
+        const BYTE_LEN: usize = 32;
+        if L < BYTE_LEN {
+            return Err(err!(
+                "Not enough bytes to decode, require at least {} \
+                for a {}, array is of length {}.",
+                BYTE_LEN, std::any::type_name::<Self>(), L;
+            Bytes, Invalid, Input, Decode, Missing));
+        }
+        Ok(Self(res!(
+            <[u8; BYTE_LEN]>::try_from(&buf[0..BYTE_LEN]),
+            Decode, Bytes, Integer,
+        )))
+    }
+}
+impl ToByteArray<32> for B32 {
+    fn to_byte_array(&self) -> [u8; 32] {
+        **self
+    }
+}
+pub trait ToBytesMut {
+    fn to_bytes_mut(&mut self, buf: Vec<u8>) -> Outcome<Vec<u8>>;
+}
+#[allow(non_camel_case_types)] 
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Encoding {
+    Unknown = 0,
+    Binary  = 1,
+    UTF8    = 2,
+}
+impl Default for Encoding {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+impl From<u8> for Encoding {
+    fn from(b: u8) -> Self {
+        match b {
+            1 => Self::Binary,
+            2 => Self::UTF8, 
+            _ => Self::Unknown,
+        }
+    }
+}
+File: src/thread.rs
+use crate::{
+    channels::Simplex,
+};
+use std::{
+    sync::{
+        atomic::{
+            AtomicBool,
+            Ordering,
+        },
+        Arc,
+        Mutex,
+        Weak,
+    },
+    thread,
+};
+pub fn thread_channel() -> (Semaphore, Sentinel) {
+    let flag = Semaphore::new();
+    let control = flag.to_sentinel();
+    (flag, control)
+}
+#[derive(Clone, Debug)]
+pub struct ThreadController<T> {
+    pub chan: Simplex<T>,
+    pub hopt: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
+    pub sema: Semaphore,
+}
+impl<T> ThreadController<T> {
+    pub fn new(
+        chan: Simplex<T>,
+        hopt: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
+        sema: Semaphore,
+    )
+        -> Self
+    {
+        Self {
+            chan,
+            hopt,
+            sema,
+        }
+    }
+}
+#[derive(Clone, Debug, Default)]
+pub struct Semaphore {
+    alive: Arc<AtomicBool>,
+    interrupt: Arc<AtomicBool>,
+}
+impl Drop for Semaphore {
+    fn drop(&mut self) {
+        if thread::panicking() {
+            (*self.interrupt).store(true, Ordering::Relaxed)
+        }
+    }
+}
+impl Semaphore {
+    pub fn new() -> Self {
+        Self {
+            alive: Arc::new(AtomicBool::new(true)),
+            interrupt: Arc::new(AtomicBool::new(false)),
+        }
+    }
+    pub fn touch(&self) {}
+    pub fn to_sentinel(&self) -> Sentinel {
+        Sentinel {
+            alive: Arc::downgrade(&self.alive),
+            interrupt: self.interrupt.clone(),
+        }
+    }
+    pub fn alive_or_panic(&self) -> bool {
+        if (*self.interrupt).load(Ordering::Relaxed) {
+            panic!("thread interrupted by thread-contol");
+        }
+        (*self.alive).load(Ordering::Relaxed)
+    }
+    pub fn is_alive(&self) -> bool {
+        (*self.alive).load(Ordering::Relaxed) && !(*self.interrupt).load(Ordering::Relaxed)
+    }
+    pub fn interrupt(self) {
+        (self.interrupt).store(true, Ordering::Relaxed)
+    }
+}
+#[derive(Clone, Debug, Default)]
+pub struct Sentinel {
+    alive: Weak<AtomicBool>,
+    interrupt: Arc<AtomicBool>,
+}
+impl Sentinel {
+    pub fn interrupt(&self) {
+        (*self.interrupt).store(true, Ordering::Relaxed)
+    }
+    pub fn stop(&self) {
+        self.alive.upgrade().map(|flag| {
+            (*flag).store(false, Ordering::Relaxed)
+        });
+    }
+    pub fn is_finished(&self) -> bool {
+        self.alive.upgrade().is_none()
+    }
+    pub fn was_interrupted(&self) -> bool {
+        (*self.interrupt).load(Ordering::Relaxed)
+    }
+}
+File: src/file.rs
+use crate::{
+    prelude::*,
+    path::NormalPath,
+};
+use std::{
+    fmt,
+    fs::{
+        self,
+        File,
+        OpenOptions,
+    },
+    path::{
+        Path,
+        PathBuf,
+    },
+};
+#[derive(Clone, Debug)]
+pub enum OsPath {
+    Dir(PathBuf),
+    File(PathBuf),
+}
+#[derive(Clone, Copy, Debug)]
+pub enum PathState {
+    DirMustExist,
+    FileMustExist,
+    Create,
+}
+impl PathState {
+    pub fn validate(
+        &self,
+        root:       &PathBuf,
+        rel_path:   &str,
+    )
+        -> Outcome<()>
+    {
+        let rel_path = Path::new(rel_path).normalise();
+        if rel_path.escapes() {
+            return Err(err!(
+                "The relative path '{:?}' escapes the root directory.", rel_path;
+            Invalid, Input, Path));
+        }
+        let abs_path = root.clone().join(rel_path).normalise().absolute();
+        if abs_path.exists() {
+            if let Self::DirMustExist = self {
+                if !abs_path.is_dir() {
+                    return Err(err!(
+                        "Path '{:?}' exists but is not a directory.", root;
+                    Input, Invalid, File, Path));
+                }
+            }
+        } else {
+            match self {
+                Self::DirMustExist |
+                Self::FileMustExist => return Err(err!(
+                    "The path '{:?}' must exist but was not found.", abs_path;
+                Path, File, Missing)),
+                Self::Create => res!(fs::create_dir_all(&abs_path)),
+            }
+        }
+        Ok(())
+    }
+}
+pub trait Loadable {
+    fn load<P: AsRef<Path>>(path: P) -> Outcome<Self> where Self: Sized;
+}
+pub fn touch(path: &Path) -> Outcome<File> {
+    Ok(res!(
+        OpenOptions::new().create(true).write(true).open(path),
+        File, Write,
+    ))
+}
+#[derive(Debug, Default)]
+pub struct TextFileState {
+    pub path:       String,
+    pub line_num:   usize,
+}
+impl fmt::Display for TextFileState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.path, self.line_num)
+    }
+}
+File: src/rand.rs
+use crate::byte::B32;
+use std::cmp::PartialOrd;
+use rand::{
+    Rng,
+    thread_rng,
+};
+use rand_core::{
+    OsRng,
+    RngCore,
+};
+pub trait RanDef {
+    fn randef() -> Self where Self: Sized;
+}
+impl RanDef for u8 {
+    fn randef() -> Self { Rand::rand_u8() }
+}
+impl RanDef for u16 {
+    fn randef() -> Self { Rand::rand_u16() }
+}
+impl RanDef for u32 {
+    fn randef() -> Self { Rand::rand_u32() }
+}
+impl RanDef for u64 {
+    fn randef() -> Self { Rand::rand_u64() }
+}
+impl RanDef for u128 {
+    fn randef() -> Self { Rand::rand_u128() }
+}
+impl RanDef for B32 {
+    fn randef() -> Self {
+        let mut a = [0; 32];
+        Rand::fill_u8(&mut a);
+        Self(a)
+    }
+}
+pub struct Rand;
+impl Rand {
+    pub fn generate_random_string(len: usize, charset: &str) -> String {
+        let charset = charset.as_bytes();
+        let mut rng = rand::thread_rng();
+        let pass: String = (0..len)
+            .map(|_| {
+                let idx = rng.gen_range(0..charset.len());
+                charset[idx] as char
+            })
+            .collect();
+        pass
+    }
+    pub fn value<T>() -> T
+    where
+        rand::distributions::Standard: rand::distributions::Distribution<T>,
+    {
+        let mut rng = rand::thread_rng();
+        rng.gen()
+    }
+    pub fn in_range<T>(lower: T, upper: T) -> T 
+    where
+        T: PartialOrd + rand::distributions::uniform::SampleUniform
+    {
+        let mut rng = rand::thread_rng();
+        rng.gen_range(lower..=upper)
+    }    
+    pub fn rand_u8() -> u8 {
+        OsRng.next_u32() as u8
+    }
+    pub fn rand_u16() -> u16 {
+        OsRng.next_u32() as u16
+    }
+    pub fn rand_u32() -> u32 {
+        OsRng.next_u32()
+    }
+    pub fn rand_u64() -> u64 {
+        OsRng.next_u64()
+    }
+    pub fn rand_u128() -> u128 {
+        let a = OsRng.next_u64() as u128;
+        let b = (OsRng.next_u64() as u128) << 64;
+        a | b
+    }
+    pub fn fill_u8(a: &mut [u8]) {
+        thread_rng().fill(&mut a[..]);
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::prelude::*;
+    #[test]
+    fn test_generate_random_string_00() -> Outcome<()> {
+        let p1 = Rand::generate_random_string(3, "ABCDEFGHIJKLMNOPQRSTUVWXYZ");
+        let p2 = Rand::generate_random_string(3, "ABCDEFGHIJKLMNOPQRSTUVWXYZ");
+        let p3 = Rand::generate_random_string(3, "ABCDEFGHIJKLMNOPQRSTUVWXYZ");
+        msg!("{}-{}-{}", p1, p2, p3);
+        Ok(())
+    }
+}
+File: src/id.rs
+use crate::prelude::*;
+pub trait ParseId<const L: usize> {
+    fn parse_id(s: &str) -> Outcome<Self> where Self: Sized;
+}
+impl ParseId<1> for u8 {
+    fn parse_id(s: &str) -> Outcome<Self> {
+        Ok(res!(u8::from_str(s)))    
+    }
+}
+impl ParseId<2> for u16 {
+    fn parse_id(s: &str) -> Outcome<Self> {
+        Ok(res!(u16::from_str(s)))    
+    }
+}
+impl ParseId<4> for u32 {
+    fn parse_id(s: &str) -> Outcome<Self> {
+        Ok(res!(u32::from_str(s)))    
+    }
+}
+impl ParseId<8> for u64 {
+    fn parse_id(s: &str) -> Outcome<Self> {
+        Ok(res!(u64::from_str(s)))    
+    }
+}
+impl ParseId<16> for u128 {
+    fn parse_id(s: &str) -> Outcome<Self> {
+        Ok(res!(u128::from_str(s)))    
+    }
+}
+File: src/log/stream.rs
+pub mod sync_log {
+    use std::cell::RefCell;
+    thread_local! {
+        static LOG_STREAM_ID: RefCell<String> = RefCell::new(String::from("main"));
+    }
+    pub fn stream() -> String {
+        LOG_STREAM_ID.with(|s| s.borrow().clone())
+    }
+    pub fn set_stream(id: String) {
+        LOG_STREAM_ID.with(|s| *s.borrow_mut() = id);
+    }
+}
+pub mod async_log {
+    tokio::task_local! {
+        pub static LOG_STREAM_ID: String;
+    }
+    pub fn stream() -> String {
+        LOG_STREAM_ID.try_with(|s| s.clone()).unwrap_or(String::from("main"))
+    }
+}
+File: src/log/base.rs
+use crate::{
+    prelude::*,
+    channels::simplex,
+    log::{
+        bot::{
+            Config,
+            LogBot,
+            Msg,
+        },
+        console::{
+            LoggerConsole,
+            StdoutLoggerConsole,
+        },
+    },
+    thread::{
+        thread_channel,
+        ThreadController,
+    },
+};
+use oxedize_fe2o3_stds::chars::Term;
+use std::{
+    fmt,
+    str::FromStr,
+    sync::{
+        Arc,
+        Mutex,
+        RwLock,
+    },
+    thread,
+};
+use once_cell::sync::Lazy;
+pub struct Logger<ETAG: GenTag>
+    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+{
+    pub chan_in:    ThreadController<Msg<ETAG>>,
+    pub chan_out:   Arc<RwLock<ThreadController<Msg<ETAG>>>>,
+    pub cfg:        Arc<RwLock<Config<ETAG>>>,
+}
+impl<ETAG: GenTag> Logger<ETAG>
+    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+{
+    pub fn send_in(&self, msg: Msg<ETAG>) {
+        match self.chan_in.chan.send(msg.clone()) {
+            Err(e) => msg!("Error!: {} for message: {:?}", e, msg),
+            Ok(()) => (),
+        }
+    }
+    pub fn send_out(&self, msg: Msg<ETAG>) -> Outcome<()> {
+        let unlocked_chan_out = lock_read!(self.chan_out);
+        match unlocked_chan_out.chan.send(msg.clone()) {
+            Ok(()) => Ok(()),
+            Err(e) => Err(err!(e,
+                "While trying to send message: {:?}", msg;
+            IO, Channel, Write)),
+        }
+    }
+    pub fn recv_in(&self) -> Outcome<Msg<ETAG>> {
+        self.chan_in.chan.recv()
+    }
+}
+pub static LOG: Lazy<Logger<ErrTag>> = Lazy::new(|| {
+    let mut logbot = LogBot::new();
+    let mut logger_console = StdoutLoggerConsole::new();
+    let chan_out = logger_console.chan.clone();
+    let cfg = Arc::new(RwLock::new(Config{
+        file:       None,
+        level:      LogLevel::Trace,
+        console:    Some(chan_out),
+    }));
+    let chan_in = simplex::<Msg<ErrTag>>();
+    let (semaphore, _sentinel) = thread_channel();
+    match logbot.init(cfg.clone(), chan_in.clone()) {
+        Ok(()) => (),
+        Err(e) => panic!("{}", e),
+    }
+    let chan_out = logger_console.go();
+    let semaphore_clone = semaphore.clone();
+    let handle = thread::spawn(move || {
+        semaphore.touch();
+        logbot.go();
+    });
+    Logger {
+        chan_in: ThreadController::new(
+            chan_in,
+            Arc::new(Mutex::new(Some(handle))),
+            semaphore_clone,
+        ),
+        chan_out: Arc::new(RwLock::new(chan_out)),
+        cfg, 
+    }
+});
+#[derive(Clone, Copy, PartialEq, PartialOrd)]
+pub enum LogLevel {
+    None,
+    Error,
+    Warn,
+    Info,
+    Test,
+    Debug,
+    Trace,
+}
+impl Default for LogLevel {
+    fn default() -> Self {
+        Self::None
+    }
+}
+impl fmt::Display for LogLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::None => Ok(()),
+            Self::Error => write!(
+                f,
+                "{}{}ERR!{}{}",
+                Term::SET_BRIGHT_FORE_RED,
+                Term::BOLD,
+                Term::RESET,
+                Term::FORE_RED,
+            ),
+            Self::Warn => write!(
+                f,
+                "{}{}WARN{}{}",
+                Term::SET_BRIGHT_FORE_YELLOW,
+                Term::BOLD,
+                Term::RESET,
+                Term::FORE_YELLOW,
+            ),
+            Self::Info => write!(
+                f,
+                "{}{}INFO{}{}",
+                Term::SET_BRIGHT_FORE_GREEN,
+                Term::BOLD,
+                Term::RESET,
+                Term::FORE_GREEN,
+            ),
+            Self::Test => write!(
+                f,
+                "{}{}TEST{}{}",
+                Term::SET_BRIGHT_FORE_CYAN,
+                Term::BOLD,
+                Term::RESET,
+                Term::FORE_CYAN,
+            ),
+            Self::Debug => write!(
+                f,
+                "{}{}DBUG{}{}",
+                Term::SET_BRIGHT_FORE_BLUE,
+                Term::BOLD,
+                Term::RESET,
+                Term::FORE_BLUE,
+            ),
+            Self::Trace => write!(
+                f,
+                "{}{}TRCE{}{}",
+                Term::SET_BRIGHT_FORE_MAGENTA,
+                Term::BOLD,
+                Term::RESET,
+                Term::FORE_MAGENTA,
+            ),
+        }
+    }
+}
+impl fmt::Debug for LogLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::None  => Ok(()),
+            Self::Error => write!(f, "ERR!"),
+            Self::Warn  => write!(f, "WARN"),
+            Self::Info  => write!(f, "INFO"),
+            Self::Test  => write!(f, "TEST"),
+            Self::Debug => write!(f, "DBUG"),
+            Self::Trace => write!(f, "TRCE"),
+        }
+    }
+}
+impl FromStr for LogLevel {
+    type Err = Error<ErrTag>;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().trim() {
+            "error" => Ok(LogLevel::Error),
+            "warn"  => Ok(LogLevel::Warn),
+            "info"  => Ok(LogLevel::Info),
+            "test"  => Ok(LogLevel::Test),
+            "debug" => Ok(LogLevel::Debug),
+            "trace" => Ok(LogLevel::Trace),
+            _ => Err(err!(
+                "The LogLevel '{}' is not recognised, use 'trace', 'debug', \
+                'info', 'warn', or 'error'.", s;
+            Invalid, Input)),
+        }
+    }
+}
+#[derive(Clone, Debug)]
+pub struct Source {
+    pub tid:    std::thread::ThreadId,
+    pub file:   &'static str,
+    pub line:   u32,
+}
+#[derive(Debug)]
+pub enum LogWaitError {
+    LockError(String),
+    JoinError(String),
+}
+impl fmt::Display for LogWaitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LockError(msg) => write!(f, "Failed to acquire lock on logger handle: {}", msg),
+            Self::JoinError(msg) => write!(f, "Failed to join logging thread: {}", msg),
+        }
+    }
+}
+impl std::error::Error for LogWaitError {}
+File: src/log/macros.rs
+#[macro_export]
+macro_rules! log {
+    ($level:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
+        LOG.send_in(bot_log::Msg::Log {
+            level: $level,
+            src: oxedize_fe2o3_core::log::base::Source {
+                tid: std::thread::current().id(),
+                file: file!(),
+                line: line!(),
+            },
+            erropt: None,
+            msg: fmt!($lit $(, $arg)*),
+            stream: String::new(),
+        });
+    };
+    ($level:expr, $stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
+        LOG.send_in(bot_log::Msg::Log {
+            level: $level,
+            src: oxedize_fe2o3_core::log::base::Source {
+                tid: std::thread::current().id(),
+                file: file!(),
+                line: line!(),
+            },
+            erropt: None,
+            msg: fmt!($lit $(, $arg)*),
+            stream: String::from($stream),
+        });
+    };
+}
+#[macro_export]
+macro_rules! error {
+    ($e:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
+        LOG.send_in(bot_log::Msg::Log {
+            level: LogLevel::Error,
+            src: oxedize_fe2o3_core::log::base::Source {
+                tid: std::thread::current().id(),
+                file: file!(),
+                line: line!(),
+            },
+            erropt: Some($e),
+            msg: fmt!($lit $(, $arg)*),
+            stream: String::new(),
+        });
+    };
+    ($e:expr, $stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
+        LOG.send_in(bot_log::Msg::Log {
+            level: LogLevel::Error,
+            src: oxedize_fe2o3_core::log::base::Source {
+                tid: std::thread::current().id(),
+                file: file!(),
+                line: line!(),
+            },
+            erropt: Some($e),
+            msg: fmt!($lit $(, $arg)*),
+            stream: String::from($stream),
+        });
+    };
+    ($stream:expr, $e:expr) => {
+        LOG.send_in(bot_log::Msg::Log {
+            level: LogLevel::Error,
+            src: oxedize_fe2o3_core::log::base::Source {
+                tid: std::thread::current().id(),
+                file: file!(),
+                line: line!(),
+            },
+            erropt: Some($e),
+            msg: fmt!(""),
+            stream: String::from($stream),
+        });
+    };
+    ($e:expr) => {
+        LOG.send_in(bot_log::Msg::Log {
+            level: LogLevel::Error,
+            src: oxedize_fe2o3_core::log::base::Source {
+                tid: std::thread::current().id(),
+                file: file!(),
+                line: line!(),
+            },
+            erropt: Some($e),
+            msg: fmt!(""),
+            stream: String::new(),
+        });
+    };
+}
+#[macro_export]
+macro_rules! fault {
+    ($lit:literal $(, $arg:expr)* $(,)?) => {
+        LOG.send_in(bot_log::Msg::Log {
+            level: LogLevel::Error,
+            src: oxedize_fe2o3_core::log::base::Source {
+                tid: std::thread::current().id(),
+                file: file!(),
+                line: line!(),
+            },
+            erropt: None,
+            msg: fmt!($lit $(, $arg)*),
+            stream: String::new(),
+        });
+    };
+    ($stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
+        LOG.send_in(bot_log::Msg::Log {
+            level: LogLevel::Error,
+            src: oxedize_fe2o3_core::log::base::Source {
+                tid: std::thread::current().id(),
+                file: file!(),
+                line: line!(),
+            },
+            erropt: None,
+            msg: fmt!($lit $(, $arg)*),
+            stream: String::from($stream),
+        });
+    };
+}
+#[macro_export]
+macro_rules! warn {
+    ($lit:literal $(, $arg:expr)* $(,)?) => {
+        LOG.send_in(bot_log::Msg::Log {
+            level: LogLevel::Warn,
+            src: oxedize_fe2o3_core::log::base::Source {
+                tid: std::thread::current().id(),
+                file: file!(),
+                line: line!(),
+            },
+            erropt: None,
+            msg: fmt!($lit $(, $arg)*),
+            stream: String::new(),
+        });
+    };
+    ($stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
+        LOG.send_in(bot_log::Msg::Log {
+            level: LogLevel::Warn,
+            src: oxedize_fe2o3_core::log::base::Source {
+                tid: std::thread::current().id(),
+                file: file!(),
+                line: line!(),
+            },
+            erropt: None,
+            msg: fmt!($lit $(, $arg)*),
+            stream: String::from($stream),
+        });
+    };
+}
+#[macro_export]
+macro_rules! info {
+    ($lit:literal $(, $arg:expr)* $(,)?) => {
+        LOG.send_in(bot_log::Msg::Log {
+            level: LogLevel::Info,
+            src: oxedize_fe2o3_core::log::base::Source {
+                tid: std::thread::current().id(),
+                file: file!(),
+                line: line!(),
+            },
+            erropt: None,
+            msg: fmt!($lit $(, $arg)*),
+            stream: String::new(),
+        });
+    };
+    ($stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
+        LOG.send_in(bot_log::Msg::Log {
+            level: LogLevel::Info,
+            src: oxedize_fe2o3_core::log::base::Source {
+                tid: std::thread::current().id(),
+                file: file!(),
+                line: line!(),
+            },
+            erropt: None,
+            msg: fmt!($lit $(, $arg)*),
+            stream: String::from($stream),
+        });
+    };
+}
+#[macro_export]
+macro_rules! test {
+    ($lit:literal $(, $arg:expr)* $(,)?) => {
+        LOG.send_in(bot_log::Msg::Log {
+            level: LogLevel::Test,
+            src: oxedize_fe2o3_core::log::base::Source {
+                tid: std::thread::current().id(),
+                file: file!(),
+                line: line!(),
+            },
+            erropt: None,
+            msg: fmt!($lit $(, $arg)*),
+            stream: String::new(),
+        });
+    };
+    ($stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
+        LOG.send_in(bot_log::Msg::Log {
+            level: LogLevel::Test,
+            src: oxedize_fe2o3_core::log::base::Source {
+                tid: std::thread::current().id(),
+                file: file!(),
+                line: line!(),
+            },
+            erropt: None,
+            msg: fmt!($lit $(, $arg)*),
+            stream: String::from($stream),
+        });
+    };
+}
+#[macro_export]
+macro_rules! debug {
+    ($lit:literal $(, $arg:expr)* $(,)?) => {
+        LOG.send_in(bot_log::Msg::Log {
+            level: LogLevel::Debug,
+            src: oxedize_fe2o3_core::log::base::Source {
+                tid: std::thread::current().id(),
+                file: file!(),
+                line: line!(),
+            },
+            erropt: None,
+            msg: fmt!($lit $(, $arg)*),
+            stream: String::new(),
+        });
+    };
+    ($stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
+        LOG.send_in(bot_log::Msg::Log {
+            level: LogLevel::Debug,
+            src: oxedize_fe2o3_core::log::base::Source {
+                tid: std::thread::current().id(),
+                file: file!(),
+                line: line!(),
+            },
+            erropt: None,
+            msg: fmt!($lit $(, $arg)*),
+            stream: String::from($stream),
+        });
+    };
+}
+#[macro_export]
+macro_rules! trace {
+    ($lit:literal $(, $arg:expr)* $(,)?) => {
+        LOG.send_in(bot_log::Msg::Log {
+            level: LogLevel::Trace,
+            src: oxedize_fe2o3_core::log::base::Source {
+                tid: std::thread::current().id(),
+                file: file!(),
+                line: line!(),
+            },
+            erropt: None,
+            msg: fmt!($lit $(, $arg)*),
+            stream: String::new(),
+        });
+    };
+    ($stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
+        LOG.send_in(bot_log::Msg::Log {
+            level: LogLevel::Trace,
+            src: oxedize_fe2o3_core::log::base::Source {
+                tid: std::thread::current().id(),
+                file: file!(),
+                line: line!(),
+            },
+            erropt: None,
+            msg: fmt!($lit $(, $arg)*),
+            stream: String::from($stream),
+        });
+    };
+}
+#[macro_export]
+macro_rules! log_finish {
+    () => {
+        LOG.send_in(bot_log::Msg::Finish(oxedize_fe2o3_core::log::base::Source {
+            tid: std::thread::current().id(),
+            file: file!(),
+            line: line!(),
+        }));
+    }
+}
+#[macro_export]
+macro_rules! log_in_finish_wait {
+    () => {
+        LOG.send_in(bot_log::Msg::Finish(oxedize_fe2o3_core::log::base::Source {
+            tid: std::thread::current().id(),
+            file: file!(),
+            line: line!(),
+        }));
+        if let Some(handle) = {
+            match LOG.chan_in.hopt.lock() {
+                Ok(mut inner) => inner.take(),
+                Err(e) => {
+                    let err = oxedize_fe2o3_core::log::base::LogWaitError::LockError(fmt!("{}", e));
+                    return Err(Error::Local(ErrMsg {
+                        tags: &[ErrTag::Lock],
+                        msg: fmt!("{}", err),
+                    }));
+                }
+            }
+        } {
+            if let Err(e) = handle.join() {
+                let err = oxedize_fe2o3_core::log::base::LogWaitError::JoinError(fmt!("{:?}", e));
+                return Err(Error::Local(ErrMsg {
+                    tags: &[ErrTag::Thread],
+                    msg: fmt!("{}", err),
+                }));
+            }
+        }
+    }
+}
+#[macro_export]
+macro_rules! log_out_finish_wait {
+    () => {
+        res!(LOG.send_out(bot_log::Msg::Finish(oxedize_fe2o3_core::log::base::Source {
+            tid: std::thread::current().id(),
+            file: file!(),
+            line: line!(),
+        })));
+        {
+            let unlocked_chan_out = lock_write!(LOG.chan_out);
+            if let Some(handle) = {
+                let x = match unlocked_chan_out.hopt.lock() {
+                    Ok(mut inner) => inner.take(),
+                    Err(e) => {
+                        let err = oxedize_fe2o3_core::log::base::LogWaitError::LockError(fmt!("{}", e));
+                        return Err(Error::Local(ErrMsg {
+                            tags: &[ErrTag::Lock],
+                            msg: fmt!("{}", err),
+                        }));
+                    }
+                };
+                x
+            } {
+                if let Err(e) = handle.join() {
+                    let err = oxedize_fe2o3_core::log::base::LogWaitError::JoinError(fmt!("{:?}", e));
+                    return Err(Error::Local(ErrMsg {
+                        tags: &[ErrTag::Thread],
+                        msg: fmt!("{}", err),
+                    }));
+                }
+            }
+        }
+    }
+}
+#[macro_export]
+macro_rules! log_finish_wait {
+    () => {
+        log_in_finish_wait!();
+        log_out_finish_wait!();
+    }
+}
+#[macro_export]
+macro_rules! log_set_level {
+    ($level:literal) => {
+        {
+            let mut unlocked_cfg = lock_write!(LOG.cfg);
+            unlocked_cfg.level = res!(LogLevel::from_str($level));
+        }
+    }
+}
+#[macro_export]
+macro_rules! log_get_level {
+    () => {
+        {
+            let unlocked_cfg = lock_read!(LOG.cfg);
+            unlocked_cfg.level
+        }
+    }
+}
+#[macro_export]
+macro_rules! log_set_config {
+    ($cfg:expr) => {
+        {
+            let mut unlocked_cfg = lock_write!(LOG.cfg);
+            *unlocked_cfg = $cfg;
+        }
+        LOG.send_in(bot_log::Msg::Update(oxedize_fe2o3_core::log::base::Source {
+            tid: std::thread::current().id(),
+            file: file!(),
+            line: line!(),
+        }));
+    }
+}
+#[macro_export]
+macro_rules! log_get_config {
+    () => {
+        {
+            let unlocked_cfg = lock_read!(LOG.cfg);
+            unlocked_cfg.clone()
+        }
+    }
+}
+#[macro_export]
+macro_rules! set_log_out {
+    ($simthread:expr) => {
+        log_out_finish_wait!();
+        let chan_clone = $simthread.chan.clone();
+        {
+            let mut unlocked_chan_out = lock_write!(LOG.chan_out);
+            *unlocked_chan_out = $simthread;
+        }
+        {
+            let mut unlocked_cfg = lock_write!(LOG.cfg);
+            (*unlocked_cfg).console = Some(chan_clone);
+        }
+    }
+}
+#[macro_export]
+macro_rules! log_get_file_path {
+    () => {
+        {
+            let unlocked_cfg = lock_read!(LOG.cfg);
+            match &unlocked_cfg.file {
+                Some(fcfg) => {
+                    Some(fcfg.path())
+                }
+                None => None,
+            }
+        }
+    }
+}
+#[macro_export]
+macro_rules! log_get_streams {
+    ($wait:expr) => {{
+        let simplex = oxedize_fe2o3_core::channels::simplex();
+        res!(LOG.send_out(bot_log::Msg::GetStreams(simplex.clone())));
+        match simplex.recv_timeout($wait) {
+            Recv::Empty => Ok(None),
+            Recv::Result(Err(e)) => Err(e),
+            Recv::Result(Ok(streams)) => Ok(Some(streams)),
+            Recv::Result(Ok(msg)) => Err(err!(
+                "Unexpected message received when requesting log streams map: {:?}", msg;
+                Bug, Unexpected, Input)),
+        }
+    }};
+}
+File: src/log/mod.rs
+pub mod base; 
+pub mod bot; 
+pub mod console; 
+pub mod macros;
+pub mod stream;
+File: src/log/console.rs
+use crate::{
+    prelude::*,
+    channels::{
+        simplex,
+        Simplex,
+    },
+    log::{
+        bot::{
+            Msg,
+        },
+    },
+    thread::{
+        thread_channel,
+        ThreadController,
+    },
+};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        Mutex,
+        RwLock,
+    },
+    thread,
+};
+pub fn switch_to_logger_console<
+    L: LoggerConsole<ErrTag>,
+>()
+    -> Outcome<()>
+{
+    log_out_finish_wait!();
+    let mut log_cfg = log_get_config!();
+    let mut logger_console = L::new();
+    let logger_console_thread = logger_console.go();
+    {
+        let mut unlocked_chan_out = lock_write!(LOG.chan_out);
+        *unlocked_chan_out = logger_console_thread.clone();
+    }
+    log_cfg.console = Some(logger_console_thread.chan.clone());
+    log_set_config!(log_cfg);
+    Ok(())
+}
+pub trait LoggerConsole<ETAG: GenTag>
+    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+{
+    fn new() -> Self;
+    fn go(&mut self) -> ThreadController<Msg<ETAG>>;
+    fn listen(&mut self);
+    fn get_streams(&self) -> HashMap<String, Simplex<String>> { HashMap::new() }
+}
+#[derive(Clone, Debug)]
+pub struct StdoutLoggerConsole<ETAG: GenTag>
+    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+{
+    pub chan:   Simplex<Msg<ETAG>>,
+}
+impl<ETAG: GenTag> LoggerConsole<ETAG> for StdoutLoggerConsole<ETAG>
+    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+{
+    fn new() -> Self {
+        Self {
+            chan: simplex(),
+        }
+    }
+    fn go(&mut self) -> ThreadController<Msg<ETAG>> {
+        let (semaphore, _sentinel) = thread_channel();
+        let semaphore_clone = semaphore.clone();
+        let chan_clone = self.chan.clone();
+        let handle = thread::spawn(move || {
+            semaphore.touch();
+            let mut logger = Self { chan: chan_clone };
+            logger.listen();
+        });
+        ThreadController::new(
+            self.chan.clone(),
+            Arc::new(Mutex::new(Some(handle))),
+            semaphore_clone,
+        )
+    }
+    fn listen(&mut self) {
+        while let Ok(msg) = self.chan.recv() {
+            match msg {
+                Msg::Finish(_src) => {
+                    break;
+                }
+                Msg::Console(_stream, msg) => {
+                    println!("{}", msg)
+                }
+                _ => {
+                    println!("{}", err!(
+                        "Unexpected log message type: {:?}", msg;
+                    Bug, Unexpected, Input));
+                }
+            }
+        }
+    }
+}
+#[derive(Clone, Debug)]
+pub struct MultiStreamLoggerConsole<ETAG: GenTag>
+    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+{
+    pub chan:       Simplex<Msg<ETAG>>,
+    pub streams:    Arc<RwLock<HashMap<String, Simplex<String>>>>,
+}
+impl<ETAG: GenTag> LoggerConsole<ETAG> for MultiStreamLoggerConsole<ETAG>
+    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+{
+    fn new() -> Self {
+        Self {
+            chan:       simplex(),
+            streams:    Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+    fn go(&mut self) -> ThreadController<Msg<ETAG>> {
+        let (semaphore, _sentinel) = thread_channel();
+        let semaphore_clone = semaphore.clone();
+        let chan_clone = self.chan.clone();
+        let handle = thread::spawn(move || {
+            semaphore.touch();
+            let mut logger = Self {
+                chan:       chan_clone,
+                streams:    Arc::new(RwLock::new(HashMap::new())),
+            };
+            logger.listen();
+        });
+        ThreadController::new(
+            self.chan.clone(),
+            Arc::new(Mutex::new(Some(handle))),
+            semaphore_clone,
+        )
+    }
+    fn listen(&mut self) {
+        while let Ok(msg) = self.chan.recv() {
+            match msg {
+                Msg::Finish(_src) => {
+                    break;
+                }
+                Msg::Console(stream, msg) => {
+                    let chan = {
+                        match self.streams.write() {
+                            Ok(mut streams) => {
+                                streams.entry(stream.clone())
+                                    .or_insert_with(|| simplex())
+                                    .clone()
+                            }
+                            Err(_) => {
+                                println!("Failed to acquire write lock on log streams.");
+                                continue;
+                            }
+                        }
+                    };
+                    if let Err(e) = chan.send(msg) {
+                        println!("Failed to send to log message to stream '{}': {}",
+                            stream, e);
+                    }
+                }
+                Msg::AddStream(name, chan) => {
+                    if let Err(_) = self.streams.write().map(|mut streams| {
+                        streams.insert(name.clone(), chan);
+                    }) {
+                        println!("Failed to acquire write lock on log streams \
+                            in order to add stream channel '{}'.", name);
+                    }
+                }
+                Msg::GetStreams(responder) => {
+                    if let Err(e) = responder.send(self.streams.clone()) {
+                        println!("{}", err!(e,
+                            "While sending log streams map."; Channel, Write));
+                    }
+                    continue;
+                }
+                _ => {
+                    println!("{}", err!(
+                        "Unexpected log message type: {:?}", msg;
+                        Bug, Unexpected, Input));
+                }
+            }
+        }
+    }
+}
+File: src/log/bot.rs
+use crate::{
+    prelude::*,
+    bot,
+    channels::Simplex,
+    log::{
+        base::{
+            LogLevel,
+            Source,
+        },
+    },
+};
+use oxedize_fe2o3_stds::chars::Term;
+use std::{
+    collections::HashMap,
+    fs::{
+        File,
+        OpenOptions,
+    },
+    io::{
+        self,
+        BufReader,
+        Seek,
+        SeekFrom,
+        Write,
+    },
+    path::{
+        Path,
+        PathBuf,
+    },
+    sync::{
+        Arc,
+        RwLock,
+    },
+    time,
+};
+use flate2::{
+    Compression,
+    bufread::GzEncoder,
+};
+pub use humantime::format_rfc3339_seconds as timefmt;
+#[derive(Clone, Debug)]
+pub enum Msg<ETAG: GenTag> where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error {
+    AddStream(String, Simplex<String>),
+    Base(bot::BaseMsg<ETAG>),
+    Console(String, String),
+    Finish(Source),
+    GetStreams(Simplex<Arc<RwLock<HashMap<String, Simplex<String>>>>>),
+    Level(Source, LogLevel),
+    Log {
+        level:  LogLevel,
+        src:    Source,
+        erropt: Option<Error<ETAG>>,
+        msg:    String,
+        stream: String,
+    },
+    Update(Source),
+}
+impl<
+    ETAG: GenTag,
+>
+    bot::CtrlMsg for Msg<ETAG>
+    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+{
+    fn finish() -> Self { Msg::Base(bot::BaseMsg::Finish) }
+    fn ready() -> Self { Msg::Base(bot::BaseMsg::Ready) }
+}
+#[derive(Clone, Debug, Default)]
+pub struct Config<ETAG: GenTag>
+    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+{
+    pub file:       Option<FileConfig>,
+    pub console:    Option<Simplex<Msg<ETAG>>>,
+    pub level:      LogLevel,
+}
+impl<ETAG: GenTag> Config<ETAG>
+    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+{
+    pub fn path(&self) -> Option<PathBuf> {
+        if let Some(fcfg) = self.file.as_ref() {
+            Some(fcfg.path())
+        } else {
+            None
+        }
+    }
+    pub fn update_file(&mut self) -> Outcome<Option<File>> {
+        Ok(match self.file {
+            Some(ref mut fcfg) => Some(res!(fcfg.update())),
+            None => None,
+        })
+    }
+}
+#[derive(Clone, Debug, Default)]
+pub struct FileConfig {
+    pub dir:    PathBuf,
+    pub name:   String,
+    pub ext:    String,
+    pub num:    u16,
+    pub max:    Option<u64>,
+    pub path:   PathBuf,
+}
+impl FileConfig {
+    pub fn new(
+        dir:    PathBuf,
+        name:   String,
+        ext:    String,
+        num:    u16,
+        max:    Option<u64>,
+    )
+        -> Self
+    {
+        let mut result = Self {
+            dir,
+            name,
+            ext,
+            num,
+            max,
+            path: PathBuf::new(),
+        };
+        result.path = result.path();
+        trace!("Log file path = {:?}", result.path);
+        result
+    }
+    pub fn path(&self) -> PathBuf {
+        let mut log_path = self.dir.clone();
+        log_path.push(&self.name);
+        log_path.set_extension(&self.ext);
+        log_path
+    }
+    fn make_dir(&self) -> Outcome<()> {
+        res!(std::fs::create_dir_all(&self.dir));
+        Ok(())
+    }
+    fn update(&mut self) -> Outcome<File> {
+        res!(self.make_dir());
+        let path = self.path();
+        self.path = path.clone();
+        let file = res!(OpenOptions::new()
+            .create(true)
+            .append(true)
+            .read(true)
+            .open(path));
+        Ok(file)
+    }
+}
+#[derive(Default)]
+pub struct LogBot<ETAG: GenTag>
+    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+{
+    file:   Option<File>,   
+    cfg:    Arc<RwLock<Config<ETAG>>>,
+    chan:   Simplex<Msg<ETAG>>,
+}
+impl<ETAG: GenTag> LogBot<ETAG>
+    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+{
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn level(&self) -> Outcome<LogLevel> {
+        let unlocked_cfg = lock_read!(self.cfg);
+        Ok(unlocked_cfg.level)
+    }
+    pub fn len(&self) -> usize {
+        self.chan.len()
+    }
+    pub fn init(
+        &mut self,
+        cfg:    Arc<RwLock<Config<ETAG>>>,
+        chan:   Simplex<Msg<ETAG>>,
+    )
+        -> Outcome<()>
+    {
+        self.cfg = cfg;
+        res!(self.update_file());
+        self.chan = chan;
+        Ok(())
+    }
+    pub fn update_file(&mut self) -> Outcome<()> {
+        let mut unlocked_cfg = lock_write!(self.cfg);
+        self.file = res!(unlocked_cfg.update_file());
+        if unlocked_cfg.console.is_none() && self.file.is_none() {
+            return Err(err!(
+                "LogBot must output to either a file or a console channel, but \
+                neither has been specified.";
+            Init, Invalid));
+        }
+        Ok(())
+    }
+    pub fn format_msg(
+        level:          LogLevel,
+        src:            &Source,
+        res:            Outcome<String>,
+        for_console:    bool,
+        for_file:       bool,
+    )
+        -> (Option<String>, Option<String>)
+    {
+        let msg = match res {
+            Ok(msg) => msg,
+            Err(e) => fmt!("{}", e),
+        };
+        let mut path_str = src.file.to_string();
+        if level == LogLevel::Info {
+            let path = Path::new(src.file);
+            path_str = match path.file_name() {
+                Some(s) => match s.to_os_string().into_string() {
+                    Ok(s) => s,
+                    Err(_) => fmt!("{}", path.display()),
+                }
+                None => fmt!("{}", path.display()),
+            };
+        }
+        let t = time::SystemTime::now();
+        let console_result = if for_console {
+            let prefix = fmt!(
+                "{}: {:5?} {} {}:{}",
+                timefmt(t),
+                src.tid,
+                level,
+                path_str,
+                src.line,
+            );
+            Some(fmt!("{} {}{}", prefix, Term::RESET, msg))
+        } else {
+            None
+        };
+        let file_result = if for_file {
+            let prefix = fmt!(
+                "{}: {:5?} {:?} {}:{}",
+                timefmt(t),
+                src.tid,
+                level,
+                path_str,
+                src.line,
+            );
+            Some(fmt!("{} {}", prefix, msg))
+        } else {
+            None
+        };
+        (
+            console_result,
+            file_result,
+        )
+    }
+    fn file_max_size(&self) -> Outcome<Option<u64>> {
+        let unlocked_cfg = lock_read!(self.cfg);
+        Ok(if let Some(file_cfg) = unlocked_cfg.file.as_ref() {
+            file_cfg.max
+        } else {
+            None
+        })
+    }
+    fn check_for_archiving(&mut self) -> Outcome<()> {
+        if let Some(f) = &self.file {
+            res!(f.sync_all());
+            let size = res!(f.metadata()).len();
+            if let Some(max_size) = res!(self.file_max_size()) {
+                if size > max_size {
+                    res!(self.archive());
+                }
+            }
+        }
+        Ok(())
+    }
+    fn archive(&mut self) -> Outcome<()> {
+        let mut unlocked_cfg = lock_write!(self.cfg);
+        if let Some(file_cfg) = unlocked_cfg.file.as_mut() {
+            let mut log_path = file_cfg.dir.clone();
+            let mut name = file_cfg.name.clone();
+            name.push('.');
+            name.push_str(&file_cfg.ext);
+            name.push('.');
+            name.push_str(&fmt!("{:02}.gz", file_cfg.num));
+            log_path.push(name);
+            let mut new = res!(File::create(log_path));
+            let old = self.file.as_mut().unwrap();
+            res!(old.seek(SeekFrom::Start(0)));
+            let old_buf = BufReader::new(old);
+            let mut gz = GzEncoder::new(old_buf, Compression::fast());
+            res!(io::copy(&mut gz, &mut new));
+            res!(self.file.as_mut().unwrap().set_len(0));
+            file_cfg.num = file_cfg.num.wrapping_add(1); 
+        }
+        Ok(())
+    }
+    fn get_file_path(&self) -> Outcome<Option<PathBuf>> {
+        let unlocked_cfg = lock_read!(self.cfg);
+        Ok(match &unlocked_cfg.file {
+            Some(file_cfg) => Some(file_cfg.path()),
+            None => None,
+        })
+    }
+    fn write_err(
+        &mut self,
+        src:    &Source,
+        e:      Error<ErrTag>,
+    ) {
+        let mut for_console = true;
+        let mut for_file = false;
+        {
+            let unlocked_cfg = self.cfg.read();
+            match unlocked_cfg {
+                Ok(cfg) => {
+                    for_console = cfg.console.is_some();
+                    for_file = cfg.file.is_some();
+                },
+                Err(e) => {
+                    let (msg_console_opt, _msg_file_opt) = Self::format_msg(
+                        LogLevel::Error,
+                        src,
+                        Err(err!(
+                            "Could access log configuration: {}", e;
+                        Poisoned, Configuration)),
+                        for_console,
+                        for_file,
+                    );
+                    if let Some(msg) = msg_console_opt {
+                        println!("{}", msg);
+                    }
+                },
+            }
+        }
+        let (msg_console_opt, msg_file_opt) = Self::format_msg(
+            LogLevel::Error,
+            src,
+            Err(e),
+            for_console,
+            for_file,
+        );
+        if let Some(msg) = msg_console_opt {
+            println!("{}", msg);
+        }
+        if let Some(f) = self.file.as_mut() {
+            if let Some(msg) = msg_file_opt {
+                match writeln!(f, "{}", msg) {
+                    Err(e) => msg!("{}", err!(e,
+                        "Error writing '{}' to the log file.", msg;
+                    IO, File, Write)),
+                    _ => (),
+                }
+            }
+        }
+    }
+    fn write(
+        &mut self,
+        level:  LogLevel,
+        src:    &Source,
+        res:    Outcome<String>,
+        stream: String,
+    ) {
+        let mut path_opt = None;
+        let mut console_chan = None;
+        let mut err_opt = None;
+        let mut current_level = LogLevel::None;
+        {
+            let unlocked_cfg = self.cfg.write();
+            match unlocked_cfg {
+                Ok(cfg) => {
+                    path_opt = match &cfg.file {
+                        Some(file_cfg) => Some(file_cfg.path()),
+                        None => None,
+                    };
+                    console_chan = cfg.console.clone();
+                    current_level = cfg.level;
+                },
+                Err(e) => err_opt = Some(e.into()),
+            }
+        }
+        if let Some(e) = err_opt {
+            let src = Source {
+                tid: std::thread::current().id(),
+                file: file!(),
+                line: line!(),
+            };
+            self.write_err(&src, e);
+            return;
+        }
+        if level <= current_level {
+            let (msg_console_opt, msg_file_opt) = Self::format_msg(
+                level,
+                &src,
+                res,
+                console_chan.is_some(),
+                self.file.is_some(),
+            );
+            if let Some(console_chan) = console_chan {
+                if let Some(msg) = msg_console_opt {
+                    match console_chan.send(Msg::Console(stream, msg.clone())) {
+                        Err(e) => msg!("{}", err!(e,
+                            "Error writing '{}' to the console channel.", msg;
+                        IO, Channel, Write)),
+                        _ => (),
+                    }
+                }
+            }
+            if let Some(f) = self.file.as_mut() {
+                if let Some(msg) = msg_file_opt {
+                    match writeln!(f, "{}", msg) {
+                        Err(e) => msg!("{}", err!(e,
+                            "Error writing '{}' to the log file {:?}.", msg, path_opt;
+                        IO, File, Write)),
+                        _ => (),
+                    }
+                }
+            }
+        }
+    }
+    pub fn go(&mut self) {
+        loop {
+            if self.listen() {
+                break;
+            }
+        }
+    }
+    fn listen(&mut self) -> bool {
+        match self.chan.recv() {
+            Err(e) => {
+                let e = err!(e,
+                    "Error while LogBot attempted to receive a message.";
+                IO, Channel, Read);
+                let src = Source {
+                    tid: std::thread::current().id(),
+                    file: file!(),
+                    line: line!(),
+                };
+                self.write_err(&src, e);
+            }
+            Ok(Msg::Finish(src)) => {
+                let msg = fmt!("Finish message received, LogBot finishing now.");
+                let level = LogLevel::Warn;
+                self.write(level, &src, Ok(msg), String::new());
+                return true;
+            }
+            Ok(Msg::Base(bot::BaseMsg::Ready)) => msg!("LogBot now ready to receive messages."),
+            Ok(Msg::Log { level, src, erropt, msg, stream }) => {
+                let msg = if let Some(e) = erropt {
+                    fmt!("{} {}", msg, e)
+                } else {
+                    fmt!("{}", msg)
+                };
+                self.write(level, &src, Ok(msg), stream);
+            }
+            Ok(Msg::Update(src)) => match self.update_file() {
+                Ok(()) => (),
+                Err(e) => self.write_err(&src, e),
+            }
+            Ok(msg) => {
+                let e = err!(
+                    "Message handling for {:?} currently not implemented.", msg;
+                IO, Channel, Read, Unimplemented);
+                let src = Source {
+                    tid: std::thread::current().id(),
+                    file: file!(),
+                    line: line!(),
+                };
+                self.write_err(&src, e);
+            }
+        }
+        match self.check_for_archiving() {
+            Err(e) => {
+                let src = Source {
+                    tid: std::thread::current().id(),
+                    file: file!(),
+                    line: line!(),
+                };
+                self.write(LogLevel::Error, &src, Err(e), String::new());
+            },
+            _ => (),
+        }
+        false
+    }
+}
+File: src/bot.rs
+use crate::{
+    prelude::*,
+    error,
+    GenTag,
+};
+pub trait CtrlMsg {
+    fn finish() -> Self;
+    fn ready() -> Self;
+}
+pub trait ErrorMsg<T: GenTag> where error::Error<T>: std::error::Error {
+    fn error(e: Error<T>) -> Self;
+}
+#[derive(Clone, Debug)]
+pub enum BaseMsg<T: GenTag> where error::Error<T>: std::error::Error {
+    Error(Error<T>),
+    Finish,
+    Ready,
+}
+impl<T: GenTag> CtrlMsg for BaseMsg<T> where error::Error<T>: std::error::Error {
+    fn finish() -> Self { BaseMsg::Finish }
+    fn ready() -> Self  { BaseMsg::Ready }
+}
+impl<T: GenTag> ErrorMsg<T> for BaseMsg<T> where error::Error<T>: std::error::Error {
+    fn error(e: Error<T>) -> Self { BaseMsg::Error(e) }
+}
+File: new/Cargo.toml
+[package]
+name = "new"
+version = "0.5.0"
+authors = ["h00gs <hello@oxedize.com>"]
+edition = "2021"
+license = "BSD-2-Clause/Apache-2.0"
+# See more keys and their definitions at https:
+[lib]
+proc-macro = true
+[dependencies]
+#fe2o3_core 		   		= { path = "../../fe2o3_core" }
+syn = { version = "1.0", features = ["full"] }
+quote = "1.0"
+proc-macro2 = "1.0"
+File: new/src/lib.rs
+use proc_macro::TokenStream;
+use quote::quote;
+use syn::{parse_macro_input, DeriveInput, Fields};
+#[proc_macro_derive(New)]
+pub fn derive_new(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = &input.ident;
+    let fields = match &input.data {
+        syn::Data::Struct(data) => {
+            match &data.fields {
+                Fields::Named(fields) => &fields.named,
+                _ => panic!("Only named fields are supported")
+            }
+        },
+        _ => panic!("Only structs are supported")
+    };
+    let params = fields.iter().map(|f| {
+        let name = &f.ident;
+        let ty = &f.ty;
+        quote! { #name: #ty }
+    });
+    let field_inits = fields.iter().map(|f| {
+        let name = &f.ident;
+        quote! { #name }
+    });
+    let expanded = quote! {
+        impl #name {
+            pub fn new(#(#params),*) -> Self {
+                Self {
+                    #(#field_inits),*
+                }
+            }
+        }
+    };
+    TokenStream::from(expanded)
+}

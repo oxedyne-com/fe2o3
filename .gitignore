@@ -12,7 +12,7 @@ Cargo.lock
 *.log
 
 # Source code text file bundles
-fe2o3_*.txt
+txtcat_*.txt
 
 # Vim
 *.swp
