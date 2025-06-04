@@ -1,0 +1,4958 @@
+File: Cargo.toml
+[package]
+name = "oxedize_fe2o3_steel"
+version = "0.5.0"
+authors = ["h00gs <hello@oxedize.com>"]
+edition = "2021"
+license = "BSD-2-Clause/Apache-2.0"
+description = "Hematite TCP server including HTTPS, WebSocket and SMTPS support."
+repository = "https:
+[lib]
+path = "src/lib.rs"
+[[bin]]
+name = "steel"
+path = "src/main.rs"
+[dependencies]
+oxedize_fe2o3_bot 				= { path = "../fe2o3_bot" }
+oxedize_fe2o3_core 				= { path = "../fe2o3_core" }
+oxedize_fe2o3_crypto			= { path = "../fe2o3_crypto" }
+oxedize_fe2o3_data 				= { path = "../fe2o3_data" }
+oxedize_fe2o3_hash 				= { path = "../fe2o3_hash" }
+oxedize_fe2o3_iop_crypto		= { path = "../fe2o3_iop_crypto" }
+oxedize_fe2o3_iop_db			= { path = "../fe2o3_iop_db" }
+oxedize_fe2o3_iop_hash			= { path = "../fe2o3_iop_hash" }
+oxedize_fe2o3_jdat 				= { path = "../fe2o3_jdat" }
+oxedize_fe2o3_namex				= { path = "../fe2o3_namex" }
+oxedize_fe2o3_net				= { path = "../fe2o3_net" }
+oxedize_fe2o3_o3db_sync 				= { path = "../fe2o3_o3db_sync" }
+oxedize_fe2o3_stds				= { path = "../fe2o3_stds" }
+oxedize_fe2o3_syntax			= { path = "../fe2o3_syntax" }
+oxedize_fe2o3_text				= { path = "../fe2o3_text" }
+oxedize_fe2o3_tui				= { path = "../fe2o3_tui" }
+notify = "6.1.1"
+rustls-pemfile = "2"
+rustls = "0.22"
+rcgen = "0.12.0"
+tokio = { version = "1.35", features = ["full"] }
+tokio-rustls = "0.25"
+# App.
+crossterm = "0.27"
+rpassword = "5.0.1"
+secrecy = "0.8.0"
+zeroize = { version = "1.4.2", features = ["zeroize_derive"] }
+# App dev js bundling.
+anyhow = "1.0"
+swc = "8.0.0"
+swc_bundler = "6.0.0"
+swc_common = { version = "5.0.0", features = ["tty-emitter"] }
+swc_config = "1.0.0"
+swc_ecma_loader = { version = "5.0.0", features = ["node", "cache"] }
+swc_ecma_parser = "6.0.0"
+swc_ecma_codegen = "5.0.0"
+swc_ecma_transforms_module = "6.0.0"
+swc_ecma_visit = "5.0.0"
+swc_ecma_ast = "5.0.0"
+swc_ecma_transforms_base = "6.0.0"
+# App sass compilation to css.
+grass = "0.13"
+[build-dependencies]
+oxedize_fe2o3_core 				= { path = "../fe2o3_core" }
+[dev-dependencies]
+# For test client
+rustls-pki-types = "1.0"
+webpki-roots = "0.26"
+[target.'cfg(windows)'.dependencies]
+is_elevated = "0.1"
+File: src/app/https.rs
+use crate::srv::{
+    cfg::ServerConfig,
+    dev::refresh::HtmlModifier,
+};
+use oxedize_fe2o3_core::{
+    prelude::*,
+    file::{
+        OsPath,
+    },
+    map::MapMut,
+    path::NormalPath,
+    rand::Rand,
+};
+use oxedize_fe2o3_iop_crypto::enc::Encrypter;
+use oxedize_fe2o3_iop_db::api::Database;
+use oxedize_fe2o3_iop_hash::api::Hasher;
+use oxedize_fe2o3_jdat::id::NumIdDat;
+use oxedize_fe2o3_net::{
+    file::RequestPath,
+    http::{
+        fields::HeaderName,
+        handler::WebHandler,
+        loc::HttpLocator,
+        msg::HttpMessage,
+        status::HttpStatus,
+    },
+};
+use std::{
+    fmt::Debug,
+    path::{
+        Path,
+        PathBuf,
+    },
+    sync::{
+        Arc,
+        RwLock,
+    },
+};
+use tokio::{
+    self,
+    io::AsyncReadExt,
+};
+#[derive(Clone, Debug)]
+pub struct AppWebHandler<
+    M: MapMut<String, OsPath> + Clone + Debug + Send + Sync,
+>{
+    pub cfg:                    ServerConfig,
+    pub public_dir:             PathBuf,
+    pub static_routes:          M,
+    pub default_index_files:    Vec<String>,
+    pub dev_mode:               bool,
+}
+impl<
+    M: MapMut<String, OsPath> + Clone + Debug + Send + Sync,
+>
+    AppWebHandler<M>
+{
+    pub fn new(
+        cfg:                    ServerConfig,
+        public_dir:             PathBuf,
+        static_routes:          M,
+        default_index_files:    Vec<String>,
+        dev_mode:               bool,
+    )
+        -> Self
+    {
+        Self {
+            cfg,
+            public_dir,
+            static_routes,
+            default_index_files,
+            dev_mode,
+        }
+    }
+    pub fn err_id() -> String {
+        Rand::generate_random_string(6, "abcdefghikmnpqrstuvw0123456789")
+    }
+    async fn router(
+        &self,
+        loc:    &HttpLocator,
+        id:     &String, 
+    )
+        -> Outcome<PathBuf>
+    {
+        let route = loc.path.as_string();
+        match self.static_routes.get(route) {
+            Some(os_path) => match os_path {
+                OsPath::Dir(path) => {
+                    for filename in &self.default_index_files {
+                        let candidate = path.clone().join(filename);
+                        if candidate.exists() {
+                            return Ok(candidate);
+                        }
+                    }
+                    return Err(err!(
+                        "{}: No default index files found in directory {:?}. \
+                        Tried: {:?}", id, path, self.default_index_files;
+                        File, NotFound)); 
+                }
+                OsPath::File(path) => return Ok(path.clone()),
+            }
+            None => {
+                let clean_path = if route.starts_with('/') {
+                    &route[1..]
+                } else {
+                    route
+                };
+                let path = Path::new(clean_path).normalise();
+                if path.escapes() {
+                    return Err(err!(
+                        "{}: Request path '{}' would escape the public directory.", 
+                        id, route;
+                        Invalid, Path, Security));
+                }
+                let full_path = self.public_dir.clone().join(path);
+                if full_path.is_dir() {
+                    for filename in &self.default_index_files {
+                        let candidate = full_path.join(filename);
+                        if candidate.exists() {
+                            return Ok(candidate);
+                        }
+                    }
+                }
+                return Ok(full_path);
+            }
+        }
+    }
+}
+impl<
+    M: MapMut<String, OsPath> + Clone + Debug + Send + Sync,
+>
+    WebHandler for AppWebHandler<M>
+{
+    fn handle_get<
+        const SIDL: usize,
+        const UIDL: usize,
+        SID:    NumIdDat<SIDL> + 'static,
+        UID:    NumIdDat<UIDL> + 'static,
+        ENC:    Encrypter,
+        KH:     Hasher,
+        DB:     Database<UIDL, UID, ENC, KH>,
+    >(
+        &self,
+        loc:        HttpLocator,
+        _response:   Option<HttpMessage>,
+        _body:       Vec<u8>,
+        _db:         Option<(Arc<RwLock<DB>>, UID)>,
+        _sid_opt:    &Option<SID>,
+        id:         &String, 
+    )
+        -> impl std::future::Future<Output = Outcome<Option<HttpMessage>>> + Send
+    {
+        let dev_mode = self.dev_mode;
+        let rpath = loc.path.clone();
+        let id = id.to_string();
+        async move {
+            let abs_path = match self.router(&loc, &id).await {
+                Ok(path) => path,
+                Err(e) => {
+                    error!(e);
+                    return Ok(Some(
+                        HttpMessage::respond_with_text(
+                            HttpStatus::NotFound,
+                            "File not found.",
+                        ).with_field(
+                            HeaderName::ContentType,
+                            RequestPath::content_type(rpath.as_path()),
+                        )
+                    ));
+                }
+            };
+            let id_clone = id.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                tokio::runtime::Handle::current().block_on(async {
+                    Ok(match tokio::fs::File::open(&abs_path).await {
+                        Ok(mut file) => {
+                            let mut contents = Vec::new();
+                            match file.read_to_end(&mut contents).await {
+                                Ok(_n) => {
+                                    let content_type = RequestPath::content_type(abs_path.as_path());
+                                    let content_type_str = content_type.to_string();
+                                    let response = HttpMessage::new_response(HttpStatus::OK)
+                                        .with_field(HeaderName::ContentType, content_type);
+                                    if dev_mode && content_type_str.contains("text/html") {
+                                        let contents_str = res!(String::from_utf8(contents.clone()));
+                                        let modified =
+                                            res!(HtmlModifier::inject_dev_refresh(&contents_str));
+                                        response.with_body(modified.into_bytes())
+                                    } else {
+                                        response.with_body(contents)
+                                    }
+                                }
+                                Err(e) => {
+                                    let err_id = Self::err_id();
+                                    error!(e.into(),
+                                        "{}: While trying to server file '{:?}' (err_id: {})",
+                                        id_clone, abs_path, err_id,
+                                    );
+                                    HttpMessage::respond_with_text(
+                                        HttpStatus::InternalServerError,
+                                        fmt!("Problem during request processing (err_id: {}).",
+                                            err_id),
+                                    )
+                                }
+                            }
+                        }
+                        Err(_e) => {
+                            debug!("{}: File {:?} not found.", id_clone, abs_path);
+                            HttpMessage::respond_with_text(
+                                HttpStatus::NotFound,
+                                "File not found.",
+                            ).with_field(
+                                HeaderName::ContentType,
+                                RequestPath::content_type(abs_path.as_path()),
+                            )
+                        }
+                    })
+                })
+            });
+            match result.await {
+                Ok(response) => match response {
+                    Ok(http_msg) => Ok(Some(http_msg)),
+                    Err(e) => Err(e),
+                },
+                Err(e) => Err(err!(e,
+                    "{}: Error while executing async file read.", id;
+                    IO, File, Read)),
+            }
+        }        
+    }
+    fn handle_post<
+        const SIDL: usize,
+        const UIDL: usize,
+        SID:    NumIdDat<SIDL> + 'static,
+        UID:    NumIdDat<UIDL> + 'static,
+        ENC:    Encrypter,
+        KH:     Hasher,
+        DB:     Database<UIDL, UID, ENC, KH>,
+    >(
+        &self,
+        _loc:        HttpLocator,
+        response:   Option<HttpMessage>,
+        _body:       Vec<u8>,
+        _db:         Option<(Arc<RwLock<DB>>, UID)>,
+        _sid_opt:    &Option<SID>,
+        _id:         &String, 
+    )
+        -> impl std::future::Future<Output = Outcome<Option<HttpMessage>>> + Send
+    {
+        async move {
+            Ok(response)
+        }
+    }
+}
+File: src/app/smtps.rs
+use crate::srv::cfg::ServerConfig;
+use oxedize_fe2o3_core::{
+    prelude::*,
+    path::{
+        NormPathBuf,
+    },
+    rand::Rand,
+};
+use oxedize_fe2o3_net::{
+    smtp::handler::EmailHandler,
+};
+#[derive(Clone, Debug)]
+pub struct AppEmailHandler {
+    pub cfg:    ServerConfig,
+    pub root:   NormPathBuf,
+}
+impl AppEmailHandler {
+    pub fn err_id() -> String {
+        Rand::generate_random_string(6, "abcdefghikmnpqrstuvw0123456789")
+    }
+}
+impl EmailHandler for AppEmailHandler {
+}
+File: src/app/dev.rs
+use crate::app::constant;
+use oxedize_fe2o3_core::prelude::*;
+use std::{
+    fs,
+    path::Path,
+};
+pub fn setup(app_root: &Path) -> Outcome<String> {
+    let existing_indicators = [
+        "www/public/index.html",
+        "www/src/index.html", 
+        "www/public/main.js",
+        "www/src/js",
+        "package.json",
+    ];
+    let mut existing_files = Vec::new();
+    for &indicator in &existing_indicators {
+        let path = app_root.join(indicator);
+        if res!(fs::exists(&path)) {
+            existing_files.push(indicator);
+        }
+    }
+    if !existing_files.is_empty() {
+        info!("Detected existing website with: {:?}", existing_files);
+        return Ok(fmt!("Existing website detected, skipping dev initialisation. \
+            Found: {}", existing_files.join(", ")));
+    }
+    for dir in constant::INIT_TREE_HALT.iter() {
+        let dir_path = app_root.join(dir);
+        if res!(fs::exists(&dir_path)) {
+            return Ok(fmt!("Directory {:?} exists, skipping dev setup.", dir_path));
+        }
+    }
+    info!("No existing website detected, creating development structure.");
+    for dir in constant::INIT_TREE_HALT.iter() {
+        let dir_path = app_root.join(dir);
+        if res!(fs::exists(&dir_path)) {
+            return Ok(fmt!("{:?} exists, bypassing dev initialisation.", dir_path));
+        }
+    }
+    info!("Creating development tree because no existing web code was detected.");
+    for dir in constant::DEV_TREE_CREATE.iter() {
+        let dir_path = app_root.join(dir);
+        res!(fs::create_dir_all(&dir_path));
+        info!(" Created: {}", dir_path.display());
+    }
+    let html_index = r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Database Test Interface</title>
+    <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+    <div class="container">
+        <img src="/assets/img/logo.svg" alt="Hematite Rust Library" height="30"/>
+        <h2>Database Test Interface</h2>
+        <div class="input-group">
+            <label>Key:</label>
+            <input type="text" id="keyInput" placeholder="Enter key">
+        </div>
+        <div class="input-group">
+            <label>Value:</label>
+            <input type="text" id="valueInput" placeholder="Enter value">
+        </div>
+        <div class="input-group">
+            <button id="storeBtn">Store</button>
+            <button id="retrieveBtn">Retrieve</button>
+        </div>
+        <div id="status"></div>
+    </div>
+    <script type="module" src="/bundles/js/main.bundle.js"></script>
+</body>
+</html>"#;    
+    let html_admin = r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Interface</title>
+    <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+    <div class="container">
+        <img src="/assets/img/logo.svg" alt="Hematite Rust Library" height="30"/>
+        <h2>Admin Interface</h2>
+        <!-- Admin-specific content here -->
+        <div id="status"></div>
+    </div>
+    <script type="module" src="/bundles/js/admin.bundle.js"></script>
+</body>
+</html>
+"#;
+    let js_websocket = r#"export class WebSocketManager {
+    constructor(statusCallback) {
+        this.ws = null;
+        this.reconnectAttempts = 0;
+        this.MAX_RECONNECT_ATTEMPTS = 3;
+        this.reconnectTimeout = null;
+        this.statusCallback = statusCallback;
+    }
+    connect() {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) return;
+        if (this.reconnectTimeout) {
+            clearTimeout(this.reconnectTimeout);
+            this.reconnectTimeout = null;
+        }
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${wsProtocol}
+        try {
+            this.ws = new WebSocket(wsUrl);
+            this.ws.onopen = () => {
+                console.log('WebSocket connected');
+                this.statusCallback('Connected to server.');
+                this.reconnectAttempts = 0;
+            };
+            this.ws.onclose = (event) => {
+                this.ws = null;
+                console.log('WebSocket closed:', event.code, event.reason || '<no reason>');
+                if (this.reconnectAttempts < this.MAX_RECONNECT_ATTEMPTS && event.code !== 1000) {
+                    this.reconnectAttempts++;
+                    const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts - 1), 10000);
+                    this.statusCallback(`Connection lost. Retry attempt ${this.reconnectAttempts} in ${delay/1000} seconds...`);
+                    this.reconnectTimeout = setTimeout(() => this.connect(), delay);
+                } else {
+                    const msg = event.code === 1000 
+                        ? 'Connection closed normally.'
+                        : 'Unable to connect to server. Please refresh the page to try again.';
+                    this.statusCallback(msg);
+                }
+            };
+            this.ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+                this.statusCallback('Connection error occurred.');
+            };
+        } catch (error) {
+            console.error('Failed to create WebSocket:', error);
+            this.statusCallback('Failed to create connection.');
+        }
+    }
+    send(message) {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            try {
+                this.ws.send(message);
+                return true;
+            } catch (error) {
+                console.error('Send error:', error);
+                this.statusCallback('Failed to send message.');
+                return false;
+            }
+        }
+        return false;
+    }
+    onMessage(callback) {
+        if (this.ws) {
+            this.ws.onmessage = callback;
+        }
+    }
+    close() {
+        if (this.reconnectTimeout) {
+            clearTimeout(this.reconnectTimeout);
+            this.reconnectTimeout = null;
+        }
+        if (this.ws) {
+            try {
+                if (this.ws.readyState === WebSocket.OPEN) {
+                    this.ws.close(1000, 'Normal closure');
+                    this.statusCallback('Connection closed cleanly.');
+                }
+            } catch (error) {
+                console.error('Error during WebSocket closure:', error);
+            } finally {
+                this.ws = null;
+            }
+        }
+    }
+}"#;
+    let js_main_index = r#"import { WebSocketManager } from '@utils/websocket.mjs';
+class App {
+    constructor() {
+        console.log('App initialising...');
+        this.storeData = this.storeData.bind(this);
+        this.retrieveData = this.retrieveData.bind(this);
+        this.showStatus = this.showStatus.bind(this);
+        this.wsManager = new WebSocketManager((msg) => {
+            console.log('Status update:', msg);
+            this.showStatus(msg);
+        });
+        this.init();
+    }
+    init() {
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', () => this.setupAll());
+        } else {
+            this.setupAll();
+        }
+    }
+    setupAll() {
+        console.log('Setting up all components...');
+        this.setupWebSocket();
+        this.setupWindowEvents();
+        this.setupButtons();
+    }
+    showStatus(message) {
+        console.log('Status message:', message);
+        const status = document.getElementById('status');
+        if (status) {
+            status.textContent = message;
+        } else {
+            console.error('Status element not found.');
+        }
+    }
+    setupButtons() {
+        console.log('Setting up buttons...');
+        const storeBtn = document.getElementById('storeBtn');
+        const retrieveBtn = document.getElementById('retrieveBtn');
+        if (storeBtn) {
+            console.log('Store button found, adding listener.');
+            storeBtn.onclick = () => {
+                console.log('Store button clicked.');
+                this.storeData();
+            };
+        } else {
+            console.error('Store button not found.');
+        }
+        if (retrieveBtn) {
+            console.log('Retrieve button found, adding listener.');
+            retrieveBtn.onclick = () => {
+                console.log('Retrieve button clicked.');
+                this.retrieveData();
+            };
+        } else {
+            console.error('Retrieve button not found.');
+        }
+    }
+    setupWebSocket() {
+        console.log('Setting up WebSocket...');
+        this.wsManager.connect();
+        this.wsManager.onMessage((event) => {
+            const response = event.data;
+            console.log('Received WebSocket message:', response);
+            if (response.startsWith('data')) {
+                const value = response.split(' ')[1].replace(/['"]/g, '');
+                const valueInput = document.getElementById('valueInput');
+                if (valueInput) {
+                    valueInput.value = value;
+                    this.showStatus('Data retrieved successfully.');
+                }
+            } else {
+                this.showStatus(`Server response: ${response}`);
+            }
+        });
+    }
+    setupWindowEvents() {
+        window.addEventListener('beforeunload', () => {
+            console.log('Window closing, cleaning up...');
+            this.wsManager.close();
+        });
+    }
+    storeData() {
+        console.log('storeData called');
+        const keyInput = document.getElementById('keyInput');
+        const valueInput = document.getElementById('valueInput');
+        if (!keyInput || !valueInput) {
+            console.error('Input elements not found.');
+            return;
+        }
+        const key = keyInput.value.trim();
+        const value = valueInput.value.trim();
+        if (!key || !value) {
+            this.showStatus('Both key and value are required');
+            return;
+        }
+        const message = `insert (t2|[(str|${key}),(str|${value})])`;
+        console.log('Sending message:', message);
+        if (!this.wsManager.send(message)) {
+            console.log('WebSocket not ready, attempting to reconnect...');
+            this.showStatus('Connecting to server...');
+            this.wsManager.connect();
+            setTimeout(() => this.storeData(), 1000);
+        }
+    }
+    retrieveData() {
+        console.log('retrieveData called');
+        const keyInput = document.getElementById('keyInput');
+        if (!keyInput) {
+            console.error('Key input element not found.');
+            return;
+        }
+        const key = keyInput.value.trim();
+        if (!key) {
+            this.showStatus('Key is required for retrieval.');
+            return;
+        }
+        const message = `get_data (str|${key})`;
+        console.log('Sending message:', message);
+        if (!this.wsManager.send(message)) {
+            console.log('WebSocket not ready, attempting to reconnect...');
+            this.showStatus('Connecting to server...');
+            this.wsManager.connect();
+            setTimeout(() => this.retrieveData(), 1000);
+        }
+    }
+}
+console.log('Creating App instance...');
+window.app = new App();"#;
+    let js_admin_index = r#"import { WebSocketManager } from '../../utils/websocket.mjs';
+class AdminApp {
+    constructor() {
+        console.log('Admin app initialising...');
+        this.showStatus = this.showStatus.bind(this);
+        this.wsManager = new WebSocketManager((msg) => {
+            console.log('Status update:', msg);
+            this.showStatus(msg);
+        });
+        this.init();
+    }
+    init() {
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', () => this.setupAll());
+        } else {
+            this.setupAll();
+        }
+    }
+    setupAll() {
+        console.log('Setting up admin components...');
+        this.setupWebSocket();
+        this.setupWindowEvents();
+    }
+    showStatus(message) {
+        console.log('Status message:', message);
+        const status = document.getElementById('status');
+        if (status) {
+            status.textContent = message;
+        }
+    }
+    setupWebSocket() {
+        console.log('Setting up WebSocket...');
+        this.wsManager.connect();
+        this.wsManager.onMessage((event) => {
+            const response = event.data;
+            console.log('Received WebSocket message:', response);
+            this.showStatus(`Server response: ${response}`);
+        });
+    }
+    setupWindowEvents() {
+        window.addEventListener('beforeunload', () => {
+            console.log('Window closing, cleaning up...');
+            this.wsManager.close();
+        });
+    }
+}
+console.log('Creating AdminApp instance...');
+window.adminApp = new AdminApp();
+"#;
+    let base_styles = r#"
+@use 'common' as *;
+.container {
+    margin: 20px;
+    padding: 10px;
+}"#;
+    let common_styles = r#"$primary-color: #4CAF50;
+$hover-color: #45a049;
+$border-color: #ccc;
+$status-bg: #f8f8f8;
+@mixin button-style {
+    padding: 5px 15px;
+    margin-right: 10px;
+    background: $primary-color;
+    color: white;
+    border: none;
+    cursor: pointer;
+    &:hover {
+        background: $hover-color;
+    }
+}"#;
+    let input_styles = r#"@use '../common' as *;
+.input-group {
+    margin-bottom: 15px;
+    label {
+        display: inline-block;
+        width: 50px;
+        margin-right: 10px;
+    }
+    input {
+        padding: 5px;
+        margin-right: 10px;
+        border: 1px solid $border-color;
+        width: 200px;
+    }
+    button {
+        @include button-style;
+    }
+}"#;
+    let status_styles = r#"@use '../common' as *;
+#status {
+    margin-top: 20px;
+    padding: 10px;
+    background: $status-bg;
+    border-left: 4px solid $primary-color;
+}"#;
+    let main_styles = r#"@use './common' as *;
+@use 'components/input';
+@use 'components/status';
+.container {
+    margin: 20px;
+    padding: 10px;
+}
+"#;
+    let admin_styles = r#"@use './common' as *;
+@use 'components/input';
+@use 'components/status';
+.container {
+    margin: 20px;
+    padding: 10px;
+}
+"#;
+    let logo_svg = include_str!("logo.svg");
+    let files = [
+        ("www/public/index.html", html_index),
+        ("www/public/admin.html", html_admin),
+        ("www/public/assets/img/logo.svg", logo_svg),
+        ("www/src/js/utils/websocket.mjs", js_websocket),
+        ("www/src/js/pages/main/index.mjs", js_main_index),
+        ("www/src/js/pages/admin/index.mjs", js_admin_index),
+        ("www/src/styles/base.scss", base_styles),
+        ("www/src/styles/_common.scss", common_styles),
+        ("www/src/styles/components/_input.scss", input_styles),
+        ("www/src/styles/components/_status.scss", status_styles),
+        ("www/src/styles/main.scss", main_styles),
+        ("www/src/styles/admin.scss", admin_styles),
+    ];
+    for (path, content) in files.iter() {
+        let file_path = app_root.join(path);
+        if let Some(parent) = file_path.parent() {
+            res!(fs::create_dir_all(parent));
+        }
+        res!(fs::write(&file_path, content));
+        info!(" Created: {}", file_path.display());
+    }
+    Ok(fmt!(""))
+}
+pub fn ensure_compatibility(app_root: &Path) -> Outcome<()> {
+    info!("Ensuring compatibility with existing website structure...");
+    let required_dirs = [
+        "tls/dev",
+        "tls/prod",
+        "www/logs",
+    ];
+    for dir in &required_dirs {
+        let dir_path = app_root.join(dir);
+        if !dir_path.exists() {
+            res!(fs::create_dir_all(&dir_path));
+            info!("Created required directory: {}", dir);
+        }
+    }
+    let index_path = app_root.join("www/public/index.html");
+    if !index_path.exists() {
+        warn!("No index.html found in www/public/. Creating minimal placeholder.");
+        let minimal_html = r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Steel Server</title>
+</head>
+<body>
+    <h1>Welcome</h1>
+    <p>Steel server is running. Please add your content to www/public/</p>
+</body>
+</html>"#;
+        res!(fs::write(&index_path, minimal_html));
+        info!("Created minimal index.html");
+    }
+    Ok(())
+}
+File: src/app/server.rs
+use crate::{
+    app::{
+        self,
+        constant as app_const,
+        https::AppWebHandler,
+        repl::AppShellContext,
+    },
+    srv::{
+        cert::Certificate,
+        cfg::ServerConfig,
+        constant as srv_const,
+        context::{
+            Protocol,
+            ServerContext,
+        },
+        dev::{
+            cfg::DevConfig,
+            refresh::DevRefreshManager,
+        },
+        id,
+        server::Server,
+        ws::{
+            handler::AppWebSocketHandler,
+            syntax::WebSocketSyntax,
+        },
+    },
+};
+use oxedize_fe2o3_core::{
+    prelude::*,
+    log::{
+        bot::FileConfig,
+        console::{
+            LoggerConsole,
+            StdoutLoggerConsole,
+        },
+    },
+    path::NormalPath,
+};
+use oxedize_fe2o3_jdat::{
+    prelude::*,
+};
+use oxedize_fe2o3_syntax::{
+    msg::{
+        MsgCmd,
+    },
+};
+use oxedize_fe2o3_tui::lib_tui::{
+    repl::{
+        Evaluation,
+        ShellConfig,
+    },
+};
+use std::{
+    collections::HashMap,
+    path::{
+        Path,
+        PathBuf,
+    },
+    sync::Arc,
+    time::Duration,
+};
+use tokio;
+impl AppShellContext {
+    pub fn start_server(
+        &mut self,
+        _shell_cfg:  &ShellConfig,
+        cmd:        Option<&MsgCmd>,
+    )
+        -> Outcome<Evaluation>
+    {
+        let root_path = Path::new(&self.app_cfg.app_root)
+            .normalise()
+            .absolute();
+        info!("Reading server config...");
+        let server_cfg = res!(ServerConfig::from_datmap(self.app_cfg.server_cfg.clone()));
+        info!("Reading dev config...");
+        let dev_cfg = res!(DevConfig::from_datmap(self.app_cfg.dev_cfg.clone()));
+        let mut dev_mode = false;
+        if let Some(msg_cmd) = cmd {
+            if msg_cmd.has_arg("dev") {
+                dev_mode = true;
+                info!("Running in development mode.");
+            }
+        }
+        res!(app::dev::ensure_compatibility(&root_path));
+        info!("Validating server config...");
+        match server_cfg.validate(&root_path) {
+            Ok(()) => info!("Server configuration validated successfully."),
+            Err(e) => {
+                warn!("Server configuration validation issues: {}", e);
+                info!("Continuing with available routes...");
+            }
+        }
+        if dev_mode {
+            info!("Validating development config...");
+            match dev_cfg.validate(&root_path) {
+                Ok(()) => info!("Development configuration validated successfully."),
+                Err(e) => {
+                    warn!("Development configuration issues: {}", e);
+                    info!("Some development features may be disabled.");
+                }
+            }
+        }
+        if self.stat.first && !dev_mode {
+            return Ok(Evaluation::Error(fmt!(
+                "You should update values in {} before running the server in production mode.",
+                app_const::CONFIG_NAME,
+            )));
+        }
+        let mut log_cfg = log_get_config!();
+        let mut logger_console = StdoutLoggerConsole::new();
+        let logger_console_thread = logger_console.go();
+        log_cfg.console = Some(logger_console_thread.chan.clone());
+        (log_cfg.level, _) = res!(self.app_cfg.server_log_level());
+        log_cfg.file = Some(FileConfig::new(
+            PathBuf::from(&root_path).join("www").join("logs"),
+            self.app_cfg.app_name.clone(),
+            "log".to_string(),
+            0,
+            Some(1_048_576),
+        ));
+        debug!("log_cfg = {:?}", log_cfg);
+        log_set_config!(log_cfg);
+        println!("Server now logging at {:?}", log_get_file_path!());
+        info!("┌───────────────────────┐");
+        info!("│ New server session.   │");
+        info!("└───────────────────────┘");
+        info!("Starting database...");
+        res!(self.db.start("database"));
+        res!(ok!(self.db.updated_api()).activate_gc(true));
+        std::thread::sleep(Duration::from_secs(1));
+        let uid = id::Uid::new(0);
+        let (start, msgs) = res!(self.db.api().ping_bots(app_const::GET_DATA_WAIT));
+        info!("{} ping replies received in {:?}.", msgs.len(), start.elapsed());
+        let (tls_dir, cert_path, key_path) = res!(server_cfg.get_tls_paths(&root_path, dev_mode));
+        debug!("tls_dir = {:?}", tls_dir);
+        debug!("cert_path = {:?}", cert_path);
+        debug!("key_path = {:?}", key_path);
+        let domains = res!(server_cfg.get_domain_names());
+        if !cert_path.exists() || !key_path.exists() {
+            if dev_mode {
+                info!("Development certificates not found - generating self-signed certificates.");
+                res!(Certificate::new_dev(
+                    &server_cfg,
+                    &root_path,
+                ));
+            } else {
+                info!("Production certificates not found - generating self-signed certificates.");
+                res!(Certificate::new_lets_encrypt(
+                    &domains,
+                    &tls_dir,
+                ));
+            }
+        }
+        if dev_mode {
+            info!("Connect via: https:
+        } else {
+            info!("Connect via: https:
+        }
+        let js_bundles_map = if dev_mode && dev_cfg.has_js_bundling(&root_path) {
+            info!("JavaScript bundling enabled.");
+            res!(dev_cfg.get_js_bundles_map(&root_path))
+        } else {
+            info!("JavaScript bundling disabled or not configured.");
+            Vec::new()
+        };
+        let js_import_aliases = res!(dev_cfg.get_js_import_aliases(&root_path));
+        let css_paths = if dev_mode && dev_cfg.has_css_bundling(&root_path) {
+            info!("CSS compilation enabled.");
+            res!(dev_cfg.get_css_paths(&root_path))
+        } else {
+            info!("CSS compilation disabled or not configured.");
+            (PathBuf::new(), PathBuf::new())
+        };
+        let refresh_manager = Arc::new(DevRefreshManager::new(
+            &root_path,
+            js_bundles_map,
+            js_import_aliases,
+            css_paths,
+        ));
+        res!(refresh_manager.refresh());
+        let rt = res!(tokio::runtime::Runtime::new());
+        let ws_handler = AppWebSocketHandler::new(
+            if dev_mode {
+                let manager_clone = refresh_manager.clone();
+                rt.spawn(async move {
+                    debug!("Starting dev refresh file watcher.");
+                    if let Err(e) = manager_clone.watch() {
+                        error!(err!(e,
+                            "Failed to start development file watcher.";
+                            Init));
+                    }
+                });
+                Some(refresh_manager)
+            } else {
+                None
+            }
+        );
+        let ws_syntax = res!(WebSocketSyntax::new(
+            &self.app_cfg.app_human_name,
+            &app_const::VERSION,
+            &self.app_cfg.app_description,
+        ));
+        let web_handler = AppWebHandler::new(
+            server_cfg.clone(),
+            res!(server_cfg.get_public_dir(&root_path)),
+            res!(server_cfg.get_static_route_paths(
+                &root_path,
+                HashMap::new(),
+            )),
+            res!(server_cfg.get_default_index_files()),
+            dev_mode,
+        );
+        let protocol = Protocol::Web {
+            web_handler,
+            ws_handler,
+            ws_syntax,
+            dev_mode,
+        };
+        let server_context = ServerContext::new(
+            server_cfg,
+            root_path.clone(),
+            Some((self.db.clone(), uid)),
+            protocol,
+        );
+        let server = Server::new(server_context);
+        info!("Starting server...");
+        for line in srv_const::SPLASH.lines() {
+            info!("{}", line);
+        }
+        match rt.block_on(server.start()) {
+            Ok(()) => info!("Server stopped gracefully."),
+            Err(e) => error!(Error::Upstream(Arc::new(e), ErrMsg {
+                tags: &[ErrTag::IO, ErrTag::Thread],
+                msg: fmt!("Result of the attempt to execute the server within the Tokio runtime."),
+            })),
+        }
+        log_finish_wait!();
+        Ok(Evaluation::Exit)
+    }
+}
+File: src/app/repl.rs
+use crate::{
+    app::{
+        cfg::AppConfig,
+        constant as app_const,
+        tui::AppStatus,
+    },
+    srv::{
+        cert::Certificate,
+        cfg::ServerConfig,
+        constant as srv_const,
+        id,
+    },
+};
+use oxedize_fe2o3_core::{
+    prelude::*,
+    path::NormalPath,
+};
+use oxedize_fe2o3_crypto::{
+    enc::EncryptionScheme,
+    keys::Wallet,
+};
+use oxedize_fe2o3_hash::{
+    csum::ChecksumScheme,
+    hash::HashScheme,
+    kdf::KeyDerivationScheme,
+};
+use oxedize_fe2o3_iop_crypto::{
+    keys::KeyManager,
+    enc::Encrypter,
+};
+use oxedize_fe2o3_iop_hash::kdf::KeyDeriver;
+use oxedize_fe2o3_jdat::{
+    prelude::*,
+    file::JdatFile,
+    string::enc::EncoderConfig,
+};
+use oxedize_fe2o3_net::dns::Fqdn;
+use oxedize_fe2o3_o3db_sync::O3db;
+use oxedize_fe2o3_syntax::{
+    core::SyntaxRef,
+    help::Help,
+    msg::{
+        Msg,
+        MsgCmd,
+    },
+    opt::OptionRefVec,
+};
+use oxedize_fe2o3_text::base2x;
+use oxedize_fe2o3_tui::lib_tui::{
+    cmds,
+    repl::{
+        Evaluation,
+        Shell,
+        ShellConfig,
+        ShellContext,
+        Splitters,
+    },
+    input::UserInput,
+};
+use oxedize_fe2o3_namex::InNamex;
+use std::{
+    collections::BTreeMap,
+    path::{
+        Path,
+    },
+};
+use secrecy::{
+    ExposeSecret,
+    Secret,
+};
+use zeroize::Zeroize;
+#[derive(Clone)]
+pub struct AppShellContext {
+    pub stat:       AppStatus,
+    pub app_cfg:    AppConfig,
+    pub syntax:     SyntaxRef,
+    pub ws:         BTreeMap<Dat, Dat>,
+    pub db:         O3db<
+                        { id::UID_LEN },
+                        id::Uid,
+                        EncryptionScheme,
+                        HashScheme,
+                        HashScheme,
+                        ChecksumScheme,
+                    >,
+    pub wallet:     Wallet<{ app_const::NUM_PREV_PASSHASHES_TO_RETAIN }, Dat>,
+}
+impl ShellContext for AppShellContext {
+    fn eval(
+        &mut self,
+        input:      &String,
+        cfg:        &ShellConfig,
+        splitters:  &Splitters,
+    )
+        -> Outcome<Vec<Evaluation>>
+    {
+        for expr in splitters.command.split(input).into_iter() {
+            let parts = splitters.assignment.split(expr.val_ref());
+            match parts.len() {
+                0 => unreachable!(),
+                1 => {
+                },
+                2 => {
+                    let lhs = res!(Dat::decode_string(parts[0].val_ref()));
+                    let rhs = res!(Dat::decode_string(parts[1].val_ref()));
+                    if lhs.kind() != Kind::Str {
+                        return Err(err!(
+                            "The left hand side of the assignment is a {:?} but must be a Kind::Str.",
+                            lhs.kind();
+                            Input, Mismatch));
+                    }
+                    self.ws.insert(lhs, rhs);
+                    continue;
+                },
+                _ => return Err(err!(
+                    "Only single assignment such as a = b is permitted.";
+                    Input, Mismatch)),
+            }
+            let mut parts = splitters.word
+                .split(expr.val_ref())
+                .into_iter()
+                .map(|x| x.to_val())
+                .peekable();
+            if let Some("echo") = parts.peek().map(|s| s.as_ref()) {
+                return Ok(vec![Evaluation::Output(input.clone())]);
+            }
+            return self.execute(parts, &cfg);
+        }
+        Ok(vec![Evaluation::None])
+    }
+}
+impl AppShellContext {
+    pub fn execute<I: IntoIterator<Item=String>>(
+        &mut self,
+        parts:      I,
+        shell_cfg:  &ShellConfig,
+    )
+        -> Outcome<Vec<Evaluation>>
+    {
+        let mut evals = Vec::new();
+        let msgrx = Msg::new(self.syntax.clone());
+        let msgrx = res!(msgrx.rx_text_iter(
+            parts,
+            Some(app_const::SYNTAX_CMD_SIMILARITY_THRESHOLD),
+        ));  
+        for (cmd_key, cmd) in &msgrx.cmds {
+            match cmd_key.as_str() {
+                "help" => {
+                    let help = Help::default();
+                    for line in res!(help.to_lines(&self.syntax)) {
+                        println!("{}", line);
+                    }
+                },
+                "exit"      => evals.push(res!(cmds::exit_shell(&shell_cfg.exit_msg))),
+                "server"    => evals.push(res!(self.start_server(&shell_cfg, Some(cmd)))),
+                "shell"     => evals.push(res!(self.start_shell(&shell_cfg, Some(cmd)))),
+                "cert"      => evals.push(res!(self.manage_certificates(&shell_cfg, Some(cmd)))),
+                "cd"        => evals.push(res!(cmds::change_directory(cmd))),
+                "ls"        => evals.push(res!(cmds::list_directory_contents(cmd))),
+                "pwd"       => evals.push(res!(cmds::print_working_directory())),
+                "secrets"   => evals.push(res!(self.secrets(&shell_cfg, Some(cmd)))),
+                _ => (),
+            }
+        }
+        Ok(evals)
+    }
+    pub fn start_shell(
+        &mut self,
+        shell_cfg:  &ShellConfig,
+        _cmd:       Option<&MsgCmd>,
+    )
+        -> Outcome<Evaluation>
+    {
+        let mut shell = res!(Shell::new(
+            shell_cfg.clone(),
+            self.clone(),
+        ));
+        res!(shell.start());
+        Ok(Evaluation::None)
+    }
+    pub fn secrets(
+        &mut self,
+        _shell_cfg:  &ShellConfig,
+        cmd:        Option<&MsgCmd>,
+    )
+        -> Outcome<Evaluation>
+    {
+        if let Some(msg_cmd) = cmd {
+            if msg_cmd.has_args() {
+                if res!(msg_cmd.has_only_arg("create")) {
+                    let vals = res!(msg_cmd.get_arg_vals("create").with_len(1));
+                    let name = &vals[0];
+                    let pass = res!(UserInput::ask_for_secret(None));
+                    let mut kdf = res!(KeyDerivationScheme::from_str(&self.app_cfg.kdf_name));
+                    let key = res!(UserInput::derive_key(&mut kdf, pass));
+                    if self.wallet.enc_secs().get(name).is_some() {
+                        if res!(UserInput::ask(
+                            fmt!("Encrypted secret '{}' already exists, replace? (Y/N): ", name).as_str(),
+                        )).to_lowercase().as_str() != "y" {
+                            return Ok(Evaluation::Output(fmt!("Creation of encrypted secret aborted.")));
+                        }
+                    }
+                    let mut map = DaticleMap::new();
+                    map.insert(dat!("kdf_name"), dat!(fmt!("{}", kdf)));
+                    map.insert(dat!("kdf_nid"), dat!(fmt!("{}", res!(kdf.name_id()))));
+                    map.insert(dat!("kdf_cfg"), dat!(res!(kdf.encode_cfg_to_string())));
+                    let enc = res!(EncryptionScheme::new_aes_256_gcm_with_key(&key));
+                    map.insert(dat!("enc_name"), dat!(fmt!("{:?}", enc)));
+                    map.insert(dat!("enc_nid"), dat!(fmt!("{}", res!(enc.name_id()))));
+                    let sec = res!(UserInput::ask_for_secret(
+                        Some("Enter the secret you want to encrypt: ")
+                    ));
+                    let enc_sec = res!(enc.encrypt(sec.expose_secret().as_bytes()));
+                    let base2x = base2x::HEMATITE64;
+                    let b2x_sec = base2x.to_string(&enc_sec);
+                    map.insert(dat!("enc_sec"), dat!(b2x_sec));
+                    if let Some(enc_sec_map) = self.wallet.enc_secs_mut().get_mut(name) {
+                        *enc_sec_map = dat!(map);
+                    } else {
+                        self.wallet.enc_secs_mut().insert(name.clone(), dat!(map));
+                    }
+                    let wallet_path = Path::new("./").join(app_const::WALLET_NAME);
+                    res!(self.wallet.save(
+                        &wallet_path, "  ", Some(EncoderConfig::<(), ()>::default()),
+                    ));
+                } else if res!(msg_cmd.has_only_arg("recover")) {
+                    let vals = res!(msg_cmd.get_arg_vals("recover").with_len(1));
+                    let name = &vals[0];
+                    let enc_sec_dat = match self.wallet.enc_secs().get(name) {
+                        Some(map_dat) => map_dat,
+                        None => return Ok(Evaluation::Output(
+                            fmt!("Secret '{}' not found in wallet.", name)
+                        )),
+                    };
+                    let key = {
+                        let pass = res!(UserInput::ask_for_secret(None));
+                        let pass = pass.expose_secret();
+                        let kdf_name = try_extract_dat!(
+                            res!(enc_sec_dat.map_get_type_must(&dat!("kdf_name"), &[&Kind::Str])),
+                            Str,
+                        );
+                        let mut kdf = res!(KeyDerivationScheme::from_str(kdf_name));
+                        let kdf_cfg = try_extract_dat!(
+                            res!(enc_sec_dat.map_get_type_must(&dat!("kdf_cfg"), &[&Kind::Str])),
+                            Str,
+                        );
+                        res!(kdf.decode_cfg_from_string(&kdf_cfg));
+                        res!(kdf.derive(pass.as_bytes()));
+                        res!(kdf.get_hash()).to_vec()
+                    };
+                    let enc_name = try_extract_dat!(
+                        res!(enc_sec_dat.map_get_type_must(&dat!("enc_name"), &[&Kind::Str])),
+                        Str,
+                    );
+                    let mut enc = res!(EncryptionScheme::from_str(enc_name));
+                    enc = res!(enc.set_secret_key(Some(&key)));
+                    let enc_sec_base2x = try_extract_dat!(
+                        res!(enc_sec_dat.map_get_type_must(&dat!("enc_sec"), &[&Kind::Str])),
+                        Str,
+                    );
+                    let base2x = base2x::HEMATITE64;
+                    let enc_sec_byts = res!(base2x.from_str(&enc_sec_base2x));
+                    let sec_byts = res!(enc.decrypt(&enc_sec_byts));
+                    let mut sec_str = res!(String::from_utf8(sec_byts));
+                    res!(UserInput::show_and_clear(
+                        Secret::new(fmt!("Press enter to clear: secret is '{}'", sec_str))
+                    ));
+                    sec_str.zeroize();
+                }
+            } else {
+                return Err(err!("Missing message command."; Invalid, Input, Missing));
+            }
+        }
+        Ok(Evaluation::None)
+    }
+    pub fn manage_certificates(
+        &mut self,
+        _shell_cfg: &ShellConfig,
+        cmd:        Option<&MsgCmd>,
+    )
+        -> Outcome<Evaluation>
+    {
+        if let Some(msg_cmd) = cmd {
+            if msg_cmd.has_args() {
+                if res!(msg_cmd.has_only_arg("create-dev")) {
+                    info!("Generating self-signed development certificates...");
+                    res!(Certificate::new_dev(
+                        &ServerConfig::default(),
+                        &Path::new(&self.app_cfg.app_root).normalise().absolute(),
+                    ));
+                    return Ok(Evaluation::Output(fmt!(
+                        "Self-signed development certificates generated in {}/tls/{}",
+                        self.app_cfg.app_root,
+                        srv_const::TLS_DIR_DEV,
+                    )));
+                } else if res!(msg_cmd.has_only_arg("create-prod")) {
+                    let domains = if let Some(vals) = msg_cmd.get_vals() {
+                        let domains_str: Vec<String> = res!(vals[0].clone().try_into());
+                        let mut domains_fqdn = Vec::new();
+                        for domain_str in domains_str {
+                            domains_fqdn.push(res!(Fqdn::new(domain_str)));    
+                        }
+                        domains_fqdn
+                    } else {
+                        let server_cfg = res!(ServerConfig::from_datmap(
+                            self.app_cfg.server_cfg.clone()
+                        ));
+                        res!(server_cfg.get_domain_names())
+                    };
+                    let tls_dir = Path::new(&self.app_cfg.app_root)
+                        .join("tls")
+                        .join(srv_const::TLS_DIR_PROD);
+                    res!(Certificate::new_lets_encrypt(&domains, &tls_dir));
+                    return Ok(Evaluation::Output(fmt!(
+                        "Production certificates created and installed in {}/tls/{}",
+                        self.app_cfg.app_root,
+                        srv_const::TLS_DIR_PROD,
+                    )));
+                }
+            } else {
+                let avail_args = if let Some(cmd) = msg_cmd.syntax.get_cmd(&*msg_cmd.name) {
+                    cmd.collect_short_arg_names()
+                        .iter()
+                        .map(|s| fmt!("-{}", s))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                } else {
+                    fmt!("<no args>")
+                };
+                return Ok(Evaluation::Error(fmt!(
+                    "Must use one of '{}' for command '{}'.  Type 'help' for more info.",
+                    avail_args, msg_cmd.name,
+                )));
+            }
+        }
+        Ok(Evaluation::None)
+    }
+}
+File: src/app/mod.rs
+pub mod cfg;
+pub mod constant;
+pub mod dev;
+pub mod https;
+pub mod repl;
+pub mod server;
+pub mod smtps;
+pub mod syntax;
+pub mod tui;
+File: src/app/tui.rs
+#![forbid(unsafe_code)]
+use crate::{
+    app::{
+        cfg::AppConfig,
+        constant,
+        dev,
+        repl::AppShellContext,
+        syntax as app_syntax,
+    },
+    srv::{
+        context::new_db,
+    },
+};
+use oxedize_fe2o3_core::{
+    prelude::*,
+    log::{
+        bot::FileConfig,
+    },
+};
+use oxedize_fe2o3_crypto::{
+    keys::Wallet,
+};
+use oxedize_fe2o3_data::{
+    ring::RingBuffer,
+    time::Timestamped,
+};
+use oxedize_fe2o3_hash::{
+    kdf::KeyDerivationScheme,
+};
+use oxedize_fe2o3_iop_hash::{
+    kdf::KeyDeriver,
+};
+use oxedize_fe2o3_jdat::{
+    prelude::*,
+    cfg::Config,
+    file::{
+        JdatFile,
+        JdatMapFile,
+    },
+    string::{
+        dec::DecoderConfig,
+        enc::EncoderConfig,
+    },
+};
+use oxedize_fe2o3_tui::lib_tui::{
+    repl::{
+        Evaluation,
+        ShellConfig,
+    },
+    input::UserInput,
+};
+use oxedize_fe2o3_namex::InNamex;
+use std::{
+    collections::BTreeMap,
+    io::Write,
+    path::{
+        Path,
+        PathBuf,
+    },
+};
+use secrecy::{
+    ExposeSecret,
+};
+#[derive(Clone)]
+pub enum State {
+    NotStarted,
+    Running,
+    NotResponsive,
+}
+impl Default for State { fn default() -> Self { Self::NotStarted } }
+#[derive(Clone, Default)]
+pub struct AppStatus {
+    pub first:  bool,
+    pub log:    State,
+    pub db:     State,
+    pub web:    State,
+}
+pub fn run() -> Outcome<()> {
+    let mut app_status = AppStatus::default();
+    let cwd = res!(std::env::current_dir());
+    let cwd_str = res!(cwd.to_str().ok_or(err!(
+        "Converting the current working directory path '{:?}' to a string.", cwd;
+        Conversion, String)));
+    let err_str = fmt!("Failed to obtain the directory name from the current working path '{:?}'.",
+        cwd);
+    let this_dir = res!(
+        res!(cwd.file_name().ok_or(err!("{}", &err_str; Conversion, String)))
+        .to_str().ok_or(err!("{}", &err_str; Conversion, String))
+    );
+    let cfg_path = Path::new("./").join(constant::CONFIG_NAME);
+    if !cfg_path.is_file() {
+        app_status.first = true;
+        let mut cfg = res!(AppConfig::new());
+        println!("Welcome to the Hematite Steel Server, this appears to be a new app.");
+        println!("You'll now be asked to enter a human name and a description...");
+        for (field, prompt) in [
+            (&mut cfg.app_human_name, "App human name"),
+            (&mut cfg.app_description, "App description"),
+        ] {
+            print!("{}: ", prompt);
+            res!(std::io::stdout().flush());
+            let mut input = String::new();
+            res!(std::io::stdin().read_line(&mut input));
+            *field = input.trim().to_string();
+        }
+        cfg.app_name = this_dir.to_string();
+        res!(cfg.save(&cfg_path, "  ", false));
+        println!(
+            "There is no {} file, a default has been created at {:?}.",
+            constant::CONFIG_NAME, cfg_path,
+        );
+    }
+    let mut cfg = res!(AppConfig::load(cfg_path));
+    res!(cfg.check_and_fix());
+    println!("Welcome to {}.", cfg.app_human_name);
+    let mut log_cfg = log_get_config!();
+    log_cfg.console = None;
+    log_cfg.level = match LogLevel::from_str(&cfg.app_log_level) {
+        Ok(level) => level,
+        _ => res!(LogLevel::from_str(constant::DEFAULT_LOG_LEVEL)),
+    };
+    log_cfg.file = Some(FileConfig::new(
+        PathBuf::from(cfg.app_root.clone()),
+        cfg.app_name.clone(),
+        constant::LOG_FILE_EXTENSION.to_string(),
+        0,
+        None,
+    ));
+    log_set_config!(log_cfg);
+    println!("Shell now logging at {:?}", log_get_file_path!());
+    info!("┌───────────────────────┐");
+    info!("│ New shell session.    │");
+    info!("└───────────────────────┘");
+    const PH: usize = constant::NUM_PREV_PASSHASHES_TO_RETAIN;
+    let wallet_path = Path::new("./").join(constant::WALLET_NAME);
+    let (wallet, db_default_enc_key) = if wallet_path.is_file() {
+        let wallet = res!(Wallet::<{PH}, Dat>::load(wallet_path, Some(DecoderConfig::<(), ()>::default())));
+        let kdf_map_dat = match wallet.kdf_cfgs().get(&dat!("default")) {
+            Some(map_dat) => map_dat,
+            None => return Err(err!(
+                "The wallet does not contain a 'default' KDF entry.";
+                Data, Configuration, Missing)),
+        };
+        let db_default_kdf_name = try_extract_dat!(
+            res!(kdf_map_dat.map_get_must(&dat!("kdf_name"))),
+            Str,
+        );
+        let mut db_default_kdf = res!(KeyDerivationScheme::from_str(&db_default_kdf_name));
+        let db_default_kdf_cfg = try_extract_dat!(
+            res!(kdf_map_dat.map_get_must(&dat!("kdf_cfg"))),
+            Str,
+        );
+        let app_kdf = match wallet.passhashes().get() {
+            Some(Timestamped { data: kdf_dat, .. }) => {
+                let kdf_name = try_extract_dat!(res!(kdf_dat.map_get_must(&dat!("kdf_name"))), Str);
+                let kdf_hash = try_extract_dat!(res!(kdf_dat.map_get_must(&dat!("kdf_hash"))), Str);
+                let mut app_kdf = res!(KeyDerivationScheme::from_str(&kdf_name));
+                res!(app_kdf.decode_from_string(kdf_hash));
+                app_kdf
+            }
+            None => return Err(err!(
+                "The current passhash is None in {}.",
+                constant::WALLET_NAME;
+                Data, Configuration, Missing)),
+        };
+        let pass = res!(UserInput::ask_for_secret(None));
+        let pass = pass.expose_secret().as_bytes();
+        if res!(app_kdf.verify(pass)) {
+            res!(db_default_kdf.decode_cfg_from_string(&db_default_kdf_cfg));
+            res!(db_default_kdf.derive(pass));
+            let db_default_enc_key = res!(db_default_kdf.get_hash()).to_vec();
+            (wallet, db_default_enc_key)
+        } else {
+            println!("The passphrase does not match, goodbye!");
+            return Ok(());
+        }
+    } else {
+        println!(
+            "There is no {} file.\nYou can replace it with a backup and restart, or create a new one.",
+            constant::WALLET_NAME,
+        );
+        println!("What would you like to do?");
+        println!("  1. Exit, replace with a backup file, and restart.");
+        println!("  2. Create a new {} file.", constant::WALLET_NAME);
+        print!("Please choose: ");
+        res!(std::io::stdout().flush());
+        let mut choice = String::new();
+        res!(std::io::stdin().read_line(&mut choice));
+        match choice.trim() {
+            "1" => {
+                println!("Ok, good luck!");
+                return Ok(());
+            },
+            "2" => {
+                println!("Ok, let's create the first app wallet passphrase.");
+                let pass = res!(UserInput::create_pass(constant::MAX_CREATE_PASS_ATTEMPTS));
+                let pass = pass.expose_secret().as_bytes();
+                let mut app_kdf = res!(KeyDerivationScheme::from_str(&cfg.kdf_name));
+                res!(app_kdf.derive(pass));
+                let mut kdf_map = DaticleMap::new();
+                kdf_map.insert(dat!("kdf_name"), dat!(fmt!("{}", app_kdf)));
+                let kdf_hash = res!(app_kdf.encode_to_string());
+                kdf_map.insert(dat!("kdf_hash"), dat!(kdf_hash));
+                let mut passhashes = RingBuffer::<{PH}, Timestamped<Dat>>::default();
+                passhashes.set(res!(Timestamped::new(dat!(kdf_map))));
+                let mut kdf_cfgs = DaticleMap::new();
+                let mut db_kdf = res!(KeyDerivationScheme::from_str(&cfg.kdf_name));
+                res!(db_kdf.derive(pass));
+                let mut kdf_map = DaticleMap::new();
+                kdf_map.insert(dat!("kdf_name"), dat!(fmt!("{}", db_kdf)));
+                kdf_map.insert(dat!("kdf_nid"), dat!(fmt!("{}", res!(db_kdf.name_id()))));
+                kdf_map.insert(dat!("kdf_cfg"), dat!(res!(db_kdf.encode_cfg_to_string())));
+                kdf_cfgs.insert(dat!("default"), dat!(kdf_map));
+                let db_default_enc_key = res!(db_kdf.get_hash()).to_vec();
+                let mut metadata = BTreeMap::new();
+                metadata.insert(dat!("app_name"), dat!(cfg.app_name.clone()));
+                metadata.insert(dat!("app_root"), dat!(cfg.app_root.clone()));
+                metadata.insert(dat!("this_dir"), dat!(cwd_str));
+                let wallet = Wallet::<{PH}, Dat>::new(
+                    metadata,
+                    kdf_cfgs,
+                    DaticleMap::new(),
+                    passhashes,
+                );
+                res!(wallet.save(&wallet_path, "  ", Some(EncoderConfig::<(), ()>::default())));
+                println!("Thank you, {:?} created.", wallet_path);
+                (wallet, db_default_enc_key)
+            },
+            _ => return Err(err!(
+                "Invalid response, goodbye!";
+                Invalid, Input)),
+        }
+    };
+    let app_root = Path::new(&cfg.app_root);
+    let db_root = app_root.join(constant::DB_DIR);
+    match dev::setup(&app_root) {
+        Ok(s) => {
+            if !s.is_empty() {
+                warn!("{}", s);
+            }
+        }
+        Err(e) => return Err(err!(e, "While setting up dev environment."; Init)),
+    }
+    let invocation_cmds: Vec<String> = std::env::args().skip(1).collect();
+    let syntax = res!(app_syntax::new_shell(
+        &cfg.app_human_name,
+        &constant::VERSION,
+        &fmt!("{} app: {}", cfg.app_human_name, cfg.app_description),
+    ));
+    let mut context = AppShellContext {
+        stat:       app_status,
+        app_cfg:    cfg.clone(),
+        syntax,
+        ws:         BTreeMap::new(),
+        db:         res!(new_db(&db_root, &db_default_enc_key)),
+        wallet,
+    };
+    let mut shell_cfg = ShellConfig::default();
+    if invocation_cmds.len() > 0 {
+        match context.execute(invocation_cmds, &shell_cfg) {
+            Ok(evals) => for eval in evals {
+                match eval {
+                    Evaluation::Output(s) => println!("{}", s),
+                    Evaluation::Exit => {
+                        println!("Exiting {} now.", cfg.app_human_name);
+                    }
+                    _ => (),
+                }
+            }
+            Err(e) => {
+                return Err(e);
+            }
+        }
+    } else {
+        shell_cfg.greeting_msg = 
+            fmt!("Welcome, type \"help\" for a help menu.");
+        res!(context.start_shell(&shell_cfg, None));
+    }
+    Ok(())
+}
+File: src/app/constant.rs
+use oxedize_fe2o3_jdat::version::SemVer;
+use oxedize_fe2o3_o3db_sync::{
+    comm::response::Wait,
+};
+pub const VERSION:                          SemVer = SemVer::new(0, 1, 0);
+pub const DB_DIR:                           &'static str = "o3db";
+pub const DEFAULT_LOG_LEVEL:                &'static str = "info";
+pub const LOG_FILE_EXTENSION:               &'static str = "log";
+pub const CONFIG_NAME:                      &'static str = "config.jdat";
+pub const WALLET_NAME:                      &'static str = "wallet.jdat";
+pub const NUM_PREV_PASSHASHES_TO_RETAIN:    usize = 10;
+pub const GET_DATA_WAIT:                    Wait = Wait::new_default();
+pub const KDF_HASH_LEN:                     u32 = 32;
+pub const KDF_SALT_LEN:                     usize = 16;
+pub const KDF_MEM_COST_KB:                  u32 = 104_858;
+pub const KDF_TIME_COST_PASSES:             u32 = 5;
+pub const WS_APP_MSG_LIMIT:                 u16 = 100;
+pub const MAX_CREATE_PASS_ATTEMPTS:         usize = 3;
+pub const SYNTAX_CMD_SIMILARITY_THRESHOLD:  f64 = 0.7;
+pub const DEV_TREE_CREATE: &[&str] = &[
+    "tls/dev",
+    "tls/prod",
+    "www/logs",
+    "www/public",
+    "www/public/assets",
+    "www/public/assets/font",
+    "www/public/assets/img",
+    "www/public/bundles",
+    "www/public/bundles/js",
+    "www/src/js",
+    "www/src/js/components",
+    "www/src/js/pages",
+    "www/src/js/pages/main",
+    "www/src/js/pages/admin",
+    "www/src/js/utils",
+    "www/src/styles",
+    "www/src/styles/components",
+];
+pub const INIT_TREE_HALT: &[&str] = &[
+    "www/public",
+    "www/src",
+];
+File: src/app/syntax.rs
+use oxedize_fe2o3_core::prelude::*;
+use oxedize_fe2o3_jdat::{
+    prelude::*,
+    version::SemVer,
+};
+use oxedize_fe2o3_syntax::{
+    self,
+    Syntax,
+    SyntaxRef,
+    arg::{
+        Arg,
+        ArgConfig,
+    },
+    cmd::{
+        Cmd,
+        CmdConfig,
+    },
+};
+pub fn new_shell(
+    name:   &str,
+    ver:    &SemVer,
+    about:  &str,
+)
+    -> Outcome<SyntaxRef>
+{
+    let mut s = Syntax::new(name).ver(*ver).about(about);
+    s = res!(s.with_default_help_cmd());
+    s = res!(oxedize_fe2o3_syntax::apps::file::generic_file_system(s));
+    let cmd = Cmd::from(CmdConfig {
+        name:   fmt!("exit"),
+        help:   Some(fmt!("Shutdown the app and exit, or use Ctrl+C, Ctrl+D")),
+        cat:    fmt!("Control"),
+        ..Default::default()
+    });
+    s = res!(s.add_cmd(cmd));
+    let cmd = Cmd::from(CmdConfig {
+        name:   fmt!("shell"),
+        help:   Some(fmt!("Start the app shell")),
+        cat:    fmt!("Control"),
+        ..Default::default()
+    });
+    s = res!(s.add_cmd(cmd));
+    let mut cmd = Cmd::from(CmdConfig {
+        name:   fmt!("server"),
+        help:   Some(fmt!("Start the app HTTPS server")),
+        cat:    fmt!("Control"),
+        ..Default::default()
+    });
+    let a1 = Arg::from(ArgConfig {
+        name:   fmt!("dev"),
+        hyph1:  fmt!("d"),
+        vals:   vec![],
+        reqd:   false,
+        help:   Some(fmt!("Run server in developer mode.")),
+        ..Default::default()
+    });
+    cmd = res!(cmd.add_arg(a1));
+    s = res!(s.add_cmd(cmd));
+    let mut cmd = Cmd::from(CmdConfig {
+        name:   fmt!("cert"),
+        help:   Some(fmt!("Manage TLS certificates")),
+        cat:    fmt!("TLS"),
+        ..Default::default()
+    });
+    let a1 = Arg::from(ArgConfig {
+        name:   fmt!("create-dev"),
+        hyph1:  fmt!("d"),
+        vals:   vec![],
+        reqd:   false,
+        help:   Some(fmt!("Create self-signed certificates for development.")),
+        ..Default::default()
+    });
+    let a2 = Arg::from(ArgConfig {
+        name:   fmt!("create-prod"),
+        hyph1:  fmt!("p"),
+        vals:   vec![(Kind::Vek, fmt!("Domain name(s), overriding config.jdat."))],
+        reqd:   false,
+        help:   Some(fmt!("Create production certificates using system Let's Encrypt.")),
+        ..Default::default()
+    });
+    cmd = res!(cmd.add_arg(a1));
+    cmd = res!(cmd.add_arg(a2));
+    s = res!(s.add_cmd(cmd));
+    let mut cmd = Cmd::from(CmdConfig {
+        name:   fmt!("secrets"),
+        help:   Some(fmt!("Manage wallet encrypted secrets.")),
+        cat:    fmt!("Wallet"),
+        ..Default::default()
+    });
+    let a1 = Arg::from(ArgConfig {
+        name:   fmt!("create"),
+        hyph1:  fmt!("c"),
+        vals:   vec![(Kind::Str, fmt!("Name of secret for indexing"))],
+        reqd:   false,
+        help:   Some(fmt!("Interactively create a new encrypted secret.")),
+        ..Default::default()
+    });
+    let a2 = Arg::from(ArgConfig {
+        name:   fmt!("recover"),
+        hyph1:  fmt!("r"),
+        vals:   vec![(Kind::Str, fmt!("Name of secret for indexing"))],
+        reqd:   false,
+        help:   Some(fmt!("Interactively recover an encrypted secret.")),
+        ..Default::default()
+    });
+    cmd = res!(cmd.add_arg(a1));
+    cmd = res!(cmd.add_arg(a2));
+    s = res!(s.add_cmd(cmd));
+    let cmd = Cmd::from(CmdConfig {
+        name:   fmt!("vars"),
+        help:   Some(fmt!("Display variable names and values")),
+        cat:    fmt!("Workspace"),
+        ..Default::default()
+    });
+    s = res!(s.add_cmd(cmd));
+    Ok(SyntaxRef::new(s))
+}
+File: src/app/cfg.rs
+use crate::srv::{
+    cfg::ServerConfig,
+    dev::cfg::DevConfig,
+};
+use oxedize_fe2o3_core::{
+    prelude::*,
+};
+use oxedize_fe2o3_jdat::{
+    prelude::*,
+    cfg::Config,
+};
+use std::{
+    collections::BTreeMap,
+    path::Path,
+};
+#[derive(Clone, Debug, Eq, PartialEq, FromDatMap, ToDatMap)]
+pub struct AppConfig {
+    pub app_root:           String,
+    pub app_name:           String,
+    pub app_human_name:     String,
+    pub app_description:    String,
+    pub app_log_level:      String,
+    pub kdf_name:           String,
+    pub enc_name:           String,
+    pub server_cfg:         DaticleMap,
+    pub dev_cfg:            DaticleMap,
+}
+impl Config for AppConfig {
+    fn check_and_fix(&mut self) -> Outcome<()> {
+        let app_root_path = Path::new(&self.app_root);
+        res!(std::fs::create_dir_all(app_root_path));
+        Ok(())
+    }
+}
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            app_root:           String::new(),
+            app_name:           fmt!("steel"),
+            app_human_name:     fmt!("Steel Server"),
+            app_description:    fmt!("A Hematite Steel Server app."),
+            app_log_level:      fmt!("debug"),
+            kdf_name:           fmt!("Argon2id_v0x13"),
+            enc_name:           fmt!("AES-256-GCM"),
+            server_cfg:         DaticleMap::new(),
+            dev_cfg:            DaticleMap::new(),
+        }
+    }
+}
+impl AppConfig {
+    pub fn new() -> Outcome<Self> {
+        let mut cfg = Self::default();
+        cfg.app_root = fmt!("{}", res!(std::env::current_dir()).display());
+        cfg.server_cfg = try_extract_dat!(
+            ServerConfig::to_datmap(ServerConfig::default()),
+            Map,
+        );
+        cfg.dev_cfg = try_extract_dat!(
+            DevConfig::to_datmap(DevConfig::default()),
+            Map,
+        );
+        Ok(cfg)
+    }
+    pub fn server_log_level(&self) -> Outcome<(LogLevel, String)> {
+        let level_str = if let Some(dat) = self.server_cfg.get(&dat!("log_level")) {
+            try_extract_dat!(dat, Str)
+        } else {
+            return Err(err!(
+                "Log level key not found in server configuration: {:?}.",
+                self.server_cfg;
+            Configuration, Missing, Key));
+        };
+        let level = res!(LogLevel::from_str(&level_str));
+        Ok((level, level_str.clone()))
+    }
+}
+File: src/lib.rs
+#![forbid(unsafe_code)]
+pub mod srv;
+pub mod app;
+File: src/srv/id.rs
+use oxedize_fe2o3_core::prelude::*;
+use oxedize_fe2o3_jdat::{
+    id::IdDat,
+    kind::Kind,
+};
+use std::{
+    fmt,
+    mem,
+};
+pub type BidTyp = u64;
+pub type SidTyp = u64;
+pub type UidTyp = u128;
+pub const UID_KIND: Kind = Kind::U128;
+pub const BID_LEN: usize = mem::size_of::<BidTyp>();
+pub const SID_LEN: usize = mem::size_of::<SidTyp>();
+pub const UID_LEN: usize = mem::size_of::<UidTyp>();
+pub type Bid = IdDat<{BID_LEN}, BidTyp>;
+pub type Sid = IdDat<{SID_LEN}, SidTyp>;
+pub type Uid = IdDat<{UID_LEN}, UidTyp>;
+new_type!(McidTyp, u64, Clone, Copy);
+pub const MCID_KIND: Kind = Kind::U64;
+impl fmt::Display for McidTyp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:016x}", self)
+    }
+}
+impl fmt::Debug for McidTyp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self)
+    }
+}
+impl fmt::LowerHex for McidTyp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::LowerHex::fmt(&self.0, f)
+    }
+}
+File: src/srv/https.rs
+use crate::srv::{
+    constant,
+    context::ServerContext,
+};
+use oxedize_fe2o3_core::{
+    prelude::*,
+    rand::RanDef,
+};
+use oxedize_fe2o3_iop_crypto::enc::Encrypter;
+use oxedize_fe2o3_iop_db::api::Database;
+use oxedize_fe2o3_iop_hash::api::Hasher;
+use oxedize_fe2o3_jdat::id::{
+    IdDat,
+    NumIdDat,
+};
+use oxedize_fe2o3_net::{
+    conc::AsyncReadIterator,
+    http::{
+        handler::WebHandler,
+        header::{
+            HttpHeadline,
+            HttpMethod,
+        },
+        msg::{
+            HttpMessageReader,
+            HttpMessage,
+        },
+        status::HttpStatus,
+    },
+    ws::handler::WebSocketHandler,
+};
+use oxedize_fe2o3_syntax::SyntaxRef;
+use std::{
+    net::SocketAddr,
+    pin::Pin,
+};
+use tokio::{
+    net::TcpStream,
+    io::AsyncWriteExt,
+};
+use tokio_rustls::server::TlsStream;
+impl<
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL> + 'static,
+    ENC:    Encrypter + 'static,
+    KH:     Hasher + 'static,
+    DB:     Database<UIDL, UID, ENC, KH> + 'static, 
+    WH:     WebHandler + 'static,
+    WSH:    WebSocketHandler + 'static,
+>
+    ServerContext<UIDL, UID, ENC, KH, DB, WH, WSH>
+{
+    pub async fn handle_https(
+        self,
+        mut stream: TlsStream<TcpStream>,
+        handler:    WH,
+        ws_handler: WSH,
+        ws_syntax:  SyntaxRef,
+        src_addr:   SocketAddr,
+    )
+        -> Outcome<()>
+    {
+        let id = fmt!("Https|Cx:{}", IdDat::<4, u32>::randef());
+        let (mut read_stream, mut write_stream) = tokio::io::split(&mut stream);
+        let mut reader: HttpMessageReader<
+            '_,
+            { constant::HTTP_DEFAULT_HEADER_CHUNK_SIZE },
+            { constant::HTTP_DEFAULT_BODY_CHUNK_SIZE },
+            _,
+        > = HttpMessageReader::new(Pin::new(&mut read_stream));
+        let log_level = res!(self.cfg.log_level());
+        loop {
+            let result = reader.next().await;
+            match result {
+                Some(Ok(request)) => {
+                    log!(log_level, "{}: Incoming from {:?}:", id, src_addr);
+                    request.log(log_get_level!());
+                    if request.is_websocket_upgrade() {
+                        log!(log_level, "Connection upgrading to websocket...");
+                        let reunited_stream = read_stream.unsplit(write_stream);
+                        return self.handle_websocket(
+                            reunited_stream,
+                            ws_handler,
+                            ws_syntax,
+                            request,
+                            &id,
+                        ).await;
+                    }
+                    let sid_opt = Self::get_session_id(&request, &src_addr);
+                    let mut response = None;
+                    let close_requested = request.get_connection_close();
+                    if close_requested {
+                        let mut msg = HttpMessage::new_response(HttpStatus::OK);
+                        msg.set_connection_close(true);
+                        response = Some(msg);
+                    }
+                    match request.header.headline {
+                        HttpHeadline::Request { method, loc } => {
+                            let body = request.body;
+                            match method {
+                                HttpMethod::GET => {
+                                    let result = handler.handle_get(
+                                        loc,
+                                        response,
+                                        body,
+                                        self.db.clone(),
+                                        &sid_opt,
+                                        &id,
+                                    ).await;
+                                    response = res!(result);
+                                }
+                                _ => fault!("{}: Unsupported HTTP request method '{}'.", id, method),
+                            }
+                        },
+                        _ => fault!("{}: Unsupported HTTP '{:?}'.", id, request.header.headline),
+                    }
+                    log!(log_level, "Outgoing HTTPS message:");
+                    match response {
+                        Some(msg) => {
+                            match msg.write_all(&mut write_stream).await {
+                                Ok(()) => (),
+                                Err(e) => return Err(err!(e,
+                                    "{}: Could not send response.", id;
+                                    IO, Network, Wire, Write)),
+                            }
+                        }
+                        None => log!(log_level, " None"),
+                    }
+                }
+                Some(Err(e)) => return Err(e),
+                None => {
+                    break;
+                }
+            }
+        }
+        let reunited_stream = read_stream.unsplit(write_stream);
+        let result = reunited_stream.shutdown().await;
+        if let Err(e) = result {
+            error!(e.into());
+        }
+        log!(log_level, "{}: Connection with {:?} closed.", id, src_addr);
+        Ok(())
+    }
+}
+File: src/srv/dev/refresh.rs
+use crate::srv::dev::{
+    js::{
+        FileType,
+        JsBundle,
+    },
+    sass::SassBundle,
+};
+use oxedize_fe2o3_core::prelude::*;
+use std::{
+    path::{
+        Path,
+        PathBuf,
+    },
+    sync::{
+        Arc,
+        atomic::{
+            AtomicBool,
+            Ordering,
+        },
+    },
+    time::Duration,
+};
+use notify::{
+    RecommendedWatcher,
+    Watcher,
+    RecursiveMode,
+    Event,
+    EventKind,
+    event::{
+        ModifyKind,
+        CreateKind,
+        RemoveKind,
+    },
+};
+use tokio::sync::broadcast;
+#[derive(Clone, Debug)]
+pub struct DevRefreshManager {
+    sender:             broadcast::Sender<()>,
+    running:            Arc<AtomicBool>,
+    js_bundles_map:     Vec<(PathBuf, PathBuf)>,
+    js_import_aliases:  Vec<(String, PathBuf)>,
+    css_paths:          (PathBuf, PathBuf),
+    src_path:           PathBuf,
+    public_path:        PathBuf,
+}
+impl DevRefreshManager {
+    pub fn new(
+        root_path:          &Path,
+        js_bundles_map:     Vec<(PathBuf, PathBuf)>,
+        js_import_aliases:  Vec<(String, PathBuf)>,
+        css_paths:          (PathBuf, PathBuf),
+    )
+        -> Self
+    {
+        let (sender, _) = broadcast::channel(16);
+        let valid_js_bundles: Vec<(PathBuf, PathBuf)> = js_bundles_map
+            .into_iter()
+            .filter(|(src, _)| src.exists())
+            .collect();
+        let valid_css_paths = if css_paths.0.exists() {
+            css_paths
+        } else {
+            (PathBuf::new(), PathBuf::new())
+        };
+        info!("DevRefreshManager initialised with {} JS bundles, CSS: {}",
+            valid_js_bundles.len(),
+            if valid_css_paths.0.as_os_str().is_empty() {
+                "disabled"
+            } else {
+                "enabled"
+            }
+        );
+        Self {
+            sender,
+            running:            Arc::new(AtomicBool::new(true)),
+            js_bundles_map:     valid_js_bundles,
+            js_import_aliases,
+            css_paths:          valid_css_paths,
+            src_path:           root_path.join("www/src"),
+            public_path:        root_path.join("www/public"),
+        }
+    }
+    pub fn get_receiver(&self) -> broadcast::Receiver<()> {
+        self.sender.subscribe()
+    }
+    pub fn stop(&self) {
+        self.running.store(false, Ordering::SeqCst);
+    }
+    fn should_process_file(path: &Path) -> bool {
+        if path.is_file() {
+            if let Some(filename) = path.file_name() {
+                if let Some(filename) = filename.to_str() {
+                    return !filename.starts_with(".") && !filename.contains('~');
+                }
+            }
+        }
+        false
+    }
+    pub fn refresh(&self) -> Outcome<()> {
+        if !self.js_bundles_map.is_empty() {
+            res!(self.bundle_js());
+        } else {
+            debug!("Skipping JS bundling - no bundles configured");
+        }
+        if !self.css_paths.0.as_os_str().is_empty() && self.css_paths.0.exists() {
+            res!(self.bundle_sass());
+        } else {
+            debug!("Skipping SASS bundling - no valid CSS source directory");
+        }
+        Ok(())
+    }
+    pub fn bundle_js(&self) -> Outcome<()> {
+        Self::js_bundler(
+            self.src_path.clone(),
+            self.js_bundles_map.clone(),
+            self.js_import_aliases.clone(),
+        )
+    }
+    pub fn bundle_sass(&self) -> Outcome<()> {
+        Self::sass_bundler(
+            &self.css_paths,
+        )
+    }
+    pub fn js_bundler(
+        src_path:           PathBuf,
+        js_bundles_map:     Vec<(PathBuf, PathBuf)>,
+        js_import_aliases:  Vec<(String, PathBuf)>,
+    )
+        -> Outcome<()>
+    {
+        let bundler = JsBundle::new(
+            js_bundles_map,
+            js_import_aliases,
+        );
+        res!(bundler.bundle_entries(
+            &src_path.join("js"),
+        ));
+        debug!("JavaScript/TypeScript bundling completed.");
+        Ok(())
+    }
+    pub fn sass_bundler(
+        css_paths: &(PathBuf, PathBuf),
+    )
+        -> Outcome<()>
+    {
+        let bundler = SassBundle::new();
+        res!(bundler.compile_directory(css_paths));
+        debug!("SCSS compilation completed.");
+        Ok(())
+    }
+    async fn handle_src_change(
+        src_path:           PathBuf,
+        js_bundles_map:     Vec<(PathBuf, PathBuf)>,
+        js_import_aliases:  Vec<(String, PathBuf)>,
+        css_paths:          &(PathBuf, PathBuf),
+        path:               &Path,
+    )
+        -> Outcome<()>
+    {
+        if let Some(ext) = path.extension() {
+            if let Some(ext_str) = ext.to_str() {
+                match FileType::from_str(ext_str) {
+                    Ok(_) => {
+                        debug!("JavaScript/TypeScript file changed, rebundling...");
+                        res!(Self::js_bundler(
+                            src_path,
+                            js_bundles_map,
+                            js_import_aliases,
+                        ));
+                    }
+                    _ => if ext_str == "scss" || ext_str == "sass" {
+                        debug!("SCSS file changed, recompiling...");
+                        res!(Self::sass_bundler(
+                            css_paths,
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    pub fn watch(&self) -> Outcome<()> {
+        info!("Starting file watchers for src and public directories.");
+        let sender = self.sender.clone();
+        let src_path = self.src_path.clone();
+        let js_bundles_map = self.js_bundles_map.clone();
+        let js_import_aliases = self.js_import_aliases.clone();
+        let css_paths = self.css_paths.clone();
+        let mut src_watcher: RecommendedWatcher = res!(notify::recommended_watcher(
+            move |res: Result<Event, _>| {
+                if let Ok(event) = res {
+                    for path in &event.paths {
+                        if !Self::should_process_file(path) {
+                            continue;
+                        }
+                        match event.kind {
+                            EventKind::Modify(ModifyKind::Data(_)) |
+                            EventKind::Create(CreateKind::File) |
+                            EventKind::Remove(RemoveKind::File) => {
+                                if path.starts_with(&src_path) &&
+                                    Self::should_process_file(path)
+                                {
+                                    let src_path = src_path.clone();
+                                    let js_bundles_map = js_bundles_map.clone();
+                                    let js_import_aliases = js_import_aliases.clone();
+                                    let rt = match tokio::runtime::Runtime::new() {
+                                        Ok(rt) => rt,
+                                        Err(e) => {
+                                            error!(err!(e,
+                                                "Failed to create Tokio runtime for bundling.";
+                                                Init));
+                                            return;
+                                        }
+                                    };
+                                    if let Err(e) = rt.block_on(Self::handle_src_change(
+                                        src_path,
+                                        js_bundles_map,
+                                        js_import_aliases,
+                                        &css_paths,
+                                        path,
+                                    )) {
+                                        error!(err!(e,
+                                            "Error processing source file change: {:?}", path;
+                                            IO, File));
+                                    }
+                                }
+                            }
+                            _ => debug!("Ignoring event: {:?}", event.kind),
+                        }
+                    }
+                }
+            }
+        ));
+        let public_path = self.public_path.clone();
+        let mut public_watcher: RecommendedWatcher = res!(notify::recommended_watcher(
+            move |res: Result<Event, _>| {
+                if let Ok(event) = res {
+                    match event.kind {
+                        EventKind::Modify(ModifyKind::Data(_)) |
+                        EventKind::Create(CreateKind::File) |
+                        EventKind::Remove(RemoveKind::File) => {
+                            for path in &event.paths {
+                                if path.starts_with(&public_path) &&
+                                    Self::should_process_file(path)
+                                {
+                                    info!("Broadcasting refresh for file: {:?}.", path);
+                                    match sender.send(()) {
+                                        Ok(_) => debug!("Refresh notification sent successfully."),
+                                        Err(e) => debug!("No active subscribers: {}", e),
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                        _ => debug!("Ignoring event: {:?}", event.kind),
+                    }
+                }
+            }
+        ));
+        info!("Starting source file watcher for: {:?}", self.src_path);
+        res!(src_watcher.watch(&self.src_path, RecursiveMode::Recursive));
+        info!("Starting public file watcher for: {:?}", self.public_path);
+        res!(public_watcher.watch(&self.public_path, RecursiveMode::Recursive));
+        while self.running.load(Ordering::SeqCst) {
+            std::thread::park_timeout(Duration::from_millis(100));
+        }
+        info!("File watchers stopped.");
+        Ok(())
+    }
+}
+pub struct HtmlModifier;
+impl HtmlModifier {
+    pub fn inject_dev_refresh(html: &str) -> Outcome<String> {
+        if !html.contains("</body>") {
+            return Ok(html.to_string());
+        }
+        let dev_refresh_script = r#"
+    <script>
+    function getTimestamp() {
+        return new Date().toISOString();
+    }
+    const initDevRefresh = () => {
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${wsProtocol}
+        console.log('Connecting to WebSocket:', wsUrl);
+        const ws = new WebSocket(wsUrl);
+        let pingInterval;
+        ws.onopen = () => {
+            console.log('Development refresh connection opened.');
+            ws.send('dev_connect');
+        };
+        ws.onmessage = (event) => {
+            console.log('Received message:', event.data);
+            if (event.data === 'info "connected"') {
+                console.log('Development refresh connection established.');
+                pingInterval = setInterval(() => {
+                    if (ws.readyState === WebSocket.OPEN) {
+                        console.log('Sending ping...');
+                        ws.send('dev_ping');
+                    }
+                }, 15000);
+            } else if (event.data === 'info "pong"') {
+                console.log('Received dev pong response.');
+            } else if (event.data === 'dev_refresh') {
+                console.log('Server requested page refresh.');
+                window.location.reload();
+            }
+        };
+        ws.onclose = (event) => {
+            console.log('WebSocket closed:', event.code, event.reason || '<no reason>', event.wasClean);
+            console.log('Development refresh connection closed');
+            if (pingInterval) {
+                clearInterval(pingInterval);
+            }
+        };
+        ws.onerror = (error) => {
+            console.error('WebSocket error:', error);
+        };
+        window.addEventListener('beforeunload', () => {
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.close();
+            }
+        });
+    };
+    if (document.readyState === 'loading') {
+        console.log(`${getTimestamp()} Document loading, waiting for DOMContentLoaded`);
+        document.addEventListener('DOMContentLoaded', initDevRefresh);
+    } else {
+        console.log(`${getTimestamp()} Document ready, initialising immediately`);
+        initDevRefresh();
+    }
+    </script>
+    </body>"#;
+        Ok(html.replace("</body>", dev_refresh_script))
+    }
+}
+File: src/srv/dev/js.rs
+use oxedize_fe2o3_core::{
+    prelude::*,
+};
+use std::{
+    collections::{
+        HashMap,
+        HashSet,
+    },
+    path::{
+        Path,
+        PathBuf,
+    },
+    str::FromStr,
+    sync::Arc,
+};
+use swc_bundler::{
+    Bundler,
+    Hook,
+    Load,
+    ModuleData,
+    ModuleRecord,
+    ModuleType,
+    Resolve,
+};
+use swc_common::{
+    FileName,
+    GLOBALS,
+    Span,
+    SourceMap,
+};
+use swc_ecma_ast::{
+    EsVersion, 
+    KeyValueProp, 
+    PropName,
+    Expr, 
+    Lit, 
+    Str,
+    IdentName,
+};
+use swc_ecma_codegen::{
+    text_writer::JsWriter,
+    Emitter,
+};
+use swc_ecma_loader::{
+    resolve::Resolution,
+    resolvers::{
+        lru::CachingResolver,
+        node::NodeModulesResolver,
+    },
+    TargetEnv,
+};
+use swc_ecma_parser::{
+    parse_file_as_module,
+    Syntax,
+    TsSyntax,
+};
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FileType {
+    JavaScript,
+    JavaScriptModule,
+    TypeScript,
+    TypeScriptModule,
+    TypeScriptReact,
+}
+impl FromStr for FileType {
+    type Err = Error<ErrTag>;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "js"    => Ok(Self::JavaScript),
+            "mjs"   => Ok(Self::JavaScriptModule),
+            "ts"    => Ok(Self::TypeScript),
+            "mts"   => Ok(Self::TypeScriptModule),
+            "tsx"   => Ok(Self::TypeScriptReact),
+            _ => Err(err!(
+                "Unknown file type extension: {}", s;
+                Invalid, Input, String, Conversion))
+        }
+    }
+}
+#[derive(Debug)]
+pub struct AliasResolver {
+    aliases:        Arc<Vec<(String, PathBuf)>>,
+}
+impl AliasResolver {
+    pub fn new(
+        aliases:        Vec<(String, PathBuf)>,
+    )
+        -> Self
+    {
+        Self {
+            aliases: Arc::new(aliases),
+        }
+    }
+    fn try_resolve_with_extensions(&self, path: &Path) -> Option<PathBuf> {
+        if path.exists() {
+            return Some(path.to_path_buf());
+        }
+        if path.extension().is_none() {
+            let file_exts = [".mjs", ".js", ".ts"];
+            for ext in file_exts {
+                let with_ext = path.with_extension(ext.trim_start_matches('.'));
+                if with_ext.exists() {
+                    return Some(with_ext);
+                }
+            }
+            if path.is_dir() {
+                for ext in file_exts {
+                    let index_path = path.join(fmt!("index{}", ext));
+                    if index_path.exists() {
+                        return Some(index_path);
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+impl Resolve for AliasResolver {
+    fn resolve(
+        &self,
+        base:               &FileName,
+        module_specifier:   &str,
+    )
+        -> Result<Resolution, anyhow::Error>
+    {
+        for (alias, path) in self.aliases.iter() {
+            if module_specifier.starts_with(alias) {
+                if let Some(rel_path) = module_specifier.strip_prefix(alias) {
+                    let full_path = path.join(rel_path.trim_start_matches('/'));
+                    if let Some(resolved_path) = self.try_resolve_with_extensions(&full_path) {
+                        return Ok(Resolution {
+                            filename: FileName::Real(resolved_path),
+                            slug: None,
+                        });
+                    }
+                    if full_path.exists() {
+                        return Ok(Resolution {
+                            filename: FileName::Real(full_path),
+                            slug: None,
+                        });
+                    }
+                }
+            }
+        }
+        let resolver = NodeModulesResolver::new(
+            TargetEnv::Browser,
+            Default::default(),
+            true,
+        );
+        match resolver.resolve(base, module_specifier) {
+            Ok(resolution) => Ok(resolution),
+            Err(_) => Ok(Resolution {
+                filename: FileName::Real(PathBuf::new()),
+                slug: None,
+            }),
+        }
+    }
+}
+#[derive(Debug, Clone)]
+pub struct BundleConfig {
+    pub entry_points: Vec<PathBuf>,
+    pub file_types: HashSet<FileType>,
+    pub target_version: EsVersion,
+    pub typescript: bool,
+    pub minify: bool,
+}
+impl Default for BundleConfig {
+    fn default() -> Self {
+        let mut file_types = HashSet::new();
+        file_types.insert(FileType::JavaScript);
+        file_types.insert(FileType::JavaScriptModule);
+        file_types.insert(FileType::TypeScript);
+        file_types.insert(FileType::TypeScriptModule);
+        file_types.insert(FileType::TypeScriptReact);
+        Self {
+            entry_points:   Vec::new(),
+            file_types,
+            target_version: EsVersion::Es2020,
+            typescript:     true,
+            minify:         true,
+        }
+    }
+}
+struct BundleHook;
+impl Hook for BundleHook {
+    fn get_import_meta_props(
+        &self,
+        span:   Span,
+        record: &ModuleRecord,
+    )
+        -> Result<Vec<KeyValueProp>, anyhow::Error>
+    {
+        info!("Processing imports for module: {}", record.file_name);
+        let web_path = match &record.file_name {
+            FileName::Real(path) => {
+                path.to_string_lossy()
+                    .split("/www/")
+                    .nth(1)
+                    .map(|p| fmt!("/{}", p))
+                    .unwrap_or_else(|| "/".to_string())
+            },
+            _ => "/".to_string(),
+        };
+        let mut props = Vec::new();
+        props.push(KeyValueProp {
+            key: PropName::Ident(IdentName::new("url".into(), span)),
+            value: Box::new(Expr::Lit(Lit::Str(Str {
+                span,
+                value: web_path.into(),
+                raw: None,
+            }))),
+        });
+        Ok(props)
+    }
+}
+struct ModuleLoader {
+    cm: Arc<SourceMap>,
+    config: BundleConfig,
+}
+impl ModuleLoader {
+    fn new(cm: Arc<SourceMap>, config: BundleConfig) -> Self {
+        Self { cm, config }
+    }
+}
+impl Load for ModuleLoader {
+    fn load(&self, filename: &FileName) -> Result<ModuleData, anyhow::Error> {
+        let module_path = match filename {
+            FileName::Real(path) => path.display().to_string(),
+            _ => "<unknown>".to_string(),
+        };
+        info!("Attempting to load module: {}", module_path);
+        let fm = match filename {
+            FileName::Real(path) => {
+                if !path.exists() {
+                    return Err(anyhow::anyhow!(err!(
+                        "Module not found: {:?}. Check import paths in requesting module.",
+                        path;
+                        IO, File, Missing)));
+                }
+                match self.cm.load_file(path) {
+                    Ok(fm) => {
+                        debug!("Successfully loaded file: {}", module_path);
+                        fm
+                    },
+                    Err(e) => return Err(anyhow::anyhow!(err!(e,
+                        "Failed to load file: {:?}", path;
+                        IO, File, Read))),
+                }
+            },
+            _ => return Err(anyhow::anyhow!(err!(
+                "Unsupported module type: {:?}", filename;
+                IO, File))),
+        };
+        let syntax = if self.config.typescript {
+            Syntax::Typescript(TsSyntax {
+                tsx: fm.name.to_string().ends_with(".tsx"),
+                decorators: true,
+                dts: false,
+                no_early_errors: false,
+                disallow_ambiguous_jsx_like: false,
+            })
+        } else {
+            Syntax::Es(Default::default())
+        };
+        debug!("Parsing module with syntax: {:?}", syntax);
+        let module = match parse_file_as_module(
+            &fm,
+            syntax,
+            self.config.target_version,
+            None,
+            &mut vec![],
+        ) {
+            Ok(m) => {
+                debug!("Successfully parsed module");
+                m
+            },
+            Err(e) => return Err(anyhow::anyhow!(err!(
+                "Failed to parse module {}: {:?}", fm.name, e;
+                IO, Format))),
+        };
+        Ok(ModuleData {
+            fm,
+            module,
+            helpers: Default::default(),
+        })
+    }
+}
+pub struct JsBundle {
+    bundles_map:    Vec<(PathBuf, PathBuf)>,
+    path_aliases:   Vec<(String, PathBuf)>,
+    config:         BundleConfig,
+}
+impl JsBundle {
+    pub fn new(
+        bundles_map:    Vec<(PathBuf, PathBuf)>,
+        path_aliases:   Vec<(String, PathBuf)>,
+    )
+        -> Self
+    {
+        let entry_points = bundles_map
+            .clone()
+            .into_iter()
+            .map(|jsbm| jsbm.0)
+            .collect();
+        Self {
+            bundles_map,
+            path_aliases,
+            config: BundleConfig {
+                entry_points,
+                ..Default::default()
+            },
+        }
+    }
+    pub fn bundle_entries(
+        &self,
+        src_dir: &Path,
+    )
+        -> Outcome<()>
+    {
+        info!("Starting JS bundling from directory: {:?}", src_dir);
+        for js_bundle_map in &self.bundles_map {
+            info!("Bundling entry point: {:?} -> {:?}", 
+                js_bundle_map.0, js_bundle_map.1);
+            if !js_bundle_map.0.exists() {
+                return Err(err!(
+                    "Entry point file not found: {:?}", js_bundle_map.0;
+                    IO, File, Missing));
+            }
+            let mut entries = HashMap::new();
+            entries.insert(
+                fmt!("entry"),
+                FileName::Real(js_bundle_map.0.clone()),
+            );
+            if let Some(parent) = js_bundle_map.1.parent() {
+                if !parent.exists() {
+                    res!(std::fs::create_dir_all(parent));
+                }
+            }
+            let result = GLOBALS.set(&swc_common::Globals::new(), || {
+                let cm = Arc::new(SourceMap::default());
+                let globals = GLOBALS.set(&swc_common::Globals::new(), || {
+                    swc_common::Globals::new()
+                });
+                let resolver = CachingResolver::new(
+                    4096,
+                    AliasResolver::new(
+                        self.path_aliases.clone(),
+                    ),
+                );
+                let loader = ModuleLoader::new(cm.clone(), self.config.clone());
+                let mut bundler = Bundler::new(
+                    &globals,
+                    cm.clone(),
+                    loader,
+                    resolver,
+                    swc_bundler::Config {
+                        require: false,
+                        disable_inliner: false,
+                        external_modules: vec![],
+                        module: ModuleType::Es,
+                        disable_fixer: false,
+                        disable_hygiene: false,
+                        disable_dce: false,
+                    },
+                    Box::new(BundleHook),
+                );
+                let bundles = catch_other!(bundler.bundle(entries), IO, Format);
+                info!("Bundle generation complete, processing {} modules", bundles.len());
+                let mut combined = String::new();
+                for (idx, bundle) in bundles.iter().enumerate() {
+                    info!("Processing bundle module {}/{}", idx + 1, bundles.len());
+                    let mut buf = vec![];
+                    {
+                        let writer = JsWriter::new(
+                            cm.clone(),
+                            "\n",
+                            &mut buf,
+                            None,
+                        );
+                        let mut emitter = Emitter {
+                            cfg: swc_ecma_codegen::Config::default(),
+                            comments: None,
+                            cm: cm.clone(),
+                            wr: Box::new(writer),
+                        };
+                        if let Err(e) = emitter.emit_module(&bundle.module) {
+                            return Err(err!(e,
+                                "Failed to emit bundle module {} for entry point {:?}",
+                                idx, js_bundle_map.0;
+                                IO, Format));
+                        }
+                    }
+                    match String::from_utf8(buf) {
+                        Ok(s) => combined.push_str(&s),
+                        Err(e) => return Err(err!(e,
+                            "Generated invalid UTF-8 in bundle module {}", idx;
+                            IO, Format)),
+                    };
+                    combined.push('\n');
+                }
+                if let Err(e) = std::fs::write(&js_bundle_map.1, combined) {
+                    return Err(err!(e,
+                        "Failed to write bundle to {:?}", js_bundle_map.1;
+                        IO, File, Write));
+                }
+                info!("Successfully bundled {:?}", js_bundle_map.0);
+                Ok(())
+            });
+            res!(result);
+        }
+        info!("JavaScript bundling completed successfully");
+        Ok(())
+    }
+}
+File: src/srv/dev/mod.rs
+pub mod cfg;
+pub mod js;
+pub mod refresh;
+pub mod sass;
+File: src/srv/dev/sass.rs
+use oxedize_fe2o3_core::prelude::*;
+use std::{
+    collections::{
+        HashSet,
+    },
+    path::{
+        Path,
+        PathBuf,
+    },
+    fs,
+};
+use grass::{
+    self,
+    Options,
+    OutputStyle,
+};
+#[derive(Debug)]
+#[allow(dead_code)]
+struct StyleInfo {
+    path:       PathBuf,
+    content:    String,
+}
+pub struct SassBundle {
+    load_paths:     Vec<PathBuf>,
+    processed:      HashSet<PathBuf>,
+    styles:         Vec<StyleInfo>,
+}
+impl SassBundle {
+    pub fn new() -> Self {
+        Self {
+            load_paths:     Vec::new(),
+            processed:      HashSet::new(),
+            styles:         Vec::new(),
+        }
+    }
+    pub fn add_load_path<P: AsRef<Path>>(
+        &mut self,
+        path: P,
+    ) {
+        self.load_paths.push(path.as_ref().to_path_buf());
+    }
+    pub fn compile_directory(
+        mut self,
+        css_paths: &(PathBuf, PathBuf),
+    ) 
+        -> Outcome<()>
+    {
+        let mut entry_files = Vec::new();
+        res!(self.collect_sass_files(&css_paths.0, &mut entry_files));
+        for entry in entry_files {
+            res!(self.process_style(
+                &entry,
+            ));
+        }
+        let mut bundled = String::new();
+        for style in &self.styles {
+            bundled.push_str(&style.content);
+            bundled.push('\n');
+        }
+        res!(fs::write(css_paths.1.clone(), bundled));
+        Ok(())
+    }
+    fn process_style(
+        &mut self,
+        file_path: &Path,
+    )
+        -> Outcome<()>
+    {
+        if self.processed.contains(file_path) {
+            return Ok(());
+        }
+        debug!("Processing {:?}", file_path);
+        let content = res!(fs::read_to_string(file_path));
+        let mut options = Options::default().style(OutputStyle::Compressed);
+        let import_dir = match file_path.parent() {
+            Some(dir) => dir,
+            None => return Err(err!(
+                "Could not get parent directory of {:?}.",
+                file_path;
+                Path)),
+        };
+        options = options.load_path(import_dir);
+        for load_path in &self.load_paths {
+            if let Some(path_str) = load_path.to_str() {
+                options = options.load_path(path_str);
+            }
+        }
+        let css = match grass::from_string(
+            content,
+            &options,
+        ) {
+            Ok(css) => css,
+            Err(e) => return Err(err!(e,
+                "Why trying to compile Sass file {:?}", file_path;
+                IO, Format)),
+        };
+        self.styles.push(StyleInfo {
+            path: file_path.to_path_buf(),
+            content: css,
+        });
+        self.processed.insert(file_path.to_path_buf());
+        debug!(" Successful processing {:?}", file_path);
+        Ok(())
+    }
+    fn collect_sass_files(
+        &self,
+        dir:    &Path,
+        files:  &mut Vec<PathBuf>,
+    )
+        -> Outcome<()>
+    {
+        if dir.is_dir() {
+            for entry in res!(fs::read_dir(dir)) {
+                let entry = res!(entry);
+                let path = entry.path();
+                if path.is_dir() {
+                    res!(self.collect_sass_files(&path, files));
+                } else if let Some(ext) = path.extension() {
+                    if ext == "sass" || ext == "scss" {
+                        files.push(path);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+File: src/srv/dev/cfg.rs
+use oxedize_fe2o3_core::{
+    prelude::*,
+    file::PathState,
+    path::{
+        NormalPath,
+        NormPathBuf,
+    },
+};
+use oxedize_fe2o3_jdat::{
+    prelude::*,
+    cfg::Config,
+};
+use std::{
+    collections::{
+        BTreeMap,
+    },
+    path::{
+        Path,
+        PathBuf,
+    },
+};
+#[derive(Clone, Debug, Eq, PartialEq, FromDatMap, ToDatMap)]
+pub struct DevConfig {
+    pub src_path_rel:           String,
+    pub js_bundles_rel:         DaticleMap,
+    pub css_source_dir_rel:     String,
+    pub css_bundle_rel:         String,
+    pub js_import_aliases_rel:  DaticleMap,
+}
+impl Config for DevConfig {}
+impl Default for DevConfig {
+    fn default() -> Self {
+        Self {
+            src_path_rel:           fmt!("./www/src"),
+            js_bundles_rel:         mapdat!{
+                "./www/src/js/pages/main/index.mjs" => "./www/public/bundles/js/main.bundle.js",
+                "./www/src/js/pages/admin/index.mjs" => "./www/public/bundles/js/admin.bundle.js",
+            }.get_map().unwrap_or(DaticleMap::new()),
+            css_source_dir_rel:     fmt!("./www/src/styles"),
+            css_bundle_rel:         fmt!("./www/public/styles.css"),
+            js_import_aliases_rel:  mapdat!{
+                "@utils" => "./www/src/js/utils",
+                "@components" => "./www/src/js/components",
+            }.get_map().unwrap_or(DaticleMap::new()),
+        }
+    }
+}
+impl DevConfig {
+    pub fn validate(
+        &self,
+        root: &NormPathBuf,
+    )
+        -> Outcome<()>
+    {
+        if !self.src_path_rel.is_empty() {
+            match PathState::DirMustExist.validate(root, &self.src_path_rel) {
+                Ok(()) => {
+                    let _ = self.get_js_bundles_map(root).unwrap_or_else(|e| {
+                        warn!("JS bundling configuration invalid: {}", e);
+                        Vec::new()
+                    });
+                    let _ = self.get_css_paths(root).unwrap_or_else(|e| {
+                        warn!("CSS bundling configuration invalid: {}", e);
+                        (PathBuf::new(), PathBuf::new())
+                    });
+                }
+                Err(_) => {
+                    info!("Source directory '{}' not found, bundling disabled.",
+                        self.src_path_rel);
+                }
+            }
+        }
+        Ok(())
+    }
+    pub fn has_js_bundling(&self, root: &NormPathBuf) -> bool {
+        self.get_js_bundles_map(root).is_ok() && !self.js_bundles_rel.is_empty()
+    }
+    pub fn has_css_bundling(&self, root: &NormPathBuf) -> bool {
+        self.get_css_paths(root).is_ok() && !self.css_source_dir_rel.is_empty()
+    }
+    pub fn get_js_bundles_map(
+        &self,
+        root: &NormPathBuf,
+    )
+        -> Outcome<Vec<(PathBuf, PathBuf)>>
+    {
+        let mut result = Vec::new(); 
+        for (entry_dat, bundle_dat) in &self.js_bundles_rel {
+            let entry_str = try_extract_dat!(entry_dat, Str);
+            let entry = Path::new(&entry_str).normalise();
+            if entry.escapes() {
+                return Err(err!(
+                    "DevConfig: javascipt/typescript entry point {} escapes the directory {:?}.",
+                    entry_str, root;
+                Invalid, Input, Path));
+            }
+            let entry = root.clone().join(entry).normalise().absolute();
+            res!(PathState::FileMustExist.validate(
+                root,
+                entry_str,
+            ));
+            let bundle_str = try_extract_dat!(bundle_dat, Str);
+            let bundle = Path::new(&bundle_str).normalise();
+            if bundle.escapes() {
+                return Err(err!(
+                    "DevConfig: javascript bundle entry {} maps to a bundle path {} \
+                    that escapes the directory {:?}.",
+                    entry_str, bundle_str, root;
+                Invalid, Input, Path));
+            }
+            let bundle = root.clone().join(bundle).normalise().absolute();
+            result.push((entry.as_pathbuf(), bundle.as_pathbuf()));
+        }
+        Ok(result)
+    }
+    pub fn get_js_import_aliases(
+        &self,
+        root: &NormPathBuf,
+    )
+        -> Outcome<Vec<(String, PathBuf)>>
+    {
+        let mut result = Vec::new(); 
+        for (alias_dat, path_dat) in &self.js_import_aliases_rel {
+            let alias = try_extract_dat!(alias_dat, Str).clone();
+            let path_str = try_extract_dat!(path_dat, Str);
+            let path = Path::new(&path_str).normalise();
+            if path.escapes() {
+                return Err(err!(
+                    "DevConfig: javascript import alias entry {} maps to a path {} \
+                    that escapes the directory {:?}.",
+                    alias, path_str, root;
+                Invalid, Input, Path));
+            }
+            let path = root.clone().join(path).normalise().absolute();
+            result.push((alias, path.as_pathbuf()));
+        }
+        Ok(result)
+    }
+    pub fn get_css_paths(
+        &self,
+        root: &NormPathBuf,
+    )
+        -> Outcome<(PathBuf, PathBuf)>
+    {
+        let src_str = &self.css_source_dir_rel;
+        if src_str.is_empty() {
+            return Err(err!(
+                "DevConfig: Css source directory path is empty.";
+            Invalid, Input, Path));
+        }
+        let src = Path::new(&src_str).normalise();
+        if src.escapes() {
+            return Err(err!(
+                "DevConfig: Css source directory path {} escapes the directory {:?}.",
+                src_str, root;
+            Invalid, Input, Path));
+        }
+        let src = root.clone().join(src).normalise().absolute().as_pathbuf();
+        res!(PathState::DirMustExist.validate(
+            root,
+            &src_str,
+        ));
+        let trg_str = &self.css_bundle_rel;
+        if trg_str.is_empty() {
+            return Err(err!(
+                "DevConfig: Css target bundle file is empty.";
+            Invalid, Input, Path));
+        }
+        let trg = Path::new(&trg_str).normalise();
+        if trg.escapes() {
+            return Err(err!(
+                "DevConfig: Css target bundle file {} escapes the directory {:?}.",
+                trg_str, root;
+            Invalid, Input, Path));
+        }
+        let trg = root.clone().join(trg).normalise().absolute().as_pathbuf();
+        Ok((src, trg))
+    }
+}
+File: src/srv/cert.rs
+use crate::srv::{
+    cfg::ServerConfig,
+    constant,
+};
+use oxedize_fe2o3_core::{
+    prelude::*,
+    path::{
+        NormalPath,
+        NormPathBuf,
+    },
+};
+use oxedize_fe2o3_net::dns::Fqdn;
+use std::{
+    fs::{
+        create_dir_all,
+        File,
+    },
+    io::{
+        BufReader,
+        Write,
+    },
+    path::{
+        Path,
+        PathBuf,
+    },
+};
+use rustls::{
+    self,
+    pki_types::{
+        CertificateDer,
+        PrivateKeyDer,
+        PrivatePkcs8KeyDer,
+    },
+};
+use rcgen;
+pub struct Certificate;
+impl Certificate {
+    pub fn filepath(
+        root:       &NormPathBuf,
+        dir_root:   &String,
+        subdir:     &str,
+        name:       &String,
+        ext:        &str,
+    )
+        -> PathBuf
+    {
+        let mut relpath = PathBuf::from(dir_root);
+        relpath.push(subdir);
+        relpath.push(name.clone());
+        relpath.set_extension(ext);
+        let relpath = relpath.normalise().remove_relative();
+        root.clone().join(relpath).absolute().into_inner()
+    }
+    pub fn write_to_file<
+        P: AsRef<Path> + std::fmt::Debug,
+    >(
+        fname: P,
+        data: &[u8],
+    )
+        -> Outcome<()>
+    {
+        let fname = fname.as_ref();
+        let mut file = res!(File::create(fname));
+        res!(file.write_all(data));
+        info!("{:?} saved successfully.", fname);
+        Ok(())
+    }
+    pub fn load(
+        cfg:        &ServerConfig,
+        root:       &NormPathBuf,
+        dev_mode:   bool,
+    )
+        -> Outcome<rustls::server::ServerConfig>
+    {
+        debug!("DEV_MODE = {}", dev_mode);
+        let tls_subdir = if dev_mode {
+            constant::TLS_DIR_DEV
+        } else {
+            constant::TLS_DIR_PROD
+        };
+        let cert_path = Self::filepath(
+            root,
+            &cfg.tls_dir_rel,
+            tls_subdir,
+            &cfg.tls_cert_name,
+            "pem",
+        ); 
+        info!("Certificate path = {:?}", cert_path);
+        let key_path = Self::filepath(
+            root,
+            &cfg.tls_dir_rel,
+            tls_subdir,
+            &cfg.tls_private_key_name,
+            "pem",
+        ); 
+        info!("Private key path = {:?}", key_path);
+        let cert_file = res!(File::open(&cert_path));
+        let mut cert_reader = BufReader::new(cert_file);
+        let certs: Result<Vec<CertificateDer>, _> =
+            rustls_pemfile::certs(&mut cert_reader)
+            .map(|cert_result| cert_result.map_err(|e| err!(e,
+                "Error reading cert at {:?}.", cert_path; File)))
+            .collect();
+        let certs = res!(certs);
+        let key_file = res!(File::open(&key_path));
+        let mut key_reader = BufReader::new(key_file);
+        let keys: Result<Vec<PrivatePkcs8KeyDer>, _> =
+            rustls_pemfile::pkcs8_private_keys(&mut key_reader)
+            .map(|key_result| key_result.map_err(|e| err!(e,
+                "Error reading private key at {:?}.", key_path; File)))
+            .collect();
+        let keys = res!(keys);
+        let private_key: PrivateKeyDer<'_> = match keys.into_iter().next() {
+            Some(key) => key.into(),
+            None => return Err(err!("No keys found in key file."; Missing, Input, File)),
+        };
+        let server_cfg = res!(rustls::server::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, private_key));
+        Ok(server_cfg)
+    }
+    pub fn new_dev(
+        cfg:        &ServerConfig,
+        root:       &NormPathBuf,
+    )
+        -> Outcome<()>
+    {
+        let scheme = res!(rcgen::SignatureAlgorithm::from_oid(constant::PKCS_ECDSA_P256_SHA256));
+        let key_pair = res!(rcgen::KeyPair::generate(&scheme));
+        let der_encoding = key_pair.serialize_der();
+        let key_pair_copy = res!(rcgen::KeyPair::from_der_and_sign_algo(&der_encoding, &scheme));
+        let domains = vec![
+            fmt!("localhost"),
+            fmt!("127.0.0.1"),
+        ];
+        let mut params = rcgen::CertificateParams::new(domains);
+        params.alg = &scheme;
+        params.key_pair = Some(key_pair_copy);
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params.key_usages = vec![
+            rcgen::KeyUsagePurpose::DigitalSignature,
+            rcgen::KeyUsagePurpose::KeyEncipherment,
+        ];
+        params.extended_key_usages = vec![
+            rcgen::ExtendedKeyUsagePurpose::ServerAuth,
+            rcgen::ExtendedKeyUsagePurpose::ClientAuth,
+        ];
+        let cert = res!(rcgen::Certificate::from_params(params));
+        let cert_path = Self::filepath(
+            root,
+            &cfg.tls_dir_rel,
+            constant::TLS_DIR_DEV,
+            &cfg.tls_cert_name,
+            "pem",
+        );
+        let dir_path = match cert_path.parent() {
+            Some(p) => p,
+            None => return Err(err!(
+                "Could not get parent directory from {:?}.", cert_path;
+                Path)),
+        };
+        res!(create_dir_all(dir_path));
+        res!(Self::write_to_file(
+            Self::filepath(
+                root,
+                &cfg.tls_dir_rel,
+                constant::TLS_DIR_DEV,
+                &cfg.tls_public_key_name,
+                "pem",
+            ),
+            &key_pair.public_key_pem().as_bytes(),
+        ));
+        res!(Self::write_to_file(
+            Self::filepath(
+                root,
+                &cfg.tls_dir_rel,
+                constant::TLS_DIR_DEV,
+                &cfg.tls_private_key_name,
+                "pem",
+            ),
+            &cert.serialize_private_key_pem().as_bytes(),
+        ));
+        res!(Self::write_to_file(
+            Self::filepath(
+                root,
+                &cfg.tls_dir_rel,
+                constant::TLS_DIR_DEV,
+                &cfg.tls_cert_name,
+                "pem",
+            ),
+            &res!(cert.serialize_pem()).as_bytes(),
+        ));
+        Ok(())
+    }
+    #[cfg(target_os = "linux")]
+    pub fn new_lets_encrypt(
+        domains:    &Vec<Fqdn>,
+        tls_dir:    &Path,
+    )
+        -> Outcome<()>
+    {
+        res!(Self::check_requirements());
+        let mut cmd = std::process::Command::new("sudo");
+        cmd.arg("certbot")
+            .arg("certonly")
+            .arg("--standalone")
+            .arg("--non-interactive")
+            .arg("--force-renewal");
+        for domain in domains {
+            cmd.arg("-d").arg(domain.as_str());
+        }
+        let output = res!(cmd.output());
+        if !output.status.success() {
+            return Err(err!(
+                "Certificate creation failed: {}", String::from_utf8_lossy(&output.stderr);
+                IO, File));
+        }
+        let src_dir = PathBuf::from("/etc/letsencrypt/live").join(domains[0].as_str());
+        res!(std::fs::create_dir_all(tls_dir));
+        let user = res!(std::env::var("USER"));
+        for file in &["fullchain.pem", "privkey.pem"] {
+            res!(std::process::Command::new("sudo")
+                .arg("cp")
+                .arg(src_dir.join(file))
+                .arg(tls_dir.join(file))
+                .output());
+            res!(std::process::Command::new("sudo")
+                .arg("chown")
+                .arg(fmt!("{}:{}", user, user))
+                .arg(tls_dir.join(file))
+                .output());
+        }
+        Ok(())
+    }
+    #[cfg(target_os = "windows")] 
+    pub fn new_lets_encrypt(
+        domains:    &Vec<Fqdn>,
+        tls_dir:    &Path,
+    )
+        -> Outcome<()>
+    {
+        res!(Self::check_requirements());
+        let domain_names = domains
+            .iter()
+            .map(|d| fmt!("\"{}\"", d))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let output = res!(std::process::Command::new("wacs")
+            .arg("--target")
+            .arg("manual")
+            .arg("--host")
+            .arg(domain_list)
+            .arg("--installation")
+            .arg("script")
+            .arg("--script")
+            .arg(format!("copy %PfxPath% \"{}\"",
+                tls_dir.join("certificate.pfx").display()))
+            .arg("--scriptparameters")
+            .arg("\"%PfxPath%\"")
+            .arg("--store")
+            .arg("false")
+            .output());
+        if !output.status.success() {
+            return Err(err!(
+                "Certificate creation failed: {}", String::from_utf8_lossy(&output.stderr);
+                IO, File));
+        }
+        let pfx_path = tls_dir.join("certificate.pfx");
+        let output = res!(std::process::Command::new("openssl")
+            .arg("pkcs12")
+            .arg("-in")
+            .arg(&pfx_path)
+            .arg("-out")
+            .arg(tls_dir.join("combined.pem"))
+            .arg("-nodes")
+            .arg("-password")
+            .arg("pass:")
+            .output());
+        if !output.status.success() {
+            return Err(err!(
+                "PFX to PEM conversion failed: {}", String::from_utf8_lossy(&output.stderr);
+                IO, File));
+        }
+        let ps_script = fmt!(
+            "$pemContent = Get-Content \"{}\"
+             $certContent = $pemContent[0..($pemContent.Length-1)] | Where-Object {{ $_ -match 'CERTIFICATE' -or ($_ -notmatch 'KEY' -and $_.trim() -ne '') }}
+             $keyContent = $pemContent[0..($pemContent.Length-1)] | Where-Object {{ $_ -match 'PRIVATE KEY' -or ($_ -notmatch 'CERTIFICATE' -and $_.trim() -ne '') }}
+             Set-Content -Path \"{}\" -Value $certContent
+             Set-Content -Path \"{}\" -Value $keyContent",
+            tls_dir.join("combined.pem").display(),
+            tls_dir.join("fullchain.pem").display(),
+            tls_dir.join("privkey.pem").display()
+        );
+        let output = res!(std::process::Command::new("powershell")
+            .arg("-Command")
+            .arg(&ps_script)
+            .output());
+        if !output.status.success() {
+            return Err(err!(
+                "Certificate splitting failed: {}", String::from_utf8_lossy(&output.stderr);
+                IO, File));
+        }
+        let _ = std::fs::remove_file(tls_dir.join("certificate.pfx"));
+        let _ = std::fs::remove_file(tls_dir.join("combined.pem"));
+        let cert_path = tls_dir.join("fullchain.pem");
+        let key_path = tls_dir.join("privkey.pem");
+        if !cert_path.exists() || !key_path.exists() {
+            return Err(err!(
+                "Certificate files were not created properly at {:?}", tls_dir;
+                IO, File, Missing));
+        }
+        Ok(())
+    }    
+    #[cfg(target_os = "macos")]
+    pub fn new_lets_encrypt(
+        domains:    &Vec<Fqdn>,
+        tls_dir:    &Path,
+    )
+        -> Outcome<()>
+    {
+        res!(Self::check_requirements());
+        let mut cmd = std::process::Command::new("certbot");
+        cmd.arg("certonly")
+            .arg("--standalone")
+            .arg("--non-interactive")
+            .arg("--force-renewal");
+        for domain in &domains {
+            cmd.arg("-d").arg(domain_as_str());
+        }
+        let output = res!(cmd.output());
+        if !output.status.success() {
+            return Err(err!(
+                "Certificate creation failed: {}", String::from_utf8_lossy(&output.stderr);
+                IO, File));
+        }
+        let src_dir = PathBuf::from("/etc/letsencrypt/live").join(domains[0].as_str());
+        res!(std::fs::create_dir_all(tls_dir));
+        for file in &["fullchain.pem", "privkey.pem"] {
+            res!(std::fs::copy(
+                src_dir.join(file),
+                tls_dir.join(file)
+            ));
+        }
+        Ok(())
+    }
+    pub fn check_requirements() -> Outcome<()> {
+        #[cfg(target_os = "linux")]
+        {
+            let has_certbot = std::process::Command::new("certbot")
+                .arg("--version")
+                .output()
+                .map_or(false, |output| output.status.success());
+            if !has_certbot {
+                return Err(err!(
+                    "Certbot not found. Please install via: sudo apt-get install certbot";
+                    System, Missing));
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            if !is_elevated::is_elevated() {
+                return Err(err!(
+                    "Administrator privileges required. Please run as administrator.";
+                    System, Missing));
+            }
+            let has_wacs = std::process::Command::new("wacs")
+                .arg("--version")
+                .output()
+                .map_or(false, |output| output.status.success());
+            if !has_wacs {
+                return Err(err!(
+                    "win-acme (WACS) not found. Please install from https:
+                    System, Missing));
+            }
+            let has_openssl = std::process::Command::new("openssl")
+                .arg("version")
+                .output()
+                .map_or(false, |output| output.status.success());
+            if !has_openssl {
+                return Err(err!(
+                    "OpenSSL not found. Please install OpenSSL and add it to your PATH.";
+                    System, Missing));
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let has_brew = std::process::Command::new("brew")
+                .arg("--version")
+                .output()
+                .map_or(false, |output| output.status.success());
+            if !has_brew {
+                return Err(err!(
+                    "Homebrew not found. Please install from https:
+                    System, Missing));
+            }
+        }
+        Ok(())
+    }
+}
+File: src/srv/context.rs
+use crate::srv::{
+    cfg::ServerConfig,
+    id,
+};
+use oxedize_fe2o3_core::{
+    prelude::*,
+    id::ParseId,
+    path::NormPathBuf,
+    rand::Rand,
+};
+use oxedize_fe2o3_crypto::enc::EncryptionScheme;
+use oxedize_fe2o3_hash::{
+    csum::ChecksumScheme,
+    hash::HashScheme,
+};
+use oxedize_fe2o3_iop_crypto::enc::Encrypter;
+use oxedize_fe2o3_iop_db::api::Database;
+use oxedize_fe2o3_iop_hash::api::Hasher;
+use oxedize_fe2o3_jdat::id::NumIdDat;
+use oxedize_fe2o3_net::{
+    http::{
+        handler::WebHandler,
+        msg::HttpMessage,
+    },
+    id::Sid,
+    ws::{
+        WebSocket,
+        handler::WebSocketHandler,
+    },
+};
+use oxedize_fe2o3_o3db_sync::{
+    O3db,
+    base::cfg::OzoneConfig,
+    data::core::RestSchemesInput,
+};
+use oxedize_fe2o3_syntax::core::SyntaxRef;
+use std::{
+    collections::BTreeMap,
+    marker::PhantomData,
+    net::SocketAddr,
+    path::Path,
+    sync::{
+        Arc,
+        RwLock,
+    },
+};
+use tokio::io::{
+    AsyncRead,
+    AsyncWrite,
+};
+#[derive(Clone, Debug)]
+pub enum Protocol<
+    WH:     WebHandler,
+    WSH:    WebSocketHandler,
+> {
+    Web {
+        web_handler:    WH,
+        ws_handler:     WSH,
+        ws_syntax:      SyntaxRef,
+        dev_mode:       bool,
+    },
+}
+pub struct ServerContext<
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL> + 'static,
+    ENC:    Encrypter,
+    KH:     Hasher,
+    DB:     Database<UIDL, UID, ENC, KH>, 
+    WH:     WebHandler,
+    WSH:    WebSocketHandler,
+> {
+    pub cfg:        ServerConfig,
+    pub root:       NormPathBuf,
+    pub db:         Option<(Arc<RwLock<DB>>, UID)>,
+    pub protocol:   Protocol<WH, WSH>,
+    phantom3:       PhantomData<ENC>,
+    phantom4:       PhantomData<KH>,
+}
+impl<
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL> + 'static,
+    ENC:    Encrypter + 'static,
+    KH:     Hasher + 'static,
+    DB:     Database<UIDL, UID, ENC, KH> + 'static, 
+    WH:     WebHandler + 'static,
+    WSH:    WebSocketHandler + 'static,
+>
+    Clone for ServerContext<UIDL, UID, ENC, KH, DB, WH, WSH>
+{
+    fn clone(&self) -> Self {
+        Self {
+            cfg:        self.cfg.clone(),
+            root:       self.root.clone(),
+            db:         self.db.clone(),
+            protocol:   self.protocol.clone(),
+            phantom3:   PhantomData,
+            phantom4:   PhantomData,
+        }
+    }
+}
+impl<
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL> + 'static,
+    ENC:    Encrypter + 'static,
+    KH:     Hasher + 'static,
+    DB:     Database<UIDL, UID, ENC, KH> + 'static, 
+    WH:     WebHandler + 'static,
+    WSH:    WebSocketHandler + 'static,
+>
+    ServerContext<UIDL, UID, ENC, KH, DB, WH, WSH>
+{
+    pub fn new(
+        cfg:        ServerConfig,
+        root:       NormPathBuf,
+        db:         Option<(DB, UID)>,
+        protocol:   Protocol<WH, WSH>,
+    )
+        -> Self
+    {
+        Self {
+            cfg,
+            root,
+            db:         db.map(|(db, uid)| (Arc::new(RwLock::new(db)), uid)),
+            protocol,
+            phantom3:   PhantomData,
+            phantom4:   PhantomData,
+        }
+    }
+    pub fn clone_self(&self) -> Self {
+        self.clone()
+    }
+    pub fn err_id() -> String {
+        Rand::generate_random_string(6, "abcdefghikmnpqrstuvw0123456789")
+    }
+    pub fn get_session_id(
+        msg:        &HttpMessage,
+        src_addr:   &SocketAddr,
+    )
+        -> Option<Sid>
+    {
+        match msg.header.fields.get_session_id() {
+            Some(sid_string) => match Sid::parse_id(&sid_string) {
+                Ok(n) => Some(n),
+                Err(e) => {
+                    error!(e, "The session cookie string '{}' in a message from \
+                        {:?} cannot be decoded to a {}.",
+                        sid_string, src_addr, std::any::type_name::<Sid>());
+                    None
+                },
+            },
+            None => None,
+        }
+    }
+}
+pub fn new_db(
+    db_root: &Path,
+    enc_key: &[u8],
+)
+    -> Outcome<O3db<
+        { id::UID_LEN },
+        id::Uid,
+        EncryptionScheme,
+        HashScheme,
+        HashScheme,
+        ChecksumScheme,
+    >>
+{
+    let cfg = OzoneConfig {
+        bytes_before_hashing:           32,
+        cache_size_limit_bytes:         100_000_000,
+        init_load_caches:               true,
+        data_file_max_bytes:            1_000_000,
+        rest_chunk_threshold:           1_500,
+        rest_chunk_bytes:               64,
+        num_cbots_per_zone:             2,
+        num_fbots_per_zone:             2,
+        num_igbots_per_zone:            2,
+        num_rbots_per_zone:             2,
+        num_wbots_per_zone:             1,
+        num_sbots:                      2,
+        num_zones:                      2,
+        zone_state_update_secs:         1, 
+        zone_overrides:                 BTreeMap::new(),
+    };
+    let aes_gcm = res!(EncryptionScheme::new_aes_256_gcm_with_key(enc_key));
+    let crc32 = ChecksumScheme::new_crc32();
+    let schms_input = RestSchemesInput::new(
+        Some(aes_gcm.clone()),
+        None::<HashScheme>,
+        None::<HashScheme>,
+        Some(crc32.clone()),
+    );
+    O3db::new(
+        &db_root,
+        Some(cfg),
+        schms_input,
+        id::Uid::default(),
+    )
+}
+pub fn no_db()
+    -> Outcome<Option<(Arc<RwLock<O3db<
+        { id::UID_LEN },
+        id::Uid,
+        EncryptionScheme,
+        HashScheme,
+        HashScheme,
+        ChecksumScheme,
+    >>>,
+        id::Uid,
+    )>>
+{
+    Ok(None)
+}
+pub fn new_ws_no_db<
+    'a,
+    S:      AsyncRead + AsyncWrite + Unpin,
+    WSH:    WebSocketHandler,
+>(
+    stream: &'a mut S,
+    ws_handler: WSH,
+)
+    -> Outcome<WebSocket<
+        'a,
+        { id::UID_LEN },
+        id::Uid,
+        EncryptionScheme,
+        HashScheme,
+        O3db<
+            { id::UID_LEN },
+            id::Uid,
+            EncryptionScheme,
+            HashScheme,
+            HashScheme,
+            ChecksumScheme,
+        >,
+        S,
+        WSH,
+    >>
+{
+    Ok(WebSocket::<
+        '_,
+        { id::UID_LEN },
+        id::Uid,
+        EncryptionScheme,
+        HashScheme,
+        O3db<
+            { id::UID_LEN },
+            id::Uid,
+            EncryptionScheme,
+            HashScheme,
+            HashScheme,
+            ChecksumScheme,
+        >,
+        S,
+        WSH,
+    >::new_client(
+        stream,
+        ws_handler,
+        10,
+        20,
+    ))
+}
+File: src/srv/smtps.rs
+use crate::srv::{
+    constant,
+    context::ServerContext,
+};
+use oxedize_fe2o3_core::{
+    prelude::*,
+    rand::RanDef,
+};
+use oxedize_fe2o3_iop_crypto::enc::Encrypter;
+use oxedize_fe2o3_iop_db::api::Database;
+use oxedize_fe2o3_iop_hash::api::Hasher;
+use oxedize_fe2o3_jdat::id::{
+    IdDat,
+    NumIdDat,
+};
+use oxedize_fe2o3_net::{
+    http::{
+        handler::WebHandler,
+        header::{
+            HttpHeadline,
+            HttpMethod,
+        },
+        msg::{
+            AsyncReadIterator,
+            HttpMessageReader,
+            HttpMessage,
+        },
+        status::HttpStatus,
+    },
+    smtp::{
+        handler::EmailHandler,
+        msg::SmtpMessageReader,
+    },
+    ws::handler::WebSocketHandler,
+};
+use oxedize_fe2o3_syntax::SyntaxRef;
+use std::{
+    net::SocketAddr,
+    pin::Pin,
+};
+use tokio::{
+    net::TcpStream,
+    io::AsyncWriteExt,
+};
+use tokio_rustls::server::TlsStream;
+impl<
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL> + 'static,
+    ENC:    Encrypter + 'static,
+    KH:     Hasher + 'static,
+    DB:     Database<UIDL, UID, ENC, KH> + 'static, 
+    EH:     EmailHandler + 'static,
+    WH:     WebHandler + 'static,
+    WSH:    WebSocketHandler + 'static,
+>
+    ServerContext<UIDL, UID, ENC, KH, DB, EH, WH, WSH>
+{
+    pub async fn handle_smtps(
+        self,
+        mut stream: TlsStream<TcpStream>,
+        handler:    EH,
+        src_addr:   SocketAddr,
+    )
+        -> Outcome<()>
+    {
+        let id = fmt!("Smtps|Cx:{}", IdDat::<4, u32>::randef());
+        let (mut read_stream, mut write_stream) = tokio::io::split(&mut stream);
+        let mut reader: SmtpMessageReader<
+            '_,
+            { constant::SMTP_DEFAULT_CHUNK_SIZE },
+            _,
+        > = HttpMessageReader::new(Pin::new(&mut read_stream));
+        let log_level = res!(self.cfg.log_level());
+        loop {
+            let result = reader.next().await;
+            match result {
+                Some(Ok(request)) => {
+                    log!(log_level, "{}: Incoming from {:?}:", id, src_addr);
+                    request.log();
+                    if request.is_websocket_upgrade() {
+                        log!(log_level, "Connection upgrading to websocket...");
+                        let reunited_stream = read_stream.unsplit(write_stream);
+                        return self.handle_websocket(
+                            reunited_stream,
+                            ws_handler,
+                            ws_syntax,
+                            request,
+                            &id,
+                        ).await;
+                    }
+                    let sid_opt = Self::get_session_id(&request, &src_addr);
+                    let mut response = None;
+                    let close_requested = request.get_connection_close();
+                    if close_requested {
+                        let mut msg = HttpMessage::new_response(HttpStatus::OK);
+                        msg.set_connection_close(true);
+                        response = Some(msg);
+                    }
+                    match request.header.headline {
+                        HttpHeadline::Request { method, loc } => {
+                            let body = request.body;
+                            match method {
+                                HttpMethod::GET => {
+                                    let result = handler.handle_get(
+                                        loc,
+                                        response,
+                                        body,
+                                        self.db.clone(),
+                                        &sid_opt,
+                                        &id,
+                                    ).await;
+                                    response = res!(result);
+                                }
+                                _ => fault!("{}: Unsupported HTTP request method '{}'.", id, method),
+                            }
+                        },
+                        _ => fault!("{}: Unsupported HTTP '{:?}'.", id, request.header.headline),
+                    }
+                    log!(log_level, "Outgoing HTTPS message:");
+                    match response {
+                        Some(msg) => {
+                            match msg.write_all(&mut write_stream, Some(log_level)).await {
+                                Ok(()) => (),
+                                Err(e) => return Err(err!(e,
+                                    "{}: Could not send response.", id;
+                                    IO, Network, Wire, Write)),
+                            }
+                        }
+                        None => log!(log_level, " None"),
+                    }
+                }
+                Some(Err(e)) => return Err(e),
+                None => {
+                    break;
+                }
+            }
+        }
+        let reunited_stream = read_stream.unsplit(write_stream);
+        let result = reunited_stream.shutdown().await;
+        if let Err(e) = result {
+            error!(e.into());
+        }
+        log!(log_level, "{}: Connection with {:?} closed.", id, src_addr);
+        Ok(())
+    }
+}
+File: src/srv/server.rs
+use crate::srv::{
+    cert::Certificate,
+    context::{
+        Protocol,
+        ServerContext,
+    },
+};
+use oxedize_fe2o3_core::prelude::*;
+use oxedize_fe2o3_iop_crypto::enc::Encrypter;
+use oxedize_fe2o3_iop_db::api::Database;
+use oxedize_fe2o3_iop_hash::api::Hasher;
+use oxedize_fe2o3_jdat::id::NumIdDat;
+use oxedize_fe2o3_net::{
+    http::handler::WebHandler,
+    ws::handler::WebSocketHandler,
+};
+use std::{
+    net::SocketAddr,
+    sync::Arc,
+};
+use tokio::{
+    net::TcpListener,
+    io::AsyncWriteExt,
+};
+use tokio_rustls::TlsAcceptor;
+pub struct Server<
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL> + 'static,
+    ENC:    Encrypter,
+    KH:     Hasher,
+    DB:     Database<UIDL, UID, ENC, KH>, 
+    WH:     WebHandler,
+    WSH:    WebSocketHandler,
+> {
+    pub context: ServerContext<UIDL, UID, ENC, KH, DB, WH, WSH>,
+}
+impl<
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL> + 'static,
+    ENC:    Encrypter + 'static,
+    KH:     Hasher + 'static,
+    DB:     Database<UIDL, UID, ENC, KH> + 'static, 
+    WH:     WebHandler + 'static,
+    WSH:    WebSocketHandler + 'static,
+>
+    Server<UIDL, UID, ENC, KH, DB, WH, WSH>
+{
+    pub fn new(
+        context: ServerContext<UIDL, UID, ENC, KH, DB, WH, WSH>,
+    )
+        -> Self
+    {
+        Self { context }
+    }
+    pub async fn start(&self) -> Outcome<()> {
+        let dev_mode = match &self.context.protocol {
+            Protocol::Web { dev_mode, .. } => *dev_mode,
+        };
+        let server_config = res!(Certificate::load(
+            &self.context.cfg,
+            &self.context.root,
+            dev_mode,
+        ));
+        let tls_acceptor = TlsAcceptor::from(Arc::new(server_config));
+        let addr = SocketAddr::from(([0, 0, 0, 0], 8443));
+        let result = TcpListener::bind(&addr).await;
+        let listener = res!(result, IO, Network);
+        info!("Listening on: {}", addr);
+        loop {
+            let result = listener.accept().await;
+            let (mut stream, src_addr) = match result {
+                Ok((stream, src_addr)) => (stream, src_addr),
+                Err(e) => {
+                    error!(err!(e, "TCP connection aborted."; IO, Network));
+                    continue;
+                }
+            };
+            let mut peek_buf = [0u8; 5];
+            match stream.peek(&mut peek_buf).await {
+                Ok(n) if n >= 5 && peek_buf[0] == 0x16 && peek_buf[1] == 0x03 => {
+                    match tls_acceptor.accept(stream).await {
+                        Ok(tls_stream) => {
+                            let context_clone = self.context.clone();
+                            match self.context.protocol.clone() {
+                                Protocol::Web { web_handler, ws_handler, ws_syntax, .. } => {
+                                    tokio::spawn(async move {
+                                        if let Err(e) = context_clone.handle_https(
+                                            tls_stream,
+                                            web_handler,
+                                            ws_handler,
+                                            ws_syntax,
+                                            src_addr,
+                                        ).await {
+                                            error!(err!(e,
+                                                "Error handling HTTPS connection.";
+                                                IO, Network));
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!(err!(e, "TLS handshake aborted."; IO, Network, Init));
+                            continue;
+                        }
+                    }
+                },
+                _ => {
+                    let response = "HTTP/1.1 308 Permanent Redirect\r\n\
+                        Location: https:
+                        Connection: close\r\n\
+                        Content-Type: text/plain\r\n\
+                        Content-Length: 63\r\n\
+                        \r\n\
+                        This server requires HTTPS. Please use https:
+                    if let Err(e) = stream.write_all(response.as_bytes()).await {
+                        error!(err!(e, "Failed to send HTTPS redirect"; IO, Network, Write));
+                    }
+                    continue;
+                }
+            }
+        }
+    }
+}
+File: src/srv/ws/handler.rs
+use crate::srv::{
+    constant,
+    context::{
+        ServerContext,
+    },
+    dev::refresh::DevRefreshManager,
+};
+use oxedize_fe2o3_core::{
+    prelude::*,
+};
+use oxedize_fe2o3_iop_crypto::enc::Encrypter;
+use oxedize_fe2o3_iop_db::api::Database;
+use oxedize_fe2o3_iop_hash::api::Hasher;
+use oxedize_fe2o3_jdat::{
+    prelude::*,
+    id::NumIdDat,
+};
+use oxedize_fe2o3_net::{
+    http::{
+        handler::WebHandler,
+        msg::HttpMessage,
+    },
+    ws::{
+        WebSocket,
+        core::WebSocketMessage,
+        handler::WebSocketHandler,
+    },
+};
+use oxedize_fe2o3_syntax::{
+    SyntaxRef,
+    msg::{
+        Msg,
+        MsgCmd,
+    },
+};
+use std::{
+    sync::{
+        Arc,
+        RwLock,
+    },
+};
+use tokio::{
+    self,
+    io::{
+        AsyncRead,
+        AsyncWrite,
+    },
+    sync::broadcast,
+};
+impl<
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL> + 'static,
+    ENC:    Encrypter + 'static,
+    KH:     Hasher + 'static,
+    DB:     Database<UIDL, UID, ENC, KH> + 'static,
+    WH:     WebHandler + 'static,
+    WSH:    WebSocketHandler + 'static,
+>
+    ServerContext<UIDL, UID, ENC, KH, DB, WH, WSH>
+{
+    pub async fn handle_websocket<
+        'a,
+        S: AsyncRead + AsyncWrite + Unpin,
+    >(
+        self,
+        stream:     &'a mut S,
+        ws_handler: WSH,
+        ws_syntax:  SyntaxRef,
+        request:    HttpMessage,
+        id:         &String, 
+    )
+        -> Outcome<()>
+    {
+        let mut ws = WebSocket::new_server(
+            stream,
+            ws_handler.clone(),
+            constant::WEBSOCKET_CHUNK_SIZE,
+            constant::WEBSOCKET_CHUNKING_THRESHOLD,
+        );
+        match ws.connect_as_server(request).await {
+            Ok(()) => (),
+            Err(e) => return Err(err!(e,
+                "{}: WebSocket handshake failed.", id;
+                IO, Network, Wire)),
+        };
+        ws.listen(
+            self.db,
+            ws_syntax,
+            Some(self.cfg.ws_ping_interval_secs),
+            self.cfg.server_max_errors_allowed,
+            id,
+        ).await
+    }
+}
+#[derive(Clone, Debug)]
+pub struct AppWebSocketHandler {
+    dev_manager: Option<Arc<DevRefreshManager>>,
+}
+impl AppWebSocketHandler {
+    pub fn new(dev_manager: Option<Arc<DevRefreshManager>>) -> Self {
+        Self {
+            dev_manager,
+        }
+    }
+    fn response_text(
+        syntax: SyntaxRef,
+        cmd:    &str,
+        vals:   Vec<Dat>,
+    )
+        -> Outcome<Option<WebSocketMessage>>
+    {
+        let mut response = res!(MsgCmd::new(syntax, cmd));
+        for val in vals {
+            response = res!(response.add_cmd_val(val));
+        }
+        trace!("Sending websocket message '{}'", response.to_string());
+        return Ok(Some(WebSocketMessage::Text(response.to_string())));
+    }
+    fn check_syntax(
+        syntax: SyntaxRef,
+        msgcmd: &MsgCmd,
+    )
+        -> Outcome<()>
+    {
+        match syntax.get_cmd(&*msgcmd.name) {
+            Some(cmd) => {
+                let cmdcfg = cmd.config();
+                if msgcmd.vals.len() != cmdcfg.vals.len() {
+                    return Err(err!(
+                        "The syntax '{}' command '{}' expects {} value(s), found {}.",
+                        syntax.config().name,
+                        msgcmd.name,
+                        cmdcfg.vals.len(),
+                        msgcmd.vals.len();
+                        Input, Network, Mismatch));
+                }
+                for (i, (kind, _)) in cmdcfg.vals.iter().enumerate() {
+                    if *kind != Kind::Unknown && *kind != msgcmd.vals[i].kind() {
+                        return Err(err!(
+                            "The syntax '{}' command '{}' expects value {} to be a '{:?}, found {:?}.",
+                            syntax.config().name,
+                            msgcmd.name,
+                            i,
+                            kind,
+                            msgcmd.vals[i].kind();
+                            Input, Network, Mismatch));
+                    }
+                }
+            }
+            None => {
+                return Err(err!(
+                    "No command '{}' found in syntax '{}'.",
+                    msgcmd.name,
+                    syntax.config().name;
+                    Input, Network, Unknown));
+            }
+        }
+        Ok(())
+    }
+}
+impl WebSocketHandler for AppWebSocketHandler {
+    fn handle_text<
+        const UIDL: usize,
+        UID:    NumIdDat<UIDL> + 'static,
+        ENC:    Encrypter,
+        KH:     Hasher,
+        DB:     Database<UIDL, UID, ENC, KH>,
+    >(
+        &mut self,
+        txt:    String,
+        db:     Option<(Arc<RwLock<DB>>, UID)>,
+        syntax: SyntaxRef,
+        id:     &String,
+    )
+        -> Outcome<Option<WebSocketMessage>>
+    {
+        debug!("{}: AppWebSocketHandler received text message: '{}'", id, txt);
+        let msgrx = Msg::new(syntax.clone());
+        let msgrx = match msgrx.from_str(&txt, None) {
+            Err(err) => {
+                error!(err.clone());
+                return Self::response_text(syntax, "error", vec![dat!(err.to_string())]);
+            }
+            Ok(msgrx) => msgrx,
+        };
+        if msgrx.cmds.len() != 1 {
+            let err = err!(
+                "Expected one command from syntax '{}', found {}.",
+                syntax.config().name, msgrx.cmds.len();
+                Invalid, Network, Input);
+            error!(err.clone());
+            return Self::response_text(syntax, "error", vec![dat!(err.to_string())]);
+        }
+        if let Some((cmd_name, mut cmdrx)) = msgrx.cmds.into_iter().next() {
+            if let Err(err) = Self::check_syntax(syntax.clone(), &cmdrx) {
+                error!(err.clone());
+                return Self::response_text(syntax, "error", vec![dat!(err.to_string())]);
+            }
+            match cmd_name.as_str() {
+                "dev_ping" => {
+                    trace!("Received dev_ping");
+                    if let Some(_manager) = &self.dev_manager {
+                        return Self::response_text(syntax, "info", vec![dat!("pong")]);
+                    } else {
+                        return Self::response_text(syntax, "error",
+                            vec![dat!("Dev mode not enabled.")]);
+                    }
+                }
+                "dev_connect" => {
+                    trace!("Received dev_connect");
+                    if self.dev_manager.is_some() {
+                        return Self::response_text(syntax, "info", vec![dat!("connected")]);
+                    } else {
+                        trace!("Not in dev mode");
+                        return Self::response_text(syntax, "error",
+                            vec![dat!("Dev mode not enabled.")]);
+                    }
+                }
+                "echo" => return Ok(Some(WebSocketMessage::Text(txt))),
+                "insert" => {
+                    trace!("Received insert");
+                    if let Some((ref db, uid)) = db {
+                        let db = match db.write() {
+                            Err(_err) => {
+                                let err = err!(
+                                    "While trying to access database.";
+                                    Lock, Poisoned, Write);
+                                error!(err.clone());
+                                return Self::response_text(syntax,
+                                    "error", vec![dat!(err.to_string())]);
+                            }
+                            Ok(v) => v,
+                        };
+                        if let Dat::Tup2(mut tup2) = std::mem::take(&mut cmdrx.vals[0]) {
+                            let k = std::mem::take(&mut tup2[0]);
+                            let v = std::mem::take(&mut tup2[1]);
+                            let success = fmt!("Inserted value for key {} into database.", k);
+                            match db.insert(
+                                k,
+                                v,
+                                uid,
+                                None,
+                            ) {
+                                Err(err) => {
+                                    error!(err.clone());
+                                    return Self::response_text(syntax,
+                                        "error", vec![dat!(err.to_string())]);
+                                }
+                                Ok((exists, num_chunks)) => {
+                                    let exists_txt = if exists {
+                                        "exists"
+                                    } else {
+                                        "did not exist"
+                                    };
+                                    let txt = fmt!(
+                                        "{} The key {}, {} chunks were used.",
+                                        success, exists_txt, num_chunks,
+                                    );
+                                    return Self::response_text(syntax, "info", vec![dat!(txt)]);
+                                }
+                            }
+                        }
+                    }
+                    let err = err!(
+                        "Database not accessible for 'insert' command.";
+                        Invalid, Network, Input);
+                    error!(err.clone());
+                    return Self::response_text(syntax, "error", vec![dat!(err.to_string())]);
+                }
+                "get_data" => {
+                    if let Some((ref db, _uid)) = db {
+                        let db = match db.read() {
+                            Err(_err) => {
+                                let err = err!(
+                                    "While trying to access database.";
+                                    Lock, Poisoned, Read);
+                                error!(err.clone());
+                                return Self::response_text(syntax,
+                                    "error", vec![dat!(err.to_string())]);
+                            }
+                            Ok(v) => v,
+                        };
+                        match db.get(
+                            &cmdrx.vals[0],
+                            None,
+                        ) {
+                            Err(err) => {
+                                error!(err.clone());
+                                return Self::response_text(syntax,
+                                    "error", vec![dat!(err.to_string())]);
+                            }
+                            Ok(Some((data, _meta))) => {
+                                return Self::response_text(syntax, "data", vec![dat!(data)]);
+                            }
+                            Ok(None) => {
+                                return Self::response_text(syntax, "data", vec![Dat::Empty]);
+                            }
+                        }
+                    }
+                    let err = err!(
+                        "Database not accessible for 'get_data' command.";
+                        Invalid, Network, Input);
+                    error!(err.clone());
+                    return Self::response_text(syntax, "error", vec![dat!(err.to_string())]);
+                }
+                _ => {}
+            }
+        }
+        unreachable!()
+    }
+    fn handle_binary<
+        const UIDL: usize,
+        UID:    NumIdDat<UIDL> + 'static,
+        ENC:    Encrypter,
+        KH:     Hasher,
+        DB:     Database<UIDL, UID, ENC, KH>,
+    >(
+        &mut self,
+        byts:   Vec<u8>,
+        _db:     Option<(Arc<RwLock<DB>>, UID)>,
+        _syntax: SyntaxRef,
+        id:     &String,
+    )
+        -> Outcome<Option<WebSocketMessage>>
+    {
+        debug!("{}: AppWebSocketHandler received binary message of length {}: {:02x?}",
+            id, byts.len(), byts);
+        let response = WebSocketMessage::Binary(byts);
+        Ok(Some(response))
+    }
+    fn dev_receiver(&self, id: &String) -> Outcome<Option<broadcast::Receiver<()>>> {
+        if let Some(manager) = &self.dev_manager {
+            debug!("{}: New client subscribed to dev refresh notifications.", id);
+            Ok(Some(manager.get_receiver()))
+        } else {
+            debug!("{}: No dev receiver available to accept client refresh messages.", id);
+            Ok(None)
+        }
+    }
+}
+File: src/srv/ws/mod.rs
+pub mod handler;
+pub mod syntax;
+File: src/srv/ws/syntax.rs
+use oxedize_fe2o3_core::prelude::*;
+use oxedize_fe2o3_jdat::{
+    prelude::*,
+    version::SemVer,
+};
+use oxedize_fe2o3_syntax::{
+    cmd::{
+        Cmd,
+        CmdConfig,
+    },
+    core::{
+        Syntax,
+        SyntaxRef,
+    },
+};
+#[derive(Clone, Debug)]
+pub struct WebSocketSyntax;
+impl WebSocketSyntax {
+    pub fn new(
+        name:   &str,
+        ver:    &SemVer,
+        about:  &str,
+    )
+        -> Outcome<SyntaxRef>
+    {
+        let mut s = Syntax::new(name).ver(*ver).about(about);
+        s = res!(s.with_default_help_cmd());
+        let cmd = Cmd::from(CmdConfig {
+            name:   fmt!("exit"),
+            help:   Some(fmt!("Shutdown the app and exit, or use Ctrl+C, Ctrl+D")),
+            cat:    fmt!("Control"),
+            ..Default::default()
+        });
+        s = res!(s.add_cmd(cmd));
+        let cmd = Cmd::from(CmdConfig {
+            name:   fmt!("dev_connect"),
+            help:   Some(fmt!("Initialize dev mode refresh connection.")),
+            cat:    fmt!("Development"),
+            ..Default::default()
+        });
+        s = res!(s.add_cmd(cmd));
+        let cmd = Cmd::from(CmdConfig {
+            name:   fmt!("dev_ping"),
+            help:   Some(fmt!("Keep dev mode connection alive.")),
+            cat:    fmt!("Development"),
+            ..Default::default()
+        });
+        s = res!(s.add_cmd(cmd));
+        let cmd = Cmd::from(CmdConfig {
+            name:   fmt!("data"),
+            help:   Some(fmt!("Data retrieved from database.")),
+            vals:   vec![(Kind::Unknown, fmt!("Retrieved data"))],
+            cat:    fmt!("Database IO"),
+            ..Default::default()
+        });
+        s = res!(s.add_cmd(cmd));
+        let cmd = Cmd::from(CmdConfig {
+            name:   fmt!("info"),
+            help:   Some(fmt!("For your information.")),
+            vals:   vec![(Kind::Str, fmt!("Information message"))],
+            cat:    fmt!("General IO"),
+            ..Default::default()
+        });
+        s = res!(s.add_cmd(cmd));
+        let cmd = Cmd::from(CmdConfig {
+            name:   fmt!("error"),
+            help:   Some(fmt!("Error.")),
+            vals:   vec![(Kind::Str, fmt!("Error message"))],
+            cat:    fmt!("General IO"),
+            ..Default::default()
+        });
+        s = res!(s.add_cmd(cmd));
+        let cmd = Cmd::from(CmdConfig {
+            name:   fmt!("echo"),
+            help:   Some(fmt!("Echo the incoming message.")),
+            vals:   vec![(Kind::Str, fmt!("Text to echo"))],
+            cat:    fmt!("General IO"),
+            ..Default::default()
+        });
+        s = res!(s.add_cmd(cmd));
+        let cmd = Cmd::from(CmdConfig {
+            name:   fmt!("insert"),
+            help:   Some(fmt!("Insert (key, value) daticles into database.")),
+            vals:   vec![(Kind::Tup2, fmt!("(Key, Value)"))],
+            cat:    fmt!("Database IO"),
+            ..Default::default()
+        });
+        s = res!(s.add_cmd(cmd));
+        let cmd = Cmd::from(CmdConfig {
+            name:   fmt!("get_data"),
+            help:   Some(fmt!("Get database value for given key daticle.")),
+            vals:   vec![(Kind::Unknown, fmt!("Key"))],
+            cat:    fmt!("Database IO"),
+            ..Default::default()
+        });
+        s = res!(s.add_cmd(cmd));
+        Ok(SyntaxRef::new(s))
+    }
+}
+File: src/srv/mod.rs
+pub mod cert;
+pub mod cfg;
+pub mod constant;
+pub mod context;
+pub mod dev;
+pub mod https;
+pub mod id;
+pub mod server;
+pub mod ws;
+File: src/srv/constant.rs
+use oxedize_fe2o3_o3db_sync::{
+    comm::response::Wait,
+};
+use std::{
+    time::Duration,
+};
+pub const DB_DIR:                               &'static str = "o3db";
+pub const GET_DATA_WAIT:                        Wait = Wait::new_default();
+pub const DEFAULT_INDEX_FILE:                   &'static str = "index.html";
+pub const HTTP_DEFAULT_HEADER_CHUNK_SIZE:       usize = 1_500;
+pub const HTTP_DEFAULT_BODY_CHUNK_SIZE:         usize = 5_000;
+pub const STACK_SIZE:                           usize = 2 * 1024 * 1024;
+pub const SERVER_INT_CHANNEL_CHECK_INTERVAL:    Duration = Duration::from_nanos(1_000);
+pub const SERVER_EXT_SOCKET_CHECK_INTERVAL:     Duration = Duration::from_secs(1);
+pub const SERVER_RETAIN_PREV_PASSHASHES:        usize = 10;
+pub const SERVER_RETAIN_PREV_SESSION_ARCHIVES:  usize = 10;
+pub const SERVER_MAX_UID_COLLISION_ATTEMPTS:    usize = 10;
+pub const SERVER_BAD_LOGIN_MSG:                 &'static str = "Login unsuccessful.";
+pub const WEBSOCKET_CHUNK_SIZE:                 usize = 10;
+pub const WEBSOCKET_CHUNKING_THRESHOLD:         usize = 20;
+pub const PKCS_RSA_SHA256:                  &[u64] = &[1, 2, 840, 113549, 1, 1, 11];
+pub const PKCS_RSA_SHA384:                  &[u64] = &[1, 2, 840, 113549, 1, 1, 12];
+pub const PKCS_RSA_SHA512:                  &[u64] = &[1, 2, 840, 113549, 1, 1, 13];
+pub const PKCS_RSA_PSS_SHA256:              &[u64] = &[1, 2, 840, 113549, 1, 1, 10];
+pub const PKCS_ECDSA_P256_SHA256:           &[u64] = &[1, 2, 840, 10045, 4, 3, 2];
+pub const PKCS_ECDSA_P384_SHA384:           &[u64] = &[1, 2, 840, 10045, 4, 3, 3];
+pub const PKCS_ED25519:                     &[u64] = &[1, 3, 101, 112];
+pub const UGRD_SHARDMAP_INIT_SHARDS:        usize = 10;
+pub const AGRD_SHARDMAP_INIT_SHARDS:        usize = 10;
+pub const GUARD_SHARDMAP_SALT_LEN:          usize = 8;
+pub const SALT8: [u8; 8] = [
+    0x13, 0x8b, 0x4f, 0xe3, 0xd3, 0x75, 0x67, 0x86,
+];
+pub const TLS_DIR_DEV:                      &'static str = "dev";
+pub const TLS_DIR_PROD:                     &'static str = "prod";
+pub const SPLASH: &'static str =
+r#"
+    =***********************= 
+   :*************************:
+   ***************************
+   ***=:::::::::::::::::::=***     88888888b                  .o88888o.         
+   ***:                  :+***     88                        d8'     `8b        
+   *******+=.       .=+*******     88aaaa   .d8888b.         88       88        
+   **********       **********     88       88ooood8 d8888b. 88       88 d8888b.
+   *********=       =*********     88       88.  ...     `88 Y8.     .8P     `88
+   ******+:.  .---.  .:+******     dP       `88888P' .aaadP'  `888888P'   aaad8'
+   ******+   -*****-   =******                       88'                     `88
+   *******---*******---*******                       Y88888P             d88888P
+   ***************************                                
+    '^*********************^'                                   
+                                                                Steel Web Server
+"#;
+File: src/srv/cfg.rs
+use crate::srv::constant;
+use oxedize_fe2o3_core::{
+    prelude::*,
+    file::{
+        OsPath,
+        PathState,
+    },
+    map::MapMut,
+    path::{
+        self,
+        NormalPath,
+        NormPathBuf,
+    },
+};
+use oxedize_fe2o3_jdat::{
+    prelude::*,
+    cfg::Config,
+};
+use oxedize_fe2o3_net::{
+    constant::SESSION_ID_KEY_LABEL,
+    dns::Fqdn,
+    http::{
+        fields::{
+            Cookie,
+            SetCookieAttributes,
+            SameSite,
+        },
+    },
+};
+use std::{
+    collections::{
+        BTreeMap,
+        BTreeSet,
+    },
+    path::{
+        Path,
+        PathBuf,
+    },
+    time::Duration,
+};
+#[derive(Clone, Debug, Eq, PartialEq, FromDatMap, ToDatMap)]
+pub struct ServerConfig {
+    pub tls_dir_rel:                    String,
+    pub tls_public_key_name:            String,
+    pub tls_private_key_name:           String,
+    pub tls_cert_name:                  String,
+    pub tls_cert_address:               String,
+    pub domain_names:                   Vec<String>,
+    pub log_level:                      String,
+    pub num_server_bots:                u16,
+    pub server_address:                 String,
+    pub server_port_tcp:                u16,
+    pub session_expiry_default_secs:    u32,
+    pub ws_ping_interval_secs:          u8,
+    pub server_max_errors_allowed:      u8,
+    pub public_dir_rel:                 String,
+    pub static_route_paths_rel:         DaticleMap,
+    pub default_index_files:            Vec<String>,
+    pub server_accept_unknown_users:    bool,
+}
+impl Config for ServerConfig {}
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            tls_dir_rel:                    fmt!("./tls"),
+            tls_public_key_name:            fmt!("pubkey"),
+            tls_private_key_name:           fmt!("privkey"),
+            tls_cert_name:                  fmt!("fullchain"),
+            tls_cert_address:               fmt!("0.0.0.0"),
+            domain_names:                   vec![
+                fmt!("localhost."),
+            ],
+            log_level:                      fmt!("debug"),
+            num_server_bots:                1,
+            server_address:                 fmt!("0.0.0.0"),
+            server_port_tcp:                8443,
+            session_expiry_default_secs:    604_800,
+            ws_ping_interval_secs:          30,
+            server_max_errors_allowed:      30,
+            public_dir_rel:                 fmt!("./www/public"),
+            static_route_paths_rel:         mapdat!{
+                "/" => "./www/public/",
+            }.get_map().unwrap_or(DaticleMap::new()),
+            default_index_files:            vec![
+                fmt!("index.html"),
+                fmt!("index.htm"),
+                fmt!("default.html"),
+                fmt!("home.html"),
+            ],
+            server_accept_unknown_users:    false,
+        }
+    }
+}
+impl ServerConfig {
+    pub fn validate(
+        &self,
+        root: &NormPathBuf,
+    )
+        -> Outcome<()>
+    {
+        let path = Path::new(&self.public_dir_rel).normalise();
+        if path.escapes() {
+            return Err(err!(
+                "ServerConfig: public directory {} escapes the directory {:?}.",
+                self.public_dir_rel, root;
+                Invalid, Input, Path));
+        }
+        res!(PathState::DirMustExist.validate(
+            root,
+            &self.public_dir_rel,
+        ));
+        let _ = res!(self.get_tls_paths(root, true));
+        let _ = res!(self.get_tls_paths(root, false));
+        let _ = res!(self.get_static_route_paths(root, ()));
+        let _ = res!(self.get_default_index_files());
+        let _ = res!(self.get_domain_names());
+        Ok(())
+    }
+    pub fn get_public_dir(
+        &self,
+        root: &NormPathBuf,
+    )
+        -> Outcome<PathBuf>
+    {
+        let path = Path::new(&self.public_dir_rel).normalise();
+        if path.escapes() {
+            return Err(err!(
+                "ServerConfig: public directory {} escapes the directory {:?}.",
+                self.public_dir_rel, root;
+                Invalid, Input, Path));
+        }
+        let path = root.clone().join(path).normalise().absolute().as_pathbuf();
+        res!(PathState::DirMustExist.validate(
+            &path,
+            "",
+        ));
+        Ok(path)
+    }
+    pub fn session_cookie_default(&self, sid: String) -> Cookie {
+        let session_cookie_attrs = [
+            SetCookieAttributes::HttpOnly,
+            SetCookieAttributes::MaxAge(self.session_expiry_default_secs),
+            SetCookieAttributes::Path("/".to_string()),
+            SetCookieAttributes::SameSite(SameSite::Lax),
+            SetCookieAttributes::Secure,
+        ];
+        let session_cookie_attrs =
+            BTreeSet::from_iter(session_cookie_attrs.iter().cloned());
+        Cookie {
+            key: SESSION_ID_KEY_LABEL.to_string(),
+            val: sid,
+            attrs: Some(session_cookie_attrs),
+        }
+    }
+    pub fn session_expiry(&self) -> Duration {
+        Duration::from_secs(self.session_expiry_default_secs as u64)
+    }
+    pub fn log_level(&self) -> Outcome<LogLevel> {
+        LogLevel::from_str(&self.log_level)
+    }
+    pub fn get_static_route_paths<M: MapMut<String, OsPath>>(
+        &self,
+        root:       &NormPathBuf,
+        mut map:    M,
+    )
+        -> Outcome<M>
+    {
+        for (route_dat, path_dat) in &self.static_route_paths_rel {
+            let route = try_extract_dat!(route_dat, Str).clone();
+            if route.is_empty() {
+                warn!("ServerConfig: Static route key is empty, skipping.");
+                continue;
+            }
+            let path_str = try_extract_dat!(path_dat, Str);
+            if path_str.is_empty() {
+                warn!("ServerConfig: Static route '{}' path is empty, skipping.", route);
+                continue;
+            }
+            let is_dir = path_str.ends_with("/");
+            let path = Path::new(&path_str).normalise();
+            if path.escapes() {
+                warn!("ServerConfig: route '{}' target path '{}' escapes the directory \
+                    {:?}, skipping.",
+                    route, path_str, root);
+                continue;
+            }
+            let path = root.clone().join(path).normalise().absolute();
+            if is_dir {
+                match PathState::DirMustExist.validate(&path, "") {
+                    Ok(()) => {
+                        map.insert(route, OsPath::Dir(path.as_pathbuf()));
+                    }
+                    Err(_) => {
+                        warn!("ServerConfig: Directory '{}' for route '{}' not found, \
+                            skipping.",
+                            path_str, route);
+                        continue;
+                    }
+                }
+            } else {
+                match PathState::FileMustExist.validate(&path, "") {
+                    Ok(()) => {
+                        map.insert(route, OsPath::File(path.as_pathbuf()));
+                    }
+                    Err(_) => {
+                        warn!("ServerConfig: File '{}' for route '{}' not found, skipping. \
+                            If this should be a directory, ensure it ends with '/'.",
+                            path_str, route);
+                        continue;
+                    }
+                }
+            }
+        }
+        Ok(map)
+    }
+    pub fn get_default_index_files(&self) -> Outcome<Vec<String>> {
+        if self.default_index_files.len() == 0 {
+            warn!("ServerConfig: No default index files have been specified, using '{}'.",
+                constant::DEFAULT_INDEX_FILE);
+            return Ok(vec![fmt!("{}", constant::DEFAULT_INDEX_FILE)]);
+        }
+        let mut result = Vec::new();
+        for filename in &self.default_index_files {
+            if filename.is_empty() {
+                return Err(err!(
+                    "ServerConfig: Default index file entry is empty.";
+                    Invalid, Input, Path));
+            }
+            if path::is_filename(filename) {
+                result.push(filename.clone());
+            } else {
+                return Err(err!(
+                    "ServerConfig: The default index file '{}' must be a standalone file \
+                    and not a path.", filename;
+                    Invalid, Input, String));
+            }
+        }
+        Ok(result)
+    }
+    pub fn get_domain_names(&self) -> Outcome<Vec<Fqdn>> {
+        if self.domain_names.len() == 0 {
+            return Err(err!(
+                "ServerConfig: There must be at least one entry in the domain_names field, \
+                such as 'localhost'.";
+                Invalid, Input, Missing));
+        }
+        let mut result = Vec::new();
+        for domain_name in &self.domain_names {
+            msg!("name='{}'",domain_name);
+            if domain_name.is_empty() {
+                return Err(err!(
+                    "ServerConfig: Domain name entry is empty.";
+                    Invalid, Input, Path));
+            }
+            let fqdn = match Fqdn::new(domain_name) {
+                Ok(fqdn) => fqdn,
+                Err(e) => return Err(err!(e,
+                    "While trying to validate domain name '{}'.", domain_name;
+                Network)),
+            };
+            result.push(fqdn);
+        }
+        Ok(result)
+    }
+    pub fn get_tls_paths(
+        &self,
+        root:       &NormPathBuf,
+        dev_mode:   bool,
+    )
+        -> Outcome<(PathBuf, PathBuf, PathBuf)>
+    {
+        let tls_dir_str = &self.tls_dir_rel;
+        if tls_dir_str.is_empty() {
+            return Err(err!(
+                "ServerConfig: TLS directory is empty.";
+                Invalid, Input, Missing));
+        }
+        let tls_dir = Path::new(tls_dir_str).normalise();
+        if tls_dir.escapes() {
+            return Err(err!(
+                "ServerConfig: TLS directory {} escapes the directory {:?}.",
+                tls_dir_str, root;
+                Invalid, Input, Path));
+        }
+        let tls_dir = root.clone().join(tls_dir).normalise().absolute().as_pathbuf();
+        let tls_dir = if dev_mode {
+            res!(PathState::Create.validate(
+                &tls_dir,
+                constant::TLS_DIR_DEV,
+            ));
+            tls_dir.join(constant::TLS_DIR_DEV)
+        } else {
+            res!(PathState::Create.validate(
+                &tls_dir,
+                constant::TLS_DIR_PROD,
+            ));
+            tls_dir.join(constant::TLS_DIR_PROD)
+        };
+        if self.tls_cert_name.is_empty() {
+            return Err(err!(
+                "ServerConfig: TLS certificate name is empty.";
+                Invalid, Input, Missing));
+        }
+        if self.tls_private_key_name.is_empty() {
+            return Err(err!(
+                "ServerConfig: TLS private_key_name is empty.";
+                Invalid, Input, Missing));
+        }
+        let cert_path = tls_dir.join(&self.tls_cert_name).with_extension("pem");
+        let key_path = tls_dir.join(&self.tls_private_key_name).with_extension("pem");
+        Ok((tls_dir, cert_path, key_path))
+    }
+}
+File: src/main.rs
+#![forbid(unsafe_code)]
+pub mod app;
+pub mod srv;
+use crate::{
+    app::tui,
+};
+use oxedize_fe2o3_core::{
+    prelude::*,
+};
+fn main() -> Outcome<()> {
+    let mut log_cfg = log_get_config!();
+    log_cfg.file = None;
+    log_set_config!(log_cfg);
+    log_set_level!("debug");
+    let outcome = tui::run();
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    log_finish_wait!();
+    outcome
+}
