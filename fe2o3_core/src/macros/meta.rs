@@ -227,6 +227,11 @@ macro_rules! new_type_gen {
 /// ```
 ///
 /// # Note
+/// - **Variant Duplication Required**: This macro requires duplicating enum variants to avoid
+///   compile-time overhead from proc-macro parsing. This trade-off is acceptable for enums 
+///   with variants that aren't likely to change frequently (like Country, Color, etc.).
+///   The duplication ensures fast compile times while providing convenient iteration and 
+///   random selection functionality.
 /// - The macro generates const methods, allowing use in const contexts
 /// - Fields in variants must implement Copy or provide owned values
 /// - Useful for exhaustive testing and validation
@@ -240,6 +245,10 @@ macro_rules! new_enum {
             }
             const fn num_of_variants() -> usize {
                 0 $(+ (1 $(+ <[()]>::len(&[$($field),+]))?))*
+            }
+            pub fn rand() -> Self {
+                let index = ::oxedize_fe2o3_core::rand::Rand::in_range(0, Self::num_of_variants());
+                Self::variants()[index]
             }
         }
     }

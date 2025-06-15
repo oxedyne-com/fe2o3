@@ -8,5 +8,7 @@ description = "Hematite standards library."
 repository = "https://github.com/Oxedize/fe2o3"
 
 [dependencies]
+oxedize_fe2o3_core = { path = "../fe2o3_core" }
+strum = { version = "0.25", features = ["derive"] }
 
 [dev-dependencies]

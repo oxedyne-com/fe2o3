@@ -13,4 +13,5 @@
 //!
 #![forbid(unsafe_code)]
 pub mod chars;
+pub mod culture;
 pub mod regions;

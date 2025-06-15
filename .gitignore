@@ -5,7 +5,7 @@
 
 # Rust
 /target/
-Cargo.lock
+#Cargo.lock # removed for reproducible app builds, e.g. fe2o3_steel
 **/*.rs.bk
 
 # Logs

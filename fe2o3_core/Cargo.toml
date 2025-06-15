@@ -8,7 +8,6 @@ description = "Hematite core library, consisting mostly of relatively simple fou
 repository = "https://github.com/Oxedize/fe2o3"
 
 [dependencies]
-oxedize_fe2o3_stds 			= { path = "../fe2o3_stds" }
 new							= { path = "new" }
 
 base64 = "0.13.0"

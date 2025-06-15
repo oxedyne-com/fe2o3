@@ -1934,7 +1934,6 @@ dependencies = [
  "humantime",
  "new",
  "once_cell",
- "oxedize_fe2o3_stds",
  "rand 0.8.5",
  "rand_core 0.6.4",
  "tokio",
@@ -2179,6 +2178,10 @@ dependencies = [
 [[package]]
 name = "oxedize_fe2o3_stds"
 version = "0.5.0"
+dependencies = [
+ "oxedize_fe2o3_core",
+ "strum 0.25.0",
+]
 
 [[package]]
 name = "oxedize_fe2o3_steel"

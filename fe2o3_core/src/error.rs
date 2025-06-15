@@ -85,7 +85,7 @@
 //!
 use crate::GenTag;
 
-use oxedize_fe2o3_stds::chars::Term;
+use crate::term::Term;
 
 use std::{
     fmt,

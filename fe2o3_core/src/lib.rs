@@ -96,6 +96,7 @@ pub mod path;
 pub mod prelude;
 pub mod rand;
 pub mod string;
+pub mod term;
 pub mod test;
 pub mod time;
 pub mod thread;

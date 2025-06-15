@@ -555,6 +555,137 @@ impl Default for ValidationFlags {
     }
 }
 
+/// Trait for formatting numbers with thousands separators.
+pub trait ThousandsSeparator {
+    /// Formats the number with the specified thousands separator character.
+    /// 
+    /// # Arguments
+    /// * `sep` - The character to use as thousands separator (e.g., ',', ' ', '_').
+    /// 
+    /// # Example
+    /// ```
+    /// use oxedize_fe2o3_num::string::ThousandsSeparator;
+    /// 
+    /// assert_eq!(1234567.with_sep(','), "1,234,567");
+    /// assert_eq!((-9876543).with_sep(' '), "-9 876 543");
+    /// ```
+    fn with_sep(&self, sep: char) -> String;
+    
+    /// Formats the number with separators and specified decimal precision.
+    /// 
+    /// # Arguments
+    /// * `sep` - The character to use as thousands separator (e.g., ',', ' ', '_').
+    /// * `decimals` - Number of decimal places to show (0 means no decimal point).
+    /// 
+    /// # Example
+    /// ```
+    /// use oxedize_fe2o3_num::string::ThousandsSeparator;
+    /// 
+    /// assert_eq!(1234567.with_sep_precision(',', 2), "1,234,567.00");
+    /// assert_eq!(1234.567.with_sep_precision(' ', 1), "1 234.6");
+    /// assert_eq!(1234.with_sep_precision(',', 0), "1,234");
+    /// ```
+    fn with_sep_precision(&self, sep: char, decimals: usize) -> String;
+}
+
+/// Helper function to add separators to a string of digits.
+fn add_separators_to_digits(digits: &str, sep: char) -> String {
+    if digits.len() <= 3 {
+        return digits.to_string();
+    }
+    
+    let mut result = String::with_capacity(digits.len() + (digits.len() - 1) / 3);
+    let chars: Vec<char> = digits.chars().collect();
+    
+    for (i, &ch) in chars.iter().enumerate() {
+        if i > 0 && (chars.len() - i) % 3 == 0 {
+            result.push(sep);
+        }
+        result.push(ch);
+    }
+    
+    result
+}
+
+macro_rules! impl_thousands_separator_for_int {
+    ($($t:ty),*) => {
+        $(
+            impl ThousandsSeparator for $t {
+                fn with_sep(&self, sep: char) -> String {
+                    let s = self.to_string();
+                    if let Some(stripped) = s.strip_prefix('-') {
+                        format!("-{}", add_separators_to_digits(stripped, sep))
+                    } else {
+                        add_separators_to_digits(&s, sep)
+                    }
+                }
+                
+                fn with_sep_precision(&self, sep: char, decimals: usize) -> String {
+                    let integer_part = self.with_sep(sep);
+                    if decimals == 0 {
+                        integer_part
+                    } else {
+                        format!("{}.{}", integer_part, "0".repeat(decimals))
+                    }
+                }
+            }
+        )*
+    };
+}
+
+macro_rules! impl_thousands_separator_for_float {
+    ($($t:ty),*) => {
+        $(
+            impl ThousandsSeparator for $t {
+                fn with_sep(&self, sep: char) -> String {
+                    let s = self.to_string();
+                    let (sign, rest) = if let Some(stripped) = s.strip_prefix('-') {
+                        ("-", stripped)
+                    } else {
+                        ("", s.as_str())
+                    };
+                    
+                    if let Some(dot_pos) = rest.find('.') {
+                        let (integer_part, fractional_part) = rest.split_at(dot_pos);
+                        format!("{}{}{}", sign, add_separators_to_digits(integer_part, sep), fractional_part)
+                    } else {
+                        format!("{}{}", sign, add_separators_to_digits(rest, sep))
+                    }
+                }
+                
+                fn with_sep_precision(&self, sep: char, decimals: usize) -> String {
+                    let formatted = if decimals == 0 {
+                        format!("{:.0}", self)
+                    } else {
+                        format!("{:.1$}", self, decimals)
+                    };
+                    
+                    let (sign, rest) = if let Some(stripped) = formatted.strip_prefix('-') {
+                        ("-", stripped)
+                    } else {
+                        ("", formatted.as_str())
+                    };
+                    
+                    if decimals == 0 {
+                        format!("{}{}", sign, add_separators_to_digits(rest, sep))
+                    } else if let Some(dot_pos) = rest.find('.') {
+                        let (integer_part, fractional_part) = rest.split_at(dot_pos);
+                        format!("{}{}{}", sign, add_separators_to_digits(integer_part, sep), fractional_part)
+                    } else {
+                        format!("{}{}", sign, add_separators_to_digits(rest, sep))
+                    }
+                }
+            }
+        )*
+    };
+}
+
+// Implement for all standard integer types
+impl_thousands_separator_for_int!(i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize);
+
+// Implement for all standard floating-point types
+impl_thousands_separator_for_float!(f32, f64);
+
 #[cfg(test)]
 mod tests {
     use super::*;
