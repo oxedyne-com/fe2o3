@@ -581,11 +581,41 @@ pub trait ThousandsSeparator {
     /// ```
     /// use oxedize_fe2o3_num::string::ThousandsSeparator;
     /// 
-    /// assert_eq!(1234567.with_sep_precision(',', 2), "1,234,567.00");
-    /// assert_eq!(1234.567.with_sep_precision(' ', 1), "1 234.6");
-    /// assert_eq!(1234.with_sep_precision(',', 0), "1,234");
+    /// assert_eq!(1234567.with_sep_dp(',', 2), "1,234,567.00");
+    /// assert_eq!(1234.567.with_sep_dp(' ', 1), "1 234.6");
+    /// assert_eq!(1234.with_sep_dp(',', 0), "1,234");
     /// ```
-    fn with_sep_precision(&self, sep: char, decimals: usize) -> String;
+    fn with_sep_dp(&self, sep: char, decimals: usize) -> String;
+    
+    /// Formats the number with comma thousands separators.
+    /// 
+    /// # Example
+    /// ```
+    /// use oxedize_fe2o3_num::string::ThousandsSeparator;
+    /// 
+    /// assert_eq!(1234567.with_commas(), "1,234,567");
+    /// assert_eq!((-9876543).with_commas(), "-9,876,543");
+    /// ```
+    fn with_commas(&self) -> String {
+        self.with_sep(',')
+    }
+    
+    /// Formats the number with comma thousands separators and specified decimal precision.
+    /// 
+    /// # Arguments
+    /// * `decimals` - Number of decimal places to show (0 means no decimal point).
+    /// 
+    /// # Example
+    /// ```
+    /// use oxedize_fe2o3_num::string::ThousandsSeparator;
+    /// 
+    /// assert_eq!(1234567.with_commas_dp(2), "1,234,567.00");
+    /// assert_eq!(1234.567.with_commas_dp(1), "1,234.6");
+    /// assert_eq!(1234.with_commas_dp(0), "1,234");
+    /// ```
+    fn with_commas_dp(&self, decimals: usize) -> String {
+        self.with_sep_dp(',', decimals)
+    }
 }
 
 /// Helper function to add separators to a string of digits.
@@ -620,7 +650,7 @@ macro_rules! impl_thousands_separator_for_int {
                     }
                 }
                 
-                fn with_sep_precision(&self, sep: char, decimals: usize) -> String {
+                fn with_sep_dp(&self, sep: char, decimals: usize) -> String {
                     let integer_part = self.with_sep(sep);
                     if decimals == 0 {
                         integer_part
@@ -653,7 +683,7 @@ macro_rules! impl_thousands_separator_for_float {
                     }
                 }
                 
-                fn with_sep_precision(&self, sep: char, decimals: usize) -> String {
+                fn with_sep_dp(&self, sep: char, decimals: usize) -> String {
                     let formatted = if decimals == 0 {
                         format!("{:.0}", self)
                     } else {
