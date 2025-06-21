@@ -97,6 +97,34 @@ impl Rand {
     pub fn fill_u8(a: &mut [u8]) {
         thread_rng().fill(&mut a[..]);
     }
+
+    /// Generate a random number from a normal (Gaussian) distribution
+    /// using the Box-Muller transform.
+    /// 
+    /// # Arguments
+    /// * `mean` - The mean (μ) of the distribution
+    /// * `stdev` - The standard deviation (σ) of the distribution
+    /// 
+    /// # Returns
+    /// A random f64 value from the normal distribution N(mean, stdev²)
+    pub fn normal(mean: f64, stdev: f64) -> f64 {
+        let mut rng = thread_rng();
+        
+        // Generate two uniform random numbers in (0, 1]
+        let u1: f64 = loop {
+            let val = rng.gen::<f64>();
+            if val > 0.0 {
+                break val;
+            }
+        };
+        let u2: f64 = rng.gen();
+        
+        // Box-Muller transform
+        let z0 = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+        
+        // Transform to desired mean and standard deviation
+        mean + stdev * z0
+    }
 }
 
 #[cfg(test)]
@@ -110,6 +138,36 @@ mod tests {
         let p2 = Rand::generate_random_string(3, "ABCDEFGHIJKLMNOPQRSTUVWXYZ");
         let p3 = Rand::generate_random_string(3, "ABCDEFGHIJKLMNOPQRSTUVWXYZ");
         msg!("{}-{}-{}", p1, p2, p3);
+        Ok(())
+    }
+
+    #[test]
+    fn test_normal_distribution() -> Outcome<()> {
+        let mean = 100.0;
+        let stdev = 15.0;
+        
+        // Generate some samples
+        let mut samples = Vec::new();
+        for _ in 0..1000 {
+            samples.push(Rand::normal(mean, stdev));
+        }
+        
+        // Calculate sample mean
+        let sample_mean = samples.iter().sum::<f64>() / samples.len() as f64;
+        
+        // Calculate sample standard deviation
+        let variance = samples.iter()
+            .map(|x| (x - sample_mean).powi(2))
+            .sum::<f64>() / (samples.len() - 1) as f64;
+        let sample_stdev = variance.sqrt();
+        
+        msg!("Expected mean: {}, Sample mean: {}", mean, sample_mean);
+        msg!("Expected stdev: {}, Sample stdev: {}", stdev, sample_stdev);
+        
+        // Check that sample statistics are reasonably close to expected values
+        assert!((sample_mean - mean).abs() < 1.0, "Sample mean too far from expected");
+        assert!((sample_stdev - stdev).abs() < 1.0, "Sample stdev too far from expected");
+        
         Ok(())
     }
 }
