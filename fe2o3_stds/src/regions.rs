@@ -442,16 +442,7 @@ impl Country {
     /// 
     /// # Returns
     /// 
-    /// A tuple of (latitude, longitude) in decimal degrees, or None if country data unavailable.
-    /// 
-    /// # Example
-    /// 
-    /// ```
-    /// use oxedize_fe2o3_stds::regions::Country;
-    /// if let Some((lat, lon)) = random_population_location(Country::UnitedKingdom) {
-    ///     println!("Random UK resident location: {:.4}°, {:.4}°", lat, lon);
-    /// }
-    /// ```
+    /// A `LocationPopulationRegion` containing latitude, longitude in decimal degrees and the region name.
     pub fn random_population_location(&self) -> LocationPopulationRegion {
         let country_data = self.get_country_population_data();
         
@@ -516,7 +507,11 @@ impl Country {
                     PopulationRegion::new(36.3650, 6.6147, 507_000.0, 80.0, AreaType::Urban, "Constantine"),
                     PopulationRegion::new(36.1900, 5.4100, 415_000.0, 127.0, AreaType::Urban, "Sétif"),
                     PopulationRegion::new(35.4000, 8.1200, 380_000.0, 40.0, AreaType::Urban, "Biskra"),
-                    PopulationRegion::new(28.0, 3.0, 11_600_000.0, 2_380_000.0, AreaType::Rural, "Rural Algeria"),
+                    PopulationRegion::new(35.4028, 0.1320, 335_000.0, 85.0, AreaType::Urban, "Tiaret"),
+                    PopulationRegion::new(36.7525, 5.0556, 320_000.0, 75.0, AreaType::Urban, "Béjaïa"),
+                    PopulationRegion::new(36.9050, 7.7633, 295_000.0, 68.0, AreaType::Urban, "Annaba"),
+                    PopulationRegion::new(35.3714, 1.3225, 280_000.0, 62.0, AreaType::Urban, "Tlemcen"),
+                    PopulationRegion::new(28.0, 3.0, 10_600_000.0, 2_380_000.0, AreaType::Rural, "Rural Algeria"),
                 ], 2_381_741.0)
             },
             
@@ -543,7 +538,10 @@ impl Country {
                 // Antigua and Barbuda: 98k population, 442 km² area, ~24% urban.
                 CountryPopulationData::from_regions(vec![
                     PopulationRegion::new(17.1175, -61.8456, 24_000.0, 10.0, AreaType::Urban, "St. John's"),
-                    PopulationRegion::new(17.1, -61.8, 74_000.0, 432.0, AreaType::Rural, "Rural Antigua"),
+                    PopulationRegion::new(17.1333, -61.7833, 11_000.0, 5.0, AreaType::Urban, "All Saints"),
+                    PopulationRegion::new(17.0667, -61.8667, 5_000.0, 3.0, AreaType::Urban, "Liberta"),
+                    PopulationRegion::new(17.1, -61.8, 36_000.0, 280.0, AreaType::Rural, "Rural Antigua"),
+                    PopulationRegion::new(17.6333, -62.0167, 22_000.0, 144.0, AreaType::Rural, "Rural Barbuda"),
                 ], 442.0)
             },
             
@@ -555,7 +553,11 @@ impl Country {
                     PopulationRegion::new(-32.8908, -68.8272, 1_200_000.0, 57.0, AreaType::Urban, "Mendoza"),
                     PopulationRegion::new(-26.8083, -65.2176, 1_014_000.0, 91.0, AreaType::Urban, "Tucumán"),
                     PopulationRegion::new(-34.9205, -57.9536, 937_000.0, 25.0, AreaType::Urban, "La Plata"),
-                    PopulationRegion::new(-38.0, -63.0, 3_700_000.0, 2_778_000.0, AreaType::Rural, "Rural Argentina"),
+                    PopulationRegion::new(-24.7859, -65.4117, 792_000.0, 60.0, AreaType::Urban, "Salta"),
+                    PopulationRegion::new(-32.9468, -60.6393, 743_000.0, 117.0, AreaType::Urban, "Rosario"),
+                    PopulationRegion::new(-34.5711, -58.4232, 715_000.0, 52.0, AreaType::Urban, "San Justo"),
+                    PopulationRegion::new(-27.7834, -64.2642, 554_000.0, 44.0, AreaType::Urban, "Santiago del Estero"),
+                    PopulationRegion::new(-38.0, -63.0, 1_750_000.0, 2_778_000.0, AreaType::Rural, "Rural Argentina"),
                 ], 2_780_400.0)
             },
             
@@ -611,7 +613,10 @@ impl Country {
                 CountryPopulationData::from_regions(vec![
                     PopulationRegion::new(25.0480, -77.3554, 280_000.0, 207.0, AreaType::Urban, "Nassau"),
                     PopulationRegion::new(26.5333, -78.7000, 19_000.0, 23.0, AreaType::Urban, "Freeport"),
-                    PopulationRegion::new(25.0, -77.5, 68_000.0, 13_700.0, AreaType::Rural, "Rural Bahamas"),
+                    PopulationRegion::new(23.1085, -75.7619, 11_000.0, 15.0, AreaType::Urban, "George Town"),
+                    PopulationRegion::new(24.9000, -76.1833, 9_000.0, 12.0, AreaType::Urban, "Cooper's Town"),
+                    PopulationRegion::new(26.6833, -77.4000, 7_000.0, 10.0, AreaType::Urban, "Marsh Harbour"),
+                    PopulationRegion::new(25.0, -77.5, 41_000.0, 13_676.0, AreaType::Rural, "Rural Bahamas"),
                 ], 13_943.0)
             },
             
@@ -633,7 +638,11 @@ impl Country {
                     PopulationRegion::new(24.3636, 88.6241, 2_280_000.0, 65.0, AreaType::Urban, "Khulna"),
                     PopulationRegion::new(24.8465, 89.3773, 907_000.0, 25.0, AreaType::Urban, "Rajshahi"),
                     PopulationRegion::new(23.4607, 91.1809, 877_000.0, 20.0, AreaType::Urban, "Sylhet"),
-                    PopulationRegion::new(24.0, 90.0, 103_400_000.0, 147_000.0, AreaType::Rural, "Rural Bangladesh"),
+                    PopulationRegion::new(25.7439, 89.2752, 774_000.0, 18.0, AreaType::Urban, "Rangpur"),
+                    PopulationRegion::new(22.8456, 89.5403, 654_000.0, 15.0, AreaType::Urban, "Barisal"),
+                    PopulationRegion::new(24.7471, 90.4203, 532_000.0, 12.0, AreaType::Urban, "Mymensingh"),
+                    PopulationRegion::new(22.7010, 90.3535, 466_000.0, 10.0, AreaType::Urban, "Jessore"),
+                    PopulationRegion::new(24.0, 90.0, 99_900_000.0, 147_000.0, AreaType::Rural, "Rural Bangladesh"),
                 ], 147_630.0)
             },
             
@@ -743,7 +752,9 @@ impl Country {
                     PopulationRegion::new(-25.4244, -49.2654, 3_733_000.0, 435.0, AreaType::Urban, "Curitiba Metro"),
                     PopulationRegion::new(-23.9609, -46.3332, 3_572_000.0, 2_704.0, AreaType::Urban, "Campinas Metro"),
                     PopulationRegion::new(-3.1019, -60.0250, 2_676_000.0, 377.0, AreaType::Urban, "Manaus"),
-                    PopulationRegion::new(-15.0, -55.0, 27_900_000.0, 8_500_000.0, AreaType::Rural, "Rural Brazil"),
+                    PopulationRegion::new(-1.4558, -48.4902, 2_491_000.0, 346.0, AreaType::Urban, "Belém"),
+                    PopulationRegion::new(-10.9472, -37.0731, 2_338_000.0, 163.0, AreaType::Urban, "Aracaju"),
+                    PopulationRegion::new(-15.0, -55.0, 24_500_000.0, 8_500_000.0, AreaType::Rural, "Rural Brazil"),
                 ], 8_515_767.0)
             },
             
@@ -818,7 +829,9 @@ impl Country {
                     PopulationRegion::new(45.4215, -75.6972, 1_393_000.0, 6_767.0, AreaType::Urban, "Ottawa-Gatineau"),
                     PopulationRegion::new(49.8951, -97.1384, 834_000.0, 5_306.0, AreaType::Urban, "Winnipeg Metro"),
                     PopulationRegion::new(46.8139, -71.2080, 812_000.0, 3_408.0, AreaType::Urban, "Quebec City Metro"),
-                    PopulationRegion::new(50.0, -95.0, 7_000_000.0, 9_940_000.0, AreaType::Rural, "Rural Canada"),
+                    PopulationRegion::new(43.2607, -79.9194, 785_000.0, 1_371.0, AreaType::Urban, "Hamilton"),
+                    PopulationRegion::new(43.0131, -81.1992, 543_000.0, 2_882.0, AreaType::Urban, "London"),
+                    PopulationRegion::new(50.0, -95.0, 5_700_000.0, 9_940_000.0, AreaType::Rural, "Rural Canada"),
                 ], 9_984_670.0)
             },
             
@@ -827,7 +840,9 @@ impl Country {
                 CountryPopulationData::from_regions(vec![
                     PopulationRegion::new(14.9055, -23.5087, 160_000.0, 103.0, AreaType::Urban, "Praia"),
                     PopulationRegion::new(16.8880, -24.9956, 76_000.0, 29.0, AreaType::Urban, "Mindelo"),
-                    PopulationRegion::new(15.1, -23.6, 186_000.0, 3_900.0, AreaType::Rural, "Rural Cape Verde"),
+                    PopulationRegion::new(15.0833, -23.1167, 14_000.0, 8.0, AreaType::Urban, "Assomada"),
+                    PopulationRegion::new(16.1667, -22.9167, 12_000.0, 7.0, AreaType::Urban, "Porto Novo"),
+                    PopulationRegion::new(15.1, -23.6, 160_000.0, 3_886.0, AreaType::Rural, "Rural Cape Verde"),
                 ], 4_033.0)
             },
             
@@ -858,7 +873,12 @@ impl Country {
                     PopulationRegion::new(-36.8201, -73.0444, 1_044_000.0, 221.0, AreaType::Urban, "Concepción Metro"),
                     PopulationRegion::new(-23.6509, -70.3975, 607_000.0, 30.0, AreaType::Urban, "Antofagasta"),
                     PopulationRegion::new(-20.2208, -70.1431, 384_000.0, 20.0, AreaType::Urban, "Iquique"),
-                    PopulationRegion::new(-35.0, -71.0, 2_300_000.0, 754_900.0, AreaType::Rural, "Rural Chile"),
+                    PopulationRegion::new(-41.4693, -72.9424, 317_000.0, 25.0, AreaType::Urban, "Puerto Montt"),
+                    PopulationRegion::new(-39.8196, -73.2452, 294_000.0, 22.0, AreaType::Urban, "Valdivia"),
+                    PopulationRegion::new(-18.4783, -70.3126, 287_000.0, 15.0, AreaType::Urban, "Arica"),
+                    PopulationRegion::new(-38.7369, -72.6018, 278_000.0, 20.0, AreaType::Urban, "Temuco"),
+                    PopulationRegion::new(-29.9045, -71.2489, 251_000.0, 18.0, AreaType::Urban, "La Serena"),
+                    PopulationRegion::new(-35.0, -71.0, 1_200_000.0, 754_900.0, AreaType::Rural, "Rural Chile"),
                 ], 756_102.0)
             },
             
@@ -875,7 +895,16 @@ impl Country {
                     PopulationRegion::new(30.2741, 120.1551, 11_936_000.0, 16_596.0, AreaType::Urban, "Hangzhou"),
                     PopulationRegion::new(30.5928, 114.3055, 11_895_000.0, 8_569.0, AreaType::Urban, "Wuhan"),
                     PopulationRegion::new(34.2667, 108.8833, 10_680_000.0, 10_096.0, AreaType::Urban, "Xi'an"),
-                    PopulationRegion::new(35.0, 105.0, 520_000_000.0, 9_500_000.0, AreaType::Rural, "Rural China"),
+                    PopulationRegion::new(32.0603, 118.7969, 9_204_000.0, 6_587.0, AreaType::Urban, "Nanjing"),
+                    PopulationRegion::new(26.0745, 119.2965, 8_346_000.0, 12_155.0, AreaType::Urban, "Fuzhou"),
+                    PopulationRegion::new(38.9122, 121.6021, 7_903_000.0, 13_238.0, AreaType::Urban, "Dalian"),
+                    PopulationRegion::new(41.7923, 123.4328, 7_441_000.0, 12_948.0, AreaType::Urban, "Shenyang"),
+                    PopulationRegion::new(36.6512, 117.1201, 6_814_000.0, 7_753.0, AreaType::Urban, "Jinan"),
+                    PopulationRegion::new(25.0389, 102.7183, 6_663_000.0, 21_473.0, AreaType::Urban, "Kunming"),
+                    PopulationRegion::new(43.8171, 125.3235, 5_965_000.0, 32_347.0, AreaType::Urban, "Changchun"),
+                    PopulationRegion::new(45.8038, 126.5350, 5_353_000.0, 53_068.0, AreaType::Urban, "Harbin"),
+                    PopulationRegion::new(29.5630, 106.5516, 5_104_000.0, 82_403.0, AreaType::Urban, "Chongqing Metro"),
+                    PopulationRegion::new(35.0, 105.0, 440_000_000.0, 9_500_000.0, AreaType::Rural, "Rural China"),
                 ], 9_596_961.0)
             },
             
@@ -887,7 +916,11 @@ impl Country {
                     PopulationRegion::new(3.4516, -76.5320, 2_882_000.0, 564.0, AreaType::Urban, "Cali Metro"),
                     PopulationRegion::new(10.9685, -74.7813, 2_046_000.0, 154.0, AreaType::Urban, "Barranquilla Metro"),
                     PopulationRegion::new(11.2422, -74.2017, 1_358_000.0, 55.0, AreaType::Urban, "Cartagena"),
-                    PopulationRegion::new(4.0, -72.0, 9_800_000.0, 1_138_000.0, AreaType::Rural, "Rural Colombia"),
+                    PopulationRegion::new(7.8836, -72.4967, 714_000.0, 143.0, AreaType::Urban, "Cúcuta"),
+                    PopulationRegion::new(7.1254, -73.1198, 681_000.0, 30.0, AreaType::Urban, "Bucaramanga"),
+                    PopulationRegion::new(8.7549, -75.8261, 557_000.0, 90.0, AreaType::Urban, "Montería"),
+                    PopulationRegion::new(5.0689, -75.5174, 539_000.0, 25.0, AreaType::Urban, "Manizales"),
+                    PopulationRegion::new(4.0, -72.0, 7_300_000.0, 1_138_000.0, AreaType::Rural, "Rural Colombia"),
                 ], 1_141_748.0)
             },
             
@@ -896,7 +929,9 @@ impl Country {
                 CountryPopulationData::from_regions(vec![
                     PopulationRegion::new(-11.7100, 43.2400, 62_000.0, 30.0, AreaType::Urban, "Moroni"),
                     PopulationRegion::new(-12.2800, 44.4500, 25_000.0, 15.0, AreaType::Urban, "Mutsamudu"),
-                    PopulationRegion::new(-11.8, 43.3, 630_000.0, 1_816.0, AreaType::Rural, "Rural Comoros"),
+                    PopulationRegion::new(-12.1667, 44.2667, 21_000.0, 12.0, AreaType::Urban, "Fomboni"),
+                    PopulationRegion::new(-11.4667, 43.3333, 18_000.0, 10.0, AreaType::Urban, "Domoni"),
+                    PopulationRegion::new(-11.8, 43.3, 591_000.0, 1_794.0, AreaType::Rural, "Rural Comoros"),
                 ], 1_861.0)
             },
             
@@ -928,7 +963,10 @@ impl Country {
                     PopulationRegion::new(43.5081, 16.4402, 179_000.0, 79.0, AreaType::Urban, "Split"),
                     PopulationRegion::new(44.1194, 15.2314, 129_000.0, 58.0, AreaType::Urban, "Rijeka"),
                     PopulationRegion::new(45.5550, 18.6955, 108_000.0, 84.0, AreaType::Urban, "Osijek"),
-                    PopulationRegion::new(45.0, 16.0, 1_700_000.0, 55_700.0, AreaType::Rural, "Rural Croatia"),
+                    PopulationRegion::new(45.3270, 14.4420, 57_000.0, 44.0, AreaType::Urban, "Pula"),
+                    PopulationRegion::new(44.8666, 13.8495, 55_000.0, 38.0, AreaType::Urban, "Zadar"),
+                    PopulationRegion::new(45.4873, 15.5468, 49_000.0, 36.0, AreaType::Urban, "Karlovac"),
+                    PopulationRegion::new(45.0, 16.0, 1_540_000.0, 55_614.0, AreaType::Rural, "Rural Croatia"),
                 ], 56_594.0)
             },
             
@@ -1044,7 +1082,12 @@ impl Country {
                     PopulationRegion::new(30.5927, 32.2714, 800_000.0, 100.0, AreaType::Urban, "Port Said"),
                     PopulationRegion::new(29.9668, 32.5498, 711_000.0, 110.0, AreaType::Urban, "Suez"),
                     PopulationRegion::new(25.6872, 32.6396, 545_000.0, 417.0, AreaType::Urban, "Luxor"),
-                    PopulationRegion::new(27.0, 30.0, 59_500_000.0, 997_600.0, AreaType::Rural, "Rural Egypt"),
+                    PopulationRegion::new(27.1811, 31.1858, 538_000.0, 50.0, AreaType::Urban, "Asyut"),
+                    PopulationRegion::new(30.5765, 31.5041, 522_000.0, 45.0, AreaType::Urban, "Tanta"),
+                    PopulationRegion::new(31.0409, 31.3785, 495_000.0, 40.0, AreaType::Urban, "Mansoura"),
+                    PopulationRegion::new(30.1282, 31.3429, 483_000.0, 35.0, AreaType::Urban, "Zagazig"),
+                    PopulationRegion::new(24.0889, 32.8998, 474_000.0, 30.0, AreaType::Urban, "Aswan"),
+                    PopulationRegion::new(27.0, 30.0, 56_900_000.0, 997_600.0, AreaType::Rural, "Rural Egypt"),
                 ], 1_001_450.0)
             },
             
@@ -1094,7 +1137,13 @@ impl Country {
                     PopulationRegion::new(7.6781, 36.8289, 605_000.0, 169.0, AreaType::Urban, "Arba Minch"),
                     PopulationRegion::new(11.5931, 37.3964, 534_000.0, 213.0, AreaType::Urban, "Bahir Dar"),
                     PopulationRegion::new(6.8227, 37.7282, 500_000.0, 98.0, AreaType::Urban, "Hawassa"),
-                    PopulationRegion::new(9.0, 39.0, 93_600_000.0, 1_103_000.0, AreaType::Rural, "Rural Ethiopia"),
+                    PopulationRegion::new(11.1274, 39.6365, 497_000.0, 150.0, AreaType::Urban, "Mekelle"),
+                    PopulationRegion::new(7.5522, 38.4872, 445_000.0, 120.0, AreaType::Urban, "Jimma"),
+                    PopulationRegion::new(9.3225, 42.1198, 437_000.0, 130.0, AreaType::Urban, "Dire Dawa"),
+                    PopulationRegion::new(13.4937, 39.4764, 423_000.0, 100.0, AreaType::Urban, "Gonder"),
+                    PopulationRegion::new(8.5500, 39.2667, 401_000.0, 90.0, AreaType::Urban, "Shashemene"),
+                    PopulationRegion::new(9.0107, 38.7613, 385_000.0, 80.0, AreaType::Urban, "Adama"),
+                    PopulationRegion::new(9.0, 39.0, 88_400_000.0, 1_103_000.0, AreaType::Rural, "Rural Ethiopia"),
                 ], 1_104_300.0)
             },
             
@@ -1103,7 +1152,9 @@ impl Country {
                 CountryPopulationData::from_regions(vec![
                     PopulationRegion::new(6.9248, 158.1610, 7_000.0, 12.0, AreaType::Urban, "Palikir"),
                     PopulationRegion::new(6.8927, 158.2339, 7_000.0, 10.0, AreaType::Urban, "Kolonia"),
-                    PopulationRegion::new(7.0, 158.0, 88_000.0, 680.0, AreaType::Rural, "Rural Micronesia"),
+                    PopulationRegion::new(7.4456, 151.8488, 3_500.0, 8.0, AreaType::Urban, "Weno"),
+                    PopulationRegion::new(7.3315, 151.5033, 3_000.0, 6.0, AreaType::Urban, "Tol"),
+                    PopulationRegion::new(7.0, 158.0, 81_500.0, 666.0, AreaType::Rural, "Rural Micronesia"),
                 ], 702.0)
             },
             
@@ -1113,7 +1164,9 @@ impl Country {
                     PopulationRegion::new(-18.1248, 178.4501, 341_000.0, 2_048.0, AreaType::Urban, "Suva Metro"),
                     PopulationRegion::new(-17.6134, 177.4481, 52_000.0, 32.0, AreaType::Urban, "Lautoka"),
                     PopulationRegion::new(-17.7765, 177.9098, 72_000.0, 57.0, AreaType::Urban, "Nadi"),
-                    PopulationRegion::new(-18.0, 178.0, 389_000.0, 16_137.0, AreaType::Rural, "Rural Fiji"),
+                    PopulationRegion::new(-17.5333, 178.8167, 50_000.0, 30.0, AreaType::Urban, "Labasa"),
+                    PopulationRegion::new(-17.8000, 178.0000, 44_000.0, 25.0, AreaType::Urban, "Ba"),
+                    PopulationRegion::new(-18.0, 178.0, 295_000.0, 16_082.0, AreaType::Rural, "Rural Fiji"),
                 ], 18_274.0)
             },
             
@@ -1139,7 +1192,9 @@ impl Country {
                     PopulationRegion::new(44.8378, -0.5792, 1_247_000.0, 5_613.0, AreaType::Urban, "Bordeaux Metro"),
                     PopulationRegion::new(47.2184, -1.5536, 972_000.0, 3_378.0, AreaType::Urban, "Nantes Metro"),
                     PopulationRegion::new(48.1113, -1.6742, 733_000.0, 704.0, AreaType::Urban, "Rennes"),
-                    PopulationRegion::new(47.0, 2.0, 12_900_000.0, 620_000.0, AreaType::Rural, "Rural France"),
+                    PopulationRegion::new(43.6047, 7.2644, 1_006_000.0, 2_383.0, AreaType::Urban, "Nice Metro"),
+                    PopulationRegion::new(45.1880, 5.7240, 689_000.0, 2_621.0, AreaType::Urban, "Grenoble Metro"),
+                    PopulationRegion::new(47.0, 2.0, 10_600_000.0, 620_000.0, AreaType::Rural, "Rural France"),
                 ], 643_801.0)
             },
             
@@ -1187,7 +1242,11 @@ impl Country {
                     PopulationRegion::new(51.4556, 7.0116, 586_000.0, 210.0, AreaType::Urban, "Essen"),
                     PopulationRegion::new(51.3397, 12.3731, 587_000.0, 297.0, AreaType::Urban, "Leipzig"),
                     PopulationRegion::new(51.3127, 7.4639, 582_000.0, 280.0, AreaType::Urban, "Dortmund"),
-                    PopulationRegion::new(51.0, 10.0, 19_000_000.0, 354_000.0, AreaType::Rural, "Rural Germany"),
+                    PopulationRegion::new(51.0504, 13.7373, 556_000.0, 328.0, AreaType::Urban, "Dresden"),
+                    PopulationRegion::new(49.4521, 11.0768, 532_000.0, 186.0, AreaType::Urban, "Nuremberg"),
+                    PopulationRegion::new(52.3759, 9.7320, 532_000.0, 204.0, AreaType::Urban, "Hanover"),
+                    PopulationRegion::new(51.5136, 7.4653, 519_000.0, 168.0, AreaType::Urban, "Bochum"),
+                    PopulationRegion::new(51.0, 10.0, 15_600_000.0, 354_000.0, AreaType::Rural, "Rural Germany"),
                 ], 357_588.0)
             },
             
@@ -1209,7 +1268,13 @@ impl Country {
                     PopulationRegion::new(40.6401, 22.9444, 1_110_000.0, 1_286.0, AreaType::Urban, "Thessaloniki Metro"),
                     PopulationRegion::new(38.2466, 21.7346, 214_000.0, 125.0, AreaType::Urban, "Patras"),
                     PopulationRegion::new(35.3387, 25.1442, 174_000.0, 336.0, AreaType::Urban, "Heraklion"),
-                    PopulationRegion::new(39.5, 22.0, 2_250_000.0, 127_400.0, AreaType::Rural, "Rural Greece"),
+                    PopulationRegion::new(37.0741, 22.4303, 139_000.0, 90.0, AreaType::Urban, "Kalamata"),
+                    PopulationRegion::new(35.5138, 24.0180, 122_000.0, 240.0, AreaType::Urban, "Chania"),
+                    PopulationRegion::new(36.4167, 28.2167, 105_000.0, 200.0, AreaType::Urban, "Rhodes"),
+                    PopulationRegion::new(37.9500, 23.6333, 100_000.0, 180.0, AreaType::Urban, "Piraeus"),
+                    PopulationRegion::new(39.6650, 20.8537, 85_000.0, 120.0, AreaType::Urban, "Ioannina"),
+                    PopulationRegion::new(38.9000, 22.4333, 75_000.0, 100.0, AreaType::Urban, "Lamia"),
+                    PopulationRegion::new(39.5, 22.0, 1_460_000.0, 127_300.0, AreaType::Rural, "Rural Greece"),
                 ], 131_957.0)
             },
             
@@ -1313,7 +1378,17 @@ impl Country {
                     PopulationRegion::new(18.5204, 73.8567, 7_412_000.0, 582.0, AreaType::Urban, "Pune"),
                     PopulationRegion::new(22.3072, 73.1812, 6_357_000.0, 331.0, AreaType::Urban, "Surat"),
                     PopulationRegion::new(26.4499, 80.3319, 3_683_000.0, 285.0, AreaType::Urban, "Kanpur"),
-                    PopulationRegion::new(23.0, 78.0, 915_000_000.0, 3_275_000.0, AreaType::Rural, "Rural India"),
+                    PopulationRegion::new(26.8467, 80.9462, 3_597_000.0, 402.0, AreaType::Urban, "Lucknow"),
+                    PopulationRegion::new(21.1458, 79.0882, 3_004_000.0, 227.0, AreaType::Urban, "Nagpur"),
+                    PopulationRegion::new(26.9124, 75.7873, 3_928_000.0, 484.0, AreaType::Urban, "Jaipur"),
+                    PopulationRegion::new(23.2599, 77.4126, 2_427_000.0, 293.0, AreaType::Urban, "Bhopal"),
+                    PopulationRegion::new(17.6868, 83.2185, 2_358_000.0, 682.0, AreaType::Urban, "Visakhapatnam"),
+                    PopulationRegion::new(25.5941, 85.1376, 2_300_000.0, 201.0, AreaType::Urban, "Patna"),
+                    PopulationRegion::new(13.0878, 80.2785, 2_283_000.0, 175.0, AreaType::Urban, "Vadodara"),
+                    PopulationRegion::new(22.7196, 75.8577, 2_171_000.0, 244.0, AreaType::Urban, "Indore"),
+                    PopulationRegion::new(30.7333, 76.7794, 2_122_000.0, 158.0, AreaType::Urban, "Chandigarh"),
+                    PopulationRegion::new(25.3478, 72.3106, 2_019_000.0, 149.0, AreaType::Urban, "Jodhpur"),
+                    PopulationRegion::new(23.0, 78.0, 880_000_000.0, 3_275_000.0, AreaType::Rural, "Rural India"),
                 ], 3_287_263.0)
             },
             
@@ -1327,7 +1402,14 @@ impl Country {
                     PopulationRegion::new(-6.9667, 110.4167, 4_679_000.0, 210.0, AreaType::Urban, "Semarang Metro"),
                     PopulationRegion::new(-5.1477, 119.4327, 3_368_000.0, 2_226.0, AreaType::Urban, "Makassar Metro"),
                     PopulationRegion::new(-0.9493, 100.3543, 2_658_000.0, 694.0, AreaType::Urban, "Padang Metro"),
-                    PopulationRegion::new(-3.0, 120.0, 117_700_000.0, 1_890_000.0, AreaType::Rural, "Rural Indonesia"),
+                    PopulationRegion::new(-3.8000, 102.2667, 2_010_000.0, 315.0, AreaType::Urban, "Palembang"),
+                    PopulationRegion::new(1.4926, 124.8414, 1_895_000.0, 409.0, AreaType::Urban, "Manado"),
+                    PopulationRegion::new(-0.8917, 119.8707, 1_423_000.0, 333.0, AreaType::Urban, "Palu"),
+                    PopulationRegion::new(-8.5833, 116.1167, 1_407_000.0, 222.0, AreaType::Urban, "Mataram"),
+                    PopulationRegion::new(-0.0263, 109.3425, 1_396_000.0, 230.0, AreaType::Urban, "Pontianak"),
+                    PopulationRegion::new(-8.6500, 115.2167, 1_327_000.0, 5_780.0, AreaType::Urban, "Denpasar"),
+                    PopulationRegion::new(-2.9909, 104.7754, 1_312_000.0, 358.0, AreaType::Urban, "Jambi"),
+                    PopulationRegion::new(-3.0, 120.0, 95_700_000.0, 1_890_000.0, AreaType::Rural, "Rural Indonesia"),
                 ], 1_904_569.0)
             },
             
@@ -1340,7 +1422,11 @@ impl Country {
                     PopulationRegion::new(35.3219, 46.9982, 1_920_000.0, 234.0, AreaType::Urban, "Kermanshah"),
                     PopulationRegion::new(38.0792, 46.2919, 1_841_000.0, 131.0, AreaType::Urban, "Tabriz"),
                     PopulationRegion::new(29.5918, 52.5836, 1_750_000.0, 240.0, AreaType::Urban, "Shiraz"),
-                    PopulationRegion::new(32.0, 53.0, 20_400_000.0, 1_646_000.0, AreaType::Rural, "Rural Iran"),
+                    PopulationRegion::new(37.2807, 49.5831, 1_703_000.0, 162.0, AreaType::Urban, "Rasht"),
+                    PopulationRegion::new(31.3183, 48.6706, 1_569_000.0, 134.0, AreaType::Urban, "Ahvaz"),
+                    PopulationRegion::new(36.3107, 59.5989, 1_245_000.0, 92.0, AreaType::Urban, "Zahedan"),
+                    PopulationRegion::new(34.6416, 50.8746, 1_228_000.0, 106.0, AreaType::Urban, "Qom"),
+                    PopulationRegion::new(32.0, 53.0, 14_600_000.0, 1_646_000.0, AreaType::Rural, "Rural Iran"),
                 ], 1_648_195.0)
             },
             
@@ -1352,7 +1438,10 @@ impl Country {
                     PopulationRegion::new(30.5234, 47.7919, 1_497_000.0, 117.0, AreaType::Urban, "Basra"),
                     PopulationRegion::new(36.1905, 44.0119, 1_080_000.0, 70.0, AreaType::Urban, "Erbil"),
                     PopulationRegion::new(35.4679, 44.3923, 875_000.0, 60.0, AreaType::Urban, "Kirkuk"),
-                    PopulationRegion::new(32.0, 44.0, 12_100_000.0, 437_700.0, AreaType::Rural, "Rural Iraq"),
+                    PopulationRegion::new(31.9960, 44.3150, 821_000.0, 54.0, AreaType::Urban, "Najaf"),
+                    PopulationRegion::new(32.4637, 44.0249, 711_000.0, 48.0, AreaType::Urban, "Karbala"),
+                    PopulationRegion::new(32.6149, 44.0227, 656_000.0, 43.0, AreaType::Urban, "Hillah"),
+                    PopulationRegion::new(32.0, 44.0, 10_000_000.0, 437_700.0, AreaType::Rural, "Rural Iraq"),
                 ], 438_317.0)
             },
             
@@ -1374,7 +1463,10 @@ impl Country {
                     PopulationRegion::new(31.7683, 35.2137, 1_158_000.0, 125.0, AreaType::Urban, "Jerusalem"),
                     PopulationRegion::new(32.7940, 34.9896, 924_000.0, 290.0, AreaType::Urban, "Haifa Metro"),
                     PopulationRegion::new(31.2530, 34.7915, 217_000.0, 62.0, AreaType::Urban, "Beersheba"),
-                    PopulationRegion::new(32.0, 35.0, 660_000.0, 18_700.0, AreaType::Rural, "Rural Israel"),
+                    PopulationRegion::new(32.0876, 34.8881, 197_000.0, 55.0, AreaType::Urban, "Rishon LeZion"),
+                    PopulationRegion::new(32.3261, 34.8516, 193_000.0, 52.0, AreaType::Urban, "Netanya"),
+                    PopulationRegion::new(31.8894, 34.8031, 181_000.0, 48.0, AreaType::Urban, "Ashdod"),
+                    PopulationRegion::new(32.0, 35.0, 260_000.0, 18_584.0, AreaType::Rural, "Rural Israel"),
                 ], 20_770.0)
             },
             
@@ -1388,7 +1480,13 @@ impl Country {
                     PopulationRegion::new(38.1157, 13.3613, 1_252_000.0, 5_009.0, AreaType::Urban, "Palermo Metro"),
                     PopulationRegion::new(44.4949, 11.3426, 1_011_000.0, 3_703.0, AreaType::Urban, "Bologna Metro"),
                     PopulationRegion::new(43.7696, 11.2558, 1_013_000.0, 4_844.0, AreaType::Urban, "Florence Metro"),
-                    PopulationRegion::new(42.0, 12.5, 17_100_000.0, 283_000.0, AreaType::Rural, "Rural Italy"),
+                    PopulationRegion::new(45.4408, 12.3155, 853_000.0, 2_462.0, AreaType::Urban, "Venice Metro"),
+                    PopulationRegion::new(41.1171, 16.8719, 608_000.0, 2_122.0, AreaType::Urban, "Bari"),
+                    PopulationRegion::new(45.0555, 8.0463, 462_000.0, 1_553.0, AreaType::Urban, "Genoa"),
+                    PopulationRegion::new(37.5079, 15.0830, 580_000.0, 1_570.0, AreaType::Urban, "Catania"),
+                    PopulationRegion::new(38.1938, 15.5540, 423_000.0, 3_183.0, AreaType::Urban, "Messina"),
+                    PopulationRegion::new(45.4064, 11.8768, 407_000.0, 2_281.0, AreaType::Urban, "Padua"),
+                    PopulationRegion::new(42.0, 12.5, 13_900_000.0, 283_000.0, AreaType::Rural, "Rural Italy"),
                 ], 301_340.0)
             },
             
@@ -1412,7 +1510,11 @@ impl Country {
                     PopulationRegion::new(33.5904, 130.4017, 5_502_000.0, 4_747.0, AreaType::Urban, "Fukuoka-Kitakyushu"),
                     PopulationRegion::new(34.3853, 132.4553, 2_096_000.0, 905.0, AreaType::Urban, "Hiroshima Metro"),
                     PopulationRegion::new(38.2682, 140.8694, 2_324_000.0, 6_400.0, AreaType::Urban, "Sendai Metro"),
-                    PopulationRegion::new(37.0, 138.0, 10_000_000.0, 324_000.0, AreaType::Rural, "Rural Japan"),
+                    PopulationRegion::new(35.4437, 139.6380, 1_304_000.0, 326.0, AreaType::Urban, "Kawasaki"),
+                    PopulationRegion::new(35.1796, 136.9066, 1_163_000.0, 523.0, AreaType::Urban, "Kobe"),
+                    PopulationRegion::new(34.9756, 138.3829, 1_143_000.0, 1_411.0, AreaType::Urban, "Shizuoka"),
+                    PopulationRegion::new(26.2124, 127.6809, 1_377_000.0, 1_199.0, AreaType::Urban, "Naha"),
+                    PopulationRegion::new(37.0, 138.0, 8_600_000.0, 324_000.0, AreaType::Rural, "Rural Japan"),
                 ], 377_975.0)
             },
             
@@ -1435,7 +1537,10 @@ impl Country {
                     PopulationRegion::new(42.3151, 69.5893, 1_074_000.0, 200.0, AreaType::Urban, "Shymkent"),
                     PopulationRegion::new(50.4119, 80.2282, 510_000.0, 300.0, AreaType::Urban, "Semey"),
                     PopulationRegion::new(47.1167, 51.8833, 500_000.0, 280.0, AreaType::Urban, "Aktobe"),
-                    PopulationRegion::new(48.0, 68.0, 8_000_000.0, 2_722_000.0, AreaType::Rural, "Rural Kazakhstan"),
+                    PopulationRegion::new(49.8047, 73.1094, 497_000.0, 220.0, AreaType::Urban, "Karaganda"),
+                    PopulationRegion::new(52.2878, 76.9456, 476_000.0, 195.0, AreaType::Urban, "Pavlodar"),
+                    PopulationRegion::new(43.3551, 77.3205, 453_000.0, 175.0, AreaType::Urban, "Taraz"),
+                    PopulationRegion::new(48.0, 68.0, 6_700_000.0, 2_722_000.0, AreaType::Rural, "Rural Kazakhstan"),
                 ], 2_724_900.0)
             },
             
@@ -1447,7 +1552,10 @@ impl Country {
                     PopulationRegion::new(0.5143, 35.2698, 608_000.0, 325.0, AreaType::Urban, "Nakuru"),
                     PopulationRegion::new(-1.0502, 37.0804, 500_000.0, 123.0, AreaType::Urban, "Ruiru"),
                     PopulationRegion::new(-0.0917, 34.7680, 475_000.0, 197.0, AreaType::Urban, "Kisumu"),
-                    PopulationRegion::new(-1.0, 37.0, 38_900_000.0, 578_700.0, AreaType::Rural, "Rural Kenya"),
+                    PopulationRegion::new(0.0353, 37.0733, 336_000.0, 85.0, AreaType::Urban, "Eldoret"),
+                    PopulationRegion::new(-1.2837, 36.8269, 311_000.0, 75.0, AreaType::Urban, "Kikuyu"),
+                    PopulationRegion::new(-0.7174, 37.1520, 260_000.0, 65.0, AreaType::Urban, "Thika"),
+                    PopulationRegion::new(-1.0, 37.0, 37_000_000.0, 578_700.0, AreaType::Rural, "Rural Kenya"),
                 ], 580_367.0)
             },
             
@@ -1455,7 +1563,10 @@ impl Country {
                 // Kiribati: 121k population, 811 km² area, ~55% urban.
                 CountryPopulationData::from_regions(vec![
                     PopulationRegion::new(1.3559, 172.9847, 66_000.0, 40.0, AreaType::Urban, "South Tarawa"),
-                    PopulationRegion::new(1.5, 173.0, 54_000.0, 771.0, AreaType::Rural, "Rural Kiribati"),
+                    PopulationRegion::new(1.9808, 157.3603, 3_200.0, 8.0, AreaType::Urban, "Kiritimati"),
+                    PopulationRegion::new(1.4167, 173.0167, 3_000.0, 7.0, AreaType::Urban, "Betio"),
+                    PopulationRegion::new(1.3333, 172.9833, 2_800.0, 6.0, AreaType::Urban, "Bairiki"),
+                    PopulationRegion::new(1.5, 173.0, 45_000.0, 750.0, AreaType::Rural, "Rural Kiribati"),
                 ], 811.0)
             },
             
@@ -1617,7 +1728,11 @@ impl Country {
                     PopulationRegion::new(1.5533, 103.7594, 1_803_000.0, 1_064.0, AreaType::Urban, "Johor Bahru Metro"),
                     PopulationRegion::new(3.0733, 101.5185, 800_000.0, 290.0, AreaType::Urban, "Ipoh"),
                     PopulationRegion::new(6.1254, 102.2381, 354_000.0, 36.0, AreaType::Urban, "Kota Bharu"),
-                    PopulationRegion::new(4.0, 102.0, 7_200_000.0, 324_000.0, AreaType::Rural, "Rural Malaysia"),
+                    PopulationRegion::new(1.4655, 110.4294, 740_000.0, 1_545.0, AreaType::Urban, "Kuching"),
+                    PopulationRegion::new(5.9804, 116.0735, 500_000.0, 366.0, AreaType::Urban, "Kota Kinabalu"),
+                    PopulationRegion::new(3.8077, 103.3260, 497_000.0, 33.0, AreaType::Urban, "Kuantan"),
+                    PopulationRegion::new(5.3593, 103.1368, 425_000.0, 28.0, AreaType::Urban, "Kota Terengganu"),
+                    PopulationRegion::new(4.0, 102.0, 5_300_000.0, 324_000.0, AreaType::Rural, "Rural Malaysia"),
                 ], 330_803.0)
             },
             
@@ -1625,7 +1740,11 @@ impl Country {
                 // Maldives: 541k population, 298 km² area, ~41% urban.
                 CountryPopulationData::from_regions(vec![
                     PopulationRegion::new(4.1755, 73.5093, 211_000.0, 6.0, AreaType::Urban, "Malé"),
-                    PopulationRegion::new(4.2, 73.5, 320_000.0, 292.0, AreaType::Rural, "Rural Maldives"),
+                    PopulationRegion::new(4.1748, 73.5089, 41_000.0, 2.0, AreaType::Urban, "Hulhumalé"),
+                    PopulationRegion::new(-0.6286, 73.0949, 12_000.0, 1.0, AreaType::Urban, "Addu City"),
+                    PopulationRegion::new(5.0378, 73.0728, 8_000.0, 1.0, AreaType::Urban, "Kulhudhuffushi"),
+                    PopulationRegion::new(-0.5816, 73.0969, 7_000.0, 1.0, AreaType::Urban, "Hithadhoo"),
+                    PopulationRegion::new(4.2, 73.5, 252_000.0, 287.0, AreaType::Rural, "Rural Maldives"),
                 ], 298.0)
             },
             
@@ -1655,7 +1774,8 @@ impl Country {
                 CountryPopulationData::from_regions(vec![
                     PopulationRegion::new(7.0897, 171.3803, 28_000.0, 10.0, AreaType::Urban, "Majuro"),
                     PopulationRegion::new(8.7208, 167.7314, 12_000.0, 5.0, AreaType::Urban, "Ebeye"),
-                    PopulationRegion::new(7.5, 171.0, 13_000.0, 166.0, AreaType::Rural, "Rural Marshall Islands"),
+                    PopulationRegion::new(7.1315, 171.3723, 3_000.0, 3.0, AreaType::Urban, "Delap-Uliga-Djarrit"),
+                    PopulationRegion::new(7.5, 171.0, 10_000.0, 163.0, AreaType::Rural, "Rural Marshall Islands"),
                 ], 181.0)
             },
             
@@ -1690,7 +1810,10 @@ impl Country {
                     PopulationRegion::new(32.5149, -117.0382, 2_157_000.0, 1_392.0, AreaType::Urban, "Tijuana"),
                     PopulationRegion::new(31.6904, -106.4245, 1_513_000.0, 4_853.0, AreaType::Urban, "Ciudad Juárez"),
                     PopulationRegion::new(19.1738, -96.1342, 1_046_000.0, 475.0, AreaType::Urban, "Veracruz"),
-                    PopulationRegion::new(23.0, -102.0, 24_500_000.0, 1_940_000.0, AreaType::Rural, "Rural Mexico"),
+                    PopulationRegion::new(20.5880, -100.3899, 1_385_000.0, 1_165.0, AreaType::Urban, "Querétaro"),
+                    PopulationRegion::new(21.0190, -89.6237, 1_316_000.0, 348.0, AreaType::Urban, "Mérida"),
+                    PopulationRegion::new(20.6953, -101.9539, 1_266_000.0, 324.0, AreaType::Urban, "Aguascalientes"),
+                    PopulationRegion::new(23.0, -102.0, 19_900_000.0, 1_940_000.0, AreaType::Rural, "Rural Mexico"),
                 ], 1_964_375.0)
             },
             
@@ -1816,7 +1939,11 @@ impl Country {
                     PopulationRegion::new(-37.7870, 175.2793, 242_000.0, 1_115.0, AreaType::Urban, "Hamilton"),
                     PopulationRegion::new(-38.1368, 176.2497, 151_000.0, 168.0, AreaType::Urban, "Tauranga"),
                     PopulationRegion::new(-45.8788, 170.5028, 134_000.0, 256.0, AreaType::Urban, "Dunedin"),
-                    PopulationRegion::new(-42.0, 172.0, 670_000.0, 258_600.0, AreaType::Rural, "Rural New Zealand"),
+                    PopulationRegion::new(-39.0556, 174.0752, 83_000.0, 2_062.0, AreaType::Urban, "New Plymouth"),
+                    PopulationRegion::new(-39.4928, 176.9120, 81_000.0, 156.0, AreaType::Urban, "Napier-Hastings"),
+                    PopulationRegion::new(-38.6857, 178.0236, 79_000.0, 94.0, AreaType::Urban, "Gisborne"),
+                    PopulationRegion::new(-46.4132, 168.3538, 56_000.0, 3_314.0, AreaType::Urban, "Invercargill"),
+                    PopulationRegion::new(-42.0, 172.0, 350_000.0, 258_600.0, AreaType::Rural, "Rural New Zealand"),
                 ], 268_021.0)
             },
             
@@ -1851,7 +1978,9 @@ impl Country {
                     PopulationRegion::new(4.8156, 7.0498, 1_865_000.0, 360.0, AreaType::Urban, "Port Harcourt"),
                     PopulationRegion::new(11.8333, 13.1500, 1_336_000.0, 194.0, AreaType::Urban, "Maiduguri"),
                     PopulationRegion::new(6.1704, 6.7410, 1_049_000.0, 228.0, AreaType::Urban, "Warri"),
-                    PopulationRegion::new(10.0, 8.0, 102_000_000.0, 920_000.0, AreaType::Rural, "Rural Nigeria"),
+                    PopulationRegion::new(11.0992, 7.6508, 950_000.0, 216.0, AreaType::Urban, "Kaduna"),
+                    PopulationRegion::new(5.1053, 7.3646, 918_000.0, 103.0, AreaType::Urban, "Aba"),
+                    PopulationRegion::new(10.0, 8.0, 99_000_000.0, 920_000.0, AreaType::Rural, "Rural Nigeria"),
                 ], 923_768.0)
             },
             
@@ -1873,7 +2002,10 @@ impl Country {
                     PopulationRegion::new(60.3913, 5.3221, 420_000.0, 445.0, AreaType::Urban, "Bergen Metro"),
                     PopulationRegion::new(63.4305, 10.3951, 280_000.0, 321.0, AreaType::Urban, "Trondheim Metro"),
                     PopulationRegion::new(58.9700, 5.7331, 225_000.0, 71.0, AreaType::Urban, "Stavanger Metro"),
-                    PopulationRegion::new(62.0, 9.0, 920_000.0, 322_500.0, AreaType::Rural, "Rural Norway"),
+                    PopulationRegion::new(68.4384, 17.4272, 86_000.0, 103.0, AreaType::Urban, "Bodø"),
+                    PopulationRegion::new(67.2803, 14.4049, 83_000.0, 98.0, AreaType::Urban, "Narvik"),
+                    PopulationRegion::new(69.6492, 18.9553, 77_000.0, 2_521.0, AreaType::Urban, "Tromsø"),
+                    PopulationRegion::new(62.0, 9.0, 670_000.0, 322_500.0, AreaType::Rural, "Rural Norway"),
                 ], 323_802.0)
             },
             
@@ -1898,7 +2030,12 @@ impl Country {
                     PopulationRegion::new(31.4180, 73.0790, 1_977_000.0, 370.0, AreaType::Urban, "Faisalabad"),
                     PopulationRegion::new(25.3960, 68.3578, 1_677_000.0, 168.0, AreaType::Urban, "Hyderabad"),
                     PopulationRegion::new(34.0150, 71.5805, 1_594_000.0, 92.0, AreaType::Urban, "Peshawar"),
-                    PopulationRegion::new(30.0, 70.0, 142_100_000.0, 876_500.0, AreaType::Rural, "Rural Pakistan"),
+                    PopulationRegion::new(32.0740, 72.6861, 1_388_000.0, 122.0, AreaType::Urban, "Jhang"),
+                    PopulationRegion::new(29.3956, 71.6836, 1_217_000.0, 108.0, AreaType::Urban, "Bahawalpur"),
+                    PopulationRegion::new(32.1877, 74.1945, 1_197_000.0, 103.0, AreaType::Urban, "Gujranwala"),
+                    PopulationRegion::new(31.4504, 74.5366, 1_165_000.0, 97.0, AreaType::Urban, "Gujrat"),
+                    PopulationRegion::new(30.8138, 73.4534, 1_027_000.0, 83.0, AreaType::Urban, "Sahiwal"),
+                    PopulationRegion::new(30.0, 70.0, 130_000_000.0, 876_500.0, AreaType::Rural, "Rural Pakistan"),
                 ], 881_913.0)
             },
             
@@ -1906,7 +2043,8 @@ impl Country {
                 // Palau: 18k population, 459 km² area, ~81% urban.
                 CountryPopulationData::from_regions(vec![
                     PopulationRegion::new(7.3419, 134.4794, 11_000.0, 18.0, AreaType::Urban, "Koror"),
-                    PopulationRegion::new(7.5, 134.5, 3_000.0, 441.0, AreaType::Rural, "Rural Palau"),
+                    PopulationRegion::new(7.5036, 134.6292, 2_500.0, 6.0, AreaType::Urban, "Airai"),
+                    PopulationRegion::new(7.5, 134.5, 500.0, 435.0, AreaType::Rural, "Rural Palau"),
                 ], 459.0)
             },
             
@@ -1948,7 +2086,10 @@ impl Country {
                     PopulationRegion::new(-8.1116, -79.0288, 975_000.0, 692.0, AreaType::Urban, "Trujillo"),
                     PopulationRegion::new(-6.7701, -79.8223, 763_000.0, 192.0, AreaType::Urban, "Chiclayo"),
                     PopulationRegion::new(-12.0266, -75.2041, 563_000.0, 494.0, AreaType::Urban, "Huancayo"),
-                    PopulationRegion::new(-10.0, -75.0, 7_000_000.0, 1_280_000.0, AreaType::Rural, "Rural Peru"),
+                    PopulationRegion::new(-3.7437, -73.2516, 498_000.0, 368.0, AreaType::Urban, "Iquitos"),
+                    PopulationRegion::new(-5.1783, -80.6466, 484_000.0, 277.0, AreaType::Urban, "Piura"),
+                    PopulationRegion::new(-13.5226, -71.9673, 480_000.0, 385.0, AreaType::Urban, "Cusco"),
+                    PopulationRegion::new(-10.0, -75.0, 5_500_000.0, 1_280_000.0, AreaType::Rural, "Rural Peru"),
                 ], 1_285_216.0)
             },
             
@@ -1961,7 +2102,14 @@ impl Country {
                     PopulationRegion::new(6.9214, 122.0790, 457_000.0, 133.0, AreaType::Urban, "Zamboanga City"),
                     PopulationRegion::new(7.8010, 123.4132, 439_000.0, 40.0, AreaType::Urban, "Cagayan de Oro"),
                     PopulationRegion::new(10.6969, 122.5605, 433_000.0, 124.0, AreaType::Urban, "Bacolod"),
-                    PopulationRegion::new(12.0, 122.0, 58_000_000.0, 296_400.0, AreaType::Rural, "Rural Philippines"),
+                    PopulationRegion::new(8.4822, 124.6472, 354_000.0, 163.0, AreaType::Urban, "Butuan"),
+                    PopulationRegion::new(14.5547, 121.0244, 354_000.0, 103.0, AreaType::Urban, "Caloocan"),
+                    PopulationRegion::new(10.7202, 122.5621, 511_000.0, 279.0, AreaType::Urban, "Iloilo City"),
+                    PopulationRegion::new(11.2472, 125.0006, 188_000.0, 197.0, AreaType::Urban, "Tacloban"),
+                    PopulationRegion::new(13.1391, 123.7358, 182_000.0, 107.0, AreaType::Urban, "Legazpi"),
+                    PopulationRegion::new(9.6500, 123.8500, 172_000.0, 80.0, AreaType::Urban, "Tagbilaran"),
+                    PopulationRegion::new(16.4023, 120.5960, 170_000.0, 77.0, AreaType::Urban, "Baguio"),
+                    PopulationRegion::new(12.0, 122.0, 55_200_000.0, 296_400.0, AreaType::Rural, "Rural Philippines"),
                 ], 300_000.0)
             },
             
@@ -1986,7 +2134,11 @@ impl Country {
                     PopulationRegion::new(41.1579, -8.6291, 2_489_000.0, 2_395.0, AreaType::Urban, "Porto Metro"),
                     PopulationRegion::new(40.2033, -8.4103, 235_000.0, 319.0, AreaType::Urban, "Coimbra"),
                     PopulationRegion::new(41.5454, -8.4265, 181_000.0, 183.0, AreaType::Urban, "Braga"),
-                    PopulationRegion::new(40.0, -8.0, 3_500_000.0, 86_200.0, AreaType::Rural, "Rural Portugal"),
+                    PopulationRegion::new(37.0194, -7.9304, 150_000.0, 607.0, AreaType::Urban, "Faro"),
+                    PopulationRegion::new(32.6333, -16.9000, 112_000.0, 828.0, AreaType::Urban, "Funchal"),
+                    PopulationRegion::new(38.5667, -7.9000, 110_000.0, 314.0, AreaType::Urban, "Évora"),
+                    PopulationRegion::new(41.5333, -8.6167, 101_000.0, 183.0, AreaType::Urban, "Viana do Castelo"),
+                    PopulationRegion::new(40.0, -8.0, 3_100_000.0, 86_200.0, AreaType::Rural, "Rural Portugal"),
                 ], 92_090.0)
             },
             
@@ -2036,7 +2188,12 @@ impl Country {
                     PopulationRegion::new(55.3333, 86.0833, 1_075_000.0, 293.0, AreaType::Urban, "Novokuznetsk"),
                     PopulationRegion::new(55.7540, 48.7439, 1_255_000.0, 425.0, AreaType::Urban, "Kazan"),
                     PopulationRegion::new(52.0300, 113.5000, 1_054_000.0, 500.0, AreaType::Urban, "Chita"),
-                    PopulationRegion::new(60.0, 90.0, 35_700_000.0, 17_090_000.0, AreaType::Rural, "Rural Russia"),
+                    PopulationRegion::new(54.7388, 55.9721, 1_126_000.0, 479.0, AreaType::Urban, "Ufa"),
+                    PopulationRegion::new(53.1958, 45.0183, 1_019_000.0, 353.0, AreaType::Urban, "Volgograd"),
+                    PopulationRegion::new(47.2357, 39.7015, 1_119_000.0, 348.0, AreaType::Urban, "Rostov-on-Don"),
+                    PopulationRegion::new(55.0415, 73.3686, 1_174_000.0, 573.0, AreaType::Urban, "Omsk"),
+                    PopulationRegion::new(43.1056, 131.8735, 606_000.0, 325.0, AreaType::Urban, "Vladivostok"),
+                    PopulationRegion::new(60.0, 90.0, 29_700_000.0, 17_090_000.0, AreaType::Rural, "Rural Russia"),
                 ], 17_098_242.0)
             },
             
@@ -2054,7 +2211,9 @@ impl Country {
                 // Saint Kitts and Nevis: 54k population, 261 km² area, ~31% urban.
                 CountryPopulationData::from_regions(vec![
                     PopulationRegion::new(17.3026, -62.7177, 13_000.0, 7.0, AreaType::Urban, "Basseterre"),
-                    PopulationRegion::new(17.3, -62.7, 37_000.0, 254.0, AreaType::Rural, "Rural St Kitts and Nevis"),
+                    PopulationRegion::new(17.3578, -62.7822, 2_500.0, 3.0, AreaType::Urban, "Sandy Point Town"),
+                    PopulationRegion::new(17.1408, -62.6228, 1_800.0, 2.0, AreaType::Urban, "Charlestown"),
+                    PopulationRegion::new(17.3, -62.7, 32_700.0, 249.0, AreaType::Rural, "Rural St Kitts and Nevis"),
                 ], 261.0)
             },
             
@@ -2062,7 +2221,9 @@ impl Country {
                 // Saint Lucia: 185k population, 617 km² area, ~19% urban.
                 CountryPopulationData::from_regions(vec![
                     PopulationRegion::new(14.0101, -60.9875, 22_000.0, 11.0, AreaType::Urban, "Castries"),
-                    PopulationRegion::new(13.9, -61.0, 149_000.0, 606.0, AreaType::Rural, "Rural Saint Lucia"),
+                    PopulationRegion::new(13.9740, -61.0242, 6_000.0, 5.0, AreaType::Urban, "Gros Islet"),
+                    PopulationRegion::new(13.8412, -60.9605, 5_000.0, 4.0, AreaType::Urban, "Vieux Fort"),
+                    PopulationRegion::new(13.9, -61.0, 138_000.0, 597.0, AreaType::Rural, "Rural Saint Lucia"),
                 ], 617.0)
             },
             
@@ -2070,7 +2231,9 @@ impl Country {
                 // Saint Vincent and the Grenadines: 110k population, 389 km² area, ~53% urban.
                 CountryPopulationData::from_regions(vec![
                     PopulationRegion::new(13.1600, -61.2248, 27_000.0, 13.0, AreaType::Urban, "Kingstown"),
-                    PopulationRegion::new(13.1, -61.2, 52_000.0, 376.0, AreaType::Rural, "Rural St Vincent"),
+                    PopulationRegion::new(13.0031, -61.2397, 1_200.0, 2.0, AreaType::Urban, "Port Elizabeth"),
+                    PopulationRegion::new(13.1526, -61.1964, 1_000.0, 1.0, AreaType::Urban, "Georgetown"),
+                    PopulationRegion::new(13.1, -61.2, 49_800.0, 373.0, AreaType::Rural, "Rural St Vincent"),
                 ], 389.0)
             },
             
@@ -2094,7 +2257,9 @@ impl Country {
                 // São Tomé and Príncipe: 223k population, 964 km² area, ~74% urban.
                 CountryPopulationData::from_regions(vec![
                     PopulationRegion::new(0.3365, 6.7273, 90_000.0, 17.0, AreaType::Urban, "São Tomé"),
-                    PopulationRegion::new(0.3, 6.7, 58_000.0, 947.0, AreaType::Rural, "Rural São Tomé"),
+                    PopulationRegion::new(1.6333, 7.4167, 8_000.0, 4.0, AreaType::Urban, "Santo António"),
+                    PopulationRegion::new(0.2017, 6.5317, 6_000.0, 3.0, AreaType::Urban, "Neves"),
+                    PopulationRegion::new(0.3, 6.7, 44_000.0, 940.0, AreaType::Rural, "Rural São Tomé"),
                 ], 964.0)
             },
             
@@ -2106,7 +2271,12 @@ impl Country {
                     PopulationRegion::new(21.4267, 39.8261, 2_042_000.0, 760.0, AreaType::Urban, "Mecca"),
                     PopulationRegion::new(24.4861, 39.6111, 1_387_000.0, 589.0, AreaType::Urban, "Medina"),
                     PopulationRegion::new(26.4207, 50.0888, 1_252_000.0, 672.0, AreaType::Urban, "Dammam"),
-                    PopulationRegion::new(24.0, 45.0, 5_600_000.0, 2_145_000.0, AreaType::Rural, "Rural Saudi Arabia"),
+                    PopulationRegion::new(18.3004, 42.7103, 949_000.0, 334.0, AreaType::Urban, "Abha"),
+                    PopulationRegion::new(24.6877, 46.7219, 814_000.0, 280.0, AreaType::Urban, "Kharj"),
+                    PopulationRegion::new(26.3267, 43.9750, 768_000.0, 263.0, AreaType::Urban, "Buraydah"),
+                    PopulationRegion::new(21.2700, 40.4158, 689_000.0, 235.0, AreaType::Urban, "Taif"),
+                    PopulationRegion::new(16.8892, 42.5511, 668_000.0, 228.0, AreaType::Urban, "Jazan"),
+                    PopulationRegion::new(24.0, 45.0, 2_900_000.0, 2_145_000.0, AreaType::Rural, "Rural Saudi Arabia"),
                 ], 2_149_690.0)
             },
             
@@ -2135,7 +2305,10 @@ impl Country {
                 // Seychelles: 99k population, 452 km² area, ~58% urban.
                 CountryPopulationData::from_regions(vec![
                     PopulationRegion::new(-4.6827, 55.4804, 28_000.0, 20.0, AreaType::Urban, "Victoria"),
-                    PopulationRegion::new(-4.6, 55.5, 42_000.0, 432.0, AreaType::Rural, "Rural Seychelles"),
+                    PopulationRegion::new(-4.7667, 55.5167, 8_500.0, 6.0, AreaType::Urban, "Anse Royale"),
+                    PopulationRegion::new(-4.7833, 55.5333, 4_000.0, 3.0, AreaType::Urban, "Beau Vallon"),
+                    PopulationRegion::new(-4.3167, 55.7667, 3_500.0, 2.0, AreaType::Urban, "Baie Lazare"),
+                    PopulationRegion::new(-4.6, 55.5, 26_000.0, 421.0, AreaType::Rural, "Rural Seychelles"),
                 ], 452.0)
             },
             
@@ -2181,7 +2354,10 @@ impl Country {
                 // Solomon Islands: 703k population, 28,896 km² area, ~24% urban.
                 CountryPopulationData::from_regions(vec![
                     PopulationRegion::new(-9.4319, 159.9556, 93_000.0, 22.0, AreaType::Urban, "Honiara"),
-                    PopulationRegion::new(-9.0, 160.0, 535_000.0, 28_874.0, AreaType::Rural, "Rural Solomon Islands"),
+                    PopulationRegion::new(-8.7667, 160.7000, 6_200.0, 5.0, AreaType::Urban, "Auki"),
+                    PopulationRegion::new(-10.5667, 161.7667, 5_100.0, 4.0, AreaType::Urban, "Gizo"),
+                    PopulationRegion::new(-8.1333, 157.2000, 4_500.0, 3.0, AreaType::Urban, "Buala"),
+                    PopulationRegion::new(-9.0, 160.0, 519_200.0, 28_862.0, AreaType::Rural, "Rural Solomon Islands"),
                 ], 28_896.0)
             },
             
@@ -2203,7 +2379,12 @@ impl Country {
                     PopulationRegion::new(-29.8587, 31.0292, 3_969_000.0, 2_556.0, AreaType::Urban, "Durban Metro"),
                     PopulationRegion::new(-25.7479, 28.2293, 3_888_000.0, 6_197.0, AreaType::Urban, "Pretoria Metro"),
                     PopulationRegion::new(-33.9608, 25.6022, 770_000.0, 947.0, AreaType::Urban, "Port Elizabeth Metro"),
-                    PopulationRegion::new(-29.0, 24.0, 19_900_000.0, 1_208_000.0, AreaType::Rural, "Rural South Africa"),
+                    PopulationRegion::new(-32.0833, 18.8666, 348_000.0, 13_647.0, AreaType::Urban, "Saldanha Bay"),
+                    PopulationRegion::new(-33.0167, 27.9, 312_000.0, 6_357.0, AreaType::Urban, "East London"),
+                    PopulationRegion::new(-28.7282, 24.7499, 255_000.0, 164.0, AreaType::Urban, "Kimberley"),
+                    PopulationRegion::new(-26.6667, 27.0833, 232_000.0, 38.0, AreaType::Urban, "Welkom"),
+                    PopulationRegion::new(-29.0852, 26.1596, 222_000.0, 6_283.0, AreaType::Urban, "Bloemfontein"),
+                    PopulationRegion::new(-29.0, 24.0, 18_000_000.0, 1_208_000.0, AreaType::Rural, "Rural South Africa"),
                 ], 1_221_037.0)
             },
             
@@ -2215,7 +2396,10 @@ impl Country {
                     PopulationRegion::new(37.4563, 126.7052, 3_032_000.0, 1_045.0, AreaType::Urban, "Incheon"),
                     PopulationRegion::new(35.8714, 128.6014, 2_431_000.0, 884.0, AreaType::Urban, "Daegu"),
                     PopulationRegion::new(35.1595, 126.8526, 1_478_000.0, 501.0, AreaType::Urban, "Gwangju"),
-                    PopulationRegion::new(36.5, 127.5, 9_700_000.0, 85_300.0, AreaType::Rural, "Rural South Korea"),
+                    PopulationRegion::new(36.3504, 127.3845, 1_542_000.0, 540.0, AreaType::Urban, "Daejeon"),
+                    PopulationRegion::new(35.5384, 129.3114, 1_046_000.0, 1_058.0, AreaType::Urban, "Ulsan"),
+                    PopulationRegion::new(37.8813, 127.7298, 983_000.0, 872.0, AreaType::Urban, "Chuncheon"),
+                    PopulationRegion::new(36.5, 127.5, 6_700_000.0, 85_300.0, AreaType::Rural, "Rural South Korea"),
                 ], 100_210.0)
             },
             
@@ -2239,7 +2423,10 @@ impl Country {
                     PopulationRegion::new(36.7213, -4.4217, 1_661_000.0, 1_336.0, AreaType::Urban, "Málaga Metro"),
                     PopulationRegion::new(43.2627, -2.9253, 1_037_000.0, 497.0, AreaType::Urban, "Bilbao Metro"),
                     PopulationRegion::new(39.5750, 2.6502, 634_000.0, 209.0, AreaType::Urban, "Palma"),
-                    PopulationRegion::new(40.0, -4.0, 9_100_000.0, 497_000.0, AreaType::Rural, "Rural Spain"),
+                    PopulationRegion::new(37.9922, -1.1307, 493_000.0, 558.0, AreaType::Urban, "Murcia"),
+                    PopulationRegion::new(36.5344, -6.2994, 477_000.0, 32.0, AreaType::Urban, "Cádiz"),
+                    PopulationRegion::new(37.8882, -4.7794, 472_000.0, 38.0, AreaType::Urban, "Córdoba"),
+                    PopulationRegion::new(40.0, -4.0, 7_600_000.0, 497_000.0, AreaType::Rural, "Rural Spain"),
                 ], 505_992.0)
             },
             
@@ -2288,7 +2475,11 @@ impl Country {
                     PopulationRegion::new(57.7089, 11.9746, 1_089_000.0, 896.0, AreaType::Urban, "Gothenburg Metro"),
                     PopulationRegion::new(55.6050, 13.0038, 749_000.0, 347.0, AreaType::Urban, "Malmö Metro"),
                     PopulationRegion::new(59.8586, 17.6389, 177_000.0, 49.0, AreaType::Urban, "Uppsala"),
-                    PopulationRegion::new(60.0, 15.0, 1_250_000.0, 447_000.0, AreaType::Rural, "Rural Sweden"),
+                    PopulationRegion::new(62.3908, 17.3069, 127_000.0, 30.0, AreaType::Urban, "Sundsvall"),
+                    PopulationRegion::new(63.8258, 20.2630, 123_000.0, 29.0, AreaType::Urban, "Umeå"),
+                    PopulationRegion::new(58.4108, 15.6214, 110_000.0, 25.0, AreaType::Urban, "Linköping"),
+                    PopulationRegion::new(56.1612, 15.5869, 93_000.0, 20.0, AreaType::Urban, "Karlskrona"),
+                    PopulationRegion::new(60.0, 15.0, 800_000.0, 447_000.0, AreaType::Rural, "Rural Sweden"),
                 ], 450_295.0)
             },
             
@@ -2344,7 +2535,11 @@ impl Country {
                     PopulationRegion::new(-3.3869, 36.6830, 621_000.0, 83.0, AreaType::Urban, "Arusha"),
                     PopulationRegion::new(-5.0689, 39.0986, 540_000.0, 65.0, AreaType::Urban, "Tanga"),
                     PopulationRegion::new(-2.5166, 32.9000, 540_000.0, 70.0, AreaType::Urban, "Mwanza"),
-                    PopulationRegion::new(-6.0, 35.0, 40_000_000.0, 943_200.0, AreaType::Rural, "Rural Tanzania"),
+                    PopulationRegion::new(-5.9095, 35.7516, 436_000.0, 58.0, AreaType::Urban, "Dodoma"),
+                    PopulationRegion::new(-8.9094, 33.4608, 414_000.0, 53.0, AreaType::Urban, "Mbeya"),
+                    PopulationRegion::new(-4.8723, 29.6420, 303_000.0, 38.0, AreaType::Urban, "Kigoma"),
+                    PopulationRegion::new(-10.2667, 40.1833, 280_000.0, 35.0, AreaType::Urban, "Mtwara"),
+                    PopulationRegion::new(-6.0, 35.0, 37_500_000.0, 943_200.0, AreaType::Rural, "Rural Tanzania"),
                 ], 945_087.0)
             },
             
@@ -2355,7 +2550,10 @@ impl Country {
                     PopulationRegion::new(7.0086, 100.4733, 439_000.0, 70.0, AreaType::Urban, "Hat Yai"),
                     PopulationRegion::new(18.7883, 98.9853, 435_000.0, 40.0, AreaType::Urban, "Chiang Mai"),
                     PopulationRegion::new(14.9714, 102.1027, 358_000.0, 46.0, AreaType::Urban, "Nakhon Ratchasima"),
-                    PopulationRegion::new(15.0, 100.0, 34_400_000.0, 511_400.0, AreaType::Rural, "Rural Thailand"),
+                    PopulationRegion::new(16.4322, 102.8236, 355_000.0, 40.0, AreaType::Urban, "Khon Kaen"),
+                    PopulationRegion::new(12.6095, 102.1038, 315_000.0, 35.0, AreaType::Urban, "Chonburi"),
+                    PopulationRegion::new(16.8211, 100.2668, 300_000.0, 32.0, AreaType::Urban, "Phitsanulok"),
+                    PopulationRegion::new(15.0, 100.0, 33_400_000.0, 511_400.0, AreaType::Rural, "Rural Thailand"),
                 ], 513_120.0)
             },
             
@@ -2373,7 +2571,10 @@ impl Country {
                 // Tonga: 107k population, 747 km² area, ~23% urban.
                 CountryPopulationData::from_regions(vec![
                     PopulationRegion::new(-21.1393, -175.2049, 23_000.0, 30.0, AreaType::Urban, "Nukuʻalofa"),
-                    PopulationRegion::new(-21.0, -175.0, 82_000.0, 717.0, AreaType::Rural, "Rural Tonga"),
+                    PopulationRegion::new(-21.1333, -175.2, 6_000.0, 8.0, AreaType::Urban, "Neiafu"),
+                    PopulationRegion::new(-20.0333, -174.3667, 3_500.0, 5.0, AreaType::Urban, "Haveluloto"),
+                    PopulationRegion::new(-18.6500, -173.9833, 3_000.0, 4.0, AreaType::Urban, "Vava'u"),
+                    PopulationRegion::new(-21.0, -175.0, 69_500.0, 700.0, AreaType::Rural, "Rural Tonga"),
                 ], 747.0)
             },
             
@@ -2383,7 +2584,9 @@ impl Country {
                     PopulationRegion::new(10.6596, -61.5086, 545_000.0, 547.0, AreaType::Urban, "Port of Spain Metro"),
                     PopulationRegion::new(10.2667, -61.4667, 83_000.0, 20.0, AreaType::Urban, "San Fernando"),
                     PopulationRegion::new(10.6425, -61.4013, 61_000.0, 15.0, AreaType::Urban, "Arima"),
-                    PopulationRegion::new(10.5, -61.3, 646_000.0, 4_548.0, AreaType::Rural, "Rural Trinidad"),
+                    PopulationRegion::new(10.5333, -61.4119, 58_000.0, 13.0, AreaType::Urban, "Chaguanas"),
+                    PopulationRegion::new(11.1891, -60.7525, 18_000.0, 5.0, AreaType::Urban, "Scarborough"),
+                    PopulationRegion::new(10.5, -61.3, 570_000.0, 4_530.0, AreaType::Rural, "Rural Trinidad"),
                 ], 5_130.0)
             },
             
@@ -2408,7 +2611,10 @@ impl Country {
                     PopulationRegion::new(36.9914, 35.3308, 2_254_000.0, 13_488.0, AreaType::Urban, "Adana"),
                     PopulationRegion::new(37.8737, 32.4847, 2_254_000.0, 20_814.0, AreaType::Urban, "Konya"),
                     PopulationRegion::new(36.9081, 30.6956, 2_619_000.0, 19_086.0, AreaType::Urban, "Antalya"),
-                    PopulationRegion::new(39.0, 35.0, 19_600_000.0, 700_000.0, AreaType::Rural, "Rural Turkey"),
+                    PopulationRegion::new(37.0660, 37.3781, 1_986_000.0, 3_584.0, AreaType::Urban, "Gaziantep"),
+                    PopulationRegion::new(38.7317, 35.4787, 1_241_000.0, 13_251.0, AreaType::Urban, "Kayseri"),
+                    PopulationRegion::new(41.0053, 39.7277, 757_000.0, 6_277.0, AreaType::Urban, "Trabzon"),
+                    PopulationRegion::new(39.0, 35.0, 14_800_000.0, 700_000.0, AreaType::Rural, "Rural Turkey"),
                 ], 783_562.0)
             },
             
@@ -2459,7 +2665,10 @@ impl Country {
                     PopulationRegion::new(24.4539, 54.3773, 1_684_000.0, 972.0, AreaType::Urban, "Abu Dhabi"),
                     PopulationRegion::new(25.3463, 55.4209, 807_000.0, 259.0, AreaType::Urban, "Sharjah"),
                     PopulationRegion::new(25.4052, 56.2611, 545_000.0, 100.0, AreaType::Urban, "Ajman"),
-                    PopulationRegion::new(24.9, 55.0, 1_300_000.0, 78_200.0, AreaType::Rural, "Rural UAE"),
+                    PopulationRegion::new(25.3350, 55.3890, 262_000.0, 80.0, AreaType::Urban, "Al Ain"),
+                    PopulationRegion::new(25.4000, 55.5136, 230_000.0, 70.0, AreaType::Urban, "Ras Al Khaimah"),
+                    PopulationRegion::new(25.1294, 55.3765, 140_000.0, 60.0, AreaType::Urban, "Fujairah"),
+                    PopulationRegion::new(24.9, 55.0, 668_000.0, 78_145.0, AreaType::Rural, "Rural UAE"),
                 ], 83_600.0)
             },
             
@@ -2476,7 +2685,12 @@ impl Country {
                     PopulationRegion::new(54.9783, -1.6178, 1_100_000.0, 2_329.0, AreaType::Urban, "Newcastle Metro"),
                     PopulationRegion::new(52.9548, -1.1581, 919_000.0, 641.0, AreaType::Urban, "Nottingham Metro"),
                     PopulationRegion::new(51.4545, -2.5879, 909_000.0, 1_015.0, AreaType::Urban, "Bristol Metro"),
-                    PopulationRegion::new(53.0, -1.5, 10_900_000.0, 230_000.0, AreaType::Rural, "Rural UK"),
+                    PopulationRegion::new(55.9533, -3.1883, 902_000.0, 264.0, AreaType::Urban, "Edinburgh"),
+                    PopulationRegion::new(50.8229, -0.1363, 789_000.0, 641.0, AreaType::Urban, "Brighton"),
+                    PopulationRegion::new(52.2053, 0.1218, 752_000.0, 634.0, AreaType::Urban, "Cambridge"),
+                    PopulationRegion::new(50.9097, -1.4044, 636_000.0, 394.0, AreaType::Urban, "Southampton"),
+                    PopulationRegion::new(50.7256, -3.5269, 617_000.0, 816.0, AreaType::Urban, "Plymouth"),
+                    PopulationRegion::new(53.0, -1.5, 6_500_000.0, 230_000.0, AreaType::Rural, "Rural UK"),
                 ], 242_495.0)
             },
             
@@ -2503,7 +2717,17 @@ impl Country {
                     PopulationRegion::new(39.7392, -104.9903, 2_968_000.0, 21_622.0, AreaType::Urban, "Denver Metro"),
                     PopulationRegion::new(45.5152, -122.6784, 2_513_000.0, 6_685.0, AreaType::Urban, "Portland Metro"),
                     PopulationRegion::new(28.5383, -81.3792, 2_609_000.0, 4_013.0, AreaType::Urban, "Orlando Metro"),
-                    PopulationRegion::new(38.0, -97.0, 57_000_000.0, 9_600_000.0, AreaType::Rural, "Rural USA"),
+                    PopulationRegion::new(39.0997, -94.5786, 2_193_000.0, 20_570.0, AreaType::Urban, "Kansas City Metro"),
+                    PopulationRegion::new(40.4406, -79.9959, 2_324_000.0, 13_761.0, AreaType::Urban, "Pittsburgh Metro"),
+                    PopulationRegion::new(40.7608, -111.8910, 2_607_000.0, 21_590.0, AreaType::Urban, "Salt Lake City Metro"),
+                    PopulationRegion::new(39.7684, -86.1581, 2_111_000.0, 9_885.0, AreaType::Urban, "Indianapolis Metro"),
+                    PopulationRegion::new(39.1031, -84.5120, 2_256_000.0, 12_072.0, AreaType::Urban, "Cincinnati Metro"),
+                    PopulationRegion::new(41.4993, -81.6944, 2_048_000.0, 10_895.0, AreaType::Urban, "Cleveland Metro"),
+                    PopulationRegion::new(36.1627, -86.7816, 2_011_000.0, 13_310.0, AreaType::Urban, "Nashville Metro"),
+                    PopulationRegion::new(30.2672, -97.7431, 2_295_000.0, 11_100.0, AreaType::Urban, "Austin Metro"),
+                    PopulationRegion::new(29.4241, -98.4936, 2_588_000.0, 20_824.0, AreaType::Urban, "San Antonio Metro"),
+                    PopulationRegion::new(36.1540, -95.9928, 1_044_000.0, 9_305.0, AreaType::Urban, "Tulsa Metro"),
+                    PopulationRegion::new(38.0, -97.0, 40_000_000.0, 9_600_000.0, AreaType::Rural, "Rural USA"),
                 ], 9_833_520.0)
             },
             
@@ -2513,7 +2737,9 @@ impl Country {
                     PopulationRegion::new(-34.9011, -56.1645, 1_381_000.0, 200.0, AreaType::Urban, "Montevideo"),
                     PopulationRegion::new(-31.3833, -57.9667, 113_000.0, 25.0, AreaType::Urban, "Salto"),
                     PopulationRegion::new(-32.3333, -58.0833, 87_000.0, 20.0, AreaType::Urban, "Paysandú"),
-                    PopulationRegion::new(-33.0, -56.0, 180_000.0, 180_800.0, AreaType::Rural, "Rural Uruguay"),
+                    PopulationRegion::new(-33.2524, -58.0265, 78_000.0, 17.0, AreaType::Urban, "Mercedes"),
+                    PopulationRegion::new(-34.3375, -56.7139, 58_000.0, 13.0, AreaType::Urban, "Las Piedras"),
+                    PopulationRegion::new(-33.0, -56.0, 50_000.0, 180_759.0, AreaType::Rural, "Rural Uruguay"),
                 ], 181_034.0)
             },
             
@@ -2524,7 +2750,11 @@ impl Country {
                     PopulationRegion::new(39.6530, 66.9597, 546_000.0, 120.0, AreaType::Urban, "Samarkand"),
                     PopulationRegion::new(40.3789, 71.7825, 544_000.0, 90.0, AreaType::Urban, "Namangan"),
                     PopulationRegion::new(40.5283, 70.9429, 544_000.0, 77.0, AreaType::Urban, "Andijan"),
-                    PopulationRegion::new(41.0, 64.0, 17_500_000.0, 448_400.0, AreaType::Rural, "Rural Uzbekistan"),
+                    PopulationRegion::new(39.7747, 64.4286, 279_000.0, 60.0, AreaType::Urban, "Bukhara"),
+                    PopulationRegion::new(40.8420, 69.6333, 259_000.0, 55.0, AreaType::Urban, "Qarshi"),
+                    PopulationRegion::new(42.4589, 59.6103, 232_000.0, 50.0, AreaType::Urban, "Nukus"),
+                    PopulationRegion::new(40.1167, 67.8422, 183_000.0, 40.0, AreaType::Urban, "Jizzakh"),
+                    PopulationRegion::new(41.0, 64.0, 16_500_000.0, 448_251.0, AreaType::Rural, "Rural Uzbekistan"),
                 ], 448_978.0)
             },
             
@@ -2552,7 +2782,10 @@ impl Country {
                     PopulationRegion::new(10.2442, -67.6066, 2_182_000.0, 2_050.0, AreaType::Urban, "Valencia"),
                     PopulationRegion::new(10.3632, -71.6245, 1_628_000.0, 441.0, AreaType::Urban, "Maracay"),
                     PopulationRegion::new(10.2340, -64.1934, 1_239_000.0, 192.0, AreaType::Urban, "Barcelona-Puerto La Cruz"),
-                    PopulationRegion::new(8.0, -66.0, 3_450_000.0, 909_000.0, AreaType::Rural, "Rural Venezuela"),
+                    PopulationRegion::new(8.6196, -70.2049, 495_000.0, 30.0, AreaType::Urban, "Mérida"),
+                    PopulationRegion::new(7.8936, -72.5048, 463_000.0, 25.0, AreaType::Urban, "San Cristóbal"),
+                    PopulationRegion::new(10.0678, -69.3467, 453_000.0, 20.0, AreaType::Urban, "Barquisimeto"),
+                    PopulationRegion::new(8.0, -66.0, 2_000_000.0, 909_000.0, AreaType::Rural, "Rural Venezuela"),
                 ], 916_445.0)
             },
             
@@ -2564,7 +2797,12 @@ impl Country {
                     PopulationRegion::new(20.8449, 106.6881, 1_493_000.0, 1_495.0, AreaType::Urban, "Haiphong"),
                     PopulationRegion::new(16.0544, 108.2022, 1_231_000.0, 1_285.0, AreaType::Urban, "Da Nang"),
                     PopulationRegion::new(10.2539, 105.9721, 1_200_000.0, 1_440.0, AreaType::Urban, "Can Tho"),
-                    PopulationRegion::new(16.0, 107.0, 61_000_000.0, 322_600.0, AreaType::Rural, "Rural Vietnam"),
+                    PopulationRegion::new(11.9404, 108.4583, 640_000.0, 3_568.0, AreaType::Urban, "Dalat"),
+                    PopulationRegion::new(10.9642, 106.8251, 532_000.0, 209.0, AreaType::Urban, "Bien Hoa"),
+                    PopulationRegion::new(12.2388, 109.1888, 527_000.0, 209.0, AreaType::Urban, "Nha Trang"),
+                    PopulationRegion::new(16.4498, 107.5623, 519_000.0, 117.0, AreaType::Urban, "Hue"),
+                    PopulationRegion::new(10.5417, 106.4142, 513_000.0, 650.0, AreaType::Urban, "Vung Tau"),
+                    PopulationRegion::new(16.0, 107.0, 57_300_000.0, 322_600.0, AreaType::Rural, "Rural Vietnam"),
                 ], 331_212.0)
             },
             

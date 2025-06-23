@@ -19,11 +19,11 @@ members = [
 [features]
 default = ["core"]
 all = [
-	"dep:oxedize_fe2o3_core",
 	"dep:oxedize_fe2o3_bot",
 	"dep:oxedize_fe2o3_core",
 	"dep:oxedize_fe2o3_crypto",
 	"dep:oxedize_fe2o3_data",
+	"dep:oxedize_fe2o3_datime",
 	"dep:oxedize_fe2o3_file",
 	"dep:oxedize_fe2o3_geom",
 	"dep:oxedize_fe2o3_hash",
@@ -48,6 +48,7 @@ bot 		= ["dep:oxedize_fe2o3_bot"]
 core 		= ["dep:oxedize_fe2o3_core"]
 crypto 		= ["dep:oxedize_fe2o3_crypto"]
 data 		= ["dep:oxedize_fe2o3_data"]
+datime		= ["dep:oxedize_fe2o3_datime"]
 file 		= ["dep:oxedize_fe2o3_file"]
 geom 		= ["dep:oxedize_fe2o3_geom"]
 hash 		= ["dep:oxedize_fe2o3_hash"]
@@ -81,6 +82,7 @@ oxedize_fe2o3_bot =         { path = "fe2o3_bot",			optional = true }
 oxedize_fe2o3_core =        { path = "fe2o3_core",			optional = true }
 oxedize_fe2o3_crypto =      { path = "fe2o3_crypto",		optional = true }
 oxedize_fe2o3_data =        { path = "fe2o3_data",			optional = true }
+oxedize_fe2o3_datime =      { path = "fe2o3_datime",		optional = true }
 oxedize_fe2o3_file =        { path = "fe2o3_file",			optional = true }
 oxedize_fe2o3_geom =        { path = "fe2o3_geom",			optional = true }
 oxedize_fe2o3_hash =        { path = "fe2o3_hash",			optional = true }
@@ -91,7 +93,7 @@ oxedize_fe2o3_jdat =        { path = "fe2o3_jdat",			optional = true }
 oxedize_fe2o3_namex =       { path = "fe2o3_namex",			optional = true }
 oxedize_fe2o3_net =         { path = "fe2o3_net",			optional = true }
 oxedize_fe2o3_num =         { path = "fe2o3_num",			optional = true }
-oxedize_fe2o3_o3db_sync =        { path = "fe2o3_o3db_sync",			optional = true }
+oxedize_fe2o3_o3db_sync =   { path = "fe2o3_o3db_sync",		optional = true }
 oxedize_fe2o3_shield =      { path = "fe2o3_shield",		optional = true }
 oxedize_fe2o3_stds =        { path = "fe2o3_stds",			optional = true }
 oxedize_fe2o3_steel =       { path = "fe2o3_steel",			optional = true }

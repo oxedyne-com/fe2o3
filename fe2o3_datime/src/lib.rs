@@ -1,0 +1,134 @@
+//! A comprehensive date and time library for the Hematite ecosystem.
+//!
+//! **fe2o3_datime** provides robust date and time handling with modern features including:
+//! - **Multiple calendar systems**: Gregorian, Julian, Islamic, Japanese, Thai, Minguo, Holocene
+//! - **JDAT serialization**: String, binary, and structured formats with round-trip compatibility
+//! - **Namex integration**: Universal identifiers and efficient local IDs for calendar types
+//! - **Timezone support**: Full IANA TZif integration with DST handling
+//! - **Nanosecond precision**: Clock operations with sub-second accuracy
+//! - **Flexible parsing**: Natural language and ISO 8601 support
+//! - **Comprehensive validation**: Business rules and date/time constraints
+//!
+//! The design emphasizes correctness, performance, and ecosystem integration while
+//! maintaining the Hematite philosophy of minimal external dependencies.
+//!
+//! # Example
+//! ```rust,ignore
+//! use oxedize_fe2o3_datime::{
+//!     calendar::{Calendar, CalendarDate},
+//!     clock::ClockTime,
+//!     time::{CalClock, CalClockZone},
+//! };
+//!
+//! let zone = CalClockZone::new("UTC")?;
+//! let calendar = Calendar::new(); // Default to Gregorian
+//! let date = calendar.date(2024, 3, 15, zone)?;
+//! let time = ClockTime::new(14, 30, 0, 0, zone)?;
+//! let calclock = CalClock::from_date_time(date, time)?;
+//! ```
+//!
+#![forbid(unsafe_code)]
+
+pub mod calendar;
+pub mod clock; 
+pub mod constant;
+pub mod core;
+pub mod format;
+pub mod interval;
+pub mod parser;
+pub mod time;
+pub mod validation;
+
+pub mod prelude {
+    pub use crate::{
+        calendar::{
+            Calendar,
+            CalendarDate,
+            CalendarDay,
+            CalendarDuration,
+            CalendarInterval,
+            CalendarMonth,
+            CalendarRule,
+            CalendarYear,
+            DayIncrementor,
+            MonthPeriod,
+            YearPeriod,
+        },
+        clock::{
+            ClockDuration,
+            ClockFields,
+            ClockHour,
+            ClockInterval,
+            ClockMicroSecond,
+            ClockMilliSecond,
+            ClockMinute,
+            ClockNanoSecond,
+            ClockSecond,
+            ClockTime,
+            HourPeriod,
+            MinutePeriod,
+            PerSecondRated,
+            SecondPeriod,
+        },
+        constant::{
+            DayOfWeek,
+            MonthOfYear,
+            OrdinalEnglish,
+        },
+        core::{
+            AbstractInterval,
+            AbstractPeriod,
+            AbstractTime,
+            Duration,
+            Interval,
+            IntervalList,
+            KnownDay,
+            KnownHour,
+            KnownMinute,
+            KnownMonth,
+            KnownNanoSecond,
+            KnownSecond,
+            KnownYear,
+            Time,
+            TimeField,
+            TimeList,
+            TimeValidation,
+        },
+        format::{
+            CalClockFormatter,
+            FormatPattern,
+            FormatStyle,
+            FormatToken,
+        },
+        interval::{
+            CalClockRange,
+            DateRange,
+            TimeRange,
+            RecurrencePattern,
+            RecurrenceRule,
+            Frequency,
+            Schedule,
+            ScheduleEvent,
+            ScheduleBuilder,
+        },
+        parser::{
+            Parser,
+        },
+        time::{
+            CalClock,
+            CalClockConverter,
+            CalClockDuration,
+            CalClockInterval,
+            CalClockZone,
+            StopWatch,
+            StopWatchMillis,
+        },
+        validation::{
+            CalClockValidator,
+            ValidationError,
+            ValidationResult,
+            ValidationRule,
+            ValidationRules,
+        },
+    };
+}

@@ -1893,6 +1893,7 @@ dependencies = [
  "oxedize_fe2o3_core",
  "oxedize_fe2o3_crypto",
  "oxedize_fe2o3_data",
+ "oxedize_fe2o3_datime",
  "oxedize_fe2o3_file",
  "oxedize_fe2o3_geom",
  "oxedize_fe2o3_hash",
@@ -1980,6 +1981,18 @@ dependencies = [
  "oxedize_fe2o3_core",
  "oxedize_fe2o3_jdat",
  "oxedize_fe2o3_text",
+]
+
+[[package]]
+name = "oxedize_fe2o3_datime"
+version = "0.5.0"
+dependencies = [
+ "oxedize_fe2o3_core",
+ "oxedize_fe2o3_data",
+ "oxedize_fe2o3_jdat",
+ "oxedize_fe2o3_namex",
+ "oxedize_fe2o3_num",
+ "oxedize_fe2o3_stds",
 ]
 
 [[package]]

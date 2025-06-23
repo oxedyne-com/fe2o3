@@ -1,4 +1,4 @@
-//! A library implementing Jason's Data And Type (JDAT)scheme, a typed superset of JSON providing
+//! A library implementing Jason's Data And Type (JDAT) scheme, a typed superset of JSON providing
 //! both text and binary serialisation.
 //!
 //! JDAT extends JSON by adding:
