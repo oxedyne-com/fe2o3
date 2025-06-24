@@ -14,20 +14,20 @@ use crate::{
     },
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     byte::ToBytes,
     rand::Rand,
 };
-use oxedize_fe2o3_data::{
+use oxedyne_fe2o3_data::{
     ring::RingBuffer,
     time::Timestamp,
 };
-use oxedize_fe2o3_iop_crypto::enc::Encrypter;
-use oxedize_fe2o3_iop_db::api::Database;
-use oxedize_fe2o3_iop_hash::api::Hasher;
-use oxedize_fe2o3_jdat::id::NumIdDat;
-use oxedize_fe2o3_syntax::SyntaxRef;
+use oxedyne_fe2o3_iop_crypto::enc::Encrypter;
+use oxedyne_fe2o3_iop_db::api::Database;
+use oxedyne_fe2o3_iop_hash::api::Hasher;
+use oxedyne_fe2o3_jdat::id::NumIdDat;
+use oxedyne_fe2o3_syntax::SyntaxRef;
 
 use std::{
     convert::TryFrom,

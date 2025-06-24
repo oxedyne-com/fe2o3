@@ -10,8 +10,8 @@
 //!
 //! # Example
 //! ```rust
-//! use oxedize_fe2o3_syntax::{Syntax, SyntaxRef};
-//! use oxedize_fe2o3_jdat::kind::Kind;
+//! use oxedyne_fe2o3_syntax::{Syntax, SyntaxRef};
+//! use oxedyne_fe2o3_jdat::kind::Kind;
 //! 
 //! // Create a new syntax
 //! let mut syntax = Syntax::new("example")
@@ -43,7 +43,7 @@
 //! Model](https://en.wikipedia.org/wiki/OSI_model).  This generalises to a command line interface.
 //! Messages are composed of one or more pre-defined commands.  There can be a variable number of
 //! arguments associated with the message and with each command.  There can be a fixed number of
-//! values ([Daticle](oxedize_fe2o3_jdat::daticle::Daticle) of pre-defined `Kind`) for the message
+//! values ([Daticle](oxedyne_fe2o3_jdat::daticle::Daticle) of pre-defined `Kind`) for the message
 //! and for each argument and command.
 //!
 //! Valid examples:

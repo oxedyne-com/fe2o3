@@ -1,4 +1,4 @@
-use oxedize_fe2o3_steel::{
+use oxedyne_fe2o3_steel::{
     app::https::AppWebHandler,
     srv::{
         cfg::ServerConfig,
@@ -17,11 +17,11 @@ use oxedize_fe2o3_steel::{
     },
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     path::NormalPath,
 };
-use oxedize_fe2o3_jdat::version::SemVer;
+use oxedyne_fe2o3_jdat::version::SemVer;
 
 use std::{
     path::Path,

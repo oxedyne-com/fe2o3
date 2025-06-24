@@ -1,4 +1,4 @@
-//use oxedize_fe2o3_shield::{
+//use oxedyne_fe2o3_shield::{
 //    cfg::ServerConfig,
 //    core::Shield,
 //    guard::{
@@ -11,20 +11,20 @@
 //    msg::syntax,
 //};
 //
-//use oxedize_fe2o3_bot::id::BotId;
-//use oxedize_fe2o3_core::{
+//use oxedyne_fe2o3_bot::id::BotId;
+//use oxedyne_fe2o3_core::{
 //    prelude::*,
 //    rand::Rand,
 //};
-//use oxedize_fe2o3_crypto::{
+//use oxedyne_fe2o3_crypto::{
 //    enc::EncryptionScheme,
 //    sign::SignatureScheme,
 //};
-//use oxedize_fe2o3_hash::{
+//use oxedyne_fe2o3_hash::{
 //    csum::ChecksumScheme,
 //    hash::HashScheme,
 //};
-//use oxedize_fe2o3_net::id::{
+//use oxedyne_fe2o3_net::id::{
 //    MessageId,
 //    SessionId,
 //    UserId,
@@ -119,7 +119,7 @@
 //
 //        thread::sleep(Duration::from_secs(3));
 //
-//        for line in oxedize_fe2o3_text::string::to_lines(fmt!("{:?}", shield.user_guard), "  ") {
+//        for line in oxedyne_fe2o3_text::string::to_lines(fmt!("{:?}", shield.user_guard), "  ") {
 //            debug!("{}", line);
 //        }
 //

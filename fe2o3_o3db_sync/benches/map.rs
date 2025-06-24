@@ -9,8 +9,8 @@
 #![feature(test)]
 extern crate test;
 
-use oxedize_fe2o3_core::prelude::*;
-use oxedize_fe2o3_crypto::{
+use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_crypto::{
     hash::HashScheme,
 };
 

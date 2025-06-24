@@ -4,8 +4,8 @@ use crate::{
     usr::UsrKindId,
 };
 
-use oxedize_fe2o3_core::prelude::*;
-use oxedize_fe2o3_num::{
+use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_num::{
     float::{
         Float32,
         Float64,

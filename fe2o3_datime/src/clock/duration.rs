@@ -1,6 +1,6 @@
 use crate::core::Duration;
 
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 
 use std::fmt;
 
@@ -19,7 +19,7 @@ use std::fmt;
 /// # Examples
 ///
 /// ```ignore
-/// use oxedize_fe2o3_datime::clock::ClockDurationres!();
+/// use oxedyne_fe2o3_datime::clock::ClockDurationres!();
 ///
 /// let duration1 = ClockDuration::from_hours(2)res!();
 /// let duration2 = ClockDuration::from_minutes(30)res!();

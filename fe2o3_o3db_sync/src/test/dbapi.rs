@@ -10,11 +10,11 @@ use crate::{
     },
 };
 
-use oxedize_fe2o3_iop_db::api::{
+use oxedyne_fe2o3_iop_db::api::{
     Database,
     RestSchemesOverride,
 };
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     chunk::ChunkConfig,
     id::NumIdDat,

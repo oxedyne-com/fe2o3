@@ -5,7 +5,7 @@ use crate::lib_tui::{
     },
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     channels::{
         simplex,
@@ -25,7 +25,7 @@ use oxedize_fe2o3_core::{
         ThreadController,
     },
 };
-use oxedize_fe2o3_text::lines::TextLines;
+use oxedyne_fe2o3_text::lines::TextLines;
 
 use std::{
     fmt,
@@ -44,14 +44,14 @@ use std::{
 
 #[derive(Clone, Debug)]
 pub struct AppLoggerConsole<ETAG: GenTag>
-    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+    where oxedyne_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
     pub log_chan:   Simplex<Msg<ETAG>>,
     pub app_log:    Arc<RwLock<TextLines<TextType, HighlightType>>>,
 }
 
 impl<ETAG: GenTag> LoggerConsole<ETAG> for AppLoggerConsole<ETAG>
-    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+    where oxedyne_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
     fn go(&mut self) -> ThreadController<Msg<ETAG>> {
         // Logger console thread.  Listens for messages from the LogBot.
@@ -133,7 +133,7 @@ impl<ETAG: GenTag> LoggerConsole<ETAG> for AppLoggerConsole<ETAG>
 }
 
 impl<ETAG: GenTag + fmt::Debug + Send + Sync> AppLoggerConsole<ETAG>
-    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+    where oxedyne_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
     pub fn new(
         app_log: Arc<RwLock<TextLines<TextType, HighlightType>>>,

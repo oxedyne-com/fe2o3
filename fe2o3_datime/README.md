@@ -38,11 +38,11 @@ A comprehensive date and time library for the Hematite ecosystem with modern ser
 ## Quick Start
 
 ```rust
-use oxedize_fe2o3_datime::{
+use oxedyne_fe2o3_datime::{
     calendar::Calendar,
     time::{CalClock, CalClockZone},
 };
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 
 // Create dates in different calendar systems
 let gregorian = Calendar::Gregorian;
@@ -72,7 +72,7 @@ let datetime_binary = res!(now.to_dat_binary()); // 16 bytes
 ### Configuration with Multiple Formats
 
 ```rust
-use oxedize_fe2o3_jdat::prelude::*;
+use oxedyne_fe2o3_jdat::prelude::*;
 
 // User-friendly configuration
 #[derive(FromDatMap, ToDatMap)]
@@ -109,7 +109,7 @@ let json_response = res!(api_response.encode_string());
 ### Universal Calendar Identification
 
 ```rust
-use oxedize_fe2o3_namex::id::InNamex;
+use oxedyne_fe2o3_namex::id::InNamex;
 
 // Get universal 256-bit identifier
 let namex_id = res!(Calendar::Gregorian.name_id());
@@ -171,11 +171,11 @@ fe2o3_datime seamlessly integrates with other Hematite components:
 
 ```rust
 // OLD API (calclock)
-use oxedize_fe2o3_calclock::calendar::CalendarDate;
+use oxedyne_fe2o3_calclock::calendar::CalendarDate;
 let date = CalendarDate::new(2024, 1, 15, zone)?;
 
 // NEW API (datime)
-use oxedize_fe2o3_datime::calendar::Calendar;
+use oxedyne_fe2o3_datime::calendar::Calendar;
 let calendar = Calendar::new(); // Default Gregorian
 let date = res!(calendar.date(2024, 1, 15, zone));
 ```

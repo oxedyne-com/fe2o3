@@ -1,4 +1,4 @@
-use oxedize_fe2o3_syntax::{
+use oxedyne_fe2o3_syntax::{
     arg::{
         Arg,
         ArgConfig,
@@ -14,12 +14,12 @@ use oxedize_fe2o3_syntax::{
     key::Key,
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     map::MapRec,
     test::test_it,
 };
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     version::SemVer,
 };

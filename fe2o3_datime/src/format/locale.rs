@@ -1,5 +1,5 @@
 use crate::format::FormatPattern;
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 
 use std::{
     collections::HashMap,
@@ -16,8 +16,8 @@ use std::{
 /// # Examples
 ///
 /// ```ignore
-/// use oxedize_fe2o3_datime::format::{Locale, CalClockFormatter}res!();
-/// use oxedize_fe2o3_datime::time::CalClockres!();
+/// use oxedyne_fe2o3_datime::format::{Locale, CalClockFormatter}res!();
+/// use oxedyne_fe2o3_datime::time::CalClockres!();
 ///
 /// let calclock = CalClock::now_utc()?res!();
 /// let formatter = CalClockFormatter::new()res!();

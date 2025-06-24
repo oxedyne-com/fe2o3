@@ -2,7 +2,7 @@
 /// Captures and propagates a `RwLock` poisoning error when reading.
 ///
 ///```
-/// use oxedize_fe2o3_core::prelude::*;
+/// use oxedyne_fe2o3_core::prelude::*;
 /// use std::sync::{std::sync::Arc, RwLock};
 /// 
 /// fn main() -> Outcome<()> {
@@ -42,7 +42,7 @@ macro_rules! lock_read {
 /// Captures and propagates a `RwLock` poisoning error when writing.
 ///
 ///```
-/// use oxedize_fe2o3_core::prelude::*;
+/// use oxedyne_fe2o3_core::prelude::*;
 /// use std::sync::{std::sync::Arc, RwLock};
 /// 
 /// fn main() -> Outcome<()> {

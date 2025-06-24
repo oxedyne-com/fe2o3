@@ -18,14 +18,14 @@ use crate::{
     },
 };
 
-use oxedize_fe2o3_iop_db::api::{
+use oxedyne_fe2o3_iop_db::api::{
     RestSchemesOverride,
 };
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     id::NumIdDat,
 };
-use oxedize_fe2o3_hash::csum::ChecksumScheme;
+use oxedyne_fe2o3_hash::csum::ChecksumScheme;
 
 use std::{
     collections::BTreeMap,

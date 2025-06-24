@@ -11,26 +11,26 @@ use crate::{
     },
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     log::{
         bot::FileConfig,
     },
 };
-use oxedize_fe2o3_crypto::{
+use oxedyne_fe2o3_crypto::{
     keys::Wallet,
 };
-use oxedize_fe2o3_data::{
+use oxedyne_fe2o3_data::{
     ring::RingBuffer,
     time::Timestamped,
 };
-use oxedize_fe2o3_hash::{
+use oxedyne_fe2o3_hash::{
     kdf::KeyDerivationScheme,
 };
-use oxedize_fe2o3_iop_hash::{
+use oxedyne_fe2o3_iop_hash::{
     kdf::KeyDeriver,
 };
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     cfg::Config,
     file::{
@@ -42,14 +42,14 @@ use oxedize_fe2o3_jdat::{
         enc::EncoderConfig,
     },
 };
-use oxedize_fe2o3_tui::lib_tui::{
+use oxedyne_fe2o3_tui::lib_tui::{
     repl::{
         Evaluation,
         ShellConfig,
     },
     input::UserInput,
 };
-use oxedize_fe2o3_namex::InNamex;
+use oxedyne_fe2o3_namex::InNamex;
 
 use std::{
     collections::BTreeMap,

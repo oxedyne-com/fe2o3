@@ -6,17 +6,17 @@ use crate::srv::{
     dev::refresh::DevRefreshManager,
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
 };
-use oxedize_fe2o3_iop_crypto::enc::Encrypter;
-use oxedize_fe2o3_iop_db::api::Database;
-use oxedize_fe2o3_iop_hash::api::Hasher;
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_iop_crypto::enc::Encrypter;
+use oxedyne_fe2o3_iop_db::api::Database;
+use oxedyne_fe2o3_iop_hash::api::Hasher;
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     id::NumIdDat,
 };
-use oxedize_fe2o3_net::{
+use oxedyne_fe2o3_net::{
     http::{
         handler::WebHandler,
         msg::HttpMessage,
@@ -28,7 +28,7 @@ use oxedize_fe2o3_net::{
         handler::WebSocketHandler,
     },
 };
-use oxedize_fe2o3_syntax::{
+use oxedyne_fe2o3_syntax::{
     SyntaxRef,
     msg::{
         Msg,

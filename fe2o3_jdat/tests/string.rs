@@ -1,4 +1,4 @@
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     tup2dat,
     tup3dat,
@@ -21,12 +21,12 @@ use oxedize_fe2o3_jdat::{
     },
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     test::test_it,
 };
-use oxedize_fe2o3_num::prelude::*;
-use oxedize_fe2o3_text::string::Stringer;
+use oxedyne_fe2o3_num::prelude::*;
+use oxedyne_fe2o3_text::string::Stringer;
 
 use std::{
     collections::BTreeMap,

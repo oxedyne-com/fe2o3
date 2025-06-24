@@ -12,32 +12,32 @@ use crate::{
     },
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     path::NormalPath,
 };
-use oxedize_fe2o3_crypto::{
+use oxedyne_fe2o3_crypto::{
     enc::EncryptionScheme,
     keys::Wallet,
 };
-use oxedize_fe2o3_hash::{
+use oxedyne_fe2o3_hash::{
     csum::ChecksumScheme,
     hash::HashScheme,
     kdf::KeyDerivationScheme,
 };
-use oxedize_fe2o3_iop_crypto::{
+use oxedyne_fe2o3_iop_crypto::{
     keys::KeyManager,
     enc::Encrypter,
 };
-use oxedize_fe2o3_iop_hash::kdf::KeyDeriver;
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_iop_hash::kdf::KeyDeriver;
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     file::JdatFile,
     string::enc::EncoderConfig,
 };
-use oxedize_fe2o3_net::dns::Fqdn;
-use oxedize_fe2o3_o3db_sync::O3db;
-use oxedize_fe2o3_syntax::{
+use oxedyne_fe2o3_net::dns::Fqdn;
+use oxedyne_fe2o3_o3db_sync::O3db;
+use oxedyne_fe2o3_syntax::{
     core::SyntaxRef,
     help::Help,
     msg::{
@@ -46,8 +46,8 @@ use oxedize_fe2o3_syntax::{
     },
     opt::OptionRefVec,
 };
-use oxedize_fe2o3_text::base2x;
-use oxedize_fe2o3_tui::lib_tui::{
+use oxedyne_fe2o3_text::base2x;
+use oxedyne_fe2o3_tui::lib_tui::{
     cmds,
     repl::{
         Evaluation,
@@ -58,7 +58,7 @@ use oxedize_fe2o3_tui::lib_tui::{
     },
     input::UserInput,
 };
-use oxedize_fe2o3_namex::InNamex;
+use oxedyne_fe2o3_namex::InNamex;
 
 use std::{
     collections::BTreeMap,

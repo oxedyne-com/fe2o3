@@ -8,9 +8,9 @@ use crate::{
     data::core::Key,
 };
 
-use oxedize_fe2o3_data::time::Timestamp;
-use oxedize_fe2o3_iop_db::api::Meta;
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_data::time::Timestamp;
+use oxedyne_fe2o3_iop_db::api::Meta;
+use oxedyne_fe2o3_jdat::{
     daticle::Dat,
     id::NumIdDat,
 };

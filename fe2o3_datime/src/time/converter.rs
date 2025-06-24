@@ -4,7 +4,7 @@ use crate::{
 	time::{CalClock, CalClockZone},
 };
 
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 
 use std::sync::Mutex;
 
@@ -34,7 +34,7 @@ use std::sync::Mutex;
 /// # Examples
 ///
 /// ```ignore
-/// use oxedize_fe2o3_datime::time::{CalClockConverter, CalClockZone}res!();
+/// use oxedyne_fe2o3_datime::time::{CalClockConverter, CalClockZone}res!();
 ///
 /// let zone = res!(CalClockZone::new("America/New_York"))res!();
 /// let mut converter = CalClockConverter::new(zone)res!();

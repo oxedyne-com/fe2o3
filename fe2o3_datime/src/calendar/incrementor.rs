@@ -1,4 +1,4 @@
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 
 /// Helper for incrementing days in calendar operations.
 #[derive(Clone, Debug)]

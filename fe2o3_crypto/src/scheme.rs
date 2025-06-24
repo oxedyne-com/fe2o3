@@ -1,14 +1,14 @@
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     mem::Extract,
 };
-use oxedize_fe2o3_data::time::Timestamp;
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_data::time::Timestamp;
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     try_extract_tup2dat,
     tup2dat,
 };
-use oxedize_fe2o3_namex::id::LocalId as SchemeLocalId;
+use oxedyne_fe2o3_namex::id::LocalId as SchemeLocalId;
 
 #[derive(Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub struct SchemeTimestamp {

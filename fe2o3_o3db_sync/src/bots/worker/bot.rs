@@ -9,11 +9,11 @@ use crate::{
     file::zdir::ZoneDir,
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     channels::Simplex,
     thread::Semaphore,
 };
-use oxedize_fe2o3_jdat::id::NumIdDat;
+use oxedyne_fe2o3_jdat::id::NumIdDat;
 
 #[macro_export]
 macro_rules! workerbot_methods { () => {

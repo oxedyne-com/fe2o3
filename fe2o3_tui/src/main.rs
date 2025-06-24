@@ -32,17 +32,17 @@ use crate::{
     },
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     log::{
         bot::FileConfig,
         console::LoggerConsole,
     },
 };
-use oxedize_fe2o3_geom::{
+use oxedyne_fe2o3_geom::{
     rect::AbsRect,
 };
-use oxedize_fe2o3_text::{
+use oxedyne_fe2o3_text::{
     Text,
     lines::TextLines,
 };

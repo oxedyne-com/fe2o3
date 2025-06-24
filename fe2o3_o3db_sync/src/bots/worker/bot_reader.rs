@@ -31,12 +31,12 @@ use crate::{
     },
 };
 
-use oxedize_fe2o3_iop_db::api::Meta;
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_iop_db::api::Meta;
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     id::NumIdDat,
 };
-use oxedize_fe2o3_iop_hash::csum::Checksummer;
+use oxedyne_fe2o3_iop_hash::csum::Checksummer;
 
 use std::{
     fs::File,

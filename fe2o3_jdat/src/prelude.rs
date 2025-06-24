@@ -34,7 +34,7 @@ pub use crate::{
         OrdDaticleMap,
     },
 };
-pub use oxedize_fe2o3_core::{
+pub use oxedyne_fe2o3_core::{
     byte::{
         // These anonymous imports allow the trait methods to be used, but still require
         // explicit importation when implementing the traits.

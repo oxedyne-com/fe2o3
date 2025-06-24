@@ -1,10 +1,10 @@
 use crate::prelude::*;
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     byte::ToBytes,
 };
-use oxedize_fe2o3_num::float::{
+use oxedyne_fe2o3_num::float::{
     Float32,
     Float64,
 };

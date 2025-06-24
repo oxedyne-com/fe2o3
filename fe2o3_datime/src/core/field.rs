@@ -1,4 +1,4 @@
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 
 /// Enumeration of time field types.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

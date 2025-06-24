@@ -5,8 +5,8 @@ use crate::{
 	time::{CalClockDuration, CalClockZone},
 };
 
-use oxedize_fe2o3_core::prelude::*;
-use oxedize_fe2o3_jdat::{prelude::*, tup2dat};
+use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_jdat::{prelude::*, tup2dat};
 
 use std::{
 	cmp::Ordering,
@@ -28,7 +28,7 @@ use std::{
 /// # Examples
 ///
 /// ```ignore
-/// use oxedize_fe2o3_datime::{
+/// use oxedyne_fe2o3_datime::{
 ///     calendar::CalendarDate,
 ///     clock::ClockTime,
 ///     time::{CalClock, CalClockZone},

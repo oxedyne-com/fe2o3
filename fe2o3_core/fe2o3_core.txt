@@ -52,7 +52,7 @@ pub fn derive_new(input: TokenStream) -> TokenStream {
 }
 File: Cargo.toml
 [package]
-name = "oxedize_fe2o3_core"
+name = "oxedyne_fe2o3_core"
 version = "0.5.0"
 authors = ["h00gs <hello@oxedize.com>"]
 edition = "2021"
@@ -60,7 +60,7 @@ license = "BSD-2-Clause/Apache-2.0"
 description = "Hematite core library, consisting mostly of relatively simple foundational types and macros."
 repository = "https:
 [dependencies]
-oxedize_fe2o3_stds 			= { path = "../fe2o3_stds" }
+oxedyne_fe2o3_stds 			= { path = "../fe2o3_stds" }
 new							= { path = "new" }
 base64 = "0.13.0"
 flume = "0.10.9" 
@@ -660,7 +660,7 @@ macro_rules! new_type {
                 &mut self.0
             }
         }
-        impl oxedize_fe2o3_core::conv::IntoInner for $newtyp {
+        impl oxedyne_fe2o3_core::conv::IntoInner for $newtyp {
             type Inner = $wrapped;
             fn into_inner(self) -> Self::Inner {
                 self.0
@@ -681,7 +681,7 @@ macro_rules! new_type {
                 &mut self.0
             }
         }
-        impl oxedize_fe2o3_core::conv::IntoInner for $newtyp {
+        impl oxedyne_fe2o3_core::conv::IntoInner for $newtyp {
             type Inner = $wrapped;
             fn into_inner(self) -> Self::Inner {
                 self.0
@@ -701,7 +701,7 @@ macro_rules! new_type_priv {
                 &self.0
             }
         }
-        impl oxedize_fe2o3_core::conv::IntoInner for $newtyp {
+        impl oxedyne_fe2o3_core::conv::IntoInner for $newtyp {
             type Inner = $wrapped;
             fn into_inner(self) -> Self::Inner {
                 self.0
@@ -717,7 +717,7 @@ macro_rules! new_type_priv {
                 &self.0
             }
         }
-        impl oxedize_fe2o3_core::conv::IntoInner for $newtyp {
+        impl oxedyne_fe2o3_core::conv::IntoInner for $newtyp {
             type Inner = $wrapped;
             fn into_inner(self) -> Self::Inner {
                 self.0
@@ -854,7 +854,7 @@ macro_rules! fmt {
 #[macro_export]
 macro_rules! fmt_typ {
     () => (String::from(""));
-    ($v:expr) => (oxedize_fe2o3_core::format_type($v));
+    ($v:expr) => (oxedyne_fe2o3_core::format_type($v));
 }
 #[macro_export]
 macro_rules! str {
@@ -1185,7 +1185,7 @@ macro_rules! try_range {
 #[macro_export]
 macro_rules! impls_for_native_integer {
     ($t:ty, $n:literal) => {
-        impl oxedize_fe2o3_core::byte::FromBytes for $t {
+        impl oxedyne_fe2o3_core::byte::FromBytes for $t {
             fn from_bytes(buf: &[u8]) -> Outcome<(Self, usize)> {
                 const BYTE_LEN: usize = std::mem::size_of::<$t>();
                 if buf.len() < BYTE_LEN {
@@ -1202,7 +1202,7 @@ macro_rules! impls_for_native_integer {
                 Ok((n, BYTE_LEN))
             }
         }
-        impl oxedize_fe2o3_core::byte::FromByteArray for $t {
+        impl oxedyne_fe2o3_core::byte::FromByteArray for $t {
             fn from_byte_array<const L: usize>(buf: [u8; L]) -> Outcome<Self> {
                 const BYTE_LEN: usize = std::mem::size_of::<$t>();
                 if L < BYTE_LEN {
@@ -1218,18 +1218,18 @@ macro_rules! impls_for_native_integer {
                 )))
             }
         }
-        impl oxedize_fe2o3_core::byte::ToBytes for $t {
+        impl oxedyne_fe2o3_core::byte::ToBytes for $t {
             fn to_bytes(&self, mut buf: Vec<u8>) -> Outcome<Vec<u8>> {
                 buf.extend_from_slice(&self.to_be_bytes());
                 Ok(buf)
             }
         }
-        impl oxedize_fe2o3_core::byte::ToByteArray<$n> for $t {
+        impl oxedyne_fe2o3_core::byte::ToByteArray<$n> for $t {
             fn to_byte_array(&self) -> [u8; $n] {
                 self.to_be_bytes()
             }
         }
-        impl oxedize_fe2o3_core::string::ToHexString for $t {}
+        impl oxedyne_fe2o3_core::string::ToHexString for $t {}
     }
 }
 File: src/alt.rs
@@ -1912,7 +1912,7 @@ impl NormalPath for Path {
 }
 File: src/error.rs
 use crate::GenTag;
-use oxedize_fe2o3_stds::chars::Term;
+use oxedyne_fe2o3_stds::chars::Term;
 use std::{
     fmt,
     io,
@@ -2695,7 +2695,7 @@ pub fn switch_to_logger_console<
     Ok(())
 }
 pub trait LoggerConsole<ETAG: GenTag>
-    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+    where oxedyne_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
     fn new() -> Self;
     fn go(&mut self) -> ThreadController<Msg<ETAG>>;
@@ -2704,12 +2704,12 @@ pub trait LoggerConsole<ETAG: GenTag>
 }
 #[derive(Clone, Debug)]
 pub struct StdoutLoggerConsole<ETAG: GenTag>
-    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+    where oxedyne_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
     pub chan:   Simplex<Msg<ETAG>>,
 }
 impl<ETAG: GenTag> LoggerConsole<ETAG> for StdoutLoggerConsole<ETAG>
-    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+    where oxedyne_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
     fn new() -> Self {
         Self {
@@ -2751,13 +2751,13 @@ impl<ETAG: GenTag> LoggerConsole<ETAG> for StdoutLoggerConsole<ETAG>
 }
 #[derive(Clone, Debug)]
 pub struct MultiStreamLoggerConsole<ETAG: GenTag>
-    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+    where oxedyne_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
     pub chan:       Simplex<Msg<ETAG>>,
     pub streams:    Arc<RwLock<HashMap<String, Simplex<String>>>>,
 }
 impl<ETAG: GenTag> LoggerConsole<ETAG> for MultiStreamLoggerConsole<ETAG>
-    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+    where oxedyne_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
     fn new() -> Self {
         Self {
@@ -2859,7 +2859,7 @@ macro_rules! log {
     ($level:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: $level,
-            src: oxedize_fe2o3_core::log::base::Source {
+            src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
                 file: file!(),
                 line: line!(),
@@ -2872,7 +2872,7 @@ macro_rules! log {
     ($level:expr, $stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: $level,
-            src: oxedize_fe2o3_core::log::base::Source {
+            src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
                 file: file!(),
                 line: line!(),
@@ -2888,7 +2888,7 @@ macro_rules! error {
     ($e:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Error,
-            src: oxedize_fe2o3_core::log::base::Source {
+            src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
                 file: file!(),
                 line: line!(),
@@ -2901,7 +2901,7 @@ macro_rules! error {
     ($e:expr, $stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Error,
-            src: oxedize_fe2o3_core::log::base::Source {
+            src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
                 file: file!(),
                 line: line!(),
@@ -2914,7 +2914,7 @@ macro_rules! error {
     ($stream:expr, $e:expr) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Error,
-            src: oxedize_fe2o3_core::log::base::Source {
+            src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
                 file: file!(),
                 line: line!(),
@@ -2927,7 +2927,7 @@ macro_rules! error {
     ($e:expr) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Error,
-            src: oxedize_fe2o3_core::log::base::Source {
+            src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
                 file: file!(),
                 line: line!(),
@@ -2943,7 +2943,7 @@ macro_rules! fault {
     ($lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Error,
-            src: oxedize_fe2o3_core::log::base::Source {
+            src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
                 file: file!(),
                 line: line!(),
@@ -2956,7 +2956,7 @@ macro_rules! fault {
     ($stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Error,
-            src: oxedize_fe2o3_core::log::base::Source {
+            src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
                 file: file!(),
                 line: line!(),
@@ -2972,7 +2972,7 @@ macro_rules! warn {
     ($lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Warn,
-            src: oxedize_fe2o3_core::log::base::Source {
+            src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
                 file: file!(),
                 line: line!(),
@@ -2985,7 +2985,7 @@ macro_rules! warn {
     ($stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Warn,
-            src: oxedize_fe2o3_core::log::base::Source {
+            src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
                 file: file!(),
                 line: line!(),
@@ -3001,7 +3001,7 @@ macro_rules! info {
     ($lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Info,
-            src: oxedize_fe2o3_core::log::base::Source {
+            src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
                 file: file!(),
                 line: line!(),
@@ -3014,7 +3014,7 @@ macro_rules! info {
     ($stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Info,
-            src: oxedize_fe2o3_core::log::base::Source {
+            src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
                 file: file!(),
                 line: line!(),
@@ -3030,7 +3030,7 @@ macro_rules! test {
     ($lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Test,
-            src: oxedize_fe2o3_core::log::base::Source {
+            src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
                 file: file!(),
                 line: line!(),
@@ -3043,7 +3043,7 @@ macro_rules! test {
     ($stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Test,
-            src: oxedize_fe2o3_core::log::base::Source {
+            src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
                 file: file!(),
                 line: line!(),
@@ -3059,7 +3059,7 @@ macro_rules! debug {
     ($lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Debug,
-            src: oxedize_fe2o3_core::log::base::Source {
+            src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
                 file: file!(),
                 line: line!(),
@@ -3072,7 +3072,7 @@ macro_rules! debug {
     ($stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Debug,
-            src: oxedize_fe2o3_core::log::base::Source {
+            src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
                 file: file!(),
                 line: line!(),
@@ -3088,7 +3088,7 @@ macro_rules! trace {
     ($lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Trace,
-            src: oxedize_fe2o3_core::log::base::Source {
+            src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
                 file: file!(),
                 line: line!(),
@@ -3101,7 +3101,7 @@ macro_rules! trace {
     ($stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Trace,
-            src: oxedize_fe2o3_core::log::base::Source {
+            src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
                 file: file!(),
                 line: line!(),
@@ -3115,7 +3115,7 @@ macro_rules! trace {
 #[macro_export]
 macro_rules! log_finish {
     () => {
-        LOG.send_in(bot_log::Msg::Finish(oxedize_fe2o3_core::log::base::Source {
+        LOG.send_in(bot_log::Msg::Finish(oxedyne_fe2o3_core::log::base::Source {
             tid: std::thread::current().id(),
             file: file!(),
             line: line!(),
@@ -3125,7 +3125,7 @@ macro_rules! log_finish {
 #[macro_export]
 macro_rules! log_in_finish_wait {
     () => {
-        LOG.send_in(bot_log::Msg::Finish(oxedize_fe2o3_core::log::base::Source {
+        LOG.send_in(bot_log::Msg::Finish(oxedyne_fe2o3_core::log::base::Source {
             tid: std::thread::current().id(),
             file: file!(),
             line: line!(),
@@ -3134,7 +3134,7 @@ macro_rules! log_in_finish_wait {
             match LOG.chan_in.hopt.lock() {
                 Ok(mut inner) => inner.take(),
                 Err(e) => {
-                    let err = oxedize_fe2o3_core::log::base::LogWaitError::LockError(fmt!("{}", e));
+                    let err = oxedyne_fe2o3_core::log::base::LogWaitError::LockError(fmt!("{}", e));
                     return Err(Error::Local(ErrMsg {
                         tags: &[ErrTag::Lock],
                         msg: fmt!("{}", err),
@@ -3143,7 +3143,7 @@ macro_rules! log_in_finish_wait {
             }
         } {
             if let Err(e) = handle.join() {
-                let err = oxedize_fe2o3_core::log::base::LogWaitError::JoinError(fmt!("{:?}", e));
+                let err = oxedyne_fe2o3_core::log::base::LogWaitError::JoinError(fmt!("{:?}", e));
                 return Err(Error::Local(ErrMsg {
                     tags: &[ErrTag::Thread],
                     msg: fmt!("{}", err),
@@ -3155,7 +3155,7 @@ macro_rules! log_in_finish_wait {
 #[macro_export]
 macro_rules! log_out_finish_wait {
     () => {
-        res!(LOG.send_out(bot_log::Msg::Finish(oxedize_fe2o3_core::log::base::Source {
+        res!(LOG.send_out(bot_log::Msg::Finish(oxedyne_fe2o3_core::log::base::Source {
             tid: std::thread::current().id(),
             file: file!(),
             line: line!(),
@@ -3166,7 +3166,7 @@ macro_rules! log_out_finish_wait {
                 let x = match unlocked_chan_out.hopt.lock() {
                     Ok(mut inner) => inner.take(),
                     Err(e) => {
-                        let err = oxedize_fe2o3_core::log::base::LogWaitError::LockError(fmt!("{}", e));
+                        let err = oxedyne_fe2o3_core::log::base::LogWaitError::LockError(fmt!("{}", e));
                         return Err(Error::Local(ErrMsg {
                             tags: &[ErrTag::Lock],
                             msg: fmt!("{}", err),
@@ -3176,7 +3176,7 @@ macro_rules! log_out_finish_wait {
                 x
             } {
                 if let Err(e) = handle.join() {
-                    let err = oxedize_fe2o3_core::log::base::LogWaitError::JoinError(fmt!("{:?}", e));
+                    let err = oxedyne_fe2o3_core::log::base::LogWaitError::JoinError(fmt!("{:?}", e));
                     return Err(Error::Local(ErrMsg {
                         tags: &[ErrTag::Thread],
                         msg: fmt!("{}", err),
@@ -3218,7 +3218,7 @@ macro_rules! log_set_config {
             let mut unlocked_cfg = lock_write!(LOG.cfg);
             *unlocked_cfg = $cfg;
         }
-        LOG.send_in(bot_log::Msg::Update(oxedize_fe2o3_core::log::base::Source {
+        LOG.send_in(bot_log::Msg::Update(oxedyne_fe2o3_core::log::base::Source {
             tid: std::thread::current().id(),
             file: file!(),
             line: line!(),
@@ -3266,7 +3266,7 @@ macro_rules! log_get_file_path {
 #[macro_export]
 macro_rules! log_get_streams {
     ($wait:expr) => {{
-        let simplex = oxedize_fe2o3_core::channels::simplex();
+        let simplex = oxedyne_fe2o3_core::channels::simplex();
         res!(LOG.send_out(bot_log::Msg::GetStreams(simplex.clone())));
         match simplex.recv_timeout($wait) {
             Recv::Empty => Ok(None),
@@ -3304,7 +3304,7 @@ use crate::{
         ThreadController,
     },
 };
-use oxedize_fe2o3_stds::chars::Term;
+use oxedyne_fe2o3_stds::chars::Term;
 use std::{
     fmt,
     str::FromStr,
@@ -3317,14 +3317,14 @@ use std::{
 };
 use once_cell::sync::Lazy;
 pub struct Logger<ETAG: GenTag>
-    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+    where oxedyne_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
     pub chan_in:    ThreadController<Msg<ETAG>>,
     pub chan_out:   Arc<RwLock<ThreadController<Msg<ETAG>>>>,
     pub cfg:        Arc<RwLock<Config<ETAG>>>,
 }
 impl<ETAG: GenTag> Logger<ETAG>
-    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+    where oxedyne_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
     pub fn send_in(&self, msg: Msg<ETAG>) {
         match self.chan_in.chan.send(msg.clone()) {
@@ -3508,7 +3508,7 @@ use crate::{
         },
     },
 };
-use oxedize_fe2o3_stds::chars::Term;
+use oxedyne_fe2o3_stds::chars::Term;
 use std::{
     collections::HashMap,
     fs::{
@@ -3538,7 +3538,7 @@ use flate2::{
 };
 pub use humantime::format_rfc3339_seconds as timefmt;
 #[derive(Clone, Debug)]
-pub enum Msg<ETAG: GenTag> where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error {
+pub enum Msg<ETAG: GenTag> where oxedyne_fe2o3_core::error::Error<ETAG>: std::error::Error {
     AddStream(String, Simplex<String>),
     Base(bot::BaseMsg<ETAG>),
     Console(String, String),
@@ -3558,21 +3558,21 @@ impl<
     ETAG: GenTag,
 >
     bot::CtrlMsg for Msg<ETAG>
-    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+    where oxedyne_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
     fn finish() -> Self { Msg::Base(bot::BaseMsg::Finish) }
     fn ready() -> Self { Msg::Base(bot::BaseMsg::Ready) }
 }
 #[derive(Clone, Debug, Default)]
 pub struct Config<ETAG: GenTag>
-    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+    where oxedyne_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
     pub file:       Option<FileConfig>,
     pub console:    Option<Simplex<Msg<ETAG>>>,
     pub level:      LogLevel,
 }
 impl<ETAG: GenTag> Config<ETAG>
-    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+    where oxedyne_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
     pub fn path(&self) -> Option<PathBuf> {
         if let Some(fcfg) = self.file.as_ref() {
@@ -3643,14 +3643,14 @@ impl FileConfig {
 }
 #[derive(Default)]
 pub struct LogBot<ETAG: GenTag>
-    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+    where oxedyne_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
     file:   Option<File>,   
     cfg:    Arc<RwLock<Config<ETAG>>>,
     chan:   Simplex<Msg<ETAG>>,
 }
 impl<ETAG: GenTag> LogBot<ETAG>
-    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+    where oxedyne_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
     pub fn new() -> Self {
         Self::default()
@@ -3971,7 +3971,7 @@ impl<ETAG: GenTag> LogBot<ETAG>
 }
 File: src/prelude.rs
 pub use crate::{
-    self as oxedize_fe2o3_core,
+    self as oxedyne_fe2o3_core,
     byte::B32,
     Outcome,
     GenTag,

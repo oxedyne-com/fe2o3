@@ -18,8 +18,8 @@
 /// assert_eq!(loc.frag, "section");
 /// ```
 use crate::file::RequestPath;
-use oxedize_fe2o3_core::prelude::*;
-use oxedize_fe2o3_jdat::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_jdat::prelude::*;
 
 use std::fmt;
 

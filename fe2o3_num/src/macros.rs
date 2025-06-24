@@ -2,8 +2,8 @@
 /// Create an integer of arbitrary size using primitive integers.  Can return an error.
 ///
 /// ```
-/// use oxedize_fe2o3_core::prelude::*; // To handle the possible error.
-/// use oxedize_fe2o3_num::prelude::*;
+/// use oxedyne_fe2o3_core::prelude::*; // To handle the possible error.
+/// use oxedyne_fe2o3_num::prelude::*;
 ///
 /// fn main() -> Outcome<()> {
 ///     let n = res!(aint!(fmt!("{}0", u128::MAX)));
@@ -20,8 +20,8 @@ macro_rules! aint {
 ///// Create an integer of arbitrary size from a str.
 /////
 ///// ```
-///// use oxedize_fe2o3_core::prelude::*;
-///// use oxedize_fe2o3_num::aintstr;
+///// use oxedyne_fe2o3_core::prelude::*;
+///// use oxedyne_fe2o3_num::aintstr;
 ///// use std::str::FromStr;
 ///// use num_bigint::BigInt;
 /////
@@ -48,8 +48,8 @@ macro_rules! aint {
 /// Create an arbitrary decimal via string conversion. Can return an error.
 ///
 /// ```
-/// use oxedize_fe2o3_core::prelude::*; // To handle the possible error.
-/// use oxedize_fe2o3_num::prelude::*;
+/// use oxedyne_fe2o3_core::prelude::*; // To handle the possible error.
+/// use oxedyne_fe2o3_num::prelude::*;
 ///
 /// fn main() -> Outcome<()> {
 ///     let n = res!(adec!(fmt!("{}0", f64::MAX)));

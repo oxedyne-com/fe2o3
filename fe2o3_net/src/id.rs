@@ -1,4 +1,4 @@
-use oxedize_fe2o3_jdat::id::IdDat;
+use oxedyne_fe2o3_jdat::id::IdDat;
 
 use std::{
     mem,

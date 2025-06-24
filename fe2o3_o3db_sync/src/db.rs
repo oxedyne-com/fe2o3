@@ -31,8 +31,8 @@ use crate::{
     file::core::find_files,
 };
 
-use oxedize_fe2o3_bot::Bot;
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_bot::Bot;
+use oxedyne_fe2o3_core::{
     channels::{
         simplex,
         Simplex,
@@ -42,17 +42,17 @@ use oxedize_fe2o3_core::{
     rand::RanDef,
     thread::thread_channel,
 };
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     cfg::Config,
     file::JdatMapFile,
     id::NumIdDat,
 };
-use oxedize_fe2o3_namex::id::{
+use oxedyne_fe2o3_namex::id::{
     InNamex,
     NamexId,
 };
-use oxedize_fe2o3_text::string::Stringer;
+use oxedyne_fe2o3_text::string::Stringer;
 
 use std::{
     fs,
@@ -76,13 +76,13 @@ use crossbeam_utils::sync::WaitGroup;
 /// # Storage specifications
 /// The user can change the various data transformation schemes in three ways.
 /// ## Invocation
-/// Upon invocation, rest schemes conforming to the traits `oxedize_fe2o3_iop_hash::csum::Checksummer`,
-/// `oxedize_fe2o3_iop_hash::api::Hasher`, `oxedize_fe2o3_iop_crypto::enc::Encrypter` and
-/// `oxedize_fe2o3_iop_crypto::sign::Signer` can be given to the `O3db` instance.  When a scheme is not
+/// Upon invocation, rest schemes conforming to the traits `oxedyne_fe2o3_iop_hash::csum::Checksummer`,
+/// `oxedyne_fe2o3_iop_hash::api::Hasher`, `oxedyne_fe2o3_iop_crypto::enc::Encrypter` and
+/// `oxedyne_fe2o3_iop_crypto::sign::Signer` can be given to the `O3db` instance.  When a scheme is not
 /// provided, a hardwired default is set.
 /// ## Configuration
 /// Default schemes can be overridden at invocation or upon any subsequent configuration file
-/// changes.  Schemes are limited to those provided in `oxedize_fe2o3_hash` and `oxedize_fe2o3_crypto`.
+/// changes.  Schemes are limited to those provided in `oxedyne_fe2o3_hash` and `oxedyne_fe2o3_crypto`.
 /// ## Per value basis
 /// Finally, schemes for storage of data at rest can be set explicitely for any key-value pair,
 /// overriding invocation or default schemes.

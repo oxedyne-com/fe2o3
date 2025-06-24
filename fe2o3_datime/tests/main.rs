@@ -6,7 +6,7 @@ mod integration_demo;
 mod new_features;
 mod time;
 
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 
 #[test]
 fn main() -> Outcome<()> {

@@ -8,7 +8,7 @@ use crate::{
     key::Key,
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     byte::{
         Encoding,
@@ -21,8 +21,8 @@ use oxedize_fe2o3_core::{
         Recursive,
     },
 };
-use oxedize_fe2o3_jdat::prelude::*;
-use oxedize_fe2o3_text::split::StringSplitter;
+use oxedyne_fe2o3_jdat::prelude::*;
+use oxedyne_fe2o3_text::split::StringSplitter;
 
 use std::{
     collections::{

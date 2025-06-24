@@ -6,20 +6,20 @@ use crate::{
     //},
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     path::NormPathBuf,
     //alt::DefAlt,
 };
-use oxedize_fe2o3_crypto::sign::SignatureScheme;
-//use oxedize_fe2o3_iop_crypto::{
+use oxedyne_fe2o3_crypto::sign::SignatureScheme;
+//use oxedyne_fe2o3_iop_crypto::{
 //    sign::{
 //        Signer,
 //        SignerDefAlt,
 //    },
 //    enc::Encrypter,
 //};
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     cfg::Config,
     chunk::{
@@ -28,14 +28,14 @@ use oxedize_fe2o3_jdat::{
     },
     //file::JdatFile,
 };
-use oxedize_fe2o3_hash::{
+use oxedyne_fe2o3_hash::{
     hash::{
         HashScheme,
         //HasherDefAlt,
     },
     //pow::ProofOfWork,
 };
-//use oxedize_fe2o3_iop_hash::{
+//use oxedyne_fe2o3_iop_hash::{
 //    api::Hasher,
 //    csum::Checksummer,
 //};
@@ -90,7 +90,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             // Schemes
-            schemes_db_path:                fmt!("../oxedize_fe2o3_namex/namex.jdat"),
+            schemes_db_path:                fmt!("../oxedyne_fe2o3_namex/namex.jdat"),
             // Chunking
             wire_chunk_threshold:           1_500,
             wire_chunk_bytes:               1_000,

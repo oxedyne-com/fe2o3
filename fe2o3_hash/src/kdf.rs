@@ -4,7 +4,7 @@
 //! value of one for portability.  Even so, the Open Worldwide Application Security Project (OWASP)
 //! recommends using Argon2id with one lane of parallelism.
 //!
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     alt::{
         Alt,
@@ -13,13 +13,13 @@ use oxedize_fe2o3_core::{
     mem::Extract,
     rand::Rand,
 };
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     try_extract_tup2dat,
     tup2dat,
 };
-use oxedize_fe2o3_iop_hash::kdf::KeyDeriver;
-use oxedize_fe2o3_namex::id::{
+use oxedyne_fe2o3_iop_hash::kdf::KeyDeriver;
+use oxedyne_fe2o3_namex::id::{
     LocalId,
     InNamex,
     NamexId,

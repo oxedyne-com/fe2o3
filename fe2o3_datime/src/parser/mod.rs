@@ -5,7 +5,7 @@ use crate::{
 	time::{CalClock, CalClockZone},
 };
 
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 
 use std::{
 	collections::HashMap,
@@ -50,7 +50,7 @@ use std::{
 /// # Examples
 ///
 /// ```ignore
-/// use oxedize_fe2o3_datime::{
+/// use oxedyne_fe2o3_datime::{
 ///     parser::Parser,
 ///     time::CalClockZone,
 /// }res!();

@@ -36,13 +36,13 @@ use crate::srv::{
     },
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
 };
-use oxedize_fe2o3_crypto::{
+use oxedyne_fe2o3_crypto::{
     sign::SignatureScheme,
 };
-use oxedize_fe2o3_hash::{
+use oxedyne_fe2o3_hash::{
     hash::{
         HasherDefAlt,
         HashScheme,
@@ -50,9 +50,9 @@ use oxedize_fe2o3_hash::{
     map::ShardMap,
     pow::ProofOfWork,
 };
-use oxedize_fe2o3_data::ring::RingTimer;
-use oxedize_fe2o3_iop_crypto::sign::SignerDefAlt;
-use oxedize_fe2o3_iop_hash::api::HashForm;
+use oxedyne_fe2o3_data::ring::RingTimer;
+use oxedyne_fe2o3_iop_crypto::sign::SignerDefAlt;
+use oxedyne_fe2o3_iop_hash::api::HashForm;
 
 use std::{
     collections::BTreeMap,

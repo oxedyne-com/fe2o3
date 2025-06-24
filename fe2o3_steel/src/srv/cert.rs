@@ -3,14 +3,14 @@ use crate::srv::{
     constant,
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     path::{
         NormalPath,
         NormPathBuf,
     },
 };
-use oxedize_fe2o3_net::dns::Fqdn;
+use oxedyne_fe2o3_net::dns::Fqdn;
 
 use std::{
     fs::{

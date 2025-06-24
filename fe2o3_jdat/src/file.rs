@@ -11,11 +11,11 @@ use crate::{
     },
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     map::MapMut,
 };
-use oxedize_fe2o3_text::string::Stringer;
+use oxedyne_fe2o3_text::string::Stringer;
 
 use std::{
     fmt,

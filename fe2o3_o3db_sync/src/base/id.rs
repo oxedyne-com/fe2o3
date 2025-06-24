@@ -6,11 +6,11 @@ use crate::{
     },
     bots::worker::bot::WorkerType,
 };
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     rand::RanDef,
 };
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_jdat::{
     id::IdDat,
     kind::Kind,
     usr::UsrKindId,

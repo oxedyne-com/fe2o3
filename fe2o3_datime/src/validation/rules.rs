@@ -5,7 +5,7 @@ use crate::{
     validation::{ValidationError, ValidationResult},
 };
 
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 
 use std::collections::HashSet;
 
@@ -18,7 +18,7 @@ use std::collections::HashSet;
 /// # Examples
 ///
 /// ```ignore
-/// use oxedize_fe2o3_datime::{
+/// use oxedyne_fe2o3_datime::{
 ///     validation::{ValidationRule, CalClockValidator},
 ///     time::CalClock,
 /// }res!();

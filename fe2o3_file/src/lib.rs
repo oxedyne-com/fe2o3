@@ -12,7 +12,7 @@
 //!
 //! # Example
 //! ```no_run
-//! use oxedize_fe2o3_file::tree::FileTree;
+//! use oxedyne_fe2o3_file::tree::FileTree;
 //!
 //! // Create a file tree from a directory path
 //! let tree = FileTree::new("/path/to/directory").unwrap();

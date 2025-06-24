@@ -1,19 +1,19 @@
 use crate::prelude::*;
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     byte::{
         FromBytes,
         ToBytes,
     },
     mem::Extract,
 };
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_jdat::{
     tup3dat,
     try_extract_dat_as,
     try_extract_tup3dat,
     daticle::Dat,
 };
-use oxedize_fe2o3_iop_hash::csum::Checksummer;
+use oxedyne_fe2o3_iop_hash::csum::Checksummer;
 
 use std::io;
 

@@ -141,19 +141,19 @@ use crate::{
     },
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     byte::IntoBytes,
     mem::Extract,
 };
-use oxedize_fe2o3_jdat::prelude::*;
-use oxedize_fe2o3_syntax::{
+use oxedyne_fe2o3_jdat::prelude::*;
+use oxedyne_fe2o3_syntax::{
     msg::{
         Msg,
         MsgCmd,
     },
 };
-use oxedize_fe2o3_text::string::Stringer;
+use oxedyne_fe2o3_text::string::Stringer;
 
 use std::{
     net::UdpSocket,

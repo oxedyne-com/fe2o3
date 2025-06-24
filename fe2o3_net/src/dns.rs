@@ -1,6 +1,6 @@
 use crate::constant;
 
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 
 use std::net::ToSocketAddrs;
 

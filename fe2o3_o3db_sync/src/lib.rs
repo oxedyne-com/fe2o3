@@ -15,8 +15,8 @@
 //! Basic usage with error handling:
 //! 
 //! ```
-//! use oxedize_fe2o3_core::prelude::*;
-//! use oxedize_fe2o3_o3db_sync::prelude::*;
+//! use oxedyne_fe2o3_core::prelude::*;
+//! use oxedyne_fe2o3_o3db_sync::prelude::*;
 //! 
 //! fn store_value() -> Outcome<()> {
 //!     // Configure and start the database

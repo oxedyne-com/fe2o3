@@ -1,20 +1,20 @@
-use oxedize_fe2o3_steel::srv::{
+use oxedyne_fe2o3_steel::srv::{
     constant,
     context,
     id,
     ws::syntax::WebSocketSyntax,
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
 };
-use oxedize_fe2o3_crypto::enc::EncryptionScheme;
-use oxedize_fe2o3_hash::{
+use oxedyne_fe2o3_crypto::enc::EncryptionScheme;
+use oxedyne_fe2o3_hash::{
     csum::ChecksumScheme,
     hash::HashScheme,
 };
-use oxedize_fe2o3_jdat::version::SemVer;
-use oxedize_fe2o3_net::{
+use oxedyne_fe2o3_jdat::version::SemVer;
+use oxedyne_fe2o3_net::{
     conc::AsyncReadIterator,
     http::msg::{
         //AsyncReadIterator,
@@ -29,7 +29,7 @@ use oxedize_fe2o3_net::{
         status::WebSocketStatusCode,
     },
 };
-use oxedize_fe2o3_o3db_sync::O3db;
+use oxedyne_fe2o3_o3db_sync::O3db;
 
 use std::{
     fs::File,

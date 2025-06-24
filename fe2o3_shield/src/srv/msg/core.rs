@@ -1,15 +1,15 @@
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     byte::Encoding,
     mem::Extract,
 };
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     id::NumIdDat,
 };
-use oxedize_fe2o3_hash::pow::ZeroBits;
-use oxedize_fe2o3_net::id;
-use oxedize_fe2o3_syntax::{
+use oxedyne_fe2o3_hash::pow::ZeroBits;
+use oxedyne_fe2o3_net::id;
+use oxedyne_fe2o3_syntax::{
     SyntaxRef,
     msg::Msg,
 };

@@ -14,9 +14,9 @@
 //! # Example
 //! 
 //! ```rust,no_run
-//! use oxedize_fe2o3_bot::{Bot, BotMsg};
-//! use oxedize_fe2o3_core::prelude::*;
-//! use oxedize_fe2o3_jdat::id::NumIdDat;
+//! use oxedyne_fe2o3_bot::{Bot, BotMsg};
+//! use oxedyne_fe2o3_core::prelude::*;
+//! use oxedyne_fe2o3_jdat::id::NumIdDat;
 //! 
 //! // Define bot message type
 //! #[derive(Clone, Debug)]

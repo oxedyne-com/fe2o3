@@ -1,4 +1,4 @@
-use oxedize_fe2o3_tui::{
+use oxedyne_fe2o3_tui::{
     dim::{
         AbsRect,
         Dim,
@@ -10,7 +10,7 @@ use oxedize_fe2o3_tui::{
     },
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     test::test_it,
 };

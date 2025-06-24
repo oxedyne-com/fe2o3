@@ -1,8 +1,8 @@
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     alt::Gnomon,
 };
-use oxedize_fe2o3_namex::id::InNamex;
+use oxedyne_fe2o3_namex::id::InNamex;
 
 use std::fmt;
 

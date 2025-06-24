@@ -23,19 +23,19 @@ use crate::{
     },
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     map::MapMut,
     mem::Extract,
 };
-use oxedize_fe2o3_num::{
+use oxedyne_fe2o3_num::{
     float::{
         Float32,
         Float64,
     },
     string::NumberString,
 };
-use oxedize_fe2o3_text::{
+use oxedyne_fe2o3_text::{
     base2x,
     string::Quote,
 };

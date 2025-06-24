@@ -9,8 +9,8 @@ use crate::lib_tui::{
     },
 };
 
-use oxedize_fe2o3_geom::dim::Coord;
-use oxedize_fe2o3_text::Text;
+use oxedyne_fe2o3_geom::dim::Coord;
+use oxedyne_fe2o3_text::Text;
 
 use std::{
     path::PathBuf,

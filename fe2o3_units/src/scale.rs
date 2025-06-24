@@ -1,5 +1,5 @@
-use oxedize_fe2o3_core::prelude::*;
-use oxedize_fe2o3_num::float;
+use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_num::float;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ScaleBasis {

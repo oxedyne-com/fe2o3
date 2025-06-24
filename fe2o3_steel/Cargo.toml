@@ -1,11 +1,11 @@
 [package]
-name = "oxedize_fe2o3_steel"
+name = "oxedyne_fe2o3_steel"
 version = "0.5.0"
-authors = ["h00gs <hello@oxedize.com>"]
+authors = ["h00gs <hello@oxedyne.io>"]
 edition = "2021"
 license = "BSD-2-Clause/Apache-2.0"
 description = "Hematite TCP server including HTTPS, WebSocket and SMTPS support."
-repository = "https://github.com/Oxedize/fe2o3"
+repository = "https://github.com/oxedyne-io/fe2o3"
 
 [lib]
 path = "src/lib.rs"
@@ -15,22 +15,22 @@ name = "steel"
 path = "src/main.rs"
 
 [dependencies]
-oxedize_fe2o3_bot 				= { path = "../fe2o3_bot" }
-oxedize_fe2o3_core 				= { path = "../fe2o3_core" }
-oxedize_fe2o3_crypto			= { path = "../fe2o3_crypto" }
-oxedize_fe2o3_data 				= { path = "../fe2o3_data" }
-oxedize_fe2o3_hash 				= { path = "../fe2o3_hash" }
-oxedize_fe2o3_iop_crypto		= { path = "../fe2o3_iop_crypto" }
-oxedize_fe2o3_iop_db			= { path = "../fe2o3_iop_db" }
-oxedize_fe2o3_iop_hash			= { path = "../fe2o3_iop_hash" }
-oxedize_fe2o3_jdat 				= { path = "../fe2o3_jdat" }
-oxedize_fe2o3_namex				= { path = "../fe2o3_namex" }
-oxedize_fe2o3_net				= { path = "../fe2o3_net" }
-oxedize_fe2o3_o3db_sync 				= { path = "../fe2o3_o3db_sync" }
-oxedize_fe2o3_stds				= { path = "../fe2o3_stds" }
-oxedize_fe2o3_syntax			= { path = "../fe2o3_syntax" }
-oxedize_fe2o3_text				= { path = "../fe2o3_text" }
-oxedize_fe2o3_tui				= { path = "../fe2o3_tui" }
+oxedyne_fe2o3_bot 				= { path = "../fe2o3_bot" }
+oxedyne_fe2o3_core 				= { path = "../fe2o3_core" }
+oxedyne_fe2o3_crypto			= { path = "../fe2o3_crypto" }
+oxedyne_fe2o3_data 				= { path = "../fe2o3_data" }
+oxedyne_fe2o3_hash 				= { path = "../fe2o3_hash" }
+oxedyne_fe2o3_iop_crypto		= { path = "../fe2o3_iop_crypto" }
+oxedyne_fe2o3_iop_db			= { path = "../fe2o3_iop_db" }
+oxedyne_fe2o3_iop_hash			= { path = "../fe2o3_iop_hash" }
+oxedyne_fe2o3_jdat 				= { path = "../fe2o3_jdat" }
+oxedyne_fe2o3_namex				= { path = "../fe2o3_namex" }
+oxedyne_fe2o3_net				= { path = "../fe2o3_net" }
+oxedyne_fe2o3_o3db_sync 				= { path = "../fe2o3_o3db_sync" }
+oxedyne_fe2o3_stds				= { path = "../fe2o3_stds" }
+oxedyne_fe2o3_syntax			= { path = "../fe2o3_syntax" }
+oxedyne_fe2o3_text				= { path = "../fe2o3_text" }
+oxedyne_fe2o3_tui				= { path = "../fe2o3_tui" }
 
 notify = "6.1.1"
 rustls-pemfile = "2"
@@ -63,7 +63,7 @@ swc_ecma_transforms_base = "6.0.0"
 grass = "0.13"
 
 [build-dependencies]
-oxedize_fe2o3_core 				= { path = "../fe2o3_core" }
+oxedyne_fe2o3_core 				= { path = "../fe2o3_core" }
 
 [dev-dependencies]
 # For test client

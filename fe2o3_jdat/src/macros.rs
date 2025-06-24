@@ -2,7 +2,7 @@
 /// Create a `Dat` with automatic `Kind` detection using `std::convert::From` conversion.
 ///
 /// ```
-/// use oxedize_fe2o3_jdat::prelude::*;
+/// use oxedyne_fe2o3_jdat::prelude::*;
 ///
 /// let dat = dat!( 1u8 );
 /// ```
@@ -16,21 +16,21 @@ macro_rules! dat {
 /// Create an annotated `Dat` with automatic `Kind` detection using `std::convert::From` conversion.
 ///
 /// ```
-/// use oxedize_fe2o3_jdat::prelude::*;
+/// use oxedyne_fe2o3_jdat::prelude::*;
 ///
 /// let dat = abox!( 1u8, "A type1 comment" );
 /// ```
 macro_rules! abox {
     ( $v:expr, $($arg:tt)*) => {
-        Dat::ABox(oxedize_fe2o3_jdat::note::NoteConfig::default(), Box::new(Dat::from($v)), format!($($arg)*))
+        Dat::ABox(oxedyne_fe2o3_jdat::note::NoteConfig::default(), Box::new(Dat::from($v)), format!($($arg)*))
     };
 }
 
 #[macro_export]
-/// Create a `Dat` with automatic `Kind` detection using `oxedize_fe2o3_core::conv::BestFrom` conversion.
+/// Create a `Dat` with automatic `Kind` detection using `oxedyne_fe2o3_core::conv::BestFrom` conversion.
 ///
 /// ```
-/// use oxedize_fe2o3_jdat::prelude::*;
+/// use oxedyne_fe2o3_jdat::prelude::*;
 ///
 /// let dat = best_dat!( 1u8 );
 /// ```
@@ -44,7 +44,7 @@ macro_rules! best_dat {
 /// Create a `List` of `Dat`s using `std::convert::From` conversion.
 ///
 /// ```
-/// use oxedize_fe2o3_jdat::prelude::*;
+/// use oxedyne_fe2o3_jdat::prelude::*;
 ///
 /// let list = listdat![ 1u8, 2u16, "value", -3i32, ];
 /// ```
@@ -61,10 +61,10 @@ macro_rules! listdat {
 }
 
 #[macro_export]
-/// Create a `List` of `Dat`s using `oxedize_fe2o3_core::conv::BestFrom` conversion.
+/// Create a `List` of `Dat`s using `oxedyne_fe2o3_core::conv::BestFrom` conversion.
 ///
 /// ```
-/// use oxedize_fe2o3_jdat::prelude::*;
+/// use oxedyne_fe2o3_jdat::prelude::*;
 ///
 /// let list = best_listdat![ 1u8, 2u16, "value", -3i32, ];
 /// ```
@@ -84,8 +84,8 @@ macro_rules! best_listdat {
 /// Create a `Dat::Tup2` using `std::convert::From` conversion.
 ///
 /// ```
-/// use oxedize_fe2o3_jdat::prelude::*;
-/// use oxedize_fe2o3_jdat::tup2dat;
+/// use oxedyne_fe2o3_jdat::prelude::*;
+/// use oxedyne_fe2o3_jdat::tup2dat;
 ///
 /// let expected = Dat::Tup2(Box::new([ dat!(1u8), dat!(2u8) ]));
 /// let list2 = tup2dat![ 1u8, 2u8, ];
@@ -102,11 +102,11 @@ macro_rules! tup2dat {
 }
 
 #[macro_export]
-/// Create a `Dat::Tup2` using `oxedize_fe2o3_core::conv::BestFrom` conversion.
+/// Create a `Dat::Tup2` using `oxedyne_fe2o3_core::conv::BestFrom` conversion.
 ///
 /// ```
-/// use oxedize_fe2o3_jdat::prelude::*;
-/// use oxedize_fe2o3_jdat::tup2dat;
+/// use oxedyne_fe2o3_jdat::prelude::*;
+/// use oxedyne_fe2o3_jdat::tup2dat;
 ///
 /// let expected = Dat::Tup2(Box::new([ dat!(1u8), dat!(2u8) ]));
 /// let list2 = tup2dat![ 1u8, 2u8, ];
@@ -126,9 +126,9 @@ macro_rules! best_tup2dat {
 /// Create a `Dat::Tup3` using `std::convert::From` conversion.
 ///
 /// ```
-/// use oxedize_fe2o3_jdat::prelude::*;
-/// use oxedize_fe2o3_jdat::tup3dat;
-/// use oxedize_fe2o3_jdat::Dat;
+/// use oxedyne_fe2o3_jdat::prelude::*;
+/// use oxedyne_fe2o3_jdat::tup3dat;
+/// use oxedyne_fe2o3_jdat::Dat;
 ///
 /// let expected = Dat::Tup3(Box::new([
 ///     dat!(1u8),
@@ -150,12 +150,12 @@ macro_rules! tup3dat {
 }
 
 #[macro_export]
-/// Create a `Dat::Tup3` using `oxedize_fe2o3_core::conv::BestFrom` conversion.
+/// Create a `Dat::Tup3` using `oxedyne_fe2o3_core::conv::BestFrom` conversion.
 ///
 /// ```
-/// use oxedize_fe2o3_jdat::prelude::*;
-/// use oxedize_fe2o3_jdat::tup3dat;
-/// use oxedize_fe2o3_jdat::Dat;
+/// use oxedyne_fe2o3_jdat::prelude::*;
+/// use oxedyne_fe2o3_jdat::tup3dat;
+/// use oxedyne_fe2o3_jdat::Dat;
 ///
 /// let expected = Dat::Tup3(Box::new([
 ///     dat!(1u8),
@@ -180,9 +180,9 @@ macro_rules! best_tup3dat {
 /// Create a `Dat::Tup4` using `std::convert::From` conversion.
 ///
 /// ```
-/// use oxedize_fe2o3_jdat::prelude::*;
-/// use oxedize_fe2o3_jdat::tup4dat;
-/// use oxedize_fe2o3_jdat::Dat;
+/// use oxedyne_fe2o3_jdat::prelude::*;
+/// use oxedyne_fe2o3_jdat::tup4dat;
+/// use oxedyne_fe2o3_jdat::Dat;
 ///
 /// let expected = Dat::Tup4(Box::new([
 ///     dat!(1u8),
@@ -206,12 +206,12 @@ macro_rules! tup4dat {
 }
 
 #[macro_export]
-/// Create a `Dat::Tup4` using `oxedize_fe2o3_core::conv::BestFrom` conversion.
+/// Create a `Dat::Tup4` using `oxedyne_fe2o3_core::conv::BestFrom` conversion.
 ///
 /// ```
-/// use oxedize_fe2o3_jdat::prelude::*;
-/// use oxedize_fe2o3_jdat::tup4dat;
-/// use oxedize_fe2o3_jdat::Dat;
+/// use oxedyne_fe2o3_jdat::prelude::*;
+/// use oxedyne_fe2o3_jdat::tup4dat;
+/// use oxedyne_fe2o3_jdat::Dat;
 ///
 /// let expected = Dat::Tup4(Box::new([
 ///     dat!(1u8),
@@ -238,9 +238,9 @@ macro_rules! best_tup4dat {
 /// Create a `Dat::Tup5` using `std::convert::From` conversion.
 ///
 /// ```
-/// use oxedize_fe2o3_jdat::prelude::*;
-/// use oxedize_fe2o3_jdat::tup5dat;
-/// use oxedize_fe2o3_jdat::Dat;
+/// use oxedyne_fe2o3_jdat::prelude::*;
+/// use oxedyne_fe2o3_jdat::tup5dat;
+/// use oxedyne_fe2o3_jdat::Dat;
 ///
 /// let expected = Dat::Tup5(Box::new([
 ///     dat!(1u8),
@@ -266,12 +266,12 @@ macro_rules! tup5dat {
 }
 
 #[macro_export]
-/// Create a `Dat::Tup5` using `oxedize_fe2o3_core::conv::BestFrom` conversion.
+/// Create a `Dat::Tup5` using `oxedyne_fe2o3_core::conv::BestFrom` conversion.
 ///
 /// ```
-/// use oxedize_fe2o3_jdat::prelude::*;
-/// use oxedize_fe2o3_jdat::tup5dat;
-/// use oxedize_fe2o3_jdat::Dat;
+/// use oxedyne_fe2o3_jdat::prelude::*;
+/// use oxedyne_fe2o3_jdat::tup5dat;
+/// use oxedyne_fe2o3_jdat::Dat;
 ///
 /// let expected = Dat::Tup5(Box::new([
 ///     dat!(1u8),
@@ -300,9 +300,9 @@ macro_rules! best_tup5dat {
 /// Create a `Dat::Tup6` using `std::convert::From` conversion.
 ///
 /// ```
-/// use oxedize_fe2o3_jdat::prelude::*;
-/// use oxedize_fe2o3_jdat::tup6dat;
-/// use oxedize_fe2o3_jdat::Dat;
+/// use oxedyne_fe2o3_jdat::prelude::*;
+/// use oxedyne_fe2o3_jdat::tup6dat;
+/// use oxedyne_fe2o3_jdat::Dat;
 ///
 /// let expected = Dat::Tup6(Box::new([
 ///     dat!(1u8),
@@ -331,12 +331,12 @@ macro_rules! tup6dat {
 }
 
 #[macro_export]
-/// Create a `Dat::Tup6` using `oxedize_fe2o3_core::conv::BestFrom` conversion.
+/// Create a `Dat::Tup6` using `oxedyne_fe2o3_core::conv::BestFrom` conversion.
 ///
 /// ```
-/// use oxedize_fe2o3_jdat::prelude::*;
-/// use oxedize_fe2o3_jdat::tup6dat;
-/// use oxedize_fe2o3_jdat::Dat;
+/// use oxedyne_fe2o3_jdat::prelude::*;
+/// use oxedyne_fe2o3_jdat::tup6dat;
+/// use oxedyne_fe2o3_jdat::Dat;
 ///
 /// let expected = Dat::Tup6(Box::new([
 ///     dat!(1u8),
@@ -368,9 +368,9 @@ macro_rules! best_tup6dat {
 /// Create a `Dat::Tup7` using `std::convert::From` conversion.
 ///
 /// ```
-/// use oxedize_fe2o3_jdat::prelude::*;
-/// use oxedize_fe2o3_jdat::tup7dat;
-/// use oxedize_fe2o3_jdat::Dat;
+/// use oxedyne_fe2o3_jdat::prelude::*;
+/// use oxedyne_fe2o3_jdat::tup7dat;
+/// use oxedyne_fe2o3_jdat::Dat;
 ///
 /// let expected = Dat::Tup7(Box::new([
 ///     dat!(1u8),
@@ -401,12 +401,12 @@ macro_rules! tup7dat {
 }
 
 #[macro_export]
-/// Create a `Dat::Tup7` using `oxedize_fe2o3_core::conv::BestFrom` conversion.
+/// Create a `Dat::Tup7` using `oxedyne_fe2o3_core::conv::BestFrom` conversion.
 ///
 /// ```
-/// use oxedize_fe2o3_jdat::prelude::*;
-/// use oxedize_fe2o3_jdat::tup7dat;
-/// use oxedize_fe2o3_jdat::Dat;
+/// use oxedyne_fe2o3_jdat::prelude::*;
+/// use oxedyne_fe2o3_jdat::tup7dat;
+/// use oxedyne_fe2o3_jdat::Dat;
 ///
 /// let expected = Dat::Tup7(Box::new([
 ///     dat!(1u8),
@@ -440,9 +440,9 @@ macro_rules! best_tup7dat {
 /// Create a `Dat::Tup8` using `std::convert::From` conversion.
 ///
 /// ```
-/// use oxedize_fe2o3_jdat::prelude::*;
-/// use oxedize_fe2o3_jdat::tup8dat;
-/// use oxedize_fe2o3_jdat::Dat;
+/// use oxedyne_fe2o3_jdat::prelude::*;
+/// use oxedyne_fe2o3_jdat::tup8dat;
+/// use oxedyne_fe2o3_jdat::Dat;
 ///
 /// let expected = Dat::Tup8(Box::new([
 ///     dat!(1u8),
@@ -475,12 +475,12 @@ macro_rules! tup8dat {
 }
 
 #[macro_export]
-/// Create a `Dat::Tup8` using `oxedize_fe2o3_core::conv::BestFrom` conversion.
+/// Create a `Dat::Tup8` using `oxedyne_fe2o3_core::conv::BestFrom` conversion.
 ///
 /// ```
-/// use oxedize_fe2o3_jdat::prelude::*;
-/// use oxedize_fe2o3_jdat::tup8dat;
-/// use oxedize_fe2o3_jdat::Dat;
+/// use oxedyne_fe2o3_jdat::prelude::*;
+/// use oxedyne_fe2o3_jdat::tup8dat;
+/// use oxedyne_fe2o3_jdat::Dat;
 ///
 /// let expected = Dat::Tup8(Box::new([
 ///     dat!(1u8),
@@ -516,9 +516,9 @@ macro_rules! best_tup8dat {
 /// Create a `Dat::Tup9` using `std::convert::From` conversion.
 ///
 /// ```
-/// use oxedize_fe2o3_jdat::prelude::*;
-/// use oxedize_fe2o3_jdat::tup9dat;
-/// use oxedize_fe2o3_jdat::Dat;
+/// use oxedyne_fe2o3_jdat::prelude::*;
+/// use oxedyne_fe2o3_jdat::tup9dat;
+/// use oxedyne_fe2o3_jdat::Dat;
 ///
 /// let expected = Dat::Tup9(Box::new([
 ///     dat!(1u8),
@@ -553,12 +553,12 @@ macro_rules! tup9dat {
 }
 
 #[macro_export]
-/// Create a `Dat::Tup9` using `oxedize_fe2o3_core::conv::BestFrom` conversion.
+/// Create a `Dat::Tup9` using `oxedyne_fe2o3_core::conv::BestFrom` conversion.
 ///
 /// ```
-/// use oxedize_fe2o3_jdat::prelude::*;
-/// use oxedize_fe2o3_jdat::tup9dat;
-/// use oxedize_fe2o3_jdat::Dat;
+/// use oxedyne_fe2o3_jdat::prelude::*;
+/// use oxedyne_fe2o3_jdat::tup9dat;
+/// use oxedyne_fe2o3_jdat::Dat;
 ///
 /// let expected = Dat::Tup9(Box::new([
 ///     dat!(1u8),
@@ -596,9 +596,9 @@ macro_rules! best_tup9dat {
 /// Create a `Dat::Tup10` using `std::convert::From` conversion.
 ///
 /// ```
-/// use oxedize_fe2o3_jdat::prelude::*;
-/// use oxedize_fe2o3_jdat::tup10dat;
-/// use oxedize_fe2o3_jdat::Dat;
+/// use oxedyne_fe2o3_jdat::prelude::*;
+/// use oxedyne_fe2o3_jdat::tup10dat;
+/// use oxedyne_fe2o3_jdat::Dat;
 ///
 /// let expected = Dat::Tup10(Box::new([
 ///     dat!(1u8),
@@ -635,12 +635,12 @@ macro_rules! tup10dat {
 }
 
 #[macro_export]
-/// Create a `Dat::Tup10` using `oxedize_fe2o3_core::conv::BestFrom` conversion.
+/// Create a `Dat::Tup10` using `oxedyne_fe2o3_core::conv::BestFrom` conversion.
 ///
 /// ```
-/// use oxedize_fe2o3_jdat::prelude::*;
-/// use oxedize_fe2o3_jdat::tup10dat;
-/// use oxedize_fe2o3_jdat::Dat;
+/// use oxedyne_fe2o3_jdat::prelude::*;
+/// use oxedyne_fe2o3_jdat::tup10dat;
+/// use oxedyne_fe2o3_jdat::Dat;
 ///
 /// let expected = Dat::Tup10(Box::new([
 ///     dat!(1u8),
@@ -680,8 +680,8 @@ macro_rules! best_tup10dat {
 /// Create a `Map` of `Dat`s.
 ///
 /// ```
-/// use oxedize_fe2o3_core::prelude::*;
-/// use oxedize_fe2o3_jdat::prelude::*; // create_dat_map must be brought into scope
+/// use oxedyne_fe2o3_core::prelude::*;
+/// use oxedyne_fe2o3_jdat::prelude::*; // create_dat_map must be brought into scope
 ///
 /// fn main() {
 ///     let map = mapdat![
@@ -750,9 +750,9 @@ macro_rules! best_omapdat {
 /// fixed, encoding for the length, yielding a either a `Dat::BU8` through to a
 /// `Dat::BU64`.
 /// ```
-/// use oxedize_fe2o3_core::prelude::*;
-/// use oxedize_fe2o3_jdat::prelude::*;
-/// use oxedize_fe2o3_jdat::try_extract_dat;
+/// use oxedyne_fe2o3_core::prelude::*;
+/// use oxedyne_fe2o3_jdat::prelude::*;
+/// use oxedyne_fe2o3_jdat::try_extract_dat;
 ///
 /// fn main() -> Outcome<()> { // needed because try_extract_dat! can return Err
 ///     let v1 = vec![1u8, 2, 3, 4];
@@ -783,9 +783,9 @@ macro_rules! try_extract_dat {
 /// Extracts associated data from a `Dat`, including a specified cast to a type alias for
 /// multiple source variants.
 /// ```
-/// use oxedize_fe2o3_core::prelude::*;
-/// use oxedize_fe2o3_jdat::prelude::*;
-/// use oxedize_fe2o3_jdat::try_extract_dat_as;
+/// use oxedyne_fe2o3_core::prelude::*;
+/// use oxedyne_fe2o3_jdat::prelude::*;
+/// use oxedyne_fe2o3_jdat::try_extract_dat_as;
 ///
 /// type AnIntType = u32;
 ///
@@ -818,9 +818,9 @@ macro_rules! try_extract_dat_as {
 #[macro_export]
 /// Extracts associated `Vec` from a `Dat::List`.
 /// ```
-/// use oxedize_fe2o3_core::prelude::*;
-/// use oxedize_fe2o3_jdat::prelude::*;
-/// use oxedize_fe2o3_jdat::try_extract_listdat;
+/// use oxedyne_fe2o3_core::prelude::*;
+/// use oxedyne_fe2o3_jdat::prelude::*;
+/// use oxedyne_fe2o3_jdat::try_extract_listdat;
 ///
 /// fn main() -> Outcome<()> { // needed because try_extract_listdat! can return Err
 ///     let list = listdat![42u8, "hello"];
@@ -853,9 +853,9 @@ macro_rules! try_extract_listdat {
 #[macro_export]
 /// Extracts associated `[Dat; 2]` from a `Dat::Tup2`.
 /// ```
-/// use oxedize_fe2o3_core::prelude::*;
-/// use oxedize_fe2o3_jdat::prelude::*;
-/// use oxedize_fe2o3_jdat::try_extract_tup2dat;
+/// use oxedyne_fe2o3_core::prelude::*;
+/// use oxedyne_fe2o3_jdat::prelude::*;
+/// use oxedyne_fe2o3_jdat::try_extract_tup2dat;
 ///
 /// fn main() -> Outcome<()> { // needed because try_extract_tup2dat! can return Err
 ///     let array = [
@@ -891,9 +891,9 @@ macro_rules! try_extract_tup2dat {
 #[macro_export]
 /// Extracts associated `[Dat; 3]` from a `Dat::Tup3`.
 /// ```
-/// use oxedize_fe2o3_core::prelude::*;
-/// use oxedize_fe2o3_jdat::prelude::*;
-/// use oxedize_fe2o3_jdat::try_extract_tup3dat;
+/// use oxedyne_fe2o3_core::prelude::*;
+/// use oxedyne_fe2o3_jdat::prelude::*;
+/// use oxedyne_fe2o3_jdat::try_extract_tup3dat;
 ///
 /// fn main() -> Outcome<()> { // needed because try_extract_tup3dat! can return Err
 ///     let array = [
@@ -930,9 +930,9 @@ macro_rules! try_extract_tup3dat {
 #[macro_export]
 /// Extracts associated `[Dat; 4]` from a `Dat::Tup4`.
 /// ```
-/// use oxedize_fe2o3_core::prelude::*;
-/// use oxedize_fe2o3_jdat::prelude::*;
-/// use oxedize_fe2o3_jdat::try_extract_tup4dat;
+/// use oxedyne_fe2o3_core::prelude::*;
+/// use oxedyne_fe2o3_jdat::prelude::*;
+/// use oxedyne_fe2o3_jdat::try_extract_tup4dat;
 ///
 /// fn main() -> Outcome<()> { // needed because try_extract_tup4dat! can return Err
 ///     let array = [
@@ -970,9 +970,9 @@ macro_rules! try_extract_tup4dat {
 #[macro_export]
 /// Extracts associated `[Dat; 5]` from a `Dat::Tup5`.
 /// ```
-/// use oxedize_fe2o3_core::prelude::*;
-/// use oxedize_fe2o3_jdat::prelude::*;
-/// use oxedize_fe2o3_jdat::try_extract_tup5dat;
+/// use oxedyne_fe2o3_core::prelude::*;
+/// use oxedyne_fe2o3_jdat::prelude::*;
+/// use oxedyne_fe2o3_jdat::try_extract_tup5dat;
 ///
 /// fn main() -> Outcome<()> { // needed because try_extract_tup5dat! can return Err
 ///     let array = [
@@ -1011,9 +1011,9 @@ macro_rules! try_extract_tup5dat {
 #[macro_export]
 /// Extracts associated `[Dat; 6]` from a `Dat::Tup6`.
 /// ```
-/// use oxedize_fe2o3_core::prelude::*;
-/// use oxedize_fe2o3_jdat::prelude::*;
-/// use oxedize_fe2o3_jdat::try_extract_tup6dat;
+/// use oxedyne_fe2o3_core::prelude::*;
+/// use oxedyne_fe2o3_jdat::prelude::*;
+/// use oxedyne_fe2o3_jdat::try_extract_tup6dat;
 ///
 /// fn main() -> Outcome<()> { // needed because try_extract_tup6dat! can return Err
 ///     let array = [
@@ -1053,9 +1053,9 @@ macro_rules! try_extract_tup6dat {
 #[macro_export]
 /// Extracts associated `[Dat; 7]` from a `Dat::Tup7`.
 /// ```
-/// use oxedize_fe2o3_core::prelude::*;
-/// use oxedize_fe2o3_jdat::prelude::*;
-/// use oxedize_fe2o3_jdat::try_extract_tup7dat;
+/// use oxedyne_fe2o3_core::prelude::*;
+/// use oxedyne_fe2o3_jdat::prelude::*;
+/// use oxedyne_fe2o3_jdat::try_extract_tup7dat;
 ///
 /// fn main() -> Outcome<()> { // needed because try_extract_tup7dat! can return Err
 ///     let array = [
@@ -1096,9 +1096,9 @@ macro_rules! try_extract_tup7dat {
 #[macro_export]
 /// Extracts associated `[Dat; 8]` from a `Dat::Tup8`.
 /// ```
-/// use oxedize_fe2o3_core::prelude::*;
-/// use oxedize_fe2o3_jdat::prelude::*;
-/// use oxedize_fe2o3_jdat::try_extract_tup8dat;
+/// use oxedyne_fe2o3_core::prelude::*;
+/// use oxedyne_fe2o3_jdat::prelude::*;
+/// use oxedyne_fe2o3_jdat::try_extract_tup8dat;
 ///
 /// fn main() -> Outcome<()> { // needed because try_extract_tup8dat! can return Err
 ///     let array = [
@@ -1140,9 +1140,9 @@ macro_rules! try_extract_tup8dat {
 #[macro_export]
 /// Extracts associated `[Dat; 9]` from a `Dat::Tup9`.
 /// ```
-/// use oxedize_fe2o3_core::prelude::*;
-/// use oxedize_fe2o3_jdat::prelude::*;
-/// use oxedize_fe2o3_jdat::try_extract_tup9dat;
+/// use oxedyne_fe2o3_core::prelude::*;
+/// use oxedyne_fe2o3_jdat::prelude::*;
+/// use oxedyne_fe2o3_jdat::try_extract_tup9dat;
 ///
 /// fn main() -> Outcome<()> { // needed because try_extract_tup9dat! can return Err
 ///     let array = [
@@ -1185,9 +1185,9 @@ macro_rules! try_extract_tup9dat {
 #[macro_export]
 /// Extracts associated `[Dat; 10]` from a `Dat::Tup10`.
 /// ```
-/// use oxedize_fe2o3_core::prelude::*;
-/// use oxedize_fe2o3_jdat::prelude::*;
-/// use oxedize_fe2o3_jdat::try_extract_tup10dat;
+/// use oxedyne_fe2o3_core::prelude::*;
+/// use oxedyne_fe2o3_jdat::prelude::*;
+/// use oxedyne_fe2o3_jdat::try_extract_tup10dat;
 ///
 /// fn main() -> Outcome<()> { // needed because try_extract_tup10dat! can return Err
 ///     let array = [
@@ -1500,7 +1500,7 @@ macro_rules! test_string_encode_decode_homogenous_tuple {
 #[cfg(test)]
 mod tests {
     use crate::prelude::*;
-    use oxedize_fe2o3_core::prelude::*;
+    use oxedyne_fe2o3_core::prelude::*;
 
     #[test]
     fn test_dat() {

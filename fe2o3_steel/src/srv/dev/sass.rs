@@ -5,8 +5,8 @@
 //!
 //! # Usage Example
 //! ```rust,no_run
-//! use oxedize_fe2o3_core::prelude::*;
-//! use oxedize_fe2o3_steel::app::dev::sass::SassBundle;
+//! use oxedyne_fe2o3_core::prelude::*;
+//! use oxedyne_fe2o3_steel::app::dev::sass::SassBundle;
 //! use std::path::Path;
 //!
 //! let mut bundler = SassBundle::new();
@@ -23,7 +23,7 @@
 //! ));
 //! ```
 
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 
 use std::{
     collections::{

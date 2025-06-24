@@ -3,7 +3,7 @@ use crate::clock::{
 	ClockNanoSecond,
 };
 
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 
 use std::fmt;
 
@@ -23,7 +23,7 @@ use std::fmt;
 /// # Examples
 ///
 /// ```ignore
-/// use oxedize_fe2o3_datime::clock::ClockMicroSecondres!();
+/// use oxedyne_fe2o3_datime::clock::ClockMicroSecondres!();
 ///
 /// let micros = ClockMicroSecond::new(500_000)?res!();
 /// assert_eq!(micros.of(), 500_000)res!();

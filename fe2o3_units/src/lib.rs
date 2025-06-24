@@ -16,8 +16,8 @@
 //! 
 //! Working with data sizes using binary prefixes:
 //! ```rust
-//! use oxedize_fe2o3_units::{Units, SI};
-//! use oxedize_fe2o3_core::prelude::*;
+//! use oxedyne_fe2o3_units::{Units, SI};
+//! use oxedyne_fe2o3_core::prelude::*;
 //! 
 //! fn main() -> Outcome<()> {
 //!     // Create a measurement representing 1024 bytes with 4 significant figures
@@ -34,8 +34,8 @@
 //!
 //! Working with SI units and decimal prefixes:
 //! ```rust
-//! use oxedize_fe2o3_units::scale::Mag;
-//! use oxedize_fe2o3_core::prelude::*;
+//! use oxedyne_fe2o3_units::scale::Mag;
+//! use oxedyne_fe2o3_core::prelude::*;
 //! 
 //! fn main() -> Outcome<()> {
 //!     // Create a measurement of 1234000 microseconds with 4 significant figures 
@@ -51,7 +51,7 @@
 //!
 //! Custom unit systems can be created by implementing the System trait:
 //! ```rust
-//! use oxedize_fe2o3_units::system::System;
+//! use oxedyne_fe2o3_units::system::System;
 //! 
 //! #[derive(Clone, Debug, PartialEq)]
 //! struct Currency {

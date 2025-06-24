@@ -15,17 +15,17 @@ use crate::{
     },
 };
 
-use oxedize_fe2o3_bot::{
+use oxedyne_fe2o3_bot::{
     bot::{
         Bot,
         LoopBreak,
     },
 };
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     channels::Simplex,
     thread::Semaphore,
 };
-use oxedize_fe2o3_jdat::id::NumIdDat;
+use oxedyne_fe2o3_jdat::id::NumIdDat;
 
 use std::{
     path::Path,

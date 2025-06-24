@@ -1,10 +1,10 @@
 use crate::id::NamexId;
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     map::MapMut,
 };
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     daticle::Vek,
     string::{
@@ -21,7 +21,7 @@ use oxedize_fe2o3_jdat::{
         UsrKinds,
     },
 };
-use oxedize_fe2o3_text::string::Stringer;
+use oxedyne_fe2o3_text::string::Stringer;
 
 use std::{
     collections::BTreeMap,
@@ -62,49 +62,49 @@ impl Entity {
             match klab.as_str() {
                 "nams" => {
                     map.insert(
-                        oxedize_fe2o3_jdat::map::MapKey::new(100, Dat::Usr(ukid.clone(), None)),
+                        oxedyne_fe2o3_jdat::map::MapKey::new(100, Dat::Usr(ukid.clone(), None)),
                         dat!(self.nams.clone()),
                     );
                 },
                 "lang" => {
                     map.insert(
-                        oxedize_fe2o3_jdat::map::MapKey::new(200, Dat::Usr(ukid.clone(), None)),
+                        oxedyne_fe2o3_jdat::map::MapKey::new(200, Dat::Usr(ukid.clone(), None)),
                         dat!(self.lang.clone()),
                     );
                 },
                 "desc" => if let Some(desc) = &self.desc {
                     map.insert(
-                        oxedize_fe2o3_jdat::map::MapKey::new(300, Dat::Usr(ukid.clone(), None)),
+                        oxedyne_fe2o3_jdat::map::MapKey::new(300, Dat::Usr(ukid.clone(), None)),
                         dat!(desc.clone()),
                     );
                 },
                 "vers" => if let Some(vers) = &self.vers {
                     map.insert(
-                        oxedize_fe2o3_jdat::map::MapKey::new(350, Dat::Usr(ukid.clone(), None)),
+                        oxedyne_fe2o3_jdat::map::MapKey::new(350, Dat::Usr(ukid.clone(), None)),
                         dat!(vers.clone()),
                     );
                 },
                 "tim1" => if let Some(tim1) = &self.tim1 {
                     map.insert(
-                        oxedize_fe2o3_jdat::map::MapKey::new(400, Dat::Usr(ukid.clone(), None)),
+                        oxedyne_fe2o3_jdat::map::MapKey::new(400, Dat::Usr(ukid.clone(), None)),
                         dat!(tim1.clone()),
                     );
                 },
                 "tim2" => if let Some(tim2) = &self.tim2 {
                     map.insert(
-                        oxedize_fe2o3_jdat::map::MapKey::new(500, Dat::Usr(ukid.clone(), None)),
+                        oxedyne_fe2o3_jdat::map::MapKey::new(500, Dat::Usr(ukid.clone(), None)),
                         dat!(tim2.clone()),
                     );
                 },
                 "refs" => if let Some(refs) = &self.refs {
                     map.insert(
-                        oxedize_fe2o3_jdat::map::MapKey::new(600, Dat::Usr(ukid.clone(), None)),
+                        oxedyne_fe2o3_jdat::map::MapKey::new(600, Dat::Usr(ukid.clone(), None)),
                         dat!(refs.clone()),
                     );
                 },
                 "alts" => if let Some(alts) = &self.alts {
                     map.insert(
-                        oxedize_fe2o3_jdat::map::MapKey::new(650, Dat::Usr(ukid.clone(), None)),
+                        oxedyne_fe2o3_jdat::map::MapKey::new(650, Dat::Usr(ukid.clone(), None)),
                         {
                             let mut map = BTreeMap::new();
                             for (k, v) in alts {
@@ -116,7 +116,7 @@ impl Entity {
                 },
                 "lnks" => if let Some(lnks) = &self.lnks {
                     map.insert(
-                        oxedize_fe2o3_jdat::map::MapKey::new(700, Dat::Usr(ukid.clone(), None)),
+                        oxedyne_fe2o3_jdat::map::MapKey::new(700, Dat::Usr(ukid.clone(), None)),
                         {
                             let mut map = BTreeMap::new();
                             for (k, v) in lnks {
@@ -128,7 +128,7 @@ impl Entity {
                 },
                 "tags" => if let Some(tags) = &self.tags {
                     map.insert(
-                        oxedize_fe2o3_jdat::map::MapKey::new(800, Dat::Usr(ukid.clone(), None)),
+                        oxedyne_fe2o3_jdat::map::MapKey::new(800, Dat::Usr(ukid.clone(), None)),
                         dat!(tags.clone()),
                     );
                 },
@@ -382,7 +382,7 @@ impl<
         let mut map = BTreeMap::new();
         for (umk, v) in self.ordered.iter() {
             map.insert(
-                oxedize_fe2o3_jdat::map::MapKey::new(umk.ord(), dat!(*umk.id().clone())),
+                oxedyne_fe2o3_jdat::map::MapKey::new(umk.ord(), dat!(*umk.id().clone())),
                 res!(v.to_datmap::<M1, M2>()),
             );    
         }

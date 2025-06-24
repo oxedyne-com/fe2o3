@@ -10,17 +10,17 @@ use crate::{
     },
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     alt::Override,
     channels::{
         Recv,
         Simplex,
     },
 };
-use oxedize_fe2o3_crypto::enc::EncryptionScheme;
-use oxedize_fe2o3_iop_crypto::enc::EncrypterDefAlt;
-use oxedize_fe2o3_iop_db::api::Meta;
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_crypto::enc::EncryptionScheme;
+use oxedyne_fe2o3_iop_crypto::enc::EncrypterDefAlt;
+use oxedyne_fe2o3_iop_db::api::Meta;
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     id::NumIdDat,
 };

@@ -1,6 +1,6 @@
 use crate::srv::constant;
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     file::{
         OsPath,
@@ -13,11 +13,11 @@ use oxedize_fe2o3_core::{
         NormPathBuf,
     },
 };
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     cfg::Config,
 };
-use oxedize_fe2o3_net::{
+use oxedyne_fe2o3_net::{
     constant::SESSION_ID_KEY_LABEL,
     dns::Fqdn,
     http::{

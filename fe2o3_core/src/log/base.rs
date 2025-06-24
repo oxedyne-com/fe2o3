@@ -43,7 +43,7 @@ use once_cell::sync::Lazy;
 
 
 pub struct Logger<ETAG: GenTag>
-    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+    where oxedyne_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
     pub chan_in:    ThreadController<Msg<ETAG>>,
     pub chan_out:   Arc<RwLock<ThreadController<Msg<ETAG>>>>,
@@ -51,7 +51,7 @@ pub struct Logger<ETAG: GenTag>
 }
 
 impl<ETAG: GenTag> Logger<ETAG>
-    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+    where oxedyne_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
     /// Unfortunately there is no obvious way to retain a printable version of `msg` up our sleeve to
     /// show on the off chance that `send` fails, without cloning.

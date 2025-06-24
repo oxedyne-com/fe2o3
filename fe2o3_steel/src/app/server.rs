@@ -28,7 +28,7 @@ use crate::{
     },
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     log::{
         bot::FileConfig,
@@ -39,15 +39,15 @@ use oxedize_fe2o3_core::{
     },
     path::NormalPath,
 };
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_jdat::{
     prelude::*,
 };
-use oxedize_fe2o3_syntax::{
+use oxedyne_fe2o3_syntax::{
     msg::{
         MsgCmd,
     },
 };
-use oxedize_fe2o3_tui::lib_tui::{
+use oxedyne_fe2o3_tui::lib_tui::{
     repl::{
         Evaluation,
         ShellConfig,

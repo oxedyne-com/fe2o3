@@ -1,4 +1,4 @@
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     alt::{
         Alt,
@@ -6,11 +6,11 @@ use oxedize_fe2o3_core::{
     },
 };
 
-use oxedize_fe2o3_crypto::{
+use oxedyne_fe2o3_crypto::{
     enc::EncryptionScheme,
     sign::SignatureScheme,
 };
-use oxedize_fe2o3_iop_crypto::{
+use oxedyne_fe2o3_iop_crypto::{
     enc::{
         Encrypter,
         EncrypterDefAlt,
@@ -20,14 +20,14 @@ use oxedize_fe2o3_iop_crypto::{
         SignerDefAlt,
     },
 };
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_jdat::{
     chunk::{
         //Chunker,
         ChunkConfig,
     },
     //daticle::Daticle,
 };
-use oxedize_fe2o3_hash::{
+use oxedyne_fe2o3_hash::{
     csum::{
         ChecksummerDefAlt,
         ChecksumScheme,
@@ -41,7 +41,7 @@ use oxedize_fe2o3_hash::{
     //    KeyDeriverDefAlt,
     //},
 };
-use oxedize_fe2o3_iop_hash::{
+use oxedyne_fe2o3_iop_hash::{
     api::Hasher,
     csum::Checksummer,
     //kdf::KeyDeriver,

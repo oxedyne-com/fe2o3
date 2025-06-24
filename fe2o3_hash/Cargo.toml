@@ -1,17 +1,17 @@
 [package]
-name = "oxedize_fe2o3_hash"
+name = "oxedyne_fe2o3_hash"
 version = "0.5.0"
-authors = ["h00gs <hello@oxedize.com>"]
+authors = ["h00gs <hello@oxedyne.io>"]
 edition = "2021"
 license = "BSD-2-Clause/Apache-2.0"
 description = "Hematite hashing library."
-repository = "https://github.com/Oxedize/fe2o3"
+repository = "https://github.com/oxedyne-io/fe2o3"
 
 [dependencies]
-oxedize_fe2o3_core 				= { path = "../fe2o3_core" }
-oxedize_fe2o3_iop_hash 			= { path = "../fe2o3_iop_hash" }
-oxedize_fe2o3_jdat 				= { path = "../fe2o3_jdat" }
-oxedize_fe2o3_namex				= { path = "../fe2o3_namex" }
+oxedyne_fe2o3_core 				= { path = "../fe2o3_core" }
+oxedyne_fe2o3_iop_hash 			= { path = "../fe2o3_iop_hash" }
+oxedyne_fe2o3_jdat 				= { path = "../fe2o3_jdat" }
+oxedyne_fe2o3_namex				= { path = "../fe2o3_namex" }
 
 base64 = "0.13.0"
 crc32fast = "1.2.1"
@@ -21,4 +21,4 @@ seahash = "4.0.1"
 tiny-keccak = { version = "2.0.2", features = ["sha3", "shake"] }
 
 [dev-dependencies]
-oxedize_fe2o3_text 				= { path = "../fe2o3_text" }
+oxedyne_fe2o3_text 				= { path = "../fe2o3_text" }

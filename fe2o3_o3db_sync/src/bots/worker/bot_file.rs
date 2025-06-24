@@ -16,8 +16,8 @@ use crate::{
     },
 };
 
-use oxedize_fe2o3_core::channels::Recv;
-use oxedize_fe2o3_jdat::id::NumIdDat;
+use oxedyne_fe2o3_core::channels::Recv;
+use oxedyne_fe2o3_jdat::id::NumIdDat;
 
 use std::{
     collections::BTreeMap,

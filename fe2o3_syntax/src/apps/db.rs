@@ -10,10 +10,10 @@ use crate::{
     },
 };
 
-use oxedize_fe2o3_core::prelude::*;
-use oxedize_fe2o3_jdat::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_jdat::prelude::*;
 
-/// Works with the `oxedize_fe2o3_iop_db::Database` trait.
+/// Works with the `oxedyne_fe2o3_iop_db::Database` trait.
 pub fn generic_database(
     mut s:      Syntax,
     mcid_kind:  Kind,

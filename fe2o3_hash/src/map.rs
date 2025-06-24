@@ -7,14 +7,14 @@
 //! different number of shards is performed via cloning.  A `ShardMap` can be safely given to
 //! threads simply by wrapping it in an `Arc`.
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     map::{
         Map,
         MapMut,
     },
 };
-use oxedize_fe2o3_iop_hash::api::{
+use oxedyne_fe2o3_iop_hash::api::{
     Hasher,
     HashForm,
 };

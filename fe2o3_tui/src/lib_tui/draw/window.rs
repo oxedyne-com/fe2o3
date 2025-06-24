@@ -32,8 +32,8 @@ use crate::lib_tui::{
     window::WindowMode,
 };
 
-use oxedize_fe2o3_core::prelude::*;
-use oxedize_fe2o3_geom::{
+use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_geom::{
     dim::{
         Coord,
         Dim,
@@ -44,7 +44,7 @@ use oxedize_fe2o3_geom::{
         RectView,
     },
 };
-use oxedize_fe2o3_text::{
+use oxedyne_fe2o3_text::{
     lines::TextLines,
 };
 

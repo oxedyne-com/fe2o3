@@ -1,4 +1,4 @@
-use oxedize_fe2o3_core::new_enum;
+use oxedyne_fe2o3_core::new_enum;
 use strum::Display;
 
 #[derive(Clone, Copy, Debug, Display, Eq, PartialEq)]
@@ -28,7 +28,7 @@ impl Gender {
     /// 
     /// # Example
     /// ```
-    /// use oxedize_fe2o3_stds::culture::Gender;
+    /// use oxedyne_fe2o3_stds::culture::Gender;
     /// 
     /// // 10% chance of minority gender, 90% chance of Male/Female.
     /// let gender = Gender::rand_minority(0.1);
@@ -37,7 +37,7 @@ impl Gender {
     /// let gender = Gender::rand_minority(0.5);
     /// ```
     pub fn rand_minority(p: f64) -> Self {
-        use ::oxedize_fe2o3_core::rand::Rand;
+        use ::oxedyne_fe2o3_core::rand::Rand;
         
         let random_val: f64 = Rand::value();
         

@@ -1,4 +1,4 @@
-use oxedize_fe2o3_namex::{
+use oxedyne_fe2o3_namex::{
     id::NamexId,
     db::{
         Entity,
@@ -7,7 +7,7 @@ use oxedize_fe2o3_namex::{
     },
 };
 
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 
 use std::{
     collections::BTreeMap,

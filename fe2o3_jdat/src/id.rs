@@ -1,4 +1,4 @@
-//! An `IdDat` is the `Dat` flavoured version of the generic identifier `oxedize_fe2o3_core::id::Id` that
+//! An `IdDat` is the `Dat` flavoured version of the generic identifier `oxedyne_fe2o3_core::id::Id` that
 //! wraps an explicit, native unsigned integer. The unsigned integers and `IdDat` implement the
 //! `NumId` and `NumIdDat` trait collections.
 
@@ -6,7 +6,7 @@ use crate::{
     prelude::*,
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     byte::{
         FromBytes,
@@ -18,7 +18,7 @@ use oxedize_fe2o3_core::{
     rand::RanDef,
     string::ToHexString,
 };
-use oxedize_fe2o3_text::base2x;
+use oxedyne_fe2o3_text::base2x;
 
 use std::{
     fmt::{
@@ -217,7 +217,7 @@ impl<
 //        id::NumId,
 //    };
 //
-//    use oxedize_fe2o3_core::{
+//    use oxedyne_fe2o3_core::{
 //        prelude::*,
 //        string::ToHexString,
 //    };

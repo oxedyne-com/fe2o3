@@ -13,8 +13,8 @@ use crate::{
     format_zone_dir,
 };
 
-use oxedize_fe2o3_core::channels::Recv;
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_core::channels::Recv;
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     id::NumIdDat,
 };

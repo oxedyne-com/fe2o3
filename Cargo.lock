@@ -773,9 +773,9 @@ dependencies = [
 name = "dat_map"
 version = "0.5.0"
 dependencies = [
- "oxedize_fe2o3_core",
- "oxedize_fe2o3_jdat",
- "oxedize_fe2o3_num",
+ "oxedyne_fe2o3_core",
+ "oxedyne_fe2o3_jdat",
+ "oxedyne_fe2o3_num",
  "proc-macro2",
  "quote",
  "syn 1.0.109",
@@ -1884,49 +1884,49 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fb37767f6569cd834a413442455e0f066d0d522de8630436e2a1761d9726ba56"
 
 [[package]]
-name = "oxedize_fe2o3"
+name = "oxedyne_fe2o3"
 version = "0.5.0"
 dependencies = [
  "cap",
  "criterion",
- "oxedize_fe2o3_bot",
- "oxedize_fe2o3_core",
- "oxedize_fe2o3_crypto",
- "oxedize_fe2o3_data",
- "oxedize_fe2o3_datime",
- "oxedize_fe2o3_file",
- "oxedize_fe2o3_geom",
- "oxedize_fe2o3_hash",
- "oxedize_fe2o3_iop_crypto",
- "oxedize_fe2o3_iop_db",
- "oxedize_fe2o3_iop_hash",
- "oxedize_fe2o3_jdat",
- "oxedize_fe2o3_namex",
- "oxedize_fe2o3_net",
- "oxedize_fe2o3_num",
- "oxedize_fe2o3_o3db_sync",
- "oxedize_fe2o3_shield",
- "oxedize_fe2o3_stds",
- "oxedize_fe2o3_steel",
- "oxedize_fe2o3_syntax",
- "oxedize_fe2o3_test",
- "oxedize_fe2o3_text",
- "oxedize_fe2o3_tui",
- "oxedize_fe2o3_units",
+ "oxedyne_fe2o3_bot",
+ "oxedyne_fe2o3_core",
+ "oxedyne_fe2o3_crypto",
+ "oxedyne_fe2o3_data",
+ "oxedyne_fe2o3_datime",
+ "oxedyne_fe2o3_file",
+ "oxedyne_fe2o3_geom",
+ "oxedyne_fe2o3_hash",
+ "oxedyne_fe2o3_iop_crypto",
+ "oxedyne_fe2o3_iop_db",
+ "oxedyne_fe2o3_iop_hash",
+ "oxedyne_fe2o3_jdat",
+ "oxedyne_fe2o3_namex",
+ "oxedyne_fe2o3_net",
+ "oxedyne_fe2o3_num",
+ "oxedyne_fe2o3_o3db_sync",
+ "oxedyne_fe2o3_shield",
+ "oxedyne_fe2o3_stds",
+ "oxedyne_fe2o3_steel",
+ "oxedyne_fe2o3_syntax",
+ "oxedyne_fe2o3_test",
+ "oxedyne_fe2o3_text",
+ "oxedyne_fe2o3_tui",
+ "oxedyne_fe2o3_units",
  "rand 0.7.3",
  "rand_core 0.5.1",
 ]
 
 [[package]]
-name = "oxedize_fe2o3_bot"
+name = "oxedyne_fe2o3_bot"
 version = "0.5.0"
 dependencies = [
- "oxedize_fe2o3_core",
- "oxedize_fe2o3_jdat",
+ "oxedyne_fe2o3_core",
+ "oxedyne_fe2o3_jdat",
 ]
 
 [[package]]
-name = "oxedize_fe2o3_core"
+name = "oxedyne_fe2o3_core"
 version = "0.5.0"
 dependencies = [
  "base64 0.13.1",
@@ -1941,7 +1941,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "oxedize_fe2o3_crypto"
+name = "oxedyne_fe2o3_crypto"
 version = "0.5.0"
 dependencies = [
  "aes-gcm",
@@ -1954,12 +1954,12 @@ dependencies = [
  "hex",
  "itertools 0.7.11",
  "libc",
- "oxedize_fe2o3_core",
- "oxedize_fe2o3_data",
- "oxedize_fe2o3_iop_crypto",
- "oxedize_fe2o3_jdat",
- "oxedize_fe2o3_namex",
- "oxedize_fe2o3_text",
+ "oxedyne_fe2o3_core",
+ "oxedyne_fe2o3_data",
+ "oxedyne_fe2o3_iop_crypto",
+ "oxedyne_fe2o3_jdat",
+ "oxedyne_fe2o3_namex",
+ "oxedyne_fe2o3_text",
  "pqcrypto-dilithium",
  "pqcrypto-traits",
  "rand 0.7.3",
@@ -1974,138 +1974,138 @@ dependencies = [
 ]
 
 [[package]]
-name = "oxedize_fe2o3_data"
+name = "oxedyne_fe2o3_data"
 version = "0.5.0"
 dependencies = [
  "base64 0.22.1",
- "oxedize_fe2o3_core",
- "oxedize_fe2o3_jdat",
- "oxedize_fe2o3_text",
+ "oxedyne_fe2o3_core",
+ "oxedyne_fe2o3_jdat",
+ "oxedyne_fe2o3_text",
 ]
 
 [[package]]
-name = "oxedize_fe2o3_datime"
+name = "oxedyne_fe2o3_datime"
 version = "0.5.0"
 dependencies = [
- "oxedize_fe2o3_core",
- "oxedize_fe2o3_data",
- "oxedize_fe2o3_jdat",
- "oxedize_fe2o3_namex",
- "oxedize_fe2o3_num",
- "oxedize_fe2o3_stds",
+ "oxedyne_fe2o3_core",
+ "oxedyne_fe2o3_data",
+ "oxedyne_fe2o3_jdat",
+ "oxedyne_fe2o3_namex",
+ "oxedyne_fe2o3_num",
+ "oxedyne_fe2o3_stds",
 ]
 
 [[package]]
-name = "oxedize_fe2o3_file"
+name = "oxedyne_fe2o3_file"
 version = "0.5.0"
 dependencies = [
- "oxedize_fe2o3_core",
- "oxedize_fe2o3_data",
+ "oxedyne_fe2o3_core",
+ "oxedyne_fe2o3_data",
 ]
 
 [[package]]
-name = "oxedize_fe2o3_geom"
+name = "oxedyne_fe2o3_geom"
 version = "0.5.0"
 dependencies = [
- "oxedize_fe2o3_core",
+ "oxedyne_fe2o3_core",
 ]
 
 [[package]]
-name = "oxedize_fe2o3_hash"
+name = "oxedyne_fe2o3_hash"
 version = "0.5.0"
 dependencies = [
  "base64 0.13.1",
  "crc32fast",
  "num_cpus",
- "oxedize_fe2o3_core",
- "oxedize_fe2o3_iop_hash",
- "oxedize_fe2o3_jdat",
- "oxedize_fe2o3_namex",
- "oxedize_fe2o3_text",
+ "oxedyne_fe2o3_core",
+ "oxedyne_fe2o3_iop_hash",
+ "oxedyne_fe2o3_jdat",
+ "oxedyne_fe2o3_namex",
+ "oxedyne_fe2o3_text",
  "rust-argon2",
  "seahash",
  "tiny-keccak",
 ]
 
 [[package]]
-name = "oxedize_fe2o3_iop_crypto"
+name = "oxedyne_fe2o3_iop_crypto"
 version = "0.5.0"
 dependencies = [
- "oxedize_fe2o3_core",
- "oxedize_fe2o3_namex",
+ "oxedyne_fe2o3_core",
+ "oxedyne_fe2o3_namex",
 ]
 
 [[package]]
-name = "oxedize_fe2o3_iop_db"
+name = "oxedyne_fe2o3_iop_db"
 version = "0.5.0"
 dependencies = [
- "oxedize_fe2o3_core",
- "oxedize_fe2o3_crypto",
- "oxedize_fe2o3_data",
- "oxedize_fe2o3_hash",
- "oxedize_fe2o3_iop_crypto",
- "oxedize_fe2o3_iop_hash",
- "oxedize_fe2o3_jdat",
- "oxedize_fe2o3_namex",
+ "oxedyne_fe2o3_core",
+ "oxedyne_fe2o3_crypto",
+ "oxedyne_fe2o3_data",
+ "oxedyne_fe2o3_hash",
+ "oxedyne_fe2o3_iop_crypto",
+ "oxedyne_fe2o3_iop_hash",
+ "oxedyne_fe2o3_jdat",
+ "oxedyne_fe2o3_namex",
 ]
 
 [[package]]
-name = "oxedize_fe2o3_iop_hash"
+name = "oxedyne_fe2o3_iop_hash"
 version = "0.5.0"
 dependencies = [
- "oxedize_fe2o3_core",
- "oxedize_fe2o3_namex",
+ "oxedyne_fe2o3_core",
+ "oxedyne_fe2o3_namex",
 ]
 
 [[package]]
-name = "oxedize_fe2o3_jdat"
+name = "oxedyne_fe2o3_jdat"
 version = "0.5.0"
 dependencies = [
  "bigdecimal",
  "dat_map",
  "num-bigint 0.3.3",
- "oxedize_fe2o3_core",
- "oxedize_fe2o3_hash",
- "oxedize_fe2o3_num",
- "oxedize_fe2o3_test",
- "oxedize_fe2o3_text",
+ "oxedyne_fe2o3_core",
+ "oxedyne_fe2o3_hash",
+ "oxedyne_fe2o3_num",
+ "oxedyne_fe2o3_test",
+ "oxedyne_fe2o3_text",
  "quote",
  "rand_core 0.6.4",
  "syn 1.0.109",
 ]
 
 [[package]]
-name = "oxedize_fe2o3_namex"
+name = "oxedyne_fe2o3_namex"
 version = "0.5.0"
 dependencies = [
  "base64 0.13.1",
  "num-derive",
  "num-traits",
- "oxedize_fe2o3_core",
- "oxedize_fe2o3_jdat",
- "oxedize_fe2o3_text",
+ "oxedyne_fe2o3_core",
+ "oxedyne_fe2o3_jdat",
+ "oxedyne_fe2o3_text",
  "strum 0.24.1",
  "strum_macros 0.24.3",
 ]
 
 [[package]]
-name = "oxedize_fe2o3_net"
+name = "oxedyne_fe2o3_net"
 version = "0.5.0"
 dependencies = [
  "base64 0.13.1",
  "chrono",
- "oxedize_fe2o3_bot",
- "oxedize_fe2o3_core",
- "oxedize_fe2o3_crypto",
- "oxedize_fe2o3_data",
- "oxedize_fe2o3_hash",
- "oxedize_fe2o3_iop_crypto",
- "oxedize_fe2o3_iop_db",
- "oxedize_fe2o3_iop_hash",
- "oxedize_fe2o3_jdat",
- "oxedize_fe2o3_stds",
- "oxedize_fe2o3_syntax",
- "oxedize_fe2o3_text",
+ "oxedyne_fe2o3_bot",
+ "oxedyne_fe2o3_core",
+ "oxedyne_fe2o3_crypto",
+ "oxedyne_fe2o3_data",
+ "oxedyne_fe2o3_hash",
+ "oxedyne_fe2o3_iop_crypto",
+ "oxedyne_fe2o3_iop_db",
+ "oxedyne_fe2o3_iop_hash",
+ "oxedyne_fe2o3_jdat",
+ "oxedyne_fe2o3_stds",
+ "oxedyne_fe2o3_syntax",
+ "oxedyne_fe2o3_text",
  "secrecy",
  "sha1",
  "strum 0.25.0",
@@ -2114,17 +2114,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "oxedize_fe2o3_num"
+name = "oxedyne_fe2o3_num"
 version = "0.5.0"
 dependencies = [
  "bigdecimal",
  "num-bigint 0.3.3",
- "oxedize_fe2o3_core",
+ "oxedyne_fe2o3_core",
  "rand_core 0.6.4",
 ]
 
 [[package]]
-name = "oxedize_fe2o3_o3db_sync"
+name = "oxedyne_fe2o3_o3db_sync"
 version = "0.5.0"
 dependencies = [
  "crossbeam-utils",
@@ -2132,22 +2132,22 @@ dependencies = [
  "humantime",
  "lazy_static",
  "num_cpus",
- "oxedize_fe2o3_bot",
- "oxedize_fe2o3_core",
- "oxedize_fe2o3_crypto",
- "oxedize_fe2o3_data",
- "oxedize_fe2o3_hash",
- "oxedize_fe2o3_iop_crypto",
- "oxedize_fe2o3_iop_db",
- "oxedize_fe2o3_iop_hash",
- "oxedize_fe2o3_jdat",
- "oxedize_fe2o3_namex",
- "oxedize_fe2o3_net",
- "oxedize_fe2o3_num",
- "oxedize_fe2o3_stds",
- "oxedize_fe2o3_syntax",
- "oxedize_fe2o3_test",
- "oxedize_fe2o3_text",
+ "oxedyne_fe2o3_bot",
+ "oxedyne_fe2o3_core",
+ "oxedyne_fe2o3_crypto",
+ "oxedyne_fe2o3_data",
+ "oxedyne_fe2o3_hash",
+ "oxedyne_fe2o3_iop_crypto",
+ "oxedyne_fe2o3_iop_db",
+ "oxedyne_fe2o3_iop_hash",
+ "oxedyne_fe2o3_jdat",
+ "oxedyne_fe2o3_namex",
+ "oxedyne_fe2o3_net",
+ "oxedyne_fe2o3_num",
+ "oxedyne_fe2o3_stds",
+ "oxedyne_fe2o3_syntax",
+ "oxedyne_fe2o3_test",
+ "oxedyne_fe2o3_text",
  "rand 0.8.5",
  "rand_core 0.6.4",
  "regex",
@@ -2156,30 +2156,30 @@ dependencies = [
 ]
 
 [[package]]
-name = "oxedize_fe2o3_shield"
+name = "oxedyne_fe2o3_shield"
 version = "0.5.0"
 dependencies = [
  "base64 0.13.1",
  "crossterm",
  "local-ip-address",
  "num_cpus",
- "oxedize_fe2o3_bot",
- "oxedize_fe2o3_core",
- "oxedize_fe2o3_crypto",
- "oxedize_fe2o3_data",
- "oxedize_fe2o3_hash",
- "oxedize_fe2o3_iop_crypto",
- "oxedize_fe2o3_iop_db",
- "oxedize_fe2o3_iop_hash",
- "oxedize_fe2o3_jdat",
- "oxedize_fe2o3_namex",
- "oxedize_fe2o3_net",
- "oxedize_fe2o3_o3db_sync",
- "oxedize_fe2o3_stds",
- "oxedize_fe2o3_syntax",
- "oxedize_fe2o3_test",
- "oxedize_fe2o3_text",
- "oxedize_fe2o3_tui",
+ "oxedyne_fe2o3_bot",
+ "oxedyne_fe2o3_core",
+ "oxedyne_fe2o3_crypto",
+ "oxedyne_fe2o3_data",
+ "oxedyne_fe2o3_hash",
+ "oxedyne_fe2o3_iop_crypto",
+ "oxedyne_fe2o3_iop_db",
+ "oxedyne_fe2o3_iop_hash",
+ "oxedyne_fe2o3_jdat",
+ "oxedyne_fe2o3_namex",
+ "oxedyne_fe2o3_net",
+ "oxedyne_fe2o3_o3db_sync",
+ "oxedyne_fe2o3_stds",
+ "oxedyne_fe2o3_syntax",
+ "oxedyne_fe2o3_test",
+ "oxedyne_fe2o3_text",
+ "oxedyne_fe2o3_tui",
  "rand 0.8.5",
  "rand_core 0.6.4",
  "rpassword",
@@ -2189,15 +2189,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "oxedize_fe2o3_stds"
+name = "oxedyne_fe2o3_stds"
 version = "0.5.0"
 dependencies = [
- "oxedize_fe2o3_core",
+ "oxedyne_fe2o3_core",
  "strum 0.25.0",
 ]
 
 [[package]]
-name = "oxedize_fe2o3_steel"
+name = "oxedyne_fe2o3_steel"
 version = "0.5.0"
 dependencies = [
  "anyhow",
@@ -2205,22 +2205,22 @@ dependencies = [
  "grass",
  "is_elevated",
  "notify",
- "oxedize_fe2o3_bot",
- "oxedize_fe2o3_core",
- "oxedize_fe2o3_crypto",
- "oxedize_fe2o3_data",
- "oxedize_fe2o3_hash",
- "oxedize_fe2o3_iop_crypto",
- "oxedize_fe2o3_iop_db",
- "oxedize_fe2o3_iop_hash",
- "oxedize_fe2o3_jdat",
- "oxedize_fe2o3_namex",
- "oxedize_fe2o3_net",
- "oxedize_fe2o3_o3db_sync",
- "oxedize_fe2o3_stds",
- "oxedize_fe2o3_syntax",
- "oxedize_fe2o3_text",
- "oxedize_fe2o3_tui",
+ "oxedyne_fe2o3_bot",
+ "oxedyne_fe2o3_core",
+ "oxedyne_fe2o3_crypto",
+ "oxedyne_fe2o3_data",
+ "oxedyne_fe2o3_hash",
+ "oxedyne_fe2o3_iop_crypto",
+ "oxedyne_fe2o3_iop_db",
+ "oxedyne_fe2o3_iop_hash",
+ "oxedyne_fe2o3_jdat",
+ "oxedyne_fe2o3_namex",
+ "oxedyne_fe2o3_net",
+ "oxedyne_fe2o3_o3db_sync",
+ "oxedyne_fe2o3_stds",
+ "oxedyne_fe2o3_syntax",
+ "oxedyne_fe2o3_text",
+ "oxedyne_fe2o3_tui",
  "rcgen",
  "rpassword",
  "rustls",
@@ -2245,62 +2245,62 @@ dependencies = [
 ]
 
 [[package]]
-name = "oxedize_fe2o3_syntax"
+name = "oxedyne_fe2o3_syntax"
 version = "0.5.0"
 dependencies = [
  "levenshtein",
  "num-bigint 0.3.3",
- "oxedize_fe2o3_core",
- "oxedize_fe2o3_jdat",
- "oxedize_fe2o3_stds",
- "oxedize_fe2o3_test",
- "oxedize_fe2o3_text",
- "oxedize_fe2o3_units",
+ "oxedyne_fe2o3_core",
+ "oxedyne_fe2o3_jdat",
+ "oxedyne_fe2o3_stds",
+ "oxedyne_fe2o3_test",
+ "oxedyne_fe2o3_text",
+ "oxedyne_fe2o3_units",
 ]
 
 [[package]]
-name = "oxedize_fe2o3_test"
+name = "oxedyne_fe2o3_test"
 version = "0.5.0"
 dependencies = [
- "oxedize_fe2o3_core",
+ "oxedyne_fe2o3_core",
  "rand 0.8.5",
 ]
 
 [[package]]
-name = "oxedize_fe2o3_text"
+name = "oxedyne_fe2o3_text"
 version = "0.5.0"
 dependencies = [
  "base64 0.13.1",
- "oxedize_fe2o3_core",
- "oxedize_fe2o3_geom",
- "oxedize_fe2o3_stds",
- "oxedize_fe2o3_test",
+ "oxedyne_fe2o3_core",
+ "oxedyne_fe2o3_geom",
+ "oxedyne_fe2o3_stds",
+ "oxedyne_fe2o3_test",
 ]
 
 [[package]]
-name = "oxedize_fe2o3_tui"
+name = "oxedyne_fe2o3_tui"
 version = "0.5.0"
 dependencies = [
  "crossterm",
- "oxedize_fe2o3_core",
- "oxedize_fe2o3_file",
- "oxedize_fe2o3_geom",
- "oxedize_fe2o3_hash",
- "oxedize_fe2o3_iop_hash",
- "oxedize_fe2o3_jdat",
- "oxedize_fe2o3_stds",
- "oxedize_fe2o3_syntax",
- "oxedize_fe2o3_text",
- "oxedize_fe2o3_units",
+ "oxedyne_fe2o3_core",
+ "oxedyne_fe2o3_file",
+ "oxedyne_fe2o3_geom",
+ "oxedyne_fe2o3_hash",
+ "oxedyne_fe2o3_iop_hash",
+ "oxedyne_fe2o3_jdat",
+ "oxedyne_fe2o3_stds",
+ "oxedyne_fe2o3_syntax",
+ "oxedyne_fe2o3_text",
+ "oxedyne_fe2o3_units",
  "secrecy",
 ]
 
 [[package]]
-name = "oxedize_fe2o3_units"
+name = "oxedyne_fe2o3_units"
 version = "0.5.0"
 dependencies = [
- "oxedize_fe2o3_core",
- "oxedize_fe2o3_num",
+ "oxedyne_fe2o3_core",
+ "oxedyne_fe2o3_num",
 ]
 
 [[package]]

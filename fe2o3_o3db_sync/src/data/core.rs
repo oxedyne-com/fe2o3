@@ -1,8 +1,8 @@
 //! The database is instantiated with two types for each of the four schemes, e.g.
 //! `EncryptionScheme` and `ENC`.  The first is a default Hematite `enum` that provides access to a
 //! range of schemes, but is naturally limited.  The second can be a custom type that implements
-//! `Encrypter`.  `oxedize_fe2o3_iop_db::api::RestSchemesOverride` is used to specify an
-//! `oxedize_fe2o3_core::alt::Override` based on these two scheme types for encryption and key hashing (as
+//! `Encrypter`.  `oxedyne_fe2o3_iop_db::api::RestSchemesOverride` is used to specify an
+//! `oxedyne_fe2o3_core::alt::Override` based on these two scheme types for encryption and key hashing (as
 //! well as an optional change in the database chunking configuration).  This allows four
 //! possibilities for changing the scheme used to write and read individual (k, v) pairs:
 //! - a pass-through which defers to the current database-wide scheme,
@@ -18,9 +18,9 @@ use crate::{
     },
 };
 
-use oxedize_fe2o3_crypto::enc::EncryptionScheme;
-use oxedize_fe2o3_iop_crypto::enc::EncrypterDefAlt;
-use oxedize_fe2o3_hash::{
+use oxedyne_fe2o3_crypto::enc::EncryptionScheme;
+use oxedyne_fe2o3_iop_crypto::enc::EncrypterDefAlt;
+use oxedyne_fe2o3_hash::{
     csum::{
         ChecksummerDefAlt,
         ChecksumScheme,
@@ -30,8 +30,8 @@ use oxedize_fe2o3_hash::{
         HashScheme,
     },
 };
-use oxedize_fe2o3_iop_db::api::Meta;
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_iop_db::api::Meta;
+use oxedyne_fe2o3_jdat::{
     daticle::Dat,
     id::NumIdDat,
 };

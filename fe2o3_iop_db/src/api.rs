@@ -1,4 +1,4 @@
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     alt::Override,
     byte::{
@@ -6,17 +6,17 @@ use oxedize_fe2o3_core::{
         ToBytes,
     },
 };
-use oxedize_fe2o3_crypto::enc::EncryptionScheme;
-use oxedize_fe2o3_data::time::Timestamp;
-use oxedize_fe2o3_hash::hash::HashScheme;
-use oxedize_fe2o3_iop_crypto::enc::Encrypter;
-use oxedize_fe2o3_iop_hash::api::Hasher;
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_crypto::enc::EncryptionScheme;
+use oxedyne_fe2o3_data::time::Timestamp;
+use oxedyne_fe2o3_hash::hash::HashScheme;
+use oxedyne_fe2o3_iop_crypto::enc::Encrypter;
+use oxedyne_fe2o3_iop_hash::api::Hasher;
+use oxedyne_fe2o3_jdat::{
     chunk::ChunkConfig,
     daticle::Dat,
     id::NumIdDat,
 };
-use oxedize_fe2o3_namex::id::InNamex;
+use oxedyne_fe2o3_namex::id::InNamex;
 
 
 /// Metadata attached to every stored key instance.
@@ -93,7 +93,7 @@ impl<
 }
 
 /// A database can make use of two filters for the key (hash scheme) and the value (encryption
-/// scheme).  `RestSchemesOverride` is used to specify an `oxedize_fe2o3_core::alt::Override` based on
+/// scheme).  `RestSchemesOverride` is used to specify an `oxedyne_fe2o3_core::alt::Override` based on
 /// these two scheme types for encryption and key hashing (as well as an optional change in the
 /// database chunking configuration).  This allows four possibilities for changing the scheme used
 /// to write and read individual (k, v) pairs:

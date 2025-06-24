@@ -53,7 +53,7 @@ use crate::{
     app::tui,
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     //log::{
     //    console::StdoutLoggerConsole,

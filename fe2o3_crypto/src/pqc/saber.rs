@@ -43,7 +43,7 @@ println!("The modular result in decimal difference is -255");
 
 use crate::generic_saber_api;
 
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 
 use std::{
     convert::TryInto,

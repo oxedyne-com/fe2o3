@@ -2,7 +2,7 @@ use crate::{
     comm::channels::ChannelPool,
 };
 
-use oxedize_fe2o3_jdat::id::NumIdDat;
+use oxedyne_fe2o3_jdat::id::NumIdDat;
 
 pub struct ServerChannels<
     const UIDL: usize,

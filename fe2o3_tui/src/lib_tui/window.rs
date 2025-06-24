@@ -33,20 +33,20 @@ use crate::lib_tui::{
     },
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     count::{
         Counter,
         CycleCounter,
     },
 };
-use oxedize_fe2o3_geom::{
+use oxedyne_fe2o3_geom::{
     rect::{
         AbsSize,
         RectView,
     },
 };
-use oxedize_fe2o3_text::{
+use oxedyne_fe2o3_text::{
     Text,
     lines::{
         LineRange,

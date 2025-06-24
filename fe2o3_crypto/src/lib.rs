@@ -34,8 +34,8 @@
 //! # Example Usage
 //! 
 //! ```ignore
-//! use oxedize_fe2o3_crypto::{EncryptionScheme, SignatureScheme};
-//! use oxedize_fe2o3_core::prelude::*;
+//! use oxedyne_fe2o3_crypto::{EncryptionScheme, SignatureScheme};
+//! use oxedyne_fe2o3_core::prelude::*;
 //! 
 //! // Create a post-quantum signature scheme
 //! let scheme = res!(SignatureScheme::new_dilithium2());
@@ -47,7 +47,7 @@
 //! // Verify the signature
 //! assert!(res!(scheme.verify(message, &signature)));
 //!
-//#![forbid(unsafe_code)] // Unfortunately need to remove for c interop. TODO oxedize everything!
+//#![forbid(unsafe_code)] // Unfortunately need to remove for c interop. TODO Rust all the things!
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
@@ -67,6 +67,6 @@ pub mod scheme;
 pub mod sign;
 //pub mod wasm;
 
-use oxedize_fe2o3_jdat::version::SemVer;
+use oxedyne_fe2o3_jdat::version::SemVer;
 
 pub const VERSION: SemVer = SemVer::new(0,0,1);

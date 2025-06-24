@@ -21,14 +21,14 @@
 //! `(u8|42)`), kindicles (type annotations like `u8|`), and the different text encodings available:
 //!
 //! ```rust
-//! use oxedize_fe2o3_jdat::{
+//! use oxedyne_fe2o3_jdat::{
 //!     prelude::*,
 //!     string::{
 //!         dec::DecoderConfig,
 //!         enc::EncoderConfig,
 //!     },
 //! };
-//! use oxedize_fe2o3_core::prelude::*;
+//! use oxedyne_fe2o3_core::prelude::*;
 //! use std::collections::BTreeMap;
 //!
 //! fn main() -> Outcome<()> {
@@ -124,9 +124,9 @@ pub mod string;
 pub mod usr;
 pub mod version;
 
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 
-pub use oxedize_fe2o3_core::conv::BestFrom;
+pub use oxedyne_fe2o3_core::conv::BestFrom;
 
 pub use dat_map::{
     FromDatMap,

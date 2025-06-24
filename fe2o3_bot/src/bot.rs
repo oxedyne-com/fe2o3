@@ -2,11 +2,11 @@ use crate::{
     msg::BotMsg,
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     channels::Simplex,
 };
-use oxedize_fe2o3_jdat::id::NumIdDat;
+use oxedyne_fe2o3_jdat::id::NumIdDat;
 
 use std::{
     sync::{

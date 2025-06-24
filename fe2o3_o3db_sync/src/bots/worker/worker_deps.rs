@@ -22,4 +22,4 @@ pub use crate::{
     workerbot_methods,
 };
 
-pub use oxedize_fe2o3_core::bot::BaseMsg;
+pub use oxedyne_fe2o3_core::bot::BaseMsg;

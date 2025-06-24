@@ -1,5 +1,5 @@
 pub use crate::{
-    self as oxedize_fe2o3_core,
+    self as oxedyne_fe2o3_core,
     byte::B32,
     Outcome,
     GenTag,

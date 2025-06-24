@@ -15,8 +15,8 @@ use crate::{
     },
 };
 
-use oxedize_fe2o3_iop_db::api::Meta;
-use oxedize_fe2o3_jdat::id::NumIdDat;
+use oxedyne_fe2o3_iop_db::api::Meta;
+use oxedyne_fe2o3_jdat::id::NumIdDat;
 
 use std::{
     fs::File,

@@ -17,9 +17,9 @@ use crate::{
     file::floc::FileLocation,
 };
 
-use oxedize_fe2o3_core::channels::Recv;
-use oxedize_fe2o3_iop_db::api::Meta;
-use oxedize_fe2o3_jdat::id::NumIdDat;
+use oxedyne_fe2o3_core::channels::Recv;
+use oxedyne_fe2o3_iop_db::api::Meta;
+use oxedyne_fe2o3_jdat::id::NumIdDat;
 
 use std::{
     sync::Arc,

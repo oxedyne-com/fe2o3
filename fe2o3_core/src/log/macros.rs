@@ -6,7 +6,7 @@ macro_rules! log {
     ($level:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: $level,
-            src: oxedize_fe2o3_core::log::base::Source {
+            src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
                 file: file!(),
                 line: line!(),
@@ -19,7 +19,7 @@ macro_rules! log {
     ($level:expr, $stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: $level,
-            src: oxedize_fe2o3_core::log::base::Source {
+            src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
                 file: file!(),
                 line: line!(),
@@ -33,14 +33,14 @@ macro_rules! log {
 
 #[macro_export]
 /// Log an error message by sending it to the `LogBot` instance. This macro has a different
-/// structure to the others, accepting either an `oxedize_fe2o3_core::error::Error` or an `Error` with
+/// structure to the others, accepting either an `oxedyne_fe2o3_core::error::Error` or an `Error` with
 /// parameters for string formatting.  In other words, it requires the caller to pass an `Error` or
 /// create one.
 macro_rules! error {
     ($e:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Error,
-            src: oxedize_fe2o3_core::log::base::Source {
+            src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
                 file: file!(),
                 line: line!(),
@@ -53,7 +53,7 @@ macro_rules! error {
     ($e:expr, $stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Error,
-            src: oxedize_fe2o3_core::log::base::Source {
+            src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
                 file: file!(),
                 line: line!(),
@@ -66,7 +66,7 @@ macro_rules! error {
     ($stream:expr, $e:expr) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Error,
-            src: oxedize_fe2o3_core::log::base::Source {
+            src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
                 file: file!(),
                 line: line!(),
@@ -79,7 +79,7 @@ macro_rules! error {
     ($e:expr) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Error,
-            src: oxedize_fe2o3_core::log::base::Source {
+            src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
                 file: file!(),
                 line: line!(),
@@ -99,7 +99,7 @@ macro_rules! fault {
     ($lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Error,
-            src: oxedize_fe2o3_core::log::base::Source {
+            src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
                 file: file!(),
                 line: line!(),
@@ -112,7 +112,7 @@ macro_rules! fault {
     ($stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Error,
-            src: oxedize_fe2o3_core::log::base::Source {
+            src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
                 file: file!(),
                 line: line!(),
@@ -130,7 +130,7 @@ macro_rules! warn {
     ($lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Warn,
-            src: oxedize_fe2o3_core::log::base::Source {
+            src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
                 file: file!(),
                 line: line!(),
@@ -143,7 +143,7 @@ macro_rules! warn {
     ($stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Warn,
-            src: oxedize_fe2o3_core::log::base::Source {
+            src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
                 file: file!(),
                 line: line!(),
@@ -160,7 +160,7 @@ macro_rules! info {
     ($lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Info,
-            src: oxedize_fe2o3_core::log::base::Source {
+            src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
                 file: file!(),
                 line: line!(),
@@ -173,7 +173,7 @@ macro_rules! info {
     ($stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Info,
-            src: oxedize_fe2o3_core::log::base::Source {
+            src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
                 file: file!(),
                 line: line!(),
@@ -191,7 +191,7 @@ macro_rules! test {
     ($lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Test,
-            src: oxedize_fe2o3_core::log::base::Source {
+            src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
                 file: file!(),
                 line: line!(),
@@ -204,7 +204,7 @@ macro_rules! test {
     ($stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Test,
-            src: oxedize_fe2o3_core::log::base::Source {
+            src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
                 file: file!(),
                 line: line!(),
@@ -222,7 +222,7 @@ macro_rules! debug {
     ($lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Debug,
-            src: oxedize_fe2o3_core::log::base::Source {
+            src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
                 file: file!(),
                 line: line!(),
@@ -235,7 +235,7 @@ macro_rules! debug {
     ($stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Debug,
-            src: oxedize_fe2o3_core::log::base::Source {
+            src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
                 file: file!(),
                 line: line!(),
@@ -253,7 +253,7 @@ macro_rules! trace {
     ($lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Trace,
-            src: oxedize_fe2o3_core::log::base::Source {
+            src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
                 file: file!(),
                 line: line!(),
@@ -266,7 +266,7 @@ macro_rules! trace {
     ($stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
             level: LogLevel::Trace,
-            src: oxedize_fe2o3_core::log::base::Source {
+            src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
                 file: file!(),
                 line: line!(),
@@ -282,7 +282,7 @@ macro_rules! trace {
 /// Send a finish message to the `LogBot` instance.
 macro_rules! log_finish {
     () => {
-        LOG.send_in(bot_log::Msg::Finish(oxedize_fe2o3_core::log::base::Source {
+        LOG.send_in(bot_log::Msg::Finish(oxedyne_fe2o3_core::log::base::Source {
             tid: std::thread::current().id(),
             file: file!(),
             line: line!(),
@@ -298,7 +298,7 @@ macro_rules! log_in_finish_wait {
     () => {
         // Send finish message to the incoming channel of the logger, and wait for the logbot
         // thread to finish.
-        LOG.send_in(bot_log::Msg::Finish(oxedize_fe2o3_core::log::base::Source {
+        LOG.send_in(bot_log::Msg::Finish(oxedyne_fe2o3_core::log::base::Source {
             tid: std::thread::current().id(),
             file: file!(),
             line: line!(),
@@ -307,7 +307,7 @@ macro_rules! log_in_finish_wait {
             match LOG.chan_in.hopt.lock() {
                 Ok(mut inner) => inner.take(),
                 Err(e) => {
-                    let err = oxedize_fe2o3_core::log::base::LogWaitError::LockError(fmt!("{}", e));
+                    let err = oxedyne_fe2o3_core::log::base::LogWaitError::LockError(fmt!("{}", e));
                     return Err(Error::Local(ErrMsg {
                         tags: &[ErrTag::Lock],
                         msg: fmt!("{}", err),
@@ -316,7 +316,7 @@ macro_rules! log_in_finish_wait {
             }
         } {
             if let Err(e) = handle.join() {
-                let err = oxedize_fe2o3_core::log::base::LogWaitError::JoinError(fmt!("{:?}", e));
+                let err = oxedyne_fe2o3_core::log::base::LogWaitError::JoinError(fmt!("{:?}", e));
                 return Err(Error::Local(ErrMsg {
                     tags: &[ErrTag::Thread],
                     msg: fmt!("{}", err),
@@ -334,7 +334,7 @@ macro_rules! log_out_finish_wait {
     () => {
         // Send finish message to the outgoing channel of the logger, and wait for its thread to
         // finish.
-        res!(LOG.send_out(bot_log::Msg::Finish(oxedize_fe2o3_core::log::base::Source {
+        res!(LOG.send_out(bot_log::Msg::Finish(oxedyne_fe2o3_core::log::base::Source {
             tid: std::thread::current().id(),
             file: file!(),
             line: line!(),
@@ -345,7 +345,7 @@ macro_rules! log_out_finish_wait {
                 let x = match unlocked_chan_out.hopt.lock() {
                     Ok(mut inner) => inner.take(),
                     Err(e) => {
-                        let err = oxedize_fe2o3_core::log::base::LogWaitError::LockError(fmt!("{}", e));
+                        let err = oxedyne_fe2o3_core::log::base::LogWaitError::LockError(fmt!("{}", e));
                         return Err(Error::Local(ErrMsg {
                             tags: &[ErrTag::Lock],
                             msg: fmt!("{}", err),
@@ -355,7 +355,7 @@ macro_rules! log_out_finish_wait {
                 x // KTCH Keeping the Compiler Happy (TM)
             } {
                 if let Err(e) = handle.join() {
-                    let err = oxedize_fe2o3_core::log::base::LogWaitError::JoinError(fmt!("{:?}", e));
+                    let err = oxedyne_fe2o3_core::log::base::LogWaitError::JoinError(fmt!("{:?}", e));
                     return Err(Error::Local(ErrMsg {
                         tags: &[ErrTag::Thread],
                         msg: fmt!("{}", err),
@@ -402,7 +402,7 @@ macro_rules! log_get_level {
 }
 
 #[macro_export]
-/// Set a new log `oxedize_fe2o3_core::log::bot::Config`.  Because this is done via its write lock, this
+/// Set a new log `oxedyne_fe2o3_core::log::bot::Config`.  Because this is done via its write lock, this
 /// macro can return an error.
 macro_rules! log_set_config {
     ($cfg:expr) => {
@@ -410,7 +410,7 @@ macro_rules! log_set_config {
             let mut unlocked_cfg = lock_write!(LOG.cfg);
             *unlocked_cfg = $cfg;
         }
-        LOG.send_in(bot_log::Msg::Update(oxedize_fe2o3_core::log::base::Source {
+        LOG.send_in(bot_log::Msg::Update(oxedyne_fe2o3_core::log::base::Source {
             tid: std::thread::current().id(),
             file: file!(),
             line: line!(),
@@ -419,7 +419,7 @@ macro_rules! log_set_config {
 }
 
 #[macro_export]
-/// Get the current log `oxedize_fe2o3_core::log::bot::Config`.  Because this is done via its write lock,
+/// Get the current log `oxedyne_fe2o3_core::log::bot::Config`.  Because this is done via its write lock,
 /// this macro can return an error.
 macro_rules! log_get_config {
     () => {
@@ -476,7 +476,7 @@ macro_rules! log_get_file_path {
 ///   None if the map does not exist
 macro_rules! log_get_streams {
     ($wait:expr) => {{
-        let simplex = oxedize_fe2o3_core::channels::simplex();
+        let simplex = oxedyne_fe2o3_core::channels::simplex();
         res!(LOG.send_out(bot_log::Msg::GetStreams(simplex.clone())));
 
         match simplex.recv_timeout($wait) {

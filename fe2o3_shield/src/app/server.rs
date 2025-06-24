@@ -24,29 +24,29 @@ use crate::{
     },
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     alt::Alt,
     channels::Simplex,
     path::NormalPath,
 };
-use oxedize_fe2o3_crypto::enc::EncryptionScheme;
-use oxedize_fe2o3_hash::{
+use oxedyne_fe2o3_crypto::enc::EncryptionScheme;
+use oxedyne_fe2o3_hash::{
     csum::ChecksumScheme,
     hash::HashScheme,
 };
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     cfg::Config,
 };
-use oxedize_fe2o3_net::id;
-use oxedize_fe2o3_o3db_sync::O3db;
-use oxedize_fe2o3_syntax::{
+use oxedyne_fe2o3_net::id;
+use oxedyne_fe2o3_o3db_sync::O3db;
+use oxedyne_fe2o3_syntax::{
     msg::{
         MsgCmd,
     },
 };
-use oxedize_fe2o3_tui::lib_tui::{
+use oxedyne_fe2o3_tui::lib_tui::{
     repl::Evaluation,
 };
 

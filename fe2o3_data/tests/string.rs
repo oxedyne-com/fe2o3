@@ -1,8 +1,8 @@
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     test::test_it,
 };
-use oxedize_fe2o3_text::string::Stringer;
+use oxedyne_fe2o3_text::string::Stringer;
 
 
 pub fn test_string(filter: &'static str) -> Outcome<()> {

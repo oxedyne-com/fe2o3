@@ -3,7 +3,7 @@ mod highlight;
 mod pattern;
 mod string;
 
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 
 #[test]
 fn main() -> Outcome<()> {

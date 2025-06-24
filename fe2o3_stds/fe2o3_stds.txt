@@ -1,6 +1,6 @@
 File: Cargo.toml
 [package]
-name = "oxedize_fe2o3_stds"
+name = "oxedyne_fe2o3_stds"
 version = "0.5.0"
 authors = ["h00gs <hello@oxedize.com>"]
 edition = "2021"
@@ -8,11 +8,11 @@ license = "BSD-2-Clause/Apache-2.0"
 description = "Hematite standards library."
 repository = "https:
 [dependencies]
-oxedize_fe2o3_core = { path = "../fe2o3_core" }
+oxedyne_fe2o3_core = { path = "../fe2o3_core" }
 strum = { version = "0.25", features = ["derive"] }
 [dev-dependencies]
 File: src/culture.rs
-use oxedize_fe2o3_core::new_enum;
+use oxedyne_fe2o3_core::new_enum;
 use strum::Display;
 #[derive(Clone, Copy, Debug, Display, Eq, PartialEq)]
 #[repr(usize)]
@@ -32,7 +32,7 @@ new_enum!(Gender;
 );
 impl Gender {
     pub fn rand_minority(p: f64) -> Self {
-        use ::oxedize_fe2o3_core::rand::Rand;
+        use ::oxedyne_fe2o3_core::rand::Rand;
         let random_val: f64 = Rand::value();
         if random_val < (1.0 - p) {
             if Rand::value::<f64>() < 0.5 {
@@ -57,7 +57,7 @@ pub mod chars;
 pub mod culture;
 pub mod regions;
 File: src/regions.rs
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     new_enum,
     rand::Rand,
@@ -2554,4 +2554,4 @@ pub enum CelestialBodies {
     Saturn,
 }
 File: src/chars.rs
-pub use oxedize_fe2o3_core::term::Term;
+pub use oxedyne_fe2o3_core::term::Term;

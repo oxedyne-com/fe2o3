@@ -5,7 +5,7 @@ use crate::{
     time::{CalClock, CalClockDuration},
 };
 
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 
 /// A range representing a span of time between two CalClock instances.
 #[derive(Clone, Debug, PartialEq)]

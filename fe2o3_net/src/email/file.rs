@@ -1,6 +1,6 @@
 use crate::email::msg::EmailMessage;
 
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 
 use std::path::Path;
 

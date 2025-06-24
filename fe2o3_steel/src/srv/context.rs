@@ -3,22 +3,22 @@ use crate::srv::{
     id,
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     id::ParseId,
     path::NormPathBuf,
     rand::Rand,
 };
-use oxedize_fe2o3_crypto::enc::EncryptionScheme;
-use oxedize_fe2o3_hash::{
+use oxedyne_fe2o3_crypto::enc::EncryptionScheme;
+use oxedyne_fe2o3_hash::{
     csum::ChecksumScheme,
     hash::HashScheme,
 };
-use oxedize_fe2o3_iop_crypto::enc::Encrypter;
-use oxedize_fe2o3_iop_db::api::Database;
-use oxedize_fe2o3_iop_hash::api::Hasher;
-use oxedize_fe2o3_jdat::id::NumIdDat;
-use oxedize_fe2o3_net::{
+use oxedyne_fe2o3_iop_crypto::enc::Encrypter;
+use oxedyne_fe2o3_iop_db::api::Database;
+use oxedyne_fe2o3_iop_hash::api::Hasher;
+use oxedyne_fe2o3_jdat::id::NumIdDat;
+use oxedyne_fe2o3_net::{
     http::{
         handler::WebHandler,
         msg::HttpMessage,
@@ -30,12 +30,12 @@ use oxedize_fe2o3_net::{
         handler::WebSocketHandler,
     },
 };
-use oxedize_fe2o3_o3db_sync::{
+use oxedyne_fe2o3_o3db_sync::{
     O3db,
     base::cfg::OzoneConfig,
     data::core::RestSchemesInput,
 };
-use oxedize_fe2o3_syntax::core::SyntaxRef;
+use oxedyne_fe2o3_syntax::core::SyntaxRef;
 
 use std::{
     collections::BTreeMap,

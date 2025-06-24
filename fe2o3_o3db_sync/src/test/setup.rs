@@ -4,7 +4,7 @@ use crate::{
     data::core::RestSchemesInput,
 };
 
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     id::IdDat,
 };

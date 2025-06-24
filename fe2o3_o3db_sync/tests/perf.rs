@@ -1,22 +1,22 @@
 // Be sure to run using release target, e.g.:
 // > clear;clear;cargo test -r --test perf -- --nocapture
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     alt::Override,
 };
-use oxedize_fe2o3_crypto::enc::EncryptionScheme;
-use oxedize_fe2o3_hash::{
+use oxedyne_fe2o3_crypto::enc::EncryptionScheme;
+use oxedyne_fe2o3_hash::{
     csum::ChecksumScheme,
     hash::HashScheme,
 };
-use oxedize_fe2o3_iop_db::api::{
+use oxedyne_fe2o3_iop_db::api::{
     Meta,
     RestSchemesOverride,
 };
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_jdat::{
     prelude::*,
 };
-use oxedize_fe2o3_o3db_sync::{
+use oxedyne_fe2o3_o3db_sync::{
     data::core::RestSchemesInput,
     test::{
         data::{
@@ -34,7 +34,7 @@ use oxedize_fe2o3_o3db_sync::{
         setup,
     },
 };
-use oxedize_fe2o3_test::{
+use oxedyne_fe2o3_test::{
     data::{
         DataArrangement,
         DataFill,

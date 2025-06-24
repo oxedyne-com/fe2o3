@@ -1,4 +1,4 @@
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     test_binary_encode_decode_byte_tuple,
     usr::{
@@ -7,13 +7,13 @@ use oxedize_fe2o3_jdat::{
     },
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     rand::Rand,
     test::test_it,
 };
 
-use oxedize_fe2o3_num::{
+use oxedyne_fe2o3_num::{
     prelude::*,
     BigDecimal,
     BigInt,

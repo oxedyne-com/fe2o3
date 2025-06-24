@@ -1,5 +1,5 @@
-use oxedize_fe2o3_core::prelude::*;
-use oxedize_fe2o3_num::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_num::prelude::*;
 
 #[test]
 fn test_aint_00() -> Outcome<()> {

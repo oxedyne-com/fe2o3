@@ -14,7 +14,7 @@
 //! # Examples
 //! 
 //! ```
-//! use oxedize_fe2o3_hash::{
+//! use oxedyne_fe2o3_hash::{
 //!     hash::HashScheme,
 //!     prelude::*,
 //! };
@@ -28,7 +28,7 @@
 //! ```
 #![forbid(unsafe_code)]
 
-use oxedize_fe2o3_jdat::version::SemVer;
+use oxedyne_fe2o3_jdat::version::SemVer;
 
 
 pub mod csum;

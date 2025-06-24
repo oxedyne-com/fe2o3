@@ -1,6 +1,6 @@
 use crate::clock::PerSecondRated;
 
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 
 use std::fmt;
 
@@ -18,7 +18,7 @@ use std::fmt;
 /// # Examples
 ///
 /// ```ignore
-/// use oxedize_fe2o3_datime::clock::ClockSecondres!();
+/// use oxedyne_fe2o3_datime::clock::ClockSecondres!();
 ///
 /// let second = ClockSecond::new(45)?res!();
 /// let (new_second, minute_carry) = second.add_seconds(20)res!();

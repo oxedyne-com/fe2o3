@@ -18,11 +18,11 @@ use crate::{
     },
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     channels::Simplex,
     thread::Sentinel,
 };
-use oxedize_fe2o3_jdat::id::NumIdDat;
+use oxedyne_fe2o3_jdat::id::NumIdDat;
 
 use std::{
     time::Duration,

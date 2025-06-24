@@ -43,14 +43,14 @@ use crate::{
     },
 };
 
-use oxedize_fe2o3_bot::msg::BotMsg;
-use oxedize_fe2o3_iop_crypto::enc::Encrypter;
-use oxedize_fe2o3_iop_db::api::{
+use oxedyne_fe2o3_bot::msg::BotMsg;
+use oxedyne_fe2o3_iop_crypto::enc::Encrypter;
+use oxedyne_fe2o3_iop_db::api::{
     Meta,
     RestSchemesOverride,
 };
-use oxedize_fe2o3_iop_hash::api::Hasher;
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_iop_hash::api::Hasher;
+use oxedyne_fe2o3_jdat::{
     Dat,
     id::NumIdDat,
 };

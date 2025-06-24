@@ -1,7 +1,7 @@
-use oxedize_fe2o3_core::prelude::*;
-use oxedize_fe2o3_crypto::enc::EncryptionScheme;
-use oxedize_fe2o3_jdat::prelude::*;
-use oxedize_fe2o3_o3db_sync2::{
+use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_crypto::enc::EncryptionScheme;
+use oxedyne_fe2o3_jdat::prelude::*;
+use oxedyne_fe2o3_o3db_sync2::{
     base::{
         cfg_db::ConfigInit,
     },
@@ -24,7 +24,7 @@ use oxedize_fe2o3_o3db_sync2::{
         },
     },
 };
-use oxedize_fe2o3_test::{
+use oxedyne_fe2o3_test::{
     data::{
         DataArrangement,
         DataFill,
@@ -289,7 +289,7 @@ use rand_core::{
 //            let zstats = res!(db.ozone_state(db.default_wait()));
 //            for (i, zstat) in zstats.iter().enumerate() {
 //                info!(sync_log::stream(), "Zone {}", i+1);
-//                for line in oxedize_fe2o3_text::string::to_lines(fmt!("{:?}", zstat), "  ") {
+//                for line in oxedyne_fe2o3_text::string::to_lines(fmt!("{:?}", zstat), "  ") {
 //                    info!(sync_log::stream(), "{}", line);
 //                }
 //            }

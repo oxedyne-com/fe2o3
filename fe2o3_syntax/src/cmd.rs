@@ -7,11 +7,11 @@ use crate::{
     key::Key,
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     map::Recursive,
 };
-use oxedize_fe2o3_jdat::kind::Kind;
+use oxedyne_fe2o3_jdat::kind::Kind;
 
 use std::{
     collections::BTreeMap,

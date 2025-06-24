@@ -1,11 +1,11 @@
 [package]
-name = "oxedize_fe2o3"
+name = "oxedyne_fe2o3"
 version = "0.5.0"
-authors = ["h00gs <hello@oxedize.com>"]
+authors = ["h00gs <hello@oxedyne.io>"]
 edition = "2021"
 license = "BSD-2-Clause/Apache-2.0"
 description = "A Rust ecosystem built from first principles, providing foundational tools for building robust applications."
-repository = "https://github.com/Oxedize/fe2o3"
+repository = "https://github.com/oxedyne-io/fe2o3"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -19,89 +19,89 @@ members = [
 [features]
 default = ["core"]
 all = [
-	"dep:oxedize_fe2o3_bot",
-	"dep:oxedize_fe2o3_core",
-	"dep:oxedize_fe2o3_crypto",
-	"dep:oxedize_fe2o3_data",
-	"dep:oxedize_fe2o3_datime",
-	"dep:oxedize_fe2o3_file",
-	"dep:oxedize_fe2o3_geom",
-	"dep:oxedize_fe2o3_hash",
-	"dep:oxedize_fe2o3_iop_crypto",
-	"dep:oxedize_fe2o3_iop_db",
-	"dep:oxedize_fe2o3_iop_hash",
-	"dep:oxedize_fe2o3_jdat",
-	"dep:oxedize_fe2o3_namex",
-	"dep:oxedize_fe2o3_net",
-	"dep:oxedize_fe2o3_num",
-	"dep:oxedize_fe2o3_o3db_sync",
-	"dep:oxedize_fe2o3_shield",
-	"dep:oxedize_fe2o3_stds",
-	"dep:oxedize_fe2o3_steel",
-	"dep:oxedize_fe2o3_syntax",
-	"dep:oxedize_fe2o3_test",
-	"dep:oxedize_fe2o3_text",
-	"dep:oxedize_fe2o3_tui",
-	"dep:oxedize_fe2o3_units",
+	"dep:oxedyne_fe2o3_bot",
+	"dep:oxedyne_fe2o3_core",
+	"dep:oxedyne_fe2o3_crypto",
+	"dep:oxedyne_fe2o3_data",
+	"dep:oxedyne_fe2o3_datime",
+	"dep:oxedyne_fe2o3_file",
+	"dep:oxedyne_fe2o3_geom",
+	"dep:oxedyne_fe2o3_hash",
+	"dep:oxedyne_fe2o3_iop_crypto",
+	"dep:oxedyne_fe2o3_iop_db",
+	"dep:oxedyne_fe2o3_iop_hash",
+	"dep:oxedyne_fe2o3_jdat",
+	"dep:oxedyne_fe2o3_namex",
+	"dep:oxedyne_fe2o3_net",
+	"dep:oxedyne_fe2o3_num",
+	"dep:oxedyne_fe2o3_o3db_sync",
+	"dep:oxedyne_fe2o3_shield",
+	"dep:oxedyne_fe2o3_stds",
+	"dep:oxedyne_fe2o3_steel",
+	"dep:oxedyne_fe2o3_syntax",
+	"dep:oxedyne_fe2o3_test",
+	"dep:oxedyne_fe2o3_text",
+	"dep:oxedyne_fe2o3_tui",
+	"dep:oxedyne_fe2o3_units",
 ]
-bot 		= ["dep:oxedize_fe2o3_bot"]
-core 		= ["dep:oxedize_fe2o3_core"]
-crypto 		= ["dep:oxedize_fe2o3_crypto"]
-data 		= ["dep:oxedize_fe2o3_data"]
-datime		= ["dep:oxedize_fe2o3_datime"]
-file 		= ["dep:oxedize_fe2o3_file"]
-geom 		= ["dep:oxedize_fe2o3_geom"]
-hash 		= ["dep:oxedize_fe2o3_hash"]
-iop_crypto 	= ["dep:oxedize_fe2o3_iop_crypto"]
-iop_db 		= ["dep:oxedize_fe2o3_iop_db"]
-iop_hash 	= ["dep:oxedize_fe2o3_iop_hash"]
-jdat 		= ["dep:oxedize_fe2o3_jdat"]
-namex 		= ["dep:oxedize_fe2o3_namex"]
-net 		= ["dep:oxedize_fe2o3_net"]
-num 		= ["dep:oxedize_fe2o3_num"]
-o3db 		= ["dep:oxedize_fe2o3_o3db_sync"]
-shield 		= ["dep:oxedize_fe2o3_shield"]
-stds 		= ["dep:oxedize_fe2o3_stds"]
-steel 		= ["dep:oxedize_fe2o3_steel"]
-syntax 		= ["dep:oxedize_fe2o3_syntax"]
-test 		= ["dep:oxedize_fe2o3_test"]
-text 		= ["dep:oxedize_fe2o3_text"]
-tui 		= ["dep:oxedize_fe2o3_tui"]
-units 		= ["dep:oxedize_fe2o3_units"]
+bot 		= ["dep:oxedyne_fe2o3_bot"]
+core 		= ["dep:oxedyne_fe2o3_core"]
+crypto 		= ["dep:oxedyne_fe2o3_crypto"]
+data 		= ["dep:oxedyne_fe2o3_data"]
+datime		= ["dep:oxedyne_fe2o3_datime"]
+file 		= ["dep:oxedyne_fe2o3_file"]
+geom 		= ["dep:oxedyne_fe2o3_geom"]
+hash 		= ["dep:oxedyne_fe2o3_hash"]
+iop_crypto 	= ["dep:oxedyne_fe2o3_iop_crypto"]
+iop_db 		= ["dep:oxedyne_fe2o3_iop_db"]
+iop_hash 	= ["dep:oxedyne_fe2o3_iop_hash"]
+jdat 		= ["dep:oxedyne_fe2o3_jdat"]
+namex 		= ["dep:oxedyne_fe2o3_namex"]
+net 		= ["dep:oxedyne_fe2o3_net"]
+num 		= ["dep:oxedyne_fe2o3_num"]
+o3db 		= ["dep:oxedyne_fe2o3_o3db_sync"]
+shield 		= ["dep:oxedyne_fe2o3_shield"]
+stds 		= ["dep:oxedyne_fe2o3_stds"]
+steel 		= ["dep:oxedyne_fe2o3_steel"]
+syntax 		= ["dep:oxedyne_fe2o3_syntax"]
+test 		= ["dep:oxedyne_fe2o3_test"]
+text 		= ["dep:oxedyne_fe2o3_text"]
+tui 		= ["dep:oxedyne_fe2o3_tui"]
+units 		= ["dep:oxedyne_fe2o3_units"]
 
 [dependencies]
 # List all Hematite crates here so that they can be re-exported in lib.rs, allowing users to import the oxedize_fe2o3 workspace from crates.  So in addition to being able to import individual crates,:
 #
-#  use oxedize_fe2o3_core::prelude::*;
+#  use oxedyne_fe2o3_core::prelude::*;
 #
 # users can also do this:
 #
 #  use oxedize_fe2o3::core::prelude::*;
 #
-oxedize_fe2o3_bot =         { path = "fe2o3_bot",			optional = true }
-oxedize_fe2o3_core =        { path = "fe2o3_core",			optional = true }
-oxedize_fe2o3_crypto =      { path = "fe2o3_crypto",		optional = true }
-oxedize_fe2o3_data =        { path = "fe2o3_data",			optional = true }
-oxedize_fe2o3_datime =      { path = "fe2o3_datime",		optional = true }
-oxedize_fe2o3_file =        { path = "fe2o3_file",			optional = true }
-oxedize_fe2o3_geom =        { path = "fe2o3_geom",			optional = true }
-oxedize_fe2o3_hash =        { path = "fe2o3_hash",			optional = true }
-oxedize_fe2o3_iop_crypto =  { path = "fe2o3_iop_crypto",	optional = true }
-oxedize_fe2o3_iop_db =      { path = "fe2o3_iop_db",		optional = true }
-oxedize_fe2o3_iop_hash =    { path = "fe2o3_iop_hash",		optional = true }
-oxedize_fe2o3_jdat =        { path = "fe2o3_jdat",			optional = true }
-oxedize_fe2o3_namex =       { path = "fe2o3_namex",			optional = true }
-oxedize_fe2o3_net =         { path = "fe2o3_net",			optional = true }
-oxedize_fe2o3_num =         { path = "fe2o3_num",			optional = true }
-oxedize_fe2o3_o3db_sync =   { path = "fe2o3_o3db_sync",		optional = true }
-oxedize_fe2o3_shield =      { path = "fe2o3_shield",		optional = true }
-oxedize_fe2o3_stds =        { path = "fe2o3_stds",			optional = true }
-oxedize_fe2o3_steel =       { path = "fe2o3_steel",			optional = true }
-oxedize_fe2o3_syntax =      { path = "fe2o3_syntax",		optional = true }
-oxedize_fe2o3_test =        { path = "fe2o3_test",			optional = true }
-oxedize_fe2o3_text =        { path = "fe2o3_text",			optional = true }
-oxedize_fe2o3_tui =         { path = "fe2o3_tui",			optional = true }
-oxedize_fe2o3_units =       { path = "fe2o3_units",			optional = true }
+oxedyne_fe2o3_bot =         { path = "fe2o3_bot",			optional = true }
+oxedyne_fe2o3_core =        { path = "fe2o3_core",			optional = true }
+oxedyne_fe2o3_crypto =      { path = "fe2o3_crypto",		optional = true }
+oxedyne_fe2o3_data =        { path = "fe2o3_data",			optional = true }
+oxedyne_fe2o3_datime =      { path = "fe2o3_datime",		optional = true }
+oxedyne_fe2o3_file =        { path = "fe2o3_file",			optional = true }
+oxedyne_fe2o3_geom =        { path = "fe2o3_geom",			optional = true }
+oxedyne_fe2o3_hash =        { path = "fe2o3_hash",			optional = true }
+oxedyne_fe2o3_iop_crypto =  { path = "fe2o3_iop_crypto",	optional = true }
+oxedyne_fe2o3_iop_db =      { path = "fe2o3_iop_db",		optional = true }
+oxedyne_fe2o3_iop_hash =    { path = "fe2o3_iop_hash",		optional = true }
+oxedyne_fe2o3_jdat =        { path = "fe2o3_jdat",			optional = true }
+oxedyne_fe2o3_namex =       { path = "fe2o3_namex",			optional = true }
+oxedyne_fe2o3_net =         { path = "fe2o3_net",			optional = true }
+oxedyne_fe2o3_num =         { path = "fe2o3_num",			optional = true }
+oxedyne_fe2o3_o3db_sync =   { path = "fe2o3_o3db_sync",		optional = true }
+oxedyne_fe2o3_shield =      { path = "fe2o3_shield",		optional = true }
+oxedyne_fe2o3_stds =        { path = "fe2o3_stds",			optional = true }
+oxedyne_fe2o3_steel =       { path = "fe2o3_steel",			optional = true }
+oxedyne_fe2o3_syntax =      { path = "fe2o3_syntax",		optional = true }
+oxedyne_fe2o3_test =        { path = "fe2o3_test",			optional = true }
+oxedyne_fe2o3_text =        { path = "fe2o3_text",			optional = true }
+oxedyne_fe2o3_tui =         { path = "fe2o3_tui",			optional = true }
+oxedyne_fe2o3_units =       { path = "fe2o3_units",			optional = true }
 
 [dev-dependencies]
 criterion = "0.3"

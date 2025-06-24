@@ -13,7 +13,7 @@
 //! # Example
 //!
 //! ```rust
-//! use oxedize_fe2o3_namex::{Namex, Entity};
+//! use oxedyne_fe2o3_namex::{Namex, Entity};
 //! use std::collections::BTreeMap;
 //!
 //! // Load an existing namex database

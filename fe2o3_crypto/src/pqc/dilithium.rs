@@ -1514,8 +1514,8 @@ mod test_sign {
         sign::SignatureScheme,
     };
 
-    use oxedize_fe2o3_core::prelude::*;
-    use oxedize_fe2o3_iop_crypto::sign::Signer;
+    use oxedyne_fe2o3_core::prelude::*;
+    use oxedyne_fe2o3_iop_crypto::sign::Signer;
 
     use std::time::Instant;
 

@@ -22,19 +22,19 @@ use crate::{
     },
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     byte::FromBytes,
 };
-use oxedize_fe2o3_crypto::keys::PublicKey;
-use oxedize_fe2o3_hash::pow::PowVars;
-use oxedize_fe2o3_iop_crypto::keys::KeyManager;
-use oxedize_fe2o3_namex::InNamex;
-use oxedize_fe2o3_syntax::{
+use oxedyne_fe2o3_crypto::keys::PublicKey;
+use oxedyne_fe2o3_hash::pow::PowVars;
+use oxedyne_fe2o3_iop_crypto::keys::KeyManager;
+use oxedyne_fe2o3_namex::InNamex;
+use oxedyne_fe2o3_syntax::{
     core::SyntaxRef,
     msg::Msg,
 };
-use oxedize_fe2o3_text::string::Stringer;
+use oxedyne_fe2o3_text::string::Stringer;
 
 use std::{
     net::{

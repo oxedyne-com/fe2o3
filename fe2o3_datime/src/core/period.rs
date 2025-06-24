@@ -1,6 +1,6 @@
 use crate::time::CalClockZone;
 
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 
 /// Abstract base for period types (periods of time like a specific month or year).
 #[derive(Clone, Debug, PartialEq)]

@@ -2,12 +2,12 @@ use crate::srv::{
     constant,
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     //mem::Extract,
 };
-use oxedize_fe2o3_jdat::prelude::*;
-use oxedize_fe2o3_syntax::{
+use oxedyne_fe2o3_jdat::prelude::*;
+use oxedyne_fe2o3_syntax::{
     arg::{
         Arg,
         ArgConfig,

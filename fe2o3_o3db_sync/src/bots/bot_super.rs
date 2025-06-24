@@ -36,12 +36,12 @@ use crate::{
     },
 };
 
-use oxedize_fe2o3_bot::Bot;
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_bot::Bot;
+use oxedyne_fe2o3_core::{
     channels::simplex,
     thread::thread_channel,
 };
-use oxedize_fe2o3_jdat::id::NumIdDat;
+use oxedyne_fe2o3_jdat::id::NumIdDat;
 
 use std::{
     sync::Arc,

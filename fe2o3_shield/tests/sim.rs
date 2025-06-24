@@ -1,4 +1,4 @@
-use oxedize_fe2o3_shield::{
+use oxedyne_fe2o3_shield::{
     //prelude::*,
     app::{
         cfg::AppConfig,
@@ -12,7 +12,7 @@ use oxedize_fe2o3_shield::{
     },
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     channels::Recv,
     log::{
@@ -23,8 +23,8 @@ use oxedize_fe2o3_core::{
         },
     },
 };
-use oxedize_fe2o3_hash::kdf::KeyDerivationScheme;
-use oxedize_fe2o3_iop_hash::kdf::KeyDeriver;
+use oxedyne_fe2o3_hash::kdf::KeyDerivationScheme;
+use oxedyne_fe2o3_iop_hash::kdf::KeyDeriver;
 
 use std::{
     fs,

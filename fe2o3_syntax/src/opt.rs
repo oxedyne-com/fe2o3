@@ -1,4 +1,4 @@
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 
 pub trait OptionRefVec<T> {
     fn with_len<'a>(self, len: usize) -> Outcome<&'a [T]> where Self: 'a;

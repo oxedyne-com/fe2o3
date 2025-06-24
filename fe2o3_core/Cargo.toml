@@ -1,11 +1,11 @@
 [package]
-name = "oxedize_fe2o3_core"
+name = "oxedyne_fe2o3_core"
 version = "0.5.0"
-authors = ["h00gs <hello@oxedize.com>"]
+authors = ["h00gs <hello@oxedyne.io>"]
 edition = "2021"
 license = "BSD-2-Clause/Apache-2.0"
 description = "Hematite core library, consisting mostly of relatively simple foundational types and macros."
-repository = "https://github.com/Oxedize/fe2o3"
+repository = "https://github.com/oxedyne-io/fe2o3"
 
 [dependencies]
 new							= { path = "new" }

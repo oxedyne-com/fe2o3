@@ -1,4 +1,4 @@
-pub use oxedize_fe2o3_core::{
+pub use oxedyne_fe2o3_core::{
     prelude::*,
     alt::Gnomon,
     //bot::CtrlMsg,
@@ -14,7 +14,7 @@ pub use oxedize_fe2o3_core::{
         thread_channel,
     },
 };
-use oxedize_fe2o3_iop_hash::api::Hasher;
+use oxedyne_fe2o3_iop_hash::api::Hasher;
 
 use std::{
     thread,
@@ -64,7 +64,7 @@ pub trait Pristine<
     fn len(&self) -> usize { Self::BYTE_LEN }
     fn prefix_len(&self) -> usize { Self::PREFIX_BYTE_LEN }
 
-    /// We can't use `oxedize_fe2o3_core::bytes::ToBytes` because we want an array output.
+    /// We can't use `oxedyne_fe2o3_core::bytes::ToBytes` because we want an array output.
     fn to_bytes(&self) -> Outcome<[u8; P1]>;
     fn prefix(&self, byts: &mut [u8]) -> Outcome<usize>;
     fn timestamp_valid(&self, artefact: &[u8]) -> Outcome<bool>;

@@ -1,6 +1,6 @@
 use crate::system::System;
 
-//use oxedize_fe2o3_core::prelude::*;
+//use oxedyne_fe2o3_core::prelude::*;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SI {

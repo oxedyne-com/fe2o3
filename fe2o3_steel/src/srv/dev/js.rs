@@ -2,7 +2,7 @@
 //! 
 //! This module provides functionality to bundle JavaScript and TypeScript files into a single 
 //! minified output file. It handles module dependencies, import resolution, and code transformations.
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
 };
 

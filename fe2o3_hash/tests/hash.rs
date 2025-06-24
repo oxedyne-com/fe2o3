@@ -1,10 +1,10 @@
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
 };
-use oxedize_fe2o3_hash::{
+use oxedyne_fe2o3_hash::{
     hash::HashScheme,
 };
-use oxedize_fe2o3_iop_hash::{
+use oxedyne_fe2o3_iop_hash::{
     api::Hasher,
 };
 

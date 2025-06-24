@@ -5,7 +5,7 @@ use crate::{
     validation::ValidationRule,
 };
 
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 
 use std::fmt;
 
@@ -87,7 +87,7 @@ pub type ValidationResult = Result<(), Vec<ValidationError>>;
 /// # Examples
 ///
 /// ```ignore
-/// use oxedize_fe2o3_datime::{
+/// use oxedyne_fe2o3_datime::{
 ///     validation::CalClockValidator,
 ///     time::CalClock,
 /// };

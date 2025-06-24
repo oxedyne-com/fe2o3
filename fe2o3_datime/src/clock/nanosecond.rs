@@ -1,6 +1,6 @@
 use crate::clock::PerSecondRated;
 
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 
 use std::fmt;
 
@@ -19,7 +19,7 @@ use std::fmt;
 /// # Examples
 ///
 /// ```ignore
-/// use oxedize_fe2o3_datime::clock::ClockNanoSecondres!();
+/// use oxedyne_fe2o3_datime::clock::ClockNanoSecondres!();
 ///
 /// let nanos = ClockNanoSecond::from_millis(500)?res!();
 /// assert_eq!(nanos.of(), 500_000_000)res!();

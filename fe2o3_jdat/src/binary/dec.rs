@@ -7,11 +7,11 @@ use crate::{
     },
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     byte::FromBytes,
 };
-use oxedize_fe2o3_num::float::{
+use oxedyne_fe2o3_num::float::{
     Float32,
     Float64,
 };

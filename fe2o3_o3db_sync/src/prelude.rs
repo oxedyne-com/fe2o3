@@ -10,19 +10,19 @@ pub use crate::{
     file::core::FileType,
 };
 
-pub use oxedize_fe2o3_core::{
+pub use oxedyne_fe2o3_core::{
     prelude::*,
     alt::{
         Alt,
         DefAlt,
     },
 };
-pub use oxedize_fe2o3_iop_crypto::{
+pub use oxedyne_fe2o3_iop_crypto::{
     enc::Encrypter,
     sign::Signer,
 };
-pub use oxedize_fe2o3_iop_hash::{
+pub use oxedyne_fe2o3_iop_hash::{
     api::Hasher,
     csum::Checksummer,
 };
-pub use oxedize_fe2o3_namex::id::InNamex;
+pub use oxedyne_fe2o3_namex::id::InNamex;

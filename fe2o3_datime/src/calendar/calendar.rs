@@ -4,9 +4,9 @@ use crate::{
     time::CalClockZone,
 };
 
-use oxedize_fe2o3_core::prelude::*;
-use oxedize_fe2o3_jdat::prelude::*;
-use oxedize_fe2o3_namex::{
+use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_jdat::prelude::*;
+use oxedyne_fe2o3_namex::{
     id::{InNamex, LocalId, NamexId},
 };
 
@@ -20,8 +20,8 @@ use std::fmt;
 /// # Usage
 ///
 /// ```ignore
-/// use oxedize_fe2o3_datime::calendar::Calendarres!();
-/// use oxedize_fe2o3_datime::time::CalClockZoneres!();
+/// use oxedyne_fe2o3_datime::calendar::Calendarres!();
+/// use oxedyne_fe2o3_datime::time::CalClockZoneres!();
 ///
 /// // Create calendars
 /// let gregorian = Calendar::new()res!(); // Default to Gregorian

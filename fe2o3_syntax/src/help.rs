@@ -3,11 +3,11 @@ use crate::{
     core::Syntax,
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     map::Recursive,
 };
-use oxedize_fe2o3_stds::chars::Term;
+use oxedyne_fe2o3_stds::chars::Term;
 
 
 #[derive(Clone, Debug)]

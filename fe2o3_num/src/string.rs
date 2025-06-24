@@ -5,7 +5,7 @@ use crate::{
     },
 };
 
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 
 use std::{
     fmt,
@@ -564,7 +564,7 @@ pub trait ThousandsSeparator {
     /// 
     /// # Example
     /// ```
-    /// use oxedize_fe2o3_num::string::ThousandsSeparator;
+    /// use oxedyne_fe2o3_num::string::ThousandsSeparator;
     /// 
     /// assert_eq!(1234567.with_sep(','), "1,234,567");
     /// assert_eq!((-9876543).with_sep(' '), "-9 876 543");
@@ -579,7 +579,7 @@ pub trait ThousandsSeparator {
     /// 
     /// # Example
     /// ```
-    /// use oxedize_fe2o3_num::string::ThousandsSeparator;
+    /// use oxedyne_fe2o3_num::string::ThousandsSeparator;
     /// 
     /// assert_eq!(1234567.with_sep_dp(',', 2), "1,234,567.00");
     /// assert_eq!(1234.567.with_sep_dp(' ', 1), "1 234.6");
@@ -591,7 +591,7 @@ pub trait ThousandsSeparator {
     /// 
     /// # Example
     /// ```
-    /// use oxedize_fe2o3_num::string::ThousandsSeparator;
+    /// use oxedyne_fe2o3_num::string::ThousandsSeparator;
     /// 
     /// assert_eq!(1234567.with_commas(), "1,234,567");
     /// assert_eq!((-9876543).with_commas(), "-9,876,543");
@@ -607,7 +607,7 @@ pub trait ThousandsSeparator {
     /// 
     /// # Example
     /// ```
-    /// use oxedize_fe2o3_num::string::ThousandsSeparator;
+    /// use oxedyne_fe2o3_num::string::ThousandsSeparator;
     /// 
     /// assert_eq!(1234567.with_commas_dp(2), "1,234,567.00");
     /// assert_eq!(1234.567.with_commas_dp(1), "1,234.6");

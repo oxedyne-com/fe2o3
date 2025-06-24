@@ -36,8 +36,8 @@ use crate::{
     },
 };
 
-use oxedize_fe2o3_core::prelude::*;
-use oxedize_fe2o3_geom::{
+use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_geom::{
     dim::{
         Dim,
         FlexDim,
@@ -49,7 +49,7 @@ use oxedize_fe2o3_geom::{
         RelRect,
     },
 };
-use oxedize_fe2o3_text::{
+use oxedyne_fe2o3_text::{
     Text,
     access::AccessibleText,
     lines::TextLines,

@@ -2,7 +2,7 @@
 /// Create context for an Error.
 ///
 ///```
-/// use oxedize_fe2o3_core::prelude::*;
+/// use oxedyne_fe2o3_core::prelude::*;
 ///
 /// let n = 41;
 /// let result0: Outcome<()> = Err(Error::Local(ErrMsg {
@@ -32,7 +32,7 @@ macro_rules! errmsg {
 ///
 /// ## Local Errors
 /// ```ignore
-/// use oxedize_fe2o3_core::prelude::*;
+/// use oxedyne_fe2o3_core::prelude::*;
 /// 
 /// // Simple message
 /// let e1 = err!("Just text"; Input);
@@ -51,7 +51,7 @@ macro_rules! errmsg {
 ///
 /// ## Upstream Errors 
 /// ```ignore
-/// use oxedize_fe2o3_core::prelude::*;
+/// use oxedyne_fe2o3_core::prelude::*;
 /// use std::fs;
 ///
 /// let io_error = fs::read_to_string("missing.txt").unwrap_err();

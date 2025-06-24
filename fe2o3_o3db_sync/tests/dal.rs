@@ -1,20 +1,20 @@
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     alt::Override,
     rand::Rand,
     test::test_it,
     time::Timer,
 };
-use oxedize_fe2o3_crypto::enc::EncryptionScheme;
-use oxedize_fe2o3_hash::{
+use oxedyne_fe2o3_crypto::enc::EncryptionScheme;
+use oxedyne_fe2o3_hash::{
     csum::ChecksumScheme,
     hash::HashScheme,
 };
-use oxedize_fe2o3_iop_db::api::{
+use oxedyne_fe2o3_iop_db::api::{
     Meta,
     RestSchemesOverride,
 };
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     usr::{
         UsrKind,
@@ -22,8 +22,8 @@ use oxedize_fe2o3_jdat::{
         UsrKindId,
     },
 };
-use oxedize_fe2o3_net::id::Uid;
-use oxedize_fe2o3_o3db_sync::{
+use oxedyne_fe2o3_net::id::Uid;
+use oxedyne_fe2o3_o3db_sync::{
     base::{
         constant,
         index::ZoneInd,
@@ -46,7 +46,7 @@ use oxedize_fe2o3_o3db_sync::{
         setup,
     },
 };
-use oxedize_fe2o3_test::error::delayed_error;
+use oxedyne_fe2o3_test::error::delayed_error;
 
 use std::{
     collections::BTreeMap,

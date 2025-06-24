@@ -18,7 +18,7 @@ macro_rules! test_it {
 /// `PartialEq`, do not match.
 ///
 ///```
-/// use oxedize_fe2o3_core::prelude::*;
+/// use oxedyne_fe2o3_core::prelude::*;
 /// 
 /// fn main() -> Outcome<()> {
 ///     let v1 = 42u8;

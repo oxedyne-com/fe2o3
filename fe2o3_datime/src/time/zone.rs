@@ -1,6 +1,6 @@
 use crate::time::tzif::{TZifData, LocalTimeResult};
 
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 
 use std::{
 	collections::HashMap,
@@ -33,7 +33,7 @@ use std::{
 /// # Examples
 ///
 /// ```ignore
-/// use oxedize_fe2o3_datime::time::CalClockZoneres!();
+/// use oxedyne_fe2o3_datime::time::CalClockZoneres!();
 ///
 /// // Create common timezones
 /// let utc = CalClockZone::utc()res!();

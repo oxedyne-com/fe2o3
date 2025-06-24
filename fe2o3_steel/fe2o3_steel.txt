@@ -1,6 +1,6 @@
 File: Cargo.toml
 [package]
-name = "oxedize_fe2o3_steel"
+name = "oxedyne_fe2o3_steel"
 version = "0.5.0"
 authors = ["h00gs <hello@oxedize.com>"]
 edition = "2021"
@@ -13,22 +13,22 @@ path = "src/lib.rs"
 name = "steel"
 path = "src/main.rs"
 [dependencies]
-oxedize_fe2o3_bot 				= { path = "../fe2o3_bot" }
-oxedize_fe2o3_core 				= { path = "../fe2o3_core" }
-oxedize_fe2o3_crypto			= { path = "../fe2o3_crypto" }
-oxedize_fe2o3_data 				= { path = "../fe2o3_data" }
-oxedize_fe2o3_hash 				= { path = "../fe2o3_hash" }
-oxedize_fe2o3_iop_crypto		= { path = "../fe2o3_iop_crypto" }
-oxedize_fe2o3_iop_db			= { path = "../fe2o3_iop_db" }
-oxedize_fe2o3_iop_hash			= { path = "../fe2o3_iop_hash" }
-oxedize_fe2o3_jdat 				= { path = "../fe2o3_jdat" }
-oxedize_fe2o3_namex				= { path = "../fe2o3_namex" }
-oxedize_fe2o3_net				= { path = "../fe2o3_net" }
-oxedize_fe2o3_o3db_sync 				= { path = "../fe2o3_o3db_sync" }
-oxedize_fe2o3_stds				= { path = "../fe2o3_stds" }
-oxedize_fe2o3_syntax			= { path = "../fe2o3_syntax" }
-oxedize_fe2o3_text				= { path = "../fe2o3_text" }
-oxedize_fe2o3_tui				= { path = "../fe2o3_tui" }
+oxedyne_fe2o3_bot 				= { path = "../fe2o3_bot" }
+oxedyne_fe2o3_core 				= { path = "../fe2o3_core" }
+oxedyne_fe2o3_crypto			= { path = "../fe2o3_crypto" }
+oxedyne_fe2o3_data 				= { path = "../fe2o3_data" }
+oxedyne_fe2o3_hash 				= { path = "../fe2o3_hash" }
+oxedyne_fe2o3_iop_crypto		= { path = "../fe2o3_iop_crypto" }
+oxedyne_fe2o3_iop_db			= { path = "../fe2o3_iop_db" }
+oxedyne_fe2o3_iop_hash			= { path = "../fe2o3_iop_hash" }
+oxedyne_fe2o3_jdat 				= { path = "../fe2o3_jdat" }
+oxedyne_fe2o3_namex				= { path = "../fe2o3_namex" }
+oxedyne_fe2o3_net				= { path = "../fe2o3_net" }
+oxedyne_fe2o3_o3db_sync 				= { path = "../fe2o3_o3db_sync" }
+oxedyne_fe2o3_stds				= { path = "../fe2o3_stds" }
+oxedyne_fe2o3_syntax			= { path = "../fe2o3_syntax" }
+oxedyne_fe2o3_text				= { path = "../fe2o3_text" }
+oxedyne_fe2o3_tui				= { path = "../fe2o3_tui" }
 notify = "6.1.1"
 rustls-pemfile = "2"
 rustls = "0.22"
@@ -56,7 +56,7 @@ swc_ecma_transforms_base = "6.0.0"
 # App sass compilation to css.
 grass = "0.13"
 [build-dependencies]
-oxedize_fe2o3_core 				= { path = "../fe2o3_core" }
+oxedyne_fe2o3_core 				= { path = "../fe2o3_core" }
 [dev-dependencies]
 # For test client
 rustls-pki-types = "1.0"
@@ -68,7 +68,7 @@ use crate::srv::{
     cfg::ServerConfig,
     dev::refresh::HtmlModifier,
 };
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     file::{
         OsPath,
@@ -77,11 +77,11 @@ use oxedize_fe2o3_core::{
     path::NormalPath,
     rand::Rand,
 };
-use oxedize_fe2o3_iop_crypto::enc::Encrypter;
-use oxedize_fe2o3_iop_db::api::Database;
-use oxedize_fe2o3_iop_hash::api::Hasher;
-use oxedize_fe2o3_jdat::id::NumIdDat;
-use oxedize_fe2o3_net::{
+use oxedyne_fe2o3_iop_crypto::enc::Encrypter;
+use oxedyne_fe2o3_iop_db::api::Database;
+use oxedyne_fe2o3_iop_hash::api::Hasher;
+use oxedyne_fe2o3_jdat::id::NumIdDat;
+use oxedyne_fe2o3_net::{
     file::RequestPath,
     http::{
         fields::HeaderName,
@@ -320,14 +320,14 @@ impl<
 }
 File: src/app/smtps.rs
 use crate::srv::cfg::ServerConfig;
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     path::{
         NormPathBuf,
     },
     rand::Rand,
 };
-use oxedize_fe2o3_net::{
+use oxedyne_fe2o3_net::{
     smtp::handler::EmailHandler,
 };
 #[derive(Clone, Debug)]
@@ -344,7 +344,7 @@ impl EmailHandler for AppEmailHandler {
 }
 File: src/app/dev.rs
 use crate::app::constant;
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 use std::{
     fs,
     path::Path,
@@ -847,7 +847,7 @@ use crate::{
         },
     },
 };
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     log::{
         bot::FileConfig,
@@ -858,15 +858,15 @@ use oxedize_fe2o3_core::{
     },
     path::NormalPath,
 };
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_jdat::{
     prelude::*,
 };
-use oxedize_fe2o3_syntax::{
+use oxedyne_fe2o3_syntax::{
     msg::{
         MsgCmd,
     },
 };
-use oxedize_fe2o3_tui::lib_tui::{
+use oxedyne_fe2o3_tui::lib_tui::{
     repl::{
         Evaluation,
         ShellConfig,
@@ -1075,32 +1075,32 @@ use crate::{
         id,
     },
 };
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     path::NormalPath,
 };
-use oxedize_fe2o3_crypto::{
+use oxedyne_fe2o3_crypto::{
     enc::EncryptionScheme,
     keys::Wallet,
 };
-use oxedize_fe2o3_hash::{
+use oxedyne_fe2o3_hash::{
     csum::ChecksumScheme,
     hash::HashScheme,
     kdf::KeyDerivationScheme,
 };
-use oxedize_fe2o3_iop_crypto::{
+use oxedyne_fe2o3_iop_crypto::{
     keys::KeyManager,
     enc::Encrypter,
 };
-use oxedize_fe2o3_iop_hash::kdf::KeyDeriver;
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_iop_hash::kdf::KeyDeriver;
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     file::JdatFile,
     string::enc::EncoderConfig,
 };
-use oxedize_fe2o3_net::dns::Fqdn;
-use oxedize_fe2o3_o3db_sync::O3db;
-use oxedize_fe2o3_syntax::{
+use oxedyne_fe2o3_net::dns::Fqdn;
+use oxedyne_fe2o3_o3db_sync::O3db;
+use oxedyne_fe2o3_syntax::{
     core::SyntaxRef,
     help::Help,
     msg::{
@@ -1109,8 +1109,8 @@ use oxedize_fe2o3_syntax::{
     },
     opt::OptionRefVec,
 };
-use oxedize_fe2o3_text::base2x;
-use oxedize_fe2o3_tui::lib_tui::{
+use oxedyne_fe2o3_text::base2x;
+use oxedyne_fe2o3_tui::lib_tui::{
     cmds,
     repl::{
         Evaluation,
@@ -1121,7 +1121,7 @@ use oxedize_fe2o3_tui::lib_tui::{
     },
     input::UserInput,
 };
-use oxedize_fe2o3_namex::InNamex;
+use oxedyne_fe2o3_namex::InNamex;
 use std::{
     collections::BTreeMap,
     path::{
@@ -1424,26 +1424,26 @@ use crate::{
         context::new_db,
     },
 };
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     log::{
         bot::FileConfig,
     },
 };
-use oxedize_fe2o3_crypto::{
+use oxedyne_fe2o3_crypto::{
     keys::Wallet,
 };
-use oxedize_fe2o3_data::{
+use oxedyne_fe2o3_data::{
     ring::RingBuffer,
     time::Timestamped,
 };
-use oxedize_fe2o3_hash::{
+use oxedyne_fe2o3_hash::{
     kdf::KeyDerivationScheme,
 };
-use oxedize_fe2o3_iop_hash::{
+use oxedyne_fe2o3_iop_hash::{
     kdf::KeyDeriver,
 };
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     cfg::Config,
     file::{
@@ -1455,14 +1455,14 @@ use oxedize_fe2o3_jdat::{
         enc::EncoderConfig,
     },
 };
-use oxedize_fe2o3_tui::lib_tui::{
+use oxedyne_fe2o3_tui::lib_tui::{
     repl::{
         Evaluation,
         ShellConfig,
     },
     input::UserInput,
 };
-use oxedize_fe2o3_namex::InNamex;
+use oxedyne_fe2o3_namex::InNamex;
 use std::{
     collections::BTreeMap,
     io::Write,
@@ -1692,8 +1692,8 @@ pub fn run() -> Outcome<()> {
     Ok(())
 }
 File: src/app/constant.rs
-use oxedize_fe2o3_jdat::version::SemVer;
-use oxedize_fe2o3_o3db_sync::{
+use oxedyne_fe2o3_jdat::version::SemVer;
+use oxedyne_fe2o3_o3db_sync::{
     comm::response::Wait,
 };
 pub const VERSION:                          SemVer = SemVer::new(0, 1, 0);
@@ -1735,12 +1735,12 @@ pub const INIT_TREE_HALT: &[&str] = &[
     "www/src",
 ];
 File: src/app/syntax.rs
-use oxedize_fe2o3_core::prelude::*;
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     version::SemVer,
 };
-use oxedize_fe2o3_syntax::{
+use oxedyne_fe2o3_syntax::{
     self,
     Syntax,
     SyntaxRef,
@@ -1762,7 +1762,7 @@ pub fn new_shell(
 {
     let mut s = Syntax::new(name).ver(*ver).about(about);
     s = res!(s.with_default_help_cmd());
-    s = res!(oxedize_fe2o3_syntax::apps::file::generic_file_system(s));
+    s = res!(oxedyne_fe2o3_syntax::apps::file::generic_file_system(s));
     let cmd = Cmd::from(CmdConfig {
         name:   fmt!("exit"),
         help:   Some(fmt!("Shutdown the app and exit, or use Ctrl+C, Ctrl+D")),
@@ -1857,10 +1857,10 @@ use crate::srv::{
     cfg::ServerConfig,
     dev::cfg::DevConfig,
 };
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
 };
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     cfg::Config,
 };
@@ -1934,8 +1934,8 @@ File: src/lib.rs
 pub mod srv;
 pub mod app;
 File: src/srv/id.rs
-use oxedize_fe2o3_core::prelude::*;
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_jdat::{
     id::IdDat,
     kind::Kind,
 };
@@ -1975,18 +1975,18 @@ use crate::srv::{
     constant,
     context::ServerContext,
 };
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     rand::RanDef,
 };
-use oxedize_fe2o3_iop_crypto::enc::Encrypter;
-use oxedize_fe2o3_iop_db::api::Database;
-use oxedize_fe2o3_iop_hash::api::Hasher;
-use oxedize_fe2o3_jdat::id::{
+use oxedyne_fe2o3_iop_crypto::enc::Encrypter;
+use oxedyne_fe2o3_iop_db::api::Database;
+use oxedyne_fe2o3_iop_hash::api::Hasher;
+use oxedyne_fe2o3_jdat::id::{
     IdDat,
     NumIdDat,
 };
-use oxedize_fe2o3_net::{
+use oxedyne_fe2o3_net::{
     conc::AsyncReadIterator,
     http::{
         handler::WebHandler,
@@ -2002,7 +2002,7 @@ use oxedize_fe2o3_net::{
     },
     ws::handler::WebSocketHandler,
 };
-use oxedize_fe2o3_syntax::SyntaxRef;
+use oxedyne_fe2o3_syntax::SyntaxRef;
 use std::{
     net::SocketAddr,
     pin::Pin,
@@ -2123,7 +2123,7 @@ use crate::srv::dev::{
     },
     sass::SassBundle,
 };
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 use std::{
     path::{
         Path,
@@ -2453,7 +2453,7 @@ impl HtmlModifier {
     }
 }
 File: src/srv/dev/js.rs
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
 };
 use std::{
@@ -2873,7 +2873,7 @@ pub mod js;
 pub mod refresh;
 pub mod sass;
 File: src/srv/dev/sass.rs
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 use std::{
     collections::{
         HashSet,
@@ -3001,7 +3001,7 @@ impl SassBundle {
     }
 }
 File: src/srv/dev/cfg.rs
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     file::PathState,
     path::{
@@ -3009,7 +3009,7 @@ use oxedize_fe2o3_core::{
         NormPathBuf,
     },
 };
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     cfg::Config,
 };
@@ -3185,14 +3185,14 @@ use crate::srv::{
     cfg::ServerConfig,
     constant,
 };
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     path::{
         NormalPath,
         NormPathBuf,
     },
 };
-use oxedize_fe2o3_net::dns::Fqdn;
+use oxedyne_fe2o3_net::dns::Fqdn;
 use std::{
     fs::{
         create_dir_all,
@@ -3585,22 +3585,22 @@ use crate::srv::{
     cfg::ServerConfig,
     id,
 };
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     id::ParseId,
     path::NormPathBuf,
     rand::Rand,
 };
-use oxedize_fe2o3_crypto::enc::EncryptionScheme;
-use oxedize_fe2o3_hash::{
+use oxedyne_fe2o3_crypto::enc::EncryptionScheme;
+use oxedyne_fe2o3_hash::{
     csum::ChecksumScheme,
     hash::HashScheme,
 };
-use oxedize_fe2o3_iop_crypto::enc::Encrypter;
-use oxedize_fe2o3_iop_db::api::Database;
-use oxedize_fe2o3_iop_hash::api::Hasher;
-use oxedize_fe2o3_jdat::id::NumIdDat;
-use oxedize_fe2o3_net::{
+use oxedyne_fe2o3_iop_crypto::enc::Encrypter;
+use oxedyne_fe2o3_iop_db::api::Database;
+use oxedyne_fe2o3_iop_hash::api::Hasher;
+use oxedyne_fe2o3_jdat::id::NumIdDat;
+use oxedyne_fe2o3_net::{
     http::{
         handler::WebHandler,
         msg::HttpMessage,
@@ -3611,12 +3611,12 @@ use oxedize_fe2o3_net::{
         handler::WebSocketHandler,
     },
 };
-use oxedize_fe2o3_o3db_sync::{
+use oxedyne_fe2o3_o3db_sync::{
     O3db,
     base::cfg::OzoneConfig,
     data::core::RestSchemesInput,
 };
-use oxedize_fe2o3_syntax::core::SyntaxRef;
+use oxedyne_fe2o3_syntax::core::SyntaxRef;
 use std::{
     collections::BTreeMap,
     marker::PhantomData,
@@ -3848,18 +3848,18 @@ use crate::srv::{
     constant,
     context::ServerContext,
 };
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     rand::RanDef,
 };
-use oxedize_fe2o3_iop_crypto::enc::Encrypter;
-use oxedize_fe2o3_iop_db::api::Database;
-use oxedize_fe2o3_iop_hash::api::Hasher;
-use oxedize_fe2o3_jdat::id::{
+use oxedyne_fe2o3_iop_crypto::enc::Encrypter;
+use oxedyne_fe2o3_iop_db::api::Database;
+use oxedyne_fe2o3_iop_hash::api::Hasher;
+use oxedyne_fe2o3_jdat::id::{
     IdDat,
     NumIdDat,
 };
-use oxedize_fe2o3_net::{
+use oxedyne_fe2o3_net::{
     http::{
         handler::WebHandler,
         header::{
@@ -3879,7 +3879,7 @@ use oxedize_fe2o3_net::{
     },
     ws::handler::WebSocketHandler,
 };
-use oxedize_fe2o3_syntax::SyntaxRef;
+use oxedyne_fe2o3_syntax::SyntaxRef;
 use std::{
     net::SocketAddr,
     pin::Pin,
@@ -3998,12 +3998,12 @@ use crate::srv::{
         ServerContext,
     },
 };
-use oxedize_fe2o3_core::prelude::*;
-use oxedize_fe2o3_iop_crypto::enc::Encrypter;
-use oxedize_fe2o3_iop_db::api::Database;
-use oxedize_fe2o3_iop_hash::api::Hasher;
-use oxedize_fe2o3_jdat::id::NumIdDat;
-use oxedize_fe2o3_net::{
+use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_iop_crypto::enc::Encrypter;
+use oxedyne_fe2o3_iop_db::api::Database;
+use oxedyne_fe2o3_iop_hash::api::Hasher;
+use oxedyne_fe2o3_jdat::id::NumIdDat;
+use oxedyne_fe2o3_net::{
     http::handler::WebHandler,
     ws::handler::WebSocketHandler,
 };
@@ -4123,17 +4123,17 @@ use crate::srv::{
     },
     dev::refresh::DevRefreshManager,
 };
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
 };
-use oxedize_fe2o3_iop_crypto::enc::Encrypter;
-use oxedize_fe2o3_iop_db::api::Database;
-use oxedize_fe2o3_iop_hash::api::Hasher;
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_iop_crypto::enc::Encrypter;
+use oxedyne_fe2o3_iop_db::api::Database;
+use oxedyne_fe2o3_iop_hash::api::Hasher;
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     id::NumIdDat,
 };
-use oxedize_fe2o3_net::{
+use oxedyne_fe2o3_net::{
     http::{
         handler::WebHandler,
         msg::HttpMessage,
@@ -4144,7 +4144,7 @@ use oxedize_fe2o3_net::{
         handler::WebSocketHandler,
     },
 };
-use oxedize_fe2o3_syntax::{
+use oxedyne_fe2o3_syntax::{
     SyntaxRef,
     msg::{
         Msg,
@@ -4460,12 +4460,12 @@ File: src/srv/ws/mod.rs
 pub mod handler;
 pub mod syntax;
 File: src/srv/ws/syntax.rs
-use oxedize_fe2o3_core::prelude::*;
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     version::SemVer,
 };
-use oxedize_fe2o3_syntax::{
+use oxedyne_fe2o3_syntax::{
     cmd::{
         Cmd,
         CmdConfig,
@@ -4570,7 +4570,7 @@ pub mod id;
 pub mod server;
 pub mod ws;
 File: src/srv/constant.rs
-use oxedize_fe2o3_o3db_sync::{
+use oxedyne_fe2o3_o3db_sync::{
     comm::response::Wait,
 };
 use std::{
@@ -4624,7 +4624,7 @@ r#"
 "#;
 File: src/srv/cfg.rs
 use crate::srv::constant;
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     file::{
         OsPath,
@@ -4637,11 +4637,11 @@ use oxedize_fe2o3_core::{
         NormPathBuf,
     },
 };
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     cfg::Config,
 };
-use oxedize_fe2o3_net::{
+use oxedyne_fe2o3_net::{
     constant::SESSION_ID_KEY_LABEL,
     dns::Fqdn,
     http::{
@@ -4943,7 +4943,7 @@ pub mod srv;
 use crate::{
     app::tui,
 };
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
 };
 fn main() -> Outcome<()> {

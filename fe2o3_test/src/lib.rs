@@ -16,7 +16,7 @@
 //! mod map;
 //! mod string;
 //! 
-//! use oxedize_fe2o3_core::prelude::*;
+//! use oxedyne_fe2o3_core::prelude::*;
 //! 
 //! #[test]
 //! fn main() -> Outcome<()> {
@@ -43,7 +43,7 @@
 //! 
 //! In your test modules (e.g. `tests/map.rs`):
 //! ```rust
-//! use oxedize_fe2o3_core::{prelude::*, test::test_it};
+//! use oxedyne_fe2o3_core::{prelude::*, test::test_it};
 //! 
 //! pub fn test_map_func(filter: &'static str) -> Outcome<()> {
 //!     // Run test cases that match the filter

@@ -61,7 +61,7 @@ pub fn switch_to_logger_console<
 }
 
 pub trait LoggerConsole<ETAG: GenTag>
-    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+    where oxedyne_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
     fn new() -> Self;
     fn go(&mut self) -> ThreadController<Msg<ETAG>>;
@@ -71,13 +71,13 @@ pub trait LoggerConsole<ETAG: GenTag>
 
 #[derive(Clone, Debug)]
 pub struct StdoutLoggerConsole<ETAG: GenTag>
-    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+    where oxedyne_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
     pub chan:   Simplex<Msg<ETAG>>,
 }
 
 impl<ETAG: GenTag> LoggerConsole<ETAG> for StdoutLoggerConsole<ETAG>
-    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+    where oxedyne_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
     fn new() -> Self {
         Self {
@@ -122,14 +122,14 @@ impl<ETAG: GenTag> LoggerConsole<ETAG> for StdoutLoggerConsole<ETAG>
 
 #[derive(Clone, Debug)]
 pub struct MultiStreamLoggerConsole<ETAG: GenTag>
-    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+    where oxedyne_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
     pub chan:       Simplex<Msg<ETAG>>,
     pub streams:    Arc<RwLock<HashMap<String, Simplex<String>>>>,
 }
 
 impl<ETAG: GenTag> LoggerConsole<ETAG> for MultiStreamLoggerConsole<ETAG>
-    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+    where oxedyne_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
     fn new() -> Self {
         Self {

@@ -1,11 +1,11 @@
 //use crate::srv::id;
 
-use oxedize_fe2o3_core::prelude::*;
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     version::SemVer,
 };
-use oxedize_fe2o3_syntax::{
+use oxedyne_fe2o3_syntax::{
     self,
     Syntax,
     SyntaxRef,
@@ -29,7 +29,7 @@ pub fn new_shell(
 {
     let mut s = Syntax::new(name).ver(*ver).about(about);
     s = res!(s.with_default_help_cmd());
-    s = res!(oxedize_fe2o3_syntax::apps::file::generic_file_system(s));
+    s = res!(oxedyne_fe2o3_syntax::apps::file::generic_file_system(s));
 
     // ┌───────────────────────┐
     // │ CONTROL               │

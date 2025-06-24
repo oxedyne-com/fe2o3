@@ -3,12 +3,12 @@ use crate::{
     pqc::dilithium as dilithium2_fe2o3,
 };
 
-use oxedize_fe2o3_core::prelude::*;
-use oxedize_fe2o3_iop_crypto::{
+use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_iop_crypto::{
     keys::KeyManager,
     sign::Signer,
 };
-use oxedize_fe2o3_namex::{
+use oxedyne_fe2o3_namex::{
     id::{
         LocalId,
         InNamex,

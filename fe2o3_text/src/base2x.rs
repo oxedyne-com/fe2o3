@@ -18,7 +18,7 @@
 //! without padding executes without error, but the last byte may not match a proper encoding of
 //! the original binary.  It's best to always use padding, and to normalise if unsure.
 
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 
 use std::collections::HashSet;
 

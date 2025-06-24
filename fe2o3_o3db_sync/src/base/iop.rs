@@ -5,22 +5,22 @@ use crate::{
     comm::msg::OzoneMsg,
 };
 
-use oxedize_fe2o3_core::prelude::*;
-use oxedize_fe2o3_iop_crypto::enc::Encrypter;
-use oxedize_fe2o3_iop_db::api::{
+use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_iop_crypto::enc::Encrypter;
+use oxedyne_fe2o3_iop_db::api::{
     Meta,
     Database,
     RestSchemesOverride,
 };
-use oxedize_fe2o3_iop_hash::{
+use oxedyne_fe2o3_iop_hash::{
     api::Hasher,
     csum::Checksummer,
 };
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     id::NumIdDat,
 };
-use oxedize_fe2o3_namex::id::{
+use oxedyne_fe2o3_namex::id::{
     InNamex,
     NamexId,
 };

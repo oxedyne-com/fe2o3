@@ -1,7 +1,7 @@
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
 };
-use oxedize_fe2o3_data::tree::{
+use oxedyne_fe2o3_data::tree::{
     Branch,
     Leaf,
     Node,

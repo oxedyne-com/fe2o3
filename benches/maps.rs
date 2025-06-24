@@ -4,12 +4,12 @@ use cap::Cap;
 #[global_allocator]
 static ALLOCATOR: Cap<alloc::System> = Cap::new(alloc::System, usize::max_value());
 
-use oxedize_fe2o3_sand::treemap::{
+use oxedyne_fe2o3_sand::treemap::{
     ByteKey,
     TreeMap,
 };
-use oxedize_fe2o3_core::{debug};
-use oxedize_fe2o3_core::data::{Stack};
+use oxedyne_fe2o3_core::{debug};
+use oxedyne_fe2o3_core::data::{Stack};
 
 use criterion::{
     criterion_group,

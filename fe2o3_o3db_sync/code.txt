@@ -1,6 +1,6 @@
 Cargo.toml:
 [package]
-name = "oxedize_fe2o3_o3db_sync"
+name = "oxedyne_fe2o3_o3db_sync"
 version = "0.5.0"
 authors = ["h00gs <hello@oxedize.com>"]
 edition = "2021"
@@ -9,22 +9,22 @@ description = "Hematite library for the Ozone database (o3db), a key-value store
 repository = "https://github.com/Oxedize/fe2o3"
 
 [dependencies]
-oxedize_fe2o3_bot 		   		= { path = "../fe2o3_bot" }
-oxedize_fe2o3_core 		   		= { path = "../fe2o3_core" }
-oxedize_fe2o3_crypto 			= { path = "../fe2o3_crypto" }
-oxedize_fe2o3_data 		   		= { path = "../fe2o3_data" }
-oxedize_fe2o3_hash 				= { path = "../fe2o3_hash" }
-oxedize_fe2o3_iop_crypto		= { path = "../fe2o3_iop_crypto" }
-oxedize_fe2o3_iop_db			= { path = "../fe2o3_iop_db" }
-oxedize_fe2o3_iop_hash 			= { path = "../fe2o3_iop_hash" }
-oxedize_fe2o3_jdat 				= { path = "../fe2o3_jdat" }
-oxedize_fe2o3_net 				= { path = "../fe2o3_net" }
-oxedize_fe2o3_num 				= { path = "../fe2o3_num" }
-oxedize_fe2o3_syntax 			= { path = "../fe2o3_syntax" }
-oxedize_fe2o3_stds 				= { path = "../fe2o3_stds" }
-oxedize_fe2o3_test 				= { path = "../fe2o3_test" }
-oxedize_fe2o3_text 				= { path = "../fe2o3_text" }
-oxedize_fe2o3_namex				= { path = "../fe2o3_namex" }
+oxedyne_fe2o3_bot 		   		= { path = "../fe2o3_bot" }
+oxedyne_fe2o3_core 		   		= { path = "../fe2o3_core" }
+oxedyne_fe2o3_crypto 			= { path = "../fe2o3_crypto" }
+oxedyne_fe2o3_data 		   		= { path = "../fe2o3_data" }
+oxedyne_fe2o3_hash 				= { path = "../fe2o3_hash" }
+oxedyne_fe2o3_iop_crypto		= { path = "../fe2o3_iop_crypto" }
+oxedyne_fe2o3_iop_db			= { path = "../fe2o3_iop_db" }
+oxedyne_fe2o3_iop_hash 			= { path = "../fe2o3_iop_hash" }
+oxedyne_fe2o3_jdat 				= { path = "../fe2o3_jdat" }
+oxedyne_fe2o3_net 				= { path = "../fe2o3_net" }
+oxedyne_fe2o3_num 				= { path = "../fe2o3_num" }
+oxedyne_fe2o3_syntax 			= { path = "../fe2o3_syntax" }
+oxedyne_fe2o3_stds 				= { path = "../fe2o3_stds" }
+oxedyne_fe2o3_test 				= { path = "../fe2o3_test" }
+oxedyne_fe2o3_text 				= { path = "../fe2o3_text" }
+oxedyne_fe2o3_namex				= { path = "../fe2o3_namex" }
 
 crossbeam-utils = "0.8.5"
 hostname = "0.3.1"
@@ -38,7 +38,7 @@ secrecy = "0.8.0"
 seahash = "4.0.1"
 
 [dev-dependencies]
-oxedize_fe2o3_test 				= { path = "../fe2o3_test" }
+oxedyne_fe2o3_test 				= { path = "../fe2o3_test" }
 
 bot_super.rs:
 use crate::{
@@ -79,12 +79,12 @@ use crate::{
     },
 };
 
-use oxedize_fe2o3_bot::Bot;
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_bot::Bot;
+use oxedyne_fe2o3_core::{
     channels::simplex,
     thread::thread_channel,
 };
-use oxedize_fe2o3_jdat::id::NumIdDat;
+use oxedyne_fe2o3_jdat::id::NumIdDat;
 
 use std::{
     sync::Arc,
@@ -594,11 +594,11 @@ use crate::{
     },
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     channels::Simplex,
     thread::Sentinel,
 };
-use oxedize_fe2o3_jdat::id::NumIdDat;
+use oxedyne_fe2o3_jdat::id::NumIdDat;
 
 use std::{
     time::Duration,

@@ -47,22 +47,22 @@ use crate::{
     file::zdir::ZoneDir,
 };
 
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     chunk::PartKey,
     id::NumIdDat,
 };
-use oxedize_fe2o3_hash::{
+use oxedyne_fe2o3_hash::{
     csum::{
         ChecksummerDefAlt,
         ChecksumScheme,
     },
 };
-use oxedize_fe2o3_iop_db::api::{
+use oxedyne_fe2o3_iop_db::api::{
     Meta,
     RestSchemesOverride,
 };
-use oxedize_fe2o3_namex::id::{
+use oxedyne_fe2o3_namex::id::{
     InNamex,
     NamexId,
 };

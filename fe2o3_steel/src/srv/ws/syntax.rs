@@ -1,9 +1,9 @@
-use oxedize_fe2o3_core::prelude::*;
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     version::SemVer,
 };
-use oxedize_fe2o3_syntax::{
+use oxedyne_fe2o3_syntax::{
 //    arg::{
 //        Arg,
 //        ArgConfig,

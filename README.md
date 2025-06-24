@@ -1,12 +1,12 @@
 <p align="center">
-    <img src="img/oxedize_display_white_opt.svg" width="150"/>
+    <img src="img/oxedyne_display_white_opt.svg" width="150"/>
 </p>
 
 <p align="center">
     <img src="img/fe2o3_display_white_opt.svg" width="200"/>
 </p>
 
-# Oxedize Hematite (fe2o3)
+# Oxedyne Hematite (fe2o3)
 
 Hematite is a collection of Rust crates that grew from an exploration into database design and key data structures.  The project includes several innovative components:
 
@@ -15,7 +15,7 @@ Hematite is a collection of Rust crates that grew from an exploration into datab
 - **Shield**: A secure peer-to-peer protocol and app built on UDP.
 - **Namex**: A distributed universal name codex for schemes and specifications.
 
-Oxedize is my Rust/Web development shop.
+Oxedyne is my Rust/Web development shop.
 
 ## Status
 
@@ -43,7 +43,7 @@ One of the initial motivations for the library was to improve my personal develo
 
 This project is developed and maintained through GitHub Sponsors. If you find Hematite valuable for your work or interesting as a project, consider supporting it to increase the pace of development. No special perks or privileges - just sustainable open source development of innovative Rust infrastructure and apps.
 
-![GitHub Sponsors](https://img.shields.io/github/sponsors/Oxedize)
+![GitHub Sponsors](https://img.shields.io/github/sponsors/oxedyne-io)
 
 ## Components
 
@@ -78,7 +78,7 @@ The crates can be organised by their level of internal cross-dependencies, curre
 
 ## Getting Started
 
-Hematite is currently available via [GitHub]("https://github.com/Oxedize/fe2o3.git") and version 0.9.0 will be available on [crates.io](crates.io). You can use it in several ways:
+Hematite is currently available via [GitHub]("https://github.com/oxedyne-io/fe2o3.git") and version 0.9.0 will be available on [crates.io](crates.io). You can use it in several ways:
 
 ### Installation
 
@@ -91,7 +91,7 @@ Note that Hematite is developed on linux.  Compilation of C static libraries for
 For the latest development version, use git dependencies:
 ```toml
 [dependencies]
-oxedize_fe2o3 = { git = "https://github.com/Oxedize/fe2o3" }
+oxedyne_fe2o3 = { git = "https://github.com/oxedyne-io/fe2o3" }
 ```
 
 ### Local Development
@@ -100,7 +100,7 @@ To explore or contribute:
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/Oxedize/fe2o3.git
+git clone https://github.com/oxedyne-io/fe2o3.git
 cd fe2o3
 ```
 
@@ -125,20 +125,20 @@ cargo test main -- --nocapture
 When it becomes available, you can access specific crates directly :
 ```toml
 [dependencies]
-oxedize_fe2o3_core = "0.5.0"
-oxedize_fe2o3_jdat = "0.5.0"
+oxedyne_fe2o3_core = "0.5.0"
+oxedyne_fe2o3_jdat = "0.5.0"
 ```
 
 Or use the workspace crate to access everything:
 ```toml
 [dependencies]
-oxedize_fe2o3 = { version = "0.5.0", features = ["all"] }
+oxedyne_fe2o3 = { version = "0.5.0", features = ["all"] }
 ```
 
 Or just the components you need:
 ```toml
 [dependencies]
-oxedize_fe2o3 = { version = "0.5.0", features = ["core", "jdat", "o3db"] }
+oxedyne_fe2o3 = { version = "0.5.0", features = ["core", "jdat", "o3db"] }
 ```
 
 ### Usage Examples
@@ -147,12 +147,12 @@ Check the test files in each crate's `tests` directory for detailed usage exampl
 
 ```rust
 // Using the workspace crate
-use oxedize_fe2o3::core::prelude::*;
-use oxedize_fe2o3::jdat;
+use oxedyne_fe2o3::core::prelude::*;
+use oxedyne_fe2o3::jdat;
 
 // Or individual crates
-use oxedize_fe2o3_core::prelude::*;
-use oxedize_fe2o3_jdat;
+use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_jdat;
 ```
 
 ## Highlights
@@ -227,4 +227,4 @@ See the [LICENSE](LICENSE) file for license rights and limitations.
 
 ## Contact
 
-<hello@oxedize.com>
+<hello@oxedyne.io>

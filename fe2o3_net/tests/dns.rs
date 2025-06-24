@@ -1,8 +1,8 @@
-use oxedize_fe2o3_net::{
+use oxedyne_fe2o3_net::{
     dns::Fqdn,
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     test::test_it,
 };

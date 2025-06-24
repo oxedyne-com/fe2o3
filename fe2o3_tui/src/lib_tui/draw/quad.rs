@@ -1,5 +1,5 @@
-use oxedize_fe2o3_core::prelude::*;
-use oxedize_fe2o3_stds::chars::Term;
+use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_stds::chars::Term;
 
 #[derive(Clone, Debug, Default)]
 pub enum Dimension {

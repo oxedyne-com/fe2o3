@@ -1,4 +1,4 @@
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 
 use std::fmt;
 
@@ -16,7 +16,7 @@ use std::fmt;
 /// # Examples
 ///
 /// ```ignore
-/// use oxedize_fe2o3_datime::clock::ClockHourres!();
+/// use oxedyne_fe2o3_datime::clock::ClockHourres!();
 ///
 /// let hour = ClockHour::new(14)?res!();
 /// let (twelve_hour, is_pm) = hour.to_twelve_hour()res!();

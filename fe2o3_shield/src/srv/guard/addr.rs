@@ -5,13 +5,13 @@ use crate::srv::{
     },
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     map::MapMut,
 };
-use oxedize_fe2o3_data::ring::RingTimer;
-use oxedize_fe2o3_hash::map::ShardMap;
-use oxedize_fe2o3_iop_hash::api::{
+use oxedyne_fe2o3_data::ring::RingTimer;
+use oxedyne_fe2o3_hash::map::ShardMap;
+use oxedyne_fe2o3_iop_hash::api::{
     Hasher,
     HashForm,
 };

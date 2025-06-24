@@ -17,13 +17,13 @@ use crate::{
     comm::msg::OzoneMsg,
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     channels::{
         simplex,
         Simplex,
     },
 };
-use oxedize_fe2o3_jdat::id::NumIdDat;
+use oxedyne_fe2o3_jdat::id::NumIdDat;
 
 use std::{
     ops::{
@@ -562,7 +562,7 @@ impl<
         // Now wait for all bots to become idle.
         warn!(sync_log::stream(), "Shutdown: Completion request sent to server, waiting up \
             to {:?} for all other bots to become idle...", constant::SHUTDOWN_MAX_WAIT);
-        let (start, timed_out) = res!(oxedize_fe2o3_core::time::wait_for_true(
+        let (start, timed_out) = res!(oxedyne_fe2o3_core::time::wait_for_true(
             constant::CHECK_INTERVAL,
             constant::SHUTDOWN_MAX_WAIT,
             || { self.msg_count().total_zone() == 0 },

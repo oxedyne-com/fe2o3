@@ -6,12 +6,12 @@ use crate::srv::{
     },
 };
 
-use oxedize_fe2o3_core::prelude::*;
-use oxedize_fe2o3_iop_crypto::enc::Encrypter;
-use oxedize_fe2o3_iop_db::api::Database;
-use oxedize_fe2o3_iop_hash::api::Hasher;
-use oxedize_fe2o3_jdat::id::NumIdDat;
-use oxedize_fe2o3_net::{
+use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_iop_crypto::enc::Encrypter;
+use oxedyne_fe2o3_iop_db::api::Database;
+use oxedyne_fe2o3_iop_hash::api::Hasher;
+use oxedyne_fe2o3_jdat::id::NumIdDat;
+use oxedyne_fe2o3_net::{
     http::handler::WebHandler,
     //smtp::handler::EmailHandler,
     ws::handler::WebSocketHandler,

@@ -3,11 +3,11 @@ use crate::{
     comm::response::Wait,
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     byte::Encoding,
 };
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_jdat::{
     usr::UsrKindCode,
     version::SemVer,
 };

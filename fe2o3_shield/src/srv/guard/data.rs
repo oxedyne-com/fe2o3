@@ -1,15 +1,15 @@
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
 };
-use oxedize_fe2o3_crypto::{
+use oxedyne_fe2o3_crypto::{
     keys::{
         PublicKey,
         SecretKey,
     },
     scheme::SchemeTimestamp,
 };
-use oxedize_fe2o3_hash::pow::ZeroBits;
-use oxedize_fe2o3_jdat::id::{
+use oxedyne_fe2o3_hash::pow::ZeroBits;
+use oxedyne_fe2o3_jdat::id::{
     IdDat,
     NumIdDat,
 };
@@ -57,7 +57,7 @@ impl Address {
 
 /// [`AddressData`] contains parameters that are provided to an address, which are expected during
 /// packet validation, and that an address provides to us, which it expects during packet
-/// validation.  Used by [`oxedize_fe2o3_net::guard::addr::AddressGuard`] to store information relating to
+/// validation.  Used by [`oxedyne_fe2o3_net::guard::addr::AddressGuard`] to store information relating to
 /// an IP address.
 #[derive(Clone, Debug, Default)]
 pub struct AddressData {
@@ -71,7 +71,7 @@ impl AsMut<AddressData> for AddressData {
     }
 }
 
-/// Used by [`oxedize_fe2o3_net::guard::user::UserGuard`] to store information relating to a user.
+/// Used by [`oxedyne_fe2o3_net::guard::user::UserGuard`] to store information relating to a user.
 #[derive(Clone, Debug, Default)]
 pub struct UserData<
     const SIDL: usize,

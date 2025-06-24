@@ -1,8 +1,8 @@
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     test::test_it,
 };
-use oxedize_fe2o3_datime::{
+use oxedyne_fe2o3_datime::{
     calendar::Calendar,
     constant::DayOfWeek,
     core::Time,

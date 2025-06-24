@@ -1,6 +1,6 @@
-use oxedize_fe2o3_jdat::prelude::*;
+use oxedyne_fe2o3_jdat::prelude::*;
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     test::test_it,
 };

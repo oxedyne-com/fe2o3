@@ -13,8 +13,8 @@ use crate::lib_tui::{
     },
 };
 
-use oxedize_fe2o3_core::prelude::*;
-use oxedize_fe2o3_geom::dim::Coord;
+use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_geom::dim::Coord;
 
 
 #[derive(Clone, Debug, Default)]

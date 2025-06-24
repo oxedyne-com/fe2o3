@@ -2,7 +2,7 @@ use crate::{
     daticle::Dat,
 };
 
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 
 use rand_core::{
     OsRng,
@@ -58,7 +58,7 @@ impl Chunker {
     {
         let data_len = vbuf.len();
         let chunk_size = self.cfg.chunk_size;
-        let num_chunks = res!(oxedize_fe2o3_num::int::usize_ceil_div(
+        let num_chunks = res!(oxedyne_fe2o3_num::int::usize_ceil_div(
                 data_len,
                 chunk_size,
         ));

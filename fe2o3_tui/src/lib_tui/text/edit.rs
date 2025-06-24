@@ -2,7 +2,7 @@ use crate::lib_tui::{
     text::nav::Navigator,
 };
 
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 
 use std::{
     fmt,

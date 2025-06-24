@@ -44,7 +44,7 @@ pub use humantime::format_rfc3339_seconds as timefmt;
 
 /// Different messages can be sent to the console or file.
 #[derive(Clone, Debug)]
-pub enum Msg<ETAG: GenTag> where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error {
+pub enum Msg<ETAG: GenTag> where oxedyne_fe2o3_core::error::Error<ETAG>: std::error::Error {
     AddStream(String, Simplex<String>),
     Base(bot::BaseMsg<ETAG>),
     Console(String, String), // Stream key, Message
@@ -65,7 +65,7 @@ impl<
     ETAG: GenTag,
 >
     bot::CtrlMsg for Msg<ETAG>
-    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+    where oxedyne_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
     fn finish() -> Self { Msg::Base(bot::BaseMsg::Finish) }
     fn ready() -> Self { Msg::Base(bot::BaseMsg::Ready) }
@@ -73,7 +73,7 @@ impl<
 
 #[derive(Clone, Debug, Default)]
 pub struct Config<ETAG: GenTag>
-    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+    where oxedyne_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
     pub file:       Option<FileConfig>,
     pub console:    Option<Simplex<Msg<ETAG>>>,
@@ -81,7 +81,7 @@ pub struct Config<ETAG: GenTag>
 }
 
 impl<ETAG: GenTag> Config<ETAG>
-    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+    where oxedyne_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
 
     pub fn path(&self) -> Option<PathBuf> {
@@ -162,7 +162,7 @@ impl FileConfig {
 
 #[derive(Default)]
 pub struct LogBot<ETAG: GenTag>
-    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+    where oxedyne_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
     file:   Option<File>,   
     cfg:    Arc<RwLock<Config<ETAG>>>,
@@ -170,7 +170,7 @@ pub struct LogBot<ETAG: GenTag>
 }
 
 impl<ETAG: GenTag> LogBot<ETAG>
-    where oxedize_fe2o3_core::error::Error<ETAG>: std::error::Error
+    where oxedyne_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
 
     pub fn new() -> Self {

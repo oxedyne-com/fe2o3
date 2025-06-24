@@ -1,4 +1,4 @@
-use oxedize_fe2o3_net::{
+use oxedyne_fe2o3_net::{
     //conc::AsyncReadIterator,
     dns::Fqdn,
     //email::msg::{
@@ -11,11 +11,11 @@ use oxedize_fe2o3_net::{
     },
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     test::test_it,
 };
-//use oxedize_fe2o3_text::string::Stringer;
+//use oxedyne_fe2o3_text::string::Stringer;
 //
 //use std::{
 //    pin::Pin,

@@ -1,13 +1,13 @@
 [package]
-name = "oxedize_fe2o3_geom"
+name = "oxedyne_fe2o3_geom"
 version = "0.5.0"
-authors = ["h00gs <hello@oxedize.com>"]
+authors = ["h00gs <hello@oxedyne.io>"]
 edition = "2021"
 license = "BSD-2-Clause/Apache-2.0"
 description = "Hematite geometry library."
-repository = "https://github.com/Oxedize/fe2o3"
+repository = "https://github.com/oxedyne-io/fe2o3"
 
 [dependencies]
-oxedize_fe2o3_core 		   		= { path = "../fe2o3_core" }
+oxedyne_fe2o3_core 		   		= { path = "../fe2o3_core" }
 
 [dev-dependencies]

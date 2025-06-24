@@ -8,19 +8,19 @@ use crate::{
     },
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     byte::{
         FromBytes,
         ToBytes,
     },
 };
-use oxedize_fe2o3_iop_crypto::sign::Signer;
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_iop_crypto::sign::Signer;
+use oxedyne_fe2o3_jdat::{
     id::NumIdDat,
     version::SemVer,
 };
-use oxedize_fe2o3_hash::{
+use oxedyne_fe2o3_hash::{
     pow::{
         PowCreateParams,
         PowSearchResult,
@@ -29,8 +29,8 @@ use oxedize_fe2o3_hash::{
         ProofOfWork,
     },
 };
-use oxedize_fe2o3_iop_hash::api::Hasher;
-use oxedize_fe2o3_namex::id::LocalId;
+use oxedyne_fe2o3_iop_hash::api::Hasher;
+use oxedyne_fe2o3_namex::id::LocalId;
 
 use std::{
     convert::TryFrom,
@@ -40,7 +40,7 @@ use std::{
 pub type PacketCount = u32;
 pub const PACKET_COUNT_BYTE_LEN: usize = 4;
 
-/// A more economical form of `oxedize_fe2o3_jdat::chunk::ChunkState`.
+/// A more economical form of `oxedyne_fe2o3_jdat::chunk::ChunkState`.
 #[derive(Clone, Debug, Default)]
 pub struct PacketChunkState {
     pub index:      PacketCount,

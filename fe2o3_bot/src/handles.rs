@@ -1,4 +1,4 @@
-use oxedize_fe2o3_core::thread::Sentinel;
+use oxedyne_fe2o3_core::thread::Sentinel;
 
 #[derive(Debug, Default)]
 pub struct Handle<T> {

@@ -7,7 +7,7 @@ use crate::{
     },
 };
 
-use oxedize_fe2o3_iop_hash::api::{
+use oxedyne_fe2o3_iop_hash::api::{
     Hasher,
     HashForm,
 };

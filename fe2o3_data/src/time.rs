@@ -1,4 +1,4 @@
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     byte::{
         FromBytes,
@@ -6,7 +6,7 @@ use oxedize_fe2o3_core::{
     },
     mem::Extract,
 };
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     try_extract_tup2dat,
     tup2dat,

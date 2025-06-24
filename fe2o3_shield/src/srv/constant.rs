@@ -4,11 +4,11 @@ use crate::srv::{
     pow::DifficultyProfile,
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     byte::Encoding,
 };
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     version::SemVer,
 };

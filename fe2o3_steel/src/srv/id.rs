@@ -1,5 +1,5 @@
-use oxedize_fe2o3_core::prelude::*;
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_jdat::{
     id::IdDat,
     kind::Kind,
 };

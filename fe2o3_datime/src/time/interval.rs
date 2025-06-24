@@ -2,7 +2,7 @@ use crate::{
 	core::{Interval, Time},
 	time::{CalClock, CalClockDuration},
 };
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 
 /// Interval between two CalClock instances.
 #[derive(Clone, Debug, PartialEq)]

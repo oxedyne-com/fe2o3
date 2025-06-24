@@ -18,11 +18,11 @@ pub use crate::{
     ozonebot_methods,
 };
 
-pub use oxedize_fe2o3_bot::{
+pub use oxedyne_fe2o3_bot::{
     Bot,
     bot::LoopBreak,
 };
-pub use oxedize_fe2o3_core::{
+pub use oxedyne_fe2o3_core::{
     bot,
     channels::Simplex,
     rand::RanDef,

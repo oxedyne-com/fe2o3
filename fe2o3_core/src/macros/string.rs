@@ -2,7 +2,7 @@
 /// Print a line to the console including the source file and line info.
 ///
 ///```
-/// use oxedize_fe2o3_core::prelude::*;
+/// use oxedyne_fe2o3_core::prelude::*;
 ///
 /// let trooper = 421;
 /// msg!("TK{} why aren't you at your post?", trooper);
@@ -19,7 +19,7 @@ macro_rules! msg {
 /// A three letter alias for `std::format!`.
 ///
 ///```
-/// use oxedize_fe2o3_core::prelude::*;
+/// use oxedyne_fe2o3_core::prelude::*;
 ///
 /// let s = fmt!("The meaning is {}", 42);
 ///```
@@ -32,20 +32,20 @@ macro_rules! fmt {
 /// Return the type of the given expression as a `String`.
 ///
 ///```
-/// use oxedize_fe2o3_core::prelude::*;
+/// use oxedyne_fe2o3_core::prelude::*;
 ///
 /// let typ = fmt_typ!(42u8);
 ///```
 macro_rules! fmt_typ {
     () => (String::from(""));
-    ($v:expr) => (oxedize_fe2o3_core::format_type($v));
+    ($v:expr) => (oxedyne_fe2o3_core::format_type($v));
 }
 
 #[macro_export]
 /// A three letter alias for wrapping a string in a `Stringer`.
 ///
 ///```
-/// use oxedize_fe2o3_core::prelude::*;
+/// use oxedyne_fe2o3_core::prelude::*;
 ///
 /// let s = str!("The meaning is {}", 42);
 ///```
@@ -68,7 +68,7 @@ macro_rules! str {
 ///
 /// # Example
 ///```
-/// use oxedize_fe2o3_core::dump;
+/// use oxedyne_fe2o3_core::dump;
 ///
 /// let b = [0_u16; 10];
 /// let lines: Vec<String> = dump!(" {:04x}", &b, 4);

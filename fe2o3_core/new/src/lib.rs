@@ -7,7 +7,7 @@
 //! # Example
 //! 
 //! ```rust
-//! use oxedize_fe2o3_core_new::New;
+//! use oxedyne_fe2o3_core_new::New;
 //! 
 //! #[derive(New)]
 //! struct Person {

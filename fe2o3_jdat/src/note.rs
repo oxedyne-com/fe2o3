@@ -2,7 +2,7 @@
 //! including a `String` annotation, which can be displayed natively in daticle string formatted
 //! output.
 //!
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     byte::{
         ToBytes,

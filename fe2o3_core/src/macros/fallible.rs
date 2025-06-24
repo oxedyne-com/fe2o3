@@ -2,7 +2,7 @@
 /// Shortcut for attempt to convert type.
 ///
 ///```
-/// use oxedize_fe2o3_core::prelude::*;
+/// use oxedyne_fe2o3_core::prelude::*;
 /// 
 /// fn main() -> Outcome<()> {
 ///     let n = 42u32;
@@ -28,7 +28,7 @@ macro_rules! try_into {
 /// Shortcut for attempt to add integers that can overflow.
 ///
 ///```
-/// use oxedize_fe2o3_core::prelude::*;
+/// use oxedyne_fe2o3_core::prelude::*;
 /// 
 /// fn main() -> Outcome<()> {
 ///     //let sum = try_add!(255u8, 1); // Will return an overflow error
@@ -53,7 +53,7 @@ macro_rules! try_add {
 /// Shortcut for attempt to subtract integers that can underflow.
 ///
 ///```
-/// use oxedize_fe2o3_core::prelude::*;
+/// use oxedyne_fe2o3_core::prelude::*;
 /// 
 /// fn main() -> Outcome<()> {
 ///     //let sum = try_sub!(1u8, 2); // Will return an overflow error
@@ -78,7 +78,7 @@ macro_rules! try_sub {
 /// Shortcut for attempt to multiply integers that can overflow.
 ///
 ///```
-/// use oxedize_fe2o3_core::prelude::*;
+/// use oxedyne_fe2o3_core::prelude::*;
 /// 
 /// fn main() -> Outcome<()> {
 ///     //let prod = try_mul!(17u8, 17); // Will return an overflow error
@@ -103,7 +103,7 @@ macro_rules! try_mul {
 /// Shortcut for attempt to divide integers, checking for division by zero.
 ///
 ///```
-/// use oxedize_fe2o3_core::prelude::*;
+/// use oxedyne_fe2o3_core::prelude::*;
 /// 
 /// fn main() -> Outcome<()> {
 ///     //let div = try_div!(17u8, 0); // Will return an error
@@ -128,7 +128,7 @@ macro_rules! try_div {
 /// Shortcut for attempt to find the remainder after division, checking for division by zero.
 ///
 ///```
-/// use oxedize_fe2o3_core::prelude::*;
+/// use oxedyne_fe2o3_core::prelude::*;
 /// 
 /// fn main() -> Outcome<()> {
 ///     //let rem = try_rem!(17u8, 0); // Will return an error
@@ -155,7 +155,7 @@ macro_rules! try_rem {
 /// specification or inference of types.
 ///
 ///```
-/// use oxedize_fe2o3_core::prelude::*;
+/// use oxedyne_fe2o3_core::prelude::*;
 /// 
 /// fn main() -> Outcome<()> {
 ///     //let n = try_range!(3u8, 5u8, 17u8); // Will return an error
@@ -182,7 +182,7 @@ macro_rules! try_range {
 macro_rules! impls_for_native_integer {
     ($t:ty, $n:literal) => {
         
-        impl oxedize_fe2o3_core::byte::FromBytes for $t {
+        impl oxedyne_fe2o3_core::byte::FromBytes for $t {
             fn from_bytes(buf: &[u8]) -> Outcome<(Self, usize)> {
                 const BYTE_LEN: usize = std::mem::size_of::<$t>();
                 if buf.len() < BYTE_LEN {
@@ -200,7 +200,7 @@ macro_rules! impls_for_native_integer {
             }
         }
 
-        impl oxedize_fe2o3_core::byte::FromByteArray for $t {
+        impl oxedyne_fe2o3_core::byte::FromByteArray for $t {
             fn from_byte_array<const L: usize>(buf: [u8; L]) -> Outcome<Self> {
                 const BYTE_LEN: usize = std::mem::size_of::<$t>();
                 if L < BYTE_LEN {
@@ -217,19 +217,19 @@ macro_rules! impls_for_native_integer {
             }
         }
 
-        impl oxedize_fe2o3_core::byte::ToBytes for $t {
+        impl oxedyne_fe2o3_core::byte::ToBytes for $t {
             fn to_bytes(&self, mut buf: Vec<u8>) -> Outcome<Vec<u8>> {
                 buf.extend_from_slice(&self.to_be_bytes());
                 Ok(buf)
             }
         }
 
-        impl oxedize_fe2o3_core::byte::ToByteArray<$n> for $t {
+        impl oxedyne_fe2o3_core::byte::ToByteArray<$n> for $t {
             fn to_byte_array(&self) -> [u8; $n] {
                 self.to_be_bytes()
             }
         }
 
-        impl oxedize_fe2o3_core::string::ToHexString for $t {}
+        impl oxedyne_fe2o3_core::string::ToHexString for $t {}
     }
 }

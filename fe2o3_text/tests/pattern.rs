@@ -1,4 +1,4 @@
-use oxedize_fe2o3_text::{
+use oxedyne_fe2o3_text::{
     pattern::{
         MatcherNode,
         MatcherOp,
@@ -6,7 +6,7 @@ use oxedize_fe2o3_text::{
     },
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     test::test_it,
 };

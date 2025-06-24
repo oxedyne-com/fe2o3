@@ -1,4 +1,4 @@
-use oxedize_fe2o3_text::{
+use oxedyne_fe2o3_text::{
     Text,
     highlight::{
         Highlight,
@@ -9,11 +9,11 @@ use oxedize_fe2o3_text::{
     },
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     test::test_it,
 };
-use oxedize_fe2o3_geom::{
+use oxedyne_fe2o3_geom::{
     dim::Coord,
 };
 

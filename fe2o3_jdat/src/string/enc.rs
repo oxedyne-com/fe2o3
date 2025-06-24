@@ -10,17 +10,17 @@ use crate::{
     kind::KindCase,
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     map::MapMut,
 };
-use oxedize_fe2o3_num::{
+use oxedyne_fe2o3_num::{
     float::{
         Float32,
         Float64,
     },
 };
-use oxedize_fe2o3_text::{
+use oxedyne_fe2o3_text::{
     base2x,
     string::{
         Indenter,
@@ -370,7 +370,7 @@ impl EncoderState {
 
 impl Dat {
 
-    /// Uses `EncoderConfig::debug`, `EncoderConfig::display` and `oxedize_fe2o3_core::string::Stringer`.
+    /// Uses `EncoderConfig::debug`, `EncoderConfig::display` and `oxedyne_fe2o3_core::string::Stringer`.
     pub fn to_lines(&self, tab: &str, print_kinds: bool) -> Vec<String> {
         let s = if print_kinds {
             fmt!("{:?}", self)

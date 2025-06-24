@@ -27,7 +27,7 @@ use crate::{
     },
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     byte::{
         Encoding,
@@ -36,7 +36,7 @@ use oxedize_fe2o3_core::{
     },
     rand::RanDef,
 };
-use oxedize_fe2o3_hash::{
+use oxedyne_fe2o3_hash::{
     pow::{
         PowCreateParams,
         PowVars,
@@ -45,7 +45,7 @@ use oxedize_fe2o3_hash::{
         ZeroBits,
     },
 };
-use oxedize_fe2o3_syntax::{
+use oxedyne_fe2o3_syntax::{
     SyntaxRef,
     msg::{
         Msg,
@@ -70,12 +70,12 @@ use std::{
 
 /// Rather than a generic and possibly more complex callback mechanism, the processing of server
 /// command is customised so as to access only parameters needed from the server loop scope.
-/// Incoming server commands are encoded in a `oxedize_fe2o3_syntax::msg::MsgCmd` using the `Syntax`
-/// defined in `oxedize_fe2o3_shield::syntax`.  Each must be associated with a `struct` below that
-/// is accessed in `oxedize_fe2o3_o3db_sync::bots::bot_server`.  This must capture some basic information (i.e.
+/// Incoming server commands are encoded in a `oxedyne_fe2o3_syntax::msg::MsgCmd` using the `Syntax`
+/// defined in `oxedyne_fe2o3_shield::syntax`.  Each must be associated with a `struct` below that
+/// is accessed in `oxedyne_fe2o3_o3db_sync::bots::bot_server`.  This must capture some basic information (i.e.
 /// `MsgFmt` and `MsgIds`) as well as the command-specific data.  The associated `struct` must have
 /// its own custom method for processing the incoming command (e.g.
-/// `oxedize_fe2o3_o3db_sync::comm::wire::HReq1::process`), and should implement `ShieldCommand` in order to
+/// `oxedyne_fe2o3_o3db_sync::comm::wire::HReq1::process`), and should implement `ShieldCommand` in order to
 /// access supporting methods.  There are plenty of examples to copy and modify.
 pub trait ShieldCommand<
     const ML: usize,

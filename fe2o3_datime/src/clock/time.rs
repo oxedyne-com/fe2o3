@@ -11,7 +11,7 @@ use crate::{
 	time::CalClockZone,
 };
 
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 
 use std::fmt;
 
@@ -28,7 +28,7 @@ use std::fmt;
 /// # Examples
 ///
 /// ```ignore
-/// use oxedize_fe2o3_datime::{
+/// use oxedyne_fe2o3_datime::{
 ///     clock::ClockTime,
 ///     time::CalClockZone,
 /// }res!();

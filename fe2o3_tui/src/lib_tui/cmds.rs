@@ -4,14 +4,14 @@ use crate::lib_tui::{
     },
 };
 
-use oxedize_fe2o3_core::prelude::*;
-use oxedize_fe2o3_jdat::prelude::*;
-use oxedize_fe2o3_units::{
+use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_jdat::prelude::*;
+use oxedyne_fe2o3_units::{
     si::SI,
     system::Units,
 };
-use oxedize_fe2o3_stds::chars::Term;
-use oxedize_fe2o3_syntax::{
+use oxedyne_fe2o3_stds::chars::Term;
+use oxedyne_fe2o3_syntax::{
     msg::{
         MsgCmd,
     },

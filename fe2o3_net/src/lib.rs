@@ -44,7 +44,7 @@
 //! # Example
 //!
 //! ```rust
-//! use oxedize_fe2o3_net::{
+//! use oxedyne_fe2o3_net::{
 //!     dns::Fqdn,
 //!     http::{
 //!         msg::HttpMessage,

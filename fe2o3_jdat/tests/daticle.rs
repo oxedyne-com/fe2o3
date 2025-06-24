@@ -1,4 +1,4 @@
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     self,
     FromDatMap,
@@ -10,11 +10,11 @@ use oxedize_fe2o3_jdat::{
     usr::UsrKindId,
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     test::test_it,
 };
-use oxedize_fe2o3_num::{
+use oxedyne_fe2o3_num::{
     prelude::*,
     BigDecimal,
     BigInt,

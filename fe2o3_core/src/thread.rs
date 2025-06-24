@@ -82,7 +82,7 @@ impl Semaphore {
     }
 
     /// Bring the semaphore into scope so that the compiler adds a Drop function at the end of the
-    /// scope (i.e. the thread).  This is used by `oxedize_fe2o3_log::logger::Logger` because hiding the
+    /// scope (i.e. the thread).  This is used by `oxedyne_fe2o3_log::logger::Logger` because hiding the
     /// semaphore inside the `LOG` singleton would not yield a call to its `Drop` function, since
     /// `LOG` is static.  Normally you would activate a semaphore inside a child thread with a
     /// `while semaphore.alive() {}` loop.

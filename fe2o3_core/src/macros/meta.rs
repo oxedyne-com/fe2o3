@@ -19,7 +19,7 @@ macro_rules! new_type {
             }
         }
         
-        impl oxedize_fe2o3_core::conv::IntoInner for $newtyp {
+        impl oxedyne_fe2o3_core::conv::IntoInner for $newtyp {
             type Inner = $wrapped;
             fn into_inner(self) -> Self::Inner {
                 self.0
@@ -44,7 +44,7 @@ macro_rules! new_type {
             }
         }
         
-        impl oxedize_fe2o3_core::conv::IntoInner for $newtyp {
+        impl oxedyne_fe2o3_core::conv::IntoInner for $newtyp {
             type Inner = $wrapped;
             fn into_inner(self) -> Self::Inner {
                 self.0
@@ -68,7 +68,7 @@ macro_rules! new_type_priv {
             }
         }
         
-        impl oxedize_fe2o3_core::conv::IntoInner for $newtyp {
+        impl oxedyne_fe2o3_core::conv::IntoInner for $newtyp {
             type Inner = $wrapped;
             fn into_inner(self) -> Self::Inner {
                 self.0
@@ -87,7 +87,7 @@ macro_rules! new_type_priv {
             }
         }
 
-        impl oxedize_fe2o3_core::conv::IntoInner for $newtyp {
+        impl oxedyne_fe2o3_core::conv::IntoInner for $newtyp {
             type Inner = $wrapped;
             fn into_inner(self) -> Self::Inner {
                 self.0
@@ -247,7 +247,7 @@ macro_rules! new_enum {
                 0 $(+ (1 $(+ <[()]>::len(&[$($field),+]))?))*
             }
             pub fn rand() -> Self {
-                let index = ::oxedize_fe2o3_core::rand::Rand::in_range(0, Self::num_of_variants());
+                let index = ::oxedyne_fe2o3_core::rand::Rand::in_range(0, Self::num_of_variants());
                 Self::variants()[index]
             }
         }

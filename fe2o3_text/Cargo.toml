@@ -1,18 +1,18 @@
 [package]
-name = "oxedize_fe2o3_text"
+name = "oxedyne_fe2o3_text"
 version = "0.5.0"
-authors = ["h00gs <hello@oxedize.com>"]
+authors = ["h00gs <hello@oxedyne.io>"]
 edition = "2021"
 license = "BSD-2-Clause/Apache-2.0"
 description = "Hematite text library."
-repository = "https://github.com/Oxedize/fe2o3"
+repository = "https://github.com/oxedyne-io/fe2o3"
 
 [dependencies]
-oxedize_fe2o3_core 				= { path = "../fe2o3_core" }
-oxedize_fe2o3_geom 				= { path = "../fe2o3_geom" }
-oxedize_fe2o3_stds 				= { path = "../fe2o3_stds" }
+oxedyne_fe2o3_core 				= { path = "../fe2o3_core" }
+oxedyne_fe2o3_geom 				= { path = "../fe2o3_geom" }
+oxedyne_fe2o3_stds 				= { path = "../fe2o3_stds" }
 
 [dev-dependencies]
-oxedize_fe2o3_test 				= { path = "../fe2o3_test" }
+oxedyne_fe2o3_test 				= { path = "../fe2o3_test" }
 
 base64 = "0.13.0"

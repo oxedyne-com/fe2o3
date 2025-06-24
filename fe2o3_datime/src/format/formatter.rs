@@ -6,7 +6,7 @@ use crate::{
     time::CalClock,
 };
 
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 
 use std::fmt;
 
@@ -36,7 +36,7 @@ impl fmt::Display for FormattingError {
 /// # Examples
 ///
 /// ```ignore
-/// use oxedize_fe2o3_datime::{
+/// use oxedyne_fe2o3_datime::{
 ///     format::{CalClockFormatter, FormatPattern},
 ///     time::CalClock,
 /// }res!();

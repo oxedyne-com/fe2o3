@@ -4,7 +4,7 @@ use crate::{
     tup3dat,
 };
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     byte::{
         FromBytes,

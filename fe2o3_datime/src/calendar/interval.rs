@@ -6,7 +6,7 @@ use crate::{
     core::{Interval, Time},
 };
 
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 
 use std::fmt::{self, Display};
 

@@ -10,8 +10,8 @@ use crate::{
     },
 };
 
-use oxedize_fe2o3_core::prelude::*;
-use oxedize_fe2o3_jdat::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_jdat::prelude::*;
 
 pub fn generic_file_system(
     mut s: Syntax,

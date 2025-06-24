@@ -1,4 +1,4 @@
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     alt::{
         Alt,
@@ -7,12 +7,12 @@ use oxedize_fe2o3_core::{
         Gnomon,
     },
 };
-use oxedize_fe2o3_iop_hash::api::{
+use oxedyne_fe2o3_iop_hash::api::{
     Hash,
     HashForm,
     Hasher,
 };
-use oxedize_fe2o3_namex::{
+use oxedyne_fe2o3_namex::{
     id::{
         LocalId,
         InNamex,

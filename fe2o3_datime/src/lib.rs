@@ -14,7 +14,7 @@
 //!
 //! # Example
 //! ```rust,ignore
-//! use oxedize_fe2o3_datime::{
+//! use oxedyne_fe2o3_datime::{
 //!     calendar::{Calendar, CalendarDate},
 //!     clock::ClockTime,
 //!     time::{CalClock, CalClockZone},

@@ -1,15 +1,15 @@
 use crate::scheme::SchemeTimestamp;
 
-use oxedize_fe2o3_core::{
+use oxedyne_fe2o3_core::{
     prelude::*,
     mem::Extract,
     rand::RanDef,
 };
-use oxedize_fe2o3_data::{
+use oxedyne_fe2o3_data::{
     ring::RingBuffer,
     time::Timestamped,
 };
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     try_extract_tup2dat,
     //try_extract_tup3dat,
@@ -17,7 +17,7 @@ use oxedize_fe2o3_jdat::{
     //tup3dat,
     file::JdatFile,
 };
-use oxedize_fe2o3_namex::id::LocalId as SchemeLocalId;
+use oxedyne_fe2o3_namex::id::LocalId as SchemeLocalId;
 
 use std::{
     fmt,
@@ -680,7 +680,7 @@ impl<
 //#[cfg(test)]
 //mod tests {
 //    use super::*;
-//    use oxedize_fe2o3_data::time::Timestamp;
+//    use oxedyne_fe2o3_data::time::Timestamp;
 //    use std::{
 //        time::Duration,
 //    };

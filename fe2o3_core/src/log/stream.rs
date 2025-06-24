@@ -11,7 +11,7 @@
 //! The sync version uses thread-local storage that is unique to each operating system thread:
 //! 
 //! ```rust
-//! use oxedize_fe2o3_core::prelude::*;
+//! use oxedyne_fe2o3_core::prelude::*;
 //! 
 //! // Set the stream ID for the current thread.
 //! sync_log::set_stream(fmt!("my_thread");
@@ -26,7 +26,7 @@
 //! an async task in a scope:
 //! 
 //! ```rust
-//! use oxedize_fe2o3_core::prelude::*;
+//! use oxedyne_fe2o3_core::prelude::*;
 //! 
 //! let handle = tokio::spawn(async_log::LOG_STREAM_ID.scope(
 //!     fmt!("my_stream"),

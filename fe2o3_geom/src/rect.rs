@@ -6,7 +6,7 @@ use crate::dim::{
     Span,
 };
 
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 
 
 #[derive(Clone, Copy, Debug)]

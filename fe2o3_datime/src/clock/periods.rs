@@ -10,7 +10,7 @@ use crate::{
 	time::CalClockZone,
 };
 
-use oxedize_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 
 /// Represents a specific hour within a specific day.
 #[derive(Clone, Debug, PartialEq)]

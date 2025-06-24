@@ -3,7 +3,7 @@ use crate::{
     bots::worker::bot::WorkerType,
 };
 
-use oxedize_fe2o3_jdat::{
+use oxedyne_fe2o3_jdat::{
     prelude::*,
     cfg::Config,
     chunk::{
