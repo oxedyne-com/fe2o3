@@ -115,6 +115,35 @@ impl DayOfWeek {
     pub fn long_name(&self) -> &'static str {
         self.name()
     }
+    
+    /// Parse from a string name (case insensitive).
+    pub fn from_name(name: &str) -> Option<Self> {
+        let name = name.to_lowercase();
+        match name.as_str() {
+            "monday" | "mon" => Some(Self::Monday),
+            "tuesday" | "tue" | "tues" => Some(Self::Tuesday),
+            "wednesday" | "wed" => Some(Self::Wednesday),
+            "thursday" | "thu" | "thur" | "thurs" => Some(Self::Thursday),
+            "friday" | "fri" => Some(Self::Friday),
+            "saturday" | "sat" => Some(Self::Saturday),
+            "sunday" | "sun" => Some(Self::Sunday),
+            _ => None,
+        }
+    }
+    
+    /// Calculate days until another day of week (0-6).
+    pub fn days_until(&self, target: &Self) -> u8 {
+        let current = self.of();
+        let target = target.of();
+        
+        if current == target {
+            0
+        } else if target > current {
+            target - current
+        } else {
+            7 - (current - target)
+        }
+    }
 }
 
 impl Display for DayOfWeek {

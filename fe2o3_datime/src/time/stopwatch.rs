@@ -54,4 +54,19 @@ impl StopWatchMillis {
 			Err(err!("Stopwatch not started"; Invalid))
 		}
 	}
+	
+	/// Starts the stopwatch (Java-compatible method).
+	pub fn tic(&mut self) {
+		self.start();
+	}
+	
+	/// Returns elapsed milliseconds since tic() without stopping.
+	pub fn toc(&self) -> u64 {
+		if let Some(start) = self.start_time {
+			let elapsed = start.elapsed();
+			elapsed.as_millis() as u64
+		} else {
+			0
+		}
+	}
 }

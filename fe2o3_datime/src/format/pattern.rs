@@ -84,6 +84,10 @@ impl FormatPattern {
     /// - `EEE` - Short day name (e.g., Mon)
     /// - `DDD` - Day of year (e.g., 365)
     /// - `Q` - Quarter (e.g., 1)
+    /// - `w` - Week of year (e.g., 42)
+    /// - `ww` - 2-digit week of year (e.g., 02)
+    /// - `G` - Era abbreviation (e.g., CE, BCE)
+    /// - `GGGG` - Full era name (e.g., Common Era)
     ///
     /// ## Time Patterns
     /// - `HH` - 24-hour format hour (e.g., 14)
@@ -228,6 +232,26 @@ impl FormatPattern {
                     tokens.push(FormatToken::Quarter(FormatStyle::Numeric));
                 },
                 
+                // Week of year patterns
+                'w' => {
+                    let count = Self::count_consecutive(&mut chars, 'w') + 1;
+                    match count {
+                        1 => tokens.push(FormatToken::WeekOfYear(FormatStyle::Numeric)),
+                        2 => tokens.push(FormatToken::WeekOfYear(FormatStyle::Custom { width: 2, pad_char: '0' })),
+                        _ => tokens.push(FormatToken::WeekOfYear(FormatStyle::Custom { width: 2, pad_char: '0' })),
+                    }
+                },
+                
+                // Era patterns
+                'G' => {
+                    let count = Self::count_consecutive(&mut chars, 'G') + 1;
+                    match count {
+                        1 => tokens.push(FormatToken::Era(FormatStyle::Short)),
+                        2..=4 => tokens.push(FormatToken::Era(FormatStyle::Long)),
+                        _ => tokens.push(FormatToken::Era(FormatStyle::Long)),
+                    }
+                },
+                
                 // 24-hour patterns
                 'H' => {
                     let count = Self::count_consecutive(&mut chars, 'H') + 1;
@@ -346,7 +370,7 @@ impl FormatPattern {
     
     /// Returns true if the character is a format pattern character.
     fn is_pattern_char(ch: char) -> bool {
-        matches!(ch, 'y' | 'M' | 'd' | 'E' | 'D' | 'Q' | 'H' | 'h' | 'm' | 's' | 'S' | 'a' | 'z' | 'Z' | 'v' | ' ' | ':' | '-' | '/' | ',' | '.')
+        matches!(ch, 'y' | 'M' | 'd' | 'E' | 'D' | 'Q' | 'w' | 'G' | 'H' | 'h' | 'm' | 's' | 'S' | 'a' | 'z' | 'Z' | 'v' | ' ' | ':' | '-' | '/' | ',' | '.')
     }
     
     // ========================================================================

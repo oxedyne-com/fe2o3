@@ -76,9 +76,14 @@ impl CalendarDate {
     
     /// Get today's date in the given timezone.
     pub fn today(zone: CalClockZone) -> Outcome<Self> {
-        // TODO: Implement proper current date retrieval
-        // For now, return a dummy date
-        Self::new(2024, 1, 1, zone)
+        use std::time::{SystemTime, UNIX_EPOCH};
+        
+        let now = SystemTime::now();
+        let duration = res!(now.duration_since(UNIX_EPOCH)
+            .map_err(|_| err!("System time is before Unix epoch"; System)));
+        
+        let days_since_epoch = duration.as_secs() / (24 * 60 * 60);
+        Self::from_days_since_epoch(days_since_epoch as i64, zone)
     }
     
     /// Parse a date from a string.
@@ -163,12 +168,45 @@ impl CalendarDate {
         Ok(days)
     }
     
-    /// Get the week of year (1-53).
+    /// Get the week of year (1-53) using ISO 8601 week numbering.
     pub fn week_of_year(&self) -> Outcome<u8> {
-        // ISO 8601 week numbering
-        // TODO: Implement proper ISO week calculation
+        // ISO 8601 week numbering - weeks start on Monday
+        // Week 1 is the first week with at least 4 days in the new year
+        
+        // Get January 1st of this year
+        let jan1 = res!(Self::new(self.year, 1, 1, self.zone.clone()));
+        let jan1_dow = jan1.day_of_week() as u8; // Monday = 1, Sunday = 7
+        
+        // Calculate the day of year
         let day_of_year = res!(self.day_of_year());
-        Ok(((day_of_year - 1) / 7 + 1) as u8)
+        
+        // ISO week calculation
+        let jan1_iso_dow = if jan1_dow == 7 { 7 } else { jan1_dow }; // Sunday = 7 in ISO
+        
+        // Days before the first Monday of the year
+        let days_before_first_monday = if jan1_iso_dow == 1 { 0u16 } else { (8 - jan1_iso_dow) as u16 };
+        
+        // If January 1st is Friday, Saturday, or Sunday, week 1 starts in previous year
+        if jan1_iso_dow >= 5 {
+            // This date is in week 1 of next year if it's in the last few days
+            if day_of_year > (365 + if self.is_leap_year() { 1 } else { 0 } - (jan1_iso_dow - 1) as u16) {
+                return Ok(1); // Week 1 of next year
+            }
+            
+            // Otherwise, calculate week number normally
+            let adjusted_day = day_of_year + (7u16 - days_before_first_monday);
+            Ok(((adjusted_day - 1) / 7 + 1) as u8)
+        } else {
+            // Week 1 starts in current year
+            if day_of_year <= days_before_first_monday {
+                // This date belongs to the last week of previous year
+                let prev_year_date = res!(Self::new(self.year - 1, 12, 31, self.zone.clone()));
+                return prev_year_date.week_of_year();
+            }
+            
+            let adjusted_day = day_of_year - days_before_first_monday;
+            Ok(((adjusted_day - 1) / 7 + 1) as u8)
+        }
     }
     
     /// Add years, months and days to this date.
@@ -208,11 +246,11 @@ impl CalendarDate {
             return Ok(self.clone());
         }
         
-        // Convert to day number from epoch (simplistic approach)
-        let day_number = res!(self.to_day_number());
-        let new_day_number = day_number + days as i64;
+        // Use Julian day number for accurate date arithmetic
+        let julian_day = self.to_julian_day_number();
+        let new_julian_day = julian_day + days as i64;
         
-        Self::from_day_number(new_day_number, self.zone.clone())
+        Self::from_julian_day_number(new_julian_day, self.zone.clone())
     }
     
     /// Increment by one day.
@@ -295,7 +333,7 @@ impl CalendarDate {
     
     /// Calculate the duration between this date and another.
     pub fn minus_date(&self, other: &Self) -> Outcome<CalendarDuration> {
-        let days = res!(self.to_day_number()) - res!(other.to_day_number());
+        let days = self.to_julian_day_number() - other.to_julian_day_number();
         Ok(CalendarDuration::from_days(days as i32))
     }
     
@@ -332,30 +370,20 @@ impl CalendarDate {
     
     /// Get the number of days since the Unix epoch (1970-01-01).
     pub fn days_since_epoch(&self) -> Outcome<i64> {
-        // Convert to day number from our epoch (year 0) then adjust to Unix epoch
-        let day_number = res!(self.to_day_number());
+        // Unix epoch (1970-01-01) Julian day number is 2440588
+        let unix_epoch_julian_day = 2440588i64;
+        let this_julian_day = self.to_julian_day_number();
         
-        // Calculate days from year 0 to Unix epoch (1970-01-01)
-        let mut epoch_days: i64 = 0;
-        for y in 0..1970 {
-            epoch_days += if self.calendar.is_leap_year(y) { 366 } else { 365 };
-        }
-        
-        Ok(day_number - epoch_days)
+        Ok(this_julian_day - unix_epoch_julian_day)
     }
     
     /// Create a CalendarDate from the number of days since the Unix epoch.
     pub fn from_days_since_epoch(days: i64, zone: CalClockZone) -> Outcome<Self> {
-        // Calculate days from year 0 to Unix epoch (1970-01-01)
-        let calendar = CalendarSystem::default();
-        let mut epoch_days: i64 = 0;
-        for y in 0..1970 {
-            epoch_days += if calendar.is_leap_year(y) { 366 } else { 365 };
-        }
+        // Unix epoch (1970-01-01) Julian day number is 2440588
+        let unix_epoch_julian_day = 2440588i64;
+        let julian_day = unix_epoch_julian_day + days;
         
-        // Convert to our internal day number system and create date
-        let day_number = days + epoch_days;
-        Self::from_day_number(day_number, zone)
+        Self::from_julian_day_number(julian_day, zone)
     }
     
     /// Check if this date represents a valid calendar date.
@@ -380,6 +408,11 @@ impl CalendarDate {
         // Extract days from duration and add them
         let days = duration.days();
         self.add_days(days)
+    }
+    
+    /// Add a CalendarDuration to this date.
+    pub fn add_calendar_duration(&self, duration: &CalendarDuration) -> Outcome<Self> {
+        self.plus(duration.years(), duration.months(), duration.days())
     }
     
     /// Subtract a CalClockDuration from this date.
@@ -432,6 +465,11 @@ impl CalendarDate {
         self.calendar.is_julian()
     }
 
+    /// Returns true if this is a weekday (Monday through Friday).
+    pub fn is_weekday(&self) -> bool {
+        self.day_of_week().is_weekday()
+    }
+    
     /// Returns true if this is a business day (Monday through Friday).
     pub fn is_business_day(&self) -> bool {
         use crate::constant::DayOfWeek::*;
@@ -699,6 +737,234 @@ impl CalendarDate {
         let years = self.years_until(birth_date).abs() as u32;
         Ok(years)
     }
+    
+    /// Converts this date to Julian day number.
+    /// 
+    /// Uses the same algorithm as Java calclock toJulianDayNumber4
+    /// Source: http://pmyers.pcug.org.au/General/JulianDates.htm
+    pub fn to_julian_day_number(&self) -> i64 {
+        let mut year = self.year as i64;
+        let mut month = self.month.of() as i64;
+        let day = self.day as i64;
+        
+        if month > 2 {
+            month -= 3;
+        } else {
+            month += 9;
+            year -= 1;
+        }
+        
+        let c = year / 100;
+        let ya = year - 100 * c;
+        
+        (146097 * c) / 4
+            + (1461 * ya) / 4
+            + (153 * month + 2) / 5
+            + day
+            + 1721119
+    }
+    
+    /// Creates a CalendarDate from Julian day number.
+    /// 
+    /// Uses the same algorithm as Java calclock fromJulianDayNumber4
+    /// Source: http://pmyers.pcug.org.au/General/JulianDates.htm#J2G
+    pub fn from_julian_day_number(mut julian_day: i64, zone: CalClockZone) -> Outcome<Self> {
+        julian_day -= 1721119;
+        let y = (4 * julian_day - 1) / 146097;
+        julian_day = 4 * julian_day - 1 - 146097 * y;
+        let mut d = julian_day / 4;
+        julian_day = (4 * d + 3) / 1461;
+        d = 4 * d + 3 - 1461 * julian_day;
+        d = (d + 4) / 4;
+        let mut m = (5 * d - 3) / 153;
+        d = 5 * d - 3 - 153 * m;
+        d = (d + 5) / 5;
+        let mut year = 100 * y + julian_day;
+        
+        if m < 10 {
+            m += 3;
+        } else {
+            m -= 9;
+            year += 1;
+        }
+        
+        Self::new(year as i32, m as u8, d as u8, zone)
+    }
+    
+    // ========================================================================
+    // String Formatting Implementation (ported from Java original)
+    // ========================================================================
+    
+    /// Formats the date according to the stencil pattern.
+    /// 
+    /// Format scheme from original Java implementation:
+    /// - y yy yyy yyyy yyyyy    Year            8 08 008 2008 02008
+    /// - M MM MMM MMMM          Month           3 03 Mar March
+    /// - d dd ddd dddd          Day             9 09 Sun Sunday
+    /// - z zz zzz zzzz          Timezone        +1 +01 +01:00 UTC
+    pub fn format_with_stencil(&self, stencil: &str) -> String {
+        let mut output = String::new();
+        let chars: Vec<char> = stencil.chars().collect();
+        let mut i = 0;
+        
+        while i < chars.len() {
+            let curr = chars[i];
+            
+            if self.is_recognised_format_char(curr) {
+                // Count consecutive occurrences of the same format character
+                let mut token_len = 1;
+                while i + token_len < chars.len() && chars[i + token_len] == curr {
+                    token_len += 1;
+                }
+                
+                // Process the token
+                self.switch_on_format_char(curr, token_len, &mut output);
+                i += token_len;
+            } else {
+                // Regular character, append as-is
+                output.push(curr);
+                i += 1;
+            }
+        }
+        
+        output
+    }
+    
+    /// Processes a single format token (ported from Java switchOnFormatChar)
+    fn switch_on_format_char(&self, c: char, n: usize, sb: &mut String) {
+        match c {
+            'y' => self.format_year(n, sb, self.year),
+            'M' => self.format_month(n, sb, self.month.of() as i32),
+            'd' => {
+                if n < 3 {
+                    self.format_day(n, sb, self.day as i32);
+                } else {
+                    self.format_day_of_week(n, sb, self.day_of_week() as i32);
+                }
+            },
+            'z' => self.format_timezone(n, sb),
+            _ => {}
+        }
+    }
+    
+    /// Formats year component (ported from Java formatYear)
+    fn format_year(&self, n: usize, sb: &mut String, val: i32) {
+        let val_str = val.to_string();
+        let val_len = val_str.len();
+        
+        if val_len > n {
+            // Restrict to last n digits
+            let start = val_len - n;
+            sb.push_str(&val_str[start..]);
+        } else {
+            // Zero-pad to n digits
+            sb.push_str(&fmt!("{:0width$}", val, width = n));
+        }
+    }
+    
+    /// Formats month component (ported from Java formatMonth)
+    fn format_month(&self, n: usize, sb: &mut String, val: i32) {
+        match n {
+            1 => sb.push_str(&val.to_string()),
+            2 => sb.push_str(&fmt!("{:02}", val)),
+            3 => sb.push_str(self.month.to_short_name()),
+            _ => sb.push_str(self.month.to_long_name()),
+        }
+    }
+    
+    /// Formats day component (ported from Java formatDay)
+    fn format_day(&self, n: usize, sb: &mut String, val: i32) {
+        match n {
+            1 => sb.push_str(&val.to_string()),
+            _ => sb.push_str(&fmt!("{:02}", val)),
+        }
+    }
+    
+    /// Formats day of week (ported from Java formatDay for n >= 3)
+    fn format_day_of_week(&self, n: usize, sb: &mut String, _val: i32) {
+        let day_of_week = self.day_of_week();
+        match n {
+            3 => sb.push_str(day_of_week.to_short_name()),
+            _ => sb.push_str(day_of_week.to_long_name()),
+        }
+    }
+    
+    /// Formats timezone component
+    fn format_timezone(&self, n: usize, sb: &mut String) {
+        match n {
+            1 => sb.push_str(self.zone.id()), // Simple ID
+            2 => sb.push_str(self.zone.id()), // Short format  
+            3 => sb.push_str(self.zone.id()), // Medium format
+            _ => sb.push_str(self.zone.id()), // Long format
+        }
+    }
+}
+
+// Add to constant modules - these need implementations
+impl MonthOfYear {
+    /// Returns short name for month (ported from Java)
+    pub fn to_short_name(&self) -> &'static str {
+        match self {
+            MonthOfYear::January => "Jan",
+            MonthOfYear::February => "Feb", 
+            MonthOfYear::March => "Mar",
+            MonthOfYear::April => "Apr",
+            MonthOfYear::May => "May",
+            MonthOfYear::June => "Jun",
+            MonthOfYear::July => "Jul",
+            MonthOfYear::August => "Aug",
+            MonthOfYear::September => "Sep",
+            MonthOfYear::October => "Oct",
+            MonthOfYear::November => "Nov",
+            MonthOfYear::December => "Dec",
+        }
+    }
+    
+    /// Returns long name for month (ported from Java)
+    pub fn to_long_name(&self) -> &'static str {
+        match self {
+            MonthOfYear::January => "January",
+            MonthOfYear::February => "February",
+            MonthOfYear::March => "March",
+            MonthOfYear::April => "April",
+            MonthOfYear::May => "May",
+            MonthOfYear::June => "June",
+            MonthOfYear::July => "July",
+            MonthOfYear::August => "August",
+            MonthOfYear::September => "September",
+            MonthOfYear::October => "October",
+            MonthOfYear::November => "November",
+            MonthOfYear::December => "December",
+        }
+    }
+}
+
+impl DayOfWeek {
+    /// Returns short name for day of week (ported from Java)
+    pub fn to_short_name(&self) -> &'static str {
+        match self {
+            DayOfWeek::Monday => "Mon",
+            DayOfWeek::Tuesday => "Tue",
+            DayOfWeek::Wednesday => "Wed",
+            DayOfWeek::Thursday => "Thu",
+            DayOfWeek::Friday => "Fri",
+            DayOfWeek::Saturday => "Sat",
+            DayOfWeek::Sunday => "Sun",
+        }
+    }
+    
+    /// Returns long name for day of week (ported from Java)
+    pub fn to_long_name(&self) -> &'static str {
+        match self {
+            DayOfWeek::Monday => "Monday",
+            DayOfWeek::Tuesday => "Tuesday",
+            DayOfWeek::Wednesday => "Wednesday",
+            DayOfWeek::Thursday => "Thursday",
+            DayOfWeek::Friday => "Friday",
+            DayOfWeek::Saturday => "Saturday",
+            DayOfWeek::Sunday => "Sunday",
+        }
+    }
 }
 
 impl Time for CalendarDate {
@@ -713,14 +979,12 @@ impl Time for CalendarDate {
         })
     }
     
-    fn format(&self, _stencil: &str) -> String {
-        // TODO: Implement proper date formatting
-        // For now, use ISO format
-        fmt!("{:04}-{:02}-{:02}", self.year, self.month.of(), self.day)
+    fn format(&self, stencil: &str) -> String {
+        self.format_with_stencil(stencil)
     }
     
     fn is_recognised_format_char(&self, c: char) -> bool {
-        matches!(c, 'y' | 'M' | 'd' | 'E')
+        matches!(c, 'y' | 'M' | 'd' | 'E' | 'z')
     }
     
     fn is_before(&self, other: &Self) -> bool {

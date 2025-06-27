@@ -8,7 +8,7 @@ use crate::{
 		ClockFields,
 		ClockDuration,
 	},
-	time::CalClockZone,
+	time::{CalClockZone, LeapSecondConfig},
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -38,7 +38,7 @@ use std::fmt;
 /// assert_eq!(time.hour().of(), 14)res!();
 /// assert_eq!(time.to_twelve_hour_string(), "2:30:45 PM")res!();
 /// ```
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ClockTime {
 	hour:		ClockHour,
 	minute:		ClockMinute,
@@ -54,7 +54,7 @@ impl ClockTime {
 	///
 	/// * `hour` - Hour of day (0-23)
 	/// * `minute` - Minute within hour (0-59)
-	/// * `second` - Second within minute (0-59, leap seconds not supported in ClockTime)
+	/// * `second` - Second within minute (0-59)
 	/// * `nanosecond` - Nanosecond within second (0-999,999,999)
 	/// * `zone` - Time zone for this time
 	///
@@ -102,6 +102,96 @@ impl ClockTime {
 		})
 	}
 	
+	/// Creates a new ClockTime with leap second support.
+	///
+	/// This method allows creation of times with second=60 (leap seconds) when
+	/// the leap second configuration allows it and validates against the leap second table.
+	///
+	/// # Arguments
+	///
+	/// * `hour` - Hour of day (0-23)
+	/// * `minute` - Minute within hour (0-59)
+	/// * `second` - Second within minute (0-60)
+	/// * `nanosecond` - Nanosecond within second (0-999,999,999)
+	/// * `zone` - Time zone for this time
+	/// * `config` - Leap second configuration
+	///
+	/// # Returns
+	///
+	/// Returns `Ok(ClockTime)` if the time is valid according to the leap second
+	/// configuration, otherwise returns an error.
+	pub fn new_with_leap_seconds(
+		hour: u8,
+		minute: u8,
+		second: u8,
+		nanosecond: u32,
+		zone: CalClockZone,
+		config: &LeapSecondConfig,
+	) -> Outcome<Self> {
+		// Standard validation for hour, minute
+		if hour >= 24 {
+			return Err(err!(
+				"Hour {} is invalid for ClockTime, must be 0-23", 
+				hour; 
+				Invalid, Input
+			));
+		}
+		if minute >= 60 {
+			return Err(err!(
+				"Minute {} is invalid, must be 0-59", 
+				minute; 
+				Invalid, Input
+			));
+		}
+		
+		// Leap second validation
+		if second == 60 {
+			// Second 60 is only allowed if leap seconds are enabled and allowed in parsing
+			if !config.enabled || !config.allow_leap_second_parsing {
+				return Err(err!(
+					"Leap second (second=60) not allowed: leap seconds disabled or parsing not allowed"; 
+					Invalid, Input
+				));
+			}
+			
+			// If validation is enabled, check that this is actually a valid leap second
+			if config.validate_leap_seconds {
+				let table = config.get_table();
+				// For time-only validation, we can only check if leap seconds are generally possible
+				// Full validation would require a complete date context
+				if !table.is_enabled() {
+					return Err(err!(
+						"Leap second validation failed: leap second table is disabled"; 
+						Invalid, Input
+					));
+				}
+				
+				// Basic validation: leap seconds only occur at 23:59:60 UTC
+				if hour != 23 || minute != 59 {
+					return Err(err!(
+						"Leap second (second=60) only valid at 23:59:60 UTC, got {}:{}:60", 
+						hour, minute; 
+						Invalid, Input
+					));
+				}
+			}
+		} else if second > 60 {
+			return Err(err!(
+				"Second {} is invalid, must be 0-60", 
+				second; 
+				Invalid, Input
+			));
+		}
+		
+		Ok(Self {
+			hour:		res!(ClockHour::new(hour)),
+			minute:		res!(ClockMinute::new(minute)),
+			second:		res!(ClockSecond::new(second)),
+			nanosecond:	res!(ClockNanoSecond::new(nanosecond)),
+			zone,
+		})
+	}
+
 	/// Creates a new ClockTime from pre-validated components.
 	///
 	/// This method accepts component objects that have already been validated,
@@ -263,6 +353,38 @@ impl ClockTime {
 		self.second.of() == 0 &&
 		self.nanosecond.of() == 0
 	}
+
+	/// Returns true if this time represents a leap second (second=60).
+	pub fn is_leap_second(&self) -> bool {
+		self.second.is_leap_second()
+	}
+
+	/// Returns true if this time could potentially be a valid leap second.
+	///
+	/// This checks if the time is 23:59:60, which is the only time format
+	/// where leap seconds can occur in UTC.
+	pub fn is_potential_leap_second(&self) -> bool {
+		self.hour.of() == 23 && self.minute.of() == 59 && self.second.of() == 60
+	}
+
+	/// Normalizes a leap second time to the next minute.
+	///
+	/// Converts 23:59:60 to 00:00:00 of the next day, which is how leap seconds
+	/// are typically handled in calculations.
+	pub fn normalize_leap_second(&self) -> Outcome<(Self, bool)> {
+		if !self.is_leap_second() {
+			return Ok((self.clone(), false));
+		}
+
+		// Leap second at 23:59:60 becomes 00:00:00 of next day
+		if self.hour.of() == 23 && self.minute.of() == 59 {
+			let normalized = res!(Self::new(0, 0, 0, self.nanosecond.of(), self.zone.clone()));
+			Ok((normalized, true)) // true indicates day overflow
+		} else {
+			// Invalid leap second time
+			Err(err!("Invalid leap second time: leap seconds only valid at 23:59:60"; Invalid, Input))
+		}
+	}
 	
 	/// Returns true if this time is before another time.
 	pub fn is_before(&self, other: &Self) -> bool {
@@ -375,18 +497,11 @@ impl Time for ClockTime {
 	}
 	
 	fn format(&self, stencil: &str) -> String {
-		// Simplified formatting implementation
-		// TODO: Implement full stencil-based formatting
-		match stencil {
-			"HH:mm:ss" => self.to_twenty_four_hour_string(),
-			"hh:mm:ss a" => self.to_twelve_hour_string(),
-			"HH:mm:ss.nnnnnnnnn" => self.to_iso_string(),
-			_ => self.to_iso_string(), // fallback
-		}
+		self.format_with_stencil(stencil)
 	}
 	
 	fn is_recognised_format_char(&self, c: char) -> bool {
-		matches!(c, 'H' | 'h' | 'm' | 's' | 'n' | 'a')
+		matches!(c, 'H' | 'h' | 'm' | 's' | 'f' | 'F' | 't' | 'z')
 	}
 	
 	fn is_before(&self, other: &Self) -> bool {
@@ -440,6 +555,135 @@ impl ClockTime {
 	pub fn subtract_duration(&self, duration: &ClockDuration) -> Outcome<Self> {
 		let (new_time, _day_underflow) = res!(self.minus(duration));
 		Ok(new_time)
+	}
+	
+	// ========================================================================
+	// String Formatting Implementation (ported from Java original)
+	// ========================================================================
+	
+	/// Formats the time according to the stencil pattern.
+	/// 
+	/// Format scheme from original Java implementation:
+	/// - h hh                   Hour (12hr)     4 04
+	/// - H HH                   Hour (24hr)     16 16
+	/// - m mm                   Minute          5 05
+	/// - s ss                   Second          7 07
+	/// - f ff fff ffff          Sec frac        1 12 123 1230
+	/// - F FF FFF FFFF          Sec frac nozero 1 12 123 123
+	/// - t tt                   A.M. or P.M.    P PM
+	/// - z zz zzz zzzz          Timezone        +1 +01 +01:00 UTC
+	pub fn format_with_stencil(&self, stencil: &str) -> String {
+		let mut output = String::new();
+		let chars: Vec<char> = stencil.chars().collect();
+		let mut i = 0;
+		
+		while i < chars.len() {
+			let curr = chars[i];
+			
+			if self.is_recognised_format_char(curr) {
+				// Count consecutive occurrences of the same format character
+				let mut token_len = 1;
+				while i + token_len < chars.len() && chars[i + token_len] == curr {
+					token_len += 1;
+				}
+				
+				// Process the token
+				self.switch_on_format_char(curr, token_len, &mut output);
+				i += token_len;
+			} else {
+				// Regular character, append as-is
+				output.push(curr);
+				i += 1;
+			}
+		}
+		
+		output
+	}
+	
+	/// Processes a single format token (ported from Java switchOnFormatChar)
+	fn switch_on_format_char(&self, c: char, n: usize, sb: &mut String) {
+		match c {
+			'h' => self.format_hour_12(n, sb, self.hour.of() as i32),
+			'H' => self.format_hour_24(n, sb, self.hour.of() as i32),
+			'm' => self.format_minute(n, sb, self.minute.of() as i32),
+			's' => self.format_second(n, sb, self.second.of() as i32),
+			'f' => self.format_fraction(n, sb, self.nanosecond.of(), false),
+			'F' => self.format_fraction(n, sb, self.nanosecond.of(), true),
+			't' => self.format_am_pm(n, sb, self.hour.of() as i32),
+			'z' => self.format_timezone(n, sb),
+			_ => {}
+		}
+	}
+	
+	/// Formats 12-hour hour component
+	fn format_hour_12(&self, n: usize, sb: &mut String, val: i32) {
+		let hour_12 = if val == 0 { 12 } else if val > 12 { val - 12 } else { val };
+		match n {
+			1 => sb.push_str(&hour_12.to_string()),
+			_ => sb.push_str(&fmt!("{:02}", hour_12)),
+		}
+	}
+	
+	/// Formats 24-hour hour component
+	fn format_hour_24(&self, n: usize, sb: &mut String, val: i32) {
+		match n {
+			1 => sb.push_str(&val.to_string()),
+			_ => sb.push_str(&fmt!("{:02}", val)),
+		}
+	}
+	
+	/// Formats minute component
+	fn format_minute(&self, n: usize, sb: &mut String, val: i32) {
+		match n {
+			1 => sb.push_str(&val.to_string()),
+			_ => sb.push_str(&fmt!("{:02}", val)),
+		}
+	}
+	
+	/// Formats second component
+	fn format_second(&self, n: usize, sb: &mut String, val: i32) {
+		match n {
+			1 => sb.push_str(&val.to_string()),
+			_ => sb.push_str(&fmt!("{:02}", val)),
+		}
+	}
+	
+	/// Formats fractional seconds (nanoseconds)
+	fn format_fraction(&self, n: usize, sb: &mut String, nanos: u32, suppress_trailing_zeros: bool) {
+		let fraction_str = fmt!("{:09}", nanos);
+		let mut result = if n <= 9 {
+			fraction_str[..n].to_string()
+		} else {
+			fraction_str
+		};
+		
+		if suppress_trailing_zeros {
+			result = result.trim_end_matches('0').to_string();
+			if result.is_empty() {
+				result = "0".to_string();
+			}
+		}
+		
+		sb.push_str(&result);
+	}
+	
+	/// Formats AM/PM indicator
+	fn format_am_pm(&self, n: usize, sb: &mut String, hour: i32) {
+		let is_pm = hour >= 12;
+		match n {
+			1 => sb.push_str(if is_pm { "P" } else { "A" }),
+			_ => sb.push_str(if is_pm { "PM" } else { "AM" }),
+		}
+	}
+	
+	/// Formats timezone component
+	fn format_timezone(&self, n: usize, sb: &mut String) {
+		match n {
+			1 => sb.push_str(self.zone.id()), // Simple ID
+			2 => sb.push_str(self.zone.id()), // Short format  
+			3 => sb.push_str(self.zone.id()), // Medium format
+			_ => sb.push_str(self.zone.id()), // Long format
+		}
 	}
 }
 

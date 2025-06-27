@@ -8,18 +8,28 @@ use oxedyne_fe2o3_core::prelude::*;
 
 use std::sync::Mutex;
 
+/// Macro to handle Mutex locks with proper error handling
+macro_rules! lock_mutex {
+    ($mutex:expr) => {
+        match $mutex.lock() {
+            Ok(guard) => guard,
+            Err(_) => return Err(err!("Mutex lock failed: poisoned lock"; Lock, Poisoned)),
+        }
+    };
+}
+
 /// High-performance utility for converting between Unix timestamps and CalClock instances.
 ///
-/// CalClockConverter provides optimized conversion between Unix epoch timestamps
+/// CalClockConverter provides optimised conversion between Unix epoch timestamps
 /// (milliseconds since 1970-01-01 00:00:00 UTC) and CalClock representations.
 /// It includes sophisticated performance optimizations for sequential time data
 /// processing and handles timezone conversions with historical accuracy.
 ///
-/// # Performance Optimizations
+/// # Performance Optimisations
 ///
 /// - **Reference Point Caching**: Maintains a reference timestamp/CalClock pair
-///   for optimized conversion of nearby timestamps
-/// - **Sequential Data Optimization**: 10-100x faster for timestamps within
+///   for optimised conversion of nearby timestamps
+/// - **Sequential Data Optimisation**: 10-100x faster for timestamps within
 ///   reference range (typically 24 hours)
 /// - **Automatic Reference Updates**: Dynamically updates reference points
 ///   for optimal performance with varying data patterns
@@ -83,7 +93,7 @@ struct ReferencePoint {
 impl CalClockConverter {
 	/// Creates a new CalClockConverter for the specified timezone.
 	///
-	/// The converter will be optimized for the given timezone's DST rules
+	/// The converter will be optimised for the given timezone's DST rules
 	/// and historical offset changes.
 	///
 	/// # Arguments
@@ -109,7 +119,7 @@ impl CalClockConverter {
 	
 	/// Creates a new CalClockConverter with a pre-set reference point.
 	///
-	/// This method is optimized for cases where you know the approximate
+	/// This method is optimised for cases where you know the approximate
 	/// timestamp range you'll be converting. Setting an initial reference
 	/// point can improve performance for the first few conversions.
 	///
@@ -156,7 +166,7 @@ impl CalClockConverter {
 	/// ```
 	pub fn unix_to_calclock(&self, unix_millis: i64) -> Outcome<CalClock> {
 		if self.use_optimization {
-			self.unix_to_calclock_optimized(unix_millis)
+			self.unix_to_calclock_optimised(unix_millis)
 		} else {
 			self.unix_to_calclock_full(unix_millis)
 		}
@@ -197,7 +207,7 @@ impl CalClockConverter {
 	
 	/// Converts an array of Unix timestamps to CalClock instances optimally.
 	///
-	/// This method is highly optimized for batch conversion of sequential
+	/// This method is highly optimised for batch conversion of sequential
 	/// timestamp data. It automatically manages reference points for
 	/// optimal performance across the entire sequence.
 	///
@@ -239,7 +249,13 @@ impl CalClockConverter {
 	/// Returns (hit_count, miss_count, hit_ratio) where hit_ratio is
 	/// the percentage of conversions that used the reference point optimization.
 	pub fn reference_stats(&self) -> (u64, u64, f64) {
-		let reference = self.reference.lock().unwrap();
+		let reference = match self.reference.lock() {
+			Ok(guard) => guard,
+			Err(_) => {
+				// Return default stats if mutex is poisoned
+				return (0, 0, 0.0);
+			}
+		};
 		let total = reference.hit_count + reference.miss_count;
 		let hit_ratio = if total > 0 {
 			reference.hit_count as f64 / total as f64 * 100.0
@@ -254,7 +270,14 @@ impl CalClockConverter {
 	/// Forces the converter to start fresh with no reference point,
 	/// useful for changing to a completely different timestamp range.
 	pub fn reset_reference(&self) {
-		let mut reference = self.reference.lock().unwrap();
+		let mut reference = match self.reference.lock() {
+			Ok(guard) => guard,
+			Err(_) => {
+				// If mutex is poisoned, we can't reset reference
+				eprintln!("Warning: Could not reset reference due to poisoned mutex");
+				return;
+			}
+		};
 		*reference = ReferencePoint::new();
 	}
 	
@@ -281,11 +304,11 @@ impl CalClockConverter {
 		&self.zone
 	}
 	
-	/// Performs optimized Unix timestamp to CalClock conversion.
-	fn unix_to_calclock_optimized(&self, unix_millis: i64) -> Outcome<CalClock> {
-		// Check if we can use reference point optimization
+	/// Performs optimised Unix timestamp to CalClock conversion.
+	fn unix_to_calclock_optimised(&self, unix_millis: i64) -> Outcome<CalClock> {
+		// Check if we can use reference point optimisation
 		let optimization_data = {
-			let reference = self.reference.lock().unwrap();
+			let reference = lock_mutex!(self.reference);
 			match (reference.unix_millis, reference.calclock.as_ref()) {
 				(Some(ref_millis), Some(ref_calclock)) => {
 					let deviation = (unix_millis - ref_millis).abs();
@@ -302,7 +325,7 @@ impl CalClockConverter {
 		if let Some((ref_calclock, offset)) = optimization_data {
 			// Fast path: calculate offset from reference
 			{
-				let mut reference = self.reference.lock().unwrap();
+				let mut reference = lock_mutex!(self.reference);
 				reference.hit_count += 1;
 			}
 			return self.calculate_from_reference(&ref_calclock, offset);
@@ -310,7 +333,7 @@ impl CalClockConverter {
 		
 		// Slow path: full conversion + update reference
 		{
-			let mut reference = self.reference.lock().unwrap();
+			let mut reference = lock_mutex!(self.reference);
 			reference.miss_count += 1;
 		}
 		
@@ -397,7 +420,7 @@ impl CalClockConverter {
 	
 	/// Updates the reference point with a new timestamp/CalClock pair.
 	fn update_reference_point(&self, unix_millis: i64, calclock: &CalClock) -> Outcome<()> {
-		let mut reference = self.reference.lock().unwrap();
+		let mut reference = lock_mutex!(self.reference);
 		reference.unix_millis = Some(unix_millis);
 		reference.calclock = Some(calclock.clone());
 		Ok(())
@@ -410,7 +433,7 @@ impl CalClockConverter {
 		let millis_in_day = millis % (24 * 60 * 60 * 1000);
 		
 		// Convert days to calendar date (using Julian day number algorithm)
-		let (year, month, day) = res!(self.days_to_date(days_since_epoch as i32 + 719163)); // Unix epoch offset
+		let (year, month, day) = res!(self.days_to_date(days_since_epoch as i32));
 		
 		// Convert milliseconds in day to time components
 		let (hour, minute, second, nanos) = res!(self.millis_to_time_components(millis_in_day));
@@ -418,20 +441,12 @@ impl CalClockConverter {
 		Ok((year, month, day, hour, minute, second, nanos))
 	}
 	
-	/// Converts days since a reference to year/month/day.
-	fn days_to_date(&self, julian_day: i32) -> Outcome<(i32, u8, u8)> {
-		// Simplified Julian day to Gregorian calendar conversion
-		// This is a placeholder - a full implementation would use proper calendar arithmetic
-		
-		// For now, use a basic approximation
-		let year = 1970 + (julian_day - 719163) / 365; // Rough approximation
-		let month = 1;
-		let day = 1;
-		
-		// TODO: Implement proper Julian day number conversion
-		// This should handle leap years, month boundaries, etc.
-		
-		Ok((year, month, day))
+	/// Converts days since Unix epoch to year/month/day.
+	fn days_to_date(&self, days_since_epoch: i32) -> Outcome<(i32, u8, u8)> {
+		// Use CalendarDate's proper from_days_since_epoch method
+		// which uses Julian day arithmetic for accurate calculation
+		let date = res!(CalendarDate::from_days_since_epoch(days_since_epoch as i64, self.zone.clone()));
+		Ok((date.year(), date.month(), date.day()))
 	}
 	
 	/// Converts milliseconds within a day to time components.
@@ -513,16 +528,10 @@ impl CalClockConverter {
 	
 	/// Converts CalendarDate to days since Unix epoch.
 	fn date_to_days(&self, date: &CalendarDate) -> Outcome<i32> {
-		// TODO: Implement proper calendar arithmetic
-		// This is a placeholder that should be replaced with proper date calculation
-		
-		// For now, use a very basic approximation
-		let year_days = (date.year() - 1970) * 365;
-		let leap_years = (date.year() - 1970) / 4; // Rough leap year approximation
-		let month_days = (date.month() - 1) as i32 * 30; // Very rough month approximation
-		let day_offset = date.day() as i32 - 1;
-		
-		Ok(year_days + leap_years + month_days + day_offset)
+		// Use the CalendarDate's proper days_since_epoch method
+		// which uses Julian day arithmetic for accurate calculation
+		let days = res!(date.days_since_epoch());
+		Ok(days as i32)
 	}
 }
 
@@ -554,7 +563,7 @@ mod tests {
 		
 		// Test known timestamp: 2022-01-01 00:00:00 UTC
 		let unix_millis = 1640995200000;
-		let calclock = converter.unix_to_calclock(unix_millis).unwrap();
+		let calclock = res!(converter.unix_to_calclock(unix_millis));
 		
 		assert_eq!(calclock.date().year(), 2022);
 		assert_eq!(calclock.date().month(), 1);
@@ -569,8 +578,8 @@ mod tests {
 		let converter = CalClockConverter::new(CalClockZone::utc());
 		let original_unix = 1640995200000;
 		
-		let calclock = converter.unix_to_calclock(original_unix).unwrap();
-		let converted_unix = converter.calclock_to_unix(&calclock).unwrap();
+		let calclock = res!(converter.unix_to_calclock(original_unix));
+		let converted_unix = res!(converter.calclock_to_unix(&calclock));
 		
 		// Should be equal within millisecond precision
 		assert!((original_unix - converted_unix).abs() < 1000);
@@ -584,7 +593,7 @@ mod tests {
 		let base_time = 1640995200000;
 		for i in 0..10 {
 			let timestamp = base_time + i * 60 * 1000; // 1 minute intervals
-			let _ = converter.unix_to_calclock(timestamp).unwrap();
+			let _ = res!(converter.unix_to_calclock(timestamp));
 		}
 		
 		let (hits, misses, ratio) = converter.reference_stats();
@@ -602,7 +611,7 @@ mod tests {
 			1640995320000, // 2022-01-01 00:02:00
 		];
 		
-		let calclocks = converter.convert_sequence(&timestamps).unwrap();
+		let calclocks = res!(converter.convert_sequence(&timestamps));
 		assert_eq!(calclocks.len(), 3);
 		
 		// Verify first timestamp
@@ -615,22 +624,19 @@ mod tests {
 
 	#[test]
 	fn test_timezone_conversion() {
-		let eastern = CalClockZone::new("America/New_York").unwrap();
+		let eastern = res!(CalClockZone::new("America/New_York"));
 		let converter = CalClockConverter::new(eastern);
 		
 		// Test conversion with timezone offset
 		let unix_millis = 1640995200000; // 2022-01-01 00:00:00 UTC
-		let calclock = converter.unix_to_calclock(unix_millis).unwrap();
+		let calclock = res!(converter.unix_to_calclock(unix_millis));
 		
-		// Note: Due to simplified calendar arithmetic, exact date may differ
-		// but the timezone offset should be applied correctly
-		// The important thing is that timezone functionality is working
+		// Verify that timezone offset is applied correctly
 		assert_eq!(calclock.time().hour().of(), 19); // Should be 19:00 (UTC-5)
 		
-		// TODO: Improve calendar arithmetic for exact date conversion
-		// For now, verify that timezone offset is being applied
+		// Verify that timezone offset is being applied
 		let utc_converter = CalClockConverter::new(CalClockZone::utc());
-		let utc_calclock = utc_converter.unix_to_calclock(unix_millis).unwrap();
+		let utc_calclock = res!(utc_converter.unix_to_calclock(unix_millis));
 		assert_ne!(calclock.time().hour().of(), utc_calclock.time().hour().of());
 	}
 }

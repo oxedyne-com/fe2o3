@@ -1,5 +1,6 @@
 use crate::{
-    calendar::CalendarDate,
+    cache::string_intern::convenience as intern,
+    calendar::{CalendarDate, Calendar},
     clock::ClockTime,
     constant::{DayOfWeek, MonthOfYear},
     format::{FormatPattern, FormatToken, FormatStyle, Locale},
@@ -8,7 +9,7 @@ use crate::{
 
 use oxedyne_fe2o3_core::prelude::*;
 
-use std::fmt;
+use std::{fmt, collections::HashMap};
 
 /// Error type for formatting operations.
 #[derive(Clone, Debug)]
@@ -52,15 +53,65 @@ impl fmt::Display for FormattingError {
 /// let custom_pattern = FormatPattern::new("EEEE, MMMM d, yyyy 'at' h:mm a")?res!();
 /// let custom_string = formatter.format_with_pattern(&calclock, &custom_pattern)?res!();
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CalClockFormatter {
-    // Future: locale settings, custom month/day names, etc.
+    /// The locale for formatting (affects month/day names, date order, etc.).
+    locale: Option<Locale>,
+    /// Custom month names override (for localization).
+    month_names: Option<HashMap<MonthOfYear, (String, String)>>, // (short, long)
+    /// Custom day names override (for localization).
+    day_names: Option<HashMap<DayOfWeek, (String, String)>>, // (short, long)
+    /// Custom AM/PM markers.
+    am_pm_markers: Option<(String, String)>, // (AM, PM)
+    /// Whether to use ordinal suffixes (1st, 2nd, 3rd).
+    use_ordinals: bool,
 }
 
 impl CalClockFormatter {
     /// Creates a new formatter with default settings.
     pub fn new() -> Self {
-        Self {}
+        Self {
+            locale: None,
+            month_names: None,
+            day_names: None,
+            am_pm_markers: None,
+            use_ordinals: false,
+        }
+    }
+    
+    /// Creates a new formatter with the specified locale.
+    pub fn with_locale(locale: Locale) -> Self {
+        Self {
+            locale: Some(locale),
+            month_names: None,
+            day_names: None,
+            am_pm_markers: None,
+            use_ordinals: false,
+        }
+    }
+    
+    /// Sets custom month names for localization.
+    pub fn set_month_names(mut self, names: HashMap<MonthOfYear, (String, String)>) -> Self {
+        self.month_names = Some(names);
+        self
+    }
+    
+    /// Sets custom day names for localization.
+    pub fn set_day_names(mut self, names: HashMap<DayOfWeek, (String, String)>) -> Self {
+        self.day_names = Some(names);
+        self
+    }
+    
+    /// Sets custom AM/PM markers.
+    pub fn set_am_pm_markers(mut self, am: String, pm: String) -> Self {
+        self.am_pm_markers = Some((am, pm));
+        self
+    }
+    
+    /// Enables ordinal suffixes (1st, 2nd, 3rd) for day formatting.
+    pub fn enable_ordinals(mut self) -> Self {
+        self.use_ordinals = true;
+        self
     }
     
     /// Formats a CalClock using the specified pattern.
@@ -149,6 +200,11 @@ impl CalClockFormatter {
                 self.format_day_of_year(day_of_year, style)
             },
             FormatToken::Quarter(style) => self.format_quarter(calclock.date().quarter(), style),
+            FormatToken::WeekOfYear(style) => {
+                let week_of_year = res!(self.calculate_week_of_year(calclock.date()));
+                self.format_week_of_year(week_of_year, style)
+            },
+            FormatToken::Era(style) => self.format_era(calclock.date(), style),
             
             // Time tokens
             FormatToken::Hour12(style) => {
@@ -201,6 +257,11 @@ impl CalClockFormatter {
                 self.format_day_of_year(day_of_year, style)
             },
             FormatToken::Quarter(style) => self.format_quarter(date.quarter(), style),
+            FormatToken::WeekOfYear(style) => {
+                let week_of_year = res!(self.calculate_week_of_year(date));
+                self.format_week_of_year(week_of_year, style)
+            },
+            FormatToken::Era(style) => self.format_era(date, style),
             
             // Special characters
             FormatToken::Space => Ok(" ".to_string()),
@@ -276,30 +337,82 @@ impl CalClockFormatter {
     fn format_month(&self, month: MonthOfYear, style: &FormatStyle) -> Outcome<String> {
         match style {
             FormatStyle::Numeric => Ok(month.of().to_string()),
-            FormatStyle::Short => Ok(month.short_name().to_string()),
-            FormatStyle::Long => Ok(month.long_name().to_string()),
-            FormatStyle::Custom { width, pad_char } => {
+            FormatStyle::Short => {
+                if let Some(ref names) = self.month_names {
+                    if let Some((short, _)) = names.get(&month) {
+                        return Ok(short.clone());
+                    }
+                }
+                Ok((*intern::intern_month(month.short_name())).clone())
+            },
+            FormatStyle::Long => {
+                if let Some(ref names) = self.month_names {
+                    if let Some((_, long)) = names.get(&month) {
+                        return Ok(long.clone());
+                    }
+                }
+                Ok((*intern::intern_month(month.long_name())).clone())
+            },
+            FormatStyle::Custom { width, pad_char: _ } => {
                 Ok(format!("{:0width$}", month.of(), width = width))
             },
-            _ => Ok(month.short_name().to_string()),
+            _ => Ok((*intern::intern_month(month.short_name())).clone()),
         }
     }
     
     fn format_day(&self, day: u8, style: &FormatStyle) -> Outcome<String> {
         match style {
-            FormatStyle::Numeric => Ok(day.to_string()),
-            FormatStyle::Custom { width, pad_char } => {
+            FormatStyle::Numeric => {
+                if self.use_ordinals {
+                    let ordinal = match day {
+                        1 | 21 | 31 => format!("{}st", day),
+                        2 | 22 => format!("{}nd", day),
+                        3 | 23 => format!("{}rd", day),
+                        _ => format!("{}th", day),
+                    };
+                    Ok(ordinal)
+                } else {
+                    Ok(day.to_string())
+                }
+            },
+            FormatStyle::Custom { width, pad_char: _ } => {
                 Ok(format!("{:0width$}", day, width = width))
             },
-            _ => Ok(day.to_string()),
+            _ => {
+                if self.use_ordinals {
+                    let ordinal = match day {
+                        1 | 21 | 31 => format!("{}st", day),
+                        2 | 22 => format!("{}nd", day),
+                        3 | 23 => format!("{}rd", day),
+                        _ => format!("{}th", day),
+                    };
+                    Ok(ordinal)
+                } else {
+                    Ok(day.to_string())
+                }
+            },
         }
     }
     
     fn format_day_of_week(&self, day_of_week: DayOfWeek, style: &FormatStyle) -> Outcome<String> {
         match style {
-            FormatStyle::Short => Ok(day_of_week.short_name().to_string()),
-            FormatStyle::Long => Ok(day_of_week.long_name().to_string()),
-            _ => Ok(day_of_week.short_name().to_string()),
+            FormatStyle::Short => {
+                if let Some(ref names) = self.day_names {
+                    if let Some((short, _)) = names.get(&day_of_week) {
+                        return Ok(short.clone());
+                    }
+                }
+                Ok((*intern::intern_day(day_of_week.short_name())).clone())
+            },
+            FormatStyle::Long => {
+                if let Some(ref names) = self.day_names {
+                    if let Some((_, long)) = names.get(&day_of_week) {
+                        return Ok(long.clone());
+                    }
+                }
+                Ok((*intern::intern_day(day_of_week.long_name())).clone())
+            },
+            _ => Ok((*intern::intern_day(day_of_week.short_name())).clone()),
         }
     }
     
@@ -377,10 +490,11 @@ impl CalClockFormatter {
     }
     
     fn format_am_pm(&self, is_pm: bool, style: &FormatStyle) -> Outcome<String> {
-        match style {
-            FormatStyle::Short => Ok(if is_pm { "PM" } else { "AM" }.to_string()),
-            FormatStyle::Long => Ok(if is_pm { "PM" } else { "AM" }.to_string()),
-            _ => Ok(if is_pm { "PM" } else { "AM" }.to_string()),
+        if let Some((ref am, ref pm)) = self.am_pm_markers {
+            Ok(if is_pm { pm.clone() } else { am.clone() })
+        } else {
+            let marker = if is_pm { "PM" } else { "AM" };
+            Ok((*intern::intern(marker)).clone())
         }
     }
     
@@ -401,9 +515,90 @@ impl CalClockFormatter {
     }
     
     fn format_timezone_name(&self, timezone_id: &str, style: &FormatStyle) -> Outcome<String> {
-        // For now, just return the timezone ID
-        // In the future, this could map to common abbreviations like EST, PST, etc.
-        Ok(timezone_id.to_string())
+        // Map common timezone IDs to abbreviations
+        let abbrev = match timezone_id {
+            "America/New_York" => "EST",
+            "America/Chicago" => "CST",
+            "America/Denver" => "MST",
+            "America/Los_Angeles" => "PST",
+            "Europe/London" => "GMT",
+            "Europe/Paris" => "CET",
+            "Asia/Tokyo" => "JST",
+            "Australia/Sydney" => "AEDT",
+            _ => timezone_id,
+        };
+        Ok((*intern::intern_timezone(abbrev)).clone())
+    }
+    
+    fn format_week_of_year(&self, week: u8, style: &FormatStyle) -> Outcome<String> {
+        match style {
+            FormatStyle::Numeric => Ok(week.to_string()),
+            FormatStyle::Custom { width, pad_char: _ } => {
+                Ok(format!("{:0width$}", week, width = width))
+            },
+            _ => Ok(week.to_string()),
+        }
+    }
+    
+    fn format_era(&self, date: &CalendarDate, style: &FormatStyle) -> Outcome<String> {
+        // Use calendar-specific era handling
+        // Since CalendarSystem only has Gregorian and Julian currently,
+        // we'll determine the calendar type from the internal Calendar enum if available
+        // For now, default to CE/BCE for all calendar systems
+        let era_text = match style {
+            FormatStyle::Short => {
+                if date.year() > 0 { "CE" } else { "BCE" }
+            },
+            FormatStyle::Long => {
+                if date.year() > 0 { "Common Era" } else { "Before Common Era" }
+            },
+            _ => {
+                if date.year() > 0 { "CE" } else { "BCE" }
+            },
+        };
+        
+        Ok((*intern::intern(era_text)).clone())
+    }
+    
+    fn calculate_week_of_year(&self, date: &CalendarDate) -> Outcome<u8> {
+        // ISO 8601 week calculation
+        // Week 1 is the first week with Thursday in the new year
+        let jan_1 = res!(CalendarDate::from_ymd(date.year(), MonthOfYear::January, 1, date.zone().clone()));
+        let jan_1_dow = jan_1.day_of_week();
+        
+        // Find the Monday of week 1
+        let days_from_monday = match jan_1_dow {
+            DayOfWeek::Monday => 0,
+            DayOfWeek::Tuesday => 1,
+            DayOfWeek::Wednesday => 2,
+            DayOfWeek::Thursday => 3,
+            DayOfWeek::Friday => 4,
+            DayOfWeek::Saturday => 5,
+            DayOfWeek::Sunday => 6,
+        };
+        
+        let week_1_monday = if days_from_monday <= 3 {
+            // January 1 is in week 1
+            res!(jan_1.add_days(-(days_from_monday as i32)))
+        } else {
+            // January 1 is in the last week of the previous year
+            res!(jan_1.add_days((7 - days_from_monday) as i32))
+        };
+        
+        // Calculate the number of days from week 1 Monday to the date
+        let date_day_number = res!(date.to_day_number());
+        let week_1_day_number = res!(week_1_monday.to_day_number());
+        let days_diff = date_day_number - week_1_day_number;
+        
+        if days_diff < 0 {
+            // Date is in the last week of the previous year
+            // Calculate the week number for the previous year
+            let prev_year_date = res!(CalendarDate::from_ymd(date.year() - 1, MonthOfYear::December, 31, date.zone().clone()));
+            self.calculate_week_of_year(&prev_year_date)
+        } else {
+            let week_number = (days_diff / 7) + 1;
+            Ok(week_number as u8)
+        }
     }
 }
 

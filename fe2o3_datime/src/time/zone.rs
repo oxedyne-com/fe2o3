@@ -1,4 +1,7 @@
-use crate::time::tzif::{TZifData, LocalTimeResult};
+use crate::{
+    cache::timezone_cache::{TimezoneCache, CalClockZoneCached},
+    time::tzif::{TZifData, LocalTimeResult},
+};
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -291,7 +294,7 @@ impl CalClockZone {
 	///
 	/// This method forces the use of embedded timezone data and will not attempt to
 	/// load from system timezone databases. This is useful for:
-	/// - Security-conscious applications that want deterministic behavior
+	/// - Security-conscious applications that want deterministic behaviour
 	/// - Testing with known timezone data
 	/// - Applications that don't want to depend on system timezone data
 	pub fn new_embedded<S: Into<String>>(zone_id: S) -> Outcome<Self> {
@@ -406,6 +409,9 @@ impl CalClockZone {
 	///
 	/// This method provides historical accuracy by calculating the exact offset
 	/// at the specified time, including daylight saving time transitions.
+	///
+	/// For better performance, consider using `offset_millis_at_time_cached()` from
+	/// the `CalClockZoneCached` trait which provides automatic caching.
 	///
 	/// # Arguments
 	///
@@ -699,23 +705,190 @@ impl CalClockZone {
 	}
 	
 	/// Converts UTC milliseconds to a simplified date structure.
-	fn millis_to_date(&self, _utc_millis: i64) -> Outcome<SimpleDate> {
-		// Simplified implementation - in a full implementation this would
-		// use proper calendar arithmetic
-		Ok(SimpleDate { year: 2024 }) // Placeholder
+	fn millis_to_date(&self, utc_millis: i64) -> Outcome<SimpleDate> {
+		// Convert milliseconds to seconds
+		let seconds = utc_millis / 1000;
+		
+		// Calculate days since Unix epoch (January 1, 1970)
+		let days_since_epoch = seconds / 86400; // 86400 seconds in a day
+		
+		// Calculate the year using proper calendar arithmetic
+		let mut year = 1970;
+		let mut remaining_days = days_since_epoch;
+		
+		// Handle negative days (before 1970)
+		if remaining_days < 0 {
+			while remaining_days < 0 {
+				year -= 1;
+				let days_in_year = if Self::is_leap_year(year) { 366 } else { 365 };
+				remaining_days += days_in_year;
+			}
+		} else {
+			// Handle positive days (after 1970)
+			loop {
+				let days_in_year = if Self::is_leap_year(year) { 366 } else { 365 };
+				if remaining_days < days_in_year {
+					break;
+				}
+				remaining_days -= days_in_year;
+				year += 1;
+			}
+		}
+		
+		Ok(SimpleDate { year: year as i32 })
+	}
+	
+	/// Checks if a year is a leap year.
+	fn is_leap_year(year: i64) -> bool {
+		(year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 	}
 	
 	/// Calculates the exact UTC timestamp for a DST transition.
-	fn calculate_transition_time(&self, _transition: &DstTransition, _year: i32) -> Outcome<i64> {
-		// Simplified implementation - full version would calculate exact
-		// transition times based on day specifications
-		Ok(0) // Placeholder
+	fn calculate_transition_time(&self, transition: &DstTransition, year: i32) -> Outcome<i64> {
+		// Calculate the day of the transition
+		let day = res!(self.calculate_transition_day(&transition.day_spec, transition.month, year));
+		
+		// Convert to UTC milliseconds
+		let days_since_epoch = res!(self.days_since_epoch(year, transition.month, day));
+		let transition_millis = days_since_epoch * 86400 * 1000 + (transition.hour as i64) * 3600 * 1000;
+		
+		Ok(transition_millis)
+	}
+	
+	/// Calculates the actual day of month for a DST transition based on day specification.
+	fn calculate_transition_day(&self, day_spec: &DaySpec, month: u8, year: i32) -> Outcome<u8> {
+		match day_spec {
+			DaySpec::Day(day) => Ok(*day),
+			DaySpec::LastWeekday(weekday) => {
+				// Find the last occurrence of the specified weekday in the month
+				let days_in_month = self.days_in_month(month, year);
+				let mut day = days_in_month;
+				
+				// Work backwards from the last day of month
+				while day >= 1 {
+					let day_of_week = self.day_of_week(year, month, day);
+					if day_of_week == *weekday {
+						return Ok(day);
+					}
+					day -= 1;
+				}
+				
+				Err(err!("Could not find weekday {} in month {}/{}", weekday, month, year; Invalid))
+			},
+			DaySpec::WeekdayOnOrAfter { weekday, day } => {
+				// Find the first occurrence of weekday on or after the specified day
+				let days_in_month = self.days_in_month(month, year);
+				let mut current_day = *day;
+				
+				while current_day <= days_in_month {
+					let day_of_week = self.day_of_week(year, month, current_day);
+					if day_of_week == *weekday {
+						return Ok(current_day);
+					}
+					current_day += 1;
+				}
+				
+				Err(err!("Could not find weekday {} on or after day {} in month {}/{}", 
+					weekday, day, month, year; Invalid))
+			}
+		}
+	}
+	
+	/// Calculates days since Unix epoch for a given date.
+	fn days_since_epoch(&self, year: i32, month: u8, day: u8) -> Outcome<i64> {
+		let mut days = 0i64;
+		
+		// Add days for complete years from 1970
+		for y in 1970..year {
+			days += if Self::is_leap_year(y as i64) { 366 } else { 365 };
+		}
+		
+		// Add days for complete months in the target year
+		for m in 1..month {
+			days += self.days_in_month(m, year) as i64;
+		}
+		
+		// Add remaining days (subtract 1 because day 1 = 0 days since start of month)
+		days += (day - 1) as i64;
+		
+		Ok(days)
+	}
+	
+	/// Returns the number of days in a given month/year.
+	fn days_in_month(&self, month: u8, year: i32) -> u8 {
+		match month {
+			1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+			4 | 6 | 9 | 11 => 30,
+			2 => if Self::is_leap_year(year as i64) { 29 } else { 28 },
+			_ => 0, // Invalid month
+		}
+	}
+	
+	/// Calculates the day of week for a given date (0=Sunday, 1=Monday, etc.).
+	fn day_of_week(&self, year: i32, month: u8, day: u8) -> u8 {
+		// Use Zeller's congruence algorithm
+		let (q, m, k, j) = if month < 3 {
+			(day as i32, month as i32 + 12, (year - 1) % 100, (year - 1) / 100)
+		} else {
+			(day as i32, month as i32, year % 100, year / 100)
+		};
+		
+		let h = (q + ((13 * (m + 1)) / 5) + k + (k / 4) + (j / 4) - 2 * j) % 7;
+		
+		// Convert to our format (0=Sunday)
+		((h + 5) % 7) as u8
 	}
 	
 	/// Gets system timezone offset using platform APIs.
-	fn system_offset_at_time(&self, _utc_millis: i64) -> Outcome<i32> {
-		// Platform-specific implementation would go here
-		Ok(0) // Placeholder
+	fn system_offset_at_time(&self, utc_millis: i64) -> Outcome<i32> {
+		// Try to get system offset using standard library SystemTime
+		use std::time::{SystemTime, UNIX_EPOCH};
+		
+		// For now, return 0 (UTC) as fallback since proper platform-specific
+		// timezone offset detection requires platform-specific APIs
+		// This could be enhanced with platform-specific implementations:
+		// - Windows: GetTimeZoneInformation
+		// - Unix/Linux: /etc/localtime, TZ environment variable parsing
+		// - macOS: NSTimeZone currentTimeZone
+		
+		// Basic implementation: check TZ environment variable
+		if let Ok(tz) = std::env::var("TZ") {
+			if tz == "UTC" || tz == "GMT" {
+				return Ok(0);
+			}
+			// Parse simple offset formats like "GMT+5" or "UTC-3"
+			if let Ok(offset) = self.parse_simple_offset(&tz) {
+				return Ok(offset);
+			}
+		}
+		
+		// Fallback to UTC offset
+		Ok(0)
+	}
+	
+	/// Parses simple timezone offset formats like "GMT+5", "UTC-3".
+	fn parse_simple_offset(&self, tz: &str) -> Outcome<i32> {
+		if tz.starts_with("GMT") || tz.starts_with("UTC") {
+			let offset_part = &tz[3..];
+			if offset_part.is_empty() {
+				return Ok(0);
+			}
+			
+			let sign = if offset_part.starts_with('+') {
+				1
+			} else if offset_part.starts_with('-') {
+				-1
+			} else {
+				return Err(err!("Invalid timezone offset format: {}", tz; Invalid, Input));
+			};
+			
+			let hours: i32 = res!(offset_part[1..].parse().map_err(|_|
+				err!("Invalid hour value in timezone: {}", tz; Invalid, Input)));
+			
+			Ok(sign * hours * 3600)
+		} else {
+			Err(err!("Unsupported timezone format: {}", tz; Invalid, Input))
+		}
 	}
 }
 
@@ -768,16 +941,16 @@ mod tests {
 
 	#[test]
 	fn test_fixed_offset_parsing() {
-		let gmt_plus_5 = CalClockZone::new("GMT+5").unwrap();
+		let gmt_plus_5 = res!(CalClockZone::new("GMT+5"));
 		assert_eq!(gmt_plus_5.raw_offset_millis(), 5 * 3600 * 1000);
 		
-		let gmt_minus_3 = CalClockZone::new("GMT-3").unwrap();
+		let gmt_minus_3 = res!(CalClockZone::new("GMT-3"));
 		assert_eq!(gmt_minus_3.raw_offset_millis(), -3 * 3600 * 1000);
 	}
 
 	#[test]
 	fn test_timezone_database_lookup() {
-		let eastern = CalClockZone::new("America/New_York").unwrap();
+		let eastern = res!(CalClockZone::new("America/New_York"));
 		assert_eq!(eastern.id(), "America/New_York");
 		assert_eq!(eastern.raw_offset_millis(), -5 * 3600 * 1000);
 	}
@@ -785,13 +958,13 @@ mod tests {
 	#[test]
 	fn test_offset_compatibility() {
 		let utc = CalClockZone::utc();
-		assert_eq!(utc.offset_seconds(1640995200).unwrap(), 0); // 2022-01-01 UTC
+		assert_eq!(res!(utc.offset_seconds(1640995200)), 0); // 2022-01-01 UTC
 	}
 
 	#[test]
 	fn test_dst_detection() {
-		let eastern = CalClockZone::new("America/New_York").unwrap();
+		let eastern = res!(CalClockZone::new("America/New_York"));
 		// This would need proper date calculation in full implementation
-		assert!(!eastern.in_daylight_time(0).unwrap()); // Simplified test
+		assert!(!res!(eastern.in_daylight_time(0))); // Simplified test
 	}
 }

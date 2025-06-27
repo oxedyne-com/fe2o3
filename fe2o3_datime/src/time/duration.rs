@@ -132,6 +132,37 @@ impl CalClockDuration {
 	pub fn time_component(&self) -> crate::clock::ClockDuration {
 		crate::clock::ClockDuration::from_nanos(self.nanos)
 	}
+	
+	/// Returns the negation of this duration.
+	pub fn negate(&self) -> Self {
+		Self {
+			days: -self.days,
+			nanos: -self.nanos,
+		}
+	}
+	
+	/// Returns the total seconds in this duration.
+	pub fn total_seconds(&self) -> i64 {
+		self.to_seconds().unwrap_or(0)
+	}
+	
+	/// Divides this duration by a factor.
+	pub fn divide_by(&self, factor: i32) -> Outcome<Self> {
+		if factor == 0 {
+			return Err(err!("Cannot divide duration by zero"; Invalid, Input));
+		}
+		
+		let total_nanos = self.days as i64 * 24 * 60 * 60 * 1_000_000_000 + self.nanos;
+		let divided_nanos = total_nanos / factor as i64;
+		
+		let new_days = (divided_nanos / (24 * 60 * 60 * 1_000_000_000)) as i32;
+		let remaining_nanos = divided_nanos % (24 * 60 * 60 * 1_000_000_000);
+		
+		Ok(Self {
+			days: new_days,
+			nanos: remaining_nanos,
+		})
+	}
 }
 
 impl Duration for CalClockDuration {
@@ -151,5 +182,15 @@ impl Duration for CalClockDuration {
 	
 	fn is_negative(&self) -> bool {
 		self.days < 0 || (self.days == 0 && self.nanos < 0)
+	}
+}
+
+impl std::fmt::Display for CalClockDuration {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		if self.days != 0 {
+			write!(f, "{}d {}ns", self.days, self.nanos)
+		} else {
+			write!(f, "{}ns", self.nanos)
+		}
 	}
 }

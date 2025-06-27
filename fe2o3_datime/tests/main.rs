@@ -4,6 +4,7 @@ mod format_locale;
 mod iana_integration;
 mod integration_demo;
 mod new_features;
+mod rfc9557_demo;
 mod time;
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -34,6 +35,7 @@ fn run_tests() -> Outcome<()> {
     res!(iana_integration::test_iana_integration(filter));
     res!(integration_demo::test_integration_demo(filter));
     res!(new_features::test_new_features(filter));
+    res!(rfc9557_demo::test_rfc9557_integration(filter));
     res!(time::test_time(filter));
 
     Ok(())

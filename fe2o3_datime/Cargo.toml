@@ -14,5 +14,7 @@ oxedyne_fe2o3_jdat		= { path = "../fe2o3_jdat" }
 oxedyne_fe2o3_namex		= { path = "../fe2o3_namex" }
 oxedyne_fe2o3_num		= { path = "../fe2o3_num" }
 oxedyne_fe2o3_stds		= { path = "../fe2o3_stds" }
+num-bigint			= "0.4"
+num-traits			= "0.2"
 
 [dev-dependencies]

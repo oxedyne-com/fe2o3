@@ -7,7 +7,10 @@ use crate::{
 
 use oxedyne_fe2o3_core::prelude::*;
 
-use std::collections::HashSet;
+use std::{
+    collections::HashSet,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 /// A custom validation rule that can be applied to CalClock components.
 ///
@@ -122,10 +125,33 @@ impl ValidationRule {
     
     /// Validates a CalClock using this rule.
     pub fn validate_calclock(&self, calclock: &CalClock) -> ValidationResult {
+        let mut errors = Vec::new();
+        
+        // Check calclock-specific validator
         if let Some(ref validator) = self.calclock_validator {
-            validator(calclock)
-        } else {
+            if let Err(mut errs) = validator(calclock) {
+                errors.append(&mut errs);
+            }
+        }
+        
+        // Also check date validator on the date component
+        if let Some(ref validator) = self.date_validator {
+            if let Err(mut errs) = validator(&calclock.date()) {
+                errors.append(&mut errs);
+            }
+        }
+        
+        // Also check time validator on the time component
+        if let Some(ref validator) = self.time_validator {
+            if let Err(mut errs) = validator(&calclock.time()) {
+                errors.append(&mut errs);
+            }
+        }
+        
+        if errors.is_empty() {
             Ok(())
+        } else {
+            Err(errors)
         }
     }
     
@@ -381,13 +407,29 @@ impl ValidationRules {
             })
     }
     
+    /// Gets the current year from system time.
+    fn get_current_year() -> i32 {
+        let now = SystemTime::now();
+        match now.duration_since(UNIX_EPOCH) {
+            Ok(duration) => {
+                // Convert seconds since Unix epoch to current year
+                // Approximate: 365.25 days per year, 86400 seconds per day
+                let years_since_1970 = duration.as_secs() / (365 * 24 * 60 * 60);
+                1970 + years_since_1970 as i32
+            },
+            Err(_) => {
+                // Fallback to a reasonable default if system time is before Unix epoch
+                2024
+            }
+        }
+    }
+    
     /// Creates a rule that prevents dates too far in the past (more than specified years ago).
     pub fn not_too_old(max_years_ago: u32) -> ValidationRule {
         ValidationRule::new("not_too_old")
             .description(format!("Prevents dates more than {} years in the past", max_years_ago))
             .with_date_validator(move |date| {
-                // Use a simple approximation: current year - max_years_ago
-                let current_year = 2024; // This should ideally use current date
+                let current_year = Self::get_current_year();
                 let min_allowed_year = current_year - max_years_ago as i32;
                 
                 if date.year() < min_allowed_year {
@@ -408,8 +450,7 @@ impl ValidationRules {
         ValidationRule::new("not_too_future")
             .description(format!("Prevents dates more than {} years in the future", max_years_ahead))
             .with_date_validator(move |date| {
-                // Use a simple approximation: current year + max_years_ahead
-                let current_year = 2024; // This should ideally use current date
+                let current_year = Self::get_current_year();
                 let max_allowed_year = current_year + max_years_ahead as i32;
                 
                 if date.year() > max_allowed_year {
@@ -504,8 +545,13 @@ impl ValidationRules {
     pub fn historical_data() -> ValidationRule {
         all_rules(vec![
             Self::max_date({
+                // TODO: Replace with proper error handling for static initialization
                 let calendar = Calendar::new();
-                calendar.date(2024, 12, 31, crate::time::CalClockZone::utc()).unwrap()
+                let utc_zone = crate::time::CalClockZone::utc();
+                match calendar.date(2024, 12, 31, utc_zone) {
+                    Ok(date) => date,
+                    Err(_) => panic!("Failed to create validation date"),
+                }
             }),
             Self::not_too_old(100),
         ])

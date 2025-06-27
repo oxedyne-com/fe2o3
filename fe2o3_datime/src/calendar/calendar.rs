@@ -1,5 +1,5 @@
 use crate::{
-    calendar::{CalendarDate, system::CalendarSystem},
+    calendar::{CalendarDate, system::CalendarSystem, era::JapaneseEraRegistry, hebrew::HebrewCalendar},
     constant::MonthOfYear,
     time::CalClockZone,
 };
@@ -52,6 +52,11 @@ pub enum Calendar {
     /// Used primarily in Islamic countries for religious purposes
     Islamic,
     
+    /// Hebrew/Jewish calendar - lunisolar calendar starting from creation (3761 BCE)
+    /// 12 or 13 months per year (leap years), used for Jewish religious observances
+    /// Months alternate between 29 and 30 days, years can be deficient, regular, or abundant
+    Hebrew,
+    
     /// Japanese Imperial calendar - based on imperial eras (nengō)
     /// Uses Gregorian calendar structure but years reset with each emperor
     /// Current era: Reiwa (started May 1, 2019)
@@ -97,6 +102,7 @@ impl Calendar {
             Self::Gregorian => "Gregorian",
             Self::Julian => "Julian", 
             Self::Islamic => "Islamic",
+            Self::Hebrew => "Hebrew",
             Self::Japanese => "Japanese",
             Self::Thai => "Thai Buddhist",
             Self::Minguo => "Minguo",
@@ -109,7 +115,8 @@ impl Calendar {
         match self {
             Self::Gregorian => "gregorian",
             Self::Julian => "julian",
-            Self::Islamic => "islamic", 
+            Self::Islamic => "islamic",
+            Self::Hebrew => "hebrew",
             Self::Japanese => "japanese",
             Self::Thai => "thai",
             Self::Minguo => "minguo",
@@ -206,6 +213,10 @@ impl Calendar {
                 let cycle_year = ((year - 1) % 30) + 1;
                 matches!(cycle_year, 2 | 5 | 7 | 10 | 13 | 16 | 18 | 21 | 24 | 26 | 29)
             },
+            Self::Hebrew => {
+                // Hebrew leap years occur 7 times in a 19-year cycle
+                HebrewCalendar::is_hebrew_leap_year(year)
+            },
         }
     }
     
@@ -242,6 +253,10 @@ impl Calendar {
                     _ => Err(err!("Invalid month {} for Julian calendar", month; Invalid, Input)),
                 }
             },
+            Self::Hebrew => {
+                // Hebrew calendar has variable month lengths
+                HebrewCalendar::days_in_hebrew_month(year, month)
+            },
             _ => {
                 // All other calendars use Gregorian month structure
                 let gregorian_year = self.to_gregorian_year(year);
@@ -256,6 +271,9 @@ impl Calendar {
         match self {
             Self::Islamic => {
                 if self.is_leap_year(year) { 355 } else { 354 }
+            },
+            Self::Hebrew => {
+                HebrewCalendar::days_in_hebrew_year(year) as u16
             },
             _ => {
                 if self.is_leap_year(year) { 366 } else { 365 }
@@ -323,15 +341,29 @@ impl Calendar {
             Self::Gregorian => Ok((year, month, day)),
             Self::Julian => Ok((year, month, day)), // Julian dates stored as-is
             Self::Islamic => {
-                // Convert Islamic date to Gregorian via Julian Day Number
-                let jdn = res!(self.islamic_to_jdn(year, month, day));
-                self.jdn_to_gregorian(jdn)
+                // Convert Islamic date to Gregorian using accurate algorithms
+                crate::calendar::islamic::IslamicCalendar::islamic_to_gregorian(year, month, day)
+            },
+            Self::Hebrew => {
+                // Convert Hebrew date to Gregorian
+                HebrewCalendar::to_gregorian(year, month, day)
             },
             Self::Japanese => {
-                // For now, treat as Gregorian with year offset
-                // TODO: Implement proper era handling
-                let gregorian_year = self.to_gregorian_year(year);
-                Ok((gregorian_year, month, day))
+                // Use proper Japanese era system
+                let era_registry = JapaneseEraRegistry::new();
+                let (gregorian_year, gregorian_month, gregorian_day) = 
+                    res!(era_registry.japanese_to_gregorian("Reiwa", year, month, day)
+                        .or_else(|_| {
+                            // Try other eras if Reiwa doesn't work
+                            for era in era_registry.all_eras() {
+                                if let Ok(result) = era_registry.japanese_to_gregorian(era.name_romaji, year, month, day) {
+                                    return Ok(result);
+                                }
+                            }
+                            Err(err!("Invalid Japanese calendar date: {} year {}, month {}, day {}", 
+                                    "unknown era", year, month, day; Invalid, Input))
+                        }));
+                Ok((gregorian_year, gregorian_month, gregorian_day))
             },
             Self::Thai => {
                 // Thai Buddhist = Gregorian - 543
@@ -357,14 +389,37 @@ impl Calendar {
             Self::Gregorian => (gregorian_year, month, day),
             Self::Julian => (gregorian_year, month, day), // Julian dates stored as-is
             Self::Islamic => {
-                // Convert Gregorian to Islamic via Julian Day Number
-                // This is a placeholder - full implementation would convert properly
-                (gregorian_year, month, day) // TODO: Implement proper conversion
+                // Convert Gregorian to Islamic using accurate algorithms
+                match crate::calendar::islamic::IslamicCalendar::gregorian_to_islamic(gregorian_year, month, day) {
+                    Ok((islamic_year, islamic_month, islamic_day)) => (islamic_year, islamic_month, islamic_day),
+                    Err(_) => {
+                        // Fallback for invalid dates
+                        (gregorian_year, month, day)
+                    }
+                }
+            },
+            Self::Hebrew => {
+                // Convert Gregorian to Hebrew
+                match HebrewCalendar::from_gregorian(gregorian_year, month, day) {
+                    Ok((hebrew_year, hebrew_month, hebrew_day)) => (hebrew_year, hebrew_month, hebrew_day),
+                    Err(_) => {
+                        // Fallback for invalid dates
+                        (gregorian_year, month, day)
+                    }
+                }
             },
             Self::Japanese => {
-                // For now, treat as Gregorian with year offset
-                // TODO: Implement proper era handling
-                self.from_gregorian_year(gregorian_year)
+                // Use proper Japanese era system
+                let era_registry = JapaneseEraRegistry::new();
+                match era_registry.gregorian_to_japanese(gregorian_year, month, day) {
+                    Ok((_era_name, era_year, month, day)) => (era_year, month, day),
+                    Err(_) => {
+                        // Fallback for dates outside known eras
+                        let current_era = era_registry.current_era();
+                        let era_year = gregorian_year - current_era.start_year + 1;
+                        (era_year, month, day)
+                    }
+                }
             },
             Self::Thai => {
                 // Thai Buddhist = Gregorian + 543
@@ -393,10 +448,28 @@ impl Calendar {
                 // More precise conversion would account for lunar vs solar years
                 622 + ((year - 1) * 354) / 365
             },
+            Self::Hebrew => {
+                // Hebrew calendar epoch is 3761 BCE
+                // Rough approximation for year conversion
+                year - 3760
+            },
             Self::Japanese => {
-                // For now, assume current era (Reiwa started 2019)
-                // TODO: Implement proper era handling
-                2019 + year - 1
+                // Use proper Japanese era system for current era approximation
+                let era_registry = JapaneseEraRegistry::new();
+                let current_era = era_registry.current_era();
+                match current_era.era_year_to_gregorian(year) {
+                    Ok(gregorian_year) => gregorian_year,
+                    Err(_) => {
+                        // If current era doesn't work, try other eras
+                        for era in era_registry.all_eras() {
+                            if let Ok(gregorian_year) = era.era_year_to_gregorian(year) {
+                                return gregorian_year;
+                            }
+                        }
+                        // Fallback to current era start + year
+                        current_era.start_year + year - 1
+                    }
+                }
             },
             Self::Thai => year - 543,
             Self::Minguo => year + 1911,
@@ -412,9 +485,21 @@ impl Calendar {
                 // Rough approximation
                 ((gregorian_year - 622) * 365) / 354 + 1
             },
+            Self::Hebrew => {
+                // Hebrew calendar conversion: add 3760 to get Hebrew year
+                gregorian_year + 3760
+            },
             Self::Japanese => {
-                // For now, assume current era (Reiwa started 2019)
-                gregorian_year - 2019 + 1
+                // Use proper Japanese era system
+                let era_registry = JapaneseEraRegistry::new();
+                match era_registry.gregorian_to_japanese(gregorian_year, 1, 1) {
+                    Ok((_era_name, era_year, _, _)) => era_year,
+                    Err(_) => {
+                        // Fallback for dates outside known eras
+                        let current_era = era_registry.current_era();
+                        gregorian_year - current_era.start_year + 1
+                    }
+                }
             },
             Self::Thai => gregorian_year + 543,
             Self::Minguo => gregorian_year - 1911,
@@ -427,7 +512,7 @@ impl Calendar {
     /// Converts this calendar to the underlying CalendarSystem for storage.
     fn to_calendar_system(&self) -> CalendarSystem {
         match self {
-            Self::Gregorian | Self::Islamic | Self::Japanese | Self::Thai | Self::Minguo | Self::Holocene => {
+            Self::Gregorian | Self::Islamic | Self::Hebrew | Self::Japanese | Self::Thai | Self::Minguo | Self::Holocene => {
                 CalendarSystem::Gregorian
             },
             Self::Julian => CalendarSystem::Julian,
@@ -479,6 +564,7 @@ impl Calendar {
             "gregorian" | "greg" | "g" => Ok(Self::Gregorian),
             "julian" | "jul" | "j" => Ok(Self::Julian),
             "islamic" | "hijri" | "muslim" | "i" => Ok(Self::Islamic),
+            "hebrew" | "jewish" | "judaism" => Ok(Self::Hebrew),
             "japanese" | "jp" | "imperial" => Ok(Self::Japanese),
             "thai" | "buddhist" | "th" => Ok(Self::Thai),
             "minguo" | "roc" | "taiwan" | "m" => Ok(Self::Minguo),
@@ -493,6 +579,7 @@ impl Calendar {
             Self::Gregorian,
             Self::Julian,
             Self::Islamic,
+            Self::Hebrew,
             Self::Japanese,
             Self::Thai,
             Self::Minguo,
@@ -505,6 +592,7 @@ impl Calendar {
         match self {
             Self::Gregorian | Self::Julian => 1,
             Self::Islamic => 622,
+            Self::Hebrew => -3760,  // Hebrew calendar epoch (3761 BCE)
             Self::Japanese => 2019, // Current era: Reiwa
             Self::Thai => -543,     // 544 BCE
             Self::Minguo => 1912,   // Republic of China establishment
@@ -518,6 +606,7 @@ impl Calendar {
             Self::Gregorian => "Modern international standard calendar, reformed in 1582",
             Self::Julian => "Ancient Roman calendar, used before Gregorian reform", 
             Self::Islamic => "Lunar calendar starting from the Hijra (622 CE)",
+            Self::Hebrew => "Lunisolar calendar used for Jewish religious observances",
             Self::Japanese => "Based on imperial eras, currently Reiwa era",
             Self::Thai => "Buddhist calendar, Gregorian structure + 543 years",
             Self::Minguo => "Republic of China calendar, starting from 1912 CE",
@@ -540,6 +629,7 @@ impl InNamex for Calendar {
             Self::Gregorian => "cal_gregorian_0123456789abcdef0123456789abcd=",
             Self::Julian => "cal_julian_abcdef0123456789abcdef0123456789=",
             Self::Islamic => "cal_islamic_fedcba9876543210fedcba9876543210=",
+            Self::Hebrew => "cal_hebrew_789abc123def456789abc123def456789=",
             Self::Japanese => "cal_japanese_123abc456def789123abc456def789a=",
             Self::Thai => "cal_thai_987654321fedcba987654321fedcba98=",
             Self::Minguo => "cal_minguo_abcdef123456789abcdef123456789a=",
@@ -557,10 +647,11 @@ impl InNamex for Calendar {
             Self::Gregorian => LocalId(1),
             Self::Julian => LocalId(2),
             Self::Islamic => LocalId(3),
-            Self::Japanese => LocalId(4),
-            Self::Thai => LocalId(5),
-            Self::Minguo => LocalId(6),
-            Self::Holocene => LocalId(7),
+            Self::Hebrew => LocalId(4),
+            Self::Japanese => LocalId(5),
+            Self::Thai => LocalId(6),
+            Self::Minguo => LocalId(7),
+            Self::Holocene => LocalId(8),
         }
     }
 
@@ -611,10 +702,11 @@ impl FromDat for Calendar {
                     LocalId(1) => Ok(Self::Gregorian),
                     LocalId(2) => Ok(Self::Julian),
                     LocalId(3) => Ok(Self::Islamic),
-                    LocalId(4) => Ok(Self::Japanese),
-                    LocalId(5) => Ok(Self::Thai),
-                    LocalId(6) => Ok(Self::Minguo),
-                    LocalId(7) => Ok(Self::Holocene),
+                    LocalId(4) => Ok(Self::Hebrew),
+                    LocalId(5) => Ok(Self::Japanese),
+                    LocalId(6) => Ok(Self::Thai),
+                    LocalId(7) => Ok(Self::Minguo),
+                    LocalId(8) => Ok(Self::Holocene),
                     _ => Err(err!("Invalid calendar LocalId: {}", local_id; Invalid, Input)),
                 }
             },

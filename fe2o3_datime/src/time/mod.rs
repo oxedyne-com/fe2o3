@@ -6,6 +6,9 @@ pub mod converter;
 pub mod stopwatch;
 pub mod system;
 pub mod tzif;
+pub mod ntp;
+pub mod ntp_advanced;
+pub mod leap_second;
 
 pub use self::{
     zone::CalClockZone,
@@ -31,5 +34,23 @@ pub use self::{
         LocalTimeResult,
         LocalTimeType,
         LeapSecond,
+    },
+    ntp::{
+        NtpClient,
+        NtpTimeResult,
+        NtpPool,
+    },
+    ntp_advanced::{
+        AdvancedNtpClient,
+        AdvancedNtpResult,
+        NtpData,
+        NtpOffsets,
+        NtpAlgorithm,
+    },
+    leap_second::{
+        LeapSecondTable,
+        LeapSecondEntry,
+        LeapSecondConfig,
+        LeapSecondStatistics,
     },
 };

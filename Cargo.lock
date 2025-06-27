@@ -1987,6 +1987,8 @@ dependencies = [
 name = "oxedyne_fe2o3_datime"
 version = "0.5.0"
 dependencies = [
+ "num-bigint 0.4.6",
+ "num-traits",
  "oxedyne_fe2o3_core",
  "oxedyne_fe2o3_data",
  "oxedyne_fe2o3_jdat",

@@ -247,7 +247,7 @@ pub fn test_calendar(filter: &str) -> Outcome<()> {
         // Test informational methods
         
         let calendars = Calendar::all().collect::<Vec<_>>();
-        assert_eq!(calendars.len(), 7);
+        assert_eq!(calendars.len(), 8);
         
         for calendar in calendars {
             // Each calendar should have non-empty name, id, and description

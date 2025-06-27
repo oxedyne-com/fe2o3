@@ -173,6 +173,26 @@ impl MonthOfYear {
     pub fn long_name(&self) -> &'static str {
         self.name()
     }
+
+    /// Parse from a string name (case insensitive).
+    pub fn from_name(name: &str) -> Option<Self> {
+        let name = name.to_lowercase();
+        match name.as_str() {
+            "january" | "jan" => Some(Self::January),
+            "february" | "feb" => Some(Self::February),
+            "march" | "mar" => Some(Self::March),
+            "april" | "apr" => Some(Self::April),
+            "may" => Some(Self::May),
+            "june" | "jun" => Some(Self::June),
+            "july" | "jul" => Some(Self::July),
+            "august" | "aug" => Some(Self::August),
+            "september" | "sep" | "sept" => Some(Self::September),
+            "october" | "oct" => Some(Self::October),
+            "november" | "nov" => Some(Self::November),
+            "december" | "dec" => Some(Self::December),
+            _ => None,
+        }
+    }
 }
 
 impl Display for MonthOfYear {
