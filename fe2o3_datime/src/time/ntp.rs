@@ -21,7 +21,7 @@ use std::{
     net::{UdpSocket, ToSocketAddrs},
     time::{Duration, SystemTime, UNIX_EPOCH},
     thread,
-    sync::{Arc, mpsc},
+    sync::mpsc,
 };
 
 /// NTP packet format as defined in RFC 5905
@@ -269,7 +269,7 @@ impl NtpClient {
     /// Calculates time result from NTP packet exchange
     fn calculate_time_result(
         &self,
-        request: NtpPacket,
+        _request: NtpPacket,
         response: NtpPacket,
         send_time: SystemTime,
         receive_time: SystemTime

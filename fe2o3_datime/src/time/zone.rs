@@ -1,5 +1,4 @@
 use crate::{
-    cache::timezone_cache::{TimezoneCache, CalClockZoneCached},
     time::tzif::{TZifData, LocalTimeResult},
 };
 
@@ -67,6 +66,7 @@ enum TimezoneData {
 		dst_rules: Vec<DstRule>,
 	},
 	/// System local timezone (platform-dependent).
+	#[allow(dead_code)]
 	Local,
 }
 
@@ -100,6 +100,7 @@ struct DstTransition {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 enum DaySpec {
 	/// Specific day of month.
+	#[allow(dead_code)]
 	Day(u8),
 	/// Last occurrence of weekday in month.
 	LastWeekday(u8), // 0=Sunday, 1=Monday, etc.
@@ -840,9 +841,8 @@ impl CalClockZone {
 	}
 	
 	/// Gets system timezone offset using platform APIs.
-	fn system_offset_at_time(&self, utc_millis: i64) -> Outcome<i32> {
+	fn system_offset_at_time(&self, _utc_millis: i64) -> Outcome<i32> {
 		// Try to get system offset using standard library SystemTime
-		use std::time::{SystemTime, UNIX_EPOCH};
 		
 		// For now, return 0 (UTC) as fallback since proper platform-specific
 		// timezone offset detection requires platform-specific APIs

@@ -1,7 +1,6 @@
 use oxedyne_fe2o3_core::prelude::*;
 
 use std::{
-    collections::HashMap,
     fs,
     io::{Cursor, Read},
     path::Path,
@@ -381,7 +380,7 @@ impl TZifData {
         let mut candidates = Vec::new();
 
         // Check all possible timezone rules around this time
-        for (i, &transition_time) in self.transition_times.iter().enumerate() {
+        for (i, &_transition_time) in self.transition_times.iter().enumerate() {
             if i >= self.transition_types.len() {
                 continue;
             }

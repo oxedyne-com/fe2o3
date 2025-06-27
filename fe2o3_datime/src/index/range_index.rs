@@ -200,6 +200,7 @@ pub struct RangeIndex<T> {
     /// All indexed ranges
     entries: Vec<RangeEntry<T>>,
     /// Time zone for calculations
+    #[allow(dead_code)]
     zone: CalClockZone,
     /// Next ID for entries
     next_id: usize,
@@ -254,7 +255,7 @@ impl<T> RangeIndex<T> {
 
         // Find all ranges that could potentially overlap
         // Look at ranges that start before or at query end
-        for (&start_ts, entry_indices) in self.start_index.range(..=query_end_ts) {
+        for (&_start_ts, entry_indices) in self.start_index.range(..=query_end_ts) {
             for &entry_idx in entry_indices {
                 if seen.contains(&entry_idx) {
                     continue;
@@ -307,7 +308,7 @@ impl<T> RangeIndex<T> {
 
         let mut results = Vec::new();
 
-        for (&ts, entry_indices) in self.start_index.range(start_ts..=end_ts) {
+        for (&_ts, entry_indices) in self.start_index.range(start_ts..=end_ts) {
             for &entry_idx in entry_indices {
                 if let Some(entry) = self.entries.get(entry_idx) {
                     results.push(entry);
@@ -325,7 +326,7 @@ impl<T> RangeIndex<T> {
 
         let mut results = Vec::new();
 
-        for (&ts, entry_indices) in self.end_index.range(start_ts..=end_ts) {
+        for (&_ts, entry_indices) in self.end_index.range(start_ts..=end_ts) {
             for &entry_idx in entry_indices {
                 if let Some(entry) = self.entries.get(entry_idx) {
                     results.push(entry);

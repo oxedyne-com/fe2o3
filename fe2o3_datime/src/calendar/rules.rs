@@ -87,6 +87,7 @@ pub struct HolidayInterval {
     /// End date of holiday interval (inclusive)
     end: CalendarDate,
     /// Name/description of the holiday
+    #[allow(dead_code)]
     name: String,
 }
 
@@ -698,7 +699,7 @@ mod tests {
     
     #[test]
     fn test_business_day_engine_integration() {
-        use crate::calendar::business_day_engine::{BusinessDayEngine, BusinessWeek};
+        use crate::calendar::business_day_engine::BusinessDayEngine;
         use crate::calendar::holiday_engines::HolidayEngine;
         
         let zone = CalClockZone::utc();

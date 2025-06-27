@@ -312,7 +312,7 @@ impl DatabaseStorable for ClockTime {
             },
             
             StorageFormat::Iso8601 => {
-                let iso_string = res!(record.primary_data.get_string().ok_or_else(|| err!("Invalid component type"; Invalid, Input)));
+                let _iso_string = res!(record.primary_data.get_string().ok_or_else(|| err!("Invalid component type"; Invalid, Input)));
                 // Parse ISO time string - this would need a proper parser
                 // For now, return an error as ClockTime doesn't have direct ISO parsing
                 Err(err!("ClockTime ISO parsing not implemented"; Unimplemented))

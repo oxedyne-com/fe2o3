@@ -507,6 +507,7 @@ impl AdvancedTimeFieldHolder {
 			false
 		}
 	}
+	#[allow(dead_code)]
 	fn is_leap_year(&self, year: i32) -> bool {
 		year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
 	}
@@ -2883,7 +2884,7 @@ impl SemanticParser {
 		}
 		
 		// Parse time part (HH:MM or HH:MM:SS or HH:MM:SS.SSS)
-		let mut time_components: Vec<&str> = time_part.split(':').collect();
+		let time_components: Vec<&str> = time_part.split(':').collect();
 		if time_components.len() < 2 || time_components.len() > 3 {
 			return Err(err!("Invalid ISO datetime time part - expected HH:MM or HH:MM:SS"; Invalid, Input));
 		}

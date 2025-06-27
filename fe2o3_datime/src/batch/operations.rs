@@ -39,7 +39,7 @@ impl DateArithmetic {
         
         for date in dates {
             // Check if we can reuse leap year calculation
-            let is_leap = if let Some((cached_yr, cached_leap)) = cached_year {
+            let _is_leap = if let Some((cached_yr, cached_leap)) = cached_year {
                 if cached_yr == date.year() {
                     cached_leap
                 } else {

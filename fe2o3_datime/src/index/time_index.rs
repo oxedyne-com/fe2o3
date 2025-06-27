@@ -142,6 +142,7 @@ pub struct TimeIndex<T: Clone> {
     /// All entries for index mapping
     entries: Vec<TimeIndexEntry<T>>,
     /// Time zone for calculations
+    #[allow(dead_code)]
     zone: CalClockZone,
 }
 

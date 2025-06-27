@@ -92,19 +92,32 @@ impl NtpData {
 
 /// Statistical tracking for each NTP server.
 #[derive(Debug, Clone)]
-struct NtpServerStats {
+pub struct NtpServerStats {
+	#[allow(dead_code)]
 	offset_history: Vec<f64>,
+	#[allow(dead_code)]
 	delay_history: Vec<f64>,
+	#[allow(dead_code)]
 	mean_offset: f64,
+	#[allow(dead_code)]
 	std_dev_offset: f64,
+	#[allow(dead_code)]
 	mean_delay: f64,
+	#[allow(dead_code)]
 	std_dev_delay: f64,
+	#[allow(dead_code)]
 	sample_count: usize,
+	#[allow(dead_code)]
 	root_distance: f64,
+	#[allow(dead_code)]
 	stratum: u8,
+	#[allow(dead_code)]
 	precision: i8,
+	#[allow(dead_code)]
 	last_poll_time: Option<Instant>,
+	#[allow(dead_code)]
 	is_reachable: bool,
+	#[allow(dead_code)]
 	falseticker_count: usize,
 }
 
@@ -375,8 +388,8 @@ impl AdvancedNtpClient {
 		let root_dispersion = u32::from_be_bytes([packet[8], packet[9], packet[10], packet[11]]) as f64 / 65536.0;
 		
 		// Extract server timestamps
-		let reference_ts = self.extract_ntp_timestamp(&packet[16..24]);
-		let originate_ts = self.extract_ntp_timestamp(&packet[24..32]);
+		let _reference_ts = self.extract_ntp_timestamp(&packet[16..24]);
+		let _originate_ts = self.extract_ntp_timestamp(&packet[24..32]);
 		let receive_ts = self.extract_ntp_timestamp(&packet[32..40]);
 		let transmit_ts = self.extract_ntp_timestamp(&packet[40..48]);
 		
@@ -431,6 +444,7 @@ impl AdvancedNtpClient {
 	}
 	
 	/// Calculates jitter estimate for a server.
+	#[allow(dead_code)]
 	fn calculate_jitter(&self, server_addr: IpAddr, current_delay: f64) -> f64 {
 		if let Some(stats) = self.server_stats.get(&server_addr) {
 			if stats.delay_history.len() > 1 {
@@ -532,8 +546,10 @@ impl AdvancedNtpClient {
 		let mut f = 0; // Number of falsetickers
 		
 		loop {
-			let mut lower = 0i64;
-			let mut upper = 0i64;
+			#[allow(unused_assignments)]
+			let mut lower = 0i64; // Will be overwritten before use
+			#[allow(unused_assignments)]
+			let mut upper = 0i64; // Will be overwritten before use
 			let mut endcount = 0;
 			let mut midcount = 0;
 			

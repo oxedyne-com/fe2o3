@@ -129,7 +129,7 @@ impl DayIncrementor {
         main_inc.next_inc = Some(Box::new(DayIncrementor::new()));
 
         // Parse each word
-        let mut current_inc = &mut main_inc;
+        let current_inc = &mut main_inc;
         let mut i = 0;
         
         while i < words.len() {
@@ -350,7 +350,6 @@ impl DayIncrementor {
     /// Apply this incrementor's logic to a base date.
     fn apply_incrementor_to_date(&self, base_date: &CalendarDate) -> Outcome<CalendarDate> {
         use crate::calendar::CalendarDate;
-        use crate::constant::DayOfWeek;
         
         match self.day_type {
             Some(DayType::DayOfWeek) => {
@@ -485,7 +484,7 @@ impl DayIncrementor {
         use crate::constant::MonthOfYear;
         
         let month_enum = res!(MonthOfYear::from_number(month));
-        let mut current = res!(CalendarDate::from_ymd(year, month_enum, 1, zone.clone()));
+        let mut current: CalendarDate;
         let days_in_month = month_enum.days_in_month(year);
         let mut weekday_count = 0;
         
@@ -508,7 +507,7 @@ impl DayIncrementor {
         use crate::constant::MonthOfYear;
         
         let month_enum = res!(MonthOfYear::from_number(month));
-        let mut current = res!(CalendarDate::from_ymd(year, month_enum, 1, zone.clone()));
+        let mut current: CalendarDate;
         let days_in_month = month_enum.days_in_month(year);
         let mut business_day_count = 0;
         

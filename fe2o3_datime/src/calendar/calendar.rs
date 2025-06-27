@@ -478,6 +478,7 @@ impl Calendar {
     }
     
     /// Converts a Gregorian year to this calendar's year.
+    #[allow(dead_code)]
     fn from_gregorian_year(&self, gregorian_year: i32) -> (i32, u8, u8) {
         let calendar_year = match self {
             Self::Gregorian | Self::Julian => gregorian_year,
@@ -525,6 +526,7 @@ impl Calendar {
     
     
     /// Converts Islamic date to Julian Day Number.
+    #[allow(dead_code)]
     fn islamic_to_jdn(&self, year: i32, month: u8, day: u8) -> Outcome<i64> {
         // Islamic calendar algorithm
         // Based on the standard Islamic calendar calculation
@@ -542,6 +544,7 @@ impl Calendar {
     }
     
     /// Converts Julian Day Number to Gregorian date.
+    #[allow(dead_code)]
     fn jdn_to_gregorian(&self, jdn: i64) -> Outcome<(i32, u8, u8)> {
         let a = jdn + 32044;
         let b = (4 * a + 3) / 146097;

@@ -228,7 +228,7 @@ impl CalendarRule {
 		reference_date: &CalendarDate,
 		duration: Option<&CalendarDuration>,
 		count: Option<i32>,
-		holidays: Option<&Vec<CalClockInterval>>,
+		_holidays: Option<&Vec<CalClockInterval>>,
 	) -> Outcome<Vec<CalendarDate>> {
 		let mut results = Vec::new();
 		
@@ -237,10 +237,10 @@ impl CalendarRule {
 				res!(self.generate_by_years(&mut results, task, reference_date, duration, count));
 			},
 			RuleType::ByExplicitMonths => {
-				res!(self.generate_by_explicit_months(&mut results, task, reference_date, duration, count, holidays));
+				res!(self.generate_by_explicit_months(&mut results, task, reference_date, duration, count, _holidays));
 			},
 			RuleType::ByRegularMonths => {
-				res!(self.generate_by_regular_months(&mut results, task, reference_date, duration, count, holidays));
+				res!(self.generate_by_regular_months(&mut results, task, reference_date, duration, count, _holidays));
 			},
 			RuleType::ByDays => {
 				res!(self.generate_by_days(&mut results, task, reference_date, duration, count));
@@ -348,7 +348,7 @@ impl CalendarRule {
 		reference_date: &CalendarDate,
 		duration: Option<&CalendarDuration>,
 		count: Option<i32>,
-		holidays: Option<&Vec<CalClockInterval>>,
+		_holidays: Option<&Vec<CalClockInterval>>,
 	) -> Outcome<()> {
 		let month_set = self.month_set.as_ref()
 			.ok_or_else(|| err!("By-explicit-months rule requires month_set"; Invalid, Input))?;
@@ -374,7 +374,7 @@ impl CalendarRule {
 				}
 				
 				// Use day incrementor to find the target date in this month
-				let month_start = res!(CalendarDate::from_ymd(current_year, month, 1, reference_date.zone().clone()));
+				let _month_start = res!(CalendarDate::from_ymd(current_year, month, 1, reference_date.zone().clone()));
 				
 				if let Ok(target_date) = day_incrementor.calculate_date(current_year, month.of(), reference_date.zone().clone()) {
 					let should_include = match task {
@@ -416,7 +416,7 @@ impl CalendarRule {
 		reference_date: &CalendarDate,
 		duration: Option<&CalendarDuration>,
 		count: Option<i32>,
-		holidays: Option<&Vec<CalClockInterval>>,
+		_holidays: Option<&Vec<CalClockInterval>>,
 	) -> Outcome<()> {
 		let skip_months = self.skip_months.as_ref()
 			.ok_or_else(|| err!("By-regular-months rule requires skip_months"; Invalid, Input))?;

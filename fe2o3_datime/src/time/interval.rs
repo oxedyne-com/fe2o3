@@ -198,7 +198,7 @@ impl Interval<CalClockDuration> for CalClockInterval {
 		self.duration()
 	}
 	
-	fn contains<T: Time>(&self, time: &T) -> bool {
+	fn contains<T: Time>(&self, _time: &T) -> bool {
 		// This would need a way to convert T to CalClock for proper comparison
 		// For now, return false as we can't convert arbitrary Time types
 		false

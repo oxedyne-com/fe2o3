@@ -588,7 +588,7 @@ mod tests {
 			let _ = res!(converter.unix_to_calclock(timestamp));
 		}
 		
-		let (hits, misses, ratio) = converter.reference_stats();
+		let (hits, _misses, ratio) = converter.reference_stats();
 		assert!(hits > 0, "Should have some reference point hits");
 		assert!(ratio > 0.0, "Hit ratio should be positive");
 		Ok(())

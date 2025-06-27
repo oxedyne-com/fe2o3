@@ -26,6 +26,7 @@ pub struct BatchProcessor {
     /// Shared timezone for batch operations.
     default_zone: CalClockZone,
     /// Pre-allocated buffers for string operations.
+    #[allow(dead_code)]
     string_buffer: String,
     /// Shared formatter for batch formatting operations.
     formatter: CalClockFormatter,

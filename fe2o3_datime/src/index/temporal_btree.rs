@@ -258,6 +258,7 @@ pub struct TemporalBTree<T: Clone> {
     /// All entries for index mapping
     all_entries: Vec<TemporalEntry<T>>,
     /// Time zone for operations
+    #[allow(dead_code)]
     zone: CalClockZone,
 }
 

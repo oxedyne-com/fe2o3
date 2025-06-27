@@ -360,7 +360,7 @@ impl TimeInteger for TimeBigInt {
 	}
 	
 	fn to_fixed_byte_array(&self, n: usize) -> Vec<u8> {
-		let mut bytes = self.to_file_byte_array();
+		let bytes = self.to_file_byte_array();
 		if bytes.len() < n {
 			// Pad with zeros at the beginning for big endian
 			let mut padded = vec![0; n - bytes.len()];

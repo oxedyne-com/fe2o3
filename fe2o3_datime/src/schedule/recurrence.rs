@@ -162,7 +162,7 @@ impl RecurrencePattern {
 
     /// Calculates next yearly execution
     fn next_yearly_execution(&self, current_time: &CalClock, target_months: &HashSet<MonthOfYear>) -> Outcome<Option<CalClock>> {
-        let current_month = current_time.month_of_year();
+        let _current_month = current_time.month_of_year();
         let current_year = current_time.year();
         
         // Try remaining months in current year
@@ -501,7 +501,7 @@ impl RecurrenceRule {
 
             // Check business calendar if enabled
             if self.respect_business_calendar {
-                let calendar = Calendar::new();
+                let _calendar = Calendar::new();
                 let calendar_date = next_time.date();
                 if !calendar_date.is_business_day() {
                     candidate = res!(self.pattern.next_execution(&next_time, &self.zone));

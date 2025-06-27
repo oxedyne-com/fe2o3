@@ -327,6 +327,7 @@ impl Action for LogAction {
 #[derive(Debug, Clone)]
 pub struct HttpAction {
     url: String,
+    #[allow(dead_code)]
     method: String,
     headers: Vec<(String, String)>,
     body: Option<String>,

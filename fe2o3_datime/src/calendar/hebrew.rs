@@ -1,6 +1,5 @@
 use crate::{
 	calendar::CalendarDate,
-	time::CalClockZone,
 };
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -542,7 +541,7 @@ mod tests {
 	#[test]
 	fn test_calendar_interface() {
 		let calendar = HebrewCalendar::new();
-		let zone = CalClockZone::utc();
+		let zone = crate::time::CalClockZone::utc();
 		
 		// Create a Gregorian date that we'll treat as Hebrew
 		let date = CalendarDate::new(2023, 9, 16, zone).unwrap();

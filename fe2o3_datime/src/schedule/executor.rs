@@ -139,7 +139,7 @@ impl TaskExecutor {
     ) -> Outcome<ActionResult> {
         use std::sync::mpsc;
 
-        let (tx, rx) = mpsc::channel::<Outcome<()>>();
+        let (_tx, _rx) = mpsc::channel::<Outcome<()>>();
         let action_context = context.clone();
         
         // We need to work around the fact that Action is not Clone

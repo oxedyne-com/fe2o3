@@ -1,4 +1,4 @@
-use crate::time::{CalClockZone, tzif::{TZifParser, TZifData, LocalTimeResult}};
+use crate::time::{CalClockZone, tzif::{TZifParser, TZifData}};
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -135,9 +135,11 @@ struct TimezoneCache {
 #[derive(Clone, Debug)]
 struct CachedTimezoneData {
     zone: CalClockZone,
+    #[allow(dead_code)]
     tzif_data: Option<TZifData>,
     source_path: PathBuf,
     last_modified: SystemTime,
+    #[allow(dead_code)]
     rules_version: String,
 }
 
@@ -521,10 +523,10 @@ impl SystemTimezoneManager {
     }
     
     /// Extracts DST transition timestamps from a timezone.
-    fn get_dst_transitions(&self, zone: &CalClockZone) -> Outcome<Vec<i64>> {
+    fn get_dst_transitions(&self, _zone: &CalClockZone) -> Outcome<Vec<i64>> {
         // This is a simplified implementation that would need to be
         // expanded based on the actual timezone implementation
-        let mut transitions = Vec::new();
+        let transitions = Vec::new();
         
         // For zones with DST rules, extract transition points
         // This would require access to the zone's internal DST rules

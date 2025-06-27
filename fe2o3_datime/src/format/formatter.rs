@@ -1,6 +1,6 @@
 use crate::{
     cache::string_intern::convenience as intern,
-    calendar::{CalendarDate, Calendar},
+    calendar::CalendarDate,
     clock::ClockTime,
     constant::{DayOfWeek, MonthOfYear},
     format::{FormatPattern, FormatToken, FormatStyle, Locale},
@@ -56,6 +56,7 @@ impl fmt::Display for FormattingError {
 #[derive(Debug, Clone)]
 pub struct CalClockFormatter {
     /// The locale for formatting (affects month/day names, date order, etc.).
+    #[allow(dead_code)]
     locale: Option<Locale>,
     /// Custom month names override (for localization).
     month_names: Option<HashMap<MonthOfYear, (String, String)>>, // (short, long)
@@ -239,9 +240,6 @@ impl CalClockFormatter {
             
             // Literal text
             FormatToken::Literal(text) => Ok(text.clone()),
-            
-            // Unsupported for now
-            _ => Err(err!("Unsupported token for CalClock: {:?}", token; Unimplemented)),
         }
     }
     
@@ -323,7 +321,7 @@ impl CalClockFormatter {
     fn format_year(&self, year: i32, style: &FormatStyle) -> Outcome<String> {
         match style {
             FormatStyle::Numeric => Ok(year.to_string()),
-            FormatStyle::Custom { width, pad_char } => {
+            FormatStyle::Custom { width, pad_char: _ } => {
                 match width {
                     2 => Ok(format!("{:02}", year % 100)),
                     4 => Ok(format!("{:04}", year)),
@@ -419,7 +417,7 @@ impl CalClockFormatter {
     fn format_day_of_year(&self, day_of_year: u16, style: &FormatStyle) -> Outcome<String> {
         match style {
             FormatStyle::Numeric => Ok(day_of_year.to_string()),
-            FormatStyle::Custom { width, pad_char } => {
+            FormatStyle::Custom { width, pad_char: _ } => {
                 Ok(format!("{:0width$}", day_of_year, width = width))
             },
             _ => Ok(day_of_year.to_string()),
@@ -435,7 +433,7 @@ impl CalClockFormatter {
     fn format_hour(&self, hour: u8, style: &FormatStyle) -> Outcome<String> {
         match style {
             FormatStyle::Numeric => Ok(hour.to_string()),
-            FormatStyle::Custom { width, pad_char } => {
+            FormatStyle::Custom { width, pad_char: _ } => {
                 Ok(format!("{:0width$}", hour, width = width))
             },
             _ => Ok(hour.to_string()),
@@ -445,7 +443,7 @@ impl CalClockFormatter {
     fn format_minute(&self, minute: u8, style: &FormatStyle) -> Outcome<String> {
         match style {
             FormatStyle::Numeric => Ok(minute.to_string()),
-            FormatStyle::Custom { width, pad_char } => {
+            FormatStyle::Custom { width, pad_char: _ } => {
                 Ok(format!("{:0width$}", minute, width = width))
             },
             _ => Ok(minute.to_string()),
@@ -455,7 +453,7 @@ impl CalClockFormatter {
     fn format_second(&self, second: u8, style: &FormatStyle) -> Outcome<String> {
         match style {
             FormatStyle::Numeric => Ok(second.to_string()),
-            FormatStyle::Custom { width, pad_char } => {
+            FormatStyle::Custom { width, pad_char: _ } => {
                 Ok(format!("{:0width$}", second, width = width))
             },
             _ => Ok(second.to_string()),
@@ -464,7 +462,7 @@ impl CalClockFormatter {
     
     fn format_millisecond(&self, millisecond: u16, style: &FormatStyle) -> Outcome<String> {
         match style {
-            FormatStyle::Custom { width, pad_char } => {
+            FormatStyle::Custom { width, pad_char: _ } => {
                 Ok(format!("{:0width$}", millisecond, width = width))
             },
             _ => Ok(format!("{:03}", millisecond)),
@@ -473,7 +471,7 @@ impl CalClockFormatter {
     
     fn format_microsecond(&self, microsecond: u16, style: &FormatStyle) -> Outcome<String> {
         match style {
-            FormatStyle::Custom { width, pad_char } => {
+            FormatStyle::Custom { width, pad_char: _ } => {
                 Ok(format!("{:0width$}", microsecond, width = width))
             },
             _ => Ok(format!("{:03}", microsecond)),
@@ -482,14 +480,14 @@ impl CalClockFormatter {
     
     fn format_nanosecond(&self, nanosecond: u32, style: &FormatStyle) -> Outcome<String> {
         match style {
-            FormatStyle::Custom { width, pad_char } => {
+            FormatStyle::Custom { width, pad_char: _ } => {
                 Ok(format!("{:0width$}", nanosecond, width = width))
             },
             _ => Ok(format!("{:09}", nanosecond)),
         }
     }
     
-    fn format_am_pm(&self, is_pm: bool, style: &FormatStyle) -> Outcome<String> {
+    fn format_am_pm(&self, is_pm: bool, _style: &FormatStyle) -> Outcome<String> {
         if let Some((ref am, ref pm)) = self.am_pm_markers {
             Ok(if is_pm { pm.clone() } else { am.clone() })
         } else {
@@ -498,11 +496,11 @@ impl CalClockFormatter {
         }
     }
     
-    fn format_timezone_id(&self, timezone_id: &str, style: &FormatStyle) -> Outcome<String> {
+    fn format_timezone_id(&self, timezone_id: &str, _style: &FormatStyle) -> Outcome<String> {
         Ok(timezone_id.to_string())
     }
     
-    fn format_timezone_offset(&self, offset_millis: i32, style: &FormatStyle) -> Outcome<String> {
+    fn format_timezone_offset(&self, offset_millis: i32, _style: &FormatStyle) -> Outcome<String> {
         let offset_seconds = offset_millis / 1000;
         let offset_hours = offset_seconds / 3600;
         let offset_mins = (offset_seconds % 3600) / 60;
@@ -514,7 +512,7 @@ impl CalClockFormatter {
         Ok(format!("{}{:02}{:02}", sign, abs_hours, abs_mins))
     }
     
-    fn format_timezone_name(&self, timezone_id: &str, style: &FormatStyle) -> Outcome<String> {
+    fn format_timezone_name(&self, timezone_id: &str, _style: &FormatStyle) -> Outcome<String> {
         // Map common timezone IDs to abbreviations
         let abbrev = match timezone_id {
             "America/New_York" => "EST",

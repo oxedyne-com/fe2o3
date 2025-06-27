@@ -146,8 +146,11 @@ impl QueuedTask {
 #[derive(Debug)]
 enum SchedulerMessage {
     Stop,
+    #[allow(dead_code)]
     AddTask(Task),
+    #[allow(dead_code)]
     RemoveTask(TaskId),
+    #[allow(dead_code)]
     GetStats,
 }
 

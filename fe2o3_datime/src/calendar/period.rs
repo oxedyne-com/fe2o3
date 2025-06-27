@@ -56,7 +56,7 @@ impl MonthPeriod {
     pub fn find(
         &self, 
         day_incrementor: &DayIncrementor, 
-        holidays: Option<&IntervalList<CalClockInterval>>
+        _holidays: Option<&IntervalList<CalClockInterval>>
     ) -> Outcome<crate::calendar::CalendarDate> {
         use crate::calendar::incrementor::DayType;
         
@@ -101,7 +101,7 @@ impl MonthPeriod {
             Some(DayType::DayOfWeek) => {
                 // Find a specific day of the week in the month
                 if let Some(target_dow) = day_incrementor.day_of_week() {
-                    let mut search_date = candidate_date.clone();
+                    let mut search_date: crate::calendar::CalendarDate;
                     let max_days = res!(candidate_date.days_in_month());
                     
                     // Find the first occurrence of the target day of week
@@ -178,6 +178,7 @@ impl MonthPeriod {
 #[derive(Clone, Debug)]
 pub struct YearPeriod {
     year: i32,
+    #[allow(dead_code)]
     zone: CalClockZone,
 }
 

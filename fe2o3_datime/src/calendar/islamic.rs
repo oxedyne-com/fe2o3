@@ -5,7 +5,6 @@
 /// The Islamic calendar is a lunar calendar with 12 months that can have either
 /// 29 or 30 days based on lunar observations.
 
-use crate::constant::MonthOfYear;
 use oxedyne_fe2o3_core::prelude::*;
 
 /// Islamic calendar conversion utilities.
@@ -93,7 +92,7 @@ impl IslamicCalendar {
         
         // Calculate total days since Islamic epoch
         let years_since_epoch = islamic_year - 1;
-        let months_since_epoch = years_since_epoch * 12 + (islamic_month as i32 - 1);
+        let _months_since_epoch = years_since_epoch * 12 + (islamic_month as i32 - 1);
         
         // Calculate days for complete years
         let days_for_years = ((years_since_epoch as f64) * Self::ISLAMIC_YEAR_LENGTH).floor() as i64;

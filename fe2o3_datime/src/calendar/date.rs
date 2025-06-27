@@ -92,6 +92,7 @@ impl CalendarDate {
     }
     
     /// Validate a date.
+    #[allow(dead_code)]
     fn validate(year: i32, month: MonthOfYear, day: u8) -> Outcome<()> {
         // Validate year range (somewhat arbitrary but reasonable)
         if year < -9999 || year > 9999 {
@@ -291,6 +292,7 @@ impl CalendarDate {
     }
     
     /// Create from a day number.
+    #[allow(dead_code)]
     fn from_day_number(mut day_number: i64, zone: CalClockZone) -> Outcome<Self> {
         // Start from year 0 and count forward or backward
         let mut year = 0;
