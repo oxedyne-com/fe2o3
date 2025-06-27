@@ -468,7 +468,7 @@ mod tests {
     }
 
     #[test]
-    fn test_utc_tai_conversion() {
+    fn test_utc_tai_conversion() -> Outcome<()> {
         let table = LeapSecondTable::standard();
         
         let utc_timestamp = 1483228800; // 2017-01-01 00:00:00 UTC
@@ -478,6 +478,7 @@ mod tests {
         // Round trip conversion
         let converted_utc = res!(table.tai_to_utc(tai_timestamp));
         assert_eq!(converted_utc, utc_timestamp);
+        Ok(())
     }
 
     #[test]
@@ -523,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn test_leap_second_boundary_handling() {
+    fn test_leap_second_boundary_handling() -> Outcome<()> {
         let table = LeapSecondTable::standard();
         
         // Test conversion around leap second boundaries
@@ -533,5 +534,6 @@ mod tests {
         // Converting back should work
         let converted_back = res!(table.tai_to_utc(tai_at_leap));
         assert_eq!(converted_back, leap_second_utc);
+        Ok(())
     }
 }

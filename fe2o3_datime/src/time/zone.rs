@@ -940,31 +940,35 @@ mod tests {
 	}
 
 	#[test]
-	fn test_fixed_offset_parsing() {
+	fn test_fixed_offset_parsing() -> Outcome<()> {
 		let gmt_plus_5 = res!(CalClockZone::new("GMT+5"));
 		assert_eq!(gmt_plus_5.raw_offset_millis(), 5 * 3600 * 1000);
 		
 		let gmt_minus_3 = res!(CalClockZone::new("GMT-3"));
 		assert_eq!(gmt_minus_3.raw_offset_millis(), -3 * 3600 * 1000);
+		Ok(())
 	}
 
 	#[test]
-	fn test_timezone_database_lookup() {
+	fn test_timezone_database_lookup() -> Outcome<()> {
 		let eastern = res!(CalClockZone::new("America/New_York"));
 		assert_eq!(eastern.id(), "America/New_York");
 		assert_eq!(eastern.raw_offset_millis(), -5 * 3600 * 1000);
+		Ok(())
 	}
 
 	#[test]
-	fn test_offset_compatibility() {
+	fn test_offset_compatibility() -> Outcome<()> {
 		let utc = CalClockZone::utc();
 		assert_eq!(res!(utc.offset_seconds(1640995200)), 0); // 2022-01-01 UTC
+		Ok(())
 	}
 
 	#[test]
-	fn test_dst_detection() {
+	fn test_dst_detection() -> Outcome<()> {
 		let eastern = res!(CalClockZone::new("America/New_York"));
 		// This would need proper date calculation in full implementation
 		assert!(!res!(eastern.in_daylight_time(0))); // Simplified test
+		Ok(())
 	}
 }

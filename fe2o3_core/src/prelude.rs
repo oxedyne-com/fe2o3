@@ -30,6 +30,8 @@ pub use crate::{
     // Synchronisation macros
     lock_read,
     lock_write,
+    lock_mutex,
+    lock_mutex_thread,
     // Test macros
     req,
     test_it,

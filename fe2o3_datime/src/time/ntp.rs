@@ -392,7 +392,7 @@ mod tests {
         
         // Should be within 1 second due to precision
         let diff = now.duration_since(converted_back).unwrap_or_else(|_| {
-            res!(converted_back.duration_since(now))
+            converted_back.duration_since(now).unwrap_or(Duration::from_secs(0))
         });
         
         assert!(diff.as_secs() <= 1);
@@ -400,7 +400,7 @@ mod tests {
 
     #[ignore] // Network test - only run manually
     #[test] 
-    fn test_ntp_query() {
+    fn test_ntp_query() -> Outcome<()> {
         let client = NtpClient::default("pool.ntp.org");
         let result = res!(client.query_time());
         
@@ -411,16 +411,18 @@ mod tests {
         // Sanity checks
         assert!(result.delay_millis < 10000); // Less than 10 seconds delay
         assert!(result.stratum > 0 && result.stratum < 16); // Valid stratum
+        Ok(())
     }
 
     #[ignore] // Network test - only run manually
     #[test]
-    fn test_ntp_pool_query() {
+    fn test_ntp_pool_query() -> Outcome<()> {
         let result = res!(NtpPool::query_reliable());
         
         println!("Pool result - Offset: {} ms, Delay: {} ms, Stratum: {}", 
                  result.offset_millis, result.delay_millis, result.stratum);
         
         assert!(result.stratum > 0);
+        Ok(())
     }
 }

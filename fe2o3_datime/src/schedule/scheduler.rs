@@ -1,29 +1,6 @@
 /// Main scheduler implementation for managing and executing scheduled tasks with real-time processing
 
 use oxedyne_fe2o3_core::prelude::*;
-
-/// Macro to handle Mutex locks with proper error handling
-macro_rules! lock_mutex {
-    ($mutex:expr) => {
-        match $mutex.lock() {
-            Ok(guard) => guard,
-            Err(_) => return Err(err!("Mutex lock failed: poisoned lock"; Lock, Poisoned)),
-        }
-    };
-}
-
-/// Macro to handle Mutex locks in thread contexts where we can't return Outcome
-macro_rules! lock_mutex_thread {
-    ($mutex:expr, $context:expr) => {
-        match $mutex.lock() {
-            Ok(guard) => guard,
-            Err(_) => {
-                eprintln!("Scheduler thread: poisoned mutex in {}", $context);
-                return;
-            }
-        }
-    };
-}
 use crate::{
     schedule::{Task, TaskId, TaskExecutor},
     time::CalClock,
@@ -548,12 +525,24 @@ impl Scheduler {
 
     /// Gets the current queue size
     pub fn queue_size(&self) -> usize {
-        lock_mutex!(self.task_queue).len()
+        match self.task_queue.lock() {
+            Ok(guard) => guard.len(),
+            Err(_) => {
+                eprintln!("Warning: Task queue mutex poisoned, returning 0");
+                0
+            }
+        }
     }
 
     /// Checks if the scheduler is currently running
     pub fn is_running(&self) -> bool {
-        *lock_mutex!(self.is_running)
+        match self.is_running.lock() {
+            Ok(guard) => *guard,
+            Err(_) => {
+                eprintln!("Warning: Is_running mutex poisoned, returning false");
+                false
+            }
+        }
     }
 }
 

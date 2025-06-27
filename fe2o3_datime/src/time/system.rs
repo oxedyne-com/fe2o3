@@ -2,16 +2,6 @@ use crate::time::{CalClockZone, tzif::{TZifParser, TZifData, LocalTimeResult}};
 
 use oxedyne_fe2o3_core::prelude::*;
 
-/// Macro to handle Mutex locks with proper error handling
-macro_rules! lock_mutex {
-    ($mutex:expr) => {
-        match $mutex.lock() {
-            Ok(guard) => guard,
-            Err(_) => return Err(err!("Mutex lock failed: poisoned lock"; Lock, Poisoned)),
-        }
-    };
-}
-
 use std::{
     collections::HashMap,
     env,

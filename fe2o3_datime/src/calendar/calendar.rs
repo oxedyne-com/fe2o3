@@ -824,12 +824,12 @@ mod tests {
     }
 
     #[test]
-    fn test_islamic_calendar() {
+    fn test_islamic_calendar() -> Outcome<()> {
         let islamic = Calendar::Islamic;
         let zone = CalClockZone::utc();
         
         // Test basic Islamic date creation
-        let islamic_date = islamic.date(1445, 1, 15, zone).unwrap();
+        let _islamic_date = ok!(islamic.date(1445, 1, 15, zone));
         // The internal representation will be converted to Gregorian equivalent
         
         // Test Islamic month lengths
@@ -841,6 +841,7 @@ mod tests {
         
         // Test a non-leap year (1444 is cycle year 4, not leap)
         assert_eq!(islamic.days_in_month(1444, 12).unwrap(), 29); // Non-leap year Dhul-Hijjah
+        Ok(())
     }
 
     #[test]

@@ -8,16 +8,6 @@ use oxedyne_fe2o3_core::prelude::*;
 
 use std::sync::Mutex;
 
-/// Macro to handle Mutex locks with proper error handling
-macro_rules! lock_mutex {
-    ($mutex:expr) => {
-        match $mutex.lock() {
-            Ok(guard) => guard,
-            Err(_) => return Err(err!("Mutex lock failed: poisoned lock"; Lock, Poisoned)),
-        }
-    };
-}
-
 /// High-performance utility for converting between Unix timestamps and CalClock instances.
 ///
 /// CalClockConverter provides optimised conversion between Unix epoch timestamps
@@ -558,7 +548,7 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn test_basic_conversion() {
+	fn test_basic_conversion() -> Outcome<()> {
 		let converter = CalClockConverter::new(CalClockZone::utc());
 		
 		// Test known timestamp: 2022-01-01 00:00:00 UTC
@@ -571,10 +561,11 @@ mod tests {
 		assert_eq!(calclock.time().hour().of(), 0);
 		assert_eq!(calclock.time().minute().of(), 0);
 		assert_eq!(calclock.time().second().of(), 0);
+		Ok(())
 	}
 
 	#[test]
-	fn test_round_trip_conversion() {
+	fn test_round_trip_conversion() -> Outcome<()> {
 		let converter = CalClockConverter::new(CalClockZone::utc());
 		let original_unix = 1640995200000;
 		
@@ -583,10 +574,11 @@ mod tests {
 		
 		// Should be equal within millisecond precision
 		assert!((original_unix - converted_unix).abs() < 1000);
+		Ok(())
 	}
 
 	#[test]
-	fn test_reference_point_optimization() {
+	fn test_reference_point_optimization() -> Outcome<()> {
 		let converter = CalClockConverter::new(CalClockZone::utc());
 		
 		// Convert multiple nearby timestamps
@@ -599,10 +591,11 @@ mod tests {
 		let (hits, misses, ratio) = converter.reference_stats();
 		assert!(hits > 0, "Should have some reference point hits");
 		assert!(ratio > 0.0, "Hit ratio should be positive");
+		Ok(())
 	}
 
 	#[test]
-	fn test_batch_conversion() {
+	fn test_batch_conversion() -> Outcome<()> {
 		let converter = CalClockConverter::new(CalClockZone::utc());
 		
 		let timestamps = vec![
@@ -620,10 +613,11 @@ mod tests {
 		
 		// Verify second timestamp (1 minute later)
 		assert_eq!(calclocks[1].time().minute().of(), 1);
+		Ok(())
 	}
 
 	#[test]
-	fn test_timezone_conversion() {
+	fn test_timezone_conversion() -> Outcome<()> {
 		let eastern = res!(CalClockZone::new("America/New_York"));
 		let converter = CalClockConverter::new(eastern);
 		
@@ -638,5 +632,6 @@ mod tests {
 		let utc_converter = CalClockConverter::new(CalClockZone::utc());
 		let utc_calclock = res!(utc_converter.unix_to_calclock(unix_millis));
 		assert_ne!(calclock.time().hour().of(), utc_calclock.time().hour().of());
+		Ok(())
 	}
 }
