@@ -6,6 +6,7 @@
 //! - A comprehensive enumeration of countries through the `regions::Country` enum
 //! - Basic celestial body identifiers via `regions::CelestialBodies`
 //! - ANSI terminal control sequences through the `chars::Term` struct
+//! - Generic person modelling and generation through the `person` module
 //!
 //! The crate maintains zero dependencies to ensure it can serve as a reliable foundation for other
 //! components. All data structures are designed to be efficient and easy to maintain, focussing on
@@ -14,4 +15,6 @@
 #![forbid(unsafe_code)]
 pub mod chars;
 pub mod culture;
+pub mod person;
+pub mod person_filters;
 pub mod regions;
