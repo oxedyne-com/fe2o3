@@ -24,7 +24,7 @@ fn main() -> Outcome<()> {
 
 fn run_tests() -> Outcome<()> {
 
-    let filter = "match";//"all";
+    let filter = "all";
     res!(base2x::test_base2x(filter));
     res!(highlight::test_highlight(filter));
     res!(pattern::test_pattern(filter));

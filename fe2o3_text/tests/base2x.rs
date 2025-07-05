@@ -880,7 +880,7 @@ pub fn test_base2x(filter: &'static str) -> Outcome<()> {
         test!("Here are the first {} characters of the alphabet:", first);
         for token in 0..first {
             let c = base2x.get_char(token);    
-            test!(" '{:0width$b}' -> {}", token, c, width = X_LEN);
+            test!(" '{:03b}' -> {}", token, c);
         }         // 12345678901234567890123456789012
         let input = "Every moment is a new beginning.";
         let input_byts = input.as_bytes();

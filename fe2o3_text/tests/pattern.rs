@@ -1,8 +1,8 @@
 use oxedyne_fe2o3_text::{
     pattern::{
-        MatcherNode,
-        MatcherOp,
-        Matcher,
+        SacssNode,
+        SacssOp,
+        Sacss,
     },
 };
 
@@ -16,8 +16,8 @@ pub fn test_pattern(filter: &'static str) -> Outcome<()> {
 
     res!(test_it(filter, &["Starts with", "all", "match"], || {
 
-        let root = MatcherNode::new_leaf(MatcherOp::StartsWith("he".to_string()));
-        let mut matcher = Matcher::new(root);
+        let root = SacssNode::new_leaf(SacssOp::StartsWith("he".to_string()));
+        let mut matcher = Sacss::new(root);
 
         let input = "hello world hello";
         let mut all_results = Vec::new();
