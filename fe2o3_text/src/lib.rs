@@ -30,5 +30,6 @@ pub mod pattern;
 pub mod split;
 pub mod string;
 pub mod phrase;
+pub mod table;
 
 pub use core::Text;
