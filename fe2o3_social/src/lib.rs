@@ -13,5 +13,6 @@
 //! enumerations that provide compile-time guarantees of correctness.
 //!
 #![forbid(unsafe_code)]
-pub mod chars;
-pub mod regions;
+pub mod culture;
+pub mod person;
+pub mod person_filters;

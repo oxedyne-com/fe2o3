@@ -1,0 +1,13 @@
+[package]
+name = "oxedyne_fe2o3_social"
+version = "0.5.0"
+authors = ["h00gs <hello@oxedyne.io>"]
+edition = "2021"
+license = "BSD-2-Clause/Apache-2.0"
+description = "Hematite social utilities library."
+repository = "https://github.com/oxedyne-io/fe2o3"
+
+[dependencies]
+oxedyne_fe2o3_core = { path = "../fe2o3_core" }
+
+[dev-dependencies]

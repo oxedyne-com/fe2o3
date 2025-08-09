@@ -4,15 +4,7 @@ Hematite is a collection of crates built from first principles, providing founda
 
 ## This crate
 
-This is a major application-level crate providing secure peer-to-peer networking via UDP. The Shield (Signed Hash In Every Little Datagram) protocol offers:
-
-- Security-focused UDP messaging with post-quantum cryptography options
-- A lightweight handshake procedure for establishing encrypted sessions
-- Robust denial of service mitigation through proof of work validation
-- Flexible choice of cryptographic primitives for encryption, signing and key derivation
-- Modular design allowing custom protocol implementations
-
-The crate includes both a library for building Shield protocol applications and a reference UDP server implementation.
+This is an application level crate in the Hematite ecosystem that provides tools for creating, manipulating and simulating social networks.
 
 ## Supporting Development
 

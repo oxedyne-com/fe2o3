@@ -70,14 +70,6 @@ tui 		= ["dep:oxedyne_fe2o3_tui"]
 units 		= ["dep:oxedyne_fe2o3_units"]
 
 [dependencies]
-# List all Hematite crates here so that they can be re-exported in lib.rs, allowing users to import the oxedize_fe2o3 workspace from crates.  So in addition to being able to import individual crates,:
-#
-#  use oxedyne_fe2o3_core::prelude::*;
-#
-# users can also do this:
-#
-#  use oxedize_fe2o3::core::prelude::*;
-#
 oxedyne_fe2o3_bot =         { path = "fe2o3_bot",			optional = true }
 oxedyne_fe2o3_core =        { path = "fe2o3_core",			optional = true }
 oxedyne_fe2o3_crypto =      { path = "fe2o3_crypto",		optional = true }
