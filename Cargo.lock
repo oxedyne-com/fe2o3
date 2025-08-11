@@ -2196,6 +2196,8 @@ name = "oxedyne_fe2o3_social"
 version = "0.5.0"
 dependencies = [
  "oxedyne_fe2o3_core",
+ "oxedyne_fe2o3_data",
+ "strum 0.25.0",
 ]
 
 [[package]]

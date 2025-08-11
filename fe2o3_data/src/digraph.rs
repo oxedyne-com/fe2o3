@@ -20,13 +20,13 @@ pub trait NodeId: Clone + fmt::Debug + Eq + Hash + Send + Sync {}
 
 /// Trait for data stored within graph nodes.
 /// 
-/// Node data must be cloneable and debuggable for graph operations.
-pub trait NodeData: Clone + fmt::Debug + Send + Sync {}
+/// Node data must be cloneable, debuggable, and displayable for graph operations.
+pub trait NodeData: Clone + fmt::Debug + fmt::Display + Send + Sync {}
 
 /// Trait for data stored on graph links (edges).
 /// 
-/// Link data must be cloneable and debuggable for graph operations.
-pub trait LinkData: Clone + fmt::Debug + Send + Sync {}
+/// Link data must be cloneable, debuggable, and displayable for graph operations.
+pub trait LinkData: Clone + fmt::Debug + fmt::Display + Send + Sync {}
 
 /// A node in the directed graph.
 /// 
@@ -83,6 +83,10 @@ impl<ID: NodeId, ND: NodeData, LD: LinkData> DiGraph<ID, ND, LD> {
         Self {
             nodes: HashMap::new(),
         }
+    }
+
+    pub fn len(&self) -> usize {
+        self.nodes.len()
     }
 
     /// Inserts a new node into the graph.
@@ -334,5 +338,62 @@ impl<ID: NodeId, ND: NodeData, LD: LinkData> DiGraph<ID, ND, LD> {
                 }
             })
             .collect()
+    }
+    
+    /// Gets a node's data by ID.
+    /// 
+    /// # Arguments
+    /// * `id` - The node identifier.
+    /// 
+    /// # Returns
+    /// Reference to the node's data if it exists.
+    pub fn get_node(&self, id: &ID) -> Option<&ND> {
+        self.nodes.get(id).map(|node| &node.data)
+    }
+    
+    /// Gets all outgoing links from a node.
+    /// 
+    /// # Arguments
+    /// * `id` - The source node identifier.
+    /// 
+    /// # Returns
+    /// Vector of (target_id, link_data) tuples for all outgoing links.
+    pub fn get_links_from(&self, id: &ID) -> Vec<(&ID, &LD)> {
+        self.nodes
+            .get(id)
+            .map(|node| {
+                node.links
+                    .iter()
+                    .map(|link| (&link.to, &link.data))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    
+    /// Gets all incoming links to a node.
+    /// 
+    /// # Arguments
+    /// * `id` - The target node identifier.
+    /// 
+    /// # Returns
+    /// Vector of (source_id, link_data) tuples for all incoming links.
+    pub fn get_links_to(&self, id: &ID) -> Vec<(&ID, &LD)> {
+        let mut incoming = Vec::new();
+        for (from_id, node) in &self.nodes {
+            for link in &node.links {
+                if &link.to == id {
+                    incoming.push((from_id, &link.data));
+                }
+            }
+        }
+        incoming
+    }
+    
+    /// Iterates over all nodes in the graph.
+    /// 
+    /// # Returns
+    /// Iterator over (node_id, node_data) pairs.
+    pub fn iter_nodes(&self) -> impl Iterator<Item = (&ID, &ND)> {
+        self.nodes.iter().map(|(id, node)| (id, &node.data))
     }
 }

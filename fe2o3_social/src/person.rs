@@ -5,6 +5,8 @@ use oxedyne_fe2o3_core::{
     rand::Rand,
 };
 
+use std::fmt;
+
 /// Represents a generic person with basic attributes.
 #[derive(Clone, Debug)]
 pub struct Person {
@@ -34,6 +36,12 @@ pub struct Person {
     pub education: EducationLevel,
     /// Income bracket.
     pub income_bracket: IncomeBracket,
+}
+
+impl fmt::Display for Person {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.given_name)
+    }
 }
 
 /// Gender representation.

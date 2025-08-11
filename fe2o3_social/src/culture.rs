@@ -28,7 +28,7 @@ impl Gender {
     /// 
     /// # Example
     /// ```
-    /// use oxedyne_fe2o3_stds::culture::Gender;
+    /// use oxedyne_fe2o3_social::culture::Gender;
     /// 
     /// // 10% chance of minority gender, 90% chance of Male/Female.
     /// let gender = Gender::rand_minority(0.1);
