@@ -36,6 +36,7 @@ pub use crate::{
     req,
     test_it,
 };
+pub use crate::mem::get_memory_usage_mb;
 pub use crate::error::{
     Error,
     ErrMsg,

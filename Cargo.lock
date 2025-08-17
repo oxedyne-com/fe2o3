@@ -2264,6 +2264,7 @@ dependencies = [
  "num-bigint 0.3.3",
  "oxedyne_fe2o3_core",
  "oxedyne_fe2o3_jdat",
+ "oxedyne_fe2o3_num",
  "oxedyne_fe2o3_stds",
  "oxedyne_fe2o3_test",
  "oxedyne_fe2o3_text",

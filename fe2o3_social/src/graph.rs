@@ -15,9 +15,12 @@ use oxedyne_fe2o3_data::digraph::{
     NodeId,
 };
 
-use crate::person::{
-    Person,
-    PersonGenConfig,
+use crate::{
+    mmap_graph::MmapGraph,
+    person::{
+        Person,
+        PersonGenConfig,
+    },
 };
 
 use std::{
@@ -27,9 +30,111 @@ use std::{
 };
 
 
+/// Graph storage type - either in-memory or memory-mapped.
+pub enum SocialGraph {
+    /// In-memory graph using HashMap storage.
+    InMemory(DiGraph<PersonId, PersonData, SocialLink>),
+    /// Memory-mapped graph using disk storage for edges, in-memory for nodes.
+    MappedMemory {
+        /// Node data stored in memory for fast access.
+        nodes: HashMap<PersonId, PersonData>,
+        /// Edge data stored in memory-mapped file.
+        edges: MmapGraph,
+    },
+}
+
+impl SocialGraph {
+
+    /// Returns the number of nodes in the graph.
+    pub fn len(&self) -> usize {
+        match self {
+            SocialGraph::InMemory(graph) => graph.len(),
+            SocialGraph::MappedMemory { nodes, .. } => nodes.len(),
+        }
+    }
+
+    /// Returns an iterator over all nodes in the graph.
+    pub fn iter_nodes(&self) -> Box<dyn Iterator<Item = (&PersonId, &PersonData)> + '_> {
+        match self {
+            SocialGraph::InMemory(graph) => Box::new(graph.iter_nodes()),
+            SocialGraph::MappedMemory { nodes, .. } => Box::new(nodes.iter()),
+        }
+    }
+
+    /// Gets outgoing links from a node.
+    /// 
+    /// Note: Returns owned data for MmapGraph to avoid lifetime issues.
+    pub fn get_links_from(&self, id: &PersonId) -> Vec<(PersonId, SocialLink)> {
+        match self {
+            SocialGraph::InMemory(graph) => {
+                // Convert borrowed data to owned for consistency
+                graph.get_links_from(id)
+                    .into_iter()
+                    .map(|(id, link)| (id.clone(), link.clone()))
+                    .collect()
+            },
+            SocialGraph::MappedMemory { edges, .. } => {
+                // Query the mmap file for edges from this node
+                match edges.get_outgoing_edges(id.0) {
+                    Ok(edge_list) => {
+                        edge_list.into_iter().map(|(target_id, link_data)| {
+                            let person_id = PersonId(target_id);
+                            let social_link = SocialLink { packed: link_data };
+                            (person_id, social_link)
+                        }).collect()
+                    },
+                    Err(_) => Vec::new(),
+                }
+            }
+        }
+    }
+
+    /// Gets node data for a specific ID.
+    pub fn get_node(&self, id: &PersonId) -> Option<&PersonData> {
+        match self {
+            SocialGraph::InMemory(graph) => graph.get_node(id),
+            SocialGraph::MappedMemory { nodes, .. } => nodes.get(id),
+        }
+    }
+
+    /// Gets incoming links to a node.
+    pub fn get_links_to(&self, id: &PersonId) -> Vec<(PersonId, SocialLink)> {
+        match self {
+            SocialGraph::InMemory(graph) => {
+                // Convert borrowed data to owned for consistency
+                graph.get_links_to(id)
+                    .into_iter()
+                    .map(|(id, link)| (id.clone(), link.clone()))
+                    .collect()
+            },
+            SocialGraph::MappedMemory { .. } => {
+                // For MmapGraph, we'd need to scan the entire file for incoming edges.
+                // This is expensive - for now, return empty.
+                Vec::new()
+            }
+        }
+    }
+
+    /// Gets the total number of edges in the graph.
+    pub fn edge_count(&self) -> usize {
+        match self {
+            SocialGraph::InMemory(graph) => {
+                // Count all outgoing edges in DiGraph
+                graph.iter_nodes()
+                    .map(|(id, _)| graph.get_links_from(id).len())
+                    .sum()
+            }
+            SocialGraph::MappedMemory { edges, .. } => {
+                edges.total_edges()
+            }
+        }
+    }
+}
+
+
 /// Person identifier in the social network.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct PersonId(pub usize);
+pub struct PersonId(pub u32);
 
 impl NodeId for PersonId {}
 
@@ -61,7 +166,7 @@ impl NodeData for PersonData {}
 /// 
 /// Represents a numbered circle from 0 (innermost) to n-1 (outermost).
 #[derive(Clone, Debug, Copy, PartialEq, Eq)]
-pub struct CircleType(pub usize);
+pub struct CircleType(pub u8);
 
 impl CircleType {
     /// Converts circle type to matrix index.
@@ -69,7 +174,7 @@ impl CircleType {
     /// # Returns
     /// Index for use in reciprocity matrix.
     pub fn to_index(&self) -> usize {
-        self.0
+        self.0 as usize
     }
     
     /// Creates circle type from matrix index.
@@ -81,13 +186,13 @@ impl CircleType {
     /// # Returns
     /// Corresponding circle type or error if invalid.
     pub fn from_index(idx: usize, max_circles: usize) -> Outcome<Self> {
-        if idx >= max_circles {
+        if idx >= max_circles || idx > 255 {
             Err(err!(
                 "Invalid circle index: {} (max: {})", idx, max_circles - 1;
                 Invalid, Index
             ))
         } else {
-            Ok(Self(idx))
+            Ok(Self(idx as u8))
         }
     }
     
@@ -113,15 +218,42 @@ impl CircleType {
 }
 
 /// Data stored on each social link.
-#[derive(Clone, Debug)]
+/// 
+/// Compact representation using a single byte to store both circle types.
+/// Lower 4 bits: from_circle, Upper 4 bits: to_circle.
+#[derive(Clone, Debug, Copy)]
 pub struct SocialLink {
-    pub from_circle:	CircleType,
-    pub to_circle:		CircleType,
+    pub packed: u8,
+}
+
+impl SocialLink {
+    /// Creates a new social link.
+    /// 
+    /// # Arguments
+    /// * `from_circle` - Source circle type.
+    /// * `to_circle` - Target circle type.
+    /// 
+    /// # Returns
+    /// New social link instance.
+    pub fn new(from_circle: CircleType, to_circle: CircleType) -> Self {
+        let packed = (to_circle.0 << 4) | (from_circle.0 & 0x0F);
+        Self { packed }
+    }
+    
+    /// Gets the source circle.
+    pub fn from_circle(&self) -> CircleType {
+        CircleType(self.packed & 0x0F)
+    }
+    
+    /// Gets the target circle.
+    pub fn to_circle(&self) -> CircleType {
+        CircleType(self.packed >> 4)
+    }
 }
 
 impl fmt::Display for SocialLink {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "C{} -> C{}", self.from_circle.0, self.to_circle.0)
+        write!(f, "C{} -> C{}", self.from_circle().0, self.to_circle().0)
     }
 }
 
@@ -230,6 +362,10 @@ pub struct NetworkConfig {
     pub reciprocity_matrix:	Vec<Vec<f64>>, // NxN matrix for circle reciprocity.
     pub circle_labels:		Option<CircleLabels>, // Optional labels for circles.
     pub link_mode:			LinkMode, // Whether links are reciprocal or not.
+    pub progress_interval:	Option<usize>, // Report progress every N nodes (None = no progress reports).
+    pub memory_limit_mb:	Option<f64>, // Memory limit in MB (None = no limit).
+    pub chunk_size:			Option<usize>, // Process stubs in chunks of this size (None = process all at once).
+    pub use_mmap:			Option<String>, // Use memory-mapped graph with specified file path (None = use in-memory DiGraph).
 }
 
 impl NetworkConfig {
@@ -279,6 +415,10 @@ impl NetworkConfig {
             ],
             circle_labels: Some(CircleLabels::default()),
             link_mode: LinkMode::Reciprocal, // Default to reciprocal for backward compatibility.
+            progress_interval: None, // No progress reporting by default.
+            memory_limit_mb: None, // No memory limit by default.
+            chunk_size: None, // Process all stubs at once by default.
+            use_mmap: None, // Use in-memory DiGraph by default.
         }
     }
 }
@@ -295,39 +435,338 @@ pub struct GraphStatistics {
 /// 
 /// Creates a directed graph representing social relationships between
 /// people based on profile types and geographic distribution.
+/// Automatically manages memory by offloading to disk when needed.
 /// 
 /// # Arguments
 /// * `config` - Network generation configuration.
 /// 
 /// # Returns
-/// A directed graph of social connections or error if generation fails.
+/// A social graph (either in-memory or memory-mapped) or error if generation fails.
 pub fn generate_social_network(
     config: NetworkConfig,
 )
-    -> Outcome<DiGraph<PersonId, PersonData, SocialLink>>
+    -> Outcome<SocialGraph>
 {
+    use oxedyne_fe2o3_core::info;
+    use oxedyne_fe2o3_core::mem::get_memory_usage_mb;
+    
+    // Check if we should use memory-mapped storage.
+    if let Some(mmap_path) = config.use_mmap.clone() {
+        return generate_mmap_social_network(config, mmap_path);
+    }
+    
+    // Use in-memory DiGraph.
     let mut graph = DiGraph::new();
     
+    if let Some(interval) = config.progress_interval {
+        info!("=== SOCIAL NETWORK GENERATION ===");
+        info!("Population: {}", config.population);
+        info!("Progress reporting every {} nodes", interval);
+    }
+    
     // Step 1: Create nodes with sampled properties.
+    if config.progress_interval.is_some() {
+        info!("Step 1: Creating {} nodes...", config.population);
+    }
     let nodes = res!(create_nodes(&config));
     
-    // Insert nodes into graph.
+    // Insert nodes into graph with progress reporting.
+    let mut nodes_processed = 0;
     for (id, data) in &nodes {
         graph.insert(id.clone(), data.clone());
+        nodes_processed += 1;
+        
+        if let Some(interval) = config.progress_interval {
+            if nodes_processed % interval == 0 || nodes_processed == config.population {
+                let progress_pct = (nodes_processed as f64 / config.population as f64) * 100.0;
+                let memory_mb = get_memory_usage_mb();
+                info!("Nodes: {}/{} ({:.1}%) | Memory: {:.1}MB", 
+                      nodes_processed, config.population, progress_pct, memory_mb);
+            }
+        }
     }
     
     // Step 2: Create stubs based on circle sizes.
+    if config.progress_interval.is_some() {
+        info!("Step 2: Creating connection stubs...");
+    }
     let stubs = create_stubs(&nodes);
     
     // Step 3: Match stubs to create edges.
-    let edges = res!(match_stubs(stubs, &config.reciprocity_matrix, config.num_circles, config.link_mode));
+    if config.progress_interval.is_some() {
+        let total_stubs = stubs.len();
+        info!("Step 3: Matching {} stubs to create edges...", total_stubs);
+    }
+    // Process stubs and insert edges directly into graph with memory management.
+    let total_edges = res!(match_stubs_and_insert_directly(
+        &mut graph,
+        stubs, 
+        &config.reciprocity_matrix, 
+        config.num_circles, 
+        config.link_mode, 
+        config.progress_interval,
+        config.memory_limit_mb,
+        config.chunk_size
+    ));
     
-    // Insert edges into graph.
-    for (from, to, link_data) in edges {
-        graph.link(&from, &to, link_data);
+    if config.progress_interval.is_some() {
+        let memory_mb = get_memory_usage_mb();
+        info!("Social network generation complete: {} nodes, {} edges | Memory: {:.1}MB", 
+              config.population, total_edges, memory_mb);
     }
     
-    Ok(graph)
+    Ok(SocialGraph::InMemory(graph))
+}
+
+/// Generates social network using memory-mapped storage.
+fn generate_mmap_social_network(
+    config: NetworkConfig,
+    mmap_path: String,
+) -> Outcome<SocialGraph> {
+    use oxedyne_fe2o3_core::info;
+    use oxedyne_fe2o3_core::mem::get_memory_usage_mb;
+    use crate::mmap_graph::MmapGraphBuilder;
+    use std::path::Path;
+    
+    // Check if the mmap file already exists and has content.
+    if Path::new(&mmap_path).exists() {
+        if let Ok(metadata) = std::fs::metadata(&mmap_path) {
+            if metadata.len() > 0 {
+                if let Some(_interval) = config.progress_interval {
+                    info!("=== LOADING EXISTING MEMORY-MAPPED SOCIAL NETWORK ===");
+                    info!("Population: {}", config.population);
+                    info!("Memory-mapped file: {}", mmap_path);
+                    info!("File size: {:.1} MB", metadata.len() as f64 / (1024.0 * 1024.0));
+                }
+                
+                // Load existing mmap graph.
+                let edges = res!(MmapGraph::load_existing(&mmap_path));
+                
+                // Recreate nodes using same random seed and parameters for consistency.
+                let nodes_vec = res!(create_nodes(&config));
+                let nodes: HashMap<PersonId, PersonData> = nodes_vec.into_iter().collect();
+                
+                return Ok(SocialGraph::MappedMemory { nodes, edges });
+            }
+        }
+    }
+    
+    if let Some(interval) = config.progress_interval {
+        info!("=== MEMORY-MAPPED SOCIAL NETWORK GENERATION ===");
+        info!("Population: {}", config.population);
+        info!("Progress reporting every {} nodes", interval);
+        info!("Memory-mapped file: {}", mmap_path);
+    }
+    
+    // Step 1: Create nodes with sampled properties.
+    if config.progress_interval.is_some() {
+        info!("Step 1: Creating {} nodes...", config.population);
+    }
+    let nodes = res!(create_nodes(&config));
+    
+    // Estimate total edges for mmap file sizing.
+    let stubs = create_stubs(&nodes);
+    // For reciprocal/symmetric modes, each stub pair creates 2 edges (A→B and B→A).
+    // For non-reciprocal mode, each pair creates 1 edge.
+    // Add 10% safety margin for edge case variations.
+    let base_edges = match config.link_mode {
+        LinkMode::NonReciprocal => stubs.len() / 2,
+        _ => stubs.len(), // Reciprocal and Symmetric create 2 edges per pair
+    };
+    let estimated_edges = (base_edges as f64 * 1.1) as usize;
+    
+    if config.progress_interval.is_some() {
+        info!("Step 2: Creating memory-mapped graph (estimated {} edges)...", estimated_edges);
+    }
+    
+    // Create memory-mapped graph builder.
+    let mut builder = res!(MmapGraphBuilder::new(&mmap_path, estimated_edges));
+    
+    // Step 3: Match stubs and write directly to memory-mapped file.
+    if config.progress_interval.is_some() {
+        let total_stubs = stubs.len();
+        info!("Step 3: Matching {} stubs and writing to mmap file...", total_stubs);
+    }
+    
+    let total_edges = res!(match_stubs_and_insert_to_mmap(
+        &mut builder,
+        stubs,
+        &config.reciprocity_matrix,
+        config.num_circles,
+        config.link_mode,
+        config.progress_interval,
+        config.memory_limit_mb,
+        config.chunk_size
+    ));
+    
+    let mmap_graph = res!(builder.build());
+    
+    // Save the index for fast future lookups
+    info!("Saving index for fast graph lookups...");
+    res!(mmap_graph.save_index(&mmap_path));
+    
+    // Convert nodes Vec to HashMap for consistent interface.
+    let mut node_map = HashMap::new();
+    for (id, data) in nodes {
+        node_map.insert(id, data);
+    }
+    
+    if config.progress_interval.is_some() {
+        let memory_mb = get_memory_usage_mb();
+        info!("Memory-mapped social network complete: {} nodes, {} edges | Memory: {:.1}MB", 
+              config.population, total_edges, memory_mb);
+    }
+    
+    Ok(SocialGraph::MappedMemory {
+        nodes: node_map,
+        edges: mmap_graph,
+    })
+}
+
+/// Matches stubs and inserts edges directly into memory-mapped graph.
+fn match_stubs_and_insert_to_mmap(
+    builder: &mut crate::mmap_graph::MmapGraphBuilder,
+    stubs: Vec<Stub>,
+    reciprocity_matrix: &Vec<Vec<f64>>,
+    num_circles: usize,
+    link_mode: LinkMode,
+    progress_interval: Option<usize>,
+    memory_limit_mb: Option<f64>,
+    chunk_size: Option<usize>,
+) -> Outcome<usize> {
+    use oxedyne_fe2o3_core::info;
+    use oxedyne_fe2o3_core::mem::get_memory_usage_mb;
+    
+    // Check initial memory usage.
+    let initial_memory = get_memory_usage_mb();
+    if let Some(limit) = memory_limit_mb {
+        if initial_memory > limit {
+            return Err(err!("Memory usage ({:.1}MB) already exceeds limit ({:.1}MB)", 
+                           initial_memory, limit; Invalid, Input));
+        }
+    }
+    
+    // Use chunked processing for memory efficiency (always use chunked for mmap).
+    let effective_chunk_size = chunk_size.unwrap_or_else(|| {
+        // Auto-calculate chunk size based on memory constraints.
+        if let Some(limit) = memory_limit_mb {
+            // Estimate: aim to use at most 60% of memory limit for stubs.
+            let available_mb = limit * 0.6;
+            let bytes_per_stub = std::mem::size_of::<Stub>() as f64;
+            let stubs_per_mb = 1_048_576.0 / bytes_per_stub;
+            (available_mb * stubs_per_mb) as usize
+        } else {
+            // Default chunk size: 10k stubs for mmap (smaller chunks).
+            10_000
+        }
+    });
+    
+    if progress_interval.is_some() {
+        info!("Using chunked processing for mmap: {} stubs per chunk", effective_chunk_size);
+    }
+    
+    match_stubs_chunked_mmap(
+        builder,
+        stubs,
+        reciprocity_matrix,
+        num_circles,
+        link_mode,
+        progress_interval,
+        memory_limit_mb,
+        effective_chunk_size
+    )
+}
+
+/// Matches stubs in chunks and writes directly to memory-mapped graph.
+fn match_stubs_chunked_mmap(
+    builder: &mut crate::mmap_graph::MmapGraphBuilder,
+    mut stubs: Vec<Stub>,
+    reciprocity_matrix: &Vec<Vec<f64>>,
+    num_circles: usize,
+    link_mode: LinkMode,
+    progress_interval: Option<usize>,
+    memory_limit_mb: Option<f64>,
+    chunk_size: usize,
+) -> Outcome<usize> {
+    use oxedyne_fe2o3_core::info;
+    use oxedyne_fe2o3_core::mem::get_memory_usage_mb;
+    
+    let mut total_edges = 0;
+    let initial_stubs = stubs.len();
+    let total_chunks = (initial_stubs + chunk_size - 1) / chunk_size;
+    
+    // Shuffle all stubs first for better randomization.
+    shuffle_stubs(&mut stubs);
+    
+    if progress_interval.is_some() {
+        info!("Processing {} stubs in {} chunks of size {}", initial_stubs, total_chunks, chunk_size);
+    }
+    
+    let mut chunk_num = 0;
+    while !stubs.is_empty() {
+        chunk_num += 1;
+        
+        // Extract chunk from the end of the vector.
+        let current_chunk_size = chunk_size.min(stubs.len());
+        let chunk_start = stubs.len() - current_chunk_size;
+        let chunk: Vec<Stub> = stubs.drain(chunk_start..).collect();
+        
+        // Check memory usage before processing chunk.
+        let current_memory = get_memory_usage_mb();
+        if let Some(limit) = memory_limit_mb {
+            if current_memory > limit {
+                return Err(err!("Memory usage ({:.1}MB) exceeds limit ({:.1}MB) at chunk {}/{}", 
+                               current_memory, limit, chunk_num, total_chunks; Invalid, Input));
+            }
+        }
+        
+        if let Some(_progress_interval) = progress_interval {
+            // Report more frequently for large numbers of chunks to provide better visibility
+            let report_interval = if total_chunks > 1000 { 
+                std::cmp::max(1, total_chunks / 200)  // Report ~200 times total for large jobs
+            } else {
+                10  // Original: every 10 chunks for smaller jobs
+            };
+            
+            if chunk_num % report_interval == 1 || chunk_num == total_chunks {
+                let percent_complete = (chunk_num as f64 / total_chunks as f64) * 100.0;
+                info!("Processing chunk {}/{} ({:.1}%) | {} stubs | Memory: {:.1}MB | {} edges so far", 
+                      chunk_num, total_chunks, percent_complete, chunk.len(), current_memory, total_edges);
+            }
+        }
+        
+        // Process this chunk and insert edges directly into mmap builder.
+        let chunk_edges = res!(match_stubs_simple_mmap(
+            builder,
+            chunk,
+            reciprocity_matrix,
+            num_circles,
+            link_mode
+        ));
+        
+        total_edges += chunk_edges;
+        
+        // Periodic memory check during processing.
+        if chunk_num % 50 == 0 {
+            let current_memory = get_memory_usage_mb();
+            if let Some(limit) = memory_limit_mb {
+                if current_memory > limit * 0.9 {
+                    if progress_interval.is_some() {
+                        info!("WARNING: Memory usage ({:.1}MB) approaching limit ({:.1}MB)", 
+                              current_memory, limit);
+                    }
+                }
+            }
+        }
+    }
+    
+    if progress_interval.is_some() {
+        let final_memory = get_memory_usage_mb();
+        info!("Chunked stub matching to mmap complete: {} edges created | Memory: {:.1}MB", 
+              total_edges, final_memory);
+    }
+    
+    Ok(total_edges)
 }
 
 /// Filter for selecting which nodes to dump.
@@ -414,7 +853,7 @@ pub fn dump_graph(
     
     // Get all nodes and sort by ID.
     let mut nodes: Vec<_> = graph.iter_nodes()
-        .filter(|(id, _)| filter.matches(id.0))
+        .filter(|(id, _)| filter.matches(id.0 as usize))
         .collect();
     nodes.sort_by_key(|(id, _)| id.0);
     
@@ -585,7 +1024,7 @@ fn create_nodes(
             circle_sizes,
         };
         
-        nodes.push((PersonId(i), data));
+        nodes.push((PersonId(i as u32), data));
     }
     
     Ok(nodes)
@@ -719,7 +1158,7 @@ fn create_stubs(nodes: &[(PersonId, PersonData)]) -> Vec<Stub> {
     
     for (id, data) in nodes {
         for (circle_idx, &size) in data.circle_sizes.iter().enumerate() {
-            let circle_type = CircleType(circle_idx);
+            let circle_type = CircleType(circle_idx as u8);
             
             for _ in 0..size {
                 stubs.push(Stub {
@@ -747,15 +1186,202 @@ fn create_stubs(nodes: &[(PersonId, PersonData)]) -> Vec<Stub> {
 /// 
 /// # Returns
 /// Vector of edges (from, to, link data) or error if matching fails.
+
+/// Matches stubs and inserts edges directly into graph to avoid memory accumulation.
+/// 
+/// This is the memory-efficient approach that doesn't build up large edge vectors.
+/// Instead, edges are inserted into the graph as they're created.
+/// 
+/// # Arguments
+/// * `graph` - Mutable reference to the graph to insert edges into.
+/// * `stubs` - Vector of connection stubs to match.
+/// * `reciprocity_matrix` - Probability matrix for reciprocal connections.
+/// * `num_circles` - Number of social circles.
+/// * `link_mode` - Whether to create reciprocal or non-reciprocal links.
+/// * `progress_interval` - Report progress every N nodes (None = no progress).
+/// * `memory_limit_mb` - Memory limit in MB (None = no limit).
+/// * `chunk_size` - Process stubs in chunks of this size (None = process all at once).
+/// 
+/// # Returns
+/// Total number of edges created or error if matching fails.
+fn match_stubs_and_insert_directly(
+    graph: &mut DiGraph<PersonId, PersonData, SocialLink>,
+    stubs: Vec<Stub>,
+    reciprocity_matrix: &Vec<Vec<f64>>,
+    num_circles: usize,
+    link_mode: LinkMode,
+    progress_interval: Option<usize>,
+    memory_limit_mb: Option<f64>,
+    chunk_size: Option<usize>,
+)
+    -> Outcome<usize>
+{
+    use oxedyne_fe2o3_core::info;
+    use oxedyne_fe2o3_core::mem::get_memory_usage_mb;
+    
+    // Check initial memory usage.
+    let initial_memory = get_memory_usage_mb();
+    if let Some(limit) = memory_limit_mb {
+        if initial_memory > limit {
+            return Err(err!("Memory usage ({:.1}MB) already exceeds limit ({:.1}MB)", 
+                           initial_memory, limit; Invalid, Input));
+        }
+    }
+    
+    // Determine processing strategy.
+    let use_chunked = chunk_size.is_some() || memory_limit_mb.is_some();
+    
+    if use_chunked {
+        // Use chunked processing for memory efficiency.
+        let effective_chunk_size = chunk_size.unwrap_or_else(|| {
+            // Auto-calculate chunk size based on memory constraints.
+            if let Some(limit) = memory_limit_mb {
+                // Estimate: aim to use at most 60% of memory limit for stubs.
+                let available_mb = limit * 0.6;
+                let bytes_per_stub = std::mem::size_of::<Stub>() as f64;
+                let stubs_per_mb = 1_048_576.0 / bytes_per_stub;
+                (available_mb * stubs_per_mb) as usize
+            } else {
+                // Default chunk size: 50k stubs.
+                50_000
+            }
+        });
+        
+        if progress_interval.is_some() {
+            info!("Using chunked processing: {} stubs per chunk", effective_chunk_size);
+        }
+        
+        match_stubs_chunked_direct(
+            graph,
+            stubs,
+            reciprocity_matrix,
+            num_circles,
+            link_mode,
+            progress_interval,
+            memory_limit_mb,
+            effective_chunk_size
+        )
+    } else {
+        // Use original algorithm but insert directly.
+        let edges = res!(match_stubs(
+            stubs,
+            reciprocity_matrix,
+            num_circles,
+            link_mode,
+            progress_interval
+        ));
+        
+        // Insert edges into graph.
+        let total_edges = edges.len();
+        if progress_interval.is_some() {
+            info!("Step 4: Inserting {} edges into graph...", total_edges);
+        }
+        
+        for (from, to, link_data) in edges {
+            graph.link(&from, &to, link_data);
+        }
+        
+        Ok(total_edges)
+    }
+}
+
+
+/// Matches stubs to create edges with memory management and chunked processing.
+/// 
+/// Processes stubs in configurable chunks to manage memory usage for large networks.
+/// Monitors memory usage and can enforce limits to prevent system overload.
+/// 
+/// # Arguments
+/// * `stubs` - Vector of connection stubs to match.
+/// * `reciprocity_matrix` - Probability matrix for reciprocal connections.
+/// * `num_circles` - Number of social circles.
+/// * `link_mode` - Whether to create reciprocal or non-reciprocal links.
+/// * `progress_interval` - Report progress every N nodes (None = no progress).
+/// * `memory_limit_mb` - Memory limit in MB (None = no limit).
+/// * `chunk_size` - Process stubs in chunks of this size (None = process all at once).
+/// 
+/// # Returns
+/// Vector of edges (from, to, link data) or error if matching fails.
+#[allow(dead_code)]
+fn match_stubs_with_memory_management(
+    stubs: Vec<Stub>,
+    reciprocity_matrix: &Vec<Vec<f64>>,
+    num_circles: usize,
+    link_mode: LinkMode,
+    progress_interval: Option<usize>,
+    memory_limit_mb: Option<f64>,
+    chunk_size: Option<usize>,
+)
+    -> Outcome<Vec<(PersonId, PersonId, SocialLink)>>
+{
+    use oxedyne_fe2o3_core::info;
+    use oxedyne_fe2o3_core::mem::get_memory_usage_mb;
+    
+    // Check initial memory usage.
+    let initial_memory = get_memory_usage_mb();
+    if let Some(limit) = memory_limit_mb {
+        if initial_memory > limit {
+            return Err(err!("Memory usage ({:.1}MB) already exceeds limit ({:.1}MB)", 
+                           initial_memory, limit; Invalid, Input));
+        }
+    }
+    
+    // Determine processing strategy.
+    let use_chunked = chunk_size.is_some() || memory_limit_mb.is_some();
+    
+    if use_chunked {
+        // Use chunked processing for memory efficiency.
+        let effective_chunk_size = chunk_size.unwrap_or_else(|| {
+            // Auto-calculate chunk size based on memory constraints.
+            if let Some(limit) = memory_limit_mb {
+                // Estimate: aim to use at most 60% of memory limit for stubs.
+                let available_mb = limit * 0.6;
+                let bytes_per_stub = std::mem::size_of::<Stub>() as f64;
+                let stubs_per_mb = 1_048_576.0 / bytes_per_stub;
+                (available_mb * stubs_per_mb) as usize
+            } else {
+                // Default chunk size: 100k stubs.
+                100_000
+            }
+        });
+        
+        if progress_interval.is_some() {
+            info!("Using chunked processing: {} stubs per chunk", effective_chunk_size);
+        }
+        
+        match_stubs_chunked(
+            stubs,
+            reciprocity_matrix,
+            num_circles,
+            link_mode,
+            progress_interval,
+            memory_limit_mb,
+            effective_chunk_size
+        )
+    } else {
+        // Use original algorithm for maximum performance.
+        match_stubs(
+            stubs,
+            reciprocity_matrix,
+            num_circles,
+            link_mode,
+            progress_interval
+        )
+    }
+}
+
 fn match_stubs(
     mut stubs: Vec<Stub>,
     reciprocity_matrix: &Vec<Vec<f64>>,
     num_circles: usize,
     link_mode: LinkMode,
+    progress_interval: Option<usize>,
 )
     -> Outcome<Vec<(PersonId, PersonId, SocialLink)>>
 {
     use std::collections::{HashMap, HashSet};
+    use oxedyne_fe2o3_core::info;
+    use oxedyne_fe2o3_core::mem::get_memory_usage_mb;
     
     let mut edges = Vec::new();
     let mut existing_edges: HashSet<(PersonId, PersonId)> = HashSet::new();
@@ -770,6 +1396,11 @@ fn match_stubs(
     
     // Shuffle stubs for random matching.
     shuffle_stubs(&mut stubs);
+    
+    // Track progress for large stub sets.
+    let initial_stubs = stubs.len();
+    let mut pairs_processed = 0;
+    let report_interval = progress_interval.map(|interval| interval * 2); // Report every 2 * node_interval pairs.
     
     // Match pairs, avoiding duplicate edges.
     while stubs.len() >= 2 {
@@ -813,10 +1444,7 @@ fn match_stubs(
                 edges.push((
                     stub_a.owner_id.clone(),
                     stub_b.owner_id.clone(),
-                    SocialLink {
-                        from_circle:	stub_a.circle_type,
-                        to_circle,
-                    },
+                    SocialLink::new(stub_a.circle_type, to_circle),
                 ));
                 
                 // Create the reverse edge from B to A with inverted circle relationship.
@@ -825,10 +1453,7 @@ fn match_stubs(
                     edges.push((
                         stub_b.owner_id.clone(),
                         stub_a.owner_id.clone(),
-                        SocialLink {
-                            from_circle:	to_circle,        // Use the target circle from forward edge.
-                            to_circle:		stub_a.circle_type, // Use the source circle from forward edge.
-                        },
+                        SocialLink::new(to_circle, stub_a.circle_type),
                     ));
                     
                     // Mark reverse edge as created.
@@ -848,10 +1473,7 @@ fn match_stubs(
                 edges.push((
                     stub_a.owner_id.clone(),
                     stub_b.owner_id.clone(),
-                    SocialLink {
-                        from_circle:	symmetric_circle,  // Both use same circle.
-                        to_circle:		symmetric_circle,   // Both use same circle.
-                    },
+                    SocialLink::new(symmetric_circle, symmetric_circle),
                 ));
                 
                 // Create the reverse edge from B to A with identical relationship.
@@ -860,10 +1482,7 @@ fn match_stubs(
                     edges.push((
                         stub_b.owner_id.clone(),
                         stub_a.owner_id.clone(),
-                        SocialLink {
-                            from_circle:	symmetric_circle,  // Same circle.
-                            to_circle:		symmetric_circle,   // Same circle.
-                        },
+                        SocialLink::new(symmetric_circle, symmetric_circle),
                     ));
                     
                     // Mark reverse edge as created.
@@ -875,15 +1494,461 @@ fn match_stubs(
                 edges.push((
                     stub_a.owner_id.clone(),
                     stub_b.owner_id.clone(),
-                    SocialLink {
-                        from_circle:	stub_a.circle_type,
-                        to_circle,
-                    },
+                    SocialLink::new(stub_a.circle_type, to_circle),
                 ));
             },
         }
         
         // Mark this edge as created.
+        existing_edges.insert(edge_key);
+        
+        // Progress reporting.
+        pairs_processed += 1;
+        if let Some(interval) = report_interval {
+            if pairs_processed % interval == 0 {
+                let stubs_remaining = stubs.len();
+                let stubs_processed = initial_stubs - stubs_remaining;
+                let progress_pct = (stubs_processed as f64 / initial_stubs as f64) * 100.0;
+                let memory_mb = get_memory_usage_mb();
+                info!("Stub matching: {}/{} stubs processed ({:.1}%) | {} edges created | Memory: {:.1}MB", 
+                      stubs_processed, initial_stubs, progress_pct, edges.len(), memory_mb);
+            }
+        }
+    }
+    
+    // Final progress report if enabled.
+    if progress_interval.is_some() {
+        let memory_mb = get_memory_usage_mb();
+        info!("Stub matching complete: {} stubs processed | {} edges created | Memory: {:.1}MB", 
+              initial_stubs, edges.len(), memory_mb);
+    }
+    
+    Ok(edges)
+}
+
+/// Matches stubs using chunked processing and inserts directly into graph.
+/// 
+/// Processes stubs in chunks and inserts edges directly into the graph
+/// to avoid accumulating large edge vectors in memory.
+/// 
+/// # Arguments
+/// * `graph` - Mutable reference to the graph to insert edges into.
+/// * `stubs` - Vector of connection stubs to match.
+/// * `reciprocity_matrix` - Probability matrix for reciprocal connections.
+/// * `num_circles` - Number of social circles.
+/// * `link_mode` - Whether to create reciprocal or non-reciprocal links.
+/// * `progress_interval` - Report progress every N nodes (None = no progress).
+/// * `memory_limit_mb` - Memory limit in MB (None = no limit).
+/// * `chunk_size` - Size of each processing chunk.
+/// 
+/// # Returns
+/// Total number of edges created or error if matching fails.
+fn match_stubs_chunked_direct(
+    graph: &mut DiGraph<PersonId, PersonData, SocialLink>,
+    mut stubs: Vec<Stub>,
+    reciprocity_matrix: &Vec<Vec<f64>>,
+    num_circles: usize,
+    link_mode: LinkMode,
+    progress_interval: Option<usize>,
+    memory_limit_mb: Option<f64>,
+    chunk_size: usize,
+)
+    -> Outcome<usize>
+{
+    use std::collections::HashSet;
+    use oxedyne_fe2o3_core::info;
+    use oxedyne_fe2o3_core::mem::get_memory_usage_mb;
+    
+    let mut total_edges = 0;
+    let mut existing_edges: HashSet<(PersonId, PersonId)> = HashSet::new();
+    let initial_stubs = stubs.len();
+    let total_chunks = (initial_stubs + chunk_size - 1) / chunk_size;
+    
+    // Shuffle all stubs first for better randomization.
+    shuffle_stubs(&mut stubs);
+    
+    if progress_interval.is_some() {
+        info!("Processing {} stubs in {} chunks of size {}", initial_stubs, total_chunks, chunk_size);
+    }
+    
+    let mut chunk_num = 0;
+    while !stubs.is_empty() {
+        chunk_num += 1;
+        
+        // Extract chunk from the end of the vector.
+        let current_chunk_size = chunk_size.min(stubs.len());
+        let chunk_start = stubs.len() - current_chunk_size;
+        let chunk: Vec<Stub> = stubs.drain(chunk_start..).collect();
+        
+        // Check memory usage before processing chunk.
+        let current_memory = get_memory_usage_mb();
+        if let Some(limit) = memory_limit_mb {
+            if current_memory > limit {
+                return Err(err!("Memory usage ({:.1}MB) exceeds limit ({:.1}MB) at chunk {}/{}", 
+                               current_memory, limit, chunk_num, total_chunks; Invalid, Input));
+            }
+        }
+        
+        if let Some(_progress_interval) = progress_interval {
+            if chunk_num % 10 == 1 || chunk_num == total_chunks {
+                info!("Processing chunk {}/{} ({} stubs) | Memory: {:.1}MB | {} edges so far", 
+                      chunk_num, total_chunks, chunk.len(), current_memory, total_edges);
+            }
+        }
+        
+        // Process this chunk and insert edges directly into graph.
+        let chunk_edges = res!(match_stubs_simple_direct(
+            graph,
+            chunk,
+            reciprocity_matrix,
+            num_circles,
+            link_mode,
+            &mut existing_edges
+        ));
+        
+        total_edges += chunk_edges;
+        
+        // Periodic memory check during processing.
+        if chunk_num % 50 == 0 {
+            let current_memory = get_memory_usage_mb();
+            if let Some(limit) = memory_limit_mb {
+                if current_memory > limit * 0.9 {
+                    if progress_interval.is_some() {
+                        info!("WARNING: Memory usage ({:.1}MB) approaching limit ({:.1}MB)", 
+                              current_memory, limit);
+                    }
+                }
+            }
+        }
+    }
+    
+    if progress_interval.is_some() {
+        let final_memory = get_memory_usage_mb();
+        info!("Chunked stub matching complete: {} edges created | Memory: {:.1}MB", 
+              total_edges, final_memory);
+    }
+    
+    Ok(total_edges)
+}
+
+/// Legacy chunked stub matching that returns edge vectors (memory-intensive).
+#[allow(dead_code)]
+fn match_stubs_chunked(
+    mut stubs: Vec<Stub>,
+    reciprocity_matrix: &Vec<Vec<f64>>,
+    num_circles: usize,
+    link_mode: LinkMode,
+    progress_interval: Option<usize>,
+    memory_limit_mb: Option<f64>,
+    chunk_size: usize,
+)
+    -> Outcome<Vec<(PersonId, PersonId, SocialLink)>>
+{
+    use std::collections::HashSet;
+    use oxedyne_fe2o3_core::info;
+    use oxedyne_fe2o3_core::mem::get_memory_usage_mb;
+    
+    let mut all_edges = Vec::new();
+    let mut existing_edges: HashSet<(PersonId, PersonId)> = HashSet::new();
+    let initial_stubs = stubs.len();
+    let total_chunks = (initial_stubs + chunk_size - 1) / chunk_size;
+    
+    // Shuffle all stubs first for better randomization.
+    shuffle_stubs(&mut stubs);
+    
+    if progress_interval.is_some() {
+        info!("Processing {} stubs in {} chunks of size {}", initial_stubs, total_chunks, chunk_size);
+    }
+    
+    let mut chunk_num = 0;
+    while !stubs.is_empty() {
+        chunk_num += 1;
+        
+        // Extract chunk from the end of the vector.
+        let current_chunk_size = chunk_size.min(stubs.len());
+        let chunk_start = stubs.len() - current_chunk_size;
+        let chunk: Vec<Stub> = stubs.drain(chunk_start..).collect();
+        
+        // Check memory usage before processing chunk.
+        let current_memory = get_memory_usage_mb();
+        if let Some(limit) = memory_limit_mb {
+            if current_memory > limit {
+                return Err(err!("Memory usage ({:.1}MB) exceeds limit ({:.1}MB) at chunk {}/{}", 
+                               current_memory, limit, chunk_num, total_chunks; Invalid, Input));
+            }
+        }
+        
+        if let Some(_progress_interval) = progress_interval {
+            if chunk_num % 10 == 1 || chunk_num == total_chunks {
+                info!("Processing chunk {}/{} ({} stubs) | Memory: {:.1}MB | {} edges so far", 
+                      chunk_num, total_chunks, chunk.len(), current_memory, all_edges.len());
+            }
+        }
+        
+        // Process this chunk using the original algorithm.
+        let chunk_edges = res!(match_stubs_simple(
+            chunk,
+            reciprocity_matrix,
+            num_circles,
+            link_mode,
+            &mut existing_edges
+        ));
+        
+        // Add chunk edges to the total.
+        all_edges.extend(chunk_edges);
+        
+        // Periodic memory check during processing.
+        if chunk_num % 50 == 0 {
+            let current_memory = get_memory_usage_mb();
+            if let Some(limit) = memory_limit_mb {
+                if current_memory > limit * 0.9 {
+                    if progress_interval.is_some() {
+                        info!("WARNING: Memory usage ({:.1}MB) approaching limit ({:.1}MB)", 
+                              current_memory, limit);
+                    }
+                }
+            }
+        }
+    }
+    
+    if progress_interval.is_some() {
+        let final_memory = get_memory_usage_mb();
+        info!("Chunked stub matching complete: {} edges created | Memory: {:.1}MB", 
+              all_edges.len(), final_memory);
+    }
+    
+    Ok(all_edges)
+}
+
+/// Simple stub matching that inserts edges directly into graph.
+/// 
+/// Processes a chunk of stubs and inserts edges directly, using provided existing_edges
+/// set to avoid duplicates across chunks. Returns count of edges created.
+fn match_stubs_simple_direct(
+    graph: &mut DiGraph<PersonId, PersonData, SocialLink>,
+    mut chunk: Vec<Stub>,
+    reciprocity_matrix: &Vec<Vec<f64>>,
+    num_circles: usize,
+    link_mode: LinkMode,
+    existing_edges: &mut std::collections::HashSet<(PersonId, PersonId)>,
+)
+    -> Outcome<usize>
+{
+    let mut edges_created = 0;
+    
+    // Process pairs from this chunk.
+    while chunk.len() >= 2 {
+        let stub_a = chunk.pop().unwrap();
+        let stub_b = chunk.pop().unwrap();
+        
+        // Check for self-loop.
+        if stub_a.owner_id == stub_b.owner_id {
+            chunk.push(stub_a);
+            continue;
+        }
+        
+        // Check if edge already exists.
+        let edge_key = (stub_a.owner_id.clone(), stub_b.owner_id.clone());
+        if existing_edges.contains(&edge_key) {
+            continue;
+        }
+        
+        // Determine reciprocal circle type.
+        let to_circle = res!(sample_reciprocal_circle(
+            stub_a.circle_type,
+            reciprocity_matrix,
+            num_circles
+        ));
+        
+        // Create and insert edges based on link mode.
+        match link_mode {
+            LinkMode::Reciprocal => {
+                graph.link(&stub_a.owner_id, &stub_b.owner_id, SocialLink::new(stub_a.circle_type, to_circle));
+                edges_created += 1;
+                
+                let reverse_key = (stub_b.owner_id.clone(), stub_a.owner_id.clone());
+                if !existing_edges.contains(&reverse_key) {
+                    graph.link(&stub_b.owner_id, &stub_a.owner_id, SocialLink::new(to_circle, stub_a.circle_type));
+                    edges_created += 1;
+                    existing_edges.insert(reverse_key);
+                }
+            },
+            LinkMode::Symmetric => {
+                let symmetric_circle = to_circle;
+                graph.link(&stub_a.owner_id, &stub_b.owner_id, SocialLink::new(symmetric_circle, symmetric_circle));
+                edges_created += 1;
+                
+                let reverse_key = (stub_b.owner_id.clone(), stub_a.owner_id.clone());
+                if !existing_edges.contains(&reverse_key) {
+                    graph.link(&stub_b.owner_id, &stub_a.owner_id, SocialLink::new(symmetric_circle, symmetric_circle));
+                    edges_created += 1;
+                    existing_edges.insert(reverse_key);
+                }
+            },
+            LinkMode::NonReciprocal => {
+                graph.link(&stub_a.owner_id, &stub_b.owner_id, SocialLink::new(stub_a.circle_type, to_circle));
+                edges_created += 1;
+            },
+        }
+        
+        existing_edges.insert(edge_key);
+    }
+    
+    Ok(edges_created)
+}
+
+/// Simple stub matching that writes directly to memory-mapped builder.
+fn match_stubs_simple_mmap(
+    builder: &mut crate::mmap_graph::MmapGraphBuilder,
+    mut chunk: Vec<Stub>,
+    reciprocity_matrix: &Vec<Vec<f64>>,
+    num_circles: usize,
+    link_mode: LinkMode,
+) -> Outcome<usize> {
+    let mut edges_created = 0;
+    
+    // Process pairs from this chunk.
+    while chunk.len() >= 2 {
+        let stub_a = chunk.pop().unwrap();
+        let stub_b = chunk.pop().unwrap();
+        
+        // Check for self-loop.
+        if stub_a.owner_id == stub_b.owner_id {
+            chunk.push(stub_a);
+            continue;
+        }
+        
+        // Determine reciprocal circle type.
+        let to_circle = res!(sample_reciprocal_circle(
+            stub_a.circle_type,
+            reciprocity_matrix,
+            num_circles
+        ));
+        
+        // Create and insert edges based on link mode.
+        match link_mode {
+            LinkMode::Reciprocal => {
+                let link_data = SocialLink::new(stub_a.circle_type, to_circle);
+                let added = res!(builder.add_edge_unique(stub_a.owner_id.0, stub_b.owner_id.0, link_data.packed));
+                if added {
+                    edges_created += 1;
+                }
+                
+                let reverse_link_data = SocialLink::new(to_circle, stub_a.circle_type);
+                let added = res!(builder.add_edge_unique(stub_b.owner_id.0, stub_a.owner_id.0, reverse_link_data.packed));
+                if added {
+                    edges_created += 1;
+                }
+            },
+            LinkMode::Symmetric => {
+                let symmetric_circle = to_circle;
+                let link_data = SocialLink::new(symmetric_circle, symmetric_circle);
+                let added = res!(builder.add_edge_unique(stub_a.owner_id.0, stub_b.owner_id.0, link_data.packed));
+                if added {
+                    edges_created += 1;
+                }
+                
+                let added = res!(builder.add_edge_unique(stub_b.owner_id.0, stub_a.owner_id.0, link_data.packed));
+                if added {
+                    edges_created += 1;
+                }
+            },
+            LinkMode::NonReciprocal => {
+                let link_data = SocialLink::new(stub_a.circle_type, to_circle);
+                let added = res!(builder.add_edge_unique(stub_a.owner_id.0, stub_b.owner_id.0, link_data.packed));
+                if added {
+                    edges_created += 1;
+                }
+            },
+        }
+    }
+    
+    Ok(edges_created)
+}
+
+/// Legacy simple stub matching for a chunk that returns edge vectors.
+#[allow(dead_code)]
+fn match_stubs_simple(
+    mut chunk: Vec<Stub>,
+    reciprocity_matrix: &Vec<Vec<f64>>,
+    num_circles: usize,
+    link_mode: LinkMode,
+    existing_edges: &mut std::collections::HashSet<(PersonId, PersonId)>,
+)
+    -> Outcome<Vec<(PersonId, PersonId, SocialLink)>>
+{
+    let mut edges = Vec::new();
+    
+    // Process pairs from this chunk.
+    while chunk.len() >= 2 {
+        let stub_a = chunk.pop().unwrap();
+        let stub_b = chunk.pop().unwrap();
+        
+        // Check for self-loop.
+        if stub_a.owner_id == stub_b.owner_id {
+            chunk.push(stub_a);
+            continue;
+        }
+        
+        // Check if edge already exists.
+        let edge_key = (stub_a.owner_id.clone(), stub_b.owner_id.clone());
+        if existing_edges.contains(&edge_key) {
+            continue;
+        }
+        
+        // Determine reciprocal circle type.
+        let to_circle = res!(sample_reciprocal_circle(
+            stub_a.circle_type,
+            reciprocity_matrix,
+            num_circles
+        ));
+        
+        // Create edges based on link mode.
+        match link_mode {
+            LinkMode::Reciprocal => {
+                edges.push((
+                    stub_a.owner_id.clone(),
+                    stub_b.owner_id.clone(),
+                    SocialLink::new(stub_a.circle_type, to_circle),
+                ));
+                
+                let reverse_key = (stub_b.owner_id.clone(), stub_a.owner_id.clone());
+                if !existing_edges.contains(&reverse_key) {
+                    edges.push((
+                        stub_b.owner_id.clone(),
+                        stub_a.owner_id.clone(),
+                        SocialLink::new(to_circle, stub_a.circle_type),
+                    ));
+                    existing_edges.insert(reverse_key);
+                }
+            },
+            LinkMode::Symmetric => {
+                let symmetric_circle = to_circle;
+                edges.push((
+                    stub_a.owner_id.clone(),
+                    stub_b.owner_id.clone(),
+                    SocialLink::new(symmetric_circle, symmetric_circle),
+                ));
+                
+                let reverse_key = (stub_b.owner_id.clone(), stub_a.owner_id.clone());
+                if !existing_edges.contains(&reverse_key) {
+                    edges.push((
+                        stub_b.owner_id.clone(),
+                        stub_a.owner_id.clone(),
+                        SocialLink::new(symmetric_circle, symmetric_circle),
+                    ));
+                    existing_edges.insert(reverse_key);
+                }
+            },
+            LinkMode::NonReciprocal => {
+                edges.push((
+                    stub_a.owner_id.clone(),
+                    stub_b.owner_id.clone(),
+                    SocialLink::new(stub_a.circle_type, to_circle),
+                ));
+            },
+        }
+        
         existing_edges.insert(edge_key);
     }
     
@@ -948,7 +2013,7 @@ fn sample_reciprocal_circle(
     }
     
     // Default to outermost circle if probabilities don't sum to 1.0.
-    Ok(CircleType(num_circles - 1))
+    Ok(CircleType((num_circles - 1) as u8))
 }
 
 #[cfg(test)]
@@ -971,7 +2036,7 @@ mod tests {
         // Test round-trip conversion.
         let num_circles = 4;
         for i in 0..num_circles {
-            let circle = CircleType(i);
+            let circle = CircleType(i as u8);
             let idx = circle.to_index();
             let converted = res!(CircleType::from_index(idx, num_circles));
             req!(circle, converted);
@@ -1065,6 +2130,10 @@ mod tests {
             ],
             circle_labels: Some(CircleLabels::default()),
             link_mode: LinkMode::Symmetric,
+            progress_interval: None,
+            memory_limit_mb: None,
+            chunk_size: None,
+            use_mmap: None,
         }
     }
 
@@ -1207,9 +2276,9 @@ mod tests {
                         // Found reverse link - check if it's truly symmetric.
                         // In symmetric mode: both directions should be identical.
                         // If A->B is [Cx -> Cx], then B->A should also be [Cx -> Cx].
-                        if link.from_circle == reverse_link.from_circle && 
-                           link.to_circle == reverse_link.to_circle &&
-                           link.from_circle == link.to_circle {  // Should be same circle.
+                        if link.from_circle() == reverse_link.from_circle() && 
+                           link.to_circle() == reverse_link.to_circle() &&
+                           link.from_circle() == link.to_circle() {  // Should be same circle.
                             symmetric_count += 1;
                         }
                         break;
@@ -1311,13 +2380,13 @@ mod tests {
             
             println!("  Node {:?}:", node_id);
             for (target_id, link) in &outgoing {
-                print!("    -> {:?}: [C{} -> C{}]", target_id, link.from_circle.0, link.to_circle.0);
+                print!("    -> {:?}: [C{} -> C{}]", target_id, link.from_circle().0, link.to_circle().0);
                 
                 // Find reverse link if it exists.
                 let mut found_reverse = false;
                 for (source_id, reverse_link) in &incoming {
                     if source_id == target_id {
-                        println!(" <-> [C{} -> C{}]", reverse_link.from_circle.0, reverse_link.to_circle.0);
+                        println!(" <-> [C{} -> C{}]", reverse_link.from_circle().0, reverse_link.to_circle().0);
                         found_reverse = true;
                         break;
                     }
@@ -1402,10 +2471,10 @@ mod tests {
             let outgoing = graph.get_links_from(node_id);
             for (target_id, link) in &outgoing {
                 // In symmetric mode, from_circle should equal to_circle.
-                if link.from_circle != link.to_circle {
+                if link.from_circle() != link.to_circle() {
                     return Err(err!(
                         "Non-symmetric link found: [{:?} -> {:?}]", 
-                        link.from_circle, link.to_circle;
+                        link.from_circle(), link.to_circle();
                         Test, Unexpected
                     ));
                 }
@@ -1414,16 +2483,16 @@ mod tests {
                 let incoming = graph.get_links_to(target_id);
                 for (source_id, reverse_link) in &incoming {
                     if source_id == &node_id {
-                        if reverse_link.from_circle != link.from_circle ||
-                           reverse_link.to_circle != link.to_circle {
+                        if reverse_link.from_circle() != link.from_circle() ||
+                           reverse_link.to_circle() != link.to_circle() {
                             return Err(err!(
                                 "Asymmetric reverse link: forward [{:?} -> {:?}], reverse [{:?} -> {:?}]",
-                                link.from_circle, link.to_circle,
-                                reverse_link.from_circle, reverse_link.to_circle;
+                                link.from_circle(), link.to_circle(),
+                                reverse_link.from_circle(), reverse_link.to_circle();
                                 Test, Unexpected
                             ));
                         }
-                        println!("  {:?} <-> {:?}: C{} (symmetric)", node_id, target_id, link.from_circle.0);
+                        println!("  {:?} <-> {:?}: C{} (symmetric)", node_id, target_id, link.from_circle().0);
                         break;
                     }
                 }

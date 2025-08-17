@@ -22,6 +22,7 @@ use oxedyne_fe2o3_core::{
     },
 };
 use oxedyne_fe2o3_jdat::prelude::*;
+use oxedyne_fe2o3_num::float::Float64;
 use oxedyne_fe2o3_text::split::StringSplitter;
 
 use std::{
@@ -757,6 +758,40 @@ impl Msg {
                                     Dat::U32(v) => d = Dat::I128(try_into!(i128, v)),
                                     Dat::U64(v) => d = Dat::I128(try_into!(i128, v)),
                                     Dat::U128(v) => d = Dat::I128(try_into!(i128, v)),
+                                    _ => (),
+                                },
+                                Kind::U16 => match d {
+                                    Dat::U8(v) => d = Dat::U16(try_into!(u16, v)),
+                                    _ => (),
+                                },
+                                Kind::U32 => match d {
+                                    Dat::U8(v)  => d = Dat::U32(try_into!(u32, v)),
+                                    Dat::U16(v) => d = Dat::U32(try_into!(u32, v)),
+                                    _ => (),
+                                },
+                                Kind::U64 => match d {
+                                    Dat::U8(v)  => d = Dat::U64(try_into!(u64, v)),
+                                    Dat::U16(v) => d = Dat::U64(try_into!(u64, v)),
+                                    Dat::U32(v) => d = Dat::U64(try_into!(u64, v)),
+                                    _ => (),
+                                },
+                                Kind::U128 => match d {
+                                    Dat::U8(v)  => d = Dat::U128(try_into!(u128, v)),
+                                    Dat::U16(v) => d = Dat::U128(try_into!(u128, v)),
+                                    Dat::U32(v) => d = Dat::U128(try_into!(u128, v)),
+                                    Dat::U64(v) => d = Dat::U128(try_into!(u128, v)),
+                                    _ => (),
+                                },
+                                Kind::F64 => match d {
+                                    Dat::U8(v)  => d = Dat::F64(Float64(v as f64)),
+                                    Dat::U16(v) => d = Dat::F64(Float64(v as f64)),
+                                    Dat::U32(v) => d = Dat::F64(Float64(v as f64)),
+                                    Dat::U64(v) => d = Dat::F64(Float64(v as f64)),
+                                    Dat::I8(v)  => d = Dat::F64(Float64(v as f64)),
+                                    Dat::I16(v) => d = Dat::F64(Float64(v as f64)),
+                                    Dat::I32(v) => d = Dat::F64(Float64(v as f64)),
+                                    Dat::I64(v) => d = Dat::F64(Float64(v as f64)),
+                                    Dat::F32(v) => d = Dat::F64(Float64(v.0 as f64)),
                                     _ => (),
                                 },
                                 _ => (),

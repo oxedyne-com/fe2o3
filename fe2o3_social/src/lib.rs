@@ -15,5 +15,6 @@
 #![forbid(unsafe_code)]
 pub mod culture;
 pub mod graph;
+pub mod mmap_graph;
 pub mod person;
 pub mod person_filters;

@@ -386,6 +386,12 @@ macro_rules! log_set_level {
             let mut unlocked_cfg = lock_write!(LOG.cfg);
             unlocked_cfg.level = res!(LogLevel::from_str($level));
         }
+    };
+    ($level:expr) => {
+        {
+            let mut unlocked_cfg = lock_write!(LOG.cfg);
+            unlocked_cfg.level = res!(LogLevel::from_str(&$level));
+        }
     }
 }
 
