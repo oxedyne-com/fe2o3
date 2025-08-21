@@ -22,7 +22,10 @@ use oxedyne_fe2o3_core::{
     },
 };
 use oxedyne_fe2o3_jdat::prelude::*;
-use oxedyne_fe2o3_num::float::Float64;
+use oxedyne_fe2o3_num::{
+    float::Float64,
+    prelude::bigdecimal::ToPrimitive,
+};
 use oxedyne_fe2o3_text::split::StringSplitter;
 
 use std::{
@@ -792,6 +795,15 @@ impl Msg {
                                     Dat::I32(v) => d = Dat::F64(Float64(v as f64)),
                                     Dat::I64(v) => d = Dat::F64(Float64(v as f64)),
                                     Dat::F32(v) => d = Dat::F64(Float64(v.0 as f64)),
+                                    Dat::Adec(v) => {
+                                        // Convert BigDecimal to f64.
+                                        match v.to_f64() {
+                                            Some(f) => d = Dat::F64(Float64(f)),
+                                            None => return Err(err!(
+                                                "Cannot convert BigDecimal '{}' to f64: value out of range", v;
+                                                Input, Invalid, Conversion)),
+                                        }
+                                    },
                                     _ => (),
                                 },
                                 _ => (),

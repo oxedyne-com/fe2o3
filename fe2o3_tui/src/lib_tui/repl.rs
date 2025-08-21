@@ -189,6 +189,11 @@ impl<C: ShellContext> Shell<C> {
                             self.hist_ind += 1;
                             input = self.hist[self.hist_ind].clone();
                             cursor_pos = input.len();
+                        } else if self.hist_ind == self.hist.len() - 1 {
+                            // Move to blank entry beyond history.
+                            self.hist_ind = self.hist.len();
+                            input.clear();
+                            cursor_pos = 0;
                         } else {
                             continue;
                         }

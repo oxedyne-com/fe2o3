@@ -1,4 +1,3 @@
-use oxedyne_fe2o3_core::new_enum;
 use strum::Display;
 
 #[derive(Clone, Copy, Debug, Display, Eq, PartialEq)]
@@ -10,14 +9,6 @@ pub enum Gender {
     Other,
     PreferNotToSay,
 }
-
-new_enum!(Gender;
-    Male,
-    Female,
-    NonBinary,
-    Other,
-    PreferNotToSay,
-);
 
 impl Gender {
     /// Returns a random Gender variant with specified minority probability.
@@ -50,7 +41,7 @@ impl Gender {
             }
         } else {
             // Choose from minority genders.
-            let minority_choice = Rand::in_range(0, 3);
+            let minority_choice = Rand::in_range(0, 2); // 0, 1, or 2
             match minority_choice {
                 0 => Self::NonBinary,
                 1 => Self::Other,

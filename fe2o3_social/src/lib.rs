@@ -1,20 +1,18 @@
-//! A standards library providing commonly used enumerations and constants.
+//! Social network graph generation and analysis.
 //! 
-//! This crate serves as a central repository for standardised data structures used throughout the
-//! Hematite ecosystem. It currently provides:
+//! This crate provides tools for generating realistic social networks using a stub matching
+//! algorithm with configurable population profiles and geographic distributions.
 //! 
-//! - A comprehensive enumeration of countries through the `regions::Country` enum
-//! - Basic celestial body identifiers via `regions::CelestialBodies`
-//! - ANSI terminal control sequences through the `chars::Term` struct
-//! - Generic person modelling and generation through the `person` module
+//! Key components:
+//! - Social network graph generation with memory-mapped storage
+//! - Person modelling with demographic attributes
+//! - Cultural and gender classifications
+//! - Memory-mapped graph storage for large networks
 //!
-//! The crate maintains zero dependencies to ensure it can serve as a reliable foundation for other
-//! components. All data structures are designed to be efficient and easy to maintain, focussing on
-//! enumerations that provide compile-time guarantees of correctness.
-//!
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
+// Exception: Allow unsafe only for memory mapping in specific, well-documented cases
 pub mod culture;
 pub mod graph;
 pub mod mmap_graph;
+pub mod mmap_index;
 pub mod person;
-pub mod person_filters;

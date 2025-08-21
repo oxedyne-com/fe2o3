@@ -3,37 +3,58 @@
 //! Provides disk-backed storage for graphs that exceed available RAM,
 //! using memory-mapped files for efficient access patterns.
 
-use oxedyne_fe2o3_core::prelude::*;
-
-use std::{
-    collections::HashMap,
-    fs::{File, OpenOptions},
-    io::{Write, Read, Seek, SeekFrom},
-    os::unix::io::AsRawFd,
-    path::Path,
+use crate::mmap_index::{
+	MmapIndex,
+	MmapIndexBuilder,
 };
 
-use oxedyne_fe2o3_core::{info, warn};
+use oxedyne_fe2o3_core::{
+	prelude::*,
+	info,
+	warn,
+};
+
+use std::fs::{
+	File,
+	OpenOptions,
+};
+use std::io::{
+	Write,
+	Read,
+	Seek,
+	SeekFrom,
+};
+
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
+
+use memmap2::{
+	Mmap,
+	MmapOptions,
+};
 
 /// Memory-mapped graph storage using flat edge list.
 /// 
 /// Stores edges in binary format on disk, memory-maps for access.
 /// Each edge is 9 bytes: from_id(4) + to_id(4) + link_data(1).
 pub struct MmapGraph {
-    /// File handle.
+    /// File handle (kept for writing during generation).
     edge_file: File,
     /// Number of edges stored.
     num_edges: usize,
     /// Maximum edges capacity.
     capacity: usize,
-    /// Index mapping person_id -> list of edge offsets for fast lookups.
-    /// Built during generation and saved to .idx file.
-    /// Set to None to disable indexing for faster generation.
-    edge_index: Option<HashMap<u32, Vec<u64>>>,  // person_id -> list of edge offsets
+    /// Memory-mapped view of the edge data (for fast reading).
+    mmap: Option<Mmap>,
+    /// Disk-based index for fast lookups.
+    /// Loaded from .idx file if available.
+    index: Option<MmapIndex>,
+    /// File path for the edge data.
+    file_path: String,
 }
 
 impl MmapGraph {
-    /// Creates a new memory-mapped graph.
+    /// Creates a new memory-mapped graph with indexing.
     /// 
     /// # Arguments
     /// * `path` - Path for the edge data file.
@@ -42,6 +63,34 @@ impl MmapGraph {
     /// # Returns
     /// New memory-mapped graph instance.
     pub fn new(path: &str, capacity: usize) -> Outcome<Self> {
+        Self::new_with_options(path, capacity, true)
+    }
+    
+    /// Creates a new memory-mapped graph without indexing for large graphs.
+    /// 
+    /// Disables the in-memory index to save memory for very large graphs.
+    /// Graph queries will be slower but memory usage will be minimal.
+    /// 
+    /// # Arguments
+    /// * `path` - Path for the edge data file.
+    /// * `capacity` - Maximum number of edges to support.
+    /// 
+    /// # Returns
+    /// New memory-mapped graph instance without indexing.
+    pub fn new_without_index(path: &str, capacity: usize) -> Outcome<Self> {
+        Self::new_with_options(path, capacity, false)
+    }
+    
+    /// Creates a new memory-mapped graph with optional indexing.
+    /// 
+    /// # Arguments
+    /// * `path` - Path for the edge data file.
+    /// * `capacity` - Maximum number of edges to support.
+    /// * `enable_index` - Whether to enable in-memory indexing.
+    /// 
+    /// # Returns
+    /// New memory-mapped graph instance.
+    pub fn new_with_options(path: &str, capacity: usize, _enable_index: bool) -> Outcome<Self> {
         // Create or truncate the file.
         let edge_file = res!(OpenOptions::new()
             .read(true)
@@ -58,7 +107,9 @@ impl MmapGraph {
             edge_file,
             num_edges: 0,
             capacity,
-            edge_index: Some(HashMap::new()),
+            mmap: None, // Memory mapping created when loading existing graphs.
+            index: None, // Index will be loaded separately after generation.
+            file_path: path.to_string(),
         })
     }
     
@@ -82,18 +133,44 @@ impl MmapGraph {
         let capacity = (file_size / 9) as usize; // 9 bytes per edge.
         let num_edges = capacity; // Assume file is fully written for now.
         
+        // Create memory mapping for fast reading.
+        // SAFETY: The file was just opened successfully and has valid content.
+        // We only read from this mapping, never write to it.
+        #[allow(unsafe_code)]
+        let mmap = unsafe {
+            MmapOptions::new().map(&edge_file)
+        };
+        
+        let mmap = match mmap {
+            Ok(m) => {
+                info!("Created memory mapping for edge data ({:.1} MB)", m.len() as f64 / 1024.0 / 1024.0);
+                Some(m)
+            },
+            Err(e) => {
+                warn!("Failed to create memory mapping: {}. Will use direct file access.", e);
+                None
+            }
+        };
+        
         let mut graph = Self {
             edge_file,
             num_edges,
             capacity,
-            edge_index: Some(HashMap::new()),
+            mmap,
+            index: None,
+            file_path: path.to_string(),
         };
         
-        // Try to load the index if it exists
-        if res!(graph.load_index(path)) {
-            info!("Loaded existing index for fast lookups");
-        } else {
-            info!("No index found for {}. Graph lookups will use fallback scan (slower).", path);
+        // Try to load the disk-based index if it exists.
+        let index_path = format!("{}.idx", path.trim_end_matches(".mmap"));
+        match MmapIndex::load(&index_path) {
+            Ok(idx) => {
+                info!("Loaded disk-based index for fast lookups");
+                graph.index = Some(idx);
+            },
+            Err(_) => {
+                info!("No index found for {}. Graph lookups will scan edges.", path);
+            }
         }
         
         Ok(graph)
@@ -113,11 +190,7 @@ impl MmapGraph {
             return Err(err!("Graph capacity exceeded: {} edges", self.capacity; Invalid, Input));
         }
         
-        // Track the offset for this edge in the index (if enabled)
-        if let Some(ref mut index) = self.edge_index {
-            let offset = (self.num_edges * 9) as u64;
-            index.entry(from).or_insert_with(Vec::new).push(offset);
-        }
+        // Index tracking handled by the builder during generation.
         
         // Write edge data directly to file.
         res!(self.edge_file.write_all(&from.to_le_bytes()));
@@ -134,76 +207,7 @@ impl MmapGraph {
         Ok(())
     }
     
-    /// Saves the index to a separate file for fast future loading.
-    pub fn save_index(&self, mmap_path: &str) -> Outcome<()> {
-        let index_path = format!("{}.idx", mmap_path.trim_end_matches(".mmap"));
-        info!("Saving index to: {}", index_path);
-        
-        let mut index_file = res!(File::create(&index_path));
-        
-        let index = match &self.edge_index {
-            Some(idx) => idx,
-            None => {
-                info!("No index to save (indexing was disabled)");
-                return Ok(());
-            }
-        };
-        
-        // Write number of indexed nodes
-        res!(index_file.write_all(&(index.len() as u32).to_le_bytes()));
-        
-        // Write each node's edge offsets
-        for (node_id, offsets) in index {
-            res!(index_file.write_all(&node_id.to_le_bytes()));
-            res!(index_file.write_all(&(offsets.len() as u32).to_le_bytes()));
-            for offset in offsets {
-                res!(index_file.write_all(&offset.to_le_bytes()));
-            }
-        }
-        
-        res!(index_file.flush());
-        info!("Index saved with {} entries", index.len());
-        Ok(())
-    }
     
-    /// Loads the index from a file if it exists.
-    pub fn load_index(&mut self, mmap_path: &str) -> Outcome<bool> {
-        let index_path = format!("{}.idx", mmap_path.trim_end_matches(".mmap"));
-        
-        if !Path::new(&index_path).exists() {
-            return Ok(false);
-        }
-        
-        info!("Loading index from: {}", index_path);
-        let mut index_file = res!(File::open(&index_path));
-        
-        let mut buf = [0u8; 4];
-        res!(index_file.read_exact(&mut buf));
-        let num_nodes = u32::from_le_bytes(buf);
-        
-        let index = self.edge_index.get_or_insert_with(HashMap::new);
-        index.clear();
-        
-        for _ in 0..num_nodes {
-            res!(index_file.read_exact(&mut buf));
-            let node_id = u32::from_le_bytes(buf);
-            
-            res!(index_file.read_exact(&mut buf));
-            let num_offsets = u32::from_le_bytes(buf) as usize;
-            
-            let mut offsets = Vec::with_capacity(num_offsets);
-            let mut offset_buf = [0u8; 8];
-            for _ in 0..num_offsets {
-                res!(index_file.read_exact(&mut offset_buf));
-                offsets.push(u64::from_le_bytes(offset_buf));
-            }
-            
-            index.insert(node_id, offsets);
-        }
-        
-        info!("Index loaded with {} entries", index.len());
-        Ok(true)
-    }
     
     /// Gets the number of edges stored.
     pub fn edge_count(&self) -> usize {
@@ -217,55 +221,155 @@ impl MmapGraph {
         0.001 // Negligible memory usage.
     }
 
-    /// Gets all outgoing edges from a node.
-    /// 
-    /// Uses the index for O(1) lookup if available, otherwise falls back to scanning.
-    pub fn get_outgoing_edges(&self, from_id: u32) -> Outcome<Vec<(u32, u8)>> {
-        // If we have an index, use it for fast lookup
-        if let Some(index) = &self.edge_index {
-            if let Some(offsets) = index.get(&from_id) {
-                let mut edges = Vec::with_capacity(offsets.len());
-                
-                // Open the file for reading
-                let mut file = res!(std::fs::File::open(format!("/proc/self/fd/{}", self.edge_file.as_raw_fd())));
-                
-                let mut buffer = [0u8; 9]; // 4 + 4 + 1 bytes per edge
-                
-                for &offset in offsets {
-                    res!(file.seek(SeekFrom::Start(offset)));
-                    res!(file.read_exact(&mut buffer));
-                    
-                    // We already know from_id matches, just read to_id and link_data
-                    let edge_to = u32::from_le_bytes([buffer[4], buffer[5], buffer[6], buffer[7]]);
-                    let link_data = buffer[8];
-                    edges.push((edge_to, link_data));
+    /// Gets incoming edges to a node ID.
+    /// Scans all edges to find matches (O(n) operation).
+    /// Note: This is expensive for large graphs without reverse index.
+    pub fn get_incoming_edges(&self, to_id: u32) -> Outcome<Vec<(u32, u8)>> {
+        let mut edges = Vec::new();
+        
+        if let Some(ref mmap) = self.mmap {
+            // Scan all edges to find incoming ones.
+            let edge_size = 9; // 4 bytes from_id + 4 bytes to_id + 1 byte link_data.
+            let num_edges = self.num_edges;
+            
+            for i in 0..num_edges {
+                let offset = i * edge_size;
+                if offset + edge_size > mmap.len() {
+                    break;
                 }
                 
-                return Ok(edges);
+                // Read edge.
+                let edge_from = u32::from_le_bytes([
+                    mmap[offset], mmap[offset + 1], mmap[offset + 2], mmap[offset + 3]
+                ]);
+                let edge_to = u32::from_le_bytes([
+                    mmap[offset + 4], mmap[offset + 5], mmap[offset + 6], mmap[offset + 7]
+                ]);
+                let link_data = mmap[offset + 8];
+                
+                // Check if this edge points to our target node.
+                if edge_to == to_id {
+                    edges.push((edge_from, link_data));
+                }
             }
+            
+            return Ok(edges);
         }
         
-        // Fallback: scan the entire file (slow but works without index)
-        warn!("No index available for node {}, falling back to full scan", from_id);
+        // Fallback: read from file if memory mapping is unavailable.
+        warn!("Memory mapping unavailable for incoming edges to node {}, using direct file access", to_id);
         
-        let mut edges = Vec::new();
-        let mut file = res!(std::fs::File::open(format!("/proc/self/fd/{}", self.edge_file.as_raw_fd())));
-        res!(file.seek(SeekFrom::Start(0)));
+        let mut file = res!(File::open(&self.file_path));
+        let edge_size = 9;
         
-        let mut buffer = [0u8; 9];
-        
-        for _ in 0..self.num_edges {
+        for i in 0..self.num_edges {
+            let offset = i as u64 * edge_size as u64;
+            res!(file.seek(SeekFrom::Start(offset)));
+            
+            let mut buffer = [0u8; 9];
             match file.read_exact(&mut buffer) {
-                Ok(_) => {
+                Ok(()) => {
                     let edge_from = u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]);
                     let edge_to = u32::from_le_bytes([buffer[4], buffer[5], buffer[6], buffer[7]]);
                     let link_data = buffer[8];
                     
-                    if edge_from == from_id {
-                        edges.push((edge_to, link_data));
+                    if edge_to == to_id {
+                        edges.push((edge_from, link_data));
                     }
-                },
-                Err(_) => break,
+                }
+                Err(_) => break, // End of file or read error.
+            }
+        }
+        
+        Ok(edges)
+    }
+
+    /// Gets all outgoing edges from a node.
+    /// 
+    /// Uses memory-mapped index for O(1) lookup if available, otherwise scans edges.
+    pub fn get_outgoing_edges(&self, from_id: u32) -> Outcome<Vec<(u32, u8)>> {
+        let mut edges = Vec::new();
+        
+        // Try to use the index for fast lookup first.
+        if let Some(ref index) = self.index {
+            if let Some(edge_offsets) = index.get_node_edge_offsets(from_id) {
+                if let Some(ref mmap) = self.mmap {
+                    // Use index to read only this node's edges directly.
+                    for edge_offset in edge_offsets {
+                        let offset = edge_offset as usize;
+                        if offset + 9 > mmap.len() {
+                            continue;
+                        }
+                        
+                        // Read edge directly from memory-mapped data.
+                        let edge_from = u32::from_le_bytes([
+                            mmap[offset], mmap[offset + 1], mmap[offset + 2], mmap[offset + 3]
+                        ]);
+                        let edge_to = u32::from_le_bytes([
+                            mmap[offset + 4], mmap[offset + 5], mmap[offset + 6], mmap[offset + 7]
+                        ]);
+                        let link_data = mmap[offset + 8];
+                        
+                        // Verify this edge belongs to the requested node.
+                        if edge_from == from_id {
+                            edges.push((edge_to, link_data));
+                        }
+                    }
+                    
+                    return Ok(edges);
+                }
+            }
+        }
+        
+        // Fallback: scan all edges if no index available.
+        if let Some(ref mmap) = self.mmap {
+            // Use memory-mapped data for edge scanning.
+            let mut offset = 0;
+            for _ in 0..self.num_edges {
+                if offset + 9 > mmap.len() {
+                    break;
+                }
+                
+                // Read edge directly from memory-mapped data.
+                let edge_from = u32::from_le_bytes([
+                    mmap[offset], mmap[offset + 1], mmap[offset + 2], mmap[offset + 3]
+                ]);
+                let edge_to = u32::from_le_bytes([
+                    mmap[offset + 4], mmap[offset + 5], mmap[offset + 6], mmap[offset + 7]
+                ]);
+                let link_data = mmap[offset + 8];
+                
+                if edge_from == from_id {
+                    edges.push((edge_to, link_data));
+                }
+                
+                offset += 9;
+            }
+        } else {
+            // Memory mapping failed during initialization - use direct file access.
+            warn!("Memory mapping unavailable for node {}, using direct file access", from_id);
+            
+            #[cfg(unix)]
+            let mut file = res!(std::fs::File::open(format!("/proc/self/fd/{}", self.edge_file.as_raw_fd())));
+            #[cfg(not(unix))]
+            let mut file = res!(std::fs::File::open(&self.file_path));
+            res!(file.seek(SeekFrom::Start(0)));
+            
+            let mut buffer = [0u8; 9];
+            
+            for _ in 0..self.num_edges {
+                match file.read_exact(&mut buffer) {
+                    Ok(_) => {
+                        let edge_from = u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]);
+                        let edge_to = u32::from_le_bytes([buffer[4], buffer[5], buffer[6], buffer[7]]);
+                        let link_data = buffer[8];
+                        
+                        if edge_from == from_id {
+                            edges.push((edge_to, link_data));
+                        }
+                    },
+                    Err(_) => break,
+                }
             }
         }
         
@@ -276,28 +380,139 @@ impl MmapGraph {
     pub fn total_edges(&self) -> usize {
         self.num_edges
     }
+    
+    /// Loads the memory-mapped index if available.
+    pub fn load_index(&mut self, mmap_path: &str) -> Outcome<()> {
+        let index_path = format!("{}.idx", mmap_path.trim_end_matches(".mmap"));
+        match MmapIndex::load(&index_path) {
+            Ok(idx) => {
+                self.index = Some(idx);
+                Ok(())
+            },
+            Err(e) => {
+                warn!("Could not load index: {}", e);
+                Ok(()) // Not having an index is ok, just slower.
+            }
+        }
+    }
+    
+    /// Builds a memory-mapped index for an existing graph by scanning all edges.
+    /// 
+    /// This creates a fast lookup index for graphs that were generated without indexing.
+    /// Call this once after graph generation to enable O(1) edge lookups.
+    pub fn build_index(&mut self, mmap_path: &str, max_node_id: u32) -> Outcome<()> {
+        info!("Building memory-mapped index by scanning {} edges...", self.num_edges);
+        
+        let index_path = format!("{}.idx", mmap_path.trim_end_matches(".mmap"));
+        let mut index_builder = res!(MmapIndexBuilder::new(&index_path, max_node_id + 1));
+        
+        // Scan all edges to build the index.
+        if let Some(ref mmap) = self.mmap {
+            // Use memory-mapped edge data for scanning.
+            let mut offset = 0;
+            for edge_idx in 0..self.num_edges {
+                if offset + 9 > mmap.len() {
+                    break;
+                }
+                
+                // Read the source node ID from this edge.
+                let from_node = u32::from_le_bytes([
+                    mmap[offset], mmap[offset + 1], mmap[offset + 2], mmap[offset + 3]
+                ]);
+                
+                // Record this edge's offset in the index.
+                let edge_offset = (edge_idx * 9) as u64;
+                res!(index_builder.add_edge(from_node, edge_offset));
+                
+                offset += 9;
+            }
+        } else {
+            return Err(err!("Cannot build index: no memory mapping available"; Invalid, Input));
+        }
+        
+        // Finalise and save the index.
+        res!(index_builder.finalise());
+        info!("Index built successfully: {}", index_path);
+        
+        // Load the newly created index.
+        res!(self.load_index(mmap_path));
+        info!("Memory-mapped index loaded for fast lookups");
+        
+        Ok(())
+    }
 }
 
 /// Builder for creating memory-mapped graphs from stub matching.
 pub struct MmapGraphBuilder {
     graph: MmapGraph,
-    seen_edges: std::collections::HashSet<(u32, u32)>,
+    /// Optional index builder for creating disk-based index.
+    index_builder: Option<MmapIndexBuilder>,
+    /// Path for the graph files.
+    base_path: String,
+    /// Maximum node ID for index sizing.
+    _max_node_id: u32,
 }
 
 impl MmapGraphBuilder {
-    /// Creates a new builder.
+    /// Creates a new builder with disk-based indexing.
+    /// 
+    /// # Arguments
+    /// * `path` - Path for the edge data file.
+    /// * `estimated_edges` - Estimated number of edges (for pre-allocation).
+    /// * `max_node_id` - Maximum node ID (for index sizing).
+    /// 
+    /// # Returns
+    /// New builder instance.
+    pub fn new(path: &str, estimated_edges: usize, max_node_id: u32) -> Outcome<Self> {
+        let index_path = format!("{}.idx", path.trim_end_matches(".mmap"));
+        let index_builder = Some(res!(MmapIndexBuilder::new(&index_path, max_node_id + 1)));
+        
+        Ok(Self {
+            graph: res!(MmapGraph::new_with_options(path, estimated_edges, false)),
+            index_builder,
+            base_path: path.to_string(),
+            _max_node_id: max_node_id,
+        })
+    }
+    
+    /// Creates a new builder without indexing for large graphs.
+    /// 
+    /// Disables indexing completely to save memory for very large graphs.
+    /// Graph queries will be slower but memory usage will be minimal.
     /// 
     /// # Arguments
     /// * `path` - Path for the edge data file.
     /// * `estimated_edges` - Estimated number of edges (for pre-allocation).
     /// 
     /// # Returns
-    /// New builder instance.
-    pub fn new(path: &str, estimated_edges: usize) -> Outcome<Self> {
+    /// New builder instance without indexing.
+    pub fn new_without_index(path: &str, estimated_edges: usize) -> Outcome<Self> {
         Ok(Self {
-            graph: res!(MmapGraph::new(path, estimated_edges)),
-            seen_edges: std::collections::HashSet::new(),
+            graph: res!(MmapGraph::new_with_options(path, estimated_edges, false)),
+            index_builder: None,
+            base_path: path.to_string(),
+            _max_node_id: 0,
         })
+    }
+    
+    /// Adds an edge directly to the graph.
+    /// 
+    /// # Arguments
+    /// * `from` - Source node ID.
+    /// * `to` - Target node ID.
+    /// * `link_data` - Edge data byte.
+    /// 
+    /// # Returns
+    /// Success result.
+    pub fn add_edge(&mut self, from: u32, to: u32, link_data: u8) -> Outcome<()> {
+        // Record edge offset in index if enabled.
+        if let Some(ref mut index_builder) = self.index_builder {
+            let edge_offset = (self.graph.num_edges * 9) as u64;
+            res!(index_builder.add_edge(from, edge_offset));
+        }
+        
+        res!(self.graph.add_edge(from, to, link_data));
+        Ok(())
     }
     
     /// Adds an edge if it doesn't already exist.
@@ -310,19 +525,29 @@ impl MmapGraphBuilder {
     /// # Returns
     /// True if edge was added, false if it already existed.
     pub fn add_edge_unique(&mut self, from: u32, to: u32, link_data: u8) -> Outcome<bool> {
-        let key = (from, to);
-        if self.seen_edges.contains(&key) {
-            return Ok(false);
-        }
-        
+        // Note: This method is deprecated for large graphs due to memory usage.
+        // Use add_edge() directly for better memory efficiency.
         res!(self.graph.add_edge(from, to, link_data));
-        self.seen_edges.insert(key);
         Ok(true)
     }
     
-    /// Finalizes the graph and returns it.
+    /// Finalises the graph and returns it.
+    /// 
+    /// Writes the disk-based index if indexing was enabled.
     pub fn build(mut self) -> Outcome<MmapGraph> {
         res!(self.graph.flush());
+        
+        // Write the disk-based index if we have one.
+        if let Some(index_builder) = self.index_builder {
+            res!(index_builder.finalise());
+            info!("Disk-based index created for fast graph lookups");
+            
+            // Load the index into the graph.
+            res!(self.graph.load_index(&self.base_path));
+        } else {
+            info!("No index created (indexing was disabled)");
+        }
+        
         Ok(self.graph)
     }
     
@@ -339,22 +564,3 @@ impl MmapGraphBuilder {
     }
 }
 
-/// Configuration for memory-mapped graph generation.
-pub struct MmapConfig {
-    /// Path for the edge data file.
-    pub edge_file_path: String,
-    /// Whether to use memory mapping.
-    pub enabled: bool,
-    /// Estimated number of edges.
-    pub estimated_edges: usize,
-}
-
-impl Default for MmapConfig {
-    fn default() -> Self {
-        Self {
-            edge_file_path: "/tmp/social_graph_edges.bin".to_string(),
-            enabled: false,
-            estimated_edges: 100_000_000, // 100M edges default.
-        }
-    }
-}

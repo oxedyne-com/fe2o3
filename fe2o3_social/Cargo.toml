@@ -11,6 +11,7 @@ repository = "https://github.com/oxedyne-io/fe2o3"
 oxedyne_fe2o3_core = { path = "../fe2o3_core" }
 oxedyne_fe2o3_data = { path = "../fe2o3_data" }
 
+memmap2 = "0.9"
 strum = { version = "0.25", features = ["derive"] }
 
 [dev-dependencies]
