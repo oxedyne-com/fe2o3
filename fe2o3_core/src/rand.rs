@@ -106,21 +106,21 @@ impl Rand {
     /// * `stdev` - The standard deviation (σ) of the distribution
     /// 
     /// # Returns
-    /// A random f64 value from the normal distribution N(mean, stdev²)
-    pub fn normal(mean: f64, stdev: f64) -> f64 {
+    /// A random f32 value from the normal distribution N(mean, stdev²)
+    pub fn normal(mean: f32, stdev: f32) -> f32 {
         let mut rng = thread_rng();
         
         // Generate two uniform random numbers in (0, 1]
-        let u1: f64 = loop {
-            let val = rng.gen::<f64>();
+        let u1: f32 = loop {
+            let val = rng.gen::<f32>();
             if val > 0.0 {
                 break val;
             }
         };
-        let u2: f64 = rng.gen();
+        let u2: f32 = rng.gen();
         
         // Box-Muller transform
-        let z0 = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+        let z0 = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos();
         
         // Transform to desired mean and standard deviation
         mean + stdev * z0
@@ -153,12 +153,12 @@ mod tests {
         }
         
         // Calculate sample mean
-        let sample_mean = samples.iter().sum::<f64>() / samples.len() as f64;
+        let sample_mean = samples.iter().sum::<f32>() / samples.len() as f32;
         
         // Calculate sample standard deviation
         let variance = samples.iter()
             .map(|x| (x - sample_mean).powi(2))
-            .sum::<f64>() / (samples.len() - 1) as f64;
+            .sum::<f32>() / (samples.len() - 1) as f32;
         let sample_stdev = variance.sqrt();
         
         msg!("Expected mean: {}, Sample mean: {}", mean, sample_mean);

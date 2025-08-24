@@ -237,6 +237,20 @@ impl Help {
             ));
         }
         len += line.len() - arg_effect.len();
+        
+        // Single value type - display inline.
+        if arg.config().vals.len() == 1 {
+            if let Some((kind, _)) = arg.config().vals.first() {
+                line.push_str(&fmt!(
+                    " {}[{}]{}",
+                    val_effect,
+                    kind,
+                    arg_effect,
+                ));
+                len += fmt!(" [{}]", kind).len();
+            }
+        }
+        
         // Argument description.
         if let Some(help_txt) = &arg.config().help {
             line.push_str(&fmt!(
@@ -247,7 +261,9 @@ impl Help {
             ));
         }
         lines.push(line);
-        if arg.config().vals.len() > 0 {
+        
+        // Multiple value types - display on separate lines.
+        if arg.config().vals.len() > 1 {
             for (kind, help_txt) in &arg.config().vals {
                 let mut line = String::new();
                 let mut len = 0;

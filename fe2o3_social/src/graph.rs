@@ -33,13 +33,18 @@ use std::{
 
 /// Social graph - edges only, stored in memory-mapped file.
 pub struct SocialGraph {
-    edges: MmapGraph,
-    population: usize,
+    edges:      MmapGraph,
+    population: u32,
 }
 
 impl SocialGraph {
 
-    pub fn new(edges: MmapGraph, population: usize) -> Self {
+    pub fn new(
+        edges:      MmapGraph,
+        population: u32,
+    )
+        -> Self
+    {
         Self { edges, population }
     }
 
@@ -80,7 +85,7 @@ impl SocialGraph {
 
     /// Gets the number of nodes.
     pub fn len(&self) -> usize {
-        self.population
+        self.population as usize
     }
 
     /// Iterator over nodes.
@@ -208,8 +213,8 @@ impl fmt::Display for EmptyNodeData {
 #[derive(Clone, Debug)]
 pub struct Profile {
     pub profile_type:	ProfileType,
-    pub probability:	f64,
-    pub circle_ranges:	Vec<(usize, usize)>, // (min, max) for each circle.
+    pub probability:	f32,
+    pub circle_ranges:	Vec<(u32, u32)>, // (min, max) for each circle.
 }
 
 /// Sampling method for circle sizes and locations.
@@ -256,9 +261,9 @@ pub enum LinkMode {
 /// Geographic distribution parameters.
 #[derive(Clone, Debug)]
 pub struct GeographicParams {
-    pub origin_x:	f64,
-    pub origin_y:	f64,
-    pub extent:		f64,
+    pub origin_x:	f32,
+    pub origin_y:	f32,
+    pub extent:		f32,
     pub method:		SamplingMethod,
 }
 
@@ -292,17 +297,17 @@ impl CircleLabels {
 /// Configuration for social network generation.
 #[derive(Clone)]
 pub struct NetworkConfig {
-    pub population:			usize,
+    pub population:			u32,
     pub profiles:			Vec<Profile>,
     pub sampling_method:	SamplingMethod,
     pub geographic_params:	GeographicParams,
     pub num_circles:		usize,
-    pub reciprocity_matrix:	Vec<Vec<f64>>, // NxN matrix for circle reciprocity.
+    pub reciprocity_matrix:	Vec<Vec<f32>>, // NxN matrix for circle reciprocity.
     pub circle_labels:		Option<CircleLabels>, // Optional labels for circles.
     pub link_mode:			LinkMode, // Whether links are reciprocal or not.
-    pub progress_interval:	Option<usize>, // Report progress every N nodes (None = no progress reports).
-    pub memory_limit_mb:	Option<f64>, // Memory limit in MB (None = no limit).
-    pub chunk_size:			Option<usize>, // Process stubs in chunks of this size (None = process all at once).
+    pub progress_interval:	Option<u32>, // Report progress every N nodes (None = no progress reports).
+    pub memory_limit_mb:	Option<f32>, // Memory limit in MB (None = no limit).
+    pub chunk_size:			Option<u32>, // Process stubs in chunks of this size (None = process all at once).
     pub use_mmap:			Option<String>, // Use memory-mapped graph with specified file path (required).
 }
 
@@ -364,9 +369,9 @@ impl NetworkConfig {
 /// Statistics from graph verification.
 #[derive(Debug)]
 pub struct GraphStatistics {
-    pub population:				usize,
-    pub profile_counts:			HashMap<ProfileType, usize>,
-    pub avg_circle_sizes:		Vec<f64>, // Average circle sizes by type.
+    pub population:		    u32,
+    pub profile_counts:	    HashMap<ProfileType, usize>,
+    pub avg_circle_sizes:   Vec<f32>, // Average circle sizes by type.
 }
 
 /// Generates a social network graph using the stub matching algorithm.
@@ -409,7 +414,7 @@ fn generate_mmap_social_network(
                     info!("=== LOADING EXISTING MEMORY-MAPPED SOCIAL NETWORK ===");
                     info!("Population: {}", config.population);
                     info!("Memory-mapped file: {}", mmap_path);
-                    info!("File size: {:.1} MB", metadata.len() as f64 / (1024.0 * 1024.0));
+                    info!("File size: {:.1} MB", metadata.len() as f32 / (1024.0 * 1024.0));
                 }
                 
                 // Load existing mmap graph.
@@ -439,7 +444,7 @@ fn generate_mmap_social_network(
         LinkMode::NonReciprocal => stubs.len() / 2,
         _ => stubs.len(), // Reciprocal and Symmetric create 2 edges per pair
     };
-    let estimated_edges = (base_edges as f64 * 1.1) as usize;
+    let estimated_edges = (base_edges as f32 * 1.1) as usize;
     
     if config.progress_interval.is_some() {
         info!("Step 2: Creating memory-mapped graph (estimated {} edges)...", estimated_edges);
@@ -495,12 +500,12 @@ fn generate_mmap_social_network(
 fn match_stubs_and_insert_to_mmap(
     builder:            &mut MmapGraphBuilder,
     stubs:              Vec<Stub>,
-    reciprocity_matrix: &Vec<Vec<f64>>,
+    reciprocity_matrix: &Vec<Vec<f32>>,
     num_circles:        usize,
     link_mode:          LinkMode,
-    progress_interval:  Option<usize>,
-    memory_limit_mb:    Option<f64>,
-    chunk_size:         Option<usize>,
+    progress_interval:  Option<u32>,
+    memory_limit_mb:    Option<f32>,
+    chunk_size:         Option<u32>,
 )
     -> Outcome<usize>
 {
@@ -519,9 +524,9 @@ fn match_stubs_and_insert_to_mmap(
         if let Some(limit) = memory_limit_mb {
             // Estimate: aim to use at most 60% of memory limit for stubs.
             let available_mb = limit * 0.6;
-            let bytes_per_stub = std::mem::size_of::<Stub>() as f64;
+            let bytes_per_stub = std::mem::size_of::<Stub>() as f32;
             let stubs_per_mb = 1_048_576.0 / bytes_per_stub;
-            (available_mb * stubs_per_mb) as usize
+            (available_mb * stubs_per_mb) as u32
         } else {
             // Default chunk size: 10k stubs for mmap (smaller chunks).
             10_000
@@ -546,19 +551,20 @@ fn match_stubs_and_insert_to_mmap(
 
 /// Matches stubs in chunks and writes directly to memory-mapped graph.
 fn match_stubs_chunked_mmap(
-    builder:            &mut crate::mmap_graph::MmapGraphBuilder,
+    builder:            &mut MmapGraphBuilder,
     mut stubs:          Vec<Stub>,
-    reciprocity_matrix: &Vec<Vec<f64>>,
+    reciprocity_matrix: &Vec<Vec<f32>>,
     num_circles:        usize,
     link_mode:          LinkMode,
-    progress_interval:  Option<usize>,
-    memory_limit_mb:    Option<f64>,
-    chunk_size:         usize,
+    progress_interval:  Option<u32>,
+    memory_limit_mb:    Option<f32>,
+    chunk_size:         u32,
 )
     -> Outcome<usize>
 {
     let mut total_edges = 0;
     let initial_stubs = stubs.len();
+    let chunk_size = chunk_size as usize;
     let total_chunks = (initial_stubs + chunk_size - 1) / chunk_size;
     
     // Shuffle all stubs first for better randomization.
@@ -595,7 +601,7 @@ fn match_stubs_chunked_mmap(
             };
             
             if chunk_num % report_interval == 1 || chunk_num == total_chunks {
-                let percent_complete = (chunk_num as f64 / total_chunks as f64) * 100.0;
+                let percent_complete = (chunk_num as f32 / total_chunks as f32) * 100.0;
                 info!("Processing chunk {}/{} ({:.1}%) | {} stubs | Memory: {:.1}MB | {} edges so far", 
                       chunk_num, total_chunks, percent_complete, chunk.len(), current_memory, total_edges);
             }
@@ -813,11 +819,11 @@ pub fn verify_graph(
     }
     
     // Calculate average circle sizes from actual usage.
-    let avg_circle_sizes: Vec<f64> = circle_counts
+    let avg_circle_sizes: Vec<f32> = circle_counts
         .iter()
         .map(|&count| {
             if total_edges_sampled > 0 {
-                count as f64 / total_edges_sampled as f64
+                count as f32 / total_edges_sampled as f32
             } else {
                 0.0
             }
@@ -827,13 +833,13 @@ pub fn verify_graph(
     // Estimate profile counts (can't determine from edges alone, use config).
     let mut profile_counts = HashMap::new();
     for profile in &config.profiles {
-        let estimated_count = (profile.probability * population as f64) as usize;
+        let estimated_count = (profile.probability * population as f32) as usize;
         profile_counts.insert(profile.profile_type, estimated_count);
     }
     
     // Verify edge count is reasonable for population size.
-    let expected_min_edges = population / 10; // At least 0.1 edges per node.
-    let expected_max_edges = population * 1000; // At most 1000 edges per node.
+    let expected_min_edges = population as usize / 10; // At least 0.1 edges per node.
+    let expected_max_edges = population as usize * 1000; // At most 1000 edges per node.
     
     if edge_count < expected_min_edges {
         return Err(err!(
@@ -871,7 +877,7 @@ pub fn verify_graph(
 fn create_stubs(config: &NetworkConfig) -> Vec<Stub> {
     let mut stubs = Vec::new();
     
-    for i in 0..config.population {
+    for i in 0..config.population as usize {
         let id = PersonId(i as u32);
         
         // Sample profile type based on probabilities.
@@ -912,7 +918,7 @@ fn create_stubs(config: &NetworkConfig) -> Vec<Stub> {
 
 /// Samples a profile based on probabilities.
 fn sample_profile<'a>(profiles: &'a [Profile]) -> Outcome<&'a Profile> {
-    let roll = Rand::value::<f64>();
+    let roll = Rand::value::<f32>();
     let mut cumulative = 0.0;
     
     for profile in profiles {
@@ -927,7 +933,13 @@ fn sample_profile<'a>(profiles: &'a [Profile]) -> Outcome<&'a Profile> {
 }
 
 /// Samples a value from a range using the specified method.
-fn sample_range(min: usize, max: usize, method: SamplingMethod) -> Outcome<usize> {
+fn sample_range(
+    min:    u32,
+    max:    u32,
+    method: SamplingMethod,
+)
+    -> Outcome<u32>
+{
     if min > max {
         return Err(err!("Invalid range: {} > {}", min, max; Invalid, Range));
     }
@@ -937,9 +949,9 @@ fn sample_range(min: usize, max: usize, method: SamplingMethod) -> Outcome<usize
             Rand::in_range(min, max)
         }
         SamplingMethod::Gaussian => {
-            let mean = (min + max) as f64 / 2.0;
-            let stdev = (max - min) as f64 / 6.0; // 99.7% within range.
-            let sample = Rand::normal(mean, stdev).round() as usize;
+            let mean = (min + max) as f32 / 2.0;
+            let stdev = (max - min) as f32 / 6.0; // 99.7% within range.
+            let sample = Rand::normal(mean, stdev).round() as u32;
             // Clamp to range.
             sample.max(min).min(max)
         }
@@ -951,12 +963,14 @@ fn sample_range(min: usize, max: usize, method: SamplingMethod) -> Outcome<usize
 
 /// Simple stub matching that writes directly to memory-mapped builder.
 fn match_stubs_simple_mmap(
-    builder: &mut crate::mmap_graph::MmapGraphBuilder,
-    mut chunk: Vec<Stub>,
-    reciprocity_matrix: &Vec<Vec<f64>>,
-    num_circles: usize,
-    link_mode: LinkMode,
-) -> Outcome<usize> {
+    builder:            &mut MmapGraphBuilder,
+    mut chunk:          Vec<Stub>,
+    reciprocity_matrix: &Vec<Vec<f32>>,
+    num_circles:        usize,
+    link_mode:          LinkMode,
+)
+    -> Outcome<usize>
+{
     let mut edges_created = 0;
     
     // Process pairs from this chunk.
@@ -1061,9 +1075,9 @@ fn shuffle_stubs(stubs: &mut Vec<Stub>) {
 /// # Returns
 /// Target circle type or error if matrix invalid.
 fn sample_reciprocal_circle(
-    from_circle: CircleType,
-    reciprocity_matrix: &Vec<Vec<f64>>,
-    num_circles: usize,
+    from_circle:        CircleType,
+    reciprocity_matrix: &Vec<Vec<f32>>,
+    num_circles:        usize,
 )
     -> Outcome<CircleType>
 {
@@ -1076,7 +1090,7 @@ fn sample_reciprocal_circle(
     }
     
     let probabilities = &reciprocity_matrix[row_idx];
-    let roll = Rand::value::<f64>();
+    let roll = Rand::value::<f32>();
     let mut cumulative = 0.0;
     
     for (idx, &prob) in probabilities.iter().enumerate() {
@@ -1319,7 +1333,7 @@ mod tests {
         
         // In reciprocal mode, most links should be reciprocal.
         // Allow some tolerance since edge creation can be affected by stub counts.
-        let reciprocal_ratio = reciprocal_count as f64 / total_edges as f64;
+        let reciprocal_ratio = reciprocal_count as f32 / total_edges as f32;
         if reciprocal_ratio < 0.7 {
             return Err(err!(
                 "Reciprocal link ratio too low: {}", reciprocal_ratio;
@@ -1443,7 +1457,7 @@ mod tests {
         let non_reciprocal_graph = res!(generate_social_network(non_reciprocal_config));
         
         // Calculate reciprocal ratios for both.
-        let calc_ratio = |graph: &SocialGraph| -> f64 {
+        let calc_ratio = |graph: &SocialGraph| -> f32 {
             let mut reciprocal_count = 0;
             let mut total_edges = 0;
             
@@ -1461,7 +1475,7 @@ mod tests {
             }
             
             if total_edges > 0 {
-                reciprocal_count as f64 / total_edges as f64
+                reciprocal_count as f32 / total_edges as f32
             } else {
                 0.0
             }

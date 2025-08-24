@@ -2076,6 +2076,7 @@ dependencies = [
  "bigdecimal",
  "dat_map",
  "num-bigint 0.3.3",
+ "num-traits",
  "oxedyne_fe2o3_core",
  "oxedyne_fe2o3_hash",
  "oxedyne_fe2o3_num",

@@ -1276,8 +1276,8 @@ macro_rules! to_from_dat_boxed {
 }
 
 #[macro_export]
-/// Provide a simple cloning getter for variants of an enum, primarily for the
-/// [`FromDatMap`] and [`ToDatMap`] derive macros.
+/// Provide a simple cloning getter for variants of an enum, primarily for the [`FromDatMap`] and
+/// [`ToDatMap`] derive macros.
 macro_rules! enum_getter {
     { $method:ident, $typ:ty, $variant:ident } => {
         
@@ -1289,6 +1289,187 @@ macro_rules! enum_getter {
             }
         }
         
+    };
+}
+
+#[macro_export]
+/// Coerce numercial types to the desired type primarily for the [`FromDatMap`] and [`ToDatMap`]
+/// derive macros.
+macro_rules! enum_getter_numeric {
+    // For unsigned integers - can convert from smaller types
+    { $method:ident, u8 } => {
+        pub fn $method(&self) -> Option<u8> {
+            match self {
+                Self::U8(v) => Some(*v),
+                _ => None,
+            }
+        }
+    };
+    { $method:ident, u16 } => {
+        pub fn $method(&self) -> Option<u16> {
+            match self {
+                Self::U8(v)     => Some(*v as u16),
+                Self::U16(v)    => Some(*v),
+                _ => None,
+            }
+        }
+    };
+    { $method:ident, u32 } => {
+        pub fn $method(&self) -> Option<u32> {
+            match self {
+                Self::U8(v)     => Some(*v as u32),
+                Self::U16(v)    => Some(*v as u32),
+                Self::U32(v)    => Some(*v),
+                _ => None,
+            }
+        }
+    };
+    { $method:ident, u64 } => {
+        pub fn $method(&self) -> Option<u64> {
+            match self {
+                Self::U8(v)     => Some(*v as u64),
+                Self::U16(v)    => Some(*v as u64),
+                Self::U32(v)    => Some(*v as u64),
+                Self::U64(v)    => Some(*v),
+                Self::C64(v)    => Some(*v),  // C64 is also u64
+                _ => None,
+            }
+        }
+    };
+    { $method:ident, u128 } => {
+        pub fn $method(&self) -> Option<u128> {
+            match self {
+                Self::U8(v)     => Some(*v as u128),
+                Self::U16(v)    => Some(*v as u128),
+                Self::U32(v)    => Some(*v as u128),
+                Self::U64(v)    => Some(*v as u128),
+                Self::C64(v)    => Some(*v as u128),
+                Self::U128(v)   => Some(*v),
+                _ => None,
+            }
+        }
+    };
+    // For signed integers - can convert from smaller signed types and smaller unsigned types
+    { $method:ident, i8 } => {
+        pub fn $method(&self) -> Option<i8> {
+            match self {
+                Self::I8(v) => Some(*v),
+                _ => None,
+            }
+        }
+    };
+    { $method:ident, i16 } => {
+        pub fn $method(&self) -> Option<i16> {
+            match self {
+                Self::U8(v)     => Some(*v as i16),
+                Self::I8(v)     => Some(*v as i16),
+                Self::I16(v)    => Some(*v),
+                _ => None,
+            }
+        }
+    };
+    { $method:ident, i32 } => {
+        pub fn $method(&self) -> Option<i32> {
+            match self {
+                Self::U8(v)     => Some(*v as i32),
+                Self::U16(v)    => Some(*v as i32),
+                Self::I8(v)     => Some(*v as i32),
+                Self::I16(v)    => Some(*v as i32),
+                Self::I32(v)    => Some(*v),
+                _ => None,
+            }
+        }
+    };
+    { $method:ident, i64 } => {
+        pub fn $method(&self) -> Option<i64> {
+            match self {
+                Self::U8(v)     => Some(*v as i64),
+                Self::U16(v)    => Some(*v as i64),
+                Self::U32(v)    => Some(*v as i64),
+                Self::I8(v)     => Some(*v as i64),
+                Self::I16(v)    => Some(*v as i64),
+                Self::I32(v)    => Some(*v as i64),
+                Self::I64(v)    => Some(*v),
+                _ => None,
+            }
+        }
+    };
+    { $method:ident, i128 } => {
+        pub fn $method(&self) -> Option<i128> {
+            match self {
+                Self::U8(v)     => Some(*v as i128),
+                Self::U16(v)    => Some(*v as i128),
+                Self::U32(v)    => Some(*v as i128),
+                Self::U64(v)    => Some(*v as i128),
+                Self::C64(v)    => Some(*v as i128),
+                Self::I8(v)     => Some(*v as i128),
+                Self::I16(v)    => Some(*v as i128),
+                Self::I32(v)    => Some(*v as i128),
+                Self::I64(v)    => Some(*v as i128),
+                Self::I128(v)   => Some(*v),
+                _ => None,
+            }
+        }
+    };
+
+    { $method:ident, Float32 } => {
+        pub fn $method(&self) -> Option<Float32> {
+            match self {
+                Self::U8(v)             => Some(Float32(*v as f32)),
+                Self::U16(v)            => Some(Float32(*v as f32)),
+                Self::U32(v)            => Some(Float32(*v as f32)),
+                Self::U64(v)            => Some(Float32(*v as f32)),
+                Self::U128(v)           => Some(Float32(*v as f32)),
+                Self::I8(v)             => Some(Float32(*v as f32)),
+                Self::I16(v)            => Some(Float32(*v as f32)),
+                Self::I32(v)            => Some(Float32(*v as f32)),
+                Self::I64(v)            => Some(Float32(*v as f32)),
+                Self::I128(v)           => Some(Float32(*v as f32)),
+                Self::F32(v)            => Some(Float32(**v)),
+                Self::F64(Float64(v))   => Some(Float32(*v as f32)),
+                Self::Aint(bigint) => {
+                    // Convert BigInt to f32 (may lose precision for large values).
+                    use num_traits::ToPrimitive;
+                    bigint.to_f32().map(Float32)
+                },
+                Self::Adec(bigdec) => {
+                    // Convert BigDecimal to f32 (may lose precision).
+                    use num_traits::ToPrimitive;
+                    bigdec.to_f32().map(Float32)
+                },
+                _ => None,
+            }
+        }
+    };
+    // For Float64 wrapper - convert from all numeric types
+    { $method:ident, Float64 } => {
+        pub fn $method(&self) -> Option<Float64> {
+            match self {
+                Self::U8(v)             => Some(Float64(*v as f64)),
+                Self::U16(v)            => Some(Float64(*v as f64)),
+                Self::U32(v)            => Some(Float64(*v as f64)),
+                Self::U64(v)            => Some(Float64(*v as f64)),
+                Self::U128(v)           => Some(Float64(*v as f64)),
+                Self::I8(v)             => Some(Float64(*v as f64)),
+                Self::I16(v)            => Some(Float64(*v as f64)),
+                Self::I32(v)            => Some(Float64(*v as f64)),
+                Self::I64(v)            => Some(Float64(*v as f64)),
+                Self::I128(v)           => Some(Float64(*v as f64)),
+                Self::F32(Float32(v))   => Some(Float64(*v as f64)),
+                Self::F64(v)            => Some(Float64(**v)),
+                Self::Aint(bigint) => {
+                    // Convert BigInt to f64 (may lose precision for large values).
+                    use num_traits::ToPrimitive;
+                    bigint.to_f64().map(Float64)
+                },
+                Self::Adec(bigdec) => {
+                    // Convert BigDecimal to f64 (may lose precision).
+                    use num_traits::ToPrimitive;
+                    bigdec.to_f64().map(Float64)
+                },
+                _ => None,
+            }
+        }
     };
 }
 

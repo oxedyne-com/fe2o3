@@ -34,3 +34,5 @@ Thumbs.db
 .idea/
 .vscode/
 *.iml
+
+.srcat/

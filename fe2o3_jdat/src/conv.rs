@@ -438,29 +438,29 @@ impl<
 impl Dat {
 
     // Used in FromDatMap
-    enum_getter! { get_bool,    bool,   Bool    }
-    enum_getter! { get_u8,      u8,     U8      }
-    enum_getter! { get_u16,     u16,    U16     }
-    enum_getter! { get_u32,     u32,    U32     }
-    enum_getter! { get_u64,     u64,    U64     }
-    enum_getter! { get_u128,    u128,   U128    }
-    enum_getter! { get_i8,      i8,     I8      }
-    enum_getter! { get_i16,     i16,    I16     }
-    enum_getter! { get_i32,     i32,    I32     }
-    enum_getter! { get_i64,     i64,    I64     }
-    enum_getter! { get_i128,    i128,   I128    }
-    enum_getter! { get_float32,     Float32,        F32  }
-    enum_getter! { get_float64,     Float64,        F64  }
-    enum_getter! { get_bigint,      BigInt,         Aint }
-    enum_getter! { get_bigdecimal,  BigDecimal,     Adec }
-    enum_getter! { get_string,      String,         Str  }
-    enum_getter! { get_bytes,       Vec<u8>,        BU64 }
+    enum_getter! { get_bool,        bool,               Bool    }
+    enum_getter! { get_bigint,      BigInt,             Aint    }
+    enum_getter! { get_bigdecimal,  BigDecimal,         Adec    }
+    enum_getter! { get_string,      String,             Str     }
+    enum_getter! { get_bytes,       Vec<u8>,            BU64    }
     // TODO B256??
-    enum_getter! { get_list,    Vec<Dat>,           List }
-    enum_getter! { get_map,     DaticleMap,         Map }
-    enum_getter! { get_box,     Box<Dat>,           Box }
-    enum_getter! { get_box_opt, Box<Option<Dat>>,   Opt }
+    enum_getter! { get_list,        Vec<Dat>,           List    }
+    enum_getter! { get_map,         DaticleMap,         Map     }
+    enum_getter! { get_box,         Box<Dat>,           Box     }
+    enum_getter! { get_box_opt,     Box<Option<Dat>>,   Opt     }
 
+    enum_getter_numeric! { get_u8,   u8   }
+    enum_getter_numeric! { get_u16,  u16  }
+    enum_getter_numeric! { get_u32,  u32  }
+    enum_getter_numeric! { get_u64,  u64  }
+    enum_getter_numeric! { get_u128, u128 }
+    enum_getter_numeric! { get_i8,   i8   }
+    enum_getter_numeric! { get_i16,  i16  }
+    enum_getter_numeric! { get_i32,  i32  }
+    enum_getter_numeric! { get_i64,  i64  }
+    enum_getter_numeric! { get_i128, i128 }
+    enum_getter_numeric! { get_float32,  Float32  }
+    enum_getter_numeric! { get_float64,  Float64  }
 }
 
 
