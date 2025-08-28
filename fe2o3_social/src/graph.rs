@@ -17,7 +17,10 @@ use crate::{
 use oxedyne_fe2o3_core::{
 	prelude::*,
     mem::get_memory_usage_mb,
-	rand::Rand,
+	rand::{
+        Rand,
+        SamplingMethod,
+    },
 };
 use oxedyne_fe2o3_data::digraph::{
 	LinkData,
@@ -217,13 +220,6 @@ pub struct Profile {
     pub circle_ranges:	Vec<(u32, u32)>, // (min, max) for each circle.
 }
 
-/// Sampling method for circle sizes and locations.
-#[derive(Clone, Debug, Copy)]
-pub enum SamplingMethod {
-    Uniform,
-    Gaussian,
-}
-
 /// Link generation mode for network creation.
 /// 
 /// # Example
@@ -256,15 +252,6 @@ pub enum LinkMode {
     /// Links are non-reciprocal - connections are one-way only.
     /// Uses the existing probability matrix to determine circle types.
     NonReciprocal,
-}
-
-/// Geographic distribution parameters.
-#[derive(Clone, Debug)]
-pub struct GeographicParams {
-    pub origin_x:	f32,
-    pub origin_y:	f32,
-    pub extent:		f32,
-    pub method:		SamplingMethod,
 }
 
 /// Internal stub representation for matching.
@@ -300,7 +287,6 @@ pub struct NetworkConfig {
     pub population:			u32,
     pub profiles:			Vec<Profile>,
     pub sampling_method:	SamplingMethod,
-    pub geographic_params:	GeographicParams,
     pub num_circles:		usize,
     pub reciprocity_matrix:	Vec<Vec<f32>>, // NxN matrix for circle reciprocity.
     pub circle_labels:		Option<CircleLabels>, // Optional labels for circles.
@@ -343,12 +329,6 @@ impl NetworkConfig {
                 },
             ],
             sampling_method: SamplingMethod::Uniform,
-            geographic_params: GeographicParams {
-                origin_x:	0.0,
-                origin_y:	0.0,
-                extent:		100.0,
-                method:		SamplingMethod::Gaussian,
-            },
             num_circles: 4,
             reciprocity_matrix: vec![
                 vec![0.95, 0.05, 0.00, 0.00], // Inner -> x.
@@ -411,7 +391,7 @@ fn generate_mmap_social_network(
         if let Ok(metadata) = std::fs::metadata(&mmap_path) {
             if metadata.len() > 0 {
                 if let Some(_interval) = config.progress_interval {
-                    info!("=== LOADING EXISTING MEMORY-MAPPED SOCIAL NETWORK ===");
+                    info!(">>> Loading existing memory-mapped social graph");
                     info!("Population: {}", config.population);
                     info!("Memory-mapped file: {}", mmap_path);
                     info!("File size: {:.1} MB", metadata.len() as f32 / (1024.0 * 1024.0));
@@ -426,7 +406,7 @@ fn generate_mmap_social_network(
     }
     
     if let Some(interval) = config.progress_interval {
-        info!("=== MEMORY-MAPPED SOCIAL NETWORK GENERATION ===");
+        info!(">>> Memory-mapped social graph generation");
         info!("Population: {}", config.population);
         info!("Progress reporting every {} nodes", interval);
         info!("Memory-mapped file: {}", mmap_path);
@@ -897,7 +877,7 @@ fn create_stubs(config: &NetworkConfig) -> Vec<Stub> {
             let circle_type = CircleType(circle_idx as u8);
             
             // Sample circle size from range using the configured method.
-            let size = sample_range(
+            let size = Rand::sample_u32(
                 min_size,
                 max_size,
                 config.sampling_method
@@ -931,35 +911,6 @@ fn sample_profile<'a>(profiles: &'a [Profile]) -> Outcome<&'a Profile> {
     // Should not reach here if probabilities sum to 1.0.
     Err(err!("Profile probabilities do not sum to 1.0"; Invalid, Configuration))
 }
-
-/// Samples a value from a range using the specified method.
-fn sample_range(
-    min:    u32,
-    max:    u32,
-    method: SamplingMethod,
-)
-    -> Outcome<u32>
-{
-    if min > max {
-        return Err(err!("Invalid range: {} > {}", min, max; Invalid, Range));
-    }
-    
-    let value = match method {
-        SamplingMethod::Uniform => {
-            Rand::in_range(min, max)
-        }
-        SamplingMethod::Gaussian => {
-            let mean = (min + max) as f32 / 2.0;
-            let stdev = (max - min) as f32 / 6.0; // 99.7% within range.
-            let sample = Rand::normal(mean, stdev).round() as u32;
-            // Clamp to range.
-            sample.max(min).min(max)
-        }
-    };
-    
-    Ok(value)
-}
-
 
 /// Simple stub matching that writes directly to memory-mapped builder.
 fn match_stubs_simple_mmap(
@@ -1209,12 +1160,6 @@ mod tests {
                 },
             ],
             sampling_method: SamplingMethod::Uniform,
-            geographic_params: GeographicParams {
-                origin_x:	0.0,
-                origin_y:	0.0,
-                extent:		100.0,
-                method:		SamplingMethod::Gaussian,
-            },
             num_circles: 4,
             reciprocity_matrix: vec![
                 vec![0.95, 0.05, 0.00, 0.00], // Inner -> x.
@@ -1572,10 +1517,10 @@ mod tests {
     }
     
     #[test]
-    fn test_sample_range() -> Outcome<()> {
+    fn test_sample_u32() -> Outcome<()> {
         // Test uniform sampling.
         for _ in 0..100 {
-            let val = res!(sample_range(10, 20, SamplingMethod::Uniform));
+            let val = res!(Rand::sample_u32(10, 20, SamplingMethod::Uniform));
             if !(val >= 10 && val <= 20) {
                 return Err(err!(
                     "Uniform sample {} out of range [10, 20]", val;
@@ -1586,7 +1531,7 @@ mod tests {
         
         // Test Gaussian sampling.
         for _ in 0..100 {
-            let val = res!(sample_range(50, 100, SamplingMethod::Gaussian));
+            let val = res!(Rand::sample_u32(50, 100, SamplingMethod::Gaussian));
             if !(val >= 50 && val <= 100) {
                 return Err(err!(
                     "Gaussian sample {} out of range [50, 100]", val;
@@ -1596,7 +1541,7 @@ mod tests {
         }
         
         // Test invalid range.
-        match sample_range(20, 10, SamplingMethod::Uniform) {
+        match Rand::sample_u32(20, 10, SamplingMethod::Uniform) {
             Err(_) => Ok(()),
             Ok(_) => Err(err!(
                 "Should have failed for invalid range";
