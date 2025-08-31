@@ -302,6 +302,15 @@ impl MolecularCapture {
             Kind::B16       |
             Kind::B32       => Some(MolecularCapture::Bytes),
             Kind::Vek       |
+            Kind::Tup2u8    |
+            Kind::Tup3u8    |
+            Kind::Tup4u8    |
+            Kind::Tup5u8    |
+            Kind::Tup6u8    |
+            Kind::Tup7u8    |
+            Kind::Tup8u8    |
+            Kind::Tup9u8    |
+            Kind::Tup10u8   |
             Kind::Tup2u16   |
             Kind::Tup3u16   |
             Kind::Tup4u16   |
@@ -328,13 +337,58 @@ impl MolecularCapture {
             Kind::Tup7u64   |
             Kind::Tup8u64   |
             Kind::Tup9u64   |
-            Kind::Tup10u64  => Some(MolecularCapture::ListSame),
+            Kind::Tup10u64  |
+            Kind::Tup2i8    |
+            Kind::Tup3i8    |
+            Kind::Tup4i8    |
+            Kind::Tup5i8    |
+            Kind::Tup6i8    |
+            Kind::Tup7i8    |
+            Kind::Tup8i8    |
+            Kind::Tup9i8    |
+            Kind::Tup10i8   |
+            Kind::Tup2i16   |
+            Kind::Tup3i16   |
+            Kind::Tup4i16   |
+            Kind::Tup5i16   |
+            Kind::Tup6i16   |
+            Kind::Tup7i16   |
+            Kind::Tup8i16   |
+            Kind::Tup9i16   |
+            Kind::Tup10i16  |
+            Kind::Tup2i32   |
+            Kind::Tup3i32   |
+            Kind::Tup4i32   |
+            Kind::Tup5i32   |
+            Kind::Tup6i32   |
+            Kind::Tup7i32   |
+            Kind::Tup8i32   |
+            Kind::Tup9i32   |
+            Kind::Tup10i32  |
+            Kind::Tup2i64   |
+            Kind::Tup3i64   |
+            Kind::Tup4i64   |
+            Kind::Tup5i64   |
+            Kind::Tup6i64   |
+            Kind::Tup7i64   |
+            Kind::Tup8i64   |
+            Kind::Tup9i64   |
+            Kind::Tup10i64  => Some(MolecularCapture::ListSame),
             _ => None,
         }
     }
 
     pub fn same_kind(kind: &Kind) -> Kind {
         match kind {
+            Kind::Tup2u8    |
+            Kind::Tup3u8    |
+            Kind::Tup4u8    |
+            Kind::Tup5u8    |
+            Kind::Tup6u8    |
+            Kind::Tup7u8    |
+            Kind::Tup8u8    |
+            Kind::Tup9u8    |
+            Kind::Tup10u8   => Kind::U8,
             Kind::Tup2u16   |
             Kind::Tup3u16   |
             Kind::Tup4u16   |
@@ -362,6 +416,42 @@ impl MolecularCapture {
             Kind::Tup8u64   |
             Kind::Tup9u64   |
             Kind::Tup10u64  => Kind::U64,
+            Kind::Tup2i8    |
+            Kind::Tup3i8    |
+            Kind::Tup4i8    |
+            Kind::Tup5i8    |
+            Kind::Tup6i8    |
+            Kind::Tup7i8    |
+            Kind::Tup8i8    |
+            Kind::Tup9i8    |
+            Kind::Tup10i8   => Kind::I8,
+            Kind::Tup2i16   |
+            Kind::Tup3i16   |
+            Kind::Tup4i16   |
+            Kind::Tup5i16   |
+            Kind::Tup6i16   |
+            Kind::Tup7i16   |
+            Kind::Tup8i16   |
+            Kind::Tup9i16   |
+            Kind::Tup10i16  => Kind::I16,
+            Kind::Tup2i32   |
+            Kind::Tup3i32   |
+            Kind::Tup4i32   |
+            Kind::Tup5i32   |
+            Kind::Tup6i32   |
+            Kind::Tup7i32   |
+            Kind::Tup8i32   |
+            Kind::Tup9i32   |
+            Kind::Tup10i32  => Kind::I32,
+            Kind::Tup2i64   |
+            Kind::Tup3i64   |
+            Kind::Tup4i64   |
+            Kind::Tup5i64   |
+            Kind::Tup6i64   |
+            Kind::Tup7i64   |
+            Kind::Tup8i64   |
+            Kind::Tup9i64   |
+            Kind::Tup10i64  => Kind::I64,
             _ => Kind::Unknown,
         }
     }
@@ -678,6 +768,15 @@ impl Kind {
             Self::B16       |
             Self::B32       |
             // Fixed length numbers
+            Self::Tup2u8    |
+            Self::Tup3u8    |
+            Self::Tup4u8    |
+            Self::Tup5u8    |
+            Self::Tup6u8    |
+            Self::Tup7u8    |
+            Self::Tup8u8    |
+            Self::Tup9u8    |
+            Self::Tup10u8   |
             Self::Tup2u16   |
             Self::Tup3u16   |
             Self::Tup4u16   |
@@ -704,7 +803,43 @@ impl Kind {
             Self::Tup7u64   |
             Self::Tup8u64   |
             Self::Tup9u64   |
-            Self::Tup10u64  => true,
+            Self::Tup10u64  |
+            Self::Tup2i8    |
+            Self::Tup3i8    |
+            Self::Tup4i8    |
+            Self::Tup5i8    |
+            Self::Tup6i8    |
+            Self::Tup7i8    |
+            Self::Tup8i8    |
+            Self::Tup9i8    |
+            Self::Tup10i8   |
+            Self::Tup2i16   |
+            Self::Tup3i16   |
+            Self::Tup4i16   |
+            Self::Tup5i16   |
+            Self::Tup6i16   |
+            Self::Tup7i16   |
+            Self::Tup8i16   |
+            Self::Tup9i16   |
+            Self::Tup10i16  |
+            Self::Tup2i32   |
+            Self::Tup3i32   |
+            Self::Tup4i32   |
+            Self::Tup5i32   |
+            Self::Tup6i32   |
+            Self::Tup7i32   |
+            Self::Tup8i32   |
+            Self::Tup9i32   |
+            Self::Tup10i32  |
+            Self::Tup2i64   |
+            Self::Tup3i64   |
+            Self::Tup4i64   |
+            Self::Tup5i64   |
+            Self::Tup6i64   |
+            Self::Tup7i64   |
+            Self::Tup8i64   |
+            Self::Tup9i64   |
+            Self::Tup10i64  => true,
             _ => false,
         }
     }
@@ -1295,6 +1430,15 @@ impl Dat {
                                 Kind::Tup10 => string_decode_heterogenous_tuple! { Tup10,   10, store.list, state },
 
                                 Kind::Vek   => return Ok(Dat::Vek(res!(Vek::try_from(store.list)))),
+                                Kind::Tup2u8    => string_decode_int_tuple! { Tup2u8,   U8,  u8,  2, store.list, state },
+                                Kind::Tup3u8    => string_decode_int_tuple! { Tup3u8,   U8,  u8,  3, store.list, state },
+                                Kind::Tup4u8    => string_decode_int_tuple! { Tup4u8,   U8,  u8,  4, store.list, state },
+                                Kind::Tup5u8    => string_decode_int_tuple! { Tup5u8,   U8,  u8,  5, store.list, state },
+                                Kind::Tup6u8    => string_decode_int_tuple! { Tup6u8,   U8,  u8,  6, store.list, state },
+                                Kind::Tup7u8    => string_decode_int_tuple! { Tup7u8,   U8,  u8,  7, store.list, state },
+                                Kind::Tup8u8    => string_decode_int_tuple! { Tup8u8,   U8,  u8,  8, store.list, state },
+                                Kind::Tup9u8    => string_decode_int_tuple! { Tup9u8,   U8,  u8,  9, store.list, state },
+                                Kind::Tup10u8   => string_decode_int_tuple! { Tup10u8,  U8,  u8,  10, store.list, state },
 
                                 Kind::Tup2u16   => string_decode_int_tuple! { Tup2u16,  U16, u16, 2, store.list, state },
                                 Kind::Tup3u16   => string_decode_int_tuple! { Tup3u16,  U16, u16, 3, store.list, state },
@@ -1325,6 +1469,42 @@ impl Dat {
                                 Kind::Tup8u64   => string_decode_int_tuple! { Tup8u64,  U64, u64, 8, store.list, state },
                                 Kind::Tup9u64   => string_decode_int_tuple! { Tup9u64,  U64, u64, 9, store.list, state },
                                 Kind::Tup10u64  => string_decode_int_tuple! { Tup10u64, U64, u64, 10, store.list, state },
+                                Kind::Tup2i8    => string_decode_int_tuple! { Tup2i8,   I8,  i8,  2, store.list, state },
+                                Kind::Tup3i8    => string_decode_int_tuple! { Tup3i8,   I8,  i8,  3, store.list, state },
+                                Kind::Tup4i8    => string_decode_int_tuple! { Tup4i8,   I8,  i8,  4, store.list, state },
+                                Kind::Tup5i8    => string_decode_int_tuple! { Tup5i8,   I8,  i8,  5, store.list, state },
+                                Kind::Tup6i8    => string_decode_int_tuple! { Tup6i8,   I8,  i8,  6, store.list, state },
+                                Kind::Tup7i8    => string_decode_int_tuple! { Tup7i8,   I8,  i8,  7, store.list, state },
+                                Kind::Tup8i8    => string_decode_int_tuple! { Tup8i8,   I8,  i8,  8, store.list, state },
+                                Kind::Tup9i8    => string_decode_int_tuple! { Tup9i8,   I8,  i8,  9, store.list, state },
+                                Kind::Tup10i8   => string_decode_int_tuple! { Tup10i8,  I8,  i8,  10, store.list, state },
+                                Kind::Tup2i16   => string_decode_int_tuple! { Tup2i16,  I16, i16, 2, store.list, state },
+                                Kind::Tup3i16   => string_decode_int_tuple! { Tup3i16,  I16, i16, 3, store.list, state },
+                                Kind::Tup4i16   => string_decode_int_tuple! { Tup4i16,  I16, i16, 4, store.list, state },
+                                Kind::Tup5i16   => string_decode_int_tuple! { Tup5i16,  I16, i16, 5, store.list, state },
+                                Kind::Tup6i16   => string_decode_int_tuple! { Tup6i16,  I16, i16, 6, store.list, state },
+                                Kind::Tup7i16   => string_decode_int_tuple! { Tup7i16,  I16, i16, 7, store.list, state },
+                                Kind::Tup8i16   => string_decode_int_tuple! { Tup8i16,  I16, i16, 8, store.list, state },
+                                Kind::Tup9i16   => string_decode_int_tuple! { Tup9i16,  I16, i16, 9, store.list, state },
+                                Kind::Tup10i16  => string_decode_int_tuple! { Tup10i16, I16, i16, 10, store.list, state },
+                                Kind::Tup2i32   => string_decode_int_tuple! { Tup2i32,  I32, i32, 2, store.list, state },
+                                Kind::Tup3i32   => string_decode_int_tuple! { Tup3i32,  I32, i32, 3, store.list, state },
+                                Kind::Tup4i32   => string_decode_int_tuple! { Tup4i32,  I32, i32, 4, store.list, state },
+                                Kind::Tup5i32   => string_decode_int_tuple! { Tup5i32,  I32, i32, 5, store.list, state },
+                                Kind::Tup6i32   => string_decode_int_tuple! { Tup6i32,  I32, i32, 6, store.list, state },
+                                Kind::Tup7i32   => string_decode_int_tuple! { Tup7i32,  I32, i32, 7, store.list, state },
+                                Kind::Tup8i32   => string_decode_int_tuple! { Tup8i32,  I32, i32, 8, store.list, state },
+                                Kind::Tup9i32   => string_decode_int_tuple! { Tup9i32,  I32, i32, 9, store.list, state },
+                                Kind::Tup10i32  => string_decode_int_tuple! { Tup10i32, I32, i32, 10, store.list, state },
+                                Kind::Tup2i64   => string_decode_int_tuple! { Tup2i64,  I64, i64, 2, store.list, state },
+                                Kind::Tup3i64   => string_decode_int_tuple! { Tup3i64,  I64, i64, 3, store.list, state },
+                                Kind::Tup4i64   => string_decode_int_tuple! { Tup4i64,  I64, i64, 4, store.list, state },
+                                Kind::Tup5i64   => string_decode_int_tuple! { Tup5i64,  I64, i64, 5, store.list, state },
+                                Kind::Tup6i64   => string_decode_int_tuple! { Tup6i64,  I64, i64, 6, store.list, state },
+                                Kind::Tup7i64   => string_decode_int_tuple! { Tup7i64,  I64, i64, 7, store.list, state },
+                                Kind::Tup8i64   => string_decode_int_tuple! { Tup8i64,  I64, i64, 8, store.list, state },
+                                Kind::Tup9i64   => string_decode_int_tuple! { Tup9i64,  I64, i64, 9, store.list, state },
+                                Kind::Tup10i64  => string_decode_int_tuple! { Tup10i64, I64, i64, 10, store.list, state },
 
                                 _ => {
                                     return Err(err!(

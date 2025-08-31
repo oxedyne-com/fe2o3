@@ -120,6 +120,7 @@ impl From<[u8; 32]> for Dat {
     }
 }
 // Fixed length numbers
+
 to_from_dat! { [u16; 2],    Tup2u16     }
 to_from_dat! { [u16; 3],    Tup3u16     }
 to_from_dat! { [u16; 4],    Tup4u16     }
@@ -149,6 +150,46 @@ to_from_dat! { [u64; 7],    Tup7u64     }
 to_from_dat! { [u64; 8],    Tup8u64     }
 to_from_dat! { [u64; 9],    Tup9u64     }
 to_from_dat! { [u64; 10],   Tup10u64    }
+
+to_from_dat! { [i8; 2],     Tup2i8      }
+to_from_dat! { [i8; 3],     Tup3i8      }
+to_from_dat! { [i8; 4],     Tup4i8      }
+to_from_dat! { [i8; 5],     Tup5i8      }
+to_from_dat! { [i8; 6],     Tup6i8      }
+to_from_dat! { [i8; 7],     Tup7i8      }
+to_from_dat! { [i8; 8],     Tup8i8      }
+to_from_dat! { [i8; 9],     Tup9i8      }
+to_from_dat! { [i8; 10],    Tup10i8     }
+
+to_from_dat! { [i16; 2],    Tup2i16     }
+to_from_dat! { [i16; 3],    Tup3i16     }
+to_from_dat! { [i16; 4],    Tup4i16     }
+to_from_dat! { [i16; 5],    Tup5i16     }
+to_from_dat! { [i16; 6],    Tup6i16     }
+to_from_dat! { [i16; 7],    Tup7i16     }
+to_from_dat! { [i16; 8],    Tup8i16     }
+to_from_dat! { [i16; 9],    Tup9i16     }
+to_from_dat! { [i16; 10],   Tup10i16    }
+
+to_from_dat! { [i32; 2],    Tup2i32     }
+to_from_dat! { [i32; 3],    Tup3i32     }
+to_from_dat! { [i32; 4],    Tup4i32     }
+to_from_dat! { [i32; 5],    Tup5i32     }
+to_from_dat! { [i32; 6],    Tup6i32     }
+to_from_dat! { [i32; 7],    Tup7i32     }
+to_from_dat! { [i32; 8],    Tup8i32     }
+to_from_dat! { [i32; 9],    Tup9i32     }
+to_from_dat! { [i32; 10],   Tup10i32    }
+
+to_from_dat! { [i64; 2],    Tup2i64     }
+to_from_dat! { [i64; 3],    Tup3i64     }
+to_from_dat! { [i64; 4],    Tup4i64     }
+to_from_dat! { [i64; 5],    Tup5i64     }
+to_from_dat! { [i64; 6],    Tup6i64     }
+to_from_dat! { [i64; 7],    Tup7i64     }
+to_from_dat! { [i64; 8],    Tup8i64     }
+to_from_dat! { [i64; 9],    Tup9i64     }
+to_from_dat! { [i64; 10],   Tup10i64    }
 
 impl From<Vec<String>> for Dat {
     fn from(v: Vec<String>) -> Self {

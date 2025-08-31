@@ -88,6 +88,16 @@ pub enum Kind {
     Vi64, // Not yet implemented
     Vi128, // Not yet implemented
     // Fixed length numbers
+    Tup2u8,
+    Tup3u8,
+    Tup4u8,
+    Tup5u8,
+    Tup6u8,
+    Tup7u8,
+    Tup8u8,
+    Tup9u8,
+    Tup10u8,
+
     Tup2u16,
     Tup3u16,
     Tup4u16,
@@ -118,45 +128,45 @@ pub enum Kind {
     Tup9u64,
     Tup10u64,
 
-    Tup2i8, // Not yet implemented
-    Tup3i8, // Not yet implemented
-    Tup4i8, // Not yet implemented
-    Tup5i8, // Not yet implemented
-    Tup6i8, // Not yet implemented
-    Tup7i8, // Not yet implemented
-    Tup8i8, // Not yet implemented
-    Tup9i8, // Not yet implemented
-    Tup10i8, // Not yet implemented
-             //
-    Tup2i16, // Not yet implemented
-    Tup3i16, // Not yet implemented
-    Tup4i16, // Not yet implemented
-    Tup5i16, // Not yet implemented
-    Tup6i16, // Not yet implemented
-    Tup7i16, // Not yet implemented
-    Tup8i16, // Not yet implemented
-    Tup9i16, // Not yet implemented
-    Tup10i16, // Not yet implemented
-              //
-    Tup2i32, // Not yet implemented
-    Tup3i32, // Not yet implemented
-    Tup4i32, // Not yet implemented
-    Tup5i32, // Not yet implemented
-    Tup6i32, // Not yet implemented
-    Tup7i32, // Not yet implemented
-    Tup8i32, // Not yet implemented
-    Tup9i32, // Not yet implemented
-    Tup10i32, // Not yet implemented
-              //
-    Tup2i64, // Not yet implemented
-    Tup3i64, // Not yet implemented
-    Tup4i64, // Not yet implemented
-    Tup5i64, // Not yet implemented
-    Tup6i64, // Not yet implemented
-    Tup7i64, // Not yet implemented
-    Tup8i64, // Not yet implemented
-    Tup9i64, // Not yet implemented
-    Tup10i64, // Not yet implemented
+    Tup2i8,
+    Tup3i8,
+    Tup4i8,
+    Tup5i8,
+    Tup6i8,
+    Tup7i8,
+    Tup8i8,
+    Tup9i8,
+    Tup10i8,
+
+    Tup2i16,
+    Tup3i16,
+    Tup4i16,
+    Tup5i16,
+    Tup6i16,
+    Tup7i16,
+    Tup8i16,
+    Tup9i16,
+    Tup10i16,
+
+    Tup2i32,
+    Tup3i32,
+    Tup4i32,
+    Tup5i32,
+    Tup6i32,
+    Tup7i32,
+    Tup8i32,
+    Tup9i32,
+    Tup10i32,
+
+    Tup2i64,
+    Tup3i64,
+    Tup4i64,
+    Tup5i64,
+    Tup6i64,
+    Tup7i64,
+    Tup8i64,
+    Tup9i64,
+    Tup10i64,
 
     //// Scheduled for removal
     //PartKey,
@@ -233,6 +243,16 @@ impl Daticle for Dat {
             Self::B32(_)        => Kind::B32,
 
             // Fixed length numbers
+            Self::Tup2u8(_)     => Kind::Tup2u8,
+            Self::Tup3u8(_)     => Kind::Tup3u8,
+            Self::Tup4u8(_)     => Kind::Tup4u8,
+            Self::Tup5u8(_)     => Kind::Tup5u8,
+            Self::Tup6u8(_)     => Kind::Tup6u8,
+            Self::Tup7u8(_)     => Kind::Tup7u8,
+            Self::Tup8u8(_)     => Kind::Tup8u8,
+            Self::Tup9u8(_)     => Kind::Tup9u8,
+            Self::Tup10u8(_)    => Kind::Tup10u8,
+
             Self::Tup2u16(_)    => Kind::Tup2u16,
             Self::Tup3u16(_)    => Kind::Tup3u16,
             Self::Tup4u16(_)    => Kind::Tup4u16,
@@ -262,6 +282,46 @@ impl Daticle for Dat {
             Self::Tup8u64(_)    => Kind::Tup8u64,
             Self::Tup9u64(_)    => Kind::Tup9u64,
             Self::Tup10u64(_)   => Kind::Tup10u64,
+
+            Self::Tup2i8(_)     => Kind::Tup2i8,
+            Self::Tup3i8(_)     => Kind::Tup3i8,
+            Self::Tup4i8(_)     => Kind::Tup4i8,
+            Self::Tup5i8(_)     => Kind::Tup5i8,
+            Self::Tup6i8(_)     => Kind::Tup6i8,
+            Self::Tup7i8(_)     => Kind::Tup7i8,
+            Self::Tup8i8(_)     => Kind::Tup8i8,
+            Self::Tup9i8(_)     => Kind::Tup9i8,
+            Self::Tup10i8(_)    => Kind::Tup10i8,
+
+            Self::Tup2i16(_)    => Kind::Tup2i16,
+            Self::Tup3i16(_)    => Kind::Tup3i16,
+            Self::Tup4i16(_)    => Kind::Tup4i16,
+            Self::Tup5i16(_)    => Kind::Tup5i16,
+            Self::Tup6i16(_)    => Kind::Tup6i16,
+            Self::Tup7i16(_)    => Kind::Tup7i16,
+            Self::Tup8i16(_)    => Kind::Tup8i16,
+            Self::Tup9i16(_)    => Kind::Tup9i16,
+            Self::Tup10i16(_)   => Kind::Tup10i16,
+
+            Self::Tup2i32(_)    => Kind::Tup2i32,
+            Self::Tup3i32(_)    => Kind::Tup3i32,
+            Self::Tup4i32(_)    => Kind::Tup4i32,
+            Self::Tup5i32(_)    => Kind::Tup5i32,
+            Self::Tup6i32(_)    => Kind::Tup6i32,
+            Self::Tup7i32(_)    => Kind::Tup7i32,
+            Self::Tup8i32(_)    => Kind::Tup8i32,
+            Self::Tup9i32(_)    => Kind::Tup9i32,
+            Self::Tup10i32(_)   => Kind::Tup10i32,
+
+            Self::Tup2i64(_)    => Kind::Tup2i64,
+            Self::Tup3i64(_)    => Kind::Tup3i64,
+            Self::Tup4i64(_)    => Kind::Tup4i64,
+            Self::Tup5i64(_)    => Kind::Tup5i64,
+            Self::Tup6i64(_)    => Kind::Tup6i64,
+            Self::Tup7i64(_)    => Kind::Tup7i64,
+            Self::Tup8i64(_)    => Kind::Tup8i64,
+            Self::Tup9i64(_)    => Kind::Tup9i64,
+            Self::Tup10i64(_)   => Kind::Tup10i64,
 
             //// Scheduled for removal
             //Self::PartKey(_)    => Kind::PartKey,
@@ -508,6 +568,16 @@ impl Kind {
             Self::Tup8u64   => "A tuple of eight u64 values",
             Self::Tup9u64   => "A tuple of nine u64 values", 
             Self::Tup10u64  => "A tuple of ten u64 values",  
+        
+            Self::Tup2u8    => "A tuple of two u8 values",  
+            Self::Tup3u8    => "A tuple of three u8 values",
+            Self::Tup4u8    => "A tuple of four u8 values", 
+            Self::Tup5u8    => "A tuple of five u8 values",
+            Self::Tup6u8    => "A tuple of six u8 values",  
+            Self::Tup7u8    => "A tuple of seven u8 values",
+            Self::Tup8u8    => "A tuple of eight u8 values",
+            Self::Tup9u8    => "A tuple of nine u8 values", 
+            Self::Tup10u8   => "A tuple of ten u8 values",
         
             Self::Tup2i8    => "A tuple of two i8 values, not yet implemented",  
             Self::Tup3i8    => "A tuple of three i8 values, not yet implemented",
@@ -780,6 +850,56 @@ impl Dat {
             Self::Tup8u64(_)    => Self::TUP8_U64_CODE,
             Self::Tup9u64(_)    => Self::TUP9_U64_CODE,
             Self::Tup10u64(_)   => Self::TUP10_U64_CODE,
+
+            Self::Tup2u8(_)     => Self::TUP2_U8_CODE,
+            Self::Tup3u8(_)     => Self::TUP3_U8_CODE,
+            Self::Tup4u8(_)     => Self::TUP4_U8_CODE,
+            Self::Tup5u8(_)     => Self::TUP5_U8_CODE,
+            Self::Tup6u8(_)     => Self::TUP6_U8_CODE,
+            Self::Tup7u8(_)     => Self::TUP7_U8_CODE,
+            Self::Tup8u8(_)     => Self::TUP8_U8_CODE,
+            Self::Tup9u8(_)     => Self::TUP9_U8_CODE,
+            Self::Tup10u8(_)    => Self::TUP10_U8_CODE,
+
+            Self::Tup2i8(_)     => Self::TUP2_I8_CODE,
+            Self::Tup3i8(_)     => Self::TUP3_I8_CODE,
+            Self::Tup4i8(_)     => Self::TUP4_I8_CODE,
+            Self::Tup5i8(_)     => Self::TUP5_I8_CODE,
+            Self::Tup6i8(_)     => Self::TUP6_I8_CODE,
+            Self::Tup7i8(_)     => Self::TUP7_I8_CODE,
+            Self::Tup8i8(_)     => Self::TUP8_I8_CODE,
+            Self::Tup9i8(_)     => Self::TUP9_I8_CODE,
+            Self::Tup10i8(_)    => Self::TUP10_I8_CODE,
+
+            Self::Tup2i16(_)    => Self::TUP2_I16_CODE,
+            Self::Tup3i16(_)    => Self::TUP3_I16_CODE,
+            Self::Tup4i16(_)    => Self::TUP4_I16_CODE,
+            Self::Tup5i16(_)    => Self::TUP5_I16_CODE,
+            Self::Tup6i16(_)    => Self::TUP6_I16_CODE,
+            Self::Tup7i16(_)    => Self::TUP7_I16_CODE,
+            Self::Tup8i16(_)    => Self::TUP8_I16_CODE,
+            Self::Tup9i16(_)    => Self::TUP9_I16_CODE,
+            Self::Tup10i16(_)   => Self::TUP10_I16_CODE,
+
+            Self::Tup2i32(_)    => Self::TUP2_I32_CODE,
+            Self::Tup3i32(_)    => Self::TUP3_I32_CODE,
+            Self::Tup4i32(_)    => Self::TUP4_I32_CODE,
+            Self::Tup5i32(_)    => Self::TUP5_I32_CODE,
+            Self::Tup6i32(_)    => Self::TUP6_I32_CODE,
+            Self::Tup7i32(_)    => Self::TUP7_I32_CODE,
+            Self::Tup8i32(_)    => Self::TUP8_I32_CODE,
+            Self::Tup9i32(_)    => Self::TUP9_I32_CODE,
+            Self::Tup10i32(_)   => Self::TUP10_I32_CODE,
+
+            Self::Tup2i64(_)    => Self::TUP2_I64_CODE,
+            Self::Tup3i64(_)    => Self::TUP3_I64_CODE,
+            Self::Tup4i64(_)    => Self::TUP4_I64_CODE,
+            Self::Tup5i64(_)    => Self::TUP5_I64_CODE,
+            Self::Tup6i64(_)    => Self::TUP6_I64_CODE,
+            Self::Tup7i64(_)    => Self::TUP7_I64_CODE,
+            Self::Tup8i64(_)    => Self::TUP8_I64_CODE,
+            Self::Tup9i64(_)    => Self::TUP9_I64_CODE,
+            Self::Tup10i64(_)   => Self::TUP10_I64_CODE,
             
             //// Scheduled for removal
             //Self::PartKey(_)    => Self::PARTKEY_CODE,
@@ -958,6 +1078,16 @@ impl fmt::Display for Kind {
             Self::Tup8u64   => f.write_str("t8u64"),
             Self::Tup9u64   => f.write_str("t9u64"),
             Self::Tup10u64  => f.write_str("t10u64"),
+            // u8 tuples
+            Self::Tup2u8    => f.write_str("t2u8"),
+            Self::Tup3u8    => f.write_str("t3u8"),
+            Self::Tup4u8    => f.write_str("t4u8"),
+            Self::Tup5u8    => f.write_str("t5u8"),
+            Self::Tup6u8    => f.write_str("t6u8"),
+            Self::Tup7u8    => f.write_str("t7u8"),
+            Self::Tup8u8    => f.write_str("t8u8"),
+            Self::Tup9u8    => f.write_str("t9u8"),
+            Self::Tup10u8   => f.write_str("t10u8"),
             // i8 tuples
             Self::Tup2i8   => f.write_str("t2i8"),
             Self::Tup3i8   => f.write_str("t3i8"),

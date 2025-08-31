@@ -92,6 +92,16 @@ pub enum Dat {
     B16([u8; 16]),
     B32(B32),
     // Fixed length numbers
+    Tup2u8([u8; 2]),
+    Tup3u8([u8; 3]),
+    Tup4u8([u8; 4]),
+    Tup5u8([u8; 5]),
+    Tup6u8([u8; 6]),
+    Tup7u8([u8; 7]),
+    Tup8u8([u8; 8]),
+    Tup9u8([u8; 9]),
+    Tup10u8([u8; 10]),
+
     Tup2u16([u16; 2]),
     Tup3u16([u16; 3]),
     Tup4u16([u16; 4]),
@@ -121,6 +131,46 @@ pub enum Dat {
     Tup8u64([u64; 8]),
     Tup9u64([u64; 9]),
     Tup10u64([u64; 10]),
+
+    Tup2i8([i8; 2]),
+    Tup3i8([i8; 3]),
+    Tup4i8([i8; 4]),
+    Tup5i8([i8; 5]),
+    Tup6i8([i8; 6]),
+    Tup7i8([i8; 7]),
+    Tup8i8([i8; 8]),
+    Tup9i8([i8; 9]),
+    Tup10i8([i8; 10]),
+
+    Tup2i16([i16; 2]),
+    Tup3i16([i16; 3]),
+    Tup4i16([i16; 4]),
+    Tup5i16([i16; 5]),
+    Tup6i16([i16; 6]),
+    Tup7i16([i16; 7]),
+    Tup8i16([i16; 8]),
+    Tup9i16([i16; 9]),
+    Tup10i16([i16; 10]),
+
+    Tup2i32([i32; 2]),
+    Tup3i32([i32; 3]),
+    Tup4i32([i32; 4]),
+    Tup5i32([i32; 5]),
+    Tup6i32([i32; 6]),
+    Tup7i32([i32; 7]),
+    Tup8i32([i32; 8]),
+    Tup9i32([i32; 9]),
+    Tup10i32([i32; 10]),
+
+    Tup2i64([i64; 2]),
+    Tup3i64([i64; 3]),
+    Tup4i64([i64; 4]),
+    Tup5i64([i64; 5]),
+    Tup6i64([i64; 6]),
+    Tup7i64([i64; 7]),
+    Tup8i64([i64; 8]),
+    Tup9i64([i64; 9]),
+    Tup10i64([i64; 10]),
 
     //// Scheduled for removal
     //PartKey(PartId),
@@ -293,6 +343,51 @@ impl IterDat {
                     stack.push_front(Dat::U8(n));
                 }
             },
+            Dat::Tup2u8(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::U8(n));
+                }
+            },
+            Dat::Tup3u8(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::U8(n));
+                }
+            },
+            Dat::Tup4u8(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::U8(n));
+                }
+            },
+            Dat::Tup5u8(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::U8(n));
+                }
+            },
+            Dat::Tup6u8(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::U8(n));
+                }
+            },
+            Dat::Tup7u8(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::U8(n));
+                }
+            },
+            Dat::Tup8u8(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::U8(n));
+                }
+            },
+            Dat::Tup9u8(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::U8(n));
+                }
+            },
+            Dat::Tup10u8(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::U8(n));
+                }
+            },
             Dat::Tup2u16(a) => {
                 for n in a.into_iter().rev() {
                     stack.push_front(Dat::U16(n));
@@ -426,6 +521,186 @@ impl IterDat {
             Dat::Tup10u64(a) => {
                 for n in a.into_iter().rev() {
                     stack.push_front(Dat::U64(n));
+                }
+            },
+            Dat::Tup2i8(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::I8(n));
+                }
+            },
+            Dat::Tup3i8(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::I8(n));
+                }
+            },
+            Dat::Tup4i8(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::I8(n));
+                }
+            },
+            Dat::Tup5i8(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::I8(n));
+                }
+            },
+            Dat::Tup6i8(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::I8(n));
+                }
+            },
+            Dat::Tup7i8(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::I8(n));
+                }
+            },
+            Dat::Tup8i8(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::I8(n));
+                }
+            },
+            Dat::Tup9i8(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::I8(n));
+                }
+            },
+            Dat::Tup10i8(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::I8(n));
+                }
+            },
+            Dat::Tup2i16(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::I16(n));
+                }
+            },
+            Dat::Tup3i16(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::I16(n));
+                }
+            },
+            Dat::Tup4i16(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::I16(n));
+                }
+            },
+            Dat::Tup5i16(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::I16(n));
+                }
+            },
+            Dat::Tup6i16(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::I16(n));
+                }
+            },
+            Dat::Tup7i16(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::I16(n));
+                }
+            },
+            Dat::Tup8i16(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::I16(n));
+                }
+            },
+            Dat::Tup9i16(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::I16(n));
+                }
+            },
+            Dat::Tup10i16(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::I16(n));
+                }
+            },
+            Dat::Tup2i32(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::I32(n));
+                }
+            },
+            Dat::Tup3i32(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::I32(n));
+                }
+            },
+            Dat::Tup4i32(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::I32(n));
+                }
+            },
+            Dat::Tup5i32(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::I32(n));
+                }
+            },
+            Dat::Tup6i32(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::I32(n));
+                }
+            },
+            Dat::Tup7i32(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::I32(n));
+                }
+            },
+            Dat::Tup8i32(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::I32(n));
+                }
+            },
+            Dat::Tup9i32(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::I32(n));
+                }
+            },
+            Dat::Tup10i32(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::I32(n));
+                }
+            },
+            Dat::Tup2i64(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::I64(n));
+                }
+            },
+            Dat::Tup3i64(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::I64(n));
+                }
+            },
+            Dat::Tup4i64(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::I64(n));
+                }
+            },
+            Dat::Tup5i64(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::I64(n));
+                }
+            },
+            Dat::Tup6i64(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::I64(n));
+                }
+            },
+            Dat::Tup7i64(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::I64(n));
+                }
+            },
+            Dat::Tup8i64(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::I64(n));
+                }
+            },
+            Dat::Tup9i64(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::I64(n));
+                }
+            },
+            Dat::Tup10i64(a) => {
+                for n in a.into_iter().rev() {
+                    stack.push_front(Dat::I64(n));
                 }
             },
             _ => (),

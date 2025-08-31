@@ -112,90 +112,143 @@ impl Dat {
     pub const VI32_CODE:        u8 = 0x5e; // 94
     pub const VI64_CODE:        u8 = 0x5f; // 95
     pub const VI128_CODE:       u8 = 0x60; // 96
-    // Fixed length numbers
-    pub const TUP2_U16_CODE:    u8 = 0x61; // 97 i.e. [u16, u16] 
-    pub const TUP3_U16_CODE:    u8 = 0x62; // 98 [u16, u16, u16]
-    pub const TUP4_U16_CODE:    u8 = 0x63; // 99 ...
-    pub const TUP5_U16_CODE:    u8 = 0x64; // 100
-    pub const TUP6_U16_CODE:    u8 = 0x65; // 101
-    pub const TUP7_U16_CODE:    u8 = 0x66; // 102
-    pub const TUP8_U16_CODE:    u8 = 0x67; // 103
-    pub const TUP9_U16_CODE:    u8 = 0x68; // 104
-    pub const TUP10_U16_CODE:   u8 = 0x69; // 105
+    // Fixed length numbers - Sequential layout
+    pub const TUP2_U8_CODE:     u8 = 0x61; // 97  [u8; 2]
+    pub const TUP3_U8_CODE:     u8 = 0x62; // 98  [u8; 3]
+    pub const TUP4_U8_CODE:     u8 = 0x63; // 99  [u8; 4]
+    pub const TUP5_U8_CODE:     u8 = 0x64; // 100 [u8; 5]
+    pub const TUP6_U8_CODE:     u8 = 0x65; // 101 [u8; 6]
+    pub const TUP7_U8_CODE:     u8 = 0x66; // 102 [u8; 7]
+    pub const TUP8_U8_CODE:     u8 = 0x67; // 103 [u8; 8]
+    pub const TUP9_U8_CODE:     u8 = 0x68; // 104 [u8; 9]
+    pub const TUP10_U8_CODE:    u8 = 0x69; // 105 [u8; 10]
+    //                               0x6a     106 gap
+    //                               0x6b     107 gap
+    //                               0x6c     108 gap
+    //                               0x6d     109 gap
+    //                               0x6e     110 gap
+    //                               0x6f     111 gap
     
-    pub const TUP2_U32_CODE:    u8 = 0x6a; // 106 i.e. [u32, u32] 
-    pub const TUP3_U32_CODE:    u8 = 0x6b; // 107
-    pub const TUP4_U32_CODE:    u8 = 0x6c; // 108
-    pub const TUP5_U32_CODE:    u8 = 0x6d; // 109
-    pub const TUP6_U32_CODE:    u8 = 0x6e; // 110
-    pub const TUP7_U32_CODE:    u8 = 0x6f; // 111
-    pub const TUP8_U32_CODE:    u8 = 0x70; // 112
-    pub const TUP9_U32_CODE:    u8 = 0x71; // 113
-    pub const TUP10_U32_CODE:   u8 = 0x72; // 114
+    pub const TUP2_U16_CODE:    u8 = 0x70; // 112 [u16; 2]
+    pub const TUP3_U16_CODE:    u8 = 0x71; // 113 [u16; 3]
+    pub const TUP4_U16_CODE:    u8 = 0x72; // 114 [u16; 4]
+    pub const TUP5_U16_CODE:    u8 = 0x73; // 115 [u16; 5]
+    pub const TUP6_U16_CODE:    u8 = 0x74; // 116 [u16; 6]
+    pub const TUP7_U16_CODE:    u8 = 0x75; // 117 [u16; 7]
+    pub const TUP8_U16_CODE:    u8 = 0x76; // 118 [u16; 8]
+    pub const TUP9_U16_CODE:    u8 = 0x77; // 119 [u16; 9]
+    pub const TUP10_U16_CODE:   u8 = 0x78; // 120 [u16; 10]
+    //                               0x79     121 gap
+    //                               0x7a     122 gap
+    //                               0x7b     123 gap
+    //                               0x7c     124 gap
+    //                               0x7d     125 gap
+    //                               0x7e     126 gap
+    //                               0x7f     127 gap
     
-    pub const TUP2_U64_CODE:    u8 = 0x73; // 115 i.e. [u64, u64] 
-    pub const TUP3_U64_CODE:    u8 = 0x74; // 116
-    pub const TUP4_U64_CODE:    u8 = 0x75; // 117
-    pub const TUP5_U64_CODE:    u8 = 0x76; // 118
-    pub const TUP6_U64_CODE:    u8 = 0x77; // 119
-    pub const TUP7_U64_CODE:    u8 = 0x78; // 120
-    pub const TUP8_U64_CODE:    u8 = 0x79; // 121
-    pub const TUP9_U64_CODE:    u8 = 0x7a; // 122
-    pub const TUP10_U64_CODE:   u8 = 0x7b; // 123
-    //                               0x7c     124
-    //                               0x7d     125
-    //                               0x7e     126
-    //                               0x7f     127
-    //                               0x80     128
-    //                               0x81     129
-    //                               0x82     130
-    //                               0x83     131
-    //                               0x84     132
-    //                               0x85     133
-    //                               
-    pub const TUP2_I8_CODE:     u8 = 0x86; // 134
-    pub const TUP3_I8_CODE:     u8 = 0x87; // 135
-    pub const TUP4_I8_CODE:     u8 = 0x88; // 136
-    pub const TUP5_I8_CODE:     u8 = 0x89; // 137
-    pub const TUP6_I8_CODE:     u8 = 0x8a; // 138
-    pub const TUP7_I8_CODE:     u8 = 0x8b; // 139
-    pub const TUP8_I8_CODE:     u8 = 0x8c; // 140
-    pub const TUP9_I8_CODE:     u8 = 0x8d; // 141
-    pub const TUP10_I8_CODE:    u8 = 0x8e; // 142
+    pub const TUP2_U32_CODE:    u8 = 0x80; // 128 [u32; 2]
+    pub const TUP3_U32_CODE:    u8 = 0x81; // 129 [u32; 3]
+    pub const TUP4_U32_CODE:    u8 = 0x82; // 130 [u32; 4]
+    pub const TUP5_U32_CODE:    u8 = 0x83; // 131 [u32; 5]
+    pub const TUP6_U32_CODE:    u8 = 0x84; // 132 [u32; 6]
+    pub const TUP7_U32_CODE:    u8 = 0x85; // 133 [u32; 7]
+    pub const TUP8_U32_CODE:    u8 = 0x86; // 134 [u32; 8]
+    pub const TUP9_U32_CODE:    u8 = 0x87; // 135 [u32; 9]
+    pub const TUP10_U32_CODE:   u8 = 0x88; // 136 [u32; 10]
+    //                               0x89     137 gap
+    //                               0x8a     138 gap
+    //                               0x8b     139 gap
+    //                               0x8c     140 gap
+    //                               0x8d     141 gap
+    //                               0x8e     142 gap
+    //                               0x8f     143 gap
     
-    pub const TUP2_I16_CODE:    u8 = 0x8f; // 143
-    pub const TUP3_I16_CODE:    u8 = 0x90; // 144
-    pub const TUP4_I16_CODE:    u8 = 0x91; // 145
-    pub const TUP5_I16_CODE:    u8 = 0x92; // 146
-    pub const TUP6_I16_CODE:    u8 = 0x93; // 147
-    pub const TUP7_I16_CODE:    u8 = 0x94; // 148
-    pub const TUP8_I16_CODE:    u8 = 0x95; // 149
-    pub const TUP9_I16_CODE:    u8 = 0x96; // 150
-    pub const TUP10_I16_CODE:   u8 = 0x97; // 151
+    pub const TUP2_U64_CODE:    u8 = 0x90; // 144 [u64; 2]
+    pub const TUP3_U64_CODE:    u8 = 0x91; // 145 [u64; 3]
+    pub const TUP4_U64_CODE:    u8 = 0x92; // 146 [u64; 4]
+    pub const TUP5_U64_CODE:    u8 = 0x93; // 147 [u64; 5]
+    pub const TUP6_U64_CODE:    u8 = 0x94; // 148 [u64; 6]
+    pub const TUP7_U64_CODE:    u8 = 0x95; // 149 [u64; 7]
+    pub const TUP8_U64_CODE:    u8 = 0x96; // 150 [u64; 8]
+    pub const TUP9_U64_CODE:    u8 = 0x97; // 151 [u64; 9]
+    pub const TUP10_U64_CODE:   u8 = 0x98; // 152 [u64; 10]
+    //                               0x99     153 gap
+    //                               0x9a     154 gap
+    //                               0x9b     155 gap
+    //                               0x9c     156 gap
+    //                               0x9d     157 gap
+    //                               0x9e     158 gap
+    //                               0x9f     159 gap
     
-    pub const TUP2_I32_CODE:    u8 = 0x98; // 152
-    pub const TUP3_I32_CODE:    u8 = 0x99; // 153
-    pub const TUP4_I32_CODE:    u8 = 0x9a; // 154
-    pub const TUP5_I32_CODE:    u8 = 0x9b; // 155
-    pub const TUP6_I32_CODE:    u8 = 0x9c; // 156
-    pub const TUP7_I32_CODE:    u8 = 0x9d; // 157
-    pub const TUP8_I32_CODE:    u8 = 0x9e; // 158
-    pub const TUP9_I32_CODE:    u8 = 0x9f; // 159
-    pub const TUP10_I32_CODE:   u8 = 0xa0; // 160
+    pub const TUP2_I8_CODE:     u8 = 0xa0; // 160 [i8; 2]
+    pub const TUP3_I8_CODE:     u8 = 0xa1; // 161 [i8; 3]
+    pub const TUP4_I8_CODE:     u8 = 0xa2; // 162 [i8; 4]
+    pub const TUP5_I8_CODE:     u8 = 0xa3; // 163 [i8; 5]
+    pub const TUP6_I8_CODE:     u8 = 0xa4; // 164 [i8; 6]
+    pub const TUP7_I8_CODE:     u8 = 0xa5; // 165 [i8; 7]
+    pub const TUP8_I8_CODE:     u8 = 0xa6; // 166 [i8; 8]
+    pub const TUP9_I8_CODE:     u8 = 0xa7; // 167 [i8; 9]
+    pub const TUP10_I8_CODE:    u8 = 0xa8; // 168 [i8; 10]
+    //                               0xa9     169 gap
+    //                               0xaa     170 gap
+    //                               0xab     171 gap
+    //                               0xac     172 gap
+    //                               0xad     173 gap
+    //                               0xae     174 gap
+    //                               0xaf     175 gap
     
-    pub const TUP2_I64_CODE:    u8 = 0xa1; // 161
-    pub const TUP3_I64_CODE:    u8 = 0xa2; // 162
-    pub const TUP4_I64_CODE:    u8 = 0xa3; // 163
-    pub const TUP5_I64_CODE:    u8 = 0xa4; // 164
-    pub const TUP6_I64_CODE:    u8 = 0xa5; // 165
-    pub const TUP7_I64_CODE:    u8 = 0xa6; // 166
-    pub const TUP8_I64_CODE:    u8 = 0xa7; // 167
-    pub const TUP9_I64_CODE:    u8 = 0xa8; // 168
-    pub const TUP10_I64_CODE:   u8 = 0xa9; // 169
+    pub const TUP2_I16_CODE:    u8 = 0xb0; // 176 [i16; 2]
+    pub const TUP3_I16_CODE:    u8 = 0xb1; // 177 [i16; 3]
+    pub const TUP4_I16_CODE:    u8 = 0xb2; // 178 [i16; 4]
+    pub const TUP5_I16_CODE:    u8 = 0xb3; // 179 [i16; 5]
+    pub const TUP6_I16_CODE:    u8 = 0xb4; // 180 [i16; 6]
+    pub const TUP7_I16_CODE:    u8 = 0xb5; // 181 [i16; 7]
+    pub const TUP8_I16_CODE:    u8 = 0xb6; // 182 [i16; 8]
+    pub const TUP9_I16_CODE:    u8 = 0xb7; // 183 [i16; 9]
+    pub const TUP10_I16_CODE:   u8 = 0xb8; // 184 [i16; 10]
+    //                               0xb9     185 gap
+    //                               0xba     186 gap
+    //                               0xbb     187 gap
+    //                               0xbc     188 gap
+    //                               0xbd     189 gap
+    //                               0xbe     190 gap
+    //                               0xbf     191 gap
+    
+    pub const TUP2_I32_CODE:    u8 = 0xc0; // 192 [i32; 2]
+    pub const TUP3_I32_CODE:    u8 = 0xc1; // 193 [i32; 3]
+    pub const TUP4_I32_CODE:    u8 = 0xc2; // 194 [i32; 4]
+    pub const TUP5_I32_CODE:    u8 = 0xc3; // 195 [i32; 5]
+    pub const TUP6_I32_CODE:    u8 = 0xc4; // 196 [i32; 6]
+    pub const TUP7_I32_CODE:    u8 = 0xc5; // 197 [i32; 7]
+    pub const TUP8_I32_CODE:    u8 = 0xc6; // 198 [i32; 8]
+    pub const TUP9_I32_CODE:    u8 = 0xc7; // 199 [i32; 9]
+    pub const TUP10_I32_CODE:   u8 = 0xc8; // 200 [i32; 10]
+    //                               0xc9     201 gap
+    //                               0xca     202 gap
+    //                               0xcb     203 gap
+    //                               0xcc     204 gap
+    //                               0xcd     205 gap
+    //                               0xce     206 gap
+    //                               0xcf     207 gap
+    
+    pub const TUP2_I64_CODE:    u8 = 0xd0; // 208 [i64; 2]
+    pub const TUP3_I64_CODE:    u8 = 0xd1; // 209 [i64; 3]
+    pub const TUP4_I64_CODE:    u8 = 0xd2; // 210 [i64; 4]
+    pub const TUP5_I64_CODE:    u8 = 0xd3; // 211 [i64; 5]
+    pub const TUP6_I64_CODE:    u8 = 0xd4; // 212 [i64; 6]
+    pub const TUP7_I64_CODE:    u8 = 0xd5; // 213 [i64; 7]
+    pub const TUP8_I64_CODE:    u8 = 0xd6; // 214 [i64; 8]
+    pub const TUP9_I64_CODE:    u8 = 0xd7; // 215 [i64; 9]
+    pub const TUP10_I64_CODE:   u8 = 0xd8; // 216 [i64; 10]
 
     pub const TUP_SERIES_START:     u8 = Self::TUP2_CODE;
     pub const BYTE_SERIES_START:    u8 = Self::B2_CODE;
+    pub const TUP_U8_SERIES_START:  u8 = Self::TUP2_U8_CODE;
     pub const TUP_U16_SERIES_START: u8 = Self::TUP2_U16_CODE;
     pub const TUP_U32_SERIES_START: u8 = Self::TUP2_U32_CODE;
     pub const TUP_U64_SERIES_START: u8 = Self::TUP2_U64_CODE;
+    pub const TUP_I8_SERIES_START:  u8 = Self::TUP2_I8_CODE;
+    pub const TUP_I16_SERIES_START: u8 = Self::TUP2_I16_CODE;
+    pub const TUP_I32_SERIES_START: u8 = Self::TUP2_I32_CODE;
+    pub const TUP_I64_SERIES_START: u8 = Self::TUP2_I64_CODE;
 }

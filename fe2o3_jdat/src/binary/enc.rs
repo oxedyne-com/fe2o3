@@ -278,6 +278,33 @@ impl ToBytes for Dat {
                 buf.extend_from_slice(&a[..]);
             },
             // Fixed length numbers
+            Self::Tup2u8(a) => {
+                buf = res!(Self::tuple_to_bytes::<u8, 2, {Self::TUP_U8_SERIES_START}>(a, buf));
+            },
+            Self::Tup3u8(a) => {
+                buf = res!(Self::tuple_to_bytes::<u8, 3, {Self::TUP_U8_SERIES_START}>(a, buf));
+            },
+            Self::Tup4u8(a) => {
+                buf = res!(Self::tuple_to_bytes::<u8, 4, {Self::TUP_U8_SERIES_START}>(a, buf));
+            },
+            Self::Tup5u8(a) => {
+                buf = res!(Self::tuple_to_bytes::<u8, 5, {Self::TUP_U8_SERIES_START}>(a, buf));
+            },
+            Self::Tup6u8(a) => {
+                buf = res!(Self::tuple_to_bytes::<u8, 6, {Self::TUP_U8_SERIES_START}>(a, buf));
+            },
+            Self::Tup7u8(a) => {
+                buf = res!(Self::tuple_to_bytes::<u8, 7, {Self::TUP_U8_SERIES_START}>(a, buf));
+            },
+            Self::Tup8u8(a) => {
+                buf = res!(Self::tuple_to_bytes::<u8, 8, {Self::TUP_U8_SERIES_START}>(a, buf));
+            },
+            Self::Tup9u8(a) => {
+                buf = res!(Self::tuple_to_bytes::<u8, 9, {Self::TUP_U8_SERIES_START}>(a, buf));
+            },
+            Self::Tup10u8(a) => {
+                buf = res!(Self::tuple_to_bytes::<u8, 10, {Self::TUP_U8_SERIES_START}>(a, buf));
+            },
             Self::Tup2u16(a) => {
                 buf = res!(Self::tuple_to_bytes::<u16, 2, {Self::TUP_U16_SERIES_START}>(a, buf));
             },
@@ -358,6 +385,114 @@ impl ToBytes for Dat {
             },
             Self::Tup10u64(a) => {
                 buf = res!(Self::tuple_to_bytes::<u64, 10, {Self::TUP_U64_SERIES_START}>(a, buf));
+            },
+            Self::Tup2i8(a) => {
+                buf = res!(Self::tuple_to_bytes::<i8, 2, {Self::TUP_I8_SERIES_START}>(a, buf));
+            },
+            Self::Tup3i8(a) => {
+                buf = res!(Self::tuple_to_bytes::<i8, 3, {Self::TUP_I8_SERIES_START}>(a, buf));
+            },
+            Self::Tup4i8(a) => {
+                buf = res!(Self::tuple_to_bytes::<i8, 4, {Self::TUP_I8_SERIES_START}>(a, buf));
+            },
+            Self::Tup5i8(a) => {
+                buf = res!(Self::tuple_to_bytes::<i8, 5, {Self::TUP_I8_SERIES_START}>(a, buf));
+            },
+            Self::Tup6i8(a) => {
+                buf = res!(Self::tuple_to_bytes::<i8, 6, {Self::TUP_I8_SERIES_START}>(a, buf));
+            },
+            Self::Tup7i8(a) => {
+                buf = res!(Self::tuple_to_bytes::<i8, 7, {Self::TUP_I8_SERIES_START}>(a, buf));
+            },
+            Self::Tup8i8(a) => {
+                buf = res!(Self::tuple_to_bytes::<i8, 8, {Self::TUP_I8_SERIES_START}>(a, buf));
+            },
+            Self::Tup9i8(a) => {
+                buf = res!(Self::tuple_to_bytes::<i8, 9, {Self::TUP_I8_SERIES_START}>(a, buf));
+            },
+            Self::Tup10i8(a) => {
+                buf = res!(Self::tuple_to_bytes::<i8, 10, {Self::TUP_I8_SERIES_START}>(a, buf));
+            },
+            Self::Tup2i16(a) => {
+                buf = res!(Self::tuple_to_bytes::<i16, 2, {Self::TUP_I16_SERIES_START}>(a, buf));
+            },
+            Self::Tup3i16(a) => {
+                buf = res!(Self::tuple_to_bytes::<i16, 3, {Self::TUP_I16_SERIES_START}>(a, buf));
+            },
+            Self::Tup4i16(a) => {
+                buf = res!(Self::tuple_to_bytes::<i16, 4, {Self::TUP_I16_SERIES_START}>(a, buf));
+            },
+            Self::Tup5i16(a) => {
+                buf = res!(Self::tuple_to_bytes::<i16, 5, {Self::TUP_I16_SERIES_START}>(a, buf));
+            },
+            Self::Tup6i16(a) => {
+                buf = res!(Self::tuple_to_bytes::<i16, 6, {Self::TUP_I16_SERIES_START}>(a, buf));
+            },
+            Self::Tup7i16(a) => {
+                buf = res!(Self::tuple_to_bytes::<i16, 7, {Self::TUP_I16_SERIES_START}>(a, buf));
+            },
+            Self::Tup8i16(a) => {
+                buf = res!(Self::tuple_to_bytes::<i16, 8, {Self::TUP_I16_SERIES_START}>(a, buf));
+            },
+            Self::Tup9i16(a) => {
+                buf = res!(Self::tuple_to_bytes::<i16, 9, {Self::TUP_I16_SERIES_START}>(a, buf));
+            },
+            Self::Tup10i16(a) => {
+                buf = res!(Self::tuple_to_bytes::<i16, 10, {Self::TUP_I16_SERIES_START}>(a, buf));
+            },
+            Self::Tup2i32(a) => {
+                buf = res!(Self::tuple_to_bytes::<i32, 2, {Self::TUP_I32_SERIES_START}>(a, buf));
+            },
+            Self::Tup3i32(a) => {
+                buf = res!(Self::tuple_to_bytes::<i32, 3, {Self::TUP_I32_SERIES_START}>(a, buf));
+            },
+            Self::Tup4i32(a) => {
+                buf = res!(Self::tuple_to_bytes::<i32, 4, {Self::TUP_I32_SERIES_START}>(a, buf));
+            },
+            Self::Tup5i32(a) => {
+                buf = res!(Self::tuple_to_bytes::<i32, 5, {Self::TUP_I32_SERIES_START}>(a, buf));
+            },
+            Self::Tup6i32(a) => {
+                buf = res!(Self::tuple_to_bytes::<i32, 6, {Self::TUP_I32_SERIES_START}>(a, buf));
+            },
+            Self::Tup7i32(a) => {
+                buf = res!(Self::tuple_to_bytes::<i32, 7, {Self::TUP_I32_SERIES_START}>(a, buf));
+            },
+            Self::Tup8i32(a) => {
+                buf = res!(Self::tuple_to_bytes::<i32, 8, {Self::TUP_I32_SERIES_START}>(a, buf));
+            },
+            Self::Tup9i32(a) => {
+                buf = res!(Self::tuple_to_bytes::<i32, 9, {Self::TUP_I32_SERIES_START}>(a, buf));
+            },
+            Self::Tup10i32(a) => {
+                buf = res!(Self::tuple_to_bytes::<i32, 10, {Self::TUP_I32_SERIES_START}>(a, buf));
+            },
+            Self::Tup2i64(a) => {
+                buf = res!(Self::tuple_to_bytes::<i64, 2, {Self::TUP_I64_SERIES_START}>(a, buf));
+            },
+            Self::Tup3i64(a) => {
+                buf = res!(Self::tuple_to_bytes::<i64, 3, {Self::TUP_I64_SERIES_START}>(a, buf));
+            },
+            Self::Tup4i64(a) => {
+                buf = res!(Self::tuple_to_bytes::<i64, 4, {Self::TUP_I64_SERIES_START}>(a, buf));
+            },
+            Self::Tup5i64(a) => {
+                buf = res!(Self::tuple_to_bytes::<i64, 5, {Self::TUP_I64_SERIES_START}>(a, buf));
+            },
+            Self::Tup6i64(a) => {
+                buf = res!(Self::tuple_to_bytes::<i64, 6, {Self::TUP_I64_SERIES_START}>(a, buf));
+            },
+            Self::Tup7i64(a) => {
+                buf = res!(Self::tuple_to_bytes::<i64, 7, {Self::TUP_I64_SERIES_START}>(a, buf));
+            },
+            Self::Tup8i64(a) => {
+                buf = res!(Self::tuple_to_bytes::<i64, 8, {Self::TUP_I64_SERIES_START}>(a, buf));
+            },
+            Self::Tup9i64(a) => {
+                buf = res!(Self::tuple_to_bytes::<i64, 9, {Self::TUP_I64_SERIES_START}>(a, buf));
+            },
+            Self::Tup10i64(a) => {
+                buf = res!(Self::tuple_to_bytes::<i64, 10, {Self::TUP_I64_SERIES_START}>(a, buf));
             },
         }
         Ok(buf)

@@ -848,11 +848,58 @@ impl Msg {
                                 }
                                 continue;
                             } else {
-                                return Err(err!(
-                                    "The syntax '{}' expects a value of kind '{:?}' \
-                                    but the kind for received value '{}' is '{:?}'.",
-                                    self.syntax().config().name, kind, word, d.kind();
-                                Input, Invalid));
+
+                                let converted = res!(Self::coerce_to_expected_kind(kind, &d));
+
+                                match converted {
+                                    Some(converted_dat) => {
+                                        match collecting_vals {
+                                            Collecting::Message => {
+                                                msgrx.vals.push(converted_dat);
+                                            }
+                                            Collecting::MessageArg => {
+                                                if let Some(arg) = active_arg.as_ref() {
+                                                    let akey = arg.canonical_name();
+                                                    let entry = msgrx.args.entry(akey).or_insert(Vec::new());
+                                                    entry.push(converted_dat);
+                                                }
+                                            }
+                                            Collecting::Command => {
+                                                if let Some(cmd) = active_cmd.as_ref() {
+                                                    let ckey = cmd.config().name.clone();
+                                                    let entry = msgrx.cmds.entry(ckey.clone())
+                                                        .or_insert(res!(MsgCmd::new(self.syntaxref(), ckey)));
+                                                    entry.vals.push(converted_dat);
+                                                }
+                                            }
+                                            Collecting::CommandArg => {
+                                                if let Some(cmd) = active_cmd.as_ref() {
+                                                    let ckey = cmd.config().name.clone();
+                                                    let entry1 = msgrx.cmds.entry(ckey.clone())
+                                                        .or_insert(res!(MsgCmd::new(self.syntaxref(), ckey)));
+                                                    if let Some(arg) = active_arg.as_ref() {
+                                                        let akey = arg.canonical_name();
+                                                        let entry2 = entry1.args.entry(akey).or_insert(Vec::new());
+                                                        entry2.push(converted_dat);
+                                                    }
+                                                }
+                                            }
+                                            _ => {
+                                                return Err(err!(
+                                                    "Unexpected collecting state during type conversion";
+                                                Bug, Unexpected));
+                                            }
+                                        }
+                                        continue;
+                                    }
+                                    None => {
+                                        return Err(err!(
+                                            "The syntax '{}' expects a value of kind '{:?}' \
+                                            but the kind for received value '{}' is '{:?}'.",
+                                            self.syntax().config().name, kind, word, d.kind();
+                                        Input, Invalid));
+                                    }
+                                }
                             }
                         },
                         None => {
@@ -1274,6 +1321,557 @@ impl Msg {
             Some(cmd) => fmt!("'{}'", cmd.config().name),
             None => fmt!("message"),
         }
+    }
+
+    /// Coerce a Dat value to an expected Kind.
+    /// 
+    /// This handles conversions from default JDAT string parsing to specific typed variants.
+    /// For example, "(2,6)" is parsed as Dat::Tup2(Box<[Dat; 2]>) but may need to become
+    /// Dat::Tup2u8([u8; 2]) based on the syntax specification.
+    fn coerce_to_expected_kind(expected: &Kind, actual: &Dat) -> Outcome<Option<Dat>> {
+        match (expected, actual) {
+            // Tup2 conversions.
+            (Kind::Tup2u8, Dat::Tup2(boxed)) => {
+                if let (Some(a), Some(b)) = (boxed[0].get_u8(), boxed[1].get_u8()) {
+                    Ok(Some(Dat::Tup2u8([a, b])))
+                } else {
+                    Ok(None)
+                }
+            }
+            (Kind::Tup2u16, Dat::Tup2(boxed)) => {
+                if let (Some(a), Some(b)) = (boxed[0].get_u16(), boxed[1].get_u16()) {
+                    Ok(Some(Dat::Tup2u16([a, b])))
+                } else {
+                    Ok(None)
+                }
+            }
+            (Kind::Tup2u32, Dat::Tup2(boxed)) => {
+                if let (Some(a), Some(b)) = (boxed[0].get_u32(), boxed[1].get_u32()) {
+                    Ok(Some(Dat::Tup2u32([a, b])))
+                } else {
+                    Ok(None)
+                }
+            }
+            (Kind::Tup2u64, Dat::Tup2(boxed)) => {
+                if let (Some(a), Some(b)) = (boxed[0].get_u64(), boxed[1].get_u64()) {
+                    Ok(Some(Dat::Tup2u64([a, b])))
+                } else {
+                    Ok(None)
+                }
+            }
+            (Kind::Tup2i8, Dat::Tup2(boxed)) => {
+                if let (Some(a), Some(b)) = (boxed[0].get_i8(), boxed[1].get_i8()) {
+                    Ok(Some(Dat::Tup2i8([a, b])))
+                } else {
+                    Ok(None)
+                }
+            }
+            (Kind::Tup2i16, Dat::Tup2(boxed)) => {
+                if let (Some(a), Some(b)) = (boxed[0].get_i16(), boxed[1].get_i16()) {
+                    Ok(Some(Dat::Tup2i16([a, b])))
+                } else {
+                    Ok(None)
+                }
+            }
+            (Kind::Tup2i32, Dat::Tup2(boxed)) => {
+                if let (Some(a), Some(b)) = (boxed[0].get_i32(), boxed[1].get_i32()) {
+                    Ok(Some(Dat::Tup2i32([a, b])))
+                } else {
+                    Ok(None)
+                }
+            }
+            (Kind::Tup2i64, Dat::Tup2(boxed)) => {
+                if let (Some(a), Some(b)) = (boxed[0].get_i64(), boxed[1].get_i64()) {
+                    Ok(Some(Dat::Tup2i64([a, b])))
+                } else {
+                    Ok(None)
+                }
+            }
+            
+            // Tup3 conversions.
+            (Kind::Tup3u8, Dat::Tup3(boxed)) => {
+                if let (Some(a), Some(b), Some(c)) = 
+                    (boxed[0].get_u8(), boxed[1].get_u8(), boxed[2].get_u8()) {
+                    Ok(Some(Dat::Tup3u8([a, b, c])))
+                } else {
+                    Ok(None)
+                }
+            }
+            (Kind::Tup3u16, Dat::Tup3(boxed)) => {
+                if let (Some(a), Some(b), Some(c)) = 
+                    (boxed[0].get_u16(), boxed[1].get_u16(), boxed[2].get_u16()) {
+                    Ok(Some(Dat::Tup3u16([a, b, c])))
+                } else {
+                    Ok(None)
+                }
+            }
+            (Kind::Tup3u32, Dat::Tup3(boxed)) => {
+                if let (Some(a), Some(b), Some(c)) = 
+                    (boxed[0].get_u32(), boxed[1].get_u32(), boxed[2].get_u32()) {
+                    Ok(Some(Dat::Tup3u32([a, b, c])))
+                } else {
+                    Ok(None)
+                }
+            }
+            (Kind::Tup3u64, Dat::Tup3(boxed)) => {
+                if let (Some(a), Some(b), Some(c)) = 
+                    (boxed[0].get_u64(), boxed[1].get_u64(), boxed[2].get_u64()) {
+                    Ok(Some(Dat::Tup3u64([a, b, c])))
+                } else {
+                    Ok(None)
+                }
+            }
+            (Kind::Tup3i8, Dat::Tup3(boxed)) => {
+                if let (Some(a), Some(b), Some(c)) = 
+                    (boxed[0].get_i8(), boxed[1].get_i8(), boxed[2].get_i8()) {
+                    Ok(Some(Dat::Tup3i8([a, b, c])))
+                } else {
+                    Ok(None)
+                }
+            }
+            (Kind::Tup3i16, Dat::Tup3(boxed)) => {
+                if let (Some(a), Some(b), Some(c)) = 
+                    (boxed[0].get_i16(), boxed[1].get_i16(), boxed[2].get_i16()) {
+                    Ok(Some(Dat::Tup3i16([a, b, c])))
+                } else {
+                    Ok(None)
+                }
+            }
+            (Kind::Tup3i32, Dat::Tup3(boxed)) => {
+                if let (Some(a), Some(b), Some(c)) = 
+                    (boxed[0].get_i32(), boxed[1].get_i32(), boxed[2].get_i32()) {
+                    Ok(Some(Dat::Tup3i32([a, b, c])))
+                } else {
+                    Ok(None)
+                }
+            }
+            (Kind::Tup3i64, Dat::Tup3(boxed)) => {
+                if let (Some(a), Some(b), Some(c)) = 
+                    (boxed[0].get_i64(), boxed[1].get_i64(), boxed[2].get_i64()) {
+                    Ok(Some(Dat::Tup3i64([a, b, c])))
+                } else {
+                    Ok(None)
+                }
+            }
+            
+            // Tup4 conversions.
+            (Kind::Tup4u8, Dat::Tup4(boxed)) => {
+                match Self::extract_u8_array::<4>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup4u8(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup4u16, Dat::Tup4(boxed)) => {
+                match Self::extract_u16_array::<4>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup4u16(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup4u32, Dat::Tup4(boxed)) => {
+                match Self::extract_u32_array::<4>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup4u32(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup4u64, Dat::Tup4(boxed)) => {
+                match Self::extract_u64_array::<4>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup4u64(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup4i8, Dat::Tup4(boxed)) => {
+                match Self::extract_i8_array::<4>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup4i8(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup4i16, Dat::Tup4(boxed)) => {
+                match Self::extract_i16_array::<4>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup4i16(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup4i32, Dat::Tup4(boxed)) => {
+                match Self::extract_i32_array::<4>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup4i32(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup4i64, Dat::Tup4(boxed)) => {
+                match Self::extract_i64_array::<4>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup4i64(arr))),
+                    None => Ok(None)
+                }
+            }
+            
+            // Tup5 conversions.
+            (Kind::Tup5u8, Dat::Tup5(boxed)) => {
+                match Self::extract_u8_array::<5>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup5u8(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup5u16, Dat::Tup5(boxed)) => {
+                match Self::extract_u16_array::<5>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup5u16(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup5u32, Dat::Tup5(boxed)) => {
+                match Self::extract_u32_array::<5>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup5u32(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup5u64, Dat::Tup5(boxed)) => {
+                match Self::extract_u64_array::<5>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup5u64(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup5i8, Dat::Tup5(boxed)) => {
+                match Self::extract_i8_array::<5>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup5i8(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup5i16, Dat::Tup5(boxed)) => {
+                match Self::extract_i16_array::<5>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup5i16(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup5i32, Dat::Tup5(boxed)) => {
+                match Self::extract_i32_array::<5>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup5i32(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup5i64, Dat::Tup5(boxed)) => {
+                match Self::extract_i64_array::<5>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup5i64(arr))),
+                    None => Ok(None)
+                }
+            }
+            
+            // Tup6 conversions.
+            (Kind::Tup6u8, Dat::Tup6(boxed)) => {
+                match Self::extract_u8_array::<6>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup6u8(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup6u16, Dat::Tup6(boxed)) => {
+                match Self::extract_u16_array::<6>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup6u16(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup6u32, Dat::Tup6(boxed)) => {
+                match Self::extract_u32_array::<6>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup6u32(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup6u64, Dat::Tup6(boxed)) => {
+                match Self::extract_u64_array::<6>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup6u64(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup6i8, Dat::Tup6(boxed)) => {
+                match Self::extract_i8_array::<6>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup6i8(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup6i16, Dat::Tup6(boxed)) => {
+                match Self::extract_i16_array::<6>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup6i16(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup6i32, Dat::Tup6(boxed)) => {
+                match Self::extract_i32_array::<6>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup6i32(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup6i64, Dat::Tup6(boxed)) => {
+                match Self::extract_i64_array::<6>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup6i64(arr))),
+                    None => Ok(None)
+                }
+            }
+            
+            // Tup7 conversions.
+            (Kind::Tup7u8, Dat::Tup7(boxed)) => {
+                match Self::extract_u8_array::<7>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup7u8(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup7u16, Dat::Tup7(boxed)) => {
+                match Self::extract_u16_array::<7>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup7u16(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup7u32, Dat::Tup7(boxed)) => {
+                match Self::extract_u32_array::<7>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup7u32(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup7u64, Dat::Tup7(boxed)) => {
+                match Self::extract_u64_array::<7>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup7u64(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup7i8, Dat::Tup7(boxed)) => {
+                match Self::extract_i8_array::<7>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup7i8(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup7i16, Dat::Tup7(boxed)) => {
+                match Self::extract_i16_array::<7>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup7i16(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup7i32, Dat::Tup7(boxed)) => {
+                match Self::extract_i32_array::<7>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup7i32(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup7i64, Dat::Tup7(boxed)) => {
+                match Self::extract_i64_array::<7>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup7i64(arr))),
+                    None => Ok(None)
+                }
+            }
+            
+            // Tup8 conversions.
+            (Kind::Tup8u8, Dat::Tup8(boxed)) => {
+                match Self::extract_u8_array::<8>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup8u8(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup8u16, Dat::Tup8(boxed)) => {
+                match Self::extract_u16_array::<8>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup8u16(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup8u32, Dat::Tup8(boxed)) => {
+                match Self::extract_u32_array::<8>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup8u32(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup8u64, Dat::Tup8(boxed)) => {
+                match Self::extract_u64_array::<8>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup8u64(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup8i8, Dat::Tup8(boxed)) => {
+                match Self::extract_i8_array::<8>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup8i8(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup8i16, Dat::Tup8(boxed)) => {
+                match Self::extract_i16_array::<8>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup8i16(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup8i32, Dat::Tup8(boxed)) => {
+                match Self::extract_i32_array::<8>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup8i32(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup8i64, Dat::Tup8(boxed)) => {
+                match Self::extract_i64_array::<8>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup8i64(arr))),
+                    None => Ok(None)
+                }
+            }
+            
+            // Tup9 conversions.
+            (Kind::Tup9u8, Dat::Tup9(boxed)) => {
+                match Self::extract_u8_array::<9>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup9u8(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup9u16, Dat::Tup9(boxed)) => {
+                match Self::extract_u16_array::<9>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup9u16(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup9u32, Dat::Tup9(boxed)) => {
+                match Self::extract_u32_array::<9>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup9u32(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup9u64, Dat::Tup9(boxed)) => {
+                match Self::extract_u64_array::<9>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup9u64(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup9i8, Dat::Tup9(boxed)) => {
+                match Self::extract_i8_array::<9>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup9i8(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup9i16, Dat::Tup9(boxed)) => {
+                match Self::extract_i16_array::<9>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup9i16(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup9i32, Dat::Tup9(boxed)) => {
+                match Self::extract_i32_array::<9>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup9i32(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup9i64, Dat::Tup9(boxed)) => {
+                match Self::extract_i64_array::<9>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup9i64(arr))),
+                    None => Ok(None)
+                }
+            }
+            
+            // Tup10 conversions.
+            (Kind::Tup10u8, Dat::Tup10(boxed)) => {
+                match Self::extract_u8_array::<10>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup10u8(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup10u16, Dat::Tup10(boxed)) => {
+                match Self::extract_u16_array::<10>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup10u16(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup10u32, Dat::Tup10(boxed)) => {
+                match Self::extract_u32_array::<10>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup10u32(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup10u64, Dat::Tup10(boxed)) => {
+                match Self::extract_u64_array::<10>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup10u64(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup10i8, Dat::Tup10(boxed)) => {
+                match Self::extract_i8_array::<10>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup10i8(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup10i16, Dat::Tup10(boxed)) => {
+                match Self::extract_i16_array::<10>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup10i16(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup10i32, Dat::Tup10(boxed)) => {
+                match Self::extract_i32_array::<10>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup10i32(arr))),
+                    None => Ok(None)
+                }
+            }
+            (Kind::Tup10i64, Dat::Tup10(boxed)) => {
+                match Self::extract_i64_array::<10>(boxed) {
+                    Some(arr) => Ok(Some(Dat::Tup10i64(arr))),
+                    None => Ok(None)
+                }
+            }
+            
+            // No conversion needed or possible.
+            _ => Ok(None)
+        }
+    }
+
+    // Helper functions to extract typed arrays from Dat arrays.
+    fn extract_u8_array<const N: usize>(dats: &[Dat; N]) -> Option<[u8; N]> {
+        let mut result = [0u8; N];
+        for i in 0..N {
+            result[i] = dats[i].get_u8()?;
+        }
+        Some(result)
+    }
+
+    fn extract_u16_array<const N: usize>(dats: &[Dat; N]) -> Option<[u16; N]> {
+        let mut result = [0u16; N];
+        for i in 0..N {
+            result[i] = dats[i].get_u16()?;
+        }
+        Some(result)
+    }
+
+    fn extract_u32_array<const N: usize>(dats: &[Dat; N]) -> Option<[u32; N]> {
+        let mut result = [0u32; N];
+        for i in 0..N {
+            result[i] = dats[i].get_u32()?;
+        }
+        Some(result)
+    }
+
+    fn extract_u64_array<const N: usize>(dats: &[Dat; N]) -> Option<[u64; N]> {
+        let mut result = [0u64; N];
+        for i in 0..N {
+            result[i] = dats[i].get_u64()?;
+        }
+        Some(result)
+    }
+
+    fn extract_i8_array<const N: usize>(dats: &[Dat; N]) -> Option<[i8; N]> {
+        let mut result = [0i8; N];
+        for i in 0..N {
+            result[i] = dats[i].get_i8()?;
+        }
+        Some(result)
+    }
+
+    fn extract_i16_array<const N: usize>(dats: &[Dat; N]) -> Option<[i16; N]> {
+        let mut result = [0i16; N];
+        for i in 0..N {
+            result[i] = dats[i].get_i16()?;
+        }
+        Some(result)
+    }
+
+    fn extract_i32_array<const N: usize>(dats: &[Dat; N]) -> Option<[i32; N]> {
+        let mut result = [0i32; N];
+        for i in 0..N {
+            result[i] = dats[i].get_i32()?;
+        }
+        Some(result)
+    }
+
+    fn extract_i64_array<const N: usize>(dats: &[Dat; N]) -> Option<[i64; N]> {
+        let mut result = [0i64; N];
+        for i in 0..N {
+            result[i] = dats[i].get_i64()?;
+        }
+        Some(result)
     }
 }
 
