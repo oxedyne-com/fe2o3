@@ -19,8 +19,9 @@ impl fmt::Display for PersonId {
 /// Profile types for population segments.
 #[derive(Clone, Debug, Copy, PartialEq, Eq, Hash)]
 pub enum ProfileType {
-    Isolated,
     Connected,
+    Isolated,
+    Standard,
 }
 
 #[cfg(test)]

@@ -286,7 +286,7 @@ impl CircleLabels {
 pub struct NetworkConfig {
     pub population:			u32,
     pub profiles:			Vec<Profile>,
-    pub sampling_method:	SamplingMethod,
+    pub sampling_methods:	Vec<SamplingMethod>, // One per social circle
     pub num_circles:		usize,
     pub reciprocity_matrix:	Vec<Vec<f32>>, // NxN matrix for circle reciprocity.
     pub circle_labels:		Option<CircleLabels>, // Optional labels for circles.
@@ -328,7 +328,7 @@ impl NetworkConfig {
                     ],
                 },
             ],
-            sampling_method: SamplingMethod::Uniform,
+            sampling_methods: vec![SamplingMethod::Uniform; 4], // Default: uniform for all 4 circles
             num_circles: 4,
             reciprocity_matrix: vec![
                 vec![0.95, 0.05, 0.00, 0.00], // Inner -> x.
@@ -370,6 +370,16 @@ pub fn generate_social_network(
 )
     -> Outcome<SocialGraph>
 {
+    // Validate sampling methods length matches num_circles.
+    if config.sampling_methods.len() != config.num_circles {
+        return Err(err!(
+            "sampling_methods length ({}) must match num_circles ({})",
+            config.sampling_methods.len(),
+            config.num_circles;
+            Invalid, Input
+        ));
+    }
+
     // Memory-mapped storage is required.
     let mmap_path = match config.use_mmap.clone() {
         Some(path) => path,
@@ -876,11 +886,16 @@ fn create_stubs(config: &NetworkConfig) -> Vec<Stub> {
         for (circle_idx, &(min_size, max_size)) in profile.circle_ranges.iter().enumerate() {
             let circle_type = CircleType(circle_idx as u8);
             
+            // Get the sampling method for this circle (with bounds checking).
+            let sampling_method = config.sampling_methods.get(circle_idx)
+                .copied()
+                .unwrap_or(SamplingMethod::Uniform);
+            
             // Sample circle size from range using the configured method.
             let size = Rand::sample_u32(
                 min_size,
                 max_size,
-                config.sampling_method
+                sampling_method
             ).unwrap_or(min_size);
             
             for _ in 0..size {
@@ -1159,7 +1174,7 @@ mod tests {
                     ],
                 },
             ],
-            sampling_method: SamplingMethod::Uniform,
+            sampling_methods: vec![SamplingMethod::Uniform; 4],
             num_circles: 4,
             reciprocity_matrix: vec![
                 vec![0.95, 0.05, 0.00, 0.00], // Inner -> x.
@@ -1531,7 +1546,7 @@ mod tests {
         
         // Test Gaussian sampling.
         for _ in 0..100 {
-            let val = res!(Rand::sample_u32(50, 100, SamplingMethod::Gaussian));
+            let val = res!(Rand::sample_u32(50, 100, SamplingMethod::GaussianClampedDerived));
             if !(val >= 50 && val <= 100) {
                 return Err(err!(
                     "Gaussian sample {} out of range [50, 100]", val;

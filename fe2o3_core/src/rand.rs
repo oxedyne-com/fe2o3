@@ -19,7 +19,8 @@ use rand_core::{
 #[derive(Clone, Copy, Debug)]
 pub enum SamplingMethod {
     Uniform,
-    GaussianClamped,
+    GaussianClampedDerived,
+    GaussianClampedExplicit { mean: f32, stdev: f32 },
 }
 
 pub trait RanDef {
@@ -178,9 +179,13 @@ impl Rand {
                 let scale = max - min;
                 min + scale * Self::value::<f32>()
             }
-            SamplingMethod::GaussianClamped => {
+            SamplingMethod::GaussianClampedDerived => {
                 let mean = (min + max) / 2.0;
                 let stdev = (max - min) / 6.0;
+                let sample = Self::normal(mean, stdev);
+                sample.max(min).min(max)
+            }
+            SamplingMethod::GaussianClampedExplicit { mean, stdev } => {
                 let sample = Self::normal(mean, stdev);
                 sample.max(min).min(max)
             }
@@ -207,10 +212,14 @@ impl Rand {
                 let scale = max - min;
                 min + scale * Self::value::<f64>()
             }
-            SamplingMethod::GaussianClamped => {
+            SamplingMethod::GaussianClampedDerived => {
                 let mean = (min + max) / 2.0;
                 let stdev = (max - min) / 6.0;
                 let sample = Self::normal_f64(mean, stdev);
+                sample.max(min).min(max)
+            }
+            SamplingMethod::GaussianClampedExplicit { mean, stdev } => {
+                let sample = Self::normal_f64(mean as f64, stdev as f64);
                 sample.max(min).min(max)
             }
         })
@@ -229,9 +238,13 @@ impl Rand {
         
         Ok(match method {
             SamplingMethod::Uniform => Self::in_range(min, max),
-            SamplingMethod::GaussianClamped => {
+            SamplingMethod::GaussianClampedDerived => {
                 let mean = (min as f32 + max as f32) / 2.0;
                 let stdev = (max as f32 - min as f32) / 6.0;	// 6σ covers ~99.7%.
+                let sample = Self::normal(mean, stdev).round();
+                sample.max(min as f32).min(max as f32) as u8
+            }
+            SamplingMethod::GaussianClampedExplicit { mean, stdev } => {
                 let sample = Self::normal(mean, stdev).round();
                 sample.max(min as f32).min(max as f32) as u8
             }
@@ -251,9 +264,13 @@ impl Rand {
         
         Ok(match method {
             SamplingMethod::Uniform => Self::in_range(min, max),
-            SamplingMethod::GaussianClamped => {
+            SamplingMethod::GaussianClampedDerived => {
                 let mean = (min as f32 + max as f32) / 2.0;
                 let stdev = (max as f32 - min as f32) / 6.0;
+                let sample = Self::normal(mean, stdev).round();
+                sample.max(min as f32).min(max as f32) as u16
+            }
+            SamplingMethod::GaussianClampedExplicit { mean, stdev } => {
                 let sample = Self::normal(mean, stdev).round();
                 sample.max(min as f32).min(max as f32) as u16
             }
@@ -273,10 +290,14 @@ impl Rand {
         
         Ok(match method {
             SamplingMethod::Uniform => Self::in_range(min, max),
-            SamplingMethod::GaussianClamped => {
+            SamplingMethod::GaussianClampedDerived => {
                 let mean = (min as f64 + max as f64) / 2.0;	// Use f64 for precision.
                 let stdev = (max as f64 - min as f64) / 6.0;
                 let sample = Self::normal_f64(mean, stdev).round();
+                sample.max(min as f64).min(max as f64) as u32
+            }
+            SamplingMethod::GaussianClampedExplicit { mean, stdev } => {
+                let sample = Self::normal_f64(mean as f64, stdev as f64).round();
                 sample.max(min as f64).min(max as f64) as u32
             }
         })
@@ -295,10 +316,14 @@ impl Rand {
         
         Ok(match method {
             SamplingMethod::Uniform => Self::in_range(min, max),
-            SamplingMethod::GaussianClamped => {
+            SamplingMethod::GaussianClampedDerived => {
                 let mean = (min as f64 + max as f64) / 2.0;
                 let stdev = (max as f64 - min as f64) / 6.0;
                 let sample = Self::normal_f64(mean, stdev).round();
+                sample.max(min as f64).min(max as f64) as u64
+            }
+            SamplingMethod::GaussianClampedExplicit { mean, stdev } => {
+                let sample = Self::normal_f64(mean as f64, stdev as f64).round();
                 sample.max(min as f64).min(max as f64) as u64
             }
         })
@@ -317,7 +342,7 @@ impl Rand {
         
         Ok(match method {
             SamplingMethod::Uniform => Self::in_range(min, max),
-            SamplingMethod::GaussianClamped => {
+            SamplingMethod::GaussianClampedDerived => {
                 // Careful handling for large values.
                 let min_f64 = min as f64;
                 let max_f64 = max as f64;
@@ -331,6 +356,16 @@ impl Rand {
                     max
                 } else {
                     sample.max(min_f64).min(max_f64) as u128
+                }
+            }
+            SamplingMethod::GaussianClampedExplicit { mean, stdev } => {
+                let sample = Self::normal_f64(mean as f64, stdev as f64).round();
+                if sample < 0.0 {
+                    min
+                } else if sample > u128::MAX as f64 {
+                    max
+                } else {
+                    sample.max(min as f64).min(max as f64) as u128
                 }
             }
         })
@@ -349,10 +384,14 @@ impl Rand {
         
         Ok(match method {
             SamplingMethod::Uniform => Self::in_range(min, max),
-            SamplingMethod::GaussianClamped => {
+            SamplingMethod::GaussianClampedDerived => {
                 let mean = (min as f64 + max as f64) / 2.0;
                 let stdev = (max as f64 - min as f64) / 6.0;
                 let sample = Self::normal_f64(mean, stdev).round();
+                sample.max(min as f64).min(max as f64) as usize
+            }
+            SamplingMethod::GaussianClampedExplicit { mean, stdev } => {
+                let sample = Self::normal_f64(mean as f64, stdev as f64).round();
                 sample.max(min as f64).min(max as f64) as usize
             }
         })
@@ -371,9 +410,13 @@ impl Rand {
         
         Ok(match method {
             SamplingMethod::Uniform => Self::in_range(min, max),
-            SamplingMethod::GaussianClamped => {
+            SamplingMethod::GaussianClampedDerived => {
                 let mean = (min as f32 + max as f32) / 2.0;
                 let stdev = (max as f32 - min as f32) / 6.0;
+                let sample = Self::normal(mean, stdev).round();
+                sample.max(min as f32).min(max as f32) as i8
+            }
+            SamplingMethod::GaussianClampedExplicit { mean, stdev } => {
                 let sample = Self::normal(mean, stdev).round();
                 sample.max(min as f32).min(max as f32) as i8
             }
@@ -393,9 +436,13 @@ impl Rand {
         
         Ok(match method {
             SamplingMethod::Uniform => Self::in_range(min, max),
-            SamplingMethod::GaussianClamped => {
+            SamplingMethod::GaussianClampedDerived => {
                 let mean = (min as f32 + max as f32) / 2.0;
                 let stdev = (max as f32 - min as f32) / 6.0;
+                let sample = Self::normal(mean, stdev).round();
+                sample.max(min as f32).min(max as f32) as i16
+            }
+            SamplingMethod::GaussianClampedExplicit { mean, stdev } => {
                 let sample = Self::normal(mean, stdev).round();
                 sample.max(min as f32).min(max as f32) as i16
             }
@@ -415,10 +462,14 @@ impl Rand {
         
         Ok(match method {
             SamplingMethod::Uniform => Self::in_range(min, max),
-            SamplingMethod::GaussianClamped => {
+            SamplingMethod::GaussianClampedDerived => {
                 let mean = (min as f64 + max as f64) / 2.0;
                 let stdev = (max as f64 - min as f64) / 6.0;
                 let sample = Self::normal_f64(mean, stdev).round();
+                sample.max(min as f64).min(max as f64) as i32
+            }
+            SamplingMethod::GaussianClampedExplicit { mean, stdev } => {
+                let sample = Self::normal_f64(mean as f64, stdev as f64).round();
                 sample.max(min as f64).min(max as f64) as i32
             }
         })
@@ -437,10 +488,14 @@ impl Rand {
         
         Ok(match method {
             SamplingMethod::Uniform => Self::in_range(min, max),
-            SamplingMethod::GaussianClamped => {
+            SamplingMethod::GaussianClampedDerived => {
                 let mean = (min as f64 + max as f64) / 2.0;
                 let stdev = (max as f64 - min as f64) / 6.0;
                 let sample = Self::normal_f64(mean, stdev).round();
+                sample.max(min as f64).min(max as f64) as i64
+            }
+            SamplingMethod::GaussianClampedExplicit { mean, stdev } => {
+                let sample = Self::normal_f64(mean as f64, stdev as f64).round();
                 sample.max(min as f64).min(max as f64) as i64
             }
         })
@@ -459,7 +514,7 @@ impl Rand {
         
         Ok(match method {
             SamplingMethod::Uniform => Self::in_range(min, max),
-            SamplingMethod::GaussianClamped => {
+            SamplingMethod::GaussianClampedDerived => {
                 let min_f64 = min as f64;
                 let max_f64 = max as f64;
                 let mean = (min_f64 + max_f64) / 2.0;
@@ -472,6 +527,16 @@ impl Rand {
                     max
                 } else {
                     sample.max(min_f64).min(max_f64) as i128
+                }
+            }
+            SamplingMethod::GaussianClampedExplicit { mean, stdev } => {
+                let sample = Self::normal_f64(mean as f64, stdev as f64).round();
+                if sample < i128::MIN as f64 {
+                    min
+                } else if sample > i128::MAX as f64 {
+                    max
+                } else {
+                    sample.max(min as f64).min(max as f64) as i128
                 }
             }
         })
@@ -490,10 +555,14 @@ impl Rand {
         
         Ok(match method {
             SamplingMethod::Uniform => Self::in_range(min, max),
-            SamplingMethod::GaussianClamped => {
+            SamplingMethod::GaussianClampedDerived => {
                 let mean = (min as f64 + max as f64) / 2.0;
                 let stdev = (max as f64 - min as f64) / 6.0;
                 let sample = Self::normal_f64(mean, stdev).round();
+                sample.max(min as f64).min(max as f64) as isize
+            }
+            SamplingMethod::GaussianClampedExplicit { mean, stdev } => {
+                let sample = Self::normal_f64(mean as f64, stdev as f64).round();
                 sample.max(min as f64).min(max as f64) as isize
             }
         })
@@ -514,7 +583,7 @@ mod tests {
         
         // Test i32 negative range.
         for _ in 0..100 {
-            let val = res!(Rand::sample_i32(-50, 50, SamplingMethod::GaussianClamped));
+            let val = res!(Rand::sample_i32(-50, 50, SamplingMethod::GaussianClampedDerived));
             req!(val >= -50 && val <= 50, true);
         }
         
