@@ -34,6 +34,13 @@ use std::{
 };
 
 
+#[derive(Clone, Copy, Debug)]
+pub enum GraphAccessMethod {
+    Auto(usize),// Decide based on edge count.
+    FileIO,     // Always use file I/O.
+    Mmap,       // Always use memory mapping.
+}
+
 /// Social graph - edges only, stored in memory-mapped file.
 pub struct SocialGraph {
     edges:      MmapGraph,
@@ -51,10 +58,32 @@ impl SocialGraph {
         Self { edges, population }
     }
 
-    /// Gets outgoing links from a node.
+    /// Release memory pages used by the memory-mapped graph.
+    /// This tells the OS it can free cached pages to reduce memory usage.
+    #[cfg(unix)]
+    pub fn release_memory(&self) {
+        self.edges.release_memory();
+    }
+
+    #[cfg(not(unix))]
+    pub fn release_memory(&self) {
+        // No-op on non-Unix systems.
+    }
+
     pub fn get_links_from(&self, id: &PersonId) -> Vec<(PersonId, SocialLink)> {
-        // Query the mmap file for edges from this node
-        match self.edges.get_outgoing_edges(id.0) {
+        self.get_links_from_with_method(id, GraphAccessMethod::Auto(1000))
+    }
+
+    /// Gets outgoing links from a node.
+    pub fn get_links_from_with_method(
+        &self,
+        id: &PersonId,
+        method: GraphAccessMethod,
+    )
+        -> Vec<(PersonId, SocialLink)>
+    {
+        // Query the mmap file for edges from this node.
+        match self.edges.get_outgoing_edges(id.0, method) {
             Ok(edge_list) => {
                 edge_list.into_iter().map(|(target_id, link_data)| {
                     let person_id = PersonId(target_id);

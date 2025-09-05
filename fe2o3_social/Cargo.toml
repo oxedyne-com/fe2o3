@@ -14,4 +14,6 @@ oxedyne_fe2o3_data = { path = "../fe2o3_data" }
 memmap2 = "0.9"
 strum = { version = "0.25", features = ["derive"] }
 
+libc = "0.2"
+
 [dev-dependencies]

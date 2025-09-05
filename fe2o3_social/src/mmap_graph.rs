@@ -3,9 +3,12 @@
 //! Provides disk-backed storage for graphs that exceed available RAM,
 //! using memory-mapped files for efficient access patterns.
 
-use crate::mmap_index::{
-	MmapIndex,
-	MmapIndexBuilder,
+use crate::{
+    graph::GraphAccessMethod,
+    mmap_index::{
+    	MmapIndex,
+    	MmapIndexBuilder,
+    },
 };
 
 use oxedyne_fe2o3_core::{
@@ -14,15 +17,18 @@ use oxedyne_fe2o3_core::{
 	warn,
 };
 
-use std::fs::{
-	File,
-	OpenOptions,
-};
-use std::io::{
-	Write,
-	Read,
-	Seek,
-	SeekFrom,
+use std::{
+    cell::RefCell,
+    fs::{
+    	File,
+    	OpenOptions,
+    },
+    io::{
+    	Write,
+    	Read,
+    	Seek,
+    	SeekFrom,
+    },
 };
 
 #[cfg(unix)]
@@ -32,6 +38,7 @@ use memmap2::{
 	Mmap,
 	MmapOptions,
 };
+
 
 /// Memory-mapped graph storage using flat edge list.
 /// 
@@ -51,6 +58,8 @@ pub struct MmapGraph {
     index: Option<MmapIndex>,
     /// File path for the edge data.
     file_path: String,
+    /// Opening and closing the file can degrade performance.
+    read_handle: RefCell<Option<File>>,
 }
 
 impl MmapGraph {
@@ -110,6 +119,7 @@ impl MmapGraph {
             mmap: None, // Memory mapping created when loading existing graphs.
             index: None, // Index will be loaded separately after generation.
             file_path: path.to_string(),
+            read_handle: RefCell::new(None),
         })
     }
     
@@ -144,6 +154,21 @@ impl MmapGraph {
         let mmap = match mmap {
             Ok(m) => {
                 info!("Created memory mapping for edge data ({:.1} MB)", m.len() as f64 / 1024.0 / 1024.0);
+                // Tell OS we don't need aggressive caching.
+                #[cfg(unix)]
+                #[allow(unsafe_code)]
+                unsafe {
+                    let result = libc::madvise(
+                        m.as_ptr() as *mut libc::c_void,
+                        m.len(),
+                        libc::MADV_RANDOM  // Random access pattern, don't prefetch
+                    );
+                    if result == 0 {
+                        info!("Applied MADV_RANDOM to memory mapping");
+                    } else {
+                        warn!("Failed to apply madvise: {}", result);
+                    }
+                }
                 Some(m)
             },
             Err(e) => {
@@ -157,8 +182,9 @@ impl MmapGraph {
             num_edges,
             capacity,
             mmap,
-            index: None,
-            file_path: path.to_string(),
+            index:          None,
+            file_path:      path.to_string(),
+            read_handle:    RefCell::new(None),
         };
         
         // Try to load the disk-based index if it exists.
@@ -176,6 +202,25 @@ impl MmapGraph {
         Ok(graph)
     }
     
+    pub fn release_memory(&self) {
+        #[cfg(unix)]
+        if let Some(ref mmap) = self.mmap {
+            #[allow(unsafe_code)]
+            unsafe {
+                // This tells the OS it can free these pages.
+                // They'll be reloaded on next access.
+                let result = libc::madvise(
+                    mmap.as_ptr() as *mut libc::c_void,
+                    mmap.len(),
+                    libc::MADV_DONTNEED  // Free the pages.
+                );
+                if result == 0 {
+                    debug!("Released mmap memory pages");
+                }
+            }
+        }
+    }
+
     /// Adds an edge to the graph.
     /// 
     /// # Arguments
@@ -284,53 +329,128 @@ impl MmapGraph {
         Ok(edges)
     }
 
-    /// Gets all outgoing edges from a node.
-    /// 
-    /// Uses memory-mapped index for O(1) lookup if available, otherwise scans edges.
-    pub fn get_outgoing_edges(&self, from_id: u32) -> Outcome<Vec<(u32, u8)>> {
+    /// Retrieves all outgoing edges from a specified node.
+    ///
+    /// This method supports multiple access strategies to balance memory usage and performance:
+    /// - FileIO: Always uses direct file I/O (lowest memory, slowest).
+    /// - Mmap: Always uses memory mapping (highest memory, fastest).
+    /// - Auto: Chooses based on edge count threshold.
+    ///
+    /// # Arguments
+    /// * `from_id` - The source node ID to retrieve edges from.
+    /// * `method` - The access method to use for retrieving edges.
+    ///
+    /// # Returns
+    /// A vector of tuples containing (target_node_id, link_data) for all outgoing edges.
+    pub fn get_outgoing_edges(
+        &self,
+        from_id: u32,
+        method: GraphAccessMethod,
+    )
+        -> Outcome<Vec<(u32, u8)>>
+    {
         let mut edges = Vec::new();
-        
-        // Try to use the index for fast lookup first.
+    
+        // Try index-based lookup first.
         if let Some(ref index) = self.index {
             if let Some(edge_offsets) = index.get_node_edge_offsets(from_id) {
-                if let Some(ref mmap) = self.mmap {
-                    // Use index to read only this node's edges directly.
+                if edge_offsets.is_empty() {
+                    return Ok(edges);
+                }
+    
+                // Decide which method to use.
+                let use_file_io = match method {
+                    GraphAccessMethod::FileIO => true,
+                    GraphAccessMethod::Mmap => false,
+                    GraphAccessMethod::Auto(edge_lim) => edge_offsets.len() < edge_lim,
+                };
+    
+                if use_file_io {
+                    // Get or create cached file handle.
+                    let mut read_handle = self.read_handle.borrow_mut();
+                    if read_handle.is_none() {
+                        *read_handle = Some(res!(File::open(&self.file_path)));
+                    }
+    
+                    let file = match read_handle.as_mut() {
+                        Some(f) => f,
+                        None => return Err(err!("Failed to get file handle after creation"; Bug)),
+                    };
+    
+                    // Find the range of bytes we need.
+                    let first_offset = match edge_offsets.first() {
+                        Some(offset) => *offset,
+                        None => return Err(err!("Edge offsets unexpectedly empty"; Invalid, Input)),
+                    };
+                    let last_offset = match edge_offsets.last() {
+                        Some(offset) => *offset,
+                        None => return Err(err!("Edge offsets unexpectedly empty"; Invalid, Input)),
+                    };
+                    let bytes_to_read = (last_offset - first_offset + 9) as usize;
+    
+                    // Read all relevant bytes in one operation.
+                    res!(file.seek(SeekFrom::Start(first_offset)));
+                    let mut buffer = vec![0u8; bytes_to_read];
+                    res!(file.read_exact(&mut buffer));
+    
+                    // Parse edges from buffer.
                     for edge_offset in edge_offsets {
-                        let offset = edge_offset as usize;
-                        if offset + 9 > mmap.len() {
-                            continue;
-                        }
-                        
-                        // Read edge directly from memory-mapped data.
-                        let edge_from = u32::from_le_bytes([
-                            mmap[offset], mmap[offset + 1], mmap[offset + 2], mmap[offset + 3]
-                        ]);
-                        let edge_to = u32::from_le_bytes([
-                            mmap[offset + 4], mmap[offset + 5], mmap[offset + 6], mmap[offset + 7]
-                        ]);
-                        let link_data = mmap[offset + 8];
-                        
-                        // Verify this edge belongs to the requested node.
-                        if edge_from == from_id {
-                            edges.push((edge_to, link_data));
+                        let relative_offset = (edge_offset - first_offset) as usize;
+                        if relative_offset + 9 <= buffer.len() {
+                            let edge_from = u32::from_le_bytes([
+                                buffer[relative_offset],
+                                buffer[relative_offset + 1],
+                                buffer[relative_offset + 2],
+                                buffer[relative_offset + 3]
+                            ]);
+                            let edge_to = u32::from_le_bytes([
+                                buffer[relative_offset + 4],
+                                buffer[relative_offset + 5],
+                                buffer[relative_offset + 6],
+                                buffer[relative_offset + 7]
+                            ]);
+                            let link_data = buffer[relative_offset + 8];
+    
+                            if edge_from == from_id {
+                                edges.push((edge_to, link_data));
+                            }
                         }
                     }
-                    
+    
                     return Ok(edges);
+                } else {
+                    // Memory-mapped path for better performance.
+                    if let Some(ref mmap) = self.mmap {
+                        for edge_offset in edge_offsets {
+                            let offset = edge_offset as usize;
+                            if offset + 9 > mmap.len() {
+                                continue;
+                            }
+                            let edge_from = u32::from_le_bytes([
+                                mmap[offset], mmap[offset + 1], mmap[offset + 2], mmap[offset + 3]
+                            ]);
+                            let edge_to = u32::from_le_bytes([
+                                mmap[offset + 4], mmap[offset + 5], mmap[offset + 6], mmap[offset + 7]
+                            ]);
+                            let link_data = mmap[offset + 8];
+    
+                            if edge_from == from_id {
+                                edges.push((edge_to, link_data));
+                            }
+                        }
+                        return Ok(edges);
+                    }
                 }
             }
         }
-        
-        // Fallback: scan all edges if no index available.
+    
+        // Fallback to mmap scanning when no index available.
         if let Some(ref mmap) = self.mmap {
-            // Use memory-mapped data for edge scanning.
             let mut offset = 0;
             for _ in 0..self.num_edges {
                 if offset + 9 > mmap.len() {
                     break;
                 }
-                
-                // Read edge directly from memory-mapped data.
                 let edge_from = u32::from_le_bytes([
                     mmap[offset], mmap[offset + 1], mmap[offset + 2], mmap[offset + 3]
                 ]);
@@ -338,32 +458,28 @@ impl MmapGraph {
                     mmap[offset + 4], mmap[offset + 5], mmap[offset + 6], mmap[offset + 7]
                 ]);
                 let link_data = mmap[offset + 8];
-                
+    
                 if edge_from == from_id {
                     edges.push((edge_to, link_data));
                 }
-                
                 offset += 9;
             }
         } else {
-            // Memory mapping failed during initialization - use direct file access.
+            // No mmap available, use direct file access.
             warn!("Memory mapping unavailable for node {}, using direct file access", from_id);
-            
             #[cfg(unix)]
             let mut file = res!(std::fs::File::open(format!("/proc/self/fd/{}", self.edge_file.as_raw_fd())));
             #[cfg(not(unix))]
             let mut file = res!(std::fs::File::open(&self.file_path));
+    
             res!(file.seek(SeekFrom::Start(0)));
-            
             let mut buffer = [0u8; 9];
-            
             for _ in 0..self.num_edges {
                 match file.read_exact(&mut buffer) {
                     Ok(_) => {
                         let edge_from = u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]);
                         let edge_to = u32::from_le_bytes([buffer[4], buffer[5], buffer[6], buffer[7]]);
                         let link_data = buffer[8];
-                        
                         if edge_from == from_id {
                             edges.push((edge_to, link_data));
                         }
@@ -372,10 +488,10 @@ impl MmapGraph {
                 }
             }
         }
-        
+    
         Ok(edges)
     }
-    
+
     /// Gets the total number of edges for statistics.
     pub fn total_edges(&self) -> usize {
         self.num_edges
