@@ -247,6 +247,7 @@ pub struct Profile {
     pub profile_type:	ProfileType,
     pub probability:	f32,
     pub circle_ranges:	Vec<(u32, u32)>, // (min, max) for each circle.
+    pub sampling_methods:	Vec<SamplingMethod>, // One per social circle.
 }
 
 /// Link generation mode for network creation.
@@ -301,21 +302,21 @@ impl CircleLabels {
     pub fn default() -> Self {
         Self {
             labels: vec![
-                "Inner".to_string(),
-                "Close".to_string(),
-                "Active".to_string(),
-                "Wider".to_string(),
+                fmt!("Inner"),
+                fmt!("Close"),
+                fmt!("Active"),
+                fmt!("Wider"),
             ],
         }
     }
 }
+
 
 /// Configuration for social network generation.
 #[derive(Clone)]
 pub struct NetworkConfig {
     pub population:			u32,
     pub profiles:			Vec<Profile>,
-    pub sampling_methods:	Vec<SamplingMethod>, // One per social circle
     pub num_circles:		usize,
     pub reciprocity_matrix:	Vec<Vec<f32>>, // NxN matrix for circle reciprocity.
     pub circle_labels:		Option<CircleLabels>, // Optional labels for circles.
@@ -345,6 +346,7 @@ impl NetworkConfig {
                         (5, 5),     // Active circle.
                         (30, 35),   // Wider circle.
                     ],
+                    sampling_methods: vec![SamplingMethod::Uniform; 4],
                 },
                 Profile {
                     profile_type:	ProfileType::Connected,
@@ -355,9 +357,9 @@ impl NetworkConfig {
                         (70, 75),     // Active circle.
                         (450, 500),   // Wider circle.
                     ],
+                    sampling_methods: vec![SamplingMethod::Uniform; 4],
                 },
             ],
-            sampling_methods: vec![SamplingMethod::Uniform; 4], // Default: uniform for all 4 circles
             num_circles: 4,
             reciprocity_matrix: vec![
                 vec![0.95, 0.05, 0.00, 0.00], // Inner -> x.
@@ -365,12 +367,12 @@ impl NetworkConfig {
                 vec![0.10, 0.40, 0.40, 0.10], // Active -> x.
                 vec![0.00, 0.10, 0.30, 0.60], // Wider -> x.
             ],
-            circle_labels: Some(CircleLabels::default()),
-            link_mode: LinkMode::Reciprocal,
-            progress_interval: None, // No progress reporting by default.
-            memory_limit_mb: None, // No memory limit by default.
-            chunk_size: None, // Process all stubs at once by default.
-            use_mmap: None, // Memory-mapped path required for generation.
+            circle_labels:      Some(CircleLabels::default()),
+            link_mode:          LinkMode::Reciprocal,
+            progress_interval:  None,
+            memory_limit_mb:    None,
+            chunk_size:         None,
+            use_mmap:           None,
         }
     }
 }
@@ -399,14 +401,24 @@ pub fn generate_social_network(
 )
     -> Outcome<SocialGraph>
 {
-    // Validate sampling methods length matches num_circles.
-    if config.sampling_methods.len() != config.num_circles {
-        return Err(err!(
-            "sampling_methods length ({}) must match num_circles ({})",
-            config.sampling_methods.len(),
-            config.num_circles;
-            Invalid, Input
-        ));
+    // Validate profile sampling methods match num_circles.
+    for profile in &config.profiles {
+        if profile.sampling_methods.len() != config.num_circles {
+            return Err(err!(
+                "Profile sampling_methods length ({}) must match num_circles ({})",
+                profile.sampling_methods.len(),
+                config.num_circles;
+                Invalid, Input
+            ));
+        }
+        if profile.circle_ranges.len() != config.num_circles {
+            return Err(err!(
+                "Profile circle_ranges length ({}) must match num_circles ({})",
+                profile.circle_ranges.len(),
+                config.num_circles;
+                Invalid, Input
+            ));
+        }
     }
 
     // Memory-mapped storage is required.
@@ -796,16 +808,14 @@ pub fn dump_graph(
 /// # Returns
 /// Graph statistics and verification results.
 pub fn verify_graph(
-    graph: &SocialGraph,
+    graph:  &SocialGraph,
     config: &NetworkConfig,
 )
-    -> Outcome<GraphStatistics>
+    -> Outcome<GraphStatistics> 
 {
-    // Verify actual graph matches configuration.
     let population = config.population;
     let edge_count = graph.edge_count();
     
-    // Verify basic graph structure.
     if graph.len() == 0 && population > 0 {
         return Err(err!(
             "Graph is empty but config specifies {} nodes", population;
@@ -813,20 +823,17 @@ pub fn verify_graph(
         ));
     }
     
-    // Count actual circle types used in edges.
+    // Verification logic.
     let mut circle_counts = vec![0usize; config.num_circles];
     let mut total_edges_sampled = 0;
+    let sample_size = (population / 10).max(1).min(100);
     
-    // Sample some nodes to verify circle usage.
-    let sample_size = (population / 10).max(1).min(100); // Sample 10% up to 100 nodes.
     for i in 0..sample_size {
         let node_id = PersonId(i as u32);
         let outgoing = graph.get_links_from(&node_id);
-        
         for (_target, link) in outgoing {
             let from_circle = link.from_circle().0 as usize;
             let to_circle = link.to_circle().0 as usize;
-            
             if from_circle < config.num_circles {
                 circle_counts[from_circle] += 1;
             }
@@ -837,7 +844,6 @@ pub fn verify_graph(
         }
     }
     
-    // Calculate average circle sizes from actual usage.
     let avg_circle_sizes: Vec<f32> = circle_counts
         .iter()
         .map(|&count| {
@@ -849,16 +855,14 @@ pub fn verify_graph(
         })
         .collect();
     
-    // Estimate profile counts (can't determine from edges alone, use config).
     let mut profile_counts = HashMap::new();
     for profile in &config.profiles {
         let estimated_count = (profile.probability * population as f32) as usize;
         profile_counts.insert(profile.profile_type, estimated_count);
     }
     
-    // Verify edge count is reasonable for population size.
-    let expected_min_edges = population as usize / 10; // At least 0.1 edges per node.
-    let expected_max_edges = population as usize * 1000; // At most 1000 edges per node.
+    let expected_min_edges = population as usize / 10;
+    let expected_max_edges = population as usize * 1000;
     
     if edge_count < expected_min_edges {
         return Err(err!(
@@ -883,10 +887,11 @@ pub fn verify_graph(
     })
 }
 
-/// Creates stubs for population range.
+/// Creates stubs for population using multi-profile sampling.
 /// 
-/// Generates connection stubs for matching algorithm using
-/// proper random sampling from NetworkConfig profiles.
+/// Generates connection stubs for the matching algorithm by sampling
+/// each node's profile probabilistically and then sampling circle sizes
+/// using per-profile Gaussian parameters.
 /// 
 /// # Arguments
 /// * `config` - Network configuration with profiles and population.
@@ -894,33 +899,32 @@ pub fn verify_graph(
 /// # Returns
 /// Vector of stubs for matching.
 fn create_stubs(config: &NetworkConfig) -> Vec<Stub> {
+    create_multiprofile_stubs(config)
+}
+
+
+/// Creates stubs using multi-profile sampling.
+fn create_multiprofile_stubs(config: &NetworkConfig) -> Vec<Stub> {
     let mut stubs = Vec::new();
     
     for i in 0..config.population as usize {
         let id = PersonId(i as u32);
-        
-        // Sample profile type based on probabilities.
         let profile = match sample_profile(&config.profiles) {
             Ok(p) => p,
             Err(_) => {
                 if config.profiles.is_empty() {
-                    // Skip this person if no profiles defined
                     continue;
                 }
-                &config.profiles[0]  // Fallback to first profile
+                &config.profiles[0]
             }
         };
         
-        // Generate circle sizes for this person using the profile.
         for (circle_idx, &(min_size, max_size)) in profile.circle_ranges.iter().enumerate() {
             let circle_type = CircleType(circle_idx as u8);
-            
-            // Get the sampling method for this circle (with bounds checking).
-            let sampling_method = config.sampling_methods.get(circle_idx)
+            let sampling_method = profile.sampling_methods.get(circle_idx)
                 .copied()
                 .unwrap_or(SamplingMethod::Uniform);
             
-            // Sample circle size from range using the configured method.
             let size = Rand::sample_u32(
                 min_size,
                 max_size,
@@ -938,7 +942,6 @@ fn create_stubs(config: &NetworkConfig) -> Vec<Stub> {
     
     stubs
 }
-
 
 /// Samples a profile based on probabilities.
 fn sample_profile<'a>(profiles: &'a [Profile]) -> Outcome<&'a Profile> {
@@ -1191,6 +1194,7 @@ mod tests {
                         (3, 4),     // Active circle.
                         (4, 5),     // Wider circle.
                     ],
+                    sampling_methods: vec![SamplingMethod::Uniform; 4],
                 },
                 Profile {
                     profile_type:	ProfileType::Connected,
@@ -1201,9 +1205,9 @@ mod tests {
                         (6, 8),     // Active circle.
                         (8, 10),    // Wider circle.
                     ],
+                    sampling_methods: vec![SamplingMethod::Uniform; 4],
                 },
             ],
-            sampling_methods: vec![SamplingMethod::Uniform; 4],
             num_circles: 4,
             reciprocity_matrix: vec![
                 vec![0.95, 0.05, 0.00, 0.00], // Inner -> x.
