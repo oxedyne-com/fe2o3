@@ -1,5 +1,5 @@
 <p align="center">
-    <img src="img/oxedyne_display_white_opt.svg" width="150"/>
+    <img src="img/oxedyne_logo_white_text_below_opt.svg" width="150"/>
 </p>
 
 <p align="center">
