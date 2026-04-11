@@ -1,3 +1,4 @@
+pub mod client;
 pub mod fields;
 pub mod handler;
 pub mod header;

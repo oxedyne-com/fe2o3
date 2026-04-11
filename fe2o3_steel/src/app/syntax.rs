@@ -96,12 +96,33 @@ pub fn new_shell(
         help:   Some(fmt!("Create self-signed certificates for development.")),
         ..Default::default()
     });
-    let a2 = Arg::from(ArgConfig {
-        name:   fmt!("create-prod"),
-        hyph1:  fmt!("p"),
-        vals:   vec![(Kind::Vek, fmt!("Domain name(s), overriding config.jdat."))],
+    cmd = res!(cmd.add_arg(a1));
+    s = res!(s.add_cmd(cmd));
+    // =============================================================================================
+
+    // ---------------------------------------------------------------------------------------------
+    // Command: acme
+    // ---------------------------------------------------------------------------------------------
+    let mut cmd = Cmd::from(CmdConfig {
+        name:   fmt!("acme"),
+        help:   Some(fmt!("Manage ACME (Let's Encrypt) certificate state")),
+        cat:    fmt!("TLS"),
+        ..Default::default()
+    });
+    let a1 = Arg::from(ArgConfig {
+        name:   fmt!("status"),
+        hyph1:  fmt!("s"),
+        vals:   vec![],
         reqd:   false,
-        help:   Some(fmt!("Create production certificates using system Let's Encrypt.")),
+        help:   Some(fmt!("Print the configured ACME state and vhost hostnames.")),
+        ..Default::default()
+    });
+    let a2 = Arg::from(ArgConfig {
+        name:   fmt!("renew"),
+        hyph1:  fmt!("r"),
+        vals:   vec![],
+        reqd:   false,
+        help:   Some(fmt!("Clear the ACME cache so certs are re-issued on next start-up.")),
         ..Default::default()
     });
     cmd = res!(cmd.add_arg(a1));

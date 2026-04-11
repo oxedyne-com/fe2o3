@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# Build the Steel release binary locally, deploy it to deployhost's dev
+# directory, and restart the tmux-hosted Steel process there.
+#
+# Assumes:
+#   - ~/steel-dev/ on deployhost has config.jdat and wallet.jdat already
+#   - ~/steel-dev/.devpass contains the wallet passphrase
+#   - tmux is installed on deployhost
+#
+# Usage: scripts/steel_deploy [--no-build] [--no-restart]
+
+set -euo pipefail
+
+no_build=false
+no_restart=false
+for arg in "$@"; do
+    case "$arg" in
+        --no-build)     no_build=true ;;
+        --no-restart)   no_restart=true ;;
+        -h|--help)
+            sed -n '2,12p' "$0"
+            exit 0
+            ;;
+        *)
+            echo "Unknown argument: $arg" >&2
+            exit 2
+            ;;
+    esac
+done
+
+HERE="$(cd "$(dirname "$0")"/.. && pwd)"
+WORKSPACE="$(cd "$HERE"/.. && pwd)"
+REMOTE_USER=jason
+REMOTE_HOST=deployhost
+REMOTE_DIR=/home/jason/usr/steel-dev
+
+if ! $no_build; then
+    echo "[1/4] building release binary..."
+    (cd "$WORKSPACE" && cargo build --release -p oxedyne_fe2o3_steel)
+fi
+
+BIN="$WORKSPACE/target/release/steel"
+if [ ! -x "$BIN" ]; then
+    echo "no steel binary at $BIN -- did the build succeed?" >&2
+    exit 1
+fi
+
+echo "[2/4] rsync $BIN -> $REMOTE_HOST:$REMOTE_DIR/steel.new"
+rsync -a "$BIN" "$REMOTE_USER@$REMOTE_HOST:$REMOTE_DIR/steel.new"
+
+if $no_restart; then
+    echo "--no-restart set; binary staged as steel.new on deployhost, not activated."
+    exit 0
+fi
+
+echo "[3/4] stopping running Steel and swapping in new binary"
+ssh "$REMOTE_USER@$REMOTE_HOST" bash -s <<'REMOTEEND'
+set -euo pipefail
+cd ~/steel-dev
+
+# Stop any running steel process and tmux session.
+pkill -9 -f "^\./steel$" 2>/dev/null || true
+tmux kill-session -t steel-dev 2>/dev/null || true
+
+# Atomic swap of the binary.
+mv steel.new steel
+
+# Start a fresh tmux session hosting a fresh Steel process.
+tmux new-session -d -s steel-dev -c ~/steel-dev
+tmux send-keys -t steel-dev "./steel 2>&1 | tee steel.log" Enter
+REMOTEEND
+
+echo "[4/4] driving first-run prompts (passphrase + server -d)"
+ssh "$REMOTE_USER@$REMOTE_HOST" bash -s <<'REMOTEEND'
+set -euo pipefail
+# The wallet already exists on subsequent runs, so Steel prompts for the
+# passphrase only once.
+sleep 3
+tmux send-keys -t steel-dev "$(cat ~/steel-dev/.devpass)" Enter
+sleep 3
+tmux send-keys -t steel-dev "server -d" Enter
+sleep 4
+
+# Print the tail of the tmux pane so the caller can see what happened.
+echo
+echo "--- tmux pane tail ---"
+tmux capture-pane -t steel-dev -p | tail -12
+REMOTEEND
+
+echo
+echo "deploy complete."

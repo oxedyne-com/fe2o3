@@ -1,5 +1,9 @@
 use crate::srv::{
-    cfg::ServerConfig,
+    cfg::{
+        AcmeConfig,
+        ServerConfig,
+        VhostConfig,
+    },
     constant,
 };
 
@@ -10,10 +14,22 @@ use oxedyne_fe2o3_core::{
         NormPathBuf,
     },
 };
-use oxedyne_fe2o3_net::dns::Fqdn;
+use oxedyne_fe2o3_net::acme::{
+    cache::AcmeDiskCache,
+    challenge::ChallengeCert,
+    client::{
+        AcmeClient,
+        ChallengeInstaller,
+        IssuedCertificate,
+    },
+    jose::JwsSigner,
+    trust::letsencrypt_client_config,
+};
 
 use std::{
+    collections::HashMap,
     fs::{
+        self,
         create_dir_all,
         File,
     },
@@ -25,6 +41,14 @@ use std::{
         Path,
         PathBuf,
     },
+    sync::{
+        Arc,
+        RwLock,
+    },
+    time::{
+        Duration,
+        SystemTime,
+    },
 };
 
 use rustls::{
@@ -34,32 +58,331 @@ use rustls::{
         PrivateKeyDer,
         PrivatePkcs8KeyDer,
     },
+    server::{
+        ClientHello,
+        ResolvesServerCert,
+    },
+    sign::CertifiedKey,
 };
 
 use rcgen;
 
 
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ STEEL CERT RESOLVER                                                       │
+// │                                                                           │
+// │ Per-vhost cert resolver that looks up the right CertifiedKey by SNI.      │
+// │ Also handles TLS-ALPN-01 challenge handshakes from an ACME CA by          │
+// │ detecting the `acme-tls/1` ALPN and serving a separate challenge cert     │
+// │ map on those connections.                                                 │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// ALPN protocol name for ACME TLS-ALPN-01 challenge handshakes (RFC 8737).
+const ACME_TLS_ALPN_NAME: &[u8] = b"acme-tls/1";
+
+/// Maps TLS SNI hostnames to their corresponding `CertifiedKey` plus a
+/// separate challenge-cert map used exclusively on incoming `acme-tls/1`
+/// handshakes. Falls back to a "default" certificate (the first vhost) for
+/// regular handshakes when no SNI is present or no SNI match is found.
+///
+/// All three inner maps are behind `RwLock` so the ACME renewer running in
+/// a background task can swap cert contents under a live resolver without
+/// stopping the main accept loop.
+#[derive(Debug)]
+pub struct SteelCertResolver {
+    /// Regular per-vhost certificate store, keyed by lowercase hostname.
+    by_hostname:        RwLock<HashMap<String, Arc<CertifiedKey>>>,
+    /// Default cert served when SNI is absent or unmatched. Pinned to the
+    /// first cert inserted so legacy clients and debug tools still get a
+    /// valid handshake.
+    default_cert:       RwLock<Option<Arc<CertifiedKey>>>,
+    /// Throwaway challenge certificates, keyed by lowercase hostname,
+    /// served only on handshakes whose sole ALPN offer is `acme-tls/1`.
+    challenge_certs:    RwLock<HashMap<String, Arc<CertifiedKey>>>,
+}
+
+impl SteelCertResolver {
+    /// Create a new, empty resolver.
+    pub fn new() -> Self {
+        Self {
+            by_hostname:        RwLock::new(HashMap::new()),
+            default_cert:       RwLock::new(None),
+            challenge_certs:    RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Insert a `CertifiedKey` under one or more hostnames in the main
+    /// vhost map. If no default cert has been set yet, the first
+    /// inserted cert becomes the default.
+    pub fn insert_vhost_cert(&self, hostnames: &[String], cert: Arc<CertifiedKey>) {
+        {
+            let mut default = match self.default_cert.write() {
+                Ok(g) => g,
+                Err(poisoned) => {
+                    warn!("SteelCertResolver.default_cert RwLock was poisoned; \
+                        recovering.");
+                    poisoned.into_inner()
+                },
+            };
+            if default.is_none() {
+                *default = Some(cert.clone());
+            }
+        }
+        let mut map = match self.by_hostname.write() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                warn!("SteelCertResolver.by_hostname RwLock was poisoned; \
+                    recovering.");
+                poisoned.into_inner()
+            },
+        };
+        for host in hostnames {
+            map.insert(host.to_lowercase(), cert.clone());
+        }
+    }
+}
+
+impl ResolvesServerCert for SteelCertResolver {
+    fn resolve(&self, client_hello: ClientHello) -> Option<Arc<CertifiedKey>> {
+        // If the client's ALPN offer is exactly {"acme-tls/1"} this is an
+        // ACME challenge handshake from the CA; serve a challenge cert
+        // keyed on the SNI instead of the real vhost cert. The single-
+        // element equality test matches rustls-acme's own helper.
+        let is_acme_challenge = client_hello
+            .alpn()
+            .into_iter()
+            .flatten()
+            .eq([ACME_TLS_ALPN_NAME]);
+
+        if is_acme_challenge {
+            let name = match client_hello.server_name() {
+                Some(n) => n.to_lowercase(),
+                None    => return None,
+            };
+            let map = match self.challenge_certs.read() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            return map.get(&name).cloned();
+        }
+
+        // Regular handshake: SNI lookup then default cert fallback.
+        if let Some(name) = client_hello.server_name() {
+            let map = match self.by_hostname.read() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if let Some(cert) = map.get(&name.to_lowercase()) {
+                return Some(cert.clone());
+            }
+        }
+        let default = match self.default_cert.read() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        default.clone()
+    }
+}
+
+impl ChallengeInstaller for SteelCertResolver {
+    fn install(&self, hostname: &str, cert: &ChallengeCert) -> Outcome<()> {
+        let certified = res!(der_to_certified_key(&cert.cert_der, &cert.key_der));
+        let mut map = match self.challenge_certs.write() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        map.insert(hostname.to_lowercase(), Arc::new(certified));
+        Ok(())
+    }
+
+    fn remove(&self, hostname: &str) -> Outcome<()> {
+        let mut map = match self.challenge_certs.write() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        map.remove(&hostname.to_lowercase());
+        Ok(())
+    }
+}
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ LOADED TLS STATE                                                          │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// Result of loading TLS state.
+///
+/// `server_config` is ready to hand to `TlsAcceptor`. `acme_renewer` is
+/// `Some(..)` when ACME is enabled, in which case the caller must spawn
+/// a background task that calls [`AcmeRenewer::run_forever`] for the
+/// lifetime of the server.
+pub struct LoadedTls {
+    /// Rustls server configuration to install on the listener.
+    pub server_config:  rustls::server::ServerConfig,
+    /// When ACME is active, the renewer that drives issuance and
+    /// periodic renewal on a background task.
+    pub acme_renewer:   Option<AcmeRenewer>,
+}
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ ACME RENEWER                                                              │
+// │                                                                           │
+// │ Drives the `fe2o3_net::acme::AcmeClient` issuance cycle on startup (if    │
+// │ needed) and then periodically in a renewal loop. Holds an `Arc` to the    │
+// │ shared `SteelCertResolver` so it can install challenge certs during       │
+// │ `tls-alpn-01` validation and swap the issued cert into the vhost map      │
+// │ once issuance completes.                                                  │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// Background driver for the ACME issuance + renewal state machine.
+pub struct AcmeRenewer {
+    /// ACME client holding the account key, directory cache, and nonce
+    /// state.
+    client:     AcmeClient,
+    /// Disk cache for the account key and issued cert/key pair.
+    cache:      AcmeDiskCache,
+    /// Shared resolver that both the live accept loop and the renewer
+    /// write into.
+    resolver:   Arc<SteelCertResolver>,
+    /// DNS names to issue a single multi-SAN certificate for.
+    dns_names:  Vec<String>,
+}
+
+impl AcmeRenewer {
+
+    /// Run the renewer forever: attempt any needed initial issuance, then
+    /// loop with a 24-hour sleep between expiry checks.
+    ///
+    /// Returns an error only if the initial issuance fails. Errors on
+    /// subsequent renewal attempts are logged and swallowed; the loop
+    /// keeps running so transient failures (CA outage, DNS hiccup) do not
+    /// permanently shut down the renewer.
+    pub async fn run_forever(mut self) -> Outcome<()> {
+        // Initial issuance on startup if the cache is empty or its cert is
+        // older than the renewal threshold.
+        if res!(self.needs_renewal()) {
+            info!("ACME: initial issuance for {:?}", self.dns_names);
+            res!(self.issue_and_install().await);
+        } else {
+            info!("ACME: cached certificate for {:?} is still fresh.", self.dns_names);
+        }
+
+        // Renewal loop. 24-hour tick granularity is plenty -- LE issues
+        // 90-day certs, we renew at 60 days, and a one-day latency on
+        // detecting the rollover is fine.
+        loop {
+            tokio::time::sleep(RENEWAL_POLL_INTERVAL).await;
+            match self.needs_renewal() {
+                Ok(true) => {
+                    info!("ACME: cached cert is due for renewal, issuing now.");
+                    if let Err(e) = self.issue_and_install().await {
+                        error!(err!(e,
+                            "ACME: renewal attempt failed; will retry in \
+                            24 hours.";
+                            Init, Network));
+                    }
+                },
+                Ok(false) => (),
+                Err(e) => error!(err!(e,
+                    "ACME: failed to check cached cert age; will retry in \
+                    24 hours.";
+                    IO, File)),
+            }
+        }
+    }
+
+    /// Return `true` if the cached certificate is missing or older than
+    /// [`RENEWAL_THRESHOLD`].
+    fn needs_renewal(&self) -> Outcome<bool> {
+        let cert_path = self.cache.certificate_path();
+        if !cert_path.exists() {
+            return Ok(true);
+        }
+        let md = match fs::metadata(&cert_path) {
+            Ok(m) => m,
+            Err(e) => return Err(err!(e,
+                "Failed to stat cached cert at {:?}.", cert_path;
+                IO, File, Read)),
+        };
+        let modified = match md.modified() {
+            Ok(t) => t,
+            Err(e) => return Err(err!(e,
+                "Filesystem does not report a modification time for {:?}.",
+                cert_path;
+                IO, File, Read)),
+        };
+        let age = match SystemTime::now().duration_since(modified) {
+            Ok(d) => d,
+            Err(_) => return Ok(true), // clock skew, err on the side of renewing
+        };
+        Ok(age >= RENEWAL_THRESHOLD)
+    }
+
+    /// Drive one full issuance through `AcmeClient`, persist the result
+    /// to the disk cache, and swap the new cert into the live resolver.
+    async fn issue_and_install(&mut self) -> Outcome<()> {
+        let issued: IssuedCertificate = res!(self.client.issue_certificate(
+            &self.dns_names,
+            &*self.resolver,
+        ).await);
+
+        // Persist the PEM chain and the matching key to disk first, so a
+        // process crash between issuance and resolver swap still leaves a
+        // usable cached cert for the next restart.
+        res!(self.cache.store_certificate(&issued.cert_pem, &issued.key_pkcs8));
+
+        // Parse the PEM bytes into a CertifiedKey and swap it into the
+        // vhost map under every DNS name.
+        let certified = res!(pem_to_certified_key(&issued.cert_pem, &issued.key_pkcs8));
+        self.resolver.insert_vhost_cert(&self.dns_names, Arc::new(certified));
+        info!("ACME: issued and installed cert for {:?}.", self.dns_names);
+        Ok(())
+    }
+}
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ CONSTANTS                                                                 │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// Interval between renewal-needed checks inside [`AcmeRenewer::run_forever`].
+const RENEWAL_POLL_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Cached cert age beyond which a renewal is triggered. Let's Encrypt
+/// issues 90-day certs; renewing at 60 days gives us a one-month safety
+/// margin before expiry and matches the community convention.
+const RENEWAL_THRESHOLD: Duration = Duration::from_secs(60 * 24 * 60 * 60);
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ CERTIFICATE                                                               │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// Namespace for TLS certificate helpers.
 pub struct Certificate;
 
 impl Certificate {
 
+    /// Compute an absolute path beneath a config-relative TLS directory.
     pub fn filepath(
         root:       &NormPathBuf,
         dir_root:   &String,
         subdir:     &str,
-        name:       &String,
+        name:       &str,
         ext:        &str,
     )
         -> PathBuf
     {
         let mut relpath = PathBuf::from(dir_root);
         relpath.push(subdir);
-        relpath.push(name.clone());
+        relpath.push(name);
         relpath.set_extension(ext);
         let relpath = relpath.normalise().remove_relative();
         root.clone().join(relpath).absolute().into_inner()
     }
 
+    /// Atomically write a blob to disk, logging on success.
     pub fn write_to_file<
         P: AsRef<Path> + std::fmt::Debug,
     >(
@@ -75,78 +398,262 @@ impl Certificate {
         Ok(())
     }
 
+    /// Load the TLS state for the current configuration.
+    ///
+    /// When `acme.enabled == true`, this function builds an
+    /// `fe2o3_net::acme::AcmeClient`, loads the cached account key from
+    /// disk (or generates a fresh one), and returns an `AcmeRenewer` for
+    /// the caller to spawn on a background task. The returned
+    /// [`SteelCertResolver`] starts out with any cached certificate
+    /// already installed; the renewer fills it in on its first pass if
+    /// there is nothing cached.
+    ///
+    /// When `acme.enabled == false`, this function loads per-vhost PEM
+    /// files from disk (or a single self-signed certificate in dev mode)
+    /// and builds a [`SteelCertResolver`] that selects the right one by SNI.
     pub fn load(
         cfg:        &ServerConfig,
         root:       &NormPathBuf,
         dev_mode:   bool,
     )
-        -> Outcome<rustls::server::ServerConfig>
+        -> Outcome<LoadedTls>
     {
         debug!("DEV_MODE = {}", dev_mode);
+        let vhosts = res!(cfg.get_vhosts());
+        let acme_cfg = res!(cfg.get_acme());
 
+        // ACME is orthogonal to dev/prod mode: if it's on, use it; if it's
+        // off, fall back to loading static certificates from disk.
+        if acme_cfg.enabled {
+            Self::load_acme(&vhosts, &acme_cfg, root)
+        } else {
+            Self::load_static(cfg, &vhosts, root, dev_mode)
+        }
+    }
+
+    /// Load certificates from PEM files on disk and build a SteelCertResolver.
+    fn load_static(
+        cfg:        &ServerConfig,
+        vhosts:     &[VhostConfig],
+        root:       &NormPathBuf,
+        dev_mode:   bool,
+    )
+        -> Outcome<LoadedTls>
+    {
         let tls_subdir = if dev_mode {
             constant::TLS_DIR_DEV
         } else {
             constant::TLS_DIR_PROD
         };
-    
-        let cert_path = Self::filepath(
-            root,
-            &cfg.tls_dir_rel,   // Use updated field name.
-            tls_subdir,
-            &cfg.tls_cert_name,
-            "pem",
-        ); 
-        info!("Certificate path = {:?}", cert_path);
-    
-        let key_path = Self::filepath(
-            root,
-            &cfg.tls_dir_rel,   // Use updated field name.
-            tls_subdir,
-            &cfg.tls_private_key_name,
-            "pem",
-        ); 
-        info!("Private key path = {:?}", key_path);
 
-        // Load and parse the certificate.
-        let cert_file = res!(File::open(&cert_path));
+        let resolver = Arc::new(SteelCertResolver::new());
+
+        if dev_mode {
+            // In dev mode, all vhosts share the single self-signed dev cert.
+            let cert_path = Self::filepath(
+                root, &cfg.tls_dir_rel, tls_subdir, "fullchain", "pem",
+            );
+            let key_path = Self::filepath(
+                root, &cfg.tls_dir_rel, tls_subdir, "privkey", "pem",
+            );
+            info!("Loading dev certificate from {:?}", cert_path);
+            let certified = res!(Self::read_cert_and_key(&cert_path, &key_path));
+            let all_hostnames: Vec<String> = vhosts
+                .iter()
+                .flat_map(|v| v.hostnames.iter().cloned())
+                .collect();
+            resolver.insert_vhost_cert(&all_hostnames, Arc::new(certified));
+        } else {
+            // Production without ACME: one cert per vhost under
+            // {tls_dir_rel}/prod/{primary_hostname}/{fullchain,privkey}.pem
+            for vh in vhosts {
+                let primary = vh.primary_hostname();
+                let cert_path = Self::filepath(
+                    root, &cfg.tls_dir_rel, tls_subdir, &fmt!("{}/fullchain", primary), "pem",
+                );
+                let key_path = Self::filepath(
+                    root, &cfg.tls_dir_rel, tls_subdir, &fmt!("{}/privkey", primary), "pem",
+                );
+                info!("Loading cert for vhost '{}' from {:?}", primary, cert_path);
+                let certified = res!(Self::read_cert_and_key(&cert_path, &key_path));
+                resolver.insert_vhost_cert(&vh.hostnames, Arc::new(certified));
+            }
+        }
+
+        let mut server_config = rustls::server::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_cert_resolver(resolver);
+        // See `load_acme` for the ALPN rationale; we advertise the same
+        // set so a cert in the static path can still be used in front of
+        // clients that expect `http/1.1` ALPN and so that toggling ACME
+        // on and off does not change the wire-level ALPN offering.
+        server_config.alpn_protocols.push(b"http/1.1".to_vec());
+
+        Ok(LoadedTls {
+            server_config,
+            acme_renewer: None,
+        })
+    }
+
+    /// Build an in-tree `fe2o3_net::acme::AcmeClient`-driven TLS state.
+    ///
+    /// This function is cheap: it constructs the ACME client, sets up the
+    /// disk cache, pre-loads any cached certificate into the resolver, and
+    /// returns immediately. The first issuance (if the cache is empty) or
+    /// any periodic renewal runs on the background task that
+    /// [`AcmeRenewer::run_forever`] provides.
+    fn load_acme(
+        vhosts:     &[VhostConfig],
+        acme_cfg:   &AcmeConfig,
+        root:       &NormPathBuf,
+    )
+        -> Outcome<LoadedTls>
+    {
+        if acme_cfg.contact_email.is_empty() {
+            return Err(err!(
+                "AcmeConfig: contact_email must be set when acme.enabled = true.";
+                Invalid, Input, Missing));
+        }
+        let cache_dir = res!(acme_cfg.get_cache_dir(root));
+
+        // Collect every hostname across every vhost, preserving order.
+        let mut all_hostnames: Vec<String> = Vec::new();
+        for vh in vhosts {
+            for h in &vh.hostnames {
+                if !all_hostnames.iter().any(|x| x.eq_ignore_ascii_case(h)) {
+                    all_hostnames.push(h.clone());
+                }
+            }
+        }
+        if all_hostnames.is_empty() {
+            return Err(err!(
+                "AcmeConfig: no vhost hostnames configured to issue certs for.";
+                Invalid, Input, Missing));
+        }
+        info!("ACME: requesting certificates for {:?} via {}",
+            all_hostnames, acme_cfg.directory_url);
+
+        // Disk cache for account key + issued cert.
+        let cache = res!(AcmeDiskCache::new(&cache_dir));
+
+        // Load or generate the account key.
+        let signer = match res!(cache.load_account_key()) {
+            Some(s) => {
+                info!("ACME: loaded cached account key from {:?}.", cache.root());
+                s
+            },
+            None => {
+                info!("ACME: no cached account key; generating a fresh one.");
+                let s = res!(JwsSigner::new_es256());
+                res!(cache.store_account_key(&s));
+                s
+            },
+        };
+
+        // Build the trust store and ACME client.
+        let tls_client_config = res!(letsencrypt_client_config());
+        let client = AcmeClient::new(
+            acme_cfg.directory_url.clone(),
+            acme_cfg.contact_email.clone(),
+            tls_client_config,
+            signer,
+        );
+
+        // Build the resolver and pre-load any cached cert into it.
+        let resolver = Arc::new(SteelCertResolver::new());
+        if let Some((cert_pem, key_pkcs8)) = res!(cache.load_certificate()) {
+            match pem_to_certified_key(&cert_pem, &key_pkcs8) {
+                Ok(certified) => {
+                    info!("ACME: pre-loaded cached cert for {:?} from {:?}.",
+                        all_hostnames, cache.root());
+                    resolver.insert_vhost_cert(
+                        &all_hostnames, Arc::new(certified));
+                },
+                Err(e) => {
+                    // A broken cache file should not stop startup -- we'll
+                    // just issue a fresh cert on the renewer's first pass.
+                    warn!("ACME: cached cert at {:?} failed to parse: {:?}. \
+                        Will re-issue.", cache.root(), e);
+                }
+            }
+        }
+
+        // Build the ServerConfig around the resolver.
+        let mut server_config = rustls::server::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_cert_resolver(resolver.clone());
+        // Advertise HTTP/1.1 for normal clients plus the ACME-specific
+        // "acme-tls/1" protocol so our resolver can serve the challenge
+        // cert when the CA connects. Rustls rejects any client whose
+        // ALPN offer does not intersect this list, so omitting http/1.1
+        // breaks every real request with NoApplicationProtocol. We
+        // deliberately do NOT advertise h2 because Steel's HTTP parser
+        // is HTTP/1.1 only; advertising h2 would cause HTTP/2-capable
+        // clients to send the `PRI * HTTP/2.0` connection preface,
+        // which Steel cannot parse.
+        server_config.alpn_protocols.push(b"http/1.1".to_vec());
+        server_config.alpn_protocols.push(b"acme-tls/1".to_vec());
+
+        let renewer = AcmeRenewer {
+            client,
+            cache,
+            resolver,
+            dns_names: all_hostnames,
+        };
+
+        Ok(LoadedTls {
+            server_config,
+            acme_renewer: Some(renewer),
+        })
+    }
+
+    /// Read a PEM cert chain and its private key from disk, returning a
+    /// `CertifiedKey`.
+    fn read_cert_and_key(
+        cert_path:  &Path,
+        key_path:   &Path,
+    )
+        -> Outcome<CertifiedKey>
+    {
+        let cert_file = res!(File::open(cert_path));
         let mut cert_reader = BufReader::new(cert_file);
-        let certs: Result<Vec<CertificateDer>, _> =
+        let certs: Result<Vec<CertificateDer<'static>>, _> =
             rustls_pemfile::certs(&mut cert_reader)
-            .map(|cert_result| cert_result.map_err(|e| err!(e,
+            .map(|c| c.map_err(|e| err!(e,
                 "Error reading cert at {:?}.", cert_path; File)))
             .collect();
         let certs = res!(certs);
-    
-        // Load and parse the private key.
-        let key_file = res!(File::open(&key_path));
+
+        let key_file = res!(File::open(key_path));
         let mut key_reader = BufReader::new(key_file);
-        let keys: Result<Vec<PrivatePkcs8KeyDer>, _> =
+        let keys: Result<Vec<PrivatePkcs8KeyDer<'static>>, _> =
             rustls_pemfile::pkcs8_private_keys(&mut key_reader)
-            .map(|key_result| key_result.map_err(|e| err!(e,
+            .map(|k| k.map_err(|e| err!(e,
                 "Error reading private key at {:?}.", key_path; File)))
             .collect();
         let keys = res!(keys);
-    
-        let private_key: PrivateKeyDer<'_> = match keys.into_iter().next() {
-            Some(key) => key.into(),
-            None => return Err(err!("No keys found in key file."; Missing, Input, File)),
+        let key: PrivateKeyDer<'static> = match keys.into_iter().next() {
+            Some(k) => k.into(),
+            None => return Err(err!(
+                "No private keys found in {:?}.", key_path;
+                Missing, Input, File)),
         };
-    
-        let server_cfg = res!(rustls::server::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(certs, private_key));
-    
-        Ok(server_cfg)
+
+        let signing_key = res!(rustls::crypto::ring::sign::any_supported_type(&key)
+            .map_err(|e| err!("{:?}", e; Init, Invalid)));
+        Ok(CertifiedKey::new(certs, signing_key))
     }
 
+    /// Generate a self-signed development certificate covering localhost.
+    ///
+    /// The certificate is written to `{tls_dir_rel}/dev/fullchain.pem`, keyed
+    /// by `{tls_dir_rel}/dev/privkey.pem`. Used only when running in dev mode.
     pub fn new_dev(
         cfg:        &ServerConfig,
         root:       &NormPathBuf,
     )
         -> Outcome<()>
     {
-        //let scheme = res!(rcgen::SignatureAlgorithm::from_oid(constant::PKCS_ED25519));
         let scheme = res!(rcgen::SignatureAlgorithm::from_oid(constant::PKCS_ECDSA_P256_SHA256));
         let key_pair = res!(rcgen::KeyPair::generate(&scheme));
         let der_encoding = key_pair.serialize_der();
@@ -159,14 +666,11 @@ impl Certificate {
         let mut params = rcgen::CertificateParams::new(domains);
         params.alg = &scheme;
         params.key_pair = Some(key_pair_copy);
-        // Add basic constraints.
         params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-        // Add key usages.
         params.key_usages = vec![
             rcgen::KeyUsagePurpose::DigitalSignature,
             rcgen::KeyUsagePurpose::KeyEncipherment,
         ];
-        // Add extended key usages.
         params.extended_key_usages = vec![
             rcgen::ExtendedKeyUsagePurpose::ServerAuth,
             rcgen::ExtendedKeyUsagePurpose::ClientAuth,
@@ -175,359 +679,75 @@ impl Certificate {
         let cert = res!(rcgen::Certificate::from_params(params));
 
         let cert_path = Self::filepath(
-            root,
-            &cfg.tls_dir_rel,
-            constant::TLS_DIR_DEV,
-            &cfg.tls_cert_name,
-            "pem",
+            root, &cfg.tls_dir_rel, constant::TLS_DIR_DEV, "fullchain", "pem",
         );
-
-        //let key_path = Self::filepath(
-        //    root,
-        //    &cfg.tls_dir_rel,
-        //    constant::TLS_DIR_DEV,
-        //    &cfg.tls_private_key_name,
-        //    "pem",
-        //);
-
-        // Create directories if they don't exist.
         let dir_path = match cert_path.parent() {
             Some(p) => p,
             None => return Err(err!(
                 "Could not get parent directory from {:?}.", cert_path;
                 Path)),
         };
-
         res!(create_dir_all(dir_path));
 
         res!(Self::write_to_file(
-            Self::filepath(
-                root,
-                &cfg.tls_dir_rel,
-                constant::TLS_DIR_DEV,
-                &cfg.tls_public_key_name,
-                "pem",
-            ),
-            &key_pair.public_key_pem().as_bytes(),
+            Self::filepath(root, &cfg.tls_dir_rel, constant::TLS_DIR_DEV, "privkey", "pem"),
+            cert.serialize_private_key_pem().as_bytes(),
         ));
-
         res!(Self::write_to_file(
-            Self::filepath(
-                root,
-                &cfg.tls_dir_rel,
-                constant::TLS_DIR_DEV,
-                &cfg.tls_private_key_name,
-                "pem",
-            ),
-            &cert.serialize_private_key_pem().as_bytes(),
+            Self::filepath(root, &cfg.tls_dir_rel, constant::TLS_DIR_DEV, "fullchain", "pem"),
+            res!(cert.serialize_pem()).as_bytes(),
         ));
-
-        res!(Self::write_to_file(
-            Self::filepath(
-                root,
-                &cfg.tls_dir_rel,
-                constant::TLS_DIR_DEV,
-                &cfg.tls_cert_name,
-                "pem",
-            ),
-            &res!(cert.serialize_pem()).as_bytes(),
-        ));
-
-        //// DER (binary) format.
-        //res!(Self::write_to_file(
-        //    Self::filepath(root, &dir_str, &cfg.tls_public_key_name, "der"),
-        //    &key_pair.public_key_der(),
-        //));
-
-        //res!(Self::write_to_file(
-        //    Self::filepath(root, &dir_str, &cfg.tls_private_key_name, "der"),
-        //    &cert.serialize_private_key_der(),
-        //));
-
-        //res!(Self::write_to_file(
-        //    Self::filepath(root, &dir_str, &cfg.tls_cert_name, "der"),
-        //    &res!(cert.serialize_der()),
-        //));
-
         Ok(())
     }
+}
 
-    /// Generate self-signed certificates.  The problem is that they are not widely trusted.  Use
-    /// Lets Encrypt instead.
-    ///
-    ///     sudo apt-get update
-    ///     sudo apt-get install certbot
-    ///     sudo certbot certonly --standalone
-    ///
-    /// Upon successful issuance, your certificate and key will be stored in
-    /// /etc/letsencrypt/live/your_domain_name/. The important files are:
-    /// The certificate file:
-    ///     /etc/letsencrypt/live/your_domain_name/fullchain.pem
-    /// The private key file:
-    ///     /etc/letsencrypt/live/your_domain_name/privkey.pem
-    #[cfg(target_os = "linux")]
-    pub fn new_lets_encrypt(
-        domains:    &Vec<Fqdn>,
-        tls_dir:    &Path,
-    )
-        -> Outcome<()>
-    {
-        res!(Self::check_requirements());
 
-        let mut cmd = std::process::Command::new("sudo");
-        cmd.arg("certbot")
-            .arg("certonly")
-            .arg("--standalone")
-            .arg("--non-interactive")
-            .arg("--force-renewal");
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ PEM / DER DECODING                                                        │
+// └───────────────────────────────────────────────────────────────────────────┘
 
-        // Add each domain with -d flag.
-        for domain in domains {
-            cmd.arg("-d").arg(domain.as_str());
-        }
-
-        // Run certbot standalone.
-        let output = res!(cmd.output());
-    
-        if !output.status.success() {
-            return Err(err!(
-                "Certificate creation failed: {}", String::from_utf8_lossy(&output.stderr);
-                IO, File));
-        }
-    
-        // Copy certs from /etc/letsencrypt/live/{domain}/ to tls/
-        // Note: Let's Encrypt uses the first domain as the primary domain.
-        let src_dir = PathBuf::from("/etc/letsencrypt/live").join(domains[0].as_str());
-        res!(std::fs::create_dir_all(tls_dir));
-    
-        // Get current user.
-        let user = res!(std::env::var("USER"));
-        
-        // Copy and set ownership for both files.
-        for file in &["fullchain.pem", "privkey.pem"] {
-            res!(std::process::Command::new("sudo")
-                .arg("cp")
-                .arg(src_dir.join(file))
-                .arg(tls_dir.join(file))
-                .output());
-    
-            res!(std::process::Command::new("sudo")
-                .arg("chown")
-                .arg(fmt!("{}:{}", user, user))
-                .arg(tls_dir.join(file))
-                .output());
-        }
-    
-        Ok(())
+/// Parse a PEM-encoded certificate chain plus a PKCS#8 DER-encoded
+/// private key into a rustls `CertifiedKey`, as produced by
+/// `fe2o3_net::acme::AcmeClient::issue_certificate`.
+fn pem_to_certified_key(
+    cert_pem:   &[u8],
+    key_pkcs8:  &[u8],
+)
+    -> Outcome<CertifiedKey>
+{
+    let mut reader = BufReader::new(cert_pem);
+    let certs: Result<Vec<CertificateDer<'static>>, _> =
+        rustls_pemfile::certs(&mut reader)
+        .map(|c| c.map_err(|e| err!(e,
+            "Error parsing ACME-issued cert PEM."; IO, Decode)))
+        .collect();
+    let certs = res!(certs);
+    if certs.is_empty() {
+        return Err(err!(
+            "ACME-issued cert PEM contained no certificates.";
+            IO, Decode, Missing));
     }
-    
-    #[cfg(target_os = "windows")] 
-    // TODO Windows users this needs to be tested and probably fixed.
-    pub fn new_lets_encrypt(
-        domains:    &Vec<Fqdn>,
-        tls_dir:    &Path,
-    )
-        -> Outcome<()>
-    {
-        res!(Self::check_requirements());
 
-        // Create DNS string for multiple domains
-        let domain_names = domains
-            .iter()
-            .map(|d| fmt!("\"{}\"", d))
-            .collect::<Vec<_>>()
-            .join(", ");
-        
-        // Run wacs with appropriate parameters
-        let output = res!(std::process::Command::new("wacs")
-            .arg("--target")
-            .arg("manual")
-            .arg("--host")
-            .arg(domain_list)
-            .arg("--installation")
-            .arg("script")
-            .arg("--script")
-            .arg(format!("copy %PfxPath% \"{}\"",
-                tls_dir.join("certificate.pfx").display()))
-            .arg("--scriptparameters")
-            .arg("\"%PfxPath%\"")
-            .arg("--store")
-            .arg("false")
-            .output());
+    let key = PrivatePkcs8KeyDer::from(key_pkcs8.to_vec());
+    let key_der: PrivateKeyDer<'static> = key.into();
+    let signing_key = res!(rustls::crypto::ring::sign::any_supported_type(&key_der)
+        .map_err(|e| err!("{:?}", e; Init, Invalid)));
+    Ok(CertifiedKey::new(certs, signing_key))
+}
 
-        if !output.status.success() {
-            return Err(err!(
-                "Certificate creation failed: {}", String::from_utf8_lossy(&output.stderr);
-                IO, File));
-        }
-
-        // Convert PFX to PEM format
-        let pfx_path = tls_dir.join("certificate.pfx");
-        let output = res!(std::process::Command::new("openssl")
-            .arg("pkcs12")
-            .arg("-in")
-            .arg(&pfx_path)
-            .arg("-out")
-            .arg(tls_dir.join("combined.pem"))
-            .arg("-nodes")
-            .arg("-password")
-            .arg("pass:")
-            .output());
-
-        if !output.status.success() {
-            return Err(err!(
-                "PFX to PEM conversion failed: {}", String::from_utf8_lossy(&output.stderr);
-                IO, File));
-        }
-
-        // Split the combined PEM into separate cert and key files
-        let ps_script = fmt!(
-            "$pemContent = Get-Content \"{}\"
-             $certContent = $pemContent[0..($pemContent.Length-1)] | Where-Object {{ $_ -match 'CERTIFICATE' -or ($_ -notmatch 'KEY' -and $_.trim() -ne '') }}
-             $keyContent = $pemContent[0..($pemContent.Length-1)] | Where-Object {{ $_ -match 'PRIVATE KEY' -or ($_ -notmatch 'CERTIFICATE' -and $_.trim() -ne '') }}
-             Set-Content -Path \"{}\" -Value $certContent
-             Set-Content -Path \"{}\" -Value $keyContent",
-            tls_dir.join("combined.pem").display(),
-            tls_dir.join("fullchain.pem").display(),
-            tls_dir.join("privkey.pem").display()
-        );
-
-        let output = res!(std::process::Command::new("powershell")
-            .arg("-Command")
-            .arg(&ps_script)
-            .output());
-
-        if !output.status.success() {
-            return Err(err!(
-                "Certificate splitting failed: {}", String::from_utf8_lossy(&output.stderr);
-                IO, File));
-        }
-
-        // Clean up intermediate files
-        let _ = std::fs::remove_file(tls_dir.join("certificate.pfx"));
-        let _ = std::fs::remove_file(tls_dir.join("combined.pem"));
-
-        // Verify files exist
-        let cert_path = tls_dir.join("fullchain.pem");
-        let key_path = tls_dir.join("privkey.pem");
-
-        if !cert_path.exists() || !key_path.exists() {
-            return Err(err!(
-                "Certificate files were not created properly at {:?}", tls_dir;
-                IO, File, Missing));
-        }
-
-        Ok(())
-    }    
-    
-    #[cfg(target_os = "macos")]
-    pub fn new_lets_encrypt(
-        domains:    &Vec<Fqdn>,
-        tls_dir:    &Path,
-    )
-        -> Outcome<()>
-    {
-        res!(Self::check_requirements());
-
-        // Build certbot command with multiple domains.
-        let mut cmd = std::process::Command::new("certbot");
-        cmd.arg("certonly")
-            .arg("--standalone")
-            .arg("--non-interactive")
-            .arg("--force-renewal");
-        
-        // Add each domain with -d flag
-        for domain in &domains {
-            cmd.arg("-d").arg(domain_as_str());
-        }
-
-        let output = res!(cmd.output());
-    
-        if !output.status.success() {
-            return Err(err!(
-                "Certificate creation failed: {}", String::from_utf8_lossy(&output.stderr);
-                IO, File));
-        }
-    
-        // Copy certs from /etc/letsencrypt/live/{domain}/ to tls/
-        let src_dir = PathBuf::from("/etc/letsencrypt/live").join(domains[0].as_str());
-        res!(std::fs::create_dir_all(tls_dir));
-        
-        for file in &["fullchain.pem", "privkey.pem"] {
-            res!(std::fs::copy(
-                src_dir.join(file),
-                tls_dir.join(file)
-            ));
-        }
-    
-        Ok(())
-    }
-    
-    pub fn check_requirements() -> Outcome<()> {
-        #[cfg(target_os = "linux")]
-        {
-            // Check for certbot.
-            let has_certbot = std::process::Command::new("certbot")
-                .arg("--version")
-                .output()
-                .map_or(false, |output| output.status.success());
-    
-            if !has_certbot {
-                return Err(err!(
-                    "Certbot not found. Please install via: sudo apt-get install certbot";
-                    System, Missing));
-            }
-        }
-    
-        #[cfg(target_os = "windows")]
-        {
-            // Check for admin rights
-            if !is_elevated::is_elevated() {
-                return Err(err!(
-                    "Administrator privileges required. Please run as administrator.";
-                    System, Missing));
-            }
-        
-            // Check for win-acme
-            let has_wacs = std::process::Command::new("wacs")
-                .arg("--version")
-                .output()
-                .map_or(false, |output| output.status.success());
-        
-            if !has_wacs {
-                return Err(err!(
-                    "win-acme (WACS) not found. Please install from https://www.win-acme.com";
-                    System, Missing));
-            }
-        
-            // Check for OpenSSL
-            let has_openssl = std::process::Command::new("openssl")
-                .arg("version")
-                .output()
-                .map_or(false, |output| output.status.success());
-        
-            if !has_openssl {
-                return Err(err!(
-                    "OpenSSL not found. Please install OpenSSL and add it to your PATH.";
-                    System, Missing));
-            }
-        }
-    
-        #[cfg(target_os = "macos")]
-        {
-            // Check for homebrew.
-            let has_brew = std::process::Command::new("brew")
-                .arg("--version")
-                .output()
-                .map_or(false, |output| output.status.success());
-    
-            if !has_brew {
-                return Err(err!(
-                    "Homebrew not found. Please install from https://brew.sh";
-                    System, Missing));
-            }
-        }
-    
-        Ok(())
-    }
+/// Build a rustls `CertifiedKey` from a self-signed challenge cert's
+/// raw DER bytes (as produced by
+/// [`oxedyne_fe2o3_net::acme::challenge::build_tls_alpn_01_cert`]).
+fn der_to_certified_key(
+    cert_der:   &[u8],
+    key_pkcs8:  &[u8],
+)
+    -> Outcome<CertifiedKey>
+{
+    let cert = CertificateDer::from(cert_der.to_vec());
+    let key = PrivatePkcs8KeyDer::from(key_pkcs8.to_vec());
+    let key_der: PrivateKeyDer<'static> = key.into();
+    let signing_key = res!(rustls::crypto::ring::sign::any_supported_type(&key_der)
+        .map_err(|e| err!("{:?}", e; Init, Invalid)));
+    Ok(CertifiedKey::new(vec![cert], signing_key))
 }

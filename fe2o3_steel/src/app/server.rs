@@ -1,11 +1,9 @@
 use crate::{
     app::{
         self,
-        //cfg::AppConfig,
         constant as app_const,
         https::AppWebHandler,
         repl::AppShellContext,
-        //smtps::AppEmailHandler,
     },
     srv::{
         cert::Certificate,
@@ -14,6 +12,7 @@ use crate::{
         context::{
             Protocol,
             ServerContext,
+            VhostRuntime,
         },
         dev::{
             cfg::DevConfig,
@@ -167,38 +166,53 @@ impl AppShellContext {
         info!("{} ping replies received in {:?}.", msgs.len(), start.elapsed());
 
         // ┌───────────────────────┐
-        // │ Use self-signed       │
-        // │ certificates.         │
+        // │ Certificates.         │
         // └───────────────────────┘
-        
-        let (tls_dir, cert_path, key_path) = res!(server_cfg.get_tls_paths(&root_path, dev_mode));
 
-        debug!("tls_dir = {:?}", tls_dir);
-        debug!("cert_path = {:?}", cert_path);
-        debug!("key_path = {:?}", key_path);
+        // Parse the vhosts and ACME config so we can decide the cert strategy.
+        let vhosts_cfg = res!(server_cfg.get_vhosts());
+        let acme_cfg = res!(server_cfg.get_acme());
 
-        let domains = res!(server_cfg.get_domain_names());
-
-        if !cert_path.exists() || !key_path.exists() {
-            if dev_mode {
-                info!("Development certificates not found - generating self-signed certificates.");
+        if dev_mode {
+            // Dev mode uses a single shared self-signed cert.
+            let tls_dir = res!(server_cfg.get_tls_dir(&root_path, true));
+            let cert_path = tls_dir.join("fullchain.pem");
+            let key_path = tls_dir.join("privkey.pem");
+            debug!("dev tls_dir = {:?}", tls_dir);
+            if !cert_path.exists() || !key_path.exists() {
+                info!("Development certificates not found -- generating self-signed cert.");
                 res!(Certificate::new_dev(
                     &server_cfg,
                     &root_path,
                 ));
-            } else {
-                info!("Production certificates not found - generating self-signed certificates.");
-                res!(Certificate::new_lets_encrypt(
-                    &domains,
-                    &tls_dir,
-                ));
+            }
+        } else if acme_cfg.enabled {
+            info!("ACME is enabled; certificates will be issued on start-up via {}.",
+                acme_cfg.directory_url);
+        } else {
+            // Production without ACME: require per-vhost cert files on disk.
+            let tls_dir = res!(server_cfg.get_tls_dir(&root_path, false));
+            for vh in &vhosts_cfg {
+                let primary = vh.primary_hostname();
+                let vh_dir = tls_dir.join(primary);
+                let cert_path = vh_dir.join("fullchain.pem");
+                let key_path = vh_dir.join("privkey.pem");
+                if !cert_path.exists() || !key_path.exists() {
+                    return Ok(Evaluation::Error(fmt!(
+                        "Missing certificate for vhost '{}'. ACME is disabled, so \
+                        Steel expects {:?} and {:?} to already exist. Either enable \
+                        ACME in the acme section of config.jdat, or install the \
+                        required PEM files and restart.",
+                        primary, cert_path, key_path,
+                    )));
+                }
             }
         }
 
         if dev_mode {
             info!("Connect via: https://localhost:{}", server_cfg.server_port_tcp);
-        } else {
-            info!("Connect via: https://{}", domains[0].as_str());
+        } else if let Some(first) = vhosts_cfg.first() {
+            info!("Connect via: https://{}", first.primary_hostname());
         }
 
         // ┌───────────────────────┐
@@ -242,7 +256,13 @@ impl AppShellContext {
         let ws_handler = AppWebSocketHandler::new(
             if dev_mode {
                 let manager_clone = refresh_manager.clone();
-                rt.spawn(async move {
+                // The file watcher is synchronous blocking code (notify's
+                // event loop). On single-CPU hosts Tokio's default runtime
+                // has a single worker, so a blocking task spawned with
+                // `rt.spawn` would hog that worker and starve the accept
+                // loop. Use `spawn_blocking` to run it on the dedicated
+                // blocking thread pool instead.
+                rt.spawn_blocking(move || {
                     debug!("Starting dev refresh file watcher.");
                     if let Err(e) = manager_clone.watch() {
                         error!(err!(e,
@@ -259,27 +279,68 @@ impl AppShellContext {
         // ┌───────────────────────┐
         // │ Start server.         │
         // └───────────────────────┘
-        
+
         let ws_syntax = res!(WebSocketSyntax::new(
             &self.app_cfg.app_human_name,
             &app_const::VERSION,
             &self.app_cfg.app_description,
         ));
 
-        let web_handler = AppWebHandler::new(
-            server_cfg.clone(),
-            res!(server_cfg.get_public_dir(&root_path)),
-            res!(server_cfg.get_static_route_paths(
+        // Build per-vhost runtimes: one AppWebHandler per vhost, each with its
+        // own public_dir / static_routes / default index files. The resulting
+        // map is keyed by every alias hostname so SNI dispatch finds the right
+        // runtime regardless of which alias the client asked for.
+        let mut vhost_map: HashMap<String, Arc<VhostRuntime<
+            AppWebHandler<HashMap<String, oxedyne_fe2o3_core::file::OsPath>>,
+            _,
+        >>> = HashMap::new();
+        let mut default_vhost_key: Option<String> = None;
+
+        for vh in &vhosts_cfg {
+            let public_dir = match res!(vh.get_public_dir(&root_path)) {
+                Some(p) => p,
+                None => PathBuf::new(),
+            };
+            let static_routes = res!(vh.get_static_route_paths(
                 &root_path,
                 HashMap::new(),
-            )),
-            res!(server_cfg.get_default_index_files()),
-            dev_mode,
-        );
+            ));
+            let default_index_files = res!(vh.get_default_index_files());
+
+            let web_handler = AppWebHandler::new(
+                server_cfg.clone(),
+                public_dir,
+                static_routes,
+                default_index_files,
+                dev_mode,
+            );
+
+            let runtime = Arc::new(VhostRuntime {
+                hostnames:      vh.hostnames.clone(),
+                web_handler,
+                ws_handler:     ws_handler.clone(),
+                ws_syntax:      ws_syntax.clone(),
+                redirects:      vh.redirects.clone(),
+            });
+
+            let primary_lc = vh.primary_hostname().to_lowercase();
+            if default_vhost_key.is_none() {
+                default_vhost_key = Some(primary_lc.clone());
+            }
+            for h in &vh.hostnames {
+                vhost_map.insert(h.to_lowercase(), runtime.clone());
+            }
+        }
+
+        let default_vhost = match default_vhost_key {
+            Some(k) => k,
+            None => return Ok(Evaluation::Error(fmt!(
+                "No vhosts configured -- at least one vhost is required."))),
+        };
+
         let protocol = Protocol::Web {
-            web_handler,
-            ws_handler,
-            ws_syntax,
+            vhosts:         Arc::new(vhost_map),
+            default_vhost,
             dev_mode,
         };
 

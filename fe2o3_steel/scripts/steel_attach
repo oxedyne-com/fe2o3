@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Attach to the Steel tmux session on deployhost for interactive debugging.
+#
+# Exit with Ctrl-b d (tmux detach) to return to your local shell without
+# killing the session or the running Steel process.
+
+exec ssh -t operator@example.host 'tmux attach-session -t steel-dev'

@@ -76,6 +76,7 @@
 //! error handling through the `Outcome` type.
 //!
 #![forbid(unsafe_code)]
+pub mod acme;
 pub mod addr;
 pub mod conc;
 pub mod charset;

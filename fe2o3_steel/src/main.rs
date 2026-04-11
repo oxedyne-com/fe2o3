@@ -62,7 +62,14 @@ use oxedyne_fe2o3_core::{
 
 
 fn main() -> Outcome<()> {
-    
+
+    // Install the process-wide rustls default crypto provider. Rustls 0.23
+    // requires one of `ring` or `aws-lc-rs` to be installed before any
+    // `ServerConfig::builder()` call; Steel uses `ring` throughout, matching
+    // the `rustls = { features = ["ring"] }` declaration in Cargo.toml.
+    // We ignore the error because a second install attempt is benign.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let mut log_cfg = log_get_config!();
     log_cfg.file = None;
     log_set_config!(log_cfg);

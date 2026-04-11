@@ -66,7 +66,7 @@ use tokio_rustls::{
 fn load_certs() -> Outcome<RootCertStore> {
     let mut root_store = RootCertStore::empty();
     let home = res!(std::env::var("HOME"));
-    let path = Path::new(home).join("usr/code/web/apps/test/tls/fullchain.pem");
+    let path = Path::new(&home).join("usr/code/web/apps/test/tls/fullchain.pem");
     let cert_file = res!(File::open(path));
     let mut reader = BufReader::new(cert_file);
     let certs = res!(rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, _>>());

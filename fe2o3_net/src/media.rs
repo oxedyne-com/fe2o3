@@ -120,8 +120,17 @@ impl MediaType {
             Self::Text(_)                                   |
             Self::Image(Image::SvgXml)                      |
             Self::Application(Application::Json)            |
+            Self::Application(Application::JsonLd)          |
             Self::Application(Application::FormUrlEncoded)  |
             Self::Application(Application::Xml)             => true,
+            // Structured syntax suffixes per RFC 6838 §4.2.8: anything
+            // that looks like `foo+json` or `foo+xml` is text-shaped, so
+            // body dumps like `application/problem+json` (RFC 7807) and
+            // `application/jose+json` (RFC 7515) can be logged as text
+            // rather than binary.
+            Self::Application(Application::Other(s)) => {
+                s.ends_with("+json") || s.ends_with("+xml")
+            },
             // TODO complete list
             _ => false,
         }
@@ -132,6 +141,16 @@ impl MediaType {
 /// │ IANA Top Level Media Type: Application     │
 /// │ Subtypes                                   │
 /// ╰────────────────────────────────────────────╯
+///
+/// The `Other(String)` variant accepts any subtype we do not have a named
+/// variant for -- e.g. `application/problem+json` (RFC 7807, used by ACME
+/// CAs for error responses), `application/jose+json` (RFC 7515), or any
+/// future IANA subtype. This matters for clients like the ACME driver
+/// in [`crate::acme::client`] which must be able to receive and parse
+/// responses with arbitrary Content-Type values; a strict enum would
+/// refuse the response at parse time and the caller would never see the
+/// body. Keeping known subtypes as dedicated variants preserves the
+/// ergonomics of pattern matching for code that cares.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum Application {
     Json,
@@ -149,27 +168,31 @@ pub enum Application {
     Xml,
     Zip,
     Zstd,
+    /// Subtype not explicitly modelled by this crate; the contained
+    /// string is the raw subtype text after the `application/` prefix.
+    Other(String),
 }
 
 impl Display for Application {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", match self {
-            Self::Json                      => "json",
-            Self::JsonLd                    => "ld+json",
-            Self::Pdf                       => "pdf",
-            Self::Sql                       => "sql",
-            Self::MicrosoftDocument         => "msword",
-            Self::MicrosoftPresentation     => "vnd.ms-powerpoint",
-            Self::MicrosoftSpreadsheet      => "vnd.ms-excel",
-            Self::OpenDocument              => "vnd.oasis.opendocument.text",
-            Self::OpenXmlDocument           => "vnd.openxmlformats-officedocument.wordprocessingml.document",
-            Self::OpenXmlPresentation       => "vnd.openxmlformats-officedocument.presentationml.presentation",
-            Self::OpenXmlSpreadsheet        => "vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            Self::FormUrlEncoded            => "x-www-form-urlencoded",
-            Self::Xml                       => "xml",
-            Self::Zip                       => "zip",
-            Self::Zstd                      => "zstd",
-        })
+        match self {
+            Self::Json                      => write!(f, "json"),
+            Self::JsonLd                    => write!(f, "ld+json"),
+            Self::Pdf                       => write!(f, "pdf"),
+            Self::Sql                       => write!(f, "sql"),
+            Self::MicrosoftDocument         => write!(f, "msword"),
+            Self::MicrosoftPresentation     => write!(f, "vnd.ms-powerpoint"),
+            Self::MicrosoftSpreadsheet      => write!(f, "vnd.ms-excel"),
+            Self::OpenDocument              => write!(f, "vnd.oasis.opendocument.text"),
+            Self::OpenXmlDocument           => write!(f, "vnd.openxmlformats-officedocument.wordprocessingml.document"),
+            Self::OpenXmlPresentation       => write!(f, "vnd.openxmlformats-officedocument.presentationml.presentation"),
+            Self::OpenXmlSpreadsheet        => write!(f, "vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+            Self::FormUrlEncoded            => write!(f, "x-www-form-urlencoded"),
+            Self::Xml                       => write!(f, "xml"),
+            Self::Zip                       => write!(f, "zip"),
+            Self::Zstd                      => write!(f, "zstd"),
+            Self::Other(s)                  => write!(f, "{}", s),
+        }
     }
 }
 
@@ -178,24 +201,27 @@ impl FromStr for Application {
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         Ok(match s {
-            "json"                                                          => Self::Json,                  
-            "ld+json"                                                       => Self::JsonLd,               
-            "pdf"                                                           => Self::Pdf,                   
-            "sql"                                                           => Self::Sql,                   
-            "msword"                                                        => Self::MicrosoftDocument,     
-            "vnd.ms-powerpoint"                                             => Self::MicrosoftPresentation, 
-            "vnd.ms-excel"                                                  => Self::MicrosoftSpreadsheet,  
-            "vnd.oasis.opendocument.text"                                   => Self::OpenDocument,          
-            "vnd.openxmlformats-officedocument.wordprocessingml.document"   => Self::OpenXmlDocument,       
-            "vnd.openxmlformats-officedocument.presentationml.presentation" => Self::OpenXmlPresentation,   
-            "vnd.openxmlformats-officedocument.spreadsheetml.sheet"         => Self::OpenXmlSpreadsheet,    
-            "x-www-form-urlencoded"                                         => Self::FormUrlEncoded,        
-            "xml"                                                           => Self::Xml,                   
-            "zip"                                                           => Self::Zip,                   
-            "zstd"                                                          => Self::Zstd,                  
-            _ => return Err(err!(
-                "Unrecognised Application Media subtype '{}'.", s;
-            IO, Network, Unknown, Input)),
+            "json"                                                          => Self::Json,
+            "ld+json"                                                       => Self::JsonLd,
+            "pdf"                                                           => Self::Pdf,
+            "sql"                                                           => Self::Sql,
+            "msword"                                                        => Self::MicrosoftDocument,
+            "vnd.ms-powerpoint"                                             => Self::MicrosoftPresentation,
+            "vnd.ms-excel"                                                  => Self::MicrosoftSpreadsheet,
+            "vnd.oasis.opendocument.text"                                   => Self::OpenDocument,
+            "vnd.openxmlformats-officedocument.wordprocessingml.document"   => Self::OpenXmlDocument,
+            "vnd.openxmlformats-officedocument.presentationml.presentation" => Self::OpenXmlPresentation,
+            "vnd.openxmlformats-officedocument.spreadsheetml.sheet"         => Self::OpenXmlSpreadsheet,
+            "x-www-form-urlencoded"                                         => Self::FormUrlEncoded,
+            "xml"                                                           => Self::Xml,
+            "zip"                                                           => Self::Zip,
+            "zstd"                                                          => Self::Zstd,
+            // Any other IANA subtype: stored verbatim so callers that do
+            // care about it can still read the raw string, and the HTTP
+            // message parser can construct a complete HttpMessage instead
+            // of failing the whole response. Structured JSON-ish subtypes
+            // like `problem+json` and `jose+json` arrive here.
+            other                                                           => Self::Other(other.to_string()),
         })
     }
 }

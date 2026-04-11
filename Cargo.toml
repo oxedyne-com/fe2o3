@@ -10,7 +10,7 @@ repository = "https://github.com/oxedyne-io/fe2o3"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [workspace]
-members = [ 
+members = [
 	"fe2o3_*",
 	"fe2o3_core/new",
 	"fe2o3_jdat/dat_map",

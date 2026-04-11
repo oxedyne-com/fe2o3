@@ -13,7 +13,6 @@ use oxedyne_fe2o3_iop_hash::api::Hasher;
 use oxedyne_fe2o3_jdat::id::NumIdDat;
 use oxedyne_fe2o3_net::{
     http::handler::WebHandler,
-    //smtp::handler::EmailHandler,
     ws::handler::WebSocketHandler,
 };
 
@@ -29,17 +28,16 @@ use tokio::{
 use tokio_rustls::TlsAcceptor;
 
 
+/// The Steel TCP/TLS server, wrapping a `ServerContext`.
 pub struct Server<
     const UIDL: usize,
     UID:    NumIdDat<UIDL> + 'static,
-    ENC:    Encrypter,        // Symmetric encryption of database.
-    KH:     Hasher,           // Hashes database keys.
-    DB:     Database<UIDL, UID, ENC, KH>, 
-    //EH:     EmailHandler,
+    ENC:    Encrypter,
+    KH:     Hasher,
+    DB:     Database<UIDL, UID, ENC, KH>,
     WH:     WebHandler,
     WSH:    WebSocketHandler,
 > {
-    //pub context: ServerContext<UIDL, UID, ENC, KH, DB, EH, WH, WSH>,
     pub context: ServerContext<UIDL, UID, ENC, KH, DB, WH, WSH>,
 }
 
@@ -48,16 +46,14 @@ impl<
     UID:    NumIdDat<UIDL> + 'static,
     ENC:    Encrypter + 'static,
     KH:     Hasher + 'static,
-    DB:     Database<UIDL, UID, ENC, KH> + 'static, 
-    //EH:     EmailHandler + 'static,
+    DB:     Database<UIDL, UID, ENC, KH> + 'static,
     WH:     WebHandler + 'static,
     WSH:    WebSocketHandler + 'static,
 >
-    //Server<UIDL, UID, ENC, KH, DB, EH, WH, WSH>
     Server<UIDL, UID, ENC, KH, DB, WH, WSH>
 {
+    /// Construct a new server from a pre-built context.
     pub fn new(
-        //context: ServerContext<UIDL, UID, ENC, KH, DB, EH, WH, WSH>,
         context: ServerContext<UIDL, UID, ENC, KH, DB, WH, WSH>,
     )
         -> Self
@@ -65,51 +61,78 @@ impl<
         Self { context }
     }
 
+    /// Bind the configured address and port, perform TLS + vhost dispatch
+    /// in an accept loop, and hand each accepted connection off to the
+    /// `handle_https` method on a fresh Tokio task.
     pub async fn start(&self) -> Outcome<()> {
 
         let dev_mode = match &self.context.protocol {
             Protocol::Web { dev_mode, .. } => *dev_mode,
         };
-    
-        let server_config = res!(Certificate::load(
+
+        let loaded = res!(Certificate::load(
             &self.context.cfg,
             &self.context.root,
             dev_mode,
         ));
-    
-        let tls_acceptor = TlsAcceptor::from(Arc::new(server_config));
-    
-        let addr = SocketAddr::from(([0, 0, 0, 0], 8443));
-        let result = TcpListener::bind(&addr).await;
-        let listener = res!(result, IO, Network);
+
+        // If ACME is enabled, spawn the renewer task. It drives the
+        // initial issuance (if the cache is empty) and then loops with
+        // a 24-hour tick, re-issuing whenever the cached cert is older
+        // than the renewal threshold.
+        if let Some(renewer) = loaded.acme_renewer {
+            tokio::spawn(async move {
+                if let Err(e) = renewer.run_forever().await {
+                    error!(err!(e,
+                        "ACME renewer task exited.";
+                        Init, Network));
+                }
+            });
+        }
+
+        let tls_acceptor = TlsAcceptor::from(Arc::new(loaded.server_config));
+
+        // Build the bind address from the (now honoured) server_cfg.
+        let addr: SocketAddr = {
+            let ip: std::net::IpAddr = match self.context.cfg.server_address.parse() {
+                Ok(ip) => ip,
+                Err(e) => return Err(err!(e,
+                    "Invalid server_address '{}' in config.",
+                    self.context.cfg.server_address;
+                    Invalid, Input, Network)),
+            };
+            SocketAddr::new(ip, self.context.cfg.server_port_tcp)
+        };
+        let listener = res!(TcpListener::bind(&addr).await, IO, Network);
         info!("Listening on: {}", addr);
-    
+
         loop {
-            let result = listener.accept().await;
-            let (mut stream, src_addr) = match result {
-                Ok((stream, src_addr)) => (stream, src_addr),
+            let (mut stream, src_addr) = match listener.accept().await {
+                Ok(pair) => pair,
                 Err(e) => {
                     error!(err!(e, "TCP connection aborted."; IO, Network));
                     continue;
                 }
             };
-    
-            // Peek at first bytes to detect TLS handshake.
+
+            // Peek at first bytes to detect TLS handshake. Non-TLS requests
+            // receive a 308 to redirect the caller to HTTPS.
             let mut peek_buf = [0u8; 5];
             match stream.peek(&mut peek_buf).await {
                 Ok(n) if n >= 5 && peek_buf[0] == 0x16 && peek_buf[1] == 0x03 => {
-                    // Valid TLS handshake - proceed with TLS.
                     match tls_acceptor.accept(stream).await {
                         Ok(tls_stream) => {
+                            // Extract SNI now, before we hand ownership of
+                            // the stream to the handler task.
+                            let sni = tls_stream.get_ref().1.server_name()
+                                .map(|s| s.to_string());
                             let context_clone = self.context.clone();
-                            match self.context.protocol.clone() {
-                                Protocol::Web { web_handler, ws_handler, ws_syntax, .. } => {
+                            match &self.context.protocol {
+                                Protocol::Web { .. } => {
                                     tokio::spawn(async move {
                                         if let Err(e) = context_clone.handle_https(
                                             tls_stream,
-                                            web_handler,
-                                            ws_handler,
-                                            ws_syntax,
+                                            sni,
                                             src_addr,
                                         ).await {
                                             error!(err!(e,
@@ -121,28 +144,41 @@ impl<
                             }
                         }
                         Err(e) => {
-                            error!(err!(e, "TLS handshake aborted."; IO, Network, Init));
+                            error!(err!(e,
+                                "TLS handshake aborted.";
+                                IO, Network, Init));
                             continue;
                         }
                     }
-                },
+                }
                 _ => {
-                    // Non-TLS connection - send redirect response.
-                    let response = "HTTP/1.1 308 Permanent Redirect\r\n\
-                        Location: https://localhost:8443\r\n\
+                    // Non-TLS connection: redirect to HTTPS.
+                    let port = self.context.cfg.server_port_tcp;
+                    let body = fmt!(
+                        "This server requires HTTPS. Please use https://<host>:{} instead.",
+                        port,
+                    );
+                    let response = fmt!(
+                        "HTTP/1.1 308 Permanent Redirect\r\n\
+                        Location: https://{}:{}\r\n\
                         Connection: close\r\n\
                         Content-Type: text/plain\r\n\
-                        Content-Length: 63\r\n\
+                        Content-Length: {}\r\n\
                         \r\n\
-                        This server requires HTTPS. Please use https://localhost:8443 instead";
-    
+                        {}",
+                        self.context.cfg.server_address,
+                        port,
+                        body.len(),
+                        body,
+                    );
                     if let Err(e) = stream.write_all(response.as_bytes()).await {
-                        error!(err!(e, "Failed to send HTTPS redirect"; IO, Network, Write));
+                        error!(err!(e,
+                            "Failed to send HTTPS redirect.";
+                            IO, Network, Write));
                     }
                     continue;
                 }
             }
         }
     }
-
 }

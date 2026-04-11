@@ -630,7 +630,19 @@ impl Dat {
             // Atomic Kinds ===========================
             // Logic
             Self::Empty     => (fmt!("\"\""), true),
-            Self::Bool(_b)  => (fmt!("\"{}\"", typ_str), true),
+            // The value string here is the bare token `true` or `false`,
+            // not the kind name in quotes. In jdat-native modes the
+            // `is_dataless = true` flag triggers the `({typ_str})`
+            // kindicle wrapping below, so the output still emerges as
+            // `(true)` / `(false)`. In JSON mode (`kind_scope: Nothing`),
+            // the `hide_kindicle` branch further down emits `{s}` as-is,
+            // producing the unquoted JSON boolean literal `true` or
+            // `false`. The earlier form `fmt!("\"{}\"", typ_str)` emitted
+            // the value as a quoted string in JSON mode, which Let's
+            // Encrypt's JSON parser correctly rejected as malformed
+            // (`termsOfServiceAgreed` is required to be a boolean, not a
+            // string).
+            Self::Bool(b)   => (fmt!("{}", b), true),
             // Fixed
             Self::U8(n)     => (Self::encode_int(&DatInt::U8(*n), &cfg), false),
             Self::U16(n)    => (Self::encode_int(&DatInt::U16(*n), &cfg), false),

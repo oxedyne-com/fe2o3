@@ -35,7 +35,6 @@ use oxedyne_fe2o3_jdat::{
     file::JdatFile,
     string::enc::EncoderConfig,
 };
-use oxedyne_fe2o3_net::dns::Fqdn;
 use oxedyne_fe2o3_o3db_sync::O3db;
 use oxedyne_fe2o3_syntax::{
     core::SyntaxRef,
@@ -185,6 +184,7 @@ impl AppShellContext {
                 "server"    => evals.push(res!(self.start_server(&shell_cfg, Some(cmd)))),
                 "shell"     => evals.push(res!(self.start_shell(&shell_cfg, Some(cmd)))),
                 "cert"      => evals.push(res!(self.manage_certificates(&shell_cfg, Some(cmd)))),
+                "acme"      => evals.push(res!(self.manage_acme(&shell_cfg, Some(cmd)))),
                 // Filesystem
                 "cd"        => evals.push(res!(cmds::change_directory(cmd))),
                 "ls"        => evals.push(res!(cmds::list_directory_contents(cmd))),
@@ -332,29 +332,6 @@ impl AppShellContext {
                         self.app_cfg.app_root,
                         srv_const::TLS_DIR_DEV,
                     )));
-                } else if res!(msg_cmd.has_only_arg("create-prod")) {
-                    let domains = if let Some(vals) = msg_cmd.get_vals() {
-                        let domains_str: Vec<String> = res!(vals[0].clone().try_into());
-                        let mut domains_fqdn = Vec::new();
-                        for domain_str in domains_str {
-                            domains_fqdn.push(res!(Fqdn::new(domain_str)));    
-                        }
-                        domains_fqdn
-                    } else {
-                        let server_cfg = res!(ServerConfig::from_datmap(
-                            self.app_cfg.server_cfg.clone()
-                        ));
-                        res!(server_cfg.get_domain_names())
-                    };
-                    let tls_dir = Path::new(&self.app_cfg.app_root)
-                        .join("tls")
-                        .join(srv_const::TLS_DIR_PROD);
-                    res!(Certificate::new_lets_encrypt(&domains, &tls_dir));
-                    return Ok(Evaluation::Output(fmt!(
-                        "Production certificates created and installed in {}/tls/{}",
-                        self.app_cfg.app_root,
-                        srv_const::TLS_DIR_PROD,
-                    )));
                 }
             } else {
                 let avail_args = if let Some(cmd) = msg_cmd.syntax.get_cmd(&*msg_cmd.name) {
@@ -369,6 +346,72 @@ impl AppShellContext {
                 return Ok(Evaluation::Error(fmt!(
                     "Must use one of '{}' for command '{}'.  Type 'help' for more info.",
                     avail_args, msg_cmd.name,
+                )));
+            }
+        }
+        Ok(Evaluation::None)
+    }
+
+    /// `acme` shell command: inspect the configured ACME state.
+    ///
+    /// Currently supports:
+    ///   - `acme -s` / `acme --status` — print the configured vhost hostnames
+    ///     and the ACME directory URL that will be used on next start-up.
+    ///   - `acme -r` / `acme --renew` — schedule a forced renewal by clearing
+    ///     the ACME cache directory. Steel re-issues on next start-up.
+    ///
+    /// Live inspection and renewal of a running ACME state is a follow-up;
+    /// for now the shell only inspects and resets cached state.
+    pub fn manage_acme(
+        &mut self,
+        _shell_cfg: &ShellConfig,
+        cmd:        Option<&MsgCmd>,
+    )
+        -> Outcome<Evaluation>
+    {
+        let server_cfg = res!(ServerConfig::from_datmap(self.app_cfg.server_cfg.clone()));
+        let acme_cfg = res!(server_cfg.get_acme());
+        let vhosts = res!(server_cfg.get_vhosts());
+
+        if let Some(msg_cmd) = cmd {
+            if msg_cmd.has_args() {
+                if res!(msg_cmd.has_only_arg("status")) {
+                    let mut lines = Vec::new();
+                    lines.push(fmt!("ACME enabled:   {}", acme_cfg.enabled));
+                    lines.push(fmt!("Directory URL:  {}", acme_cfg.directory_url));
+                    lines.push(fmt!("Contact email:  {}",
+                        if acme_cfg.contact_email.is_empty() {
+                            fmt!("(not set)")
+                        } else {
+                            acme_cfg.contact_email.clone()
+                        }));
+                    lines.push(fmt!("Cache dir:      {}", acme_cfg.cache_dir_rel));
+                    lines.push(fmt!("Vhost hostnames:"));
+                    for vh in &vhosts {
+                        lines.push(fmt!("  - {}", vh.hostnames.join(", ")));
+                    }
+                    return Ok(Evaluation::Output(lines.join("\n")));
+                } else if res!(msg_cmd.has_only_arg("renew")) {
+                    let root = Path::new(&self.app_cfg.app_root).normalise().absolute();
+                    let cache_dir = res!(acme_cfg.get_cache_dir(&root));
+                    info!("Clearing ACME cache at {:?} to force renewal on next start-up.",
+                        cache_dir);
+                    match std::fs::remove_dir_all(&cache_dir) {
+                        Ok(()) => (),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                        Err(e) => return Err(err!(e,
+                            "Failed to clear ACME cache at {:?}.", cache_dir;
+                            IO, File)),
+                    }
+                    res!(std::fs::create_dir_all(&cache_dir));
+                    return Ok(Evaluation::Output(fmt!(
+                        "ACME cache cleared at {:?}. Restart the server to re-issue.",
+                        cache_dir,
+                    )));
+                }
+            } else {
+                return Ok(Evaluation::Error(fmt!(
+                    "Use 'acme -s' for status or 'acme -r' to schedule renewal.",
                 )));
             }
         }

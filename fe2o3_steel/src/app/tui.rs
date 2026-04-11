@@ -64,6 +64,7 @@ use std::{
 
 use secrecy::{
     ExposeSecret,
+    Secret,
 };
 
 
@@ -224,7 +225,14 @@ pub fn run() -> Outcome<()> {
                 constant::WALLET_NAME;
                 Data, Configuration, Missing)),
         };
-        let pass = res!(UserInput::ask_for_secret(None));
+        // Headless mode: read the wallet passphrase from the environment
+        // variable `STEEL_WALLET_PASS` when set (e.g. under a systemd service
+        // with an `EnvironmentFile`). This is what the `--headless` code path
+        // needs to avoid the interactive tty prompt.
+        let pass = match std::env::var("STEEL_WALLET_PASS") {
+            Ok(s) => Secret::new(s),
+            Err(_) => res!(UserInput::ask_for_secret(None)),
+        };
         let pass = pass.expose_secret().as_bytes();
         if res!(app_kdf.verify(pass)) {
             res!(db_default_kdf.decode_cfg_from_string(&db_default_kdf_cfg));

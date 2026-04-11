@@ -34,10 +34,11 @@ oxedyne_fe2o3_tui				= { path = "../fe2o3_tui" }
 
 notify = "6.1.1"
 rustls-pemfile = "2"
-rustls = "0.22"
+rustls = { version = "0.23", features = ["ring"] }
 rcgen = "0.12.0"
 tokio = { version = "1.35", features = ["full"] }
-tokio-rustls = "0.25"
+tokio-rustls = "0.26"
+futures = "0.3"
 
 # App.
 crossterm = "0.27"
@@ -68,7 +69,6 @@ oxedyne_fe2o3_core 				= { path = "../fe2o3_core" }
 [dev-dependencies]
 # For test client
 rustls-pki-types = "1.0"
-webpki-roots = "0.26"
 
 [target.'cfg(windows)'.dependencies]
 is_elevated = "0.1"

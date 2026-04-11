@@ -21,7 +21,7 @@ fn setup_log() -> Outcome<()> {
         "steel_test".to_string(),
         "log".to_string(),
         0,
-        1_048_576,
+        Some(1_048_576),
     );
     let log_path = file_cfg.path();
     log_cfg.file = Some(file_cfg);
