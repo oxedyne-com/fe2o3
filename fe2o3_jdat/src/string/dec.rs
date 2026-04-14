@@ -504,6 +504,15 @@ impl Slurp {
         self.s.len()
     }
 
+    /// Whether this slurp has captured anything at all. An empty
+    /// quoted string (e.g. `""`) has zero characters but is still
+    /// content -- it decodes to `Dat::Str("")` -- so `len()` alone
+    /// is not enough to decide whether a pending value is waiting
+    /// to be processed at a `,`, `}` or `]` boundary.
+    fn has_content(&self) -> bool {
+        self.is_string || !self.s.is_empty()
+    }
+
     fn char_slurped(
         &mut self,
         (i, c):  (usize, char),
@@ -973,7 +982,7 @@ impl Dat {
                             let mut dat = match store.val_opt.take() {
                                 Some(dat) => dat, // store.val_opt is now None.
                                 None => {
-                                    let dat = if store.slurp.len() > 0 {
+                                    let dat = if store.slurp.has_content() {
                                         res!(Self::process_atom(&mut store.slurp, &Kind::Unknown))
                                     } else {
                                         Dat::Empty
@@ -1038,13 +1047,11 @@ impl Dat {
                 }
             }
             match c {
-                '\t' => {
-                    return Err(err!(
-                        "Escaped tab characters are prohibited ({}).  Replace all tabs with spaces.",
-                        cursor.borrow();
-                    String, Input, Decode, Invalid));
-                }
-                ' ' | '\n' | '\r' => {
+                // JSON RFC 8259 §2 allows U+0009 tab as whitespace, so
+                // JDAT accepts it alongside space / LF / CR. This lets
+                // JSON files using tab indentation round-trip through
+                // `Dat::decode_string` unchanged.
+                ' ' | '\t' | '\n' | '\r' => {
                     res!(store.slurp.char_slurped((i, c), &mut state));
                 }
                 '(' => {
@@ -1174,7 +1181,7 @@ impl Dat {
                         }
                         // Complete the capture of the store.list by converting it to the correct
                         // type.
-                        if store.slurp.len() > 0 {
+                        if store.slurp.has_content() {
                             store.val_opt = Some(res!(Self::process_atom(&mut store.slurp, &kind)));
                         }
                         // Copied from ']' branch: (TODO rationalise code)
@@ -1373,7 +1380,7 @@ impl Dat {
                     // The remainder here is a terminal branch so no need to reset switches and store.
                     match state.molecular_capture {
                         Some(MolecularCapture::Bytes) => {
-                            if store.slurp.len() > 0 {
+                            if store.slurp.has_content() {
                                 let n = try_extract_dat!(
                                     res!(Self::process_atom(&mut store.slurp, &Kind::U8)), U8,
                                 );
@@ -1385,7 +1392,7 @@ impl Dat {
                         Some(MolecularCapture::ListSame) => {
                             // Complete the capture of the store.list by converting it to the correct
                             // type.
-                            if store.slurp.len() > 0 {
+                            if store.slurp.has_content() {
                                 let kind = match state.molecular_capture {
                                     Some(MolecularCapture::ListSame) =>
                                         MolecularCapture::same_kind(&state.kind_outer),
@@ -1566,7 +1573,7 @@ impl Dat {
                             let mut dat = match store.val_opt.take() {
                                 Some(dat) => dat,
                                 None => {
-                                    if store.slurp.len() > 0 {
+                                    if store.slurp.has_content() {
                                         res!(Self::process_atom(&mut store.slurp, &Kind::Unknown))
                                     } else {
                                         Dat::Empty
@@ -1594,7 +1601,7 @@ impl Dat {
                     }
                     // The remainder here is a terminal branch so no need to reset switches and store.
                     if state.molecular_capture == Some(MolecularCapture::Map) {
-                        if store.slurp.len() > 0 {
+                        if store.slurp.has_content() {
                             store.val_opt =
                                 Some(res!(Self::process_atom(&mut store.slurp, &state.kind_outer)));
                         }
@@ -1719,7 +1726,7 @@ impl Dat {
                 let dat = match store.val_opt.take() { // store.val_opt is now None.
                     Some(dat) => dat, 
                     None => {
-                        if store.slurp.len() > 0 {
+                        if store.slurp.has_content() {
                             res!(Self::process_atom(&mut store.slurp, &state.kind_outer))
                         } else {
                             Dat::Empty
@@ -1742,7 +1749,7 @@ impl Dat {
                 let mut dat = match store.val_opt.take() {
                     Some(dat) => dat, // store.val_opt is now None.
                     None => {
-                        let dat = if store.slurp.len() > 0 {
+                        let dat = if store.slurp.has_content() {
                             res!(Self::process_atom(&mut store.slurp, &Kind::Unknown))
                         } else {
                             Dat::Empty

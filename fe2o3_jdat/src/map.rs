@@ -125,6 +125,72 @@ impl Dat {
         }
     }
 
+    /// Look up a required key and return a cloned `String`. The value at
+    /// the key must be a `Dat::Str`.
+    pub fn map_get_string(&self, key: &Self) -> Outcome<String> {
+        let val = res!(self.map_get_must(key));
+        match val.get_string() {
+            Some(s) => Ok(s),
+            None => Err(err!(
+                "The key {:?} maps to a value of kind {:?}, \
+                expected a string.", key, val.kind();
+            Input, Mismatch)),
+        }
+    }
+
+    /// Look up a required key and return its value coerced to `i64`.
+    /// Any of the signed or unsigned integer variants will convert.
+    pub fn map_get_i64(&self, key: &Self) -> Outcome<i64> {
+        let val = res!(self.map_get_must(key));
+        match val.get_i64() {
+            Some(n) => Ok(n),
+            None => Err(err!(
+                "The key {:?} maps to a value of kind {:?}, \
+                expected an integer.", key, val.kind();
+            Input, Mismatch)),
+        }
+    }
+
+    /// Look up a required key and return its value coerced to `f64`.
+    /// Any numeric variant will convert.
+    pub fn map_get_f64(&self, key: &Self) -> Outcome<f64> {
+        let val = res!(self.map_get_must(key));
+        match val.get_float64() {
+            Some(f) => Ok(f.0),
+            None => Err(err!(
+                "The key {:?} maps to a value of kind {:?}, \
+                expected a number.", key, val.kind();
+            Input, Mismatch)),
+        }
+    }
+
+    /// Look up a required key whose value is itself a map. Returns a
+    /// reference into the parent so callers can navigate deeper
+    /// without cloning.
+    pub fn map_get_map(&self, key: &Self) -> Outcome<&Self> {
+        let val = res!(self.map_get_must(key));
+        match val {
+            Dat::Map(_) | Dat::OrdMap(_) => Ok(val),
+            _ => Err(err!(
+                "The key {:?} maps to a value of kind {:?}, \
+                expected a map.", key, val.kind();
+            Input, Mismatch)),
+        }
+    }
+
+    /// Look up a required key whose value is a list and return a
+    /// reference to the backing `Vec<Dat>`.
+    pub fn map_get_list(&self, key: &Self) -> Outcome<&Vec<Dat>> {
+        let val = res!(self.map_get_must(key));
+        match val {
+            Dat::List(v) | Dat::Vek(Vek(v)) => Ok(v),
+            _ => Err(err!(
+                "The key {:?} maps to a value of kind {:?}, \
+                expected a list.", key, val.kind();
+            Input, Mismatch)),
+        }
+    }
+
     /// Raise an error if the dat is not a map or the key is not present, otherwise return
     /// the removed value.
     pub fn map_remove_must(&mut self, key: &Self) -> Outcome<Self> {

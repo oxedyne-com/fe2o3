@@ -1142,7 +1142,10 @@ impl FromStr for Kind {
             "empty"     => Ok(Self::Empty),
             "true"      => Ok(Self::True),
             "false"     => Ok(Self::False),
-            "none"      => Ok(Self::None),
+            // `none` is JDAT's keyword; `null` is accepted as an
+            // alias so any RFC 8259 JSON document decodes through
+            // `Dat::decode_string` without pre-processing.
+            "none" | "null" => Ok(Self::None),
             // Fixed
             "u8"        => Ok(Self::U8),
             "u16"       => Ok(Self::U16),
