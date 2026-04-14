@@ -547,6 +547,9 @@ impl AppShellContext {
         if msg_cmd.has_arg("list") {
             return self.admin_list();
         }
+        if msg_cmd.has_arg("passwd") {
+            return self.admin_passwd();
+        }
         if msg_cmd.has_arg("add") {
             let vals = res!(msg_cmd.get_arg_vals("add").with_len(1));
             let name = try_extract_dat!(&vals[0], Str).clone();
@@ -583,6 +586,51 @@ impl AppShellContext {
         }
         Ok(Evaluation::Output(fmt!(
             "No recognised 'admin' subcommand argument supplied.")))
+    }
+
+    /// `admin --passwd`: rotate the caller's own password in place.
+    ///
+    /// The caller is whichever admin unlocked the wallet at start-up
+    /// (captured in `self.unlocked_admin_name`). Scopes and expiry
+    /// are preserved; only the wrap is replaced. The cached master
+    /// key from the startup unlock is reused, so the caller does not
+    /// need to re-type their current password.
+    fn admin_passwd(&mut self) -> Outcome<Evaluation> {
+        let caller_name = self.unlocked_admin_name.clone();
+        if caller_name.is_empty() {
+            audit_log("(unknown)", "admin.passwd", "err",
+                "reason=no_caller_identity");
+            return Err(err!(
+                "No caller identity is known -- `admin --passwd` can only \
+                be invoked inside a running session that has already \
+                unlocked the wallet.";
+                Input, Invalid, Security));
+        }
+        let new_pass = res!(UserInput::create_pass(app_const::MAX_CREATE_PASS_ATTEMPTS));
+        let master = self.db_enc_key.clone();
+        if let Err(e) = self.wallet.change_password(
+            &caller_name,
+            &master,
+            new_pass.expose_secret().as_bytes(),
+            oxedyne_fe2o3_crypto::keys::DEFAULT_WALLET_KDF_NAME,
+        ) {
+            audit_log(&caller_name, "admin.passwd", "err",
+                &fmt!("reason={}", e));
+            return Err(e);
+        }
+        let wallet_path = Path::new("./").join(app_const::WALLET_NAME);
+        res!(self.wallet.save(
+            &wallet_path,
+            "  ",
+            Some(EncoderConfig::<(), ()>::default()),
+        ));
+        audit_log(&caller_name, "admin.passwd", "ok", "self");
+        Ok(Evaluation::Output(fmt!(
+            "Password for admin '{}' rotated in place. The new password \
+            takes effect at the next Steel start-up; the running session \
+            keeps using the master key recovered at its original unlock.",
+            caller_name,
+        )))
     }
 
     fn admin_list(&self) -> Outcome<Evaluation> {

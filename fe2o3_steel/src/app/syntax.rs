@@ -249,11 +249,24 @@ pub fn new_shell(
             A value of 0 (the default) means 'never expires'.")),
         ..Default::default()
     });
+    let a6 = Arg::from(ArgConfig {
+        name:   fmt!("passwd"),
+        hyph1:  fmt!("p"),
+        hyph2:  Some(fmt!("passwd")),
+        vals:   vec![],
+        reqd:   false,
+        help:   Some(fmt!("Change the caller's own admin password in place. \
+            The caller is whichever admin unlocked the wallet at start-up. \
+            Scopes and expiry are preserved; only the wrap is replaced. \
+            Prompts for the new password twice.")),
+        ..Default::default()
+    });
     cmd = res!(cmd.add_arg(a1));
     cmd = res!(cmd.add_arg(a2));
     cmd = res!(cmd.add_arg(a3));
     cmd = res!(cmd.add_arg(a4));
     cmd = res!(cmd.add_arg(a5));
+    cmd = res!(cmd.add_arg(a6));
     s = res!(s.add_cmd(cmd));
     // =============================================================================================
 

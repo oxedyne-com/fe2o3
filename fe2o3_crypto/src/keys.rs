@@ -864,6 +864,36 @@ impl Wallet {
         Ok(())
     }
 
+    /// Replace the wrap on the named admin entry with a fresh one
+    /// derived from `new_password`. The admin's `scopes` and
+    /// `expires_at` are preserved. Used to rotate an admin's
+    /// password in place without disturbing other admins' entries.
+    ///
+    /// Does not re-authenticate the caller: the caller is expected
+    /// to hold `master_key` from a prior successful `unlock`. The
+    /// typical use is "an admin wants to change their own password
+    /// after the startup unlock", which the host application
+    /// implements by passing the already-unlocked master key back
+    /// in here.
+    pub fn change_password(
+        &mut self,
+        admin_name:     &str,
+        master_key:     &[u8],
+        new_password:   &[u8],
+        kdf_name:       &str,
+    )
+        -> Outcome<()>
+    {
+        let admin = match self.admins.iter_mut().find(|a| a.name == admin_name) {
+            Some(a) => a,
+            None => return Err(err!(
+                "No admin entry named '{}'.", admin_name;
+                Input, Missing)),
+        };
+        admin.wrap = res!(wrap_master_key(master_key, new_password, kdf_name));
+        Ok(())
+    }
+
     /// Remove the first admin entry whose name matches `target`.
     ///
     /// Does not authenticate the caller -- analogous to
@@ -932,6 +962,38 @@ mod tests {
         req!(unlocked.master_key.expose_secret(), unlocked2.master_key.expose_secret());
         // Wrong password must fail.
         req!(wallet2.unlock(b"notit").is_err(), true);
+        Ok(())
+    }
+
+    #[test]
+    fn test_wallet_change_password() -> Outcome<()> {
+        let (mut wallet, unlocked) = res!(Wallet::create_with_first_admin(
+            DaticleMap::new(),
+            "alice",
+            b"oldpass",
+            DEFAULT_WALLET_KDF_NAME,
+        ));
+        let master = unlocked.master_key.expose_secret().clone();
+        // Old password works.
+        req!(wallet.unlock(b"oldpass").is_ok(), true);
+        // Rotate alice's password, master key stays the same.
+        res!(wallet.change_password(
+            "alice",
+            &master,
+            b"newpass",
+            DEFAULT_WALLET_KDF_NAME,
+        ));
+        // Old no longer works, new does, master key unchanged.
+        req!(wallet.unlock(b"oldpass").is_err(), true);
+        let u2 = res!(wallet.unlock(b"newpass"));
+        req!(u2.master_key.expose_secret(), &master);
+        req!(u2.admin_name, "alice".to_string());
+        // Scopes preserved.
+        req!(u2.admin_scopes, vec!["*".to_string()]);
+        // Rotation on an unknown name fails.
+        req!(wallet.change_password(
+            "nobody", &master, b"x", DEFAULT_WALLET_KDF_NAME,
+        ).is_err(), true);
         Ok(())
     }
 
