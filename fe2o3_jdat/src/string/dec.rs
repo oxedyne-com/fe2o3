@@ -183,6 +183,43 @@ pub enum CommentCapture {
     Type2,
 }
 
+/// Per-character state machine for decoding RFC 8259 §7 string
+/// escapes inside a quoted string literal.
+///
+/// * `None`          -- normal: characters are pushed verbatim
+///                      into the slurp, except `\` which
+///                      transitions into `Backslash`.
+/// * `Backslash`     -- the previous character was a backslash
+///                      and the current character is the escape
+///                      type: `"`, `\`, `/`, `b`, `f`, `n`, `r`,
+///                      `t`, or `u`. The first eight translate
+///                      to a single character; `u` transitions
+///                      into `Unicode`.
+/// * `Unicode`       -- collecting four hex digits for a
+///                      `\uXXXX` code point. On completion the
+///                      code point is pushed if it is in the BMP
+///                      and not a surrogate half, the high half
+///                      of a surrogate pair transitions into
+///                      `SurrogateBackslash`, and a bare low
+///                      surrogate is a decode error.
+/// * `SurrogateBackslash` -- after a high surrogate; expecting
+///                           `\` to start the low half.
+/// * `SurrogateU`    -- after `SurrogateBackslash`; expecting `u`.
+/// * `LowSurrogate`  -- collecting four hex digits for the low
+///                      half; on completion the pair is combined
+///                      into a supplementary plane code point
+///                      and pushed.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum StringEscape {
+    #[default]
+    None,
+    Backslash,
+    Unicode             { digits: u8, acc: u32 },
+    SurrogateBackslash  { high: u16 },
+    SurrogateU          { high: u16 },
+    LowSurrogate        { digits: u8, acc: u32, high: u16 },
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct DecoderState {
     // Data
@@ -196,6 +233,7 @@ pub struct DecoderState {
     pub kind_capture:       bool, // (k|
     pub atomic_capture:     bool,
     pub molecular_capture:  Option<MolecularCapture>,
+    pub string_escape:      StringEscape, // Inside quoted strings only.
 }
 
 impl fmt::Display for DecoderState {
@@ -934,6 +972,15 @@ impl Dat {
         while let Some((i, c)) = iter.next() {
             {
                 cursor.borrow_mut().advance(c, state.quote_protection != Quote::None);
+            }
+            // String escape handling (RFC 8259 §7). Only active
+            // inside a quoted string. Runs ahead of the outer
+            // `"` / `'` matching so that `\"` inside a string is
+            // interpreted as an escape, not a string terminator.
+            if state.quote_protection != Quote::None {
+                if res!(Self::handle_string_escape(c, &mut state, &mut store.slurp)) {
+                    continue;
+                }
             }
             if cfg.quote_protection {
                 match c {
@@ -1834,6 +1881,194 @@ impl Dat {
             }
         }
         Ok(())
+    }
+
+    /// Advance the string-escape state machine by one character.
+    ///
+    /// Called from the top of the decoder's outer loop whenever
+    /// we are inside a quoted string. Returns `Ok(true)` if the
+    /// character was consumed by the escape state machine and
+    /// the outer loop should `continue`; returns `Ok(false)` if
+    /// the character is an ordinary literal character and the
+    /// outer loop should fall through to its normal handling
+    /// (including the `"` / `'` string-terminator branches).
+    ///
+    /// Decodes RFC 8259 §7 escapes:
+    ///
+    /// * `\"` `\\` `\/` `\b` `\f` `\n` `\r` `\t` -- one-char
+    ///   translations, pushed into the slurp.
+    /// * `\uXXXX` -- four hex digits forming a 16-bit code unit.
+    ///   A BMP code point is pushed directly; a high surrogate
+    ///   must be followed immediately by `\uYYYY` with a low
+    ///   surrogate, which is combined into a supplementary
+    ///   plane code point; a bare low surrogate is a decode
+    ///   error.
+    fn handle_string_escape(
+        c:      char,
+        state:  &mut DecoderState,
+        slurp:  &mut Slurp,
+    )
+        -> Outcome<bool>
+    {
+        use StringEscape::*;
+        match state.string_escape.clone() {
+            None => {
+                if c == '\\' {
+                    state.string_escape = Backslash;
+                    // Ensure the slurp is marked as a string
+                    // even when the whole payload is escapes
+                    // (e.g. `"\n"` would otherwise look like a
+                    // zero-length non-string slurp).
+                    slurp.flag_as_string();
+                    return Ok(true);
+                }
+                Ok(false)
+            }
+            Backslash => {
+                let translated = match c {
+                    '"'     => '"',
+                    '\\'    => '\\',
+                    '/'     => '/',
+                    'b'     => '\u{0008}',
+                    'f'     => '\u{000C}',
+                    'n'     => '\n',
+                    'r'     => '\r',
+                    't'     => '\t',
+                    'u'     => {
+                        state.string_escape = Unicode { digits: 0, acc: 0 };
+                        return Ok(true);
+                    }
+                    _ => return Err(err!(
+                        "Invalid string escape sequence '\\{}' \
+                        inside quoted string. Expected one of \
+                        `\"`, `\\`, `/`, `b`, `f`, `n`, `r`, `t`, \
+                        `u`.", c;
+                        String, Input, Decode, Invalid)),
+                };
+                slurp.push(translated);
+                state.string_escape = None;
+                Ok(true)
+            }
+            Unicode { digits, acc } => {
+                let hex = res!(Self::hex_digit_value(c));
+                let new_acc = (acc << 4) | hex;
+                let new_digits = digits + 1;
+                if new_digits < 4 {
+                    state.string_escape = Unicode {
+                        digits: new_digits,
+                        acc:    new_acc,
+                    };
+                    return Ok(true);
+                }
+                // Four digits collected. Decide what to do with
+                // the 16-bit value.
+                let code_unit = new_acc as u16;
+                if (0xD800..=0xDBFF).contains(&code_unit) {
+                    // High surrogate -- must be followed by a
+                    // low surrogate `\uYYYY`.
+                    state.string_escape = SurrogateBackslash { high: code_unit };
+                    return Ok(true);
+                }
+                if (0xDC00..=0xDFFF).contains(&code_unit) {
+                    return Err(err!(
+                        "Bare low surrogate U+{:04X} in \\uXXXX \
+                        escape without a preceding high \
+                        surrogate.", code_unit;
+                        String, Input, Decode, Invalid));
+                }
+                // BMP code point, push directly.
+                match char::from_u32(new_acc) {
+                    Some(ch) => {
+                        slurp.push(ch);
+                        state.string_escape = None;
+                        Ok(true)
+                    }
+                    Option::None => Err(err!(
+                        "Invalid Unicode code point U+{:04X} in \
+                        \\uXXXX escape.", new_acc;
+                        String, Input, Decode, Invalid)),
+                }
+            }
+            SurrogateBackslash { high } => {
+                if c != '\\' {
+                    return Err(err!(
+                        "High surrogate U+{:04X} not followed by \
+                        a `\\` to start the low-surrogate escape \
+                        (saw {:?}).", high, c;
+                        String, Input, Decode, Invalid));
+                }
+                state.string_escape = SurrogateU { high };
+                Ok(true)
+            }
+            SurrogateU { high } => {
+                if c != 'u' {
+                    return Err(err!(
+                        "High surrogate U+{:04X} not followed by \
+                        a `\\u` to start the low-surrogate escape \
+                        (saw \\{:?}).", high, c;
+                        String, Input, Decode, Invalid));
+                }
+                state.string_escape = LowSurrogate {
+                    digits: 0,
+                    acc:    0,
+                    high,
+                };
+                Ok(true)
+            }
+            LowSurrogate { digits, acc, high } => {
+                let hex = res!(Self::hex_digit_value(c));
+                let new_acc = (acc << 4) | hex;
+                let new_digits = digits + 1;
+                if new_digits < 4 {
+                    state.string_escape = LowSurrogate {
+                        digits: new_digits,
+                        acc:    new_acc,
+                        high,
+                    };
+                    return Ok(true);
+                }
+                let low = new_acc as u16;
+                if !(0xDC00..=0xDFFF).contains(&low) {
+                    return Err(err!(
+                        "Expected a low surrogate (U+DC00..U+DFFF) \
+                        after high surrogate U+{:04X}, got U+{:04X}.",
+                        high, low;
+                        String, Input, Decode, Invalid));
+                }
+                // Combine the surrogate pair into a
+                // supplementary plane code point.
+                let h = high as u32;
+                let l = low as u32;
+                let cp = 0x10000 + ((h - 0xD800) << 10) + (l - 0xDC00);
+                match char::from_u32(cp) {
+                    Some(ch) => {
+                        slurp.push(ch);
+                        state.string_escape = None;
+                        Ok(true)
+                    }
+                    Option::None => Err(err!(
+                        "Surrogate pair U+{:04X} U+{:04X} does \
+                        not form a valid code point (U+{:06X}).",
+                        high, low, cp;
+                        String, Input, Decode, Invalid)),
+                }
+            }
+        }
+    }
+
+    /// Convert a single ASCII hex digit to its numeric value.
+    /// Rejects anything else with a clear error message tagged
+    /// for the decoder's error chain.
+    fn hex_digit_value(c: char) -> Outcome<u32> {
+        match c {
+            '0'..='9'   => Ok((c as u32) - ('0' as u32)),
+            'a'..='f'   => Ok((c as u32) - ('a' as u32) + 10),
+            'A'..='F'   => Ok((c as u32) - ('A' as u32) + 10),
+            _ => Err(err!(
+                "Invalid hex digit '{}' in \\uXXXX escape \
+                sequence.", c;
+                String, Input, Decode, Invalid)),
+        }
     }
 
     /// Process a [`Slurp`] extracted during single-pass processing.  Numbers currently undergo an

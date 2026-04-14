@@ -34,6 +34,42 @@ use std::{
 };
 
 
+/// Escape the reserved characters in a string literal so it can
+/// be safely embedded between `"..."` in a JDAT or JSON document.
+///
+/// Implements RFC 8259 §7: `"`, `\`, the C0 control characters
+/// U+0000..U+001F, and U+007F (DEL for safety) are escaped. All
+/// other characters -- including all non-ASCII UTF-8 -- are
+/// passed through unchanged, so a string containing `'` or `’`
+/// or an emoji round-trips as raw bytes rather than as
+/// `\u0027` / `\u2019` / a surrogate pair.
+///
+/// This is the inverse of the decoder's `handle_string_escape`
+/// path (which accepts both raw characters and escapes on input),
+/// and round-tripping a decoded Dat through the encoder and back
+/// is a fixed point after the first pass.
+pub fn escape_json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"'             => out.push_str("\\\""),
+            '\\'            => out.push_str("\\\\"),
+            '\u{0008}'      => out.push_str("\\b"),
+            '\u{000C}'      => out.push_str("\\f"),
+            '\n'            => out.push_str("\\n"),
+            '\r'            => out.push_str("\\r"),
+            '\t'            => out.push_str("\\t"),
+            c if (c as u32) < 0x20 || (c as u32) == 0x7f => {
+                // Other C0 controls and DEL: hex-escape.
+                out.push_str(&fmt!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+
 /// Except for the addition of trailing commas and some explicit kindicles like (omap|, this is
 /// essentially JSON format.
 impl fmt::Display for Dat {
@@ -679,7 +715,7 @@ impl Dat {
                 let (bint, expi64) = n.as_bigint_and_exponent();
                 (fmt!("{}e{}", bint, -expi64), false)
             }
-            Self::Str(s) => (fmt!("\"{}\"", s), false),
+            Self::Str(s) => (fmt!("\"{}\"", escape_json_string(s)), false),
             // Molecule Kinds =========================
             // Unitary
             Self::Usr(ukid, optboxd) => {
