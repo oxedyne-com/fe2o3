@@ -15,6 +15,7 @@ use crate::srv::cfg::ApiRoute;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_net::http::{
+    fields::HeaderFields,
     header::HttpMethod,
     loc::HttpLocator,
     msg::HttpMessage,
@@ -48,23 +49,29 @@ pub trait ApiHandler: Send + Sync + 'static {
     /// Handle an incoming API request and return an HTTP response.
     ///
     /// # Arguments
-    /// * `route`      -- the matched API route config (path, handler
-    ///                   name, resolved handler-config key-value pairs).
-    /// * `method`     -- the HTTP method of the incoming request.
-    /// * `loc`        -- the parsed request location (path, query
-    ///                   string, parsed fields).
-    /// * `body`       -- the raw request body bytes.
-    /// * `tls_client` -- shared TLS client config for outbound HTTPS
-    ///                   calls the handler may need to make.
-    /// * `id`         -- connection identifier for logging.
+    /// * `route`       -- the matched API route config (path,
+    ///                    handler name, resolved handler-config
+    ///                    key-value pairs).
+    /// * `method`      -- the HTTP method of the incoming request.
+    /// * `loc`         -- the parsed request location (path, query
+    ///                    string, parsed fields).
+    /// * `body`        -- the raw request body bytes.
+    /// * `req_headers` -- the incoming request header fields, so
+    ///                    handlers can inspect values like
+    ///                    `Accept-Language`, `User-Agent`,
+    ///                    `Authorization`, or custom headers.
+    /// * `tls_client`  -- shared TLS client config for outbound
+    ///                    HTTPS calls the handler may need to make.
+    /// * `id`          -- connection identifier for logging.
     fn handle<'a>(
         &'a self,
-        route:      &'a ApiRoute,
-        method:     HttpMethod,
-        loc:        &'a HttpLocator,
-        body:       &'a [u8],
-        tls_client: &'a Option<Arc<ClientConfig>>,
-        id:         &'a str,
+        route:          &'a ApiRoute,
+        method:         HttpMethod,
+        loc:            &'a HttpLocator,
+        body:           &'a [u8],
+        req_headers:    &'a HeaderFields,
+        tls_client:     &'a Option<Arc<ClientConfig>>,
+        id:             &'a str,
     ) -> Pin<Box<dyn Future<Output = Outcome<HttpMessage>> + Send + 'a>>;
 }
 
@@ -137,13 +144,14 @@ impl std::fmt::Debug for ApiHandlerRegistry {
 /// field set (meaning the route should be served by an in-process
 /// handler rather than proxied to a remote upstream).
 pub async fn dispatch(
-    registry:   &ApiHandlerRegistry,
-    route:      &ApiRoute,
-    method:     HttpMethod,
-    loc:        &HttpLocator,
-    body:       &[u8],
-    tls_client: &Option<Arc<ClientConfig>>,
-    id:         &str,
+    registry:       &ApiHandlerRegistry,
+    route:          &ApiRoute,
+    method:         HttpMethod,
+    loc:            &HttpLocator,
+    body:           &[u8],
+    req_headers:    &HeaderFields,
+    tls_client:     &Option<Arc<ClientConfig>>,
+    id:             &str,
 )
     -> Outcome<HttpMessage>
 {
@@ -159,7 +167,9 @@ pub async fn dispatch(
         }
     };
     match registry.handlers.get(handler_name) {
-        Some(handler) => handler.handle(route, method, loc, body, tls_client, id).await,
+        Some(handler) => handler.handle(
+            route, method, loc, body, req_headers, tls_client, id,
+        ).await,
         None => {
             warn!("{}: No registered API handler '{}'.", id, handler_name);
             Ok(HttpMessage::respond_with_text(

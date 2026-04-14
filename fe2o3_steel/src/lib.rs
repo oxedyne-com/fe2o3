@@ -124,6 +124,24 @@ pub mod prelude {
         extract_json_string,
     };
 
+    // Request-side HTTP types that handlers need to read incoming
+    // request headers and construct response messages without
+    // depending on `fe2o3_net` directly.
+    pub use oxedyne_fe2o3_net::http::{
+        fields::{
+            HeaderFields,
+            HeaderFieldValue,
+            HeaderName,
+        },
+        header::{
+            HttpHeadline,
+            HttpMethod,
+        },
+        loc::HttpLocator,
+        msg::HttpMessage,
+        status::HttpStatus,
+    };
+
     // Re-exports from the upstream syntax / TUI crates so that app
     // extensions can implement `AppExtension` without depending on
     // them directly.

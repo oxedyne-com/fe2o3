@@ -35,7 +35,10 @@ use oxedyne_fe2o3_net::{
     file::RequestPath,
     http::{
         client::https_request,
-        fields::HeaderName,
+        fields::{
+            HeaderFields,
+            HeaderName,
+        },
         handler::WebHandler,
         header::HttpMethod,
         loc::HttpLocator,
@@ -200,12 +203,13 @@ impl<
         DB:     Database<UIDL, UID, ENC, KH>,
     >(
         &self,
-        loc:        HttpLocator,
-        _response:   Option<HttpMessage>,
-        _body:       Vec<u8>,
-        _db:         Option<(Arc<RwLock<DB>>, UID)>,
-        _sid_opt:    &Option<SID>,
-        id:         &String, 
+        loc:            HttpLocator,
+        _response:      Option<HttpMessage>,
+        _body:          Vec<u8>,
+        req_headers:    Arc<HeaderFields>,
+        _db:            Option<(Arc<RwLock<DB>>, UID)>,
+        _sid_opt:       &Option<SID>,
+        id:             &String,
     )
         -> impl std::future::Future<Output = Outcome<Option<HttpMessage>>> + Send
     {
@@ -233,6 +237,7 @@ impl<
                     HttpMethod::GET,
                     &loc,
                     &[],
+                    &req_headers,
                     &tls_client,
                     &id,
                 ).await);
@@ -330,12 +335,13 @@ impl<
         DB:     Database<UIDL, UID, ENC, KH>,
     >(
         &self,
-        loc:        HttpLocator,
-        _response:  Option<HttpMessage>,
-        body:       Vec<u8>,
-        _db:        Option<(Arc<RwLock<DB>>, UID)>,
-        _sid_opt:   &Option<SID>,
-        id:         &String,
+        loc:            HttpLocator,
+        _response:      Option<HttpMessage>,
+        body:           Vec<u8>,
+        req_headers:    Arc<HeaderFields>,
+        _db:            Option<(Arc<RwLock<DB>>, UID)>,
+        _sid_opt:       &Option<SID>,
+        id:             &String,
     )
         -> impl std::future::Future<Output = Outcome<Option<HttpMessage>>> + Send
     {
@@ -353,7 +359,7 @@ impl<
                 debug!("{}: POST {} -> webhook handler '{}'",
                     id, request_path, wh.handler);
                 return webhook::dispatch(
-                    &webhook_registry, wh, &body, &tls_client, &id,
+                    &webhook_registry, wh, &body, &req_headers, &tls_client, &id,
                 ).await;
             }
 
@@ -380,6 +386,7 @@ impl<
                     HttpMethod::POST,
                     &loc,
                     &body,
+                    &req_headers,
                     &tls_client,
                     &id,
                 ).await);

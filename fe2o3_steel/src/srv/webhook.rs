@@ -7,6 +7,7 @@ use crate::srv::cfg::WebhookRoute;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_net::http::{
+    fields::HeaderFields,
     msg::HttpMessage,
     status::HttpStatus,
 };
@@ -35,17 +36,22 @@ pub trait WebhookHandler: Send + Sync + 'static {
     /// Handle an incoming webhook POST body and return an HTTP response.
     ///
     /// # Arguments
-    /// * `route` — the matched webhook route config (path, handler name,
-    ///   resolved config key-value pairs).
-    /// * `body` — the raw request body bytes.
-    /// * `tls_client` — shared TLS client config for outbound HTTPS calls.
-    /// * `id` — connection identifier for logging.
+    /// * `route` -- the matched webhook route config (path, handler
+    ///   name, resolved config key-value pairs).
+    /// * `body` -- the raw request body bytes.
+    /// * `req_headers` -- the incoming request header fields, so
+    ///   handlers can inspect signature headers (e.g. `Stripe-Signature`)
+    ///   or content-type headers without a separate side channel.
+    /// * `tls_client` -- shared TLS client config for outbound HTTPS
+    ///   calls.
+    /// * `id` -- connection identifier for logging.
     fn handle<'a>(
         &'a self,
-        route:      &'a WebhookRoute,
-        body:       &'a [u8],
-        tls_client: &'a Option<Arc<ClientConfig>>,
-        id:         &'a str,
+        route:          &'a WebhookRoute,
+        body:           &'a [u8],
+        req_headers:    &'a HeaderFields,
+        tls_client:     &'a Option<Arc<ClientConfig>>,
+        id:             &'a str,
     ) -> Pin<Box<dyn Future<Output = Outcome<Option<HttpMessage>>> + Send + 'a>>;
 }
 
@@ -107,16 +113,19 @@ impl std::fmt::Debug for WebhookRegistry {
 
 /// Dispatch an incoming webhook to the appropriate registered handler.
 pub async fn dispatch(
-    registry:   &WebhookRegistry,
-    route:      &WebhookRoute,
-    body:       &[u8],
-    tls_client: &Option<Arc<ClientConfig>>,
-    id:         &str,
+    registry:       &WebhookRegistry,
+    route:          &WebhookRoute,
+    body:           &[u8],
+    req_headers:    &HeaderFields,
+    tls_client:     &Option<Arc<ClientConfig>>,
+    id:             &str,
 )
     -> Outcome<Option<HttpMessage>>
 {
     match registry.handlers.get(&route.handler) {
-        Some(handler) => handler.handle(route, body, tls_client, id).await,
+        Some(handler) => handler.handle(
+            route, body, req_headers, tls_client, id,
+        ).await,
         None => {
             warn!("{}: No registered webhook handler '{}'.", id, route.handler);
             Ok(Some(HttpMessage::respond_with_text(

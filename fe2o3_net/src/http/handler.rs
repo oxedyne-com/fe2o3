@@ -1,5 +1,6 @@
 use crate::{
     http::{
+        fields::HeaderFields,
         msg::HttpMessage,
         loc::HttpLocator,
     },
@@ -35,15 +36,16 @@ pub trait WebHandler:
         DB:     Database<UIDL, UID, ENC, KH>,
     >(
         &self,
-        loc:        HttpLocator,
-        response:   Option<HttpMessage>,
-        body:       Vec<u8>,
-        db:         Option<(Arc<RwLock<DB>>, UID)>,
-        sid_opt:    &Option<SID>,
-        id:         &String, 
+        loc:            HttpLocator,
+        response:       Option<HttpMessage>,
+        body:           Vec<u8>,
+        req_headers:    Arc<HeaderFields>,
+        db:             Option<(Arc<RwLock<DB>>, UID)>,
+        sid_opt:        &Option<SID>,
+        id:             &String,
     )
         -> impl std::future::Future<Output = Outcome<Option<HttpMessage>>> + Send;
-    
+
     fn handle_post<
         const SIDL: usize,
         const UIDL: usize,
@@ -54,12 +56,13 @@ pub trait WebHandler:
         DB:     Database<UIDL, UID, ENC, KH>,
     >(
         &self,
-        loc:        HttpLocator,
-        response:   Option<HttpMessage>,
-        body:       Vec<u8>,
-        db:         Option<(Arc<RwLock<DB>>, UID)>,
-        sid_opt:    &Option<SID>,
-        id:         &String, 
+        loc:            HttpLocator,
+        response:       Option<HttpMessage>,
+        body:           Vec<u8>,
+        req_headers:    Arc<HeaderFields>,
+        db:             Option<(Arc<RwLock<DB>>, UID)>,
+        sid_opt:        &Option<SID>,
+        id:             &String,
     )
         -> impl std::future::Future<Output = Outcome<Option<HttpMessage>>> + Send;
 }

@@ -39,6 +39,7 @@ use oxedyne_fe2o3_syntax::SyntaxRef;
 use std::{
     net::SocketAddr,
     pin::Pin,
+    sync::Arc,
 };
 
 use tokio::{
@@ -112,6 +113,9 @@ impl<
     
                     match request.header.headline {
                         HttpHeadline::Request { method, loc } => {
+                            let req_headers = Arc::new(
+                                request.header.fields.clone(),
+                            );
                             let body = request.body;
                             match method {
                                 HttpMethod::GET => {
@@ -119,6 +123,7 @@ impl<
                                         loc,
                                         response,
                                         body,
+                                        req_headers,
                                         self.db.clone(),
                                         &sid_opt,
                                         &id,

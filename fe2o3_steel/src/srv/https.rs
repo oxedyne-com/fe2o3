@@ -48,6 +48,7 @@ use oxedyne_fe2o3_net::{
 use std::{
     net::SocketAddr,
     pin::Pin,
+    sync::Arc,
 };
 
 use tokio::{
@@ -218,6 +219,17 @@ impl<
                                     );
                                 response = Some(resp);
                             } else {
+                                // Wrap the incoming header fields in an
+                                // `Arc` so the downstream handler (and
+                                // any API / webhook handler it dispatches
+                                // to) can read request headers without
+                                // another copy. Cloning here rather than
+                                // moving because the POST branch still
+                                // needs `request.header.fields` a few
+                                // lines down.
+                                let req_headers = Arc::new(
+                                    request.header.fields.clone(),
+                                );
                                 let body = request.body;
                                 match method {
                                     HttpMethod::GET => {
@@ -228,6 +240,7 @@ impl<
                                             loc,
                                             response,
                                             body,
+                                            req_headers.clone(),
                                             vhost_db,
                                             &sid_opt,
                                             &id,
@@ -256,6 +269,7 @@ impl<
                                             loc,
                                             response,
                                             body,
+                                            req_headers.clone(),
                                             vhost_db,
                                             &sid_opt,
                                             &id,
