@@ -149,19 +149,34 @@ impl RedirectRule {
 /// Maps a local POST path to an upstream HTTPS URL. Steel forwards the
 /// request body verbatim and injects the configured headers (typically
 /// containing secret credentials loaded from files at startup).
+///
+/// As an alternative to a remote upstream, a route may name an
+/// in-process `handler` registered by an `AppExtension`. In that case
+/// Steel dispatches the request to the registered `ApiHandler`
+/// instead of proxying. The two modes are mutually exclusive: a
+/// route either has `upstream*` set or `handler` set, never both.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApiRoute {
     /// Local path to match (e.g. `/api/payments/checkout`).
     pub path:           String,
-    /// Upstream hostname (e.g. `api.example.com`).
-    pub upstream_host:  String,
-    /// Upstream port (defaults to 443).
-    pub upstream_port:  u16,
-    /// Upstream request path (e.g. `/v1/checkout/sessions`).
-    pub upstream_path:  String,
+    /// Upstream hostname (e.g. `api.example.com`). `None` when the
+    /// route is served by an in-process handler.
+    pub upstream_host:  Option<String>,
+    /// Upstream port (defaults to 443). `None` when handler-served.
+    pub upstream_port:  Option<u16>,
+    /// Upstream request path (e.g. `/v1/checkout/sessions`). `None`
+    /// when handler-served.
+    pub upstream_path:  Option<String>,
     /// Headers injected into the upstream request. Values have already been
     /// resolved (any `{file:...}` references expanded at config load time).
     pub headers:        Vec<(String, String)>,
+    /// Name of an in-process API handler registered via `AppExtension`.
+    /// `None` when the route is a proxy.
+    pub handler:        Option<String>,
+    /// Handler-specific configuration key-value pairs. Values support
+    /// `{file:}` and `{env:}` placeholders, resolved at startup.
+    /// Empty when the route is a proxy.
+    pub config:         Vec<(String, String)>,
 }
 
 impl ApiRoute {
@@ -178,16 +193,43 @@ impl ApiRoute {
                 "ApiRoute: 'path' field is required and must be a string.";
                 Invalid, Input, Missing)),
         };
-        // Upstream URL (required).
-        let upstream = match m.get(&dat!("upstream")) {
-            Some(Dat::Str(s)) => s.clone(),
+        // Either `upstream` (proxy) or `handler` (in-process). Not both.
+        let upstream_str = match m.get(&dat!("upstream")) {
+            Some(Dat::Str(s)) => Some(s.clone()),
+            None              => None,
             _ => return Err(err!(
-                "ApiRoute: 'upstream' field is required and must be a string.";
-                Invalid, Input, Missing)),
+                "ApiRoute '{}': 'upstream' must be a string when present.", path;
+                Invalid, Input, Mismatch)),
         };
-        // Parse upstream URL into host, port, path.
-        let (host, port, upath) = res!(Self::parse_upstream(&upstream));
-        // Headers (optional map of name → value).
+        let handler = match m.get(&dat!("handler")) {
+            Some(Dat::Str(s)) => Some(s.clone()),
+            None              => None,
+            _ => return Err(err!(
+                "ApiRoute '{}': 'handler' must be a string when present.", path;
+                Invalid, Input, Mismatch)),
+        };
+        match (&upstream_str, &handler) {
+            (None, None) => return Err(err!(
+                "ApiRoute '{}': must specify either 'upstream' (for proxy \
+                routes) or 'handler' (for in-process routes).", path;
+                Invalid, Input, Missing)),
+            (Some(_), Some(_)) => return Err(err!(
+                "ApiRoute '{}': 'upstream' and 'handler' are mutually \
+                exclusive. A route is either a proxy or in-process, not \
+                both.", path;
+                Invalid, Input, Conflict)),
+            _ => {}
+        }
+        // Parse upstream URL into host, port, path (proxy mode only).
+        let (upstream_host, upstream_port, upstream_path) = match upstream_str {
+            Some(url) => {
+                let (h, p, up) = res!(Self::parse_upstream(&url));
+                (Some(h), Some(p), Some(up))
+            }
+            None => (None, None, None),
+        };
+        // Headers (optional map of name -> value). Used in proxy mode for
+        // headers injected into the upstream request; empty for handler mode.
         let headers = match m.get(&dat!("headers")) {
             Some(Dat::Map(sub)) => {
                 let mut out = Vec::new();
@@ -195,13 +237,13 @@ impl ApiRoute {
                     let name = match k {
                         Dat::Str(s) => s.clone(),
                         _ => return Err(err!(
-                            "ApiRoute: header names must be strings.";
+                            "ApiRoute '{}': header names must be strings.", path;
                             Invalid, Input, Mismatch)),
                     };
                     let raw_val = match v {
                         Dat::Str(s) => s.clone(),
                         _ => return Err(err!(
-                            "ApiRoute: header values must be strings.";
+                            "ApiRoute '{}': header values must be strings.", path;
                             Invalid, Input, Mismatch)),
                     };
                     out.push((name, raw_val));
@@ -210,16 +252,45 @@ impl ApiRoute {
             }
             None => Vec::new(),
             _ => return Err(err!(
-                "ApiRoute: 'headers' must be a map.";
+                "ApiRoute '{}': 'headers' must be a map.", path;
                 Invalid, Input, Mismatch)),
+        };
+        // Handler-specific config (optional map). Only used in handler mode.
+        let config = match m.get(&dat!("config")) {
+            Some(Dat::Map(sub)) => {
+                let mut out = Vec::new();
+                for (k, v) in sub.iter() {
+                    let name = match k {
+                        Dat::Str(s) => s.clone(),
+                        _ => continue,
+                    };
+                    let val = match v {
+                        Dat::Str(s) => s.clone(),
+                        _ => continue,
+                    };
+                    out.push((name, val));
+                }
+                out
+            }
+            None => Vec::new(),
+            _ => Vec::new(),
         };
         Ok(Self {
             path,
-            upstream_host: host,
-            upstream_port: port,
-            upstream_path: upath,
+            upstream_host,
+            upstream_port,
+            upstream_path,
             headers,
+            handler,
+            config,
         })
+    }
+
+    /// Look up a handler-config value by key.
+    pub fn get_config(&self, key: &str) -> Option<&str> {
+        self.config.iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
     }
 
     /// Parse an `https://host[:port]/path` URL into components.
@@ -249,11 +320,15 @@ impl ApiRoute {
         Ok((host, port, path.to_string()))
     }
 
-    /// Expand `{file:path}` placeholders in all header values by reading
-    /// the referenced files relative to `root`. Must be called once at
-    /// startup before the route is used for proxying.
+    /// Expand `{file:path}` and `{env:}` placeholders in all header
+    /// values and handler-config values by reading the referenced
+    /// files relative to `root`. Must be called once at startup
+    /// before the route is dispatched.
     pub fn resolve_headers(&mut self, root: &Path) -> Outcome<()> {
         for (_name, value) in &mut self.headers {
+            *value = res!(Self::resolve_file_refs(value, root));
+        }
+        for (_name, value) in &mut self.config {
             *value = res!(Self::resolve_file_refs(value, root));
         }
         Ok(())

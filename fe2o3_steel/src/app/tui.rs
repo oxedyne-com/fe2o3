@@ -5,10 +5,17 @@ use crate::{
         cfg::AppConfig,
         constant,
         dev,
+        ext::{
+            AppExtension,
+            NoExtension,
+        },
         repl::AppShellContext,
         syntax as app_syntax,
     },
-    srv::webhook::WebhookRegistry,
+    srv::{
+        api::ApiHandlerRegistry,
+        webhook::WebhookRegistry,
+    },
 };
 
 use std::sync::Arc;
@@ -75,23 +82,39 @@ pub struct AppStatus {
     pub web:    State,
 }
 
-/// Start the Steel application with no registered webhook handlers.
+/// Start the Steel application with no app extension.
 ///
 /// This is the entry point for the stock `steel` binary. Apps that
-/// need custom webhook handlers should call [`run_with_webhooks`] instead.
+/// need custom webhook handlers, API handlers or shell commands
+/// should implement `AppExtension` and call [`run_with_extension`]
+/// instead.
 pub fn run() -> Outcome<()> {
-    run_with_webhooks(WebhookRegistry::new())
+    run_with_extension(NoExtension)
 }
 
-/// Start the Steel application with a pre-built webhook handler registry.
+/// Start the Steel application with a custom app extension.
 ///
-/// App binaries call this after registering their handlers:
+/// App binaries implement `AppExtension` for their integration
+/// surface and call this entry point:
 /// ```rust
-/// let mut reg = WebhookRegistry::new();
-/// reg.register("my_handler", MyHandler);
-/// run_with_webhooks(reg)?;
+/// struct MyApp;
+/// impl AppExtension for MyApp { /* ... */ }
+///
+/// fn main() -> Outcome<()> {
+///     run_with_extension(MyApp)
+/// }
 /// ```
-pub fn run_with_webhooks(registry: WebhookRegistry) -> Outcome<()> {
+///
+/// Steel uses the extension to:
+/// * populate the shell Syntax tree with the app's own commands
+///   (so `./steel help` lists them with proper categories and args);
+/// * build the server-wide webhook handler registry from
+///   `AppExtension::webhook_handlers`;
+/// * build the server-wide API handler registry from
+///   `AppExtension::api_handlers`;
+/// * dispatch any shell command not owned by Steel through
+///   `AppExtension::dispatch_cmd`.
+pub fn run_with_extension<E: AppExtension>(extension: E) -> Outcome<()> {
 
     let mut app_status = AppStatus::default();
     let cwd = res!(std::env::current_dir());
@@ -323,22 +346,45 @@ pub fn run_with_webhooks(registry: WebhookRegistry) -> Outcome<()> {
         Err(e) => return Err(err!(e, "While setting up dev environment."; Init)),
     }
 
-    let syntax = res!(app_syntax::new_shell(
+    // Build the syntax tree, then let the extension contribute its
+    // own commands so they show up in `help` alongside Steel's
+    // built-ins.
+    let mut syntax_builder = res!(app_syntax::new_shell_raw(
         &cfg.app_human_name,
         &constant::VERSION,
         &fmt!("{} app: {}", cfg.app_human_name, cfg.app_description),
     ));
+    syntax_builder = res!(extension.extend_syntax(syntax_builder));
+    let syntax = oxedyne_fe2o3_syntax::core::SyntaxRef::new(syntax_builder);
+
+    // Wrap the extension once and use the Arc clones from here on:
+    // one clone lives in AppShellContext for CLI dispatch; another
+    // is consumed below to drain its handlers into the registries.
+    let extension_arc: Arc<dyn AppExtension> = Arc::new(extension);
+
+    // Drain webhook + API handlers from the extension into their
+    // registries.
+    let mut webhook_registry = WebhookRegistry::new();
+    for (name, h) in extension_arc.webhook_handlers() {
+        webhook_registry.insert_boxed(name, h);
+    }
+    let mut api_handler_registry = ApiHandlerRegistry::new();
+    for (name, h) in extension_arc.api_handlers() {
+        api_handler_registry.insert_boxed(name, h);
+    }
 
     let mut context = AppShellContext {
-        stat:               app_status,
-        app_cfg:            cfg.clone(),
+        stat:                   app_status,
+        app_cfg:                cfg.clone(),
         syntax,
-        ws:                 BTreeMap::new(),
-        db_enc_key:         db_default_enc_key,
+        ws:                     BTreeMap::new(),
+        db_enc_key:             db_default_enc_key,
         wallet,
         unlocked_admin_name,
         unlocked_admin_scopes,
-        webhook_registry:   Arc::new(registry),
+        webhook_registry:       Arc::new(webhook_registry),
+        api_handler_registry:   Arc::new(api_handler_registry),
+        extension:              extension_arc,
     };
 
     let mut shell_cfg = ShellConfig::default();

@@ -1,4 +1,8 @@
 use crate::srv::{
+    api::{
+        self,
+        ApiHandlerRegistry,
+    },
     cfg::{
         ApiRoute,
         ServerConfig,
@@ -76,6 +80,8 @@ pub struct AppWebHandler<
     pub webhook_routes:         Vec<WebhookRoute>,
     /// Registered webhook handler implementations.
     pub webhook_registry:       Arc<WebhookRegistry>,
+    /// Registered in-process API handler implementations.
+    pub api_handler_registry:   Arc<ApiHandlerRegistry>,
     /// TLS client config for outbound HTTPS requests to upstream APIs.
     pub tls_client:             Option<Arc<ClientConfig>>,
 }
@@ -94,6 +100,7 @@ impl<
         api_routes:             Vec<ApiRoute>,
         webhook_routes:         Vec<WebhookRoute>,
         webhook_registry:       Arc<WebhookRegistry>,
+        api_handler_registry:   Arc<ApiHandlerRegistry>,
         tls_client:             Option<Arc<ClientConfig>>,
     )
         -> Self
@@ -107,6 +114,7 @@ impl<
             api_routes,
             webhook_routes,
             webhook_registry,
+            api_handler_registry,
             tls_client,
         }
     }
@@ -204,8 +212,33 @@ impl<
         let dev_mode = self.dev_mode;
         let rpath = loc.path.clone();
         let id = id.to_string();
+        let request_path = loc.path.as_string().to_string();
+        let api_routes = self.api_routes.clone();
+        let api_handler_registry = self.api_handler_registry.clone();
+        let tls_client = self.tls_client.clone();
 
         async move {
+            // Check API routes for a handler-mode match before falling
+            // through to static file serving. Proxy-mode API routes are
+            // POST-only, so we only match handler-mode routes here.
+            if let Some(route) = api_routes.iter().find(|r|
+                r.path == request_path && r.handler.is_some())
+            {
+                debug!("{}: GET {} -> api handler '{}'",
+                    id, request_path,
+                    route.handler.as_deref().unwrap_or("?"));
+                let resp = res!(api::dispatch(
+                    &api_handler_registry,
+                    route,
+                    HttpMethod::GET,
+                    &loc,
+                    &[],
+                    &tls_client,
+                    &id,
+                ).await);
+                return Ok(Some(resp));
+            }
+
             let abs_path = match self.router(&loc, &id).await {
                 Ok(path) => path, // The path may not exist, but at least we have one.
                 Err(e) => {
@@ -311,6 +344,7 @@ impl<
         let api_routes = self.api_routes.clone();
         let webhook_routes = self.webhook_routes.clone();
         let webhook_registry = self.webhook_registry.clone();
+        let api_handler_registry = self.api_handler_registry.clone();
         let tls_client = self.tls_client.clone();
 
         async move {
@@ -327,7 +361,7 @@ impl<
             let route = match api_routes.iter().find(|r| r.path == request_path) {
                 Some(r) => r,
                 None => {
-                    debug!("{}: POST {} — no matching API route.", id, request_path);
+                    debug!("{}: POST {} -- no matching API route.", id, request_path);
                     return Ok(Some(HttpMessage::respond_with_text(
                         HttpStatus::NotFound,
                         "No API route matches this path.",
@@ -335,6 +369,24 @@ impl<
                 }
             };
 
+            // In-process handler path: dispatch to the registered ApiHandler.
+            if route.handler.is_some() {
+                debug!("{}: POST {} -> api handler '{}'",
+                    id, request_path,
+                    route.handler.as_deref().unwrap_or("?"));
+                let resp = res!(api::dispatch(
+                    &api_handler_registry,
+                    route,
+                    HttpMethod::POST,
+                    &loc,
+                    &body,
+                    &tls_client,
+                    &id,
+                ).await);
+                return Ok(Some(resp));
+            }
+
+            // Proxy path: forward to the upstream.
             let tls_cfg = match &tls_client {
                 Some(cfg) => cfg.clone(),
                 None => {
@@ -347,6 +399,25 @@ impl<
                         "Server TLS client not configured for outbound requests.",
                     )));
                 }
+            };
+
+            let upstream_host = match &route.upstream_host {
+                Some(h) => h,
+                None => {
+                    error!(err!(
+                        "{}: API route '{}' is in proxy mode but has no upstream_host.",
+                        id, request_path;
+                        Init, Missing));
+                    return Ok(Some(HttpMessage::respond_with_text(
+                        HttpStatus::InternalServerError,
+                        "API proxy route misconfigured.",
+                    )));
+                }
+            };
+            let upstream_port = route.upstream_port.unwrap_or(443);
+            let upstream_path = match &route.upstream_path {
+                Some(p) => p.as_str(),
+                None    => "/",
             };
 
             // Build upstream headers.
@@ -368,14 +439,14 @@ impl<
             }
 
             debug!("{}: POST {} -> {}:{}{}", id, request_path,
-                route.upstream_host, route.upstream_port, route.upstream_path);
+                upstream_host, upstream_port, upstream_path);
 
             // Forward the request to the upstream.
             let upstream_resp = res!(https_request(
-                &route.upstream_host,
-                route.upstream_port,
+                upstream_host,
+                upstream_port,
                 HttpMethod::POST,
-                &route.upstream_path,
+                upstream_path,
                 &hdrs,
                 &body,
                 tls_cfg,

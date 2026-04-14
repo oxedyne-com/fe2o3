@@ -94,12 +94,26 @@ pub mod app;
 
 /// Public API for apps that build on Steel.
 ///
-/// Apps that need custom webhook handlers depend on `fe2o3_steel` as a
-/// library and use these types to register their handlers before starting
-/// the server.
+/// Apps that need custom webhook handlers, in-process API handlers
+/// or shell commands depend on `fe2o3_steel` as a library, implement
+/// the `AppExtension` trait, and call `run_with_extension`.
 pub mod prelude {
-    pub use crate::app::tui::{run, run_with_webhooks};
-    pub use crate::srv::cfg::WebhookRoute;
+    pub use crate::app::ext::{
+        AppExtension,
+        NoExtension,
+    };
+    pub use crate::app::tui::{
+        run,
+        run_with_extension,
+    };
+    pub use crate::srv::api::{
+        ApiHandler,
+        ApiHandlerRegistry,
+    };
+    pub use crate::srv::cfg::{
+        ApiRoute,
+        WebhookRoute,
+    };
     pub use crate::srv::webhook::{
         WebhookHandler,
         WebhookRegistry,
@@ -107,5 +121,25 @@ pub mod prelude {
         url_encode,
         extract_value,
         extract_json_string,
+    };
+
+    // Re-exports from the upstream syntax / TUI crates so that app
+    // extensions can implement `AppExtension` without depending on
+    // them directly.
+    pub use oxedyne_fe2o3_syntax::{
+        Syntax,
+        msg::MsgCmd,
+        cmd::{
+            Cmd,
+            CmdConfig,
+        },
+        arg::{
+            Arg,
+            ArgConfig,
+        },
+    };
+    pub use oxedyne_fe2o3_tui::lib_tui::repl::{
+        Evaluation,
+        ShellConfig,
     };
 }

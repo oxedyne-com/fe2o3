@@ -2,9 +2,11 @@ use crate::{
     app::{
         cfg::AppConfig,
         constant as app_const,
+        ext::AppExtension,
         tui::AppStatus,
     },
     srv::{
+        api::ApiHandlerRegistry,
         cert::Certificate,
         cfg::ServerConfig,
         constant as srv_const,
@@ -95,6 +97,13 @@ pub struct AppShellContext {
     /// App-registered webhook handlers, dispatched by name from the
     /// webhook route config.
     pub webhook_registry:   Arc<WebhookRegistry>,
+    /// App-registered API handlers, dispatched by name from any
+    /// `api_routes` entry that has its `handler` field set.
+    pub api_handler_registry: Arc<ApiHandlerRegistry>,
+    /// App extension that contributed shell commands and handlers.
+    /// Held so the REPL dispatch loop can route unknown commands
+    /// through `AppExtension::dispatch_cmd`.
+    pub extension:          Arc<dyn AppExtension>,
 }
 
 impl ShellContext for AppShellContext {
@@ -201,7 +210,18 @@ impl AppShellContext {
                 "admin"     => evals.push(res!(self.manage_admin(&shell_cfg, Some(cmd)))),
                 // Mail
                 "mailpass"  => evals.push(res!(self.mailpass(&shell_cfg, Some(cmd)))),
-                _ => (), // Not implemented yet.
+                _ => {
+                    // Not a built-in command -- offer it to the app
+                    // extension. Cloning the Arc is cheap and lets the
+                    // borrow checker see that `self` is not aliased.
+                    let ext = self.extension.clone();
+                    match res!(ext.dispatch_cmd(cmd_key.as_str(), cmd, shell_cfg)) {
+                        Some(eval) => evals.push(eval),
+                        None => {
+                            warn!("Command '{}' is not implemented.", cmd_key);
+                        }
+                    }
+                }
             }
         }
         Ok(evals)

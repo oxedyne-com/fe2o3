@@ -78,6 +78,13 @@ impl WebhookRegistry {
         self.handlers.insert(name.to_string(), Box::new(handler));
     }
 
+    /// Insert a handler already boxed (used by `AppExtension` wiring,
+    /// which produces `Box<dyn WebhookHandler>` from its trait method
+    /// rather than handing over concrete handler types).
+    pub fn insert_boxed(&mut self, name: String, handler: Box<dyn WebhookHandler>) {
+        self.handlers.insert(name, handler);
+    }
+
     /// Returns `true` if a handler is registered for the given name.
     pub fn has(&self, name: &str) -> bool {
         self.handlers.contains_key(name)

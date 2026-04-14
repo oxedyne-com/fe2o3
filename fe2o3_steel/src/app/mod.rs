@@ -1,6 +1,7 @@
 pub mod cfg;
 pub mod constant;
 pub mod dev;
+pub mod ext;
 pub mod https;
 pub mod mail;
 pub mod repl;

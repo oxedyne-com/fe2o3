@@ -392,6 +392,7 @@ impl AppShellContext {
                 api_routes,
                 webhook_routes,
                 self.webhook_registry.clone(),
+                self.api_handler_registry.clone(),
                 tls_client.clone(),
             );
 
