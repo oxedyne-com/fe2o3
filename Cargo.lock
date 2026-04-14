@@ -1991,6 +1991,7 @@ dependencies = [
  "oxedyne_fe2o3_iop_db",
  "oxedyne_fe2o3_iop_hash",
  "oxedyne_fe2o3_jdat",
+ "oxedyne_fe2o3_mail",
  "oxedyne_fe2o3_namex",
  "oxedyne_fe2o3_net",
  "oxedyne_fe2o3_num",
@@ -2046,7 +2047,9 @@ dependencies = [
  "libc",
  "oxedyne_fe2o3_core",
  "oxedyne_fe2o3_data",
+ "oxedyne_fe2o3_hash",
  "oxedyne_fe2o3_iop_crypto",
+ "oxedyne_fe2o3_iop_hash",
  "oxedyne_fe2o3_jdat",
  "oxedyne_fe2o3_namex",
  "oxedyne_fe2o3_text",
@@ -2166,6 +2169,17 @@ dependencies = [
  "quote",
  "rand_core 0.6.4",
  "syn 1.0.109",
+]
+
+[[package]]
+name = "oxedyne_fe2o3_mail"
+version = "0.5.0"
+dependencies = [
+ "oxedyne_fe2o3_core",
+ "oxedyne_fe2o3_hash",
+ "oxedyne_fe2o3_iop_hash",
+ "oxedyne_fe2o3_jdat",
+ "oxedyne_fe2o3_net",
 ]
 
 [[package]]
@@ -2322,6 +2336,7 @@ dependencies = [
  "oxedyne_fe2o3_iop_db",
  "oxedyne_fe2o3_iop_hash",
  "oxedyne_fe2o3_jdat",
+ "oxedyne_fe2o3_mail",
  "oxedyne_fe2o3_namex",
  "oxedyne_fe2o3_net",
  "oxedyne_fe2o3_o3db_sync",

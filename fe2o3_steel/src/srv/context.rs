@@ -151,7 +151,12 @@ pub struct ServerContext<
 > {
     pub cfg:        ServerConfig,
     pub root:       NormPathBuf,
-    pub db:         Option<(Arc<RwLock<DB>>, UID)>,
+    /// Per-vhost Ozone databases, keyed by the canonical (primary) hostname
+    /// of each vhost in lowercase. A vhost that has no database configured
+    /// (typical for pure-redirect vhosts) has no entry here. All alias
+    /// hostnames resolve to the primary via `vhost_for()` first, then use
+    /// the primary as the lookup key into this map.
+    pub vhost_dbs:  HashMap<String, (Arc<RwLock<DB>>, UID)>,
     pub protocol:   Protocol<WH, WSH>,
     phantom3:       PhantomData<ENC>,
     phantom4:       PhantomData<KH>,
@@ -172,7 +177,7 @@ impl<
         Self {
             cfg:        self.cfg.clone(),
             root:       self.root.clone(),
-            db:         self.db.clone(),
+            vhost_dbs:  self.vhost_dbs.clone(),
             protocol:   self.protocol.clone(),
             phantom3:   PhantomData,
             phantom4:   PhantomData,
@@ -192,10 +197,14 @@ impl<
     ServerContext<UIDL, UID, ENC, KH, DB, WH, WSH>
 {
     /// Create a new server context.
+    ///
+    /// `vhost_dbs` maps the canonical (primary) hostname of each vhost, in
+    /// lowercase, to its already-started Ozone database handle and the
+    /// user id under which database writes will be attributed.
     pub fn new(
         cfg:        ServerConfig,
         root:       NormPathBuf,
-        db:         Option<(DB, UID)>,
+        vhost_dbs:  HashMap<String, (Arc<RwLock<DB>>, UID)>,
         protocol:   Protocol<WH, WSH>,
     )
         -> Self
@@ -203,11 +212,24 @@ impl<
         Self {
             cfg,
             root,
-            db:         db.map(|(db, uid)| (Arc::new(RwLock::new(db)), uid)),
+            vhost_dbs,
             protocol,
             phantom3:   PhantomData,
             phantom4:   PhantomData,
         }
+    }
+
+    /// Resolve the Ozone database for a given vhost. `vhost_key` is the
+    /// canonical (primary) hostname of the vhost in lowercase, as returned
+    /// by `VhostRuntime::primary_hostname()`. Returns `None` when the vhost
+    /// has no database configured.
+    pub fn db_for_vhost(
+        &self,
+        vhost_key: &str,
+    )
+        -> Option<(Arc<RwLock<DB>>, UID)>
+    {
+        self.vhost_dbs.get(&vhost_key.to_lowercase()).cloned()
     }
 
     /// Clone the context (explicit alias for situations where type inference
@@ -324,9 +346,11 @@ pub fn new_db(
     )
 }
 
-/// Return a typed `None` matching the database type parameters used by Steel.
+/// Return an empty per-vhost database map matching the database type
+/// parameters used by Steel. Useful in tests that build a `ServerContext`
+/// without any backing storage.
 pub fn no_db()
-    -> Outcome<Option<(Arc<RwLock<O3db<
+    -> Outcome<HashMap<String, (Arc<RwLock<O3db<
         { id::UID_LEN },
         id::Uid,
         EncryptionScheme,
@@ -337,7 +361,7 @@ pub fn no_db()
         id::Uid,
     )>>
 {
-    Ok(None)
+    Ok(HashMap::new())
 }
 
 /// Construct a WebSocket client helper without a database handle.

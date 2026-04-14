@@ -48,7 +48,7 @@ use std::{
 /// How a redirect rule's `match_path` is tested against an incoming request path.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RedirectMatch {
-    /// Exact path match, e.g. `/example`.
+    /// Exact path match, e.g. `/admin`.
     Exact,
     /// Path prefix match; matches any request whose path starts with `match_path`.
     Prefix,
@@ -141,15 +141,287 @@ impl RedirectRule {
 
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
+// │ API ROUTES                                                                │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// An outbound API proxy route.
+///
+/// Maps a local POST path to an upstream HTTPS URL. Steel forwards the
+/// request body verbatim and injects the configured headers (typically
+/// containing secret credentials loaded from files at startup).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApiRoute {
+    /// Local path to match (e.g. `/api/payments/checkout`).
+    pub path:           String,
+    /// Upstream hostname (e.g. `api.example.com`).
+    pub upstream_host:  String,
+    /// Upstream port (defaults to 443).
+    pub upstream_port:  u16,
+    /// Upstream request path (e.g. `/v1/checkout/sessions`).
+    pub upstream_path:  String,
+    /// Headers injected into the upstream request. Values have already been
+    /// resolved (any `{file:...}` references expanded at config load time).
+    pub headers:        Vec<(String, String)>,
+}
+
+impl ApiRoute {
+    /// Parse an API route from a `DaticleMap`.
+    ///
+    /// Header values are stored as-is and may contain `{file:path}`
+    /// placeholders. Call `resolve_headers` with the app root to expand
+    /// them before use.
+    pub fn from_datmap(m: &DaticleMap) -> Outcome<Self> {
+        // Path (required).
+        let path = match m.get(&dat!("path")) {
+            Some(Dat::Str(s)) => s.clone(),
+            _ => return Err(err!(
+                "ApiRoute: 'path' field is required and must be a string.";
+                Invalid, Input, Missing)),
+        };
+        // Upstream URL (required).
+        let upstream = match m.get(&dat!("upstream")) {
+            Some(Dat::Str(s)) => s.clone(),
+            _ => return Err(err!(
+                "ApiRoute: 'upstream' field is required and must be a string.";
+                Invalid, Input, Missing)),
+        };
+        // Parse upstream URL into host, port, path.
+        let (host, port, upath) = res!(Self::parse_upstream(&upstream));
+        // Headers (optional map of name → value).
+        let headers = match m.get(&dat!("headers")) {
+            Some(Dat::Map(sub)) => {
+                let mut out = Vec::new();
+                for (k, v) in sub.iter() {
+                    let name = match k {
+                        Dat::Str(s) => s.clone(),
+                        _ => return Err(err!(
+                            "ApiRoute: header names must be strings.";
+                            Invalid, Input, Mismatch)),
+                    };
+                    let raw_val = match v {
+                        Dat::Str(s) => s.clone(),
+                        _ => return Err(err!(
+                            "ApiRoute: header values must be strings.";
+                            Invalid, Input, Mismatch)),
+                    };
+                    out.push((name, raw_val));
+                }
+                out
+            }
+            None => Vec::new(),
+            _ => return Err(err!(
+                "ApiRoute: 'headers' must be a map.";
+                Invalid, Input, Mismatch)),
+        };
+        Ok(Self {
+            path,
+            upstream_host: host,
+            upstream_port: port,
+            upstream_path: upath,
+            headers,
+        })
+    }
+
+    /// Parse an `https://host[:port]/path` URL into components.
+    fn parse_upstream(url: &str) -> Outcome<(String, u16, String)> {
+        let rest = match url.strip_prefix("https://") {
+            Some(r) => r,
+            None => return Err(err!(
+                "ApiRoute: upstream URL must start with 'https://'. Got: '{}'.", url;
+                Invalid, Input)),
+        };
+        let (host_port, path) = match rest.find('/') {
+            Some(i) => (&rest[..i], &rest[i..]),
+            None    => (rest, "/"),
+        };
+        let (host, port) = match host_port.rfind(':') {
+            Some(i) => {
+                let p: u16 = match host_port[i + 1..].parse() {
+                    Ok(n)  => n,
+                    Err(_) => return Err(err!(
+                        "ApiRoute: invalid port in upstream URL '{}'.", url;
+                        Invalid, Input)),
+                };
+                (host_port[..i].to_string(), p)
+            }
+            None => (host_port.to_string(), 443),
+        };
+        Ok((host, port, path.to_string()))
+    }
+
+    /// Expand `{file:path}` placeholders in all header values by reading
+    /// the referenced files relative to `root`. Must be called once at
+    /// startup before the route is used for proxying.
+    pub fn resolve_headers(&mut self, root: &Path) -> Outcome<()> {
+        for (_name, value) in &mut self.headers {
+            *value = res!(Self::resolve_file_refs(value, root));
+        }
+        Ok(())
+    }
+
+    /// Resolve `{file:path}` and `{env:VAR}` or `{env:VAR:default}`
+    /// placeholders in a config value.
+    ///
+    /// * `{file:path}` — replaced with the trimmed contents of the file,
+    ///   resolved relative to `root`. Fails if the file cannot be read.
+    /// * `{env:VAR}` — replaced with the value of environment variable
+    ///   `VAR`. Fails if the variable is unset.
+    /// * `{env:VAR:default}` — replaced with the env var value, or
+    ///   `default` if the variable is unset or empty.
+    ///
+    /// Env placeholders are resolved first so they may appear inside
+    /// `{file:...}` paths to parameterise file locations.
+    pub fn resolve_file_refs(value: &str, root: &Path) -> Outcome<String> {
+        // Pass 1: resolve all {env:} placeholders so env values can appear
+        // inside {file:} paths.
+        let intermediate = res!(Self::resolve_env_refs(value));
+        // Pass 2: resolve all {file:} placeholders.
+        Self::resolve_file_only(&intermediate, root)
+    }
+
+    /// Resolve only `{env:VAR[:default]}` placeholders.
+    fn resolve_env_refs(value: &str) -> Outcome<String> {
+        let mut result = value.to_string();
+        while let Some(start) = result.find("{env:") {
+            let end = match result[start..].find('}') {
+                Some(i) => start + i,
+                None => return Err(err!(
+                    "Config: unclosed '{{env:' placeholder in value '{}'.", value;
+                    Invalid, Input)),
+            };
+            let inner = result[start + 5..end].to_string();
+            let (var_name, default) = match inner.find(':') {
+                Some(i) => (&inner[..i], Some(&inner[i + 1..])),
+                None    => (inner.as_str(), None),
+            };
+            let replacement = match std::env::var(var_name) {
+                Ok(v) if !v.is_empty() => v,
+                _ => match default {
+                    Some(d) => d.to_string(),
+                    None => return Err(err!(
+                        "Config: environment variable '{}' is not set \
+                        and '{{env:{}}}' has no default.",
+                        var_name, inner;
+                        Invalid, Input, Missing)),
+                },
+            };
+            result.replace_range(start..=end, &replacement);
+        }
+        Ok(result)
+    }
+
+    /// Resolve only `{file:path}` placeholders.
+    fn resolve_file_only(value: &str, root: &Path) -> Outcome<String> {
+        let mut result = value.to_string();
+        while let Some(start) = result.find("{file:") {
+            let end = match result[start..].find('}') {
+                Some(i) => start + i,
+                None => return Err(err!(
+                    "Config: unclosed '{{file:' placeholder in value '{}'.", value;
+                    Invalid, Input)),
+            };
+            let rel_path = result[start + 6..end].to_string();
+            let abs_path = root.join(&rel_path);
+            let content = match std::fs::read_to_string(&abs_path) {
+                Ok(s) => s.trim().to_string(),
+                Err(e) => return Err(err!(e,
+                    "Config: failed to read '{{file:{}}}' at '{:?}'.",
+                    rel_path, abs_path;
+                    IO, File, Read)),
+            };
+            result.replace_range(start..=end, &content);
+        }
+        Ok(result)
+    }
+}
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ WEBHOOK ROUTES                                                            │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// An incoming webhook route with a named handler.
+///
+/// When Steel receives a POST at the configured `path`, it dispatches to
+/// the handler identified by `handler`. The `config` map carries handler-
+/// specific settings (API keys, upstream URLs, identifiers, etc.) whose
+/// values support the same `{file:path}` secret placeholder syntax as
+/// API routes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WebhookRoute {
+    /// Local path to match (e.g. `/webhook/payments`).
+    pub path:       String,
+    /// Handler name (e.g. `payments_forwarder`).
+    pub handler:    String,
+    /// Handler-specific configuration.
+    pub config:     Vec<(String, String)>,
+}
+
+impl WebhookRoute {
+    /// Parse a webhook route from a `DaticleMap`.
+    pub fn from_datmap(m: &DaticleMap) -> Outcome<Self> {
+        let path = match m.get(&dat!("path")) {
+            Some(Dat::Str(s)) => s.clone(),
+            _ => return Err(err!(
+                "WebhookRoute: 'path' is required and must be a string.";
+                Invalid, Input, Missing)),
+        };
+        let handler = match m.get(&dat!("handler")) {
+            Some(Dat::Str(s)) => s.clone(),
+            _ => return Err(err!(
+                "WebhookRoute: 'handler' is required and must be a string.";
+                Invalid, Input, Missing)),
+        };
+        let config = match m.get(&dat!("config")) {
+            Some(Dat::Map(sub)) => {
+                let mut out = Vec::new();
+                for (k, v) in sub.iter() {
+                    let name = match k {
+                        Dat::Str(s) => s.clone(),
+                        _ => continue,
+                    };
+                    let val = match v {
+                        Dat::Str(s) => s.clone(),
+                        _ => continue,
+                    };
+                    out.push((name, val));
+                }
+                out
+            }
+            None => Vec::new(),
+            _ => Vec::new(),
+        };
+        Ok(Self { path, handler, config })
+    }
+
+    /// Expand `{file:path}` placeholders in all config values.
+    pub fn resolve_config(&mut self, root: &Path) -> Outcome<()> {
+        for (_name, value) in &mut self.config {
+            *value = res!(ApiRoute::resolve_file_refs(value, root));
+        }
+        Ok(())
+    }
+
+    /// Look up a config value by key.
+    pub fn get_config(&self, key: &str) -> Option<&str> {
+        self.config.iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
+}
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
 // │ VHOST CONFIG                                                              │
 // └───────────────────────────────────────────────────────────────────────────┘
 
 /// Configuration for a single virtual host served by Steel.
 ///
 /// A vhost is selected at TLS handshake time by its SNI hostname, and may carry
-/// its own webroot, static routes, default index files, and redirect rules.
-/// Multiple hostnames (e.g. `example.com` and a trailing-dot alias) are supported
-/// by listing them all in `hostnames`; the first entry is the primary.
+/// its own webroot, static routes, default index files, redirect rules and
+/// Ozone database. Multiple hostnames (e.g. `example.com` and a trailing-dot
+/// alias) are supported by listing them all in `hostnames`; the first entry
+/// is the primary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VhostConfig {
     /// Hostnames answered by this vhost. The first entry is the canonical name.
@@ -163,6 +435,17 @@ pub struct VhostConfig {
     pub default_index_files:    Vec<String>,
     /// Ordered list of redirect rules evaluated before static file resolution.
     pub redirects:              Vec<RedirectRule>,
+    /// Database directory for this vhost's Ozone instance, relative to the
+    /// app root. `None` means the vhost has no backing database (typical for
+    /// pure-redirect vhosts). When set, Steel opens and starts a dedicated
+    /// Ozone instance rooted here at server start-up.
+    pub db_dir_rel:             Option<String>,
+    /// Outbound API proxy routes. Each route maps a local POST path to an
+    /// upstream HTTPS URL with injected headers (typically secret credentials).
+    pub api_routes:             Vec<ApiRoute>,
+    /// Incoming webhook routes. Each route maps a local POST path to a
+    /// named handler with handler-specific configuration.
+    pub webhook_routes:         Vec<WebhookRoute>,
 }
 
 impl Default for VhostConfig {
@@ -178,6 +461,9 @@ impl Default for VhostConfig {
                 fmt!("home.html"),
             ],
             redirects:              Vec::new(),
+            db_dir_rel:             Some(fmt!("./o3db")),
+            api_routes:             Vec::new(),
+            webhook_routes:         Vec::new(),
         }
     }
 }
@@ -299,17 +585,104 @@ impl VhostConfig {
                 "VhostConfig: 'redirects' must be a list of maps.";
                 Invalid, Input, Mismatch)),
         };
+        // Database directory (optional).
+        let db_dir_rel = match m.get(&dat!("db_dir_rel")) {
+            Some(Dat::Str(s)) if s.is_empty() => None,
+            Some(Dat::Str(s)) => Some(s.clone()),
+            Some(Dat::Opt(opt)) => match opt.as_ref() {
+                Some(Dat::Str(s)) => Some(s.clone()),
+                _ => None,
+            },
+            None => None,
+            _ => return Err(err!(
+                "VhostConfig: 'db_dir_rel' must be a string.";
+                Invalid, Input, Mismatch)),
+        };
+        // API proxy routes (optional).
+        let api_routes = match m.get(&dat!("api_routes")) {
+            Some(Dat::List(list)) => {
+                let mut out = Vec::new();
+                for item in list {
+                    match item {
+                        Dat::Map(sub) => out.push(res!(ApiRoute::from_datmap(sub))),
+                        _ => return Err(err!(
+                            "VhostConfig: 'api_routes' entries must be maps.";
+                            Invalid, Input, Mismatch)),
+                    }
+                }
+                out
+            }
+            None => Vec::new(),
+            _ => return Err(err!(
+                "VhostConfig: 'api_routes' must be a list of maps.";
+                Invalid, Input, Mismatch)),
+        };
+        // Webhook routes (optional).
+        let webhook_routes = match m.get(&dat!("webhook_routes")) {
+            Some(Dat::List(list)) => {
+                let mut out = Vec::new();
+                for item in list {
+                    match item {
+                        Dat::Map(sub) => out.push(res!(WebhookRoute::from_datmap(sub))),
+                        _ => return Err(err!(
+                            "VhostConfig: 'webhook_routes' entries must be maps.";
+                            Invalid, Input, Mismatch)),
+                    }
+                }
+                out
+            }
+            None => Vec::new(),
+            _ => return Err(err!(
+                "VhostConfig: 'webhook_routes' must be a list of maps.";
+                Invalid, Input, Mismatch)),
+        };
         Ok(Self {
             hostnames,
             public_dir_rel,
             static_route_paths_rel,
             default_index_files,
             redirects,
+            db_dir_rel,
+            api_routes,
+            webhook_routes,
         })
     }
 
+    /// Resolve the vhost's database directory to an absolute path, creating
+    /// it if it does not yet exist. Returns `None` when the vhost has no
+    /// configured database. Unlike `get_public_dir`, this tolerates a missing
+    /// directory and creates it: Ozone expects a writable root and will
+    /// populate it on first start-up.
+    /// Supports both relative (anchored at `root`) and absolute paths.
+    pub fn get_db_dir(
+        &self,
+        root: &NormPathBuf,
+    )
+        -> Outcome<Option<PathBuf>>
+    {
+        let rel = match &self.db_dir_rel {
+            Some(s) if !s.is_empty() => s,
+            _ => return Ok(None),
+        };
+        let path = if Path::new(rel).is_absolute() {
+            PathBuf::from(rel)
+        } else {
+            let norm = Path::new(rel).normalise();
+            if norm.escapes() {
+                return Err(err!(
+                    "VhostConfig: database directory {} escapes the directory {:?}.",
+                    rel, root;
+                    Invalid, Input, Path));
+            }
+            root.clone().join(norm).normalise().absolute().as_pathbuf()
+        };
+        res!(std::fs::create_dir_all(&path));
+        Ok(Some(path))
+    }
+
     /// Resolve the vhost's webroot to an absolute validated path, returning
-    /// `None` for pure-redirect vhosts that have no webroot.
+    /// `None` for pure-redirect vhosts that have no webroot. Supports both
+    /// relative paths (anchored at `root`) and absolute paths (used as-is).
     pub fn get_public_dir(
         &self,
         root: &NormPathBuf,
@@ -320,14 +693,18 @@ impl VhostConfig {
             Some(s) if !s.is_empty() => s,
             _ => return Ok(None),
         };
-        let path = Path::new(rel).normalise();
-        if path.escapes() {
-            return Err(err!(
-                "VhostConfig: public directory {} escapes the directory {:?}.",
-                rel, root;
-                Invalid, Input, Path));
-        }
-        let path = root.clone().join(path).normalise().absolute().as_pathbuf();
+        let path = if Path::new(rel).is_absolute() {
+            PathBuf::from(rel)
+        } else {
+            let norm = Path::new(rel).normalise();
+            if norm.escapes() {
+                return Err(err!(
+                    "VhostConfig: public directory {} escapes the directory {:?}.",
+                    rel, root;
+                    Invalid, Input, Path));
+            }
+            root.clone().join(norm).normalise().absolute().as_pathbuf()
+        };
         res!(PathState::DirMustExist.validate(
             &path,
             "",
@@ -526,6 +903,128 @@ impl AcmeConfig {
 
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
+// │ MAIL CONFIG                                                               │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// Hematite mail listener configuration.
+///
+/// When present (and `enabled = true`), Steel binds three TCP ports
+/// alongside the HTTPS listener: SMTP receive, SMTP submission, and
+/// IMAP. All three share the rustls cert resolver Steel uses for
+/// HTTPS so a single ACME-issued cert covers every protocol.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MailConfig {
+    /// Master switch. When `false`, the mail server is not started.
+    pub enabled:            bool,
+    /// Hostname the SMTP and IMAP servers advertise in their
+    /// greetings. Should be the public MX hostname.
+    pub hostname:           String,
+    /// MX-receive port. Standard 25.
+    pub smtp_port:          u16,
+    /// Submission port. Standard 587.
+    pub submission_port:    u16,
+    /// Implicit-TLS IMAP port. Standard 993.
+    pub imap_port:          u16,
+    /// Maildir storage root. Per-user trees live underneath as
+    /// `<root>/<delivery_dir>/`.
+    pub maildir_root:       String,
+    /// Path to the JDAT user file (passwords + delivery dirs).
+    pub users_file_rel:     String,
+    /// Path to the outbound spool directory.
+    pub spool_dir_rel:      String,
+    /// Path to the DKIM private key file (PKCS#8 DER form). Empty
+    /// disables DKIM signing.
+    pub dkim_key_file:      String,
+    /// DKIM selector to publish under
+    /// `<selector>._domainkey.<dkim_domain>`.
+    pub dkim_selector:      String,
+    /// Domain to sign for. May differ from `hostname` if mail is
+    /// sent on behalf of a user-facing domain via a separate MX.
+    pub dkim_domain:        String,
+    /// Domains the receive path will accept mail for. Recipients
+    /// outside this set are rejected at `RCPT TO` time.
+    pub local_domains:      Vec<String>,
+}
+
+impl Default for MailConfig {
+    fn default() -> Self {
+        Self {
+            enabled:            false,
+            hostname:           String::new(),
+            smtp_port:          25,
+            submission_port:    587,
+            imap_port:          993,
+            maildir_root:       String::new(),
+            users_file_rel:     String::new(),
+            spool_dir_rel:      String::new(),
+            dkim_key_file:      String::new(),
+            dkim_selector:      String::new(),
+            dkim_domain:        String::new(),
+            local_domains:      Vec::new(),
+        }
+    }
+}
+
+impl MailConfig {
+    /// Parse a `MailConfig` from a `DaticleMap`.
+    pub fn from_datmap(m: &DaticleMap) -> Outcome<Self> {
+        let mut out = Self::default();
+        if let Some(Dat::Bool(b)) = m.get(&dat!("enabled")) {
+            out.enabled = *b;
+        }
+        if let Some(Dat::Str(s)) = m.get(&dat!("hostname")) {
+            out.hostname = s.clone();
+        }
+        if let Some(Dat::U16(n)) = m.get(&dat!("smtp_port")) {
+            out.smtp_port = *n;
+        }
+        if let Some(Dat::U16(n)) = m.get(&dat!("submission_port")) {
+            out.submission_port = *n;
+        }
+        if let Some(Dat::U16(n)) = m.get(&dat!("imap_port")) {
+            out.imap_port = *n;
+        }
+        if let Some(Dat::Str(s)) = m.get(&dat!("maildir_root")) {
+            out.maildir_root = s.clone();
+        }
+        if let Some(Dat::Str(s)) = m.get(&dat!("users_file_rel")) {
+            out.users_file_rel = s.clone();
+        }
+        if let Some(Dat::Str(s)) = m.get(&dat!("spool_dir_rel")) {
+            out.spool_dir_rel = s.clone();
+        }
+        if let Some(Dat::Str(s)) = m.get(&dat!("dkim_key_file")) {
+            out.dkim_key_file = s.clone();
+        }
+        if let Some(Dat::Str(s)) = m.get(&dat!("dkim_selector")) {
+            out.dkim_selector = s.clone();
+        }
+        if let Some(Dat::Str(s)) = m.get(&dat!("dkim_domain")) {
+            out.dkim_domain = s.clone();
+        }
+        match m.get(&dat!("local_domains")) {
+            Some(Dat::List(l)) => {
+                for d in l {
+                    if let Dat::Str(s) = d {
+                        out.local_domains.push(s.clone());
+                    }
+                }
+            }
+            Some(Dat::Vek(v)) => {
+                for d in v.iter() {
+                    if let Dat::Str(s) = d {
+                        out.local_domains.push(s.clone());
+                    }
+                }
+            }
+            _ => (),
+        }
+        Ok(out)
+    }
+}
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
 // │ SERVER CONFIG                                                             │
 // └───────────────────────────────────────────────────────────────────────────┘
 
@@ -547,16 +1046,33 @@ pub struct ServerConfig {
     pub num_server_bots:                u16,
     /// IP address to bind to, typically `"0.0.0.0"`.
     pub server_address:                 String,
-    /// TCP port to listen on.
+    /// Primary TCP port for HTTPS traffic.
     pub server_port_tcp:                u16,
+    /// Optional plaintext HTTP listener port. When non-zero, Steel binds
+    /// this port too and responds to every incoming HTTP request with a
+    /// `301 Moved Permanently` redirect to the equivalent HTTPS URL on
+    /// the primary port. Typically set to `80` in production and `0`
+    /// (disabled) in local development. Defaults to `0`.
+    pub server_port_tcp_plaintext:      u16,
+    /// `Strict-Transport-Security` `max-age` in seconds, injected into
+    /// every HTTPS response when non-zero. A value of `31536000` (one
+    /// year) is conventional for production. Defaults to `0` (no HSTS).
+    pub hsts_max_age_secs:              u32,
     /// Default session lifetime in seconds.
     pub session_expiry_default_secs:    u32,
     /// WebSocket ping interval in seconds.
     pub ws_ping_interval_secs:          u8,
     /// Maximum consecutive errors allowed on a single connection.
     pub server_max_errors_allowed:      u8,
-    /// Whether to accept users not known to the wallet.
-    pub server_accept_unknown_users:    bool,
+    /// Whether to issue a session cookie to unauthenticated clients on
+    /// first contact. When `true`, Steel generates a fresh session id for
+    /// any incoming request that does not already carry one and attaches
+    /// it as an `HttpOnly`, `Secure`, `SameSite=Lax` cookie. This makes
+    /// session-scoped WebSocket commands work for anonymous browsers.
+    /// When `false`, requests without a session cookie are still served
+    /// but session-scoped commands will reject until the client obtains
+    /// a session id through some other mechanism.
+    pub allow_anonymous_sessions:       bool,
 
     // --- Virtual hosts ------------------------------------------------------
     /// Ordered list of virtual host configurations, stored as a `Dat::List`
@@ -566,6 +1082,11 @@ pub struct ServerConfig {
     // --- ACME ---------------------------------------------------------------
     /// ACME client configuration (as a daticle map, parsed via `get_acme()`).
     pub acme:                           DaticleMap,
+
+    // --- Mail ---------------------------------------------------------------
+    /// Mail listener configuration (as a daticle map, parsed via `get_mail()`).
+    /// Empty map disables the mail server entirely.
+    pub mail:                           DaticleMap,
 }
 
 impl Config for ServerConfig {}
@@ -594,6 +1115,9 @@ impl Default for ServerConfig {
             .collect();
         vhost_map.insert(dat!("default_index_files"), Dat::List(idx_list));
         vhost_map.insert(dat!("redirects"), Dat::List(Vec::new()));
+        if let Some(ref p) = default_vhost.db_dir_rel {
+            vhost_map.insert(dat!("db_dir_rel"), dat!(p.clone()));
+        }
 
         Self {
             tls_dir_rel:                    fmt!("./tls"),
@@ -601,12 +1125,15 @@ impl Default for ServerConfig {
             num_server_bots:                1,
             server_address:                 fmt!("0.0.0.0"),
             server_port_tcp:                8443,
+            server_port_tcp_plaintext:      0,      // disabled by default
+            hsts_max_age_secs:              0,      // disabled by default
             session_expiry_default_secs:    604_800, // 1 week.
             ws_ping_interval_secs:          30,
             server_max_errors_allowed:      30,
-            server_accept_unknown_users:    false,
+            allow_anonymous_sessions:       true,
             vhosts:                         Dat::List(vec![Dat::Map(vhost_map)]),
             acme:                           AcmeConfig::default().to_datmap(),
+            mail:                           DaticleMap::new(),
         }
     }
 }
@@ -661,6 +1188,19 @@ impl ServerConfig {
     /// Parse and return the ACME configuration.
     pub fn get_acme(&self) -> Outcome<AcmeConfig> {
         AcmeConfig::from_datmap(&self.acme)
+    }
+
+    /// Parse and return the mail configuration. Returns `None` if no
+    /// mail block is configured (`mail = {}` in JDAT).
+    pub fn get_mail(&self) -> Outcome<Option<MailConfig>> {
+        if self.mail.is_empty() {
+            return Ok(None);
+        }
+        let cfg = res!(MailConfig::from_datmap(&self.mail));
+        if !cfg.enabled {
+            return Ok(None);
+        }
+        Ok(Some(cfg))
     }
 
     /// Build a default session cookie for the given session id string.

@@ -9,19 +9,24 @@ use crate::srv::{
 
 use oxedyne_fe2o3_core::{
     prelude::*,
+    id::ParseId,
     rand::RanDef,
 };
 use oxedyne_fe2o3_iop_crypto::enc::Encrypter;
 use oxedyne_fe2o3_iop_db::api::Database;
 use oxedyne_fe2o3_iop_hash::api::Hasher;
-use oxedyne_fe2o3_jdat::id::{
-    IdDat,
-    NumIdDat,
+use oxedyne_fe2o3_jdat::{
+    prelude::*,
+    id::{
+        IdDat,
+        NumIdDat,
+    },
 };
 use oxedyne_fe2o3_net::{
     conc::AsyncReadIterator,
     http::{
         fields::{
+            Cookie,
             HeaderFieldValue,
             HeaderName,
         },
@@ -36,6 +41,7 @@ use oxedyne_fe2o3_net::{
         },
         status::HttpStatus,
     },
+    id::Sid,
     ws::handler::WebSocketHandler,
 };
 
@@ -99,18 +105,6 @@ impl<
                     log!(log_level, "{}: Incoming from {:?}:", id, src_addr);
                     request.log(log_get_level!());
 
-                    if request.is_websocket_upgrade() {
-                        log!(log_level, "Connection upgrading to websocket...");
-                        let reunited_stream = read_stream.unsplit(write_stream);
-                        return self.handle_websocket(
-                            reunited_stream,
-                            vhost.ws_handler.clone(),
-                            vhost.ws_syntax.clone(),
-                            request,
-                            &id,
-                        ).await;
-                    }
-
                     // Validate the Host header against the vhost hostnames.
                     // A mismatch means an SNI/Host disagreement, which is a
                     // misdirected client; we return 421.
@@ -136,7 +130,53 @@ impl<
                         }
                     }
 
-                    let sid_opt = Self::get_session_id(&request, &src_addr);
+                    // Resolve (or issue) the session identifier for this
+                    // request. If the client already carries a session
+                    // cookie, parse it. Otherwise, when anonymous sessions
+                    // are enabled, mint a fresh `Sid`, remember it as a
+                    // pending `Set-Cookie` header to attach to the response,
+                    // and use it to scope session commands on this request.
+                    let raw_sid_str = request.header.fields.get_session_id();
+                    let mut issued_cookie: Option<Cookie> = None;
+                    let (sid_opt, sid_str) = match raw_sid_str {
+                        Some(ref s) => {
+                            let parsed = Sid::parse_id(s).ok();
+                            (parsed, raw_sid_str.clone())
+                        }
+                        None => {
+                            if self.cfg.allow_anonymous_sessions {
+                                let new_sid: Sid = Sid::randef();
+                                let s = fmt!("{}", new_sid);
+                                issued_cookie = Some(
+                                    self.cfg.session_cookie_default(s.clone()),
+                                );
+                                log!(log_level,
+                                    "{}: issuing anonymous session {}.", id, s);
+                                (Some(new_sid), Some(s))
+                            } else {
+                                (None, None)
+                            }
+                        }
+                    };
+
+                    if request.is_websocket_upgrade() {
+                        log!(log_level, "Connection upgrading to websocket...");
+                        // The raw sid string is enough for the WS handler:
+                        // it only needs a stable per-client key prefix, not
+                        // the typed numeric identifier.
+                        let ws_handler = vhost.ws_handler.clone()
+                            .attach_sid(sid_str.clone());
+                        let reunited_stream = read_stream.unsplit(write_stream);
+                        let vhost_db = self.db_for_vhost(vhost.primary_hostname());
+                        return self.handle_websocket(
+                            reunited_stream,
+                            ws_handler,
+                            vhost.ws_syntax.clone(),
+                            vhost_db,
+                            request,
+                            &id,
+                        ).await;
+                    }
 
                     let mut response = None;
                     let close_requested = request.get_connection_close();
@@ -181,11 +221,42 @@ impl<
                                 let body = request.body;
                                 match method {
                                     HttpMethod::GET => {
+                                        let vhost_db = self.db_for_vhost(
+                                            vhost.primary_hostname(),
+                                        );
                                         let result = vhost.web_handler.handle_get(
                                             loc,
                                             response,
                                             body,
-                                            self.db.clone(),
+                                            vhost_db,
+                                            &sid_opt,
+                                            &id,
+                                        ).await;
+                                        response = res!(result);
+                                    }
+                                    HttpMethod::POST => {
+                                        // Carry Content-Type from the incoming
+                                        // request into loc.data so the handler
+                                        // can forward it to the upstream.
+                                        let mut loc = loc;
+                                        if let Some((vals, _)) = request.header.fields.get_all(
+                                            &HeaderName::ContentType,
+                                        ) {
+                                            if let Some(v) = vals.first() {
+                                                loc.data.insert(
+                                                    dat!("content_type"),
+                                                    dat!(v.to_string()),
+                                                );
+                                            }
+                                        }
+                                        let vhost_db = self.db_for_vhost(
+                                            vhost.primary_hostname(),
+                                        );
+                                        let result = vhost.web_handler.handle_post(
+                                            loc,
+                                            response,
+                                            body,
+                                            vhost_db,
                                             &sid_opt,
                                             &id,
                                         ).await;
@@ -201,7 +272,25 @@ impl<
 
                     log!(log_level, "Outgoing HTTPS message:");
                     match response {
-                        Some(msg) => {
+                        Some(mut msg) => {
+                            // Attach the freshly-issued session cookie to
+                            // the outgoing response, if any. Works for both
+                            // file responses and redirect responses.
+                            if let Some(cookie) = issued_cookie.take() {
+                                msg = msg.set_cookie(cookie);
+                            }
+                            // Inject HSTS header if configured, so browsers
+                            // remember to use HTTPS for subsequent visits.
+                            if self.cfg.hsts_max_age_secs > 0 {
+                                msg.header.fields.insert(
+                                    HeaderName::StrictTransportSecurity,
+                                    HeaderFieldValue::Generic(fmt!(
+                                        "max-age={}; includeSubDomains",
+                                        self.cfg.hsts_max_age_secs,
+                                    )),
+                                    None,
+                                );
+                            }
                             match msg.write_all(&mut write_stream).await {
                                 Ok(()) => (),
                                 Err(e) => return Err(err!(e,

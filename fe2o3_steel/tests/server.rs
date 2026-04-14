@@ -46,7 +46,7 @@ use std::{
 /// redirect rules, just to verify that the refactored `ServerContext` and
 /// `Server::start()` path compile and accept a start call under the current
 /// API. This is a compile-time regression guard; end-to-end behaviour is
-/// verified separately against the live deployhost deployment.
+/// verified separately against a live deployment.
 pub async fn test_server(filter: &'static str) -> Outcome<()> {
 
     match filter {
@@ -110,6 +110,7 @@ pub async fn test_server(filter: &'static str) -> Outcome<()> {
                 static_route_paths_rel: Default::default(),
                 default_index_files:    vec![fmt!("index.html")],
                 redirects:              Vec::new(),
+                db_dir_rel:             None,
             };
 
             let web_handler: AppWebHandler<HashMap<String, OsPath>> = AppWebHandler::new(
@@ -141,10 +142,15 @@ pub async fn test_server(filter: &'static str) -> Outcome<()> {
                 dev_mode:       true,
             };
 
+            let mut vhost_dbs = HashMap::new();
+            vhost_dbs.insert(
+                vhost_cfg.primary_hostname().to_lowercase(),
+                (Arc::new(std::sync::RwLock::new(db)), uid),
+            );
             let context = ServerContext::new(
                 cfg,
                 app_root,
-                Some((db, uid)),
+                vhost_dbs,
                 protocol,
             );
 

@@ -304,11 +304,11 @@ impl Tabular {
 //        (4, Alignment::Right),  // Rest AU
 //        (5, Alignment::Right),  // Rest World
 //        (6, Alignment::Right),  // Total Users
-//        (7, Alignment::Right),  // Overlay Rev
-//        (8, Alignment::Right),  // Overlay Bal
-//        (9, Alignment::Right),  // RPS A
-//        (10, Alignment::Right), // RPS B
-//        (11, Alignment::Right), // RPS C
+//        (7, Alignment::Right),  // Revenue
+//        (8, Alignment::Right),  // Balance
+//        (9, Alignment::Right),  // Rate A
+//        (10, Alignment::Right), // Rate B
+//        (11, Alignment::Right), // Rate C
 //        (12, Alignment::Right), // Expenses
 //    ])
 //    .rows_from_iter(rows.into_iter())

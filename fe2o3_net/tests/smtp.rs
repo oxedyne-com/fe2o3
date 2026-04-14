@@ -24,7 +24,7 @@ use oxedyne_fe2o3_core::{
 
 pub fn test_smtp(filter: &'static str) -> Outcome<()> {
 
-// S: 220 serverb.example.com ESMTP Postfix
+// S: 220 serverb.example.com ESMTP ExampleMTA
 // C: EHLO servera.example.org
 // S: 250-serverb.example.com
 // S: 250-PIPELINING
@@ -42,7 +42,7 @@ pub fn test_smtp(filter: &'static str) -> Outcome<()> {
 // C: DATA
 // S: 354 End data with <CR><LF>.<CR><LF>
 // C: Received: from servera.example.org (servera.example.org [192.168.0.1])
-// C:         by serverb.example.com (Postfix) with ESMTP id 12345678
+// C:         by serverb.example.com (ExampleMTA) with ESMTP id 12345678
 // C:         for <recipient@example.com>; Fri, 11 Jun 2023 09:30:00 -0500 (EST)
 // C: From: Sender <sender@example.org>
 // C: To: Recipient <recipient@example.com>

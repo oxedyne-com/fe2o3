@@ -91,7 +91,7 @@ pub struct AppShellContext {
                         HashScheme,
                         ChecksumScheme,
                     >,
-    pub wallet:     Wallet<{ app_const::NUM_PREV_PASSHASHES_TO_RETAIN }, Dat>,
+    pub wallet:     Wallet,
     //server: Server,
 }
 

@@ -3,9 +3,6 @@
 !*/
 !*.*
 
-# Operator scripts (extensionless but deliberately tracked).
-!fe2o3_steel/scripts/steel_*
-
 # Rust
 /target/
 #Cargo.lock # removed for reproducible app builds, e.g. fe2o3_steel

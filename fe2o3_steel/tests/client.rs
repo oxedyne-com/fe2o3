@@ -347,8 +347,9 @@ pub async fn test_client(filter: &'static str) -> Outcome<()> {
             ));
 
             tokio::time::timeout(listen_time_limit, async {
+                // Client side: no database is needed for the listen loop.
                 ws.listen(
-                    res!(context::no_db()),
+                    None,
                     ws_syntax,
                     Some(30),
                     0,

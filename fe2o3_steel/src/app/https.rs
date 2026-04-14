@@ -1,6 +1,14 @@
 use crate::srv::{
-    cfg::ServerConfig,
+    cfg::{
+        ApiRoute,
+        ServerConfig,
+        WebhookRoute,
+    },
     dev::refresh::HtmlModifier,
+    webhook::{
+        self,
+        WebhookRegistry,
+    },
 };
 
 use oxedyne_fe2o3_core::{
@@ -15,12 +23,17 @@ use oxedyne_fe2o3_core::{
 use oxedyne_fe2o3_iop_crypto::enc::Encrypter;
 use oxedyne_fe2o3_iop_db::api::Database;
 use oxedyne_fe2o3_iop_hash::api::Hasher;
-use oxedyne_fe2o3_jdat::id::NumIdDat;
+use oxedyne_fe2o3_jdat::{
+    prelude::*,
+    id::NumIdDat,
+};
 use oxedyne_fe2o3_net::{
     file::RequestPath,
     http::{
+        client::https_request,
         fields::HeaderName,
         handler::WebHandler,
+        header::HttpMethod,
         loc::HttpLocator,
         msg::HttpMessage,
         status::HttpStatus,
@@ -43,6 +56,7 @@ use tokio::{
     self,
     io::AsyncReadExt,
 };
+use tokio_rustls::rustls::ClientConfig;
 
 
 #[derive(Clone, Debug)]
@@ -56,6 +70,14 @@ pub struct AppWebHandler<
     pub static_routes:          M,
     pub default_index_files:    Vec<String>,
     pub dev_mode:               bool,
+    /// Outbound API proxy routes for this vhost.
+    pub api_routes:             Vec<ApiRoute>,
+    /// Incoming webhook routes for this vhost.
+    pub webhook_routes:         Vec<WebhookRoute>,
+    /// Registered webhook handler implementations.
+    pub webhook_registry:       Arc<WebhookRegistry>,
+    /// TLS client config for outbound HTTPS requests to upstream APIs.
+    pub tls_client:             Option<Arc<ClientConfig>>,
 }
 
 impl<
@@ -69,6 +91,10 @@ impl<
         static_routes:          M,
         default_index_files:    Vec<String>,
         dev_mode:               bool,
+        api_routes:             Vec<ApiRoute>,
+        webhook_routes:         Vec<WebhookRoute>,
+        webhook_registry:       Arc<WebhookRegistry>,
+        tls_client:             Option<Arc<ClientConfig>>,
     )
         -> Self
     {
@@ -78,6 +104,10 @@ impl<
             static_routes,
             default_index_files,
             dev_mode,
+            api_routes,
+            webhook_routes,
+            webhook_registry,
+            tls_client,
         }
     }
 
@@ -267,17 +297,91 @@ impl<
         DB:     Database<UIDL, UID, ENC, KH>,
     >(
         &self,
-        _loc:        HttpLocator,
-        response:   Option<HttpMessage>,
-        _body:       Vec<u8>,
-        _db:         Option<(Arc<RwLock<DB>>, UID)>,
-        _sid_opt:    &Option<SID>,
-        _id:         &String, 
+        loc:        HttpLocator,
+        _response:  Option<HttpMessage>,
+        body:       Vec<u8>,
+        _db:        Option<(Arc<RwLock<DB>>, UID)>,
+        _sid_opt:   &Option<SID>,
+        id:         &String,
     )
         -> impl std::future::Future<Output = Outcome<Option<HttpMessage>>> + Send
     {
+        let request_path = loc.path.as_string().to_string();
+        let id = id.to_string();
+        let api_routes = self.api_routes.clone();
+        let webhook_routes = self.webhook_routes.clone();
+        let webhook_registry = self.webhook_registry.clone();
+        let tls_client = self.tls_client.clone();
+
         async move {
-            Ok(response)
+            // Check webhook routes first.
+            if let Some(wh) = webhook_routes.iter().find(|r| r.path == request_path) {
+                debug!("{}: POST {} -> webhook handler '{}'",
+                    id, request_path, wh.handler);
+                return webhook::dispatch(
+                    &webhook_registry, wh, &body, &tls_client, &id,
+                ).await;
+            }
+
+            // Find a matching API route.
+            let route = match api_routes.iter().find(|r| r.path == request_path) {
+                Some(r) => r,
+                None => {
+                    debug!("{}: POST {} — no matching API route.", id, request_path);
+                    return Ok(Some(HttpMessage::respond_with_text(
+                        HttpStatus::NotFound,
+                        "No API route matches this path.",
+                    )));
+                }
+            };
+
+            let tls_cfg = match &tls_client {
+                Some(cfg) => cfg.clone(),
+                None => {
+                    error!(err!(
+                        "{}: API route '{}' matched but no TLS client is configured.",
+                        id, request_path;
+                        Init, Missing));
+                    return Ok(Some(HttpMessage::respond_with_text(
+                        HttpStatus::InternalServerError,
+                        "Server TLS client not configured for outbound requests.",
+                    )));
+                }
+            };
+
+            // Build upstream headers.
+            let mut hdrs: Vec<(&str, &str)> = Vec::new();
+            for (name, value) in &route.headers {
+                hdrs.push((name.as_str(), value.as_str()));
+            }
+
+            // Forward the Content-Type from the original request if present.
+            // Different upstream APIs expect different content types
+            // (form-urlencoded, JSON, XML, etc.) so we relay whatever
+            // the caller sent rather than hard-coding a default.
+            let ct_holder;
+            if let Some(ct) = loc.data.get(&dat!("content_type")) {
+                if let Dat::Str(s) = ct {
+                    ct_holder = s.clone();
+                    hdrs.push(("Content-Type", &ct_holder));
+                }
+            }
+
+            debug!("{}: POST {} -> {}:{}{}", id, request_path,
+                route.upstream_host, route.upstream_port, route.upstream_path);
+
+            // Forward the request to the upstream.
+            let upstream_resp = res!(https_request(
+                &route.upstream_host,
+                route.upstream_port,
+                HttpMethod::POST,
+                &route.upstream_path,
+                &hdrs,
+                &body,
+                tls_cfg,
+            ).await);
+
+            Ok(Some(upstream_resp))
         }
     }
 }

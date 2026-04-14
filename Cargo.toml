@@ -31,6 +31,7 @@ all = [
 	"dep:oxedyne_fe2o3_iop_db",
 	"dep:oxedyne_fe2o3_iop_hash",
 	"dep:oxedyne_fe2o3_jdat",
+	"dep:oxedyne_fe2o3_mail",
 	"dep:oxedyne_fe2o3_namex",
 	"dep:oxedyne_fe2o3_net",
 	"dep:oxedyne_fe2o3_num",
@@ -56,6 +57,7 @@ iop_crypto 	= ["dep:oxedyne_fe2o3_iop_crypto"]
 iop_db 		= ["dep:oxedyne_fe2o3_iop_db"]
 iop_hash 	= ["dep:oxedyne_fe2o3_iop_hash"]
 jdat 		= ["dep:oxedyne_fe2o3_jdat"]
+mail 		= ["dep:oxedyne_fe2o3_mail"]
 namex 		= ["dep:oxedyne_fe2o3_namex"]
 net 		= ["dep:oxedyne_fe2o3_net"]
 num 		= ["dep:oxedyne_fe2o3_num"]
@@ -82,6 +84,7 @@ oxedyne_fe2o3_iop_crypto =  { path = "fe2o3_iop_crypto",	optional = true }
 oxedyne_fe2o3_iop_db =      { path = "fe2o3_iop_db",		optional = true }
 oxedyne_fe2o3_iop_hash =    { path = "fe2o3_iop_hash",		optional = true }
 oxedyne_fe2o3_jdat =        { path = "fe2o3_jdat",			optional = true }
+oxedyne_fe2o3_mail =        { path = "fe2o3_mail",			optional = true }
 oxedyne_fe2o3_namex =       { path = "fe2o3_namex",			optional = true }
 oxedyne_fe2o3_net =         { path = "fe2o3_net",			optional = true }
 oxedyne_fe2o3_num =         { path = "fe2o3_num",			optional = true }

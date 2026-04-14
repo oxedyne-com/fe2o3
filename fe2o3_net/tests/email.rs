@@ -32,7 +32,7 @@ pub fn test_email(filter: &'static str) -> Outcome<()> {
 
         // Note: Every line ends with an implicit \n character.
         let wire = "Received: from servera.example.org (servera.example.org [192.168.0.1])\r
- by serverb.example.com (Postfix) with ESMTP id 12345678\r
+ by serverb.example.com (ExampleMTA) with ESMTP id 12345678\r
  for <recipient@example.com>; Fri, 11 Jun 2023 09:30:00 -0500 (EST)\r
 From: Sender <sender@example.org>\r
 To: Recipient <recipient@example.com>\r
@@ -62,7 +62,7 @@ Sender\r
             subject:    fmt!("Test message"),
             body:       fmt!("This is a test message sent from Server A to Server B.\n\nBest regards,\nSender\n"),
             headers:    vec![
-                EmailHeader::Received(fmt!("from servera.example.org (servera.example.org [192.168.0.1]) by serverb.example.com (Postfix) with ESMTP id 12345678 for <recipient@example.com>; Fri, 11 Jun 2023 09:30:00 -0500 (EST)")),
+                EmailHeader::Received(fmt!("from servera.example.org (servera.example.org [192.168.0.1]) by serverb.example.com (ExampleMTA) with ESMTP id 12345678 for <recipient@example.com>; Fri, 11 Jun 2023 09:30:00 -0500 (EST)")),
                 EmailHeader::Date(fmt!("Fri, 11 Jun 2023 09:30:00 -0500")),
             ],
         };

@@ -106,12 +106,21 @@ impl TryFrom<&str> for EmailAddress {
     }
 }
 
+/// An address on a Hematite-native overlay identity layer.
+///
+/// `real` is the underlying backing identity (whatever the overlay
+/// treats as the host or account behind the address) and `virt` is
+/// the virtual face presented to correspondents. The wire form is
+/// `overlay:<real>//<virt>`. Left as a placeholder type until the
+/// overlay's address model is nailed down by downstream consumers.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct OverlayAddress {
     real:    String,
     virt:    String,
 }
 
+/// One of the several address shapes a contact can be reached at:
+/// phone, email, or a Hematite-native overlay address.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ContactAddress {
     Phone(PhoneNumber),
@@ -124,7 +133,7 @@ impl fmt::Display for ContactAddress {
         match self {
             ContactAddress::Phone(pn) => write!(f, "+{} {}", pn.prefix, pn.num),
             ContactAddress::Email(email) => write!(f, "{}@{}", email.loc, email.dom),
-            ContactAddress::Overlay(omail) => write!(f, "ox:{}//{}", omail.real, omail.virt),
+            ContactAddress::Overlay(addr) => write!(f, "overlay:{}//{}", addr.real, addr.virt),
         }
     }
 }
@@ -135,9 +144,9 @@ impl TryFrom<&str> for ContactAddress {
 
     fn try_from(s: &str) -> std::result::Result<Self, Self::Error> {
         let s = s.trim_start();
-        if s.starts_with("ox:") {
-            let omail = OverlayAddress::default();
-            Ok(ContactAddress::Overlay(omail))
+        if s.starts_with("overlay:") {
+            let addr = OverlayAddress::default();
+            Ok(ContactAddress::Overlay(addr))
         } else if s.contains('@') {
             let email = res!(EmailAddress::try_from(s));
             Ok(ContactAddress::Email(email))

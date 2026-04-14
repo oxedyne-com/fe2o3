@@ -91,3 +91,21 @@
 #![forbid(unsafe_code)]
 pub mod srv;
 pub mod app;
+
+/// Public API for apps that build on Steel.
+///
+/// Apps that need custom webhook handlers depend on `fe2o3_steel` as a
+/// library and use these types to register their handlers before starting
+/// the server.
+pub mod prelude {
+    pub use crate::app::tui::{run, run_with_webhooks};
+    pub use crate::srv::cfg::WebhookRoute;
+    pub use crate::srv::webhook::{
+        WebhookHandler,
+        WebhookRegistry,
+        // Utilities for handler implementations.
+        url_encode,
+        extract_value,
+        extract_json_string,
+    };
+}

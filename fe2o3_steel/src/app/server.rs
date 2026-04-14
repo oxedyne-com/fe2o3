@@ -10,6 +10,7 @@ use crate::{
         cfg::ServerConfig,
         constant as srv_const,
         context::{
+            new_db,
             Protocol,
             ServerContext,
             VhostRuntime,
@@ -26,6 +27,13 @@ use crate::{
         },
     },
 };
+
+use oxedyne_fe2o3_crypto::enc::EncryptionScheme;
+use oxedyne_fe2o3_hash::{
+    csum::ChecksumScheme,
+    hash::HashScheme,
+};
+use oxedyne_fe2o3_o3db_sync::O3db;
 
 use oxedyne_fe2o3_core::{
     prelude::*,
@@ -59,7 +67,10 @@ use std::{
         Path,
         PathBuf,
     },
-    sync::Arc,
+    sync::{
+        Arc,
+        RwLock,
+    },
     time::Duration,
 };
 
@@ -150,28 +161,62 @@ impl AppShellContext {
         info!("└───────────────────────┘");
 
         // ┌───────────────────────┐
-        // │ Start database.       │
+        // │ Parse vhosts + ACME.  │
         // └───────────────────────┘
-        
-        info!("Starting database...");
-        res!(self.db.start("database"));
-        res!(ok!(self.db.updated_api()).activate_gc(true));
 
-        std::thread::sleep(Duration::from_secs(1));
+        let vhosts_cfg = res!(server_cfg.get_vhosts());
+        let acme_cfg = res!(server_cfg.get_acme());
 
+        // ┌───────────────────────┐
+        // │ Start per-vhost dbs.  │
+        // └───────────────────────┘
+
+        // One Ozone instance per vhost that has a `db_dir_rel` configured.
+        // Pure-redirect vhosts (no webroot, no database) simply skip this
+        // step. The resulting map is keyed by each vhost's canonical
+        // (primary) hostname in lowercase, matching what `db_for_vhost`
+        // looks up on request dispatch.
         let uid = id::Uid::new(0);
+        let mut vhost_dbs: HashMap<String, (Arc<RwLock<O3db<
+            { id::UID_LEN },
+            id::Uid,
+            EncryptionScheme,
+            HashScheme,
+            HashScheme,
+            ChecksumScheme,
+        >>>, id::Uid)> = HashMap::new();
 
-        // Ping all bots.
-        let (start, msgs) = res!(self.db.api().ping_bots(app_const::GET_DATA_WAIT));
-        info!("{} ping replies received in {:?}.", msgs.len(), start.elapsed());
+        for vh in &vhosts_cfg {
+            let primary_lc = vh.primary_hostname().to_lowercase();
+            let db_dir = match res!(vh.get_db_dir(&root_path)) {
+                Some(p) => p,
+                None => {
+                    info!("Vhost '{}' has no database configured, skipping.",
+                        primary_lc);
+                    continue;
+                }
+            };
+            info!("Starting database for vhost '{}' at {:?}...",
+                primary_lc, db_dir);
+            let mut db = res!(new_db(&db_dir, &self.db_enc_key));
+            // Label is the vhost's canonical name so log output disambiguates
+            // multi-vhost deployments.
+            let label = fmt!("db_{}", primary_lc);
+            res!(db.start(&label));
+            res!(ok!(db.updated_api()).activate_gc(true));
+
+            std::thread::sleep(Duration::from_millis(200));
+
+            let (start, msgs) = res!(db.api().ping_bots(app_const::GET_DATA_WAIT));
+            info!("Vhost '{}': {} ping replies in {:?}.",
+                primary_lc, msgs.len(), start.elapsed());
+
+            vhost_dbs.insert(primary_lc, (Arc::new(RwLock::new(db)), uid));
+        }
 
         // ┌───────────────────────┐
         // │ Certificates.         │
         // └───────────────────────┘
-
-        // Parse the vhosts and ACME config so we can decide the cert strategy.
-        let vhosts_cfg = res!(server_cfg.get_vhosts());
-        let acme_cfg = res!(server_cfg.get_acme());
 
         if dev_mode {
             // Dev mode uses a single shared self-signed cert.
@@ -296,6 +341,17 @@ impl AppShellContext {
         >>> = HashMap::new();
         let mut default_vhost_key: Option<String> = None;
 
+        // Build a TLS client config for outbound API proxy requests.
+        // Reads the system CA bundle so Steel can talk to any upstream.
+        let tls_client = match Self::build_tls_client() {
+            Ok(cfg) => Some(cfg),
+            Err(e) => {
+                warn!("{}", e);
+                info!("Outbound API proxy will be unavailable.");
+                None
+            }
+        };
+
         for vh in &vhosts_cfg {
             let public_dir = match res!(vh.get_public_dir(&root_path)) {
                 Some(p) => p,
@@ -307,12 +363,36 @@ impl AppShellContext {
             ));
             let default_index_files = res!(vh.get_default_index_files());
 
+            // Resolve {file:} placeholders in API route headers.
+            let mut api_routes = vh.api_routes.clone();
+            for route in &mut api_routes {
+                res!(route.resolve_headers(root_path.as_ref()));
+            }
+            if !api_routes.is_empty() {
+                info!("Vhost '{}': {} API route(s) configured.",
+                    vh.primary_hostname(), api_routes.len());
+            }
+
+            // Resolve {file:} placeholders in webhook route config.
+            let mut webhook_routes = vh.webhook_routes.clone();
+            for route in &mut webhook_routes {
+                res!(route.resolve_config(root_path.as_ref()));
+            }
+            if !webhook_routes.is_empty() {
+                info!("Vhost '{}': {} webhook route(s) configured.",
+                    vh.primary_hostname(), webhook_routes.len());
+            }
+
             let web_handler = AppWebHandler::new(
                 server_cfg.clone(),
                 public_dir,
                 static_routes,
                 default_index_files,
                 dev_mode,
+                api_routes,
+                webhook_routes,
+                self.webhook_registry.clone(),
+                tls_client.clone(),
             );
 
             let runtime = Arc::new(VhostRuntime {
@@ -347,7 +427,7 @@ impl AppShellContext {
         let server_context = ServerContext::new(
             server_cfg,
             root_path.clone(),
-            Some((self.db.clone(), uid)),
+            vhost_dbs,
             protocol,
         );
 
@@ -369,5 +449,67 @@ impl AppShellContext {
         log_finish_wait!();
 
         Ok(Evaluation::Exit)
+    }
+
+    /// Build a `rustls::ClientConfig` for outbound HTTPS requests by
+    /// reading the system CA certificate bundle. Returns an error if the
+    /// bundle cannot be found or contains no usable certificates.
+    fn build_tls_client() -> Outcome<Arc<tokio_rustls::rustls::ClientConfig>> {
+        use tokio_rustls::rustls::{
+            ClientConfig,
+            RootCertStore,
+            pki_types::CertificateDer,
+        };
+
+        // Common system CA bundle paths.
+        let ca_paths = [
+            "/etc/ssl/certs/ca-certificates.crt",   // Debian/Ubuntu
+            "/etc/pki/tls/certs/ca-bundle.crt",     // Fedora/RHEL
+            "/etc/ssl/cert.pem",                     // Alpine/macOS
+        ];
+        let ca_file = match ca_paths.iter().find(|p| Path::new(p).exists()) {
+            Some(p) => *p,
+            None => return Err(err!(
+                "No system CA bundle found. Tried: {:?}", ca_paths;
+                Init, Missing, File)),
+        };
+
+        info!("Loading system CA certificates from '{}'...", ca_file);
+        let pem_data = match std::fs::read(ca_file) {
+            Ok(d) => d,
+            Err(e) => return Err(err!(e,
+                "Failed to read CA bundle '{}'.", ca_file;
+                IO, File, Read)),
+        };
+
+        let mut store = RootCertStore::empty();
+        let mut count = 0u32;
+        // Parse PEM-encoded certificates.
+        let mut cursor = &pem_data[..];
+        loop {
+            match rustls_pemfile::read_one(&mut cursor) {
+                Ok(Some(rustls_pemfile::Item::X509Certificate(cert))) => {
+                    let der = CertificateDer::from(cert);
+                    match store.add(der) {
+                        Ok(()) => count += 1,
+                        Err(_) => (), // Skip malformed certs silently.
+                    }
+                }
+                Ok(Some(_)) => continue, // Skip non-certificate items.
+                Ok(None) => break,       // End of file.
+                Err(_) => break,         // Parse error; stop.
+            }
+        }
+        if count == 0 {
+            return Err(err!(
+                "CA bundle '{}' contained no usable certificates.", ca_file;
+                Init, Invalid, File));
+        }
+        info!("Loaded {} CA certificate(s) for outbound HTTPS.", count);
+
+        let config = ClientConfig::builder()
+            .with_root_certificates(store)
+            .with_no_client_auth();
+        Ok(Arc::new(config))
     }
 }

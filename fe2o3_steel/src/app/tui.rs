@@ -8,10 +8,10 @@ use crate::{
         repl::AppShellContext,
         syntax as app_syntax,
     },
-    srv::{
-        context::new_db,
-    },
+    srv::webhook::WebhookRegistry,
 };
+
+use std::sync::Arc;
 
 use oxedyne_fe2o3_core::{
     prelude::*,
@@ -19,18 +19,9 @@ use oxedyne_fe2o3_core::{
         bot::FileConfig,
     },
 };
-use oxedyne_fe2o3_crypto::{
-    keys::Wallet,
-};
-use oxedyne_fe2o3_data::{
-    ring::RingBuffer,
-    time::Timestamped,
-};
-use oxedyne_fe2o3_hash::{
-    kdf::KeyDerivationScheme,
-};
-use oxedyne_fe2o3_iop_hash::{
-    kdf::KeyDeriver,
+use oxedyne_fe2o3_crypto::keys::{
+    DEFAULT_WALLET_KDF_NAME,
+    Wallet,
 };
 use oxedyne_fe2o3_jdat::{
     prelude::*,
@@ -51,7 +42,6 @@ use oxedyne_fe2o3_tui::lib_tui::{
     },
     input::UserInput,
 };
-use oxedyne_fe2o3_namex::InNamex;
 
 use std::{
     collections::BTreeMap,
@@ -85,7 +75,23 @@ pub struct AppStatus {
     pub web:    State,
 }
 
+/// Start the Steel application with no registered webhook handlers.
+///
+/// This is the entry point for the stock `steel` binary. Apps that
+/// need custom webhook handlers should call [`run_with_webhooks`] instead.
 pub fn run() -> Outcome<()> {
+    run_with_webhooks(WebhookRegistry::new())
+}
+
+/// Start the Steel application with a pre-built webhook handler registry.
+///
+/// App binaries call this after registering their handlers:
+/// ```rust
+/// let mut reg = WebhookRegistry::new();
+/// reg.register("my_handler", MyHandler);
+/// run_with_webhooks(reg)?;
+/// ```
+pub fn run_with_webhooks(registry: WebhookRegistry) -> Outcome<()> {
 
     let mut app_status = AppStatus::default();
     let cwd = res!(std::env::current_dir());
@@ -164,85 +170,76 @@ pub fn run() -> Outcome<()> {
     info!("│ New shell session.    │");
     info!("└───────────────────────┘");
 
-    // ┌───────────────────────┐
-    // │ The config is loaded, │
-    // │ now load the wallet   │
-    // │ file.                 │
-    // └───────────────────────┘
-    // ---------------------------------------------------------------------------------------------
-    // It contains the hash of the passphrase, used for overall authentication, as well as the KDF
-    // configurations for deriving database encryption keys.  The wallet file itself is open and
-    // contains no encryption itself.
-    // ---------------------------------------------------------------------------------------------
-    const PH: usize = constant::NUM_PREV_PASSHASHES_TO_RETAIN;
-    let wallet_path = Path::new("./").join(constant::WALLET_NAME);
-    let (wallet, db_default_enc_key) = if wallet_path.is_file() {
-        // ┌───────────────────────┐
-        // │ The wallet exists,    │
-        // │ load it, authenticate │
-        // │ and derive the        │
-        // │ default database key. │
-        // └───────────────────────┘
-        // -----------------------------------------------------------------------------------------
-        // The wallet contains:
-        // - metadata:
-        //  Persisting some kind data out in the open,
-        // - app_hashes:
-        //  Provides hashes when users are required to enter passphrases for access,
-        // - app_encrypted_secrets:
-        //  Provides encrypted keys when the plain keys are required, decrypted by the wallet
-        //  passphrase,
-        // - wallet_pass_hashes:
-        //  Provides the current and historical wallet passphrase hashes, as a fixed size ring
-        //  buffer.  This map includes a U64 index identifying the current passphrase hash.
-        // -----------------------------------------------------------------------------------------
-        let wallet = res!(Wallet::<{PH}, Dat>::load(wallet_path, Some(DecoderConfig::<(), ()>::default())));
-        let kdf_map_dat = match wallet.kdf_cfgs().get(&dat!("default")) {
-            Some(map_dat) => map_dat,
-            None => return Err(err!(
-                "The wallet does not contain a 'default' KDF entry.";
-                Data, Configuration, Missing)),
-        };
-        let db_default_kdf_name = try_extract_dat!(
-            res!(kdf_map_dat.map_get_must(&dat!("kdf_name"))),
-            Str,
-        );
-        let mut db_default_kdf = res!(KeyDerivationScheme::from_str(&db_default_kdf_name));
-        let db_default_kdf_cfg = try_extract_dat!(
-            res!(kdf_map_dat.map_get_must(&dat!("kdf_cfg"))),
-            Str,
-        );
-        let app_kdf = match wallet.passhashes().get() {
-            Some(Timestamped { data: kdf_dat, .. }) => {
-                let kdf_name = try_extract_dat!(res!(kdf_dat.map_get_must(&dat!("kdf_name"))), Str);
-                let kdf_hash = try_extract_dat!(res!(kdf_dat.map_get_must(&dat!("kdf_hash"))), Str);
-                let mut app_kdf = res!(KeyDerivationScheme::from_str(&kdf_name));
-                res!(app_kdf.decode_from_string(kdf_hash));
-                app_kdf
-            }
-            None => return Err(err!(
-                "The current passhash is None in {}.",
-                constant::WALLET_NAME;
-                Data, Configuration, Missing)),
-        };
-        // Headless mode: read the wallet passphrase from the environment
-        // variable `STEEL_WALLET_PASS` when set (e.g. under a systemd service
-        // with an `EnvironmentFile`). This is what the `--headless` code path
-        // needs to avoid the interactive tty prompt.
-        let pass = match std::env::var("STEEL_WALLET_PASS") {
-            Ok(s) => Secret::new(s),
-            Err(_) => res!(UserInput::ask_for_secret(None)),
-        };
-        let pass = pass.expose_secret().as_bytes();
-        if res!(app_kdf.verify(pass)) {
-            res!(db_default_kdf.decode_cfg_from_string(&db_default_kdf_cfg));
-            res!(db_default_kdf.derive(pass));
-            let db_default_enc_key = res!(db_default_kdf.get_hash()).to_vec();
-            (wallet, db_default_enc_key)
-        } else {
-            println!("The passphrase does not match, goodbye!");
-            return Ok(());
+    // ┌───────────────────────────────────────────────────────────────────────┐
+    // │ BOOTSTRAP BYPASS FOR WALLET MIGRATE                                   │
+    // │                                                                       │
+    // │ If the caller is invoking `wallet --migrate`, the wallet is still in  │
+    // │ the legacy passphrase-only layout and the normal unlock flow cannot  │
+    // │ read it. Detect this one subcommand here and dispatch straight into  │
+    // │ the migration routine, bypassing the unlock step entirely. All other │
+    // │ subcommands require a successful unlock first.                        │
+    // └───────────────────────────────────────────────────────────────────────┘
+    let invocation_cmds: Vec<String> = std::env::args().skip(1).collect();
+    let is_wallet_migrate = {
+        let mut saw_wallet = false;
+        let mut saw_migrate = false;
+        for tok in &invocation_cmds {
+            if tok == "wallet" { saw_wallet = true; }
+            if tok == "-m" || tok == "--migrate" { saw_migrate = true; }
         }
+        saw_wallet && saw_migrate
+    };
+    if is_wallet_migrate {
+        res!(migrate_legacy_wallet_inline(&cfg));
+        return Ok(());
+    }
+
+    // ┌───────────────────────────────────────────────────────────────────────┐
+    // │ WALLET UNLOCK                                                         │
+    // │                                                                       │
+    // │ The wallet holds one or more admin entries. Each admin has its own    │
+    // │ password-wrapped copy of the same wallet master key; any of them can  │
+    // │ unlock the wallet with their own password. The master key is used as  │
+    // │ the Ozone database encryption key.                                    │
+    // │                                                                       │
+    // │ Password source, in descending order of preference:                   │
+    // │                                                                       │
+    // │   1. `STEEL_ADMIN_PASS` environment variable -- development and       │
+    // │      scripted test convenience only.                                  │
+    // │   2. Interactive tty prompt via `UserInput::ask_for_secret`, which    │
+    // │      reads stdin with echo off.                                       │
+    // │                                                                       │
+    // │ There is deliberately no disk-resident fallback. In production the    │
+    // │ passphrase must be supplied by a human at each start (or by an        │
+    // │ orchestration layer that knows how to pipe it into stdin without      │
+    // │ writing it to disk). A wallet that can be unlocked with a secret      │
+    // │ stored on the same disk it protects provides no real defence against  │
+    // │ the threat model it was built for -- disk theft.                      │
+    // └───────────────────────────────────────────────────────────────────────┘
+    let wallet_path = Path::new("./").join(constant::WALLET_NAME);
+    let (wallet, db_default_enc_key, unlocked_admin_name, unlocked_admin_scopes) =
+    if wallet_path.is_file() {
+        let wallet = res!(Wallet::load(
+            wallet_path,
+            Some(DecoderConfig::<(), ()>::default()),
+        ));
+        let pass = if let Ok(s) = std::env::var("STEEL_ADMIN_PASS") {
+            Secret::new(s)
+        } else {
+            res!(UserInput::ask_for_secret(None))
+        };
+        let unlocked = match wallet.unlock(pass.expose_secret().as_bytes()) {
+            Ok(u) => u,
+            Err(e) => {
+                println!("Wallet unlock failed: {}.", e);
+                return Ok(());
+            }
+        };
+        info!("Wallet unlocked by admin '{}'.", unlocked.admin_name);
+        let db_default_enc_key = unlocked.master_key.expose_secret().clone();
+        let name = unlocked.admin_name.clone();
+        let scopes = unlocked.admin_scopes.clone();
+        (wallet, db_default_enc_key, name, scopes)
     } else {
         // ┌───────────────────────┐
         // │ Wallet not found.     │
@@ -266,44 +263,42 @@ pub fn run() -> Outcome<()> {
             "2" => {
                 // ┌───────────────────────┐
                 // │ Create the wallet     │
-                // │ from scratch.         │
+                // │ from scratch with one │
+                // │ operator admin entry. │
                 // └───────────────────────┘
-                println!("Ok, let's create the first app wallet passphrase.");
+                println!("Ok, let's create the first wallet admin and passphrase.");
+                print!("Admin name (default 'operator'): ");
+                res!(std::io::stdout().flush());
+                let mut name_in = String::new();
+                res!(std::io::stdin().read_line(&mut name_in));
+                let admin_name = match name_in.trim() {
+                    "" => "operator".to_string(),
+                    s  => s.to_string(),
+                };
                 let pass = res!(UserInput::create_pass(constant::MAX_CREATE_PASS_ATTEMPTS));
-                let pass = pass.expose_secret().as_bytes();
-                let mut app_kdf = res!(KeyDerivationScheme::from_str(&cfg.kdf_name));
-                res!(app_kdf.derive(pass));
-                let mut kdf_map = DaticleMap::new();
-                kdf_map.insert(dat!("kdf_name"), dat!(fmt!("{}", app_kdf)));
-                let kdf_hash = res!(app_kdf.encode_to_string());
-                kdf_map.insert(dat!("kdf_hash"), dat!(kdf_hash));
-                let mut passhashes = RingBuffer::<{PH}, Timestamped<Dat>>::default();
-                passhashes.set(res!(Timestamped::new(dat!(kdf_map))));
-
-                let mut kdf_cfgs = DaticleMap::new();
-                let mut db_kdf = res!(KeyDerivationScheme::from_str(&cfg.kdf_name));
-                res!(db_kdf.derive(pass));
-                let mut kdf_map = DaticleMap::new();
-                kdf_map.insert(dat!("kdf_name"), dat!(fmt!("{}", db_kdf)));
-                kdf_map.insert(dat!("kdf_nid"), dat!(fmt!("{}", res!(db_kdf.name_id()))));
-                kdf_map.insert(dat!("kdf_cfg"), dat!(res!(db_kdf.encode_cfg_to_string())));
-                kdf_cfgs.insert(dat!("default"), dat!(kdf_map));
-                let db_default_enc_key = res!(db_kdf.get_hash()).to_vec();
+                let pass_bytes = pass.expose_secret().as_bytes();
 
                 let mut metadata = BTreeMap::new();
                 metadata.insert(dat!("app_name"), dat!(cfg.app_name.clone()));
                 metadata.insert(dat!("app_root"), dat!(cfg.app_root.clone()));
                 metadata.insert(dat!("this_dir"), dat!(cwd_str));
 
-                let wallet = Wallet::<{PH}, Dat>::new(
+                let (wallet, unlocked) = res!(Wallet::create_with_first_admin(
                     metadata,
-                    kdf_cfgs,
-                    DaticleMap::new(),
-                    passhashes,
-                );
-                res!(wallet.save(&wallet_path, "  ", Some(EncoderConfig::<(), ()>::default())));
+                    admin_name,
+                    pass_bytes,
+                    DEFAULT_WALLET_KDF_NAME,
+                ));
+                res!(wallet.save(
+                    &wallet_path,
+                    "  ",
+                    Some(EncoderConfig::<(), ()>::default()),
+                ));
                 println!("Thank you, {:?} created.", wallet_path);
-                (wallet, db_default_enc_key)
+                let db_default_enc_key = unlocked.master_key.expose_secret().clone();
+                let name = unlocked.admin_name.clone();
+                let scopes = unlocked.admin_scopes.clone();
+                (wallet, db_default_enc_key, name, scopes)
             },
             _ => return Err(err!(
                 "Invalid response, goodbye!";
@@ -319,7 +314,6 @@ pub fn run() -> Outcome<()> {
     // └───────────────────────────────────────────────────────────────────────────────────────────┘
 
     let app_root = Path::new(&cfg.app_root);
-    let db_root = app_root.join(constant::DB_DIR);
     match dev::setup(&app_root) {
         Ok(s) => {
             if !s.is_empty() {
@@ -329,8 +323,6 @@ pub fn run() -> Outcome<()> {
         Err(e) => return Err(err!(e, "While setting up dev environment."; Init)),
     }
 
-    let invocation_cmds: Vec<String> = std::env::args().skip(1).collect();
-
     let syntax = res!(app_syntax::new_shell(
         &cfg.app_human_name,
         &constant::VERSION,
@@ -338,12 +330,15 @@ pub fn run() -> Outcome<()> {
     ));
 
     let mut context = AppShellContext {
-        stat:       app_status,
-        app_cfg:    cfg.clone(),
+        stat:               app_status,
+        app_cfg:            cfg.clone(),
         syntax,
-        ws:         BTreeMap::new(),
-        db:         res!(new_db(&db_root, &db_default_enc_key)),
+        ws:                 BTreeMap::new(),
+        db_enc_key:         db_default_enc_key,
         wallet,
+        unlocked_admin_name,
+        unlocked_admin_scopes,
+        webhook_registry:   Arc::new(registry),
     };
 
     let mut shell_cfg = ShellConfig::default();
@@ -365,10 +360,171 @@ pub fn run() -> Outcome<()> {
             }
         }
     } else {
-        shell_cfg.greeting_msg = 
+        shell_cfg.greeting_msg =
             fmt!("Welcome, type \"help\" for a help menu.");
         res!(context.start_shell(&shell_cfg, None));
     }
 
     Ok(())
 }
+
+
+/// One-shot migration of a legacy (pre-admin-user) wallet file to
+/// the new multi-admin layout.
+///
+/// Called by the `wallet --migrate` bootstrap bypass in [`run`],
+/// before the normal wallet unlock step. Reads the existing wallet
+/// file as raw `Dat`, pulls the legacy `wallet_pass_hashes` (for
+/// passphrase verification) and `app_hashes.default.kdf_cfg` (for
+/// deriving the database encryption key) out of it, verifies the
+/// passphrase, derives the current database encryption key -- which
+/// becomes the new wallet's master key `K` unchanged, so no Ozone
+/// re-encryption is required -- and rewrites the wallet with a
+/// single admin entry named "operator" (override via prompt)
+/// wrapping the same `K`. The old wallet file is preserved as
+/// `wallet.jdat.pre-admins` for rollback.
+fn migrate_legacy_wallet_inline(_cfg: &AppConfig) -> Outcome<()> {
+    use std::io::Write;
+    use oxedyne_fe2o3_core::mem::Extract;
+    use oxedyne_fe2o3_hash::kdf::KeyDerivationScheme;
+    use oxedyne_fe2o3_iop_hash::kdf::KeyDeriver;
+    use oxedyne_fe2o3_crypto::keys::{
+        AdminUser,
+        DEFAULT_WALLET_KDF_NAME,
+    };
+
+    let wallet_path = Path::new("./").join(constant::WALLET_NAME);
+    if !wallet_path.is_file() {
+        println!("No wallet file to migrate at {:?}.", wallet_path);
+        return Ok(());
+    }
+    let text = res!(std::fs::read_to_string(&wallet_path));
+    let mut dat = res!(Dat::decode_string(&text));
+    if dat.kind() != Kind::OrdMap && dat.kind() != Kind::Map {
+        return Err(err!(
+            "Legacy wallet at {:?} is not a map (kind={:?}).",
+            wallet_path, dat.kind();
+            Input, Invalid, Mismatch));
+    }
+    // Already new layout?
+    if let Ok(_) = dat.map_get_must(&dat!("admins")) {
+        println!("Wallet at {:?} is already in the admin-user layout.",
+            wallet_path);
+        return Ok(());
+    }
+
+    let pass = res!(UserInput::ask_for_secret(
+        Some("Enter the current wallet passphrase: "),
+    ));
+    let pass_bytes = pass.expose_secret().as_bytes();
+
+    // Verify the passphrase against the legacy passhash ring buffer.
+    let ring = res!(dat.map_remove_must(&dat!("wallet_pass_hashes")));
+    let current_hash_dat = {
+        // The ring buffer serialises as `Tup2(list, index)` where
+        // `list` is a Vek of `Opt<Tup2(data, timestamp)>`. Extract
+        // the current slot's `data` daticle, which is the kdf map.
+        let mut ring_parts = oxedyne_fe2o3_jdat::try_extract_tup2dat!(ring);
+        let index: u64 = match ring_parts[1].extract() {
+            Dat::U64(n) => n,
+            other => return Err(err!(
+                "Legacy ring buffer index must be u64 (got {:?}).", other.kind();
+                Invalid, Input)),
+        };
+        let list = oxedyne_fe2o3_jdat::try_extract_dat!(
+            ring_parts[0].extract(),
+            Vek,
+        );
+        let slot = list.into_iter().nth(index as usize).ok_or_else(|| err!(
+            "Legacy ring buffer index {} out of range.", index;
+            Input, Invalid, Mismatch))?;
+        let some = match slot {
+            Dat::Opt(inner) => match *inner {
+                Some(d) => d,
+                None => return Err(err!(
+                    "Legacy ring buffer current slot is None.";
+                    Input, Missing)),
+            },
+            other => return Err(err!(
+                "Legacy ring buffer slot must be Opt (got {:?}).", other.kind();
+                Input, Invalid, Mismatch)),
+        };
+        let mut slot_parts = oxedyne_fe2o3_jdat::try_extract_tup2dat!(some);
+        slot_parts[0].extract()
+    };
+    let app_kdf_name = try_extract_dat!(
+        res!(current_hash_dat.map_get_must(&dat!("kdf_name"))),
+        Str,
+    );
+    let app_kdf_hash = try_extract_dat!(
+        res!(current_hash_dat.map_get_must(&dat!("kdf_hash"))),
+        Str,
+    );
+    let mut app_kdf = res!(KeyDerivationScheme::from_str(&app_kdf_name));
+    res!(app_kdf.decode_from_string(&app_kdf_hash));
+    if !res!(app_kdf.verify(pass_bytes)) {
+        println!("Passphrase rejected -- nothing migrated.");
+        return Ok(());
+    }
+
+    // Derive the legacy database encryption key -- becomes the new
+    // master key unchanged.
+    let app_hashes = res!(dat.map_remove_must(&dat!("app_hashes")));
+    let default_entry = res!(app_hashes.map_get_must(&dat!("default"))).clone();
+    let db_kdf_name = try_extract_dat!(
+        res!(default_entry.map_get_must(&dat!("kdf_name"))),
+        Str,
+    );
+    let db_kdf_cfg = try_extract_dat!(
+        res!(default_entry.map_get_must(&dat!("kdf_cfg"))),
+        Str,
+    );
+    let mut db_kdf = res!(KeyDerivationScheme::from_str(&db_kdf_name));
+    res!(db_kdf.decode_cfg_from_string(&db_kdf_cfg));
+    res!(db_kdf.derive(pass_bytes));
+    let master_key = res!(db_kdf.get_hash()).to_vec();
+
+    let metadata = match dat.map_remove(&dat!("metadata")) {
+        Ok(Some(d)) => try_extract_dat!(d, Map),
+        _ => DaticleMap::new(),
+    };
+
+    print!("New admin name (default 'operator'): ");
+    res!(std::io::stdout().flush());
+    let mut name_in = String::new();
+    res!(std::io::stdin().read_line(&mut name_in));
+    let admin_name = match name_in.trim() {
+        "" => "operator".to_string(),
+        s  => s.to_string(),
+    };
+
+    let admin = res!(AdminUser::new(
+        admin_name.clone(),
+        pass_bytes,
+        &master_key,
+        DEFAULT_WALLET_KDF_NAME,
+        vec!["*".to_string()],
+        0,
+    ));
+    let new_wallet = Wallet::new(metadata, vec![admin], DaticleMap::new());
+
+    let backup_path = Path::new("./").join(fmt!("{}.pre-admins", constant::WALLET_NAME));
+    if let Err(e) = std::fs::copy(&wallet_path, &backup_path) {
+        return Err(err!(e,
+            "Backing up {:?} to {:?}.", wallet_path, backup_path;
+            IO, File, Write));
+    }
+    res!(new_wallet.save(
+        &wallet_path,
+        "  ",
+        Some(EncoderConfig::<(), ()>::default()),
+    ));
+    println!();
+    println!("Migrated wallet to the admin-user layout.");
+    println!("  New admin: '{}'", admin_name);
+    println!("  Passphrase: unchanged (the one you just typed)");
+    println!("  Backup: {:?}", backup_path);
+    println!();
+    Ok(())
+}
+

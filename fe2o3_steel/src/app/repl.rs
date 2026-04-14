@@ -8,12 +8,15 @@ use crate::{
         cert::Certificate,
         cfg::ServerConfig,
         constant as srv_const,
-        id,
+        webhook::WebhookRegistry,
     },
 };
 
+use std::sync::Arc;
+
 use oxedyne_fe2o3_core::{
     prelude::*,
+    mem::Extract,
     path::NormalPath,
 };
 use oxedyne_fe2o3_crypto::{
@@ -21,8 +24,6 @@ use oxedyne_fe2o3_crypto::{
     keys::Wallet,
 };
 use oxedyne_fe2o3_hash::{
-    csum::ChecksumScheme,
-    hash::HashScheme,
     kdf::KeyDerivationScheme,
 };
 use oxedyne_fe2o3_iop_crypto::{
@@ -35,7 +36,6 @@ use oxedyne_fe2o3_jdat::{
     file::JdatFile,
     string::enc::EncoderConfig,
 };
-use oxedyne_fe2o3_o3db_sync::O3db;
 use oxedyne_fe2o3_syntax::{
     core::SyntaxRef,
     help::Help,
@@ -75,20 +75,26 @@ use zeroize::Zeroize;
 
 #[derive(Clone)]
 pub struct AppShellContext {
-    pub stat:       AppStatus,
-    pub app_cfg:    AppConfig,
-    pub syntax:     SyntaxRef,
-    pub ws:         BTreeMap<Dat, Dat>,
-    pub db:         O3db<
-                        { id::UID_LEN },
-                        id::Uid,
-                        EncryptionScheme,
-                        HashScheme,
-                        HashScheme,
-                        ChecksumScheme,
-                    >,
-    pub wallet:     Wallet<{ app_const::NUM_PREV_PASSHASHES_TO_RETAIN }, Dat>,
-    //server: Server,
+    pub stat:               AppStatus,
+    pub app_cfg:            AppConfig,
+    pub syntax:             SyntaxRef,
+    pub ws:                 BTreeMap<Dat, Dat>,
+    /// Default database encryption key, derived from the wallet passphrase
+    /// at shell start-up. The `server` command uses this key to open one
+    /// Ozone instance per configured vhost.
+    pub db_enc_key:         Vec<u8>,
+    pub wallet:             Wallet,
+    /// Name of the admin whose password unlocked the wallet at
+    /// start-up. Empty when the wallet was just created. Threaded
+    /// through so privileged subcommands do not have to re-prompt
+    /// the caller for a password they have already proven once.
+    pub unlocked_admin_name:    String,
+    /// Scope list of the unlocking admin. Checked by privileged
+    /// subcommands to enforce verb-level authorisation.
+    pub unlocked_admin_scopes:  Vec<String>,
+    /// App-registered webhook handlers, dispatched by name from the
+    /// webhook route config.
+    pub webhook_registry:   Arc<WebhookRegistry>,
 }
 
 impl ShellContext for AppShellContext {
@@ -191,6 +197,10 @@ impl AppShellContext {
                 "pwd"       => evals.push(res!(cmds::print_working_directory())),
                 // Wallet
                 "secrets"   => evals.push(res!(self.secrets(&shell_cfg, Some(cmd)))),
+                "wallet"    => evals.push(res!(self.manage_wallet(&shell_cfg, Some(cmd)))),
+                "admin"     => evals.push(res!(self.manage_admin(&shell_cfg, Some(cmd)))),
+                // Mail
+                "mailpass"  => evals.push(res!(self.mailpass(&shell_cfg, Some(cmd)))),
                 _ => (), // Not implemented yet.
             }
         }
@@ -312,6 +322,371 @@ impl AppShellContext {
         Ok(Evaluation::None)
     }
 
+    pub fn mailpass(
+        &mut self,
+        _shell_cfg: &ShellConfig,
+        cmd:        Option<&MsgCmd>,
+    )
+        -> Outcome<Evaluation>
+    {
+        let msg_cmd = match cmd {
+            Some(c) => c,
+            None => return Err(err!(
+                "mailpass requires arguments."; Invalid, Input, Missing)),
+        };
+        let address_vals = res!(msg_cmd.get_arg_vals("address").with_len(1));
+        let address = try_extract_dat!(&address_vals[0], Str).clone();
+        let delivery_vals = res!(msg_cmd.get_arg_vals("delivery-dir").with_len(1));
+        let delivery = try_extract_dat!(&delivery_vals[0], Str).clone();
+        // Allow the password to be supplied via the STEEL_MAIL_PASS
+        // env var so this command works in non-interactive contexts
+        // (CI, scripts, deploy automation).
+        let pass: secrecy::Secret<String> = match std::env::var("STEEL_MAIL_PASS") {
+            Ok(p) => secrecy::Secret::new(p),
+            Err(_) => res!(UserInput::ask_for_secret(
+                Some("Enter password for mailbox: "),
+            )),
+        };
+        // Use a moderate cost so the prompt feels snappy. 64 MB / 3
+        // iterations is the OWASP minimum for Argon2id.
+        let mut kdf = res!(KeyDerivationScheme::new_argon2(
+            "Argon2id",
+            0x13,
+            65_536,
+            3,
+            16,
+            32,
+        ));
+        res!(kdf.derive(pass.expose_secret().as_bytes()));
+        let encoded = res!(kdf.encode_to_string());
+        println!();
+        println!("Add this entry to your mail users.jdat:");
+        println!();
+        println!("  {{");
+        println!("    \"address\":      \"{}\",", address);
+        println!("    \"delivery_dir\": \"{}\",", delivery);
+        println!("    \"argon2id\":     \"{}\"", encoded);
+        println!("  }}");
+        println!();
+        Ok(Evaluation::None)
+    }
+
+    /// `wallet --migrate`: one-shot migrate a pre-admin-user wallet
+    /// into the multi-admin layout.
+    ///
+    /// Reads the existing wallet file as raw `Dat`, extracts the
+    /// legacy `wallet_pass_hashes` (for passphrase verification) and
+    /// `app_hashes.default.kdf_cfg` (for deriving the database
+    /// encryption key), verifies the current passphrase, derives the
+    /// current database encryption key -- which becomes the new
+    /// wallet's master key `K` unchanged, so no Ozone re-encryption is
+    /// required -- and rewrites the wallet with a single admin entry
+    /// named "jason" (override via prompt) wrapping the same `K`. The
+    /// old wallet file is preserved as `wallet.jdat.pre-admins` for
+    /// rollback.
+    pub fn manage_wallet(
+        &mut self,
+        _shell_cfg: &ShellConfig,
+        cmd:        Option<&MsgCmd>,
+    )
+        -> Outcome<Evaluation>
+    {
+        let msg_cmd = match cmd {
+            Some(c) => c,
+            None => return Err(err!(
+                "wallet requires a subcommand argument."; Invalid, Input, Missing)),
+        };
+        if res!(msg_cmd.has_only_arg("migrate")) {
+            return self.migrate_wallet();
+        }
+        Ok(Evaluation::Output(fmt!(
+            "No recognised 'wallet' subcommand argument supplied.")))
+    }
+
+    fn migrate_wallet(&mut self) -> Outcome<Evaluation> {
+        let wallet_path = Path::new("./").join(app_const::WALLET_NAME);
+        if !wallet_path.is_file() {
+            return Ok(Evaluation::Output(fmt!(
+                "No wallet file to migrate at {:?}.", wallet_path)));
+        }
+        // Load the wallet file as raw Dat so we can read the legacy
+        // layout without depending on the old `Wallet<PH, D>` struct
+        // (which no longer exists in the source tree).
+        let text = res!(std::fs::read_to_string(&wallet_path));
+        let mut dat = res!(Dat::decode_string(&text));
+        if dat.kind() != Kind::OrdMap && dat.kind() != Kind::Map {
+            return Err(err!(
+                "Legacy wallet file at {:?} is not a map (kind={:?}).",
+                wallet_path, dat.kind();
+                Input, Invalid, Mismatch));
+        }
+        // If the file already has an "admins" list, it is already the
+        // new layout and there is nothing to do.
+        if let Ok(_) = dat.map_get_must(&dat!("admins")) {
+            return Ok(Evaluation::Output(fmt!(
+                "Wallet at {:?} is already in the admin-user layout.",
+                wallet_path)));
+        }
+        // Pull the current passphrase from the caller.
+        let pass = res!(UserInput::ask_for_secret(
+            Some("Enter the current wallet passphrase: "),
+        ));
+        let pass_bytes = pass.expose_secret().as_bytes();
+
+        // Verify the passphrase against the legacy `wallet_pass_hashes`
+        // ring buffer. We extract just the first (current) entry --
+        // older entries are historical and not used for verification.
+        let ring = res!(dat.map_remove_must(&dat!("wallet_pass_hashes")));
+        let current_hash_dat = res!(extract_legacy_current_passhash(ring));
+        let app_kdf_name = try_extract_dat!(
+            res!(current_hash_dat.map_get_must(&dat!("kdf_name"))),
+            Str,
+        );
+        let app_kdf_hash = try_extract_dat!(
+            res!(current_hash_dat.map_get_must(&dat!("kdf_hash"))),
+            Str,
+        );
+        let mut app_kdf = res!(KeyDerivationScheme::from_str(&app_kdf_name));
+        res!(app_kdf.decode_from_string(&app_kdf_hash));
+        if !res!(app_kdf.verify(pass_bytes)) {
+            return Ok(Evaluation::Output(fmt!(
+                "Passphrase rejected -- nothing migrated.")));
+        }
+
+        // Derive the current database encryption key via the legacy
+        // `app_hashes.default` KDF config. That derived key becomes
+        // the new wallet's master key, unchanged, so the on-disk
+        // Ozone data does not need to be re-encrypted.
+        let app_hashes = res!(dat.map_remove_must(&dat!("app_hashes")));
+        let default_entry = res!(app_hashes.map_get_must(&dat!("default"))).clone();
+        let db_kdf_name = try_extract_dat!(
+            res!(default_entry.map_get_must(&dat!("kdf_name"))),
+            Str,
+        );
+        let db_kdf_cfg = try_extract_dat!(
+            res!(default_entry.map_get_must(&dat!("kdf_cfg"))),
+            Str,
+        );
+        let mut db_kdf = res!(KeyDerivationScheme::from_str(&db_kdf_name));
+        res!(db_kdf.decode_cfg_from_string(&db_kdf_cfg));
+        res!(db_kdf.derive(pass_bytes));
+        let master_key = res!(db_kdf.get_hash()).to_vec();
+
+        // Preserve the existing metadata if present.
+        let metadata = match dat.map_remove(&dat!("metadata")) {
+            Ok(Some(d)) => try_extract_dat!(d, Map),
+            _ => DaticleMap::new(),
+        };
+
+        // Prompt for the new admin name, defaulting to the current
+        // unix user name or "operator".
+        print!("New admin name (default 'operator'): ");
+        {
+            use std::io::Write;
+            res!(std::io::stdout().flush());
+        }
+        let mut name_in = String::new();
+        res!(std::io::stdin().read_line(&mut name_in));
+        let admin_name = match name_in.trim() {
+            "" => "operator".to_string(),
+            s  => s.to_string(),
+        };
+
+        // Build the fresh admin entry (wraps `master_key` under the
+        // same passphrase the caller just typed), assemble a new
+        // Wallet, and save it. The caller keeps using the same
+        // passphrase; nothing changes on the Ozone side.
+        let admin = res!(oxedyne_fe2o3_crypto::keys::AdminUser::new(
+            admin_name.clone(),
+            pass_bytes,
+            &master_key,
+            oxedyne_fe2o3_crypto::keys::DEFAULT_WALLET_KDF_NAME,
+            vec!["*".to_string()],
+            0,
+        ));
+        let new_wallet = Wallet::new(metadata, vec![admin], DaticleMap::new());
+
+        // Back up the old wallet first.
+        let backup_path = Path::new("./").join(fmt!("{}.pre-admins", app_const::WALLET_NAME));
+        if let Err(e) = std::fs::copy(&wallet_path, &backup_path) {
+            return Err(err!(e,
+                "Backing up {:?} to {:?}.", wallet_path, backup_path;
+                IO, File, Write));
+        }
+        res!(new_wallet.save(
+            &wallet_path,
+            "  ",
+            Some(EncoderConfig::<(), ()>::default()),
+        ));
+        self.wallet = new_wallet;
+        audit_log(&admin_name, "wallet.migrate", "ok",
+            &fmt!("backup={:?}", backup_path));
+        Ok(Evaluation::Output(fmt!(
+            "Migrated wallet to the admin-user layout. New admin '{}' \
+            can unlock with the existing passphrase. Old wallet saved \
+            as {:?}.",
+            admin_name, backup_path,
+        )))
+    }
+
+    /// `admin --add NAME --scopes ... --expires-in N`,
+    /// `admin --remove NAME`,
+    /// `admin --list`.
+    pub fn manage_admin(
+        &mut self,
+        _shell_cfg: &ShellConfig,
+        cmd:        Option<&MsgCmd>,
+    )
+        -> Outcome<Evaluation>
+    {
+        let msg_cmd = match cmd {
+            Some(c) => c,
+            None => return Err(err!(
+                "admin requires a subcommand argument."; Invalid, Input, Missing)),
+        };
+        if msg_cmd.has_arg("list") {
+            return self.admin_list();
+        }
+        if msg_cmd.has_arg("add") {
+            let vals = res!(msg_cmd.get_arg_vals("add").with_len(1));
+            let name = try_extract_dat!(&vals[0], Str).clone();
+            let scopes: Vec<String> = match msg_cmd.get_arg_vals("scopes") {
+                Some(vs) if !vs.is_empty() => {
+                    let s = try_extract_dat!(&vs[0], Str).clone();
+                    s.split(',').map(|t| t.trim().to_string()).collect()
+                },
+                _ => Vec::new(),
+            };
+            let expires_in: u64 = match msg_cmd.get_arg_vals("expires-in") {
+                Some(vs) if !vs.is_empty() => match &vs[0] {
+                    Dat::U64(n) => *n,
+                    Dat::U32(n) => *n as u64,
+                    _ => 0u64,
+                },
+                _ => 0u64,
+            };
+            let expires_at = if expires_in == 0 {
+                0
+            } else {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                now.saturating_add(expires_in)
+            };
+            return self.admin_add(&name, scopes, expires_at);
+        }
+        if msg_cmd.has_arg("remove") {
+            let vals = res!(msg_cmd.get_arg_vals("remove").with_len(1));
+            let name = try_extract_dat!(&vals[0], Str).clone();
+            return self.admin_remove(&name);
+        }
+        Ok(Evaluation::Output(fmt!(
+            "No recognised 'admin' subcommand argument supplied.")))
+    }
+
+    fn admin_list(&self) -> Outcome<Evaluation> {
+        let mut lines = Vec::new();
+        lines.push(fmt!(
+            "{:<24} {:<12} {}",
+            "name", "expires_at", "scopes",
+        ));
+        for a in self.wallet.admins() {
+            let expiry = if a.expires_at == 0 {
+                "never".to_string()
+            } else {
+                fmt!("{}", a.expires_at)
+            };
+            lines.push(fmt!(
+                "{:<24} {:<12} {}",
+                a.name, expiry, a.scopes.join(","),
+            ));
+        }
+        audit_log("(anon)", "admin.list", "ok",
+            &fmt!("count={}", self.wallet.admins().len()));
+        Ok(Evaluation::Output(lines.join("\n")))
+    }
+
+    /// Return `true` if the admin who unlocked the wallet at start
+    /// holds the `"admin"` scope or the `"*"` wildcard.
+    fn unlocked_has_admin_scope(&self) -> bool {
+        self.unlocked_admin_scopes.iter()
+            .any(|s| s == "*" || s == "admin")
+    }
+
+    fn admin_add(
+        &mut self,
+        new_name:   &str,
+        new_scopes: Vec<String>,
+        expires_at: u64,
+    )
+        -> Outcome<Evaluation>
+    {
+        let caller_name = self.unlocked_admin_name.clone();
+        if !self.unlocked_has_admin_scope() {
+            audit_log(&caller_name, "admin.add", "err",
+                &fmt!("target={} reason=caller_scope", new_name));
+            return Err(err!(
+                "Admin '{}' does not hold the 'admin' scope; cannot \
+                enrol new admins.", caller_name;
+                Input, Invalid, Security));
+        }
+        let new_pass = res!(UserInput::create_pass(app_const::MAX_CREATE_PASS_ATTEMPTS));
+        let master = self.db_enc_key.clone();
+        if let Err(e) = self.wallet.enrol(
+            &master,
+            new_name,
+            new_pass.expose_secret().as_bytes(),
+            new_scopes.clone(),
+            expires_at,
+            oxedyne_fe2o3_crypto::keys::DEFAULT_WALLET_KDF_NAME,
+        ) {
+            audit_log(&caller_name, "admin.add", "err",
+                &fmt!("target={} reason={}", new_name, e));
+            return Err(e);
+        }
+        let wallet_path = Path::new("./").join(app_const::WALLET_NAME);
+        res!(self.wallet.save(
+            &wallet_path,
+            "  ",
+            Some(EncoderConfig::<(), ()>::default()),
+        ));
+        audit_log(&caller_name, "admin.add", "ok",
+            &fmt!("target={} scopes={} expires_at={}",
+                new_name, new_scopes.join(","), expires_at));
+        Ok(Evaluation::Output(fmt!(
+            "Added admin '{}'.", new_name,
+        )))
+    }
+
+    fn admin_remove(&mut self, target_name: &str) -> Outcome<Evaluation> {
+        let caller_name = self.unlocked_admin_name.clone();
+        if !self.unlocked_has_admin_scope() {
+            audit_log(&caller_name, "admin.remove", "err",
+                &fmt!("target={} reason=caller_scope", target_name));
+            return Err(err!(
+                "Admin '{}' does not hold the 'admin' scope; cannot \
+                remove admin entries.", caller_name;
+                Input, Invalid, Security));
+        }
+        if let Err(e) = self.wallet.remove_by_name(target_name) {
+            audit_log(&caller_name, "admin.remove", "err",
+                &fmt!("target={} reason={}", target_name, e));
+            return Err(e);
+        }
+        let wallet_path = Path::new("./").join(app_const::WALLET_NAME);
+        res!(self.wallet.save(
+            &wallet_path,
+            "  ",
+            Some(EncoderConfig::<(), ()>::default()),
+        ));
+        audit_log(&caller_name, "admin.remove", "ok",
+            &fmt!("target={}", target_name));
+        Ok(Evaluation::Output(fmt!(
+            "Removed admin '{}'.", target_name,
+        )))
+    }
+
     pub fn manage_certificates(
         &mut self,
         _shell_cfg: &ShellConfig,
@@ -418,3 +793,78 @@ impl AppShellContext {
         Ok(Evaluation::None)
     }
 }
+
+/// Append a single line to the admin audit log `./admin-audit.log`.
+///
+/// Format: `<unix_seconds> <admin> <verb> <result> <detail>`, one
+/// entry per line, append-only. Errors are logged at `warn!` level
+/// but never propagated: an operator needs the admin commands to
+/// keep working even if the log file is temporarily unavailable.
+fn audit_log(admin: &str, verb: &str, result: &str, detail: &str) {
+    use std::{
+        io::Write,
+        time::{
+            SystemTime,
+            UNIX_EPOCH,
+        },
+    };
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let line = fmt!(
+        "{} {} {} {} {}\n",
+        secs, admin, verb, result, detail,
+    );
+    let path = Path::new("./").join(app_const::ADMIN_AUDIT_LOG_NAME);
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(mut f) => {
+            if let Err(e) = f.write_all(line.as_bytes()) {
+                warn!("Failed to write audit log line: {}", e);
+            }
+        },
+        Err(e) => warn!("Failed to open audit log {:?}: {}", path, e),
+    }
+}
+
+/// Extract the "current" passhash from a legacy `wallet_pass_hashes`
+/// ring buffer `Dat`. The ring buffer is a 2-tuple of `(list, index)`
+/// where `list` holds N optional timestamped entries and `index`
+/// points at the active one. Used by the one-shot `wallet migrate`
+/// flow to recover the pre-admin-user passphrase verification hash.
+fn extract_legacy_current_passhash(ring: Dat) -> Outcome<Dat> {
+    // Tuples round-trip as `Dat::Tup2` values that we destructure
+    // with `try_extract_tup2dat`. The first element is the slot
+    // list, the second is the index.
+    let mut parts = oxedyne_fe2o3_jdat::try_extract_tup2dat!(ring);
+    let index: u64 = match parts[1].extract() {
+        Dat::U64(n) => n,
+        other => return Err(err!(
+            "Legacy ring buffer index must be u64 (got {:?}).", other.kind();
+            Invalid, Input)),
+    };
+    let list = oxedyne_fe2o3_jdat::try_extract_dat!(parts[0].extract(), Vek);
+    let slot = list.into_iter().nth(index as usize).ok_or_else(|| err!(
+        "Legacy ring buffer index {} out of range.", index;
+        Input, Invalid, Mismatch))?;
+    // Each slot is an `Opt<Tup2(data, timestamp)>`. The caller wants
+    // the `data` daticle, which is the kdf map.
+    let some = match slot {
+        Dat::Opt(inner) => match *inner {
+            Some(d) => d,
+            None => return Err(err!(
+                "Legacy ring buffer current slot is None.";
+                Input, Missing)),
+        },
+        other => return Err(err!(
+            "Legacy ring buffer slot must be Opt (got {:?}).", other.kind();
+            Input, Invalid, Mismatch)),
+    };
+    let mut slot_parts = oxedyne_fe2o3_jdat::try_extract_tup2dat!(some);
+    Ok(slot_parts[0].extract())
+}
+

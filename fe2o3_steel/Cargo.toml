@@ -24,6 +24,7 @@ oxedyne_fe2o3_iop_crypto		= { path = "../fe2o3_iop_crypto" }
 oxedyne_fe2o3_iop_db			= { path = "../fe2o3_iop_db" }
 oxedyne_fe2o3_iop_hash			= { path = "../fe2o3_iop_hash" }
 oxedyne_fe2o3_jdat 				= { path = "../fe2o3_jdat" }
+oxedyne_fe2o3_mail				= { path = "../fe2o3_mail" }
 oxedyne_fe2o3_namex				= { path = "../fe2o3_namex" }
 oxedyne_fe2o3_net				= { path = "../fe2o3_net" }
 oxedyne_fe2o3_o3db_sync 				= { path = "../fe2o3_o3db_sync" }

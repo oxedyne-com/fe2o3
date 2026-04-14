@@ -13,8 +13,14 @@ use std::{
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum SmtpCommand {
-    Helo(Fqdn),
-    Ehlo(Fqdn),
+    /// HELO argument is an unvalidated string -- per RFC 5321 §4.1.1.1
+    /// the client identifier may be either an FQDN *or* an
+    /// address-literal like `[192.168.1.4]` or `[IPv6:::1]`, and even
+    /// then a server SHOULD NOT reject the connection on the basis of
+    /// the identifier failing to verify.
+    Helo(String),
+    /// EHLO argument: same rules as `Helo`.
+    Ehlo(String),
     MailFrom(String),
     RcptTo(String),
     Data,
@@ -33,8 +39,8 @@ pub enum SmtpCommand {
 impl fmt::Display for SmtpCommand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Helo(fqdn)            => write!(f, "HELO {}", fqdn.as_str()),
-            Self::Ehlo(fqdn)            => write!(f, "EHLO {}", fqdn.as_str()),
+            Self::Helo(domain)          => write!(f, "HELO {}", domain),
+            Self::Ehlo(domain)          => write!(f, "EHLO {}", domain),
             Self::MailFrom(address)     => write!(f, "MAIL FROM:<{}>", address),
             Self::RcptTo(address)       => write!(f, "RCPT TO:<{}>", address),
             Self::Data                  => write!(f, "DATA"),
@@ -71,44 +77,60 @@ impl FromStr for SmtpCommand {
 
         match cmd.as_str() {
             "HELO" => {
-                if parts.len() != 2 {
+                let rest = s[4..].trim();
+                let domain = rest.split_whitespace().next().unwrap_or("");
+                if domain.is_empty() {
                     Err(err!(
-                        "'{}' invalid: {} command requires a single address.", s, cmd;
+                        "'{}' invalid: HELO command requires a domain.", s;
                     Invalid, Input, Mismatch))
                 } else {
-                    let fqdn = parts[1].trim();
-                    Ok(Self::Helo(res!(Fqdn::new(fqdn.to_string()))))
+                    Ok(Self::Helo(domain.to_string()))
                 }
             }
             "EHLO" => {
-                if parts.len() != 2 {
+                // RFC 5321 §4.1.1.1: argument is a domain *or* an
+                // address-literal `[IPv4]` / `[IPv6:...]`. Per
+                // §4.1.4 the server SHOULD NOT refuse based on the
+                // identifier failing to verify, so we accept any
+                // non-empty token as-is.
+                let rest = s[4..].trim();
+                let domain = rest.split_whitespace().next().unwrap_or("");
+                if domain.is_empty() {
                     Err(err!(
-                        "'{}' invalid: {} command requires a single address.", s, cmd;
+                        "'{}' invalid: EHLO command requires a domain.", s;
                     Invalid, Input, Mismatch))
                 } else {
-                    let fqdn = parts[1].trim();
-                    Ok(Self::Ehlo(res!(Fqdn::new(fqdn.to_string()))))
+                    Ok(Self::Ehlo(domain.to_string()))
                 }
             }
             "MAIL" => {
-                if parts.len() != 2 || !parts[1].to_uppercase().starts_with("FROM:") {
-                    Err(err!(
-                        "'{}' invalid: {} command requires 'FROM:' followed by an address.", s, cmd;
-                    Invalid, Input))
-                } else {
-                    let address = parts[1].trim_start_matches("FROM:<").trim_end_matches('>').to_string();
-                    Ok(SmtpCommand::MailFrom(address))
+                // RFC 5321 §4.1.1.2: MAIL FROM:<reverse-path> [SP <esmtp-params>]
+                // Accept whitespace between FROM: and the angle-bracketed
+                // address, and silently ignore any ESMTP extension
+                // parameters that follow the closing '>'.
+                let after = res!(strip_verb(s, "MAIL"));
+                let after_upper = after.to_uppercase();
+                if !after_upper.starts_with("FROM:") {
+                    return Err(err!(
+                        "'{}' invalid: MAIL command requires 'FROM:'.", s;
+                    Invalid, Input));
                 }
+                let after_colon = after[5..].trim_start();
+                let addr = res!(parse_path(after_colon));
+                Ok(SmtpCommand::MailFrom(addr))
             }
             "RCPT" => {
-                if parts.len() != 2 || !parts[1].to_uppercase().starts_with("TO:") {
-                    Err(err!(
-                        "'{}' invalid: {} command requires 'FROM:' followed by an address.", s, cmd;
-                    Invalid, Input))
-                } else {
-                    let address = parts[1].trim_start_matches("TO:<").trim_end_matches('>').to_string();
-                    Ok(SmtpCommand::RcptTo(address))
+                // RFC 5321 §4.1.1.3: RCPT TO:<forward-path> [SP <esmtp-params>]
+                let after = res!(strip_verb(s, "RCPT"));
+                let after_upper = after.to_uppercase();
+                if !after_upper.starts_with("TO:") {
+                    return Err(err!(
+                        "'{}' invalid: RCPT command requires 'TO:'.", s;
+                    Invalid, Input));
                 }
+                let after_colon = after[3..].trim_start();
+                let addr = res!(parse_path(after_colon));
+                Ok(SmtpCommand::RcptTo(addr))
             }
             "DATA" => {
                 if parts.len() != 1 {
@@ -179,13 +201,17 @@ impl FromStr for SmtpCommand {
                 }
             }
             "AUTH" => {
-                if parts.len() != 2 {
+                // AUTH takes a mechanism name plus an optional inline
+                // initial response, e.g. `AUTH PLAIN <base64>`. Pass
+                // everything after the command verb through verbatim
+                // so the session loop can split mech and payload.
+                let rest = s[4..].trim_start();
+                if rest.is_empty() {
                     Err(err!(
-                        "'{}' invalid: {} command requires a single argument.", s, cmd;
+                        "'{}' invalid: AUTH command requires a mechanism.", s;
                     Invalid, Input, Mismatch))
                 } else {
-                    let mechanism = parts[1].trim().to_string();
-                    Ok(SmtpCommand::Auth(mechanism))
+                    Ok(SmtpCommand::Auth(rest.to_string()))
                 }
             }
             "STARTTLS" => {
@@ -200,4 +226,44 @@ impl FromStr for SmtpCommand {
             _ => Err(err!("Unrecognised command in '{}'.", s; Unknown, Input)),
         }
     }
+}
+
+
+/// Strip the leading verb (`MAIL`, `RCPT`, ...) from a command line and
+/// return the remainder, trimmed of leading whitespace. Used by the
+/// `MAIL FROM:` and `RCPT TO:` parsers, which need the raw remainder
+/// rather than a whitespace-split view.
+fn strip_verb(line: &str, verb: &str) -> Outcome<String> {
+    if line.len() < verb.len() {
+        return Err(err!(
+            "Line '{}' shorter than verb '{}'.", line, verb;
+            Invalid, Input));
+    }
+    let head = &line[..verb.len()];
+    if !head.eq_ignore_ascii_case(verb) {
+        return Err(err!(
+            "Line '{}' does not start with verb '{}'.", line, verb;
+            Invalid, Input));
+    }
+    Ok(line[verb.len()..].trim_start().to_string())
+}
+
+/// Parse an SMTP `<reverse-path>` or `<forward-path>` plus optional
+/// trailing ESMTP parameters. Accepts both `<addr>` and the empty
+/// path `<>`. Anything after the closing '>' is silently ignored
+/// (this is where SIZE=, BODY=, ORCPT=, NOTIFY= etc. live).
+fn parse_path(s: &str) -> Outcome<String> {
+    let s = s.trim_start();
+    if !s.starts_with('<') {
+        return Err(err!(
+            "Path '{}' must begin with '<'.", s;
+            Invalid, Input));
+    }
+    let end = match s.find('>') {
+        Some(i) => i,
+        None => return Err(err!(
+            "Path '{}' has no closing '>'.", s;
+            Invalid, Input)),
+    };
+    Ok(s[1..end].to_string())
 }

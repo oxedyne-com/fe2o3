@@ -22,9 +22,12 @@ mode3 = []
 [dependencies]
 oxedyne_fe2o3_core 				= { path = "../fe2o3_core" }
 oxedyne_fe2o3_data 				= { path = "../fe2o3_data" }
+oxedyne_fe2o3_hash 				= { path = "../fe2o3_hash" }
 oxedyne_fe2o3_iop_crypto		= { path = "../fe2o3_iop_crypto" }
+oxedyne_fe2o3_iop_hash 			= { path = "../fe2o3_iop_hash" }
 oxedyne_fe2o3_jdat 				= { path = "../fe2o3_jdat" }
 oxedyne_fe2o3_namex				= { path = "../fe2o3_namex" }
+oxedyne_fe2o3_text 				= { path = "../fe2o3_text" }
 
 # std reqd to activate impl std::error::Error for aead::Error
 aes-gcm = { version = "0.10.3", features = ["std"] }

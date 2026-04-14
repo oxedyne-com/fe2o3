@@ -409,7 +409,7 @@ mod tests {
             "expires":   "2026-05-01T12:00:00Z",
             "identifiers": [
                 {"type":"dns","value":"example.com"},
-                {"type":"dns","value":"app.example.com"}
+                {"type":"dns","value":"www.example.com"}
             ],
             "authorizations": [
                 "https://acme-v02.api.letsencrypt.org/acme/authz/1",
@@ -520,10 +520,10 @@ mod tests {
     /// **Regression test for the vendor patch.** Parse an authorisation whose
     /// challenges include one that omits both `token` and `url` entirely --
     /// the exact shape that broke upstream `rustls-acme 0.15.1` deserialisation
-    /// with `missing field 'token'` in the live deployhost staging run on
-    /// 2026-04-11. With our `#[optional]` markings this must succeed, and
-    /// the affected challenge must deserialise with empty defaults on both
-    /// fields while the `tls-alpn-01` entry is still readable.
+    /// with `missing field 'token'` against a live ACME staging server.
+    /// With our `#[optional]` markings this must succeed, and the affected
+    /// challenge must deserialise with empty defaults on both fields while
+    /// the `tls-alpn-01` entry is still readable.
     #[test]
     fn test_parse_authorization_with_tokenless_challenge() -> Outcome<()> {
         let body = br#"{
@@ -634,7 +634,7 @@ mod tests {
     fn test_new_order_request_shape() -> Outcome<()> {
         let req = new_order_request(&[
             "example.com".to_string(),
-            "app.example.com".to_string(),
+            "www.example.com".to_string(),
         ]);
         match req {
             Dat::Map(m) => match m.get(&dat!("identifiers")) {
@@ -654,7 +654,7 @@ mod tests {
                                     Test, Mismatch)),
                             }
                             match im.get(&dat!("value")) {
-                                Some(Dat::Str(s)) if s == "app.example.com" => (),
+                                Some(Dat::Str(s)) if s == "www.example.com" => (),
                                 other => return Err(err!(
                                     "identifiers[1].value = {:?}", other;
                                     Test, Mismatch)),
@@ -677,11 +677,11 @@ mod tests {
         Ok(())
     }
 
-    /// Regression test for the jdat encoder boolean bug that broke the
-    /// 2026-04-12 deployhost staging cutover: `Dat::Bool(true).json()` used
-    /// to emit the JSON string `"true"` instead of the JSON literal
-    /// `true`, causing Let's Encrypt to reject the new-account POST
-    /// with `Error unmarshaling JSON`. After fixing
+    /// Regression test for a jdat encoder boolean bug that broke an ACME
+    /// new-account POST against a live staging server: `Dat::Bool(true).json()`
+    /// used to emit the JSON string `"true"` instead of the JSON literal
+    /// `true`, causing Let's Encrypt to reject the request with
+    /// `Error unmarshaling JSON`. After fixing
     /// `fe2o3_jdat/src/string/enc.rs:633` this test asserts that a
     /// realistic ACME payload containing a boolean now serialises
     /// through `.json()` → parses as valid JSON → round-trips via

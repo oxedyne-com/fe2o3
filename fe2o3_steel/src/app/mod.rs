@@ -2,6 +2,7 @@ pub mod cfg;
 pub mod constant;
 pub mod dev;
 pub mod https;
+pub mod mail;
 pub mod repl;
 pub mod server;
 pub mod smtps;

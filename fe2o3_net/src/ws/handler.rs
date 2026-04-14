@@ -63,6 +63,18 @@ pub trait WebSocketHandler:
         debug!("{}: No dev receiver has been defined to accept client refresh messages.", id);
         Ok(None)
     }
+
+    /// Attach a per-connection session identifier to a cloned handler just
+    /// before the WebSocket handshake runs. The default implementation is
+    /// a no-op, so handlers that do not care about session state are
+    /// unaffected. Handlers that implement session-scoped commands
+    /// override this to store the id for later use inside `handle_text`.
+    fn attach_sid(self, _sid: Option<String>) -> Self
+    where
+        Self: Sized,
+    {
+        self
+    }
 }
 
 #[derive(Clone, Debug)]

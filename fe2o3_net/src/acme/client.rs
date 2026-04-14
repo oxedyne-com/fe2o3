@@ -1076,7 +1076,7 @@ mod tests {
     fn test_build_csr_multi_name() -> Outcome<()> {
         let names = vec![
             "example.com".to_string(),
-            "app.example.com".to_string(),
+            "www.example.com".to_string(),
         ];
         let (csr, _key) = res!(build_csr(&names));
         for host in &names {
