@@ -1535,6 +1535,15 @@ impl Dat {
                     }
                     if state.molecular_capture == None {
                         state.molecular_capture = Some(MolecularCapture::Map);
+                        // Also honour cfg.use_ordmaps at the top
+                        // level. Without this, a root `{...}`
+                        // decoded with `use_ordmaps = true` still
+                        // lands in a `Dat::Map` because kind_outer
+                        // was never set from Kind::Unknown -- only
+                        // the nested recurse branch below did it.
+                        if !state.explicit_kind && cfg.use_ordmaps {
+                            state.kind_outer = Kind::OrdMap;
+                        }
                     } else {
                         let mut new_state = state.recurse();
                         if !state.explicit_kind {

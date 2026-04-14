@@ -191,6 +191,55 @@ impl Dat {
         }
     }
 
+    /// Insert or update `(key, val)` in a `Dat::Map` or
+    /// `Dat::OrdMap`, returning any previous value at that key. In
+    /// an `OrdMap` an existing entry is replaced in place so that
+    /// the original insertion order is preserved; a new entry is
+    /// appended at the end using the next available order
+    /// slot. Errors if `self` is neither a map variant.
+    pub fn map_put(&mut self, key: Self, val: Self) -> Outcome<Option<Self>> {
+        match self {
+            Dat::Map(m) => Ok(m.insert(key, val)),
+            Dat::OrdMap(m) => {
+                // Find an existing entry with a matching dat key.
+                // Collect the matching MapKeys first so we can
+                // mutate the map afterwards without aliasing.
+                let existing: Vec<MapKey> = m
+                    .iter()
+                    .filter(|(mk, _)| mk.dat() == &key)
+                    .map(|(mk, _)| mk.clone())
+                    .collect();
+                if existing.len() > 1 {
+                    return Err(err!(
+                        "There are {} entries with the same key {:?} \
+                        in the OrdMap, which is not allowed.",
+                        existing.len(), key;
+                        Invalid, Input, Exists));
+                }
+                if let Some(mk) = existing.into_iter().next() {
+                    // Replace in place, preserving `ord`.
+                    let prev = m.remove(&mk);
+                    m.insert(mk, val);
+                    Ok(prev)
+                } else {
+                    // Append with the next available order slot.
+                    let next_ord = m
+                        .keys()
+                        .map(|mk| mk.ord())
+                        .max()
+                        .map(|n| n + Dat::OMAP_ORDER_DELTA_DEFAULT)
+                        .unwrap_or(Dat::OMAP_ORDER_START_DEFAULT);
+                    m.insert(MapKey::new(next_ord, key), val);
+                    Ok(None)
+                }
+            },
+            _ => Err(err!(
+                "Expected a Dat::Map or Dat::OrdMap, got {:?}.",
+                self.kind();
+                Input, Invalid, Mismatch)),
+        }
+    }
+
     /// Raise an error if the dat is not a map or the key is not present, otherwise return
     /// the removed value.
     pub fn map_remove_must(&mut self, key: &Self) -> Outcome<Self> {
