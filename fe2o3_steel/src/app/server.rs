@@ -343,7 +343,7 @@ impl AppShellContext {
 
         // Build a TLS client config for outbound API proxy requests.
         // Reads the system CA bundle so Steel can talk to any upstream.
-        let tls_client = match Self::build_tls_client() {
+        let tls_client = match build_outbound_tls_client() {
             Ok(cfg) => Some(cfg),
             Err(e) => {
                 warn!("{}", e);
@@ -452,65 +452,72 @@ impl AppShellContext {
         Ok(Evaluation::Exit)
     }
 
-    /// Build a `rustls::ClientConfig` for outbound HTTPS requests by
-    /// reading the system CA certificate bundle. Returns an error if the
-    /// bundle cannot be found or contains no usable certificates.
-    fn build_tls_client() -> Outcome<Arc<tokio_rustls::rustls::ClientConfig>> {
-        use tokio_rustls::rustls::{
-            ClientConfig,
-            RootCertStore,
-            pki_types::CertificateDer,
-        };
+}
 
-        // Common system CA bundle paths.
-        let ca_paths = [
-            "/etc/ssl/certs/ca-certificates.crt",   // Debian/Ubuntu
-            "/etc/pki/tls/certs/ca-bundle.crt",     // Fedora/RHEL
-            "/etc/ssl/cert.pem",                     // Alpine/macOS
-        ];
-        let ca_file = match ca_paths.iter().find(|p| Path::new(p).exists()) {
-            Some(p) => *p,
-            None => return Err(err!(
-                "No system CA bundle found. Tried: {:?}", ca_paths;
-                Init, Missing, File)),
-        };
+/// Build a `rustls::ClientConfig` for outbound HTTPS requests by
+/// reading the system CA certificate bundle. Returns an error if the
+/// bundle cannot be found or contains no usable certificates.
+///
+/// Used internally by `start_server` for the API proxy and exposed
+/// so that app extensions can use the same CA store for one-shot
+/// CLI subcommands that need to make outbound HTTPS calls.
+pub fn build_outbound_tls_client()
+    -> Outcome<Arc<tokio_rustls::rustls::ClientConfig>>
+{
+    use tokio_rustls::rustls::{
+        ClientConfig,
+        RootCertStore,
+        pki_types::CertificateDer,
+    };
 
-        info!("Loading system CA certificates from '{}'...", ca_file);
-        let pem_data = match std::fs::read(ca_file) {
-            Ok(d) => d,
-            Err(e) => return Err(err!(e,
-                "Failed to read CA bundle '{}'.", ca_file;
-                IO, File, Read)),
-        };
+    // Common system CA bundle paths.
+    let ca_paths = [
+        "/etc/ssl/certs/ca-certificates.crt",   // Debian/Ubuntu
+        "/etc/pki/tls/certs/ca-bundle.crt",     // Fedora/RHEL
+        "/etc/ssl/cert.pem",                    // Alpine/macOS
+    ];
+    let ca_file = match ca_paths.iter().find(|p| Path::new(p).exists()) {
+        Some(p) => *p,
+        None => return Err(err!(
+            "No system CA bundle found. Tried: {:?}", ca_paths;
+            Init, Missing, File)),
+    };
 
-        let mut store = RootCertStore::empty();
-        let mut count = 0u32;
-        // Parse PEM-encoded certificates.
-        let mut cursor = &pem_data[..];
-        loop {
-            match rustls_pemfile::read_one(&mut cursor) {
-                Ok(Some(rustls_pemfile::Item::X509Certificate(cert))) => {
-                    let der = CertificateDer::from(cert);
-                    match store.add(der) {
-                        Ok(()) => count += 1,
-                        Err(_) => (), // Skip malformed certs silently.
-                    }
+    info!("Loading system CA certificates from '{}'...", ca_file);
+    let pem_data = match std::fs::read(ca_file) {
+        Ok(d) => d,
+        Err(e) => return Err(err!(e,
+            "Failed to read CA bundle '{}'.", ca_file;
+            IO, File, Read)),
+    };
+
+    let mut store = RootCertStore::empty();
+    let mut count = 0u32;
+    // Parse PEM-encoded certificates.
+    let mut cursor = &pem_data[..];
+    loop {
+        match rustls_pemfile::read_one(&mut cursor) {
+            Ok(Some(rustls_pemfile::Item::X509Certificate(cert))) => {
+                let der = CertificateDer::from(cert);
+                match store.add(der) {
+                    Ok(()) => count += 1,
+                    Err(_) => (), // Skip malformed certs silently.
                 }
-                Ok(Some(_)) => continue, // Skip non-certificate items.
-                Ok(None) => break,       // End of file.
-                Err(_) => break,         // Parse error; stop.
             }
+            Ok(Some(_)) => continue, // Skip non-certificate items.
+            Ok(None) => break,       // End of file.
+            Err(_) => break,         // Parse error; stop.
         }
-        if count == 0 {
-            return Err(err!(
-                "CA bundle '{}' contained no usable certificates.", ca_file;
-                Init, Invalid, File));
-        }
-        info!("Loaded {} CA certificate(s) for outbound HTTPS.", count);
-
-        let config = ClientConfig::builder()
-            .with_root_certificates(store)
-            .with_no_client_auth();
-        Ok(Arc::new(config))
     }
+    if count == 0 {
+        return Err(err!(
+            "CA bundle '{}' contained no usable certificates.", ca_file;
+            Init, Invalid, File));
+    }
+    info!("Loaded {} CA certificate(s) for outbound HTTPS.", count);
+
+    let config = ClientConfig::builder()
+        .with_root_certificates(store)
+        .with_no_client_auth();
+    Ok(Arc::new(config))
 }

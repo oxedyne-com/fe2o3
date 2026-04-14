@@ -102,6 +102,7 @@ pub mod prelude {
         AppExtension,
         NoExtension,
     };
+    pub use crate::app::server::build_outbound_tls_client;
     pub use crate::app::tui::{
         run,
         run_with_extension,
@@ -137,6 +138,7 @@ pub mod prelude {
             Arg,
             ArgConfig,
         },
+        opt::OptionRefVec,
     };
     pub use oxedyne_fe2o3_tui::lib_tui::repl::{
         Evaluation,
