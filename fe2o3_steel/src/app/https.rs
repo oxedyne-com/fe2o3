@@ -1,6 +1,7 @@
 use crate::srv::{
     admin::{
         handler as admin_handler,
+        ozone_view as admin_ozone_view,
         state::AdminState,
         traffic::TrafficRecorder,
     },
@@ -227,7 +228,7 @@ impl<
         _response:      Option<HttpMessage>,
         _body:          Vec<u8>,
         req_headers:    Arc<HeaderFields>,
-        _db:            Option<(Arc<RwLock<DB>>, UID)>,
+        db:             Option<(Arc<RwLock<DB>>, UID)>,
         _sid_opt:       &Option<SID>,
         id:             &String,
     )
@@ -247,6 +248,30 @@ impl<
             // subtree on every vhost it is configured for. Dispatch
             // before any API/webhook/static route lookups so app
             // routes cannot accidentally shadow it.
+            //
+            // Two-stage dispatch: ozone-prefixed routes go to the
+            // generic ozone_view module (which needs the per-vhost
+            // db typed parameters in scope), all other dashboard
+            // routes go to the non-generic handler module.
+            if request_path == "/admin/ozone"
+                || request_path.starts_with("/admin/ozone?")
+                || request_path.starts_with("/admin/ozone/")
+            {
+                if let Some(state) = &admin_state {
+                    let resp = res!(admin_ozone_view::handle_get(
+                        state.as_ref(),
+                        db.as_ref(),
+                        &request_path,
+                        &req_headers,
+                        &id,
+                    ).await);
+                    return Ok(Some(resp));
+                }
+                return Ok(Some(HttpMessage::respond_with_text(
+                    HttpStatus::NotFound,
+                    "Not found.",
+                )));
+            }
             if request_path == "/admin"
                 || request_path.starts_with("/admin/")
             {

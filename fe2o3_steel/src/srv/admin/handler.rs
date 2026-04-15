@@ -321,7 +321,9 @@ fn render_home(
 
 /// Build a 303 redirect to the login form. Used for any
 /// authenticated route that is hit without a valid session.
-fn redirect_to_login() -> HttpMessage {
+/// `pub` so submodules can reuse this redirect without
+/// reimplementing the response shape.
+pub fn redirect_to_login() -> HttpMessage {
     HttpMessage::new_response(HttpStatus::SeeOther)
         .with_field(
             HeaderName::Location,
@@ -335,7 +337,11 @@ fn redirect_to_login() -> HttpMessage {
 /// authorised to see the dashboard. Any failure -- missing cookie,
 /// tampered cookie, expired cookie, missing dashboard scope -- is
 /// flattened to `None` so the caller can simply 303 to login.
-fn extract_principal(
+///
+/// `pub` so other dashboard submodules (`ozone_view`, future
+/// admin-management UI) can share the same auth gate rather than
+/// each implementing cookie verification independently.
+pub fn extract_principal(
     state:   &AdminState,
     headers: &Arc<HeaderFields>,
 )
