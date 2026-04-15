@@ -254,6 +254,7 @@ impl<
                     let resp = res!(admin_handler::handle_get(
                         state.as_ref(),
                         &request_path,
+                        &req_headers,
                         &id,
                     ).await);
                     return Ok(Some(resp));
@@ -412,6 +413,7 @@ impl<
                         state.as_ref(),
                         &request_path,
                         &body,
+                        &req_headers,
                         &id,
                     ).await);
                     return Ok(Some(resp));

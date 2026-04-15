@@ -1,4 +1,5 @@
 use crate::srv::{
+    admin::traffic::TrafficRecorder,
     cfg::{
         RedirectRule,
         ServerConfig,
@@ -158,6 +159,13 @@ pub struct ServerContext<
     /// the primary as the lookup key into this map.
     pub vhost_dbs:  HashMap<String, (Arc<RwLock<DB>>, UID)>,
     pub protocol:   Protocol<WH, WSH>,
+    /// Optional shared traffic recorder. When present, every request
+    /// that reaches the HTTPS handler emits a `RequestRecord` to this
+    /// recorder once the response has been written. Lives at server
+    /// scope (not per-vhost) because the dashboard wants a single
+    /// host-wide traffic view; per-vhost filtering happens at query
+    /// time using the `vhost` field on each record.
+    pub traffic:    Option<Arc<TrafficRecorder>>,
     phantom3:       PhantomData<ENC>,
     phantom4:       PhantomData<KH>,
 }
@@ -179,6 +187,7 @@ impl<
             root:       self.root.clone(),
             vhost_dbs:  self.vhost_dbs.clone(),
             protocol:   self.protocol.clone(),
+            traffic:    self.traffic.clone(),
             phantom3:   PhantomData,
             phantom4:   PhantomData,
         }
@@ -206,6 +215,7 @@ impl<
         root:       NormPathBuf,
         vhost_dbs:  HashMap<String, (Arc<RwLock<DB>>, UID)>,
         protocol:   Protocol<WH, WSH>,
+        traffic:    Option<Arc<TrafficRecorder>>,
     )
         -> Self
     {
@@ -214,6 +224,7 @@ impl<
             root,
             vhost_dbs,
             protocol,
+            traffic,
             phantom3:   PhantomData,
             phantom4:   PhantomData,
         }

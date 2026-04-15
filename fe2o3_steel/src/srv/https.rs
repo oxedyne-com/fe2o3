@@ -1,4 +1,8 @@
 use crate::srv::{
+    admin::traffic::{
+        self,
+        RequestRecord,
+    },
     cfg::{
         RedirectMatch,
         RedirectRule,
@@ -49,6 +53,7 @@ use std::{
     net::SocketAddr,
     pin::Pin,
     sync::Arc,
+    time::Instant,
 };
 
 use tokio::{
@@ -101,10 +106,26 @@ impl<
 
         loop {
             let result = reader.next().await;
+            // Capture request start time + method/path before the
+            // request is consumed by the dispatch chain. Used at
+            // the bottom of the loop to emit a TrafficRecord that
+            // covers the full handle-to-write duration.
+            let req_started_at = Instant::now();
             match result {
                 Some(Ok(request)) => {
                     log!(log_level, "{}: Incoming from {:?}:", id, src_addr);
                     request.log(log_get_level!());
+
+                    // Pull method+path out for traffic recording
+                    // before the request is moved into the dispatch
+                    // chain. Both are cheap clones.
+                    let (rec_method, rec_path) = match &request.header.headline {
+                        HttpHeadline::Request { method, loc } => (
+                            fmt!("{}", method),
+                            loc.path.as_string().to_string(),
+                        ),
+                        _ => (String::new(), String::new()),
+                    };
 
                     // Validate the Host header against the vhost hostnames.
                     // A mismatch means an SNI/Host disagreement, which is a
@@ -285,6 +306,8 @@ impl<
                     }
 
                     log!(log_level, "Outgoing HTTPS message:");
+                    let mut rec_status: u16 = 0;
+                    let mut rec_bytes: Option<u64> = None;
                     match response {
                         Some(mut msg) => {
                             // Attach the freshly-issued session cookie to
@@ -305,6 +328,17 @@ impl<
                                     None,
                                 );
                             }
+                            // Pull the status code out for the
+                            // traffic record before the message is
+                            // consumed by write_all. HttpStatus is
+                            // repr(u16), so a direct cast yields
+                            // the wire code (200, 404, etc.).
+                            if let HttpHeadline::Response { status } =
+                                &msg.header.headline
+                            {
+                                rec_status = *status as u16;
+                            }
+                            rec_bytes = Some(msg.body.len() as u64);
                             match msg.write_all(&mut write_stream).await {
                                 Ok(()) => (),
                                 Err(e) => return Err(err!(e,
@@ -313,6 +347,30 @@ impl<
                             }
                         }
                         None => log!(log_level, " None"),
+                    }
+
+                    // Emit a traffic record for this request now that
+                    // the response has been fully written. Recording
+                    // is a bounded short critical section; failures
+                    // are logged but never propagated, since the
+                    // request itself succeeded and we do not want
+                    // the dashboard to break the data path.
+                    if let Some(recorder) = self.traffic.as_ref() {
+                        let dur_us = req_started_at.elapsed().as_micros() as u64;
+                        let record = RequestRecord {
+                            when_ns:        traffic::now_ns(),
+                            vhost:          vhost.primary_hostname().to_string(),
+                            method:         rec_method,
+                            path:           rec_path,
+                            status:         rec_status,
+                            peer:           fmt!("{}", src_addr),
+                            bytes:          rec_bytes,
+                            duration_us:    dur_us,
+                        };
+                        if let Err(e) = recorder.record(record) {
+                            warn!("{}: traffic recorder rejected entry: {}",
+                                id, e);
+                        }
                     }
                 }
                 Some(Err(e)) => return Err(e),

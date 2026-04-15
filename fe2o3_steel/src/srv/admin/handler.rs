@@ -26,6 +26,7 @@ use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_net::http::{
     fields::{
         Cookie,
+        HeaderFields,
         HeaderFieldValue,
         HeaderName,
         SameSite,
@@ -35,7 +36,10 @@ use oxedyne_fe2o3_net::http::{
     status::HttpStatus,
 };
 
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    sync::Arc,
+};
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ ROUTE PATHS                                                               │
@@ -54,9 +58,10 @@ pub const PATH_LOGOUT:  &str = "/admin/logout";
 
 /// Dispatch a `GET` request against a `/admin/*` path.
 pub async fn handle_get(
-    state: &AdminState,
-    path:  &str,
-    id:    &str,
+    state:   &AdminState,
+    path:    &str,
+    headers: &Arc<HeaderFields>,
+    id:      &str,
 )
     -> Outcome<HttpMessage>
 {
@@ -64,7 +69,7 @@ pub async fn handle_get(
     match path {
         PATH_LOGIN => Ok(render_login_form(None)),
         PATH_LOGOUT => Ok(handle_logout()),
-        PATH_ROOT => Ok(render_home_or_redirect(state)),
+        PATH_ROOT => Ok(render_home(state, headers)),
         _ => Ok(HttpMessage::respond_with_text(
             HttpStatus::NotFound,
             "Dashboard route not found.",
@@ -78,10 +83,11 @@ pub async fn handle_get(
 
 /// Dispatch a `POST` request against a `/admin/*` path.
 pub async fn handle_post(
-    state: &AdminState,
-    path:  &str,
-    body:  &[u8],
-    id:    &str,
+    state:    &AdminState,
+    path:     &str,
+    body:     &[u8],
+    _headers: &Arc<HeaderFields>,
+    id:       &str,
 )
     -> Outcome<HttpMessage>
 {
@@ -215,28 +221,95 @@ fn handle_logout() -> HttpMessage {
 // │ HOME                                                                      │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Authenticated landing page. v1 is a placeholder ack so we can
-/// verify the session cookie round-trips end-to-end. The real
-/// content (traffic, ozone browser, admin management) lands in
+/// Authenticated landing page. Validates the session cookie, and on
+/// failure (no cookie / tampered / expired / unknown version) sends
+/// the visitor to the login form. v1 home content is deliberately
+/// minimal -- traffic, ozone browser and admin management land in
 /// subsequent commits.
-fn render_home_or_redirect(_state: &AdminState) -> HttpMessage {
-    // TODO: extract session cookie from the request and authenticate
-    // the principal once the request_headers wiring lands. For now
-    // this returns a placeholder page; the cookie-checking middleware
-    // arrives with task #6 (UI assets) when the request headers are
-    // threaded through to the admin handler.
-    let body = "<!doctype html>\n\
-                <html><head><title>Steel admin</title></head>\n\
-                <body><h1>Steel admin dashboard</h1>\n\
-                <p>Authenticated landing page (placeholder). \
-                See <a href=\"/admin/login\">login</a> to sign in.</p>\n\
-                </body></html>\n";
+fn render_home(
+    state:   &AdminState,
+    headers: &Arc<HeaderFields>,
+)
+    -> HttpMessage
+{
+    let principal = match extract_principal(state, headers) {
+        Some(p) => p,
+        None => return redirect_to_login(),
+    };
+    let body = fmt!(
+        "<!doctype html>\n\
+        <html><head><title>Steel admin</title></head>\n\
+        <body>\n\
+        <h1>Steel admin dashboard</h1>\n\
+        <p>Signed in as <strong>{}</strong>.</p>\n\
+        <p>Scopes: <code>{}</code></p>\n\
+        <p>This is the v1 placeholder landing page. Traffic, ozone \
+        and admin-management views arrive in subsequent commits.</p>\n\
+        <p><a href=\"/admin/logout\">Sign out</a></p>\n\
+        </body></html>\n",
+        html_escape(&principal.name),
+        html_escape(&principal.scopes.join(" ")),
+    );
     HttpMessage::new_response(HttpStatus::OK)
         .with_field(
             HeaderName::ContentType,
             HeaderFieldValue::Generic("text/html; charset=utf-8".to_string()),
         )
-        .with_body(body.as_bytes().to_vec())
+        .with_body(body.into_bytes())
+}
+
+/// Build a 303 redirect to the login form. Used for any
+/// authenticated route that is hit without a valid session.
+fn redirect_to_login() -> HttpMessage {
+    HttpMessage::new_response(HttpStatus::SeeOther)
+        .with_field(
+            HeaderName::Location,
+            HeaderFieldValue::Generic(PATH_LOGIN.to_string()),
+        )
+}
+
+/// Extract the admin session cookie from the request header fields,
+/// decode and verify it via [`session::decode_session`], and return
+/// the embedded [`AdminPrincipal`] only if the principal is still
+/// authorised to see the dashboard. Any failure -- missing cookie,
+/// tampered cookie, expired cookie, missing dashboard scope -- is
+/// flattened to `None` so the caller can simply 303 to login.
+fn extract_principal(
+    state:   &AdminState,
+    headers: &Arc<HeaderFields>,
+)
+    -> Option<AdminPrincipal>
+{
+    let cookie_value = read_cookie(headers, SESSION_COOKIE_NAME)?;
+    let principal = match session::decode_session(state, &cookie_value) {
+        Ok(p) => p,
+        Err(e) => {
+            debug!("dashboard: session cookie rejected: {}", e);
+            return None;
+        },
+    };
+    if !principal.can_view_dashboard() {
+        debug!("dashboard: principal '{}' lacks dashboard scope",
+            principal.name);
+        return None;
+    }
+    Some(principal)
+}
+
+/// Walk the request's `Cookie` header and return the value of the
+/// first cookie whose key matches `name`. Returns `None` when the
+/// header is absent, has no Cookie field, or no entry matches.
+fn read_cookie(headers: &Arc<HeaderFields>, name: &str) -> Option<String> {
+    if let Some(HeaderFieldValue::Cookie(cookies)) =
+        headers.get_one(&HeaderName::Cookie)
+    {
+        for c in cookies {
+            if c.key == name {
+                return Some(c.val.clone());
+            }
+        }
+    }
+    None
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
