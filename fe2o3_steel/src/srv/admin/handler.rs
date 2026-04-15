@@ -11,6 +11,12 @@
 
 use crate::srv::admin::{
     AdminPrincipal,
+    audit::{
+        self,
+        ADMIN_ANON,
+        VERB_DASHBOARD_LOGIN,
+        VERB_DASHBOARD_LOGOUT,
+    },
     auth::{
         self,
         LoginOutcome,
@@ -68,7 +74,7 @@ pub async fn handle_get(
     debug!("{}: dashboard GET {}", id, path);
     match path {
         PATH_LOGIN => Ok(render_login_form(None)),
-        PATH_LOGOUT => Ok(handle_logout()),
+        PATH_LOGOUT => Ok(handle_logout(state, headers)),
         PATH_ROOT => Ok(render_home(state, headers)),
         _ => Ok(HttpMessage::respond_with_text(
             HttpStatus::NotFound,
@@ -110,6 +116,14 @@ pub async fn handle_post(
 /// field. On success, set the session cookie and 303-redirect to
 /// `/admin`. On failure, re-render the login form with a generic
 /// error message.
+///
+/// Every outcome -- success, bad credentials, missing dashboard
+/// scope, structural error -- writes one line to the admin audit
+/// log. The actor name is the unlocked admin where known and
+/// `(anon)` otherwise; the response to the client is deliberately
+/// generic regardless of outcome so the audit log is the only
+/// place where "wrong passphrase" and "no dashboard scope" can
+/// be told apart.
 fn handle_login(
     state: &AdminState,
     body:  &[u8],
@@ -118,27 +132,59 @@ fn handle_login(
 {
     let passphrase = match extract_form_field(body, "passphrase") {
         Some(p) => p,
-        None => return render_login_form(Some(
-            "Login form did not include a passphrase.")),
+        None => {
+            audit::append(
+                ADMIN_ANON,
+                VERB_DASHBOARD_LOGIN,
+                "err",
+                "reason=missing_passphrase_field",
+            );
+            return render_login_form(Some(
+                "Login form did not include a passphrase."));
+        },
     };
 
     let outcome = match auth::verify_passphrase(state, passphrase.as_bytes()) {
         Ok(o) => o,
         Err(e) => {
             warn!("dashboard login: structural error during verify: {}", e);
+            audit::append(
+                ADMIN_ANON,
+                VERB_DASHBOARD_LOGIN,
+                "err",
+                "reason=verify_structural_error",
+            );
             return render_login_form(Some("Internal error during login."));
         },
     };
 
     match outcome {
         LoginOutcome::Ok(principal) => {
+            audit::append(
+                &principal.name,
+                VERB_DASHBOARD_LOGIN,
+                "ok",
+                &fmt!("scopes={}", principal.scopes.join(",")),
+            );
             issue_session_cookie(state, &principal)
         },
         LoginOutcome::BadCredentials => {
+            audit::append(
+                ADMIN_ANON,
+                VERB_DASHBOARD_LOGIN,
+                "err",
+                "reason=bad_credentials",
+            );
             // Generic message: do not leak whether any admin exists.
             render_login_form(Some("Invalid credentials."))
         },
         LoginOutcome::NoDashboardScope { name } => {
+            audit::append(
+                &name,
+                VERB_DASHBOARD_LOGIN,
+                "err",
+                "reason=no_dashboard_scope",
+            );
             warn!("dashboard login: admin '{}' authenticated but \
                 holds no dashboard scope.", name);
             render_login_form(Some(
@@ -207,7 +253,22 @@ fn build_session_cookie(cookie_value: String, clear: bool) -> Cookie {
 /// `Max-Age=0`, then redirect to the login form. Stateless logout:
 /// because sessions are not stored server-side, dropping the cookie
 /// is sufficient.
-fn handle_logout() -> HttpMessage {
+///
+/// Audits the logout under the actor's name when a valid session
+/// cookie is present, and as `(anon)` otherwise. This lets the
+/// audit log distinguish "Alice signed out" from "an unauthorised
+/// visitor hit /admin/logout while not signed in".
+fn handle_logout(
+    state:   &AdminState,
+    headers: &Arc<HeaderFields>,
+)
+    -> HttpMessage
+{
+    let actor = match extract_principal(state, headers) {
+        Some(p) => p.name,
+        None => ADMIN_ANON.to_string(),
+    };
+    audit::append(&actor, VERB_DASHBOARD_LOGOUT, "ok", "");
     let cookie = build_session_cookie(String::new(), true);
     HttpMessage::new_response(HttpStatus::SeeOther)
         .with_field(

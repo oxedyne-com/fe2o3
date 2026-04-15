@@ -10,9 +10,6 @@ pub const LOG_FILE_EXTENSION:               &'static str = "log";
 
 pub const CONFIG_NAME:                      &'static str = "config.jdat";
 pub const WALLET_NAME:                      &'static str = "wallet.jdat";
-/// Name of the append-only admin audit log written next to the
-/// wallet file. One line per privileged CLI invocation.
-pub const ADMIN_AUDIT_LOG_NAME:              &'static str = "admin-audit.log";
 // Timeouts.
 pub const GET_DATA_WAIT:                    Wait = Wait::new_default();
 // Key derivation functions.

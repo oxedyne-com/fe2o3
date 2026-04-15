@@ -45,6 +45,7 @@
 //!   to the appropriate view or action.
 
 pub mod assets;
+pub mod audit;
 pub mod auth;
 pub mod handler;
 pub mod ozone_view;

@@ -6,6 +6,7 @@ use crate::{
         tui::AppStatus,
     },
     srv::{
+        admin::audit,
         api::ApiHandlerRegistry,
         cert::Certificate,
         cfg::ServerConfig,
@@ -563,7 +564,7 @@ impl AppShellContext {
             let mut w = lock_write!(self.wallet);
             *w = new_wallet;
         }
-        audit_log(&admin_name, "wallet.migrate", "ok",
+        audit::append(&admin_name, "wallet.migrate", "ok",
             &fmt!("backup={:?}", backup_path));
         Ok(Evaluation::Output(fmt!(
             "Migrated wallet to the admin-user layout. New admin '{}' \
@@ -642,7 +643,7 @@ impl AppShellContext {
     fn admin_passwd(&mut self) -> Outcome<Evaluation> {
         let caller_name = self.unlocked_admin_name.clone();
         if caller_name.is_empty() {
-            audit_log("(unknown)", "admin.passwd", "err",
+            audit::append("(unknown)", "admin.passwd", "err",
                 "reason=no_caller_identity");
             return Err(err!(
                 "No caller identity is known -- `admin --passwd` can only \
@@ -661,7 +662,7 @@ impl AppShellContext {
                 new_pass.expose_secret().as_bytes(),
                 oxedyne_fe2o3_crypto::keys::DEFAULT_WALLET_KDF_NAME,
             ) {
-                audit_log(&caller_name, "admin.passwd", "err",
+                audit::append(&caller_name, "admin.passwd", "err",
                     &fmt!("reason={}", e));
                 return Err(e);
             }
@@ -671,7 +672,7 @@ impl AppShellContext {
                 Some(EncoderConfig::<(), ()>::default()),
             ));
         }
-        audit_log(&caller_name, "admin.passwd", "ok", "self");
+        audit::append(&caller_name, "admin.passwd", "ok", "self");
         Ok(Evaluation::Output(fmt!(
             "Password for admin '{}' rotated in place. The new password \
             takes effect at the next Steel start-up; the running session \
@@ -702,7 +703,7 @@ impl AppShellContext {
             }
             count = w.admins().len();
         }
-        audit_log("(anon)", "admin.list", "ok",
+        audit::append("(anon)", "admin.list", "ok",
             &fmt!("count={}", count));
         Ok(Evaluation::Output(lines.join("\n")))
     }
@@ -724,7 +725,7 @@ impl AppShellContext {
     {
         let caller_name = self.unlocked_admin_name.clone();
         if !self.unlocked_has_admin_scope() {
-            audit_log(&caller_name, "admin.add", "err",
+            audit::append(&caller_name, "admin.add", "err",
                 &fmt!("target={} reason=caller_scope", new_name));
             return Err(err!(
                 "Admin '{}' does not hold the 'admin' scope; cannot \
@@ -744,7 +745,7 @@ impl AppShellContext {
                 expires_at,
                 oxedyne_fe2o3_crypto::keys::DEFAULT_WALLET_KDF_NAME,
             ) {
-                audit_log(&caller_name, "admin.add", "err",
+                audit::append(&caller_name, "admin.add", "err",
                     &fmt!("target={} reason={}", new_name, e));
                 return Err(e);
             }
@@ -754,7 +755,7 @@ impl AppShellContext {
                 Some(EncoderConfig::<(), ()>::default()),
             ));
         }
-        audit_log(&caller_name, "admin.add", "ok",
+        audit::append(&caller_name, "admin.add", "ok",
             &fmt!("target={} scopes={} expires_at={}",
                 new_name, new_scopes.join(","), expires_at));
         Ok(Evaluation::Output(fmt!(
@@ -765,7 +766,7 @@ impl AppShellContext {
     fn admin_remove(&mut self, target_name: &str) -> Outcome<Evaluation> {
         let caller_name = self.unlocked_admin_name.clone();
         if !self.unlocked_has_admin_scope() {
-            audit_log(&caller_name, "admin.remove", "err",
+            audit::append(&caller_name, "admin.remove", "err",
                 &fmt!("target={} reason=caller_scope", target_name));
             return Err(err!(
                 "Admin '{}' does not hold the 'admin' scope; cannot \
@@ -776,7 +777,7 @@ impl AppShellContext {
         {
             let mut w = lock_write!(self.wallet);
             if let Err(e) = w.remove_by_name(target_name) {
-                audit_log(&caller_name, "admin.remove", "err",
+                audit::append(&caller_name, "admin.remove", "err",
                     &fmt!("target={} reason={}", target_name, e));
                 return Err(e);
             }
@@ -786,7 +787,7 @@ impl AppShellContext {
                 Some(EncoderConfig::<(), ()>::default()),
             ));
         }
-        audit_log(&caller_name, "admin.remove", "ok",
+        audit::append(&caller_name, "admin.remove", "ok",
             &fmt!("target={}", target_name));
         Ok(Evaluation::Output(fmt!(
             "Removed admin '{}'.", target_name,
@@ -897,43 +898,6 @@ impl AppShellContext {
             }
         }
         Ok(Evaluation::None)
-    }
-}
-
-/// Append a single line to the admin audit log `./admin-audit.log`.
-///
-/// Format: `<unix_seconds> <admin> <verb> <result> <detail>`, one
-/// entry per line, append-only. Errors are logged at `warn!` level
-/// but never propagated: an operator needs the admin commands to
-/// keep working even if the log file is temporarily unavailable.
-fn audit_log(admin: &str, verb: &str, result: &str, detail: &str) {
-    use std::{
-        io::Write,
-        time::{
-            SystemTime,
-            UNIX_EPOCH,
-        },
-    };
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let line = fmt!(
-        "{} {} {} {} {}\n",
-        secs, admin, verb, result, detail,
-    );
-    let path = Path::new("./").join(app_const::ADMIN_AUDIT_LOG_NAME);
-    match std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    {
-        Ok(mut f) => {
-            if let Err(e) = f.write_all(line.as_bytes()) {
-                warn!("Failed to write audit log line: {}", e);
-            }
-        },
-        Err(e) => warn!("Failed to open audit log {:?}: {}", path, e),
     }
 }
 
