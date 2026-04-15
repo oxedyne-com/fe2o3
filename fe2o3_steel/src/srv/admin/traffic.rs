@@ -48,6 +48,15 @@ pub const MAX_PATHS_PER_VHOST: usize = 256;
 /// `MAX_PATHS_PER_VHOST`.
 pub const OTHER_PATH_BUCKET: &str = "_other";
 
+/// Default number of periodic samples the sampler keeps. At the
+/// default sample interval this works out to one hour of history.
+pub const DEFAULT_HISTORY_CAPACITY: usize = 720;
+
+/// Default interval between counter samples. Five seconds is a
+/// reasonable trade-off between chart smoothness and CPU cost on
+/// a quiet host.
+pub const DEFAULT_SAMPLE_INTERVAL_SECS: u64 = 5;
+
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ REQUEST RECORD                                                            │
 // └───────────────────────────────────────────────────────────────────────────┘
@@ -109,6 +118,20 @@ pub struct CountersSnapshot {
     pub by_vhost:   HashMap<String, VhostCounters>,
 }
 
+/// One point in the bounded traffic history. Captures the
+/// monotonic totals at a particular unix second so the dashboard
+/// can compute deltas between adjacent samples and draw a
+/// requests-per-interval chart.
+#[derive(Clone, Debug)]
+pub struct TrafficSample {
+    /// Unix seconds at which the sample was taken.
+    pub when_secs:  u64,
+    /// Cumulative total requests across every vhost.
+    pub total:      u64,
+    /// Cumulative per-status breakdown at this instant.
+    pub by_status:  HashMap<u16, u64>,
+}
+
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ TRAFFIC RECORDER                                                          │
 // └───────────────────────────────────────────────────────────────────────────┘
@@ -122,17 +145,23 @@ pub struct CountersSnapshot {
 pub struct TrafficRecorder {
     /// Fixed ring buffer capacity. Older entries are dropped when
     /// a new entry arrives at capacity.
-    capacity:   usize,
+    capacity:           usize,
     /// Recent request records, newest-last. Length never exceeds
     /// `capacity`.
-    ring:       RwLock<VecDeque<RequestRecord>>,
+    ring:               RwLock<VecDeque<RequestRecord>>,
     /// Rolling counter state. Distinct lock from the ring so that
     /// dashboard reads of counters and records do not contend on
     /// the same lock.
-    counters:   RwLock<CountersSnapshot>,
+    counters:           RwLock<CountersSnapshot>,
     /// Monotonic total, also visible via `counters`, but kept as
     /// an atomic so lock-free reads stay cheap.
-    total:      AtomicU64,
+    total:              AtomicU64,
+    /// Bounded ring of periodic counter samples, newest-last.
+    /// Populated by a background sampling task; read by the
+    /// dashboard traffic view to draw time-series charts.
+    history:            RwLock<VecDeque<TrafficSample>>,
+    /// Maximum number of samples kept in `history`.
+    history_capacity:   usize,
 }
 
 impl TrafficRecorder {
@@ -145,10 +174,14 @@ impl TrafficRecorder {
             capacity
         };
         Self {
-            capacity:   cap,
-            ring:       RwLock::new(VecDeque::with_capacity(cap)),
-            counters:   RwLock::new(CountersSnapshot::default()),
-            total:      AtomicU64::new(0),
+            capacity:           cap,
+            ring:               RwLock::new(VecDeque::with_capacity(cap)),
+            counters:           RwLock::new(CountersSnapshot::default()),
+            total:              AtomicU64::new(0),
+            history:            RwLock::new(
+                VecDeque::with_capacity(DEFAULT_HISTORY_CAPACITY),
+            ),
+            history_capacity:   DEFAULT_HISTORY_CAPACITY,
         }
     }
 
@@ -162,6 +195,11 @@ impl TrafficRecorder {
     /// Capacity of the ring buffer.
     pub fn capacity(&self) -> usize {
         self.capacity
+    }
+
+    /// Maximum number of periodic samples kept in history.
+    pub fn history_capacity(&self) -> usize {
+        self.history_capacity
     }
 
     /// Monotonic total request count since the recorder was
@@ -225,6 +263,42 @@ impl TrafficRecorder {
     pub fn counters_snapshot(&self) -> Outcome<CountersSnapshot> {
         let ctr = lock_read!(self.counters);
         Ok(ctr.clone())
+    }
+
+    /// Record a periodic sample of the current counter state into
+    /// the history ring. Intended to be called from a background
+    /// task at a fixed interval; the dashboard reads from the
+    /// history when drawing time-series charts. Trims the oldest
+    /// entry when the ring reaches `history_capacity`.
+    pub fn sample_now(&self) -> Outcome<()> {
+        let ctr = lock_read!(self.counters);
+        let sample = TrafficSample {
+            when_secs:  SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            total:      ctr.total,
+            by_status:  ctr.by_status.clone(),
+        };
+        drop(ctr);
+        let mut hist = lock_write!(self.history);
+        if hist.len() == self.history_capacity {
+            hist.pop_front();
+        }
+        hist.push_back(sample);
+        Ok(())
+    }
+
+    /// Clone the full history ring in chronological order
+    /// (oldest first). Cheap: one short read lock plus a
+    /// per-sample clone.
+    pub fn history_snapshot(&self) -> Outcome<Vec<TrafficSample>> {
+        let hist = lock_read!(self.history);
+        let mut out = Vec::with_capacity(hist.len());
+        for s in hist.iter() {
+            out.push(s.clone());
+        }
+        Ok(out)
     }
 }
 
