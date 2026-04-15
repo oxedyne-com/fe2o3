@@ -40,6 +40,7 @@ all = [
 	"dep:oxedyne_fe2o3_stds",
 	"dep:oxedyne_fe2o3_steel",
 	"dep:oxedyne_fe2o3_syntax",
+	"dep:oxedyne_fe2o3_sys",
 	"dep:oxedyne_fe2o3_test",
 	"dep:oxedyne_fe2o3_text",
 	"dep:oxedyne_fe2o3_tui",
@@ -66,6 +67,7 @@ shield 		= ["dep:oxedyne_fe2o3_shield"]
 stds 		= ["dep:oxedyne_fe2o3_stds"]
 steel 		= ["dep:oxedyne_fe2o3_steel"]
 syntax 		= ["dep:oxedyne_fe2o3_syntax"]
+sys 		= ["dep:oxedyne_fe2o3_sys"]
 test 		= ["dep:oxedyne_fe2o3_test"]
 text 		= ["dep:oxedyne_fe2o3_text"]
 tui 		= ["dep:oxedyne_fe2o3_tui"]
@@ -93,6 +95,7 @@ oxedyne_fe2o3_shield =      { path = "fe2o3_shield",		optional = true }
 oxedyne_fe2o3_stds =        { path = "fe2o3_stds",			optional = true }
 oxedyne_fe2o3_steel =       { path = "fe2o3_steel",			optional = true }
 oxedyne_fe2o3_syntax =      { path = "fe2o3_syntax",		optional = true }
+oxedyne_fe2o3_sys =         { path = "fe2o3_sys",			optional = true }
 oxedyne_fe2o3_test =        { path = "fe2o3_test",			optional = true }
 oxedyne_fe2o3_text =        { path = "fe2o3_text",			optional = true }
 oxedyne_fe2o3_tui =         { path = "fe2o3_tui",			optional = true }

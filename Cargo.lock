@@ -2000,6 +2000,7 @@ dependencies = [
  "oxedyne_fe2o3_stds",
  "oxedyne_fe2o3_steel",
  "oxedyne_fe2o3_syntax",
+ "oxedyne_fe2o3_sys",
  "oxedyne_fe2o3_test",
  "oxedyne_fe2o3_text",
  "oxedyne_fe2o3_tui",
@@ -2342,6 +2343,7 @@ dependencies = [
  "oxedyne_fe2o3_o3db_sync",
  "oxedyne_fe2o3_stds",
  "oxedyne_fe2o3_syntax",
+ "oxedyne_fe2o3_sys",
  "oxedyne_fe2o3_text",
  "oxedyne_fe2o3_tui",
  "rcgen",
@@ -2379,6 +2381,13 @@ dependencies = [
  "oxedyne_fe2o3_test",
  "oxedyne_fe2o3_text",
  "oxedyne_fe2o3_units",
+]
+
+[[package]]
+name = "oxedyne_fe2o3_sys"
+version = "0.5.0"
+dependencies = [
+ "oxedyne_fe2o3_core",
 ]
 
 [[package]]
