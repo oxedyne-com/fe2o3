@@ -307,6 +307,7 @@ pub fn new_db(
     >>
 {
     let cfg = OzoneConfig {
+        format_version:                 oxedyne_fe2o3_o3db_sync::base::constant::CURRENT_FORMAT_VERSION,
         // Key hashing
         bytes_before_hashing:           32,
         // Caches

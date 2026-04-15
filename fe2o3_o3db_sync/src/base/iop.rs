@@ -11,6 +11,7 @@ use oxedyne_fe2o3_iop_db::api::{
     Meta,
     Database,
     RestSchemesOverride,
+    ScanOpts,
 };
 use oxedyne_fe2o3_iop_hash::{
     api::Hasher,
@@ -119,9 +120,19 @@ impl<
             Bug, Unexpected)),
         }
     }
+
+    fn scan(
+        &self,
+        opts:   &ScanOpts,
+        or:     Option<&RestSchemesOverride<ENC, KH>>,
+    )
+        -> Outcome<Vec<(Dat, Dat, Meta<UIDL, UID>)>>
+    {
+        self.api().scan(opts, or)
+    }
 }
 
-/// `LocalOzoneApi` is unfortunately necessary to satisfy the compiler regarding E0210. 
+/// `LocalOzoneApi` is unfortunately necessary to satisfy the compiler regarding E0210.
 #[derive(Debug)]
 struct LocalOzoneApi<
     const UIDL: usize,
@@ -253,5 +264,16 @@ impl<
                 "Expected an OzoneMsg::KeyExists message, received a: {:?}", msg;
             Bug, Unexpected)),
         }
+    }
+
+    fn scan(
+        &self,
+        opts:   &ScanOpts,
+        or:     Option<&RestSchemesOverride<ENC, KH>>,
+    )
+        -> Outcome<Vec<(Dat, Dat, Meta<UIDL, UID>)>>
+    {
+        let unlocked_api = lock_read!(self.0);
+        unlocked_api.scan(opts, or)
     }
 }

@@ -30,6 +30,28 @@ impl OzoneConfig {
 pub const VERSION:                      SemVer = SemVer::new(0, 5, 0);
 pub const NAMEX_ID:                    &'static str = "QByizewdCnRH/E6ksx4rOnqv5lFuB6PX1EA4Z5kNQwA=";
 
+/// On-disk format version. Bumped whenever the envelope of any ozone
+/// database file, the config file layout, or a structural invariant
+/// between them changes in a non-backwards-compatible way.
+///
+/// The version is persisted in `OzoneConfig::format_version` and is
+/// verified on load via `check_and_fix`. A mismatch is a hard refusal
+/// -- ozone does not offer an automatic migration path; the database
+/// must be re-created.
+///
+/// Version history:
+/// - **v1**: introduced format versioning. Stored a routing hash as
+///   the on-disk key form (`StoredKey` envelope contained
+///   `Dat::wrap_bytes_var(hash_of_key_bytes)` not the original key).
+///   Made `scan` impossible because the original keys were never
+///   persisted.
+/// - **v2**: stores the original plaintext key bytes (the
+///   `Dat::as_bytes()` form supplied by the caller) on disk. The
+///   routing hash remains computed at write time but is used only
+///   to pick the owning cbot/zone, never persisted as the key form.
+///   `scan` can now recover the user's original `Dat` keys.
+pub const CURRENT_FORMAT_VERSION:       u8 = 2;
+
 // Files.
 pub const MAX_ZONES:                    u16 = 100;
 pub const DEFAULT_MAX_ZONE_DIR_BYTES:   u64 = 104_857_600; // 100 MiB

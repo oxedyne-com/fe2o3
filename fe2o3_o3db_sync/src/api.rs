@@ -61,6 +61,7 @@ use oxedyne_fe2o3_hash::{
 use oxedyne_fe2o3_iop_db::api::{
     Meta,
     RestSchemesOverride,
+    ScanOpts,
 };
 use oxedyne_fe2o3_namex::id::{
     InNamex,
@@ -184,12 +185,18 @@ impl<
         nc:     u16,
     )
         -> Outcome<(Vec<u8>, WorkerInd, alias::ChooseHash)>
-    { 
+    {
         if kbuf.len() == 0 {
             return Err(err!("Key has length zero."; Input, Invalid));
         }
 
-        // Generate the hash.
+        // Compute the routing hash. This is *only* a routing signal
+        // used to select the owning cbot and zone -- it does not
+        // become the stored key form. The bytes that flow through
+        // the rest of the write path, into the cache, and onto disk
+        // are the original plaintext `kbuf`, so a later `scan` can
+        // recover the user's original `Dat` key by parsing those
+        // bytes with `Dat::from_bytes`.
         let hash = self.schemes().key_hasher()
             .or_hash(&[&kbuf], constant::KEY_HASH_SALT, schms2.map(|s| s.key_hasher()))
             .as_hashform();
@@ -199,11 +206,8 @@ impl<
             nc,
         ));
 
-        // Keys and values are wrapped in a fixed width `Dat::BU8`, `Dat::BU16`,
-        // `Dat::BU32`, or `Dat::BU64`.
-        let new_key = res!(Dat::wrap_bytes_var(hash.as_vec()));
         Ok((
-            new_key,
+            kbuf,
             cbwind,
             chash,
         ))
@@ -1009,6 +1013,82 @@ impl<
             },
             _ => return Err(err!("{}: Key must be a PartKey.", self_id; Input, Invalid)),
         }
+    }
+
+    /// Walk every zone and collect the live `(key, value, meta)`
+    /// entries that satisfy `opts`.
+    ///
+    /// Dispatches one `ScanRequest` per zone to its first igbot,
+    /// waits for every zone's `ScanEntries` response, merges the
+    /// vectors and applies the global `limit` (per-zone limits
+    /// have already been applied inside each igbot before
+    /// response).
+    ///
+    /// Scan v1 does not read value payloads: every returned tuple
+    /// has `Dat::Empty` as the value. Callers fetch a value via
+    /// [`OzoneApi::get_wait`] or the generic `Database::get` once
+    /// the operator has chosen a specific key.
+    ///
+    /// `schms2` is threaded through to the per-zone handlers so a
+    /// future value-reading revision can honour per-call scheme
+    /// overrides without a protocol change.
+    pub fn scan(
+        &self,
+        opts:   &ScanOpts,
+        schms2: Option<&RestSchemesOverride<ENC, KH>>,
+    )
+        -> Outcome<Vec<(Dat, Dat, Meta<UIDL, UID>)>>
+    {
+        let nz = self.cfg().num_zones();
+        let resp = self.responder();
+
+        // Send one ScanRequest to the first igbot of every zone.
+        for z in 0..nz {
+            let zind = ZoneInd::new(z);
+            let igbots = res!(self.chans().get_workers_of_type_in_zone(
+                &WorkerType::InitGarbage,
+                &zind,
+            ));
+            let bot = res!(igbots.get_bot(0));
+            if let Err(e) = bot.send(OzoneMsg::ScanRequest {
+                opts:   opts.clone(),
+                schms2: schms2.cloned(),
+                resp:   resp.clone(),
+            }) {
+                return Err(err!(e,
+                    "{}: Cannot send scan request to igbot in zone {}.",
+                    self.ozid(), z;
+                    Channel, Write));
+            }
+        }
+
+        // Gather one ScanEntries response per zone.
+        let (_, msgs) = res!(resp.recv_number(nz, constant::USER_REQUEST_WAIT));
+        let mut out: Vec<(Dat, Dat, Meta<UIDL, UID>)> = Vec::new();
+        for msg in msgs {
+            match msg {
+                OzoneMsg::ScanEntries(entries) => {
+                    out.extend(entries);
+                },
+                OzoneMsg::Error(e) => return Err(err!(e,
+                    "{}: Zone-level scan failure.", self.ozid();
+                    Channel)),
+                other => return Err(err!(
+                    "{}: Unexpected response to scan request: {:?}",
+                    self.ozid(), other;
+                    Channel, Unexpected)),
+            }
+        }
+
+        // Apply the global limit. Per-zone limits have already been
+        // applied inside each igbot, so this cap tightens the
+        // cross-zone merge rather than truncating any single zone.
+        if let Some(lim) = opts.limit {
+            if out.len() > lim {
+                out.truncate(lim);
+            }
+        }
+        Ok(out)
     }
 
     /// Activate garbage collection by sending a control message to the igbots via the zbots, via the supervisor.

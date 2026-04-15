@@ -1,6 +1,7 @@
 mod basic;
 mod dal;
 mod perf;
+mod scan;
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -27,6 +28,7 @@ fn run_tests() -> Outcome<()> {
     let filter = "all";
     res!(basic::test_basic(filter));
     res!(dal::test_docs(filter));
+    res!(scan::test_scan(filter));
     //res!(perf::test_perf("all"));
 
     Ok(())

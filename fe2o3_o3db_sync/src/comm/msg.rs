@@ -48,6 +48,7 @@ use oxedyne_fe2o3_iop_crypto::enc::Encrypter;
 use oxedyne_fe2o3_iop_db::api::{
     Meta,
     RestSchemesOverride,
+    ScanOpts,
 };
 use oxedyne_fe2o3_iop_hash::api::Hasher;
 use oxedyne_fe2o3_jdat::{
@@ -150,6 +151,22 @@ pub enum OzoneMsg<
     Ready,
     ReadCache(Key, Responder<UIDL, UID, ENC, KH>),
     ReadFileRequest(FileNum, MetaLocation<UIDL, UID>, Responder<UIDL, UID, ENC, KH>),
+    /// Walk a zone's index files and return every live entry that
+    /// satisfies `opts`. Dispatched to an igbot per zone by the
+    /// scan coordinator in `O3db::scan`. The igbot is responsible
+    /// for chash-based deduplication within its zone; the
+    /// coordinator stitches the per-zone results and applies the
+    /// final prefix and limit filters.
+    ///
+    /// `schms2` supplies the per-call encryption scheme override
+    /// that the igbot must use when decrypting value payloads for
+    /// `opts.include_values == true`. Ignored when values are
+    /// skipped.
+    ScanRequest {
+        opts:   ScanOpts,
+        schms2: Option<RestSchemesOverride<ENC, KH>>,
+        resp:   Responder<UIDL, UID, ENC, KH>,
+    },
     Shutdown(OzoneBotId, Responder<UIDL, UID, ENC, KH>),
     Write {
         kstored:    Vec<u8>,
@@ -172,6 +189,13 @@ pub enum OzoneMsg<
     Ok,
     //OkFrom(OzoneBotId),
     OzoneStateResponse(Vec<ZoneState>),
+    /// A zone's contribution to a scan in progress. Emitted by an
+    /// igbot in response to [`OzoneMsg::ScanRequest`]. Contains the
+    /// live entries the zone's index walker found, after per-zone
+    /// chash deduplication. Corrupt entries are logged at `warn!`
+    /// level and elided from this vector in v1; a future richer
+    /// return type can surface them explicitly.
+    ScanEntries(Vec<(Dat, Dat, Meta<UIDL, UID>)>),
     //UserKeys(Vec<(u128, Dat)>),
     UseLiveFile(FileNum),
     Value(Value<UIDL, UID>),

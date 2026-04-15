@@ -155,11 +155,70 @@ impl<
     }
 }
 
+/// Options controlling a [`Database::scan`] invocation.
+///
+/// All fields have sensible defaults via [`Default`], so the common case
+/// "give me every entry" is `ScanOpts::default()`.
+///
+/// # Semantics
+///
+/// - `prefix`: restrict the returned entries to those whose key matches
+///   the given `Dat`. For `Dat::Str(s)` prefixes the match is a string
+///   prefix. For other `Dat` variants the match is equality. `None`
+///   returns every entry.
+/// - `limit`: cap the returned vector at this many entries. `None` means
+///   no cap; callers that don't trust the database size should always
+///   set a bound.
+/// - `include_values`: when `true` the scan reads each value payload
+///   from disk (and decrypts if the database is encrypted). When
+///   `false` the returned values are `Dat::Empty`, but keys and `Meta`
+///   are still populated; this mode is much cheaper and is the right
+///   choice when the caller is paginating keys for display and will
+///   fetch values individually on demand.
+#[derive(Clone, Debug, Default)]
+pub struct ScanOpts {
+    /// Optional key prefix filter.
+    pub prefix:         Option<Dat>,
+    /// Optional hard cap on the returned entry count.
+    pub limit:          Option<usize>,
+    /// Whether to read and decrypt value payloads.
+    pub include_values: bool,
+}
+
+impl ScanOpts {
+    /// Construct a scan-everything options value.
+    pub fn all() -> Self {
+        Self::default()
+    }
+
+    /// Shorthand for "scan every entry whose key is a `Dat::Str` starting
+    /// with `prefix`".
+    pub fn with_str_prefix(prefix: impl Into<String>) -> Self {
+        Self {
+            prefix:         Some(Dat::Str(prefix.into())),
+            limit:          None,
+            include_values: false,
+        }
+    }
+
+    /// Fluent setter for `include_values`.
+    pub fn include_values(mut self, yes: bool) -> Self {
+        self.include_values = yes;
+        self
+    }
+
+    /// Fluent setter for `limit`.
+    pub fn limit(mut self, n: usize) -> Self {
+        self.limit = Some(n);
+        self
+    }
+}
+
 /// A minimal, universal and synchronous (blocking) interface for a database.
 ///
 pub trait Database<
     const UIDL: usize,        // User identifier byte length.
-    UID:    NumIdDat<UIDL>,   // User identifier.            
+    UID:    NumIdDat<UIDL>,   // User identifier.
     ENC:    Encrypter,        // Symmetric encryption of data at rest.
     KH:     Hasher,           // Hashes database keys.
 >:
@@ -195,4 +254,33 @@ pub trait Database<
         or:     Option<&RestSchemesOverride<ENC, KH>>,
     )
         -> Outcome<bool>;
+
+    /// Walk the database, returning `(key, value, meta)` triples for
+    /// every entry that satisfies `opts`.
+    ///
+    /// The scan is a best-effort point-in-time snapshot: entries
+    /// written after the scan begins may or may not appear; entries
+    /// deleted or overwritten mid-scan return their latest live state
+    /// (stale versions are filtered via the database's own
+    /// reconciliation -- implementations must not return superseded
+    /// values).
+    ///
+    /// `or` behaves as for [`Database::get`], supplying a per-call
+    /// override of the encryption and hashing schemes. Scans with
+    /// `include_values == true` use it to decrypt each value; scans
+    /// with `include_values == false` leave the `or` argument alone.
+    ///
+    /// # Cost and scale
+    ///
+    /// Scan is expected to be O(database size); it is not a
+    /// low-latency operation. Callers that only need a handful of
+    /// entries matching a tight prefix should still bound the scan
+    /// via `opts.limit` because implementations are free to evaluate
+    /// the prefix filter after the walk rather than during it.
+    fn scan(
+        &self,
+        opts:   &ScanOpts,
+        or:     Option<&RestSchemesOverride<ENC, KH>>,
+    )
+        -> Outcome<Vec<(Dat, Dat, Meta<UIDL, UID>)>>;
 }

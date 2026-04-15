@@ -27,10 +27,18 @@ use crate::{
     },
 };
 
-use oxedyne_fe2o3_iop_db::api::Meta;
-use oxedyne_fe2o3_jdat::id::NumIdDat;
+use oxedyne_fe2o3_core::byte::FromBytes;
+use oxedyne_fe2o3_iop_db::api::{
+    Meta,
+    ScanOpts,
+};
+use oxedyne_fe2o3_jdat::{
+    Dat,
+    id::NumIdDat,
+};
 
 use std::{
+    collections::HashMap,
     fs::{
         self,
         File,
@@ -174,6 +182,19 @@ impl<
                                 fbot_index,
                             );
                             self.result(&result);
+                        },
+                        // Scan
+                        OzoneMsg::ScanRequest {
+                            opts,
+                            schms2: _,
+                            resp,
+                        } => {
+                            let result = self.scan_zone(&opts);
+                            let msg = match result {
+                                Ok(entries) => OzoneMsg::ScanEntries(entries),
+                                Err(e) => OzoneMsg::Error(e),
+                            };
+                            self.respond(Ok(msg), &resp);
                         },
                         _ => return self.listen_more(msg),
                     }
@@ -919,5 +940,198 @@ impl<
             }
         }
         Ok(fstat)
+    }
+
+    // ┌───────────────────────────────────────────────────────────────────────┐
+    // │ SCAN                                                                  │
+    // └───────────────────────────────────────────────────────────────────────┘
+
+    /// Walk every index file in this bot's zone and return the live
+    /// user-visible `(key, value, meta)` entries that satisfy `opts`.
+    ///
+    /// Deduplication keeps the newest entry per raw key-bytes: index
+    /// files are walked in ascending file-number order, and within a
+    /// file in position order, so a later write of the same key
+    /// naturally overwrites the earlier one in the local map.
+    ///
+    /// Internal chunk entries (`cind >= 1`) are elided; only the
+    /// user-visible main keys are returned.
+    ///
+    /// Values are deferred to a later revision of scan: this handler
+    /// returns `Dat::Empty` as the value for every entry. Callers
+    /// that need the value fetch it with a separate `get()` call
+    /// once the operator has chosen a specific key.
+    ///
+    /// Prefix and limit filters are applied per zone before the
+    /// result ships to the coordinator, so the wire message stays
+    /// bounded even when the caller sets a small limit against a
+    /// large database.
+    fn scan_zone(
+        &mut self,
+        opts: &ScanOpts,
+    )
+        -> Outcome<Vec<(Dat, Dat, Meta<UIDL, UID>)>>
+    {
+        let fnums = res!(self.list_ind_fnums());
+        let mut live: HashMap<Vec<u8>, (Dat, Meta<UIDL, UID>)>
+            = HashMap::new();
+
+        for fnum in fnums {
+            res!(self.scan_walk_ind_file(fnum, &mut live));
+        }
+
+        let mut out: Vec<(Dat, Dat, Meta<UIDL, UID>)> =
+            Vec::with_capacity(live.len());
+        for (_kbyts, (kdat, meta)) in live.into_iter() {
+            if !scan_matches_prefix(&kdat, opts.prefix.as_ref()) {
+                continue;
+            }
+            out.push((kdat, Dat::Empty, meta));
+            if let Some(lim) = opts.limit {
+                if out.len() >= lim {
+                    break;
+                }
+            }
+        }
+        if opts.include_values {
+            warn!(sync_log::stream(),
+                "{}: scan called with include_values=true; scan v1 \
+                returns Dat::Empty for every value. Fetch individual \
+                values via get() once a key is selected.",
+                self.ozid());
+        }
+        Ok(out)
+    }
+
+    /// Enumerate the `.ind` file numbers in this bot's zone
+    /// directory, ascending. Unparseable or non-ind files are
+    /// skipped silently; the zone survey at startup already
+    /// rejects structurally invalid directories.
+    fn list_ind_fnums(&self) -> Outcome<Vec<FileNum>> {
+        let mut fnums: Vec<FileNum> = Vec::new();
+        for entry in res!(fs::read_dir(&self.zdir().dir)) {
+            let entry = res!(entry);
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let (fnum, ftyp) = match ZoneDir::ozone_file_number_and_type(&path) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            if ftyp == FileType::Index {
+                fnums.push(fnum);
+            }
+        }
+        fnums.sort();
+        Ok(fnums)
+    }
+
+    /// Walk a single index file, populating `live` with the
+    /// user-visible entries it contains. Skips internal chunk
+    /// entries. A later call with a higher `fnum` for the same key
+    /// bytes overwrites the entry inserted here, which is the
+    /// correct stale-filtering behaviour for an append-only store.
+    fn scan_walk_ind_file(
+        &mut self,
+        fnum: FileNum,
+        live: &mut HashMap<Vec<u8>, (Dat, Meta<UIDL, UID>)>,
+    )
+        -> Outcome<()>
+    {
+        let (_, file) = res!(self.zdir().open_ozone_file(
+            fnum,
+            &FileType::Index,
+            &FileAccess::Reading,
+        ));
+        let mut reader = BufReader::new(file);
+        let typ = FileType::Index;
+        let mut pos = 0usize;
+
+        loop {
+            // 1. Load the StoredKey from the file.
+            let (key, meta) = match StoredKey::load(
+                &mut reader,
+                self.api().schemes().checksummer().clone(),
+            ) {
+                Err(e) => return Err(err!(e,
+                    "{}: While scanning {:?} file {} at position {}.",
+                    self.ozid(), typ, fnum, pos;
+                    IO, File, Read)),
+                Ok(None) => break,
+                Ok(Some((skey, _, n))) => {
+                    pos += n;
+                    let meta = skey.meta().clone();
+                    (skey.into_key(), meta)
+                },
+            };
+            // 2. Skip the matching StoredIndex. We do not need the
+            //    location -- we are not reading values in v1.
+            match StoredIndex::read(
+                &mut reader,
+                fnum,
+                self.api().schemes().checksummer().clone(),
+            ) {
+                Err(e) => return Err(err!(e,
+                    "{}: While scanning stored index in {:?} file {} \
+                    at position {}.",
+                    self.ozid(), typ, fnum, pos;
+                    IO, File, Read)),
+                Ok((None, _)) => return Err(err!(
+                    "{}: Missing StoredIndex at end of {:?} file {}.",
+                    self.ozid(), typ, fnum;
+                    Missing)),
+                Ok((Some(_sindex), n)) => {
+                    pos += n;
+                },
+            }
+
+            // 3. Elide internal chunk entries; only main user keys
+            //    appear in the scan result. Main keys are either
+            //    `Complete` (non-chunked values) or `Chunk(_, 0)`
+            //    (the bunch-key pointer for a chunked value).
+            let cind = key.index();
+            if let Some(c) = cind {
+                if c >= 1 {
+                    continue;
+                }
+            }
+
+            // 4. Decode the raw key bytes to a Dat.
+            let kbyts = key.into_bytes();
+            let (kdat, _n_decoded) = match Dat::from_bytes(&kbyts) {
+                Ok(pair) => pair,
+                Err(e) => {
+                    warn!(sync_log::stream(),
+                        "{}: Could not decode scanned key bytes in file {} \
+                        at position {}: {}. Skipping entry.",
+                        self.ozid(), fnum, pos, e);
+                    continue;
+                },
+            };
+
+            // 5. Insert into the live map. Later occurrences of the
+            //    same raw key bytes (from higher fnum or later in
+            //    the same file) overwrite, which is exactly the
+            //    stale-filtering behaviour we want.
+            live.insert(kbyts, (kdat, meta));
+        }
+        Ok(())
+    }
+}
+
+/// Return `true` if `kdat` satisfies the optional `prefix` filter.
+/// When the prefix is a `Dat::Str`, the comparison is a string
+/// prefix match against `kdat` if it is also a `Dat::Str`. For
+/// every other prefix variant the comparison is strict equality.
+/// A `None` prefix matches everything.
+fn scan_matches_prefix(kdat: &Dat, prefix: Option<&Dat>) -> bool {
+    match prefix {
+        None => true,
+        Some(Dat::Str(p)) => match kdat {
+            Dat::Str(s) => s.starts_with(p.as_str()),
+            _ => false,
+        },
+        Some(other) => kdat == other,
     }
 }

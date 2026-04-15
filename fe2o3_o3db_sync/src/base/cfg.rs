@@ -57,6 +57,10 @@ impl<
 /// `FromDatMap` and `ToDatMap` currently do not handle recursion.
 #[derive(Clone, Debug, Eq, PartialEq, FromDatMap, ToDatMap)]
 pub struct OzoneConfig {
+    /// On-disk format version. Verified against
+    /// `constant::CURRENT_FORMAT_VERSION` at load time; a mismatch
+    /// causes `check_and_fix` to refuse the config.
+    pub format_version:                 u8,
     // Key hashing
     pub bytes_before_hashing:           u64, // applies only to keys
     // Caches
@@ -84,6 +88,7 @@ impl Config for OzoneConfig {
 
     /// Performs a sequence of checks of the configuration data.
     fn check_and_fix(&mut self) -> Outcome<()> {
+        res!(self.check_format_version());
         res!(self.check_rest_chunk_config(&self.chunk_config()));
         res!(self.check_file_size());
         Ok(())
@@ -93,6 +98,7 @@ impl Config for OzoneConfig {
 impl Default for OzoneConfig {
     fn default() -> Self {
         Self {
+            format_version:                 constant::CURRENT_FORMAT_VERSION,
             // Key hashing
             bytes_before_hashing:           32,
             // Caches
@@ -128,6 +134,25 @@ impl Default for OzoneConfig {
 }
 
 impl OzoneConfig {
+    /// Refuse the configuration if its `format_version` does not
+    /// match the constant the current binary was compiled with.
+    /// A mismatch means the on-disk database was written by a
+    /// different ozone version; ozone does not auto-migrate, so
+    /// the operator must either recreate the database or run a
+    /// version of the binary that matches the file.
+    pub fn check_format_version(&self) -> Outcome<()> {
+        if self.format_version != constant::CURRENT_FORMAT_VERSION {
+            return Err(err!(
+                "Ozone database format version mismatch: config declares \
+                v{}, this binary expects v{}. No automatic migration path \
+                exists; the database must be re-created with the current \
+                ozone version.",
+                self.format_version, constant::CURRENT_FORMAT_VERSION;
+                Configuration, Invalid, Mismatch));
+        }
+        Ok(())
+    }
+
     pub fn rest_chunk_size(&self)           -> usize { self.rest_chunk_bytes as usize }
     pub fn rest_chunking_threshold(&self)   -> usize { self.rest_chunk_threshold as usize }
     pub fn hashing_threshold(&self)         -> usize { self.bytes_before_hashing as usize }

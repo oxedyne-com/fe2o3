@@ -18,6 +18,7 @@ use std::{
 
 pub fn default_cfg() -> Outcome<OzoneConfig> {
     Ok(OzoneConfig {
+        format_version:                 constant::CURRENT_FORMAT_VERSION,
         // Key hashing
         bytes_before_hashing:           32,
         // Caches
@@ -81,6 +82,17 @@ pub fn start_db<
         CS,
     >>
 {
+    // Pre-wipe the persisted config so tests survive format
+    // changes (e.g. a new `OzoneConfig` field added to the
+    // struct). O3db::new loads config.jdat unconditionally if the
+    // file exists, and a stale file that predates a schema bump
+    // makes the load fail with a "missing field" error. Removing
+    // the file up front lets the supplied `cfg_opt` recreate a
+    // fresh config on disk.
+    if wipe {
+        let cfg_path = OzoneConfig::config_path(&db_root);
+        let _ = std::fs::remove_file(&cfg_path);
+    }
     let mut db = res!(O3db::new(
         db_root,
         cfg_opt,
