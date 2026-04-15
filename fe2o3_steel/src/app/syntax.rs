@@ -253,10 +253,12 @@ pub fn new_shell_raw(
         hyph2:  Some(fmt!("scopes")),
         vals:   vec![(Kind::Str, fmt!("Comma-separated verb list"))],
         reqd:   false,
-        help:   Some(fmt!("Scopes for a new admin, comma-separated (e.g. \
-            'restart,log,probe'). Use '*' for operator-level access. Defaults \
-            to an empty scope list, which can unlock the wallet but cannot \
-            invoke any verb.")),
+        help:   Some(fmt!("Scopes for a new admin, comma-separated. Well-known \
+            scopes: 'admin' (manage other admin entries, in CLI and dashboard); \
+            'dashboard.view' (log into the admin dashboard, read-only); \
+            'dashboard.admin' (log into the admin dashboard with mutations). \
+            Use '*' for operator-level access. Defaults to an empty scope \
+            list, which can unlock the wallet but cannot invoke any verb.")),
         ..Default::default()
     });
     let a5 = Arg::from(ArgConfig {
