@@ -305,12 +305,15 @@ mod tests {
 
     fn mkstate() -> AdminState {
         use crate::srv::admin::traffic::TrafficRecorder;
+        use std::path::PathBuf;
         let master = [0u8; 32];
         let key = derive_session_key(&master).expect("derive");
         let enc = EncryptionScheme::new_aes_256_gcm_with_key(&key)
             .expect("aes");
         AdminState {
             wallet:         Arc::new(RwLock::new(Wallet::default())),
+            wallet_path:    PathBuf::from("./wallet.jdat"),
+            master_key:     master.to_vec(),
             session_enc:    enc,
             traffic:        TrafficRecorder::new_shared(0),
         }

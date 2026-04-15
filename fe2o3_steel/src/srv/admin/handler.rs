@@ -19,6 +19,8 @@ use crate::srv::admin::{
     audit::{
         self,
         ADMIN_ANON,
+        VERB_DASHBOARD_ADMIN_ADD,
+        VERB_DASHBOARD_ADMIN_REMOVE,
         VERB_DASHBOARD_LOGIN,
         VERB_DASHBOARD_LOGOUT,
     },
@@ -31,6 +33,17 @@ use crate::srv::admin::{
         SESSION_COOKIE_NAME,
     },
     state::AdminState,
+};
+
+use oxedyne_fe2o3_crypto::keys::DEFAULT_WALLET_KDF_NAME;
+use oxedyne_fe2o3_jdat::{
+    file::JdatFile,
+    string::enc::EncoderConfig,
+};
+
+use std::time::{
+    SystemTime,
+    UNIX_EPOCH,
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -65,6 +78,10 @@ pub const PATH_LOGOUT:  &str = "/admin/logout";
 /// Traffic view (GET): renders recent requests and per-vhost
 /// counters from the shared `TrafficRecorder`.
 pub const PATH_TRAFFIC: &str = "/admin/traffic";
+/// Admin management view (GET): lists wallet admins and renders
+/// add / remove forms.
+/// (POST): performs the requested mutation.
+pub const PATH_ADMINS:  &str = "/admin/admins";
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ GET                                                                       │
@@ -85,6 +102,7 @@ pub async fn handle_get(
         PATH_LOGOUT => Ok(handle_logout(state, headers)),
         PATH_ROOT => Ok(render_home(state, headers)),
         PATH_TRAFFIC => Ok(render_traffic(state, headers)),
+        PATH_ADMINS => Ok(render_admins(state, headers, None)),
         _ => Ok(HttpMessage::respond_with_text(
             HttpStatus::NotFound,
             "Dashboard route not found.",
@@ -109,6 +127,7 @@ pub async fn handle_post(
     debug!("{}: dashboard POST {}", id, path);
     match path {
         PATH_LOGIN => Ok(handle_login(state, body)),
+        PATH_ADMINS => Ok(handle_admins_post(state, _headers, body)),
         _ => Ok(HttpMessage::respond_with_text(
             HttpStatus::NotFound,
             "Dashboard route not found.",
@@ -445,6 +464,395 @@ fn render_traffic(
     );
     let html = render_layout("Traffic", PATH_TRAFFIC, &principal, &body);
     html_response(html)
+}
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ ADMIN MANAGEMENT                                                          │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// Outcome of an admin-management mutation, threaded back into
+/// the rendered list view as a notice banner above the form.
+struct AdminFlash {
+    /// `true` for a green "ok" notice, `false` for a red error.
+    ok:      bool,
+    message: String,
+}
+
+/// Render the admin management view: list of wallet admins and
+/// add / remove forms. Authorisation requires both a dashboard
+/// scope (so the visitor can see the dashboard at all) and the
+/// legacy `admin` scope (which gates admin enrolment in both the
+/// CLI and the dashboard). A visitor with only `dashboard.view`
+/// or only `dashboard.admin` is sent the "forbidden" flavour of
+/// the page rather than a redirect to login -- they are signed
+/// in, just not authorised for this verb.
+fn render_admins(
+    state:   &AdminState,
+    headers: &Arc<HeaderFields>,
+    flash:   Option<AdminFlash>,
+)
+    -> HttpMessage
+{
+    let principal = match extract_principal(state, headers) {
+        Some(p) => p,
+        None => return redirect_to_login(),
+    };
+    if !principal.can_manage_admins() {
+        return render_admin_forbidden(&principal);
+    }
+
+    // Snapshot the admin list out of the wallet under a short
+    // read lock so the rendering does not hold the lock across
+    // any HTML formatting.
+    let admins_snapshot: Vec<(String, u64, Vec<String>)> = {
+        let w = match state.wallet.read() {
+            Ok(g) => g,
+            Err(_) => return render_admins_error(
+                &principal,
+                "Wallet lock is poisoned.",
+            ),
+        };
+        w.admins().iter()
+            .map(|a| (a.name.clone(), a.expires_at, a.scopes.clone()))
+            .collect()
+    };
+
+    let flash_html = render_flash(flash.as_ref());
+    let mut rows = String::new();
+    for (name, expires_at, scopes) in &admins_snapshot {
+        let expiry = if *expires_at == 0 {
+            "never".to_string()
+        } else {
+            fmt!("unix {}", expires_at)
+        };
+        let scopes_html = if scopes.is_empty() {
+            "<em>(none)</em>".to_string()
+        } else {
+            html_escape(&scopes.join(", "))
+        };
+        let safe_name = html_escape(name);
+        rows.push_str(&fmt!(
+            "<tr>\
+            <td><strong>{name}</strong></td>\
+            <td>{expiry}</td>\
+            <td><code>{scopes}</code></td>\
+            <td><form method=\"POST\" action=\"/admin/admins\" \
+                    onsubmit=\"return confirm('Remove admin {name}?');\">\
+                <input type=\"hidden\" name=\"action\" value=\"remove\">\
+                <input type=\"hidden\" name=\"name\" value=\"{name_attr}\">\
+                <button type=\"submit\" class=\"primary\">Remove</button>\
+                </form></td>\
+            </tr>\n",
+            name      = safe_name,
+            expiry    = expiry,
+            scopes    = scopes_html,
+            name_attr = safe_name,
+        ));
+    }
+    let body = fmt!(
+        "<h1>Admin management</h1>\n\
+        {flash}\
+        <p>Wallet currently holds <strong>{count}</strong> admin entries. \
+        Adding a new admin enrols their password against the same \
+        wallet master key the CLI <code>admin --add</code> verb \
+        uses; removing an admin revokes their password immediately. \
+        Every action here is recorded in <code>admin-audit.log</code> \
+        alongside the CLI events.</p>\n\
+        <h2>Existing admins</h2>\n\
+        <table class=\"steel-table\">\n\
+        <thead><tr>\
+            <th>Name</th><th>Expires</th><th>Scopes</th><th>Actions</th>\
+        </tr></thead>\n\
+        <tbody>{rows}</tbody>\n\
+        </table>\n\
+        <h2>Add an admin</h2>\n\
+        <form class=\"steel-form\" method=\"POST\" action=\"/admin/admins\">\n\
+        <input type=\"hidden\" name=\"action\" value=\"add\">\n\
+        <label for=\"new_name\">Name</label>\n\
+        <input type=\"text\" id=\"new_name\" name=\"name\" required \
+            autocomplete=\"off\">\n\
+        <label for=\"new_password\">Password</label>\n\
+        <input type=\"password\" id=\"new_password\" name=\"password\" \
+            required autocomplete=\"new-password\">\n\
+        <label for=\"new_scopes\">Scopes (comma-separated)</label>\n\
+        <input type=\"text\" id=\"new_scopes\" name=\"scopes\" \
+            value=\"dashboard.view\" \
+            placeholder=\"dashboard.view, admin\">\n\
+        <p class=\"meta\">Well-known scopes: \
+        <code>admin</code>, <code>dashboard.view</code>, \
+        <code>dashboard.admin</code>. Use <code>*</code> for \
+        operator-level access.</p>\n\
+        <label for=\"new_expires_in\">Expires in (seconds, 0 = never)</label>\n\
+        <input type=\"number\" id=\"new_expires_in\" name=\"expires_in\" \
+            value=\"0\" min=\"0\">\n\
+        <button type=\"submit\">Add admin</button>\n\
+        </form>\n",
+        flash = flash_html,
+        count = admins_snapshot.len(),
+        rows  = rows,
+    );
+    let html = render_layout(
+        "Admins",
+        PATH_ADMINS,
+        &principal,
+        &body,
+    );
+    html_response(html)
+}
+
+/// Render the "you are signed in but not allowed here" page
+/// shown to a principal whose scopes do not include both
+/// `admin` and a dashboard scope.
+fn render_admin_forbidden(principal: &AdminPrincipal) -> HttpMessage {
+    let body = "<h1>Admin management</h1>\n\
+        <p class=\"notice error\">\
+        You are signed in to the dashboard but your admin entry \
+        does not hold the <code>admin</code> scope. Admin \
+        management requires both a dashboard scope \
+        (<code>dashboard.view</code> or <code>dashboard.admin</code>) \
+        and the <code>admin</code> scope. Ask another operator to \
+        grant <code>admin</code> via <code>./steel admin --add</code> \
+        if you need to enrol new admin entries from this dashboard.\
+        </p>\n".to_string();
+    let html = render_layout(
+        "Admins",
+        PATH_ADMINS,
+        principal,
+        &body,
+    );
+    html_response(html)
+}
+
+/// Render an error variant of the admins page when the wallet
+/// itself cannot be read.
+fn render_admins_error(principal: &AdminPrincipal, message: &str) -> HttpMessage {
+    let body = fmt!(
+        "<h1>Admin management</h1>\n\
+        <p class=\"notice error\">{}</p>\n",
+        html_escape(message),
+    );
+    let html = render_layout(
+        "Admins",
+        PATH_ADMINS,
+        principal,
+        &body,
+    );
+    html_response(html)
+}
+
+/// Render the flash banner above the admin list, if any.
+fn render_flash(flash: Option<&AdminFlash>) -> String {
+    match flash {
+        None => String::new(),
+        Some(f) => fmt!(
+            "<p class=\"notice {}\">{}</p>\n",
+            if f.ok { "" } else { "error" },
+            html_escape(&f.message),
+        ),
+    }
+}
+
+/// Dispatch a `POST /admin/admins` form submission. The `action`
+/// field selects between `add` and `remove`. Authorisation is the
+/// same as for the GET view: dashboard scope plus `admin`.
+fn handle_admins_post(
+    state:   &AdminState,
+    headers: &Arc<HeaderFields>,
+    body:    &[u8],
+)
+    -> HttpMessage
+{
+    let principal = match extract_principal(state, headers) {
+        Some(p) => p,
+        None => return redirect_to_login(),
+    };
+    if !principal.can_manage_admins() {
+        return render_admin_forbidden(&principal);
+    }
+
+    let action = extract_form_field(body, "action").unwrap_or_default();
+    let flash = match action.as_str() {
+        "add" => handle_admin_add(state, &principal, body),
+        "remove" => handle_admin_remove(state, &principal, body),
+        _ => AdminFlash {
+            ok:      false,
+            message: "Unknown action.".to_string(),
+        },
+    };
+    render_admins(state, headers, Some(flash))
+}
+
+/// Add a new wallet admin entry from form fields. Validates the
+/// inputs, computes `expires_at` from the optional `expires_in`
+/// duration, takes a write lock on the wallet, calls
+/// `Wallet::enrol`, saves the wallet to disk, and emits an
+/// audit log line.
+fn handle_admin_add(
+    state:     &AdminState,
+    principal: &AdminPrincipal,
+    body:      &[u8],
+)
+    -> AdminFlash
+{
+    let new_name = extract_form_field(body, "name").unwrap_or_default();
+    let new_pass = extract_form_field(body, "password").unwrap_or_default();
+    let scopes_raw = extract_form_field(body, "scopes").unwrap_or_default();
+    let expires_in_raw = extract_form_field(body, "expires_in")
+        .unwrap_or_default();
+
+    if new_name.is_empty() || new_pass.is_empty() {
+        return AdminFlash {
+            ok:      false,
+            message: "Name and password are required.".to_string(),
+        };
+    }
+    let new_scopes: Vec<String> = scopes_raw
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let expires_in: u64 = expires_in_raw.parse::<u64>().unwrap_or(0);
+    let expires_at = if expires_in == 0 {
+        0
+    } else {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        now.saturating_add(expires_in)
+    };
+
+    let result = {
+        let mut w = match state.wallet.write() {
+            Ok(g) => g,
+            Err(_) => return AdminFlash {
+                ok:      false,
+                message: "Wallet lock is poisoned.".to_string(),
+            },
+        };
+        let enrol_res = w.enrol(
+            &state.master_key,
+            new_name.clone(),
+            new_pass.as_bytes(),
+            new_scopes.clone(),
+            expires_at,
+            DEFAULT_WALLET_KDF_NAME,
+        );
+        if let Err(e) = enrol_res {
+            audit::append(
+                &principal.name,
+                VERB_DASHBOARD_ADMIN_ADD,
+                "err",
+                &fmt!("target={} reason={}", new_name, e),
+            );
+            return AdminFlash {
+                ok:      false,
+                message: fmt!("Failed to enrol '{}': {}", new_name, e),
+            };
+        }
+        w.save(
+            &state.wallet_path,
+            "  ",
+            Some(EncoderConfig::<(), ()>::default()),
+        )
+    };
+    if let Err(e) = result {
+        audit::append(
+            &principal.name,
+            VERB_DASHBOARD_ADMIN_ADD,
+            "err",
+            &fmt!("target={} reason=save_failed:{}", new_name, e),
+        );
+        return AdminFlash {
+            ok:      false,
+            message: fmt!(
+                "Admin enrolled in memory but the wallet could not be \
+                saved to disk: {}", e),
+        };
+    }
+    audit::append(
+        &principal.name,
+        VERB_DASHBOARD_ADMIN_ADD,
+        "ok",
+        &fmt!(
+            "target={} scopes={} expires_at={}",
+            new_name, new_scopes.join(","), expires_at,
+        ),
+    );
+    AdminFlash {
+        ok:      true,
+        message: fmt!("Added admin '{}'.", new_name),
+    }
+}
+
+/// Remove a wallet admin entry by name. Validates the input,
+/// takes a write lock, calls `Wallet::remove_by_name`, saves,
+/// and audit-logs.
+fn handle_admin_remove(
+    state:     &AdminState,
+    principal: &AdminPrincipal,
+    body:      &[u8],
+)
+    -> AdminFlash
+{
+    let target = extract_form_field(body, "name").unwrap_or_default();
+    if target.is_empty() {
+        return AdminFlash {
+            ok:      false,
+            message: "Missing target name.".to_string(),
+        };
+    }
+    let result = {
+        let mut w = match state.wallet.write() {
+            Ok(g) => g,
+            Err(_) => return AdminFlash {
+                ok:      false,
+                message: "Wallet lock is poisoned.".to_string(),
+            },
+        };
+        let remove_res = w.remove_by_name(&target);
+        if let Err(e) = remove_res {
+            audit::append(
+                &principal.name,
+                VERB_DASHBOARD_ADMIN_REMOVE,
+                "err",
+                &fmt!("target={} reason={}", target, e),
+            );
+            return AdminFlash {
+                ok:      false,
+                message: fmt!("Failed to remove '{}': {}", target, e),
+            };
+        }
+        w.save(
+            &state.wallet_path,
+            "  ",
+            Some(EncoderConfig::<(), ()>::default()),
+        )
+    };
+    if let Err(e) = result {
+        audit::append(
+            &principal.name,
+            VERB_DASHBOARD_ADMIN_REMOVE,
+            "err",
+            &fmt!("target={} reason=save_failed:{}", target, e),
+        );
+        return AdminFlash {
+            ok:      false,
+            message: fmt!(
+                "Admin removed in memory but the wallet could not be \
+                saved to disk: {}", e),
+        };
+    }
+    audit::append(
+        &principal.name,
+        VERB_DASHBOARD_ADMIN_REMOVE,
+        "ok",
+        &fmt!("target={}", target),
+    );
+    AdminFlash {
+        ok:      true,
+        message: fmt!("Removed admin '{}'.", target),
+    }
 }
 
 /// Build a 200 OK response with a UTF-8 HTML body. Centralises

@@ -68,8 +68,10 @@ pub const ADMIN_AUDIT_LOG_NAME: &str = "admin-audit.log";
 /// `wallet.migrate`) live as inline strings in `app/repl.rs` so
 /// the original call sites remain stable; new dashboard verbs are
 /// declared here so handler call sites cannot drift on spelling.
-pub const VERB_DASHBOARD_LOGIN:     &str = "dashboard.login";
-pub const VERB_DASHBOARD_LOGOUT:    &str = "dashboard.logout";
+pub const VERB_DASHBOARD_LOGIN:         &str = "dashboard.login";
+pub const VERB_DASHBOARD_LOGOUT:        &str = "dashboard.logout";
+pub const VERB_DASHBOARD_ADMIN_ADD:     &str = "dashboard.admin.add";
+pub const VERB_DASHBOARD_ADMIN_REMOVE:  &str = "dashboard.admin.remove";
 
 /// Sentinel admin name used when an unauthenticated visitor hits a
 /// dashboard endpoint -- e.g. a failed login attempt where no

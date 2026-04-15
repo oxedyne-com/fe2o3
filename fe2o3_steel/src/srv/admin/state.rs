@@ -26,9 +26,12 @@ use oxedyne_fe2o3_crypto::{
 use oxedyne_fe2o3_hash::hash::HashScheme;
 use oxedyne_fe2o3_iop_hash::api::Hasher;
 
-use std::sync::{
-    Arc,
-    RwLock,
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        RwLock,
+    },
 };
 
 /// Domain-separation string mixed into the master key when deriving
@@ -47,6 +50,21 @@ pub struct AdminState {
     /// Shared wallet handle. Login reads from this; admin management
     /// (task #11) writes through it.
     pub wallet:         Arc<RwLock<Wallet>>,
+    /// On-disk path the wallet is persisted to. Held in the admin
+    /// state so the dashboard's admin-management UI can call
+    /// `Wallet::save` without depending on `app::constant`.
+    pub wallet_path:    PathBuf,
+    /// Wallet master key recovered at startup from the operator's
+    /// unlock passphrase. The dashboard's admin-management UI
+    /// needs it to call `Wallet::enrol` (which wraps the master
+    /// key under each new admin's password). Stored here so the
+    /// operator does not have to re-type their passphrase on
+    /// every dashboard mutation. The key is held in clear in
+    /// process memory, in line with the overall wallet-v2
+    /// design where the operator types the passphrase once at
+    /// boot and the unlocked secret lives in RAM until the
+    /// process restarts.
+    pub master_key:     Vec<u8>,
     /// AES-256-GCM pre-keyed with the derived session key. Used by
     /// [`session`](super::session) to encrypt and decrypt session
     /// cookies.
@@ -60,14 +78,16 @@ pub struct AdminState {
 }
 
 impl AdminState {
-    /// Build a fresh admin state from an unlocked wallet, the
-    /// recovered master key, and the shared traffic recorder.
-    /// Called from the TUI startup path once the wallet has been
-    /// unlocked, before the server listeners bind.
+    /// Build a fresh admin state from an unlocked wallet, its
+    /// on-disk path, the recovered master key, and the shared
+    /// traffic recorder. Called from the TUI startup path once
+    /// the wallet has been unlocked, before the server listeners
+    /// bind.
     pub fn new(
-        wallet:     Arc<RwLock<Wallet>>,
-        master_key: &[u8],
-        traffic:    Arc<TrafficRecorder>,
+        wallet:      Arc<RwLock<Wallet>>,
+        wallet_path: PathBuf,
+        master_key:  &[u8],
+        traffic:     Arc<TrafficRecorder>,
     )
         -> Outcome<Self>
     {
@@ -76,6 +96,8 @@ impl AdminState {
             EncryptionScheme::new_aes_256_gcm_with_key(&session_key));
         Ok(Self {
             wallet,
+            wallet_path,
+            master_key: master_key.to_vec(),
             session_enc,
             traffic,
         })

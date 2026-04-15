@@ -358,15 +358,21 @@ impl AppShellContext {
 
         // Build the admin dashboard runtime. AdminState holds a
         // shared handle to the wallet (so dashboard login uses the
-        // same admin list the CLI sees) plus an AES-256-GCM cipher
-        // pre-keyed with a SHA3-256 derivation of the wallet master
-        // key, used for stateless signed session cookies. The
-        // TrafficRecorder is shared across every vhost so the
-        // dashboard can present a single host-wide traffic view;
-        // both AdminState and ServerContext hold the same Arc.
+        // same admin list the CLI sees), the wallet's on-disk path
+        // (so the admin-management UI can call Wallet::save), the
+        // recovered master key (so it can call Wallet::enrol
+        // without re-prompting), an AES-256-GCM cipher pre-keyed
+        // with a SHA3-256 derivation of the master key (for
+        // session cookies), and the shared TrafficRecorder. Both
+        // AdminState and ServerContext hold the same Arc to the
+        // recorder so dashboard reads and request-pipeline writes
+        // see one consistent view.
         let traffic = TrafficRecorder::new_shared(0);
+        let wallet_path_for_admin = Path::new(&self.app_cfg.app_root)
+            .join(app_const::WALLET_NAME);
         let admin_state = res!(AdminState::new(
             self.wallet.clone(),
+            wallet_path_for_admin,
             &self.db_enc_key,
             traffic.clone(),
         ));
