@@ -22,6 +22,9 @@ use crate::srv::admin::{
         ADMIN_ANON,
         VERB_DASHBOARD_ADMIN_ADD,
         VERB_DASHBOARD_ADMIN_REMOVE,
+        VERB_DASHBOARD_GUARD_BLACKLIST,
+        VERB_DASHBOARD_GUARD_UNBLOCK,
+        VERB_DASHBOARD_GUARD_WHITELIST,
         VERB_DASHBOARD_LOGIN,
         VERB_DASHBOARD_LOGOUT,
     },
@@ -29,6 +32,7 @@ use crate::srv::admin::{
         self,
         LoginOutcome,
     },
+    guard::DEFAULT_SNAPSHOT_CAP,
     session::{
         self,
         SESSION_COOKIE_NAME,
@@ -79,6 +83,10 @@ pub const PATH_LOGOUT:  &str = "/admin/logout";
 /// Traffic view (GET): renders recent requests and per-vhost
 /// counters from the shared `TrafficRecorder`.
 pub const PATH_TRAFFIC: &str = "/admin/traffic";
+/// Security view (GET): renders the address guard counts and a
+/// table of per-address entries with whitelist / blacklist /
+/// unblock controls. POST performs the selected action.
+pub const PATH_SECURITY: &str = "/admin/security";
 /// Admin management view (GET): lists wallet admins and renders
 /// add / remove forms.
 /// (POST): performs the requested mutation.
@@ -107,6 +115,7 @@ pub async fn handle_get(
         PATH_LOGOUT => Ok(handle_logout(state, headers)),
         PATH_ROOT => Ok(render_home(state, headers)),
         PATH_TRAFFIC => Ok(render_traffic(state, headers)),
+        PATH_SECURITY => Ok(render_security(state, headers, None)),
         PATH_ADMINS => Ok(render_admins(state, headers, None)),
         _ => Ok(HttpMessage::respond_with_text(
             HttpStatus::NotFound,
@@ -147,6 +156,7 @@ pub async fn handle_post(
     debug!("{}: dashboard POST {}", id, path);
     match path {
         PATH_LOGIN => Ok(handle_login(state, body)),
+        PATH_SECURITY => Ok(handle_security_post(state, _headers, body)),
         PATH_ADMINS => Ok(handle_admins_post(state, _headers, body)),
         _ => Ok(HttpMessage::respond_with_text(
             HttpStatus::NotFound,
@@ -1157,6 +1167,326 @@ fn handle_admin_remove(
     AdminFlash {
         ok:      true,
         message: fmt!("Removed admin '{}'.", target),
+    }
+}
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ SECURITY                                                                  │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// One-shot flash banner threaded back into the security page after
+/// a POST mutation.
+struct SecurityFlash {
+    ok:      bool,
+    message: String,
+}
+
+/// Render the Security view: a chip row of per-state counts, a table
+/// of observed addresses with whitelist / blacklist / unblock buttons,
+/// and a manual blacklist form for operators that need to pre-block
+/// a known-bad IP.
+///
+/// The read path only needs `dashboard.view`; any mutations from the
+/// accompanying POST handler require `dashboard.admin`.
+fn render_security(
+    state:   &AdminState,
+    headers: &Arc<HeaderFields>,
+    flash:   Option<SecurityFlash>,
+)
+    -> HttpMessage
+{
+    let principal = match extract_principal(state, headers) {
+        Some(p) => p,
+        None => return redirect_to_login(),
+    };
+    let snap = match state.addr_guard.snapshot(DEFAULT_SNAPSHOT_CAP) {
+        Ok(s) => s,
+        Err(e) => {
+            error!(e, "dashboard: addr guard snapshot failed");
+            return render_security_error(&principal, "Address guard is unavailable.");
+        },
+    };
+
+    let flash_html = match flash.as_ref() {
+        Some(f) => fmt!(
+            "<p class=\"notice {}\">{}</p>\n",
+            if f.ok { "" } else { "error" },
+            html_escape(&f.message),
+        ),
+        None => String::new(),
+    };
+
+    let can_mutate = principal.can_admin_dashboard();
+    let chip_row = fmt!(
+        "<div class=\"chip-row\">\n\
+            <div class=\"chip\">\
+                <div class=\"chip-label\">Monitored</div>\
+                <div class=\"chip-value\">{mon}</div>\
+                <div class=\"chip-sub\">rate-limited only</div>\
+            </div>\n\
+            <div class=\"chip\">\
+                <div class=\"chip-label\">Throttled</div>\
+                <div class=\"chip-value\">{thr}</div>\
+                <div class=\"chip-sub\">under active cooldown</div>\
+            </div>\n\
+            <div class=\"chip\">\
+                <div class=\"chip-label\">Blacklisted</div>\
+                <div class=\"chip-value\">{bl}</div>\
+                <div class=\"chip-sub\">dropping every packet</div>\
+            </div>\n\
+            <div class=\"chip\">\
+                <div class=\"chip-label\">Whitelisted</div>\
+                <div class=\"chip-value\">{wl}</div>\
+                <div class=\"chip-sub\">always allowed</div>\
+            </div>\n\
+        </div>\n",
+        mon = snap.counts.monitor,
+        thr = snap.counts.throttle,
+        bl  = snap.counts.blacklist,
+        wl  = snap.counts.whitelist,
+    );
+
+    // Stable ordering: blacklist first so attacks rise to the top,
+    // then throttle, then monitor, then whitelist; within each state
+    // by descending total_reqs. Using a local Vec::sort because the
+    // snapshot itself emits entries in shard-traversal order.
+    let mut entries = snap.entries;
+    entries.sort_by(|a, b| {
+        let rank = |label: &str| -> u8 {
+            match label {
+                "blacklist" => 0,
+                "throttle"  => 1,
+                "monitor"   => 2,
+                "whitelist" => 3,
+                _           => 4,
+            }
+        };
+        let ra = rank(a.state);
+        let rb = rank(b.state);
+        if ra != rb { return ra.cmp(&rb); }
+        b.total_reqs.cmp(&a.total_reqs)
+    });
+
+    let table_html = if entries.is_empty() {
+        "<p class=\"notice empty\">No addresses observed yet.</p>\n".to_string()
+    } else {
+        let mut rows = String::new();
+        for e in &entries {
+            let ip = fmt!("{}", e.ip);
+            let ip_attr = html_escape(&ip);
+            let actions = if can_mutate {
+                fmt!(
+                    "<form method=\"POST\" action=\"/admin/security\" \
+                            class=\"inline-form\">\
+                        <input type=\"hidden\" name=\"ip\" value=\"{ip}\">\
+                        <button type=\"submit\" name=\"action\" value=\"whitelist\">\
+                            Whitelist</button>\
+                        <button type=\"submit\" name=\"action\" value=\"blacklist\">\
+                            Blacklist</button>\
+                        <button type=\"submit\" name=\"action\" value=\"unblock\">\
+                            Reset</button>\
+                    </form>",
+                    ip = ip_attr,
+                )
+            } else {
+                "<em>view only</em>".to_string()
+            };
+            rows.push_str(&fmt!(
+                "<tr>\
+                <td><code>{ip}</code></td>\
+                <td class=\"pill pill-{state_class}\">{state_label}</td>\
+                <td>{total}</td>\
+                <td>{thrcnt}</td>\
+                <td>{actions}</td>\
+                </tr>\n",
+                ip          = html_escape(&ip),
+                state_class = e.state,
+                state_label = e.state,
+                total       = e.total_reqs,
+                thrcnt      = e.throttle_cnt,
+                actions     = actions,
+            ));
+        }
+        fmt!(
+            "<table class=\"steel-table\">\n\
+            <thead><tr>\
+                <th>IP</th><th>State</th><th>Requests</th>\
+                <th>Throttles</th><th>Actions</th>\
+            </tr></thead>\n\
+            <tbody>{rows}</tbody>\n\
+            </table>\n",
+            rows = rows,
+        )
+    };
+
+    let manual_form_html = if can_mutate {
+        "<h2>Block a specific address</h2>\n\
+        <form class=\"steel-form\" method=\"POST\" action=\"/admin/security\">\n\
+        <input type=\"hidden\" name=\"action\" value=\"blacklist\">\n\
+        <label for=\"ip\">IP address</label>\n\
+        <input type=\"text\" id=\"ip\" name=\"ip\" required \
+            placeholder=\"1.2.3.4 or ::1\" autocomplete=\"off\">\n\
+        <button type=\"submit\">Add to blacklist</button>\n\
+        </form>\n".to_string()
+    } else {
+        String::new()
+    };
+
+    let body = fmt!(
+        "<h1>Security</h1>\n\
+        {flash}\
+        <p>The address guard runs before the TLS handshake on every \
+        incoming TCP connection. Blacklisted and throttled addresses \
+        are dropped at the accept loop so they cost the server nothing \
+        more than a SYN/ACK.</p>\n\
+        {chips}\
+        <h2>Observed addresses</h2>\n\
+        <p class=\"meta\">Total observed: <strong>{total}</strong>. \
+        Snapshot cap: {cap}. Showing {shown} rows.</p>\n\
+        {table}\
+        {manual}",
+        flash  = flash_html,
+        chips  = chip_row,
+        total  = snap.counts.total,
+        cap    = DEFAULT_SNAPSHOT_CAP,
+        shown  = entries.len(),
+        table  = table_html,
+        manual = manual_form_html,
+    );
+
+    let html = render_layout("Security", PATH_SECURITY, &principal, &body, "");
+    html_response(html)
+}
+
+/// Render an error variant of the security page.
+fn render_security_error(principal: &AdminPrincipal, message: &str) -> HttpMessage {
+    let body = fmt!(
+        "<h1>Security</h1>\n\
+        <p class=\"notice error\">{}</p>\n",
+        html_escape(message),
+    );
+    let html = render_layout("Security", PATH_SECURITY, principal, &body, "");
+    html_response(html)
+}
+
+/// Dispatch a `POST /admin/security` form submission. Requires
+/// `dashboard.admin`: guard mutations are privileged. Actions are
+/// `whitelist`, `blacklist`, and `unblock`; each takes a single
+/// `ip` field.
+fn handle_security_post(
+    state:   &AdminState,
+    headers: &Arc<HeaderFields>,
+    body:    &[u8],
+)
+    -> HttpMessage
+{
+    let principal = match extract_principal(state, headers) {
+        Some(p) => p,
+        None => return redirect_to_login(),
+    };
+    if !principal.can_admin_dashboard() {
+        return render_security_error(
+            &principal,
+            "You need the dashboard.admin scope to mutate the address guard.",
+        );
+    }
+
+    let action_raw = extract_form_field(body, "action").unwrap_or_default();
+    let ip_raw = extract_form_field(body, "ip").unwrap_or_default();
+    let flash = apply_security_action(state, &principal, &action_raw, &ip_raw);
+    render_security(state, headers, Some(flash))
+}
+
+/// Parse the `ip` form field, apply `action_raw`, emit an audit log
+/// entry, and return a flash banner summarising the outcome.
+fn apply_security_action(
+    state:      &AdminState,
+    principal:  &AdminPrincipal,
+    action_raw: &str,
+    ip_raw:     &str,
+)
+    -> SecurityFlash
+{
+    let ip = match ip_raw.parse::<std::net::IpAddr>() {
+        Ok(ip) => ip,
+        Err(e) => {
+            audit::append(
+                &principal.name,
+                audit_verb_for(action_raw),
+                "err",
+                &fmt!("ip={} reason=parse:{}", ip_raw, e),
+            );
+            return SecurityFlash {
+                ok:      false,
+                message: fmt!("Not a valid IP address: '{}'.", ip_raw),
+            };
+        },
+    };
+    let (verb, result) = match action_raw {
+        "whitelist" => (
+            VERB_DASHBOARD_GUARD_WHITELIST,
+            state.addr_guard.whitelist(&ip),
+        ),
+        "blacklist" => (
+            VERB_DASHBOARD_GUARD_BLACKLIST,
+            state.addr_guard.blacklist(&ip),
+        ),
+        "unblock" => (
+            VERB_DASHBOARD_GUARD_UNBLOCK,
+            state.addr_guard.unblock(&ip),
+        ),
+        other => {
+            return SecurityFlash {
+                ok:      false,
+                message: fmt!("Unknown security action '{}'.", other),
+            };
+        },
+    };
+    match result {
+        Ok(()) => {
+            audit::append(&principal.name, verb, "ok", &fmt!("ip={}", ip));
+            SecurityFlash {
+                ok:      true,
+                message: fmt!("{} {}.", action_label(action_raw), ip),
+            }
+        },
+        Err(e) => {
+            audit::append(
+                &principal.name,
+                verb,
+                "err",
+                &fmt!("ip={} reason={}", ip, e),
+            );
+            SecurityFlash {
+                ok:      false,
+                message: fmt!(
+                    "Failed to {} {}: {}",
+                    action_raw, ip, e,
+                ),
+            }
+        },
+    }
+}
+
+/// Map a form `action` value to the audit verb that should be
+/// recorded when parsing fails before we know which branch to take.
+fn audit_verb_for(action_raw: &str) -> &'static str {
+    match action_raw {
+        "whitelist" => VERB_DASHBOARD_GUARD_WHITELIST,
+        "blacklist" => VERB_DASHBOARD_GUARD_BLACKLIST,
+        "unblock"   => VERB_DASHBOARD_GUARD_UNBLOCK,
+        _           => VERB_DASHBOARD_GUARD_UNBLOCK,
+    }
+}
+
+/// Past-tense label used in the security flash banner so each
+/// successful action reads as a natural sentence.
+fn action_label(action_raw: &str) -> &'static str {
+    match action_raw {
+        "whitelist" => "Whitelisted",
+        "blacklist" => "Blacklisted",
+        "unblock"   => "Reset",
+        _           => "Applied",
     }
 }
 

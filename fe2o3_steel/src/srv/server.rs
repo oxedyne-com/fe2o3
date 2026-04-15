@@ -244,6 +244,10 @@ impl<
         let listener = res!(TcpListener::bind(&addr).await, IO, Network);
         info!("Listening on: {}", addr);
 
+        // Shared address guard, cloned once per accept. Cheap -- it's an Arc.
+        let addr_guard = self.context.admin_state.as_ref()
+            .map(|a| a.addr_guard.clone());
+
         loop {
             let (stream, src_addr) = match listener.accept().await {
                 Ok(pair) => pair,
@@ -252,6 +256,25 @@ impl<
                     continue;
                 }
             };
+
+            // Address-guard check runs before the TLS handshake so that a
+            // blacklisted attacker costs the server only a TCP SYN/ACK.
+            // Absent admin state (unusual -- only happens when the admin
+            // dashboard is not configured) the guard is skipped entirely.
+            if let Some(guard) = addr_guard.as_ref() {
+                match guard.check(&src_addr.ip()) {
+                    Ok(decision) if decision.should_drop() => {
+                        debug!("addr guard dropped TCP from {}: {:?}",
+                            src_addr, decision);
+                        drop(stream);
+                        continue;
+                    }
+                    Ok(_) => (),
+                    Err(e) => {
+                        warn!("addr guard error for {}: {}", src_addr, e);
+                    }
+                }
+            }
 
             // Peek at first bytes to detect TLS handshake. Non-TLS requests
             // receive a 308 to redirect the caller to HTTPS.

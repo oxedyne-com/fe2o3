@@ -132,6 +132,7 @@ pub const NAV: &[NavEntry] = &[
     NavEntry { label: "Overview",   href: "/admin",             group: Some("Dashboard") },
     NavEntry { label: "Database",   href: "/admin/database",    group: None },
     NavEntry { label: "Traffic",    href: "/admin/traffic",     group: None },
+    NavEntry { label: "Security",   href: "/admin/security",    group: None },
     NavEntry { label: "Admins",     href: "/admin/admins",      group: Some("Management") },
     NavEntry { label: "Sign out",   href: "/admin/logout",      group: Some("Session") },
 ];

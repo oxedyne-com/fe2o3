@@ -17,6 +17,7 @@
 //! back to the same wallet unlock.
 
 use crate::srv::admin::{
+    guard::SteelAddressGuard,
     host_sampler::HostSampler,
     traffic::TrafficRecorder,
 };
@@ -83,20 +84,27 @@ pub struct AdminState {
     /// interval; the dashboard reads from the same `Arc` when
     /// drawing the host resource strip.
     pub host_sampler:   Arc<HostSampler>,
+    /// Shared per-IP address guard. The TCP accept loop in
+    /// `srv/server.rs` calls `check` before handing any stream to
+    /// the TLS acceptor, and the dashboard's Security view reads
+    /// snapshots and drives whitelist / blacklist / unblock
+    /// actions against the same `Arc`.
+    pub addr_guard:     Arc<SteelAddressGuard>,
 }
 
 impl AdminState {
     /// Build a fresh admin state from an unlocked wallet, its
     /// on-disk path, the recovered master key, the shared traffic
-    /// recorder, and the shared host sampler. Called from the TUI
-    /// startup path once the wallet has been unlocked, before the
-    /// server listeners bind.
+    /// recorder, the shared host sampler, and the shared address
+    /// guard. Called from the TUI startup path once the wallet has
+    /// been unlocked, before the server listeners bind.
     pub fn new(
         wallet:       Arc<RwLock<Wallet>>,
         wallet_path:  PathBuf,
         master_key:   &[u8],
         traffic:      Arc<TrafficRecorder>,
         host_sampler: Arc<HostSampler>,
+        addr_guard:   Arc<SteelAddressGuard>,
     )
         -> Outcome<Self>
     {
@@ -110,6 +118,7 @@ impl AdminState {
             session_enc,
             traffic,
             host_sampler,
+            addr_guard,
         })
     }
 }

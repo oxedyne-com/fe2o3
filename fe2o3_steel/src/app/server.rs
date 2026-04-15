@@ -369,6 +369,7 @@ impl AppShellContext {
         // see one consistent view.
         let traffic = TrafficRecorder::new_shared(0);
         let host_sampler = crate::srv::admin::host_sampler::HostSampler::new_shared();
+        let addr_guard = res!(crate::srv::admin::guard::new_shared());
         // The periodic traffic and host samplers are spawned inside
         // Server::start (not here) because this function runs in a
         // sync context -- the tokio runtime `rt` has been built but
@@ -385,6 +386,7 @@ impl AppShellContext {
             &self.db_enc_key,
             traffic.clone(),
             host_sampler.clone(),
+            addr_guard.clone(),
         ));
         let admin_state = Arc::new(admin_state);
         info!("Admin dashboard runtime initialised \
