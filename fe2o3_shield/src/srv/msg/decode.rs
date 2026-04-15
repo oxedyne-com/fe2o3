@@ -145,7 +145,12 @@ impl<
         //    good users.  This check creates a new AddressLog entry if the source address is
         //    unknown and the request is an HREQ1.  This precedes validation because we want to
         //    collect any custom validation parameters for this address.
-        if res!(self.agrd.drop_packet(meta.typ, &src_addr)) { // Accesses the address log.
+        if res!(crate::srv::guard::addr::drop_packet(
+            &*self.agrd,
+            self.hreq_exp,
+            meta.typ,
+            &src_addr,
+        )) {
             debug!(async_log::stream(), "Address guard dropping packet.");
             return Ok(()); // Drop silently.
         }

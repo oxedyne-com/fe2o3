@@ -2,10 +2,6 @@ use crate::srv::{
     cfg::ServerConfig,
     constant,
     guard::{
-        addr::{
-            AddressGuard,
-            AddressLog,
-        },
         data::{
             AddressData,
             UserData,
@@ -53,6 +49,10 @@ use oxedyne_fe2o3_hash::{
 use oxedyne_fe2o3_data::ring::RingTimer;
 use oxedyne_fe2o3_iop_crypto::sign::SignerDefAlt;
 use oxedyne_fe2o3_iop_hash::api::HashForm;
+use oxedyne_fe2o3_net::guard::addr::{
+    AddressGuard,
+    AddressLog,
+};
 
 use std::{
     collections::BTreeMap,
@@ -61,6 +61,7 @@ use std::{
         Arc,
         RwLock,
     },
+    time::Duration,
 };
 
 
@@ -130,16 +131,16 @@ pub struct Protocol<
                                 HashForm,
                                 AddressLog<
                                     { constant::REQ_TIMER_LEN },
-                                    { constant::MAX_ALLOWED_AVG_REQ_PER_SEC },
                                     AddressData,
                                 >,
                             >,
                             HashScheme,
                             { constant::GUARD_SHARDMAP_SALT_LEN },
                             { constant::REQ_TIMER_LEN },
-                            { constant::MAX_ALLOWED_AVG_REQ_PER_SEC },
                             AddressData,
                         >>,
+    /// Handshake request expiry window enforced by the SHIELD sequence check.
+    pub hreq_exp:       Duration,
     // User protection.
     pub ugrd:           Arc<UserGuard<
                             { constant::UGRD_SHARDMAP_INIT_SHARDS },
@@ -216,7 +217,6 @@ impl<
             HashForm,
             AddressLog<
                 { constant::REQ_TIMER_LEN },
-                { constant::MAX_ALLOWED_AVG_REQ_PER_SEC },
                 AddressData,
             >,
         >::new();
@@ -227,14 +227,12 @@ impl<
                 {constant::GUARD_SHARDMAP_SALT_LEN},
                 AddressLog<
                     {constant::REQ_TIMER_LEN},
-                    {constant::MAX_ALLOWED_AVG_REQ_PER_SEC},
                     AddressData,
                 >,
                 BTreeMap::<
                     HashForm,
                     AddressLog<
                         {constant::REQ_TIMER_LEN},
-                        {constant::MAX_ALLOWED_AVG_REQ_PER_SEC},
                         AddressData,
                     >,
                 >,
@@ -246,16 +244,15 @@ impl<
                 res!(HashScheme::try_from("Seahash")),
             )),
             // Monitor
-            arps_max: constant::MAX_ALLOWED_AVG_REQ_PER_SEC,
+            arps_max:       constant::MAX_ALLOWED_AVG_REQ_PER_SEC,
             // Throttle
-            tint_min: constant::THROTTLED_INTERVAL_MIN,   
-            tsunset: (
-                constant::ADDR_THROTTLE_SUNSET_SECS_MIN,
-                constant::ADDR_THROTTLE_SUNSET_SECS_MAX,
-            ),
-            blist_cnt: constant::THROTTLE_COUNT_BEFORE_BLACKLIST,
-            // Handshake
-            hreq_exp: constant::SESSION_REQUEST_EXPIRY,
+            tint_min:       constant::THROTTLED_INTERVAL_MIN,
+            tsunset_base:   Duration::from_secs(constant::ADDR_THROTTLE_SUNSET_SECS_MIN),
+            tsunset_spread: Duration::from_secs(
+                                constant::ADDR_THROTTLE_SUNSET_SECS_MAX
+                                    .saturating_sub(constant::ADDR_THROTTLE_SUNSET_SECS_MIN)
+                            ),
+            blist_cnt:      constant::THROTTLE_COUNT_BEFORE_BLACKLIST,
         });
 
         let ugrd_map_init = BTreeMap::<
@@ -295,6 +292,7 @@ impl<
             schms,
             timer:          Arc::new(RwLock::new(RingTimer::<{ constant::REQ_TIMER_LEN }>::default())),
             agrd:           agrd.clone(),
+            hreq_exp:       constant::SESSION_REQUEST_EXPIRY,
             ugrd:           ugrd.clone(),
             packval,
             gpzparams:      DifficultyParams {

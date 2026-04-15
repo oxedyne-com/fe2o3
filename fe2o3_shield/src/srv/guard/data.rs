@@ -1,3 +1,5 @@
+use crate::srv::msg::handshake::HandshakeType;
+
 use oxedyne_fe2o3_core::{
     prelude::*,
 };
@@ -24,19 +26,14 @@ use std::{
         SocketAddr,
     },
     str::FromStr,
+    time::SystemTime,
 };
 
-/// Just a namespace for some functions to interchange between a string and a [`std::net::SocketAddress`].
+/// Just a namespace for some functions to interchange between a string and a
+/// [`std::net::SocketAddress`].
 pub struct Address;
 
 impl Address {
-
-    //pub fn udp_socket<S: Into<String> + std::fmt::Display>(&mut self, addr: S) -> Outcome<UdpSocket> {
-    //    res!(self.update());
-    //    let socket = res!(UdpSocket::bind(
-    //        Self::server_address(addr, self.cfg().server_port_udp)));
-    //    Ok(socket)
-    //}
 
     pub fn server_address<S: Into<String> + std::fmt::Display>(addr: S, port: u16) -> String {
         fmt!("{}:{}", addr, port)
@@ -55,14 +52,21 @@ impl Address {
     }
 }
 
-/// [`AddressData`] contains parameters that are provided to an address, which are expected during
-/// packet validation, and that an address provides to us, which it expects during packet
-/// validation.  Used by [`oxedyne_fe2o3_net::guard::addr::AddressGuard`] to store information relating to
-/// an IP address.
+/// SHIELD-specific extension payload attached to each generic
+/// [`oxedyne_fe2o3_net::guard::addr::AddressLog`].
+///
+/// Carries proof-of-work difficulty targets negotiated with the peer, plus the pending
+/// handshake request that allows the shield wrapper to enforce the HReq1 then HReq2 then
+/// HReq3 sequence on top of the generic rate-limit state machine.
 #[derive(Clone, Debug, Default)]
 pub struct AddressData {
-    pub my_zbits:   ZeroBits, // The difficulty I require of your POW.
-    pub your_zbits: ZeroBits, // The difficulty you require of my POW.
+    /// The difficulty I require of your POW.
+    pub my_zbits:   ZeroBits,
+    /// The difficulty you require of my POW.
+    pub your_zbits: ZeroBits,
+    /// Pending handshake step for this address, if any. The timestamp marks when the step
+    /// was recorded so expired handshakes can be discarded.
+    pub pending:    Option<(HandshakeType, SystemTime)>,
 }
 
 impl AsMut<AddressData> for AddressData {
@@ -71,7 +75,8 @@ impl AsMut<AddressData> for AddressData {
     }
 }
 
-/// Used by [`oxedyne_fe2o3_net::guard::user::UserGuard`] to store information relating to a user.
+/// Used by [`oxedyne_fe2o3_shield::srv::guard::user::UserGuard`] to store information relating
+/// to a user.
 #[derive(Clone, Debug, Default)]
 pub struct UserData<
     const SIDL: usize,

@@ -86,6 +86,7 @@ pub mod dns;
 pub mod dns_resolver;
 pub mod email;
 pub mod file;
+pub mod guard;
 pub mod http;
 pub mod id;
 pub mod imap;
