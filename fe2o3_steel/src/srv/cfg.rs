@@ -1133,6 +1133,15 @@ pub struct ServerConfig {
     /// every HTTPS response when non-zero. A value of `31536000` (one
     /// year) is conventional for production. Defaults to `0` (no HSTS).
     pub hsts_max_age_secs:              u32,
+    /// Optional plaintext HTTP listener bound to `127.0.0.1` for the
+    /// admin dashboard only. When non-zero, Steel binds this port on
+    /// the loopback interface and serves the `/admin/*` routes
+    /// without TLS. Use case: SSH-tunnel to the host and reach the
+    /// dashboard locally without going through the public TLS chain
+    /// (useful when a cert has expired, when ACME is broken, or when
+    /// the operator wants emergency access). Anything other than
+    /// `/admin*` returns 404. Defaults to `0` (disabled).
+    pub admin_local_port:               u16,
     /// Default session lifetime in seconds.
     pub session_expiry_default_secs:    u32,
     /// WebSocket ping interval in seconds.
@@ -1202,6 +1211,7 @@ impl Default for ServerConfig {
             server_port_tcp:                8443,
             server_port_tcp_plaintext:      0,      // disabled by default
             hsts_max_age_secs:              0,      // disabled by default
+            admin_local_port:               0,      // disabled by default
             session_expiry_default_secs:    604_800, // 1 week.
             ws_ping_interval_secs:          30,
             server_max_errors_allowed:      30,

@@ -462,6 +462,7 @@ impl AppShellContext {
             vhost_dbs,
             protocol,
             Some(traffic.clone()),
+            Some(admin_state.clone()),
         );
 
         let server = Server::new(server_context);

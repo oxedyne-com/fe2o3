@@ -1,5 +1,8 @@
 use crate::srv::{
-    admin::traffic::TrafficRecorder,
+    admin::{
+        state::AdminState,
+        traffic::TrafficRecorder,
+    },
     cfg::{
         RedirectRule,
         ServerConfig,
@@ -166,6 +169,12 @@ pub struct ServerContext<
     /// host-wide traffic view; per-vhost filtering happens at query
     /// time using the `vhost` field on each record.
     pub traffic:    Option<Arc<TrafficRecorder>>,
+    /// Optional shared admin dashboard runtime. The same `Arc` held
+    /// by `AppWebHandler` so that the dashboard handler called from
+    /// the HTTPS pipeline and the dashboard handler called from the
+    /// localhost plain-HTTP listener (when configured) both see the
+    /// same wallet, sessions and traffic counters.
+    pub admin_state: Option<Arc<AdminState>>,
     phantom3:       PhantomData<ENC>,
     phantom4:       PhantomData<KH>,
 }
@@ -183,13 +192,14 @@ impl<
 {
     fn clone(&self) -> Self {
         Self {
-            cfg:        self.cfg.clone(),
-            root:       self.root.clone(),
-            vhost_dbs:  self.vhost_dbs.clone(),
-            protocol:   self.protocol.clone(),
-            traffic:    self.traffic.clone(),
-            phantom3:   PhantomData,
-            phantom4:   PhantomData,
+            cfg:            self.cfg.clone(),
+            root:           self.root.clone(),
+            vhost_dbs:      self.vhost_dbs.clone(),
+            protocol:       self.protocol.clone(),
+            traffic:        self.traffic.clone(),
+            admin_state:    self.admin_state.clone(),
+            phantom3:       PhantomData,
+            phantom4:       PhantomData,
         }
     }
 }
@@ -211,11 +221,12 @@ impl<
     /// lowercase, to its already-started Ozone database handle and the
     /// user id under which database writes will be attributed.
     pub fn new(
-        cfg:        ServerConfig,
-        root:       NormPathBuf,
-        vhost_dbs:  HashMap<String, (Arc<RwLock<DB>>, UID)>,
-        protocol:   Protocol<WH, WSH>,
-        traffic:    Option<Arc<TrafficRecorder>>,
+        cfg:            ServerConfig,
+        root:           NormPathBuf,
+        vhost_dbs:      HashMap<String, (Arc<RwLock<DB>>, UID)>,
+        protocol:       Protocol<WH, WSH>,
+        traffic:        Option<Arc<TrafficRecorder>>,
+        admin_state:    Option<Arc<AdminState>>,
     )
         -> Self
     {
@@ -225,6 +236,7 @@ impl<
             vhost_dbs,
             protocol,
             traffic,
+            admin_state,
             phantom3:   PhantomData,
             phantom4:   PhantomData,
         }

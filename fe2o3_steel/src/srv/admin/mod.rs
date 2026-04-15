@@ -48,6 +48,7 @@ pub mod assets;
 pub mod audit;
 pub mod auth;
 pub mod handler;
+pub mod local_listener;
 pub mod ozone_view;
 pub mod session;
 pub mod state;

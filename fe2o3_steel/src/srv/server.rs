@@ -137,6 +137,26 @@ impl<
             });
         }
 
+        // Spawn the localhost plain-HTTP admin listener if
+        // configured. This binds 127.0.0.1:<port> for /admin only,
+        // intended to be reached via SSH tunnel when the public
+        // TLS chain is broken or the operator wants emergency
+        // access. Bound only to loopback by design; there is no
+        // network-exposed knob.
+        let admin_local_port = self.context.cfg.admin_local_port;
+        if admin_local_port != 0 {
+            let ctx_for_local = self.context.clone();
+            tokio::spawn(async move {
+                if let Err(e) = ctx_for_local.run_admin_local_listener(
+                    admin_local_port,
+                ).await {
+                    error!(err!(e,
+                        "Admin localhost listener exited.";
+                        Init, Network));
+                }
+            });
+        }
+
         let tls_acceptor = TlsAcceptor::from(Arc::new(loaded.server_config));
 
         // Spawn mail listeners if a mail block is configured.
