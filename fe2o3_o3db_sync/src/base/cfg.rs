@@ -80,8 +80,24 @@ pub struct OzoneConfig {
     pub num_sbots:                      u16, // server bots
     // Zones
     pub num_zones:                      u16,
-    pub zone_state_update_secs:         u8, 
+    pub zone_state_update_secs:         u8,
     pub zone_overrides:                 BTreeMap<Dat, Dat>,
+    // ── Durability barrier ────────────────────────────────────────────────
+    /// If `true`, issue an fsync on the data and index files after every
+    /// successful key+value write. Strongest durability, lowest throughput
+    /// (every write waits for the disk). Use on hosts where a power loss
+    /// or kernel panic must not cost the acknowledged write.
+    pub sync_on_write:                  bool,
+    /// If non-zero, issue an fsync on the data and index files after
+    /// every `N`-th write. A group-commit policy: `N` acknowledged
+    /// writes become durable in one fsync call, amortising the cost.
+    /// Ignored when `sync_on_write` is `true`.
+    pub sync_every_n_writes:            u32,
+    /// If non-zero, issue an fsync on the data and index files whenever
+    /// at least this many milliseconds have elapsed since the last
+    /// fsync on the bot. Time-based group commit. Ignored when
+    /// `sync_on_write` or `sync_every_n_writes` are active.
+    pub sync_interval_ms:               u64,
 }
 
 impl Config for OzoneConfig {
@@ -129,6 +145,12 @@ impl Default for OzoneConfig {
                                                     "max_size" => 104_857_600u64,
                                                 },
                                             }.get_map().unwrap(),
+            // Durability barrier. Default off, matching pre-feature behaviour.
+            // Operators that want stronger guarantees opt in via
+            // `sync_on_write`, `sync_every_n_writes`, or `sync_interval_ms`.
+            sync_on_write:                  false,
+            sync_every_n_writes:            0,
+            sync_interval_ms:               0,
         }
     }
 }

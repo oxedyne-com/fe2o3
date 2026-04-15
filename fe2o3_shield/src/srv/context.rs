@@ -134,8 +134,13 @@ pub fn new_db(
         num_sbots:                      2,
         // Zones
         num_zones:                      2,
-        zone_state_update_secs:         1, 
+        zone_state_update_secs:         1,
         zone_overrides:                 BTreeMap::new(),
+        // Durability barrier -- off by default, matching the pre-feature
+        // ozone behaviour.
+        sync_on_write:                  false,
+        sync_every_n_writes:            0,
+        sync_interval_ms:               0,
     };
 
 

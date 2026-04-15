@@ -352,6 +352,13 @@ pub fn new_db(
         num_zones:                      2,
         zone_state_update_secs:         1,
         zone_overrides:                 BTreeMap::new(),
+        // Durability barrier. Off by default; primary-server
+        // deployments that want stronger guarantees can flip
+        // `sync_on_write` here or set a group-commit window via
+        // `sync_every_n_writes` or `sync_interval_ms`.
+        sync_on_write:                  false,
+        sync_every_n_writes:            0,
+        sync_interval_ms:               0,
     };
 
     let aes_gcm = res!(EncryptionScheme::new_aes_256_gcm_with_key(enc_key));

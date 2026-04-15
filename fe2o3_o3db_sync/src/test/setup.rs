@@ -53,6 +53,13 @@ pub fn default_cfg() -> Outcome<OzoneConfig> {
                                                 "max_size"  =>  1_000_000u64,
                                             },
                                         }.get_map().unwrap(),
+        // Durability barrier off by default in tests so the existing
+        // suites run at their previous throughput. The
+        // `durability_barrier` integration test flips `sync_on_write`
+        // on its own copy of this config.
+        sync_on_write:                  false,
+        sync_every_n_writes:            0,
+        sync_interval_ms:               0,
     })
 }
 

@@ -26,6 +26,7 @@ use std::{
         Write,
     },
     sync::Arc,
+    time::Instant,
 };
 
 /// Each `WriterBot` in a zone has its own `LivePair`.
@@ -54,6 +55,12 @@ pub struct WriterBot<
     active:     bool,
     inited:     bool,
     lpair:      LivePair,
+    // Durability barrier counters -- track how many writes have gone
+    // through since the last fsync and when that fsync happened, so
+    // the group-commit and interval policies can make a local decision
+    // without touching shared state.
+    writes_since_sync:  u32,
+    last_sync_at:       Option<Instant>,
 }
 
 impl<
@@ -199,9 +206,11 @@ impl<
             chan_in:    args.chan_in,
             api:        args.api,
             // State
-            active:     false,
-            inited:     false,
-            lpair:      LivePair::default(),
+            active:             false,
+            inited:             false,
+            lpair:              LivePair::default(),
+            writes_since_sync:  0,
+            last_sync_at:       None,
         }
     }
 
@@ -274,6 +283,14 @@ impl<
 
         // Append key and location to the current index file.
         res!(self.write_to_file(FileType::Index, vec![&kbyts[..], &istored[..]]));
+
+        // Honour the configured durability barrier: force the data and
+        // index files to stable storage before a cbot (or any other
+        // observer) sees the newly inserted key. The sync policy is
+        // evaluated once per (kbyts, vstored) write, so caches, index
+        // files and the acknowledgement to the caller all live on the
+        // same side of the barrier.
+        res!(self.maybe_sync_files());
 
         // [11] Send the data to a cbot.
         let cbots = res!(self.cbots());
@@ -489,6 +506,74 @@ impl<
                 Ok(start)
             },
         }
+    }
+
+    /// Evaluate the configured durability policy and, when a sync is
+    /// due, call `sync_data` on the data file and the index file.
+    ///
+    /// Policies are evaluated in strict priority order:
+    /// 1. `sync_on_write` — sync after every write, ignoring counters
+    /// 2. `sync_every_n_writes` — group commit on write count
+    /// 3. `sync_interval_ms` — group commit on elapsed time
+    /// 4. Otherwise — no sync (current ozone default; fastest)
+    ///
+    /// `sync_data` (fdatasync on Linux) is used instead of `sync_all`
+    /// because the ozone file format does not rely on the file's
+    /// metadata (mtime, length on-disk as reported by the directory
+    /// entry) for recovery, only on its byte contents. Skipping the
+    /// metadata sync is a measurable throughput win on rotational
+    /// media and does not weaken the durability contract.
+    fn maybe_sync_files(&mut self) -> Outcome<()> {
+        let cfg = self.cfg();
+        let sync_on_write = cfg.sync_on_write;
+        let sync_every_n  = cfg.sync_every_n_writes;
+        let sync_interval = cfg.sync_interval_ms;
+
+        self.writes_since_sync = self.writes_since_sync.saturating_add(1);
+        let now = Instant::now();
+        let mut do_sync = false;
+        if sync_on_write {
+            do_sync = true;
+        } else if sync_every_n > 0 {
+            if self.writes_since_sync >= sync_every_n {
+                do_sync = true;
+            }
+        } else if sync_interval > 0 {
+            match self.last_sync_at {
+                None => do_sync = true,
+                Some(prev) => {
+                    let elapsed_ms = now.duration_since(prev).as_millis() as u64;
+                    if elapsed_ms >= sync_interval {
+                        do_sync = true;
+                    }
+                },
+            }
+        }
+
+        if !do_sync {
+            return Ok(());
+        }
+
+        // Sync the data file.
+        if let Some(file) = self.lpair_mut().dat.file.as_mut() {
+            if let Err(e) = file.sync_data() {
+                return Err(err!(e,
+                    "{}: sync_data on data file failed.", self.ozid();
+                    IO, File, Write));
+            }
+        }
+        // Sync the index file.
+        if let Some(file) = self.lpair_mut().ind.file.as_mut() {
+            if let Err(e) = file.sync_data() {
+                return Err(err!(e,
+                    "{}: sync_data on index file failed.", self.ozid();
+                    IO, File, Write));
+            }
+        }
+
+        self.writes_since_sync = 0;
+        self.last_sync_at = Some(now);
+        Ok(())
     }
 
     fn rewind_file_pos(
