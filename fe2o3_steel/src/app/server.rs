@@ -362,13 +362,15 @@ impl AppShellContext {
         // pre-keyed with a SHA3-256 derivation of the wallet master
         // key, used for stateless signed session cookies. The
         // TrafficRecorder is shared across every vhost so the
-        // dashboard can present a single host-wide traffic view.
+        // dashboard can present a single host-wide traffic view;
+        // both AdminState and ServerContext hold the same Arc.
+        let traffic = TrafficRecorder::new_shared(0);
         let admin_state = res!(AdminState::new(
             self.wallet.clone(),
             &self.db_enc_key,
+            traffic.clone(),
         ));
         let admin_state = Arc::new(admin_state);
-        let traffic = TrafficRecorder::new_shared(0);
         info!("Admin dashboard runtime initialised \
             (session key derived; traffic ring capacity {}).",
             traffic.capacity());

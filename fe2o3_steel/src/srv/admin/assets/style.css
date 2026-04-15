@@ -1,0 +1,297 @@
+/*
+ * Steel admin dashboard stylesheet.
+ *
+ * Visual style follows the Hematite documentation:
+ *   - Primary red:    rgb(243,  60,  87)  accents, links, action buttons
+ *   - Primary blue:   rgb(171, 202, 222)  inline code background
+ *   - Light grey:     rgb(240, 240, 240)  panels, table headers
+ *   - Mid grey:       rgb(200, 200, 200)  borders
+ *   - Dark grey:      rgb(120, 120, 120)  secondary text
+ *   - Heading face:   Libertinus Serif if available, then Georgia, then serif
+ *   - Body face:      same as headings (academic technical doc style)
+ *
+ * The whole stylesheet is intentionally short and shipped inline
+ * inside every response.  No external font load, no JavaScript
+ * framework, no preprocessor.
+ */
+
+* {
+    box-sizing:     border-box;
+}
+
+html, body {
+    margin:         0;
+    padding:        0;
+    height:         100%;
+    background:     rgb(252, 252, 252);
+    color:          rgb(34, 34, 34);
+    font-family:    "Libertinus Serif", Georgia, "Times New Roman", serif;
+    font-size:      16px;
+    line-height:    1.5;
+}
+
+a {
+    color:          rgb(243, 60, 87);
+    text-decoration:none;
+}
+
+a:hover {
+    text-decoration:underline;
+}
+
+code, pre, .mono {
+    font-family:    "Iosevka", "Source Code Pro", "Menlo", monospace;
+    font-size:      0.92em;
+}
+
+code {
+    background:     rgb(171, 202, 222);
+    padding:        0.1em 0.35em;
+    border-radius:  3px;
+    color:          rgb(20, 40, 60);
+}
+
+/* ──────────────────────────────────────────────────────────────────────── */
+/* Page header                                                              */
+/* ──────────────────────────────────────────────────────────────────────── */
+
+header.steel-header {
+    background:     rgb(240, 240, 240);
+    border-bottom:  4px solid rgb(243, 60, 87);
+    padding:        0.8rem 1.5rem;
+    display:        flex;
+    align-items:    center;
+    justify-content:space-between;
+}
+
+header.steel-header .brand {
+    font-variant-caps: small-caps;
+    font-weight:    bold;
+    font-size:      1.4rem;
+    letter-spacing: 0.04em;
+    color:          rgb(34, 34, 34);
+}
+
+header.steel-header .brand .accent {
+    color:          rgb(243, 60, 87);
+}
+
+header.steel-header .session {
+    font-size:      0.9rem;
+    color:          rgb(80, 80, 80);
+}
+
+header.steel-header .session strong {
+    color:          rgb(34, 34, 34);
+}
+
+/* ──────────────────────────────────────────────────────────────────────── */
+/* Page layout: sidebar + main                                              */
+/* ──────────────────────────────────────────────────────────────────────── */
+
+.page {
+    display:        grid;
+    grid-template-columns: 14rem 1fr;
+    min-height:     calc(100vh - 4.4rem);
+}
+
+nav.sidebar {
+    background:     rgb(240, 240, 240);
+    border-right:   1px solid rgb(220, 220, 220);
+    padding:        1.5rem 0;
+}
+
+nav.sidebar a {
+    display:        block;
+    padding:        0.5rem 1.5rem;
+    color:          rgb(34, 34, 34);
+    border-left:    4px solid transparent;
+}
+
+nav.sidebar a:hover {
+    background:     rgb(232, 232, 232);
+    text-decoration:none;
+}
+
+nav.sidebar a.current {
+    border-left:    4px solid rgb(243, 60, 87);
+    font-weight:    bold;
+}
+
+nav.sidebar .group {
+    text-transform: uppercase;
+    font-size:      0.75rem;
+    letter-spacing: 0.08em;
+    color:          rgb(120, 120, 120);
+    padding:        1rem 1.5rem 0.4rem;
+}
+
+main.content {
+    padding:        2rem 2.5rem;
+    max-width:      72rem;
+}
+
+main.content h1 {
+    font-variant-caps: small-caps;
+    font-weight:    bold;
+    font-size:      1.6rem;
+    margin-top:     0;
+    border-bottom:  1px solid rgb(220, 220, 220);
+    padding-bottom: 0.4rem;
+}
+
+main.content h2 {
+    font-style:     italic;
+    font-size:      1.2rem;
+    color:          rgb(80, 80, 80);
+    margin-top:     2rem;
+}
+
+main.content p {
+    margin:         0.8rem 0;
+}
+
+main.content .meta {
+    color:          rgb(120, 120, 120);
+    font-size:      0.9rem;
+}
+
+/* ──────────────────────────────────────────────────────────────────────── */
+/* Forms                                                                    */
+/* ──────────────────────────────────────────────────────────────────────── */
+
+form.steel-form {
+    background:     rgb(240, 240, 240);
+    padding:        1.2rem 1.5rem;
+    margin:         1rem 0;
+    border-left:    4px solid rgb(243, 60, 87);
+}
+
+form.steel-form label {
+    display:        block;
+    font-size:      0.9rem;
+    margin-top:     0.6rem;
+    color:          rgb(80, 80, 80);
+}
+
+form.steel-form input[type="text"],
+form.steel-form input[type="password"],
+form.steel-form input[type="number"] {
+    width:          100%;
+    padding:        0.5rem 0.6rem;
+    font-size:      1rem;
+    border:         1px solid rgb(200, 200, 200);
+    background:     white;
+    font-family:    inherit;
+}
+
+form.steel-form input[type="number"] {
+    width:          8rem;
+}
+
+form.steel-form .row {
+    display:        flex;
+    gap:            1rem;
+    align-items:    flex-end;
+}
+
+form.steel-form .row > * {
+    flex:           1 1 auto;
+}
+
+form.steel-form button,
+button.primary {
+    background:     rgb(243, 60, 87);
+    color:          white;
+    border:         0;
+    padding:        0.55rem 1.1rem;
+    font-size:      1rem;
+    font-family:    inherit;
+    cursor:         pointer;
+    margin-top:     0.8rem;
+}
+
+form.steel-form button:hover,
+button.primary:hover {
+    background:     rgb(220, 40, 65);
+}
+
+/* ──────────────────────────────────────────────────────────────────────── */
+/* Tables                                                                   */
+/* ──────────────────────────────────────────────────────────────────────── */
+
+table.steel-table {
+    border-collapse:collapse;
+    width:          100%;
+    margin:         1rem 0;
+}
+
+table.steel-table th,
+table.steel-table td {
+    padding:        0.5rem 0.7rem;
+    text-align:     left;
+    border-bottom:  1px solid rgb(232, 232, 232);
+}
+
+table.steel-table th {
+    background:     rgb(240, 240, 240);
+    font-weight:    bold;
+    border-bottom:  2px solid rgb(200, 200, 200);
+}
+
+table.steel-table tbody tr:hover {
+    background:     rgb(248, 248, 248);
+}
+
+/* ──────────────────────────────────────────────────────────────────────── */
+/* Notices                                                                  */
+/* ──────────────────────────────────────────────────────────────────────── */
+
+.notice {
+    padding:        0.7rem 1rem;
+    margin:         1rem 0;
+    border-left:    4px solid rgb(200, 200, 200);
+    background:     rgb(248, 248, 248);
+}
+
+.notice.error {
+    border-left-color: rgb(243, 60, 87);
+    background:        rgb(255, 245, 246);
+    color:             rgb(150, 20, 40);
+}
+
+.notice.empty {
+    color:          rgb(120, 120, 120);
+    font-style:     italic;
+}
+
+/* ──────────────────────────────────────────────────────────────────────── */
+/* Login standalone layout (no sidebar)                                     */
+/* ──────────────────────────────────────────────────────────────────────── */
+
+body.login {
+    display:        flex;
+    align-items:    center;
+    justify-content:center;
+    min-height:     100vh;
+    background:     rgb(248, 248, 248);
+}
+
+body.login .login-card {
+    background:     white;
+    padding:        2.5rem 3rem;
+    border-top:     4px solid rgb(243, 60, 87);
+    box-shadow:     0 1px 3px rgba(0, 0, 0, 0.06);
+    width:          26rem;
+    max-width:      90vw;
+}
+
+body.login h1 {
+    margin-top:     0;
+    font-variant-caps: small-caps;
+    font-weight:    bold;
+}
+
+body.login .accent {
+    color:          rgb(243, 60, 87);
+}

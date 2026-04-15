@@ -22,6 +22,11 @@
 //! 303-redirect to `/admin/login`.
 
 use crate::srv::admin::{
+    AdminPrincipal,
+    assets::{
+        html_escape,
+        render_layout,
+    },
     handler::{
         extract_principal,
         redirect_to_login,
@@ -124,7 +129,7 @@ pub async fn handle_get<
     // empty-state page rather than 500.
     let (db_arc, _uid) = match db {
         Some(t) => t,
-        None => return Ok(render_no_db_page(&principal.name)),
+        None => return Ok(render_no_db_page(&principal)),
     };
 
     let entries = {
@@ -134,7 +139,7 @@ pub async fn handle_get<
             Err(e) => {
                 error!(e, "{}: ozone view scan failed", id);
                 return Ok(render_error_page(
-                    &principal.name,
+                    &principal,
                     "Scan failed; check the server log.",
                 ));
             },
@@ -146,7 +151,7 @@ pub async fn handle_get<
     // not generic over UID byte length). Drop into a Vec<Dat> of
     // just the keys so the renderer stays simple and non-generic.
     let keys: Vec<Dat> = entries.into_iter().map(|(k, _, _)| k).collect();
-    Ok(render_list_page(&principal.name, &opts, &keys))
+    Ok(render_list_page(&principal, &opts, &keys))
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
@@ -193,113 +198,111 @@ fn parse_list_opts(query: Option<&str>) -> ScanOpts {
 /// form above it. v1 shows keys only; values and metadata land
 /// in the per-key detail view in a later commit.
 fn render_list_page(
-    actor: &str,
-    opts:  &ScanOpts,
-    keys:  &[Dat],
+    principal: &AdminPrincipal,
+    opts:      &ScanOpts,
+    keys:      &[Dat],
 ) -> HttpMessage {
     let prefix_attr = match &opts.prefix {
         Some(Dat::Str(s)) => html_escape(s),
         _ => String::new(),
     };
     let limit_attr = opts.limit.unwrap_or(DEFAULT_LIST_LIMIT);
-    let mut rows = String::new();
-    for k in keys.iter() {
-        let key_str = match k {
-            Dat::Str(s) => s.clone(),
-            other => fmt!("{:?}", other),
-        };
-        rows.push_str(&fmt!(
-            "<tr><td><code>{}</code></td></tr>\n",
-            html_escape(&key_str),
-        ));
-    }
+    let body_table = if keys.is_empty() {
+        "<p class=\"notice empty\">No keys match this filter.</p>".to_string()
+    } else {
+        let mut rows = String::new();
+        for k in keys.iter() {
+            let key_str = match k {
+                Dat::Str(s) => s.clone(),
+                other => fmt!("{:?}", other),
+            };
+            rows.push_str(&fmt!(
+                "<tr><td><code>{}</code></td></tr>\n",
+                html_escape(&key_str),
+            ));
+        }
+        fmt!(
+            "<table class=\"steel-table\">\n\
+            <thead><tr><th>Key</th></tr></thead>\n\
+            <tbody>\n{}</tbody>\n\
+            </table>\n",
+            rows,
+        )
+    };
     let body = fmt!(
-        "<!doctype html>\n\
-        <html><head><title>Ozone browser</title>\n\
-        <meta charset=\"utf-8\">\n\
-        <style>\n\
-        body {{ font-family: serif; max-width: 60rem; margin: 2rem auto; \
-                padding: 0 1rem; color: #222; }}\n\
-        h1 {{ font-variant-caps: small-caps; }}\n\
-        form {{ margin-bottom: 1rem; }}\n\
-        table {{ border-collapse: collapse; width: 100%; }}\n\
-        td, th {{ border-bottom: 1px solid rgb(220,220,220); \
-                  padding: 0.4rem 0.6rem; text-align: left; }}\n\
-        th {{ background: rgb(240,240,240); }}\n\
-        code {{ font-family: monospace; }}\n\
-        .nav a {{ color: rgb(243,60,87); margin-right: 1rem; }}\n\
-        </style>\n\
-        </head><body>\n\
-        <p class=\"nav\"><a href=\"/admin\">Home</a> \
-        <a href=\"/admin/logout\">Sign out</a></p>\n\
-        <h1>Ozone browser</h1>\n\
-        <p>Signed in as <strong>{}</strong>. \
-        Showing {} entries (cap {}).</p>\n\
-        <form method=\"GET\" action=\"/admin/ozone\">\n\
-        <label>Prefix: <input type=\"text\" name=\"prefix\" value=\"{}\"></label>\n\
-        <label>Limit: <input type=\"number\" name=\"limit\" value=\"{}\" min=\"1\" max=\"{}\"></label>\n\
+        "<h1>Ozone browser</h1>\n\
+        <p class=\"meta\">Showing {count} entries (cap {limit}).</p>\n\
+        <form class=\"steel-form\" method=\"GET\" action=\"/admin/ozone\">\n\
+        <div class=\"row\">\n\
+            <div>\n\
+                <label for=\"prefix\">Prefix</label>\n\
+                <input type=\"text\" id=\"prefix\" name=\"prefix\" \
+                    value=\"{prefix}\" placeholder=\"e.g. user:\">\n\
+            </div>\n\
+            <div>\n\
+                <label for=\"limit\">Limit</label>\n\
+                <input type=\"number\" id=\"limit\" name=\"limit\" \
+                    value=\"{limit}\" min=\"1\" max=\"{maxlim}\">\n\
+            </div>\n\
+        </div>\n\
         <button type=\"submit\">Search</button>\n\
         </form>\n\
-        <table><thead><tr><th>Key</th></tr></thead><tbody>\n\
-        {}\
-        </tbody></table>\n\
-        </body></html>\n",
-        html_escape(actor),
-        keys.len(),
-        limit_attr,
-        prefix_attr,
-        limit_attr,
-        MAX_LIST_LIMIT,
-        rows,
+        {table}",
+        count   = keys.len(),
+        limit   = limit_attr,
+        prefix  = prefix_attr,
+        maxlim  = MAX_LIST_LIMIT,
+        table   = body_table,
     );
-    HttpMessage::new_response(HttpStatus::OK)
-        .with_field(
-            HeaderName::ContentType,
-            HeaderFieldValue::Generic("text/html; charset=utf-8".to_string()),
-        )
-        .with_body(body.into_bytes())
+    let html = render_layout(
+        "Ozone",
+        "/admin/ozone",
+        principal,
+        &body,
+    );
+    html_response(html)
 }
 
 /// Render the empty-state page returned when this vhost has no
 /// configured ozone database (typical for pure-redirect vhosts).
-fn render_no_db_page(actor: &str) -> HttpMessage {
-    let body = fmt!(
-        "<!doctype html>\n\
-        <html><head><title>Ozone browser</title></head>\n\
-        <body>\n\
-        <p><a href=\"/admin\">Home</a></p>\n\
-        <h1>Ozone browser</h1>\n\
-        <p>Signed in as <strong>{}</strong>.</p>\n\
-        <p>This vhost does not have an ozone database configured. \
+fn render_no_db_page(principal: &AdminPrincipal) -> HttpMessage {
+    let body = "<h1>Ozone browser</h1>\n\
+        <p class=\"notice empty\">\
+        This vhost does not have an ozone database configured. \
         Pure-redirect vhosts and static-only vhosts do not store \
-        anything in ozone, so there is nothing to browse here.</p>\n\
-        </body></html>\n",
-        html_escape(actor),
+        anything in ozone, so there is nothing to browse here.\
+        </p>\n".to_string();
+    let html = render_layout(
+        "Ozone",
+        "/admin/ozone",
+        principal,
+        &body,
     );
-    HttpMessage::new_response(HttpStatus::OK)
-        .with_field(
-            HeaderName::ContentType,
-            HeaderFieldValue::Generic("text/html; charset=utf-8".to_string()),
-        )
-        .with_body(body.into_bytes())
+    html_response(html)
 }
 
 /// Render the error page returned when scan itself fails. Keeps
 /// the structural error out of the response body; the operator
 /// reads the server log for the underlying cause.
-fn render_error_page(actor: &str, message: &str) -> HttpMessage {
+fn render_error_page(principal: &AdminPrincipal, message: &str) -> HttpMessage {
     let body = fmt!(
-        "<!doctype html>\n\
-        <html><head><title>Ozone browser</title></head>\n\
-        <body>\n\
-        <p><a href=\"/admin\">Home</a></p>\n\
-        <h1>Ozone browser</h1>\n\
-        <p>Signed in as <strong>{}</strong>.</p>\n\
-        <p style=\"color: rgb(243,60,87);\">{}</p>\n\
-        </body></html>\n",
-        html_escape(actor),
+        "<h1>Ozone browser</h1>\n\
+        <p class=\"notice error\">{}</p>\n",
         html_escape(message),
     );
+    let html = render_layout(
+        "Ozone",
+        "/admin/ozone",
+        principal,
+        &body,
+    );
+    html_response(html)
+}
+
+/// Build a 200 OK HTML response. Mirrors the helper in
+/// `handler.rs`; copied locally so each render module can build
+/// responses without re-importing the same helper.
+fn html_response(body: String) -> HttpMessage {
     HttpMessage::new_response(HttpStatus::OK)
         .with_field(
             HeaderName::ContentType,
@@ -355,17 +358,3 @@ fn hex_nibble(b: u8) -> Option<u8> {
     }
 }
 
-fn html_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&'  => out.push_str("&amp;"),
-            '<'  => out.push_str("&lt;"),
-            '>'  => out.push_str("&gt;"),
-            '"'  => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            _    => out.push(c),
-        }
-    }
-    out
-}

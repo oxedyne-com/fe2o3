@@ -304,6 +304,7 @@ mod tests {
     use std::sync::{Arc, RwLock};
 
     fn mkstate() -> AdminState {
+        use crate::srv::admin::traffic::TrafficRecorder;
         let master = [0u8; 32];
         let key = derive_session_key(&master).expect("derive");
         let enc = EncryptionScheme::new_aes_256_gcm_with_key(&key)
@@ -311,6 +312,7 @@ mod tests {
         AdminState {
             wallet:         Arc::new(RwLock::new(Wallet::default())),
             session_enc:    enc,
+            traffic:        TrafficRecorder::new_shared(0),
         }
     }
 

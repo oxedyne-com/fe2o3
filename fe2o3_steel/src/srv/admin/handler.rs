@@ -11,6 +11,11 @@
 
 use crate::srv::admin::{
     AdminPrincipal,
+    assets::{
+        html_escape,
+        render_layout,
+        render_login_layout,
+    },
     audit::{
         self,
         ADMIN_ANON,
@@ -57,6 +62,9 @@ pub const PATH_ROOT:    &str = "/admin";
 pub const PATH_LOGIN:   &str = "/admin/login";
 /// Logout (GET): clears the session cookie and redirects to login.
 pub const PATH_LOGOUT:  &str = "/admin/logout";
+/// Traffic view (GET): renders recent requests and per-vhost
+/// counters from the shared `TrafficRecorder`.
+pub const PATH_TRAFFIC: &str = "/admin/traffic";
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ GET                                                                       │
@@ -76,6 +84,7 @@ pub async fn handle_get(
         PATH_LOGIN => Ok(render_login_form(None)),
         PATH_LOGOUT => Ok(handle_logout(state, headers)),
         PATH_ROOT => Ok(render_home(state, headers)),
+        PATH_TRAFFIC => Ok(render_traffic(state, headers)),
         _ => Ok(HttpMessage::respond_with_text(
             HttpStatus::NotFound,
             "Dashboard route not found.",
@@ -284,9 +293,8 @@ fn handle_logout(
 
 /// Authenticated landing page. Validates the session cookie, and on
 /// failure (no cookie / tampered / expired / unknown version) sends
-/// the visitor to the login form. v1 home content is deliberately
-/// minimal -- traffic, ozone browser and admin management land in
-/// subsequent commits.
+/// the visitor to the login form. The home page is a brief
+/// orientation panel pointing the operator at the live views.
 fn render_home(
     state:   &AdminState,
     headers: &Arc<HeaderFields>,
@@ -298,19 +306,151 @@ fn render_home(
         None => return redirect_to_login(),
     };
     let body = fmt!(
-        "<!doctype html>\n\
-        <html><head><title>Steel admin</title></head>\n\
-        <body>\n\
-        <h1>Steel admin dashboard</h1>\n\
-        <p>Signed in as <strong>{}</strong>.</p>\n\
-        <p>Scopes: <code>{}</code></p>\n\
-        <p>This is the v1 placeholder landing page. Traffic, ozone \
-        and admin-management views arrive in subsequent commits.</p>\n\
-        <p><a href=\"/admin/logout\">Sign out</a></p>\n\
-        </body></html>\n",
+        "<h1>Dashboard</h1>\n\
+        <p>Welcome, <strong>{}</strong>.</p>\n\
+        <p class=\"meta\">Scopes: <code>{}</code></p>\n\
+        <h2>Live views</h2>\n\
+        <ul>\n\
+            <li><a href=\"/admin/traffic\">Traffic</a> &mdash; \
+                recent requests across every vhost on this host.</li>\n\
+            <li><a href=\"/admin/ozone\">Ozone</a> &mdash; \
+                browse the keys stored in this vhost's ozone database.</li>\n\
+            <li><a href=\"/admin/admins\">Admins</a> &mdash; \
+                manage wallet admin entries (requires <code>admin</code> scope).</li>\n\
+        </ul>\n\
+        <h2>About this dashboard</h2>\n\
+        <p>This is the Steel admin dashboard, served from inside \
+        the Steel server binary. Every request through this \
+        process is reflected in the Traffic view; every privileged \
+        action you take here is recorded in the same \
+        <code>admin-audit.log</code> file the CLI <code>admin</code> \
+        verbs write to.</p>\n",
         html_escape(&principal.name),
         html_escape(&principal.scopes.join(" ")),
     );
+    let html = render_layout("Dashboard", "/admin", &principal, &body);
+    html_response(html)
+}
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ TRAFFIC                                                                   │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// Render the live traffic view. Reads the shared
+/// `TrafficRecorder` from `AdminState` and emits a counters
+/// summary plus the most recent N records as an HTML table.
+/// v1 is intentionally read-only and synchronous (no
+/// auto-refresh); a richer view with charts and live updates
+/// can come later.
+fn render_traffic(
+    state:   &AdminState,
+    headers: &Arc<HeaderFields>,
+)
+    -> HttpMessage
+{
+    let principal = match extract_principal(state, headers) {
+        Some(p) => p,
+        None => return redirect_to_login(),
+    };
+    // Take both snapshots up front so the HTML rendering does
+    // not hold either lock.
+    let recent = match state.traffic.recent(50) {
+        Ok(v) => v,
+        Err(e) => {
+            error!(e, "dashboard: traffic recent() failed");
+            Vec::new()
+        },
+    };
+    let counters = match state.traffic.counters_snapshot() {
+        Ok(c) => c,
+        Err(e) => {
+            error!(e, "dashboard: traffic counters_snapshot() failed");
+            crate::srv::admin::traffic::CountersSnapshot::default()
+        },
+    };
+
+    // Render counters: total + per-status table.
+    let mut status_rows = String::new();
+    let mut statuses: Vec<(u16, u64)> = counters.by_status
+        .iter()
+        .map(|(s, n)| (*s, *n))
+        .collect();
+    statuses.sort_by_key(|(s, _)| *s);
+    for (s, n) in statuses {
+        status_rows.push_str(&fmt!(
+            "<tr><td><code>{}</code></td><td>{}</td></tr>\n",
+            s, n,
+        ));
+    }
+    let counters_html = if counters.total == 0 {
+        "<p class=\"notice empty\">\
+         No requests recorded yet. As soon as a request lands on \
+         this Steel binary the counters and recent-requests table \
+         below will populate.\
+         </p>".to_string()
+    } else {
+        fmt!(
+            "<p class=\"meta\">Total requests since startup: \
+            <strong>{}</strong>.</p>\n\
+            <h2>By status</h2>\n\
+            <table class=\"steel-table\">\n\
+            <thead><tr><th>Status</th><th>Count</th></tr></thead>\n\
+            <tbody>{}</tbody>\n\
+            </table>\n",
+            counters.total,
+            status_rows,
+        )
+    };
+
+    // Render the recent-requests table.
+    let recent_html = if recent.is_empty() {
+        String::new()
+    } else {
+        let mut rows = String::new();
+        for r in &recent {
+            rows.push_str(&fmt!(
+                "<tr>\
+                <td><code>{}</code></td>\
+                <td>{}</td>\
+                <td><code>{}</code></td>\
+                <td>{}</td>\
+                <td>{} \u{00b5}s</td>\
+                </tr>\n",
+                html_escape(&r.method),
+                html_escape(&r.vhost),
+                html_escape(&r.path),
+                r.status,
+                r.duration_us,
+            ));
+        }
+        fmt!(
+            "<h2>Recent requests</h2>\n\
+            <table class=\"steel-table\">\n\
+            <thead><tr>\
+            <th>Method</th><th>Vhost</th><th>Path</th>\
+            <th>Status</th><th>Duration</th>\
+            </tr></thead>\n\
+            <tbody>{}</tbody>\n\
+            </table>\n",
+            rows,
+        )
+    };
+
+    let body = fmt!(
+        "<h1>Traffic</h1>\n\
+        {counters}\
+        {recent}",
+        counters = counters_html,
+        recent   = recent_html,
+    );
+    let html = render_layout("Traffic", PATH_TRAFFIC, &principal, &body);
+    html_response(html)
+}
+
+/// Build a 200 OK response with a UTF-8 HTML body. Centralises
+/// the content-type wiring so the per-page render functions stay
+/// concerned only with their own markup.
+fn html_response(body: String) -> HttpMessage {
     HttpMessage::new_response(HttpStatus::OK)
         .with_field(
             HeaderName::ContentType,
@@ -383,52 +523,30 @@ fn read_cookie(headers: &Arc<HeaderFields>, name: &str) -> Option<String> {
 // │ LOGIN FORM                                                                │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Build the HTML login form. `error_msg`, when present, is rendered
-/// above the form -- the wording is deliberately generic to avoid
-/// leaking which axis (no admin / wrong passphrase / no dashboard
-/// scope) caused the failure.
+/// Build the HTML login form. `error_msg`, when present, is
+/// rendered above the form -- the wording is deliberately generic
+/// to avoid leaking which axis (no admin / wrong passphrase / no
+/// dashboard scope) caused the failure.
 fn render_login_form(error_msg: Option<&str>) -> HttpMessage {
     let error_html = match error_msg {
         Some(msg) => fmt!(
-            "<p style=\"color: rgb(243, 60, 87);\">{}</p>",
+            "<p class=\"notice error\">{}</p>",
             html_escape(msg),
         ),
         None => String::new(),
     };
     let body = fmt!(
-        "<!doctype html>\n\
-        <html><head>\n\
-        <title>Steel admin login</title>\n\
-        <meta charset=\"utf-8\">\n\
-        <style>\n\
-        body {{ font-family: serif; max-width: 32rem; margin: 4rem auto; \
-                padding: 0 1rem; color: #222; }}\n\
-        h1 {{ font-variant-caps: small-caps; font-weight: bold; }}\n\
-        form {{ background: rgb(240, 240, 240); padding: 1.5rem; }}\n\
-        input[type=password] {{ width: 100%; padding: 0.5rem; \
-                font-size: 1rem; }}\n\
-        button {{ background: rgb(243, 60, 87); color: white; \
-                border: 0; padding: 0.5rem 1rem; font-size: 1rem; \
-                cursor: pointer; }}\n\
-        </style>\n\
-        </head><body>\n\
-        <h1>Steel admin</h1>\n\
-        {}\
-        <form method=\"POST\" action=\"/admin/login\">\n\
-        <p><label for=\"passphrase\">Wallet passphrase:</label></p>\n\
-        <p><input type=\"password\" id=\"passphrase\" name=\"passphrase\" \
-            autofocus required></p>\n\
-        <p><button type=\"submit\">Sign in</button></p>\n\
-        </form>\n\
-        </body></html>\n",
-        error_html,
+        "{error}\
+        <form class=\"steel-form\" method=\"POST\" action=\"/admin/login\">\n\
+        <label for=\"passphrase\">Wallet passphrase</label>\n\
+        <input type=\"password\" id=\"passphrase\" name=\"passphrase\" \
+            autofocus required>\n\
+        <button type=\"submit\">Sign in</button>\n\
+        </form>\n",
+        error = error_html,
     );
-    HttpMessage::new_response(HttpStatus::OK)
-        .with_field(
-            HeaderName::ContentType,
-            HeaderFieldValue::Generic("text/html; charset=utf-8".to_string()),
-        )
-        .with_body(body.into_bytes())
+    let html = render_login_layout("Sign in", &body);
+    html_response(html)
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
@@ -498,22 +616,3 @@ fn hex_nibble(b: u8) -> Option<u8> {
     }
 }
 
-/// Escape a string for safe inclusion in HTML body text. Replaces
-/// the five characters that can break out of a text node into
-/// markup or attribute syntax. Sufficient for the dashboard's
-/// error message rendering; richer output goes through proper
-/// templating in task #6.
-fn html_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&'  => out.push_str("&amp;"),
-            '<'  => out.push_str("&lt;"),
-            '>'  => out.push_str("&gt;"),
-            '"'  => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            _    => out.push(c),
-        }
-    }
-    out
-}

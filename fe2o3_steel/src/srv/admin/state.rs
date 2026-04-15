@@ -16,6 +16,8 @@
 //! from the ozone encryption key even though both ultimately trace
 //! back to the same wallet unlock.
 
+use crate::srv::admin::traffic::TrafficRecorder;
+
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_crypto::{
     enc::EncryptionScheme,
@@ -49,16 +51,23 @@ pub struct AdminState {
     /// [`session`](super::session) to encrypt and decrypt session
     /// cookies.
     pub session_enc:    EncryptionScheme,
+    /// Shared traffic recorder. The dashboard reads from this when
+    /// rendering the `/admin/traffic` view; the request pipeline
+    /// in `srv/https.rs` writes to it on every completed response.
+    /// Both sides hold the same `Arc`, so the dashboard sees live
+    /// data without any per-vhost coordination.
+    pub traffic:        Arc<TrafficRecorder>,
 }
 
 impl AdminState {
-    /// Build a fresh admin state from an unlocked wallet and the
-    /// recovered master key. Called from the TUI startup path once
-    /// the wallet has been unlocked, before the server listeners
-    /// bind.
+    /// Build a fresh admin state from an unlocked wallet, the
+    /// recovered master key, and the shared traffic recorder.
+    /// Called from the TUI startup path once the wallet has been
+    /// unlocked, before the server listeners bind.
     pub fn new(
         wallet:     Arc<RwLock<Wallet>>,
         master_key: &[u8],
+        traffic:    Arc<TrafficRecorder>,
     )
         -> Outcome<Self>
     {
@@ -68,6 +77,7 @@ impl AdminState {
         Ok(Self {
             wallet,
             session_enc,
+            traffic,
         })
     }
 }
