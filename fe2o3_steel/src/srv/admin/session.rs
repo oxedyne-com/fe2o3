@@ -304,7 +304,10 @@ mod tests {
     use std::sync::{Arc, RwLock};
 
     fn mkstate() -> AdminState {
-        use crate::srv::admin::traffic::TrafficRecorder;
+        use crate::srv::admin::{
+            host_sampler::HostSampler,
+            traffic::TrafficRecorder,
+        };
         use std::path::PathBuf;
         let master = [0u8; 32];
         let key = derive_session_key(&master).expect("derive");
@@ -316,6 +319,7 @@ mod tests {
             master_key:     master.to_vec(),
             session_enc:    enc,
             traffic:        TrafficRecorder::new_shared(0),
+            host_sampler:   HostSampler::new_shared(),
         }
     }
 

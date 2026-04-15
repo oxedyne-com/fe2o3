@@ -15,6 +15,7 @@ use crate::srv::admin::{
         html_escape,
         render_layout,
         render_login_layout,
+        upload_head_html,
     },
     audit::{
         self,
@@ -82,6 +83,9 @@ pub const PATH_TRAFFIC: &str = "/admin/traffic";
 /// add / remove forms.
 /// (POST): performs the requested mutation.
 pub const PATH_ADMINS:  &str = "/admin/admins";
+/// Oxanium variable font. Served unauthenticated so the login
+/// page can use it for headings before the visitor has a session.
+pub const PATH_ASSET_OXANIUM: &str = "/admin/assets/oxanium.ttf";
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ GET                                                                       │
@@ -98,6 +102,7 @@ pub async fn handle_get(
 {
     debug!("{}: dashboard GET {}", id, path);
     match path {
+        PATH_ASSET_OXANIUM => Ok(serve_font_oxanium()),
         PATH_LOGIN => Ok(render_login_form(None)),
         PATH_LOGOUT => Ok(handle_logout(state, headers)),
         PATH_ROOT => Ok(render_home(state, headers)),
@@ -108,6 +113,21 @@ pub async fn handle_get(
             "Dashboard route not found.",
         )),
     }
+}
+
+/// Serve the Oxanium variable font with a long-cache header so
+/// the browser keeps one copy across dashboard navigations.
+fn serve_font_oxanium() -> HttpMessage {
+    HttpMessage::new_response(HttpStatus::OK)
+        .with_field(
+            HeaderName::ContentType,
+            HeaderFieldValue::Generic("font/ttf".to_string()),
+        )
+        .with_field(
+            HeaderName::CacheControl,
+            HeaderFieldValue::Generic("public, max-age=86400, immutable".to_string()),
+        )
+        .with_body(crate::srv::admin::assets::FONT_OXANIUM_TTF.to_vec())
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
@@ -324,31 +344,102 @@ fn render_home(
         Some(p) => p,
         None => return redirect_to_login(),
     };
+    let host_block = render_host_strip(state);
     let body = fmt!(
-        "<h1>Dashboard</h1>\n\
+        "<h1>Overview</h1>\n\
         <p>Welcome, <strong>{}</strong>.</p>\n\
         <p class=\"meta\">Scopes: <code>{}</code></p>\n\
+        {host}\
         <h2>Live views</h2>\n\
         <ul>\n\
             <li><a href=\"/admin/traffic\">Traffic</a> &mdash; \
                 recent requests across every vhost on this host.</li>\n\
-            <li><a href=\"/admin/ozone\">Ozone</a> &mdash; \
-                browse the keys stored in this vhost's ozone database.</li>\n\
+            <li><a href=\"/admin/database\">Database</a> &mdash; \
+                browse keys and fetch values from this vhost's ozone database.</li>\n\
             <li><a href=\"/admin/admins\">Admins</a> &mdash; \
                 manage wallet admin entries (requires <code>admin</code> scope).</li>\n\
-        </ul>\n\
-        <h2>About this dashboard</h2>\n\
-        <p>This is the Steel admin dashboard, served from inside \
-        the Steel server binary. Every request through this \
-        process is reflected in the Traffic view; every privileged \
-        action you take here is recorded in the same \
-        <code>admin-audit.log</code> file the CLI <code>admin</code> \
-        verbs write to.</p>\n",
+        </ul>\n",
         html_escape(&principal.name),
         html_escape(&principal.scopes.join(" ")),
+        host = host_block,
     );
-    let html = render_layout("Dashboard", "/admin", &principal, &body);
+    let html = render_layout("Overview", "/admin", &principal, &body, "");
     html_response(html)
+}
+
+/// Render the Host Resources strip on the dashboard home. Reads
+/// the latest sample from [`HostSampler`](super::host_sampler)
+/// and emits a four-chip row (CPU busy, memory, load average,
+/// process RSS). If the sampler has not yet produced a reading
+/// (briefly true at start-up) returns a placeholder notice.
+///
+/// Rate-based figures (CPU busy percentage, disk / network
+/// throughput) need two samples -- this renderer shows absolute
+/// values only; the port to the richer host strip with charts
+/// lives in the mockup-port commit that follows this one.
+fn render_host_strip(state: &AdminState) -> String {
+    let latest = match state.host_sampler.latest() {
+        Ok(Some(s)) => s,
+        Ok(None) => return
+            "<h2>Host resources</h2>\n\
+            <p class=\"notice empty\">\
+            Sampler is warming up -- refresh in a few seconds.\
+            </p>\n".to_string(),
+        Err(e) => {
+            warn!("host strip render: {}", e);
+            return "<h2>Host resources</h2>\n\
+                <p class=\"notice error\">\
+                Host sampler is unavailable (see server log).\
+                </p>\n".to_string();
+        },
+    };
+    let s = &latest.snapshot;
+    let mem_used_mib  = s.mem.used()  / (1024 * 1024);
+    let mem_total_mib = s.mem.total  / (1024 * 1024);
+    let mem_pct       = (s.mem.used_fraction() * 100.0).round() as u64;
+    let rss_mib       = s.proc_self.rss_bytes / (1024 * 1024);
+    fmt!(
+        "<h2>Host resources</h2>\n\
+        <div class=\"chip-row\">\n\
+            <div class=\"chip\">\n\
+                <div class=\"chip-label\">Load (1m)</div>\n\
+                <div class=\"chip-value\">{load}</div>\n\
+                <div class=\"chip-sub\">5m {load5} &middot; 15m {load15}</div>\n\
+            </div>\n\
+            <div class=\"chip\">\n\
+                <div class=\"chip-label\">Memory</div>\n\
+                <div class=\"chip-value\">{mem_pct}%</div>\n\
+                <div class=\"chip-sub\">{mem_used} / {mem_total} MiB</div>\n\
+            </div>\n\
+            <div class=\"chip\">\n\
+                <div class=\"chip-label\">Steel RSS</div>\n\
+                <div class=\"chip-value\">{rss} MiB</div>\n\
+                <div class=\"chip-sub\">{threads} threads</div>\n\
+            </div>\n\
+            <div class=\"chip\">\n\
+                <div class=\"chip-label\">Uptime</div>\n\
+                <div class=\"chip-value\">{up_h} h</div>\n\
+                <div class=\"chip-sub\">host seconds {up_s}</div>\n\
+            </div>\n\
+        </div>\n",
+        load      = format_load(s.load.one),
+        load5     = format_load(s.load.five),
+        load15    = format_load(s.load.fifteen),
+        mem_pct   = mem_pct,
+        mem_used  = mem_used_mib,
+        mem_total = mem_total_mib,
+        rss       = rss_mib,
+        threads   = s.proc_self.threads,
+        up_h      = (s.uptime.seconds / 3600.0) as u64,
+        up_s      = s.uptime.seconds as u64,
+    )
+}
+
+/// Format a load-average number to two decimal places without
+/// pulling in a formatting crate.
+fn format_load(v: f64) -> String {
+    let hundredths = (v * 100.0).round() as i64;
+    fmt!("{}.{:02}", hundredths / 100, (hundredths % 100).abs())
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
@@ -356,11 +447,19 @@ fn render_home(
 // └───────────────────────────────────────────────────────────────────────────┘
 
 /// Render the live traffic view. Reads the shared
-/// `TrafficRecorder` from `AdminState` and emits a counters
-/// summary plus the most recent N records as an HTML table.
-/// v1 is intentionally read-only and synchronous (no
-/// auto-refresh); a richer view with charts and live updates
-/// can come later.
+/// `TrafficRecorder` from `AdminState` and emits:
+///
+/// - A headline card with the monotonic total, the per-status
+///   summary, and the rate over the last sample window.
+/// - A uPlot chart drawn from the periodic sample history,
+///   showing request rate over time.
+/// - The most recent 50 request records as a table.
+///
+/// The chart is drawn client-side by a small inline JavaScript
+/// fragment that reads a JSON blob embedded in the page. No
+/// polling or auto-refresh yet -- the view is a synchronous
+/// snapshot of whatever the recorder contains at the moment of
+/// the request.
 fn render_traffic(
     state:   &AdminState,
     headers: &Arc<HeaderFields>,
@@ -371,8 +470,7 @@ fn render_traffic(
         Some(p) => p,
         None => return redirect_to_login(),
     };
-    // Take both snapshots up front so the HTML rendering does
-    // not hold either lock.
+
     let recent = match state.traffic.recent(50) {
         Ok(v) => v,
         Err(e) => {
@@ -387,59 +485,87 @@ fn render_traffic(
             crate::srv::admin::traffic::CountersSnapshot::default()
         },
     };
-
-    // Render counters: total + per-status table.
-    let mut status_rows = String::new();
-    let mut statuses: Vec<(u16, u64)> = counters.by_status
-        .iter()
-        .map(|(s, n)| (*s, *n))
-        .collect();
-    statuses.sort_by_key(|(s, _)| *s);
-    for (s, n) in statuses {
-        status_rows.push_str(&fmt!(
-            "<tr><td><code>{}</code></td><td>{}</td></tr>\n",
-            s, n,
-        ));
-    }
-    let counters_html = if counters.total == 0 {
-        "<p class=\"notice empty\">\
-         No requests recorded yet. As soon as a request lands on \
-         this Steel binary the counters and recent-requests table \
-         below will populate.\
-         </p>".to_string()
-    } else {
-        fmt!(
-            "<p class=\"meta\">Total requests since startup: \
-            <strong>{}</strong>.</p>\n\
-            <h2>By status</h2>\n\
-            <table class=\"steel-table\">\n\
-            <thead><tr><th>Status</th><th>Count</th></tr></thead>\n\
-            <tbody>{}</tbody>\n\
-            </table>\n",
-            counters.total,
-            status_rows,
-        )
+    let history = match state.traffic.history_snapshot() {
+        Ok(v) => v,
+        Err(e) => {
+            error!(e, "dashboard: traffic history_snapshot() failed");
+            Vec::new()
+        },
     };
 
-    // Render the recent-requests table.
+    // Collect per-status codes in sorted order so the legend is
+    // stable across refreshes.
+    let mut status_keys: Vec<u16> = counters.by_status
+        .keys().copied().collect();
+    status_keys.sort();
+
+    let rate_last = compute_rate_last(&history);
+
+    // Build the headline strip.
+    let mut headline_chips = String::new();
+    headline_chips.push_str(&fmt!(
+        "<div class=\"chip chip-total\">\
+            <div class=\"chip-label\">Total</div>\
+            <div class=\"chip-value\">{}</div>\
+            <div class=\"chip-sub\">requests since startup</div>\
+        </div>\n",
+        counters.total,
+    ));
+    headline_chips.push_str(&fmt!(
+        "<div class=\"chip\">\
+            <div class=\"chip-label\">Rate</div>\
+            <div class=\"chip-value\">{rate:.2}</div>\
+            <div class=\"chip-sub\">requests / sec (last interval)</div>\
+        </div>\n",
+        rate = rate_last,
+    ));
+    for s in &status_keys {
+        let count = counters.by_status.get(s).copied().unwrap_or(0);
+        let cls = chip_class_for_status(*s);
+        headline_chips.push_str(&fmt!(
+            "<div class=\"chip {cls}\">\
+                <div class=\"chip-label\">HTTP {status}</div>\
+                <div class=\"chip-value\">{count}</div>\
+                <div class=\"chip-sub\">{desc}</div>\
+            </div>\n",
+            cls    = cls,
+            status = s,
+            count  = count,
+            desc   = status_description(*s),
+        ));
+    }
+
+    // Build the chart data as JSON. Each series is the delta
+    // between adjacent samples (so the chart shows
+    // "requests-in-this-sample-interval", not cumulative
+    // totals). Timestamps are unix seconds; uPlot expects
+    // numeric x values.
+    let chart_json = build_chart_json(&history, &status_keys);
+
+    // Build the recent-requests table.
     let recent_html = if recent.is_empty() {
-        String::new()
+        "<p class=\"notice empty\">\
+         No requests recorded yet. Interact with the dashboard \
+         or visit any vhost and this table will populate.\
+         </p>".to_string()
     } else {
         let mut rows = String::new();
         for r in &recent {
+            let status_cls = chip_class_for_status(r.status);
             rows.push_str(&fmt!(
                 "<tr>\
-                <td><code>{}</code></td>\
-                <td>{}</td>\
-                <td><code>{}</code></td>\
-                <td>{}</td>\
-                <td>{} \u{00b5}s</td>\
+                <td><code>{method}</code></td>\
+                <td>{vhost}</td>\
+                <td class=\"path\"><code>{path}</code></td>\
+                <td class=\"status {cls}\">{status}</td>\
+                <td class=\"num\">{dur}</td>\
                 </tr>\n",
-                html_escape(&r.method),
-                html_escape(&r.vhost),
-                html_escape(&r.path),
-                r.status,
-                r.duration_us,
+                method = html_escape(&r.method),
+                vhost  = html_escape(&r.vhost),
+                path   = html_escape(&r.path),
+                cls    = status_cls,
+                status = r.status,
+                dur    = format_duration_us(r.duration_us),
             ));
         }
         fmt!(
@@ -447,7 +573,7 @@ fn render_traffic(
             <table class=\"steel-table\">\n\
             <thead><tr>\
             <th>Method</th><th>Vhost</th><th>Path</th>\
-            <th>Status</th><th>Duration</th>\
+            <th class=\"status\">Status</th><th class=\"num\">Duration</th>\
             </tr></thead>\n\
             <tbody>{}</tbody>\n\
             </table>\n",
@@ -455,15 +581,191 @@ fn render_traffic(
         )
     };
 
+    // Page body. The chart container has a fixed height so
+    // uPlot can measure it before the JSON arrives.
     let body = fmt!(
         "<h1>Traffic</h1>\n\
-        {counters}\
+        <div class=\"chip-row\">\n{chips}</div>\n\
+        <h2>Requests per sample interval</h2>\n\
+        <div id=\"traffic-chart\" class=\"chart-panel\"></div>\n\
+        <script id=\"traffic-chart-data\" type=\"application/json\">\n\
+        {chart_json}\n\
+        </script>\n\
+        <script>\n{chart_js}\n</script>\n\
         {recent}",
-        counters = counters_html,
-        recent   = recent_html,
+        chips      = headline_chips,
+        chart_json = chart_json,
+        chart_js   = TRAFFIC_CHART_JS,
+        recent     = recent_html,
     );
-    let html = render_layout("Traffic", PATH_TRAFFIC, &principal, &body);
+    let html = render_layout(
+        "Traffic",
+        PATH_TRAFFIC,
+        &principal,
+        &body,
+        &upload_head_html(),
+    );
     html_response(html)
+}
+
+/// Client-side glue that reads the chart JSON blob embedded in
+/// the page and draws a stacked requests-per-interval chart
+/// with uPlot. Tiny on purpose: one fetch, one `new uPlot(...)`
+/// call, one resize handler.
+const TRAFFIC_CHART_JS: &str = r#"
+(function() {
+    var el = document.getElementById('traffic-chart');
+    var dataEl = document.getElementById('traffic-chart-data');
+    if (!el || !dataEl || typeof uPlot === 'undefined') return;
+    var payload;
+    try {
+        payload = JSON.parse(dataEl.textContent);
+    } catch (e) {
+        el.textContent = 'Chart data unavailable.';
+        return;
+    }
+    if (!payload.t || payload.t.length < 2) {
+        el.innerHTML = '<p class="notice empty">Not enough samples yet. '
+            + 'The chart appears after two sample intervals '
+            + '(~10 seconds at the default cadence).</p>';
+        return;
+    }
+    var series = [{}];
+    var palette = ['#f33c57', '#1976d2', '#2e7d32', '#ed6c02',
+                   '#6a1b9a', '#00838f', '#455a64'];
+    for (var i = 0; i < payload.series.length; i++) {
+        series.push({
+            label:  payload.series[i].label,
+            stroke: palette[i % palette.length],
+            width:  2,
+            fill:   palette[i % palette.length] + '22',
+            paths:  uPlot.paths.stepped({align: 1}),
+        });
+    }
+    var data = [payload.t];
+    for (var j = 0; j < payload.series.length; j++) {
+        data.push(payload.series[j].values);
+    }
+    var opts = {
+        width:  el.clientWidth || 800,
+        height: 260,
+        scales: {x: {time: true}},
+        axes: [
+            {stroke: '#666', grid: {stroke: '#eee'}},
+            {stroke: '#666', grid: {stroke: '#eee'}},
+        ],
+        series: series,
+        legend: {live: false},
+    };
+    var chart = new uPlot(opts, data, el);
+    window.addEventListener('resize', function() {
+        chart.setSize({
+            width:  el.clientWidth,
+            height: 260,
+        });
+    });
+})();
+"#;
+
+/// Compute the requests-per-second rate over the last sample
+/// interval in `history`. Returns 0.0 when there are fewer than
+/// two samples.
+fn compute_rate_last(history: &[crate::srv::admin::traffic::TrafficSample]) -> f64 {
+    if history.len() < 2 {
+        return 0.0;
+    }
+    let last = &history[history.len() - 1];
+    let prev = &history[history.len() - 2];
+    if last.when_secs <= prev.when_secs {
+        return 0.0;
+    }
+    let dt = (last.when_secs - prev.when_secs) as f64;
+    let dn = last.total.saturating_sub(prev.total) as f64;
+    if dt == 0.0 { 0.0 } else { dn / dt }
+}
+
+/// Serialise the traffic history into the JSON shape the chart
+/// script expects: `{t: [unix_ts...], series: [{label, values}]}`
+/// where each `values` array is the delta in that status's
+/// counter since the previous sample (i.e. "requests in this
+/// sample interval").
+fn build_chart_json(
+    history:     &[crate::srv::admin::traffic::TrafficSample],
+    status_keys: &[u16],
+)
+    -> String
+{
+    if history.len() < 2 {
+        return "{\"t\": [], \"series\": []}".to_string();
+    }
+    let mut ts = String::from("[");
+    let mut deltas: Vec<Vec<u64>> = status_keys.iter()
+        .map(|_| Vec::with_capacity(history.len() - 1))
+        .collect();
+    for w in history.windows(2) {
+        let prev = &w[0];
+        let curr = &w[1];
+        if !ts.ends_with('[') {
+            ts.push(',');
+        }
+        ts.push_str(&fmt!("{}", curr.when_secs));
+        for (i, s) in status_keys.iter().enumerate() {
+            let a = prev.by_status.get(s).copied().unwrap_or(0);
+            let b = curr.by_status.get(s).copied().unwrap_or(0);
+            deltas[i].push(b.saturating_sub(a));
+        }
+    }
+    ts.push(']');
+
+    let mut series = String::from("[");
+    for (i, s) in status_keys.iter().enumerate() {
+        if i > 0 { series.push(','); }
+        let values = deltas[i].iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        series.push_str(&fmt!(
+            "{{\"label\":\"{label}\",\"values\":[{values}]}}",
+            label  = fmt!("HTTP {}", s),
+            values = values,
+        ));
+    }
+    series.push(']');
+
+    fmt!("{{\"t\":{},\"series\":{}}}", ts, series)
+}
+
+/// Pick a CSS class for a status chip based on the HTTP class.
+fn chip_class_for_status(status: u16) -> &'static str {
+    match status {
+        200..=299 => "chip-ok",
+        300..=399 => "chip-redirect",
+        400..=499 => "chip-client",
+        500..=599 => "chip-server",
+        _         => "",
+    }
+}
+
+/// Human-readable one-word description for a status code class.
+fn status_description(status: u16) -> &'static str {
+    match status {
+        200..=299 => "success",
+        300..=399 => "redirect",
+        400..=499 => "client error",
+        500..=599 => "server error",
+        _         => "informational",
+    }
+}
+
+/// Format a microsecond duration as a compact human string.
+fn format_duration_us(us: u64) -> String {
+    if us < 1_000 {
+        fmt!("{} \u{00b5}s", us)
+    } else if us < 1_000_000 {
+        fmt!("{:.1} ms", (us as f64) / 1_000.0)
+    } else {
+        fmt!("{:.2} s", (us as f64) / 1_000_000.0)
+    }
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
@@ -596,6 +898,7 @@ fn render_admins(
         PATH_ADMINS,
         &principal,
         &body,
+        "",
     );
     html_response(html)
 }
@@ -619,6 +922,7 @@ fn render_admin_forbidden(principal: &AdminPrincipal) -> HttpMessage {
         PATH_ADMINS,
         principal,
         &body,
+        "",
     );
     html_response(html)
 }
@@ -636,6 +940,7 @@ fn render_admins_error(principal: &AdminPrincipal, message: &str) -> HttpMessage
         PATH_ADMINS,
         principal,
         &body,
+        "",
     );
     html_response(html)
 }

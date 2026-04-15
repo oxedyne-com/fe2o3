@@ -26,7 +26,7 @@
 //! - **Ozone view falls back to the first vhost db.** With no
 //!   per-vhost routing, the local listener picks the first vhost
 //!   in `ServerContext::vhost_dbs` (in iteration order) as the
-//!   default for `/admin/ozone`. Operators who want a specific
+//!   default for `/admin/database`. Operators who want a specific
 //!   vhost's ozone use the public path.
 
 use crate::srv::{
@@ -199,9 +199,9 @@ impl<
                     let response: HttpMessage = if path == "/admin"
                         || path.starts_with("/admin/")
                     {
-                        if path == "/admin/ozone"
-                            || path.starts_with("/admin/ozone?")
-                            || path.starts_with("/admin/ozone/")
+                        if path == "/admin/database"
+                            || path.starts_with("/admin/database?")
+                            || path.starts_with("/admin/database/")
                         {
                             match method {
                                 HttpMethod::GET => {

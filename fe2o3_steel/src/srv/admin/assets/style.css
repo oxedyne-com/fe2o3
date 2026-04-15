@@ -1,19 +1,86 @@
 /*
  * Steel admin dashboard stylesheet.
  *
- * Visual style follows the Hematite documentation:
- *   - Primary red:    rgb(243,  60,  87)  accents, links, action buttons
- *   - Primary blue:   rgb(171, 202, 222)  inline code background
- *   - Light grey:     rgb(240, 240, 240)  panels, table headers
- *   - Mid grey:       rgb(200, 200, 200)  borders
- *   - Dark grey:      rgb(120, 120, 120)  secondary text
- *   - Heading face:   Libertinus Serif if available, then Georgia, then serif
- *   - Body face:      same as headings (academic technical doc style)
+ * Palette:
+ *   --accent   rgb(243,  60,  87)  Hematite red for action + highlights
+ *   --blue     rgb(171, 202, 222)  soft blue (inline code backgrounds)
+ *   --grey-0   rgb(252, 252, 252)  page background
+ *   --grey-1   rgb(244, 244, 244)  panel background
+ *   --grey-2   rgb(228, 228, 228)  panel borders
+ *   --grey-3   rgb(190, 190, 190)  strong borders
+ *   --grey-4   rgb(120, 120, 120)  secondary text
+ *   --grey-5   rgb(60,  60,  60)   primary text
+ *   --green    rgb(46, 125,  50)   2xx status
+ *   --orange   rgb(237, 108,   2)  3xx status
+ *   --red      rgb(198,  40,  40)  5xx status
  *
- * The whole stylesheet is intentionally short and shipped inline
- * inside every response.  No external font load, no JavaScript
- * framework, no preprocessor.
+ * Typography:
+ *   Libertinus Serif > Georgia > Times for body and headings.
+ *   Monospace: Iosevka > Source Code Pro > Menlo > monospace.
+ *
+ * Kept intentionally short. Shipped inline inside every response.
  */
+
+/* Oxanium variable font, served from /admin/assets/oxanium.ttf
+ * so the browser caches it between pages instead of re-parsing
+ * a data URI on every response. Used for page-level headings
+ * and KPI chips via the `--font-heading` stack below. */
+@font-face {
+    font-family: 'Oxanium';
+    src:         url('/admin/assets/oxanium.ttf') format('truetype-variations'),
+                 url('/admin/assets/oxanium.ttf') format('truetype');
+    font-weight: 200 800;
+    font-style:  normal;
+    font-display:swap;
+}
+
+:root {
+    /* Semantic names map to the light palette by default. */
+    --accent:       rgb(243,  60,  87);
+    --accent-dark:  rgb(213,  40,  65);
+    --blue:         rgb(171, 202, 222);
+    --bg-page:      rgb(252, 252, 252);
+    --bg-panel:     rgb(244, 244, 244);
+    --bg-card:      white;
+    --bg-inset:     rgb(244, 244, 244);
+    --bg-table-row-hover: rgb(250, 250, 250);
+    --border-soft:  rgb(228, 228, 228);
+    --border-firm:  rgb(200, 200, 200);
+    --text-muted:   rgb(120, 120, 120);
+    --text-body:    rgb(60,  60,  60);
+    --text-heading: rgb(34,  34,  34);
+    --green:        rgb(46, 125,  50);
+    --orange:       rgb(237, 108,   2);
+    --red:          rgb(198,  40,  40);
+    --inline-code-bg:   rgb(171, 202, 222);
+    --inline-code-fg:   rgb(20, 40, 60);
+    --shadow-card:      0 1px 3px rgba(0, 0, 0, 0.05);
+    /* Corner radius for interactive controls (inputs, buttons).
+       Matches elearnity's --radius-lg so the dashboard feels
+       visually consistent with the apps it administers. */
+    --radius-input:     8px;
+}
+
+html.dark {
+    --accent:       rgb(243,  78, 103);
+    --accent-dark:  rgb(255, 108, 128);
+    --bg-page:      rgb(19, 22, 27);
+    --bg-panel:     rgb(26, 30, 38);
+    --bg-card:      rgb(31, 35, 44);
+    --bg-inset:     rgb(34, 39, 49);
+    --bg-table-row-hover: rgb(39, 44, 54);
+    --border-soft:  rgb(46, 52, 64);
+    --border-firm:  rgb(66, 72, 86);
+    --text-muted:   rgb(150, 158, 170);
+    --text-body:    rgb(215, 220, 230);
+    --text-heading: rgb(240, 243, 248);
+    --green:        rgb(120, 200, 130);
+    --orange:       rgb(250, 170,  90);
+    --red:          rgb(255, 120, 140);
+    --inline-code-bg:   rgb(52, 72, 92);
+    --inline-code-fg:   rgb(200, 220, 240);
+    --shadow-card:      0 1px 3px rgba(0, 0, 0, 0.45);
+}
 
 * {
     box-sizing:     border-box;
@@ -23,15 +90,16 @@ html, body {
     margin:         0;
     padding:        0;
     height:         100%;
-    background:     rgb(252, 252, 252);
-    color:          rgb(34, 34, 34);
+    background:     var(--bg-page);
+    color:          var(--text-body);
     font-family:    "Libertinus Serif", Georgia, "Times New Roman", serif;
     font-size:      16px;
     line-height:    1.5;
+    transition:     background 120ms ease, color 120ms ease;
 }
 
 a {
-    color:          rgb(243, 60, 87);
+    color:          var(--accent);
     text-decoration:none;
 }
 
@@ -39,16 +107,20 @@ a:hover {
     text-decoration:underline;
 }
 
+/* Mono fallback chain ends in DejaVu Sans Mono, which is the
+   font Typst picks for raw blocks in the Hematite manual when
+   no `raw` font is set. Iosevka and Source Code Pro come first
+   because they are sharper at small sizes when present. */
 code, pre, .mono {
-    font-family:    "Iosevka", "Source Code Pro", "Menlo", monospace;
+    font-family:    "Iosevka", "Source Code Pro", "DejaVu Sans Mono", "Menlo", monospace;
     font-size:      0.92em;
 }
 
 code {
-    background:     rgb(171, 202, 222);
-    padding:        0.1em 0.35em;
+    background:     var(--inline-code-bg);
+    padding:        0.08em 0.35em;
     border-radius:  3px;
-    color:          rgb(20, 40, 60);
+    color:          var(--inline-code-fg);
 }
 
 /* ──────────────────────────────────────────────────────────────────────── */
@@ -56,33 +128,106 @@ code {
 /* ──────────────────────────────────────────────────────────────────────── */
 
 header.steel-header {
-    background:     rgb(240, 240, 240);
-    border-bottom:  4px solid rgb(243, 60, 87);
-    padding:        0.8rem 1.5rem;
+    background:     var(--bg-card);
+    border-bottom:  1px solid var(--border-soft);
+    padding:        0.55rem 1.5rem;
     display:        flex;
     align-items:    center;
     justify-content:space-between;
+    font-size:      0.95rem;
 }
 
 header.steel-header .brand {
-    font-variant-caps: small-caps;
-    font-weight:    bold;
-    font-size:      1.4rem;
-    letter-spacing: 0.04em;
-    color:          rgb(34, 34, 34);
+    display:        flex;
+    align-items:    center;
+    gap:            0.7rem;
 }
 
-header.steel-header .brand .accent {
-    color:          rgb(243, 60, 87);
+header.steel-header .brand-logo {
+    display:        inline-block;
+    line-height:    0;
+}
+
+header.steel-header .brand-logo svg {
+    height:         28px;
+    width:          auto;
+}
+
+/* The fe2o3 wordmark inside the logo SVG is a fill of #4d4d4d.
+ * Recolour it in dark mode so it is still legible on the dark
+ * card. The geometric mark stroke stays Hematite red in both
+ * themes. */
+html.dark header.steel-header .brand-logo svg path[fill="#4d4d4d"] {
+    fill:           var(--text-heading);
+}
+
+header.steel-header .brand-section {
+    color:          var(--accent);
+    font-family:    'Oxanium', "Libertinus Serif", Georgia, serif;
+    font-weight:    500;
+    font-size:      1.05rem;
+    letter-spacing: 0.01em;
 }
 
 header.steel-header .session {
-    font-size:      0.9rem;
-    color:          rgb(80, 80, 80);
+    display:        flex;
+    align-items:    center;
+    gap:            0.9rem;
+    color:          var(--text-muted);
 }
 
-header.steel-header .session strong {
-    color:          rgb(34, 34, 34);
+header.steel-header .session-user {
+    color:          var(--text-body);
+}
+
+header.steel-header .session-signout {
+    color:          var(--text-muted);
+}
+
+header.steel-header .session-signout:hover {
+    color:          var(--accent);
+}
+
+/* ──────────────────────────────────────────────────────────────────────── */
+/* Theme toggle                                                             */
+/* ──────────────────────────────────────────────────────────────────────── */
+
+.theme-toggle {
+    display:        inline-flex;
+    align-items:    center;
+    justify-content:center;
+    background:     transparent;
+    border:         1px solid var(--border-soft);
+    color:          var(--text-muted);
+    width:          2rem;
+    height:         2rem;
+    padding:        0;
+    cursor:         pointer;
+    border-radius:  4px;
+    transition:     color 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+
+.theme-toggle:hover {
+    color:          var(--accent);
+    border-color:   var(--accent);
+    background:     var(--bg-panel);
+}
+
+.theme-toggle .icon {
+    width:          18px;
+    height:         18px;
+}
+
+.theme-toggle .theme-icon-moon {
+    display:        none;
+}
+
+html.dark .theme-toggle .theme-icon-sun {
+    display:        none;
+}
+
+html.dark .theme-toggle .theme-icon-moon {
+    display:        inline-flex;
 }
 
 /* ──────────────────────────────────────────────────────────────────────── */
@@ -91,69 +236,224 @@ header.steel-header .session strong {
 
 .page {
     display:        grid;
-    grid-template-columns: 14rem 1fr;
-    min-height:     calc(100vh - 4.4rem);
+    grid-template-columns: 12rem 1fr;
+    min-height:     calc(100vh - 3rem);
 }
 
 nav.sidebar {
-    background:     rgb(240, 240, 240);
-    border-right:   1px solid rgb(220, 220, 220);
-    padding:        1.5rem 0;
+    background:     var(--bg-panel);
+    border-right:   1px solid var(--border-soft);
+    padding:        0;
+    font-size:      0.95rem;
+}
+
+.sidebar-brand {
+    padding:        0.9rem 1rem 0.9rem 1.2rem;
+    border-bottom:  1px solid var(--border-soft);
+    display:        flex;
+    align-items:    center;
+    justify-content:flex-start;
+}
+
+.sidebar-brand svg {
+    height:         24px;
+    width:          auto;
+    pointer-events: none;
+}
+
+html.dark .sidebar-brand svg path[fill="#4d4d4d"] {
+    fill:           var(--text-heading);
 }
 
 nav.sidebar a {
     display:        block;
-    padding:        0.5rem 1.5rem;
-    color:          rgb(34, 34, 34);
-    border-left:    4px solid transparent;
+    padding:        0.45rem 1.4rem;
+    color:          var(--text-body);
+    border-left:    3px solid transparent;
 }
 
 nav.sidebar a:hover {
-    background:     rgb(232, 232, 232);
+    background:     var(--bg-inset);
     text-decoration:none;
 }
 
 nav.sidebar a.current {
-    border-left:    4px solid rgb(243, 60, 87);
+    border-left:    3px solid var(--accent);
+    background:     var(--bg-card);
     font-weight:    bold;
+    color:          var(--text-heading);
 }
 
 nav.sidebar .group {
     text-transform: uppercase;
-    font-size:      0.75rem;
+    font-size:      0.7rem;
     letter-spacing: 0.08em;
-    color:          rgb(120, 120, 120);
-    padding:        1rem 1.5rem 0.4rem;
+    color:          var(--text-muted);
+    padding:        1rem 1.4rem 0.3rem;
 }
 
 main.content {
-    padding:        2rem 2.5rem;
+    padding:        2rem 2.5rem 3rem;
     max-width:      72rem;
 }
 
+/* Headings use the Oxanium variable font, pulled via @font-face
+ * at the top of this sheet. */
 main.content h1 {
-    font-variant-caps: small-caps;
-    font-weight:    bold;
-    font-size:      1.6rem;
-    margin-top:     0;
-    border-bottom:  1px solid rgb(220, 220, 220);
-    padding-bottom: 0.4rem;
+    font-family:    'Oxanium', "Libertinus Serif", Georgia, serif;
+    font-weight:    600;
+    font-size:      1.9rem;
+    margin:         0 0 1rem;
+    color:          var(--text-heading);
+    letter-spacing: 0.01em;
+    display:        flex;
+    align-items:    center;
+    gap:            0.7rem;
 }
 
 main.content h2 {
-    font-style:     italic;
-    font-size:      1.2rem;
-    color:          rgb(80, 80, 80);
-    margin-top:     2rem;
+    font-family:    'Oxanium', "Libertinus Serif", Georgia, serif;
+    font-weight:    600;
+    font-size:      1.1rem;
+    color:          var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    border-bottom:  1px solid var(--border-soft);
+    padding-bottom: 0.3rem;
+    margin:         2rem 0 0.6rem;
+}
+
+/* Inline logo that sits beside a page heading (e.g. the ozone
+ * mark next to the Database h1). Sized to match the heading
+ * height rather than a hard pixel value. */
+.heading-logo {
+    height:         1.7rem;
+    width:          auto;
+    flex:           0 0 auto;
+}
+
+html.dark .heading-logo path[fill="#4d4d4d"] {
+    fill:           var(--text-heading);
 }
 
 main.content p {
-    margin:         0.8rem 0;
+    margin:         0.6rem 0;
 }
 
 main.content .meta {
-    color:          rgb(120, 120, 120);
+    color:          var(--text-muted);
     font-size:      0.9rem;
+}
+
+main.content ul {
+    padding-left:   1.2rem;
+}
+
+main.content li {
+    margin:         0.2rem 0;
+}
+
+/* ──────────────────────────────────────────────────────────────────────── */
+/* Headline chip row                                                        */
+/* ──────────────────────────────────────────────────────────────────────── */
+
+.chip-row {
+    display:        flex;
+    flex-wrap:      wrap;
+    gap:            0.9rem;
+    margin:         1rem 0 1.5rem;
+}
+
+.chip {
+    background:     var(--bg-card);
+    border:         1px solid var(--border-soft);
+    border-top:     3px solid var(--border-firm);
+    padding:        0.6rem 1rem 0.7rem;
+    min-width:      8rem;
+    flex:           0 0 auto;
+    box-shadow:     var(--shadow-card);
+}
+
+.chip-label {
+    font-size:      0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color:          var(--text-muted);
+}
+
+.chip-value {
+    font-size:      1.8rem;
+    font-weight:    bold;
+    color:          var(--text-heading);
+    font-variant-numeric: tabular-nums;
+    line-height:    1.1;
+    margin-top:     0.15rem;
+}
+
+.chip-sub {
+    font-size:      0.75rem;
+    color:          var(--text-muted);
+    margin-top:     0.15rem;
+}
+
+.chip-total {
+    border-top-color: var(--accent);
+}
+.chip-total .chip-value {
+    color:          var(--accent);
+}
+.chip-ok {
+    border-top-color: var(--green);
+}
+.chip-redirect {
+    border-top-color: var(--orange);
+}
+.chip-client {
+    border-top-color: var(--orange);
+}
+.chip-server {
+    border-top-color: var(--red);
+}
+
+/* ──────────────────────────────────────────────────────────────────────── */
+/* Chart panel                                                              */
+/* ──────────────────────────────────────────────────────────────────────── */
+
+.chart-panel {
+    background:     var(--bg-card);
+    border:         1px solid var(--border-soft);
+    padding:        0.8rem 0.8rem 0.4rem;
+    margin:         0.5rem 0 1.5rem;
+    min-height:     260px;
+    box-shadow:     var(--shadow-card);
+    /* uPlot's outer `.uplot` container is display: inline-block, so
+     * it shrinks to fit its child `.u-wrap`. We size `.u-wrap` by
+     * passing the panel's clientWidth to `new uPlot(...)` at render
+     * time, not via CSS, otherwise forcing width: 100% on .u-wrap
+     * creates a sizing loop and collapses everything to a narrow
+     * strip. Nothing to override here. */
+}
+
+/* Dark theme overrides for uPlot itself: the library's default
+ * stylesheet uses hard-coded black axis labels and white
+ * backgrounds. Retarget them against our palette. */
+html.dark .uplot {
+    color:          var(--text-body);
+}
+html.dark .u-legend {
+    color:          var(--text-muted);
+}
+html.dark .u-axis {
+    color:          var(--text-muted);
+}
+
+.chart-panel .notice {
+    margin:         0;
+}
+
+.chart-panel .u-legend {
+    font-size:      0.8rem;
+    color:          var(--text-muted);
 }
 
 /* ──────────────────────────────────────────────────────────────────────── */
@@ -161,28 +461,40 @@ main.content .meta {
 /* ──────────────────────────────────────────────────────────────────────── */
 
 form.steel-form {
-    background:     rgb(240, 240, 240);
+    background:     var(--bg-card);
+    border:         1px solid var(--border-soft);
+    border-left:    3px solid var(--accent);
     padding:        1.2rem 1.5rem;
     margin:         1rem 0;
-    border-left:    4px solid rgb(243, 60, 87);
+    box-shadow:     var(--shadow-card);
 }
 
 form.steel-form label {
     display:        block;
-    font-size:      0.9rem;
+    font-size:      0.85rem;
     margin-top:     0.6rem;
-    color:          rgb(80, 80, 80);
+    color:          var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
 }
 
 form.steel-form input[type="text"],
 form.steel-form input[type="password"],
 form.steel-form input[type="number"] {
     width:          100%;
-    padding:        0.5rem 0.6rem;
+    padding:        0.5rem 0.75rem;
     font-size:      1rem;
-    border:         1px solid rgb(200, 200, 200);
-    background:     white;
+    border:         1px solid var(--border-firm);
+    border-radius:  var(--radius-input);
+    background:     var(--bg-page);
     font-family:    inherit;
+    color:          var(--text-body);
+}
+
+form.steel-form input:focus {
+    outline:        0;
+    border-color:   var(--accent);
+    background:     var(--bg-card);
 }
 
 form.steel-form input[type="number"] {
@@ -201,19 +513,21 @@ form.steel-form .row > * {
 
 form.steel-form button,
 button.primary {
-    background:     rgb(243, 60, 87);
+    background:     var(--accent);
     color:          white;
     border:         0;
-    padding:        0.55rem 1.1rem;
-    font-size:      1rem;
+    border-radius:  var(--radius-input);
+    padding:        0.55rem 1.2rem;
+    font-size:      0.95rem;
     font-family:    inherit;
     cursor:         pointer;
     margin-top:     0.8rem;
+    letter-spacing: 0.02em;
 }
 
 form.steel-form button:hover,
 button.primary:hover {
-    background:     rgb(220, 40, 65);
+    background:     var(--accent-dark);
 }
 
 /* ──────────────────────────────────────────────────────────────────────── */
@@ -223,25 +537,60 @@ button.primary:hover {
 table.steel-table {
     border-collapse:collapse;
     width:          100%;
-    margin:         1rem 0;
+    margin:         0.5rem 0 1rem;
+    background:     var(--bg-card);
+    border:         1px solid var(--border-soft);
+    font-size:      0.92rem;
+    box-shadow:     var(--shadow-card);
 }
 
 table.steel-table th,
 table.steel-table td {
-    padding:        0.5rem 0.7rem;
+    padding:        0.45rem 0.7rem;
     text-align:     left;
-    border-bottom:  1px solid rgb(232, 232, 232);
+    border-bottom:  1px solid var(--border-soft);
 }
 
 table.steel-table th {
-    background:     rgb(240, 240, 240);
+    background:     var(--bg-panel);
     font-weight:    bold;
-    border-bottom:  2px solid rgb(200, 200, 200);
+    color:          var(--text-heading);
+    text-transform: uppercase;
+    font-size:      0.72rem;
+    letter-spacing: 0.06em;
+}
+
+table.steel-table tbody tr:last-child td {
+    border-bottom:  0;
 }
 
 table.steel-table tbody tr:hover {
-    background:     rgb(248, 248, 248);
+    background:     var(--bg-table-row-hover);
 }
+
+table.steel-table td.path code {
+    background:     transparent;
+    color:          var(--text-body);
+    padding:        0;
+}
+
+table.steel-table td.num,
+table.steel-table th.num {
+    text-align:     right;
+    font-variant-numeric: tabular-nums;
+}
+
+table.steel-table td.status,
+table.steel-table th.status {
+    text-align:     right;
+    font-variant-numeric: tabular-nums;
+    font-weight:    bold;
+}
+
+table.steel-table td.status.chip-ok       { color: var(--green); }
+table.steel-table td.status.chip-redirect { color: var(--orange); }
+table.steel-table td.status.chip-client   { color: var(--orange); }
+table.steel-table td.status.chip-server   { color: var(--red); }
 
 /* ──────────────────────────────────────────────────────────────────────── */
 /* Notices                                                                  */
@@ -250,19 +599,81 @@ table.steel-table tbody tr:hover {
 .notice {
     padding:        0.7rem 1rem;
     margin:         1rem 0;
-    border-left:    4px solid rgb(200, 200, 200);
-    background:     rgb(248, 248, 248);
+    border-left:    3px solid var(--border-firm);
+    background:     var(--bg-panel);
 }
 
 .notice.error {
-    border-left-color: rgb(243, 60, 87);
-    background:        rgb(255, 245, 246);
-    color:             rgb(150, 20, 40);
+    border-left-color: var(--accent);
+    background:        var(--bg-inset);
+    color:             var(--accent);
 }
 
 .notice.empty {
-    color:          rgb(120, 120, 120);
+    color:          var(--text-muted);
     font-style:     italic;
+}
+
+/* ──────────────────────────────────────────────────────────────────────── */
+/* Ozone browser split view                                                 */
+/* ──────────────────────────────────────────────────────────────────────── */
+
+.ozone-split {
+    display:        grid;
+    grid-template-columns: minmax(0, 1fr) 22rem;
+    gap:            1rem;
+    margin:         0.5rem 0 1.5rem;
+}
+@media (max-width: 1100px) { .ozone-split { grid-template-columns: 1fr; } }
+
+.ozone-list { min-width: 0; }
+.ozone-list table.steel-table a { color: inherit; }
+.ozone-list table.steel-table tr.selected td {
+    background:     var(--bg-inset);
+    font-weight:    bold;
+}
+
+.ozone-detail {
+    background:     var(--bg-card);
+    border:         1px solid var(--border-soft);
+    border-top:     3px solid var(--accent);
+    box-shadow:     var(--shadow-card);
+    padding:        0.8rem 1rem 1rem;
+    font-size:      0.88rem;
+    min-width:      0;
+}
+
+.ozone-detail h3 {
+    margin:         0.1rem 0 0.6rem;
+    font-size:      0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color:          var(--text-muted);
+}
+
+.ozone-detail .field { margin-bottom: 0.6rem; }
+.ozone-detail .field .lbl {
+    display:        block;
+    font-size:      0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color:          var(--text-muted);
+    margin-bottom:  0.1rem;
+}
+.ozone-detail .field .val {
+    font-family:    "Iosevka", "Source Code Pro", "DejaVu Sans Mono", "Menlo", monospace;
+    color:          var(--text-body);
+    word-break:     break-all;
+}
+.ozone-detail pre.val {
+    background:     var(--bg-inset);
+    padding:        0.5rem 0.7rem;
+    border-radius:  4px;
+    margin:         0;
+    font-size:      0.82rem;
+    white-space:    pre-wrap;
+    max-height:     18rem;
+    overflow:       auto;
 }
 
 /* ──────────────────────────────────────────────────────────────────────── */
@@ -274,24 +685,38 @@ body.login {
     align-items:    center;
     justify-content:center;
     min-height:     100vh;
-    background:     rgb(248, 248, 248);
+    background:     var(--bg-panel);
 }
 
 body.login .login-card {
-    background:     white;
-    padding:        2.5rem 3rem;
-    border-top:     4px solid rgb(243, 60, 87);
-    box-shadow:     0 1px 3px rgba(0, 0, 0, 0.06);
-    width:          26rem;
+    background:     var(--bg-card);
+    padding:        2rem 2.5rem;
+    border-top:     3px solid var(--accent);
+    box-shadow:     var(--shadow-card);
+    width:          24rem;
     max-width:      90vw;
 }
 
-body.login h1 {
-    margin-top:     0;
-    font-variant-caps: small-caps;
-    font-weight:    bold;
+body.login .login-logo {
+    display:        flex;
+    justify-content:center;
+    margin-bottom:  0.4rem;
 }
 
-body.login .accent {
-    color:          rgb(243, 60, 87);
+body.login .login-logo svg {
+    height:         38px;
+    width:          auto;
+}
+
+html.dark body.login .login-logo svg path[fill="#4d4d4d"] {
+    fill:           var(--text-heading);
+}
+
+body.login .login-sub {
+    text-align:     center;
+    color:          var(--text-muted);
+    font-style:     italic;
+    font-size:      0.9rem;
+    margin-bottom:  1.2rem;
+    letter-spacing: 0.04em;
 }

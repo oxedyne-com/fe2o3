@@ -368,6 +368,15 @@ impl AppShellContext {
         // recorder so dashboard reads and request-pipeline writes
         // see one consistent view.
         let traffic = TrafficRecorder::new_shared(0);
+        let host_sampler = crate::srv::admin::host_sampler::HostSampler::new_shared();
+        // The periodic traffic and host samplers are spawned inside
+        // Server::start (not here) because this function runs in a
+        // sync context -- the tokio runtime `rt` has been built but
+        // not entered yet, so calling `tokio::spawn` here would
+        // panic with "there is no reactor running". Server::start
+        // is invoked via `rt.block_on` which makes the runtime
+        // current for its body, so any tokio::spawn call from
+        // there works.
         let wallet_path_for_admin = Path::new(&self.app_cfg.app_root)
             .join(app_const::WALLET_NAME);
         let admin_state = res!(AdminState::new(
@@ -375,11 +384,14 @@ impl AppShellContext {
             wallet_path_for_admin,
             &self.db_enc_key,
             traffic.clone(),
+            host_sampler.clone(),
         ));
         let admin_state = Arc::new(admin_state);
         info!("Admin dashboard runtime initialised \
-            (session key derived; traffic ring capacity {}).",
-            traffic.capacity());
+            (session key derived; traffic ring capacity {}; \
+            host sampler capacity {}).",
+            traffic.capacity(),
+            host_sampler.history_capacity());
 
         for vh in &vhosts_cfg {
             let public_dir = match res!(vh.get_public_dir(&root_path)) {

@@ -30,6 +30,7 @@ oxedyne_fe2o3_net				= { path = "../fe2o3_net" }
 oxedyne_fe2o3_o3db_sync 				= { path = "../fe2o3_o3db_sync" }
 oxedyne_fe2o3_stds				= { path = "../fe2o3_stds" }
 oxedyne_fe2o3_syntax			= { path = "../fe2o3_syntax" }
+oxedyne_fe2o3_sys				= { path = "../fe2o3_sys" }
 oxedyne_fe2o3_text				= { path = "../fe2o3_text" }
 oxedyne_fe2o3_tui				= { path = "../fe2o3_tui" }
 

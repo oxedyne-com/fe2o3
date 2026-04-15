@@ -16,7 +16,10 @@
 //! from the ozone encryption key even though both ultimately trace
 //! back to the same wallet unlock.
 
-use crate::srv::admin::traffic::TrafficRecorder;
+use crate::srv::admin::{
+    host_sampler::HostSampler,
+    traffic::TrafficRecorder,
+};
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_crypto::{
@@ -75,19 +78,25 @@ pub struct AdminState {
     /// Both sides hold the same `Arc`, so the dashboard sees live
     /// data without any per-vhost coordination.
     pub traffic:        Arc<TrafficRecorder>,
+    /// Shared host-resource sampler. A background task in
+    /// `Server::start` calls `HostSampler::sample_now` on a fixed
+    /// interval; the dashboard reads from the same `Arc` when
+    /// drawing the host resource strip.
+    pub host_sampler:   Arc<HostSampler>,
 }
 
 impl AdminState {
     /// Build a fresh admin state from an unlocked wallet, its
-    /// on-disk path, the recovered master key, and the shared
-    /// traffic recorder. Called from the TUI startup path once
-    /// the wallet has been unlocked, before the server listeners
-    /// bind.
+    /// on-disk path, the recovered master key, the shared traffic
+    /// recorder, and the shared host sampler. Called from the TUI
+    /// startup path once the wallet has been unlocked, before the
+    /// server listeners bind.
     pub fn new(
-        wallet:      Arc<RwLock<Wallet>>,
-        wallet_path: PathBuf,
-        master_key:  &[u8],
-        traffic:     Arc<TrafficRecorder>,
+        wallet:       Arc<RwLock<Wallet>>,
+        wallet_path:  PathBuf,
+        master_key:   &[u8],
+        traffic:      Arc<TrafficRecorder>,
+        host_sampler: Arc<HostSampler>,
     )
         -> Outcome<Self>
     {
@@ -100,6 +109,7 @@ impl AdminState {
             master_key: master_key.to_vec(),
             session_enc,
             traffic,
+            host_sampler,
         })
     }
 }

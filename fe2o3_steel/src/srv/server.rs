@@ -115,6 +115,63 @@ impl<
             });
         }
 
+        // Spawn the periodic traffic sampler if the traffic
+        // recorder is configured. Samples counters into the
+        // recorder's bounded history ring every
+        // DEFAULT_SAMPLE_INTERVAL_SECS seconds so the dashboard
+        // traffic view has time-series data to chart. Lives here
+        // (inside the async Server::start) rather than in the sync
+        // AppShellContext::start_server so the current tokio
+        // runtime is active when the spawn happens.
+        if let Some(recorder) = self.context.traffic.clone() {
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(
+                    std::time::Duration::from_secs(
+                        crate::srv::admin::traffic::DEFAULT_SAMPLE_INTERVAL_SECS,
+                    ),
+                );
+                // Skip the first immediate tick so the first
+                // real sample is taken after one full interval.
+                ticker.tick().await;
+                loop {
+                    ticker.tick().await;
+                    if let Err(e) = recorder.sample_now() {
+                        warn!("traffic sampler: {}", e);
+                    }
+                }
+            });
+        }
+
+        // Spawn the periodic host sampler if the admin state is
+        // configured. Reads `/proc/*` via `fe2o3_sys::Snapshot`
+        // and pushes a new entry into the sampler's bounded
+        // history ring on every tick, so the dashboard's host
+        // resource strip has real CPU / memory / disk / network
+        // data to render. Lives next to the traffic sampler so
+        // both get the same late-spawn treatment.
+        if let Some(admin) = self.context.admin_state.clone() {
+            let sampler = admin.host_sampler.clone();
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(
+                    std::time::Duration::from_secs(
+                        crate::srv::admin::host_sampler::DEFAULT_SAMPLE_INTERVAL_SECS,
+                    ),
+                );
+                // Prime with an immediate read so the dashboard
+                // has a non-empty ring on the first request.
+                if let Err(e) = sampler.sample_now() {
+                    warn!("host sampler prime: {}", e);
+                }
+                ticker.tick().await;
+                loop {
+                    ticker.tick().await;
+                    if let Err(e) = sampler.sample_now() {
+                        warn!("host sampler: {}", e);
+                    }
+                }
+            });
+        }
+
         // Spawn the plaintext HTTP redirect listener if configured.
         // This binds a separate port (typically 80) and responds to every
         // incoming HTTP request with a 301 to the HTTPS equivalent, so

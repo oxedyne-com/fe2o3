@@ -253,9 +253,9 @@ impl<
             // generic ozone_view module (which needs the per-vhost
             // db typed parameters in scope), all other dashboard
             // routes go to the non-generic handler module.
-            if request_path == "/admin/ozone"
-                || request_path.starts_with("/admin/ozone?")
-                || request_path.starts_with("/admin/ozone/")
+            if request_path == "/admin/database"
+                || request_path.starts_with("/admin/database?")
+                || request_path.starts_with("/admin/database/")
             {
                 if let Some(state) = &admin_state {
                     let resp = res!(admin_ozone_view::handle_get(
