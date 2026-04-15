@@ -69,6 +69,126 @@ pub const ICON_SUN_SVG: &str = r#"<svg class="icon" viewBox="0 0 24 24" fill="no
 /// clearly says "switch to light mode".
 pub const ICON_MOON_SVG: &str = r#"<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>"#;
 
+/// Inline JavaScript rendered by the Overview page. Fetches the
+/// host-sampler JSON at `/admin/host.json`, builds four small
+/// uPlot sparklines against the four `<div class="spark-plot">`
+/// placeholders, and updates the four current-value labels.
+///
+/// Runs once on `DOMContentLoaded`, and is re-entered by the
+/// auto-refresh polling loop (task #4) which pokes a second
+/// function exposed on `window` so the chart and headline value
+/// both update without a full page reload. The auto-refresh
+/// hook degrades gracefully if uPlot or the JSON feed returns an
+/// empty payload -- the sparkline shows its placeholder and the
+/// headline stays at its previous value.
+pub const OVERVIEW_SPARKLINE_JS: &str = r#"
+(function() {
+    var charts = {};
+    var SPECS = [
+        { key: 'cpu',  label: 'CPU %',    color: 'rgb(243, 60, 87)',   fmt: fmtPct  },
+        { key: 'mem',  label: 'Memory %', color: 'rgb(46, 125, 50)',   fmt: fmtPct  },
+        { key: 'disk', label: 'Disk B/s', color: 'rgb(237, 108, 2)',   fmt: fmtBps  },
+        { key: 'net',  label: 'Net B/s',  color: 'rgb(51, 102, 204)',  fmt: fmtBps  },
+    ];
+    function fmtPct(v) {
+        if (v == null) return '\u2014';
+        return Math.round(v) + ' %';
+    }
+    function fmtBps(v) {
+        if (v == null) return '\u2014';
+        if (v < 1024) return Math.round(v) + ' B/s';
+        if (v < 1048576) return (v / 1024).toFixed(1) + ' KiB/s';
+        if (v < 1073741824) return (v / 1048576).toFixed(1) + ' MiB/s';
+        return (v / 1073741824).toFixed(2) + ' GiB/s';
+    }
+    function buildChart(spec, t, values) {
+        var container = document.getElementById('spark-' + spec.key);
+        if (!container || typeof uPlot === 'undefined') return null;
+        var width = container.clientWidth || 160;
+        var opts = {
+            width:  width,
+            height: 60,
+            cursor: { show: false },
+            legend: { show: false },
+            scales: {
+                x: { time: true },
+                y: { auto: true },
+            },
+            axes: [
+                { show: false },
+                { show: false },
+            ],
+            series: [
+                {},
+                {
+                    label:  spec.label,
+                    stroke: spec.color,
+                    width:  1.5,
+                    fill:   spec.color.replace('rgb', 'rgba').replace(')', ', 0.14)'),
+                    points: { show: false },
+                },
+            ],
+        };
+        return new uPlot(opts, [t, values], container);
+    }
+    function renderAll(data) {
+        var t = data.t || [];
+        SPECS.forEach(function(spec) {
+            var values = data[spec.key] || [];
+            var last = values.length ? values[values.length - 1] : null;
+            var valNode = document.getElementById('spark-' + spec.key + '-val');
+            if (valNode) valNode.textContent = spec.fmt(last);
+            var existing = charts[spec.key];
+            if (existing) {
+                existing.setData([t, values]);
+                return;
+            }
+            if (t.length > 0) {
+                charts[spec.key] = buildChart(spec, t, values);
+            }
+        });
+    }
+    function load() {
+        fetch('/admin/host.json', { credentials: 'same-origin' })
+            .then(function(r) { return r.ok ? r.json() : null; })
+            .then(function(data) { if (data) renderAll(data); })
+            .catch(function() {});
+    }
+    window.steelSparkRefresh = load;
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', load);
+    } else {
+        load();
+    }
+})();
+"#;
+
+/// Shared auto-refresh driver. Sets up a 5-second polling interval
+/// that calls whichever refresh function the current page exposed
+/// on `window` -- `steelSparkRefresh` for the Overview host strip,
+/// `steelTrafficRefresh` for the Traffic view -- and pauses when
+/// the browser tab is hidden so a background tab does not burn
+/// bandwidth. Every page can include this script unconditionally;
+/// if no refresh function is defined the loop is a no-op.
+pub const AUTO_REFRESH_JS: &str = r#"
+(function() {
+    var INTERVAL_MS = 5000;
+    function tick() {
+        if (document.hidden) return;
+        if (typeof window.steelSparkRefresh === 'function') {
+            try { window.steelSparkRefresh(); } catch (e) {}
+        }
+        if (typeof window.steelTrafficRefresh === 'function') {
+            try { window.steelTrafficRefresh(); } catch (e) {}
+        }
+    }
+    setInterval(tick, INTERVAL_MS);
+    document.addEventListener('visibilitychange', function() {
+        if (!document.hidden) tick();
+    });
+})();
+"#;
+
 /// Inline JavaScript that reads the persisted theme preference
 /// from `localStorage` on page load and applies the `dark` class
 /// to `<html>`. Hooked to the theme toggle button by id. Runs

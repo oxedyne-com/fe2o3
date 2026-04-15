@@ -83,6 +83,15 @@ pub const PATH_LOGOUT:  &str = "/admin/logout";
 /// Traffic view (GET): renders recent requests and per-vhost
 /// counters from the shared `TrafficRecorder`.
 pub const PATH_TRAFFIC: &str = "/admin/traffic";
+/// JSON feed for the Overview sparkline strip. Emits host
+/// sampler history as four aligned series (CPU, memory, disk,
+/// network). Used by the inline Overview JavaScript and by the
+/// auto-refresh polling loop.
+pub const PATH_HOST_JSON: &str = "/admin/host.json";
+/// JSON feed for the Traffic view. Emits counters, chart series,
+/// and recent requests so the auto-refresh loop can update the
+/// chip row, chart, and table without reloading the page.
+pub const PATH_TRAFFIC_JSON: &str = "/admin/traffic.json";
 /// Security view (GET): renders the address guard counts and a
 /// table of per-address entries with whitelist / blacklist /
 /// unblock controls. POST performs the selected action.
@@ -115,6 +124,8 @@ pub async fn handle_get(
         PATH_LOGOUT => Ok(handle_logout(state, headers)),
         PATH_ROOT => Ok(render_home(state, headers)),
         PATH_TRAFFIC => Ok(render_traffic(state, headers)),
+        PATH_HOST_JSON => Ok(render_host_json(state, headers)),
+        PATH_TRAFFIC_JSON => Ok(render_traffic_json(state, headers)),
         PATH_SECURITY => Ok(render_security(state, headers, None)),
         PATH_ADMINS => Ok(render_admins(state, headers, None)),
         _ => Ok(HttpMessage::respond_with_text(
@@ -342,8 +353,9 @@ fn handle_logout(
 
 /// Authenticated landing page. Validates the session cookie, and on
 /// failure (no cookie / tampered / expired / unknown version) sends
-/// the visitor to the login form. The home page is a brief
-/// orientation panel pointing the operator at the live views.
+/// the visitor to the login form. Shows a four-card sparkline strip
+/// fed by `/admin/host.json`, a welcome line, and a list of the
+/// other live views.
 fn render_home(
     state:   &AdminState,
     headers: &Arc<HeaderFields>,
@@ -354,7 +366,7 @@ fn render_home(
         Some(p) => p,
         None => return redirect_to_login(),
     };
-    let host_block = render_host_strip(state);
+    let host_block = render_host_sparkline_strip();
     let body = fmt!(
         "<h1>Overview</h1>\n\
         <p>Welcome, <strong>{}</strong>.</p>\n\
@@ -366,6 +378,8 @@ fn render_home(
                 recent requests across every vhost on this host.</li>\n\
             <li><a href=\"/admin/database\">Database</a> &mdash; \
                 browse keys and fetch values from this vhost's ozone database.</li>\n\
+            <li><a href=\"/admin/security\">Security</a> &mdash; \
+                address guard state and per-IP controls.</li>\n\
             <li><a href=\"/admin/admins\">Admins</a> &mdash; \
                 manage wallet admin entries (requires <code>admin</code> scope).</li>\n\
         </ul>\n",
@@ -373,83 +387,300 @@ fn render_home(
         html_escape(&principal.scopes.join(" ")),
         host = host_block,
     );
-    let html = render_layout("Overview", "/admin", &principal, &body, "");
+    let head_extra = fmt!(
+        "{uplot}\n<script>{spark}</script>\n<script>{refresh}</script>\n",
+        uplot   = upload_head_html(),
+        spark   = crate::srv::admin::assets::OVERVIEW_SPARKLINE_JS,
+        refresh = crate::srv::admin::assets::AUTO_REFRESH_JS,
+    );
+    let html = render_layout(
+        "Overview",
+        "/admin",
+        &principal,
+        &body,
+        &head_extra,
+    );
     html_response(html)
 }
 
-/// Render the Host Resources strip on the dashboard home. Reads
-/// the latest sample from [`HostSampler`](super::host_sampler)
-/// and emits a four-chip row (CPU busy, memory, load average,
-/// process RSS). If the sampler has not yet produced a reading
-/// (briefly true at start-up) returns a placeholder notice.
-///
-/// Rate-based figures (CPU busy percentage, disk / network
-/// throughput) need two samples -- this renderer shows absolute
-/// values only; the port to the richer host strip with charts
-/// lives in the mockup-port commit that follows this one.
-fn render_host_strip(state: &AdminState) -> String {
-    let latest = match state.host_sampler.latest() {
-        Ok(Some(s)) => s,
-        Ok(None) => return
-            "<h2>Host resources</h2>\n\
-            <p class=\"notice empty\">\
-            Sampler is warming up -- refresh in a few seconds.\
-            </p>\n".to_string(),
-        Err(e) => {
-            warn!("host strip render: {}", e);
-            return "<h2>Host resources</h2>\n\
-                <p class=\"notice error\">\
-                Host sampler is unavailable (see server log).\
-                </p>\n".to_string();
-        },
-    };
-    let s = &latest.snapshot;
-    let mem_used_mib  = s.mem.used()  / (1024 * 1024);
-    let mem_total_mib = s.mem.total  / (1024 * 1024);
-    let mem_pct       = (s.mem.used_fraction() * 100.0).round() as u64;
-    let rss_mib       = s.proc_self.rss_bytes / (1024 * 1024);
-    fmt!(
-        "<h2>Host resources</h2>\n\
-        <div class=\"chip-row\">\n\
-            <div class=\"chip\">\n\
-                <div class=\"chip-label\">Load (1m)</div>\n\
-                <div class=\"chip-value\">{load}</div>\n\
-                <div class=\"chip-sub\">5m {load5} &middot; 15m {load15}</div>\n\
-            </div>\n\
-            <div class=\"chip\">\n\
-                <div class=\"chip-label\">Memory</div>\n\
-                <div class=\"chip-value\">{mem_pct}%</div>\n\
-                <div class=\"chip-sub\">{mem_used} / {mem_total} MiB</div>\n\
-            </div>\n\
-            <div class=\"chip\">\n\
-                <div class=\"chip-label\">Steel RSS</div>\n\
-                <div class=\"chip-value\">{rss} MiB</div>\n\
-                <div class=\"chip-sub\">{threads} threads</div>\n\
-            </div>\n\
-            <div class=\"chip\">\n\
-                <div class=\"chip-label\">Uptime</div>\n\
-                <div class=\"chip-value\">{up_h} h</div>\n\
-                <div class=\"chip-sub\">host seconds {up_s}</div>\n\
-            </div>\n\
-        </div>\n",
-        load      = format_load(s.load.one),
-        load5     = format_load(s.load.five),
-        load15    = format_load(s.load.fifteen),
-        mem_pct   = mem_pct,
-        mem_used  = mem_used_mib,
-        mem_total = mem_total_mib,
-        rss       = rss_mib,
-        threads   = s.proc_self.threads,
-        up_h      = (s.uptime.seconds / 3600.0) as u64,
-        up_s      = s.uptime.seconds as u64,
-    )
+/// Emit the four-card sparkline placeholder block. The inline JS
+/// shipped alongside in `head_extra` fetches `/admin/host.json` and
+/// populates each card's headline value and uPlot chart.
+fn render_host_sparkline_strip() -> String {
+    "<h2>Host resources</h2>\n\
+    <p class=\"meta\">Last hour, sampled every 5 s. \
+    Waiting on the first full pair of samples before charts draw.</p>\n\
+    <div class=\"spark-row\">\n\
+        <div class=\"spark-card\">\
+            <div class=\"spark-header\">\
+                <span class=\"spark-label\">CPU busy</span>\
+                <span class=\"spark-value\" id=\"spark-cpu-val\">&mdash;</span>\
+            </div>\
+            <div class=\"spark-plot\" id=\"spark-cpu\"></div>\
+        </div>\n\
+        <div class=\"spark-card\">\
+            <div class=\"spark-header\">\
+                <span class=\"spark-label\">Memory used</span>\
+                <span class=\"spark-value\" id=\"spark-mem-val\">&mdash;</span>\
+            </div>\
+            <div class=\"spark-plot\" id=\"spark-mem\"></div>\
+        </div>\n\
+        <div class=\"spark-card\">\
+            <div class=\"spark-header\">\
+                <span class=\"spark-label\">Disk I/O</span>\
+                <span class=\"spark-value\" id=\"spark-disk-val\">&mdash;</span>\
+            </div>\
+            <div class=\"spark-plot\" id=\"spark-disk\"></div>\
+        </div>\n\
+        <div class=\"spark-card\">\
+            <div class=\"spark-header\">\
+                <span class=\"spark-label\">Network</span>\
+                <span class=\"spark-value\" id=\"spark-net-val\">&mdash;</span>\
+            </div>\
+            <div class=\"spark-plot\" id=\"spark-net\"></div>\
+        </div>\n\
+    </div>\n".to_string()
 }
 
-/// Format a load-average number to two decimal places without
-/// pulling in a formatting crate.
-fn format_load(v: f64) -> String {
-    let hundredths = (v * 100.0).round() as i64;
-    fmt!("{}.{:02}", hundredths / 100, (hundredths % 100).abs())
+/// Serialise the host sampler history as four time-aligned series.
+///
+/// The series are computed at the later-of-pair timestamp because
+/// the rate-based figures (CPU busy, disk throughput, network
+/// throughput) require two snapshots. Memory is a level metric and
+/// is emitted at the same later-of-pair timestamp for alignment.
+fn render_host_json(
+    state:   &AdminState,
+    headers: &Arc<HeaderFields>,
+)
+    -> HttpMessage
+{
+    if extract_principal(state, headers).is_none() {
+        return HttpMessage::respond_with_text(
+            HttpStatus::Unauthorized,
+            "Sign in required.",
+        );
+    }
+
+    let history = match state.host_sampler.history_snapshot() {
+        Ok(h) => h,
+        Err(e) => {
+            error!(e, "dashboard: host history snapshot failed");
+            return HttpMessage::respond_with_text(
+                HttpStatus::InternalServerError,
+                "Host sampler error.",
+            );
+        },
+    };
+
+    // Need at least two samples to derive any rate-based figure.
+    // Emit an empty payload so the browser-side JS can render the
+    // "warming up" state cleanly rather than throw on undefined.
+    if history.len() < 2 {
+        let empty = "{\"t\":[],\"cpu\":[],\"mem\":[],\"disk\":[],\"net\":[]}";
+        return HttpMessage::new_response(HttpStatus::OK)
+            .with_field(
+                HeaderName::ContentType,
+                HeaderFieldValue::Generic(
+                    "application/json; charset=utf-8".to_string()),
+            )
+            .with_field(
+                HeaderName::CacheControl,
+                HeaderFieldValue::Generic("no-store".to_string()),
+            )
+            .with_body(empty.as_bytes().to_vec());
+    }
+
+    let mut ts = String::from("[");
+    let mut cpu = String::from("[");
+    let mut mem = String::from("[");
+    let mut disk = String::from("[");
+    let mut net = String::from("[");
+    for w in history.windows(2) {
+        let prev = &w[0];
+        let curr = &w[1];
+        let d = curr.snapshot.delta(&prev.snapshot);
+        // Sum deltas across every device / interface; the strip
+        // panel shows the whole-host picture, not per-device. The
+        // operator can drill into `/admin/traffic` or a future
+        // per-device view if they want breakdown.
+        let disk_bps: f64 = d.disk.iter()
+            .map(|dd| dd.read_bps + dd.write_bps).sum();
+        let net_bps: f64 = d.net.iter()
+            .filter(|ni| ni.name != "lo")
+            .map(|ni| ni.rx_bps + ni.tx_bps).sum();
+        let mem_pct = curr.snapshot.mem.used_fraction() * 100.0;
+        let cpu_pct = d.cpu_busy * 100.0;
+        if !ts.ends_with('[') {
+            ts.push(',');
+            cpu.push(',');
+            mem.push(',');
+            disk.push(',');
+            net.push(',');
+        }
+        ts.push_str(&fmt!("{}", curr.when_secs));
+        cpu.push_str(&format_float(cpu_pct));
+        mem.push_str(&format_float(mem_pct));
+        disk.push_str(&format_float(disk_bps));
+        net.push_str(&format_float(net_bps));
+    }
+    ts.push(']');
+    cpu.push(']');
+    mem.push(']');
+    disk.push(']');
+    net.push(']');
+
+    let body = fmt!(
+        "{{\"t\":{t},\"cpu\":{cpu},\"mem\":{mem},\"disk\":{disk},\"net\":{net}}}",
+        t    = ts,
+        cpu  = cpu,
+        mem  = mem,
+        disk = disk,
+        net  = net,
+    );
+
+    HttpMessage::new_response(HttpStatus::OK)
+        .with_field(
+            HeaderName::ContentType,
+            HeaderFieldValue::Generic(
+                "application/json; charset=utf-8".to_string()),
+        )
+        .with_field(
+            HeaderName::CacheControl,
+            HeaderFieldValue::Generic("no-store".to_string()),
+        )
+        .with_body(body.into_bytes())
+}
+
+/// Format an `f64` as a JSON number with one decimal place. Used by
+/// the host JSON emitter so the response size stays bounded and
+/// matches what uPlot will render anyway. `NaN` and infinities fall
+/// back to `0` so the emitted document is always valid JSON.
+fn format_float(v: f64) -> String {
+    if !v.is_finite() {
+        return "0".to_string();
+    }
+    let scaled = (v * 10.0).round() as i64;
+    let whole = scaled / 10;
+    let frac  = (scaled % 10).abs();
+    fmt!("{}.{}", whole, frac)
+}
+
+/// JSON feed for the Traffic view. Returns counters, chart series,
+/// and the recent-requests table in a single payload that the
+/// auto-refresh client uses to update each section without
+/// reloading the page.
+fn render_traffic_json(
+    state:   &AdminState,
+    headers: &Arc<HeaderFields>,
+)
+    -> HttpMessage
+{
+    if extract_principal(state, headers).is_none() {
+        return HttpMessage::respond_with_text(
+            HttpStatus::Unauthorized,
+            "Sign in required.",
+        );
+    }
+
+    let counters = match state.traffic.counters_snapshot() {
+        Ok(c) => c,
+        Err(e) => {
+            error!(e, "dashboard: traffic counters_snapshot() failed");
+            crate::srv::admin::traffic::CountersSnapshot::default()
+        },
+    };
+    let history = match state.traffic.history_snapshot() {
+        Ok(v) => v,
+        Err(e) => {
+            error!(e, "dashboard: traffic history_snapshot() failed");
+            Vec::new()
+        },
+    };
+    let recent = match state.traffic.recent(50) {
+        Ok(v) => v,
+        Err(e) => {
+            error!(e, "dashboard: traffic recent() failed");
+            Vec::new()
+        },
+    };
+
+    let mut status_keys: Vec<u16> = counters.by_status.keys().copied().collect();
+    status_keys.sort();
+    let rate_last = compute_rate_last(&history);
+    let chart_json = build_chart_json(&history, &status_keys);
+
+    // Build the counters JSON by hand to stay dependency-free.
+    let mut by_status_json = String::from("[");
+    for (i, s) in status_keys.iter().enumerate() {
+        if i > 0 { by_status_json.push(','); }
+        let count = counters.by_status.get(s).copied().unwrap_or(0);
+        by_status_json.push_str(&fmt!(
+            "{{\"code\":{c},\"count\":{n}}}",
+            c = s,
+            n = count,
+        ));
+    }
+    by_status_json.push(']');
+
+    let mut recent_json = String::from("[");
+    for (i, r) in recent.iter().enumerate() {
+        if i > 0 { recent_json.push(','); }
+        recent_json.push_str(&fmt!(
+            "{{\"method\":\"{m}\",\"vhost\":\"{v}\",\"path\":\"{p}\",\
+            \"status\":{s},\"duration\":\"{d}\"}}",
+            m = json_escape(&r.method),
+            v = json_escape(&r.vhost),
+            p = json_escape(&r.path),
+            s = r.status,
+            d = json_escape(&format_duration_us(r.duration_us)),
+        ));
+    }
+    recent_json.push(']');
+
+    let body = fmt!(
+        "{{\"counters\":{{\"total\":{total},\"rate\":{rate},\
+        \"by_status\":{by_status}}},\
+        \"chart\":{chart},\"recent\":{recent}}}",
+        total     = counters.total,
+        rate      = format_float(rate_last),
+        by_status = by_status_json,
+        chart     = chart_json,
+        recent    = recent_json,
+    );
+
+    HttpMessage::new_response(HttpStatus::OK)
+        .with_field(
+            HeaderName::ContentType,
+            HeaderFieldValue::Generic(
+                "application/json; charset=utf-8".to_string()),
+        )
+        .with_field(
+            HeaderName::CacheControl,
+            HeaderFieldValue::Generic("no-store".to_string()),
+        )
+        .with_body(body.into_bytes())
+}
+
+/// Escape a string for inclusion inside a JSON string literal. Only
+/// covers the characters actually reachable through `RequestRecord`
+/// (backslash, double quote, control characters). Not a general
+/// JSON encoder.
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '"'  => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&fmt!("\\u{:04x}", c as u32));
+            },
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
@@ -585,7 +816,7 @@ fn render_traffic(
             <th>Method</th><th>Vhost</th><th>Path</th>\
             <th class=\"status\">Status</th><th class=\"num\">Duration</th>\
             </tr></thead>\n\
-            <tbody>{}</tbody>\n\
+            <tbody id=\"traffic-recent-body\">{}</tbody>\n\
             </table>\n",
             rows,
         )
@@ -595,17 +826,19 @@ fn render_traffic(
     // uPlot can measure it before the JSON arrives.
     let body = fmt!(
         "<h1>Traffic</h1>\n\
-        <div class=\"chip-row\">\n{chips}</div>\n\
+        <div class=\"chip-row\" id=\"traffic-chip-row\">\n{chips}</div>\n\
         <h2>Requests per sample interval</h2>\n\
         <div id=\"traffic-chart\" class=\"chart-panel\"></div>\n\
         <script id=\"traffic-chart-data\" type=\"application/json\">\n\
         {chart_json}\n\
         </script>\n\
         <script>\n{chart_js}\n</script>\n\
+        <script>\n{refresh_js}\n</script>\n\
         {recent}",
         chips      = headline_chips,
         chart_json = chart_json,
         chart_js   = TRAFFIC_CHART_JS,
+        refresh_js = crate::srv::admin::assets::AUTO_REFRESH_JS,
         recent     = recent_html,
     );
     let html = render_layout(
@@ -620,59 +853,165 @@ fn render_traffic(
 
 /// Client-side glue that reads the chart JSON blob embedded in
 /// the page and draws a stacked requests-per-interval chart
-/// with uPlot. Tiny on purpose: one fetch, one `new uPlot(...)`
-/// call, one resize handler.
+/// with uPlot. Exposes `window.steelTrafficRefresh()` so the
+/// auto-refresh polling loop can repaint the chip row, chart
+/// and recent-requests table without reloading the page.
 const TRAFFIC_CHART_JS: &str = r#"
 (function() {
     var el = document.getElementById('traffic-chart');
     var dataEl = document.getElementById('traffic-chart-data');
-    if (!el || !dataEl || typeof uPlot === 'undefined') return;
-    var payload;
-    try {
-        payload = JSON.parse(dataEl.textContent);
-    } catch (e) {
-        el.textContent = 'Chart data unavailable.';
-        return;
-    }
-    if (!payload.t || payload.t.length < 2) {
-        el.innerHTML = '<p class="notice empty">Not enough samples yet. '
-            + 'The chart appears after two sample intervals '
-            + '(~10 seconds at the default cadence).</p>';
-        return;
-    }
-    var series = [{}];
+    if (!el || typeof uPlot === 'undefined') return;
+    var chart = null;
+    var chartSeriesLabels = [];
     var palette = ['#f33c57', '#1976d2', '#2e7d32', '#ed6c02',
                    '#6a1b9a', '#00838f', '#455a64'];
-    for (var i = 0; i < payload.series.length; i++) {
-        series.push({
-            label:  payload.series[i].label,
-            stroke: palette[i % palette.length],
-            width:  2,
-            fill:   palette[i % palette.length] + '22',
-            paths:  uPlot.paths.stepped({align: 1}),
-        });
+    function classForStatus(s) {
+        if (s >= 200 && s < 300) return 'chip-ok';
+        if (s >= 300 && s < 400) return 'chip-redirect';
+        if (s >= 400 && s < 500) return 'chip-client';
+        if (s >= 500 && s < 600) return 'chip-server';
+        return '';
     }
-    var data = [payload.t];
-    for (var j = 0; j < payload.series.length; j++) {
-        data.push(payload.series[j].values);
+    function descForStatus(s) {
+        if (s >= 200 && s < 300) return 'success';
+        if (s >= 300 && s < 400) return 'redirect';
+        if (s >= 400 && s < 500) return 'client error';
+        if (s >= 500 && s < 600) return 'server error';
+        return 'informational';
     }
-    var opts = {
-        width:  el.clientWidth || 800,
-        height: 260,
-        scales: {x: {time: true}},
-        axes: [
-            {stroke: '#666', grid: {stroke: '#eee'}},
-            {stroke: '#666', grid: {stroke: '#eee'}},
-        ],
-        series: series,
-        legend: {live: false},
-    };
-    var chart = new uPlot(opts, data, el);
-    window.addEventListener('resize', function() {
-        chart.setSize({
-            width:  el.clientWidth,
+    function buildChart(payload) {
+        var series = [{}];
+        chartSeriesLabels = [];
+        for (var i = 0; i < payload.series.length; i++) {
+            series.push({
+                label:  payload.series[i].label,
+                stroke: palette[i % palette.length],
+                width:  2,
+                fill:   palette[i % palette.length] + '22',
+                paths:  uPlot.paths.stepped({align: 1}),
+            });
+            chartSeriesLabels.push(payload.series[i].label);
+        }
+        var data = [payload.t];
+        for (var j = 0; j < payload.series.length; j++) {
+            data.push(payload.series[j].values);
+        }
+        var opts = {
+            width:  el.clientWidth || 800,
             height: 260,
+            scales: {x: {time: true}},
+            axes: [
+                {stroke: '#666', grid: {stroke: '#eee'}},
+                {stroke: '#666', grid: {stroke: '#eee'}},
+            ],
+            series: series,
+            legend: {live: false},
+        };
+        chart = new uPlot(opts, data, el);
+    }
+    function chartSchemaMatches(payload) {
+        if (payload.series.length !== chartSeriesLabels.length) return false;
+        for (var i = 0; i < payload.series.length; i++) {
+            if (payload.series[i].label !== chartSeriesLabels[i]) return false;
+        }
+        return true;
+    }
+    function updateChart(payload) {
+        if (!payload.t || payload.t.length < 2) {
+            if (!chart) {
+                el.innerHTML = '<p class="notice empty">Not enough samples yet. '
+                    + 'The chart appears after two sample intervals '
+                    + '(~10 seconds at the default cadence).</p>';
+            }
+            return;
+        }
+        if (!chart || !chartSchemaMatches(payload)) {
+            if (chart) { chart.destroy(); chart = null; }
+            el.innerHTML = '';
+            buildChart(payload);
+            return;
+        }
+        var data = [payload.t];
+        for (var j = 0; j < payload.series.length; j++) {
+            data.push(payload.series[j].values);
+        }
+        chart.setData(data);
+    }
+    function updateChips(counters) {
+        var row = document.getElementById('traffic-chip-row');
+        if (!row) return;
+        var parts = [];
+        parts.push(
+            '<div class="chip chip-total">'
+            + '<div class="chip-label">Total</div>'
+            + '<div class="chip-value">' + counters.total + '</div>'
+            + '<div class="chip-sub">requests since startup</div>'
+            + '</div>'
+        );
+        parts.push(
+            '<div class="chip">'
+            + '<div class="chip-label">Rate</div>'
+            + '<div class="chip-value">' + counters.rate.toFixed(2) + '</div>'
+            + '<div class="chip-sub">requests / sec (last interval)</div>'
+            + '</div>'
+        );
+        counters.by_status.forEach(function(entry) {
+            parts.push(
+                '<div class="chip ' + classForStatus(entry.code) + '">'
+                + '<div class="chip-label">HTTP ' + entry.code + '</div>'
+                + '<div class="chip-value">' + entry.count + '</div>'
+                + '<div class="chip-sub">' + descForStatus(entry.code) + '</div>'
+                + '</div>'
+            );
         });
+        row.innerHTML = parts.join('');
+    }
+    function updateRecent(recent) {
+        var body = document.getElementById('traffic-recent-body');
+        if (!body) return;
+        if (!recent.length) return;
+        var html = '';
+        for (var i = 0; i < recent.length; i++) {
+            var r = recent[i];
+            html += '<tr>'
+                + '<td><code>' + r.method + '</code></td>'
+                + '<td>' + r.vhost + '</td>'
+                + '<td class="path"><code>' + r.path + '</code></td>'
+                + '<td class="status ' + classForStatus(r.status) + '">' + r.status + '</td>'
+                + '<td class="num">' + r.duration + '</td>'
+                + '</tr>';
+        }
+        body.innerHTML = html;
+    }
+    function refreshFrom(payload) {
+        if (!payload) return;
+        updateChips(payload.counters);
+        updateChart(payload.chart);
+        updateRecent(payload.recent);
+    }
+    function refresh() {
+        fetch('/admin/traffic.json', { credentials: 'same-origin' })
+            .then(function(r) { return r.ok ? r.json() : null; })
+            .then(refreshFrom)
+            .catch(function() {});
+    }
+    // First paint: prefer the inline blob for a zero-RTT render,
+    // fall back to the JSON feed if the blob is missing or empty.
+    if (dataEl) {
+        try {
+            var payload = JSON.parse(dataEl.textContent);
+            updateChart(payload);
+        } catch (e) {
+            refresh();
+        }
+    } else {
+        refresh();
+    }
+    window.steelTrafficRefresh = refresh;
+    window.addEventListener('resize', function() {
+        if (chart) {
+            chart.setSize({ width: el.clientWidth, height: 260 });
+        }
     });
 })();
 "#;
