@@ -188,7 +188,7 @@ impl<
         info!("Listening on: {}", addr);
 
         loop {
-            let (mut stream, src_addr) = match listener.accept().await {
+            let (stream, src_addr) = match listener.accept().await {
                 Ok(pair) => pair,
                 Err(e) => {
                     error!(err!(e, "TCP connection aborted."; IO, Network));

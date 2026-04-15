@@ -31,7 +31,6 @@ use std::{
 };
 
 use tokio_rustls::rustls::{
-    self,
     ClientConfig,
     pki_types::{
         CertificateDer,

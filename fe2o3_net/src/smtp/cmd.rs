@@ -1,5 +1,4 @@
 use crate::{
-    dns::Fqdn,
     email::msg::EmailMessage,
     smtp::codes::SmtpResponseCode,
 };

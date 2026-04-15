@@ -1691,11 +1691,11 @@ impl<const LEN: usize> PublicKey<LEN> {
         &self.seed
     }
 
-    fn iter(&self) -> Chain<Iter<u8>, Iter<u8>> {
+    fn iter(&self) -> Chain<Iter<'_, u8>, Iter<'_, u8>> {
         self.key.iter().chain(self.seed.iter())
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> { 
+    pub fn to_bytes(&self) -> Vec<u8> {
         [&self.key[..], &self.seed[..]].concat()
     }
 
@@ -1751,7 +1751,7 @@ impl<const LEN: usize> SecretKeyCPA<LEN> {
         &self.key
     }
 
-    fn iter(&self) -> Iter<u8> {
+    fn iter(&self) -> Iter<'_, u8> {
         self.key.iter()
     }
 
@@ -1820,15 +1820,15 @@ impl<
         Chain<
             Chain<
                 Chain<
-                    Iter<u8>,
+                    Iter<'_, u8>,
                     Chain<
-                        Iter<u8>,
-                        Iter<u8>,
+                        Iter<'_, u8>,
+                        Iter<'_, u8>,
                     >,
                 >,
-                Iter<u8>,
+                Iter<'_, u8>,
             >,
-            Iter<u8>,
+            Iter<'_, u8>,
         >
     {
         self.sk.iter()
@@ -1895,7 +1895,7 @@ impl<
     CipherText<SBK, PVCB>
 {
 
-    fn iter(&self) -> Chain<Iter<u8>, Iter<u8>> {
+    fn iter(&self) -> Chain<Iter<'_, u8>, Iter<'_, u8>> {
         self.ct.iter().chain(self.cm.iter())
     }
 
