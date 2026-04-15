@@ -118,6 +118,7 @@ pub struct CountersSnapshot {
 /// Cheaply cloneable via `Arc`. A typical deployment constructs
 /// one and stores it both in the request pipeline (via
 /// `ServerContext`) and in the admin state (for the dashboard).
+#[derive(Debug)]
 pub struct TrafficRecorder {
     /// Fixed ring buffer capacity. Older entries are dropped when
     /// a new entry arrives at capacity.

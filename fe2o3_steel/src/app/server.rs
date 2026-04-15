@@ -6,6 +6,10 @@ use crate::{
         repl::AppShellContext,
     },
     srv::{
+        admin::{
+            state::AdminState,
+            traffic::TrafficRecorder,
+        },
         cert::Certificate,
         cfg::ServerConfig,
         constant as srv_const,
@@ -352,6 +356,23 @@ impl AppShellContext {
             }
         };
 
+        // Build the admin dashboard runtime. AdminState holds a
+        // shared handle to the wallet (so dashboard login uses the
+        // same admin list the CLI sees) plus an AES-256-GCM cipher
+        // pre-keyed with a SHA3-256 derivation of the wallet master
+        // key, used for stateless signed session cookies. The
+        // TrafficRecorder is shared across every vhost so the
+        // dashboard can present a single host-wide traffic view.
+        let admin_state = res!(AdminState::new(
+            self.wallet.clone(),
+            &self.db_enc_key,
+        ));
+        let admin_state = Arc::new(admin_state);
+        let traffic = TrafficRecorder::new_shared(0);
+        info!("Admin dashboard runtime initialised \
+            (session key derived; traffic ring capacity {}).",
+            traffic.capacity());
+
         for vh in &vhosts_cfg {
             let public_dir = match res!(vh.get_public_dir(&root_path)) {
                 Some(p) => p,
@@ -394,6 +415,8 @@ impl AppShellContext {
                 self.webhook_registry.clone(),
                 self.api_handler_registry.clone(),
                 tls_client.clone(),
+                Some(admin_state.clone()),
+                Some(traffic.clone()),
             );
 
             let runtime = Arc::new(VhostRuntime {

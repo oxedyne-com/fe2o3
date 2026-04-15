@@ -18,7 +18,10 @@ use crate::{
     },
 };
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    RwLock,
+};
 
 use oxedyne_fe2o3_core::{
     prelude::*,
@@ -379,7 +382,7 @@ pub fn run_with_extension<E: AppExtension>(extension: E) -> Outcome<()> {
         syntax,
         ws:                     BTreeMap::new(),
         db_enc_key:             db_default_enc_key,
-        wallet,
+        wallet:                 Arc::new(RwLock::new(wallet)),
         unlocked_admin_name,
         unlocked_admin_scopes,
         webhook_registry:       Arc::new(webhook_registry),

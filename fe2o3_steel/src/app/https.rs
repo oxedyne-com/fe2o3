@@ -1,4 +1,9 @@
 use crate::srv::{
+    admin::{
+        handler as admin_handler,
+        state::AdminState,
+        traffic::TrafficRecorder,
+    },
     api::{
         self,
         ApiHandlerRegistry,
@@ -87,6 +92,17 @@ pub struct AppWebHandler<
     pub api_handler_registry:   Arc<ApiHandlerRegistry>,
     /// TLS client config for outbound HTTPS requests to upstream APIs.
     pub tls_client:             Option<Arc<ClientConfig>>,
+    /// Shared admin dashboard runtime. Built once at server startup
+    /// from the unlocked wallet, then handed to every vhost so the
+    /// dashboard `/admin/*` routes can authenticate and authorise
+    /// requests against the same admin list and session key. `None`
+    /// disables the dashboard entirely (the route returns 404).
+    pub admin_state:            Option<Arc<AdminState>>,
+    /// Shared traffic recorder. Every request that reaches a vhost
+    /// is logged here for the dashboard's traffic view. `None`
+    /// disables traffic recording without affecting request
+    /// handling.
+    pub traffic:                Option<Arc<TrafficRecorder>>,
 }
 
 impl<
@@ -105,6 +121,8 @@ impl<
         webhook_registry:       Arc<WebhookRegistry>,
         api_handler_registry:   Arc<ApiHandlerRegistry>,
         tls_client:             Option<Arc<ClientConfig>>,
+        admin_state:            Option<Arc<AdminState>>,
+        traffic:                Option<Arc<TrafficRecorder>>,
     )
         -> Self
     {
@@ -119,6 +137,8 @@ impl<
             webhook_registry,
             api_handler_registry,
             tls_client,
+            admin_state,
+            traffic,
         }
     }
 
@@ -220,8 +240,33 @@ impl<
         let api_routes = self.api_routes.clone();
         let api_handler_registry = self.api_handler_registry.clone();
         let tls_client = self.tls_client.clone();
+        let admin_state = self.admin_state.clone();
 
         async move {
+            // The dashboard owns the entire `/admin` and `/admin/*`
+            // subtree on every vhost it is configured for. Dispatch
+            // before any API/webhook/static route lookups so app
+            // routes cannot accidentally shadow it.
+            if request_path == "/admin"
+                || request_path.starts_with("/admin/")
+            {
+                if let Some(state) = &admin_state {
+                    let resp = res!(admin_handler::handle_get(
+                        state.as_ref(),
+                        &request_path,
+                        &id,
+                    ).await);
+                    return Ok(Some(resp));
+                }
+                // Dashboard not configured. Pretend the route does
+                // not exist so we do not leak the existence of an
+                // admin endpoint.
+                return Ok(Some(HttpMessage::respond_with_text(
+                    HttpStatus::NotFound,
+                    "Not found.",
+                )));
+            }
+
             // Check API routes for a handler-mode match before falling
             // through to static file serving. Proxy-mode API routes are
             // POST-only, so we only match handler-mode routes here.
@@ -352,8 +397,31 @@ impl<
         let webhook_registry = self.webhook_registry.clone();
         let api_handler_registry = self.api_handler_registry.clone();
         let tls_client = self.tls_client.clone();
+        let admin_state = self.admin_state.clone();
 
         async move {
+            // Dashboard `/admin/*` POST handlers (login form POST,
+            // logout, future mutations). Same precedence rule as
+            // GET: dashboard owns the subtree and dispatches before
+            // any other lookup.
+            if request_path == "/admin"
+                || request_path.starts_with("/admin/")
+            {
+                if let Some(state) = &admin_state {
+                    let resp = res!(admin_handler::handle_post(
+                        state.as_ref(),
+                        &request_path,
+                        &body,
+                        &id,
+                    ).await);
+                    return Ok(Some(resp));
+                }
+                return Ok(Some(HttpMessage::respond_with_text(
+                    HttpStatus::NotFound,
+                    "Not found.",
+                )));
+            }
+
             // Check webhook routes first.
             if let Some(wh) = webhook_routes.iter().find(|r| r.path == request_path) {
                 debug!("{}: POST {} -> webhook handler '{}'",

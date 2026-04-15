@@ -66,6 +66,7 @@ use std::{
     path::{
         Path,
     },
+    sync::RwLock,
 };
 
 use secrecy::{
@@ -85,7 +86,13 @@ pub struct AppShellContext {
     /// at shell start-up. The `server` command uses this key to open one
     /// Ozone instance per configured vhost.
     pub db_enc_key:         Vec<u8>,
-    pub wallet:             Wallet,
+    /// The wallet is shared via `Arc<RwLock<_>>` so that the admin
+    /// dashboard handler (running inside the HTTPS server task) can
+    /// hold a clone of the same wallet that the REPL mutates from
+    /// the operator's terminal. CLI admin verbs and dashboard admin
+    /// verbs therefore observe each other's changes without any
+    /// reload-from-disk dance.
+    pub wallet:             Arc<RwLock<Wallet>>,
     /// Name of the admin whose password unlocked the wallet at
     /// start-up. Empty when the wallet was just created. Threaded
     /// through so privileged subcommands do not have to re-prompt
@@ -257,7 +264,11 @@ impl AppShellContext {
                     let pass = res!(UserInput::ask_for_secret(None));
                     let mut kdf = res!(KeyDerivationScheme::from_str(&self.app_cfg.kdf_name));
                     let key = res!(UserInput::derive_key(&mut kdf, pass));
-                    if self.wallet.enc_secs().get(name).is_some() {
+                    let already_present = {
+                        let w = lock_read!(self.wallet);
+                        w.enc_secs().get(name).is_some()
+                    };
+                    if already_present {
                         if res!(UserInput::ask(
                             fmt!("Encrypted secret '{}' already exists, replace? (Y/N): ", name).as_str(),
                         )).to_lowercase().as_str() != "y" {
@@ -278,24 +289,34 @@ impl AppShellContext {
                     let base2x = base2x::HEMATITE64;
                     let b2x_sec = base2x.to_string(&enc_sec);
                     map.insert(dat!("enc_sec"), dat!(b2x_sec));
-                    if let Some(enc_sec_map) = self.wallet.enc_secs_mut().get_mut(name) {
-                        *enc_sec_map = dat!(map);
-                    } else {
-                        self.wallet.enc_secs_mut().insert(name.clone(), dat!(map));
-                    }
                     let wallet_path = Path::new("./").join(app_const::WALLET_NAME);
-                    res!(self.wallet.save(
-                        &wallet_path, "  ", Some(EncoderConfig::<(), ()>::default()),
-                    ));
+                    {
+                        let mut w = lock_write!(self.wallet);
+                        if let Some(enc_sec_map) = w.enc_secs_mut().get_mut(name) {
+                            *enc_sec_map = dat!(map);
+                        } else {
+                            w.enc_secs_mut().insert(name.clone(), dat!(map));
+                        }
+                        res!(w.save(
+                            &wallet_path, "  ", Some(EncoderConfig::<(), ()>::default()),
+                        ));
+                    }
                 } else if res!(msg_cmd.has_only_arg("recover")) {
                     let vals = res!(msg_cmd.get_arg_vals("recover").with_len(1));
                     let name = &vals[0];
-                    let enc_sec_dat = match self.wallet.enc_secs().get(name) {
-                        Some(map_dat) => map_dat,
-                        None => return Ok(Evaluation::Output(
-                            fmt!("Secret '{}' not found in wallet.", name)
-                        )),
+                    // Clone the encrypted-secret map out of the wallet
+                    // so we can drop the read lock before the
+                    // interactive passphrase prompt below.
+                    let enc_sec_dat = {
+                        let w = lock_read!(self.wallet);
+                        match w.enc_secs().get(name) {
+                            Some(map_dat) => map_dat.clone(),
+                            None => return Ok(Evaluation::Output(
+                                fmt!("Secret '{}' not found in wallet.", name)
+                            )),
+                        }
                     };
+                    let enc_sec_dat = &enc_sec_dat;
                     // Derive the encryption key from the wallet passphrase using the kdf
                     // configuration.  Drop the pass as soon as we can.
                     let key = {
@@ -306,7 +327,7 @@ impl AppShellContext {
                             res!(enc_sec_dat.map_get_type_must(&dat!("kdf_name"), &[&Kind::Str])),
                             Str,
                         );
-                        let mut kdf = res!(KeyDerivationScheme::from_str(kdf_name));
+                        let mut kdf = res!(KeyDerivationScheme::from_str(&kdf_name));
                         let kdf_cfg = try_extract_dat!(
                             res!(enc_sec_dat.map_get_type_must(&dat!("kdf_cfg"), &[&Kind::Str])),
                             Str,
@@ -320,7 +341,7 @@ impl AppShellContext {
                         res!(enc_sec_dat.map_get_type_must(&dat!("enc_name"), &[&Kind::Str])),
                         Str,
                     );
-                    let mut enc = res!(EncryptionScheme::from_str(enc_name));
+                    let mut enc = res!(EncryptionScheme::from_str(&enc_name));
                     enc = res!(enc.set_secret_key(Some(&key)));
                     let enc_sec_base2x = try_extract_dat!(
                         res!(enc_sec_dat.map_get_type_must(&dat!("enc_sec"), &[&Kind::Str])),
@@ -538,7 +559,10 @@ impl AppShellContext {
             "  ",
             Some(EncoderConfig::<(), ()>::default()),
         ));
-        self.wallet = new_wallet;
+        {
+            let mut w = lock_write!(self.wallet);
+            *w = new_wallet;
+        }
         audit_log(&admin_name, "wallet.migrate", "ok",
             &fmt!("backup={:?}", backup_path));
         Ok(Evaluation::Output(fmt!(
@@ -628,22 +652,25 @@ impl AppShellContext {
         }
         let new_pass = res!(UserInput::create_pass(app_const::MAX_CREATE_PASS_ATTEMPTS));
         let master = self.db_enc_key.clone();
-        if let Err(e) = self.wallet.change_password(
-            &caller_name,
-            &master,
-            new_pass.expose_secret().as_bytes(),
-            oxedyne_fe2o3_crypto::keys::DEFAULT_WALLET_KDF_NAME,
-        ) {
-            audit_log(&caller_name, "admin.passwd", "err",
-                &fmt!("reason={}", e));
-            return Err(e);
-        }
         let wallet_path = Path::new("./").join(app_const::WALLET_NAME);
-        res!(self.wallet.save(
-            &wallet_path,
-            "  ",
-            Some(EncoderConfig::<(), ()>::default()),
-        ));
+        {
+            let mut w = lock_write!(self.wallet);
+            if let Err(e) = w.change_password(
+                &caller_name,
+                &master,
+                new_pass.expose_secret().as_bytes(),
+                oxedyne_fe2o3_crypto::keys::DEFAULT_WALLET_KDF_NAME,
+            ) {
+                audit_log(&caller_name, "admin.passwd", "err",
+                    &fmt!("reason={}", e));
+                return Err(e);
+            }
+            res!(w.save(
+                &wallet_path,
+                "  ",
+                Some(EncoderConfig::<(), ()>::default()),
+            ));
+        }
         audit_log(&caller_name, "admin.passwd", "ok", "self");
         Ok(Evaluation::Output(fmt!(
             "Password for admin '{}' rotated in place. The new password \
@@ -659,19 +686,24 @@ impl AppShellContext {
             "{:<24} {:<12} {}",
             "name", "expires_at", "scopes",
         ));
-        for a in self.wallet.admins() {
-            let expiry = if a.expires_at == 0 {
-                "never".to_string()
-            } else {
-                fmt!("{}", a.expires_at)
-            };
-            lines.push(fmt!(
-                "{:<24} {:<12} {}",
-                a.name, expiry, a.scopes.join(","),
-            ));
+        let count;
+        {
+            let w = lock_read!(self.wallet);
+            for a in w.admins() {
+                let expiry = if a.expires_at == 0 {
+                    "never".to_string()
+                } else {
+                    fmt!("{}", a.expires_at)
+                };
+                lines.push(fmt!(
+                    "{:<24} {:<12} {}",
+                    a.name, expiry, a.scopes.join(","),
+                ));
+            }
+            count = w.admins().len();
         }
         audit_log("(anon)", "admin.list", "ok",
-            &fmt!("count={}", self.wallet.admins().len()));
+            &fmt!("count={}", count));
         Ok(Evaluation::Output(lines.join("\n")))
     }
 
@@ -701,24 +733,27 @@ impl AppShellContext {
         }
         let new_pass = res!(UserInput::create_pass(app_const::MAX_CREATE_PASS_ATTEMPTS));
         let master = self.db_enc_key.clone();
-        if let Err(e) = self.wallet.enrol(
-            &master,
-            new_name,
-            new_pass.expose_secret().as_bytes(),
-            new_scopes.clone(),
-            expires_at,
-            oxedyne_fe2o3_crypto::keys::DEFAULT_WALLET_KDF_NAME,
-        ) {
-            audit_log(&caller_name, "admin.add", "err",
-                &fmt!("target={} reason={}", new_name, e));
-            return Err(e);
-        }
         let wallet_path = Path::new("./").join(app_const::WALLET_NAME);
-        res!(self.wallet.save(
-            &wallet_path,
-            "  ",
-            Some(EncoderConfig::<(), ()>::default()),
-        ));
+        {
+            let mut w = lock_write!(self.wallet);
+            if let Err(e) = w.enrol(
+                &master,
+                new_name,
+                new_pass.expose_secret().as_bytes(),
+                new_scopes.clone(),
+                expires_at,
+                oxedyne_fe2o3_crypto::keys::DEFAULT_WALLET_KDF_NAME,
+            ) {
+                audit_log(&caller_name, "admin.add", "err",
+                    &fmt!("target={} reason={}", new_name, e));
+                return Err(e);
+            }
+            res!(w.save(
+                &wallet_path,
+                "  ",
+                Some(EncoderConfig::<(), ()>::default()),
+            ));
+        }
         audit_log(&caller_name, "admin.add", "ok",
             &fmt!("target={} scopes={} expires_at={}",
                 new_name, new_scopes.join(","), expires_at));
@@ -737,17 +772,20 @@ impl AppShellContext {
                 remove admin entries.", caller_name;
                 Input, Invalid, Security));
         }
-        if let Err(e) = self.wallet.remove_by_name(target_name) {
-            audit_log(&caller_name, "admin.remove", "err",
-                &fmt!("target={} reason={}", target_name, e));
-            return Err(e);
-        }
         let wallet_path = Path::new("./").join(app_const::WALLET_NAME);
-        res!(self.wallet.save(
-            &wallet_path,
-            "  ",
-            Some(EncoderConfig::<(), ()>::default()),
-        ));
+        {
+            let mut w = lock_write!(self.wallet);
+            if let Err(e) = w.remove_by_name(target_name) {
+                audit_log(&caller_name, "admin.remove", "err",
+                    &fmt!("target={} reason={}", target_name, e));
+                return Err(e);
+            }
+            res!(w.save(
+                &wallet_path,
+                "  ",
+                Some(EncoderConfig::<(), ()>::default()),
+            ));
+        }
         audit_log(&caller_name, "admin.remove", "ok",
             &fmt!("target={}", target_name));
         Ok(Evaluation::Output(fmt!(

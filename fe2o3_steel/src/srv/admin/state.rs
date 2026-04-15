@@ -40,7 +40,7 @@ pub const SESSION_KEY_DERIVATION_INFO: &[u8] =
 ///
 /// Cheaply cloneable: the wallet is behind an `Arc<RwLock<_>>` and
 /// the encryption scheme clones its key material.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct AdminState {
     /// Shared wallet handle. Login reads from this; admin management
     /// (task #11) writes through it.
