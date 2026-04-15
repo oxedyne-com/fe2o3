@@ -52,6 +52,11 @@ use std::{
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
+/// Interval between dashboard-state persistence writes. A restart or
+/// crash can lose at most one tick's worth of derived history, which is
+/// a reasonable trade-off against ozone write load.
+pub const PERSIST_INTERVAL_SECS: u64 = 60;
+
 
 /// The Steel TCP/TLS server, wrapping a `ServerContext`.
 pub struct Server<
@@ -84,6 +89,16 @@ impl<
         -> Self
     {
         Self { context }
+    }
+
+    /// Resolve the database handle associated with the primary vhost.
+    /// Used by admin-state persistence to settle on a single database
+    /// for dashboard-wide state without a second configuration knob.
+    fn primary_db_handle(&self) -> Option<(Arc<std::sync::RwLock<DB>>, UID)> {
+        let default_vhost = match &self.context.protocol {
+            Protocol::Web { default_vhost, .. } => default_vhost.clone(),
+        };
+        self.context.db_for_vhost(&default_vhost)
     }
 
     /// Bind the configured address and port, perform TLS + vhost dispatch
@@ -149,8 +164,40 @@ impl<
         // resource strip has real CPU / memory / disk / network
         // data to render. Lives next to the traffic sampler so
         // both get the same late-spawn treatment.
+        //
+        // Before the sampler starts, load any persisted sparkline
+        // points the previous run saved to ozone and seed the
+        // sampler so the Overview chart does not reset to blank
+        // across a restart.
         if let Some(admin) = self.context.admin_state.clone() {
             let sampler = admin.host_sampler.clone();
+
+            // Start-up restore. Pick the default vhost's database
+            // (the primary / the vhost the dashboard is attached
+            // to) and pull the derived history back.
+            let primary_db = self.primary_db_handle();
+            if let Some((db, _uid)) = primary_db.as_ref() {
+                let db_guard = db.read();
+                if let Ok(db_g) = db_guard {
+                    match crate::srv::admin::persist::load_host_points(&*db_g) {
+                        Ok(points) if !points.is_empty() => {
+                            info!("admin persist: restored {} derived host points.",
+                                points.len());
+                            if let Err(e) = sampler.seed_persisted(points) {
+                                warn!("host sampler seed: {}", e);
+                            }
+                        },
+                        Ok(_) => {
+                            info!("admin persist: no previous host history to restore.");
+                        },
+                        Err(e) => {
+                            warn!("admin persist: load host points failed: {}", e);
+                        },
+                    }
+                }
+            }
+
+            let sampler_for_task = sampler.clone();
             tokio::spawn(async move {
                 let mut ticker = tokio::time::interval(
                     std::time::Duration::from_secs(
@@ -159,17 +206,61 @@ impl<
                 );
                 // Prime with an immediate read so the dashboard
                 // has a non-empty ring on the first request.
-                if let Err(e) = sampler.sample_now() {
+                if let Err(e) = sampler_for_task.sample_now() {
                     warn!("host sampler prime: {}", e);
                 }
                 ticker.tick().await;
                 loop {
                     ticker.tick().await;
-                    if let Err(e) = sampler.sample_now() {
+                    if let Err(e) = sampler_for_task.sample_now() {
                         warn!("host sampler: {}", e);
                     }
                 }
             });
+
+            // Periodic saver: write the merged derived history to
+            // ozone every PERSIST_INTERVAL_SECS so a crash or
+            // restart loses at most one tick's worth of history.
+            // Spawned in addition to -- not instead of -- the
+            // live sampler task so a slow disk cannot throttle
+            // the sampling cadence.
+            if let Some((db, uid)) = primary_db {
+                let sampler_for_save = sampler.clone();
+                tokio::spawn(async move {
+                    let mut ticker = tokio::time::interval(
+                        std::time::Duration::from_secs(PERSIST_INTERVAL_SECS),
+                    );
+                    ticker.tick().await;
+                    loop {
+                        ticker.tick().await;
+                        let points = match sampler_for_save.merged_derived_history() {
+                            Ok(p) => p,
+                            Err(e) => {
+                                warn!("admin persist: merged history failed: {}", e);
+                                continue;
+                            },
+                        };
+                        if points.is_empty() {
+                            continue;
+                        }
+                        let db_guard = db.read();
+                        let db_g = match db_guard {
+                            Ok(g) => g,
+                            Err(_) => {
+                                warn!("admin persist: db read lock poisoned.");
+                                continue;
+                            },
+                        };
+                        if let Err(e) = crate::srv::admin::persist::save_host_points(
+                            &*db_g,
+                            uid,
+                            &points,
+                        ) {
+                            warn!("admin persist: save host points failed: {}", e);
+                        }
+                    }
+                });
+            }
         }
 
         // Spawn the plaintext HTTP redirect listener if configured.

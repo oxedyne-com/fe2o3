@@ -461,10 +461,10 @@ fn render_host_json(
         );
     }
 
-    let history = match state.host_sampler.history_snapshot() {
-        Ok(h) => h,
+    let merged = match state.host_sampler.merged_derived_history() {
+        Ok(v) => v,
         Err(e) => {
-            error!(e, "dashboard: host history snapshot failed");
+            error!(e, "dashboard: host merged_derived_history failed");
             return HttpMessage::respond_with_text(
                 HttpStatus::InternalServerError,
                 "Host sampler error.",
@@ -472,10 +472,10 @@ fn render_host_json(
         },
     };
 
-    // Need at least two samples to derive any rate-based figure.
+    // No points yet (fewer than two live samples and nothing persisted).
     // Emit an empty payload so the browser-side JS can render the
     // "warming up" state cleanly rather than throw on undefined.
-    if history.len() < 2 {
+    if merged.is_empty() {
         let empty = "{\"t\":[],\"cpu\":[],\"mem\":[],\"disk\":[],\"net\":[]}";
         return HttpMessage::new_response(HttpStatus::OK)
             .with_field(
@@ -495,21 +495,7 @@ fn render_host_json(
     let mut mem = String::from("[");
     let mut disk = String::from("[");
     let mut net = String::from("[");
-    for w in history.windows(2) {
-        let prev = &w[0];
-        let curr = &w[1];
-        let d = curr.snapshot.delta(&prev.snapshot);
-        // Sum deltas across every device / interface; the strip
-        // panel shows the whole-host picture, not per-device. The
-        // operator can drill into `/admin/traffic` or a future
-        // per-device view if they want breakdown.
-        let disk_bps: f64 = d.disk.iter()
-            .map(|dd| dd.read_bps + dd.write_bps).sum();
-        let net_bps: f64 = d.net.iter()
-            .filter(|ni| ni.name != "lo")
-            .map(|ni| ni.rx_bps + ni.tx_bps).sum();
-        let mem_pct = curr.snapshot.mem.used_fraction() * 100.0;
-        let cpu_pct = d.cpu_busy * 100.0;
+    for p in &merged {
         if !ts.ends_with('[') {
             ts.push(',');
             cpu.push(',');
@@ -517,11 +503,11 @@ fn render_host_json(
             disk.push(',');
             net.push(',');
         }
-        ts.push_str(&fmt!("{}", curr.when_secs));
-        cpu.push_str(&format_float(cpu_pct));
-        mem.push_str(&format_float(mem_pct));
-        disk.push_str(&format_float(disk_bps));
-        net.push_str(&format_float(net_bps));
+        ts.push_str(&fmt!("{}", p.t_secs));
+        cpu.push_str(&format_float(p.cpu_pct));
+        mem.push_str(&format_float(p.mem_pct));
+        disk.push_str(&format_float(p.disk_bps));
+        net.push_str(&format_float(p.net_bps));
     }
     ts.push(']');
     cpu.push(']');

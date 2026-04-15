@@ -52,6 +52,7 @@ pub mod handler;
 pub mod host_sampler;
 pub mod local_listener;
 pub mod ozone_view;
+pub mod persist;
 pub mod session;
 pub mod state;
 pub mod traffic;
