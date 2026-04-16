@@ -2,25 +2,24 @@
 //! cohorts, intended for the strong-consistency tables of the Hematite
 //! distributed Ozone layer.
 //!
-//! # Scope of this crate
+//! # Protocol
 //!
-//! This is the *happy-path three-phase skeleton* of Basic HotStuff: a fixed
-//! leader drives a single view through `Prepare -> PreCommit -> Commit ->
-//! Decide`. The primitive is a pure, deterministic state machine; it has no
-//! transport, no crypto, and no time. Signatures are opaque byte vectors
-//! supplied by the caller and aggregated without inspection, exactly as in
-//! the other fe2o3 primitives.
+//! This is Basic HotStuff: a fixed leader drives a single view through
+//! `Prepare -> PreCommit -> Commit -> Decide`, and the cohort recovers from
+//! a silent or misbehaving leader through a view-change round. The primitive
+//! is a pure, deterministic state machine; it has no transport, no crypto,
+//! and no time. Signatures are opaque byte vectors supplied by the caller
+//! and aggregated without inspection.
 //!
-//! # Deliberately deferred
+//! # Safety predicate
 //!
-//! - **View change and leader rotation.** The current implementation panics
-//!   in no sense but also cannot recover from a silent or Byzantine leader.
-//!   A follow-up commit will add the `NEW_VIEW` flow, leader rotation per
-//!   view, and the locked/prepared safety rules.
-//! - **Checkpointing.** Multi-decision sequencing beyond a single view.
-//! - **Byzantine-fault simulation tests.** The current test matrix exercises
-//!   only honest replicas; adversarial tests will land alongside view
-//!   change.
+//! Every `Prepare` proposal in view `v > 1` must either carry a justify QC
+//! that endorses the locally-locked block or carry a justify QC from a view
+//! strictly newer than the locally-locked QC. A fresh proposal with no
+//! justify is only legal when the replica holds no lock -- which happens
+//! when the NewView quorum collected by the new leader saw no prior prepare
+//! QC anywhere in the cohort. [`replica::Replica::on_proposal`] enforces
+//! this.
 //!
 //! # Cohort sizes
 //!
@@ -33,8 +32,16 @@
 //! | 7   | 2   | 5      |
 //! | 9   | 2   | 7      |
 //!
-//! [`replica::Config::validate`] enforces the `λ >= 3z + 1` safety
-//! requirement.
+//! [`replica::Config::validate`] enforces the `λ >= 3z + 1` requirement.
+//!
+//! # Deferred
+//!
+//! - Checkpointing of multiple decisions (this primitive is one-decision).
+//! - Byzantine-fault simulation tests beyond the single unsafe-proposal case
+//!   currently in the integration-test suite.
+//! - Signature aggregation (we pass individual signatures through the QC;
+//!   callers implementing threshold signatures can swap the aggregation
+//!   logic at their integration layer).
 #![forbid(unsafe_code)]
 
 pub mod replica;

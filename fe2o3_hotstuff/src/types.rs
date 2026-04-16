@@ -121,6 +121,25 @@ pub struct Qc {
 	pub signatures:	Vec<(ReplicaId, Vec<u8>)>,
 }
 
+/// A view-change message sent by a replica to the leader of the next view.
+///
+/// The leader of the new view aggregates a quorum of `NewView` messages and
+/// picks the highest `prepare_qc` among them as the basis of the next
+/// `Prepare` proposal. A replica that has never seen a prepare QC sends
+/// `prepare_qc = None`.
+#[derive(Clone, Debug)]
+pub struct NewView {
+	/// The view the sender is entering. The new leader is
+	/// `leader_for(view)`; it accumulates messages whose `view` equals its
+	/// own current view.
+	pub view:		ViewId,
+	/// Replica identifier of the sender.
+	pub sender:		ReplicaId,
+	/// The sender's highest prepare QC, if any.
+	pub prepare_qc:	Option<Qc>,
+}
+
+
 impl Qc {
 	/// Returns the number of distinct voters in the QC.
 	pub fn voter_count(&self) -> usize {
