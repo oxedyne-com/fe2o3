@@ -172,6 +172,7 @@ pub async fn https_request(
         Pin::new(&mut stream),
         &Vec::new(),
         Some(false),
+        None,
     ).await;
 
     match result {

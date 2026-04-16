@@ -1157,6 +1157,33 @@ pub struct ServerConfig {
     /// but session-scoped commands will reject until the client obtains
     /// a session id through some other mechanism.
     pub allow_anonymous_sessions:       bool,
+    /// Maximum bytes accepted in the HTTP request header block before
+    /// the reader returns `413 Content Too Large`. Bounds memory
+    /// exposure to oversized headers such as cookie stuffing. A value
+    /// of `0` disables the limit.
+    pub http_max_header_bytes:          u64,
+    /// Maximum bytes accepted in the HTTP request body before the
+    /// reader returns `413 Content Too Large`. Checked against the
+    /// `Content-Length` header up front so oversize requests are
+    /// rejected before any body bytes are read. A value of `0`
+    /// disables the limit.
+    pub http_max_body_bytes:            u64,
+    /// Wall-clock budget for the HTTP header read phase, in
+    /// milliseconds. A slow client that fails to finish sending its
+    /// header block within this window is disconnected with a
+    /// `Timeout` error. A value of `0` disables the deadline.
+    pub http_header_read_timeout_ms:    u64,
+    /// When `true`, Steel injects a baseline set of security
+    /// response headers into every HTTPS response: `X-Content-Type-Options`,
+    /// `X-Frame-Options`, `Referrer-Policy`, `Permissions-Policy`.
+    /// Recommended on for production deployments.
+    pub security_headers_enabled:       bool,
+    /// Optional `Content-Security-Policy` header value. When
+    /// non-empty, Steel emits this string verbatim as the CSP
+    /// header on every HTTPS response. Defaults to empty because
+    /// CSP is app-specific and a strict default would break
+    /// existing front ends. Tighten on a per-deployment basis.
+    pub content_security_policy:        String,
 
     // --- Virtual hosts ------------------------------------------------------
     /// Ordered list of virtual host configurations, stored as a `Dat::List`
@@ -1216,6 +1243,11 @@ impl Default for ServerConfig {
             ws_ping_interval_secs:          30,
             server_max_errors_allowed:      30,
             allow_anonymous_sessions:       true,
+            http_max_header_bytes:          16 * 1024,            // 16 KiB
+            http_max_body_bytes:            8 * 1024 * 1024,      // 8 MiB
+            http_header_read_timeout_ms:    15_000,               // 15 s
+            security_headers_enabled:       true,
+            content_security_policy:        String::new(),
             vhosts:                         Dat::List(vec![Dat::Map(vhost_map)]),
             acme:                           AcmeConfig::default().to_datmap(),
             mail:                           DaticleMap::new(),

@@ -13,6 +13,7 @@ use crate::srv::{
 
 use oxedyne_fe2o3_core::{
     prelude::*,
+    error::ErrTag,
     id::ParseId,
     rand::RanDef,
 };
@@ -42,6 +43,7 @@ use oxedyne_fe2o3_net::{
         msg::{
             HttpMessageReader,
             HttpMessage,
+            ReadLimits,
         },
         status::HttpStatus,
     },
@@ -53,7 +55,10 @@ use std::{
     net::SocketAddr,
     pin::Pin,
     sync::Arc,
-    time::Instant,
+    time::{
+        Duration,
+        Instant,
+    },
 };
 
 use tokio::{
@@ -97,12 +102,36 @@ impl<
 
         let (mut read_stream, mut write_stream) = tokio::io::split(&mut stream);
 
+        // Build per-connection read limits from ServerConfig so the
+        // reader enforces the configured header / body bounds and the
+        // slowloris read deadline. A zero value in the config means
+        // "disabled" and maps to `None` in `ReadLimits`.
+        let limits = ReadLimits {
+            max_header_bytes: if self.cfg.http_max_header_bytes == 0 {
+                None
+            } else {
+                Some(self.cfg.http_max_header_bytes as usize)
+            },
+            max_body_bytes: if self.cfg.http_max_body_bytes == 0 {
+                None
+            } else {
+                Some(self.cfg.http_max_body_bytes as usize)
+            },
+            header_read_timeout: if self.cfg.http_header_read_timeout_ms == 0 {
+                None
+            } else {
+                Some(Duration::from_millis(
+                    self.cfg.http_header_read_timeout_ms,
+                ))
+            },
+        };
+
         let mut reader: HttpMessageReader<
             '_,
             { constant::HTTP_DEFAULT_HEADER_CHUNK_SIZE },
             { constant::HTTP_DEFAULT_BODY_CHUNK_SIZE },
             _,
-        > = HttpMessageReader::new(Pin::new(&mut read_stream));
+        > = HttpMessageReader::with_limits(Pin::new(&mut read_stream), limits);
 
         loop {
             let result = reader.next().await;
@@ -328,6 +357,61 @@ impl<
                                     None,
                                 );
                             }
+                            // Baseline security response headers: cheap
+                            // defence in depth against content sniffing,
+                            // clickjacking and referrer leakage. Each one
+                            // is a hard-coded conservative default; tighten
+                            // via per-deployment patches if the defaults
+                            // bite an integration.
+                            if self.cfg.security_headers_enabled {
+                                msg.header.fields.insert(
+                                    HeaderName::XContentTypeOptions,
+                                    HeaderFieldValue::Generic(
+                                        "nosniff".to_string()),
+                                    None,
+                                );
+                                msg.header.fields.insert(
+                                    HeaderName::XFrameOptions,
+                                    HeaderFieldValue::Generic(
+                                        "SAMEORIGIN".to_string()),
+                                    None,
+                                );
+                                msg.header.fields.insert(
+                                    HeaderName::ReferrerPolicy,
+                                    HeaderFieldValue::Generic(
+                                        "strict-origin-when-cross-origin"
+                                        .to_string()),
+                                    None,
+                                );
+                                // Permissions-Policy: deny every sensor
+                                // feature by default. Apps that need any
+                                // of camera / microphone / geolocation /
+                                // payment can override by tweaking this
+                                // string (future per-vhost config).
+                                msg.header.fields.insert(
+                                    HeaderName::PermissionsPolicy,
+                                    HeaderFieldValue::Generic(
+                                        "accelerometer=(), camera=(), \
+                                        geolocation=(), gyroscope=(), \
+                                        magnetometer=(), microphone=(), \
+                                        payment=(), usb=()".to_string()),
+                                    None,
+                                );
+                            }
+                            // Content-Security-Policy: only emit if the
+                            // operator configured a value. An empty CSP
+                            // string is not injected at all because the
+                            // absence of the header is different from
+                            // `default-src 'none'` -- the former is a
+                            // no-op, the latter blocks the whole page.
+                            if !self.cfg.content_security_policy.is_empty() {
+                                msg.header.fields.insert(
+                                    HeaderName::ContentSecurityPolicy,
+                                    HeaderFieldValue::Generic(
+                                        self.cfg.content_security_policy.clone()),
+                                    None,
+                                );
+                            }
                             // Pull the status code out for the
                             // traffic record before the message is
                             // consumed by write_all. HttpStatus is
@@ -373,7 +457,34 @@ impl<
                         }
                     }
                 }
-                Some(Err(e)) => return Err(e),
+                Some(Err(e)) => {
+                    // A reader error is often a configured limit
+                    // breach (oversized body, oversized header,
+                    // slowloris timeout). Translate those into a
+                    // proper HTTP status so the client sees a
+                    // deliberate rejection instead of a silent
+                    // connection drop, then close the connection.
+                    let tags = e.tags();
+                    let (status, msg) = if tags.contains(&ErrTag::TooBig) {
+                        (HttpStatus::ContentTooLarge,
+                         "Request exceeds the configured size limit.")
+                    } else if tags.contains(&ErrTag::Timeout) {
+                        (HttpStatus::RequestTimeout,
+                         "Request timed out while reading headers.")
+                    } else {
+                        warn!("{}: HTTP read error: {}", id, e);
+                        return Err(e);
+                    };
+                    warn!("{}: dropping connection ({}): {}", id, status, e);
+                    let mut resp = HttpMessage::respond_with_text(status, msg);
+                    resp.set_connection_close(true);
+                    match resp.write_all(&mut write_stream).await {
+                        Ok(()) => (),
+                        Err(we) => warn!("{}: failed to emit {} response: {}",
+                            id, status, we),
+                    }
+                    break;
+                }
                 None => {
                     break;
                 }

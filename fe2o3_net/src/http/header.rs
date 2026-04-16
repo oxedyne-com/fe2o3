@@ -241,13 +241,18 @@ impl HttpHeader {
         mut stream: Pin<&mut R>,
         remnant:    &Vec<u8>,
         is_request: Option<bool>,
+        limits:     Option<&crate::http::msg::ReadLimits>,
     )
         -> Outcome<Option<(Self, Vec<u8>, usize)>>
     {
         //trace!("Entered HttpHeader::read");
         let mut header_bytes = Vec::new();
         let mut buf = [0u8; CHUNK_SIZE];
-    
+
+        let max_header_bytes = limits.and_then(|l| l.max_header_bytes);
+        let header_timeout = limits.and_then(|l| l.header_read_timeout);
+        let started = std::time::Instant::now();
+
         // Check if the remnant contains a complete header
         if let Some(pos) = remnant.windows(4).position(|w| w == b"\r\n\r\n") {
             header_bytes.extend_from_slice(&remnant[..pos]);
@@ -259,18 +264,95 @@ impl HttpHeader {
                 content_length,
             )));
         }
-    
+
         // Append the remnant to the header bytes
         header_bytes.extend_from_slice(&remnant);
-    
+        if let Some(lim) = max_header_bytes {
+            if header_bytes.len() > lim {
+                return Err(err!(
+                    "HTTP header carry-over from previous request ({} \
+                    bytes) already exceeds the configured header limit \
+                    of {} bytes.", header_bytes.len(), lim;
+                    IO, Network, Input, TooBig));
+            }
+        }
+
         // Read from the stream until the header is complete
         loop {
-            //trace!("Attempting to read from stream...");
+            // Slowloris guard: bound the total wall-clock time the
+            // reader will spend accumulating header bytes. The
+            // elapsed check runs on every loop iteration so a client
+            // that manages to ship one byte before the deadline
+            // still gets evicted on the next iteration.
+            if let Some(budget) = header_timeout {
+                let elapsed = started.elapsed();
+                if elapsed >= budget {
+                    return Err(err!(
+                        "HTTP header read timed out after {:?} \
+                        (limit {:?}).", elapsed, budget;
+                        IO, Network, Input, Timeout));
+                }
+                let remaining = budget - elapsed;
+                let result = tokio::time::timeout(
+                    remaining,
+                    stream.as_mut().read(&mut buf),
+                ).await;
+                let inner = match result {
+                    Ok(inner) => inner,
+                    Err(_) => return Err(err!(
+                        "HTTP header read timed out after {:?} with \
+                        {} bytes accumulated so far.",
+                        budget, header_bytes.len();
+                        IO, Network, Input, Timeout)),
+                };
+                match inner {
+                    Ok(bytes_read) => {
+                        if let Some(lim) = max_header_bytes {
+                            if header_bytes.len().saturating_add(bytes_read) > lim {
+                                return Err(err!(
+                                    "HTTP header exceeds configured \
+                                    limit of {} bytes.", lim;
+                                    IO, Network, Input, TooBig));
+                            }
+                        }
+                        if let Some(pos) = buf[..bytes_read].windows(4).position(|w| w == b"\r\n\r\n") {
+                            header_bytes.extend_from_slice(&buf[..pos]);
+                            let remnant = buf[pos + 4..bytes_read].to_vec();
+                            let (header_str, content_length) = res!(Self::parse_header_str(&header_bytes));
+                            return Ok(Some((
+                                res!(Self::parse(header_str, is_request)),
+                                remnant,
+                                content_length,
+                            )));
+                        } else {
+                            header_bytes.extend_from_slice(&buf[..bytes_read]);
+                        }
+                        if bytes_read == 0 {
+                            return Ok(None);
+                        }
+                    },
+                    Err(e) if e.kind() == tokio::io::ErrorKind::UnexpectedEof => {
+                        warn!("UnexpectedEof treated as connection closure.");
+                        return Ok(None);
+                    },
+                    Err(e) => return Err(e.into()),
+                }
+                continue;
+            }
+
+            // No deadline configured: retain the original read loop.
             let result = stream.as_mut().read(&mut buf).await;
             match result {
                 Ok(bytes_read) => {
                     trace!("Successfully read {} bytes into buf of size {}", bytes_read, CHUNK_SIZE);
-    
+                    if let Some(lim) = max_header_bytes {
+                        if header_bytes.len().saturating_add(bytes_read) > lim {
+                            return Err(err!(
+                                "HTTP header exceeds configured limit of \
+                                {} bytes.", lim;
+                                IO, Network, Input, TooBig));
+                        }
+                    }
                     if let Some(pos) = buf[..bytes_read].windows(4).position(|w| w == b"\r\n\r\n") {
                         trace!("FOUND at pos = {}", pos);
                         header_bytes.extend_from_slice(&buf[..pos]);
@@ -284,7 +366,7 @@ impl HttpHeader {
                     } else {
                         header_bytes.extend_from_slice(&buf[..bytes_read]);
                     }
-    
+
                     if bytes_read == 0 {
                         return Ok(None);
                     }

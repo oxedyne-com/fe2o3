@@ -135,7 +135,7 @@ pub async fn test_client(filter: &'static str) -> Outcome<()> {
                     { constant::HTTP_DEFAULT_HEADER_CHUNK_SIZE },
                     { constant::HTTP_DEFAULT_BODY_CHUNK_SIZE },
                     _,
-                >(Pin::new(&mut stream), &Vec::new(), Some(false)).await;
+                >(Pin::new(&mut stream), &Vec::new(), Some(false), None).await;
 
                 match result {
                     Ok((Some(response), remnant)) => {

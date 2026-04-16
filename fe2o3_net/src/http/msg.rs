@@ -30,6 +30,7 @@ use std::{
     str::FromStr,
     future::Future,
     pin::Pin,
+    time::Duration,
 };
 
 use tokio::{
@@ -40,6 +41,50 @@ use tokio::{
     },
 };
 
+/// Caller-supplied bounds applied to an HTTP read. Each field is
+/// optional so a caller can tune only the bounds it cares about,
+/// and the absence of a `ReadLimits` argument (`None`) restores the
+/// unbounded pre-feature behaviour used by tests and outbound HTTP
+/// clients that trust their own peers.
+///
+/// Applied at the server accept path to harden the connection
+/// against three common cheap-resource-exhaustion attacks:
+///
+/// - Oversized headers (memory blow through a small number of
+///   connections) are bounded by `max_header_bytes`.
+/// - Oversized bodies (same, per request) are bounded by
+///   `max_body_bytes` which is checked against the `Content-Length`
+///   header up front and enforced during the body read.
+/// - Slowloris-style trickle attacks (pin a connection for hours
+///   by sending one byte at a time) are bounded by
+///   `header_read_timeout` which wraps every header-phase stream
+///   read in a `tokio::time::timeout`.
+#[derive(Clone, Debug, Default)]
+pub struct ReadLimits {
+    /// Maximum total bytes accepted for the request / response header
+    /// block before the reader aborts with `TooBig`. The count covers
+    /// every byte read up to the terminating `CRLF CRLF`.
+    pub max_header_bytes:       Option<usize>,
+    /// Maximum bytes permitted in the message body. Checked against
+    /// `Content-Length` first (rejecting oversize requests before a
+    /// single byte is read) and enforced as an upper bound during the
+    /// body read loop.
+    pub max_body_bytes:         Option<usize>,
+    /// Upper bound on the wall-clock duration between entering the
+    /// header read loop and the `CRLF CRLF` terminator arriving. A
+    /// slow client exceeding this limit has its connection dropped
+    /// with a `TimedOut` error.
+    pub header_read_timeout:    Option<Duration>,
+}
+
+impl ReadLimits {
+    /// Shortcut for constructing a fully permissive limits struct
+    /// with explicit `None` for every field. Mostly a readability
+    /// alias for `ReadLimits::default()`.
+    pub fn unbounded() -> Self {
+        Self::default()
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct HttpMessage {
@@ -229,6 +274,7 @@ impl HttpMessage {
         mut stream: Pin<&mut R>,
         remnant:    &Vec<u8>,
         is_request: Option<bool>,
+        limits:     Option<&ReadLimits>,
     )
         -> Outcome<(Option<Self>, Vec<u8>)>
     {
@@ -237,19 +283,34 @@ impl HttpMessage {
             stream.as_mut(),
             remnant,
             is_request,
+            limits,
         ).await;
-    
+
         match result {
             Ok(Some((header, mut remnant, content_length))) => {
                 trace!("remnant size = {}, content_length = {}", remnant.len(), content_length);
+
+                // Reject the request up front if its declared content
+                // length exceeds the caller's bound. Cheaper than
+                // accumulating bytes and erroring halfway through, and
+                // surfaces the error before any body bytes are read.
+                if let Some(lim) = limits.and_then(|l| l.max_body_bytes) {
+                    if content_length > lim {
+                        return Err(err!(
+                            "HTTP request body of {} bytes exceeds the \
+                            configured limit of {}.", content_length, lim;
+                            IO, Network, Input, TooBig));
+                    }
+                }
+
                 let mut msg = HttpMessage::default();
                 msg.header = header;
-    
+
                 if content_length > 0 {
                     let mut body = Vec::with_capacity(content_length);
                     body.extend_from_slice(&remnant);
                     let mut bytes_read = body.len();
-    
+
                     while bytes_read < content_length {
                         let mut chunk = [0; BODY_CHUNK_SIZE];
                         let result = stream.as_mut().read(&mut chunk).await;
@@ -261,17 +322,35 @@ impl HttpMessage {
                             Ok(n) => {
                                 body.extend_from_slice(&chunk[..n]);
                                 bytes_read += n;
+                                // Defence-in-depth: the upfront
+                                // Content-Length check already
+                                // rejected oversize requests, but a
+                                // buggy or malicious remote could
+                                // keep streaming beyond the declared
+                                // length. Stop as soon as we have
+                                // enough to satisfy the header.
+                                if let Some(lim) =
+                                    limits.and_then(|l| l.max_body_bytes)
+                                {
+                                    if bytes_read > lim {
+                                        return Err(err!(
+                                            "HTTP request body overflowed \
+                                            the configured limit of {} \
+                                            bytes during read.", lim;
+                                            IO, Network, Input, TooBig));
+                                    }
+                                }
                             }
                             Err(e) => return Err(e.into()),
                         }
                     }
-    
+
                     remnant = if bytes_read > content_length {
                         body[content_length..].to_vec()
                     } else {
                         Vec::new()
                     };
-    
+
                     msg.body = body[..content_length].to_vec();
                     Ok((Some(msg), remnant))
                 } else {
@@ -460,6 +539,7 @@ pub struct HttpMessageReader<
 > {
     stream: Pin<&'a mut R>,
     buffer: Vec<u8>,
+    limits: Option<ReadLimits>,
 }
 
 impl<
@@ -470,6 +550,8 @@ impl<
 >
     HttpMessageReader<'a, HEADER_CHUNK_SIZE, BODY_CHUNK_SIZE, R>
 {
+    /// Build a reader with no read limits applied. Suitable for
+    /// outbound HTTP clients, tests, and anywhere the peer is trusted.
     pub fn new(
         stream: Pin<&'a mut R>,
     )
@@ -478,6 +560,23 @@ impl<
         Self {
             stream,
             buffer: Vec::new(),
+            limits: None,
+        }
+    }
+
+    /// Build a reader that enforces the supplied limits on every
+    /// successive read. Use from HTTPS accept paths where the peer
+    /// is untrusted.
+    pub fn with_limits(
+        stream: Pin<&'a mut R>,
+        limits: ReadLimits,
+    )
+        -> Self
+    {
+        Self {
+            stream,
+            buffer: Vec::new(),
+            limits: Some(limits),
         }
     }
 }
@@ -495,12 +594,14 @@ impl<
     fn next<'b>(&'b mut self) -> Pin<Box<dyn Future<Output = Option<Self::Item>> + Send + 'b>> {
         let mut stream = self.stream.as_mut();
         let buffer = &mut self.buffer;
+        let limits = self.limits.as_ref();
 
         Box::pin(async move {
             let result = HttpMessage::read::<HEADER_CHUNK_SIZE, BODY_CHUNK_SIZE, _>(
                 stream.as_mut(),
                 buffer,
                 None,
+                limits,
             )
             .await;
 
