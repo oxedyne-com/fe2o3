@@ -40,9 +40,13 @@ use oxedyne_fe2o3_jdat::{
 use oxedyne_fe2o3_net::{
     file::RequestPath,
     http::{
-        client::https_request,
+        client::{
+            http_request,
+            https_request,
+        },
         fields::{
             HeaderFields,
+            HeaderFieldValue,
             HeaderName,
         },
         handler::WebHandler,
@@ -293,26 +297,43 @@ impl<
                 )));
             }
 
-            // Check API routes for a handler-mode match before falling
-            // through to static file serving. Proxy-mode API routes are
-            // POST-only, so we only match handler-mode routes here.
-            if let Some(route) = api_routes.iter().find(|r|
-                r.path == request_path && r.handler.is_some())
-            {
-                debug!("{}: GET {} -> api handler '{}'",
-                    id, request_path,
-                    route.handler.as_deref().unwrap_or("?"));
-                let resp = res!(api::dispatch(
-                    &api_handler_registry,
-                    route,
-                    HttpMethod::GET,
-                    &loc,
-                    &[],
-                    &req_headers,
-                    &tls_client,
-                    &id,
-                ).await);
-                return Ok(Some(resp));
+            // Check API routes before falling through to static file
+            // serving. Handler-mode routes dispatch in-process;
+            // proxy-mode routes forward to the upstream over TLS or
+            // plain HTTP depending on the scheme flag. A proxy-mode
+            // GET is useful for loopback app binaries that respond to
+            // plain GETs (e.g. dynamic JSON endpoints), and for
+            // third-party APIs that the app wants to mirror through
+            // Steel so browser calls pick up the operator-supplied
+            // headers (auth tokens, rate-limit keys).
+            if let Some(route) = api_routes.iter().find(|r| r.path == request_path) {
+                if route.handler.is_some() {
+                    debug!("{}: GET {} -> api handler '{}'",
+                        id, request_path,
+                        route.handler.as_deref().unwrap_or("?"));
+                    let resp = res!(api::dispatch(
+                        &api_handler_registry,
+                        route,
+                        HttpMethod::GET,
+                        &loc,
+                        &[],
+                        &req_headers,
+                        &tls_client,
+                        &id,
+                    ).await);
+                    return Ok(Some(resp));
+                }
+                if route.upstream_host.is_some() {
+                    let resp = res!(forward_api_proxy(
+                        route,
+                        HttpMethod::GET,
+                        &loc,
+                        &[],
+                        &tls_client,
+                        &id,
+                    ).await);
+                    return Ok(Some(resp));
+                }
             }
 
             let abs_path = match self.router(&loc, &id).await {
@@ -449,10 +470,33 @@ impl<
                 )));
             }
 
-            // Check webhook routes first.
+            // Check webhook routes first. Two dispatch branches
+            // depending on the mode the route was configured in:
+            //
+            // - in-process `handler` -- the route names a registered
+            //   `WebhookHandler` in the webhook registry; dispatch
+            //   runs inside the Steel process as before.
+            // - forwarded `upstream` -- the route carries an upstream
+            //   URL; the raw body and most incoming headers are
+            //   forwarded verbatim to the upstream so downstream
+            //   signature verification (e.g. `Stripe-Signature`)
+            //   still sees an unmodified payload.
             if let Some(wh) = webhook_routes.iter().find(|r| r.path == request_path) {
+                if wh.is_upstream() {
+                    debug!("{}: POST {} -> webhook upstream {:?}:{:?}",
+                        id, request_path, wh.upstream_host, wh.upstream_port);
+                    let resp = res!(forward_webhook(
+                        wh,
+                        &body,
+                        &req_headers,
+                        &tls_client,
+                        &id,
+                    ).await);
+                    return Ok(Some(resp));
+                }
                 debug!("{}: POST {} -> webhook handler '{}'",
-                    id, request_path, wh.handler);
+                    id, request_path,
+                    wh.handler.as_deref().unwrap_or("?"));
                 return webhook::dispatch(
                     &webhook_registry, wh, &body, &req_headers, &tls_client, &id,
                 ).await;
@@ -488,73 +532,203 @@ impl<
                 return Ok(Some(resp));
             }
 
-            // Proxy path: forward to the upstream.
-            let tls_cfg = match &tls_client {
-                Some(cfg) => cfg.clone(),
-                None => {
-                    error!(err!(
-                        "{}: API route '{}' matched but no TLS client is configured.",
-                        id, request_path;
-                        Init, Missing));
-                    return Ok(Some(HttpMessage::respond_with_text(
-                        HttpStatus::InternalServerError,
-                        "Server TLS client not configured for outbound requests.",
-                    )));
-                }
-            };
-
-            let upstream_host = match &route.upstream_host {
-                Some(h) => h,
-                None => {
-                    error!(err!(
-                        "{}: API route '{}' is in proxy mode but has no upstream_host.",
-                        id, request_path;
-                        Init, Missing));
-                    return Ok(Some(HttpMessage::respond_with_text(
-                        HttpStatus::InternalServerError,
-                        "API proxy route misconfigured.",
-                    )));
-                }
-            };
-            let upstream_port = route.upstream_port.unwrap_or(443);
-            let upstream_path = match &route.upstream_path {
-                Some(p) => p.as_str(),
-                None    => "/",
-            };
-
-            // Build upstream headers.
-            let mut hdrs: Vec<(&str, &str)> = Vec::new();
-            for (name, value) in &route.headers {
-                hdrs.push((name.as_str(), value.as_str()));
-            }
-
-            // Forward the Content-Type from the original request if present.
-            // Different upstream APIs expect different content types
-            // (form-urlencoded, JSON, XML, etc.) so we relay whatever
-            // the caller sent rather than hard-coding a default.
-            let ct_holder;
-            if let Some(ct) = loc.data.get(&dat!("content_type")) {
-                if let Dat::Str(s) = ct {
-                    ct_holder = s.clone();
-                    hdrs.push(("Content-Type", &ct_holder));
-                }
-            }
-
-            debug!("{}: POST {} -> {}:{}{}", id, request_path,
-                upstream_host, upstream_port, upstream_path);
-
-            // Forward the request to the upstream.
-            let upstream_resp = res!(https_request(
-                upstream_host,
-                upstream_port,
+            // Proxy path: forward to the upstream via the shared helper.
+            let resp = res!(forward_api_proxy(
+                route,
                 HttpMethod::POST,
-                upstream_path,
-                &hdrs,
+                &loc,
                 &body,
-                tls_cfg,
+                &tls_client,
+                &id,
             ).await);
-
-            Ok(Some(upstream_resp))
+            Ok(Some(resp))
         }
+    }
+}
+
+/// Forward an API request to the configured upstream. Shared by the
+/// GET and POST proxy branches.
+///
+/// Honours the route's `upstream_tls` flag to pick between
+/// `https_request` and `http_request`, carries the static headers
+/// the route was configured with, and propagates the incoming
+/// request's `Content-Type` when present so the upstream receives
+/// whatever the client originally sent.
+async fn forward_api_proxy(
+    route:          &ApiRoute,
+    method:         HttpMethod,
+    loc:            &HttpLocator,
+    body:           &[u8],
+    tls_client:     &Option<Arc<ClientConfig>>,
+    id:             &str,
+)
+    -> Outcome<HttpMessage>
+{
+    let upstream_host = match &route.upstream_host {
+        Some(h) => h.as_str(),
+        None => return Err(err!(
+            "{}: API route '{}' is in proxy mode but has no upstream_host.",
+            id, route.path;
+            Init, Missing, Bug)),
+    };
+    let upstream_port = route.upstream_port.unwrap_or(
+        if route.upstream_tls { 443 } else { 80 });
+    let upstream_path = route.upstream_path
+        .as_deref().unwrap_or("/");
+
+    // Build upstream headers.
+    let mut hdrs: Vec<(&str, &str)> = Vec::new();
+    for (name, value) in &route.headers {
+        hdrs.push((name.as_str(), value.as_str()));
+    }
+
+    // Forward the Content-Type from the original request if present.
+    // Different upstream APIs expect different content types
+    // (form-urlencoded, JSON, XML, etc.) so we relay whatever the
+    // caller sent rather than hard-coding a default.
+    let ct_holder;
+    if let Some(ct) = loc.data.get(&dat!("content_type")) {
+        if let Dat::Str(s) = ct {
+            ct_holder = s.clone();
+            hdrs.push(("Content-Type", &ct_holder));
+        }
+    }
+
+    debug!("{}: {} {} -> {}{}:{}{}", id, method, route.path,
+        if route.upstream_tls { "https://" } else { "http://" },
+        upstream_host, upstream_port, upstream_path);
+
+    if route.upstream_tls {
+        let tls_cfg = match tls_client {
+            Some(cfg) => cfg.clone(),
+            None => return Err(err!(
+                "{}: API route '{}' configured with https:// upstream but \
+                no TLS client is available.", id, route.path;
+                Init, Missing)),
+        };
+        https_request(
+            upstream_host,
+            upstream_port,
+            method,
+            upstream_path,
+            &hdrs,
+            body,
+            tls_cfg,
+        ).await
+    } else {
+        http_request(
+            upstream_host,
+            upstream_port,
+            method,
+            upstream_path,
+            &hdrs,
+            body,
+        ).await
+    }
+}
+
+/// Forward an incoming webhook POST to the upstream configured on a
+/// `WebhookRoute`. Preserves the raw body bytes and propagates the
+/// essential headers so signature verification on the upstream side
+/// sees an unmodified payload.
+///
+/// Headers propagated: every header whose name is known to matter for
+/// webhook providers (Stripe, GitHub, generic X-Signature, etc.).
+/// Not every header: hop-by-hop headers (`Host`, `Connection`,
+/// `Content-Length`) are regenerated by the outbound client, and
+/// propagating them would double-up.
+async fn forward_webhook(
+    route:          &WebhookRoute,
+    body:           &[u8],
+    req_headers:    &HeaderFields,
+    tls_client:     &Option<Arc<ClientConfig>>,
+    id:             &str,
+)
+    -> Outcome<HttpMessage>
+{
+    let upstream_host = match &route.upstream_host {
+        Some(h) => h.as_str(),
+        None => return Err(err!(
+            "{}: forward_webhook called on a route with no upstream_host.", id;
+            Bug, Missing)),
+    };
+    let upstream_port = route.upstream_port.unwrap_or(
+        if route.upstream_tls { 443 } else { 80 });
+    let upstream_path = route.upstream_path
+        .as_deref().unwrap_or("/");
+
+    // Propagate the headers a typical webhook provider expects to see
+    // verbatim. The list is deliberately short: Content-Type for the
+    // JSON/form encoding, any Stripe-Signature / X-Hub-Signature style
+    // header for signature verification, and a selection of common
+    // auxiliaries (User-Agent, Request-Id, Idempotency-Key). Callers
+    // that need a broader set can extend this list without touching
+    // the dispatch shape.
+    let mut hdrs: Vec<(String, String)> = Vec::new();
+    let propagate_names: &[HeaderName] = &[
+        HeaderName::ContentType,
+        HeaderName::UserAgent,
+    ];
+    for name in propagate_names {
+        if let Some(HeaderFieldValue::Generic(v)) =
+            req_headers.get_one(name)
+        {
+            hdrs.push((fmt!("{}", name), v.clone()));
+        }
+    }
+    // Propagate any non-standard header whose name begins with a
+    // canonical signature prefix. This catches Stripe-Signature,
+    // X-Hub-Signature, X-Signature, X-Hmac-Signature, and similar
+    // without hardcoding the provider.
+    for (name, values) in req_headers.iter() {
+        if let HeaderName::NonStandard(n) = name {
+            let lower = n.to_lowercase();
+            let is_signature_like = lower.contains("signature")
+                || lower.contains("idempotency")
+                || lower == "x-request-id";
+            if !is_signature_like {
+                continue;
+            }
+            if let Some(HeaderFieldValue::Generic(v)) = values.first() {
+                hdrs.push((n.clone(), v.clone()));
+            }
+        }
+    }
+    let hdr_refs: Vec<(&str, &str)> = hdrs.iter()
+        .map(|(n, v)| (n.as_str(), v.as_str()))
+        .collect();
+
+    debug!("{}: forwarding webhook to {}{}:{}{} (body {} bytes, {} headers)",
+        id,
+        if route.upstream_tls { "https://" } else { "http://" },
+        upstream_host, upstream_port, upstream_path,
+        body.len(), hdr_refs.len());
+
+    if route.upstream_tls {
+        let tls_cfg = match tls_client {
+            Some(cfg) => cfg.clone(),
+            None => return Err(err!(
+                "{}: webhook route '{}' configured with https:// upstream \
+                but no TLS client is available.", id, route.path;
+                Init, Missing)),
+        };
+        https_request(
+            upstream_host,
+            upstream_port,
+            HttpMethod::POST,
+            upstream_path,
+            &hdr_refs,
+            body,
+            tls_cfg,
+        ).await
+    } else {
+        http_request(
+            upstream_host,
+            upstream_port,
+            HttpMethod::POST,
+            upstream_path,
+            &hdr_refs,
+            body,
+        ).await
     }
 }

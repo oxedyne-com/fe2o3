@@ -159,14 +159,22 @@ impl RedirectRule {
 pub struct ApiRoute {
     /// Local path to match (e.g. `/api/payments/checkout`).
     pub path:           String,
-    /// Upstream hostname (e.g. `api.example.com`). `None` when the
-    /// route is served by an in-process handler.
+    /// Upstream hostname (e.g. `api.example.com`, `127.0.0.1`). `None`
+    /// when the route is served by an in-process handler.
     pub upstream_host:  Option<String>,
-    /// Upstream port (defaults to 443). `None` when handler-served.
+    /// Upstream port (defaults to 443 for `https://`, 80 for `http://`).
+    /// `None` when handler-served.
     pub upstream_port:  Option<u16>,
     /// Upstream request path (e.g. `/v1/checkout/sessions`). `None`
     /// when handler-served.
     pub upstream_path:  Option<String>,
+    /// `true` when the upstream URL used `https://`. Proxy dispatch
+    /// opens a TLS connection when this is set and a plain TCP
+    /// connection otherwise. Defaults to `true` so third-party API
+    /// proxying keeps the pre-feature semantics; the new
+    /// `http://` form is reserved for loopback app binaries where
+    /// TLS is unnecessary.
+    pub upstream_tls:   bool,
     /// Headers injected into the upstream request. Values have already been
     /// resolved (any `{file:...}` references expanded at config load time).
     pub headers:        Vec<(String, String)>,
@@ -220,13 +228,13 @@ impl ApiRoute {
                 Invalid, Input, Conflict)),
             _ => {}
         }
-        // Parse upstream URL into host, port, path (proxy mode only).
-        let (upstream_host, upstream_port, upstream_path) = match upstream_str {
+        // Parse upstream URL into host, port, path, scheme (proxy mode only).
+        let (upstream_host, upstream_port, upstream_path, upstream_tls) = match upstream_str {
             Some(url) => {
-                let (h, p, up) = res!(Self::parse_upstream(&url));
-                (Some(h), Some(p), Some(up))
+                let (h, p, up, tls) = res!(Self::parse_upstream(&url));
+                (Some(h), Some(p), Some(up), tls)
             }
-            None => (None, None, None),
+            None => (None, None, None, true),
         };
         // Headers (optional map of name -> value). Used in proxy mode for
         // headers injected into the upstream request; empty for handler mode.
@@ -280,6 +288,7 @@ impl ApiRoute {
             upstream_host,
             upstream_port,
             upstream_path,
+            upstream_tls,
             headers,
             handler,
             config,
@@ -294,12 +303,22 @@ impl ApiRoute {
     }
 
     /// Parse an `https://host[:port]/path` URL into components.
-    fn parse_upstream(url: &str) -> Outcome<(String, u16, String)> {
-        let rest = match url.strip_prefix("https://") {
-            Some(r) => r,
-            None => return Err(err!(
-                "ApiRoute: upstream URL must start with 'https://'. Got: '{}'.", url;
-                Invalid, Input)),
+    /// Parse an upstream URL into `(host, port, path, tls)`. Accepts
+    /// both `https://` and `http://`; the former sets `tls = true` and
+    /// defaults the port to 443, the latter sets `tls = false` and
+    /// defaults the port to 80. Plain HTTP is intended for loopback
+    /// upstreams only -- a public API reached over HTTP is a separate
+    /// security mistake and Steel does not make it easier to do.
+    pub fn parse_upstream(url: &str) -> Outcome<(String, u16, String, bool)> {
+        let (rest, tls, default_port) = if let Some(r) = url.strip_prefix("https://") {
+            (r, true, 443u16)
+        } else if let Some(r) = url.strip_prefix("http://") {
+            (r, false, 80u16)
+        } else {
+            return Err(err!(
+                "ApiRoute: upstream URL must start with 'https://' or 'http://'. \
+                Got: '{}'.", url;
+                Invalid, Input));
         };
         let (host_port, path) = match rest.find('/') {
             Some(i) => (&rest[..i], &rest[i..]),
@@ -315,9 +334,9 @@ impl ApiRoute {
                 };
                 (host_port[..i].to_string(), p)
             }
-            None => (host_port.to_string(), 443),
+            None => (host_port.to_string(), default_port),
         };
-        Ok((host, port, path.to_string()))
+        Ok((host, port, path.to_string(), tls))
     }
 
     /// Expand `{file:path}` and `{env:}` placeholders in all header
@@ -425,15 +444,34 @@ impl ApiRoute {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WebhookRoute {
     /// Local path to match (e.g. `/webhook/payments`).
-    pub path:       String,
-    /// Handler name (e.g. `payments_forwarder`).
-    pub handler:    String,
-    /// Handler-specific configuration.
-    pub config:     Vec<(String, String)>,
+    pub path:           String,
+    /// In-process handler name (e.g. `payments_forwarder`). `None`
+    /// when the route forwards to an upstream URL instead.
+    pub handler:        Option<String>,
+    /// Upstream hostname when the route forwards instead of
+    /// dispatching in-process. Mutually exclusive with `handler`.
+    pub upstream_host:  Option<String>,
+    /// Upstream port when forwarding.
+    pub upstream_port:  Option<u16>,
+    /// Upstream request path when forwarding (the hook payload is
+    /// POSTed here verbatim).
+    pub upstream_path:  Option<String>,
+    /// `true` when the upstream URL used `https://`; `false` for
+    /// plain HTTP loopback upstreams. Default `true` mirrors the
+    /// `ApiRoute` conservative default.
+    pub upstream_tls:   bool,
+    /// Handler-specific configuration (in-process mode only).
+    pub config:         Vec<(String, String)>,
 }
 
 impl WebhookRoute {
     /// Parse a webhook route from a `DaticleMap`.
+    ///
+    /// Accepts either an in-process `handler` field or an
+    /// `upstream` URL; exactly one of the two is required, and
+    /// setting both is a configuration error. The `upstream` URL
+    /// follows the same `https://` / `http://` grammar as
+    /// [`ApiRoute::parse_upstream`].
     pub fn from_datmap(m: &DaticleMap) -> Outcome<Self> {
         let path = match m.get(&dat!("path")) {
             Some(Dat::Str(s)) => s.clone(),
@@ -442,10 +480,38 @@ impl WebhookRoute {
                 Invalid, Input, Missing)),
         };
         let handler = match m.get(&dat!("handler")) {
-            Some(Dat::Str(s)) => s.clone(),
+            Some(Dat::Str(s)) => Some(s.clone()),
+            None              => None,
             _ => return Err(err!(
-                "WebhookRoute: 'handler' is required and must be a string.";
+                "WebhookRoute '{}': 'handler' must be a string when present.", path;
+                Invalid, Input, Mismatch)),
+        };
+        let upstream_str = match m.get(&dat!("upstream")) {
+            Some(Dat::Str(s)) => Some(s.clone()),
+            None              => None,
+            _ => return Err(err!(
+                "WebhookRoute '{}': 'upstream' must be a string when present.", path;
+                Invalid, Input, Mismatch)),
+        };
+        match (&handler, &upstream_str) {
+            (None, None) => return Err(err!(
+                "WebhookRoute '{}': must specify either 'handler' (for \
+                in-process webhooks) or 'upstream' (for forwarded \
+                webhooks).", path;
                 Invalid, Input, Missing)),
+            (Some(_), Some(_)) => return Err(err!(
+                "WebhookRoute '{}': 'handler' and 'upstream' are mutually \
+                exclusive. A webhook route is either in-process or \
+                forwarded, not both.", path;
+                Invalid, Input, Conflict)),
+            _ => (),
+        }
+        let (upstream_host, upstream_port, upstream_path, upstream_tls) = match upstream_str {
+            Some(url) => {
+                let (h, p, up, tls) = res!(ApiRoute::parse_upstream(&url));
+                (Some(h), Some(p), Some(up), tls)
+            }
+            None => (None, None, None, true),
         };
         let config = match m.get(&dat!("config")) {
             Some(Dat::Map(sub)) => {
@@ -466,7 +532,15 @@ impl WebhookRoute {
             None => Vec::new(),
             _ => Vec::new(),
         };
-        Ok(Self { path, handler, config })
+        Ok(Self {
+            path,
+            handler,
+            upstream_host,
+            upstream_port,
+            upstream_path,
+            upstream_tls,
+            config,
+        })
     }
 
     /// Expand `{file:path}` placeholders in all config values.
@@ -482,6 +556,12 @@ impl WebhookRoute {
         self.config.iter()
             .find(|(k, _)| k == key)
             .map(|(_, v)| v.as_str())
+    }
+
+    /// True when the route forwards to an upstream instead of
+    /// dispatching to an in-process handler.
+    pub fn is_upstream(&self) -> bool {
+        self.upstream_host.is_some()
     }
 }
 

@@ -91,6 +91,80 @@ pub fn format_request(
 
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
+// │ HTTP REQUEST (PLAIN)                                                      │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// Perform a single plain-HTTP request/response cycle against a remote server.
+///
+/// Sibling of [`https_request`] for callers that need to talk to an upstream
+/// over loopback or another trusted network segment where TLS is unnecessary.
+/// The canonical use case is an in-tree Steel deployment that proxies
+/// per-vhost application endpoints to a local app binary bound to
+/// `127.0.0.1:<port>`: the app does not need to present a certificate for
+/// traffic that never leaves the host, and forcing TLS on loopback would
+/// complicate operations (rotating an internal CA, distrust after restart,
+/// timing cost on every hit).
+///
+/// Shape mirrors `https_request` exactly except for the absence of a
+/// `tls_config` parameter.
+pub async fn http_request(
+    host:           &str,
+    port:           u16,
+    method:         HttpMethod,
+    path:           &str,
+    headers:        &[(&str, &str)],
+    body:           &[u8],
+)
+    -> Outcome<HttpMessage>
+{
+    let request_bytes = format_request(method, host, path, headers, body);
+
+    let mut stream = match TcpStream::connect((host, port)).await {
+        Ok(s) => s,
+        Err(e) => return Err(err!(e,
+            "Failed to open a TCP connection to {}:{}.", host, port;
+            IO, Network, Init)),
+    };
+
+    match stream.write_all(&request_bytes).await {
+        Ok(()) => (),
+        Err(e) => return Err(err!(e,
+            "Failed to write HTTP request body to {}:{}.", host, port;
+            IO, Network, Wire, Write)),
+    }
+    match stream.flush().await {
+        Ok(()) => (),
+        Err(e) => return Err(err!(e,
+            "Failed to flush HTTP request to {}:{}.", host, port;
+            IO, Network, Wire, Write)),
+    }
+
+    let result = HttpMessage::read::<
+        { constant::HTTP_DEFAULT_HEADER_CHUNK_SIZE },
+        { constant::HTTP_DEFAULT_BODY_CHUNK_SIZE },
+        _,
+    >(
+        Pin::new(&mut stream),
+        &Vec::new(),
+        Some(false),
+        None,
+    ).await;
+
+    match result {
+        Ok((Some(msg), _remnant)) => Ok(msg),
+        Ok((None, _)) => Err(err!(
+            "Server at {}:{} closed the connection before sending a \
+            complete HTTP response.",
+            host, port;
+            IO, Network, Wire, Read, Missing)),
+        Err(e) => Err(err!(e,
+            "Failed to read or parse the HTTP response from {}:{}.", host, port;
+            IO, Network, Wire, Read)),
+    }
+}
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
 // │ HTTPS REQUEST                                                             │
 // └───────────────────────────────────────────────────────────────────────────┘
 

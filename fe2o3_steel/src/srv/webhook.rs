@@ -112,6 +112,8 @@ impl std::fmt::Debug for WebhookRegistry {
 // └───────────────────────────────────────────────────────────────────────────┘
 
 /// Dispatch an incoming webhook to the appropriate registered handler.
+/// Only called for handler-mode webhook routes; upstream-mode routes
+/// are forwarded directly from the HTTPS dispatcher.
 pub async fn dispatch(
     registry:       &WebhookRegistry,
     route:          &WebhookRoute,
@@ -122,12 +124,22 @@ pub async fn dispatch(
 )
     -> Outcome<Option<HttpMessage>>
 {
-    match registry.handlers.get(&route.handler) {
+    let name = match &route.handler {
+        Some(n) => n,
+        None => {
+            warn!("{}: webhook::dispatch called on an upstream-mode route.", id);
+            return Ok(Some(HttpMessage::respond_with_text(
+                HttpStatus::InternalServerError,
+                "Webhook route misconfigured.",
+            )));
+        },
+    };
+    match registry.handlers.get(name) {
         Some(handler) => handler.handle(
             route, body, req_headers, tls_client, id,
         ).await,
         None => {
-            warn!("{}: No registered webhook handler '{}'.", id, route.handler);
+            warn!("{}: No registered webhook handler '{}'.", id, name);
             Ok(Some(HttpMessage::respond_with_text(
                 HttpStatus::NotFound,
                 "Unknown webhook handler.",
