@@ -16,9 +16,6 @@ use oxedyne_fe2o3_core::{
             LogBot,
             Msg,
         },
-        console::{
-            LoggerConsole,
-        },
     },
     thread::{
         thread_channel,
@@ -50,10 +47,23 @@ pub struct AppLoggerConsole<ETAG: GenTag>
     pub app_log:    Arc<RwLock<TextLines<TextType, HighlightType>>>,
 }
 
-impl<ETAG: GenTag> LoggerConsole<ETAG> for AppLoggerConsole<ETAG>
+impl<ETAG: GenTag + fmt::Debug + Send + Sync + 'static> AppLoggerConsole<ETAG>
     where oxedyne_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
-    fn go(&mut self) -> ThreadController<Msg<ETAG>> {
+    /// Creates a new app logger console sharing the supplied app log buffer.
+    pub fn new(
+        app_log: Arc<RwLock<TextLines<TextType, HighlightType>>>,
+    )
+        -> Self
+    {
+        Self {
+            log_chan: simplex(),
+            app_log,
+        }
+    }
+
+    /// Spawns the listener thread and returns a controller that owns its channel and handle.
+    pub fn go(&mut self) -> ThreadController<Msg<ETAG>> {
         // Logger console thread.  Listens for messages from the LogBot.
         let (semaphore, _sentinel) = thread_channel();
         let semaphore_clone = semaphore.clone();
@@ -69,7 +79,8 @@ impl<ETAG: GenTag> LoggerConsole<ETAG> for AppLoggerConsole<ETAG>
         )
     }
 
-    fn listen(&self) {
+    /// Drains the log channel, appending each message to the shared app log.
+    pub fn listen(&self) {
         while let Ok(msg) = self.log_chan.recv() {
             match msg {
                 Msg::Finish(src) => {
@@ -81,68 +92,37 @@ impl<ETAG: GenTag> LoggerConsole<ETAG> for AppLoggerConsole<ETAG>
                         true,
                         false,
                     ) {
-                        match self.app_log.write() {
-                            Ok(mut unlocked) => {
-                                let ref mut log = *unlocked;
-                                log.append_string(msg);
-                            }
-                            Err(e) => {
-                                let msg2 = errmsg!(
-                                    "{}: Could not access app log to write message: {}", e, msg,
-                                );
-                                msg!("{}", msg2);
-                            }
-                        }
+                        self.append_to_log(msg);
                     }
                     break;
                 }
-                Msg::Console(msg) => {
-                    match self.app_log.write() {
-                        Ok(mut unlocked) => {
-                            let ref mut log = *unlocked;
-                            log.append_string(msg);
-                        }
-                        Err(e) => {
-                            let msg2 = errmsg!(
-                                "{}: Could not access app log to write message: {}", e, msg,
-                            );
-                            msg!("{}", msg2);
-                        }
-                    }
+                Msg::Console(_stream, msg) => {
+                    // Stream key currently unused; the TUI surfaces a single stream.
+                    self.append_to_log(msg);
                 }
                 _ => {
                     let msg = err!(
                         "Unexpected message type: {:?}", msg;
                         Bug, Unexpected, Input).to_string();
-                    match self.app_log.write() {
-                        Ok(mut unlocked) => {
-                            let ref mut log = *unlocked;
-                            log.append_string(msg);
-                        }
-                        Err(e) => {
-                            let msg2 = errmsg!(
-                                "{}: Could not access app log to write message: {}", e, msg,
-                            );
-                            msg!("{}", msg2);
-                        }
-                    }
+                    self.append_to_log(msg);
                 }
             }
         }
     }
-}
 
-impl<ETAG: GenTag + fmt::Debug + Send + Sync> AppLoggerConsole<ETAG>
-    where oxedyne_fe2o3_core::error::Error<ETAG>: std::error::Error
-{
-    pub fn new(
-        app_log: Arc<RwLock<TextLines<TextType, HighlightType>>>,
-    )
-        -> Self
-    {
-        Self {
-            log_chan: simplex(),
-            app_log,
+    /// Appends a pre-formatted line to the shared app log, or reports a lock failure via `msg!`.
+    fn append_to_log(&self, line: String) {
+        match self.app_log.write() {
+            Ok(mut unlocked) => {
+                let ref mut log = *unlocked;
+                log.append_string(line);
+            }
+            Err(e) => {
+                let msg2 = errmsg!(
+                    "{}: Could not access app log to write message: {}", e, line,
+                );
+                msg!("{}", msg2);
+            }
         }
     }
 }

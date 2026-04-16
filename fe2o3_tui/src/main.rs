@@ -36,7 +36,6 @@ use oxedyne_fe2o3_core::{
     prelude::*,
     log::{
         bot::FileConfig,
-        console::LoggerConsole,
     },
 };
 use oxedyne_fe2o3_geom::{
