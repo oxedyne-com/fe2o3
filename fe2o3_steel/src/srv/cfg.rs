@@ -1323,54 +1323,48 @@ pub struct ServerConfig {
     /// but session-scoped commands will reject until the client obtains
     /// a session id through some other mechanism.
     pub allow_anonymous_sessions:       bool,
+    // ── Hardening knobs ───────────────────────────────────────────────────
+    //
+    // Every field below is `#[optional]` so on-disk configs from
+    // earlier Steel builds continue to load. Missing fields fall
+    // through to the Default impl (which reproduces the pre-feature
+    // "permissive" behaviour for each: no size/time limits, headers
+    // enabled, empty CSP, empty guard block).
+
     /// Maximum bytes accepted in the HTTP request header block before
-    /// the reader returns `413 Content Too Large`. Bounds memory
-    /// exposure to oversized headers such as cookie stuffing. A value
-    /// of `0` disables the limit.
+    /// the reader returns `413 Content Too Large`. A value of `0`
+    /// disables the limit.
+    #[optional]
     pub http_max_header_bytes:          u64,
     /// Maximum bytes accepted in the HTTP request body before the
-    /// reader returns `413 Content Too Large`. Checked against the
-    /// `Content-Length` header up front so oversize requests are
-    /// rejected before any body bytes are read. A value of `0`
+    /// reader returns `413 Content Too Large`. A value of `0`
     /// disables the limit.
+    #[optional]
     pub http_max_body_bytes:            u64,
     /// Wall-clock budget for the HTTP header read phase, in
     /// milliseconds. A slow client that fails to finish sending its
     /// header block within this window is disconnected with a
     /// `Timeout` error. A value of `0` disables the deadline.
+    #[optional]
     pub http_header_read_timeout_ms:    u64,
     /// When `true`, Steel injects a baseline set of security
     /// response headers into every HTTPS response: `X-Content-Type-Options`,
     /// `X-Frame-Options`, `Referrer-Policy`, `Permissions-Policy`.
-    /// Recommended on for production deployments.
+    #[optional]
     pub security_headers_enabled:       bool,
-    /// Optional `Content-Security-Policy` header value. When
-    /// non-empty, Steel emits this string verbatim as the CSP
-    /// header on every HTTPS response. Defaults to empty because
-    /// CSP is app-specific and a strict default would break
-    /// existing front ends. Tighten on a per-deployment basis.
+    /// Optional `Content-Security-Policy` header value.
+    #[optional]
     pub content_security_policy:        String,
-    /// Per-IP address guard tuning. Fields: `rps_max` (u64,
-    /// default 50), `tint_min_ms` (u64, default 100),
-    /// `tsunset_base_secs` (u64, default 60),
-    /// `tsunset_spread_secs` (u64, default 240), `blist_cnt`
-    /// (u16, default 6). Any missing field falls back to its
-    /// default, and an empty map restores the built-in
-    /// defaults. Parsed via `get_addr_guard_settings()`.
+    /// Per-IP address guard tuning. Empty map restores defaults.
+    #[optional]
     pub addr_guard:                     DaticleMap,
-    /// URL path prefixes that route requests through a tighter,
-    /// dedicated rate limiter on top of the general address guard.
-    /// Default matches the common login surfaces
-    /// (`/login`, `/admin/login`). An address that exceeds the
-    /// auth guard's rate on these routes is blocked independently
-    /// from its general-traffic behaviour, so a brute-force
-    /// password hammer gets kicked off the login path faster than
-    /// a normal browsing session.
+    /// URL path prefixes routed through the tighter auth-path
+    /// rate limiter.
+    #[optional]
     pub auth_path_prefixes:             Vec<String>,
     /// Maximum average requests per second permitted against the
-    /// auth path prefixes. Intentionally much lower than the
-    /// general `addr_guard.rps_max` (default 5 rps against auth
-    /// paths vs 50 rps general).
+    /// auth path prefixes.
+    #[optional]
     pub auth_rps_max:                   u64,
 
     // --- Virtual hosts ------------------------------------------------------

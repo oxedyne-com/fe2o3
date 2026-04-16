@@ -83,20 +83,31 @@ pub struct OzoneConfig {
     pub zone_state_update_secs:         u8,
     pub zone_overrides:                 BTreeMap<Dat, Dat>,
     // ── Durability barrier ────────────────────────────────────────────────
+    //
+    // All three fields are `#[optional]` so an on-disk config written
+    // by a pre-durability-barrier Steel binary still loads. Missing
+    // fields fall through to the Default impl below, which reproduces
+    // the pre-feature behaviour (no fsync at all). Operators upgrade
+    // by editing the on-disk file or by letting Steel rewrite it on
+    // next clean start.
+
     /// If `true`, issue an fsync on the data and index files after every
     /// successful key+value write. Strongest durability, lowest throughput
     /// (every write waits for the disk). Use on hosts where a power loss
     /// or kernel panic must not cost the acknowledged write.
+    #[optional]
     pub sync_on_write:                  bool,
     /// If non-zero, issue an fsync on the data and index files after
     /// every `N`-th write. A group-commit policy: `N` acknowledged
     /// writes become durable in one fsync call, amortising the cost.
     /// Ignored when `sync_on_write` is `true`.
+    #[optional]
     pub sync_every_n_writes:            u32,
     /// If non-zero, issue an fsync on the data and index files whenever
     /// at least this many milliseconds have elapsed since the last
     /// fsync on the bot. Time-based group commit. Ignored when
     /// `sync_on_write` or `sync_every_n_writes` are active.
+    #[optional]
     pub sync_interval_ms:               u64,
 }
 

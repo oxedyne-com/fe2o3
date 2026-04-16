@@ -329,6 +329,7 @@ impl<
                         HttpMethod::GET,
                         &loc,
                         &[],
+                        &req_headers,
                         &tls_client,
                         &id,
                     ).await);
@@ -538,6 +539,7 @@ impl<
                 HttpMethod::POST,
                 &loc,
                 &body,
+                &req_headers,
                 &tls_client,
                 &id,
             ).await);
@@ -551,14 +553,17 @@ impl<
 ///
 /// Honours the route's `upstream_tls` flag to pick between
 /// `https_request` and `http_request`, carries the static headers
-/// the route was configured with, and propagates the incoming
-/// request's `Content-Type` when present so the upstream receives
-/// whatever the client originally sent.
+/// the route was configured with, and propagates a curated set of
+/// incoming request headers so the upstream sees the same client
+/// context the in-process handler would have seen. Hop-by-hop
+/// headers (`Host`, `Connection`, `Content-Length`) are filtered
+/// out because the outbound client regenerates them itself.
 async fn forward_api_proxy(
     route:          &ApiRoute,
     method:         HttpMethod,
     loc:            &HttpLocator,
     body:           &[u8],
+    req_headers:    &HeaderFields,
     tls_client:     &Option<Arc<ClientConfig>>,
     id:             &str,
 )
@@ -576,27 +581,66 @@ async fn forward_api_proxy(
     let upstream_path = route.upstream_path
         .as_deref().unwrap_or("/");
 
-    // Build upstream headers.
-    let mut hdrs: Vec<(&str, &str)> = Vec::new();
+    // Owned strings for headers built here so their `&str` refs live
+    // until the outbound client has finished formatting the request.
+    let mut owned: Vec<(String, String)> = Vec::new();
+
+    // Route-configured headers (secret tokens, fixed auth). These
+    // win against any incoming client header with the same name
+    // below -- the operator's declared headers are authoritative.
     for (name, value) in &route.headers {
-        hdrs.push((name.as_str(), value.as_str()));
+        owned.push((name.clone(), value.clone()));
     }
 
-    // Forward the Content-Type from the original request if present.
-    // Different upstream APIs expect different content types
-    // (form-urlencoded, JSON, XML, etc.) so we relay whatever the
-    // caller sent rather than hard-coding a default.
-    let ct_holder;
-    if let Some(ct) = loc.data.get(&dat!("content_type")) {
-        if let Dat::Str(s) = ct {
-            ct_holder = s.clone();
-            hdrs.push(("Content-Type", &ct_holder));
+    // Propagate client headers that in-process handlers used to
+    // have direct access to. The name list covers everything an
+    // elearnity handler currently inspects plus the small set of
+    // conventional "pass-through" headers browsers and CLIs send.
+    // Hop-by-hop headers (`Host`, `Connection`, `Content-Length`)
+    // are skipped because the outbound client regenerates them.
+    let propagate: &[HeaderName] = &[
+        HeaderName::Accept,
+        HeaderName::AcceptLanguage,
+        HeaderName::AcceptEncoding,
+        HeaderName::ContentType,
+        HeaderName::UserAgent,
+        HeaderName::Authorization,
+        HeaderName::Origin,
+        HeaderName::Referer,
+    ];
+    for name in propagate {
+        // Skip duplicates: a route-configured header with the same
+        // name already sits in `owned`, so the operator's choice
+        // wins over the client's.
+        let name_str = fmt!("{}", name);
+        if owned.iter().any(|(n, _)| n.eq_ignore_ascii_case(&name_str)) {
+            continue;
+        }
+        if let Some(HeaderFieldValue::Generic(v)) = req_headers.get_one(name) {
+            owned.push((name_str, v.clone()));
         }
     }
 
-    debug!("{}: {} {} -> {}{}:{}{}", id, method, route.path,
+    // Also let the dispatcher-resolved Content-Type override ride
+    // through, because the POST branch already stamped it into
+    // `loc.data` before reaching us and we want to respect the
+    // original byte-level content-type.
+    if let Some(ct) = loc.data.get(&dat!("content_type")) {
+        if let Dat::Str(s) = ct {
+            if !owned.iter().any(|(n, _)| n.eq_ignore_ascii_case("Content-Type")) {
+                owned.push(("Content-Type".to_string(), s.clone()));
+            }
+        }
+    }
+
+    let hdrs: Vec<(&str, &str)> = owned.iter()
+        .map(|(n, v)| (n.as_str(), v.as_str()))
+        .collect();
+
+    debug!("{}: {} {} -> {}{}:{}{} ({} headers)",
+        id, method, route.path,
         if route.upstream_tls { "https://" } else { "http://" },
-        upstream_host, upstream_port, upstream_path);
+        upstream_host, upstream_port, upstream_path, hdrs.len());
 
     if route.upstream_tls {
         let tls_cfg = match tls_client {
