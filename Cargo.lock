@@ -2295,6 +2295,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxedyne_fe2o3_oam"
+version = "0.5.0"
+dependencies = [
+ "oxedyne_fe2o3_core",
+ "oxedyne_fe2o3_kademlia",
+]
+
+[[package]]
 name = "oxedyne_fe2o3_shield"
 version = "0.5.0"
 dependencies = [
