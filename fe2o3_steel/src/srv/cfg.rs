@@ -521,6 +521,16 @@ pub struct VhostConfig {
     /// Incoming webhook routes. Each route maps a local POST path to a
     /// named handler with handler-specific configuration.
     pub webhook_routes:         Vec<WebhookRoute>,
+    /// Optional allow-list of outbound egress targets. When
+    /// non-empty, every `api_routes` upstream must match at
+    /// least one entry or the server refuses to start. Entries
+    /// are `host` or `host:port` strings; `host` alone matches
+    /// any port. Empty list (the default) means "no allow-list
+    /// configured" and every upstream is permitted, matching the
+    /// pre-feature behaviour. Populating this field on a vhost is
+    /// a defence against a compromised app config exfiltrating
+    /// via an arbitrary upstream URL.
+    pub egress_allowed:         Vec<String>,
 }
 
 impl Default for VhostConfig {
@@ -539,6 +549,7 @@ impl Default for VhostConfig {
             db_dir_rel:             Some(fmt!("./o3db")),
             api_routes:             Vec::new(),
             webhook_routes:         Vec::new(),
+            egress_allowed:         Vec::new(),
         }
     }
 }
@@ -711,6 +722,37 @@ impl VhostConfig {
                 "VhostConfig: 'webhook_routes' must be a list of maps.";
                 Invalid, Input, Mismatch)),
         };
+        // Egress allow-list (optional).
+        let egress_allowed = match m.get(&dat!("egress_allowed")) {
+            Some(Dat::List(list)) => {
+                let mut out = Vec::new();
+                for item in list {
+                    match item {
+                        Dat::Str(s) => out.push(s.clone()),
+                        _ => return Err(err!(
+                            "VhostConfig: 'egress_allowed' entries must be strings.";
+                            Invalid, Input, Mismatch)),
+                    }
+                }
+                out
+            }
+            Some(Dat::Vek(vek)) => {
+                let mut out = Vec::new();
+                for item in vek.iter() {
+                    match item {
+                        Dat::Str(s) => out.push(s.clone()),
+                        _ => return Err(err!(
+                            "VhostConfig: 'egress_allowed' entries must be strings.";
+                            Invalid, Input, Mismatch)),
+                    }
+                }
+                out
+            }
+            None => Vec::new(),
+            _ => return Err(err!(
+                "VhostConfig: 'egress_allowed' must be a list of strings.";
+                Invalid, Input, Mismatch)),
+        };
         Ok(Self {
             hostnames,
             public_dir_rel,
@@ -720,7 +762,51 @@ impl VhostConfig {
             db_dir_rel,
             api_routes,
             webhook_routes,
+            egress_allowed,
         })
+    }
+
+    /// Check every `api_routes` upstream against the `egress_allowed`
+    /// list. Returns `Ok(())` when the allow-list is empty (no
+    /// enforcement) or when every upstream matches at least one
+    /// entry. Entries are compared as `host` or `host:port`: a
+    /// bare-host entry matches any port for that host, and a
+    /// `host:port` entry requires an exact match.
+    pub fn validate_egress(&self) -> Outcome<()> {
+        if self.egress_allowed.is_empty() {
+            return Ok(());
+        }
+        for route in &self.api_routes {
+            let (h, p) = match (&route.upstream_host, &route.upstream_port) {
+                (Some(h), Some(p)) => (h.clone(), *p),
+                _ => continue, // handler-served route; no outbound
+            };
+            let mut ok = false;
+            for entry in &self.egress_allowed {
+                if let Some((eh, ep)) = entry.split_once(':') {
+                    if eh == h.as_str() {
+                        if let Ok(ep_n) = ep.parse::<u16>() {
+                            if ep_n == p {
+                                ok = true;
+                                break;
+                            }
+                        }
+                    }
+                } else if entry == h.as_str() {
+                    ok = true;
+                    break;
+                }
+            }
+            if !ok {
+                return Err(err!(
+                    "VhostConfig '{}': api route '{}' upstream {}:{} is not \
+                    in the configured egress_allowed list ({:?}).",
+                    self.primary_hostname(), route.path, h, p,
+                    self.egress_allowed;
+                    Invalid, Input, Security, Configuration));
+            }
+        }
+        Ok(())
     }
 
     /// Resolve the vhost's database directory to an absolute path, creating
@@ -1304,6 +1390,11 @@ impl ServerConfig {
             let _ = res!(vh.get_static_route_paths(root, ()));
             let _ = res!(vh.get_default_index_files());
             let _ = res!(vh.get_hostnames_fqdn());
+            // Egress allow-list check: a vhost whose API proxy
+            // routes target an upstream outside its configured
+            // allow-list is refused at start-up. The check is a
+            // no-op when the allow-list is empty.
+            res!(vh.validate_egress());
         }
         let _ = res!(self.get_acme());
         Ok(())
