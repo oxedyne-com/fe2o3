@@ -90,14 +90,22 @@ pub struct AdminState {
     /// snapshots and drives whitelist / blacklist / unblock
     /// actions against the same `Arc`.
     pub addr_guard:     Arc<SteelAddressGuard>,
+    /// Dedicated tighter rate limiter for sensitive URL prefixes
+    /// (login forms, admin login). Consulted by the HTTPS
+    /// handler after the request line has been parsed; a block
+    /// returns 429 without reaching the application handler and
+    /// without counting against (or affecting) the general
+    /// `addr_guard`'s state for that address.
+    pub auth_guard:     Arc<SteelAddressGuard>,
 }
 
 impl AdminState {
     /// Build a fresh admin state from an unlocked wallet, its
     /// on-disk path, the recovered master key, the shared traffic
-    /// recorder, the shared host sampler, and the shared address
-    /// guard. Called from the TUI startup path once the wallet has
-    /// been unlocked, before the server listeners bind.
+    /// recorder, the shared host sampler, the general address
+    /// guard and the auth guard. Called from the TUI startup path
+    /// once the wallet has been unlocked, before the server
+    /// listeners bind.
     pub fn new(
         wallet:       Arc<RwLock<Wallet>>,
         wallet_path:  PathBuf,
@@ -105,6 +113,7 @@ impl AdminState {
         traffic:      Arc<TrafficRecorder>,
         host_sampler: Arc<HostSampler>,
         addr_guard:   Arc<SteelAddressGuard>,
+        auth_guard:   Arc<SteelAddressGuard>,
     )
         -> Outcome<Self>
     {
@@ -119,6 +128,7 @@ impl AdminState {
             traffic,
             host_sampler,
             addr_guard,
+            auth_guard,
         })
     }
 }

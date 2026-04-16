@@ -1184,6 +1184,28 @@ pub struct ServerConfig {
     /// CSP is app-specific and a strict default would break
     /// existing front ends. Tighten on a per-deployment basis.
     pub content_security_policy:        String,
+    /// Per-IP address guard tuning. Fields: `rps_max` (u64,
+    /// default 50), `tint_min_ms` (u64, default 100),
+    /// `tsunset_base_secs` (u64, default 60),
+    /// `tsunset_spread_secs` (u64, default 240), `blist_cnt`
+    /// (u16, default 6). Any missing field falls back to its
+    /// default, and an empty map restores the built-in
+    /// defaults. Parsed via `get_addr_guard_settings()`.
+    pub addr_guard:                     DaticleMap,
+    /// URL path prefixes that route requests through a tighter,
+    /// dedicated rate limiter on top of the general address guard.
+    /// Default matches the common login surfaces
+    /// (`/login`, `/admin/login`). An address that exceeds the
+    /// auth guard's rate on these routes is blocked independently
+    /// from its general-traffic behaviour, so a brute-force
+    /// password hammer gets kicked off the login path faster than
+    /// a normal browsing session.
+    pub auth_path_prefixes:             Vec<String>,
+    /// Maximum average requests per second permitted against the
+    /// auth path prefixes. Intentionally much lower than the
+    /// general `addr_guard.rps_max` (default 5 rps against auth
+    /// paths vs 50 rps general).
+    pub auth_rps_max:                   u64,
 
     // --- Virtual hosts ------------------------------------------------------
     /// Ordered list of virtual host configurations, stored as a `Dat::List`
@@ -1248,6 +1270,12 @@ impl Default for ServerConfig {
             http_header_read_timeout_ms:    15_000,               // 15 s
             security_headers_enabled:       true,
             content_security_policy:        String::new(),
+            addr_guard:                     DaticleMap::new(),
+            auth_path_prefixes:             vec![
+                fmt!("/login"),
+                fmt!("/admin/login"),
+            ],
+            auth_rps_max:                   5,
             vhosts:                         Dat::List(vec![Dat::Map(vhost_map)]),
             acme:                           AcmeConfig::default().to_datmap(),
             mail:                           DaticleMap::new(),
@@ -1318,6 +1346,44 @@ impl ServerConfig {
             return Ok(None);
         }
         Ok(Some(cfg))
+    }
+
+    /// Parse the `addr_guard` map block into runtime settings for the
+    /// per-IP address guard. Every field is optional; a missing or
+    /// unrecognised field falls back to the module default, and an
+    /// entirely empty map restores every default.
+    pub fn get_addr_guard_settings(
+        &self,
+    )
+        -> crate::srv::admin::guard::AddrGuardSettings
+    {
+        use crate::srv::admin::guard::AddrGuardSettings;
+        let mut s = AddrGuardSettings::default();
+        let take_u64 = |key: &str| -> Option<u64> {
+            match self.addr_guard.get(&dat!(key)) {
+                Some(Dat::U64(v)) => Some(*v),
+                Some(Dat::U32(v)) => Some(*v as u64),
+                Some(Dat::U16(v)) => Some(*v as u64),
+                Some(Dat::U8(v))  => Some(*v as u64),
+                _ => None,
+            }
+        };
+        if let Some(v) = take_u64("rps_max") {
+            s.rps_max = v;
+        }
+        if let Some(v) = take_u64("tint_min_ms") {
+            s.tint_min = Duration::from_millis(v);
+        }
+        if let Some(v) = take_u64("tsunset_base_secs") {
+            s.tsunset_base = Duration::from_secs(v);
+        }
+        if let Some(v) = take_u64("tsunset_spread_secs") {
+            s.tsunset_spread = Duration::from_secs(v);
+        }
+        if let Some(v) = take_u64("blist_cnt") {
+            s.blist_cnt = v.min(u16::MAX as u64) as u16;
+        }
+        s
     }
 
     /// Build a default session cookie for the given session id string.

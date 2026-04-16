@@ -369,7 +369,19 @@ impl AppShellContext {
         // see one consistent view.
         let traffic = TrafficRecorder::new_shared(0);
         let host_sampler = crate::srv::admin::host_sampler::HostSampler::new_shared();
-        let addr_guard = res!(crate::srv::admin::guard::new_shared());
+        let addr_guard = res!(crate::srv::admin::guard::new_shared_with(
+            server_cfg.get_addr_guard_settings(),
+        ));
+        // Build the tighter auth-path guard from the general
+        // settings, then override the rps cap with the auth-specific
+        // value. Everything else (throttle spacing, cooldown, strike
+        // count) stays aligned with the general guard so operators
+        // only need to tune one number for the common case.
+        let mut auth_settings = server_cfg.get_addr_guard_settings();
+        auth_settings.rps_max = server_cfg.auth_rps_max;
+        let auth_guard = res!(crate::srv::admin::guard::new_shared_with(
+            auth_settings,
+        ));
         // The periodic traffic and host samplers are spawned inside
         // Server::start (not here) because this function runs in a
         // sync context -- the tokio runtime `rt` has been built but
@@ -387,6 +399,7 @@ impl AppShellContext {
             traffic.clone(),
             host_sampler.clone(),
             addr_guard.clone(),
+            auth_guard.clone(),
         ));
         let admin_state = Arc::new(admin_state);
         info!("Admin dashboard runtime initialised \

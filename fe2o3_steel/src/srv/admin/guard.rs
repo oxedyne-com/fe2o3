@@ -65,8 +65,52 @@ pub type SteelAddressGuard = AddressGuard<
     (),
 >;
 
+/// Runtime-configurable tuning knobs for the Steel address guard.
+/// Deserialised from the `addr_guard` block in Steel's `ServerConfig`
+/// and applied when the guard is constructed at startup.
+///
+/// Every field has a meaningful default (the `DEFAULT_*` consts above),
+/// so a deployment that omits the `addr_guard` block altogether gets the
+/// same thresholds as the pre-config version of this module.
+#[derive(Clone, Debug)]
+pub struct AddrGuardSettings {
+    /// Maximum average requests per second a Monitor address may
+    /// sustain before being downgraded to Throttle.
+    pub rps_max:            u64,
+    /// Minimum interval between allowed requests while Throttled.
+    pub tint_min:           Duration,
+    /// Base throttle cooldown duration.
+    pub tsunset_base:       Duration,
+    /// Upper bound on jitter added to `tsunset_base` to spread
+    /// cooldown expiries and avoid thundering-herd re-entry.
+    pub tsunset_spread:     Duration,
+    /// Number of throttle episodes after which the address is
+    /// auto-blacklisted.
+    pub blist_cnt:          u16,
+}
+
+impl Default for AddrGuardSettings {
+    fn default() -> Self {
+        Self {
+            rps_max:        DEFAULT_RPS_MAX,
+            tint_min:       DEFAULT_TINT_MIN,
+            tsunset_base:   DEFAULT_TSUNSET_BASE,
+            tsunset_spread: DEFAULT_TSUNSET_SPREAD,
+            blist_cnt:      DEFAULT_BLIST_CNT,
+        }
+    }
+}
+
 /// Construct a shared Steel address guard with the module defaults.
 pub fn new_shared() -> Outcome<Arc<SteelAddressGuard>> {
+    new_shared_with(AddrGuardSettings::default())
+}
+
+/// Construct a shared Steel address guard tuned by the supplied
+/// settings. The shard count, ring length and hasher salt are fixed
+/// compile-time parameters; only the runtime thresholds are operator
+/// adjustable.
+pub fn new_shared_with(settings: AddrGuardSettings) -> Outcome<Arc<SteelAddressGuard>> {
     let amap = res!(ShardMap::<
         GUARD_SHARDS,
         GUARD_SALT_LEN,
@@ -81,11 +125,11 @@ pub fn new_shared() -> Outcome<Arc<SteelAddressGuard>> {
     ));
     let guard = AddressGuard {
         amap,
-        arps_max:       DEFAULT_RPS_MAX,
-        tint_min:       DEFAULT_TINT_MIN,
-        tsunset_base:   DEFAULT_TSUNSET_BASE,
-        tsunset_spread: DEFAULT_TSUNSET_SPREAD,
-        blist_cnt:      DEFAULT_BLIST_CNT,
+        arps_max:       settings.rps_max,
+        tint_min:       settings.tint_min,
+        tsunset_base:   settings.tsunset_base,
+        tsunset_spread: settings.tsunset_spread,
+        blist_cnt:      settings.blist_cnt,
     };
     Ok(Arc::new(guard))
 }

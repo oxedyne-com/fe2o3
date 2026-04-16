@@ -237,6 +237,46 @@ impl<
                         response = Some(msg);
                     }
 
+                    // Per-route rate limit: sensitive URL prefixes
+                    // (login forms, admin login) go through a
+                    // dedicated, tighter guard so a brute-force
+                    // password hammer gets kicked off the login
+                    // path faster than a normal browsing session.
+                    if let HttpHeadline::Request { ref loc, .. } =
+                        request.header.headline
+                    {
+                        let path_str = loc.path.as_string();
+                        if self.cfg.auth_path_prefixes.iter()
+                            .any(|p| path_str.starts_with(p.as_str()))
+                        {
+                            if let Some(admin) = self.admin_state.as_ref() {
+                                match admin.auth_guard.check(&src_addr.ip()) {
+                                    Ok(d) if d.should_drop() => {
+                                        warn!("{}: auth guard dropping {} from {}: {:?}",
+                                            id, path_str, src_addr, d);
+                                        let mut resp = HttpMessage::respond_with_text(
+                                            HttpStatus::TooManyRequests,
+                                            "Too many authentication attempts. \
+                                            Please wait and try again.",
+                                        );
+                                        resp.set_connection_close(true);
+                                        match resp.write_all(&mut write_stream).await {
+                                            Ok(()) => (),
+                                            Err(we) => warn!(
+                                                "{}: failed to emit 429: {}",
+                                                id, we),
+                                        }
+                                        break;
+                                    }
+                                    Ok(_) => (),
+                                    Err(e) => warn!(
+                                        "{}: auth guard error for {}: {}",
+                                        id, src_addr, e),
+                                }
+                            }
+                        }
+                    }
+
                     match request.header.headline.clone() {
                         HttpHeadline::Request { method, loc } => {
                             // Redirect rules fire before the file router.
