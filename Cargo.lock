@@ -2263,6 +2263,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxedyne_fe2o3_o3db_dist"
+version = "0.5.0"
+dependencies = [
+ "oxedyne_fe2o3_core",
+ "oxedyne_fe2o3_hll",
+ "oxedyne_fe2o3_iblt",
+ "oxedyne_fe2o3_kademlia",
+ "oxedyne_fe2o3_oam",
+]
+
+[[package]]
 name = "oxedyne_fe2o3_o3db_sync"
 version = "0.5.0"
 dependencies = [
