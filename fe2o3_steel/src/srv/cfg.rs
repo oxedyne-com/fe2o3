@@ -1307,6 +1307,7 @@ pub struct ServerConfig {
     /// (useful when a cert has expired, when ACME is broken, or when
     /// the operator wants emergency access). Anything other than
     /// `/admin*` returns 404. Defaults to `0` (disabled).
+    #[optional]
     pub admin_local_port:               u16,
     /// Default session lifetime in seconds.
     pub session_expiry_default_secs:    u32,
