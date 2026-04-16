@@ -112,17 +112,27 @@ fn config_rejects_invalid_cohort_lambda() -> Outcome<()> {
 		"treasury",
 		Consistency::Cohort { lambda: 4 },
 		TableConfig::DEFAULT_AE,
+		TableConfig::DEFAULT_IBLT_CELLS,
 	).is_err());
 	assert!(TableConfig::new(
 		"treasury",
 		Consistency::Cohort { lambda: 6 },
 		TableConfig::DEFAULT_AE,
+		TableConfig::DEFAULT_IBLT_CELLS,
 	).is_err());
 	assert!(TableConfig::new(
 		"treasury",
 		Consistency::Cohort { lambda: 7 },
 		TableConfig::DEFAULT_AE,
+		TableConfig::DEFAULT_IBLT_CELLS,
 	).is_ok());
+	// Zero cells rejected.
+	assert!(TableConfig::new(
+		"identity",
+		Consistency::Eventual,
+		TableConfig::DEFAULT_AE,
+		0,
+	).is_err());
 	Ok(())
 }
 

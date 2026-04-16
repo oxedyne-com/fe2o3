@@ -46,7 +46,15 @@ use crate::transport::{
 };
 
 use oxedyne_fe2o3_core::prelude::*;
-use oxedyne_fe2o3_kademlia::id::NodeId;
+use oxedyne_fe2o3_iblt::iblt::{
+	DecodeOutcome,
+	Iblt,
+	IbltConfig,
+};
+use oxedyne_fe2o3_kademlia::id::{
+	ID_LEN,
+	NodeId,
+};
 use oxedyne_fe2o3_oam::config::OamConfig;
 
 use std::collections::HashMap;
@@ -57,6 +65,15 @@ use std::sync::{
 		Ordering,
 	},
 };
+
+
+/// Fixed key and value lengths used by the anti-entropy IBLT sketches.
+///
+/// The key is a 32-byte [`RecordId`] and the value is the 32-byte content
+/// hash produced by [`Storage::digests`]. Matching lengths across peers is
+/// mandatory for IBLT subtraction; callers cannot override.
+const ANTI_ENTROPY_KEY_LEN:		usize = ID_LEN;
+const ANTI_ENTROPY_VALUE_LEN:	usize = 32;
 
 
 /// The default number of peers to which a remote read request is dispatched.
@@ -333,6 +350,17 @@ impl<S: Storage> DistOzone<S> {
 					completed_get:	if completed { Some(request_id) } else { None },
 				})
 			}
+			MsgKind::AntiEntropyDigest { table, sketch } => {
+				self.handle_anti_entropy_digest(env.from, table, sketch)
+			}
+			MsgKind::AntiEntropyReply { table, records, requested_ids, bulk } => {
+				self.handle_anti_entropy_reply(
+					env.from, table, records, requested_ids, bulk,
+				)
+			}
+			MsgKind::AntiEntropyPush { table, records } => {
+				self.handle_anti_entropy_push(table, records)
+			}
 		}
 	}
 
@@ -366,6 +394,227 @@ impl<S: Storage> DistOzone<S> {
 		let mut pending = lock_mutex!(self.pending_gets);
 		pending.remove(&request_id);
 		Ok(())
+	}
+
+	/// Builds an anti-entropy digest envelope for the given eventual-
+	/// consistency table, addressed to a randomly- or caller-chosen target
+	/// peer.
+	///
+	/// The envelope carries a serialised IBLT built from the local storage's
+	/// [`Storage::digests`] enumeration for that table. The recipient
+	/// subtracts it against its own sketch, decodes the symmetric difference
+	/// and answers with [`MsgKind::AntiEntropyReply`].
+	///
+	/// Rejects unknown tables and cohort-backed tables (those reconcile
+	/// through consensus, not anti-entropy).
+	pub fn build_anti_entropy_request(
+		&self,
+		table:	&str,
+		target:	NodeId,
+	)
+		-> Outcome<Envelope>
+	{
+		let tc = res!(self.table_or_err(table));
+		if !matches!(tc.consistency, Consistency::Eventual) {
+			return Err(err!(
+				"anti-entropy is defined only for Eventual tables \
+				(table '{}').", table;
+				Invalid, Input, Unimplemented));
+		}
+		let iblt = res!(self.build_table_iblt(tc));
+		let sketch = iblt.to_bytes();
+		Ok(Envelope::new(
+			self.cfg.local_peer_id,
+			target,
+			MsgKind::AntiEntropyDigest {
+				table:	table.to_string(),
+				sketch,
+			},
+		))
+	}
+
+	/// Builds an IBLT sketch of the entire contents of a table from the
+	/// local storage backend. Factored out so both the request builder and
+	/// the inbound digest handler use the same sketch shape.
+	fn build_table_iblt(&self, tc: &TableConfig) -> Outcome<Iblt> {
+		let cfg = IbltConfig {
+			num_cells:	tc.iblt_cells,
+			num_hashes:	TableConfig::IBLT_NUM_HASHES,
+			key_len:	ANTI_ENTROPY_KEY_LEN,
+			value_len:	ANTI_ENTROPY_VALUE_LEN,
+			seed:		tc.iblt_seed(),
+		};
+		let mut iblt = res!(Iblt::new(cfg));
+		let digests = res!(self.storage.digests(&tc.name));
+		for d in digests {
+			res!(iblt.insert(d.id.as_bytes(), &d.content));
+		}
+		Ok(iblt)
+	}
+
+	/// Handles an incoming anti-entropy digest: decodes the symmetric
+	/// difference against the local sketch and returns an
+	/// [`AntiEntropyReply`][ar] envelope carrying records the sender lacks
+	/// and a list of record identifiers the recipient lacks. On sketch
+	/// overload falls back to a bulk reply of every record the recipient
+	/// holds for the table.
+	///
+	/// [ar]: MsgKind::AntiEntropyReply
+	fn handle_anti_entropy_digest(
+		&self,
+		from:		NodeId,
+		table:		String,
+		sketch:		Vec<u8>,
+	)
+		-> Outcome<InboundOutcome>
+	{
+		let tc = res!(self.table_or_err(&table));
+		if !matches!(tc.consistency, Consistency::Eventual) {
+			return Err(err!(
+				"anti-entropy digest received for non-Eventual table '{}'.",
+				table;
+				Invalid, Input, Unimplemented));
+		}
+		let expected_cfg = IbltConfig {
+			num_cells:	tc.iblt_cells,
+			num_hashes:	TableConfig::IBLT_NUM_HASHES,
+			key_len:	ANTI_ENTROPY_KEY_LEN,
+			value_len:	ANTI_ENTROPY_VALUE_LEN,
+			seed:		tc.iblt_seed(),
+		};
+		let their_iblt = res!(Iblt::from_bytes(&sketch));
+		if their_iblt.config() != expected_cfg {
+			return Err(err!(
+				"anti-entropy sketch config mismatch for table '{}'.",
+				table;
+				Invalid, Input, Mismatch));
+		}
+		let mut mine = res!(self.build_table_iblt(tc));
+		res!(mine.subtract(&their_iblt));
+		let decode = res!(mine.decode());
+		let (records_for_sender, requested_ids, bulk) = match decode {
+			DecodeOutcome::Complete { inserted, deleted } => {
+				// `inserted` = keys in mine not in theirs -> records I
+				// should send. `deleted` = keys in theirs not in mine ->
+				// ids I should request.
+				let mut records_for_sender = Vec::with_capacity(inserted.len());
+				for (key_bytes, _value_hash) in inserted {
+					let rid = res!(RecordId::from_slice(&key_bytes));
+					if let Some(r) = res!(self.storage.get(&table, &rid)) {
+						records_for_sender.push(r);
+					}
+				}
+				let mut requested_ids = Vec::with_capacity(deleted.len());
+				for (key_bytes, _value_hash) in deleted {
+					requested_ids.push(res!(RecordId::from_slice(&key_bytes)));
+				}
+				(records_for_sender, requested_ids, false)
+			}
+			DecodeOutcome::Incomplete { .. } => {
+				// Sketch overloaded. Fall back to bulk: send everything I
+				// have for this table; the sender absorbs what it lacks.
+				// This is simple and correct; a later optimisation can
+				// teach the sender to retry with a larger sketch.
+				let digests = res!(self.storage.digests(&table));
+				let mut records = Vec::with_capacity(digests.len());
+				for d in digests {
+					if let Some(r) = res!(self.storage.get(&table, &d.id)) {
+						records.push(r);
+					}
+				}
+				(records, Vec::new(), true)
+			}
+		};
+		let reply = Envelope::new(
+			self.cfg.local_peer_id,
+			from,
+			MsgKind::AntiEntropyReply {
+				table,
+				records:		records_for_sender,
+				requested_ids,
+				bulk,
+			},
+		);
+		Ok(InboundOutcome {
+			outbound:		vec![reply],
+			completed_get:	None,
+		})
+	}
+
+	/// Handles an incoming anti-entropy reply: applies the records the
+	/// recipient was missing, and builds an
+	/// [`AntiEntropyPush`][ap] envelope for any records the recipient
+	/// requested in return.
+	///
+	/// [ap]: MsgKind::AntiEntropyPush
+	fn handle_anti_entropy_reply(
+		&self,
+		from:			NodeId,
+		table:			String,
+		records:		Vec<Record>,
+		requested_ids:	Vec<RecordId>,
+		_bulk:			bool,
+	)
+		-> Outcome<InboundOutcome>
+	{
+		res!(self.table_or_err(&table));
+
+		// Apply every record the peer sent us, re-checking placement so a
+		// stale-N sender cannot push a record to a peer that has since
+		// stopped considering itself a holder.
+		for record in records {
+			if record.table != table {
+				continue;
+			}
+			if self.placement.i_am_holder(&record.id) {
+				res!(self.storage.put(&record));
+			}
+		}
+
+		// Build a push for every requested id we actually have.
+		let mut to_push = Vec::with_capacity(requested_ids.len());
+		for rid in requested_ids {
+			if let Some(r) = res!(self.storage.get(&table, &rid)) {
+				to_push.push(r);
+			}
+		}
+		if to_push.is_empty() {
+			return Ok(InboundOutcome::empty());
+		}
+		let push = Envelope::new(
+			self.cfg.local_peer_id,
+			from,
+			MsgKind::AntiEntropyPush {
+				table,
+				records:	to_push,
+			},
+		);
+		Ok(InboundOutcome {
+			outbound:		vec![push],
+			completed_get:	None,
+		})
+	}
+
+	/// Handles an incoming anti-entropy push: applies the records the
+	/// originator sent in response to our request list. Each record is
+	/// placement-checked before persistence.
+	fn handle_anti_entropy_push(
+		&self,
+		table:		String,
+		records:	Vec<Record>,
+	)
+		-> Outcome<InboundOutcome>
+	{
+		res!(self.table_or_err(&table));
+		for record in records {
+			if record.table != table {
+				continue;
+			}
+			if self.placement.i_am_holder(&record.id) {
+				res!(self.storage.put(&record));
+			}
+		}
+		Ok(InboundOutcome::empty())
 	}
 }
 

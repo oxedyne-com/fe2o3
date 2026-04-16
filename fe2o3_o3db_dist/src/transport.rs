@@ -57,10 +57,11 @@ impl Envelope {
 
 /// The distributed-Ozone message kinds.
 ///
-/// This enum intentionally covers only the messages exchanged by the pieces
-/// of distributed mode delivered so far. Anti-entropy digest exchanges,
-/// cohort-level HotStuff messages, and brickyard backup messages are deferred
-/// until those layers land and will be added as further variants.
+/// This enum covers the replication-broadcast / read-routing cycle
+/// (`ReplicatePut`, `GetRequest`, `GetResponse`) plus the IBLT
+/// anti-entropy cycle (`AntiEntropyDigest`, `AntiEntropyReply`,
+/// `AntiEntropyPush`). Cohort-level HotStuff messages and brickyard
+/// backup messages are deferred until those layers land.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MsgKind {
 	/// A write: "persist this record if you consider yourself a holder".
@@ -93,15 +94,69 @@ pub enum MsgKind {
 		/// The record, or `None` if the recipient did not have it.
 		record:		Option<Record>,
 	},
+
+	/// Anti-entropy digest: "here is my IBLT for this table; reconcile
+	/// against yours and reply with the symmetric difference".
+	///
+	/// The sender builds the sketch from its own [`Storage::digests`][s]
+	/// enumeration. The recipient builds its own sketch with matching
+	/// parameters, subtracts, decodes, and replies with
+	/// [`MsgKind::AntiEntropyReply`].
+	///
+	/// [s]: crate::storage::Storage::digests
+	AntiEntropyDigest {
+		/// The table being reconciled.
+		table:		String,
+		/// The serialised IBLT sketch (the output of
+		/// [`Iblt::to_bytes`][tb]). Opaque to the transport layer.
+		///
+		/// [tb]: oxedyne_fe2o3_iblt::iblt::Iblt::to_bytes
+		sketch:		Vec<u8>,
+	},
+	/// Anti-entropy reply: "these records are what I have and you lack;
+	/// please send me records with these identifiers".
+	///
+	/// On decode failure (sketch overload), the recipient bulk-replies with
+	/// every record it holds for the table and an empty requested-id list,
+	/// and the originator absorbs the records it lacks. This simplifies
+	/// the first-iteration flow at the cost of bandwidth on fresh joins.
+	AntiEntropyReply {
+		/// The table being reconciled.
+		table:			String,
+		/// Records the recipient holds that the originator lacked, per the
+		/// decoded symmetric difference.
+		records:		Vec<Record>,
+		/// Record identifiers the recipient wants from the originator.
+		requested_ids:	Vec<RecordId>,
+		/// `true` if the recipient fell back to a bulk reply because the
+		/// sketch could not decode. The originator may choose to skip
+		/// sending a follow-up push when it sees a bulk reply.
+		bulk:			bool,
+	},
+	/// Anti-entropy push: "here are the records you requested".
+	///
+	/// Sent by the originator in response to an
+	/// [`AntiEntropyReply`][ar]'s `requested_ids` list.
+	///
+	/// [ar]: MsgKind::AntiEntropyReply
+	AntiEntropyPush {
+		/// The table being reconciled.
+		table:		String,
+		/// The records the recipient asked for.
+		records:	Vec<Record>,
+	},
 }
 
 impl MsgKind {
 	/// A short human-readable label for logging.
 	pub fn label(&self) -> &'static str {
 		match self {
-			Self::ReplicatePut { .. }	=> "ReplicatePut",
-			Self::GetRequest { .. }		=> "GetRequest",
-			Self::GetResponse { .. }	=> "GetResponse",
+			Self::ReplicatePut { .. }		=> "ReplicatePut",
+			Self::GetRequest { .. }			=> "GetRequest",
+			Self::GetResponse { .. }		=> "GetResponse",
+			Self::AntiEntropyDigest { .. }	=> "AntiEntropyDigest",
+			Self::AntiEntropyReply { .. }	=> "AntiEntropyReply",
+			Self::AntiEntropyPush { .. }	=> "AntiEntropyPush",
 		}
 	}
 }

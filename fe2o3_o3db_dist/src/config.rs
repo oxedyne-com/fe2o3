@@ -39,8 +39,9 @@ pub enum Consistency {
 }
 
 
-/// Per-table configuration: the name, the consistency model, and the
-/// anti-entropy cadence for the eventual-consistency reconciliation loop.
+/// Per-table configuration: the name, the consistency model, the
+/// anti-entropy cadence, and the IBLT sketch dimensions used for
+/// anti-entropy reconciliation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TableConfig {
 	/// The application-visible table name. Must be unique within a
@@ -52,6 +53,12 @@ pub struct TableConfig {
 	/// Ignored for [`Consistency::Cohort`] tables, which reconcile through
 	/// consensus rather than anti-entropy.
 	pub anti_entropy:		Duration,
+	/// Number of IBLT cells used in anti-entropy digests for this table.
+	/// Spec rule of thumb: `1.5 × d` cells with three hash functions, where
+	/// `d` is the maximum symmetric-difference size the sketch must decode.
+	/// Oversized sketches waste bandwidth; undersized sketches force a
+	/// bulk-transfer fallback.
+	pub iblt_cells:			usize,
 }
 
 impl TableConfig {
@@ -63,15 +70,29 @@ impl TableConfig {
 	/// list.
 	pub const HIGH_VALUE_AE: Duration = Duration::from_secs(3);
 
-	/// Constructs a table config, validating the consistency model.
+	/// Default IBLT cell count. Tuned for a steady-state symmetric
+	/// difference of up to ~160 records (`256 / 1.5`). Larger differences
+	/// overload the sketch; the anti-entropy handler falls back to a bulk
+	/// transfer when decoding fails.
+	pub const DEFAULT_IBLT_CELLS: usize = 256;
+
+	/// The number of hash functions the anti-entropy IBLT uses. Fixed at
+	/// three across the crate, matching the sizing rule of thumb in
+	/// `fe2o3_iblt`.
+	pub const IBLT_NUM_HASHES: usize = 3;
+
+	/// Constructs a table config, validating the consistency model and the
+	/// sketch dimensions.
 	///
 	/// Rejects:
 	/// - an empty `name`;
-	/// - a [`Consistency::Cohort`] `lambda` outside `{5, 7, 9}`.
+	/// - a [`Consistency::Cohort`] `lambda` outside `{5, 7, 9}`;
+	/// - `iblt_cells == 0`.
 	pub fn new<S: Into<String>>(
 		name:			S,
 		consistency:	Consistency,
 		anti_entropy:	Duration,
+		iblt_cells:		usize,
 	)
 		-> Outcome<Self>
 	{
@@ -88,17 +109,47 @@ impl TableConfig {
 					Invalid, Input, Size));
 			}
 		}
-		Ok(Self { name, consistency, anti_entropy })
+		if iblt_cells == 0 {
+			return Err(err!(
+				"TableConfig requires iblt_cells > 0.";
+				Invalid, Input, Size));
+		}
+		Ok(Self { name, consistency, anti_entropy, iblt_cells })
 	}
 
-	/// Convenience: an eventual-consistency table at the default cadence.
+	/// Convenience: an eventual-consistency table at the default cadence
+	/// and the default IBLT cell count.
 	pub fn eventual<S: Into<String>>(name: S) -> Outcome<Self> {
-		Self::new(name, Consistency::Eventual, Self::DEFAULT_AE)
+		Self::new(
+			name,
+			Consistency::Eventual,
+			Self::DEFAULT_AE,
+			Self::DEFAULT_IBLT_CELLS,
+		)
 	}
 
 	/// Convenience: a cohort-backed table with lambda = 5.
 	pub fn cohort_default<S: Into<String>>(name: S) -> Outcome<Self> {
-		Self::new(name, Consistency::Cohort { lambda: 5 }, Self::DEFAULT_AE)
+		Self::new(
+			name,
+			Consistency::Cohort { lambda: 5 },
+			Self::DEFAULT_AE,
+			Self::DEFAULT_IBLT_CELLS,
+		)
+	}
+
+	/// A deterministic 64-bit seed derived from the table name, used as
+	/// the IBLT's splitmix64 salt so that different tables have different
+	/// hash functions.
+	pub fn iblt_seed(&self) -> u64 {
+		let mut state: u64 = 0x9E3779B97F4A7C15;
+		for byte in self.name.as_bytes() {
+			state = state.wrapping_add(*byte as u64);
+			state = (state ^ (state >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+			state = (state ^ (state >> 27)).wrapping_mul(0x94D049BB133111EB);
+			state ^= state >> 31;
+		}
+		state
 	}
 }
 
