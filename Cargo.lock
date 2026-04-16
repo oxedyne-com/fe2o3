@@ -2132,6 +2132,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxedyne_fe2o3_hotstuff"
+version = "0.5.0"
+dependencies = [
+ "oxedyne_fe2o3_core",
+]
+
+[[package]]
 name = "oxedyne_fe2o3_iblt"
 version = "0.5.0"
 dependencies = [
