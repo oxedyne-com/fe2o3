@@ -24,8 +24,8 @@
 //! [c]: crate::config::Consistency::Cohort
 //! [hs]: https://github.com/oxedyne-io/fe2o3/tree/main/fe2o3_hotstuff
 
-use crate::peer_set::PeerSet;
-use crate::record::RecordId;
+use super::peer_set::PeerSet;
+use super::record::RecordId;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_kademlia::id::NodeId;

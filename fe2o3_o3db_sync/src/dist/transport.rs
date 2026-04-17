@@ -11,9 +11,14 @@
 //! no hidden I/O, which is the property that made the primitive crates
 //! (Kademlia, OAM, IBLT, HotStuff) easy to test and reason about.
 
-use crate::record::{
+use super::record::{
 	Record,
 	RecordId,
+};
+use super::hotstuff::types::{
+	NewView,
+	Proposal,
+	Vote,
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -58,10 +63,11 @@ impl Envelope {
 /// The distributed-Ozone message kinds.
 ///
 /// This enum covers the replication-broadcast / read-routing cycle
-/// (`ReplicatePut`, `GetRequest`, `GetResponse`) plus the IBLT
-/// anti-entropy cycle (`AntiEntropyDigest`, `AntiEntropyReply`,
-/// `AntiEntropyPush`). Cohort-level HotStuff messages and brickyard
-/// backup messages are deferred until those layers land.
+/// (`ReplicatePut`, `GetRequest`, `GetResponse`), the IBLT anti-entropy
+/// cycle (`AntiEntropyDigest`, `AntiEntropyReply`, `AntiEntropyPush`),
+/// and the HotStuff cohort cycle for strong-consistency tables
+/// (`CohortSubmit`, `CohortPropose`, `CohortVote`, `CohortNewView`).
+/// Brickyard backup messages are deferred until that layer lands.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MsgKind {
 	/// A write: "persist this record if you consider yourself a holder".
@@ -145,6 +151,58 @@ pub enum MsgKind {
 		/// The records the recipient asked for.
 		records:	Vec<Record>,
 	},
+
+	/// Forwarded write: "you are the HotStuff leader for this record;
+	/// drive consensus on my behalf".
+	///
+	/// Sent by a peer whose own [`DistOzone::put`][p] call named a
+	/// cohort-backed table but for which the peer is not the initial
+	/// round's leader. The recipient leader creates a
+	/// [`CohortInstance`][ci] (if it does not yet exist) and opens a
+	/// [`MsgKind::CohortPropose`] round.
+	///
+	/// [p]: crate::dist::DistOzone::put
+	/// [ci]: crate::consensus::CohortInstance
+	CohortSubmit {
+		/// The record to consent on.
+		record:	Record,
+	},
+	/// HotStuff leader-to-cohort proposal for a specific record.
+	///
+	/// The `(table, id)` pair selects the per-record HotStuff instance; the
+	/// [`Proposal`] itself carries the view, phase, block hash, optional
+	/// block payload (on [`Phase::Prepare`][ph]) and optional justify QC.
+	///
+	/// [ph]: oxedyne_fe2o3_hotstuff::types::Phase::Prepare
+	CohortPropose {
+		/// The consensus-bearing table.
+		table:		String,
+		/// The record id the cohort is deciding on.
+		id:			RecordId,
+		/// The HotStuff proposal.
+		proposal:	Proposal,
+	},
+	/// HotStuff replica-to-leader vote for a specific record.
+	CohortVote {
+		/// The consensus-bearing table.
+		table:	String,
+		/// The record id the cohort is deciding on.
+		id:		RecordId,
+		/// The HotStuff vote.
+		vote:	Vote,
+	},
+	/// HotStuff view-change message for a specific record.
+	///
+	/// Sent by a replica to the incoming leader when its local timer fires
+	/// without seeing progress in the current view.
+	CohortNewView {
+		/// The consensus-bearing table.
+		table:		String,
+		/// The record id the cohort is deciding on.
+		id:			RecordId,
+		/// The HotStuff view-change payload.
+		new_view:	NewView,
+	},
 }
 
 impl MsgKind {
@@ -157,6 +215,10 @@ impl MsgKind {
 			Self::AntiEntropyDigest { .. }	=> "AntiEntropyDigest",
 			Self::AntiEntropyReply { .. }	=> "AntiEntropyReply",
 			Self::AntiEntropyPush { .. }	=> "AntiEntropyPush",
+			Self::CohortSubmit { .. }		=> "CohortSubmit",
+			Self::CohortPropose { .. }		=> "CohortPropose",
+			Self::CohortVote { .. }			=> "CohortVote",
+			Self::CohortNewView { .. }		=> "CohortNewView",
 		}
 	}
 }

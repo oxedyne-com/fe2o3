@@ -1,3 +1,4 @@
+#![cfg(feature = "dist")]
 //! Integration tests for the IBLT anti-entropy reconciliation cycle.
 //!
 //! Tests cover:
@@ -13,13 +14,13 @@
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_kademlia::id::NodeId;
 use oxedyne_fe2o3_oam::config::OamConfig;
-use oxedyne_fe2o3_o3db_dist::{
+use oxedyne_fe2o3_o3db_sync::dist::{
 	config::{
 		Consistency,
 		DistOzoneConfig,
 		TableConfig,
 	},
-	dist::DistOzone,
+	engine::DistOzone,
 	record::{
 		Record,
 		RecordId,

@@ -1,3 +1,4 @@
+#![cfg(feature = "dist")]
 //! Integration tests for the distributed-Ozone engine.
 //!
 //! Tests cover the pure state-machine behaviour of the engine against the
@@ -12,13 +13,13 @@ use oxedyne_fe2o3_oam::{
 	config::OamConfig,
 	threshold::Threshold,
 };
-use oxedyne_fe2o3_o3db_dist::{
+use oxedyne_fe2o3_o3db_sync::dist::{
 	config::{
 		Consistency,
 		DistOzoneConfig,
 		TableConfig,
 	},
-	dist::{
+	engine::{
 		DistOzone,
 		GetOutcome,
 		InboundOutcome,
@@ -273,7 +274,11 @@ fn put_rejects_unknown_table() -> Outcome<()> {
 }
 
 #[test]
-fn put_rejects_cohort_table() -> Outcome<()> {
+fn put_on_cohort_table_enters_consensus() -> Outcome<()> {
+	// On a cohort-backed table with no peers, the sole member is the
+	// local node -- which is therefore the leader. `put` opens a HotStuff
+	// round and reports consensus_pending. The record is *not* persisted
+	// yet (that happens on Decide).
 	let me = node_id_from_u8(1);
 	let oam = res!(OamConfig::new(20, 500));
 	let tables = vec![res!(TableConfig::cohort_default("treasury"))];
@@ -281,7 +286,9 @@ fn put_rejects_cohort_table() -> Outcome<()> {
 	let engine = res!(DistOzone::new(cfg, MemoryStorage::new()));
 	let rid = RecordId::from_bytes([0; 32]);
 	let record = Record::new(rid, "treasury", b"v".to_vec());
-	assert!(engine.put(record).is_err());
+	let outcome = res!(engine.put(record.clone()));
+	assert!(!outcome.local_persisted);
+	assert_eq!(outcome.consensus_pending, Some((record.table.clone(), rid)));
 	Ok(())
 }
 

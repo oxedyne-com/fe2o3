@@ -10,7 +10,7 @@
 //! full engine without touching disk. A later commit wires the
 //! `fe2o3_o3db_sync` adapter in an integration crate.
 
-use crate::record::{
+use super::record::{
 	Record,
 	RecordDigest,
 	RecordId,

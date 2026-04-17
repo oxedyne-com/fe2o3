@@ -27,19 +27,32 @@
 //! dispatch. The caller polls [`DistOzone::poll_get`] to learn when a
 //! response has landed.
 
-use crate::config::{
+use super::cohort;
+use super::config::{
 	Consistency,
 	DistOzoneConfig,
 	TableConfig,
 };
-use crate::peer_set::PeerSet;
-use crate::placement::Placement;
-use crate::record::{
+use super::consensus::{
+	self,
+	CohortInstance,
+};
+use super::hotstuff::{
+	replica::Command as HsCommand,
+	types::{
+		NewView,
+		Proposal,
+		Vote,
+	},
+};
+use super::peer_set::PeerSet;
+use super::placement::Placement;
+use super::record::{
 	Record,
 	RecordId,
 };
-use crate::storage::Storage;
-use crate::transport::{
+use super::storage::Storage;
+use super::transport::{
 	Envelope,
 	MsgKind,
 	RequestId,
@@ -93,6 +106,11 @@ pub struct DistOzone<S: Storage> {
 	next_rid:		AtomicU64,
 	pending_gets:	Mutex<HashMap<RequestId, PendingGet>>,
 	read_fanout:	usize,
+	/// Per-`(table, record_id)` HotStuff state for cohort-backed writes.
+	/// An entry is created lazily on the first message (either a local
+	/// `put` on a cohort table or an inbound cohort envelope) and kept
+	/// after Decide so duplicate late messages are silently absorbed.
+	cohorts:		Mutex<HashMap<(String, RecordId), CohortInstance>>,
 }
 
 /// The in-flight state of a remote read.
@@ -126,6 +144,7 @@ impl<S: Storage> DistOzone<S> {
 			next_rid:		AtomicU64::new(1),
 			pending_gets:	Mutex::new(HashMap::new()),
 			read_fanout:	DEFAULT_READ_FANOUT,
+			cohorts:		Mutex::new(HashMap::new()),
 		})
 	}
 
@@ -190,25 +209,36 @@ impl<S: Storage> DistOzone<S> {
 		}
 	}
 
-	/// Writes a record, persisting it locally if the local peer is a holder
-	/// and returning the outbound replicate envelopes for every remote
-	/// holder.
+	/// Writes a record, dispatching to either the eventual-consistency
+	/// replication path or the cohort-consensus path based on the table's
+	/// declared [`Consistency`].
 	///
-	/// Rejects unknown table names and cohort-backed tables. The latter
-	/// route through the consensus path, which is not yet wired in this
-	/// layer and would silently bypass the cohort if fall-through were
-	/// permitted.
+	/// On an eventual table the record is persisted locally if the local
+	/// peer is a holder and a [`MsgKind::ReplicatePut`] envelope is emitted
+	/// for every remote holder.
+	///
+	/// On a cohort-backed table the put enters a HotStuff round. If the
+	/// local peer is the cohort's initial leader the engine opens a
+	/// [`MsgKind::CohortPropose`] round and returns the proposal envelopes.
+	/// Otherwise it emits a [`MsgKind::CohortSubmit`] envelope to the
+	/// leader, who drives the round on the submitter's behalf. In both
+	/// cases [`PutOutcome::consensus_pending`] is set; the caller learns
+	/// when consensus completes through
+	/// [`InboundOutcome::completed_consensus_put`].
+	///
+	/// Rejects unknown table names.
 	pub fn put(&self, record: Record) -> Outcome<PutOutcome> {
 		let tc = res!(self.table_or_err(&record.table));
-		if !matches!(tc.consistency, Consistency::Eventual) {
-			return Err(err!(
-				"DistOzone::put does not yet support cohort-backed tables \
-				(table '{}'). Writes to such tables must go through the \
-				consensus path once it is wired in.",
-				record.table;
-				Invalid, Input, Unimplemented));
+		match tc.consistency {
+			Consistency::Eventual => self.put_eventual(record),
+			Consistency::Cohort { lambda } =>
+				self.put_cohort(record, lambda),
 		}
+	}
 
+	/// Eventual-consistency write path -- replicate to the OAM holders and
+	/// persist locally if the local peer is one of them.
+	fn put_eventual(&self, record: Record) -> Outcome<PutOutcome> {
 		let decision = self.placement.decide(&record.id, &self.peer_set);
 		let local_persisted = decision.local_is_holder;
 		if local_persisted {
@@ -223,7 +253,231 @@ impl<S: Storage> DistOzone<S> {
 				MsgKind::ReplicatePut { record: record.clone() },
 			));
 		}
-		Ok(PutOutcome { local_persisted, outbound })
+		Ok(PutOutcome {
+			local_persisted,
+			outbound,
+			consensus_pending:	None,
+		})
+	}
+
+	/// Cohort-consensus write path.
+	///
+	/// Selects the cohort deterministically from `(table, record_id)`, and:
+	/// - if the local peer is the initial leader, opens a HotStuff round
+	///   and returns the broadcast envelopes;
+	/// - otherwise, emits a [`MsgKind::CohortSubmit`] envelope targeting
+	///   the leader.
+	fn put_cohort(&self, record: Record, lambda: u64) -> Outcome<PutOutcome> {
+		let table = record.table.clone();
+		let id = record.id;
+		let sel = res!(cohort::select(
+			&table,
+			&id,
+			&self.peer_set,
+			&self.cfg.local_peer_id,
+			lambda,
+		));
+		if sel.local_is_leader {
+			// Drive the round locally.
+			let outbound = res!(self.leader_open_round(sel, record));
+			Ok(PutOutcome {
+				local_persisted:	false,
+				outbound,
+				consensus_pending:	Some((table, id)),
+			})
+		} else {
+			// Forward to the leader.
+			let env = Envelope::new(
+				self.cfg.local_peer_id,
+				sel.leader,
+				MsgKind::CohortSubmit { record },
+			);
+			Ok(PutOutcome {
+				local_persisted:	false,
+				outbound:			vec![env],
+				consensus_pending:	Some((table, id)),
+			})
+		}
+	}
+
+	/// Leader-side: create the HotStuff instance (if one does not already
+	/// exist) and open a Prepare round for the given record.
+	fn leader_open_round(
+		&self,
+		sel:	cohort::Cohort,
+		record:	Record,
+	)
+		-> Outcome<Vec<Envelope>>
+	{
+		let table = record.table.clone();
+		let id = record.id;
+		let block = consensus::encode_record(&record);
+		let block_hash = consensus::block_hash(&block);
+
+		let lambda = sel.members.len() as u64;
+		let mut cohorts = lock_mutex!(self.cohorts);
+		let instance = match cohorts.get_mut(&(table.clone(), id)) {
+			Some(i) => i,
+			None => {
+				let fresh = res!(CohortInstance::new(
+					sel,
+					&self.cfg.local_peer_id,
+					lambda,
+				));
+				cohorts.insert((table.clone(), id), fresh);
+				cohorts.get_mut(&(table.clone(), id)).expect("just inserted")
+			},
+		};
+		if instance.has_decided() {
+			return Ok(Vec::new());
+		}
+		let cmds = res!(instance.replica.propose(block, block_hash));
+		let outbound = res!(self.translate_commands(&table, &id, instance, cmds));
+		Ok(outbound)
+	}
+
+	/// Translates a list of HotStuff [`Command`](HsCommand)s emitted by a
+	/// per-record replica into wire envelopes, applying local side effects
+	/// (persistence on Decide) along the way.
+	fn translate_commands(
+		&self,
+		table:		&str,
+		id:			&RecordId,
+		instance:	&mut CohortInstance,
+		cmds:		Vec<HsCommand>,
+	)
+		-> Outcome<Vec<Envelope>>
+	{
+		let mut out = Vec::new();
+		for cmd in cmds {
+			match cmd {
+				HsCommand::BroadcastProposal(proposal) => {
+					// Broadcast to every cohort member *except* ourselves.
+					// HotStuff's on_proposal recipe expects the leader to
+					// record its own vote via on_proposal too, so we also
+					// feed the proposal back into our local replica.
+					let self_id = instance.replica.config().self_id;
+					for (i, member) in instance.members.iter().enumerate() {
+						if (i as u16) == self_id {
+							continue;
+						}
+						out.push(Envelope::new(
+							self.cfg.local_peer_id,
+							*member,
+							MsgKind::CohortPropose {
+								table:		table.to_string(),
+								id:			*id,
+								proposal:	proposal.clone(),
+							},
+						));
+					}
+					// Now fold the proposal into the local replica. We
+					// recurse on the commands produced, which lets a leader
+					// that is also a voter correctly emit its own SendVote.
+					let local_cmds = res!(instance.replica.on_proposal(proposal));
+					let more = res!(self.translate_commands(
+						table, id, instance, local_cmds,
+					));
+					out.extend(more);
+				},
+				HsCommand::SendVote { to, vote } => {
+					let target = match instance.node_id(to) {
+						Some(n) => n,
+						None => return Err(err!(
+							"HotStuff SendVote targets replica id {} \
+							which is out of cohort range (size = {}).",
+							to, instance.members.len();
+							Bug, Invalid)),
+					};
+					// The leader of the current view is the usual target; a
+					// vote sent to ourselves needs to be folded in directly
+					// rather than sent on the wire.
+					if target == self.cfg.local_peer_id {
+						let local_cmds = res!(instance.replica.on_vote(vote));
+						let more = res!(self.translate_commands(
+							table, id, instance, local_cmds,
+						));
+						out.extend(more);
+					} else {
+						out.push(Envelope::new(
+							self.cfg.local_peer_id,
+							target,
+							MsgKind::CohortVote {
+								table:	table.to_string(),
+								id:		*id,
+								vote,
+							},
+						));
+					}
+				},
+				HsCommand::SendNewView { to, new_view } => {
+					let target = match instance.node_id(to) {
+						Some(n) => n,
+						None => return Err(err!(
+							"HotStuff SendNewView targets replica id {} \
+							which is out of cohort range (size = {}).",
+							to, instance.members.len();
+							Bug, Invalid)),
+					};
+					if target == self.cfg.local_peer_id {
+						let local_cmds = res!(instance.replica.on_new_view(new_view));
+						let more = res!(self.translate_commands(
+							table, id, instance, local_cmds,
+						));
+						out.extend(more);
+					} else {
+						out.push(Envelope::new(
+							self.cfg.local_peer_id,
+							target,
+							MsgKind::CohortNewView {
+								table:		table.to_string(),
+								id:			*id,
+								new_view,
+							},
+						));
+					}
+				},
+				HsCommand::Decide { view: _, block } => {
+					let record = res!(consensus::decode_record(&block));
+					if record.table != table || &record.id != id {
+						return Err(err!(
+							"HotStuff Decide block decoded to a record at \
+							({}, {:?}) that does not match the consensus \
+							slot ({}, {:?}).",
+							record.table, record.id.as_bytes(),
+							table, id.as_bytes();
+							Bug, Invalid, Mismatch));
+					}
+					let hash = consensus::block_hash(&block);
+					res!(instance.mark_decided(hash));
+					res!(self.storage.put(&record));
+				},
+			}
+		}
+		Ok(out)
+	}
+
+	/// Drives a local timeout for a per-record HotStuff instance. The
+	/// caller owns the timer; on timer expiry it calls this method and
+	/// dispatches the returned envelopes. Returns an empty vec if the
+	/// instance is absent (already decided or never created).
+	pub fn cohort_timeout(
+		&self,
+		table:	&str,
+		id:		&RecordId,
+	)
+		-> Outcome<Vec<Envelope>>
+	{
+		let mut cohorts = lock_mutex!(self.cohorts);
+		let instance = match cohorts.get_mut(&(table.to_string(), *id)) {
+			Some(i) => i,
+			None => return Ok(Vec::new()),
+		};
+		if instance.has_decided() {
+			return Ok(Vec::new());
+		}
+		let cmds = res!(instance.replica.on_timeout());
+		self.translate_commands(table, id, instance, cmds)
 	}
 
 	/// Reads a record. Returns immediately from local storage if the local
@@ -318,8 +572,9 @@ impl<S: Storage> DistOzone<S> {
 					MsgKind::GetResponse { request_id, record },
 				);
 				Ok(InboundOutcome {
-					outbound:		vec![reply],
-					completed_get:	None,
+					outbound:					vec![reply],
+					completed_get:				None,
+					completed_consensus_put:	None,
 				})
 			}
 			MsgKind::GetResponse { request_id, record } => {
@@ -346,8 +601,9 @@ impl<S: Storage> DistOzone<S> {
 					slot.first_response.is_some() || slot.outstanding == 0
 				};
 				Ok(InboundOutcome {
-					outbound:		Vec::new(),
-					completed_get:	if completed { Some(request_id) } else { None },
+					outbound:					Vec::new(),
+					completed_get:				if completed { Some(request_id) } else { None },
+					completed_consensus_put:	None,
 				})
 			}
 			MsgKind::AntiEntropyDigest { table, sketch } => {
@@ -360,6 +616,18 @@ impl<S: Storage> DistOzone<S> {
 			}
 			MsgKind::AntiEntropyPush { table, records } => {
 				self.handle_anti_entropy_push(table, records)
+			}
+			MsgKind::CohortSubmit { record } => {
+				self.handle_cohort_submit(record)
+			}
+			MsgKind::CohortPropose { table, id, proposal } => {
+				self.handle_cohort_propose(env.from, table, id, proposal)
+			}
+			MsgKind::CohortVote { table, id, vote } => {
+				self.handle_cohort_vote(table, id, vote)
+			}
+			MsgKind::CohortNewView { table, id, new_view } => {
+				self.handle_cohort_new_view(table, id, new_view)
 			}
 		}
 	}
@@ -536,8 +804,9 @@ impl<S: Storage> DistOzone<S> {
 			},
 		);
 		Ok(InboundOutcome {
-			outbound:		vec![reply],
-			completed_get:	None,
+			outbound:					vec![reply],
+			completed_get:				None,
+			completed_consensus_put:	None,
 		})
 	}
 
@@ -590,8 +859,193 @@ impl<S: Storage> DistOzone<S> {
 			},
 		);
 		Ok(InboundOutcome {
-			outbound:		vec![push],
-			completed_get:	None,
+			outbound:					vec![push],
+			completed_get:				None,
+			completed_consensus_put:	None,
+		})
+	}
+
+	/// Handles an inbound [`MsgKind::CohortSubmit`].
+	///
+	/// Validates that the local peer is the initial leader for the
+	/// `(table, record_id)` pair and opens (or re-opens, if the current
+	/// view has progressed but this is the first submit the leader has
+	/// seen) a HotStuff round. If the local peer is not the leader the
+	/// submission is dropped silently -- this is almost always a
+	/// stale-cohort race (the submitter's view of the peer set differed
+	/// from the leader's at the moment of submission).
+	fn handle_cohort_submit(
+		&self,
+		record:	Record,
+	)
+		-> Outcome<InboundOutcome>
+	{
+		let tc = res!(self.table_or_err(&record.table));
+		let lambda = match tc.consistency {
+			Consistency::Cohort { lambda } => lambda,
+			Consistency::Eventual => return Err(err!(
+				"CohortSubmit received for eventual-consistency table '{}'.",
+				record.table;
+				Invalid, Input, Mismatch)),
+		};
+		let sel = res!(cohort::select(
+			&record.table,
+			&record.id,
+			&self.peer_set,
+			&self.cfg.local_peer_id,
+			lambda,
+		));
+		if !sel.local_is_leader {
+			// Not our job -- drop silently.
+			return Ok(InboundOutcome::empty());
+		}
+		let outbound = res!(self.leader_open_round(sel, record));
+		Ok(InboundOutcome {
+			outbound,
+			completed_get:				None,
+			completed_consensus_put:	None,
+		})
+	}
+
+	/// Handles an inbound [`MsgKind::CohortPropose`]: feeds the proposal
+	/// into the per-record HotStuff replica, creating a fresh instance if
+	/// one does not yet exist. Proposals addressed to a peer that is not a
+	/// cohort member are dropped silently.
+	fn handle_cohort_propose(
+		&self,
+		from:		NodeId,
+		table:		String,
+		id:			RecordId,
+		proposal:	Proposal,
+	)
+		-> Outcome<InboundOutcome>
+	{
+		let tc = res!(self.table_or_err(&table));
+		let lambda = match tc.consistency {
+			Consistency::Cohort { lambda } => lambda,
+			Consistency::Eventual => return Err(err!(
+				"CohortPropose received for eventual-consistency table '{}'.",
+				table;
+				Invalid, Input, Mismatch)),
+		};
+		let sel = res!(cohort::select(
+			&table,
+			&id,
+			&self.peer_set,
+			&self.cfg.local_peer_id,
+			lambda,
+		));
+		if !sel.local_is_member {
+			// Proposal arrived but we are not in the cohort -- drop. This
+			// can happen if peer-set views disagree; the sender will retry
+			// after its own set updates.
+			return Ok(InboundOutcome::empty());
+		}
+		// Verify the proposal came from someone plausibly in the cohort.
+		// Stronger origin checks (view-aware leader matching) live in the
+		// HotStuff replica itself.
+		if !sel.members.iter().any(|m| m == &from) {
+			return Ok(InboundOutcome::empty());
+		}
+		let mut cohorts = lock_mutex!(self.cohorts);
+		let key = (table.clone(), id);
+		let instance = match cohorts.get_mut(&key) {
+			Some(i) => i,
+			None => {
+				let fresh = res!(CohortInstance::new(
+					sel,
+					&self.cfg.local_peer_id,
+					lambda,
+				));
+				cohorts.insert(key.clone(), fresh);
+				cohorts.get_mut(&key).expect("just inserted")
+			},
+		};
+		if instance.has_decided() {
+			return Ok(InboundOutcome::empty());
+		}
+		let before_decided = instance.has_decided();
+		let cmds = res!(instance.replica.on_proposal(proposal));
+		let outbound = res!(self.translate_commands(&table, &id, instance, cmds));
+		let completed_consensus_put = if !before_decided && instance.has_decided() {
+			Some((table, id))
+		} else {
+			None
+		};
+		Ok(InboundOutcome {
+			outbound,
+			completed_get:				None,
+			completed_consensus_put,
+		})
+	}
+
+	/// Handles an inbound [`MsgKind::CohortVote`]: feeds the vote into the
+	/// per-record HotStuff replica (leader-only; non-leader replicas
+	/// silently ignore per the HotStuff spec).
+	fn handle_cohort_vote(
+		&self,
+		table:	String,
+		id:		RecordId,
+		vote:	Vote,
+	)
+		-> Outcome<InboundOutcome>
+	{
+		let mut cohorts = lock_mutex!(self.cohorts);
+		let key = (table.clone(), id);
+		let instance = match cohorts.get_mut(&key) {
+			Some(i) => i,
+			None => {
+				// Vote arrived before we created an instance. Drop -- a
+				// well-behaved cohort member only votes after seeing the
+				// leader's Propose, so by the time a vote reaches us we
+				// should already have an instance. This case is most
+				// likely an adversarial or replayed envelope.
+				return Ok(InboundOutcome::empty());
+			},
+		};
+		if instance.has_decided() {
+			return Ok(InboundOutcome::empty());
+		}
+		let before_decided = instance.has_decided();
+		let cmds = res!(instance.replica.on_vote(vote));
+		let outbound = res!(self.translate_commands(&table, &id, instance, cmds));
+		let completed_consensus_put = if !before_decided && instance.has_decided() {
+			Some((table, id))
+		} else {
+			None
+		};
+		Ok(InboundOutcome {
+			outbound,
+			completed_get:				None,
+			completed_consensus_put,
+		})
+	}
+
+	/// Handles an inbound [`MsgKind::CohortNewView`]: feeds the view-
+	/// change message into the per-record HotStuff replica.
+	fn handle_cohort_new_view(
+		&self,
+		table:		String,
+		id:			RecordId,
+		new_view:	NewView,
+	)
+		-> Outcome<InboundOutcome>
+	{
+		let mut cohorts = lock_mutex!(self.cohorts);
+		let key = (table.clone(), id);
+		let instance = match cohorts.get_mut(&key) {
+			Some(i) => i,
+			None => return Ok(InboundOutcome::empty()),
+		};
+		if instance.has_decided() {
+			return Ok(InboundOutcome::empty());
+		}
+		let cmds = res!(instance.replica.on_new_view(new_view));
+		let outbound = res!(self.translate_commands(&table, &id, instance, cmds));
+		Ok(InboundOutcome {
+			outbound,
+			completed_get:				None,
+			completed_consensus_put:	None,
 		})
 	}
 
@@ -622,10 +1076,23 @@ impl<S: Storage> DistOzone<S> {
 /// The result of a [`DistOzone::put`] call.
 #[derive(Clone, Debug)]
 pub struct PutOutcome {
-	/// `true` if the record was persisted to local storage.
+	/// `true` if the record was persisted to local storage by this call.
+	/// Always `false` for cohort-backed writes -- those persist when the
+	/// HotStuff round reaches `Decide`, which is signalled through
+	/// [`InboundOutcome::completed_consensus_put`].
 	pub local_persisted:	bool,
-	/// The replicate-put envelopes to dispatch to remote holders.
+	/// The envelopes the caller should dispatch. For eventual writes these
+	/// are [`MsgKind::ReplicatePut`]s to remote holders. For cohort writes
+	/// these are either [`MsgKind::CohortPropose`] envelopes (when the
+	/// local peer is the initial leader) or a single
+	/// [`MsgKind::CohortSubmit`] (otherwise).
 	pub outbound:			Vec<Envelope>,
+	/// `Some((table, record_id))` when this put entered a HotStuff
+	/// consensus round. Callers that need to know when the record lands in
+	/// storage across the cohort can watch
+	/// [`InboundOutcome::completed_consensus_put`] for a matching
+	/// `(table, record_id)`.
+	pub consensus_pending:	Option<(String, RecordId)>,
 }
 
 
@@ -660,11 +1127,21 @@ pub struct InboundOutcome {
 	/// that read. The caller polls [`DistOzone::poll_get`] to collect the
 	/// record itself.
 	pub completed_get:	Option<RequestId>,
+	/// If this envelope caused a HotStuff cohort round to reach `Decide`
+	/// and the resulting record to be persisted to local storage, the
+	/// `(table, record_id)` identifying that commit. The caller can use
+	/// this to ack the originating submitter or to drive application-level
+	/// post-commit work.
+	pub completed_consensus_put:	Option<(String, RecordId)>,
 }
 
 impl InboundOutcome {
 	fn empty() -> Self {
-		Self { outbound: Vec::new(), completed_get: None }
+		Self {
+			outbound:					Vec::new(),
+			completed_get:				None,
+			completed_consensus_put:	None,
+		}
 	}
 }
 

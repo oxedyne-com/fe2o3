@@ -4,8 +4,19 @@ version = "0.5.0"
 authors = ["h00gs <hello@oxedyne.io>"]
 edition = "2021"
 license = "BSD-2-Clause/Apache-2.0"
-description = "Hematite library for the Ozone database (o3db), a key-value store inspired by BitCask, designed for high throughput." 
+description = "Hematite library for the Ozone database (o3db), a key-value store inspired by BitCask, designed for high throughput."
 repository = "https://github.com/oxedyne-io/fe2o3"
+
+[features]
+# Peer-to-peer distributed Ozone: OAM placement, IBLT anti-entropy,
+# HotStuff consensus for strong-consistency tables. Disabled by default
+# -- enable when your application needs replication across peers.
+dist = [
+	"dep:oxedyne_fe2o3_hll",
+	"dep:oxedyne_fe2o3_iblt",
+	"dep:oxedyne_fe2o3_kademlia",
+	"dep:oxedyne_fe2o3_oam",
+]
 
 [dependencies]
 oxedyne_fe2o3_bot 		   		= { path = "../fe2o3_bot" }
@@ -24,6 +35,13 @@ oxedyne_fe2o3_stds 				= { path = "../fe2o3_stds" }
 oxedyne_fe2o3_test 				= { path = "../fe2o3_test" }
 oxedyne_fe2o3_text 				= { path = "../fe2o3_text" }
 oxedyne_fe2o3_namex				= { path = "../fe2o3_namex" }
+
+# Distributed-mode dependencies. Gated behind the `dist` feature so that
+# local-only callers do not pull the peer-to-peer primitive graph in.
+oxedyne_fe2o3_hll				= { path = "../fe2o3_hll",		optional = true }
+oxedyne_fe2o3_iblt				= { path = "../fe2o3_iblt",		optional = true }
+oxedyne_fe2o3_kademlia			= { path = "../fe2o3_kademlia",	optional = true }
+oxedyne_fe2o3_oam				= { path = "../fe2o3_oam",		optional = true }
 
 crossbeam-utils = "0.8.5"
 hostname = "0.3.1"

@@ -1,8 +1,9 @@
+#![cfg(feature = "dist")]
 //! Integration tests for the HotStuff primitive.
 
 use oxedyne_fe2o3_core::prelude::*;
 
-use oxedyne_fe2o3_hotstuff::{
+use oxedyne_fe2o3_o3db_sync::dist::hotstuff::{
 	replica::{
 		Command,
 		Config,

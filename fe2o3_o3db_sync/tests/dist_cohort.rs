@@ -1,3 +1,4 @@
+#![cfg(feature = "dist")]
 //! Integration tests for the HotStuff cohort selection primitive.
 //!
 //! Covers determinism, size clamping, leader stability, sensitivity to
@@ -6,7 +7,7 @@
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_kademlia::id::NodeId;
-use oxedyne_fe2o3_o3db_dist::{
+use oxedyne_fe2o3_o3db_sync::dist::{
 	cohort::{
 		self,
 		Cohort,

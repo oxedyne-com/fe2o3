@@ -64,7 +64,7 @@ impl Phase {
 /// of a particular view. The first proposal of a view (phase `Prepare`)
 /// carries the full block payload; subsequent proposals carry only the
 /// justifying QC since the block was pinned by `Prepare`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Proposal {
 	/// The view this proposal belongs to.
 	pub view:		ViewId,
@@ -89,7 +89,7 @@ pub struct Proposal {
 /// A replica's vote for a specific phase of a specific view over a specific
 /// block hash. The signature is opaque to this primitive -- callers produce
 /// and verify it.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Vote {
 	/// View the vote belongs to.
 	pub view:		ViewId,
@@ -107,7 +107,7 @@ pub struct Vote {
 
 /// A quorum certificate: at least `cohort_size - f` distinct votes at the
 /// same `(view, phase, block_hash)`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Qc {
 	/// View the QC belongs to.
 	pub view:		ViewId,
@@ -127,7 +127,7 @@ pub struct Qc {
 /// picks the highest `prepare_qc` among them as the basis of the next
 /// `Prepare` proposal. A replica that has never seen a prepare QC sends
 /// `prepare_qc = None`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NewView {
 	/// The view the sender is entering. The new leader is
 	/// `leader_for(view)`; it accumulates messages whose `view` equals its

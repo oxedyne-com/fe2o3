@@ -156,4 +156,9 @@ pub mod test;
 pub mod db;
 pub mod prelude;
 
+/// Peer-to-peer distributed Ozone: OAM placement + IBLT anti-entropy +
+/// HotStuff consensus. Gated behind the `dist` cargo feature.
+#[cfg(feature = "dist")]
+pub mod dist;
+
 pub use crate::db::O3db;

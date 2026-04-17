@@ -20,8 +20,8 @@
 //! [`OamConfig`]: oxedyne_fe2o3_oam::config::OamConfig
 //! [`Threshold`]: oxedyne_fe2o3_oam::threshold::Threshold
 
-use crate::peer_set::PeerSet;
-use crate::record::RecordId;
+use super::peer_set::PeerSet;
+use super::record::RecordId;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_kademlia::id::NodeId;

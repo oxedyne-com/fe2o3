@@ -42,7 +42,6 @@
 //! - Signature aggregation (we pass individual signatures through the QC;
 //!   callers implementing threshold signatures can swap the aggregation
 //!   logic at their integration layer).
-#![forbid(unsafe_code)]
 
 pub mod replica;
 pub mod types;

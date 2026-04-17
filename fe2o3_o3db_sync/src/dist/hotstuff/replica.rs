@@ -20,7 +20,7 @@
 //! simulation tests, signature aggregation (we pass individual signatures
 //! through the QC).
 
-use crate::types::{
+use super::types::{
 	BLOCK_HASH_LEN,
 	BlockHash,
 	NewView,
