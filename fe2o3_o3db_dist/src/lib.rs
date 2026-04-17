@@ -43,6 +43,7 @@
 //!   API for persistence.
 #![forbid(unsafe_code)]
 
+pub mod cohort;
 pub mod config;
 pub mod dist;
 pub mod peer_set;
