@@ -300,7 +300,7 @@ mod tests {
     use super::*;
     use crate::srv::admin::state::derive_session_key;
     use oxedyne_fe2o3_crypto::enc::EncryptionScheme;
-    use oxedyne_fe2o3_crypto::keys::Wallet;
+    use oxedyne_fe2o3_crypto::keystore::Wallet;
     use std::sync::{Arc, RwLock};
 
     fn mkstate() -> AdminState {

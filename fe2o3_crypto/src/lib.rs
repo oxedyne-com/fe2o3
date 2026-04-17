@@ -62,6 +62,7 @@ include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 pub mod enc;
 pub mod kem;
 pub mod keys;
+pub mod keystore;
 pub mod pqc;
 pub mod scheme;
 pub mod sign;

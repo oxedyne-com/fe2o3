@@ -17,7 +17,7 @@ use oxedyne_fe2o3_core::{
         bot::FileConfig,
     },
 };
-use oxedyne_fe2o3_crypto::keys::{
+use oxedyne_fe2o3_crypto::keystore::{
     DEFAULT_WALLET_KDF_NAME,
     Wallet,
 };
@@ -155,7 +155,7 @@ pub fn run() -> Outcome<()> {
     // ┌───────────────────────────────────────────────────────────────────────┐
     // │ WALLET UNLOCK                                                         │
     // │                                                                       │
-    // │ See `fe2o3_crypto::keys::Wallet` for the data model. Any admin whose  │
+    // │ See `fe2o3_crypto::keystore::Wallet` for the data model. Any admin   │
     // │ password unwraps their entry recovers the shared master key, which   │
     // │ is then used as the Ozone database encryption key. Password is read  │
     // │ from stdin (echo off) with an optional `SHIELD_ADMIN_PASS` env var   │

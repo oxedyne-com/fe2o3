@@ -29,7 +29,7 @@ use oxedyne_fe2o3_core::{
         bot::FileConfig,
     },
 };
-use oxedyne_fe2o3_crypto::keys::{
+use oxedyne_fe2o3_crypto::keystore::{
     DEFAULT_WALLET_KDF_NAME,
     Wallet,
 };
@@ -437,7 +437,7 @@ fn migrate_legacy_wallet_inline(_cfg: &AppConfig) -> Outcome<()> {
     use oxedyne_fe2o3_core::mem::Extract;
     use oxedyne_fe2o3_hash::kdf::KeyDerivationScheme;
     use oxedyne_fe2o3_iop_hash::kdf::KeyDeriver;
-    use oxedyne_fe2o3_crypto::keys::{
+    use oxedyne_fe2o3_crypto::keystore::{
         AdminUser,
         DEFAULT_WALLET_KDF_NAME,
     };

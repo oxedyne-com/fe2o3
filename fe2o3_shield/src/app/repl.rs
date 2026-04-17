@@ -20,7 +20,7 @@ use oxedyne_fe2o3_core::{
 };
 use oxedyne_fe2o3_crypto::{
     enc::EncryptionScheme,
-    keys::Wallet,
+    keystore::Wallet,
 };
 use oxedyne_fe2o3_hash::{
     csum::ChecksumScheme,

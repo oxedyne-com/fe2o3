@@ -40,7 +40,7 @@ use crate::srv::admin::{
     state::AdminState,
 };
 
-use oxedyne_fe2o3_crypto::keys::DEFAULT_WALLET_KDF_NAME;
+use oxedyne_fe2o3_crypto::keystore::DEFAULT_WALLET_KDF_NAME;
 use oxedyne_fe2o3_jdat::{
     file::JdatFile,
     string::enc::EncoderConfig,

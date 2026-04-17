@@ -25,7 +25,7 @@ use crate::srv::admin::{
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_crypto::{
     enc::EncryptionScheme,
-    keys::Wallet,
+    keystore::Wallet,
 };
 use oxedyne_fe2o3_hash::hash::HashScheme;
 use oxedyne_fe2o3_iop_hash::api::Hasher;

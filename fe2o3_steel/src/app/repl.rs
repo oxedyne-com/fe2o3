@@ -24,7 +24,7 @@ use oxedyne_fe2o3_core::{
 };
 use oxedyne_fe2o3_crypto::{
     enc::EncryptionScheme,
-    keys::Wallet,
+    keystore::Wallet,
 };
 use oxedyne_fe2o3_hash::{
     kdf::KeyDerivationScheme,
@@ -538,11 +538,11 @@ impl AppShellContext {
         // same passphrase the caller just typed), assemble a new
         // Wallet, and save it. The caller keeps using the same
         // passphrase; nothing changes on the Ozone side.
-        let admin = res!(oxedyne_fe2o3_crypto::keys::AdminUser::new(
+        let admin = res!(oxedyne_fe2o3_crypto::keystore::AdminUser::new(
             admin_name.clone(),
             pass_bytes,
             &master_key,
-            oxedyne_fe2o3_crypto::keys::DEFAULT_WALLET_KDF_NAME,
+            oxedyne_fe2o3_crypto::keystore::DEFAULT_WALLET_KDF_NAME,
             vec!["*".to_string()],
             0,
         ));
@@ -660,7 +660,7 @@ impl AppShellContext {
                 &caller_name,
                 &master,
                 new_pass.expose_secret().as_bytes(),
-                oxedyne_fe2o3_crypto::keys::DEFAULT_WALLET_KDF_NAME,
+                oxedyne_fe2o3_crypto::keystore::DEFAULT_WALLET_KDF_NAME,
             ) {
                 audit::append(&caller_name, "admin.passwd", "err",
                     &fmt!("reason={}", e));
@@ -743,7 +743,7 @@ impl AppShellContext {
                 new_pass.expose_secret().as_bytes(),
                 new_scopes.clone(),
                 expires_at,
-                oxedyne_fe2o3_crypto::keys::DEFAULT_WALLET_KDF_NAME,
+                oxedyne_fe2o3_crypto::keystore::DEFAULT_WALLET_KDF_NAME,
             ) {
                 audit::append(&caller_name, "admin.add", "err",
                     &fmt!("target={} reason={}", new_name, e));
