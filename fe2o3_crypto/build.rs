@@ -69,8 +69,16 @@ fn main() {
 
     println!("cargo:rustc-link-search=/usr/lib/x86_64-linux-gnu");
     println!("cargo:rustc-link-lib=static=crypto");
+    // libcrypto.a pulls in compression-library symbols (zlib + zstd)
+    // via its c_zlib.o / c_zstd.o wrappers. Link them dynamically so
+    // the test binary can resolve them. Downstream binaries that link
+    // this crate as a lib usually pick these up transitively from
+    // another dependency, so the failure only surfaces for
+    // `cargo test -p fe2o3_crypto`.
+    println!("cargo:rustc-link-lib=z");
+    println!("cargo:rustc-link-lib=zstd");
 
-    let dir = env::var("CARGO_MANIFEST_DIR").unwrap();    
+    let dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     println!(
         "cargo:rustc-link-search={}",
         Path::new(&dir).join("src/c").display(),
