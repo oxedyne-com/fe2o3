@@ -59,6 +59,7 @@ include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 //pub mod macros_dilithium;
 //pub mod macros_saber;
 
+pub mod command;
 pub mod credential;
 pub mod enc;
 pub mod kem;
