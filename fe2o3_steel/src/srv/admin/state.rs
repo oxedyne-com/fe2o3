@@ -16,10 +16,14 @@
 //! from the ozone encryption key even though both ultimately trace
 //! back to the same wallet unlock.
 
-use crate::srv::admin::{
-    guard::SteelAddressGuard,
-    host_sampler::HostSampler,
-    traffic::TrafficRecorder,
+use crate::srv::{
+    admin::{
+        guard::SteelAddressGuard,
+        host_sampler::HostSampler,
+        signed_login::NonceTracker,
+        traffic::TrafficRecorder,
+    },
+    cfg::AdminKey,
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -34,8 +38,10 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
+        Mutex,
         RwLock,
     },
+    time::Duration,
 };
 
 /// Domain-separation string mixed into the master key when deriving
@@ -97,6 +103,21 @@ pub struct AdminState {
     /// without counting against (or affecting) the general
     /// `addr_guard`'s state for that address.
     pub auth_guard:     Arc<SteelAddressGuard>,
+    /// Authorised public keys for the signed-admin-login flow, as
+    /// parsed from the primary vhost's `admin_keys` config block.
+    /// Empty when the feature is not configured. Shared across
+    /// clones via `Arc` so every handler holds the same list.
+    pub admin_keys:     Arc<Vec<AdminKey>>,
+    /// Replay-window tracker for signed-login nonces. Rejects any
+    /// `(signer_id, nonce)` pair presented twice inside the
+    /// freshness window.
+    pub nonce_tracker:  Arc<Mutex<NonceTracker>>,
+    /// Optional URL whose script tag is injected into every
+    /// admin-served page's `<head>`. Copied from the primary vhost's
+    /// `head_injection_url` field at start-up. `None` leaves the
+    /// default head untouched. Exposed as `Arc<Option<_>>` for cheap
+    /// cloning across handlers.
+    pub head_injection_url: Arc<Option<String>>,
 }
 
 impl AdminState {
@@ -107,19 +128,28 @@ impl AdminState {
     /// once the wallet has been unlocked, before the server
     /// listeners bind.
     pub fn new(
-        wallet:       Arc<RwLock<Wallet>>,
-        wallet_path:  PathBuf,
-        master_key:   &[u8],
-        traffic:      Arc<TrafficRecorder>,
-        host_sampler: Arc<HostSampler>,
-        addr_guard:   Arc<SteelAddressGuard>,
-        auth_guard:   Arc<SteelAddressGuard>,
+        wallet:             Arc<RwLock<Wallet>>,
+        wallet_path:        PathBuf,
+        master_key:         &[u8],
+        traffic:            Arc<TrafficRecorder>,
+        host_sampler:       Arc<HostSampler>,
+        addr_guard:         Arc<SteelAddressGuard>,
+        auth_guard:         Arc<SteelAddressGuard>,
+        admin_keys:         Vec<AdminKey>,
+        head_injection_url: Option<String>,
     )
         -> Outcome<Self>
     {
         let session_key = res!(derive_session_key(master_key));
         let session_enc = res!(
             EncryptionScheme::new_aes_256_gcm_with_key(&session_key));
+        // The replay-window matches the signed-login freshness
+        // window -- an envelope older than the window would fail
+        // the verify_fresh check anyway, so there is no point
+        // tracking nonces past that horizon.
+        let tracker = NonceTracker::new(Duration::from_secs(
+            crate::srv::admin::signed_login::SIGNED_LOGIN_FRESHNESS_SECS,
+        ));
         Ok(Self {
             wallet,
             wallet_path,
@@ -129,6 +159,9 @@ impl AdminState {
             host_sampler,
             addr_guard,
             auth_guard,
+            admin_keys:         Arc::new(admin_keys),
+            nonce_tracker:      Arc::new(Mutex::new(tracker)),
+            head_injection_url: Arc::new(head_injection_url),
         })
     }
 }

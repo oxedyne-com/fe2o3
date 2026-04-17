@@ -54,6 +54,7 @@ pub mod local_listener;
 pub mod ozone_view;
 pub mod persist;
 pub mod session;
+pub mod signed_login;
 pub mod state;
 pub mod traffic;
 

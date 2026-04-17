@@ -611,6 +611,52 @@ pub struct VhostConfig {
     /// a defence against a compromised app config exfiltrating
     /// via an arbitrary upstream URL.
     pub egress_allowed:         Vec<String>,
+    /// Authorised signing keys for the signed-admin-login flow.
+    /// Each entry binds a named operator to a public key and a
+    /// scope list; a #raw("SignedCommand") with #raw("cmd") =
+    /// `"admin_login"` and #raw("signer_id") matching one of these
+    /// entries' public keys issues a dashboard session cookie
+    /// without a wallet passphrase. Empty list means the feature
+    /// is disabled for this vhost and the classical
+    /// passphrase-form login is the only admin entry.
+    pub admin_keys:             Vec<AdminKey>,
+    /// Optional URL of a script or stylesheet resource to inject
+    /// into the `<head>` of every admin-served page. An operator
+    /// uses this to plug an Oxegen-style header bar or similar
+    /// cross-app chrome onto a Steel deployment without touching
+    /// the Steel source. `None` leaves the default `<head>`
+    /// untouched. Interpreted as a raw URL, rendered as
+    /// `<script src="{url}" defer></script>`.
+    pub head_injection_url:     Option<String>,
+}
+
+/// A single entry in a vhost's [`VhostConfig::admin_keys`] list.
+///
+/// Names a public key, a human-readable identity and a scope list.
+/// The signed-admin-login flow looks up an inbound
+/// #raw("SignedCommand")'s #raw("signer_id") against these entries'
+/// public keys; a match yields the matching name and scopes for the
+/// session cookie. Scopes use the same vocabulary as
+/// [`AdminUser::scopes`](oxedyne_fe2o3_crypto::keystore::AdminUser)
+/// so the dashboard gates requests identically regardless of whether
+/// the admin authenticated via passphrase or signature.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminKey {
+    /// Human-readable identity for the key's holder. Used in audit
+    /// log output and the dashboard's admin view.
+    pub name:           String,
+    /// Raw public key bytes. Encoded as lowercase hex in the config
+    /// file for human-readability; parsed into bytes at load time.
+    pub public_key:     Vec<u8>,
+    /// Signature scheme name, matching one of
+    /// [`SignatureScheme`](oxedyne_fe2o3_crypto::sign::SignatureScheme)'s
+    /// `Debug` output strings (`"Ed25519"`, `"Dilithium2"`,
+    /// `"Dilithium2_fe2o3"`).
+    pub scheme:         String,
+    /// Scopes granted to a session authenticated with this key. Uses
+    /// the same vocabulary as the wallet's admin entries; `"*"` is
+    /// the wildcard.
+    pub scopes:         Vec<String>,
 }
 
 impl Default for VhostConfig {
@@ -630,6 +676,8 @@ impl Default for VhostConfig {
             api_routes:             Vec::new(),
             webhook_routes:         Vec::new(),
             egress_allowed:         Vec::new(),
+            admin_keys:             Vec::new(),
+            head_injection_url:     None,
         }
     }
 }
@@ -833,6 +881,35 @@ impl VhostConfig {
                 "VhostConfig: 'egress_allowed' must be a list of strings.";
                 Invalid, Input, Mismatch)),
         };
+        // Authorised signed-admin-login keys (optional).
+        let admin_keys = match m.get(&dat!("admin_keys")) {
+            Some(Dat::List(list)) => {
+                let mut out = Vec::with_capacity(list.len());
+                for item in list {
+                    out.push(res!(AdminKey::from_dat(item.clone())));
+                }
+                out
+            }
+            Some(Dat::Vek(vek)) => {
+                let mut out = Vec::with_capacity(vek.len());
+                for item in vek.iter() {
+                    out.push(res!(AdminKey::from_dat(item.clone())));
+                }
+                out
+            }
+            None => Vec::new(),
+            _ => return Err(err!(
+                "VhostConfig: 'admin_keys' must be a list of maps.";
+                Invalid, Input, Mismatch)),
+        };
+        // Head-injection URL (optional).
+        let head_injection_url = match m.get(&dat!("head_injection_url")) {
+            Some(Dat::Str(s)) => Some(s.clone()),
+            None => None,
+            _ => return Err(err!(
+                "VhostConfig: 'head_injection_url' must be a string.";
+                Invalid, Input, Mismatch)),
+        };
         Ok(Self {
             hostnames,
             public_dir_rel,
@@ -843,6 +920,8 @@ impl VhostConfig {
             api_routes,
             webhook_routes,
             egress_allowed,
+            admin_keys,
+            head_injection_url,
         })
     }
 
@@ -1617,5 +1696,108 @@ impl ServerConfig {
             tls_dir.join(constant::TLS_DIR_PROD)
         };
         Ok(tls_dir)
+    }
+}
+
+
+impl AdminKey {
+    /// Parses a single admin-key entry from a `Dat` map. Expected
+    /// shape:
+    ///
+    /// ```text
+    /// {
+    ///     "name":       "alice",
+    ///     "scheme":     "Ed25519",
+    ///     "public_key": "a1b2c3...",   // lowercase hex
+    ///     "scopes":     ["*"],
+    /// }
+    /// ```
+    pub fn from_dat(dat: Dat) -> Outcome<Self> {
+        let mut dat = dat;
+        if dat.kind() != oxedyne_fe2o3_jdat::kind::Kind::Map
+            && dat.kind() != oxedyne_fe2o3_jdat::kind::Kind::OrdMap
+        {
+            return Err(err!(
+                "admin_keys entry must be a map, got {:?}.", dat.kind();
+                Invalid, Input, Mismatch));
+        }
+        let name = match dat.map_remove_must(&dat!("name")) {
+            Ok(Dat::Str(s)) => s,
+            Ok(other) => return Err(err!(
+                "admin_keys entry 'name' must be a string, got {:?}.",
+                other.kind();
+                Invalid, Input, Mismatch)),
+            Err(_) => return Err(err!(
+                "admin_keys entry missing 'name'.";
+                Invalid, Input, Missing)),
+        };
+        let scheme = match dat.map_remove_must(&dat!("scheme")) {
+            Ok(Dat::Str(s)) => s,
+            Ok(other) => return Err(err!(
+                "admin_keys entry 'scheme' must be a string, got {:?}.",
+                other.kind();
+                Invalid, Input, Mismatch)),
+            Err(_) => "Ed25519".to_string(),	// default
+        };
+        let public_key_hex = match dat.map_remove_must(&dat!("public_key")) {
+            Ok(Dat::Str(s)) => s,
+            _ => return Err(err!(
+                "admin_keys entry '{}' missing or non-string 'public_key'.",
+                name;
+                Invalid, Input, Mismatch)),
+        };
+        let public_key = res!(admin_key_hex_decode(&public_key_hex, &name));
+        let scopes = match dat.map_remove_must(&dat!("scopes")) {
+            Ok(Dat::List(list)) => {
+                let mut out = Vec::with_capacity(list.len());
+                for item in list {
+                    match item {
+                        Dat::Str(s) => out.push(s),
+                        other => return Err(err!(
+                            "admin_keys entry '{}' scope must be a string, \
+                            got {:?}.", name, other.kind();
+                            Invalid, Input, Mismatch)),
+                    }
+                }
+                out
+            }
+            Ok(other) => return Err(err!(
+                "admin_keys entry '{}' 'scopes' must be a list, got {:?}.",
+                name, other.kind();
+                Invalid, Input, Mismatch)),
+            Err(_) => Vec::new(),
+        };
+        Ok(Self { name, scheme, public_key, scopes })
+    }
+}
+
+/// Decodes a lowercase-hex string into bytes, reporting the offending
+/// admin-key entry name in the error on failure.
+fn admin_key_hex_decode(s: &str, name: &str) -> Outcome<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return Err(err!(
+            "admin_keys entry '{}' 'public_key' hex string has odd \
+            length ({}).", name, s.len();
+            Invalid, Input, Size));
+    }
+    let mut out = Vec::with_capacity(s.len() / 2);
+    let bytes = s.as_bytes();
+    for i in (0..bytes.len()).step_by(2) {
+        let hi = res!(admin_key_hex_nibble(bytes[i], name));
+        let lo = res!(admin_key_hex_nibble(bytes[i + 1], name));
+        out.push((hi << 4) | lo);
+    }
+    Ok(out)
+}
+
+fn admin_key_hex_nibble(b: u8, name: &str) -> Outcome<u8> {
+    match b {
+        b'0'..=b'9' => Ok(b - b'0'),
+        b'a'..=b'f' => Ok(b - b'a' + 10),
+        b'A'..=b'F' => Ok(b - b'A' + 10),
+        _ => Err(err!(
+            "admin_keys entry '{}' 'public_key' contains invalid hex \
+            character: 0x{:02x}.", name, b;
+            Invalid, Input)),
     }
 }

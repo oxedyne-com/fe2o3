@@ -306,20 +306,34 @@ mod tests {
     fn mkstate() -> AdminState {
         use crate::srv::admin::{
             host_sampler::HostSampler,
+            signed_login::NonceTracker,
             traffic::TrafficRecorder,
         };
-        use std::path::PathBuf;
+        use std::{
+            path::PathBuf,
+            sync::Mutex,
+            time::Duration,
+        };
         let master = [0u8; 32];
         let key = derive_session_key(&master).expect("derive");
         let enc = EncryptionScheme::new_aes_256_gcm_with_key(&key)
             .expect("aes");
         AdminState {
-            wallet:         Arc::new(RwLock::new(Wallet::default())),
-            wallet_path:    PathBuf::from("./wallet.jdat"),
-            master_key:     master.to_vec(),
-            session_enc:    enc,
-            traffic:        TrafficRecorder::new_shared(0),
-            host_sampler:   HostSampler::new_shared(),
+            wallet:             Arc::new(RwLock::new(Wallet::default())),
+            wallet_path:        PathBuf::from("./wallet.jdat"),
+            master_key:         master.to_vec(),
+            session_enc:        enc,
+            traffic:            TrafficRecorder::new_shared(0),
+            host_sampler:       HostSampler::new_shared(),
+            addr_guard:         crate::srv::admin::guard::new_shared()
+                .expect("addr guard"),
+            auth_guard:         crate::srv::admin::guard::new_shared()
+                .expect("auth guard"),
+            admin_keys:         Arc::new(Vec::new()),
+            nonce_tracker:      Arc::new(Mutex::new(
+                NonceTracker::new(Duration::from_secs(120)),
+            )),
+            head_injection_url: Arc::new(None),
         }
     }
 

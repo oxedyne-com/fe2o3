@@ -103,6 +103,15 @@ pub const PATH_ADMINS:  &str = "/admin/admins";
 /// Oxanium variable font. Served unauthenticated so the login
 /// page can use it for headings before the visitor has a session.
 pub const PATH_ASSET_OXANIUM: &str = "/admin/assets/oxanium.ttf";
+/// Signed-admin-login challenge (GET): returns a JDAT body
+/// describing the expected command name and the server's current
+/// timestamp so a client can align its SignedCommand envelope.
+pub const PATH_CHALLENGE: &str = "/admin/challenge";
+/// Signed-admin-login submission (POST): accepts a JDAT-encoded
+/// [`SignedCommand`] with `cmd = "admin_login"`, verifies it
+/// against the vhost's configured `admin_keys`, and issues the
+/// same admin session cookie the passphrase flow does.
+pub const PATH_SIGNED_LOGIN: &str = "/admin/signed-login";
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ GET                                                                       │
@@ -128,6 +137,9 @@ pub async fn handle_get(
         PATH_TRAFFIC_JSON => Ok(render_traffic_json(state, headers)),
         PATH_SECURITY => Ok(render_security(state, headers, None)),
         PATH_ADMINS => Ok(render_admins(state, headers, None)),
+        PATH_CHALLENGE => Ok(
+            crate::srv::admin::signed_login::handle_challenge(state),
+        ),
         _ => Ok(HttpMessage::respond_with_text(
             HttpStatus::NotFound,
             "Dashboard route not found.",
@@ -167,12 +179,42 @@ pub async fn handle_post(
     debug!("{}: dashboard POST {}", id, path);
     match path {
         PATH_LOGIN => Ok(handle_login(state, body)),
+        PATH_SIGNED_LOGIN => Ok(handle_signed_login(state, body)),
         PATH_SECURITY => Ok(handle_security_post(state, _headers, body)),
         PATH_ADMINS => Ok(handle_admins_post(state, _headers, body)),
         _ => Ok(HttpMessage::respond_with_text(
             HttpStatus::NotFound,
             "Dashboard route not found.",
         )),
+    }
+}
+
+/// Verifies a signed-admin-login envelope and, on success, issues
+/// the same admin session cookie the passphrase flow issues. A
+/// failure returns a short JDAT error body rather than re-rendering
+/// the passphrase login form -- the client is a programmatic caller,
+/// not a browser form submission.
+fn handle_signed_login(
+    state: &AdminState,
+    body:  &[u8],
+)
+    -> HttpMessage
+{
+    use crate::srv::admin::signed_login::{
+        audit_signed_login,
+        verify_signed_login,
+        SignedLoginOutcome,
+    };
+    let outcome = verify_signed_login(state, body);
+    audit_signed_login(&outcome);
+    match outcome {
+        SignedLoginOutcome::Ok(principal) => issue_session_cookie(
+            state, &principal,
+        ),
+        _ => HttpMessage::respond_with_text(
+            HttpStatus::Unauthorized,
+            "Signed admin login rejected.",
+        ),
     }
 }
 

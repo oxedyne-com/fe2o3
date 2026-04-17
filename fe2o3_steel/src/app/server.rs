@@ -392,6 +392,20 @@ impl AppShellContext {
         // there works.
         let wallet_path_for_admin = Path::new(&self.app_cfg.app_root)
             .join(app_const::WALLET_NAME);
+        // Pull the signed-admin-login configuration off the primary
+        // vhost, if any. A Steel process can host any number of
+        // vhosts, but the admin dashboard is a single cross-vhost
+        // surface, so the admin_keys list and head_injection_url
+        // are sourced from the canonical vhost (the first entry in
+        // the config). This mirrors how the wallet and master key
+        // are already a process-wide concern.
+        let (admin_keys_cfg, head_injection_url_cfg) = {
+            let vhosts = res!(server_cfg.get_vhosts());
+            match vhosts.into_iter().next() {
+                Some(v) => (v.admin_keys, v.head_injection_url),
+                None    => (Vec::new(), None),
+            }
+        };
         let admin_state = res!(AdminState::new(
             self.wallet.clone(),
             wallet_path_for_admin,
@@ -400,6 +414,8 @@ impl AppShellContext {
             host_sampler.clone(),
             addr_guard.clone(),
             auth_guard.clone(),
+            admin_keys_cfg,
+            head_injection_url_cfg,
         ));
         let admin_state = Arc::new(admin_state);
         info!("Admin dashboard runtime initialised \
