@@ -56,6 +56,7 @@ pub mod config;
 pub mod consensus;
 pub mod engine;
 pub mod hotstuff;
+pub mod o3db_storage;
 pub mod peer_set;
 pub mod placement;
 pub mod record;
