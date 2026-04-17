@@ -138,9 +138,11 @@ impl Help {
                     kind,
                 ));
                 len += line.len() - val_effect.len();
+                let pad_width = self.cfg.col[4].saturating_sub(len);
+                let pad_width = try_range!(pad_width, 0, self.cfg.col[6]);
                 line.push_str(&fmt!(
                     "{}{}{}",
-                    " ".repeat(try_range!(self.cfg.col[4] - len, 0, self.cfg.col[6])),
+                    " ".repeat(pad_width),
                     Self::normalise(help_txt),
                     reset,
                 ));
@@ -169,9 +171,11 @@ impl Help {
                 len += line.len() - cmd_effect.len() - reset.len();
                 // Command description.
                 if let Some(help_txt) = &cmd.config().help {
+                    let pad_width = self.cfg.col[3].saturating_sub(len);
+                    let pad_width = try_range!(pad_width, 0, self.cfg.col[6]);
                     line.push_str(&fmt!(
                         "{}{}{}{}",
-                        " ".repeat(try_range!(self.cfg.col[3] - len, 0, self.cfg.col[6])),
+                        " ".repeat(pad_width),
                         cmd_effect,
                         Self::normalise(help_txt),
                         reset,
@@ -189,9 +193,11 @@ impl Help {
                         kind,
                     ));
                     len += line.len() - val_effect.len();
+                    let pad_width = self.cfg.col[4].saturating_sub(len);
+                    let pad_width = try_range!(pad_width, 0, self.cfg.col[6]);
                     line.push_str(&fmt!(
                         "{}{}{}",
-                        " ".repeat(try_range!(self.cfg.col[4] - len, 0, self.cfg.col[6])),
+                        " ".repeat(pad_width),
                         Self::normalise(help_txt),
                         reset,
                     ));
@@ -251,17 +257,22 @@ impl Help {
             }
         }
         
-        // Argument description.
+        // Argument description. Use saturating_sub so an argument
+        // whose label already exceeds the description column does
+        // not underflow -- the description simply starts right
+        // after the label with a single space of padding.
         if let Some(help_txt) = &arg.config().help {
+            let pad_width = self.cfg.col[first_col + 3].saturating_sub(len);
+            let pad_width = try_range!(pad_width, 0, self.cfg.col[6]);
             line.push_str(&fmt!(
                 "{}{}{}",
-                " ".repeat(try_range!(self.cfg.col[first_col + 3] - len, 0, self.cfg.col[6])),
+                " ".repeat(pad_width),
                 Self::normalise(help_txt),
                 if self.cfg.colour { &reset }                else { "" },
             ));
         }
         lines.push(line);
-        
+
         // Multiple value types - display on separate lines.
         if arg.config().vals.len() > 1 {
             for (kind, help_txt) in &arg.config().vals {
@@ -275,9 +286,11 @@ impl Help {
                     kind,
                 ));
                 len += line.len() - val_effect.len();
+                let pad_width = self.cfg.col[first_col + 4].saturating_sub(len);
+                let pad_width = try_range!(pad_width, 0, self.cfg.col[6]);
                 line.push_str(&fmt!(
                     "{}{}{}",
-                    " ".repeat(try_range!(self.cfg.col[first_col + 4] - len, 0, self.cfg.col[6])),
+                    " ".repeat(pad_width),
                     Self::normalise(help_txt),
                     reset,
                 ));

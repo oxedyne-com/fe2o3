@@ -1708,10 +1708,14 @@ impl AdminKey {
     /// {
     ///     "name":       "alice",
     ///     "scheme":     "Ed25519",
-    ///     "public_key": "a1b2c3...",   // lowercase hex
+    ///     "public_key": "<base2x HEMATITE64 bytes>",
     ///     "scopes":     ["*"],
     /// }
     /// ```
+    ///
+    /// `public_key` is the canonical fe2o3 byte-string encoding --
+    /// [`base2x::HEMATITE64`](oxedyne_fe2o3_text::base2x::HEMATITE64) --
+    /// matching what `oxegen keygen` prints.
     pub fn from_dat(dat: Dat) -> Outcome<Self> {
         let mut dat = dat;
         if dat.kind() != oxedyne_fe2o3_jdat::kind::Kind::Map
@@ -1739,14 +1743,22 @@ impl AdminKey {
                 Invalid, Input, Mismatch)),
             Err(_) => "Ed25519".to_string(),	// default
         };
-        let public_key_hex = match dat.map_remove_must(&dat!("public_key")) {
+        let public_key_enc = match dat.map_remove_must(&dat!("public_key")) {
             Ok(Dat::Str(s)) => s,
             _ => return Err(err!(
                 "admin_keys entry '{}' missing or non-string 'public_key'.",
                 name;
                 Invalid, Input, Mismatch)),
         };
-        let public_key = res!(admin_key_hex_decode(&public_key_hex, &name));
+        let public_key = match oxedyne_fe2o3_text::base2x::HEMATITE64
+            .from_str(&public_key_enc)
+        {
+            Ok(b) => b,
+            Err(e) => return Err(err!(e,
+                "admin_keys entry '{}' 'public_key' is not valid \
+                base2x HEMATITE64.", name;
+                Invalid, Input, Decode)),
+        };
         let scopes = match dat.map_remove_must(&dat!("scopes")) {
             Ok(Dat::List(list)) => {
                 let mut out = Vec::with_capacity(list.len());
@@ -1768,36 +1780,5 @@ impl AdminKey {
             Err(_) => Vec::new(),
         };
         Ok(Self { name, scheme, public_key, scopes })
-    }
-}
-
-/// Decodes a lowercase-hex string into bytes, reporting the offending
-/// admin-key entry name in the error on failure.
-fn admin_key_hex_decode(s: &str, name: &str) -> Outcome<Vec<u8>> {
-    if s.len() % 2 != 0 {
-        return Err(err!(
-            "admin_keys entry '{}' 'public_key' hex string has odd \
-            length ({}).", name, s.len();
-            Invalid, Input, Size));
-    }
-    let mut out = Vec::with_capacity(s.len() / 2);
-    let bytes = s.as_bytes();
-    for i in (0..bytes.len()).step_by(2) {
-        let hi = res!(admin_key_hex_nibble(bytes[i], name));
-        let lo = res!(admin_key_hex_nibble(bytes[i + 1], name));
-        out.push((hi << 4) | lo);
-    }
-    Ok(out)
-}
-
-fn admin_key_hex_nibble(b: u8, name: &str) -> Outcome<u8> {
-    match b {
-        b'0'..=b'9' => Ok(b - b'0'),
-        b'a'..=b'f' => Ok(b - b'a' + 10),
-        b'A'..=b'F' => Ok(b - b'A' + 10),
-        _ => Err(err!(
-            "admin_keys entry '{}' 'public_key' contains invalid hex \
-            character: 0x{:02x}.", name, b;
-            Invalid, Input)),
     }
 }
