@@ -32,4 +32,6 @@ pub mod string;
 pub mod phrase;
 pub mod table;
 
+pub mod fmt;
+
 pub use core::Text;

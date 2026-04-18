@@ -1,0 +1,104 @@
+# Rustfmt configuration for the fe2o3 (Hematite) library.
+# Requires nightly: cargo +nightly fmt
+# On stable, unstable options are silently ignored with a warning.
+#
+# KNOWN LIMITATIONS
+# rustfmt cannot reproduce these fe2o3 style patterns:
+#   - Return type on its own indented line after multi-line fn params:
+#         fn foo(          rustfmt produces:     fn foo(
+#             x: T,            x: T,
+#         )                ) -> ReturnType {
+#             -> ReturnType
+#         {
+#   - Tab alignment between param name and type (len:\tType)
+#     or space-column alignment in fn params (peer:       SocketAddr).
+#   - Manual column alignment in match arms ("exact"     =>).
+#   - Blank line after opening brace in impl blocks.
+# Use #[rustfmt::skip] for blocks that rely on these patterns.
+
+unstable_features = true
+
+edition = "2021"
+
+# Indentation: 4 spaces, not hard tabs.
+hard_tabs = false
+tab_spaces = 4
+
+# Line width.
+max_width = 100
+
+# Unix line endings.
+newline_style = "Unix"
+
+# Break parameters into vertical layout only when the signature does not fit.
+fn_params_layout = "Tall"
+
+# Allow short functions on a single line:
+#     fn len(&self) -> usize { self.len() }
+fn_single_line = true
+
+# Brace on same line unless there is a where clause.
+brace_style = "SameLineWhere"
+
+# Preserve existing import granularity (don't merge/split use trees).
+imports_granularity = "Preserve"
+
+# Keep each imported item on its own line inside use braces.
+imports_layout = "Vertical"
+
+# Don't reorder imports: the codebase follows crate -> fe2o3 -> std -> third-party.
+reorder_imports = false
+reorder_modules = false
+
+# Binary operators: line break comes before the operator.
+binop_separator = "Front"
+
+# Match arms: no extra block braces around the arm body.
+match_arm_blocks = false
+
+# Trailing comma after block-based match arms (the codebase uses them).
+match_block_trailing_comma = true
+
+# Trailing commas in vertical layouts.
+trailing_comma = "Vertical"
+
+# Do NOT reformat string literals (the codebase has carefully formatted
+# multi-line SQL, error messages, etc.).
+format_strings = false
+
+# Align struct fields and enum discriminants whose name lengths differ
+# by up to this threshold.
+struct_field_align_threshold = 40
+enum_discrim_align_threshold = 40
+
+# Keep comment formatting as-is.
+wrap_comments = false
+normalize_comments = false
+
+# Allow up to 2 consecutive blank lines (the codebase uses double blank
+# lines as section separators).
+blank_lines_upper_bound = 2
+
+# Keep single-predicate where clauses compact.
+where_single_line = true
+
+# Allow trailing bracket/brace expressions to overflow into subsequent
+# lines. Matches the codebase pattern:
+#     Error::Upstream(Arc::new(e), ErrMsg {
+#         tags: &[...],
+#         msg: String::new(),
+#     })
+overflow_delimited_expr = true
+
+# Width heuristics: explicit control.
+# fn_call_width kept at 60 to preserve multi-line macro invocations
+# like res!(long_call(), Tag1, Tag2).
+use_small_heuristics = "Off"
+fn_call_width = 60
+attr_fn_like_width = 70
+struct_lit_width = 60
+struct_variant_width = 35
+array_width = 60
+chain_width = 80
+single_line_if_else_max_width = 80
+single_line_let_else_max_width = 50
