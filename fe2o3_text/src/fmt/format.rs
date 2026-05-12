@@ -115,7 +115,7 @@ fn tokens_to_formatted_doc(tokens: &[Token], spec: &FormatSpec) -> Doc {
         apply_import_reorder(&mut tokens);
     }
     let mut pos = 0;
-    let result = format_token_range(&tokens, &mut pos, spec, false);
+    let result = format_token_range(&tokens, &mut pos, spec, false, false);
     doc::concat(result)
 }
 
@@ -172,6 +172,7 @@ fn format_token_range(
     pos:            &mut usize,
     spec:           &FormatSpec,
     inside_brace:   bool,
+    inside_macro:   bool,
 ) -> Vec<Doc> {
     let indent = spec.indent_width;
     let mut docs = Vec::new();
@@ -207,9 +208,12 @@ fn format_token_range(
         flush_newlines(&mut docs, &mut newline_count, &mut had_newline, spec);
 
         // Space before this token.
-        if !had_newline && i > 0 && !suppress_space_before(tok) {
+        if !had_newline && i > 0 {
             let prev = &tokens[i - 1];
-            if !suppress_space_after(prev) && tok.leading_trivia.is_empty() {
+            if !suppress_space_before_ctx(tok, Some(prev))
+                && !suppress_space_after(prev)
+                && tok.leading_trivia.is_empty()
+            {
                 docs.push(doc::text(" "));
             }
         }
@@ -266,9 +270,14 @@ fn format_token_range(
             }
 
             TokenKind::Punct('{') => {
-                // Check if this is a struct/enum field block by
-                // looking at the preceding keyword.
-                let is_field_block = is_preceded_by_struct_or_enum(tokens, i);
+                // Check if this is a struct/enum field block.
+                // Macro bodies and their nested blocks are never
+                // treated as field blocks.
+                let is_macro_entry = i > 0
+                    && matches!(tokens[i - 1].kind, TokenKind::Punct('!'));
+                let in_macro = inside_macro || is_macro_entry;
+                let is_field_block = !in_macro
+                    && is_preceded_by_struct_or_enum(tokens, i);
 
                 docs.push(doc::text("{"));
                 *pos += 1;
@@ -299,7 +308,7 @@ fn format_token_range(
                     docs.push(doc::text("}"));
                 } else {
                     // Generic block: recurse.
-                    let inner = format_token_range(tokens, pos, spec, true);
+                    let inner = format_token_range(tokens, pos, spec, true, in_macro);
                     let (content, closing) = split_off_closing_brace(inner);
                     if !content.is_empty() {
                         docs.push(doc::nest(indent, doc::concat(content)));
@@ -345,9 +354,12 @@ fn format_token_range(
                         }
                     }
                     flush_newlines(&mut pred_docs, &mut pn, &mut ph, spec);
-                    if !ph && !pred_docs.is_empty() && !suppress_space_before(pt) {
+                    if !ph && !pred_docs.is_empty() {
                         let prev_tok = &tokens[*pos - 1];
-                        if !suppress_space_after(prev_tok) && pt.leading_trivia.is_empty() {
+                        if !suppress_space_before_ctx(pt, Some(prev_tok))
+                            && !suppress_space_after(prev_tok)
+                            && pt.leading_trivia.is_empty()
+                        {
                             pred_docs.push(doc::text(" "));
                         }
                     }
@@ -1305,7 +1317,7 @@ fn smart_spaced_tokens_inner(tokens: &[Token], chain_breaks: bool) -> Vec<Doc> {
                 docs.push(token_text(tok));
                 continue;
             }
-            let need_space = !suppress_space_after(prev) && !suppress_space_before(tok);
+            let need_space = !suppress_space_after(prev) && !suppress_space_before_ctx(tok, Some(prev));
             if need_space {
                 docs.push(doc::text(" "));
             }
@@ -1429,7 +1441,7 @@ fn format_binop_expr(tokens: &[Token], spec: &FormatSpec) -> Doc {
         } else {
             if i > 0 {
                 let prev = &tokens[i - 1];
-                let need_space = !suppress_space_after(prev) && !suppress_space_before(tok);
+                let need_space = !suppress_space_after(prev) && !suppress_space_before_ctx(tok, Some(prev));
                 if need_space {
                     docs.push(doc::text(" "));
                 }
@@ -1457,7 +1469,8 @@ fn suppress_space_after(tok: &Token) -> bool {
 }
 
 /// Tokens before which no leading space should be added.
-fn suppress_space_before(tok: &Token) -> bool {
+/// When `prev` is provided, context-sensitive rules apply.
+fn suppress_space_before_ctx(tok: &Token, prev: Option<&Token>) -> bool {
     match &tok.kind {
         TokenKind::Punct(':') | TokenKind::Punct(';') | TokenKind::Punct(',')
             | TokenKind::Punct('.') | TokenKind::Punct(')') | TokenKind::Punct(']')
@@ -1465,13 +1478,20 @@ fn suppress_space_before(tok: &Token) -> bool {
             | TokenKind::Punct('(') | TokenKind::Punct('[')
             | TokenKind::Punct('<')
             => true,
+        TokenKind::Operator(op) if op == "::" => {
+            // Keep space after `:` bound separator: `E: ::std`.
+            !matches!(prev.map(|p| &p.kind), Some(TokenKind::Punct(':')))
+        }
         TokenKind::Operator(op)
-            if op == "::" || op == ".." || op == "..="
-            // Nested generics: `>>` closing two type params.
+            if op == ".." || op == "..="
             || op == ">>"
             => true,
         _ => false,
     }
+}
+
+fn suppress_space_before(tok: &Token) -> bool {
+    suppress_space_before_ctx(tok, None)
 }
 
 /// Check whether a block is empty (only contains `{` and `}`).
@@ -1569,7 +1589,8 @@ fn format_param_list(
 /// aligns the `=>` across all simple (single-line) arms.
 fn format_match_arms(tokens: &[Token], spec: &FormatSpec) -> Doc {
     // Split into individual arms at top-level commas.
-    let arms = split_by_comma_depth(tokens);
+    let arms: Vec<Vec<Token>> = split_by_comma_depth(tokens)
+        .into_iter().filter(|a| !a.is_empty()).collect();
     if arms.is_empty() {
         return doc::empty();
     }
@@ -1769,7 +1790,8 @@ fn find_at_depth0(tokens: &[Token], ch: char) -> Option<usize> {
 }
 
 fn format_aligned_fields(tokens: &[Token], spec: &FormatSpec) -> Doc {
-    let fields = split_by_comma_depth(tokens);
+    let fields: Vec<Vec<Token>> = split_by_comma_depth(tokens)
+        .into_iter().filter(|f| !f.is_empty()).collect();
     if fields.len() < 2 {
         let mut docs = Vec::new();
         for (i, field) in fields.iter().enumerate() {
@@ -1811,7 +1833,9 @@ fn format_aligned_fields(tokens: &[Token], spec: &FormatSpec) -> Doc {
             emit_prefix(&mut docs, prefix);
             docs.push(doc::concat(smart_spaced_tokens(content)));
         }
-        if !fields.is_empty() { docs.push(doc::text(",")); }
+        if !fields.is_empty() {
+            docs.push(doc::text(","));
+        }
         return doc::concat(docs);
     };
 
@@ -1883,6 +1907,11 @@ fn format_aligned_fields(tokens: &[Token], spec: &FormatSpec) -> Doc {
         docs.push(doc::text(","));
     }
     doc::concat(docs)
+}
+
+/// Check whether a token slice ends with a comma.
+fn ends_with_comma(tokens: &[Token]) -> bool {
+    tokens.last().map_or(false, |t| matches!(t.kind, TokenKind::Punct(',')))
 }
 
 fn is_short_body(tokens: &[Token]) -> bool {
