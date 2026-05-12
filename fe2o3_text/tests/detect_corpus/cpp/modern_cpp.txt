@@ -1,0 +1,77 @@
+#include <optional>
+#include <variant>
+#include <functional>
+#include <string>
+#include <iostream>
+
+using Callback = std::function<void(const std::string&)>;
+
+struct Config {
+    std::string host = "localhost";
+    int port = 8080;
+    std::optional<std::string> tls_cert;
+    bool verbose = false;
+};
+
+using ParseResult = std::variant<Config, std::string>;
+
+ParseResult parse_args(int argc, const char* argv[]) {
+    Config cfg;
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--verbose") {
+            cfg.verbose = true;
+        } else if (arg == "--host" && i + 1 < argc) {
+            cfg.host = argv[++i];
+        } else if (arg == "--port" && i + 1 < argc) {
+            cfg.port = std::stoi(argv[++i]);
+        } else if (arg == "--tls-cert" && i + 1 < argc) {
+            cfg.tls_cert = argv[++i];
+        } else {
+            return "unknown argument: " + arg;
+        }
+    }
+    return cfg;
+}
+
+class Server {
+public:
+    explicit Server(Config config)
+        : config_(std::move(config)) {}
+
+    void on_request(Callback cb) {
+        handler_ = std::move(cb);
+    }
+
+    void start() {
+        if (config_.verbose) {
+            std::cout << "starting on " << config_.host
+                      << ":" << config_.port << "\n";
+        }
+        if (config_.tls_cert.has_value()) {
+            std::cout << "TLS: " << config_.tls_cert.value() << "\n";
+        }
+    }
+
+private:
+    Config config_;
+    Callback handler_;
+};
+
+int main(int argc, const char* argv[]) {
+    auto result = parse_args(argc, argv);
+
+    if (auto* err = std::get_if<std::string>(&result)) {
+        std::cerr << "error: " << *err << "\n";
+        return 1;
+    }
+
+    auto cfg = std::get<Config>(result);
+    Server srv(std::move(cfg));
+    srv.on_request([](const std::string& req) {
+        std::cout << "request: " << req << "\n";
+    });
+    srv.start();
+
+    return 0;
+}

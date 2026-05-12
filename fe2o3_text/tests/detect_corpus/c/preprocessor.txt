@@ -1,0 +1,40 @@
+#include <stdlib.h>
+#include <string.h>
+
+#define ARRAY_SIZE(a)  (sizeof(a) / sizeof((a)[0]))
+#define MAX(a, b)      ((a) > (b) ? (a) : (b))
+#define MIN(a, b)      ((a) < (b) ? (a) : (b))
+#define CLAMP(x, lo, hi) MIN(MAX(x, lo), hi)
+
+#ifdef DEBUG
+#define LOG(fmt, ...) fprintf(stderr, "[DEBUG] " fmt "\n", ##__VA_ARGS__)
+#else
+#define LOG(fmt, ...) ((void)0)
+#endif
+
+#if defined(__GNUC__) || defined(__clang__)
+#define LIKELY(x)   __builtin_expect(!!(x), 1)
+#define UNLIKELY(x) __builtin_expect(!!(x), 0)
+#define PACKED      __attribute__((packed))
+#define ALIGNED(n)  __attribute__((aligned(n)))
+#else
+#define LIKELY(x)   (x)
+#define UNLIKELY(x) (x)
+#define PACKED
+#define ALIGNED(n)
+#endif
+
+typedef struct PACKED {
+    uint8_t  type;
+    uint16_t length;
+    uint32_t sequence;
+    uint8_t  payload[];
+} packet_t;
+
+static inline size_t packet_total_size(const packet_t *pkt) {
+    return sizeof(packet_t) + pkt->length;
+}
+
+static inline void *packet_payload(packet_t *pkt) {
+    return pkt->payload;
+}

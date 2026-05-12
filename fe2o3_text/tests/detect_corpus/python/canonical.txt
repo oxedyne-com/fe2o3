@@ -1,0 +1,60 @@
+from collections import defaultdict
+from typing import Dict, List, Optional
+import json
+import sys
+
+
+class WordIndex:
+    """Index of word positions within a document."""
+
+    def __init__(self):
+        self.index: Dict[str, List[int]] = defaultdict(list)
+        self.doc_count = 0
+
+    def add_document(self, doc_id: int, text: str) -> None:
+        words = text.lower().split()
+        for pos, word in enumerate(words):
+            cleaned = ''.join(c for c in word if c.isalnum())
+            if cleaned:
+                self.index[cleaned].append((doc_id, pos))
+        self.doc_count += 1
+
+    def search(self, term: str) -> List[tuple]:
+        return self.index.get(term.lower(), [])
+
+    def term_count(self) -> int:
+        return len(self.index)
+
+    def document_frequency(self, term: str) -> int:
+        hits = self.search(term)
+        return len(set(doc_id for doc_id, _ in hits))
+
+    def to_json(self) -> str:
+        return json.dumps({
+            'doc_count': self.doc_count,
+            'term_count': self.term_count(),
+            'index': {k: v for k, v in self.index.items()},
+        }, indent=2)
+
+
+def build_index(documents: Dict[int, str]) -> WordIndex:
+    idx = WordIndex()
+    for doc_id, text in documents.items():
+        idx.add_document(doc_id, text)
+    return idx
+
+
+if __name__ == '__main__':
+    docs = {
+        1: "the quick brown fox jumps over the lazy dog",
+        2: "the fox went to the market to buy some eggs",
+        3: "a lazy dog slept in the sun all afternoon",
+    }
+
+    index = build_index(docs)
+    print(f"indexed {index.doc_count} documents, {index.term_count()} terms")
+
+    for term in sys.argv[1:]:
+        hits = index.search(term)
+        df = index.document_frequency(term)
+        print(f"  '{term}': {len(hits)} occurrences in {df} documents")

@@ -1,0 +1,59 @@
+from typing import Generator, Iterator, Iterable
+import itertools
+
+
+def fibonacci() -> Generator[int, None, None]:
+    a, b = 0, 1
+    while True:
+        yield a
+        a, b = b, a + b
+
+
+def primes() -> Generator[int, None, None]:
+    """Sieve of Eratosthenes, unbounded."""
+    composites = {}
+    n = 2
+    while True:
+        if n not in composites:
+            yield n
+            composites[n * n] = [n]
+        else:
+            for prime in composites[n]:
+                composites.setdefault(prime + n, []).append(prime)
+            del composites[n]
+        n += 1
+
+
+def take(n: int, iterable: Iterable) -> list:
+    return list(itertools.islice(iterable, n))
+
+
+def windowed(iterable: Iterable, size: int) -> Generator:
+    it = iter(iterable)
+    window = []
+    for _ in range(size):
+        try:
+            window.append(next(it))
+        except StopIteration:
+            return
+    yield tuple(window)
+    for item in it:
+        window.pop(0)
+        window.append(item)
+        yield tuple(window)
+
+
+def batched(iterable: Iterable, n: int) -> Generator:
+    it = iter(iterable)
+    while True:
+        batch = list(itertools.islice(it, n))
+        if not batch:
+            return
+        yield batch
+
+
+if __name__ == '__main__':
+    print(f"first 10 fibs: {take(10, fibonacci())}")
+    print(f"first 10 primes: {take(10, primes())}")
+    print(f"windows: {list(windowed(range(6), 3))}")
+    print(f"batches: {list(batched(range(10), 3))}")

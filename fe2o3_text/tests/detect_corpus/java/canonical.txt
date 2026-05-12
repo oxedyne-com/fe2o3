@@ -1,0 +1,50 @@
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Optional;
+
+public class Registry<T> {
+
+    private final Map<String, T> entries = new HashMap<>();
+    private final String name;
+
+    public Registry(String name) {
+        this.name = name;
+    }
+
+    public void register(String key, T value) {
+        if (entries.containsKey(key)) {
+            throw new IllegalArgumentException("duplicate key: " + key);
+        }
+        entries.put(key, value);
+    }
+
+    public Optional<T> lookup(String key) {
+        return Optional.ofNullable(entries.get(key));
+    }
+
+    public boolean contains(String key) {
+        return entries.containsKey(key);
+    }
+
+    public int size() {
+        return entries.size();
+    }
+
+    @Override
+    public String toString() {
+        return String.format("Registry[%s, %d entries]", name, entries.size());
+    }
+
+    public static void main(String[] args) {
+        Registry<String> reg = new Registry<>("colours");
+        reg.register("red", "#ff0000");
+        reg.register("green", "#00ff00");
+        reg.register("blue", "#0000ff");
+
+        System.out.println(reg);
+
+        reg.lookup("red").ifPresent(v ->
+            System.out.println("red = " + v)
+        );
+    }
+}

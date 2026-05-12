@@ -1,0 +1,71 @@
+use std::collections::HashMap;
+
+/// Count word frequencies in a text.
+pub fn word_frequencies(text: &str) -> HashMap<String, usize> {
+    let mut freq = HashMap::new();
+    for word in text.split_whitespace() {
+        let normalised = word
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(|c| c.to_lowercase())
+            .collect::<String>();
+        if !normalised.is_empty() {
+            *freq.entry(normalised).or_insert(0) += 1;
+        }
+    }
+    freq
+}
+
+/// Return the top N words by frequency.
+pub fn top_n(freq: &HashMap<String, usize>, n: usize) -> Vec<(&str, usize)> {
+    let mut entries: Vec<_> = freq.iter()
+        .map(|(word, &count)| (word.as_str(), count))
+        .collect();
+    entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    entries.truncate(n);
+    entries
+}
+
+/// Filter entries below a minimum count.
+pub fn filter_min(freq: &HashMap<String, usize>, min: usize) -> HashMap<String, usize> {
+    freq.iter()
+        .filter(|(_, &count)| count >= min)
+        .map(|(word, &count)| (word.clone(), count))
+        .collect()
+}
+
+/// Apply a transformation to every word in the frequency map.
+pub fn map_words<F>(freq: &HashMap<String, usize>, f: F) -> HashMap<String, usize>
+where
+    F: Fn(&str) -> String,
+{
+    let mut result = HashMap::new();
+    for (word, &count) in freq {
+        let transformed = f(word);
+        *result.entry(transformed).or_insert(0) += count;
+    }
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_word_frequencies() {
+        let text = "the cat sat on the mat the cat";
+        let freq = word_frequencies(text);
+        assert_eq!(freq["the"], 3);
+        assert_eq!(freq["cat"], 2);
+        assert_eq!(freq["sat"], 1);
+    }
+
+    #[test]
+    fn test_top_n() {
+        let text = "alpha beta alpha gamma alpha beta";
+        let freq = word_frequencies(text);
+        let top = top_n(&freq, 2);
+        assert_eq!(top[0].0, "alpha");
+        assert_eq!(top[1].0, "beta");
+    }
+}

@@ -1,0 +1,84 @@
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import List, Optional
+
+
+@dataclass
+class Point:
+    x: float
+    y: float
+
+    def distance_to(self, other: 'Point') -> float:
+        dx = self.x - other.x
+        dy = self.y - other.y
+        return (dx ** 2 + dy ** 2) ** 0.5
+
+    def __add__(self, other: 'Point') -> 'Point':
+        return Point(self.x + other.x, self.y + other.y)
+
+
+class Shape(ABC):
+    @abstractmethod
+    def area(self) -> float:
+        pass
+
+    @abstractmethod
+    def perimeter(self) -> float:
+        pass
+
+
+@dataclass
+class Circle(Shape):
+    centre: Point
+    radius: float
+
+    def area(self) -> float:
+        return 3.14159265 * self.radius ** 2
+
+    def perimeter(self) -> float:
+        return 2 * 3.14159265 * self.radius
+
+
+@dataclass
+class Polygon(Shape):
+    vertices: List[Point] = field(default_factory=list)
+
+    def area(self) -> float:
+        n = len(self.vertices)
+        if n < 3:
+            return 0.0
+        total = 0.0
+        for i in range(n):
+            j = (i + 1) % n
+            total += self.vertices[i].x * self.vertices[j].y
+            total -= self.vertices[j].x * self.vertices[i].y
+        return abs(total) / 2.0
+
+    def perimeter(self) -> float:
+        n = len(self.vertices)
+        total = 0.0
+        for i in range(n):
+            j = (i + 1) % n
+            total += self.vertices[i].distance_to(self.vertices[j])
+        return total
+
+
+class Rectangle(Polygon):
+    def __init__(self, origin: Point, width: float, height: float):
+        super().__init__([
+            origin,
+            Point(origin.x + width, origin.y),
+            Point(origin.x + width, origin.y + height),
+            Point(origin.x, origin.y + height),
+        ])
+        self.width = width
+        self.height = height
+
+
+if __name__ == '__main__':
+    rect = Rectangle(Point(0, 0), 4, 3)
+    print(f"area: {rect.area()}")
+    print(f"perimeter: {rect.perimeter()}")
+
+    circ = Circle(Point(0, 0), 5.0)
+    print(f"circle area: {circ.area():.2f}")

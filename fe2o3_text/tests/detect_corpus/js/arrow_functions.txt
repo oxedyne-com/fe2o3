@@ -1,0 +1,39 @@
+const compose = (...fns) =>
+    fns.reduce((f, g) => (...args) => f(g(...args)));
+
+const pipe = (...fns) =>
+    fns.reduce((f, g) => (...args) => g(f(...args)));
+
+const map = (fn) => (arr) => arr.map(fn);
+const filter = (pred) => (arr) => arr.filter(pred);
+const reduce = (fn, init) => (arr) => arr.reduce(fn, init);
+
+const sum = reduce((a, b) => a + b, 0);
+const double = map((x) => x * 2);
+const evens = filter((x) => x % 2 === 0);
+
+const sumOfDoubledEvens = pipe(evens, double, sum);
+
+const numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+console.log(sumOfDoubledEvens(numbers)); // 60
+
+const debounce = (fn, ms) => {
+    let timer = null;
+    return (...args) => {
+        clearTimeout(timer);
+        timer = setTimeout(() => fn(...args), ms);
+    };
+};
+
+const throttle = (fn, ms) => {
+    let last = 0;
+    return (...args) => {
+        const now = Date.now();
+        if (now - last >= ms) {
+            last = now;
+            fn(...args);
+        }
+    };
+};
+
+export { compose, pipe, map, filter, reduce, debounce, throttle };

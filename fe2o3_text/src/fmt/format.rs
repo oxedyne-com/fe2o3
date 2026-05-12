@@ -10,8 +10,6 @@ use crate::fmt::{
     cst::{
         CstChild,
         CstNode,
-        ChildRole,
-        NodeKind,
         Token,
         TokenKind,
         Trivia,
@@ -22,7 +20,6 @@ use crate::fmt::{
     render,
     spec::{
         BinopBreak,
-        BraceStyle,
         FormatSpec,
         ReturnTypePlacement,
     },
@@ -36,71 +33,36 @@ pub fn format_rust(source: &str, spec: &FormatSpec) -> Outcome<String> {
     let lang = lex::rust_tokens();
     let tokens = res!(lex::lex(source, &lang));
     let cst = res!(parse::parse_rust(tokens));
-    let document = cst_to_doc(&cst, spec);
+    let document = format_source_file(&cst, spec);
     let indent_str = spec.indent_str();
     let formatted = render::render(spec.max_width, &indent_str, &document);
     Ok(formatted)
 }
 
-/// Convert a CST node to a Doc.
-fn cst_to_doc(node: &CstNode, spec: &FormatSpec) -> Doc {
-    match node.kind {
-        NodeKind::SourceFile    => format_source_file(node, spec),
-        NodeKind::FnDef         => format_fn_def(node, spec),
-        NodeKind::StructDef     => format_struct_def(node, spec),
-        NodeKind::EnumDef       => format_enum_def(node, spec),
-        NodeKind::ImplBlock     => format_impl_block(node, spec),
-        NodeKind::UseDecl       => format_use_decl(node, spec),
-        NodeKind::Block         => format_block(node, spec),
-        NodeKind::ParamList     => format_paren_list(node, spec),
-        NodeKind::GenericParams => format_verbatim_children(node, spec),
-        NodeKind::WhereClause   => format_where_clause(node, spec),
-        NodeKind::TypeExpr      => format_verbatim_children(node, spec),
-        _                       => format_verbatim_children(node, spec),
-    }
+/// Format source code using a pre-built language token definition.
+///
+/// For Rust, this goes through the structural parser for
+/// keyword-aware formatting. For other languages, it uses the
+/// generic token-stream pipeline directly.
+pub fn format_with_lang(
+    source: &str,
+    lang:   &lex::LangTokens,
+    spec:   &FormatSpec,
+) -> Outcome<String> {
+    let tokens = res!(lex::lex(source, lang));
+    let document = tokens_to_formatted_doc(&tokens, spec);
+    let indent_str = spec.indent_str();
+    let formatted = render::render(spec.max_width, &indent_str, &document);
+    Ok(formatted)
 }
 
 // ── Source file ──────────────────────────────────────────────────
 
-/// Format the top-level source file.
-///
-/// Iterates over the CST children, dispatching structured nodes
-/// (fn, struct, impl, ...) to their specialised formatters and
-/// handling stray tokens (doc comments, attributes, `pub`) with
-/// trivia-aware spacing.
+/// Flatten a CST into tokens and format via the token-stream pipeline.
 fn format_source_file(node: &CstNode, spec: &FormatSpec) -> Doc {
     let mut tokens: Vec<Token> = Vec::new();
     collect_tokens(node, &mut tokens);
     tokens_to_formatted_doc(&tokens, spec)
-}
-
-/// Format a sequence of CstChild entries. Stray tokens get
-/// trivia-based spacing; structured nodes are dispatched to
-/// their specialised formatters via `cst_to_doc`.
-fn format_child_sequence(children: &[CstChild], spec: &FormatSpec) -> Doc {
-    let mut docs = Vec::new();
-
-    for (i, child) in children.iter().enumerate() {
-        match child {
-            CstChild::Token(tok) => {
-                if matches!(tok.kind, TokenKind::Eof) {
-                    continue;
-                }
-                docs.push(token_verbatim(tok));
-            }
-            CstChild::Node { node: inner, .. } => {
-                // If previous entry was a stray token (e.g. `pub`),
-                // always add a space before the structured node.
-                if i > 0 {
-                    if let CstChild::Token(_) = &children[i - 1] {
-                        docs.push(doc::text(" "));
-                    }
-                }
-                docs.push(cst_to_doc(inner, spec));
-            }
-        }
-    }
-    doc::concat(docs)
 }
 
 /// Core formatting logic: convert a token stream to a Doc with
@@ -210,9 +172,10 @@ fn format_token_range(
         // Space before this token.
         if !had_newline && i > 0 {
             let prev = &tokens[i - 1];
-            if !suppress_space_before_ctx(tok, Some(prev))
-                && !suppress_space_after(prev)
-                && tok.leading_trivia.is_empty()
+            if needs_separator_space(prev, tok)
+                || (!suppress_space_before(tok)
+                    && !suppress_space_after(prev)
+                    && tok.leading_trivia.is_empty())
             {
                 docs.push(doc::text(" "));
             }
@@ -260,12 +223,16 @@ fn format_token_range(
                         *pos += 1;
                     }
                     let arms_doc = format_match_arms(&arm_tokens, spec);
-                    docs.push(doc::nest(indent, doc::concat(vec![
-                        doc::hardline(),
-                        arms_doc,
-                    ])));
-                    docs.push(doc::hardline());
-                    docs.push(doc::text("}"));
+                    if !arm_tokens.is_empty() {
+                        docs.push(doc::nest(indent, doc::concat(vec![
+                            doc::hardline(),
+                            arms_doc,
+                        ])));
+                    }
+                    if depth == 0 {
+                        docs.push(doc::hardline());
+                        docs.push(doc::text("}"));
+                    }
                 }
             }
 
@@ -300,12 +267,16 @@ fn format_token_range(
                     }
                     // Format as aligned fields.
                     let field_doc = format_aligned_fields(&field_tokens, spec);
-                    docs.push(doc::nest(indent, doc::concat(vec![
-                        doc::hardline(),
-                        field_doc,
-                    ])));
-                    docs.push(doc::hardline());
-                    docs.push(doc::text("}"));
+                    if !field_tokens.is_empty() {
+                        docs.push(doc::nest(indent, doc::concat(vec![
+                            doc::hardline(),
+                            field_doc,
+                        ])));
+                    }
+                    if depth == 0 {
+                        docs.push(doc::hardline());
+                        docs.push(doc::text("}"));
+                    }
                 } else {
                     // Generic block: recurse.
                     let inner = format_token_range(tokens, pos, spec, true, in_macro);
@@ -662,6 +633,8 @@ fn format_fn_from_tokens(
         // multi-statement body (always vertical).
         let is_short = is_short_body(&body_tokens);
 
+        let found_close = depth == 0;
+
         if is_short && spec.fn_single_line {
             // Short body: use smart_spaced_tokens (no trivia hardlines)
             // so the group can choose flat.
@@ -678,7 +651,9 @@ fn format_fn_from_tokens(
                     doc::hardline(),
                 ]),
             ));
-            grouped.push(doc::text("}"));
+            if found_close {
+                grouped.push(doc::text("}"));
+            }
         } else {
             // Multi-statement body: always vertical, outside the group.
             sig.push(doc::group(doc::concat(grouped)));
@@ -702,8 +677,10 @@ fn format_fn_from_tokens(
                 doc::hardline(),
                 body_doc,
             ])));
-            sig.push(doc::hardline());
-            sig.push(doc::text("}"));
+            if found_close {
+                sig.push(doc::hardline());
+                sig.push(doc::text("}"));
+            }
             return doc::concat(sig);
         }
     } else if *pos < tokens.len() && matches!(tokens[*pos].kind, TokenKind::Punct(';')) {
@@ -730,263 +707,6 @@ fn flush_newlines(
         *newline_count = 0;
         *had_newline = false;
     }
-}
-
-// ── Function definition ─────────────────────────────────────────
-
-fn format_fn_def(node: &CstNode, spec: &FormatSpec) -> Doc {
-    let mut docs = Vec::new();
-    let indent = spec.indent_width;
-
-    // Collect the parts by role.
-    let mut sig_tokens: Vec<Doc> = Vec::new();  // fn, async, name
-    let mut params_node: Option<&CstNode> = None;
-    let mut ret_node: Option<&CstNode> = None;
-    let mut where_node: Option<&CstNode> = None;
-    let mut body_node: Option<&CstNode> = None;
-    let mut semi = false;
-
-    for child in &node.children {
-        match child {
-            CstChild::Token(tok) => {
-                if tok.kind == TokenKind::Punct(';') {
-                    semi = true;
-                } else {
-                    sig_tokens.push(token_text(tok));
-                }
-            }
-            CstChild::Node { role, node: inner } => match role {
-                ChildRole::Params       => params_node = Some(inner),
-                ChildRole::ReturnType   => ret_node = Some(inner),
-                ChildRole::Where        => where_node = Some(inner),
-                ChildRole::Body         => body_node = Some(inner),
-                ChildRole::Generics     => {
-                    sig_tokens.push(cst_to_doc(inner, spec));
-                }
-                _ => {
-                    sig_tokens.push(cst_to_doc(inner, spec));
-                }
-            },
-        }
-    }
-
-    // Build the signature as a group. The group controls whether
-    // params go vertical. The body is OUTSIDE the group so it
-    // doesn't force the signature to break.
-
-    let mut sig = Vec::new();
-
-    // fn name
-    sig.push(doc::concat(intersperse_space(sig_tokens)));
-
-    // Parameters.
-    if let Some(params) = params_node {
-        sig.push(format_fn_params(params, spec));
-    }
-
-    // Return type.
-    // Oxedyne rule: when the group breaks (params go vertical),
-    // the return type goes on its own indented line.
-    if let Some(ret) = ret_node {
-        let ret_doc = format_return_type(ret, spec);
-        match spec.fn_return_type {
-            ReturnTypePlacement::OwnLine => {
-                sig.push(doc::if_break(
-                    doc::concat(vec![doc::text(" "), ret_doc.clone()]),
-                    doc::concat(vec![
-                        doc::hardline(),
-                        doc::nest(indent, ret_doc),
-                    ]),
-                ));
-            }
-            ReturnTypePlacement::SameLine => {
-                sig.push(doc::text(" "));
-                sig.push(ret_doc);
-            }
-        }
-    }
-
-    // Where clause.
-    if let Some(wh) = where_node {
-        sig.push(doc::hardline());
-        sig.push(format_where_clause(wh, spec));
-    }
-
-    // The signature group — the renderer decides flat vs broken.
-    docs.push(doc::group(doc::concat(sig)));
-
-    // Body or semicolon (outside the group).
-    if let Some(body) = body_node {
-        let has_where = where_node.is_some();
-        // Brace placement: use the opening-brace helper.
-        // For the Oxedyne style, the brace goes on its own line
-        // when the signature broke, but this is handled by the
-        // where-clause rule (SameLineUnlessWhere).
-        docs.push(format_opening_brace(spec, has_where));
-
-        let body_doc = format_block_contents(body, spec);
-        docs.push(doc::nest(indent, doc::concat(vec![
-            doc::hardline(),
-            body_doc,
-        ])));
-        docs.push(doc::hardline());
-        docs.push(doc::text("}"));
-    } else if semi {
-        docs.push(doc::text(";"));
-    }
-
-    doc::concat(docs)
-}
-
-/// Format a function's parameter list.
-fn format_fn_params(params: &CstNode, spec: &FormatSpec) -> Doc {
-    // Extract tokens between ( and ).
-    let inner = extract_inner_tokens(params);
-    if inner.is_empty() {
-        return doc::text("()");
-    }
-
-    // Split into comma-separated items.
-    let items = split_by_comma(&inner);
-    let item_docs: Vec<Doc> = items.into_iter()
-        .map(|toks| tokens_to_doc(&toks, spec))
-        .collect();
-
-    format_bracketed_list("(", ")", spec.indent_width, &item_docs, spec)
-}
-
-/// Format a return type (-> Type).
-fn format_return_type(ret: &CstNode, spec: &FormatSpec) -> Doc {
-    format_verbatim_children(ret, spec)
-}
-
-// ── Struct definition ────────────────────────────────────────────
-
-fn format_struct_def(node: &CstNode, spec: &FormatSpec) -> Doc {
-    let mut docs = Vec::new();
-
-    let mut header_tokens: Vec<Doc> = Vec::new();
-    let mut body_node: Option<&CstNode> = None;
-    let mut where_node: Option<&CstNode> = None;
-    let mut has_semi = false;
-
-    for child in &node.children {
-        match child {
-            CstChild::Token(tok) if tok.kind == TokenKind::Punct(';') => {
-                has_semi = true;
-            }
-            CstChild::Token(tok) => {
-                header_tokens.push(token_text(tok));
-            }
-            CstChild::Node { role: ChildRole::Body, node: inner } => {
-                body_node = Some(inner);
-            }
-            CstChild::Node { role: ChildRole::Where, node: inner } => {
-                where_node = Some(inner);
-            }
-            CstChild::Node { node: inner, .. } => {
-                header_tokens.push(cst_to_doc(inner, spec));
-            }
-        }
-    }
-
-    docs.push(doc::concat(intersperse_space(header_tokens)));
-
-    if let Some(wh) = where_node {
-        docs.push(doc::hardline());
-        docs.push(format_where_clause(wh, spec));
-    }
-
-    if let Some(body) = body_node {
-        if body.kind == NodeKind::Block {
-            let has_where = where_node.is_some();
-            docs.push(format_opening_brace(spec, has_where));
-            let body_doc = format_block_contents(body, spec);
-            docs.push(doc::nest(spec.indent_width, doc::concat(vec![
-                doc::hardline(),
-                body_doc,
-            ])));
-            docs.push(doc::hardline());
-            docs.push(doc::text("}"));
-        } else {
-            docs.push(cst_to_doc(body, spec));
-        }
-    }
-
-    if has_semi {
-        docs.push(doc::text(";"));
-    }
-
-    doc::concat(docs)
-}
-
-// ── Enum definition ──────────────────────────────────────────────
-
-fn format_enum_def(node: &CstNode, spec: &FormatSpec) -> Doc {
-    // Reuse struct_def logic — same structure.
-    format_struct_def(node, spec)
-}
-
-// ── Impl block ───────────────────────────────────────────────────
-
-fn format_impl_block(node: &CstNode, spec: &FormatSpec) -> Doc {
-    let mut docs = Vec::new();
-    let mut header_tokens: Vec<Doc> = Vec::new();
-    let mut body_node: Option<&CstNode> = None;
-    let mut where_node: Option<&CstNode> = None;
-
-    for child in &node.children {
-        match child {
-            CstChild::Token(tok) => {
-                header_tokens.push(token_text(tok));
-            }
-            CstChild::Node { role: ChildRole::Body, node: inner } => {
-                body_node = Some(inner);
-            }
-            CstChild::Node { role: ChildRole::Where, node: inner } => {
-                where_node = Some(inner);
-            }
-            CstChild::Node { node: inner, .. } => {
-                header_tokens.push(cst_to_doc(inner, spec));
-            }
-        }
-    }
-
-    docs.push(doc::concat(intersperse_space(header_tokens)));
-
-    if let Some(wh) = where_node {
-        docs.push(doc::hardline());
-        docs.push(format_where_clause(wh, spec));
-    }
-
-    if let Some(body) = body_node {
-        let has_where = where_node.is_some();
-        docs.push(format_opening_brace(spec, has_where));
-        let body_doc = format_block_contents(body, spec);
-        if !is_empty_block(body) {
-            docs.push(doc::nest(spec.indent_width, doc::concat(vec![
-                doc::hardline(),
-                body_doc,
-            ])));
-            docs.push(doc::hardline());
-        }
-        docs.push(doc::text("}"));
-    }
-
-    doc::concat(docs)
-}
-
-// ── Use declaration ──────────────────────────────────────────────
-
-fn format_use_decl(node: &CstNode, spec: &FormatSpec) -> Doc {
-    let mut tokens: Vec<Token> = Vec::new();
-    collect_tokens(node, &mut tokens);
-
-    if spec.import_reorder {
-        reorder_use_items(&mut tokens);
-    }
-
-    tokens_to_formatted_doc(&tokens, spec)
 }
 
 /// Reorder items inside `use { ... }` blocks alphabetically.
@@ -1062,72 +782,7 @@ fn reorder_use_items(tokens: &mut Vec<Token>) {
     *tokens = result;
 }
 
-// ── Where clause ─────────────────────────────────────────────────
-
-fn format_where_clause(node: &CstNode, spec: &FormatSpec) -> Doc {
-    format_verbatim_children(node, spec)
-}
-
-// ── Block ────────────────────────────────────────────────────────
-
-fn format_block(node: &CstNode, spec: &FormatSpec) -> Doc {
-    let mut docs = vec![doc::text("{")];
-    let body_doc = format_block_contents(node, spec);
-    if !is_empty_block(node) {
-        docs.push(doc::nest(spec.indent_width, doc::concat(vec![
-            doc::hardline(),
-            body_doc,
-        ])));
-        docs.push(doc::hardline());
-    }
-    docs.push(doc::text("}"));
-    doc::concat(docs)
-}
-
-/// Format the contents of a block (without the outer braces).
-/// Uses the recursive token formatter so nested braces get
-/// proper indentation. Only strips the outermost `{` and `}`;
-/// inner braces are preserved.
-fn format_block_contents(node: &CstNode, spec: &FormatSpec) -> Doc {
-    let mut all_tokens: Vec<Token> = Vec::new();
-    collect_tokens(node, &mut all_tokens);
-    // Strip only the first `{` and last `}`.
-    if let Some(first) = all_tokens.first() {
-        if matches!(first.kind, TokenKind::Punct('{')) {
-            all_tokens.remove(0);
-        }
-    }
-    if let Some(last) = all_tokens.last() {
-        if matches!(last.kind, TokenKind::Punct('}')) {
-            all_tokens.pop();
-        }
-    }
-    tokens_to_formatted_doc(&all_tokens, spec)
-}
-
-// ── Parenthesised list ───────────────────────────────────────────
-
-fn format_paren_list(node: &CstNode, spec: &FormatSpec) -> Doc {
-    let inner = extract_inner_tokens(node);
-    if inner.is_empty() {
-        return doc::text("()");
-    }
-    let items = split_by_comma(&inner);
-    let item_docs: Vec<Doc> = items.into_iter()
-        .map(|toks| tokens_to_doc(&toks, spec))
-        .collect();
-    format_bracketed_list("(", ")", spec.indent_width, &item_docs, spec)
-}
-
 // ── Helpers ──────────────────────────────────────────────────────
-
-/// Format all children with smart spacing between tokens.
-fn format_verbatim_children(node: &CstNode, _spec: &FormatSpec) -> Doc {
-    // Collect all leaf tokens.
-    let mut tokens: Vec<Token> = Vec::new();
-    collect_tokens(node, &mut tokens);
-    doc::concat(smart_spaced_tokens(&tokens))
-}
 
 /// Recursively collect all leaf tokens from a CST node.
 fn collect_tokens(node: &CstNode, out: &mut Vec<Token>) {
@@ -1164,95 +819,19 @@ fn token_text(tok: &Token) -> Doc {
     }
 
     if !tok.text.is_empty() {
-        docs.push(doc::text(tok.text.as_str()));
+        // Doc comments must stay on their own line — if placed
+        // inline they swallow everything to the end of the line
+        // when re-lexed.
+        if matches!(tok.kind, TokenKind::DocComment(_)) {
+            docs.push(doc::hardline());
+            docs.push(doc::text(tok.text.as_str()));
+            docs.push(doc::hardline());
+        } else {
+            docs.push(doc::text(tok.text.as_str()));
+        }
     }
 
     doc::concat(docs)
-}
-
-/// Emit a token with trivia for top-level / verbatim contexts
-/// where we want to preserve the original whitespace structure.
-fn token_verbatim(tok: &Token) -> Doc {
-    let mut docs = Vec::new();
-
-    for t in &tok.leading_trivia {
-        match t {
-            Trivia::Whitespace(s) => docs.push(doc::text(s.as_str())),
-            Trivia::Newline       => docs.push(doc::hardline()),
-            Trivia::LineComment(c)  => docs.push(doc::text(c.as_str())),
-            Trivia::BlockComment(c) => docs.push(doc::text(c.as_str())),
-        }
-    }
-
-    if !tok.text.is_empty() {
-        docs.push(doc::text(tok.text.as_str()));
-    }
-
-    doc::concat(docs)
-}
-
-/// Opening brace, respecting brace style.
-fn format_opening_brace(spec: &FormatSpec, has_where: bool) -> Doc {
-    match spec.brace_style {
-        BraceStyle::SameLine => doc::text(" {"),
-        BraceStyle::NextLine => doc::concat(vec![doc::hardline(), doc::text("{")]),
-        BraceStyle::SameLineUnlessWhere => {
-            if has_where {
-                doc::concat(vec![doc::hardline(), doc::text("{")])
-            } else {
-                doc::text(" {")
-            }
-        }
-    }
-}
-
-/// Format a bracketed list with group/nest for potential breaking.
-fn format_bracketed_list(
-    open:       &str,
-    close:      &str,
-    indent:     u16,
-    items:      &[Doc],
-    spec:       &FormatSpec,
-) -> Doc {
-    if items.is_empty() {
-        return doc::concat(vec![doc::text(open), doc::text(close)]);
-    }
-
-    let sep = doc::concat(vec![doc::text(","), doc::line()]);
-    let body = doc::join(sep, items.to_vec());
-
-    let trailing = if spec.trailing_comma {
-        doc::trailing_comma()
-    } else {
-        doc::empty()
-    };
-
-    doc::group(doc::concat(vec![
-        doc::text(open),
-        doc::nest(indent, doc::concat(vec![
-            doc::line(),
-            body,
-            trailing,
-        ])),
-        doc::line(),
-        doc::text(close),
-    ]))
-}
-
-/// Extract the inner tokens of a bracketed node (skip the first
-/// and last tokens, which are the brackets).
-fn extract_inner_tokens(node: &CstNode) -> Vec<Token> {
-    let children = &node.children;
-    if children.len() <= 2 {
-        return Vec::new();
-    }
-    let mut toks = Vec::new();
-    for child in &children[1..children.len()-1] {
-        if let CstChild::Token(tok) = child {
-            toks.push(tok.clone());
-        }
-    }
-    toks
 }
 
 /// Split a token sequence at commas.
@@ -1273,25 +852,6 @@ fn split_by_comma(tokens: &[Token]) -> Vec<Vec<Token>> {
         groups.push(current);
     }
     groups
-}
-
-/// Convert a sequence of tokens to a Doc with smart spacing.
-fn tokens_to_doc(tokens: &[Token], _spec: &FormatSpec) -> Doc {
-    doc::concat(smart_spaced_tokens(tokens))
-}
-
-/// Insert a space between consecutive Docs.
-fn intersperse_space(docs: Vec<Doc>) -> Vec<Doc> {
-    let mut result = Vec::with_capacity(docs.len() * 2);
-    let mut first = true;
-    for d in docs {
-        if !first {
-            result.push(doc::text(" "));
-        }
-        result.push(d);
-        first = false;
-    }
-    result
 }
 
 /// Insert spaces between tokens with language-aware rules.
@@ -1317,7 +877,8 @@ fn smart_spaced_tokens_inner(tokens: &[Token], chain_breaks: bool) -> Vec<Doc> {
                 docs.push(token_text(tok));
                 continue;
             }
-            let need_space = !suppress_space_after(prev) && !suppress_space_before_ctx(tok, Some(prev));
+            let need_space = needs_separator_space(prev, tok)
+                || (!suppress_space_after(prev) && !suppress_space_before(tok));
             if need_space {
                 docs.push(doc::text(" "));
             }
@@ -1454,6 +1015,16 @@ fn format_binop_expr(tokens: &[Token], spec: &FormatSpec) -> Doc {
     doc::group(doc::concat(docs))
 }
 
+/// Adjacent tokens that would re-tokenize differently if the
+/// separating space were removed. Prevents ambiguous sequences
+/// like `:::` (from `: ::` or `:: :`).
+fn needs_separator_space(prev: &Token, next: &Token) -> bool {
+    (matches!(prev.kind, TokenKind::Punct(':'))
+        && matches!(next.kind, TokenKind::Operator(ref op) if op == "::"))
+    || (matches!(prev.kind, TokenKind::Operator(ref op) if op == "::")
+        && matches!(next.kind, TokenKind::Punct(':')))
+}
+
 /// Tokens after which no trailing space should be added.
 fn suppress_space_after(tok: &Token) -> bool {
     match &tok.kind {
@@ -1466,6 +1037,11 @@ fn suppress_space_after(tok: &Token) -> bool {
             => true,
         _ => false,
     }
+}
+
+/// Context-free version of `suppress_space_before_ctx`.
+fn suppress_space_before(tok: &Token) -> bool {
+    suppress_space_before_ctx(tok, None)
 }
 
 /// Tokens before which no leading space should be added.
@@ -1488,18 +1064,6 @@ fn suppress_space_before_ctx(tok: &Token, prev: Option<&Token>) -> bool {
             => true,
         _ => false,
     }
-}
-
-fn suppress_space_before(tok: &Token) -> bool {
-    suppress_space_before_ctx(tok, None)
-}
-
-/// Check whether a block is empty (only contains `{` and `}`).
-fn is_empty_block(node: &CstNode) -> bool {
-    node.children.iter().all(|c| matches!(c,
-        CstChild::Token(tok) if matches!(tok.kind,
-            TokenKind::Punct('{') | TokenKind::Punct('}') | TokenKind::Eof)
-    ))
 }
 
 /// Check whether a body token sequence is short enough to potentially
@@ -1789,6 +1353,84 @@ fn find_at_depth0(tokens: &[Token], ch: char) -> Option<usize> {
     None
 }
 
+/// Find the first `{` at bracket depth 0.
+///
+/// Unlike `find_at_depth0`, this checks the depth *before* the
+/// open-brace increments it, so it actually finds a `{` that is
+/// not nested inside other brackets.
+fn find_brace_at_depth0(tokens: &[Token]) -> Option<usize> {
+    let mut depth = 0usize;
+    for (i, tok) in tokens.iter().enumerate() {
+        match tok.kind {
+            TokenKind::Punct('{') => {
+                if depth == 0 { return Some(i); }
+                depth += 1;
+            }
+            TokenKind::Punct('(') | TokenKind::Punct('[') => depth += 1,
+            TokenKind::Punct('}') | TokenKind::Punct(')') | TokenKind::Punct(']') => {
+                depth = depth.saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Format field or variant content, handling struct-like bodies.
+///
+/// When the content contains a `{` at bracket depth 0 (a struct-like
+/// enum variant body), the part before the brace is emitted as the
+/// variant header and the braced body is recursively formatted with
+/// field alignment. Without a brace, falls back to smart spacing.
+fn format_field_content(tokens: &[Token], spec: &FormatSpec) -> Doc {
+    let brace_pos = find_brace_at_depth0(tokens);
+    match brace_pos {
+        Some(bp) if bp > 0 => {
+            let header = &tokens[..bp];
+            let header_doc = doc::concat(smart_spaced_tokens(header));
+
+            // Find the matching `}`.
+            let mut depth = 0usize;
+            let mut close = tokens.len();
+            for j in bp..tokens.len() {
+                match tokens[j].kind {
+                    TokenKind::Punct('{') => depth += 1,
+                    TokenKind::Punct('}') => {
+                        depth -= 1;
+                        if depth == 0 {
+                            close = j;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            let inner = &tokens[bp + 1..close];
+            let inner_doc = format_aligned_fields(inner, spec);
+
+            let mut docs = vec![
+                header_doc,
+                doc::text(" {"),
+                doc::nest(spec.indent_width, doc::concat(vec![
+                    doc::hardline(),
+                    inner_doc,
+                ])),
+                doc::hardline(),
+                doc::text("}"),
+            ];
+
+            // Tokens after `}` (rare but handle gracefully).
+            if close + 1 < tokens.len() {
+                docs.push(doc::concat(smart_spaced_tokens(&tokens[close + 1..])));
+            }
+
+            doc::concat(docs)
+        }
+        _ => doc::concat(smart_spaced_tokens(tokens)),
+    }
+}
+
 fn format_aligned_fields(tokens: &[Token], spec: &FormatSpec) -> Doc {
     let fields: Vec<Vec<Token>> = split_by_comma_depth(tokens)
         .into_iter().filter(|f| !f.is_empty()).collect();
@@ -1801,7 +1443,7 @@ fn format_aligned_fields(tokens: &[Token], spec: &FormatSpec) -> Doc {
             }
             let (prefix, content) = split_field_prefix(field);
             emit_prefix(&mut docs, &prefix);
-            docs.push(doc::concat(smart_spaced_tokens(&content)));
+            docs.push(format_field_content(&content, spec));
         }
         if !fields.is_empty() {
             docs.push(doc::text(","));
@@ -1831,7 +1473,7 @@ fn format_aligned_fields(tokens: &[Token], spec: &FormatSpec) -> Doc {
                 docs.push(doc::hardline());
             }
             emit_prefix(&mut docs, prefix);
-            docs.push(doc::concat(smart_spaced_tokens(content)));
+            docs.push(format_field_content(content, spec));
         }
         if !fields.is_empty() {
             docs.push(doc::text(","));
@@ -1870,10 +1512,10 @@ fn format_aligned_fields(tokens: &[Token], spec: &FormatSpec) -> Doc {
             docs.push(doc::hardline());
         }
         emit_prefix(&mut docs, prefix);
-        let name_doc = doc::concat(smart_spaced_tokens(name_toks));
         if val_toks.is_empty() {
-            docs.push(name_doc);
+            docs.push(format_field_content(name_toks, spec));
         } else {
+            let name_doc = doc::concat(smart_spaced_tokens(name_toks));
             let val_doc = doc::concat(smart_spaced_tokens(val_toks));
             if align {
                 let pad = " ".repeat(max_name - name_w);
@@ -1925,28 +1567,6 @@ fn is_short_body(tokens: &[Token]) -> bool {
     // Short enough (heuristic: total text width).
     let width: usize = tokens.iter().map(|t| t.text.len() + 1).sum();
     width < 40
-}
-
-/// Check whether a block contains a single expression (for fn_single_line).
-fn is_single_expr_block(node: &CstNode) -> bool {
-    let meaningful: Vec<&CstChild> = node.children.iter().filter(|c| {
-        match c {
-            CstChild::Token(tok) => !matches!(tok.kind,
-                TokenKind::Punct('{') | TokenKind::Punct('}')),
-            _ => true,
-        }
-    }).collect();
-    // Count non-trivia tokens.
-    let token_count = meaningful.iter().filter(|c| {
-        match c {
-            CstChild::Token(tok) => {
-                // Skip tokens that are only whitespace/newline trivia.
-                !tok.text.is_empty()
-            }
-            _ => true,
-        }
-    }).count();
-    token_count <= 5 // Heuristic: short expressions have few tokens.
 }
 
 

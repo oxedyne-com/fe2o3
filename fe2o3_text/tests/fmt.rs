@@ -6,6 +6,7 @@
 
 use oxedyne_fe2o3_text::fmt::{
     format_rust,
+    detect_language_from_source,
     spec::FormatSpec,
 };
 
@@ -800,5 +801,171 @@ fn test_workspace_regression() {
             println!("  FAIL: {}", f);
         }
         panic!("{} file(s) failed the regression check.", failed.len());
+    }
+}
+
+// ── Content-based language detection ─────────────────────────────
+
+#[test]
+fn test_detect_rust_from_source() {
+    let src = r#"
+use std::collections::HashMap;
+
+pub fn main() {
+    let mut map = HashMap::new();
+    map.insert("key", "value");
+}
+"#;
+    assert_eq!(detect_language_from_source(src), Some("rust"));
+}
+
+#[test]
+fn test_detect_go_from_source() {
+    let src = r#"
+package main
+
+import "fmt"
+
+func main() {
+    x := 42
+    fmt.Println(x)
+}
+"#;
+    assert_eq!(detect_language_from_source(src), Some("go"));
+}
+
+#[test]
+fn test_detect_python_from_source() {
+    let src = r#"
+from collections import defaultdict
+
+class Foo:
+    def __init__(self):
+        self.data = defaultdict(list)
+
+    def add(self, key, value):
+        self.data[key].append(value)
+"#;
+    assert_eq!(detect_language_from_source(src), Some("python"));
+}
+
+#[test]
+fn test_detect_python_shebang() {
+    let src = "#!/usr/bin/env python3\nimport sys\nprint(sys.argv)\n";
+    assert_eq!(detect_language_from_source(src), Some("python"));
+}
+
+#[test]
+fn test_detect_js_from_source() {
+    let src = r#"
+import { readFile } from 'fs';
+
+const handler = async (req) => {
+    if (req.method === 'GET') {
+        console.log('request received');
+    }
+};
+
+export default handler;
+"#;
+    assert_eq!(detect_language_from_source(src), Some("js"));
+}
+
+#[test]
+fn test_detect_java_from_source() {
+    let src = r#"
+import java.util.HashMap;
+
+public class Main {
+    public static void main(String[] args) {
+        System.out.println("hello");
+    }
+}
+"#;
+    assert_eq!(detect_language_from_source(src), Some("java"));
+}
+
+#[test]
+fn test_detect_c_from_source() {
+    let src = r#"
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(int argc, char *argv[]) {
+    printf("hello %s\n", argv[0]);
+    return 0;
+}
+"#;
+    assert_eq!(detect_language_from_source(src), Some("c"));
+}
+
+#[test]
+fn test_detect_none_for_empty() {
+    assert_eq!(detect_language_from_source(""), None);
+    assert_eq!(detect_language_from_source("hello world"), None);
+}
+
+// ── Corpus-based detection tests ─────────────────────────────────
+
+/// Walk a corpus directory and verify detection for every file.
+///
+/// The corpus lives in `tests/detect_corpus/`. Subdirectories are
+/// named after the expected language (`rust`, `c`, `go`, `java`,
+/// `js`, `python`) or `none` for non-code files. Each `.txt` file
+/// in a language directory should be detected as that language.
+/// Files in `none/` should return `None`.
+#[test]
+fn test_detect_corpus() {
+    let corpus_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("detect_corpus");
+
+    let mut checked = 0;
+    let mut failed: Vec<String> = Vec::new();
+
+    let lang_dirs = ["rust", "c", "cpp", "csharp", "go", "java", "js", "python", "none"];
+
+    for lang_dir in &lang_dirs {
+        let dir = corpus_dir.join(lang_dir);
+        if !dir.exists() {
+            panic!("corpus directory missing: {}", dir.display());
+        }
+
+        let expected: Option<&str> = match *lang_dir {
+            "none" => None,
+            other  => Some(other),
+        };
+
+        let mut entries: Vec<_> = std::fs::read_dir(&dir)
+            .expect("cannot read corpus dir")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map_or(false, |ext| ext == "txt"))
+            .collect();
+        entries.sort_by_key(|e| e.path());
+
+        for entry in entries {
+            let path = entry.path();
+            let source = std::fs::read_to_string(&path)
+                .expect("cannot read corpus file");
+
+            let detected = detect_language_from_source(&source);
+            let rel = format!("{}/{}", lang_dir, path.file_name().unwrap().to_string_lossy());
+
+            if detected != expected {
+                failed.push(format!(
+                    "{}: expected {:?}, got {:?}",
+                    rel, expected, detected,
+                ));
+            }
+            checked += 1;
+        }
+    }
+
+    println!("Corpus: checked {} files, {} failures.", checked, failed.len());
+    if !failed.is_empty() {
+        for f in &failed {
+            println!("  FAIL: {}", f);
+        }
+        panic!("{} corpus file(s) failed detection.", failed.len());
     }
 }

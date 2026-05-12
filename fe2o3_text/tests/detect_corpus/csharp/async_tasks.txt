@@ -1,0 +1,54 @@
+using System;
+using System.Collections.Generic;
+using System.Net.Http;
+using System.Threading.Tasks;
+
+namespace Annealer.Examples
+{
+    public class Fetcher
+    {
+        private readonly HttpClient _client = new();
+        private readonly Dictionary<string, string> _cache = new();
+
+        public async Task<string> GetAsync(string url)
+        {
+            if (_cache.TryGetValue(url, out var cached))
+                return cached;
+
+            var response = await _client.GetAsync(url);
+            response.EnsureSuccessStatusCode();
+            var body = await response.Content.ReadAsStringAsync();
+            _cache[url] = body;
+            return body;
+        }
+
+        public async Task<List<string>> GetAllAsync(IEnumerable<string> urls)
+        {
+            var tasks = new List<Task<string>>();
+            foreach (var url in urls)
+            {
+                tasks.Add(GetAsync(url));
+            }
+            var results = await Task.WhenAll(tasks);
+            return new List<string>(results);
+        }
+
+        public async Task<string?> TryGetAsync(string url, int retries = 3)
+        {
+            for (int attempt = 1; attempt <= retries; attempt++)
+            {
+                try
+                {
+                    return await GetAsync(url);
+                }
+                catch (HttpRequestException)
+                {
+                    if (attempt == retries)
+                        return null;
+                    await Task.Delay(TimeSpan.FromSeconds(Math.Pow(2, attempt)));
+                }
+            }
+            return null;
+        }
+    }
+}

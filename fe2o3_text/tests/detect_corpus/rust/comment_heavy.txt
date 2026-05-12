@@ -1,0 +1,68 @@
+// This module implements a simple ring buffer for fixed-size messages.
+//
+// The buffer is backed by a contiguous allocation. Reads and writes
+// wrap around the end of the buffer. The implementation does not
+// support concurrent access; callers must synchronise externally.
+//
+// Design constraints:
+//   - Fixed capacity, set at construction.
+//   - Messages are fixed-size byte arrays.
+//   - No heap allocation after construction.
+//   - O(1) push and pop.
+
+/// Ring buffer for fixed-size messages.
+pub struct RingBuffer {
+    // The backing storage.
+    buf: Vec<u8>,
+    // Size of each message in bytes.
+    msg_size: usize,
+    // Read position (index into buf).
+    read_pos: usize,
+    // Write position (index into buf).
+    write_pos: usize,
+    // Number of messages currently stored.
+    count: usize,
+    // Maximum number of messages.
+    capacity: usize,
+}
+
+impl RingBuffer {
+    /// Create a ring buffer that holds `capacity` messages of
+    /// `msg_size` bytes each.
+    pub fn new(capacity: usize, msg_size: usize) -> Self {
+        Self {
+            buf: vec![0u8; capacity * msg_size],
+            msg_size,
+            read_pos:  0,
+            write_pos: 0,
+            count:     0,
+            capacity,
+        }
+    }
+
+    /// Push a message. Returns false if the buffer is full.
+    pub fn push(&mut self, msg: &[u8]) -> bool {
+        if msg.len() != self.msg_size || self.count == self.capacity {
+            return false;
+        }
+        // Copy message into the write slot.
+        let start = self.write_pos * self.msg_size;
+        self.buf[start..start + self.msg_size].copy_from_slice(msg);
+        // Advance write position, wrapping around.
+        self.write_pos = (self.write_pos + 1) % self.capacity;
+        self.count += 1;
+        true
+    }
+
+    /// Pop a message. Returns None if the buffer is empty.
+    pub fn pop(&mut self) -> Option<Vec<u8>> {
+        if self.count == 0 {
+            return None;
+        }
+        let start = self.read_pos * self.msg_size;
+        let msg = self.buf[start..start + self.msg_size].to_vec();
+        self.read_pos = (self.read_pos + 1) % self.capacity;
+        self.count -= 1;
+        Some(msg)
+    }
+}

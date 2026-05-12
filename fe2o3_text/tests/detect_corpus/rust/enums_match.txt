@@ -1,0 +1,69 @@
+/// HTTP request method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Method {
+    Get,
+    Post,
+    Put,
+    Delete,
+    Patch,
+    Head,
+    Options,
+}
+
+impl Method {
+    /// Parse a method from a string slice.
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "GET"     => Some(Self::Get),
+            "POST"    => Some(Self::Post),
+            "PUT"     => Some(Self::Put),
+            "DELETE"  => Some(Self::Delete),
+            "PATCH"   => Some(Self::Patch),
+            "HEAD"    => Some(Self::Head),
+            "OPTIONS" => Some(Self::Options),
+            _         => None,
+        }
+    }
+
+    /// Whether this method conventionally carries a request body.
+    pub fn has_body(&self) -> bool {
+        match self {
+            Self::Post | Self::Put | Self::Patch => true,
+            _ => false,
+        }
+    }
+
+    /// The method as an uppercase string.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Get     => "GET",
+            Self::Post    => "POST",
+            Self::Put     => "PUT",
+            Self::Delete  => "DELETE",
+            Self::Patch   => "PATCH",
+            Self::Head    => "HEAD",
+            Self::Options => "OPTIONS",
+        }
+    }
+}
+
+/// HTTP status code category.
+pub enum StatusCategory {
+    Informational,
+    Success,
+    Redirection,
+    ClientError,
+    ServerError,
+    Unknown,
+}
+
+pub fn categorise(code: u16) -> StatusCategory {
+    match code {
+        100..=199 => StatusCategory::Informational,
+        200..=299 => StatusCategory::Success,
+        300..=399 => StatusCategory::Redirection,
+        400..=499 => StatusCategory::ClientError,
+        500..=599 => StatusCategory::ServerError,
+        _         => StatusCategory::Unknown,
+    }
+}

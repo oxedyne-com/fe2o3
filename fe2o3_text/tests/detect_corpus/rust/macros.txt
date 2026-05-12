@@ -1,0 +1,55 @@
+//! Utility macros for error handling and logging.
+
+/// Create a formatted error string and return it as an Err.
+macro_rules! bail {
+    ($($arg:tt)*) => {
+        return Err(format!($($arg)*))
+    };
+}
+
+/// Unwrap a Result, returning early on Err with context.
+macro_rules! try_with {
+    ($expr:expr, $ctx:expr) => {
+        match $expr {
+            Ok(val) => val,
+            Err(e) => return Err(format!("{}: {}", $ctx, e)),
+        }
+    };
+}
+
+/// Declare a set of string constants.
+macro_rules! string_consts {
+    ($($name:ident = $val:expr),* $(,)?) => {
+        $(pub const $name: &str = $val;)*
+    };
+}
+
+string_consts! {
+    VERSION    = "0.1.0",
+    APP_NAME   = "annealer",
+    CONFIG_DIR = ".config/annealer",
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bail() {
+        fn inner() -> Result<(), String> {
+            bail!("something went wrong: {}", 42);
+        }
+        let err = inner().unwrap_err();
+        assert_eq!(err, "something went wrong: 42");
+    }
+
+    #[test]
+    fn test_try_with() {
+        fn parse(s: &str) -> Result<i32, String> {
+            let n: i32 = try_with!(s.parse(), "bad integer");
+            Ok(n * 2)
+        }
+        assert_eq!(parse("21").unwrap(), 42);
+        assert!(parse("abc").is_err());
+    }
+}

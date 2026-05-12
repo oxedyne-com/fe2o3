@@ -1,0 +1,71 @@
+using System;
+using System.Collections.Generic;
+
+namespace Annealer.Examples
+{
+    public class EventBus
+    {
+        private readonly Dictionary<string, List<Action<object>>> _handlers = new();
+
+        public void Subscribe(string topic, Action<object> handler)
+        {
+            if (!_handlers.ContainsKey(topic))
+                _handlers[topic] = new List<Action<object>>();
+            _handlers[topic].Add(handler);
+        }
+
+        public void Publish(string topic, object payload)
+        {
+            if (!_handlers.TryGetValue(topic, out var handlers))
+                return;
+            foreach (var handler in handlers)
+            {
+                try
+                {
+                    handler(payload);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"handler error on {topic}: {ex.Message}");
+                }
+            }
+        }
+
+        public int HandlerCount(string topic)
+        {
+            return _handlers.TryGetValue(topic, out var handlers)
+                ? handlers.Count
+                : 0;
+        }
+    }
+
+    internal class Ticker
+    {
+        public event EventHandler<int>? Ticked;
+        private int _count;
+
+        public void Tick()
+        {
+            _count++;
+            Ticked?.Invoke(this, _count);
+        }
+    }
+
+    class Program
+    {
+        static void Main()
+        {
+            var bus = new EventBus();
+            bus.Subscribe("log", msg => Console.WriteLine($"LOG: {msg}"));
+            bus.Subscribe("log", msg => Console.WriteLine($"AUDIT: {msg}"));
+            bus.Publish("log", "application started");
+
+            var ticker = new Ticker();
+            ticker.Ticked += (sender, count) =>
+                Console.WriteLine($"tick #{count}");
+            ticker.Tick();
+            ticker.Tick();
+            ticker.Tick();
+        }
+    }
+}

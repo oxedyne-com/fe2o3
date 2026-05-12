@@ -1,0 +1,8 @@
+name,age,city,score
+Alice,28,London,92.5
+Bob,34,Manchester,87.3
+Charlie,22,Edinburgh,91.0
+Diana,31,Cardiff,88.7
+Eve,27,Belfast,95.2
+Frank,45,Dublin,79.8
+Grace,29,Glasgow,90.1

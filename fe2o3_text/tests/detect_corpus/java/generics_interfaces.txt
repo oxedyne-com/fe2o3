@@ -1,0 +1,81 @@
+import java.util.Iterator;
+import java.util.NoSuchElementException;
+
+public class LinkedList<E> implements Iterable<E> {
+
+    private static class Node<E> {
+        E data;
+        Node<E> next;
+
+        Node(E data, Node<E> next) {
+            this.data = data;
+            this.next = next;
+        }
+    }
+
+    private Node<E> head;
+    private int size;
+
+    public void addFirst(E element) {
+        head = new Node<>(element, head);
+        size++;
+    }
+
+    public E removeFirst() {
+        if (head == null) {
+            throw new NoSuchElementException("list is empty");
+        }
+        E data = head.data;
+        head = head.next;
+        size--;
+        return data;
+    }
+
+    public E getFirst() {
+        if (head == null) {
+            throw new NoSuchElementException("list is empty");
+        }
+        return head.data;
+    }
+
+    public int size() {
+        return size;
+    }
+
+    public boolean isEmpty() {
+        return size == 0;
+    }
+
+    @Override
+    public Iterator<E> iterator() {
+        return new Iterator<E>() {
+            private Node<E> current = head;
+
+            @Override
+            public boolean hasNext() {
+                return current != null;
+            }
+
+            @Override
+            public E next() {
+                if (current == null) {
+                    throw new NoSuchElementException();
+                }
+                E data = current.data;
+                current = current.next;
+                return data;
+            }
+        };
+    }
+
+    public static void main(String[] args) {
+        LinkedList<Integer> list = new LinkedList<>();
+        for (int i = 0; i < 10; i++) {
+            list.addFirst(i);
+        }
+        for (int val : list) {
+            System.out.print(val + " ");
+        }
+        System.out.println();
+    }
+}

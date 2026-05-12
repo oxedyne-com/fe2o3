@@ -1,0 +1,61 @@
+/// Pixel format for image buffers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PixelFormat {
+    Rgba8,
+    Rgb8,
+    Greyscale8,
+    Greyscale16,
+}
+
+/// Image buffer metadata.
+pub struct ImageHeader {
+    pub width:  u32,
+    pub height: u32,
+    pub format: PixelFormat,
+    pub dpi:    Option<f64>,
+}
+
+/// Colour space for rendering.
+#[derive(Debug, Clone, Copy)]
+pub enum ColourSpace {
+    Srgb,
+    LinearRgb,
+    DisplayP3,
+    AdobeRgb,
+}
+
+/// Blend mode for compositing layers.
+pub enum BlendMode {
+    Normal,
+    Multiply,
+    Screen,
+    Overlay,
+    SoftLight,
+    HardLight,
+    Difference,
+}
+
+/// A rectangular region within an image.
+pub struct Rect {
+    pub x:      u32,
+    pub y:      u32,
+    pub width:  u32,
+    pub height: u32,
+}
+
+/// Image transform operations.
+pub trait Transform {
+    fn rotate(&self, degrees: f64) -> Self;
+    fn scale(&self, factor: f64) -> Self;
+    fn crop(&self, region: &Rect) -> Self;
+    fn flip_horizontal(&self) -> Self;
+    fn flip_vertical(&self) -> Self;
+}
+
+/// Interpolation method for scaling.
+pub enum Interpolation {
+    Nearest,
+    Bilinear,
+    Bicubic,
+    Lanczos3,
+}

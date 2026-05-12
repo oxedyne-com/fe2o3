@@ -1,0 +1,20 @@
+# Project README
+
+## Overview
+
+This project provides a general-purpose formatting tool for source code.
+It supports multiple languages and produces consistent output.
+
+## Features
+
+- Fast single-pass formatting
+- Configurable layout options
+- Multiple language support
+
+## Installation
+
+Download the binary from the releases page and add it to your PATH.
+
+## Usage
+
+Run `annealer --help` for a full list of options.

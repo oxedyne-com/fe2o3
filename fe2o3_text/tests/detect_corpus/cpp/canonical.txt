@@ -1,0 +1,51 @@
+#include <iostream>
+#include <vector>
+#include <string>
+#include <algorithm>
+
+class Logger {
+public:
+    enum class Level { Debug, Info, Warn, Error };
+
+    explicit Logger(std::string name)
+        : name_(std::move(name)) {}
+
+    void log(Level level, const std::string& message) const {
+        std::cout << "[" << level_str(level) << "] "
+                  << name_ << ": " << message << "\n";
+    }
+
+    void debug(const std::string& msg) const { log(Level::Debug, msg); }
+    void info(const std::string& msg) const  { log(Level::Info, msg); }
+    void warn(const std::string& msg) const  { log(Level::Warn, msg); }
+    void error(const std::string& msg) const { log(Level::Error, msg); }
+
+private:
+    std::string name_;
+
+    static const char* level_str(Level l) {
+        switch (l) {
+            case Level::Debug: return "DEBUG";
+            case Level::Info:  return "INFO";
+            case Level::Warn:  return "WARN";
+            case Level::Error: return "ERROR";
+        }
+        return "UNKNOWN";
+    }
+};
+
+int main() {
+    Logger log("main");
+    log.info("starting up");
+
+    std::vector<int> values = {5, 3, 8, 1, 9, 2, 7};
+    std::sort(values.begin(), values.end());
+
+    for (const auto& v : values) {
+        std::cout << v << " ";
+    }
+    std::cout << std::endl;
+
+    log.info("done");
+    return 0;
+}

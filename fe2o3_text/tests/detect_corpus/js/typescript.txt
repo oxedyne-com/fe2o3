@@ -1,0 +1,49 @@
+interface User {
+    id: number;
+    name: string;
+    email: string;
+    role: 'admin' | 'editor' | 'viewer';
+}
+
+interface Repository<T> {
+    findById(id: number): Promise<T | null>;
+    findAll(): Promise<T[]>;
+    create(item: Omit<T, 'id'>): Promise<T>;
+    update(id: number, fields: Partial<T>): Promise<T>;
+    delete(id: number): Promise<boolean>;
+}
+
+class InMemoryUserRepo implements Repository<User> {
+    private users: Map<number, User> = new Map();
+    private nextId = 1;
+
+    async findById(id: number): Promise<User | null> {
+        return this.users.get(id) ?? null;
+    }
+
+    async findAll(): Promise<User[]> {
+        return [...this.users.values()];
+    }
+
+    async create(item: Omit<User, 'id'>): Promise<User> {
+        const user: User = { ...item, id: this.nextId++ };
+        this.users.set(user.id, user);
+        return user;
+    }
+
+    async update(id: number, fields: Partial<User>): Promise<User> {
+        const existing = this.users.get(id);
+        if (!existing) {
+            throw new Error(`user ${id} not found`);
+        }
+        const updated = { ...existing, ...fields, id };
+        this.users.set(id, updated);
+        return updated;
+    }
+
+    async delete(id: number): Promise<boolean> {
+        return this.users.delete(id);
+    }
+}
+
+export { User, Repository, InMemoryUserRepo };

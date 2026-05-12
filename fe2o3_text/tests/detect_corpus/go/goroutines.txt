@@ -1,0 +1,74 @@
+package worker
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"time"
+)
+
+type Job struct {
+	ID      int
+	Payload string
+}
+
+type Result struct {
+	JobID    int
+	Output   string
+	Duration time.Duration
+}
+
+func worker(ctx context.Context, id int, jobs <-chan Job, results chan<- Result) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case job, ok := <-jobs:
+			if !ok {
+				return
+			}
+			start := time.Now()
+			output := process(job.Payload)
+			results <- Result{
+				JobID:    job.ID,
+				Output:   output,
+				Duration: time.Since(start),
+			}
+		}
+	}
+}
+
+func process(payload string) string {
+	time.Sleep(10 * time.Millisecond)
+	return fmt.Sprintf("processed: %s", payload)
+}
+
+func RunPool(ctx context.Context, numWorkers int, jobs []Job) []Result {
+	jobCh := make(chan Job, len(jobs))
+	resultCh := make(chan Result, len(jobs))
+
+	var wg sync.WaitGroup
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			worker(ctx, id, jobCh, resultCh)
+		}(i)
+	}
+
+	for _, job := range jobs {
+		jobCh <- job
+	}
+	close(jobCh)
+
+	go func() {
+		wg.Wait()
+		close(resultCh)
+	}()
+
+	var results []Result
+	for r := range resultCh {
+		results = append(results, r)
+	}
+	return results
+}

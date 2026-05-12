@@ -1,0 +1,72 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace Annealer.Examples
+{
+    public class Student
+    {
+        public string Name { get; set; } = "";
+        public int Grade { get; set; }
+        public double Score { get; set; }
+
+        public bool IsPassing => Score >= 60.0;
+    }
+
+    public class Classroom
+    {
+        private readonly List<Student> _students = new();
+
+        public int Count => _students.Count;
+
+        public void Add(Student student)
+        {
+            _students.Add(student);
+        }
+
+        public IEnumerable<Student> TopPerformers(int n)
+        {
+            return _students
+                .OrderByDescending(s => s.Score)
+                .Take(n);
+        }
+
+        public double AverageScore()
+        {
+            return _students.Average(s => s.Score);
+        }
+
+        public Dictionary<int, List<Student>> GroupByGrade()
+        {
+            return _students
+                .GroupBy(s => s.Grade)
+                .ToDictionary(g => g.Key, g => g.ToList());
+        }
+
+        public IEnumerable<string> PassingNames()
+        {
+            return _students
+                .Where(s => s.IsPassing)
+                .Select(s => s.Name)
+                .OrderBy(n => n);
+        }
+    }
+
+    class Program
+    {
+        static void Main()
+        {
+            var classroom = new Classroom();
+            classroom.Add(new Student { Name = "Alice", Grade = 12, Score = 92.5 });
+            classroom.Add(new Student { Name = "Bob", Grade = 11, Score = 55.0 });
+            classroom.Add(new Student { Name = "Charlie", Grade = 12, Score = 87.3 });
+
+            Console.WriteLine($"average: {classroom.AverageScore():F1}");
+
+            foreach (var name in classroom.PassingNames())
+            {
+                Console.WriteLine($"  passing: {name}");
+            }
+        }
+    }
+}

@@ -1,0 +1,76 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef struct node {
+    int data;
+    struct node *left;
+    struct node *right;
+} node_t;
+
+node_t *node_new(int data) {
+    node_t *n = malloc(sizeof(node_t));
+    if (n == NULL) return NULL;
+    n->data  = data;
+    n->left  = NULL;
+    n->right = NULL;
+    return n;
+}
+
+node_t *bst_insert(node_t *root, int data) {
+    if (root == NULL) return node_new(data);
+    if (data < root->data)
+        root->left = bst_insert(root->left, data);
+    else if (data > root->data)
+        root->right = bst_insert(root->right, data);
+    return root;
+}
+
+node_t *bst_find(node_t *root, int data) {
+    while (root != NULL) {
+        if (data == root->data) return root;
+        if (data < root->data)
+            root = root->left;
+        else
+            root = root->right;
+    }
+    return NULL;
+}
+
+void bst_inorder(node_t *root, void (*visit)(int)) {
+    if (root == NULL) return;
+    bst_inorder(root->left, visit);
+    visit(root->data);
+    bst_inorder(root->right, visit);
+}
+
+void bst_free(node_t *root) {
+    if (root == NULL) return;
+    bst_free(root->left);
+    bst_free(root->right);
+    free(root);
+}
+
+static void print_int(int x) {
+    printf("%d ", x);
+}
+
+int main(void) {
+    int values[] = {5, 3, 7, 1, 4, 6, 8};
+    size_t n = sizeof(values) / sizeof(values[0]);
+
+    node_t *root = NULL;
+    for (size_t i = 0; i < n; i++)
+        root = bst_insert(root, values[i]);
+
+    printf("inorder: ");
+    bst_inorder(root, print_int);
+    printf("\n");
+
+    node_t *found = bst_find(root, 4);
+    if (found)
+        printf("found: %d\n", found->data);
+
+    bst_free(root);
+    return 0;
+}

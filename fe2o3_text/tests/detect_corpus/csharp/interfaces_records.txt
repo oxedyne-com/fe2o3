@@ -1,0 +1,64 @@
+using System;
+using System.Collections.Generic;
+
+namespace Annealer.Examples
+{
+    public interface IStore<T>
+    {
+        T? Get(string key);
+        void Put(string key, T value);
+        bool Delete(string key);
+        IReadOnlyList<string> Keys { get; }
+    }
+
+    public record Point(double X, double Y)
+    {
+        public double DistanceTo(Point other)
+        {
+            var dx = X - other.X;
+            var dy = Y - other.Y;
+            return Math.Sqrt(dx * dx + dy * dy);
+        }
+
+        public Point Translate(double dx, double dy) => this with { X = X + dx, Y = Y + dy };
+    }
+
+    public record Circle(Point Centre, double Radius)
+    {
+        public double Area => Math.PI * Radius * Radius;
+        public double Circumference => 2 * Math.PI * Radius;
+        public bool Contains(Point p) => Centre.DistanceTo(p) <= Radius;
+    }
+
+    public sealed class MemStore<T> : IStore<T>
+    {
+        private readonly Dictionary<string, T> _data = new();
+
+        public T? Get(string key) =>
+            _data.TryGetValue(key, out var value) ? value : default;
+
+        public void Put(string key, T value) => _data[key] = value;
+
+        public bool Delete(string key) => _data.Remove(key);
+
+        public IReadOnlyList<string> Keys => new List<string>(_data.Keys);
+    }
+
+    class Program
+    {
+        static void Main()
+        {
+            var store = new MemStore<Point>();
+            store.Put("origin", new Point(0, 0));
+            store.Put("corner", new Point(3, 4));
+
+            var origin = store.Get("origin")!;
+            var corner = store.Get("corner")!;
+            Console.WriteLine($"distance: {origin.DistanceTo(corner):F2}");
+
+            var circle = new Circle(origin, 5.0);
+            Console.WriteLine($"contains corner? {circle.Contains(corner)}");
+            Console.WriteLine($"area: {circle.Area:F2}");
+        }
+    }
+}

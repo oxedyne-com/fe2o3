@@ -1,0 +1,91 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define MAX_LINE 1024
+#define HASH_SIZE 1024
+
+typedef struct Entry {
+    char *key;
+    char *value;
+    struct Entry *next;
+} Entry;
+
+typedef struct {
+    Entry *buckets[HASH_SIZE];
+    int count;
+} HashMap;
+
+static unsigned int hash(const char *s) {
+    unsigned int h = 5381;
+    int c;
+    while ((c = *s++))
+        h = ((h << 5) + h) + c;
+    return h % HASH_SIZE;
+}
+
+HashMap *hashmap_new(void) {
+    HashMap *map = calloc(1, sizeof(HashMap));
+    if (!map) {
+        fprintf(stderr, "out of memory\n");
+        exit(1);
+    }
+    return map;
+}
+
+void hashmap_put(HashMap *map, const char *key, const char *value) {
+    unsigned int idx = hash(key);
+    Entry *e = map->buckets[idx];
+    while (e) {
+        if (strcmp(e->key, key) == 0) {
+            free(e->value);
+            e->value = strdup(value);
+            return;
+        }
+        e = e->next;
+    }
+    Entry *new_entry = malloc(sizeof(Entry));
+    new_entry->key = strdup(key);
+    new_entry->value = strdup(value);
+    new_entry->next = map->buckets[idx];
+    map->buckets[idx] = new_entry;
+    map->count++;
+}
+
+const char *hashmap_get(HashMap *map, const char *key) {
+    unsigned int idx = hash(key);
+    Entry *e = map->buckets[idx];
+    while (e) {
+        if (strcmp(e->key, key) == 0)
+            return e->value;
+        e = e->next;
+    }
+    return NULL;
+}
+
+void hashmap_free(HashMap *map) {
+    for (int i = 0; i < HASH_SIZE; i++) {
+        Entry *e = map->buckets[i];
+        while (e) {
+            Entry *next = e->next;
+            free(e->key);
+            free(e->value);
+            free(e);
+            e = next;
+        }
+    }
+    free(map);
+}
+
+int main(int argc, char *argv[]) {
+    HashMap *map = hashmap_new();
+    hashmap_put(map, "name", "annealer");
+    hashmap_put(map, "version", "0.1.0");
+
+    printf("name = %s\n", hashmap_get(map, "name"));
+    printf("version = %s\n", hashmap_get(map, "version"));
+    printf("count = %d\n", map->count);
+
+    hashmap_free(map);
+    return 0;
+}

@@ -1,0 +1,78 @@
+use std::fmt;
+
+/// A trait for objects that can be serialised to a compact binary form.
+pub trait Encode {
+    fn encode(&self, buf: &mut Vec<u8>);
+    fn encoded_len(&self) -> usize;
+}
+
+/// A trait for objects that can be deserialised from bytes.
+pub trait Decode: Sized {
+    fn decode(buf: &[u8]) -> Result<(Self, usize), DecodeError>;
+}
+
+#[derive(Debug)]
+pub struct DecodeError {
+    msg: String,
+    pos: usize,
+}
+
+impl fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "decode error at byte {}: {}", self.pos, self.msg)
+    }
+}
+
+/// Encode a slice of encodable items, prefixed by a length varint.
+pub fn encode_sequence<T: Encode>(items: &[T], buf: &mut Vec<u8>) {
+    encode_varint(items.len() as u64, buf);
+    for item in items {
+        item.encode(buf);
+    }
+}
+
+/// Decode a length-prefixed sequence.
+pub fn decode_sequence<T: Decode>(buf: &[u8]) -> Result<(Vec<T>, usize), DecodeError> {
+    let (count, mut offset) = decode_varint(buf)?;
+    let mut items = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let (item, consumed) = T::decode(&buf[offset..])?;
+        items.push(item);
+        offset += consumed;
+    }
+    Ok((items, offset))
+}
+
+fn encode_varint(mut val: u64, buf: &mut Vec<u8>) {
+    loop {
+        let byte = (val & 0x7F) as u8;
+        val >>= 7;
+        if val == 0 {
+            buf.push(byte);
+            return;
+        }
+        buf.push(byte | 0x80);
+    }
+}
+
+fn decode_varint(buf: &[u8]) -> Result<(u64, usize), DecodeError> {
+    let mut result: u64 = 0;
+    let mut shift = 0;
+    for (i, &byte) in buf.iter().enumerate() {
+        result |= ((byte & 0x7F) as u64) << shift;
+        if byte & 0x80 == 0 {
+            return Ok((result, i + 1));
+        }
+        shift += 7;
+        if shift >= 64 {
+            return Err(DecodeError {
+                msg: "varint too long".to_string(),
+                pos: i,
+            });
+        }
+    }
+    Err(DecodeError {
+        msg: "unexpected end of input".to_string(),
+        pos: buf.len(),
+    })
+}

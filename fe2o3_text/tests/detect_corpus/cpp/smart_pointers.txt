@@ -1,0 +1,65 @@
+#include <memory>
+#include <string>
+#include <vector>
+#include <iostream>
+
+class Node {
+public:
+    explicit Node(std::string name)
+        : name_(std::move(name)) {}
+
+    void add_child(std::unique_ptr<Node> child) {
+        child->parent_ = this;
+        children_.push_back(std::move(child));
+    }
+
+    const std::string& name() const noexcept { return name_; }
+
+    void print(int depth = 0) const {
+        for (int i = 0; i < depth; ++i) std::cout << "  ";
+        std::cout << name_ << "\n";
+        for (const auto& child : children_) {
+            child->print(depth + 1);
+        }
+    }
+
+private:
+    std::string name_;
+    Node* parent_ = nullptr;
+    std::vector<std::unique_ptr<Node>> children_;
+};
+
+class Registry {
+public:
+    std::shared_ptr<Node> get_or_create(const std::string& name) {
+        for (const auto& node : nodes_) {
+            if (node->name() == name) {
+                return node;
+            }
+        }
+        auto node = std::make_shared<Node>(name);
+        nodes_.push_back(node);
+        return node;
+    }
+
+    size_t size() const noexcept { return nodes_.size(); }
+
+private:
+    std::vector<std::shared_ptr<Node>> nodes_;
+};
+
+int main() {
+    auto root = std::make_unique<Node>("root");
+    root->add_child(std::make_unique<Node>("child1"));
+    root->add_child(std::make_unique<Node>("child2"));
+    root->print();
+
+    Registry reg;
+    auto a = reg.get_or_create("alpha");
+    auto b = reg.get_or_create("beta");
+    auto a2 = reg.get_or_create("alpha");
+    std::cout << "registry size: " << reg.size() << "\n";
+    std::cout << "same? " << (a.get() == a2.get() ? "yes" : "no") << "\n";
+
+    return 0;
+}

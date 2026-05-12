@@ -1,0 +1,55 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
+/// Shared application state behind an RwLock.
+pub struct AppState {
+    cache:    HashMap<String, Vec<u8>>,
+    hit_count: u64,
+}
+
+impl AppState {
+    pub fn new() -> Self {
+        Self {
+            cache:     HashMap::new(),
+            hit_count: 0,
+        }
+    }
+
+    pub fn lookup(&mut self, key: &str) -> Option<&Vec<u8>> {
+        self.hit_count += 1;
+        self.cache.get(key)
+    }
+
+    pub fn store(&mut self, key: String, data: Vec<u8>) {
+        self.cache.insert(key, data);
+    }
+}
+
+/// A request handler that reads from shared state.
+pub async fn handle_get(
+    state: Arc<std::sync::RwLock<AppState>>,
+    key:   String,
+)
+    -> Result<Vec<u8>, String>
+{
+    let mut guard = state.write().map_err(|e| format!("lock: {}", e))?;
+    match guard.lookup(&key) {
+        Some(data) => Ok(data.clone()),
+        None       => Err(format!("key not found: {}", key)),
+    }
+}
+
+/// Process a batch of keys concurrently.
+pub async fn batch_lookup(
+    state: Arc<std::sync::RwLock<AppState>>,
+    keys:  Vec<String>,
+)
+    -> Vec<Result<Vec<u8>, String>>
+{
+    let mut results = Vec::with_capacity(keys.len());
+    for key in keys {
+        let result = handle_get(Arc::clone(&state), key).await;
+        results.push(result);
+    }
+    results
+}

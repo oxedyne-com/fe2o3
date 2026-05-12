@@ -1,0 +1,49 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace Annealer.Examples
+{
+    public class Registry<T>
+    {
+        private readonly Dictionary<string, T> _entries = new();
+        private readonly string _name;
+
+        public Registry(string name)
+        {
+            _name = name;
+        }
+
+        public void Register(string key, T value)
+        {
+            if (_entries.ContainsKey(key))
+                throw new ArgumentException($"duplicate key: {key}");
+            _entries[key] = value;
+        }
+
+        public T? Lookup(string key)
+        {
+            return _entries.TryGetValue(key, out var value) ? value : default;
+        }
+
+        public bool Contains(string key) => _entries.ContainsKey(key);
+        public int Count => _entries.Count;
+
+        public override string ToString()
+            => $"Registry[{_name}, {_entries.Count} entries]";
+    }
+
+    class Program
+    {
+        static void Main(string[] args)
+        {
+            var reg = new Registry<string>("colours");
+            reg.Register("red", "#ff0000");
+            reg.Register("green", "#00ff00");
+            reg.Register("blue", "#0000ff");
+
+            Console.WriteLine(reg);
+            Console.WriteLine($"red = {reg.Lookup("red")}");
+        }
+    }
+}

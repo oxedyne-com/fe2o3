@@ -1,0 +1,11 @@
+{
+    "name": "annealer",
+    "version": "0.1.0",
+    "description": "code formatter",
+    "settings": {
+        "indent_width": 4,
+        "max_width": 100,
+        "trailing_comma": true
+    },
+    "languages": ["rust", "c", "go", "java", "javascript", "python"]
+}

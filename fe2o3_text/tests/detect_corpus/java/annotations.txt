@@ -1,0 +1,47 @@
+import java.util.List;
+import java.util.ArrayList;
+import java.util.Collections;
+
+public class TaskQueue {
+
+    private final List<Runnable> tasks = new ArrayList<>();
+    private volatile boolean shutdown = false;
+
+    @SuppressWarnings("unchecked")
+    public synchronized void submit(Runnable task) {
+        if (shutdown) {
+            throw new IllegalStateException("queue is shut down");
+        }
+        tasks.add(task);
+    }
+
+    @Override
+    public synchronized String toString() {
+        return String.format("TaskQueue[%d pending, shutdown=%b]",
+                tasks.size(), shutdown);
+    }
+
+    @Deprecated
+    public void runAll() {
+        List<Runnable> snapshot;
+        synchronized (this) {
+            snapshot = new ArrayList<>(tasks);
+            tasks.clear();
+        }
+        for (Runnable task : snapshot) {
+            try {
+                task.run();
+            } catch (Exception e) {
+                System.err.println("task failed: " + e.getMessage());
+            }
+        }
+    }
+
+    public synchronized void shutdown() {
+        this.shutdown = true;
+    }
+
+    public synchronized List<Runnable> pending() {
+        return Collections.unmodifiableList(new ArrayList<>(tasks));
+    }
+}

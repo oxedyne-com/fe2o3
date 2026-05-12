@@ -1,0 +1,66 @@
+import java.io.BufferedReader;
+import java.io.FileReader;
+import java.io.IOException;
+import java.util.Properties;
+
+public class ConfigLoader {
+
+    private final Properties props = new Properties();
+
+    public void load(String path) throws IOException {
+        try (BufferedReader reader = new BufferedReader(new FileReader(path))) {
+            props.load(reader);
+        }
+    }
+
+    public String getString(String key) throws ConfigException {
+        String value = props.getProperty(key);
+        if (value == null) {
+            throw new ConfigException("missing key: " + key);
+        }
+        return value;
+    }
+
+    public int getInt(String key) throws ConfigException {
+        String value = getString(key);
+        try {
+            return Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            throw new ConfigException(
+                    String.format("key '%s' is not an integer: %s", key, value), e);
+        }
+    }
+
+    public boolean getBoolean(String key, boolean defaultValue) {
+        String value = props.getProperty(key);
+        if (value == null) {
+            return defaultValue;
+        }
+        return Boolean.parseBoolean(value);
+    }
+
+    public static class ConfigException extends Exception {
+        public ConfigException(String message) {
+            super(message);
+        }
+
+        public ConfigException(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
+
+    public static void main(String[] args) {
+        ConfigLoader loader = new ConfigLoader();
+        try {
+            loader.load("app.properties");
+            String host = loader.getString("db.host");
+            int port = loader.getInt("db.port");
+            boolean ssl = loader.getBoolean("db.ssl", false);
+            System.out.printf("db: %s:%d (ssl=%b)%n", host, port, ssl);
+        } catch (IOException e) {
+            System.err.println("cannot read config: " + e.getMessage());
+        } catch (ConfigException e) {
+            System.err.println("config error: " + e.getMessage());
+        }
+    }
+}

@@ -1,0 +1,61 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"strings"
+	"sync/atomic"
+	"time"
+)
+
+var requestCount uint64
+
+type StatusResponse struct {
+	Uptime   string `json:"uptime"`
+	Requests uint64 `json:"requests"`
+}
+
+func statusHandler(startTime time.Time) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		count := atomic.AddUint64(&requestCount, 1)
+		resp := StatusResponse{
+			Uptime:   time.Since(startTime).String(),
+			Requests: count,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}
+}
+
+func echoHandler(w http.ResponseWriter, r *http.Request) {
+	atomic.AddUint64(&requestCount, 1)
+	path := strings.TrimPrefix(r.URL.Path, "/echo/")
+	fmt.Fprintf(w, "echo: %s\n", path)
+}
+
+func loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		next.ServeHTTP(w, r)
+		log.Printf("%s %s %s", r.Method, r.URL.Path, time.Since(start))
+	})
+}
+
+func main() {
+	startTime := time.Now()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/status", statusHandler(startTime))
+	mux.HandleFunc("/echo/", echoHandler)
+
+	server := &http.Server{
+		Addr:         ":8080",
+		Handler:      loggingMiddleware(mux),
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 10 * time.Second,
+	}
+
+	log.Printf("listening on %s", server.Addr)
+	log.Fatal(server.ListenAndServe())
+}

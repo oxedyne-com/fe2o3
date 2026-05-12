@@ -1,0 +1,19 @@
+#!/usr/bin/env node
+
+const args = process.argv.slice(2);
+const verbose = args.includes('--verbose');
+
+function formatBytes(bytes) {
+    if (bytes === 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(1024));
+    return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`;
+}
+
+const usage = process.memoryUsage();
+console.log(`heap: ${formatBytes(usage.heapUsed)} / ${formatBytes(usage.heapTotal)}`);
+console.log(`rss: ${formatBytes(usage.rss)}`);
+
+if (verbose) {
+    console.log(JSON.stringify(usage, null, 2));
+}

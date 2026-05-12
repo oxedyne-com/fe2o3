@@ -1,0 +1,52 @@
+using System;
+
+namespace Annealer.Examples
+{
+    public abstract record Shape;
+    public record Circle(double Radius) : Shape;
+    public record Rectangle(double Width, double Height) : Shape;
+    public record Triangle(double Base, double Height) : Shape;
+
+    public static class Geometry
+    {
+        public static double Area(Shape shape) => shape switch
+        {
+            Circle c    => Math.PI * c.Radius * c.Radius,
+            Rectangle r => r.Width * r.Height,
+            Triangle t  => 0.5 * t.Base * t.Height,
+            _           => throw new ArgumentException(
+                               $"unknown shape: {nameof(shape)}")
+        };
+
+        public static string Describe(Shape shape) => shape switch
+        {
+            Circle { Radius: > 10 }   => "large circle",
+            Circle { Radius: > 0 }    => "small circle",
+            Rectangle { Width: var w, Height: var h } when w == h
+                                       => $"square ({w}x{h})",
+            Rectangle r                => $"rectangle ({r.Width}x{r.Height})",
+            Triangle t                 => $"triangle (base {t.Base})",
+            _                          => "unknown"
+        };
+    }
+
+    class Program
+    {
+        static void Main()
+        {
+            Shape[] shapes = {
+                new Circle(5.0),
+                new Rectangle(4.0, 4.0),
+                new Triangle(3.0, 8.0),
+                new Circle(15.0),
+            };
+
+            foreach (var shape in shapes)
+            {
+                var desc = Geometry.Describe(shape);
+                var area = Geometry.Area(shape);
+                Console.WriteLine($"{desc}: area = {area:F2}");
+            }
+        }
+    }
+}

@@ -1,0 +1,75 @@
+#include <iostream>
+#include <string>
+#include <vector>
+#include <memory>
+
+class Shape {
+public:
+    virtual ~Shape() = default;
+    virtual double area() const = 0;
+    virtual std::string name() const = 0;
+
+    void describe() const {
+        std::cout << name() << ": area = " << area() << "\n";
+    }
+};
+
+class Circle : public Shape {
+public:
+    explicit Circle(double radius) : radius_(radius) {}
+
+    double area() const override {
+        return 3.14159265 * radius_ * radius_;
+    }
+
+    std::string name() const override { return "Circle"; }
+
+private:
+    double radius_;
+};
+
+class Rectangle : public Shape {
+public:
+    Rectangle(double w, double h) : width_(w), height_(h) {}
+
+    double area() const override {
+        return width_ * height_;
+    }
+
+    std::string name() const override { return "Rectangle"; }
+
+private:
+    double width_;
+    double height_;
+};
+
+class Triangle : public Shape {
+public:
+    Triangle(double base, double height) : base_(base), height_(height) {}
+
+    double area() const override {
+        return 0.5 * base_ * height_;
+    }
+
+    std::string name() const override { return "Triangle"; }
+
+private:
+    double base_;
+    double height_;
+};
+
+int main() {
+    std::vector<std::unique_ptr<Shape>> shapes;
+    shapes.push_back(std::make_unique<Circle>(5.0));
+    shapes.push_back(std::make_unique<Rectangle>(4.0, 6.0));
+    shapes.push_back(std::make_unique<Triangle>(3.0, 8.0));
+
+    double total = 0.0;
+    for (const auto& shape : shapes) {
+        shape->describe();
+        total += shape->area();
+    }
+    std::cout << "total area: " << total << "\n";
+
+    return 0;
+}

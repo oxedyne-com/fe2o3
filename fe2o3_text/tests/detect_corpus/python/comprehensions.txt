@@ -1,0 +1,51 @@
+from collections import Counter
+from typing import Dict, List, Set
+
+
+def word_lengths(words: List[str]) -> Dict[str, int]:
+    return {w: len(w) for w in words}
+
+
+def unique_chars(text: str) -> Set[str]:
+    return {c.lower() for c in text if c.isalpha()}
+
+
+def flatten(nested: List[List]) -> List:
+    return [item for sublist in nested for item in sublist]
+
+
+def matrix_transpose(matrix: List[List[float]]) -> List[List[float]]:
+    if not matrix:
+        return []
+    return [[row[i] for row in matrix] for i in range(len(matrix[0]))]
+
+
+def group_by_length(words: List[str]) -> Dict[int, List[str]]:
+    result: Dict[int, List[str]] = {}
+    for word in words:
+        length = len(word)
+        if length not in result:
+            result[length] = []
+        result[length].append(word)
+    return result
+
+
+def top_n_words(text: str, n: int = 10) -> List[tuple]:
+    words = text.lower().split()
+    cleaned = [''.join(c for c in w if c.isalnum()) for w in words]
+    counts = Counter(w for w in cleaned if w)
+    return counts.most_common(n)
+
+
+def chunk(lst: List, size: int) -> List[List]:
+    return [lst[i:i + size] for i in range(0, len(lst), size)]
+
+
+if __name__ == '__main__':
+    text = "the quick brown fox jumps over the lazy dog the fox"
+    print(f"unique chars: {sorted(unique_chars(text))}")
+    print(f"top words: {top_n_words(text, 3)}")
+
+    matrix = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
+    print(f"transpose: {matrix_transpose(matrix)}")
+    print(f"chunks: {chunk(list(range(10)), 3)}")

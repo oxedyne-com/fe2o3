@@ -1,0 +1,47 @@
+import { readFile, writeFile } from 'fs/promises';
+import { join } from 'path';
+
+const DEFAULT_ENCODING = 'utf-8';
+
+class ConfigStore {
+    constructor(basePath) {
+        this.basePath = basePath;
+        this.cache = new Map();
+    }
+
+    async load(name) {
+        const filePath = join(this.basePath, `${name}.json`);
+        try {
+            const raw = await readFile(filePath, DEFAULT_ENCODING);
+            const data = JSON.parse(raw);
+            this.cache.set(name, data);
+            return data;
+        } catch (err) {
+            if (err.code === 'ENOENT') {
+                return null;
+            }
+            throw err;
+        }
+    }
+
+    async save(name, data) {
+        const filePath = join(this.basePath, `${name}.json`);
+        const raw = JSON.stringify(data, null, 2);
+        await writeFile(filePath, raw, DEFAULT_ENCODING);
+        this.cache.set(name, data);
+    }
+
+    get(name) {
+        return this.cache.get(name) ?? null;
+    }
+
+    has(name) {
+        return this.cache.has(name);
+    }
+
+    keys() {
+        return [...this.cache.keys()];
+    }
+}
+
+export default ConfigStore;

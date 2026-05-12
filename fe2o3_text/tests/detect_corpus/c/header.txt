@@ -1,0 +1,20 @@
+#ifndef RINGBUF_H
+#define RINGBUF_H
+
+#include <stddef.h>
+#include <stdint.h>
+#include <stdbool.h>
+
+typedef struct ringbuf ringbuf_t;
+
+ringbuf_t *ringbuf_create(size_t capacity, size_t elem_size);
+void       ringbuf_destroy(ringbuf_t *rb);
+bool       ringbuf_push(ringbuf_t *rb, const void *data);
+bool       ringbuf_pop(ringbuf_t *rb, void *out);
+size_t     ringbuf_count(const ringbuf_t *rb);
+size_t     ringbuf_capacity(const ringbuf_t *rb);
+bool       ringbuf_is_empty(const ringbuf_t *rb);
+bool       ringbuf_is_full(const ringbuf_t *rb);
+void       ringbuf_clear(ringbuf_t *rb);
+
+#endif /* RINGBUF_H */

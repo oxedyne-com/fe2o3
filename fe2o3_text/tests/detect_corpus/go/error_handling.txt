@@ -1,0 +1,91 @@
+package config
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+)
+
+type Config struct {
+	Host     string
+	Port     int
+	LogLevel string
+	Workers  int
+}
+
+type ParseError struct {
+	Field   string
+	Value   string
+	Reason  string
+}
+
+func (e *ParseError) Error() string {
+	return fmt.Sprintf("config: invalid %s=%q: %s", e.Field, e.Value, e.Reason)
+}
+
+func LoadFromEnv() (*Config, error) {
+	cfg := &Config{
+		Host:     "localhost",
+		Port:     8080,
+		LogLevel: "info",
+		Workers:  4,
+	}
+
+	if host := os.Getenv("APP_HOST"); host != "" {
+		cfg.Host = host
+	}
+
+	if portStr := os.Getenv("APP_PORT"); portStr != "" {
+		port, err := strconv.Atoi(portStr)
+		if err != nil {
+			return nil, &ParseError{Field: "port", Value: portStr, Reason: "must be an integer"}
+		}
+		if port < 1 || port > 65535 {
+			return nil, &ParseError{Field: "port", Value: portStr, Reason: "out of range 1-65535"}
+		}
+		cfg.Port = port
+	}
+
+	if level := os.Getenv("APP_LOG_LEVEL"); level != "" {
+		level = strings.ToLower(level)
+		switch level {
+		case "debug", "info", "warn", "error":
+			cfg.LogLevel = level
+		default:
+			return nil, &ParseError{
+				Field:  "log_level",
+				Value:  level,
+				Reason: "must be debug, info, warn, or error",
+			}
+		}
+	}
+
+	if wStr := os.Getenv("APP_WORKERS"); wStr != "" {
+		w, err := strconv.Atoi(wStr)
+		if err != nil {
+			return nil, &ParseError{Field: "workers", Value: wStr, Reason: "must be an integer"}
+		}
+		if w < 1 {
+			return nil, &ParseError{Field: "workers", Value: wStr, Reason: "must be at least 1"}
+		}
+		cfg.Workers = w
+	}
+
+	return cfg, nil
+}
+
+func (c *Config) Validate() error {
+	var errs []string
+	if c.Host == "" {
+		errs = append(errs, "host is required")
+	}
+	if c.Port == 0 {
+		errs = append(errs, "port is required")
+	}
+	if len(errs) > 0 {
+		return errors.New("config: " + strings.Join(errs, "; "))
+	}
+	return nil
+}
