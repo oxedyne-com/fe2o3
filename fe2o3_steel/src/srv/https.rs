@@ -217,6 +217,39 @@ impl<
                     };
 
                     if request.is_websocket_upgrade() {
+                        // Check proxy routes first — if a proxy route
+                        // matches, tunnel the WebSocket to the upstream
+                        // instead of handling it with Steel's own WS
+                        // handler.  This allows proxied applications
+                        // that use WebSocket (e.g. web terminals) to
+                        // work through the reverse proxy.
+                        if !vhost.proxy_routes.is_empty() {
+                            if let HttpHeadline::Request { ref loc, .. } =
+                                request.header.headline
+                            {
+                                let proxy_path = loc.path.as_string().to_string();
+                                if let Some(proxy_route) = vhost.proxy_routes.iter()
+                                    .filter(|r| proxy_path.starts_with(&r.path_prefix))
+                                    .max_by_key(|r| r.path_prefix.len())
+                                {
+                                    log!(log_level,
+                                        "{}: proxy ws {} -> {}:{}{}",
+                                        id, proxy_path,
+                                        proxy_route.upstream_host,
+                                        proxy_route.upstream_port,
+                                        if proxy_route.upstream_tls { " (tls)" } else { "" },
+                                    );
+                                    let reunited = read_stream.unsplit(write_stream);
+                                    return self.handle_proxy_websocket(
+                                        reunited,
+                                        request,
+                                        proxy_route,
+                                        src_addr,
+                                        &id,
+                                    ).await;
+                                }
+                            }
+                        }
                         log!(log_level, "Connection upgrading to websocket...");
                         // The raw sid string is enough for the WS handler:
                         // it only needs a stable per-client key prefix, not
