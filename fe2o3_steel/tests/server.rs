@@ -119,6 +119,7 @@ pub async fn test_server(filter: &'static str) -> Outcome<()> {
                 admin_keys:             Vec::new(),
                 head_injection_url:     None,
                 proxy_routes:           Vec::new(),
+                term_config:            None,
             };
 
             let web_handler: AppWebHandler<HashMap<String, OsPath>> = AppWebHandler::new(
@@ -145,6 +146,7 @@ pub async fn test_server(filter: &'static str) -> Outcome<()> {
                 ws_syntax,
                 redirects:      vhost_cfg.redirects.clone(),
                 proxy_routes:   vhost_cfg.proxy_routes.clone(),
+                term_manager:   None,
             });
 
             let mut vhosts = HashMap::new();

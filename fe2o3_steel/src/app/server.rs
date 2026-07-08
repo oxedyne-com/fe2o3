@@ -477,10 +477,20 @@ impl AppShellContext {
             let runtime = Arc::new(VhostRuntime {
                 hostnames:      vh.hostnames.clone(),
                 web_handler,
-                ws_handler:     ws_handler.clone(),
+                ws_handler:     if let Some(tc) = &vh.term_config {
+                    ws_handler.clone().with_term_manager(Arc::new(
+                        crate::srv::ws::term::TerminalManager::new(
+                            &tc.session_prefix,
+                            &tc.launch_command,
+                        )
+                    ))
+                } else {
+                    ws_handler.clone()
+                },
                 ws_syntax:      ws_syntax.clone(),
                 redirects:      vh.redirects.clone(),
                 proxy_routes:   vh.proxy_routes.clone(),
+                term_manager:   None,
             });
 
             let primary_lc = vh.primary_hostname().to_lowercase();

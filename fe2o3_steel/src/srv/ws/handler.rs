@@ -4,6 +4,7 @@ use crate::srv::{
         ServerContext,
     },
     dev::refresh::DevRefreshManager,
+    ws::term::TerminalManager,
 };
 
 use oxedyne_fe2o3_core::{
@@ -119,6 +120,9 @@ pub struct AppWebSocketHandler {
     /// `with_sid()` before the handshake. `None` means the client sent no
     /// session cookie; session-scoped commands will then reject.
     sid: Option<String>,
+    /// Terminal session manager for term_* commands.  `None` when
+    /// terminal features are not configured for this vhost.
+    term_manager: Option<Arc<TerminalManager>>,
 }
 
 impl AppWebSocketHandler {
@@ -127,7 +131,14 @@ impl AppWebSocketHandler {
         Self {
             dev_manager,
             sid: None,
+            term_manager: None,
         }
+    }
+
+    /// Attach a terminal manager to enable term_* commands.
+    pub fn with_term_manager(mut self, tm: Arc<TerminalManager>) -> Self {
+        self.term_manager = Some(tm);
+        self
     }
 
     /// Build the scoped database key used by session-scoped commands, of
@@ -949,6 +960,226 @@ impl WebSocketHandler for AppWebSocketHandler {
                     }
                     return Self::response_text(syntax, "error",
                         vec![dat!("whoami: no database available.")]);
+                }
+                // ┌───────────────────────┐
+                // │ TERMINAL              │
+                // └───────────────────────┘
+                "term_new" => {
+                    trace!("{}: term_new", id);
+                    let tm = match &self.term_manager {
+                        Some(t) => t.clone(),
+                        None => return Self::response_text(syntax, "error",
+                            vec![dat!("term_new: terminal features not enabled.")]),
+                    };
+                    match tm.new_session() {
+                        Ok(name) => {
+                            let mut m = DaticleMap::new();
+                            m.insert(dat!("name"), dat!(name));
+                            return Self::response_text(syntax, "data",
+                                vec![Dat::Map(m)]);
+                        }
+                        Err(e) => return Self::response_text(syntax, "error",
+                            vec![dat!(e.to_string())]),
+                    }
+                }
+                "term_list" => {
+                    trace!("{}: term_list", id);
+                    let tm = match &self.term_manager {
+                        Some(t) => t.clone(),
+                        None => return Self::response_text(syntax, "error",
+                            vec![dat!("term_list: terminal features not enabled.")]),
+                    };
+                    match tm.list_sessions_dat() {
+                        Ok(dat) => return Self::response_text(syntax, "data",
+                            vec![dat]),
+                        Err(e) => return Self::response_text(syntax, "error",
+                            vec![dat!(e.to_string())]),
+                    }
+                }
+                "term_close" => {
+                    trace!("{}: term_close", id);
+                    let tm = match &self.term_manager {
+                        Some(t) => t.clone(),
+                        None => return Self::response_text(syntax, "error",
+                            vec![dat!("term_close: terminal features not enabled.")]),
+                    };
+                    let name = match std::mem::take(&mut cmdrx.vals[0]) {
+                        Dat::Str(s) => s,
+                        _ => return Self::response_text(syntax, "error",
+                            vec![dat!("term_close: session name must be a string.")]),
+                    };
+                    match tm.close_session(&name) {
+                        Ok(()) => return Self::response_text(syntax, "info",
+                            vec![dat!(fmt!("term_close: session '{}' closed.", name))]),
+                        Err(e) => return Self::response_text(syntax, "error",
+                            vec![dat!(e.to_string())]),
+                    }
+                }
+                "term_set_name" => {
+                    trace!("{}: term_set_name", id);
+                    let tm = match &self.term_manager {
+                        Some(t) => t.clone(),
+                        None => return Self::response_text(syntax, "error",
+                            vec![dat!("term_set_name: terminal features not enabled.")]),
+                    };
+                    let old = match std::mem::take(&mut cmdrx.vals[0]) {
+                        Dat::Str(s) => s,
+                        _ => return Self::response_text(syntax, "error",
+                            vec![dat!("term_set_name: old name must be a string.")]),
+                    };
+                    let new = match std::mem::take(&mut cmdrx.vals[1]) {
+                        Dat::Str(s) => s,
+                        _ => return Self::response_text(syntax, "error",
+                            vec![dat!("term_set_name: new name must be a string.")]),
+                    };
+                    match tm.set_session_name(&old, &new) {
+                        Ok(()) => return Self::response_text(syntax, "info",
+                            vec![dat!(fmt!("term_set_name: '{}' -> '{}'.", old, new))]),
+                        Err(e) => return Self::response_text(syntax, "error",
+                            vec![dat!(e.to_string())]),
+                    }
+                }
+                // ┌───────────────────────┐
+                // │ AUTH — change_pass     │
+                // └───────────────────────┘
+                "change_pass" => {
+                    trace!("{}: change_pass", id);
+                    let sid = match self.sid.clone() {
+                        Some(s) => s,
+                        None => return Self::response_text(syntax, "error",
+                            vec![dat!("change_pass: no session cookie attached.")]),
+                    };
+                    let old_pass = match std::mem::take(&mut cmdrx.vals[0]) {
+                        Dat::Str(s) => s,
+                        _ => return Self::response_text(syntax, "error",
+                            vec![dat!("change_pass: old passphrase must be a string.")]),
+                    };
+                    let new_pass = match std::mem::take(&mut cmdrx.vals[1]) {
+                        Dat::Str(s) => s,
+                        _ => return Self::response_text(syntax, "error",
+                            vec![dat!("change_pass: new passphrase must be a string.")]),
+                    };
+                    // Look up the session's bound user.
+                    let meta_key = Dat::Str(fmt!("sess_meta:{}", sid));
+                    let (db, uid) = match &db {
+                        Some(pair) => pair,
+                        None => return Self::response_text(syntax, "error",
+                            vec![dat!("change_pass: no database available.")]),
+                    };
+                    let username = {
+                        let db_r = match db.read() {
+                            Err(_) => return Self::response_text(syntax, "error",
+                                vec![dat!("change_pass: database read lock poisoned.")]),
+                            Ok(v) => v,
+                        };
+                        match db_r.get(&meta_key, None) {
+                            Ok(Some((data, _))) => match &data {
+                                Dat::Map(m) => match m.get(&dat!("user")) {
+                                    Some(Dat::Str(s)) if !s.is_empty() => s.clone(),
+                                    _ => return Self::response_text(syntax, "error",
+                                        vec![dat!("change_pass: session not authenticated.")]),
+                                },
+                                _ => return Self::response_text(syntax, "error",
+                                    vec![dat!("change_pass: session not authenticated.")]),
+                            },
+                            _ => return Self::response_text(syntax, "error",
+                                vec![dat!("change_pass: session not authenticated.")]),
+                        }
+                    };
+                    // Fetch and verify old passphrase.
+                    let user_key = Self::user_key(&username);
+                    let (kdf_name, kdf_hash) = {
+                        let db_r = match db.read() {
+                            Err(_) => return Self::response_text(syntax, "error",
+                                vec![dat!("change_pass: database read lock poisoned.")]),
+                            Ok(v) => v,
+                        };
+                        match db_r.get(&user_key, None) {
+                            Ok(Some((data, _))) => match &data {
+                                Dat::Map(m) => {
+                                    let name = match m.get(&dat!("kdf_name")) {
+                                        Some(Dat::Str(s)) => s.clone(),
+                                        _ => return Self::response_text(syntax, "error",
+                                            vec![dat!("change_pass: malformed user record (kdf_name).")]),
+                                    };
+                                    let hash = match m.get(&dat!("kdf_hash")) {
+                                        Some(Dat::Str(s)) => s.clone(),
+                                        _ => return Self::response_text(syntax, "error",
+                                            vec![dat!("change_pass: malformed user record (kdf_hash).")]),
+                                    };
+                                    (name, hash)
+                                }
+                                _ => return Self::response_text(syntax, "error",
+                                    vec![dat!("change_pass: malformed user record (not a Map).")]),
+                            },
+                            _ => return Self::response_text(syntax, "error",
+                                vec![dat!("change_pass: user record not found.")]),
+                        }
+                    };
+                    let mut kdf = match KeyDerivationScheme::from_str(&kdf_name) {
+                        Ok(k) => k,
+                        Err(e) => return Self::response_text(syntax, "error",
+                            vec![dat!(e.to_string())]),
+                    };
+                    if let Err(e) = kdf.decode_from_string(&kdf_hash) {
+                        return Self::response_text(syntax, "error",
+                            vec![dat!(e.to_string())]);
+                    }
+                    let ok = match kdf.verify(old_pass.as_bytes()) {
+                        Ok(b) => b,
+                        Err(e) => return Self::response_text(syntax, "error",
+                            vec![dat!(e.to_string())]),
+                    };
+                    if !ok {
+                        return Self::response_text(syntax, "error",
+                            vec![dat!("change_pass: old passphrase incorrect.")]);
+                    }
+                    // Derive new hash.
+                    let mut new_kdf = match KeyDerivationScheme::from_str(Self::AUTH_KDF_NAME) {
+                        Ok(k) => k,
+                        Err(e) => return Self::response_text(syntax, "error",
+                            vec![dat!(e.to_string())]),
+                    };
+                    if let Err(e) = new_kdf.derive(new_pass.as_bytes()) {
+                        return Self::response_text(syntax, "error",
+                            vec![dat!(e.to_string())]);
+                    }
+                    let new_hash = match new_kdf.encode_to_string() {
+                        Ok(s) => s,
+                        Err(e) => return Self::response_text(syntax, "error",
+                            vec![dat!(e.to_string())]),
+                    };
+                    // Build updated record and write.
+                    let mut rec = DaticleMap::new();
+                    rec.insert(dat!("kdf_name"), dat!(fmt!("{}", new_kdf)));
+                    rec.insert(dat!("kdf_hash"), dat!(new_hash));
+                    // Preserve created_at from old record.
+                    {
+                        let db_r = match db.read() {
+                            Err(_) => return Self::response_text(syntax, "error",
+                                vec![dat!("change_pass: database read lock poisoned.")]),
+                            Ok(v) => v,
+                        };
+                        if let Ok(Some((old_data, _))) = db_r.get(&user_key, None) {
+                            if let Dat::Map(m) = &old_data {
+                                if let Some(v) = m.get(&dat!("created_at")) {
+                                    rec.insert(dat!("created_at"), v.clone());
+                                }
+                            }
+                        }
+                    }
+                    let record = Dat::Map(rec);
+                    let db_w = match db.write() {
+                        Err(_) => return Self::response_text(syntax, "error",
+                            vec![dat!("change_pass: database write lock poisoned.")]),
+                        Ok(v) => v,
+                    };
+                    match db_w.insert(user_key, record, *uid, None) {
+                        Ok(_) => return Self::response_text(syntax, "info",
+                            vec![dat!("change_pass: passphrase updated.")]),
+                        Err(e) => return Self::response_text(syntax, "error",
+                            vec![dat!(e.to_string())]),
+                    }
                 }
                 _ => {}
             }

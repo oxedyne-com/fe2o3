@@ -250,6 +250,45 @@ impl<
                                 }
                             }
                         }
+                        // ── Terminal WS dispatch ──────────────────
+                        // If the request path starts with /term/,
+                        // route to the terminal I/O bridge instead
+                        // of the normal text-protocol WS handler.
+                        // This allows binary terminal data to flow
+                        // over a separate WS channel.
+                        if let HttpHeadline::Request { ref loc, .. } =
+                            request.header.headline
+                        {
+                            let req_path = loc.path.as_string();
+                            if req_path.starts_with("/term/") {
+                                let session_name = req_path
+                                    .strip_prefix("/term/")
+                                    .unwrap_or("")
+                                    .to_string();
+                                if session_name.is_empty() {
+                                    log!(log_level,
+                                        "{}: terminal WS missing session name.", id);
+                                    let mut resp = HttpMessage::respond_with_text(
+                                        HttpStatus::BadRequest,
+                                        "Missing terminal session name.",
+                                    );
+                                    resp.set_connection_close(true);
+                                    let _ = resp.write_all(&mut write_stream).await;
+                                    break;
+                                }
+                                log!(log_level,
+                                    "{}: terminal ws -> '{}'", id, session_name);
+                                let reunited = read_stream.unsplit(write_stream);
+                                return crate::srv::ws::term::handle_terminal_websocket::<
+                                    UIDL, UID, ENC, KH, DB, _,
+                                >(
+                                    reunited,
+                                    session_name,
+                                    request,
+                                    &id,
+                                ).await;
+                            }
+                        }
                         log!(log_level, "Connection upgrading to websocket...");
                         // The raw sid string is enough for the WS handler:
                         // it only needs a stable per-client key prefix, not

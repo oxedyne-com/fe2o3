@@ -301,6 +301,88 @@ impl WebSocketSyntax {
         s = res!(s.add_cmd(cmd));
         // =============================================================================================
 
+        // ┌───────────────────────┐
+        // │ TERMINAL              │
+        // └───────────────────────┘
+
+        // ---------------------------------------------------------------------------------------------
+        // Command: term_new
+        // ---------------------------------------------------------------------------------------------
+        // Create a new terminal session (tmux).  Returns the session
+        // name in the data response.
+        let cmd = Cmd::from(CmdConfig {
+            name:   fmt!("term_new"),
+            help:   Some(fmt!("Create a new terminal session.")),
+            cat:    fmt!("Terminal"),
+            ..Default::default()
+        });
+        s = res!(s.add_cmd(cmd));
+        // =============================================================================================
+
+        // ---------------------------------------------------------------------------------------------
+        // Command: term_list
+        // ---------------------------------------------------------------------------------------------
+        // List active terminal sessions.  Returns a map with a
+        // "sessions" array of { "name": "goose-N" } entries.
+        let cmd = Cmd::from(CmdConfig {
+            name:   fmt!("term_list"),
+            help:   Some(fmt!("List active terminal sessions.")),
+            cat:    fmt!("Terminal"),
+            ..Default::default()
+        });
+        s = res!(s.add_cmd(cmd));
+        // =============================================================================================
+
+        // ---------------------------------------------------------------------------------------------
+        // Command: term_close
+        // ---------------------------------------------------------------------------------------------
+        // Kill a terminal session by name.
+        let cmd = Cmd::from(CmdConfig {
+            name:   fmt!("term_close"),
+            help:   Some(fmt!("Kill a terminal session by name.")),
+            vals:   vec![(Kind::Str, fmt!("Session name"))],
+            cat:    fmt!("Terminal"),
+            ..Default::default()
+        });
+        s = res!(s.add_cmd(cmd));
+        // =============================================================================================
+
+        // ---------------------------------------------------------------------------------------------
+        // Command: term_set_name
+        // ---------------------------------------------------------------------------------------------
+        // Rename a terminal session.
+        let cmd = Cmd::from(CmdConfig {
+            name:   fmt!("term_set_name"),
+            help:   Some(fmt!("Rename a terminal session.")),
+            vals:   vec![
+                (Kind::Str, fmt!("Old session name")),
+                (Kind::Str, fmt!("New session name")),
+            ],
+            cat:    fmt!("Terminal"),
+            ..Default::default()
+        });
+        s = res!(s.add_cmd(cmd));
+        // =============================================================================================
+
+        // ---------------------------------------------------------------------------------------------
+        // Command: change_pass
+        // ---------------------------------------------------------------------------------------------
+        // Change the authenticated user's passphrase.  Requires the
+        // old passphrase for verification and the new passphrase
+        // (entered twice on the client side).
+        let cmd = Cmd::from(CmdConfig {
+            name:   fmt!("change_pass"),
+            help:   Some(fmt!("Change the authenticated user's passphrase.")),
+            vals:   vec![
+                (Kind::Str, fmt!("Old passphrase")),
+                (Kind::Str, fmt!("New passphrase")),
+            ],
+            cat:    fmt!("Auth"),
+            ..Default::default()
+        });
+        s = res!(s.add_cmd(cmd));
+        // =============================================================================================
+
         Ok(SyntaxRef::new(s))
     }
 }

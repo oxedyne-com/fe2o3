@@ -688,6 +688,46 @@ impl ProxyRoute {
 
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
+// │ TERMINAL CONFIG                                                           │
+// │                                                                           │
+// │ Enables terminal session management for a vhost.  When configured,        │
+// │ Steel adds term_* commands to the WS syntax protocol and a binary         │
+// │ WS endpoint at /term/<session> for bidirectional terminal I/O.            │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// Configuration for the terminal session manager.
+///
+/// When present in a [`VhostConfig`], enables terminal features:
+/// creating, listing, closing and renaming tmux-backed sessions,
+/// plus a binary WS endpoint for terminal I/O bridging.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TermConfig {
+    /// Prefix for tmux session names (e.g. "goose-").
+    pub session_prefix:     String,
+    /// Command to launch in new sessions (e.g. "goose session").
+    pub launch_command:     String,
+}
+
+impl TermConfig {
+
+    pub fn from_datmap(m: &DaticleMap) -> Outcome<Self> {
+        let session_prefix = match m.get(&dat!("session_prefix")) {
+            Some(Dat::Str(s)) => s.clone(),
+            _ => "term-".to_string(),
+        };
+        let launch_command = match m.get(&dat!("launch_command")) {
+            Some(Dat::Str(s)) => s.clone(),
+            _ => "/bin/bash".to_string(),
+        };
+        Ok(Self {
+            session_prefix,
+            launch_command,
+        })
+    }
+}
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
 // │ VHOST CONFIG                                                              │
 // └───────────────────────────────────────────────────────────────────────────┘
 
@@ -754,6 +794,11 @@ pub struct VhostConfig {
     /// and streaming response support.  Checked after redirects but
     /// before static files and API routes; longest prefix wins.
     pub proxy_routes:           Vec<ProxyRoute>,
+    /// Terminal session configuration.  When present, enables the
+    /// `term_new`, `term_list`, `term_close` and `term_set_name`
+    /// WS commands and the `/term/<session>` binary WS endpoint
+    /// for this vhost.  `None` disables terminal features.
+    pub term_config:            Option<TermConfig>,
 }
 
 /// A single entry in a vhost's [`VhostConfig::admin_keys`] list.
@@ -805,6 +850,7 @@ impl Default for VhostConfig {
             admin_keys:             Vec::new(),
             head_injection_url:     None,
             proxy_routes:           Vec::new(),
+            term_config:            None,
         }
     }
 }
@@ -1056,6 +1102,13 @@ impl VhostConfig {
                 "VhostConfig: 'proxy_routes' must be a list of maps.";
                 Invalid, Input, Mismatch)),
         };
+        let term_config = match m.get(&dat!("term_config")) {
+            Some(Dat::Map(sub)) => Some(res!(TermConfig::from_datmap(sub))),
+            None => None,
+            _ => return Err(err!(
+                "VhostConfig: 'term_config' must be a map.";
+                Invalid, Input, Mismatch)),
+        };
         Ok(Self {
             hostnames,
             public_dir_rel,
@@ -1069,6 +1122,7 @@ impl VhostConfig {
             admin_keys,
             head_injection_url,
             proxy_routes,
+            term_config,
         })
     }
 

@@ -93,6 +93,10 @@ pub struct VhostRuntime<
     /// Reverse-proxy routes, checked after redirects but before static
     /// files.  Longest matching prefix wins.
     pub proxy_routes:   Vec<ProxyRoute>,
+    /// Terminal session manager, when terminal features are enabled
+    /// for this vhost.  `None` disables term_* commands and the
+    /// /term/<session> WS endpoint.
+    pub term_manager:   Option<Arc<crate::srv::ws::term::TerminalManager>>,
 }
 
 impl<
