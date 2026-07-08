@@ -4,6 +4,7 @@ use crate::srv::{
         RequestRecord,
     },
     cfg::{
+        ProxyRoute,
         RedirectMatch,
         RedirectRule,
     },
@@ -63,7 +64,12 @@ use std::{
 
 use tokio::{
     net::TcpStream,
-    io::AsyncWriteExt,
+    io::{
+        AsyncRead,
+        AsyncReadExt,
+        AsyncWrite,
+        AsyncWriteExt,
+    },
 };
 use tokio_rustls::server::TlsStream;
 
@@ -309,6 +315,94 @@ impl<
                                     );
                                 response = Some(resp);
                             } else {
+                                // ── Reverse proxy routes ──────────────
+                                // Checked after redirects, before static
+                                // files and API routes.  Longest matching
+                                // prefix wins.  WebSocket upgrades are
+                                // tunnelled; regular HTTP is streamed.
+                                if !vhost.proxy_routes.is_empty() {
+                                    let proxy_path = loc.path.as_string().to_string();
+                                    if let Some(proxy_route) = vhost.proxy_routes.iter()
+                                        .filter(|r| proxy_path.starts_with(&r.path_prefix))
+                                        .max_by_key(|r| r.path_prefix.len())
+                                    {
+                                        log!(log_level,
+                                            "{}: proxy {} -> {}:{}{}",
+                                            id, proxy_path,
+                                            proxy_route.upstream_host,
+                                            proxy_route.upstream_port,
+                                            if proxy_route.upstream_tls { " (tls)" } else { "" },
+                                        );
+
+                                        if request.is_websocket_upgrade() {
+                                            let reunited = read_stream.unsplit(write_stream);
+                                            return self.handle_proxy_websocket(
+                                                reunited,
+                                                request,
+                                                proxy_route,
+                                                src_addr,
+                                                &id,
+                                            ).await;
+                                        }
+
+                                        let proxy_result = self.handle_proxy_http(
+                                            request,
+                                            proxy_route,
+                                            &mut write_stream,
+                                            src_addr,
+                                            &id,
+                                        ).await;
+
+                                        let (proxy_status, proxy_bytes) = match proxy_result {
+                                            Ok(sb) => sb,
+                                            Err(e) => {
+                                                warn!("{}: proxy error: {}", id, e);
+                                                let mut resp = HttpMessage::respond_with_text(
+                                                    HttpStatus::BadGateway,
+                                                    "Bad Gateway: upstream proxy error.",
+                                                );
+                                                resp.set_connection_close(true);
+                                                match resp.write_all(&mut write_stream).await {
+                                                    Ok(()) => (),
+                                                    Err(we) => warn!(
+                                                        "{}: failed to emit 502: {}",
+                                                        id, we),
+                                                }
+                                                break;
+                                            }
+                                        };
+
+                                        // Record traffic for the proxied request.
+                                        if let Some(recorder) = self.traffic.as_ref() {
+                                            let dur_us = req_started_at
+                                                .elapsed().as_micros() as u64;
+                                            let record = RequestRecord {
+                                                when_ns:       traffic::now_ns(),
+                                                vhost:         vhost.primary_hostname()
+                                                                .to_string(),
+                                                method:        rec_method.clone(),
+                                                path:          rec_path.clone(),
+                                                status:        proxy_status,
+                                                peer:          fmt!("{}", src_addr),
+                                                bytes:         proxy_bytes,
+                                                duration_us:   dur_us,
+                                            };
+                                            if let Err(e) = recorder.record(record) {
+                                                warn!("{}: traffic recorder rejected entry: {}",
+                                                    id, e);
+                                            }
+                                        }
+
+                                        // Proxied responses are written
+                                        // directly to the stream.  Close
+                                        // the connection because the
+                                        // upstream uses Connection: close
+                                        // and we cannot guarantee
+                                        // keep-alive semantics.
+                                        break;
+                                    }
+                                }
+
                                 // Wrap the incoming header fields in an
                                 // `Arc` so the downstream handler (and
                                 // any API / webhook handler it dispatches
@@ -556,5 +650,365 @@ impl<
             }
         }
         None
+    }
+
+    /// Forward a regular (non-WebSocket) HTTP request to the upstream
+    /// proxy target and stream the response back to the client.
+    ///
+    /// The request is forwarded with `Connection: close` to the
+    /// upstream so the response termination is unambiguous.  The
+    /// response is streamed in chunks — not buffered — so SSE and
+    /// other streaming responses work correctly.
+    ///
+    /// Returns `(status_code, body_byte_count)` for traffic recording.
+    async fn handle_proxy_http<W>(
+        &self,
+        request:    HttpMessage,
+        route:      &ProxyRoute,
+        client_w:   &mut W,
+        src_addr:   SocketAddr,
+        id:         &str,
+    )
+        -> Outcome<(u16, Option<u64>)>
+        where W: AsyncWriteExt + Unpin,
+    {
+        // Extract method and request path.
+        let (method, path) = match &request.header.headline {
+            HttpHeadline::Request { method, loc } => {
+                (fmt!("{}", method), loc.path.as_string().to_string())
+            }
+            _ => return Err(err!(
+                "{}: proxy: request is not an HTTP request.", id;
+                Invalid, Bug)),
+        };
+
+        let upstream_path = route.upstream_path_for(&path);
+
+        // Connect to the upstream.
+        let mut upstream = match TcpStream::connect(
+            (route.upstream_host.as_str(), route.upstream_port),
+        ).await {
+            Ok(s) => s,
+            Err(e) => return Err(err!(e,
+                "{}: proxy: failed to connect to {}:{}.",
+                id, route.upstream_host, route.upstream_port;
+                IO, Network, Init)),
+        };
+
+        // Build the request bytes to send to the upstream.
+        // We reconstruct from the parsed HttpMessage, forwarding all
+        // original headers except Host, Connection and Content-Length
+        // which we manage ourselves.
+        let mut req = String::with_capacity(512 + request.body.len());
+        req.push_str(&fmt!("{} {} HTTP/1.1\r\n", method, upstream_path));
+        req.push_str(&fmt!("Host: {}\r\n", route.upstream_host));
+
+        // Forward original headers (skip hop-by-hop and managed ones).
+        for (name, values) in request.header.fields.iter() {
+            let name_str = fmt!("{}", name);
+            if name_str.eq_ignore_ascii_case("host")
+                || name_str.eq_ignore_ascii_case("connection")
+                || name_str.eq_ignore_ascii_case("content-length")
+                || name_str.eq_ignore_ascii_case("transfer-encoding")
+            {
+                continue;
+            }
+            for value in values {
+                req.push_str(&fmt!("{}: {}\r\n", name_str, value));
+            }
+        }
+
+        // Proxy headers.
+        req.push_str(&fmt!("X-Forwarded-For: {}\r\n", src_addr));
+        req.push_str("X-Forwarded-Proto: https\r\n");
+        req.push_str("Connection: close\r\n");
+        req.push_str(&fmt!("Content-Length: {}\r\n", request.body.len()));
+        req.push_str("\r\n");
+
+        // Write request to upstream.
+        match upstream.write_all(req.as_bytes()).await {
+            Ok(()) => (),
+            Err(e) => return Err(err!(e,
+                "{}: proxy: failed to write request to upstream.", id;
+                IO, Network, Wire, Write)),
+        }
+        if !request.body.is_empty() {
+            match upstream.write_all(&request.body).await {
+                Ok(()) => (),
+                Err(e) => return Err(err!(e,
+                    "{}: proxy: failed to write request body to upstream.", id;
+                    IO, Network, Wire, Write)),
+            }
+        }
+        match upstream.flush().await {
+            Ok(()) => (),
+            Err(e) => return Err(err!(e,
+                "{}: proxy: failed to flush upstream.", id;
+                IO, Network, Wire, Write)),
+        }
+
+        // Stream the response from upstream to client.
+        // Read into a buffer, find the header/body boundary,
+        // parse the status code, then stream everything.
+        let mut buf = vec![0u8; 16384];
+        let mut accum: Vec<u8> = Vec::new();
+        let mut status_code: u16 = 0;
+        let mut total_body_bytes: u64 = 0;
+        let mut headers_forwarded = false;
+
+        loop {
+            let n = match upstream.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) => return Err(err!(e,
+                    "{}: proxy: error reading upstream response.", id;
+                    IO, Network, Wire, Read)),
+            };
+
+            if !headers_forwarded {
+                accum.extend_from_slice(&buf[..n]);
+                // Look for end-of-headers marker.
+                if let Some(pos) = accum.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let header_end = pos + 4;
+                    let header_bytes = &accum[..header_end];
+                    let body_start = &accum[header_end..];
+
+                    // Parse status code from the first line.
+                    if let Some(line_end) = header_bytes.iter().position(|&b| b == b'\r') {
+                        let status_line = String::from_utf8_lossy(&header_bytes[..line_end]);
+                        // Format: "HTTP/1.1 200 OK"
+                        let parts: Vec<&str> = status_line.splitn(3, ' ').collect();
+                        if parts.len() >= 2 {
+                            if let Ok(code) = parts[1].parse::<u16>() {
+                                status_code = code;
+                            }
+                        }
+                    }
+
+                    // Forward the response headers to the client.
+                    match client_w.write_all(header_bytes).await {
+                        Ok(()) => (),
+                        Err(e) => return Err(err!(e,
+                            "{}: proxy: failed to write response headers to client.", id;
+                            IO, Network, Wire, Write)),
+                    }
+
+                    // Forward any body bytes that arrived with the headers.
+                    if !body_start.is_empty() {
+                        match client_w.write_all(body_start).await {
+                            Ok(()) => (),
+                            Err(e) => return Err(err!(e,
+                                "{}: proxy: failed to write initial body to client.", id;
+                                IO, Network, Wire, Write)),
+                        }
+                        total_body_bytes += body_start.len() as u64;
+                    }
+
+                    headers_forwarded = true;
+                } else if accum.len() > 65536 {
+                    return Err(err!(
+                        "{}: proxy: upstream response headers exceed 64 KiB.", id;
+                        IO, Network, Input, TooBig));
+                }
+            } else {
+                // Stream body chunks directly.
+                match client_w.write_all(&buf[..n]).await {
+                    Ok(()) => (),
+                    Err(e) => return Err(err!(e,
+                        "{}: proxy: failed to stream body to client.", id;
+                        IO, Network, Wire, Write)),
+                }
+                total_body_bytes += n as u64;
+            }
+        }
+
+        match client_w.flush().await {
+            Ok(()) => (),
+            Err(e) => return Err(err!(e,
+                "{}: proxy: failed to flush client stream.", id;
+                IO, Network, Wire, Write)),
+        }
+
+        if status_code == 0 {
+            status_code = 200;  // Fallback if parsing failed.
+        }
+
+        log!(log_get_level!(),
+            "{}: proxy: {} {} -> {} ({} body bytes)",
+            id, method, path, status_code, total_body_bytes);
+
+        Ok((status_code, Some(total_body_bytes)))
+    }
+
+    /// Tunnel a WebSocket upgrade request to the upstream proxy target.
+    ///
+    /// Reconstructs the upgrade handshake, sends it to the upstream,
+    /// forwards the upstream's 101 response to the client, then
+    /// bidirectionally pipes raw bytes between client and upstream for
+    /// the lifetime of the WebSocket connection.  Returns when either
+    /// direction closes.
+    async fn handle_proxy_websocket<S>(
+        self,
+        client:     &mut S,
+        request:    HttpMessage,
+        route:      &ProxyRoute,
+        src_addr:   SocketAddr,
+        id:         &str,
+    )
+        -> Outcome<()>
+        where S: AsyncRead + AsyncWrite + Unpin,
+    {
+        // Extract path from the request.
+        let path = match &request.header.headline {
+            HttpHeadline::Request { loc, .. } => loc.path.as_string().to_string(),
+            _ => return Err(err!(
+                "{}: proxy ws: request is not an HTTP request.", id;
+                Invalid, Bug)),
+        };
+        let upstream_path = route.upstream_path_for(&path);
+
+        // Connect to the upstream.
+        let mut upstream = match TcpStream::connect(
+            (route.upstream_host.as_str(), route.upstream_port),
+        ).await {
+            Ok(s) => s,
+            Err(e) => return Err(err!(e,
+                "{}: proxy ws: failed to connect to {}:{}.",
+                id, route.upstream_host, route.upstream_port;
+                IO, Network, Init)),
+        };
+
+        // Reconstruct the WebSocket upgrade request for the upstream.
+        let mut req = String::with_capacity(512);
+        req.push_str(&fmt!("GET {} HTTP/1.1\r\n", upstream_path));
+        req.push_str(&fmt!("Host: {}\r\n", route.upstream_host));
+
+        // Forward all original headers except Host, Connection and
+        // Content-Length which we manage.  WebSocket upgrade headers
+        // (Upgrade, Sec-WebSocket-Key, Sec-WebSocket-Version, etc.)
+        // are forwarded verbatim.
+        for (name, values) in request.header.fields.iter() {
+            let name_str = fmt!("{}", name);
+            if name_str.eq_ignore_ascii_case("host")
+                || name_str.eq_ignore_ascii_case("connection")
+                || name_str.eq_ignore_ascii_case("content-length")
+            {
+                continue;
+            }
+            for value in values {
+                req.push_str(&fmt!("{}: {}\r\n", name_str, value));
+            }
+        }
+
+        // Connection: Upgrade for the upstream.
+        req.push_str("Connection: Upgrade\r\n");
+        req.push_str(&fmt!("X-Forwarded-For: {}\r\n", src_addr));
+        req.push_str("X-Forwarded-Proto: https\r\n");
+        req.push_str("\r\n");
+
+        // Send the upgrade request to the upstream.
+        match upstream.write_all(req.as_bytes()).await {
+            Ok(()) => (),
+            Err(e) => return Err(err!(e,
+                "{}: proxy ws: failed to send upgrade request to upstream.", id;
+                IO, Network, Wire, Write)),
+        }
+        match upstream.flush().await {
+            Ok(()) => (),
+            Err(e) => return Err(err!(e,
+                "{}: proxy ws: failed to flush upstream.", id;
+                IO, Network, Wire, Write)),
+        }
+
+        // Read the upstream's response (should be 101 Switching Protocols)
+        // and forward it to the client.  Read until we find \r\n\r\n.
+        let mut buf = vec![0u8; 8192];
+        let mut accum: Vec<u8> = Vec::new();
+        loop {
+            let n = match upstream.read(&mut buf).await {
+                Ok(0) => {
+                    return Err(err!(
+                        "{}: proxy ws: upstream closed before sending \
+                        a WebSocket upgrade response.", id;
+                        IO, Network, Wire, Read, Missing));
+                }
+                Ok(n) => n,
+                Err(e) => return Err(err!(e,
+                    "{}: proxy ws: error reading upstream response.", id;
+                    IO, Network, Wire, Read)),
+            };
+            accum.extend_from_slice(&buf[..n]);
+            if let Some(pos) = accum.windows(4).position(|w| w == b"\r\n\r\n") {
+                let header_end = pos + 4;
+                let response_bytes = &accum[..header_end];
+                let extra_bytes = &accum[header_end..];
+
+                // Forward the response to the client.
+                match client.write_all(response_bytes).await {
+                    Ok(()) => (),
+                    Err(e) => return Err(err!(e,
+                        "{}: proxy ws: failed to forward upgrade response.", id;
+                        IO, Network, Wire, Write)),
+                }
+
+                // If the upstream sent any data after the headers
+                // (early WebSocket frames), forward those too.
+                if !extra_bytes.is_empty() {
+                    match client.write_all(extra_bytes).await {
+                        Ok(()) => (),
+                        Err(e) => return Err(err!(e,
+                            "{}: proxy ws: failed to forward early frames.", id;
+                            IO, Network, Wire, Write)),
+                    }
+                }
+                match client.flush().await {
+                    Ok(()) => (),
+                    Err(e) => return Err(err!(e,
+                        "{}: proxy ws: failed to flush client.", id;
+                        IO, Network, Wire, Write)),
+                }
+                break;
+            }
+            if accum.len() > 65536 {
+                return Err(err!(
+                    "{}: proxy ws: upstream response headers exceed 64 KiB.", id;
+                    IO, Network, Input, TooBig));
+            }
+        }
+
+        // Bidirectionally pipe between client and upstream.
+        // Split both streams and use tokio::select to wait for
+        // either direction to close.
+        let (mut client_r, mut client_w) = tokio::io::split(client);
+        let (mut upstream_r, mut upstream_w) = upstream.into_split();
+
+        log!(log_get_level!(),
+            "{}: proxy ws: tunnel established, piping bidirectionally.", id);
+
+        tokio::select! {
+            // Client -> Upstream
+            res = tokio::io::copy(&mut client_r, &mut upstream_w) => {
+                match res {
+                    Ok(_) => log!(log_get_level!(),
+                        "{}: proxy ws: client -> upstream closed.", id),
+                    Err(e) => log!(log_get_level!(),
+                        "{}: proxy ws: client -> upstream error: {}", id, e),
+                }
+                let _ = upstream_w.shutdown().await;
+            }
+            // Upstream -> Client
+            res = tokio::io::copy(&mut upstream_r, &mut client_w) => {
+                match res {
+                    Ok(_) => log!(log_get_level!(),
+                        "{}: proxy ws: upstream -> client closed.", id),
+                    Err(e) => log!(log_get_level!(),
+                        "{}: proxy ws: upstream -> client error: {}", id, e),
+                }
+                let _ = client_w.shutdown().await;
+            }
+        }
+
+        log!(log_get_level!(), "{}: proxy ws: tunnel closed.", id);
+        Ok(())
     }
 }

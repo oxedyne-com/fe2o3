@@ -4,6 +4,7 @@ use crate::srv::{
         traffic::TrafficRecorder,
     },
     cfg::{
+        ProxyRoute,
         RedirectRule,
         ServerConfig,
     },
@@ -89,6 +90,9 @@ pub struct VhostRuntime<
     pub ws_syntax:      SyntaxRef,
     /// Ordered redirect rules evaluated before the static file router.
     pub redirects:      Vec<RedirectRule>,
+    /// Reverse-proxy routes, checked after redirects but before static
+    /// files.  Longest matching prefix wins.
+    pub proxy_routes:   Vec<ProxyRoute>,
 }
 
 impl<

@@ -1,6 +1,7 @@
 use oxedyne_fe2o3_steel::{
     app::https::AppWebHandler,
     srv::{
+        api::ApiHandlerRegistry,
         cfg::{
             ServerConfig,
             VhostConfig,
@@ -14,6 +15,7 @@ use oxedyne_fe2o3_steel::{
         },
         id,
         server::Server,
+        webhook::WebhookRegistry,
         ws::{
             handler::AppWebSocketHandler,
             syntax::WebSocketSyntax,
@@ -111,6 +113,12 @@ pub async fn test_server(filter: &'static str) -> Outcome<()> {
                 default_index_files:    vec![fmt!("index.html")],
                 redirects:              Vec::new(),
                 db_dir_rel:             None,
+                api_routes:             Vec::new(),
+                webhook_routes:         Vec::new(),
+                egress_allowed:         Vec::new(),
+                admin_keys:             Vec::new(),
+                head_injection_url:     None,
+                proxy_routes:           Vec::new(),
             };
 
             let web_handler: AppWebHandler<HashMap<String, OsPath>> = AppWebHandler::new(
@@ -119,6 +127,13 @@ pub async fn test_server(filter: &'static str) -> Outcome<()> {
                 HashMap::new(),
                 vhost_cfg.default_index_files.clone(),
                 true,
+                Vec::new(),        // api_routes
+                Vec::new(),        // webhook_routes
+                Arc::new(WebhookRegistry::new()),
+                Arc::new(ApiHandlerRegistry::new()),
+                None,              // tls_client
+                None,              // admin_state
+                None,              // traffic
             );
 
             let ws_handler = AppWebSocketHandler::new(None);
@@ -129,6 +144,7 @@ pub async fn test_server(filter: &'static str) -> Outcome<()> {
                 ws_handler,
                 ws_syntax,
                 redirects:      vhost_cfg.redirects.clone(),
+                proxy_routes:   vhost_cfg.proxy_routes.clone(),
             });
 
             let mut vhosts = HashMap::new();
@@ -152,6 +168,8 @@ pub async fn test_server(filter: &'static str) -> Outcome<()> {
                 app_root,
                 vhost_dbs,
                 protocol,
+                None,   // traffic recorder
+                None,   // admin state
             );
 
             let server = Server::new(context);

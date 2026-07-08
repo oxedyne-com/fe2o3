@@ -444,6 +444,10 @@ impl AppShellContext {
                 info!("Vhost '{}': {} API route(s) configured.",
                     vh.primary_hostname(), api_routes.len());
             }
+            if !vh.proxy_routes.is_empty() {
+                info!("Vhost '{}': {} proxy route(s) configured.",
+                    vh.primary_hostname(), vh.proxy_routes.len());
+            }
 
             // Resolve {file:} placeholders in webhook route config.
             let mut webhook_routes = vh.webhook_routes.clone();
@@ -476,6 +480,7 @@ impl AppShellContext {
                 ws_handler:     ws_handler.clone(),
                 ws_syntax:      ws_syntax.clone(),
                 redirects:      vh.redirects.clone(),
+                proxy_routes:   vh.proxy_routes.clone(),
             });
 
             let primary_lc = vh.primary_hostname().to_lowercase();

@@ -567,6 +567,127 @@ impl WebhookRoute {
 
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
+// │ PROXY ROUTES                                                              │
+// │                                                                           │
+// │ A reverse-proxy route forwards all requests under a path prefix to an     │
+// │ upstream server.  Unlike ApiRoute (exact path match, buffered response),  │
+// │ ProxyRoute uses prefix matching, supports WebSocket upgrade tunneling,     │
+// │ and streams response bodies without buffering — making it suitable for     │
+// │ proxying full web applications including those that use SSE or WebSocket  │
+// │ for real-time communication.                                              │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// A reverse-proxy route that forwards all requests under a path prefix
+/// to an upstream server.
+///
+/// When a request's path starts with `path_prefix`, Steel connects to
+/// the upstream over TCP (optionally TLS), forwards the request, and
+/// streams the response back to the client.  WebSocket upgrade requests
+/// are transparently tunnelled: Steel connects to the upstream, forwards
+/// the upgrade handshake, then bidirectionally pipes raw bytes between
+/// client and upstream for the lifetime of the WebSocket connection.
+///
+/// Proxy routes are checked after redirect rules but before static file
+/// serving and API routes.  When multiple proxy routes match, the longest
+/// prefix wins.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProxyRoute {
+    /// Path prefix to match (e.g. `/` matches everything, `/api/` matches
+    /// all paths starting with `/api/`).
+    pub path_prefix:    String,
+    /// Upstream hostname or IP address (e.g. `127.0.0.1`, `localhost`).
+    pub upstream_host:  String,
+    /// Upstream TCP port (e.g. 3000).
+    pub upstream_port:  u16,
+    /// Whether to use TLS when connecting to the upstream.  Default false
+    /// — loopback proxies typically do not need TLS.
+    pub upstream_tls:   bool,
+    /// Whether to strip the path prefix before forwarding.  When true,
+    /// a request for `/chat/api/v1/users` with prefix `/chat` is
+    /// forwarded as `/api/v1/users`.  When false, the full original
+    /// path is forwarded verbatim.
+    pub strip_prefix:   bool,
+}
+
+impl ProxyRoute {
+    /// Parse a proxy route from a `DaticleMap`.
+    pub fn from_datmap(m: &DaticleMap) -> Outcome<Self> {
+        let path_prefix = match m.get(&dat!("path_prefix")) {
+            Some(Dat::Str(s)) => s.clone(),
+            _ => return Err(err!(
+                "ProxyRoute: 'path_prefix' is required and must be a string.";
+                Invalid, Input, Missing)),
+        };
+        let upstream_host = match m.get(&dat!("upstream_host")) {
+            Some(Dat::Str(s)) => s.clone(),
+            _ => return Err(err!(
+                "ProxyRoute '{}': 'upstream_host' is required and must be a string.",
+                path_prefix;
+                Invalid, Input, Missing)),
+        };
+        let upstream_port = match m.get(&dat!("upstream_port")) {
+            Some(Dat::U16(n)) => *n,
+            Some(Dat::U32(n)) => *n as u16,
+            Some(Dat::U64(n)) => *n as u16,
+            Some(Dat::I64(n)) => *n as u16,
+            _ => return Err(err!(
+                "ProxyRoute '{}': 'upstream_port' is required and must be a number.",
+                path_prefix;
+                Invalid, Input, Missing)),
+        };
+        let upstream_tls = match m.get(&dat!("upstream_tls")) {
+            Some(Dat::Bool(b)) => *b,
+            None => false,
+            _ => return Err(err!(
+                "ProxyRoute '{}': 'upstream_tls' must be a boolean when present.",
+                path_prefix;
+                Invalid, Input, Mismatch)),
+        };
+        let strip_prefix = match m.get(&dat!("strip_prefix")) {
+            Some(Dat::Bool(b)) => *b,
+            None => false,
+            _ => return Err(err!(
+                "ProxyRoute '{}': 'strip_prefix' must be a boolean when present.",
+                path_prefix;
+                Invalid, Input, Mismatch)),
+        };
+        Ok(Self {
+            path_prefix,
+            upstream_host,
+            upstream_port,
+            upstream_tls,
+            strip_prefix,
+        })
+    }
+
+    /// Returns `true` if the given request path matches this proxy route's
+    /// prefix.
+    pub fn matches(&self, request_path: &str) -> bool {
+        request_path.starts_with(&self.path_prefix)
+    }
+
+    /// Compute the upstream request path, stripping the prefix if configured.
+    pub fn upstream_path_for(&self, request_path: &str) -> String {
+        if self.strip_prefix {
+            if let Some(stripped) = request_path.strip_prefix(&self.path_prefix) {
+                if stripped.is_empty() {
+                    "/".to_string()
+                } else if stripped.starts_with('/') {
+                    stripped.to_string()
+                } else {
+                    fmt!("/{}", stripped)
+                }
+            } else {
+                request_path.to_string()
+            }
+        } else {
+            request_path.to_string()
+        }
+    }
+}
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
 // │ VHOST CONFIG                                                              │
 // └───────────────────────────────────────────────────────────────────────────┘
 
@@ -628,6 +749,11 @@ pub struct VhostConfig {
     /// untouched. Interpreted as a raw URL, rendered as
     /// `<script src="{url}" defer></script>`.
     pub head_injection_url:     Option<String>,
+    /// Reverse-proxy routes.  Each route forwards all requests under
+    /// a path prefix to an upstream server, with WebSocket tunneling
+    /// and streaming response support.  Checked after redirects but
+    /// before static files and API routes; longest prefix wins.
+    pub proxy_routes:           Vec<ProxyRoute>,
 }
 
 /// A single entry in a vhost's [`VhostConfig::admin_keys`] list.
@@ -678,6 +804,7 @@ impl Default for VhostConfig {
             egress_allowed:         Vec::new(),
             admin_keys:             Vec::new(),
             head_injection_url:     None,
+            proxy_routes:           Vec::new(),
         }
     }
 }
@@ -910,6 +1037,25 @@ impl VhostConfig {
                 "VhostConfig: 'head_injection_url' must be a string.";
                 Invalid, Input, Mismatch)),
         };
+        // Reverse proxy routes (optional).
+        let proxy_routes = match m.get(&dat!("proxy_routes")) {
+            Some(Dat::List(list)) => {
+                let mut out = Vec::new();
+                for item in list {
+                    match item {
+                        Dat::Map(sub) => out.push(res!(ProxyRoute::from_datmap(sub))),
+                        _ => return Err(err!(
+                            "VhostConfig: 'proxy_routes' entries must be maps.";
+                            Invalid, Input, Mismatch)),
+                    }
+                }
+                out
+            }
+            None => Vec::new(),
+            _ => return Err(err!(
+                "VhostConfig: 'proxy_routes' must be a list of maps.";
+                Invalid, Input, Mismatch)),
+        };
         Ok(Self {
             hostnames,
             public_dir_rel,
@@ -922,6 +1068,7 @@ impl VhostConfig {
             egress_allowed,
             admin_keys,
             head_injection_url,
+            proxy_routes,
         })
     }
 
