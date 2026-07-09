@@ -367,21 +367,29 @@ impl<
                 }
             }
 
-            // Peek at first bytes to detect TLS handshake. Non-TLS requests
-            // receive a 308 to redirect the caller to HTTPS.
-            let mut peek_buf = [0u8; 5];
-            match stream.peek(&mut peek_buf).await {
-                Ok(n) if n >= 5 && peek_buf[0] == 0x16 && peek_buf[1] == 0x03 => {
-                    match tls_acceptor.accept(stream).await {
-                        Ok(tls_stream) => {
-                            // Extract SNI now, before we hand ownership of
-                            // the stream to the handler task.
-                            let sni = tls_stream.get_ref().1.server_name()
-                                .map(|s| s.to_string());
-                            let context_clone = self.context.clone();
-                            match &self.context.protocol {
-                                Protocol::Web { .. } => {
-                                    tokio::spawn(async move {
+            // ── Per-connection processing ────────────────────────
+            //
+            // Spawn immediately so the accept loop is never blocked
+            // by a slow client, an incomplete TLS handshake, or a
+            // scanner that connects without sending data.  Without
+            // this, a single hung peek() or TLS accept() would
+            // prevent all new connections from being accepted.
+            let context_clone = self.context.clone();
+            let tls_acceptor_conn = tls_acceptor.clone();
+            tokio::spawn(async move {
+                // Peek at first bytes to detect TLS handshake.
+                // Non-TLS requests receive a 308 to redirect to HTTPS.
+                let mut peek_buf = [0u8; 5];
+                match stream.peek(&mut peek_buf).await {
+                    Ok(n) if n >= 5 && peek_buf[0] == 0x16 && peek_buf[1] == 0x03 => {
+                        match tls_acceptor_conn.accept(stream).await {
+                            Ok(tls_stream) => {
+                                // Extract SNI now, before we hand
+                                // ownership of the stream to the handler.
+                                let sni = tls_stream.get_ref().1.server_name()
+                                    .map(|s| s.to_string());
+                                match &context_clone.protocol {
+                                    Protocol::Web { .. } => {
                                         if let Err(e) = context_clone.handle_https(
                                             tls_stream,
                                             sni,
@@ -391,35 +399,34 @@ impl<
                                                 "Error handling HTTPS connection.";
                                                 IO, Network));
                                         }
-                                    });
+                                    }
                                 }
                             }
+                            Err(e) => {
+                                error!(err!(e,
+                                    "TLS handshake aborted.";
+                                    IO, Network, Init));
+                            }
                         }
-                        Err(e) => {
+                    }
+                    _ => {
+                        // Non-TLS connection on the TLS port: redirect
+                        // to HTTPS using the incoming Host header so the
+                        // redirect target matches whatever the client
+                        // typed.
+                        let https_port = context_clone.cfg.server_port_tcp;
+                        if let Err(e) = handle_redirect(
+                            stream,
+                            src_addr,
+                            https_port,
+                        ).await {
                             error!(err!(e,
-                                "TLS handshake aborted.";
-                                IO, Network, Init));
-                            continue;
+                                "Failed to redirect plaintext HTTP on TLS port.";
+                                IO, Network, Write));
                         }
                     }
                 }
-                _ => {
-                    // Non-TLS connection on the TLS port: redirect to HTTPS
-                    // using the incoming Host header so the redirect target
-                    // matches whatever the client typed.
-                    let https_port = self.context.cfg.server_port_tcp;
-                    if let Err(e) = handle_redirect(
-                        stream,
-                        src_addr,
-                        https_port,
-                    ).await {
-                        error!(err!(e,
-                            "Failed to redirect plaintext HTTP on TLS port.";
-                            IO, Network, Write));
-                    }
-                    continue;
-                }
-            }
+            });
         }
     }
 }
