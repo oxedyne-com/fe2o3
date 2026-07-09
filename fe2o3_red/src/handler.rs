@@ -261,8 +261,9 @@ pub async fn handle_chat_websocket<
                             .collect();
                         let mut m = DaticleMap::new();
                         m.insert(dat!("sessions"), Dat::List(list));
+                        let json = crate::llm::datmap_to_json(&m);
                         let _ = ws.send(&text_msg(syntax.clone(), "data", vec![
-                            Dat::Map(m),
+                            dat!(json),
                         ])).await;
                     }
                     Err(e) => {
@@ -286,8 +287,9 @@ pub async fn handle_chat_websocket<
                     Ok(session) => {
                         current_session_id = Some(session.id.clone());
                         current_session = Some(session.clone());
+                        let json = crate::llm::datmap_to_json(&session.to_datmap());
                         let _ = ws.send(&text_msg(syntax.clone(), "data", vec![
-                            Dat::Map(session.to_datmap()),
+                            dat!(json),
                         ])).await;
                     }
                     Err(e) => {
@@ -449,14 +451,20 @@ pub async fn handle_chat_websocket<
 fn text_msg(syntax: SyntaxRef, cmd: &str, vals: Vec<Dat>)
     -> WebSocketMessage
 {
-    let mut response = match MsgCmd::new(syntax, cmd) {
+    let mut response = match MsgCmd::new(syntax.clone(), cmd) {
         Ok(r) => r,
-        Err(_) => return WebSocketMessage::Text("error \"internal\"".to_string()),
+        Err(e) => {
+            info!("text_msg: MsgCmd::new('{}') failed: {}", cmd, e);
+            return WebSocketMessage::Text("error \"internal\"".to_string());
+        }
     };
-    for val in vals {
-        response = match response.add_cmd_val(val) {
+    for val in &vals {
+        response = match response.add_cmd_val(val.clone()) {
             Ok(r) => r,
-            Err(_) => return WebSocketMessage::Text("error \"internal\"".to_string()),
+            Err(e) => {
+                info!("text_msg: add_cmd_val for '{}' failed: {} (val kind={:?})", cmd, e, val.kind());
+                return WebSocketMessage::Text("error \"internal\"".to_string());
+            }
         }
     }
     WebSocketMessage::Text(response.to_string())

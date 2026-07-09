@@ -4,11 +4,21 @@
 (function () {
 	'use strict';
 
+	// ── Models ─────────────────────────────────────────────────
+	var MODELS = [
+		{ id: 'accounts/fireworks/models/glm-5p2',     label: 'GLM-5.2' },
+		{ id: 'accounts/fireworks/models/glm-5p1',     label: 'GLM-5.1' },
+		{ id: 'accounts/fireworks/models/gpt-oss-120b', label: 'GPT-OSS 120B' },
+		{ id: 'accounts/fireworks/models/deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
+		{ id: 'accounts/fireworks/models/kimi-k2p6',   label: 'Kimi K2.6' },
+	];
+
 	// ── State ──────────────────────────────────────────────────
 	var mgmtWs = null;       // Management WS (auth via o3db.js)
 	var chatWs = null;       // Chat WS (agent protocol at /chat)
 	var username = null;
 	var currentSessionId = null;
+	var sessions = [];       // Cached session metadata
 	var sidebarWidth = 260;
 
 	// ── DOM refs ───────────────────────────────────────────────
@@ -126,31 +136,21 @@
 	}
 
 	function handleChatMessage(e) {
-		// Parse syntax response.
 		var msgrx = Msg_new(e.data);
 		if (!msgrx) return;
 	}
 
 	// Simple syntax parser — parse the response cmd and vals.
 	function Msg_new(raw) {
-		// The response is a syntax message like:
-		//   data "content"
-		//   info "message"
-		//   error "message"
-		//   text "content"
-		//   done
 		var firstSpace = raw.indexOf(' ');
 		if (firstSpace < 0) {
-			// Single-word command like "done".
 			handleChatCmd(raw, null);
 			return true;
 		}
 		var cmd = raw.substring(0, firstSpace);
 		var rest = raw.substring(firstSpace + 1);
-		// Try to parse the value as a JDAT string (starts with ").
 		var val = null;
 		if (rest.charAt(0) === '"') {
-			// Extract quoted string, handling escapes.
 			var end = 1;
 			while (end < rest.length) {
 				if (rest.charAt(end) === '\\') { end += 2; continue; }
@@ -161,7 +161,6 @@
 				.replace(/\\"/g, '"')
 				.replace(/\\\\/g, '\\');
 		} else if (rest.charAt(0) === '{') {
-			// JDAT map — try JSON parse (close enough for our data).
 			try { val = JSON.parse(rest); } catch (e) { val = rest; }
 		}
 		handleChatCmd(cmd, val);
@@ -170,10 +169,8 @@
 
 	function handleChatCmd(cmd, val) {
 		if (cmd === 'text') {
-			// Streamed text token.
 			appendAssistantText(val || '');
 		} else if (cmd === 'done') {
-			// Turn complete — re-enable input.
 			chatSend.disabled = false;
 			chatInput.disabled = false;
 			chatInput.focus();
@@ -183,23 +180,41 @@
 			chatSend.disabled = false;
 			chatInput.disabled = false;
 		} else if (cmd === 'data') {
-			// Session data or session list.
 			if (val && typeof val === 'object') {
-				if (val.id) {
+				if (val.id && val.model) {
 					// New session created.
 					currentSessionId = val.id;
 					sessionNameEl.textContent = val.name || 'Session';
 					refreshSessions();
 					clearChat();
 				} else if (val.sessions) {
-					renderSessionList(val.sessions);
+					sessions = val.sessions;
+					renderSessionList(sessions);
 				} else if (val.messages) {
-					// Session switched — render history.
 					renderHistory(val.messages);
 				}
+			} else if (typeof val === 'string') {
+				// Data value is a JSON string — try to parse it.
+				try {
+					var obj = JSON.parse(val);
+					if (obj && obj.id && obj.model) {
+						currentSessionId = obj.id;
+						sessionNameEl.textContent = obj.name || 'Session';
+						refreshSessions();
+						clearChat();
+					} else if (obj && obj.sessions) {
+						sessions = obj.sessions;
+						renderSessionList(sessions);
+					} else if (obj && obj.messages) {
+						renderHistory(obj.messages);
+					}
+				} catch (e) { /* not JSON */ }
 			}
 		} else if (cmd === 'info') {
-			// Confirmation message — ignore or log.
+			// Confirmation — may be session rename/close, refresh.
+			if (val && val.indexOf('Session') === 0) {
+				refreshSessions();
+			}
 			console.log('Info:', val);
 		}
 	}
@@ -226,14 +241,12 @@
 			currentAssistantText = '';
 		}
 		currentAssistantText += text;
-		// Render as markdown.
 		var content = currentAssistantDiv.querySelector('.chat-msg-content');
 		content.innerHTML = marked.parse(currentAssistantText);
 		chatOutput.scrollTop = chatOutput.scrollHeight;
 	}
 
 	function finalizeAssistantMessage() {
-		// Re-render final markdown.
 		if (currentAssistantDiv && currentAssistantText) {
 			var content = currentAssistantDiv.querySelector('.chat-msg-content');
 			content.innerHTML = marked.parse(currentAssistantText);
@@ -278,7 +291,6 @@
 		chatInput.style.height = 'auto';
 		chatSend.disabled = true;
 		chatInput.disabled = true;
-		// Send as syntax command: chat "content"
 		var escaped = text.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 		sendChat('chat "' + escaped + '"');
 	}
@@ -288,33 +300,174 @@
 		sendChat('session_list');
 	}
 
-	function renderSessionList(sessions) {
-		sessionList.innerHTML = '';
-		if (!Array.isArray(sessions)) sessions = [];
-		sessions.forEach(function (s) {
-			var item = document.createElement('div');
-			item.className = 'session-item' + (s.id === currentSessionId ? ' active' : '');
-			item.innerHTML = '<span class="session-name">' + escapeHtml(s.name || s.id) + '</span>' +
-				'<button class="session-close" data-id="' + escapeHtml(s.id) + '">×</button>';
-			item.addEventListener('click', function (e) {
-				if (e.target.classList.contains('session-close')) {
-					e.stopPropagation();
-					sendChat('session_close "' + e.target.dataset.id + '"');
-				} else {
-					currentSessionId = s.id;
-					sessionNameEl.textContent = s.name || 'Session';
-					sendChat('session_switch "' + s.id + '"');
-					updateActiveSession(s.id);
-				}
+	function getModelLabel(modelId) {
+		for (var i = 0; i < MODELS.length; i++) {
+			if (MODELS[i].id === modelId) return MODELS[i].label;
+		}
+		return modelId.split('/').pop() || modelId;
+	}
+
+	function estimateContext(messages) {
+		// Rough estimate: ~4 chars per token.
+		var chars = 0;
+		if (Array.isArray(messages)) {
+			messages.forEach(function (m) {
+				chars += (m.content || '').length;
 			});
-			sessionList.appendChild(item);
+		}
+		return Math.ceil(chars / 4);
+	}
+
+	function renderSessionList(list) {
+		// Remove any existing new-session panel first.
+		var existingPanel = sessionList.querySelector('.new-session-panel');
+		if (existingPanel) existingPanel.remove();
+
+		sessionList.innerHTML = '';
+		if (!Array.isArray(list)) list = [];
+		list.forEach(function (s) {
+			sessionList.appendChild(createSessionBox(s));
+		});
+	}
+
+	function createSessionBox(s) {
+		var box = document.createElement('div');
+		box.className = 'session-box' + (s.id === currentSessionId ? ' active' : '');
+		box.dataset.id = s.id;
+
+		var header = document.createElement('div');
+		header.className = 'session-box-header';
+
+		var name = document.createElement('span');
+		name.className = 'session-box-name';
+		name.textContent = s.name || s.id;
+		name.title = 'Click to rename';
+		name.addEventListener('click', function () {
+			startRenameSession(s.id, name);
+		});
+
+		var closeBtn = document.createElement('button');
+		closeBtn.className = 'session-box-close';
+		closeBtn.textContent = '×';
+		closeBtn.title = 'Archive session';
+		closeBtn.addEventListener('click', function (e) {
+			e.stopPropagation();
+			sendChat('session_close "' + escJdat(s.id) + '"');
+		});
+
+		header.appendChild(name);
+		header.appendChild(closeBtn);
+
+		var meta = document.createElement('div');
+		meta.className = 'session-box-meta';
+
+		var modelLabel = document.createElement('span');
+		modelLabel.className = 'session-box-model';
+		modelLabel.textContent = getModelLabel(s.model || '');
+
+		var ctxLabel = document.createElement('span');
+		ctxLabel.className = 'session-box-ctx';
+		var ctx = estimateContext(s.messages);
+		ctxLabel.textContent = ctx > 0 ? ctx + ' tok' : '';
+
+		meta.appendChild(modelLabel);
+		if (ctx > 0) meta.appendChild(ctxLabel);
+
+		box.appendChild(header);
+		box.appendChild(meta);
+
+		box.addEventListener('click', function (e) {
+			if (e.target === closeBtn) return;
+			currentSessionId = s.id;
+			sessionNameEl.textContent = s.name || 'Session';
+			sendChat('session_switch "' + escJdat(s.id) + '"');
+			updateActiveSession(s.id);
+		});
+
+		return box;
+	}
+
+	function startRenameSession(sessionId, nameEl) {
+		var oldName = nameEl.textContent;
+		var input = document.createElement('input');
+		input.type = 'text';
+		input.className = 'session-box-rename';
+		input.value = oldName;
+		nameEl.replaceWith(input);
+		input.focus();
+		input.select();
+
+		function commit() {
+			var newName = input.value.trim() || oldName;
+			if (newName !== oldName) {
+				sendChat('session_rename "' + escJdat(sessionId) + '" "' + escJdat(newName) + '"');
+			}
+			// Restore span immediately; refreshSessions will update.
+			var span = document.createElement('span');
+			span.className = 'session-box-name';
+			span.textContent = newName;
+			span.title = 'Click to rename';
+			span.addEventListener('click', function () {
+				startRenameSession(sessionId, span);
+			});
+			input.replaceWith(span);
+		}
+
+		input.addEventListener('blur', commit);
+		input.addEventListener('keydown', function (e) {
+			if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+			if (e.key === 'Escape') { input.value = oldName; input.blur(); }
 		});
 	}
 
 	function updateActiveSession(id) {
-		sessionList.querySelectorAll('.session-item').forEach(function (item) {
-			item.classList.toggle('active', item.querySelector('.session-close').dataset.id === id);
+		sessionList.querySelectorAll('.session-box').forEach(function (box) {
+			box.classList.toggle('active', box.dataset.id === id);
 		});
+	}
+
+	// ── New session panel ──────────────────────────────────────
+	function showNewSessionPanel() {
+		// Remove any existing panel.
+		var existing = sessionList.querySelector('.new-session-panel');
+		if (existing) { existing.remove(); return; }
+
+		var panel = document.createElement('div');
+		panel.className = 'new-session-panel';
+
+		// Model selector.
+		var select = document.createElement('select');
+		select.className = 'new-session-model';
+		MODELS.forEach(function (m) {
+			var opt = document.createElement('option');
+			opt.value = m.id;
+			opt.textContent = m.label;
+			select.appendChild(opt);
+		});
+
+		// Start button.
+		var startBtn = document.createElement('button');
+		startBtn.className = 'new-session-start';
+		startBtn.textContent = 'Start';
+
+		startBtn.addEventListener('click', function () {
+			var model = select.value;
+			// Generate a default session name from the model label + timestamp.
+			var label = getModelLabel(model);
+			var now = new Date();
+			var ts = now.getHours().toString().padStart(2, '0') + ':' +
+				now.getMinutes().toString().padStart(2, '0');
+			var name = label + ' ' + ts;
+			sendChat('session_new "' + escJdat(name) + '" "' + escJdat(model) + '"');
+			panel.remove();
+		});
+
+		panel.appendChild(select);
+		panel.appendChild(startBtn);
+
+		// Prepend to session list.
+		sessionList.insertBefore(panel, sessionList.firstChild);
+		select.focus();
 	}
 
 	// ── Auth ───────────────────────────────────────────────────
@@ -355,15 +508,15 @@
 	function attemptRegister(user, pass) {
 		connectMgmt().then(function () {
 			return O3db.register(user, pass);
+		}).catch(function (e) {
+			document.getElementById('register-error').textContent = 'Connection error: ' + e;
 		}).then(function (r) {
-			if (r.cmd === 'info') {
+			if (r && r.cmd === 'info') {
 				attemptLogin(user, pass);
-			} else {
+			} else if (r) {
 				document.getElementById('register-error').textContent =
 					r.cmd === 'error' ? (r.val || 'Registration failed') : 'Registration failed';
 			}
-		}).catch(function (e) {
-			document.getElementById('register-error').textContent = 'Connection error: ' + e;
 		});
 	}
 
@@ -448,9 +601,7 @@
 		registerScreen.style.display = 'flex';
 	});
 
-	newSessionBtn.addEventListener('click', function () {
-		sendChat('session_new');
-	});
+	newSessionBtn.addEventListener('click', showNewSessionPanel);
 
 	logoutBtn.addEventListener('click', logout);
 
