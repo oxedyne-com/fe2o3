@@ -38,10 +38,12 @@ pub struct LlmClient {
     pub tls_config: Arc<ClientConfig>,
 }
 
-/// The response from a completed (non-streaming) chat call.
-#[derive(Clone, Debug)]
+/// The response from a completed chat call.
+#[derive(Clone, Debug, Default)]
 pub struct ChatResponse {
-    pub content:    String,
+    pub content:           String,
+    pub prompt_tokens:     u64,
+    pub completion_tokens: u64,
 }
 
 impl LlmClient {
@@ -76,8 +78,12 @@ impl LlmClient {
     ) -> Outcome<ChatResponse> {
         let body = self.build_request_body(messages);
         let response_bytes = res!(self.do_request(&body).await);
-        let content = parse_sse_stream(&response_bytes, on_token);
-        Ok(ChatResponse { content })
+        let (content, prompt_tok, completion_tok) = parse_sse_stream(&response_bytes, on_token);
+        Ok(ChatResponse {
+            content,
+            prompt_tokens: prompt_tok,
+            completion_tokens: completion_tok,
+        })
     }
 
     /// Build the JSON request body for the OpenAI-compatible API.
@@ -101,7 +107,8 @@ impl LlmClient {
             out.push_str(&datmap_to_json(&dm));
         }
         out.push_str("],");
-        out.push_str("\"stream\":true");
+        out.push_str("\"stream\":true,");
+        out.push_str("\"stream_options\":{\"include_usage\":true}");
         out.push_str("}");
         out
     }
@@ -234,9 +241,13 @@ impl LlmClient {
 /// deliberately simple parser — it handles the common case without
 /// needing a full JSON parser.  Escaped quotes inside content are
 /// handled by scanning for the matching unescaped quote.
-pub fn parse_sse_stream(body: &[u8], on_token: &mut impl FnMut(&str)) -> String {
+pub fn parse_sse_stream(body: &[u8], on_token: &mut impl FnMut(&str))
+    -> (String, u64, u64)
+{
     let text = String::from_utf8_lossy(body);
     let mut full = String::new();
+    let mut prompt_tokens = 0u64;
+    let mut completion_tokens = 0u64;
 
     for line in text.lines() {
         let line = line.trim();
@@ -248,19 +259,82 @@ pub fn parse_sse_stream(body: &[u8], on_token: &mut impl FnMut(&str)) -> String 
             break;
         }
         // Extract content from: {"choices":[{"delta":{"content":"..."}}]}
-        // We scan for "content":" and read until the matching unescaped quote.
         if let Some(content) = extract_json_string(data, "content") {
             on_token(&content);
             full.push_str(&content);
         }
+        // Extract usage from the final chunk:
+        // {"choices":[],"usage":{"prompt_tokens":13,"completion_tokens":200}}
+        if let Some(usage_str) = find_json_object(data, "usage") {
+            if let Some(pt) = extract_json_number(&usage_str, "prompt_tokens") {
+                prompt_tokens = pt;
+            }
+            if let Some(ct) = extract_json_number(&usage_str, "completion_tokens") {
+                completion_tokens = ct;
+            }
+        }
     }
 
-    full
+    (full, prompt_tokens, completion_tokens)
 }
 
-/// Extract a string value for a key from a JSON string.
+/// Extract a JSON object value for a key from a JSON string.
 ///
-/// Scans for `"key":"value"` and returns the unescaped value.
+/// Scans for `"key":{...}` and returns the inner object string
+/// (including the braces).  Used to extract the `usage` object
+/// from the final SSE chunk.
+fn find_json_object(json: &str, key: &str) -> Option<String> {
+    let needle = fmt!("\"{}\":{{", key);
+    let pos = json.find(&needle)?;
+    let start = pos + needle.len() - 1; // position of the opening brace
+    let bytes = json.as_bytes();
+    let mut depth = 0i32;
+    let mut i = start;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(json[start..=i].to_string());
+                }
+            }
+            b'"' => {
+                // Skip string contents.
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'\\' { i += 2; continue; }
+                    if bytes[i] == b'"' { break; }
+                    i += 1;
+                }
+            }
+            _ => (),
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Extract a numeric value for a key from a JSON string.
+///
+/// Scans for `"key":number` and returns the parsed value.
+fn extract_json_number(json: &str, key: &str) -> Option<u64> {
+    let needle = fmt!("\"{}\":", key);
+    let pos = json.find(&needle)?;
+    let mut start = pos + needle.len();
+    let bytes = json.as_bytes();
+    // Skip whitespace.
+    while start < bytes.len() && bytes[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    let mut end = start;
+    while end < bytes.len() && (bytes[end].is_ascii_digit() || bytes[end] == b'-') {
+        end += 1;
+    }
+    json[start..end].parse::<u64>().ok()
+}
+
+
 /// Handles `\"`, `\\`, `\n`, `\t` escapes.
 ///
 /// The search ensures `key` is a complete JSON key, not a suffix of

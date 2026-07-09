@@ -82,6 +82,16 @@
 	<div class="modal-card">
 		<h2>Settings</h2>
 		<div class="settings-section">
+			<h3>Cloud Provider</h3>
+			<select id="provider-select" class="settings-select">
+				<option value="fireworks">Fireworks.ai</option>
+				<option value="openai" disabled>OpenAI (coming soon)</option>
+				<option value="anthropic" disabled>Anthropic (coming soon)</option>
+				<option value="google" disabled>Google AI (coming soon)</option>
+				<option value="groq" disabled>Groq (coming soon)</option>
+			</select>
+		</div>
+		<div class="settings-section">
 			<h3>Change Password</h3>
 			<form id="change-pass-form">
 				<input type="password" id="old-pass" placeholder="Current password" required>

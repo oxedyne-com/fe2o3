@@ -175,38 +175,40 @@
 			chatInput.disabled = false;
 			chatInput.focus();
 			finalizeAssistantMessage();
+			refreshSessions();
 		} else if (cmd === 'error') {
 			appendError(val || 'Error');
 			chatSend.disabled = false;
 			chatInput.disabled = false;
 		} else if (cmd === 'data') {
 			if (val && typeof val === 'object') {
-				if (val.id && val.model) {
+				if (val.sessions) {
+					sessions = val.sessions;
+					renderSessionList(sessions);
+				} else if (val.messages) {
+					renderHistory(val.messages);
+				} else if (val.id && val.model) {
 					// New session created.
 					currentSessionId = val.id;
 					sessionNameEl.textContent = val.name || 'Session';
 					refreshSessions();
 					clearChat();
-				} else if (val.sessions) {
-					sessions = val.sessions;
-					renderSessionList(sessions);
-				} else if (val.messages) {
-					renderHistory(val.messages);
 				}
 			} else if (typeof val === 'string') {
 				// Data value is a JSON string — try to parse it.
 				try {
 					var obj = JSON.parse(val);
-					if (obj && obj.id && obj.model) {
-						currentSessionId = obj.id;
-						sessionNameEl.textContent = obj.name || 'Session';
-						refreshSessions();
-						clearChat();
-					} else if (obj && obj.sessions) {
+					if (obj && obj.sessions) {
 						sessions = obj.sessions;
 						renderSessionList(sessions);
 					} else if (obj && obj.messages) {
 						renderHistory(obj.messages);
+					} else if (obj && obj.id && obj.model) {
+						// New session created.
+						currentSessionId = obj.id;
+						sessionNameEl.textContent = obj.name || 'Session';
+						refreshSessions();
+						clearChat();
 					}
 				} catch (e) { /* not JSON */ }
 			}
@@ -307,15 +309,26 @@
 		return modelId.split('/').pop() || modelId;
 	}
 
-	function estimateContext(messages) {
-		// Rough estimate: ~4 chars per token.
-		var chars = 0;
-		if (Array.isArray(messages)) {
-			messages.forEach(function (m) {
-				chars += (m.content || '').length;
-			});
-		}
-		return Math.ceil(chars / 4);
+	// ── Pricing (USD per 1M tokens) ────────────────────────────
+	// Source: Fireworks.ai pricing page.  These are approximate
+	// and should be updated when official pricing changes.
+	var PRICING = {
+		'accounts/fireworks/models/glm-5p2':         { in: 0.90, out: 0.90 },
+		'accounts/fireworks/models/glm-5p1':         { in: 0.90, out: 0.90 },
+		'accounts/fireworks/models/gpt-oss-120b':    { in: 0.15, out: 0.15 },
+		'accounts/fireworks/models/deepseek-v4-pro': { in: 0.90, out: 0.90 },
+		'accounts/fireworks/models/kimi-k2p6':       { in: 0.60, out: 2.50 },
+	};
+
+	function estimateCost(modelId, promptTok, completionTok) {
+		var p = PRICING[modelId];
+		if (!p) return 0;
+		return (promptTok / 1e6 * p.in) + (completionTok / 1e6 * p.out);
+	}
+
+	function fmtTok(n) {
+		if (n >= 1000) return (n / 1000).toFixed(1) + 'k tok';
+		return n + ' tok';
 	}
 
 	function renderSessionList(list) {
@@ -342,7 +355,8 @@
 		name.className = 'session-box-name';
 		name.textContent = s.name || s.id;
 		name.title = 'Click to rename';
-		name.addEventListener('click', function () {
+		name.addEventListener('click', function (e) {
+			e.stopPropagation();
 			startRenameSession(s.id, name);
 		});
 
@@ -367,11 +381,21 @@
 
 		var ctxLabel = document.createElement('span');
 		ctxLabel.className = 'session-box-ctx';
-		var ctx = estimateContext(s.messages);
-		ctxLabel.textContent = ctx > 0 ? ctx + ' tok' : '';
+		var pt = s.prompt_tokens || 0;
+		var ct = s.completion_tokens || 0;
+		var totalTok = pt + ct;
+		ctxLabel.textContent = totalTok > 0 ? fmtTok(totalTok) : '';
+
+		var costLabel = document.createElement('span');
+		costLabel.className = 'session-box-cost';
+		var cost = estimateCost(s.model || '', pt, ct);
+		if (cost > 0) {
+			costLabel.textContent = '$' + cost.toFixed(4);
+		}
 
 		meta.appendChild(modelLabel);
-		if (ctx > 0) meta.appendChild(ctxLabel);
+		if (totalTok > 0) meta.appendChild(ctxLabel);
+		if (cost > 0) meta.appendChild(costLabel);
 
 		box.appendChild(header);
 		box.appendChild(meta);

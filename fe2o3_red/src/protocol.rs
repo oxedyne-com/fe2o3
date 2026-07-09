@@ -107,11 +107,13 @@ impl ChatMessage {
 /// A chat session belonging to a user.
 #[derive(Clone, Debug)]
 pub struct Session {
-    pub id:          String,
-    pub name:        String,
-    pub created_at:  u64,
-    pub model:       String,
-    pub messages:    Vec<ChatMessage>,
+    pub id:                  String,
+    pub name:                String,
+    pub created_at:          u64,
+    pub model:               String,
+    pub messages:            Vec<ChatMessage>,
+    pub prompt_tokens:       u64,
+    pub completion_tokens:   u64,
 }
 
 impl Session {
@@ -126,6 +128,8 @@ impl Session {
                 .unwrap_or(0),
             model,
             messages: Vec::new(),
+            prompt_tokens: 0,
+            completion_tokens: 0,
         }
     }
 
@@ -136,6 +140,8 @@ impl Session {
         m.insert(dat!("name"), dat!(self.name.clone()));
         m.insert(dat!("created_at"), Dat::U64(self.created_at));
         m.insert(dat!("model"), dat!(self.model.clone()));
+        m.insert(dat!("prompt_tokens"), Dat::U64(self.prompt_tokens));
+        m.insert(dat!("completion_tokens"), Dat::U64(self.completion_tokens));
         m
     }
 
@@ -179,7 +185,15 @@ impl Session {
             }
             _ => Vec::new(),
         };
-        Ok(Self { id, name, created_at, model, messages })
+        let prompt_tokens = match m.get(&dat!("prompt_tokens")) {
+            Some(Dat::U64(n)) => *n,
+            _ => 0,
+        };
+        let completion_tokens = match m.get(&dat!("completion_tokens")) {
+            Some(Dat::U64(n)) => *n,
+            _ => 0,
+        };
+        Ok(Self { id, name, created_at, model, messages, prompt_tokens, completion_tokens })
     }
 }
 

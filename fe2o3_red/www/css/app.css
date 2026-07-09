@@ -51,6 +51,7 @@ body { font-family: var(--font); background: var(--bg-primary); color: var(--tex
 .session-box-meta { display: flex; gap: 8px; margin-top: 4px; }
 .session-box-model { font-size: 11px; color: var(--text-secondary); }
 .session-box-ctx { font-size: 11px; color: var(--text-muted); }
+.session-box-cost { font-size: 11px; color: var(--text-muted); }
 
 /* Legacy session-item (kept for backward compat) */
 .session-item { display: flex; align-items: center; padding: 10px 12px; border-radius: var(--radius-sm); cursor: pointer; color: var(--text-secondary); font-size: 14px; gap: 8px; margin-bottom: 2px; transition: background 0.1s; }
@@ -105,6 +106,9 @@ body { font-family: var(--font); background: var(--bg-primary); color: var(--tex
 .settings-section form { display: flex; flex-direction: column; gap: 10px; }
 .settings-section input { background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-primary); padding: 9px 12px; font-size: 14px; font-family: var(--font); }
 .settings-section input:focus { outline: none; border-color: var(--accent); }
+.settings-select { width: 100%; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-primary); padding: 9px 12px; font-size: 14px; font-family: var(--font); }
+.settings-select:focus { outline: none; border-color: var(--accent); }
+.settings-select option:disabled { color: var(--text-muted); }
 .settings-section button { background: var(--accent); color: #fff; border: none; border-radius: var(--radius-sm); padding: 9px 16px; font-size: 14px; cursor: pointer; font-family: var(--font); }
 .settings-section button:hover { background: var(--accent-hover); }
 .modal-close { background: var(--bg-tertiary); color: var(--text-secondary); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 16px; font-size: 14px; cursor: pointer; font-family: var(--font); margin-top: 8px; width: 100%; }

@@ -86,7 +86,11 @@ impl Agent {
                     content: content.clone(),
                 });
 
-                // 6. Emit Done.
+                // 6. Accumulate token usage.
+                session.prompt_tokens += response.prompt_tokens;
+                session.completion_tokens += response.completion_tokens;
+
+                // 7. Emit Done.
                 on_event(AgentEvent::Done);
                 Ok(())
             }
