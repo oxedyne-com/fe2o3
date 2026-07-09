@@ -12,12 +12,24 @@ use oxedyne_fe2o3_jdat::prelude::*;
 // │ Chat messages                                                  │
 // └───────────────────────────────────────────────────────────────┘
 
+/// A single tool call requested by the assistant.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolCall {
+    pub id:        String,
+    pub name:      String,
+    /// Raw JSON arguments object as produced by the model.
+    pub arguments: String,
+}
+
 /// A single message in a conversation, mirroring the OpenAI API format.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ChatMessage {
     System { content: String },
     User { content: String },
-    Assistant { content: String },
+    /// Assistant turn.  `tool_calls` is populated only for the
+    /// in-flight working conversation; persisted assistant messages
+    /// carry the final text with no tool calls.
+    Assistant { content: String, tool_calls: Vec<ToolCall> },
     /// Tool call result returned to the LLM.
     Tool { tool_call_id: String, content: String },
 }
@@ -42,7 +54,7 @@ impl ChatMessage {
                 m.insert(dat!("role"), dat!("user"));
                 m.insert(dat!("content"), dat!(content.clone()));
             }
-            Self::Assistant { content } => {
+            Self::Assistant { content, .. } => {
                 m.insert(dat!("role"), dat!("assistant"));
                 m.insert(dat!("content"), dat!(content.clone()));
             }
@@ -68,7 +80,7 @@ impl ChatMessage {
         match role.as_str() {
             "system" => Ok(Self::System { content }),
             "user" => Ok(Self::User { content }),
-            "assistant" => Ok(Self::Assistant { content }),
+            "assistant" => Ok(Self::Assistant { content, tool_calls: Vec::new() }),
             "tool" => {
                 let tool_call_id = match m.get(&dat!("tool_call_id")) {
                     Some(Dat::Str(s)) => s.clone(),
@@ -93,7 +105,7 @@ impl ChatMessage {
         match self {
             Self::System { content }
             | Self::User { content }
-            | Self::Assistant { content }
+            | Self::Assistant { content, .. }
             | Self::Tool { content, .. } => content,
         }
     }
@@ -261,6 +273,10 @@ impl UserConfig {
 pub enum AgentEvent {
     /// Streamed LLM response text (a token or chunk).
     Text(String),
+    /// The agent is invoking a tool (name + raw JSON args).
+    ToolCall { name: String, args: String },
+    /// A tool returned a result (name + result text).
+    ToolResult { name: String, result: String },
     /// Agent turn complete.
     Done,
     /// Error occurred.
@@ -276,6 +292,16 @@ impl AgentEvent {
             Self::Text(text) => {
                 m.insert(dat!("type"), dat!("text"));
                 m.insert(dat!("content"), dat!(text.clone()));
+            }
+            Self::ToolCall { name, args } => {
+                m.insert(dat!("type"), dat!("tool_call"));
+                m.insert(dat!("name"), dat!(name.clone()));
+                m.insert(dat!("args"), dat!(args.clone()));
+            }
+            Self::ToolResult { name, result } => {
+                m.insert(dat!("type"), dat!("tool_result"));
+                m.insert(dat!("name"), dat!(name.clone()));
+                m.insert(dat!("content"), dat!(result.clone()));
             }
             Self::Done => {
                 m.insert(dat!("type"), dat!("done"));
@@ -353,7 +379,7 @@ mod tests {
     fn test_session_roundtrip() {
         let mut s = Session::new("s1".to_string(), "Test".to_string(), "glm-5p2".to_string());
         s.messages.push(ChatMessage::User { content: "Hi".to_string() });
-        s.messages.push(ChatMessage::Assistant { content: "Hello!".to_string() });
+        s.messages.push(ChatMessage::Assistant { content: "Hello!".to_string(), tool_calls: Vec::new() });
         let dm = s.to_datmap();
         let s2 = Session::from_datmap(&dm).unwrap();
         assert_eq!(s.id, s2.id);

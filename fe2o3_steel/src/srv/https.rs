@@ -297,9 +297,18 @@ impl<
                                     };
                                     let session_store =
                                         oxedyne_fe2o3_red::session::SessionStore::new(db, uid);
+                                    // Per-user workspaces live under
+                                    // <app_root>/<workspace_root>/<user>.
+                                    let workspace_base = self.root.clone()
+                                        .as_pathbuf()
+                                        .join(&red_cfg.workspace_root);
+                                    let executor =
+                                        oxedyne_fe2o3_red::executor::Executor::local_default();
                                     let red_state = oxedyne_fe2o3_red::handler::RedState {
                                         agent,
                                         session_store,
+                                        workspace_base,
+                                        executor,
                                     };
                                     let reunited = read_stream.unsplit(write_stream);
                                     return oxedyne_fe2o3_red::handler::handle_chat_websocket::<

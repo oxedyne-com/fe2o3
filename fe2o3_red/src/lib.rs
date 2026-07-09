@@ -16,8 +16,11 @@
 #![forbid(unsafe_code)]
 
 pub mod agent;
+pub mod executor;
 pub mod handler;
 pub mod llm;
 pub mod protocol;
 pub mod session;
 pub mod syntax;
+pub mod tools;
+pub mod workspace;

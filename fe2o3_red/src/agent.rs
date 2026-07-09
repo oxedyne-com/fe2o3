@@ -8,9 +8,14 @@ use oxedyne_fe2o3_core::prelude::*;
 
 use crate::llm::LlmClient;
 use crate::protocol::{AgentEvent, ChatMessage, Session};
+use crate::tools::ToolRegistry;
 
 use std::sync::Arc;
 use tokio_rustls::rustls::ClientConfig;
+
+/// Upper bound on tool-call rounds in a single turn, to bound cost and
+/// prevent a model from looping on tools indefinitely.
+const MAX_TOOL_ROUNDS: usize = 25;
 
 
 // ┌───────────────────────────────────────────────────────────────┐
@@ -48,49 +53,54 @@ impl Agent {
         &self,
         session:    &mut Session,
         user_msg:   String,
+        registry:   &ToolRegistry,
         on_event:   &mut impl FnMut(AgentEvent),
     ) -> Outcome<()> {
-        // 1. Append user message.
-        session.messages.push(ChatMessage::User {
-            content: user_msg.clone(),
-        });
+        // Append the user message to the persisted history.
+        session.messages.push(ChatMessage::User { content: user_msg });
 
-        // 2. Build messages for the LLM (system prompt + history).
-        let mut llm_messages = Vec::with_capacity(session.messages.len() + 1);
+        // Build the working conversation: system prompt + history.
+        let mut working = Vec::with_capacity(session.messages.len() + 1);
         if !self.system_prompt.is_empty() {
-            llm_messages.push(ChatMessage::System {
-                content: self.system_prompt.clone(),
-            });
+            let mut sys = self.system_prompt.clone();
+            if !registry.is_empty() {
+                sys.push_str(
+                    "\n\nYou have tools to read, write, edit, list, search and \
+                     delete files, and to run shell commands, all within the \
+                     user's workspace directory. Use them to inspect and modify \
+                     the workspace when completing a task.");
+            }
+            working.push(ChatMessage::System { content: sys });
         }
-        llm_messages.extend(session.messages.iter().cloned());
+        working.extend(session.messages.iter().cloned());
 
-        // 3. Call LLM with streaming.
-        let mut full_response = String::new();
+        if registry.is_empty() {
+            return self.run_streaming(session, working, on_event).await;
+        }
+        self.run_tool_loop(session, working, registry, on_event).await
+    }
+
+    /// Pure-chat path: stream tokens as they arrive (no tools).
+    async fn run_streaming(
+        &self,
+        session:    &mut Session,
+        working:    Vec<ChatMessage>,
+        on_event:   &mut impl FnMut(AgentEvent),
+    ) -> Outcome<()> {
+        let mut full = String::new();
         let result = self.llm.chat_stream(
-            &llm_messages,
+            &working,
             &mut |token| {
-                full_response.push_str(token);
+                full.push_str(token);
                 on_event(AgentEvent::Text(token.to_string()));
             },
         ).await;
-
         match result {
-            Ok(response) => {
-                // 5. Append assistant response.
-                let content = if response.content.is_empty() {
-                    full_response
-                } else {
-                    response.content
-                };
-                session.messages.push(ChatMessage::Assistant {
-                    content: content.clone(),
-                });
-
-                // 6. Accumulate token usage.
-                session.prompt_tokens += response.prompt_tokens;
-                session.completion_tokens += response.completion_tokens;
-
-                // 7. Emit Done.
+            Ok(resp) => {
+                let content = if resp.content.is_empty() { full } else { resp.content };
+                session.messages.push(ChatMessage::Assistant { content, tool_calls: Vec::new() });
+                session.prompt_tokens += resp.prompt_tokens;
+                session.completion_tokens += resp.completion_tokens;
                 on_event(AgentEvent::Done);
                 Ok(())
             }
@@ -99,6 +109,64 @@ impl Agent {
                 Err(e)
             }
         }
+    }
+
+    /// Agentic path: non-streaming request/response, executing tool
+    /// calls between rounds until the model returns a final answer.
+    /// Only the user turn and the final assistant text are persisted;
+    /// the intermediate tool exchange stays within the working vec.
+    async fn run_tool_loop(
+        &self,
+        session:    &mut Session,
+        mut working: Vec<ChatMessage>,
+        registry:   &ToolRegistry,
+        on_event:   &mut impl FnMut(AgentEvent),
+    ) -> Outcome<()> {
+        let tools_json = registry.definitions_json();
+        for _ in 0..MAX_TOOL_ROUNDS {
+            let resp = match self.llm.chat_once(&working, tools_json.as_deref()).await {
+                Ok(r) => r,
+                Err(e) => { on_event(AgentEvent::Error(e.to_string())); return Err(e); }
+            };
+            session.prompt_tokens += resp.prompt_tokens;
+            session.completion_tokens += resp.completion_tokens;
+
+            if resp.tool_calls.is_empty() {
+                // Final answer.
+                on_event(AgentEvent::Text(resp.content.clone()));
+                session.messages.push(ChatMessage::Assistant {
+                    content: resp.content, tool_calls: Vec::new(),
+                });
+                on_event(AgentEvent::Done);
+                return Ok(());
+            }
+
+            // Interim assistant text alongside tool calls (uncommon).
+            if !resp.content.is_empty() {
+                on_event(AgentEvent::Text(resp.content.clone()));
+            }
+            working.push(ChatMessage::Assistant {
+                content: resp.content.clone(),
+                tool_calls: resp.tool_calls.clone(),
+            });
+
+            // Execute each requested tool call.
+            for tc in &resp.tool_calls {
+                on_event(AgentEvent::ToolCall { name: tc.name.clone(), args: tc.arguments.clone() });
+                let result = registry.dispatch(&tc.name, &tc.arguments).await;
+                on_event(AgentEvent::ToolResult { name: tc.name.clone(), result: result.clone() });
+                working.push(ChatMessage::Tool { tool_call_id: tc.id.clone(), content: result });
+            }
+        }
+
+        // Exceeded the tool-round budget.
+        let msg = fmt!("Reached the tool-call round limit ({}).", MAX_TOOL_ROUNDS);
+        on_event(AgentEvent::Error(msg.clone()));
+        session.messages.push(ChatMessage::Assistant {
+            content: fmt!("[{}]", msg), tool_calls: Vec::new(),
+        });
+        on_event(AgentEvent::Done);
+        Ok(())
     }
 }
 

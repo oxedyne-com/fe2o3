@@ -24,9 +24,13 @@ use oxedyne_fe2o3_syntax::{
 use std::sync::{Arc, RwLock};
 
 use crate::agent::Agent;
+use crate::executor::Executor;
 use crate::protocol::{AgentEvent, Session};
 use crate::session::SessionStore;
+use crate::tools::{Tool, ToolContext, ToolRegistry};
+use crate::workspace::Workspace;
 use crate::llm::datmap_to_json;
+use std::path::PathBuf;
 use std::pin::pin;
 
 
@@ -44,6 +48,9 @@ pub struct RedConfig {
     pub llm_model:      String,
     pub max_tokens:     u32,
     pub system_prompt:  String,
+    /// Base directory (relative to the app root, or absolute) under
+    /// which each user's workspace lives as `<workspace_root>/<user>`.
+    pub workspace_root: String,
 }
 
 impl RedConfig {
@@ -80,8 +87,13 @@ impl RedConfig {
             Some(Dat::Str(s)) => s.clone(),
             _ => "You are Red, an AI assistant.".to_string(),
         };
+        let workspace_root = match m.get(&dat!("workspace_root")) {
+            Some(Dat::Str(s)) => s.clone(),
+            _ => "workspaces".to_string(),
+        };
         Ok(Self {
-            llm_host, llm_port, llm_path, llm_key, llm_model, max_tokens, system_prompt,
+            llm_host, llm_port, llm_path, llm_key, llm_model, max_tokens,
+            system_prompt, workspace_root,
         })
     }
 }
@@ -96,8 +108,12 @@ pub struct RedState<
     KH:     Hasher + 'static,
     DB:     Database<UIDL, UID, ENC, KH> + 'static,
 > {
-    pub agent:        Agent,
+    pub agent:         Agent,
     pub session_store: SessionStore<UIDL, UID, ENC, KH, DB>,
+    /// Absolute base directory under which per-user workspaces live.
+    pub workspace_base: PathBuf,
+    /// Command-execution backend for the shell tool.
+    pub executor:      Executor,
 }
 
 // ┌───────────────────────────────────────────────────────────────┐
@@ -425,6 +441,29 @@ pub async fn handle_chat_websocket<
                 let agent = state.agent.clone();
                 let syntax_ref = syntax.clone();
 
+                // Build the per-user tool registry: a workspace jailed
+                // to <workspace_base>/<user>, plus the executor.
+                let registry = {
+                    let ws_dir = state.workspace_base.join(&username);
+                    match Workspace::new(ws_dir) {
+                        Ok(ws) => {
+                            let ctx = ToolContext {
+                                workspace: ws,
+                                executor:  state.executor.clone(),
+                                cwd:       String::new(),
+                            };
+                            ToolRegistry::new(Tool::defaults(), ctx)
+                        }
+                        Err(e) => {
+                            let _ = ws.send(&text_msg(syntax.clone(), "error", vec![
+                                dat!(fmt!("Workspace unavailable: {}", e)),
+                            ])).await;
+                            current_session = Some(session);
+                            continue;
+                        }
+                    }
+                };
+
                 let result = {
                     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
 
@@ -432,6 +471,7 @@ pub async fn handle_chat_websocket<
                     let mut agent_fut = pin!(agent.run_turn(
                         &mut session,
                         content,
+                        &registry,
                         &mut on_event,
                     ));
 
@@ -497,6 +537,10 @@ pub async fn handle_chat_websocket<
 fn event_to_ws(ev: &AgentEvent) -> (&'static str, Vec<Dat>) {
     match ev {
         AgentEvent::Text(t)   => ("text",  vec![dat!(t.clone())]),
+        AgentEvent::ToolCall { name, args } =>
+            ("tool_call", vec![dat!(name.clone()), dat!(args.clone())]),
+        AgentEvent::ToolResult { name, result } =>
+            ("tool_result", vec![dat!(name.clone()), dat!(result.clone())]),
         AgentEvent::Done      => ("done",  vec![]),
         AgentEvent::Error(msg) => ("error", vec![dat!(msg.clone())]),
     }

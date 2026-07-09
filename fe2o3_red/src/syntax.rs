@@ -155,6 +155,36 @@ pub fn build_syntax()
     s = res!(s.add_cmd(cmd));
 
     // ----------------------------------------------------------------
+    // Command: tool_call  (server → client: agent is invoking a tool)
+    // ----------------------------------------------------------------
+    let cmd = Cmd::from(CmdConfig {
+        name:   fmt!("tool_call"),
+        help:   Some(fmt!("The agent is invoking a tool.")),
+        vals:   vec![
+            (Kind::Str, fmt!("Tool name")),
+            (Kind::Str, fmt!("JSON arguments")),
+        ],
+        cat:    fmt!("Response"),
+        ..Default::default()
+    });
+    s = res!(s.add_cmd(cmd));
+
+    // ----------------------------------------------------------------
+    // Command: tool_result  (server → client: a tool returned)
+    // ----------------------------------------------------------------
+    let cmd = Cmd::from(CmdConfig {
+        name:   fmt!("tool_result"),
+        help:   Some(fmt!("A tool returned its result.")),
+        vals:   vec![
+            (Kind::Str, fmt!("Tool name")),
+            (Kind::Str, fmt!("Result text")),
+        ],
+        cat:    fmt!("Response"),
+        ..Default::default()
+    });
+    s = res!(s.add_cmd(cmd));
+
+    // ----------------------------------------------------------------
     // Command: done  (server → client: agent turn complete)
     // ----------------------------------------------------------------
     let cmd = Cmd::from(CmdConfig {

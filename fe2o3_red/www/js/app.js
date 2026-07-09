@@ -206,38 +206,74 @@
 		if (!msgrx) return;
 	}
 
-	// Simple syntax parser — parse the response cmd and vals.
+	// Simple syntax parser — parse the response cmd and all values.
 	function Msg_new(raw) {
 		var firstSpace = raw.indexOf(' ');
 		if (firstSpace < 0) {
-			handleChatCmd(raw, null);
+			handleChatCmd(raw, []);
 			return true;
 		}
 		var cmd = raw.substring(0, firstSpace);
 		var rest = raw.substring(firstSpace + 1);
-		var val = null;
-		if (rest.charAt(0) === '"') {
-			var end = 1;
-			while (end < rest.length) {
-				if (rest.charAt(end) === '\\') { end += 2; continue; }
-				if (rest.charAt(end) === '"') break;
-				end++;
-			}
-			val = rest.substring(1, end)
-				.replace(/\\"/g, '"')
-				.replace(/\\n/g, '\n')
-				.replace(/\\t/g, '\t')
-				.replace(/\\\\/g, '\\');
-		} else if (rest.charAt(0) === '{') {
-			try { val = JSON.parse(rest); } catch (e) { val = rest; }
-		}
-		handleChatCmd(cmd, val);
+		handleChatCmd(cmd, parseValues(rest));
 		return true;
 	}
 
-	function handleChatCmd(cmd, val) {
+	// Parse a sequence of space-separated values: quoted strings,
+	// JSON objects, or bare tokens.  Returns an array.
+	function parseValues(rest) {
+		var vals = [];
+		var i = 0;
+		while (i < rest.length) {
+			while (i < rest.length && rest.charAt(i) === ' ') i++;
+			if (i >= rest.length) break;
+			var c = rest.charAt(i);
+			if (c === '"') {
+				var j = i + 1, s = '';
+				while (j < rest.length) {
+					var ch = rest.charAt(j);
+					if (ch === '\\') {
+						var n = rest.charAt(j + 1);
+						s += (n === 'n' ? '\n' : n === 't' ? '\t' : n === 'r' ? '\r' : n);
+						j += 2; continue;
+					}
+					if (ch === '"') break;
+					s += ch; j++;
+				}
+				vals.push(s);
+				i = j + 1;
+			} else if (c === '{') {
+				var depth = 0, k = i, inStr = false;
+				for (; k < rest.length; k++) {
+					var cc = rest.charAt(k);
+					if (inStr) {
+						if (cc === '\\') { k++; continue; }
+						if (cc === '"') inStr = false;
+					} else if (cc === '"') { inStr = true; }
+					else if (cc === '{') { depth++; }
+					else if (cc === '}') { depth--; if (depth === 0) { k++; break; } }
+				}
+				var objStr = rest.substring(i, k);
+				try { vals.push(JSON.parse(objStr)); } catch (e) { vals.push(objStr); }
+				i = k;
+			} else {
+				var sp = rest.indexOf(' ', i);
+				if (sp < 0) sp = rest.length;
+				vals.push(rest.substring(i, sp));
+				i = sp;
+			}
+		}
+		return vals;
+	}
+
+	function handleChatCmd(cmd, vals) {
+		var val = vals[0];
 		if (cmd === 'text') {
 			appendAssistantText(val || '');
+		} else if (cmd === 'tool_call') {
+			renderToolCall(vals[0] || '', vals[1] || '');
+		} else if (cmd === 'tool_result') {
+			renderToolResult(vals[0] || '', vals[1] || '');
 		} else if (cmd === 'done') {
 			endGenerating();
 			chatInput.focus();
@@ -320,6 +356,42 @@
 		}
 		currentAssistantDiv = null;
 		currentAssistantText = '';
+	}
+
+	// Inline tool-call rendering: a collapsible block showing the tool
+	// name, its JSON args, and (once it returns) its result.
+	var lastToolBlock = null;
+
+	function renderToolCall(name, args) {
+		finalizeAssistantMessage(); // close any open text bubble
+		var block = document.createElement('div');
+		block.className = 'tool-block running';
+		var head = document.createElement('div');
+		head.className = 'tool-head';
+		head.textContent = '\u{1F527} ' + name;
+		head.addEventListener('click', function () { block.classList.toggle('collapsed'); });
+		var argsPre = document.createElement('pre');
+		argsPre.className = 'tool-args';
+		argsPre.textContent = typeof args === 'string' ? args : JSON.stringify(args);
+		var resPre = document.createElement('pre');
+		resPre.className = 'tool-result';
+		resPre.style.display = 'none';
+		block.appendChild(head);
+		block.appendChild(argsPre);
+		block.appendChild(resPre);
+		chatOutput.appendChild(block);
+		lastToolBlock = block;
+		chatOutput.scrollTop = chatOutput.scrollHeight;
+	}
+
+	function renderToolResult(name, result) {
+		if (lastToolBlock) {
+			lastToolBlock.classList.remove('running');
+			var resPre = lastToolBlock.querySelector('.tool-result');
+			resPre.textContent = result;
+			resPre.style.display = '';
+		}
+		chatOutput.scrollTop = chatOutput.scrollHeight;
 	}
 
 	function appendError(msg) {
