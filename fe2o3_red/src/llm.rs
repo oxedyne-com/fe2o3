@@ -171,10 +171,10 @@ impl LlmClient {
         let mut req = Vec::with_capacity(request.as_bytes().len() + body_bytes.len());
         req.extend_from_slice(request.as_bytes());
         req.extend_from_slice(body_bytes);
-        stream.write_all(&req).await
-            .map_err(|e| err!(e, "LLM: write request failed."; IO, Network, Wire, Write))?;
-        stream.flush().await
-            .map_err(|e| err!(e, "LLM: flush failed."; IO, Network, Wire, Write))?;
+        res!(stream.write_all(&req).await
+            .map_err(|e| err!(e, "LLM: write request failed."; IO, Network, Wire, Write)));
+        res!(stream.flush().await
+            .map_err(|e| err!(e, "LLM: flush failed."; IO, Network, Wire, Write)));
 
         // ── Read response headers ──────────────────────────────
         //
@@ -297,7 +297,7 @@ impl<S: tokio::io::AsyncRead + Unpin> LineReader<S> {
             buf: Vec::with_capacity(8192),
             buf_pos: 0,
             is_chunked,
-            chunk_remaining: if is_chunked { None } else { None },
+            chunk_remaining: None,
             eof: false,
         }
     }
@@ -324,7 +324,10 @@ impl<S: tokio::io::AsyncRead + Unpin> LineReader<S> {
                 return Ok(None);
             }
             // Need more data.
-            self.fill_buf().await?;
+            match self.fill_buf().await {
+                Ok(())  => {},
+                Err(e)  => return Err(e),
+            }
         }
     }
 
@@ -421,7 +424,12 @@ impl<S: tokio::io::AsyncRead + Unpin> LineReader<S> {
             }
 
             // Read up to chunk_remaining bytes or tmp.len(), whichever is smaller.
-            let remaining = self.chunk_remaining.unwrap();
+            let remaining = match self.chunk_remaining {
+                Some(r) => r,
+                None    => return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "chunk_remaining unexpectedly unset")),
+            };
             let to_read = remaining.min(tmp.len());
             match self.stream.read(&mut tmp[..to_read]).await {
                 Ok(0) => { self.eof = true; return Ok(()); }
@@ -510,7 +518,10 @@ pub fn parse_sse_stream(body: &[u8], on_token: &mut impl FnMut(&str))
 /// from the final SSE chunk.
 fn find_json_object(json: &str, key: &str) -> Option<String> {
     let needle = fmt!("\"{}\":{{", key);
-    let pos = json.find(&needle)?;
+    let pos = match json.find(&needle) {
+        Some(p) => p,
+        None    => return None,
+    };
     let start = pos + needle.len() - 1; // position of the opening brace
     let bytes = json.as_bytes();
     let mut depth = 0i32;
@@ -545,7 +556,10 @@ fn find_json_object(json: &str, key: &str) -> Option<String> {
 /// Scans for `"key":number` and returns the parsed value.
 fn extract_json_number(json: &str, key: &str) -> Option<u64> {
     let needle = fmt!("\"{}\":", key);
-    let pos = json.find(&needle)?;
+    let pos = match json.find(&needle) {
+        Some(p) => p,
+        None    => return None,
+    };
     let mut start = pos + needle.len();
     let bytes = json.as_bytes();
     // Skip whitespace.
@@ -716,7 +730,7 @@ pub mod tests {
     fn test_parse_sse_simple() {
         let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\ndata: [DONE]\n";
         let mut tokens = Vec::new();
-        let full = parse_sse_stream(sse.as_bytes(), &mut |t| tokens.push(t.to_string()));
+        let (full, _pt, _ct) = parse_sse_stream(sse.as_bytes(), &mut |t| tokens.push(t.to_string()));
         assert_eq!(tokens, vec!["Hello", " world"]);
         assert_eq!(full, "Hello world");
     }
@@ -725,23 +739,13 @@ pub mod tests {
     fn test_parse_sse_empty_lines() {
         let sse = "\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\r\n\r\ndata: [DONE]\r\n";
         let mut tokens = Vec::new();
-        let full = parse_sse_stream(sse.as_bytes(), &mut |t| tokens.push(t.to_string()));
+        let (full, _pt, _ct) = parse_sse_stream(sse.as_bytes(), &mut |t| tokens.push(t.to_string()));
         assert_eq!(tokens, vec!["Hi"]);
         assert_eq!(full, "Hi");
     }
 
-    #[test]
-    fn test_dechunk() {
-        // 5 bytes of "Hello", then 0 (end).
-        let chunked = b"5\r\nHello\r\n0\r\n\r\n";
-        assert_eq!(dechunk(chunked), b"Hello");
-    }
-
-    #[test]
-    fn test_dechunk_multiple() {
-        let chunked = b"5\r\nHello\r\n6\r\n world\r\n0\r\n\r\n";
-        assert_eq!(dechunk(chunked), b"Hello world");
-    }
+    // Chunked transfer decoding is now handled inline by `LineReader`;
+    // the standalone `dechunk` helper and its tests were removed.
 
     #[test]
     fn test_datmap_to_json() {

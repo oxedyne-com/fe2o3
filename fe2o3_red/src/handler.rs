@@ -223,7 +223,10 @@ pub async fn handle_chat_websocket<
             ])).await;
             continue;
         }
-        let (cmd_name, cmdrx) = msgrx.cmds.into_iter().next().unwrap();
+        let (cmd_name, cmdrx) = match msgrx.cmds.into_iter().next() {
+            Some(v) => v,
+            None    => continue, // length checked == 1 above
+        };
 
          info!("{}: Red WS command '{}'.", id, cmd_name);
 
@@ -408,7 +411,10 @@ pub async fn handle_chat_websocket<
                 // conflicting with the save after.  The future is
                 // scoped inside a block so the borrow ends before
                 // we put the session back.
-                let mut session = current_session.take().expect("session checked above");
+                let mut session = match current_session.take() {
+                    Some(s) => s,
+                    None    => continue, // presence checked above
+                };
                 let agent = state.agent.clone();
                 let syntax_ref = syntax.clone();
 
@@ -523,9 +529,18 @@ fn get_username<
     db: &Option<(Arc<RwLock<DB>>, UID)>,
     sid: &Option<String>,
 ) -> Option<String> {
-    let sid = sid.as_ref()?;
-    let (db, _uid) = db.as_ref()?;
-    let db_r = db.read().ok()?;
+    let sid = match sid.as_ref() {
+        Some(s) => s,
+        None    => return None,
+    };
+    let (db, _uid) = match db.as_ref() {
+        Some(v) => v,
+        None    => return None,
+    };
+    let db_r = match db.read() {
+        Ok(v)  => v,
+        Err(_) => return None,
+    };
     let meta_key = Dat::Str(fmt!("sess_meta:{}", sid));
     match db_r.get(&meta_key, None) {
         Ok(Some((data, _))) => {

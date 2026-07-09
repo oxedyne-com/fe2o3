@@ -109,14 +109,14 @@ impl<
         }
 
         // Add to the user's session list.
-        self.add_to_user_sessions(username, &id)?;
+        res!(self.add_to_user_sessions(username, &id));
 
         Ok(session)
     }
 
     /// List all sessions for a user (metadata only, no messages).
     pub fn list_sessions(&self, username: &str) -> Outcome<Vec<Session>> {
-        let session_ids = self.get_user_session_ids(username)?;
+        let session_ids = res!(self.get_user_session_ids(username));
         let mut sessions = Vec::new();
         for id in session_ids {
             match self.get_session(&id) {
@@ -180,7 +180,7 @@ impl<
     /// Delete a session.
     pub fn delete_session(&self, username: &str, session_id: &str) -> Outcome<()> {
         // Remove from user's session list.
-        self.remove_from_user_sessions(username, session_id)?;
+        res!(self.remove_from_user_sessions(username, session_id));
 
         // Delete the session record.
         let db_w = match self.db.write() {
