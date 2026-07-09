@@ -42,6 +42,7 @@ pub struct RedConfig {
     pub llm_path:       String,
     pub llm_key:        String,
     pub llm_model:      String,
+    pub max_tokens:     u32,
     pub system_prompt:  String,
 }
 
@@ -69,12 +70,18 @@ impl RedConfig {
             Some(Dat::Str(s)) => s.clone(),
             _ => "accounts/fireworks/models/glm-5p2".to_string(),
         };
+        let max_tokens = match m.get(&dat!("max_tokens")) {
+            Some(Dat::U32(n)) => *n,
+            Some(Dat::U64(n)) => *n as u32,
+            Some(Dat::U16(n)) => *n as u32,
+            _ => 4096, // sensible default; caps runaway reasoning loops
+        };
         let system_prompt = match m.get(&dat!("system_prompt")) {
             Some(Dat::Str(s)) => s.clone(),
             _ => "You are Red, an AI assistant.".to_string(),
         };
         Ok(Self {
-            llm_host, llm_port, llm_path, llm_key, llm_model, system_prompt,
+            llm_host, llm_port, llm_path, llm_key, llm_model, max_tokens, system_prompt,
         })
     }
 }
@@ -139,7 +146,7 @@ pub async fn handle_chat_websocket<
     );
     match ws.connect_as_server(request).await {
         Ok(()) => {
-            info!("{}: Red WS handshake completed.", id);
+            debug!("{}: Red WS handshake completed.", id);
         }
         Err(e) => return Err(err!(e,
             "{}: Red WS handshake failed.", id;
@@ -187,7 +194,7 @@ pub async fn handle_chat_websocket<
     loop {
         let msg = match ws.read().await {
             Ok(Some(WebSocketMessage::Text(txt))) => {
-                info!("{}: Red WS received text: '{}'", id, txt);
+                debug!("{}: Red WS received text: '{}'", id, txt);
                 txt
             }
             Ok(Some(WebSocketMessage::Binary(_))) => continue,
@@ -228,7 +235,7 @@ pub async fn handle_chat_websocket<
             None    => continue, // length checked == 1 above
         };
 
-         info!("{}: Red WS command '{}'.", id, cmd_name);
+        debug!("{}: Red WS command '{}'.", id, cmd_name);
 
         match cmd_name.as_str() {
             "session_new" => {
@@ -501,7 +508,7 @@ fn text_msg(syntax: SyntaxRef, cmd: &str, vals: Vec<Dat>)
     let mut response = match MsgCmd::new(syntax.clone(), cmd) {
         Ok(r) => r,
         Err(e) => {
-            info!("text_msg: MsgCmd::new('{}') failed: {}", cmd, e);
+            debug!("text_msg: MsgCmd::new('{}') failed: {}", cmd, e);
             return WebSocketMessage::Text("error \"internal\"".to_string());
         }
     };
@@ -509,7 +516,7 @@ fn text_msg(syntax: SyntaxRef, cmd: &str, vals: Vec<Dat>)
         response = match response.add_cmd_val(val.clone()) {
             Ok(r) => r,
             Err(e) => {
-                info!("text_msg: add_cmd_val for '{}' failed: {} (val kind={:?})", cmd, e, val.kind());
+                debug!("text_msg: add_cmd_val for '{}' failed: {} (val kind={:?})", cmd, e, val.kind());
                 return WebSocketMessage::Text("error \"internal\"".to_string());
             }
         }

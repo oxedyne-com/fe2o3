@@ -35,6 +35,9 @@ pub struct LlmClient {
     pub path:       String,
     pub api_key:    String,
     pub model:      String,
+    /// Upper bound on generated tokens per turn.  Prevents runaway
+    /// reasoning loops (e.g. GLM-5.2 without a cap).
+    pub max_tokens: u32,
     pub tls_config: Arc<ClientConfig>,
 }
 
@@ -54,6 +57,7 @@ impl LlmClient {
         path:       &str,
         api_key:    &str,
         model:      &str,
+        max_tokens: u32,
         tls_config: Arc<ClientConfig>,
     ) -> Self {
         Self {
@@ -62,6 +66,7 @@ impl LlmClient {
             path:       path.to_string(),
             api_key:    api_key.to_string(),
             model:      model.to_string(),
+            max_tokens,
             tls_config,
         }
     }
@@ -109,7 +114,8 @@ impl LlmClient {
         }
         out.push_str("],");
         out.push_str("\"stream\":true,");
-        out.push_str("\"stream_options\":{\"include_usage\":true}");
+        out.push_str("\"stream_options\":{\"include_usage\":true},");
+        out.push_str(&fmt!("\"max_tokens\":{}", self.max_tokens));
         out.push_str("}");
         out
     }
@@ -777,7 +783,7 @@ pub mod tests {
                 .with_custom_certificate_verifier(Arc::new(NoVerify))
                 .with_no_client_auth()
         );
-        let client = LlmClient::new("api.test.com", 443, "/v1/chat", "key", "model", tls);
+        let client = LlmClient::new("api.test.com", 443, "/v1/chat", "key", "model", 4096, tls);
         let messages = vec![
             ChatMessage::System { content: "You are helpful".to_string() },
             ChatMessage::User { content: "Hello".to_string() },

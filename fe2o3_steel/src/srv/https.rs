@@ -280,6 +280,7 @@ impl<
                                         &red_cfg.llm_path,
                                         &red_cfg.llm_key,
                                         &red_cfg.llm_model,
+                                        red_cfg.max_tokens,
                                         tls,
                                     );
                                     let agent = oxedyne_fe2o3_red::agent::Agent::new(

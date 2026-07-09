@@ -121,17 +121,78 @@
 	}
 
 	// ── Chat WS ────────────────────────────────────────────────
+	var wantChat = false;        // Should the chat WS be kept alive?
+	var reconnectTimer = null;
+	var reconnectDelay = 500;    // Backoff, capped at 8s.
+	var generating = false;      // Is an agent turn in flight?
+
 	function connectChat() {
-		if (chatWs) { chatWs.close(); chatWs = null; }
+		wantChat = true;
+		if (chatWs) { try { chatWs.close(); } catch (e) {} chatWs = null; }
 		var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
 		chatWs = new WebSocket(proto + '//' + location.host + '/chat');
 		chatWs.onopen = function () {
 			console.log('Chat WS connected');
+			reconnectDelay = 500;
 			refreshSessions();
+			// Restore the active session's history after a (re)connect.
+			if (currentSessionId) {
+				sendChat('session_switch "' + escJdat(currentSessionId) + '"');
+			} else {
+				renderEmptyState();
+			}
 		};
 		chatWs.onmessage = handleChatMessage;
-		chatWs.onclose = function () { chatWs = null; };
+		chatWs.onclose = function () {
+			chatWs = null;
+			if (generating) { endGenerating(); }
+			if (wantChat) { scheduleReconnect(); }
+		};
 		chatWs.onerror = function (e) { console.warn('Chat WS error:', e); };
+	}
+
+	function scheduleReconnect() {
+		if (reconnectTimer) return;
+		reconnectTimer = setTimeout(function () {
+			reconnectTimer = null;
+			if (wantChat) { connectChat(); }
+		}, reconnectDelay);
+		reconnectDelay = Math.min(reconnectDelay * 2, 8000);
+	}
+
+	// Stop the current agent turn.  Closing the chat WS aborts the
+	// in-flight LLM stream server-side (the next token send fails and
+	// the handler task ends), and onclose auto-reconnects + reloads.
+	function stopGeneration() {
+		if (chatWs) { try { chatWs.close(); } catch (e) {} }
+		endGenerating();
+	}
+
+	function beginGenerating() {
+		generating = true;
+		showSpinner();
+		setSendMode('stop');
+	}
+
+	function endGenerating() {
+		generating = false;
+		hideSpinner();
+		finalizeAssistantMessage();
+		chatInput.disabled = false;
+		setSendMode('send');
+	}
+
+	function setSendMode(mode) {
+		chatSend.disabled = false;
+		if (mode === 'stop') {
+			chatSend.innerHTML = '■';
+			chatSend.classList.add('stop');
+			chatSend.title = 'Stop';
+		} else {
+			chatSend.innerHTML = '➤';
+			chatSend.classList.remove('stop');
+			chatSend.title = 'Send';
+		}
 	}
 
 	function sendChat(cmd) {
@@ -178,17 +239,12 @@
 		if (cmd === 'text') {
 			appendAssistantText(val || '');
 		} else if (cmd === 'done') {
-			chatSend.disabled = false;
-			chatInput.disabled = false;
+			endGenerating();
 			chatInput.focus();
-			finalizeAssistantMessage();
-			hideSpinner();
 			refreshSessions();
 		} else if (cmd === 'error') {
 			appendError(val || 'Error');
-			chatSend.disabled = false;
-			chatInput.disabled = false;
-			hideSpinner();
+			endGenerating();
 		} else if (cmd === 'data') {
 			if (val && typeof val === 'object') {
 				if (val.sessions) {
@@ -281,6 +337,33 @@
 		currentAssistantText = '';
 	}
 
+	// Welcome / empty state shown when no session is active.
+	function renderEmptyState() {
+		clearChat();
+		var wrap = document.createElement('div');
+		wrap.className = 'empty-state';
+		wrap.innerHTML =
+			'<img class="empty-logo" src="assets/oxedyne_red.svg" alt="">' +
+			'<h2>Welcome to Red</h2>' +
+			'<p>Your workspace for chat and coding. Start a new session to begin.</p>';
+		var btn = document.createElement('button');
+		btn.className = 'empty-new-session';
+		btn.textContent = '+ New session';
+		btn.addEventListener('click', showNewSessionPanel);
+		wrap.appendChild(btn);
+		chatOutput.appendChild(wrap);
+	}
+
+	// Relative time from a unix-seconds timestamp.
+	function fmtRelTime(sec) {
+		if (!sec) return '';
+		var d = Math.floor(Date.now() / 1000) - sec;
+		if (d < 60) return 'just now';
+		if (d < 3600) return Math.floor(d / 60) + 'm ago';
+		if (d < 86400) return Math.floor(d / 3600) + 'h ago';
+		return Math.floor(d / 86400) + 'd ago';
+	}
+
 	function renderHistory(messages) {
 		clearChat();
 		if (!Array.isArray(messages)) return;
@@ -295,14 +378,15 @@
 	}
 
 	function sendUserMessage() {
+		if (generating) return;
 		var text = chatInput.value.trim();
-		if (!text || chatSend.disabled) return;
+		if (!text) return;
+		if (!currentSessionId) { showNewSessionPanel(); return; }
 		appendUserMessage(text);
 		chatInput.value = '';
 		chatInput.style.height = 'auto';
-		chatSend.disabled = true;
 		chatInput.disabled = true;
-		showSpinner();
+		beginGenerating();
 		var escaped = text.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 		sendChat('chat "' + escaped + '"');
 	}
@@ -424,9 +508,14 @@
 			costLabel.textContent = '$' + cost.toFixed(4);
 		}
 
+		var timeLabel = document.createElement('span');
+		timeLabel.className = 'session-box-time';
+		timeLabel.textContent = fmtRelTime(s.created_at);
+
 		meta.appendChild(modelLabel);
 		if (totalTok > 0) meta.appendChild(ctxLabel);
 		if (cost > 0) meta.appendChild(costLabel);
+		if (timeLabel.textContent) meta.appendChild(timeLabel);
 
 		box.appendChild(header);
 		box.appendChild(meta);
@@ -580,8 +669,11 @@
 	}
 
 	function logout() {
+		wantChat = false;
+		if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
 		O3db.logout().then(function () {
 			username = null;
+			currentSessionId = null;
 			if (chatWs) { chatWs.close(); chatWs = null; }
 			showLogin();
 		}).catch(function () { showLogin(); });
@@ -696,7 +788,9 @@
 			sendUserMessage();
 		}
 	});
-	chatSend.addEventListener('click', sendUserMessage);
+	chatSend.addEventListener('click', function () {
+		if (generating) { stopGeneration(); } else { sendUserMessage(); }
+	});
 
 	// ── Init ───────────────────────────────────────────────────
 	initTheme();

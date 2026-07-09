@@ -176,3 +176,16 @@ body { font-family: var(--font); background: var(--bg-primary); color: var(--tex
 .chat-spinner-dot:nth-child(1) { animation-delay: -0.32s; }
 .chat-spinner-dot:nth-child(2) { animation-delay: -0.16s; }
 @keyframes spinner-bounce { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
+
+/* ── WS-A additions: stop button, empty state, session timestamp ── */
+#chat-send.stop { background: var(--danger, #e5484d); }
+#chat-send.stop:hover { background: var(--danger, #e5484d); filter: brightness(1.1); }
+
+.empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; text-align: center; color: var(--text-secondary); gap: 10px; padding: 24px; }
+.empty-state .empty-logo { width: 56px; height: 56px; opacity: 0.9; margin-bottom: 4px; }
+.empty-state h2 { margin: 0; color: var(--text-primary); font-size: 20px; }
+.empty-state p { margin: 0; max-width: 360px; }
+.empty-new-session { margin-top: 12px; background: var(--accent); color: #fff; border: none; border-radius: var(--radius); padding: 10px 18px; font-size: 14px; cursor: pointer; }
+.empty-new-session:hover { background: var(--accent-hover); }
+
+.session-box-time { color: var(--text-secondary); font-size: 11px; }

@@ -166,7 +166,7 @@ mod tests {
 
     fn make_test_agent() -> Agent {
         let tls = build_test_tls_config();
-        let llm = LlmClient::new("api.test.com", 443, "/v1/chat", "key", "model", tls);
+        let llm = LlmClient::new("api.test.com", 443, "/v1/chat", "key", "model", 4096, tls);
         Agent::new(llm, "You are Red, an AI assistant.")
     }
 
