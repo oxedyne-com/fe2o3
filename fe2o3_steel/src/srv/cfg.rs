@@ -799,6 +799,10 @@ pub struct VhostConfig {
     /// WS commands and the `/term/<session>` binary WS endpoint
     /// for this vhost.  `None` disables terminal features.
     pub term_config:            Option<TermConfig>,
+    /// Red agent configuration.  When present, enables the Red
+    /// chat agent for this vhost — sessions, LLM streaming, and
+    /// tool calling via the /chat WS endpoint.
+    pub red_config:             Option<oxedyne_fe2o3_red::handler::RedConfig>,
 }
 
 /// A single entry in a vhost's [`VhostConfig::admin_keys`] list.
@@ -851,6 +855,7 @@ impl Default for VhostConfig {
             head_injection_url:     None,
             proxy_routes:           Vec::new(),
             term_config:            None,
+            red_config:             None,
         }
     }
 }
@@ -1109,6 +1114,14 @@ impl VhostConfig {
                 "VhostConfig: 'term_config' must be a map.";
                 Invalid, Input, Mismatch)),
         };
+        let red_config = match m.get(&dat!("red_config")) {
+            Some(Dat::Map(sub)) => Some(res!(
+                oxedyne_fe2o3_red::handler::RedConfig::from_datmap(sub))),
+            None => None,
+            _ => return Err(err!(
+                "VhostConfig: 'red_config' must be a map.";
+                Invalid, Input, Mismatch)),
+        };
         Ok(Self {
             hostnames,
             public_dir_rel,
@@ -1123,6 +1136,7 @@ impl VhostConfig {
             head_injection_url,
             proxy_routes,
             term_config,
+            red_config,
         })
     }
 

@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Red</title>
+<link rel="stylesheet" href="css/variables.css">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+
+<!-- Login screen -->
+<div id="login-screen" class="login-screen">
+	<div class="login-card">
+		<img class="login-logo" src="assets/oxedyne_red.svg" alt="Oxedyne">
+		<form id="login-form">
+			<input type="text" id="login-user" placeholder="Username" required autocomplete="username" autofocus>
+			<input type="password" id="login-pass" placeholder="Password" required autocomplete="current-password">
+			<button type="submit">Sign in</button>
+		</form>
+		<div id="login-error" class="login-error"></div>
+		<a href="#" id="show-register">Create account</a>
+	</div>
+</div>
+
+<!-- Register screen -->
+<div id="register-screen" class="login-screen" style="display:none;">
+	<div class="login-card">
+		<img class="login-logo" src="assets/oxedyne_red.svg" alt="Oxedyne">
+		<form id="register-form">
+			<input type="text" id="reg-user" placeholder="Username" required autocomplete="username">
+			<input type="password" id="reg-pass" placeholder="Password" required autocomplete="new-password">
+			<input type="password" id="reg-pass2" placeholder="Confirm password" required autocomplete="new-password">
+			<button type="submit">Register</button>
+		</form>
+		<div id="register-error" class="login-error"></div>
+		<a href="#" id="back-to-login">← Back to sign in</a>
+	</div>
+</div>
+
+<!-- Main app -->
+<div id="app" style="display:none;">
+
+	<!-- Sidebar -->
+	<aside class="sidebar" id="sidebar">
+		<div class="sidebar-header">
+			<img class="sidebar-logo" src="assets/oxedyne_logo_white.svg" alt="Oxedyne" data-light="assets/oxedyne_logo_dark.svg" data-dark="assets/oxedyne_logo_white.svg">
+		</div>
+		<button class="new-session-btn" id="new-session-btn">+ New Session</button>
+		<div class="session-list" id="session-list"></div>
+		<div class="sidebar-footer">
+			<div class="user-info" id="user-info"></div>
+			<button class="settings-btn" id="settings-btn" title="Settings">⚙</button>
+			<button class="logout-btn" id="logout-btn" title="Sign out">⏻</button>
+		</div>
+	</aside>
+
+	<!-- Resize handle -->
+	<div class="resize-handle" id="resize-handle"></div>
+
+	<!-- Main area -->
+	<div class="main-area">
+		<div class="top-bar">
+			<span id="current-session-name">No session</span>
+			<button class="theme-toggle" id="theme-toggle" title="Toggle theme">
+				<span class="theme-icon-dark">🌙</span>
+				<span class="theme-icon-light">☀</span>
+			</button>
+		</div>
+		<div class="chat-area">
+			<div class="chat-output" id="chat-output"></div>
+			<div class="chat-input-bar">
+				<textarea id="chat-input" placeholder="Type a message... (Enter to send, Shift+Enter for newline)" rows="1"></textarea>
+				<button id="chat-send" title="Send">➤</button>
+			</div>
+		</div>
+	</div>
+</div>
+
+<!-- Settings modal -->
+<div id="settings-modal" class="modal" style="display:none;">
+	<div class="modal-card">
+		<h2>Settings</h2>
+		<div class="settings-section">
+			<h3>Change Password</h3>
+			<form id="change-pass-form">
+				<input type="password" id="old-pass" placeholder="Current password" required>
+				<input type="password" id="new-pass" placeholder="New password" required>
+				<input type="password" id="new-pass2" placeholder="Confirm new password" required>
+				<button type="submit">Update password</button>
+			</form>
+			<div id="change-pass-error" class="login-error"></div>
+		</div>
+		<button class="modal-close" id="settings-close">Close</button>
+	</div>
+</div>
+
+<script src="js/marked.min.js"></script>
+<script src="js/o3db.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

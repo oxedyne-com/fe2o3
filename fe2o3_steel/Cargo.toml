@@ -33,6 +33,7 @@ oxedyne_fe2o3_syntax			= { path = "../fe2o3_syntax" }
 oxedyne_fe2o3_sys				= { path = "../fe2o3_sys" }
 oxedyne_fe2o3_text				= { path = "../fe2o3_text" }
 oxedyne_fe2o3_tui				= { path = "../fe2o3_tui" }
+oxedyne_fe2o3_red 				= { path = "../fe2o3_red" }
 
 notify = "6.1.1"
 nix = { version = "0.31", features = ["term", "fs"] }

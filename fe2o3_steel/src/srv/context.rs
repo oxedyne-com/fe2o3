@@ -97,6 +97,9 @@ pub struct VhostRuntime<
     /// for this vhost.  `None` disables term_* commands and the
     /// /term/<session> WS endpoint.
     pub term_manager:   Option<Arc<crate::srv::ws::term::TerminalManager>>,
+    /// Red configuration (cloned from VhostConfig).  When present,
+    /// the /chat WS endpoint dispatches to the Red agent handler.
+    pub red_config:     Option<oxedyne_fe2o3_red::handler::RedConfig>,
 }
 
 impl<

@@ -2318,6 +2318,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxedyne_fe2o3_red"
+version = "0.1.0"
+dependencies = [
+ "oxedyne_fe2o3_core",
+ "oxedyne_fe2o3_hash",
+ "oxedyne_fe2o3_iop_crypto",
+ "oxedyne_fe2o3_iop_db",
+ "oxedyne_fe2o3_iop_hash",
+ "oxedyne_fe2o3_jdat",
+ "oxedyne_fe2o3_net",
+ "oxedyne_fe2o3_o3db_sync",
+ "oxedyne_fe2o3_stds",
+ "oxedyne_fe2o3_syntax",
+ "oxedyne_fe2o3_text",
+ "rustls",
+ "rustls-pemfile",
+ "tokio",
+ "tokio-rustls",
+]
+
+[[package]]
 name = "oxedyne_fe2o3_shield"
 version = "0.5.0"
 dependencies = [
@@ -2394,6 +2415,7 @@ dependencies = [
  "oxedyne_fe2o3_namex",
  "oxedyne_fe2o3_net",
  "oxedyne_fe2o3_o3db_sync",
+ "oxedyne_fe2o3_red",
  "oxedyne_fe2o3_stds",
  "oxedyne_fe2o3_syntax",
  "oxedyne_fe2o3_sys",

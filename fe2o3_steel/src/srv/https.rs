@@ -250,6 +250,69 @@ impl<
                                 }
                             }
                         }
+                        // ── Red chat WS dispatch ───────────────────
+                        // If the request path is /chat and the vhost
+                        // has red_config, route to the Red agent
+                        // handler which manages its own WS loop for
+                        // streaming LLM responses.
+                        if let Some(ref red_cfg) = vhost.red_config {
+                            if let HttpHeadline::Request { ref loc, .. } =
+                                request.header.headline
+                            {
+                                let req_path = loc.path.as_string();
+                                if req_path == "/chat" || req_path.starts_with("/chat/") {
+                                    log!(log_level,
+                                        "{}: red chat ws", id);
+                                    // Build the agent and session store.
+                                    let tls = match crate::app::server::build_outbound_tls_client() {
+                                        Ok(t) => t,
+                                        Err(e) => {
+                                            log!(log_level,
+                                                "{}: red: TLS config failed: {}", id, e);
+                                            break;
+                                        }
+                                    };
+                                    let llm = oxedyne_fe2o3_red::llm::LlmClient::new(
+                                        &red_cfg.llm_host,
+                                        red_cfg.llm_port,
+                                        &red_cfg.llm_path,
+                                        &red_cfg.llm_key,
+                                        &red_cfg.llm_model,
+                                        tls,
+                                    );
+                                    let agent = oxedyne_fe2o3_red::agent::Agent::new(
+                                        llm, &red_cfg.system_prompt,
+                                    );
+                                    let vhost_db = self.db_for_vhost(vhost.primary_hostname());
+                                    let (db, uid) = match &vhost_db {
+                                        Some(pair) => (pair.0.clone(), pair.1.clone()),
+                                        None => {
+                                            log!(log_level,
+                                                "{}: red: no database for vhost.", id);
+                                            break;
+                                        }
+                                    };
+                                    let session_store =
+                                        oxedyne_fe2o3_red::session::SessionStore::new(db, uid);
+                                    let red_state = oxedyne_fe2o3_red::handler::RedState {
+                                        agent,
+                                        session_store,
+                                        syntax: vhost.ws_syntax.clone(),
+                                    };
+                                    let reunited = read_stream.unsplit(write_stream);
+                                    return oxedyne_fe2o3_red::handler::handle_chat_websocket::<
+                                        UIDL, UID, ENC, KH, DB, _,
+                                    >(
+                                        reunited,
+                                        red_state,
+                                        sid_str.clone(),
+                                        vhost_db,
+                                        request,
+                                        &id,
+                                    ).await;
+                                }
+                            }
+                        }
                         // ── Terminal WS dispatch ──────────────────
                         // If the request path starts with /term/,
                         // route to the terminal I/O bridge instead

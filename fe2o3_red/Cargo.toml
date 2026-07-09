@@ -1,0 +1,32 @@
+[package]
+name = "oxedyne_fe2o3_red"
+version = "0.1.0"
+authors = ["Jason Hoogland <jason@oxedyne.io>"]
+edition = "2021"
+license = "BSD-2-Clause/Apache-2.0"
+description = "Red — AI agent and web chatbot for the Hematite Steel server."
+repository = "https://github.com/oxedyne-io/fe2o3"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+oxedyne_fe2o3_core			= { path = "../fe2o3_core" }
+oxedyne_fe2o3_jdat 			= { path = "../fe2o3_jdat" }
+oxedyne_fe2o3_net  			= { path = "../fe2o3_net" }
+oxedyne_fe2o3_hash			= { path = "../fe2o3_hash" }
+oxedyne_fe2o3_iop_hash			= { path = "../fe2o3_iop_hash" }
+oxedyne_fe2o3_iop_db			= { path = "../fe2o3_iop_db" }
+oxedyne_fe2o3_iop_crypto		= { path = "../fe2o3_iop_crypto" }
+oxedyne_fe2o3_o3db_sync			= { path = "../fe2o3_o3db_sync" }
+oxedyne_fe2o3_syntax			= { path = "../fe2o3_syntax" }
+oxedyne_fe2o3_stds			= { path = "../fe2o3_stds" }
+oxedyne_fe2o3_text			= { path = "../fe2o3_text" }
+
+tokio = { version = "1.35", features = ["full"] }
+tokio-rustls = "0.26"
+rustls = { version = "0.23", features = ["ring"] }
+rustls-pemfile = "2"
+
+[dev-dependencies]
+tokio = { version = "1.35", features = ["full", "test-util"] }
