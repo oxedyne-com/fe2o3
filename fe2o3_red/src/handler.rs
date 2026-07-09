@@ -27,6 +27,7 @@ use crate::agent::Agent;
 use crate::protocol::{AgentEvent, Session};
 use crate::session::SessionStore;
 use crate::llm::datmap_to_json;
+use std::pin::pin;
 
 
 // ┌───────────────────────────────────────────────────────────────┐
@@ -375,55 +376,86 @@ pub async fn handle_chat_websocket<
                 };
 
                 // Ensure we have a current session.
-                let session = match &mut current_session {
-                    Some(s) => s,
-                    None => {
-                        // Auto-create a session.
-                        let s = match state.session_store.create_session(
-                            &username, "Untitled", &state.agent.llm.model,
-                        ) {
-                            Ok(s) => s,
-                            Err(e) => {
-                                let _ = ws.send(&text_msg(syntax.clone(), "error", vec![
-                                    dat!(e.to_string()),
-                                ])).await;
-                                continue;
-                            }
-                        };
-                        current_session_id = Some(s.id.clone());
-                        current_session = Some(s);
-                        current_session.as_mut().unwrap()
+                if current_session.is_none() {
+                    // Auto-create a session.
+                    match state.session_store.create_session(
+                        &username, "Untitled", &state.agent.llm.model,
+                    ) {
+                        Ok(s) => {
+                            current_session_id = Some(s.id.clone());
+                            current_session = Some(s);
+                        }
+                        Err(e) => {
+                            let _ = ws.send(&text_msg(syntax.clone(), "error", vec![
+                                dat!(e.to_string()),
+                            ])).await;
+                            continue;
+                        }
                     }
-                };
-
-                // Run the agent turn.
-                let mut events = Vec::new();
-                let agent = state.agent.clone();
-                let result = agent.run_turn(
-                    session,
-                    content,
-                    &mut |ev| {
-                        events.push(ev);
-                    },
-                ).await;
-
-                // Stream events to the client.
-                for ev in &events {
-                    let cmd_name = match ev {
-                        AgentEvent::Text(_) => "text",
-                        AgentEvent::Done => "done",
-                        AgentEvent::Error(_) => "error",
-                    };
-                    let vals = match ev {
-                        AgentEvent::Text(t) => vec![dat!(t.clone())],
-                        AgentEvent::Done => vec![],
-                        AgentEvent::Error(msg) => vec![dat!(msg.clone())],
-                    };
-                    let _ = ws.send(&text_msg(syntax.clone(), cmd_name, vals)).await;
                 }
 
-                // Save the updated session.
-                if let Some(s) = &current_session {
+                // Run the agent turn with streaming events.
+                //
+                // The on_event callback is synchronous (FnMut), but
+                // we need to send WS messages asynchronously.  We
+                // use an mpsc channel and pin the agent future so
+                // we can concurrently drain events while the agent
+                // turn runs — giving the user true incremental
+                // streaming.
+                //
+                // The session is taken out of current_session so
+                // the pinned future can hold &mut without
+                // conflicting with the save after.  The future is
+                // scoped inside a block so the borrow ends before
+                // we put the session back.
+                let mut session = current_session.take().expect("session checked above");
+                let agent = state.agent.clone();
+                let syntax_ref = syntax.clone();
+
+                let result = {
+                    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+
+                    let mut on_event = |ev| { let _ = tx.send(ev); };
+                    let mut agent_fut = pin!(agent.run_turn(
+                        &mut session,
+                        content,
+                        &mut on_event,
+                    ));
+
+                    let mut result = Ok(());
+                    loop {
+                        tokio::select! {
+                            biased;
+                            r = &mut agent_fut => {
+                                result = r;
+                                // Drain any remaining events.
+                                while let Ok(ev) = rx.try_recv() {
+                                    let (cmd_name, vals) = event_to_ws(&ev);
+                                    let _ = ws.send(&text_msg(
+                                        syntax_ref.clone(), cmd_name, vals,
+                                    )).await;
+                                }
+                                break;
+                            }
+                            ev = rx.recv() => {
+                                match ev {
+                                    Some(ev) => {
+                                        let (cmd_name, vals) = event_to_ws(&ev);
+                                        let _ = ws.send(&text_msg(
+                                            syntax_ref.clone(), cmd_name, vals,
+                                        )).await;
+                                    }
+                                    None => break,
+                                }
+                            }
+                        }
+                    }
+                    result
+                };
+
+                // Put the session back and save.
+                current_session = Some(session);
+                if let Some(ref s) = current_session {
                     let _ = state.session_store.save_session(s);
                 }
 
@@ -447,6 +479,15 @@ pub async fn handle_chat_websocket<
 // ┌───────────────────────────────────────────────────────────────┐
 // │ Helpers                                                        │
 // └───────────────────────────────────────────────────────────────┘
+
+/// Map an `AgentEvent` to a WS command name and value list.
+fn event_to_ws(ev: &AgentEvent) -> (&'static str, Vec<Dat>) {
+    match ev {
+        AgentEvent::Text(t)   => ("text",  vec![dat!(t.clone())]),
+        AgentEvent::Done      => ("done",  vec![]),
+        AgentEvent::Error(msg) => ("error", vec![dat!(msg.clone())]),
+    }
+}
 
 fn text_msg(syntax: SyntaxRef, cmd: &str, vals: Vec<Dat>)
     -> WebSocketMessage

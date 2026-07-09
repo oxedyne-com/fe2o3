@@ -4,6 +4,11 @@
 (function () {
 	'use strict';
 
+	// Render single newlines as <br> in markdown.
+	if (typeof marked !== 'undefined') {
+		marked.setOptions({ breaks: true });
+	}
+
 	// ── Models ─────────────────────────────────────────────────
 	var MODELS = [
 		{ id: 'accounts/fireworks/models/glm-5p2',     label: 'GLM-5.2' },
@@ -159,6 +164,8 @@
 			}
 			val = rest.substring(1, end)
 				.replace(/\\"/g, '"')
+				.replace(/\\n/g, '\n')
+				.replace(/\\t/g, '\t')
 				.replace(/\\\\/g, '\\');
 		} else if (rest.charAt(0) === '{') {
 			try { val = JSON.parse(rest); } catch (e) { val = rest; }

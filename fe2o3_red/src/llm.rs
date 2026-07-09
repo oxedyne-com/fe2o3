@@ -68,17 +68,18 @@ impl LlmClient {
 
     /// Send a streaming chat completion request.
     ///
-    /// Calls `on_token` for each text delta as it arrives from the
-    /// LLM.  Returns the full accumulated response when the stream
-    /// completes.
+    /// Reads the SSE response line-by-line from the TLS stream,
+    /// calling `on_token` for each text delta *as it arrives*.
+    /// Returns the full accumulated response and token usage when
+    /// the stream completes.
     pub async fn chat_stream(
         &self,
         messages:   &[ChatMessage],
         on_token:   &mut impl FnMut(&str),
     ) -> Outcome<ChatResponse> {
         let body = self.build_request_body(messages);
-        let response_bytes = res!(self.do_request(&body).await);
-        let (content, prompt_tok, completion_tok) = parse_sse_stream(&response_bytes, on_token);
+        let (prompt_tok, completion_tok, content) =
+            res!(self.do_request_stream(&body, on_token).await);
         Ok(ChatResponse {
             content,
             prompt_tokens: prompt_tok,
@@ -114,7 +115,20 @@ impl LlmClient {
     }
 
     /// Perform the HTTPS request and return the raw response body.
-    async fn do_request(&self, body: &str) -> Outcome<Vec<u8>> {
+    /// Send the HTTP request and stream the SSE response line-by-line.
+    ///
+    /// Reads the response headers first, then reads the body
+    /// incrementally — calling `on_token` for each `data:` line
+    /// as it arrives.  Handles both chunked and identity transfer
+    /// encoding.
+    ///
+    /// Returns `(prompt_tokens, completion_tokens, full_content)`.
+    async fn do_request_stream(
+        &self,
+        body:           &str,
+        on_token:       &mut impl FnMut(&str),
+    ) -> Outcome<(u64, u64, String)>
+    {
         use tokio_rustls::TlsConnector;
         use tokio::net::TcpStream;
 
@@ -152,79 +166,290 @@ impl LlmClient {
         };
 
         // Write request — combine headers and body into a single
-        // buffer so they're sent in one TLS record.  Some CDN-
-        // fronted servers reject requests where headers and body
-        // arrive in separate records.
+        // TLS record so CDN-fronted servers don't reject split
+        // header/body writes.
         let mut req = Vec::with_capacity(request.as_bytes().len() + body_bytes.len());
         req.extend_from_slice(request.as_bytes());
         req.extend_from_slice(body_bytes);
-        info!("LLM: sending {} bytes to {}:{}{}", req.len(), self.host, self.port, self.path);
         stream.write_all(&req).await
             .map_err(|e| err!(e, "LLM: write request failed."; IO, Network, Wire, Write))?;
         stream.flush().await
             .map_err(|e| err!(e, "LLM: flush failed."; IO, Network, Wire, Write))?;
-        info!("LLM: request sent, waiting for response...");
 
-        // Read entire response into buffer.
-        // The response is SSE — we read it all since fe2o3_net's
-        // HttpMessage::read buffers the full body.  For true
-        // incremental streaming we'd need to read line-by-line,
-        // but for Phase 1 reading the full response then parsing
-        // is simpler and sufficient.
-        let mut buf = Vec::with_capacity(8192);
-        let mut chunk = [0u8; 4096];
+        // ── Read response headers ──────────────────────────────
+        //
+        // Read byte-by-byte until we find \r\n\r\n.  This is
+        // slightly wasteful but headers are small (< 1KB) and
+        // the simplicity is worth it.
+        let mut hdr_buf = Vec::with_capacity(2048);
+        let mut byte = [0u8; 1];
         loop {
-            match stream.read(&mut chunk).await {
-                Ok(0) => {
-                    info!("LLM: response complete, {} bytes received.", buf.len());
-                    break;
+            match stream.read(&mut byte).await {
+                Ok(0) => break,
+                Ok(_) => {
+                    hdr_buf.push(byte[0]);
+                    if hdr_buf.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
                 }
-                Ok(n) => {
-                    info!("LLM: read {} bytes.", n);
-                    buf.extend_from_slice(&chunk[..n]);
+                Err(e) if e.kind() == tokio::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(err!(e,
+                    "LLM: read headers failed."; IO, Network, Wire, Read)),
+            }
+        }
+
+        let headers_str = String::from_utf8_lossy(&hdr_buf);
+        let is_chunked = headers_str
+            .to_ascii_lowercase()
+            .contains("transfer-encoding: chunked");
+
+        // Check for HTTP error status.
+        let status_line = headers_str.lines().next().unwrap_or("");
+        if !status_line.contains("200") {
+            // Read remaining body for error details.
+            let mut err_body = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                match stream.read(&mut chunk).await {
+                    Ok(0) => break,
+                    Ok(n) => err_body.extend_from_slice(&chunk[..n]),
+                    Err(_) => break,
                 }
-                Err(e) if e.kind() == tokio::io::ErrorKind::UnexpectedEof => {
-                    // Many HTTP servers close the TCP connection
-                    // without a TLS close_notify when using
-                    // Connection: close.  rustls surfaces this as
-                    // UnexpectedEof.  We have already received the
-                    // full response body, so treat this as a
-                    // graceful end-of-stream.
-                    info!("LLM: peer closed (no close_notify), {} bytes received.", buf.len());
-                    break;
+            }
+            let err_msg = String::from_utf8_lossy(&err_body);
+            return Err(err!(
+                "LLM: HTTP error: {} | {}", status_line, &err_msg[..err_msg.len().min(200)];
+                IO, Network, Wire, Read));
+        }
+
+        // ── Stream body line-by-line ───────────────────────────
+        let mut reader = LineReader::new(stream, is_chunked);
+        let mut full = String::new();
+        let mut prompt_tokens = 0u64;
+        let mut completion_tokens = 0u64;
+
+        loop {
+            let line = match reader.read_line().await {
+                Ok(Some(l)) => l,
+                Ok(None) => break,
+                Err(e) if e.kind() == tokio::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(err!(e,
+                    "LLM: read SSE line failed."; IO, Network, Wire, Read)),
+            };
+            let line = line.trim();
+            if !line.starts_with("data: ") {
+                continue;
+            }
+            let data = &line[6..];
+            if data == "[DONE]" {
+                break;
+            }
+            // Extract content token.
+            if let Some(content) = extract_json_string(data, "content") {
+                on_token(&content);
+                full.push_str(&content);
+            }
+            // Extract usage from the final chunk.
+            if let Some(usage_str) = find_json_object(data, "usage") {
+                if let Some(pt) = extract_json_number(&usage_str, "prompt_tokens") {
+                    prompt_tokens = pt;
                 }
-                Err(e) => {
-                    info!("LLM: read error after {} bytes: {}", buf.len(), e);
-                    return Err(err!(e,
-                    "LLM: read response failed."; IO, Network, Wire, Read))
+                if let Some(ct) = extract_json_number(&usage_str, "completion_tokens") {
+                    completion_tokens = ct;
                 }
             }
         }
 
-        // Find the body (after \r\n\r\n).
-        let body_start = buf.windows(4)
-            .position(|w| w == b"\r\n\r\n")
-            .map(|p| p + 4)
-            .unwrap_or(0);
-
-        // Check for chunked transfer encoding — if the response uses
-        // chunked encoding, we need to dechunk it.
-        let headers_str = String::from_utf8_lossy(&buf[..body_start.min(buf.len())]);
-        let is_chunked = headers_str.to_ascii_lowercase().contains("transfer-encoding: chunked");
-
-        let raw_body = &buf[body_start..];
-        if is_chunked {
-            Ok(dechunk(raw_body))
-        } else {
-            Ok(raw_body.to_vec())
-        }
+        Ok((prompt_tokens, completion_tokens, full))
     }
 }
 
 
 // ┌───────────────────────────────────────────────────────────────┐
-// │ SSE parsing                                                    │
+// │ LineReader — incremental line reader for TLS streams           │
 // └───────────────────────────────────────────────────────────────┘
+
+/// Reads lines from a TLS stream, handling HTTP chunked transfer
+/// encoding transparently.
+///
+/// For identity (Content-Length) encoding, lines are read directly
+/// from the stream.  For chunked encoding, chunk headers are parsed
+/// and chunk data is dechunked on the fly, so the caller sees a
+/// continuous stream of lines.
+///
+/// A line is terminated by `\n` (with or without a preceding `\r`).
+struct LineReader<S: tokio::io::AsyncRead + Unpin> {
+    stream:     S,
+    buf:        Vec<u8>,
+    buf_pos:    usize,
+    is_chunked: bool,
+    // For chunked encoding: remaining bytes in the current chunk.
+    // None means we need to read the next chunk header.
+    chunk_remaining: Option<usize>,
+    eof:        bool,
+}
+
+impl<S: tokio::io::AsyncRead + Unpin> LineReader<S> {
+
+    fn new(stream: S, is_chunked: bool) -> Self {
+        Self {
+            stream,
+            buf: Vec::with_capacity(8192),
+            buf_pos: 0,
+            is_chunked,
+            chunk_remaining: if is_chunked { None } else { None },
+            eof: false,
+        }
+    }
+
+    /// Read the next line (without the trailing newline).
+    ///
+    /// Returns `Ok(None)` at end of stream.
+    async fn read_line(&mut self) -> std::io::Result<Option<String>> {
+        loop {
+            // Try to find a complete line in the buffer.
+            if let Some(line) = self.try_extract_line() {
+                return Ok(Some(line));
+            }
+            if self.eof {
+                // If there's remaining data without a newline,
+                // return it as the last line.
+                if self.buf_pos < self.buf.len() {
+                    let rest = String::from_utf8_lossy(
+                        &self.buf[self.buf_pos..]
+                    ).to_string();
+                    self.buf_pos = self.buf.len();
+                    return Ok(Some(rest));
+                }
+                return Ok(None);
+            }
+            // Need more data.
+            self.fill_buf().await?;
+        }
+    }
+
+    /// Try to extract a complete line from the buffer.
+    fn try_extract_line(&mut self) -> Option<String> {
+        let search_start = self.buf_pos;
+        let rest = &self.buf[search_start..];
+        if let Some(pos) = rest.iter().position(|&b| b == b'\n') {
+            let end = search_start + pos;
+            let line = &self.buf[self.buf_pos..end];
+            // Strip trailing \r if present.
+            let line = if line.ends_with(b"\r") { &line[..line.len()-1] } else { line };
+            let s = String::from_utf8_lossy(line).to_string();
+            self.buf_pos = end + 1; // skip the \n
+            // Compact buffer periodically.
+            if self.buf_pos > 16384 {
+                self.buf.drain(..self.buf_pos);
+                self.buf_pos = 0;
+            }
+            return Some(s);
+        }
+        None
+    }
+
+    /// Read more data into the buffer.
+    async fn fill_buf(&mut self) -> std::io::Result<()> {
+        let mut tmp = [0u8; 4096];
+
+        if self.is_chunked {
+            // For chunked encoding, we need to be careful about
+            // chunk boundaries.  However, SSE lines are always
+            // within a single chunk in practice (servers don't
+            // split a data: line across chunks).  We read raw
+            // bytes and handle chunk boundaries in the line
+            // buffer.  This is simpler than tracking exact chunk
+            // positions and works because we only need lines.
+            //
+            // For correctness, we parse chunk headers when we
+            // run out of chunk data.
+            if self.chunk_remaining == Some(0) {
+                // Read and discard the trailing \r\n after a chunk,
+                // then read the next chunk header.
+                let mut crlf = [0u8; 2];
+                match self.stream.read_exact(&mut crlf).await {
+                    Ok(_) => {}
+                    Err(e) if e.kind() == tokio::io::ErrorKind::UnexpectedEof => {
+                        self.eof = true;
+                        return Ok(());
+                    }
+                    Err(e) => return Err(e),
+                }
+                self.chunk_remaining = None;
+            }
+
+            if self.chunk_remaining.is_none() {
+                // Read chunk size line.
+                let mut size_line = Vec::new();
+                let mut byte = [0u8; 1];
+                loop {
+                    match self.stream.read(&mut byte).await {
+                        Ok(0) => { self.eof = true; return Ok(()); }
+                        Ok(_) => {
+                            size_line.push(byte[0]);
+                            if size_line.ends_with(b"\r\n") {
+                                break;
+                            }
+                            // Some servers include chunk extensions
+                            // after the size: 1a;ext=val\r\n
+                            if size_line.ends_with(b"\n") {
+                                break;
+                            }
+                        }
+                        Err(e) if e.kind() == tokio::io::ErrorKind::UnexpectedEof => {
+                            self.eof = true;
+                            return Ok(());
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                let size_str = String::from_utf8_lossy(&size_line);
+                let size_str = size_str.trim();
+                // Strip chunk extensions (everything after ;).
+                let size_str = size_str.split(';').next().unwrap_or("0").trim();
+                let size = match usize::from_str_radix(size_str, 16) {
+                    Ok(n) => n,
+                    Err(_) => { self.eof = true; return Ok(()); }
+                };
+                if size == 0 {
+                    // Last chunk — end of body.
+                    self.eof = true;
+                    return Ok(());
+                }
+                self.chunk_remaining = Some(size);
+            }
+
+            // Read up to chunk_remaining bytes or tmp.len(), whichever is smaller.
+            let remaining = self.chunk_remaining.unwrap();
+            let to_read = remaining.min(tmp.len());
+            match self.stream.read(&mut tmp[..to_read]).await {
+                Ok(0) => { self.eof = true; return Ok(()); }
+                Ok(n) => {
+                    self.buf.extend_from_slice(&tmp[..n]);
+                    self.chunk_remaining = Some(remaining - n);
+                }
+                Err(e) if e.kind() == tokio::io::ErrorKind::UnexpectedEof => {
+                    self.eof = true;
+                    return Ok(());
+                }
+                Err(e) => return Err(e),
+            }
+        } else {
+            // Identity encoding — read directly.
+            match self.stream.read(&mut tmp).await {
+                Ok(0) => { self.eof = true; return Ok(()); }
+                Ok(n) => self.buf.extend_from_slice(&tmp[..n]),
+                Err(e) if e.kind() == tokio::io::ErrorKind::UnexpectedEof => {
+                    self.eof = true;
+                    return Ok(());
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+}
 
 /// Parse an SSE response body, calling `on_token` for each text delta.
 ///
@@ -394,38 +619,6 @@ fn extract_json_string(json: &str, key: &str) -> Option<String> {
         return None;
     }
 }
-
-/// Dechunk an HTTP chunked transfer-encoded body.
-///
-/// Format: `<hex-size>\r\n<data>\r\n` repeated, ending with `0\r\n\r\n`.
-fn dechunk(data: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(data.len());
-    let mut pos = 0;
-    while pos < data.len() {
-        // Find the chunk size line.
-        let line_end = match data[pos..].windows(2).position(|w| w == b"\r\n") {
-            Some(p) => pos + p,
-            None => break,
-        };
-        let size_str = String::from_utf8_lossy(&data[pos..line_end]);
-        let size = match usize::from_str_radix(size_str.trim(), 16) {
-            Ok(n) => n,
-            Err(_) => break,
-        };
-        if size == 0 {
-            break;
-        }
-        let data_start = line_end + 2;
-        let data_end = data_start + size;
-        if data_end > data.len() {
-            break;
-        }
-        out.extend_from_slice(&data[data_start..data_end]);
-        pos = data_end + 2; // skip \r\n after chunk data
-    }
-    out
-}
-
 
 /// Convert a JDAT DaticleMap to a minimal JSON string.
 ///
