@@ -10,13 +10,28 @@
 	}
 
 	// ── Models ─────────────────────────────────────────────────
+	// ctx = context window (tokens). Approximate; provider /models
+	// endpoint or config will supply exact values later.
 	var MODELS = [
-		{ id: 'accounts/fireworks/models/glm-5p2',     label: 'GLM-5.2' },
-		{ id: 'accounts/fireworks/models/glm-5p1',     label: 'GLM-5.1' },
-		{ id: 'accounts/fireworks/models/gpt-oss-120b', label: 'GPT-OSS 120B' },
-		{ id: 'accounts/fireworks/models/deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
-		{ id: 'accounts/fireworks/models/kimi-k2p6',   label: 'Kimi K2.6' },
+		{ id: 'accounts/fireworks/models/glm-5p2',     label: 'GLM-5.2',       ctx: 1048576 },
+		{ id: 'accounts/fireworks/models/glm-5p1',     label: 'GLM-5.1',       ctx: 131072 },
+		{ id: 'accounts/fireworks/models/gpt-oss-120b', label: 'GPT-OSS 120B', ctx: 131072 },
+		{ id: 'accounts/fireworks/models/deepseek-v4-pro', label: 'DeepSeek V4 Pro', ctx: 163840 },
+		{ id: 'accounts/fireworks/models/kimi-k2p6',   label: 'Kimi K2.6',     ctx: 262144 },
 	];
+
+	function getModelCtx(modelId) {
+		for (var i = 0; i < MODELS.length; i++) {
+			if (MODELS[i].id === modelId) return MODELS[i].ctx || 131072;
+		}
+		return 131072;
+	}
+
+	function fmtCtx(n) {
+		if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
+		if (n >= 1000) return Math.round(n / 1000) + 'k';
+		return '' + n;
+	}
 
 	// ── State ──────────────────────────────────────────────────
 	var mgmtWs = null;       // Management WS (auth via o3db.js)
@@ -591,6 +606,29 @@
 
 		box.appendChild(header);
 		box.appendChild(meta);
+
+		// Live context-window meter: current context usage vs the
+		// model's limit.
+		var lpt = s.last_prompt_tokens || 0;
+		if (lpt > 0) {
+			var ctx = getModelCtx(s.model || '');
+			var pct = Math.min(100, (lpt / ctx) * 100);
+			var meter = document.createElement('div');
+			meter.className = 'ctx-meter';
+			var bar = document.createElement('div');
+			bar.className = 'ctx-bar';
+			var fill = document.createElement('div');
+			fill.className = 'ctx-fill';
+			fill.style.width = pct.toFixed(1) + '%';
+			if (pct > 85) fill.classList.add('high');
+			bar.appendChild(fill);
+			var lbl = document.createElement('span');
+			lbl.className = 'ctx-meter-label';
+			lbl.textContent = fmtCtx(lpt) + ' / ' + fmtCtx(ctx);
+			meter.appendChild(bar);
+			meter.appendChild(lbl);
+			box.appendChild(meter);
+		}
 
 		box.addEventListener('click', function (e) {
 			if (e.target === closeBtn) return;

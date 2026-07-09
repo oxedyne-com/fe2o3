@@ -199,3 +199,10 @@ body { font-family: var(--font); background: var(--bg-primary); color: var(--tex
 .tool-args { color: var(--text-secondary); }
 .tool-result { color: var(--text-primary); }
 .tool-block.collapsed .tool-args, .tool-block.collapsed .tool-result { display: none !important; }
+
+/* ── WS-G: context-window meter ── */
+.ctx-meter { display: flex; align-items: center; gap: 6px; margin-top: 5px; }
+.ctx-bar { flex: 1; height: 4px; background: var(--border, #333); border-radius: 2px; overflow: hidden; }
+.ctx-fill { height: 100%; background: var(--accent); transition: width 0.3s ease; }
+.ctx-fill.high { background: var(--danger, #e5484d); }
+.ctx-meter-label { font-size: 10px; color: var(--text-secondary); white-space: nowrap; }

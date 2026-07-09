@@ -101,6 +101,7 @@ impl Agent {
                 session.messages.push(ChatMessage::Assistant { content, tool_calls: Vec::new() });
                 session.prompt_tokens += resp.prompt_tokens;
                 session.completion_tokens += resp.completion_tokens;
+                if resp.prompt_tokens > 0 { session.last_prompt_tokens = resp.prompt_tokens; }
                 on_event(AgentEvent::Done);
                 Ok(())
             }
@@ -130,6 +131,7 @@ impl Agent {
             };
             session.prompt_tokens += resp.prompt_tokens;
             session.completion_tokens += resp.completion_tokens;
+            if resp.prompt_tokens > 0 { session.last_prompt_tokens = resp.prompt_tokens; }
 
             if resp.tool_calls.is_empty() {
                 // Final answer.

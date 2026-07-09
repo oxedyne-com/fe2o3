@@ -124,8 +124,13 @@ pub struct Session {
     pub created_at:          u64,
     pub model:               String,
     pub messages:            Vec<ChatMessage>,
+    /// Cumulative prompt tokens across all turns (for billing).
     pub prompt_tokens:       u64,
+    /// Cumulative completion tokens across all turns (for billing).
     pub completion_tokens:   u64,
+    /// Prompt tokens of the most recent request — the current context
+    /// window usage (not cumulative), for the live meter.
+    pub last_prompt_tokens:  u64,
 }
 
 impl Session {
@@ -142,6 +147,7 @@ impl Session {
             messages: Vec::new(),
             prompt_tokens: 0,
             completion_tokens: 0,
+            last_prompt_tokens: 0,
         }
     }
 
@@ -154,6 +160,7 @@ impl Session {
         m.insert(dat!("model"), dat!(self.model.clone()));
         m.insert(dat!("prompt_tokens"), Dat::U64(self.prompt_tokens));
         m.insert(dat!("completion_tokens"), Dat::U64(self.completion_tokens));
+        m.insert(dat!("last_prompt_tokens"), Dat::U64(self.last_prompt_tokens));
         m
     }
 
@@ -205,7 +212,14 @@ impl Session {
             Some(Dat::U64(n)) => *n,
             _ => 0,
         };
-        Ok(Self { id, name, created_at, model, messages, prompt_tokens, completion_tokens })
+        let last_prompt_tokens = match m.get(&dat!("last_prompt_tokens")) {
+            Some(Dat::U64(n)) => *n,
+            _ => 0,
+        };
+        Ok(Self {
+            id, name, created_at, model, messages,
+            prompt_tokens, completion_tokens, last_prompt_tokens,
+        })
     }
 }
 
