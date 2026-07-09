@@ -175,11 +175,13 @@
 			chatInput.disabled = false;
 			chatInput.focus();
 			finalizeAssistantMessage();
+			hideSpinner();
 			refreshSessions();
 		} else if (cmd === 'error') {
 			appendError(val || 'Error');
 			chatSend.disabled = false;
 			chatInput.disabled = false;
+			hideSpinner();
 		} else if (cmd === 'data') {
 			if (val && typeof val === 'object') {
 				if (val.sessions) {
@@ -293,8 +295,30 @@
 		chatInput.style.height = 'auto';
 		chatSend.disabled = true;
 		chatInput.disabled = true;
+		showSpinner();
 		var escaped = text.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 		sendChat('chat "' + escaped + '"');
+	}
+
+	// ── Spinner ────────────────────────────────────────────────
+	var spinnerEl = null;
+
+	function showSpinner() {
+		if (spinnerEl) return;
+		spinnerEl = document.createElement('div');
+		spinnerEl.className = 'chat-spinner';
+		spinnerEl.innerHTML = '<span class="chat-spinner-dot"></span>\
+<span class="chat-spinner-dot"></span>\
+<span class="chat-spinner-dot"></span>';
+		chatOutput.appendChild(spinnerEl);
+		chatOutput.scrollTop = chatOutput.scrollHeight;
+	}
+
+	function hideSpinner() {
+		if (spinnerEl) {
+			spinnerEl.remove();
+			spinnerEl = null;
+		}
 	}
 
 	// ── Session management ─────────────────────────────────────
@@ -425,6 +449,10 @@
 			var newName = input.value.trim() || oldName;
 			if (newName !== oldName) {
 				sendChat('session_rename "' + escJdat(sessionId) + '" "' + escJdat(newName) + '"');
+				// Update header if this is the active session.
+				if (sessionId === currentSessionId) {
+					sessionNameEl.textContent = newName;
+				}
 			}
 			// Restore span immediately; refreshSessions will update.
 			var span = document.createElement('span');

@@ -169,3 +169,10 @@ body { font-family: var(--font); background: var(--bg-primary); color: var(--tex
 .chat-msg-content code { background: var(--bg-tertiary); padding: 2px 6px; border-radius: 3px; }
 .chat-msg-content ul, .chat-msg-content ol { margin: 8px 0; padding-left: 24px; }
 .chat-msg-content h1, .chat-msg-content h2, .chat-msg-content h3 { margin: 12px 0 6px; }
+
+/* Spinner */
+.chat-spinner { display: flex; gap: 4px; padding: 8px 14px; }
+.chat-spinner-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-secondary); animation: spinner-bounce 1.4s infinite ease-in-out both; }
+.chat-spinner-dot:nth-child(1) { animation-delay: -0.32s; }
+.chat-spinner-dot:nth-child(2) { animation-delay: -0.16s; }
+@keyframes spinner-bounce { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
