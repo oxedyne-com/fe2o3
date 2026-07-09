@@ -133,6 +133,11 @@ as courtesy guardrails, not as a security boundary.
 
 Ordered roughly by dependency.  Each item maps to `TODO.md` where relevant.
 
+**Status (2026-07-10):** WS-A ✅, WS-C ✅, WS-D ✅ (verified end-to-end vs live
+GLM-5.2), WS-G ✅ — committed and pushed.  Remaining: WS-B, WS-E, WS-F, WS-I,
+rendering.  Client UI written but pending Playwright visual verification (the
+dev browser's X display dropped mid-session).
+
 ### WS-A — MVP hardening (finish what exists)
 The current crate streams chat but has the P0 gaps from `TODO.md`.
 
