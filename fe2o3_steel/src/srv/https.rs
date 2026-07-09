@@ -260,6 +260,8 @@ impl<
                                 request.header.headline
                             {
                                 let req_path = loc.path.as_string();
+                                log!(log_level,
+                                    "{}: red vhost has config, path='{}'", id, req_path);
                                 if req_path == "/chat" || req_path.starts_with("/chat/") {
                                     log!(log_level,
                                         "{}: red chat ws", id);
@@ -297,7 +299,6 @@ impl<
                                     let red_state = oxedyne_fe2o3_red::handler::RedState {
                                         agent,
                                         session_store,
-                                        syntax: vhost.ws_syntax.clone(),
                                     };
                                     let reunited = read_stream.unsplit(write_stream);
                                     return oxedyne_fe2o3_red::handler::handle_chat_websocket::<

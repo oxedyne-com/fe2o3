@@ -24,8 +24,9 @@ use oxedyne_fe2o3_syntax::{
 use std::sync::{Arc, RwLock};
 
 use crate::agent::Agent;
-use crate::protocol::{AgentEvent, ChatMessage, Session};
+use crate::protocol::{AgentEvent, Session};
 use crate::session::SessionStore;
+use crate::llm::datmap_to_json;
 
 
 // ┌───────────────────────────────────────────────────────────────┐
@@ -89,7 +90,6 @@ pub struct RedState<
 > {
     pub agent:        Agent,
     pub session_store: SessionStore<UIDL, UID, ENC, KH, DB>,
-    pub syntax:       SyntaxRef,
 }
 
 // ┌───────────────────────────────────────────────────────────────┐
@@ -137,17 +137,32 @@ pub async fn handle_chat_websocket<
         chunk_thresh,
     );
     match ws.connect_as_server(request).await {
-        Ok(()) => (),
+        Ok(()) => {
+            info!("{}: Red WS handshake completed.", id);
+        }
         Err(e) => return Err(err!(e,
             "{}: Red WS handshake failed.", id;
             IO, Network, Wire)),
     }
 
+    // ── Build Red's own syntax ────────────────────────────────
+    let syntax = match crate::syntax::build_syntax() {
+        Ok(s) => s,
+        Err(e) => {
+            error!(e, "{}: Red: failed to build syntax.", id);
+            return Ok(());
+        }
+    };
+
     // ── Determine the authenticated username ──────────────────
     let username = match get_username(&vhost_db, &sid) {
-        Some(u) => u,
+        Some(u) => {
+             info!("{}: Red WS authenticated as '{}'.", id, u);
+            u
+        }
         None => {
-            let _ = ws.send(&text_msg(state.syntax.clone(), "error", vec![
+             info!("{}: Red WS not authenticated (sid={:?}).", id, sid);
+            let _ = ws.send(&text_msg(syntax.clone(), "error", vec![
                 dat!("Not authenticated.  Please log in first."),
             ])).await;
             return Ok(());
@@ -170,10 +185,19 @@ pub async fn handle_chat_websocket<
 
     loop {
         let msg = match ws.read().await {
-            Ok(Some(WebSocketMessage::Text(txt))) => txt,
+            Ok(Some(WebSocketMessage::Text(txt))) => {
+                info!("{}: Red WS received text: '{}'", id, txt);
+                txt
+            }
             Ok(Some(WebSocketMessage::Binary(_))) => continue,
-            Ok(Some(WebSocketMessage::Close(_, _))) => break,
-            Ok(None) => break,
+            Ok(Some(WebSocketMessage::Close(_, _))) => {
+                info!("{}: Red WS client closed.", id);
+                break;
+            }
+            Ok(None) => {
+                info!("{}: Red WS client disconnected.", id);
+                break;
+            }
             Ok(_) => continue,
             Err(e) => {
                 warn!("{}: Red WS read error: {}", id, e);
@@ -182,23 +206,25 @@ pub async fn handle_chat_websocket<
         };
 
         // Parse syntax command.
-        let msgrx = Msg::new(state.syntax.clone());
+        let msgrx = Msg::new(syntax.clone());
         let msgrx = match msgrx.from_str(&msg, None) {
             Ok(m) => m,
             Err(e) => {
-                let _ = ws.send(&text_msg(state.syntax.clone(), "error", vec![
+                let _ = ws.send(&text_msg(syntax.clone(), "error", vec![
                     dat!(e.to_string()),
                 ])).await;
                 continue;
             }
         };
         if msgrx.cmds.len() != 1 {
-            let _ = ws.send(&text_msg(state.syntax.clone(), "error", vec![
+            let _ = ws.send(&text_msg(syntax.clone(), "error", vec![
                 dat!("Expected one command."),
             ])).await;
             continue;
         }
         let (cmd_name, cmdrx) = msgrx.cmds.into_iter().next().unwrap();
+
+         info!("{}: Red WS command '{}'.", id, cmd_name);
 
         match cmd_name.as_str() {
             "session_new" => {
@@ -206,18 +232,22 @@ pub async fn handle_chat_websocket<
                     Some(Dat::Str(s)) => s.clone(),
                     _ => fmt!("Session"),
                 };
+                let model = match cmdrx.vals.get(1) {
+                    Some(Dat::Str(s)) => s.clone(),
+                    _ => state.agent.llm.model.clone(),
+                };
                 match state.session_store.create_session(
-                    &username, &name, &state.agent.llm.model,
+                    &username, &name, &model,
                 ) {
                     Ok(session) => {
                         current_session_id = Some(session.id.clone());
                         current_session = Some(session.clone());
-                        let _ = ws.send(&text_msg(state.syntax.clone(), "data", vec![
-                            Dat::Map(session.to_meta_datmap()),
+                        let _ = ws.send(&text_msg(syntax.clone(), "data", vec![
+                            dat!(datmap_to_json(&session.to_meta_datmap())),
                         ])).await;
                     }
                     Err(e) => {
-                        let _ = ws.send(&text_msg(state.syntax.clone(), "error", vec![
+                        let _ = ws.send(&text_msg(syntax.clone(), "error", vec![
                             dat!(e.to_string()),
                         ])).await;
                     }
@@ -231,12 +261,12 @@ pub async fn handle_chat_websocket<
                             .collect();
                         let mut m = DaticleMap::new();
                         m.insert(dat!("sessions"), Dat::List(list));
-                        let _ = ws.send(&text_msg(state.syntax.clone(), "data", vec![
+                        let _ = ws.send(&text_msg(syntax.clone(), "data", vec![
                             Dat::Map(m),
                         ])).await;
                     }
                     Err(e) => {
-                        let _ = ws.send(&text_msg(state.syntax.clone(), "error", vec![
+                        let _ = ws.send(&text_msg(syntax.clone(), "error", vec![
                             dat!(e.to_string()),
                         ])).await;
                     }
@@ -246,7 +276,7 @@ pub async fn handle_chat_websocket<
                 let session_id = match cmdrx.vals.get(0) {
                     Some(Dat::Str(s)) => s.clone(),
                     _ => {
-                        let _ = ws.send(&text_msg(state.syntax.clone(), "error", vec![
+                        let _ = ws.send(&text_msg(syntax.clone(), "error", vec![
                             dat!("session_switch: missing session id."),
                         ])).await;
                         continue;
@@ -256,12 +286,12 @@ pub async fn handle_chat_websocket<
                     Ok(session) => {
                         current_session_id = Some(session.id.clone());
                         current_session = Some(session.clone());
-                        let _ = ws.send(&text_msg(state.syntax.clone(), "data", vec![
+                        let _ = ws.send(&text_msg(syntax.clone(), "data", vec![
                             Dat::Map(session.to_datmap()),
                         ])).await;
                     }
                     Err(e) => {
-                        let _ = ws.send(&text_msg(state.syntax.clone(), "error", vec![
+                        let _ = ws.send(&text_msg(syntax.clone(), "error", vec![
                             dat!(e.to_string()),
                         ])).await;
                     }
@@ -271,7 +301,7 @@ pub async fn handle_chat_websocket<
                 let session_id = match cmdrx.vals.get(0) {
                     Some(Dat::Str(s)) => s.clone(),
                     _ => {
-                        let _ = ws.send(&text_msg(state.syntax.clone(), "error", vec![
+                        let _ = ws.send(&text_msg(syntax.clone(), "error", vec![
                             dat!("session_close: missing session id."),
                         ])).await;
                         continue;
@@ -283,12 +313,49 @@ pub async fn handle_chat_websocket<
                             current_session_id = None;
                             current_session = None;
                         }
-                        let _ = ws.send(&text_msg(state.syntax.clone(), "info", vec![
+                        let _ = ws.send(&text_msg(syntax.clone(), "info", vec![
                             dat!(fmt!("Session '{}' closed.", session_id)),
                         ])).await;
                     }
                     Err(e) => {
-                        let _ = ws.send(&text_msg(state.syntax.clone(), "error", vec![
+                        let _ = ws.send(&text_msg(syntax.clone(), "error", vec![
+                            dat!(e.to_string()),
+                        ])).await;
+                    }
+                }
+            }
+            "session_rename" => {
+                let session_id = match cmdrx.vals.get(0) {
+                    Some(Dat::Str(s)) => s.clone(),
+                    _ => {
+                        let _ = ws.send(&text_msg(syntax.clone(), "error", vec![
+                            dat!("session_rename: missing session id."),
+                        ])).await;
+                        continue;
+                    }
+                };
+                let new_name = match cmdrx.vals.get(1) {
+                    Some(Dat::Str(s)) => s.clone(),
+                    _ => {
+                        let _ = ws.send(&text_msg(syntax.clone(), "error", vec![
+                            dat!("session_rename: missing new name."),
+                        ])).await;
+                        continue;
+                    }
+                };
+                match state.session_store.rename_session(&session_id, &new_name) {
+                    Ok(()) => {
+                        if current_session_id.as_deref() == Some(&session_id) {
+                            if let Some(ref mut s) = current_session {
+                                s.name = new_name.clone();
+                            }
+                        }
+                        let _ = ws.send(&text_msg(syntax.clone(), "info", vec![
+                            dat!(fmt!("Session renamed to '{}'.", new_name)),
+                        ])).await;
+                    }
+                    Err(e) => {
+                        let _ = ws.send(&text_msg(syntax.clone(), "error", vec![
                             dat!(e.to_string()),
                         ])).await;
                     }
@@ -298,7 +365,7 @@ pub async fn handle_chat_websocket<
                 let content = match cmdrx.vals.get(0) {
                     Some(Dat::Str(s)) => s.clone(),
                     _ => {
-                        let _ = ws.send(&text_msg(state.syntax.clone(), "error", vec![
+                        let _ = ws.send(&text_msg(syntax.clone(), "error", vec![
                             dat!("chat: missing content."),
                         ])).await;
                         continue;
@@ -315,7 +382,7 @@ pub async fn handle_chat_websocket<
                         ) {
                             Ok(s) => s,
                             Err(e) => {
-                                let _ = ws.send(&text_msg(state.syntax.clone(), "error", vec![
+                                let _ = ws.send(&text_msg(syntax.clone(), "error", vec![
                                     dat!(e.to_string()),
                                 ])).await;
                                 continue;
@@ -328,7 +395,6 @@ pub async fn handle_chat_websocket<
                 };
 
                 // Run the agent turn.
-                let session_id = session.id.clone();
                 let mut events = Vec::new();
                 let agent = state.agent.clone();
                 let result = agent.run_turn(
@@ -341,18 +407,17 @@ pub async fn handle_chat_websocket<
 
                 // Stream events to the client.
                 for ev in &events {
-                    let dm = ev.to_datmap();
                     let cmd_name = match ev {
                         AgentEvent::Text(_) => "text",
                         AgentEvent::Done => "done",
                         AgentEvent::Error(_) => "error",
                     };
                     let vals = match ev {
-                        AgentEvent::Text(t) => vec![Dat::Map(dm)],
+                        AgentEvent::Text(t) => vec![dat!(t.clone())],
                         AgentEvent::Done => vec![],
-                        AgentEvent::Error(_) => vec![Dat::Map(dm)],
+                        AgentEvent::Error(msg) => vec![dat!(msg.clone())],
                     };
-                    let _ = ws.send(&text_msg(state.syntax.clone(), cmd_name, vals)).await;
+                    let _ = ws.send(&text_msg(syntax.clone(), cmd_name, vals)).await;
                 }
 
                 // Save the updated session.
@@ -365,14 +430,14 @@ pub async fn handle_chat_websocket<
                 }
             }
             _ => {
-                let _ = ws.send(&text_msg(state.syntax.clone(), "error", vec![
+                let _ = ws.send(&text_msg(syntax.clone(), "error", vec![
                     dat!(fmt!("Unknown command '{}'.", cmd_name)),
                 ])).await;
             }
         }
     }
 
-    debug!("{}: Red WS closed.", id);
+     info!("{}: Red WS closed.", id);
     Ok(())
 }
 

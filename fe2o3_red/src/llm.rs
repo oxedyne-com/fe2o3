@@ -144,13 +144,19 @@ impl LlmClient {
                 IO, Network, Init)),
         };
 
-        // Write request.
-        stream.write_all(request.as_bytes()).await
+        // Write request — combine headers and body into a single
+        // buffer so they're sent in one TLS record.  Some CDN-
+        // fronted servers reject requests where headers and body
+        // arrive in separate records.
+        let mut req = Vec::with_capacity(request.as_bytes().len() + body_bytes.len());
+        req.extend_from_slice(request.as_bytes());
+        req.extend_from_slice(body_bytes);
+        info!("LLM: sending {} bytes to {}:{}{}", req.len(), self.host, self.port, self.path);
+        stream.write_all(&req).await
             .map_err(|e| err!(e, "LLM: write request failed."; IO, Network, Wire, Write))?;
-        stream.write_all(body_bytes).await
-            .map_err(|e| err!(e, "LLM: write body failed."; IO, Network, Wire, Write))?;
         stream.flush().await
             .map_err(|e| err!(e, "LLM: flush failed."; IO, Network, Wire, Write))?;
+        info!("LLM: request sent, waiting for response...");
 
         // Read entire response into buffer.
         // The response is SSE — we read it all since fe2o3_net's
@@ -162,10 +168,29 @@ impl LlmClient {
         let mut chunk = [0u8; 4096];
         loop {
             match stream.read(&mut chunk).await {
-                Ok(0) => break,
-                Ok(n) => buf.extend_from_slice(&chunk[..n]),
-                Err(e) => return Err(err!(e,
-                    "LLM: read response failed."; IO, Network, Wire, Read)),
+                Ok(0) => {
+                    info!("LLM: response complete, {} bytes received.", buf.len());
+                    break;
+                }
+                Ok(n) => {
+                    info!("LLM: read {} bytes.", n);
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+                Err(e) if e.kind() == tokio::io::ErrorKind::UnexpectedEof => {
+                    // Many HTTP servers close the TCP connection
+                    // without a TLS close_notify when using
+                    // Connection: close.  rustls surfaces this as
+                    // UnexpectedEof.  We have already received the
+                    // full response body, so treat this as a
+                    // graceful end-of-stream.
+                    info!("LLM: peer closed (no close_notify), {} bytes received.", buf.len());
+                    break;
+                }
+                Err(e) => {
+                    info!("LLM: read error after {} bytes: {}", buf.len(), e);
+                    return Err(err!(e,
+                    "LLM: read response failed."; IO, Network, Wire, Read))
+                }
             }
         }
 
@@ -237,36 +262,63 @@ pub fn parse_sse_stream(body: &[u8], on_token: &mut impl FnMut(&str)) -> String 
 ///
 /// Scans for `"key":"value"` and returns the unescaped value.
 /// Handles `\"`, `\\`, `\n`, `\t` escapes.
+///
+/// The search ensures `key` is a complete JSON key, not a suffix of
+/// a longer key (e.g. `"content"` must not match inside
+/// `"reasoning_content"`).  This is done by requiring the character
+/// before the opening quote to be `{` or `,` (whitespace-tolerant).
 fn extract_json_string(json: &str, key: &str) -> Option<String> {
     let needle = fmt!("\"{}\":\"", key);
-    let start = json.find(&needle)? + needle.len();
-    let bytes = json.as_bytes();
-    let mut result = String::new();
-    let mut i = start;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b == b'\\' && i + 1 < bytes.len() {
-            match bytes[i + 1] {
-                b'"' => result.push('"'),
-                b'\\' => result.push('\\'),
-                b'n' => result.push('\n'),
-                b't' => result.push('\t'),
-                b'r' => result.push('\r'),
-                b'/' => result.push('/'),
-                _ => {
-                    result.push('\\');
-                    result.push(bytes[i + 1] as char);
-                }
-            }
-            i += 2;
-        } else if b == b'"' {
-            return Some(result);
+    let mut search_from = 0;
+    loop {
+        let pos = match json[search_from..].find(&needle) {
+            Some(p) => search_from + p,
+            None => return None,
+        };
+        // Verify this is a complete JSON key by checking the
+        // character before the opening quote.  It must be `{`, `,`,
+        // or whitespace — not a letter (which would mean it's part
+        // of a longer key like "reasoning_content").
+        if pos == 0 {
+            // Start of string — valid only if the string starts
+            // with the key, which is unusual but acceptable.
         } else {
-            result.push(b as char);
-            i += 1;
+            let prev = json.as_bytes()[pos - 1];
+            if prev != b'{' && prev != b',' && !prev.is_ascii_whitespace() {
+                // Part of a longer key (e.g. "reasoning_content").
+                search_from = pos + needle.len();
+                continue;
+            }
         }
+        let start = pos + needle.len();
+        let bytes = json.as_bytes();
+        let mut result = String::new();
+        let mut i = start;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if b == b'\\' && i + 1 < bytes.len() {
+                match bytes[i + 1] {
+                    b'"' => result.push('"'),
+                    b'\\' => result.push('\\'),
+                    b'n' => result.push('\n'),
+                    b't' => result.push('\t'),
+                    b'r' => result.push('\r'),
+                    b'/' => result.push('/'),
+                    _ => {
+                        result.push('\\');
+                        result.push(bytes[i + 1] as char);
+                    }
+                }
+                i += 2;
+            } else if b == b'"' {
+                return Some(result);
+            } else {
+                result.push(b as char);
+                i += 1;
+            }
+        }
+        return None;
     }
-    None
 }
 
 /// Dechunk an HTTP chunked transfer-encoded body.

@@ -110,7 +110,10 @@
 		if (chatWs) { chatWs.close(); chatWs = null; }
 		var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
 		chatWs = new WebSocket(proto + '//' + location.host + '/chat');
-		chatWs.onopen = function () { console.log('Chat WS connected'); };
+		chatWs.onopen = function () {
+			console.log('Chat WS connected');
+			refreshSessions();
+		};
 		chatWs.onmessage = handleChatMessage;
 		chatWs.onclose = function () { chatWs = null; };
 		chatWs.onerror = function (e) { console.warn('Chat WS error:', e); };
@@ -327,7 +330,6 @@
 		appEl.style.display = 'flex';
 		connectMgmt().then(function () {
 			connectChat();
-			refreshSessions();
 		}).catch(function (e) {
 			console.warn('Mgmt WS connect failed:', e);
 		});

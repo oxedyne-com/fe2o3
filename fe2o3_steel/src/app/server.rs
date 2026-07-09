@@ -608,8 +608,12 @@ pub fn build_outbound_tls_client()
     }
     info!("Loaded {} CA certificate(s) for outbound HTTPS.", count);
 
-    let config = ClientConfig::builder()
+    let mut config = ClientConfig::builder()
         .with_root_certificates(store)
         .with_no_client_auth();
+    // Advertise HTTP/1.1 via ALPN so CDN-fronted servers (e.g.
+    // Fireworks.ai behind Cloudflare) don't close the connection
+    // after the TLS handshake when no protocol is negotiated.
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
     Ok(Arc::new(config))
 }

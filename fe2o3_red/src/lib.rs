@@ -20,3 +20,4 @@ pub mod handler;
 pub mod llm;
 pub mod protocol;
 pub mod session;
+pub mod syntax;
