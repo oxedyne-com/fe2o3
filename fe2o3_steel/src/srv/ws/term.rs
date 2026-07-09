@@ -1,4 +1,4 @@
-//! Terminal bridge — manages tmux sessions and bridges I/O to
+//! Terminal bridge — manages tmux sessions and bridges PTY I/O to
 //! WebSocket binary frames.
 //!
 //! Two layers:
@@ -9,16 +9,16 @@
 //!    syntax-protocol responses.
 //!
 //! 2. **Terminal I/O bridge** (async, via a separate WS path
-//!    `/term/<session>`):  spawns `tmux attach` as a child process
-//!    with piped stdin/stdout and bidirectionally pipes bytes
-//!    between the child and the WebSocket.  The client sends
+//!    `/term/<session>`):  creates a PTY pair, spawns `tmux attach`
+//!    with the slave end as stdin/stdout/stderr, and bridges bytes
+//!    between the PTY master and the WebSocket.  The client sends
 //!    keystrokes as binary WS frames; the server pushes terminal
 //!    output as binary WS frames.
 //!
-//! No PTY is needed on our side — tmux already manages the PTY for
-//! the child process (e.g. Goose).  When we `tmux attach`, tmux
-//! connects us to that terminal via its own protocol over
-//! stdin/stdout pipes.  We simply bridge bytes.
+//! tmux manages the PTY for the child process (e.g. Goose).  We
+//! create our own PTY for the `tmux attach` process so it sees a
+//! real terminal.  The tmux session persists after the WebSocket
+//! disconnects; reconnecting reattaches.
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_jdat::{
@@ -26,17 +26,17 @@ use oxedyne_fe2o3_jdat::{
     id::NumIdDat,
 };
 use oxedyne_fe2o3_net::ws::core::{WebSocket, WebSocketMessage};
-
 use oxedyne_fe2o3_iop_crypto::enc::Encrypter;
 use oxedyne_fe2o3_iop_db::api::Database;
 use oxedyne_fe2o3_iop_hash::api::Hasher;
 
 use std::{
-    process::Command,
+    fs::File,
+    os::fd::AsFd,
+    process::{Command, Stdio},
 };
 
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
     process::Command as TokioCommand,
 };
 
@@ -99,7 +99,7 @@ impl TerminalManager {
         for n in names {
             let mut m = DaticleMap::new();
             m.insert(dat!("name"), dat!(n));
-            arr.push(Dat::List(vec![Dat::Map(m)]));
+            arr.push(Dat::Map(m));
         }
         let mut out = DaticleMap::new();
         out.insert(dat!("sessions"), Dat::List(arr));
@@ -148,10 +148,7 @@ impl TerminalManager {
             .output()
         {
             Ok(o) => o,
-            Err(_) => {
-                // tmux not running or no sessions — return empty.
-                return Ok(Vec::new());
-            }
+            Err(_) => return Ok(Vec::new()),
         };
         if !output.status.success() {
             return Ok(Vec::new());
@@ -180,22 +177,20 @@ impl TerminalManager {
 
 
 // ┌───────────────────────────────────────────────────────────────┐
-// │ Terminal I/O bridge — piped child ↔ WebSocket                 │
+// │ Terminal I/O bridge — PTY ↔ WebSocket                         │
 // └───────────────────────────────────────────────────────────────┘
 
-/// Bridge a WebSocket connection to a tmux session via piped I/O.
+/// Bridge a WebSocket connection to a tmux session via a PTY.
 ///
-/// Spawns `tmux attach -t <session>` as a child process with piped
-/// stdin/stdout/stderr.  Bytes from the child's stdout/stderr are
-/// forwarded as binary WS messages to the client; binary WS
-/// messages from the client are written to the child's stdin as
-/// keystrokes.
+/// Creates a PTY pair, spawns `tmux attach -t <session>` with the
+/// slave end as stdin/stdout/stderr (so tmux sees a real terminal),
+/// and bridges bytes between the PTY master and the WebSocket:
 ///
-/// tmux manages the PTY for the child process (e.g. Goose) — we
-/// only bridge bytes between the WebSocket and the tmux attach
-/// process.  The tmux session persists after the WebSocket
-/// disconnects; reconnecting with the same session name
-/// reattaches.
+/// - Client keystrokes (binary WS) → PTY master write
+/// - PTY master read → terminal output (binary WS)
+///
+/// The tmux session persists after the WebSocket disconnects;
+/// reconnecting with the same session name reattaches.
 pub async fn handle_terminal_websocket<
     const UIDL: usize,
     UID:    NumIdDat<UIDL> + 'static,
@@ -230,20 +225,54 @@ pub async fn handle_terminal_websocket<
             IO, Network, Wire)),
     }
 
-    // ── Spawn tmux attach with piped I/O ──────────────────────
-    let mut child = match TokioCommand::new("tmux")
-        .arg("attach-session")
+    // ── Create PTY ────────────────────────────────────────────
+    let winsize = nix::pty::Winsize {
+        ws_row:    24,
+        ws_col:    80,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let pty = match nix::pty::openpty(&Some(winsize), &None) {
+        Ok(p) => p,
+        Err(e) => {
+            let err_msg = WebSocketMessage::Text(
+                fmt!("error \"PTY creation failed: {}\"", e));
+            let _ = ws.send(&err_msg).await;
+            return Err(err!(e,
+                "{}: Failed to create PTY for '{}'.", id, session_name;
+                IO, System));
+        }
+    };
+
+    // pty.master and pty.slave are OwnedFd (safe FD wrappers).
+
+    // Dup the slave for each stdio stream using nix's safe API.
+    let slave_stdin  = match nix::unistd::dup(pty.slave.as_fd()) {
+        Ok(f) => f,
+        Err(e) => return Err(err!(e, "{}: dup slave stdin failed.", id; IO, System)),
+    };
+    let slave_stdout = match nix::unistd::dup(pty.slave.as_fd()) {
+        Ok(f) => f,
+        Err(e) => return Err(err!(e, "{}: dup slave stdout failed.", id; IO, System)),
+    };
+    let slave_stderr = match nix::unistd::dup(pty.slave.as_fd()) {
+        Ok(f) => f,
+        Err(e) => return Err(err!(e, "{}: dup slave stderr failed.", id; IO, System)),
+    };
+
+    // ── Spawn tmux attach with the PTY slave ──────────────────
+    let mut cmd = TokioCommand::new("tmux");
+    cmd.arg("attach-session")
         .arg("-t")
         .arg(&session_name)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .env("TERM", "xterm-256color")
-        .spawn()
-    {
+        .stdin(Stdio::from(slave_stdin))
+        .stdout(Stdio::from(slave_stdout))
+        .stderr(Stdio::from(slave_stderr))
+        .env("TERM", "xterm-256color");
+
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            // Send an error message before closing.
             let err_msg = WebSocketMessage::Text(
                 fmt!("error \"tmux attach failed: {}\"", e));
             let _ = ws.send(&err_msg).await;
@@ -253,38 +282,58 @@ pub async fn handle_terminal_websocket<
         }
     };
 
-    let mut child_stdin = child.stdin.take()
-        .ok_or_else(|| err!(
-            "{}: Failed to capture tmux stdin.", id;
-            IO, System))?;
-    let mut child_stdout = child.stdout.take()
-        .ok_or_else(|| err!(
-            "{}: Failed to capture tmux stdout.", id;
-            IO, System))?;
+    // ── Set master to non-blocking ────────────────────────────
+    //
+    // We must do this before wrapping the master in AsyncFd.
+    // nix::fcntl::fcntl takes AsFd, so we pass the OwnedFd
+    // before it is consumed by the File conversion below.
+    if let Err(e) = nix::fcntl::fcntl(
+        &pty.master,
+        nix::fcntl::FcntlArg::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK),
+    ) {
+        warn!("{}: Failed to set master non-blocking: {}", id, e);
+    }
+
+    // ── Wrap the master for async I/O ─────────────────────────
+    //
+    // Convert the master OwnedFd to a File for AsyncFd.  The
+    // OwnedFd is consumed and the File takes ownership of the FD.
+    let master_file: File = pty.master.into();
+    let master_async = match tokio::io::unix::AsyncFd::new(master_file) {
+        Ok(a) => a,
+        Err(e) => {
+            let _ = child.kill().await;
+            return Err(err!(e,
+                "{}: Failed to create AsyncFd for PTY master.", id;
+                IO, System));
+        }
+    };
 
     // ── Bidirectional pipe loop ───────────────────────────────
-    let mut pty_buf = vec![0u8; 16384];
+    let mut buf = vec![0u8; 16384];
 
     loop {
         tokio::select! {
-            // ── Read from WebSocket → write to tmux stdin ──────
+            // ── Read from WebSocket → write to PTY master ──────
             ws_read = ws.read() => {
                 match ws_read {
                     Ok(Some(WebSocketMessage::Binary(byts))) => {
-                        if let Err(e) = child_stdin.write_all(&byts).await {
-                            warn!("{}: tmux stdin write error: {}", id, e);
-                            break;
+                        use std::io::Write;
+                        if let Err(e) = (&*master_async.get_ref()).write(&byts) {
+                            if e.kind() != std::io::ErrorKind::WouldBlock {
+                                warn!("{}: PTY write error: {}", id, e);
+                                break;
+                            }
                         }
-                        let _ = child_stdin.flush().await;
                     }
                     Ok(Some(WebSocketMessage::Text(txt))) => {
-                        // Allow text messages as keystrokes too
-                        // (some clients send text instead of binary).
-                        if let Err(e) = child_stdin.write_all(txt.as_bytes()).await {
-                            warn!("{}: tmux stdin write error: {}", id, e);
-                            break;
+                        use std::io::Write;
+                        if let Err(e) = (&*master_async.get_ref()).write(txt.as_bytes()) {
+                            if e.kind() != std::io::ErrorKind::WouldBlock {
+                                warn!("{}: PTY write error: {}", id, e);
+                                break;
+                            }
                         }
-                        let _ = child_stdin.flush().await;
                     }
                     Ok(Some(WebSocketMessage::Close(_, _))) => {
                         debug!("{}: Terminal WS client closed.", id);
@@ -294,31 +343,44 @@ pub async fn handle_terminal_websocket<
                         debug!("{}: Terminal WS client disconnected.", id);
                         break;
                     }
-                    Ok(_) => (), // Ping/Pong handled by read().
+                    Ok(_) => (),
                     Err(e) => {
                         warn!("{}: Terminal WS read error: {}", id, e);
                         break;
                     }
                 }
             }
-            // ── Read from tmux stdout → send as binary WS ──────
-            n = child_stdout.read(&mut pty_buf) => {
-                match n {
-                    Ok(0) => {
-                        // tmux attach exited — session detached or ended.
-                        debug!("{}: tmux stdout EOF for '{}'.", id, session_name);
+            // ── Read from PTY master → send as binary WS ───────
+            readable = master_async.readable() => {
+                let mut guard = match readable {
+                    Ok(g) => g,
+                    Err(e) => {
+                        warn!("{}: PTY readable error: {}", id, e);
                         break;
                     }
-                    Ok(n) => {
-                        let msg = WebSocketMessage::Binary(pty_buf[..n].to_vec());
+                };
+                use std::io::Read;
+                match guard.try_io(|afd| afd.get_ref().read(&mut buf)) {
+                    Ok(Ok(0)) => {
+                        debug!("{}: PTY EOF for '{}'.", id, session_name);
+                        break;
+                    }
+                    Ok(Ok(n)) => {
+                        let msg = WebSocketMessage::Binary(buf[..n].to_vec());
                         if let Err(e) = ws.send(&msg).await {
                             warn!("{}: WS send error: {}", id, e);
                             break;
                         }
                     }
-                    Err(e) => {
-                        warn!("{}: tmux stdout read error: {}", id, e);
+                    Ok(Err(ref e)) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        guard.clear_ready();
+                    }
+                    Ok(Err(e)) => {
+                        warn!("{}: PTY read error: {}", id, e);
                         break;
+                    }
+                    Err(_) => {
+                        guard.clear_ready();
                     }
                 }
             }
@@ -326,11 +388,12 @@ pub async fn handle_terminal_websocket<
     }
 
     // ── Cleanup ───────────────────────────────────────────────
-    // Kill the tmux attach process if still running.  The tmux
-    // session itself persists for reconnection.
+    // Kill the tmux attach process.  The tmux session itself
+    // persists for reconnection.
     let _ = child.kill().await;
     let _ = child.wait().await;
-    let _ = ws.send(&WebSocketMessage::Close(None, Some("session ended".to_string()))).await;
+    let _ = ws.send(&WebSocketMessage::Close(
+        None, Some("session ended".to_string()))).await;
     debug!("{}: Terminal bridge closed for '{}'.", id, session_name);
     Ok(())
 }

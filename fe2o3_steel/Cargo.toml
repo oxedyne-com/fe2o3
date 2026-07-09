@@ -35,6 +35,8 @@ oxedyne_fe2o3_text				= { path = "../fe2o3_text" }
 oxedyne_fe2o3_tui				= { path = "../fe2o3_tui" }
 
 notify = "6.1.1"
+nix = { version = "0.31", features = ["term", "fs"] }
+libc = "0.2"
 rustls-pemfile = "2"
 rustls = { version = "0.23", features = ["ring"] }
 rcgen = "0.12.0"
