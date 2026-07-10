@@ -75,9 +75,25 @@ impl<ID: NodeId, ND: NodeData, LD: LinkData> DiGraph<ID, ND, LD> {
     /// # Examples
     /// 
     /// ```
-    /// use oxedyne_fe2o3_data::digraph::DiGraph;
-    /// 
-    /// let graph: DiGraph<u32, String, ()> = DiGraph::new();
+    /// use oxedyne_fe2o3_data::digraph::{DiGraph, NodeId, NodeData, LinkData};
+    /// use std::fmt;
+    ///
+    /// // Node and link data opt in through the marker traits. Wrap standard
+    /// // types in a newtype to satisfy the orphan rule.
+    /// #[derive(Clone, Debug, Eq, Hash, PartialEq)]
+    /// struct Id(u32);
+    /// impl NodeId for Id {}
+    ///
+    /// #[derive(Clone, Debug)]
+    /// struct Label(String);
+    /// impl fmt::Display for Label {
+    ///     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { write!(f, "{}", self.0) }
+    /// }
+    /// impl NodeData for Label {}
+    /// impl LinkData for Label {}
+    ///
+    /// let graph: DiGraph<Id, Label, Label> = DiGraph::new();
+    /// assert_eq!(graph.len(), 0);
     /// ```
     pub fn new() -> Self {
         Self {
@@ -101,12 +117,18 @@ impl<ID: NodeId, ND: NodeData, LD: LinkData> DiGraph<ID, ND, LD> {
     /// # Examples
     /// 
     /// ```
-    /// use oxedyne_fe2o3_data::digraph::DiGraph;
-    /// use oxedyne_fe2o3_core::prelude::*;
-    /// 
-    /// let mut graph = DiGraph::new();
-    /// graph.insert(1, fmt!("Node A"));
-    /// graph.insert(2, fmt!("Node B"));
+    /// # use oxedyne_fe2o3_data::digraph::{DiGraph, NodeId, NodeData, LinkData};
+    /// # use std::fmt;
+    /// # #[derive(Clone, Debug, Eq, Hash, PartialEq)] struct Id(u32);
+    /// # impl NodeId for Id {}
+    /// # #[derive(Clone, Debug)] struct Label(String);
+    /// # impl fmt::Display for Label { fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { write!(f, "{}", self.0) } }
+    /// # impl NodeData for Label {}
+    /// # impl LinkData for Label {}
+    /// let mut graph: DiGraph<Id, Label, Label> = DiGraph::new();
+    /// graph.insert(Id(1), Label("Node A".into()));
+    /// graph.insert(Id(2), Label("Node B".into()));
+    /// assert_eq!(graph.len(), 2);
     /// ```
     pub fn insert(&mut self, id: ID, data: ND) -> Option<Node<ID, ND, LD>> {
         let node = Node {
@@ -130,13 +152,18 @@ impl<ID: NodeId, ND: NodeData, LD: LinkData> DiGraph<ID, ND, LD> {
     /// # Examples
     /// 
     /// ```
-    /// use oxedyne_fe2o3_data::digraph::DiGraph;
-    /// use oxedyne_fe2o3_core::prelude::*;
-    /// 
-    /// let mut graph = DiGraph::new();
-    /// graph.insert(1, fmt!("Node A"));
-    /// graph.insert(2, fmt!("Node B"));
-    /// graph.link(&1, &2, fmt!("Edge A->B"));
+    /// # use oxedyne_fe2o3_data::digraph::{DiGraph, NodeId, NodeData, LinkData};
+    /// # use std::fmt;
+    /// # #[derive(Clone, Debug, Eq, Hash, PartialEq)] struct Id(u32);
+    /// # impl NodeId for Id {}
+    /// # #[derive(Clone, Debug)] struct Label(String);
+    /// # impl fmt::Display for Label { fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { write!(f, "{}", self.0) } }
+    /// # impl NodeData for Label {}
+    /// # impl LinkData for Label {}
+    /// let mut graph: DiGraph<Id, Label, Label> = DiGraph::new();
+    /// graph.insert(Id(1), Label("Node A".into()));
+    /// graph.insert(Id(2), Label("Node B".into()));
+    /// graph.link(&Id(1), &Id(2), Label("Edge A->B".into()));
     /// ```
     pub fn link(&mut self, from: &ID, to: &ID, data: LD) {
         if let Some(from_node) = self.nodes.get_mut(from) {
@@ -160,15 +187,21 @@ impl<ID: NodeId, ND: NodeData, LD: LinkData> DiGraph<ID, ND, LD> {
     /// # Examples
     /// 
     /// ```
-    /// use oxedyne_fe2o3_data::digraph::DiGraph;
-    /// 
-    /// let mut graph = DiGraph::new();
-    /// graph.insert(1, 100);
-    /// graph.insert(2, 200);
-    /// graph.insert(3, 150);
-    /// 
+    /// # use oxedyne_fe2o3_data::digraph::{DiGraph, NodeId, NodeData, LinkData};
+    /// # use std::fmt;
+    /// # #[derive(Clone, Debug, Eq, Hash, PartialEq)] struct Id(u32);
+    /// # impl NodeId for Id {}
+    /// # #[derive(Clone, Debug)] struct Val(i64);
+    /// # impl fmt::Display for Val { fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { write!(f, "{}", self.0) } }
+    /// # impl NodeData for Val {}
+    /// # impl LinkData for Val {}
+    /// let mut graph: DiGraph<Id, Val, Val> = DiGraph::new();
+    /// graph.insert(Id(1), Val(100));
+    /// graph.insert(Id(2), Val(200));
+    /// graph.insert(Id(3), Val(150));
+    ///
     /// // Find all nodes with values greater than 120.
-    /// let large_nodes = graph.find_nodes(|&value| value > 120);
+    /// let large_nodes = graph.find_nodes(|value| value.0 > 120);
     /// assert_eq!(large_nodes.len(), 2);
     /// ```
     pub fn find_nodes<F>(&self, predicate: F) -> Vec<ID>
@@ -204,25 +237,32 @@ impl<ID: NodeId, ND: NodeData, LD: LinkData> DiGraph<ID, ND, LD> {
     /// # Examples
     /// 
     /// ```
-    /// use oxedyne_fe2o3_data::digraph::DiGraph;
-    /// use oxedyne_fe2o3_core::prelude::*;
-    /// 
+    /// use oxedyne_fe2o3_data::digraph::{DiGraph, NodeId, NodeData, LinkData};
+    /// use std::fmt;
+    /// # #[derive(Clone, Debug, Eq, Hash, PartialEq)] struct Id(u32);
+    /// # impl NodeId for Id {}
+    ///
     /// #[derive(Clone, Debug)]
     /// struct Person {
     ///     name: String,
     ///     age: u32,
     /// }
-    /// 
-    /// let mut graph = DiGraph::new();
-    /// graph.insert(1, Person { name: fmt!("Alice"), age: 30 });
-    /// graph.insert(2, Person { name: fmt!("Bob"), age: 25 });
-    /// graph.insert(3, Person { name: fmt!("Charlie"), age: 35 });
-    /// 
+    /// impl fmt::Display for Person {
+    ///     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    ///         write!(f, "{} ({})", self.name, self.age)
+    ///     }
+    /// }
+    /// impl NodeData for Person {}
+    /// impl LinkData for Person {}
+    ///
+    /// let mut graph: DiGraph<Id, Person, Person> = DiGraph::new();
+    /// graph.insert(Id(1), Person { name: "Alice".into(), age: 30 });
+    /// graph.insert(Id(2), Person { name: "Bob".into(), age: 25 });
+    /// graph.insert(Id(3), Person { name: "Charlie".into(), age: 35 });
+    ///
     /// // Find all people aged 30 or over.
     /// let adults = graph.find_nodes_with_data(|person| person.age >= 30);
-    /// for (id, person) in adults {
-    ///     println!("Person {}: {} is {} years old", id, person.name, person.age);
-    /// }
+    /// assert_eq!(adults.len(), 2);
     /// ```
     pub fn find_nodes_with_data<F>(&self, predicate: F) -> Vec<(ID, &ND)>
     where
@@ -256,15 +296,22 @@ impl<ID: NodeId, ND: NodeData, LD: LinkData> DiGraph<ID, ND, LD> {
     /// # Examples
     /// 
     /// ```
-    /// use oxedyne_fe2o3_data::digraph::DiGraph;
-    /// 
-    /// let mut graph = DiGraph::new();
-    /// for i in 0..10000 {
-    ///     graph.insert(i, i * 2);
+    /// # use oxedyne_fe2o3_data::digraph::{DiGraph, NodeId, NodeData, LinkData};
+    /// # use std::fmt;
+    /// # #[derive(Clone, Debug, Eq, Hash, PartialEq)] struct Id(u32);
+    /// # impl NodeId for Id {}
+    /// # #[derive(Clone, Debug)] struct Val(i64);
+    /// # impl fmt::Display for Val { fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { write!(f, "{}", self.0) } }
+    /// # impl NodeData for Val {}
+    /// # impl LinkData for Val {}
+    /// let mut graph: DiGraph<Id, Val, Val> = DiGraph::new();
+    /// for i in 0..10_000u32 {
+    ///     graph.insert(Id(i), Val((i as i64) * 2));
     /// }
-    /// 
+    ///
     /// // Find all nodes with values greater than 5000 in parallel.
-    /// let large_nodes = graph.find_nodes_par(|&value| value > 5000);
+    /// let large_nodes = graph.find_nodes_par(|value| value.0 > 5000);
+    /// assert!(!large_nodes.is_empty());
     /// ```
     pub fn find_nodes_par<F>(&self, predicate: F) -> Vec<ID>
     where
@@ -301,26 +348,35 @@ impl<ID: NodeId, ND: NodeData, LD: LinkData> DiGraph<ID, ND, LD> {
     /// # Examples
     /// 
     /// ```
-    /// use oxedyne_fe2o3_data::digraph::DiGraph;
-    /// use oxedyne_fe2o3_core::prelude::*;
-    /// 
+    /// use oxedyne_fe2o3_data::digraph::{DiGraph, NodeId, NodeData, LinkData};
+    /// use std::fmt;
+    /// # #[derive(Clone, Debug, Eq, Hash, PartialEq)] struct Id(u32);
+    /// # impl NodeId for Id {}
+    ///
     /// #[derive(Clone, Debug)]
     /// struct Sensor {
     ///     name: String,
     ///     temperature: f64,
     /// }
-    /// 
-    /// let mut graph = DiGraph::new();
-    /// for i in 0..10000 {
-    ///     graph.insert(i, Sensor { 
-    ///         name: fmt!("Sensor_{}", i), 
-    ///         temperature: (i as f64) * 0.1 
+    /// impl fmt::Display for Sensor {
+    ///     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    ///         write!(f, "{}: {:.1}", self.name, self.temperature)
+    ///     }
+    /// }
+    /// impl NodeData for Sensor {}
+    /// impl LinkData for Sensor {}
+    ///
+    /// let mut graph: DiGraph<Id, Sensor, Sensor> = DiGraph::new();
+    /// for i in 0..10_000u32 {
+    ///     graph.insert(Id(i), Sensor {
+    ///         name: format!("Sensor_{}", i),
+    ///         temperature: (i as f64) * 0.1,
     ///     });
     /// }
-    /// 
+    ///
     /// // Find all sensors with high temperature readings in parallel.
     /// let hot_sensors = graph.find_nodes_with_data_par(|sensor| sensor.temperature > 500.0);
-    /// println!("Found {} sensors with high temperature", hot_sensors.len());
+    /// assert!(!hot_sensors.is_empty());
     /// ```
     pub fn find_nodes_with_data_par<F>(&self, predicate: F) -> Vec<(ID, &ND)>
     where

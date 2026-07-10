@@ -12,12 +12,12 @@
 //! 
 //! # Examples
 //! 
-//! Basic usage with error handling:
-//! 
-//! ```
+//! Basic usage with error handling (illustrative sketch):
+//!
+//! ```ignore
 //! use oxedyne_fe2o3_core::prelude::*;
 //! use oxedyne_fe2o3_o3db_sync::prelude::*;
-//! 
+//!
 //! fn store_value() -> Outcome<()> {
 //!     // Configure and start the database
 //!     let mut db = res!(O3db::new(
@@ -44,9 +44,9 @@
 //! }
 //! ```
 //! 
-//! Fetching values with chunking support:
-//! 
-//! ```
+//! Fetching values with chunking support (illustrative sketch):
+//!
+//! ```ignore
 //! fn fetch_large_value() -> Outcome<Vec<u8>> {
 //!     let resp = res!(db.api().fetch_using_schemes(
 //!         &dat!("large_key"),
@@ -64,9 +64,9 @@
 //! }
 //! ```
 //! 
-//! Garbage collection:
-//! 
-//! ```
+//! Garbage collection (illustrative sketch):
+//!
+//! ```ignore
 //! fn manage_gc() -> Outcome<()> {
 //!     // Enable garbage collection
 //!     res!(db.api().activate_gc(true));
