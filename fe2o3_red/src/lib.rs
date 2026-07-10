@@ -28,4 +28,9 @@ pub mod session;
 pub mod skills;
 pub mod syntax;
 pub mod tools;
+/// The browser (wasm32) entry surface — a `#[wasm_bindgen]` API plus the
+/// OPFS filesystem edge.  Gated to wasm32 so the native build never sees
+/// `wasm-bindgen`'s generated glue.
+#[cfg(target_arch = "wasm32")]
+pub mod wasm;
 pub mod workspace;

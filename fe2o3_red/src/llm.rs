@@ -481,9 +481,40 @@ impl LlmClient {
         }
     }
 
+    /// Issue a lightweight transport probe and return the raw HTTP
+    /// status the provider replies with.
+    ///
+    /// Unlike [`wasm_fetch`](Self::wasm_fetch), a non-2xx status is *not*
+    /// treated as an error — the status number is the whole point.  A
+    /// `401` from a real provider with a dummy key proves the full
+    /// `fetch` + CORS + transport path end-to-end without a valid key.
+    pub async fn probe_status(&self) -> Outcome<u16> {
+        let messages = [crate::protocol::ChatMessage::User {
+            content: "ping".to_string(),
+        }];
+        let body = self.build_body(&messages, None, false);
+        let resp = res!(self.wasm_fetch_raw(&body).await);
+        Ok(resp.status())
+    }
+
     /// POST `body` via `fetch` and await the `Response`, mapping any
-    /// JS error into an `Outcome`.  TLS trust is the browser's.
+    /// JS error into an `Outcome`.  A non-2xx status is surfaced as an
+    /// error (the streaming/chat callers require a 200).
     async fn wasm_fetch(&self, body: &str) -> Outcome<web_sys::Response> {
+        let resp = res!(self.wasm_fetch_raw(body).await);
+        if !resp.ok() {
+            return Err(err!(
+                "LLM: HTTP error: {} {}.", resp.status(), resp.status_text();
+                IO, Network, Wire, Read));
+        }
+        Ok(resp)
+    }
+
+    /// POST `body` via `fetch` and await the `Response` without checking
+    /// the status, mapping any JS error into an `Outcome`.  TLS trust is
+    /// the browser's.  Callers that need a 2xx guarantee go through
+    /// [`wasm_fetch`](Self::wasm_fetch).
+    async fn wasm_fetch_raw(&self, body: &str) -> Outcome<web_sys::Response> {
         use wasm_bindgen::JsCast;
         use wasm_bindgen::JsValue;
         use wasm_bindgen_futures::JsFuture;
@@ -522,11 +553,6 @@ impl LlmClient {
             .map_err(|e| err!("LLM: fetch failed: {}.", js_str(&e); IO, Network, Wire)));
         let resp: Response = res!(resp_val.dyn_into()
             .map_err(|_| err!("LLM: fetch did not return a Response."; IO, Network, Wire)));
-        if !resp.ok() {
-            return Err(err!(
-                "LLM: HTTP error: {} {}.", resp.status(), resp.status_text();
-                IO, Network, Wire, Read));
-        }
         Ok(resp)
     }
 

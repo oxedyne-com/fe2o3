@@ -9,6 +9,9 @@ repository = "https://github.com/oxedyne-io/fe2o3"
 
 [lib]
 path = "src/lib.rs"
+# `cdylib` lets wasm-pack emit a browser wasm module; `rlib` keeps the
+# native consumers (Steel, the agent smoke example) linking as before.
+crate-type = ["cdylib", "rlib"]
 
 # Portable dependencies — build on both native and wasm32.  These are
 # pulled in by the target-agnostic modules (protocol, session, syntax,
@@ -57,6 +60,17 @@ web-sys = { version = "0.3", features = [
 	"Response",
 	"Window",
 	"WorkerGlobalScope",
+	# OPFS filesystem edge (main-thread async path).
+	"Navigator",
+	"StorageManager",
+	"FileSystemDirectoryHandle",
+	"FileSystemFileHandle",
+	"FileSystemGetFileOptions",
+	"FileSystemGetDirectoryOptions",
+	"FileSystemWritableFileStream",
+	"WritableStream",
+	"Blob",
+	"File",
 ] }
 
 [dev-dependencies]
