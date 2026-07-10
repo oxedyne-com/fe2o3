@@ -42,12 +42,12 @@
 
 		<!-- Rail: projects + chats -->
 		<aside class="panel rail" id="panel-rail">
-			<div class="railhead"><span>Projects</span>
-				<button class="addbtn" id="new-project-btn" title="Projects arrive with the brief layer" disabled>
+			<div class="railhead"><span>Foci</span>
+				<button class="addbtn" id="new-focus-btn" title="New Focus">
 					<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
 				</button>
 			</div>
-			<div class="rail-note">None yet.</div>
+			<div class="focus-list" id="focus-list"></div>
 			<div class="railhead"><span>Chats</span>
 				<button class="addbtn" id="new-session-btn" title="New chat">
 					<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
@@ -76,6 +76,13 @@
 			<div class="chat-input-bar">
 				<textarea id="chat-input" placeholder="Type a message…" rows="1"></textarea>
 				<button id="chat-send" title="Send">➤</button>
+			</div>
+
+			<!-- Brief view: the Focus command surface (steer + fold), shown
+			     in place of the chat when a Focus is selected. Built in JS. -->
+			<div class="brief-view" id="brief-view" style="display:none">
+				<div class="brief-body" id="brief-body"></div>
+				<div class="brief-controls" id="brief-controls"></div>
 			</div>
 		</section>
 		<div class="phandle" id="handle-agents" data-panel="agents" title="Drag to resize, double-click to reset"></div>

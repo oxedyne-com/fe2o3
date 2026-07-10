@@ -139,6 +139,48 @@ label.addbtn { cursor: pointer; }
 .chat-msg-content ul, .chat-msg-content ol { margin: 8px 0; padding-left: 24px; }
 .chat-msg-content h1, .chat-msg-content h2, .chat-msg-content h3 { margin: 12px 0 6px; }
 
+/* Foci rail list — reuses .session-box styling via the shared class. */
+.focus-list { display: flex; flex-direction: column; gap: 6px; padding: 0 6px 6px; }
+
+/* Brief view — the Focus command surface (steer + fold). */
+.brief-view { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.brief-body { flex: 1; overflow-y: auto; padding: 16px 20px; font-size: 14px; line-height: 1.6; color: var(--text-primary); word-break: break-word; }
+.brief-body .brief-empty { color: var(--text-muted); font-style: italic; }
+.brief-controls { border-top: 1px solid var(--border); padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+
+/* Steer row: an instruction command line, distinct from a chat thread. */
+.steer-row { display: flex; align-items: flex-end; gap: 8px; }
+.steer-input { flex: 1; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text-primary); padding: 9px 12px; font-size: 14px; resize: none; max-height: 120px; line-height: 1.5; }
+.steer-input:focus { outline: none; border-color: var(--accent); }
+.steer-input::placeholder { color: var(--text-muted); }
+.steer-send { background: var(--accent); color: #fff; border: none; border-radius: var(--radius); padding: 9px 13px; font-size: 16px; flex-shrink: 0; }
+.steer-send:hover { background: var(--accent-hover); }
+.steer-send:disabled { opacity: 0.4; cursor: default; }
+
+/* Fold-a-delta control: enter a delta, propose a fold (writes nothing). */
+.fold-row { display: flex; align-items: flex-end; gap: 8px; }
+.fold-delta { flex: 1; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text-primary); padding: 8px 12px; font-size: 13px; resize: none; max-height: 100px; line-height: 1.5; }
+.fold-delta:focus { outline: none; border-color: var(--accent); }
+.fold-btn { background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border-2); border-radius: var(--radius); padding: 8px 12px; font-size: 13px; flex-shrink: 0; white-space: nowrap; }
+.fold-btn:hover { border-color: var(--accent); }
+.fold-btn:disabled { opacity: 0.4; cursor: default; }
+.brief-status { font-size: 12px; color: var(--text-muted); font-family: var(--font-mono); min-height: 14px; }
+
+/* Fold diff — added / removed lines, all text escaped. */
+.diff-head { font-size: 12px; color: var(--text-secondary); margin-bottom: 10px; }
+.diff-lines { font-family: var(--font-mono); font-size: 12.5px; line-height: 1.55; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.diff-line { display: block; white-space: pre-wrap; word-break: break-word; padding: 1px 8px; }
+.diff-line .sign { display: inline-block; width: 1.3em; color: var(--text-muted); user-select: none; }
+.diff-line.add { background: rgba(102, 185, 140, 0.16); }
+.diff-line.del { background: rgba(224, 122, 103, 0.16); }
+.diff-line.add .sign { color: var(--ok); }
+.diff-line.del .sign { color: var(--danger); }
+.diff-actions { display: flex; gap: 8px; }
+.diff-accept { background: var(--ok); color: #fff; border: none; border-radius: var(--radius); padding: 9px 16px; font-size: 14px; }
+.diff-accept:hover { filter: brightness(1.08); }
+.diff-reject { background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border-2); border-radius: var(--radius); padding: 9px 16px; font-size: 14px; }
+.diff-reject:hover { border-color: var(--danger); color: var(--danger); }
+
 /* Empty state */
 .empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; text-align: center; color: var(--text-secondary); gap: 10px; padding: 24px; }
 .empty-state .empty-logo { width: 56px; height: 56px; opacity: 0.9; margin-bottom: 4px; }
