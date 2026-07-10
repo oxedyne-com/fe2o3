@@ -979,7 +979,7 @@ fn find_json_object(json: &str, key: &str) -> Option<String> {
 /// Extract a numeric value for a key from a JSON string.
 ///
 /// Scans for `"key":number` and returns the parsed value.
-fn extract_json_number(json: &str, key: &str) -> Option<u64> {
+pub(crate) fn extract_json_number(json: &str, key: &str) -> Option<u64> {
     let needle = fmt!("\"{}\":", key);
     let pos = match json.find(&needle) {
         Some(p) => p,

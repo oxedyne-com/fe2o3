@@ -24,6 +24,13 @@ pub struct ToolContext {
     /// Working subdirectory (relative to the workspace root) for shell
     /// commands.  Empty means the workspace root.
     pub cwd:       String,
+    /// Path prefix that scopes every file tool to a subtree of the store.
+    /// Empty means the whole workspace / OPFS root; a value such as
+    /// `foci/<id>` confines a Focus's brief agent so its `file_read` /
+    /// `file_write` on `brief.md` address `foci/<id>/brief.md`, still
+    /// OPFS-jailed.  Applied on the wasm transport only (the native tools
+    /// jail through [`Workspace`]).
+    pub path_prefix: String,
 }
 
 /// Maximum bytes returned from a file read / command output before
@@ -145,16 +152,16 @@ impl Tool {
     /// only the `shell` tool escalates, as there is no in-browser process
     /// executor.
     #[cfg(target_arch = "wasm32")]
-    pub async fn execute(&self, args_json: &str, _ctx: &ToolContext) -> Outcome<String> {
+    pub async fn execute(&self, args_json: &str, ctx: &ToolContext) -> Outcome<String> {
         match self {
             Tool::FileWrite => {
-                let path = res!(Self::arg(args_json, "path"));
+                let path = Self::scoped(ctx, &res!(Self::arg(args_json, "path")));
                 let content = res!(Self::arg(args_json, "content"));
                 res!(crate::wasm::opfs::write_file(&path, content.as_bytes()).await);
                 Ok(fmt!("Wrote {} bytes to {}.", content.len(), path))
             }
             Tool::FileRead => {
-                let path = res!(Self::arg(args_json, "path"));
+                let path = Self::scoped(ctx, &res!(Self::arg(args_json, "path")));
                 let bytes = res!(crate::wasm::opfs::read_file(&path).await);
                 let mut s = String::from_utf8_lossy(&bytes).to_string();
                 if s.len() > MAX_OUTPUT {
@@ -164,7 +171,7 @@ impl Tool {
                 Ok(s)
             }
             Tool::FileEdit => {
-                let path = res!(Self::arg(args_json, "path"));
+                let path = Self::scoped(ctx, &res!(Self::arg(args_json, "path")));
                 let old = res!(Self::arg(args_json, "old_string"));
                 let new = res!(Self::arg(args_json, "new_string"));
                 let bytes = res!(crate::wasm::opfs::read_file(&path).await);
@@ -185,7 +192,8 @@ impl Tool {
                 Ok(fmt!("Edited {}.", path))
             }
             Tool::FileList => {
-                let path = extract_json_string(args_json, "path").unwrap_or_else(|| ".".to_string());
+                let raw = extract_json_string(args_json, "path").unwrap_or_else(|| ".".to_string());
+                let path = Self::scoped(ctx, &raw);
                 let mut entries = res!(crate::wasm::opfs::list_dir(&path).await);
                 // Dirs first, then by name — matching the native ordering.
                 entries.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
@@ -204,7 +212,15 @@ impl Tool {
             }
             Tool::FileSearch => {
                 let query = res!(Self::arg(args_json, "query"));
-                let start = extract_json_string(args_json, "path").unwrap_or_else(|| ".".to_string());
+                let raw = extract_json_string(args_json, "path").unwrap_or_else(|| ".".to_string());
+                let start = Self::scoped(ctx, &raw);
+                // Strip the Focus prefix from reported paths so results are
+                // Focus-relative and round-trip back through `file_read`.
+                let strip = if ctx.path_prefix.is_empty() {
+                    String::new()
+                } else {
+                    fmt!("{}/", ctx.path_prefix.trim_end_matches('/'))
+                };
                 let mut matches: Vec<String> = Vec::new();
                 let cap = 200usize;
                 let mut stack = vec![start];
@@ -231,7 +247,12 @@ impl Tool {
                             let text = String::from_utf8_lossy(&bytes);
                             for (i, line) in text.lines().enumerate() {
                                 if line.contains(&query) {
-                                    matches.push(fmt!("{}:{}: {}", child, i + 1, line.trim()));
+                                    let disp = if strip.is_empty() {
+                                        child.as_str()
+                                    } else {
+                                        child.strip_prefix(&strip).unwrap_or(child.as_str())
+                                    };
+                                    matches.push(fmt!("{}:{}: {}", disp, i + 1, line.trim()));
                                     if matches.len() >= cap {
                                         matches.push("… [more matches truncated]".to_string());
                                         break 'walk;
@@ -248,13 +269,32 @@ impl Tool {
                 }
             }
             Tool::FileDelete => {
-                let path = res!(Self::arg(args_json, "path"));
+                let path = Self::scoped(ctx, &res!(Self::arg(args_json, "path")));
                 res!(crate::wasm::opfs::delete_entry(&path, false).await);
                 Ok(fmt!("Deleted {}.", path))
             }
             Tool::Shell => Err(err!(
                 "Tool 'shell' is not available in the browser build (no in-browser process executor).";
                 Unimplemented)),
+        }
+    }
+
+    /// Resolve a tool's raw path against the context's Focus
+    /// [`path_prefix`](ToolContext::path_prefix).
+    ///
+    /// With an empty prefix the path passes through unchanged (whole-OPFS
+    /// behaviour); with a prefix such as `foci/<id>` the leaf path is
+    /// confined beneath it, so a brief agent addressing `brief.md` writes
+    /// `foci/<id>/brief.md`.  Still OPFS-jailed downstream.
+    #[cfg(target_arch = "wasm32")]
+    fn scoped(ctx: &ToolContext, rel: &str) -> String {
+        let prefix = ctx.path_prefix.trim_end_matches('/');
+        if prefix.is_empty() {
+            rel.to_string()
+        } else if rel.is_empty() || rel == "." {
+            prefix.to_string()
+        } else {
+            fmt!("{}/{}", prefix, rel.trim_start_matches("./"))
         }
     }
 
@@ -495,7 +535,7 @@ mod tests {
             .unwrap_or(0);
         dir.push(fmt!("red_tools_test_{}", n));
         let ws = Workspace::new(dir).expect("ws");
-        ToolContext { workspace: ws, executor: Executor::local_default(), cwd: String::new() }
+        ToolContext { workspace: ws, executor: Executor::local_default(), cwd: String::new(), path_prefix: String::new() }
     }
 
     #[test]

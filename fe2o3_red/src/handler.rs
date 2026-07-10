@@ -453,9 +453,10 @@ pub async fn handle_chat_websocket<
                     match Workspace::new(ws_dir) {
                         Ok(ws) => {
                             let ctx = ToolContext {
-                                workspace: ws,
-                                executor:  state.executor.clone(),
-                                cwd:       String::new(),
+                                workspace:   ws,
+                                executor:    state.executor.clone(),
+                                cwd:         String::new(),
+                                path_prefix: String::new(),
                             };
                             ToolRegistry::new(Tool::defaults(), ctx)
                         }

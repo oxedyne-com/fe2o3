@@ -8,7 +8,10 @@
 //!   probe, an OPFS read/write pair, and an LLM transport probe.
 //! - [`app`] — the [`RedApp`](app::RedApp) agent surface: runs a real
 //!   [`Agent`](crate::agent::Agent) turn and streams
-//!   [`AgentEvent`](crate::protocol::AgentEvent)s to a JS callback.
+//!   [`AgentEvent`](crate::protocol::AgentEvent)s to a JS callback, and
+//!   hosts the Focus / brief / fold surface.
+//! - [`focus`] — the Focus / brief / fold substrate: the OPFS layout and
+//!   store operations behind the durable brief and the advisory fold.
 //! - [`opfs`] — an async filesystem edge over the Origin Private File
 //!   System (OPFS), reached through `navigator.storage.getDirectory()`.
 //!
@@ -19,6 +22,7 @@
 
 pub mod app;
 pub mod entry;
+pub mod focus;
 pub mod opfs;
 
 use oxedyne_fe2o3_core::prelude::*;
