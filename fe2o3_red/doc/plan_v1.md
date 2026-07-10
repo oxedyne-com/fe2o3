@@ -134,9 +134,13 @@ as courtesy guardrails, not as a security boundary.
 Ordered roughly by dependency.  Each item maps to `TODO.md` where relevant.
 
 **Status (2026-07-10):** WS-A ✅, WS-C ✅, WS-D ✅ (verified end-to-end vs live
-GLM-5.2), WS-G ✅ — committed and pushed.  Remaining: WS-B, WS-E, WS-F, WS-I,
-rendering.  Client UI written but pending Playwright visual verification (the
-dev browser's X display dropped mid-session).
+GLM-5.2), WS-E ✅ (skills, 18 tests), WS-F ✅ (file browser), WS-G ✅ (context
+meter), WS-I ✅ (mobile), rich rendering ✅ — all committed and pushed.  WS-B
+partial: the model picker is now functional (agent uses the session's model);
+multi-provider/BYOK config remains.  59 unit tests pass.  Client UI is
+syntax-checked and deployed locally but pending Playwright *visual*
+verification (the dev browser's X display dropped mid-session) — intended for
+manual testing.
 
 ### WS-A — MVP hardening (finish what exists)
 The current crate streams chat but has the P0 gaps from `TODO.md`.
