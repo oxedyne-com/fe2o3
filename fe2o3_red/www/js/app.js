@@ -115,17 +115,20 @@
 			work:   document.getElementById('work-toggle-btn'),
 		};
 		var widths = {};
-		var open = { rail: true, agents: true, work: true };
+		var open = { rail: true, agents: true, work: true };   // user intent
+		var forced = { rail: false, agents: false, work: false }; // auto-hidden: too narrow
+
+		function shown(name) { return open[name] && !forced[name]; }
 
 		function clamp(name, w) {
 			var lim = LIM[name];
 			w = Math.max(lim[0], Math.min(lim[1], w));
 			// Keep the center panel usable: cap by available space.
-			var others = 0;
-			for (var k in els) {
-				if (k !== name && open[k]) others += els[k].offsetWidth;
-			}
-			var nHandles = (open.rail ? 1 : 0) + (open.agents ? 1 : 0) + (open.work ? 1 : 0);
+			var others = 0, nHandles = 0;
+			['rail', 'agents', 'work'].forEach(function (k) {
+				if (k !== name && shown(k)) { others += els[k].offsetWidth; nHandles++; }
+			});
+			nHandles++; // this panel's own handle
 			var cap = main.clientWidth - others - nHandles * HANDLE_W - CENTER_MIN;
 			return Math.max(lim[0], Math.min(w, cap));
 		}
@@ -177,6 +180,7 @@
 				els[name].classList.remove('nt');
 				document.body.classList.remove('dragging');
 				save();
+				reflow(false);
 			});
 			h.addEventListener('dblclick', function () {
 				setWidth(name, DEF[name]);
@@ -184,44 +188,74 @@
 			});
 		}
 
-		function show(name, animate) {
-			open[name] = true;
-			handles[name].classList.remove('closed');
-			var el = els[name];
-			el.classList.remove('closed');
-			if (animate) {
-				el.classList.add('nt');
-				el.style.width = '0px';
-				void el.offsetWidth; // reflow
-				el.classList.remove('nt');
+		// Apply a panel's current visibility (from open + forced) to the DOM.
+		function apply(name, animate) {
+			var el = els[name], h = handles[name];
+			if (shown(name)) {
+				h.classList.remove('closed');
+				el.classList.remove('closed');
+				if (animate) {
+					el.classList.add('nt');
+					el.style.width = '0px';
+					void el.offsetWidth; // reflow
+					el.classList.remove('nt');
+				}
+				el.style.width = widths[name] + 'px';
+			} else {
+				h.classList.add('closed');
+				if (animate) {
+					el.style.width = '0px';
+					var onEnd = function () {
+						el.removeEventListener('transitionend', onEnd);
+						if (!shown(name)) el.classList.add('closed');
+					};
+					el.addEventListener('transitionend', onEnd);
+				} else {
+					el.style.width = '0px';
+					el.classList.add('closed');
+				}
 			}
-			el.style.width = widths[name] + 'px';
-			syncToggles();
-			save();
-			if (name === 'work' && window.RedFiles) RedFiles.onOpen();
 		}
 
-		function hide(name, animate) {
-			open[name] = false;
-			handles[name].classList.add('closed');
-			var el = els[name];
-			if (animate) {
-				el.style.width = '0px';
-				var onEnd = function () {
-					el.removeEventListener('transitionend', onEnd);
-					if (!open[name]) el.classList.add('closed');
-				};
-				el.addEventListener('transitionend', onEnd);
-			} else {
-				el.style.width = '0px';
-				el.classList.add('closed');
+		// Recompute which side panels fit and hide the overflow (work first,
+		// then agents) so the four-panel layout never spills off-screen. On a
+		// wide window nothing is forced; as it narrows, panels drop out and
+		// come back when it widens again. The user's open/close intent is
+		// preserved across this.
+		function reflow(animate) {
+			if (isMobile()) return; // mobile CSS owns the layout
+			var avail = main.clientWidth;
+			if (avail <= 0) return; // not laid out yet (app still hidden)
+			forced.agents = false;
+			forced.work = false;
+			function needed() {
+				var w = 0, n = 0;
+				['rail', 'agents', 'work'].forEach(function (k) {
+					if (shown(k)) { w += widths[k]; n++; }
+				});
+				return w + n * HANDLE_W + CENTER_MIN;
 			}
+			if (needed() > avail && open.work) forced.work = true;
+			if (needed() > avail && open.agents) forced.agents = true;
+			['rail', 'agents', 'work'].forEach(function (k) { apply(k, animate); });
 			syncToggles();
+		}
+
+		function show(name) {
+			open[name] = true;
 			save();
+			reflow(true);
+			if (shown(name) && name === 'work' && window.RedFiles) RedFiles.onOpen();
+		}
+
+		function hide(name) {
+			open[name] = false;
+			save();
+			reflow(true);
 		}
 
 		function toggle(name) {
-			if (open[name]) hide(name, true); else show(name, true);
+			if (open[name]) hide(name); else show(name);
 		}
 
 		function init() {
@@ -233,9 +267,7 @@
 			}
 			open.agents = localStorage.getItem('red-panel-open-agents') !== '0';
 			open.work = localStorage.getItem('red-panel-open-work') !== '0';
-			if (!open.agents) hide('agents', false);
-			if (!open.work) hide('work', false);
-			syncToggles();
+			reflow(false);
 
 			for (var t in toggles) {
 				(function (name) {
@@ -243,11 +275,23 @@
 				})(t);
 			}
 			document.querySelectorAll('.panel-close').forEach(function (btn) {
-				btn.addEventListener('click', function () { hide(btn.dataset.close, true); });
+				btn.addEventListener('click', function () { hide(btn.dataset.close); });
+			});
+
+			// Keep the layout fitting as the window resizes.
+			var rt = null;
+			window.addEventListener('resize', function () {
+				if (rt) return;
+				rt = setTimeout(function () { rt = null; reflow(false); }, 80);
 			});
 		}
 
-		return { init: init, toggle: toggle, isOpen: function (n) { return !!open[n]; } };
+		return {
+			init: init,
+			toggle: toggle,
+			reflow: function () { reflow(false); },
+			isOpen: function (n) { return shown(n); },
+		};
 	})();
 	window.RedPanels = RedPanels;
 
@@ -518,7 +562,7 @@
 	function renderToolCall(name, args) {
 		finalizeAssistantMessage(); // close any open text bubble
 		var block = document.createElement('div');
-		block.className = 'tool-block running';
+		block.className = 'tool-block running collapsed';
 		var head = document.createElement('div');
 		head.className = 'tool-head';
 		head.textContent = '\u{1F527} ' + name;
@@ -702,7 +746,7 @@
 			var pct = Math.min(100, (lpt / getModelCtx(s.model || '')) * 100);
 			parts.push('session ' + (lpt > 0 ? pct.toFixed(pct < 10 ? 1 : 0) : '0') + '% ctx');
 		}
-		if (total > 0) parts.push('$' + total.toFixed(total < 0.1 ? 4 : 2));
+		if (total > 0) parts.push('$' + total.toFixed(total < 0.1 ? 4 : 2) + (s ? '' : ' total'));
 		topMeter.innerHTML = '';
 		parts.forEach(function (p, idx) {
 			if (idx > 0) {
@@ -773,10 +817,6 @@
 		var meta = document.createElement('div');
 		meta.className = 'session-box-meta';
 
-		var modelLabel = document.createElement('span');
-		modelLabel.className = 'session-box-model';
-		modelLabel.textContent = getModelLabel(s.model || '');
-
 		var ctxLabel = document.createElement('span');
 		ctxLabel.className = 'session-box-ctx';
 		var pt = s.prompt_tokens || 0;
@@ -795,7 +835,6 @@
 		timeLabel.className = 'session-box-time';
 		timeLabel.textContent = fmtRelTime(s.created_at);
 
-		meta.appendChild(modelLabel);
 		if (totalTok > 0) meta.appendChild(ctxLabel);
 		if (cost > 0) meta.appendChild(costLabel);
 		if (timeLabel.textContent) meta.appendChild(timeLabel);
@@ -971,13 +1010,6 @@
 			ah.appendChild(pill);
 			card.appendChild(ah);
 
-			if (run.model) {
-				var ml = document.createElement('div');
-				ml.className = 'amodel';
-				ml.textContent = run.model;
-				card.appendChild(ml);
-			}
-
 			// Context bar + cost for the run's session, live figures.
 			var s = sessionById(run.sid);
 			if (s) {
@@ -1098,6 +1130,9 @@
 		loginScreen.style.display = 'none';
 		registerScreen.style.display = 'none';
 		appEl.style.display = 'flex';
+		// The app was display:none during RedPanels.init(), so the panel
+		// fit couldn't be measured; recompute now that it is laid out.
+		if (window.RedPanels) RedPanels.reflow();
 		connectMgmt().then(function () {
 			connectChat();
 		}).catch(function (e) {
@@ -1274,9 +1309,6 @@
 		});
 	}
 	applyToolsVisibility();
-
-	// A long placeholder wraps and clips on narrow screens.
-	if (isMobile()) { chatInput.placeholder = 'Type a message…'; }
 
 	// ── Init ───────────────────────────────────────────────────
 	initTheme();

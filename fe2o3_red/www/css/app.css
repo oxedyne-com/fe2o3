@@ -99,7 +99,6 @@ label.addbtn { cursor: pointer; }
 .session-box:hover .session-box-close { opacity: 1; }
 .session-box-close:hover { color: var(--danger); }
 .session-box-meta { display: flex; flex-wrap: wrap; gap: 4px 8px; margin-top: 3px; font-family: var(--font-mono); }
-.session-box-model { font-size: 11px; color: var(--text-secondary); }
 .session-box-ctx, .session-box-cost, .session-box-time { font-size: 11px; color: var(--text-muted); }
 
 /* ── Center panel ────────────────────────────────────────────── */
@@ -158,12 +157,15 @@ label.addbtn { cursor: pointer; }
 /* Inline tool-call blocks */
 .tool-block { margin: 8px 0; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-tertiary); overflow: hidden; font-size: 13px; }
 .tool-head { padding: 7px 12px; cursor: pointer; font-weight: 600; color: var(--accent); user-select: none; display: flex; align-items: center; gap: 6px; }
+.tool-head::before { content: '▾'; font-size: 10px; color: var(--text-muted); transition: transform 0.15s; }
+.tool-block.collapsed .tool-head::before { transform: rotate(-90deg); }
 .tool-head:hover { background: var(--bg-hover); }
 .tool-block.running .tool-head::after { content: '…'; color: var(--text-secondary); }
 .tool-args, .tool-result { margin: 0; padding: 8px 12px; white-space: pre-wrap; word-break: break-word; font-family: var(--font-mono); font-size: 12px; border-top: 1px solid var(--border); max-height: 260px; overflow: auto; }
 .tool-args { color: var(--text-secondary); }
 .tool-result { color: var(--text-primary); }
-.tool-block.collapsed .tool-args, .tool-block.collapsed .tool-result { display: none !important; }
+/* Collapsed by default: hide the (often long) args JSON, keep the result. */
+.tool-block.collapsed .tool-args { display: none !important; }
 .chat-output.hide-tools .tool-block { display: none; }
 
 /* Context-window meter (session boxes + agent tiles) */
@@ -183,7 +185,6 @@ label.addbtn { cursor: pointer; }
 .acard.error { border-color: var(--danger); }
 .acard .ah { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-bottom: 3px; }
 .acard .an { font-size: 12px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.acard .amodel { font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); margin-bottom: 3px; }
 .pill { font-family: var(--font-mono); font-size: 10px; padding: 1px 8px; border-radius: 20px; white-space: nowrap; flex: none; }
 .pill.run { color: var(--accent-text); background: var(--accent-soft); }
 .pill.ok { color: var(--ok); background: var(--ok-bg); }
