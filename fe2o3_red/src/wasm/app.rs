@@ -93,8 +93,17 @@ impl RedApp {
             executor:  Executor::Wasm,
             cwd:       String::new(),
         };
+        // The whole file toolset is OPFS-backed in the browser; only the
+        // shell tool has no in-browser executor, so it is left out.
         let tools = if enable_tools {
-            vec![Tool::FileWrite, Tool::FileRead]
+            vec![
+                Tool::FileRead,
+                Tool::FileWrite,
+                Tool::FileEdit,
+                Tool::FileList,
+                Tool::FileSearch,
+                Tool::FileDelete,
+            ]
         } else {
             Vec::new()
         };
@@ -124,6 +133,16 @@ impl RedApp {
             .run_turn(&mut self.session, user_msg, &self.registry, &mut sink)
             .await
             .map_err(to_js_err)
+    }
+
+    /// Invoke a single tool directly by wire name with a raw-JSON argument
+    /// object, returning its result text — the same path the agent loop
+    /// takes, without an LLM turn.  This backs UI affordances such as a
+    /// file-browser panel (list/read/delete) that act on OPFS directly.
+    /// Tool errors are returned as `Error: …` text (never a rejection), so
+    /// the browser can surface them inline.
+    pub async fn run_tool(&self, name: String, args_json: String) -> String {
+        self.registry.dispatch(&name, &args_json).await
     }
 
     /// Cumulative prompt tokens billed to this session.

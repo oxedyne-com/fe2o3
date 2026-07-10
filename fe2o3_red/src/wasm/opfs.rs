@@ -24,6 +24,7 @@ use oxedyne_fe2o3_core::prelude::*;
 use std::path::{Component, Path};
 
 use wasm_bindgen::JsCast;
+use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
     File,
@@ -31,17 +32,19 @@ use web_sys::{
     FileSystemFileHandle,
     FileSystemGetDirectoryOptions,
     FileSystemGetFileOptions,
+    FileSystemRemoveOptions,
     FileSystemWritableFileStream,
 };
 
 
-/// Split a workspace-relative path into jailed components.
+/// Split a workspace-relative path into jailed components, tolerating an
+/// empty result (which addresses the OPFS root itself).
 ///
 /// Mirrors [`crate::workspace::Workspace::resolve`]: leading slashes are
 /// stripped (treated as relative), `.` is skipped, and any absolute
 /// component or `..` that would escape the root is rejected.  Returns the
-/// ordered directory/file names, the last of which is the leaf.
-fn jail_components(rel: &str) -> Outcome<Vec<String>> {
+/// ordered directory/file names; an empty vector means the root directory.
+fn split_components(rel: &str) -> Outcome<Vec<String>> {
     let rel = rel.trim_start_matches('/');
     let mut out: Vec<String> = Vec::new();
     for comp in Path::new(rel).components() {
@@ -63,6 +66,16 @@ fn jail_components(rel: &str) -> Outcome<Vec<String>> {
             }
         }
     }
+    Ok(out)
+}
+
+/// Split a workspace-relative path into jailed components, requiring at
+/// least one component (a leaf file or directory name).
+///
+/// A wrapper over [`split_components`] for the file-addressing tools,
+/// which always name a leaf; the empty (root) case is rejected here.
+fn jail_components(rel: &str) -> Outcome<Vec<String>> {
+    let out = res!(split_components(rel));
     if out.is_empty() {
         return Err(err!(
             "OPFS: path '{}' has no file component.", rel;
@@ -172,4 +185,136 @@ pub async fn read_file(path: &str) -> Outcome<Vec<u8>> {
         .map_err(|e| err!("OPFS: read bytes of '{}' failed: {}.", leaf, js_str(&e); IO, File, Read)));
     let bytes = js_sys::Uint8Array::new(&buf_val).to_vec();
     Ok(bytes)
+}
+
+/// Descend into an *existing* directory path (no creation), returning the
+/// handle.  An empty path (`""`, `"."`, `"/"`) resolves to the OPFS root.
+/// Errors if any component does not exist or is not a directory.
+async fn descend_dir(path: &str) -> Outcome<FileSystemDirectoryHandle> {
+    let components = res!(split_components(path));
+    let mut dir = res!(root().await);
+    for name in components {
+        let next_val = res!(JsFuture::from(dir.get_directory_handle(&name)).await
+            .map_err(|e| err!("OPFS: open dir '{}' failed: {}.", name, js_str(&e); IO, File, Read)));
+        dir = res!(next_val.dyn_into()
+            .map_err(|_| err!("OPFS: dir handle for '{}' was not a directory.", name; IO, File, Read)));
+    }
+    Ok(dir)
+}
+
+/// Descend into the *existing* parent directory of a jailed path (no
+/// creation), returning the parent handle plus the leaf name.
+async fn open_parent(components: Vec<String>) -> Outcome<(FileSystemDirectoryHandle, String)> {
+    let mut dir = res!(root().await);
+    let last = components.len() - 1;
+    let mut leaf = String::new();
+    for (i, name) in components.into_iter().enumerate() {
+        if i == last {
+            leaf = name;
+            break;
+        }
+        let next_val = res!(JsFuture::from(dir.get_directory_handle(&name)).await
+            .map_err(|e| err!("OPFS: open dir '{}' failed: {}.", name, js_str(&e); IO, File)));
+        dir = res!(next_val.dyn_into()
+            .map_err(|_| err!("OPFS: dir handle for '{}' was not a directory.", name; IO, File)));
+    }
+    Ok((dir, leaf))
+}
+
+/// Read the entries of `dir`, returning `(name, is_dir, size)` per entry.
+///
+/// OPFS directory iteration is exposed as an async iterator via
+/// `FileSystemDirectoryHandle.entries()` (web-sys returns a
+/// [`js_sys::AsyncIterator`]).  Each `next()` yields a `Promise` resolving
+/// to an `{ done, value }` record whose `value` is a `[name, handle]`
+/// pair; the record fields are read with [`js_sys::Reflect`].  A file
+/// entry's size comes from its [`File`] (`getFile().size`); directory
+/// entries report a size of zero.
+async fn read_entries(dir: &FileSystemDirectoryHandle) -> Outcome<Vec<(String, bool, u64)>> {
+    let iter = dir.entries();
+    let mut out: Vec<(String, bool, u64)> = Vec::new();
+    loop {
+        let promise = res!(iter.next()
+            .map_err(|e| err!("OPFS: directory iterator next() failed: {}.", js_str(&e); IO, File, Read)));
+        let record = res!(JsFuture::from(promise).await
+            .map_err(|e| err!("OPFS: awaiting directory entry failed: {}.", js_str(&e); IO, File, Read)));
+
+        // `done` signals iterator exhaustion; treat a missing/unreadable
+        // flag as done so a malformed record cannot spin forever.
+        let done = js_sys::Reflect::get(&record, &JsValue::from_str("done"))
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        if done {
+            break;
+        }
+
+        let value = res!(js_sys::Reflect::get(&record, &JsValue::from_str("value"))
+            .map_err(|e| err!("OPFS: read directory entry value failed: {}.", js_str(&e); IO, File, Read)));
+        let pair = js_sys::Array::from(&value);
+        let name = pair.get(0).as_string().unwrap_or_default();
+        let handle = pair.get(1);
+
+        // The handle's `kind` distinguishes files from directories.
+        let is_dir = js_sys::Reflect::get(&handle, &JsValue::from_str("kind"))
+            .ok()
+            .and_then(|v| v.as_string())
+            .map(|k| k == "directory")
+            .unwrap_or(false);
+
+        let size = if is_dir {
+            0u64
+        } else {
+            match handle.dyn_into::<FileSystemFileHandle>() {
+                Ok(fh) => {
+                    let file_val = res!(JsFuture::from(fh.get_file()).await
+                        .map_err(|e| err!("OPFS: get file '{}' failed: {}.", name, js_str(&e); IO, File, Read)));
+                    match file_val.dyn_into::<File>() {
+                        Ok(f)  => f.size() as u64,
+                        Err(_) => 0u64,
+                    }
+                }
+                Err(_) => 0u64,
+            }
+        };
+        out.push((name, is_dir, size));
+    }
+    Ok(out)
+}
+
+/// List the entries of the directory at `path`, returning
+/// `(name, is_dir, size)` per entry (unsorted — the caller orders them).
+/// An empty path addresses the OPFS root.
+pub async fn list_dir(path: &str) -> Outcome<Vec<(String, bool, u64)>> {
+    let dir = res!(descend_dir(path).await);
+    read_entries(&dir).await
+}
+
+/// Delete the entry at `path`.  With `recursive` set, a directory and all
+/// its contents are removed; otherwise a non-empty directory is rejected
+/// by the browser.  Errors if the entry or any parent does not exist.
+pub async fn delete_entry(path: &str, recursive: bool) -> Outcome<()> {
+    let components = res!(jail_components(path));
+    let (dir, leaf) = res!(open_parent(components).await);
+    let opts = FileSystemRemoveOptions::new();
+    opts.set_recursive(recursive);
+    res!(JsFuture::from(dir.remove_entry_with_options(&leaf, &opts)).await
+        .map_err(|e| err!("OPFS: remove '{}' failed: {}.", leaf, js_str(&e); IO, File)));
+    Ok(())
+}
+
+/// Whether an entry (file or directory) exists at `path`.
+pub async fn exists(path: &str) -> Outcome<bool> {
+    let components = res!(jail_components(path));
+    let (dir, leaf) = match open_parent(components).await {
+        Ok(v)  => v,
+        Err(_) => return Ok(false),
+    };
+    if JsFuture::from(dir.get_file_handle(&leaf)).await.is_ok() {
+        return Ok(true);
+    }
+    if JsFuture::from(dir.get_directory_handle(&leaf)).await.is_ok() {
+        return Ok(true);
+    }
+    Ok(false)
 }

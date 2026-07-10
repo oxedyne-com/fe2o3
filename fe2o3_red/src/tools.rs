@@ -140,12 +140,10 @@ impl Tool {
     ///
     /// OPFS applies its own lexical path jail, so the raw workspace-
     /// relative path is passed straight through; the [`ToolContext`] is
-    /// unused here.  Only whole-file read and write are wired for now —
-    /// the OPFS edge has no directory-iteration or delete surface yet, and
-    /// there is no in-browser shell — so the remaining tools escalate.
-    // TODO(wasm-opfs-tools): back file_edit/list/search/delete once the
-    // OPFS edge grows directory iteration and entry removal; route shell
-    // to a server round-trip.
+    /// unused here.  The full file toolset — read, write, edit, list,
+    /// search and delete — mirrors the native semantics and output format;
+    /// only the `shell` tool escalates, as there is no in-browser process
+    /// executor.
     #[cfg(target_arch = "wasm32")]
     pub async fn execute(&self, args_json: &str, _ctx: &ToolContext) -> Outcome<String> {
         match self {
@@ -165,9 +163,110 @@ impl Tool {
                 }
                 Ok(s)
             }
-            other => Err(err!(
-                "Tool '{}' is not yet available in the browser build.", other.name();
+            Tool::FileEdit => {
+                let path = res!(Self::arg(args_json, "path"));
+                let old = res!(Self::arg(args_json, "old_string"));
+                let new = res!(Self::arg(args_json, "new_string"));
+                let bytes = res!(crate::wasm::opfs::read_file(&path).await);
+                let data = String::from_utf8_lossy(&bytes).to_string();
+                let count = data.matches(&old).count();
+                if count == 0 {
+                    return Err(err!(
+                        "file_edit: old_string not found in '{}'.", path;
+                        Invalid, Input, NotFound));
+                }
+                if count > 1 {
+                    return Err(err!(
+                        "file_edit: old_string appears {} times in '{}'; make it unique.", count, path;
+                        Invalid, Input, Excessive));
+                }
+                let updated = data.replacen(&old, &new, 1);
+                res!(crate::wasm::opfs::write_file(&path, updated.as_bytes()).await);
+                Ok(fmt!("Edited {}.", path))
+            }
+            Tool::FileList => {
+                let path = extract_json_string(args_json, "path").unwrap_or_else(|| ".".to_string());
+                let mut entries = res!(crate::wasm::opfs::list_dir(&path).await);
+                // Dirs first, then by name — matching the native ordering.
+                entries.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+                if entries.is_empty() {
+                    return Ok(fmt!("{} is empty.", path));
+                }
+                let mut out = String::new();
+                for (name, is_dir, size) in entries {
+                    if is_dir {
+                        out.push_str(&fmt!("{}/\n", name));
+                    } else {
+                        out.push_str(&fmt!("{}  ({} bytes)\n", name, size));
+                    }
+                }
+                Ok(out)
+            }
+            Tool::FileSearch => {
+                let query = res!(Self::arg(args_json, "query"));
+                let start = extract_json_string(args_json, "path").unwrap_or_else(|| ".".to_string());
+                let mut matches: Vec<String> = Vec::new();
+                let cap = 200usize;
+                let mut stack = vec![start];
+                'walk: while let Some(dir) = stack.pop() {
+                    let entries = match crate::wasm::opfs::list_dir(&dir).await {
+                        Ok(e)  => e,
+                        Err(_) => continue,
+                    };
+                    for (name, is_dir, size) in entries {
+                        if name.starts_with('.') || name == "target" || name == "node_modules" {
+                            continue; // skip hidden / build dirs
+                        }
+                        let child = Self::join_rel(&dir, &name);
+                        if is_dir {
+                            stack.push(child);
+                        } else {
+                            if size > 2_000_000 {
+                                continue; // skip large files
+                            }
+                            let bytes = match crate::wasm::opfs::read_file(&child).await {
+                                Ok(b)  => b,
+                                Err(_) => continue,
+                            };
+                            let text = String::from_utf8_lossy(&bytes);
+                            for (i, line) in text.lines().enumerate() {
+                                if line.contains(&query) {
+                                    matches.push(fmt!("{}:{}: {}", child, i + 1, line.trim()));
+                                    if matches.len() >= cap {
+                                        matches.push("… [more matches truncated]".to_string());
+                                        break 'walk;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if matches.is_empty() {
+                    Ok(fmt!("No matches for '{}'.", query))
+                } else {
+                    Ok(matches.join("\n"))
+                }
+            }
+            Tool::FileDelete => {
+                let path = res!(Self::arg(args_json, "path"));
+                res!(crate::wasm::opfs::delete_entry(&path, false).await);
+                Ok(fmt!("Deleted {}.", path))
+            }
+            Tool::Shell => Err(err!(
+                "Tool 'shell' is not available in the browser build (no in-browser process executor).";
                 Unimplemented)),
+        }
+    }
+
+    /// Join a workspace-relative directory and an entry name into a clean
+    /// relative path, dropping a `.`/empty directory prefix so search
+    /// results read like the native workspace-relative form.
+    #[cfg(target_arch = "wasm32")]
+    fn join_rel(dir: &str, name: &str) -> String {
+        if dir.is_empty() || dir == "." {
+            name.to_string()
+        } else {
+            fmt!("{}/{}", dir.trim_end_matches('/'), name)
         }
     }
 
