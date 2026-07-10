@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Red</title>
+<link rel="icon" type="image/svg+xml" href="assets/oxedyne_red.svg">
+<link rel="stylesheet" href="css/variables.css">
+<link rel="stylesheet" href="css/app.css">
+<link rel="stylesheet" href="css/render.css">
+<link rel="stylesheet" href="css/files.css">
+<link rel="stylesheet" href="css/responsive.css">
+</head>
+<body data-mpanel="center">
+
+<!-- Main app: browser-only, no server. The whole agent runs in wasm. -->
+<div id="app">
+
+	<!-- Top bar -->
+	<div class="topbar">
+		<div class="brand">
+			<img class="brand-logo" src="assets/oxedyne_logo_white.svg" alt="Oxedyne" data-light="assets/oxedyne_logo_dark.svg" data-dark="assets/oxedyne_logo_white.svg">
+			<b>Red</b>
+		</div>
+		<div class="top-meter" id="top-meter"></div>
+		<div class="top-actions">
+			<button class="icon-btn ptoggle" id="agents-toggle-btn" title="Agents panel" aria-label="Toggle agents panel">
+				<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3 20c0-3.3 2.7-5 6-5s6 1.7 6 5"/><path d="M16 5.6a3 3 0 010 4.8M15.5 15c2.6.3 4.5 2 4.5 5"/></svg>
+			</button>
+			<button class="icon-btn ptoggle" id="work-toggle-btn" title="Workspace panel" aria-label="Toggle workspace panel">
+				<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h6l2 2h10v11H3z"/></svg>
+			</button>
+			<button class="theme-toggle" id="theme-toggle" title="Toggle theme">
+				<span class="theme-icon-dark">🌙</span>
+				<span class="theme-icon-light">☀</span>
+			</button>
+		</div>
+	</div>
+
+	<!-- Four panels -->
+	<div class="main" id="main">
+
+		<!-- Rail: projects + chats -->
+		<aside class="panel rail" id="panel-rail">
+			<div class="railhead"><span>Projects</span>
+				<button class="addbtn" id="new-project-btn" title="Projects arrive with the brief layer" disabled>
+					<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+				</button>
+			</div>
+			<div class="rail-note">None yet.</div>
+			<div class="railhead"><span>Chats</span>
+				<button class="addbtn" id="new-session-btn" title="New chat">
+					<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+				</button>
+			</div>
+			<div class="session-list" id="session-list"></div>
+			<div class="rail-footer">
+				<div class="user-info" id="user-info">Browser-only</div>
+				<button class="icon-btn" id="settings-btn" title="Settings">⚙</button>
+			</div>
+		</aside>
+		<div class="phandle" id="handle-rail" data-panel="rail" title="Drag to resize, double-click to reset"></div>
+
+		<!-- Center: the conversation -->
+		<section class="panel center" id="panel-center">
+			<div class="chead">
+				<span class="ctitle" id="current-session-name">No chat</span>
+				<div class="chead-right">
+					<span class="cmeter" id="center-meter"></span>
+					<button class="icon-btn" id="steps-toggle-btn" title="Show/hide tool steps in the thread">
+						<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M14.7 6.3a4 4 0 00-5.4 5.4L4 17v3h3l5.3-5.3a4 4 0 005.4-5.4L14 13l-3-3z"/></svg>
+					</button>
+				</div>
+			</div>
+			<div class="chat-output" id="chat-output"></div>
+			<div class="chat-input-bar">
+				<textarea id="chat-input" placeholder="Type a message…" rows="1"></textarea>
+				<button id="chat-send" title="Send">➤</button>
+			</div>
+		</section>
+		<div class="phandle" id="handle-agents" data-panel="agents" title="Drag to resize, double-click to reset"></div>
+
+		<!-- Agents: live runs -->
+		<aside class="panel agents" id="panel-agents">
+			<div class="railhead"><span>Agents</span>
+				<span class="rail-count" id="agents-count"></span>
+				<button class="addbtn panel-close" data-close="agents" title="Close panel">
+					<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+				</button>
+			</div>
+			<div class="agents-list" id="agents-list"></div>
+		</aside>
+		<div class="phandle" id="handle-work" data-panel="work" title="Drag to resize, double-click to reset"></div>
+
+		<!-- Workspace: OPFS file tree -->
+		<aside class="panel work" id="panel-work">
+			<div class="railhead"><span>Workspace</span>
+				<span class="files-actions">
+					<button class="addbtn" data-act="up" title="Parent folder">↑</button>
+					<button class="addbtn" data-act="refresh" title="Refresh">⟳</button>
+					<button class="addbtn panel-close" data-close="work" title="Close panel">
+						<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+					</button>
+				</span>
+			</div>
+			<div class="files-card">
+				<div class="files-path"></div>
+				<div class="files-tree"></div>
+				<div class="files-view" style="display:none"></div>
+			</div>
+		</aside>
+	</div>
+
+	<!-- Mobile: one panel at a time -->
+	<nav class="mnav" id="mnav">
+		<button data-mp="rail"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg><span>Chats</span></button>
+		<button data-mp="center" class="on"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v10H9l-4 4v-4H4z"/></svg><span>Chat</span></button>
+		<button data-mp="agents"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3 20c0-3.3 2.7-5 6-5s6 1.7 6 5"/><path d="M16 5.6a3 3 0 010 4.8M15.5 15c2.6.3 4.5 2 4.5 5"/></svg><span>Agents</span></button>
+		<button data-mp="work"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h6l2 2h10v11H3z"/></svg><span>Files</span></button>
+	</nav>
+</div>
+
+<!-- Settings modal: bring-your-own-key provider configuration -->
+<div id="settings-modal" class="modal" style="display:none;">
+	<div class="modal-card">
+		<h2>Settings</h2>
+		<div class="settings-section">
+			<h3>Provider (bring your own key)</h3>
+			<form id="byok-form" autocomplete="off">
+				<input type="text" id="cfg-base-url" placeholder="Base URL (https://…/v1/chat/completions)" spellcheck="false">
+				<input type="password" id="cfg-api-key" placeholder="API key" autocomplete="off">
+				<input type="text" id="cfg-model" placeholder="Model id" spellcheck="false">
+				<input type="number" id="cfg-max-tokens" placeholder="Max tokens" min="1" step="1">
+				<label class="cfg-check"><input type="checkbox" id="cfg-tools" checked> Enable file tools</label>
+				<button type="submit">Save</button>
+			</form>
+			<div id="byok-note" class="login-error"></div>
+			<p class="cfg-hint">Keys are held in this browser's localStorage only. Passphrase-wrapping is a later hardening stage. <!-- TODO(H-later): wrap the stored key with a user passphrase. --></p>
+		</div>
+		<button class="modal-close" id="settings-close">Close</button>
+	</div>
+</div>
+
+<script src="js/marked.min.js"></script>
+<script src="js/render.js"></script>
+<script type="module" src="js/red.js"></script>
+</body>
+</html>

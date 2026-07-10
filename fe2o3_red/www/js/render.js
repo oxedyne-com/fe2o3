@@ -290,9 +290,87 @@
 		});
 	}
 
+	// ── Sanitisation (H5: escape-by-default) ───────────────────
+	// The rendered surface is now the whole app, so model output must
+	// never introduce live markup.  `marked` passes raw HTML through
+	// untouched, so its output is sanitised against a tag/attribute
+	// whitelist before it ever reaches the DOM.  A `<template>` holds
+	// the parse inertly (no scripts run, no resources load); any tag
+	// outside the whitelist is reduced to its text, dangerous elements
+	// are dropped whole, and only vetted attributes and URLs survive.
+
+	// Inline formatting, lists, headings, tables, code — the shape of
+	// ordinary markdown output, nothing that can execute.
+	var TAG_OK = wordSet([
+		'A', 'ABBR', 'B', 'BLOCKQUOTE', 'BR', 'CODE', 'DEL', 'DIV', 'EM',
+		'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'HR', 'I', 'IMG', 'KBD', 'LI',
+		'OL', 'P', 'PRE', 'S', 'SPAN', 'STRONG', 'SUB', 'SUP', 'TABLE',
+		'TBODY', 'TD', 'TH', 'THEAD', 'TR', 'U', 'UL',
+	]);
+	// Elements dropped whole (content and all), never merely unwrapped.
+	var TAG_DROP = wordSet([
+		'SCRIPT', 'STYLE', 'IFRAME', 'OBJECT', 'EMBED', 'LINK', 'META',
+		'TEMPLATE', 'NOSCRIPT', 'FORM', 'INPUT', 'BUTTON', 'TEXTAREA',
+		'SELECT', 'SVG', 'MATH',
+	]);
+	// Attributes safe on any allowed element.
+	var ATTR_OK = wordSet(['CLASS', 'TITLE', 'ALT', 'ALIGN']);
+
+	/// True when a URL is safe to keep — http(s), mailto, in-page or
+	/// root-relative, or an inline image data URI.  Everything else
+	/// (notably `javascript:`) is rejected.
+	function safeUrl(u) {
+		var v = String(u == null ? '' : u).trim();
+		if (/^(https?:|mailto:|#|\/)/i.test(v)) return true;
+		if (/^data:image\/(png|jpe?g|gif|webp|svg\+xml);/i.test(v)) return true;
+		return false;
+	}
+
+	/// Recursively scrub a node's children in place against the
+	/// whitelist.  Elements are visited on a static snapshot so
+	/// live-collection surprises cannot skip a node.
+	function scrub(node) {
+		var kids = Array.prototype.slice.call(node.childNodes);
+		for (var i = 0; i < kids.length; i++) {
+			var ch = kids[i];
+			if (ch.nodeType === 8) { node.removeChild(ch); continue; } // comment
+			if (ch.nodeType !== 1) continue;                            // keep text
+			var tag = ch.tagName;
+			if (TAG_DROP[tag]) { node.removeChild(ch); continue; }
+			if (!TAG_OK[tag]) {
+				// Unknown wrapper: keep the text, discard the markup.
+				node.replaceChild(document.createTextNode(ch.textContent || ''), ch);
+				continue;
+			}
+			var attrs = Array.prototype.slice.call(ch.attributes);
+			for (var a = 0; a < attrs.length; a++) {
+				var name = attrs[a].name;
+				var up = name.toUpperCase();
+				var keep = ATTR_OK[up];
+				if (!keep && up === 'HREF' && tag === 'A') keep = safeUrl(attrs[a].value);
+				if (!keep && up === 'SRC' && tag === 'IMG') keep = safeUrl(attrs[a].value);
+				if (!keep) ch.removeAttribute(name);
+			}
+			if (tag === 'A') ch.setAttribute('rel', 'noopener noreferrer nofollow');
+			scrub(ch);
+		}
+	}
+
+	/// Sanitise an HTML string, returning safe HTML.  Falls back to a
+	/// fully-escaped render if the DOM APIs are unavailable.
+	function sanitize(html) {
+		if (typeof document === 'undefined' || !document.createElement) {
+			return escapeHtml(html);
+		}
+		var tpl = document.createElement('template');
+		tpl.innerHTML = String(html == null ? '' : html);
+		scrub(tpl.content);
+		return tpl.innerHTML;
+	}
+
 	// ── Public render ──────────────────────────────────────────
 
-	/// Render markdown `text` to an HTML string.
+	/// Render markdown `text` to a sanitised HTML string.
 	function md(text) {
 		var src = (text == null) ? '' : String(text);
 		var html;
@@ -301,6 +379,12 @@
 		} catch (e) {
 			return escapeHtml(src);
 		}
+		// Sanitise the model-authored markup first, then apply the
+		// trusted code-block transform (which builds its own markup
+		// from already-escaped source).
+		try {
+			html = sanitize(html);
+		} catch (e) { return escapeHtml(src); }
 		try {
 			html = enhanceCodeBlocks(html);
 		} catch (e) { /* keep unenhanced html */ }
@@ -354,5 +438,5 @@
 	});
 
 	// ── Export ─────────────────────────────────────────────────
-	window.RedRender = { md: md, escapeHtml: escapeHtml };
+	window.RedRender = { md: md, escapeHtml: escapeHtml, sanitize: sanitize };
 })();
