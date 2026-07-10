@@ -172,7 +172,6 @@ impl fmt::Debug for Dat {
 /// |                           |         |      |      |            |
 /// | MoleculeSame              |         |      |      |            |
 /// |   Vek,BU8-64,B2-32,etc    |    ✗    |  ✗   |    ✓ |       ✓    |
-/// ```
 ///
 /// This enum provides a hierarchical system for controlling type information visibility
 /// while maintaining data readability, ranging from JSON-compatible output to fully typed
