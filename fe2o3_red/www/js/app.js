@@ -1,5 +1,12 @@
 /* ============================================================
    Red — AI agent web application
+   ------------------------------------------------------------
+   Four-panel layout (doc/red mockup): rail (projects + chats),
+   center (the conversation), agents (live runs), workspace
+   (file tree). Side panel widths are user-pullable via drag
+   handles and persisted; the agents and workspace panels can
+   be closed/opened. On mobile one panel shows at a time,
+   switched with the bottom nav.
    ============================================================ */
 (function () {
 	'use strict';
@@ -39,7 +46,6 @@
 	var username = null;
 	var currentSessionId = null;
 	var sessions = [];       // Cached session metadata
-	var sidebarWidth = 260;
 
 	// ── DOM refs ───────────────────────────────────────────────
 	var loginScreen    = document.getElementById('login-screen');
@@ -47,8 +53,6 @@
 	var appEl          = document.getElementById('app');
 	var sessionList    = document.getElementById('session-list');
 	var newSessionBtn  = document.getElementById('new-session-btn');
-	var sidebar        = document.getElementById('sidebar');
-	var resizeHandle   = document.getElementById('resize-handle');
 	var chatOutput     = document.getElementById('chat-output');
 	var chatInput      = document.getElementById('chat-input');
 	var chatSend       = document.getElementById('chat-send');
@@ -59,7 +63,11 @@
 	var settingsModal  = document.getElementById('settings-modal');
 	var settingsClose  = document.getElementById('settings-close');
 	var themeToggle    = document.getElementById('theme-toggle');
-	var sidebarLogo    = document.querySelector('.sidebar-logo');
+	var brandLogo      = document.querySelector('.brand-logo');
+	var topMeter       = document.getElementById('top-meter');
+	var centerMeter    = document.getElementById('center-meter');
+	var agentsList     = document.getElementById('agents-list');
+	var agentsCount    = document.getElementById('agents-count');
 
 	// ── Theme ──────────────────────────────────────────────────
 	function initTheme() {
@@ -70,10 +78,10 @@
 	function setTheme(theme) {
 		document.documentElement.setAttribute('data-theme', theme);
 		localStorage.setItem('red-theme', theme);
-		if (sidebarLogo) {
-			sidebarLogo.src = theme === 'light'
-				? sidebarLogo.dataset.light
-				: sidebarLogo.dataset.dark;
+		if (brandLogo) {
+			brandLogo.src = theme === 'light'
+				? brandLogo.dataset.light
+				: brandLogo.dataset.dark;
 		}
 	}
 
@@ -82,52 +90,182 @@
 		setTheme(current === 'dark' ? 'light' : 'dark');
 	});
 
-	// ── Sidebar resize ─────────────────────────────────────────
-	function initSidebarResize() {
-		sidebarWidth = parseInt(localStorage.getItem('red-sidebar-width') || '260');
-		sidebar.style.width = sidebarWidth + 'px';
-		var dragging = false;
-		var startX, startW;
+	// ── Panel manager ──────────────────────────────────────────
+	// Side panels have a persisted, drag-adjustable width; the
+	// agents and workspace panels can be closed and reopened.
+	var RedPanels = (function () {
+		var DEF = { rail: 220, agents: 240, work: 260 };  // Default widths
+		var LIM = { rail: [160, 420], agents: [180, 480], work: [180, 560] };
+		var CENTER_MIN = 300;
+		var HANDLE_W = 10;
 
-		resizeHandle.addEventListener('mousedown', function (e) {
-			dragging = true;
-			startX = e.clientX;
-			startW = sidebarWidth;
-			resizeHandle.classList.add('dragging');
-			document.body.style.cursor = 'col-resize';
-			e.preventDefault();
-		});
+		var main = document.getElementById('main');
+		var els = {
+			rail:   document.getElementById('panel-rail'),
+			agents: document.getElementById('panel-agents'),
+			work:   document.getElementById('panel-work'),
+		};
+		var handles = {
+			rail:   document.getElementById('handle-rail'),
+			agents: document.getElementById('handle-agents'),
+			work:   document.getElementById('handle-work'),
+		};
+		var toggles = {
+			agents: document.getElementById('agents-toggle-btn'),
+			work:   document.getElementById('work-toggle-btn'),
+		};
+		var widths = {};
+		var open = { rail: true, agents: true, work: true };
 
-		document.addEventListener('mousemove', function (e) {
-			if (!dragging) return;
-			var w = startW + (e.clientX - startX);
-			if (w >= 180 && w <= 500) {
-				sidebarWidth = w;
-				sidebar.style.width = w + 'px';
+		function clamp(name, w) {
+			var lim = LIM[name];
+			w = Math.max(lim[0], Math.min(lim[1], w));
+			// Keep the center panel usable: cap by available space.
+			var others = 0;
+			for (var k in els) {
+				if (k !== name && open[k]) others += els[k].offsetWidth;
 			}
-		});
+			var nHandles = (open.rail ? 1 : 0) + (open.agents ? 1 : 0) + (open.work ? 1 : 0);
+			var cap = main.clientWidth - others - nHandles * HANDLE_W - CENTER_MIN;
+			return Math.max(lim[0], Math.min(w, cap));
+		}
 
-		document.addEventListener('mouseup', function () {
-			if (dragging) {
+		function setWidth(name, w) {
+			widths[name] = w;
+			els[name].style.width = w + 'px';
+		}
+
+		function save() {
+			for (var k in widths) localStorage.setItem('red-panel-w-' + k, widths[k]);
+			localStorage.setItem('red-panel-open-agents', open.agents ? '1' : '0');
+			localStorage.setItem('red-panel-open-work', open.work ? '1' : '0');
+		}
+
+		function syncToggles() {
+			for (var k in toggles) {
+				if (toggles[k]) toggles[k].classList.toggle('on', !!open[k]);
+			}
+		}
+
+		// Drag-to-resize. The rail handle sits to the panel's right
+		// (drag right = wider); the agents/work handles sit to the
+		// panel's left (drag left = wider).
+		function initHandle(name) {
+			var h = handles[name];
+			var sign = (name === 'rail') ? 1 : -1;
+			var startX = 0, startW = 0, dragging = false;
+
+			h.addEventListener('pointerdown', function (e) {
+				dragging = true;
+				startX = e.clientX;
+				startW = widths[name];
+				h.setPointerCapture(e.pointerId);
+				h.classList.add('dragging');
+				els[name].classList.add('nt');
+				document.body.classList.add('dragging');
+				e.preventDefault();
+			});
+			h.addEventListener('pointermove', function (e) {
+				if (!dragging) return;
+				setWidth(name, clamp(name, startW + sign * (e.clientX - startX)));
+			});
+			h.addEventListener('pointerup', function (e) {
+				if (!dragging) return;
 				dragging = false;
-				resizeHandle.classList.remove('dragging');
-				document.body.style.cursor = '';
-				localStorage.setItem('red-sidebar-width', sidebarWidth);
-			}
-		});
+				h.releasePointerCapture(e.pointerId);
+				h.classList.remove('dragging');
+				els[name].classList.remove('nt');
+				document.body.classList.remove('dragging');
+				save();
+			});
+			h.addEventListener('dblclick', function () {
+				setWidth(name, DEF[name]);
+				save();
+			});
+		}
 
-		// Double-click to toggle.
-		resizeHandle.addEventListener('dblclick', function () {
-			if (sidebarWidth > 0) {
-				sidebar.style.width = '0px';
-				sidebarWidth = 0;
-			} else {
-				sidebarWidth = 260;
-				sidebar.style.width = '260px';
+		function show(name, animate) {
+			open[name] = true;
+			handles[name].classList.remove('closed');
+			var el = els[name];
+			el.classList.remove('closed');
+			if (animate) {
+				el.classList.add('nt');
+				el.style.width = '0px';
+				void el.offsetWidth; // reflow
+				el.classList.remove('nt');
 			}
-			localStorage.setItem('red-sidebar-width', sidebarWidth);
+			el.style.width = widths[name] + 'px';
+			syncToggles();
+			save();
+			if (name === 'work' && window.RedFiles) RedFiles.onOpen();
+		}
+
+		function hide(name, animate) {
+			open[name] = false;
+			handles[name].classList.add('closed');
+			var el = els[name];
+			if (animate) {
+				el.style.width = '0px';
+				var onEnd = function () {
+					el.removeEventListener('transitionend', onEnd);
+					if (!open[name]) el.classList.add('closed');
+				};
+				el.addEventListener('transitionend', onEnd);
+			} else {
+				el.style.width = '0px';
+				el.classList.add('closed');
+			}
+			syncToggles();
+			save();
+		}
+
+		function toggle(name) {
+			if (open[name]) hide(name, true); else show(name, true);
+		}
+
+		function init() {
+			for (var k in els) {
+				var w = parseInt(localStorage.getItem('red-panel-w-' + k) || '0');
+				widths[k] = (w >= LIM[k][0] && w <= LIM[k][1]) ? w : DEF[k];
+				setWidth(k, widths[k]);
+				initHandle(k);
+			}
+			open.agents = localStorage.getItem('red-panel-open-agents') !== '0';
+			open.work = localStorage.getItem('red-panel-open-work') !== '0';
+			if (!open.agents) hide('agents', false);
+			if (!open.work) hide('work', false);
+			syncToggles();
+
+			for (var t in toggles) {
+				(function (name) {
+					toggles[name].addEventListener('click', function () { toggle(name); });
+				})(t);
+			}
+			document.querySelectorAll('.panel-close').forEach(function (btn) {
+				btn.addEventListener('click', function () { hide(btn.dataset.close, true); });
+			});
+		}
+
+		return { init: init, toggle: toggle, isOpen: function (n) { return !!open[n]; } };
+	})();
+	window.RedPanels = RedPanels;
+
+	// ── Mobile: one panel at a time ────────────────────────────
+	var mobileMq = window.matchMedia('(max-width: 760px)');
+	function isMobile() { return mobileMq.matches; }
+
+	function mshow(name) {
+		document.body.dataset.mpanel = name;
+		document.querySelectorAll('#mnav button').forEach(function (b) {
+			b.classList.toggle('on', b.dataset.mp === name);
 		});
+		if (name === 'work' && window.RedFiles) RedFiles.onOpen();
 	}
+
+	document.querySelectorAll('#mnav button').forEach(function (b) {
+		b.addEventListener('click', function () { mshow(b.dataset.mp); });
+	});
 
 	// ── Management WS (auth) ───────────────────────────────────
 	function connectMgmt() {
@@ -150,6 +288,7 @@
 			console.log('Chat WS connected');
 			reconnectDelay = 500;
 			refreshSessions();
+			if (RedPanels.isOpen('work') && window.RedFiles) RedFiles.onOpen();
 			// Restore the active session's history after a (re)connect.
 			if (currentSessionId) {
 				sendChat('session_switch "' + escJdat(currentSessionId) + '"');
@@ -187,6 +326,7 @@
 		generating = true;
 		showSpinner();
 		setSendMode('stop');
+		Agents.begin();
 	}
 
 	function endGenerating() {
@@ -195,6 +335,7 @@
 		finalizeAssistantMessage();
 		chatInput.disabled = false;
 		setSendMode('send');
+		Agents.end('done');
 	}
 
 	function setSendMode(mode) {
@@ -300,38 +441,14 @@
 			if (window.RedFiles) RedFiles.refresh();
 		} else if (cmd === 'error') {
 			appendError(val || 'Error');
+			Agents.end('error');
 			endGenerating();
 		} else if (cmd === 'data') {
 			if (val && typeof val === 'object') {
-				if (val.sessions) {
-					sessions = val.sessions;
-					renderSessionList(sessions);
-				} else if (val.messages) {
-					renderHistory(val.messages);
-				} else if (val.id && val.model) {
-					// New session created.
-					currentSessionId = val.id;
-					sessionNameEl.textContent = val.name || 'Session';
-					refreshSessions();
-					clearChat();
-				}
+				handleDataObj(val);
 			} else if (typeof val === 'string') {
 				// Data value is a JSON string — try to parse it.
-				try {
-					var obj = JSON.parse(val);
-					if (obj && obj.sessions) {
-						sessions = obj.sessions;
-						renderSessionList(sessions);
-					} else if (obj && obj.messages) {
-						renderHistory(obj.messages);
-					} else if (obj && obj.id && obj.model) {
-						// New session created.
-						currentSessionId = obj.id;
-						sessionNameEl.textContent = obj.name || 'Session';
-						refreshSessions();
-						clearChat();
-					}
-				} catch (e) { /* not JSON */ }
+				try { handleDataObj(JSON.parse(val)); } catch (e) { /* not JSON */ }
 			}
 		} else if (cmd === 'info') {
 			// Confirmation — may be session rename/close, refresh.
@@ -339,6 +456,22 @@
 				refreshSessions();
 			}
 			console.log('Info:', val);
+		}
+	}
+
+	function handleDataObj(obj) {
+		if (!obj) return;
+		if (obj.sessions) {
+			sessions = obj.sessions;
+			renderSessionList(sessions);
+		} else if (obj.messages) {
+			renderHistory(obj.messages);
+		} else if (obj.id && obj.model) {
+			// New session created.
+			currentSessionId = obj.id;
+			sessionNameEl.textContent = obj.name || 'Session';
+			refreshSessions();
+			clearChat();
 		}
 	}
 
@@ -402,6 +535,7 @@
 		chatOutput.appendChild(block);
 		lastToolBlock = block;
 		chatOutput.scrollTop = chatOutput.scrollHeight;
+		Agents.tool(name, block);
 	}
 
 	function renderToolResult(name, result) {
@@ -412,6 +546,7 @@
 			resPre.style.display = '';
 		}
 		chatOutput.scrollTop = chatOutput.scrollHeight;
+		Agents.toolDone();
 	}
 
 	function appendError(msg) {
@@ -437,11 +572,14 @@
 		wrap.innerHTML =
 			'<img class="empty-logo" src="assets/oxedyne_red.svg" alt="">' +
 			'<h2>Welcome to Red</h2>' +
-			'<p>Your workspace for chat and coding. Start a new session to begin.</p>';
+			'<p>Your workspace for chat and coding. Start a new chat to begin.</p>';
 		var btn = document.createElement('button');
 		btn.className = 'empty-new-session';
-		btn.textContent = '+ New session';
-		btn.addEventListener('click', showNewSessionPanel);
+		btn.textContent = '+ New chat';
+		btn.addEventListener('click', function () {
+			if (isMobile()) mshow('rail');
+			showNewSessionPanel();
+		});
 		wrap.appendChild(btn);
 		chatOutput.appendChild(wrap);
 	}
@@ -473,7 +611,11 @@
 		if (generating) return;
 		var text = chatInput.value.trim();
 		if (!text) return;
-		if (!currentSessionId) { showNewSessionPanel(); return; }
+		if (!currentSessionId) {
+			if (isMobile()) mshow('rail');
+			showNewSessionPanel();
+			return;
+		}
 		appendUserMessage(text);
 		chatInput.value = '';
 		chatInput.style.height = 'auto';
@@ -538,6 +680,53 @@
 		return n + ' tok';
 	}
 
+	function sessionById(id) {
+		for (var i = 0; i < sessions.length; i++) {
+			if (sessions[i].id === id) return sessions[i];
+		}
+		return null;
+	}
+
+	function sessionCost(s) {
+		return estimateCost(s.model || '', s.prompt_tokens || 0, s.completion_tokens || 0);
+	}
+
+	// ── Meters (top bar + center header) ───────────────────────
+	function updateMeters() {
+		var s = sessionById(currentSessionId);
+		var total = 0;
+		for (var i = 0; i < sessions.length; i++) total += sessionCost(sessions[i]);
+		var parts = [];
+		if (s) {
+			var lpt = s.last_prompt_tokens || 0;
+			var pct = Math.min(100, (lpt / getModelCtx(s.model || '')) * 100);
+			parts.push('session ' + (lpt > 0 ? pct.toFixed(pct < 10 ? 1 : 0) : '0') + '% ctx');
+		}
+		if (total > 0) parts.push('$' + total.toFixed(total < 0.1 ? 4 : 2));
+		topMeter.innerHTML = '';
+		parts.forEach(function (p, idx) {
+			if (idx > 0) {
+				var sep = document.createElement('span');
+				sep.className = 'sep';
+				sep.textContent = '·';
+				topMeter.appendChild(sep);
+			}
+			var span = document.createElement('span');
+			span.textContent = p;
+			topMeter.appendChild(span);
+		});
+		if (s) {
+			var cost = sessionCost(s);
+			var m = getModelLabel(s.model || '');
+			var lp = s.last_prompt_tokens || 0;
+			centerMeter.textContent = m
+				+ (lp > 0 ? ' · ' + fmtCtx(lp) + ' / ' + fmtCtx(getModelCtx(s.model || '')) : '')
+				+ (cost > 0 ? ' · $' + cost.toFixed(cost < 0.1 ? 4 : 2) : '');
+		} else {
+			centerMeter.textContent = '';
+		}
+	}
+
 	function renderSessionList(list) {
 		// Remove any existing new-session panel first.
 		var existingPanel = sessionList.querySelector('.new-session-panel');
@@ -548,6 +737,8 @@
 		list.forEach(function (s) {
 			sessionList.appendChild(createSessionBox(s));
 		});
+		updateMeters();
+		Agents.render();
 	}
 
 	function createSessionBox(s) {
@@ -640,12 +831,16 @@
 			// Clicking the already-active session must not reload it —
 			// that would wipe the in-progress tool/process blocks (which
 			// aren't part of the persisted history).
-			if (s.id === currentSessionId) { closeSidebar(); return; }
+			if (s.id === currentSessionId) {
+				if (isMobile()) mshow('center');
+				return;
+			}
 			currentSessionId = s.id;
 			sessionNameEl.textContent = s.name || 'Session';
 			sendChat('session_switch "' + escJdat(s.id) + '"');
 			updateActiveSession(s.id);
-			closeSidebar();
+			updateMeters();
+			if (isMobile()) mshow('center');
 		});
 
 		return box;
@@ -694,6 +889,159 @@
 		});
 	}
 
+	// ── Agents panel ───────────────────────────────────────────
+	// With the single-agent chat loop, each in-flight turn of the
+	// active chat is one run: a tile with live tool activity. The
+	// run lifecycle here maps onto the brief/fold model in doc/red
+	// as the multi-agent layer lands.
+	var Agents = {
+		runs: [],       // Newest first: {name, model, sid, status, tools:[{name, status, block}]}
+		current: null,
+
+		begin: function () {
+			var s = sessionById(currentSessionId);
+			this.current = {
+				name: (s && s.name) || sessionNameEl.textContent || 'run',
+				model: s ? getModelLabel(s.model || '') : '',
+				sid: currentSessionId,
+				status: 'running',
+				tools: [],
+			};
+			this.runs.unshift(this.current);
+			if (this.runs.length > 12) this.runs.pop();
+			this.render();
+		},
+
+		tool: function (name, block) {
+			if (!this.current) return;
+			this.current.tools.push({ name: name, status: 'running', block: block });
+			this.render();
+		},
+
+		toolDone: function () {
+			if (!this.current) return;
+			var t = this.current.tools;
+			for (var i = t.length - 1; i >= 0; i--) {
+				if (t[i].status === 'running') { t[i].status = 'done'; break; }
+			}
+			this.render();
+		},
+
+		end: function (status) {
+			if (!this.current) return;
+			this.current.status = status;
+			this.current.tools.forEach(function (t) {
+				if (t.status === 'running') t.status = 'done';
+			});
+			this.current = null;
+			this.render();
+		},
+
+		render: function () {
+			if (!agentsList) return;
+			agentsList.innerHTML = '';
+			var live = 0;
+			var self = this;
+			this.runs.forEach(function (run) {
+				if (run.status === 'running') live++;
+				agentsList.appendChild(self.tile(run));
+			});
+			agentsCount.textContent = live > 0 ? live + ' live' : '';
+			if (this.runs.length === 0) {
+				var empty = document.createElement('div');
+				empty.className = 'agents-empty';
+				empty.textContent = 'No agents running. Each turn of the active chat appears here.';
+				agentsList.appendChild(empty);
+			}
+		},
+
+		tile: function (run) {
+			var card = document.createElement('div');
+			card.className = 'acard ' + run.status;
+
+			var ah = document.createElement('div');
+			ah.className = 'ah';
+			var an = document.createElement('span');
+			an.className = 'an';
+			an.textContent = run.name;
+			var pill = document.createElement('span');
+			pill.className = 'pill ' + (run.status === 'running' ? 'run' : run.status === 'error' ? 'err' : 'ok');
+			pill.textContent = run.status;
+			ah.appendChild(an);
+			ah.appendChild(pill);
+			card.appendChild(ah);
+
+			if (run.model) {
+				var ml = document.createElement('div');
+				ml.className = 'amodel';
+				ml.textContent = run.model;
+				card.appendChild(ml);
+			}
+
+			// Context bar + cost for the run's session, live figures.
+			var s = sessionById(run.sid);
+			if (s) {
+				var lpt = s.last_prompt_tokens || 0;
+				if (lpt > 0) {
+					var ctx = getModelCtx(s.model || '');
+					var pct = Math.min(100, (lpt / ctx) * 100);
+					var meter = document.createElement('div');
+					meter.className = 'ctx-meter';
+					var bar = document.createElement('div');
+					bar.className = 'ctx-bar';
+					var fill = document.createElement('div');
+					fill.className = 'ctx-fill' + (pct > 85 ? ' high' : '');
+					fill.style.width = pct.toFixed(1) + '%';
+					bar.appendChild(fill);
+					var lbl = document.createElement('span');
+					lbl.className = 'ctx-meter-label';
+					lbl.textContent = pct.toFixed(pct < 10 ? 1 : 0) + '%';
+					meter.appendChild(bar);
+					meter.appendChild(lbl);
+					card.appendChild(meter);
+				}
+				var cost = sessionCost(s);
+				var arow = document.createElement('div');
+				arow.className = 'arow';
+				var left = document.createElement('span');
+				left.textContent = run.tools.length ? run.tools.length + ' tool' + (run.tools.length === 1 ? '' : 's') : '';
+				var right = document.createElement('span');
+				right.textContent = cost > 0 ? '$' + cost.toFixed(cost < 0.1 ? 4 : 2) : '';
+				arow.appendChild(left);
+				arow.appendChild(right);
+				card.appendChild(arow);
+			}
+
+			// Tool rows (most recent last); clicking one scrolls to its
+			// inline block in the thread.
+			if (run.tools.length) {
+				var wrap = document.createElement('div');
+				wrap.className = 'atools';
+				run.tools.slice(-8).forEach(function (t) {
+					var row = document.createElement('div');
+					row.className = 'atool';
+					var dot = document.createElement('span');
+					dot.className = t.status === 'running' ? 'live' : 'tick';
+					dot.textContent = t.status === 'running' ? '●' : '✓';
+					var nm = document.createElement('span');
+					nm.textContent = t.name;
+					row.appendChild(dot);
+					row.appendChild(nm);
+					row.addEventListener('click', function () {
+						if (t.block && t.block.isConnected) {
+							if (isMobile()) mshow('center');
+							t.block.scrollIntoView({ behavior: 'smooth', block: 'center' });
+						}
+					});
+					wrap.appendChild(row);
+				});
+				card.appendChild(wrap);
+			}
+
+			return card;
+		},
+	};
+
 	// ── New session panel ──────────────────────────────────────
 	function showNewSessionPanel() {
 		// Remove any existing panel.
@@ -728,6 +1076,7 @@
 			var name = label + ' ' + ts;
 			sendChat('session_new "' + escJdat(name) + '" "' + escJdat(model) + '"');
 			panel.remove();
+			if (isMobile()) mshow('center');
 		});
 
 		panel.appendChild(select);
@@ -829,11 +1178,6 @@
 	}
 
 	// ── Helpers ────────────────────────────────────────────────
-	function escapeHtml(s) {
-		return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-			.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-	}
-
 	function escJdat(s) {
 		return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 	}
@@ -912,40 +1256,15 @@
 		if (generating) { stopGeneration(); } else { sendUserMessage(); }
 	});
 
-	// ── Mobile drawer ──────────────────────────────────────────
-	var mobileMenuBtn = document.getElementById('mobile-menu-btn');
-	function closeSidebar() { document.body.classList.remove('sidebar-open'); }
-	if (mobileMenuBtn) {
-		mobileMenuBtn.addEventListener('click', function () {
-			document.body.classList.toggle('sidebar-open');
-		});
-	}
-	// Tap outside the sidebar (the dimmed overlay) to close it.
-	document.addEventListener('click', function (e) {
-		if (!document.body.classList.contains('sidebar-open')) return;
-		if (mobileMenuBtn && mobileMenuBtn.contains(e.target)) return;
-		if (sidebar.contains(e.target)) return;
-		closeSidebar();
-	});
-	document.addEventListener('keydown', function (e) {
-		if (e.key === 'Escape') { closeSidebar(); }
-	});
-
 	// ── Files panel ────────────────────────────────────────────
 	if (window.RedFiles) { RedFiles.init(sendChat); }
-	var filesToggleBtn = document.getElementById('files-toggle-btn');
-	if (filesToggleBtn) {
-		filesToggleBtn.addEventListener('click', function () {
-			if (window.RedFiles) { RedFiles.toggle(); closeSidebar(); }
-		});
-	}
 
-	// ── Show/hide agent process (tool) blocks ──────────────────
+	// ── Show/hide agent process (tool) blocks in the thread ────
 	var toolsHidden = localStorage.getItem('red-hide-tools') === '1';
 	var stepsToggleBtn = document.getElementById('steps-toggle-btn');
 	function applyToolsVisibility() {
 		chatOutput.classList.toggle('hide-tools', toolsHidden);
-		if (stepsToggleBtn) stepsToggleBtn.style.opacity = toolsHidden ? '0.45' : '';
+		if (stepsToggleBtn) stepsToggleBtn.classList.toggle('dim', toolsHidden);
 	}
 	if (stepsToggleBtn) {
 		stepsToggleBtn.addEventListener('click', function () {
@@ -956,8 +1275,13 @@
 	}
 	applyToolsVisibility();
 
+	// A long placeholder wraps and clips on narrow screens.
+	if (isMobile()) { chatInput.placeholder = 'Type a message…'; }
+
 	// ── Init ───────────────────────────────────────────────────
 	initTheme();
-	initSidebarResize();
+	RedPanels.init();
+	Agents.render();
+	mshow(document.body.dataset.mpanel || 'center');
 	checkSession();
 })();

@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="css/files.css">
 <link rel="stylesheet" href="css/responsive.css">
 </head>
-<body>
+<body data-mpanel="center">
 
 <!-- Login screen -->
 <div id="login-screen" class="login-screen">
@@ -45,43 +45,110 @@
 <!-- Main app -->
 <div id="app" style="display:none;">
 
-	<!-- Sidebar -->
-	<aside class="sidebar" id="sidebar">
-		<div class="sidebar-header">
-			<img class="sidebar-logo" src="assets/oxedyne_logo_white.svg" alt="Oxedyne" data-light="assets/oxedyne_logo_dark.svg" data-dark="assets/oxedyne_logo_white.svg">
+	<!-- Top bar -->
+	<div class="topbar">
+		<div class="brand">
+			<img class="brand-logo" src="assets/oxedyne_logo_white.svg" alt="Oxedyne" data-light="assets/oxedyne_logo_dark.svg" data-dark="assets/oxedyne_logo_white.svg">
+			<b>Red</b>
 		</div>
-		<button class="new-session-btn" id="new-session-btn">+ New Session</button>
-		<div class="session-list" id="session-list"></div>
-		<div class="sidebar-footer">
-			<div class="user-info" id="user-info"></div>
-			<button class="files-toggle-btn" id="steps-toggle-btn" title="Show/hide agent steps">🔧</button>
-			<button class="files-toggle-btn" id="files-toggle-btn" title="Files">📁</button>
-			<button class="settings-btn" id="settings-btn" title="Settings">⚙</button>
-			<button class="logout-btn" id="logout-btn" title="Sign out">⏻</button>
-		</div>
-	</aside>
-
-	<!-- Resize handle -->
-	<div class="resize-handle" id="resize-handle"></div>
-
-	<!-- Main area -->
-	<div class="main-area">
-		<div class="top-bar">
-			<button class="mobile-menu-btn" id="mobile-menu-btn" aria-label="Menu">☰</button>
-				<span id="current-session-name">No session</span>
+		<div class="top-meter" id="top-meter"></div>
+		<div class="top-actions">
+			<button class="icon-btn ptoggle" id="agents-toggle-btn" title="Agents panel" aria-label="Toggle agents panel">
+				<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3 20c0-3.3 2.7-5 6-5s6 1.7 6 5"/><path d="M16 5.6a3 3 0 010 4.8M15.5 15c2.6.3 4.5 2 4.5 5"/></svg>
+			</button>
+			<button class="icon-btn ptoggle" id="work-toggle-btn" title="Workspace panel" aria-label="Toggle workspace panel">
+				<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h6l2 2h10v11H3z"/></svg>
+			</button>
 			<button class="theme-toggle" id="theme-toggle" title="Toggle theme">
 				<span class="theme-icon-dark">🌙</span>
 				<span class="theme-icon-light">☀</span>
 			</button>
 		</div>
-		<div class="chat-area">
+	</div>
+
+	<!-- Four panels -->
+	<div class="main" id="main">
+
+		<!-- Rail: projects + chats -->
+		<aside class="panel rail" id="panel-rail">
+			<div class="railhead"><span>Projects</span>
+				<button class="addbtn" id="new-project-btn" title="Projects arrive with the brief layer" disabled>
+					<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+				</button>
+			</div>
+			<div class="rail-note">None yet.</div>
+			<div class="railhead"><span>Chats</span>
+				<button class="addbtn" id="new-session-btn" title="New chat">
+					<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+				</button>
+			</div>
+			<div class="session-list" id="session-list"></div>
+			<div class="rail-footer">
+				<div class="user-info" id="user-info"></div>
+				<button class="icon-btn" id="settings-btn" title="Settings">⚙</button>
+				<button class="icon-btn" id="logout-btn" title="Sign out">⏻</button>
+			</div>
+		</aside>
+		<div class="phandle" id="handle-rail" data-panel="rail" title="Drag to resize, double-click to reset"></div>
+
+		<!-- Center: the conversation -->
+		<section class="panel center" id="panel-center">
+			<div class="chead">
+				<span class="ctitle" id="current-session-name">No session</span>
+				<div class="chead-right">
+					<span class="cmeter" id="center-meter"></span>
+					<button class="icon-btn" id="steps-toggle-btn" title="Show/hide tool steps in the thread">
+						<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M14.7 6.3a4 4 0 00-5.4 5.4L4 17v3h3l5.3-5.3a4 4 0 005.4-5.4L14 13l-3-3z"/></svg>
+					</button>
+				</div>
+			</div>
 			<div class="chat-output" id="chat-output"></div>
 			<div class="chat-input-bar">
 				<textarea id="chat-input" placeholder="Type a message... (Enter to send, Shift+Enter for newline)" rows="1"></textarea>
 				<button id="chat-send" title="Send">➤</button>
 			</div>
-		</div>
+		</section>
+		<div class="phandle" id="handle-agents" data-panel="agents" title="Drag to resize, double-click to reset"></div>
+
+		<!-- Agents: live runs -->
+		<aside class="panel agents" id="panel-agents">
+			<div class="railhead"><span>Agents</span>
+				<span class="rail-count" id="agents-count"></span>
+				<button class="addbtn panel-close" data-close="agents" title="Close panel">
+					<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+				</button>
+			</div>
+			<div class="agents-list" id="agents-list"></div>
+		</aside>
+		<div class="phandle" id="handle-work" data-panel="work" title="Drag to resize, double-click to reset"></div>
+
+		<!-- Workspace: file tree -->
+		<aside class="panel work" id="panel-work">
+			<div class="railhead"><span>Workspace</span>
+				<span class="files-actions">
+					<button class="addbtn" data-act="up" title="Up">↑</button>
+					<button class="addbtn" data-act="refresh" title="Refresh">⟳</button>
+					<label class="addbtn" title="Upload"><input type="file" style="display:none">⤒</label>
+					<button class="addbtn panel-close" data-close="work" title="Close panel">
+						<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+					</button>
+				</span>
+			</div>
+			<div class="files-card">
+				<div class="files-path"></div>
+				<div class="files-tree"></div>
+				<div class="files-view" style="display:none"></div>
+			</div>
+		</aside>
 	</div>
+
+	<!-- Mobile: one panel at a time -->
+	<nav class="mnav" id="mnav">
+		<button data-mp="rail"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg><span>Chats</span></button>
+		<button data-mp="center" class="on"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v10H9l-4 4v-4H4z"/></svg><span>Chat</span></button>
+		<button data-mp="agents"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3 20c0-3.3 2.7-5 6-5s6 1.7 6 5"/><path d="M16 5.6a3 3 0 010 4.8M15.5 15c2.6.3 4.5 2 4.5 5"/></svg><span>Agents</span></button>
+		<button data-mp="work"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h6l2 2h10v11H3z"/></svg><span>Files</span></button>
+	</nav>
 </div>
 
 <!-- Settings modal -->

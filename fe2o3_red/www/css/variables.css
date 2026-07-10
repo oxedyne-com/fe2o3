@@ -1,46 +1,57 @@
 :root {
-	/* Dark theme (default) */
-	--bg-primary:        #0d1117;
-	--bg-secondary:      #161b22;
-	--bg-tertiary:       #21262d;
-	--bg-hover:          #30363d;
-	--border:            #30363d;
-	--text-primary:      #e6edf3;
-	--text-secondary:    #7d8590;
-	--text-muted:        #484f58;
-	--accent:            #f33c57;
-	--accent-hover:      #d93550;
-	--accent-soft:       rgba(243, 60, 87, 0.15);
-	--danger:            #f85149;
-	--success:           #3fb950;
+	/* Dark theme (default) — warm palette from doc/red mockup. */
+	--bg-primary:        #15120F;
+	--bg-secondary:      #1E1A16;
+	--bg-tertiary:       #241F1A;
+	--bg-hover:          #2B251E;
+	--border:            #332C25;
+	--border-2:          #3F372E;
+	--text-primary:      #ECE6DC;
+	--text-secondary:    #A79E92;
+	--text-muted:        #736A5F;
+	--accent:            #D2604F;
+	--accent-hover:      #E07A67;
+	--accent-soft:       #3A211B;
+	--accent-text:       #E9A392;
+	--ok:                #66B98C;
+	--ok-bg:             #1C3227;
+	--warn:              #D6A24A;
+	--warn-bg:           #33260F;
+	--danger:            #E07A67;
+	--success:           #66B98C;
 	--radius:            8px;
-	--radius-sm:         4px;
-	--font:              -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
-	--font-mono:         'SF Mono', 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
-	--sidebar-w:         260px;
-	--header-h:          48px;
-	--logo-h:            28px;
+	--radius-sm:         6px;
+	--radius-lg:         12px;
+	--font:              system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+	--font-mono:         ui-monospace, 'SF Mono', 'Cascadia Code', 'Fira Code', Consolas, monospace;
+	--header-h:          44px;
+	--logo-h:            24px;
+	/* Default panel widths (user-pullable, persisted). */
+	--rail-w:            220px;
+	--agents-w:          240px;
+	--work-w:            260px;
+	--mnav-h:            54px;
 }
 
 /* Light theme */
 :root[data-theme="light"] {
-	--bg-primary:        #ffffff;
-	--bg-secondary:      #f6f8fa;
-	--bg-tertiary:       #eaeef2;
-	--bg-hover:          #d8dee4;
-	--border:            #d0d7de;
-	--text-primary:      #1f2328;
-	--text-secondary:    #636c76;
-	--text-muted:        #848d97;
-	--accent:            #f33c57;
-	--accent-hover:      #d93550;
-	--accent-soft:       rgba(243, 60, 87, 0.1);
-	--danger:            #cf222e;
-	--success:           #1a7f37;
-}
-
-@media (max-width: 768px) {
-	:root {
-		--sidebar-w: 280px;
-	}
+	--bg-primary:        #FBF9F5;
+	--bg-secondary:      #FFFFFF;
+	--bg-tertiary:       #F4F1EA;
+	--bg-hover:          #EDE9E0;
+	--border:            #E7E1D6;
+	--border-2:          #D6CEBF;
+	--text-primary:      #211C18;
+	--text-secondary:    #6B635A;
+	--text-muted:        #9A9187;
+	--accent:            #A6322A;
+	--accent-hover:      #C24A38;
+	--accent-soft:       #F6E7E2;
+	--accent-text:       #7E2A20;
+	--ok:                #2F7A54;
+	--ok-bg:             #E4F1E8;
+	--warn:              #9A6410;
+	--warn-bg:           #F7ECD6;
+	--danger:            #A33227;
+	--success:           #2F7A54;
 }

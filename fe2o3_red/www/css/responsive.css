@@ -1,142 +1,76 @@
 /* ============================================================
    Red — mobile responsive layer
    ------------------------------------------------------------
-   Loaded AFTER app.css. Everything that changes layout is
-   confined to `@media (max-width: 760px)` so desktop (>760px)
-   is untouched. Works in both light and dark themes because it
-   only references existing theme variables.
+   Loaded AFTER app.css. On small screens the four desktop
+   panels become one panel at a time, switched with the bottom
+   nav (.mnav). The active panel is chosen by body[data-mpanel].
+   Everything here is confined to `@media (max-width: 760px)`
+   so desktop (>760px) is untouched.
    ============================================================ */
-
-/* The hamburger button exists only for mobile. Keep it out of the
-   desktop layout by default; the media query re-shows it. This is
-   a brand-new element, so hiding it does not alter desktop. */
-.mobile-menu-btn {
-	display: none;
-}
 
 @media (max-width: 760px) {
 
-	/* ── No horizontal page scroll ─────────────────────────── */
-	html, body {
-		overflow-x: hidden;
-		max-width: 100%;
-	}
+	/* No horizontal page scroll. */
+	html, body { overflow-x: hidden; max-width: 100%; }
 
-	/* ── Sidebar as an off-canvas left drawer ──────────────── */
-	/* `initSidebarResize()` writes `sidebar.style.width` inline, so
-	   the width override MUST use !important to win over it. */
-	#sidebar {
-		position: fixed;
-		top: 0;
-		left: 0;
-		bottom: 0;
-		height: 100%;
-		width: 82% !important;
-		max-width: 320px;
-		z-index: 1001;
-		transform: translateX(-100%);
-		transition: transform 0.25s ease;
-		border-right: 1px solid var(--border);
-		box-shadow: 2px 0 16px rgba(0, 0, 0, 0.35);
-	}
+	#app { padding: 8px 8px 0; gap: 6px; }
 
-	body.sidebar-open #sidebar {
-		transform: translateX(0);
-	}
+	/* Desktop-only machinery disappears. */
+	.phandle { display: none !important; }
+	.panel-close { display: none !important; }
+	.top-actions .ptoggle { display: none; }
 
-	/* Dimming overlay behind the open drawer. CSS-only, no markup:
-	   it sits below the sidebar (z-index) but above the app. */
-	body.sidebar-open::before {
-		content: "";
-		position: fixed;
-		inset: 0;
-		background: rgba(0, 0, 0, 0.5);
-		z-index: 1000;
-	}
+	/* One panel at a time, full width. Inline widths from the
+	   desktop resizer must lose, hence !important. */
+	.main { position: relative; }
+	.main .panel { display: none !important; width: 100% !important; min-width: 0; }
+	body[data-mpanel="rail"]   .main .rail   { display: flex !important; }
+	body[data-mpanel="center"] .main .center { display: flex !important; }
+	body[data-mpanel="agents"] .main .agents { display: flex !important; }
+	body[data-mpanel="work"]   .main .work   { display: flex !important; }
 
-	/* ── Hide the desktop resize handle ────────────────────── */
-	#resize-handle {
-		display: none;
-	}
-
-	/* ── Main / chat area take the full width ──────────────── */
-	/* With the sidebar fixed (out of flow) the main area already
-	   fills the row; make the intent explicit and safe. */
-	#app {
-		width: 100%;
-	}
-	.main-area {
-		width: 100%;
-		min-width: 0;
-	}
-
-	/* ── Hamburger button in the header (top-left) ─────────── */
-	.mobile-menu-btn {
+	/* Bottom nav. */
+	.mnav {
 		display: flex;
+		align-items: stretch;
+		gap: 4px;
+		flex: none;
+		border-top: 1px solid var(--border);
+		background: var(--bg-primary);
+		padding: 6px 4px calc(6px + env(safe-area-inset-bottom, 0px));
+		margin: 0 -8px;
+	}
+	.mnav button {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
 		align-items: center;
 		justify-content: center;
-		flex-shrink: 0;
-		width: 40px;
-		height: 40px;
-		margin-right: 8px;
-		padding: 0;
+		gap: 3px;
+		padding: 5px 0 3px;
 		background: none;
 		border: none;
-		color: var(--text-secondary);
-		font-size: 22px;
-		line-height: 1;
-		cursor: pointer;
-		border-radius: var(--radius-sm);
+		border-radius: var(--radius);
+		color: var(--text-muted);
+		font-size: 11px;
 	}
-	.mobile-menu-btn:hover {
-		background: var(--bg-hover);
-		color: var(--text-primary);
-	}
+	.mnav button .ic { width: 19px; height: 19px; }
+	.mnav button.on { color: var(--accent); background: var(--accent-soft); }
 
-	/* Keep the session name from crowding the toggle. */
-	#current-session-name {
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	/* ── Long content scrolls INTERNALLY, never the page ───── */
-	.chat-output {
-		padding: 12px 14px;
-		max-width: 100%;
-	}
-	.chat-msg-content {
-		max-width: 100%;
-	}
+	/* Comfortable chat input row. */
+	.chat-output { padding: 12px 14px; }
+	.chat-msg-user .chat-msg-content,
+	.chat-msg-assistant .chat-msg-content { max-width: 100%; }
 	.chat-msg-content pre,
 	.chat-msg-content table,
 	.tool-args,
-	.tool-result {
-		max-width: 100%;
-		overflow-x: auto;
-	}
-	.chat-msg-user .chat-msg-content,
-	.chat-msg-assistant .chat-msg-content {
-		max-width: 100%;
-	}
+	.tool-result { max-width: 100%; overflow-x: auto; }
+	.chat-input-bar { gap: 8px; padding: 8px 10px; }
+	/* 16px avoids iOS Safari's auto-zoom on focus. */
+	#chat-input { font-size: 16px; padding: 11px 13px; }
+	#chat-send { min-width: 46px; height: 46px; font-size: 18px; }
 
-	/* ── Comfortable chat input row ────────────────────────── */
-	.chat-input-bar {
-		gap: 8px;
-		padding: 10px 12px;
-		/* Lift clear of the on-screen keyboard / home indicator. */
-		padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
-	}
-	#chat-input {
-		/* 16px avoids iOS Safari's auto-zoom on focus. */
-		font-size: 16px;
-		padding: 12px 14px;
-	}
-	#chat-send {
-		flex-shrink: 0;
-		min-width: 48px;
-		height: 48px;
-		font-size: 18px;
-		padding: 0 14px;
-	}
+	/* Give lists a little more row height for touch. */
+	.session-box { padding: 10px 11px; }
+	.files-row { padding: 8px 12px; }
 }

@@ -1,7 +1,8 @@
 /* ============================================================
    Red — workspace file browser (WS-F)
    ------------------------------------------------------------
-   A vanilla-JS file panel over the chat WebSocket.  Protocol
+   A vanilla-JS file panel over the chat WebSocket, docked as
+   the workspace panel (#panel-work in index.html). Protocol
    (client -> server):
      fs_list  "path"                list a directory
      fs_read  "path"                read a text file
@@ -11,19 +12,22 @@
      fs_tree    "<json entries>"    { path, entries:[{name,dir,size}] }
      fs_content "path" "content"    file contents
    app.js wires: RedFiles.init(sendChat); routes fs_tree ->
-   RedFiles.onTree, fs_content -> RedFiles.onContent; and calls
-   RedFiles.toggle() from the Files button.
+   RedFiles.onTree, fs_content -> RedFiles.onContent; calls
+   RedFiles.onOpen() when the panel opens and RedFiles.refresh()
+   after each agent turn. Panel visibility itself is owned by
+   RedPanels (desktop) and the mobile nav.
    ============================================================ */
 (function () {
 	'use strict';
 
 	var send = null;      // injected sendChat(cmd)
-	var panel = null;     // the files panel element
+	var pathEl = null;
 	var treeEl = null;
 	var viewEl = null;
 	var curDir = '';      // current directory (workspace-relative)
 	var curFile = null;   // currently open file path
 	var curContent = '';
+	var listed = false;   // has an initial listing been requested?
 	var showLineNos = localStorage.getItem('red-files-lineno') !== '0'; // default on
 
 	// Hex-encode a string (UTF-8) so arbitrary file bytes survive the
@@ -49,29 +53,15 @@
 		return n + ' B';
 	}
 
-	function build() {
-		if (panel) return;
-		panel = document.createElement('div');
-		panel.className = 'files-panel';
-		panel.innerHTML =
-			'<div class="files-head">' +
-			'  <span class="files-title">Files</span>' +
-			'  <span class="files-actions">' +
-			'    <button class="files-btn" data-act="up" title="Up">↑</button>' +
-			'    <button class="files-btn" data-act="refresh" title="Refresh">⟳</button>' +
-			'    <label class="files-btn" title="Upload"><input type="file" style="display:none">⤒</label>' +
-			'    <button class="files-btn" data-act="close" title="Close">×</button>' +
-			'  </span>' +
-			'</div>' +
-			'<div class="files-path"></div>' +
-			'<div class="files-tree"></div>' +
-			'<div class="files-view" style="display:none"></div>';
-		document.body.appendChild(panel);
+	function bind() {
+		var panel = document.getElementById('panel-work');
+		if (!panel) return;
+		pathEl = panel.querySelector('.files-path');
 		treeEl = panel.querySelector('.files-tree');
 		viewEl = panel.querySelector('.files-view');
-		panel.querySelector('[data-act="close"]').addEventListener('click', hide);
 		panel.querySelector('[data-act="refresh"]').addEventListener('click', function () { list(curDir); });
 		panel.querySelector('[data-act="up"]').addEventListener('click', function () {
+			if (curFile) { closeView(); return; }
 			if (!curDir) return;
 			var parts = curDir.split('/').filter(Boolean);
 			parts.pop();
@@ -80,19 +70,32 @@
 		panel.querySelector('input[type="file"]').addEventListener('change', onUpload);
 	}
 
+	function isOpen() {
+		if (window.matchMedia('(max-width: 760px)').matches) {
+			return document.body.dataset.mpanel === 'work';
+		}
+		return !window.RedPanels || RedPanels.isOpen('work');
+	}
+
 	function list(dir) {
 		curDir = dir || '';
 		curFile = null;
+		listed = true;
 		viewEl.style.display = 'none';
 		treeEl.style.display = '';
 		send('fs_list "' + escJdat(curDir || '.') + '"');
 	}
 
+	function closeView() {
+		viewEl.style.display = 'none';
+		treeEl.style.display = '';
+		curFile = null;
+	}
+
 	function onTree(obj) {
-		if (!panel) build();
 		if (typeof obj === 'string') { try { obj = JSON.parse(obj); } catch (e) { return; } }
 		curDir = (obj.path === '.' ? '' : obj.path) || '';
-		panel.querySelector('.files-path').textContent = '/' + curDir;
+		pathEl.textContent = '/' + curDir;
 		var entries = obj.entries || [];
 		entries.sort(function (a, b) { return (b.dir - a.dir) || a.name.localeCompare(b.name); });
 		treeEl.innerHTML = '';
@@ -136,7 +139,6 @@
 	function joinPath(dir, name) { return dir ? (dir + '/' + name) : name; }
 
 	function onContent(path, content) {
-		if (!panel) build();
 		curFile = path;
 		curContent = content;
 		treeEl.style.display = 'none';
@@ -152,9 +154,7 @@
 			'</div>' +
 			'<pre class="files-view-body"></pre>';
 		renderFileBody();
-		viewEl.querySelector('[data-act="back"]').addEventListener('click', function () {
-			viewEl.style.display = 'none'; treeEl.style.display = ''; curFile = null;
-		});
+		viewEl.querySelector('[data-act="back"]').addEventListener('click', closeView);
 		viewEl.querySelector('[data-act="lineno"]').addEventListener('click', function () {
 			showLineNos = !showLineNos;
 			localStorage.setItem('red-files-lineno', showLineNos ? '1' : '0');
@@ -202,21 +202,21 @@
 		e.target.value = '';
 	}
 
-	function show() { if (!panel) build(); panel.classList.add('open'); list(curDir); }
-	function hide() { if (panel) panel.classList.remove('open'); }
-	function toggle() { if (panel && panel.classList.contains('open')) hide(); else show(); }
+	// Called when the workspace panel is opened (desktop toggle or
+	// mobile nav) — fetch the initial or refreshed listing.
+	function onOpen() {
+		if (!curFile) { list(curDir); }
+	}
 
 	// Re-list the current directory if the panel is open and browsing
 	// (not viewing a file) — used to reflect files the agent just wrote.
 	function refresh() {
-		if (panel && panel.classList.contains('open') && !curFile) { list(curDir); }
+		if (isOpen() && listed && !curFile) { list(curDir); }
 	}
 
 	window.RedFiles = {
-		init: function (sendFn) { send = sendFn; },
-		toggle: toggle,
-		show: show,
-		hide: hide,
+		init: function (sendFn) { send = sendFn; bind(); },
+		onOpen: onOpen,
 		refresh: refresh,
 		onTree: onTree,
 		onContent: onContent
