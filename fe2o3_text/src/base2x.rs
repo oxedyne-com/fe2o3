@@ -24,7 +24,9 @@ use std::collections::HashSet;
 
 
 pub const MAX_X: usize = 32;
-pub const MAX_A: usize = 2_usize.pow(MAX_X as u32);
+// `u64` because `2^32` overflows a 32-bit `usize` (e.g. on `wasm32`); the value
+// is an alphabet-size ceiling, compared against a `usize` after a widening cast.
+pub const MAX_A: u64 = 2_u64.pow(MAX_X as u32);
 
 // Some const instances.
 pub const BASE64: Base2x<64, 6>         = base64();
@@ -207,7 +209,7 @@ impl<
     /// Checks the size of the alphabet and returns the base two logarithm of the size if it is an
     /// integer, or `None` otherwise.
     fn validate_size(n: usize) -> Option<usize> {
-        if n == 0 || n > MAX_A { return None; }
+        if n == 0 || n as u64 > MAX_A { return None; }
     
         let mut exponent = 0;
         let mut value = n;

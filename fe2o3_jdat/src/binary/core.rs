@@ -197,6 +197,10 @@ impl Dat {
     }
 
     pub fn c64_len(num: usize) -> usize {
+        // Compare in `u64`: the upper literals exceed a 32-bit `usize` (e.g. on
+        // `wasm32`); widening `num` is lossless and keeps the ladder correct on
+        // both 32- and 64-bit targets.
+        let num = num as u64;
         if num == 0 {
             1
         } else if num <= 0xff {
