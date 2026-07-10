@@ -289,6 +289,10 @@
 			renderToolCall(vals[0] || '', vals[1] || '');
 		} else if (cmd === 'tool_result') {
 			renderToolResult(vals[0] || '', vals[1] || '');
+		} else if (cmd === 'fs_tree') {
+			if (window.RedFiles) RedFiles.onTree(vals[0]);
+		} else if (cmd === 'fs_content') {
+			if (window.RedFiles) RedFiles.onContent(vals[0] || '', vals[1] || '');
 		} else if (cmd === 'done') {
 			endGenerating();
 			chatInput.focus();
@@ -360,14 +364,14 @@
 		}
 		currentAssistantText += text;
 		var content = currentAssistantDiv.querySelector('.chat-msg-content');
-		content.innerHTML = marked.parse(currentAssistantText);
+		content.innerHTML = RedRender.md(currentAssistantText);
 		chatOutput.scrollTop = chatOutput.scrollHeight;
 	}
 
 	function finalizeAssistantMessage() {
 		if (currentAssistantDiv && currentAssistantText) {
 			var content = currentAssistantDiv.querySelector('.chat-msg-content');
-			content.innerHTML = marked.parse(currentAssistantText);
+			content.innerHTML = RedRender.md(currentAssistantText);
 		}
 		currentAssistantDiv = null;
 		currentAssistantText = '';
@@ -636,6 +640,7 @@
 			sessionNameEl.textContent = s.name || 'Session';
 			sendChat('session_switch "' + escJdat(s.id) + '"');
 			updateActiveSession(s.id);
+			closeSidebar();
 		});
 
 		return box;
@@ -901,6 +906,34 @@
 	chatSend.addEventListener('click', function () {
 		if (generating) { stopGeneration(); } else { sendUserMessage(); }
 	});
+
+	// ── Mobile drawer ──────────────────────────────────────────
+	var mobileMenuBtn = document.getElementById('mobile-menu-btn');
+	function closeSidebar() { document.body.classList.remove('sidebar-open'); }
+	if (mobileMenuBtn) {
+		mobileMenuBtn.addEventListener('click', function () {
+			document.body.classList.toggle('sidebar-open');
+		});
+	}
+	// Tap outside the sidebar (the dimmed overlay) to close it.
+	document.addEventListener('click', function (e) {
+		if (!document.body.classList.contains('sidebar-open')) return;
+		if (mobileMenuBtn && mobileMenuBtn.contains(e.target)) return;
+		if (sidebar.contains(e.target)) return;
+		closeSidebar();
+	});
+	document.addEventListener('keydown', function (e) {
+		if (e.key === 'Escape') { closeSidebar(); }
+	});
+
+	// ── Files panel ────────────────────────────────────────────
+	if (window.RedFiles) { RedFiles.init(sendChat); }
+	var filesToggleBtn = document.getElementById('files-toggle-btn');
+	if (filesToggleBtn) {
+		filesToggleBtn.addEventListener('click', function () {
+			if (window.RedFiles) { RedFiles.toggle(); closeSidebar(); }
+		});
+	}
 
 	// ── Init ───────────────────────────────────────────────────
 	initTheme();

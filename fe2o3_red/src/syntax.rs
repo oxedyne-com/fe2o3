@@ -126,6 +126,48 @@ pub fn build_syntax()
     });
     s = res!(s.add_cmd(cmd));
 
+    // ----------------------------------------------------------------
+    // Commands: fs_list / fs_read / fs_delete / fs_write (file browser)
+    // ----------------------------------------------------------------
+    let cmd = Cmd::from(CmdConfig {
+        name:   fmt!("fs_list"),
+        help:   Some(fmt!("List a workspace directory.")),
+        vals:   vec![(Kind::Str, fmt!("Directory path"))],
+        cat:    fmt!("Red"),
+        ..Default::default()
+    });
+    s = res!(s.add_cmd(cmd));
+
+    let cmd = Cmd::from(CmdConfig {
+        name:   fmt!("fs_read"),
+        help:   Some(fmt!("Read a workspace text file.")),
+        vals:   vec![(Kind::Str, fmt!("File path"))],
+        cat:    fmt!("Red"),
+        ..Default::default()
+    });
+    s = res!(s.add_cmd(cmd));
+
+    let cmd = Cmd::from(CmdConfig {
+        name:   fmt!("fs_delete"),
+        help:   Some(fmt!("Delete a workspace file.")),
+        vals:   vec![(Kind::Str, fmt!("File path"))],
+        cat:    fmt!("Red"),
+        ..Default::default()
+    });
+    s = res!(s.add_cmd(cmd));
+
+    let cmd = Cmd::from(CmdConfig {
+        name:   fmt!("fs_write"),
+        help:   Some(fmt!("Create or overwrite a workspace file.")),
+        vals:   vec![
+            (Kind::Str, fmt!("File path")),
+            (Kind::Str, fmt!("Content")),
+        ],
+        cat:    fmt!("Red"),
+        ..Default::default()
+    });
+    s = res!(s.add_cmd(cmd));
+
     // ┌───────────────────────┐
     // │ RESPONSE              │
     // └───────────────────────┘
@@ -178,6 +220,33 @@ pub fn build_syntax()
         vals:   vec![
             (Kind::Str, fmt!("Tool name")),
             (Kind::Str, fmt!("Result text")),
+        ],
+        cat:    fmt!("Response"),
+        ..Default::default()
+    });
+    s = res!(s.add_cmd(cmd));
+
+    // ----------------------------------------------------------------
+    // Command: fs_tree  (server → client: directory listing JSON)
+    // ----------------------------------------------------------------
+    let cmd = Cmd::from(CmdConfig {
+        name:   fmt!("fs_tree"),
+        help:   Some(fmt!("Workspace directory listing (JSON).")),
+        vals:   vec![(Kind::Str, fmt!("JSON entries"))],
+        cat:    fmt!("Response"),
+        ..Default::default()
+    });
+    s = res!(s.add_cmd(cmd));
+
+    // ----------------------------------------------------------------
+    // Command: fs_content  (server → client: file contents)
+    // ----------------------------------------------------------------
+    let cmd = Cmd::from(CmdConfig {
+        name:   fmt!("fs_content"),
+        help:   Some(fmt!("Workspace file contents.")),
+        vals:   vec![
+            (Kind::Str, fmt!("File path")),
+            (Kind::Str, fmt!("Content")),
         ],
         cat:    fmt!("Response"),
         ..Default::default()

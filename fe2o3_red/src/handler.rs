@@ -464,6 +464,13 @@ pub async fn handle_chat_websocket<
                     }
                 };
 
+                // Expand any skill invocation (<name ...>) in the message
+                // by injecting the matching skill's instructions.
+                let content = match crate::skills::expand(&content, &registry.ctx.workspace) {
+                    Ok(c) => c,
+                    Err(_) => content,
+                };
+
                 let result = {
                     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
 
@@ -516,6 +523,58 @@ pub async fn handle_chat_websocket<
                     warn!("{}: Agent turn error: {}", id, e);
                 }
             }
+            "fs_list" => {
+                let path = match cmdrx.vals.get(0) {
+                    Some(Dat::Str(s)) => s.clone(),
+                    _ => ".".to_string(),
+                };
+                match user_ws(&state.workspace_base, &username)
+                    .and_then(|w| fs_list_json(&w, &path))
+                {
+                    Ok(json) => { let _ = ws.send(&text_msg(syntax.clone(), "fs_tree", vec![dat!(json)])).await; }
+                    Err(e)   => { let _ = ws.send(&text_msg(syntax.clone(), "error", vec![dat!(e.to_string())])).await; }
+                }
+            }
+            "fs_read" => {
+                let path = match cmdrx.vals.get(0) {
+                    Some(Dat::Str(s)) => s.clone(),
+                    _ => { let _ = ws.send(&text_msg(syntax.clone(), "error", vec![dat!("fs_read: missing path.")])).await; continue; }
+                };
+                match user_ws(&state.workspace_base, &username)
+                    .and_then(|w| fs_read_file(&w, &path))
+                {
+                    Ok(content) => { let _ = ws.send(&text_msg(syntax.clone(), "fs_content", vec![dat!(path.clone()), dat!(content)])).await; }
+                    Err(e)      => { let _ = ws.send(&text_msg(syntax.clone(), "error", vec![dat!(e.to_string())])).await; }
+                }
+            }
+            "fs_delete" => {
+                let path = match cmdrx.vals.get(0) {
+                    Some(Dat::Str(s)) => s.clone(),
+                    _ => { let _ = ws.send(&text_msg(syntax.clone(), "error", vec![dat!("fs_delete: missing path.")])).await; continue; }
+                };
+                match user_ws(&state.workspace_base, &username)
+                    .and_then(|w| fs_delete_file(&w, &path))
+                {
+                    Ok(())  => { let _ = ws.send(&text_msg(syntax.clone(), "info", vec![dat!(fmt!("Deleted {}.", path))])).await; }
+                    Err(e)  => { let _ = ws.send(&text_msg(syntax.clone(), "error", vec![dat!(e.to_string())])).await; }
+                }
+            }
+            "fs_write" => {
+                let path = match cmdrx.vals.get(0) {
+                    Some(Dat::Str(s)) => s.clone(),
+                    _ => { let _ = ws.send(&text_msg(syntax.clone(), "error", vec![dat!("fs_write: missing path.")])).await; continue; }
+                };
+                let content = match cmdrx.vals.get(1) {
+                    Some(Dat::Str(s)) => s.clone(),
+                    _ => String::new(),
+                };
+                match user_ws(&state.workspace_base, &username)
+                    .and_then(|w| fs_write_file(&w, &path, &content))
+                {
+                    Ok(())  => { let _ = ws.send(&text_msg(syntax.clone(), "info", vec![dat!(fmt!("Wrote {}.", path))])).await; }
+                    Err(e)  => { let _ = ws.send(&text_msg(syntax.clone(), "error", vec![dat!(e.to_string())])).await; }
+                }
+            }
             _ => {
                 let _ = ws.send(&text_msg(syntax.clone(), "error", vec![
                     dat!(fmt!("Unknown command '{}'.", cmd_name)),
@@ -534,6 +593,65 @@ pub async fn handle_chat_websocket<
 // └───────────────────────────────────────────────────────────────┘
 
 /// Map an `AgentEvent` to a WS command name and value list.
+/// Open a user's workspace under the shared base directory.
+fn user_ws(base: &PathBuf, user: &str) -> Outcome<Workspace> {
+    Workspace::new(base.join(user))
+}
+
+/// Build a JSON directory listing: `{"path":..,"entries":[{name,dir,size}]}`.
+fn fs_list_json(ws: &Workspace, path: &str) -> Outcome<String> {
+    let abs = res!(ws.resolve(path));
+    let rd = res!(std::fs::read_dir(&abs)
+        .map_err(|e| err!(e, "fs_list: cannot read directory '{}'.", path; IO, File, Read)));
+    let mut entries: Vec<(bool, String, u64)> = rd
+        .filter_map(|e| e.ok())
+        .map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            let is_dir = e.path().is_dir();
+            let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+            (is_dir, name, size)
+        })
+        .collect();
+    entries.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    let disp = if path == "." { String::new() } else { path.to_string() };
+    let mut out = fmt!("{{\"path\":\"{}\",\"entries\":[", crate::llm::json_escape(&disp));
+    for (i, (is_dir, name, size)) in entries.iter().enumerate() {
+        if i > 0 { out.push(','); }
+        out.push_str(&fmt!("{{\"name\":\"{}\",\"dir\":{},\"size\":{}}}",
+            crate::llm::json_escape(name), is_dir, size));
+    }
+    out.push_str("]}");
+    Ok(out)
+}
+
+/// Read a workspace text file.
+fn fs_read_file(ws: &Workspace, path: &str) -> Outcome<String> {
+    let abs = res!(ws.resolve(path));
+    let data = res!(std::fs::read(&abs)
+        .map_err(|e| err!(e, "fs_read: cannot read '{}'.", path; IO, File, Read)));
+    Ok(String::from_utf8_lossy(&data).to_string())
+}
+
+/// Delete a workspace file.
+fn fs_delete_file(ws: &Workspace, path: &str) -> Outcome<()> {
+    let abs = res!(ws.resolve(path));
+    res!(std::fs::remove_file(&abs)
+        .map_err(|e| err!(e, "fs_delete: cannot delete '{}'.", path; IO, File)));
+    Ok(())
+}
+
+/// Create or overwrite a workspace file.
+fn fs_write_file(ws: &Workspace, path: &str, content: &str) -> Outcome<()> {
+    let abs = res!(ws.resolve(path));
+    if let Some(parent) = abs.parent() {
+        res!(std::fs::create_dir_all(parent)
+            .map_err(|e| err!(e, "fs_write: cannot create parent dirs for '{}'.", path; IO, File)));
+    }
+    res!(std::fs::write(&abs, content.as_bytes())
+        .map_err(|e| err!(e, "fs_write: cannot write '{}'.", path; IO, File, Write)));
+    Ok(())
+}
+
 fn event_to_ws(ev: &AgentEvent) -> (&'static str, Vec<Dat>) {
     match ev {
         AgentEvent::Text(t)   => ("text",  vec![dat!(t.clone())]),

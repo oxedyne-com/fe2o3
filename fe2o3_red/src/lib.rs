@@ -21,6 +21,7 @@ pub mod handler;
 pub mod llm;
 pub mod protocol;
 pub mod session;
+pub mod skills;
 pub mod syntax;
 pub mod tools;
 pub mod workspace;

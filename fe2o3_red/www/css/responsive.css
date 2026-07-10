@@ -1,0 +1,142 @@
+/* ============================================================
+   Red — mobile responsive layer
+   ------------------------------------------------------------
+   Loaded AFTER app.css. Everything that changes layout is
+   confined to `@media (max-width: 760px)` so desktop (>760px)
+   is untouched. Works in both light and dark themes because it
+   only references existing theme variables.
+   ============================================================ */
+
+/* The hamburger button exists only for mobile. Keep it out of the
+   desktop layout by default; the media query re-shows it. This is
+   a brand-new element, so hiding it does not alter desktop. */
+.mobile-menu-btn {
+	display: none;
+}
+
+@media (max-width: 760px) {
+
+	/* ── No horizontal page scroll ─────────────────────────── */
+	html, body {
+		overflow-x: hidden;
+		max-width: 100%;
+	}
+
+	/* ── Sidebar as an off-canvas left drawer ──────────────── */
+	/* `initSidebarResize()` writes `sidebar.style.width` inline, so
+	   the width override MUST use !important to win over it. */
+	#sidebar {
+		position: fixed;
+		top: 0;
+		left: 0;
+		bottom: 0;
+		height: 100%;
+		width: 82% !important;
+		max-width: 320px;
+		z-index: 1001;
+		transform: translateX(-100%);
+		transition: transform 0.25s ease;
+		border-right: 1px solid var(--border);
+		box-shadow: 2px 0 16px rgba(0, 0, 0, 0.35);
+	}
+
+	body.sidebar-open #sidebar {
+		transform: translateX(0);
+	}
+
+	/* Dimming overlay behind the open drawer. CSS-only, no markup:
+	   it sits below the sidebar (z-index) but above the app. */
+	body.sidebar-open::before {
+		content: "";
+		position: fixed;
+		inset: 0;
+		background: rgba(0, 0, 0, 0.5);
+		z-index: 1000;
+	}
+
+	/* ── Hide the desktop resize handle ────────────────────── */
+	#resize-handle {
+		display: none;
+	}
+
+	/* ── Main / chat area take the full width ──────────────── */
+	/* With the sidebar fixed (out of flow) the main area already
+	   fills the row; make the intent explicit and safe. */
+	#app {
+		width: 100%;
+	}
+	.main-area {
+		width: 100%;
+		min-width: 0;
+	}
+
+	/* ── Hamburger button in the header (top-left) ─────────── */
+	.mobile-menu-btn {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		flex-shrink: 0;
+		width: 40px;
+		height: 40px;
+		margin-right: 8px;
+		padding: 0;
+		background: none;
+		border: none;
+		color: var(--text-secondary);
+		font-size: 22px;
+		line-height: 1;
+		cursor: pointer;
+		border-radius: var(--radius-sm);
+	}
+	.mobile-menu-btn:hover {
+		background: var(--bg-hover);
+		color: var(--text-primary);
+	}
+
+	/* Keep the session name from crowding the toggle. */
+	#current-session-name {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	/* ── Long content scrolls INTERNALLY, never the page ───── */
+	.chat-output {
+		padding: 12px 14px;
+		max-width: 100%;
+	}
+	.chat-msg-content {
+		max-width: 100%;
+	}
+	.chat-msg-content pre,
+	.chat-msg-content table,
+	.tool-args,
+	.tool-result {
+		max-width: 100%;
+		overflow-x: auto;
+	}
+	.chat-msg-user .chat-msg-content,
+	.chat-msg-assistant .chat-msg-content {
+		max-width: 100%;
+	}
+
+	/* ── Comfortable chat input row ────────────────────────── */
+	.chat-input-bar {
+		gap: 8px;
+		padding: 10px 12px;
+		/* Lift clear of the on-screen keyboard / home indicator. */
+		padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+	}
+	#chat-input {
+		/* 16px avoids iOS Safari's auto-zoom on focus. */
+		font-size: 16px;
+		padding: 12px 14px;
+	}
+	#chat-send {
+		flex-shrink: 0;
+		min-width: 48px;
+		height: 48px;
+		font-size: 18px;
+		padding: 0 14px;
+	}
+}

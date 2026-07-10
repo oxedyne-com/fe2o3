@@ -7,6 +7,9 @@
 <link rel="icon" type="image/svg+xml" href="assets/oxedyne_red.svg">
 <link rel="stylesheet" href="css/variables.css">
 <link rel="stylesheet" href="css/app.css">
+<link rel="stylesheet" href="css/render.css">
+<link rel="stylesheet" href="css/files.css">
+<link rel="stylesheet" href="css/responsive.css">
 </head>
 <body>
 
@@ -51,6 +54,7 @@
 		<div class="session-list" id="session-list"></div>
 		<div class="sidebar-footer">
 			<div class="user-info" id="user-info"></div>
+			<button class="files-toggle-btn" id="files-toggle-btn" title="Files">📁</button>
 			<button class="settings-btn" id="settings-btn" title="Settings">⚙</button>
 			<button class="logout-btn" id="logout-btn" title="Sign out">⏻</button>
 		</div>
@@ -62,7 +66,8 @@
 	<!-- Main area -->
 	<div class="main-area">
 		<div class="top-bar">
-			<span id="current-session-name">No session</span>
+			<button class="mobile-menu-btn" id="mobile-menu-btn" aria-label="Menu">☰</button>
+				<span id="current-session-name">No session</span>
 			<button class="theme-toggle" id="theme-toggle" title="Toggle theme">
 				<span class="theme-icon-dark">🌙</span>
 				<span class="theme-icon-light">☀</span>
@@ -107,7 +112,9 @@
 </div>
 
 <script src="js/marked.min.js"></script>
+<script src="js/render.js"></script>
 <script src="js/o3db.js"></script>
+<script src="js/files.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>
