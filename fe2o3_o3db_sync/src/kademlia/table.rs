@@ -7,7 +7,7 @@
 //! via LRU probe), removal, lookup and a `k_closest` query used by both
 //! `FIND_NODE` and `FIND_CLOSEST` message-layer flows.
 
-use crate::{
+use super::{
 	contact::Contact,
 	id::{
 		ID_BITS,
@@ -158,7 +158,7 @@ impl RoutingTable {
 			return out;
 		}
 		// Gather every contact, tagged with its distance to the target.
-		let mut tagged: Vec<(crate::id::Distance, Contact)> =
+		let mut tagged: Vec<(super::id::Distance, Contact)> =
 			Vec::with_capacity(self.len());
 		for map in &self.maps {
 			for c in map.iter() {

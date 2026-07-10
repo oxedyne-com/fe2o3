@@ -8,15 +8,13 @@ description = "Hematite library for the Ozone database (o3db), a key-value store
 repository = "https://github.com/oxedyne-io/fe2o3"
 
 [features]
-# Peer-to-peer distributed Ozone: OAM placement, IBLT anti-entropy,
-# HotStuff consensus for strong-consistency tables. Disabled by default
-# -- enable when your application needs replication across peers.
-dist = [
-	"dep:oxedyne_fe2o3_hll",
-	"dep:oxedyne_fe2o3_iblt",
-	"dep:oxedyne_fe2o3_kademlia",
-	"dep:oxedyne_fe2o3_oam",
-]
+# Peer-to-peer distributed Ozone: Kademlia routing, OAM placement, IBLT
+# anti-entropy, HotStuff consensus for strong-consistency tables. Disabled by
+# default -- enable when your application needs replication across peers. The
+# distributed primitives live in-crate (the `kademlia`, `oam` and `dist`
+# modules) and in `fe2o3_data` (`iblt`, `hll`); this flag gates their
+# compilation so local-only callers do not pull the peer-to-peer graph in.
+dist = []
 
 [dependencies]
 oxedyne_fe2o3_bot 		   		= { path = "../fe2o3_bot" }
@@ -35,13 +33,6 @@ oxedyne_fe2o3_stds 				= { path = "../fe2o3_stds" }
 oxedyne_fe2o3_test 				= { path = "../fe2o3_test" }
 oxedyne_fe2o3_text 				= { path = "../fe2o3_text" }
 oxedyne_fe2o3_namex				= { path = "../fe2o3_namex" }
-
-# Distributed-mode dependencies. Gated behind the `dist` feature so that
-# local-only callers do not pull the peer-to-peer primitive graph in.
-oxedyne_fe2o3_hll				= { path = "../fe2o3_hll",		optional = true }
-oxedyne_fe2o3_iblt				= { path = "../fe2o3_iblt",		optional = true }
-oxedyne_fe2o3_kademlia			= { path = "../fe2o3_kademlia",	optional = true }
-oxedyne_fe2o3_oam				= { path = "../fe2o3_oam",		optional = true }
 
 crossbeam-utils = "0.8.5"
 hostname = "0.3.1"

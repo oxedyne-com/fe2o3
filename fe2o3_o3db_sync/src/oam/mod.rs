@@ -17,7 +17,7 @@
 //!
 //! # Identifier space
 //!
-//! OAM reuses the 256-bit identifier space from [`oxedyne_fe2o3_kademlia`].
+//! OAM reuses the 256-bit identifier space from [`crate::kademlia`].
 //! Record hashes are interpreted as [`NodeId`]s and compared to peer
 //! identifiers by XOR distance. This keeps the Kademlia routing layer and the
 //! OAM placement layer consistent: the same hash that identifies a record for
@@ -29,7 +29,7 @@
 //!   whatever their application dictates -- and hand in the resulting 32 bytes
 //!   as a [`NodeId`].
 //! - Estimate the network size. OAM consumes an `N` value that the caller
-//!   obtains from the HyperLogLog layer (see [`oxedyne_fe2o3_hll`]).
+//!   obtains from the HyperLogLog layer (see [`oxedyne_fe2o3_data::hll`]).
 //! - Route, replicate, or transport data. OAM only decides *who should hold*;
 //!   the distributed Ozone engine decides *how to get the record there*.
 //!
@@ -37,8 +37,8 @@
 //!
 //! ```
 //! use oxedyne_fe2o3_core::prelude::*;
-//! use oxedyne_fe2o3_kademlia::id::NodeId;
-//! use oxedyne_fe2o3_oam::{
+//! use oxedyne_fe2o3_o3db_sync::kademlia::id::NodeId;
+//! use oxedyne_fe2o3_o3db_sync::oam::{
 //!     config::OamConfig,
 //!     placement,
 //! };
@@ -55,13 +55,11 @@
 //! # Ok(())
 //! # }
 //! ```
-#![forbid(unsafe_code)]
-
 pub mod config;
 pub mod placement;
 pub mod threshold;
 
-pub use crate::{
+pub use self::{
 	config::OamConfig,
 	threshold::Threshold,
 };

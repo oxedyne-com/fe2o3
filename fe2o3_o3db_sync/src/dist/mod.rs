@@ -3,13 +3,13 @@
 //!
 //! Every peer runs a local Ozone (the rest of this crate); this module layers
 //! *replication* on top. It composes the pure primitives from the
-//! neighbouring crates into one cohesive engine behind a small application
+//! primitive modules into one cohesive engine behind a small application
 //! API:
 //!
-//! - [`oxedyne_fe2o3_kademlia`] -- peer identifiers and XOR distance.
-//! - [`oxedyne_fe2o3_oam`] -- threshold-XOR placement.
-//! - [`oxedyne_fe2o3_hll`] -- network-size estimation.
-//! - [`oxedyne_fe2o3_iblt`] -- state-reconciliation sketches.
+//! - [`crate::kademlia`] -- peer identifiers and XOR distance.
+//! - [`crate::oam`] -- threshold-XOR placement.
+//! - [`oxedyne_fe2o3_data::hll`] -- network-size estimation.
+//! - [`oxedyne_fe2o3_data::iblt`] -- state-reconciliation sketches.
 //! - [`hotstuff`] -- Byzantine-fault-tolerant consensus (kept local to this
 //!   module because it is consumed nowhere else in the ecosystem today).
 //!

@@ -1,11 +1,12 @@
 //! Integration tests for the OAM placement primitive.
+#![cfg(feature = "dist")]
 
 use oxedyne_fe2o3_core::prelude::*;
-use oxedyne_fe2o3_kademlia::id::{
+use oxedyne_fe2o3_o3db_sync::kademlia::id::{
 	Distance,
 	NodeId,
 };
-use oxedyne_fe2o3_oam::{
+use oxedyne_fe2o3_o3db_sync::oam::{
 	config::OamConfig,
 	placement,
 	threshold::Threshold,

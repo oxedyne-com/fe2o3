@@ -59,16 +59,16 @@ use super::transport::{
 };
 
 use oxedyne_fe2o3_core::prelude::*;
-use oxedyne_fe2o3_iblt::iblt::{
+use oxedyne_fe2o3_data::iblt::{
 	DecodeOutcome,
 	Iblt,
 	IbltConfig,
 };
-use oxedyne_fe2o3_kademlia::id::{
+use crate::kademlia::id::{
 	ID_LEN,
 	NodeId,
 };
-use oxedyne_fe2o3_oam::config::OamConfig;
+use crate::oam::config::OamConfig;
 
 use std::collections::HashMap;
 use std::sync::{

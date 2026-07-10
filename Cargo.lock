@@ -2143,20 +2143,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "oxedyne_fe2o3_hll"
-version = "0.5.0"
-dependencies = [
- "oxedyne_fe2o3_core",
-]
-
-[[package]]
-name = "oxedyne_fe2o3_iblt"
-version = "0.5.0"
-dependencies = [
- "oxedyne_fe2o3_core",
-]
-
-[[package]]
 name = "oxedyne_fe2o3_iop_crypto"
 version = "0.5.0"
 dependencies = [
@@ -2202,13 +2188,6 @@ dependencies = [
  "quote",
  "rand_core 0.6.4",
  "syn 1.0.109",
-]
-
-[[package]]
-name = "oxedyne_fe2o3_kademlia"
-version = "0.5.0"
-dependencies = [
- "oxedyne_fe2o3_core",
 ]
 
 [[package]]
@@ -2287,17 +2266,13 @@ dependencies = [
  "oxedyne_fe2o3_crypto",
  "oxedyne_fe2o3_data",
  "oxedyne_fe2o3_hash",
- "oxedyne_fe2o3_hll",
- "oxedyne_fe2o3_iblt",
  "oxedyne_fe2o3_iop_crypto",
  "oxedyne_fe2o3_iop_db",
  "oxedyne_fe2o3_iop_hash",
  "oxedyne_fe2o3_jdat",
- "oxedyne_fe2o3_kademlia",
  "oxedyne_fe2o3_namex",
  "oxedyne_fe2o3_net",
  "oxedyne_fe2o3_num",
- "oxedyne_fe2o3_oam",
  "oxedyne_fe2o3_stds",
  "oxedyne_fe2o3_syntax",
  "oxedyne_fe2o3_test",
@@ -2307,14 +2282,6 @@ dependencies = [
  "regex",
  "seahash",
  "secrecy",
-]
-
-[[package]]
-name = "oxedyne_fe2o3_oam"
-version = "0.5.0"
-dependencies = [
- "oxedyne_fe2o3_core",
- "oxedyne_fe2o3_kademlia",
 ]
 
 [[package]]

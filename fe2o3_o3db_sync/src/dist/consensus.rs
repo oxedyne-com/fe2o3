@@ -35,7 +35,7 @@ use super::record::{
 };
 
 use oxedyne_fe2o3_core::prelude::*;
-use oxedyne_fe2o3_kademlia::id::NodeId;
+use crate::kademlia::id::NodeId;
 
 
 /// The number of Byzantine members a cohort of the given size can tolerate.

@@ -19,8 +19,8 @@
 //!     local storage; non-members do not.
 
 use oxedyne_fe2o3_core::prelude::*;
-use oxedyne_fe2o3_kademlia::id::NodeId;
-use oxedyne_fe2o3_oam::config::OamConfig;
+use oxedyne_fe2o3_o3db_sync::kademlia::id::NodeId;
+use oxedyne_fe2o3_o3db_sync::oam::config::OamConfig;
 use oxedyne_fe2o3_o3db_sync::dist::{
 	config::{
 		DistOzoneConfig,

@@ -17,15 +17,15 @@
 //! consider themselves holders even if the local view of `N` differs slightly
 //! from theirs. [`Placement::read_targets`] returns this list.
 //!
-//! [`OamConfig`]: oxedyne_fe2o3_oam::config::OamConfig
-//! [`Threshold`]: oxedyne_fe2o3_oam::threshold::Threshold
+//! [`OamConfig`]: crate::oam::config::OamConfig
+//! [`Threshold`]: crate::oam::threshold::Threshold
 
 use super::peer_set::PeerSet;
 use super::record::RecordId;
 
 use oxedyne_fe2o3_core::prelude::*;
-use oxedyne_fe2o3_kademlia::id::NodeId;
-use oxedyne_fe2o3_oam::{
+use crate::kademlia::id::NodeId;
+use crate::oam::{
 	config::OamConfig,
 	placement as oam,
 	threshold::Threshold,

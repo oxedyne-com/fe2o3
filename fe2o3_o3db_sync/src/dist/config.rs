@@ -11,8 +11,8 @@
 //! the config.
 
 use oxedyne_fe2o3_core::prelude::*;
-use oxedyne_fe2o3_kademlia::id::NodeId;
-use oxedyne_fe2o3_oam::config::OamConfig;
+use crate::kademlia::id::NodeId;
+use crate::oam::config::OamConfig;
 
 use std::time::Duration;
 
@@ -78,7 +78,7 @@ impl TableConfig {
 
 	/// The number of hash functions the anti-entropy IBLT uses. Fixed at
 	/// three across the crate, matching the sizing rule of thumb in
-	/// `fe2o3_iblt`.
+	/// `fe2o3_data::iblt`.
 	pub const IBLT_NUM_HASHES: usize = 3;
 
 	/// Constructs a table config, validating the consistency model and the

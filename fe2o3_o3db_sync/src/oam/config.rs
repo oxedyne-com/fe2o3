@@ -5,7 +5,7 @@
 //! peer and refreshed when either input changes -- `n` on a configuration
 //! reload, `N` on a HyperLogLog-driven estimate update.
 
-use crate::threshold::Threshold;
+use super::threshold::Threshold;
 
 use oxedyne_fe2o3_core::prelude::*;
 

@@ -11,9 +11,9 @@
 //! All three reduce to XOR distance comparisons between 256-bit identifiers.
 //! None of them take locks, issue I/O, or spawn tasks.
 
-use crate::threshold::Threshold;
+use super::threshold::Threshold;
 
-use oxedyne_fe2o3_kademlia::id::NodeId;
+use crate::kademlia::id::NodeId;
 
 
 /// Returns `true` if the peer holds the record under the given threshold.

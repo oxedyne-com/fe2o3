@@ -22,7 +22,7 @@ use super::hotstuff::types::{
 };
 
 use oxedyne_fe2o3_core::prelude::*;
-use oxedyne_fe2o3_kademlia::id::NodeId;
+use crate::kademlia::id::NodeId;
 
 
 /// A correlation identifier for request/response pairs.
@@ -116,7 +116,7 @@ pub enum MsgKind {
 		/// The serialised IBLT sketch (the output of
 		/// [`Iblt::to_bytes`][tb]). Opaque to the transport layer.
 		///
-		/// [tb]: oxedyne_fe2o3_iblt::iblt::Iblt::to_bytes
+		/// [tb]: oxedyne_fe2o3_data::iblt::Iblt::to_bytes
 		sketch:		Vec<u8>,
 	},
 	/// Anti-entropy reply: "these records are what I have and you lack;

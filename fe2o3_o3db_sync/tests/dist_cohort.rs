@@ -6,7 +6,7 @@
 //! the degenerate `lambda == 0` case.
 
 use oxedyne_fe2o3_core::prelude::*;
-use oxedyne_fe2o3_kademlia::id::NodeId;
+use oxedyne_fe2o3_o3db_sync::kademlia::id::NodeId;
 use oxedyne_fe2o3_o3db_sync::dist::{
 	cohort::{
 		self,
@@ -163,7 +163,7 @@ fn cohort_members_sorted_by_distance_to_seed() -> Outcome<()> {
 	// distances should be non-decreasing across the cohort.
 	// We reconstruct the seed here the same way the selection does, purely
 	// to assert the ordering property without re-exporting the helper.
-	use oxedyne_fe2o3_kademlia::id::Distance;
+	use oxedyne_fe2o3_o3db_sync::kademlia::id::Distance;
 
 	let (local, peers) = build_peers(30, 9);
 	let rid = RecordId::from_bytes([0x99; 32]);

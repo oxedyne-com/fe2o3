@@ -7,7 +7,7 @@
 //! only a confirmed-dead LRU is evicted. The bias reduces churn and raises
 //! the cost of eclipse attacks.
 
-use crate::{
+use super::{
 	contact::Contact,
 	id::NodeId,
 };

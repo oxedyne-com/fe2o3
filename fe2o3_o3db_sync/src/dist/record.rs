@@ -7,10 +7,10 @@
 //! that has already been computed, in the same way the underlying primitive
 //! crates take pre-computed [`NodeId`]s.
 //!
-//! [`NodeId`]: oxedyne_fe2o3_kademlia::id::NodeId
+//! [`NodeId`]: crate::kademlia::id::NodeId
 
 use oxedyne_fe2o3_core::prelude::*;
-use oxedyne_fe2o3_kademlia::id::{
+use crate::kademlia::id::{
 	ID_LEN,
 	NodeId,
 };

@@ -7,7 +7,7 @@
 //! layer on top of this crate -- because routing itself does not authenticate
 //! anything.
 
-use crate::id::NodeId;
+use super::id::NodeId;
 
 use std::{
 	net::SocketAddr,

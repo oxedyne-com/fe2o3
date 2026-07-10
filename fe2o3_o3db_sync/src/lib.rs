@@ -159,6 +159,10 @@ pub mod prelude;
 /// Peer-to-peer distributed Ozone: OAM placement + IBLT anti-entropy +
 /// HotStuff consensus. Gated behind the `dist` cargo feature.
 #[cfg(feature = "dist")]
+pub mod kademlia; // Kademlia DHT routing-table primitive for the distributed layer.
+#[cfg(feature = "dist")]
+pub mod oam; // Oxegen Allocation Mechanism placement primitive for the distributed layer.
+#[cfg(feature = "dist")]
 pub mod dist;
 
 pub use crate::db::O3db;

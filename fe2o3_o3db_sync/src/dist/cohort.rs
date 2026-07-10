@@ -28,7 +28,7 @@ use super::peer_set::PeerSet;
 use super::record::RecordId;
 
 use oxedyne_fe2o3_core::prelude::*;
-use oxedyne_fe2o3_kademlia::id::NodeId;
+use crate::kademlia::id::NodeId;
 
 
 /// A cohort's membership for a specific record.
@@ -160,7 +160,7 @@ fn seed_for(table_name: &str, record_id: &RecordId) -> NodeId {
 /// the cohort-selection sort wants [`NodeId`] byte order as a tiebreaker
 /// and re-wrapping is cleaner than duplicating the comparator.
 ///
-/// [d]: oxedyne_fe2o3_kademlia::id::Distance
+/// [d]: crate::kademlia::id::Distance
 trait IntoNodeId {
 	fn into_node_id(self) -> NodeId;
 }

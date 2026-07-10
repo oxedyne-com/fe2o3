@@ -37,7 +37,7 @@
 //!
 //! ```
 //! use oxedyne_fe2o3_core::prelude::*;
-//! use oxedyne_fe2o3_kademlia::{
+//! use oxedyne_fe2o3_o3db_sync::kademlia::{
 //!     contact::Contact,
 //!     id::NodeId,
 //!     table::RoutingTable,
@@ -59,8 +59,6 @@
 //! # Ok(())
 //! # }
 //! ```
-#![forbid(unsafe_code)]
-
 pub mod contact;
 pub mod id;
 pub mod kmap;

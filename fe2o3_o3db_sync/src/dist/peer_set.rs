@@ -14,7 +14,7 @@
 //! search and `O(n)` for the shift, which is appropriate for the expected
 //! peer counts (tens to low thousands, updated infrequently).
 
-use oxedyne_fe2o3_kademlia::id::NodeId;
+use crate::kademlia::id::NodeId;
 
 
 /// A rolling, sorted, deduplicated view of known peers.
