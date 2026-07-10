@@ -10,7 +10,12 @@ use crate::llm::LlmClient;
 use crate::protocol::{AgentEvent, ChatMessage, Session};
 use crate::tools::ToolRegistry;
 
+// The TLS client-config helper below is native-only; the wasm build
+// delegates TLS trust to the browser and constructs `LlmClient`
+// without a `ClientConfig`.
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio_rustls::rustls::ClientConfig;
 
 /// Upper bound on tool-call rounds in a single turn, to bound cost and
@@ -181,6 +186,7 @@ impl Agent {
 ///
 /// Reused from Steel's `build_outbound_tls_client` — same approach
 /// but kept here so `fe2o3_red` can be used standalone.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn build_tls_client_config() -> Outcome<Arc<ClientConfig>> {
     use tokio_rustls::rustls::{
         ClientConfig,

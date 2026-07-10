@@ -17,6 +17,10 @@
 
 pub mod agent;
 pub mod executor;
+/// The Steel WebSocket handler is a native-only server concern; the
+/// browser (wasm32) build drives the agent directly, so this module is
+/// gated out of the wasm target.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod handler;
 pub mod llm;
 pub mod protocol;

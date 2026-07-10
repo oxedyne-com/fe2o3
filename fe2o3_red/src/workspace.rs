@@ -5,6 +5,14 @@
 //! workspace root.  In the trusted, self-hosted environment (plan D0)
 //! this is an *accident* guardrail — keeping the agent inside the
 //! workspace by default — not a hardened *attack* boundary.
+//!
+//! The `resolve` / `display_rel` path logic is pure and target-agnostic.
+//! The backing store is `std::fs`, which compiles on wasm32 but returns
+//! "unsupported" at runtime — the browser filesystem is OPFS.
+// TODO(wasm-opfs): back `Workspace` (and the file tools in `tools.rs`)
+// with an OPFS-backed store on wasm32.  This requires an async fs
+// surface (OPFS access is async), so it is deferred to the browser
+// tool-execution stage rather than bolted on here.
 
 use oxedyne_fe2o3_core::prelude::*;
 

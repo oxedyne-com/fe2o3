@@ -10,6 +10,7 @@
 use oxedyne_fe2o3_core::prelude::*;
 
 use std::path::Path;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
 
@@ -17,7 +18,14 @@ use std::time::Duration;
 #[derive(Clone, Debug)]
 pub enum Executor {
     /// Run locally under the Red process's user, capped by `timeout`.
+    #[cfg(not(target_arch = "wasm32"))]
     Local { timeout: Duration },
+    /// Run inside the browser (wasm32).  In-browser shell execution is
+    /// not yet wired up, so a command escalates rather than running.
+    // TODO(wasm-exec): route shell commands to an in-browser sandbox or
+    // a server round-trip once the browser tool surface is built.
+    #[cfg(target_arch = "wasm32")]
+    Wasm,
 }
 
 /// The captured result of a command.
@@ -32,6 +40,7 @@ pub struct CommandOutput {
 impl Executor {
 
     /// A local executor with a sensible default timeout.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn local_default() -> Self {
         Self::Local { timeout: Duration::from_secs(120) }
     }
@@ -39,9 +48,11 @@ impl Executor {
     /// Run `command` via `sh -c` in `cwd`, capturing stdout/stderr.
     ///
     /// On timeout the child is killed (via `kill_on_drop`) and a
-    /// `timed_out` result is returned rather than an error.
+    /// `timed_out` result is returned rather than an error.  On wasm32
+    /// there is no local process backend, so this escalates.
     pub async fn run(&self, command: &str, cwd: &Path) -> Outcome<CommandOutput> {
         match self {
+            #[cfg(not(target_arch = "wasm32"))]
             Self::Local { timeout } => {
                 use tokio::process::Command;
                 let mut cmd = Command::new("sh");
@@ -68,6 +79,16 @@ impl Executor {
                         timed_out: true,
                     }),
                 }
+            }
+            #[cfg(target_arch = "wasm32")]
+            Self::Wasm => {
+                // In-browser shell execution is not yet available; the
+                // caller must escalate this to a server round-trip.
+                let _ = (command, cwd);
+                Err(err!(
+                    "Executor: in-browser shell execution is not yet \
+                     supported; escalation required.";
+                    Unimplemented))
             }
         }
     }

@@ -13,8 +13,13 @@ use oxedyne_fe2o3_jdat::prelude::*;
 
 use crate::protocol::{ChatMessage, ToolCall};
 
+// Native transport imports — the hand-rolled TLS client lives behind
+// tokio + rustls, which do not target wasm32.
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(not(target_arch = "wasm32"))]
 use tokio_rustls::rustls::ClientConfig;
 
 
@@ -38,6 +43,10 @@ pub struct LlmClient {
     /// Upper bound on generated tokens per turn.  Prevents runaway
     /// reasoning loops (e.g. GLM-5.2 without a cap).
     pub max_tokens: u32,
+    /// Root-trust TLS configuration for the native transport.  The wasm
+    /// transport delegates trust to the browser's `fetch`, so this field
+    /// is native-only.
+    #[cfg(not(target_arch = "wasm32"))]
     pub tls_config: Arc<ClientConfig>,
 }
 
@@ -61,6 +70,8 @@ pub struct ChatOnceResponse {
 
 impl LlmClient {
 
+    /// Construct a client for the native transport (tokio + rustls).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new(
         host:       &str,
         port:       u16,
@@ -78,6 +89,30 @@ impl LlmClient {
             model:      model.to_string(),
             max_tokens,
             tls_config,
+        }
+    }
+
+    /// Construct a client for the wasm transport (browser `fetch`).
+    ///
+    /// TLS trust is handled by the browser, so no `tls_config` is
+    /// required — the streaming API (`chat_stream` / `chat_once`) is
+    /// otherwise identical to the native client.
+    #[cfg(target_arch = "wasm32")]
+    pub fn new(
+        host:       &str,
+        port:       u16,
+        path:       &str,
+        api_key:    &str,
+        model:      &str,
+        max_tokens: u32,
+    ) -> Self {
+        Self {
+            host:       host.to_string(),
+            port,
+            path:       path.to_string(),
+            api_key:    api_key.to_string(),
+            model:      model.to_string(),
+            max_tokens,
         }
     }
 
@@ -164,6 +199,7 @@ impl LlmClient {
     /// response headers.  Returns the stream positioned at the body
     /// start plus whether the body uses chunked transfer encoding.
     /// Errors on a non-200 status (with body detail).
+    #[cfg(not(target_arch = "wasm32"))]
     async fn open(
         &self,
         body: &str,
@@ -256,6 +292,7 @@ impl LlmClient {
     /// Perform a non-streaming request and return the full response
     /// body as one string.  Lines are concatenated (JSON does not need
     /// the newlines), dechunking transparently.
+    #[cfg(not(target_arch = "wasm32"))]
     async fn do_request_full(&self, body: &str) -> Outcome<String> {
         let (stream, is_chunked) = res!(self.open(body).await);
         let mut reader = LineReader::new(stream, is_chunked);
@@ -280,6 +317,7 @@ impl LlmClient {
     /// encoding.
     ///
     /// Returns `(prompt_tokens, completion_tokens, full_content)`.
+    #[cfg(not(target_arch = "wasm32"))]
     async fn do_request_stream(
         &self,
         body:           &str,
@@ -423,6 +461,174 @@ impl LlmClient {
 
 
 // ┌───────────────────────────────────────────────────────────────┐
+// │ Wasm transport — browser `fetch` + `ReadableStream`            │
+// └───────────────────────────────────────────────────────────────┘
+//
+// The wasm build has no TCP sockets or TLS stack; the browser owns
+// both.  These methods mirror the native transport's public contract
+// (`do_request_full` / `do_request_stream`) using `fetch`, so the
+// `chat_stream` / `chat_once` API above is target-agnostic.
+
+#[cfg(target_arch = "wasm32")]
+impl LlmClient {
+
+    /// The absolute request URL for the browser transport.
+    fn wasm_url(&self) -> String {
+        if self.port == 443 {
+            fmt!("https://{}{}", self.host, self.path)
+        } else {
+            fmt!("https://{}:{}{}", self.host, self.port, self.path)
+        }
+    }
+
+    /// POST `body` via `fetch` and await the `Response`, mapping any
+    /// JS error into an `Outcome`.  TLS trust is the browser's.
+    async fn wasm_fetch(&self, body: &str) -> Outcome<web_sys::Response> {
+        use wasm_bindgen::JsCast;
+        use wasm_bindgen::JsValue;
+        use wasm_bindgen_futures::JsFuture;
+        use web_sys::{Headers, Request, RequestInit, RequestMode, Response};
+
+        let headers = res!(Headers::new()
+            .map_err(|e| err!("LLM: create headers failed: {}.", js_str(&e); IO, Network, Init)));
+        res!(headers.append("Authorization", &fmt!("Bearer {}", self.api_key))
+            .map_err(|e| err!("LLM: set auth header failed: {}.", js_str(&e); IO, Network, Init)));
+        res!(headers.append("Content-Type", "application/json")
+            .map_err(|e| err!("LLM: set content-type failed: {}.", js_str(&e); IO, Network, Init)));
+
+        let opts = RequestInit::new();
+        opts.set_method("POST");
+        opts.set_mode(RequestMode::Cors);
+        opts.set_headers(&headers);
+        opts.set_body(&JsValue::from_str(body));
+
+        let url = self.wasm_url();
+        let request = res!(Request::new_with_str_and_init(&url, &opts)
+            .map_err(|e| err!("LLM: build request failed: {}.", js_str(&e); IO, Network, Init)));
+
+        // `fetch` lives on the window in a document context and on the
+        // global scope in a worker; support both.
+        let promise = if let Some(win) = web_sys::window() {
+            win.fetch_with_request(&request)
+        } else {
+            let scope = res!(js_sys::global()
+                .dyn_into::<web_sys::WorkerGlobalScope>()
+                .map_err(|_| err!(
+                    "LLM: no window or worker scope for fetch."; IO, Network, Init)));
+            scope.fetch_with_request(&request)
+        };
+
+        let resp_val = res!(JsFuture::from(promise).await
+            .map_err(|e| err!("LLM: fetch failed: {}.", js_str(&e); IO, Network, Wire)));
+        let resp: Response = res!(resp_val.dyn_into()
+            .map_err(|_| err!("LLM: fetch did not return a Response."; IO, Network, Wire)));
+        if !resp.ok() {
+            return Err(err!(
+                "LLM: HTTP error: {} {}.", resp.status(), resp.status_text();
+                IO, Network, Wire, Read));
+        }
+        Ok(resp)
+    }
+
+    /// Non-streaming request — await the full response body as text.
+    async fn do_request_full(&self, body: &str) -> Outcome<String> {
+        use wasm_bindgen_futures::JsFuture;
+
+        let resp = res!(self.wasm_fetch(body).await);
+        let text_promise = res!(resp.text()
+            .map_err(|e| err!("LLM: read response text failed: {}.", js_str(&e); IO, Network, Wire, Read)));
+        let text_val = res!(JsFuture::from(text_promise).await
+            .map_err(|e| err!("LLM: await response text failed: {}.", js_str(&e); IO, Network, Wire, Read)));
+        Ok(text_val.as_string().unwrap_or_default())
+    }
+
+    /// Streaming request — read the SSE body incrementally from the
+    /// response's `ReadableStream`, calling `on_token` for each text
+    /// delta.  Returns `(prompt_tokens, completion_tokens, content)`.
+    async fn do_request_stream(
+        &self,
+        body:           &str,
+        on_token:       &mut impl FnMut(&str),
+    ) -> Outcome<(u64, u64, String)>
+    {
+        use wasm_bindgen::JsValue;
+        use wasm_bindgen_futures::JsFuture;
+        use web_sys::{ReadableStream, ReadableStreamDefaultReader};
+
+        let resp = res!(self.wasm_fetch(body).await);
+        let stream: ReadableStream = match resp.body() {
+            Some(s) => s,
+            None => return Err(err!(
+                "LLM: response has no body stream."; IO, Network, Wire, Read)),
+        };
+        let reader = res!(ReadableStreamDefaultReader::new(&stream)
+            .map_err(|e| err!("LLM: acquire stream reader failed: {}.", js_str(&e); IO, Network, Wire, Read)));
+
+        // Accumulate raw bytes and extract complete SSE lines as they
+        // arrive, mirroring the native `LineReader` line discipline.
+        let mut buf: Vec<u8> = Vec::with_capacity(8192);
+        let mut full = String::new();
+        let mut prompt_tokens = 0u64;
+        let mut completion_tokens = 0u64;
+
+        loop {
+            let result = res!(JsFuture::from(reader.read()).await
+                .map_err(|e| err!("LLM: read stream chunk failed: {}.", js_str(&e); IO, Network, Wire, Read)));
+            let done = res!(js_sys::Reflect::get(&result, &JsValue::from_str("done"))
+                .map_err(|e| err!("LLM: read 'done' failed: {}.", js_str(&e); IO, Network, Wire, Read)))
+                .as_bool()
+                .unwrap_or(true);
+            if done {
+                break;
+            }
+            let value = res!(js_sys::Reflect::get(&result, &JsValue::from_str("value"))
+                .map_err(|e| err!("LLM: read 'value' failed: {}.", js_str(&e); IO, Network, Wire, Read)));
+            let chunk = js_sys::Uint8Array::new(&value).to_vec();
+            buf.extend_from_slice(&chunk);
+
+            // Drain complete lines (terminated by `\n`) from the buffer.
+            loop {
+                let nl = match buf.iter().position(|&b| b == b'\n') {
+                    Some(p) => p,
+                    None    => break,
+                };
+                let line_bytes: Vec<u8> = buf.drain(..=nl).collect();
+                let line = String::from_utf8_lossy(&line_bytes[..line_bytes.len() - 1]);
+                let line = line.trim();
+                if !line.starts_with("data: ") {
+                    continue;
+                }
+                let data = &line[6..];
+                if data == "[DONE]" {
+                    return Ok((prompt_tokens, completion_tokens, full));
+                }
+                if let Some(content) = extract_json_string(data, "content") {
+                    on_token(&content);
+                    full.push_str(&content);
+                }
+                if let Some(usage_str) = find_json_object(data, "usage") {
+                    if let Some(pt) = extract_json_number(&usage_str, "prompt_tokens") {
+                        prompt_tokens = pt;
+                    }
+                    if let Some(ct) = extract_json_number(&usage_str, "completion_tokens") {
+                        completion_tokens = ct;
+                    }
+                }
+            }
+        }
+
+        Ok((prompt_tokens, completion_tokens, full))
+    }
+}
+
+/// Render a JS error value as a human-readable string for error tags.
+#[cfg(target_arch = "wasm32")]
+fn js_str(v: &wasm_bindgen::JsValue) -> String {
+    v.as_string().unwrap_or_else(|| fmt!("{:?}", v))
+}
+
+
+// ┌───────────────────────────────────────────────────────────────┐
 // │ LineReader — incremental line reader for TLS streams           │
 // └───────────────────────────────────────────────────────────────┘
 
@@ -435,6 +641,7 @@ impl LlmClient {
 /// continuous stream of lines.
 ///
 /// A line is terminated by `\n` (with or without a preceding `\r`).
+#[cfg(not(target_arch = "wasm32"))]
 struct LineReader<S: tokio::io::AsyncRead + Unpin> {
     stream:     S,
     buf:        Vec<u8>,
@@ -446,6 +653,7 @@ struct LineReader<S: tokio::io::AsyncRead + Unpin> {
     eof:        bool,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl<S: tokio::io::AsyncRead + Unpin> LineReader<S> {
 
     fn new(stream: S, is_chunked: bool) -> Self {
