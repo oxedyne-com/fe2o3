@@ -70,3 +70,15 @@
 @media (max-width: 760px) {
 	.files-panel { width: 100%; max-width: 100%; }
 }
+
+/* Hide agent process/tool blocks when toggled off */
+.chat-output.hide-tools .tool-block { display: none; }
+
+/* File viewer line numbers */
+.files-view-body.with-lineno { padding-left: 4px; }
+.files-view-body .ln {
+	display: inline-block; width: 3.2em; margin-right: 10px;
+	text-align: right; color: var(--text-secondary); opacity: 0.55;
+	user-select: none; -webkit-user-select: none;
+}
+.files-btn.active { color: var(--accent); border-color: var(--accent); }

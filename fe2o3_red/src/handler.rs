@@ -569,13 +569,15 @@ pub async fn handle_chat_websocket<
                     Some(Dat::Str(s)) => s.clone(),
                     _ => { let _ = ws.send(&text_msg(syntax.clone(), "error", vec![dat!("fs_write: missing path.")])).await; continue; }
                 };
-                let content = match cmdrx.vals.get(1) {
+                let content_hex = match cmdrx.vals.get(1) {
                     Some(Dat::Str(s)) => s.clone(),
                     _ => String::new(),
                 };
-                match user_ws(&state.workspace_base, &username)
-                    .and_then(|w| fs_write_file(&w, &path, &content))
-                {
+                let write_res = hex_decode(&content_hex).and_then(|bytes| {
+                    user_ws(&state.workspace_base, &username)
+                        .and_then(|w| fs_write_file(&w, &path, &bytes))
+                });
+                match write_res {
                     Ok(())  => { let _ = ws.send(&text_msg(syntax.clone(), "info", vec![dat!(fmt!("Wrote {}.", path))])).await; }
                     Err(e)  => { let _ = ws.send(&text_msg(syntax.clone(), "error", vec![dat!(e.to_string())])).await; }
                 }
@@ -645,16 +647,41 @@ fn fs_delete_file(ws: &Workspace, path: &str) -> Outcome<()> {
     Ok(())
 }
 
-/// Create or overwrite a workspace file.
-fn fs_write_file(ws: &Workspace, path: &str, content: &str) -> Outcome<()> {
+/// Create or overwrite a workspace file with raw bytes.
+fn fs_write_file(ws: &Workspace, path: &str, content: &[u8]) -> Outcome<()> {
     let abs = res!(ws.resolve(path));
     if let Some(parent) = abs.parent() {
         res!(std::fs::create_dir_all(parent)
             .map_err(|e| err!(e, "fs_write: cannot create parent dirs for '{}'.", path; IO, File)));
     }
-    res!(std::fs::write(&abs, content.as_bytes())
+    res!(std::fs::write(&abs, content)
         .map_err(|e| err!(e, "fs_write: cannot write '{}'.", path; IO, File, Write)));
     Ok(())
+}
+
+/// Decode a lowercase/uppercase hex string to bytes.  Uploads send
+/// file content hex-encoded so arbitrary bytes (newlines, quotes,
+/// `$`, binary) pass through the WS syntax parser unharmed.
+fn hex_decode(s: &str) -> Outcome<Vec<u8>> {
+    let b = s.as_bytes();
+    if b.len() % 2 != 0 {
+        return Err(err!("fs_write: hex content has odd length."; Invalid, Input));
+    }
+    let val = |c: u8| -> Outcome<u8> {
+        match c {
+            b'0'..=b'9' => Ok(c - b'0'),
+            b'a'..=b'f' => Ok(c - b'a' + 10),
+            b'A'..=b'F' => Ok(c - b'A' + 10),
+            _ => Err(err!("fs_write: invalid hex digit."; Invalid, Input)),
+        }
+    };
+    let mut out = Vec::with_capacity(b.len() / 2);
+    let mut i = 0;
+    while i < b.len() {
+        out.push(res!(val(b[i])) * 16 + res!(val(b[i + 1])));
+        i += 2;
+    }
+    Ok(out)
 }
 
 fn event_to_ws(ev: &AgentEvent) -> (&'static str, Vec<Dat>) {

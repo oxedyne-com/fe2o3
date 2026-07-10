@@ -297,6 +297,7 @@
 			endGenerating();
 			chatInput.focus();
 			refreshSessions();
+			if (window.RedFiles) RedFiles.refresh();
 		} else if (cmd === 'error') {
 			appendError(val || 'Error');
 			endGenerating();
@@ -636,6 +637,10 @@
 
 		box.addEventListener('click', function (e) {
 			if (e.target === closeBtn) return;
+			// Clicking the already-active session must not reload it —
+			// that would wipe the in-progress tool/process blocks (which
+			// aren't part of the persisted history).
+			if (s.id === currentSessionId) { closeSidebar(); return; }
 			currentSessionId = s.id;
 			sessionNameEl.textContent = s.name || 'Session';
 			sendChat('session_switch "' + escJdat(s.id) + '"');
@@ -934,6 +939,22 @@
 			if (window.RedFiles) { RedFiles.toggle(); closeSidebar(); }
 		});
 	}
+
+	// ── Show/hide agent process (tool) blocks ──────────────────
+	var toolsHidden = localStorage.getItem('red-hide-tools') === '1';
+	var stepsToggleBtn = document.getElementById('steps-toggle-btn');
+	function applyToolsVisibility() {
+		chatOutput.classList.toggle('hide-tools', toolsHidden);
+		if (stepsToggleBtn) stepsToggleBtn.style.opacity = toolsHidden ? '0.45' : '';
+	}
+	if (stepsToggleBtn) {
+		stepsToggleBtn.addEventListener('click', function () {
+			toolsHidden = !toolsHidden;
+			localStorage.setItem('red-hide-tools', toolsHidden ? '1' : '0');
+			applyToolsVisibility();
+		});
+	}
+	applyToolsVisibility();
 
 	// ── Init ───────────────────────────────────────────────────
 	initTheme();

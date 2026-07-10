@@ -24,6 +24,18 @@
 	var curDir = '';      // current directory (workspace-relative)
 	var curFile = null;   // currently open file path
 	var curContent = '';
+	var showLineNos = localStorage.getItem('red-files-lineno') !== '0'; // default on
+
+	// Hex-encode a string (UTF-8) so arbitrary file bytes survive the
+	// WS syntax parser (newlines, quotes, $, etc.).
+	function toHex(str) {
+		var bytes = new TextEncoder().encode(str);
+		var h = '';
+		for (var i = 0; i < bytes.length; i++) {
+			h += (bytes[i] < 16 ? '0' : '') + bytes[i].toString(16);
+		}
+		return h;
+	}
 
 	function esc(s) {
 		return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
@@ -133,14 +145,20 @@
 			'<div class="files-view-head">' +
 			'  <span class="files-view-name">' + esc(path) + '</span>' +
 			'  <span>' +
-			'    <button class="files-btn" data-act="download">⤓</button>' +
+			'    <button class="files-btn" data-act="lineno" title="Line numbers">#</button>' +
+			'    <button class="files-btn" data-act="download" title="Download">⤓</button>' +
 			'    <button class="files-btn" data-act="back">← Back</button>' +
 			'  </span>' +
 			'</div>' +
 			'<pre class="files-view-body"></pre>';
-		viewEl.querySelector('.files-view-body').textContent = content;
+		renderFileBody();
 		viewEl.querySelector('[data-act="back"]').addEventListener('click', function () {
-			viewEl.style.display = 'none'; treeEl.style.display = '';
+			viewEl.style.display = 'none'; treeEl.style.display = ''; curFile = null;
+		});
+		viewEl.querySelector('[data-act="lineno"]').addEventListener('click', function () {
+			showLineNos = !showLineNos;
+			localStorage.setItem('red-files-lineno', showLineNos ? '1' : '0');
+			renderFileBody();
 		});
 		viewEl.querySelector('[data-act="download"]').addEventListener('click', function () {
 			var blob = new Blob([curContent], { type: 'text/plain' });
@@ -152,12 +170,32 @@
 		});
 	}
 
+	// Render the open file's body, optionally with a line-number gutter.
+	function renderFileBody() {
+		var body = viewEl.querySelector('.files-view-body');
+		if (!body) return;
+		var btn = viewEl.querySelector('[data-act="lineno"]');
+		if (btn) btn.classList.toggle('active', showLineNos);
+		if (showLineNos) {
+			var lines = curContent.split('\n');
+			var html = '';
+			for (var i = 0; i < lines.length; i++) {
+				html += '<span class="ln">' + (i + 1) + '</span>' + esc(lines[i]) + '\n';
+			}
+			body.innerHTML = html;
+			body.classList.add('with-lineno');
+		} else {
+			body.textContent = curContent;
+			body.classList.remove('with-lineno');
+		}
+	}
+
 	function onUpload(e) {
 		var file = e.target.files && e.target.files[0];
 		if (!file) return;
 		var reader = new FileReader();
 		reader.onload = function () {
-			send('fs_write "' + escJdat(joinPath(curDir, file.name)) + '" "' + escJdat(reader.result) + '"');
+			send('fs_write "' + escJdat(joinPath(curDir, file.name)) + '" "' + toHex(reader.result) + '"');
 			setTimeout(function () { list(curDir); }, 200);
 		};
 		reader.readAsText(file);
@@ -168,11 +206,18 @@
 	function hide() { if (panel) panel.classList.remove('open'); }
 	function toggle() { if (panel && panel.classList.contains('open')) hide(); else show(); }
 
+	// Re-list the current directory if the panel is open and browsing
+	// (not viewing a file) — used to reflect files the agent just wrote.
+	function refresh() {
+		if (panel && panel.classList.contains('open') && !curFile) { list(curDir); }
+	}
+
 	window.RedFiles = {
 		init: function (sendFn) { send = sendFn; },
 		toggle: toggle,
 		show: show,
 		hide: hide,
+		refresh: refresh,
 		onTree: onTree,
 		onContent: onContent
 	};
