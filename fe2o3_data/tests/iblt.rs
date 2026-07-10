@@ -2,7 +2,7 @@
 
 use oxedyne_fe2o3_core::prelude::*;
 
-use oxedyne_fe2o3_iblt::iblt::{
+use oxedyne_fe2o3_data::iblt::{
 	DecodeOutcome,
 	Iblt,
 	IbltConfig,

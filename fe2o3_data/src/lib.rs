@@ -19,6 +19,8 @@
 //!
 #![forbid(unsafe_code)]
 pub mod digraph;
+pub mod hll;
+pub mod iblt;
 pub mod ring;
 pub mod stack;
 pub mod time;

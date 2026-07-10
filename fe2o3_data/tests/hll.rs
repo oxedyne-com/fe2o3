@@ -2,7 +2,7 @@
 
 use oxedyne_fe2o3_core::prelude::*;
 
-use oxedyne_fe2o3_hll::sketch::{
+use oxedyne_fe2o3_data::hll::{
 	HyperLogLog,
 	P_DEFAULT,
 	P_MAX,

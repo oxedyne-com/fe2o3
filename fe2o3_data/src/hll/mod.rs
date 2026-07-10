@@ -29,7 +29,7 @@
 //!
 //! ```
 //! use oxedyne_fe2o3_core::prelude::*;
-//! use oxedyne_fe2o3_hll::sketch::{HyperLogLog, P_DEFAULT};
+//! use oxedyne_fe2o3_data::hll::{HyperLogLog, P_DEFAULT};
 //!
 //! # fn main() -> Outcome<()> {
 //! let mut sketch = res!(HyperLogLog::new(P_DEFAULT));
@@ -43,6 +43,11 @@
 //! # Ok(())
 //! # }
 //! ```
-#![forbid(unsafe_code)]
+mod sketch;
 
-pub mod sketch;
+pub use sketch::{
+	HyperLogLog,
+	P_DEFAULT,
+	P_MAX,
+	P_MIN,
+};

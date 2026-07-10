@@ -10,7 +10,7 @@
 //! matches the recomputed hash of the extracted key -- and removes their
 //! contributions from all cells, iterating until no pure cells remain.
 
-use crate::hash::{
+use super::hash::{
 	hash_bytes,
 	hash_pair,
 };

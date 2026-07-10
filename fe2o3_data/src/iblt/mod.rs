@@ -23,7 +23,7 @@
 //!
 //! ```
 //! use oxedyne_fe2o3_core::prelude::*;
-//! use oxedyne_fe2o3_iblt::iblt::{DecodeOutcome, Iblt, IbltConfig};
+//! use oxedyne_fe2o3_data::iblt::{DecodeOutcome, Iblt, IbltConfig};
 //!
 //! # fn main() -> Outcome<()> {
 //! let cfg = IbltConfig {
@@ -57,7 +57,11 @@
 //! # Ok(())
 //! # }
 //! ```
-#![forbid(unsafe_code)]
-
 mod hash;
-pub mod iblt;
+mod imp;
+
+pub use imp::{
+	DecodeOutcome,
+	Iblt,
+	IbltConfig,
+};
