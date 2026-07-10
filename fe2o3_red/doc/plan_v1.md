@@ -46,6 +46,47 @@ and `/improve` *and* hacking on fe2o3 in the same interface, over the one
 
 ---
 
+## 0.1 The brief architecture (2026-07-10 pivot)
+
+The chat-centric MVP below (WS-A..J) is the substrate; the product is the
+**brief/fold architecture** from `red/README.md`.  The pivot inverts which noun
+is primary.  In the MVP the unit of work is the *session/chat*; in the vision
+it is the **Focus** — a durable container for a pursuit (a book, a refactor, a
+diet, a philosophy) — with chats and agents disposable against it.
+
+The one idea is separating memory from execution.  A chat conflates them and so
+it rots; Red splits them:
+
+- The **brief** is the durable, reduced state of a Focus, *and* the command
+  surface you steer it from.  A persistent, pre-prompted **brief agent** sits
+  behind the input line; you give it instructions, and its reply is usually an
+  **action** (edit the brief, dispatch an agent, fold a delta) or **one or more
+  errors** shown as an indicator — never a chat transcript.  It cannot rot
+  because the brief is its fixed point: past a context threshold it silently
+  re-reduces to the brief and continues.
+- An **agent** is a re-taskable executor.  It forks from the brief, does a
+  bounded job in its own context, produces a **delta**, and folds it back; the
+  tile then persists and accepts a new task.
+- **Fold** is re-reduction by a *fresh* reducer agent (handed only
+  `brief + delta + rules`), reviewed as a diff with veto-on-drop until trusted.
+  It replaces the hand-written handover — the brief is the current handover, by
+  construction.
+- The **log** is per-Focus, append-only, in a **light fe2o3-native store**
+  (`jdat` + `hash` under `.red/`), *not* git.  Git appears only in **conducted**
+  mode, for worker worktree isolation and file merge on the project's own repo.
+
+The four panels, named once: **Rail** (Foci + Chats) · **Center** (the brief) ·
+**Agents** · **Workspace**.  A Focus runs **direct** (one agent) or
+**conducted** (many under a conductor — the former "team mode", renamed to avoid
+implying human teams).  Conducted mode is designed-for now, built later.
+
+The staged pivot path lives in `TODO.md` (Stages 0–6+).  Stages 1–4 turn the
+shipped chat app into the brief/fold loop; 5 is metering polish; 6+ (conducted
+mode, the DAG, per-Focus panels) is latent capability the substrate must not
+preclude.
+
+---
+
 ## 1. Positioning, v1 target, and non-goals
 
 **Positioning: an open-source, self-hosted, web-based agentic coding
@@ -115,6 +156,13 @@ recorded so future sessions don't relitigate.
 | D13 | **Vanilla server-rendered HTML + JS/CSS**, no framework. | Standing preference; the app is already vanilla. |
 | D14 | **Reuse elearnity's O3db auth** + login popup (`o3db.js` already shared). | Auth is solved; single-user first, trusted-few optional (no isolation walls). |
 | D15 | **MCP is the extensibility spine; web search is native in v1.** Files/shell/web-search are native `RedTool`s now; MCP host (browser + the ecosystem) is the first fast-follow. Tools are curated per session. | One MCP integration inherits hundreds of servers; MCP's arbitrary-code nature fits the trusted env (D0). Web search native = reliable + zero-setup. MCP host is generic → an fe2o3 opportunity (JSON-RPC/stdio/HTTP, likely in `fe2o3_net`). |
+| D16 | **The unit of work is a Focus, not a chat.** A Focus (plural Foci) is the durable container for a pursuit — deliverable or not. Chats and agents are disposable against it. | Inverts the MVP's chat-primacy; makes the brief the memory the workflow lives in. "Foci" chosen over Project (implies an endpoint) / Pursuit / Strand for its resonance with the reduce/fold mechanic. |
+| D17 | **The brief is a command surface backed by a persistent, pre-prompted brief agent.** Instructions resolve to an action or to one or more errors (an indicator, not a transcript). It self-reduces to the brief when its context fills. | Distinguishes a brief (steer, reply-is-action) from a chat (visible thread). The brief-as-fixed-point is what keeps the persistent agent rot-free. |
+| D18 | **Agents are re-taskable, not one-shot runs.** An agent folds its delta and then accepts a new instruction through the same tile. | The task can change, so "agent" not "run"; collapses the run/agent split into one word. |
+| D19 | **Fold is done by a fresh reducer agent** handed only `brief + delta + rules`; reviewed diff with veto-on-drop until trusted, then silent. | Semantic re-reduction needs judgement (an LLM), not code; a stateless fresh reducer cannot itself rot. |
+| D20 | **Memory (log + brief versions) is a light fe2o3-native store, not git.** `jdat` records + `hash` content-addressing under `.red/`, per Focus. | Avoids git-in-git over a project's own repo; the brief's merge is semantic (the reducer), so git's line-merge buys nothing here. An event log is far simpler than reimplementing git. |
+| D21 | **Conducted mode replaces "team mode"; git is load-bearing only there.** Many agents under a thin conductor, each owning a git worktree/branch on the project's own repo; governor caps concurrency; conflicts escalate one decision. | "Team" wrongly implies humans. Worktree isolation + 3-way file merge is exactly git's job; the fold stays a reducer agent, never a git merge. Designed-for now, built later. |
+| D22 | **The generic log+reducer core is earmarked for an existing fe2o3 crate** (candidate `fe2o3_data`); built app-local first, lifted once its shape settles. No new crate without express permission. | Event-sourcing is generic (CLAUDE.md: extract generic code upstream); iterate in `fe2o3_red` while the shape moves. |
 
 ### OOM: an operator concern, not a product risk
 
@@ -141,6 +189,14 @@ multi-provider/BYOK config remains.  59 unit tests pass.  Client UI is
 syntax-checked and deployed locally but pending Playwright *visual*
 verification (the dev browser's X display dropped mid-session) — intended for
 manual testing.
+
+**Reframe (2026-07-10):** these workstreams shipped the chat MVP and now serve
+as substrate for the brief/fold architecture (§0.1).  The live front-end
+already carries the four-panel shell (Rail/Center/Agents/Workspace) wired
+chat-first; the pivot's near-term work is Stages 1–4 in `TODO.md` (Focus
+container → brief command surface → log+reducer → the fold loop).  WS-B..J below
+are re-homed under those stages rather than pursued as standalone chat-app
+features.
 
 ### WS-A — MVP hardening (finish what exists)
 The current crate streams chat but has the P0 gaps from `TODO.md`.
@@ -259,6 +315,51 @@ Not a single workstream — a quality bar across WS-A/D/F: web-chat-grade
 markdown (tables, code, math, images), syntax highlighting, and legible
 inline rendering of agent actions (diffs, previews, command output) rather
 than terminal dumps. This is what makes the coding half feel like chat.
+
+### Hardening & non-functional requirements (2026-07-10 sceptical review)
+
+**Threat-model correction.** D0's "trusted environment" covers the user
+attacking themselves, *not* third-party content attacking the user through the
+agent. A poisoned file / web-search result / repo that the agent reads is prompt
+injection, and prompt injection in an agentic tool is **RCE as the run user**.
+The following are requirements; `TODO.md` re-stages the near-term work so H1 and
+H3 land *before* the LLM-heavy stages (a new "Stage H"), and H2/H4/H5 constrain
+Stages 2–4.
+
+- **H1 — Isolate the run-user (security).** Dedicated unprivileged user on a box
+  with no wallet/prod secrets; scrubbed `Executor` child env (no `STEEL_*` /
+  keys); restricted `PATH`; egress allow-list or logging for the shell tool.
+  Single-user until done. The current posture (agent shell as `jason` next to
+  the wallet on the prod box) is the highest-severity gap.
+- **H2 — Reducer advisory first; folds never block work or lose data.** The fold
+  is a non-deterministic LLM mutation of durable state on the critical path.
+  Manual/proposed fold before any auto-reducer; always retain the raw delta;
+  queue folds and degrade to append-without-reduce on provider outage;
+  **serialise folds per Focus.** The append-only log + version snapshots make
+  every fold an auditable, revertible transaction — protect that property.
+- **H3 — Parse provider JSON with `fe2o3_jdat`; lift HTTP/SSE into `fe2o3_net`.**
+  The hand-rolled `extract_json_*` / `LineReader` scanners in `llm.rs` are a
+  correctness and DoS surface (documented bugs: `reasoning_content` mis-match,
+  whitespace-after-colon). Decode to `Dat` and navigate; move the streaming
+  client upstream. This is the correct way to satisfy the fe2o3-first
+  requirement — the constraint is fine, the hand-rolled execution is the
+  liability.
+- **H4 — Log as WAL, single writer, crash-safe.** One per-Focus writer task owns
+  `.red/log` (multi-KB JDAT records are not atomic under `O_APPEND`); the log is
+  the source of truth and the commit point; the O3db index is a derived,
+  rebuildable cache; `fsync` at commit; readers tolerate a torn trailing record.
+- **H5 — Escape-by-default frontend; stateless brief agent; `Branch` enum.**
+  Every `innerHTML` interpolation escapes and the markdown renderer's output is
+  sanitised (model and file content are untrusted → DOM XSS). The brief agent is
+  stateless per instruction (reconstructs context from `brief.md`), not
+  long-lived server state. Branches are an enum (`Chat | Agent`), not a
+  field-flagged god-struct (CLAUDE.md enum preference).
+
+Decisions that survive the review unchanged: Foci + light per-Focus log (not
+git-for-memory), git only for conducted-mode worktree isolation, one `Agent`
+across three prompts (with the reducer tool-less by construction), chat
+transcript as an append-only file + derived index, agent transcripts in-memory
+reduced to a delta.
 
 ---
 
