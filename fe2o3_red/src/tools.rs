@@ -119,7 +119,10 @@ impl Tool {
         )
     }
 
-    /// Execute the tool with the given raw-JSON arguments.
+    /// Execute the tool with the given raw-JSON arguments (native
+    /// transport — the file tools use `std::fs`, the shell tool the
+    /// process [`Executor`]).
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn execute(&self, args_json: &str, ctx: &ToolContext) -> Outcome<String> {
         match self {
             Tool::FileRead   => Self::file_read(args_json, ctx),
@@ -132,6 +135,42 @@ impl Tool {
         }
     }
 
+    /// Execute the tool in the browser (wasm32), backing the file tools
+    /// with the async OPFS edge ([`crate::wasm::opfs`]).
+    ///
+    /// OPFS applies its own lexical path jail, so the raw workspace-
+    /// relative path is passed straight through; the [`ToolContext`] is
+    /// unused here.  Only whole-file read and write are wired for now —
+    /// the OPFS edge has no directory-iteration or delete surface yet, and
+    /// there is no in-browser shell — so the remaining tools escalate.
+    // TODO(wasm-opfs-tools): back file_edit/list/search/delete once the
+    // OPFS edge grows directory iteration and entry removal; route shell
+    // to a server round-trip.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn execute(&self, args_json: &str, _ctx: &ToolContext) -> Outcome<String> {
+        match self {
+            Tool::FileWrite => {
+                let path = res!(Self::arg(args_json, "path"));
+                let content = res!(Self::arg(args_json, "content"));
+                res!(crate::wasm::opfs::write_file(&path, content.as_bytes()).await);
+                Ok(fmt!("Wrote {} bytes to {}.", content.len(), path))
+            }
+            Tool::FileRead => {
+                let path = res!(Self::arg(args_json, "path"));
+                let bytes = res!(crate::wasm::opfs::read_file(&path).await);
+                let mut s = String::from_utf8_lossy(&bytes).to_string();
+                if s.len() > MAX_OUTPUT {
+                    s.truncate(MAX_OUTPUT);
+                    s.push_str("\n… [truncated]");
+                }
+                Ok(s)
+            }
+            other => Err(err!(
+                "Tool '{}' is not yet available in the browser build.", other.name();
+                Unimplemented)),
+        }
+    }
+
     // ── File tools (sync std::fs; workspace files are small) ────────
 
     fn arg<'a>(args: &'a str, key: &str) -> Outcome<String> {
@@ -141,6 +180,7 @@ impl Tool {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn file_read(args: &str, ctx: &ToolContext) -> Outcome<String> {
         let path = res!(Self::arg(args, "path"));
         let abs = res!(ctx.workspace.resolve(&path));
@@ -154,6 +194,7 @@ impl Tool {
         Ok(s)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn file_write(args: &str, ctx: &ToolContext) -> Outcome<String> {
         let path = res!(Self::arg(args, "path"));
         let content = res!(Self::arg(args, "content"));
@@ -167,6 +208,7 @@ impl Tool {
         Ok(fmt!("Wrote {} bytes to {}.", content.len(), path))
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn file_edit(args: &str, ctx: &ToolContext) -> Outcome<String> {
         let path = res!(Self::arg(args, "path"));
         let old = res!(Self::arg(args, "old_string"));
@@ -189,6 +231,7 @@ impl Tool {
         Ok(fmt!("Edited {}.", path))
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn file_list(args: &str, ctx: &ToolContext) -> Outcome<String> {
         let path = extract_json_string(args, "path").unwrap_or_else(|| ".".to_string());
         let abs = res!(ctx.workspace.resolve(&path));
@@ -217,6 +260,7 @@ impl Tool {
         Ok(out)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn file_delete(args: &str, ctx: &ToolContext) -> Outcome<String> {
         let path = res!(Self::arg(args, "path"));
         let abs = res!(ctx.workspace.resolve(&path));
@@ -225,6 +269,7 @@ impl Tool {
         Ok(fmt!("Deleted {}.", path))
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn file_search(args: &str, ctx: &ToolContext) -> Outcome<String> {
         let query = res!(Self::arg(args, "query"));
         let path = extract_json_string(args, "path").unwrap_or_else(|| ".".to_string());
@@ -272,6 +317,7 @@ impl Tool {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     async fn shell(args: &str, ctx: &ToolContext) -> Outcome<String> {
         let command = res!(Self::arg(args, "command"));
         let cwd = res!(ctx.workspace.resolve(&ctx.cwd));

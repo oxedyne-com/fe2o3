@@ -39,6 +39,19 @@ impl Workspace {
         Ok(Self { root })
     }
 
+    /// Construct a workspace from an already-trusted root without
+    /// touching the filesystem.
+    ///
+    /// [`new`](Self::new) canonicalises the root against `std::fs`, which
+    /// is unavailable at runtime on `wasm32` (the browser store is OPFS).
+    /// This constructor stores the path verbatim, for callers that supply
+    /// a canonical root or back the workspace with a non-`std::fs` store.
+    /// Path jailing in [`resolve`](Self::resolve) is purely lexical and
+    /// remains sound regardless of the backing store.
+    pub fn unchecked(root: PathBuf) -> Self {
+        Self { root }
+    }
+
     /// The workspace root path.
     pub fn root(&self) -> &Path {
         &self.root

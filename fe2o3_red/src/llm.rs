@@ -48,6 +48,13 @@ pub struct LlmClient {
     /// is native-only.
     #[cfg(not(target_arch = "wasm32"))]
     pub tls_config: Arc<ClientConfig>,
+    /// Wasm transport URL scheme selector: `true` builds `https://…`,
+    /// `false` builds `http://…`.  Defaults to `https` (all real
+    /// providers are TLS-only); an `http` client targets a local mock
+    /// over `127.0.0.1` for headless testing, where the browser still
+    /// treats the origin as a secure context.
+    #[cfg(target_arch = "wasm32")]
+    pub secure: bool,
 }
 
 /// The response from a completed streaming chat call.
@@ -106,6 +113,24 @@ impl LlmClient {
         model:      &str,
         max_tokens: u32,
     ) -> Self {
+        Self::new_with_scheme(host, port, path, api_key, model, max_tokens, true)
+    }
+
+    /// Construct a wasm client with an explicit URL scheme.
+    ///
+    /// `secure` selects `https` (`true`) or `http` (`false`).  Real
+    /// providers always use `https`; the `http` form exists so a local
+    /// mock over `127.0.0.1` can be driven in a headless test.
+    #[cfg(target_arch = "wasm32")]
+    pub fn new_with_scheme(
+        host:       &str,
+        port:       u16,
+        path:       &str,
+        api_key:    &str,
+        model:      &str,
+        max_tokens: u32,
+        secure:     bool,
+    ) -> Self {
         Self {
             host:       host.to_string(),
             port,
@@ -113,6 +138,7 @@ impl LlmClient {
             api_key:    api_key.to_string(),
             model:      model.to_string(),
             max_tokens,
+            secure,
         }
     }
 
@@ -473,11 +499,16 @@ impl LlmClient {
 impl LlmClient {
 
     /// The absolute request URL for the browser transport.
+    ///
+    /// The scheme follows [`secure`](Self::secure); the port is elided
+    /// only when it is the scheme's default (443 for `https`, 80 for
+    /// `http`), so a mock on a custom port is addressed explicitly.
     fn wasm_url(&self) -> String {
-        if self.port == 443 {
-            fmt!("https://{}{}", self.host, self.path)
+        let (scheme, default_port) = if self.secure { ("https", 443u16) } else { ("http", 80u16) };
+        if self.port == default_port {
+            fmt!("{}://{}{}", scheme, self.host, self.path)
         } else {
-            fmt!("https://{}:{}{}", self.host, self.port, self.path)
+            fmt!("{}://{}:{}{}", scheme, self.host, self.port, self.path)
         }
     }
 

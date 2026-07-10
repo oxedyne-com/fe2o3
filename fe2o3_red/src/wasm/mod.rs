@@ -6,6 +6,9 @@
 //!
 //! - [`entry`] — the `#[wasm_bindgen]` API exposed to JS: a core-init
 //!   probe, an OPFS read/write pair, and an LLM transport probe.
+//! - [`app`] — the [`RedApp`](app::RedApp) agent surface: runs a real
+//!   [`Agent`](crate::agent::Agent) turn and streams
+//!   [`AgentEvent`](crate::protocol::AgentEvent)s to a JS callback.
 //! - [`opfs`] — an async filesystem edge over the Origin Private File
 //!   System (OPFS), reached through `navigator.storage.getDirectory()`.
 //!
@@ -14,6 +17,7 @@
 //! deferred; the main-thread async path here is sufficient for the
 //! first browser vertical.
 
+pub mod app;
 pub mod entry;
 pub mod opfs;
 

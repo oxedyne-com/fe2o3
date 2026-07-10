@@ -1,0 +1,3 @@
+# Browser wasm harness: build output and headless-test scratch.
+# Proven headlessly, not part of the crate build.
+/wasmtest/

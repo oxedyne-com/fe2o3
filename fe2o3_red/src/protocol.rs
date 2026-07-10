@@ -9,6 +9,45 @@ use oxedyne_fe2o3_jdat::prelude::*;
 
 
 // ┌───────────────────────────────────────────────────────────────┐
+// │ Wall-clock helpers                                             │
+// └───────────────────────────────────────────────────────────────┘
+
+/// Current Unix time in whole seconds.
+///
+/// The native path reads `std::time::SystemTime`; on `wasm32` that
+/// panics ("time not implemented on this platform"), so the browser
+/// path reads the core `Date.now()` clock shim instead.
+#[cfg(not(target_arch = "wasm32"))]
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Current Unix time in whole seconds (browser clock shim).
+#[cfg(target_arch = "wasm32")]
+fn now_secs() -> u64 {
+    (oxedyne_fe2o3_core::wasm::now_ms() / 1000.0) as u64
+}
+
+/// Current Unix time in whole milliseconds.
+#[cfg(not(target_arch = "wasm32"))]
+fn now_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
+/// Current Unix time in whole milliseconds (browser clock shim).
+#[cfg(target_arch = "wasm32")]
+fn now_millis() -> u128 {
+    oxedyne_fe2o3_core::wasm::now_ms() as u128
+}
+
+
+// ┌───────────────────────────────────────────────────────────────┐
 // │ Chat messages                                                  │
 // └───────────────────────────────────────────────────────────────┘
 
@@ -139,10 +178,7 @@ impl Session {
         Self {
             id,
             name,
-            created_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
+            created_at: now_secs(),
             model,
             messages: Vec::new(),
             prompt_tokens: 0,
@@ -245,10 +281,7 @@ impl UserConfig {
         Self {
             username,
             default_model,
-            created_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
+            created_at: now_secs(),
         }
     }
 
@@ -353,10 +386,7 @@ pub fn user_config_key(username: &str) -> Dat {
 pub fn generate_session_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
+    let ts = now_millis();
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     fmt!("{:x}{:x}", ts, n)
 }
