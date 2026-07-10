@@ -438,7 +438,12 @@ pub async fn handle_chat_websocket<
                     Some(s) => s,
                     None    => continue, // presence checked above
                 };
-                let agent = state.agent.clone();
+                // Use the session's selected model (the picker sets it);
+                // fall back to the configured default.
+                let mut agent = state.agent.clone();
+                if !session.model.is_empty() {
+                    agent.llm.model = session.model.clone();
+                }
                 let syntax_ref = syntax.clone();
 
                 // Build the per-user tool registry: a workspace jailed
