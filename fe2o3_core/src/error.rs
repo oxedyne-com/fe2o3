@@ -596,7 +596,7 @@ mod tests {
 
     #[test]
     fn test_err_00() -> Outcome<()> {
-        let e0 = err!(fmt!("A test {}", 42), String, Invalid);
+        let e0 = err!(fmt!("A test {}", 42); String, Invalid);
         msg!("{:?}", e0);
         let e1 = Error::Local(ErrMsg { tags: &[ErrTag::IO, ErrTag::Invalid], msg: errmsg!("A test 42") });
         let e2 = Error::Upstream(Arc::new(e1), ErrMsg { tags: &[ErrTag::IO, ErrTag::File],  msg: errmsg!() });
@@ -610,10 +610,10 @@ mod tests {
         match u8::from_str("-1") {
             Err(e0) => {
                 msg!("{}", e0);
-                let e1 = err!(e0, errmsg!("A test"),
+                let e1 = err!(e0, errmsg!("A test");
                     Decode, String, Invalid, Input);
                 msg!("{}", e1);
-                let e2 = err!(e1, errmsg!("Another level"), Bug);
+                let e2 = err!(e1, errmsg!("Another level"); Bug);
                 msg!("{}", e2);
             },
             Ok(_) => (),
