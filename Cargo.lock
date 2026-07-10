@@ -2042,12 +2042,16 @@ dependencies = [
  "base64 0.13.1",
  "flate2",
  "flume",
+ "getrandom 0.2.15",
  "humantime",
+ "js-sys",
  "new",
  "once_cell",
  "rand 0.8.5",
  "rand_core 0.6.4",
  "tokio",
+ "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]
