@@ -235,7 +235,13 @@ impl<ETAG: GenTag> LogBot<ETAG>
                 None => fmt!("{}", path.display()),
             };
         }
+        #[cfg(not(target_arch = "wasm32"))]
         let t = time::SystemTime::now();
+        // No system clock exists on wasm; reconstruct the instant from the
+        // `Date.now()` millisecond reading, which is pure arithmetic on
+        // `UNIX_EPOCH` and never panics.
+        #[cfg(target_arch = "wasm32")]
+        let t = time::UNIX_EPOCH + time::Duration::from_millis(crate::wasm::now_ms() as u64);
         let console_result = if for_console {
             let prefix = fmt!(
                 "{}: {:5?} {} {}:{}",

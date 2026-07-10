@@ -6,6 +6,7 @@ use oxedyne_fe2o3_core::{
         ToBytes,
     },
 };
+#[cfg(not(target_arch = "wasm32"))]
 use oxedyne_fe2o3_crypto::enc::EncryptionScheme;
 use oxedyne_fe2o3_data::time::Timestamp;
 use oxedyne_fe2o3_hash::hash::HashScheme;
@@ -18,6 +19,17 @@ use oxedyne_fe2o3_jdat::{
 };
 use oxedyne_fe2o3_namex::id::InNamex;
 
+
+/// Placeholder for the native `oxedyne_fe2o3_crypto::enc::EncryptionScheme` on
+/// `wasm32` targets, where the C-linked cryptographic backend cannot be built.
+///
+/// It occupies the default-scheme slot of [`RestSchemesOverride`] so the public
+/// type shape is identical across native and browser builds.  The type is
+/// uninhabited: a browser build performs no encryption at rest, so the
+/// [`Override::Default`] variant carrying it can never be constructed.
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Debug)]
+pub enum EncryptionScheme {}
 
 /// Metadata attached to every stored key instance.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

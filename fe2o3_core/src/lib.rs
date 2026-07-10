@@ -100,6 +100,9 @@ pub mod term;
 pub mod test;
 pub mod time;
 pub mod thread;
+/// Runtime shims for the `wasm32` target (clock and console).
+#[cfg(target_arch = "wasm32")]
+pub mod wasm;
 
 use error::Error;
 pub use string::contains_str;

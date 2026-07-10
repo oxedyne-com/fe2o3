@@ -9,10 +9,16 @@ repository = "https://github.com/oxedyne-io/fe2o3"
 
 [dependencies]
 oxedyne_fe2o3_core 		   		= { path = "../fe2o3_core" }
-oxedyne_fe2o3_crypto	   		= { path = "../fe2o3_crypto" }
 oxedyne_fe2o3_data 		   		= { path = "../fe2o3_data" }
 oxedyne_fe2o3_hash 		   		= { path = "../fe2o3_hash" }
 oxedyne_fe2o3_iop_crypto   		= { path = "../fe2o3_iop_crypto" }
 oxedyne_fe2o3_iop_hash   		= { path = "../fe2o3_iop_hash" }
 oxedyne_fe2o3_jdat				= { path = "../fe2o3_jdat" }
 oxedyne_fe2o3_namex				= { path = "../fe2o3_namex" }
+
+# The concrete `EncryptionScheme` lives in `fe2o3_crypto`, which links a C
+# archive and cannot target wasm.  It is only needed for the default-scheme slot
+# of `RestSchemesOverride`, so it is confined to native targets; `wasm32` builds
+# substitute an uninhabited placeholder (see `api::EncryptionScheme`).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+oxedyne_fe2o3_crypto	   		= { path = "../fe2o3_crypto" }

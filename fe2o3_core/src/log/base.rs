@@ -15,15 +15,18 @@ use crate::{
             LogBot,
             Msg,
         },
-        console::{
-            LoggerConsole,
-            StdoutLoggerConsole,
-        },
     },
     thread::{
         thread_channel,
         ThreadController,
     },
+};
+// The threaded console logger is only wired up on native targets; the wasm
+// build emits straight to the browser console.
+#[cfg(not(target_arch = "wasm32"))]
+use crate::log::console::{
+    LoggerConsole,
+    StdoutLoggerConsole,
 };
 
 use crate::term::Term;
@@ -36,8 +39,10 @@ use std::{
         Mutex,
         RwLock,
     },
-    thread,
 };
+// Thread spawning backs the native logger only.
+#[cfg(not(target_arch = "wasm32"))]
+use std::thread;
 
 use once_cell::sync::Lazy;
 
@@ -55,10 +60,41 @@ impl<ETAG: GenTag> Logger<ETAG>
 {
     /// Unfortunately there is no obvious way to retain a printable version of `msg` up our sleeve to
     /// show on the off chance that `send` fails, without cloning.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn send_in(&self, msg: Msg<ETAG>) {
         match self.chan_in.chan.send(msg.clone()) {
             Err(e) => msg!("Error!: {} for message: {:?}", e, msg),
             Ok(()) => (),
+        }
+    }
+
+    /// On wasm there is no logging thread to drain the channel, so the message
+    /// is level-filtered, formatted and emitted to the browser console
+    /// synchronously.  Non-`Log` control messages (finish, update, stream
+    /// management) have no effect in this single-threaded path.
+    #[cfg(target_arch = "wasm32")]
+    pub fn send_in(&self, msg: Msg<ETAG>) {
+        if let Msg::Log { level, src, erropt, msg, stream: _ } = msg {
+            let current = match self.cfg.read() {
+                Ok(cfg) => cfg.level,
+                Err(_)  => LogLevel::Trace,
+            };
+            if level <= current {
+                let text = match erropt {
+                    Some(e) => fmt!("{} {}", msg, e),
+                    None    => msg,
+                };
+                let (_console, file) = LogBot::<ETAG>::format_msg(
+                    level,
+                    &src,
+                    Ok(text),
+                    false,  // No ANSI-coloured console form in the browser.
+                    true,   // Use the plain form for `console.log`.
+                );
+                if let Some(line) = file {
+                    crate::wasm::console_log(&line);
+                }
+            }
         }
     }
 
@@ -78,6 +114,7 @@ impl<ETAG: GenTag> Logger<ETAG>
     }
 }
     
+#[cfg(not(target_arch = "wasm32"))]
 pub static LOG: Lazy<Logger<ErrTag>> = Lazy::new(|| {
     let mut logbot = LogBot::new();
     let mut logger_console = StdoutLoggerConsole::new();
@@ -112,7 +149,38 @@ pub static LOG: Lazy<Logger<ErrTag>> = Lazy::new(|| {
             semaphore_clone,
         ),
         chan_out: Arc::new(RwLock::new(chan_out)),
-        cfg, 
+        cfg,
+    }
+});
+
+/// The browser build runs on a single thread: no `LogBot` thread and no console
+/// thread are spawned (real wasm threads need `SharedArrayBuffer` with COOP/COEP
+/// headers, which we avoid).  Messages are formatted and emitted straight to the
+/// JavaScript console in [`Logger::send_in`].  The channels below exist only to
+/// satisfy the shared `Logger` type and the configuration macros; nothing drains
+/// them.
+#[cfg(target_arch = "wasm32")]
+pub static LOG: Lazy<Logger<ErrTag>> = Lazy::new(|| {
+    let console_chan = simplex::<Msg<ErrTag>>();
+    let cfg = Arc::new(RwLock::new(Config {
+        file:       None,
+        level:      LogLevel::Trace,
+        console:    Some(console_chan.clone()),
+    }));
+    let chan_in = simplex::<Msg<ErrTag>>();
+    let (semaphore, _sentinel) = thread_channel();
+    Logger {
+        chan_in: ThreadController::new(
+            chan_in,
+            Arc::new(Mutex::new(None)),
+            semaphore.clone(),
+        ),
+        chan_out: Arc::new(RwLock::new(ThreadController::new(
+            console_chan,
+            Arc::new(Mutex::new(None)),
+            semaphore,
+        ))),
+        cfg,
     }
 });
 

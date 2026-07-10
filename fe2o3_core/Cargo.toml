@@ -21,4 +21,13 @@ humantime = "2.1.0"
 once_cell = "1.18.0"
 tokio = { version = "1", features = ["rt"] }
 
+# Wasm-only runtime shims.  Confined to the `wasm32` target so Cargo feature
+# unification never touches the native build (getrandom's `js` backend in
+# particular must not leak onto native).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = ["console"] }
+
 [dev-dependencies]
