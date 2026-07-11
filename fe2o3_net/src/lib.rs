@@ -84,6 +84,7 @@ pub mod constant;
 pub mod dkim;
 pub mod dns;
 pub mod dns_resolver;
+pub mod ecdsa;
 pub mod email;
 pub mod file;
 pub mod guard;
