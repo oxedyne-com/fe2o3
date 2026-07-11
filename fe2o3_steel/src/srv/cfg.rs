@@ -340,13 +340,26 @@ impl ApiRoute {
     }
 
     /// Expand `{file:path}` and `{env:}` placeholders in all header
-    /// values and handler-config values by reading the referenced
-    /// files relative to `root`. Must be called once at startup
-    /// before the route is dispatched.
+    /// values by reading the referenced files relative to `root`. Used
+    /// in proxy mode for headers injected into the upstream request.
+    /// Handler-config values are resolved separately by
+    /// [`ApiRoute::resolve_config`]; a route with an in-process handler
+    /// should have both called at startup. Must be called once before
+    /// the route is dispatched.
     pub fn resolve_headers(&mut self, root: &Path) -> Outcome<()> {
         for (_name, value) in &mut self.headers {
             *value = res!(Self::resolve_file_refs(value, root));
         }
+        Ok(())
+    }
+
+    /// Expand `{file:path}` and `{env:}` placeholders in all
+    /// handler-config values by reading the referenced files relative
+    /// to `root`. Mirrors [`WebhookRoute::resolve_config`] so an
+    /// in-process API handler can read a resolved secret (e.g. a
+    /// Stripe key) out of its `config` map. Must be called once at
+    /// startup before the route is dispatched.
+    pub fn resolve_config(&mut self, root: &Path) -> Outcome<()> {
         for (_name, value) in &mut self.config {
             *value = res!(Self::resolve_file_refs(value, root));
         }

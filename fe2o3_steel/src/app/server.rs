@@ -435,10 +435,12 @@ impl AppShellContext {
             ));
             let default_index_files = res!(vh.get_default_index_files());
 
-            // Resolve {file:} placeholders in API route headers.
+            // Resolve {file:} placeholders in API route headers and in
+            // in-process handler config (e.g. a Stripe secret key).
             let mut api_routes = vh.api_routes.clone();
             for route in &mut api_routes {
                 res!(route.resolve_headers(root_path.as_ref()));
+                res!(route.resolve_config(root_path.as_ref()));
             }
             if !api_routes.is_empty() {
                 info!("Vhost '{}': {} API route(s) configured.",
