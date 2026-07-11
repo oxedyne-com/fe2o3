@@ -87,6 +87,7 @@ pub mod dns_resolver;
 pub mod email;
 pub mod file;
 pub mod guard;
+pub mod hmac;
 pub mod http;
 pub mod id;
 pub mod imap;

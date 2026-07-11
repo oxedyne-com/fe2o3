@@ -122,6 +122,9 @@ pub mod prelude {
         url_encode,
         extract_value,
         extract_json_string,
+        // Stripe webhook signature verification.
+        verify_stripe_signature,
+        STRIPE_SIG_TOLERANCE_SECS,
     };
 
     // Request-side HTTP types that handlers need to read incoming

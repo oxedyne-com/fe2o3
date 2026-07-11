@@ -6,10 +6,13 @@
 use crate::srv::cfg::WebhookRoute;
 
 use oxedyne_fe2o3_core::prelude::*;
-use oxedyne_fe2o3_net::http::{
-    fields::HeaderFields,
-    msg::HttpMessage,
-    status::HttpStatus,
+use oxedyne_fe2o3_net::{
+    hmac::verify_hmac_sha256,
+    http::{
+        fields::HeaderFields,
+        msg::HttpMessage,
+        status::HttpStatus,
+    },
 };
 
 use std::{
@@ -201,4 +204,254 @@ pub fn extract_json_string(json: &str, section_key: &str, key: &str) -> Option<S
     let section_start = json.find(section_key)?;
     let block = &json[section_start..json.len().min(section_start + 3000)];
     extract_value(block, key)
+}
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ STRIPE WEBHOOK SIGNATURE VERIFICATION                                     │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// Default clock-skew tolerance, in seconds, for a Stripe webhook
+/// timestamp. Stripe's own libraries default to five minutes.
+pub const STRIPE_SIG_TOLERANCE_SECS: u64 = 300;
+
+/// Verify a Stripe webhook signature.
+///
+/// Stripe signs each webhook with the endpoint's signing secret
+/// (`whsec_...`) and sends the result in a `Stripe-Signature` header of
+/// the form `t=<unix_ts>,v1=<hex_hmac>[,v1=<hex_hmac>...]` (there may be
+/// several `v1` schemes during a secret rotation, and other schemes such
+/// as `v0` which we ignore). The signed payload is the ASCII string
+/// `"<t>.<raw request body>"`, and the tag is `HMAC-SHA256` of that
+/// payload under the signing secret.
+///
+/// Verification succeeds when the recomputed HMAC matches any supplied
+/// `v1` value (constant-time) **and** the timestamp is within
+/// `tolerance_secs` of `now_secs`. The current time is passed in rather
+/// than read from a clock so the check is deterministic and testable;
+/// callers supply the wall-clock Unix seconds.
+///
+/// # Arguments
+/// * `secret` -- the endpoint signing secret (the whole `whsec_...`
+///   string as configured; Stripe HMACs against these raw bytes).
+/// * `body` -- the exact raw request body bytes, unmodified.
+/// * `sig_header` -- the value of the incoming `Stripe-Signature` header.
+/// * `now_secs` -- the current time as Unix seconds.
+/// * `tolerance_secs` -- the maximum allowed absolute difference between
+///   `now_secs` and the header timestamp (see [`STRIPE_SIG_TOLERANCE_SECS`]).
+///
+/// # Returns
+/// `Ok(())` when the signature is valid and fresh; otherwise a tagged
+/// error describing the failure (never the signing secret).
+pub fn verify_stripe_signature(
+    secret:         &str,
+    body:           &[u8],
+    sig_header:     &str,
+    now_secs:       u64,
+    tolerance_secs: u64,
+)
+    -> Outcome<()>
+{
+    // Parse the comma-separated scheme=value pairs, collecting the
+    // timestamp and every v1 tag.
+    let mut ts: Option<&str> = None;
+    let mut v1s: Vec<&str> = Vec::new();
+    for part in sig_header.split(',') {
+        let mut kv = part.splitn(2, '=');
+        let scheme = match kv.next() {
+            Some(s) => s.trim(),
+            None    => continue,
+        };
+        let value = match kv.next() {
+            Some(v) => v.trim(),
+            None    => continue,
+        };
+        match scheme {
+            "t"  => ts = Some(value),
+            "v1" => v1s.push(value),
+            _    => {},  // Ignore v0 and any future schemes.
+        }
+    }
+
+    let ts = match ts {
+        Some(t) => t,
+        None    => return Err(err!(
+            "Stripe-Signature header has no timestamp (t=).";
+            Invalid, Input, Missing)),
+    };
+    if v1s.is_empty() {
+        return Err(err!(
+            "Stripe-Signature header has no v1 signature.";
+            Invalid, Input, Missing));
+    }
+
+    // Enforce the timestamp tolerance before any HMAC work.
+    let t_secs = match ts.parse::<u64>() {
+        Ok(n)  => n,
+        Err(_) => return Err(err!(
+            "Stripe-Signature timestamp '{}' is not an integer.", ts;
+            Invalid, Input, Mismatch)),
+    };
+    let skew = if now_secs >= t_secs {
+        now_secs - t_secs
+    } else {
+        t_secs - now_secs
+    };
+    if skew > tolerance_secs {
+        return Err(err!(
+            "Stripe-Signature timestamp outside tolerance ({}s > {}s).",
+            skew, tolerance_secs;
+            Invalid, Input, Range));
+    }
+
+    // Signed payload is "<t>.<body>". Build the byte string.
+    let mut signed = Vec::with_capacity(ts.len() + 1 + body.len());
+    signed.extend_from_slice(ts.as_bytes());
+    signed.push(b'.');
+    signed.extend_from_slice(body);
+
+    // Constant-time compare the recomputed HMAC against each v1 tag.
+    for v1 in &v1s {
+        let tag = match hex_decode(v1) {
+            Some(bytes) => bytes,
+            None        => continue,  // Malformed hex cannot match.
+        };
+        if verify_hmac_sha256(secret.as_bytes(), &signed, &tag) {
+            return Ok(());
+        }
+    }
+
+    Err(err!(
+        "Stripe-Signature verification failed: no v1 tag matched.";
+        Invalid, Input, Security))
+}
+
+/// Decode a lowercase or uppercase hex string into bytes. Returns
+/// `None` on odd length or a non-hex character.
+fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    let bytes = s.as_bytes();
+    if bytes.len() % 2 != 0 {
+        return None;
+    }
+    let nibble = |c: u8| -> Option<u8> {
+        match c {
+            b'0'..=b'9' => Some(c - b'0'),
+            b'a'..=b'f' => Some(c - b'a' + 10),
+            b'A'..=b'F' => Some(c - b'A' + 10),
+            _           => None,
+        }
+    };
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        let hi = nibble(bytes[i])?;
+        let lo = nibble(bytes[i + 1])?;
+        out.push((hi << 4) | lo);
+        i += 2;
+    }
+    Some(out)
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oxedyne_fe2o3_net::hmac::hmac_sha256;
+
+    /// Hex-encode bytes for building a synthetic Stripe-Signature.
+    fn hex_encode(bytes: &[u8]) -> String {
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for b in bytes {
+            out.push(char::from(b"0123456789abcdef"[(b >> 4) as usize]));
+            out.push(char::from(b"0123456789abcdef"[(b & 0x0F) as usize]));
+        }
+        out
+    }
+
+    /// Build a valid Stripe-Signature header for a body at time `t`.
+    fn sign(secret: &str, body: &[u8], t: u64) -> String {
+        let mut signed = Vec::new();
+        signed.extend_from_slice(t.to_string().as_bytes());
+        signed.push(b'.');
+        signed.extend_from_slice(body);
+        let tag = hmac_sha256(secret.as_bytes(), &signed);
+        fmt!("t={},v1={}", t, hex_encode(&tag))
+    }
+
+    #[test]
+    fn test_valid_signature_verifies() {
+        let secret = "whsec_test_secret";
+        let body = br#"{"id":"evt_1","type":"checkout.session.completed"}"#;
+        let t = 1_700_000_000u64;
+        let header = sign(secret, body, t);
+        // Within tolerance of the signing time.
+        assert!(verify_stripe_signature(
+            secret, body, &header, t + 10, STRIPE_SIG_TOLERANCE_SECS).is_ok());
+    }
+
+    #[test]
+    fn test_tampered_body_rejected() {
+        let secret = "whsec_test_secret";
+        let body = br#"{"amount":100}"#;
+        let t = 1_700_000_000u64;
+        let header = sign(secret, body, t);
+        let tampered = br#"{"amount":999}"#;
+        assert!(verify_stripe_signature(
+            secret, tampered, &header, t, STRIPE_SIG_TOLERANCE_SECS).is_err());
+    }
+
+    #[test]
+    fn test_wrong_secret_rejected() {
+        let body = br#"{"amount":100}"#;
+        let t = 1_700_000_000u64;
+        let header = sign("whsec_real", body, t);
+        assert!(verify_stripe_signature(
+            "whsec_forged", body, &header, t, STRIPE_SIG_TOLERANCE_SECS).is_err());
+    }
+
+    #[test]
+    fn test_expired_timestamp_rejected() {
+        let secret = "whsec_test_secret";
+        let body = br#"{"ok":true}"#;
+        let t = 1_700_000_000u64;
+        let header = sign(secret, body, t);
+        // now is well past t + tolerance.
+        let now = t + STRIPE_SIG_TOLERANCE_SECS + 1;
+        assert!(verify_stripe_signature(
+            secret, body, &header, now, STRIPE_SIG_TOLERANCE_SECS).is_err());
+    }
+
+    #[test]
+    fn test_future_timestamp_rejected() {
+        let secret = "whsec_test_secret";
+        let body = br#"{"ok":true}"#;
+        let t = 1_700_000_000u64 + STRIPE_SIG_TOLERANCE_SECS + 5;
+        let header = sign(secret, body, t);
+        // now is before the signing time by more than tolerance.
+        let now = 1_700_000_000u64;
+        assert!(verify_stripe_signature(
+            secret, body, &header, now, STRIPE_SIG_TOLERANCE_SECS).is_err());
+    }
+
+    #[test]
+    fn test_multiple_v1_one_matches() {
+        let secret = "whsec_test_secret";
+        let body = br#"{"ok":true}"#;
+        let t = 1_700_000_000u64;
+        let good = sign(secret, body, t);
+        // Prepend a bogus v1 to simulate a rotation window; the real
+        // one still matches.
+        let header = fmt!("{},v1=deadbeef", good);
+        assert!(verify_stripe_signature(
+            secret, body, &header, t, STRIPE_SIG_TOLERANCE_SECS).is_ok());
+    }
+
+    #[test]
+    fn test_missing_v1_rejected() {
+        let secret = "whsec_test_secret";
+        let body = br#"{"ok":true}"#;
+        let header = "t=1700000000";
+        assert!(verify_stripe_signature(
+            secret, body, header, 1_700_000_000u64, STRIPE_SIG_TOLERANCE_SECS).is_err());
+    }
 }
