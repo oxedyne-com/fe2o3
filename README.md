@@ -39,12 +39,6 @@ The code aims mostly to be correct, readable, and maintainable rather than super
 
 One of the initial motivations for the library was to improve my personal developer experience, which has involved a range of experiments particularly around error handling and logging.  The code avoids the use of `unsafe` and `unwrap`.  The `?` propogator is avoided in favour of macros that are more explicitly function-like such as the directly replacement `ok!`, the match-based `res!` and the closure `catch!` which tries to capture unwind panics.  Eventually any impacts on performance will be properly assessed.  Tags were built into the `fe2o3_core::error::Error` type which offers a foundation for theoretical benefits but the practical value remains to be seen.
 
-## Supporting Development
-
-This project is developed and maintained through GitHub Sponsors. If you find Hematite valuable for your work or interesting as a project, consider supporting it to increase the pace of development. No special perks or privileges - just sustainable open source development of innovative Rust infrastructure and apps.
-
-![GitHub Sponsors](https://img.shields.io/github/sponsors/oxedyne-io)
-
 ## Components
 
 The crates can be organised by their level of internal cross-dependencies, currently the most notable being:
