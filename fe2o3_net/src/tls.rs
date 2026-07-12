@@ -286,6 +286,91 @@ pub fn certificate_not_after(pem: &[u8]) -> Outcome<i64> {
     parse_asn1_time(not_after, tag)
 }
 
+/// Every DNS name the first certificate in a PEM chain is valid for, read from
+/// its `subjectAltName` extension.
+///
+/// A renewer needs this as much as it needs the expiry: a certificate that is
+/// years from expiring still cannot serve a host it does not name, so adding a
+/// virtual host must force a reissue even though nothing has aged.
+///
+/// Walks the TBS to the `[3] EXPLICIT Extensions`, finds the extension whose OID
+/// is 2.5.29.17, and collects the `[2] IMPLICIT IA5String` entries -- the
+/// `dNSName` form of a `GeneralName`. Other forms (IP, email, URI) are skipped:
+/// a caller asking this question is asking about names.
+pub fn certificate_dns_names(pem: &[u8]) -> Outcome<Vec<String>> {
+    let der = match parse_pem_certificates(pem).into_iter().next() {
+        Some(d) => d,
+        None    => return Err(err!(
+            "No certificate found in the PEM data.";
+            Invalid, Input, Missing)),
+    };
+    let (tbs, _)    = res!(der_expect(&der, 0, TAG_SEQUENCE));
+    let (fields, _) = res!(der_expect(tbs, 0, TAG_SEQUENCE));
+
+    let mut pos = 0usize;
+    if fields.get(pos) == Some(&TAG_VERSION) {
+        let (_, next) = res!(der_element(fields, pos));
+        pos = next;
+    }
+    // serial, signature, issuer, validity, subject, subjectPublicKeyInfo.
+    for tag in [TAG_INTEGER, TAG_SEQUENCE, TAG_SEQUENCE, TAG_SEQUENCE,
+                TAG_SEQUENCE, TAG_SEQUENCE] {
+        let (_, next) = res!(der_expect(fields, pos, tag));
+        pos = next;
+    }
+    // The unique-id fields are legal and vanishingly rare; skip them if present.
+    for tag in [TAG_ISSUER_UID, TAG_SUBJECT_UID] {
+        if fields.get(pos) == Some(&tag) {
+            let (_, next) = res!(der_element(fields, pos));
+            pos = next;
+        }
+    }
+    let exts = match fields.get(pos) {
+        Some(t) if *t == TAG_EXTENSIONS => {
+            let (inner, _) = res!(der_element(fields, pos));
+            let (list, _)  = res!(der_expect(inner, 0, TAG_SEQUENCE));
+            list
+        }
+        // A v1 certificate has no extensions, and so no subject alternative
+        // names. That is not an error; it simply names nothing.
+        _ => return Ok(Vec::new()),
+    };
+
+    let mut at = 0usize;
+    while at < exts.len() {
+        let (ext, next) = res!(der_expect(exts, at, TAG_SEQUENCE));
+        at = next;
+
+        let (oid, mut p) = res!(der_expect(ext, 0, TAG_OID));
+        if oid != OID_SUBJECT_ALT_NAME {
+            continue;
+        }
+        // `critical` is optional and defaults to false.
+        if ext.get(p) == Some(&TAG_BOOLEAN) {
+            let (_, n) = res!(der_element(ext, p));
+            p = n;
+        }
+        let (value, _)  = res!(der_expect(ext, p, TAG_OCTET_STRING));
+        let (names, _)  = res!(der_expect(value, 0, TAG_SEQUENCE));
+
+        let mut out = Vec::new();
+        let mut q = 0usize;
+        while q < names.len() {
+            let tag = match names.get(q) {
+                Some(t) => *t,
+                None    => break,
+            };
+            let (bytes, n) = res!(der_element(names, q));
+            q = n;
+            if tag == TAG_DNS_NAME {
+                out.push(String::from_utf8_lossy(bytes).into_owned());
+            }
+        }
+        return Ok(out);
+    }
+    Ok(Vec::new())
+}
+
 /// Whether the certificate expires within `lead` seconds of now -- which is the
 /// question a renewer is actually asking. An unparseable or unreadable
 /// certificate is treated as expiring, because a server that cannot tell should
@@ -305,12 +390,24 @@ pub fn certificate_expires_within(pem: &[u8], lead_secs: i64) -> bool {
 }
 
 
-const TAG_INTEGER:  u8 = 0x02;
-const TAG_SEQUENCE: u8 = 0x30;
-const TAG_UTCTIME:  u8 = 0x17;
-const TAG_GENTIME:  u8 = 0x18;
+const TAG_BOOLEAN:      u8 = 0x01;
+const TAG_INTEGER:      u8 = 0x02;
+const TAG_OCTET_STRING: u8 = 0x04;
+const TAG_OID:          u8 = 0x06;
+const TAG_SEQUENCE:     u8 = 0x30;
+const TAG_UTCTIME:      u8 = 0x17;
+const TAG_GENTIME:      u8 = 0x18;
 /// `[0] EXPLICIT`, the context-specific constructed tag the version carries.
-const TAG_VERSION:  u8 = 0xa0;
+const TAG_VERSION:      u8 = 0xa0;
+/// `[1]` and `[2] IMPLICIT`, the deprecated unique identifiers.
+const TAG_ISSUER_UID:   u8 = 0x81;
+const TAG_SUBJECT_UID:  u8 = 0x82;
+/// `[3] EXPLICIT Extensions`.
+const TAG_EXTENSIONS:   u8 = 0xa3;
+/// `[2] IMPLICIT IA5String` -- the dNSName form of a GeneralName.
+const TAG_DNS_NAME:     u8 = 0x82;
+/// OID 2.5.29.17, subjectAltName.
+const OID_SUBJECT_ALT_NAME: &[u8] = &[0x55, 0x1d, 0x11];
 
 /// Read the DER element at `pos`: return its contents and the offset just past
 /// it. Only the length encodings a certificate actually uses are handled --
@@ -448,6 +545,36 @@ mod cert_tests {
         let far  = cert_expiring(2099, 1, 1);
         assert!(certificate_expires_within(&soon, 30 * 24 * 3600));
         assert!(!certificate_expires_within(&far, 30 * 24 * 3600));
+    }
+
+    #[test]
+    fn test_dns_names_are_read_from_the_san() {
+        use rcgen::{Certificate, CertificateParams};
+        let params = CertificateParams::new(vec![
+            fmt!("example.com"),
+            fmt!("www.example.com"),
+            fmt!("api.example.com"),
+        ]);
+        let cert = Certificate::from_params(params).expect("test cert");
+        let pem  = cert.serialize_pem().expect("test pem").into_bytes();
+
+        let names = certificate_dns_names(&pem).expect("parse");
+        assert_eq!(names, vec![
+            fmt!("example.com"),
+            fmt!("www.example.com"),
+            fmt!("api.example.com"),
+        ]);
+    }
+
+    #[test]
+    fn test_a_certificate_that_names_one_host_does_not_name_another() {
+        // The case that matters: a vhost is added, the certificate is nowhere
+        // near expiry, and it still cannot serve the new name.
+        let pem = cert_expiring(2099, 1, 1);          // names example.com only
+        let names = certificate_dns_names(&pem).expect("parse");
+        assert!(names.iter().any(|n| n == "example.com"));
+        assert!(!names.iter().any(|n| n == "new.example.com"));
+        assert!(!certificate_expires_within(&pem, 30 * 24 * 3600));
     }
 
     #[test]

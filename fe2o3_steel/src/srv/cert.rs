@@ -306,6 +306,12 @@ impl AcmeRenewer {
     ///
     /// A certificate that cannot be read or parsed is treated as expiring: a
     /// server that does not know should renew rather than gamble.
+    ///
+    /// Age is not the only thing that can make a certificate useless. One that
+    /// does not *name* a virtual host cannot serve it, however new it is -- so
+    /// adding a host must force a reissue too. Without that check, a new vhost is
+    /// served under the old certificate, the name does not match, and every
+    /// browser refuses the connection while the server reports nothing wrong.
     fn needs_renewal(&self) -> Outcome<bool> {
         let cert_path = self.cache.certificate_path();
         if !cert_path.exists() {
@@ -319,7 +325,26 @@ impl AcmeRenewer {
                 return Ok(true);
             }
         };
-        Ok(tls::certificate_expires_within(&pem, RENEWAL_LEAD_SECS))
+        if tls::certificate_expires_within(&pem, RENEWAL_LEAD_SECS) {
+            return Ok(true);
+        }
+        let covered = match tls::certificate_dns_names(&pem) {
+            Ok(names) => names,
+            Err(e) => {
+                warn!("Cached cert at {:?} could not be parsed ({}); renewing.",
+                    cert_path, e);
+                return Ok(true);
+            }
+        };
+        let missing: Vec<&String> = self.dns_names.iter()
+            .filter(|want| !covered.iter().any(|got| got.eq_ignore_ascii_case(want)))
+            .collect();
+        if !missing.is_empty() {
+            info!("ACME: cached cert does not cover {:?}; reissuing for {:?}.",
+                missing, self.dns_names);
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     /// Drive one full issuance through `AcmeClient`, persist the result
