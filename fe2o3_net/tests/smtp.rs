@@ -1,6 +1,5 @@
 use oxedyne_fe2o3_net::{
     //conc::AsyncReadIterator,
-    dns::Fqdn,
     //email::msg::{
     //    EmailHeader,
     //    EmailMessage,
@@ -61,8 +60,8 @@ pub fn test_smtp(filter: &'static str) -> Outcome<()> {
 
     res!(test_it(filter, &["Smtp commands 000", "all", "smtp"], || {
         let test = [
-            ("HELO client.example.com", SmtpCommand::Helo(res!(Fqdn::new("client.example.com")))),
-            ("EHLO client.example.com", SmtpCommand::Ehlo(res!(Fqdn::new("client.example.com")))),
+            ("HELO client.example.com", SmtpCommand::Helo(fmt!("client.example.com"))),
+            ("EHLO client.example.com", SmtpCommand::Ehlo(fmt!("client.example.com"))),
             ("MAIL FROM:<sender@example.com>", SmtpCommand::MailFrom(fmt!("sender@example.com"))),
             ("RCPT TO:<sender@example.com>", SmtpCommand::RcptTo(fmt!("sender@example.com"))),
         ];

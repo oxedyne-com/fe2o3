@@ -10,12 +10,17 @@
 ///
 /// # Examples
 /// ```
-/// use crate::HttpLocator;
+/// use oxedyne_fe2o3_core::prelude::*;
+/// use oxedyne_fe2o3_jdat::prelude::*;
+/// use oxedyne_fe2o3_net::http::loc::HttpLocator;
 ///
-/// let loc = HttpLocator::new("/path?key=value#section").unwrap();
+/// # fn main() -> Outcome<()> {
+/// let loc = res!(HttpLocator::new("/path?key=value#section"));
 /// assert_eq!(loc.path.as_str(), "/path");
-/// assert!(loc.data.contains_key("key")); 
+/// assert!(loc.data.contains_key(&dat!("key")));
 /// assert_eq!(loc.frag, "section");
+/// # Ok(())
+/// # }
 /// ```
 use crate::file::RequestPath;
 use oxedyne_fe2o3_core::prelude::*;

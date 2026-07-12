@@ -37,7 +37,7 @@ use std::{
 ///
 /// # Examples
 /// ```
-/// use crate::RequestPath;
+/// use oxedyne_fe2o3_net::file::RequestPath;
 ///
 /// let path = RequestPath::new("/index.html");
 /// assert_eq!(path.as_str(), "/index.html");
