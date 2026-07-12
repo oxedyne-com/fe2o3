@@ -1,6 +1,0 @@
-# Browser wasm harness: build output and headless-test scratch.
-# Proven headlessly, not part of the crate build.
-/wasmtest/
-
-# wasm-pack build output for the browser UI (regenerated from source).
-/www/pkg/

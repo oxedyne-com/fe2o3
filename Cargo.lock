@@ -2290,32 +2290,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "oxedyne_fe2o3_red"
-version = "0.1.0"
-dependencies = [
- "getrandom 0.2.15",
- "js-sys",
- "oxedyne_fe2o3_core",
- "oxedyne_fe2o3_hash",
- "oxedyne_fe2o3_iop_crypto",
- "oxedyne_fe2o3_iop_db",
- "oxedyne_fe2o3_iop_hash",
- "oxedyne_fe2o3_jdat",
- "oxedyne_fe2o3_net",
- "oxedyne_fe2o3_o3db_sync",
- "oxedyne_fe2o3_stds",
- "oxedyne_fe2o3_syntax",
- "oxedyne_fe2o3_text",
- "rustls",
- "rustls-pemfile",
- "tokio",
- "tokio-rustls",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
-]
-
-[[package]]
 name = "oxedyne_fe2o3_shield"
 version = "0.5.0"
 dependencies = [
@@ -2392,7 +2366,6 @@ dependencies = [
  "oxedyne_fe2o3_namex",
  "oxedyne_fe2o3_net",
  "oxedyne_fe2o3_o3db_sync",
- "oxedyne_fe2o3_red",
  "oxedyne_fe2o3_stds",
  "oxedyne_fe2o3_syntax",
  "oxedyne_fe2o3_sys",
@@ -4819,19 +4792,6 @@ dependencies = [
  "quote",
  "syn 2.0.90",
  "wasm-bindgen-shared",
-]
-
-[[package]]
-name = "wasm-bindgen-futures"
-version = "0.4.49"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38176d9b44ea84e9184eff0bc34cc167ed044f816accfe5922e54d84cf48eca2"
-dependencies = [
- "cfg-if",
- "js-sys",
- "once_cell",
- "wasm-bindgen",
- "web-sys",
 ]
 
 [[package]]
