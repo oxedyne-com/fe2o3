@@ -2203,6 +2203,7 @@ dependencies = [
  "oxedyne_fe2o3_iop_hash",
  "oxedyne_fe2o3_jdat",
  "oxedyne_fe2o3_net",
+ "tokio",
 ]
 
 [[package]]

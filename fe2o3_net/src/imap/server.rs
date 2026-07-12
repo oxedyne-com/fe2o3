@@ -34,9 +34,7 @@ use tokio::{
         AsyncWrite,
         AsyncWriteExt,
     },
-    net::TcpStream,
 };
-use tokio_rustls::server::TlsStream;
 
 
 /// Maximum line length the server will accept for a command. IMAP
@@ -54,6 +52,10 @@ pub const IMAP_MAX_LITERAL: usize = 20_480_000;
 /// Cheaply cloneable -- inner state (handler, user store, hostname,
 /// folder list) is wrapped in `Arc`s so a single listener fan-outs
 /// across every accept loop without contention.
+///
+/// The server is generic over its transport: it is handed an established
+/// stream and speaks IMAP over it, whether that is a TLS stream from the
+/// listener, a plain socket on loopback, or an in-memory pipe in a test.
 #[derive(Clone)]
 pub struct ImapServer<M: MailStore, U: UserStore> {
     /// Mailbox storage backend.
@@ -94,9 +96,9 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
     /// Drive one IMAP session to completion over an established TLS
     /// stream. Returns when the client logs out or the connection
     /// drops.
-    pub async fn run(
+    pub async fn run<S: AsyncRead + AsyncWrite + Unpin + Send>(
         &self,
-        mut stream: TlsStream<TcpStream>,
+        mut stream: S,
         peer:       SocketAddr,
     )
         -> Outcome<()>
@@ -150,9 +152,9 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
 
     /// Dispatch one parsed command. Returns `Ok(true)` to terminate
     /// the session (LOGOUT or fatal protocol error).
-    async fn dispatch(
+    async fn dispatch<S: AsyncRead + AsyncWrite + Unpin + Send>(
         &self,
-        stream:     &mut TlsStream<TcpStream>,
+        stream:     &mut S,
         session:    &mut ImapSession,
         parsed:     ParsedCommand,
         peer:       SocketAddr,
@@ -399,9 +401,9 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
         }
     }
 
-    async fn dispatch_data_command(
+    async fn dispatch_data_command<S: AsyncRead + AsyncWrite + Unpin + Send>(
         &self,
-        stream:     &mut TlsStream<TcpStream>,
+        stream:     &mut S,
         session:    &mut ImapSession,
         tag:        &str,
         cmd:        &str,
@@ -591,9 +593,9 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
     /// Send the untagged status responses required after SELECT or
     /// EXAMINE: EXISTS, RECENT, UIDVALIDITY, UIDNEXT, FLAGS,
     /// PERMANENTFLAGS, [UNSEEN N].
-    async fn write_select_status(
+    async fn write_select_status<S: AsyncRead + AsyncWrite + Unpin + Send>(
         &self,
-        stream:     &mut TlsStream<TcpStream>,
+        stream:     &mut S,
         session:    &mut ImapSession,
     )
         -> Outcome<()>
@@ -626,9 +628,9 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
         Ok(())
     }
 
-    async fn do_fetch(
+    async fn do_fetch<S: AsyncRead + AsyncWrite + Unpin + Send>(
         &self,
-        stream:     &mut TlsStream<TcpStream>,
+        stream:     &mut S,
         session:    &mut ImapSession,
         seq_set:    &str,
         items_raw:  &str,
@@ -807,9 +809,9 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
         Ok(())
     }
 
-    async fn do_store(
+    async fn do_store<S: AsyncRead + AsyncWrite + Unpin + Send>(
         &self,
-        stream:     &mut TlsStream<TcpStream>,
+        stream:     &mut S,
         session:    &mut ImapSession,
         seq_set:    &str,
         op:         &str,
@@ -873,9 +875,9 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
         Ok(())
     }
 
-    async fn do_search(
+    async fn do_search<S: AsyncRead + AsyncWrite + Unpin + Send>(
         &self,
-        stream:     &mut TlsStream<TcpStream>,
+        stream:     &mut S,
         session:    &mut ImapSession,
         args:       &str,
         by_uid:     bool,
@@ -924,9 +926,9 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
         Ok(())
     }
 
-    async fn do_append(
+    async fn do_append<S: AsyncRead + AsyncWrite + Unpin + Send>(
         &self,
-        stream:     &mut TlsStream<TcpStream>,
+        stream:     &mut S,
         user:       &MailUser,
         tag:        &str,
         args:       &str,

@@ -1,4 +1,10 @@
-//! IMAP4rev1 server (RFC 3501) -- Thunderbird-compatible subset.
+//! IMAP4rev1 (RFC 3501): a server and a client.
+//!
+//! [`client`] connects out to somebody else's IMAP server and reads mail
+//! from it. [`server`] is the other direction -- a Thunderbird-compatible
+//! subset serving a local Hematite mailbox -- and is described below.
+//!
+//! # Server
 //!
 //! Implements the wire protocol and just enough of the command set to
 //! run a single Hematite mailbox in front of Thunderbird:
@@ -21,4 +27,5 @@
 //! `QRESYNC`, `BINARY`, `LITERAL+` quirks beyond plain pass-through,
 //! ACLs, quotas, namespace, sort, thread.
 
+pub mod client;
 pub mod server;
