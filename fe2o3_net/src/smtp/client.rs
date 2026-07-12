@@ -15,40 +15,26 @@
 use crate::{
     dns_resolver,
     smtp::server::read_line,
+    tls::{
+        self,
+        ClientStream,
+    },
 };
 
 use oxedyne_fe2o3_core::prelude::*;
 
 use std::{
     net::IpAddr,
-    pin::Pin,
     sync::Arc,
-    task::{
-        Context,
-        Poll,
-    },
     time::Duration,
 };
 
-use tokio_rustls::rustls::{
-    ClientConfig,
-    pki_types::{
-        CertificateDer,
-        ServerName,
-    },
-    RootCertStore,
-};
 use tokio::{
-    io::{
-        AsyncRead,
-        AsyncWrite,
-        AsyncWriteExt,
-        ReadBuf,
-    },
+    io::AsyncWriteExt,
     net::TcpStream,
     time::timeout,
 };
-use tokio_rustls::TlsConnector;
+use tokio_rustls::rustls::ClientConfig;
 
 
 /// Default per-IO timeout for outbound SMTP. Chosen generously because
@@ -98,43 +84,11 @@ impl OutboundClient {
         })
     }
 
-    /// Load `/etc/ssl/certs/ca-certificates.crt` (or the closest
-    /// equivalent) into a fresh rustls `ClientConfig`.
+    /// Load the host's CA bundle into a fresh rustls `ClientConfig`.
+    /// Delegates to [`crate::tls::default_client_config`], which every
+    /// protocol client in this crate shares.
     pub fn default_tls_config() -> Outcome<ClientConfig> {
-        let ca_paths = [
-            "/etc/ssl/certs/ca-certificates.crt",   // Debian/Ubuntu
-            "/etc/pki/tls/certs/ca-bundle.crt",     // Fedora/RHEL
-            "/etc/ssl/cert.pem",                    // Alpine/macOS
-        ];
-        let ca_file = match ca_paths.iter().find(|p| std::path::Path::new(p).exists()) {
-            Some(p) => *p,
-            None => return Err(err!(
-                "No system CA bundle found. Tried: {:?}", ca_paths;
-                Init, Missing, File)),
-        };
-        let pem = match std::fs::read(ca_file) {
-            Ok(d) => d,
-            Err(e) => return Err(err!(e,
-                "Failed to read CA bundle '{}'.", ca_file;
-                IO, File, Read)),
-        };
-        let mut store = RootCertStore::empty();
-        let mut count = 0u32;
-        for der in parse_pem_certificates(&pem) {
-            let cert = CertificateDer::from(der);
-            if store.add(cert).is_ok() {
-                count += 1;
-            }
-        }
-        if count == 0 {
-            return Err(err!(
-                "CA bundle '{}' contained no usable certificates.", ca_file;
-                Init, Invalid, File));
-        }
-        let cfg = ClientConfig::builder()
-            .with_root_certificates(store)
-            .with_no_client_auth();
-        Ok(cfg)
+        tls::default_client_config()
     }
 
     /// Resolve the recipient domain's MX records, then attempt
@@ -274,20 +228,7 @@ impl OutboundClient {
                         "STARTTLS response received on already-TLS stream.";
                         Invalid, Bug)),
                 };
-                let server_name = match ServerName::try_from(tgt.host.clone()) {
-                    Ok(n) => n,
-                    Err(_) => return Err(err!(
-                        "Cannot construct ServerName for '{}'.", tgt.host;
-                        Invalid, Input)),
-                };
-                let connector = TlsConnector::from(self.tls_config.clone());
-                let tls = match connector.connect(server_name, plain).await {
-                    Ok(s) => s,
-                    Err(e) => return Err(err!(e,
-                        "TLS handshake to {}.", tgt.host;
-                        IO, Network, Init)),
-                };
-                stream = ClientStream::Tls(Box::new(tls));
+                stream = res!(tls::upgrade(plain, &tgt.host, self.tls_config.clone()).await);
 
                 // Re-issue EHLO inside TLS.
                 res!(write_command(&mut stream, &fmt!("EHLO {}", self.hostname)).await);
@@ -352,85 +293,6 @@ impl OutboundClient {
         Ok(resp.text)
     }
 }
-
-/// Either a plain TCP stream or a client-side TLS-wrapped TCP stream.
-///
-/// The SMTP server's `MaybeTls` holds a *server-side* `TlsStream`,
-/// which is a different concrete type than the *client-side* one
-/// produced by `TlsConnector::connect`. Rather than make the server
-/// enum generic, we keep a small dedicated variant here for the
-/// outbound client.
-pub enum ClientStream {
-    /// Plain TCP, before STARTTLS.
-    Plain(TcpStream),
-    /// Client-side TLS wrap, after STARTTLS.
-    Tls(Box<tokio_rustls::client::TlsStream<TcpStream>>),
-}
-
-impl ClientStream {
-    /// Consume the wrapper and return the inner plain stream, if any.
-    pub fn into_plain(self) -> Option<TcpStream> {
-        match self {
-            ClientStream::Plain(s) => Some(s),
-            ClientStream::Tls(_)   => None,
-        }
-    }
-}
-
-impl AsyncRead for ClientStream {
-    fn poll_read(
-        self:   Pin<&mut Self>,
-        cx:     &mut Context<'_>,
-        buf:    &mut ReadBuf<'_>,
-    )
-        -> Poll<std::io::Result<()>>
-    {
-        match self.get_mut() {
-            ClientStream::Plain(s) => Pin::new(s).poll_read(cx, buf),
-            ClientStream::Tls(s)   => Pin::new(s.as_mut()).poll_read(cx, buf),
-        }
-    }
-}
-
-impl AsyncWrite for ClientStream {
-    fn poll_write(
-        self:   Pin<&mut Self>,
-        cx:     &mut Context<'_>,
-        buf:    &[u8],
-    )
-        -> Poll<std::io::Result<usize>>
-    {
-        match self.get_mut() {
-            ClientStream::Plain(s) => Pin::new(s).poll_write(cx, buf),
-            ClientStream::Tls(s)   => Pin::new(s.as_mut()).poll_write(cx, buf),
-        }
-    }
-
-    fn poll_flush(
-        self:   Pin<&mut Self>,
-        cx:     &mut Context<'_>,
-    )
-        -> Poll<std::io::Result<()>>
-    {
-        match self.get_mut() {
-            ClientStream::Plain(s) => Pin::new(s).poll_flush(cx),
-            ClientStream::Tls(s)   => Pin::new(s.as_mut()).poll_flush(cx),
-        }
-    }
-
-    fn poll_shutdown(
-        self:   Pin<&mut Self>,
-        cx:     &mut Context<'_>,
-    )
-        -> Poll<std::io::Result<()>>
-    {
-        match self.get_mut() {
-            ClientStream::Plain(s) => Pin::new(s).poll_shutdown(cx),
-            ClientStream::Tls(s)   => Pin::new(s.as_mut()).poll_shutdown(cx),
-        }
-    }
-}
-
 
 /// One parsed SMTP server response (potentially multi-line).
 #[derive(Clone, Debug)]
@@ -510,32 +372,6 @@ fn dot_stuff(body: &[u8]) -> Vec<u8> {
         }
         out.push(b);
         at_line_start = b == b'\n';
-    }
-    out
-}
-
-/// Iterate over every `-----BEGIN CERTIFICATE-----` block in `pem`,
-/// returning the decoded DER bytes for each one. A tiny in-tree
-/// substitute for `rustls_pemfile::certs` so fe2o3_net does not need
-/// the extra crate.
-fn parse_pem_certificates(pem: &[u8]) -> Vec<Vec<u8>> {
-    const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
-    const END:   &str = "-----END CERTIFICATE-----";
-    let text = String::from_utf8_lossy(pem);
-    let mut out: Vec<Vec<u8>> = Vec::new();
-    let mut search_from = 0usize;
-    while let Some(b) = text[search_from..].find(BEGIN) {
-        let start = search_from + b + BEGIN.len();
-        let e = match text[start..].find(END) {
-            Some(i) => i,
-            None => break,
-        };
-        let block = &text[start..start + e];
-        let stripped: String = block.chars().filter(|c| !c.is_whitespace()).collect();
-        if let Ok(der) = base64::decode(&stripped) {
-            out.push(der);
-        }
-        search_from = start + e + END.len();
     }
     out
 }

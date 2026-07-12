@@ -44,19 +44,20 @@
 //! # Example
 //!
 //! ```rust
+//! use oxedyne_fe2o3_core::prelude::*;
 //! use oxedyne_fe2o3_net::{
 //!     dns::Fqdn,
-//!     http::{
-//!         msg::HttpMessage,
-//!         status::HttpStatus,
-//!     },
+//!     http::msg::HttpMessage,
 //! };
 //!
+//! # fn main() -> Outcome<()> {
 //! // Create a simple HTTP response
 //! let response = HttpMessage::ok_respond_with_text("Hello, world!");
 //!
 //! // Validate a domain name
 //! let domain = res!(Fqdn::new("example.com"));
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Error Handling
@@ -96,6 +97,7 @@ pub mod mail;
 pub mod media;
 pub mod smtp;
 pub mod time;
+pub mod tls;
 pub mod ws;
 
 pub use ws::core::WebSocket;
