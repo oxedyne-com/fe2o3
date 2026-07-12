@@ -14,6 +14,7 @@ use oxedyne_fe2o3_core::{
         NormPathBuf,
     },
 };
+use oxedyne_fe2o3_net::tls;
 use oxedyne_fe2o3_net::acme::{
     cache::AcmeDiskCache,
     challenge::ChallengeCert,
@@ -47,7 +48,6 @@ use std::{
     },
     time::{
         Duration,
-        SystemTime,
     },
 };
 
@@ -292,31 +292,34 @@ impl AcmeRenewer {
         }
     }
 
-    /// Return `true` if the cached certificate is missing or older than
-    /// [`RENEWAL_THRESHOLD`].
+    /// Return `true` if the cached certificate is missing, unreadable, or
+    /// close enough to expiry to be worth replacing.
+    ///
+    /// The question is asked of the *certificate*, not of the file holding it.
+    /// This used to compare the file's mtime against a 60-day threshold, which
+    /// is right only while the file and the certificate share a history. They
+    /// come apart the moment a certificate is restored from a backup or copied
+    /// from another host: the mtime is minutes old, the certificate has weeks
+    /// left, and the server sails past the expiry serving a dead certificate
+    /// and never asking why. Reading the expiry out of the certificate cannot
+    /// be fooled that way.
+    ///
+    /// A certificate that cannot be read or parsed is treated as expiring: a
+    /// server that does not know should renew rather than gamble.
     fn needs_renewal(&self) -> Outcome<bool> {
         let cert_path = self.cache.certificate_path();
         if !cert_path.exists() {
             return Ok(true);
         }
-        let md = match fs::metadata(&cert_path) {
-            Ok(m) => m,
-            Err(e) => return Err(err!(e,
-                "Failed to stat cached cert at {:?}.", cert_path;
-                IO, File, Read)),
+        let pem = match fs::read(&cert_path) {
+            Ok(b)  => b,
+            Err(e) => {
+                warn!("Cached cert at {:?} could not be read ({}); renewing.",
+                    cert_path, e);
+                return Ok(true);
+            }
         };
-        let modified = match md.modified() {
-            Ok(t) => t,
-            Err(e) => return Err(err!(e,
-                "Filesystem does not report a modification time for {:?}.",
-                cert_path;
-                IO, File, Read)),
-        };
-        let age = match SystemTime::now().duration_since(modified) {
-            Ok(d) => d,
-            Err(_) => return Ok(true), // clock skew, err on the side of renewing
-        };
-        Ok(age >= RENEWAL_THRESHOLD)
+        Ok(tls::certificate_expires_within(&pem, RENEWAL_LEAD_SECS))
     }
 
     /// Drive one full issuance through `AcmeClient`, persist the result
@@ -350,9 +353,10 @@ impl AcmeRenewer {
 const RENEWAL_POLL_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Cached cert age beyond which a renewal is triggered. Let's Encrypt
-/// issues 90-day certs; renewing at 60 days gives us a one-month safety
-/// margin before expiry and matches the community convention.
-const RENEWAL_THRESHOLD: Duration = Duration::from_secs(60 * 24 * 60 * 60);
+/// issues 90-day certs; renewing once a month of life remains gives a
+/// generous window to notice and fix a failing renewal, and matches the
+/// community convention.
+const RENEWAL_LEAD_SECS: i64 = 30 * 24 * 60 * 60;
 
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
