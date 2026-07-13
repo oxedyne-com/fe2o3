@@ -2280,6 +2280,7 @@ dependencies = [
  "oxedyne_fe2o3_num",
  "oxedyne_fe2o3_stds",
  "oxedyne_fe2o3_syntax",
+ "oxedyne_fe2o3_sys",
  "oxedyne_fe2o3_test",
  "oxedyne_fe2o3_text",
  "rand 0.8.5",

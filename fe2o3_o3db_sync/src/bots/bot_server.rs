@@ -6,7 +6,6 @@ use crate::{
 
 use oxedyne_fe2o3_core::{
     prelude::*,
-    channels::Recv,
 };
 use oxedyne_fe2o3_jdat::id::NumIdDat;
 
@@ -61,12 +60,15 @@ impl<
 
     fn listen(&mut self) -> LoopBreak {
         // INTERNAL
-        match self.chan_in().recv_timeout(constant::SERVER_INT_CHANNEL_CHECK_INTERVAL) {
-            Recv::Empty => (),
-            Recv::Result(Err(e)) => self.err_cannot_receive(err!(e,
+        // Block until a message arrives.  The server bot has no periodic maintenance of its
+        // own, so it must sleep rather than poll the channel, otherwise an idle database burns
+        // a CPU core.  A shutdown is delivered as an `OzoneMsg::Finish` on this same channel,
+        // which wakes the blocking receive immediately.
+        match self.chan_in().recv() {
+            Err(e) => self.err_cannot_receive(err!(e,
                 "{}: Waiting for message on internal channel.", self.ozid();
-                Channel, Read)),
-            Recv::Result(Ok(msg)) => match msg {
+                IO, Channel)),
+            Ok(msg) => match msg {
                 OzoneMsg::Get { key, schms2, resp } => {
                     match self.api().get_wait(&key, schms2.as_ref()) {
                         Err(e) => self.error(err!(e,

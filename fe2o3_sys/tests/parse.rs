@@ -142,3 +142,15 @@ fn proc_self_status_parses() -> Outcome<()> {
     assert_eq!(p.involuntary_ctxt, 56);
     Ok(())
 }
+
+#[test]
+fn proc_self_stat_cpu_ticks_parses() -> Outcome<()> {
+    // A synthetic /proc/self/stat line whose comm field deliberately
+    // contains spaces and brackets to exercise the "parse after the
+    // final ')'" logic.  utime is field 14 (value 30) and stime is
+    // field 15 (value 12), so the sum is 42.
+    let sample = "1234 (odd )name) ) R 1 1234 1234 0 -1 4194560 100 0 0 0 30 12 0 0 20 0 8 0 999";
+    let ticks = res!(ProcSelf::cpu_ticks_from_stat(sample));
+    assert_eq!(ticks, 42);
+    Ok(())
+}

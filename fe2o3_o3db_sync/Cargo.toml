@@ -47,3 +47,4 @@ seahash = "4.0.1"
 
 [dev-dependencies]
 oxedyne_fe2o3_test 				= { path = "../fe2o3_test" }
+oxedyne_fe2o3_sys 				= { path = "../fe2o3_sys" }

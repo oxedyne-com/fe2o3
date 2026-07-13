@@ -71,6 +71,50 @@ impl ProcSelf {
     }
 }
 
+impl ProcSelf {
+    /// Cumulative CPU time (user plus system) consumed by the current
+    /// process, in kernel clock ticks.  Read from `/proc/self/stat`
+    /// fields `utime` and `stime`.  On Linux the tick rate is
+    /// conventionally 100 Hz, so one tick is 10 ms; comparing two
+    /// samples taken a known interval apart gives the fraction of a
+    /// core the process is burning.  A process that blocks while idle
+    /// accrues almost no ticks, whereas one that busy-polls accrues
+    /// them continuously.
+    pub fn cpu_ticks() -> Outcome<u64> {
+        let content = res!(read_to_string("/proc/self/stat"));
+        Self::cpu_ticks_from_stat(&content)
+    }
+
+    /// Parse `utime + stime` from a `/proc/self/stat` body.  The
+    /// second field (`comm`) can itself contain spaces and brackets,
+    /// so parsing begins after the final `)`.
+    pub fn cpu_ticks_from_stat(content: &str) -> Outcome<u64> {
+        let tail = match content.rfind(')') {
+            Some(i) => &content[i + 1..],
+            None    => return Err(err!(
+                "No comm field terminator ')' found in /proc/self/stat body.";
+                Input, Invalid, Decode)),
+        };
+        // After the `)`, the first token is field 3 (state), so utime
+        // (field 14) and stime (field 15) sit at indices 11 and 12 of
+        // this zero-based token list.
+        let toks: Vec<&str> = tail.split_whitespace().collect();
+        let utime = match toks.get(11) {
+            Some(t) => res!(parse_num::<u64>(t, "utime")),
+            None    => return Err(err!(
+                "Missing utime field in /proc/self/stat.";
+                Input, Missing, Decode)),
+        };
+        let stime = match toks.get(12) {
+            Some(t) => res!(parse_num::<u64>(t, "stime")),
+            None    => return Err(err!(
+                "Missing stime field in /proc/self/stat.";
+                Input, Missing, Decode)),
+        };
+        Ok(utime.saturating_add(stime))
+    }
+}
+
 /// Parse a value of the form `<number> kB` into `u64` kilobytes.
 fn parse_kb(rest: &str, field: &str) -> Outcome<u64> {
     let tok = match rest.split_whitespace().next() {

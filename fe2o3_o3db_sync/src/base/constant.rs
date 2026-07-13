@@ -90,7 +90,8 @@ pub const HEALTH_CHECK_INTERVAL:        Duration = Duration::from_secs(60);
 // Busy waiting intervals.
 pub const CHECK_INTERVAL:                       Duration = Duration::from_millis(100);
 pub const CONFIGWATCHER_CHECK_INTERVAL_SECS:    u64 = 3;
-pub const SERVER_INT_CHANNEL_CHECK_INTERVAL:    Duration = Duration::from_nanos(1_000);
+// The server bot blocks on its internal channel rather than polling, so no channel check
+// interval is needed.  The external UDP socket, when enabled, reads with this timeout.
 pub const SERVER_EXT_SOCKET_CHECK_INTERVAL:     Duration = Duration::from_nanos(999_000);
 
 // Timeouts.
