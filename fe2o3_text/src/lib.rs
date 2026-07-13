@@ -25,6 +25,7 @@ pub mod access;
 pub mod base2x;
 pub mod core;
 pub mod highlight;
+pub mod html;
 pub mod lines;
 pub mod pattern;
 pub mod split;
