@@ -454,7 +454,7 @@ impl Certificate {
         // ACME is orthogonal to dev/prod mode: if it's on, use it; if it's
         // off, fall back to loading static certificates from disk.
         if acme_cfg.enabled {
-            Self::load_acme(&vhosts, &acme_cfg, root)
+            Self::load_acme(cfg, &vhosts, &acme_cfg, root)
         } else {
             Self::load_static(cfg, &vhosts, root, dev_mode)
         }
@@ -531,7 +531,13 @@ impl Certificate {
     /// returns immediately. The first issuance (if the cache is empty) or
     /// any periodic renewal runs on the background task that
     /// [`AcmeRenewer::run_forever`] provides.
+    ///
+    /// The certificate names every vhost hostname, the hostname of an enabled
+    /// mail listener, and every `acme.extra_domains` entry. A name absent from
+    /// that set has no renewal path, so leaving one out does not degrade
+    /// gracefully -- it works until the certificate expires and then fails.
     fn load_acme(
+        cfg:        &ServerConfig,
         vhosts:     &[VhostConfig],
         acme_cfg:   &AcmeConfig,
         root:       &NormPathBuf,
@@ -545,14 +551,29 @@ impl Certificate {
         }
         let cache_dir = res!(acme_cfg.get_cache_dir(root));
 
-        // Collect every hostname across every vhost, preserving order.
+        // Collect the names to certify, preserving order and ignoring
+        // duplicates (a mail hostname is commonly also a vhost).
         let mut all_hostnames: Vec<String> = Vec::new();
+        let add = |h: &String, out: &mut Vec<String>| {
+            if !h.is_empty() && !out.iter().any(|x| x.eq_ignore_ascii_case(h)) {
+                out.push(h.clone());
+            }
+        };
         for vh in vhosts {
             for h in &vh.hostnames {
-                if !all_hostnames.iter().any(|x| x.eq_ignore_ascii_case(h)) {
-                    all_hostnames.push(h.clone());
-                }
+                add(h, &mut all_hostnames);
             }
+        }
+        // Steel's mail listeners share this resolver, so the greeting
+        // hostname must be certified or every IMAP and SMTP client will
+        // reject the connection on a name mismatch.
+        if let Some(mail_cfg) = res!(cfg.get_mail()) {
+            if mail_cfg.enabled {
+                add(&mail_cfg.hostname, &mut all_hostnames);
+            }
+        }
+        for d in &acme_cfg.extra_domains {
+            add(d, &mut all_hostnames);
         }
         if all_hostnames.is_empty() {
             return Err(err!(

@@ -1358,7 +1358,9 @@ impl VhostConfig {
 ///
 /// When `enabled` is `true`, Steel will request and automatically renew TLS
 /// certificates for every configured vhost hostname via the TLS-ALPN-01
-/// challenge on the same port Steel is already listening on.
+/// challenge on the same port Steel is already listening on. The hostname of
+/// an enabled mail listener is included automatically, as are any
+/// `extra_domains`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AcmeConfig {
     /// Master switch for ACME. When `false`, certificates are loaded from disk.
@@ -1371,6 +1373,17 @@ pub struct AcmeConfig {
     /// Directory where the account key and issued certificates are persisted,
     /// relative to the app root.
     pub cache_dir_rel:  String,
+    /// Additional hostnames to name in the certificate, beyond the vhost
+    /// hostnames and the mail listener.
+    ///
+    /// Steel can only issue for a name that resolves to it, but it need not be
+    /// the service that ultimately *serves* that name. Where another daemon on
+    /// the same host terminates TLS for a hostname Steel does not route -- an
+    /// MTA, say -- listing it here puts it in the certificate Steel already
+    /// renews, and that daemon can be pointed at the result. Without it such a
+    /// name has no renewal path at all, and the failure is silent until the
+    /// certificate expires.
+    pub extra_domains:  Vec<String>,
 }
 
 impl Default for AcmeConfig {
@@ -1382,6 +1395,7 @@ impl Default for AcmeConfig {
             // everything works end to end on staging.
             directory_url:  fmt!("https://acme-staging-v02.api.letsencrypt.org/directory"),
             cache_dir_rel:  fmt!("./tls/acme"),
+            extra_domains:  Vec::new(),
         }
     }
 }
@@ -1402,6 +1416,23 @@ impl AcmeConfig {
         if let Some(Dat::Str(s)) = m.get(&dat!("cache_dir_rel")) {
             out.cache_dir_rel = s.clone();
         }
+        match m.get(&dat!("extra_domains")) {
+            Some(Dat::List(l)) => {
+                for d in l {
+                    if let Dat::Str(s) = d {
+                        out.extra_domains.push(s.clone());
+                    }
+                }
+            }
+            Some(Dat::Vek(v)) => {
+                for d in v.iter() {
+                    if let Dat::Str(s) = d {
+                        out.extra_domains.push(s.clone());
+                    }
+                }
+            }
+            _ => (),
+        }
         Ok(out)
     }
 
@@ -1412,6 +1443,9 @@ impl AcmeConfig {
         m.insert(dat!("contact_email"), dat!(self.contact_email.clone()));
         m.insert(dat!("directory_url"), dat!(self.directory_url.clone()));
         m.insert(dat!("cache_dir_rel"), dat!(self.cache_dir_rel.clone()));
+        m.insert(dat!("extra_domains"), Dat::List(
+            self.extra_domains.iter().map(|d| dat!(d.clone())).collect()
+        ));
         m
     }
 
