@@ -28,19 +28,27 @@ use crate::{
     constant,
     http::{
         header::HttpMethod,
-        msg::HttpMessage,
+        msg::{
+            HttpMessage,
+            ReadLimits,
+        },
     },
 };
 
 use oxedyne_fe2o3_core::prelude::*;
 
 use std::{
+    net::SocketAddr,
     pin::Pin,
     sync::Arc,
 };
 
 use tokio::{
-    io::AsyncWriteExt,
+    io::{
+        AsyncRead,
+        AsyncWrite,
+        AsyncWriteExt,
+    },
     net::TcpStream,
 };
 use tokio_rustls::{
@@ -91,6 +99,62 @@ pub fn format_request(
 
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
+// │ THE EXCHANGE                                                              │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// Write one formatted request to an open stream and read one response back.
+///
+/// The half of a request that does not care whether the stream underneath it is
+/// TLS-wrapped, and so is shared by all four entry points below.
+async fn exchange<S>(
+    stream:         &mut S,
+    request_bytes:  &[u8],
+    peer:           &str,
+    limits:         Option<&ReadLimits>,
+)
+    -> Outcome<HttpMessage>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    match stream.write_all(request_bytes).await {
+        Ok(()) => (),
+        Err(e) => return Err(err!(e,
+            "Failed to write HTTP request body to {}.", peer;
+            IO, Network, Wire, Write)),
+    }
+    match stream.flush().await {
+        Ok(()) => (),
+        Err(e) => return Err(err!(e,
+            "Failed to flush HTTP request to {}.", peer;
+            IO, Network, Wire, Write)),
+    }
+
+    let result = HttpMessage::read::<
+        { constant::HTTP_DEFAULT_HEADER_CHUNK_SIZE },
+        { constant::HTTP_DEFAULT_BODY_CHUNK_SIZE },
+        _,
+    >(
+        Pin::new(stream),
+        &Vec::new(),
+        Some(false),
+        limits,
+    ).await;
+
+    match result {
+        Ok((Some(msg), _remnant)) => Ok(msg),
+        Ok((None, _)) => Err(err!(
+            "Server at {} closed the connection before sending a \
+            complete HTTP response.",
+            peer;
+            IO, Network, Wire, Read, Missing)),
+        Err(e) => Err(err!(e,
+            "Failed to read or parse the HTTP response from {}.", peer;
+            IO, Network, Wire, Read)),
+    }
+}
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
 // │ HTTP REQUEST (PLAIN)                                                      │
 // └───────────────────────────────────────────────────────────────────────────┘
 
@@ -118,49 +182,53 @@ pub async fn http_request(
     -> Outcome<HttpMessage>
 {
     let request_bytes = format_request(method, host, path, headers, body);
+    let peer = fmt!("{}:{}", host, port);
 
     let mut stream = match TcpStream::connect((host, port)).await {
         Ok(s) => s,
         Err(e) => return Err(err!(e,
-            "Failed to open a TCP connection to {}:{}.", host, port;
+            "Failed to open a TCP connection to {}.", peer;
             IO, Network, Init)),
     };
 
-    match stream.write_all(&request_bytes).await {
-        Ok(()) => (),
-        Err(e) => return Err(err!(e,
-            "Failed to write HTTP request body to {}:{}.", host, port;
-            IO, Network, Wire, Write)),
-    }
-    match stream.flush().await {
-        Ok(()) => (),
-        Err(e) => return Err(err!(e,
-            "Failed to flush HTTP request to {}:{}.", host, port;
-            IO, Network, Wire, Write)),
-    }
+    exchange(&mut stream, &request_bytes, &peer, None).await
+}
 
-    let result = HttpMessage::read::<
-        { constant::HTTP_DEFAULT_HEADER_CHUNK_SIZE },
-        { constant::HTTP_DEFAULT_BODY_CHUNK_SIZE },
-        _,
-    >(
-        Pin::new(&mut stream),
-        &Vec::new(),
-        Some(false),
-        None,
-    ).await;
+/// Perform a plain-HTTP request against an address the caller has already
+/// vetted, rather than a host name this function would resolve for itself.
+///
+/// The distinction is the whole point. A server that connects somewhere its
+/// user named must check the address first (see
+/// [`crate::addr::resolve_public`]), and a check is worthless if the name is
+/// then resolved a second time to dial it: the answer can change in between,
+/// and DNS rebinding is precisely that trick. So the caller resolves once,
+/// vets what came back, and hands the surviving address here. `host` is still
+/// needed, but only for the `Host` header the origin server reads.
+///
+/// `limits` bounds the response, so a caller fetching a page on a user's
+/// behalf can cap what it is willing to read.
+pub async fn http_request_at(
+    addr:           SocketAddr,
+    host:           &str,
+    method:         HttpMethod,
+    path:           &str,
+    headers:        &[(&str, &str)],
+    body:           &[u8],
+    limits:         Option<&ReadLimits>,
+)
+    -> Outcome<HttpMessage>
+{
+    let request_bytes = format_request(method, host, path, headers, body);
+    let peer = fmt!("{} ({})", host, addr);
 
-    match result {
-        Ok((Some(msg), _remnant)) => Ok(msg),
-        Ok((None, _)) => Err(err!(
-            "Server at {}:{} closed the connection before sending a \
-            complete HTTP response.",
-            host, port;
-            IO, Network, Wire, Read, Missing)),
-        Err(e) => Err(err!(e,
-            "Failed to read or parse the HTTP response from {}:{}.", host, port;
-            IO, Network, Wire, Read)),
-    }
+    let mut stream = match TcpStream::connect(addr).await {
+        Ok(s) => s,
+        Err(e) => return Err(err!(e,
+            "Failed to open a TCP connection to {}.", peer;
+            IO, Network, Init)),
+    };
+
+    exchange(&mut stream, &request_bytes, &peer, limits).await
 }
 
 
@@ -197,17 +265,65 @@ pub async fn https_request(
     // Format the request bytes up front so any failure from this point on is
     // a real network or TLS fault, not a local formatting bug.
     let request_bytes = format_request(method, host, path, headers, body);
+    let peer = fmt!("{}:{}", host, port);
 
     // TCP connect to the remote server.
     let tcp = match TcpStream::connect((host, port)).await {
         Ok(s) => s,
         Err(e) => return Err(err!(e,
-            "Failed to open a TCP connection to {}:{}.", host, port;
+            "Failed to open a TCP connection to {}.", peer;
             IO, Network, Init)),
     };
 
-    // TLS handshake. rustls needs the host name as a validated `ServerName`
-    // so it can check SNI and verify the server certificate's SANs.
+    let mut stream = res!(tls_wrap(tcp, host, &peer, tls_config).await);
+    exchange(&mut stream, &request_bytes, &peer, None).await
+}
+
+/// Perform an HTTPS request against an address the caller has already vetted.
+///
+/// The TLS sibling of [`http_request_at`], and vetted for the same reason: the
+/// address is dialled as given, while `host` names the certificate that must
+/// validate and fills the `Host` header. Pinning the address does not weaken
+/// the TLS check -- the server still has to present a certificate for the name
+/// the caller asked for.
+pub async fn https_request_at(
+    addr:           SocketAddr,
+    host:           &str,
+    method:         HttpMethod,
+    path:           &str,
+    headers:        &[(&str, &str)],
+    body:           &[u8],
+    tls_config:     Arc<ClientConfig>,
+    limits:         Option<&ReadLimits>,
+)
+    -> Outcome<HttpMessage>
+{
+    let request_bytes = format_request(method, host, path, headers, body);
+    let peer = fmt!("{} ({})", host, addr);
+
+    let tcp = match TcpStream::connect(addr).await {
+        Ok(s) => s,
+        Err(e) => return Err(err!(e,
+            "Failed to open a TCP connection to {}.", peer;
+            IO, Network, Init)),
+    };
+
+    let mut stream = res!(tls_wrap(tcp, host, &peer, tls_config).await);
+    exchange(&mut stream, &request_bytes, &peer, limits).await
+}
+
+/// Complete the TLS handshake over an open TCP stream.
+///
+/// rustls needs the host name as a validated `ServerName` so it can send the
+/// right SNI and check the server certificate's SANs against it.
+async fn tls_wrap(
+    tcp:            TcpStream,
+    host:           &str,
+    peer:           &str,
+    tls_config:     Arc<ClientConfig>,
+)
+    -> Outcome<tokio_rustls::client::TlsStream<TcpStream>>
+{
     let server_name = match ServerName::try_from(host.to_string()) {
         Ok(n) => n,
         Err(e) => return Err(err!(e,
@@ -215,50 +331,11 @@ pub async fn https_request(
             IO, Network, Invalid, Input)),
     };
     let connector = TlsConnector::from(tls_config);
-    let mut stream = match connector.connect(server_name, tcp).await {
-        Ok(s) => s,
-        Err(e) => return Err(err!(e,
-            "TLS handshake with {}:{} failed.", host, port;
-            IO, Network, Init)),
-    };
-
-    // Write the full request and flush.
-    match stream.write_all(&request_bytes).await {
-        Ok(()) => (),
-        Err(e) => return Err(err!(e,
-            "Failed to write HTTP request body to {}:{}.", host, port;
-            IO, Network, Wire, Write)),
-    }
-    match stream.flush().await {
-        Ok(()) => (),
-        Err(e) => return Err(err!(e,
-            "Failed to flush HTTP request to {}:{}.", host, port;
-            IO, Network, Wire, Write)),
-    }
-
-    // Read one response. The server will close the connection after
-    // responding because we sent `Connection: close`.
-    let result = HttpMessage::read::<
-        { constant::HTTP_DEFAULT_HEADER_CHUNK_SIZE },
-        { constant::HTTP_DEFAULT_BODY_CHUNK_SIZE },
-        _,
-    >(
-        Pin::new(&mut stream),
-        &Vec::new(),
-        Some(false),
-        None,
-    ).await;
-
-    match result {
-        Ok((Some(msg), _remnant)) => Ok(msg),
-        Ok((None, _)) => Err(err!(
-            "Server at {}:{} closed the connection before sending a \
-            complete HTTP response.",
-            host, port;
-            IO, Network, Wire, Read, Missing)),
+    match connector.connect(server_name, tcp).await {
+        Ok(s) => Ok(s),
         Err(e) => Err(err!(e,
-            "Failed to read or parse the HTTP response from {}:{}.", host, port;
-            IO, Network, Wire, Read)),
+            "TLS handshake with {} failed.", peer;
+            IO, Network, Init)),
     }
 }
 

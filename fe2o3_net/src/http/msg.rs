@@ -306,6 +306,20 @@ impl HttpMessage {
                 let mut msg = HttpMessage::default();
                 msg.header = header;
 
+                // A chunked body carries its own lengths on the wire, and
+                // says so instead of declaring a `Content-Length`. Much of
+                // the web answers this way, so a client that cannot decode
+                // it reads every such page as empty.
+                if is_chunked(&msg.header.fields) {
+                    let (body, rest) = res!(read_chunked::<BODY_CHUNK_SIZE, _>(
+                        stream.as_mut(),
+                        remnant,
+                        limits,
+                    ).await);
+                    msg.body = body;
+                    return Ok((Some(msg), rest));
+                }
+
                 if content_length > 0 {
                     let mut body = Vec::with_capacity(content_length);
                     body.extend_from_slice(&remnant);
@@ -316,6 +330,21 @@ impl HttpMessage {
                         let result = stream.as_mut().read(&mut chunk).await;
                         match result {
                             Ok(0) => {
+                                // A reply to `HEAD` states the length of a body
+                                // it will never send, so the stream ends with
+                                // nothing received -- and that is complete, not
+                                // a failure, or a client could never make a HEAD
+                                // request at all. A response that delivered some
+                                // of a declared body and then broke off is a
+                                // genuine truncation, and still an error: an
+                                // empty body is the tell that distinguishes the
+                                // two, since HEAD yields no bytes and a cut-off
+                                // GET yields the part that arrived. A truncated
+                                // *request* is a broken client, dropped as before.
+                                if is_request == Some(false) && body.is_empty() {
+                                    msg.body = body;
+                                    return Ok((Some(msg), Vec::new()));
+                                }
                                 warn!("UnexpectedEof treated as connection closure.");
                                 return Ok((None, body.to_vec()));
                             }
@@ -530,6 +559,290 @@ impl HttpMessage {
         }
     }
 }
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ CHUNKED TRANSFER ENCODING                                                 │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// Whether the message says its body arrives in chunks (RFC 9112 §7.1).
+///
+/// `chunked` is the last coding applied, so a value of `gzip, chunked` is
+/// chunked too, and the test is for its presence in the list.
+pub fn is_chunked(fields: &HeaderFields) -> bool {
+    match fields.get_one(&HeaderName::TransferEncoding) {
+        Some(v) => fmt!("{}", v).to_lowercase().contains("chunked"),
+        None    => false,
+    }
+}
+
+/// Read a chunked body to its terminating zero-length chunk, returning the
+/// decoded bytes and whatever the peer sent after them.
+///
+/// Each chunk is a hex length, optional extensions after a `;`, a CRLF, that
+/// many bytes, and another CRLF. A zero length ends the body, after which the
+/// peer may send trailer fields, which are consumed and discarded.
+///
+/// `limits.max_body_bytes` bounds the *decoded* size: a chunked body declares
+/// no total up front, so the only way to bound it is to stop reading when it
+/// gets too big, which is what happens here.
+async fn read_chunked<
+    const BODY_CHUNK_SIZE: usize,
+    R: AsyncRead + Unpin,
+>(
+    mut stream: Pin<&mut R>,
+    remnant:    Vec<u8>,
+    limits:     Option<&ReadLimits>,
+)
+    -> Outcome<(Vec<u8>, Vec<u8>)>
+{
+    let max = limits.and_then(|l| l.max_body_bytes);
+    let mut raw: Vec<u8> = remnant;   // Undecoded bytes not yet consumed.
+    let mut out: Vec<u8> = Vec::new(); // The decoded body.
+
+    loop {
+        // The chunk size line.
+        let line = match res!(take_line::<BODY_CHUNK_SIZE, _>(stream.as_mut(), &mut raw).await) {
+            Some(l) => l,
+            None => return Err(err!(
+                "The peer closed the connection in the middle of a chunked \
+                body, before its terminating chunk.";
+                IO, Network, Wire, Read, Missing)),
+        };
+        let size_txt = match line.split(';').next() {
+            Some(s) => s.trim().to_string(),
+            None    => String::new(),
+        };
+        let size = match usize::from_str_radix(&size_txt, 16) {
+            Ok(n) => n,
+            Err(e) => return Err(err!(e,
+                "A chunked body declared a chunk size of {:?}, which is not a \
+                hexadecimal length.", size_txt;
+                IO, Network, Wire, Read, Invalid)),
+        };
+
+        // The last chunk is empty, and any trailer fields follow it up to a
+        // blank line. They are read so the stream is left where the next
+        // message begins, and are then discarded.
+        if size == 0 {
+            loop {
+                match res!(take_line::<BODY_CHUNK_SIZE, _>(stream.as_mut(), &mut raw).await) {
+                    Some(l) if l.is_empty() => break,
+                    Some(_)                 => continue,
+                    // A peer that hangs up rather than closing off its
+                    // trailers has still sent us the whole body.
+                    None                    => return Ok((out, Vec::new())),
+                }
+            }
+            return Ok((out, raw));
+        }
+
+        if let Some(lim) = max {
+            if out.len().saturating_add(size) > lim {
+                return Err(err!(
+                    "A chunked HTTP body overflowed the configured limit of {} \
+                    bytes.", lim;
+                    IO, Network, Input, TooBig));
+            }
+        }
+
+        // The chunk data, and the CRLF that closes it. The `+ 2` is a checked
+        // add so a hostile chunk-size line, `ffffffffffffffff` and the like,
+        // cannot overflow `usize` into a panic or a wrapped-round short slice.
+        // A caller that set `max_body_bytes` never reaches here with a size
+        // that large -- the limit above trips first -- but a caller that
+        // trusts its peer and set no limit must still not be crashable by one.
+        let need = match size.checked_add(2) {
+            Some(n) => n,
+            None    => return Err(err!(
+                "A chunked body declared a chunk of {} bytes, which is too \
+                large to be a real length.", size;
+                IO, Network, Wire, Read, Invalid)),
+        };
+        while raw.len() < need {
+            if !res!(fill::<BODY_CHUNK_SIZE, _>(stream.as_mut(), &mut raw).await) {
+                return Err(err!(
+                    "The peer closed the connection {} bytes into a chunk it \
+                    said was {} bytes long.", raw.len(), size;
+                    IO, Network, Wire, Read, Missing));
+            }
+        }
+        out.extend_from_slice(&raw[..size]);
+        raw.drain(..need);
+    }
+}
+
+/// Take the next CRLF-terminated line off the buffer, reading more from the
+/// stream until there is one. `None` means the peer closed first.
+async fn take_line<
+    const BODY_CHUNK_SIZE: usize,
+    R: AsyncRead + Unpin,
+>(
+    mut stream: Pin<&mut R>,
+    raw:        &mut Vec<u8>,
+)
+    -> Outcome<Option<String>>
+{
+    loop {
+        if let Some(i) = raw.windows(2).position(|w| w == b"\r\n") {
+            let line = String::from_utf8_lossy(&raw[..i]).to_string();
+            raw.drain(..i + 2);
+            return Ok(Some(line));
+        }
+        if !res!(fill::<BODY_CHUNK_SIZE, _>(stream.as_mut(), raw).await) {
+            return Ok(None);
+        }
+    }
+}
+
+/// Read one more chunk of bytes onto the buffer. `false` means the peer closed.
+async fn fill<
+    const BODY_CHUNK_SIZE: usize,
+    R: AsyncRead + Unpin,
+>(
+    mut stream: Pin<&mut R>,
+    raw:        &mut Vec<u8>,
+)
+    -> Outcome<bool>
+{
+    let mut buf = [0u8; BODY_CHUNK_SIZE];
+    match stream.as_mut().read(&mut buf).await {
+        Ok(0)  => Ok(false),
+        Ok(n)  => {
+            raw.extend_from_slice(&buf[..n]);
+            Ok(true)
+        }
+        Err(e) => Err(err!(e,
+            "Reading a chunked HTTP body."; IO, Network, Wire, Read)),
+    }
+}
+
+
+#[cfg(test)]
+mod body_tests {
+    use super::*;
+
+    /// Read one message off a buffer of wire bytes, as a client reading a
+    /// response does.
+    fn read_reply(wire: &str, is_request: Option<bool>) -> Outcome<Option<HttpMessage>> {
+        let bytes = wire.as_bytes();
+        let mut stream = std::io::Cursor::new(bytes);
+        let rt = res!(tokio::runtime::Runtime::new());
+        let (msg, _rest) = res!(rt.block_on(HttpMessage::read::<
+            { constant::HTTP_DEFAULT_HEADER_CHUNK_SIZE },
+            { constant::HTTP_DEFAULT_BODY_CHUNK_SIZE },
+            _,
+        >(
+            Pin::new(&mut stream),
+            &Vec::new(),
+            is_request,
+            None,
+        )));
+        Ok(msg)
+    }
+
+    #[test]
+    fn test_a_chunked_response_body_is_decoded() -> Outcome<()> {
+        // Much of the web answers this way, and a client that cannot decode
+        // it reads every such page as empty.
+        let wire = "HTTP/1.1 200 OK\r\n\
+            Content-Type: text/html\r\n\
+            Transfer-Encoding: chunked\r\n\
+            \r\n\
+            9\r\n<!doctype\r\n\
+            6\r\n html>\r\n\
+            0\r\n\r\n";
+        let msg = match res!(read_reply(wire, Some(false))) {
+            Some(m) => m,
+            None    => return Err(err!(
+                "A chunked response was read as no response at all.";
+                Test, Missing)),
+        };
+        assert_eq!(msg.body, b"<!doctype html>");
+        Ok(())
+    }
+
+    #[test]
+    fn test_a_chunk_may_carry_extensions_and_be_followed_by_trailers() -> Outcome<()> {
+        let wire = "HTTP/1.1 200 OK\r\n\
+            Transfer-Encoding: chunked\r\n\
+            \r\n\
+            5;name=value\r\nhello\r\n\
+            0\r\n\
+            X-Checksum: 1234\r\n\
+            \r\n";
+        let msg = match res!(read_reply(wire, Some(false))) {
+            Some(m) => m,
+            None    => return Err(err!(
+                "A chunked response with trailers was read as no response.";
+                Test, Missing)),
+        };
+        assert_eq!(msg.body, b"hello");
+        Ok(())
+    }
+
+    #[test]
+    fn test_a_reply_to_head_states_a_length_it_never_sends() -> Outcome<()> {
+        // A `HEAD` reply carries the `Content-Length` the body *would* have
+        // had, and then no body. Waiting for those bytes waits forever, so a
+        // client that treats the close as a failure cannot make the request
+        // at all.
+        let wire = "HTTP/1.1 200 OK\r\n\
+            Content-Type: text/html\r\n\
+            Content-Length: 5120\r\n\
+            \r\n";
+        let msg = match res!(read_reply(wire, Some(false))) {
+            Some(m) => m,
+            None    => return Err(err!(
+                "A reply to HEAD was read as no reply at all.";
+                Test, Missing)),
+        };
+        assert!(msg.body.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn test_a_truncated_request_is_still_dropped() -> Outcome<()> {
+        // The tolerance above is for responses only. A request whose body
+        // stops short is a broken client, and is dropped as it always was.
+        let wire = "POST /x HTTP/1.1\r\n\
+            Host: example.test\r\n\
+            Content-Length: 100\r\n\
+            \r\n\
+            short";
+        assert!(res!(read_reply(wire, None)).is_none());
+        assert!(res!(read_reply(wire, Some(true))).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn test_a_truncated_response_body_is_dropped_not_kept() -> Outcome<()> {
+        // A response that delivered part of a declared body and then broke off
+        // is a genuine truncation. The HEAD tolerance keys on an *empty* body,
+        // so this partial one must not be waved through as complete.
+        let wire = "HTTP/1.1 200 OK\r\n\
+            Content-Type: text/html\r\n\
+            Content-Length: 1000\r\n\
+            \r\n\
+            only these bytes arrived";
+        assert!(res!(read_reply(wire, Some(false))).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn test_a_chunk_size_that_would_overflow_is_an_error_not_a_panic() -> Outcome<()> {
+        // A hostile chunk-size line of `usize::MAX` once overflowed the `+ 2`
+        // that reads past the chunk's own CRLF, panicking the reader. It is now
+        // rejected as the impossible length it is.
+        let wire = "HTTP/1.1 200 OK\r\n\
+            Transfer-Encoding: chunked\r\n\
+            \r\n\
+            ffffffffffffffff\r\n";
+        assert!(read_reply(wire, Some(false)).is_err());
+        Ok(())
+    }
+}
+
 
 pub struct HttpMessageReader<
     'a,
