@@ -1592,6 +1592,16 @@ pub struct ServerConfig {
     /// every HTTPS response when non-zero. A value of `31536000` (one
     /// year) is conventional for production. Defaults to `0` (no HSTS).
     pub hsts_max_age_secs:              u32,
+    /// `Cache-Control` `max-age` in seconds for static assets, which is how
+    /// long a browser may reuse one without asking. Entry documents are
+    /// excluded and always revalidate, since a deploy that changes one is
+    /// invisible to anyone still holding the old copy. Raise this above zero
+    /// only when asset filenames carry a content hash: an asset cached under a
+    /// stable name outlives the deploy that replaced it. Defaults to `0`, which
+    /// revalidates everything -- cheap, because the entity tag turns an
+    /// unchanged asset into a bodiless `304`.
+    #[optional]
+    pub static_max_age_secs:            u32,
     /// Optional plaintext HTTP listener bound to `127.0.0.1` for the
     /// admin dashboard only. When non-zero, Steel binds this port on
     /// the loopback interface and serves the `/admin/*` routes
@@ -1714,6 +1724,7 @@ impl Default for ServerConfig {
             server_port_tcp:                8443,
             server_port_tcp_plaintext:      0,      // disabled by default
             hsts_max_age_secs:              0,      // disabled by default
+            static_max_age_secs:            0,      // revalidate every asset
             admin_local_port:               0,      // disabled by default
             session_expiry_default_secs:    604_800, // 1 week.
             ws_ping_interval_secs:          30,

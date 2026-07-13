@@ -9,6 +9,7 @@ use crate::srv::{
         self,
         ApiHandlerRegistry,
     },
+    cache,
     cfg::{
         ApiRoute,
         ServerConfig,
@@ -355,18 +356,62 @@ impl<
             };
             
             let id_clone = id.clone();
+            let req_headers_clone = req_headers.clone();
+            let static_max_age_secs = self.cfg.static_max_age_secs;
             let result = tokio::task::spawn_blocking(move || {
                 tokio::runtime::Handle::current().block_on(async {
                     Ok(match tokio::fs::File::open(&abs_path).await {
                         Ok(mut file) => {
+                            let content_type = RequestPath::content_type(abs_path.as_path());
+                            let content_type_str = content_type.to_string();
+
+                            // In development an entry document is rewritten on the
+                            // way out to carry the refresh hook, so the file on disk
+                            // is not the entity being sent, and no tag drawn from it
+                            // would describe the response. Such a document is never
+                            // cached, and never revalidated -- it is simply resent.
+                            let cacheable = !(dev_mode && cache::is_document(&content_type_str));
+
+                            // Ask the filesystem before reading the file. A client
+                            // that already holds this entity needs no body, and
+                            // reading one would be the very cost the tag exists to
+                            // avoid.
+                            let validators = if cacheable {
+                                let meta = res!(file.metadata().await);
+                                let etag = res!(cache::entity_tag(&meta));
+                                let directive = cache::cache_control(
+                                    &content_type_str,
+                                    static_max_age_secs,
+                                );
+                                Some((etag, directive))
+                            } else {
+                                None
+                            };
+
+                            if let Some((etag, directive)) = &validators {
+                                if cache::is_current(&req_headers_clone, etag) {
+                                    debug!("{}: {:?} is unchanged; 304.", id_clone, abs_path);
+                                    return Ok(res!(cache::not_modified(
+                                        etag.clone(),
+                                        directive.clone(),
+                                    )));
+                                }
+                            }
+
                             let mut contents = Vec::new();
                             match file.read_to_end(&mut contents).await {
                                 Ok(_n) => {
-                                    // Check for HTML content and dev mode.
-                                    let content_type = RequestPath::content_type(abs_path.as_path());
-                                    let content_type_str = content_type.to_string();
-                                    let response = HttpMessage::new_response(HttpStatus::OK)
+                                    let mut response = HttpMessage::new_response(HttpStatus::OK)
                                         .with_field(HeaderName::ContentType, content_type);
+
+                                    if let Some((etag, directive)) = validators {
+                                        response = response
+                                            .with_field(HeaderName::ETag, res!(
+                                                HeaderFieldValue::new(&HeaderName::ETag, &etag)))
+                                            .with_field(HeaderName::CacheControl, res!(
+                                                HeaderFieldValue::new(
+                                                    &HeaderName::CacheControl, &directive)));
+                                    }
 
                                     if dev_mode && content_type_str.contains("text/html") {
                                         let contents_str = res!(String::from_utf8(contents.clone()));
