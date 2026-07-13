@@ -1,6 +1,11 @@
 //! A library implementing Jason's Data And Type (JDAT) scheme, a typed superset of JSON providing
 //! both text and binary serialisation.
 //!
+//! The two encodings carry the same information and each has its own module. The text form, in
+//! [`string`], is the one an author reads and writes, as in `(u8|42)`. The binary form, in
+//! [`bdat`], is BDAT, which stands to JDAT as BSON does to JSON, and is what travels on the wire
+//! and rests on disk.
+//!
 //! JDAT extends JSON by adding:
 //! - Optional type annotations with a rich set of built-in types
 //! - Support for arbitrary-precision numbers and compact binary encoding
@@ -107,7 +112,7 @@
 #[macro_use]
 pub mod macros;
 
-pub mod binary;
+pub mod bdat;
 pub mod cfg;
 pub mod chunk;
 pub mod constant;
