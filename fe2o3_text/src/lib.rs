@@ -34,5 +34,6 @@ pub mod phrase;
 pub mod table;
 
 pub mod fmt;
+pub mod unicode;
 
 pub use core::Text;

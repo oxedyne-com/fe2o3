@@ -42,3 +42,8 @@ Thumbs.db
 *.iml
 
 .srcat/
+
+# The two Unicode bidi conformance suites are 15 MB between them. They are fetched on demand
+# by fe2o3_text/tests/unicode.rs, at the UCD version the committed tables were generated from.
+fe2o3_text/tests/unicode_data/BidiTest.txt
+fe2o3_text/tests/unicode_data/BidiCharacterTest.txt
