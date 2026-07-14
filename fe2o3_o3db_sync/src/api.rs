@@ -613,6 +613,20 @@ impl<
         })
     }
 
+    /// Delete the value held under a key, by appending a tombstone under that same key.
+    ///
+    /// A deletion is a write like any other, and must be framed exactly as an insertion is: the
+    /// cache hash in front of the key, a checksum behind the key and behind the value.  The reader
+    /// that replays a data file to rebuild its index cannot tell a tombstone from an insertion --
+    /// it reads every record the same way -- so a tombstone that is framed differently
+    /// desynchronises the replay at the point it appears, and every record after it is lost.  The
+    /// message is therefore packaged by the one encoder both paths share, never by hand.
+    ///
+    /// # Arguments
+    /// * `k` - The key whose value is to be deleted.
+    /// * `user` - The user the deletion is stamped with.
+    /// * `schms2` - Scheme overrides, if any.
+    /// * `resp` - The channel the writer bot replies on.
     pub fn delete_using_responder(
         &self,
         k:          &Dat,
@@ -622,9 +636,9 @@ impl<
     )
         -> Outcome<()>
     {
-        // 1. Normalise the key.
-        let (kstored, cbwind, _chash) = res!(self.ozone_key_dat(k, schms2));
-        let klen_cache = kstored.len();
+        // 1. Normalise the key.  The cache hash belongs to the stored record, not merely to the
+        //    routing decision, so it is carried through to the writer rather than dropped.
+        let (kstored, cbwind, chash) = res!(self.ozone_key_dat(k, schms2));
 
         // 2. The value we use to indicate deletion is an unencrypted custom usr type.
         let v = Dat::Usr(id::usr_kind_id_deleted(), Some(Box::new(Dat::Empty)));
@@ -638,16 +652,21 @@ impl<
         let mut meta = Meta::new(user);
         res!(meta.stamp_time_now());
 
-        // 5. Send write request, with responder.
-        match bot.send(OzoneMsg::Write {
-            kstored,
-            vstored,
-            klen_cache,
-            cind: None,
-            meta,
-            cbpind: **cbwind.bpind(),
+        // 5. Frame the tombstone through the same encoder an insertion goes through.
+        let msg = res!(Self::package_write(
+            KeyVal {
+                key:    Key::Complete(kstored),
+                val:    vstored,
+                chash,
+                meta,
+                cbpind: **cbwind.bpind(),
+            },
             resp,
-        }) {
+            self.schemes().checksummer().clone(),
+        ));
+
+        // 6. Send write request, with responder.
+        match bot.send(msg) {
             Err(e) => return Err(err!(e,
                 "{}: While sending delete request to wbot {}.",
                 self.ozid(), WorkerInd::new(*cbwind.zind(), bpind);

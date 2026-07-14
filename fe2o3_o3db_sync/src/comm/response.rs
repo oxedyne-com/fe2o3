@@ -1,6 +1,7 @@
 use crate::{
     prelude::*,
     base::id::{
+        self,
         OzoneBotId,
         Ticket,
     },
@@ -135,6 +136,17 @@ impl<
                     Recv::Result(Ok(msg)) => match msg {
                         OzoneMsg::Error(e) => return Err(e),
                         OzoneMsg::Value(Value::Complete(Some((dat, meta)), postgc)) => {
+                            // A deletion is stored as a tombstone value under the deleted key, and
+                            // the reader finds it exactly as it finds any other value.  A key whose
+                            // newest value is a tombstone has no value, so say so here, once, for
+                            // every caller: a deleted key reads as absent, indistinguishable from
+                            // one that was never written.  The tombstone is deliberately left
+                            // unencrypted so that it can be recognised without a key.
+                            if let Dat::Usr(kind, _) = &dat {
+                                if *kind == id::usr_kind_id_deleted() {
+                                    return Ok((None, postgc));
+                                }
+                            }
                             let or_is_some = match or {
                                 Some(or) => or.is_some(),
                                 None => false,

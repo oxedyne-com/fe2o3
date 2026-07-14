@@ -1,5 +1,6 @@
 mod basic;
 mod dal;
+mod delete_replay;
 mod durability;
 mod perf;
 mod scan;
@@ -31,6 +32,7 @@ fn run_tests() -> Outcome<()> {
     res!(dal::test_docs(filter));
     res!(scan::test_scan(filter));
     res!(durability::test_durability(filter));
+    res!(delete_replay::test_delete_replay(filter));
     //res!(perf::test_perf("all"));
 
     Ok(())
