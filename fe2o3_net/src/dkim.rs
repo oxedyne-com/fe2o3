@@ -888,6 +888,43 @@ mod tests {
         b"Hi.\r\n\r\nWe lost the game.  Are you hungry yet?\r\n\r\nJoe.\r\n"
     }
 
+    /// The message RFC 6376 §3.4.5 canonicalises as its worked example.  Note the space before
+    /// the colon in `B`, the tab-folded continuation, and the trailing empty lines -- every one
+    /// of them is a rule under test.
+    const RFC6376_EXAMPLE: &[u8] = b"A: X\r\nB : Y\t\r\n\tZ  \r\n\r\n C \r\nD \t E\r\n\r\n\r\n";
+
+    /// Relaxed *header* canonicalisation, driven through the real code path, must reproduce the
+    /// example output RFC 6376 §3.4.5 publishes.
+    ///
+    /// This is the gap the ed25519 fix left behind.  `test_rfc8463_ed25519_signature_vector_00`
+    /// signs `rfc8463_signing_input()`, which is **hand-typed** -- it bypasses
+    /// `parse_header_block` and `relaxed_value` entirely, so the functions that canonicalise
+    /// every real message were pinned by nothing at all.
+    #[test]
+    fn test_rfc6376_relaxed_header_canonicalisation_00() {
+        let (raw_headers, _body) = match split_headers_body(RFC6376_EXAMPLE) {
+            Ok(pair) => pair,
+            Err(e) => panic!("split: {}", e),
+        };
+        let mut canon = String::new();
+        for (name, value) in parse_header_block(raw_headers) {
+            canon.push_str(&relaxed_header(&name, &value));
+        }
+        assert_eq!(canon, "a:X\r\nb:Y Z\r\n",
+            "relaxed header canonicalisation disagrees with RFC 6376 §3.4.5");
+    }
+
+    /// Relaxed *body* canonicalisation must reproduce the same example's body output.
+    #[test]
+    fn test_rfc6376_relaxed_body_canonicalisation_00() {
+        let (_raw_headers, body) = match split_headers_body(RFC6376_EXAMPLE) {
+            Ok(pair) => pair,
+            Err(e) => panic!("split: {}", e),
+        };
+        assert_eq!(canonicalise_body_relaxed(body), b" C\r\nD E\r\n".to_vec(),
+            "relaxed body canonicalisation disagrees with RFC 6376 §3.4.5");
+    }
+
     /// Relaxed body canonicalisation must produce the RFC's `bh=`.
     #[test]
     fn test_rfc8463_body_hash_00() {

@@ -91,6 +91,21 @@ pub fn connect_request(
     ))
 }
 
+/// Derives the `Sec-WebSocket-Accept` value from the client's `Sec-WebSocket-Key`, as RFC 6455
+/// §4.2.2 step 5.4 defines it: the key and the WebSocket GUID are concatenated as US-ASCII, hashed
+/// with SHA-1, and the digest is base64-encoded with the standard alphabet.
+///
+/// Every browser recomputes this value and refuses the handshake if it disagrees, so the algorithm
+/// is fixed by the peer, not by us. It is a free function because it needs none of `WebSocket`'s
+/// generic parameters, and because a value a third party verifies must be testable on its own.
+pub fn accept_key(key: &str) -> String {
+    let concatenated = fmt!("{}{}", key, constant::WEBSOCKET_GUID);
+    let mut hasher = Sha1::new();
+    hasher.update(concatenated.as_bytes());
+    let hash = hasher.finalize();
+    base64::encode(&hash)
+}
+
 pub struct WebSocket<
     'a,
     const UIDL: usize,
@@ -213,7 +228,7 @@ impl<
         match result {
             Ok((Some(response), _)) => {
 
-                let accept_key = Self::accept_key(&key);
+                let accept_key = accept_key(&key);
 
                 if response.is_websocket_handshake(&accept_key) {
                     info!("Client connection successfully upgraded to a websocket.");
@@ -232,15 +247,6 @@ impl<
         }
 
         Ok(())
-    }
-
-    /// The accept key is just a hash of the incoming request key.
-    pub fn accept_key(key: &String) -> String {
-        let concatenated = fmt!("{}{}", key, constant::WEBSOCKET_GUID);
-        let mut hasher = Sha1::new();
-        hasher.update(concatenated.as_bytes());
-        let hash = hasher.finalize();
-        base64::encode(&hash)
     }
 
     /// The HTTP(S) server has detected a websocket upgrade request message and passes it to this
@@ -272,7 +278,7 @@ impl<
             IO, Network, Input, Missing)),
         };
 
-        let accept_key = Self::accept_key(&key);
+        let accept_key = accept_key(&key);
 
         let response = fmt!(
             "HTTP/1.1 101 Switching Protocols\r\n\
@@ -969,4 +975,32 @@ impl<
         Ok(())
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// RFC 6455 §1.3 publishes a worked example of the handshake, and this is its key pair.  The
+    /// expected value comes from the RFC, not from us, which is the whole point: a browser
+    /// recomputes it independently, so agreeing with ourselves proves nothing.
+    #[test]
+    fn test_accept_key_rfc6455_vector_00() {
+        assert_eq!(
+            accept_key("dGhlIHNhbXBsZSBub25jZQ=="),
+            "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=",
+        );
+    }
+
+    /// The GUID is byte-exact per RFC 6455 §4.2.2, and appending it is what distinguishes the
+    /// accept value from a bare hash of the key.  Pinned so that a "tidy-up" cannot silently
+    /// break every handshake.
+    #[test]
+    fn test_accept_key_guid_is_appended_00() {
+        assert_eq!(constant::WEBSOCKET_GUID, "258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+        // Without the GUID the digest differs, so this must not equal the vector above.
+        let mut hasher = Sha1::new();
+        hasher.update(b"dGhlIHNhbXBsZSBub25jZQ==");
+        assert_ne!(base64::encode(&hasher.finalize()), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+    }
 }
