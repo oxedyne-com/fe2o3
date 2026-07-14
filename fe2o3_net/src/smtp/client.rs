@@ -1,11 +1,15 @@
-//! Client-side SMTP for outbound delivery.
+//! Client-side SMTP, for the two different conversations a sender can have.
 //!
-//! Given an envelope (sender, recipients) and an RFC 5322 message body,
-//! the client looks up the recipient domain's MX, opens a TCP
-//! connection to the best-preference exchange, performs an EHLO and
-//! opportunistic STARTTLS handshake, and walks MAIL/RCPT/DATA. Used by
-//! the steel submission handler to relay outbound mail and by simple
-//! programmatic senders.
+//! **Delivery** ([`OutboundClient::deliver`]) is what a mail server does: look up the recipient
+//! domain's MX, connect to the best-preference exchange on port 25, EHLO, opportunistic STARTTLS,
+//! then MAIL/RCPT/DATA. Nobody authenticates -- the receiving server accepts the mail because it is
+//! responsible for the recipient, not because it knows the sender.
+//!
+//! **Submission** ([`OutboundClient::submit`]) is what a mail *client* does, and it is a different
+//! conversation with a different party: connect to the account holder's own provider on the
+//! submission port, and prove who you are before the provider will carry anything. Without it a
+//! sender can only talk to servers that already wanted the message; with it, a sender can post mail
+//! through the account it holds a password for, which is how every desktop mail client works.
 //!
 //! No queue, no retry policy, no exponential backoff -- the caller is
 //! expected to drive retries itself by enqueueing the message in a
@@ -14,6 +18,7 @@
 
 use crate::{
     dns_resolver,
+    imap::client::Security,
     smtp::server::read_line,
     tls::{
         self,
@@ -24,7 +29,10 @@ use crate::{
 use oxedyne_fe2o3_core::prelude::*;
 
 use std::{
-    net::IpAddr,
+    net::{
+        IpAddr,
+        SocketAddr,
+    },
     sync::Arc,
     time::Duration,
 };
@@ -41,6 +49,76 @@ use tokio_rustls::rustls::ClientConfig;
 /// some receiving MX hosts greylist or impose multi-second waits before
 /// 220.
 pub const SMTP_CLIENT_TIMEOUT: Duration = Duration::from_secs(60);
+
+
+/// Where to post a message, and how to prove you may.
+///
+/// The provider's submission service, not a recipient's MX: the host is the one the account lives
+/// on, and the credential is the account's own. Port 587 conventionally starts in the clear and
+/// upgrades with `STARTTLS`; port 465 is TLS from the first byte.
+#[derive(Clone, Debug)]
+pub struct SubmissionConfig {
+    /// Submission host. Also the name the certificate is validated against.
+    pub host:       String,
+    /// Submission port, conventionally 587 (STARTTLS) or 465 (implicit TLS).
+    pub port:       u16,
+    /// Transport protection.
+    pub security:   Security,
+    /// The account to authenticate as. Usually, but not always, the address being sent from.
+    pub user:       String,
+    /// The account's password. For a provider with two-factor authentication this is an
+    /// application password, not the password the human types into a browser.
+    pub password:   String,
+    /// Per-IO deadline.
+    pub timeout:    Duration,
+    /// Connect to this address instead of resolving `host`. The certificate is still validated
+    /// against `host`, so pinning the address weakens nothing -- and a server connecting on behalf
+    /// of a user must vet the address it dials rather than hand the name to the resolver twice.
+    pub addr:       Option<SocketAddr>,
+}
+
+impl SubmissionConfig {
+
+    /// A submission target with the conventional deadline and no pinned address.
+    ///
+    /// # Arguments
+    /// * `host` - The provider's submission host.
+    /// * `port` - The submission port.
+    /// * `security` - How the connection is protected.
+    /// * `user` - The account to authenticate as.
+    /// * `password` - That account's password.
+    pub fn new(
+        host:       impl Into<String>,
+        port:       u16,
+        security:   Security,
+        user:       impl Into<String>,
+        password:   impl Into<String>,
+    )
+        -> Self
+    {
+        Self {
+            host:       host.into(),
+            port,
+            security,
+            user:       user.into(),
+            password:   password.into(),
+            timeout:    SMTP_CLIENT_TIMEOUT,
+            addr:       None,
+        }
+    }
+
+    /// Dial this address rather than resolving the host.
+    pub fn with_addr(mut self, addr: SocketAddr) -> Self {
+        self.addr = Some(addr);
+        self
+    }
+
+    /// Use this per-IO deadline.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+}
 
 
 /// One outbound delivery target after MX resolution. Sorted in
@@ -175,6 +253,135 @@ impl OutboundClient {
             IO, Network))
     }
 
+    /// Post a message through the account holder's own provider, authenticating first.
+    ///
+    /// This is the conversation a mail client has, not the one a mail server has: the provider
+    /// carries the message because the sender proved they hold the account, so the credential is
+    /// not optional and neither is the encryption under it. The client refuses to send the password
+    /// over a connection it could not secure -- a provider that offers no TLS on its submission
+    /// port is not one a password may be spoken to, and failing loudly is the only safe answer.
+    ///
+    /// # Arguments
+    /// * `cfg` - The provider, the port, and the credential.
+    /// * `mail_from` - The envelope sender.
+    /// * `rcpt_to` - The envelope recipients. Unlike delivery, these may span any number of
+    ///   domains: the provider, not this client, works out where each one goes.
+    /// * `body` - The RFC 5322 message.
+    ///
+    /// # Returns
+    /// Whatever the provider said when it accepted the message, which usually carries its queue id.
+    pub async fn submit(
+        &self,
+        cfg:        &SubmissionConfig,
+        mail_from:  &str,
+        rcpt_to:    &[String],
+        body:       &[u8],
+    )
+        -> Outcome<String>
+    {
+        if rcpt_to.is_empty() {
+            return Err(err!(
+                "OutboundClient::submit called with no recipients.";
+                Invalid, Input, Missing));
+        }
+
+        let addr = match cfg.addr {
+            Some(a) => a,
+            None => {
+                let host = cfg.host.clone();
+                let ips = res!(
+                    tokio::task::spawn_blocking(move || dns_resolver::lookup_a(&host)).await
+                        .map_err(|e| err!("Submission host lookup task join failure: {}.", e;
+                            IO, Network, Init))
+                );
+                let ips = res!(ips);
+                match ips.first() {
+                    Some(ip) => SocketAddr::new(IpAddr::V4(*ip), cfg.port),
+                    None => return Err(err!(
+                        "The submission host {} resolves to no address.", cfg.host;
+                        IO, Network, Missing)),
+                }
+            },
+        };
+
+        let connect = TcpStream::connect(addr);
+        let plain = match timeout(cfg.timeout, connect).await {
+            Ok(Ok(s))  => s,
+            Ok(Err(e)) => return Err(err!(e,
+                "Connecting to the submission host {} at {}.", cfg.host, addr; IO, Network)),
+            Err(_)     => return Err(err!(
+                "Timeout connecting to the submission host {} at {}.", cfg.host, addr;
+                IO, Network)),
+        };
+
+        // TLS from the first byte, or in the clear until STARTTLS lifts it.
+        let mut stream = match cfg.security {
+            Security::ImplicitTls =>
+                res!(tls::upgrade(plain, &cfg.host, self.tls_config.clone()).await),
+            _ => ClientStream::Plain(plain),
+        };
+
+        let banner = res!(read_smtp_response(&mut stream).await);
+        if banner.code != 220 {
+            return Err(err!(
+                "Expected a 220 banner from {}, got {} {}", cfg.host, banner.code, banner.text;
+                IO, Network, Wire));
+        }
+
+        let mut ehlo = res!(self.ehlo(&mut stream).await);
+
+        if cfg.security == Security::StartTls {
+            let offered = ehlo.text.lines().any(|l| l.trim().eq_ignore_ascii_case("STARTTLS"));
+            if !offered {
+                return Err(err!(
+                    "{} does not offer STARTTLS, so the account password cannot be sent to it \
+                    without being readable on the wire.", cfg.host;
+                    IO, Network, Invalid));
+            }
+            res!(write_command(&mut stream, "STARTTLS").await);
+            let resp = res!(read_smtp_response(&mut stream).await);
+            if resp.code != 220 {
+                return Err(err!(
+                    "{} refused STARTTLS: {} {}", cfg.host, resp.code, resp.text;
+                    IO, Network, Wire));
+            }
+            let plain = match stream.into_plain() {
+                Some(s) => s,
+                None => return Err(err!(
+                    "STARTTLS response received on an already-encrypted stream.";
+                    Invalid, Bug)),
+            };
+            stream = res!(tls::upgrade(plain, &cfg.host, self.tls_config.clone()).await);
+            // The extension list before the upgrade cannot be trusted, and AUTH is usually only
+            // offered after it, so ask again inside TLS.
+            ehlo = res!(self.ehlo(&mut stream).await);
+        }
+
+        if cfg.security == Security::Plain {
+            warn!("Submitting to {} without TLS: the account password will cross the wire in \
+                the clear. Only a loopback test server should ever be reached this way.", cfg.host);
+        }
+
+        res!(authenticate(&mut stream, &ehlo, &cfg.user, &cfg.password).await);
+        let queue_id = res!(transact(&mut stream, mail_from, rcpt_to, body).await);
+
+        let _ = write_command(&mut stream, "QUIT").await;
+        let _ = read_smtp_response(&mut stream).await;
+        Ok(queue_id)
+    }
+
+    /// Greet the server and return what it says it can do.
+    async fn ehlo(&self, stream: &mut ClientStream) -> Outcome<SmtpResponse> {
+        res!(write_command(stream, &fmt!("EHLO {}", self.hostname)).await);
+        let resp = res!(read_smtp_response(stream).await);
+        if resp.code != 250 {
+            return Err(err!(
+                "EHLO rejected: {} {}", resp.code, resp.text;
+                IO, Network, Wire));
+        }
+        Ok(resp)
+    }
+
     async fn try_one(
         &self,
         tgt:        &DeliveryTarget,
@@ -236,62 +443,174 @@ impl OutboundClient {
             }
         }
 
-        // MAIL FROM.
-        res!(write_command(&mut stream, &fmt!("MAIL FROM:<{}>", mail_from)).await);
-        let resp = res!(read_smtp_response(&mut stream).await);
-        if resp.code / 100 != 2 {
-            return Err(err!(
-                "MAIL FROM rejected: {} {}", resp.code, resp.text;
-                IO, Network, Wire));
-        }
-        // RCPT TO each.
-        for r in rcpt_to {
-            res!(write_command(&mut stream, &fmt!("RCPT TO:<{}>", r)).await);
-            let resp = res!(read_smtp_response(&mut stream).await);
-            if resp.code / 100 != 2 {
-                return Err(err!(
-                    "RCPT TO:<{}> rejected: {} {}", r, resp.code, resp.text;
-                    IO, Network, Wire));
-            }
-        }
-        // DATA.
-        res!(write_command(&mut stream, "DATA").await);
-        let resp = res!(read_smtp_response(&mut stream).await);
-        if resp.code != 354 {
-            return Err(err!(
-                "DATA rejected: {} {}", resp.code, resp.text;
-                IO, Network, Wire));
-        }
-        // Send the body, applying dot-stuffing.
-        let stuffed = dot_stuff(body);
-        if let Err(e) = stream.write_all(&stuffed).await {
-            return Err(err!(e, "Writing DATA body."; IO, Network, Write));
-        }
-        // Always end with CRLF if not already.
-        if !body.ends_with(b"\r\n") {
-            if let Err(e) = stream.write_all(b"\r\n").await {
-                return Err(err!(e,
-                    "Writing CRLF tail."; IO, Network, Write));
-            }
-        }
-        if let Err(e) = stream.write_all(b".\r\n").await {
-            return Err(err!(e, "Writing DATA terminator."; IO, Network, Write));
-        }
-        if let Err(e) = stream.flush().await {
-            return Err(err!(e, "Flushing DATA."; IO, Network, Write));
-        }
-        let resp = res!(read_smtp_response(&mut stream).await);
-        if resp.code / 100 != 2 {
-            return Err(err!(
-                "Server rejected message: {} {}", resp.code, resp.text;
-                IO, Network, Wire));
-        }
+        let queue_id = res!(transact(&mut stream, mail_from, rcpt_to, body).await);
+
         // QUIT.
         let _ = write_command(&mut stream, "QUIT").await;
         let _ = read_smtp_response(&mut stream).await;
 
-        Ok(resp.text)
+        Ok(queue_id)
     }
+}
+
+/// Walk MAIL/RCPT/DATA on a stream that is already open, secured and (where the server demands it)
+/// authenticated. Delivery and submission differ in how they reach this point and not at all in
+/// what they do once they are here, so they share the transaction rather than each keeping a copy
+/// of it -- the second copy is where the dot-stuffing gets forgotten.
+///
+/// # Arguments
+/// * `stream` - The open conversation.
+/// * `mail_from` - The envelope sender.
+/// * `rcpt_to` - The envelope recipients.
+/// * `body` - The RFC 5322 message.
+async fn transact(
+    stream:     &mut ClientStream,
+    mail_from:  &str,
+    rcpt_to:    &[String],
+    body:       &[u8],
+)
+    -> Outcome<String>
+{
+    res!(write_command(stream, &fmt!("MAIL FROM:<{}>", mail_from)).await);
+    let resp = res!(read_smtp_response(stream).await);
+    if resp.code / 100 != 2 {
+        return Err(err!(
+            "MAIL FROM rejected: {} {}", resp.code, resp.text;
+            IO, Network, Wire));
+    }
+    for r in rcpt_to {
+        res!(write_command(stream, &fmt!("RCPT TO:<{}>", r)).await);
+        let resp = res!(read_smtp_response(stream).await);
+        if resp.code / 100 != 2 {
+            return Err(err!(
+                "RCPT TO:<{}> rejected: {} {}", r, resp.code, resp.text;
+                IO, Network, Wire));
+        }
+    }
+    res!(write_command(stream, "DATA").await);
+    let resp = res!(read_smtp_response(stream).await);
+    if resp.code != 354 {
+        return Err(err!(
+            "DATA rejected: {} {}", resp.code, resp.text;
+            IO, Network, Wire));
+    }
+
+    // A line of the body that begins with a full stop would otherwise end the message.
+    let stuffed = dot_stuff(body);
+    if let Err(e) = stream.write_all(&stuffed).await {
+        return Err(err!(e, "Writing DATA body."; IO, Network, Write));
+    }
+    if !body.ends_with(b"\r\n") {
+        if let Err(e) = stream.write_all(b"\r\n").await {
+            return Err(err!(e, "Writing CRLF tail."; IO, Network, Write));
+        }
+    }
+    if let Err(e) = stream.write_all(b".\r\n").await {
+        return Err(err!(e, "Writing DATA terminator."; IO, Network, Write));
+    }
+    if let Err(e) = stream.flush().await {
+        return Err(err!(e, "Flushing DATA."; IO, Network, Write));
+    }
+
+    let resp = res!(read_smtp_response(stream).await);
+    if resp.code / 100 != 2 {
+        return Err(err!(
+            "Server rejected message: {} {}", resp.code, resp.text;
+            IO, Network, Wire));
+    }
+    Ok(resp.text)
+}
+
+/// Prove to the provider that the sender holds the account.
+///
+/// `PLAIN` is preferred and `LOGIN` accepted, because between them they are what every provider
+/// worth submitting through offers. Both hand over the password in base64, which is an encoding and
+/// not a protection -- the only thing keeping it safe is the TLS underneath, which is why the
+/// caller establishes that first and refuses to proceed without it.
+///
+/// # Arguments
+/// * `stream` - The open, secured conversation.
+/// * `ehlo` - The extension list the server advertised inside TLS.
+/// * `user` - The account to authenticate as.
+/// * `password` - That account's password.
+async fn authenticate(
+    stream:     &mut ClientStream,
+    ehlo:       &SmtpResponse,
+    user:       &str,
+    password:   &str,
+)
+    -> Outcome<()>
+{
+    let mut mechanisms: Vec<String> = Vec::new();
+    for line in ehlo.text.lines() {
+        let l = line.trim();
+        if l.len() >= 4 && l[..4].eq_ignore_ascii_case("AUTH") {
+            for m in l[4..].split_whitespace() {
+                mechanisms.push(m.to_uppercase());
+            }
+        }
+    }
+    if mechanisms.is_empty() {
+        return Err(err!(
+            "The server offers no AUTH mechanism, so there is no way to prove the account is \
+            ours and it will not carry the message. It advertised: {}",
+            ehlo.text.replace('\n', " | ");
+            IO, Network, Missing));
+    }
+
+    if mechanisms.iter().any(|m| m == "PLAIN") {
+        // RFC 4616: an authorisation identity we leave empty, then the account, then the password,
+        // each separated by a NUL.
+        let raw = fmt!("\0{}\0{}", user, password);
+        let cmd = fmt!("AUTH PLAIN {}", base64::encode(raw.as_bytes()));
+        res!(write_command(stream, &cmd).await);
+        let resp = res!(read_smtp_response(stream).await);
+        return check_auth(&resp);
+    }
+
+    if mechanisms.iter().any(|m| m == "LOGIN") {
+        res!(write_command(stream, "AUTH LOGIN").await);
+        let resp = res!(read_smtp_response(stream).await);
+        if resp.code != 334 {
+            return Err(err!(
+                "AUTH LOGIN was refused before the username: {} {}", resp.code, resp.text;
+                IO, Network, Wire));
+        }
+        res!(write_command(stream, &base64::encode(user.as_bytes())).await);
+        let resp = res!(read_smtp_response(stream).await);
+        if resp.code != 334 {
+            return Err(err!(
+                "The server rejected the username: {} {}", resp.code, resp.text;
+                IO, Network, Wire));
+        }
+        res!(write_command(stream, &base64::encode(password.as_bytes())).await);
+        let resp = res!(read_smtp_response(stream).await);
+        return check_auth(&resp);
+    }
+
+    Err(err!(
+        "The server offers only {}, and this client can prove itself with PLAIN or LOGIN.",
+        mechanisms.join(", ");
+        IO, Network, Unimplemented))
+}
+
+/// Read the server's verdict on a login attempt, saying what a rejection usually means rather than
+/// only that it happened. A wrong password and a password the provider will not accept from a
+/// program look identical on the wire, and the second is the common case.
+fn check_auth(resp: &SmtpResponse) -> Outcome<()> {
+    if resp.code / 100 == 2 {
+        return Ok(());
+    }
+    if resp.code == 535 || resp.code == 534 {
+        return Err(err!(
+            "The provider rejected the credential ({} {}). If the account has two-factor \
+            authentication, an ordinary password will always be refused here and an application \
+            password is required.", resp.code, resp.text;
+            Invalid, Input, Unauthorised));
+    }
+    Err(err!(
+        "Authentication failed: {} {}", resp.code, resp.text;
+        IO, Network, Wire))
 }
 
 /// One parsed SMTP server response (potentially multi-line).

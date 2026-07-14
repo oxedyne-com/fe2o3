@@ -2,6 +2,7 @@ mod dns;
 mod email;
 mod http;
 mod smtp;
+mod smtp_submit;
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -31,6 +32,7 @@ fn run_tests() -> Outcome<()> {
     res!(email::test_email(filter));
     res!(http::test_http(filter));
     res!(smtp::test_smtp(filter));
+    res!(smtp_submit::test_smtp_submit(filter));
 
     Ok(())
 }
