@@ -29,7 +29,13 @@
 use crate::srv::cfg::AlertConfig;
 
 use oxedyne_fe2o3_core::prelude::*;
-use oxedyne_fe2o3_net::smtp::client::OutboundClient;
+use oxedyne_fe2o3_net::{
+    imap::client::Security,
+    smtp::client::{
+        OutboundClient,
+        SubmissionConfig,
+    },
+};
 
 use std::{
     net::SocketAddr,
@@ -149,6 +155,9 @@ struct FailureWindow {
 pub struct Alerter {
     cfg:     Arc<AlertConfig>,
     client:  Arc<OutboundClient>,
+    /// Where to post, when posting through a provider rather than delivering
+    /// straight to the recipient's MX. Built once, at start-up.
+    submission: Option<Arc<SubmissionConfig>>,
     /// Public hostname, used in subject lines and in the `/admin` link.
     host:    Arc<String>,
     failures: Arc<Mutex<FailureWindow>>,
@@ -197,9 +206,27 @@ impl Alerter {
             cfg.ehlo_hostname.clone()
         };
         let client = res!(OutboundClient::with_system_roots(ehlo));
+        let submission = match &cfg.submission {
+            Some(s) => {
+                let security = match s.security.as_str() {
+                    "implicit" => Security::ImplicitTls,
+                    "plain"    => Security::Plain,
+                    _          => Security::StartTls,
+                };
+                Some(Arc::new(SubmissionConfig::new(
+                    s.host.clone(),
+                    s.port,
+                    security,
+                    s.user.clone(),
+                    s.password.clone(),
+                )))
+            }
+            None => None,
+        };
         Ok(Some(Self {
             cfg:      Arc::new(cfg),
             client:   Arc::new(client),
+            submission,
             host:     Arc::new(host),
             failures: Arc::new(Mutex::new(FailureWindow {
                 count:  0,
@@ -239,15 +266,30 @@ impl Alerter {
         }
     }
 
-    /// Compose and deliver one alert.
+    /// Compose and send one alert.
+    ///
+    /// Posts through the configured provider when there is one, and otherwise
+    /// delivers straight to the recipient's MX. The provider is the better
+    /// road: a message that arrives unannounced and unauthenticated from a
+    /// host with no PTR record is one a strict receiver may bin, and the alert
+    /// saying something is wrong is precisely the one that must not land in a
+    /// spam folder.
     async fn send(&self, event: &AlertEvent) -> Outcome<()> {
         let msg = self.compose(event);
-        let queue_id = res!(self.client.deliver(
-            &self.cfg.from,
-            &self.cfg.to,
-            msg.as_bytes(),
-        ).await);
-        info!("Alert delivered ({}): {}", queue_id, event.subject(&self.host));
+        let queue_id = match &self.submission {
+            Some(cfg) => res!(self.client.submit(
+                cfg,
+                &self.cfg.from,
+                &self.cfg.to,
+                msg.as_bytes(),
+            ).await),
+            None => res!(self.client.deliver(
+                &self.cfg.from,
+                &self.cfg.to,
+                msg.as_bytes(),
+            ).await),
+        };
+        info!("Alert sent ({}): {}", queue_id, event.subject(&self.host));
         Ok(())
     }
 
@@ -334,6 +376,7 @@ mod tests {
         let cfg = AlertConfig {
             enabled:                true,
             from:                   "steel@example.com".to_string(),
+            submission:             None,
             to:                     vec!["operator@example.com".to_string()],
             ehlo_hostname:          "example.com".to_string(),
             failed_threshold:       threshold,
@@ -411,6 +454,123 @@ mod tests {
             ..Default::default()
         };
         assert!(Alerter::new(cfg, "example.com".to_string()).is_err());
+    }
+
+    /// End to end, through a stand-in provider: the alert must actually be
+    /// composed, authenticated and submitted, and arrive with the event in
+    /// it. Alerting's failure mode is *looking like cover* -- an operator who
+    /// believes they will be told, and is not -- so it is worth proving the
+    /// message leaves the building rather than only that the code was called.
+    #[test]
+    fn test_an_alert_is_submitted_through_a_provider_00() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+
+        let listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(l) => l,
+            Err(e) => panic!("bind: {}", e),
+        };
+        let addr = match listener.local_addr() {
+            Ok(a) => a,
+            Err(e) => panic!("addr: {}", e),
+        };
+
+        // A stand-in submission server: greet, advertise AUTH, accept the
+        // credential, take the message, and hand back what it saw.
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let log = seen.clone();
+        let jh = std::thread::spawn(move || {
+            let (sock, _) = match listener.accept() {
+                Ok(x) => x,
+                Err(_) => return,
+            };
+            let mut w = match sock.try_clone() {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            let mut lines = BufReader::new(sock).lines();
+            let _ = w.write_all(b"220 provider.example.com ESMTP\r\n");
+            let mut in_data = false;
+            while let Some(Ok(line)) = lines.next() {
+                if let Ok(mut g) = log.lock() {
+                    g.push(line.clone());
+                }
+                if in_data {
+                    if line == "." {
+                        in_data = false;
+                        let _ = w.write_all(b"250 2.0.0 Ok: queued as TEST1\r\n");
+                    }
+                    continue;
+                }
+                let upper = line.to_uppercase();
+                if upper.starts_with("EHLO") {
+                    let _ = w.write_all(
+                        b"250-provider.example.com\r\n250-AUTH PLAIN\r\n250 8BITMIME\r\n");
+                } else if upper.starts_with("AUTH PLAIN") {
+                    let _ = w.write_all(b"235 2.7.0 Accepted\r\n");
+                } else if upper.starts_with("DATA") {
+                    in_data = true;
+                    let _ = w.write_all(b"354 End data\r\n");
+                } else if upper.starts_with("QUIT") {
+                    let _ = w.write_all(b"221 2.0.0 Bye\r\n");
+                    return;
+                } else {
+                    let _ = w.write_all(b"250 2.0.0 Ok\r\n");
+                }
+            }
+        });
+
+        let cfg = AlertConfig {
+            enabled:                true,
+            from:                   "steel@example.com".to_string(),
+            submission:             Some(crate::srv::cfg::AlertSubmission {
+                host:       "provider.example.com".to_string(),
+                port:       addr.port(),
+                security:   "plain".to_string(),
+                user:       "steel@example.com".to_string(),
+                password:   "app-password".to_string(),
+            }),
+            to:                     vec!["operator@elsewhere.example".to_string()],
+            ehlo_hostname:          "example.com".to_string(),
+            failed_threshold:       5,
+            failed_window_secs:     900,
+            failed_cooldown_secs:   3600,
+        };
+        let mut a = match Alerter::new(cfg, "example.com".to_string()) {
+            Ok(Some(a)) => a,
+            other => panic!("alerter: {:?}", other.is_err()),
+        };
+        // Pin the dialled address: the certificate name stays
+        // provider.example.com, and no resolver is involved.
+        a.submission = a.submission.map(|s| {
+            Arc::new((*s).clone().with_addr(addr))
+        });
+
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all().build()
+        {
+            Ok(r) => r,
+            Err(e) => panic!("runtime: {}", e),
+        };
+        let ev = AlertEvent::SealedStart { db_count: 3 };
+        match rt.block_on(a.send(&ev)) {
+            Ok(()) => (),
+            Err(e) => panic!("the alert was not submitted: {}", e),
+        }
+        let _ = jh.join();
+
+        let transcript = match seen.lock() {
+            Ok(g) => g.join("\n"),
+            Err(_) => panic!("lock"),
+        };
+        assert!(transcript.contains("AUTH PLAIN"),
+            "the alerter must authenticate to the provider:\n{}", transcript);
+        assert!(transcript.contains("MAIL FROM:<steel@example.com>"),
+            "envelope sender missing:\n{}", transcript);
+        assert!(transcript.contains("RCPT TO:<operator@elsewhere.example>"),
+            "envelope recipient missing:\n{}", transcript);
+        assert!(transcript.contains("SEALED at start -- 3 database(s) shut"),
+            "the event did not reach the message:\n{}", transcript);
     }
 
     /// The message must never carry an action link. An authorisation that

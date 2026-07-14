@@ -1596,13 +1596,56 @@ impl MailConfig {
 // │ ALERT CONFIG                                                              │
 // └───────────────────────────────────────────────────────────────────────────┘
 
+/// Where an alert is posted, when it goes through a provider rather than
+/// straight to the recipient's MX.
+///
+/// # Why this is usually the right choice
+///
+/// Delivering directly to the recipient's MX means a receiver decides whether
+/// to trust a message that arrived, unannounced and unauthenticated, from a
+/// server it has never heard of. Without a PTR record for the sending IP and
+/// an SPF record naming it, a strict receiver -- Gmail, for one -- is entitled
+/// to bin it. The message that says something is wrong is exactly the one that
+/// must not land in a spam folder.
+///
+/// Submitting through the sender's own provider authenticates the sender, and
+/// the provider's reputation carries the message the rest of the way. It also
+/// serves the rule that the machine raising the alarm should not be the only
+/// machine on the path.
+///
+/// # The credential must be readable while sealed
+///
+/// It cannot live in the wallet's encrypted secrets, because the most
+/// important alert of all is the one saying Steel came up *sealed* -- and at
+/// that moment there is no master key with which to decrypt anything. So the
+/// password is a plain config value, and should be given as a `{file:...}`
+/// reference to a file the server user alone can read, rather than written
+/// into `config.jdat` in the clear.
+#[derive(Clone, Debug)]
+pub struct AlertSubmission {
+    /// The provider's submission host. Also the name its certificate is
+    /// validated against.
+    pub host:       String,
+    /// Conventionally 587 (STARTTLS) or 465 (implicit TLS).
+    pub port:       u16,
+    /// `"starttls"`, `"implicit"`, or `"plain"` (loopback test servers only).
+    pub security:   String,
+    /// The account to authenticate as.
+    pub user:       String,
+    /// That account's password. Supply as `{file:path}`; a provider with
+    /// two-factor authentication wants an application password here, not the
+    /// one a human types into a browser.
+    pub password:   String,
+}
+
 /// Operator alerting by email. See `srv::alert`.
 ///
-/// Mail is delivered straight to the recipient's MX by the in-tree SMTP
-/// client, so no relay or local mail daemon is required. Deliverability is
-/// therefore the sender's own problem: the `from` domain wants an SPF record
-/// covering this host, and the host wants a PTR record, or a strict receiver
-/// may drop the very message that says something is wrong.
+/// With no `submission` block, mail is delivered straight to the recipient's
+/// MX by the in-tree SMTP client, so no relay and no local mail daemon are
+/// required -- but deliverability then rests on this host having a PTR record
+/// and the `from` domain having an SPF record that names it. With a
+/// `submission` block, the message is posted through the sender's own
+/// provider, which authenticates it. See [`AlertSubmission`].
 #[derive(Clone, Debug)]
 pub struct AlertConfig {
     /// Master switch. When `false`, no alert is ever sent.
@@ -1610,6 +1653,8 @@ pub struct AlertConfig {
     /// Envelope and header sender. Use a domain whose SPF record names
     /// this host.
     pub from:                   String,
+    /// Post through a provider rather than direct to the recipient's MX.
+    pub submission:             Option<AlertSubmission>,
     /// Recipients. Address these *off* this machine: an alert delivered to
     /// a mailbox on the host it is warning about is one the operator cannot
     /// read precisely when they need to.
@@ -1635,6 +1680,7 @@ impl Default for AlertConfig {
         Self {
             enabled:                false,
             from:                   String::new(),
+            submission:             None,
             to:                     Vec::new(),
             ehlo_hostname:          String::new(),
             failed_threshold:       5,
@@ -1656,6 +1702,42 @@ impl AlertConfig {
         }
         if let Some(Dat::Str(s)) = m.get(&dat!("ehlo_hostname")) {
             out.ehlo_hostname = s.clone();
+        }
+        if let Some(Dat::Map(sm)) = m.get(&dat!("submission")) {
+            let get_str = |k: &str| -> String {
+                match sm.get(&dat!(k)) {
+                    Some(Dat::Str(v)) => v.clone(),
+                    _ => String::new(),
+                }
+            };
+            let host = get_str("host");
+            if host.is_empty() {
+                return Err(err!(
+                    "alerts.submission is present but has no 'host'.";
+                    Configuration, Invalid, Missing));
+            }
+            let port = match sm.get(&dat!("port")) {
+                Some(Dat::U16(n)) => *n,
+                _ => 587,
+            };
+            let security = match get_str("security").as_str() {
+                "" => fmt!("starttls"),
+                other => other.to_string(),
+            };
+            match security.as_str() {
+                "starttls" | "implicit" | "plain" => (),
+                other => return Err(err!(
+                    "alerts.submission.security is '{}'; expected 'starttls', \
+                    'implicit' or 'plain'.", other;
+                    Configuration, Invalid)),
+            }
+            out.submission = Some(AlertSubmission {
+                host,
+                port,
+                security,
+                user:       get_str("user"),
+                password:   get_str("password"),
+            });
         }
         match m.get(&dat!("to")) {
             Some(Dat::List(l)) => {
@@ -1691,6 +1773,23 @@ impl AlertConfig {
                 Configuration, Invalid, Range));
         }
         Ok(out)
+    }
+
+    /// Expand `{file:path}` and `{env:VAR}` placeholders in the submission
+    /// credential, so the password need not be written into `config.jdat`
+    /// in the clear.
+    ///
+    /// Not the wallet's encrypted secrets: the alert that matters most is the
+    /// one saying Steel came up *sealed*, and at that moment there is no
+    /// master key to decrypt anything with. The credential has to be readable
+    /// before the wallet is open, which means a file the server user alone
+    /// can read.
+    pub fn resolve_secrets(&mut self, root: &Path) -> Outcome<()> {
+        if let Some(sub) = &mut self.submission {
+            sub.password = res!(ApiRoute::resolve_file_refs(&sub.password, root));
+            sub.user = res!(ApiRoute::resolve_file_refs(&sub.user, root));
+        }
+        Ok(())
     }
 }
 

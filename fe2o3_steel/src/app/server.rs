@@ -422,10 +422,17 @@ impl AppShellContext {
             }
         };
         let alerter = match res!(server_cfg.get_alerts()) {
-            Some(cfg) => {
+            Some(mut cfg) => {
+                // Expand `{file:...}` in the submission credential, so the
+                // password is not sitting in config.jdat in the clear.
+                res!(cfg.resolve_secrets(root_path.as_ref()));
                 let to = cfg.to.join(", ");
+                let via = match &cfg.submission {
+                    Some(s) => fmt!("via {}:{}", s.host, s.port),
+                    None    => fmt!("direct to the recipient's MX"),
+                };
                 let a = res!(Alerter::new(cfg, alert_host.clone()));
-                info!("Alerting enabled; operator alerts go to {}.", to);
+                info!("Alerting enabled; operator alerts go to {} ({}).", to, via);
                 a
             }
             None => {
