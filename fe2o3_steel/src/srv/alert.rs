@@ -30,6 +30,7 @@ use crate::srv::cfg::AlertConfig;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_net::{
+    dkim::DkimSigner,
     imap::client::Security,
     smtp::client::{
         OutboundClient,
@@ -158,6 +159,15 @@ pub struct Alerter {
     /// Where to post, when posting through a provider rather than delivering
     /// straight to the recipient's MX. Built once, at start-up.
     submission: Option<Arc<SubmissionConfig>>,
+    /// DKIM identities to sign the alert with, when the host is configured to
+    /// sign its mail at all.
+    ///
+    /// An unsigned message from a domain that signs everything else is exactly
+    /// what a spam filter is entitled to distrust -- and the alert is the one
+    /// message that has to arrive. The alerter posts straight through the SMTP
+    /// client rather than through the mail handler, so it has to sign for
+    /// itself.
+    dkim:       Vec<Arc<DkimSigner>>,
     /// Public hostname, used in subject lines and in the `/admin` link.
     host:    Arc<String>,
     failures: Arc<Mutex<FailureWindow>>,
@@ -184,7 +194,13 @@ impl Alerter {
     /// no-op: an operator who has written an `alerts` block believes they
     /// will be told when something goes wrong, and the failure mode of
     /// discovering otherwise is that they find out from an outage.
-    pub fn new(cfg: AlertConfig, host: String) -> Outcome<Option<Self>> {
+    pub fn new(
+        cfg:    AlertConfig,
+        host:   String,
+        dkim:   Vec<Arc<DkimSigner>>,
+    )
+        -> Outcome<Option<Self>>
+    {
         if !cfg.enabled {
             return Ok(None);
         }
@@ -227,6 +243,7 @@ impl Alerter {
             cfg:      Arc::new(cfg),
             client:   Arc::new(client),
             submission,
+            dkim,
             host:     Arc::new(host),
             failures: Arc::new(Mutex::new(FailureWindow {
                 count:  0,
@@ -275,7 +292,25 @@ impl Alerter {
     /// saying something is wrong is precisely the one that must not land in a
     /// spam folder.
     async fn send(&self, event: &AlertEvent) -> Outcome<()> {
-        let msg = self.compose(event);
+        let mut msg = self.compose(event).into_bytes();
+
+        // Sign with every configured key, as the mail path does. A key that
+        // will not sign is skipped rather than fatal: an alert that goes out
+        // unsigned still reaches the operator, and an alert that does not go
+        // out at all reaches nobody.
+        let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(d) => d.as_secs(),
+            Err(_) => 0,
+        };
+        for signer in &self.dkim {
+            match signer.sign(&msg, &[], now) {
+                Ok(b) => msg = b,
+                Err(e) => warn!("Signing an alert with the {} key for selector \
+                    '{}' failed; sending it unsigned: {}",
+                    signer.algorithm(), signer.selector(), e),
+            }
+        }
+        let msg = String::from_utf8_lossy(&msg).into_owned();
         let queue_id = match &self.submission {
             Some(cfg) => res!(self.client.submit(
                 cfg,
@@ -383,7 +418,7 @@ mod tests {
             failed_window_secs:     900,
             failed_cooldown_secs:   cooldown_secs,
         };
-        match Alerter::new(cfg, "example.com".to_string()) {
+        match Alerter::new(cfg, "example.com".to_string(), Vec::new()) {
             Ok(Some(a)) => a,
             _ => panic!("alerter"),
         }
@@ -453,7 +488,7 @@ mod tests {
             to:      Vec::new(),
             ..Default::default()
         };
-        assert!(Alerter::new(cfg, "example.com".to_string()).is_err());
+        assert!(Alerter::new(cfg, "example.com".to_string(), Vec::new()).is_err());
     }
 
     /// End to end, through a stand-in provider: the alert must actually be
@@ -536,7 +571,7 @@ mod tests {
             failed_window_secs:     900,
             failed_cooldown_secs:   3600,
         };
-        let mut a = match Alerter::new(cfg, "example.com".to_string()) {
+        let mut a = match Alerter::new(cfg, "example.com".to_string(), Vec::new()) {
             Ok(Some(a)) => a,
             other => panic!("alerter: {:?}", other.is_err()),
         };

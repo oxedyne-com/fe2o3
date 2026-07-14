@@ -488,105 +488,11 @@ async fn spawn_mail_listeners(
     }
     let spool = res!(OutboundSpool::new(resolve(&cfg.spool_dir_rel)));
 
-    // DKIM signers (optional, and more than one is the point).
-    //
-    // RFC 8463 says a signer SHOULD publish and sign with both an ed25519 and
-    // an RSA key. The reason is practical: ed25519 verification is still
-    // patchy in the wild, and a receiver that cannot verify a signature sees
-    // an *unsigned* message, leaving DMARC to rest on SPF alone. Two
-    // signatures cost a few hundred bytes and let each receiver take whichever
-    // it understands.
-    let mut dkim: Vec<Arc<DkimSigner>> = Vec::new();
-
-    // The ed25519 key, generated in tree if absent.
-    if !cfg.dkim_key_file.is_empty() {
-        let path = resolve(&cfg.dkim_key_file);
-        let domain = if cfg.dkim_domain.is_empty() {
-            cfg.hostname.clone()
-        } else {
-            cfg.dkim_domain.clone()
-        };
-        let selector = if cfg.dkim_selector.is_empty() {
-            "default".to_string()
-        } else {
-            cfg.dkim_selector.clone()
-        };
-        let bytes = if path.exists() {
-            match std::fs::read(&path) {
-                Ok(b) => b,
-                Err(e) => return Err(err!(e,
-                    "Reading DKIM key {:?}.", path;
-                    IO, File, Read)),
-            }
-        } else {
-            // Generate a fresh key, persist it, and log the public DNS
-            // record value so the operator can publish it.
-            info!("DKIM: no key at {:?}, generating fresh ed25519 pair.", path);
-            let s = res!(DkimSigner::generate(domain.clone(), selector.clone()));
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            if let Err(e) = std::fs::write(&path, s.pkcs8_bytes()) {
-                return Err(err!(e,
-                    "Writing DKIM key {:?}.", path;
-                    IO, File, Write));
-            }
-            info!("DKIM TXT record for {}._domainkey.{}: {}",
-                selector, domain, s.dns_txt_record());
-            s.pkcs8_bytes().to_vec()
-        };
-        let signer = res!(DkimSigner::from_pkcs8(&bytes, domain.clone(), selector.clone()));
-        info!("DKIM ({}) TXT record for {}._domainkey.{}: {}",
-            signer.algorithm(), selector, domain, signer.dns_txt_record());
-        dkim.push(Arc::new(signer));
-    }
-
-    // The RSA key. Never generated -- ring will not generate RSA keys, and
-    // hand-rolling the arithmetic to do so is not a road worth taking. The
-    // operator makes it once, offline:
-    //
-    //   openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
-    //       -outform DER -out mail/dkim_rsa.key
-    //
-    // and Steel logs the TXT record to publish beside it.
-    if !cfg.dkim_rsa_key_file.is_empty() {
-        let path = resolve(&cfg.dkim_rsa_key_file);
-        let domain = if cfg.dkim_domain.is_empty() {
-            cfg.hostname.clone()
-        } else {
-            cfg.dkim_domain.clone()
-        };
-        let selector = if cfg.dkim_rsa_selector.is_empty() {
-            "rsa".to_string()
-        } else {
-            cfg.dkim_rsa_selector.clone()
-        };
-        if !path.exists() {
-            return Err(err!(
-                "MailConfig: dkim_rsa_key_file {:?} does not exist. An RSA DKIM \
-                key is generated once, offline: `openssl genpkey -algorithm RSA \
-                -pkeyopt rsa_keygen_bits:2048 -outform DER -out {:?}`. Steel will \
-                not generate it, because ring will not, and implementing RSA key \
-                generation by hand is not a road worth taking to save one command.",
-                path, path;
-                Init, Missing, File));
-        }
-        let bytes = match std::fs::read(&path) {
-            Ok(b) => b,
-            Err(e) => return Err(err!(e,
-                "Reading RSA DKIM key {:?}.", path;
-                IO, File, Read)),
-        };
-        let signer = res!(DkimSigner::from_pkcs8(&bytes, domain.clone(), selector.clone()));
-        info!("DKIM ({}) TXT record for {}._domainkey.{}: {}",
-            signer.algorithm(), selector, domain, signer.dns_txt_record());
-        dkim.push(Arc::new(signer));
-    }
-
-    if dkim.is_empty() {
-        warn!("Mail is enabled with no DKIM key. Outbound mail will be unsigned, \
-            and receivers will judge it on SPF alone.");
-    }
+    // DKIM signers. Shared with the alerter, which signs its own mail: an
+    // unsigned alert from a domain that signs everything else is exactly the
+    // message a spam filter is entitled to distrust, and it is the one message
+    // that has to arrive.
+    let dkim = res!(load_dkim_signers(cfg, root));
 
     let handler = AppMailHandler {
         store:          store.clone(),
@@ -658,4 +564,115 @@ async fn spawn_mail_listeners(
     });
 
     Ok(())
+}
+
+/// Load the DKIM signing identities named in a `MailConfig`.
+///
+/// Shared by the mail listeners and by the operator alerter, so an alert is
+/// signed with the same keys as everything else the domain sends.
+///
+/// RFC 8463 says a signer SHOULD publish and sign with both an ed25519 and an
+/// RSA key. The reason is practical: ed25519 verification is still patchy in
+/// the wild, and a receiver that cannot verify a signature sees an *unsigned*
+/// message, leaving DMARC to rest on SPF alone. Two signatures cost a few
+/// hundred bytes and let each receiver take whichever it understands.
+pub fn load_dkim_signers(
+    cfg:    &MailConfig,
+    root:   &oxedyne_fe2o3_core::path::NormPathBuf,
+)
+    -> Outcome<Vec<Arc<DkimSigner>>>
+{
+    use oxedyne_fe2o3_core::path::NormalPath;
+    use std::path::{Path, PathBuf};
+
+    let resolve = |rel: &str| -> PathBuf {
+        let p = Path::new(rel);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            root.clone().join(p.normalise()).absolute().as_pathbuf()
+        }
+    };
+
+    let mut dkim: Vec<Arc<DkimSigner>> = Vec::new();
+
+    let domain = if cfg.dkim_domain.is_empty() {
+        cfg.hostname.clone()
+    } else {
+        cfg.dkim_domain.clone()
+    };
+
+    // The ed25519 key, generated in tree if absent.
+    if !cfg.dkim_key_file.is_empty() {
+        let path = resolve(&cfg.dkim_key_file);
+        let selector = if cfg.dkim_selector.is_empty() {
+            "default".to_string()
+        } else {
+            cfg.dkim_selector.clone()
+        };
+        let bytes = if path.exists() {
+            match std::fs::read(&path) {
+                Ok(b) => b,
+                Err(e) => return Err(err!(e,
+                    "Reading DKIM key {:?}.", path;
+                    IO, File, Read)),
+            }
+        } else {
+            info!("DKIM: no key at {:?}, generating a fresh ed25519 pair.", path);
+            let s = res!(DkimSigner::generate(domain.clone(), selector.clone()));
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Err(e) = std::fs::write(&path, s.pkcs8_bytes()) {
+                return Err(err!(e,
+                    "Writing DKIM key {:?}.", path;
+                    IO, File, Write));
+            }
+            s.pkcs8_bytes().to_vec()
+        };
+        let signer = res!(DkimSigner::from_pkcs8(&bytes, domain.clone(), selector.clone()));
+        info!("DKIM ({}) TXT record for {}._domainkey.{}: {}",
+            signer.algorithm(), selector, domain, signer.dns_txt_record());
+        dkim.push(Arc::new(signer));
+    }
+
+    // The RSA key. Never generated -- `ring` will not generate RSA keys, and
+    // hand-rolling the arithmetic to do so is not a road worth taking to save
+    // one command:
+    //
+    //   openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
+    //       -outform DER -out mail/dkim_rsa.key
+    if !cfg.dkim_rsa_key_file.is_empty() {
+        let path = resolve(&cfg.dkim_rsa_key_file);
+        let selector = if cfg.dkim_rsa_selector.is_empty() {
+            "rsa".to_string()
+        } else {
+            cfg.dkim_rsa_selector.clone()
+        };
+        if !path.exists() {
+            return Err(err!(
+                "MailConfig: dkim_rsa_key_file {:?} does not exist. An RSA DKIM \
+                key is generated once, offline: `openssl genpkey -algorithm RSA \
+                -pkeyopt rsa_keygen_bits:2048 -outform DER -out {:?}`. Steel will \
+                not generate it, because ring will not.",
+                path, path;
+                Init, Missing, File));
+        }
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) => return Err(err!(e,
+                "Reading RSA DKIM key {:?}.", path;
+                IO, File, Read)),
+        };
+        let signer = res!(DkimSigner::from_pkcs8(&bytes, domain.clone(), selector.clone()));
+        info!("DKIM ({}) TXT record for {}._domainkey.{}: {}",
+            signer.algorithm(), selector, domain, signer.dns_txt_record());
+        dkim.push(Arc::new(signer));
+    }
+
+    if dkim.is_empty() {
+        warn!("Mail is enabled with no DKIM key. Outbound mail will be unsigned, \
+            and receivers will judge it on SPF alone.");
+    }
+    Ok(dkim)
 }

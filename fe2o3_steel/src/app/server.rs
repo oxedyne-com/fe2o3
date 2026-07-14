@@ -426,13 +426,28 @@ impl AppShellContext {
                 // Expand `{file:...}` in the submission credential, so the
                 // password is not sitting in config.jdat in the clear.
                 res!(cfg.resolve_secrets(root_path.as_ref()));
+                // Sign alerts with the host's own DKIM keys, when it has any.
+                // An unsigned message from a domain that signs everything else
+                // is what a spam filter is entitled to distrust, and the alert
+                // is the one message that has to arrive.
+                let dkim = match res!(server_cfg.get_mail()) {
+                    Some(mail_cfg) => res!(
+                        crate::srv::server::load_dkim_signers(&mail_cfg, &root_path)),
+                    None => Vec::new(),
+                };
                 let to = cfg.to.join(", ");
                 let via = match &cfg.submission {
                     Some(s) => fmt!("via {}:{}", s.host, s.port),
                     None    => fmt!("direct to the recipient's MX"),
                 };
-                let a = res!(Alerter::new(cfg, alert_host.clone()));
-                info!("Alerting enabled; operator alerts go to {} ({}).", to, via);
+                let signed = if dkim.is_empty() {
+                    fmt!("unsigned")
+                } else {
+                    fmt!("DKIM-signed with {} key(s)", dkim.len())
+                };
+                let a = res!(Alerter::new(cfg, alert_host.clone(), dkim));
+                info!("Alerting enabled; operator alerts go to {} ({}, {}).",
+                    to, via, signed);
                 a
             }
             None => {

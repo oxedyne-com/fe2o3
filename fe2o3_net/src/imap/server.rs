@@ -22,6 +22,7 @@ use std::{
     net::SocketAddr,
     sync::Arc,
     time::{
+        Duration,
         SystemTime,
         UNIX_EPOCH,
     },
@@ -36,6 +37,24 @@ use tokio::{
     },
 };
 
+
+/// How often an idling session looks at the mailbox.
+///
+/// A Maildir folder status is a directory listing, so this is cheap; the cost
+/// is one stat per idle connection per interval, against a client that would
+/// otherwise poll every ten minutes and be told nothing.
+pub const IDLE_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// How long the server idles before asking the client to renew.
+///
+/// RFC 2177 tells clients to re-issue `IDLE` at least every 29 minutes.
+/// Ending it a little earlier means a connection a NAT was about to drop
+/// silently is refreshed deliberately instead.
+pub const IDLE_MAX_DURATION: Duration = Duration::from_secs(28 * 60);
+
+/// Longest partial line the server will buffer from an idling client. Only
+/// `DONE` is legal, so anything approaching this is not a client to indulge.
+pub const IDLE_MAX_LINE: usize = 1024;
 
 /// Maximum line length the server will accept for a command. IMAP
 /// itself imposes no formal limit, but capping protects us from a
@@ -190,6 +209,15 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                 }
                 res!(write_ok(stream, &tag, "NOOP completed").await);
                 Ok(false)
+            }
+            "IDLE" => {
+                if session.user.is_none() || session.selected.is_none() {
+                    res!(write_bad(stream, &tag,
+                        "IDLE requires an authenticated session with a \
+                        selected mailbox").await);
+                    return Ok(false);
+                }
+                self.idle(stream, session, &tag).await
             }
             "LOGOUT" => {
                 res!(write_all(stream, b"* BYE Logging out\r\n").await);
@@ -569,6 +597,122 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
 
     /// Refresh the cached message list from the backing store and
     /// optionally clear the `\Recent` flag (SELECT vs EXAMINE).
+    /// RFC 2177 `IDLE`: hold the connection open and tell the client the
+    /// moment the mailbox changes, instead of making it ask.
+    ///
+    /// Without this a client polls -- Thunderbird every ten minutes by
+    /// default -- so mail that has already arrived sits unannounced for up to
+    /// ten minutes, and the client wakes the server up all day to be told
+    /// nothing has happened. IDLE inverts both halves of that bargain.
+    ///
+    /// The client sends `IDLE`, we answer `+ idling`, and from then until it
+    /// sends `DONE` the only thing it may send is `DONE`. We meanwhile watch
+    /// the mailbox and push an untagged `EXISTS` when the count moves.
+    ///
+    /// # Why a timeout around the read, and not `select!`
+    ///
+    /// The obvious shape -- `select!` between the socket and a ticker -- wants
+    /// a mutable borrow of the stream in one branch and another in the handler
+    /// of the other, which does not compile, and inviting people to work around
+    /// that by reading a byte at a time invites losing bytes: a future dropped
+    /// mid-line has already taken those bytes off the socket. `AsyncReadExt::read`
+    /// is cancel-safe -- if it is dropped, nothing was consumed -- so a timeout
+    /// around it is both correct and simple, and the partial line lives in a
+    /// buffer that outlives each attempt.
+    async fn idle<S: AsyncRead + AsyncWrite + Unpin + Send>(
+        &self,
+        stream:     &mut S,
+        session:    &mut ImapSession,
+        tag:        &str,
+    )
+        -> Outcome<bool>
+    {
+        let user = match session.user.clone() {
+            Some(u) => u,
+            None => return Ok(false),
+        };
+        let folder = match session.selected.clone() {
+            Some(f) => f,
+            None => return Ok(false),
+        };
+
+        res!(write_all(stream, b"+ idling\r\n").await);
+
+        let mut last_exists = res!(self.store.folder_status(&user, &folder)).exists;
+        let mut pending: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; 256];
+        let mut waited = Duration::from_secs(0);
+
+        loop {
+            let read = tokio::time::timeout(
+                IDLE_POLL_INTERVAL,
+                stream.read(&mut chunk),
+            ).await;
+
+            match read {
+                // The client hung up. Not an error: closing an idle
+                // connection is how clients end a session all the time.
+                Ok(Ok(0)) => return Ok(true),
+                Ok(Ok(n)) => {
+                    pending.extend_from_slice(&chunk[..n]);
+                    // Only `DONE` is legal here, so a line that is not `DONE`
+                    // ends the IDLE rather than being silently swallowed --
+                    // a client that thinks it issued a command and got no
+                    // answer will hang for ever.
+                    if let Some(i) = pending.iter().position(|b| *b == b'\n') {
+                        let line: Vec<u8> = pending.drain(..=i).collect();
+                        let text = String::from_utf8_lossy(&line)
+                            .trim()
+                            .to_uppercase();
+                        if text == "DONE" {
+                            res!(write_ok(stream, tag, "IDLE terminated").await);
+                        } else {
+                            res!(write_bad(stream, tag,
+                                "Only DONE is valid while idling").await);
+                        }
+                        return Ok(false);
+                    }
+                    // A line this long is not a client we want to keep
+                    // buffering for.
+                    if pending.len() > IDLE_MAX_LINE {
+                        res!(write_bad(stream, tag,
+                            "Line too long while idling").await);
+                        return Ok(false);
+                    }
+                }
+                Ok(Err(e)) => return Err(err!(e,
+                    "Reading from an idling IMAP client.";
+                    IO, Network, Read)),
+                // Nothing from the client: look at the mailbox.
+                Err(_elapsed) => {
+                    waited = waited.saturating_add(IDLE_POLL_INTERVAL);
+
+                    let status = res!(self.store.folder_status(&user, &folder));
+                    if status.exists != last_exists {
+                        last_exists = status.exists;
+                        res!(self.refresh_selected(session, false).await);
+                        res!(write_all(stream,
+                            fmt!("* {} EXISTS\r\n", status.exists).as_bytes()).await);
+                        res!(write_all(stream,
+                            fmt!("* {} RECENT\r\n", status.recent).as_bytes()).await);
+                    }
+
+                    // RFC 2177 tells clients to re-issue IDLE at least every
+                    // 29 minutes, and warns servers to expect stale ones. End
+                    // it ourselves a little before that: a well-behaved client
+                    // simply idles again, and a NAT that would have dropped
+                    // the connection silently never gets the chance.
+                    if waited >= IDLE_MAX_DURATION {
+                        res!(write_all(stream,
+                            b"* OK Idle time expired, please re-issue IDLE\r\n").await);
+                        res!(write_ok(stream, tag, "IDLE terminated").await);
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+    }
+
     async fn refresh_selected(
         &self,
         session:    &mut ImapSession,
@@ -1532,7 +1676,7 @@ async fn read_line<S: AsyncRead + Unpin>(stream: &mut S) -> Outcome<Option<Strin
 // └───────────────────────────────────────────────────────────────────────────┘
 
 fn capability_list() -> &'static str {
-    "IMAP4rev1 LITERAL+ AUTH=PLAIN AUTH=LOGIN SPECIAL-USE"
+    "IMAP4rev1 LITERAL+ AUTH=PLAIN AUTH=LOGIN SPECIAL-USE IDLE"
 }
 
 /// Return the RFC 6154 SPECIAL-USE attribute (with leading backslash
