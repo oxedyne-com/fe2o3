@@ -54,9 +54,12 @@ use crate::{
             new_order_request,
             parse_json_response,
             Authorization,
+            AuthorizationStatus,
             Challenge,
+            ChallengeStatus,
             Directory,
             Order,
+            OrderStatus,
             Problem,
         },
     },
@@ -568,31 +571,44 @@ impl AcmeClient {
         // Submit the order and fetch its authorisation URLs.
         let (order_url, mut order) = res!(self.new_order(dns_names).await);
 
-        // Remember the hostnames we installed challenge certs for, so we
-        // can remove them all at the end regardless of success.
-        let mut installed_hosts: Vec<String> = Vec::new();
+        // RFC 8555 §7.1.3: act on the state the order actually arrived in.
+        // A brand new order is usually `pending`, but when the CA still holds
+        // cached validations for every name it can hand us one that is already
+        // `ready`, with no authorisation work left to do at all.
+        match res!(order_step(&order, &order_url)) {
+            OrderStep::Authorise => {
+                // Remember the hostnames we installed challenge certs for, so
+                // we can remove them all at the end regardless of success.
+                let mut installed_hosts: Vec<String> = Vec::new();
 
-        // Drive each authorisation to the "valid" state.
-        let drive_result = self.drive_all_authorisations(
-            &order,
-            installer,
-            &mut installed_hosts,
-        ).await;
+                // Drive each authorisation to the "valid" state.
+                let drive_result = self.drive_all_authorisations(
+                    &order,
+                    installer,
+                    &mut installed_hosts,
+                ).await;
 
-        // Uninstall challenge certs unconditionally.
-        for host in &installed_hosts {
-            if let Err(e) = installer.remove(host) {
-                // Log-worthy but not fatal; the issuance may still be on
-                // track.  Wrap into the error chain if `drive_result` is
-                // already broken, otherwise report it separately via the
-                // standard logging macros.
-                warn!("ACME: installer.remove({:?}) failed: {:?}", host, e);
-            }
+                // Uninstall challenge certs unconditionally.
+                for host in &installed_hosts {
+                    if let Err(e) = installer.remove(host) {
+                        // Log-worthy but not fatal; the issuance may still be
+                        // on track.
+                        warn!("ACME: installer.remove({:?}) failed: {:?}", host, e);
+                    }
+                }
+                res!(drive_result);
+
+                // Poll the order until the CA marks it ready to be finalised.
+                order = res!(self.poll_until_ready(&order_url).await);
+            },
+            OrderStep::Finalise => {
+                info!(
+                    "ACME: order for {:?} arrived 'ready'; every \
+                    authorisation was already valid, going straight to \
+                    finalisation.", dns_names,
+                );
+            },
         }
-        res!(drive_result);
-
-        // Poll the order until it is ready to be finalised.
-        order = res!(self.poll_until_ready(&order_url).await);
 
         // Build the CSR key pair for the end-entity cert, generate the
         // CSR, and finalise the order. We do not bind the finalise reply
@@ -618,9 +634,13 @@ impl AcmeClient {
         })
     }
 
-    /// Walk every authorisation attached to `order`, build a challenge
-    /// cert for each, install it via `installer`, signal readiness, and
-    /// poll the authorisation until it becomes `valid`.
+    /// Walk every authorisation attached to `order` and bring each one to the
+    /// `valid` state, doing only the work its current status calls for.
+    ///
+    /// An authorisation that is already `valid` is skipped without a challenge
+    /// POST: the CA caches successful validations (RFC 8555 §7.1.4), so this
+    /// is the normal shape of any order placed after a previous issuance for
+    /// the same name got as far as validating it.
     async fn drive_all_authorisations<I: ChallengeInstaller>(
         &mut self,
         order:              &Order,
@@ -634,20 +654,28 @@ impl AcmeClient {
 
             // We only satisfy DNS identifiers via tls-alpn-01.
             let hostname = res!(dns_identifier(&authz));
-            let chall = match res!(authz.tls_alpn_01_challenge()) {
-                Some(c) => c,
-                None    => return Err(err!(
-                    "Authorisation for {:?} did not offer a tls-alpn-01 \
-                    challenge.", hostname;
-                    IO, Network, Missing, Invalid)),
-            };
-            if chall.token.is_empty() {
-                return Err(err!(
-                    "tls-alpn-01 challenge for {:?} has an empty token.",
-                    hostname;
-                    IO, Network, Missing, Invalid));
-            }
 
+            let step = res!(authz_step(&authz, &hostname));
+            // Whether to signal readiness is decided here, with the challenge borrowed rather than
+            // taken, because the challenge is needed either way and the decision is needed after.
+            let (chall, prove) = match &step {
+                AuthzStep::Skip => {
+                    // Already validated by the CA; nothing to prove. POSTing
+                    // the challenge here is exactly what Boulder answers with
+                    // `400 malformed`.
+                    info!(
+                        "ACME: authorisation for {:?} is already valid; \
+                        no challenge needed.", hostname,
+                    );
+                    continue;
+                },
+                AuthzStep::Prove(c)             => (c, true),
+                AuthzStep::AwaitValidation(c)   => (c, false),
+            };
+
+            // The challenge cert has to be reachable before the CA looks, and
+            // it must stay up while a validation that is already in flight
+            // completes -- so we install it for `AwaitValidation` too.
             let thumbprint = res!(self.signer.jwk_thumbprint_sha256());
             let key_auth = chall.key_authorization(&thumbprint);
             let cert = res!(build_tls_alpn_01_cert(&hostname, &key_auth));
@@ -655,16 +683,21 @@ impl AcmeClient {
             res!(installer.install(&hostname, &cert));
             installed_hosts.push(hostname.clone());
 
-            let _ = res!(self.signal_challenge_ready(&chall.url).await);
+            // Only signal readiness on a challenge that is still `pending`.
+            // Re-POSTing one the CA is already validating is at best wasted
+            // and at worst rejected.
+            if prove {
+                let _ = res!(self.signal_challenge_ready(&chall.url).await);
+            }
 
-            // Poll the authorisation itself until it reaches a terminal
-            // state.
+            // Poll the authorisation itself until it reaches a terminal state.
             let final_authz = res!(self.poll_authorisation_until_final(authz_url).await);
-            if final_authz.status != "valid" {
-                return Err(err!(
-                    "Authorisation for {:?} ended in status {:?} instead \
-                    of 'valid'.", hostname, final_authz.status;
-                    IO, Network, Invalid));
+            match res!(final_authz.typed_status()) {
+                AuthorizationStatus::Valid => (),
+                other => return Err(err!(
+                    "Authorisation for {:?} ended in status {:?} instead of \
+                    'valid'.", hostname, other.as_wire();
+                    IO, Network, Invalid)),
             }
         }
         Ok(())
@@ -680,8 +713,11 @@ impl AcmeClient {
     {
         for _ in 0..POLL_MAX_ATTEMPTS {
             let authz = res!(self.fetch_authorization(authz_url).await);
-            if authz.status != "pending" && authz.status != "processing" {
-                return Ok(authz);
+            // RFC 8555 §7.1.6: an authorisation has no `processing` state; it
+            // leaves `pending` straight for a terminal one.
+            match res!(authz.typed_status()) {
+                AuthorizationStatus::Pending => (),
+                _ => return Ok(authz),
             }
             tokio::time::sleep(POLL_INTERVAL).await;
         }
@@ -691,8 +727,8 @@ impl AcmeClient {
             IO, Network, Timeout))
     }
 
-    /// Poll an order URL until its status is `ready`, `valid` or `invalid`.
-    /// Used after challenges are satisfied, before the finalise POST.
+    /// Poll an order URL until it is ready to be finalised. Used after the
+    /// challenges are satisfied, before the finalise POST.
     async fn poll_until_ready(
         &mut self,
         order_url:  &str,
@@ -701,13 +737,16 @@ impl AcmeClient {
     {
         for _ in 0..POLL_MAX_ATTEMPTS {
             let order = res!(self.poll_order(order_url).await);
-            match order.status.as_str() {
-                "ready" | "valid" => return Ok(order),
-                "invalid" => return Err(err!(
-                    "Order {:?} transitioned to 'invalid' while waiting for \
-                    authorisations to complete.", order_url;
-                    IO, Network, Invalid)),
-                _ => (),
+            match res!(order.typed_status()) {
+                OrderStatus::Ready | OrderStatus::Valid => return Ok(order),
+                OrderStatus::Invalid => return Err(res!(order_invalid_error(
+                    &order,
+                    order_url,
+                    "while waiting for authorisations to complete",
+                ))),
+                // Still settling: the CA has not yet caught up with the
+                // authorisations we just satisfied.
+                OrderStatus::Pending | OrderStatus::Processing => (),
             }
             tokio::time::sleep(POLL_INTERVAL).await;
         }
@@ -727,13 +766,18 @@ impl AcmeClient {
     {
         for _ in 0..POLL_MAX_ATTEMPTS {
             let order = res!(self.poll_order(order_url).await);
-            match order.status.as_str() {
-                "valid" => return Ok(order),
-                "invalid" => return Err(err!(
-                    "Order {:?} transitioned to 'invalid' during \
-                    finalisation.", order_url;
-                    IO, Network, Invalid)),
-                _ => (),
+            match res!(order.typed_status()) {
+                OrderStatus::Valid => return Ok(order),
+                OrderStatus::Invalid => return Err(res!(order_invalid_error(
+                    &order,
+                    order_url,
+                    "during finalisation",
+                ))),
+                // `processing` is the CA issuing; `pending` and `ready` mean
+                // it has not yet registered our CSR.
+                OrderStatus::Pending
+                    | OrderStatus::Ready
+                    | OrderStatus::Processing => (),
             }
             tokio::time::sleep(POLL_INTERVAL).await;
         }
@@ -884,6 +928,202 @@ fn parse_problem_body(body: &[u8]) -> Outcome<Option<Problem>> {
     }
 }
 
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ STATE DECISIONS (RFC 8555 §7.1.3, §7.1.4, §7.1.6)                         │
+// └───────────────────────────────────────────────────────────────────────────┘
+//
+// The two functions below are the whole of the client's protocol reasoning,
+// deliberately kept pure: they take a parsed order or authorisation and say
+// what must happen next, with no I/O anywhere near them. The async drivers are
+// thin executors of their verdict. That split is what makes the state machine
+// testable against captured CA responses without a network.
+
+/// What the client must do with a single authorisation.
+#[derive(Clone, Debug)]
+pub(super) enum AuthzStep {
+    /// The CA has already validated this identifier, so there is nothing to
+    /// prove. POSTing the challenge anyway is what Boulder rejects with
+    /// `400 malformed`.
+    Skip,
+    /// Install the challenge cert and POST the challenge to signal readiness.
+    Prove(Challenge),
+    /// Readiness has already been signalled and the CA is validating: keep the
+    /// challenge cert up and poll, but do not POST the challenge again.
+    AwaitValidation(Challenge),
+}
+
+/// What the client must do with a freshly-created order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum OrderStep {
+    /// Authorisations are outstanding and must be satisfied first.
+    Authorise,
+    /// Every authorisation is already valid; go straight to the CSR.
+    Finalise,
+}
+
+/// Decide what to do with `authz`, per RFC 8555 §7.1.4 and §7.1.6.
+///
+/// The `valid` arm is the one that matters: a CA caches successful validations
+/// (Let's Encrypt for roughly 30 days), so any order placed after an issuance
+/// that got as far as validating a name will carry an authorisation that is
+/// already `valid`. Treating that as though it were `pending` -- which is what
+/// an unconditional challenge POST amounts to -- turns a single transient
+/// failure into a permanent one, because every retry thereafter POSTs a
+/// challenge whose authorisation is no longer pending and is refused.
+pub(super) fn authz_step(
+    authz:      &Authorization,
+    hostname:   &str,
+)
+    -> Outcome<AuthzStep>
+{
+    match res!(authz.typed_status()) {
+        // Nothing to do. This is the cached-validation case.
+        AuthorizationStatus::Valid => Ok(AuthzStep::Skip),
+
+        // Dead authorisations. Naming both the domain and the status matters:
+        // this error is the only thing an operator will see, and "invalid" and
+        // "expired" call for quite different responses.
+        AuthorizationStatus::Invalid
+            | AuthorizationStatus::Expired
+            | AuthorizationStatus::Revoked
+            | AuthorizationStatus::Deactivated => {
+            let status = res!(authz.typed_status());
+            let mut msg = fmt!(
+                "Authorisation for {:?} is in status {:?} and cannot be \
+                satisfied; a new order is required.",
+                hostname, status.as_wire(),
+            );
+            // Surface the CA's own explanation when it attached one to the
+            // challenge that failed.
+            if let Ok(Some(chall)) = authz.tls_alpn_01_challenge() {
+                if let Ok(Some(problem)) = chall.typed_error() {
+                    msg.push_str(&fmt!(
+                        " CA problem type: {:?}, detail: {:?}.",
+                        problem.typ, problem.detail,
+                    ));
+                }
+            }
+            Err(err!(msg.clone(); IO, Network, Invalid))
+        },
+
+        // The ordinary first-issuance path: something still has to be proved.
+        AuthorizationStatus::Pending => {
+            let chall = match res!(authz.tls_alpn_01_challenge()) {
+                Some(c) => c,
+                None    => return Err(err!(
+                    "Authorisation for {:?} did not offer a tls-alpn-01 \
+                    challenge.", hostname;
+                    IO, Network, Missing, Invalid)),
+            };
+            if chall.token.is_empty() {
+                return Err(err!(
+                    "tls-alpn-01 challenge for {:?} has an empty token.",
+                    hostname;
+                    IO, Network, Missing, Invalid));
+            }
+            match res!(chall.typed_status()) {
+                ChallengeStatus::Pending => {
+                    if chall.url.is_empty() {
+                        return Err(err!(
+                            "tls-alpn-01 challenge for {:?} has an empty url, \
+                            so readiness cannot be signalled.", hostname;
+                            IO, Network, Missing, Invalid));
+                    }
+                    Ok(AuthzStep::Prove(chall))
+                },
+                // Already signalled, or already validated while the enclosing
+                // authorisation has yet to catch up: either way, keep the cert
+                // up and wait rather than POSTing again.
+                ChallengeStatus::Processing
+                    | ChallengeStatus::Valid => Ok(AuthzStep::AwaitValidation(chall)),
+                ChallengeStatus::Invalid => {
+                    let mut msg = fmt!(
+                        "The tls-alpn-01 challenge for {:?} is in status \
+                        'invalid'; a new order is required.", hostname,
+                    );
+                    if let Ok(Some(problem)) = chall.typed_error() {
+                        msg.push_str(&fmt!(
+                            " CA problem type: {:?}, detail: {:?}.",
+                            problem.typ, problem.detail,
+                        ));
+                    }
+                    Err(err!(msg.clone(); IO, Network, Invalid))
+                },
+            }
+        },
+    }
+}
+
+/// Decide what to do with a freshly-created order, per RFC 8555 §7.1.3.
+///
+/// `pending` and `ready` are the two states a `newOrder` reply can legitimately
+/// arrive in. The other three are handled explicitly rather than swept into a
+/// catch-all, because each means something quite specific has gone sideways.
+pub(super) fn order_step(
+    order:      &Order,
+    order_url:  &str,
+)
+    -> Outcome<OrderStep>
+{
+    match res!(order.typed_status()) {
+        OrderStatus::Pending => Ok(OrderStep::Authorise),
+
+        // Every authorisation is already valid, from the CA's cache. There is
+        // no challenge to answer -- the order wants a CSR and nothing else.
+        OrderStatus::Ready => Ok(OrderStep::Finalise),
+
+        OrderStatus::Invalid => Err(res!(order_invalid_error(
+            order,
+            order_url,
+            "on creation",
+        ))),
+
+        // Both of these mean the order has already been finalised, against a
+        // CSR whose private key belonged to some earlier issuance attempt.
+        // That key is not recoverable here (we mint a fresh one per issuance),
+        // so the certificate at the far end of this order is unusable to us:
+        // installing it would mean serving a chain whose private key we do not
+        // hold, and every TLS handshake would fail. Erroring lets the caller's
+        // retry place a clean order, which is the recoverable outcome.
+        OrderStatus::Processing
+            | OrderStatus::Valid => {
+            let status = res!(order.typed_status());
+            Err(err!(
+                "Order {:?} arrived in status {:?}, meaning it was already \
+                finalised against a CSR from an earlier attempt whose private \
+                key this process does not hold. The resulting certificate \
+                cannot be served. A fresh order is required.",
+                order_url, status.as_wire();
+                IO, Network, Invalid, Conflict))
+        },
+    }
+}
+
+/// Build the error for an order that has gone `invalid`, folding in the CA's
+/// problem document when one is attached (RFC 8555 §7.1.3 puts it on `error`).
+fn order_invalid_error(
+    order:      &Order,
+    order_url:  &str,
+    context:    &str,
+)
+    -> Outcome<Error<ErrTag>>
+{
+    let mut msg = fmt!(
+        "Order {:?} transitioned to 'invalid' {}.", order_url, context,
+    );
+    match order.typed_error() {
+        Ok(Some(problem)) => msg.push_str(&fmt!(
+            " CA problem type: {:?}, title: {:?}, detail: {:?}.",
+            problem.typ, problem.title, problem.detail,
+        )),
+        Ok(None) => msg.push_str(" The CA attached no problem document."),
+        Err(e) => msg.push_str(&fmt!(
+            " The CA's problem document could not be parsed: {:?}.", e,
+        )),
+    }
+    Ok(err!(msg.clone(); IO, Network, Invalid))
+}
+
 /// Extract the DNS name from an authorisation's `identifier` field.
 fn dns_identifier(authz: &Authorization) -> Outcome<String> {
     match &authz.identifier {
@@ -957,6 +1197,315 @@ fn build_csr(dns_names: &[String]) -> Outcome<(Vec<u8>, Vec<u8>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- authorisation state machine (RFC 8555 §7.1.4, §7.1.6) -----------
+
+    /// Build an authorisation body with the given authorisation status and
+    /// tls-alpn-01 challenge status, shaped as Let's Encrypt actually sends
+    /// them.
+    fn authz_json(authz_status: &str, chall_status: &str) -> Vec<u8> {
+        fmt!(r#"{{
+            "status":     "{}",
+            "expires":    "2026-08-01T12:00:00Z",
+            "identifier": {{"type":"dns","value":"example.com"}},
+            "challenges": [
+                {{
+                    "type":   "http-01",
+                    "status": "{}",
+                    "url":    "https://acme-v02.api.letsencrypt.org/acme/chall/1/a",
+                    "token":  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }},
+                {{
+                    "type":   "tls-alpn-01",
+                    "status": "{}",
+                    "url":    "https://acme-v02.api.letsencrypt.org/acme/chall/1/c",
+                    "token":  "cccccccccccccccccccccccccccccccc"
+                }}
+            ]
+        }}"#, authz_status, chall_status, chall_status).into_bytes()
+    }
+
+    /// **Defect regression.** An authorisation the CA has already validated --
+    /// which is what a renewal order carries, because Let's Encrypt caches a
+    /// successful validation for around 30 days -- must be skipped outright.
+    ///
+    /// The old code POSTed the challenge unconditionally. Boulder answers a
+    /// POST to a challenge of a non-pending authorisation with `400 malformed`,
+    /// so every retry after a transient mid-issuance failure failed the same
+    /// way, every 24 hours, until the certificate expired.
+    #[test]
+    fn test_authz_step_skips_already_valid_authorisation() -> Outcome<()> {
+        let authz: Authorization = res!(parse_json_response(
+            &authz_json("valid", "valid")));
+        match res!(authz_step(&authz, "example.com")) {
+            AuthzStep::Skip => Ok(()),
+            other => Err(err!(
+                "A `valid` authorisation must be skipped, not challenged; \
+                authz_step returned {:?}.", other;
+                Test, Mismatch)),
+        }
+    }
+
+    /// The ordinary first-issuance path: a pending authorisation with a
+    /// pending challenge must still be proved.
+    #[test]
+    fn test_authz_step_proves_pending_authorisation() -> Outcome<()> {
+        let authz: Authorization = res!(parse_json_response(
+            &authz_json("pending", "pending")));
+        match res!(authz_step(&authz, "example.com")) {
+            AuthzStep::Prove(c) => {
+                if c.token != "cccccccccccccccccccccccccccccccc" {
+                    return Err(err!(
+                        "authz_step selected the wrong challenge: token {:?}.",
+                        c.token;
+                        Test, Mismatch));
+                }
+                if !c.url.ends_with("/chall/1/c") {
+                    return Err(err!(
+                        "authz_step selected the wrong challenge: url {:?}.",
+                        c.url;
+                        Test, Mismatch));
+                }
+                Ok(())
+            },
+            other => Err(err!(
+                "A `pending` authorisation must be proved; authz_step \
+                returned {:?}.", other;
+                Test, Mismatch)),
+        }
+    }
+
+    /// A challenge already being validated must not be POSTed a second time,
+    /// but its cert must still be installed -- so the step is
+    /// `AwaitValidation`, not `Prove` and not `Skip`.
+    #[test]
+    fn test_authz_step_awaits_processing_challenge() -> Outcome<()> {
+        let authz: Authorization = res!(parse_json_response(
+            &authz_json("pending", "processing")));
+        match res!(authz_step(&authz, "example.com")) {
+            AuthzStep::AwaitValidation(_) => Ok(()),
+            other => Err(err!(
+                "A `processing` challenge must be awaited, not re-POSTed; \
+                authz_step returned {:?}.", other;
+                Test, Mismatch)),
+        }
+    }
+
+    /// Every dead authorisation status must produce an error that names both
+    /// the domain and the status -- never a silent skip, which would let the
+    /// client sail on to finalisation and fail confusingly later.
+    #[test]
+    fn test_authz_step_errors_on_dead_statuses() -> Outcome<()> {
+        for status in ["invalid", "expired", "revoked", "deactivated"] {
+            let authz: Authorization = res!(parse_json_response(
+                &authz_json(status, "invalid")));
+            match authz_step(&authz, "example.com") {
+                Ok(step) => return Err(err!(
+                    "Authorisation status {:?} must be an error, but \
+                    authz_step returned {:?}.", status, step;
+                    Test, Mismatch)),
+                Err(e) => {
+                    let msg = fmt!("{}", e);
+                    if !msg.contains("example.com") {
+                        return Err(err!(
+                            "The error for status {:?} does not name the \
+                            domain: {}", status, msg;
+                            Test, Missing));
+                    }
+                    if !msg.contains(status) {
+                        return Err(err!(
+                            "The error for status {:?} does not name the \
+                            status: {}", status, msg;
+                            Test, Missing));
+                    }
+                },
+            }
+        }
+        Ok(())
+    }
+
+    /// When the CA explains why a challenge failed, that explanation must
+    /// reach the operator rather than being swallowed.
+    #[test]
+    fn test_authz_step_surfaces_ca_problem_document() -> Outcome<()> {
+        let body = br#"{
+            "status":     "invalid",
+            "identifier": {"type":"dns","value":"example.com"},
+            "challenges": [
+                {
+                    "type":   "tls-alpn-01",
+                    "status": "invalid",
+                    "url":    "https://acme-v02.api.letsencrypt.org/acme/chall/1/c",
+                    "token":  "cccccccccccccccccccccccccccccccc",
+                    "error":  {
+                        "type":   "urn:ietf:params:acme:error:unauthorized",
+                        "detail": "Timeout during connect (likely firewall problem)",
+                        "status": 403
+                    }
+                }
+            ]
+        }"#;
+        let authz: Authorization = res!(parse_json_response(body));
+        match authz_step(&authz, "example.com") {
+            Ok(step) => Err(err!(
+                "An invalid authorisation must error, got {:?}.", step;
+                Test, Mismatch)),
+            Err(e) => {
+                let msg = fmt!("{}", e);
+                if !msg.contains("Timeout during connect") {
+                    return Err(err!(
+                        "The CA's problem detail was not surfaced: {}", msg;
+                        Test, Missing));
+                }
+                Ok(())
+            },
+        }
+    }
+
+    /// A pending authorisation that offers no tls-alpn-01 challenge at all is
+    /// unsatisfiable by this client and must say so.
+    #[test]
+    fn test_authz_step_errors_when_no_tls_alpn_challenge() -> Outcome<()> {
+        let body = br#"{
+            "status":     "pending",
+            "identifier": {"type":"dns","value":"example.com"},
+            "challenges": [
+                {
+                    "type":   "http-01",
+                    "status": "pending",
+                    "url":    "https://acme-v02.api.letsencrypt.org/acme/chall/1/a",
+                    "token":  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }
+            ]
+        }"#;
+        let authz: Authorization = res!(parse_json_response(body));
+        match authz_step(&authz, "example.com") {
+            Ok(step) => Err(err!(
+                "Expected an error when no tls-alpn-01 challenge is offered, \
+                got {:?}.", step;
+                Test, Mismatch)),
+            Err(_) => Ok(()),
+        }
+    }
+
+    // ---- order state machine (RFC 8555 §7.1.3) ---------------------------
+
+    /// Build an order body in the given status.
+    fn order_json(status: &str, extra: &str) -> Vec<u8> {
+        fmt!(r#"{{
+            "status":     "{}",
+            "identifiers": [{{"type":"dns","value":"example.com"}}],
+            "authorizations": ["https://acme-v02.api.letsencrypt.org/acme/authz/1"],
+            "finalize":   "https://acme-v02.api.letsencrypt.org/acme/finalize/1"{}
+        }}"#, status, extra).into_bytes()
+    }
+
+    /// A `pending` order means authorisations are outstanding.
+    #[test]
+    fn test_order_step_pending_authorises() -> Outcome<()> {
+        let order: Order = res!(parse_json_response(&order_json("pending", "")));
+        let step = res!(order_step(&order, "https://example.test/order/1"));
+        if step != OrderStep::Authorise {
+            return Err(err!(
+                "A `pending` order must be authorised, got {:?}.", step;
+                Test, Mismatch));
+        }
+        Ok(())
+    }
+
+    /// **Defect regression.** An order that arrives already `ready` -- every
+    /// authorisation validated from the CA's cache -- must go straight to
+    /// finalisation, with no challenge POSTed for any of its authorisations.
+    #[test]
+    fn test_order_step_ready_goes_straight_to_finalisation() -> Outcome<()> {
+        let order: Order = res!(parse_json_response(&order_json("ready", "")));
+        let step = res!(order_step(&order, "https://example.test/order/1"));
+        if step != OrderStep::Finalise {
+            return Err(err!(
+                "A `ready` order must go straight to finalisation, got {:?}.",
+                step;
+                Test, Mismatch));
+        }
+        Ok(())
+    }
+
+    /// An `invalid` order must error, and must carry the CA's problem
+    /// document into the message rather than dropping it.
+    #[test]
+    fn test_order_step_invalid_surfaces_problem_document() -> Outcome<()> {
+        let extra = r#",
+            "error": {
+                "type":   "urn:ietf:params:acme:error:rateLimited",
+                "title":  "Too many certificates already issued",
+                "detail": "too many certificates already issued for example.com",
+                "status": 429
+            }"#;
+        let order: Order = res!(parse_json_response(&order_json("invalid", extra)));
+        match order_step(&order, "https://example.test/order/1") {
+            Ok(step) => Err(err!(
+                "An `invalid` order must error, got {:?}.", step;
+                Test, Mismatch)),
+            Err(e) => {
+                let msg = fmt!("{}", e);
+                if !msg.contains("too many certificates already issued") {
+                    return Err(err!(
+                        "The CA's problem detail was not surfaced: {}", msg;
+                        Test, Missing));
+                }
+                if !msg.contains("rateLimited") {
+                    return Err(err!(
+                        "The CA's problem type was not surfaced: {}", msg;
+                        Test, Missing));
+                }
+                Ok(())
+            },
+        }
+    }
+
+    /// An order that is already `valid` or `processing` was finalised against
+    /// a CSR from an earlier attempt, whose private key we do not hold. Its
+    /// certificate is therefore unusable and must not be quietly returned:
+    /// serving a chain whose key we lack would fail every TLS handshake while
+    /// looking, to the renewal check, like a perfectly fresh certificate.
+    #[test]
+    fn test_order_step_errors_on_already_finalised_order() -> Outcome<()> {
+        for status in ["valid", "processing"] {
+            let extra = r#",
+            "certificate": "https://acme-v02.api.letsencrypt.org/acme/cert/abc""#;
+            let order: Order = res!(parse_json_response(&order_json(status, extra)));
+            match order_step(&order, "https://example.test/order/1") {
+                Ok(step) => return Err(err!(
+                    "An order in status {:?} must error rather than yield \
+                    {:?}.", status, step;
+                    Test, Mismatch)),
+                Err(e) => {
+                    let msg = fmt!("{}", e);
+                    if !msg.contains(status) {
+                        return Err(err!(
+                            "The error for an order in status {:?} does not \
+                            name the status: {}", status, msg;
+                            Test, Missing));
+                    }
+                },
+            }
+        }
+        Ok(())
+    }
+
+    /// A status the RFC does not define must be refused outright rather than
+    /// silently treated as one we know.
+    #[test]
+    fn test_order_step_rejects_unknown_status() -> Outcome<()> {
+        let order: Order = res!(parse_json_response(&order_json("frobnicating", "")));
+        match order_step(&order, "https://example.test/order/1") {
+            Ok(step) => Err(err!(
+                "An unknown order status must error, got {:?}.", step;
+                Test, Mismatch)),
+            Err(_) => Ok(()),
+        }
+    }
+
+    // ---- URL splitting ---------------------------------------------------
 
     /// A bare hostname-only URL must parse to (host, 443, "/").
     #[test]

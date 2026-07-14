@@ -155,24 +155,20 @@ impl JwsSigner {
 
     /// Compute the RFC 7638 §3 thumbprint of the public JWK using SHA-256.
     ///
-    /// The canonical input form for a P-256 EC key is byte-exact:
-    ///
-    /// ```text
-    /// {"crv":"P-256","kty":"EC","x":"<b64url-x>","y":"<b64url-y>"}
-    /// ```
-    ///
-    /// with the required members in lexicographic order and no whitespace.
-    /// We construct that string by hand rather than relying on a generic JSON
-    /// serialiser because the RFC defines the canonical form in terms of the
-    /// exact byte sequence, not a structural equivalent.
+    /// The required members of an EC key are `crv`, `kty`, `x` and `y`. They
+    /// are handed to [`jwk_thumbprint_sha256_of`] deliberately out of
+    /// lexicographic order, so that the canonicalisation -- not the caller --
+    /// is what puts them in the order RFC 7638 §3 mandates.
     pub fn jwk_thumbprint_sha256(&self) -> Outcome<[u8; 32]> {
         let (x, y) = res!(self.public_key_xy());
-        let canonical = fmt!(
-            r#"{{"crv":"P-256","kty":"EC","x":"{}","y":"{}"}}"#,
-            base64url_encode(&x),
-            base64url_encode(&y),
-        );
-        Ok(sha256(canonical.as_bytes()))
+        let x_b64 = base64url_encode(&x);
+        let y_b64 = base64url_encode(&y);
+        jwk_thumbprint_sha256_of(&[
+            ("kty", "EC"),
+            ("x",   &x_b64),
+            ("y",   &y_b64),
+            ("crv", "P-256"),
+        ])
     }
 
     /// Produce a JWS in the flattened JSON serialisation form defined in RFC
@@ -243,6 +239,86 @@ impl JwsSigner {
 // │ HELPERS                                                                   │
 // └───────────────────────────────────────────────────────────────────────────┘
 
+/// Build the RFC 7638 §3 canonical JSON form of a JWK from its required
+/// members.
+///
+/// The canonical form is defined as an exact byte sequence, not merely a
+/// structurally equivalent JSON document: the **required** members only (for
+/// an EC key `crv`, `kty`, `x` and `y`; for an RSA key `e`, `kty` and `n`),
+/// lexicographically ordered by member name, with no whitespace and no line
+/// breaks. A CA recomputes this string from the JWK we send it and hashes the
+/// result, so a single stray space or a reordered member silently invalidates
+/// every challenge we ever answer.
+///
+/// The members are sorted here rather than trusted from the caller, and the
+/// string is assembled by hand rather than handed to a general-purpose JSON
+/// serialiser, because no serialiser guarantees the byte-exactness the RFC
+/// requires. Members are taken as `(name, value)` pairs because every required
+/// member of every key type RFC 7638 covers has a string value.
+pub fn jwk_canonical_string(members: &[(&str, &str)]) -> Outcome<String> {
+    if members.is_empty() {
+        return Err(err!(
+            "An RFC 7638 canonical JWK needs at least one required member, \
+            none were supplied.";
+            Invalid, Input, Missing));
+    }
+    let mut sorted = members.to_vec();
+    // Lexicographic order by member name. Rust's `str` ordering compares by
+    // byte, which for UTF-8 is equivalent to ordering by code point, and the
+    // member names RFC 7638 defines are all ASCII in any case.
+    sorted.sort_by(|a, b| a.0.cmp(b.0));
+    for pair in sorted.windows(2) {
+        if pair[0].0 == pair[1].0 {
+            return Err(err!(
+                "Duplicate JWK member name {:?}; the canonical form would \
+                silently drop one of them.", pair[0].0;
+                Invalid, Input, Conflict));
+        }
+    }
+    let mut out = String::from("{");
+    for (i, (name, value)) in sorted.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push('"');
+        out.push_str(&json_escape(name));
+        out.push_str("\":\"");
+        out.push_str(&json_escape(value));
+        out.push('"');
+    }
+    out.push('}');
+    Ok(out)
+}
+
+/// Compute the RFC 7638 §3 SHA-256 thumbprint of a JWK given its required
+/// members, which are canonicalised by [`jwk_canonical_string`] first.
+pub fn jwk_thumbprint_sha256_of(members: &[(&str, &str)]) -> Outcome<[u8; 32]> {
+    let canonical = res!(jwk_canonical_string(members));
+    Ok(sha256(canonical.as_bytes()))
+}
+
+/// Escape a string for inclusion in a JSON string literal, per RFC 8259 §7.
+///
+/// Base64url payloads and the short ASCII tokens RFC 7638 uses as member
+/// names never need escaping, so in practice this is the identity function;
+/// it exists so that the canonical form stays valid JSON no matter what it is
+/// handed.
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"'             => out.push_str("\\\""),
+            '\\'            => out.push_str("\\\\"),
+            '\n'            => out.push_str("\\n"),
+            '\r'            => out.push_str("\\r"),
+            '\t'            => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&fmt!("\\u{:04x}", c as u32)),
+            c               => out.push(c),
+        }
+    }
+    out
+}
+
 /// URL-safe base64 without padding, as required by RFC 7515 §2.
 pub fn base64url_encode(bytes: &[u8]) -> String {
     base64::encode_config(bytes, base64::URL_SAFE_NO_PAD)
@@ -270,6 +346,74 @@ fn sha256(data: &[u8]) -> [u8; 32] {
 
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
+// │ TEST VECTORS                                                              │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// A fixed P-256 account key in PKCS#8, used to pin the EC thumbprint path
+/// against an externally-derived expected value. Shared with the
+/// [`crate::acme::rfc8555`] tests so the key authorisation and dns-01 vectors
+/// chain off the very same key.
+///
+/// Generated once, outside this crate, with:
+///
+/// ```text
+/// openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 \
+///     -outform DER -out k.der
+/// openssl pkcs8 -topk8 -nocrypt -inform DER -in k.der -outform DER
+/// ```
+///
+/// This is a throwaway test key and guards nothing.
+#[cfg(test)]
+pub(crate) const TEST_P256_PKCS8: [u8; 138] = [
+    0x30, 0x81, 0x87, 0x02, 0x01, 0x00, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86,
+    0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d,
+    0x03, 0x01, 0x07, 0x04, 0x6d, 0x30, 0x6b, 0x02, 0x01, 0x01, 0x04, 0x20,
+    0x36, 0x69, 0x61, 0xe3, 0x3c, 0xdb, 0xf0, 0x14, 0x7f, 0xc3, 0xc0, 0x0c,
+    0x8b, 0xea, 0xfd, 0xa5, 0xa4, 0x6d, 0x21, 0xfa, 0xed, 0xa2, 0x06, 0x98,
+    0x8a, 0x36, 0xc5, 0xc2, 0xa8, 0x87, 0xc3, 0x39, 0xa1, 0x44, 0x03, 0x42,
+    0x00, 0x04, 0x70, 0xc0, 0x18, 0x21, 0x82, 0x6e, 0xec, 0x0d, 0x9a, 0x35,
+    0x34, 0xeb, 0xba, 0xb4, 0x96, 0x04, 0x53, 0x30, 0xaf, 0xcb, 0xb2, 0x55,
+    0x16, 0x06, 0xbe, 0xba, 0xe0, 0xb1, 0x4c, 0xfc, 0x23, 0xa4, 0x2a, 0xda,
+    0xb2, 0xda, 0x17, 0x2f, 0x8c, 0x8c, 0xbf, 0x16, 0x87, 0xce, 0xe3, 0xb3,
+    0x1f, 0x59, 0xe1, 0xcb, 0x82, 0x33, 0x7b, 0x55, 0xdc, 0x70, 0xd0, 0x1a,
+    0x76, 0x31, 0x14, 0x32, 0x1b, 0xc6,
+];
+
+/// The RFC 7638 §3 thumbprint of [`TEST_P256_PKCS8`], base64url-encoded.
+///
+/// Derived **independently of this crate**, from the DER above. The public
+/// point is the trailing 65 bytes of the SubjectPublicKeyInfo
+/// (`04 || X || Y`), giving:
+///
+/// ```text
+/// x = cMAYIYJu7A2aNTTrurSWBFMwr8uyVRYGvrrgsUz8I6Q
+/// y = Ktqy2hcvjIy_FofO47MfWeHLgjN7Vdxw0Bp2MRQyG8Y
+/// ```
+///
+/// and therefore the RFC 7638 canonical string
+///
+/// ```text
+/// {"crv":"P-256","kty":"EC","x":"cMAYIYJu7A2aNTTrurSWBFMwr8uyVRYGvrrgsUz8I6Q","y":"Ktqy2hcvjIy_FofO47MfWeHLgjN7Vdxw0Bp2MRQyG8Y"}
+/// ```
+///
+/// whose SHA-256, base64url-encoded without padding, is the value below.
+/// Re-derive with `openssl` and `python3`:
+///
+/// ```text
+/// openssl pkey -inform DER -in k8.der -pubout -outform DER -out pub.der
+/// python3 -c '
+/// import hashlib, base64
+/// p = open("pub.der","rb").read()[-65:]
+/// b = lambda v: base64.urlsafe_b64encode(v).rstrip(b"=").decode()
+/// c = chr(123)+chr(34)+"crv"+chr(34)+":"+chr(34)+"P-256"+chr(34)+","+chr(34)+"kty"+chr(34)+":"+chr(34)+"EC"+chr(34)+","+chr(34)+"x"+chr(34)+":"+chr(34)+b(p[1:33])+chr(34)+","+chr(34)+"y"+chr(34)+":"+chr(34)+b(p[33:65])+chr(34)+chr(125)
+/// print(b(hashlib.sha256(c.encode()).digest()))'
+/// ```
+#[cfg(test)]
+pub(crate) const TEST_P256_THUMBPRINT_B64: &str =
+    "rIV82OX7WtoQ9t9CvXXciOOey0zuRuaonj8p-bQghoA";
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
 // │ TESTS                                                                     │
 // └───────────────────────────────────────────────────────────────────────────┘
 
@@ -281,6 +425,158 @@ mod tests {
         UnparsedPublicKey,
         ECDSA_P256_SHA256_FIXED,
     };
+
+    // ---- RFC 7638 external oracles ---------------------------------------
+
+    /// The RSA key from the RFC 7638 §3.1 worked example. `e`, `kty` and `n`
+    /// are the required members of an RSA JWK; everything else in the RFC's
+    /// example JWK (`alg`, `kid`, `use`) is excluded from the canonical form
+    /// by §3, and this vector is precisely what proves we exclude them.
+    const RFC7638_RSA_N: &str = "0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4\
+        cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5Js\
+        GY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZg\
+        nYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lF\
+        d2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw";
+
+    /// The canonical string RFC 7638 §3.1 prints for that key, byte for byte.
+    const RFC7638_RSA_CANONICAL: &str = "{\"e\":\"AQAB\",\"kty\":\"RSA\",\"n\":\"0vx7\
+        agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1\
+        L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6C\
+        f0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajr\
+        n1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw\
+        0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw\"}";
+
+    /// The thumbprint RFC 7638 §3.1 publishes for that key.
+    const RFC7638_RSA_THUMBPRINT_B64: &str = "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs";
+
+    /// **External oracle, RFC 7638 §3.1.** The canonical string we build for
+    /// the RFC's own RSA example must equal the one the RFC prints, byte for
+    /// byte. This is the test that a self-consistently wrong implementation
+    /// cannot pass: reordering the members, inserting whitespace, or padding
+    /// the base64 all change these bytes, while leaving a determinism test
+    /// perfectly happy.
+    ///
+    /// Note the members are handed over deliberately unsorted, so the
+    /// canonicaliser -- not this test -- is what establishes the order.
+    #[test]
+    fn test_rfc7638_rsa_canonical_string_matches_the_rfc() -> Outcome<()> {
+        let canonical = res!(jwk_canonical_string(&[
+            ("n",   RFC7638_RSA_N),
+            ("kty", "RSA"),
+            ("e",   "AQAB"),
+        ]));
+        if canonical != RFC7638_RSA_CANONICAL {
+            return Err(err!(
+                "RFC 7638 §3.1 canonical string mismatch.\n  ours: {}\n  rfc:  {}",
+                canonical, RFC7638_RSA_CANONICAL;
+                Test, Mismatch));
+        }
+        Ok(())
+    }
+
+    /// **External oracle, RFC 7638 §3.1.** The SHA-256 thumbprint of the
+    /// RFC's RSA example must equal the value the RFC publishes.
+    #[test]
+    fn test_rfc7638_rsa_thumbprint_matches_the_rfc() -> Outcome<()> {
+        let tp = res!(jwk_thumbprint_sha256_of(&[
+            ("n",   RFC7638_RSA_N),
+            ("kty", "RSA"),
+            ("e",   "AQAB"),
+        ]));
+        let got = base64url_encode(&tp);
+        if got != RFC7638_RSA_THUMBPRINT_B64 {
+            return Err(err!(
+                "RFC 7638 §3.1 thumbprint mismatch: got {:?}, RFC publishes {:?}.",
+                got, RFC7638_RSA_THUMBPRINT_B64;
+                Test, Mismatch));
+        }
+        Ok(())
+    }
+
+    /// The canonicaliser must sort by member name regardless of the order it
+    /// is given them in, and must emit no whitespace whatsoever.
+    #[test]
+    fn test_jwk_canonical_string_sorts_and_omits_whitespace() -> Outcome<()> {
+        let canonical = res!(jwk_canonical_string(&[
+            ("y",   "YY"),
+            ("kty", "EC"),
+            ("crv", "P-256"),
+            ("x",   "XX"),
+        ]));
+        let expected = "{\"crv\":\"P-256\",\"kty\":\"EC\",\"x\":\"XX\",\"y\":\"YY\"}";
+        if canonical != expected {
+            return Err(err!(
+                "Canonical string was {:?}, expected {:?}.", canonical, expected;
+                Test, Mismatch));
+        }
+        if canonical.contains(' ') || canonical.contains('\n') || canonical.contains('\t') {
+            return Err(err!(
+                "Canonical string contains whitespace: {:?}.", canonical;
+                Test, Invalid));
+        }
+        Ok(())
+    }
+
+    /// A duplicate member name would silently drop data from the hash input,
+    /// so it must be refused rather than canonicalised.
+    #[test]
+    fn test_jwk_canonical_string_rejects_duplicate_members() -> Outcome<()> {
+        match jwk_canonical_string(&[("kty", "EC"), ("kty", "RSA")]) {
+            Ok(s) => Err(err!(
+                "Duplicate member name was accepted, producing {:?}.", s;
+                Test, Mismatch)),
+            Err(_) => Ok(()),
+        }
+    }
+
+    /// **External oracle, EC path.** The thumbprint of the fixed P-256 key in
+    /// [`TEST_P256_PKCS8`], computed through the real production path
+    /// (`from_pkcs8` -> `jwk_thumbprint_sha256`), must equal the value derived
+    /// independently with `openssl` and `python3`. See the doc comment on
+    /// [`TEST_P256_THUMBPRINT_B64`] for the derivation.
+    #[test]
+    fn test_ec_thumbprint_matches_external_oracle() -> Outcome<()> {
+        let signer = res!(JwsSigner::from_pkcs8(&TEST_P256_PKCS8));
+        let tp = res!(signer.jwk_thumbprint_sha256());
+        let got = base64url_encode(&tp);
+        if got != TEST_P256_THUMBPRINT_B64 {
+            return Err(err!(
+                "EC thumbprint for the pinned P-256 key was {:?}, but the \
+                externally-derived value is {:?}.", got, TEST_P256_THUMBPRINT_B64;
+                Test, Mismatch));
+        }
+        Ok(())
+    }
+
+    /// The JWK the signer publishes and the JWK the thumbprint is taken over
+    /// must describe the same key: a CA recomputes the thumbprint from the
+    /// `jwk` header we send, so any drift between the two breaks every
+    /// challenge. Pins both against the same external oracle.
+    #[test]
+    fn test_public_jwk_agrees_with_thumbprint_input() -> Outcome<()> {
+        let signer = res!(JwsSigner::from_pkcs8(&TEST_P256_PKCS8));
+        let jwk = res!(signer.public_jwk());
+        let kty = res!(map_get_str(&jwk, "kty"));
+        let crv = res!(map_get_str(&jwk, "crv"));
+        let x   = res!(map_get_str(&jwk, "x"));
+        let y   = res!(map_get_str(&jwk, "y"));
+
+        // Rebuild the thumbprint from the *published* JWK members alone.
+        let tp = res!(jwk_thumbprint_sha256_of(&[
+            ("kty", &kty),
+            ("crv", &crv),
+            ("x",   &x),
+            ("y",   &y),
+        ]));
+        let got = base64url_encode(&tp);
+        if got != TEST_P256_THUMBPRINT_B64 {
+            return Err(err!(
+                "Thumbprint taken over the published JWK is {:?}, but the \
+                externally-derived value is {:?}.", got, TEST_P256_THUMBPRINT_B64;
+                Test, Mismatch));
+        }
+        Ok(())
+    }
 
     /// Pull one string-valued entry out of a `Dat::Map` by key, returning an
     /// `Outcome` error on absence or type mismatch. Used by the tests below.
