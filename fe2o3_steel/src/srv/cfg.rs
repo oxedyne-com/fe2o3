@@ -1923,7 +1923,15 @@ pub struct ServerConfig {
 
     // --- Alerts -------------------------------------------------------------
     /// Operator alerting configuration (as a daticle map, parsed via
-    /// `get_alerts()`). Empty map disables alerting entirely.
+    /// `get_alerts()`). Absent, or an empty map, disables alerting entirely.
+    ///
+    /// `#[optional]` because a config block for a feature nobody has switched
+    /// on must not be mandatory. Without it, `from_datmap` treats the field as
+    /// required and every existing `config.jdat` in the world becomes invalid
+    /// the moment a new block is added to this struct -- which is a fine way
+    /// to take a production server down while adding a feature it does not
+    /// even use. Any block added here in future should be `#[optional]` too.
+    #[optional]
     pub alerts:                         DaticleMap,
 }
 
