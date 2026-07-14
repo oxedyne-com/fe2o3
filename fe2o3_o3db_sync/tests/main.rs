@@ -1,4 +1,5 @@
 mod basic;
+mod chunked_value;
 mod dal;
 mod delete_replay;
 mod durability;
@@ -33,6 +34,7 @@ fn run_tests() -> Outcome<()> {
     res!(scan::test_scan(filter));
     res!(durability::test_durability(filter));
     res!(delete_replay::test_delete_replay(filter));
+    res!(chunked_value::test_chunked_value(filter));
     //res!(perf::test_perf("all"));
 
     Ok(())

@@ -729,24 +729,20 @@ impl<
         let resp = res!(self.fetch_using_schemes(k, schms2));
         match res!(resp.recv_daticle(enc, or_enc)) {
             (None, _) => Ok(None), // The key was not found.
+            // The value was too large for a single record, so what is stored under this key is a
+            // part key naming its chunks.  `fetch_chunks` gathers them, rejoins the bytes,
+            // decrypts them and decodes them, so what it hands back is already the caller's
+            // value -- fully formed, of whatever kind they stored.
+            //
+            // It was previously taken for raw bytes and decoded a SECOND time, which no chunked
+            // value survives: a list, a map or a string fell through to a catch-all and came back
+            // as an error, and a byte string -- the one kind the arms matched -- had its payload
+            // read as though it were itself an encoding.  So every value large enough to be
+            // chunked was written perfectly well and could not be read: an accumulating value,
+            // such as a ledger, worked until the day it crossed the chunk size and then failed
+            // for good.
             (Some((Dat::Tup5u64(tup), meta)), _) =>
-                // Fetch the chunks.
-                match res!(self.fetch_chunks(&Dat::Tup5u64(tup), schms2)) {
-                    Dat::BU8(v)   |
-                    Dat::BU16(v)  |
-                    Dat::BU32(v)  |
-                    Dat::BU64(v)  => match Dat::from_bytes(&v) {
-                        Err(e) => Err(err!(e,
-                            "Could not form a Dat from the chunked value bytes, \
-                            this could be due to the use of an encryption scheme \
-                            differing from the one provided ({}).",
-                            enc.or_debug(or_enc);
-                            Decode, Bytes, Unexpected)),
-                        Ok((dat, _)) => Ok(Some((dat, meta))),
-                    },
-                    dat => Err(err!( "Unexpected Dat {:?} returned.", dat;
-                        Decode, Bytes, Unexpected)),
-                },
+                Ok(Some((res!(self.fetch_chunks(&Dat::Tup5u64(tup), schms2)), meta))),
             // The data received was in a single piece.
             (Some((dat, meta)), _) => Ok(Some((dat, meta))),
         }
