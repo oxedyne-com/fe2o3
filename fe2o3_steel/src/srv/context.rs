@@ -419,36 +419,26 @@ pub fn new_db(
         ChecksumScheme,
     >>
 {
+    // Start from the library's own production configuration and state only what a Steel server
+    // deliberately wants different.  This was previously a full struct literal, and it carried
+    // the values from `o3db_sync`'s *test* setup -- a 1.5 KB chunking threshold and a 64-byte
+    // chunk size -- so every Steel store split any value past 1.5 KB into 64-byte pieces.  An
+    // exhaustive literal is what let that happen and what kept it: it has to restate every field,
+    // so a wrong one is invisible among the right ones, and a field added upstream cannot reach a
+    // caller who has already spelled them all out.  Naming only the deviations makes each one a
+    // decision, and everything else tracks the library.
     let cfg = OzoneConfig {
-        format_version:                 oxedyne_fe2o3_o3db_sync::base::constant::CURRENT_FORMAT_VERSION,
-        // Key hashing
-        bytes_before_hashing:           32,
-        // Caches
+        // A Steel server may hold several stores, so it takes a tenth of the library's cache.
         cache_size_limit_bytes:         100_000_000,
-        init_load_caches:               true,
-        // Files
-        data_file_max_bytes:            1_000_000,
-        // Chunking
-        rest_chunk_threshold:           1_500,
-        rest_chunk_bytes:               64,
-        // Bots
-        num_cbots_per_zone:             2,
-        num_fbots_per_zone:             2,
-        num_igbots_per_zone:            2,
-        num_rbots_per_zone:             2,
+        // One writer per zone: the server's stores are small and write-light.
         num_wbots_per_zone:             1,
-        num_sbots:                      2,
-        // Zones
-        num_zones:                      2,
+        // Zone state is reported more often than the library default, so the dashboard's view of
+        // a store is near-live rather than five seconds stale.
         zone_state_update_secs:         1,
+        // No per-zone size caps: a Steel store grows with the application that owns it.
         zone_overrides:                 BTreeMap::new(),
-        // Durability barrier. Off by default; primary-server
-        // deployments that want stronger guarantees can flip
-        // `sync_on_write` here or set a group-commit window via
-        // `sync_every_n_writes` or `sync_interval_ms`.
-        sync_on_write:                  false,
-        sync_every_n_writes:            0,
-        sync_interval_ms:               0,
+        // Everything else -- the chunking above all -- is the library's own production default.
+        ..Default::default()
     };
 
     let aes_gcm = res!(EncryptionScheme::new_aes_256_gcm_with_key(enc_key));
