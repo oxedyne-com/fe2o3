@@ -78,17 +78,25 @@ async fn main() -> Outcome<()> {
     };
     res!(store.ensure_user(&user));
 
+    // Every seeded message carries a `Message-ID`, because a client that answers one has to
+    // point back at it -- a reply with no `In-Reply-To` arrives as an unrelated message with a
+    // similar subject, and a fixture whose mail cannot be threaded cannot show that a client
+    // threads. The second message names the first in `References`, so a fetched thread has a
+    // chain in it and not merely two messages.
     let inbox = FolderName::new("INBOX");
     let seeds: Vec<Vec<u8>> = vec![
         fmt!("From: bank@example.org\r\n\
               To: {}\r\n\
               Subject: Your statement is ready\r\n\
+              Message-ID: <stmt-202607@example.org>\r\n\
               Date: Mon, 06 Jul 2026 09:15:00 +0000\r\n\
               \r\n\
               Your July statement is available.\r\n", USER).into_bytes(),
         fmt!("From: bob@example.org\r\n\
               To: {}\r\n\
               Subject: Lunch on Thursday?\r\n\
+              Message-ID: <lunch-1@example.org>\r\n\
+              References: <stmt-202607@example.org>\r\n\
               Date: Tue, 07 Jul 2026 12:30:00 +0000\r\n\
               \r\n\
               Are you free Thursday? There is a new place on Bourke Street.\r\n\
@@ -98,6 +106,7 @@ async fn main() -> Outcome<()> {
         fmt!("From: newsletter@example.net\r\n\
               To: {}\r\n\
               Subject: Weekly digest\r\n\
+              Message-ID: <digest-28@example.net>\r\n\
               Date: Wed, 08 Jul 2026 06:00:00 +0000\r\n\
               \r\n\
               This week: nothing happened.\r\n", USER).into_bytes(),
