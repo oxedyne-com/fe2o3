@@ -10,6 +10,10 @@ use crate::{
             state::AdminState,
             traffic::TrafficRecorder,
         },
+        alert::{
+            AlertEvent,
+            Alerter,
+        },
         cert::Certificate,
         cfg::ServerConfig,
         constant as srv_const,
@@ -408,11 +412,35 @@ impl AppShellContext {
                 None    => (Vec::new(), None),
             }
         };
+        // Operator alerting. The public hostname of the primary vhost is what
+        // an alert names, and what its `/admin` link points at.
+        let alert_host = {
+            let vhosts = res!(server_cfg.get_vhosts());
+            match vhosts.first() {
+                Some(v) => v.primary_hostname().to_string(),
+                None    => String::new(),
+            }
+        };
+        let alerter = match res!(server_cfg.get_alerts()) {
+            Some(cfg) => {
+                let to = cfg.to.join(", ");
+                let a = res!(Alerter::new(cfg, alert_host.clone()));
+                info!("Alerting enabled; operator alerts go to {}.", to);
+                a
+            }
+            None => {
+                info!("Alerting is not configured. Steel will not tell anybody \
+                    when it comes up sealed or when its passphrase is guessed at.");
+                None
+            }
+        };
+
         let admin_state = res!(AdminState::new(
             self.wallet.clone(),
             wallet_path_for_admin,
             self.db_enc_key.clone(),
             db_specs.len(),
+            alerter,
             traffic.clone(),
             host_sampler.clone(),
             addr_guard.clone(),
@@ -432,6 +460,17 @@ impl AppShellContext {
                 renewal all serve normally. Sign in at /admin with an admin \
                 passphrase to unseal.",
                 db_specs.len());
+            // The alert that matters most. The websites are up, so nothing
+            // looks wrong from outside, and without this the operator learns
+            // that the databases are shut from a user complaint. Queued on the
+            // runtime handle because `raise` spawns, and the runtime is not
+            // current until `block_on` below.
+            if let Some(a) = admin_state.alerter().cloned() {
+                let n = db_specs.len();
+                rt.spawn(async move {
+                    a.raise(AlertEvent::SealedStart { db_count: n });
+                });
+            }
         } else if admin_state.is_sealed() {
             info!("Steel is sealed -- no wallet master key has been supplied -- but \
                 no vhost has a database configured, so nothing is waiting on it and \

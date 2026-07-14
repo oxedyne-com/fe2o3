@@ -13,6 +13,7 @@ use oxedyne_fe2o3_iop_hash::api::Hasher;
 use oxedyne_fe2o3_jdat::id::NumIdDat;
 
 use std::{
+    net::SocketAddr,
     sync::{
         Arc,
         RwLock,
@@ -26,6 +27,13 @@ pub trait WebHandler:
     + Send
     + Sync
 {
+    /// Handle a `GET`.
+    ///
+    /// `peer` is the address the request arrived from. A handler that cannot
+    /// see who it is talking to cannot audit a failed login, attribute an
+    /// abusive request, or refuse one address while serving another -- so the
+    /// address is passed in rather than left to be reconstructed from headers
+    /// a client controls.
     fn handle_get<
         const SIDL: usize,
         const UIDL: usize,
@@ -42,10 +50,12 @@ pub trait WebHandler:
         req_headers:    Arc<HeaderFields>,
         db:             Option<(Arc<RwLock<DB>>, UID)>,
         sid_opt:        &Option<SID>,
+        peer:           SocketAddr,
         id:             &String,
     )
         -> impl std::future::Future<Output = Outcome<Option<HttpMessage>>> + Send;
 
+    /// Handle a `POST`. See [`WebHandler::handle_get`] for `peer`.
     fn handle_post<
         const SIDL: usize,
         const UIDL: usize,
@@ -62,6 +72,7 @@ pub trait WebHandler:
         req_headers:    Arc<HeaderFields>,
         db:             Option<(Arc<RwLock<DB>>, UID)>,
         sid_opt:        &Option<SID>,
+        peer:           SocketAddr,
         id:             &String,
     )
         -> impl std::future::Future<Output = Outcome<Option<HttpMessage>>> + Send;

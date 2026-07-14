@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod alert;
 pub mod api;
 pub mod cache;
 pub mod cert;

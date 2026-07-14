@@ -1593,6 +1593,109 @@ impl MailConfig {
 
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
+// │ ALERT CONFIG                                                              │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// Operator alerting by email. See `srv::alert`.
+///
+/// Mail is delivered straight to the recipient's MX by the in-tree SMTP
+/// client, so no relay or local mail daemon is required. Deliverability is
+/// therefore the sender's own problem: the `from` domain wants an SPF record
+/// covering this host, and the host wants a PTR record, or a strict receiver
+/// may drop the very message that says something is wrong.
+#[derive(Clone, Debug)]
+pub struct AlertConfig {
+    /// Master switch. When `false`, no alert is ever sent.
+    pub enabled:                bool,
+    /// Envelope and header sender. Use a domain whose SPF record names
+    /// this host.
+    pub from:                   String,
+    /// Recipients. Address these *off* this machine: an alert delivered to
+    /// a mailbox on the host it is warning about is one the operator cannot
+    /// read precisely when they need to.
+    pub to:                     Vec<String>,
+    /// Hostname sent in `EHLO`. Defaults to the server's own hostname.
+    /// Should be the name whose PTR record matches the sending IP.
+    pub ehlo_hostname:          String,
+    /// Failed passphrase attempts within `failed_window_secs` before an
+    /// alert is raised.
+    pub failed_threshold:       u32,
+    /// Window over which failures are counted. Failures further apart than
+    /// this start a fresh count, so a slow trickle does not eventually add
+    /// up to something that reads as an attack.
+    pub failed_window_secs:     u64,
+    /// Minimum gap between two failed-attempt alerts, so a sustained
+    /// campaign produces a sustained defence rather than a sustained
+    /// mailbox.
+    pub failed_cooldown_secs:   u64,
+}
+
+impl Default for AlertConfig {
+    fn default() -> Self {
+        Self {
+            enabled:                false,
+            from:                   String::new(),
+            to:                     Vec::new(),
+            ehlo_hostname:          String::new(),
+            failed_threshold:       5,
+            failed_window_secs:     900,    // 15 minutes
+            failed_cooldown_secs:   3_600,  // 1 hour
+        }
+    }
+}
+
+impl AlertConfig {
+    /// Parse an `AlertConfig` from a `DaticleMap`.
+    pub fn from_datmap(m: &DaticleMap) -> Outcome<Self> {
+        let mut out = Self::default();
+        if let Some(Dat::Bool(b)) = m.get(&dat!("enabled")) {
+            out.enabled = *b;
+        }
+        if let Some(Dat::Str(s)) = m.get(&dat!("from")) {
+            out.from = s.clone();
+        }
+        if let Some(Dat::Str(s)) = m.get(&dat!("ehlo_hostname")) {
+            out.ehlo_hostname = s.clone();
+        }
+        match m.get(&dat!("to")) {
+            Some(Dat::List(l)) => {
+                for d in l {
+                    if let Dat::Str(s) = d {
+                        out.to.push(s.clone());
+                    }
+                }
+            }
+            Some(Dat::Vek(v)) => {
+                for d in v.iter() {
+                    if let Dat::Str(s) = d {
+                        out.to.push(s.clone());
+                    }
+                }
+            }
+            _ => (),
+        }
+        if let Some(Dat::U32(n)) = m.get(&dat!("failed_threshold")) {
+            out.failed_threshold = *n;
+        }
+        if let Some(Dat::U64(n)) = m.get(&dat!("failed_window_secs")) {
+            out.failed_window_secs = *n;
+        }
+        if let Some(Dat::U64(n)) = m.get(&dat!("failed_cooldown_secs")) {
+            out.failed_cooldown_secs = *n;
+        }
+        if out.failed_threshold == 0 {
+            return Err(err!(
+                "alerts.failed_threshold is 0, which would raise an alert on \
+                every failed attempt and turn the alerter into an amplifier \
+                pointed at the operator's mailbox.";
+                Configuration, Invalid, Range));
+        }
+        Ok(out)
+    }
+}
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
 // │ SERVER CONFIG                                                             │
 // └───────────────────────────────────────────────────────────────────────────┘
 
@@ -1718,6 +1821,11 @@ pub struct ServerConfig {
     /// Mail listener configuration (as a daticle map, parsed via `get_mail()`).
     /// Empty map disables the mail server entirely.
     pub mail:                           DaticleMap,
+
+    // --- Alerts -------------------------------------------------------------
+    /// Operator alerting configuration (as a daticle map, parsed via
+    /// `get_alerts()`). Empty map disables alerting entirely.
+    pub alerts:                         DaticleMap,
 }
 
 impl Config for ServerConfig {}
@@ -1778,6 +1886,7 @@ impl Default for ServerConfig {
             vhosts:                         Dat::List(vec![Dat::Map(vhost_map)]),
             acme:                           AcmeConfig::default().to_datmap(),
             mail:                           DaticleMap::new(),
+            alerts:                         DaticleMap::new(),
         }
     }
 }
@@ -1846,6 +1955,19 @@ impl ServerConfig {
             return Ok(None);
         }
         let cfg = res!(MailConfig::from_datmap(&self.mail));
+        if !cfg.enabled {
+            return Ok(None);
+        }
+        Ok(Some(cfg))
+    }
+
+    /// Parse the `alerts` block. An empty map, or an `enabled: false`
+    /// map, disables alerting.
+    pub fn get_alerts(&self) -> Outcome<Option<AlertConfig>> {
+        if self.alerts.is_empty() {
+            return Ok(None);
+        }
+        let cfg = res!(AlertConfig::from_datmap(&self.alerts));
         if !cfg.enabled {
             return Ok(None);
         }

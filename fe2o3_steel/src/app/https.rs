@@ -60,6 +60,7 @@ use oxedyne_fe2o3_net::{
 
 use std::{
     fmt::Debug,
+    net::SocketAddr,
     path::{
         Path,
         PathBuf,
@@ -235,6 +236,7 @@ impl<
         req_headers:    Arc<HeaderFields>,
         db:             Option<(Arc<RwLock<DB>>, UID)>,
         _sid_opt:       &Option<SID>,
+        peer:           SocketAddr,
         id:             &String,
     )
         -> impl std::future::Future<Output = Outcome<Option<HttpMessage>>> + Send
@@ -285,6 +287,7 @@ impl<
                         state.as_ref(),
                         &request_path,
                         &req_headers,
+                        peer,
                         &id,
                     ).await);
                     return Ok(Some(resp));
@@ -479,6 +482,7 @@ impl<
         req_headers:    Arc<HeaderFields>,
         _db:            Option<(Arc<RwLock<DB>>, UID)>,
         _sid_opt:       &Option<SID>,
+        peer:           SocketAddr,
         id:             &String,
     )
         -> impl std::future::Future<Output = Outcome<Option<HttpMessage>>> + Send
@@ -506,6 +510,7 @@ impl<
                         &request_path,
                         &body,
                         &req_headers,
+                        peer,
                         &id,
                     ).await);
                     return Ok(Some(resp));

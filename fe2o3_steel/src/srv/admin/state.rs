@@ -40,6 +40,7 @@ use crate::srv::{
         signed_login::NonceTracker,
         traffic::TrafficRecorder,
     },
+    alert::Alerter,
     cfg::AdminKey,
 };
 
@@ -71,6 +72,24 @@ use tokio::sync::Notify;
 
 /// Length in bytes of the dashboard session key.
 pub const SESSION_KEY_LEN: usize = 32;
+
+/// Result of a successful passphrase unwrap against the wallet.
+#[derive(Clone, Debug)]
+pub struct Unsealed {
+    /// Name of the admin entry whose wrap the passphrase opened.
+    pub name:   String,
+    /// That admin's scope list.
+    pub scopes: Vec<String>,
+    /// Whether this call is what lifted the seal, as opposed to finding
+    /// it already lifted.
+    ///
+    /// Only the first correct passphrase after a start unseals; a later
+    /// one merely re-authenticates. The distinction matters to alerting:
+    /// an unseal is a rare, notable event worth an email, and a routine
+    /// dashboard login is not. Conflating them would send an alert on
+    /// every sign-in and teach the operator to ignore the lot.
+    pub lifted: bool,
+}
 
 /// Shared dashboard runtime state.
 ///
@@ -119,6 +138,12 @@ pub struct AdminState {
     /// databases are shut" to an operator who has none is how a healthy
     /// server gets mistaken for a broken one.
     db_count:           usize,
+    /// Operator alerting, when configured. `None` disables it.
+    ///
+    /// Lives here because the events worth alerting on -- an unseal, a run
+    /// of failed passphrase attempts -- all happen on the login path, which
+    /// is the one place that already holds this state.
+    alerter:            Option<Alerter>,
     /// AES-256-GCM pre-keyed with the derived session key. Used by
     /// [`session`](super::session) to encrypt and decrypt session
     /// cookies.
@@ -181,6 +206,7 @@ impl AdminState {
         wallet_path:        PathBuf,
         master_key:         Option<Vec<u8>>,
         db_count:           usize,
+        alerter:            Option<Alerter>,
         traffic:            Arc<TrafficRecorder>,
         host_sampler:       Arc<HostSampler>,
         addr_guard:         Arc<SteelAddressGuard>,
@@ -213,6 +239,7 @@ impl AdminState {
             sealed:             Arc::new(AtomicBool::new(sealed)),
             unseal_notify:      Arc::new(Notify::new()),
             db_count,
+            alerter,
             session_enc,
             traffic,
             host_sampler,
@@ -233,6 +260,11 @@ impl AdminState {
     /// How many vhosts have a database configured.
     pub fn db_count(&self) -> usize {
         self.db_count
+    }
+
+    /// The operator alerter, when alerting is configured.
+    pub fn alerter(&self) -> Option<&Alerter> {
+        self.alerter.as_ref()
     }
 
     /// Returns `true` when the seal is actually holding something shut:
@@ -278,7 +310,7 @@ impl AdminState {
     /// passphrase and leaves the key in place, so a second admin
     /// logging in cannot swap the key out from under the running
     /// databases.
-    pub fn unseal(&self, passphrase: &[u8]) -> Outcome<(String, Vec<String>)> {
+    pub fn unseal(&self, passphrase: &[u8]) -> Outcome<Unsealed> {
         let unlocked = {
             let wallet = lock_read!(self.wallet, "Reading the wallet to unseal.");
             res!(wallet.unlock(passphrase))
@@ -288,7 +320,8 @@ impl AdminState {
 
         let mut guard = lock_write!(self.master_key,
             "Installing the wallet master key.");
-        if guard.is_none() {
+        let lifted = guard.is_none();
+        if lifted {
             *guard = Some(unlocked.master_key.expose_secret().clone());
             self.sealed.store(false, Ordering::Release);
             drop(guard);
@@ -298,7 +331,7 @@ impl AdminState {
             self.unseal_notify.notify_waiters();
             info!("Steel unsealed by admin '{}'; starting databases.", name);
         }
-        Ok((name, scopes))
+        Ok(Unsealed { name, scopes, lifted })
     }
 
     /// Wait until an admin installs the master key, then return it.

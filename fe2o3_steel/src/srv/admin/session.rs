@@ -322,7 +322,8 @@ mod tests {
             Arc::new(RwLock::new(Wallet::default())),
             PathBuf::from("./wallet.jdat"),
             master_key,
-            1, // one database configured, so the seal withholds data
+            1,      // one database configured, so the seal withholds data
+            None,   // no alerter in tests
             TrafficRecorder::new_shared(0),
             HostSampler::new_shared(),
             crate::srv::admin::guard::new_shared().expect("addr guard"),
@@ -357,6 +358,7 @@ mod tests {
             PathBuf::from("./wallet.jdat"),
             None,   // sealed
             0,      // but nothing is configured to need the key
+            None,   // no alerter
             TrafficRecorder::new_shared(0),
             HostSampler::new_shared(),
             crate::srv::admin::guard::new_shared().expect("addr guard"),

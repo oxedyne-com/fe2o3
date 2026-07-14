@@ -13,16 +13,21 @@
 //! CLI-only verbs is therefore still recognised by the wallet but
 //! refused by the dashboard.
 
-use crate::srv::admin::{
-    AdminPrincipal,
-    session::{
-        DEFAULT_SESSION_TTL_SECS,
-        now_secs,
+use crate::srv::{
+    admin::{
+        AdminPrincipal,
+        session::{
+            DEFAULT_SESSION_TTL_SECS,
+            now_secs,
+        },
+        state::AdminState,
     },
-    state::AdminState,
+    alert::AlertEvent,
 };
 
 use oxedyne_fe2o3_core::prelude::*;
+
+use std::net::SocketAddr;
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ LOGIN OUTCOME                                                             │
@@ -65,6 +70,7 @@ pub enum LoginOutcome {
 pub fn verify_passphrase(
     state:      &AdminState,
     passphrase: &[u8],
+    peer:       SocketAddr,
 )
     -> Outcome<LoginOutcome>
 {
@@ -84,10 +90,33 @@ pub fn verify_passphrase(
     // can already recover it by definition. Scope governs what the
     // dashboard will *show* them, not whether they are trusted with
     // the key they already have.
-    let (name, scopes) = match state.unseal(passphrase) {
-        Ok(pair) => pair,
-        Err(_) => return Ok(LoginOutcome::BadCredentials),
+    let unsealed = match state.unseal(passphrase) {
+        Ok(u) => u,
+        Err(_) => {
+            // A wrong passphrase. Count it: this form unwraps the wallet
+            // master key, so it is worth guessing at, and a burst of
+            // guesses is something the operator should hear about.
+            if let Some(alerter) = state.alerter() {
+                alerter.note_failed_unseal(peer);
+            }
+            return Ok(LoginOutcome::BadCredentials);
+        }
     };
+
+    // Alert only when this login is what actually lifted the seal. Every
+    // subsequent sign-in is a routine login, and alerting on those would
+    // bury the one message that mattered.
+    if unsealed.lifted {
+        if let Some(alerter) = state.alerter() {
+            alerter.raise(AlertEvent::Unsealed {
+                admin: unsealed.name.clone(),
+                peer,
+            });
+        }
+    }
+
+    let name = unsealed.name;
+    let scopes = unsealed.scopes;
 
     // Reuse the principal-side scope check so the dashboard
     // access rule lives in exactly one place.

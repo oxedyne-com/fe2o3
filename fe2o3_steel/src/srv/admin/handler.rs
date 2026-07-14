@@ -46,9 +46,12 @@ use oxedyne_fe2o3_jdat::{
     string::enc::EncoderConfig,
 };
 
-use std::time::{
-    SystemTime,
-    UNIX_EPOCH,
+use std::{
+    net::SocketAddr,
+    time::{
+        SystemTime,
+        UNIX_EPOCH,
+    },
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -122,10 +125,12 @@ pub async fn handle_get(
     state:   &AdminState,
     path:    &str,
     headers: &Arc<HeaderFields>,
+    peer:    SocketAddr,
     id:      &str,
 )
     -> Outcome<HttpMessage>
 {
+    let _ = peer; // GET routes do not yet audit by address.
     debug!("{}: dashboard GET {}", id, path);
     match path {
         PATH_ASSET_OXANIUM => Ok(serve_font_oxanium()),
@@ -172,13 +177,14 @@ pub async fn handle_post(
     path:     &str,
     body:     &[u8],
     _headers: &Arc<HeaderFields>,
+    peer:     SocketAddr,
     id:       &str,
 )
     -> Outcome<HttpMessage>
 {
     debug!("{}: dashboard POST {}", id, path);
     match path {
-        PATH_LOGIN => Ok(handle_login(state, body)),
+        PATH_LOGIN => Ok(handle_login(state, body, peer)),
         PATH_SIGNED_LOGIN => Ok(handle_signed_login(state, body)),
         PATH_SECURITY => Ok(handle_security_post(state, _headers, body)),
         PATH_ADMINS => Ok(handle_admins_post(state, _headers, body)),
@@ -238,6 +244,7 @@ fn handle_signed_login(
 fn handle_login(
     state: &AdminState,
     body:  &[u8],
+    peer:  SocketAddr,
 )
     -> HttpMessage
 {
@@ -255,7 +262,7 @@ fn handle_login(
         },
     };
 
-    let outcome = match auth::verify_passphrase(state, passphrase.as_bytes()) {
+    let outcome = match auth::verify_passphrase(state, passphrase.as_bytes(), peer) {
         Ok(o) => o,
         Err(e) => {
             warn!("dashboard login: structural error during verify: {}", e);
@@ -275,7 +282,8 @@ fn handle_login(
                 &principal.name,
                 VERB_DASHBOARD_LOGIN,
                 "ok",
-                &fmt!("scopes={}", principal.scopes.join(",")),
+                &fmt!("scopes={} src={}",
+                    principal.scopes.join(","), peer.ip()),
             );
             issue_session_cookie(state, &principal)
         },
@@ -284,7 +292,7 @@ fn handle_login(
                 ADMIN_ANON,
                 VERB_DASHBOARD_LOGIN,
                 "err",
-                "reason=bad_credentials",
+                &fmt!("reason=bad_credentials src={}", peer.ip()),
             );
             // Generic message: do not leak whether any admin exists.
             render_login_form(state.seal_withholds_data(), Some("Invalid credentials."))
@@ -294,7 +302,7 @@ fn handle_login(
                 &name,
                 VERB_DASHBOARD_LOGIN,
                 "err",
-                "reason=no_dashboard_scope",
+                &fmt!("reason=no_dashboard_scope src={}", peer.ip()),
             );
             warn!("dashboard login: admin '{}' authenticated but \
                 holds no dashboard scope.", name);

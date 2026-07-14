@@ -239,6 +239,7 @@ impl<
                                         admin_state.as_ref(),
                                         &path,
                                         &req_headers,
+                                        src_addr,
                                         &id,
                                     ).await {
                                         Ok(r) => r,
@@ -257,6 +258,7 @@ impl<
                                         &path,
                                         &body,
                                         &req_headers,
+                                        src_addr,
                                         &id,
                                     ).await {
                                         Ok(r) => r,
