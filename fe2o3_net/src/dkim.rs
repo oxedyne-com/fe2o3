@@ -225,10 +225,33 @@ impl DkimSigner {
         fmt!("v=DKIM1; k={}; p={}", k, p)
     }
 
-    /// Sign the canonicalised bytes with whichever key this signer holds.
+    /// Sign the canonicalised header block with whichever key this signer
+    /// holds.
+    ///
+    /// # The two algorithms want different things, and it matters
+    ///
+    /// RFC 6376 §3.7 defines *the message hash*: SHA-256 over the
+    /// canonicalised headers. What each algorithm then does with it differs,
+    /// and conflating them produces a signature that is cryptographically
+    /// impeccable and that no receiver on earth will accept.
+    ///
+    /// **ed25519-sha256** (RFC 8463 §3) signs *the hash*: PureEdDSA over the
+    /// 32-byte SHA-256 digest. Ed25519 hashes its input again internally, with
+    /// SHA-512, so handing it the canonical bytes instead of their digest
+    /// signs an entirely different message. That is what Steel used to do, and
+    /// it is why Gmail reported `dkim=fail` on every message this stack ever
+    /// sent -- silently, because a failed signature is indistinguishable from
+    /// no signature, and the mail still arrived on SPF alone.
+    ///
+    /// **rsa-sha256** takes the message, not the digest: `ring`'s
+    /// `RSA_PKCS1_SHA256` computes the SHA-256 itself and wraps it in the
+    /// PKCS#1 DigestInfo. Pre-hashing here would hash it twice.
     fn sign_canonical(&self, canon: &[u8]) -> Outcome<Vec<u8>> {
         match &self.key {
-            DkimKey::Ed25519(kp) => Ok(kp.sign(canon).as_ref().to_vec()),
+            DkimKey::Ed25519(kp) => {
+                let digest = sha(&SHA256, canon);
+                Ok(kp.sign(digest.as_ref()).as_ref().to_vec())
+            }
             DkimKey::Rsa(kp) => {
                 let rng = SystemRandom::new();
                 let mut sig = vec![0u8; kp.public_modulus_len()];
@@ -817,6 +840,105 @@ mod tests {
         };
         assert_eq!(ed_input, ed_input_after,
             "the second signature changed what the first one covers");
+    }
+
+    // ── RFC 8463 Appendix A: the specification's own test vector ─────────
+    //
+    // The authoritative check, and the one whose absence let a broken signer
+    // ship. Everything else here tests Steel against Steel: that the crypto is
+    // sound, that the bytes round-trip, that the code agrees with itself. None
+    // of that catches signing the *wrong thing*, which is precisely what went
+    // wrong -- ed25519 was handed the canonical headers instead of their
+    // SHA-256 digest, producing a flawless signature over a message no
+    // verifier computes. Gmail said `dkim=fail` for three months and nobody
+    // asked it.
+
+    /// Ed25519 private key seed from RFC 8463 §A.1.
+    const RFC8463_SEED_B64: &str = "nWGxne/9WmC6hEr0kuwsxERJxWl7MmkZcDusAxyuf2A=";
+    /// The matching public key, RFC 8463 §A.2.
+    const RFC8463_PUB_B64: &str = "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=";
+    /// The signature the RFC says a correct signer produces, §A.3.
+    const RFC8463_SIG_B64: &str =
+        "/gCrinpcQOoIfuHNQIbq4pgh9kyIK3AQUdt9OdqQehSwhEIug4D11Bus\
+         Fa3bT3FY5OsU7ZbnKELq+eXdp1Q1Dw==";
+    /// The body hash the RFC says relaxed body canonicalisation yields, §A.3.
+    const RFC8463_BH_B64: &str = "2jUSOH9NhtVGCQWNr9BrIAPreKQjO6Sn7XIkfJVOzv8=";
+
+    /// The canonicalised header block for the RFC's ed25519 signature, built
+    /// by hand from RFC 6376 §3.4.2 relaxed rules and the vector's `h=` tag.
+    /// `h=` oversigns (from, subject and date appear twice); a second entry
+    /// for a name with no further instance contributes nothing.
+    fn rfc8463_signing_input() -> String {
+        let mut c = String::new();
+        c.push_str("from:Joe SixPack <joe@football.example.com>\r\n");
+        c.push_str("to:Suzie Q <suzie@shopping.example.net>\r\n");
+        c.push_str("subject:Is dinner ready?\r\n");
+        c.push_str("date:Fri, 11 Jul 2003 21:00:37 -0700 (PDT)\r\n");
+        c.push_str("message-id:<20030712040037.46341.5F8J@football.example.com>\r\n");
+        c.push_str("dkim-signature:v=1; a=ed25519-sha256; c=relaxed/relaxed; \
+            d=football.example.com; i=@football.example.com; q=dns/txt; \
+            s=brisbane; t=1528637909; h=from : to : subject : date : \
+            message-id : from : subject : date; \
+            bh=2jUSOH9NhtVGCQWNr9BrIAPreKQjO6Sn7XIkfJVOzv8=; b=");
+        c
+    }
+
+    /// The body the RFC signs, §A.3.
+    fn rfc8463_body() -> &'static [u8] {
+        b"Hi.\r\n\r\nWe lost the game.  Are you hungry yet?\r\n\r\nJoe.\r\n"
+    }
+
+    /// Relaxed body canonicalisation must produce the RFC's `bh=`.
+    #[test]
+    fn test_rfc8463_body_hash_00() {
+        let canon = canonicalise_body_relaxed(rfc8463_body());
+        let bh = base64::encode(sha(&SHA256, &canon).as_ref());
+        assert_eq!(bh, RFC8463_BH_B64,
+            "relaxed body canonicalisation disagrees with RFC 8463 A.3");
+    }
+
+    /// **The test that would have caught it.** Sign the RFC's own canonical
+    /// input with the RFC's own key, and produce the RFC's own signature.
+    ///
+    /// ed25519-sha256 signs the SHA-256 *digest* of the canonicalised headers
+    /// (RFC 8463 §3: "It signs the hash with the PureEdDSA variant Ed25519").
+    /// Ed25519 hashes its input again internally with SHA-512, so handing it
+    /// the canonical bytes signs a different message entirely -- valid, and
+    /// worthless.
+    #[test]
+    fn test_rfc8463_ed25519_signature_vector_00() {
+        let seed = match base64::decode(RFC8463_SEED_B64) {
+            Ok(v) => v,
+            Err(e) => panic!("seed: {}", e),
+        };
+        let pubkey = match base64::decode(RFC8463_PUB_B64) {
+            Ok(v) => v,
+            Err(e) => panic!("pubkey: {}", e),
+        };
+        let kp = match Ed25519KeyPair::from_seed_and_public_key(&seed, &pubkey) {
+            Ok(kp) => kp,
+            Err(e) => panic!("the RFC's own key pair was rejected: {}", e),
+        };
+        let signer = DkimSigner {
+            pkcs8:    Vec::new(),
+            key:      DkimKey::Ed25519(kp),
+            domain:   "football.example.com".to_string(),
+            selector: "brisbane".to_string(),
+        };
+
+        let canon = rfc8463_signing_input();
+        let sig = match signer.sign_canonical(canon.as_bytes()) {
+            Ok(s) => s,
+            Err(e) => panic!("signing: {}", e),
+        };
+        let got = base64::encode(&sig);
+        let want: String = RFC8463_SIG_B64.chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert_eq!(got, want,
+            "Steel does not reproduce RFC 8463's signature over RFC 8463's \
+            own input. This is what a receiver checks, and it is the only \
+            check that matters.");
     }
 
     /// DER long-form lengths: a 2048-bit key needs them, so an off-by-one
