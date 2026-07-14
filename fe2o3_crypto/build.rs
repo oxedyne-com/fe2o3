@@ -1,5 +1,7 @@
+#[cfg(feature = "pq")]
 extern crate bindgen;
 
+#[cfg(feature = "pq")]
 use std::{
     env,
     fs::File,
@@ -11,6 +13,15 @@ use std::{
     process::Command,
 };
 
+/// Without the `pq` feature there is no C to compile and nothing to bind, so the build script does
+/// nothing at all. This is what lets the crate be built for a target that has no C toolchain, which
+/// is to say for a browser.
+#[cfg(not(feature = "pq"))]
+fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
+}
+
+#[cfg(feature = "pq")]
 #[allow(dead_code)] // for unused Scheme variants
 fn main() {
 

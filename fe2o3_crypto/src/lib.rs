@@ -53,6 +53,9 @@
 #![allow(non_snake_case)]
 //#![allow(unused)]
 
+// The bindings bindgen generated for the SABER C reference implementation. There are none without
+// the `pq` feature, because there is no C build without it.
+#[cfg(feature = "pq")]
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
 //#[macro_use]
@@ -62,6 +65,8 @@ include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 pub mod command;
 pub mod credential;
 pub mod enc;
+/// The SABER key exchange, which rests on the C reference implementation.
+#[cfg(feature = "pq")]
 pub mod kem;
 pub mod keys;
 pub mod keystore;

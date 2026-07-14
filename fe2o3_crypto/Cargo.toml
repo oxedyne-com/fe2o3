@@ -13,11 +13,25 @@ build = "build.rs"
 crate-type = ["lib", "cdylib"]
 
 [features]
-default = [ "mode2" ]
+default = [ "mode2", "pq" ]
 mode0 = []
 mode1 = []
 mode2 = []
 mode3 = []
+
+# The post-quantum schemes that rest on C: the SABER key exchange, whose reference implementation
+# this crate compiles and binds with bindgen, and the C wrapper behind `SignatureScheme::Dilithium2`.
+# They need a C toolchain, OpenSSL and bindgen, none of which exist in a browser.
+#
+# Turn this off and what remains is pure Rust: Ed25519, AES-GCM, SHA3, and the pure-Rust Dilithium
+# of `SignatureScheme::Dilithium2_fe2o3`. That subset compiles to wasm32, which is what lets a
+# reader verify a signature in a browser instead of trusting a server to have done it. On by
+# default, so a native build is unchanged.
+pq = [
+	"dep:pqcrypto-dilithium",
+	"dep:pqcrypto-traits",
+	"dep:bindgen",
+]
 
 [dependencies]
 oxedyne_fe2o3_core 				= { path = "../fe2o3_core" }
@@ -34,8 +48,8 @@ aes-gcm = { version = "0.10.3", features = ["std"] }
 
 console_error_panic_hook= "0.1.6"
 ed25519-dalek = { version = "2.0.0", features = ["rand_core"] } 
-pqcrypto-dilithium = "0.4.5"
-pqcrypto-traits = "0.3.4"
+pqcrypto-dilithium = { version = "0.4.5", optional = true }
+pqcrypto-traits = { version = "0.3.4", optional = true }
 rand_core = { version = "0.6.3", features = ["std"] }
 rand = { version = "0.8.4" }
 secrecy = "0.8.0"
@@ -61,4 +75,4 @@ libc = "0.2"
 hex = "0.3"
 
 [build-dependencies]
-bindgen = "0.66.1"
+bindgen = { version = "0.66.1", optional = true }

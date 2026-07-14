@@ -33,7 +33,9 @@ use ed25519_dalek::{
     VerifyingKey,
 };
 
+#[cfg(feature = "pq")]
 use pqcrypto_dilithium::dilithium2;
+#[cfg(feature = "pq")]
 use pqcrypto_traits::sign::{
     DetachedSignature as _,
     PublicKey as _,
@@ -57,7 +59,10 @@ pub enum SignatureScheme { // Associated data: (public key, wrapped secret key)
         {Self::ED25519_PK_LEN},
         {Self::ED25519_SK_LEN},
     >),
-    Dilithium2(Keys< // Wrapper reference c impl.
+    /// The C reference implementation, wrapped. Absent without the `pq` feature; the pure-Rust
+    /// `Dilithium2_fe2o3` below is always here.
+    #[cfg(feature = "pq")]
+    Dilithium2(Keys<
         {Self::DILITHIUM2_PK_LEN},
         {Self::DILITHIUM2_SK_LEN},
     >),
@@ -71,6 +76,7 @@ impl Debug for SignatureScheme {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Ed25519(..) => write!(f, "Ed25519"),
+            #[cfg(feature = "pq")]
             Self::Dilithium2(..) => write!(f, "Dilithium2"),
             Self::Dilithium2_fe2o3(..) => write!(f, "Dilithium2_fe2o3"),
         }
@@ -83,6 +89,7 @@ impl InNamex for SignatureScheme {
 	    Ok(match self {
             Self::Ed25519(..) =>
                 res!(NamexId::try_from("9UQvATp4Zbv8IbWOivdhiQnex+ELo7sxOr8ntEZphMc=")),
+            #[cfg(feature = "pq")]
             Self::Dilithium2(..) =>
                 res!(NamexId::try_from("W4+qt2Gd+9RQBxllcx10b4h/Ih3g9m76C+mj17TwUNw=")),
             Self::Dilithium2_fe2o3(..) =>
@@ -93,6 +100,7 @@ impl InNamex for SignatureScheme {
     fn local_id(&self) -> LocalId {
 	    match self {
             Self::Ed25519(..)           => LocalId(1),
+            #[cfg(feature = "pq")]
             Self::Dilithium2(..)        => LocalId(2),
             Self::Dilithium2_fe2o3(..)  => LocalId(3),
         }
@@ -143,6 +151,7 @@ impl Signer for SignatureScheme {
                 },
                 _ => Err(err!("Require both keys to sign."; Missing, Configuration)),
             },
+            #[cfg(feature = "pq")]
             Self::Dilithium2(keys) => match keys {
                 Keys { sks: Some(sks), .. } => { 
                     let skv = sks.expose_secret(); // This gets zeroized automatically, ...
@@ -179,6 +188,7 @@ impl Signer for SignatureScheme {
                 },
                 _ => return Err(err!("Require public key to verify."; Missing, Configuration)),
             },
+            #[cfg(feature = "pq")]
             Self::Dilithium2(keys) => match keys {
                 Keys { pk: Some(pk), .. } => { 
                     let pk = res!(dilithium2::PublicKey::from_bytes(&pk[..]));
@@ -219,6 +229,7 @@ impl KeyManager for SignatureScheme {
                     None => None,
                 },
             }),
+            #[cfg(feature = "pq")]
             Self::Dilithium2(..) => Self::Dilithium2(Keys {
                 pk: match pk {
                     Some(pk) => Some(res!(<[u8; Self::DILITHIUM2_PK_LEN]>::try_from(&pk[..]))),
@@ -254,6 +265,7 @@ impl KeyManager for SignatureScheme {
                 Some(k) => Some(&k[..]),
                 None => None,
             },
+            #[cfg(feature = "pq")]
             Self::Dilithium2(keys) => match &keys.pk {
                 Some(k) => Some(&k[..]),
                 None => None,
@@ -274,6 +286,7 @@ impl KeyManager for SignatureScheme {
                 },
                 None => None,
             },
+            #[cfg(feature = "pq")]
             Self::Dilithium2(keys) => match &keys.sks {
                 Some(sks) => {
                     let sk = sks.expose_secret();
@@ -297,6 +310,7 @@ impl KeyManager for SignatureScheme {
                 Some(pk) => Some(res!(<[u8; Self::ED25519_PK_LEN]>::try_from(&pk[..]))),
                 None => None,
             },
+            #[cfg(feature = "pq")]
             Self::Dilithium2(keys) => keys.pk = match pk {
                 Some(pk) => Some(res!(<[u8; Self::DILITHIUM2_PK_LEN]>::try_from(&pk[..]))),
                 None => None,
@@ -315,6 +329,7 @@ impl KeyManager for SignatureScheme {
                 Some(sk) => Some(Secret::new(res!(<[u8; Self::ED25519_SK_LEN]>::try_from(&sk[..])))),
                 None => None,
             },
+            #[cfg(feature = "pq")]
             Self::Dilithium2(keys) => keys.sks = match sk {
                 Some(sk) => Some(Secret::new(res!(<[u8; Self::DILITHIUM2_SK_LEN]>::try_from(&sk[..])))),
                 None => None,
@@ -334,7 +349,16 @@ impl str::FromStr for SignatureScheme {
     fn from_str(name: &str) -> std::result::Result<Self, Self::Err> {
         Ok(match name {
             "Ed25519" => Self::new_ed25519(),
+            #[cfg(feature = "pq")]
             "Dilithium2" => res!(Self::new_dilithium2()),
+            // The name is a real one, and this build simply does not carry it. Saying so is not the
+            // same as saying it does not exist, and a caller deserves to be told which it is.
+            #[cfg(not(feature = "pq"))]
+            "Dilithium2" => return Err(err!(
+                "The signature scheme 'Dilithium2' is the C reference implementation, which this \
+                build does not carry: it was built without the 'pq' feature, which needs a C \
+                toolchain. The pure-Rust 'Dilithium2_fe2o3' is here and does the same job.";
+            Invalid, Input, NoImpl)),
             "Dilithium2_fe2o3" => Self::new_dilithium2_fe2o3(),
             _ => return Err(err!(
                 "The signature scheme '{}' is not recognised.", name;
@@ -349,7 +373,14 @@ impl TryFrom<&LocalId> for SignatureScheme {
     fn try_from(n: &LocalId) -> std::result::Result<Self, Self::Error> {
         Ok(match *n {
             LocalId(1) => Self::new_ed25519(),
+            #[cfg(feature = "pq")]
             LocalId(2) => res!(Self::new_dilithium2()),
+            #[cfg(not(feature = "pq"))]
+            LocalId(2) => return Err(err!(
+                "The signature scheme with local id 2 is Dilithium2, the C reference \
+                implementation, which this build does not carry: it was built without the 'pq' \
+                feature. The pure-Rust Dilithium2_fe2o3, local id 3, is here.";
+            Invalid, Input, NoImpl)),
             LocalId(3) => Self::new_dilithium2_fe2o3(),
             _ => return Err(err!(
                 "The signature scheme with local id {} is not recognised.", n;
@@ -369,8 +400,12 @@ impl SignatureScheme {
 
     pub const ED25519_PK_LEN:           usize = ed25519_dalek::PUBLIC_KEY_LENGTH;
     pub const ED25519_SK_LEN:           usize = ed25519_dalek::SECRET_KEY_LENGTH;
+    // These are the C implementation's own sizes, so they can only be asked of it when it is here.
+    #[cfg(feature = "pq")]
     pub const DILITHIUM2_PK_LEN:        usize = dilithium2::public_key_bytes();
+    #[cfg(feature = "pq")]
     pub const DILITHIUM2_SK_LEN:        usize = dilithium2::secret_key_bytes();
+    #[cfg(feature = "pq")]
     pub const DILITHIUM2_SIG_LEN:       usize = dilithium2::signature_bytes();
     pub const DILITHIUM2_FE2O3_PK_LEN:  usize = dilithium2_fe2o3::params::PUBLICKEYBYTES;
     pub const DILITHIUM2_FE2O3_SK_LEN:  usize = dilithium2_fe2o3::params::SECRETKEYBYTES;
@@ -389,6 +424,7 @@ impl SignatureScheme {
         Self::Ed25519(Keys::default())
     }
 
+    #[cfg(feature = "pq")]
     pub fn new_dilithium2() -> Outcome<Self> {
         let (pk, sk) = dilithium2::keypair();
         const PK_LEN: usize = dilithium2::public_key_bytes();
@@ -400,6 +436,7 @@ impl SignatureScheme {
         Ok(Self::Dilithium2(keys))
     }
 
+    #[cfg(feature = "pq")]
     pub fn empty_dilithium2() -> Self {
         Self::Dilithium2(Keys::default())
     }
