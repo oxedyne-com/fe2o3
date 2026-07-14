@@ -408,13 +408,22 @@ impl AppShellContext {
         ));
         res!(kdf.derive(pass.expose_secret().as_bytes()));
         let encoded = res!(kdf.encode_to_string());
+        // Print the whole file, not just the entry. The entry alone invites
+        // the reader to paste it into a bare list, which the parser rejects
+        // with "no 'users' list" -- and the only clue that the wrapper exists
+        // is a doc comment in another crate.
         println!();
-        println!("Add this entry to your mail users.jdat:");
+        println!("Add this entry to the \"users\" list in your mail users.jdat.");
+        println!("A file with a single user looks like this in full:");
         println!();
         println!("  {{");
-        println!("    \"address\":      \"{}\",", address);
-        println!("    \"delivery_dir\": \"{}\",", delivery);
-        println!("    \"argon2id\":     \"{}\"", encoded);
+        println!("    \"users\": [");
+        println!("      {{");
+        println!("        \"address\":      \"{}\",", address);
+        println!("        \"delivery_dir\": \"{}\",", delivery);
+        println!("        \"argon2id\":     \"{}\"", encoded);
+        println!("      }}");
+        println!("    ]");
         println!("  }}");
         println!();
         Ok(Evaluation::None)
