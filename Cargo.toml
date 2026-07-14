@@ -26,6 +26,7 @@ all = [
 	"dep:oxedyne_fe2o3_datime",
 	"dep:oxedyne_fe2o3_file",
 	"dep:oxedyne_fe2o3_geom",
+	"dep:oxedyne_fe2o3_graphics",
 	"dep:oxedyne_fe2o3_hash",
 	"dep:oxedyne_fe2o3_iop_crypto",
 	"dep:oxedyne_fe2o3_iop_db",
@@ -53,6 +54,7 @@ data 		= ["dep:oxedyne_fe2o3_data"]
 datime		= ["dep:oxedyne_fe2o3_datime"]
 file 		= ["dep:oxedyne_fe2o3_file"]
 geom 		= ["dep:oxedyne_fe2o3_geom"]
+graphics 	= ["dep:oxedyne_fe2o3_graphics"]
 hash 		= ["dep:oxedyne_fe2o3_hash"]
 iop_crypto 	= ["dep:oxedyne_fe2o3_iop_crypto"]
 iop_db 		= ["dep:oxedyne_fe2o3_iop_db"]
@@ -81,6 +83,7 @@ oxedyne_fe2o3_data =        { path = "fe2o3_data",			optional = true }
 oxedyne_fe2o3_datime =      { path = "fe2o3_datime",		optional = true }
 oxedyne_fe2o3_file =        { path = "fe2o3_file",			optional = true }
 oxedyne_fe2o3_geom =        { path = "fe2o3_geom",			optional = true }
+oxedyne_fe2o3_graphics =    { path = "fe2o3_graphics",		optional = true }
 oxedyne_fe2o3_hash =        { path = "fe2o3_hash",			optional = true }
 oxedyne_fe2o3_iop_crypto =  { path = "fe2o3_iop_crypto",	optional = true }
 oxedyne_fe2o3_iop_db =      { path = "fe2o3_iop_db",		optional = true }
