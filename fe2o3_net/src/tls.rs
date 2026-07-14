@@ -150,12 +150,34 @@ pub async fn upgrade(
     }
 }
 
+/// Ensure rustls has a process-wide crypto provider.
+///
+/// rustls resolves its provider from process-global state, and its builders
+/// **panic** when they cannot pick one unambiguously -- either because none
+/// is installed, or because the build enabled more than one and so has no
+/// default. An application is expected to install one in `main`, and the
+/// Steel binary does; but a library that panics because its *caller's*
+/// `main` omitted a line is a landmine, and it goes off deep inside a
+/// request path rather than at start-up.
+///
+/// So install one here if nobody has. `install_default` fails when a
+/// provider is already installed, which is not an error -- whichever one
+/// the application chose is the one we want to keep.
+pub fn ensure_crypto_provider() {
+    if tokio_rustls::rustls::crypto::CryptoProvider::get_default().is_some() {
+        return;
+    }
+    let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider()
+        .install_default();
+}
+
 /// Load the host's CA bundle into a fresh rustls `ClientConfig`.
 ///
 /// Callers needing a custom root store should build the `ClientConfig`
 /// themselves; this is the "trust what the operating system trusts"
 /// default that every public-internet client wants.
 pub fn default_client_config() -> Outcome<ClientConfig> {
+    ensure_crypto_provider();
     let ca_paths = [
         "/etc/ssl/certs/ca-certificates.crt",	// Debian/Ubuntu
         "/etc/pki/tls/certs/ca-bundle.crt",		// Fedora/RHEL

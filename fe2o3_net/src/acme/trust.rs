@@ -110,6 +110,9 @@ pub fn letsencrypt_client_config() -> Outcome<Arc<ClientConfig>> {
                 Init, Invalid));
         }
     }
+    // rustls's builder panics when it cannot resolve a crypto provider from
+    // process-global state. Install one if the application has not.
+    crate::tls::ensure_crypto_provider();
     let config = ClientConfig::builder()
         .with_root_certificates(store)
         .with_no_client_auth();
@@ -177,21 +180,6 @@ mod tests {
     /// trust store without complaint.
     #[test]
     fn test_build_letsencrypt_client_config() -> Outcome<()> {
-        // rustls resolves its crypto provider from process-global state, and
-        // panics in the `ClientConfig` builder when it cannot pick one
-        // unambiguously. Building this crate on its own enables exactly one
-        // provider, so rustls chooses it and the builder works. Building it
-        // in the workspace unifies features with `fe2o3_steel`, which turns
-        // on rustls's `ring` alongside this crate's `aws_lc_rs` -- two
-        // providers, no default, and the builder panics. An application
-        // resolves this by installing a provider in `main` (as the Steel
-        // binary does); a test has no `main`, so it installs one itself.
-        //
-        // `install_default` errors if a provider is already installed, which
-        // is not a failure here -- any provider will do.
-        let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider()
-            .install_default();
-
         let config_a = res!(letsencrypt_client_config());
         let config_b = res!(letsencrypt_client_config());
         // The two Arcs should point at different allocations; we do not
