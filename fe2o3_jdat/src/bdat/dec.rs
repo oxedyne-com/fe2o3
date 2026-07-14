@@ -1,5 +1,6 @@
 use crate::{
     prelude::*,
+    bdat::limits::DecodeLimits,
     note::NoteConfig,
     usr::{
         UsrKindCode,
@@ -29,10 +30,781 @@ impl FromBytes for Dat {
 
     /// Read the `Dat` from the buffer, and include the number of bytes required in the return
     /// tuple.
+    ///
+    /// The bytes are trusted, so a hostile encoding can nest deeply enough to exhaust the stack.
+    /// Read anything you did not encode yourself with [`Dat::from_bytes_limited`] instead.
     fn from_bytes(buf: &[u8]) -> Outcome<(Self, usize)> {
+        Self::from_bytes_depth(buf, &DecodeLimits::UNLIMITED, 1, 0)
+    }
+}
+
+impl Dat {
+
+    /// Read the `Dat` from the buffer under the given limits, and include the number of bytes
+    /// required in the return tuple.
+    ///
+    /// The decoding is that of [`Dat::from_bytes`], except that a buffer longer than
+    /// `lims.max_bytes`, or a value nested deeper than `lims.max_depth`, is refused with an error
+    /// naming the byte offset and the limit broken.
+    pub fn from_bytes_limited(
+        buf:    &[u8],
+        lims:   &DecodeLimits,
+    )
+        -> Outcome<(Self, usize)>
+    {
+        res!(lims.check_len(buf.len()));
+        Self::from_bytes_depth(buf, lims, 1, 0)
+    }
+
+    /// Read the `Dat` beginning at `pos` bytes into the original input, where `depth` counts the
+    /// values enclosing it, the root value being at depth 1.
+    fn from_bytes_depth(
+        buf:    &[u8],
+        lims:   &DecodeLimits,
+        depth:  usize,
+        pos:    usize,
+    )
+        -> Outcome<(Self, usize)>
+    {
+        res!(lims.check_depth(depth, pos));
         if buf.len() == 0 {
             return Err(err!("No bytes to decode."; Input, Invalid));
         }
+        match buf[0] {
+            // Molecular Kinds ========================
+            // Unitary
+            Self::USR_CODE      => return Self::from_bytes_usr(buf, lims, depth, pos),
+            Self::BOX_CODE      => return Self::from_bytes_box(buf, lims, depth, pos),
+            Self::OPT_SOME_CODE => return Self::from_bytes_opt_some(buf, lims, depth, pos),
+            Self::ABOX_CODE     => return Self::from_bytes_abox(buf, lims, depth, pos),
+            // Heterogenous
+            Self::LIST_CODE     |
+            Self::VEK_CODE      => return Self::from_bytes_list(buf, lims, depth, pos),
+            Self::TUP2_CODE     |
+            Self::TUP3_CODE     |
+            Self::TUP4_CODE     |
+            Self::TUP5_CODE     |
+            Self::TUP6_CODE     |
+            Self::TUP7_CODE     |
+            Self::TUP8_CODE     |
+            Self::TUP9_CODE     |
+            Self::TUP10_CODE    => return Self::from_bytes_tuple(buf, lims, depth, pos),
+            Self::MAP_CODE      => return Self::from_bytes_map(buf, lims, depth, pos),
+            Self::OMAP_CODE     => return Self::from_bytes_ordmap(buf, lims, depth, pos),
+            // Every other kind is atomic, enclosing no other value.  Those arms carry the
+            // bulk of the decoder's stack frame, so they too are decoded in a frame of their
+            // own, leaving the frame that nesting repeats a small one.
+            _ => return Self::from_bytes_atomic(buf),
+        }
+    }
+
+    /// Read a user-defined kind from the start of the buffer, `pos` bytes into the original input and
+    /// enclosed by `depth` values.
+    ///
+    /// Kept out of the dispatch above so that its locals sit in a frame of their own,
+    /// rather than in the frame that nesting repeats.
+    #[inline(never)]
+    fn from_bytes_usr(
+        buf:    &[u8],
+        lims:   &DecodeLimits,
+        depth:  usize,
+        pos:    usize,
+    )
+        -> Outcome<(Self, usize)>
+    {
+        // 
+        // +---+---+---+---+---+---+---+---+---+
+        // | c |  u16  |   |   |   |   |   |   |
+        // +---+---+---+---+---+---+---+---+---+
+        //   ^     ^     ^ \___________________/   
+        //   |     |     |           |                   
+        //   |     |  opt code   inner Dat            
+        //   |     ukid_code     (if some)
+        //  daticle
+        //  code
+        //
+        const CODE_LEN: usize = UsrKindId::CODE_BYTE_LEN;
+        // A usr daticle is the daticle code, the kind code, then an option code, so the smallest
+        // valid encoding is `2 + CODE_LEN` bytes. Guarding on `CODE_LEN` alone let a buffer one byte
+        // short reach the `buf[1 + CODE_LEN]` read below and panic on hostile input.
+        if buf.len() > 1 + CODE_LEN {
+            let ukid_code = UsrKindCode::from_be_bytes(
+                res!(<[u8; CODE_LEN]>::try_from(&buf[1..1 + CODE_LEN]), Decode, Bytes)
+            );
+            let opt_code = buf[1 + CODE_LEN];
+            match opt_code {
+                Self::OPT_NONE_CODE => return Ok((
+                    Dat::Usr(
+                        UsrKindId::from(ukid_code),
+                        None,
+                    ),
+                    2 + CODE_LEN,
+                )),
+                Self::OPT_SOME_CODE => {
+                    let (inner, n) = res!(Self::from_bytes_depth(&buf[2 + CODE_LEN..], lims, depth + 1, pos + 2 + CODE_LEN));
+                    return Ok((
+                        Dat::Usr(
+                            UsrKindId::from(ukid_code),
+                            Some(Box::new(inner)),
+                        ),
+                        2 + CODE_LEN + n,
+                    ));
+                }
+                _ => return Err(err!(
+                    "Expecting an option code {} (for none) or {} (for some), \
+                    instead found code {}.",
+                    Self::OPT_NONE_CODE, Self::OPT_SOME_CODE, opt_code;
+                Bytes, Input, Decode, Missing)),
+            }
+        } else {
+            return Err(<Dat as FromBytes>::too_few(
+                buf.len(), CODE_LEN, &Self::code_name(buf[0]), file!(), line!()));
+        }
+    }
+
+    /// Read a boxed value from the start of the buffer, `pos` bytes into the original input and
+    /// enclosed by `depth` values.
+    ///
+    /// Kept out of the dispatch above so that its locals sit in a frame of their own,
+    /// rather than in the frame that nesting repeats.
+    #[inline(never)]
+    fn from_bytes_box(
+        buf:    &[u8],
+        lims:   &DecodeLimits,
+        depth:  usize,
+        pos:    usize,
+    )
+        -> Outcome<(Self, usize)>
+    {
+        // 
+        // +---+---+---+---+---+---+---+---+---+
+        // | c |   |   |   |   |   |   |   |   |
+        // +---+---+---+---+---+---+---+---+---+
+        //     \_______________________________/
+        //                     |
+        //                inner Dat
+        //
+        // Dat::Box(k) byte encoding does nothing more than prepend Dat k with
+        // Dat::BOX_CODE
+        //
+        if buf.len() > 1 {
+            let (inner, n) = res!(Self::from_bytes_depth(&buf[1..], lims, depth + 1, pos + 1));
+            return Ok((Dat::Box(Box::new(inner)), 1 + n));
+        } else {
+            return Err(<Dat as FromBytes>::too_few(
+                buf.len(), 1, &Self::code_name(buf[0]), file!(), line!()));
+        }
+    }
+
+    /// Read a present optional value from the start of the buffer, `pos` bytes into the original input and
+    /// enclosed by `depth` values.
+    ///
+    /// Kept out of the dispatch above so that its locals sit in a frame of their own,
+    /// rather than in the frame that nesting repeats.
+    #[inline(never)]
+    fn from_bytes_opt_some(
+        buf:    &[u8],
+        lims:   &DecodeLimits,
+        depth:  usize,
+        pos:    usize,
+    )
+        -> Outcome<(Self, usize)>
+    {
+        // 
+        // +---+---+---+---+---+---+---+---+---+
+        // | c |   |   |   |   |   |   |   |   |
+        // +---+---+---+---+---+---+---+---+---+
+        //     \_______________________________/
+        //                     |
+        //                inner Dat
+        //
+        // Dat::Opt(Some(k)) byte encoding does nothing more than prepend Dat k
+        // with Dat::OPT_SOME_CODE
+        //
+        if buf.len() > 1 {
+            let (inner, n) = res!(Self::from_bytes_depth(&buf[1..], lims, depth + 1, pos + 1));
+            return Ok((Dat::Opt(Box::new(Some(inner))), 1 + n));
+        } else {
+            return Err(<Dat as FromBytes>::too_few(
+                buf.len(), 1, &Self::code_name(buf[0]), file!(), line!()));
+        }
+    }
+
+    /// Read an annotated boxed value from the start of the buffer, `pos` bytes into the original input and
+    /// enclosed by `depth` values.
+    ///
+    /// Kept out of the dispatch above so that its locals sit in a frame of their own,
+    /// rather than in the frame that nesting repeats.
+    #[inline(never)]
+    fn from_bytes_abox(
+        buf:    &[u8],
+        lims:   &DecodeLimits,
+        depth:  usize,
+        pos:    usize,
+    )
+        -> Outcome<(Self, usize)>
+    {
+        //
+        //   0                                       1   2  ...  n   1   2  ...  v
+        // +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+        // | c |   |   |   |   |   |   |   |   |   |   |   |   |   |   |  ...  |   |
+        // +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+        //       | \_______________________________/\______________/\______________/
+        //       |                 |                         |               |
+        //  NoteConfig         inner Dat                    c64        payload bytes
+        //
+        if buf.len() > 1 { 
+            let mut start: usize = 1;
+            let (ncfg, n) = res!(NoteConfig::from_bytes(&buf[start..]));
+            start += n;
+            let (boxd, n) = if buf.len() > start {
+                let (inner, n) = res!(Self::from_bytes_depth(&buf[start..], lims, depth + 1, pos + start));
+                (Box::new(inner), n)
+            } else {
+                return Err(<Dat as FromBytes>::too_few(
+                    buf.len(), start, &Self::code_name(buf[0]), file!(), line!()));
+            };
+            start += n;
+            // The inner value may consume the rest of the buffer, leaving no byte for the trailing
+            // annotation length. Without this guard `buf[start]` panics on hostile input.
+            if start >= buf.len() {
+                return Err(<Dat as FromBytes>::too_few(
+                    buf.len(), start, &Self::code_name(buf[0]), file!(), line!()));
+            }
+            match buf[start] {
+                Self::C64_CODE_START..=Self::C64_CODE_END => {
+                    let (v, n) = res!(Self::read_c64(&buf[start..]));
+                    if v == 0 {
+                        return Ok((
+                            Self::ABox(ncfg, boxd, String::new()),
+                            start + n,
+                        ));
+                    }
+                    let v = v as usize;
+                    if buf.len() > start - 1 + n + v {
+                        let owned = &buf[start + n .. start + n + v].to_vec();
+                        return Ok((
+                            Self::ABox(
+                                ncfg,
+                                boxd,
+                                res!(std::str::from_utf8(owned)).to_string(),
+                            ),
+                            start + n + v,
+                        ));
+                    } else {
+                        return Err(<Dat as FromBytes>::too_few(
+                            buf.len(),
+                            start + n + v,
+                            &Self::code_name(buf[0]),
+                            file!(),
+                            line!(),
+                        ));
+                    }
+                }
+                _ => return Err(err!(
+                    "{} code was not followed by a code for a Dat::C64 in the correct \
+                    range {}..{}, the code found was {}.",
+                    Self::code_name(buf[0]), Self::C64_CODE_START, Self::C64_CODE_END,
+                    buf[start];
+                Bytes, Input, Decode, Missing)),
+            }
+        } else {
+            return Err(<Dat as FromBytes>::too_few(
+                buf.len(), 1, &Self::code_name(buf[0]), file!(), line!()));
+        }
+    }
+
+    /// Read a list or a vek from the start of the buffer, `pos` bytes into the original input and
+    /// enclosed by `depth` values.
+    ///
+    /// Kept out of the dispatch above so that its locals sit in a frame of their own,
+    /// rather than in the frame that nesting repeats.
+    #[inline(never)]
+    fn from_bytes_list(
+        buf:    &[u8],
+        lims:   &DecodeLimits,
+        depth:  usize,
+        pos:    usize,
+    )
+        -> Outcome<(Self, usize)>
+    {
+        //
+        //   0   1  ...
+        // +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+        // | c |   |   |   | c |   |   | c |   |   | c |   |   |   |  ...  |   |
+        // +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+        //      \__________/\__________/\__________/\______________/    ...
+        //            |           |          |            |
+        //      payload_len      item       item         item
+        //
+        if buf.len() > 1 { 
+            match buf[1] {
+                Self::C64_CODE_START..=Self::C64_CODE_END => {
+                    let (payload_len, n) = res!(Self::read_c64(&buf[1..]));
+                    if payload_len == 0 {
+                        return Ok((Self::List(Vec::new()), 1 + n));
+                    }
+                    let payload_len = payload_len as usize;
+                    // `payload_len` is attacker-controlled and can be near `usize::MAX`, so the bound
+                    // is expressed by subtraction from the buffer length rather than by adding to
+                    // `payload_len`, which would overflow both the guard and `byt_len`.
+                    if payload_len <= buf.len().saturating_sub(1 + n) {
+                        let byt_len = 1 + n + payload_len;
+                        let mut list = Vec::new();
+                        let mut i = 1 + n;
+                        while i < byt_len {
+                            let (dat, n) = res!(Dat::from_bytes_depth(&buf[i..], lims, depth + 1, pos + i));
+                            i += n;
+                            list.push(dat);
+                        }
+                        let result = if buf[0] == Self::LIST_CODE {
+                            Self::List(list)
+                        } else {
+                            res!(Self::try_vek_from(list))
+                        };
+                        return Ok((
+                            result,
+                            byt_len,
+                        ));
+                    } else {
+                        return Err(<Dat as FromBytes>::too_few(
+                            buf.len(), (1 + n).saturating_add(payload_len),
+                            &Self::code_name(buf[0]), file!(), line!()));
+                    }
+                }
+                _ => {
+                    return Err(err!(
+                        "Dat::List code was not followed by a code for a \
+                        Dat::C64 in the correct range {}..{}, the code found \
+                        was {}",
+                        Self::C64_CODE_START,
+                        Self::C64_CODE_END,
+                        buf[1];
+                    Bytes, Input, Decode, Missing));
+                }
+            }
+        } else {
+            return Err(<Dat as FromBytes>::too_few(
+                buf.len(), 1, &Self::code_name(buf[0]), file!(), line!()));
+        }
+    }
+
+    /// Read a map from the start of the buffer, `pos` bytes into the original input and
+    /// enclosed by `depth` values.
+    ///
+    /// Kept out of the dispatch above so that its locals sit in a frame of their own,
+    /// rather than in the frame that nesting repeats.
+    #[inline(never)]
+    fn from_bytes_map(
+        buf:    &[u8],
+        lims:   &DecodeLimits,
+        depth:  usize,
+        pos:    usize,
+    )
+        -> Outcome<(Self, usize)>
+    {
+        //
+        //   0   1  ...
+        // +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+        // | c |   |   |   | c |   |   | c |   |   | c |   |   |   |  ...  |   |
+        // +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+        //      \__________/\__________/\__________/\______________/    ...
+        //            |           |          |            |
+        //      payload_len      key       value         key
+        //
+        if buf.len() > 1 { 
+            match buf[1] {
+                Self::C64_CODE_START..=Self::C64_CODE_END => {
+                    let (payload_len, n) = res!(Self::read_c64(&buf[1..]));
+                    if payload_len == 0 {
+                        return Ok((Self::Map(DaticleMap::new()), 1 + n));
+                    }
+                    let payload_len = payload_len as usize;
+                    // `payload_len` is attacker-controlled and can be near `usize::MAX`, so the bound
+                    // is expressed by subtraction from the buffer length rather than by adding to
+                    // `payload_len`, which would overflow both the guard and `byt_len`.
+                    if payload_len <= buf.len().saturating_sub(1 + n) {
+                        let byt_len = 1 + n + payload_len;
+                        let mut map = DaticleMap::new();
+                        let mut i = 1 + n;
+                        let mut count: usize = 0;
+                        while i < byt_len {
+                            let (key, n) = res!(Dat::from_bytes_depth(&buf[i..], lims, depth + 1, pos + i));
+                            i += n;
+                            if i >= byt_len {
+                                return Err(err!(
+                                    "Not enough bytes to decode the required value \
+                                    for key {:?} in the {:?}, after successfully \
+                                    decoding {} key-value pairs.",
+                                    key, Self::code_name(buf[0]), count;
+                                Bytes, Input, Decode, Missing));
+                            }
+                            let (val, n) = res!(Dat::from_bytes_depth(&buf[i..], lims, depth + 1, pos + i));
+                            i += n;
+                            map.insert(key, val);
+                            count += 1;
+                        }
+                        return Ok((
+                            Self::Map(map),
+                            byt_len,
+                        ));
+                    } else {
+                        return Err(err!(
+                            "Not enough bytes to decode the {:?} bytes.  \
+                            The map length is {} bytes, but the remaining buffer \
+                            length is {} bytes.",
+                            Self::code_name(buf[0]), payload_len, buf.len() - 1 - n;
+                        Bytes, Input, Decode, Missing));
+                    }
+                }
+                _ => {
+                    return Err(err!(
+                        "{:?} code was not followed by a code for a \
+                        Dat::C64 in the correct range {}..{}, the code found \
+                        was {}",
+                        Self::code_name(buf[0]), Self::C64_CODE_START, Self::C64_CODE_END, buf[1];
+                    Bytes, Input, Decode, Missing));
+                }
+            }
+        } else {
+            return Err(<Dat as FromBytes>::too_few(
+                buf.len(), 1, &Self::code_name(buf[0]), file!(), line!()));
+        }
+    }
+
+    /// Read an ordered map from the start of the buffer, `pos` bytes into the original input and
+    /// enclosed by `depth` values.
+    ///
+    /// Kept out of the dispatch above so that its locals sit in a frame of their own,
+    /// rather than in the frame that nesting repeats.
+    #[inline(never)]
+    fn from_bytes_ordmap(
+        buf:    &[u8],
+        lims:   &DecodeLimits,
+        depth:  usize,
+        pos:    usize,
+    )
+        -> Outcome<(Self, usize)>
+    {
+        //
+        //   0   1  ...
+        // +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+        // | c |   |   |   | c |   |   | c |   |   | c |   |   |   |  ...  |   |
+        // +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+        //      \__________/\__________/\__________/\______________/    ...
+        //            |           |          |            |
+        //      payload_len      key       value         key
+        //
+        if buf.len() > 1 { 
+            match buf[1] {
+                Self::C64_CODE_START..=Self::C64_CODE_END => {
+                    let (payload_len, n) = res!(Self::read_c64(&buf[1..]));
+                    if payload_len == 0 {
+                        return Ok((Self::OrdMap(OrdDaticleMap::new()), 1 + n));
+                    }
+                    let payload_len = payload_len as usize;
+                    let byt_len = 1 + n + payload_len;
+                    if buf.len() > n + payload_len {
+                        let mut map = OrdDaticleMap::new();
+                        let mut i = 1 + n;
+                        let mut count: u64 = 0;
+                        let mut order: u64 = Dat::OMAP_ORDER_START_DEFAULT;
+                        while i < byt_len {
+                            let (key, n) = res!(Dat::from_bytes_depth(&buf[i..], lims, depth + 1, pos + i));
+                            i += n;
+                            if i >= byt_len {
+                                return Err(err!(
+                                    "Not enough bytes to decode the required value \
+                                    for key {:?} in the {:?}, after successfully \
+                                    decoding {} key-value pairs.",
+                                    key, Self::code_name(buf[0]), count;
+                                Bytes, Input, Decode, Missing));
+                            }
+                            let (val, n) = res!(Dat::from_bytes_depth(&buf[i..], lims, depth + 1, pos + i));
+                            i += n;
+                            map.insert(MapKey::new(order, key), val);
+                            order = try_add!(order, Dat::OMAP_ORDER_DELTA_DEFAULT);
+                            count = try_add!(count, 1);
+                        }
+                        return Ok((
+                            Self::OrdMap(map),
+                            byt_len,
+                        ));
+                    } else {
+                        return Err(err!(
+                            "Not enough bytes to decode the {:?} bytes.  \
+                            The map length is {} bytes, but the remaining buffer \
+                            length is {} bytes.",
+                            Self::code_name(buf[0]), payload_len, buf.len() - 1 - n;
+                        Bytes, Input, Decode, Missing));
+                    }
+                }
+                _ => {
+                    return Err(err!(
+                        "{:?} code was not followed by a code for a \
+                        Dat::C64 in the correct range {}..{}, the code found \
+                        was {}",
+                        Self::code_name(buf[0]), Self::C64_CODE_START, Self::C64_CODE_END, buf[1];
+                    Bytes, Input, Decode, Missing));
+                }
+            }
+        } else {
+            return Err(<Dat as FromBytes>::too_few(
+                buf.len(), 1, &Self::code_name(buf[0]), file!(), line!()));
+        }
+    }
+
+    /// Read a heterogenous tuple from the start of the buffer, `pos` bytes into the original
+    /// input and enclosed by `depth` values.
+    ///
+    /// The arrays these arms build are the decoder's largest locals, so they are kept out of
+    /// the dispatch above.
+    #[inline(never)]
+    fn from_bytes_tuple(
+        buf:    &[u8],
+        lims:   &DecodeLimits,
+        depth:  usize,
+        pos:    usize,
+    )
+        -> Outcome<(Self, usize)>
+    {
+        match buf[0] {
+            Self::TUP2_CODE => {
+                //
+                //   0   1  ...
+                // +---+---+---+---+---+---+---+
+                // | c | c |   |   | c |   |   |
+                // +---+---+---+---+---+---+---+
+                //      \__________/\__________/
+                //            |          |      
+                //           item       item    
+                //
+                if buf.len() > 1 { 
+                    const N: usize = 2;
+                    let mut list = [
+                        Dat::default(),
+                        Dat::default(),
+                    ];
+                    let mut i: usize = 1;
+                    for j in 0..N {
+                        let (dat, k) = res!(Dat::from_bytes_depth(&buf[i..], lims, depth + 1, pos + i));
+                        list[j] = dat;
+                        i += k;
+                    }
+                    return Ok((Self::Tup2(Box::new(list)), i));
+                } else {
+                    return Err(<Dat as FromBytes>::too_few(
+                        buf.len(), 1, &Self::code_name(buf[0]), file!(), line!()));
+                }
+            }
+            Self::TUP3_CODE => {
+                //
+                //   0   1  ...
+                // +---+---+---+---+---+---+---+---+---+---+---+
+                // | c | c |   |   | c |   |   | c |   |   |   |
+                // +---+---+---+---+---+---+---+---+---+---+---+
+                //      \__________/\__________/\______________/
+                //            |          |            |
+                //           item       item         item
+                //
+                if buf.len() > 1 { 
+                    const N: usize = 3;
+                    let mut list = [
+                        Dat::default(),
+                        Dat::default(),
+                        Dat::default(),
+                    ];
+                    let mut i: usize = 1;
+                    for j in 0..N {
+                        let (dat, k) = res!(Dat::from_bytes_depth(&buf[i..], lims, depth + 1, pos + i));
+                        list[j] = dat;
+                        i += k;
+                    }
+                    return Ok((Self::Tup3(Box::new(list)), i));
+                } else {
+                    return Err(<Dat as FromBytes>::too_few(
+                        buf.len(), 1, &Self::code_name(buf[0]), file!(), line!()));
+                }
+            }
+            Self::TUP4_CODE => {
+                if buf.len() > 1 { 
+                    const N: usize = 4;
+                    let mut list = [
+                        Dat::default(),
+                        Dat::default(),
+                        Dat::default(),
+                        Dat::default(),
+                    ];
+                    let mut i: usize = 1;
+                    for j in 0..N {
+                        let (dat, k) = res!(Dat::from_bytes_depth(&buf[i..], lims, depth + 1, pos + i));
+                        list[j] = dat;
+                        i += k;
+                    }
+                    return Ok((Self::Tup4(Box::new(list)), i));
+                } else {
+                    return Err(<Dat as FromBytes>::too_few(
+                        buf.len(), 1, &Self::code_name(buf[0]), file!(), line!()));
+                }
+            }
+            Self::TUP5_CODE => {
+                if buf.len() > 1 { 
+                    const N: usize = 5;
+                    let mut list = [
+                        Dat::default(),
+                        Dat::default(),
+                        Dat::default(),
+                        Dat::default(),
+                        Dat::default(),
+                    ];
+                    let mut i: usize = 1;
+                    for j in 0..N {
+                        let (dat, k) = res!(Dat::from_bytes_depth(&buf[i..], lims, depth + 1, pos + i));
+                        list[j] = dat;
+                        i += k;
+                    }
+                    return Ok((Self::Tup5(Box::new(list)), i));
+                } else {
+                    return Err(<Dat as FromBytes>::too_few(
+                        buf.len(), 1, &Self::code_name(buf[0]), file!(), line!()));
+                }
+            }
+            Self::TUP6_CODE => {
+                if buf.len() > 1 { 
+                    const N: usize = 6;
+                    let mut list = [
+                        Dat::default(),
+                        Dat::default(),
+                        Dat::default(),
+                        Dat::default(),
+                        Dat::default(),
+                        Dat::default(),
+                    ];
+                    let mut i: usize = 1;
+                    for j in 0..N {
+                        let (dat, k) = res!(Dat::from_bytes_depth(&buf[i..], lims, depth + 1, pos + i));
+                        list[j] = dat;
+                        i += k;
+                    }
+                    return Ok((Self::Tup6(Box::new(list)), i));
+                } else {
+                    return Err(<Dat as FromBytes>::too_few(
+                        buf.len(), 1, &Self::code_name(buf[0]), file!(), line!()));
+                }
+            }
+            Self::TUP7_CODE => {
+                if buf.len() > 1 { 
+                    const N: usize = 7;
+                    let mut list = [
+                        Dat::default(),
+                        Dat::default(),
+                        Dat::default(),
+                        Dat::default(),
+                        Dat::default(),
+                        Dat::default(),
+                        Dat::default(),
+                    ];
+                    let mut i: usize = 1;
+                    for j in 0..N {
+                        let (dat, k) = res!(Dat::from_bytes_depth(&buf[i..], lims, depth + 1, pos + i));
+                        list[j] = dat;
+                        i += k;
+                    }
+                    return Ok((Self::Tup7(Box::new(list)), i));
+                } else {
+                    return Err(<Dat as FromBytes>::too_few(
+                        buf.len(), 1, &Self::code_name(buf[0]), file!(), line!()));
+                }
+            }
+            Self::TUP8_CODE => {
+                if buf.len() > 1 { 
+                    const N: usize = 8;
+                    let mut list = [
+                        Dat::default(),
+                        Dat::default(),
+                        Dat::default(),
+                        Dat::default(),
+                        Dat::default(),
+                        Dat::default(),
+                        Dat::default(),
+                        Dat::default(),
+                    ];
+                    let mut i: usize = 1;
+                    for j in 0..N {
+                        let (dat, k) = res!(Dat::from_bytes_depth(&buf[i..], lims, depth + 1, pos + i));
+                        list[j] = dat;
+                        i += k;
+                    }
+                    return Ok((Self::Tup8(Box::new(list)), i));
+                } else {
+                    return Err(<Dat as FromBytes>::too_few(
+                        buf.len(), 1, &Self::code_name(buf[0]), file!(), line!()));
+                }
+            }
+            Self::TUP9_CODE => {
+                if buf.len() > 1 { 
+                    const N: usize = 9;
+                    let mut list = [
+                        Dat::default(),
+                        Dat::default(),
+                        Dat::default(),
+                        Dat::default(),
+                        Dat::default(),
+                        Dat::default(),
+                        Dat::default(),
+                        Dat::default(),
+                        Dat::default(),
+                    ];
+                    let mut i: usize = 1;
+                    for j in 0..N {
+                        let (dat, k) = res!(Dat::from_bytes_depth(&buf[i..], lims, depth + 1, pos + i));
+                        list[j] = dat;
+                        i += k;
+                    }
+                    return Ok((Self::Tup9(Box::new(list)), i));
+                } else {
+                    return Err(<Dat as FromBytes>::too_few(
+                        buf.len(), 1, &Self::code_name(buf[0]), file!(), line!()));
+                }
+            }
+            Self::TUP10_CODE => {
+                if buf.len() > 1 { 
+                    const N: usize = 10;
+                    let mut list = [
+                        Dat::default(),
+                        Dat::default(),
+                        Dat::default(),
+                        Dat::default(),
+                        Dat::default(),
+                        Dat::default(),
+                        Dat::default(),
+                        Dat::default(),
+                        Dat::default(),
+                        Dat::default(),
+                    ];
+                    let mut i: usize = 1;
+                    for j in 0..N {
+                        let (dat, k) = res!(Dat::from_bytes_depth(&buf[i..], lims, depth + 1, pos + i));
+                        list[j] = dat;
+                        i += k;
+                    }
+                    return Ok((Self::Tup10(Box::new(list)), i));
+                } else {
+                    return Err(<Dat as FromBytes>::too_few(
+                        buf.len(), 1, &Self::code_name(buf[0]), file!(), line!()));
+                }
+            }
+            code => return Err(err!(
+                "Byte code 0x{:02x} is not that of a heterogenous tuple.", code;
+            Bug, Input, Invalid)),
+        }
+    }
+
+    /// Read an atomic `Dat`, one enclosing no other `Dat`, from the start of the buffer.
+    ///
+    /// No arm here recurses, so this frame is entered once, at the foot of the recursion.
+    #[inline(never)]
+    fn from_bytes_atomic(buf: &[u8]) -> Outcome<(Self, usize)> {
         match buf[0] {
             // Atomic Kinds ===========================
             // Logic
@@ -519,576 +1291,6 @@ impl FromBytes for Dat {
                             Self::code_name(buf[0]), Self::C64_CODE_START, Self::C64_CODE_END,
                             buf[1];
                         Bytes, Input, Decode, Missing)),
-                    }
-                } else {
-                    return Err(<Dat as FromBytes>::too_few(
-                        buf.len(), 1, &Self::code_name(buf[0]), file!(), line!()));
-                }
-            }
-            // Molecular Kinds ========================
-            // Unitary
-            Self::USR_CODE => {
-                // 
-                // +---+---+---+---+---+---+---+---+---+
-                // | c |  u16  |   |   |   |   |   |   |
-                // +---+---+---+---+---+---+---+---+---+
-                //   ^     ^     ^ \___________________/   
-                //   |     |     |           |                   
-                //   |     |  opt code   inner Dat            
-                //   |     ukid_code     (if some)
-                //  daticle
-                //  code
-                //
-                const CODE_LEN: usize = UsrKindId::CODE_BYTE_LEN;
-                if buf.len() > CODE_LEN {
-                    let ukid_code = UsrKindCode::from_be_bytes(
-                        res!(<[u8; CODE_LEN]>::try_from(&buf[1..1 + CODE_LEN]), Decode, Bytes)
-                    );
-                    let opt_code = buf[1 + CODE_LEN];
-                    match opt_code {
-                        Self::OPT_NONE_CODE => return Ok((
-                            Dat::Usr(
-                                UsrKindId::from(ukid_code),
-                                None,
-                            ),
-                            2 + CODE_LEN,
-                        )),
-                        Self::OPT_SOME_CODE => {
-                            let (inner, n) = res!(Self::from_bytes(&buf[2 + CODE_LEN..]));
-                            return Ok((
-                                Dat::Usr(
-                                    UsrKindId::from(ukid_code),
-                                    Some(Box::new(inner)),
-                                ),
-                                2 + CODE_LEN + n,
-                            ));
-                        }
-                        _ => return Err(err!(
-                            "Expecting an option code {} (for none) or {} (for some), \
-                            instead found code {}.",
-                            Self::OPT_NONE_CODE, Self::OPT_SOME_CODE, opt_code;
-                        Bytes, Input, Decode, Missing)),
-                    }
-                } else {
-                    return Err(<Dat as FromBytes>::too_few(
-                        buf.len(), CODE_LEN, &Self::code_name(buf[0]), file!(), line!()));
-                }
-            }
-            Self::BOX_CODE => {
-                // 
-                // +---+---+---+---+---+---+---+---+---+
-                // | c |   |   |   |   |   |   |   |   |
-                // +---+---+---+---+---+---+---+---+---+
-                //     \_______________________________/
-                //                     |
-                //                inner Dat
-                //
-                // Dat::Box(k) byte encoding does nothing more than prepend Dat k with
-                // Dat::BOX_CODE
-                //
-                if buf.len() > 1 {
-                    let (inner, n) = res!(Self::from_bytes(&buf[1..]));
-                    return Ok((Dat::Box(Box::new(inner)), 1 + n));
-                } else {
-                    return Err(<Dat as FromBytes>::too_few(
-                        buf.len(), 1, &Self::code_name(buf[0]), file!(), line!()));
-                }
-            }
-            Self::OPT_SOME_CODE => {
-                // 
-                // +---+---+---+---+---+---+---+---+---+
-                // | c |   |   |   |   |   |   |   |   |
-                // +---+---+---+---+---+---+---+---+---+
-                //     \_______________________________/
-                //                     |
-                //                inner Dat
-                //
-                // Dat::Opt(Some(k)) byte encoding does nothing more than prepend Dat k
-                // with Dat::OPT_SOME_CODE
-                //
-                if buf.len() > 1 {
-                    let (inner, n) = res!(Self::from_bytes(&buf[1..]));
-                    return Ok((Dat::Opt(Box::new(Some(inner))), 1 + n));
-                } else {
-                    return Err(<Dat as FromBytes>::too_few(
-                        buf.len(), 1, &Self::code_name(buf[0]), file!(), line!()));
-                }
-            }
-            Self::ABOX_CODE => {
-                //
-                //   0                                       1   2  ...  n   1   2  ...  v
-                // +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-                // | c |   |   |   |   |   |   |   |   |   |   |   |   |   |   |  ...  |   |
-                // +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-                //       | \_______________________________/\______________/\______________/
-                //       |                 |                         |               |
-                //  NoteConfig         inner Dat                    c64        payload bytes
-                //
-                if buf.len() > 1 { 
-                    let mut start: usize = 1;
-                    let (ncfg, n) = res!(NoteConfig::from_bytes(&buf[start..]));
-                    start += n;
-                    let (boxd, n) = if buf.len() > start {
-                        let (inner, n) = res!(Self::from_bytes(&buf[start..]));
-                        (Box::new(inner), n)
-                    } else {
-                        return Err(<Dat as FromBytes>::too_few(
-                            buf.len(), start, &Self::code_name(buf[0]), file!(), line!()));
-                    };
-                    start += n;
-                    match buf[start] {
-                        Self::C64_CODE_START..=Self::C64_CODE_END => {
-                            let (v, n) = res!(Self::read_c64(&buf[start..]));
-                            if v == 0 {
-                                return Ok((
-                                    Self::ABox(ncfg, boxd, String::new()),
-                                    start + n,
-                                ));
-                            }
-                            let v = v as usize;
-                            if buf.len() > start - 1 + n + v {
-                                let owned = &buf[start + n .. start + n + v].to_vec();
-                                return Ok((
-                                    Self::ABox(
-                                        ncfg,
-                                        boxd,
-                                        res!(std::str::from_utf8(owned)).to_string(),
-                                    ),
-                                    start + n + v,
-                                ));
-                            } else {
-                                return Err(<Dat as FromBytes>::too_few(
-                                    buf.len(),
-                                    start + n + v,
-                                    &Self::code_name(buf[0]),
-                                    file!(),
-                                    line!(),
-                                ));
-                            }
-                        }
-                        _ => return Err(err!(
-                            "{} code was not followed by a code for a Dat::C64 in the correct \
-                            range {}..{}, the code found was {}.",
-                            Self::code_name(buf[0]), Self::C64_CODE_START, Self::C64_CODE_END,
-                            buf[start];
-                        Bytes, Input, Decode, Missing)),
-                    }
-                } else {
-                    return Err(<Dat as FromBytes>::too_few(
-                        buf.len(), 1, &Self::code_name(buf[0]), file!(), line!()));
-                }
-            }
-            // Heterogenous
-            Self::LIST_CODE | Self::VEK_CODE => {
-                //
-                //   0   1  ...
-                // +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-                // | c |   |   |   | c |   |   | c |   |   | c |   |   |   |  ...  |   |
-                // +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-                //      \__________/\__________/\__________/\______________/    ...
-                //            |           |          |            |
-                //      payload_len      item       item         item
-                //
-                if buf.len() > 1 { 
-                    match buf[1] {
-                        Self::C64_CODE_START..=Self::C64_CODE_END => {
-                            let (payload_len, n) = res!(Self::read_c64(&buf[1..]));
-                            if payload_len == 0 {
-                                return Ok((Self::List(Vec::new()), 1 + n));
-                            }
-                            let payload_len = payload_len as usize;
-                            let byt_len = 1 + n + payload_len;
-                            if buf.len() > n + payload_len {
-                                let mut list = Vec::new();
-                                let mut i = 1 + n;
-                                while i < byt_len {
-                                    let (dat, n) = res!(Dat::from_bytes(&buf[i..]));
-                                    i += n;
-                                    list.push(dat);
-                                }
-                                let result = if buf[0] == Self::LIST_CODE {
-                                    Self::List(list)
-                                } else {
-                                    res!(Self::try_vek_from(list))
-                                };
-                                return Ok((
-                                    result,
-                                    byt_len,
-                                ));
-                            } else {
-                                return Err(<Dat as FromBytes>::too_few(
-                                    buf.len(), n + payload_len, &Self::code_name(buf[0]), file!(), line!()));
-                            }
-                        }
-                        _ => {
-                            return Err(err!(
-                                "Dat::List code was not followed by a code for a \
-                                Dat::C64 in the correct range {}..{}, the code found \
-                                was {}",
-                                Self::C64_CODE_START,
-                                Self::C64_CODE_END,
-                                buf[1];
-                            Bytes, Input, Decode, Missing));
-                        }
-                    }
-                } else {
-                    return Err(<Dat as FromBytes>::too_few(
-                        buf.len(), 1, &Self::code_name(buf[0]), file!(), line!()));
-                }
-            }
-            Self::TUP2_CODE => {
-                //
-                //   0   1  ...
-                // +---+---+---+---+---+---+---+
-                // | c | c |   |   | c |   |   |
-                // +---+---+---+---+---+---+---+
-                //      \__________/\__________/
-                //            |          |      
-                //           item       item    
-                //
-                if buf.len() > 1 { 
-                    const N: usize = 2;
-                    let mut list = [
-                        Dat::default(),
-                        Dat::default(),
-                    ];
-                    let mut i: usize = 1;
-                    for j in 0..N {
-                        let (dat, k) = res!(Dat::from_bytes(&buf[i..]));
-                        list[j] = dat;
-                        i += k;
-                    }
-                    return Ok((Self::Tup2(Box::new(list)), i));
-                } else {
-                    return Err(<Dat as FromBytes>::too_few(
-                        buf.len(), 1, &Self::code_name(buf[0]), file!(), line!()));
-                }
-            }
-            Self::TUP3_CODE => {
-                //
-                //   0   1  ...
-                // +---+---+---+---+---+---+---+---+---+---+---+
-                // | c | c |   |   | c |   |   | c |   |   |   |
-                // +---+---+---+---+---+---+---+---+---+---+---+
-                //      \__________/\__________/\______________/
-                //            |          |            |
-                //           item       item         item
-                //
-                if buf.len() > 1 { 
-                    const N: usize = 3;
-                    let mut list = [
-                        Dat::default(),
-                        Dat::default(),
-                        Dat::default(),
-                    ];
-                    let mut i: usize = 1;
-                    for j in 0..N {
-                        let (dat, k) = res!(Dat::from_bytes(&buf[i..]));
-                        list[j] = dat;
-                        i += k;
-                    }
-                    return Ok((Self::Tup3(Box::new(list)), i));
-                } else {
-                    return Err(<Dat as FromBytes>::too_few(
-                        buf.len(), 1, &Self::code_name(buf[0]), file!(), line!()));
-                }
-            }
-            Self::TUP4_CODE => {
-                if buf.len() > 1 { 
-                    const N: usize = 4;
-                    let mut list = [
-                        Dat::default(),
-                        Dat::default(),
-                        Dat::default(),
-                        Dat::default(),
-                    ];
-                    let mut i: usize = 1;
-                    for j in 0..N {
-                        let (dat, k) = res!(Dat::from_bytes(&buf[i..]));
-                        list[j] = dat;
-                        i += k;
-                    }
-                    return Ok((Self::Tup4(Box::new(list)), i));
-                } else {
-                    return Err(<Dat as FromBytes>::too_few(
-                        buf.len(), 1, &Self::code_name(buf[0]), file!(), line!()));
-                }
-            }
-            Self::TUP5_CODE => {
-                if buf.len() > 1 { 
-                    const N: usize = 5;
-                    let mut list = [
-                        Dat::default(),
-                        Dat::default(),
-                        Dat::default(),
-                        Dat::default(),
-                        Dat::default(),
-                    ];
-                    let mut i: usize = 1;
-                    for j in 0..N {
-                        let (dat, k) = res!(Dat::from_bytes(&buf[i..]));
-                        list[j] = dat;
-                        i += k;
-                    }
-                    return Ok((Self::Tup5(Box::new(list)), i));
-                } else {
-                    return Err(<Dat as FromBytes>::too_few(
-                        buf.len(), 1, &Self::code_name(buf[0]), file!(), line!()));
-                }
-            }
-            Self::TUP6_CODE => {
-                if buf.len() > 1 { 
-                    const N: usize = 6;
-                    let mut list = [
-                        Dat::default(),
-                        Dat::default(),
-                        Dat::default(),
-                        Dat::default(),
-                        Dat::default(),
-                        Dat::default(),
-                    ];
-                    let mut i: usize = 1;
-                    for j in 0..N {
-                        let (dat, k) = res!(Dat::from_bytes(&buf[i..]));
-                        list[j] = dat;
-                        i += k;
-                    }
-                    return Ok((Self::Tup6(Box::new(list)), i));
-                } else {
-                    return Err(<Dat as FromBytes>::too_few(
-                        buf.len(), 1, &Self::code_name(buf[0]), file!(), line!()));
-                }
-            }
-            Self::TUP7_CODE => {
-                if buf.len() > 1 { 
-                    const N: usize = 7;
-                    let mut list = [
-                        Dat::default(),
-                        Dat::default(),
-                        Dat::default(),
-                        Dat::default(),
-                        Dat::default(),
-                        Dat::default(),
-                        Dat::default(),
-                    ];
-                    let mut i: usize = 1;
-                    for j in 0..N {
-                        let (dat, k) = res!(Dat::from_bytes(&buf[i..]));
-                        list[j] = dat;
-                        i += k;
-                    }
-                    return Ok((Self::Tup7(Box::new(list)), i));
-                } else {
-                    return Err(<Dat as FromBytes>::too_few(
-                        buf.len(), 1, &Self::code_name(buf[0]), file!(), line!()));
-                }
-            }
-            Self::TUP8_CODE => {
-                if buf.len() > 1 { 
-                    const N: usize = 8;
-                    let mut list = [
-                        Dat::default(),
-                        Dat::default(),
-                        Dat::default(),
-                        Dat::default(),
-                        Dat::default(),
-                        Dat::default(),
-                        Dat::default(),
-                        Dat::default(),
-                    ];
-                    let mut i: usize = 1;
-                    for j in 0..N {
-                        let (dat, k) = res!(Dat::from_bytes(&buf[i..]));
-                        list[j] = dat;
-                        i += k;
-                    }
-                    return Ok((Self::Tup8(Box::new(list)), i));
-                } else {
-                    return Err(<Dat as FromBytes>::too_few(
-                        buf.len(), 1, &Self::code_name(buf[0]), file!(), line!()));
-                }
-            }
-            Self::TUP9_CODE => {
-                if buf.len() > 1 { 
-                    const N: usize = 9;
-                    let mut list = [
-                        Dat::default(),
-                        Dat::default(),
-                        Dat::default(),
-                        Dat::default(),
-                        Dat::default(),
-                        Dat::default(),
-                        Dat::default(),
-                        Dat::default(),
-                        Dat::default(),
-                    ];
-                    let mut i: usize = 1;
-                    for j in 0..N {
-                        let (dat, k) = res!(Dat::from_bytes(&buf[i..]));
-                        list[j] = dat;
-                        i += k;
-                    }
-                    return Ok((Self::Tup9(Box::new(list)), i));
-                } else {
-                    return Err(<Dat as FromBytes>::too_few(
-                        buf.len(), 1, &Self::code_name(buf[0]), file!(), line!()));
-                }
-            }
-            Self::TUP10_CODE => {
-                if buf.len() > 1 { 
-                    const N: usize = 10;
-                    let mut list = [
-                        Dat::default(),
-                        Dat::default(),
-                        Dat::default(),
-                        Dat::default(),
-                        Dat::default(),
-                        Dat::default(),
-                        Dat::default(),
-                        Dat::default(),
-                        Dat::default(),
-                        Dat::default(),
-                    ];
-                    let mut i: usize = 1;
-                    for j in 0..N {
-                        let (dat, k) = res!(Dat::from_bytes(&buf[i..]));
-                        list[j] = dat;
-                        i += k;
-                    }
-                    return Ok((Self::Tup10(Box::new(list)), i));
-                } else {
-                    return Err(<Dat as FromBytes>::too_few(
-                        buf.len(), 1, &Self::code_name(buf[0]), file!(), line!()));
-                }
-            }
-            Self::MAP_CODE => {
-                //
-                //   0   1  ...
-                // +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-                // | c |   |   |   | c |   |   | c |   |   | c |   |   |   |  ...  |   |
-                // +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-                //      \__________/\__________/\__________/\______________/    ...
-                //            |           |          |            |
-                //      payload_len      key       value         key
-                //
-                if buf.len() > 1 { 
-                    match buf[1] {
-                        Self::C64_CODE_START..=Self::C64_CODE_END => {
-                            let (payload_len, n) = res!(Self::read_c64(&buf[1..]));
-                            if payload_len == 0 {
-                                return Ok((Self::Map(DaticleMap::new()), 1 + n));
-                            }
-                            let payload_len = payload_len as usize;
-                            let byt_len = 1 + n + payload_len;
-                            if buf.len() > n + payload_len {
-                                let mut map = DaticleMap::new();
-                                let mut i = 1 + n;
-                                let mut count: usize = 0;
-                                while i < byt_len {
-                                    let (key, n) = res!(Dat::from_bytes(&buf[i..]));
-                                    i += n;
-                                    if i >= byt_len {
-                                        return Err(err!(
-                                            "Not enough bytes to decode the required value \
-                                            for key {:?} in the {:?}, after successfully \
-                                            decoding {} key-value pairs.",
-                                            key, Self::code_name(buf[0]), count;
-                                        Bytes, Input, Decode, Missing));
-                                    }
-                                    let (val, n) = res!(Dat::from_bytes(&buf[i..]));
-                                    i += n;
-                                    map.insert(key, val);
-                                    count += 1;
-                                }
-                                return Ok((
-                                    Self::Map(map),
-                                    byt_len,
-                                ));
-                            } else {
-                                return Err(err!(
-                                    "Not enough bytes to decode the {:?} bytes.  \
-                                    The map length is {} bytes, but the remaining buffer \
-                                    length is {} bytes.",
-                                    Self::code_name(buf[0]), payload_len, buf.len() - 1 - n;
-                                Bytes, Input, Decode, Missing));
-                            }
-                        }
-                        _ => {
-                            return Err(err!(
-                                "{:?} code was not followed by a code for a \
-                                Dat::C64 in the correct range {}..{}, the code found \
-                                was {}",
-                                Self::code_name(buf[0]), Self::C64_CODE_START, Self::C64_CODE_END, buf[1];
-                            Bytes, Input, Decode, Missing));
-                        }
-                    }
-                } else {
-                    return Err(<Dat as FromBytes>::too_few(
-                        buf.len(), 1, &Self::code_name(buf[0]), file!(), line!()));
-                }
-            }
-            Self::OMAP_CODE => {
-                //
-                //   0   1  ...
-                // +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-                // | c |   |   |   | c |   |   | c |   |   | c |   |   |   |  ...  |   |
-                // +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-                //      \__________/\__________/\__________/\______________/    ...
-                //            |           |          |            |
-                //      payload_len      key       value         key
-                //
-                if buf.len() > 1 { 
-                    match buf[1] {
-                        Self::C64_CODE_START..=Self::C64_CODE_END => {
-                            let (payload_len, n) = res!(Self::read_c64(&buf[1..]));
-                            if payload_len == 0 {
-                                return Ok((Self::OrdMap(OrdDaticleMap::new()), 1 + n));
-                            }
-                            let payload_len = payload_len as usize;
-                            let byt_len = 1 + n + payload_len;
-                            if buf.len() > n + payload_len {
-                                let mut map = OrdDaticleMap::new();
-                                let mut i = 1 + n;
-                                let mut count: u64 = 0;
-                                let mut order: u64 = Dat::OMAP_ORDER_START_DEFAULT;
-                                while i < byt_len {
-                                    let (key, n) = res!(Dat::from_bytes(&buf[i..]));
-                                    i += n;
-                                    if i >= byt_len {
-                                        return Err(err!(
-                                            "Not enough bytes to decode the required value \
-                                            for key {:?} in the {:?}, after successfully \
-                                            decoding {} key-value pairs.",
-                                            key, Self::code_name(buf[0]), count;
-                                        Bytes, Input, Decode, Missing));
-                                    }
-                                    let (val, n) = res!(Dat::from_bytes(&buf[i..]));
-                                    i += n;
-                                    map.insert(MapKey::new(order, key), val);
-                                    order = try_add!(order, Dat::OMAP_ORDER_DELTA_DEFAULT);
-                                    count = try_add!(count, 1);
-                                }
-                                return Ok((
-                                    Self::OrdMap(map),
-                                    byt_len,
-                                ));
-                            } else {
-                                return Err(err!(
-                                    "Not enough bytes to decode the {:?} bytes.  \
-                                    The map length is {} bytes, but the remaining buffer \
-                                    length is {} bytes.",
-                                    Self::code_name(buf[0]), payload_len, buf.len() - 1 - n;
-                                Bytes, Input, Decode, Missing));
-                            }
-                        }
-                        _ => {
-                            return Err(err!(
-                                "{:?} code was not followed by a code for a \
-                                Dat::C64 in the correct range {}..{}, the code found \
-                                was {}",
-                                Self::code_name(buf[0]), Self::C64_CODE_START, Self::C64_CODE_END, buf[1];
-                            Bytes, Input, Decode, Missing));
-                        }
                     }
                 } else {
                     return Err(<Dat as FromBytes>::too_few(

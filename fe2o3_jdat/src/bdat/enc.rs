@@ -10,11 +10,210 @@ use oxedyne_fe2o3_num::float::{
 };
 
 
+/// The error raised when a kind reaches an encoding frame that is not the one it belongs to.
+///
+/// The dispatch in [`Dat::to_bytes`] sends every kind to its own frame, so this is unreachable
+/// unless the dispatch and the frames disagree, which is a fault in this file rather than in
+/// anything given to it.
+fn wrong_frame(dat: &Dat) -> Error<ErrTag> {
+    err!(
+        "The daticle kind {:?} was encoded in a frame that does not encode it.  The dispatch in \
+        Dat::to_bytes and the frames it dispatches to disagree.", dat.kind();
+    Bug, Mismatch)
+}
+
 impl ToBytes for Dat {
 
     /// Appends the encoded `Dat` to the given byte buffer.
-    fn to_bytes(&self, mut buf: Vec<u8>) -> Outcome<Vec<u8>> {
+    ///
+    /// Every kind that encloses other kinds is encoded in a frame of its own, so that the frame
+    /// this dispatch repeats as it descends holds nothing but the dispatch.  A single match over
+    /// every kind would give one frame the locals of all of them, and a value nested a few hundred
+    /// deep would then exhaust the stack while encoding something that decodes perfectly well.
+    /// [`Dat::from_bytes_depth`](crate::Dat) keeps its frames small for the same reason.
+    fn to_bytes(&self, buf: Vec<u8>) -> Outcome<Vec<u8>> {
         match self {
+            // Molecular Kinds ========================
+            // Unitary
+            Self::Usr(..)       => self.to_bytes_usr(buf),
+            Self::Opt(..)       => self.to_bytes_opt(buf),
+            Self::Box(..)       => self.to_bytes_box(buf),
+            Self::ABox(..)      => self.to_bytes_abox(buf),
+            // Heterogenous
+            Self::List(..)      |
+            Self::Vek(..)       => self.to_bytes_list(buf),
+            Self::Tup2(..)      |
+            Self::Tup3(..)      |
+            Self::Tup4(..)      |
+            Self::Tup5(..)      |
+            Self::Tup6(..)      |
+            Self::Tup7(..)      |
+            Self::Tup8(..)      |
+            Self::Tup9(..)      |
+            Self::Tup10(..)     => self.to_bytes_tuple(buf),
+            Self::Map(..)       |
+            Self::OrdMap(..)    => self.to_bytes_map(buf),
+            // Every other kind is atomic, enclosing no other kind.  Those arms carry the bulk of
+            // the encoder's stack frame, so they too are encoded in a frame of their own, which is
+            // entered at a leaf and left there.
+            _                   => self.to_bytes_atomic(buf),
+        }
+    }
+}
+
+impl Dat {
+
+    /// Encodes a user-defined kind: the kind code, then the payload it carries, if any.
+    #[inline(never)]
+    fn to_bytes_usr(&self, mut buf: Vec<u8>) -> Outcome<Vec<u8>> {
+        match self {
+            Self::Usr(ukid, optboxd) => {
+                self.append_code(&mut buf);
+                buf.extend_from_slice(&ukid.code().to_be_bytes());
+                match optboxd {
+                    Some(boxd) => {
+                        buf.push(Self::OPT_SOME_CODE);
+                        buf = res!(boxd.to_bytes(buf));
+                    },
+                    None => buf.push(Self::OPT_NONE_CODE),
+                }
+                Ok(buf)
+            },
+            _ => Err(wrong_frame(self)),
+        }
+    }
+
+    /// Encodes an optional value: the code alone when it is none, the value when it is some.
+    #[inline(never)]
+    fn to_bytes_opt(&self, mut buf: Vec<u8>) -> Outcome<Vec<u8>> {
+        match self {
+            Self::Opt(boxoptd) => {
+                self.append_code(&mut buf);
+                if let Some(d) = &**boxoptd {
+                    buf = res!(d.to_bytes(buf));
+                }
+                Ok(buf)
+            },
+            _ => Err(wrong_frame(self)),
+        }
+    }
+
+    /// Encodes a boxed value.
+    #[inline(never)]
+    fn to_bytes_box(&self, mut buf: Vec<u8>) -> Outcome<Vec<u8>> {
+        match self {
+            Self::Box(boxd) => {
+                self.append_code(&mut buf);
+                Ok(res!(boxd.to_bytes(buf)))
+            },
+            _ => Err(wrong_frame(self)),
+        }
+    }
+
+    /// Encodes an annotated box: its configuration, the value, then the note.
+    #[inline(never)]
+    fn to_bytes_abox(&self, mut buf: Vec<u8>) -> Outcome<Vec<u8>> {
+        match self {
+            Self::ABox(ncfg, boxd, s) => {
+                self.append_code(&mut buf);
+                buf = res!(ncfg.to_bytes(buf));
+                buf = res!(boxd.to_bytes(buf));
+                let b = s.as_bytes();
+                buf = res!(Dat::C64(b.len() as u64).to_bytes(buf));
+                buf.extend_from_slice(b);
+                Ok(buf)
+            },
+            _ => Err(wrong_frame(self)),
+        }
+    }
+
+    /// Encodes a list or a vek: the code, the byte length, then the items.
+    #[inline(never)]
+    fn to_bytes_list(&self, mut buf: Vec<u8>) -> Outcome<Vec<u8>> {
+        match self {
+            Self::List(v) => {
+                self.append_code(&mut buf);
+                Ok(res!(Self::vec_to_bytes(v, buf)))
+            },
+            Self::Vek(vek) => {
+                self.append_code(&mut buf);
+                Ok(res!(Self::vec_to_bytes(&*vek, buf)))
+            },
+            _ => Err(wrong_frame(self)),
+        }
+    }
+
+    /// Encodes a tuple of daticles.
+    #[inline(never)]
+    fn to_bytes_tuple(&self, buf: Vec<u8>) -> Outcome<Vec<u8>> {
+        match self {
+            Self::Tup2(a)   => Self::tuple_to_bytes::<Dat, 2, {Self::TUP_SERIES_START}>(a, buf),
+            Self::Tup3(a)   => Self::tuple_to_bytes::<Dat, 3, {Self::TUP_SERIES_START}>(a, buf),
+            Self::Tup4(a)   => Self::tuple_to_bytes::<Dat, 4, {Self::TUP_SERIES_START}>(a, buf),
+            Self::Tup5(a)   => Self::tuple_to_bytes::<Dat, 5, {Self::TUP_SERIES_START}>(a, buf),
+            Self::Tup6(a)   => Self::tuple_to_bytes::<Dat, 6, {Self::TUP_SERIES_START}>(a, buf),
+            Self::Tup7(a)   => Self::tuple_to_bytes::<Dat, 7, {Self::TUP_SERIES_START}>(a, buf),
+            Self::Tup8(a)   => Self::tuple_to_bytes::<Dat, 8, {Self::TUP_SERIES_START}>(a, buf),
+            Self::Tup9(a)   => Self::tuple_to_bytes::<Dat, 9, {Self::TUP_SERIES_START}>(a, buf),
+            Self::Tup10(a)  => Self::tuple_to_bytes::<Dat, 10, {Self::TUP_SERIES_START}>(a, buf),
+            _ => Err(wrong_frame(self)),
+        }
+    }
+
+    /// Encodes a map or an ordered map: the code, the byte length, then the entries.
+    ///
+    /// The two are kept apart because their keys are of different types, an ordered map keying by
+    /// insertion rather than by the key itself.
+    #[inline(never)]
+    fn to_bytes_map(&self, mut buf: Vec<u8>) -> Outcome<Vec<u8>> {
+        let mut buf2 = Vec::new();
+        match self {
+            Self::Map(map) => {
+                for (k, v) in map {
+                    buf2 = res!(k.to_bytes(buf2));
+                    buf2 = res!(v.to_bytes(buf2));
+                }
+            },
+            Self::OrdMap(map) => {
+                for (k, v) in map {
+                    buf2 = res!(k.to_bytes(buf2));
+                    buf2 = res!(v.to_bytes(buf2));
+                }
+            },
+            _ => return Err(wrong_frame(self)),
+        }
+        self.append_code(&mut buf);
+        buf = res!(Dat::C64(buf2.len() as u64).to_bytes(buf));
+        buf.extend_from_slice(&buf2);
+        Ok(buf)
+    }
+
+    /// Encodes every kind that encloses no other kind.
+    ///
+    /// The arms here are many, and in a debug build each keeps its own slot in the frame, so this
+    /// is the frame that must not be the one nesting repeats.
+    #[inline(never)]
+    fn to_bytes_atomic(&self, mut buf: Vec<u8>) -> Outcome<Vec<u8>> {
+        match self {
+            // Molecular Kinds ========================
+            // Each of these is encoded in a frame of its own, and never here.
+            Self::Usr(..)       |
+            Self::Opt(..)       |
+            Self::Box(..)       |
+            Self::ABox(..)      |
+            Self::List(..)      |
+            Self::Vek(..)       |
+            Self::Tup2(..)      |
+            Self::Tup3(..)      |
+            Self::Tup4(..)      |
+            Self::Tup5(..)      |
+            Self::Tup6(..)      |
+            Self::Tup7(..)      |
+            Self::Tup8(..)      |
+            Self::Tup9(..)      |
+            Self::Tup10(..)     |
+            Self::Map(..)       |
+            Self::OrdMap(..)    => return Err(wrong_frame(self)),
             // Atomic Kinds ===========================
             // Logic
             Self::Empty => {
@@ -112,94 +311,6 @@ impl ToBytes for Dat {
                 let b = s.as_bytes();
                 buf = res!(Dat::C64(b.len() as u64).to_bytes(buf));
                 buf.extend_from_slice(b);
-            },
-            // Molecular Kinds ========================
-            // Unitary
-            Self::Usr(ukid, optboxd) => {
-                self.append_code(&mut buf);
-                buf.extend_from_slice(&ukid.code().to_be_bytes());
-                match optboxd {
-                    Some(boxd) => {
-                        buf.push(Self::OPT_SOME_CODE);
-                        buf = res!(boxd.to_bytes(buf));
-                    },
-                    None => buf.push(Self::OPT_NONE_CODE),
-                }
-            },
-            Self::Opt(boxoptd) => {
-                self.append_code(&mut buf);
-                if let Some(d) = &**boxoptd {
-                    buf = res!(d.to_bytes(buf));
-                }
-            },
-            Self::Box(boxd) => {
-                self.append_code(&mut buf);
-                buf = res!(boxd.to_bytes(buf));
-            },
-            Self::ABox(ncfg, boxd, s) => {
-                self.append_code(&mut buf);
-                buf = res!(ncfg.to_bytes(buf));
-                buf = res!(boxd.to_bytes(buf));
-                let b = s.as_bytes();
-                buf = res!(Dat::C64(b.len() as u64).to_bytes(buf));
-                buf.extend_from_slice(b);
-            },
-            // Heterogenous
-            Self::List(v) => {
-                self.append_code(&mut buf);
-                buf = res!(Self::vec_to_bytes(v, buf));
-            },
-            Self::Tup2(a) => {
-                buf = res!(Self::tuple_to_bytes::<Dat, 2, {Self::TUP_SERIES_START}>(a, buf));
-            },
-            Self::Tup3(a) => {
-                buf = res!(Self::tuple_to_bytes::<Dat, 3, {Self::TUP_SERIES_START}>(a, buf));
-            },
-            Self::Tup4(a) => {
-                buf = res!(Self::tuple_to_bytes::<Dat, 4, {Self::TUP_SERIES_START}>(a, buf));
-            },
-            Self::Tup5(a) => {
-                buf = res!(Self::tuple_to_bytes::<Dat, 5, {Self::TUP_SERIES_START}>(a, buf));
-            },
-            Self::Tup6(a) => {
-                buf = res!(Self::tuple_to_bytes::<Dat, 6, {Self::TUP_SERIES_START}>(a, buf));
-            },
-            Self::Tup7(a) => {
-                buf = res!(Self::tuple_to_bytes::<Dat, 7, {Self::TUP_SERIES_START}>(a, buf));
-            },
-            Self::Tup8(a) => {
-                buf = res!(Self::tuple_to_bytes::<Dat, 8, {Self::TUP_SERIES_START}>(a, buf));
-            },
-            Self::Tup9(a) => {
-                buf = res!(Self::tuple_to_bytes::<Dat, 9, {Self::TUP_SERIES_START}>(a, buf));
-            },
-            Self::Tup10(a) => {
-                buf = res!(Self::tuple_to_bytes::<Dat, 10, {Self::TUP_SERIES_START}>(a, buf));
-            },
-            Self::Map(map) => {
-                let mut buf2 = Vec::new();
-                for (k, v) in map {
-                    buf2 = res!(k.to_bytes(buf2));
-                    buf2 = res!(v.to_bytes(buf2));
-                }
-                self.append_code(&mut buf);
-                buf = res!(Dat::C64(buf2.len() as u64).to_bytes(buf));
-                buf.extend_from_slice(&buf2);
-            },
-            Self::OrdMap(map) => {
-                let mut buf2 = Vec::new();
-                for (k, v) in map {
-                    buf2 = res!(k.to_bytes(buf2));
-                    buf2 = res!(v.to_bytes(buf2));
-                }
-                self.append_code(&mut buf);
-                buf = res!(Dat::C64(buf2.len() as u64).to_bytes(buf));
-                buf.extend_from_slice(&buf2);
-            },
-            // Homogenous
-            Self::Vek(vek) => {
-                self.append_code(&mut buf);
-                buf = res!(Self::vec_to_bytes(&*vek, buf));
             },
             // Variable length bytes
             Self::BU8(v) => {
