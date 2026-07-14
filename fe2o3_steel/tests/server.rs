@@ -160,6 +160,9 @@ pub async fn test_server(filter: &'static str) -> Outcome<()> {
                 dev_mode:       true,
             };
 
+            // An already-open database, as the server holds after an
+            // unseal. The map is shared because databases are normally
+            // attached to it after the listeners bind.
             let mut vhost_dbs = HashMap::new();
             vhost_dbs.insert(
                 vhost_cfg.primary_hostname().to_lowercase(),
@@ -168,7 +171,8 @@ pub async fn test_server(filter: &'static str) -> Outcome<()> {
             let context = ServerContext::new(
                 cfg,
                 app_root,
-                vhost_dbs,
+                Arc::new(std::sync::RwLock::new(vhost_dbs)),
+                Vec::new(), // db specs: nothing left to open
                 protocol,
                 None,   // traffic recorder
                 None,   // admin state

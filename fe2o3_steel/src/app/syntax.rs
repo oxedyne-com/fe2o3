@@ -183,6 +183,21 @@ pub fn new_shell_raw(
     // =============================================================================================
     
     // ---------------------------------------------------------------------------------------------
+    // Command: unseal
+    // ---------------------------------------------------------------------------------------------
+    let cmd = Cmd::from(CmdConfig {
+        name:   fmt!("unseal"),
+        help:   Some(fmt!("Unwrap the wallet master key with an admin passphrase, so \
+            the server opens its databases when it starts. Optional: the server runs \
+            sealed as well, serving every static vhost while DB-backed routes answer \
+            503, and can be unsealed from the /admin dashboard afterwards.")),
+        cat:    fmt!("Wallet"),
+        ..Default::default()
+    });
+    s = res!(s.add_cmd(cmd));
+    // =============================================================================================
+
+    // ---------------------------------------------------------------------------------------------
     // Command: wallet
     // ---------------------------------------------------------------------------------------------
     let mut cmd = Cmd::from(CmdConfig {

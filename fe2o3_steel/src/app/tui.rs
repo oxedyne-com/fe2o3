@@ -221,26 +221,35 @@ pub fn run_with_extension<E: AppExtension>(extension: E) -> Outcome<()> {
     }
 
     // ┌───────────────────────────────────────────────────────────────────────┐
-    // │ WALLET UNLOCK                                                         │
+    // │ WALLET LOAD (NOT UNLOCK)                                              │
     // │                                                                       │
     // │ The wallet holds one or more admin entries. Each admin has its own    │
     // │ password-wrapped copy of the same wallet master key; any of them can  │
     // │ unlock the wallet with their own password. The master key is used as  │
     // │ the Ozone database encryption key.                                    │
     // │                                                                       │
-    // │ Password source, in descending order of preference:                   │
+    // │ The wallet is *loaded* here but deliberately NOT unlocked. Steel      │
+    // │ starts sealed. The wrapped keys are useless without a passphrase, so  │
+    // │ the file is safe to read, and reading it is enough to authenticate an │
+    // │ admin later -- which is what lets the dashboard offer an unseal form  │
+    // │ that needs no database behind it.                                     │
     // │                                                                       │
-    // │   1. `STEEL_ADMIN_PASS` environment variable -- development and       │
-    // │      scripted test convenience only.                                  │
-    // │   2. Interactive tty prompt via `UserInput::ask_for_secret`, which    │
-    // │      reads stdin with echo off.                                       │
+    // │ Demanding the passphrase here would make the *database* key a         │
+    // │ precondition for the *websites* being up, which is backwards: a       │
+    // │ static site does not touch Ozone. It also made every restart an       │
+    // │ outage that waited on a human at a terminal, and made a headless      │
+    // │ start (systemd, cron) impossible -- no tty, no prompt, crash loop.    │
     // │                                                                       │
-    // │ There is deliberately no disk-resident fallback. In production the    │
-    // │ passphrase must be supplied by a human at each start (or by an        │
-    // │ orchestration layer that knows how to pipe it into stdin without      │
-    // │ writing it to disk). A wallet that can be unlocked with a secret      │
-    // │ stored on the same disk it protects provides no real defence against  │
-    // │ the threat model it was built for -- disk theft.                      │
+    // │ So: no prompt at start-up. `STEEL_ADMIN_PASS` is still honoured for   │
+    // │ development and scripted tests, and the operator can type `unseal` at │
+    // │ the shell before `server` if they want the databases open from the    │
+    // │ first request. Otherwise Steel binds, serves, renews certificates,    │
+    // │ and waits for an admin to unseal at /admin.                           │
+    // │                                                                       │
+    // │ There is still deliberately no disk-resident fallback. A wallet that  │
+    // │ can be unlocked with a secret stored on the same disk it protects     │
+    // │ provides no real defence against the threat model it was built for -- │
+    // │ disk theft.                                                           │
     // └───────────────────────────────────────────────────────────────────────┘
     let wallet_path = Path::new("./").join(constant::WALLET_NAME);
     let (wallet, db_default_enc_key, unlocked_admin_name, unlocked_admin_scopes) =
@@ -249,23 +258,33 @@ pub fn run_with_extension<E: AppExtension>(extension: E) -> Outcome<()> {
             wallet_path,
             Some(DecoderConfig::<(), ()>::default()),
         ));
-        let pass = if let Ok(s) = std::env::var("STEEL_ADMIN_PASS") {
-            Secret::new(s)
-        } else {
-            res!(UserInput::ask_for_secret(None))
-        };
-        let unlocked = match wallet.unlock(pass.expose_secret().as_bytes()) {
-            Ok(u) => u,
-            Err(e) => {
-                println!("Wallet unlock failed: {}.", e);
-                return Ok(());
+        // Only the environment variable unlocks eagerly. Absent it, stay
+        // sealed -- `AppShellContext::require_master_key` prompts if and
+        // when a command actually needs the key.
+        match std::env::var(constant::ADMIN_PASS_ENV) {
+            Ok(s) => {
+                let pass = Secret::new(s);
+                let unlocked = match wallet.unlock(pass.expose_secret().as_bytes()) {
+                    Ok(u) => u,
+                    Err(e) => {
+                        println!("Wallet unlock failed: {}.", e);
+                        return Ok(());
+                    }
+                };
+                info!("Wallet unlocked by admin '{}' via {}.",
+                    unlocked.admin_name, constant::ADMIN_PASS_ENV);
+                let key = unlocked.master_key.expose_secret().clone();
+                let name = unlocked.admin_name.clone();
+                let scopes = unlocked.admin_scopes.clone();
+                (wallet, Some(key), name, scopes)
             }
-        };
-        info!("Wallet unlocked by admin '{}'.", unlocked.admin_name);
-        let db_default_enc_key = unlocked.master_key.expose_secret().clone();
-        let name = unlocked.admin_name.clone();
-        let scopes = unlocked.admin_scopes.clone();
-        (wallet, db_default_enc_key, name, scopes)
+            Err(_) => {
+                info!("Wallet loaded, sealed. {} admin entr{} available to unseal.",
+                    wallet.admins().len(),
+                    if wallet.admins().len() == 1 { "y" } else { "ies" });
+                (wallet, None, String::new(), Vec::new())
+            }
+        }
     } else {
         // ┌───────────────────────┐
         // │ Wallet not found.     │
@@ -321,10 +340,12 @@ pub fn run_with_extension<E: AppExtension>(extension: E) -> Outcome<()> {
                     Some(EncoderConfig::<(), ()>::default()),
                 ));
                 println!("Thank you, {:?} created.", wallet_path);
+                // A wallet just created from a passphrase the operator typed
+                // is, by definition, unlocked -- start unsealed.
                 let db_default_enc_key = unlocked.master_key.expose_secret().clone();
                 let name = unlocked.admin_name.clone();
                 let scopes = unlocked.admin_scopes.clone();
-                (wallet, db_default_enc_key, name, scopes)
+                (wallet, Some(db_default_enc_key), name, scopes)
             },
             _ => return Err(err!(
                 "Invalid response, goodbye!";

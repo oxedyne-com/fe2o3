@@ -10,6 +10,10 @@ pub const LOG_FILE_EXTENSION:               &'static str = "log";
 
 pub const CONFIG_NAME:                      &'static str = "config.jdat";
 pub const WALLET_NAME:                      &'static str = "wallet.jdat";
+/// Environment variable read in place of an interactive passphrase prompt.
+/// For development and scripted tests. Production supplies the passphrase
+/// through a human -- at the shell, or at the dashboard's unseal form.
+pub const ADMIN_PASS_ENV:                   &'static str = "STEEL_ADMIN_PASS";
 // Timeouts.
 pub const GET_DATA_WAIT:                    Wait = Wait::new_default();
 // Key derivation functions.

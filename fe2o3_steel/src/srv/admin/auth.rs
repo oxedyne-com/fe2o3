@@ -68,15 +68,26 @@ pub fn verify_passphrase(
 )
     -> Outcome<LoginOutcome>
 {
-    let wallet = lock_read!(state.wallet);
-    let unlocked = match wallet.unlock(passphrase) {
-        Ok(u) => u,
+    // `unseal` performs the wallet unlock, and installs the recovered
+    // master key if the process is still sealed. A dashboard login is
+    // therefore the same act as an unseal: the passphrase that proves
+    // who you are is the passphrase that unwraps the key. That is what
+    // lets an admin bring a cold-started Steel's databases up from a
+    // browser, with no terminal and no database behind the login form.
+    //
+    // A wrong passphrase fails the unwrap, so it can neither log in
+    // nor unseal. There is no separate credential to get out of step.
+    //
+    // Note the unseal is not gated on dashboard scope, while the
+    // session below is. This is not an escalation: every admin in the
+    // wallet holds their own wrap of the master key, so any of them
+    // can already recover it by definition. Scope governs what the
+    // dashboard will *show* them, not whether they are trusted with
+    // the key they already have.
+    let (name, scopes) = match state.unseal(passphrase) {
+        Ok(pair) => pair,
         Err(_) => return Ok(LoginOutcome::BadCredentials),
     };
-    drop(wallet);
-
-    let scopes = unlocked.admin_scopes.clone();
-    let name = unlocked.admin_name.clone();
 
     // Reuse the principal-side scope check so the dashboard
     // access rule lives in exactly one place.

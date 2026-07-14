@@ -163,8 +163,13 @@ impl<
         };
 
         // Pick the first registered vhost db as the default for
-        // ozone view, if any vhost has one configured.
-        let default_db = self.vhost_dbs.values().next().cloned();
+        // ozone view, if any vhost has one configured. The map is empty
+        // while Steel is sealed, so this is `None` until an admin unseals.
+        let default_db = {
+            let guard = lock_read!(self.vhost_dbs,
+                "Reading the vhost database map for the local admin listener.");
+            guard.values().next().cloned()
+        };
 
         let (mut read_stream, mut write_stream) = tokio::io::split(&mut stream);
         let mut reader: HttpMessageReader<

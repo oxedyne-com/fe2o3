@@ -298,43 +298,67 @@ fn read_slice<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::srv::admin::state::derive_session_key;
-    use oxedyne_fe2o3_crypto::enc::EncryptionScheme;
+    use crate::srv::admin::{
+        host_sampler::HostSampler,
+        state::AdminState,
+        traffic::TrafficRecorder,
+    };
     use oxedyne_fe2o3_crypto::keystore::Wallet;
-    use std::sync::{Arc, RwLock};
+    use std::{
+        path::PathBuf,
+        sync::{
+            Arc,
+            RwLock,
+        },
+    };
 
+    /// An unsealed admin state, as the server holds after an unseal.
     fn mkstate() -> AdminState {
-        use crate::srv::admin::{
-            host_sampler::HostSampler,
-            signed_login::NonceTracker,
-            traffic::TrafficRecorder,
-        };
-        use std::{
-            path::PathBuf,
-            sync::Mutex,
-            time::Duration,
-        };
-        let master = [0u8; 32];
-        let key = derive_session_key(&master).expect("derive");
-        let enc = EncryptionScheme::new_aes_256_gcm_with_key(&key)
-            .expect("aes");
-        AdminState {
-            wallet:             Arc::new(RwLock::new(Wallet::default())),
-            wallet_path:        PathBuf::from("./wallet.jdat"),
-            master_key:         master.to_vec(),
-            session_enc:        enc,
-            traffic:            TrafficRecorder::new_shared(0),
-            host_sampler:       HostSampler::new_shared(),
-            addr_guard:         crate::srv::admin::guard::new_shared()
-                .expect("addr guard"),
-            auth_guard:         crate::srv::admin::guard::new_shared()
-                .expect("auth guard"),
-            admin_keys:         Arc::new(Vec::new()),
-            nonce_tracker:      Arc::new(Mutex::new(
-                NonceTracker::new(Duration::from_secs(120)),
-            )),
-            head_injection_url: Arc::new(None),
-        }
+        mkstate_with_key(Some([0u8; 32].to_vec()))
+    }
+
+    fn mkstate_with_key(master_key: Option<Vec<u8>>) -> AdminState {
+        AdminState::new(
+            Arc::new(RwLock::new(Wallet::default())),
+            PathBuf::from("./wallet.jdat"),
+            master_key,
+            TrafficRecorder::new_shared(0),
+            HostSampler::new_shared(),
+            crate::srv::admin::guard::new_shared().expect("addr guard"),
+            crate::srv::admin::guard::new_shared().expect("auth guard"),
+            Vec::new(),
+            None,
+        ).expect("admin state")
+    }
+
+    #[test]
+    fn test_seal_state_00() {
+        // A state built without a master key is sealed, and says so
+        // rather than handing back a key that is not there.
+        let sealed = mkstate_with_key(None);
+        assert!(sealed.is_sealed());
+        assert!(sealed.master_key().is_err());
+
+        // One built with a key is not sealed and yields it.
+        let open = mkstate_with_key(Some(vec![7u8; 32]));
+        assert!(!open.is_sealed());
+        assert_eq!(open.master_key().expect("master key"), vec![7u8; 32]);
+    }
+
+    #[test]
+    fn test_session_key_is_per_process_00() {
+        // The session key must not be derived from the master key: a
+        // sealed Steel has none, yet must still issue session cookies
+        // to the admin on their way to unseal. Two states built from
+        // the *same* master key must therefore still disagree about
+        // each other's cookies.
+        let a = mkstate_with_key(Some([0u8; 32].to_vec()));
+        let b = mkstate_with_key(Some([0u8; 32].to_vec()));
+        let principal = mkprincipal();
+        let cookie = encode_session(&a, &principal).expect("encode");
+        assert!(decode_session(&a, &cookie).is_ok());
+        assert!(decode_session(&b, &cookie).is_err(),
+            "a session cookie must not be portable between processes");
     }
 
     fn mkprincipal() -> AdminPrincipal {

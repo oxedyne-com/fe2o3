@@ -83,10 +83,16 @@ pub struct AppShellContext {
     pub app_cfg:            AppConfig,
     pub syntax:             SyntaxRef,
     pub ws:                 BTreeMap<Dat, Dat>,
-    /// Default database encryption key, derived from the wallet passphrase
-    /// at shell start-up. The `server` command uses this key to open one
-    /// Ozone instance per configured vhost.
-    pub db_enc_key:         Vec<u8>,
+    /// Default database encryption key -- the wallet master key. The
+    /// `server` command uses it to open one Ozone instance per
+    /// configured vhost.
+    ///
+    /// `None` until an admin supplies a passphrase. Steel no longer
+    /// demands one at start-up: the shell opens sealed, and a command
+    /// that genuinely needs the key calls [`Self::require_master_key`],
+    /// which prompts at that point. Starting the server while sealed is
+    /// legitimate and expected -- see `srv::admin::state`.
+    pub db_enc_key:         Option<Vec<u8>>,
     /// The wallet is shared via `Arc<RwLock<_>>` so that the admin
     /// dashboard handler (running inside the HTTPS server task) can
     /// hold a clone of the same wallet that the REPL mutates from
@@ -213,6 +219,7 @@ impl AppShellContext {
                 "ls"        => evals.push(res!(cmds::list_directory_contents(cmd))),
                 "pwd"       => evals.push(res!(cmds::print_working_directory())),
                 // Wallet
+                "unseal"    => evals.push(res!(self.unseal(&shell_cfg, Some(cmd)))),
                 "secrets"   => evals.push(res!(self.secrets(&shell_cfg, Some(cmd)))),
                 "wallet"    => evals.push(res!(self.manage_wallet(&shell_cfg, Some(cmd)))),
                 "admin"     => evals.push(res!(self.manage_admin(&shell_cfg, Some(cmd)))),
@@ -633,14 +640,74 @@ impl AppShellContext {
             "No recognised 'admin' subcommand argument supplied.")))
     }
 
+    /// `unseal`: unwrap the wallet master key with an admin passphrase.
+    ///
+    /// Optional. Steel serves perfectly well sealed; this is for the
+    /// operator who is already at the shell and would rather have the
+    /// databases open before the listeners bind than unseal from the
+    /// dashboard afterwards.
+    pub fn unseal(
+        &mut self,
+        _shell_cfg: &ShellConfig,
+        _cmd:       Option<&MsgCmd>,
+    )
+        -> Outcome<Evaluation>
+    {
+        if self.db_enc_key.is_some() {
+            return Ok(Evaluation::Output(fmt!(
+                "Already unsealed by admin '{}'.", self.unlocked_admin_name,
+            )));
+        }
+        res!(self.require_master_key());
+        Ok(Evaluation::Output(fmt!(
+            "Unsealed by admin '{}'. The databases will open when the server \
+            starts.", self.unlocked_admin_name,
+        )))
+    }
+
+    /// The wallet master key, prompting for a passphrase if the shell is
+    /// still sealed.
+    ///
+    /// Steel defers the wallet unlock: the shell starts without a
+    /// passphrase so that `server` can bind and serve with the databases
+    /// shut. A command that actually needs the key -- opening a database,
+    /// enrolling an admin -- calls this, and the prompt happens then,
+    /// rather than as a toll on every invocation.
+    ///
+    /// `STEEL_ADMIN_PASS` is honoured first, for scripted and test use.
+    /// On success the caller's identity and scopes are cached, so a run
+    /// of several privileged subcommands prompts once.
+    pub fn require_master_key(&mut self) -> Outcome<Vec<u8>> {
+        if let Some(key) = &self.db_enc_key {
+            return Ok(key.clone());
+        }
+        let pass = match std::env::var(app_const::ADMIN_PASS_ENV) {
+            Ok(s) => Secret::new(s),
+            Err(_) => res!(UserInput::ask_for_secret(
+                Some("Enter an admin passphrase to unseal: "),
+            )),
+        };
+        let unlocked = {
+            let w = lock_read!(self.wallet);
+            res!(w.unlock(pass.expose_secret().as_bytes()))
+        };
+        let key = unlocked.master_key.expose_secret().clone();
+        self.db_enc_key = Some(key.clone());
+        self.unlocked_admin_name = unlocked.admin_name.clone();
+        self.unlocked_admin_scopes = unlocked.admin_scopes.clone();
+        info!("Wallet unlocked by admin '{}'.", unlocked.admin_name);
+        Ok(key)
+    }
+
     /// `admin --passwd`: rotate the caller's own password in place.
     ///
-    /// The caller is whichever admin unlocked the wallet at start-up
-    /// (captured in `self.unlocked_admin_name`). Scopes and expiry
-    /// are preserved; only the wrap is replaced. The cached master
-    /// key from the startup unlock is reused, so the caller does not
-    /// need to re-type their current password.
+    /// The caller is whichever admin unlocked the wallet (captured in
+    /// `self.unlocked_admin_name`). Scopes and expiry are preserved;
+    /// only the wrap is replaced. The cached master key from the unlock
+    /// is reused, so the caller does not need to re-type their current
+    /// password.
     fn admin_passwd(&mut self) -> Outcome<Evaluation> {
+        let master = res!(self.require_master_key());
         let caller_name = self.unlocked_admin_name.clone();
         if caller_name.is_empty() {
             audit::append("(unknown)", "admin.passwd", "err",
@@ -652,7 +719,6 @@ impl AppShellContext {
                 Input, Invalid, Security));
         }
         let new_pass = res!(UserInput::create_pass(app_const::MAX_CREATE_PASS_ATTEMPTS));
-        let master = self.db_enc_key.clone();
         let wallet_path = Path::new("./").join(app_const::WALLET_NAME);
         {
             let mut w = lock_write!(self.wallet);
@@ -723,6 +789,10 @@ impl AppShellContext {
     )
         -> Outcome<Evaluation>
     {
+        // Unseal first: the caller's identity and scopes are exactly what
+        // the unlock establishes, so there is nothing to authorise until
+        // it has happened.
+        let master = res!(self.require_master_key());
         let caller_name = self.unlocked_admin_name.clone();
         if !self.unlocked_has_admin_scope() {
             audit::append(&caller_name, "admin.add", "err",
@@ -733,7 +803,6 @@ impl AppShellContext {
                 Input, Invalid, Security));
         }
         let new_pass = res!(UserInput::create_pass(app_const::MAX_CREATE_PASS_ATTEMPTS));
-        let master = self.db_enc_key.clone();
         let wallet_path = Path::new("./").join(app_const::WALLET_NAME);
         {
             let mut w = lock_write!(self.wallet);
@@ -764,6 +833,9 @@ impl AppShellContext {
     }
 
     fn admin_remove(&mut self, target_name: &str) -> Outcome<Evaluation> {
+        // As in `admin_add`: the unlock is what establishes who the caller
+        // is, so it has to precede the scope check.
+        res!(self.require_master_key());
         let caller_name = self.unlocked_admin_name.clone();
         if !self.unlocked_has_admin_scope() {
             audit::append(&caller_name, "admin.remove", "err",

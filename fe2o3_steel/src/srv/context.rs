@@ -151,6 +151,30 @@ pub enum Protocol<
 // │ SERVER CONTEXT                                                            │
 // └───────────────────────────────────────────────────────────────────────────┘
 
+/// Per-vhost database map, keyed by canonical hostname in lowercase.
+///
+/// Shared behind an `Arc<RwLock<_>>` so databases opened at unseal time --
+/// after the server is already accepting connections -- become visible to
+/// every connection task without rebuilding the context. Cloning a
+/// `ServerContext` therefore bumps a refcount rather than deep-copying the
+/// map, which it did when the map was owned.
+pub type VhostDbs<const UIDL: usize, UID, DB> =
+    Arc<RwLock<HashMap<String, (Arc<RwLock<DB>>, UID)>>>;
+
+/// What a vhost needs in order to have its database opened later.
+///
+/// Recorded at start-up, when the configuration is parsed, and consumed at
+/// unseal, when the master key finally exists. Deliberately free of the
+/// database type parameters so it can be held by non-generic state.
+#[derive(Clone, Debug)]
+pub struct VhostDbSpec {
+    /// Canonical (primary) hostname of the vhost, lowercased. The key this
+    /// vhost's database is filed under in [`VhostDbs`].
+    pub vhost_key:  String,
+    /// Directory the Ozone instance lives in.
+    pub db_dir:     std::path::PathBuf,
+}
+
 /// Shared state threaded through the server. Cheaply cloneable.
 pub struct ServerContext<
     const UIDL: usize,
@@ -168,7 +192,15 @@ pub struct ServerContext<
     /// (typical for pure-redirect vhosts) has no entry here. All alias
     /// hostnames resolve to the primary via `vhost_for()` first, then use
     /// the primary as the lookup key into this map.
-    pub vhost_dbs:  HashMap<String, (Arc<RwLock<DB>>, UID)>,
+    ///
+    /// Shared and interior-mutable because the map is populated *after*
+    /// the listeners bind. Steel starts sealed, with no master key and so
+    /// no open databases; when an admin unseals, the databases are opened
+    /// and inserted here, and every connection task already holding a
+    /// clone of this context sees them at once. Until then the map is
+    /// empty and `db_for_vhost` returns `None`, exactly as it does for a
+    /// vhost that has no database configured at all.
+    pub vhost_dbs:  VhostDbs<UIDL, UID, DB>,
     pub protocol:   Protocol<WH, WSH>,
     /// Optional shared traffic recorder. When present, every request
     /// that reaches the HTTPS handler emits a `RequestRecord` to this
@@ -181,8 +213,14 @@ pub struct ServerContext<
     /// by `AppWebHandler` so that the dashboard handler called from
     /// the HTTPS pipeline and the dashboard handler called from the
     /// localhost plain-HTTP listener (when configured) both see the
-    /// same wallet, sessions and traffic counters.
+    /// same wallet, sessions and traffic counters. It also carries the
+    /// seal, and so is what a request path consults to learn whether a
+    /// database can be expected to exist yet.
     pub admin_state: Option<Arc<AdminState>>,
+    /// Databases that are configured but not yet open. Populated at
+    /// start-up from the vhost configuration and consumed once, when an
+    /// admin unseals and the master key becomes available.
+    pub db_specs:   Vec<VhostDbSpec>,
     phantom3:       PhantomData<ENC>,
     phantom4:       PhantomData<KH>,
 }
@@ -206,6 +244,7 @@ impl<
             protocol:       self.protocol.clone(),
             traffic:        self.traffic.clone(),
             admin_state:    self.admin_state.clone(),
+            db_specs:       self.db_specs.clone(),
             phantom3:       PhantomData,
             phantom4:       PhantomData,
         }
@@ -226,12 +265,14 @@ impl<
     /// Create a new server context.
     ///
     /// `vhost_dbs` maps the canonical (primary) hostname of each vhost, in
-    /// lowercase, to its already-started Ozone database handle and the
-    /// user id under which database writes will be attributed.
+    /// lowercase, to its Ozone database handle and the user id under which
+    /// database writes will be attributed. It is empty while Steel is
+    /// sealed; `db_specs` says what belongs in it once an admin unseals.
     pub fn new(
         cfg:            ServerConfig,
         root:           NormPathBuf,
-        vhost_dbs:      HashMap<String, (Arc<RwLock<DB>>, UID)>,
+        vhost_dbs:      VhostDbs<UIDL, UID, DB>,
+        db_specs:       Vec<VhostDbSpec>,
         protocol:       Protocol<WH, WSH>,
         traffic:        Option<Arc<TrafficRecorder>>,
         admin_state:    Option<Arc<AdminState>>,
@@ -242,6 +283,7 @@ impl<
             cfg,
             root,
             vhost_dbs,
+            db_specs,
             protocol,
             traffic,
             admin_state,
@@ -252,15 +294,55 @@ impl<
 
     /// Resolve the Ozone database for a given vhost. `vhost_key` is the
     /// canonical (primary) hostname of the vhost in lowercase, as returned
-    /// by `VhostRuntime::primary_hostname()`. Returns `None` when the vhost
-    /// has no database configured.
+    /// by `VhostRuntime::primary_hostname()`.
+    ///
+    /// Returns `None` when the vhost has no database configured, and also
+    /// while Steel is sealed -- the databases are not open yet. Callers on
+    /// the request path distinguish the two through [`Self::is_sealed`]:
+    /// "this site has no database" is a 404, "the database is not unlocked
+    /// yet" is a 503.
     pub fn db_for_vhost(
         &self,
         vhost_key: &str,
     )
         -> Option<(Arc<RwLock<DB>>, UID)>
     {
-        self.vhost_dbs.get(&vhost_key.to_lowercase()).cloned()
+        let guard = match self.vhost_dbs.read() {
+            Ok(g) => g,
+            Err(_) => {
+                // This returns `Option`, not `Outcome`, so a poisoned lock
+                // cannot be propagated. Report it and answer as though the
+                // vhost has no database: the caller degrades to a 404 or a
+                // 503 rather than serving from a map nobody can read.
+                fault!("The vhost database map lock is poisoned; treating \
+                    '{}' as having no database.", vhost_key);
+                return None;
+            }
+        };
+        guard.get(&vhost_key.to_lowercase()).cloned()
+    }
+
+    /// Returns `true` while Steel is sealed: no wallet master key is
+    /// loaded, so the per-vhost databases have not been opened.
+    ///
+    /// A context with no admin state cannot be sealed -- there is nothing
+    /// holding a wallet to unseal against -- so this reports `false`.
+    pub fn is_sealed(&self) -> bool {
+        match &self.admin_state {
+            Some(state) => state.is_sealed(),
+            None => false,
+        }
+    }
+
+    /// Returns `true` when `vhost_key` is configured to have a database
+    /// that is not open yet, i.e. a DB-backed route on this vhost should
+    /// answer 503 rather than behave as though the site has no database.
+    pub fn db_pending_for_vhost(&self, vhost_key: &str) -> bool {
+        if !self.is_sealed() {
+            return false;
+        }
+        let key = vhost_key.to_lowercase();
+        self.db_specs.iter().any(|spec| spec.vhost_key == key)
     }
 
     /// Clone the context (explicit alias for situations where type inference

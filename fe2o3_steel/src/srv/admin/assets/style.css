@@ -721,6 +721,13 @@ table.steel-table td.status.chip-server   { color: var(--red); }
     font-style:     italic;
 }
 
+/* A state the operator must act on, but which is not an error: the
+   sealed banner on the login form is the case this exists for. */
+.notice.warn {
+    border-left-color: var(--warn, #d08a2c);
+    background:        var(--bg-inset);
+}
+
 /* ──────────────────────────────────────────────────────────────────────── */
 /* Ozone browser split view                                                 */
 /* ──────────────────────────────────────────────────────────────────────── */

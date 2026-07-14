@@ -129,7 +129,7 @@ pub async fn handle_get(
     debug!("{}: dashboard GET {}", id, path);
     match path {
         PATH_ASSET_OXANIUM => Ok(serve_font_oxanium()),
-        PATH_LOGIN => Ok(render_login_form(None)),
+        PATH_LOGIN => Ok(render_login_form(state.is_sealed(), None)),
         PATH_LOGOUT => Ok(handle_logout(state, headers)),
         PATH_ROOT => Ok(render_home(state, headers)),
         PATH_TRAFFIC => Ok(render_traffic(state, headers)),
@@ -250,7 +250,7 @@ fn handle_login(
                 "err",
                 "reason=missing_passphrase_field",
             );
-            return render_login_form(Some(
+            return render_login_form(state.is_sealed(), Some(
                 "Login form did not include a passphrase."));
         },
     };
@@ -265,7 +265,7 @@ fn handle_login(
                 "err",
                 "reason=verify_structural_error",
             );
-            return render_login_form(Some("Internal error during login."));
+            return render_login_form(state.is_sealed(), Some("Internal error during login."));
         },
     };
 
@@ -287,7 +287,7 @@ fn handle_login(
                 "reason=bad_credentials",
             );
             // Generic message: do not leak whether any admin exists.
-            render_login_form(Some("Invalid credentials."))
+            render_login_form(state.is_sealed(), Some("Invalid credentials."))
         },
         LoginOutcome::NoDashboardScope { name } => {
             audit::append(
@@ -298,7 +298,7 @@ fn handle_login(
             );
             warn!("dashboard login: admin '{}' authenticated but \
                 holds no dashboard scope.", name);
-            render_login_form(Some(
+            render_login_form(state.is_sealed(), Some(
                 "Authenticated, but this admin is not authorised \
                 to use the dashboard. Ask an operator to grant \
                 'dashboard.view' or 'dashboard.admin'."))
@@ -320,7 +320,7 @@ fn issue_session_cookie(
         Ok(s) => s,
         Err(e) => {
             error!(e, "dashboard login: failed to encode session cookie");
-            return render_login_form(Some(
+            return render_login_form(state.is_sealed(), Some(
                 "Login succeeded but session encoding failed."));
         },
     };
@@ -1404,6 +1404,19 @@ fn handle_admin_add(
         now.saturating_add(expires_in)
     };
 
+    // Enrolling wraps the master key under the new admin's password, so
+    // it cannot be done while sealed. In practice this is unreachable
+    // from the dashboard -- signing in *is* the unseal -- but the state
+    // is shared, and a caller reaching here without a key deserves a
+    // straight answer rather than a panic.
+    let master_key = match state.master_key() {
+        Ok(k) => k,
+        Err(_) => return AdminFlash {
+            ok:      false,
+            message: "Steel is sealed: no master key is loaded, so a new \
+                admin cannot be enrolled.".to_string(),
+        },
+    };
     let result = {
         let mut w = match state.wallet.write() {
             Ok(g) => g,
@@ -1413,7 +1426,7 @@ fn handle_admin_add(
             },
         };
         let enrol_res = w.enrol(
-            &state.master_key,
+            &master_key,
             new_name.clone(),
             new_pass.as_bytes(),
             new_scopes.clone(),
@@ -1937,7 +1950,15 @@ fn read_cookie(headers: &Arc<HeaderFields>, name: &str) -> Option<String> {
 /// rendered above the form -- the wording is deliberately generic
 /// to avoid leaking which axis (no admin / wrong passphrase / no
 /// dashboard scope) caused the failure.
-fn render_login_form(error_msg: Option<&str>) -> HttpMessage {
+///
+/// When Steel is sealed the form says so, and says what signing in
+/// will do. This is the cold-start path: the process is up and serving
+/// its static sites, but the databases are shut until an admin's
+/// passphrase unwraps the master key. The operator needs to know that
+/// this form is the thing standing between them and their databases --
+/// otherwise a sealed Steel looks like a healthy one that has
+/// mysteriously lost its data.
+fn render_login_form(sealed: bool, error_msg: Option<&str>) -> HttpMessage {
     let error_html = match error_msg {
         Some(msg) => fmt!(
             "<p class=\"notice error\">{}</p>",
@@ -1945,17 +1966,31 @@ fn render_login_form(error_msg: Option<&str>) -> HttpMessage {
         ),
         None => String::new(),
     };
+    let sealed_html = if sealed {
+        "<p class=\"notice warn\">\
+        <strong>Steel is sealed.</strong> The websites are serving, but the \
+        databases are shut: no master key is loaded. Signing in with an admin \
+        passphrase unseals them.\
+        </p>\n"
+    } else {
+        ""
+    };
     let body = fmt!(
-        "{error}\
+        "{sealed}{error}\
         <form class=\"steel-form\" method=\"POST\" action=\"/admin/login\">\n\
         <label for=\"passphrase\">Wallet passphrase</label>\n\
         <input type=\"password\" id=\"passphrase\" name=\"passphrase\" \
             autofocus required>\n\
-        <button type=\"submit\">Sign in</button>\n\
+        <button type=\"submit\">{action}</button>\n\
         </form>\n",
-        error = error_html,
+        sealed = sealed_html,
+        error  = error_html,
+        action = if sealed { "Sign in and unseal" } else { "Sign in" },
     );
-    let html = render_login_layout("Sign in", &body);
+    let html = render_login_layout(
+        if sealed { "Sign in and unseal" } else { "Sign in" },
+        &body,
+    );
     html_response(html)
 }
 

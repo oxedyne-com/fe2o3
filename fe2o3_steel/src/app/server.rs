@@ -17,6 +17,8 @@ use crate::{
             new_db,
             Protocol,
             ServerContext,
+            VhostDbSpec,
+            VhostDbs,
             VhostRuntime,
         },
         dev::{
@@ -172,24 +174,34 @@ impl AppShellContext {
         let acme_cfg = res!(server_cfg.get_acme());
 
         // ┌───────────────────────┐
-        // │ Start per-vhost dbs.  │
+        // │ Note per-vhost dbs.   │
         // └───────────────────────┘
 
         // One Ozone instance per vhost that has a `db_dir_rel` configured.
-        // Pure-redirect vhosts (no webroot, no database) simply skip this
-        // step. The resulting map is keyed by each vhost's canonical
-        // (primary) hostname in lowercase, matching what `db_for_vhost`
-        // looks up on request dispatch.
+        // Pure-redirect vhosts (no webroot, no database) simply have no
+        // entry. The map is keyed by each vhost's canonical (primary)
+        // hostname in lowercase, matching what `db_for_vhost` looks up on
+        // request dispatch.
+        //
+        // The databases are *not* opened here. Ozone is encrypted with the
+        // wallet master key, and Steel starts sealed -- no passphrase has
+        // been supplied, so no key exists yet. We record what to open and
+        // leave the map empty; `open_dbs_on_unseal` fills it in once an
+        // admin unseals, which may be seconds later (the operator typed a
+        // passphrase at the shell) or hours later (a cold restart, unsealed
+        // from the dashboard on someone's phone). Either way the listeners
+        // bind and the static vhosts serve in the meantime.
         let uid = id::Uid::new(0);
-        let mut vhost_dbs: HashMap<String, (Arc<RwLock<O3db<
+        let vhost_dbs: VhostDbs<{ id::UID_LEN }, id::Uid, O3db<
             { id::UID_LEN },
             id::Uid,
             EncryptionScheme,
             HashScheme,
             HashScheme,
             ChecksumScheme,
-        >>>, id::Uid)> = HashMap::new();
+        >> = Arc::new(RwLock::new(HashMap::new()));
 
+        let mut db_specs: Vec<VhostDbSpec> = Vec::new();
         for vh in &vhosts_cfg {
             let primary_lc = vh.primary_hostname().to_lowercase();
             let db_dir = match res!(vh.get_db_dir(&root_path)) {
@@ -200,22 +212,12 @@ impl AppShellContext {
                     continue;
                 }
             };
-            info!("Starting database for vhost '{}' at {:?}...",
+            info!("Vhost '{}' has a database at {:?}; it will be opened on unseal.",
                 primary_lc, db_dir);
-            let mut db = res!(new_db(&db_dir, &self.db_enc_key));
-            // Label is the vhost's canonical name so log output disambiguates
-            // multi-vhost deployments.
-            let label = fmt!("db_{}", primary_lc);
-            res!(db.start(&label));
-            res!(ok!(db.updated_api()).activate_gc(true));
-
-            std::thread::sleep(Duration::from_millis(200));
-
-            let (start, msgs) = res!(db.api().ping_bots(app_const::GET_DATA_WAIT));
-            info!("Vhost '{}': {} ping replies in {:?}.",
-                primary_lc, msgs.len(), start.elapsed());
-
-            vhost_dbs.insert(primary_lc, (Arc::new(RwLock::new(db)), uid));
+            db_specs.push(VhostDbSpec {
+                vhost_key:  primary_lc,
+                db_dir,
+            });
         }
 
         // ┌───────────────────────┐
@@ -409,7 +411,7 @@ impl AppShellContext {
         let admin_state = res!(AdminState::new(
             self.wallet.clone(),
             wallet_path_for_admin,
-            &self.db_enc_key,
+            self.db_enc_key.clone(),
             traffic.clone(),
             host_sampler.clone(),
             addr_guard.clone(),
@@ -419,10 +421,16 @@ impl AppShellContext {
         ));
         let admin_state = Arc::new(admin_state);
         info!("Admin dashboard runtime initialised \
-            (session key derived; traffic ring capacity {}; \
-            host sampler capacity {}).",
+            (traffic ring capacity {}; host sampler capacity {}).",
             traffic.capacity(),
             host_sampler.history_capacity());
+        if admin_state.is_sealed() {
+            warn!("Steel is SEALED: no wallet master key has been supplied, so \
+                the {} configured database(s) are shut. Static vhosts, redirects, \
+                proxy routes and certificate renewal all serve normally. Sign in \
+                at /admin with an admin passphrase to unseal.",
+                db_specs.len());
+        }
 
         for vh in &vhosts_cfg {
             let public_dir = match res!(vh.get_public_dir(&root_path)) {
@@ -519,13 +527,31 @@ impl AppShellContext {
         let server_context = ServerContext::new(
             server_cfg,
             root_path.clone(),
-            vhost_dbs,
+            vhost_dbs.clone(),
+            db_specs.clone(),
             protocol,
             Some(traffic.clone()),
             Some(admin_state.clone()),
         );
 
         let server = Server::new(server_context);
+
+        // The database opener waits for the master key and then opens
+        // every configured Ozone instance. Spawned on the runtime handle
+        // *before* `block_on` drives it, so it is already waiting on the
+        // unseal signal by the time the first request can arrive.
+        //
+        // When the operator has already supplied a passphrase (via the
+        // shell's `unseal`, or `STEEL_ADMIN_PASS`) the key is present and
+        // this returns without waiting -- so the familiar start-up path is
+        // unchanged apart from the databases now opening in parallel with
+        // the listeners binding, rather than before them.
+        rt.spawn(open_dbs_on_unseal(
+            admin_state.clone(),
+            vhost_dbs,
+            db_specs,
+            uid,
+        ));
 
         info!("Starting server...");
         for line in srv_const::SPLASH.lines() {
@@ -617,4 +643,91 @@ pub fn build_outbound_tls_client()
     // after the TLS handshake when no protocol is negotiated.
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
     Ok(Arc::new(config))
+}
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ DATABASE OPENER                                                           │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// Wait for an admin to unseal, then open every configured database and
+/// attach it to the live server context.
+///
+/// Steel serves while sealed, so this runs concurrently with the accept
+/// loop rather than before it. Until it completes, `db_for_vhost` returns
+/// `None` for every vhost and DB-backed routes answer 503.
+///
+/// Opening Ozone is blocking work -- it starts a bot fleet, sleeps, and
+/// pings -- so it runs on a blocking thread. On a single-core host, doing
+/// this on an async worker would starve the accept loop for the duration.
+///
+/// A failure to open leaves Steel sealed and serving. That is deliberate:
+/// a database that will not open is a bad reason to take the websites down
+/// with it, and the operator can retry by unsealing again.
+async fn open_dbs_on_unseal(
+    admin_state:    Arc<AdminState>,
+    vhost_dbs:      VhostDbs<{ id::UID_LEN }, id::Uid, O3db<
+                        { id::UID_LEN },
+                        id::Uid,
+                        EncryptionScheme,
+                        HashScheme,
+                        HashScheme,
+                        ChecksumScheme,
+                    >>,
+    db_specs:       Vec<VhostDbSpec>,
+    uid:            id::Uid,
+) {
+    if db_specs.is_empty() {
+        return;
+    }
+
+    let enc_key = match admin_state.await_master_key().await {
+        Ok(k) => k,
+        Err(e) => {
+            error!(e, "Waiting for the wallet master key. No database will \
+                be opened; Steel remains sealed.");
+            return;
+        }
+    };
+
+    let outcome = tokio::task::spawn_blocking(move || -> Outcome<usize> {
+        let mut opened = 0;
+        for spec in &db_specs {
+            info!("Starting database for vhost '{}' at {:?}...",
+                spec.vhost_key, spec.db_dir);
+            let mut db = res!(new_db(&spec.db_dir, &enc_key));
+            // Label is the vhost's canonical name so log output
+            // disambiguates multi-vhost deployments.
+            let label = fmt!("db_{}", spec.vhost_key);
+            res!(db.start(&label));
+            res!(ok!(db.updated_api()).activate_gc(true));
+
+            std::thread::sleep(Duration::from_millis(200));
+
+            let (start, msgs) = res!(db.api().ping_bots(app_const::GET_DATA_WAIT));
+            info!("Vhost '{}': {} ping replies in {:?}.",
+                spec.vhost_key, msgs.len(), start.elapsed());
+
+            // Publish as soon as each database is up, rather than
+            // batching at the end: a vhost whose database is ready has
+            // no reason to keep answering 503 while a later one starts.
+            let mut guard = lock_write!(vhost_dbs,
+                "Attaching the database for vhost '{}'.", spec.vhost_key);
+            guard.insert(
+                spec.vhost_key.clone(),
+                (Arc::new(RwLock::new(db)), uid),
+            );
+            opened += 1;
+        }
+        Ok(opened)
+    }).await;
+
+    match outcome {
+        Ok(Ok(n)) => info!("Unsealed: {} database(s) open and attached.", n),
+        Ok(Err(e)) => error!(e, "Opening the per-vhost databases after unseal."),
+        Err(e) => error!(err!(e,
+            "The database opener task failed to join.";
+            Thread, Panic),
+            "Opening the per-vhost databases after unseal."),
+    }
 }

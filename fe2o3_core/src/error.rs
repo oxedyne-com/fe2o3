@@ -151,6 +151,7 @@ pub enum ErrTag {
     Poisoned,
     Range,
     Read,
+    Sealed, // A key-protected resource is locked; it must be unsealed first.
     Security,
     Seek,
     Size,
