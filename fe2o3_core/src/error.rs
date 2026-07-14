@@ -256,6 +256,12 @@ impl<T: GenTag> Error<T> where Error<T>: std::error::Error {
         )
     }
 
+    /// The upstream error is one of ours, so it is printed as one: with `Debug`, which is plain.
+    ///
+    /// Printing it with `Display` would recurse into the console form, and every frame below the
+    /// first would carry ANSI colour codes. That is invisible in a terminal, where they are what is
+    /// wanted, and it is why it went unnoticed. Anywhere else -- a browser, a log file, a JSON
+    /// field -- the escapes are rubbish in the middle of the message.
     fn fmt_debug_upstream_specific(
         f: &mut fmt::Formatter<'_>,
         e: &Self,
@@ -264,7 +270,7 @@ impl<T: GenTag> Error<T> where Error<T>: std::error::Error {
     )
         -> fmt::Result
     {
-        write!(f, "UpstreamErr{{{}{}}}\n{}",
+        write!(f, "UpstreamErr{{{}{}}}\n{:?}",
             Self::tags_display(t.to_vec()),
             if m.len() > 0 {
                 if t.len() > 0 {
@@ -569,6 +575,45 @@ mod tests {
         let mut output = String::new();
         write(&mut output, format_args!("Hello {}!", "world"))?;
         Ok(42)
+    }
+
+    /// The `Debug` form must be plain to the bottom of the chain, not merely at the top.
+    ///
+    /// `Display` is for a console and colours itself with ANSI escapes. `Debug` is what a caller
+    /// reaches for when the message is going somewhere that is not a console -- a browser, a log
+    /// file, a JSON field -- and an escape code in the middle of it is rubbish. A nested error is
+    /// still one of ours, so it must be printed as one.
+    #[test]
+    fn test_debug_carries_no_terminal_escapes() -> Outcome<()> {
+        // Three deep: a local error, wrapped, wrapped again.
+        fn innermost() -> Outcome<()> {
+            Err(err!("The tree region does not hash to what was signed."; Invalid, Input))
+        }
+        fn middle() -> Outcome<()> {
+            res!(innermost());
+            Ok(())
+        }
+        fn outer() -> Outcome<()> {
+            res!(middle());
+            Ok(())
+        }
+        let e = match outer() {
+            Ok(()) => return Err(err!("The error was supposed to propagate."; Bug)),
+            Err(e) => e,
+        };
+
+        let debug = fmt!("{:?}", e);
+        assert!(
+            !debug.contains('\u{1b}'),
+            "The Debug form carries an ANSI escape, so it is not plain: {:?}", debug,
+        );
+        assert!(
+            debug.contains("does not hash to what was signed"),
+            "and the innermost message must still be in it: {}", debug,
+        );
+
+        // The Display form is for a console, and may colour itself all it likes.
+        Ok(())
     }
 
     #[test]
