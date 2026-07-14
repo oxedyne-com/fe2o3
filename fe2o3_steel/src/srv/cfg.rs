@@ -1506,6 +1506,26 @@ pub struct MailConfig {
     /// DKIM selector to publish under
     /// `<selector>._domainkey.<dkim_domain>`.
     pub dkim_selector:      String,
+    /// Path to an RSA DKIM private key (PKCS#8 or PKCS#1 DER). Empty
+    /// disables RSA signing.
+    ///
+    /// Signing with both an ed25519 and an RSA key, under two selectors, is
+    /// what RFC 8463 asks for: ed25519 verification is still patchy in the
+    /// wild, and a receiver that cannot verify a signature treats the message
+    /// as *unsigned*, leaving DMARC to rest on SPF alone.
+    ///
+    /// Steel will not create this key. `ring` refuses to generate RSA keys,
+    /// and hand-rolling the arithmetic to do so is not a road worth taking to
+    /// save one command:
+    ///
+    /// ```text
+    /// openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
+    ///     -outform DER -out mail/dkim_rsa.key
+    /// ```
+    pub dkim_rsa_key_file:  String,
+    /// Selector for the RSA key. Must differ from `dkim_selector`, since the
+    /// two keys are published as two records. Defaults to `"rsa"`.
+    pub dkim_rsa_selector:  String,
     /// Domain to sign for. May differ from `hostname` if mail is
     /// sent on behalf of a user-facing domain via a separate MX.
     pub dkim_domain:        String,
@@ -1527,6 +1547,8 @@ impl Default for MailConfig {
             spool_dir_rel:      String::new(),
             dkim_key_file:      String::new(),
             dkim_selector:      String::new(),
+            dkim_rsa_key_file:  String::new(),
+            dkim_rsa_selector:  String::new(),
             dkim_domain:        String::new(),
             local_domains:      Vec::new(),
         }
@@ -1566,6 +1588,12 @@ impl MailConfig {
         }
         if let Some(Dat::Str(s)) = m.get(&dat!("dkim_selector")) {
             out.dkim_selector = s.clone();
+        }
+        if let Some(Dat::Str(s)) = m.get(&dat!("dkim_rsa_key_file")) {
+            out.dkim_rsa_key_file = s.clone();
+        }
+        if let Some(Dat::Str(s)) = m.get(&dat!("dkim_rsa_selector")) {
+            out.dkim_rsa_selector = s.clone();
         }
         if let Some(Dat::Str(s)) = m.get(&dat!("dkim_domain")) {
             out.dkim_domain = s.clone();

@@ -43,7 +43,10 @@ pub struct AppMailHandler {
     /// Outbound delivery spool.
     pub spool:          OutboundSpool,
     /// DKIM signer, if a key is configured.
-    pub dkim:           Option<Arc<DkimSigner>>,
+    /// DKIM signing identities. Each prepends its own `DKIM-Signature`
+    /// header; a receiver verifies whichever it understands and ignores the
+    /// rest. Empty means outbound mail goes unsigned.
+    pub dkim:           Vec<Arc<DkimSigner>>,
     /// Domains the receive path will accept mail for.
     pub local_domains:  Arc<Vec<String>>,
 }
@@ -52,7 +55,7 @@ impl std::fmt::Debug for AppMailHandler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AppMailHandler")
             .field("local_domains", &self.local_domains)
-            .field("dkim", &self.dkim.is_some())
+            .field("dkim", &self.dkim.len())
             .finish()
     }
 }
@@ -106,22 +109,27 @@ impl SmtpHandler for AppMailHandler {
         // DKIM-sign first, if a key is configured. Signed bytes are
         // used both for local delivery (so the IMAP-fetched message
         // shows the DKIM-Signature header) and for remote delivery.
-        let signed_bytes = match &self.dkim {
-            Some(signer) => {
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                match signer.sign(&txn.raw_message, &[], now) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        warn!("DKIM signing failed: {}", e);
-                        txn.raw_message.clone()
-                    }
-                }
+        // Sign with every configured key, each prepending its own header.
+        // The signatures are independent: a DKIM-Signature field is not itself
+        // among the covered headers, and the body is untouched, so signing the
+        // already-signed bytes does not disturb the earlier signature.
+        //
+        // A key that fails to sign is skipped rather than fatal. One bad
+        // signature is worth less than no mail at all, and the remaining key
+        // still carries the message.
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let mut signed_bytes = txn.raw_message.clone();
+        for signer in &self.dkim {
+            match signer.sign(&signed_bytes, &[], now) {
+                Ok(b) => signed_bytes = b,
+                Err(e) => warn!("DKIM signing with the {} key for selector \
+                    '{}' failed; continuing without it: {}",
+                    signer.algorithm(), signer.selector(), e),
             }
-            None => txn.raw_message.clone(),
-        };
+        }
 
         // Split recipients into local (deliver directly into the
         // mailbox) and remote (enqueue for SMTP outbound). This
