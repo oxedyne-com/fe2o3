@@ -147,6 +147,62 @@ pub fn prev_grapheme(s: &str, from: usize) -> usize {
 	prev
 }
 
+/// Whether `at` is a grapheme cluster boundary, which is where a cursor is allowed to be. A cursor
+/// anywhere else sits inside a character, which is a corruption rather than a position.
+pub fn is_grapheme_boundary(s: &str, at: usize) -> bool {
+	if at == 0 || at == s.len() {
+		return true;
+	}
+	grapheme_boundaries(s).contains(&at)
+}
+
+/// Returns the byte offset of the grapheme cluster boundary at or after `from` that is nearest to
+/// it, snapping a cursor onto the character grid it must sit on.
+pub fn snap_grapheme(s: &str, at: usize) -> usize {
+	let at = at.min(s.len());
+	let mut best = 0;
+	for b in grapheme_boundaries(s) {
+		if b == at {
+			return at;
+		}
+		// The boundaries come in order, so the last one below `at` and the first one above it are
+		// the only two candidates, and the nearer of those two wins.
+		if b < at {
+			best = b;
+		} else {
+			return if at - best <= b - at { best } else { b };
+		}
+	}
+	best
+}
+
+/// Returns the byte offset of the word boundary after `from`, which is the string length once there
+/// is nothing left. This is where a cursor moving a word to the right should land.
+///
+/// A word boundary is UAX #29's, so an apostrophe does not break `don't` and a full stop does not
+/// break `3.14`.
+pub fn next_word(s: &str, from: usize) -> usize {
+	for b in word_boundaries(s) {
+		if b > from {
+			return b;
+		}
+	}
+	s.len()
+}
+
+/// Returns the byte offset of the word boundary before `from`, which is zero once there is nothing
+/// left. This is where a cursor moving a word to the left should land.
+pub fn prev_word(s: &str, from: usize) -> usize {
+	let mut prev = 0;
+	for b in word_boundaries(s) {
+		if b >= from {
+			break;
+		}
+		prev = b;
+	}
+	prev
+}
+
 /// Whether there is a grapheme cluster boundary before the character at `i`, by the rules of
 /// UAX #29, taken in order.
 fn grapheme_break(chs: &[Ch], i: usize) -> bool {
@@ -491,4 +547,53 @@ fn word_regional_run(chs: &[Ch], base: &[usize], p: usize) -> usize {
 		}
 	}
 	n
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use oxedyne_fe2o3_core::prelude::*;
+
+	/// A cursor moves by character, and a character is a grapheme cluster: the acute and the letter
+	/// it sits on are one press of an arrow key, not two.
+	#[test]
+	fn test_a_cursor_steps_over_a_combining_mark_00() -> Outcome<()> {
+		let s = "e\u{301}f";	// e + combining acute, then f.
+		assert_eq!(next_grapheme(s, 0), 3);
+		assert_eq!(prev_grapheme(s, 3), 0);
+		Ok(())
+	}
+
+	/// Word movement lands on UAX #29's boundaries, so an apostrophe does not split a word.
+	#[test]
+	fn test_word_movement_keeps_a_contraction_whole_01() -> Outcome<()> {
+		let s = "don't stop";
+		// The word runs to its end rather than breaking at the apostrophe.
+		assert_eq!(next_word(s, 0), 5);
+		assert_eq!(prev_word(s, 10), 6);
+		Ok(())
+	}
+
+	/// A cursor offset that fell inside a character is snapped back onto the character grid.
+	#[test]
+	fn test_an_offset_inside_a_character_snaps_to_a_boundary_02() -> Outcome<()> {
+		let s = "e\u{301}f";
+		assert!(!is_grapheme_boundary(s, 1));	// Inside the cluster.
+		assert!(is_grapheme_boundary(s, 0));
+		assert!(is_grapheme_boundary(s, 3));
+		assert_eq!(snap_grapheme(s, 1), 0);	// Nearer the start of the cluster.
+		assert_eq!(snap_grapheme(s, 2), 3);	// Nearer its end.
+		Ok(())
+	}
+
+	/// The ends of the string are boundaries, and movement stops at them rather than running off.
+	#[test]
+	fn test_movement_stops_at_the_ends_03() -> Outcome<()> {
+		let s = "ab";
+		assert_eq!(next_grapheme(s, 2), 2);
+		assert_eq!(prev_grapheme(s, 0), 0);
+		assert_eq!(next_word(s, 2), 2);
+		assert_eq!(prev_word(s, 0), 0);
+		Ok(())
+	}
 }
