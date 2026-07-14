@@ -1,10 +1,11 @@
-//! Limits applied while decoding BDAT from an untrusted source.
+//! Limits applied while decoding a daticle from an untrusted source, in either encoding.
 //!
-//! BDAT is self-delimiting but not self-limiting: a few bytes can describe a list nested a million
-//! deep, and a decoder that trusts them will recurse until its stack is gone.  A reader that did
-//! not create the bytes it is reading should therefore decode through
-//! [`Dat::from_bytes_limited`](crate::Dat::from_bytes_limited), which refuses input that is too
-//! long, and refuses to descend past a stated depth.
+//! Neither encoding is self-limiting: a few bytes can describe a list nested a million deep, and a
+//! decoder that trusts them will recurse until its stack is gone.  A reader that did not create the
+//! input it is reading should therefore decode through
+//! [`Dat::from_bytes_limited`](crate::Dat::from_bytes_limited) for BDAT, or
+//! [`Dat::decode_string_limited`](crate::Dat::decode_string_limited) for JDAT text, both of which
+//! refuse input that is too long, and refuse to descend past a stated depth.
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -38,6 +39,20 @@ impl DecodeLimits {
     /// Default nesting depth, deep enough for any document a human wrote and shallow enough to
     /// leave the stack intact.
     pub const DEFAULT_MAX_DEPTH: usize = 64;
+    /// Default nesting depth for the text decoder, measured rather than chosen.
+    ///
+    /// The text decoder costs 2.5 KiB of stack per level of nesting in an unoptimised build, and
+    /// 0.9 KiB in an optimised one, so a 2 MiB stack, which is what Rust gives a spawned thread,
+    /// is exhausted at depth 789 in the worst case.  A limit of 512 levels spends 1.25 MiB of that
+    /// stack, leaving 800 KiB spare in the worst case and four times the room in an optimised
+    /// build, so a document at the limit cannot abort the process, which is the only thing the
+    /// limit is for.  It is not an opinion about how deep a document should be: a caller wanting a
+    /// stricter bound passes one.
+    ///
+    /// The limit is generous because text depth runs well ahead of value depth.  Every bracket,
+    /// brace and kindicle costs a level, so a format layered on JDAT may spend several levels on
+    /// one of its own nodes, and a document nesting a hundred such nodes still decodes.
+    pub const DEFAULT_MAX_TEXT_DEPTH: usize = 512;
     /// Default buffer length, in bytes.
     pub const DEFAULT_MAX_BYTES: usize = 64 * 1024 * 1024;
 
@@ -79,6 +94,33 @@ impl DecodeLimits {
             return Err(err!(
                 "Decoding input of {} bytes at byte offset 0 exceeds the maximum of {} bytes.",
                 len, self.max_bytes;
+            Input, Invalid, Excessive, Size));
+        }
+        Ok(())
+    }
+
+    /// Returns the default limits for the text decoder, whose depth runs ahead of value depth.
+    pub fn text() -> Self {
+        Self {
+            max_depth:  Self::DEFAULT_MAX_TEXT_DEPTH,
+            max_bytes:  Self::DEFAULT_MAX_BYTES,
+        }
+    }
+
+    /// Rejects a value nested deeper than the maximum depth, naming the offset of its first
+    /// character.
+    pub fn check_char_depth(
+        &self,
+        depth:  usize,
+        pos:    usize,
+    )
+        -> Outcome<()>
+    {
+        if depth > self.max_depth {
+            return Err(err!(
+                "Decoding a value at nesting depth {} at character offset {} exceeds the maximum \
+                depth of {}.",
+                depth, pos, self.max_depth;
             Input, Invalid, Excessive, Size));
         }
         Ok(())

@@ -6,6 +6,7 @@
 //!
 use crate::{
     prelude::*,
+    bdat::limits::DecodeLimits,
     note::NoteConfig,
     int::{
         DatInt,
@@ -75,6 +76,8 @@ pub struct DecoderConfig<
     pub ukinds_opt:             Option<UsrKinds<M1, M2>>,
     pub omap_start:             u64,
     pub omap_delta:             u64,
+    /// Bounds on the length and the nesting depth of the text the decoder will accept.
+    pub limits:                 DecodeLimits,
 }
 
 impl<
@@ -98,8 +101,9 @@ impl<
             ukinds_opt:             None,
             omap_start:             Dat::OMAP_ORDER_START_DEFAULT,
             omap_delta:             Dat::OMAP_ORDER_DELTA_DEFAULT,
+            limits:                 DecodeLimits::text(),
         }
-    }   
+    }
 }
 
 impl<
@@ -122,6 +126,12 @@ impl<
             ukinds_opt,
             ..Default::default()
         }
+    }
+
+    /// Returns the configuration with the decoding limits replaced.
+    pub fn with_limits(mut self, limits: DecodeLimits) -> Self {
+        self.limits = limits;
+        self
     }
 }
 
@@ -220,11 +230,13 @@ pub enum StringEscape {
     LowSurrogate        { digits: u8, acc: u32, high: u16 },
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct DecoderState {
     // Data
     //pub cursor:             Cursor,
     pub kind_outer:         Kind,
+    /// Nesting depth of the value being decoded, the root value sitting at depth 1.
+    pub depth:              usize,
     // Switches
     pub explicit_kind:      bool, // The kind was defined explicitly.
     pub quote_protection:   Quote, // "a(' &{}" etc
@@ -234,6 +246,23 @@ pub struct DecoderState {
     pub atomic_capture:     bool,
     pub molecular_capture:  Option<MolecularCapture>,
     pub string_escape:      StringEscape, // Inside quoted strings only.
+}
+
+impl Default for DecoderState {
+    fn default() -> Self {
+        Self {
+            kind_outer:         Kind::default(),
+            depth:              1, // The state a decode starts from is the root value.
+            explicit_kind:      false,
+            quote_protection:   Quote::default(),
+            comment_capture:    None,
+            number_capture:     false,
+            kind_capture:       false,
+            atomic_capture:     false,
+            molecular_capture:  None,
+            string_escape:      StringEscape::default(),
+        }
+    }
 }
 
 impl fmt::Display for DecoderState {
@@ -250,9 +279,11 @@ impl fmt::Display for DecoderState {
 }
 
 impl DecoderState {
+    /// Returns the state for the next level down, one deeper than the present one.
     pub fn recurse(&self) -> Self {
         Self {
             kind_outer: self.kind_outer.clone(),
+            depth:      self.depth + 1,
             ..Default::default()
         }
     }
@@ -308,7 +339,31 @@ pub enum MolecularCapture {
     Map,
 }
 
+/// What the decoder does with the daticle returned by the level below.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Descent {
+    /// The level was opened by a kindicle, e.g. `(u8|42)`, and may complete this one.
+    Kindicle,
+    /// The level was opened by a `[` or a `{`, so it is one item of the molecule being gathered.
+    Molecule,
+}
+
+/// What reading one character asks of the level that character belongs to.
+///
+/// The descent is asked for rather than taken, so that the locals of the character-reading code are
+/// off the stack before the decoder enters the level below.
+#[derive(Debug)]
+enum Step {
+    /// Read the next character at this level.
+    Continue,
+    /// The daticle at this level is complete.
+    Done(Dat),
+    /// Open a level below this one, decoding it under the given state.
+    Descend(DecoderState, Descent),
+}
+
 impl MolecularCapture {
+    #[inline(never)]
     pub fn from_kind(kind: &Kind) -> Option<Self> {
         match kind {
             Kind::List      |
@@ -416,6 +471,7 @@ impl MolecularCapture {
         }
     }
 
+    #[inline(never)]
     pub fn same_kind(kind: &Kind) -> Kind {
         match kind {
             Kind::Tup2u8    |
@@ -551,6 +607,7 @@ impl Slurp {
         self.is_string || !self.s.is_empty()
     }
 
+    #[inline(never)]
     fn char_slurped(
         &mut self,
         (i, c):  (usize, char),
@@ -633,6 +690,7 @@ impl Kind {
 
     /// Reverse lookup from name to enum value that first tries the standard names then the given
     /// user names.
+    #[inline(never)]
     pub fn from_label<
         M1: MapMut<UsrKindCode, UsrKind> + Clone + fmt::Debug + Default,
         M2: MapMut<String, UsrKindId> + Clone + fmt::Debug + Default,
@@ -656,6 +714,7 @@ impl Kind {
         }
     }
 
+    #[inline(never)]
     fn decode_number(self, ns: NumberString) -> Outcome<Dat> {
         match self {
             Kind::U8 => {
@@ -894,6 +953,8 @@ impl Kind {
 
 impl Dat {
 
+    /// Decodes JDAT text under the default limits, which refuse text that is too long or nested too
+    /// deep.
     pub fn decode_string<
         S: Into<String>,
     >(
@@ -901,22 +962,34 @@ impl Dat {
     )
         -> Outcome<Self>
     {
-        // We want to take ownership of the String
-        let mut iter = s.into().chars().collect::<Vec<_>>().into_iter().enumerate();
-
         let dec_cfg = DecoderConfig::<
             BTreeMap<UsrKindCode, UsrKind>,
             BTreeMap<String, UsrKindId>,
         >::default();
 
-        Self::recursive_decode(
-            &mut iter,
-            &dec_cfg,
-            DecoderState::default(),
-            &RefCell::new(Cursor::default()),
-        )
+        Self::decode_string_with_config(s, &dec_cfg)
     }
 
+    /// Decodes JDAT text under the given limits, which refuse text that is too long or nested too
+    /// deep.
+    pub fn decode_string_limited<
+        S: Into<String>,
+    >(
+        s:      S,
+        lims:   &DecodeLimits,
+    )
+        -> Outcome<Self>
+    {
+        let dec_cfg = DecoderConfig::<
+            BTreeMap<UsrKindCode, UsrKind>,
+            BTreeMap<String, UsrKindId>,
+        >::default().with_limits(*lims);
+
+        Self::decode_string_with_config(s, &dec_cfg)
+    }
+
+    /// Decodes JDAT text using the given configuration, whose limits refuse text that is too long
+    /// or nested too deep.
     pub fn decode_string_with_config<
         S: Into<String>,
         M1: MapMut<UsrKindCode, UsrKind> + Clone + fmt::Debug + Default,
@@ -927,7 +1000,10 @@ impl Dat {
     )
         -> Outcome<Self>
     {
-        let mut iter = s.into().chars().collect::<Vec<_>>().into_iter().enumerate();
+        // We want to take ownership of the String.
+        let s = s.into();
+        res!(cfg.limits.check_len(s.len()));
+        let mut iter = s.chars().collect::<Vec<_>>().into_iter().enumerate();
         Self::recursive_decode(
             &mut iter,
             cfg,
@@ -936,21 +1012,25 @@ impl Dat {
         )
     }
 
-    /// A recursive text processor, that aims to interpret in a single pass, while
-    /// performing a second pass over numbers.
+    /// Decodes a value at one level of nesting, recursing at each `(k|`, `[` and `{`.
+    ///
+    /// The recursion is bounded by `cfg.limits.max_depth`, and the frame is kept small by moving
+    /// each of the fatter arms of the match below into its own `#[inline(never)]` function, so that
+    /// the cost of a level of nesting is the cost of the loop and its store, not the sum of every
+    /// arm's locals.  A hostile text nesting a list a million deep must return an error, not exhaust
+    /// the stack, since a stack overflow aborts the process and cannot be caught.
     ///
     /// * `kind_outer` - if not None, indicates that the upper recursion level is a
     /// `List` or `Map`/`OrdMap`
     ///
     /// BNF (does not include comments)
-    /// <atom> ::= "" | <string> | <number> | "(" <kind> ")" | "(" <kind> "|" ")" 
+    /// <atom> ::= "" | <string> | <number> | "(" <kind> ")" | "(" <kind> "|" ")"
     /// <daticle> ::= <atom> | <seq> | "(" <kind> "|" <daticle> ")"
     /// <kind> ::= EMPTY | TRUE | FALSE | U8 ...
     /// <seq> ::= <lbrac> <seq> "," <daticle> <rbrac> | <lbrac> <seq> "," <pair> <rbrac>
     /// <pair> ::= <daticle> ":" <daticle>
     /// <lbrac> ::= "[" | "{"
     /// <rbrac> ::= "]" | "}"
-    #[allow(unused_assignments)]
     pub fn recursive_decode<
         M1: MapMut<UsrKindCode, UsrKind> + Clone + fmt::Debug + Default,
         M2: MapMut<String, UsrKindId> + Clone + fmt::Debug + Default,
@@ -962,788 +1042,955 @@ impl Dat {
     )
         -> Outcome<Self>
     {
+        // Refuse the level before descending into it, naming the character we are looking at.
+        let pos = cursor.borrow().abs;
+        res!(cfg.limits.check_char_depth(state.depth, pos));
+
         // Switches.
-        let mut comment_required = false; 
+        let mut comment_required = false;
         // Store.
         let mut store = DecoderStore::new(cfg);
 
         state.molecular_capture = MolecularCapture::from_kind(&state.kind_outer);
 
         while let Some((i, c)) = iter.next() {
-            {
-                cursor.borrow_mut().advance(c, state.quote_protection != Quote::None);
-            }
-            // String escape handling (RFC 8259 §7). Only active
-            // inside a quoted string. Runs ahead of the outer
-            // `"` / `'` matching so that `\"` inside a string is
-            // interpreted as an escape, not a string terminator.
-            if state.quote_protection != Quote::None {
-                if res!(Self::handle_string_escape(c, &mut state, &mut store.slurp)) {
-                    continue;
-                }
-            }
-            if cfg.quote_protection {
-                match c {
-                    '"'  => {
-                        if state.quote_protection != Quote::Single {
-                            if state.quote_protection == Quote::Double {
-                                state.quote_protection = Quote::None;
-                                // Whenever quote protection is applied to some or all of a string,
-                                // the entire string is flagged as a STR kind.
-                                store.slurp.flag_as_string();
-                            } else {
-                                state.quote_protection = Quote::Double;
-                            }
-                            continue;
-                        }
-                    }
-                    '\''  => {
-                        if state.quote_protection != Quote::Double {
-                            if state.quote_protection == Quote::Single {
-                                state.quote_protection = Quote::None;
-                                // Whenever quote protection is applied to some or all of a string,
-                                // the entire string is flagged as a STR kind
-                                store.slurp.flag_as_string();
-                            } else {
-                                state.quote_protection = Quote::Single;
-                            }
-                            continue;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            if let Some(capturing) = &state.comment_capture {
-                // Finish comment capturing?
-                if (
-                    *capturing == CommentCapture::Type1
-                    && (c == cfg.comment1_end_char || c == '\n')
-                ) || (
-                    *capturing == CommentCapture::Type2
-                    && (c == cfg.comment2_end_char || c == '\n')
-                ) {
-                    state.comment_capture = None;
-                    store.comment = store.comment.trim_start().to_string();
-                    if c == '\n' {
-                        if let Some(molecular_capture) = &state.molecular_capture {
-                            let mut dat = match store.val_opt.take() {
-                                Some(dat) => dat, // store.val_opt is now None.
-                                None => {
-                                    let dat = if store.slurp.has_content() {
-                                        res!(Self::process_atom(&mut store.slurp, &Kind::Unknown))
-                                    } else {
-                                        Dat::Empty
-                                    };
-                                    dat
-                                }
-                            };
-                            dat = Dat::ABox(
-                                store.note_config.extract(),
-                                Box::new(dat),
-                                store.comment.extract(),
-                            );
-                            store.slurp = Slurp::new();
-                            match molecular_capture {
-                                MolecularCapture::Map => {
-                                    match store.key_opt.take() {
-                                        Some(key) => {
-                                            res!(Self::map_insert(
-                                                state.kind_outer == Kind::OrdMap,
-                                                &mut store,
-                                                (key, dat),
-                                            ));
-                                        }
-                                        None => {
-                                            res!(Self::map_insert(
-                                                state.kind_outer == Kind::OrdMap,
-                                                &mut store,
-                                                (dat, Dat::Empty),
-                                            ));
-                                        }
-                                    }
-                                }
-                                _ => {
-                                    store.list.push(dat);
-                                }
-                            }
-                        } else {
-                            return Err(err!(
-                                "Line comments currently only allowed in molecules \
-                                (lists and maps). ({})", cursor.borrow();
-                            String, Input, Decode, Invalid));
-                        }
-                    }
-                    continue;
-                }
-                if cfg.comment_capture {
-                    store.comment.push(c);
-                }
-                continue;
-            }
-            if cfg.comment_allowed && state.quote_protection == Quote::None {
-                // Start comment capturing?
-                if c == cfg.comment1_start_char {
-                    state.comment_capture = Some(CommentCapture::Type1);
-                    store.note_config = store.note_config.set_type1(true);
-                    continue;
-                }
-                if c == cfg.comment2_start_char {
-                    state.comment_capture = Some(CommentCapture::Type2);
-                    store.note_config = store.note_config.set_type1(false);
-                    continue;
-                }
-            }
-            match c {
-                // JSON RFC 8259 §2 allows U+0009 tab as whitespace, so
-                // JDAT accepts it alongside space / LF / CR. This lets
-                // JSON files using tab indentation round-trip through
-                // `Dat::decode_string` unchanged.
-                ' ' | '\t' | '\n' | '\r' => {
-                    res!(store.slurp.char_slurped((i, c), &mut state));
-                }
-                '(' => {
-                    if res!(store.slurp.char_slurped((i, c), &mut state)) {
-                        continue;
-                    }
-                    if state.kind_outer == Kind::Unknown ||
-                        state.kind_outer.case() == KindCase::MoleculeUnitary ||
-                        state.molecular_capture != None
-                    {
-                        // Begin capturing the daticle kind (or "kindicle").
-                        state.kind_capture = true;
-                        store.slurp = Slurp::new();
-                        continue;
-                    } else {
-                        // "(k1|(k2|v))"
-                        //      ^ already expect k1 kind, invalid unless preceded by [ or {
-                        match state.kind_outer.case() {
-                            KindCase::MoleculeSame => {
-                                return Err(err!(
-                                    "Elements of a vector of kind {:?} are not daticles, \
-                                    so no kind should be specified ({})",
-                                    state.kind_outer, cursor.borrow();
-                                String, Input, Decode, Invalid));
-                            }
-                            _ => {
-                                return Err(err!(
-                                    "The kind for the daticle has already been specified \
-                                    as {:?} ({})", state.kind_outer, cursor.borrow();
-                                String, Input, Decode, Invalid));
-                            }
-                        }
-                    }
-                }
-                '|' => {
-                    if state.quote_protection != Quote::None {
-                        store.slurp.push(c);
-                    } else if state.kind_capture {
-                        // We have captured a kind, triggering a new level of recursion.
-                        let kind_inner = res!(Kind::from_label(
-                            &store.slurp.clone_string().to_lowercase(),
-                            cfg.ukinds_opt.as_ref(),
-                        ));
-                        if kind_inner.case() == KindCase::AtomLogic {
-                            // An unused '|' separator is not valid, e.g. (true|), (EMPTY|)
-                            return Err(err!(
-                                "The separation character \"|\" for {:?} is superfluous {}.",
-                                kind_inner, cursor.borrow();
-                            String, Input, Decode, Invalid));
-                        }
-                        state.kind_capture = false;
-                        let mut new_state = state.recurse();
-                        new_state.kind_outer = kind_inner;
-                        new_state.explicit_kind = true;
-                        let dat = res!(Self::recursive_decode(
-                            &mut iter,
-                            &cfg,
-                            new_state,
-                            cursor,
-                        ));
-                        store.slurp = Slurp::new();
-                        let mut atomic = false;
-                        if state.kind_outer == Kind::Unknown {
-                            if state.molecular_capture == None {
-                                atomic = true;
-                            }
-                        } else if state.kind_outer.case().class() == KindClass::Atomic {
-                            atomic = true;
-                        }
-                        if atomic {
-                            return Ok(dat);
-                        }
-                        store.val_opt = Some(dat);
-                        // Otherwise, keep accumulating daticles...
-                    }
-                }
-                ')' => {
-                    // Deal with atoms (e.g. (FALSE)), which should only
-                    // ever be processed within a recursion level.
-                    if res!(store.slurp.char_slurped((i, c), &mut state)) {
-                        continue;
-                    }
-                    let kind_inner = if state.kind_capture {
-                        // We were capturing a kind, but the daticle finished before
-                        // | and no data was found.  This is valid for AtomLogic
-                        // cases and usr kinds.  Set the inner kind.
-                        let slurped = store.slurp.clone_string().to_lowercase();
-                        let kind_inner = if slurped.len() == 0 {
-                            // First take care of case "()".
-                            Kind::Empty
-                        } else {
-                            // (EMPTY), (TRUE), (FALSE), (NONE), (my_kind), etc. are valid.
-                            let k = res!(Kind::from_label(&slurped, cfg.ukinds_opt.as_ref()));
-                            if !k.is_dataless() {
-                                return Err(err!(
-                                    "Closing ')' without a kindicle should have triggered \
-                                    set MolecularCapture::ListMixed, but instead the state is \
-                                    {:?}. ({})", state.molecular_capture, cursor.borrow();
-                                String, Input, Decode, Invalid));
-                            }
-                            k
-                        };
-                        state.kind_capture = false;
-                        store.slurp.reset();
-                        kind_inner
-                    } else {
-                        Kind::Unknown
-                    };
-                    let mut kind = kind_inner.clone();
-                    if kind == Kind::Unknown {
-                        kind = state.kind_outer.clone();
-                    }
-
-                    if kind == Kind::Unknown {
-                        // For unknown kinds, first attempt to interpret as a tuple.
-                        // When no kindicle is specified, items accumulate directly in store.list
-                        
-                        match state.molecular_capture {
-                            Some(MolecularCapture::ListMixed) => {}
-                            _ => {
-                                return Err(err!(
-                                    "Closing ')' without a kindicle should have triggered \
-                                    set MolecularCapture::ListMixed, but instead the state is \
-                                    {:?}. ({})", state.molecular_capture, cursor.borrow();
-                                String, Input, Decode, Invalid));
-                            }
-                        }
-                        // Complete the capture of the store.list by converting it to the correct
-                        // type.
-                        if store.slurp.has_content() {
-                            store.val_opt = Some(res!(Self::process_atom(&mut store.slurp, &kind)));
-                        }
-                        // Copied from ']' branch: (TODO rationalise code)
-                        match store.val_opt {
-                            Some(dat) => {
-                                if store.comment.len() > 0 {
-                                    store.list.push(Dat::ABox(
-                                        store.note_config.clone(),
-                                        Box::new(dat),
-                                        store.comment,
-                                    ));
-                                } else {
-                                    store.list.push(dat);
-                                }
-                            }
-                            None => {
-                                if store.comment.len() > 0 {
-                                    store.list.push(Dat::ABox(
-                                        store.note_config.clone(),
-                                        Box::new(Dat::Empty),
-                                        store.comment,
-                                    ));
-                                }
-                            }
-                        }
-
-                        match store.list.len() {
-                            0 => return Ok(Dat::Empty),
-                            1 => return Ok(store.list[0].clone()),
-                            2 => return Ok(Dat::Tup2(Box::new(
-                                res!(store.list.try_into().map_err(|_| err!(
-                                    "While decoding a 2-item tuple ({})", cursor.borrow();
-                                String, Input, Decode, Invalid)))
-                            ))),
-                            3 => return Ok(Dat::Tup3(Box::new(
-                                res!(store.list.try_into().map_err(|_| err!(
-                                    "While decoding a 3-item tuple ({})", cursor.borrow();
-                                String, Input, Decode, Invalid)))
-                            ))),
-                            4 => return Ok(Dat::Tup4(Box::new(
-                                res!(store.list.try_into().map_err(|_| err!(
-                                    "While decoding a 4-item tuple ({})", cursor.borrow();
-                                String, Input, Decode, Invalid)))
-                            ))),
-                            5 => return Ok(Dat::Tup5(Box::new(
-                                res!(store.list.try_into().map_err(|_| err!(
-                                    "While decoding a 5-item tuple ({})", cursor.borrow();
-                                String, Input, Decode, Invalid)))
-                            ))),
-                            6 => return Ok(Dat::Tup6(Box::new(
-                                res!(store.list.try_into().map_err(|_| err!(
-                                    "While decoding a 6-item tuple ({})", cursor.borrow();
-                                String, Input, Decode, Invalid)))
-                            ))),
-                            7 => return Ok(Dat::Tup7(Box::new(
-                                res!(store.list.try_into().map_err(|_| err!(
-                                    "While decoding a 7-item tuple ({})", cursor.borrow();
-                                String, Input, Decode, Invalid)))
-                            ))),
-                            8 => return Ok(Dat::Tup8(Box::new(
-                                res!(store.list.try_into().map_err(|_| err!(
-                                    "While decoding a 8-item tuple ({})", cursor.borrow();
-                                String, Input, Decode, Invalid)))
-                            ))),
-                            9 => return Ok(Dat::Tup9(Box::new(
-                                res!(store.list.try_into().map_err(|_| err!(
-                                    "While decoding a 9-item tuple ({})", cursor.borrow();
-                                String, Input, Decode, Invalid)))
-                            ))),
-                            10 => return Ok(Dat::Tup10(Box::new(
-                                res!(store.list.try_into().map_err(|_| err!(
-                                    "While decoding a 10-item tuple ({})", cursor.borrow();
-                                String, Input, Decode, Invalid)))
-                            ))),
-                            n => return Err(err!(
-                                "Tuples are limited to 10 items, {} found ({}).",
-                                n, cursor.borrow();
-                            String, Input, Decode, Invalid)),
-                        }
-                    };
-
-                    match &kind {
-                        // No data is needed for these kinds, so create them here.
-                        Kind::Empty => store.val_opt = Some(Dat::Empty),
-                        Kind::True  => store.val_opt = Some(Dat::Bool(true)),
-                        Kind::False => store.val_opt = Some(Dat::Bool(false)),
-                        Kind::None  => store.val_opt = Some(Dat::Opt(Box::new(None))),
-                        Kind::Usr(ukid) if ukid.kind().is_none() =>
-                            store.val_opt = Some(Dat::Usr(ukid.clone(), None)),
-                        _ => (),
-                        // We don't necessarily return out of the method here because the
-                        // daticle might be part of a molecule, with the exception of the outer
-                        // kind being a Dat::ABox.
-                    }
-                    if let Kind::ABox(_) = state.kind_outer {
-                        match &store.val_opt {
-                            Some(dat) => {
-                                if store.comment.len() > 0 {
-                                    return Ok(Dat::ABox(
-                                        store.note_config.clone(),
-                                        Box::new(dat.clone()),
-                                        store.comment,
-                                    ));
-                                } else {
-                                    comment_required = true;
-                                }
-                            }
-                            None => {
-                                return Err(err!(
-                                    "Daticle missing in Dat::ABox ({})", cursor.borrow();
-                                String, Input, Decode, Invalid, Missing));
-                            }
-                        }
-                    }
-                    
-                    if !comment_required && (
-                        !kind.is_dataless() || state.molecular_capture == None
-                    ) {
-                        // Atom point cases were just dealt with, while molecular capture is
-                        // ongoing until a `]` or `}` is encountered, with the exception of a
-                        // base2x string for bytes.
-                        if state.molecular_capture == None || (
-                            state.molecular_capture == Some(MolecularCapture::Bytes)
-                            && store.slurp.is_string()
-                        ) {
-                            let d = match store.val_opt {
-                                Some(d) => d,
-                                None => res!(Self::process_atom(&mut store.slurp, &kind)),
-                            };
-                            return Ok(match state.kind_outer {
-                                // Unitary molecules
-                                Kind::Usr(ukid) => Dat::Usr(ukid, Some(Box::new(d))),
-                                Kind::Box(_)    => Dat::Box(Box::new(d)),
-                                Kind::Some(_)   => Dat::Opt(Box::new(Some(d))),
-                                _ => d,
-                            });
-                        } else {
-                            if let Some(d) = store.val_opt {
-                                return Ok(d);
-                            } else {
-                                return Err(err!(
-                                    "Failed to capture the daticle of kind {:?} ({})",
-                                    kind, cursor.borrow();
-                                String, Input, Decode, Invalid));
-                            }
-                        }
-                    }
-                }
-                '[' => {
-                    if res!(store.slurp.char_slurped((i, c), &mut state)) {
-                        continue;
-                    }
-                    if state.molecular_capture == None {
-                        if state.kind_outer == Kind::Unknown {
-                            state.molecular_capture = Some(MolecularCapture::ListMixed);
-                        } else {
-                            match MolecularCapture::from_kind(&state.kind_outer) {
-                                Some(MolecularCapture::Map) => return Err(err!(
-                                    "Expecting a store.map bracket '{{' but found a '[' ({})", cursor.borrow();
-                                String, Input, Decode, Invalid)),
-                                None => return Err(err!(
-                                    "Found a '[' which is incompatible with a {:?} ({})",
-                                    state.kind_outer, cursor.borrow();
-                                String, Input, Decode, Invalid)),
-                                _ => (),
-                            }
-                        }
-                    }
-                    let mut new_state = state.recurse();
-                    if !state.kind_outer.uses_list_brackets() {
-                        new_state.kind_outer = Kind::List;
-                    }
-                    store.val_opt = Some(res!(Self::recursive_decode(
+            match res!(Self::step(
+                (i, c),
+                cfg,
+                &mut state,
+                &mut store,
+                cursor,
+                &mut comment_required,
+            )) {
+                Step::Continue => (),
+                Step::Done(dat) => return Ok(dat),
+                Step::Descend(new_state, descent) => {
+                    // The one place the decoder descends a level.  Every other part of reading a
+                    // character has already returned by now, so the frame that carries the
+                    // recursion holds only the store, the state and this daticle.
+                    let dat = res!(Self::recursive_decode(
                         &mut iter,
-                        &cfg,
+                        cfg,
                         new_state,
                         cursor,
-                    )));
-                    store.slurp = Slurp::new();
-                }
-                ',' => {
-                    if res!(store.slurp.char_slurped((i, c), &mut state)) {
-                        continue;
-                    }
-                    res!(Self::comma_handler(
-                        cfg,
-                        &mut state,
-                        cursor,
-                        &mut store,
                     ));
-                }
-                ']' => {
-                    if res!(store.slurp.char_slurped((i, c), &mut state)) {
-                        continue;
-                    }
-                    // The remainder here is a terminal branch so no need to reset switches and store.
-                    match state.molecular_capture {
-                        Some(MolecularCapture::Bytes) => {
-                            if store.slurp.has_content() {
-                                let n = try_extract_dat!(
-                                    res!(Self::process_atom(&mut store.slurp, &Kind::U8)), U8,
-                                );
-                                store.byts.push(n);
-                            }
-                            return Self::decode_bytes(store.byts, &state.kind_outer);
-                        }
-                        Some(MolecularCapture::ListMixed) |
-                        Some(MolecularCapture::ListSame) => {
-                            // Complete the capture of the store.list by converting it to the correct
-                            // type.
-                            if store.slurp.has_content() {
-                                let kind = match state.molecular_capture {
-                                    Some(MolecularCapture::ListSame) =>
-                                        MolecularCapture::same_kind(&state.kind_outer),
-                                    _ => state.kind_outer.clone(),
-                                };
-                                store.val_opt = Some(res!(Self::process_atom(&mut store.slurp, &kind)));
-                            }
-                            match store.val_opt {
-                                Some(dat) => {
-                                    if store.comment.len() > 0 {
-                                        store.list.push(Dat::ABox(
-                                            store.note_config.clone(),
-                                            Box::new(dat),
-                                            store.comment,
-                                        ));
-                                    } else {
-                                        store.list.push(dat);
-                                    }
-                                }
-                                None => {
-                                    if store.comment.len() > 0 {
-                                        store.list.push(Dat::ABox(
-                                            store.note_config.clone(),
-                                            Box::new(Dat::Empty),
-                                            store.comment,
-                                        ));
-                                    }
-                                }
-                            }
-                            state.molecular_capture = None;
-                            match state.kind_outer {
-                                Kind::List | Kind::Unknown => return Ok(Dat::List(store.list)),
-
-                                Kind::Tup2  => string_decode_heterogenous_tuple! { Tup2,    2, store.list, state },
-                                Kind::Tup3  => string_decode_heterogenous_tuple! { Tup3,    3, store.list, state },
-                                Kind::Tup4  => string_decode_heterogenous_tuple! { Tup4,    4, store.list, state },
-                                Kind::Tup5  => string_decode_heterogenous_tuple! { Tup5,    5, store.list, state },
-                                Kind::Tup6  => string_decode_heterogenous_tuple! { Tup6,    6, store.list, state },
-                                Kind::Tup7  => string_decode_heterogenous_tuple! { Tup7,    7, store.list, state },
-                                Kind::Tup8  => string_decode_heterogenous_tuple! { Tup8,    8, store.list, state },
-                                Kind::Tup9  => string_decode_heterogenous_tuple! { Tup9,    9, store.list, state },
-                                Kind::Tup10 => string_decode_heterogenous_tuple! { Tup10,   10, store.list, state },
-
-                                Kind::Vek   => return Ok(Dat::Vek(res!(Vek::try_from(store.list)))),
-                                Kind::Tup2u8    => string_decode_int_tuple! { Tup2u8,   U8,  u8,  2, store.list, state },
-                                Kind::Tup3u8    => string_decode_int_tuple! { Tup3u8,   U8,  u8,  3, store.list, state },
-                                Kind::Tup4u8    => string_decode_int_tuple! { Tup4u8,   U8,  u8,  4, store.list, state },
-                                Kind::Tup5u8    => string_decode_int_tuple! { Tup5u8,   U8,  u8,  5, store.list, state },
-                                Kind::Tup6u8    => string_decode_int_tuple! { Tup6u8,   U8,  u8,  6, store.list, state },
-                                Kind::Tup7u8    => string_decode_int_tuple! { Tup7u8,   U8,  u8,  7, store.list, state },
-                                Kind::Tup8u8    => string_decode_int_tuple! { Tup8u8,   U8,  u8,  8, store.list, state },
-                                Kind::Tup9u8    => string_decode_int_tuple! { Tup9u8,   U8,  u8,  9, store.list, state },
-                                Kind::Tup10u8   => string_decode_int_tuple! { Tup10u8,  U8,  u8,  10, store.list, state },
-
-                                Kind::Tup2u16   => string_decode_int_tuple! { Tup2u16,  U16, u16, 2, store.list, state },
-                                Kind::Tup3u16   => string_decode_int_tuple! { Tup3u16,  U16, u16, 3, store.list, state },
-                                Kind::Tup4u16   => string_decode_int_tuple! { Tup4u16,  U16, u16, 4, store.list, state },
-                                Kind::Tup5u16   => string_decode_int_tuple! { Tup5u16,  U16, u16, 5, store.list, state },
-                                Kind::Tup6u16   => string_decode_int_tuple! { Tup6u16,  U16, u16, 6, store.list, state },
-                                Kind::Tup7u16   => string_decode_int_tuple! { Tup7u16,  U16, u16, 7, store.list, state },
-                                Kind::Tup8u16   => string_decode_int_tuple! { Tup8u16,  U16, u16, 8, store.list, state },
-                                Kind::Tup9u16   => string_decode_int_tuple! { Tup9u16,  U16, u16, 9, store.list, state },
-                                Kind::Tup10u16  => string_decode_int_tuple! { Tup10u16, U16, u16, 10, store.list, state },
-
-                                Kind::Tup2u32   => string_decode_int_tuple! { Tup2u32,  U32, u32, 2, store.list, state },
-                                Kind::Tup3u32   => string_decode_int_tuple! { Tup3u32,  U32, u32, 3, store.list, state },
-                                Kind::Tup4u32   => string_decode_int_tuple! { Tup4u32,  U32, u32, 4, store.list, state },
-                                Kind::Tup5u32   => string_decode_int_tuple! { Tup5u32,  U32, u32, 5, store.list, state },
-                                Kind::Tup6u32   => string_decode_int_tuple! { Tup6u32,  U32, u32, 6, store.list, state },
-                                Kind::Tup7u32   => string_decode_int_tuple! { Tup7u32,  U32, u32, 7, store.list, state },
-                                Kind::Tup8u32   => string_decode_int_tuple! { Tup8u32,  U32, u32, 8, store.list, state },
-                                Kind::Tup9u32   => string_decode_int_tuple! { Tup9u32,  U32, u32, 9, store.list, state },
-                                Kind::Tup10u32  => string_decode_int_tuple! { Tup10u32, U32, u32, 10, store.list, state },
-
-                                Kind::Tup2u64   => string_decode_int_tuple! { Tup2u64,  U64, u64, 2, store.list, state },
-                                Kind::Tup3u64   => string_decode_int_tuple! { Tup3u64,  U64, u64, 3, store.list, state },
-                                Kind::Tup4u64   => string_decode_int_tuple! { Tup4u64,  U64, u64, 4, store.list, state },
-                                Kind::Tup5u64   => string_decode_int_tuple! { Tup5u64,  U64, u64, 5, store.list, state },
-                                Kind::Tup6u64   => string_decode_int_tuple! { Tup6u64,  U64, u64, 6, store.list, state },
-                                Kind::Tup7u64   => string_decode_int_tuple! { Tup7u64,  U64, u64, 7, store.list, state },
-                                Kind::Tup8u64   => string_decode_int_tuple! { Tup8u64,  U64, u64, 8, store.list, state },
-                                Kind::Tup9u64   => string_decode_int_tuple! { Tup9u64,  U64, u64, 9, store.list, state },
-                                Kind::Tup10u64  => string_decode_int_tuple! { Tup10u64, U64, u64, 10, store.list, state },
-                                Kind::Tup2i8    => string_decode_int_tuple! { Tup2i8,   I8,  i8,  2, store.list, state },
-                                Kind::Tup3i8    => string_decode_int_tuple! { Tup3i8,   I8,  i8,  3, store.list, state },
-                                Kind::Tup4i8    => string_decode_int_tuple! { Tup4i8,   I8,  i8,  4, store.list, state },
-                                Kind::Tup5i8    => string_decode_int_tuple! { Tup5i8,   I8,  i8,  5, store.list, state },
-                                Kind::Tup6i8    => string_decode_int_tuple! { Tup6i8,   I8,  i8,  6, store.list, state },
-                                Kind::Tup7i8    => string_decode_int_tuple! { Tup7i8,   I8,  i8,  7, store.list, state },
-                                Kind::Tup8i8    => string_decode_int_tuple! { Tup8i8,   I8,  i8,  8, store.list, state },
-                                Kind::Tup9i8    => string_decode_int_tuple! { Tup9i8,   I8,  i8,  9, store.list, state },
-                                Kind::Tup10i8   => string_decode_int_tuple! { Tup10i8,  I8,  i8,  10, store.list, state },
-                                Kind::Tup2i16   => string_decode_int_tuple! { Tup2i16,  I16, i16, 2, store.list, state },
-                                Kind::Tup3i16   => string_decode_int_tuple! { Tup3i16,  I16, i16, 3, store.list, state },
-                                Kind::Tup4i16   => string_decode_int_tuple! { Tup4i16,  I16, i16, 4, store.list, state },
-                                Kind::Tup5i16   => string_decode_int_tuple! { Tup5i16,  I16, i16, 5, store.list, state },
-                                Kind::Tup6i16   => string_decode_int_tuple! { Tup6i16,  I16, i16, 6, store.list, state },
-                                Kind::Tup7i16   => string_decode_int_tuple! { Tup7i16,  I16, i16, 7, store.list, state },
-                                Kind::Tup8i16   => string_decode_int_tuple! { Tup8i16,  I16, i16, 8, store.list, state },
-                                Kind::Tup9i16   => string_decode_int_tuple! { Tup9i16,  I16, i16, 9, store.list, state },
-                                Kind::Tup10i16  => string_decode_int_tuple! { Tup10i16, I16, i16, 10, store.list, state },
-                                Kind::Tup2i32   => string_decode_int_tuple! { Tup2i32,  I32, i32, 2, store.list, state },
-                                Kind::Tup3i32   => string_decode_int_tuple! { Tup3i32,  I32, i32, 3, store.list, state },
-                                Kind::Tup4i32   => string_decode_int_tuple! { Tup4i32,  I32, i32, 4, store.list, state },
-                                Kind::Tup5i32   => string_decode_int_tuple! { Tup5i32,  I32, i32, 5, store.list, state },
-                                Kind::Tup6i32   => string_decode_int_tuple! { Tup6i32,  I32, i32, 6, store.list, state },
-                                Kind::Tup7i32   => string_decode_int_tuple! { Tup7i32,  I32, i32, 7, store.list, state },
-                                Kind::Tup8i32   => string_decode_int_tuple! { Tup8i32,  I32, i32, 8, store.list, state },
-                                Kind::Tup9i32   => string_decode_int_tuple! { Tup9i32,  I32, i32, 9, store.list, state },
-                                Kind::Tup10i32  => string_decode_int_tuple! { Tup10i32, I32, i32, 10, store.list, state },
-                                Kind::Tup2i64   => string_decode_int_tuple! { Tup2i64,  I64, i64, 2, store.list, state },
-                                Kind::Tup3i64   => string_decode_int_tuple! { Tup3i64,  I64, i64, 3, store.list, state },
-                                Kind::Tup4i64   => string_decode_int_tuple! { Tup4i64,  I64, i64, 4, store.list, state },
-                                Kind::Tup5i64   => string_decode_int_tuple! { Tup5i64,  I64, i64, 5, store.list, state },
-                                Kind::Tup6i64   => string_decode_int_tuple! { Tup6i64,  I64, i64, 6, store.list, state },
-                                Kind::Tup7i64   => string_decode_int_tuple! { Tup7i64,  I64, i64, 7, store.list, state },
-                                Kind::Tup8i64   => string_decode_int_tuple! { Tup8i64,  I64, i64, 8, store.list, state },
-                                Kind::Tup9i64   => string_decode_int_tuple! { Tup9i64,  I64, i64, 9, store.list, state },
-                                Kind::Tup10i64  => string_decode_int_tuple! { Tup10i64, I64, i64, 10, store.list, state },
-
-                                _ => {
-                                    return Err(err!(
-                                        "Unexpected outer kind {:?} case while concluding {:?}.",
-                                        state.kind_outer, state.molecular_capture;
-                                    Input, Mismatch, Unexpected, Bug));
-                                }
-                            }
-                        }
-                        _ => {
-                            return Err(err!(
-                                "List capture was not actived with a '[' character ({})",
-                                cursor.borrow();
-                            String, Input, Decode, Invalid));
-                        }
+                    store.slurp = Slurp::new();
+                    match descent {
+                        Descent::Kindicle if Self::kindicle_completes(&state) => return Ok(dat),
+                        _ => store.val_opt = Some(dat),
                     }
                 }
-                '{' => {
-                    if res!(store.slurp.char_slurped((i, c), &mut state)) {
-                        continue;
-                    }
-                    if state.molecular_capture == None {
-                        state.molecular_capture = Some(MolecularCapture::Map);
-                        // Also honour cfg.use_ordmaps at the top
-                        // level. Without this, a root `{...}`
-                        // decoded with `use_ordmaps = true` still
-                        // lands in a `Dat::Map` because kind_outer
-                        // was never set from Kind::Unknown -- only
-                        // the nested recurse branch below did it.
-                        if !state.explicit_kind && cfg.use_ordmaps {
-                            state.kind_outer = Kind::OrdMap;
-                        }
-                    } else {
-                        let mut new_state = state.recurse();
-                        if !state.explicit_kind {
-                            // We are free to define the kind of this store.map.
-                            match cfg.use_ordmaps {
-                                true => new_state.kind_outer = Kind::OrdMap,
-                                false => new_state.kind_outer = Kind::Map,
-                            }
-                        }
-                        store.val_opt = Some(res!(Self::recursive_decode(
-                            &mut iter,
-                            &cfg,
-                            new_state,
-                            cursor,
-                        )));
-                        store.slurp = Slurp::new();
-                    }
-                }
-                ':' => {
-                    if res!(store.slurp.char_slurped((i, c), &mut state)) {
-                        continue;
-                    }
-                    match state.molecular_capture {
-                        None => return Err(err!(
-                                "Map capture not active ({})", cursor.borrow();
-                        String, Input, Decode, Invalid)),
-                        Some(MolecularCapture::ListMixed)   |
-                        Some(MolecularCapture::ListSame)    |
-                        Some(MolecularCapture::Bytes)       => {
-                            return Err(err!(
-                                "List capture active, incompatible character ({})", cursor.borrow();
-                            String, Input, Decode, Invalid));
-                        }
-                        Some(MolecularCapture::Map) => {
-                            // We're expecting to have a daticle to add to the store.map.
-                            let mut dat = match store.val_opt.take() {
-                                Some(dat) => dat,
-                                None => {
-                                    if store.slurp.has_content() {
-                                        res!(Self::process_atom(&mut store.slurp, &Kind::Unknown))
-                                    } else {
-                                        Dat::Empty
-                                    }
-                                }
-                            };
-                            if store.comment.len() > 0 {
-                                dat = Dat::ABox(
-                                    store.note_config.extract(),
-                                    Box::new(dat),
-                                    store.comment.extract(),
-                                );
-                            }
-                            if store.key_opt == None {
-                                store.key_opt = Some(dat);
-                                store.val_opt = None;
-                            }
-                            store.slurp = Slurp::new();
-                        }
-                    }
-                }
-                '}' => {
-                    if res!(store.slurp.char_slurped((i, c), &mut state)) {
-                        continue;
-                    }
-                    // The remainder here is a terminal branch so no need to reset switches and store.
-                    if state.molecular_capture == Some(MolecularCapture::Map) {
-                        if store.slurp.has_content() {
-                            store.val_opt =
-                                Some(res!(Self::process_atom(&mut store.slurp, &state.kind_outer)));
-                        }
-                        match (store.key_opt.take(), store.val_opt.take()) {
-                            (Some(key), Some(mut dat)) => {
-                                // The key has already been abox-wrapped if necessary.
-                                if store.comment.len() > 0 {
-                                    dat = Dat::ABox(
-                                        store.note_config.extract(),
-                                        Box::new(dat),
-                                        store.comment.extract(),
-                                    );
-                                }
-                                res!(Self::map_insert(
-                                    state.kind_outer == Kind::OrdMap,
-                                    &mut store,
-                                    (key, dat),
-                                ));
-                            }
-                            (None, Some(dat)) => {
-                                return Err(err!(
-                                    "Unpaired value {:?} at end of store.map {} ({})",
-                                    dat, match cfg.use_ordmaps {
-                                        true => fmt!("{:?}", store.ordmap),
-                                        false => fmt!("{:?}", store.map),
-                                    }, cursor.borrow();
-                                String, Input, Decode, Invalid, Missing));
-                            }
-                            (Some(key), None) => {
-                                if store.comment.len() > 0 {
-                                    let dat = Dat::ABox(
-                                        store.note_config.extract(),
-                                        Box::new(Dat::Empty),
-                                        store.comment.extract(),
-                                    );
-                                    res!(Self::map_insert(
-                                        state.kind_outer == Kind::OrdMap,
-                                        &mut store,
-                                        (key, dat),
-                                    ));
-                                } else {
-                                    return Err(err!(
-                                        "Unpaired key {:?} at end of store.map {} ({})",
-                                        key, match cfg.use_ordmaps {
-                                            true => fmt!("{:?}", store.ordmap),
-                                            false => fmt!("{:?}", store.map),
-                                        }, cursor.borrow();
-                                    String, Input, Decode, Invalid, Missing));
-                                }
-                            }
-                            (None, None) => {}
-                        }
-                        return Ok(if state.kind_outer == Kind::OrdMap {
-                            Dat::OrdMap(store.ordmap)
-                        } else {
-                            Dat::Map(store.map)
-                        });
-                    }
-                    return Err(err!(
-                        "Map capture was not actived with a '{{' character ({})", cursor.borrow();
-                    String, Input, Decode, Invalid));
-                }
-                _ => {
-                    if res!(store.slurp.char_slurped((i, c), &mut state)) {
-                        continue;
-                    }
-                    store.slurp.push(c);
-                }
-            } // match
+            }
         } // while loop
-        if let Some(dat) = store.val_opt {
+        Self::finish(&state, &mut store)
+    }
+
+    /// Whether a kindicled daticle, e.g. the `42` of `(u8|42)`, is the whole of this level.
+    #[inline(never)]
+    fn kindicle_completes(state: &DecoderState) -> bool {
+        if state.kind_outer == Kind::Unknown {
+            state.molecular_capture == None
+        } else {
+            state.kind_outer.case().class() == KindClass::Atomic
+        }
+    }
+
+    /// Reads one character, returning what the level it belongs to should do next.
+    ///
+    /// Every arm of the match lives here rather than in [`Self::recursive_decode`], and the descent
+    /// is handed back to the caller rather than taken here, so that none of this function's locals
+    /// are on the stack while the decoder is inside a nested level.  That is what makes the cost of
+    /// a level of nesting a fixed few hundred bytes.
+    #[inline(never)]
+    fn step<
+        M1: MapMut<UsrKindCode, UsrKind> + Clone + fmt::Debug + Default,
+        M2: MapMut<String, UsrKindId> + Clone + fmt::Debug + Default,
+    >(
+        (i, c):             (usize, char),
+        cfg:                &DecoderConfig<M1, M2>,
+        state:              &mut DecoderState,
+        store:              &mut DecoderStore,
+        cursor:             &RefCell<Cursor>,
+        comment_required:   &mut bool,
+    )
+        -> Outcome<Step>
+    {
+        {
+            cursor.borrow_mut().advance(c, state.quote_protection != Quote::None);
+        }
+        // String escape handling (RFC 8259 §7). Only active
+        // inside a quoted string. Runs ahead of the outer
+        // `"` / `'` matching so that `\"` inside a string is
+        // interpreted as an escape, not a string terminator.
+        if state.quote_protection != Quote::None {
+            if res!(Self::handle_string_escape(c, state, &mut store.slurp)) {
+                return Ok(Step::Continue);
+            }
+        }
+        if cfg.quote_protection {
+            match c {
+                '"'  => {
+                    if state.quote_protection != Quote::Single {
+                        if state.quote_protection == Quote::Double {
+                            state.quote_protection = Quote::None;
+                            // Whenever quote protection is applied to some or all of a string,
+                            // the entire string is flagged as a STR kind.
+                            store.slurp.flag_as_string();
+                        } else {
+                            state.quote_protection = Quote::Double;
+                        }
+                        return Ok(Step::Continue);
+                    }
+                }
+                '\''  => {
+                    if state.quote_protection != Quote::Double {
+                        if state.quote_protection == Quote::Single {
+                            state.quote_protection = Quote::None;
+                            // Whenever quote protection is applied to some or all of a string,
+                            // the entire string is flagged as a STR kind
+                            store.slurp.flag_as_string();
+                        } else {
+                            state.quote_protection = Quote::Single;
+                        }
+                        return Ok(Step::Continue);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if state.comment_capture.is_some() {
+            res!(Self::capture_comment(c, cfg, state, store, cursor));
+            return Ok(Step::Continue);
+        }
+        if cfg.comment_allowed && state.quote_protection == Quote::None {
+            // Start comment capturing?
+            if c == cfg.comment1_start_char {
+                state.comment_capture = Some(CommentCapture::Type1);
+                store.note_config = store.note_config.extract().set_type1(true);
+                return Ok(Step::Continue);
+            }
+            if c == cfg.comment2_start_char {
+                state.comment_capture = Some(CommentCapture::Type2);
+                store.note_config = store.note_config.extract().set_type1(false);
+                return Ok(Step::Continue);
+            }
+        }
+
+        // Every character is first offered to the slurp, which takes it while a number, a quoted
+        // string or a kind label is being gathered.  A single call site here, rather than the same
+        // call at the head of a dozen match arms, keeps the frame small.  The separator '|' is the
+        // exception, since a kind capture must see it and the slurp would refuse it.
+        let whitespace = matches!(c, ' ' | '\t' | '\n' | '\r');
+        let slurped = if c == '|' {
+            if state.quote_protection != Quote::None {
+                store.slurp.push(c);
+                true
+            } else {
+                false
+            }
+        } else {
+            res!(store.slurp.char_slurped((i, c), state))
+        };
+        // Whitespace is offered to the slurp but never ends the character's handling, since a
+        // space may also close an atom.
+        if slurped && !whitespace {
+            return Ok(Step::Continue);
+        }
+
+        match c {
+            // JSON RFC 8259 §2 allows U+0009 tab as whitespace, so
+            // JDAT accepts it alongside space / LF / CR. This lets
+            // JSON files using tab indentation round-trip through
+            // `Dat::decode_string` unchanged.
+            ' ' | '\t' | '\n' | '\r' => (), // The slurp has taken it, if it wanted it.
+            '(' => {
+                if state.kind_outer == Kind::Unknown ||
+                    state.kind_outer.case() == KindCase::MoleculeUnitary ||
+                    state.molecular_capture != None
+                {
+                    // Begin capturing the daticle kind (or "kindicle").
+                    state.kind_capture = true;
+                    store.slurp = Slurp::new();
+                } else {
+                    // "(k1|(k2|v))"
+                    //      ^ already expect k1 kind, invalid unless preceded by [ or {
+                    return Err(Self::open_paren_err(state, cursor));
+                }
+            }
+            '|' => {
+                if state.kind_capture {
+                    // We have captured a kind, triggering a new level of recursion.
+                    let kind_inner = res!(Kind::from_label(
+                        &store.slurp.clone_string().to_lowercase(),
+                        cfg.ukinds_opt.as_ref(),
+                    ));
+                    if kind_inner.case() == KindCase::AtomLogic {
+                        // An unused '|' separator is not valid, e.g. (true|), (EMPTY|)
+                        return Err(Self::superfluous_bar_err(&kind_inner, cursor));
+                    }
+                    state.kind_capture = false;
+                    let mut new_state = state.recurse();
+                    new_state.kind_outer = kind_inner;
+                    new_state.explicit_kind = true;
+                    return Ok(Step::Descend(new_state, Descent::Kindicle));
+                }
+            }
+            ')' => {
+                // Deal with atoms (e.g. (FALSE)), which should only
+                // ever be processed within a recursion level.
+                match res!(Self::close_paren(cfg, state, store, cursor, comment_required)) {
+                    Some(dat) => return Ok(Step::Done(dat)),
+                    None => (), // The daticle may yet be one item of a molecule.
+                }
+            }
+            '[' => {
+                if state.molecular_capture == None {
+                    if state.kind_outer == Kind::Unknown {
+                        state.molecular_capture = Some(MolecularCapture::ListMixed);
+                    } else {
+                        match MolecularCapture::from_kind(&state.kind_outer) {
+                            Some(MolecularCapture::Map) |
+                            None => return Err(Self::open_bracket_err(state, cursor)),
+                            _ => (),
+                        }
+                    }
+                }
+                let mut new_state = state.recurse();
+                if !state.kind_outer.uses_list_brackets() {
+                    new_state.kind_outer = Kind::List;
+                }
+                return Ok(Step::Descend(new_state, Descent::Molecule));
+            }
+            ',' => {
+                res!(Self::comma_handler(cfg, state, cursor, store));
+            }
+            ']' => {
+                // A terminal branch, so the state and the store are given away.
+                return Ok(Step::Done(res!(Self::close_bracket(
+                    state.extract(),
+                    store.extract(),
+                    cursor,
+                ))));
+            }
+            '{' => {
+                if state.molecular_capture == None {
+                    state.molecular_capture = Some(MolecularCapture::Map);
+                    // Also honour cfg.use_ordmaps at the top
+                    // level. Without this, a root `{...}`
+                    // decoded with `use_ordmaps = true` still
+                    // lands in a `Dat::Map` because kind_outer
+                    // was never set from Kind::Unknown -- only
+                    // the nested recurse branch below did it.
+                    if !state.explicit_kind && cfg.use_ordmaps {
+                        state.kind_outer = Kind::OrdMap;
+                    }
+                } else {
+                    let mut new_state = state.recurse();
+                    if !state.explicit_kind {
+                        // We are free to define the kind of this store.map.
+                        match cfg.use_ordmaps {
+                            true => new_state.kind_outer = Kind::OrdMap,
+                            false => new_state.kind_outer = Kind::Map,
+                        }
+                    }
+                    return Ok(Step::Descend(new_state, Descent::Molecule));
+                }
+            }
+            ':' => {
+                res!(Self::colon(state, store, cursor));
+            }
+            '}' => {
+                // A terminal branch, so the store is given away.
+                return Ok(Step::Done(res!(Self::close_brace(
+                    cfg,
+                    state,
+                    store.extract(),
+                    cursor,
+                ))));
+            }
+            _ => {
+                store.slurp.push(c);
+            }
+        } // match
+        Ok(Step::Continue)
+    }
+
+    /// Concludes a level whose text ran out before a closing bracket did, which is legal only for
+    /// an atom.
+    #[inline(never)]
+    fn finish(
+        state:  &DecoderState,
+        store:  &mut DecoderStore,
+    )
+        -> Outcome<Self>
+    {
+        if let Some(dat) = store.val_opt.take() {
             return Ok(dat);
         }
         match state.molecular_capture {
-            None => return Self::process_atom(&mut store.slurp, &state.kind_outer),
+            None => Self::process_atom(&mut store.slurp, &state.kind_outer),
             Some(MolecularCapture::ListMixed)  |
             Some(MolecularCapture::ListSame)   |
             Some(MolecularCapture::Bytes) =>
-                return Err(err!("Expected closure of a store.list with ']'";
+                Err(err!("Expected closure of a store.list with ']'";
                     String, Input, Decode, Missing)),
             Some(MolecularCapture::Map) =>
-                return Err(err!("Expected closure of a store.map with '}}'";
+                Err(err!("Expected closure of a store.map with '}}'";
                     String, Input, Decode, Missing)),
         }
     }
 
+    /// Reports a `(` which repeats a kind that has already been given.
+    #[inline(never)]
+    fn open_paren_err(
+        state:  &DecoderState,
+        cursor: &RefCell<Cursor>,
+    )
+        -> Error<ErrTag>
+    {
+        match state.kind_outer.case() {
+            KindCase::MoleculeSame => err!(
+                "Elements of a vector of kind {:?} are not daticles, \
+                so no kind should be specified ({})",
+                state.kind_outer, cursor.borrow();
+            String, Input, Decode, Invalid),
+            _ => err!(
+                "The kind for the daticle has already been specified \
+                as {:?} ({})", state.kind_outer, cursor.borrow();
+            String, Input, Decode, Invalid),
+        }
+    }
+
+    /// Reports a `|` separating a kind that carries no data, e.g. `(true|)`.
+    #[inline(never)]
+    fn superfluous_bar_err(
+        kind_inner: &Kind,
+        cursor:     &RefCell<Cursor>,
+    )
+        -> Error<ErrTag>
+    {
+        err!(
+            "The separation character \"|\" for {:?} is superfluous {}.",
+            kind_inner, cursor.borrow();
+        String, Input, Decode, Invalid)
+    }
+
+    /// Reports a `[` opening a molecule that the outer kind cannot hold.
+    #[inline(never)]
+    fn open_bracket_err(
+        state:  &DecoderState,
+        cursor: &RefCell<Cursor>,
+    )
+        -> Error<ErrTag>
+    {
+        match MolecularCapture::from_kind(&state.kind_outer) {
+            Some(MolecularCapture::Map) => err!(
+                "Expecting a store.map bracket '{{' but found a '[' ({})", cursor.borrow();
+            String, Input, Decode, Invalid),
+            _ => err!(
+                "Found a '[' which is incompatible with a {:?} ({})",
+                state.kind_outer, cursor.borrow();
+            String, Input, Decode, Invalid),
+        }
+    }
+
+    /// Consumes a character while a comment is being captured, closing the comment at the end
+    /// character or the end of the line.
+    #[inline(never)]
+    fn capture_comment<
+        M1: MapMut<UsrKindCode, UsrKind> + Clone + fmt::Debug + Default,
+        M2: MapMut<String, UsrKindId> + Clone + fmt::Debug + Default,
+    >(
+        c:      char,
+        cfg:    &DecoderConfig<M1, M2>,
+        state:  &mut DecoderState,
+        store:  &mut DecoderStore,
+        cursor: &RefCell<Cursor>,
+    )
+        -> Outcome<()>
+    {
+        let capturing = match &state.comment_capture {
+            Some(capturing) => capturing.clone(),
+            None => return Ok(()),
+        };
+        // Finish comment capturing?
+        if (
+            capturing == CommentCapture::Type1
+            && (c == cfg.comment1_end_char || c == '\n')
+        ) || (
+            capturing == CommentCapture::Type2
+            && (c == cfg.comment2_end_char || c == '\n')
+        ) {
+            state.comment_capture = None;
+            store.comment = store.comment.trim_start().to_string();
+            if c == '\n' {
+                if let Some(molecular_capture) = &state.molecular_capture {
+                    let mut dat = match store.val_opt.take() {
+                        Some(dat) => dat, // store.val_opt is now None.
+                        None => {
+                            let dat = if store.slurp.has_content() {
+                                res!(Self::process_atom(&mut store.slurp, &Kind::Unknown))
+                            } else {
+                                Dat::Empty
+                            };
+                            dat
+                        }
+                    };
+                    dat = Dat::ABox(
+                        store.note_config.extract(),
+                        Box::new(dat),
+                        store.comment.extract(),
+                    );
+                    store.slurp = Slurp::new();
+                    match molecular_capture {
+                        MolecularCapture::Map => {
+                            match store.key_opt.take() {
+                                Some(key) => {
+                                    res!(Self::map_insert(
+                                        state.kind_outer == Kind::OrdMap,
+                                        store,
+                                        (key, dat),
+                                    ));
+                                }
+                                None => {
+                                    res!(Self::map_insert(
+                                        state.kind_outer == Kind::OrdMap,
+                                        store,
+                                        (dat, Dat::Empty),
+                                    ));
+                                }
+                            }
+                        }
+                        _ => {
+                            store.list.push(dat);
+                        }
+                    }
+                } else {
+                    return Err(err!(
+                        "Line comments currently only allowed in molecules \
+                        (lists and maps). ({})", cursor.borrow();
+                    String, Input, Decode, Invalid));
+                }
+            }
+            return Ok(());
+        }
+        if cfg.comment_capture {
+            store.comment.push(c);
+        }
+        Ok(())
+    }
+
+    /// Concludes a `)`, returning the completed daticle, or `None` if the level continues because
+    /// the daticle may yet be one item of a molecule.
+    #[inline(never)]
+    fn close_paren<
+        M1: MapMut<UsrKindCode, UsrKind> + Clone + fmt::Debug + Default,
+        M2: MapMut<String, UsrKindId> + Clone + fmt::Debug + Default,
+    >(
+        cfg:                &DecoderConfig<M1, M2>,
+        state:              &mut DecoderState,
+        store:              &mut DecoderStore,
+        cursor:             &RefCell<Cursor>,
+        comment_required:   &mut bool,
+    )
+        -> Outcome<Option<Self>>
+    {
+        let kind_inner = if state.kind_capture {
+            // We were capturing a kind, but the daticle finished before
+            // | and no data was found.  This is valid for AtomLogic
+            // cases and usr kinds.  Set the inner kind.
+            let slurped = store.slurp.clone_string().to_lowercase();
+            let kind_inner = if slurped.len() == 0 {
+                // First take care of case "()".
+                Kind::Empty
+            } else {
+                // (EMPTY), (TRUE), (FALSE), (NONE), (my_kind), etc. are valid.
+                let k = res!(Kind::from_label(&slurped, cfg.ukinds_opt.as_ref()));
+                if !k.is_dataless() {
+                    return Err(err!(
+                        "Closing ')' without a kindicle should have triggered \
+                        set MolecularCapture::ListMixed, but instead the state is \
+                        {:?}. ({})", state.molecular_capture, cursor.borrow();
+                    String, Input, Decode, Invalid));
+                }
+                k
+            };
+            state.kind_capture = false;
+            store.slurp.reset();
+            kind_inner
+        } else {
+            Kind::Unknown
+        };
+        let mut kind = kind_inner.clone();
+        if kind == Kind::Unknown {
+            kind = state.kind_outer.clone();
+        }
+
+        if kind == Kind::Unknown {
+            // For unknown kinds, first attempt to interpret as a tuple.
+            // When no kindicle is specified, items accumulate directly in store.list
+            match state.molecular_capture {
+                Some(MolecularCapture::ListMixed) => {}
+                _ => {
+                    return Err(err!(
+                        "Closing ')' without a kindicle should have triggered \
+                        set MolecularCapture::ListMixed, but instead the state is \
+                        {:?}. ({})", state.molecular_capture, cursor.borrow();
+                    String, Input, Decode, Invalid));
+                }
+            }
+            // Complete the capture of the store.list by converting it to the correct
+            // type.
+            if store.slurp.has_content() {
+                store.val_opt = Some(res!(Self::process_atom(&mut store.slurp, &kind)));
+            }
+            match store.val_opt.take() {
+                Some(dat) => {
+                    if store.comment.len() > 0 {
+                        store.list.push(Dat::ABox(
+                            store.note_config.extract(),
+                            Box::new(dat),
+                            store.comment.extract(),
+                        ));
+                    } else {
+                        store.list.push(dat);
+                    }
+                }
+                None => {
+                    if store.comment.len() > 0 {
+                        store.list.push(Dat::ABox(
+                            store.note_config.extract(),
+                            Box::new(Dat::Empty),
+                            store.comment.extract(),
+                        ));
+                    }
+                }
+            }
+            return Ok(Some(res!(Self::implicit_tuple(store.list.extract(), cursor))));
+        }
+
+        match &kind {
+            // No data is needed for these kinds, so create them here.
+            Kind::Empty => store.val_opt = Some(Dat::Empty),
+            Kind::True  => store.val_opt = Some(Dat::Bool(true)),
+            Kind::False => store.val_opt = Some(Dat::Bool(false)),
+            Kind::None  => store.val_opt = Some(Dat::Opt(Box::new(None))),
+            Kind::Usr(ukid) if ukid.kind().is_none() =>
+                store.val_opt = Some(Dat::Usr(ukid.clone(), None)),
+            _ => (),
+            // We don't necessarily return out of the method here because the
+            // daticle might be part of a molecule, with the exception of the outer
+            // kind being a Dat::ABox.
+        }
+        if let Kind::ABox(_) = state.kind_outer {
+            match &store.val_opt {
+                Some(dat) => {
+                    if store.comment.len() > 0 {
+                        return Ok(Some(Dat::ABox(
+                            store.note_config.extract(),
+                            Box::new(dat.clone()),
+                            store.comment.extract(),
+                        )));
+                    } else {
+                        *comment_required = true;
+                    }
+                }
+                None => {
+                    return Err(err!(
+                        "Daticle missing in Dat::ABox ({})", cursor.borrow();
+                    String, Input, Decode, Invalid, Missing));
+                }
+            }
+        }
+
+        if !*comment_required && (
+            !kind.is_dataless() || state.molecular_capture == None
+        ) {
+            // Atom point cases were just dealt with, while molecular capture is
+            // ongoing until a `]` or `}` is encountered, with the exception of a
+            // base2x string for bytes.
+            if state.molecular_capture == None || (
+                state.molecular_capture == Some(MolecularCapture::Bytes)
+                && store.slurp.is_string()
+            ) {
+                let d = match store.val_opt.take() {
+                    Some(d) => d,
+                    None => res!(Self::process_atom(&mut store.slurp, &kind)),
+                };
+                return Ok(Some(match state.kind_outer.clone() {
+                    // Unitary molecules
+                    Kind::Usr(ukid) => Dat::Usr(ukid, Some(Box::new(d))),
+                    Kind::Box(_)    => Dat::Box(Box::new(d)),
+                    Kind::Some(_)   => Dat::Opt(Box::new(Some(d))),
+                    _ => d,
+                }));
+            } else {
+                match store.val_opt.take() {
+                    Some(d) => return Ok(Some(d)),
+                    None => {
+                        return Err(err!(
+                            "Failed to capture the daticle of kind {:?} ({})",
+                            kind, cursor.borrow();
+                        String, Input, Decode, Invalid));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Converts the daticles gathered between round brackets into a tuple, e.g. `(1, 2)`.
+    #[inline(never)]
+    fn implicit_tuple(
+        mut list:   Vec<Dat>,
+        cursor:     &RefCell<Cursor>,
+    )
+        -> Outcome<Self>
+    {
+        match list.len() {
+            0 => Ok(Dat::Empty),
+            1 => Ok(list.remove(0)),
+            2 => Ok(Dat::Tup2(Box::new(
+                res!(list.try_into().map_err(|_| err!(
+                    "While decoding a 2-item tuple ({})", cursor.borrow();
+                String, Input, Decode, Invalid)))
+            ))),
+            3 => Ok(Dat::Tup3(Box::new(
+                res!(list.try_into().map_err(|_| err!(
+                    "While decoding a 3-item tuple ({})", cursor.borrow();
+                String, Input, Decode, Invalid)))
+            ))),
+            4 => Ok(Dat::Tup4(Box::new(
+                res!(list.try_into().map_err(|_| err!(
+                    "While decoding a 4-item tuple ({})", cursor.borrow();
+                String, Input, Decode, Invalid)))
+            ))),
+            5 => Ok(Dat::Tup5(Box::new(
+                res!(list.try_into().map_err(|_| err!(
+                    "While decoding a 5-item tuple ({})", cursor.borrow();
+                String, Input, Decode, Invalid)))
+            ))),
+            6 => Ok(Dat::Tup6(Box::new(
+                res!(list.try_into().map_err(|_| err!(
+                    "While decoding a 6-item tuple ({})", cursor.borrow();
+                String, Input, Decode, Invalid)))
+            ))),
+            7 => Ok(Dat::Tup7(Box::new(
+                res!(list.try_into().map_err(|_| err!(
+                    "While decoding a 7-item tuple ({})", cursor.borrow();
+                String, Input, Decode, Invalid)))
+            ))),
+            8 => Ok(Dat::Tup8(Box::new(
+                res!(list.try_into().map_err(|_| err!(
+                    "While decoding a 8-item tuple ({})", cursor.borrow();
+                String, Input, Decode, Invalid)))
+            ))),
+            9 => Ok(Dat::Tup9(Box::new(
+                res!(list.try_into().map_err(|_| err!(
+                    "While decoding a 9-item tuple ({})", cursor.borrow();
+                String, Input, Decode, Invalid)))
+            ))),
+            10 => Ok(Dat::Tup10(Box::new(
+                res!(list.try_into().map_err(|_| err!(
+                    "While decoding a 10-item tuple ({})", cursor.borrow();
+                String, Input, Decode, Invalid)))
+            ))),
+            n => Err(err!(
+                "Tuples are limited to 10 items, {} found ({}).",
+                n, cursor.borrow();
+            String, Input, Decode, Invalid)),
+        }
+    }
+
+    /// Concludes a `]`, completing the list, vector, byte string or tuple at this level.
+    #[inline(never)]
+    fn close_bracket(
+        mut state:  DecoderState,
+        mut store:  DecoderStore,
+        cursor:     &RefCell<Cursor>,
+    )
+        -> Outcome<Self>
+    {
+        match state.molecular_capture {
+            Some(MolecularCapture::Bytes) => {
+                if store.slurp.has_content() {
+                    let n = try_extract_dat!(
+                        res!(Self::process_atom(&mut store.slurp, &Kind::U8)), U8,
+                    );
+                    store.byts.push(n);
+                }
+                return Self::decode_bytes(store.byts, &state.kind_outer);
+            }
+            Some(MolecularCapture::ListMixed) |
+            Some(MolecularCapture::ListSame) => {
+                // Complete the capture of the store.list by converting it to the correct
+                // type.
+                if store.slurp.has_content() {
+                    let kind = match state.molecular_capture {
+                        Some(MolecularCapture::ListSame) =>
+                            MolecularCapture::same_kind(&state.kind_outer),
+                        _ => state.kind_outer.clone(),
+                    };
+                    store.val_opt = Some(res!(Self::process_atom(&mut store.slurp, &kind)));
+                }
+                match store.val_opt {
+                    Some(dat) => {
+                        if store.comment.len() > 0 {
+                            store.list.push(Dat::ABox(
+                                store.note_config.clone(),
+                                Box::new(dat),
+                                store.comment,
+                            ));
+                        } else {
+                            store.list.push(dat);
+                        }
+                    }
+                    None => {
+                        if store.comment.len() > 0 {
+                            store.list.push(Dat::ABox(
+                                store.note_config.clone(),
+                                Box::new(Dat::Empty),
+                                store.comment,
+                            ));
+                        }
+                    }
+                }
+                state.molecular_capture = None;
+                match state.kind_outer {
+                    Kind::List | Kind::Unknown => return Ok(Dat::List(store.list)),
+
+                    Kind::Tup2  => string_decode_heterogenous_tuple! { Tup2,    2, store.list, state },
+                    Kind::Tup3  => string_decode_heterogenous_tuple! { Tup3,    3, store.list, state },
+                    Kind::Tup4  => string_decode_heterogenous_tuple! { Tup4,    4, store.list, state },
+                    Kind::Tup5  => string_decode_heterogenous_tuple! { Tup5,    5, store.list, state },
+                    Kind::Tup6  => string_decode_heterogenous_tuple! { Tup6,    6, store.list, state },
+                    Kind::Tup7  => string_decode_heterogenous_tuple! { Tup7,    7, store.list, state },
+                    Kind::Tup8  => string_decode_heterogenous_tuple! { Tup8,    8, store.list, state },
+                    Kind::Tup9  => string_decode_heterogenous_tuple! { Tup9,    9, store.list, state },
+                    Kind::Tup10 => string_decode_heterogenous_tuple! { Tup10,   10, store.list, state },
+
+                    Kind::Vek   => return Ok(Dat::Vek(res!(Vek::try_from(store.list)))),
+                    Kind::Tup2u8    => string_decode_int_tuple! { Tup2u8,   U8,  u8,  2, store.list, state },
+                    Kind::Tup3u8    => string_decode_int_tuple! { Tup3u8,   U8,  u8,  3, store.list, state },
+                    Kind::Tup4u8    => string_decode_int_tuple! { Tup4u8,   U8,  u8,  4, store.list, state },
+                    Kind::Tup5u8    => string_decode_int_tuple! { Tup5u8,   U8,  u8,  5, store.list, state },
+                    Kind::Tup6u8    => string_decode_int_tuple! { Tup6u8,   U8,  u8,  6, store.list, state },
+                    Kind::Tup7u8    => string_decode_int_tuple! { Tup7u8,   U8,  u8,  7, store.list, state },
+                    Kind::Tup8u8    => string_decode_int_tuple! { Tup8u8,   U8,  u8,  8, store.list, state },
+                    Kind::Tup9u8    => string_decode_int_tuple! { Tup9u8,   U8,  u8,  9, store.list, state },
+                    Kind::Tup10u8   => string_decode_int_tuple! { Tup10u8,  U8,  u8,  10, store.list, state },
+
+                    Kind::Tup2u16   => string_decode_int_tuple! { Tup2u16,  U16, u16, 2, store.list, state },
+                    Kind::Tup3u16   => string_decode_int_tuple! { Tup3u16,  U16, u16, 3, store.list, state },
+                    Kind::Tup4u16   => string_decode_int_tuple! { Tup4u16,  U16, u16, 4, store.list, state },
+                    Kind::Tup5u16   => string_decode_int_tuple! { Tup5u16,  U16, u16, 5, store.list, state },
+                    Kind::Tup6u16   => string_decode_int_tuple! { Tup6u16,  U16, u16, 6, store.list, state },
+                    Kind::Tup7u16   => string_decode_int_tuple! { Tup7u16,  U16, u16, 7, store.list, state },
+                    Kind::Tup8u16   => string_decode_int_tuple! { Tup8u16,  U16, u16, 8, store.list, state },
+                    Kind::Tup9u16   => string_decode_int_tuple! { Tup9u16,  U16, u16, 9, store.list, state },
+                    Kind::Tup10u16  => string_decode_int_tuple! { Tup10u16, U16, u16, 10, store.list, state },
+
+                    Kind::Tup2u32   => string_decode_int_tuple! { Tup2u32,  U32, u32, 2, store.list, state },
+                    Kind::Tup3u32   => string_decode_int_tuple! { Tup3u32,  U32, u32, 3, store.list, state },
+                    Kind::Tup4u32   => string_decode_int_tuple! { Tup4u32,  U32, u32, 4, store.list, state },
+                    Kind::Tup5u32   => string_decode_int_tuple! { Tup5u32,  U32, u32, 5, store.list, state },
+                    Kind::Tup6u32   => string_decode_int_tuple! { Tup6u32,  U32, u32, 6, store.list, state },
+                    Kind::Tup7u32   => string_decode_int_tuple! { Tup7u32,  U32, u32, 7, store.list, state },
+                    Kind::Tup8u32   => string_decode_int_tuple! { Tup8u32,  U32, u32, 8, store.list, state },
+                    Kind::Tup9u32   => string_decode_int_tuple! { Tup9u32,  U32, u32, 9, store.list, state },
+                    Kind::Tup10u32  => string_decode_int_tuple! { Tup10u32, U32, u32, 10, store.list, state },
+
+                    Kind::Tup2u64   => string_decode_int_tuple! { Tup2u64,  U64, u64, 2, store.list, state },
+                    Kind::Tup3u64   => string_decode_int_tuple! { Tup3u64,  U64, u64, 3, store.list, state },
+                    Kind::Tup4u64   => string_decode_int_tuple! { Tup4u64,  U64, u64, 4, store.list, state },
+                    Kind::Tup5u64   => string_decode_int_tuple! { Tup5u64,  U64, u64, 5, store.list, state },
+                    Kind::Tup6u64   => string_decode_int_tuple! { Tup6u64,  U64, u64, 6, store.list, state },
+                    Kind::Tup7u64   => string_decode_int_tuple! { Tup7u64,  U64, u64, 7, store.list, state },
+                    Kind::Tup8u64   => string_decode_int_tuple! { Tup8u64,  U64, u64, 8, store.list, state },
+                    Kind::Tup9u64   => string_decode_int_tuple! { Tup9u64,  U64, u64, 9, store.list, state },
+                    Kind::Tup10u64  => string_decode_int_tuple! { Tup10u64, U64, u64, 10, store.list, state },
+                    Kind::Tup2i8    => string_decode_int_tuple! { Tup2i8,   I8,  i8,  2, store.list, state },
+                    Kind::Tup3i8    => string_decode_int_tuple! { Tup3i8,   I8,  i8,  3, store.list, state },
+                    Kind::Tup4i8    => string_decode_int_tuple! { Tup4i8,   I8,  i8,  4, store.list, state },
+                    Kind::Tup5i8    => string_decode_int_tuple! { Tup5i8,   I8,  i8,  5, store.list, state },
+                    Kind::Tup6i8    => string_decode_int_tuple! { Tup6i8,   I8,  i8,  6, store.list, state },
+                    Kind::Tup7i8    => string_decode_int_tuple! { Tup7i8,   I8,  i8,  7, store.list, state },
+                    Kind::Tup8i8    => string_decode_int_tuple! { Tup8i8,   I8,  i8,  8, store.list, state },
+                    Kind::Tup9i8    => string_decode_int_tuple! { Tup9i8,   I8,  i8,  9, store.list, state },
+                    Kind::Tup10i8   => string_decode_int_tuple! { Tup10i8,  I8,  i8,  10, store.list, state },
+                    Kind::Tup2i16   => string_decode_int_tuple! { Tup2i16,  I16, i16, 2, store.list, state },
+                    Kind::Tup3i16   => string_decode_int_tuple! { Tup3i16,  I16, i16, 3, store.list, state },
+                    Kind::Tup4i16   => string_decode_int_tuple! { Tup4i16,  I16, i16, 4, store.list, state },
+                    Kind::Tup5i16   => string_decode_int_tuple! { Tup5i16,  I16, i16, 5, store.list, state },
+                    Kind::Tup6i16   => string_decode_int_tuple! { Tup6i16,  I16, i16, 6, store.list, state },
+                    Kind::Tup7i16   => string_decode_int_tuple! { Tup7i16,  I16, i16, 7, store.list, state },
+                    Kind::Tup8i16   => string_decode_int_tuple! { Tup8i16,  I16, i16, 8, store.list, state },
+                    Kind::Tup9i16   => string_decode_int_tuple! { Tup9i16,  I16, i16, 9, store.list, state },
+                    Kind::Tup10i16  => string_decode_int_tuple! { Tup10i16, I16, i16, 10, store.list, state },
+                    Kind::Tup2i32   => string_decode_int_tuple! { Tup2i32,  I32, i32, 2, store.list, state },
+                    Kind::Tup3i32   => string_decode_int_tuple! { Tup3i32,  I32, i32, 3, store.list, state },
+                    Kind::Tup4i32   => string_decode_int_tuple! { Tup4i32,  I32, i32, 4, store.list, state },
+                    Kind::Tup5i32   => string_decode_int_tuple! { Tup5i32,  I32, i32, 5, store.list, state },
+                    Kind::Tup6i32   => string_decode_int_tuple! { Tup6i32,  I32, i32, 6, store.list, state },
+                    Kind::Tup7i32   => string_decode_int_tuple! { Tup7i32,  I32, i32, 7, store.list, state },
+                    Kind::Tup8i32   => string_decode_int_tuple! { Tup8i32,  I32, i32, 8, store.list, state },
+                    Kind::Tup9i32   => string_decode_int_tuple! { Tup9i32,  I32, i32, 9, store.list, state },
+                    Kind::Tup10i32  => string_decode_int_tuple! { Tup10i32, I32, i32, 10, store.list, state },
+                    Kind::Tup2i64   => string_decode_int_tuple! { Tup2i64,  I64, i64, 2, store.list, state },
+                    Kind::Tup3i64   => string_decode_int_tuple! { Tup3i64,  I64, i64, 3, store.list, state },
+                    Kind::Tup4i64   => string_decode_int_tuple! { Tup4i64,  I64, i64, 4, store.list, state },
+                    Kind::Tup5i64   => string_decode_int_tuple! { Tup5i64,  I64, i64, 5, store.list, state },
+                    Kind::Tup6i64   => string_decode_int_tuple! { Tup6i64,  I64, i64, 6, store.list, state },
+                    Kind::Tup7i64   => string_decode_int_tuple! { Tup7i64,  I64, i64, 7, store.list, state },
+                    Kind::Tup8i64   => string_decode_int_tuple! { Tup8i64,  I64, i64, 8, store.list, state },
+                    Kind::Tup9i64   => string_decode_int_tuple! { Tup9i64,  I64, i64, 9, store.list, state },
+                    Kind::Tup10i64  => string_decode_int_tuple! { Tup10i64, I64, i64, 10, store.list, state },
+
+                    _ => {
+                        return Err(err!(
+                            "Unexpected outer kind {:?} case while concluding {:?}.",
+                            state.kind_outer, state.molecular_capture;
+                        Input, Mismatch, Unexpected, Bug));
+                    }
+                }
+            }
+            _ => {
+                return Err(err!(
+                    "List capture was not actived with a '[' character ({})",
+                    cursor.borrow();
+                String, Input, Decode, Invalid));
+            }
+        }
+    }
+
+    /// Concludes a `:`, taking the daticle just gathered as the key of a map entry.
+    #[inline(never)]
+    fn colon(
+        state:  &DecoderState,
+        store:  &mut DecoderStore,
+        cursor: &RefCell<Cursor>,
+    )
+        -> Outcome<()>
+    {
+        match state.molecular_capture {
+            None => return Err(err!(
+                    "Map capture not active ({})", cursor.borrow();
+            String, Input, Decode, Invalid)),
+            Some(MolecularCapture::ListMixed)   |
+            Some(MolecularCapture::ListSame)    |
+            Some(MolecularCapture::Bytes)       => {
+                return Err(err!(
+                    "List capture active, incompatible character ({})", cursor.borrow();
+                String, Input, Decode, Invalid));
+            }
+            Some(MolecularCapture::Map) => {
+                // We're expecting to have a daticle to add to the store.map.
+                let mut dat = match store.val_opt.take() {
+                    Some(dat) => dat,
+                    None => {
+                        if store.slurp.has_content() {
+                            res!(Self::process_atom(&mut store.slurp, &Kind::Unknown))
+                        } else {
+                            Dat::Empty
+                        }
+                    }
+                };
+                if store.comment.len() > 0 {
+                    dat = Dat::ABox(
+                        store.note_config.extract(),
+                        Box::new(dat),
+                        store.comment.extract(),
+                    );
+                }
+                if store.key_opt == None {
+                    store.key_opt = Some(dat);
+                    store.val_opt = None;
+                }
+                store.slurp = Slurp::new();
+            }
+        }
+        Ok(())
+    }
+
+    /// Concludes a `}`, completing the map at this level.
+    #[inline(never)]
+    fn close_brace<
+        M1: MapMut<UsrKindCode, UsrKind> + Clone + fmt::Debug + Default,
+        M2: MapMut<String, UsrKindId> + Clone + fmt::Debug + Default,
+    >(
+        cfg:        &DecoderConfig<M1, M2>,
+        state:      &DecoderState,
+        mut store:  DecoderStore,
+        cursor:     &RefCell<Cursor>,
+    )
+        -> Outcome<Self>
+    {
+        if state.molecular_capture == Some(MolecularCapture::Map) {
+            if store.slurp.has_content() {
+                store.val_opt =
+                    Some(res!(Self::process_atom(&mut store.slurp, &state.kind_outer)));
+            }
+            match (store.key_opt.take(), store.val_opt.take()) {
+                (Some(key), Some(mut dat)) => {
+                    // The key has already been abox-wrapped if necessary.
+                    if store.comment.len() > 0 {
+                        dat = Dat::ABox(
+                            store.note_config.extract(),
+                            Box::new(dat),
+                            store.comment.extract(),
+                        );
+                    }
+                    res!(Self::map_insert(
+                        state.kind_outer == Kind::OrdMap,
+                        &mut store,
+                        (key, dat),
+                    ));
+                }
+                (None, Some(dat)) => {
+                    return Err(err!(
+                        "Unpaired value {:?} at end of store.map {} ({})",
+                        dat, match cfg.use_ordmaps {
+                            true => fmt!("{:?}", store.ordmap),
+                            false => fmt!("{:?}", store.map),
+                        }, cursor.borrow();
+                    String, Input, Decode, Invalid, Missing));
+                }
+                (Some(key), None) => {
+                    if store.comment.len() > 0 {
+                        let dat = Dat::ABox(
+                            store.note_config.extract(),
+                            Box::new(Dat::Empty),
+                            store.comment.extract(),
+                        );
+                        res!(Self::map_insert(
+                            state.kind_outer == Kind::OrdMap,
+                            &mut store,
+                            (key, dat),
+                        ));
+                    } else {
+                        return Err(err!(
+                            "Unpaired key {:?} at end of store.map {} ({})",
+                            key, match cfg.use_ordmaps {
+                                true => fmt!("{:?}", store.ordmap),
+                                false => fmt!("{:?}", store.map),
+                            }, cursor.borrow();
+                        String, Input, Decode, Invalid, Missing));
+                    }
+                }
+                (None, None) => {}
+            }
+            return Ok(if state.kind_outer == Kind::OrdMap {
+                Dat::OrdMap(store.ordmap)
+            } else {
+                Dat::Map(store.map)
+            });
+        }
+        Err(err!(
+            "Map capture was not actived with a '{{' character ({})", cursor.borrow();
+        String, Input, Decode, Invalid))
+    }
+
+    #[inline(never)]
     fn comma_handler<
         M1: MapMut<UsrKindCode, UsrKind> + Clone + fmt::Debug + Default,
         M2: MapMut<String, UsrKindId> + Clone + fmt::Debug + Default,
@@ -1849,6 +2096,7 @@ impl Dat {
     /// `Dat::OrdMap` allows map key ordering to be preserved, but the trade off is an additional
     /// search prior to insertion to ensure uniqueness of the key daticle.  This will become
     /// costly as the map size grows.
+    #[inline(never)]
     fn map_insert(
         use_ordmap: bool,
         store:      &mut DecoderStore,
@@ -1903,6 +2151,7 @@ impl Dat {
     ///   surrogate, which is combined into a supplementary
     ///   plane code point; a bare low surrogate is a decode
     ///   error.
+    #[inline(never)]
     fn handle_string_escape(
         c:      char,
         state:  &mut DecoderState,
@@ -2074,6 +2323,7 @@ impl Dat {
     /// Process a [`Slurp`] extracted during single-pass processing.  Numbers currently undergo an
     /// additional pass via validation in [`NumberString::new`], to cope with the various forms of
     /// representation, even when typed (e.g. different radices).
+    #[inline(never)]
     fn process_atom(
         slurp: &mut Slurp,
         kind: &Kind,
@@ -2217,6 +2467,7 @@ impl Dat {
         Ok(d)
     }
 
+    #[inline(never)]
     fn decode_bytes(v: Vec<u8>, k: &Kind) -> Outcome<Self> {
         Ok(match k {
             Kind::BU8   => Self::BU8(v),
@@ -2239,5 +2490,204 @@ impl Dat {
                 "{:?} is not suitable for bytes.", k;
             Input, Mismatch, Bug)),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::thread;
+
+    /// The stack Rust gives a spawned thread, and the stack the default depth limit is sized
+    /// against.
+    const SPAWNED_THREAD_STACK: usize = 2 * 1024 * 1024;
+
+    /// Nests `levels` lists around nothing, e.g. `[[[]]]`, which the decoder reads at depth
+    /// `levels + 1`, the root sitting at depth 1.
+    ///
+    /// This is the bomb: a few characters per level, describing a nesting deep enough to exhaust
+    /// the stack of whoever reads it.  It is written rather than encoded, since the encoder recurses
+    /// as the decoder does, and an attacker is under no obligation to use it.
+    fn nested_lists(levels: usize) -> String {
+        let mut s = String::with_capacity(2 * levels);
+        for _ in 0..levels {
+            s.push('[');
+        }
+        for _ in 0..levels {
+            s.push(']');
+        }
+        s
+    }
+
+    /// Nests `levels` maps around a scalar, e.g. `{a:{a:1}}`, which the decoder reads at depth
+    /// `levels`, since the outermost brace opens the root rather than a level below it.
+    fn nested_maps(levels: usize) -> String {
+        let mut s = String::with_capacity(4 * levels);
+        for _ in 0..levels {
+            s.push_str("{a:");
+        }
+        s.push('1');
+        for _ in 0..levels {
+            s.push('}');
+        }
+        s
+    }
+
+    /// Decodes on a thread with the stack a spawned thread gets, which is the stack the default
+    /// limit is sized against.
+    ///
+    /// A decoder that overflows this stack aborts the process, taking the whole test run with it,
+    /// which is precisely the failure these tests exist to catch: the abort cannot be caught, so it
+    /// must not happen.
+    fn decode_on_a_small_stack(s: String) -> Outcome<Outcome<Dat>> {
+        let builder = thread::Builder::new().stack_size(SPAWNED_THREAD_STACK);
+        let handle = match builder.spawn(move || Dat::decode_string(s)) {
+            Ok(handle) => handle,
+            Err(e) => return Err(err!(e, "While spawning the decoding thread."; Test, Init)),
+        };
+        match handle.join() {
+            Ok(result) => Ok(result),
+            Err(_) => Err(err!(
+                "The decoding thread died rather than returning, which is what a stack overflow \
+                looks like.";
+            Test, Invalid)),
+        }
+    }
+
+    #[test]
+    fn test_text_depth_limit_accepts_at_the_limit() -> Outcome<()> {
+        // A leaf inside 15 lists sits at depth 16.
+        const LEVELS: usize = 15;
+        let lims = DecodeLimits::text().with_max_depth(LEVELS + 1);
+        let dat = res!(Dat::decode_string_limited(nested_lists(LEVELS), &lims));
+        let mut expected = Dat::List(Vec::new());
+        for _ in 1..LEVELS {
+            expected = Dat::List(vec![expected]);
+        }
+        assert_eq!(dat, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn test_text_depth_limit_refuses_past_the_limit() -> Outcome<()> {
+        // The same nesting, one level shallower than it needs, is refused rather than decoded.
+        const LEVELS: usize = 15;
+        let lims = DecodeLimits::text().with_max_depth(LEVELS);
+        match Dat::decode_string_limited(nested_lists(LEVELS), &lims) {
+            Ok(dat) => Err(err!(
+                "Expected a depth limit error, but decoded {:?}.", dat;
+            Test, Invalid)),
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(msg.contains("depth"), "Error should name the depth limit: {}", msg);
+                assert!(msg.contains("offset"), "Error should name the offset: {}", msg);
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn test_text_list_bomb_is_refused() -> Outcome<()> {
+        // A hostile document: 100,000 nested lists, 200 kB of text, which would exhaust the stack
+        // of a decoder that trusted it.  The decode must return an error, on a stack that a stack
+        // overflow would abort.
+        match res!(decode_on_a_small_stack(nested_lists(100_000))) {
+            Ok(_) => Err(err!(
+                "A nesting of 100,000 lists should be refused by the default limits.";
+            Test, Invalid)),
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(msg.contains("depth"), "Error should name the depth limit: {}", msg);
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn test_text_map_bomb_is_refused() -> Outcome<()> {
+        // The same attack through the other bracket.
+        match res!(decode_on_a_small_stack(nested_maps(100_000))) {
+            Ok(_) => Err(err!(
+                "A nesting of 100,000 maps should be refused by the default limits.";
+            Test, Invalid)),
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(msg.contains("depth"), "Error should name the depth limit: {}", msg);
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn test_text_at_the_default_limit_decodes_on_a_small_stack() -> Outcome<()> {
+        // The limit is only worth having if everything under it is safe.  A document nested as deep
+        // as the default allows must decode on the stack the default is sized against, rather than
+        // aborting just short of the error the decoder promises.
+        let levels = DecodeLimits::DEFAULT_MAX_TEXT_DEPTH - 1;
+        let dat = res!(res!(decode_on_a_small_stack(nested_lists(levels))));
+        let mut depth = 0;
+        let mut node = &dat;
+        while let Dat::List(items) = node {
+            depth += 1;
+            match items.first() {
+                Some(item) => node = item,
+                None => break,
+            }
+        }
+        assert_eq!(depth, levels, "The decoded nesting is not the nesting that was given.");
+        Ok(())
+    }
+
+    #[test]
+    fn test_text_byte_limit_refuses_an_oversized_input() -> Outcome<()> {
+        let lims = DecodeLimits::text().with_max_bytes(8);
+        match Dat::decode_string_limited("\"a string longer than a tiny limit\"", &lims) {
+            Ok(dat) => Err(err!(
+                "Expected a byte limit error, but decoded {:?}.", dat;
+            Test, Invalid)),
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(msg.contains("8 bytes"), "Error should name the byte limit: {}", msg);
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn test_ordinary_documents_still_decode() -> Outcome<()> {
+        // The limits are no use if they cost the decoder its day job.
+        let txt = r#"{
+            "name": "Hematite",
+            "version": (u16|3),
+            "tags": ["a", "b"],
+            "nested": {"n": [1, 2, 3]},
+            "pair": (t2|[1, 2]),
+            "opt": (some|(u8|7)),
+        }"#;
+        let expected = mapdat!{
+            dat!("name")    => dat!("Hematite"),
+            dat!("version") => dat!(3u16),
+            dat!("tags")    => listdat![dat!("a"), dat!("b")],
+            dat!("nested")  => mapdat!{
+                dat!("n") => listdat![dat!(1u8), dat!(2u8), dat!(3u8)],
+            },
+            dat!("pair")    => Dat::Tup2(Box::new([dat!(1u8), dat!(2u8)])),
+            dat!("opt")     => Dat::Opt(Box::new(Some(dat!(7u8)))),
+        };
+        assert_eq!(res!(Dat::decode_string(txt)), expected);
+        Ok(())
+    }
+
+    #[test]
+    fn test_limits_can_be_tightened_by_the_caller() -> Outcome<()> {
+        // A caller with an opinion about depth states it, and the decoder holds them to it.
+        let cfg = DecoderConfig::<
+            BTreeMap<UsrKindCode, UsrKind>,
+            BTreeMap<String, UsrKindId>,
+        >::default().with_limits(DecodeLimits::text().with_max_depth(2));
+        assert!(Dat::decode_string_with_config("[1]", &cfg).is_ok());
+        assert!(Dat::decode_string_with_config("[[1]]", &cfg).is_err());
+        Ok(())
     }
 }
