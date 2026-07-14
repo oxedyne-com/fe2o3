@@ -412,6 +412,7 @@ impl AppShellContext {
             self.wallet.clone(),
             wallet_path_for_admin,
             self.db_enc_key.clone(),
+            db_specs.len(),
             traffic.clone(),
             host_sampler.clone(),
             addr_guard.clone(),
@@ -424,12 +425,17 @@ impl AppShellContext {
             (traffic ring capacity {}; host sampler capacity {}).",
             traffic.capacity(),
             host_sampler.history_capacity());
-        if admin_state.is_sealed() {
-            warn!("Steel is SEALED: no wallet master key has been supplied, so \
-                the {} configured database(s) are shut. Static vhosts, redirects, \
-                proxy routes and certificate renewal all serve normally. Sign in \
-                at /admin with an admin passphrase to unseal.",
+        if admin_state.seal_withholds_data() {
+            warn!("Steel is SEALED: no wallet master key has been supplied, so the \
+                {} configured database(s) are shut and routes that need them will \
+                answer 503. Static vhosts, redirects, proxy routes and certificate \
+                renewal all serve normally. Sign in at /admin with an admin \
+                passphrase to unseal.",
                 db_specs.len());
+        } else if admin_state.is_sealed() {
+            info!("Steel is sealed -- no wallet master key has been supplied -- but \
+                no vhost has a database configured, so nothing is waiting on it and \
+                everything serves normally.");
         }
 
         for vh in &vhosts_cfg {

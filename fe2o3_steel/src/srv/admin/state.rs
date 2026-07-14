@@ -110,6 +110,15 @@ pub struct AdminState {
     /// starter task in `Server::start` waits on this; it cannot open
     /// the Ozone instances until the key exists.
     unseal_notify:      Arc<Notify>,
+    /// How many vhosts have a database configured. Zero is common: a
+    /// deployment serving only static sites, redirects and proxy routes
+    /// never touches Ozone.
+    ///
+    /// Held so the seal can be reported honestly. A sealed Steel with no
+    /// databases has nothing locked and nothing waiting, and saying "the
+    /// databases are shut" to an operator who has none is how a healthy
+    /// server gets mistaken for a broken one.
+    db_count:           usize,
     /// AES-256-GCM pre-keyed with the derived session key. Used by
     /// [`session`](super::session) to encrypt and decrypt session
     /// cookies.
@@ -171,6 +180,7 @@ impl AdminState {
         wallet:             Arc<RwLock<Wallet>>,
         wallet_path:        PathBuf,
         master_key:         Option<Vec<u8>>,
+        db_count:           usize,
         traffic:            Arc<TrafficRecorder>,
         host_sampler:       Arc<HostSampler>,
         addr_guard:         Arc<SteelAddressGuard>,
@@ -202,6 +212,7 @@ impl AdminState {
             master_key:         Arc::new(RwLock::new(master_key)),
             sealed:             Arc::new(AtomicBool::new(sealed)),
             unseal_notify:      Arc::new(Notify::new()),
+            db_count,
             session_enc,
             traffic,
             host_sampler,
@@ -217,6 +228,22 @@ impl AdminState {
     /// databases are shut and DB-backed routes must refuse.
     pub fn is_sealed(&self) -> bool {
         self.sealed.load(Ordering::Acquire)
+    }
+
+    /// How many vhosts have a database configured.
+    pub fn db_count(&self) -> usize {
+        self.db_count
+    }
+
+    /// Returns `true` when the seal is actually holding something shut:
+    /// no master key, and at least one database that needs it.
+    ///
+    /// Distinct from [`Self::is_sealed`] because a deployment of static
+    /// sites, redirects and proxy routes has no database at all, and for
+    /// it the seal is inconsequential -- nothing is locked, nothing is
+    /// waiting, and there is no reason to tell an operator otherwise.
+    pub fn seal_withholds_data(&self) -> bool {
+        self.is_sealed() && self.db_count > 0
     }
 
     /// Copy of the wallet master key.

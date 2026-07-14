@@ -129,7 +129,7 @@ pub async fn handle_get(
     debug!("{}: dashboard GET {}", id, path);
     match path {
         PATH_ASSET_OXANIUM => Ok(serve_font_oxanium()),
-        PATH_LOGIN => Ok(render_login_form(state.is_sealed(), None)),
+        PATH_LOGIN => Ok(render_login_form(state.seal_withholds_data(), None)),
         PATH_LOGOUT => Ok(handle_logout(state, headers)),
         PATH_ROOT => Ok(render_home(state, headers)),
         PATH_TRAFFIC => Ok(render_traffic(state, headers)),
@@ -250,7 +250,7 @@ fn handle_login(
                 "err",
                 "reason=missing_passphrase_field",
             );
-            return render_login_form(state.is_sealed(), Some(
+            return render_login_form(state.seal_withholds_data(), Some(
                 "Login form did not include a passphrase."));
         },
     };
@@ -265,7 +265,7 @@ fn handle_login(
                 "err",
                 "reason=verify_structural_error",
             );
-            return render_login_form(state.is_sealed(), Some("Internal error during login."));
+            return render_login_form(state.seal_withholds_data(), Some("Internal error during login."));
         },
     };
 
@@ -287,7 +287,7 @@ fn handle_login(
                 "reason=bad_credentials",
             );
             // Generic message: do not leak whether any admin exists.
-            render_login_form(state.is_sealed(), Some("Invalid credentials."))
+            render_login_form(state.seal_withholds_data(), Some("Invalid credentials."))
         },
         LoginOutcome::NoDashboardScope { name } => {
             audit::append(
@@ -298,7 +298,7 @@ fn handle_login(
             );
             warn!("dashboard login: admin '{}' authenticated but \
                 holds no dashboard scope.", name);
-            render_login_form(state.is_sealed(), Some(
+            render_login_form(state.seal_withholds_data(), Some(
                 "Authenticated, but this admin is not authorised \
                 to use the dashboard. Ask an operator to grant \
                 'dashboard.view' or 'dashboard.admin'."))
@@ -320,7 +320,7 @@ fn issue_session_cookie(
         Ok(s) => s,
         Err(e) => {
             error!(e, "dashboard login: failed to encode session cookie");
-            return render_login_form(state.is_sealed(), Some(
+            return render_login_form(state.seal_withholds_data(), Some(
                 "Login succeeded but session encoding failed."));
         },
     };

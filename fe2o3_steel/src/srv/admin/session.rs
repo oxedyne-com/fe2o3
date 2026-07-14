@@ -322,6 +322,7 @@ mod tests {
             Arc::new(RwLock::new(Wallet::default())),
             PathBuf::from("./wallet.jdat"),
             master_key,
+            1, // one database configured, so the seal withholds data
             TrafficRecorder::new_shared(0),
             HostSampler::new_shared(),
             crate::srv::admin::guard::new_shared().expect("addr guard"),
@@ -343,6 +344,35 @@ mod tests {
         let open = mkstate_with_key(Some(vec![7u8; 32]));
         assert!(!open.is_sealed());
         assert_eq!(open.master_key().expect("master key"), vec![7u8; 32]);
+    }
+
+    /// Being sealed and withholding data are different things. A
+    /// deployment of static sites has no database, so its seal holds
+    /// nothing shut -- and telling its operator "the databases are shut"
+    /// is how a healthy server gets mistaken for a broken one.
+    #[test]
+    fn test_a_seal_with_no_databases_withholds_nothing_00() {
+        let no_dbs = AdminState::new(
+            Arc::new(RwLock::new(Wallet::default())),
+            PathBuf::from("./wallet.jdat"),
+            None,   // sealed
+            0,      // but nothing is configured to need the key
+            TrafficRecorder::new_shared(0),
+            HostSampler::new_shared(),
+            crate::srv::admin::guard::new_shared().expect("addr guard"),
+            crate::srv::admin::guard::new_shared().expect("auth guard"),
+            Vec::new(),
+            None,
+        ).expect("admin state");
+        assert!(no_dbs.is_sealed(), "no master key means sealed");
+        assert!(!no_dbs.seal_withholds_data(),
+            "a seal over zero databases holds nothing shut");
+
+        // With a database configured, the same seal does withhold data.
+        let with_db = mkstate_with_key(None);
+        assert!(with_db.is_sealed());
+        assert!(with_db.seal_withholds_data(),
+            "a seal over a configured database holds it shut");
     }
 
     #[test]
