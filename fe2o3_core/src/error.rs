@@ -185,6 +185,43 @@ pub struct ErrMsg<T: GenTag> {
     pub tags:   &'static [T],
 }
 
+/// A message with the source location the `errmsg!` macro puts in front of it taken off again.
+///
+/// The macro writes `file.rs:123: the words`, or `file.rs:123` alone where it was given no words, so
+/// what is left after the location is what somebody meant to say. A message that begins with no
+/// location is returned whole, since it was written by something else and is not ours to trim.
+fn without_location(msg: &str) -> &str {
+    match msg.split_once(": ") {
+        Some((head, tail)) if is_location(head) => tail,
+        // The whole message may be a location and nothing else, which is what a frame that merely
+        // wraps another error looks like. It has nothing to say, so it says nothing.
+        _ => if is_location(msg) { "" } else { msg },
+    }
+}
+
+/// Whether a string is a `file:line` of the shape `errmsg!` writes.
+///
+/// The test is that what follows the last colon is a line number. A message of somebody's own that
+/// happened to hold a colon has words after it, not digits, and is left alone.
+fn is_location(s: &str) -> bool {
+    match s.rsplit_once(':') {
+        Some((file, line)) => {
+            !file.is_empty()
+                && !line.is_empty()
+                && line.chars().all(|c| c.is_ascii_digit())
+        },
+        None => false,
+    }
+}
+
+/// Adds a message to the list, unless it has nothing in it.
+fn push_words(out: &mut Vec<String>, msg: &str) {
+    let msg = msg.trim();
+    if !msg.is_empty() {
+        out.push(msg.to_string());
+    }
+}
+
 impl<T: GenTag> fmt::Display for ErrMsg<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:?}", self)
@@ -216,6 +253,60 @@ impl<T: GenTag> Error<T> where Error<T>: std::error::Error {
                 t
             },
         }
+    }
+
+    /// The words the error carries, outermost first, with nothing in them but words.
+    ///
+    /// The `err!` macro writes the file and the line in front of every message it is given, and an
+    /// error that wraps another keeps a frame for each. That is what a developer wants and it is not
+    /// what anybody else wants, so this gives the messages alone: no source locations, no frame
+    /// names, no tags, and nothing from a frame that carried no words of its own.
+    pub fn msgs(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        self.gather(&mut out);
+        out
+    }
+
+    /// Walks the error and its causes, appending the words each carries.
+    fn gather(&self, out: &mut Vec<String>) {
+        match self {
+            Error::Local(ErrMsg { msg: m, .. }) |
+            Error::Other(ErrMsg { msg: m, .. }) => push_words(out, without_location(m)),
+            Error::Upstream(arc_e, ErrMsg { msg: m, .. }) => {
+                push_words(out, without_location(m));
+                match arc_e.downcast_ref::<Error<T>>() {
+                    // One of ours, so its words are reachable and are gathered in turn.
+                    Some(e) => e.gather(out),
+                    // Somebody else's, so all we have is what it says of itself. `Display` is the
+                    // right form here: a foreign error has no ANSI colour of ours in it.
+                    None => push_words(out, &fmt!("{}", arc_e)),
+                }
+            },
+            Error::Collection(boxerrs) => {
+                for boxerr in boxerrs {
+                    boxerr.gather(out);
+                }
+            },
+        }
+    }
+
+    /// The error as a person should read it: what went wrong, in the words the code chose.
+    ///
+    /// `Debug` is the developer's form and names the file and the line of every frame; `Display` is
+    /// the console's and carries ANSI colour. Neither belongs in a browser, a log field, or anything
+    /// a user will read, and this is the form for those. The outermost words come first, since they
+    /// are the context, and the innermost last, since they are the detail.
+    pub fn plain(&self) -> String {
+        let msgs = self.msgs();
+        if msgs.is_empty() {
+            // An error with no words at all still has its tags, and they beat saying nothing.
+            let tags = Self::tags_display(self.tags());
+            if tags.is_empty() {
+                return "An error carrying neither a message nor a tag.".to_string();
+            }
+            return tags;
+        }
+        msgs.join(" ")
     }
 
     pub fn tags_display(tags: Vec<T>) -> String {
@@ -614,6 +705,73 @@ mod tests {
 
         // The Display form is for a console, and may colour itself all it likes.
         Ok(())
+    }
+
+    /// `plain` is what a person reads, so it must hold the words and nothing else.
+    ///
+    /// `Debug` names the file and the line of every frame, which is right for a developer and wrong
+    /// for a browser: a reader told a document was refused wants to know why, not which line of
+    /// which file noticed. The words are all that crosses.
+    #[test]
+    fn test_plain_is_words_and_nothing_else() -> Outcome<()> {
+        // The shape of a real rejection: a detailed innermost error, wrapped by frames that add
+        // context, and wrapped again by one that adds none.
+        fn innermost() -> Outcome<()> {
+            Err(err!(
+                "The 1895 byte tree region hashes to 1507362a, but the envelope declares \
+                387a4f57."; Invalid, Input, Mismatch))
+        }
+        fn middle() -> Outcome<()> {
+            match innermost() {
+                Ok(()) => Ok(()),
+                Err(e) => Err(err!(e, "The document could not be read."; Invalid)),
+            }
+        }
+        fn outer() -> Outcome<()> {
+            res!(middle());	// Adds a frame carrying no words of its own.
+            Ok(())
+        }
+        let e = match outer() {
+            Ok(()) => return Err(err!("The error was supposed to propagate."; Bug)),
+            Err(e) => e,
+        };
+
+        let plain = e.plain();
+
+        // What a developer needs, and a reader does not.
+        assert!(!plain.contains(".rs:"), "plain names a source file: {}", plain);
+        assert!(!plain.contains("LocalErr"), "plain names a frame: {}", plain);
+        assert!(!plain.contains("UpstreamErr"), "plain names a frame: {}", plain);
+        assert!(!plain.contains('['), "plain carries its tags: {}", plain);
+        assert!(!plain.contains('\u{1b}'), "plain carries an ANSI escape: {}", plain);
+
+        // What a reader needs, and every word of it.
+        assert!(
+            plain.contains("The document could not be read."),
+            "the context is missing: {}", plain,
+        );
+        assert!(
+            plain.contains("hashes to 1507362a, but the envelope declares 387a4f57."),
+            "the detail is missing: {}", plain,
+        );
+        // Context first, detail after: the reader is told what failed before being told how.
+        let ctx = plain.find("could not be read");
+        let det = plain.find("hashes to");
+        assert!(ctx < det, "the detail came before the context: {}", plain);
+
+        // The frame that carried no words of its own contributed none.
+        assert_eq!(e.msgs().len(), 2, "a wordless frame put something in: {:?}", e.msgs());
+        Ok(())
+    }
+
+    #[test]
+    fn test_a_location_is_told_from_a_message_that_merely_holds_a_colon() {
+        assert_eq!(without_location("src/doc.rs:95: The tree is short."), "The tree is short.");
+        assert_eq!(without_location("src/doc.rs:95"), "");
+        // A message of somebody else's, which owes the macro nothing.
+        assert_eq!(without_location("error: the file is missing"), "error: the file is missing");
+        assert_eq!(without_location("Note: 3 of 4 failed"), "Note: 3 of 4 failed");
+        assert_eq!(without_location("no colon here"), "no colon here");
     }
 
     #[test]
