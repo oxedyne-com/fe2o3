@@ -317,6 +317,14 @@ impl HttpMessage {
                         limits,
                     ).await);
                     msg.body = body;
+                    // The body now sits decoded in `msg.body`, so the message is
+                    // no longer chunked and must stop saying that it is.  A proxy
+                    // re-emitting it would otherwise send `Transfer-Encoding:
+                    // chunked` over a body that is not chunked, and, once
+                    // `write_all` added the length, both framing fields at once --
+                    // the combination RFC 9112 §6.1 forbids and §6.3 calls a
+                    // smuggling signal.
+                    msg.header.fields.remove(&HeaderName::TransferEncoding);
                     return Ok((Some(msg), rest));
                 }
 
@@ -399,6 +407,9 @@ impl HttpMessage {
     )
         -> Outcome<()>
     {
+        // `HeaderFields::insert` refuses a `Content-Length` while a
+        // `Transfer-Encoding` stands, so a message that really is chunked keeps
+        // its own framing and does not acquire a second, contradictory one.
         let _ = self.insert(
             HeaderName::ContentLength,
             HeaderFieldValue::ContentLength(self.body.len()),
@@ -570,9 +581,9 @@ impl HttpMessage {
 /// `chunked` is the last coding applied, so a value of `gzip, chunked` is
 /// chunked too, and the test is for its presence in the list.
 pub fn is_chunked(fields: &HeaderFields) -> bool {
-    match fields.get_one(&HeaderName::TransferEncoding) {
-        Some(v) => fmt!("{}", v).to_lowercase().contains("chunked"),
-        None    => false,
+    match fields.get_list(&HeaderName::TransferEncoding) {
+        Some(list) => list.iter().any(|v| fmt!("{}", v).to_lowercase().contains("chunked")),
+        None       => false,
     }
 }
 
@@ -826,6 +837,40 @@ mod body_tests {
             \r\n\
             only these bytes arrived";
         assert!(res!(read_reply(wire, Some(false))).is_none());
+        Ok(())
+    }
+
+    /// A proxy reads a chunked response, and writes it on.  The body is decoded
+    /// by then, so the message must stop claiming to be chunked: emitting
+    /// `Transfer-Encoding: chunked` and a `Content-Length` together is forbidden
+    /// by RFC 9112 §6.1, and is the request-smuggling signal of §6.3, which is
+    /// why browsers and proxies treat such a response as hostile.
+    #[test]
+    fn test_a_dechunked_body_is_not_re_emitted_as_chunked() -> Outcome<()> {
+        let wire = "HTTP/1.1 200 OK\r\n\
+            Content-Type: text/html\r\n\
+            Transfer-Encoding: chunked\r\n\
+            \r\n\
+            9\r\n<!doctype\r\n\
+            6\r\n html>\r\n\
+            0\r\n\r\n";
+        let msg = match res!(read_reply(wire, Some(false))) {
+            Some(m) => m,
+            None    => return Err(err!(
+                "A chunked response was read as no response at all.";
+                Test, Missing)),
+        };
+        let rt = res!(tokio::runtime::Runtime::new());
+        let mut out: Vec<u8> = Vec::new();
+        res!(rt.block_on(msg.write_all(&mut out)));
+        assert_eq!(
+            out,
+            b"HTTP/1.1 200 OK\r\n\
+            content-type: text/html\r\n\
+            content-length: 15\r\n\
+            \r\n\
+            <!doctype html>".to_vec(),
+        );
         Ok(())
     }
 

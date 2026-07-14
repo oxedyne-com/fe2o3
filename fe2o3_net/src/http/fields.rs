@@ -744,6 +744,45 @@ impl From<String> for HeaderName {
 }
 
 impl HeaderName {
+    /// Whether at most one line of this field may appear in a message.
+    ///
+    /// Two groups qualify.  The first is the fields whose grammar is a single
+    /// value rather than a comma-separated list, which RFC 9110 §5.3 says a
+    /// sender must not repeat.  The second is the list fields whose whole list
+    /// this crate encapsulates in one `HeaderFieldValue`, so a second insertion
+    /// carries the full replacement list rather than an addition to it.  Fields
+    /// outside both groups, `set-cookie` above all, may legitimately repeat.
+    pub fn is_singleton(&self) -> bool {
+        match self {
+            // Single-valued fields (RFC 9110 §5.3).
+            Self::Age                   |
+            Self::Authorization         |
+            Self::ContentLength         |
+            Self::ContentLocation       |
+            Self::ContentRange          |
+            Self::ContentType           |
+            Self::Date                  |
+            Self::ETag                  |
+            Self::Expires               |
+            Self::From                  |
+            Self::Host                  |
+            Self::LastModified          |
+            Self::Location              |
+            Self::MaxForwards           |
+            Self::ProxyAuthorization    |
+            Self::Referer               |
+            Self::RetryAfter            |
+            Self::Server                |
+            Self::UserAgent             |
+            // List fields held whole in a single `HeaderFieldValue`.
+            Self::Connection            |
+            Self::Cookie                |
+            Self::TransferEncoding      |
+            Self::Upgrade               => true,
+            _ => false,
+        }
+    }
+
     /// Categorise `HeaderNames`s mainly for ordering.
     pub fn category(&self) -> HeaderFieldCategory {
         match self {
@@ -897,10 +936,20 @@ pub enum HeaderFieldValue {
 impl fmt::Display for HeaderFieldValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Connection(ct_opt, list) => if list.len() > 0 {
-                write!(f, "{:?}, {}", ct_opt, list.join(", "))
-            } else {
-                write!(f, "{:?}", ct_opt)
+            // RFC 9110 §7.6.1: a comma-separated list of connection-option
+            // tokens, and nothing else.  A `Debug` rendering of the optional
+            // connection type once put `Some(Close)` on the wire, whose
+            // parentheses are delimiters, so the peer never saw the `close` it
+            // needed to expect the teardown that followed.
+            Self::Connection(ct_opt, list) => {
+                let mut toks = Vec::new();
+                if let Some(ct) = ct_opt {
+                    toks.push(fmt!("{}", ct));
+                }
+                for opt in list {
+                    toks.push(opt.clone());
+                }
+                write!(f, "{}", toks.join(", "))
             }
             Self::Cookie(list) => {
                 let s = list.iter()
@@ -934,6 +983,20 @@ impl fmt::Display for HeaderFieldValue {
 }
 
 impl HeaderFieldValue {
+
+    /// Whether the value renders to an empty field value, in which case the
+    /// field says nothing and is better left off the wire than sent as a bare
+    /// name.  A `Connection` field holding neither a connection type nor an
+    /// option is the case that arises in practice.
+    pub fn is_wire_empty(&self) -> bool {
+        match self {
+            Self::Connection(None, list) => list.is_empty(),
+            Self::Cookie(list)           => list.is_empty(),
+            Self::Upgrade(list)          => list.is_empty(),
+            _ => false,
+        }
+    }
+
     pub fn new(name: &HeaderName, value: &str) -> Outcome<Self> {
         Ok(match name {
             HeaderName::Connection => {
@@ -1142,34 +1205,76 @@ pub struct HeaderFields {
 
 impl HeaderFields {
 
+    /// Insert a header field value, returning whether the field name was already
+    /// present.
+    ///
+    /// A singleton field (see `HeaderName::is_singleton`) is replaced rather than
+    /// added to, because a second line of it on the wire is either meaningless or,
+    /// for the framing fields, dangerous.  Every other field accumulates its
+    /// values, so `set-cookie` and the like still emit one line each.
+    ///
+    /// `Content-Length` and `Transfer-Encoding` are mutually exclusive here by
+    /// construction: RFC 9112 §6.1 forbids a sender from emitting both, and
+    /// §6.3 treats the pair as the request-smuggling signal it is.  Whichever
+    /// order they arrive in, the transfer encoding wins, since it is the framing
+    /// the peer actually applied; so inserting a `Transfer-Encoding` drops any
+    /// `Content-Length`, and inserting a `Content-Length` while a
+    /// `Transfer-Encoding` stands is refused.
     pub fn insert(
         &mut self,
-        nam: HeaderName, 
+        nam: HeaderName,
         val: HeaderFieldValue,
         ord: Option<u16>,
     )
         -> bool
     {
-        let ohn = OrderedHeaderName::new(
-            match ord {
-                Some(ord) => ord,
-                None => nam.category().order(),
+        let new_ord = match ord {
+            Some(ord)   => ord,
+            None        => nam.category().order(),
+        };
+
+        match nam {
+            HeaderName::TransferEncoding => {
+                self.remove(&HeaderName::ContentLength);
             },
-            nam.clone(),
-        );
+            HeaderName::ContentLength => {
+                if self.fields.contains_key(&HeaderName::TransferEncoding) {
+                    return false;
+                }
+            },
+            _ => (),
+        }
+
         match self.fields.get_mut(&nam) {
             Some((prev_val_list, prev_ord)) => {
+                // The name may already sit in the order map under a different
+                // ordinal, and a stale entry there would emit the field twice.
+                let stale = OrderedHeaderName::new(*prev_ord, nam.clone());
+                if nam.is_singleton() {
+                    prev_val_list.clear();
+                }
                 prev_val_list.push(val);
-                *prev_ord = ohn.ord;
-                self.order.insert(ohn, nam);
+                *prev_ord = new_ord;
+                if stale.ord != new_ord {
+                    self.order.remove(&stale);
+                }
+                self.order.insert(OrderedHeaderName::new(new_ord, nam.clone()), nam);
                 true
             },
             None => {
-                self.fields.insert(nam.clone(), (vec![val], ohn.ord));
-                self.order.insert(ohn, nam);
+                self.fields.insert(nam.clone(), (vec![val], new_ord));
+                self.order.insert(OrderedHeaderName::new(new_ord, nam.clone()), nam);
                 false
             },
         }
+    }
+
+    /// Remove every value for the given field name, returning whether it was
+    /// present.
+    pub fn remove(&mut self, nam: &HeaderName) -> bool {
+        let was_present = self.fields.remove(nam).is_some();
+        self.order.retain(|_, held| held != nam);
+        was_present
     }
 
     pub fn get_all(
@@ -1253,4 +1358,189 @@ impl HeaderFields {
         })
     }
 
+}
+
+
+#[cfg(test)]
+mod wire_tests {
+    use super::*;
+    use crate::{
+        http::{
+            header::{
+                HttpHeader,
+                HttpHeadline,
+                HttpVersion,
+            },
+            status::HttpStatus,
+        },
+        media::MEDIA_PLAIN_TEXT,
+    };
+
+    /// A 200 response carrying just the given fields, so a test can compare the
+    /// bytes it puts on the wire against a literal from the RFC.
+    fn response(fields: HeaderFields) -> HttpHeader {
+        HttpHeader {
+            version:    HttpVersion::Http1_1,
+            headline:   HttpHeadline::Response { status: HttpStatus::OK },
+            fields,
+        }
+    }
+
+    fn with_connection(ct_opt: Option<ConnectionType>, list: Vec<String>) -> HeaderFields {
+        let mut fields = HeaderFields::default();
+        fields.insert(
+            HeaderName::Connection,
+            HeaderFieldValue::Connection(ct_opt, list),
+            Some(HeaderFieldCategory::General as u16),
+        );
+        fields
+    }
+
+    /// RFC 9110 §7.6.1 wants a token.  A `Debug` rendering once wrote
+    /// `connection: Some(Close)`, whose parentheses are delimiters, so the peer
+    /// never saw the `close` that explained the teardown it was about to get.
+    #[test]
+    fn test_a_connection_close_is_written_as_a_token() {
+        assert_eq!(
+            response(with_connection(Some(ConnectionType::Close), Vec::new())).as_vec(),
+            b"HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n".to_vec(),
+        );
+    }
+
+    #[test]
+    fn test_a_connection_type_and_its_options_are_one_comma_separated_list() {
+        assert_eq!(
+            response(with_connection(
+                Some(ConnectionType::KeepAlive),
+                vec!["upgrade".to_string()],
+            )).as_vec(),
+            b"HTTP/1.1 200 OK\r\nconnection: keep-alive, upgrade\r\n\r\n".to_vec(),
+        );
+    }
+
+    #[test]
+    fn test_connection_options_stand_without_a_connection_type() {
+        assert_eq!(
+            response(with_connection(None, vec!["upgrade".to_string()])).as_vec(),
+            b"HTTP/1.1 200 OK\r\nconnection: upgrade\r\n\r\n".to_vec(),
+        );
+    }
+
+    /// A `Connection` field with neither a type nor an option says nothing, so it
+    /// is left off the wire rather than sent as `connection: None`, or as a bare
+    /// name with an empty value.
+    #[test]
+    fn test_an_empty_connection_field_is_not_written_at_all() {
+        assert_eq!(
+            response(with_connection(None, Vec::new())).as_vec(),
+            b"HTTP/1.1 200 OK\r\n\r\n".to_vec(),
+        );
+    }
+
+    /// A singleton field is replaced, not repeated: RFC 9110 §5.3 forbids sending
+    /// a second line of a field whose grammar is a single value.  Setting a
+    /// content type on a response that already had one once emitted both.
+    #[test]
+    fn test_a_second_content_type_replaces_the_first() {
+        let mut fields = HeaderFields::default();
+        fields.insert(
+            HeaderName::ContentType,
+            HeaderFieldValue::ContentType(MEDIA_PLAIN_TEXT),
+            Some(HeaderFieldCategory::Entity as u16),
+        );
+        fields.insert(
+            HeaderName::ContentType,
+            HeaderFieldValue::Generic("text/css".to_string()),
+            None,
+        );
+        assert_eq!(
+            response(fields).as_vec(),
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/css\r\n\r\n".to_vec(),
+        );
+    }
+
+    /// The same, where the two insertions carry different ordinals, as they do
+    /// when a parsed message (ordinal by line number) is later amended.  A stale
+    /// entry in the order map emitted the field a second time.
+    #[test]
+    fn test_a_replaced_field_leaves_no_stale_ordering_entry() {
+        let mut fields = HeaderFields::default();
+        fields.insert(
+            HeaderName::ContentType,
+            HeaderFieldValue::Generic("text/plain".to_string()),
+            Some(1), // As `HttpHeader::parse` numbers the lines it reads.
+        );
+        fields.insert(
+            HeaderName::ContentType,
+            HeaderFieldValue::Generic("text/html".to_string()),
+            Some(HeaderFieldCategory::Entity as u16),
+        );
+        assert_eq!(
+            response(fields).as_vec(),
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/html\r\n\r\n".to_vec(),
+        );
+    }
+
+    /// Replacement is for singletons only.  A cookie jar is set one line at a
+    /// time (RFC 6265 §3.1), and must still be.
+    #[test]
+    fn test_set_cookie_still_repeats() {
+        let mut fields = HeaderFields::default();
+        for (key, val) in [("a", "1"), ("b", "2")] {
+            fields.insert(
+                HeaderName::SetCookie,
+                HeaderFieldValue::SetCookie(Cookie {
+                    key:    key.to_string(),
+                    val:    val.to_string(),
+                    attrs:  None,
+                }),
+                None,
+            );
+        }
+        assert_eq!(
+            response(fields).as_vec(),
+            b"HTTP/1.1 200 OK\r\nset-cookie: a=1\r\nset-cookie: b=2\r\n\r\n".to_vec(),
+        );
+    }
+
+    /// RFC 9112 §6.1: a sender must not put both framing fields in one message.
+    /// The transfer encoding wins, whichever order they arrive in, because it is
+    /// the framing the peer actually applied.
+    #[test]
+    fn test_a_content_length_cannot_join_a_transfer_encoding() {
+        let mut fields = HeaderFields::default();
+        fields.insert(
+            HeaderName::TransferEncoding,
+            HeaderFieldValue::Generic("chunked".to_string()),
+            Some(2),
+        );
+        fields.insert(
+            HeaderName::ContentLength,
+            HeaderFieldValue::ContentLength(15),
+            Some(HeaderFieldCategory::Entity as u16),
+        );
+        assert_eq!(
+            response(fields).as_vec(),
+            b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n".to_vec(),
+        );
+    }
+
+    #[test]
+    fn test_a_transfer_encoding_evicts_a_content_length() {
+        let mut fields = HeaderFields::default();
+        fields.insert(
+            HeaderName::ContentLength,
+            HeaderFieldValue::ContentLength(15),
+            Some(HeaderFieldCategory::Entity as u16),
+        );
+        fields.insert(
+            HeaderName::TransferEncoding,
+            HeaderFieldValue::Generic("chunked".to_string()),
+            Some(2),
+        );
+        assert_eq!(
+            response(fields).as_vec(),
+            b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n".to_vec(),
+        );
+    }
 }
