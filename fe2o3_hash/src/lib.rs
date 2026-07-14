@@ -14,16 +14,14 @@
 //! # Examples
 //! 
 //! ```
-//! use oxedyne_fe2o3_hash::{
-//!     hash::HashScheme,
-//!     prelude::*,
-//! };
-//! 
+//! use oxedyne_fe2o3_hash::hash::HashScheme;
+//! use oxedyne_fe2o3_iop_hash::api::Hasher;
+//!
 //! // Create a SHA3-256 hasher.
 //! let hasher = HashScheme::new_sha3_256();
 //! let input = b"example data";
-//! 
-//! // Generate a hash with an empty salt.
+//!
+//! // Generate a hash with an empty salt.  Hashing consumes the scheme.
 //! let hash = hasher.hash(&[input], []);
 //! ```
 #![forbid(unsafe_code)]

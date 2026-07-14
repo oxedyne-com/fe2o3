@@ -1,8 +1,24 @@
 //! This crate provides a concrete interface for multiple Key Derivation Function algorithms.
-//! Currently it uses only one, Argon2.  The Argon2 implementation wrapped here, `rust-argon2`
-//! unexpectedly produces different hash values for different lane values, necessitating a lane
-//! value of one for portability.  Even so, the Open Worldwide Application Security Project (OWASP)
-//! recommends using Argon2id with one lane of parallelism.
+//! Currently it uses only one, Argon2.  The Argon2 tag depends on the lane count `p` by design, so
+//! a tag produced with `p = 4` differs from one produced with `p = 1` for otherwise identical
+//! inputs.  Every parameter that changes the tag must therefore survive a round trip through the
+//! encoded configuration string, or the derived key will silently differ.  The default here is a
+//! single lane, which the Open Worldwide Application Security Project (OWASP) recommends for
+//! Argon2id, but the encoding does not assume it.
+//!
+//! # Encoded strings
+//!
+//! `encode_to_string` emits the Password Hashing Competition (PHC) string format exactly, as
+//! `$argon2id$v=19$m=<mem_cost>,t=<time_cost>,p=<lanes>$<salt>$<hash>`, so that other Argon2
+//! implementations can read it.  The tag length is implied by the length of the encoded hash.
+//!
+//! `encode_cfg_to_string` emits the same string sans hash.  PHC defines no hash-less form, and
+//! without the hash the tag length would be lost, so the tag length is carried explicitly in an
+//! `l=<hash_length>` option, as `$argon2id$v=19$m=...,t=...,p=...,l=32$<salt>`.  Associated data,
+//! when present, is carried in the `data=<base64>` option used by the reference implementation.
+//!
+//! The secret (pepper) is deliberately never encoded.  A caller using one must set it on the
+//! decoded state out of band; the encoders return an error rather than drop it silently.
 //!
 use oxedyne_fe2o3_core::{
     prelude::*,
@@ -321,11 +337,13 @@ impl Default for Argon2State {
 
 impl Argon2State {
 
+    /// Creates an Argon2 state with the given parameters, all of which change the resulting tag.
     pub fn new(
         variant:        &str,
         version:        u32,
         mem_cost:       u32,
         time_cost:      u32,
+        lanes:          u32,
         hash_length:    u32,
         salt:           Vec<u8>,
     )
@@ -333,7 +351,7 @@ impl Argon2State {
     {
         Ok(Self {
             hash_length,
-            lanes:          1,
+            lanes,
             mem_cost,
             time_cost,
             variant:        res!(argon2::Variant::from_str(variant)),
@@ -356,8 +374,9 @@ impl Argon2State {
         }
     }
     
-    /// Unfortunately the argon2::encoding module is private so the decoding functionality must be
-    /// replicated here.
+    /// Decodes an Argon2 string, returning an error rather than silently defaulting any parameter
+    /// that changes the tag.  The `argon2::encoding` module is private, so the decoding must be
+    /// replicated here.  The secret, which is never encoded, is left untouched on `self`.
     pub fn from_argon2_string(
         &mut self,
         encoded:        &str,
@@ -365,46 +384,97 @@ impl Argon2State {
     )
         -> Outcome<()>
     {
-        let encoded = match encoded.strip_prefix('$') {
+        let body = match encoded.strip_prefix('$') {
             Some(s) => s,
             None => return Err(err!(
                 "Encoded Argon2 string '{}' does not begin with a '$'.", encoded;
             Invalid, Input)),
         };
         let (n_complete, n_v0x10) = if expect_hash { (5, 4) } else { (4, 3) };
-        let parts: Vec<&str> = encoded.split('$').collect();
-        if parts.len() == n_complete {
-            let options = res!(Self::extract_options(parts[2]));
-            self.variant = res!(argon2::Variant::from_str(parts[0]));
+        let parts: Vec<&str> = body.split('$').collect();
+        // The version field is absent in the original v0x10 encoding.
+        let (variant_str, version, opts_str, salt_str, hash_str) = if parts.len() == n_complete {
             let vstr = res!(Self::extract_value(parts[1], "v", "version"));
-            self.version = res!(argon2::Version::from_str(vstr));
-            let mstr = res!(Self::extract_value(options[0], "m", "mem_cost"));
-            self.mem_cost = res!(mstr.parse::<u32>());
-            let tstr = res!(Self::extract_value(options[1], "t", "time_cost"));
-            self.time_cost = res!(tstr.parse::<u32>());
-            self.salt = res!(base64::decode(parts[3]));
-            if expect_hash {
-                self.hash = Some(res!(base64::decode(parts[4])));
-            }
-            Ok(())
+            (
+                parts[0],
+                res!(argon2::Version::from_str(vstr)),
+                parts[2],
+                parts[3],
+                if expect_hash { Some(parts[4]) } else { None },
+            )
         } else if parts.len() == n_v0x10 {
-            let options = res!(Self::extract_options(parts[1]));
-            self.variant = res!(argon2::Variant::from_str(parts[0]));
-            self.version = argon2::Version::Version10;
-            let mstr = res!(Self::extract_value(options[0], "m", "mem_cost"));
-            self.mem_cost = res!(mstr.parse::<u32>());
-            let tstr = res!(Self::extract_value(options[1], "t", "time_cost"));
-            self.time_cost = res!(tstr.parse::<u32>());
-            self.salt = res!(base64::decode(parts[2]));
-            if expect_hash {
-                self.hash = Some(res!(base64::decode(parts[3])));
-            }
-            Ok(())
+            (
+                parts[0],
+                argon2::Version::Version10,
+                parts[1],
+                parts[2],
+                if expect_hash { Some(parts[3]) } else { None },
+            )
         } else {
-            Err(err!(
-                "The Argon2 string should have {} or {} parts separated by the '$' \
-                character. {} were found.", parts.len() - 1, n_v0x10, n_complete;
-            Decode, String, Invalid, Input))
+            return Err(err!(
+                "The Argon2 string '{}' should have {} or {} parts separated by the '$' \
+                character, {} were found.", encoded, n_v0x10, n_complete, parts.len();
+            Decode, String, Invalid, Input));
+        };
+        let opts = res!(Self::extract_options(opts_str));
+        let salt = res!(base64::decode(salt_str));
+        let hash = match hash_str {
+            Some(s) => Some(res!(base64::decode(s))),
+            None => None,
+        };
+        // The tag length is implied by the hash when there is one, and carried in the 'l' option
+        // when there is not.  A configuration string with neither is the format the previous
+        // release wrote, which never emitted 'l' at all: those strings are in every wallet in the
+        // field, and a wallet cannot be rebuilt from source, so refusing to read one would lock its
+        // owner out of their own master key.  The tag length then stays as the state already has
+        // it, which is what the old decoder did, and so derives the key that string has always
+        // meant.
+        let hash_length = match (&hash, opts.hash_length) {
+            (Some(h), Some(l)) => {
+                if (h.len() as u32) != l {
+                    return Err(err!(
+                        "The Argon2 string '{}' declares a hash length of {} but encodes a hash \
+                        of {} bytes.", encoded, l, h.len();
+                    Decode, String, Mismatch, Invalid, Input));
+                }
+                l
+            },
+            (Some(h), None)     => h.len() as u32,
+            (None, Some(l))     => l,
+            (None, None)        => self.hash_length,
+        };
+        self.variant        = res!(argon2::Variant::from_str(variant_str));
+        self.version        = version;
+        self.mem_cost       = opts.mem_cost;
+        self.time_cost      = opts.time_cost;
+        self.lanes          = opts.lanes;
+        self.hash_length    = hash_length;
+        self.ad             = opts.ad;
+        self.salt           = salt;
+        self.hash           = hash;
+        Ok(())
+    }
+
+    /// Returns an error if a secret is present, since the encoded string must never carry it.
+    fn require_no_secret(&self) -> Outcome<()> {
+        if !self.secret.is_empty() {
+            return Err(err!(
+                "This Argon2 state carries a secret of {} bytes. A secret is never written to the \
+                encoded string, and encoding it away silently would derive a different key on \
+                decoding. Supply the secret out of band on the decoded state instead.",
+                self.secret.len();
+            Invalid, Input, Security));
+        }
+        Ok(())
+    }
+
+    /// Encodes the associated data, when present, as the `data` option used by the reference
+    /// implementation, including the leading comma.
+    fn encode_ad(&self) -> String {
+        if self.ad.is_empty() {
+            String::new()
+        } else {
+            fmt!(",data={}", base64::encode_config(&self.ad, base64::STANDARD_NO_PAD))
         }
     }
 
@@ -421,7 +491,7 @@ impl Argon2State {
                 Ok(parts[1])
             } else {
                 Err(err!(
-                    "The Argon2 {} substring key must be '{}'.", err_str, name;
+                    "The Argon2 {} substring key must be '{}', found '{}'.", err_str, name, parts[0];
                 Missing, Decode, String, Invalid, Input))
             }
         } else {
@@ -432,17 +502,72 @@ impl Argon2State {
         }
     }
 
-    fn extract_options(s: &str) -> Outcome<Vec<&str>> {
+    /// Decodes the comma separated options substring.  The mandatory `m`, `t` and `p` come first,
+    /// in that order, and may be followed by the optional `l` and `data`.  Any other option is an
+    /// error, because an option we do not understand may well be one that changes the tag.
+    fn extract_options(s: &str) -> Outcome<Argon2Options> {
         let parts: Vec<&str> = s.split(',').collect();
-        if parts.len() == 3 {
-            Ok(parts)
-        } else {
-            Err(err!(
-                "The Argon2 options substring '{}' should have 3 parts separated by the ',' \
-                character. {} were found.", s, parts.len();
-            Decode, String, Invalid, Input))
+        if parts.len() < 3 {
+            return Err(err!(
+                "The Argon2 options substring '{}' should have at least the 3 parts 'm', 't' and \
+                'p' separated by the ',' character. {} were found.", s, parts.len();
+            Decode, String, Missing, Invalid, Input));
         }
+        let mstr = res!(Self::extract_value(parts[0], "m", "mem_cost"));
+        let tstr = res!(Self::extract_value(parts[1], "t", "time_cost"));
+        let pstr = res!(Self::extract_value(parts[2], "p", "lanes"));
+        let mut result = Argon2Options {
+            mem_cost:       res!(mstr.parse::<u32>()),
+            time_cost:      res!(tstr.parse::<u32>()),
+            lanes:          res!(pstr.parse::<u32>()),
+            hash_length:    None,
+            ad:             Vec::new(),
+        };
+        let mut ad_seen = false;
+        for part in &parts[3..] {
+            let kv: Vec<&str> = part.split('=').collect();
+            if kv.len() != 2 {
+                return Err(err!(
+                    "The Argon2 option '{}' should have 2 parts separated by the '=' character. \
+                    {} were found.", part, kv.len();
+                Decode, String, Invalid, Input));
+            }
+            match kv[0] {
+                "l" => {
+                    if result.hash_length.is_some() {
+                        return Err(err!(
+                            "The Argon2 options substring '{}' repeats the 'l' option.", s;
+                        Decode, String, Duplicate, Invalid, Input));
+                    }
+                    result.hash_length = Some(res!(kv[1].parse::<u32>()));
+                },
+                "data" => {
+                    if ad_seen {
+                        return Err(err!(
+                            "The Argon2 options substring '{}' repeats the 'data' option.", s;
+                        Decode, String, Duplicate, Invalid, Input));
+                    }
+                    result.ad = res!(base64::decode(kv[1]));
+                    ad_seen = true;
+                },
+                _ => return Err(err!(
+                    "The Argon2 option key '{}' in options substring '{}' is not recognised. An \
+                    unrecognised option may change the derived key, so it cannot be ignored.",
+                    kv[0], s;
+                Decode, String, Unknown, Invalid, Input)),
+            }
+        }
+        Ok(result)
     }
+}
+
+/// The decoded options substring of an Argon2 encoded string.
+struct Argon2Options {
+    mem_cost:       u32,
+    time_cost:      u32,
+    lanes:          u32,
+    hash_length:    Option<u32>, // Absent from a string that carries a hash.
+    ad:             Vec<u8>,
 }
 
 impl KeyDeriver for KeyDerivationScheme {
@@ -498,34 +623,56 @@ impl KeyDeriver for KeyDerivationScheme {
         }
     }
 
+    /// Encodes the state and its hash in the PHC string format, which other Argon2 implementations
+    /// can read.  The tag length is implied by the length of the encoded hash.
     fn encode_to_string(&self) -> Outcome<String> {
         match self {
             Self::Argon2(state) => match &state.hash {
-                Some(hash) => Ok(fmt!(
-                    // Copy the encoding function from argon2 to avoid using argon2::Context
+                Some(hash) => {
+                    // The encoding function is copied from argon2 to avoid using argon2::Context,
                     // which requires the password.
-                    "{}${}",
-                    res!(self.encode_cfg_to_string()),
-                    base64::encode_config(&hash, base64::STANDARD_NO_PAD),
-                )),
+                    res!(state.require_no_secret());
+                    if (hash.len() as u32) != state.hash_length {
+                        return Err(err!(
+                            "This Argon2 state declares a hash length of {} but holds a hash of \
+                            {} bytes.", state.hash_length, hash.len();
+                        Bug, Mismatch, Invalid));
+                    }
+                    Ok(fmt!(
+                        "${}$v={}$m={},t={},p={}{}${}${}",
+                        state.variant,
+                        state.version,
+                        state.mem_cost,
+                        state.time_cost,
+                        state.lanes,
+                        state.encode_ad(),
+                        base64::encode_config(&state.salt, base64::STANDARD_NO_PAD),
+                        base64::encode_config(&hash, base64::STANDARD_NO_PAD),
+                    ))
+                },
                 None => Err(err!("Hash has not been created."; Missing)),
             },
         }
     }
 
+    /// Encodes the state sans hash.  Since PHC defines no hash-less form, and the tag length can
+    /// no longer be implied by a hash, it is carried explicitly in the `l` option.
     fn encode_cfg_to_string(&self) -> Outcome<String> {
         match self {
-            Self::Argon2(state) => Ok(fmt!(
-                // Copy the encoding function from argon2 to avoid using argon2::Context
-                // which requires the password.
-                "${}$v={}$m={},t={},p={}${}",
-                state.variant,
-                state.version,
-                state.mem_cost,
-                state.time_cost,
-                state.lanes,
-                base64::encode_config(&state.salt, base64::STANDARD_NO_PAD),
-            )),
+            Self::Argon2(state) => {
+                res!(state.require_no_secret());
+                Ok(fmt!(
+                    "${}$v={}$m={},t={},p={},l={}{}${}",
+                    state.variant,
+                    state.version,
+                    state.mem_cost,
+                    state.time_cost,
+                    state.lanes,
+                    state.hash_length,
+                    state.encode_ad(),
+                    base64::encode_config(&state.salt, base64::STANDARD_NO_PAD),
+                ))
+            },
         }
     }
 
@@ -851,6 +998,163 @@ mod tests {
     use super::*;
     use std::time::SystemTime;
 
+    // The Argon2id test vector of RFC 9106, section 5.3.  It is the only vector here that pins the
+    // lane count, the secret and the associated data, because it is the only one that uses them.
+    const RFC9106_PASS:     [u8; 32] = [0x01; 32];
+    const RFC9106_SALT:     [u8; 16] = [0x02; 16];
+    const RFC9106_SECRET:   [u8; 8]  = [0x03; 8];
+    const RFC9106_AD:       [u8; 12] = [0x04; 12];
+    const RFC9106_TAG:      [u8; 32] = [
+        0x0d, 0x64, 0x0d, 0xf5, 0x8d, 0x78, 0x76, 0x6c,
+        0x08, 0xc0, 0x37, 0xa3, 0x4a, 0x8b, 0x53, 0xc9,
+        0xd0, 0x1e, 0xf0, 0x45, 0x2d, 0x75, 0xb6, 0x5e,
+        0xb5, 0x25, 0x20, 0xe9, 0x6b, 0x01, 0xe6, 0x59,
+    ];
+
+    /// The RFC 9106 section 5.3 inputs: 32 KiB of memory, 3 passes and, critically, 4 lanes.
+    fn rfc9106_state() -> Argon2State {
+        Argon2State {
+            ad:             RFC9106_AD.to_vec(),
+            hash_length:    32,
+            lanes:          4,
+            mem_cost:       32,
+            secret:         RFC9106_SECRET.to_vec(),
+            time_cost:      3,
+            variant:        argon2::Variant::Argon2id,
+            version:        argon2::Version::Version13,
+            salt:           RFC9106_SALT.to_vec(),
+            hash:           None,
+        }
+    }
+
+    /// Pins our Argon2id output against the published RFC 9106 tag.
+    #[test]
+    fn test_argon2_rfc9106_vector() -> Outcome<()> {
+        let mut kdf = KeyDerivationScheme::Argon2(rfc9106_state());
+        res!(kdf.derive(&RFC9106_PASS));
+        req!(res!(kdf.get_hash()), &RFC9106_TAG[..]);
+        Ok(())
+    }
+
+    /// Pins the configuration string round trip against the published RFC 9106 tag.  Should the
+    /// lane count or the tag length be dropped in encoding or decoding, the derived key differs
+    /// from the vector and this fails.
+    #[test]
+    fn test_argon2_rfc9106_cfg_round_trip() -> Outcome<()> {
+        let mut state = rfc9106_state();
+        state.secret = Vec::new(); // The secret is never encoded; it is supplied out of band.
+        let kdf = KeyDerivationScheme::Argon2(state);
+        let encoded_cfg = res!(kdf.encode_cfg_to_string());
+        msg!("encoded cfg = '{}'", encoded_cfg);
+        // A fresh scheme carrying the defaults, lanes = 1 and hash_length = 32, which the decoded
+        // configuration must overwrite.
+        let mut kdf2 = res!(KeyDerivationScheme::default_argon2("Argon2id", 0x13));
+        res!(kdf2.decode_cfg_from_string(&encoded_cfg));
+        match &mut kdf2 {
+            KeyDerivationScheme::Argon2(state) => {
+                req!(state.lanes, 4, "The lane count did not survive the round trip.");
+                req!(state.hash_length, 32);
+                req!(state.mem_cost, 32);
+                req!(state.time_cost, 3);
+                req!(state.version, argon2::Version::Version13);
+                req!(&state.ad[..], &RFC9106_AD[..]);
+                req!(&state.salt[..], &RFC9106_SALT[..]);
+                state.secret = RFC9106_SECRET.to_vec(); // Supplied out of band, as documented.
+            },
+        }
+        res!(kdf2.derive(&RFC9106_PASS));
+        req!(res!(kdf2.get_hash()), &RFC9106_TAG[..]);
+        Ok(())
+    }
+
+    /// A foreign PHC string, produced elsewhere with 4 lanes, must verify against its password.
+    /// Dropping the lanes on decoding derives a different tag, and the verification fails.
+    #[test]
+    fn test_argon2_decode_foreign_phc_string() -> Outcome<()> {
+        let encoded = "$argon2i$v=19$m=4096,t=3,p=4$YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXo\
+            $BvBk2OaSofBHfbrUW61nHrWB/43xgfs/QJJ5DkMAd8I";
+        let mut kdf = res!(KeyDerivationScheme::default_argon2("Argon2i", 0x13));
+        res!(kdf.decode_from_string(encoded));
+        match &kdf {
+            KeyDerivationScheme::Argon2(state) => {
+                req!(state.lanes, 4, "The lane count was dropped on decoding.");
+                req!(state.mem_cost, 4096);
+                req!(state.time_cost, 3);
+                req!(state.hash_length, 32);
+                req!(&state.salt[..], &b"abcdefghijklmnopqrstuvwxyz"[..]);
+            },
+        }
+        req!(res!(kdf.verify(b"foo")), true);
+        req!(res!(kdf.verify(b"bar")), false);
+        Ok(())
+    }
+
+    /// Our PHC output must be readable by an independent Argon2 parser, here the wrapped crate's
+    /// own, which we otherwise never exercise.
+    #[test]
+    fn test_argon2_phc_string_is_externally_readable() -> Outcome<()> {
+        let pass = b"The meaning is 42";
+        let state = res!(Argon2State::new("Argon2id", 0x13, 1024, 2, 4, 32, b"somesalt".to_vec()));
+        let mut kdf = KeyDerivationScheme::Argon2(state);
+        res!(kdf.derive(pass));
+        let encoded = res!(kdf.encode_to_string());
+        msg!("encoded with hash = '{}'", encoded);
+        req!(encoded.starts_with("$argon2id$v=19$m=1024,t=2,p=4$"), true, "Not a PHC string.");
+        match argon2::verify_encoded(&encoded, pass) {
+            Ok(true) => (),
+            Ok(false) => return Err(err!(
+                "An independent Argon2 parser read our encoded string but did not verify \
+                the password against it."; Test, Mismatch)),
+            Err(e) => return Err(err!(e,
+                "An independent Argon2 parser could not read our encoded string."; Test, Decode)),
+        }
+        Ok(())
+    }
+
+    /// A configuration string written by the previous release must still decode, and must still
+    /// derive the key it derived then.
+    ///
+    /// The deployed encoder wrote `$argon2id$v=19$m=..,t=..,p=..$<salt>` and no `l` option, because
+    /// it never wrote the tag length at all.  Every `kdf_cfg` in a wallet in the field has that
+    /// shape, and a wallet is the one artefact that cannot be rebuilt from source: refusing to read
+    /// it would lock every admin out of their own master key.  So a missing `l` is not an error, it
+    /// is the old format, and the tag length falls back to the one the state already carries.
+    ///
+    /// The expected tag comes from the wrapped crate's own hasher rather than from ours, so this
+    /// pins the fallback to what the old string actually meant, not to what we now think it means.
+    #[test]
+    fn test_a_cfg_string_from_the_previous_release_still_decodes() -> Outcome<()> {
+        let pass = b"The meaning is 42";
+        let salt = b"somesalt";
+        // Exactly what the previous release's `encode_cfg_to_string` emitted: no 'l' option.
+        let old_cfg = fmt!(
+            "$argon2id$v=19$m=1024,t=2,p=1${}",
+            base64::encode_config(salt, base64::STANDARD_NO_PAD),
+        );
+
+        let mut kdf = res!(KeyDerivationScheme::default_argon2("Argon2id", 0x13));
+        res!(kdf.decode_cfg_from_string(&old_cfg));
+        res!(kdf.derive(pass));
+        let ours = res!(kdf.get_hash()).to_vec();
+
+        // The independent oracle: the wrapped crate, told the same parameters by hand.
+        let cfg = argon2::Config {
+            variant:        argon2::Variant::Argon2id,
+            version:        argon2::Version::Version13,
+            mem_cost:       1024,
+            time_cost:      2,
+            lanes:          1,
+            hash_length:    32,
+            ..argon2::Config::default()
+        };
+        let theirs = res!(argon2::hash_raw(pass, salt, &cfg));
+
+        req!(ours, theirs,
+            "A cfg string from the previous release derived a different key than it used to, \
+            which is how a wallet locks its owner out.");
+        Ok(())
+    }
+
     #[test]
     fn test_argon2_encode_pass() -> Outcome<()> {
         // Here we store the hash along with the hasher config.
@@ -859,45 +1163,109 @@ mod tests {
         res!(kdf.derive(pass));
         let encoded_cfg = res!(kdf.encode_cfg_to_string());
         let encoded_with_hash = res!(kdf.encode_to_string());
-        let hash = res!(kdf.get_hash().ok_or(err!("Missing hash."; Bug, Missing)));
+        let hash = res!(kdf.get_hash());
         msg!("hash = '{:02x?}'", hash);
         msg!("encoded cfg = '{}'", encoded_cfg);
         msg!("encoded with hash = '{}'", encoded_with_hash);
-        match kdf.verify(b"The meaning is 43") {
-            Ok(()) => return Err(err!(
-                "The verification should have failed for a differing passphrase.";
-            Test, Unexpected)),
-            Err(_) => (),
-        }
+        req!(res!(kdf.verify(pass)), true);
+        req!(res!(kdf.verify(b"The meaning is 43")), false,
+            "The verification should have failed for a differing passphrase.");
         let mut kdf2 = res!(KeyDerivationScheme::default_argon2("Argon2id", 0x13));
         res!(kdf2.decode_from_string(&encoded_with_hash));
-        assert_eq!(kdf, kdf2);
+        req!(kdf, kdf2);
         let mut kdf3 = res!(KeyDerivationScheme::default_argon2("Argon2id", 0x13));
         res!(kdf3.decode_cfg_from_string(&encoded_cfg));
         res!(kdf3.derive(pass));
-        assert_eq!(kdf, kdf3);
+        req!(kdf, kdf3);
         Ok(())
     }
-    
+
+    /// A configuration string carrying neither a hash nor an explicit tag length keeps the tag
+    /// length the receiving state already holds.
+    ///
+    /// That is the old format, and it is what every deployed wallet contains, so it must decode.
+    /// New strings do not rely on the fallback: `encode_cfg_to_string` always writes `l`, which is
+    /// what makes them self-describing.  See
+    /// `test_a_cfg_string_from_the_previous_release_still_decodes` for the key it must derive.
+    #[test]
+    fn test_argon2_decode_without_a_tag_length_keeps_the_states_own() -> Outcome<()> {
+        let mut kdf = res!(KeyDerivationScheme::default_argon2("Argon2id", 0x13));
+        let expected = match &kdf {
+            KeyDerivationScheme::Argon2(state) => state.hash_length,
+        };
+        res!(kdf.decode_cfg_from_string("$argon2id$v=19$m=65536,t=5,p=1$c29tZXNhbHQ"));
+        match &kdf {
+            KeyDerivationScheme::Argon2(state) => {
+                req!(state.hash_length, expected,
+                    "An old configuration string changed the tag length it derives with.");
+                req!(state.lanes, 1);
+            },
+        }
+        Ok(())
+    }
+
+    /// An option we do not understand may be one that changes the derived key, so it is rejected.
+    #[test]
+    fn test_argon2_decode_rejects_unknown_option() -> Outcome<()> {
+        let mut kdf = res!(KeyDerivationScheme::default_argon2("Argon2id", 0x13));
+        match kdf.decode_cfg_from_string("$argon2id$v=19$m=65536,t=5,p=1,l=32,x=9$c29tZXNhbHQ") {
+            Ok(()) => Err(err!(
+                "A configuration string with an unknown option should not decode.";
+            Test, Unexpected)),
+            Err(_) => Ok(()),
+        }
+    }
+
+    /// The lane count is mandatory, not optional.
+    #[test]
+    fn test_argon2_decode_rejects_missing_lanes() -> Outcome<()> {
+        let mut kdf = res!(KeyDerivationScheme::default_argon2("Argon2id", 0x13));
+        match kdf.decode_cfg_from_string("$argon2id$v=19$m=65536,t=5,l=32$c29tZXNhbHQ") {
+            Ok(()) => Err(err!(
+                "A configuration string with no lane count should not decode."; Test, Unexpected)),
+            Err(_) => Ok(()),
+        }
+    }
+
+    /// A secret is never written to an encoded string, so encoding one must fail loudly rather
+    /// than drop it, which would derive a different key on decoding.
+    #[test]
+    fn test_argon2_encode_refuses_to_drop_secret() -> Outcome<()> {
+        let kdf = KeyDerivationScheme::Argon2(rfc9106_state());
+        match kdf.encode_cfg_to_string() {
+            Ok(s) => Err(err!(
+                "Encoding a state holding a secret should have failed, but produced '{}'.", s;
+            Test, Unexpected)),
+            Err(_) => Ok(()),
+        }
+    }
+
     /// A simple test of viability for a network packet header proof of work.
     #[test]
     fn test_argon2_pow() -> Outcome<()> {
-        let mut kdf = res!(KeyDerivationScheme::default_argon2("Argon2i", 0x13));
-        let prefix = [1u8, 2];
+        // Deliberately cheap parameters: this measures viability, not key strength.
+        let mut kdf = res!(KeyDerivationScheme::new_argon2("Argon2i", 0x13, 512, 1, 16, 32));
+        let prefix = [1u8]; // One byte, so around 256 derivations are expected.
+        let lim: usize = 20_000;
         let mut count: usize = 0;
         let t = res!(SystemTime::now().duration_since(SystemTime::UNIX_EPOCH));
         let mut tstamp = t.as_secs().to_be_bytes().to_vec();
         let mut pass = vec![192u8, 168, 0, 1, 127, 0, 0, 1];
         pass.append(&mut tstamp);
-        loop { 
+        loop {
             res!(kdf.derive(&pass));
-            let hash = res!(kdf.get_hash().ok_or(err!("Missing hash."; Bug, Missing)));
-            msg!("count = {} hash = {:02x?}", count, &hash[0..prefix.len()]);
+            let hash = res!(kdf.get_hash());
             if hash.starts_with(&prefix) { break; }
             count += 1;
+            if count > lim {
+                return Err(err!(
+                    "No proof of work found for a {} byte prefix in {} derivations.",
+                    prefix.len(), lim;
+                Test, Excessive));
+            }
             res!(kdf.set_rand_salt(16));
         }
-        msg!("Success.");
+        msg!("Proof of work found after {} failed derivations.", count);
         Ok(())
     }
 

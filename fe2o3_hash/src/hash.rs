@@ -93,6 +93,8 @@ impl InNamex for HashScheme {
 
 impl Hasher for HashScheme {
 
+    /// Absorbs the input slices in order and the salt last, so that the digest is `H(input ‖
+    /// salt)`.  This ordering is fixed, and pinned by test; changing it changes every digest.
     fn hash<const S: usize>(self, input: &[&[u8]], salt: [u8; S]) -> Hash<S> {
         match self {
             Self::SHA3_256(mut hasher) => {
@@ -381,32 +383,106 @@ impl<
 mod tests {
     use super::*;
 
-    //#[test]
-    //fn test_hash_scheme_sha3() -> Outcome<()> {
-    //    let mut sha3 = res!(sha3::<32>());
-    //    let mut output = [0u8; 32];
-    //    let expected = b"\
-    //        \x64\x4b\xcc\x7e\x56\x43\x73\x04\x09\x99\xaa\xc8\x9e\x76\x22\xf3\
-    //        \xca\x71\xfb\xa1\xd9\x72\xfd\x94\xa3\x1c\x3b\xfb\xf2\x4e\x39\x38\
-    //    ";
-    //
-    //    sha3.update(b"hello");
-    //    sha3.update(b" ");
-    //    sha3.update(b"world");
-    //    sha3.finalize(&mut output);
-    //
-    //    assert_eq!(expected, &output);
-    //    Ok(())
-    //}
+    use oxedyne_fe2o3_iop_hash::api::HashForm;
+
+    /// The known answer for SHA3-256("hello world").
+    const HELLO_WORLD: [u8; 32] = [
+        0x64, 0x4b, 0xcc, 0x7e, 0x56, 0x43, 0x73, 0x04,
+        0x09, 0x99, 0xaa, 0xc8, 0x9e, 0x76, 0x22, 0xf3,
+        0xca, 0x71, 0xfb, 0xa1, 0xd9, 0x72, 0xfd, 0x94,
+        0xa3, 0x1c, 0x3b, 0xfb, 0xf2, 0x4e, 0x39, 0x38,
+    ];
+
+    /// Unwraps the digest of a SHA3-256 hash, which is always 32 bytes.
+    fn digest<const S: usize>(hash: Hash<S>) -> Outcome<[u8; 32]> {
+        match hash.as_hashform() {
+            HashForm::Bytes32(a32) => Ok(a32),
+            other => Err(err!(
+                "Expected SHA3-256 to produce a HashForm::Bytes32, found {:?}.", other;
+            Test, Mismatch)),
+        }
+    }
+
+    /// SHA3-256 short message vectors from the NIST Cryptographic Algorithm Validation Programme,
+    /// SHA3_256ShortMsg.rsp, plus the widely published digest of "abc".
+    #[test]
+    fn test_sha3_256_nist_cavp_short_msg() -> Outcome<()> {
+        let vectors: [(&[u8], [u8; 32]); 5] = [
+            // Len = 0.
+            (&[], [
+                0xa7, 0xff, 0xc6, 0xf8, 0xbf, 0x1e, 0xd7, 0x66,
+                0x51, 0xc1, 0x47, 0x56, 0xa0, 0x61, 0xd6, 0x62,
+                0xf5, 0x80, 0xff, 0x4d, 0xe4, 0x3b, 0x49, 0xfa,
+                0x82, 0xd8, 0x0a, 0x4b, 0x80, 0xf8, 0x43, 0x4a,
+            ]),
+            // Len = 8.
+            (&[0xe9], [
+                0xf0, 0xd0, 0x4d, 0xd1, 0xe6, 0xcf, 0xc2, 0x9a,
+                0x44, 0x60, 0xd5, 0x21, 0x79, 0x68, 0x52, 0xf2,
+                0x5d, 0x9e, 0xf8, 0xd2, 0x8b, 0x44, 0xee, 0x91,
+                0xff, 0x5b, 0x75, 0x9d, 0x72, 0xc1, 0xe6, 0xd6,
+            ]),
+            // Len = 16.
+            (&[0xd4, 0x77], [
+                0x94, 0x27, 0x9e, 0x8f, 0x5c, 0xcd, 0xf6, 0xe1,
+                0x7f, 0x29, 0x2b, 0x59, 0x69, 0x8a, 0xb4, 0xe6,
+                0x14, 0xdf, 0xe6, 0x96, 0xa4, 0x6c, 0x46, 0xda,
+                0x78, 0x30, 0x5f, 0xc6, 0xa3, 0x14, 0x6a, 0xb7,
+            ]),
+            // Len = 32.
+            (&[0xb0, 0x53, 0xfa, 0x1d], [
+                0xbb, 0x86, 0x2f, 0x25, 0xe1, 0x0d, 0x09, 0x3f,
+                0xae, 0x21, 0xea, 0xd5, 0xb4, 0xa2, 0xb3, 0xc5,
+                0x4a, 0x41, 0x10, 0x40, 0x51, 0x09, 0x34, 0x82,
+                0xf0, 0x15, 0x90, 0xb2, 0xea, 0x36, 0xd2, 0x3a,
+            ]),
+            // The published digest of "abc".
+            (b"abc", [
+                0x3a, 0x98, 0x5d, 0xa7, 0x4f, 0xe2, 0x25, 0xb2,
+                0x04, 0x5c, 0x17, 0x2d, 0x6b, 0xd3, 0x90, 0xbd,
+                0x85, 0x5f, 0x08, 0x6e, 0x3e, 0x9d, 0x52, 0x5b,
+                0x46, 0xbf, 0xe2, 0x45, 0x11, 0x43, 0x15, 0x32,
+            ]),
+        ];
+        for (msg, expected) in vectors {
+            // `Hasher::hash` takes `self` by value, and `req!` renders its arguments a second time
+            // when it fails, so the digest is taken once and compared as a binding.
+            let hasher = HashScheme::new_sha3_256();
+            let hash = res!(digest(hasher.hash(&[msg], [])));
+            req!(hash, expected, "SHA3-256 of {:02x?}", msg);
+        }
+        Ok(())
+    }
+
+    /// The input slices must be absorbed in order, as one message.
+    #[test]
+    fn test_sha3_256_absorbs_input_slices_in_order() -> Outcome<()> {
+        let hasher = HashScheme::new_sha3_256();
+        let hash = res!(digest(hasher.hash(&[b"hello", b" ", b"world"], [])));
+        req!(hash, HELLO_WORLD);
+        Ok(())
+    }
+
+    /// The salt is absorbed after the input, giving `H(input ‖ salt)`.  Prepending the salt
+    /// instead would produce a different digest, so this pins the convention against a published
+    /// value rather than against ourselves.
+    #[test]
+    fn test_sha3_256_salt_follows_input() -> Outcome<()> {
+        let hasher = HashScheme::new_sha3_256();
+        // "hello" with the salt " world" must digest as SHA3-256("hello world").
+        let hash = res!(digest(hasher.hash(&[b"hello"], *b" world")));
+        req!(hash, HELLO_WORLD);
+        Ok(())
+    }
 
     #[test]
-    fn test_hash_01() -> Outcome<()> {
-        //let hasher = res!(Hasher::from_str("seahash"));
-        let hasher = HashScheme::new_sha3_256();
-        let input = b"this is a test";
-        msg!("len = {}", res!(hasher.len()));
-        let hash = hasher.hash(&input[..], []);
-        msg!("hash = {:02x?}", hash);
+    fn test_hash_lengths() -> Outcome<()> {
+        let sha3 = HashScheme::new_sha3_256();
+        req!(*res!(sha3.hash_length().required("SHA3-256 hash length")), 32);
+        let len = res!(digest(sha3.hash(&[b"this is a test"], []))).len();
+        req!(len, 32);
+        let seahash = HashScheme::new_seahash();
+        req!(*res!(seahash.hash_length().required("Seahash hash length")), 8);
         Ok(())
     }
 }

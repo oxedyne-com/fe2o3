@@ -518,12 +518,39 @@ impl<
 mod tests {
     use super::*;
 
+    /// The CRC-32 check value: the standard, published checksum of the string "123456789".
+    #[test]
+    fn test_crc32_check_value() -> Outcome<()> {
+        let crc32 = ChecksumScheme::new_crc32();
+        // `calculate` consumes the scheme, and `req!` renders its arguments a second time when it
+        // fails, so the value is taken once and compared as a binding.
+        let csum = res!(crc32.calculate(b"123456789"));
+        req!(csum, 0xCBF4_3926u32.to_be_bytes().to_vec());
+        Ok(())
+    }
+
     #[test]
     fn test_read_checksum() -> Outcome<()> {
         let byts = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
         let crc32 = ChecksumScheme::new_crc32();
-        let (csum, _) = res!(crc32.read_bytes(&mut byts.as_slice()));
-        msg!("csum = {:?}", csum);
+        let (csum, len) = res!(crc32.read_bytes(&mut byts.as_slice()));
+        req!(len, ChecksumScheme::CRC32_BYTE_LEN);
+        req!(csum, vec![1u8, 2, 3, 4]);
         Ok(())
+    }
+
+    /// An appended checksum verifies, and a single altered byte does not.
+    #[test]
+    fn test_append_and_verify() -> Outcome<()> {
+        let byts = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
+        let (mut buf, csum) = res!(ChecksumScheme::new_crc32().append(byts.clone()));
+        req!(buf.len(), byts.len() + ChecksumScheme::CRC32_BYTE_LEN);
+        req!(res!(ChecksumScheme::new_crc32().verify(&buf)), csum);
+        buf[2] ^= 0x01; // Corrupt one byte of the data.
+        match ChecksumScheme::new_crc32().verify(&buf) {
+            Ok(_) => Err(err!(
+                "A buffer with an altered byte should not have verified."; Test, Unexpected)),
+            Err(_) => Ok(()),
+        }
     }
 }

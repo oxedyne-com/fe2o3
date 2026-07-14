@@ -17,6 +17,7 @@ use oxedyne_fe2o3_iop_hash::{
 use std::{
     collections::BTreeMap,
     fmt::Debug,
+    sync::Arc,
     thread,
 };
 
@@ -44,16 +45,19 @@ fn dump_shards<
     H: Hasher + Send + Sync + 'static,
 >(
     shardmap: &ShardMap<C, S, V, M, H>,
-) {
+)
+    -> Outcome<()>
+{
     for i in 0..shardmap.n {
         if let Some(locked_map) = &shardmap.shards[i] {
-            let unlocked_map = locked_map.read().unwrap();
+            let unlocked_map = lock_read!(locked_map);
             debug!("Map {}, len {}", i, unlocked_map.len());
             for (k, v) in (*unlocked_map).iter() {
                 debug!(" k={:02x?} v={:?}", k, v);
             }
         }
     }
+    Ok(())
 }
 
 fn doer<
@@ -100,21 +104,30 @@ pub fn test_map(filter: &'static str) -> Outcome<()> {
 
             let mut data = Vec::new();
             for handle in handles {
-                let thread_data = handle.join().unwrap().unwrap(); // too much effort to handle errors
+                let thread_data = match handle.join() {
+                    Ok(outcome) => res!(outcome),
+                    Err(_) => return Err(err!(
+                        "A ShardMap worker thread panicked."; Test, Thread)),
+                };
                 for pair in thread_data {
                     data.push(pair);
                 }
             }
 
-            dump_shards(&shardmap);
-            for (p, v) in data {
-                let locked_map = res!(shardmap.get_shard(&p));
+            res!(dump_shards(&shardmap));
+            req!(data.len(), N_THREADS * (VALS_PER_THREAD as usize));
+            for (p, v) in &data {
+                let locked_map = res!(shardmap.get_shard(p));
                 let unlocked_map = lock_read!(locked_map);
-                req!(unlocked_map.get(&res!(shardmap.key(&p))), Some(&v));
+                req!(unlocked_map.get(&shardmap.key(p)), Some(v));
             }
             let maps2 = res!(shardmap.remap(N2));
             test!("Remap from {} to {} shards...", N1, N2);
-            dump_shards(&maps2);
+            res!(dump_shards(&maps2));
+            // Every key must still be found after the remapping.
+            for (p, v) in &data {
+                req!(res!(maps2.get_clone(p)), Some(v.clone()));
+            }
         },
         _ => (),
     }
