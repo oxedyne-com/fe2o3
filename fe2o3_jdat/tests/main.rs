@@ -1,5 +1,6 @@
 mod byte;
 mod daticle;
+mod golden;
 mod map;
 mod string;
 
@@ -32,6 +33,7 @@ fn run_tests() -> Outcome<()> {
     res!(map::test_map_func(filter));
     res!(string::test_string_encdec_func(filter));
     res!(byte::test_binary_encdec_func(filter));
+    res!(golden::test_golden_func(filter));
 
     Ok(())
 }

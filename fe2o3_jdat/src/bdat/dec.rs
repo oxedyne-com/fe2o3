@@ -1528,12 +1528,26 @@ impl Dat {
     /// Read a `u64` from bytes in the given buffer, and include the number of bytes read in the
     /// return tuple.  The code prefix must be included in the buffer, but it is assumed that it has
     /// already been verified as within the correct range.
+    ///
+    /// A `c64` must be minimal: the code says how many bytes follow, so a leading zero among them
+    /// encodes a value that a shorter code already encodes, and the encoder never writes one.  Such
+    /// an encoding is refused rather than read, because accepting it would give one value two valid
+    /// byte strings.  o3db hashes these bytes to decide which node owns a record, so a second
+    /// encoding of the same key is a second node, and a record that can be written in one place and
+    /// looked for in another.
     pub fn read_c64(buf: &[u8]) -> Outcome<(u64, usize)> {
         let len = (buf[0] - Dat::C64_CODE_START) as usize;
         if buf.len() < len + 1 {
             return Err(err!(
                 "Not enough bytes to decode the Dat::C64.";
             Bytes, Input, Decode, Missing));
+        }
+        if len > 0 && buf[1] == 0 {
+            return Err(err!(
+                "The Dat::C64 code 0x{:02x} declares {} bytes, but the first is zero. A c64 is \
+                minimally encoded, so this value has a shorter encoding and this one is not \
+                canonical.", buf[0], len;
+            Bytes, Input, Decode, Invalid));
         }
         let mut byts = [0_u8; 8];
         let offset = 8-len;
