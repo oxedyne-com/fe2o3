@@ -67,6 +67,24 @@ impl Pixmap {
 		})
 	}
 
+	/// Takes RGBA bytes that came from somewhere else and calls them a pixmap.
+	///
+	/// The bytes must be exactly `w * h * 4` of them, and a buffer that is not is refused rather
+	/// than padded or cut: a picture that arrived the wrong length is a picture whose sender and
+	/// receiver disagree about its size, and guessing which of them is right paints something
+	/// nobody drew. A caller with pixels from a decoder, a capture, or another process is the
+	/// reason this exists, since every other constructor here makes its own buffer.
+	pub fn from_data(w: usize, h: usize, data: Vec<u8>) -> Outcome<Self> {
+		let pm = res!(Self::new(w, h));
+		if data.len() != pm.data.len() {
+			return Err(err!(
+				"A pixmap of {} by {} holds {} bytes of RGBA, but {} were given.",
+				w, h, pm.data.len(), data.len();
+			Invalid, Input, Mismatch));
+		}
+		Ok(Self { w, h, data })
+	}
+
 	/// Creates a pixmap of the given size, filled with a colour.
 	pub fn filled(w: usize, h: usize, colour: Rgba) -> Outcome<Self> {
 		let mut pm = res!(Self::new(w, h));

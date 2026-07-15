@@ -107,6 +107,20 @@ impl Bounds {
 		}
 	}
 
+	/// The smallest box holding both this one and another.
+	///
+	/// The counterpart of [`Bounds::intersect`], and what anything gathering several boxes into the
+	/// one that contains them needs: a compositor totalling the damage of a frame, an accessibility
+	/// tree giving a rectangle to a node that is made of several runs of text.
+	pub fn union(&self, other: Self) -> Self {
+		Self {
+			x0: self.x0.min(other.x0),
+			y0: self.y0.min(other.y0),
+			x1: self.x1.max(other.x1),
+			y1: self.y1.max(other.y1),
+		}
+	}
+
 	/// The width of the box, or zero if it is empty.
 	pub fn width(&self) -> f32 {
 		(self.x1 - self.x0).max(0.0)
