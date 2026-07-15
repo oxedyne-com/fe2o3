@@ -174,6 +174,36 @@ impl Path {
 		pb.finish()
 	}
 
+	/// A circle centred at `(cx, cy)` with radius `r`, as a closed path.
+	///
+	/// A circle is drawn as four cubic segments, one per quadrant, which is the standard bézier
+	/// approximation and is accurate to about one part in a thousand of the radius -- indistinguishable
+	/// from a true circle at any size a screen shows. See [`Path::ellipse`], of which this is the case
+	/// with equal radii.
+	pub fn circle(cx: f32, cy: f32, r: f32) -> Outcome<Self> {
+		Self::ellipse(cx, cy, r, r)
+	}
+
+	/// An axis-aligned ellipse centred at `(cx, cy)` with radii `rx` and `ry`, as a closed path.
+	///
+	/// Each quadrant is one cubic bézier whose control points sit `k` of the way along the tangent,
+	/// where `k` is the magic constant `4/3 * (sqrt(2) - 1)` that makes a bézier hug a quarter circle.
+	/// The contour runs clockwise from the rightmost point, which fills solid under either fill rule.
+	pub fn ellipse(cx: f32, cy: f32, rx: f32, ry: f32) -> Outcome<Self> {
+		// How far along each tangent a control point sits, for a bézier that meets a quarter arc.
+		const K: f32 = 0.552_284_75;
+		let (kx, ky) = (rx * K, ry * K);
+		let mut pb = PathBuilder::new();
+		// Rightmost point, then clockwise: down to the bottom, left to the leftmost, up to the top.
+		pb.move_to(Pt::new(cx + rx, cy));
+		pb.cubic_to(Pt::new(cx + rx, cy + ky), Pt::new(cx + kx, cy + ry), Pt::new(cx, cy + ry));
+		pb.cubic_to(Pt::new(cx - kx, cy + ry), Pt::new(cx - rx, cy + ky), Pt::new(cx - rx, cy));
+		pb.cubic_to(Pt::new(cx - rx, cy - ky), Pt::new(cx - kx, cy - ry), Pt::new(cx, cy - ry));
+		pb.cubic_to(Pt::new(cx + kx, cy - ry), Pt::new(cx + rx, cy - ky), Pt::new(cx + rx, cy));
+		pb.close();
+		pb.finish()
+	}
+
 	/// The bounding box of the path's points under a transform.
 	///
 	/// Control points are included, so the box is conservative: it can be larger than the curve,
@@ -468,6 +498,29 @@ mod tests {
 		let cs = p.flatten(&Transform::IDENTITY, TOLERANCE);
 		assert_eq!(cs.len(), 1);
 		assert_eq!(cs[0].len(), 4);
+		Ok(())
+	}
+
+	#[test]
+	fn test_a_circle_stays_on_its_radius_08() -> Outcome<()> {
+		// Every flattened point of a circle must sit close to the radius from the centre: the bézier
+		// quadrants approximate the arc to about a part in a thousand, so a tolerance of one percent of
+		// the radius is generous and still catches a control point put in the wrong place.
+		let (cx, cy, r) = (40.0, 30.0, 20.0);
+		let p = res!(Path::circle(cx, cy, r));
+		let cs = p.flatten(&Transform::IDENTITY, TOLERANCE);
+		assert_eq!(cs.len(), 1, "a circle is one contour");
+		for pt in &cs[0] {
+			let d = ((pt.x - cx).powi(2) + (pt.y - cy).powi(2)).sqrt();
+			assert!((d - r).abs() < r * 0.01, "a point at distance {} is off the radius {}", d, r);
+		}
+		// And its bounding box is the square the radius inscribes.
+		let b = match p.bounds(&Transform::IDENTITY) {
+			Some(b) => b,
+			None => return Err(err!("The circle has no bounds."; Test)),
+		};
+		assert!((b.x0 - (cx - r)).abs() < 0.01 && (b.x1 - (cx + r)).abs() < 0.01, "width spans 2r");
+		assert!((b.y0 - (cy - r)).abs() < 0.01 && (b.y1 - (cy + r)).abs() < 0.01, "height spans 2r");
 		Ok(())
 	}
 
