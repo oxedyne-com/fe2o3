@@ -10,6 +10,10 @@ pub use crate::{
 		Pt,
 	},
 	pixmap::Pixmap,
+	qr::{
+		QrEcc,
+		QrMatrix,
+	},
 	raster::FillRule,
 	stroke::{
 		Cap,

@@ -28,6 +28,7 @@ pub mod path;
 pub mod pixmap;
 pub mod png;
 pub mod prelude;
+pub mod qr;
 pub mod raster;
 pub mod stroke;
 pub mod transform;
