@@ -748,17 +748,23 @@ impl<
         -> Outcome<(u16, Option<u64>)>
         where W: AsyncWriteExt + Unpin,
     {
-        // Extract method and request path.
-        let (method, path) = match &request.header.headline {
+        // Extract method, request path and the raw query. The query must ride
+        // through verbatim: an upstream that dispatches on a query parameter
+        // (e.g. `?view=`) never sees it otherwise, and silently gets the
+        // default.
+        let (method, path, query) = match &request.header.headline {
             HttpHeadline::Request { method, loc } => {
-                (fmt!("{}", method), loc.path.as_string().to_string())
+                (fmt!("{}", method), loc.path.as_string().to_string(), loc.query.clone())
             }
             _ => return Err(err!(
                 "{}: proxy: request is not an HTTP request.", id;
                 Invalid, Bug)),
         };
 
-        let upstream_path = route.upstream_path_for(&path);
+        let upstream_path = match query.is_empty() {
+            true  => route.upstream_path_for(&path),
+            false => fmt!("{}?{}", route.upstream_path_for(&path), query),
+        };
 
         // Connect to the upstream.
         let mut upstream = match TcpStream::connect(
@@ -934,14 +940,19 @@ impl<
         -> Outcome<()>
         where S: AsyncRead + AsyncWrite + Unpin,
     {
-        // Extract path from the request.
-        let path = match &request.header.headline {
-            HttpHeadline::Request { loc, .. } => loc.path.as_string().to_string(),
+        // Extract path and raw query from the request, forwarding the query
+        // verbatim as the HTTP path does.
+        let (path, query) = match &request.header.headline {
+            HttpHeadline::Request { loc, .. } =>
+                (loc.path.as_string().to_string(), loc.query.clone()),
             _ => return Err(err!(
                 "{}: proxy ws: request is not an HTTP request.", id;
                 Invalid, Bug)),
         };
-        let upstream_path = route.upstream_path_for(&path);
+        let upstream_path = match query.is_empty() {
+            true  => route.upstream_path_for(&path),
+            false => fmt!("{}?{}", route.upstream_path_for(&path), query),
+        };
 
         // Connect to the upstream.
         let mut upstream = match TcpStream::connect(

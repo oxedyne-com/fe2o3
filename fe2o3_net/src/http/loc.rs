@@ -32,14 +32,19 @@ use std::fmt;
 /// Represents a parsed HTTP URL locator with path, query params, and fragment.
 ///
 /// # Fields
-/// * `path` - The validated request path component
-/// * `data` - Map of parsed query parameters
-/// * `frag` - Fragment identifier (part after #)
+/// * `path` - The validated request path component.
+/// * `data` - Map of parsed query parameters.
+/// * `query` - The raw, verbatim query substring (no leading `?`), kept so a
+///   proxy can forward it byte-for-byte. The parse into `data` is convenient
+///   for handlers but lossy (encoding, ordering, repeated keys), so it must not
+///   be used to reconstruct a request target.
+/// * `frag` - Fragment identifier (part after #).
 #[derive(Clone, Debug, Default)]
 pub struct HttpLocator {
-    pub path: RequestPath,
-    pub data: DaticleMap,
-    pub frag: String,
+    pub path:  RequestPath,
+    pub data:  DaticleMap,
+    pub query: String,
+    pub frag:  String,
 }
 
 impl fmt::Display for HttpLocator {
@@ -68,15 +73,16 @@ impl fmt::Display for HttpLocator {
 impl HttpLocator {
 
     pub fn new<S: Into<String>>(loc: S) -> Outcome<Self> {
-        let (path, data, frag) = res!(Self::parse_locator_string(&loc.into()));
+        let (path, data, query, frag) = res!(Self::parse_locator_string(&loc.into()));
         Ok(Self {
             path,
             data,
+            query,
             frag,
         })
     }
 
-    fn parse_locator_string(path: &str) -> Outcome<(RequestPath, DaticleMap, String)> {
+    fn parse_locator_string(path: &str) -> Outcome<(RequestPath, DaticleMap, String, String)> {
         let mut split = path.split('?');
         let path = RequestPath::new(split.next().unwrap_or_default().to_string());
         let rest = split.next().unwrap_or_default();
@@ -85,7 +91,10 @@ impl HttpLocator {
         let fragment = split_rest.next().unwrap_or_default();
         let map = res!(Self::parse_query_string(query_string));
 
-        Ok((path, map, fragment.to_string()))
+        // Retain the raw query verbatim as well as the parsed map: a proxy must
+        // forward it byte-for-byte, and the parsed map cannot be relied on to
+        // reconstruct it faithfully.
+        Ok((path, map, query_string.to_string(), fragment.to_string()))
     }
 
     fn parse_query_string(query: &str) -> Outcome<DaticleMap> {
@@ -351,6 +360,23 @@ impl Url {
 #[cfg(test)]
 mod url_tests {
     use super::*;
+
+    #[test]
+    fn test_a_locator_keeps_its_raw_query_for_forwarding() -> Outcome<()> {
+        let loc = res!(HttpLocator::new("/api/admin?view=geo&page=2"));
+        assert_eq!(loc.path.as_string(), "/api/admin");
+        // The raw query survives verbatim, no leading `?`, for a proxy to
+        // forward byte-for-byte -- the parse into `data` is a convenience only.
+        assert_eq!(loc.query, "view=geo&page=2");
+        Ok(())
+    }
+
+    #[test]
+    fn test_a_locator_with_no_query_has_an_empty_query() -> Outcome<()> {
+        let loc = res!(HttpLocator::new("/api/health"));
+        assert_eq!(loc.query, "");
+        Ok(())
+    }
 
     #[test]
     fn test_a_plain_url_parses_into_its_parts() -> Outcome<()> {
