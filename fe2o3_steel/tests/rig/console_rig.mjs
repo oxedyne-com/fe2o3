@@ -164,6 +164,29 @@ async function main() {
 	if (reply.startsWith('error')) no('login was refused', reply); else ok('login is not refused');
 	socket.end();
 
+	console.log('\n== a signed-in member who is not on the list learns their id ==');
+	// The bootstrap: a member who is not an admin is shown their own id and told
+	// to ask for it, rather than sent silently home. A second account, on no list.
+	{
+		const other = 'rig second member not an admin';
+		const otherUser = crypto.createHash('sha256').update(norm(other)).digest('hex');
+		const a2 = await call('GET', '/');
+		let c2 = null;
+		for (const c of (a2.headers['set-cookie'] || [])) {
+			const m = c.match(/session_id=([^;]+)/);
+			if (m) c2 = 'session_id=' + m[1];
+		}
+		const s2 = await upgrade(c2);
+		await send(s2, `register "${otherUser}" "${other}"`);
+		await send(s2, `login "${otherUser}" "${other}"`);
+		s2.end();
+		const r2 = await call('GET', '/manage', { cookie: c2 });
+		check('a non-admin member is refused', r2.status, 403);
+		has('but is shown their own id', r2.body, otherUser);
+		has('and told what to ask for', r2.body, 'site_admins');
+		hasnt('status does not call them an admin', (await call('GET', '/manage/status', { cookie: c2 })).body, '"admin":true');
+	}
+
 	console.log('\n== now a member who is on the list is an admin ==');
 	r = await call('GET', '/manage/status', { cookie });
 	has('status now says admin', r.body, '"admin":true');

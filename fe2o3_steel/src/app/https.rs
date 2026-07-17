@@ -325,14 +325,16 @@ impl<
                 )));
             }
 
-            // The site console, at `/manage`, before static files: a site
-            // that has admins claims the prefix, and a member on the list who
-            // is signed in reaches it in the site's own look. A site with no
-            // admins skips this and `/manage` means whatever it meant before.
-            // The gate is inside the module, which reads the member session
-            // and checks the list; a non-admin is turned away, not shown that
-            // the console is there.
-            if !site_admins.is_empty() && site_console::owns(&request_path) {
+            // The site console, at `/manage`, before static files. A site that
+            // has content to manage claims the prefix -- so a signed-in member
+            // can learn their id and ask to be an admin even before anyone is
+            // one, which is the bootstrap. A site that neither publishes nor
+            // has admins skips this and `/manage` means what it did before. The
+            // gate is inside: a listed member manages, a signed-in member who
+            // is not listed is shown their id, an anonymous visitor is sent home.
+            if (publish.is_some() || !site_admins.is_empty())
+                && site_console::owns(&request_path)
+            {
                 let resp = res!(site_console::handle_get(
                     site_admins.as_ref(),
                     publish.as_deref(),
@@ -579,8 +581,12 @@ impl<
         async move {
             // The site console's writes, gated on a site admin's session and
             // guarded against cross-site forgery. It answers only the paths it
-            // writes to and hands the rest back. A site with no admins skips it.
-            if !site_admins.is_empty() && site_console::owns(&request_path) {
+            // writes to and hands the rest back. Dispatched on the same terms as
+            // its pages; the gate inside denies a site with no admins, since a
+            // write needs a listed member and an empty list names none.
+            if (publish.is_some() || !site_admins.is_empty())
+                && site_console::owns(&request_path)
+            {
                 if let Some(resp) = res!(site_console::handle_post(
                     site_admins.as_ref(),
                     publish.as_deref(),
