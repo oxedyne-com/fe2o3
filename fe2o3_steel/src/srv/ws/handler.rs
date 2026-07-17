@@ -257,7 +257,9 @@ impl WebSocketHandler for AppWebSocketHandler {
     )
         -> Outcome<Option<WebSocketMessage>>
     {
-        debug!("{}: AppWebSocketHandler received text message: '{}'", id, txt);
+        // Redacted, because this line is every message a client sends and some of
+        // them carry a passphrase. See `redact`.
+        debug!("{}: AppWebSocketHandler received text message: '{}'", id, redact(&txt));
 
         let msgrx = Msg::new(syntax.clone());
         let msgrx = match msgrx.from_str(&txt, None) {
@@ -1219,3 +1221,73 @@ impl WebSocketHandler for AppWebSocketHandler {
     }
 }
 
+/// A message as it may be written to a log.
+///
+/// `register` and `login` carry a passphrase as their second argument, in the
+/// clear, because the wire is TLS and the server needs the passphrase to hash
+/// it. That is fine on the wire and not fine in a journal, which is plain text,
+/// is read by anyone who can read the host, and outlives the request by however
+/// long the log is kept.
+///
+/// So those two keep their command name and lose their arguments. Everything
+/// else is logged whole: a key or a value is not a secret in the way a
+/// passphrase is, and a debug log that hid them would not be worth turning on.
+///
+/// **The test is the command, not the shape of the argument.** A redactor that
+/// tried to spot something secret-looking would be wrong the first time somebody
+/// added a command with a secret in a new position, and wrong silently. A
+/// command this does not know is logged whole, which is the right default for a
+/// vocabulary where the two exceptions are named -- but it does mean a new
+/// command carrying a secret must be added here, and this comment is the notice.
+fn redact(txt: &str) -> String {
+    let name = match txt.split_whitespace().next() {
+        Some(n) => n,
+        None    => return txt.to_string(),
+    };
+    match name {
+        "register" | "login" => fmt!("{} <redacted>", name),
+        _ => txt.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod redact_tests {
+    use super::*;
+
+    /// A passphrase does not reach the log, whatever it looks like.
+    #[test]
+    fn test_a_passphrase_is_not_logged_00() -> Outcome<()> {
+        let secret = "correct horse battery staple";
+        for cmd in ["login", "register"] {
+            let line = fmt!("{} \"abc123\" \"{}\"", cmd, secret);
+            let out = redact(&line);
+            assert!(!out.contains(secret), "{} leaked the passphrase: {}", cmd, out);
+            assert!(!out.contains("abc123"), "{} leaked the username: {}", cmd, out);
+            assert!(out.starts_with(cmd), "{} lost its name: {}", cmd, out);
+        }
+        Ok(())
+    }
+
+    /// Everything else is logged whole, or the log is not worth having.
+    #[test]
+    fn test_the_rest_is_logged_whole_01() -> Outcome<()> {
+        for line in [
+            "sess_get \"cart\"",
+            "user_put \"cart\" \"{}\"",
+            "whoami",
+            "logout",
+        ] {
+            assert_eq!(redact(line), line);
+        }
+        Ok(())
+    }
+
+    /// Nothing here panics on what a hostile client may send.
+    #[test]
+    fn test_odd_input_is_survived_02() -> Outcome<()> {
+        assert_eq!(redact(""), "");
+        assert_eq!(redact("   "), "   ");
+        assert_eq!(redact("login"), "login <redacted>");
+        Ok(())
+    }
+}
