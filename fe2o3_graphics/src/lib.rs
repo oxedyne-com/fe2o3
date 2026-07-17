@@ -29,6 +29,13 @@
 //! is then only a silhouette filled into a scratch pixmap, blurred, and composited back. The blur
 //! runs on premultiplied alpha, without which the colour of the clear pixels a shape is blurred
 //! against would bleed into it and fringe it with dirt.
+//!
+//! # SVG path data
+//!
+//! [`svg`] reads the `d` attribute of an SVG `<path>` -- and only that. Path data is a small closed
+//! grammar and the one part every drawing program agrees on, so it is where a vector mark drawn
+//! elsewhere can be let in without letting in a document format. Elliptical arcs, which the path
+//! types have no segment for, become cubic béziers on the way in.
 #![forbid(unsafe_code)]
 
 pub mod blur;
@@ -40,4 +47,5 @@ pub mod prelude;
 pub mod qr;
 pub mod raster;
 pub mod stroke;
+pub mod svg;
 pub mod transform;
