@@ -916,10 +916,8 @@ impl WebSocketHandler for AppWebSocketHandler {
                     let meta_key = match self.sess_meta_key() {
                         Some(k) => k,
                         None => {
-                            let mut m = DaticleMap::new();
-                            m.insert(dat!("authenticated"), Dat::Bool(false));
                             return Self::response_text(syntax, "data",
-                                vec![Dat::Map(m)]);
+                                vec![res!(whoami_dat(None))]);
                         }
                     };
                     if let Some((ref db, _)) = db {
@@ -939,20 +937,12 @@ impl WebSocketHandler for AppWebSocketHandler {
                                     },
                                     _ => None,
                                 };
-                                let mut out = DaticleMap::new();
-                                out.insert(dat!("authenticated"),
-                                    Dat::Bool(user_opt.is_some()));
-                                if let Some(u) = user_opt {
-                                    out.insert(dat!("user"), dat!(u));
-                                }
                                 return Self::response_text(syntax, "data",
-                                    vec![Dat::Map(out)]);
+                                    vec![res!(whoami_dat(user_opt))]);
                             }
                             Ok(None) => {
-                                let mut m = DaticleMap::new();
-                                m.insert(dat!("authenticated"), Dat::Bool(false));
                                 return Self::response_text(syntax, "data",
-                                    vec![Dat::Map(m)]);
+                                    vec![res!(whoami_dat(None))]);
                             }
                             Err(err) => {
                                 return Self::response_text(syntax, "error",
@@ -1218,6 +1208,116 @@ impl WebSocketHandler for AppWebSocketHandler {
             debug!("{}: No dev receiver available to accept client refresh messages.", id);
             Ok(None)
         }
+    }
+}
+
+/// The answer to `whoami`, as JSON held in a jdat string.
+///
+/// Every other value this protocol returns is JSON inside a jdat string, and not by accident: the
+/// client puts JSON in with `sess_put`, and `sess_get` hands the same string back untouched. The
+/// server is keeping a string, so a string is what comes out.
+///
+/// `whoami` is the one answer the server composes itself, and that is what made it the exception.
+/// A bare jdat map is a form the only client of this wire cannot read: jdat writes a bool as
+/// `(true)`, which is not JSON, and a browser carries no jdat reader. The map went out, the client
+/// read `undefined` off a string, and every session looked signed out to the page that asked. So
+/// the answer keeps the convention the rest of the wire already keeps.
+///
+/// [`Dat::json`] does the rendering, so nothing here writes JSON by hand.
+fn whoami_dat(user_opt: Option<String>) -> Outcome<Dat> {
+    let mut m = DaticleMap::new();
+    m.insert(dat!("authenticated"), Dat::Bool(user_opt.is_some()));
+    if let Some(u) = user_opt {
+        m.insert(dat!("user"), dat!(u));
+    }
+    Ok(dat!(res!(Dat::Map(m).json())))
+}
+
+#[cfg(test)]
+mod whoami_tests {
+    use super::*;
+
+    use oxedyne_fe2o3_jdat::{
+        string::dec::DecoderConfig,
+        usr::{
+            UsrKind,
+            UsrKindCode,
+            UsrKindId,
+        },
+    };
+
+    use std::collections::BTreeMap;
+
+    /// A signed-in session says so, and says who, in JSON a browser can read.
+    #[test]
+    fn test_a_signed_in_session_is_json_00() -> Outcome<()> {
+        let user = "eb00b174d02fc1ad";
+        let dat = res!(whoami_dat(Some(user.to_string())));
+        let txt = match &dat {
+            Dat::Str(s) => s.clone(),
+            other => return Err(err!(
+                "Expected a string holding JSON, got {:?}.", other;
+                Test, Invalid, Mismatch)),
+        };
+        // The kind wrapper is what the client cannot read: `(true)` is jdat, `true` is JSON.
+        assert!(!txt.contains("(true)"), "The bool kept its jdat kind: {}", txt);
+        assert!(txt.contains("\"authenticated\""), "No authenticated member: {}", txt);
+        assert!(txt.contains("true"), "Not reported as authenticated: {}", txt);
+        assert!(txt.contains(user), "The user did not survive: {}", txt);
+        Ok(())
+    }
+
+    /// A session with nobody in it says so, and names no user.
+    #[test]
+    fn test_a_signed_out_session_names_nobody_01() -> Outcome<()> {
+        let dat = res!(whoami_dat(None));
+        let txt = match &dat {
+            Dat::Str(s) => s.clone(),
+            other => return Err(err!(
+                "Expected a string holding JSON, got {:?}.", other;
+                Test, Invalid, Mismatch)),
+        };
+        assert!(!txt.contains("(false)"), "The bool kept its jdat kind: {}", txt);
+        assert!(txt.contains("false"), "Not reported as unauthenticated: {}", txt);
+        assert!(!txt.contains("\"user\""), "Named a user with nobody signed in: {}", txt);
+        Ok(())
+    }
+
+    /// The answer reads back as JSON, which is the whole point of it.
+    ///
+    /// jdat's own decoder in JSON mode stands in for the browser here: it accepts JSON and
+    /// nothing else, so a reply it can read is a reply `JSON.parse` can read.
+    #[test]
+    fn test_the_answer_parses_as_json_02() -> Outcome<()> {
+        for user_opt in [Some("abc123".to_string()), None] {
+            let signed_in = user_opt.is_some();
+            let dat = res!(whoami_dat(user_opt));
+            let txt = match &dat {
+                Dat::Str(s) => s.clone(),
+                other => return Err(err!(
+                    "Expected a string holding JSON, got {:?}.", other;
+                    Test, Invalid, Mismatch)),
+            };
+            let cfg: DecoderConfig<
+                BTreeMap<UsrKindCode, UsrKind>,
+                BTreeMap<String, UsrKindId>,
+            > = DecoderConfig::json(None);
+            let back = res!(Dat::decode_string_with_config(txt.clone(), &cfg));
+            let m = match back {
+                Dat::Map(m) => m,
+                other => return Err(err!(
+                    "Expected a JSON object, got {:?} from {}.", other, txt;
+                    Test, Invalid, Mismatch)),
+            };
+            match m.get(&dat!("authenticated")) {
+                Some(Dat::Bool(b)) => assert_eq!(*b, signed_in,
+                    "Wrong authenticated value in {}.", txt),
+                other => return Err(err!(
+                    "Expected a bool for authenticated, got {:?} from {}.", other, txt;
+                    Test, Invalid, Mismatch)),
+            }
+        }
+        Ok(())
     }
 }
 
