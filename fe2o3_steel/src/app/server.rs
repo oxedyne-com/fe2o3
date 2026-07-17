@@ -550,6 +550,7 @@ impl AppShellContext {
                 Some(admin_state.clone()),
                 Some(traffic.clone()),
                 vh.publish.clone().map(Arc::new),
+                Arc::new(vh.site_admins.clone()),
             );
 
             let runtime = Arc::new(VhostRuntime {

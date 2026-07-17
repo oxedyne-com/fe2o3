@@ -57,7 +57,10 @@
           "site_name":  "Rig",
           "base_url":   "https://localhost:@PORT@",
           "css":        (vek|[])
-        }
+        },
+        "site_admins": (vek|[
+          "4658b4deeb6811967464e55e1e37523c01cc37b2328b7b5a88ff4d658b060034"
+        ])
       }
     ]
   }

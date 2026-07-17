@@ -821,6 +821,23 @@ pub struct VhostConfig {
     /// paths, which is what a config with no `publish` block means and
     /// what every config written before the block existed says.
     pub publish:                Option<PublishConfig>,
+    /// Who may administer this site from within it, at `/manage`.
+    ///
+    /// Each entry is a member's username -- the same identifier the
+    /// site's own login issues, which is the SHA-256 of the member's
+    /// passphrase. A member whose username is in this list, and who is
+    /// signed in, reaches the site console; everyone else is turned
+    /// away from it.
+    ///
+    /// This is the operator's grant, and it lives here rather than in
+    /// the site's database on purpose. The operator owns the host and
+    /// decides who runs each site; a site's own database, which a
+    /// content bug could reach, cannot mint its own administrators, so
+    /// the blast radius of such a bug stays content and never becomes
+    /// authority. Empty (the default, and what every config written
+    /// before this existed says) means the site has no console and
+    /// `/manage` means whatever it meant before.
+    pub site_admins:            Vec<String>,
 }
 
 /// A single entry in a vhost's [`VhostConfig::admin_keys`] list.
@@ -874,6 +891,7 @@ impl Default for VhostConfig {
             head_injection_url:     None,
             proxy_routes:           Vec::new(),
             term_config:            None,
+            site_admins:            Vec::new(),
         }
     }
 }
@@ -1141,6 +1159,38 @@ impl VhostConfig {
                 "VhostConfig: 'publish' must be a map.";
                 Invalid, Input, Mismatch)),
         };
+        // A list and a vek are both written as a list of strings, so both are
+        // read, as everywhere else a list of strings is accepted here.
+        let site_admins = match m.get(&dat!("site_admins")) {
+            Some(Dat::List(list)) => {
+                let mut out = Vec::new();
+                for item in list {
+                    match item {
+                        Dat::Str(s) => out.push(s.clone()),
+                        _ => return Err(err!(
+                            "VhostConfig: 'site_admins' entries must be strings.";
+                            Invalid, Input, Mismatch)),
+                    }
+                }
+                out
+            }
+            Some(Dat::Vek(vek)) => {
+                let mut out = Vec::new();
+                for item in vek.iter() {
+                    match item {
+                        Dat::Str(s) => out.push(s.clone()),
+                        _ => return Err(err!(
+                            "VhostConfig: 'site_admins' entries must be strings.";
+                            Invalid, Input, Mismatch)),
+                    }
+                }
+                out
+            }
+            None => Vec::new(),
+            _ => return Err(err!(
+                "VhostConfig: 'site_admins' must be a list of strings.";
+                Invalid, Input, Mismatch)),
+        };
         Ok(Self {
             hostnames,
             public_dir_rel,
@@ -1156,6 +1206,7 @@ impl VhostConfig {
             proxy_routes,
             term_config,
             publish,
+            site_admins,
         })
     }
 

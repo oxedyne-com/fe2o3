@@ -16,10 +16,10 @@ use crate::srv::{
         WebhookRoute,
     },
     dev::refresh::HtmlModifier,
+    console as site_console,
     publish::{
         self,
         PublishConfig,
-        composer as publish_composer,
         page as publish_page,
     },
     webhook::{
@@ -120,6 +120,11 @@ pub struct AppWebHandler<
     /// the paths the block would have claimed fall through to the
     /// static file router like any others.
     pub publish:                Option<Arc<PublishConfig>>,
+    /// The members the operator has entrusted with this site, by
+    /// username. A signed-in member on this list reaches the site
+    /// console at `/manage`; an empty list means the site has no
+    /// console and `/manage` means whatever it meant before.
+    pub site_admins:            Arc<Vec<String>>,
 }
 
 impl<
@@ -141,6 +146,7 @@ impl<
         admin_state:            Option<Arc<AdminState>>,
         traffic:                Option<Arc<TrafficRecorder>>,
         publish:                Option<Arc<PublishConfig>>,
+        site_admins:            Arc<Vec<String>>,
     )
         -> Self
     {
@@ -158,6 +164,7 @@ impl<
             admin_state,
             traffic,
             publish,
+            site_admins,
         }
     }
 
@@ -265,6 +272,7 @@ impl<
         let tls_client = self.tls_client.clone();
         let admin_state = self.admin_state.clone();
         let publish = self.publish.clone();
+        let site_admins = self.site_admins.clone();
 
         async move {
             // The dashboard owns the entire `/admin` and `/admin/*`
@@ -281,28 +289,6 @@ impl<
             {
                 if let Some(state) = &admin_state {
                     let resp = res!(admin_ozone_view::handle_get(
-                        state.as_ref(),
-                        db.as_ref(),
-                        &request_path,
-                        &request_query,
-                        &req_headers,
-                        &id,
-                    ).await);
-                    return Ok(Some(resp));
-                }
-                return Ok(Some(HttpMessage::respond_with_text(
-                    HttpStatus::NotFound,
-                    "Not found.",
-                )));
-            }
-            // The composer, before the dashboard's own routes: it is an `/admin` page like the
-            // rest, but it needs the per-vhost publish config and the per-vhost database, which
-            // the non-generic handler module does not carry. Same two-stage reason as the ozone
-            // view above.
-            if publish_composer::owns(&request_path) {
-                if let Some(state) = &admin_state {
-                    let resp = res!(publish_composer::handle_get(
-                        publish.as_deref(),
                         state.as_ref(),
                         db.as_ref(),
                         &request_path,
@@ -337,6 +323,26 @@ impl<
                     HttpStatus::NotFound,
                     "Not found.",
                 )));
+            }
+
+            // The site console, at `/manage`, before static files: a site
+            // that has admins claims the prefix, and a member on the list who
+            // is signed in reaches it in the site's own look. A site with no
+            // admins skips this and `/manage` means whatever it meant before.
+            // The gate is inside the module, which reads the member session
+            // and checks the list; a non-admin is turned away, not shown that
+            // the console is there.
+            if !site_admins.is_empty() && site_console::owns(&request_path) {
+                let resp = res!(site_console::handle_get(
+                    site_admins.as_ref(),
+                    publish.as_deref(),
+                    db.as_ref(),
+                    &request_path,
+                    &request_query,
+                    &req_headers,
+                    &id,
+                ).await);
+                return Ok(Some(resp));
             }
 
             // The published prose owns its prefix and everything under
@@ -568,24 +574,23 @@ impl<
         let tls_client = self.tls_client.clone();
         let admin_state = self.admin_state.clone();
         let publish = self.publish.clone();
+        let site_admins = self.site_admins.clone();
 
         async move {
-            // The composer's writes, before the dashboard's own, for the same reason its pages
-            // are: it needs the per-vhost publish config and database. It answers only the paths
-            // it knows and hands the rest back to the dashboard below.
-            if publish_composer::owns(&request_path) {
-                if let Some(state) = &admin_state {
-                    if let Some(resp) = res!(publish_composer::handle_post(
-                        publish.as_deref(),
-                        state.as_ref(),
-                        db.as_ref(),
-                        &request_path,
-                        &req_headers,
-                        &body,
-                        &id,
-                    ).await) {
-                        return Ok(Some(resp));
-                    }
+            // The site console's writes, gated on a site admin's session and
+            // guarded against cross-site forgery. It answers only the paths it
+            // writes to and hands the rest back. A site with no admins skips it.
+            if !site_admins.is_empty() && site_console::owns(&request_path) {
+                if let Some(resp) = res!(site_console::handle_post(
+                    site_admins.as_ref(),
+                    publish.as_deref(),
+                    db.as_ref(),
+                    &request_path,
+                    &req_headers,
+                    &body,
+                    &id,
+                ).await) {
+                    return Ok(Some(resp));
                 }
             }
 

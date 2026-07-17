@@ -31,7 +31,6 @@
 //! rearrangement. A directory of Markdown is not a stand-in meanwhile: it is a real way to write, and
 //! the file is the source either way.
 
-pub mod composer;
 pub mod feed;
 pub mod json;
 pub mod page;

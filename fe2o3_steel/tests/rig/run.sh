@@ -96,164 +96,26 @@ check "/admin/ with a slash is the same, not a 404" \
 has "the login form is served" "$(curl -sk "$B/admin/login")" "passphrase"
 
 echo
-echo "== the gate, before signing in =="
-check "an anonymous GET is not served the composer" \
-    "$(curl -sk -o /dev/null -w '%{http_code}' "$B/admin/publish")" "303"
-check "an anonymous POST is refused (404, not 401)" \
-    "$(curl -sk -o /dev/null -w '%{http_code}' -X POST -d 'slug=sneaky&source=x' "$B/admin/publish/save")" "404"
-
-echo
-echo "== the cookie the dashboard issues =="
-# The composer lives under /admin because of what this cookie says, and for no
-# other reason. If this ever stops saying Path=/admin, the design moved.
+echo "== the operator dashboard still works, and is a separate tier =="
+# The operator login is not the site console's login. It stays Path=/admin and
+# SameSite=Strict; the console is reached with a member's Path=/ cookie instead.
 hdrs=$(curl -sk -D - -o /dev/null -X POST -d "passphrase=$PASS" "$B/admin/login")
-has "signing in sets a session cookie" "$hdrs" "[Ss]et-[Cc]ookie"
-has "the cookie is Path=/admin -- the whole reason the composer lives there" "$hdrs" "Path=/admin"
-has "the cookie is SameSite=Strict" "$hdrs" "SameSite=Strict"
-has "the cookie is HttpOnly" "$hdrs" "HttpOnly"
-
+has "the operator login sets a session cookie" "$hdrs" "[Ss]et-[Cc]ookie"
+has "scoped to /admin, not the whole site" "$hdrs" "Path=/admin"
+has "and SameSite=Strict" "$hdrs" "SameSite=Strict"
 curl -sk -c $J -o /dev/null -X POST -d "passphrase=$PASS" "$B/admin/login"
+has "the operator reaches the dashboard" "$(curl -sk -b $J "$B/admin")" "Overview"
+hasnt "and content authoring has left the dashboard" "$(curl -sk -b $J "$B/admin")" "/admin/publish"
 
 echo
-echo "== signed in =="
-body=$(curl -sk -b $J "$B/admin/publish")
-has "the composer serves its page" "$body" "Posts"
-has "the nav carries a Publish entry" "$body" "/admin/publish"
-has "the empty store says so" "$body" "Nothing written yet"
-
-echo
-echo "== import the directory =="
-check "the import redirects back to the list" \
-    "$(curl -sk -b $J -o /dev/null -w '%{http_code}' -X POST "$B/admin/publish/import")" "303"
-body=$(curl -sk -b $J "$B/admin/publish")
-has "the imported post is listed by its own heading" "$body" "The first post"
-has "the imported post is live" "$body" "live"
-has "the imported post kept its date" "$body" "2026-07-01"
-
-echo
-echo "== write a post =="
-check "saving redirects back to the list" "$(curl -sk -b $J -o /dev/null -w '%{http_code}' -X POST \
-    --data-urlencode 'slug=written-here' \
-    --data-urlencode 'date=2026-07-17' \
-    --data-urlencode 'kind=essay' \
-    --data-urlencode 'state=draft' \
-    --data-urlencode 'source=# Written in the composer
-
-A paragraph, and a [link](https://example.com).' \
-    "$B/admin/publish/save")" "303"
-body=$(curl -sk -b $J "$B/admin/publish")
-has "the new post is listed by its heading" "$body" "Written in the composer"
-has "it is a draft" "$body" "draft"
-has "it is an essay" "$body" "essay"
-
-echo
-echo "== a draft is served to nobody =="
-check "the draft 404s to a reader" \
-    "$(curl -sk -o /dev/null -w '%{http_code}' "$B/posts/written-here")" "404"
-body=$(curl -sk "$B/posts")
-hasnt "the draft is not on the public index" "$body" "Written in the composer"
-has "the live post is" "$body" "The first post"
-
-echo
-echo "== but its author can preview it =="
-body=$(curl -sk -b $J "$B/admin/publish/preview?slug=written-here")
-has "the preview renders the prose" "$body" "Written in the composer"
-has "the preview renders the Markdown link as a link" "$body" 'href="https://example.com"'
-has "the preview says it is a draft" "$body" "served to nobody"
-
-echo
-echo "== publish it =="
-curl -sk -b $J -o /dev/null -X POST \
-    --data-urlencode 'slug=written-here' --data-urlencode 'was=written-here' \
-    --data-urlencode 'date=2026-07-17' --data-urlencode 'kind=essay' \
-    --data-urlencode 'state=live' \
-    --data-urlencode 'source=# Written in the composer
-
-A paragraph, and a [link](https://example.com).' \
-    "$B/admin/publish/save"
-check "the published post is served to a reader" \
-    "$(curl -sk -o /dev/null -w '%{http_code}' "$B/posts/written-here")" "200"
-body=$(curl -sk "$B/posts/written-here")
-has "the reader gets the prose in the first response" "$body" "A paragraph"
-has "the page carries its Open Graph card" "$body" "og:title"
-
-echo
-echo "== a form does not get to invent a key =="
-# A slug reaches a database key and a URL. This is the check that matters most.
-check "a slug with a path in it is refused" "$(curl -sk -b $J -o /dev/null -w '%{http_code}' -X POST \
-    --data-urlencode 'slug=../../publish/index' --data-urlencode 'source=x' \
-    "$B/admin/publish/save")" "303"
-body=$(curl -sk -b $J "$B/admin/publish")
-hasnt "and wrote nothing" "$body" "publish/index"
-has "the index still serves the posts it had" "$(curl -sk "$B/posts")" "The first post"
-
-echo
-echo "== rename takes the post with it =="
-curl -sk -b $J -o /dev/null -X POST \
-    --data-urlencode 'slug=renamed' --data-urlencode 'was=written-here' \
-    --data-urlencode 'date=2026-07-17' --data-urlencode 'kind=essay' \
-    --data-urlencode 'state=live' --data-urlencode 'source=# Renamed
-
-Words.' \
-    "$B/admin/publish/save"
-check "the post is at its new name" \
-    "$(curl -sk -o /dev/null -w '%{http_code}' "$B/posts/renamed")" "200"
-check "and no longer at the old one" \
-    "$(curl -sk -o /dev/null -w '%{http_code}' "$B/posts/written-here")" "404"
-
-echo
-echo "== delete =="
-curl -sk -b $J -o /dev/null -X POST --data-urlencode 'slug=renamed' "$B/admin/publish/delete"
-check "a deleted post is gone" \
-    "$(curl -sk -o /dev/null -w '%{http_code}' "$B/posts/renamed")" "404"
-
-echo
-echo "== a deleted post stays deleted =="
-# Database::delete marks a key, and a marked key still comes back from a scan. A
-# repair that trusted the scan would resurrect every post ever deleted.
-curl -sk -b $J -o /dev/null -X POST "$B/admin/publish/import"
-body=$(curl -sk -b $J "$B/admin/publish")
-hasnt "an import does not resurrect it" "$body" "Renamed"
-has "and the directory's post is still there" "$body" "The first post"
-
-echo
-echo "== a post says which kind it is, or a page cannot tell =="
-# Without this the stream shows a passing thought and an essay identically, which
-# is the furniture a note is defined by not wearing.
-json=$(curl -sk "$B/posts/index.json")
-has "the JSON carries the kind" "$json" '"kind"'
-has "the imported post is a note" "$json" '"kind": "note"'
-
-echo
-echo "== two posts in one day have an order =="
-# A day is not an order: same-day posts used to fall back to sorting by slug,
-# which is alphabetical and has nothing to do with which was written first.
-for t in "09:00|zulu-early" "14:30|alpha-late"; do
-    curl -sk -b $J -o /dev/null -X POST \
-        --data-urlencode "slug=${t##*|}" \
-        --data-urlencode "date=2026-07-20 ${t%%|*}" \
-        --data-urlencode 'kind=note' --data-urlencode 'state=live' \
-        --data-urlencode "source=# ${t##*|}
-
-Words." "$B/admin/publish/save"
-done
-# alpha-late is later in the day and alphabetically first. Order by time, and it
-# leads; order by slug, and it leads for the wrong reason -- so check the one
-# whose slug sorts *last* comes second.
-order=$(curl -sk "$B/posts/index.json" | grep -o '"slug": "[a-z-]*"' | head -2 | tr '\n' ' ')
-check "the later post of the day comes first" "$order" '"slug": "alpha-late" "slug": "zulu-early" '
-has "a timed date survives the round trip" "$(curl -sk "$B/posts/index.json")" '"date": "2026-07-20T14:30"'
-has "and a reader is given it without the T" "$(curl -sk "$B/posts/index.json")" '"date_text": "2026-07-20 14:30"'
-has "the feed dates it to the minute, not to midnight" "$(curl -sk "$B/posts/feed.xml")" '2026-07-20T14:30:00Z'
-has "the page shows a reader the readable form" "$(curl -sk "$B/posts/alpha-late")" '2026-07-20 14:30</time>'
-has "and the machine-readable form in the attribute" "$(curl -sk "$B/posts/alpha-late")" 'datetime="2026-07-20T14:30"'
-
-echo
-echo "== a date that is not one is refused =="
-check "a date with no shape is refused" "$(curl -sk -b $J -o /dev/null -w '%{http_code}' -X POST \
-    --data-urlencode 'slug=badly-dated' --data-urlencode 'date=yesterday' \
-    --data-urlencode 'source=x' "$B/admin/publish/save")" "303"
-hasnt "and wrote nothing" "$(curl -sk -b $J "$B/admin/publish")" "badly-dated"
+echo "== the site console, driven as a member admin over its own login =="
+# The whole point: a member on the site's list manages the site from within it,
+# with a member session, never touching the operator dashboard or the wallet.
+# WebSocket login plus HTTP console -- so a small node driver, not curl.
+RIG_PORT="$PORT" RIG_PASS="rig member admin passphrase not a secret" \
+    node --experimental-websocket "$HERE/console_rig.mjs" 2>&1 | grep -v "ExperimentalWarning\|--trace-warnings"
+console_status=${PIPESTATUS[0]}
+if [ "$console_status" = "0" ]; then ok "the console rig passed"; else no "the console rig failed"; fi
 
 echo
 echo "== the dashboard reads a query =="
