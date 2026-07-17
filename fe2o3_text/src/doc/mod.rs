@@ -20,6 +20,8 @@
 //! # Front-ends
 //!
 //! - [`markdown`] -- reads Markdown, the form most existing prose is written in.
+//! - [`html`] -- reads HTML, the form a typesetter exports prose to once it has resolved the author's
+//!   own macros.
 //!
 //! # Outputs
 //!
@@ -66,6 +68,33 @@ impl Doc {
 			}
 		}
 		None
+	}
+
+	/// The text of the document's most prominent heading: the first at the shallowest level it has.
+	///
+	/// What a caller after the document's own idea of its title wants. Naming a level would ask the
+	/// wrong question, because which level a piece is headed by says where the prose came from rather
+	/// than what it says: an author writing Markdown heads a chapter with a level 1, and the same
+	/// chapter exported from Typst arrives headed by a level 2, since the exporter keeps level 1 for
+	/// the document it thinks it is making. A caller asking for level 1 finds no title at all in the
+	/// second, and titles the chapter after its file.
+	///
+	/// Taking the first heading of any level would be wrong the other way, since a piece may carry a
+	/// lesser heading above its title. The shallowest level present is the prominent one, whatever
+	/// number it happens to wear, and among equals the first wins.
+	pub fn top_heading(&self) -> Option<String> {
+		let mut top: Option<(u8, &Vec<Inline>)> = None;
+		for block in &self.blocks {
+			if let Block::Heading { level, content } = block {
+				match top {
+					// Strictly shallower, so a later heading of an equal level never displaces an
+					// earlier one.
+					Some((best, _)) if *level >= best	=> {},
+					_					=> top = Some((*level, content)),
+				}
+			}
+		}
+		top.map(|(_, content)| text_of(content))
 	}
 }
 

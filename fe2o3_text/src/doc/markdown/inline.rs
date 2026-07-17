@@ -549,8 +549,6 @@ fn skip_ws(b: &[u8], i: usize) -> usize {
 mod tests {
 	use super::*;
 
-	use oxedyne_fe2o3_core::prelude::*;
-
 	/// A run of literal text, for the tests that expect one.
 	fn t(s: &str) -> Inline {
 		Inline::Text(s.to_string())

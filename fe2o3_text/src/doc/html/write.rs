@@ -1,6 +1,6 @@
 //! Rendering a document tree to HTML.
 //!
-//! The counterpart to a front-end: where [`markdown`](super::markdown) reads a syntax into the tree,
+//! The counterpart to a front-end: where [`markdown`](crate::doc::markdown) reads a syntax into the tree,
 //! this walks the tree out to the form a browser reads. It is the first of the outputs the tree's own
 //! documentation names, and it makes the tree's neutrality testable rather than merely asserted --
 //! `Rule`, an image by its path and a code span within a line all reach HTML intact, and each is
@@ -23,8 +23,8 @@
 //!
 //! # Depth
 //!
-//! The walk is recursive, on the same terms as [`text_of`](super::text_of): a tree's depth is bounded
-//! by whatever built it, and the Markdown reader bounds its own. A tree assembled by hand deeper than
+//! The walk is recursive, on the same terms as [`text_of`](crate::doc::text_of): a tree's depth is
+//! bounded by whatever built it, and each reader bounds its own. A tree assembled by hand deeper than
 //! a stack can walk will overflow this, exactly as it would overflow `text_of` or `Drop`.
 
 use crate::doc::{

@@ -18,6 +18,12 @@ pub const TOLERANCE: f32 = 0.1;
 /// points. A curve needing more than this has been given nonsense coordinates.
 const MAX_STEPS: usize = 1_000;
 
+/// How far along each tangent a control point sits, for a cubic bézier that meets a quarter arc.
+///
+/// The magic constant `4/3 * (sqrt(2) - 1)`, which makes a bézier hug a quarter circle to about one
+/// part in a thousand of the radius. Every arc this module draws is built from it.
+const KAPPA: f32 = 0.552_284_75;
+
 /// A point in two dimensions.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Pt {
@@ -190,9 +196,7 @@ impl Path {
 	/// where `k` is the magic constant `4/3 * (sqrt(2) - 1)` that makes a bézier hug a quarter circle.
 	/// The contour runs clockwise from the rightmost point, which fills solid under either fill rule.
 	pub fn ellipse(cx: f32, cy: f32, rx: f32, ry: f32) -> Outcome<Self> {
-		// How far along each tangent a control point sits, for a bézier that meets a quarter arc.
-		const K: f32 = 0.552_284_75;
-		let (kx, ky) = (rx * K, ry * K);
+		let (kx, ky) = (rx * KAPPA, ry * KAPPA);
 		let mut pb = PathBuilder::new();
 		// Rightmost point, then clockwise: down to the bottom, left to the leftmost, up to the top.
 		pb.move_to(Pt::new(cx + rx, cy));
@@ -200,6 +204,64 @@ impl Path {
 		pb.cubic_to(Pt::new(cx - kx, cy + ry), Pt::new(cx - rx, cy + ky), Pt::new(cx - rx, cy));
 		pb.cubic_to(Pt::new(cx - rx, cy - ky), Pt::new(cx - kx, cy - ry), Pt::new(cx, cy - ry));
 		pb.cubic_to(Pt::new(cx + kx, cy - ry), Pt::new(cx + rx, cy - ky), Pt::new(cx + rx, cy));
+		pb.close();
+		pb.finish()
+	}
+
+	/// An axis-aligned rectangle with rounded corners, as a closed path.
+	///
+	/// The radius is clamped to half the shorter side, so a radius larger than the box gives the
+	/// stadium or the circle that box inscribes rather than a shape turned inside out. A radius of
+	/// zero, or less, is a square corner and returns exactly [`Path::rect`], so a caller that rounds
+	/// nothing draws precisely what it drew before rounding existed.
+	///
+	/// Each corner is one cubic bézier, the same quarter-arc approximation [`Path::ellipse`] uses, and
+	/// the contour runs clockwise from the top-left corner's end, matching [`Path::rect`] so the two
+	/// fill identically under either fill rule.
+	pub fn round_rect(b: Bounds, r: f32) -> Outcome<Self> {
+		if !r.is_finite() {
+			return Err(err!(
+				"A corner radius must be finite, but {} was given.", r; Invalid, Input));
+		}
+		// A square corner is the rectangle, and is the rectangle's own path: identical, not merely
+		// equivalent.
+		if r <= 0.0 {
+			return Self::rect(b);
+		}
+		// A corner cannot eat more than half the side it turns, or the two corners of one side would
+		// cross and the outline would fold through itself.
+		let r = r.min(b.width() * 0.5).min(b.height() * 0.5);
+		if r <= 0.0 {
+			return Self::rect(b);
+		}
+		let k = r * KAPPA;
+		let mut pb = PathBuilder::new();
+		// Clockwise, in a frame whose y falls: along the top, then each corner in turn.
+		pb.move_to(Pt::new(b.x0 + r, b.y0));
+		pb.line_to(Pt::new(b.x1 - r, b.y0));
+		pb.cubic_to(
+			Pt::new(b.x1 - r + k,	b.y0),
+			Pt::new(b.x1,		b.y0 + r - k),
+			Pt::new(b.x1,		b.y0 + r),
+		);
+		pb.line_to(Pt::new(b.x1, b.y1 - r));
+		pb.cubic_to(
+			Pt::new(b.x1,		b.y1 - r + k),
+			Pt::new(b.x1 - r + k,	b.y1),
+			Pt::new(b.x1 - r,	b.y1),
+		);
+		pb.line_to(Pt::new(b.x0 + r, b.y1));
+		pb.cubic_to(
+			Pt::new(b.x0 + r - k,	b.y1),
+			Pt::new(b.x0,		b.y1 - r + k),
+			Pt::new(b.x0,		b.y1 - r),
+		);
+		pb.line_to(Pt::new(b.x0, b.y0 + r));
+		pb.cubic_to(
+			Pt::new(b.x0,		b.y0 + r - k),
+			Pt::new(b.x0 + r - k,	b.y0),
+			Pt::new(b.x0 + r,	b.y0),
+		);
 		pb.close();
 		pb.finish()
 	}
@@ -521,6 +583,64 @@ mod tests {
 		};
 		assert!((b.x0 - (cx - r)).abs() < 0.01 && (b.x1 - (cx + r)).abs() < 0.01, "width spans 2r");
 		assert!((b.y0 - (cy - r)).abs() < 0.01 && (b.y1 - (cy + r)).abs() < 0.01, "height spans 2r");
+		Ok(())
+	}
+
+	#[test]
+	fn test_a_round_rect_of_no_radius_is_the_rectangle_09() -> Outcome<()> {
+		// Not "looks the same": IS the same path. A caller that asks for no rounding must be able to
+		// rely on getting back exactly what it would have got from Path::rect.
+		let b = Bounds::new(3.0, 7.0, 40.0, 25.0);
+		assert_eq!(res!(Path::round_rect(b, 0.0)), res!(Path::rect(b)));
+		assert_eq!(res!(Path::round_rect(b, -5.0)), res!(Path::rect(b)));
+		Ok(())
+	}
+
+	#[test]
+	fn test_a_round_rect_keeps_its_box_and_rounds_its_corners_10() -> Outcome<()> {
+		let (b, r) = (Bounds::new(0.0, 0.0, 60.0, 40.0), 8.0);
+		let p = res!(Path::round_rect(b, r));
+		// The shape still occupies exactly the box it was given: rounding takes corners away, it does
+		// not move edges.
+		let bb = match p.bounds(&Transform::IDENTITY) {
+			Some(bb) => bb,
+			None => return Err(err!("The rounded rectangle has no bounds."; Test)),
+		};
+		assert!((bb.x0 - b.x0).abs() < 0.01 && (bb.x1 - b.x1).abs() < 0.01, "the width is the box's");
+		assert!((bb.y0 - b.y0).abs() < 0.01 && (bb.y1 - b.y1).abs() < 0.01, "the height is the box's");
+
+		// And the corner itself is gone: no point of the outline lies in the square the radius cuts off
+		// at the top-left, beyond the arc's own centre distance.
+		let cs = p.flatten(&Transform::IDENTITY, TOLERANCE);
+		assert_eq!(cs.len(), 1, "a rounded rectangle is one contour");
+		let (cx, cy) = (b.x0 + r, b.y0 + r); // The top-left corner's arc centre.
+		for pt in &cs[0] {
+			if pt.x < cx && pt.y < cy {
+				let d = ((pt.x - cx).powi(2) + (pt.y - cy).powi(2)).sqrt();
+				assert!(
+					(d - r).abs() < r * 0.01,
+					"the point ({}, {}) is inside the corner square at distance {} from the arc \
+					centre, which is not on the radius {}", pt.x, pt.y, d, r,
+				);
+			}
+		}
+		Ok(())
+	}
+
+	#[test]
+	fn test_a_radius_larger_than_the_box_is_clamped_11() -> Outcome<()> {
+		// A radius of half the shorter side is the most a box can take. Beyond that the corners would
+		// cross, so the radius is clamped and the shape stays inside its box.
+		let b = Bounds::new(0.0, 0.0, 40.0, 20.0);
+		let p = res!(Path::round_rect(b, 500.0));
+		let bb = match p.bounds(&Transform::IDENTITY) {
+			Some(bb) => bb,
+			None => return Err(err!("The clamped rounded rectangle has no bounds."; Test)),
+		};
+		assert!(bb.x0 >= b.x0 - 0.01 && bb.x1 <= b.x1 + 0.01, "a clamped radius stays in its box");
+		assert!(bb.y0 >= b.y0 - 0.01 && bb.y1 <= b.y1 + 0.01, "in both axes");
+		// Half the shorter side: a stadium, whose ends are semicircles of the box's half-height.
+		assert_eq!(p, res!(Path::round_rect(b, b.height() * 0.5)), "the radius clamps to half the side");
 		Ok(())
 	}
 

@@ -718,8 +718,6 @@ mod tests {
 	use super::*;
 	use crate::doc::Inline;
 
-	use oxedyne_fe2o3_core::prelude::*;
-
 	/// The text of a block's inlines, for tests that care what a block says and not how.
 	fn said(blocks: &[Block]) -> Vec<String> {
 		blocks.iter().map(|b| match b {
