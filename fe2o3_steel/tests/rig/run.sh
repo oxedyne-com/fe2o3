@@ -84,6 +84,18 @@ fi
 echo "  up on $PORT"
 
 echo
+echo "== /admin and /admin/ both reach the dashboard =="
+# A trailing slash is not an unknown sub-route. Both are the root, both redirect
+# an unauthenticated visitor to the login form rather than 404ing one of them.
+check "/admin redirects to login" \
+    "$(curl -sk -o /dev/null -w '%{http_code}' "$B/admin")" "303"
+loc=$(curl -sk -D - -o /dev/null "$B/admin" | grep -io "location: [^[:space:]]*" | tr -d '\r')
+has "and the login is where it points" "$loc" "/admin/login"
+check "/admin/ with a slash is the same, not a 404" \
+    "$(curl -sk -o /dev/null -w '%{http_code}' "$B/admin/")" "303"
+has "the login form is served" "$(curl -sk "$B/admin/login")" "passphrase"
+
+echo
 echo "== the gate, before signing in =="
 check "an anonymous GET is not served the composer" \
     "$(curl -sk -o /dev/null -w '%{http_code}' "$B/admin/publish")" "303"

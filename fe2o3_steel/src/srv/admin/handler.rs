@@ -132,6 +132,11 @@ pub async fn handle_get(
 {
     let _ = peer; // GET routes do not yet audit by address.
     debug!("{}: dashboard GET {}", id, path);
+    // `/admin/` is `/admin`. A person types the slash, or a browser adds it to a
+    // bare directory name, and either way it is the dashboard root -- not an
+    // unknown sub-route to 404. Only the root is folded: `/admin/traffic/` is a
+    // real miss, since nothing serves it.
+    let path = if path == "/admin/" { PATH_ROOT } else { path };
     match path {
         PATH_ASSET_OXANIUM => Ok(serve_font_oxanium()),
         PATH_LOGIN => Ok(render_login_form(state.seal_withholds_data(), None)),
@@ -183,6 +188,7 @@ pub async fn handle_post(
     -> Outcome<HttpMessage>
 {
     debug!("{}: dashboard POST {}", id, path);
+    let path = if path == "/admin/" { PATH_ROOT } else { path };
     match path {
         PATH_LOGIN => Ok(handle_login(state, body, peer)),
         PATH_SIGNED_LOGIN => Ok(handle_signed_login(state, body)),
