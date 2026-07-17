@@ -205,6 +205,45 @@ hasnt "an import does not resurrect it" "$body" "Renamed"
 has "and the directory's post is still there" "$body" "The first post"
 
 echo
+echo "== a post says which kind it is, or a page cannot tell =="
+# Without this the stream shows a passing thought and an essay identically, which
+# is the furniture a note is defined by not wearing.
+json=$(curl -sk "$B/posts/index.json")
+has "the JSON carries the kind" "$json" '"kind"'
+has "the imported post is a note" "$json" '"kind": "note"'
+
+echo
+echo "== two posts in one day have an order =="
+# A day is not an order: same-day posts used to fall back to sorting by slug,
+# which is alphabetical and has nothing to do with which was written first.
+for t in "09:00|zulu-early" "14:30|alpha-late"; do
+    curl -sk -b $J -o /dev/null -X POST \
+        --data-urlencode "slug=${t##*|}" \
+        --data-urlencode "date=2026-07-20 ${t%%|*}" \
+        --data-urlencode 'kind=note' --data-urlencode 'state=live' \
+        --data-urlencode "source=# ${t##*|}
+
+Words." "$B/admin/publish/save"
+done
+# alpha-late is later in the day and alphabetically first. Order by time, and it
+# leads; order by slug, and it leads for the wrong reason -- so check the one
+# whose slug sorts *last* comes second.
+order=$(curl -sk "$B/posts/index.json" | grep -o '"slug": "[a-z-]*"' | head -2 | tr '\n' ' ')
+check "the later post of the day comes first" "$order" '"slug": "alpha-late" "slug": "zulu-early" '
+has "a timed date survives the round trip" "$(curl -sk "$B/posts/index.json")" '"date": "2026-07-20T14:30"'
+has "and a reader is given it without the T" "$(curl -sk "$B/posts/index.json")" '"date_text": "2026-07-20 14:30"'
+has "the feed dates it to the minute, not to midnight" "$(curl -sk "$B/posts/feed.xml")" '2026-07-20T14:30:00Z'
+has "the page shows a reader the readable form" "$(curl -sk "$B/posts/alpha-late")" '2026-07-20 14:30</time>'
+has "and the machine-readable form in the attribute" "$(curl -sk "$B/posts/alpha-late")" 'datetime="2026-07-20T14:30"'
+
+echo
+echo "== a date that is not one is refused =="
+check "a date with no shape is refused" "$(curl -sk -b $J -o /dev/null -w '%{http_code}' -X POST \
+    --data-urlencode 'slug=badly-dated' --data-urlencode 'date=yesterday' \
+    --data-urlencode 'source=x' "$B/admin/publish/save")" "303"
+hasnt "and wrote nothing" "$(curl -sk -b $J "$B/admin/publish")" "badly-dated"
+
+echo
 echo "== the dashboard reads a query =="
 # The path and the query are parsed apart. Reading the query out of the path
 # finds nothing, silently, and the database page did exactly that for months.

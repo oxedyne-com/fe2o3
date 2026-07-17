@@ -12,6 +12,7 @@
 use crate::srv::publish::{
 	Post,
 	PublishConfig,
+	date_text,
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -33,6 +34,11 @@ pub fn serve(cfg: &PublishConfig, posts: &[Post], id: &str) -> Outcome<HttpMessa
 			let mut fields = vec![
 				(dat!("slug"),		dat!(p.slug.clone())),
 				(dat!("title"),		dat!(p.title.clone())),
+				// Which the post is, because a page showing these cannot tell otherwise, and the
+				// difference is the whole reason the two kinds exist. Without it a passing thought
+				// and an essay arrive identical and get shown identically -- which is precisely the
+				// furniture a note is defined by not wearing.
+				(dat!("kind"),		dat!(p.kind.as_str().to_string())),
 				(dat!("url"),		dat!(cfg.path_of(&p.slug))),
 				(dat!("excerpt"),	dat!(p.excerpt.clone())),
 				(dat!("html"),		dat!(p.html.clone())),
@@ -41,6 +47,9 @@ pub fn serve(cfg: &PublishConfig, posts: &[Post], id: &str) -> Outcome<HttpMessa
 			// asks whether the post has one; it should not also have to ask what a date of nothing means.
 			if let Some(d) = &p.date {
 				fields.push((dat!("date"), dat!(d.clone())));
+				// The same instant, said the way a person says it, so a page showing this does not
+				// have to know that the stored form is ISO.
+				fields.push((dat!("date_text"), dat!(date_text(d))));
 			}
 			create_dat_ordmap(fields)
 		})

@@ -15,6 +15,7 @@
 use crate::srv::publish::{
 	Post,
 	PublishConfig,
+	date_text,
 };
 
 #[cfg(test)]
@@ -89,10 +90,13 @@ fn index(cfg: &PublishConfig, posts: &[Post], id: &str) -> Outcome<HttpMessage> 
 	for p in posts {
 		body.push_str("<li class=\"aside-index-item\">");
 		if let Some(d) = &p.date {
+			// The attribute is the stored ISO form and the text is the readable one, which is what
+			// `<time>` has two of them for: a post dated to the minute would otherwise show a reader
+			// the `T` in the middle of its own date.
 			body.push_str("<div class=\"aside-date\"><time datetime=\"");
 			escape_attr(&mut body, d);
 			body.push_str("\">");
-			escape_text(&mut body, d);
+			escape_text(&mut body, &date_text(d));
 			body.push_str("</time></div>");
 		}
 		body.push_str("<h2><a href=\"");
@@ -133,7 +137,7 @@ fn post_page(cfg: &PublishConfig, post: &Post) -> Outcome<HttpMessage> {
 		body.push_str("<div class=\"aside-date\"><time datetime=\"");
 		escape_attr(&mut body, d);
 		body.push_str("\">");
-		escape_text(&mut body, d);
+		escape_text(&mut body, &date_text(d));
 		body.push_str("</time></div>\n");
 	}
 	// The prose was escaped where it was rendered.

@@ -56,6 +56,8 @@ use crate::srv::{
 			self,
 			Record,
 		},
+		date_text,
+		normalise_date,
 		valid_date,
 		valid_slug,
 	},
@@ -271,7 +273,8 @@ fn handle_list<
 			title	= title,
 			kind	= rec.kind.as_str(),
 			state	= state,
-			date	= html_escape(rec.date.as_deref().unwrap_or("--")),
+			date	= html_escape(&rec.date.as_deref().map(date_text)
+				.unwrap_or_else(|| fmt!("--"))),
 		));
 	}
 	body.push_str("</tbody>\n</table>\n");
@@ -381,7 +384,9 @@ fn handle_edit<
 		// rather than leave a copy behind.
 		was		= html_escape(&r.slug),
 		slug		= html_escape(&r.slug),
-		date		= html_escape(r.date.as_deref().unwrap_or("")),
+		// The readable form in the box: a person edits what a person reads, and the `T` goes back
+		// in at the door on the way to the store.
+		date		= html_escape(&r.date.as_deref().map(date_text).unwrap_or_default()),
 		note_sel	= selected(r.kind == PostKind::Note),
 		essay_sel	= selected(r.kind == PostKind::Essay),
 		draft_sel	= selected(r.state == PostState::Draft),
@@ -584,10 +589,12 @@ fn do_save<
 		));
 	}
 
-	let date = extract_form_field(body, "date").unwrap_or_default();
-	let date = date.trim().to_string();
+	let date = normalise_date(&extract_form_field(body, "date").unwrap_or_default());
 	if !valid_date(&date) {
-		return Ok(back_with("a date is written 2026-07-17, or is left empty"));
+		return Ok(back_with(
+			"a date is written 2026-07-17, or 2026-07-17 14:30 to say when in the day, or is left \
+			empty",
+		));
 	}
 
 	let source = extract_form_field(body, "source").unwrap_or_default();
@@ -873,10 +880,56 @@ mod tests {
 	fn test_a_date_is_shaped_or_absent_02() -> Outcome<()> {
 		assert!(valid_date(""));
 		assert!(valid_date("2026-07-17"));
+		// A minute, so two posts of one day have an order that is not alphabetical.
+		assert!(valid_date("2026-07-17T14:30"));
+		assert!(valid_date("2026-07-17 14:30"));
 		assert!(!valid_date("17/07/2026"));
 		assert!(!valid_date("2026-7-7"));
 		assert!(!valid_date("yesterday"));
+		assert!(!valid_date("2026-07-17T14"));
+		assert!(!valid_date("2026-07-17T14:3"));
+		assert!(!valid_date("2026-07-17X14:30"));
+		assert!(!valid_date("2026-07-17T14-30"));
+		// Seconds are a shape this does not keep, so it does not accept one.
 		assert!(!valid_date("2026-07-17T09:00:00Z"));
+		Ok(())
+	}
+
+	/// A person writes a space and the store keeps a `T`, so there is one shape below the door.
+	#[test]
+	fn test_a_typed_date_is_normalised_05() -> Outcome<()> {
+		assert_eq!(normalise_date("2026-07-17 14:30"), "2026-07-17T14:30");
+		assert_eq!(normalise_date("  2026-07-17 14:30  "), "2026-07-17T14:30");
+		assert_eq!(normalise_date("2026-07-17T14:30"), "2026-07-17T14:30");
+		assert_eq!(normalise_date("2026-07-17"), "2026-07-17");
+		assert_eq!(normalise_date(""), "");
+		// And back, for a reader: the `T` is for the machine.
+		assert_eq!(date_text("2026-07-17T14:30"), "2026-07-17 14:30");
+		assert_eq!(date_text("2026-07-17"), "2026-07-17");
+		Ok(())
+	}
+
+	/// Dates sort as text, which is the whole reason the stored shape is ISO.
+	///
+	/// If this ever stops holding, every post moves: the sort compares these strings and nothing
+	/// else, so a shape that does not sort lexicographically would reorder the site silently.
+	#[test]
+	fn test_dates_sort_as_text_06() -> Outcome<()> {
+		let mut v = vec![
+			"2026-07-17T09:00",
+			"2026-07-18",
+			"2026-07-17",
+			"2026-07-17T14:30",
+			"2026-06-30T23:59",
+		];
+		v.sort();
+		assert_eq!(v, vec![
+			"2026-06-30T23:59",
+			"2026-07-17",		// A day, before any minute within it.
+			"2026-07-17T09:00",
+			"2026-07-17T14:30",
+			"2026-07-18",
+		]);
 		Ok(())
 	}
 

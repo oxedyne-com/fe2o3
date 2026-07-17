@@ -271,28 +271,88 @@ pub fn valid_slug(s: &str) -> bool {
 		&& s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+/// The length of a date that names a day.
+pub const DATE_LEN: usize = 10;
+
+/// The length of a date that names a minute.
+pub const STAMP_LEN: usize = 16;
+
 /// Whether a word may be a post's date.
 ///
-/// `YYYY-MM-DD`, the shape [`split_date`] reads out of a filename and the shape the feed needs:
-/// Atom's dates are ISO 8601, and a date that is not one would reach a reader's feed reader as a
-/// malformed entry rather than as an error anyone here would see. Empty is allowed -- a post without
-/// a date is a post, and says so by carrying none.
+/// `YYYY-MM-DD`, the shape [`split_date`] reads out of a filename -- or `YYYY-MM-DDTHH:MM`, which is
+/// the same day with a minute on it. Both are ISO 8601, which is what the feed and `<time>` need:
+/// Atom's dates are ISO, and a date that is not one reaches a reader's feed reader as a malformed
+/// entry rather than as an error anyone here would see. Empty is allowed -- a post without a date is
+/// a post, and says so by carrying none.
 ///
-/// The shape is checked and the calendar is not: `2026-02-31` passes. Refusing it would mean owning
-/// a calendar, which is the dependency this module does not have and the reason the feed is Atom.
-/// A date that is shaped right and means nothing is the author's typo to see, and it is visible --
-/// it is printed on the post.
+/// # Why a minute, when a filename only ever said a day
+///
+/// Because a day is not an order. Posts sort by date, and two posts of one day fall back to sorting
+/// by slug -- alphabetically, which is to say arbitrarily, and not at all by which was written
+/// first. A directory could not say more than the day, since the date was in the filename and there
+/// is no front matter to put a time in. A record can: its date is a field.
+///
+/// It matters most where most of the writing is. A note is the thing an author writes most, and
+/// several notes in a day is the ordinary case for the form, so the day-only date was weakest
+/// exactly where the module expects the traffic.
+///
+/// A space is accepted where the `T` goes, because that is how a person writes a date;
+/// [`normalise_date`] takes it at the door so one shape reaches the store.
+///
+/// # What is not checked
+///
+/// The calendar. `2026-02-31` passes, and so does `2026-07-17T99:99`. Refusing either means owning a
+/// calendar and a clock, which is the dependency this module does not have and the reason the feed
+/// is Atom rather than RSS. A date that is shaped right and means nothing is the author's typo to
+/// see, and it is visible -- it is printed on the post.
 pub fn valid_date(s: &str) -> bool {
 	if s.is_empty() {
 		return true;
 	}
 	let b = s.as_bytes();
-	b.len() == 10 && b.iter().enumerate().all(|(i, c)| {
+	if b.len() != DATE_LEN && b.len() != STAMP_LEN {
+		return false;
+	}
+	let day = b[..DATE_LEN].iter().enumerate().all(|(i, c)| {
 		match i {
 			4 | 7	=> *c == b'-',
 			_	=> c.is_ascii_digit(),
 		}
-	})
+	});
+	if !day || b.len() == DATE_LEN {
+		return day;
+	}
+	// `T14:30`, or ` 14:30` from a person who wrote it the way people do.
+	(b[10] == b'T' || b[10] == b' ')
+		&& b[11].is_ascii_digit()
+		&& b[12].is_ascii_digit()
+		&& b[13] == b':'
+		&& b[14].is_ascii_digit()
+		&& b[15].is_ascii_digit()
+}
+
+/// The date a record keeps, from the date a form said.
+///
+/// One shape in the store, so nothing downstream has to know there were two. ISO puts a `T` between
+/// the day and the hour and people put a space, so the space is taken here rather than handled
+/// everywhere after here.
+pub fn normalise_date(s: &str) -> String {
+	let s = s.trim();
+	if s.len() == STAMP_LEN && s.as_bytes()[10] == b' ' {
+		let mut out = s.to_string();
+		out.replace_range(10..11, "T");
+		return out;
+	}
+	s.to_string()
+}
+
+/// The date a person reads, from the date a record keeps.
+///
+/// The stored form is ISO, so a post dated to the minute carries a `T` in the middle of it. That is
+/// for a machine. A reader gets a space, and the `T` form stays in the `datetime` attribute beside
+/// it, which is the whole point of `<time>` having both.
+pub fn date_text(date: &str) -> String {
+	date.replacen('T', " ", 1)
 }
 
 
