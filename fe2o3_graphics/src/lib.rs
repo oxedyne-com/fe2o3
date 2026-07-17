@@ -1,5 +1,5 @@
 //! A 2D graphics library: paths, affine transforms, an anti-aliased rasteriser, pixmaps with
-//! alpha compositing, and a PNG codec.
+//! alpha compositing, blur and drop shadows, and a PNG codec.
 //!
 //! Painting is not geometry, which is why this crate sits beside `fe2o3_geom` rather than inside
 //! it. `fe2o3_geom` serves integer layout, where a rectangle is a cell of a terminal or a widget
@@ -21,8 +21,17 @@
 //! [`stroke`] adds no rasteriser code at all, because a stroke is only the fill of a different
 //! shape: the region the pen sweeps as it travels the path. It builds that region as a [`path::Path`]
 //! and hands it back to the filler.
+//!
+//! # Blurring
+//!
+//! [`blur`] adds none either. Three passes of a sliding box, along each axis, stand in for a
+//! Gaussian to within a few percent, at a cost that is the same whatever the radius. A drop shadow
+//! is then only a silhouette filled into a scratch pixmap, blurred, and composited back. The blur
+//! runs on premultiplied alpha, without which the colour of the clear pixels a shape is blurred
+//! against would bleed into it and fringe it with dirt.
 #![forbid(unsafe_code)]
 
+pub mod blur;
 pub mod colour;
 pub mod path;
 pub mod pixmap;

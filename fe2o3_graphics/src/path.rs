@@ -127,6 +127,22 @@ impl Bounds {
 		}
 	}
 
+	/// The box grown by `d` on every side, or shrunk where `d` is negative.
+	///
+	/// A blur, a stroke and a shadow all reach past the shape they came from, so the box that holds
+	/// the ink is the box that holds the geometry, grown by that reach. The coordinates are not
+	/// reordered afterwards, as [`Bounds::new`] would: a shrink deeper than the box is wide leaves a
+	/// box that encloses nothing, and [`Bounds::is_empty`] should say so rather than have it turned
+	/// inside out into a box that encloses something.
+	pub fn grow(&self, d: f32) -> Self {
+		Self {
+			x0: self.x0 - d,
+			y0: self.y0 - d,
+			x1: self.x1 + d,
+			y1: self.y1 + d,
+		}
+	}
+
 	/// The width of the box, or zero if it is empty.
 	pub fn width(&self) -> f32 {
 		(self.x1 - self.x0).max(0.0)

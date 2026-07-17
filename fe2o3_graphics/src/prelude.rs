@@ -1,6 +1,7 @@
 //! The types a caller almost always wants.
 
 pub use crate::{
+	blur::Shadow,
 	colour::Rgba,
 	path::{
 		Bounds,
