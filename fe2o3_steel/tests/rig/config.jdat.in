@@ -1,0 +1,64 @@
+{
+  "app_description":    "Composer test rig",
+  "app_human_name":     "Rig",
+  "app_log_level":      "info",
+  "app_name":           "rig",
+  "app_root":           "current",
+  "enc_name":           "AES-256-GCM",
+  "kdf_name":           "Argon2id_v0x13",
+  "dev_cfg": {
+    "src_path_rel":             "./www/src",
+    "js_bundles_rel":           {},
+    "js_import_aliases_rel":    {},
+    "css_source_dir_rel":       "./www/src/styles",
+    "css_bundle_rel":           "./www/public/styles.css"
+  },
+  "server_cfg": {
+    "log_level":                    "info",
+    "num_server_bots":              (u16|1),
+    "server_address":               "127.0.0.1",
+    "server_port_tcp":              (u16|@PORT@),
+    "server_port_tcp_plaintext":    (u16|0),
+    "hsts_max_age_secs":            (u32|0),
+    "admin_local_port":             (u16|0),
+    "session_expiry_default_secs":  (u32|604800),
+    "ws_ping_interval_secs":        (u8|30),
+    "server_max_errors_allowed":    (u8|30),
+    "allow_anonymous_sessions":     (true),
+    "http_max_header_bytes":        (u64|16384),
+    "http_max_body_bytes":          (u64|8388608),
+    "http_header_read_timeout_ms":  (u64|15000),
+    "security_headers_enabled":     (true),
+    "content_security_policy":      "",
+    "addr_guard":                   {},
+    "auth_path_prefixes":           (vek|["/admin/login"]),
+    "auth_rps_max":                 (u64|100),
+    "tls_dir_rel":                  "./tls",
+    "acme": {
+      "enabled":        (false),
+      "contact_email":  "",
+      "directory_url":  "https://acme-staging-v02.api.letsencrypt.org/directory",
+      "cache_dir_rel":  "./tls/acme"
+    },
+    "mail": {},
+    "vhosts": [
+      {
+        "hostnames":                (vek|["localhost","localhost."]),
+        "public_dir_rel":           "./www/public",
+        "static_route_paths_rel":   {},
+        "default_index_files":      (vek|["index.html","index.htm"]),
+        "redirects":                [],
+        "db_dir_rel":               "./o3db",
+        "publish": {
+          "path":       "/posts",
+          "dir":        "./www/public/content/posts",
+          "source":     "store",
+          "title":      "Posts",
+          "site_name":  "Rig",
+          "base_url":   "https://localhost:@PORT@",
+          "css":        (vek|[])
+        }
+      }
+    ]
+  }
+}
