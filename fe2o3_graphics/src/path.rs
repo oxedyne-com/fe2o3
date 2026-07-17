@@ -185,6 +185,32 @@ impl Path {
 		self.segs.is_empty()
 	}
 
+	/// This path in another frame.
+	///
+	/// Every other transform in this crate is applied at fill time, so a path is written once and
+	/// drawn wherever it is wanted, and nothing is baked. This bakes one in, for the caller that must
+	/// hand its result to something which applies a transform of its own and takes only a path. A
+	/// glyph outline is the case it exists for: it arrives in the font's frame, at a size, and the
+	/// painter then shears and places it.
+	///
+	/// Mapping the control points is the whole of it, and no curve is approximated: an affine map
+	/// carries a Bezier to the Bezier through its mapped control points, exactly. That is the same
+	/// fact [`Path::flatten`] leans on when it flattens under a transform rather than transforming
+	/// and then flattening.
+	pub fn transform(&self, t: &Transform) -> Outcome<Self> {
+		let mut pb = PathBuilder::new();
+		for seg in &self.segs {
+			match *seg {
+				Seg::MoveTo(p)		=> pb.move_to(t.apply(p)),
+				Seg::LineTo(p)		=> pb.line_to(t.apply(p)),
+				Seg::QuadTo(c, p)	=> pb.quad_to(t.apply(c), t.apply(p)),
+				Seg::CubicTo(c0, c1, p)	=> pb.cubic_to(t.apply(c0), t.apply(c1), t.apply(p)),
+				Seg::Close		=> pb.close(),
+			}
+		}
+		pb.finish()
+	}
+
 	/// An axis-aligned rectangle, as a closed path.
 	pub fn rect(b: Bounds) -> Outcome<Self> {
 		let mut pb = PathBuilder::new();
@@ -569,6 +595,47 @@ impl PathBuilder {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn test_a_baked_transform_matches_one_applied_at_fill_20() -> Outcome<()> {
+		// The two routes to the same picture must put the geometry in the same place, or a glyph
+		// would land somewhere other than where filling the same path under the same transform would.
+		//
+		// The comparison is the bounds and not the flattened points: flattening is adaptive, so a
+		// path already scaled up is cut into more pieces than the same path cut before scaling, and
+		// the two polylines legitimately differ in length while tracing the same curve. Bounds come
+		// off the control points, which the transform maps exactly.
+		let p = res!(Path::round_rect(Bounds::new(1.0, 2.0, 9.0, 7.0), 1.5));
+		let t = Transform::translate(3.0, -4.0).then(&Transform::scale(2.0, -1.5));
+		let baked = res!(p.transform(&t));
+		let a = match baked.bounds(&Transform::IDENTITY) {
+			Some(b) => b,
+			None => return Err(err!("The baked path has no bounds."; Test)),
+		};
+		let b = match p.bounds(&t) {
+			Some(b) => b,
+			None => return Err(err!("The path has no bounds under the transform."; Test)),
+		};
+		for (got, want, side) in [
+			(a.x0, b.x0, "x0"), (a.y0, b.y0, "y0"), (a.x1, b.x1, "x1"), (a.y1, b.y1, "y1"),
+		] {
+			assert!((got - want).abs() < 1e-4, "{}: baked {}, applied at fill {}", side, got, want);
+		}
+		Ok(())
+	}
+
+	#[test]
+	fn test_baking_keeps_the_curves_curves_21() -> Outcome<()> {
+		// An affine map carries a Bezier to a Bezier, so nothing is flattened on the way through: the
+		// segments that go in are the segments that come out, kind for kind.
+		let p = res!(Path::circle(0.0, 0.0, 4.0));
+		let baked = res!(p.transform(&Transform::scale(2.0, 3.0)));
+		assert_eq!(p.segs().len(), baked.segs().len());
+		for (a, b) in p.segs().iter().zip(baked.segs().iter()) {
+			assert_eq!(std::mem::discriminant(a), std::mem::discriminant(b));
+		}
+		Ok(())
+	}
 
 	#[test]
 	fn test_rect_has_four_corners_00() -> Outcome<()> {
