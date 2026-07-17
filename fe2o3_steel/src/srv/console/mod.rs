@@ -206,9 +206,15 @@ pub async fn handle_get<
 	let admin = res!(site_admin(site_admins, db, headers));
 
 	// The status probe answers everyone, so the site's chrome can ask whether to show the way in
-	// without being redirected. It is the one console path a non-admin may read.
+	// without being redirected. It is the one console path a non-admin may read. An admin also gets
+	// the CSRF token here, since the app that draws its own management surface needs it to write and
+	// cannot read the session cookie to derive it.
 	if request_path == PATH_STATUS {
-		return Ok(status_json(admin.is_some()));
+		let csrf = match (&admin, headers.get_session_id()) {
+			(Some(_), Some(sid))	=> Some(csrf_token(&sid)),
+			_			=> None,
+		};
+		return Ok(status_json(admin.is_some(), csrf.as_deref()));
 	}
 
 	let admin = match admin {
@@ -283,14 +289,36 @@ pub async fn handle_post<
 		Some(s)	=> s,
 		None	=> return Ok(Some(redirect(&home_of(publish)))),
 	};
+	// Whether the caller is the site's own front-end asking over fetch, which wants a plain JSON
+	// answer, or a browser posting a form, which wants a redirect. The app says so with its Accept.
+	let json = wants_json(headers);
+
 	let sent = form_field(body, "csrf").unwrap_or_default();
 	if !csrf_ok(&sid, &sent) {
 		warn!("{}: console: a write arrived without a good csrf token", id);
-		return Ok(Some(redirect(PATH_ROOT)));
+		return Ok(Some(if json {
+			HttpMessage::new_response(HttpStatus::Forbidden)
+				.with_field(
+					HeaderName::ContentType,
+					HeaderFieldValue::Generic("application/json".to_string()),
+				)
+				.with_body(fmt!("{{\"error\":\"stale session; reload\"}}").into_bytes())
+		} else {
+			redirect(PATH_ROOT)
+		}));
 	}
 
-	let resp = res!(publish::handle_post(publish, &admin, db, request_path, body, id));
+	let resp = res!(publish::handle_post(publish, &admin, db, request_path, body, json, id));
 	Ok(Some(resp))
+}
+
+/// Whether the caller wants JSON rather than a page -- the site's own front-end, over fetch, asking
+/// with `Accept: application/json`. A browser form carries no such Accept and gets a redirect.
+fn wants_json(headers: &Arc<HeaderFields>) -> bool {
+	match headers.get_one(&HeaderName::Accept) {
+		Some(HeaderFieldValue::Generic(v))	=> v.contains("application/json"),
+		_					=> false,
+	}
 }
 
 
@@ -508,9 +536,17 @@ margin-top:0.8rem;}\
 // │ HELPERS                                                                   │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// The status answer: whether the asker may manage this site.
-fn status_json(admin: bool) -> HttpMessage {
-	let body = fmt!("{{\"admin\":{}}}", admin);
+/// The status answer: whether the asker may manage this site, and if so the token their writes need.
+///
+/// The token is safe to hand out here: it proves a request came from a page that holds the session,
+/// and only a caller with the session cookie reaches this with `admin` true. A cross-site page has
+/// neither the cookie (it is `SameSite=Lax`, unsent on a cross-site request) nor the reply (the
+/// same-origin policy hides it), so it learns nothing.
+fn status_json(admin: bool, csrf: Option<&str>) -> HttpMessage {
+	let body = match csrf {
+		Some(t)	=> fmt!("{{\"admin\":{},\"csrf\":\"{}\"}}", admin, t),
+		None	=> fmt!("{{\"admin\":{}}}", admin),
+	};
 	HttpMessage::new_response(HttpStatus::OK)
 		.with_field(
 			HeaderName::ContentType,

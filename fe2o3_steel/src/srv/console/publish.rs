@@ -46,8 +46,16 @@ use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_iop_crypto::enc::Encrypter;
 use oxedyne_fe2o3_iop_db::api::Database;
 use oxedyne_fe2o3_iop_hash::api::Hasher;
-use oxedyne_fe2o3_jdat::id::NumIdDat;
+use oxedyne_fe2o3_jdat::{
+	prelude::*,
+	id::NumIdDat,
+	string::enc::EncoderConfig,
+};
 use oxedyne_fe2o3_net::http::{
+	fields::{
+		HeaderFieldValue,
+		HeaderName,
+	},
 	msg::HttpMessage,
 	status::HttpStatus,
 };
@@ -77,6 +85,12 @@ pub const PATH_DELETE: &str = "/manage/delete";
 
 /// Where an import of the directory posts.
 pub const PATH_IMPORT: &str = "/manage/import";
+
+/// The posts as JSON, every state, for a front-end that renders its own list.
+pub const PATH_LIST_JSON: &str = "/manage/list.json";
+
+/// One post's source and rendering as JSON, for a front-end that edits it in place.
+pub const PATH_POST_JSON: &str = "/manage/post.json";
 
 
 /// Whether a path is one this module writes to.
@@ -121,6 +135,8 @@ pub fn handle_get<
 		PATH_ROOT	=> handle_list(cfg, theme, admin, csrf, db, query, id),
 		PATH_EDIT	=> handle_edit(cfg, theme, admin, csrf, db, query, id),
 		PATH_PREVIEW	=> handle_preview(cfg, theme, admin, db, query, id),
+		PATH_LIST_JSON	=> list_json(cfg, db, id),
+		PATH_POST_JSON	=> post_json(cfg, db, query, id),
 		_		=> Ok(HttpMessage::respond_with_text(
 			HttpStatus::NotFound,
 			"Not found.",
@@ -468,6 +484,116 @@ fn handle_preview<
 
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
+// │ JSON, for a front-end that renders its own management surface              │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// Every post the store holds, each state, as JSON.
+///
+/// The same list as the page, for a caller that draws its own: the app's Manage tab renders this in
+/// the site's shell rather than send the operator to a page of its own. The reader's `index.json` is
+/// the live posts only; this is the author's, so it carries the drafts too, and each post's state.
+fn list_json<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	cfg:	&PublishConfig,
+	db:	Option<&(Arc<RwLock<DB>>, UID)>,
+	id:	&str,
+)
+	-> Outcome<HttpMessage>
+{
+	if cfg.source != Source::Store {
+		return Ok(json_body(&fmt!("{{\"posts\":[],\"source\":\"dir\"}}")));
+	}
+	let db = match db {
+		Some(db)	=> db,
+		None		=> return Ok(json_body("{\"posts\":[]}")),
+	};
+	let recs = res!(store::list_records(db, id));
+	let mut items = Vec::new();
+	for rec in &recs {
+		// The title is the prose's own heading; where it will not parse, the slug stands in and the
+		// state says the post is broken, exactly as the page does it.
+		let (title, broken) = match rec.render() {
+			Ok(p)	=> (p.title, false),
+			Err(_)	=> (rec.slug.clone(), true),
+		};
+		let mut m = DaticleMap::new();
+		m.insert(dat!("slug"),		dat!(rec.slug.clone()));
+		m.insert(dat!("title"),		dat!(title));
+		m.insert(dat!("kind"),		dat!(rec.kind.as_str().to_string()));
+		m.insert(dat!("state"),		dat!(rec.state.as_str().to_string()));
+		m.insert(dat!("broken"),	Dat::Bool(broken));
+		if let Some(d) = &rec.date {
+			m.insert(dat!("date"),		dat!(d.clone()));
+			m.insert(dat!("date_text"),	dat!(date_text(d)));
+		}
+		items.push(Dat::Map(m));
+	}
+	let body = create_dat_ordmap(vec![(dat!("posts"), Dat::List(items))]);
+	Ok(json_body(&res!(body.encode_string_with_config(&EncoderConfig::<(), ()>::json(None)))))
+}
+
+/// One post's source and rendering, as JSON.
+///
+/// What the editor loads to fill its fields, and what a preview shows: the Markdown as written, the
+/// kind, the state, the date in the readable form a person edits, and the HTML a reader would get.
+fn post_json<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	cfg:	&PublishConfig,
+	db:	Option<&(Arc<RwLock<DB>>, UID)>,
+	query:	&str,
+	id:	&str,
+)
+	-> Outcome<HttpMessage>
+{
+	let slug = match query_field(query, "slug") {
+		Some(s)	=> s,
+		None	=> return Ok(json_error("no post was named")),
+	};
+	if cfg.source != Source::Store {
+		return Ok(json_error("this site serves its posts from a directory"));
+	}
+	let db = match db {
+		Some(db)	=> db,
+		None		=> return Ok(json_error("this site has no database configured")),
+	};
+	let rec = match store::get(db, &slug) {
+		Ok(Some(r))	=> r,
+		Ok(None)	=> return Ok(json_error("there is no post by that name")),
+		Err(e)		=> {
+			error!(e, "{}: console: cannot read '{}'", id, slug);
+			return Ok(json_error("that post could not be read"));
+		}
+	};
+	// The rendered HTML for a preview, where the prose parses; where it does not, the empty string
+	// and a flag, so the editor can say so rather than show nothing and seem to have lost the post.
+	let (html, broken) = match rec.render() {
+		Ok(p)	=> (p.html, false),
+		Err(_)	=> (String::new(), true),
+	};
+	let mut m = DaticleMap::new();
+	m.insert(dat!("slug"),		dat!(rec.slug.clone()));
+	m.insert(dat!("source"),	dat!(rec.source.clone()));
+	m.insert(dat!("kind"),		dat!(rec.kind.as_str().to_string()));
+	m.insert(dat!("state"),		dat!(rec.state.as_str().to_string()));
+	m.insert(dat!("html"),		dat!(html));
+	m.insert(dat!("broken"),	Dat::Bool(broken));
+	// The readable form in the field; the `T` goes back in at save.
+	m.insert(dat!("date"),		dat!(rec.date.as_deref().map(date_text).unwrap_or_default()));
+	Ok(json_body(&res!(Dat::Map(m).encode_string_with_config(&EncoderConfig::<(), ()>::json(None)))))
+}
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
 // │ POST                                                                      │
 // └───────────────────────────────────────────────────────────────────────────┘
 
@@ -484,13 +610,14 @@ pub fn handle_post<
 	db:		Option<&(Arc<RwLock<DB>>, UID)>,
 	request_path:	&str,
 	body:		&[u8],
+	json:		bool,
 	id:		&str,
 )
 	-> Outcome<HttpMessage>
 {
 	let cfg = match cfg {
 		Some(c)	=> c,
-		None	=> return Ok(back_with("this site publishes nothing")),
+		None	=> return Ok(back_with("this site publishes nothing", json)),
 	};
 	// Editing what is not served would be writing into the dark, so the editor waits for the store to
 	// be the source. Importing does not: it is how a site gets from one to the other, and must run
@@ -499,19 +626,20 @@ pub fn handle_post<
 		return Ok(back_with(
 			"this site serves its posts from a directory, so there is nothing to write into; set \
 			'source' to 'store' first",
+			json,
 		));
 	}
 	let db = match db {
 		Some(db)	=> db,
-		None		=> return Ok(back_with("this site has no database configured")),
+		None		=> return Ok(back_with("this site has no database configured", json)),
 	};
 
 	match request_path {
-		PATH_SAVE	=> do_save(db, body, &admin.username, id),
-		PATH_DELETE	=> do_delete(db, body, &admin.username, id),
-		PATH_IMPORT	=> do_import(cfg, db, &admin.username, id),
+		PATH_SAVE	=> do_save(db, body, &admin.username, json, id),
+		PATH_DELETE	=> do_delete(db, body, &admin.username, json, id),
+		PATH_IMPORT	=> do_import(cfg, db, &admin.username, json, id),
 		// Unreachable: `writes` names the same three paths.
-		_		=> Ok(back()),
+		_		=> Ok(back(json)),
 	}
 }
 
@@ -526,6 +654,7 @@ fn do_save<
 	db:	&(Arc<RwLock<DB>>, UID),
 	body:	&[u8],
 	who:	&str,
+	json:	bool,
 	id:	&str,
 )
 	-> Outcome<HttpMessage>
@@ -535,6 +664,7 @@ fn do_save<
 	if !valid_slug(&slug) {
 		return Ok(back_with(
 			"a post's name may hold letters, digits, hyphens and underscores, and nothing else",
+			json,
 		));
 	}
 
@@ -542,12 +672,13 @@ fn do_save<
 	if !valid_date(&date) {
 		return Ok(back_with(
 			"a date is written 2026-07-17, or 2026-07-17 14:30 to say when in the day, or is left empty",
+			json,
 		));
 	}
 
 	let source = super::form_field(body, "source").unwrap_or_default();
 	if source.trim().is_empty() {
-		return Ok(back_with("a post with no prose in it is not a post"));
+		return Ok(back_with("a post with no prose in it is not a post", json));
 	}
 
 	let rec = Record {
@@ -576,7 +707,7 @@ fn do_save<
 	}
 
 	info!("{}: console: '{}' saved '{}' ({})", id, who, rec.slug, rec.state.as_str());
-	Ok(back())
+	Ok(back(json))
 }
 
 /// Deletes a post.
@@ -590,22 +721,23 @@ fn do_delete<
 	db:	&(Arc<RwLock<DB>>, UID),
 	body:	&[u8],
 	who:	&str,
+	json:	bool,
 	id:	&str,
 )
 	-> Outcome<HttpMessage>
 {
 	let slug = match super::form_field(body, "slug") {
 		Some(s)	=> s,
-		None	=> return Ok(back_with("no post was named")),
+		None	=> return Ok(back_with("no post was named", json)),
 	};
 	if !valid_slug(&slug) {
-		return Ok(back_with("that is not a post's name"));
+		return Ok(back_with("that is not a post's name", json));
 	}
 	let existed = res!(store::delete(db, &slug, id));
 	if existed {
 		info!("{}: console: '{}' deleted '{}'", id, who, slug);
 	}
-	Ok(back())
+	Ok(back(json))
 }
 
 /// Reads the directory into the store.
@@ -619,6 +751,7 @@ fn do_import<
 	cfg:	&PublishConfig,
 	db:	&(Arc<RwLock<DB>>, UID),
 	who:	&str,
+	json:	bool,
 	id:	&str,
 )
 	-> Outcome<HttpMessage>
@@ -627,11 +760,11 @@ fn do_import<
 		Ok(n)	=> n,
 		Err(e)	=> {
 			error!(e, "{}: console: import from '{}' failed", id, cfg.dir);
-			return Ok(back_with("the directory could not be read; the log says why"));
+			return Ok(back_with("the directory could not be read; the log says why", json));
 		}
 	};
 	info!("{}: console: '{}' imported {} posts from '{}'", id, who, n, cfg.dir);
-	Ok(back())
+	Ok(back(json))
 }
 
 
@@ -639,14 +772,46 @@ fn do_import<
 // │ HELPERS                                                                   │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Back to the list, having done the thing. A redirect, so a reload does not write again.
-fn back() -> HttpMessage {
-	redirect(PATH_ROOT)
+/// The answer to a write that went through.
+///
+/// Two callers, two shapes. A form wants a redirect, so a reload does not write again; the app,
+/// which asked for JSON, wants a plain yes it can act on without a page changing under it.
+fn back(json: bool) -> HttpMessage {
+	if json {
+		json_body("{\"ok\":true}")
+	} else {
+		redirect(PATH_ROOT)
+	}
 }
 
-/// Back to the list, having not, with the reason in the query it lands with.
-fn back_with(why: &str) -> HttpMessage {
-	redirect(&fmt!("{}?said={}", PATH_ROOT, url_encode(why)))
+/// The answer to a write that did not, carrying the reason -- in the query a form lands with, or in
+/// the JSON the app reads.
+fn back_with(why: &str, json: bool) -> HttpMessage {
+	if json {
+		json_error(why)
+	} else {
+		redirect(&fmt!("{}?said={}", PATH_ROOT, url_encode(why)))
+	}
+}
+
+/// A JSON body, already encoded.
+fn json_body(body: &str) -> HttpMessage {
+	let mut resp = HttpMessage::ok_respond_with_text(body.to_string());
+	resp = resp.with_field(
+		HeaderName::ContentType,
+		HeaderFieldValue::Generic(fmt!("application/json")),
+	);
+	resp
+}
+
+/// A JSON error a caller can read, its reason escaped for a string literal.
+fn json_error(why: &str) -> HttpMessage {
+	let m = create_dat_ordmap(vec![(dat!("error"), dat!(why.to_string()))]);
+	match m.encode_string_with_config(&EncoderConfig::<(), ()>::json(None)) {
+		Ok(j)	=> json_body(&j),
+		// The error about the error. Say the plain thing rather than nothing.
+		Err(_)	=> json_body("{\"error\":\"error\"}"),
+	}
 }
 
 /// A thing the page says.

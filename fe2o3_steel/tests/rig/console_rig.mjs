@@ -34,9 +34,9 @@ const has = (m, hay, needle) => hay.includes(needle) ? ok(m) : no(m, `missing '$
 const hasnt = (m, hay, needle) => hay.includes(needle) ? no(m, `contained '${needle}'`) : ok(m);
 
 /* --- a plain HTTP call, self-signed cert allowed, cookie carried by hand --- */
-function call(method, path, { cookie, body, form } = {}) {
+function call(method, path, { cookie, body, form, headers: extra } = {}) {
 	return new Promise((resolve, reject) => {
-		const headers = {};
+		const headers = Object.assign({}, extra);
 		let payload = null;
 		if (cookie) headers['Cookie'] = cookie;
 		if (form) {
@@ -194,6 +194,34 @@ async function main() {
 	check('the console serves its page', r.status, 200);
 	has('the page is the console', r.body, 'Posts');
 	has('in the site’s own chrome', r.body, 'manage');
+
+	console.log('\n== the app-facing JSON endpoints ==');
+	// The Manage tab renders from these, and writes with the token status hands it.
+	r = await call('GET', '/manage/status', { cookie });
+	has('status gives an admin the csrf token', r.body, '"csrf"');
+	const statusCsrf = (r.body.match(/"csrf":"([0-9a-f]+)"/) || [])[1];
+	if (statusCsrf) ok('the token is a sha3 hex'); else no('no token in status');
+	r = await call('GET', '/manage/list.json', { cookie });
+	has('list.json returns a posts array', r.body, '"posts"');
+	// A JSON write, as the app makes it: Accept application/json, token from status.
+	r = await call('POST', '/manage/save', {
+		cookie, headers: { Accept: 'application/json' },
+		form: { slug: 'json-made', kind: 'note', state: 'draft', source: '# Via JSON\n\nx.', csrf: statusCsrf },
+	});
+	check('a json save answers 200, not a redirect', r.status, 200);
+	has('and says ok', r.body, '"ok":true');
+	r = await call('GET', '/manage/post.json?slug=json-made', { cookie });
+	has('post.json returns the source to edit', r.body, 'Via JSON');
+	has('and it is a draft', r.body, '"state": "draft"');
+	// A json save with a bad token is a json error, not a redirect.
+	r = await call('POST', '/manage/save', {
+		cookie, headers: { Accept: 'application/json' },
+		form: { slug: 'json-made', source: 'x', csrf: 'bad' },
+	});
+	check('a bad-token json write is refused as json', r.status, 403);
+	has('with an error the app can read', r.body, 'error');
+	await call('POST', '/manage/delete', {
+		cookie, headers: { Accept: 'application/json' }, form: { slug: 'json-made', csrf: statusCsrf } });
 
 	console.log('\n== write a post through the console ==');
 	r = await call('GET', '/manage/edit', { cookie });
