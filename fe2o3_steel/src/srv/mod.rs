@@ -11,6 +11,7 @@ pub mod http;
 pub mod https;
 pub mod id;
 pub mod mail;
+pub mod publish;
 pub mod server;
 //pub mod smtps;
 pub mod webhook;
