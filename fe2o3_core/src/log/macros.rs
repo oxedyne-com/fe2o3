@@ -1,7 +1,8 @@
 #[macro_export]
 /// Log a message if the provided log level is less than or equal to the current log level.  Note
 /// that an error message can be logged this way but you won't be able to provide an actual error
-/// object.  Instead, user `error!` directly.
+/// object.  Instead, use `error!` directly, or `fault!` for an error-level message that has no
+/// error object to carry.
 macro_rules! log {
     ($level:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
@@ -36,6 +37,9 @@ macro_rules! log {
 /// structure to the others, accepting either an `oxedyne_fe2o3_core::error::Error` or an `Error` with
 /// parameters for string formatting.  In other words, it requires the caller to pass an `Error` or
 /// create one.
+///
+/// Every arm takes the error first, so there is no arm for a bare message: reach for `fault!`
+/// when there is no error object to carry, which logs at this same level.
 macro_rules! error {
     ($e:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
@@ -126,6 +130,11 @@ macro_rules! fault {
 
 #[macro_export]
 /// Log a warning message by sending it to the `LogBot` instance.
+///
+/// There is deliberately no arm that carries an `Error`, and one cannot be added: the stream arm
+/// below is already `($stream:expr, $lit:literal, ...)`, so an error arm would be pattern-identical
+/// to it and never match.  An error worth keeping structured is an `error!`; an error worth only a
+/// warning is interpolated into the message via `Display`.
 macro_rules! warn {
     ($lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
