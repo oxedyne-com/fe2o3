@@ -1,4 +1,7 @@
-use crate::srv::constant;
+use crate::srv::{
+    constant,
+    publish::PublishConfig,
+};
 
 use oxedyne_fe2o3_core::{
     prelude::*,
@@ -812,6 +815,12 @@ pub struct VhostConfig {
     /// WS commands and the `/term/<session>` binary WS endpoint
     /// for this vhost.  `None` disables terminal features.
     pub term_config:            Option<TermConfig>,
+    /// The prose this vhost publishes: a directory of Markdown served
+    /// as pages, a feed and a JSON list, under a prefix of the site's
+    /// choosing. `None` publishes nothing and serves none of those
+    /// paths, which is what a config with no `publish` block means and
+    /// what every config written before the block existed says.
+    pub publish:                Option<PublishConfig>,
 }
 
 /// A single entry in a vhost's [`VhostConfig::admin_keys`] list.
@@ -859,6 +868,7 @@ impl Default for VhostConfig {
             db_dir_rel:             Some(fmt!("./o3db")),
             api_routes:             Vec::new(),
             webhook_routes:         Vec::new(),
+            publish:                None,
             egress_allowed:         Vec::new(),
             admin_keys:             Vec::new(),
             head_injection_url:     None,
@@ -1122,6 +1132,15 @@ impl VhostConfig {
                 "VhostConfig: 'term_config' must be a map.";
                 Invalid, Input, Mismatch)),
         };
+        // Absent means the vhost publishes nothing, which is what every config
+        // written before this block existed says, and what most vhosts mean.
+        let publish = match m.get(&dat!("publish")) {
+            Some(Dat::Map(sub)) => Some(res!(PublishConfig::from_datmap(sub))),
+            None => None,
+            _ => return Err(err!(
+                "VhostConfig: 'publish' must be a map.";
+                Invalid, Input, Mismatch)),
+        };
         Ok(Self {
             hostnames,
             public_dir_rel,
@@ -1136,6 +1155,7 @@ impl VhostConfig {
             head_injection_url,
             proxy_routes,
             term_config,
+            publish,
         })
     }
 

@@ -235,7 +235,10 @@ fn inline(out: &mut String, item: &Inline) {
 }
 
 /// Escapes a run of text for an element's content.
-fn escape_text(out: &mut String, s: &str) {
+///
+/// Public because a caller that wraps a rendered document in a page of its own -- a title, a meta
+/// description, a feed entry -- has the same text to make safe, and the rule should be stated once.
+pub fn escape_text(out: &mut String, s: &str) {
 	for c in s.chars() {
 		match c {
 			'&'	=> out.push_str("&amp;"),
@@ -250,7 +253,10 @@ fn escape_text(out: &mut String, s: &str) {
 ///
 /// Both quote marks are escaped, not only the double the renderer happens to use, so a value stays
 /// inert if it is ever moved into single quotes.
-fn escape_attr(out: &mut String, s: &str) {
+///
+/// Public for the same reason as [`escape_text`]: a page built around a document puts its title into
+/// an attribute, and that title came from the prose.
+pub fn escape_attr(out: &mut String, s: &str) {
 	for c in s.chars() {
 		match c {
 			'&'	=> out.push_str("&amp;"),

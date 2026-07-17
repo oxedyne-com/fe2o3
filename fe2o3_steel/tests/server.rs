@@ -120,6 +120,7 @@ pub async fn test_server(filter: &'static str) -> Outcome<()> {
                 head_injection_url:     None,
                 proxy_routes:           Vec::new(),
                 term_config:            None,
+                publish:                None,
             };
 
             let web_handler: AppWebHandler<HashMap<String, OsPath>> = AppWebHandler::new(
@@ -135,6 +136,7 @@ pub async fn test_server(filter: &'static str) -> Outcome<()> {
                 None,              // tls_client
                 None,              // admin_state
                 None,              // traffic
+                None,              // publish
             );
 
             let ws_handler = AppWebSocketHandler::new(None);

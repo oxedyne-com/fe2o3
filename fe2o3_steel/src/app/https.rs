@@ -16,6 +16,10 @@ use crate::srv::{
         WebhookRoute,
     },
     dev::refresh::HtmlModifier,
+    publish::{
+        PublishConfig,
+        page as publish_page,
+    },
     webhook::{
         self,
         WebhookRegistry,
@@ -110,6 +114,10 @@ pub struct AppWebHandler<
     /// disables traffic recording without affecting request
     /// handling.
     pub traffic:                Option<Arc<TrafficRecorder>>,
+    /// The prose this vhost publishes. `None` publishes nothing, and
+    /// the paths the block would have claimed fall through to the
+    /// static file router like any others.
+    pub publish:                Option<Arc<PublishConfig>>,
 }
 
 impl<
@@ -130,6 +138,7 @@ impl<
         tls_client:             Option<Arc<ClientConfig>>,
         admin_state:            Option<Arc<AdminState>>,
         traffic:                Option<Arc<TrafficRecorder>>,
+        publish:                Option<Arc<PublishConfig>>,
     )
         -> Self
     {
@@ -146,6 +155,7 @@ impl<
             tls_client,
             admin_state,
             traffic,
+            publish,
         }
     }
 
@@ -249,6 +259,7 @@ impl<
         let api_handler_registry = self.api_handler_registry.clone();
         let tls_client = self.tls_client.clone();
         let admin_state = self.admin_state.clone();
+        let publish = self.publish.clone();
 
         async move {
             // The dashboard owns the entire `/admin` and `/admin/*`
@@ -299,6 +310,24 @@ impl<
                     HttpStatus::NotFound,
                     "Not found.",
                 )));
+            }
+
+            // The published prose owns its prefix and everything under
+            // it, so a post named like a file on disk is still the
+            // post. Dispatched before API and static routes for the
+            // same reason the dashboard is: a prefix a vhost has
+            // claimed should not be shadowed by what happens to sit in
+            // its webroot. A vhost publishing nothing skips this
+            // entirely and the paths mean whatever they meant before.
+            if let Some(cfg) = &publish {
+                if cfg.owns(&request_path) {
+                    let resp = res!(publish_page::handle_get(
+                        cfg.as_ref(),
+                        &request_path,
+                        &id,
+                    ).await);
+                    return Ok(Some(resp));
+                }
             }
 
             // Check API routes before falling through to static file

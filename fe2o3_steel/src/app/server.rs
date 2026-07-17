@@ -549,6 +549,7 @@ impl AppShellContext {
                 tls_client.clone(),
                 Some(admin_state.clone()),
                 Some(traffic.clone()),
+                vh.publish.clone().map(Arc::new),
             );
 
             let runtime = Arc::new(VhostRuntime {
