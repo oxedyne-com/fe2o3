@@ -127,6 +127,7 @@ pub async fn handle_get<
     state:        &AdminState,
     db:           Option<&(Arc<RwLock<DB>>, UID)>,
     request_path: &str,
+    query:        &str,
     headers:      &Arc<HeaderFields>,
     id:           &str,
 )
@@ -141,19 +142,21 @@ pub async fn handle_get<
         None => return Ok(redirect_to_login()),
     };
 
-    // Strip the path prefix and pull the query string off the
-    // back. v1 supports only the list route; future revisions
+    // Strip the path prefix. v1 supports only the list route; future revisions
     // will route /admin/database/<urlencoded_key> to a detail view.
-    let after_prefix = match request_path.strip_prefix("/admin/database") {
+    //
+    // The query arrives as its own argument and is not cut out of the path: a
+    // request's path and query are parsed apart, so `request_path` never holds
+    // a `?`. This looked for one, never found it, and quietly read every
+    // request as though it carried no query at all -- so the prefix box, the
+    // limit box and the detail panel all did nothing, and the page always
+    // listed the first `DEFAULT_LIST_LIMIT` keys of the whole database.
+    let path_part = match request_path.strip_prefix("/admin/database") {
         Some(s) => s,
         None => return Ok(HttpMessage::respond_with_text(
             HttpStatus::NotFound,
             "Ozone route not found.",
         )),
-    };
-    let (path_part, query) = match after_prefix.split_once('?') {
-        Some((p, q)) => (p, Some(q)),
-        None => (after_prefix, None),
     };
     let _ = path_part; // Sub-path routing reserved for future use.
 
@@ -224,15 +227,14 @@ pub async fn handle_get<
 /// Recognises `prefix=<str>`, `limit=<u32>`, and `key=<str>` for
 /// the detail panel. Unknown keys are ignored; malformed limits
 /// fall back to the default.
-fn parse_query(query: Option<&str>) -> ListQuery {
+fn parse_query(query: &str) -> ListQuery {
     let mut scan = ScanOpts::default();
     scan.limit = Some(DEFAULT_LIST_LIMIT);
     let mut detail: Option<String> = None;
-    let q = match query {
-        Some(s) => s,
-        None => return ListQuery { scan, detail },
-    };
-    for pair in q.split('&') {
+    if query.is_empty() {
+        return ListQuery { scan, detail };
+    }
+    for pair in query.split('&') {
         let mut kv = pair.splitn(2, '=');
         let k = match kv.next() { Some(k) => k, None => continue };
         let v = kv.next().unwrap_or("");

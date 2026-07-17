@@ -219,11 +219,52 @@ pub fn delete<
 	Ok(existed)
 }
 
-/// Every post, newest first, rendered.
+/// Every record the store holds, whatever its state, newest first.
+///
+/// What an author gets. [`list`] is what a reader gets and so passes over drafts, which is exactly
+/// what the author of a draft must be able to see: a composer that could not show the thing not yet
+/// published would be showing everything except the work in progress.
+///
+/// A record the index names but the database does not hold is passed over with a complaint, rather
+/// than failing the lot: one bad post should not take the others off the page.
+pub fn list_records<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	id:	&str,
+)
+	-> Outcome<Vec<Record>>
+{
+	let slugs = res!(index(db, id));
+	let mut recs = Vec::new();
+	for slug in &slugs {
+		match get(db, slug) {
+			Ok(Some(r))	=> recs.push(r),
+			Ok(None)	=> {
+				// The index names a post the database does not hold. Derived data disagreeing with
+				// what it was derived from is worth saying out loud.
+				warn!("{}: publish: the index names '{}', which is not there", id, slug);
+			}
+			Err(e)		=> {
+				warn!("{}: publish: skipping '{}': {}", id, slug, e);
+			}
+		}
+	}
+	// Newest first, and among posts of one date, or of none, by slug. The date descending and the
+	// slug ascending are compared in opposite directions, so they are compared apart.
+	recs.sort_by(|a, b| b.date.cmp(&a.date).then_with(|| a.slug.cmp(&b.slug)));
+	Ok(recs)
+}
+
+/// Every live post, newest first, rendered.
 ///
 /// A record that will not render is passed over with a complaint in the log rather than failing the
 /// lot, on the same reasoning a directory's unreadable file is: one bad post should not take the
-/// others off the page.
+/// others off the page. The order is [`list_records`]'s.
 pub fn list<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -236,31 +277,17 @@ pub fn list<
 )
 	-> Outcome<Vec<Post>>
 {
-	let slugs = res!(index(db, id));
+	let recs = res!(list_records(db, id));
 	let mut posts = Vec::new();
-	for slug in &slugs {
-		let rec = match get(db, slug) {
-			Ok(Some(r))	=> r,
-			Ok(None)	=> {
-				// The index names a post the database does not hold. Derived data disagreeing with
-				// what it was derived from is worth saying out loud.
-				warn!("{}: publish: the index names '{}', which is not there", id, slug);
-				continue;
-			}
-			Err(e)		=> {
-				warn!("{}: publish: skipping '{}': {}", id, slug, e);
-				continue;
-			}
-		};
+	for rec in &recs {
 		if rec.state != PostState::Live {
 			continue;
 		}
 		match rec.render() {
 			Ok(p)	=> posts.push(p),
-			Err(e)	=> warn!("{}: publish: '{}' will not render: {}", id, slug, e),
+			Err(e)	=> warn!("{}: publish: '{}' will not render: {}", id, rec.slug, e),
 		}
 	}
-	posts.sort_by(|a, b| b.date.cmp(&a.date).then_with(|| a.slug.cmp(&b.slug)));
 	Ok(posts)
 }
 

@@ -19,8 +19,8 @@ use crate::srv::{
     publish::{
         self,
         PublishConfig,
+        composer as publish_composer,
         page as publish_page,
-        write as publish_write,
     },
     webhook::{
         self,
@@ -257,6 +257,9 @@ impl<
         let rpath = loc.path.clone();
         let id = id.to_string();
         let request_path = loc.path.as_string().to_string();
+        // The path and the query are parsed apart, so a handler wanting the query must be handed
+        // it: `request_path` never carries one, and splitting it on `?` finds nothing.
+        let request_query = loc.query.clone();
         let api_routes = self.api_routes.clone();
         let api_handler_registry = self.api_handler_registry.clone();
         let tls_client = self.tls_client.clone();
@@ -274,7 +277,6 @@ impl<
             // db typed parameters in scope), all other dashboard
             // routes go to the non-generic handler module.
             if request_path == "/admin/database"
-                || request_path.starts_with("/admin/database?")
                 || request_path.starts_with("/admin/database/")
             {
                 if let Some(state) = &admin_state {
@@ -282,6 +284,29 @@ impl<
                         state.as_ref(),
                         db.as_ref(),
                         &request_path,
+                        &request_query,
+                        &req_headers,
+                        &id,
+                    ).await);
+                    return Ok(Some(resp));
+                }
+                return Ok(Some(HttpMessage::respond_with_text(
+                    HttpStatus::NotFound,
+                    "Not found.",
+                )));
+            }
+            // The composer, before the dashboard's own routes: it is an `/admin` page like the
+            // rest, but it needs the per-vhost publish config and the per-vhost database, which
+            // the non-generic handler module does not carry. Same two-stage reason as the ozone
+            // view above.
+            if publish_composer::owns(&request_path) {
+                if let Some(state) = &admin_state {
+                    let resp = res!(publish_composer::handle_get(
+                        publish.as_deref(),
+                        state.as_ref(),
+                        db.as_ref(),
+                        &request_path,
+                        &request_query,
                         &req_headers,
                         &id,
                     ).await);
@@ -545,6 +570,25 @@ impl<
         let publish = self.publish.clone();
 
         async move {
+            // The composer's writes, before the dashboard's own, for the same reason its pages
+            // are: it needs the per-vhost publish config and database. It answers only the paths
+            // it knows and hands the rest back to the dashboard below.
+            if publish_composer::owns(&request_path) {
+                if let Some(state) = &admin_state {
+                    if let Some(resp) = res!(publish_composer::handle_post(
+                        publish.as_deref(),
+                        state.as_ref(),
+                        db.as_ref(),
+                        &request_path,
+                        &req_headers,
+                        &body,
+                        &id,
+                    ).await) {
+                        return Ok(Some(resp));
+                    }
+                }
+            }
+
             // Dashboard `/admin/*` POST handlers (login form POST,
             // logout, future mutations). Same precedence rule as
             // GET: dashboard owns the subtree and dispatches before
@@ -567,25 +611,6 @@ impl<
                     HttpStatus::NotFound,
                     "Not found.",
                 )));
-            }
-
-            // The published prose owns its prefix for writes as it does
-            // for reads. It answers only the paths it knows and hands
-            // the rest back, so an app POSTing elsewhere under the
-            // prefix is not swallowed here.
-            if let Some(cfg) = &publish {
-                if cfg.owns(&request_path) {
-                    if let Some(resp) = res!(publish_write::handle_post(
-                        cfg.as_ref(),
-                        admin_state.as_ref(),
-                        db.as_ref(),
-                        &request_path,
-                        &req_headers,
-                        &id,
-                    ).await) {
-                        return Ok(Some(resp));
-                    }
-                }
             }
 
             // Check webhook routes first. Two dispatch branches

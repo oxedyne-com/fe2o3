@@ -31,11 +31,11 @@
 //! rearrangement. A directory of Markdown is not a stand-in meanwhile: it is a real way to write, and
 //! the file is the source either way.
 
+pub mod composer;
 pub mod feed;
 pub mod json;
 pub mod page;
 pub mod store;
-pub mod write;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_iop_crypto::enc::Encrypter;
@@ -245,12 +245,54 @@ impl PublishConfig {
 		s
 	}
 
-	/// The URL path the import is posted to.
-	pub fn import_path(&self) -> String {
-		let mut s = self.path.clone();
-		s.push_str("/import");
-		s
+}
+
+
+/// The longest a slug may be.
+///
+/// A key and a URL both hold one, and neither has a natural limit worth relying on. The number is
+/// arbitrary; having one is not.
+pub const SLUG_MAX: usize = 128;
+
+/// Whether a word may be a post's name.
+///
+/// A slug is not decoration: it is pasted into a database key (`publish/post/<slug>`) and into a
+/// URL, so a form's idea of one cannot be taken at its word. A slug carrying a slash would reach
+/// past its own key and name a different post's, or a different thing entirely; one carrying a dot
+/// pair would do the same to a path; one carrying a space or a quote would arrive somewhere as
+/// something other than what was typed.
+///
+/// So the rule is a small alphabet rather than a list of what to reject: letters, digits, hyphen and
+/// underscore. Anything a list of forbidden characters missed would be allowed by default, and the
+/// thing about that mistake is that it does not announce itself.
+pub fn valid_slug(s: &str) -> bool {
+	!s.is_empty()
+		&& s.len() <= SLUG_MAX
+		&& s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Whether a word may be a post's date.
+///
+/// `YYYY-MM-DD`, the shape [`split_date`] reads out of a filename and the shape the feed needs:
+/// Atom's dates are ISO 8601, and a date that is not one would reach a reader's feed reader as a
+/// malformed entry rather than as an error anyone here would see. Empty is allowed -- a post without
+/// a date is a post, and says so by carrying none.
+///
+/// The shape is checked and the calendar is not: `2026-02-31` passes. Refusing it would mean owning
+/// a calendar, which is the dependency this module does not have and the reason the feed is Atom.
+/// A date that is shaped right and means nothing is the author's typo to see, and it is visible --
+/// it is printed on the post.
+pub fn valid_date(s: &str) -> bool {
+	if s.is_empty() {
+		return true;
 	}
+	let b = s.as_bytes();
+	b.len() == 10 && b.iter().enumerate().all(|(i, c)| {
+		match i {
+			4 | 7	=> *c == b'-',
+			_	=> c.is_ascii_digit(),
+		}
+	})
 }
 
 

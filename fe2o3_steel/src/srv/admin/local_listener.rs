@@ -184,10 +184,13 @@ impl<
             let result = reader.next().await;
             match result {
                 Some(Ok(request)) => {
-                    let (method, path) = match &request.header.headline {
+                    // The path and the query are parsed apart, so a handler wanting
+                    // the query must be handed it: `path` never carries one.
+                    let (method, path, query) = match &request.header.headline {
                         HttpHeadline::Request { method, loc } => (
                             method.clone(),
                             loc.path.as_string().to_string(),
+                            loc.query.clone(),
                         ),
                         _ => {
                             // Not a request line; bail out.
@@ -205,7 +208,6 @@ impl<
                         || path.starts_with("/admin/")
                     {
                         if path == "/admin/database"
-                            || path.starts_with("/admin/database?")
                             || path.starts_with("/admin/database/")
                         {
                             match method {
@@ -214,6 +216,7 @@ impl<
                                         admin_state.as_ref(),
                                         default_db.as_ref(),
                                         &path,
+                                        &query,
                                         &req_headers,
                                         &id,
                                     ).await {

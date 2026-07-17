@@ -2011,7 +2011,7 @@ fn render_login_form(sealed: bool, error_msg: Option<&str>) -> HttpMessage {
 /// matching key's value, URL-decoded; returns `None` if the key
 /// is absent. Designed for tiny login-style bodies where one or
 /// two fields are expected.
-fn extract_form_field(body: &[u8], key: &str) -> Option<String> {
+pub(crate) fn extract_form_field(body: &[u8], key: &str) -> Option<String> {
     let s = std::str::from_utf8(body).ok()?;
     for pair in s.split('&') {
         let mut kv = pair.splitn(2, '=');
