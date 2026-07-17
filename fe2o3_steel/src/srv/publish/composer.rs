@@ -192,9 +192,11 @@ fn handle_list<
 	if cfg.source != Source::Store {
 		body.push_str(&notice(&fmt!(
 			"This site serves its posts from the directory <code>{dir}</code>, so they are edited \
-			by editing those files. To write them here instead, set <code>source</code> to \
-			<code>\"store\"</code> in this vhost's <code>publish</code> block, then import what the \
-			directory holds.",
+			by editing those files, and there is nothing to write here yet. To move it into the \
+			database and write here instead: import first, while the directory is still being \
+			served, then set <code>source</code> to <code>\"store\"</code> in this vhost's \
+			<code>publish</code> block and restart. That order keeps the site up; the other order \
+			empties it until the import runs.",
 			dir = html_escape(&cfg.dir),
 		)));
 		body.push_str(&import_form(&cfg.dir));
@@ -531,7 +533,14 @@ pub async fn handle_post<
 		Some(c)	=> c,
 		None	=> return Ok(Some(back_with("this vhost publishes nothing"))),
 	};
-	if cfg.source != Source::Store {
+	// Editing what is not served would be writing into the dark, so the editor waits for the store
+	// to be the source. Importing does not: it is how a site gets from one to the other, and it has
+	// to run *before* the switch or the switch empties the site.
+	//
+	// The order that works is import, look, then switch. The order that does not is switch, then
+	// discover the site is blank, then find that the thing which would fill it is refusing to run
+	// because the site is not yet serving what it has not yet been given.
+	if cfg.source != Source::Store && request_path != PATH_IMPORT {
 		return Ok(Some(back_with(
 			"this vhost serves its posts from a directory, so there is nothing to write into; set \
 			'source' to 'store' first",
