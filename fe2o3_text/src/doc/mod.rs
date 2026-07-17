@@ -1,44 +1,40 @@
-//! Markdown -- a parser for the lightweight markup language, producing a neutral document tree.
+//! A neutral document tree: what a piece of prose *is*, free of the syntax it was written in and the
+//! form it will be rendered to.
 //!
-//! Markdown is the form most prose is written in, and a great deal of prose already exists in it. This
-//! module reads that text and produces a tree of [`Block`] and [`Inline`] nodes: a small, closed
-//! vocabulary that says what the prose *is* -- a heading, a paragraph, a list, a quotation -- and says
-//! nothing about how it should look or what a caller means to do with it.
+//! A document is a sequence of [`Block`]s, and a line of prose a sequence of [`Inline`]s. The
+//! vocabulary is small and closed: a heading, a paragraph, a list, a quotation, a run of text, a
+//! link. That is the whole of it.
 //!
-//! # The tree is neutral
+//! # The tree names nothing at either end
 //!
-//! The tree names no output format. A caller walks it and makes of it whatever it likes: HTML, a
-//! signed document tree, a terminal rendering, an index. That is why the vocabulary is deliberately
-//! small and free of Markdown's own spelling -- there is no `Block::Asterisks`, only
-//! [`Inline::Emph`] -- so a second syntax could produce the same tree and every consumer of it would
-//! keep working.
+//! It names no input syntax -- there is no `Block::Asterisks`, only [`Inline::Emph`] -- so a second
+//! front-end produces the same tree and every consumer of it keeps working. And it names no output
+//! format, so a caller walks it and makes of it whatever it likes: HTML, a signed document, a
+//! terminal rendering, an index.
 //!
-//! # The dialect
+//! Both halves are load-bearing. A tree that admitted one syntax's spelling would make every consumer
+//! learn that syntax; a tree that admitted one format's constructs -- a raw HTML node, say -- would
+//! make every front-end learn that format. The tree is the narrow waist between the two, and it stays
+//! narrow by carrying meaning rather than markup.
 //!
-//! The subset parsed is the CommonMark core that prose actually uses: ATX headings, paragraphs,
-//! fenced and indented code, block quotations, ordered and unordered lists (nested), thematic breaks,
-//! and the inline run of emphasis, strong emphasis, links, images, code spans and hard breaks. It is
-//! not a conformant CommonMark implementation and does not try to be: the reference test suite is
-//! largely a catalogue of pathological nesting that no author writes. Where this parser and
-//! CommonMark differ on such input, this parser is simply making its own choice.
+//! # Front-ends
+//!
+//! - [`markdown`] -- reads Markdown, the form most existing prose is written in.
 //!
 //! # Usage
 //!
 //! ```ignore
-//! use oxedyne_fe2o3_text::markdown;
+//! use oxedyne_fe2o3_text::doc::markdown;
 //!
-//! let doc = res!(markdown::parse("# A heading\n\nA paragraph with *emphasis*.\n"));
-//! for block in &doc.blocks {
+//! let tree = res!(markdown::parse("# A heading\n\nA paragraph with *emphasis*.\n"));
+//! for block in &tree.blocks {
 //!     // Walk the tree.
 //! }
 //! ```
 
-pub mod block;
-pub mod inline;
+pub mod markdown;
 
-use oxedyne_fe2o3_core::prelude::*;
-
-/// A parsed document: the blocks it is made of, in the order they were written.
+/// A document: the blocks it is made of, in the order they were written.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Doc {
 	/// The document's blocks, in reading order.
@@ -128,7 +124,12 @@ pub enum Inline {
 	},
 	/// A span of code within a line.
 	Code(String),
-	/// A hard line break: a break the author asked for within a paragraph.
+	/// A break the author asked for within a paragraph.
+	///
+	/// Only ever a *hard* break. Where an author's editor wrapped a line is not a break the author
+	/// asked for, so a front-end resolves such a wrap to a space in the surrounding [`Inline::Text`]
+	/// and never emits this. A consumer may therefore honour this as a break unconditionally, and
+	/// needs no rule of its own about whitespace.
 	Break,
 }
 
@@ -152,20 +153,11 @@ pub fn text_of(content: &[Inline]) -> String {
 	s
 }
 
-/// Reads Markdown text and produces its document tree.
-///
-/// Parsing does not fail on badly formed markup: Markdown has no syntax errors, only text that means
-/// less than the author hoped. An unclosed fence runs to the end, an unmatched bracket is literal
-/// text, and a stray asterisk is an asterisk. The outcome is an error only when the input breaks a
-/// limit the parser holds against a hostile document, such as nesting past [`block::DEPTH_LIMIT`].
-pub fn parse(src: &str) -> Outcome<Doc> {
-	let blocks = res!(block::parse(src));
-	Ok(Doc { blocks })
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	use oxedyne_fe2o3_core::prelude::*;
 
 	#[test]
 	fn test_the_plain_text_of_a_run_flattens_every_inline_00() -> Outcome<()> {

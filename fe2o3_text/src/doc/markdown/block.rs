@@ -4,11 +4,11 @@
 //! Markdown is read in two passes, because its two levels are decided by different things. A block is
 //! decided by how a line *starts* and by the blank lines around it; an inline run is decided by
 //! delimiters within a line. This module does the first pass and hands each block's text to
-//! [`crate::markdown::inline`] for the second.
+//! [`crate::doc::markdown::inline`] for the second.
 
-use crate::markdown::{
+use crate::doc::{
 	Block,
-	inline,
+	markdown::inline,
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -572,15 +572,15 @@ fn strip_cols(line: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::markdown::Inline;
+	use crate::doc::Inline;
 
 	use oxedyne_fe2o3_core::prelude::*;
 
 	/// The text of a block's inlines, for tests that care what a block says and not how.
 	fn said(blocks: &[Block]) -> Vec<String> {
 		blocks.iter().map(|b| match b {
-			Block::Para(c)			=> crate::markdown::text_of(c),
-			Block::Heading { content, .. }	=> crate::markdown::text_of(content),
+			Block::Para(c)			=> crate::doc::text_of(c),
+			Block::Heading { content, .. }	=> crate::doc::text_of(content),
 			Block::Code { text, .. }	=> text.clone(),
 			_				=> String::new(),
 		}).collect()

@@ -27,7 +27,7 @@ pub mod core;
 pub mod highlight;
 pub mod html;
 pub mod lines;
-pub mod markdown;
+pub mod doc;
 pub mod pattern;
 pub mod split;
 pub mod string;

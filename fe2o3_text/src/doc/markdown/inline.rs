@@ -1,13 +1,13 @@
 //! Inline structure: the pass that reads a line of prose into text, emphasis, links, images, code
 //! spans and hard breaks.
 //!
-//! This is the second of the two passes described in [`crate::markdown::block`]. It is given the text
+//! This is the second of the two passes described in [`crate::doc::markdown::block`]. It is given the text
 //! of one block and returns the run of inlines it is made of.
 
-use crate::markdown::{
+use crate::doc::{
 	Inline,
-	block::DEPTH_LIMIT,
 	text_of,
+	markdown::block::DEPTH_LIMIT,
 };
 
 use oxedyne_fe2o3_core::prelude::*;
