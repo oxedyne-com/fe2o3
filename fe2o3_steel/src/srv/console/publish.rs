@@ -87,6 +87,9 @@ pub const PATH_DELETE: &str = "/manage/delete";
 /// Where an import of the directory posts.
 pub const PATH_IMPORT: &str = "/manage/import";
 
+/// Where the editor posts source to see it rendered, for a live preview.
+pub const PATH_RENDER: &str = "/manage/render";
+
 /// The posts as JSON, every state, for a front-end that renders its own list.
 pub const PATH_LIST_JSON: &str = "/manage/list.json";
 
@@ -97,6 +100,16 @@ pub const PATH_POST_JSON: &str = "/manage/post.json";
 /// Whether a path is one this module writes to.
 pub fn writes(path: &str) -> bool {
 	path == PATH_SAVE || path == PATH_DELETE || path == PATH_IMPORT
+}
+
+/// Whether a path is a POST this module answers.
+///
+/// The writes, and the render -- which is a POST because an editor's whole draft is too much for a
+/// query string, but changes nothing: it reads source and hands back HTML. It is gated and
+/// token-checked with the writes all the same, so the server is not a rendering service for anyone
+/// who asks.
+pub fn posts(path: &str) -> bool {
+	writes(path) || path == PATH_RENDER
 }
 
 
@@ -628,6 +641,12 @@ pub fn handle_post<
 )
 	-> Outcome<HttpMessage>
 {
+	// A render touches no store and needs no config: it reads the source in the body and hands back
+	// its HTML. It answers before the store checks below, since none of them bear on it.
+	if request_path == PATH_RENDER {
+		return do_render(body);
+	}
+
 	let cfg = match cfg {
 		Some(c)	=> c,
 		None	=> return Ok(back_with("this site publishes nothing", json)),
@@ -752,6 +771,25 @@ fn do_delete<
 		info!("{}: console: '{}' deleted '{}'", id, who, slug);
 	}
 	Ok(back(json))
+}
+
+/// Renders a run of source to HTML, for a live preview.
+///
+/// No store, no slug, no date: only the source and the syntax it is in. What comes back is the same
+/// HTML a reader would get, so the box a `:::` makes and the class a `{...}` names are seen where
+/// they will land. A source that will not parse answers with the reason, which the editor shows in
+/// place of the preview rather than leaving the last good render on screen as though nothing were
+/// wrong.
+fn do_render(body: &[u8]) -> Outcome<HttpMessage> {
+	let source = super::form_field(body, "source").unwrap_or_default();
+	let markup = Markup::of(&super::form_field(body, "markup").unwrap_or_default());
+	match crate::srv::publish::render_html(&source, markup) {
+		Ok(html)	=> {
+			let m = create_dat_ordmap(vec![(dat!("html"), dat!(html))]);
+			Ok(json_body(&res!(m.encode_string_with_config(&EncoderConfig::<(), ()>::json(None)))))
+		}
+		Err(e)		=> Ok(json_error(&fmt!("that will not render: {}", e))),
+	}
 }
 
 /// Reads the directory into the store.

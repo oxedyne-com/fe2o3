@@ -266,6 +266,16 @@ async function main() {
 	has('the span became a styled span', r.body, '<span class="hl">');
 	r = await call('GET', '/manage/post.json?slug=djot-made', { cookie });
 	has('post.json reports the markup', r.body, '"markup": "djot"');
+	// The live-preview endpoint renders unsaved source the same way.
+	r = await call('POST', '/manage/render', { cookie, headers: { Accept: 'application/json' }, form: {
+		source: '::: tip\nHello.\n:::', markup: 'djot', csrf,
+	}});
+	check('render answers 200', r.status, 200);
+	has('and returns the rendered box', r.body, '<div class=\\"tip\\">');
+	r = await call('POST', '/manage/render', { cookie, headers: { Accept: 'application/json' }, form: {
+		source: '*bold* not swapped', markup: 'markdown', csrf,
+	}});
+	has('markdown render keeps its markers', r.body, '<em>bold</em>');
 	await call('POST', '/manage/delete', { cookie, headers: { Accept: 'application/json' }, form: { slug: 'djot-made', csrf } });
 
 	console.log('\n== a slug cannot leave its key ==');

@@ -269,7 +269,7 @@ pub async fn handle_post<
 )
 	-> Outcome<Option<HttpMessage>>
 {
-	if !publish::writes(request_path) {
+	if !publish::posts(request_path) {
 		return Ok(None);
 	}
 

@@ -584,13 +584,7 @@ pub fn render_source(
 )
 	-> Outcome<Post>
 {
-	// The one place the syntax is chosen. Both front-ends produce the same tree, so everything below
-	// this line -- the title, the excerpt, the HTML -- is written once and knows nothing of which was
-	// read.
-	let doc = match markup {
-		Markup::Markdown	=> res!(markdown::parse(source)),
-		Markup::Djot		=> res!(djot::parse(source)),
-	};
+	let doc = res!(parse_markup(source, markup));
 	let title = doc.top_heading().unwrap_or_else(|| slug.clone());
 	Ok(Post {
 		slug,
@@ -600,6 +594,27 @@ pub fn render_source(
 		excerpt:	excerpt_of(&doc),
 		html:		html::render(&doc),
 	})
+}
+
+/// Reads source in the syntax a post names, into the tree.
+///
+/// The one place either front-end is chosen. Both produce the same tree, so every caller past this
+/// knows nothing of which was read.
+pub fn parse_markup(source: &str, markup: Markup) -> Outcome<Doc> {
+	match markup {
+		Markup::Markdown	=> markdown::parse(source),
+		Markup::Djot		=> djot::parse(source),
+	}
+}
+
+/// The HTML of a run of source, for a preview of prose not yet saved.
+///
+/// The same parse and the same render a published post goes through, over source straight from an
+/// editor rather than from the store -- which is the whole of what a live preview is: the page a
+/// reader would get, shown to the author as they type, so the box a Djot `:::` makes is seen where it
+/// will land and not guessed at.
+pub fn render_html(source: &str, markup: Markup) -> Outcome<String> {
+	Ok(html::render(&res!(parse_markup(source, markup))))
 }
 
 /// Reads one post by slug from a directory, where it exists.
