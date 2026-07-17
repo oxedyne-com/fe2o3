@@ -10,8 +10,8 @@
 //! slug may wear, punctuation not being allowed in one.
 
 use crate::srv::publish::{
+	Post,
 	PublishConfig,
-	read_all,
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -23,25 +23,11 @@ use oxedyne_fe2o3_net::http::{
 		HeaderName,
 	},
 	msg::HttpMessage,
-	status::HttpStatus,
 };
 
 
 /// Serves the posts as JSON: rendered, newest first.
-pub fn serve(cfg: &PublishConfig, id: &str) -> Outcome<HttpMessage> {
-	let posts = match read_all(&cfg.dir, id) {
-		Ok(posts) => posts,
-		Err(e) => {
-			// A directory that cannot be read is the site's mistake, not the reader's, and the reader
-			// should be told plainly rather than shown an empty shelf that looks like the truth.
-			warn!("{}: publish: cannot read '{}': {}", id, cfg.dir, e);
-			return Ok(HttpMessage::respond_with_text(
-				HttpStatus::InternalServerError,
-				"the posts cannot be read",
-			));
-		}
-	};
-
+pub fn serve(cfg: &PublishConfig, posts: &[Post], id: &str) -> Outcome<HttpMessage> {
 	let list = posts.iter()
 		.map(|p| {
 			let mut fields = vec![

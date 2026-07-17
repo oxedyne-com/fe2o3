@@ -34,9 +34,17 @@
 pub mod feed;
 pub mod json;
 pub mod page;
+pub mod store;
+pub mod write;
 
 use oxedyne_fe2o3_core::prelude::*;
-use oxedyne_fe2o3_jdat::prelude::*;
+use oxedyne_fe2o3_iop_crypto::enc::Encrypter;
+use oxedyne_fe2o3_iop_db::api::Database;
+use oxedyne_fe2o3_iop_hash::api::Hasher;
+use oxedyne_fe2o3_jdat::{
+	prelude::*,
+	id::NumIdDat,
+};
 use oxedyne_fe2o3_text::doc::{
 	Block,
 	Doc,
@@ -48,6 +56,10 @@ use oxedyne_fe2o3_text::doc::{
 use std::{
 	fs,
 	path::Path,
+	sync::{
+		Arc,
+		RwLock,
+	},
 };
 
 
@@ -64,6 +76,35 @@ const EXT: &str = "md";
 const EXCERPT_LEN: usize = 200;
 
 
+/// Where a vhost's posts are kept.
+///
+/// Both produce the same [`Post`], so nothing downstream of the read knows which it was.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Source {
+	/// A directory of Markdown. What a text editor writes, and where prose that already exists is.
+	#[default]
+	Dir,
+	/// The vhost's database. What the composer writes, and the only source a draft can live in --
+	/// a directory on a server holds no drafts, since putting one there would publish it.
+	Store,
+}
+
+impl Source {
+
+	/// The source a word names.
+	pub fn of(s: &str) -> Outcome<Self> {
+		match s {
+			"dir"	=> Ok(Self::Dir),
+			"store"	=> Ok(Self::Store),
+			// Not a lenient default: a site that meant `store` and typed `stor` would silently serve a
+			// directory instead, and discover it by noticing the wrong prose on its own front page.
+			_	=> Err(err!(
+				"PublishConfig: 'source' must be 'dir' or 'store', not '{}'.", s;
+				Invalid, Input)),
+		}
+	}
+}
+
 /// A vhost's published prose: where the posts are, where they are served, and what the site calls
 /// them.
 ///
@@ -74,8 +115,11 @@ const EXCERPT_LEN: usize = 200;
 pub struct PublishConfig {
 	/// URL prefix the posts are served under, without a trailing slash.
 	pub path:	String,
-	/// Directory holding the Markdown, absolute or relative to the app root.
+	/// Directory holding the Markdown, absolute or relative to the app root. Read when the source is
+	/// a directory, and the place an import reads from when it is the store.
 	pub dir:	String,
+	/// Where the posts are kept.
+	pub source:	Source,
 	/// What the site calls its posts, as the index's heading and the feed's name.
 	pub title:	String,
 	/// The site's own name, for the card a shared link makes.
@@ -143,9 +187,18 @@ impl PublishConfig {
 				Invalid, Input, Mismatch)),
 		};
 
+		let source = match m.get(&dat!("source")) {
+			Some(Dat::Str(s))	=> res!(Source::of(s)),
+			None			=> Source::default(),
+			_			=> return Err(err!(
+				"PublishConfig: 'source' must be a string.";
+				Invalid, Input, Mismatch)),
+		};
+
 		Ok(Self {
 			path,
 			dir:		res!(get_str("dir", DIR_DEFAULT)),
+			source,
 			title:		res!(get_str("title", "Posts")),
 			site_name:	res!(get_str("site_name", "")),
 			base_url,
@@ -191,17 +244,92 @@ impl PublishConfig {
 		s.push_str("/index.json");
 		s
 	}
+
+	/// The URL path the import is posted to.
+	pub fn import_path(&self) -> String {
+		let mut s = self.path.clone();
+		s.push_str("/import");
+		s
+	}
 }
 
 
-/// One post.
+/// What shape a post is.
+///
+/// The two are not a taxonomy for its own sake. A note is the thing an author writes most and an
+/// essay the thing they write hardest, and a surface that made a passing thought wear an essay's
+/// furniture -- a slug typed by hand, a cover, an excerpt -- would quietly stop them writing the
+/// passing thought down. So the tree carries which it is, and each renders as what it is.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PostKind {
+	/// Short. The default, because most of what gets written is.
+	#[default]
+	Note,
+	/// Long.
+	Essay,
+}
+
+impl PostKind {
+
+	/// The word a record stores.
+	pub fn as_str(&self) -> &'static str {
+		match self {
+			Self::Note	=> "note",
+			Self::Essay	=> "essay",
+		}
+	}
+
+	/// The kind a word names. An unknown word is a note, that being the lesser claim: calling an essay
+	/// a note under-dresses it, where the reverse would put furniture around a passing thought.
+	pub fn of(s: &str) -> Self {
+		match s {
+			"essay"	=> Self::Essay,
+			_	=> Self::Note,
+		}
+	}
+}
+
+/// Whether a post is anybody's business but its author's.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PostState {
+	/// Written, not published. Served to nobody.
+	#[default]
+	Draft,
+	/// Published.
+	Live,
+}
+
+impl PostState {
+
+	/// The word a record stores.
+	pub fn as_str(&self) -> &'static str {
+		match self {
+			Self::Draft	=> "draft",
+			Self::Live	=> "live",
+		}
+	}
+
+	/// The state a word names. **An unknown word is a draft**, deliberately: a record this version
+	/// cannot make sense of should not thereby become published. The safe reading of a state nobody
+	/// understands is that it is not ready.
+	pub fn of(s: &str) -> Self {
+		match s {
+			"live"	=> Self::Live,
+			_	=> Self::Draft,
+		}
+	}
+}
+
+/// One post, as a reader gets it.
 #[derive(Clone, Debug)]
 pub struct Post {
-	/// The post's name in a URL, taken from its file.
+	/// The post's name in a URL.
 	pub slug:	String,
 	/// The post's own most prominent heading, or its slug where it has none.
 	pub title:	String,
-	/// The date its file names, where its file names one.
+	/// Long or short.
+	pub kind:	PostKind,
+	/// The date it was given, where it was given one.
 	pub date:	Option<String>,
 	/// The opening of the prose, flattened, for a card and a feed.
 	pub excerpt:	String,
@@ -217,45 +345,18 @@ pub struct Post {
 /// author will look. The directory itself failing is a different thing, and is an error -- an empty
 /// shelf looks like the truth and is not.
 pub fn read_all(dir: &str, id: &str) -> Outcome<Vec<Post>> {
-	let entries = res!(fs::read_dir(Path::new(dir)), IO, File);
+	let sources = res!(read_sources(dir, id));
 
 	let mut posts = Vec::new();
-	for entry in entries {
-		let entry = res!(entry, IO, File);
-		let path = entry.path();
-		if path.extension().map(|e| e != EXT).unwrap_or(true) {
-			continue;
+	for (stem, source) in sources {
+		let (date, slug) = split_date(&stem);
+		// A file on disk is not a draft, or it would not be on the disk of a server, so a directory
+		// holds no kind or state of its own: everything in one is a live note.
+		match render_source(&source, slug, date, PostKind::Note) {
+			Ok(p)	=> posts.push(p),
+			Err(e)	=> warn!(
+				"{}: posts: skipping '{}', which will not read as Markdown: {}", id, stem, e),
 		}
-		let stem = match path.file_stem().and_then(|s| s.to_str()) {
-			Some(s)	=> s,
-			None	=> {
-				warn!("{}: posts: skipping a file whose name is not text: {:?}", id, path);
-				continue;
-			}
-		};
-		let src = match fs::read_to_string(&path) {
-			Ok(src)	=> src,
-			Err(e)	=> {
-				warn!("{}: posts: skipping '{}': {}", id, stem, e);
-				continue;
-			}
-		};
-		let doc = match markdown::parse(&src) {
-			Ok(doc)	=> doc,
-			Err(e)	=> {
-				warn!("{}: posts: skipping '{}', which will not read as Markdown: {}", id, stem, e);
-				continue;
-			}
-		};
-		let (date, slug) = split_date(stem);
-		let title = doc.top_heading().unwrap_or_else(|| slug.clone());
-		posts.push(Post {
-			slug,
-			title,
-			date,
-			excerpt:	excerpt_of(&doc),
-			html:		html::render(&doc),
-		});
 	}
 
 	// Newest first, and among posts of one date, or of none, by slug. The date descending and the slug
@@ -264,7 +365,96 @@ pub fn read_all(dir: &str, id: &str) -> Outcome<Vec<Post>> {
 	Ok(posts)
 }
 
-/// Reads one post by slug, where it exists.
+/// Every post a vhost publishes, newest first, from wherever it keeps them.
+///
+/// The one place the source is chosen, and the only part of this module that touches the database. So
+/// the genericity the database drags along -- five type parameters, threaded from the web handler --
+/// stops here, and everything downstream is a plain function over a slice of posts.
+///
+/// A store-backed vhost with no database is a misconfiguration rather than an empty site, and says so:
+/// silently serving nothing would look exactly like a site that has published nothing.
+pub fn read<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	cfg:	&PublishConfig,
+	db:	Option<&(Arc<RwLock<DB>>, UID)>,
+	id:	&str,
+)
+	-> Outcome<Vec<Post>>
+{
+	match cfg.source {
+		Source::Dir	=> read_all(&cfg.dir, id),
+		Source::Store	=> match db {
+			Some(db)	=> store::list(db, id),
+			None		=> Err(err!(
+				"publish: this vhost keeps its posts in the store and has no database \
+				configured; give the vhost a 'db_dir_rel' or set 'source' to 'dir'.";
+				Invalid, Input, Missing)),
+		},
+	}
+}
+
+/// Every Markdown file in a directory, as its stem and its text.
+///
+/// A file that will not read is passed over with a complaint in the log rather than failing the lot:
+/// one broken post should not take the others off the page, and the log is where its author will look.
+/// The directory itself failing is a different thing, and is an error -- an empty shelf looks like the
+/// truth and is not.
+pub fn read_sources(dir: &str, id: &str) -> Outcome<Vec<(String, String)>> {
+	let entries = res!(fs::read_dir(Path::new(dir)), IO, File);
+
+	let mut out = Vec::new();
+	for entry in entries {
+		let entry = res!(entry, IO, File);
+		let path = entry.path();
+		if path.extension().map(|e| e != EXT).unwrap_or(true) {
+			continue;
+		}
+		let stem = match path.file_stem().and_then(|s| s.to_str()) {
+			Some(s)	=> s.to_string(),
+			None	=> {
+				warn!("{}: posts: skipping a file whose name is not text: {:?}", id, path);
+				continue;
+			}
+		};
+		match fs::read_to_string(&path) {
+			Ok(src)	=> out.push((stem, src)),
+			Err(e)	=> warn!("{}: posts: skipping '{}': {}", id, stem, e),
+		}
+	}
+	Ok(out)
+}
+
+/// Markdown, as a reader gets it.
+///
+/// The one place prose becomes a [`Post`], so a post from a directory and a post from the store are
+/// the same post, made the same way. The title is the document's own most prominent heading, and the
+/// slug where it has none.
+pub fn render_source(
+	source:	&str,
+	slug:	String,
+	date:	Option<String>,
+	kind:	PostKind,
+)
+	-> Outcome<Post>
+{
+	let doc = res!(markdown::parse(source));
+	let title = doc.top_heading().unwrap_or_else(|| slug.clone());
+	Ok(Post {
+		slug,
+		title,
+		kind,
+		date,
+		excerpt:	excerpt_of(&doc),
+		html:		html::render(&doc),
+	})
+}
+
+/// Reads one post by slug from a directory, where it exists.
 ///
 /// The slug is what a reader put in a URL, so it is checked before it is allowed near a path: a name
 /// is letters, digits, a dash or an underscore, which leaves nothing to climb out of the directory

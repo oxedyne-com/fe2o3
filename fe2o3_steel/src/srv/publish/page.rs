@@ -15,8 +15,12 @@
 use crate::srv::publish::{
 	Post,
 	PublishConfig,
-	read_all,
-	read_one,
+};
+
+#[cfg(test)]
+use crate::srv::publish::{
+	PostKind,
+	Source,
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -38,26 +42,32 @@ use oxedyne_fe2o3_text::doc::html::{
 ///
 /// The caller has already established that the path is this module's, so anything unrecognised under
 /// the prefix is a post that does not exist.
-pub async fn handle_get(
+pub fn handle_get(
 	cfg:	&PublishConfig,
+	posts:	&[Post],
 	path:	&str,
 	id:	&str,
 )
 	-> Outcome<HttpMessage>
 {
 	if path == cfg.path {
-		return index(cfg, id);
+		return index(cfg, posts, id);
 	}
 	if path == cfg.feed_path() {
-		return super::feed::serve(cfg, id);
+		return super::feed::serve(cfg, posts, id);
 	}
 	if path == cfg.json_path() {
-		return super::json::serve(cfg, id);
+		return super::json::serve(cfg, posts, id);
 	}
-	// Everything else under the prefix names a post.
+	// Everything else under the prefix names a post. The slug is what a reader put in a URL, so it is
+	// checked before it is used: a name is letters, digits, a dash or an underscore.
 	let slug = &path[cfg.path.len() + 1..];
-	match res!(read_one(&cfg.dir, slug, id)) {
-		Some(post)	=> post_page(cfg, &post),
+	if !is_slug(slug) {
+		info!("{}: publish: '{}' is not a name a post may wear", id, slug);
+		return Ok(not_found(cfg));
+	}
+	match posts.iter().find(|p| p.slug == slug) {
+		Some(post)	=> post_page(cfg, post),
 		None		=> {
 			info!("{}: publish: no post '{}'", id, slug);
 			Ok(not_found(cfg))
@@ -65,24 +75,18 @@ pub async fn handle_get(
 	}
 }
 
-/// The index: every post, newest first, as a link and its opening.
-fn index(cfg: &PublishConfig, id: &str) -> Outcome<HttpMessage> {
-	let posts = match read_all(&cfg.dir, id) {
-		Ok(posts) => posts,
-		Err(e) => {
-			warn!("{}: publish: cannot read '{}': {}", id, cfg.dir, e);
-			return Ok(HttpMessage::respond_with_text(
-				HttpStatus::InternalServerError,
-				"the posts cannot be read",
-			));
-		}
-	};
+/// Whether a string is a name a post may wear.
+fn is_slug(s: &str) -> bool {
+	!s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
 
+/// The index: every post, newest first, as a link and its opening.
+fn index(cfg: &PublishConfig, posts: &[Post], id: &str) -> Outcome<HttpMessage> {
 	let mut body = String::new();
 	body.push_str("<header class=\"aside-index-head\"><h1>");
 	escape_text(&mut body, &cfg.title);
 	body.push_str("</h1></header>\n<ul class=\"aside-index\">\n");
-	for p in &posts {
+	for p in posts {
 		body.push_str("<li class=\"aside-index-item\">");
 		if let Some(d) = &p.date {
 			body.push_str("<div class=\"aside-date\"><time datetime=\"");
@@ -361,6 +365,7 @@ mod tests {
 		PublishConfig {
 			path:		fmt!("/asides"),
 			dir:		fmt!("/nonexistent"),
+			source:		Source::Dir,
 			title:		fmt!("Asides"),
 			site_name:	fmt!("Elearnity"),
 			base_url:	fmt!("https://example.com"),
@@ -372,6 +377,7 @@ mod tests {
 		Post {
 			slug:		fmt!("on-rent"),
 			title:		fmt!("On rent"),
+			kind:		PostKind::Note,
 			date:		Some(fmt!("2026-07-17")),
 			excerpt:	fmt!("An opening sentence."),
 			html:		fmt!("<h1>On rent</h1>\n<p>An opening sentence.</p>\n"),
@@ -418,9 +424,34 @@ mod tests {
 	/// The index links every post and says what each one opens with.
 	#[test]
 	fn test_the_index_links_its_posts_02() -> Outcome<()> {
-		// Reading a directory that is not there is the site's error, not a blank page.
-		let resp = res!(index(&cfg(), "test"));
-		assert_eq!(status_of(&resp), Some(HttpStatus::InternalServerError));
+		let posts = vec![post()];
+		let resp = res!(index(&cfg(), &posts, "test"));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert_eq!(status_of(&resp), Some(HttpStatus::OK));
+		assert!(body.contains(r#"<a href="/asides/on-rent">On rent</a>"#), "got: {}", body);
+		assert!(body.contains("An opening sentence."), "no excerpt: {}", body);
+		Ok(())
+	}
+
+	/// An index with nothing in it says so, rather than being a blank page that looks broken.
+	#[test]
+	fn test_an_empty_index_says_so_04() -> Outcome<()> {
+		let resp = res!(index(&cfg(), &[], "test"));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(body.contains("Nothing here yet."), "got: {}", body);
+		Ok(())
+	}
+
+	/// A slug that could climb out of a directory never reaches one: it is not a name a post may wear,
+	/// so the lookup refuses it before anything else looks at it.
+	#[test]
+	fn test_a_hostile_slug_is_refused_05() -> Outcome<()> {
+		let posts = vec![post()];
+		for bad in ["../../etc/passwd", "..", "a.b", "a%2Fb"] {
+			let path = fmt!("/asides/{}", bad);
+			let resp = res!(handle_get(&cfg(), &posts, &path, "test"));
+			assert_eq!(status_of(&resp), Some(HttpStatus::NotFound), "'{}' was not refused", bad);
+		}
 		Ok(())
 	}
 

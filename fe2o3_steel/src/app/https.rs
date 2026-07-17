@@ -17,8 +17,10 @@ use crate::srv::{
     },
     dev::refresh::HtmlModifier,
     publish::{
+        self,
         PublishConfig,
         page as publish_page,
+        write as publish_write,
     },
     webhook::{
         self,
@@ -321,11 +323,27 @@ impl<
             // entirely and the paths mean whatever they meant before.
             if let Some(cfg) = &publish {
                 if cfg.owns(&request_path) {
+                    // The read is the only part that touches the database, so the generics stop here
+                    // and the renderers take a slice of posts.
+                    let posts = match publish::read(cfg.as_ref(), db.as_ref(), &id) {
+                        Ok(posts) => posts,
+                        Err(e) => {
+                            // The site cannot read its own prose. That is the site's fault, and a
+                            // reader should be told rather than shown an empty shelf that looks
+                            // like the truth.
+                            error!(e, "{}: publish: cannot read the posts", id);
+                            return Ok(Some(HttpMessage::respond_with_text(
+                                HttpStatus::InternalServerError,
+                                "the posts cannot be read",
+                            )));
+                        }
+                    };
                     let resp = res!(publish_page::handle_get(
                         cfg.as_ref(),
+                        &posts,
                         &request_path,
                         &id,
-                    ).await);
+                    ));
                     return Ok(Some(resp));
                 }
             }
@@ -509,7 +527,7 @@ impl<
         _response:      Option<HttpMessage>,
         body:           Vec<u8>,
         req_headers:    Arc<HeaderFields>,
-        _db:            Option<(Arc<RwLock<DB>>, UID)>,
+        db:             Option<(Arc<RwLock<DB>>, UID)>,
         _sid_opt:       &Option<SID>,
         peer:           SocketAddr,
         id:             &String,
@@ -524,6 +542,7 @@ impl<
         let api_handler_registry = self.api_handler_registry.clone();
         let tls_client = self.tls_client.clone();
         let admin_state = self.admin_state.clone();
+        let publish = self.publish.clone();
 
         async move {
             // Dashboard `/admin/*` POST handlers (login form POST,
@@ -548,6 +567,25 @@ impl<
                     HttpStatus::NotFound,
                     "Not found.",
                 )));
+            }
+
+            // The published prose owns its prefix for writes as it does
+            // for reads. It answers only the paths it knows and hands
+            // the rest back, so an app POSTing elsewhere under the
+            // prefix is not swallowed here.
+            if let Some(cfg) = &publish {
+                if cfg.owns(&request_path) {
+                    if let Some(resp) = res!(publish_write::handle_post(
+                        cfg.as_ref(),
+                        admin_state.as_ref(),
+                        db.as_ref(),
+                        &request_path,
+                        &req_headers,
+                        &id,
+                    ).await) {
+                        return Ok(Some(resp));
+                    }
+                }
             }
 
             // Check webhook routes first. Two dispatch branches

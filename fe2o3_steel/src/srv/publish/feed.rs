@@ -17,8 +17,8 @@
 //! drift, it does not depend on where the server is, and re-serving a feed never reorders it.
 
 use crate::srv::publish::{
+	Post,
 	PublishConfig,
-	read_all,
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -28,7 +28,6 @@ use oxedyne_fe2o3_net::http::{
 		HeaderName,
 	},
 	msg::HttpMessage,
-	status::HttpStatus,
 };
 use oxedyne_fe2o3_text::doc::html::{
 	escape_attr,
@@ -44,18 +43,7 @@ const EPOCH: &str = "1970-01-01T00:00:00Z";
 
 
 /// Serves the feed.
-pub fn serve(cfg: &PublishConfig, id: &str) -> Outcome<HttpMessage> {
-	let posts = match read_all(&cfg.dir, id) {
-		Ok(posts) => posts,
-		Err(e) => {
-			warn!("{}: publish: cannot read '{}' for the feed: {}", id, cfg.dir, e);
-			return Ok(HttpMessage::respond_with_text(
-				HttpStatus::InternalServerError,
-				"the posts cannot be read",
-			));
-		}
-	};
-
+pub fn serve(cfg: &PublishConfig, posts: &[Post], id: &str) -> Outcome<HttpMessage> {
 	let self_url = cfg.url_of(&cfg.feed_path());
 	let index_url = cfg.url_of(&cfg.path);
 
@@ -93,7 +81,7 @@ pub fn serve(cfg: &PublishConfig, id: &str) -> Outcome<HttpMessage> {
 		s.push_str("</name></author>\n");
 	}
 
-	for p in &posts {
+	for p in posts {
 		let url = cfg.url_of(&cfg.path_of(&p.slug));
 		s.push_str("  <entry>\n    <title>");
 		escape_text(&mut s, &p.title);
