@@ -9,8 +9,9 @@
 //!
 //! The subset parsed is the CommonMark core that prose actually uses: ATX and setext headings,
 //! paragraphs, fenced and indented code, block quotations, ordered and unordered lists (nested),
-//! thematic breaks, and the inline run of emphasis, strong emphasis, links, images, code spans and
-//! hard breaks. It is not a conformant CommonMark implementation and does not try to be: the reference
+//! thematic breaks, GitHub's pipe tables, and the inline run of emphasis, strong emphasis, links,
+//! images, code spans and hard breaks. It is not a conformant CommonMark implementation and does not
+//! try to be: the reference
 //! test suite is largely a catalogue of pathological nesting that no author writes. Where this reader
 //! and CommonMark differ on such input, this reader is simply making its own choice.
 //!

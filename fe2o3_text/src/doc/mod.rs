@@ -2,8 +2,8 @@
 //! form it will be rendered to.
 //!
 //! A document is a sequence of [`Block`]s, and a line of prose a sequence of [`Inline`]s. The
-//! vocabulary is small and closed: a heading, a paragraph, a list, a quotation, a run of text, a
-//! link. That is the whole of it.
+//! vocabulary is small and closed: a heading, a paragraph, a list, a quotation, a table, a run of
+//! text, a link. That is the whole of it.
 //!
 //! # The tree names nothing at either end
 //!
@@ -92,8 +92,82 @@ pub enum Block {
 	},
 	/// A block quotation, itself a sequence of blocks.
 	Quote(Vec<Block>),
+	/// A table: a header row where there is one, the rows of the body, and the columns they are laid
+	/// out in.
+	///
+	/// The table's words reach a summary or an index through its cells, each of which flattens with
+	/// [`Cell::text_of`] as any other run of inlines does.
+	Table {
+		/// The header row, where the table names its columns. A table need not: a grid of figures is
+		/// a table whether or not anything stands at the head of it.
+		head:	Option<Row>,
+		/// The rows of the body, in reading order.
+		rows:	Vec<Row>,
+		/// The columns, one entry to each, so a row's nth cell is aligned by the nth entry.
+		cols:	Vec<Align>,
+	},
 	/// A thematic break: a division between passages.
 	Rule,
+}
+
+/// One row of a [`Block::Table`]: the cells it holds, in reading order.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Row(pub Vec<Cell>);
+
+impl Row {
+
+	/// The row's plain text: every cell's words, a space between each.
+	pub fn text_of(&self) -> String {
+		let mut s = String::new();
+		for (i, cell) in self.0.iter().enumerate() {
+			if i > 0 {
+				s.push(' ');
+			}
+			s.push_str(&cell.text_of());
+		}
+		s
+	}
+}
+
+/// One cell of a [`Row`]: the inline content it holds.
+///
+/// A cell holds inlines and not blocks. A cell is a phrase -- a name, a figure, a link -- and a tree
+/// that admitted a list or a quotation here would promise every consumer a cell it must lay out as a
+/// document of its own. That is a promise no front-end this tree has can keep, and a tree should not
+/// make one on their behalf.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Cell(pub Vec<Inline>);
+
+impl Cell {
+
+	/// The cell's plain text, its every inline flattened. See [`text_of`].
+	pub fn text_of(&self) -> String {
+		text_of(&self.0)
+	}
+}
+
+/// How a column's cells sit within the width they are given.
+///
+/// The sides are named `Start` and `End`, and are never named `Left` and `Right`. The tree does not
+/// know left from right, because it does not know which way its text runs: this crate ships
+/// [`bidi`](crate::unicode::bidi) precisely because the prose it carries may run right to left, and a
+/// column aligned to the start of the line is then on the *right* of the page. `Start` is the side the
+/// text begins on, whichever side that is, and the consumer -- which knows the direction it is laying
+/// out in, and is the only thing that does -- is where the two meet.
+///
+/// A tree that said `Left` would be wrong for half the world's prose, and would be wrong silently: the
+/// table would lay out, and lay out backwards. This is worth leaving alone.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Align {
+	/// No alignment given, which is most columns: the consumer's own default stands.
+	#[default]
+	None,
+	/// Aligned to the side the text begins on.
+	Start,
+	/// Centred within the column.
+	Centre,
+	/// Aligned to the side the text ends on.
+	End,
 }
 
 /// An inline element: the things a line of prose is a sequence of.
@@ -175,6 +249,53 @@ mod tests {
 			},
 		];
 		assert_eq!(text_of(&content), "A loud link");
+		Ok(())
+	}
+
+	/// A table says what its cells say, so a summary or an index that walks the tree finds a table's
+	/// words where it finds every other block's.
+	#[test]
+	fn test_a_table_contributes_the_words_of_its_cells_01() -> Outcome<()> {
+		let head = Row(vec![
+			Cell(vec![Inline::Text("Name".to_string())]),
+			Cell(vec![Inline::Text("Age".to_string())]),
+		]);
+		let row = Row(vec![
+			Cell(vec![
+				Inline::Emph {
+					strong:		true,
+					content:	vec![Inline::Text("Alice".to_string())],
+				},
+			]),
+			Cell(vec![Inline::Text("30".to_string())]),
+		]);
+		// A cell flattens as any other run of inlines does, and a row is its cells.
+		assert_eq!(head.0[0].text_of(), "Name");
+		assert_eq!(head.text_of(), "Name Age");
+		assert_eq!(row.text_of(), "Alice 30");
+		let table = Block::Table {
+			head:	Some(head),
+			rows:	vec![row],
+			cols:	vec![Align::Start, Align::End],
+		};
+		match &table {
+			Block::Table { head, rows, cols }	=> {
+				match head {
+					Some(head)	=> assert_eq!(head.text_of(), "Name Age"),
+					None		=> panic!("the table lost its header row"),
+				}
+				assert_eq!(rows[0].text_of(), "Alice 30");
+				assert_eq!(cols.len(), 2);
+			}
+			other					=> panic!("expected a table, got {:?}", other),
+		}
+		Ok(())
+	}
+
+	/// A column nobody aligned is aligned by nothing, which is what a consumer's own default is for.
+	#[test]
+	fn test_an_alignment_defaults_to_none_02() -> Outcome<()> {
+		assert_eq!(Align::default(), Align::None);
 		Ok(())
 	}
 }

@@ -7,7 +7,10 @@
 //! [`crate::doc::markdown::inline`] for the second.
 
 use crate::doc::{
+	Align,
 	Block,
+	Cell,
+	Row,
 	markdown::inline,
 };
 
@@ -282,6 +285,94 @@ fn under_of(line: &str) -> Option<u8> {
 	Some(if ch == b'=' { 1 } else { 2 })
 }
 
+/// The alignments a delimiter row gives, if the line is one and divides into as many cells as the
+/// header above it did.
+///
+/// The matching count is the whole of the test, and it is what tells a table from a paragraph that
+/// happens to hold pipes and dashes. A row of `---` under a header of three columns is not a table
+/// with two columns missing, and it is not a table the parser should repair: it is prose, and prose
+/// is what it is read as. Nothing here guesses at a row the author did not write.
+fn delim_of(line: &str, n: usize) -> Option<Vec<Align>> {
+	// Indentation past the fourth column is code, as it is under a setext underline.
+	if indent_of(line) >= CODE_COL {
+		return None;
+	}
+	let cells = cells_of(line);
+	if cells.is_empty() || cells.len() != n {
+		return None;
+	}
+	let mut cols = Vec::with_capacity(cells.len());
+	for cell in &cells {
+		match align_of(cell) {
+			Some(align)	=> cols.push(align),
+			None		=> return None,
+		}
+	}
+	Some(cols)
+}
+
+/// The alignment one delimiter cell gives: a colon at the side the column is aligned to, and dashes
+/// between. `None` where the cell is no delimiter cell at all, which is what makes the row no
+/// delimiter row.
+fn align_of(cell: &str) -> Option<Align> {
+	let b = cell.as_bytes();
+	if b.is_empty() {
+		return None;
+	}
+	let start = b[0] == b':';
+	let end = b[b.len() - 1] == b':';
+	let s = if start { 1 } else { 0 };	// Where the dashes begin.
+	let e = b.len() - if end { 1 } else { 0 };	// Where they end.
+	// A cell of colons alone marks nothing out, and a cell of anything but dashes between them is
+	// not a delimiter cell.
+	if s >= e || !b[s..e].iter().all(|c| *c == b'-') {
+		return None;
+	}
+	Some(match (start, end) {
+		(true,	true)	=> Align::Centre,
+		(true,	false)	=> Align::Start,
+		(false,	true)	=> Align::End,
+		(false,	false)	=> Align::None,
+	})
+}
+
+/// The cells a table row divides into, split on every pipe the author did not escape.
+///
+/// A pipe at either end of the row is the row's own edge and not an empty cell, so an author may draw
+/// the edges or leave them off. A `\|` divides nothing: it stays in the cell for [`inline::parse`] to
+/// resolve as the escape it is, which is where every other escape is resolved.
+///
+/// The split happens before the inline pass, so a pipe within a code span divides a cell like any
+/// other, and `` `a|b` `` is two cells. That is GFM's wart and it is kept deliberately: what a row
+/// divides into is settled by the pipes on the line and by nothing that must be parsed to be found,
+/// which means an author can see the grid in the source. Reading the span first would make the count
+/// of a row's cells depend on the inline pass, and a header and a delimiter row could then disagree
+/// for reasons neither line shows.
+fn cells_of(line: &str) -> Vec<&str> {
+	let t = trim(line);
+	let b = t.as_bytes();
+	let mut out = Vec::new();
+	// A pipe opening the row is its edge, and the first cell begins after it.
+	let mut i = if b.first() == Some(&b'|') { 1 } else { 0 };
+	let mut s = i;	// Where the cell being read begins.
+	while i < b.len() {
+		match b[i] {
+			b'\\'	=> i += 2,	// A backslash and whatever it escapes divide nothing.
+			b'|'	=> {
+				out.push(trim(&t[s..i]));
+				i += 1;
+				s = i;
+			}
+			_	=> i += 1,
+		}
+	}
+	// A pipe closing the row is its edge as well, and what follows it is no cell.
+	if s < t.len() {
+		out.push(trim(&t[s..]));
+	}
+	out
+}
+
 /// A heading's text, with the closing run of hashes an author may have balanced it with taken off.
 fn atx_text(after: &str) -> String {
 	let t = after.trim_matches(|c| c == ' ' || c == '\t');
@@ -316,18 +407,34 @@ fn interrupts(line: &str) -> bool {
 
 // ── The blocks themselves ────────────────────────────────────────
 
-/// Reads a paragraph, or the heading a setext underline turns it into.
+/// Reads a paragraph, the heading a setext underline turns it into, or the table a delimiter row
+/// turns its last line into.
 fn para(lines: &[&str]) -> Outcome<(Block, usize)> {
 	let mut acc = vec![lines[0].trim_start_matches(|c| c == ' ' || c == '\t')];
 	let mut i = 1;
 	while i < lines.len() {
 		// An underline under a paragraph is a heading, which is how `---` means a heading here
-		// and a thematic break anywhere else.
+		// and a thematic break anywhere else. It is judged before a delimiter row is, so that a
+		// line of dashes under a line of prose stays the heading it has always been.
 		if let Some(level) = under_of(lines[i]) {
 			return Ok((Block::Heading {
 				level,
 				content:	res!(inline::parse(acc.join("\n").trim_end())),
 			}, i + 1));
+		}
+		// A table's header row is a paragraph line until the delimiter row beneath it says
+		// otherwise, which is the ambiguity a setext underline has, one line lower down.
+		if let Some(cols) = delim_of(lines[i], cells_of(acc[i - 1]).len()) {
+			// The lines above the header are a paragraph of their own, and they end here. The
+			// header goes back to the document to be read again, as the table's first line.
+			if i > 1 {
+				acc.pop();
+				return Ok((
+					Block::Para(res!(inline::parse(acc.join("\n").trim_end()))),
+					i - 1,
+				));
+			}
+			return table(lines, cols);
 		}
 		if interrupts(lines[i]) {
 			break;
@@ -336,6 +443,38 @@ fn para(lines: &[&str]) -> Outcome<(Block, usize)> {
 		i += 1;
 	}
 	Ok((Block::Para(res!(inline::parse(acc.join("\n").trim_end()))), i))
+}
+
+/// Reads a table: the header row, the delimiter row that made it one, and the body beneath them.
+///
+/// The header is `lines[0]` and the delimiter row `lines[1]`, which is what [`delim_of`] has just
+/// established of them, and the columns are what it read there.
+fn table(lines: &[&str], cols: Vec<Align>) -> Outcome<(Block, usize)> {
+	let head = res!(row(lines[0], cols.len()));
+	let mut rows = Vec::new();
+	let mut i = 2;
+	// The table runs to the first line that begins a block of its own, a blank line among them. A
+	// line of plain text is a row however little it looks like one, since a row need draw no pipes.
+	while i < lines.len() && !interrupts(lines[i]) {
+		rows.push(res!(row(lines[i], cols.len())));
+		i += 1;
+	}
+	Ok((Block::Table { head: Some(head), rows, cols }, i))
+}
+
+/// Reads one row of a table, held to the width the header set.
+fn row(line: &str, n: usize) -> Outcome<Row> {
+	let mut cells = Vec::with_capacity(n);
+	for text in cells_of(line).iter().take(n) {
+		cells.push(Cell(res!(inline::parse(text))));
+	}
+	// A row of fewer cells than the header named columns is short of the grid rather than wrong, and
+	// the cells it did not write are empty. A row of more has said something the header made no
+	// column for, and what it has no column for is dropped.
+	while cells.len() < n {
+		cells.push(Cell(Vec::new()));
+	}
+	Ok(Row(cells))
 }
 
 /// Reads a fenced code block, which runs to its closing fence or to the end of the input.
@@ -506,6 +645,11 @@ fn lazy(body: &[String], line: &str) -> bool {
 
 // ── Whitespace ───────────────────────────────────────────────────
 
+/// The text with the spaces and tabs at either end of it taken off.
+fn trim(s: &str) -> &str {
+	s.trim_matches(|c| c == ' ' || c == '\t')
+}
+
 /// Whether the line holds nothing but whitespace.
 fn is_blank(line: &str) -> bool {
 	line.bytes().all(|b| b == b' ' || b == b'\t')
@@ -584,6 +728,24 @@ mod tests {
 			Block::Code { text, .. }	=> text.clone(),
 			_				=> String::new(),
 		}).collect()
+	}
+
+	/// What a table's rows say, cell by cell, the header first: for tests that care what a table holds
+	/// and not how it was marked up.
+	fn grid(b: &Block) -> Vec<Vec<String>> {
+		match b {
+			Block::Table { head, rows, .. }	=> {
+				let mut out = Vec::new();
+				if let Some(head) = head {
+					out.push(head.0.iter().map(|c| c.text_of()).collect());
+				}
+				for row in rows {
+					out.push(row.0.iter().map(|c| c.text_of()).collect());
+				}
+				out
+			}
+			other				=> panic!("expected a table, got {:?}", other),
+		}
 	}
 
 	/// A hash and a space open a heading, and the hashes count its level.
@@ -1008,6 +1170,160 @@ mod tests {
 			Inline::Break,
 			Inline::Text("two".into()),
 		])]);
+		Ok(())
+	}
+
+	/// A header row and the delimiter row beneath it make a table, and the lines under them are its
+	/// body.
+	#[test]
+	fn test_a_header_and_a_delimiter_row_make_a_table_36() -> Outcome<()> {
+		let b = res!(parse("| Name | Age |\n| --- | --- |\n| Alice | 30 |\n| Bob | 25 |\n"));
+		assert_eq!(b.len(), 1);
+		assert_eq!(grid(&b[0]), vec![
+			vec!["Name", "Age"],
+			vec!["Alice", "30"],
+			vec!["Bob", "25"],
+		]);
+		Ok(())
+	}
+
+	/// The pipes at a row's edges draw nothing, so an author may leave them off.
+	#[test]
+	fn test_the_pipes_at_a_rows_edges_are_optional_37() -> Outcome<()> {
+		let b = res!(parse("a | b\n--- | ---\n1 | 2\n"));
+		assert_eq!(grid(&b[0]), vec![vec!["a", "b"], vec!["1", "2"]]);
+		Ok(())
+	}
+
+	/// The delimiter row's colons align the columns, and a column given no colon is aligned by
+	/// nothing.
+	#[test]
+	fn test_the_delimiter_rows_colons_align_the_columns_38() -> Outcome<()> {
+		let b = res!(parse("| w | x | y | z |\n| --- | :-- | :-: | --: |\n"));
+		match &b[0] {
+			// Start and End, never left and right: the tree does not know which way its text runs.
+			Block::Table { cols, .. }	=> assert_eq!(
+				cols,
+				&vec![Align::None, Align::Start, Align::Centre, Align::End],
+			),
+			other				=> panic!("expected a table, got {:?}", other),
+		}
+		Ok(())
+	}
+
+	/// A pipe the author escaped is a pipe in the cell, and divides nothing.
+	#[test]
+	fn test_an_escaped_pipe_is_a_pipe_39() -> Outcome<()> {
+		let b = res!(parse("| a | b |\n| --- | --- |\n| x \\| y | z |\n"));
+		assert_eq!(grid(&b[0]), vec![vec!["a", "b"], vec!["x | y", "z"]]);
+		Ok(())
+	}
+
+	/// A delimiter row that gives a different number of cells than the header did is no delimiter
+	/// row, and what is left is the paragraph it always was.
+	#[test]
+	fn test_a_delimiter_row_of_the_wrong_width_is_prose_40() -> Outcome<()> {
+		let b = res!(parse("| a | b |\n| --- |\n"));
+		assert_eq!(b.len(), 1);
+		assert_eq!(said(&b), vec!["| a | b | | --- |"]);
+		// And the other way about: a delimiter row wider than its header is no more a table.
+		let b = res!(parse("| a |\n| --- | --- |\n| 1 |\n"));
+		assert_eq!(b.len(), 1);
+		assert!(matches!(b[0], Block::Para(_)), "expected a paragraph, got {:?}", b[0]);
+		Ok(())
+	}
+
+	/// A table of a header and nothing else is a table: the rows are what it has none of.
+	#[test]
+	fn test_a_table_may_have_no_rows_41() -> Outcome<()> {
+		let b = res!(parse("| a | b |\n| --- | --- |\n"));
+		match &b[0] {
+			Block::Table { head, rows, cols }	=> {
+				assert!(head.is_some(), "the table lost its header row");
+				assert!(rows.is_empty(), "the table invented a row: {:?}", rows);
+				assert_eq!(cols.len(), 2);
+			}
+			other					=> panic!("expected a table, got {:?}", other),
+		}
+		Ok(())
+	}
+
+	/// A cell holds an inline run like any other, since a cell's text is read by the inline pass.
+	#[test]
+	fn test_a_cell_holds_inline_markup_42() -> Outcome<()> {
+		let b = res!(parse("| a | b |\n| --- | --- |\n| *loud* | [link](somewhere) |\n"));
+		match &b[0] {
+			Block::Table { rows, .. }	=> {
+				assert_eq!(rows[0].0[0], Cell(vec![Inline::Emph {
+					strong:		false,
+					content:	vec![Inline::Text("loud".into())],
+				}]));
+				assert_eq!(rows[0].0[1], Cell(vec![Inline::Link {
+					to:		"somewhere".into(),
+					content:	vec![Inline::Text("link".into())],
+				}]));
+			}
+			other				=> panic!("expected a table, got {:?}", other),
+		}
+		Ok(())
+	}
+
+	/// A pipe within a code span divides the cell, because the row is divided before the inline pass
+	/// ever sees it.
+	///
+	/// This is GFM's wart, and it is asserted here because it is deliberate rather than an oversight:
+	/// what a row divides into is settled by the pipes on the line and by nothing that has to be
+	/// parsed to be found.
+	#[test]
+	fn test_a_pipe_in_a_code_span_divides_a_cell_43() -> Outcome<()> {
+		let b = res!(parse("| a | b |\n| --- | --- |\n| `x | y` | z |\n"));
+		// Three cells were written where the header named two, so the third is cut, and neither of
+		// the two that remain holds a code span: each holds a backtick that closes nothing.
+		assert_eq!(grid(&b[0]), vec![vec!["a", "b"], vec!["`x", "y`"]]);
+		Ok(())
+	}
+
+	/// A row of fewer cells than the header is filled out, and one of more is cut.
+	#[test]
+	fn test_a_row_is_held_to_the_headers_width_44() -> Outcome<()> {
+		let b = res!(parse("| a | b |\n| --- | --- |\n| 1 |\n| 1 | 2 | 3 |\n"));
+		assert_eq!(grid(&b[0]), vec![
+			vec!["a", "b"],
+			vec!["1", ""],
+			vec!["1", "2"],
+		]);
+		Ok(())
+	}
+
+	/// A table below a paragraph ends it, and the header is no part of what the paragraph said.
+	#[test]
+	fn test_a_table_ends_the_paragraph_above_it_45() -> Outcome<()> {
+		let b = res!(parse("Some prose.\nand its second line.\n| a | b |\n| --- | --- |\n| 1 | 2 |\n"));
+		assert_eq!(b.len(), 2);
+		assert_eq!(said(&b[..1]), vec!["Some prose. and its second line."]);
+		assert_eq!(grid(&b[1]), vec![vec!["a", "b"], vec!["1", "2"]]);
+		Ok(())
+	}
+
+	/// A table runs to the first blank line, or to whatever begins a block of its own.
+	#[test]
+	fn test_a_table_ends_where_the_next_block_begins_46() -> Outcome<()> {
+		let b = res!(parse("| a |\n| --- |\n| 1 |\n\nAfter.\n"));
+		assert_eq!(b.len(), 2);
+		assert_eq!(grid(&b[0]), vec![vec!["a"], vec!["1"]]);
+		assert_eq!(said(&b[1..]), vec!["After."]);
+		let b = res!(parse("| a |\n| --- |\n| 1 |\n# A heading\n"));
+		assert_eq!(b.len(), 2);
+		assert!(matches!(b[1], Block::Heading { level: 1, .. }));
+		Ok(())
+	}
+
+	/// An underline still beats what would otherwise be a delimiter row, as it beats a thematic
+	/// break: a line of dashes under a line of prose is the heading it has always been.
+	#[test]
+	fn test_an_underline_beats_a_delimiter_row_47() -> Outcome<()> {
+		let b = res!(parse("A title\n---\n"));
+		assert_eq!(b, vec![Block::Heading { level: 2, content: vec![Inline::Text("A title".into())] }]);
 		Ok(())
 	}
 
