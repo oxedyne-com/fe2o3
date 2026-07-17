@@ -17,9 +17,21 @@
 //! make every front-end learn that format. The tree is the narrow waist between the two, and it stays
 //! narrow by carrying meaning rather than markup.
 //!
+//! # Attributes are names, not meanings
+//!
+//! A [`Block::Div`] and an [`Inline::Span`] carry [`Attrs`] -- an id, classes, key-value pairs. The
+//! tree carries them and interprets none of them. `{.warning}` says a region is in the class
+//! `warning`; it does not say what `warning` looks like. That is the whole of how the tree can carry a
+//! named box or a styled span and still name no format: the name travels, and the meaning is supplied
+//! where the tree is rendered -- a stylesheet for HTML, a style table for a signed document -- never
+//! here. A tree that resolved `warning` to a colour would be an HTML tree, or an SBJ tree, and no
+//! longer the narrow waist between them.
+//!
 //! # Front-ends
 //!
 //! - [`markdown`] -- reads Markdown, the form most existing prose is written in.
+//! - [`djot`] -- reads Djot, which a prose author reaches for to name a box or a style the syntax of
+//!   Markdown cannot.
 //! - [`html`] -- reads HTML, the form a typesetter exports prose to once it has resolved the author's
 //!   own macros.
 //!
@@ -38,8 +50,39 @@
 //! }
 //! ```
 
+pub mod djot;
 pub mod html;
 pub mod markdown;
+
+/// The attributes a [`Block::Div`] or an [`Inline::Span`] carries: an id, classes, and key-value
+/// pairs.
+///
+/// Opaque, on purpose. The tree holds the names and interprets none of them, which is what lets it
+/// carry a named box or a styled span while still naming no output format. See the module's own
+/// "Attributes are names, not meanings". `{#intro .warning .boxed k=v}` parses to an id `intro`, the
+/// classes `warning` and `boxed`, and the pair `(k, v)`; what any of those *mean* is the business of
+/// whatever renders the tree.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Attrs {
+	/// The id, where one was given. At most one; a second `{#...}` replaces the first, as Djot's does.
+	pub id:		Option<String>,
+	/// The classes, in the order written.
+	pub classes:	Vec<String>,
+	/// Key-value pairs, in the order written.
+	pub pairs:	Vec<(String, String)>,
+}
+
+impl Attrs {
+
+	/// Whether these attributes name nothing at all -- no id, no class, no pair.
+	///
+	/// A span or a div that carries empty attributes is one the syntax marked but named nothing on;
+	/// a consumer may treat it as the bare content, since there is nothing to render from an empty
+	/// set.
+	pub fn is_empty(&self) -> bool {
+		self.id.is_none() && self.classes.is_empty() && self.pairs.is_empty()
+	}
+}
 
 /// A document: the blocks it is made of, in the order they were written.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -142,6 +185,18 @@ pub enum Block {
 	},
 	/// A thematic break: a division between passages.
 	Rule,
+	/// A named or attributed division: a box the prose itself asked for.
+	///
+	/// The construct a prose front-end reaches for to name a region -- an aside, a warning, a figure
+	/// -- without saying, or knowing, what that region looks like. Markdown cannot write one; Djot's
+	/// `:::` can. The [`Attrs`] name it and the content is a document in its own right, so a division
+	/// may hold paragraphs, lists, or further divisions.
+	Div {
+		/// What names the division: its id, classes and pairs.
+		attrs:		Attrs,
+		/// The blocks the division holds.
+		content:	Vec<Block>,
+	},
 }
 
 /// One row of a [`Block::Table`]: the cells it holds, in reading order.
@@ -232,6 +287,16 @@ pub enum Inline {
 	},
 	/// A span of code within a line.
 	Code(String),
+	/// A run of inline content the prose named or attributed.
+	///
+	/// The inline counterpart to [`Block::Div`]: `[text]{.highlight}` marks a span the way `:::` marks
+	/// a division. The [`Attrs`] name it and interpret nothing.
+	Span {
+		/// What names the span.
+		attrs:		Attrs,
+		/// The span's content.
+		content:	Vec<Inline>,
+	},
 	/// A break the author asked for within a paragraph.
 	///
 	/// Only ever a *hard* break. Where an author's editor wrapped a line is not a break the author
@@ -255,6 +320,7 @@ pub fn text_of(content: &[Inline]) -> String {
 			Inline::Link { content, .. }	=> s.push_str(&text_of(content)),
 			Inline::Image { alt, .. }	=> s.push_str(alt),
 			Inline::Code(c)			=> s.push_str(c),
+			Inline::Span { content, .. }	=> s.push_str(&text_of(content)),
 			Inline::Break			=> s.push(' '),
 		}
 	}

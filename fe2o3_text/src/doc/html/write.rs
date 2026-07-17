@@ -29,6 +29,7 @@
 
 use crate::doc::{
 	Align,
+	Attrs,
 	Block,
 	Cell,
 	Doc,
@@ -145,6 +146,44 @@ fn block(out: &mut String, item: &Block) {
 			out.push_str("</tbody>\n</table>");
 		}
 		Block::Rule => out.push_str("<hr>"),
+		Block::Div { attrs, content } => {
+			out.push_str("<div");
+			write_attrs(out, attrs);
+			out.push_str(">\n");
+			blocks(out, content);
+			out.push_str("</div>");
+		}
+	}
+}
+
+/// Writes an element's attributes: an id, a class list, and each key-value pair.
+///
+/// The tree carries names and nothing else, so this writes names and nothing else: what `warning`
+/// looks like is the stylesheet's business, and a class attribute is exactly the handle a stylesheet
+/// reaches it by. A pair `k=v` becomes the attribute `k="v"`; the tree does not police which keys a
+/// document may set, on the same principle that it does not police what a class means.
+fn write_attrs(out: &mut String, attrs: &Attrs) {
+	if let Some(id) = &attrs.id {
+		out.push_str(" id=\"");
+		escape_attr(out, id);
+		out.push('"');
+	}
+	if !attrs.classes.is_empty() {
+		out.push_str(" class=\"");
+		for (i, c) in attrs.classes.iter().enumerate() {
+			if i > 0 {
+				out.push(' ');
+			}
+			escape_attr(out, c);
+		}
+		out.push('"');
+	}
+	for (k, v) in &attrs.pairs {
+		out.push(' ');
+		escape_attr(out, k);
+		out.push_str("=\"");
+		escape_attr(out, v);
+		out.push('"');
 	}
 }
 
@@ -223,6 +262,13 @@ fn inline(out: &mut String, item: &Inline) {
 			escape_attr(out, alt);
 			out.push_str("\">");
 		}
+		Inline::Span { attrs, content } => {
+			out.push_str("<span");
+			write_attrs(out, attrs);
+			out.push('>');
+			inlines(out, content);
+			out.push_str("</span>");
+		}
 		Inline::Code(c) => {
 			out.push_str("<code>");
 			escape_text(out, c);
@@ -273,12 +319,112 @@ pub fn escape_attr(out: &mut String, s: &str) {
 mod tests {
 	use super::*;
 
-	use crate::doc::markdown;
+	use crate::doc::{
+		djot,
+		markdown,
+	};
 
 	use oxedyne_fe2o3_core::prelude::*;
 
 	fn text(s: &str) -> Vec<Inline> {
 		vec![Inline::Text(s.to_string())]
+	}
+
+	/// Djot reaches HTML through the same tree, and the constructs that justify it -- a named box, a
+	/// styled span -- arrive intact. This is the end-to-end check the reader's own tree-level tests
+	/// cannot make: it is the whole path a published post takes.
+	fn djot_html(src: &str) -> Outcome<String> {
+		Ok(render(&res!(djot::parse(src))))
+	}
+
+	#[test]
+	fn test_djot_reaches_html_intact_20() -> Outcome<()> {
+		// Djot swaps the markers against Markdown: `_` is emphasis, `*` is strong. If these ever come
+		// out reversed, this is where it shows.
+		let em = res!(djot_html("_soft_ and *loud*\n"));
+		assert!(em.contains("<em>soft</em>"), "underscore is emphasis: {}", em);
+		assert!(em.contains("<strong>loud</strong>"), "asterisk is strong: {}", em);
+
+		// The headline features: a div names a box, a span names a style.
+		let div = res!(djot_html("::: warning\nMind the gap.\n:::\n"));
+		assert!(div.contains("<div class=\"warning\">"), "the div lost its class: {}", div);
+		let span = res!(djot_html("A [bright]{.hl} word.\n"));
+		assert!(span.contains("<span class=\"hl\">bright</span>"), "the span lost its class: {}", span);
+
+		// Full attributes: an id, classes, a pair.
+		let attrs = res!(djot_html("[x]{#a .b .c k=v}\n"));
+		assert!(attrs.contains("id=\"a\""), "no id: {}", attrs);
+		assert!(attrs.contains("class=\"b c\""), "no classes: {}", attrs);
+		assert!(attrs.contains("k=\"v\""), "no pair: {}", attrs);
+
+		// A soft break is a space, never a break -- the same lesson the Markdown reader learned.
+		let soft = res!(djot_html("one\ntwo\n"));
+		assert!(soft.contains("one two"), "a soft break was not a space: {}", soft);
+		assert!(!soft.contains("<br>"), "a soft break became a hard one: {}", soft);
+
+		// Deferred syntax is literal text, not a crash and not a half-parse.
+		let deferred = res!(djot_html("cost $5 and :smile: and H~2~O\n"));
+		assert!(deferred.contains("$5"), "math ate a dollar sign: {}", deferred);
+		assert!(deferred.contains(":smile:"), "a symbol was consumed: {}", deferred);
+		Ok(())
+	}
+
+	/// A named division renders as a div whose attributes are the names the prose gave it.
+	#[test]
+	fn test_a_div_renders_its_attributes_11() -> Outcome<()> {
+		let doc = Doc {
+			blocks: vec![Block::Div {
+				attrs:		Attrs {
+					id:		Some("intro".to_string()),
+					classes:	vec!["warning".to_string(), "boxed".to_string()],
+					pairs:		vec![("data-k".to_string(), "v".to_string())],
+				},
+				content:	vec![Block::Para(text("Careful."))],
+			}],
+		};
+		assert_eq!(
+			render(&doc),
+			"<div id=\"intro\" class=\"warning boxed\" data-k=\"v\">\n<p>Careful.</p>\n</div>\n",
+		);
+		Ok(())
+	}
+
+	/// An attributed span renders as a span carrying the same names, inline.
+	#[test]
+	fn test_a_span_renders_its_attributes_12() -> Outcome<()> {
+		let doc = Doc {
+			blocks: vec![Block::Para(vec![
+				Inline::Text("a ".to_string()),
+				Inline::Span {
+					attrs:		Attrs { classes: vec!["hl".to_string()], ..Default::default() },
+					content:	text("bright"),
+				},
+				Inline::Text(" word".to_string()),
+			])],
+		};
+		assert_eq!(
+			render(&doc),
+			"<p>a <span class=\"hl\">bright</span> word</p>\n",
+		);
+		Ok(())
+	}
+
+	/// A name in an attribute value cannot break out of the attribute it sits in.
+	#[test]
+	fn test_an_attribute_value_is_escaped_13() -> Outcome<()> {
+		let doc = Doc {
+			blocks: vec![Block::Div {
+				attrs:		Attrs {
+					classes:	vec!["a\" onclick=\"x".to_string()],
+					..Default::default()
+				},
+				content:	vec![Block::Para(text("hi"))],
+			}],
+		};
+		let out = render(&doc);
+		assert!(!out.contains("onclick=\"x\""), "an attribute value broke out: {}", out);
+		assert!(out.contains("&quot;"), "the quote was not escaped: {}", out);
+		Ok(())
 	}
 
 	/// Text that would otherwise close a tag or open one is written out as what it says.
