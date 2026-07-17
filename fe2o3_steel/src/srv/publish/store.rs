@@ -23,6 +23,7 @@
 
 use crate::srv::publish::{
 	Post,
+	Markup,
 	PostKind,
 	PostState,
 	render_source,
@@ -73,9 +74,11 @@ pub struct Record {
 	pub kind:	PostKind,
 	/// Draft or live.
 	pub state:	PostState,
+	/// Markdown or Djot.
+	pub markup:	Markup,
 	/// The date the author gave it, where they gave one.
 	pub date:	Option<String>,
-	/// The Markdown, as written.
+	/// The prose, as written, in whatever markup [`markup`](Record::markup) names.
 	pub source:	String,
 }
 
@@ -90,6 +93,7 @@ impl Record {
 		m.insert(dat!("slug"),		dat!(self.slug.clone()));
 		m.insert(dat!("kind"),		dat!(self.kind.as_str().to_string()));
 		m.insert(dat!("state"),		dat!(self.state.as_str().to_string()));
+		m.insert(dat!("markup"),	dat!(self.markup.as_str().to_string()));
 		m.insert(dat!("source"),	dat!(self.source.clone()));
 		// A post without a date carries no date key. A key saying nothing is a second way to say
 		// nothing, and two ways to say one thing is one too many.
@@ -122,6 +126,9 @@ impl Record {
 				"slug"		=> out.slug = val,
 				"kind"		=> out.kind = PostKind::of(&val),
 				"state"		=> out.state = PostState::of(&val),
+				// A record written before markup was a field carries none, and reads as Markdown --
+				// which is what every such post was. The default falls out of `Markup::of`.
+				"markup"	=> out.markup = Markup::of(&val),
 				"source"	=> out.source = val,
 				"date"		=> date = Some(val),
 				// An unknown field is a field a later version wrote. Ignore it rather than refuse the
@@ -140,7 +147,7 @@ impl Record {
 
 	/// The record as a reader gets it.
 	pub fn render(&self) -> Outcome<Post> {
-		render_source(&self.source, self.slug.clone(), self.date.clone(), self.kind)
+		render_source(&self.source, self.slug.clone(), self.date.clone(), self.kind, self.markup)
 	}
 }
 
@@ -439,6 +446,7 @@ pub fn import_dir<
 			// on the disk of a server.
 			kind:	PostKind::Note,
 			state:	PostState::Live,
+			markup:	Markup::Markdown,
 			date,
 			source,
 		};
@@ -460,6 +468,7 @@ mod tests {
 			slug:	fmt!("on-rent"),
 			kind:	PostKind::Essay,
 			state:	PostState::Draft,
+			markup:	Markup::Djot,
 			date:	Some(fmt!("2026-07-17")),
 			source:	fmt!("# On rent\n\nWords.\n"),
 		};
@@ -486,6 +495,9 @@ mod tests {
 		assert_eq!(rec.slug, "on-rent");
 		assert_eq!(rec.source, "Words.");
 		assert_eq!(rec.state, PostState::Live);
+		// A record written before markup was a field carries no markup key, and reads as Markdown --
+		// which every such post was.
+		assert_eq!(rec.markup, Markup::Markdown);
 		Ok(())
 	}
 

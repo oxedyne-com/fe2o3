@@ -47,6 +47,7 @@ use oxedyne_fe2o3_jdat::{
 use oxedyne_fe2o3_text::doc::{
 	Block,
 	Doc,
+	djot,
 	html,
 	markdown,
 	text_of,
@@ -390,6 +391,43 @@ impl PostKind {
 	}
 }
 
+/// The syntax a post is written in.
+///
+/// Both read into the same document tree, so a post's kind of markup is a fact about how it was
+/// typed and nothing a reader ever sees: the page, the feed and the excerpt are made from the tree,
+/// which knows neither. What Djot buys an author over Markdown is the power to name a box (`:::`) and
+/// a style (`{.class}`) in the prose itself, which Markdown has no syntax for. A post says which it
+/// is so the two can sit side by side in one store, each read by its own front-end.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Markup {
+	/// Markdown -- the form most prose is already written in, and the default.
+	#[default]
+	Markdown,
+	/// Djot -- for prose that wants to name a box or a style.
+	Djot,
+}
+
+impl Markup {
+
+	/// The word a record stores.
+	pub fn as_str(&self) -> &'static str {
+		match self {
+			Self::Markdown	=> "markdown",
+			Self::Djot	=> "djot",
+		}
+	}
+
+	/// The markup a word names. An unknown word is Markdown, the safe default: it is what nearly every
+	/// post is, and a record this version cannot place should read as the ordinary thing rather than
+	/// the exception.
+	pub fn of(s: &str) -> Self {
+		match s {
+			"djot"	=> Self::Djot,
+			_	=> Self::Markdown,
+		}
+	}
+}
+
 /// Whether a post is anybody's business but its author's.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum PostState {
@@ -453,7 +491,9 @@ pub fn read_all(dir: &str, id: &str) -> Outcome<Vec<Post>> {
 		let (date, slug) = split_date(&stem);
 		// A file on disk is not a draft, or it would not be on the disk of a server, so a directory
 		// holds no kind or state of its own: everything in one is a live note.
-		match render_source(&source, slug, date, PostKind::Note) {
+		// A directory of files is Markdown: it is the form prose already exists in, and a file on
+		// disk carries no field to say otherwise.
+		match render_source(&source, slug, date, PostKind::Note, Markup::Markdown) {
 			Ok(p)	=> posts.push(p),
 			Err(e)	=> warn!(
 				"{}: posts: skipping '{}', which will not read as Markdown: {}", id, stem, e),
@@ -540,10 +580,17 @@ pub fn render_source(
 	slug:	String,
 	date:	Option<String>,
 	kind:	PostKind,
+	markup:	Markup,
 )
 	-> Outcome<Post>
 {
-	let doc = res!(markdown::parse(source));
+	// The one place the syntax is chosen. Both front-ends produce the same tree, so everything below
+	// this line -- the title, the excerpt, the HTML -- is written once and knows nothing of which was
+	// read.
+	let doc = match markup {
+		Markup::Markdown	=> res!(markdown::parse(source)),
+		Markup::Djot		=> res!(djot::parse(source)),
+	};
 	let title = doc.top_heading().unwrap_or_else(|| slug.clone());
 	Ok(Post {
 		slug,

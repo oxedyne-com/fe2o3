@@ -254,6 +254,20 @@ async function main() {
 	r = await call('GET', '/posts/feed.xml');
 	has('the feed dates it to the minute, not midnight', r.body, '2026-07-20T09:15:00Z');
 
+	console.log('\n== a Djot post names a box Markdown cannot ==');
+	// The whole reason Djot exists here: `:::` becomes a div, `{.class}` a span.
+	r = await call('POST', '/manage/save', { cookie, headers: { Accept: 'application/json' }, form: {
+		slug: 'djot-made', kind: 'note', state: 'live', markup: 'djot', csrf,
+		source: '# A Djot note\n\n::: warning\nMind the gap.\n:::\n\nA [bright]{.hl} word.',
+	}});
+	check('a Djot save answers ok', r.status, 200);
+	r = await call('GET', '/posts/djot-made');
+	has('the div became a box', r.body, '<div class="warning">');
+	has('the span became a styled span', r.body, '<span class="hl">');
+	r = await call('GET', '/manage/post.json?slug=djot-made', { cookie });
+	has('post.json reports the markup', r.body, '"markup": "djot"');
+	await call('POST', '/manage/delete', { cookie, headers: { Accept: 'application/json' }, form: { slug: 'djot-made', csrf } });
+
 	console.log('\n== a slug cannot leave its key ==');
 	r = await call('POST', '/manage/save', { cookie, form: {
 		slug: '../../publish/index', source: 'x', csrf,

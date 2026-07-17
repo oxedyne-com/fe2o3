@@ -27,6 +27,7 @@ use crate::srv::{
 		redirect,
 	},
 	publish::{
+		Markup,
 		PostKind,
 		PostState,
 		PublishConfig,
@@ -356,13 +357,21 @@ fn handle_edit<
 					<option value=\"live\"{live_sel}>Live</option>\n\
 				</select>\n\
 			</div>\n\
+			<div>\n\
+				<label for=\"markup\">Written in</label>\n\
+				<select id=\"markup\" name=\"markup\">\n\
+					<option value=\"markdown\"{md_sel}>Markdown</option>\n\
+					<option value=\"djot\"{djot_sel}>Djot</option>\n\
+				</select>\n\
+			</div>\n\
 		</div>\n\
-		<label for=\"source\">Markdown</label>\n\
+		<label for=\"source\">Text</label>\n\
 		<textarea id=\"source\" name=\"source\" rows=\"24\" spellcheck=\"true\" \
 			placeholder=\"# The title goes here, as the first heading\">{source}</textarea>\n\
 		<p class=\"mc-muted\">The title is the post's own most prominent heading. There is no title \
 			field because there is no second place to say it. A note shows whole on the site; an essay \
-			shows as a card to open.</p>\n\
+			shows as a card to open. Djot can name a box (<code>:::</code>) and a style \
+			(<code>{{.class}}</code>) that Markdown cannot.</p>\n\
 		<div class=\"mc-actions\">\n\
 			<button type=\"submit\" class=\"mc-btn\">Save</button>\n\
 			<a class=\"mc-btn mc-btn-quiet\" href=\"{root}\">Cancel</a>\n\
@@ -381,6 +390,8 @@ fn handle_edit<
 		essay_sel	= selected(r.kind == PostKind::Essay),
 		draft_sel	= selected(r.state == PostState::Draft),
 		live_sel	= selected(r.state == PostState::Live),
+		md_sel		= selected(r.markup == Markup::Markdown),
+		djot_sel	= selected(r.markup == Markup::Djot),
 		source		= html_escape(&r.source),
 	));
 
@@ -525,6 +536,7 @@ fn list_json<
 		m.insert(dat!("slug"),		dat!(rec.slug.clone()));
 		m.insert(dat!("title"),		dat!(title));
 		m.insert(dat!("kind"),		dat!(rec.kind.as_str().to_string()));
+		m.insert(dat!("markup"),	dat!(rec.markup.as_str().to_string()));
 		m.insert(dat!("state"),		dat!(rec.state.as_str().to_string()));
 		m.insert(dat!("broken"),	Dat::Bool(broken));
 		if let Some(d) = &rec.date {
@@ -584,6 +596,7 @@ fn post_json<
 	m.insert(dat!("slug"),		dat!(rec.slug.clone()));
 	m.insert(dat!("source"),	dat!(rec.source.clone()));
 	m.insert(dat!("kind"),		dat!(rec.kind.as_str().to_string()));
+	m.insert(dat!("markup"),	dat!(rec.markup.as_str().to_string()));
 	m.insert(dat!("state"),		dat!(rec.state.as_str().to_string()));
 	m.insert(dat!("html"),		dat!(html));
 	m.insert(dat!("broken"),	Dat::Bool(broken));
@@ -685,6 +698,7 @@ fn do_save<
 		slug:	slug.clone(),
 		kind:	PostKind::of(&super::form_field(body, "kind").unwrap_or_default()),
 		state:	PostState::of(&super::form_field(body, "state").unwrap_or_default()),
+		markup:	Markup::of(&super::form_field(body, "markup").unwrap_or_default()),
 		date:	if date.is_empty() { None } else { Some(date) },
 		source,
 	};

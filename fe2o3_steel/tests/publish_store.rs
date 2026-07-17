@@ -5,6 +5,7 @@
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_steel::srv::publish::{
+    Markup,
     PostKind,
     PostState,
     store::{
@@ -34,6 +35,7 @@ fn a_post_survives_the_database() -> Outcome<()> {
         slug:   fmt!("on-rent"),
         kind:   PostKind::Essay,
         state:  PostState::Live,
+        markup: Markup::Markdown,
         date:   Some(fmt!("2026-07-17")),
         source: fmt!("# On rent\n\nAn opening sentence.\n"),
     };
