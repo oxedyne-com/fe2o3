@@ -21,6 +21,10 @@
 //!
 //! - [`markdown`] -- reads Markdown, the form most existing prose is written in.
 //!
+//! # Outputs
+//!
+//! - [`html`] -- writes the tree out as HTML, for a browser to read.
+//!
 //! # Usage
 //!
 //! ```ignore
@@ -32,6 +36,7 @@
 //! }
 //! ```
 
+pub mod html;
 pub mod markdown;
 
 /// A document: the blocks it is made of, in the order they were written.
