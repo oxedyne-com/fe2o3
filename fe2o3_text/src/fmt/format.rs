@@ -418,10 +418,12 @@ fn split_off_closing_brace(mut docs: Vec<Doc>) -> (Vec<Doc>, Vec<Doc>) {
         closing.push(last);
     }
     // Pop any hardlines immediately before the `}`.
-    while let Some(d) = docs.last() {
+    while let Some(d) = docs.pop() {
         if matches!(d, Doc::HardLine) {
-            closing.push(docs.pop().expect("checked"));
+            closing.push(d);
         } else {
+            // Not a hardline: restore it and stop.
+            docs.push(d);
             break;
         }
     }

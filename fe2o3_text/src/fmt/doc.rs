@@ -106,7 +106,7 @@ pub fn concat(docs: Vec<Doc>) -> Doc {
     }
     match flat.len() {
         0 => Doc::Empty,
-        1 => flat.into_iter().next().expect("len checked"),
+        1 => flat.into_iter().next().unwrap_or(Doc::Empty),
         _ => Doc::Concat(flat),
     }
 }

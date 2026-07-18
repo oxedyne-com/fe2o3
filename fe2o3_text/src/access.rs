@@ -44,37 +44,18 @@ impl<
 >
     AccessibleText<T, D>
 {
+    /// Acquires a write guard over the underlying text lines, propagating a
+    /// poisoned-lock error via the `lock_write!` macro.
     pub fn get_text_lines(&self) -> Outcome<RwLockWriteGuard<'_, TextLines<T, D>>> {
         match self {
-            AccessibleText::ThreadShared(locked) => match locked.write() {
-                Ok(guard) => Ok(guard),
-                Err(_) => Err(err!(
-                    "Failed to acquire write lock.";
-                Poisoned, Lock)),
-            }
-            AccessibleText::Shared(locked) => match locked.write() {
-                Ok(guard) => Ok(guard),
-                Err(_) => Err(err!(
-                    "Failed to acquire write lock.";
-                Poisoned, Lock)),
-            }
+            AccessibleText::ThreadShared(locked) => Ok(lock_write!(locked)),
+            AccessibleText::Shared(locked)       => Ok(lock_write!(locked)),
         }
     }
 
+    /// Mutable-receiver alias for [`Self::get_text_lines`]; both return an
+    /// exclusive write guard, so this simply delegates.
     pub fn get_text_lines_mut(&mut self) -> Outcome<RwLockWriteGuard<'_, TextLines<T, D>>> {
-        match self {
-            AccessibleText::ThreadShared(locked) => match locked.write() {
-                Ok(guard) => Ok(guard),
-                Err(_) => Err(err!(
-                    "Failed to acquire write lock.";
-                Poisoned, Lock)),
-            }
-            AccessibleText::Shared(locked) => match locked.write() {
-                Ok(guard) => Ok(guard),
-                Err(_) => Err(err!(
-                    "Failed to acquire write lock.";
-                Poisoned, Lock)),
-            }
-        }
+        self.get_text_lines()
     }
 }

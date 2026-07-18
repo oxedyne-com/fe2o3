@@ -631,6 +631,15 @@ pub fn lex(src: &str, lang: &LangTokens) -> Outcome<Vec<Token>> {
                 if bytes[pos] == b'.' && pos + 1 < len && bytes[pos + 1] == b'.' {
                     break;
                 }
+                // A `.` followed by an identifier start is a field or
+                // tuple-index access dot (e.g. `0.connect_options`,
+                // `1.5.method`), not a decimal point — stop before it.
+                if bytes[pos] == b'.'
+                    && pos + 1 < len
+                    && is_ident_start(bytes[pos + 1])
+                {
+                    break;
+                }
                 // Avoid consuming `+`/`-` unless it's part of an exponent.
                 if (bytes[pos] == b'+' || bytes[pos] == b'-')
                     && pos > start

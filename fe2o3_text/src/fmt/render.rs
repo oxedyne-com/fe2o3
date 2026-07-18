@@ -67,6 +67,7 @@ pub fn render(
                         col += 1;
                     }
                     Mode::Break => {
+                        trim_inline_trailing(&mut out);
                         out.push('\n');
                         let spaces = cmd.indent;
                         emit_indent(&mut out, spaces, indent_str, indent_w);
@@ -76,6 +77,7 @@ pub fn render(
             }
 
             Doc::HardLine => {
+                trim_inline_trailing(&mut out);
                 out.push('\n');
                 let spaces = cmd.indent;
                 emit_indent(&mut out, spaces, indent_str, indent_w);
@@ -149,8 +151,6 @@ pub fn render(
         }
     }
 
-    // Strip trailing whitespace from each line.
-    strip_trailing_whitespace(&mut out);
     out
 }
 
@@ -204,17 +204,24 @@ fn emit_indent(
     }
 }
 
-/// Remove trailing whitespace from every line in the buffer.
-fn strip_trailing_whitespace(s: &mut String) {
-    let bytes = s.as_bytes();
-    let mut result = String::with_capacity(bytes.len());
-    for line in s.split('\n') {
-        if !result.is_empty() {
-            result.push('\n');
+/// Remove trailing spaces and tabs from the current (last) physical
+/// line of `out`, stopping at the preceding newline.
+///
+/// This is called only at layout line breaks (`Doc::Line` in break
+/// mode and `Doc::HardLine`), which always occur in code context. The
+/// newlines that appear *inside* a multi-line string literal arrive as
+/// part of a `Doc::Text` blob and never trigger a layout break, so the
+/// interior of string literals is left byte-for-byte intact. This is
+/// what a formatter must guarantee: it may reflow code, but it must
+/// never alter the contents of a string.
+fn trim_inline_trailing(out: &mut String) {
+    while let Some(&b) = out.as_bytes().last() {
+        if b == b' ' || b == b'\t' {
+            out.pop();
+        } else {
+            break;
         }
-        result.push_str(line.trim_end());
     }
-    *s = result;
 }
 
 
@@ -375,9 +382,16 @@ mod tests {
     }
 
     #[test]
-    fn test_strip_trailing_whitespace() {
-        let mut s = String::from("hello   \nworld  \n  ");
-        strip_trailing_whitespace(&mut s);
-        assert_eq!(s, "hello\nworld\n");
+    fn test_trim_inline_trailing() {
+        // Trims trailing spaces/tabs of the current line only, back to
+        // the preceding newline.
+        let mut s = String::from("hello\nworld  ");
+        trim_inline_trailing(&mut s);
+        assert_eq!(s, "hello\nworld");
+
+        // Stops at the newline; does not cross it.
+        let mut s = String::from("code  \n");
+        trim_inline_trailing(&mut s);
+        assert_eq!(s, "code  \n");
     }
 }

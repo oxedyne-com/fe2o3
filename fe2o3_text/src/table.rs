@@ -253,7 +253,7 @@ impl Tabular {
                 );
             }
             None => {
-                // Original behavior without boxing.
+                // Original behaviour without boxing.
                 for (row_idx, row) in self.rows.iter().enumerate() {
                     let formatted: Vec<String> = row.iter()
                         .zip(&widths)
