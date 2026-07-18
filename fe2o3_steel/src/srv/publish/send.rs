@@ -18,11 +18,23 @@
 //! test against a live remote is exactly what a test cannot catch. What *can* be pinned -- the JSON a
 //! remote is sent, the permalink pulled from what it returns -- is.
 
-use crate::srv::publish::dest::Destination;
+use crate::srv::publish::{
+	dest::{
+		Delivery,
+		DeliveryState,
+		Destination,
+		Rendition,
+	},
+	store,
+};
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_iop_crypto::enc::Encrypter;
+use oxedyne_fe2o3_iop_db::api::Database;
+use oxedyne_fe2o3_iop_hash::api::Hasher;
 use oxedyne_fe2o3_jdat::{
 	prelude::*,
+	id::NumIdDat,
 	string::dec::DecoderConfig,
 	usr::{
 		UsrKind,
@@ -48,7 +60,10 @@ use oxedyne_fe2o3_net::http::{
 
 use std::{
 	collections::BTreeMap,
-	sync::Arc,
+	sync::{
+		Arc,
+		RwLock,
+	},
 	time::{
 		SystemTime,
 		UNIX_EPOCH,
@@ -143,6 +158,124 @@ pub async fn deliver_one(
 			"publish: no sender is wired for {}.", other.as_str();
 			Input, Unknown)),
 	}
+}
+
+
+/// Attempts every delivery of a post that is not yet done, and writes back what happened.
+///
+/// The outbox in one pass. It reads the post, walks its deliveries, and for each one still
+/// [`open`](is_open) -- queued, or failed but not past retrying -- sends the rendition and records the
+/// outcome: a permalink and the moment on success, the error and a bumped retry count on failure. The
+/// record is written back once, at the end, with all the outcomes on it.
+///
+/// # Held under no lock
+///
+/// A network is slow and a database lock is not for holding across one. So the post is read, released,
+/// sent over the wire, and only then written back. Two saves racing settle last-write-wins, which for a
+/// delivery log is a cost worth its simplicity: the worst case re-sends a post, and the backfeed shows
+/// it, where holding a lock across a remote that has stopped answering would wedge the site.
+///
+/// Returns how many deliveries were attempted -- zero where the post has none open, which is the
+/// ordinary case for a post already sent everywhere it goes.
+pub async fn deliver_post<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	creds:	&DestCreds,
+	tls:	Arc<ClientConfig>,
+	slug:	&str,
+	id:	&str,
+)
+	-> Outcome<usize>
+{
+	let mut rec = match res!(store::get(db, slug)) {
+		Some(r)	=> r,
+		// A post that is not there has no deliveries to make, and is not an error: it may have been
+		// deleted between the queueing and the sweep.
+		None	=> return Ok(0),
+	};
+
+	let mut attempted = 0;
+	for delivery in &mut rec.deliveries {
+		if !is_open(&delivery.state) {
+			continue;
+		}
+		attempted += 1;
+		let retries = match &delivery.state {
+			DeliveryState::Failed { retries, .. }	=> *retries,
+			_					=> 0,
+		};
+		match deliver_one(delivery.dest, creds, &delivery.rendition.text, tls.clone()).await {
+			Ok(permalink)	=> {
+				let at = res!(iso_now());
+				info!("{}: publish: '{}' delivered to {} at {}",
+					id, slug, delivery.dest.as_str(), permalink);
+				delivery.state = DeliveryState::Sent { at, permalink };
+			}
+			Err(e)	=> {
+				let at = iso_now().unwrap_or_default();
+				warn!("{}: publish: '{}' to {} failed (attempt {}): {}",
+					id, slug, delivery.dest.as_str(), retries + 1, e);
+				delivery.state = DeliveryState::Failed {
+					at,
+					err:		fmt!("{}", e),
+					retries:	retries + 1,
+				};
+			}
+		}
+	}
+
+	if attempted > 0 {
+		res!(store::put(db, &rec, id));
+	}
+	Ok(attempted)
+}
+
+/// Whether a delivery still wants an attempt: queued, or failed but not yet past retrying. The
+/// complement of [`DeliveryState::is_terminal`], named for the loop that reads it.
+fn is_open(state: &DeliveryState) -> bool {
+	!state.is_terminal()
+}
+
+/// Sets a post's deliveries to a fresh queue for the destinations named, keeping a hand-edited
+/// rendition where one already exists for a destination and deriving a default where none does.
+///
+/// What the composer calls when an author ticks destinations and saves. It does not send -- it queues;
+/// [`deliver_post`] sends. A destination dropped from the set loses its delivery, and one already sent
+/// keeps it, so re-saving does not re-send what has gone: only an open or new delivery is queued.
+pub fn queue_deliveries(
+	existing:	&[Delivery],
+	chosen:		&[Destination],
+	title:		&str,
+	url:		&str,
+) -> Vec<Delivery> {
+	let mut out = Vec::new();
+	for &dest in chosen {
+		let prior = existing.iter().find(|d| d.dest == dest);
+		match prior {
+			// Already sent, or already carrying a hand-written rendition: keep it as it stands. A
+			// re-save must not re-derive over an edit, nor re-open a delivery that has landed.
+			Some(d) if matches!(d.state, DeliveryState::Sent { .. }) || !d.rendition.auto	=> {
+				out.push(d.clone());
+			}
+			// Known but still open with an automatic rendition: refresh the rendition (the title or link
+			// may have changed) and leave it queued.
+			Some(_)	=> {
+				let rendition = Rendition::promo(title, url, dest.capability().max_chars);
+				out.push(Delivery::new(dest, rendition));
+			}
+			// New: derive a default and queue it.
+			None	=> {
+				let rendition = Rendition::promo(title, url, dest.capability().max_chars);
+				out.push(Delivery::new(dest, rendition));
+			}
+		}
+	}
+	out
 }
 
 
@@ -480,6 +613,57 @@ mod tests {
 		// A known instant: 2026-07-18T10:00:00Z is 1_784_368_800.
 		let s = res!(iso_of(1_784_368_800));
 		assert!(s.starts_with("2026-07-18T10:00:00"), "got: {}", s);
+		Ok(())
+	}
+
+	/// Queueing derives a default for a new destination and keeps a hand-edited or already-sent one.
+	#[test]
+	fn test_queueing_keeps_edits_and_sends_08() -> Outcome<()> {
+		let sent = Delivery {
+			dest:		Destination::Mastodon,
+			rendition:	Rendition { text: fmt!("old"), auto: true },
+			state:		DeliveryState::Sent { at: fmt!("t"), permalink: fmt!("https://m/1") },
+		};
+		let edited = Delivery {
+			dest:		Destination::Bluesky,
+			rendition:	Rendition { text: fmt!("my words"), auto: false },
+			state:		DeliveryState::Queued,
+		};
+		let existing = [sent.clone(), edited.clone()];
+		let out = queue_deliveries(
+			&existing,
+			&[Destination::Mastodon, Destination::Bluesky],
+			"On rent",
+			"https://x/asides/on-rent",
+		);
+		// The sent one is untouched -- not re-derived, not re-opened.
+		let m = match out.iter().find(|d| d.dest == Destination::Mastodon) {
+			Some(d)	=> d,
+			None	=> return Err(err!("Mastodon delivery was dropped"; Test, Missing)),
+		};
+		assert_eq!(m.state, sent.state);
+		assert_eq!(m.rendition.text, "old");
+		// The hand-edited one keeps its words.
+		let b = match out.iter().find(|d| d.dest == Destination::Bluesky) {
+			Some(d)	=> d,
+			None	=> return Err(err!("Bluesky delivery was dropped"; Test, Missing)),
+		};
+		assert_eq!(b.rendition.text, "my words");
+		assert!(!b.rendition.auto);
+		Ok(())
+	}
+
+	/// A destination dropped from the set loses its delivery; a new one gets a derived default, queued.
+	#[test]
+	fn test_queueing_drops_the_unchosen_and_adds_the_new_09() -> Outcome<()> {
+		let existing = [Delivery::new(Destination::Mastodon, Rendition::default())];
+		// Choose only Bluesky: Mastodon is dropped, Bluesky is new.
+		let out = queue_deliveries(&existing, &[Destination::Bluesky], "On rent", "https://x/on-rent");
+		assert_eq!(out.len(), 1);
+		assert_eq!(out[0].dest, Destination::Bluesky);
+		assert_eq!(out[0].state, DeliveryState::Queued);
+		assert!(out[0].rendition.auto);
+		assert!(out[0].rendition.text.ends_with("https://x/on-rent"));
 		Ok(())
 	}
 
