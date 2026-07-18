@@ -5,4 +5,7 @@
 //! common accounting data structures defined here.
 pub mod addr;
 pub mod data;
-pub mod user;
+// `UserGuard` now lives generically in `fe2o3_net::guard::user`, beside `AddressGuard`,
+// so any protocol can share the per-user trust map. Re-exported here so the existing
+// `crate::srv::guard::user::…` paths keep resolving.
+pub use oxedyne_fe2o3_net::guard::user;

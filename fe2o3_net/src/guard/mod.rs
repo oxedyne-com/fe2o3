@@ -6,5 +6,10 @@
 //! single, hardened implementation. The SHIELD-specific handshake-sequence check is built
 //! on top of the generic core via `AddressGuard::update_log`, leaving the base guard free of
 //! protocol details.
+//!
+//! `user::UserGuard` is the per-user counterpart: a sharded map of trust state (Unknown /
+//! Blacklist / Whitelist) with a caller-supplied data payload, likewise lifted out of
+//! `fe2o3_shield` so any protocol can classify users, not only addresses.
 
 pub mod addr;
+pub mod user;
