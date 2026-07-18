@@ -374,6 +374,7 @@ mod tests {
 			site_name:	fmt!("Elearnity"),
 			base_url:	fmt!("https://example.com"),
 			css:		vec![fmt!("/css/a.css")],
+			creds:		Default::default(),
 		}
 	}
 

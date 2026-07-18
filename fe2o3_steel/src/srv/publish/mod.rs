@@ -134,6 +134,9 @@ pub struct PublishConfig {
 	/// Stylesheets a page links, in order. A page carries no styling of its own: what prose should
 	/// look like is the site's business, not the server's.
 	pub css:	Vec<String>,
+	/// The remotes this site is configured to post to, and the credentials to reach them. Empty where
+	/// the site publishes only to its own pages, which is the default.
+	pub creds:	send::DestCreds,
 }
 
 impl PublishConfig {
@@ -197,6 +200,14 @@ impl PublishConfig {
 				Invalid, Input, Mismatch)),
 		};
 
+		let creds = match m.get(&dat!("destinations")) {
+			Some(Dat::Map(dm))	=> res!(send::DestCreds::from_datmap(dm)),
+			None			=> send::DestCreds::default(),
+			_			=> return Err(err!(
+				"PublishConfig: 'destinations' must be a map.";
+				Invalid, Input, Mismatch)),
+		};
+
 		Ok(Self {
 			path,
 			dir:		res!(get_str("dir", DIR_DEFAULT)),
@@ -205,7 +216,18 @@ impl PublishConfig {
 			site_name:	res!(get_str("site_name", "")),
 			base_url,
 			css,
+			creds,
 		})
+	}
+
+	/// Resolves every secret reference the config carries against the app root.
+	///
+	/// A destination's token or app password is written as an `{env:}` or `{file:}` reference, never in
+	/// the clear, and is resolved once at startup -- the same treatment the SMTP submission password
+	/// gets, and for the same reason: a secret in the config file is a secret in every backup of it.
+	pub fn resolve_secrets(&mut self, root: &std::path::Path) -> Outcome<()> {
+		res!(self.creds.resolve_secrets(root));
+		Ok(())
 	}
 
 	/// Whether a request path belongs to the published prose.

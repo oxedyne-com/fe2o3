@@ -60,6 +60,7 @@ use oxedyne_fe2o3_net::http::{
 
 use std::{
 	collections::BTreeMap,
+	path::Path,
 	sync::{
 		Arc,
 		RwLock,
@@ -124,6 +125,99 @@ impl DestCreds {
 			// The rest are not wired regardless of config.
 			_			=> false,
 		}
+	}
+
+	/// The destinations the site can offer, in a picker's order.
+	pub fn offered(&self) -> Vec<Destination> {
+		Destination::ALL.iter().copied().filter(|d| self.has(*d)).collect()
+	}
+
+	/// Parses a vhost's `destinations` block: a map of per-remote credential blocks. A remote the site
+	/// has no block for is a remote it does not post to, and reads as `None` rather than an error.
+	pub fn from_datmap(m: &DaticleMap) -> Outcome<Self> {
+		let mastodon = match m.get(&dat!("mastodon")) {
+			Some(Dat::Map(mm))	=> Some(res!(MastodonCreds::from_datmap(mm))),
+			None			=> None,
+			_			=> return Err(err!(
+				"publish: 'destinations.mastodon' must be a map.";
+				Invalid, Input, Mismatch)),
+		};
+		let bluesky = match m.get(&dat!("bluesky")) {
+			Some(Dat::Map(bm))	=> Some(res!(BlueskyCreds::from_datmap(bm))),
+			None			=> None,
+			_			=> return Err(err!(
+				"publish: 'destinations.bluesky' must be a map.";
+				Invalid, Input, Mismatch)),
+		};
+		Ok(Self { mastodon, bluesky })
+	}
+
+	/// Resolves every credential's `{env:}`/`{file:}` secret reference against the app root, so a token
+	/// is never in the config in the clear.
+	pub fn resolve_secrets(&mut self, root: &Path) -> Outcome<()> {
+		if let Some(m) = &mut self.mastodon {
+			res!(m.resolve_secrets(root));
+		}
+		if let Some(b) = &mut self.bluesky {
+			res!(b.resolve_secrets(root));
+		}
+		Ok(())
+	}
+}
+
+impl MastodonCreds {
+
+	/// Parses a `destinations.mastodon` block. Both fields are required where the block is present: an
+	/// account named without an instance or without a token is one no post can reach, and saying so at
+	/// load beats a delivery failing at send with the same cause.
+	fn from_datmap(m: &DaticleMap) -> Outcome<Self> {
+		Ok(Self {
+			base_url:	res!(cred_str(m, "base_url", "destinations.mastodon")),
+			token:		res!(cred_str(m, "token", "destinations.mastodon")),
+		})
+	}
+
+	/// Resolves the token's secret reference. The instance URL is public and taken as written.
+	fn resolve_secrets(&mut self, root: &Path) -> Outcome<()> {
+		self.token = res!(crate::srv::cfg::ApiRoute::resolve_file_refs(&self.token, root));
+		Ok(())
+	}
+}
+
+impl BlueskyCreds {
+
+	/// Parses a `destinations.bluesky` block. Handle and app password are required; the host defaults to
+	/// [`BLUESKY_HOST_DEFAULT`], since most accounts live on the public PDS.
+	fn from_datmap(m: &DaticleMap) -> Outcome<Self> {
+		let host = match m.get(&dat!("host")) {
+			Some(Dat::Str(s)) if !s.trim().is_empty()	=> s.trim().to_string(),
+			_						=> BLUESKY_HOST_DEFAULT.to_string(),
+		};
+		Ok(Self {
+			host,
+			handle:		res!(cred_str(m, "handle", "destinations.bluesky")),
+			app_password:	res!(cred_str(m, "app_password", "destinations.bluesky")),
+		})
+	}
+
+	/// Resolves the app password's secret reference. The handle and host are public and taken as
+	/// written.
+	fn resolve_secrets(&mut self, root: &Path) -> Outcome<()> {
+		self.app_password = res!(crate::srv::cfg::ApiRoute::resolve_file_refs(&self.app_password, root));
+		Ok(())
+	}
+}
+
+/// A required string field of a credential block, named for the block it is missing from.
+fn cred_str(m: &DaticleMap, key: &str, block: &str) -> Outcome<String> {
+	match m.get(&dat!(key)) {
+		Some(Dat::Str(s)) if !s.trim().is_empty()	=> Ok(s.clone()),
+		Some(Dat::Str(_)) | None			=> Err(err!(
+			"publish: '{}.{}' is required and must be a non-empty string.", block, key;
+			Invalid, Input, Missing)),
+		_						=> Err(err!(
+			"publish: '{}.{}' must be a string.", block, key;
+			Invalid, Input, Mismatch)),
 	}
 }
 
@@ -664,6 +758,50 @@ mod tests {
 		assert_eq!(out[0].state, DeliveryState::Queued);
 		assert!(out[0].rendition.auto);
 		assert!(out[0].rendition.text.ends_with("https://x/on-rent"));
+		Ok(())
+	}
+
+	/// A destinations block parses into per-remote creds, defaulting the Bluesky host and reading a
+	/// remote it does not name as absent.
+	#[test]
+	fn test_a_destinations_block_parses_10() -> Outcome<()> {
+		let mut masto = DaticleMap::new();
+		masto.insert(dat!("base_url"),		dat!("https://mastodon.social"));
+		masto.insert(dat!("token"),		dat!("secret-token"));
+		let mut bsky = DaticleMap::new();
+		bsky.insert(dat!("handle"),		dat!("me.bsky.social"));
+		bsky.insert(dat!("app_password"),	dat!("app-pw"));
+		let mut dests = DaticleMap::new();
+		dests.insert(dat!("mastodon"),	Dat::Map(masto));
+		dests.insert(dat!("bluesky"),	Dat::Map(bsky));
+
+		let creds = res!(DestCreds::from_datmap(&dests));
+		let m = match &creds.mastodon {
+			Some(m)	=> m,
+			None	=> return Err(err!("mastodon creds did not parse"; Test, Missing)),
+		};
+		assert_eq!(m.base_url, "https://mastodon.social");
+		assert_eq!(m.token, "secret-token");
+		let b = match &creds.bluesky {
+			Some(b)	=> b,
+			None	=> return Err(err!("bluesky creds did not parse"; Test, Missing)),
+		};
+		assert_eq!(b.handle, "me.bsky.social");
+		// The host defaulted, since the block named none.
+		assert_eq!(b.host, BLUESKY_HOST_DEFAULT);
+		assert_eq!(creds.offered(), vec![Destination::Mastodon, Destination::Bluesky]);
+		Ok(())
+	}
+
+	/// A credential block missing a required field is refused at load, not left to fail at send.
+	#[test]
+	fn test_a_missing_credential_is_refused_at_load_11() -> Outcome<()> {
+		let mut masto = DaticleMap::new();
+		masto.insert(dat!("base_url"), dat!("https://mastodon.social"));
+		// No token.
+		let mut dests = DaticleMap::new();
+		dests.insert(dat!("mastodon"), Dat::Map(masto));
+		assert!(DestCreds::from_datmap(&dests).is_err());
 		Ok(())
 	}
 

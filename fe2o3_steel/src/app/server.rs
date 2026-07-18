@@ -536,6 +536,13 @@ impl AppShellContext {
                     vh.primary_hostname(), webhook_routes.len());
             }
 
+            // Resolve {file:}/{env:} placeholders in the publish module's destination credentials, so a
+            // token reaches the sender resolved and never sits in the config in the clear.
+            let mut publish = vh.publish.clone();
+            if let Some(p) = &mut publish {
+                res!(p.resolve_secrets(root_path.as_ref()));
+            }
+
             let web_handler = AppWebHandler::new(
                 server_cfg.clone(),
                 public_dir,
@@ -549,7 +556,7 @@ impl AppShellContext {
                 tls_client.clone(),
                 Some(admin_state.clone()),
                 Some(traffic.clone()),
-                vh.publish.clone().map(Arc::new),
+                publish.map(Arc::new),
                 Arc::new(vh.site_admins.clone()),
             );
 
