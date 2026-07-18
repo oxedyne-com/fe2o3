@@ -591,6 +591,7 @@ impl<
                     site_admins.as_ref(),
                     publish.as_deref(),
                     db.as_ref(),
+                    &tls_client,
                     &request_path,
                     &req_headers,
                     &body,

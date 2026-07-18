@@ -32,12 +32,15 @@ use crate::srv::{
 		PostState,
 		PublishConfig,
 		Source,
+		dest::Destination,
+		send,
 		store::{
 			self,
 			Record,
 		},
 		date_text,
 		normalise_date,
+		render_source,
 		valid_date,
 		valid_slug,
 	},
@@ -60,6 +63,8 @@ use oxedyne_fe2o3_net::http::{
 	msg::HttpMessage,
 	status::HttpStatus,
 };
+
+use tokio_rustls::rustls::ClientConfig;
 
 use std::sync::{
 	Arc,
@@ -624,7 +629,7 @@ fn post_json<
 // └───────────────────────────────────────────────────────────────────────────┘
 
 /// Serves the console's writes. The gate and the CSRF check ran before this.
-pub fn handle_post<
+pub async fn handle_post<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
 	ENC:	Encrypter,
@@ -634,6 +639,7 @@ pub fn handle_post<
 	cfg:		Option<&PublishConfig>,
 	admin:		&SiteAdmin,
 	db:		Option<&(Arc<RwLock<DB>>, UID)>,
+	tls_client:	&Option<Arc<ClientConfig>>,
 	request_path:	&str,
 	body:		&[u8],
 	json:		bool,
@@ -667,7 +673,7 @@ pub fn handle_post<
 	};
 
 	match request_path {
-		PATH_SAVE	=> do_save(db, body, &admin.username, json, id),
+		PATH_SAVE	=> do_save(cfg, db, tls_client, body, &admin.username, json, id).await,
 		PATH_DELETE	=> do_delete(db, body, &admin.username, json, id),
 		PATH_IMPORT	=> do_import(cfg, db, &admin.username, json, id),
 		// Unreachable: `writes` names the same three paths.
@@ -675,19 +681,21 @@ pub fn handle_post<
 	}
 }
 
-/// Writes a post.
-fn do_save<
+/// Writes a post, and delivers it to the destinations the author ticked.
+async fn do_save<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
 	ENC:	Encrypter,
 	KH:	Hasher,
 	DB:	Database<UIDL, UID, ENC, KH>,
 >(
-	db:	&(Arc<RwLock<DB>>, UID),
-	body:	&[u8],
-	who:	&str,
-	json:	bool,
-	id:	&str,
+	cfg:		&PublishConfig,
+	db:		&(Arc<RwLock<DB>>, UID),
+	tls_client:	&Option<Arc<ClientConfig>>,
+	body:		&[u8],
+	who:		&str,
+	json:		bool,
+	id:		&str,
 )
 	-> Outcome<HttpMessage>
 {
@@ -713,24 +721,52 @@ fn do_save<
 		return Ok(back_with("a post with no prose in it is not a post", json));
 	}
 
-	// An edit must not lose where a post has already been sent. The form carries no destinations yet
-	// (the picker is unbuilt), so a save rebuilt from the form alone would wipe every delivery. So the
-	// deliveries are carried forward from the post as it stands -- under its old name where this save
-	// renames it, since the deliveries move with the prose they belong to.
+	let kind = PostKind::of(&super::form_field(body, "kind").unwrap_or_default());
+	let state = PostState::of(&super::form_field(body, "state").unwrap_or_default());
+	let markup = Markup::of(&super::form_field(body, "markup").unwrap_or_default());
+	let date = if date.is_empty() { None } else { Some(date) };
+
+	// An edit must not lose where a post has already been sent. So the deliveries are carried forward
+	// from the post as it stands -- under its old name where this save renames it, since the deliveries
+	// move with the prose they belong to.
 	let prior_slug = super::form_field(body, "was")
 		.map(|s| s.trim().to_string())
 		.filter(|s| !s.is_empty() && valid_slug(s))
 		.unwrap_or_else(|| slug.clone());
-	let deliveries = res!(store::get(db, &prior_slug))
+	let carried = res!(store::get(db, &prior_slug))
 		.map(|r| r.deliveries)
 		.unwrap_or_default();
 
+	// The destinations the author ticked, kept to those the site actually has credentials for -- a
+	// browser's word for a remote is not a reason to queue a post the site cannot send. A post is only
+	// delivered once it is live: a draft goes nowhere, so ticking a destination on a draft queues
+	// nothing until it is published.
+	let chosen: Vec<Destination> = super::form_field(body, "destinations")
+		.unwrap_or_default()
+		.split(',')
+		.filter_map(|w| Destination::of(w.trim()))
+		.filter(|d| cfg.creds.has(*d))
+		.collect();
+
+	let deliveries = if state == PostState::Live && !chosen.is_empty() {
+		// The title and canonical link a social rendition is derived from. The title is the post's own
+		// heading, as everywhere else; the link is where the post will live on this site.
+		let title = match render_source(&source, slug.clone(), date.clone(), kind, markup) {
+			Ok(p)	=> p.title,
+			Err(_)	=> slug.clone(),
+		};
+		let url = cfg.url_of(&cfg.path_of(&slug));
+		send::queue_deliveries(&carried, &chosen, &title, &url)
+	} else {
+		carried
+	};
+
 	let rec = Record {
 		slug:	slug.clone(),
-		kind:	PostKind::of(&super::form_field(body, "kind").unwrap_or_default()),
-		state:	PostState::of(&super::form_field(body, "state").unwrap_or_default()),
-		markup:	Markup::of(&super::form_field(body, "markup").unwrap_or_default()),
-		date:	if date.is_empty() { None } else { Some(date) },
+		kind,
+		state,
+		markup,
+		date,
 		source,
 		deliveries,
 	};
@@ -753,6 +789,26 @@ fn do_save<
 	}
 
 	info!("{}: console: '{}' saved '{}' ({})", id, who, rec.slug, rec.state.as_str());
+
+	// Deliver what is queued, now, while the request is in hand: the handler holds the outbound TLS
+	// client and the database, which a save is the natural moment to use. A delivery that fails records
+	// its failure on the post and does not fail the save -- the post is written either way, and the
+	// send is best-effort with its own state to show for it. A site with no outbound TLS client cannot
+	// reach a remote at all, and says so in the log rather than silently dropping the queue.
+	if rec.state == PostState::Live && rec.deliveries.iter().any(|d| !d.state.is_terminal()) {
+		match tls_client {
+			Some(tls)	=> {
+				match send::deliver_post(db, &cfg.creds, tls.clone(), &slug, id).await {
+					Ok(n)	=> info!("{}: console: '{}' attempted {} deliver(y/ies)", id, slug, n),
+					Err(e)	=> warn!("{}: console: '{}' delivery sweep failed: {}", id, slug, e),
+				}
+			}
+			None	=> warn!(
+				"{}: console: '{}' has queued deliveries but the server has no outbound TLS client",
+				id, slug),
+		}
+	}
+
 	Ok(back(json))
 }
 

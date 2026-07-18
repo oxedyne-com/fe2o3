@@ -64,6 +64,8 @@ use oxedyne_fe2o3_net::http::{
 	status::HttpStatus,
 };
 
+use tokio_rustls::rustls::ClientConfig;
+
 use std::sync::{
 	Arc,
 	RwLock,
@@ -262,6 +264,7 @@ pub async fn handle_post<
 	site_admins:	&[String],
 	publish:	Option<&PublishConfig>,
 	db:		Option<&(Arc<RwLock<DB>>, UID)>,
+	tls_client:	&Option<Arc<ClientConfig>>,
 	request_path:	&str,
 	headers:	&Arc<HeaderFields>,
 	body:		&[u8],
@@ -308,7 +311,9 @@ pub async fn handle_post<
 		}));
 	}
 
-	let resp = res!(publish::handle_post(publish, &admin, db, request_path, body, json, id));
+	let resp = res!(publish::handle_post(
+		publish, &admin, db, tls_client, request_path, body, json, id,
+	).await);
 	Ok(Some(resp))
 }
 
