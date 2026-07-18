@@ -26,6 +26,7 @@ use crate::srv::publish::{
 	Markup,
 	PostKind,
 	PostState,
+	dest::Delivery,
 	render_source,
 	split_date,
 };
@@ -80,6 +81,9 @@ pub struct Record {
 	pub date:	Option<String>,
 	/// The prose, as written, in whatever markup [`markup`](Record::markup) names.
 	pub source:	String,
+	/// Where this post has been sent besides the site's own pages, one entry per remote. Empty for a
+	/// post that lives only at home, which every post read from a directory does.
+	pub deliveries:	Vec<Delivery>,
 }
 
 impl Record {
@@ -99,6 +103,12 @@ impl Record {
 		// nothing, and two ways to say one thing is one too many.
 		if let Some(d) = &self.date {
 			m.insert(dat!("date"), dat!(d.clone()));
+		}
+		// A post sent nowhere carries no deliveries key, for the same reason it carries no empty date:
+		// an absent key and an empty list say the same thing, and one of them is enough.
+		if !self.deliveries.is_empty() {
+			let list = Dat::List(self.deliveries.iter().map(|d| d.to_dat()).collect());
+			m.insert(dat!("deliveries"), list);
 		}
 		Dat::Map(m)
 	}
@@ -142,6 +152,20 @@ impl Record {
 				Invalid, Input, Missing));
 		}
 		out.date = date;
+		// Deliveries are a list of maps, not a string, so they are read apart from the string fields
+		// above rather than in that loop. A list and a vek are both written as a list and both mean one,
+		// as everywhere else in this grammar. A delivery to a destination this version does not know is
+		// dropped, not fatal: a later version naming a new remote must not make its posts unreadable.
+		let items = match m.get(&dat!("deliveries")) {
+			Some(Dat::List(items))	=> items.as_slice(),
+			Some(Dat::Vek(vek))	=> vek.as_slice(),
+			_			=> &[],
+		};
+		for item in items {
+			if let Some(d) = Delivery::from_dat(item) {
+				out.deliveries.push(d);
+			}
+		}
 		Ok(out)
 	}
 
@@ -449,6 +473,8 @@ pub fn import_dir<
 			markup:	Markup::Markdown,
 			date,
 			source,
+			// A file has been sent nowhere: a directory is prose, not a record of where it went.
+			deliveries:	Vec::new(),
 		};
 		res!(put(db, &rec, id));
 		n += 1;
@@ -460,8 +486,15 @@ pub fn import_dir<
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::srv::publish::dest::{
+		Delivery,
+		DeliveryState,
+		Destination,
+		Rendition,
+	};
 
-	/// A record survives the trip through a daticle, including a date it does not have.
+	/// A record survives the trip through a daticle, including a date it does not have and the
+	/// deliveries it does.
 	#[test]
 	fn test_a_record_round_trips_00() -> Outcome<()> {
 		let rec = Record {
@@ -471,6 +504,17 @@ mod tests {
 			markup:	Markup::Djot,
 			date:	Some(fmt!("2026-07-17")),
 			source:	fmt!("# On rent\n\nWords.\n"),
+			deliveries:	vec![
+				Delivery {
+					dest:		Destination::Mastodon,
+					rendition:	Rendition { text: fmt!("On rent https://x"), auto: false },
+					state:		DeliveryState::Sent {
+						at:		fmt!("2026-07-18T10:00:00Z"),
+						permalink:	fmt!("https://m.example/1"),
+					},
+				},
+				Delivery::new(Destination::Bluesky, Rendition::default()),
+			],
 		};
 		let back = res!(Record::from_dat(&rec.to_dat()));
 		assert_eq!(back, rec);

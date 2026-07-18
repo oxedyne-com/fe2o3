@@ -713,6 +713,18 @@ fn do_save<
 		return Ok(back_with("a post with no prose in it is not a post", json));
 	}
 
+	// An edit must not lose where a post has already been sent. The form carries no destinations yet
+	// (the picker is unbuilt), so a save rebuilt from the form alone would wipe every delivery. So the
+	// deliveries are carried forward from the post as it stands -- under its old name where this save
+	// renames it, since the deliveries move with the prose they belong to.
+	let prior_slug = super::form_field(body, "was")
+		.map(|s| s.trim().to_string())
+		.filter(|s| !s.is_empty() && valid_slug(s))
+		.unwrap_or_else(|| slug.clone());
+	let deliveries = res!(store::get(db, &prior_slug))
+		.map(|r| r.deliveries)
+		.unwrap_or_default();
+
 	let rec = Record {
 		slug:	slug.clone(),
 		kind:	PostKind::of(&super::form_field(body, "kind").unwrap_or_default()),
@@ -720,6 +732,7 @@ fn do_save<
 		markup:	Markup::of(&super::form_field(body, "markup").unwrap_or_default()),
 		date:	if date.is_empty() { None } else { Some(date) },
 		source,
+		deliveries,
 	};
 
 	res!(store::put(db, &rec, id));

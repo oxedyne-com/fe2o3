@@ -38,6 +38,7 @@ fn a_post_survives_the_database() -> Outcome<()> {
         markup: Markup::Markdown,
         date:   Some(fmt!("2026-07-17")),
         source: fmt!("# On rent\n\nAn opening sentence.\n"),
+        deliveries: Vec::new(),
     };
     res!(store::put(&handle, &rec, "test"));
 
