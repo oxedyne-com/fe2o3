@@ -32,7 +32,10 @@ use crate::srv::{
 		PostState,
 		PublishConfig,
 		Source,
-		dest::Destination,
+		dest::{
+			DeliveryState,
+			Destination,
+		},
 		send,
 		store::{
 			self,
@@ -620,6 +623,23 @@ fn post_json<
 	m.insert(dat!("broken"),	Dat::Bool(broken));
 	// The readable form in the field; the `T` goes back in at save.
 	m.insert(dat!("date"),		dat!(rec.date.as_deref().map(date_text).unwrap_or_default()));
+	// Where the post has already been sent, so the composer's picker shows those destinations ticked
+	// and their state -- and so re-saving does not silently drop a remote the post has already reached.
+	let dlist: Vec<Dat> = rec.deliveries.iter().map(|d| {
+		let (state, permalink) = match &d.state {
+			DeliveryState::Queued			=> ("queued", String::new()),
+			DeliveryState::Sent { permalink, .. }	=> ("sent", permalink.clone()),
+			DeliveryState::Failed { .. }		=> ("failed", String::new()),
+		};
+		let mut dm = DaticleMap::new();
+		dm.insert(dat!("dest"),		dat!(d.dest.as_str().to_string()));
+		dm.insert(dat!("state"),	dat!(state.to_string()));
+		if !permalink.is_empty() {
+			dm.insert(dat!("permalink"), dat!(permalink));
+		}
+		Dat::Map(dm)
+	}).collect();
+	m.insert(dat!("deliveries"),	Dat::List(dlist));
 	Ok(json_body(&res!(Dat::Map(m).encode_string_with_config(&EncoderConfig::<(), ()>::json(None)))))
 }
 

@@ -216,7 +216,14 @@ pub async fn handle_get<
 			(Some(_), Some(sid))	=> Some(csrf_token(&sid)),
 			_			=> None,
 		};
-		return Ok(status_json(admin.is_some(), csrf.as_deref()));
+		// An admin is told which remotes the site can post to, so the composer draws a picker for those
+		// and no others. A non-admin is told nothing of them.
+		let offered = match (&admin, publish) {
+			(Some(_), Some(p))	=> p.creds.offered(),
+			_			=> Vec::new(),
+		};
+		let dests: Vec<&str> = offered.iter().map(|d| d.as_str()).collect();
+		return Ok(status_json(admin.is_some(), csrf.as_deref(), &dests));
 	}
 
 	let admin = match admin {
@@ -547,10 +554,15 @@ margin-top:0.8rem;}\
 /// and only a caller with the session cookie reaches this with `admin` true. A cross-site page has
 /// neither the cookie (it is `SameSite=Lax`, unsent on a cross-site request) nor the reply (the
 /// same-origin policy hides it), so it learns nothing.
-fn status_json(admin: bool, csrf: Option<&str>) -> HttpMessage {
+fn status_json(admin: bool, csrf: Option<&str>, dests: &[&str]) -> HttpMessage {
+	// The destinations the site can offer, as a JSON array. The words are a fixed vocabulary
+	// (`Destination::as_str`), so they need no escaping.
+	let items: Vec<String> = dests.iter().map(|d| fmt!("\"{}\"", d)).collect();
+	let dest_arr = fmt!("[{}]", items.join(","));
 	let body = match csrf {
-		Some(t)	=> fmt!("{{\"admin\":{},\"csrf\":\"{}\"}}", admin, t),
-		None	=> fmt!("{{\"admin\":{}}}", admin),
+		Some(t)	=> fmt!(
+			"{{\"admin\":{},\"csrf\":\"{}\",\"destinations\":{}}}", admin, t, dest_arr),
+		None	=> fmt!("{{\"admin\":{},\"destinations\":{}}}", admin, dest_arr),
 	};
 	HttpMessage::new_response(HttpStatus::OK)
 		.with_field(
