@@ -149,3 +149,93 @@ macro_rules! lock_mutex_thread {
     };
 }
 
+#[macro_export]
+/// Acquires a `RwLock` read guard, recovering from a poisoned lock.
+///
+/// Unlike [`lock_read!`], which returns an error when the lock is
+/// poisoned, this macro logs a warning and continues with the inner
+/// guard via `into_inner()`. It suits long-running services where a
+/// single panic must not cascade into a persistent failure of every
+/// subsequent operation that touches the lock. The recovered data may
+/// be in an inconsistent state, so use this only where continuing to
+/// serve is safer than aborting. The optional trailing arguments form
+/// the warning message.
+macro_rules! lock_read_or_recover {
+    ($locked:expr, $($arg:tt)*) => {
+        match $locked.read() {
+            Ok(guard)     => guard,
+            Err(poisoned) => {
+                warn!($($arg)*);
+                poisoned.into_inner()
+            },
+        }
+    };
+    ($locked:expr) => {
+        match $locked.read() {
+            Ok(guard)     => guard,
+            Err(poisoned) => {
+                warn!("RwLock poisoned while reading; recovering with possibly inconsistent data.");
+                poisoned.into_inner()
+            },
+        }
+    };
+}
+
+#[macro_export]
+/// Acquires a `RwLock` write guard, recovering from a poisoned lock.
+///
+/// The write counterpart of [`lock_read_or_recover!`]. It logs a
+/// warning and continues with the inner guard rather than returning an
+/// error, for long-running services where staying available is
+/// preferable to aborting on a poisoned lock. The recovered data may
+/// be inconsistent. The optional trailing arguments form the warning
+/// message.
+macro_rules! lock_write_or_recover {
+    ($locked:expr, $($arg:tt)*) => {
+        match $locked.write() {
+            Ok(guard)     => guard,
+            Err(poisoned) => {
+                warn!($($arg)*);
+                poisoned.into_inner()
+            },
+        }
+    };
+    ($locked:expr) => {
+        match $locked.write() {
+            Ok(guard)     => guard,
+            Err(poisoned) => {
+                warn!("RwLock poisoned while writing; recovering with possibly inconsistent data.");
+                poisoned.into_inner()
+            },
+        }
+    };
+}
+
+#[macro_export]
+/// Acquires a `Mutex` guard, recovering from a poisoned lock.
+///
+/// The `Mutex` counterpart of [`lock_write_or_recover!`]. It logs a
+/// warning and continues with the inner guard rather than returning an
+/// error. The recovered data may be inconsistent. The optional
+/// trailing arguments form the warning message.
+macro_rules! lock_mutex_or_recover {
+    ($locked:expr, $($arg:tt)*) => {
+        match $locked.lock() {
+            Ok(guard)     => guard,
+            Err(poisoned) => {
+                warn!($($arg)*);
+                poisoned.into_inner()
+            },
+        }
+    };
+    ($locked:expr) => {
+        match $locked.lock() {
+            Ok(guard)     => guard,
+            Err(poisoned) => {
+                warn!("Mutex poisoned; recovering with possibly inconsistent data.");
+                poisoned.into_inner()
+            },
+        }
+    };
+}
+

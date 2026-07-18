@@ -2367,6 +2367,7 @@ dependencies = [
  "oxedyne_fe2o3_core",
  "oxedyne_fe2o3_crypto",
  "oxedyne_fe2o3_data",
+ "oxedyne_fe2o3_datime",
  "oxedyne_fe2o3_hash",
  "oxedyne_fe2o3_iop_crypto",
  "oxedyne_fe2o3_iop_db",

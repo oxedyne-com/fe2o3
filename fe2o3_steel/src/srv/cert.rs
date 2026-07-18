@@ -116,26 +116,16 @@ impl SteelCertResolver {
     /// inserted cert becomes the default.
     pub fn insert_vhost_cert(&self, hostnames: &[String], cert: Arc<CertifiedKey>) {
         {
-            let mut default = match self.default_cert.write() {
-                Ok(g) => g,
-                Err(poisoned) => {
-                    warn!("SteelCertResolver.default_cert RwLock was poisoned; \
-                        recovering.");
-                    poisoned.into_inner()
-                },
-            };
+            let mut default = lock_write_or_recover!(self.default_cert,
+                "SteelCertResolver.default_cert RwLock was poisoned; \
+                    recovering.");
             if default.is_none() {
                 *default = Some(cert.clone());
             }
         }
-        let mut map = match self.by_hostname.write() {
-            Ok(g) => g,
-            Err(poisoned) => {
-                warn!("SteelCertResolver.by_hostname RwLock was poisoned; \
-                    recovering.");
-                poisoned.into_inner()
-            },
-        };
+        let mut map = lock_write_or_recover!(self.by_hostname,
+            "SteelCertResolver.by_hostname RwLock was poisoned; \
+                recovering.");
         for host in hostnames {
             map.insert(host.to_lowercase(), cert.clone());
         }
@@ -159,27 +149,18 @@ impl ResolvesServerCert for SteelCertResolver {
                 Some(n) => n.to_lowercase(),
                 None    => return None,
             };
-            let map = match self.challenge_certs.read() {
-                Ok(g) => g,
-                Err(poisoned) => poisoned.into_inner(),
-            };
+            let map = lock_read_or_recover!(self.challenge_certs);
             return map.get(&name).cloned();
         }
 
         // Regular handshake: SNI lookup then default cert fallback.
         if let Some(name) = client_hello.server_name() {
-            let map = match self.by_hostname.read() {
-                Ok(g) => g,
-                Err(poisoned) => poisoned.into_inner(),
-            };
+            let map = lock_read_or_recover!(self.by_hostname);
             if let Some(cert) = map.get(&name.to_lowercase()) {
                 return Some(cert.clone());
             }
         }
-        let default = match self.default_cert.read() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let default = lock_read_or_recover!(self.default_cert);
         default.clone()
     }
 }
@@ -187,19 +168,13 @@ impl ResolvesServerCert for SteelCertResolver {
 impl ChallengeInstaller for SteelCertResolver {
     fn install(&self, hostname: &str, cert: &ChallengeCert) -> Outcome<()> {
         let certified = res!(der_to_certified_key(&cert.cert_der, &cert.key_der));
-        let mut map = match self.challenge_certs.write() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut map = lock_write_or_recover!(self.challenge_certs);
         map.insert(hostname.to_lowercase(), Arc::new(certified));
         Ok(())
     }
 
     fn remove(&self, hostname: &str) -> Outcome<()> {
-        let mut map = match self.challenge_certs.write() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut map = lock_write_or_recover!(self.challenge_certs);
         map.remove(&hostname.to_lowercase());
         Ok(())
     }

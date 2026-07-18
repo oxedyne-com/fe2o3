@@ -32,6 +32,9 @@ pub use crate::{
     lock_write,
     lock_mutex,
     lock_mutex_thread,
+    lock_read_or_recover,
+    lock_write_or_recover,
+    lock_mutex_or_recover,
     // Test macros
     req,
     test_it,
