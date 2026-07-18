@@ -19,6 +19,7 @@ oxedyne_fe2o3_bot 				= { path = "../fe2o3_bot" }
 oxedyne_fe2o3_core 				= { path = "../fe2o3_core" }
 oxedyne_fe2o3_crypto			= { path = "../fe2o3_crypto" }
 oxedyne_fe2o3_data 				= { path = "../fe2o3_data" }
+oxedyne_fe2o3_datime			= { path = "../fe2o3_datime" }
 oxedyne_fe2o3_hash 				= { path = "../fe2o3_hash" }
 oxedyne_fe2o3_iop_crypto		= { path = "../fe2o3_iop_crypto" }
 oxedyne_fe2o3_iop_db			= { path = "../fe2o3_iop_db" }

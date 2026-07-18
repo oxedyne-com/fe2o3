@@ -35,6 +35,7 @@ pub mod dest;
 pub mod feed;
 pub mod json;
 pub mod page;
+pub mod send;
 pub mod store;
 
 use oxedyne_fe2o3_core::prelude::*;
