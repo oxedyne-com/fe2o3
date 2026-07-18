@@ -757,6 +757,11 @@ async fn do_save<
 		.map(|r| r.deliveries)
 		.unwrap_or_default();
 
+	// The credentials that actually apply: what the console has set, over what the config names. The
+	// picker offers these and a delivery is sent with them, so the two never disagree about which
+	// remotes a site can reach.
+	let creds = res!(send::effective_creds(db, cfg));
+
 	// The destinations the author ticked, kept to those the site actually has credentials for -- a
 	// browser's word for a remote is not a reason to queue a post the site cannot send. A post is only
 	// delivered once it is live: a draft goes nowhere, so ticking a destination on a draft queues
@@ -765,7 +770,7 @@ async fn do_save<
 		.unwrap_or_default()
 		.split(',')
 		.filter_map(|w| Destination::of(w.trim()))
-		.filter(|d| cfg.creds.has(*d))
+		.filter(|d| creds.has(*d))
 		.collect();
 
 	let deliveries = if state == PostState::Live && !chosen.is_empty() {
@@ -818,7 +823,7 @@ async fn do_save<
 	if rec.state == PostState::Live && rec.deliveries.iter().any(|d| !d.state.is_terminal()) {
 		match tls_client {
 			Some(tls)	=> {
-				match send::deliver_post(db, &cfg.creds, tls.clone(), &slug, id).await {
+				match send::deliver_post(db, &creds, tls.clone(), &slug, id).await {
 					Ok(n)	=> info!("{}: console: '{}' attempted {} deliver(y/ies)", id, slug, n),
 					Err(e)	=> warn!("{}: console: '{}' delivery sweep failed: {}", id, slug, e),
 				}

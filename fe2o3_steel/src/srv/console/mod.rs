@@ -217,10 +217,14 @@ pub async fn handle_get<
 			_			=> None,
 		};
 		// An admin is told which remotes the site can post to, so the composer draws a picker for those
-		// and no others. A non-admin is told nothing of them.
-		let offered = match (&admin, publish) {
-			(Some(_), Some(p))	=> p.creds.offered(),
-			_			=> Vec::new(),
+		// and no others. A non-admin is told nothing of them. The set is the effective one -- what the
+		// console has set laid over the config -- so a remote configured from the settings form appears
+		// here at once.
+		let offered = match (&admin, publish, db) {
+			(Some(_), Some(p), Some(d))	=>
+				res!(crate::srv::publish::send::effective_creds(d, p)).offered(),
+			(Some(_), Some(p), None)	=> p.creds.offered(),
+			_				=> Vec::new(),
 		};
 		let dests: Vec<&str> = offered.iter().map(|d| d.as_str()).collect();
 		return Ok(status_json(admin.is_some(), csrf.as_deref(), &dests));

@@ -132,6 +132,45 @@ impl DestCreds {
 		Destination::ALL.iter().copied().filter(|d| self.has(*d)).collect()
 	}
 
+	/// These credentials laid over `base`, taking precedence where both name a remote.
+	///
+	/// How the interactively-entered credentials (in the store) win over the ones in the config file
+	/// while still falling back to config for a remote the console has not set. Per-remote, not
+	/// all-or-nothing: a site may keep Mastodon in its config and set Bluesky from the console.
+	pub fn overlay(self, base: DestCreds) -> DestCreds {
+		DestCreds {
+			mastodon:	self.mastodon.or(base.mastodon),
+			bluesky:	self.bluesky.or(base.bluesky),
+		}
+	}
+
+	/// The credentials as a daticle, for the store.
+	pub fn to_dat(&self) -> Dat {
+		let mut m = DaticleMap::new();
+		if let Some(x) = &self.mastodon {
+			m.insert(dat!("mastodon"), x.to_dat());
+		}
+		if let Some(x) = &self.bluesky {
+			m.insert(dat!("bluesky"), x.to_dat());
+		}
+		Dat::Map(m)
+	}
+
+	/// The credentials from a daticle, leniently: a remote whose block will not read is dropped, not an
+	/// error, since a settings page and a delivery must both survive a record a later version wrote or a
+	/// half-written one. This is the store's reader; [`from_datmap`](Self::from_datmap) is the config's,
+	/// and errors, because a broken *config* is an operator's mistake to be told about.
+	pub fn from_dat(d: &Dat) -> Self {
+		let m = match d {
+			Dat::Map(m)	=> m,
+			_		=> return Self::default(),
+		};
+		Self {
+			mastodon:	m.get(&dat!("mastodon")).and_then(MastodonCreds::from_dat),
+			bluesky:	m.get(&dat!("bluesky")).and_then(BlueskyCreds::from_dat),
+		}
+	}
+
 	/// Parses a vhost's `destinations` block: a map of per-remote credential blocks. A remote the site
 	/// has no block for is a remote it does not post to, and reads as `None` rather than an error.
 	pub fn from_datmap(m: &DaticleMap) -> Outcome<Self> {
@@ -182,6 +221,23 @@ impl MastodonCreds {
 		self.token = res!(crate::srv::cfg::ApiRoute::resolve_file_refs(&self.token, root));
 		Ok(())
 	}
+
+	/// The credentials as a daticle, for the store.
+	fn to_dat(&self) -> Dat {
+		let mut m = DaticleMap::new();
+		m.insert(dat!("base_url"),	dat!(self.base_url.clone()));
+		m.insert(dat!("token"),		dat!(self.token.clone()));
+		Dat::Map(m)
+	}
+
+	/// The credentials from a stored daticle, or nothing where either required field is missing.
+	fn from_dat(d: &Dat) -> Option<Self> {
+		let m = as_map(d)?;
+		Some(Self {
+			base_url:	nonempty(m, "base_url")?,
+			token:		nonempty(m, "token")?,
+		})
+	}
 }
 
 impl BlueskyCreds {
@@ -206,6 +262,107 @@ impl BlueskyCreds {
 		self.app_password = res!(crate::srv::cfg::ApiRoute::resolve_file_refs(&self.app_password, root));
 		Ok(())
 	}
+
+	/// The credentials as a daticle, for the store.
+	fn to_dat(&self) -> Dat {
+		let mut m = DaticleMap::new();
+		m.insert(dat!("host"),		dat!(self.host.clone()));
+		m.insert(dat!("handle"),	dat!(self.handle.clone()));
+		m.insert(dat!("app_password"),	dat!(self.app_password.clone()));
+		Dat::Map(m)
+	}
+
+	/// The credentials from a stored daticle, or nothing where the handle or password is missing. The
+	/// host defaults, as it does from config.
+	fn from_dat(d: &Dat) -> Option<Self> {
+		let m = as_map(d)?;
+		let host = nonempty(m, "host").unwrap_or_else(|| BLUESKY_HOST_DEFAULT.to_string());
+		Some(Self {
+			host,
+			handle:		nonempty(m, "handle")?,
+			app_password:	nonempty(m, "app_password")?,
+		})
+	}
+}
+
+/// A daticle as a map, or nothing.
+fn as_map(d: &Dat) -> Option<&DaticleMap> {
+	match d {
+		Dat::Map(m)	=> Some(m),
+		_		=> None,
+	}
+}
+
+/// A non-empty string field of a map, or nothing.
+fn nonempty(m: &DaticleMap, key: &str) -> Option<String> {
+	match m.get(&dat!(key)) {
+		Some(Dat::Str(s)) if !s.trim().is_empty()	=> Some(s.clone()),
+		_						=> None,
+	}
+}
+
+
+/// The key a vhost's destination credentials live under in its store.
+pub const CREDS_KEY: &str = "publish/creds";
+
+/// The credentials a site has set from the console, from its store. An empty set where none are stored,
+/// which is not an error: a site sets its remotes from the console or its config or neither.
+pub fn get_creds<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+)
+	-> Outcome<DestCreds>
+{
+	let (db_arc, _) = db;
+	let guard = lock_read!(db_arc);
+	match res!(guard.get(&dat!(CREDS_KEY), None)) {
+		Some((val, _))	=> Ok(DestCreds::from_dat(&val)),
+		None		=> Ok(DestCreds::default()),
+	}
+}
+
+/// Writes a site's console-set credentials to its store, where they are encrypted at rest under the
+/// database's own scheme -- the same treatment its posts, sessions and users get, and the reason a
+/// token entered here is not a token in a file in the clear.
+pub fn put_creds<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	creds:	&DestCreds,
+)
+	-> Outcome<()>
+{
+	let (db_arc, user) = db;
+	let guard = lock_read!(db_arc);
+	res!(guard.insert(dat!(CREDS_KEY), creds.to_dat(), *user, None));
+	Ok(())
+}
+
+/// The credentials that actually apply: what the console has set, laid over what the config names, so a
+/// remote set interactively wins and one left to the config still works. This is what the picker offers
+/// and what a delivery is sent with.
+pub fn effective_creds<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	cfg:	&crate::srv::publish::PublishConfig,
+)
+	-> Outcome<DestCreds>
+{
+	Ok(res!(get_creds(db)).overlay(cfg.creds.clone()))
 }
 
 /// A required string field of a credential block, named for the block it is missing from.
@@ -790,6 +947,57 @@ mod tests {
 		// The host defaulted, since the block named none.
 		assert_eq!(b.host, BLUESKY_HOST_DEFAULT);
 		assert_eq!(creds.offered(), vec![Destination::Mastodon, Destination::Bluesky]);
+		Ok(())
+	}
+
+	/// Credentials survive the round-trip through the store's daticle, and a half-written remote is
+	/// dropped rather than read as broken.
+	#[test]
+	fn test_creds_round_trip_through_the_store_12() -> Outcome<()> {
+		let creds = DestCreds {
+			mastodon:	Some(MastodonCreds {
+				base_url:	fmt!("https://mastodon.social"),
+				token:		fmt!("tok"),
+			}),
+			bluesky:	Some(BlueskyCreds {
+				host:		fmt!("bsky.social"),
+				handle:		fmt!("me.bsky.social"),
+				app_password:	fmt!("pw"),
+			}),
+		};
+		let back = DestCreds::from_dat(&creds.to_dat());
+		assert_eq!(back, creds);
+
+		// A Mastodon block with no token is not half-read; it is dropped.
+		let mut mm = DaticleMap::new();
+		mm.insert(dat!("base_url"), dat!("https://m"));
+		let mut m = DaticleMap::new();
+		m.insert(dat!("mastodon"), Dat::Map(mm));
+		let back = DestCreds::from_dat(&Dat::Map(m));
+		assert_eq!(back.mastodon, None);
+		Ok(())
+	}
+
+	/// Console-set credentials win over config, per remote, and config fills the rest.
+	#[test]
+	fn test_console_creds_overlay_config_13() -> Outcome<()> {
+		let config = DestCreds {
+			mastodon:	Some(MastodonCreds { base_url: fmt!("https://cfg"), token: fmt!("cfg-tok") }),
+			bluesky:	Some(BlueskyCreds {
+				host: fmt!("bsky.social"), handle: fmt!("cfg"), app_password: fmt!("cfg-pw"),
+			}),
+		};
+		// The console set only Mastodon.
+		let console = DestCreds {
+			mastodon:	Some(MastodonCreds { base_url: fmt!("https://con"), token: fmt!("con-tok") }),
+			bluesky:	None,
+		};
+		let eff = console.overlay(config);
+		// Mastodon is the console's; Bluesky falls back to config.
+		let m = match &eff.mastodon { Some(m) => m, None => return Err(err!("no mastodon"; Test, Missing)) };
+		assert_eq!(m.token, "con-tok");
+		let b = match &eff.bluesky { Some(b) => b, None => return Err(err!("no bluesky"; Test, Missing)) };
+		assert_eq!(b.handle, "cfg");
 		Ok(())
 	}
 
