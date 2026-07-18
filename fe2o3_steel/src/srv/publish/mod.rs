@@ -498,6 +498,10 @@ pub struct Post {
 	pub excerpt:	String,
 	/// The prose, rendered.
 	pub html:	String,
+	/// Where else the post has been published, as a destination and the permalink it landed at. Drawn
+	/// on the page as "also on …", so a reader can follow the post to where the conversation is. Empty
+	/// for a post read from a directory, which records no deliveries, and for one sent nowhere.
+	pub also_on:	Vec<(dest::Destination, String)>,
 }
 
 
@@ -617,6 +621,8 @@ pub fn render_source(
 		date,
 		excerpt:	excerpt_of(&doc),
 		html:		html::render(&doc),
+		// A post made from source alone has no delivery record; the store fills this where there is one.
+		also_on:	Vec::new(),
 	})
 }
 

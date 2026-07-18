@@ -26,7 +26,10 @@ use crate::srv::publish::{
 	Markup,
 	PostKind,
 	PostState,
-	dest::Delivery,
+	dest::{
+		Delivery,
+		DeliveryState,
+	},
 	render_source,
 	split_date,
 };
@@ -169,9 +172,18 @@ impl Record {
 		Ok(out)
 	}
 
-	/// The record as a reader gets it.
+	/// The record as a reader gets it, "also on …" links and all.
 	pub fn render(&self) -> Outcome<Post> {
-		render_source(&self.source, self.slug.clone(), self.date.clone(), self.kind, self.markup)
+		let mut post = res!(render_source(
+			&self.source, self.slug.clone(), self.date.clone(), self.kind, self.markup));
+		// The remotes the post actually reached, with the address it landed at, for the backlinks. Only
+		// a sent delivery has a permalink; a queued or failed one has nowhere to point.
+		post.also_on = self.deliveries.iter().filter_map(|d| match &d.state {
+			DeliveryState::Sent { permalink, .. } if !permalink.is_empty()	=>
+				Some((d.dest, permalink.clone())),
+			_								=> None,
+		}).collect();
+		Ok(post)
 	}
 }
 

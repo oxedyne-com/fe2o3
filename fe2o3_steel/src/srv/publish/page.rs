@@ -144,6 +144,21 @@ fn post_page(cfg: &PublishConfig, post: &Post) -> Outcome<HttpMessage> {
 	body.push_str(&post.html);
 	body.push_str("</article>\n");
 
+	// Where the post also lives, and where the conversation about it may be. `nofollow`, since these
+	// are the site's own syndicated copies and not endorsements to pass rank to, and a new tab, since a
+	// reader following one has not finished with the page they are on.
+	if !post.also_on.is_empty() {
+		body.push_str("<nav class=\"aside-also\"><span class=\"aside-also-lbl\">Also on</span>");
+		for (dest, url) in &post.also_on {
+			body.push_str(" <a class=\"aside-also-link\" rel=\"nofollow noopener\" target=\"_blank\" href=\"");
+			escape_attr(&mut body, url);
+			body.push_str("\">");
+			escape_text(&mut body, dest.capability().name);
+			body.push_str("</a>");
+		}
+		body.push_str("</nav>\n");
+	}
+
 	let head = Head {
 		title:		post.title.clone(),
 		description:	post.excerpt.clone(),
@@ -386,6 +401,7 @@ mod tests {
 			date:		Some(fmt!("2026-07-17")),
 			excerpt:	fmt!("An opening sentence."),
 			html:		fmt!("<h1>On rent</h1>\n<p>An opening sentence.</p>\n"),
+			also_on:	Vec::new(),
 		}
 	}
 
@@ -405,6 +421,28 @@ mod tests {
 		assert!(body.contains(r#"<link rel="stylesheet" href="/css/a.css">"#), "got: {}", body);
 		assert!(body.contains("<p>An opening sentence.</p>"), "the prose is not in the page: {}", body);
 		assert!(body.contains(r#"<time datetime="2026-07-17">"#), "got: {}", body);
+		// A post sent nowhere carries no "also on" nav.
+		assert!(!body.contains("aside-also"), "an unsent post should have no backfeed: {}", body);
+		Ok(())
+	}
+
+	/// A post that has been syndicated carries an "also on" backlink to each remote it reached, as a
+	/// nofollow link that opens away from the page.
+	#[test]
+	fn test_a_syndicated_post_backlinks_02() -> Outcome<()> {
+		use crate::srv::publish::dest::Destination;
+		let mut p = post();
+		p.also_on = vec![
+			(Destination::Mastodon, fmt!("https://mastodon.social/@me/1")),
+			(Destination::Bluesky, fmt!("https://bsky.app/profile/did:plc:x/post/3k")),
+		];
+		let resp = res!(post_page(&cfg(), &p));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(body.contains("Also on"), "no backfeed label: {}", body);
+		assert!(body.contains(r#"href="https://mastodon.social/@me/1""#), "no Mastodon link: {}", body);
+		assert!(body.contains(">Mastodon</a>"), "no Mastodon name: {}", body);
+		assert!(body.contains(">Bluesky</a>"), "no Bluesky name: {}", body);
+		assert!(body.contains(r#"rel="nofollow noopener""#), "backlinks should be nofollow: {}", body);
 		Ok(())
 	}
 
