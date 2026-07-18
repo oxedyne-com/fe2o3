@@ -28,6 +28,8 @@ use std::{
 };
 
 
+/// Sharded store reassembling multi-packet messages from their chunks, keyed
+/// by message identifier.
 #[derive(Debug)]
 pub struct MsgAssembler<
     // ShardMap
@@ -36,6 +38,7 @@ pub struct MsgAssembler<
     H: Hasher + Send + Sync + 'static, // Key hasher.
     const S: usize, // Key hasher salt length.
 > {
+    /// Sharded map from message key to its in-progress assembly state.
     pub msgs: ShardMap<C, S, MsgState, M, H>,
 }
 
@@ -48,6 +51,8 @@ impl<
 >
     MsgAssembler<C, M, H, S>
 {
+    /// Creates an assembler backed by a sharded map with `n` shards, the given
+    /// salt, initial map and key hasher.
     pub fn new(
         n:          u32,
         salt:       [u8; S],
@@ -66,6 +71,8 @@ impl<
         })
     }
 
+    /// Resolves a message identifier to its shard key and the [`RwLock`]
+    /// guarding the shard that holds its assembly state.
     pub fn get_locked_map<
         const MIDL: usize,
         MID: NumIdDat<MIDL>,
@@ -114,6 +121,7 @@ impl<
         Ok((drop, msg_byt_opt))
     }
 
+    /// Removes any in-progress assembly state for the given message identifier.
     pub fn remove<
         const MIDL: usize,
         MID: NumIdDat<MIDL>,
@@ -129,6 +137,8 @@ impl<
         Ok(())
     }
 
+    /// Sweeps every shard, discarding assembly states that have exceeded their
+    /// sunset or idle time limits.
     pub fn message_assembly_garbage_collection(
         &self,
         params: &MsgAssemblyParams,
@@ -148,14 +158,20 @@ impl<
     }
 }
 
+/// Limits and timeouts governing message reassembly.
 #[derive(Clone, Debug, Default)]
 pub struct MsgAssemblyParams {
+    /// Maximum lifetime of an assembly from its first packet.
     pub msg_sunset:     Duration,
+    /// Maximum idle time between packets before the assembly is abandoned.
     pub idle_max:       Duration,
+    /// Total duplicate-packet limit across the whole assembly.
     pub rep_tot_lim:    u8,
+    /// Duplicate limit for any single packet index.
     pub rep_max_lim:    u8,
 }
 
+/// In-progress reassembly state for one multi-packet message.
 #[derive(Clone, Debug)]
 pub struct MsgState {
     parts:      BTreeMap<PacketCount, (Vec<u8>, u8)>, // The packet and how many times it has been written.
@@ -183,6 +199,7 @@ impl Default for MsgState {
 
 impl MsgState {
 
+    /// Creates a fresh assembly state expecting `total_packets` chunks.
     pub fn new(total_packets: PacketCount) -> Self {
         Self {
             tot: total_packets,
@@ -250,6 +267,8 @@ impl MsgState {
         (false, None)
     }
 
+    /// Returns `true` if the assembly has exceeded its sunset or idle limits
+    /// and should be dropped.
     pub fn drop_on_time_check(
         &mut self,
         params: &MsgAssemblyParams,

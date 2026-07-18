@@ -161,15 +161,23 @@ use std::{
 };
 
 
+/// Stage of the six-message handshake exchange a packet belongs to.
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum HandshakeType {
+    /// Not part of the handshake sequence.
     Unknown = 0,
+    /// First handshake request from the initiator.
     Req1    = 1,
+    /// First handshake response from the receiver.
     Resp1   = 2,
+    /// Second handshake request.
     Req2    = 3,
+    /// Second handshake response.
     Resp2   = 4,
+    /// Third and final handshake request.
     Req3    = 5,
+    /// Third and final handshake response.
     Resp3   = 6,
 }
 
@@ -188,6 +196,7 @@ impl From<MsgType> for HandshakeType {
 }
 
 impl HandshakeType {
+    /// Returns `true` if this is the second handshake request.
     pub fn is_hreq2(&self) -> bool {
         match self {
             Self::Req2 => true,
@@ -222,10 +231,14 @@ pub struct HReq1<
     const UL: usize,
     ID: IdTypes<ML, SL, UL>,
 > {
+    /// Message format: syntax and encoding.
     pub fmt: MsgFmt,
+    /// Proof-of-work parameters for the request.
     pub pow: MsgPow,
+    /// Session and user identifiers.
     pub mid: MsgIds<SL, UL, ID::S, ID::U>,
     // Command-specific
+    /// The receiver's copy of the sender's signature public key, if known.
     pub peer_sigpk: Option<Vec<u8>>, // Your version of my signature public key.
 }
     
@@ -315,6 +328,8 @@ impl<
 >
     HReq1<ML, SL, UL, ID>
 {
+    /// Processes an incoming HReq1 command, recording the peer's demanded
+    /// proof-of-work difficulty in the address data ahead of sending an HResp1.
     pub fn respond(
         &mut self,
         mcmd:       &mut MsgCmd,
@@ -369,6 +384,7 @@ impl<
 }
 
 // HResp1 ======================================================================
+/// First handshake response, returned by the receiver to an [`HReq1`].
 #[derive(Clone, Debug, Default)]
 pub struct HResp1<
     const ML: usize,
@@ -376,10 +392,14 @@ pub struct HResp1<
     const UL: usize,
     ID: IdTypes<ML, SL, UL>,
 > {
+    /// Message format: syntax and encoding.
     pub fmt:        MsgFmt,
+    /// Proof-of-work parameters demanded of the peer.
     pub pow:        MsgPow,
+    /// Session and user identifiers.
     pub mid:        MsgIds<SL, UL, ID::S, ID::U>,
     // Command-specific
+    /// Whether the peer is asked to send its signing public key.
     pub send_key:   bool,
 }
     

@@ -16,27 +16,41 @@ use std::{
 use regex::Regex;
 
 
+/// The mode a file is opened in.
 #[derive(Debug)]
 pub enum FileAccess {
+    /// Opened for reading.
     Reading,
+    /// Opened for writing.
     Writing,
 }
 
+/// The two kinds of file the database writes: value data files and their
+/// companion index files. The discriminant is the on-disk type code.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum FileType {
+    /// A data file holding appended key-value records.
     Data    = 0,
+    /// An index file holding the file locations of records.
     Index   = 1,
 }
 
+/// A single entry in a directory listing, describing one file.
 #[derive(Clone, Debug)]
 pub struct FileEntry {
+    /// Type indicator (file, directory or symlink).
     pub typ: String,
+    /// Size in bytes.
     pub size: u64,
+    /// Seconds since last modification.
     pub mods: u64,
+    /// Object name.
     pub name: String,
 }
 
+/// Recursively finds all data and index files beneath `dir`, matching the
+/// database's numbered file-name pattern and extensions.
 pub fn find_files(dir: &Path) -> Outcome<Vec<PathBuf>> {
     let pattern = fmt!(
         "^{}\\.({}|{})$",

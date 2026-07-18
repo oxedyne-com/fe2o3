@@ -53,6 +53,8 @@ use tokio::{
 //    LOG_STREAM_ID.try_with(|id| id.clone()).unwrap_or(fmt!("main"))
 //}
 
+/// The Shield UDP server: owns the server context and drives the receive,
+/// packet-handling, garbage-collection and command loop.
 pub struct Server<
     const C: usize,
     const ML: usize,
@@ -62,7 +64,7 @@ pub struct Server<
     // Database
     ENC:    Encrypter,
     KH:     Hasher,
-    DB:     Database<UL, <P::ID as IdTypes<ML, SL, UL>>::U, ENC, KH>, 
+    DB:     Database<UL, <P::ID as IdTypes<ML, SL, UL>>::U, ENC, KH>,
 > {
     context:    ServerContext<C, ML, SL, UL, P, ENC, KH, DB>,
     syntax:     SyntaxRef,
@@ -84,6 +86,8 @@ impl<
 >
     Server<C, ML, SL, UL, P, ENC, KH, DB>
 {
+    /// Creates a server from a context and syntax, returning it together with a
+    /// clone of the command channel for external control.
     pub fn new(
         context: ServerContext<C, ML, SL, UL, P, ENC, KH, DB>,
         syntax: SyntaxRef,
@@ -105,6 +109,9 @@ impl<
         )
     }
 
+    /// Binds the UDP socket and runs the main server loop, spawning a handler
+    /// task per incoming packet, periodically collecting message-assembly
+    /// garbage, and processing control commands until a `Finish` is received.
     pub async fn start(&mut self) -> Outcome<()> {
 
         // Target (this machine).

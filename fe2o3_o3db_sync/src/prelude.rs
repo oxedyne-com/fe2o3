@@ -1,3 +1,9 @@
+//! Convenience re-exports for downstream users of the Ozone database.
+//!
+//! Bringing this prelude into scope pulls in the core database types
+//! ([`O3db`], [`OzoneApi`], [`OzoneConfig`]) along with the fe2o3 core, crypto
+//! and hashing traits the generic database API is parameterised over.
+
 pub use crate::{
     api::OzoneApi,
     base::{

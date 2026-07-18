@@ -77,12 +77,19 @@ use secrecy::{
 use zeroize::Zeroize;
 
 
+/// State carried through the interactive shell: application status and config,
+/// the command syntax, a workspace of variables, the database and the wallet.
 #[derive(Clone)]
 pub struct AppShellContext {
+    /// Status of the application's subsystems.
     pub stat:       AppStatus,
+    /// Loaded application configuration.
     pub app_cfg:    AppConfig,
+    /// Command syntax the shell parses input against.
     pub syntax:     SyntaxRef,
+    /// Workspace of user-assigned variables.
     pub ws:         BTreeMap<Dat, Dat>,
+    /// Backing Ozone database.
     pub db:         O3db<
                         { id::UID_LEN },
                         id::Uid,
@@ -91,6 +98,7 @@ pub struct AppShellContext {
                         HashScheme,
                         ChecksumScheme,
                     >,
+    /// Wallet holding encrypted secrets and admin key material.
     pub wallet:     Wallet,
     //server: Server,
 }
@@ -162,6 +170,9 @@ impl ShellContext for AppShellContext {
 
 impl AppShellContext {
 
+    /// Parses and runs a sequence of command words against the shell syntax,
+    /// dispatching each recognised command (help, control, filesystem, wallet)
+    /// and collecting their evaluations.
     pub fn execute<I: IntoIterator<Item=String>>(
         &mut self,
         parts:      I,
@@ -234,6 +245,7 @@ impl AppShellContext {
         Ok(evals)
     }
 
+    /// Launches an interactive shell session bound to this context.
     pub fn start_shell(
         &mut self,
         shell_cfg:  &ShellConfig,
@@ -249,6 +261,9 @@ impl AppShellContext {
         Ok(Evaluation::None)
     }
 
+    /// Handles the wallet `secrets` command, interactively creating a new
+    /// encrypted secret (`-create`) or recovering an existing one
+    /// (`-recover`), persisting any change back to the wallet file.
     pub fn secrets(
         &mut self,
         _shell_cfg:  &ShellConfig,

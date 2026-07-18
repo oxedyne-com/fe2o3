@@ -49,31 +49,49 @@ use std::{
 };
 
 
+/// Runtime configuration for a Shield server, serialisable to and from a
+/// Daticle map.
 #[derive(Clone, Debug, Eq, PartialEq, FromDatMap, ToDatMap)]
 pub struct ServerConfig {
     // Schemes
+    /// Path to the namex database defining cryptographic scheme identifiers.
     pub schemes_db_path:                String,
     // Chunking
+    /// Value size, in bytes, above which messages are chunked.
     pub wire_chunk_threshold:           u64, // applies only to values
+    /// Size, in bytes, of each wire chunk.
     pub wire_chunk_bytes:               u64,
     // Server
+    /// Logging level for the server.
     pub log_level:                      String,
+    /// Address the server binds to.
     pub server_address:                 String,
+    /// UDP port the server listens on.
     pub server_port_udp:                u16,
+    /// Difficulty profile identifier (0 = linear).
     pub server_rps_zbits_profile:       u8, // 0 = linear, ..
+    /// Minimum proof-of-work zero bits required of every packet.
     pub server_pow_zbits_min:           u16, // min zero bits for all packet pows
+    /// Zero bits required once the request rate reaches its maximum.
     pub server_pow_zbits_max:           u16, // when rps reaches max, the reqd pow zbit reaches this level
+    /// Maximum age, in seconds, of an accepted proof-of-work timestamp.
     pub server_pow_time_horiz_secs:     u64, // timestamp must be no older in seconds to now
+    /// Request rate corresponding to the maximum proof-of-work difficulty.
     pub server_rps_max:                 u16, // the requests per second corresponding to maximum pow zbits
     //pub packet_pow_hash_scheme:         String,
     //pub packet_signature_scheme:        String,
+    /// Number of bins in the shared address guard map.
     pub addr_guard_map_bins:            u32, // Number of bins in shared map of incoming addresses.
+    /// Number of bins in the shared user guard map.
     pub user_guard_map_bins:            u32, // Number of bins in shared map of users.
+    /// Number of bins in the shared message-assembler map.
     pub msg_assembler_map_bins:         u32, // Number of bins in shared map of message pieces.
     // Server policy
     // An attacker can flood us with HReq1 messages with random uids and public keys.  A reasonable
     // defence is to set a relatively high difficulty for HReq1.
+    /// Whether to accept handshakes from previously unknown users.
     pub server_accept_unknown_users:    bool,
+    /// Host names of trusted seed peers used to bootstrap.
     pub trusted_seeds:                  Vec<String>,
 }
 
@@ -117,6 +135,8 @@ impl Default for ServerConfig {
 
 impl ServerConfig {
 
+    /// Validates the configuration against the server root, returning an error
+    /// if it is inconsistent. Currently performs no checks.
     pub fn validate(
         &self,
         _root: &NormPathBuf,
@@ -126,6 +146,7 @@ impl ServerConfig {
         Ok(())
     }
 
+    /// Returns the default configuration as an [`Outcome`].
     pub fn try_default() -> Outcome<Self> {
         Ok(Self::default())
     }
@@ -202,13 +223,17 @@ impl ServerConfig {
         }
     }
 
+    /// Builds a [`Chunker`] from the given chunk configuration.
     pub fn chunker(cfg: ChunkConfig) -> Chunker {
         Chunker::default().set_config(cfg)
     }
 
+    /// Returns the configured wire chunk size in bytes.
     pub fn wire_chunk_size(&self)           -> usize { self.wire_chunk_bytes as usize }
+    /// Returns the configured wire chunking threshold in bytes.
     pub fn wire_chunking_threshold(&self)   -> usize { self.wire_chunk_threshold as usize }
 
+    /// Constructs a [`ChunkConfig`] from explicit parameters.
     pub fn new_chunk_cfg(
         threshold_bytes:    usize,
         chunk_size:         usize,
@@ -225,6 +250,7 @@ impl ServerConfig {
         }
     }
 
+    /// Returns the wire chunk configuration derived from this config.
     pub fn chunker_default(&self) -> ChunkConfig {
         ChunkConfig {
             threshold_bytes:    self.wire_chunk_threshold as usize,
@@ -234,6 +260,7 @@ impl ServerConfig {
         }
     }
 
+    /// Checks that the wire chunk size does not exceed the encodable maximum.
     pub fn check_wire_chunk_config(&self, chunk_cfg: &ChunkConfig) -> Outcome<()> {
         if chunk_cfg.chunk_size > u16::MAX as usize {
             return Err(err!(
@@ -244,6 +271,7 @@ impl ServerConfig {
         Ok(())
     }
 
+    /// Logs the configuration as formatted Daticle lines.
     pub fn dump(self) -> Outcome<()> {
         let dat = Self::to_datmap(self);
         for line in dat.to_lines("    ", true) {
@@ -253,14 +281,17 @@ impl ServerConfig {
     }
 
     // Servers.
+    /// Returns the number of bins in the address guard map.
     pub fn addr_guard_map_bins(&self) -> u32 {
         self.addr_guard_map_bins
     }
 
+    /// Returns the number of bins in the user guard map.
     pub fn user_guard_map_bins(&self) -> u32 {
         self.user_guard_map_bins
     }
 
+    /// Returns the number of bins in the message-assembler map.
     pub fn msg_assembler_map_bins(&self) -> u32 {
         self.msg_assembler_map_bins
     }
@@ -321,6 +352,8 @@ impl ServerConfig {
     //    })
     //}
     
+    /// Resolves the configured trusted seed host names to socket addresses,
+    /// requiring at least [`constant::TRUSTED_SEEDS_MIN`] of them.
     pub fn get_trusted_seeds(&self) -> Outcome<Vec<SocketAddr>> {
 
         if self.trusted_seeds.len() < constant::TRUSTED_SEEDS_MIN {

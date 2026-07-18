@@ -225,8 +225,11 @@ impl<
         })
     }
 
+    /// Returns the database root directory path.
     pub fn db_root(&self)       -> &Path { &self.db_root }
+    /// Returns a shared reference to the database API.
     pub fn api(&self)           -> &OzoneApi<UIDL, UID, ENC, KH, PR, CS> { &self.api }
+    /// Returns a mutable reference to the database API.
     pub fn api_mut(&mut self)   -> &mut OzoneApi<UIDL, UID, ENC, KH, PR, CS> { &mut self.api }
 
     /// Thread-safe mutable sharing of the API.
@@ -234,19 +237,29 @@ impl<
         Arc::new(RwLock::new(self.api))
     }
 
+    /// Applies any pending channel and config updates, then returns a mutable
+    /// reference to the now up-to-date API.
     pub fn updated_api(&mut self) -> Outcome<&mut OzoneApi<UIDL, UID, ENC, KH, PR, CS>> {
         res!(self.update());
         Ok(&mut self.api)
     }
 
     // Convenience.
+    /// Returns the identifier of this database's master bot.
     pub fn ozid(&self)      -> &OzoneBotId                      { &self.api.ozid }
+    /// Returns the active database configuration.
     pub fn cfg(&self)       -> &OzoneConfig                     { &self.api.cfg }
+    /// Returns the bot channel set used to communicate with the worker bots.
     pub fn chans(&self)     -> &BotChannels<UIDL, UID, ENC, KH>          { &self.api.chans }
+    /// Returns the data-at-rest transformation schemes (encryption, hashing, checksumming).
     pub fn schemes(&self)   -> &RestSchemes<ENC, KH, PR, CS>    { &self.api.schms }
+    /// Creates a responder that receives replies addressed to this database.
     pub fn responder(&self) -> Responder<UIDL, UID, ENC, KH> { Responder::new(Some(&self.ozid())) }
+    /// Creates a placeholder responder that expects no reply.
     pub fn no_responder()   -> Responder<UIDL, UID, ENC, KH> { Responder::none(None) }
 
+    /// Drains the inbox, absorbing the latest bot channel set and configuration
+    /// broadcast to the database by the supervisor.
     pub fn update(&mut self) -> Outcome<()> {
         loop { // loop to ensure we get the latest BotChannels
             match self.chan_inbox.try_recv() {

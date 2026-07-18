@@ -1,3 +1,9 @@
+//! Server-side implementation of the Shield protocol.
+//!
+//! This module houses the core protocol machinery: configuration and runtime
+//! context, the guard system for DoS mitigation, the message subsystem
+//! (packets, assembly and handshake), the proof-of-work engine, cryptographic
+//! scheme selection and the UDP server loop itself.
 pub mod cfg;
 pub mod cmd;
 pub mod constant;

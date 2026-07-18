@@ -17,9 +17,11 @@ use std::{
     },
 };
 
+/// Curve relating request rate to proof-of-work difficulty.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum DifficultyProfile {
+    /// Difficulty rises linearly with the request rate.
     Linear  = 0,
 }
 
@@ -41,13 +43,19 @@ impl TryFrom<u8> for DifficultyProfile {
 /// using the given profile and min/max limits.
 #[derive(Clone, Debug)]
 pub struct DifficultyParams {
+    /// Difficulty profile relating request rate to zero bits.
     pub profile:    DifficultyProfile,
+    /// Maximum number of required zero bits.
     pub max:        u16,
+    /// Minimum number of required zero bits.
     pub min:        u16,
+    /// Request rate at which the maximum difficulty is reached.
     pub rps_max:    u64,//u16
 }
 
 impl DifficultyParams {
+    /// Computes the globally required proof-of-work zero bits for a given
+    /// requests-per-second rate under the configured profile.
     #[inline(always)]
     pub fn required_global_zbits(&self, rps: u16) -> Outcome<ZeroBits> {
         match self.profile {
@@ -59,16 +67,23 @@ impl DifficultyParams {
     }
 }
 
+/// Pristine input hashed during proof of work: the challenge code, source and
+/// target addresses, timestamp and the accepted time horizon.
 #[derive(Clone, Debug)]
 pub struct PowPristine<
     const C: usize,
     const P0: usize,
     const P1: usize,
 > {
+    /// Per-challenge code binding the proof to a negotiated value.
     pub code:       [u8; C],
+    /// Source IP address, padded to 16 bytes.
     pub src_addr:   IpAddr,
+    /// Target IP address, padded to 16 bytes.
     pub trg_addr:   IpAddr,
+    /// Timestamp at which the proof was created.
     pub timestamp:  Duration,
+    /// Window, in seconds, within which the timestamp remains valid.
     pub time_horiz: u64,
 }
 
@@ -169,7 +184,9 @@ impl<
 >
     PowPristine<C, P0, P1>
 {
+    /// Length, in bytes, of the encoded timestamp.
     pub const TIMESTAMP_LEN:    usize = 8;
+    /// Length, in bytes, of an encoded (IPv6-width) address.
     pub const ADDR_LEN:         usize = 16;
 
     /// Create a new `PowPristine` for the purpose of validating an incoming packet.
@@ -197,6 +214,8 @@ impl<
         })
     }
 
+    /// Logs a byte-level breakdown of the pristine (source and target address,
+    /// code, and timestamp regions) for debugging purposes.
     pub fn trace(&self) -> Outcome<()> {
         let byts = res!(self.to_bytes());
     

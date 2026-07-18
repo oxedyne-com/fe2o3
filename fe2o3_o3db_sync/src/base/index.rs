@@ -8,7 +8,8 @@ use std::{
     },
 };
 
-// The `ZoneInd` indexes zones from 0, but displays from 1 for human consumption.
+// Zero-based index of a storage zone. Indexes zones from 0 internally, but
+// displays from 1 for human consumption.
 new_type!(ZoneInd, usize, Clone, Copy, Default, Eq, Hash, Ord, PartialEq, PartialOrd);
 
 impl Display for ZoneInd {
@@ -24,12 +25,14 @@ impl Debug for ZoneInd {
 }
     
 impl ZoneInd {
+    /// Creates a zone index from any value convertible to `usize`.
     pub fn new<I: Into<usize>>(i: I) -> Self {
         Self(i.into())
     }
 }
 
-// The index for a bot in a pool of worker bots.
+// Zero-based index of a bot within its pool of worker bots. Displays from 1
+// for human consumption.
 new_type!(BotPoolInd, usize, Clone, Copy, Default, Eq, Hash, Ord, PartialEq, PartialOrd);
 
 impl Display for BotPoolInd {
@@ -45,15 +48,18 @@ impl Debug for BotPoolInd {
 }
     
 impl BotPoolInd {
+    /// Creates a bot-pool index from any value convertible to `usize`.
     pub fn new<I: Into<usize>>(i: I) -> Self {
         Self(i.into())
     }
 }
 
-/// The index for a bot in a pool of worker bots.
+/// The full location of a worker bot: its pool position within its zone.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct WorkerInd {
+    /// Position within the zone's bot pool.
     pub pool: BotPoolInd,
+    /// Zone the bot belongs to.
     pub zone: ZoneInd,
 }
 
@@ -65,6 +71,7 @@ impl Display for WorkerInd {
     
 impl WorkerInd {
     
+    /// Creates a worker index from a zone and a pool position.
     pub fn new(zone: ZoneInd, pool: BotPoolInd) -> Self {
         Self {
             zone,
@@ -72,9 +79,13 @@ impl WorkerInd {
         }
     }
 
+    /// Returns the zone index.
     pub fn zind(&self)  -> &ZoneInd     { &self.zone }
+    /// Returns the bot-pool index.
     pub fn bpind(&self) -> &BotPoolInd  { &self.pool }
+    /// Returns the zone index as a `usize`.
     pub fn z(&self)     -> usize        { *self.zone }
+    /// Returns the bot-pool index as a `usize`.
     pub fn b(&self)     -> usize        { *self.pool }
 
 }

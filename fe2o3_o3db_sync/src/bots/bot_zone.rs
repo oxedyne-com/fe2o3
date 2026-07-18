@@ -194,7 +194,7 @@ impl<
                     }
                     match self.survey_files() {
                         Ok(shards) => {
-                            //// Initialize WriterBot live files.
+                            //// Initialise WriterBot live files.
                             //let n_w = self.cfg().num_wbots_per_zone;
                             //let result = self.init_writer_live_files(n_w);
                             //self.result(&result);
@@ -575,7 +575,7 @@ impl<
         // Sort incomplete files by number descending.
         incomplete_files.sort_by(|a, b| b.0.cmp(&a.0));
     
-        // Initialize WriterBot live files.
+        // Initialise WriterBot live files.
         let result = self.init_writer_live_files(&incomplete_files);
         self.result(&result);
     

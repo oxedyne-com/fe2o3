@@ -47,6 +47,7 @@ impl<
     O3db<UIDL, UID, ENC, KH, PR, CS>
 {
     // System reflection.
+    /// Returns the number of logical CPUs available on the host.
     pub fn num_cpus() -> usize {
         num_cpus::get()
     }
@@ -186,33 +187,44 @@ impl OzoneConfig {
         Ok(())
     }
 
+    /// Size in bytes of an individual value chunk when chunking is applied.
     pub fn rest_chunk_size(&self)           -> usize { self.rest_chunk_bytes as usize }
+    /// Value size in bytes at or above which values are split into chunks.
     pub fn rest_chunking_threshold(&self)   -> usize { self.rest_chunk_threshold as usize }
+    /// Key length in bytes at or above which keys are hashed rather than stored verbatim.
     pub fn hashing_threshold(&self)         -> usize { self.bytes_before_hashing as usize }
 
+    /// Number of storage zones.
     pub fn num_zones(&self) -> usize { self.num_zones as usize }
+    /// Number of cache bots per zone.
     pub fn num_cbots_per_zone(&self) -> usize { self.num_cbots_per_zone as usize }
+    /// Number of file bots per zone.
     pub fn num_fbots_per_zone(&self) -> usize { self.num_fbots_per_zone as usize }
+    /// Number of server bots (shared across all zones).
     pub fn num_sbots(&self) -> usize { self.num_sbots as usize }
 
+    /// Total number of caches across all zones (zones times cache bots per zone).
     pub fn num_caches(&self) -> usize {
         let nz = self.num_zones as usize;
         let nbots = self.num_cbots_per_zone as usize;
         nz * nbots
     }
 
+    /// Total number of file maps across all zones (zones times file bots per zone).
     pub fn num_filemaps(&self) -> usize {
         let nz = self.num_zones as usize;
         let nbots = self.num_fbots_per_zone as usize;
         nz * nbots
     }
 
+    /// Total number of writer bots across all zones (zones times writer bots per zone).
     pub fn num_wbots(&self) -> usize {
         let nz = self.num_zones as usize;
         let nbots = self.num_wbots_per_zone as usize;
         nz * nbots
     }
 
+    /// Returns the per-zone bot count configured for the given worker type.
     pub fn num_bots_per_zone(&self, wtyp: &WorkerType) -> usize {
         (match wtyp {
             WorkerType::Cache       => self.num_cbots_per_zone,
@@ -223,6 +235,8 @@ impl OzoneConfig {
         }) as usize
     }
 
+    /// Derives the per-zone configuration, dividing the global cache size
+    /// limit evenly across all caches and logging the resulting limits.
     pub fn zone_config(&self) -> ZoneConfig {
         let nz = self.num_zones();
         let nc = self.num_cbots_per_zone as usize;
@@ -248,16 +262,20 @@ impl OzoneConfig {
         }
     }
 
+    /// Per-zone override settings, keyed by zone number.
     pub fn zone_overrides(&self) -> &BTreeMap<Dat, Dat> { &self.zone_overrides }
 
+    /// Interval between zone state updates, as a `Duration`.
     pub fn zone_state_update_interval(&self) -> Duration {
         Duration::from_secs(self.zone_state_update_secs as u64)
     }
 
+    /// Interval between zone state updates, in whole seconds.
     pub fn zone_state_update_interval_secs(&self) -> u64 {
         self.zone_state_update_secs as u64
     }
 
+    /// Validates that `z` is a legal zone index for the configured zone count.
     pub fn check_zone_index(&self, z: usize) -> Outcome<()> {
         let nz = self.num_zones as usize;
         if z >= nz {
@@ -269,6 +287,7 @@ impl OzoneConfig {
         }
     }
 
+    /// Serialises the configuration to the standard config file under `db_root`.
     pub fn write_config_file(&self, db_root: &Path) -> Outcome<()> {
         let path = Self::config_path(db_root);
         let mut file = res!(std::fs::File::create(&path));
@@ -302,16 +321,19 @@ impl OzoneConfig {
         }
     }
 
+    /// Returns the root directory holding the zones, under the given container path.
     pub fn zone_root(&self, container: &Path) -> PathBuf {
         self.append_zone_root(PathBuf::from(container))
     }
 
-    pub fn config_path(db_root: &Path) -> PathBuf { 
+    /// Returns the path of the config file within the given database root.
+    pub fn config_path(db_root: &Path) -> PathBuf {
         let mut path = PathBuf::from(db_root);
         path.push(constant::CONFIG_FILENAME);
         path
     }
 
+    /// Appends the zones-directory component to `path` and returns it.
     pub fn append_zone_root(&self, mut path: PathBuf) -> PathBuf {
         path.push(fmt!(format_zones_dir!(), self.num_zones));
         path
@@ -329,10 +351,13 @@ impl OzoneConfig {
         }
     }
 
+    /// Builds a `Chunker` from the given chunk configuration.
     pub fn chunker(cfg: ChunkConfig) -> Chunker {
         Chunker::default().set_config(cfg)
     }
 
+    /// Validates the chunk configuration against the maximum data file size,
+    /// rejecting thresholds or chunk sizes that are disproportionate to it.
     pub fn check_rest_chunk_config(&self, chunk_cfg: &ChunkConfig) -> Outcome<()> {
         let max_file_size = self.data_file_max_bytes as f64;
         let chunk_threshold = chunk_cfg.threshold_bytes as f64;
@@ -365,6 +390,7 @@ impl OzoneConfig {
         Ok(())
     }
 
+    /// Rejects a configured maximum data file size that exceeds the safety cap.
     pub fn check_file_size(&self) -> Outcome<()> {
         if self.data_file_max_bytes > constant::MAX_FILE_BYTES {
             return Err(err!(
@@ -378,10 +404,16 @@ impl OzoneConfig {
 
 }
 
+/// Per-zone configuration derived from [`OzoneConfig`], carrying the bot
+/// counts and per-cache size limit that each zone should apply.
 #[derive(Clone, Debug, Default)]
 pub struct ZoneConfig {
+    /// Number of cache bots in the zone.
     pub ncbots:             usize,
+    /// Number of file bots in the zone.
     pub nfbots:             usize,
+    /// Size limit in bytes for each cache in the zone.
     pub cache_size_lim:     usize,
+    /// Whether file data is loaded into caches during initialisation.
     pub init_load_caches:   bool,
 }

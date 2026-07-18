@@ -56,23 +56,35 @@ use secrecy::{
 };
 
 
+/// Lifecycle state of a subsystem within the application.
 #[derive(Clone)]
 pub enum State {
+    /// The subsystem has not yet been started.
     NotStarted,
+    /// The subsystem is running.
     Running,
+    /// The subsystem is running but not responding.
     NotResponsive,
 }
 
 impl Default for State { fn default() -> Self { Self::NotStarted } }
 
+/// Aggregated status of the application's subsystems.
 #[derive(Clone, Default)]
 pub struct AppStatus {
+    /// Whether this is the application's first run.
     pub first:  bool,
+    /// State of the logging subsystem.
     pub log:    State,
+    /// State of the database subsystem.
     pub db:     State,
+    /// State of the web subsystem.
     pub web:    State,
 }
 
+/// Runs the interactive terminal application: loads or creates the config,
+/// starts logging, unlocks or creates the wallet, opens the database and then
+/// either executes command-line arguments or launches the interactive shell.
 pub fn run() -> Outcome<()> {
 
     let mut app_status = AppStatus::default();

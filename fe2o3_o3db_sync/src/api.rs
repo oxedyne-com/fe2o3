@@ -81,20 +81,31 @@ use std::{
 };
 
 
+/// The stateless request-issuing face of an Ozone database.
+///
+/// An `OzoneApi` bundles the identity, configuration, bot channel set and
+/// data-at-rest schemes needed to translate user-level key-value operations
+/// into messages dispatched to the worker bots. It is cheap to clone and is
+/// held by the database owner as well as by every bot.
 #[derive(Clone, Debug)]
 pub struct OzoneApi<
     // Data at rest.
     const UIDL: usize,        // User id byte length.
-    UID:    NumIdDat<UIDL>,   // User id.            
+    UID:    NumIdDat<UIDL>,   // User id.
     ENC:    Encrypter,        // Symmetric encryption of data at rest.
     KH:     Hasher,           // Hashes database keys.
 	PR:     Hasher,           // Pseudo-randomiser hash to distribute cache data.
     CS:     Checksummer,      // Checks integrity of data at rest.
 >{
+    /// Identifier of the bot or owner that holds this API handle.
     pub ozid:       OzoneBotId,
+    /// Root directory of the database on disk.
     pub db_root:    PathBuf,
+    /// Active database configuration.
     pub cfg:        OzoneConfig,
+    /// Channel set for reaching all worker bots.
     pub chans:      BotChannels<UIDL, UID, ENC, KH>,
+    /// Data-at-rest transformation schemes (encryption, hashing, checksumming).
     pub schms:      RestSchemes<ENC, KH, PR, CS>,
 }
 
@@ -129,14 +140,21 @@ impl<
         }
     }
 
+    /// Returns the identifier of the holder of this API handle.
     pub fn ozid(&self)          -> &OzoneBotId                      { &self.ozid }
+    /// Returns the database root directory.
     pub fn db_root(&self)       -> &Path                            { &self.db_root }
+    /// Returns the active database configuration.
     pub fn cfg(&self)           -> &OzoneConfig                     { &self.cfg }
+    /// Returns the data-at-rest transformation schemes.
     pub fn schemes(&self)       -> &RestSchemes<ENC, KH, PR, CS>    { &self.schms }
+    /// Returns the bot channel set.
     pub fn chans(&self)         -> &BotChannels<UIDL, UID, ENC, KH> { &self.chans }
 
     // Convenience.
+    /// Creates a responder that receives replies addressed to this API's holder.
     pub fn responder(&self) -> Responder<UIDL, UID, ENC, KH> { Responder::new(Some(&self.ozid())) }
+    /// Creates a placeholder responder that expects no reply.
     pub fn no_responder()   -> Responder<UIDL, UID, ENC, KH> { Responder::none(None) }
 
     // Key API.
@@ -162,13 +180,16 @@ impl<
         self.ozone_key(res!(k.as_bytes()), schms2)
     }
     
+    /// Transforms raw key bytes into an Ozone key, using the configured zone
+    /// and cache-bot counts. Returns the key bytes, the selected worker index
+    /// and the routing hash. See [`OzoneApi::keygen`] for details.
     pub fn ozone_key(
         &self,
         kbuf:   Vec<u8>,
         schms2: Option<&RestSchemesOverride<ENC, KH>>,
     )
         -> Outcome<(Vec<u8>, WorkerInd, alias::ChooseHash)>
-    { 
+    {
         self.keygen(
             kbuf,
             schms2,
@@ -177,6 +198,11 @@ impl<
         )
     }
 
+    /// Computes the routing hash for a key and selects the owning cache bot
+    /// and zone from `nz` zones and `nc` cache bots per zone. The returned key
+    /// bytes are the original plaintext, unchanged: the hash is only a routing
+    /// signal and never becomes the stored key form, so a later scan can
+    /// recover the user's original `Dat` key.
     pub fn keygen(
         &self,
         kbuf:   Vec<u8>,
@@ -592,6 +618,10 @@ impl<
         Ok(())
     }
 
+    /// Encodes a key-value pair through the shared record encoder, framing the
+    /// cache hash, key, value and checksums, and returns the `Write` message
+    /// ready to send to a writer bot. Both insertions and tombstones go through
+    /// this one path so a replaying reader frames every record identically.
     pub fn package_write(
         kv:         KeyVal<UIDL, UID>,
         resp:       Responder<UIDL, UID, ENC, KH>,
@@ -788,6 +818,8 @@ impl<
         Ok(resp)
     }
 
+    /// Fetch a value given an already-normalised key and its worker index,
+    /// returning a default `Responder` on which the value will arrive.
     pub fn fetch_using_key(
         &self,
         key:    Key,
@@ -838,6 +870,8 @@ impl<
         )
     }
 
+    /// Dispatches a read request for the given normalised key to a randomly
+    /// chosen reader bot in the key's zone, replying on the supplied responder.
     pub fn fetch_using_key_and_responder(
         &self,
         key:    Key,
@@ -1351,6 +1385,8 @@ impl<
         resp.recv_number(n, wait)
     }
 
+    /// Requests a directory listing from every zone and prints a formatted
+    /// per-zone file table, with sizes and modification times, to the log.
     pub fn list_files(&self, wait: Wait) -> Outcome<()> {
 
         info!(sync_log::stream(), "Directory listing for {} zones, key:", self.cfg().num_zones());
@@ -1404,6 +1440,7 @@ impl<
         Ok(())
     }
 
+    /// Collects the on-disk zone directory for every zone, keyed by zone index.
     pub fn get_zone_dirs(&self) -> Outcome<BTreeMap<ZoneInd, ZoneDir>> {
         let emsg = "zone directories request";
         let resp = self.responder();

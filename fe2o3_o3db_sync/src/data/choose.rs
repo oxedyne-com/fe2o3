@@ -12,11 +12,16 @@ use oxedyne_fe2o3_iop_hash::api::{
     HashForm,
 };
 
+/// Namespace for the deterministic cache-bot selection functions, parameterised
+/// by the pseudo-random hasher type used to distribute keys.
 // Just a name space for some associated functions.
 pub struct ChooseCache<PR: Hasher>(std::marker::PhantomData<PR>);
 
 impl<PR: Hasher> ChooseCache<PR> {
 
+    /// Selects the owning cache bot and zone for a key's hash across `nz` zones
+    /// and `nc` cache bots per zone, returning the worker index and the
+    /// fixed-length routing hash.
     pub fn choose_cbot(
         hform:  &HashForm,
         nz:     u16,
@@ -69,6 +74,9 @@ impl<PR: Hasher> ChooseCache<PR> {
         }
     }
 
+    /// Maps a prepared routing integer to a worker index, using its low 16 bits
+    /// modulo the zone count for the zone and its next 16 bits modulo the
+    /// cache-bot count for the pool position.
     pub fn choose_cbot_select(
         n:  alias::ChooseHashUint,
         nz: u16,

@@ -34,6 +34,11 @@ use std::{
     },
 };
 
+/// A reply channel attached to a request, tagged with a ticket so that
+/// responses can be correlated back to the originating call.
+///
+/// A responder may carry no channel (`none`), in which case the request is
+/// fire-and-forget and no reply is expected.
 #[derive(Clone, Debug)]
 pub struct Responder<
     const UIDL: usize,
@@ -54,6 +59,7 @@ impl<
 >
     Responder<UIDL, UID, ENC, KH>
 {
+    /// Creates a responder with a fresh channel and ticket, sourced from `ozid`.
     pub fn new(ozid: Option<&OzoneBotId>) -> Self {
         Self {
             ozid:   ozid.map(|id| id.clone()),
@@ -62,6 +68,8 @@ impl<
         }
     }
 
+    /// Creates a responder sourced from `ozid` using the supplied channel
+    /// (or none), with a fresh ticket.
     pub fn make(
         ozid: Option<&OzoneBotId>,
         chan: Option<Simplex<OzoneMsg<UIDL, UID, ENC, KH>>>,
@@ -75,6 +83,7 @@ impl<
         }
     }
 
+    /// Creates a channel-less responder for a fire-and-forget request.
     pub fn none(ozid: Option<&OzoneBotId>) -> Self {
         Self {
             ozid:   ozid.map(|id| id.clone()),
@@ -83,12 +92,19 @@ impl<
         }
     }
 
+    /// Returns `true` if the responder has no reply channel.
     pub fn is_none(&self)   -> bool { self.chan.is_none() }
+    /// Returns `true` if the responder has a reply channel.
     pub fn is_some(&self)   -> bool { self.chan.is_some() }
+    /// Returns the identity of the requester, if any.
     pub fn ozid(&self)      -> &Option<OzoneBotId> { &self.ozid }
+    /// Returns the ticket correlating this responder's replies.
     pub fn ticket(&self)    -> &Ticket { &self.tik }
+    /// Returns the reply channel, if present.
     pub fn channel(&self)   -> Option<&Simplex<OzoneMsg<UIDL, UID, ENC, KH>>> { self.chan.as_ref() }
 
+    /// Blocks until one reply arrives, returning it or propagating an error
+    /// message as an error.
     pub fn recv_block(&self) -> Outcome<OzoneMsg<UIDL, UID, ENC, KH>> {
         match self.channel() {
             None => Err(err!("This responder does not have a channel."; Channel, Missing)),
@@ -104,6 +120,7 @@ impl<
         }
     }
 
+    /// Sends a message back to the requester over the reply channel.
     pub fn send(&self, msg: OzoneMsg<UIDL, UID, ENC, KH>) -> Outcome<()> {
         match self.channel() {
             Some(chan) => chan.send(msg),
@@ -328,8 +345,12 @@ impl<
     }
 }
 
+/// A polling wait policy: how long to wait overall and how often to re-check
+/// the channel while waiting.
 pub struct Wait {
+    /// Maximum total time to wait before giving up.
     pub max_wait:       Duration,
+    /// Interval between successive channel polls.
     pub check_interval: Duration,
 }
 
@@ -344,6 +365,7 @@ impl Default for Wait {
 
 impl Wait {
 
+    /// Creates a wait policy, rejecting a check interval larger than the max wait.
     pub fn new(
         max_wait:       Duration,
         check_interval: Duration,
@@ -362,6 +384,7 @@ impl Wait {
         })
     }
 
+    /// Returns the default wait policy in a `const` context.
     pub const fn new_default() -> Self {
         Self {
             max_wait:       constant::USER_REQUEST_TIMEOUT,
@@ -369,6 +392,7 @@ impl Wait {
         }
     }
 
+    /// Creates a wait policy that waits up to `max_wait` with no polling interval.
     pub fn timeout(
         max_wait: Duration,
     )

@@ -20,6 +20,9 @@ use oxedyne_fe2o3_syntax::{
 };
 
 
+/// Builds the interactive shell syntax, registering the control commands
+/// (`exit`, `shell`, `server`), the wallet `secrets` command and the workspace
+/// `vars` command alongside the generic file-system commands.
 pub fn new_shell(
     name:   &str,
     ver:    &SemVer,

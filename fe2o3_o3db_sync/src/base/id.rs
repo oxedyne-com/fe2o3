@@ -25,12 +25,17 @@ use std::{
     mem,
 };
 
+/// Underlying integer type for a bot identifier.
 pub type BidTyp = u64;
+/// Length in bytes of a bot identifier.
 pub const BID_LEN: usize = mem::size_of::<BidTyp>();
+/// A random bot identifier, unique per bot instance.
 pub type Bid = IdDat<{ BID_LEN }, BidTyp>;
 
-/// Used to identify a database request.
+/// Underlying integer type used to identify a database request.
 pub type TicketTyp = u64;
+// A random ticket that tags a database request so that its responses can be
+// correlated back to the originating call.
 new_type!(Ticket, TicketTyp, Clone, Copy, Default, Eq, Ord, PartialEq, PartialOrd);
 
 impl fmt::Display for Ticket {
@@ -46,25 +51,42 @@ impl fmt::Debug for Ticket {
 }
 
 impl Ticket {
+    /// Creates a new random ticket.
     pub fn new() -> Self {
         Self(TicketTyp::randef())
     }
+    /// Creates the zero ticket, used where no correlation is required.
     pub fn zero() -> Self {
         Self(0)
     }
 }
 
+/// Identifies a bot within the database by its role and location.
+///
+/// Every worker bot carries its random [`Bid`] together with the zone and
+/// bot-pool index it occupies; the singleton bots (master, supervisor, config)
+/// carry only a [`Bid`].
 #[derive(Clone, Eq, Hash, PartialEq)]
 pub enum OzoneBotId {
+    /// A cache bot, in a given zone and pool position.
     CacheBot(Bid, ZoneInd, BotPoolInd),
+    /// The configuration bot.
     ConfigBot(Bid),
+    /// A file bot, in a given zone and pool position.
     FileBot(Bid, ZoneInd, BotPoolInd),
+    /// An initialisation and garbage-collection bot, in a given zone and pool position.
     InitGarbageBot(Bid, ZoneInd, BotPoolInd),
+    /// The master bot held by the database owner.
     Master(Bid),
+    /// A reader bot, in a given zone and pool position.
     ReaderBot(Bid, ZoneInd, BotPoolInd),
+    /// A server bot, in a given pool position (server bots are not zoned).
     ServerBot(Bid, BotPoolInd),
+    /// The supervisor bot.
     Supervisor(Bid),
+    /// A writer bot, in a given zone and pool position.
     WriterBot(Bid, ZoneInd, BotPoolInd),
+    /// A zone bot, responsible for a given zone.
     ZoneBot(Bid, ZoneInd),
 }
 
@@ -92,6 +114,7 @@ impl Display for OzoneBotId {
 }
 
 impl OzoneBotId {
+    /// Returns the bot identifier common to every variant.
     pub fn bid(&self) -> Bid {
         match self {
             Self::CacheBot(bid, ..)         => *bid,
@@ -106,6 +129,8 @@ impl OzoneBotId {
             Self::ZoneBot(bid, ..)          => *bid,
         }
     }
+    /// Constructs a fresh worker bot identifier of the given type at the given
+    /// worker index, generating a new random [`Bid`].
     pub fn new_worker(wtyp: &WorkerType, wind: &WorkerInd) -> Self {
         match wtyp {
             WorkerType::Cache       => Self::CacheBot(Bid::randef(), *wind.zind(), *wind.bpind()),
@@ -117,6 +142,7 @@ impl OzoneBotId {
     }
 }
 
+/// Returns the custom `Dat` user-kind identifier tagging a stored user record.
 pub fn usr_kind_id_user() -> UsrKindId {
     UsrKindId::new(
         64_000,
@@ -125,6 +151,7 @@ pub fn usr_kind_id_user() -> UsrKindId {
     )
 }
 
+/// Returns the custom `Dat` user-kind identifier used as a deletion tombstone.
 pub fn usr_kind_id_deleted() -> UsrKindId {
     UsrKindId::new(
         64_100,

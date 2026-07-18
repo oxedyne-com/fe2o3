@@ -35,10 +35,12 @@ pub struct Address;
 
 impl Address {
 
+    /// Formats a host and port as a `host:port` server address string.
     pub fn server_address<S: Into<String> + std::fmt::Display>(addr: S, port: u16) -> String {
         fmt!("{}:{}", addr, port)
     }
 
+    /// Parses a host string and port into a [`SocketAddr`] for UDP use.
     pub fn socket_address_udp<
         S: Into<String> + std::fmt::Display,
     >(
@@ -83,12 +85,20 @@ pub struct UserData<
     const C: usize,
     SID: NumIdDat<SIDL>,
 > {
+    /// Our record of the peer's current public signing key.
     pub sigtpk_opt:         Option<PublicKey>, // My record of your current public signing key.
+    /// Our record of the peer's previous public signing key.
     pub sigtpk_opt_old:     Option<PublicKey>, // My record of your old public signing key.
+    /// Whether we are awaiting the peer's signing public key.
     pub waiting_for_sigpk:  bool,
+    /// Active sessions with this user, keyed by session identifier.
     pub sessions:           BTreeMap<IdDat<SIDL, SID>, SecretKey>,
+    /// Per-user challenge code, if one has been issued.
     pub code:               Option<[u8; C]>,
+    /// Set of signing public keys accepted within packs from this user.
     pub pack_sigpk_set:     BTreeSet<PublicKey>,
+    /// Map from scheme timestamp to the serialised public key it introduced.
     pub pack_sigpk_map:     BTreeMap<SchemeTimestamp, Vec<u8>>,
+    /// Pack pending our signature, if any.
     pub sign_pack_this:     Option<Vec<u8>>,
 }

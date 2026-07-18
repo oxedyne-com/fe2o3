@@ -19,10 +19,14 @@ use std::{
     //},
 };
 
+/// Trust classification the server holds for a given user.
 #[derive(Clone, Debug)]
 pub enum UserState {
+    /// User has not yet been classified.
     Unknown,
+    /// User is barred; their packets are dropped.
     Blacklist, // No soup for you.
+    /// User is explicitly trusted and allowed through.
     Whitelist, // Come on through.
 }
 
@@ -32,15 +36,22 @@ impl Default for UserState {
     }
 }
 
+/// Per-user record combining trust state with a caller-supplied data payload.
 #[derive(Clone, Debug, Default)]
 pub struct UserLog<
     D: Clone + Debug + Default, // user supplied data container
 > {
+    /// Current trust classification for the user.
     pub state:  UserState,
     // Data
+    /// Application-specific data associated with the user.
     pub data:   D,
 }
 
+/// Sharded, concurrent guard tracking per-user trust state.
+///
+/// User records are held in a [`ShardMap`] keyed by user identifier, giving
+/// concurrent access across `C` shards without a single global lock.
 #[derive(Debug)]
 pub struct UserGuard<
     // ShardMap
@@ -51,6 +62,7 @@ pub struct UserGuard<
     // AddressData
     D: Clone + Debug + Default, // user supplied data container
 > {
+    /// Sharded map from user key to that user's log.
     pub umap: ShardMap<C, S, UserLog<D>, M, H>,
 }
 
@@ -94,6 +106,8 @@ impl<
         Ok(false)
     }
 
+    /// Resolves a user identifier to its shard key and the [`RwLock`] guarding
+    /// the shard that would hold that user's log.
     pub fn get_locked_map<
         const UIDL: usize,
         UID: NumIdDat<UIDL>,

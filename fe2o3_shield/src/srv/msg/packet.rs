@@ -37,15 +37,21 @@ use std::{
     ops::Range,
 };
 
+/// Count of packets (or chunks) within a message.
 pub type PacketCount = u32;
+/// Number of bytes used to encode a [`PacketCount`] on the wire.
 pub const PACKET_COUNT_BYTE_LEN: usize = 4;
 
 /// A more economical form of `oxedyne_fe2o3_jdat::chunk::ChunkState`.
 #[derive(Clone, Debug, Default)]
 pub struct PacketChunkState {
+    /// Zero-based index of this chunk within the message.
     pub index:      PacketCount,
+    /// Total number of chunks the message was split into.
     pub num_chunks: PacketCount,
+    /// Size, in bytes, of each chunk.
     pub chunk_size: u16,
+    /// Whether the final chunk is padded to `chunk_size`.
     pub pad_last:   bool,
 }
 
@@ -100,9 +106,13 @@ impl FromBytes for PacketChunkState {
 }
 
 impl PacketChunkState {
+    /// Encoded length, in bytes, of a [`PacketChunkState`].
     pub const BYTE_LEN: usize = 2 * PACKET_COUNT_BYTE_LEN + 2 + 1;
 }
 
+/// Header metadata prefixing every packet: message type and version, message
+/// and user identifiers, and the chunk state locating this packet within its
+/// message.
 #[derive(Clone, Debug)]
 pub struct PacketMeta<
     const MIDL: usize,
@@ -110,10 +120,15 @@ pub struct PacketMeta<
     MID: NumIdDat<MIDL>,
     UID: NumIdDat<UIDL>,
 > {
+    /// Message type discriminant.
     pub typ:    MsgType,
+    /// Protocol version that produced the packet.
     pub ver:    SemVer,
+    /// Identifier of the message this packet belongs to.
     pub mid:    MID,
+    /// Identifier of the originating user.
     pub uid:    UID,
+    /// Position of this packet within the chunked message.
     pub chnk:   PacketChunkState,
 }
 
@@ -220,6 +235,7 @@ impl<
 >
     PacketMeta<MIDL, UIDL, MID, UID>
 {
+    /// Encoded length, in bytes, of the packet metadata header.
     pub const BYTE_LEN: usize =
         constant::MSG_TYPE_BYTE_LEN + // message type
         SemVer::BYTE_LEN +
@@ -229,10 +245,14 @@ impl<
         //8; // time since Unix epoch in seconds
 }
 
+/// Wire tag identifying which validation artefact follows in a packet.
 #[repr(u8)]
 pub enum PacketValidatorId {
+    /// A proof-of-work artefact.
     Pow = 1,
+    /// A signature without an accompanying public key.
     BareSignature = 2,
+    /// A signature bundled with the signer's public key.
     SignatureWithKey = 3,
 }
 
@@ -255,7 +275,10 @@ impl TryFrom<u8> for PacketValidatorId {
 /// - Signature artefact s0..s1 and s2..s3, s4..s5 when the public key is included.
 #[derive(Default)]
 pub struct PacketValidationArtefactRelativeIndices {
+    /// Byte range of the proof-of-work artefact, if present.
     pub pow: Option<Range<usize>>,
+    /// Byte range of the signature artefact, with optional public-key and
+    /// signature sub-ranges when the key is included.
     pub sig: Option<(Range<usize>, Option<(Range<usize>, Range<usize>)>)>,
 }
 
@@ -346,6 +369,8 @@ impl FromBytes for PacketValidationArtefactRelativeIndices {
 
 impl PacketValidationArtefactRelativeIndices {
 
+    /// Length of an artefact's fixed prefix: a one-byte tag plus a two-byte
+    /// length field.
     pub const BYTE_PREFIX_LEN: usize = 1 + 2;
 
     fn read_size(buf: &[u8], n: usize) -> Outcome<(usize, usize)> {
@@ -366,7 +391,9 @@ pub struct PacketValidator<
     S: Signer,
 > {
     //pub pow: Option<(ProofOfWork<H>, Option<PowParams<P0, P1, PRIS>>)>,
+    /// Proof-of-work engine, when packets must carry a proof of work.
     pub pow: Option<ProofOfWork<H>>,
+    /// Signer, when packets must carry a digital signature.
     pub sig: Option<S>,
 }
 
@@ -378,6 +405,9 @@ impl<
 >
     PacketValidator<H, S>
 {
+    /// Appends the configured validation artefacts to `buf`: first a
+    /// proof-of-work artefact (if enabled), then a signature, optionally
+    /// including the signer's public key when `inc_sigpk` is set.
     pub fn to_bytes<
         const N: usize, // Pristine + Nonce size.
         const P0: usize, // Length of pristine prefix bytes (i.e. not included in artefact).
@@ -536,6 +566,8 @@ impl<
         })
     }
 
+    /// Logs a byte-level breakdown of a proof-of-work artefact (pristine,
+    /// prefix, nonce and hash regions) for debugging purposes.
     pub fn trace<
         const P0: usize,
         const P1: usize,
@@ -581,6 +613,10 @@ impl<
     }
 }
 
+/// Outcome of validating a packet's proof-of-work and signature artefacts.
+///
+/// Each field is `None` when the corresponding check was not required, or
+/// `Some` carrying the pass or fail result.
 #[derive(Debug)]
 pub struct PacketValidationResult<'a> {
     pow: Option<bool>,
@@ -602,6 +638,9 @@ impl<'a> PacketValidationResult<'a> {
     ///         +------+-------+-------+-------+
     ///          
     /// ```
+    /// Combines the proof-of-work and signature results into an overall
+    /// verdict, per the truth table above, returning the signer's local id and
+    /// public key when one was supplied. `None` means no check applied.
     pub fn is_valid(self) -> Option<(bool, Option<(LocalId, &'a[u8])>)> {
         match self.pow {
             Some(pb) => match self.sig {
@@ -615,6 +654,7 @@ impl<'a> PacketValidationResult<'a> {
         }
     }
 
+    /// Returns `true` only if proof of work was checked and failed.
     pub fn pow_invalid(&self) -> bool {
         match self.pow {
             Some(b) => !b,
@@ -622,6 +662,7 @@ impl<'a> PacketValidationResult<'a> {
         }
     }
 
+    /// Returns `true` only if the signature was checked and failed.
     pub fn sig_invalid(&self) -> bool {
         match self.sig {
             Some((b, _)) => !b,
@@ -629,6 +670,7 @@ impl<'a> PacketValidationResult<'a> {
         }
     }
 
+    /// Returns the proof-of-work outcome as `"PASS"`, `"FAIL"` or `"NONE"`.
     pub fn pow_state(&self) -> &'static str {
         match self.pow {
             Some(true) => "PASS",
@@ -637,6 +679,7 @@ impl<'a> PacketValidationResult<'a> {
         }
     }
 
+    /// Returns the signature outcome as `"PASS"`, `"FAIL"` or `"NONE"`.
     pub fn sig_state(&self) -> &'static str {
         match self.sig {
             Some((true, _)) => "PASS",

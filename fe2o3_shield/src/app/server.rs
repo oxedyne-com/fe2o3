@@ -58,6 +58,12 @@ use std::{
 use tokio;
 
 
+/// Boots a Shield server from the application configuration: reads and
+/// validates the server config, determines the run mode, starts the backing
+/// database, constructs the protocol and context, and spawns the server task.
+///
+/// Returns an [`Evaluation`] describing the outcome and, on success, the
+/// command channel and join handle for the running server.
 pub async fn start_server(
     app_cfg:        &AppConfig,
     stat:           &AppStatus,

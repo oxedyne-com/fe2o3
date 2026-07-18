@@ -31,6 +31,8 @@ use std::{
 use crossbeam_utils::sync::WaitGroup;
 
 
+/// A supervisor-side handle to one running bot: its identity, a sentinel that
+/// reports when its thread has finished, and its inbound message channel.
 #[derive(Debug)]
 pub struct Handle<
     const UIDL: usize,
@@ -68,6 +70,7 @@ impl<
 >
     Handle<UIDL, UID, ENC, KH>
 {
+    /// Creates a handle from a bot identity, sentinel and channel.
     pub fn new(
         ozid:       Option<OzoneBotId>,
         sentinel:   Sentinel,
@@ -82,11 +85,15 @@ impl<
         }
     }
 
+    /// Returns the bot's identity, if set.
     pub fn ozid(&self)      -> &Option<OzoneBotId>  { &self.ozid }
+    /// Returns the sentinel that reports whether the bot's thread has finished.
     pub fn sentinel(&self)  -> &Sentinel            { &self.sentinel }
+    /// Returns the bot's inbound channel, if set.
     pub fn chan(&self)      -> &Option<Simplex<OzoneMsg<UIDL, UID, ENC, KH>>> {
         &self.chan
     }
+    /// Returns the bot's identity, erroring if it is absent.
     pub fn some_ozid(&self) -> Outcome<OzoneBotId> {
         match &self.ozid {
             Some(ozid) => Ok(ozid.clone()),
@@ -95,6 +102,7 @@ impl<
                 Identifier, Missing)),
         }
     }
+    /// Returns a clone of the bot's channel, erroring if it is absent.
     pub fn some_chan(&self) -> Outcome<Simplex<OzoneMsg<UIDL, UID, ENC, KH>>> {
         match &self.chan {
             Some(chan) => Ok(chan.clone()),
@@ -230,50 +238,75 @@ impl<
     }
 
     // Use
+    /// Returns the per-zone cache-bot handles.
     pub fn all_cbots(&self)     -> &Vec<Vec<Handle<UIDL, UID, ENC, KH>>> { &self.cbots }
+    /// Returns the per-zone file-bot handles.
     pub fn all_fbots(&self)     -> &Vec<Vec<Handle<UIDL, UID, ENC, KH>>> { &self.fbots }
+    /// Returns the per-zone init-garbage-bot handles.
     pub fn all_igbots(&self)    -> &Vec<Vec<Handle<UIDL, UID, ENC, KH>>> { &self.igbots }
+    /// Returns the per-zone reader-bot handles.
     pub fn all_rbots(&self)     -> &Vec<Vec<Handle<UIDL, UID, ENC, KH>>> { &self.rbots }
+    /// Returns the per-zone writer-bot handles.
     pub fn all_wbots(&self)     -> &Vec<Vec<Handle<UIDL, UID, ENC, KH>>> { &self.wbots }
+    /// Returns the zone-bot handles.
     pub fn all_zbots(&self)     -> &Vec<Handle<UIDL, UID, ENC, KH>>      { &self.zbots }
+    /// Returns the config-bot handle.
     pub fn cfg(&self)           -> &Handle<UIDL, UID, ENC, KH>           { &self.cfg }
+    /// Returns the server-bot handles.
     pub fn all_sbots(&self)     -> &Vec<Handle<UIDL, UID, ENC, KH>>      { &self.sbots }
+    /// Returns the wait group that releases once all bots have initialised.
     pub fn wait_init_ref(&self) -> &WaitGroup                       { &self.wait_init }
+    /// Returns the wait group that releases once all bots have ended.
     pub fn wait_end_ref(&self)  -> &WaitGroup                       { &self.wait_end }
 
+    /// Returns the zone-bot handle for the given zone.
     pub fn get_zbot(&self, zind: &ZoneInd) -> Outcome<&Handle<UIDL, UID, ENC, KH>> {
         res!(self.check_zone_index(**zind));
         Ok(&self.zbots[**zind])
     }
 
     // Mutate
+    /// Returns a mutable reference to the per-zone cache-bot handles.
     pub fn cbots_mut(&mut self)     -> &mut Vec<Vec<Handle<UIDL, UID, ENC, KH>>> { &mut self.cbots }
+    /// Returns a mutable reference to the per-zone file-bot handles.
     pub fn fbots_mut(&mut self)     -> &mut Vec<Vec<Handle<UIDL, UID, ENC, KH>>> { &mut self.fbots }
+    /// Returns a mutable reference to the per-zone init-garbage-bot handles.
     pub fn igbots_mut(&mut self)    -> &mut Vec<Vec<Handle<UIDL, UID, ENC, KH>>> { &mut self.igbots }
+    /// Returns a mutable reference to the per-zone reader-bot handles.
     pub fn rbots_mut(&mut self)     -> &mut Vec<Vec<Handle<UIDL, UID, ENC, KH>>> { &mut self.rbots }
+    /// Returns a mutable reference to the per-zone writer-bot handles.
     pub fn wbots_mut(&mut self)     -> &mut Vec<Vec<Handle<UIDL, UID, ENC, KH>>> { &mut self.wbots }
+    /// Returns a mutable reference to the zone-bot handles.
     pub fn zbots_mut(&mut self)     -> &mut Vec<Handle<UIDL, UID, ENC, KH>>      { &mut self.zbots }
+    /// Returns a mutable reference to the config-bot handle.
     pub fn cfg_mut(&mut self)       -> &mut Handle<UIDL, UID, ENC, KH>           { &mut self.cfg }
+    /// Returns a mutable reference to the server-bot handles.
     pub fn sbots_mut(&mut self)     -> &mut Vec<Handle<UIDL, UID, ENC, KH>>      { &mut self.sbots }
 
+    /// Stores the handle for the server bot at the given pool index.
     pub fn set_sbot(&mut self, bpind: &BotPoolInd, hand: Handle<UIDL, UID, ENC, KH>) -> Outcome<()> {
         self.sbots[**bpind] = hand;
         Ok(())
     }
+    /// Stores the handle for the zone bot of the given zone.
     pub fn set_zbot(&mut self, zind: &ZoneInd, hand: Handle<UIDL, UID, ENC, KH>) -> Outcome<()> {
         res!(self.check_zone_index(**zind));
         self.zbots[**zind] = hand;
         Ok(())
     }
+    /// Stores the config-bot handle.
     pub fn set_cfg(&mut self, hand: Handle<UIDL, UID, ENC, KH>) { self.cfg = hand; }
 
+    /// Blocks until every bot has signalled that it has initialised.
     pub fn wait_init(self) {
         self.wait_init.wait();
     }
+    /// Blocks until every bot has signalled that it has ended.
     pub fn wait_end(self) {
         self.wait_end.wait();
     }
 
+    /// Stores the handle for the worker bot of the given type at the given index.
     pub fn set_worker_bot(
         &mut self,
         wtyp:   &WorkerType,
@@ -303,6 +336,7 @@ impl<
         Ok(())
     }
 
+    /// Logs a message for every bot whose thread has not yet finished.
     pub fn report_status(&self) {
         for z in 0..self.nz {
             for pool in [

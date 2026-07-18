@@ -54,9 +54,12 @@ impl<
 >
     Protocol<C, ML, SL, UL, P>
 {
+    /// Processes an incoming UDP packet, wrapping any error with the source
+    /// address for context. Delegates the decode, guard checks, validation and
+    /// message assembly to the internal handler.
     pub async fn handle(
         self,
-        buf:        [u8; constant::UDP_BUFFER_SIZE], 
+        buf:        [u8; constant::UDP_BUFFER_SIZE],
         n:          usize,
         src_addr:   SocketAddr,
         trg:        Arc<UdpSocket>,

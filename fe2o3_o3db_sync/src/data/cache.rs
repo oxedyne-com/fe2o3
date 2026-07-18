@@ -21,6 +21,7 @@ use std::{
     marker::PhantomData,
 };
 
+/// Numeric identifier of a cache.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CacheId(pub u16);
 
@@ -29,8 +30,9 @@ impl fmt::Display for CacheId {
         write!(f, "CacheId({})", self.0)
     }
 }
-    
+
 impl CacheId {
+    /// Creates a cache identifier from a raw number.
     pub fn new(c: u16) -> Self {
         Self(c)
     }
@@ -42,8 +44,11 @@ pub enum ValueOrLocation<
     const UIDL: usize,
     UID: NumIdDat<UIDL>,
 > {
+    /// The key has been deleted; only its tombstone metadata remains.
     Deleted(Meta<UIDL, UID>),
+    /// The value is held in the cache, with its metadata.
     Value(Vec<u8>, Meta<UIDL, UID>),
+    /// Only the value's on-disk location is cached, not the value itself.
     Location(MetaLocation<UIDL, UID>),
 }
 
@@ -63,11 +68,16 @@ impl<
 >
     MetaLocation<UIDL, UID>
 {
+    /// Returns the record metadata by reference.
     pub fn meta(&self)          -> &Meta<UIDL, UID> { &self.meta }
+    /// Consumes self and returns the record metadata.
     pub fn meta_move(self)      -> Meta<UIDL, UID>  { self.meta }
+    /// Returns the file location by reference.
     pub fn file_location(&self) -> &FileLocation    { &self.floc }
+    /// Returns the number of the file holding the record.
     pub fn file_number(&self)   -> FileNum          { self.floc.file_number() }
 
+    /// Updates the record's start offset within its file, e.g. after garbage collection.
     pub fn new_start_position(&mut self, new_start: u64) {
         self.floc.start = new_start
     }
@@ -102,15 +112,22 @@ impl<
     }
 }
 
+/// A key-value pair together with its routing hash, metadata and owning
+/// cache-bot pool index, as it flows through the write path.
 #[derive(Clone, Debug)]
 pub struct KeyVal<
     const UIDL: usize,
     UID: NumIdDat<UIDL>,
 > {
+    /// The routed key.
     pub key:    Key,
+    /// The value bytes.
     pub val:    Vec<u8>,
+    /// Routing hash used to select the owning cache bot.
     pub chash:  alias::ChooseHash,
+    /// Record metadata (user, timestamp).
     pub meta:   Meta<UIDL, UID>,
+    /// Cache-bot pool index owning the key.
     pub cbpind: usize
 }
 
@@ -120,17 +137,22 @@ impl<
 >
     KeyVal<UIDL, UID>
 {
+    /// Stamps the current time into the metadata.
     pub fn stamp_time_now(&mut self) -> Outcome<()> {
         self.meta.stamp_time_now()
     }
 }
 
+/// An entry in the cache map: either a located value (whose bytes may or may
+/// not be resident) or a deletion tombstone.
 #[derive(Clone, Debug)]
 pub enum CacheEntry<
     const UIDL: usize,
     UID: NumIdDat<UIDL>,
 > {
+    /// A value's location, with its bytes cached in the `Option` when resident.
     LocatedValue(MetaLocation<UIDL, UID>, Option<Vec<u8>>),
+    /// A deletion tombstone carrying the metadata of the delete.
     Deleted(Meta<UIDL, UID>),
 }
 
@@ -156,6 +178,7 @@ impl<
 {
     const MLOC_SIZE: usize = std::mem::size_of::<MetaLocation<UIDL, UID>>();
 
+    /// Creates an empty cache attributed to the given creator bot.
     pub fn new(ozid: Option<&OzoneBotId>) -> Self {
         Self {
             ozid: ozid.map(|id| id.clone()),
@@ -173,6 +196,7 @@ impl<
     pub fn get_lim(&self) -> usize { self.lim }
     /// Getter for a reference to the cache map.
     pub fn map(&self) -> &BTreeMap<Vec<u8>, CacheEntry<UIDL, UID>> { &self.map }
+    /// Returns the estimated in-memory size of a single `MetaLocation` in bytes.
     pub fn mloc_size(&self) -> usize {
         self.csizes.mloc
     }
@@ -180,11 +204,13 @@ impl<
     /// Returns the cache size in Mebibytes (1 [MiB] = 1024^2 bytes).
     pub fn size_mb(&self) -> f64 { (self.size as f64) / 1_048_576.0 }
 
+    /// Returns the cache size limit in Mebibytes.
     pub fn lim_size_mb(&self) -> f64 { (self.lim as f64) / 1_048_576.0 }
 
     /// Returns the fraction of the cache size compared to the size limit.
     pub fn size_fraction(&self) -> f64 { self.size_mb() / (self.lim as f64) }
 
+    /// Sets the cache size limit in bytes.
     pub fn set_lim(&mut self, lim: usize) {
         self.lim = lim;
     }
@@ -370,6 +396,8 @@ impl<
         }
     }
 
+    /// Drops the cached value bytes for every entry while retaining their
+    /// locations, freeing memory without losing the index.
     pub fn clear_all_values(&mut self) {
         for (_k, centry) in self.map.iter_mut() {
             if let CacheEntry::LocatedValue(_, val) = centry {
