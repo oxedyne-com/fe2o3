@@ -8,6 +8,13 @@ use oxedyne_fe2o3_steel::srv::publish::{
     Markup,
     PostKind,
     PostState,
+    PublishConfig,
+    send::{
+        self,
+        BlueskyCreds,
+        DestCreds,
+        MastodonCreds,
+    },
     store::{
         self,
         Record,
@@ -101,6 +108,56 @@ fn a_post_survives_the_database() -> Outcome<()> {
     let posts = res!(store::list(&handle, "test"));
     assert_eq!(posts.len(), 1, "the rebuilt index resurrected a deleted post");
     assert_eq!(posts[0].slug, "on-rent");
+
+    Ok(())
+}
+
+/// Destination credentials written to the database come back out of it, and the effective set lays the
+/// stored ones over the config's.
+#[test]
+fn credentials_survive_the_database() -> Outcome<()> {
+    let (db, uid, _tmp) = match common::test_db() {
+        Ok(t)   => t,
+        Err(e)  => {
+            println!("no test database available, skipping: {}", e);
+            return Ok(());
+        }
+    };
+    let handle = (db, uid);
+
+    // Nothing set is an empty set, not an error.
+    let creds = res!(send::get_creds(&handle));
+    assert_eq!(creds, DestCreds::default());
+
+    // A Bluesky credential written and read back is the one that went in.
+    let stored = DestCreds {
+        mastodon:   None,
+        bluesky:    Some(BlueskyCreds {
+            host:           fmt!("bsky.social"),
+            handle:         fmt!("me.bsky.social"),
+            app_password:   fmt!("app-secret"),
+        }),
+    };
+    res!(send::put_creds(&handle, &stored));
+    assert_eq!(res!(send::get_creds(&handle)), stored);
+
+    // The effective set lays the store over the config: the config's Mastodon survives, the store's
+    // Bluesky wins where both could name one.
+    let cfg = PublishConfig {
+        creds: DestCreds {
+            mastodon:   Some(MastodonCreds { base_url: fmt!("https://m"), token: fmt!("cfg-tok") }),
+            bluesky:    Some(BlueskyCreds {
+                host: fmt!("bsky.social"), handle: fmt!("cfg"), app_password: fmt!("cfg-pw"),
+            }),
+        },
+        ..Default::default()
+    };
+    let eff = res!(send::effective_creds(&handle, &cfg));
+    assert!(eff.mastodon.is_some(), "config Mastodon was lost");
+    match &eff.bluesky {
+        Some(b) => assert_eq!(b.handle, "me.bsky.social", "store Bluesky did not win"),
+        None    => return Err(err!("effective Bluesky was lost"; Test, Missing)),
+    }
 
     Ok(())
 }
