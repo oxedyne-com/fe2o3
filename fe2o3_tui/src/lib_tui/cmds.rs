@@ -79,9 +79,14 @@ pub fn list_directory_contents(cmd: &MsgCmd) -> Outcome<Evaluation> {
             if mdata.permissions().readonly() {"r"} else {" "},
         ));
         // 3 name
-        line.push(format!("{}", 
-            entry.path().file_name().unwrap().to_str().unwrap(),
-        ));
+        let name = match entry.path().file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None    => return Err(err!(
+                "Directory entry {:?} has an invalid (empty or non-UTF-8) name.",
+                entry.path();
+            Invalid, Input)),
+        };
+        line.push(name);
         lines.push(line);
     }
     

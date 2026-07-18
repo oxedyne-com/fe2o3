@@ -383,12 +383,12 @@ impl<S: Sink> Renderer<S> for CrosstermRenderer<S> {
     }
 
     fn set_style(&mut self, style: &Style, when: When) -> Outcome<()> {
-        // Set foreground color
+        // Set foreground colour
         if let Some(col) = style.cols.fore {
             res!(self.set_fore_colour(&col, when));
         }
 
-        // Set background color
+        // Set background colour
         if let Some(col) = style.cols.back {
             res!(self.set_back_colour(&col, when));
         }

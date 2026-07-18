@@ -59,8 +59,20 @@ impl fmt::Display for Float64 {
     }
 }
 
-pub fn string_to_digit_vec(input: &str) -> Vec<u8> {
-    input.chars().map(|c| c.to_digit(10).unwrap() as u8).collect()
+/// Converts a string of decimal digit characters into a vector of their
+/// numeric values (`0..=9`). Returns an error if any character is not a
+/// decimal digit, rather than panicking on malformed input.
+pub fn string_to_digit_vec(input: &str) -> Outcome<Vec<u8>> {
+    let mut digits = Vec::with_capacity(input.len());
+    for c in input.chars() {
+        match c.to_digit(10) {
+            Some(d) => digits.push(d as u8),
+            None    => return Err(err!(
+                "Non-digit character '{}' in numeric string {:?}.", c, input;
+            Invalid, Input)),
+        }
+    }
+    Ok(digits)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -748,7 +760,7 @@ mod tests {
     fn test_integers_base_10_000() -> Outcome<()> {
         for i in 1..10001 {
             let s0 = i.to_string();
-            let digits = string_to_digit_vec(&s0);
+            let digits = res!(string_to_digit_vec(&s0));
             let ns = res!(NumberString::validate(&s0));
             let expected = NumberString {
                 src:    s0.clone(),
@@ -766,7 +778,7 @@ mod tests {
         for i in -10001..0i32 {
             let s0 = i.to_string();
             let s00 = i.abs().to_string();
-            let digits = string_to_digit_vec(&s00);
+            let digits = res!(string_to_digit_vec(&s00));
             let ns = res!(NumberString::validate(&s0));
             let expected = NumberString {
                 src:    s0,
@@ -786,7 +798,7 @@ mod tests {
             let s0 = i.to_string();
             let mut s1 = s0.clone();
             s1.insert_str(0, "0000");
-            let digits = string_to_digit_vec(&s0);
+            let digits = res!(string_to_digit_vec(&s0));
             let ns = res!(NumberString::validate(&s1));
             let expected = NumberString {
                 src:    s1,
@@ -1127,7 +1139,7 @@ mod tests {
                 let mut s = sf.clone();
                 s.insert(0, '.');
                 s.insert_str(0, &si);
-                let digits = string_to_digit_vec(&si);
+                let digits = res!(string_to_digit_vec(&si));
                 let ns = res!(NumberString::validate(&s));
                 let ftz = NumberString::count_trailing_zeros(&s);
                 let expected = NumberString {
@@ -1155,7 +1167,7 @@ mod tests {
                 let mut s = sf.clone();
                 s.insert(0, '.');
                 s.insert_str(0, &si);
-                let digits = string_to_digit_vec(&si0);
+                let digits = res!(string_to_digit_vec(&si0));
                 let ns = res!(NumberString::validate(&s));
                 let ftz = NumberString::count_trailing_zeros(&s);
                 let expected = NumberString {
@@ -1235,7 +1247,7 @@ mod tests {
                     s.insert_str(0, &sf);
                     s.insert(0, '.');
                     s.insert_str(0, &si);
-                    let digits = string_to_digit_vec(&si);
+                    let digits = res!(string_to_digit_vec(&si));
                     let ns = res!(NumberString::validate(&s));
                     let expected = NumberString {
                         src:    s,
@@ -1271,7 +1283,7 @@ mod tests {
                         s.insert_str(0, &sf);
                         s.insert(0, '.');
                         s.insert_str(0, &si);
-                        let digits = string_to_digit_vec(&si);
+                        let digits = res!(string_to_digit_vec(&si));
                         let ns = res!(NumberString::validate(&s));
                         let expected = NumberString {
                             src:    s,

@@ -86,13 +86,10 @@ pub trait Bot<
 
     fn error_count(&self) -> Outcome<usize> {
         let errc = self.errc();
-        match errc.lock() {
-            Err(_) => Err(err!( // This is bad.
-                "{:?}: Cannot acquire the error counter lock, another thread may have \
-                terminated while holding the lock.", self.id();
-            Lock, Poisoned)),
-            Ok(c) => Ok(*c),
-        }
+        let c = lock_mutex!(errc,
+            "{:?}: Cannot acquire the error counter lock, another thread may have \
+            terminated while holding the lock.", self.id());
+        Ok(*c)
     }
 
     fn inc_err(&self) {
