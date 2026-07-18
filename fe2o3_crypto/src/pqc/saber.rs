@@ -731,10 +731,14 @@ pub trait SaberAlgorithm: fmt::Display {
         // 4
         let buf = [&m[..], &hash_pk[..]].concat();
         // 5
-        let mut kr = [0u8; 2 * KEY_BYTES];
+        // Two `KEY_BYTES`-wide halves: `kr[0]` is the key part, `kr[1]`
+        // the seed part. Splitting into fixed sub-arrays lets the seed be
+        // passed as `&[u8; SEED_BYTES]` without a fallible slice-to-array
+        // conversion (`KEY_BYTES == SEED_BYTES`).
+        let mut kr = [[0u8; KEY_BYTES]; 2];
         let mut hasher = Sha3::v512();
         hasher.update(&buf);
-        hasher.finalize(&mut kr);
+        hasher.finalize(kr.as_flattened_mut());
 
         // 7
         let ciphertext =
@@ -743,7 +747,7 @@ pub trait SaberAlgorithm: fmt::Display {
             >(
                 &self,
                 &m,
-                TryInto::<&[u8; SEED_BYTES]>::try_into(&kr[KEY_BYTES..]).unwrap(),
+                &kr[1],
                 pk,
             );
 
@@ -753,7 +757,7 @@ pub trait SaberAlgorithm: fmt::Display {
         hasher.update(&ciphertext.to_bytes::<CT>());
         hasher.finalize(&mut rdash);
         // 9
-        let krdash = [&kr[..KEY_BYTES], &rdash[..]].concat();
+        let krdash = [&kr[0][..], &rdash[..]].concat();
         // 10
         let mut session_key = [0u8; KEY_BYTES];
         let mut hasher = Sha3::v256();
@@ -783,7 +787,7 @@ pub trait SaberAlgorithm: fmt::Display {
         pk_seed:    &[u8],
         mut secret: &mut [u8], // Session key
     ) ->
-        Vec<u8> // Ciphertext
+        Outcome<Vec<u8>> // Ciphertext
     {
         // 1
         let mut m = [0_u8; KEY_BYTES];
@@ -801,21 +805,40 @@ pub trait SaberAlgorithm: fmt::Display {
         // 4
         let buf = [&m[..], &hash_pk[..]].concat();
         // 5
-        let mut kr = [0u8; 2 * KEY_BYTES];
+        // Two `KEY_BYTES`-wide halves: `kr[0]` is the key part, `kr[1]`
+        // the seed part. Splitting into fixed sub-arrays lets the seed be
+        // passed as `&[u8; SEED_BYTES]` without a fallible slice-to-array
+        // conversion (`KEY_BYTES == SEED_BYTES`).
+        let mut kr = [[0u8; KEY_BYTES]; 2];
         let mut hasher = Sha3::v512();
         hasher.update(&buf);
-        hasher.finalize(&mut kr);
+        hasher.finalize(kr.as_flattened_mut());
 
         // 7
+        // Validate the caller-supplied public-key material at this
+        // boundary rather than panicking, since it originates outside
+        // the library (the WebAssembly entry points).
+        let pk_key_arr = match TryInto::<&[u8; PVCB]>::try_into(pk_key) {
+            Ok(a)  => a,
+            Err(_) => return Err(err!(
+                "wasm KEM encapsulation: public-key part is {} bytes, expected {}.",
+                pk_key.len(), PVCB; Input, Invalid)),
+        };
+        let pk_seed_arr = match TryInto::<&[u8; SEED_BYTES]>::try_into(pk_seed) {
+            Ok(a)  => a,
+            Err(_) => return Err(err!(
+                "wasm KEM encapsulation: public-key seed is {} bytes, expected {}.",
+                pk_seed.len(), SEED_BYTES; Input, Invalid)),
+        };
         let ciphertext =
             Self::generic_pke_enc_wasm::<
                 L, PVB, L_PVB, PVCB, PCB, L_PCB, SBK,
             >(
                 &self,
                 &m,
-                TryInto::<&[u8; SEED_BYTES]>::try_into(&kr[KEY_BYTES..]).unwrap(),
-                TryInto::<&[u8; PVCB]>::try_into(pk_key).unwrap(),
-                TryInto::<&[u8; SEED_BYTES]>::try_into(pk_seed).unwrap(),
+                &kr[1],
+                pk_key_arr,
+                pk_seed_arr,
             );
 
         // 8
@@ -824,13 +847,13 @@ pub trait SaberAlgorithm: fmt::Display {
         hasher.update(&ciphertext);
         hasher.finalize(&mut rdash);
         // 9
-        let krdash = [&kr[..KEY_BYTES], &rdash[..]].concat();
+        let krdash = [&kr[0][..], &rdash[..]].concat();
         // 10
         let mut hasher = Sha3::v256();
         hasher.update(&krdash);
         hasher.finalize(&mut secret);
 
-        ciphertext
+        Ok(ciphertext)
     }
 
     /// IND-CCA Algorithm 22
@@ -866,10 +889,14 @@ pub trait SaberAlgorithm: fmt::Display {
         // 3
         let buf = [&m[..], &sk.pk_hash_ref()[..]].concat();
         // 4
-        let mut kr = [0u8; 2 * KEY_BYTES];
+        // Two `KEY_BYTES`-wide halves: `kr[0]` is the key part, `kr[1]`
+        // the seed part. Splitting into fixed sub-arrays lets the seed be
+        // passed as `&[u8; SEED_BYTES]` without a fallible slice-to-array
+        // conversion (`KEY_BYTES == SEED_BYTES`).
+        let mut kr = [[0u8; KEY_BYTES]; 2];
         let mut hasher = Sha3::v512();
         hasher.update(&buf);
-        hasher.finalize(&mut kr);
+        hasher.finalize(kr.as_flattened_mut());
         // 6
         let ciphertext_dash =
             Self::generic_pke_enc::<
@@ -877,7 +904,7 @@ pub trait SaberAlgorithm: fmt::Display {
             >(
                 &self,
                 &m,
-                TryInto::<&[u8; SEED_BYTES]>::try_into(&kr[KEY_BYTES..]).unwrap(),
+                &kr[1],
                 sk.pk_ref(),
             );
         let ctdash_bytes = ciphertext_dash.to_bytes::<CT>();
@@ -891,7 +918,7 @@ pub trait SaberAlgorithm: fmt::Display {
         // 9-12
         // the order of these concatenations seems to be erroneously reversed in the report text
         let temp = if same {
-            [&kr[..KEY_BYTES], &rdash[..]].concat()
+            [&kr[0][..], &rdash[..]].concat()
         } else {
             [&sk.rand_ref()[..], &rdash[..]].concat()
         };
@@ -1594,15 +1621,18 @@ pub trait SaberAlgorithm: fmt::Display {
         shake.update(&seed[..]);
         shake.finalize(&mut buf);
     
+        // `buf` divides into `L` contiguous `P`-byte polynomial blocks;
+        // splitting into fixed-size chunks avoids a fallible
+        // slice-to-array conversion.
+        let (blocks, _rest) = buf.as_chunks::<P>();
     	for i in 0..L {
-            let k = i*P;
     		a[i] = Self::bs2polvecq::<
                 SABER_N,
                 L,
                 POLY_BYTES,
                 P,
             >(
-                TryInto::<&[u8; P]>::try_into(&buf[k..k+P]).unwrap(),
+                &blocks[i],
             );
     	}
     }
@@ -2369,13 +2399,12 @@ mod tests {
 
         let (pk, sk) = scheme.kem_keygen_test(seed_a, seed_s, rand);
 
-        let file = OpenOptions::new()
+        let file = res!(OpenOptions::new()
             .read(false)
             .write(true)
             .create(true)
             .append(false)
-            .open(format!("validation_output_for_{}.txt", which))
-            .unwrap();
+            .open(format!("validation_output_for_{}.txt", which)));
         let mut fb = BufWriter::new(file);
 
         writeln!(&mut fb, "Rust secret key: length {}", sk.byte_len());

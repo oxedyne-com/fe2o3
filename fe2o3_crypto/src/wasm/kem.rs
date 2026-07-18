@@ -43,7 +43,7 @@ pub fn key_encap(
                 pk_key,
                 pk_seed,
                 &mut secret,
-            );
+            ).unwrap_or_default();
         },
         saber::SABER_ID => {
             let scheme = saber::Saber;
@@ -59,7 +59,7 @@ pub fn key_encap(
                 pk_key,
                 pk_seed,
                 &mut secret,
-            );
+            ).unwrap_or_default();
         },
         saber::FIRESABER_ID => {
             let scheme = saber::FireSaber;
@@ -75,7 +75,7 @@ pub fn key_encap(
                 pk_key,
                 pk_seed,
                 &mut secret,
-            );
+            ).unwrap_or_default();
         },
         _ => unimplemented!(),
     }
