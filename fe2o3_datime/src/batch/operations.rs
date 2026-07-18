@@ -94,7 +94,7 @@ impl DateArithmetic {
         let mut results = Vec::with_capacity(pairs.len());
         
         for (start_date, end_date) in pairs {
-            let business_days = Self::calculate_business_days(start_date, end_date)?;
+            let business_days = ok!(Self::calculate_business_days(start_date, end_date));
             results.push(business_days);
         }
         

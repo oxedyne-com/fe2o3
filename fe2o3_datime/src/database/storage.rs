@@ -169,29 +169,29 @@ impl DatabaseStorable for CalClock {
             
             StorageFormat::Component => {
                 let components = res!(record.primary_data.get_map().ok_or_else(|| err!("Expected map for component format"; Invalid, Input)));
-                let year = res!(components.get(&Dat::Str("year".to_string()))
-                    .ok_or_else(|| err!("Missing year component"; Invalid, Input))?
+                let year = res!(ok!(components.get(&Dat::Str("year".to_string()))
+                    .ok_or_else(|| err!("Missing year component"; Invalid, Input)))
                     .get_i32().ok_or_else(|| err!("Invalid year type"; Invalid, Input)));
-                let month = res!(components.get(&Dat::Str("month".to_string()))
-                    .ok_or_else(|| err!("Missing month component"; Invalid, Input))?
+                let month = res!(ok!(components.get(&Dat::Str("month".to_string()))
+                    .ok_or_else(|| err!("Missing month component"; Invalid, Input)))
                     .get_u8().ok_or_else(|| err!("Invalid month type"; Invalid, Input)));
-                let day = res!(components.get(&Dat::Str("day".to_string()))
-                    .ok_or_else(|| err!("Missing day component"; Invalid, Input))?
+                let day = res!(ok!(components.get(&Dat::Str("day".to_string()))
+                    .ok_or_else(|| err!("Missing day component"; Invalid, Input)))
                     .get_u8().ok_or_else(|| err!("Invalid day type"; Invalid, Input)));
-                let hour = res!(components.get(&Dat::Str("hour".to_string()))
-                    .ok_or_else(|| err!("Missing hour component"; Invalid, Input))?
+                let hour = res!(ok!(components.get(&Dat::Str("hour".to_string()))
+                    .ok_or_else(|| err!("Missing hour component"; Invalid, Input)))
                     .get_u8().ok_or_else(|| err!("Invalid hour type"; Invalid, Input)));
-                let minute = res!(components.get(&Dat::Str("minute".to_string()))
-                    .ok_or_else(|| err!("Missing minute component"; Invalid, Input))?
+                let minute = res!(ok!(components.get(&Dat::Str("minute".to_string()))
+                    .ok_or_else(|| err!("Missing minute component"; Invalid, Input)))
                     .get_u8().ok_or_else(|| err!("Invalid minute type"; Invalid, Input)));
-                let second = res!(components.get(&Dat::Str("second".to_string()))
-                    .ok_or_else(|| err!("Missing second component"; Invalid, Input))?
+                let second = res!(ok!(components.get(&Dat::Str("second".to_string()))
+                    .ok_or_else(|| err!("Missing second component"; Invalid, Input)))
                     .get_u8().ok_or_else(|| err!("Invalid second type"; Invalid, Input)));
-                let nanosecond = res!(components.get(&Dat::Str("nanosecond".to_string()))
-                    .ok_or_else(|| err!("Missing nanosecond component"; Invalid, Input))?
+                let nanosecond = res!(ok!(components.get(&Dat::Str("nanosecond".to_string()))
+                    .ok_or_else(|| err!("Missing nanosecond component"; Invalid, Input)))
                     .get_u32().ok_or_else(|| err!("Invalid nanosecond type"; Invalid, Input)));
-                let zone_id = res!(components.get(&Dat::Str("timezone".to_string()))
-                    .ok_or_else(|| err!("Missing timezone component"; Invalid, Input))?
+                let zone_id = res!(ok!(components.get(&Dat::Str("timezone".to_string()))
+                    .ok_or_else(|| err!("Missing timezone component"; Invalid, Input)))
                     .get_string().ok_or_else(|| err!("Invalid timezone type"; Invalid, Input)));
                 let zone = res!(CalClockZone::new(&zone_id));
                 
@@ -320,20 +320,20 @@ impl DatabaseStorable for ClockTime {
             
             StorageFormat::Component => {
                 let components = res!(record.primary_data.get_map().ok_or_else(|| err!("Expected map"; Invalid, Input)));
-                let hour = res!(components.get(&Dat::Str("hour".to_string()))
-                    .ok_or_else(|| err!("Missing hour component"; Invalid, Input))?
+                let hour = res!(ok!(components.get(&Dat::Str("hour".to_string()))
+                    .ok_or_else(|| err!("Missing hour component"; Invalid, Input)))
                     .get_u8().ok_or_else(|| err!("Invalid component type"; Invalid, Input)));
-                let minute = res!(components.get(&Dat::Str("minute".to_string()))
-                    .ok_or_else(|| err!("Missing minute component"; Invalid, Input))?
+                let minute = res!(ok!(components.get(&Dat::Str("minute".to_string()))
+                    .ok_or_else(|| err!("Missing minute component"; Invalid, Input)))
                     .get_u8().ok_or_else(|| err!("Invalid component type"; Invalid, Input)));
-                let second = res!(components.get(&Dat::Str("second".to_string()))
-                    .ok_or_else(|| err!("Missing second component"; Invalid, Input))?
+                let second = res!(ok!(components.get(&Dat::Str("second".to_string()))
+                    .ok_or_else(|| err!("Missing second component"; Invalid, Input)))
                     .get_u8().ok_or_else(|| err!("Invalid component type"; Invalid, Input)));
-                let nanosecond = res!(components.get(&Dat::Str("nanosecond".to_string()))
-                    .ok_or_else(|| err!("Missing nanosecond component"; Invalid, Input))?
+                let nanosecond = res!(ok!(components.get(&Dat::Str("nanosecond".to_string()))
+                    .ok_or_else(|| err!("Missing nanosecond component"; Invalid, Input)))
                     .get_u32().ok_or_else(|| err!("Invalid component type"; Invalid, Input)));
-                let zone_id = res!(components.get(&Dat::Str("timezone".to_string()))
-                    .ok_or_else(|| err!("Missing timezone component"; Invalid, Input))?
+                let zone_id = res!(ok!(components.get(&Dat::Str("timezone".to_string()))
+                    .ok_or_else(|| err!("Missing timezone component"; Invalid, Input)))
                     .get_string().ok_or_else(|| err!("Invalid component type"; Invalid, Input)));
                 let zone = res!(CalClockZone::new(&zone_id));
                 
@@ -460,17 +460,17 @@ impl DatabaseStorable for CalendarDate {
             
             StorageFormat::Component => {
                 let components = res!(record.primary_data.get_map().ok_or_else(|| err!("Expected map"; Invalid, Input)));
-                let year = res!(components.get(&Dat::Str("year".to_string()))
-                    .ok_or_else(|| err!("Missing year component"; Invalid, Input))?
+                let year = res!(ok!(components.get(&Dat::Str("year".to_string()))
+                    .ok_or_else(|| err!("Missing year component"; Invalid, Input)))
                     .get_i32().ok_or_else(|| err!("Invalid component type"; Invalid, Input)));
-                let month = res!(components.get(&Dat::Str("month".to_string()))
-                    .ok_or_else(|| err!("Missing month component"; Invalid, Input))?
+                let month = res!(ok!(components.get(&Dat::Str("month".to_string()))
+                    .ok_or_else(|| err!("Missing month component"; Invalid, Input)))
                     .get_u8().ok_or_else(|| err!("Invalid component type"; Invalid, Input)));
-                let day = res!(components.get(&Dat::Str("day".to_string()))
-                    .ok_or_else(|| err!("Missing day component"; Invalid, Input))?
+                let day = res!(ok!(components.get(&Dat::Str("day".to_string()))
+                    .ok_or_else(|| err!("Missing day component"; Invalid, Input)))
                     .get_u8().ok_or_else(|| err!("Invalid component type"; Invalid, Input)));
-                let zone_id = res!(components.get(&Dat::Str("timezone".to_string()))
-                    .ok_or_else(|| err!("Missing timezone component"; Invalid, Input))?
+                let zone_id = res!(ok!(components.get(&Dat::Str("timezone".to_string()))
+                    .ok_or_else(|| err!("Missing timezone component"; Invalid, Input)))
                     .get_string().ok_or_else(|| err!("Invalid component type"; Invalid, Input)));
                 let zone = res!(CalClockZone::new(&zone_id));
                 

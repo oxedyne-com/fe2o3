@@ -681,9 +681,9 @@ impl AdvancedNtpClient {
 	
 	/// Converts NtpData to CalClock.
 	fn data_to_calclock(&self, data: &NtpData, zone: CalClockZone) -> Outcome<CalClock> {
-		let current_time = std::time::SystemTime::now()
+		let current_time = ok!(std::time::SystemTime::now()
 			.duration_since(std::time::UNIX_EPOCH)
-			.map_err(|e| err!("System time error: {}", e; System))?;
+			.map_err(|e| err!("System time error: {}", e; System)));
 		
 		let offset_seconds = data.offset.total_seconds() as f64;
 		let adjusted_time = current_time.as_secs_f64() + offset_seconds;

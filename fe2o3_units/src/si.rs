@@ -1,6 +1,6 @@
 use crate::system::System;
 
-//use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::prelude::*;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SI {
@@ -66,28 +66,28 @@ impl System for SI {
 impl std::fmt::Display for SI {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.time != 0 {
-            write!(f, "[{}]^{}", Self::TIME_UNIT, self.time)?;
+            ok!(write!(f, "[{}]^{}", Self::TIME_UNIT, self.time));
         }
         if self.length != 0 {
-            write!(f, "[{}]^{}", Self::LENGTH_UNIT, self.length)?;
+            ok!(write!(f, "[{}]^{}", Self::LENGTH_UNIT, self.length));
         }
         if self.mass != 0 {
-            write!(f, "[{}]^{}", Self::MASS_UNIT, self.mass)?;
+            ok!(write!(f, "[{}]^{}", Self::MASS_UNIT, self.mass));
         }
         if self.current != 0 {
-            write!(f, "[{}]^{}", Self::CURRENT_UNIT, self.current)?;
+            ok!(write!(f, "[{}]^{}", Self::CURRENT_UNIT, self.current));
         }
         if self.temp != 0 {
-            write!(f, "[{}]^{}", Self::TEMP_UNIT, self.temp)?;
+            ok!(write!(f, "[{}]^{}", Self::TEMP_UNIT, self.temp));
         }
         if self.amount != 0 {
-            write!(f, "[{}]^{}", Self::AMOUNT_UNIT, self.amount)?;
+            ok!(write!(f, "[{}]^{}", Self::AMOUNT_UNIT, self.amount));
         }
         if self.luminosity != 0 {
-            write!(f, "[{}]^{}", Self::LUMINOSITY_UNIT, self.luminosity)?;
+            ok!(write!(f, "[{}]^{}", Self::LUMINOSITY_UNIT, self.luminosity));
         }
         if self.data != 0 {
-            write!(f, "[{}]^{}", Self::DATA_UNIT, self.data)?;
+            ok!(write!(f, "[{}]^{}", Self::DATA_UNIT, self.data));
         }
         Ok(())
     }

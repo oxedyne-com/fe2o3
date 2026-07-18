@@ -181,9 +181,9 @@ pub fn url_encode(s: &str) -> String {
 /// as an empty string. No full JSON parser — just enough for extracting
 /// fields from webhook payloads.
 pub fn extract_value(block: &str, key: &str) -> Option<String> {
-    let key_pos = block.find(key)?;
+    let key_pos = ok!(block.find(key));
     let after_key = &block[key_pos + key.len()..];
-    let colon_pos = after_key.find(':')?;
+    let colon_pos = ok!(after_key.find(':'));
     let after_colon = after_key[colon_pos + 1..].trim_start();
     if after_colon.starts_with('"') {
         let content = &after_colon[1..];
@@ -201,7 +201,7 @@ pub fn extract_value(block: &str, key: &str) -> Option<String> {
 /// Extract a JSON string value for `key` within a section starting at
 /// `section_key`.
 pub fn extract_json_string(json: &str, section_key: &str, key: &str) -> Option<String> {
-    let section_start = json.find(section_key)?;
+    let section_start = ok!(json.find(section_key));
     let block = &json[section_start..json.len().min(section_start + 3000)];
     extract_value(block, key)
 }
@@ -344,8 +344,8 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(bytes.len() / 2);
     let mut i = 0;
     while i + 1 < bytes.len() {
-        let hi = nibble(bytes[i])?;
-        let lo = nibble(bytes[i + 1])?;
+        let hi = ok!(nibble(bytes[i]));
+        let lo = ok!(nibble(bytes[i + 1]));
         out.push((hi << 4) | lo);
         i += 2;
     }

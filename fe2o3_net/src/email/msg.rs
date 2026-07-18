@@ -39,13 +39,13 @@ pub struct EmailMessage {
 
 impl fmt::Display for EmailMessage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "From: {}", self.from)?;
-        writeln!(f, "To: {}", self.to.join(", "))?;
-        writeln!(f, "Subject: {}", self.subject)?;
+        ok!(writeln!(f, "From: {}", self.from));
+        ok!(writeln!(f, "To: {}", self.to.join(", ")));
+        ok!(writeln!(f, "Subject: {}", self.subject));
         for header in &self.headers {
-            writeln!(f, "{}", header)?;
+            ok!(writeln!(f, "{}", header));
         }
-        writeln!(f)?;
+        ok!(writeln!(f));
         write!(f, "{}", self.body)
     }
 }

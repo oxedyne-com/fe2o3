@@ -124,19 +124,19 @@ impl Duration for CalendarDuration {
 impl Display for CalendarDuration {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.years != 0 {
-            write!(f, "{}Y", self.years)?;
+            ok!(write!(f, "{}Y", self.years));
         }
         if self.months != 0 {
             if self.years != 0 {
-                write!(f, " ")?;
+                ok!(write!(f, " "));
             }
-            write!(f, "{}M", self.months)?;
+            ok!(write!(f, "{}M", self.months));
         }
         if self.days != 0 || (self.years == 0 && self.months == 0) {
             if self.years != 0 || self.months != 0 {
-                write!(f, " ")?;
+                ok!(write!(f, " "));
             }
-            write!(f, "{}D", self.days)?;
+            ok!(write!(f, "{}D", self.days));
         }
         Ok(())
     }

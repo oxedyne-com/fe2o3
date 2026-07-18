@@ -225,7 +225,7 @@ impl RecurrencePattern {
         let current_month = current_time.month();
         
         // Try current month first
-        if let Some(target_date) = self.find_monthly_weekday(current_year, current_month, week, target_day, zone)? {
+        if let Some(target_date) = ok!(self.find_monthly_weekday(current_year, current_month, week, target_day, zone)) {
             if target_date > *current_time {
                 return Ok(Some(target_date));
             }
@@ -238,7 +238,7 @@ impl RecurrencePattern {
             (current_year, current_month + 1)
         };
         
-        if let Some(target_date) = self.find_monthly_weekday(next_year, next_month, week, target_day, zone)? {
+        if let Some(target_date) = ok!(self.find_monthly_weekday(next_year, next_month, week, target_day, zone)) {
             Ok(Some(target_date))
         } else {
             Err(err!("Could not calculate monthly weekday occurrence"; Invalid, Range))

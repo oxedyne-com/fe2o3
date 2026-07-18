@@ -37,7 +37,7 @@ fn test_real_time_scheduler_demo() -> Outcome<()> {
     
     // High priority task
     let counter_clone = Arc::clone(&counter);
-    let high_priority_task = Task::new("high_priority_task", zone.clone())
+    let high_priority_task = ok!(Task::new("high_priority_task", zone.clone())
         .at_time(0, 0, 0) // Execute immediately
         .on_date(2024, 1, 1)
         .priority(TaskPriority::High)
@@ -50,11 +50,11 @@ fn test_real_time_scheduler_demo() -> Outcome<()> {
             },
             "High priority demonstration task"
         ))
-        .build()?;
+        .build());
     
     // Normal priority task
     let counter_clone = Arc::clone(&counter);
-    let normal_priority_task = Task::new("normal_priority_task", zone.clone())
+    let normal_priority_task = ok!(Task::new("normal_priority_task", zone.clone())
         .at_time(0, 0, 0) // Execute immediately
         .on_date(2024, 1, 1)
         .priority(TaskPriority::Normal)
@@ -67,11 +67,11 @@ fn test_real_time_scheduler_demo() -> Outcome<()> {
             },
             "Normal priority demonstration task"
         ))
-        .build()?;
+        .build());
     
     // Critical priority task
     let counter_clone = Arc::clone(&counter);
-    let critical_priority_task = Task::new("critical_priority_task", zone.clone())
+    let critical_priority_task = ok!(Task::new("critical_priority_task", zone.clone())
         .at_time(0, 0, 0) // Execute immediately
         .on_date(2024, 1, 1)
         .priority(TaskPriority::Critical)
@@ -84,7 +84,7 @@ fn test_real_time_scheduler_demo() -> Outcome<()> {
             },
             "Critical priority demonstration task"
         ))
-        .build()?;
+        .build());
     
     // Schedule all tasks
     let task1_id = res!(scheduler.schedule(high_priority_task));
@@ -151,32 +151,32 @@ fn test_scheduler_queue_management() -> Outcome<()> {
     let zone = CalClockZone::utc();
     
     // Create test tasks
-    let task1 = Task::new("task1", zone.clone())
+    let task1 = ok!(Task::new("task1", zone.clone())
         .at_time(12, 0, 0)
         .on_date(2024, 6, 15)
         .with_action(CallbackAction::new(|| {
             println!("Task 1 executed");
             Ok(())
         }))
-        .build()?;
+        .build());
     
-    let task2 = Task::new("task2", zone.clone())
+    let task2 = ok!(Task::new("task2", zone.clone())
         .at_time(12, 0, 0)
         .on_date(2024, 6, 15)
         .with_action(CallbackAction::new(|| {
             println!("Task 2 executed");
             Ok(())
         }))
-        .build()?;
+        .build());
     
-    let task3 = Task::new("task3", zone.clone())
+    let task3 = ok!(Task::new("task3", zone.clone())
         .at_time(12, 0, 0)
         .on_date(2024, 6, 15)
         .with_action(CallbackAction::new(|| {
             println!("Task 3 executed");
             Ok(())
         }))
-        .build()?;
+        .build());
     
     // Schedule tasks up to queue limit
     res!(scheduler.schedule(task1));
@@ -203,7 +203,7 @@ fn test_task_priority_ordering() -> Outcome<()> {
     let zone = CalClockZone::utc();
     
     // Create tasks with different priorities
-    let low_task = Task::new("low_priority", zone.clone())
+    let low_task = ok!(Task::new("low_priority", zone.clone())
         .at_time(0, 0, 0)
         .on_date(2024, 1, 1)
         .priority(TaskPriority::Low)
@@ -211,9 +211,9 @@ fn test_task_priority_ordering() -> Outcome<()> {
             println!("🔽 Low priority task");
             Ok(())
         }))
-        .build()?;
+        .build());
     
-    let critical_task = Task::new("critical_priority", zone.clone())
+    let critical_task = ok!(Task::new("critical_priority", zone.clone())
         .at_time(0, 0, 0)
         .on_date(2024, 1, 1)
         .priority(TaskPriority::Critical)
@@ -221,9 +221,9 @@ fn test_task_priority_ordering() -> Outcome<()> {
             println!("🔺 Critical priority task");
             Ok(())
         }))
-        .build()?;
+        .build());
     
-    let normal_task = Task::new("normal_priority", zone.clone())
+    let normal_task = ok!(Task::new("normal_priority", zone.clone())
         .at_time(0, 0, 0)
         .on_date(2024, 1, 1)
         .priority(TaskPriority::Normal)
@@ -231,7 +231,7 @@ fn test_task_priority_ordering() -> Outcome<()> {
             println!("📋 Normal priority task");
             Ok(())
         }))
-        .build()?;
+        .build());
     
     // Schedule in non-priority order to test queue ordering
     res!(scheduler.schedule(low_task));

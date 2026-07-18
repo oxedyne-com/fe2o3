@@ -353,7 +353,7 @@ impl<T: Clone> TemporalBTree<T> {
         };
 
         // Choose the most selective index
-        let candidate_indices = self.get_candidate_indices(query, start_ts, end_ts)?;
+        let candidate_indices = ok!(self.get_candidate_indices(query, start_ts, end_ts));
 
         // Filter candidates
         for &entry_index in &candidate_indices {

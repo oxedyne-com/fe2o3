@@ -925,9 +925,9 @@ fn parse_plain(raw: &[u8]) -> Option<(String, String)> {
     let mut nuls = raw.iter().enumerate().filter_map(|(i, b)| {
         if *b == 0u8 { Some(i) } else { None }
     });
-    let first  = nuls.next()?;
-    let second = nuls.next()?;
-    let user = String::from_utf8(raw[first + 1..second].to_vec()).ok()?;
-    let pass = String::from_utf8(raw[second + 1..].to_vec()).ok()?;
+    let first  = ok!(nuls.next());
+    let second = ok!(nuls.next());
+    let user = ok!(String::from_utf8(raw[first + 1..second].to_vec()).ok());
+    let pass = ok!(String::from_utf8(raw[second + 1..].to_vec()).ok());
     Some((user, pass))
 }

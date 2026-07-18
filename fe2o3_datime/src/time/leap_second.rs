@@ -271,7 +271,7 @@ impl LeapSecondTable {
         }
         
         // Calculate days since Unix epoch using proper calendar algorithm
-        let days_since_epoch = self.calculate_days_since_epoch(year, month, day)?;
+        let days_since_epoch = ok!(self.calculate_days_since_epoch(year, month, day));
         
         // Convert to seconds and add time components
         let timestamp = days_since_epoch as i64 * 86400 + 

@@ -536,9 +536,9 @@ impl<T: GenTag> fmt::Debug for Error<T> where Error<T>: std::error::Error {
                 None => Self::fmt_debug_upstream_general(f, arc_e, m, t),
             },
             Error::Collection(boxerrs) => {
-                writeln!(f, "Collection of {} errors:", boxerrs.len())?;
+                ok!(writeln!(f, "Collection of {} errors:", boxerrs.len()));
                 for (i, boxerr) in boxerrs.iter().enumerate() {
-                    writeln!(f, "{:04}: {:?}", i, *boxerr)?;
+                    ok!(writeln!(f, "{:04}: {:?}", i, *boxerr));
                 }
                 Ok(())
             },
@@ -557,9 +557,9 @@ impl<T: GenTag> fmt::Display for Error<T> where Error<T>: std::error::Error {
                 None => Self::fmt_display_upstream_general(f, arc_e, m, t),
             },
             Error::Collection(boxerrs) => {
-                writeln!(f, "Collection of {} errors:", boxerrs.len())?;
+                ok!(writeln!(f, "Collection of {} errors:", boxerrs.len()));
                 for (i, boxerr) in boxerrs.iter().enumerate() {
-                    writeln!(f, "{:04}: {}", i, *boxerr)?;
+                    ok!(writeln!(f, "{:04}: {}", i, *boxerr));
                 }
                 Ok(())
             },
@@ -664,7 +664,7 @@ mod tests {
 
     fn return_fmt_error() -> Outcome<i32> {
         let mut output = String::new();
-        write(&mut output, format_args!("Hello {}!", "world"))?;
+        ok!(write(&mut output, format_args!("Hello {}!", "world")));
         Ok(42)
     }
 

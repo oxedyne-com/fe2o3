@@ -5,6 +5,7 @@
 //!
 #![forbid(unsafe_code)]
 
+use oxedyne_fe2o3_core::ok;
 use oxedyne_fe2o3_text::fmt::{
 	self,
 	spec::FormatSpec,
@@ -204,7 +205,7 @@ fn format_source(src: &str, lang: &str, spec: &FormatSpec) -> Result<String, Str
 
 /// Detect language from file extension.
 fn detect_language_from_ext(path: &str) -> Option<&'static str> {
-	let ext = Path::new(path).extension()?.to_str()?;
+	let ext = ok!(ok!(Path::new(path).extension()).to_str());
 	match ext {
 		"rs"                        => Some("rust"),
 		"c" | "h"                   => Some("c"),
@@ -222,12 +223,12 @@ fn detect_language_from_ext(path: &str) -> Option<&'static str> {
 fn collect_files(paths: &[String]) -> Result<Vec<String>, String> {
 	let mut result = Vec::new();
 	for path in paths {
-		let meta = std::fs::metadata(path)
-			.map_err(|e| format!("{}: {}", path, e))?;
+		let meta = ok!(std::fs::metadata(path)
+			.map_err(|e| format!("{}: {}", path, e)));
 		if meta.is_file() {
 			result.push(path.clone());
 		} else if meta.is_dir() {
-			walk_dir(Path::new(path), &mut result)?;
+			ok!(walk_dir(Path::new(path), &mut result));
 		}
 	}
 	result.sort();
@@ -236,10 +237,10 @@ fn collect_files(paths: &[String]) -> Result<Vec<String>, String> {
 
 /// Walk a directory tree collecting files with recognised extensions.
 fn walk_dir(dir: &Path, out: &mut Vec<String>) -> Result<(), String> {
-	let entries = std::fs::read_dir(dir)
-		.map_err(|e| format!("{}: {}", dir.display(), e))?;
+	let entries = ok!(std::fs::read_dir(dir)
+		.map_err(|e| format!("{}: {}", dir.display(), e)));
 	for entry in entries {
-		let entry = entry.map_err(|e| format!("{}: {}", dir.display(), e))?;
+		let entry = ok!(entry.map_err(|e| format!("{}: {}", dir.display(), e)));
 		let path = entry.path();
 		if path.is_dir() {
 			// Skip hidden directories and target/.
@@ -249,7 +250,7 @@ fn walk_dir(dir: &Path, out: &mut Vec<String>) -> Result<(), String> {
 			if name.starts_with('.') || name == "target" {
 				continue;
 			}
-			walk_dir(&path, out)?;
+			ok!(walk_dir(&path, out));
 		} else if path.is_file() {
 			let p = path.to_string_lossy().to_string();
 			if detect_language_from_ext(&p).is_some() {

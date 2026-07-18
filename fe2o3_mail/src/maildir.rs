@@ -762,9 +762,9 @@ fn file_to_meta(path: &Path, name: &str, uid: u32, recent: bool) -> MessageMeta 
 fn parse_uid_line(line: &str) -> Option<(u32, String)> {
     let line = line.trim();
     let mut it = line.splitn(2, ' ');
-    let uid: u32 = it.next()?.parse().ok()?;
-    let rest = it.next()?;
-    let first = rest.chars().next()?;
+    let uid: u32 = ok!(ok!(it.next()).parse().ok());
+    let rest = ok!(it.next());
+    let first = ok!(rest.chars().next());
     if first != ':' && !first.is_ascii_digit() {
         return None;
     }
@@ -778,7 +778,7 @@ fn parse_uid_line(line: &str) -> Option<(u32, String)> {
 /// Look up the uidlist key for a given UID without keeping the whole
 /// file in memory.
 fn read_uidlist_key_for(path: &Path, uid: u32) -> Option<String> {
-    let file = File::open(path).ok()?;
+    let file = ok!(File::open(path).ok());
     let reader = BufReader::new(file);
     let mut header_seen = false;
     for line in reader.lines().flatten() {

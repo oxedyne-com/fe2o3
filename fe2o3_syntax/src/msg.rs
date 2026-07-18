@@ -76,21 +76,21 @@ impl fmt::Display for Msg {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut first = true;
         for val in &self.vals {
-            if !first { write!(f, " ")?; } 
-            write!(f, "{:?}", val)?;
+            if !first { ok!(write!(f, " ")); } 
+            ok!(write!(f, "{:?}", val));
             first = false;
         }
         for (k, argvals) in &self.args {
-            if !first { write!(f, " ")?; } 
-            write!(f, "{}", k)?;
+            if !first { ok!(write!(f, " ")); } 
+            ok!(write!(f, "{}", k));
             for val in argvals {
-                write!(f, " {:?}", val)?;
+                ok!(write!(f, " {:?}", val));
             }
             first = false;
         }
         for (k, cmd) in &self.cmds {
-            if !first { write!(f, " ")?; } 
-            write!(f, "{} {}", k, cmd)?;
+            if !first { ok!(write!(f, " ")); } 
+            ok!(write!(f, "{} {}", k, cmd));
             first = false;
         }
         Ok(())
@@ -1813,7 +1813,7 @@ impl Msg {
     fn extract_u8_array<const N: usize>(dats: &[Dat; N]) -> Option<[u8; N]> {
         let mut result = [0u8; N];
         for i in 0..N {
-            result[i] = dats[i].get_u8()?;
+            result[i] = ok!(dats[i].get_u8());
         }
         Some(result)
     }
@@ -1821,7 +1821,7 @@ impl Msg {
     fn extract_u16_array<const N: usize>(dats: &[Dat; N]) -> Option<[u16; N]> {
         let mut result = [0u16; N];
         for i in 0..N {
-            result[i] = dats[i].get_u16()?;
+            result[i] = ok!(dats[i].get_u16());
         }
         Some(result)
     }
@@ -1829,7 +1829,7 @@ impl Msg {
     fn extract_u32_array<const N: usize>(dats: &[Dat; N]) -> Option<[u32; N]> {
         let mut result = [0u32; N];
         for i in 0..N {
-            result[i] = dats[i].get_u32()?;
+            result[i] = ok!(dats[i].get_u32());
         }
         Some(result)
     }
@@ -1837,7 +1837,7 @@ impl Msg {
     fn extract_u64_array<const N: usize>(dats: &[Dat; N]) -> Option<[u64; N]> {
         let mut result = [0u64; N];
         for i in 0..N {
-            result[i] = dats[i].get_u64()?;
+            result[i] = ok!(dats[i].get_u64());
         }
         Some(result)
     }
@@ -1845,7 +1845,7 @@ impl Msg {
     fn extract_i8_array<const N: usize>(dats: &[Dat; N]) -> Option<[i8; N]> {
         let mut result = [0i8; N];
         for i in 0..N {
-            result[i] = dats[i].get_i8()?;
+            result[i] = ok!(dats[i].get_i8());
         }
         Some(result)
     }
@@ -1853,7 +1853,7 @@ impl Msg {
     fn extract_i16_array<const N: usize>(dats: &[Dat; N]) -> Option<[i16; N]> {
         let mut result = [0i16; N];
         for i in 0..N {
-            result[i] = dats[i].get_i16()?;
+            result[i] = ok!(dats[i].get_i16());
         }
         Some(result)
     }
@@ -1861,7 +1861,7 @@ impl Msg {
     fn extract_i32_array<const N: usize>(dats: &[Dat; N]) -> Option<[i32; N]> {
         let mut result = [0i32; N];
         for i in 0..N {
-            result[i] = dats[i].get_i32()?;
+            result[i] = ok!(dats[i].get_i32());
         }
         Some(result)
     }
@@ -1869,7 +1869,7 @@ impl Msg {
     fn extract_i64_array<const N: usize>(dats: &[Dat; N]) -> Option<[i64; N]> {
         let mut result = [0i64; N];
         for i in 0..N {
-            result[i] = dats[i].get_i64()?;
+            result[i] = ok!(dats[i].get_i64());
         }
         Some(result)
     }
@@ -1886,18 +1886,18 @@ pub struct MsgCmd {
 
 impl fmt::Display for MsgCmd {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} ", self.name)?;
+        ok!(write!(f, "{} ", self.name));
         let mut first = true;
         for val in &self.vals {
-            if !first { write!(f, " ")?; } 
-            write!(f, "{}", val)?;
+            if !first { ok!(write!(f, " ")); } 
+            ok!(write!(f, "{}", val));
             first = false;
         }
         for (k, argvals) in &self.args {
-            if !first { write!(f, " ")?; } 
-            write!(f, "{}", k)?;
+            if !first { ok!(write!(f, " ")); } 
+            ok!(write!(f, "{}", k));
             for val in argvals {
-                write!(f, " {}", val)?;
+                ok!(write!(f, " {}", val));
             }
             first = false;
         }

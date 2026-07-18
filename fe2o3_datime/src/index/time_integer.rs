@@ -166,7 +166,7 @@ impl TimeInteger for TimeLong {
 	
 	fn divide_by_long(self, other: i64) -> Self {
 		if other == 0 {
-			return Self::new(0); // Saturating behavior
+			return Self::new(0); // Saturating behaviour
 		}
 		Self::new(self.value / other)
 	}
@@ -180,7 +180,7 @@ impl TimeInteger for TimeLong {
 	
 	fn remainder_by_long(self, other: i64) -> Self {
 		if other == 0 {
-			return Self::new(0); // Saturating behavior
+			return Self::new(0); // Saturating behaviour
 		}
 		Self::new(self.value % other)
 	}
@@ -335,7 +335,7 @@ impl TimeInteger for TimeBigInt {
 	
 	fn divide_by_long(self, other: i64) -> Self {
 		if other == 0 {
-			return Self::new(BigInt::from(0)); // Saturating behavior
+			return Self::new(BigInt::from(0)); // Saturating behaviour
 		}
 		Self::new(&self.value / BigInt::from(other))
 	}
@@ -349,7 +349,7 @@ impl TimeInteger for TimeBigInt {
 	
 	fn remainder_by_long(self, other: i64) -> Self {
 		if other == 0 {
-			return Self::new(BigInt::from(0)); // Saturating behavior
+			return Self::new(BigInt::from(0)); // Saturating behaviour
 		}
 		Self::new(&self.value % BigInt::from(other))
 	}

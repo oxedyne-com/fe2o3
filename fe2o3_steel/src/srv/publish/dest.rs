@@ -471,7 +471,7 @@ impl Delivery {
 			_		=> return None,
 		};
 		let dest = match m.get(&dat!("dest")) {
-			Some(Dat::Str(s))	=> Destination::of(s)?,
+			Some(Dat::Str(s))	=> ok!(Destination::of(s)),
 			_			=> return None,
 		};
 		let rendition = match m.get(&dat!("rendition")) {

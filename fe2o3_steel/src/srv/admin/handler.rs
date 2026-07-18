@@ -1924,7 +1924,7 @@ pub fn extract_principal(
 )
     -> Option<AdminPrincipal>
 {
-    let cookie_value = read_cookie(headers, SESSION_COOKIE_NAME)?;
+    let cookie_value = ok!(read_cookie(headers, SESSION_COOKIE_NAME));
     let principal = match session::decode_session(state, &cookie_value) {
         Ok(p) => p,
         Err(e) => {
@@ -2018,10 +2018,10 @@ fn render_login_form(sealed: bool, error_msg: Option<&str>) -> HttpMessage {
 /// is absent. Designed for tiny login-style bodies where one or
 /// two fields are expected.
 pub(crate) fn extract_form_field(body: &[u8], key: &str) -> Option<String> {
-    let s = std::str::from_utf8(body).ok()?;
+    let s = ok!(std::str::from_utf8(body).ok());
     for pair in s.split('&') {
         let mut kv = pair.splitn(2, '=');
-        let k = kv.next()?;
+        let k = ok!(kv.next());
         let v = kv.next().unwrap_or("");
         if url_decode(k) == key {
             return Some(url_decode(v));

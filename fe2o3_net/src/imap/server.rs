@@ -1155,8 +1155,8 @@ struct ParsedCommand {
 fn parse_command(line: &str) -> Option<ParsedCommand> {
     let trimmed = line.trim_end_matches(|c: char| c == '\r' || c == '\n');
     let mut parts = trimmed.splitn(3, ' ');
-    let tag = parts.next()?.to_string();
-    let cmd = parts.next()?.to_string();
+    let tag = ok!(parts.next()).to_string();
+    let cmd = ok!(parts.next()).to_string();
     let args = parts.next().unwrap_or("").to_string();
     if tag.is_empty() || cmd.is_empty() {
         return None;
@@ -1268,7 +1268,7 @@ impl<'a> ArgIter<'a> {
         } else {
             (inner, false)
         };
-        let n: usize = digits.parse().ok()?;
+        let n: usize = ok!(digits.parse().ok());
         self.literal_is_non_sync = plus;
         Some(n)
     }
@@ -1758,18 +1758,18 @@ fn parse_internal_date(s: &str) -> Option<SystemTime> {
     if parts.len() < 2 { return None; }
     let date_parts: Vec<&str> = parts[0].split('-').collect();
     if date_parts.len() != 3 { return None; }
-    let day: u32 = date_parts[0].parse().ok()?;
+    let day: u32 = ok!(date_parts[0].parse().ok());
     let mon: u32 = match date_parts[1] {
         "Jan"=>1,"Feb"=>2,"Mar"=>3,"Apr"=>4,"May"=>5,"Jun"=>6,
         "Jul"=>7,"Aug"=>8,"Sep"=>9,"Oct"=>10,"Nov"=>11,"Dec"=>12,
         _ => return None,
     };
-    let year: i32 = date_parts[2].parse().ok()?;
+    let year: i32 = ok!(date_parts[2].parse().ok());
     let time_parts: Vec<&str> = parts[1].split(':').collect();
     if time_parts.len() != 3 { return None; }
-    let h: u32 = time_parts[0].parse().ok()?;
-    let mi: u32 = time_parts[1].parse().ok()?;
-    let se: u32 = time_parts[2].parse().ok()?;
+    let h: u32 = ok!(time_parts[0].parse().ok());
+    let mi: u32 = ok!(time_parts[1].parse().ok());
+    let se: u32 = ok!(time_parts[2].parse().ok());
     let secs = civil_to_unix(year, mon, day, h, mi, se);
     Some(UNIX_EPOCH + std::time::Duration::from_secs(secs))
 }

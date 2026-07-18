@@ -505,9 +505,9 @@ fn migrate_legacy_wallet_inline(_cfg: &AppConfig) -> Outcome<()> {
             ring_parts[0].extract(),
             Vek,
         );
-        let slot = list.into_iter().nth(index as usize).ok_or_else(|| err!(
+        let slot = ok!(list.into_iter().nth(index as usize).ok_or_else(|| err!(
             "Legacy ring buffer index {} out of range.", index;
-            Input, Invalid, Mismatch))?;
+            Input, Invalid, Mismatch)));
         let some = match slot {
             Dat::Opt(inner) => match *inner {
                 Some(d) => d,

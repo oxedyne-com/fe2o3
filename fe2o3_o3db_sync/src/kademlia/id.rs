@@ -89,7 +89,7 @@ impl BitXor for NodeId {
 impl fmt::Display for NodeId {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		for b in &self.0 {
-			write!(f, "{:02x}", b)?;
+			ok!(write!(f, "{:02x}", b));
 		}
 		Ok(())
 	}
@@ -136,7 +136,7 @@ impl Distance {
 impl fmt::Display for Distance {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		for b in &self.0 {
-			write!(f, "{:02x}", b)?;
+			ok!(write!(f, "{:02x}", b));
 		}
 		Ok(())
 	}

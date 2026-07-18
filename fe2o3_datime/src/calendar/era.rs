@@ -208,8 +208,8 @@ impl JapaneseEraRegistry {
     
     /// Converts Japanese calendar format to Gregorian date.
     pub fn japanese_to_gregorian(&self, era_name: &str, era_year: i32, month: u8, day: u8) -> Outcome<(i32, u8, u8)> {
-        let era = self.find_era_by_name(era_name)
-            .ok_or_else(|| err!("Unknown Japanese era: {}", era_name; Invalid, Input))?;
+        let era = ok!(self.find_era_by_name(era_name)
+            .ok_or_else(|| err!("Unknown Japanese era: {}", era_name; Invalid, Input)));
         
         let gregorian_year = res!(era.era_year_to_gregorian(era_year));
         

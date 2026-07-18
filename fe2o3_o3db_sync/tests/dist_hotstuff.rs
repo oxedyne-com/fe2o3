@@ -87,7 +87,7 @@ impl Driver {
 					"Driver exceeded {} steps without terminating.", max_steps;
 				Bug, Timeout));
 			}
-			self.deliver(d)?;
+			ok!(self.deliver(d));
 			if self.decided.iter().all(|d| d.is_some()) {
 				break;
 			}

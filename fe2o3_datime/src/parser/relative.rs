@@ -373,7 +373,7 @@ impl RelativeDateParser {
         }
         
         // Apply some intelligent defaults and validation.
-        self.validate_and_adjust_expression(&mut expression)?;
+        ok!(self.validate_and_adjust_expression(&mut expression));
         
         Ok(expression)
     }

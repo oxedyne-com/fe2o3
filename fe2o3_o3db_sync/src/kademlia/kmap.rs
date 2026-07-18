@@ -157,7 +157,7 @@ impl KMap {
 
 	/// Removes a contact by id, if present, and returns it.
 	pub fn remove(&mut self, id: &NodeId) -> Option<Contact> {
-		let pos = self.position(id)?;
+		let pos = ok!(self.position(id));
 		self.entries.remove(pos)
 	}
 

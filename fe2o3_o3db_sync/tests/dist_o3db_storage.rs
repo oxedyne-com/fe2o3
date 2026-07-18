@@ -41,7 +41,7 @@ fn o3db_storage_round_trip() -> Outcome<()> {
 	let db_root = res!(Path::new("./test_db_dist_o3db_storage")
 		.canonicalize()
 		.or_else(|_| -> std::io::Result<_> {
-			std::fs::create_dir_all("./test_db_dist_o3db_storage")?;
+			ok!(std::fs::create_dir_all("./test_db_dist_o3db_storage"));
 			Path::new("./test_db_dist_o3db_storage").canonicalize()
 		}));
 

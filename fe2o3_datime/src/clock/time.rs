@@ -367,7 +367,7 @@ impl ClockTime {
 		self.hour.of() == 23 && self.minute.of() == 59 && self.second.of() == 60
 	}
 
-	/// Normalizes a leap second time to the next minute.
+	/// Normalises a leap second time to the next minute.
 	///
 	/// Converts 23:59:60 to 00:00:00 of the next day, which is how leap seconds
 	/// are typically handled in calculations.
@@ -418,7 +418,7 @@ impl ClockTime {
 		// Add duration nanoseconds
 		fields.nanosecond += duration.total_nanos() as i64;
 		
-		// Normalize and extract components
+		// Normalise and extract components
 		let (hour, minute, second, nanosecond, day_carry) = res!(fields
 			.to_time_components()
 			.ok_or_else(|| err!("Time arithmetic resulted in invalid time"; Invalid)));
@@ -439,7 +439,7 @@ impl ClockTime {
 		// Subtract duration nanoseconds
 		fields.nanosecond -= duration.total_nanos() as i64;
 		
-		// Normalize and extract components
+		// Normalise and extract components
 		let (hour, minute, second, nanosecond, day_carry) = res!(fields
 			.to_time_components()
 			.ok_or_else(|| err!("Time arithmetic resulted in invalid time"; Invalid)));

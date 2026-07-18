@@ -57,18 +57,18 @@ impl ValidationError {
 
 impl fmt::Display for ValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[{}] {}", self.rule, self.message)?;
+        ok!(write!(f, "[{}] {}", self.rule, self.message));
         
         if let Some(ref field) = self.field {
-            write!(f, " (field: {})", field)?;
+            ok!(write!(f, " (field: {})", field));
         }
         
         if let Some(ref value) = self.value {
-            write!(f, " (value: {})", value)?;
+            ok!(write!(f, " (value: {})", value));
         }
         
         if let Some(ref expected) = self.expected {
-            write!(f, " (expected: {})", expected)?;
+            ok!(write!(f, " (expected: {})", expected));
         }
         
         Ok(())

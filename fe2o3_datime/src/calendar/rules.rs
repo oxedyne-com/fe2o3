@@ -191,9 +191,9 @@ impl CalendarRule {
             .unwrap_or(count)
             .min(count);
             
-        let start_date = self.start_date
+        let start_date = ok!(self.start_date
             .as_ref()
-            .ok_or_else(|| err!("Start date is required for rule generation"; Invalid, Input))?;
+            .ok_or_else(|| err!("Start date is required for rule generation"; Invalid, Input)));
             
         match self.rule_type {
             RuleType::ByYears => self.generate_yearly_dates(max_count, start_date, zone),
@@ -237,9 +237,9 @@ impl CalendarRule {
     
     /// Generates monthly recurrence dates with explicitly specified months.
     fn generate_explicit_monthly_dates(&self, count: usize, start_date: &CalendarDate, zone: CalClockZone) -> Outcome<Vec<CalendarDate>> {
-        let explicit_months = self.explicit_months
+        let explicit_months = ok!(self.explicit_months
             .as_ref()
-            .ok_or_else(|| err!("Explicit months required for ByExplicitMonths rule"; Invalid, Input))?;
+            .ok_or_else(|| err!("Explicit months required for ByExplicitMonths rule"; Invalid, Input)));
             
         let mut dates = Vec::new();
         let mut current_year = start_date.year();
@@ -260,8 +260,8 @@ impl CalendarRule {
                     res!(incrementor.calculate_date(current_year, month, zone.clone()))
                 } else {
                     // Use the same day of month as start date
-                    let day = start_date.day().min(MonthOfYear::from_number(month)?.days_in_month(current_year));
-                    res!(CalendarDate::from_ymd(current_year, MonthOfYear::from_number(month)?, day, zone.clone()))
+                    let day = start_date.day().min(ok!(MonthOfYear::from_number(month)).days_in_month(current_year));
+                    res!(CalendarDate::from_ymd(current_year, ok!(MonthOfYear::from_number(month)), day, zone.clone()))
                 };
                 
                 // Check if this date should be included

@@ -1347,6 +1347,7 @@ mod test_mul {
 /////////////////////////////////////////////////////////////////////////// Original file test_vectors.rs
 #[cfg(test)]
 mod test_vectors {
+    use oxedyne_fe2o3_core::ok;
     use hex::{self, FromHexError};
     use byteorder::{ ByteOrder, BigEndian };
     use itertools::Itertools;
@@ -1396,7 +1397,7 @@ mod test_vectors {
                 match key {
                     "count" => (),
                     "seed" => {
-                        let seed = hex::decode(val)?;
+                        let seed = ok!(hex::decode(val));
                         let (rho, mu) = seed.split_at(SEEDBYTES);
                         tv.seed.0.copy_from_slice(rho);
                         tv.seed.1.copy_from_slice(mu);
@@ -1404,7 +1405,7 @@ mod test_vectors {
                     "mat" => {
                         let mut mat = [0; K * L * N];
                         let mut i = 0;
-                        BigEndian::read_u32_into(&hex::decode(val)?, &mut mat);
+                        BigEndian::read_u32_into(&ok!(hex::decode(val)), &mut mat);
                         for j in 0..K {
                             for k in 0..L {
                                 for l in 0..N {
@@ -1417,7 +1418,7 @@ mod test_vectors {
                     "s" => {
                         let mut s = [0; L * N];
                         let mut i = 0;
-                        BigEndian::read_u32_into(&hex::decode(val)?, &mut s);
+                        BigEndian::read_u32_into(&ok!(hex::decode(val)), &mut s);
                         for j in 0..L {
                             for k in 0..N {
                                 tv.s[j][k] = s[i];
@@ -1428,7 +1429,7 @@ mod test_vectors {
                     "y" => {
                         let mut y = [0; L * N];
                         let mut i = 0;
-                        BigEndian::read_u32_into(&hex::decode(val)?, &mut y);
+                        BigEndian::read_u32_into(&ok!(hex::decode(val)), &mut y);
                         for j in 0..L {
                             for k in 0..N {
                                 tv.y[j][k] = y[i];
@@ -1439,7 +1440,7 @@ mod test_vectors {
                     "w1" => {
                         let mut w1 = [0; K * N];
                         let mut i = 0;
-                        BigEndian::read_u32_into(&hex::decode(val)?, &mut w1);
+                        BigEndian::read_u32_into(&ok!(hex::decode(val)), &mut w1);
                         for j in 0..K {
                             for k in 0..N {
                                 tv.w1[j][k] = w1[i];
@@ -1448,7 +1449,7 @@ mod test_vectors {
                         }
                     },
                     "c" => {
-                        BigEndian::read_u32_into(&hex::decode(val)?, &mut tv.c);
+                        BigEndian::read_u32_into(&ok!(hex::decode(val)), &mut tv.c);
                     },
                     _ => panic!()
                 }

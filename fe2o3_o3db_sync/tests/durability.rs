@@ -47,7 +47,7 @@ use std::{
 pub fn test_durability(_filter: &'static str) -> Outcome<()> {
 
     let db_root = res!(Path::new("./test_db_durability").canonicalize().or_else(|_| {
-        std::fs::create_dir_all("./test_db_durability")?;
+        ok!(std::fs::create_dir_all("./test_db_durability"));
         Path::new("./test_db_durability").canonicalize()
     }));
 

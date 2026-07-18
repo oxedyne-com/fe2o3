@@ -74,7 +74,7 @@ impl TerminalManager {
     /// Create a new tmux session running the launch command.
     /// Returns the session name (e.g. "goose-3").
     pub fn new_session(&self) -> Outcome<String> {
-        let max = self.list_session_nums()?.iter().max().copied().unwrap_or(0);
+        let max = ok!(self.list_session_nums()).iter().max().copied().unwrap_or(0);
         let name = fmt!("{}{}", self.session_prefix, max + 1);
         let status = res!(Command::new("tmux")
             .arg("new-session")

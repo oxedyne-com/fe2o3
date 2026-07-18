@@ -45,7 +45,7 @@ impl<D: System> Units<D> {
 
     pub fn bytes(val: f64, sf: u8) -> Outcome<Units::<SI>> {
         Ok(Units::new(
-            Mag::new(val, Scale::One(ScaleBasis::Binary), sf)?,
+            ok!(Mag::new(val, Scale::One(ScaleBasis::Binary), sf)),
             SI::bytes(),
         ))
     }

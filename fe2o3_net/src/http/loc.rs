@@ -50,20 +50,20 @@ pub struct HttpLocator {
 impl fmt::Display for HttpLocator {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Write the path
-        write!(f, "{}", self.path.as_str())?;
+        ok!(write!(f, "{}", self.path.as_str()));
 
         if !self.data.is_empty() {
-            write!(f, "?")?;
+            ok!(write!(f, "?"));
             for (i, (k, v)) in self.data.iter().enumerate() {
-                write!(f, "{}={}", k, v)?;
+                ok!(write!(f, "{}={}", k, v));
                 if i < self.data.len() - 1 {
-                    write!(f, "&")?;
+                    ok!(write!(f, "&"));
                 }
             }
         }
 
         if !self.frag.is_empty() {
-            write!(f, "#{}", self.frag)?;
+            ok!(write!(f, "#{}", self.frag));
         }
 
         Ok(())

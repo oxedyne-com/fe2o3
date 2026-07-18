@@ -513,29 +513,29 @@ impl NoSqlDocument for CalClock {
     }
     
     fn from_document(doc: &HashMap<String, Dat>) -> Outcome<Self> {
-        let year = res!(doc.get("year")
-            .ok_or_else(|| err!("Missing year in document"; Invalid, Input))?
+        let year = res!(ok!(doc.get("year")
+            .ok_or_else(|| err!("Missing year in document"; Invalid, Input)))
             .get_i32().ok_or_else(|| err!("Invalid type"; Invalid, Input)));
-        let month = res!(doc.get("month")
-            .ok_or_else(|| err!("Missing month in document"; Invalid, Input))?
+        let month = res!(ok!(doc.get("month")
+            .ok_or_else(|| err!("Missing month in document"; Invalid, Input)))
             .get_u8().ok_or_else(|| err!("Invalid type"; Invalid, Input)));
-        let day = res!(doc.get("day")
-            .ok_or_else(|| err!("Missing day in document"; Invalid, Input))?
+        let day = res!(ok!(doc.get("day")
+            .ok_or_else(|| err!("Missing day in document"; Invalid, Input)))
             .get_u8().ok_or_else(|| err!("Invalid type"; Invalid, Input)));
-        let hour = res!(doc.get("hour")
-            .ok_or_else(|| err!("Missing hour in document"; Invalid, Input))?
+        let hour = res!(ok!(doc.get("hour")
+            .ok_or_else(|| err!("Missing hour in document"; Invalid, Input)))
             .get_u8().ok_or_else(|| err!("Invalid type"; Invalid, Input)));
-        let minute = res!(doc.get("minute")
-            .ok_or_else(|| err!("Missing minute in document"; Invalid, Input))?
+        let minute = res!(ok!(doc.get("minute")
+            .ok_or_else(|| err!("Missing minute in document"; Invalid, Input)))
             .get_u8().ok_or_else(|| err!("Invalid type"; Invalid, Input)));
-        let second = res!(doc.get("second")
-            .ok_or_else(|| err!("Missing second in document"; Invalid, Input))?
+        let second = res!(ok!(doc.get("second")
+            .ok_or_else(|| err!("Missing second in document"; Invalid, Input)))
             .get_u8().ok_or_else(|| err!("Invalid type"; Invalid, Input)));
-        let nanosecond = res!(doc.get("nanosecond")
-            .ok_or_else(|| err!("Missing nanosecond in document"; Invalid, Input))?
+        let nanosecond = res!(ok!(doc.get("nanosecond")
+            .ok_or_else(|| err!("Missing nanosecond in document"; Invalid, Input)))
             .get_u32().ok_or_else(|| err!("Invalid type"; Invalid, Input)));
-        let timezone_id = res!(doc.get("timezone")
-            .ok_or_else(|| err!("Missing timezone in document"; Invalid, Input))?
+        let timezone_id = res!(ok!(doc.get("timezone")
+            .ok_or_else(|| err!("Missing timezone in document"; Invalid, Input)))
             .get_string().ok_or_else(|| err!("Invalid type"; Invalid, Input)));
         
         let zone = res!(CalClockZone::new(&timezone_id));

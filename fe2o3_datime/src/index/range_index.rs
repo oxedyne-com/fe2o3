@@ -358,7 +358,7 @@ impl<T> RangeIndex<T> {
             let entry = self.entries.remove(pos);
             
             // Rebuild indexes (could be optimized but good enough for now)
-            self.rebuild_indexes()?;
+            ok!(self.rebuild_indexes());
             
             Ok(Some(entry))
         } else {

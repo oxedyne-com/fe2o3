@@ -213,10 +213,10 @@ impl fmt::Display for HttpHeader {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.headline {
             HttpHeadline::Request { method, loc } => {
-                write!(f, "{} {} {}\r\n", method, loc, self.version)?;
+                ok!(write!(f, "{} {} {}\r\n", method, loc, self.version));
             },
             HttpHeadline::Response { status } => {
-                write!(f, "{} {} {}\r\n", self.version, status, status.desc())?;
+                ok!(write!(f, "{} {} {}\r\n", self.version, status, status.desc()));
             },
         }
         for (k, header_field_values) in self.fields.iter() {
@@ -226,7 +226,7 @@ impl fmt::Display for HttpHeader {
                 if header_field_value.is_wire_empty() {
                     continue;
                 }
-                write!(f, "{}: {}\r\n", k, header_field_value)?;
+                ok!(write!(f, "{}: {}\r\n", k, header_field_value));
             }
         }
         write!(f, "\r\n")

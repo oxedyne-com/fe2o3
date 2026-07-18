@@ -232,10 +232,10 @@ impl MastodonCreds {
 
 	/// The credentials from a stored daticle, or nothing where either required field is missing.
 	fn from_dat(d: &Dat) -> Option<Self> {
-		let m = as_map(d)?;
+		let m = ok!(as_map(d));
 		Some(Self {
-			base_url:	nonempty(m, "base_url")?,
-			token:		nonempty(m, "token")?,
+			base_url:	ok!(nonempty(m, "base_url")),
+			token:		ok!(nonempty(m, "token")),
 		})
 	}
 }
@@ -275,12 +275,12 @@ impl BlueskyCreds {
 	/// The credentials from a stored daticle, or nothing where the handle or password is missing. The
 	/// host defaults, as it does from config.
 	fn from_dat(d: &Dat) -> Option<Self> {
-		let m = as_map(d)?;
+		let m = ok!(as_map(d));
 		let host = nonempty(m, "host").unwrap_or_else(|| BLUESKY_HOST_DEFAULT.to_string());
 		Some(Self {
 			host,
-			handle:		nonempty(m, "handle")?,
-			app_password:	nonempty(m, "app_password")?,
+			handle:		ok!(nonempty(m, "handle")),
+			app_password:	ok!(nonempty(m, "app_password")),
 		})
 	}
 }
@@ -697,11 +697,11 @@ fn bluesky_record_body(did: &str, text: &str, created_at: &str) -> Outcome<Strin
 /// `https://bsky.app/profile/<did>/post/<rkey>`, which is the address a person opens. A URI that is
 /// not that shape yields nothing, and the caller keeps the URI rather than inventing a link.
 fn at_uri_to_url(uri: &str) -> Option<String> {
-	let rest = uri.strip_prefix("at://")?;
+	let rest = ok!(uri.strip_prefix("at://"));
 	let mut parts = rest.splitn(3, '/');
-	let did = parts.next()?;
-	let _collection = parts.next()?;
-	let rkey = parts.next()?;
+	let did = ok!(parts.next());
+	let _collection = ok!(parts.next());
+	let rkey = ok!(parts.next());
 	if did.is_empty() || rkey.is_empty() {
 		return None;
 	}

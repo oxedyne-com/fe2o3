@@ -45,7 +45,7 @@ impl ToHexString for B32 {
 impl fmt::LowerHex for B32 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for byt in &self.0 {
-            write!(f, "{:02x}", byt)?;
+            ok!(write!(f, "{:02x}", byt));
         }
         Ok(())
     }

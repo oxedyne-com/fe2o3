@@ -1133,7 +1133,7 @@ fn query_field(query: &str, key: &str) -> Option<String> {
 	}
 	for pair in query.split('&') {
 		let mut kv = pair.splitn(2, '=');
-		let k = kv.next()?;
+		let k = ok!(kv.next());
 		let v = kv.next().unwrap_or("");
 		if k == key {
 			let val = url_decode(v);

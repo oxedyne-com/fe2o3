@@ -999,9 +999,9 @@ fn extract_legacy_current_passhash(ring: Dat) -> Outcome<Dat> {
             Invalid, Input)),
     };
     let list = oxedyne_fe2o3_jdat::try_extract_dat!(parts[0].extract(), Vek);
-    let slot = list.into_iter().nth(index as usize).ok_or_else(|| err!(
+    let slot = ok!(list.into_iter().nth(index as usize).ok_or_else(|| err!(
         "Legacy ring buffer index {} out of range.", index;
-        Input, Invalid, Mismatch))?;
+        Input, Invalid, Mismatch)));
     // Each slot is an `Opt<Tup2(data, timestamp)>`. The caller wants
     // the `data` daticle, which is the kdf map.
     let some = match slot {

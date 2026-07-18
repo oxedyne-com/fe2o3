@@ -1,3 +1,5 @@
+use oxedyne_fe2o3_core::ok;
+
 use std::{
     fmt,
 };
@@ -23,8 +25,8 @@ impl From<String> for Key {
 impl fmt::Display for Key {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &*self {
-            Key::Id(id) => write!(f, "{}", id)?,
-            Key::Str(s) => write!(f, "{}", s)?,
+            Key::Id(id) => ok!(write!(f, "{}", id)),
+            Key::Str(s) => ok!(write!(f, "{}", s)),
         }
         Ok(())
     }

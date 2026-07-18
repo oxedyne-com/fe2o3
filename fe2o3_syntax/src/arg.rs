@@ -148,9 +148,9 @@ impl Arg {
 
 impl fmt::Display for Arg {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "'{}'", self.config().hyph1)?;
+        ok!(write!(f, "'{}'", self.config().hyph1));
         if let Some(long) = &self.config().hyph2 {
-            write!(f, ", '{}'", long)?;
+            ok!(write!(f, ", '{}'", long));
         }
         Ok(())
     }

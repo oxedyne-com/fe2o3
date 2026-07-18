@@ -1016,7 +1016,7 @@ fn tokenise_until(
 fn trailing_literal_len(line: &str) -> Option<usize> {
     let trimmed = line.trim_end();
     if !trimmed.ends_with('}') { return None; }
-    let open = trimmed.rfind('{')?;
+    let open = ok!(trimmed.rfind('{'));
     let inner = &trimmed[open + 1..trimmed.len() - 1];
     let digits = inner.strip_suffix('+').unwrap_or(inner);
     if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
@@ -1132,9 +1132,9 @@ fn absorb_select_line(st: &mut MailboxStatus, text: &str) -> Outcome<()> {
 /// The number inside a `[NAME 123]` response code, if present.
 fn bracket_value(up: &str, name: &str) -> Option<u32> {
     let pat = fmt!("[{} ", name);
-    let i = up.find(&pat)?;
+    let i = ok!(up.find(&pat));
     let start = i + pat.len();
-    let end = up[start..].find(']')?;
+    let end = ok!(up[start..].find(']'));
     up[start..start + end].trim().parse::<u32>().ok()
 }
 

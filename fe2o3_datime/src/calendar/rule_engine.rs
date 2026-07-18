@@ -264,8 +264,8 @@ impl CalendarRule {
 		duration: Option<&CalendarDuration>,
 		count: Option<i32>,
 	) -> Outcome<()> {
-		let start_date = self.start_date.as_ref()
-			.ok_or_else(|| err!("By-years rule requires start_date"; Invalid, Input))?;
+		let start_date = ok!(self.start_date.as_ref()
+			.ok_or_else(|| err!("By-years rule requires start_date"; Invalid, Input)));
 		
 		let skip_years = self.skip_years.as_ref().map(|y| y.of()).unwrap_or(1);
 		let mut current_year = start_date.year();
@@ -350,11 +350,11 @@ impl CalendarRule {
 		count: Option<i32>,
 		_holidays: Option<&Vec<CalClockInterval>>,
 	) -> Outcome<()> {
-		let month_set = self.month_set.as_ref()
-			.ok_or_else(|| err!("By-explicit-months rule requires month_set"; Invalid, Input))?;
+		let month_set = ok!(self.month_set.as_ref()
+			.ok_or_else(|| err!("By-explicit-months rule requires month_set"; Invalid, Input)));
 		
-		let day_incrementor = self.day_incrementor.as_ref()
-			.ok_or_else(|| err!("By-explicit-months rule requires day_incrementor"; Invalid, Input))?;
+		let day_incrementor = ok!(self.day_incrementor.as_ref()
+			.ok_or_else(|| err!("By-explicit-months rule requires day_incrementor"; Invalid, Input)));
 		
 		let start_year = reference_date.year();
 		let max_count = count.unwrap_or(1000);
@@ -418,11 +418,11 @@ impl CalendarRule {
 		count: Option<i32>,
 		_holidays: Option<&Vec<CalClockInterval>>,
 	) -> Outcome<()> {
-		let skip_months = self.skip_months.as_ref()
-			.ok_or_else(|| err!("By-regular-months rule requires skip_months"; Invalid, Input))?;
+		let skip_months = ok!(self.skip_months.as_ref()
+			.ok_or_else(|| err!("By-regular-months rule requires skip_months"; Invalid, Input)));
 		
-		let day_incrementor = self.day_incrementor.as_ref()
-			.ok_or_else(|| err!("By-regular-months rule requires day_incrementor"; Invalid, Input))?;
+		let day_incrementor = ok!(self.day_incrementor.as_ref()
+			.ok_or_else(|| err!("By-regular-months rule requires day_incrementor"; Invalid, Input)));
 		
 		let start_month = self.start_month.as_ref()
 			.map(|m| m.get_month_of_year())
@@ -494,8 +494,8 @@ impl CalendarRule {
 		duration: Option<&CalendarDuration>,
 		count: Option<i32>,
 	) -> Outcome<()> {
-		let skip_days = self.skip_days.as_ref()
-			.ok_or_else(|| err!("By-days rule requires skip_days"; Invalid, Input))?;
+		let skip_days = ok!(self.skip_days.as_ref()
+			.ok_or_else(|| err!("By-days rule requires skip_days"; Invalid, Input)));
 		
 		let skip_interval = skip_days.of() as i32;
 		let max_count = count.unwrap_or(1000);
