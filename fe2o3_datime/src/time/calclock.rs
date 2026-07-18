@@ -412,16 +412,31 @@ impl CalClock {
 	
 	/// Adds a duration to this CalClock, returning a new CalClock.
 	pub fn add_duration(&self, duration: &CalClockDuration) -> Outcome<Self> {
-		let new_date = res!(self.date.add_duration(duration));
-		let new_time = res!(self.time.add_duration(&duration.time_component()));
+		const NANOS_PER_DAY: i64 = 86_400 * 1_000_000_000;
+		// Fold the whole duration -- its day field and its nanoseconds together -- and the time already
+		// held into a single nanosecond count, then split off whole days once at the end. Adding the
+		// date part and the time part in isolation loses the carry: a duration whose nanoseconds run to
+		// more than a day (which is how `from_seconds` and thus a Unix timestamp arrive, with every
+		// second in the nanosecond field and none in the day field) advances only the time, which wraps
+		// at midnight and drops the days; and a duration that pushes the held time past midnight never
+		// moves the date. One normalisation with `div_euclid` handles both, and negatives besides --
+		// the remainder is always in `[0, NANOS_PER_DAY)`, so it is a valid nanosecond-of-day.
+		let held = self.time.to_nanos_of_day() as i64;
+		let added = duration.days() as i64 * NANOS_PER_DAY + duration.nanoseconds();
+		let total = held + added;
+		let day_carry = total.div_euclid(NANOS_PER_DAY);
+		let rem = total.rem_euclid(NANOS_PER_DAY);
+		let new_date = res!(self.date.add_days(day_carry as i32));
+		let new_time = res!(ClockTime::from_nanos_of_day(rem as u64, self.time.zone().clone()));
 		Self::from_date_time(new_date, new_time)
 	}
-	
+
 	/// Subtracts a duration from this CalClock, returning a new CalClock.
+	///
+	/// The negation of [`add_duration`](Self::add_duration), and routed through it so the same carry
+	/// across midnight is handled the same way rather than a second time and differently.
 	pub fn subtract_duration(&self, duration: &CalClockDuration) -> Outcome<Self> {
-		let new_date = res!(self.date.subtract_duration(duration));
-		let new_time = res!(self.time.subtract_duration(&duration.time_component()));
-		Self::from_date_time(new_date, new_time)
+		self.add_duration(&duration.negate())
 	}
 	
 	/// Adds the specified number of years.
@@ -1132,5 +1147,57 @@ impl Eq for CalClock {}
 impl fmt::Display for CalClock {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		write!(f, "{} {}", self.date, self.time)
+	}
+}
+
+#[cfg(test)]
+mod add_duration_tests {
+	use super::*;
+
+	/// A Unix timestamp past its first day keeps its days.
+	///
+	/// The regression this pins: `from_unix_timestamp_seconds` builds the epoch and adds the seconds as
+	/// a duration whose day field is zero and whose nanoseconds hold the lot. When the date part read
+	/// only the day field, every whole day was dropped and the result was the epoch's date with the
+	/// timestamp's time-of-day -- so 2026-07-18T10:00:00Z came back as 1970-01-01T10:00:00Z.
+	#[test]
+	fn test_a_unix_timestamp_keeps_its_days_00() -> Outcome<()> {
+		// 2026-07-18T10:00:00Z.
+		let secs = 1_784_368_800_i64;
+		let cc = res!(CalClock::from_unix_timestamp_seconds(secs, CalClockZone::utc()));
+		assert_eq!(cc.year(), 2026);
+		assert_eq!(cc.month(), 7);
+		assert_eq!(cc.day(), 18);
+		assert_eq!(cc.hour(), 10);
+		assert_eq!(cc.minute(), 0);
+		assert_eq!(cc.second(), 0);
+		// And it round-trips back to the second it came from.
+		assert_eq!(res!(cc.to_seconds()), secs);
+		Ok(())
+	}
+
+	/// The epoch itself is still the epoch.
+	#[test]
+	fn test_the_epoch_is_the_epoch_01() -> Outcome<()> {
+		let cc = res!(CalClock::from_unix_timestamp_seconds(0, CalClockZone::utc()));
+		assert_eq!((cc.year(), cc.month(), cc.day()), (1970, 1, 1));
+		assert_eq!((cc.hour(), cc.minute(), cc.second()), (0, 0, 0));
+		Ok(())
+	}
+
+	/// A duration that carries the held time past midnight advances the date, and one that carries it
+	/// back before midnight moves the date back. This is the carry the old split-and-add lost even when
+	/// the day field was right.
+	#[test]
+	fn test_a_duration_carries_the_date_across_midnight_02() -> Outcome<()> {
+		let z = CalClockZone::utc();
+		// 2026-07-18T18:00:00 + 12h = 2026-07-19T06:00:00.
+		let base = res!(CalClock::new(2026, 7, 18, 18, 0, 0, 0, z.clone()));
+		let fwd = res!(base.add_duration(&CalClockDuration::from_seconds(12 * 3600)));
+		assert_eq!((fwd.year(), fwd.month(), fwd.day(), fwd.hour()), (2026, 7, 19, 6));
+		// And back again.
+		let back = res!(fwd.subtract_duration(&CalClockDuration::from_seconds(12 * 3600)));
+		assert_eq!((back.year(), back.month(), back.day(), back.hour()), (2026, 7, 18, 18));
+		Ok(())
 	}
 }
