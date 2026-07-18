@@ -104,10 +104,17 @@ pub const PATH_LIST_JSON: &str = "/manage/list.json";
 /// One post's source and rendering as JSON, for a front-end that edits it in place.
 pub const PATH_POST_JSON: &str = "/manage/post.json";
 
+/// A site's destination settings as JSON: the public fields and whether a secret is set, never the
+/// secret itself.
+pub const PATH_CREDS_JSON: &str = "/manage/creds.json";
+
+/// Where the destination settings form posts a remote's credentials.
+pub const PATH_CREDS: &str = "/manage/creds";
+
 
 /// Whether a path is one this module writes to.
 pub fn writes(path: &str) -> bool {
-	path == PATH_SAVE || path == PATH_DELETE || path == PATH_IMPORT
+	path == PATH_SAVE || path == PATH_DELETE || path == PATH_IMPORT || path == PATH_CREDS
 }
 
 /// Whether a path is a POST this module answers.
@@ -159,6 +166,7 @@ pub fn handle_get<
 		PATH_PREVIEW	=> handle_preview(cfg, theme, admin, db, query, id),
 		PATH_LIST_JSON	=> list_json(cfg, db, id),
 		PATH_POST_JSON	=> post_json(cfg, db, query, id),
+		PATH_CREDS_JSON	=> creds_json(cfg, db, id),
 		_		=> Ok(HttpMessage::respond_with_text(
 			HttpStatus::NotFound,
 			"Not found.",
@@ -644,6 +652,53 @@ fn post_json<
 }
 
 
+/// A site's destination settings as JSON, for the settings form.
+///
+/// Each remote's public fields -- an instance URL, a handle -- and whether its secret is set, and
+/// **never the secret**. The secret is write-only: it goes in through [`do_creds`] and does not come
+/// back out, so a session that should not have it cannot read it here. `in_config` says the config file
+/// also provides the remote, so the form can show it is set even where the store holds nothing.
+fn creds_json<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	cfg:	&PublishConfig,
+	db:	Option<&(Arc<RwLock<DB>>, UID)>,
+	id:	&str,
+)
+	-> Outcome<HttpMessage>
+{
+	let db = match db {
+		Some(d)	=> d,
+		None	=> return Ok(json_error("this site has no database configured")),
+	};
+	debug!("{}: console: GET creds.json", id);
+	let stored = res!(send::get_creds(db));
+
+	let mut mm = DaticleMap::new();
+	mm.insert(dat!("base_url"),
+		dat!(stored.mastodon.as_ref().map(|c| c.base_url.clone()).unwrap_or_default()));
+	mm.insert(dat!("secret_set"),	Dat::Bool(stored.mastodon.is_some()));
+	mm.insert(dat!("in_config"),	Dat::Bool(cfg.creds.mastodon.is_some()));
+
+	let mut bm = DaticleMap::new();
+	bm.insert(dat!("host"),
+		dat!(stored.bluesky.as_ref().map(|c| c.host.clone()).unwrap_or_default()));
+	bm.insert(dat!("handle"),
+		dat!(stored.bluesky.as_ref().map(|c| c.handle.clone()).unwrap_or_default()));
+	bm.insert(dat!("secret_set"),	Dat::Bool(stored.bluesky.is_some()));
+	bm.insert(dat!("in_config"),	Dat::Bool(cfg.creds.bluesky.is_some()));
+
+	let mut m = DaticleMap::new();
+	m.insert(dat!("mastodon"),	Dat::Map(mm));
+	m.insert(dat!("bluesky"),	Dat::Map(bm));
+	Ok(json_body(&res!(Dat::Map(m).encode_string_with_config(&EncoderConfig::<(), ()>::json(None)))))
+}
+
+
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ POST                                                                      │
 // └───────────────────────────────────────────────────────────────────────────┘
@@ -679,8 +734,9 @@ pub async fn handle_post<
 	};
 	// Editing what is not served would be writing into the dark, so the editor waits for the store to
 	// be the source. Importing does not: it is how a site gets from one to the other, and must run
-	// before the switch or the switch empties the site.
-	if cfg.source != Source::Store && request_path != PATH_IMPORT {
+	// before the switch or the switch empties the site. Setting a destination's credentials does not
+	// either: a remote is a remote whatever the posts are served from.
+	if cfg.source != Source::Store && request_path != PATH_IMPORT && request_path != PATH_CREDS {
 		return Ok(back_with(
 			"this site serves its posts from a directory, so there is nothing to write into; set \
 			'source' to 'store' first",
@@ -696,7 +752,8 @@ pub async fn handle_post<
 		PATH_SAVE	=> do_save(cfg, db, tls_client, body, &admin.username, json, id).await,
 		PATH_DELETE	=> do_delete(db, body, &admin.username, json, id),
 		PATH_IMPORT	=> do_import(cfg, db, &admin.username, json, id),
-		// Unreachable: `writes` names the same three paths.
+		PATH_CREDS	=> do_creds(db, body, &admin.username, json, id),
+		// Unreachable: `writes` names the same four paths.
 		_		=> Ok(back(json)),
 	}
 }
@@ -834,6 +891,89 @@ async fn do_save<
 		}
 	}
 
+	Ok(back(json))
+}
+
+/// Sets or clears a remote's credentials, from the settings form.
+///
+/// Write-only. The secret arrives, is stored, and is never sent back; the log line names the remote and
+/// whether it was set or cleared, never the value, on the same footing as a login passphrase. An empty
+/// secret field with a secret already stored keeps the stored one -- so a handle can be changed without
+/// re-typing a password -- but with none stored the secret is required, since a remote with no secret
+/// cannot be reached. The whole set is read, the one remote changed, and the set written back.
+fn do_creds<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	body:	&[u8],
+	who:	&str,
+	json:	bool,
+	id:	&str,
+)
+	-> Outcome<HttpMessage>
+{
+	let dest = super::form_field(body, "dest").unwrap_or_default();
+	let clear = super::form_field(body, "clear").as_deref() == Some("1");
+	let mut stored = res!(send::get_creds(db));
+
+	match dest.as_str() {
+		"mastodon"	=> {
+			if clear {
+				stored.mastodon = None;
+			} else {
+				let base_url = super::form_field(body, "base_url").unwrap_or_default().trim().to_string();
+				if base_url.is_empty() {
+					return Ok(back_with("the Mastodon instance URL is required", json));
+				}
+				// The token is kept where the form left it blank and one is already stored, so a public
+				// field can be edited without re-entering the secret; it is required where none is held.
+				let token = match super::form_field(body, "token") {
+					Some(t) if !t.trim().is_empty()	=> t,
+					_				=> match &stored.mastodon {
+						Some(c)	=> c.token.clone(),
+						None	=> return Ok(back_with(
+							"the Mastodon access token is required", json)),
+					},
+				};
+				stored.mastodon = Some(send::MastodonCreds { base_url, token });
+			}
+		}
+		"bluesky"	=> {
+			if clear {
+				stored.bluesky = None;
+			} else {
+				let handle = super::form_field(body, "handle").unwrap_or_default().trim().to_string();
+				if handle.is_empty() {
+					return Ok(back_with("the Bluesky handle is required", json));
+				}
+				let host = {
+					let h = super::form_field(body, "host").unwrap_or_default().trim().to_string();
+					if h.is_empty() { send::BLUESKY_HOST_DEFAULT.to_string() } else { h }
+				};
+				let app_password = match super::form_field(body, "app_password") {
+					Some(p) if !p.trim().is_empty()	=> p,
+					_				=> match &stored.bluesky {
+						Some(c)	=> c.app_password.clone(),
+						None	=> return Ok(back_with(
+							"the Bluesky app password is required", json)),
+					},
+				};
+				stored.bluesky = Some(send::BlueskyCreds { host, handle, app_password });
+			}
+		}
+		other	=> return Ok(back_with(
+			&fmt!("'{}' is not a destination this site can set", other), json)),
+	}
+
+	res!(send::put_creds(db, &stored));
+	// No secret in this line, deliberately: it is what a journal keeps, and a journal is read by anyone
+	// who can read the host.
+	info!("{}: console: '{}' {} {} credentials",
+		id, who, if clear { "cleared" } else { "set" }, dest);
 	Ok(back(json))
 }
 
