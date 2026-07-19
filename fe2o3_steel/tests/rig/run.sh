@@ -148,6 +148,26 @@ hasnt "rather than drawing an empty table" "$body" 'class="mc-bar-fill"'
 has "the console links to it" "$(curl -sk -b $MJ "$B/manage")" "/manage/reports"
 
 echo
+echo "== the destinations page =="
+# The server-rendered twin of the app's Destinations panel: the only one a site
+# without the app has. Every secret is write-only, so a stored secret must never
+# come back down the wire -- which is the whole point of the page and the one
+# thing a check from outside can prove.
+anon=$(curl -sk "$B/manage/destinations")
+has "anonymous gets the login, not the settings" "$anon" 'name="passphrase"'
+hasnt "and no destination form leaks to it" "$anon" 'name="dest" value="mastodon"'
+body=$(curl -sk -b $MJ "$B/manage/destinations")
+has "an admin gets the destinations page" "$body" "<h1>Destinations</h1>"
+has "it offers Mastodon" "$body" 'name="dest" value="mastodon"'
+has "and Bluesky" "$body" 'name="dest" value="bluesky"'
+has "each form carries the write token" "$body" 'name="csrf"'
+has "a secret field is masked" "$body" 'type="password"'
+has "and never autofilled from the browser" "$body" 'autocomplete="new-password"'
+has "an unset remote says so" "$body" "Not set."
+hasnt "and offers nothing to clear" "$body" 'name="clear" value="1"'
+has "the console links to it" "$(curl -sk -b $MJ "$B/manage")" "/manage/destinations"
+
+echo
 echo "== the editor is an editor, not a form with three verbs =="
 # The editor's only verb is Save: leaving is a close, and deleting belongs beside the post in
 # the list. It carries a live preview pane, so the separate preview page is not the only way
@@ -174,4 +194,18 @@ has "a search that matches nothing says so" "$one" "No post matches that"
 
 echo
 echo "$pass passed, $fail failed"
+
+# A check reads the markup; only a browser renders it, and a defect class that
+# hides behind correct markup -- a modifier that never applies, a control row of
+# stepped heights -- is visible nowhere else. `RIG_HOLD=1` keeps the server up so
+# a browser can be pointed at it, rather than tearing down the one thing worth
+# looking at. Ctrl-C ends it, and cleanup still runs.
+if [ "${RIG_HOLD:-0}" = "1" ]; then
+    echo
+    echo "holding at $B (passphrase: $PASS)"
+    echo "the manage session cookie jar is at $MJ"
+    echo "Ctrl-C to stop"
+    wait "$STEEL_PID" 2>/dev/null || true
+fi
+
 [ $fail -eq 0 ]

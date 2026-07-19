@@ -122,6 +122,9 @@ pub const PATH_CREDS_JSON: &str = "/manage/creds.json";
 /// Where the destination settings form posts a remote's credentials.
 pub const PATH_CREDS: &str = "/manage/creds";
 
+/// The destinations page: the remotes a post can be sent on to, and the credentials for each.
+pub const PATH_DESTS: &str = "/manage/destinations";
+
 /// The subscribers page: the newsletter's list, its count, and where a post is sent to it.
 pub const PATH_SUBS: &str = "/manage/subscribers";
 
@@ -209,6 +212,7 @@ pub fn handle_get<
 		PATH_SUBS	=> subscribers_page(cfg, theme, admin, csrf, db, query, id),
 		PATH_SUBS_CSV	=> subscribers_csv(db, id),
 		PATH_REPORTS	=> reports_page(theme, admin, db, id),
+		PATH_DESTS	=> destinations_page(cfg, theme, admin, csrf, db, query, id),
 		PATH_LIST_JSON	=> list_json(cfg, db, id),
 		PATH_POST_JSON	=> post_json(cfg, db, query, id),
 		PATH_TAGS_JSON	=> tags_json(cfg, db, id),
@@ -1647,6 +1651,168 @@ fn tags_json<
 }
 
 
+/// The destinations page: the remotes this site can send a post on to, and what each needs to do it.
+///
+/// The server-rendered twin of the app's Destinations panel, and the only one a site without the app
+/// has. Every secret here is write-only, exactly as it is over JSON: a stored secret comes back as the
+/// word that one is held and never as its value, and a field left blank keeps what is stored, so a
+/// handle can be corrected without re-typing a password. A remote the config file also provides is
+/// named as such, because a site whose credentials come from `{env:}` or `{file:}` should not be told
+/// its destination is unset.
+fn destinations_page<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	cfg:	&PublishConfig,
+	theme:	&Theme,
+	admin:	&SiteAdmin,
+	csrf:	&str,
+	db:	Option<&(Arc<RwLock<DB>>, UID)>,
+	query:	&str,
+	id:	&str,
+)
+	-> Outcome<HttpMessage>
+{
+	let mut body = String::new();
+	body.push_str("<h1>Destinations</h1>\n");
+
+	if let Some(said) = query_field(query, "said") {
+		body.push_str(&notice(&html_escape(&said)));
+	}
+
+	let db = match db {
+		Some(db)	=> db,
+		None		=> {
+			body.push_str(&notice(
+				"This site keeps its destination credentials in its database, and has no database \
+				configured. Set <code>db_dir_rel</code> on the vhost.",
+			));
+			return Ok(page(theme, admin, "Destinations", &body));
+		}
+	};
+
+	// A read that fails costs the forms, not the page: without knowing what is stored, a form cannot
+	// honestly say whether a secret is held, and a form that guesses is worse than none.
+	let stored = match send::get_creds(db) {
+		Ok(c)	=> c,
+		Err(e)	=> {
+			error!(e, "{}: console: cannot read the destination credentials", id);
+			body.push_str(&notice("The destination settings could not be read. The log says why."));
+			return Ok(page(theme, admin, "Destinations", &body));
+		}
+	};
+
+	body.push_str(&fmt!(
+		"<p class=\"mc-muted\">A post you save can be sent on to these. A secret is stored encrypted \
+		and never shown again &mdash; leave a secret field blank to keep the one held.</p>\n",
+	));
+
+	// Mastodon: an instance to post to, and a token to post with.
+	body.push_str(&dest_panel(
+		"Mastodon",
+		"mastodon",
+		csrf,
+		stored.mastodon.is_some(),
+		cfg.creds.mastodon.is_some(),
+		&fmt!(
+			"<div class=\"mc-f-text\"><label for=\"base_url\">Instance URL</label>\
+			<input type=\"text\" id=\"base_url\" name=\"base_url\" value=\"{url}\" \
+			placeholder=\"https://mastodon.social\"></div>\n\
+			<div class=\"mc-f-text\"><label for=\"token\">Access token</label>\
+			<input type=\"password\" id=\"token\" name=\"token\" autocomplete=\"new-password\" \
+			placeholder=\"{hint}\"></div>\n",
+			url	= html_escape(&stored.mastodon.as_ref().map(|c| c.base_url.clone()).unwrap_or_default()),
+			hint	= if stored.mastodon.is_some() { "kept" } else { "required" },
+		),
+	));
+
+	// Bluesky: a handle, an app password, and a host that almost always wants its default.
+	body.push_str(&dest_panel(
+		"Bluesky",
+		"bluesky",
+		csrf,
+		stored.bluesky.is_some(),
+		cfg.creds.bluesky.is_some(),
+		&fmt!(
+			"<div class=\"mc-f-text\"><label for=\"handle\">Handle</label>\
+			<input type=\"text\" id=\"handle\" name=\"handle\" value=\"{handle}\" \
+			placeholder=\"you.bsky.social\"></div>\n\
+			<div class=\"mc-f-text\"><label for=\"host\">Host</label>\
+			<input type=\"text\" id=\"host\" name=\"host\" value=\"{host}\" \
+			placeholder=\"{default}\"></div>\n\
+			<div class=\"mc-f-text\"><label for=\"app_password\">App password</label>\
+			<input type=\"password\" id=\"app_password\" name=\"app_password\" \
+			autocomplete=\"new-password\" placeholder=\"{hint}\"></div>\n",
+			handle	= html_escape(&stored.bluesky.as_ref().map(|c| c.handle.clone()).unwrap_or_default()),
+			host	= html_escape(&stored.bluesky.as_ref().map(|c| c.host.clone()).unwrap_or_default()),
+			default	= send::BLUESKY_HOST_DEFAULT,
+			hint	= if stored.bluesky.is_some() { "kept" } else { "required" },
+		),
+	));
+
+	Ok(page(theme, admin, "Destinations", &body))
+}
+
+/// One remote's settings: its fields, whether it is set, and the ways to set or clear it.
+///
+/// Clearing is a second form rather than a checkbox in the first, so that saving cannot clear by
+/// accident, and it is offered only where something is stored to clear.
+fn dest_panel(
+	title:		&str,
+	dest:		&str,
+	csrf:		&str,
+	is_set:		bool,
+	in_config:	bool,
+	fields:		&str,
+)
+	-> String
+{
+	let mut s = String::new();
+	s.push_str(&fmt!("<h2>{}</h2>\n", html_escape(title)));
+
+	// What the site knows about this remote, said before the form asks anything of it.
+	let state = match (is_set, in_config) {
+		(true, true)	=> "Set here, and also in the configuration file.",
+		(true, false)	=> "Set.",
+		(false, true)	=> "Set in the configuration file, not here.",
+		(false, false)	=> "Not set.",
+	};
+	s.push_str(&fmt!("<p class=\"mc-muted\">{}</p>\n", state));
+
+	s.push_str(&fmt!(
+		"<form class=\"mc-form mc-settings\" method=\"POST\" action=\"{creds}\">\n\
+		<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\n\
+		<input type=\"hidden\" name=\"dest\" value=\"{dest}\">\n\
+		{fields}\
+		<button type=\"submit\" class=\"mc-btn\">Save</button>\n\
+		</form>\n",
+		creds	= PATH_CREDS,
+		csrf	= html_escape(csrf),
+		dest	= html_escape(dest),
+		fields	= fields,
+	));
+
+	if is_set {
+		s.push_str(&fmt!(
+			"<form class=\"mc-form mc-settings\" method=\"POST\" action=\"{creds}\" \
+			onsubmit=\"return confirm('Clear the {title} credentials?')\">\n\
+			<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\n\
+			<input type=\"hidden\" name=\"dest\" value=\"{dest}\">\n\
+			<input type=\"hidden\" name=\"clear\" value=\"1\">\n\
+			<button type=\"submit\" class=\"mc-btn mc-btn-danger\">Clear</button>\n\
+			</form>\n",
+			creds	= PATH_CREDS,
+			csrf	= html_escape(csrf),
+			dest	= html_escape(dest),
+			title	= html_escape(title),
+		));
+	}
+	s
+}
+
 /// A site's destination settings as JSON, for the settings form.
 ///
 /// Each remote's public fields -- an instance URL, a handle -- and whether its secret is set, and
@@ -1937,6 +2103,27 @@ fn subs_back_with(why: &str, json: bool) -> HttpMessage {
 	}
 }
 
+/// The answer to a destination write, landing back on the destinations page rather than the post list.
+///
+/// The app posts the same endpoint with `json` set and is unaffected: it wants a yes it can act on, not
+/// a page. Only the form has somewhere to be returned to, and it is the page it was posted from.
+fn dests_back(json: bool) -> HttpMessage {
+	if json {
+		json_body("{\"ok\":true}")
+	} else {
+		redirect(PATH_DESTS)
+	}
+}
+
+/// The answer to a destination write that did not go through, carrying the reason back to its own page.
+fn dests_back_with(why: &str, json: bool) -> HttpMessage {
+	if json {
+		json_error(why)
+	} else {
+		redirect(&fmt!("{}?said={}", PATH_DESTS, url_encode(why)))
+	}
+}
+
 /// Writes a post, and delivers it to the destinations the author ticked.
 async fn do_save<
 	const UIDL: usize,
@@ -2112,7 +2299,7 @@ fn do_creds<
 			} else {
 				let base_url = super::form_field(body, "base_url").unwrap_or_default().trim().to_string();
 				if base_url.is_empty() {
-					return Ok(back_with("the Mastodon instance URL is required", json));
+					return Ok(dests_back_with("the Mastodon instance URL is required", json));
 				}
 				// The token is kept where the form left it blank and one is already stored, so a public
 				// field can be edited without re-entering the secret; it is required where none is held.
@@ -2120,7 +2307,7 @@ fn do_creds<
 					Some(t) if !t.trim().is_empty()	=> t,
 					_				=> match &stored.mastodon {
 						Some(c)	=> c.token.clone(),
-						None	=> return Ok(back_with(
+						None	=> return Ok(dests_back_with(
 							"the Mastodon access token is required", json)),
 					},
 				};
@@ -2133,7 +2320,7 @@ fn do_creds<
 			} else {
 				let handle = super::form_field(body, "handle").unwrap_or_default().trim().to_string();
 				if handle.is_empty() {
-					return Ok(back_with("the Bluesky handle is required", json));
+					return Ok(dests_back_with("the Bluesky handle is required", json));
 				}
 				let host = {
 					let h = super::form_field(body, "host").unwrap_or_default().trim().to_string();
@@ -2143,14 +2330,14 @@ fn do_creds<
 					Some(p) if !p.trim().is_empty()	=> p,
 					_				=> match &stored.bluesky {
 						Some(c)	=> c.app_password.clone(),
-						None	=> return Ok(back_with(
+						None	=> return Ok(dests_back_with(
 							"the Bluesky app password is required", json)),
 					},
 				};
 				stored.bluesky = Some(send::BlueskyCreds { host, handle, app_password });
 			}
 		}
-		other	=> return Ok(back_with(
+		other	=> return Ok(dests_back_with(
 			&fmt!("'{}' is not a destination this site can set", other), json)),
 	}
 
@@ -2159,7 +2346,7 @@ fn do_creds<
 	// who can read the host.
 	info!("{}: console: '{}' {} {} credentials",
 		id, who, if clear { "cleared" } else { "set" }, dest);
-	Ok(back(json))
+	Ok(dests_back(json))
 }
 
 /// Deletes a post.
@@ -2693,6 +2880,45 @@ mod tests {
 	fn test_the_reports_page_is_a_read_10() -> Outcome<()> {
 		assert!(!writes(PATH_REPORTS));
 		assert!(!posts(PATH_REPORTS));
+		Ok(())
+	}
+
+	/// The destinations page is a read; the credentials endpoint it posts to is the write.
+	#[test]
+	fn test_the_destinations_page_is_a_read_11() -> Outcome<()> {
+		assert!(!writes(PATH_DESTS));
+		assert!(!posts(PATH_DESTS));
+		assert!(writes(PATH_CREDS));
+		Ok(())
+	}
+
+	/// A panel names the remote it sets, carries the token, and offers a clear only where something
+	/// is stored to clear.
+	#[test]
+	fn test_a_destination_panel_offers_a_clear_only_when_set_12() -> Outcome<()> {
+		let unset = dest_panel("Mastodon", "mastodon", "tok", false, false, "");
+		assert!(unset.contains("name=\"dest\" value=\"mastodon\""));
+		assert!(unset.contains("name=\"csrf\" value=\"tok\""));
+		assert!(unset.contains("Not set."));
+		// Nothing is held, so there is nothing to clear and no button to do it.
+		assert!(!unset.contains("value=\"1\""));
+		assert!(!unset.contains("mc-btn-danger"));
+
+		let set = dest_panel("Bluesky", "bluesky", "tok", true, false, "");
+		assert!(set.contains("Set."));
+		assert!(set.contains("name=\"clear\" value=\"1\""));
+		assert!(set.contains("mc-btn-danger"));
+		Ok(())
+	}
+
+	/// A remote the config file provides is named as such, so a site keyed from `{env:}` or `{file:}`
+	/// is not told its destination is unset.
+	#[test]
+	fn test_a_destination_panel_names_a_config_credential_13() -> Outcome<()> {
+		assert!(dest_panel("Mastodon", "mastodon", "t", false, true, "")
+			.contains("Set in the configuration file, not here."));
+		assert!(dest_panel("Mastodon", "mastodon", "t", true, true, "")
+			.contains("Set here, and also in the configuration file."));
 		Ok(())
 	}
 }

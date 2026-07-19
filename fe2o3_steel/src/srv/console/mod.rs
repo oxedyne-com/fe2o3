@@ -1086,6 +1086,7 @@ pub fn page(theme: &Theme, admin: &SiteAdmin, title: &str, body: &str) -> HttpMe
 	s.push_str(&fmt!("<a href=\"{}\">Posts</a>", PATH_ROOT));
 	s.push_str(&fmt!("<a href=\"{}\">Subscribers</a>", publish::PATH_SUBS));
 	s.push_str(&fmt!("<a href=\"{}\">Reports</a>", publish::PATH_REPORTS));
+	s.push_str(&fmt!("<a href=\"{}\">Destinations</a>", publish::PATH_DESTS));
 	s.push_str(&fmt!("<span class=\"mc-who\">{}…</span>", html_escape(&admin.username[..8.min(admin.username.len())])));
 	// The way out of the console is a close, in the corner, as it is on every page within it --
 	// rather than a link competing for attention with the pages themselves.
@@ -1314,6 +1315,11 @@ line-height:1.5;resize:vertical;}\
 /* Prose keeps a readable measure even where the page around it is wide. */\
 .mc-prose{max-width:40rem;border:1px solid var(--border,var(--aside-rule-color,#333c47));border-radius:6px;padding:1.2rem 1.4rem;\
 margin-top:0.8rem;}\
+/* A settings form keeps a measure too. The page is 80rem because it holds tables and\
+   side-by-side panes; a field for a handle or a host is not made better by being 80rem\
+   of it, and a row of them that wide reads as unconsidered rather than spacious. */\
+.mc-settings{max-width:34rem;}\
+.mc-settings + .mc-settings{margin-top:0.6rem;}\
 .tag-chips{display:flex;flex-wrap:wrap;gap:0.4rem;margin:0.4rem 0 0;}\
 .tag-chip{display:inline-flex;align-items:center;gap:0.2rem;font-size:0.82rem;\
 padding:0.12rem 0.15rem 0.12rem 0.55rem;border-radius:999px;\
