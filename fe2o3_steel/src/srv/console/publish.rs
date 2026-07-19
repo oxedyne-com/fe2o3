@@ -276,46 +276,57 @@ fn subscribers_page<
 	let unsubbed = subs.iter().filter(|s| s.state == subscribe::SubState::Unsubscribed).count();
 	let bounced = subs.iter().filter(|s| s.state == subscribe::SubState::Bounced).count();
 
+	// The counts, said once and briefly. Which states receive a post is a rule of the system, not
+	// news about this list, and repeating it on every visit is how a page stops being read.
 	body.push_str(&fmt!(
-		"<p class=\"mc-muted\">{confirmed} confirmed, {pending} pending, {unsubbed} unsubscribed, \
-		{bounced} bounced. Only confirmed addresses receive a post; unsubscribed and bounced are \
-		suppressed. <a href=\"{csv}\">Export CSV</a>.</p>\n",
-		confirmed = confirmed, pending = pending, unsubbed = unsubbed, bounced = bounced,
-		csv = PATH_SUBS_CSV,
+		"<p class=\"mc-muted\">{counts} &middot; <a href=\"{csv}\">Export CSV</a></p>\n",
+		counts	= if subs.is_empty() {
+			fmt!("No subscribers yet")
+		} else {
+			fmt!("{} confirmed &middot; {} pending &middot; {} unsubscribed &middot; {} bounced",
+				confirmed, pending, unsubbed, bounced)
+		},
+		csv	= PATH_SUBS_CSV,
 	));
 
 	// The send form and the test-send form, where the store is the source and there is a live post to
 	// send. The test needs only a live post, not a confirmed subscriber, so it is offered even where the
 	// send set is empty.
-	if cfg.source == Source::Store {
-		body.push_str(&send_form(cfg, csrf, db, confirmed, id));
-		body.push_str(&test_form(csrf, db, id));
-	} else {
-		body.push_str(&notice(
-			"This site serves its posts from a directory, so a post is not in the database to send. \
-			Move to the store to mail a post to subscribers.",
-		));
-	}
-
-	// The send history: what has been mailed, most recent first. A read that fails costs the table, not
-	// the page, so it logs and carries on.
-	match send::send_history(db) {
-		Ok(hist)	=> body.push_str(&history_table(&hist)),
-		Err(e)		=> {
-			warn!("{}: console: cannot read the send history: {}", id, e);
-			body.push_str(&notice("The send history could not be read. The log says why."));
-		}
-	}
-
+	// The list is what this page is about, so it comes first and the sending follows it. An empty
+	// list says so once, in the line above, and does not repeat itself in a box of its own.
 	if subs.is_empty() {
-		body.push_str(&notice("Nobody has subscribed yet."));
+		body.push_str(&send_section(cfg, csrf, db, confirmed, id));
 		return Ok(page(theme, admin, "Subscribers", &body));
 	}
+
+	// A list that outgrows a screen needs the same two things the posts do: a way to look for one
+	// address, and a way not to render ten thousand rows into one page.
+	let q = query_field(query, "q").unwrap_or_default();
+	let want = query_field(query, "state").unwrap_or_default();
+	let needle = q.to_lowercase();
+	let shown: Vec<&subscribe::Subscriber> = subs.iter()
+		.filter(|s| want.is_empty() || s.state.as_str() == want)
+		.filter(|s| needle.is_empty() || s.email.to_lowercase().contains(&needle))
+		.collect();
+
+	body.push_str(&subs_filter(&q, &want, shown.len(), subs.len()));
+
+	if shown.is_empty() {
+		body.push_str(&notice("No subscriber matches that."));
+		body.push_str(&send_section(cfg, csrf, db, confirmed, id));
+		return Ok(page(theme, admin, "Subscribers", &body));
+	}
+
+	let page_at = query_field(query, "page").and_then(|p| p.parse::<usize>().ok()).unwrap_or(1).max(1);
+	let pages = shown.len().div_ceil(PAGE_SIZE).max(1);
+	let page_at = page_at.min(pages);
+	let from = (page_at - 1) * PAGE_SIZE;
+	let upto = (from + PAGE_SIZE).min(shown.len());
 
 	body.push_str("<table class=\"mc-table\">\n<thead><tr>\
 		<th>Address</th><th>State</th><th>Since</th><th></th>\
 		</tr></thead>\n<tbody>\n");
-	for sub in &subs {
+	for sub in &shown[from..upto] {
 		let state = match sub.state {
 			subscribe::SubState::Confirmed	=> fmt!("<span class=\"mc-tag mc-tag-live\">confirmed</span>"),
 			subscribe::SubState::Pending	=> fmt!("<span class=\"mc-tag\">pending</span>"),
@@ -333,6 +344,8 @@ fn subscribers_page<
 		));
 	}
 	body.push_str("</tbody>\n</table>\n");
+	body.push_str(&pager(PATH_SUBS, &q, &want, page_at, pages));
+	body.push_str(&send_section(cfg, csrf, db, confirmed, id));
 
 	Ok(page(theme, admin, "Subscribers", &body))
 }
@@ -355,27 +368,110 @@ fn subscriber_actions(csrf: &str, sub: &subscribe::Subscriber) -> String {
 			<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
 			<input type=\"hidden\" name=\"action\" value=\"unsubscribe\">\
 			<input type=\"hidden\" name=\"email\" value=\"{email}\">\
-			<button type=\"submit\" class=\"mc-btn mc-btn-quiet\">Unsubscribe</button>\
+			<button type=\"submit\" class=\"mc-ico\" title=\"Unsubscribe\" \
+			aria-label=\"Unsubscribe\">{close}</button>\
 			</form>",
 			act	= PATH_SUBS_ACTION,
 			csrf	= html_escape(csrf),
 			email	= html_escape(&sub.email),
+			close	= icon("close"),
 		));
 	}
 	s.push_str(&fmt!(
 		"<form method=\"POST\" action=\"{act}\" style=\"display:inline\" \
-		onsubmit=\"return confirm('Erase this subscriber for good? There is no undo.')\">\
+		onsubmit=\"return confirm('Erase {email} for good? There is no undo.')\">\
 		<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
 		<input type=\"hidden\" name=\"action\" value=\"delete\">\
 		<input type=\"hidden\" name=\"email\" value=\"{email}\">\
-		<button type=\"submit\" class=\"mc-btn mc-btn-danger\">Erase</button>\
+		<button type=\"submit\" class=\"mc-ico mc-ico-danger\" title=\"Erase\" \
+		aria-label=\"Erase\">{trash}</button>\
 		</form>",
 		act	= PATH_SUBS_ACTION,
 		csrf	= html_escape(csrf),
 		email	= html_escape(&sub.email),
+		trash	= icon("trash"),
 	));
 	s.push_str("</div>");
 	s
+}
+
+/// Everything to do with sending, under one heading and below the list.
+///
+/// The list is the page's subject and the sending is what is done with it, so the sending follows
+/// it rather than sitting on top of it. Grouped, because a send form, a test form and a history
+/// loose on a page read as three unrelated things.
+fn send_section<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	cfg:		&PublishConfig,
+	csrf:		&str,
+	db:		&(Arc<RwLock<DB>>, UID),
+	confirmed:	usize,
+	id:		&str,
+)
+	-> String
+{
+	let mut s = String::new();
+	s.push_str("<h2>Send a post</h2>\n<div class=\"mc-send\">\n");
+
+	if cfg.source == Source::Store {
+		s.push_str(&send_form(cfg, csrf, db, confirmed, id));
+		s.push_str(&test_form(csrf, db, id));
+	} else {
+		s.push_str(&notice(
+			"This site serves its posts from a directory, so a post is not in the database to send. \
+			Move to the store to mail a post to subscribers.",
+		));
+	}
+
+	s.push_str("</div>\n");
+
+	// A read that fails costs the table, not the page, so it logs and carries on.
+	match send::send_history(db) {
+		Ok(hist)	=> s.push_str(&history_table(&hist)),
+		Err(e)		=> {
+			warn!("{}: console: cannot read the send history: {}", id, e);
+			s.push_str(&notice("The send history could not be read. The log says why."));
+		}
+	}
+	s
+}
+
+/// The search-and-filter row over the subscriber list, by address and by state.
+fn subs_filter(q: &str, want: &str, showing: usize, total: usize) -> String {
+	let count = if showing == total {
+		fmt!("{} subscribers", total)
+	} else {
+		fmt!("{} of {} subscribers", showing, total)
+	};
+	fmt!(
+		"<form class=\"mc-filter mc-form\" method=\"GET\" action=\"{subs}\">\n\
+		<div class=\"mc-f-text\"><label for=\"q\">Search</label>\
+		<input type=\"text\" id=\"q\" name=\"q\" value=\"{q}\" placeholder=\"address\"></div>\n\
+		<div class=\"mc-f-sel\"><label for=\"state\">State</label>\
+		<select id=\"state\" name=\"state\">\
+		<option value=\"\"{any}>Any</option>\
+		<option value=\"confirmed\"{conf}>Confirmed</option>\
+		<option value=\"pending\"{pend}>Pending</option>\
+		<option value=\"unsubscribed\"{unsub}>Unsubscribed</option>\
+		<option value=\"bounced\"{bounce}>Bounced</option>\
+		</select></div>\n\
+		<button type=\"submit\" class=\"mc-btn mc-btn-quiet\">Filter</button>\n\
+		<span class=\"mc-muted\" style=\"margin:0 0 0 auto\">{count}</span>\n\
+		</form>\n",
+		subs	= PATH_SUBS,
+		q	= html_escape(q),
+		any	= selected(want.is_empty()),
+		conf	= selected(want == "confirmed"),
+		pend	= selected(want == "pending"),
+		unsub	= selected(want == "unsubscribed"),
+		bounce	= selected(want == "bounced"),
+		count	= count,
+	)
 }
 
 /// The send-history table: post, when, and how each send's attempts ended, most recent first.
@@ -668,6 +764,149 @@ fn month_table(heading: &str, unit: &str, months: &[(String, usize)]) -> String 
 	s
 }
 
+/// How many rows a list page shows before it pages.
+const PAGE_SIZE: usize = 20;
+
+/// The search-and-filter row over a list of posts.
+///
+/// Says how many of how many are being shown, because a filter that silently hides things is how a
+/// person concludes their work has been lost. Submits by GET, so a filtered list is a link.
+fn list_filter(q: &str, want: &str, showing: usize, total: usize) -> String {
+	let count = if showing == total {
+		fmt!("{} posts", total)
+	} else {
+		fmt!("{} of {} posts", showing, total)
+	};
+	fmt!(
+		"<form class=\"mc-filter mc-form\" method=\"GET\" action=\"{root}\">\n\
+		<div class=\"mc-f-text\"><label for=\"q\">Search</label>\
+		<input type=\"text\" id=\"q\" name=\"q\" value=\"{q}\" placeholder=\"title or name\"></div>\n\
+		<div class=\"mc-f-sel\"><label for=\"state\">State</label>\
+		<select id=\"state\" name=\"state\">\
+		<option value=\"\"{any}>Any</option>\
+		<option value=\"draft\"{draft}>Draft</option>\
+		<option value=\"live\"{live}>Live</option>\
+		</select></div>\n\
+		<button type=\"submit\" class=\"mc-btn mc-btn-quiet\">Filter</button>\n\
+		<span class=\"mc-muted\" style=\"margin:0 0 0 auto\">{count}</span>\n\
+		</form>\n",
+		root	= PATH_ROOT,
+		q	= html_escape(q),
+		any	= selected(want.is_empty()),
+		draft	= selected(want == "draft"),
+		live	= selected(want == "live"),
+		count	= count,
+	)
+}
+
+/// Previous and next over a paged list, and where in it the reader is.
+///
+/// Nothing at all where everything fits on one page: a pager under a list of four is furniture that
+/// says only that there is no more.
+fn pager(path: &str, q: &str, want: &str, at: usize, pages: usize) -> String {
+	if pages <= 1 {
+		return String::new();
+	}
+	let carry = fmt!("&q={}&state={}", url_encode(q), url_encode(want));
+	let mut s = String::from("<div class=\"mc-pager\">");
+	if at > 1 {
+		s.push_str(&fmt!("<a href=\"{}?page={}{}\">Previous</a>", path, at - 1, carry));
+	}
+	s.push_str(&fmt!("<span class=\"mc-pager-at\">Page {} of {}</span>", at, pages));
+	if at < pages {
+		s.push_str(&fmt!("<a href=\"{}?page={}{}\">Next</a>", path, at + 1, carry));
+	}
+	s.push_str("</div>\n");
+	s
+}
+
+/// A post's row actions: read it as a reader would, and delete it.
+///
+/// Icons, because a row is a place for a verb and not a sentence, and because two words per row
+/// across twenty rows is a wall of text where the eye wants the titles. Deleting asks first.
+fn post_actions(csrf: &str, slug: &str) -> String {
+	fmt!(
+		"<div class=\"mc-actions\">\
+		<a class=\"mc-ico\" href=\"{preview}?slug={slug}\" title=\"Preview as a reader\" \
+		aria-label=\"Preview as a reader\">{eye}</a>\
+		<form method=\"POST\" action=\"{del}\" style=\"display:inline\" \
+		onsubmit=\"return confirm('Delete &quot;{slug}&quot;? There is no undo.')\">\
+		<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+		<input type=\"hidden\" name=\"slug\" value=\"{slug}\">\
+		<button type=\"submit\" class=\"mc-ico mc-ico-danger\" title=\"Delete\" \
+		aria-label=\"Delete\">{trash}</button>\
+		</form>\
+		</div>",
+		preview	= PATH_PREVIEW,
+		del	= PATH_DELETE,
+		csrf	= html_escape(csrf),
+		slug	= html_escape(slug),
+		eye	= icon("eye"),
+		trash	= icon("trash"),
+	)
+}
+
+/// The live preview: the text as it will read, beside the box it is typed in.
+///
+/// The server renders it, over [`PATH_RENDER`], because there is one tested parser and it is in
+/// Rust. That costs a round trip, so it is debounced rather than run per keystroke -- and the delay
+/// is why the pane says nothing at all until the first render lands, rather than flashing empty.
+/// Changing the markup select re-renders too: the same source is a different document in Djot.
+///
+/// A failed render shows its complaint in the pane. Prose that will not parse is a thing the author
+/// wants to see immediately, and it is the one message the preview exists to deliver.
+fn preview_script(csrf: &str) -> String {
+	fmt!(
+		"<script>\n\
+		(function () {{\n\
+		\tvar src = document.getElementById('source');\n\
+		\tvar out = document.getElementById('mc-preview');\n\
+		\tvar mk = document.getElementById('markup');\n\
+		\tif (!src || !out) return;\n\
+		\tvar timer = null;\n\
+		\tfunction draw() {{\n\
+		\t\tvar body = 'csrf={csrf}&markup=' + encodeURIComponent(mk ? mk.value : 'markdown')\n\
+		\t\t\t+ '&source=' + encodeURIComponent(src.value);\n\
+		\t\tfetch('{render}', {{ method: 'POST', credentials: 'same-origin',\n\
+		\t\t\theaders: {{ 'Content-Type': 'application/x-www-form-urlencoded' }}, body: body }})\n\
+		\t\t\t.then(function (r) {{ return r.json(); }})\n\
+		\t\t\t.then(function (d) {{\n\
+		\t\t\t\tif (d && typeof d.html === 'string') out.innerHTML = d.html;\n\
+		\t\t\t\telse if (d && d.error) out.textContent = d.error;\n\
+		\t\t\t}})\n\
+		\t\t\t.catch(function () {{}});\n\
+		\t}}\n\
+		\tfunction soon() {{ clearTimeout(timer); timer = setTimeout(draw, 400); }}\n\
+		\tsrc.addEventListener('input', soon);\n\
+		\tif (mk) mk.addEventListener('change', draw);\n\
+		\tdraw();\n\
+		}})();\n\
+		</script>\n",
+		csrf	= html_escape(csrf),
+		render	= PATH_RENDER,
+	)
+}
+
+/// An inline SVG icon, drawn in the current text colour at the size of the control holding it.
+///
+/// Inline rather than a file: the console is one response with no asset it can be separated from,
+/// and a stylesheet that reaches for an image is a stylesheet that can arrive without one. Unknown
+/// names give nothing, so a typo shows as a bare button rather than a broken glyph.
+fn icon(name: &str) -> &'static str {
+	match name {
+		"close"	=> "<svg viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\" \
+			stroke-linecap=\"round\" aria-hidden=\"true\"><path d=\"M4 4l8 8M12 4l-8 8\"/></svg>",
+		"trash"	=> "<svg viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.4\" \
+			stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\">\
+			<path d=\"M2.5 4h11M6 4V2.5h4V4M4 4l.7 9.5h6.6L12 4M6.5 6.5v5M9.5 6.5v5\"/></svg>",
+		"eye"	=> "<svg viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.4\" \
+			stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\">\
+			<path d=\"M1 8s2.6-4.5 7-4.5S15 8 15 8s-2.6 4.5-7 4.5S1 8 1 8z\"/>\
+			<circle cx=\"8\" cy=\"8\" r=\"1.9\"/></svg>",
+		_	=> "",
+	}
+}
+
 /// A percentage of a total, to one decimal place, or a dash where the total is zero.
 ///
 /// Nothing out of nothing is not zero per cent, and printing it as such would invent a fact.
@@ -850,8 +1089,12 @@ fn handle_list<
 {
 	let mut body = String::new();
 
+	// The one thing this page is for, at the top right where the eye lands after the heading.
 	body.push_str(&fmt!(
-		"<h1>Posts</h1>\n<p class=\"mc-muted\">Served at <a href=\"{path}\">{path}</a>.</p>\n",
+		"<div class=\"mc-head-row\"><h1>Posts</h1>\
+		<div class=\"mc-actions\"><a class=\"mc-btn\" href=\"{edit}\">Write</a></div></div>\n\
+		<p class=\"mc-muted\">Served at <a href=\"{path}\">{path}</a>.</p>\n",
+		edit = PATH_EDIT,
 		path = html_escape(&cfg.path),
 	));
 
@@ -897,33 +1140,65 @@ fn handle_list<
 		}
 	};
 
-	body.push_str(&fmt!(
-		"<p class=\"mc-actions\"><a class=\"mc-btn\" href=\"{edit}\">Write a new post</a>\
-		<a class=\"mc-btn mc-btn-quiet\" href=\"{subs}\">Subscribers</a></p>\n",
-		edit = PATH_EDIT,
-		subs = PATH_SUBS,
-	));
-
 	if recs.is_empty() {
 		body.push_str(&notice("Nothing written yet."));
 		body.push_str(&import_form(csrf, &cfg.dir));
 		return Ok(page(theme, admin, "Posts", &body));
 	}
 
+	// What the reader of this page asked to see. A site with three posts needs none of this; a site
+	// with three hundred is unusable without it, and the same page has to serve both.
+	let q = query_field(query, "q").unwrap_or_default();
+	let want = query_field(query, "state").unwrap_or_default();
+	let needle = q.to_lowercase();
+
+	// Titles cost a parse, so each record is rendered once here and the result carried: the filter
+	// wants the title, the row wants the title, and parsing twice for one row would be paying twice.
+	let mut rows: Vec<(&Record, String, bool)> = Vec::new();
+	for rec in &recs {
+		let (title, broken) = match rec.render() {
+			Ok(p)	=> (p.title, false),
+			Err(e)	=> {
+				warn!("{}: console: '{}' will not render: {}", id, rec.slug, e);
+				(rec.slug.clone(), true)
+			}
+		};
+		let matches_state = match want.as_str() {
+			"draft"	=> rec.state == PostState::Draft,
+			"live"	=> rec.state == PostState::Live,
+			_	=> true,
+		};
+		let matches_text = needle.is_empty()
+			|| title.to_lowercase().contains(&needle)
+			|| rec.slug.to_lowercase().contains(&needle);
+		if matches_state && matches_text {
+			rows.push((rec, title, broken));
+		}
+	}
+
+	body.push_str(&list_filter(&q, &want, rows.len(), recs.len()));
+
+	if rows.is_empty() {
+		body.push_str(&notice("No post matches that."));
+		return Ok(page(theme, admin, "Posts", &body));
+	}
+
+	// One page of them. Slicing after the filter, so a search reaches the whole site and not just
+	// whatever happened to be on the page being looked at.
+	let page_at = query_field(query, "page").and_then(|p| p.parse::<usize>().ok()).unwrap_or(1).max(1);
+	let pages = rows.len().div_ceil(PAGE_SIZE).max(1);
+	let page_at = page_at.min(pages);
+	let from = (page_at - 1) * PAGE_SIZE;
+	let upto = (from + PAGE_SIZE).min(rows.len());
+
 	body.push_str("<table class=\"mc-table\">\n<thead><tr>\
 		<th>Post</th><th>Kind</th><th>State</th><th>Date</th><th></th>\
 		</tr></thead>\n<tbody>\n");
-	for rec in &recs {
+	for (rec, title, broken) in &rows[from..upto] {
+		let rec = *rec;
+		let broken = *broken;
+		let title = html_escape(title);
 		let slug = html_escape(&rec.slug);
-		// The title is the prose's own heading, so it costs a parse to know. Where the prose will not
-		// parse, the slug stands in and the state cell says the post is broken.
-		let (title, broken) = match rec.render() {
-			Ok(p)	=> (html_escape(&p.title), false),
-			Err(e)	=> {
-				warn!("{}: console: '{}' will not render: {}", id, rec.slug, e);
-				(html_escape(&rec.slug), true)
-			}
-		};
 		let state = if broken {
 			fmt!("<span class=\"mc-tag mc-tag-err\">will not render</span>")
 		} else {
@@ -938,19 +1213,20 @@ fn handle_list<
 			<td>{kind}</td>\
 			<td>{state}</td>\
 			<td>{date}</td>\
-			<td><a href=\"{preview}?slug={slug}\">Preview</a></td>\
+			<td>{actions}</td>\
 			</tr>\n",
 			edit	= PATH_EDIT,
-			preview	= PATH_PREVIEW,
 			slug	= slug,
 			title	= title,
 			kind	= rec.kind.as_str(),
 			state	= state,
 			date	= html_escape(&rec.date.as_deref().map(date_text)
 				.unwrap_or_else(|| fmt!("--"))),
+			actions	= post_actions(csrf, &rec.slug),
 		));
 	}
 	body.push_str("</tbody>\n</table>\n");
+	body.push_str(&pager(PATH_ROOT, &q, &want, page_at, pages));
 	body.push_str(&import_form(csrf, &cfg.dir));
 
 	Ok(page(theme, admin, "Posts", &body))
@@ -1007,9 +1283,9 @@ fn handle_edit<
 		}
 	};
 
-	let (heading, existing) = match &rec {
-		Some(_)	=> ("Edit a post", true),
-		None	=> ("Write a new post", false),
+	let heading = match &rec {
+		Some(_)	=> "Edit a post",
+		None	=> "Write a new post",
 	};
 	let r = rec.unwrap_or_default();
 
@@ -1027,7 +1303,15 @@ fn handle_edit<
 		None		=> Vec::new(),
 	};
 
-	let mut body = fmt!("<h1>{}</h1>\n", heading);
+	// The title row: what this is, and the way out. The way out is the close, not a Cancel button --
+	// leaving is not an action of the same weight as saving, and should not look like one.
+	let mut body = fmt!(
+		"<div class=\"mc-head-row\"><h1>{heading}</h1>\
+		<a class=\"mc-close\" href=\"{root}\" title=\"Close\" aria-label=\"Close\">{close}</a></div>\n",
+		heading	= heading,
+		root	= PATH_ROOT,
+		close	= icon("close"),
+	);
 
 	body.push_str(&fmt!(
 		"<form class=\"mc-form\" method=\"POST\" action=\"{save}\">\n\
@@ -1067,20 +1351,22 @@ fn handle_edit<
 			</div>\n\
 		</div>\n\
 		{tags_block}\
-		<label for=\"source\">Text</label>\n\
-		<textarea id=\"source\" name=\"source\" rows=\"24\" spellcheck=\"true\" \
-			placeholder=\"# The title goes here, as the first heading\">{source}</textarea>\n\
-		<p class=\"mc-muted\">The title is the post's own most prominent heading. There is no title \
-			field because there is no second place to say it. A note shows whole on the site; an essay \
-			shows as a card to open. Djot can name a box (<code>:::</code>) and a style \
-			(<code>{{.class}}</code>) that Markdown cannot.</p>\n\
+		<div class=\"mc-split\">\n\
+			<div class=\"mc-pane\">\n\
+				<label for=\"source\">Text</label>\n\
+				<textarea id=\"source\" name=\"source\" rows=\"24\" spellcheck=\"true\" \
+					placeholder=\"# The title goes here, as the first heading\">{source}</textarea>\n\
+			</div>\n\
+			<div class=\"mc-pane\">\n\
+				<label for=\"mc-preview\">Preview</label>\n\
+				<div class=\"mc-preview\" id=\"mc-preview\"></div>\n\
+			</div>\n\
+		</div>\n\
 		<div class=\"mc-actions\">\n\
 			<button type=\"submit\" class=\"mc-btn\">Save</button>\n\
-			<a class=\"mc-btn mc-btn-quiet\" href=\"{root}\">Cancel</a>\n\
 		</div>\n\
 		</form>\n",
 		save		= PATH_SAVE,
-		root		= PATH_ROOT,
 		csrf		= html_escape(csrf),
 		// What the post was called on the way in, so a renamed slug takes the old record with it.
 		was		= html_escape(&r.slug),
@@ -1099,20 +1385,10 @@ fn handle_edit<
 		tags_block	= tags_field(&r.tags, &palette),
 	));
 
-	if existing {
-		body.push_str(&fmt!(
-			"<form class=\"mc-form\" method=\"POST\" action=\"{del}\" \
-			onsubmit=\"return confirm('Delete this post? There is no undo.')\">\n\
-			<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\n\
-			<input type=\"hidden\" name=\"slug\" value=\"{slug}\">\n\
-			<div class=\"mc-actions\"><button type=\"submit\" class=\"mc-btn mc-btn-danger\">Delete\
-			</button></div>\n\
-			</form>\n",
-			del	= PATH_DELETE,
-			csrf	= html_escape(csrf),
-			slug	= html_escape(&r.slug),
-		));
-	}
+	// Deleting is not an editing action: it belongs beside the post in the list, where a person is
+	// choosing between posts, not in the editor, where a person is working on one. The editor's only
+	// verb is Save.
+	body.push_str(&preview_script(csrf));
 
 	Ok(page(theme, admin, "Edit", &body))
 }
@@ -1181,15 +1457,19 @@ fn handle_preview<
 		}
 	};
 
+	// The state is worth saying, because a draft looks identical here and is served to nobody. It is
+	// a badge, as everywhere else a state is shown, rather than a sentence explaining itself.
 	let body = fmt!(
-		"<p class=\"mc-muted\"><a href=\"{edit}?slug={slug}\">&larr; Back to the editor</a> \
-		&middot; {state} &middot; this is the page a reader gets.</p>\n\
+		"<div class=\"mc-head-row\"><h1>Preview {state}</h1>\
+		<a class=\"mc-close\" href=\"{edit}?slug={slug}\" title=\"Back to the editor\" \
+		aria-label=\"Back to the editor\">{close}</a></div>\n\
 		<article class=\"mc-prose aside\">{html}</article>\n",
 		edit	= PATH_EDIT,
 		slug	= html_escape(&slug),
+		close	= icon("close"),
 		state	= match rec.state {
-			PostState::Live		=> "live",
-			PostState::Draft	=> "a draft, so served to nobody",
+			PostState::Live		=> fmt!("<span class=\"mc-tag mc-tag-live\">live</span>"),
+			PostState::Draft	=> fmt!("<span class=\"mc-tag\">draft</span>"),
 		},
 		html	= post.html,
 	);

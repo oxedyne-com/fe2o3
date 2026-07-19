@@ -1187,7 +1187,14 @@ text-transform:uppercase;letter-spacing:0.08em;}\
 .mc-nav a:hover{text-decoration:underline;}\
 .mc-who{color:var(--text-secondary,var(--aside-date-color,#8a97a6));font-family:var(--font-mono,monospace);font-size:0.8rem;}\
 .mc-main{max-width:52rem;margin:0 auto;padding:1.4rem 1.2rem 4rem;}\
+/* The whole heading scale, not just the first rung. Setting h1 alone leaves h2 and h3 to the \
+   site's own stylesheet, whose scale is built for prose -- and a site whose h2 is larger than \
+   the console's h1 inverts the hierarchy on every page that has a section in it. */\
 .mc-main h1{font-size:1.5rem;margin:0 0 0.3rem;}\
+.mc-main h2{font-size:1.15rem;margin:2rem 0 0.4rem;}\
+.mc-main h3{font-size:0.95rem;margin:1.4rem 0 0.3rem;\
+color:var(--text-secondary,var(--aside-date-color,#8a97a6));}\
+.mc-main h1:first-child,.mc-main h2:first-child{margin-top:0;}\
 .mc-muted{color:var(--text-secondary,var(--aside-date-color,#8a97a6));font-size:0.9rem;margin:0 0 1.4rem;}\
 .mc-notice{border:1px solid var(--border,var(--aside-rule-color,#333c47));border-radius:6px;\
 padding:0.8rem 1rem;margin:0 0 1.2rem;}\
@@ -1197,8 +1204,13 @@ padding:0.8rem 1rem;margin:0 0 1.2rem;}\
 padding:0.5rem 0.9rem;border-radius:6px;border:1px solid var(--accent,var(--aside-link-color,#7fb0e0));\
 background:var(--accent,var(--aside-link-color,#7fb0e0));color:var(--bg-primary,var(--body-bg,#14181d));text-decoration:none;}\
 .mc-btn:hover{opacity:0.9;text-decoration:none;}\
-.mc-btn-quiet{background:transparent;color:var(--accent,var(--aside-link-color,#7fb0e0));}\
-.mc-btn-danger{background:transparent;border-color:#c0554e;color:#d9776f;}\
+/* The modifiers name the element as well, because the base rule does. `button.mc-btn` outranks \
+   a bare `.mc-btn-quiet`, so without this every quiet and every dangerous BUTTON -- erase, \
+   unsubscribe, import, filter -- draws itself as the loud primary one, while the same class on \
+   an <a> behaves. They looked like three different consoles. */\
+.mc-btn-quiet,button.mc-btn-quiet{background:transparent;\
+color:var(--accent,var(--aside-link-color,#7fb0e0));}\
+.mc-btn-danger,button.mc-btn-danger{background:transparent;border-color:#c0554e;color:#d9776f;}\
 table.mc-table{width:100%;border-collapse:collapse;margin:0.4rem 0 1.6rem;font-size:0.92rem;}\
 .mc-table th{text-align:left;font-size:0.75rem;text-transform:uppercase;letter-spacing:0.06em;\
 color:var(--text-secondary,var(--aside-date-color,#8a97a6));border-bottom:1px solid var(--border,var(--aside-rule-color,#333c47));\
@@ -1225,11 +1237,65 @@ color:var(--text-secondary,var(--aside-date-color,#8a97a6));}\
 .mc-bar{background:var(--border,var(--aside-rule-color,#333c47));border-radius:3px;height:0.5rem;\
 min-width:6rem;}\
 .mc-bar-fill{background:var(--accent,var(--aside-link-color,#7fb0e0));border-radius:3px;height:100%;}\
+/* A page's own title row: the heading on the left, the way out on the right. */\
+.mc-head-row{display:flex;align-items:center;justify-content:space-between;gap:1rem;margin:0 0 0.6rem;}\
+.mc-head-row h1{margin:0;}\
+.mc-head-row .mc-actions{margin-top:0;}\
+/* The close: an icon, not a word. Same corner on every page that can be left. */\
+.mc-close{display:inline-flex;align-items:center;justify-content:center;width:2.4rem;height:2.4rem;\
+border-radius:6px;color:var(--text-secondary,var(--aside-date-color,#8a97a6));text-decoration:none;\
+border:1px solid transparent;}\
+.mc-close:hover{color:var(--text,var(--aside-text-color,#d8dee6));\
+border-color:var(--border,var(--aside-rule-color,#333c47));}\
+/* A row action: an icon button sized to the row, quiet until pointed at. */\
+.mc-ico{display:inline-flex;align-items:center;justify-content:center;width:2rem;height:2rem;padding:0;\
+background:transparent;border:1px solid transparent;border-radius:6px;cursor:pointer;\
+color:var(--text-secondary,var(--aside-date-color,#8a97a6));text-decoration:none;}\
+.mc-ico:hover{color:var(--text,var(--aside-text-color,#d8dee6));\
+border-color:var(--border,var(--aside-rule-color,#333c47));}\
+.mc-ico-danger:hover{color:#d9776f;border-color:#c0554e;}\
+.mc-ico svg{width:1.05rem;height:1.05rem;display:block;}\
+.mc-table .mc-actions{margin-top:0;gap:0.15rem;flex-wrap:nowrap;justify-content:flex-end;}\
+/* The editor beside its preview: stacked on a narrow screen, side by side where there is room. \
+   Equal columns, so neither the prose nor its rendering is the afterthought. */\
+.mc-split{display:grid;grid-template-columns:1fr;gap:1rem;align-items:stretch;}\
+@media (min-width:60rem){.mc-split{grid-template-columns:1fr 1fr;}}\
+/* Both panes fill the row, so the prose and its rendering are the same height. Left to \
+   themselves a textarea takes its rows attribute and the preview takes its content, and the \
+   two sit side by side at visibly different sizes. */\
+.mc-pane{min-width:0;display:flex;flex-direction:column;}\
+.mc-pane label{margin-top:0;}\
+.mc-pane textarea,.mc-pane .mc-preview{flex:1 1 auto;min-height:26rem;}\
+.mc-preview{border:1px solid var(--border,var(--aside-rule-color,#333c47));border-radius:6px;\
+padding:0.9rem 1rem;overflow:auto;\
+background:var(--bg-secondary,var(--aside-bg,transparent));}\
+.mc-preview>*:first-child{margin-top:0;}\
+.mc-preview img{max-width:100%;height:auto;}\
+/* Filter and pager: the two things a list needs once it stops fitting on a screen. */\
+.mc-filter{display:flex;gap:0.6rem;align-items:flex-end;flex-wrap:wrap;margin:0 0 1rem;}\
+.mc-filter label{margin:0 0 0.25rem;}\
+/* The button stands on the same line as the boxes it acts on, so it is the same height as \
+   them -- a padding-sized button beside a fixed-height input is a step in the row. */\
+.mc-filter .mc-btn{height:2.4rem;padding-top:0;padding-bottom:0;display:inline-flex;align-items:center;}\
+.mc-filter .mc-f-text{flex:1 1 14rem;}\
+.mc-filter .mc-f-sel{flex:0 0 9rem;}\
+.mc-pager{display:flex;gap:0.5rem;align-items:center;justify-content:flex-end;margin:0 0 1.5rem;\
+font-size:0.85rem;color:var(--text-secondary,var(--aside-date-color,#8a97a6));}\
+.mc-pager a{color:var(--accent,var(--aside-link-color,#7fb0e0));text-decoration:none;\
+border:1px solid var(--border,var(--aside-rule-color,#333c47));border-radius:6px;padding:0.25rem 0.6rem;}\
+.mc-pager a:hover{text-decoration:underline;}\
+.mc-pager .mc-pager-at{padding:0.25rem 0.2rem;}\
+/* A form is as wide as its longest field wants to be, which for an address is not the page. */\
+.mc-send .mc-form,.mc-send .mc-notice{max-width:34rem;}\
 .mc-form label{display:block;font-size:0.8rem;text-transform:uppercase;letter-spacing:0.05em;\
 color:var(--text-secondary,var(--aside-date-color,#8a97a6));margin:1rem 0 0.3rem;}\
-.mc-form input[type=text],.mc-form input[type=password],.mc-form select,.mc-form textarea{width:100%;box-sizing:border-box;\
+.mc-form input[type=text],.mc-form input[type=password],.mc-form input[type=email],.mc-form select,.mc-form textarea{width:100%;box-sizing:border-box;\
 font:inherit;background:var(--bg-tertiary,var(--input-bg,#0e1216));color:var(--input-color,inherit);\
 border:1px solid var(--border,var(--aside-rule-color,#333c47));border-radius:6px;padding:0.5rem 0.6rem;}\
+/* One height for every control on a row. A select carries its own intrinsic height and a text \
+input another, so a row of them steps up and down unless both are told the same number. */\
+.mc-form input[type=text],.mc-form input[type=password],.mc-form input[type=email],.mc-form select{\
+height:2.4rem;line-height:normal;padding-top:0;padding-bottom:0;}\
 .mc-form textarea{min-height:22rem;font-family:var(--font-mono,monospace);font-size:0.9rem;\
 line-height:1.5;resize:vertical;}\
 .mc-row{display:flex;gap:1rem;flex-wrap:wrap;}\

@@ -148,5 +148,30 @@ hasnt "rather than drawing an empty table" "$body" 'class="mc-bar-fill"'
 has "the console links to it" "$(curl -sk -b $MJ "$B/manage")" "/manage/reports"
 
 echo
+echo "== the editor is an editor, not a form with three verbs =="
+# The editor's only verb is Save: leaving is a close, and deleting belongs beside the post in
+# the list. It carries a live preview pane, so the separate preview page is not the only way
+# to see the prose rendered.
+ed=$(curl -sk -b $MJ "$B/manage/edit?slug=from-the-dir")
+has "the editor has a live preview pane" "$ed" 'id="mc-preview"'
+has "and posts its source to the renderer" "$ed" "/manage/render"
+has "leaving is a close in the corner" "$ed" 'class="mc-close"'
+hasnt "not a Cancel button" "$ed" ">Cancel<"
+hasnt "and there is no Delete in the editor" "$ed" 'class="mc-btn mc-btn-danger"'
+has "Save is the one verb" "$ed" ">Save</button>"
+
+echo
+echo "== the list copes with more than fits on a screen =="
+# A filter and a pager, and a delete beside each post rather than buried in the editor.
+ls=$(curl -sk -b $MJ "$B/manage")
+has "the list can be searched" "$ls" 'name="q"'
+has "and filtered by state" "$ls" 'name="state"'
+has "each row can be deleted, with a confirm" "$ls" "There is no undo"
+has "and deleting is an icon, not a word" "$ls" "mc-ico-danger"
+has "the reader's view is an icon too" "$ls" 'class="mc-ico"'
+one=$(curl -sk -b $MJ "$B/manage?q=zzzznothingmatchesthis")
+has "a search that matches nothing says so" "$one" "No post matches that"
+
+echo
 echo "$pass passed, $fail failed"
 [ $fail -eq 0 ]
