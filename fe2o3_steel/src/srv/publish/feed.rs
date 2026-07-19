@@ -101,6 +101,13 @@ pub fn serve(cfg: &PublishConfig, posts: &[Post], id: &str) -> Outcome<HttpMessa
 		s.push_str("\"/>\n    <updated>");
 		s.push_str(&p.date.as_ref().map(|d| instant(d)).unwrap_or_else(|| EPOCH.to_string()));
 		s.push_str("</updated>\n");
+		// One category per tag, so a reader's feed reader can file the entry by the same tags the site
+		// shows. The term is escaped for an attribute, since a tag reaches the feed as the store kept it.
+		for t in &p.tags {
+			s.push_str("    <category term=\"");
+			escape_attr(&mut s, t);
+			s.push_str("\"/>\n");
+		}
 		if !p.excerpt.is_empty() {
 			s.push_str("    <summary>");
 			escape_text(&mut s, &p.excerpt);

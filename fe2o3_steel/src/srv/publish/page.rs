@@ -16,6 +16,7 @@ use crate::srv::publish::{
 	Post,
 	PublishConfig,
 	date_text,
+	normalise_tag,
 };
 
 #[cfg(test)]
@@ -47,12 +48,13 @@ pub fn handle_get(
 	cfg:	&PublishConfig,
 	posts:	&[Post],
 	path:	&str,
+	query:	&str,
 	id:	&str,
 )
 	-> Outcome<HttpMessage>
 {
 	if path == cfg.path {
-		return index(cfg, posts, id);
+		return index(cfg, posts, query, id);
 	}
 	if path == cfg.feed_path() {
 		return super::feed::serve(cfg, posts, id);
@@ -82,12 +84,30 @@ fn is_slug(s: &str) -> bool {
 }
 
 /// The index: every post, newest first, as a link and its opening.
-fn index(cfg: &PublishConfig, posts: &[Post], id: &str) -> Outcome<HttpMessage> {
+///
+/// A `?tag=` in the query narrows it to the posts carrying that tag, so a tag link on a card or a
+/// post is never a dead end. A narrowed index names the tag it is filtered by, so a reader knows
+/// they are looking at a slice rather than the whole.
+fn index(cfg: &PublishConfig, posts: &[Post], query: &str, id: &str) -> Outcome<HttpMessage> {
+	// The facet the index is narrowed to, normalised the way a stored tag is, so `?tag=Rust` finds
+	// the posts tagged `rust`.
+	let filter = tag_filter(query);
+	let shown: Vec<&Post> = match &filter {
+		Some(t)	=> posts.iter().filter(|p| p.tags.iter().any(|x| x == t)).collect(),
+		None	=> posts.iter().collect(),
+	};
+
 	let mut body = String::new();
 	body.push_str("<header class=\"aside-index-head\"><h1>");
 	escape_text(&mut body, &cfg.title);
-	body.push_str("</h1></header>\n<ul class=\"aside-index\">\n");
-	for p in posts {
+	body.push_str("</h1>");
+	if let Some(t) = &filter {
+		body.push_str("<p class=\"aside-index-tag\">Tagged <span class=\"tag\">");
+		escape_text(&mut body, t);
+		body.push_str("</span></p>");
+	}
+	body.push_str("</header>\n<ul class=\"aside-index\">\n");
+	for p in &shown {
 		body.push_str("<li class=\"aside-index-item\">");
 		if let Some(d) = &p.date {
 			// The attribute is the stored ISO form and the text is the readable one, which is what
@@ -109,15 +129,28 @@ fn index(cfg: &PublishConfig, posts: &[Post], id: &str) -> Outcome<HttpMessage> 
 			escape_text(&mut body, &p.excerpt);
 			body.push_str("</p>");
 		}
+		body.push_str(&tags_list(cfg, p));
 		body.push_str("</li>\n");
 	}
 	body.push_str("</ul>\n");
 
-	if posts.is_empty() {
+	if shown.is_empty() {
 		body.push_str("<p class=\"aside-empty\">Nothing here yet.</p>\n");
 	}
 
-	info!("{}: publish: index, {} posts", id, posts.len());
+	// A newsletter sign-up beneath the list, so a reader subscribes in place rather than hunting for
+	// it. It posts to the same endpoint as the standalone page; where mail is not configured that
+	// endpoint answers "not available", so the form is safe to show unconditionally.
+	body.push_str("<section class=\"aside-subscribe-inline\">\n<h2>Subscribe</h2>\n");
+	body.push_str("<p>New posts by email. Confirm once, unsubscribe from any message.</p>\n");
+	body.push_str("<form class=\"aside-subscribe\" method=\"post\" action=\"");
+	escape_attr(&mut body, &cfg.subscribe_path());
+	body.push_str("\">\n<input type=\"email\" name=\"email\" id=\"aside-subscribe-email\" \
+		placeholder=\"you@example.com\" autocomplete=\"email\" aria-label=\"Email\" required>\n");
+	body.push_str("<button type=\"submit\" class=\"aside-subscribe-btn\">Subscribe</button>\n");
+	body.push_str("</form>\n</section>\n");
+
+	info!("{}: publish: index, {} posts", id, shown.len());
 
 	let head = Head {
 		title:		cfg.title.clone(),
@@ -127,6 +160,49 @@ fn index(cfg: &PublishConfig, posts: &[Post], id: &str) -> Outcome<HttpMessage> 
 		date:		None,
 	};
 	Ok(html_response(HttpStatus::OK, &page(cfg, &head, &body, None)))
+}
+
+/// The tag a `?tag=` query narrows the index to, normalised as a stored tag is.
+///
+/// Read from the raw query with no percent-decoding: a tag is `[a-z0-9-]`, which carries nothing a
+/// query string would encode, so a value that needed decoding is a value no post is tagged with and
+/// narrows to nothing -- which is the right answer to a tag that does not exist.
+fn tag_filter(query: &str) -> Option<String> {
+	for pair in query.split('&') {
+		let mut kv = pair.splitn(2, '=');
+		let k = kv.next().unwrap_or("");
+		let v = kv.next().unwrap_or("");
+		if k == "tag" {
+			let t = normalise_tag(v);
+			if t.is_empty() {
+				return None;
+			}
+			return Some(t);
+		}
+	}
+	None
+}
+
+/// A post's tags as a list of links, each narrowing the index to that tag.
+///
+/// Nothing at all for a post with no tags, so the element is never an empty shell. The link is the
+/// index with the tag as a facet; the tag is `[a-z0-9-]`, so it needs no encoding to sit in a query.
+fn tags_list(cfg: &PublishConfig, post: &Post) -> String {
+	if post.tags.is_empty() {
+		return String::new();
+	}
+	let mut s = String::from("<ul class=\"post-tags\">");
+	for t in &post.tags {
+		s.push_str("<li><a class=\"tag\" href=\"");
+		escape_attr(&mut s, &cfg.path);
+		s.push_str("?tag=");
+		escape_attr(&mut s, t);
+		s.push_str("\">");
+		escape_text(&mut s, t);
+		s.push_str("</a></li>");
+	}
+	s.push_str("</ul>");
+	s
 }
 
 /// One post.
@@ -142,6 +218,9 @@ fn post_page(cfg: &PublishConfig, post: &Post) -> Outcome<HttpMessage> {
 	}
 	// The prose was escaped where it was rendered.
 	body.push_str(&post.html);
+	// The tags, in the article's footer, each a link back to the index narrowed to that tag. Omitted
+	// entirely for a post with none.
+	body.push_str(&tags_list(cfg, post));
 	body.push_str("</article>\n");
 
 	// Where the post also lives, and where the conversation about it may be. `nofollow`, since these
@@ -356,6 +435,117 @@ fn meta_name(out: &mut String, name: &str, content: &str) {
 	out.push_str("\">\n");
 }
 
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ THE NEWSLETTER'S PUBLIC PAGES                                             │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// The themed sign-up form, served at `GET {path}/subscribe`.
+///
+/// A working, script-free form the site can link to directly, and the shape the site's own inline form
+/// should mirror: a `POST` to the same path with one field, `email`. The classes and ids below are the
+/// contract the front-end is built against.
+pub fn subscribe_form_page(cfg: &PublishConfig) -> HttpMessage {
+	let mut body = String::new();
+	body.push_str("<article class=\"aside aside-subscribe-page\">\n<h1>Subscribe</h1>\n");
+	body.push_str("<p>Get new posts by email. Confirm once, and unsubscribe from any message.</p>\n");
+	body.push_str("<form class=\"aside-subscribe\" id=\"aside-subscribe-form\" method=\"post\" action=\"");
+	escape_attr(&mut body, &cfg.subscribe_path());
+	body.push_str("\">\n<label for=\"aside-subscribe-email\">Email</label>\n");
+	body.push_str("<input type=\"email\" name=\"email\" id=\"aside-subscribe-email\" \
+		placeholder=\"you@example.com\" autocomplete=\"email\" required>\n");
+	body.push_str("<button type=\"submit\" class=\"aside-subscribe-btn\">Subscribe</button>\n");
+	body.push_str("</form>\n</article>\n");
+	subscribe_page(cfg, "Subscribe", &body, HttpStatus::OK)
+}
+
+/// The "check your inbox" answer to a sign-up, served whether the address was new, pending or already
+/// confirmed -- so the form is never an oracle for whether an address is on the list.
+pub fn subscribe_sent_page(cfg: &PublishConfig) -> HttpMessage {
+	let body = subscribe_result(
+		"Check your inbox",
+		"If that address can receive mail, a confirmation link is on its way. Follow it to start \
+		receiving posts. Nothing arrives until you do.",
+	);
+	subscribe_page(cfg, "Check your inbox", &body, HttpStatus::OK)
+}
+
+/// The answer to a confirmation link followed: the address is now on the list.
+///
+/// The same page whether the link was fresh or followed a second time, so a double-click is not an
+/// error to a reader who did nothing wrong.
+pub fn subscribe_confirmed_page(cfg: &PublishConfig) -> HttpMessage {
+	let body = subscribe_result(
+		"You are subscribed",
+		"Your subscription is confirmed. New posts will arrive by email, and every one carries a link \
+		to unsubscribe.",
+	);
+	subscribe_page(cfg, "Subscribed", &body, HttpStatus::OK)
+}
+
+/// The answer to an unsubscribe link followed: no more mail reaches this address.
+pub fn subscribe_unsubscribed_page(cfg: &PublishConfig) -> HttpMessage {
+	let body = subscribe_result(
+		"Unsubscribed",
+		"You will receive no further posts at this address. You are welcome back any time from the \
+		subscribe page.",
+	);
+	subscribe_page(cfg, "Unsubscribed", &body, HttpStatus::OK)
+}
+
+/// The answer to a token that names nobody: malformed, already spent by a re-subscribe, or never real.
+pub fn subscribe_bad_token_page(cfg: &PublishConfig) -> HttpMessage {
+	let body = subscribe_result(
+		"This link did not work",
+		"That link is not one we recognise -- it may be old, or already used. Try subscribing again \
+		if you meant to.",
+	);
+	subscribe_page(cfg, "Link not recognised", &body, HttpStatus::NotFound)
+}
+
+/// The answer to an address the form will not take: it is not a shape an address wears.
+pub fn subscribe_invalid_page(cfg: &PublishConfig) -> HttpMessage {
+	let body = subscribe_result(
+		"That does not look like an email",
+		"Check the address and try again. It should look like you@example.com.",
+	);
+	subscribe_page(cfg, "Check the address", &body, HttpStatus::OK)
+}
+
+/// The honest answer where mail is not configured on this host, or the site has no origin to build a
+/// confirmation link from: signup is not available, rather than a pending row that can never confirm.
+pub fn subscribe_unavailable_page(cfg: &PublishConfig) -> HttpMessage {
+	let body = subscribe_result(
+		"Signups are not available yet",
+		"Email subscriptions are not set up on this site at the moment. Nothing has been recorded.",
+	);
+	subscribe_page(cfg, "Not available", &body, HttpStatus::OK)
+}
+
+/// A titled paragraph, the body every subscription-result page shares.
+fn subscribe_result(heading: &str, para: &str) -> String {
+	let mut s = String::from("<article class=\"aside aside-subscribe-result\">\n<h1>");
+	escape_text(&mut s, heading);
+	s.push_str("</h1>\n<p>");
+	escape_text(&mut s, para);
+	s.push_str("</p>\n</article>\n");
+	s
+}
+
+/// Wraps a subscription page's body in the reader's own chrome, so the site's skin applies.
+///
+/// The same [`page`] wrapper the posts use, so a subscribe page is styled by the site's stylesheets
+/// exactly as a post is, with no card metadata -- these are not shareable articles.
+fn subscribe_page(cfg: &PublishConfig, title: &str, body: &str, status: HttpStatus) -> HttpMessage {
+	let head = Head {
+		title:		title.to_string(),
+		description:	String::new(),
+		url:		cfg.url_of(&cfg.subscribe_path()),
+		kind:		"website",
+		date:		None,
+	};
+	html_response(status, &page(cfg, &head, body, None))
+}
+
 /// An HTML response with the type and status a browser expects.
 fn html_response(status: HttpStatus, body: &str) -> HttpMessage {
 	let mut resp = HttpMessage::respond_with_text(status, body);
@@ -390,6 +580,7 @@ mod tests {
 			base_url:	fmt!("https://example.com"),
 			css:		vec![fmt!("/css/a.css")],
 			creds:		Default::default(),
+			newsletter_from:	String::new(),
 		}
 	}
 
@@ -402,6 +593,7 @@ mod tests {
 			excerpt:	fmt!("An opening sentence."),
 			html:		fmt!("<h1>On rent</h1>\n<p>An opening sentence.</p>\n"),
 			also_on:	Vec::new(),
+			tags:		Vec::new(),
 		}
 	}
 
@@ -468,7 +660,7 @@ mod tests {
 	#[test]
 	fn test_the_index_links_its_posts_02() -> Outcome<()> {
 		let posts = vec![post()];
-		let resp = res!(index(&cfg(), &posts, "test"));
+		let resp = res!(index(&cfg(), &posts, "", "test"));
 		let body = String::from_utf8_lossy(&resp.body).to_string();
 		assert_eq!(status_of(&resp), Some(HttpStatus::OK));
 		assert!(body.contains(r#"<a href="/asides/on-rent">On rent</a>"#), "got: {}", body);
@@ -479,7 +671,7 @@ mod tests {
 	/// An index with nothing in it says so, rather than being a blank page that looks broken.
 	#[test]
 	fn test_an_empty_index_says_so_04() -> Outcome<()> {
-		let resp = res!(index(&cfg(), &[], "test"));
+		let resp = res!(index(&cfg(), &[], "", "test"));
 		let body = String::from_utf8_lossy(&resp.body).to_string();
 		assert!(body.contains("Nothing here yet."), "got: {}", body);
 		Ok(())
@@ -492,9 +684,53 @@ mod tests {
 		let posts = vec![post()];
 		for bad in ["../../etc/passwd", "..", "a.b", "a%2Fb"] {
 			let path = fmt!("/asides/{}", bad);
-			let resp = res!(handle_get(&cfg(), &posts, &path, "test"));
+			let resp = res!(handle_get(&cfg(), &posts, &path, "", "test"));
 			assert_eq!(status_of(&resp), Some(HttpStatus::NotFound), "'{}' was not refused", bad);
 		}
+		Ok(())
+	}
+
+	/// A tagged post carries its tags as `.tag` links to the filtered index, and an untagged one
+	/// carries no `.post-tags` element at all.
+	#[test]
+	fn test_a_post_page_carries_its_tags_06() -> Outcome<()> {
+		let mut p = post();
+		p.tags = vec![fmt!("rust"), fmt!("web")];
+		let resp = res!(post_page(&cfg(), &p));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(body.contains(r#"<ul class="post-tags">"#), "no tag list: {}", body);
+		assert!(body.contains(r#"<a class="tag" href="/asides?tag=rust">rust</a>"#), "got: {}", body);
+		assert!(body.contains(r#"<a class="tag" href="/asides?tag=web">web</a>"#), "got: {}", body);
+
+		// A post with no tags has no empty shell.
+		let resp = res!(post_page(&cfg(), &post()));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(!body.contains("post-tags"), "an untagged post drew a tag element: {}", body);
+		Ok(())
+	}
+
+	/// A `?tag=` narrows the index to the posts wearing that tag, and names the tag it narrowed by.
+	#[test]
+	fn test_the_index_filters_by_tag_07() -> Outcome<()> {
+		let mut a = post();
+		a.slug = fmt!("tagged");
+		a.title = fmt!("Tagged");
+		a.tags = vec![fmt!("rust")];
+		let mut b = post();
+		b.slug = fmt!("untagged");
+		b.title = fmt!("Untagged");
+		let posts = vec![a, b];
+
+		let resp = res!(index(&cfg(), &posts, "tag=rust", "test"));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(body.contains(r#"<a href="/asides/tagged">Tagged</a>"#), "the tagged post is missing: {}", body);
+		assert!(!body.contains(">Untagged</a>"), "an untagged post survived the filter: {}", body);
+		assert!(body.contains(r#"<span class="tag">rust</span>"#), "the filter is not named: {}", body);
+
+		// A `?tag=` naming no post's tag narrows to nothing and says so.
+		let resp = res!(index(&cfg(), &posts, "tag=nonesuch", "test"));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(body.contains("Nothing here yet."), "an empty filter did not say so: {}", body);
 		Ok(())
 	}
 

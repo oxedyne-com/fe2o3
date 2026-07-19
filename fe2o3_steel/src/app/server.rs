@@ -457,6 +457,46 @@ impl AppShellContext {
             }
         };
 
+        // The site's own newsletter sender: the DKIM identities and an outbound SMTP client, built
+        // from the same mail configuration the mail server and the alerter use, and shared by every
+        // vhost. `None` where no mail is configured -- newsletter signup then answers "not set up"
+        // rather than recording a pending subscriber it could never confirm. A build failure warns and
+        // disables the newsletter rather than taking the server down: the websites do not depend on it.
+        let mail_sender = match res!(server_cfg.get_mail_any()) {
+            // Built whenever there is a sending identity -- a hostname to greet with and at least one
+            // DKIM key -- independent of whether the mail *server* (the listeners) is enabled. This is
+            // what lets a site send its newsletter without becoming an MX.
+            Some(mail_cfg) if !mail_cfg.hostname.is_empty()
+                && (!mail_cfg.dkim_key_file.is_empty() || !mail_cfg.dkim_rsa_key_file.is_empty()) => {
+                let dkim = res!(
+                    crate::srv::server::load_dkim_signers(&mail_cfg, &root_path));
+                let domain = if mail_cfg.dkim_domain.is_empty() {
+                    mail_cfg.hostname.clone()
+                } else {
+                    mail_cfg.dkim_domain.clone()
+                };
+                let default_from = fmt!("news@{}", domain);
+                match crate::srv::publish::send::MailSender::new(
+                    mail_cfg.hostname.clone(), dkim.clone(), default_from.clone())
+                {
+                    Ok(s) => {
+                        info!("Newsletter sender ready (default from {}, {} DKIM key(s)).",
+                            default_from, dkim.len());
+                        Some(Arc::new(s))
+                    }
+                    Err(e) => {
+                        warn!("Building the newsletter sender failed ({}); newsletter \
+                            signup will report itself unavailable.", e);
+                        None
+                    }
+                }
+            }
+            _ => {
+                info!("No mail configured, so the newsletter is unavailable; signup says so.");
+                None
+            }
+        };
+
         let admin_state = res!(AdminState::new(
             self.wallet.clone(),
             wallet_path_for_admin,
@@ -557,6 +597,7 @@ impl AppShellContext {
                 Some(admin_state.clone()),
                 Some(traffic.clone()),
                 publish.map(Arc::new),
+                mail_sender.clone(),
                 Arc::new(vh.site_admins.clone()),
             );
 

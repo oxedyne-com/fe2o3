@@ -20,7 +20,10 @@ use crate::srv::{
     publish::{
         self,
         PublishConfig,
+        Subscription,
         page as publish_page,
+        send::MailSender,
+        subscribe as publish_subscribe,
     },
     webhook::{
         self,
@@ -120,6 +123,12 @@ pub struct AppWebHandler<
     /// the paths the block would have claimed fall through to the
     /// static file router like any others.
     pub publish:                Option<Arc<PublishConfig>>,
+    /// The site's own DKIM mail sender, shared across every vhost and
+    /// built once from the server's mail configuration. `None` where
+    /// the host has no mail configured, in which case newsletter
+    /// signup answers "not set up" rather than recording a pending
+    /// subscriber it could never confirm.
+    pub mail:                   Option<Arc<MailSender>>,
     /// The members the operator has entrusted with this site, by
     /// username. A signed-in member on this list reaches the site
     /// console at `/manage`; an empty list means the site has no
@@ -146,6 +155,7 @@ impl<
         admin_state:            Option<Arc<AdminState>>,
         traffic:                Option<Arc<TrafficRecorder>>,
         publish:                Option<Arc<PublishConfig>>,
+        mail:                   Option<Arc<MailSender>>,
         site_admins:            Arc<Vec<String>>,
     )
         -> Self
@@ -164,6 +174,7 @@ impl<
             admin_state,
             traffic,
             publish,
+            mail,
             site_admins,
         }
     }
@@ -337,6 +348,7 @@ impl<
             {
                 let resp = res!(site_console::handle_get(
                     site_admins.as_ref(),
+                    admin_state.as_deref(),
                     publish.as_deref(),
                     db.as_ref(),
                     &request_path,
@@ -356,6 +368,26 @@ impl<
             // entirely and the paths mean whatever they meant before.
             if let Some(cfg) = &publish {
                 if cfg.owns(&request_path) {
+                    // The newsletter's public endpoints sit under the same prefix and touch the
+                    // subscriber store, not the posts, so they are answered before the posts are
+                    // read. A confirm or unsubscribe is a GET, since it is followed from an email;
+                    // the sign-up form is a GET too, and its POST is handled in `handle_post`.
+                    match cfg.subscription_of(&request_path) {
+                        Some(Subscription::Subscribe) => {
+                            return Ok(Some(publish_subscribe::subscribe_form(cfg.as_ref())));
+                        }
+                        Some(Subscription::Confirm) => {
+                            let resp = res!(publish_subscribe::handle_confirm(
+                                cfg.as_ref(), db.as_ref(), &request_query, &id));
+                            return Ok(Some(resp));
+                        }
+                        Some(Subscription::Unsubscribe) => {
+                            let resp = res!(publish_subscribe::handle_unsubscribe(
+                                cfg.as_ref(), db.as_ref(), &request_query, &id));
+                            return Ok(Some(resp));
+                        }
+                        None => {}
+                    }
                     // The read is the only part that touches the database, so the generics stop here
                     // and the renderers take a slice of posts.
                     let posts = match publish::read(cfg.as_ref(), db.as_ref(), &id) {
@@ -375,6 +407,7 @@ impl<
                         cfg.as_ref(),
                         &posts,
                         &request_path,
+                        &request_query,
                         &id,
                     ));
                     return Ok(Some(resp));
@@ -576,9 +609,23 @@ impl<
         let tls_client = self.tls_client.clone();
         let admin_state = self.admin_state.clone();
         let publish = self.publish.clone();
+        let mail = self.mail.clone();
         let site_admins = self.site_admins.clone();
 
         async move {
+            // The newsletter sign-up: a public POST under the published prefix,
+            // answered before the console and the API routes. It touches the
+            // subscriber store and the DKIM mail sender, not the posts, and
+            // always answers the same themed page whether or not the address was
+            // already known -- so the form is never an oracle for the list.
+            if let Some(cfg) = &publish {
+                if let Some(Subscription::Subscribe) = cfg.subscription_of(&request_path) {
+                    let resp = res!(publish_subscribe::handle_subscribe(
+                        cfg.as_ref(), db.as_ref(), &mail, &body, &id).await);
+                    return Ok(Some(resp));
+                }
+            }
+
             // The site console's writes, gated on a site admin's session and
             // guarded against cross-site forgery. It answers only the paths it
             // writes to and hands the rest back. Dispatched on the same terms as
@@ -589,12 +636,15 @@ impl<
             {
                 if let Some(resp) = res!(site_console::handle_post(
                     site_admins.as_ref(),
+                    admin_state.as_deref(),
                     publish.as_deref(),
                     db.as_ref(),
                     &tls_client,
+                    &mail,
                     &request_path,
                     &req_headers,
                     &body,
+                    peer,
                     &id,
                 ).await) {
                     return Ok(Some(resp));

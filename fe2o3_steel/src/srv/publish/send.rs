@@ -19,6 +19,9 @@
 //! remote is sent, the permalink pulled from what it returns -- is.
 
 use crate::srv::publish::{
+	Post,
+	PostState,
+	PublishConfig,
 	dest::{
 		Delivery,
 		DeliveryState,
@@ -26,9 +29,13 @@ use crate::srv::publish::{
 		Rendition,
 	},
 	store,
+	subscribe,
 };
 
-use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::{
+	prelude::*,
+	rand::Rand,
+};
 use oxedyne_fe2o3_iop_crypto::enc::Encrypter;
 use oxedyne_fe2o3_iop_db::api::Database;
 use oxedyne_fe2o3_iop_hash::api::Hasher;
@@ -43,19 +50,31 @@ use oxedyne_fe2o3_jdat::{
 	},
 };
 use oxedyne_fe2o3_datime::{
+	constant::DayOfWeek,
 	format::rfc9557::Rfc9557Format,
 	time::{
 		CalClock,
 		CalClockZone,
 	},
 };
-use oxedyne_fe2o3_net::http::{
-	client::https_request,
-	header::{
-		HttpHeadline,
-		HttpMethod,
+use oxedyne_fe2o3_net::{
+	dkim::DkimSigner,
+	http::{
+		client::https_request,
+		header::{
+			HttpHeadline,
+			HttpMethod,
+		},
+		msg::HttpMessage,
 	},
-	msg::HttpMessage,
+	smtp::client::{
+		OutboundClient,
+		is_permanent,
+	},
+};
+use oxedyne_fe2o3_text::doc::html::{
+	escape_attr,
+	escape_text,
 };
 
 use std::{
@@ -779,6 +798,610 @@ pub fn iso_of(unix_secs: i64) -> Outcome<String> {
 }
 
 
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ EMAIL: the site's own DKIM sender                                         │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// The site's own outbound mail: the SMTP client that reaches a recipient's MX, and the DKIM
+/// identities that sign what it sends.
+///
+/// "Own the send." Built once at start-up from the server's mail configuration and threaded into the
+/// publish path the way the outbound TLS client is, so the newsletter and its confirmation are signed
+/// and delivered by exactly the machinery the mail server and the operator alerter already use --
+/// [`OutboundClient::deliver`] straight to the recipient's MX, each message signed by every configured
+/// [`DkimSigner`] as [`crate::srv::alert`] and the mail handler both do it.
+///
+/// Cheap to clone: the client and the signers are shared behind `Arc`s.
+#[derive(Clone)]
+pub struct MailSender {
+	/// The SMTP client, dialling each recipient's MX directly.
+	client:		Arc<OutboundClient>,
+	/// The DKIM identities every message is signed with. Empty means unsigned, which still delivers --
+	/// a key that will not sign is skipped, not fatal, as everywhere else the domain signs its mail.
+	dkim:		Vec<Arc<DkimSigner>>,
+	/// The address the newsletter is from where a site's `publish` block names none, derived from the
+	/// mail configuration's signing domain, e.g. `news@<domain>`.
+	default_from:	String,
+}
+
+impl std::fmt::Debug for MailSender {
+	/// Written by hand because [`OutboundClient`] is not `Debug`; the sending identity is the part worth
+	/// a log line.
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("MailSender")
+			.field("default_from", &self.default_from)
+			.field("dkim", &self.dkim.len())
+			.finish()
+	}
+}
+
+impl MailSender {
+
+	/// Builds a sender from an EHLO hostname, the DKIM identities to sign with, and the default
+	/// newsletter From address.
+	///
+	/// The signers and the From are the caller's -- built from the server's mail configuration -- so this
+	/// invents no key and reads no config: it is the same pattern the alerter follows.
+	pub fn new(
+		ehlo_host:	String,
+		dkim:		Vec<Arc<DkimSigner>>,
+		default_from:	String,
+	)
+		-> Outcome<Self>
+	{
+		let client = res!(OutboundClient::with_system_roots(ehlo_host));
+		Ok(Self {
+			client:	Arc::new(client),
+			dkim,
+			default_from,
+		})
+	}
+
+	/// The address the newsletter is from where a site names none.
+	pub fn default_from(&self) -> &str {
+		&self.default_from
+	}
+
+	/// Signs a message with every configured DKIM identity and delivers it to one recipient's MX.
+	///
+	/// The one door every piece of newsletter mail goes through, the confirmation included. Each signer
+	/// prepends its own `DKIM-Signature`; a key that will not sign is skipped with a warning rather than
+	/// failing the send, since an unsigned message that arrives beats a signed one that does not.
+	/// Returns the remote's queue id.
+	async fn deliver_signed(
+		&self,
+		from:	&str,
+		to:	&str,
+		msg:	&str,
+	)
+		-> Outcome<String>
+	{
+		let mut bytes = msg.as_bytes().to_vec();
+		let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
+			Ok(d)	=> d.as_secs(),
+			Err(_)	=> 0,
+		};
+		for signer in &self.dkim {
+			match signer.sign(&bytes, &[], now) {
+				Ok(b)	=> bytes = b,
+				Err(e)	=> warn!("publish: signing newsletter mail with the {} key for selector \
+					'{}' failed; sending it unsigned: {}",
+					signer.algorithm(), signer.selector(), e),
+			}
+		}
+		let rcpt = [to.to_string()];
+		self.client.deliver(from, &rcpt, &bytes).await
+	}
+
+	/// Sends the double opt-in confirmation to a pending subscriber.
+	///
+	/// One plain-text message carrying the confirm link and nothing else: it is not the newsletter, and
+	/// an address that never asked for it should get as little as possible.
+	pub async fn send_confirmation(
+		&self,
+		from:		&str,
+		to:		&str,
+		confirm_url:	&str,
+		site_name:	&str,
+	)
+		-> Outcome<String>
+	{
+		let msg = build_confirmation_email(from, to, confirm_url, site_name);
+		self.deliver_signed(from, to, &msg).await
+	}
+}
+
+/// The From address a newsletter is sent with, the site's own where it names one and the sender's
+/// derived default otherwise.
+///
+/// A method on the config so the resolution lives in one place: the `publish` block's
+/// `newsletter_from` wins, and an empty one falls back to `news@<mail-domain>`, which is aligned with
+/// the DKIM signing domain so the signature authenticates.
+impl PublishConfig {
+	/// The newsletter's From, resolved against the mail sender's default.
+	pub fn newsletter_from(&self, sender: &MailSender) -> String {
+		if self.newsletter_from.trim().is_empty() {
+			sender.default_from().to_string()
+		} else {
+			self.newsletter_from.clone()
+		}
+	}
+}
+
+/// What one newsletter send did: how many it was sent to, and how each attempt ended.
+///
+/// The tally a send returns and a [`SendEntry`] is built from. `attempted` is the confirmed send set at
+/// the moment of the send; `sent` the deliveries the receiving server accepted; `failed` the transient
+/// failures, which stay on the list to try again; `suppressed` the permanent ones, whose addresses were
+/// marked [`SubState::Bounced`](super::subscribe::SubState::Bounced) and will not be sent to again.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SendReport {
+	/// How many confirmed subscribers the send set held.
+	pub attempted:	usize,
+	/// How many the receiving server accepted.
+	pub sent:	usize,
+	/// How many failed transiently, and stay on the list to retry.
+	pub failed:	usize,
+	/// How many failed permanently and were suppressed as bounced.
+	pub suppressed:	usize,
+}
+
+/// Sends a live post to every confirmed subscriber, best-effort, one message each.
+///
+/// The [`Destination::Email`](super::dest::Destination::Email) delivery, but not through the per-remote
+/// retry queue: a newsletter is a fan-out to many addresses with no single permalink to return, so it
+/// is its own path rather than a [`Delivery`] on the post. Each subscriber gets a message carrying
+/// their own unsubscribe link -- built from their token, so the person who clicks it removes themselves
+/// and nobody else -- and delivery is per recipient, since [`OutboundClient::deliver`] is one MX per
+/// call. A recipient the send fails for is logged (redacted) and counted; the send does not stop.
+///
+/// A **permanent** failure -- a 5xx, an unknown mailbox, told apart by [`is_permanent`] -- suppresses
+/// the address: it is marked [`SubState::Bounced`](super::subscribe::SubState::Bounced) so no later send
+/// reaches it. A **transient** failure is merely counted, and the address stays confirmed for the next
+/// send. Returns the [`SendReport`] the caller records as history.
+pub async fn send_newsletter<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	sender:	&MailSender,
+	db:	&(Arc<RwLock<DB>>, UID),
+	cfg:	&PublishConfig,
+	from:	&str,
+	slug:	&str,
+	id:	&str,
+)
+	-> Outcome<SendReport>
+{
+	let rec = match res!(store::get(db, slug)) {
+		Some(r)	=> r,
+		None	=> return Err(err!(
+			"publish: there is no post '{}' to send to subscribers.", slug;
+			Invalid, Input, Missing)),
+	};
+	// A draft is served to nobody, and mailed to nobody: a newsletter is a publication, and a post not
+	// published is not one.
+	if rec.state != PostState::Live {
+		return Err(err!(
+			"publish: '{}' is a draft; a draft is sent to no subscriber.", slug;
+			Invalid, Input));
+	}
+	let post = res!(rec.render());
+	let subs = res!(subscribe::confirmed(db, id));
+	let online = cfg.url_of(&cfg.path_of(slug));
+
+	let mut report = SendReport { attempted: subs.len(), ..Default::default() };
+	for sub in &subs {
+		let unsub = cfg.url_of(&cfg.unsubscribe_path(&sub.token));
+		let msg = build_newsletter_email(from, &sub.email, &post, &online, &unsub, &cfg.site_name);
+		match sender.deliver_signed(from, &sub.email, &msg).await {
+			Ok(qid)	=> {
+				report.sent += 1;
+				debug!("{}: publish: newsletter '{}' to {} ({})",
+					id, slug, subscribe::redact(&sub.email), qid);
+			}
+			// A permanent failure suppresses the address so no future send reaches it; a transient one is
+			// counted and the address stays confirmed. The suppression is best-effort: if the mark itself
+			// will not write, the send still finishes and logs, rather than fail the whole run.
+			Err(e) if is_permanent(&e)	=> {
+				report.suppressed += 1;
+				warn!("{}: publish: newsletter '{}' to {} failed permanently; suppressing: {}",
+					id, slug, subscribe::redact(&sub.email), e);
+				if let Err(e2) = subscribe::mark_bounced(db, &sub.email, id) {
+					warn!("{}: publish: could not suppress {}: {}",
+						id, subscribe::redact(&sub.email), e2);
+				}
+			}
+			Err(e)	=> {
+				report.failed += 1;
+				warn!("{}: publish: newsletter '{}' to {} failed: {}",
+					id, slug, subscribe::redact(&sub.email), e);
+			}
+		}
+	}
+	info!("{}: publish: newsletter '{}' sent to {} of {} confirmed subscriber(s), {} failed, {} suppressed",
+		id, slug, report.sent, report.attempted, report.failed, report.suppressed);
+	Ok(report)
+}
+
+/// Sends a live post to one address only: the operator's own, to see what a subscriber would get.
+///
+/// A test, not a send: it touches no subscriber state, marks nothing bounced whatever the delivery does,
+/// and writes no history. The one recipient need not be a subscriber, so the unsubscribe link carries a
+/// throwaway token that matches nobody -- the message is well-formed and its link is harmless. The build
+/// is [`send_newsletter`]'s own, so the test is the newsletter, not an approximation of it.
+pub async fn send_test<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	sender:	&MailSender,
+	db:	&(Arc<RwLock<DB>>, UID),
+	cfg:	&PublishConfig,
+	from:	&str,
+	slug:	&str,
+	to:	&str,
+	id:	&str,
+)
+	-> Outcome<()>
+{
+	let to = subscribe::normalise_email(to);
+	if !subscribe::valid_email(&to) {
+		return Err(err!(
+			"publish: {} is not a shape an address takes.", subscribe::redact(&to);
+			Invalid, Input));
+	}
+	let rec = match res!(store::get(db, slug)) {
+		Some(r)	=> r,
+		None	=> return Err(err!(
+			"publish: there is no post '{}' to test-send.", slug;
+			Invalid, Input, Missing)),
+	};
+	if rec.state != PostState::Live {
+		return Err(err!(
+			"publish: '{}' is a draft; a test sends the live post a subscriber would get.", slug;
+			Invalid, Input));
+	}
+	let post = res!(rec.render());
+	let online = cfg.url_of(&cfg.path_of(slug));
+	// A throwaway token: the link is well-formed but names no subscriber, so a test recipient who follows
+	// it lands on the bad-token page and nobody is unsubscribed.
+	let unsub = cfg.url_of(&cfg.unsubscribe_path(&subscribe::mint_token()));
+	let msg = build_newsletter_email(from, &to, &post, &online, &unsub, &cfg.site_name);
+	let qid = res!(sender.deliver_signed(from, &to, &msg).await);
+	info!("{}: publish: test of '{}' sent to {} ({})", id, slug, subscribe::redact(&to), qid);
+	Ok(())
+}
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ SEND HISTORY                                                               │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// The key the append-only list of newsletter sends lives under.
+pub const SENDS_KEY: &str = "publish/sends";
+
+/// One newsletter send, as the history keeps it.
+///
+/// A record of a send that happened: which post, when, and how the attempts ended. Written once per real
+/// send -- never for a test -- and only appended to, so the history is the site's own log of what it
+/// mailed and to how many.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SendEntry {
+	/// The post that was sent.
+	pub slug:	String,
+	/// When it was sent, as an ISO timestamp.
+	pub at:		String,
+	/// How many confirmed subscribers the send set held.
+	pub attempted:	usize,
+	/// How many the receiving servers accepted.
+	pub sent:	usize,
+	/// How many failed transiently.
+	pub failed:	usize,
+	/// How many failed permanently and were suppressed.
+	pub suppressed:	usize,
+}
+
+impl SendEntry {
+
+	/// A history entry from a send's slug, the moment, and its [`SendReport`].
+	pub fn of(slug: &str, at: &str, report: &SendReport) -> Self {
+		Self {
+			slug:		slug.to_string(),
+			at:		at.to_string(),
+			attempted:	report.attempted,
+			sent:		report.sent,
+			failed:		report.failed,
+			suppressed:	report.suppressed,
+		}
+	}
+
+	/// The entry as a daticle.
+	pub fn to_dat(&self) -> Dat {
+		let mut m = DaticleMap::new();
+		m.insert(dat!("slug"),		dat!(self.slug.clone()));
+		m.insert(dat!("at"),		dat!(self.at.clone()));
+		m.insert(dat!("attempted"),	Dat::U64(self.attempted as u64));
+		m.insert(dat!("sent"),		Dat::U64(self.sent as u64));
+		m.insert(dat!("failed"),	Dat::U64(self.failed as u64));
+		m.insert(dat!("suppressed"),	Dat::U64(self.suppressed as u64));
+		Dat::Map(m)
+	}
+
+	/// The entry from a daticle, leniently: a missing count reads as zero and a missing string as empty,
+	/// so a record a later version wrote or an older one half-filled still lists rather than fails the
+	/// whole history.
+	pub fn from_dat(d: &Dat) -> Self {
+		let m = match d {
+			Dat::Map(m)	=> m,
+			_		=> return Self::default(),
+		};
+		let get_str = |key: &str| -> String {
+			match m.get(&dat!(key)) {
+				Some(Dat::Str(s))	=> s.clone(),
+				_			=> String::new(),
+			}
+		};
+		Self {
+			slug:		get_str("slug"),
+			at:		get_str("at"),
+			attempted:	as_usize(m.get(&dat!("attempted"))),
+			sent:		as_usize(m.get(&dat!("sent"))),
+			failed:		as_usize(m.get(&dat!("failed"))),
+			suppressed:	as_usize(m.get(&dat!("suppressed"))),
+		}
+	}
+}
+
+/// A `usize` out of a daticle that may hold an integer under any of the widths jdat writes one as, or
+/// zero where there is no readable number.
+fn as_usize(d: Option<&Dat>) -> usize {
+	match d {
+		Some(Dat::U64(n))	=> *n as usize,
+		Some(Dat::U32(n))	=> *n as usize,
+		Some(Dat::U16(n))	=> *n as usize,
+		Some(Dat::U8(n))	=> *n as usize,
+		_			=> 0,
+	}
+}
+
+/// Appends one send to the history, reading the list and writing it back with the entry on the end.
+///
+/// Index-driven, no scan: the whole history is one list under [`SENDS_KEY`], read, pushed to, and
+/// written -- the same shape the subscriber index takes. Newest is last on disk; [`send_history`] hands
+/// it back newest first.
+pub fn record_send<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	entry:	&SendEntry,
+)
+	-> Outcome<()>
+{
+	let (db_arc, user) = db;
+	let mut items = res!(sends_list(db));
+	items.push(entry.to_dat());
+	let list = Dat::List(items);
+	let guard = lock_read!(db_arc);
+	res!(guard.insert(dat!(SENDS_KEY), list, *user, None));
+	Ok(())
+}
+
+/// The raw history list, or an empty one where nothing has been sent.
+fn sends_list<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+)
+	-> Outcome<Vec<Dat>>
+{
+	let (db_arc, _) = db;
+	let guard = lock_read!(db_arc);
+	let val = match res!(guard.get(&dat!(SENDS_KEY), None)) {
+		Some((v, _))	=> v,
+		// No history is a site that has sent nothing, not an error -- the empty log it never wrote.
+		None		=> return Ok(Vec::new()),
+	};
+	match &val {
+		Dat::List(items)	=> Ok(items.clone()),
+		Dat::Vek(vek)		=> Ok(vek.as_slice().to_vec()),
+		_			=> Err(err!(
+			"publish: the send history must be a list, not {:?}.", val.kind();
+			Invalid, Input, Mismatch)),
+	}
+}
+
+/// Every recorded send, most recent first.
+///
+/// What the subscribers page draws its history table from. The list is stored oldest-first, as it was
+/// appended, and reversed here so the newest send heads the table.
+pub fn send_history<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+)
+	-> Outcome<Vec<SendEntry>>
+{
+	let mut out: Vec<SendEntry> = res!(sends_list(db)).iter().map(SendEntry::from_dat).collect();
+	out.reverse();
+	Ok(out)
+}
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ EMAIL: building the messages                                              │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// An RFC 5322 confirmation message: plain text, the confirm link, and a line saying why it arrived.
+///
+/// Pure over its strings, so what a subscriber is sent can be tested without a socket. The body is
+/// deliberately spare -- an address that never opted in gets a link and an explanation, no more.
+fn build_confirmation_email(from: &str, to: &str, confirm_url: &str, site_name: &str) -> String {
+	let who = if site_name.trim().is_empty() {
+		fmt!("this site")
+	} else {
+		site_name.to_string()
+	};
+	let subject = fmt!("Confirm your subscription to {}", who);
+	let body = fmt!(
+		"Someone -- probably you -- asked to subscribe this address to {who}.\r\n\
+		\r\n\
+		To confirm and start receiving posts, follow this link:\r\n\
+		\r\n\
+		{url}\r\n\
+		\r\n\
+		If it was not you, ignore this message: without the link followed, this address \
+		receives nothing further.\r\n",
+		who = who,
+		url = confirm_url,
+	);
+	let date = rfc5322_date_now();
+	fmt!(
+		"From: {from}\r\n\
+		To: {to}\r\n\
+		Subject: {subject}\r\n\
+		Date: {date}\r\n\
+		MIME-Version: 1.0\r\n\
+		Auto-Submitted: auto-generated\r\n\
+		Content-Type: text/plain; charset=utf-8\r\n\
+		\r\n\
+		{body}",
+		from = from, to = to, subject = subject, date = date, body = body,
+	)
+}
+
+/// An RFC 5322 newsletter message: `multipart/alternative`, the post as HTML and as plain text, each
+/// with a footer that carries the unsubscribe link -- as [CAN-SPAM] and the mailbox providers both
+/// expect of bulk mail.
+///
+/// The HTML part is the post's own rendering, the same HTML a reader gets on the site, wrapped in a
+/// minimal document and followed by the footer. The plain-text part is the title, the opening, and the
+/// two links, for a reader whose client shows text. The Subject is the post's own title.
+fn build_newsletter_email(
+	from:		&str,
+	to:		&str,
+	post:		&Post,
+	online_url:	&str,
+	unsub_url:	&str,
+	site_name:	&str,
+) -> String {
+	let boundary = fmt!("=_steel_{}", Rand::generate_random_string(24,
+		"abcdefghijklmnopqrstuvwxyz0123456789"));
+	let date = rfc5322_date_now();
+
+	// The plain-text alternative: title, opening, and the two links, wrapped where a client wants text.
+	let text = fmt!(
+		"{title}\r\n\r\n{excerpt}\r\n\r\nRead it online:\r\n{online}\r\n\r\n\
+		--\r\nYou are receiving this because you confirmed a subscription{site}.\r\n\
+		Unsubscribe: {unsub}\r\n",
+		title	= post.title,
+		excerpt	= post.excerpt,
+		online	= online_url,
+		site	= if site_name.trim().is_empty() { String::new() } else { fmt!(" to {}", site_name) },
+		unsub	= unsub_url,
+	);
+
+	// The HTML alternative: the post's own rendering, then a footer with the same links, everything the
+	// site did not itself render escaped where it lands in markup.
+	let mut html = String::new();
+	html.push_str("<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n");
+	html.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
+	html.push_str("<title>");
+	escape_text(&mut html, &post.title);
+	html.push_str("</title>\n</head>\n<body>\n<article>\n");
+	// The prose was escaped where it was rendered; it is HTML by the time it reaches here.
+	html.push_str(&post.html);
+	html.push_str("\n</article>\n<hr>\n<footer>\n<p><a href=\"");
+	escape_attr(&mut html, online_url);
+	html.push_str("\">Read it online</a></p>\n<p>You are receiving this because you confirmed a \
+		subscription");
+	if !site_name.trim().is_empty() {
+		html.push_str(" to ");
+		escape_text(&mut html, site_name);
+	}
+	html.push_str(". <a href=\"");
+	escape_attr(&mut html, unsub_url);
+	html.push_str("\">Unsubscribe</a>.</p>\n</footer>\n</body>\n</html>\n");
+
+	fmt!(
+		"From: {from}\r\n\
+		To: {to}\r\n\
+		Subject: {subject}\r\n\
+		Date: {date}\r\n\
+		MIME-Version: 1.0\r\n\
+		List-Unsubscribe: <{unsub}>\r\n\
+		Content-Type: multipart/alternative; boundary=\"{boundary}\"\r\n\
+		\r\n\
+		--{boundary}\r\n\
+		Content-Type: text/plain; charset=utf-8\r\n\
+		\r\n\
+		{text}\r\n\
+		--{boundary}\r\n\
+		Content-Type: text/html; charset=utf-8\r\n\
+		\r\n\
+		{html}\r\n\
+		--{boundary}--\r\n",
+		from = from, to = to, subject = post.title, date = date, unsub = unsub_url,
+		boundary = boundary, text = text, html = html,
+	)
+}
+
+/// The current moment as an RFC 5322 date, e.g. `Fri, 18 Jul 2026 10:00:00 +0000`.
+///
+/// Built from [`CalClock`] -- the fe2o3 calendar does the civil arithmetic -- with only the label
+/// arrays here. A clock that will not read yields the epoch's date rather than failing a send.
+fn rfc5322_date_now() -> String {
+	let secs = match SystemTime::now().duration_since(UNIX_EPOCH) {
+		Ok(d)	=> d.as_secs() as i64,
+		Err(_)	=> 0,
+	};
+	match rfc5322_date(secs) {
+		Ok(s)	=> s,
+		Err(_)	=> fmt!("Thu, 01 Jan 1970 00:00:00 +0000"),
+	}
+}
+
+/// A unix second as an RFC 5322 date in UTC.
+fn rfc5322_date(unix_secs: i64) -> Outcome<String> {
+	let cc = res!(CalClock::from_unix_timestamp_seconds(unix_secs, CalClockZone::utc()));
+	let dow = match cc.day_of_week() {
+		DayOfWeek::Monday	=> "Mon",
+		DayOfWeek::Tuesday	=> "Tue",
+		DayOfWeek::Wednesday	=> "Wed",
+		DayOfWeek::Thursday	=> "Thu",
+		DayOfWeek::Friday	=> "Fri",
+		DayOfWeek::Saturday	=> "Sat",
+		DayOfWeek::Sunday	=> "Sun",
+	};
+	let months = [
+		"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+		"Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+	];
+	let mi = (cc.month().max(1).min(12) - 1) as usize;
+	Ok(fmt!(
+		"{dow}, {day:02} {mon} {year:04} {h:02}:{m:02}:{s:02} +0000",
+		dow = dow, day = cc.day(), mon = months[mi], year = cc.year(),
+		h = cc.hour(), m = cc.minute(), s = cc.second(),
+	))
+}
+
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -1024,6 +1647,106 @@ mod tests {
 		assert!(!creds.has(Destination::Bluesky));
 		assert!(!creds.has(Destination::Email));
 		assert!(!creds.has(Destination::X));
+		Ok(())
+	}
+
+	/// A stand-in post for the mail-building tests.
+	fn a_post() -> Post {
+		Post {
+			slug:		fmt!("on-rent"),
+			title:		fmt!("On rent"),
+			kind:		crate::srv::publish::PostKind::Note,
+			date:		None,
+			excerpt:	fmt!("An opening sentence."),
+			html:		fmt!("<h1>On rent</h1>\n<p>An opening sentence.</p>\n"),
+			also_on:	Vec::new(),
+			tags:		Vec::new(),
+		}
+	}
+
+	/// The confirmation is plain text, names why it arrived, and carries the confirm link and nothing
+	/// that would act on the reader's behalf beyond it.
+	#[test]
+	fn test_a_confirmation_carries_its_link_14() -> Outcome<()> {
+		let msg = build_confirmation_email(
+			"news@x.test", "me@example.com", "https://x.test/posts/confirm?token=abc", "README");
+		assert!(msg.contains("From: news@x.test"), "got: {}", msg);
+		assert!(msg.contains("To: me@example.com"), "got: {}", msg);
+		assert!(msg.contains("Subject: Confirm your subscription to README"), "got: {}", msg);
+		assert!(msg.contains("https://x.test/posts/confirm?token=abc"), "no confirm link: {}", msg);
+		assert!(msg.contains("text/plain; charset=utf-8"), "not plain text: {}", msg);
+		assert!(msg.contains("Date: "), "no date header: {}", msg);
+		Ok(())
+	}
+
+	/// The newsletter is multipart, carries the post's own HTML, its title as the subject, and the
+	/// unsubscribe link in the body and the `List-Unsubscribe` header both.
+	#[test]
+	fn test_a_newsletter_carries_the_post_and_unsub_15() -> Outcome<()> {
+		let post = a_post();
+		let msg = build_newsletter_email(
+			"README <news@x.test>", "me@example.com", &post,
+			"https://x.test/posts/on-rent", "https://x.test/posts/unsubscribe?token=zzz", "README");
+		assert!(msg.contains("Subject: On rent"), "the subject is not the title: {}", msg);
+		assert!(msg.contains("multipart/alternative"), "not multipart: {}", msg);
+		assert!(msg.contains("text/plain; charset=utf-8"), "no text part: {}", msg);
+		assert!(msg.contains("text/html; charset=utf-8"), "no html part: {}", msg);
+		assert!(msg.contains("<h1>On rent</h1>"), "the post's HTML is not in the message: {}", msg);
+		assert!(msg.contains("https://x.test/posts/unsubscribe?token=zzz"), "no unsubscribe link: {}", msg);
+		assert!(msg.contains("List-Unsubscribe: <https://x.test/posts/unsubscribe?token=zzz>"),
+			"no List-Unsubscribe header: {}", msg);
+		Ok(())
+	}
+
+	/// A unix second becomes an RFC 5322 date the epoch pins, ending in a UTC offset.
+	#[test]
+	fn test_a_unix_second_becomes_an_rfc5322_date_16() -> Outcome<()> {
+		// 2026-07-18T10:00:00Z is 1_784_368_800.
+		let s = res!(rfc5322_date(1_784_368_800));
+		assert!(s.contains("18 Jul 2026"), "got: {}", s);
+		assert!(s.contains("10:00:00"), "got: {}", s);
+		assert!(s.ends_with("+0000"), "got: {}", s);
+		// The epoch itself was a Thursday.
+		let s = res!(rfc5322_date(0));
+		assert!(s.starts_with("Thu, 01 Jan 1970"), "got: {}", s);
+		Ok(())
+	}
+
+	/// The newsletter From is the site's own where it names one, and the sender's default otherwise.
+	#[test]
+	fn test_the_newsletter_from_resolves_17() -> Outcome<()> {
+		let sender = res!(MailSender::new(
+			"mail.x.test".to_string(), Vec::new(), "news@x.test".to_string()));
+		let named = PublishConfig { newsletter_from: fmt!("README <hi@x.test>"), ..Default::default() };
+		assert_eq!(named.newsletter_from(&sender), "README <hi@x.test>");
+		let unnamed = PublishConfig { newsletter_from: String::new(), ..Default::default() };
+		assert_eq!(unnamed.newsletter_from(&sender), "news@x.test");
+		Ok(())
+	}
+
+	/// A send report becomes a history entry that carries every count, and the entry survives the trip
+	/// through its daticle.
+	#[test]
+	fn test_a_send_entry_round_trips_18() -> Outcome<()> {
+		let report = SendReport { attempted: 10, sent: 7, failed: 2, suppressed: 1 };
+		let entry = SendEntry::of("on-rent", "2026-07-18T10:00:00Z", &report);
+		assert_eq!(entry.slug, "on-rent");
+		assert_eq!(entry.at, "2026-07-18T10:00:00Z");
+		assert_eq!(entry.attempted, 10);
+		assert_eq!(entry.sent, 7);
+		assert_eq!(entry.failed, 2);
+		assert_eq!(entry.suppressed, 1);
+
+		let back = SendEntry::from_dat(&entry.to_dat());
+		assert_eq!(back, entry);
+
+		// A record missing a count reads that count as zero rather than failing the whole history.
+		let mut sparse = DaticleMap::new();
+		sparse.insert(dat!("slug"), dat!("x"));
+		let back = SendEntry::from_dat(&Dat::Map(sparse));
+		assert_eq!(back.slug, "x");
+		assert_eq!(back.attempted, 0);
+		assert_eq!(back.sent, 0);
 		Ok(())
 	}
 }

@@ -36,13 +36,18 @@ use crate::srv::{
 			DeliveryState,
 			Destination,
 		},
-		send,
+		send::{
+			self,
+			MailSender,
+		},
 		store::{
 			self,
 			Record,
 		},
+		subscribe,
 		date_text,
 		normalise_date,
+		parse_tags,
 		render_source,
 		valid_date,
 		valid_slug,
@@ -104,6 +109,9 @@ pub const PATH_LIST_JSON: &str = "/manage/list.json";
 /// One post's source and rendering as JSON, for a front-end that edits it in place.
 pub const PATH_POST_JSON: &str = "/manage/post.json";
 
+/// The site's tag vocabulary as JSON, for the composer's palette.
+pub const PATH_TAGS_JSON: &str = "/manage/tags.json";
+
 /// A site's destination settings as JSON: the public fields and whether a secret is set, never the
 /// secret itself.
 pub const PATH_CREDS_JSON: &str = "/manage/creds.json";
@@ -111,10 +119,35 @@ pub const PATH_CREDS_JSON: &str = "/manage/creds.json";
 /// Where the destination settings form posts a remote's credentials.
 pub const PATH_CREDS: &str = "/manage/creds";
 
+/// The subscribers page: the newsletter's list, its count, and where a post is sent to it.
+pub const PATH_SUBS: &str = "/manage/subscribers";
+
+/// The subscriber list as CSV, for the site to keep the list it owns.
+pub const PATH_SUBS_CSV: &str = "/manage/subscribers.csv";
+
+/// Where the "send to subscribers" form posts a live post's slug.
+pub const PATH_NEWSLETTER: &str = "/manage/newsletter";
+
+/// Where the per-subscriber unsubscribe and remove forms post.
+///
+/// One endpoint, two actions: an `action` of `unsubscribe` sets the address [`unsubscribed`], and one of
+/// `delete` erases it outright. The target is the `email` field, exactly as the admin sees it in the
+/// list, mirroring the admin-management page's own `action` form.
+pub const PATH_SUBS_ACTION: &str = "/manage/subscribers/action";
+
+/// Where the "send a test" form posts a slug and a single recipient.
+pub const PATH_NEWSLETTER_TEST: &str = "/manage/newsletter/test";
+
 
 /// Whether a path is one this module writes to.
 pub fn writes(path: &str) -> bool {
-	path == PATH_SAVE || path == PATH_DELETE || path == PATH_IMPORT || path == PATH_CREDS
+	path == PATH_SAVE
+		|| path == PATH_DELETE
+		|| path == PATH_IMPORT
+		|| path == PATH_CREDS
+		|| path == PATH_NEWSLETTER
+		|| path == PATH_SUBS_ACTION
+		|| path == PATH_NEWSLETTER_TEST
 }
 
 /// Whether a path is a POST this module answers.
@@ -164,14 +197,356 @@ pub fn handle_get<
 		PATH_ROOT	=> handle_list(cfg, theme, admin, csrf, db, query, id),
 		PATH_EDIT	=> handle_edit(cfg, theme, admin, csrf, db, query, id),
 		PATH_PREVIEW	=> handle_preview(cfg, theme, admin, db, query, id),
+		PATH_SUBS	=> subscribers_page(cfg, theme, admin, csrf, db, query, id),
+		PATH_SUBS_CSV	=> subscribers_csv(db, id),
 		PATH_LIST_JSON	=> list_json(cfg, db, id),
 		PATH_POST_JSON	=> post_json(cfg, db, query, id),
+		PATH_TAGS_JSON	=> tags_json(cfg, db, id),
 		PATH_CREDS_JSON	=> creds_json(cfg, db, id),
 		_		=> Ok(HttpMessage::respond_with_text(
 			HttpStatus::NotFound,
 			"Not found.",
 		)),
 	}
+}
+
+/// The subscribers page: the newsletter's list, its count, an export, and a way to send a live post to
+/// the list.
+///
+/// The home of "own the list, own the send": the confirmed count is the reach, the table is the list,
+/// the CSV is the copy the site keeps, and the send form picks a live post and mails it to every
+/// confirmed address. A directory-backed site keeps its posts in files rather than the store, so it can
+/// still hold subscribers but has no store post to send; the send form is offered only where the store
+/// is the source.
+fn subscribers_page<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	cfg:	&PublishConfig,
+	theme:	&Theme,
+	admin:	&SiteAdmin,
+	csrf:	&str,
+	db:	Option<&(Arc<RwLock<DB>>, UID)>,
+	query:	&str,
+	id:	&str,
+)
+	-> Outcome<HttpMessage>
+{
+	let mut body = String::new();
+	body.push_str("<h1>Subscribers</h1>\n");
+
+	if let Some(said) = query_field(query, "said") {
+		body.push_str(&notice(&html_escape(&said)));
+	}
+
+	let db = match db {
+		Some(db)	=> db,
+		None		=> {
+			body.push_str(&notice(
+				"This site keeps its subscribers in its database, and has no database configured. Set \
+				<code>db_dir_rel</code> on the vhost.",
+			));
+			return Ok(page(theme, admin, "Subscribers", &body));
+		}
+	};
+
+	let subs = match subscribe::list(db, id) {
+		Ok(s)	=> s,
+		Err(e)	=> {
+			error!(e, "{}: console: cannot list the subscribers", id);
+			body.push_str(&notice("The subscribers could not be listed. The log says why."));
+			return Ok(page(theme, admin, "Subscribers", &body));
+		}
+	};
+	let confirmed = subs.iter().filter(|s| s.state == subscribe::SubState::Confirmed).count();
+	let pending = subs.iter().filter(|s| s.state == subscribe::SubState::Pending).count();
+	let unsubbed = subs.iter().filter(|s| s.state == subscribe::SubState::Unsubscribed).count();
+	let bounced = subs.iter().filter(|s| s.state == subscribe::SubState::Bounced).count();
+
+	body.push_str(&fmt!(
+		"<p class=\"mc-muted\">{confirmed} confirmed, {pending} pending, {unsubbed} unsubscribed, \
+		{bounced} bounced. Only confirmed addresses receive a post; unsubscribed and bounced are \
+		suppressed. <a href=\"{csv}\">Export CSV</a>.</p>\n",
+		confirmed = confirmed, pending = pending, unsubbed = unsubbed, bounced = bounced,
+		csv = PATH_SUBS_CSV,
+	));
+
+	// The send form and the test-send form, where the store is the source and there is a live post to
+	// send. The test needs only a live post, not a confirmed subscriber, so it is offered even where the
+	// send set is empty.
+	if cfg.source == Source::Store {
+		body.push_str(&send_form(cfg, csrf, db, confirmed, id));
+		body.push_str(&test_form(csrf, db, id));
+	} else {
+		body.push_str(&notice(
+			"This site serves its posts from a directory, so a post is not in the database to send. \
+			Move to the store to mail a post to subscribers.",
+		));
+	}
+
+	// The send history: what has been mailed, most recent first. A read that fails costs the table, not
+	// the page, so it logs and carries on.
+	match send::send_history(db) {
+		Ok(hist)	=> body.push_str(&history_table(&hist)),
+		Err(e)		=> {
+			warn!("{}: console: cannot read the send history: {}", id, e);
+			body.push_str(&notice("The send history could not be read. The log says why."));
+		}
+	}
+
+	if subs.is_empty() {
+		body.push_str(&notice("Nobody has subscribed yet."));
+		return Ok(page(theme, admin, "Subscribers", &body));
+	}
+
+	body.push_str("<table class=\"mc-table\">\n<thead><tr>\
+		<th>Address</th><th>State</th><th>Since</th><th></th>\
+		</tr></thead>\n<tbody>\n");
+	for sub in &subs {
+		let state = match sub.state {
+			subscribe::SubState::Confirmed	=> fmt!("<span class=\"mc-tag mc-tag-live\">confirmed</span>"),
+			subscribe::SubState::Pending	=> fmt!("<span class=\"mc-tag\">pending</span>"),
+			subscribe::SubState::Unsubscribed	=>
+				fmt!("<span class=\"mc-tag mc-tag-err\">unsubscribed</span>"),
+			subscribe::SubState::Bounced	=>
+				fmt!("<span class=\"mc-tag mc-tag-err\">bounced</span>"),
+		};
+		body.push_str(&fmt!(
+			"<tr><td>{email}</td><td>{state}</td><td>{since}</td><td>{actions}</td></tr>\n",
+			email	= html_escape(&sub.email),
+			state	= state,
+			since	= html_escape(sub.created.as_deref().unwrap_or("--")),
+			actions	= subscriber_actions(csrf, sub),
+		));
+	}
+	body.push_str("</tbody>\n</table>\n");
+
+	Ok(page(theme, admin, "Subscribers", &body))
+}
+
+/// The per-subscriber actions: unsubscribe where they still receive mail, and erase, always.
+///
+/// Two small CSRF-protected forms posting to [`PATH_SUBS_ACTION`] with the address as their target. The
+/// unsubscribe is offered only where it would change something -- an address already unsubscribed or
+/// bounced is past it -- while the erase is offered on every row, since a record in any state can be a
+/// thing a person has asked be forgotten.
+fn subscriber_actions(csrf: &str, sub: &subscribe::Subscriber) -> String {
+	let mut s = String::new();
+	s.push_str("<div class=\"mc-actions\">");
+	let receiving = matches!(
+		sub.state,
+		subscribe::SubState::Confirmed | subscribe::SubState::Pending);
+	if receiving {
+		s.push_str(&fmt!(
+			"<form method=\"POST\" action=\"{act}\" style=\"display:inline\">\
+			<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+			<input type=\"hidden\" name=\"action\" value=\"unsubscribe\">\
+			<input type=\"hidden\" name=\"email\" value=\"{email}\">\
+			<button type=\"submit\" class=\"mc-btn mc-btn-quiet\">Unsubscribe</button>\
+			</form>",
+			act	= PATH_SUBS_ACTION,
+			csrf	= html_escape(csrf),
+			email	= html_escape(&sub.email),
+		));
+	}
+	s.push_str(&fmt!(
+		"<form method=\"POST\" action=\"{act}\" style=\"display:inline\" \
+		onsubmit=\"return confirm('Erase this subscriber for good? There is no undo.')\">\
+		<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+		<input type=\"hidden\" name=\"action\" value=\"delete\">\
+		<input type=\"hidden\" name=\"email\" value=\"{email}\">\
+		<button type=\"submit\" class=\"mc-btn mc-btn-danger\">Erase</button>\
+		</form>",
+		act	= PATH_SUBS_ACTION,
+		csrf	= html_escape(csrf),
+		email	= html_escape(&sub.email),
+	));
+	s.push_str("</div>");
+	s
+}
+
+/// The send-history table: post, when, and how each send's attempts ended, most recent first.
+///
+/// Says nothing where nothing has been sent, so a site that has not yet mailed a post shows no empty
+/// table. Every value is the site's own record, and the slug is escaped where it lands in markup.
+fn history_table(hist: &[send::SendEntry]) -> String {
+	if hist.is_empty() {
+		return String::new();
+	}
+	let mut s = String::new();
+	s.push_str("<h2>Send history</h2>\n");
+	s.push_str("<table class=\"mc-table\">\n<thead><tr>\
+		<th>Post</th><th>When</th><th>Attempted</th><th>Sent</th><th>Failed</th><th>Suppressed</th>\
+		</tr></thead>\n<tbody>\n");
+	for e in hist {
+		s.push_str(&fmt!(
+			"<tr><td><span class=\"mc-slug\">{slug}</span></td><td>{at}</td>\
+			<td>{attempted}</td><td>{sent}</td><td>{failed}</td><td>{suppressed}</td></tr>\n",
+			slug		= html_escape(&e.slug),
+			at		= html_escape(&e.at),
+			attempted	= e.attempted,
+			sent		= e.sent,
+			failed		= e.failed,
+			suppressed	= e.suppressed,
+		));
+	}
+	s.push_str("</tbody>\n</table>\n");
+	s
+}
+
+/// The "send a post to subscribers" form: a live post picked from a select, and the send.
+///
+/// Offered with a count of who will receive it, so the operator sends with their eyes open. Where no
+/// post is live, or nobody is confirmed, it says so instead of offering a button that would do nothing.
+fn send_form<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	_cfg:	&PublishConfig,
+	csrf:	&str,
+	db:	&(Arc<RwLock<DB>>, UID),
+	confirmed:	usize,
+	id:	&str,
+)
+	-> String
+{
+	// The live posts, the only ones a newsletter may carry: a draft is sent to nobody.
+	let live: Vec<Record> = match store::list_records(db, id) {
+		Ok(recs)	=> recs.into_iter().filter(|r| r.state == PostState::Live).collect(),
+		Err(e)		=> {
+			warn!("{}: console: cannot list posts for the send form: {}", id, e);
+			Vec::new()
+		}
+	};
+	if live.is_empty() {
+		return notice("No post is live to send. Publish a post first, then send it here.");
+	}
+	if confirmed == 0 {
+		return notice("No confirmed subscribers to send to yet.");
+	}
+
+	let mut opts = String::new();
+	for rec in &live {
+		let title = match rec.render() {
+			Ok(p)	=> p.title,
+			Err(_)	=> rec.slug.clone(),
+		};
+		opts.push_str(&fmt!(
+			"<option value=\"{slug}\">{title}</option>\n",
+			slug	= html_escape(&rec.slug),
+			title	= html_escape(&title),
+		));
+	}
+
+	fmt!(
+		"<form class=\"mc-form\" method=\"POST\" action=\"{send}\" \
+		onsubmit=\"return confirm('Send this post to {n} confirmed subscriber(s)? There is no undo.')\">\n\
+		<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\n\
+		<label for=\"mc-send-slug\">Send a post to {n} subscriber(s)</label>\n\
+		<select id=\"mc-send-slug\" name=\"slug\">\n{opts}</select>\n\
+		<div class=\"mc-actions\">\n\
+		<button type=\"submit\" class=\"mc-btn\">Send to subscribers</button>\n\
+		</div>\n\
+		</form>\n",
+		send	= PATH_NEWSLETTER,
+		csrf	= html_escape(csrf),
+		n	= confirmed,
+		opts	= opts,
+	)
+}
+
+/// The "send a test" form: a live post, an address to send it to, and the send.
+///
+/// The operator's own preview -- it mails the chosen post to one address and touches nothing: no
+/// subscriber, no state, no history. Offered wherever there is a live post, since a test needs no
+/// confirmed subscriber. Says so where there is none, rather than a select with nothing to pick.
+fn test_form<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	csrf:	&str,
+	db:	&(Arc<RwLock<DB>>, UID),
+	id:	&str,
+)
+	-> String
+{
+	// The live posts, the only ones the test offers, since a test is a preview of what a subscriber gets
+	// and a subscriber only ever gets a live post.
+	let live: Vec<Record> = match store::list_records(db, id) {
+		Ok(recs)	=> recs.into_iter().filter(|r| r.state == PostState::Live).collect(),
+		Err(e)		=> {
+			warn!("{}: console: cannot list posts for the test form: {}", id, e);
+			Vec::new()
+		}
+	};
+	if live.is_empty() {
+		return String::new();
+	}
+
+	let mut opts = String::new();
+	for rec in &live {
+		let title = match rec.render() {
+			Ok(p)	=> p.title,
+			Err(_)	=> rec.slug.clone(),
+		};
+		opts.push_str(&fmt!(
+			"<option value=\"{slug}\">{title}</option>\n",
+			slug	= html_escape(&rec.slug),
+			title	= html_escape(&title),
+		));
+	}
+
+	fmt!(
+		"<form class=\"mc-form\" method=\"POST\" action=\"{test}\">\n\
+		<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\n\
+		<label for=\"mc-test-slug\">Send a test to one address</label>\n\
+		<select id=\"mc-test-slug\" name=\"slug\">\n{opts}</select>\n\
+		<input type=\"text\" id=\"mc-test-to\" name=\"test_to\" placeholder=\"you@example.com\" \
+		autocomplete=\"off\" spellcheck=\"false\">\n\
+		<div class=\"mc-actions\">\n\
+		<button type=\"submit\" class=\"mc-btn mc-btn-quiet\">Send test</button>\n\
+		</div>\n\
+		</form>\n",
+		test	= PATH_NEWSLETTER_TEST,
+		csrf	= html_escape(csrf),
+		opts	= opts,
+	)
+}
+
+/// The subscriber list as a CSV download.
+fn subscribers_csv<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	Option<&(Arc<RwLock<DB>>, UID)>,
+	id:	&str,
+)
+	-> Outcome<HttpMessage>
+{
+	let db = match db {
+		Some(db)	=> db,
+		None		=> return Ok(HttpMessage::respond_with_text(
+			HttpStatus::NotFound, "Not found.")),
+	};
+	let csv = res!(subscribe::export(db, id));
+	let mut resp = HttpMessage::ok_respond_with_text(csv);
+	resp = resp.with_field(
+		HeaderName::ContentType,
+		HeaderFieldValue::Generic(fmt!("text/csv; charset=utf-8")),
+	);
+	Ok(resp)
 }
 
 /// The list of posts, drafts and all.
@@ -242,8 +617,10 @@ fn handle_list<
 	};
 
 	body.push_str(&fmt!(
-		"<p><a class=\"mc-btn\" href=\"{edit}\">Write a new post</a></p>\n",
+		"<p class=\"mc-actions\"><a class=\"mc-btn\" href=\"{edit}\">Write a new post</a>\
+		<a class=\"mc-btn mc-btn-quiet\" href=\"{subs}\">Subscribers</a></p>\n",
 		edit = PATH_EDIT,
+		subs = PATH_SUBS,
 	));
 
 	if recs.is_empty() {
@@ -355,6 +732,20 @@ fn handle_edit<
 	};
 	let r = rec.unwrap_or_default();
 
+	// The site's accumulating vocabulary, for the click-to-add palette. A read the composer already
+	// pays for the list; a failure to read it costs the palette, not the editor, so it logs and
+	// carries on with an empty one rather than refusing the page.
+	let palette = match db {
+		Some(db)	=> match store::all_tags(db, id) {
+			Ok(t)	=> t,
+			Err(e)	=> {
+				warn!("{}: console: cannot list the tag vocabulary: {}", id, e);
+				Vec::new()
+			}
+		},
+		None		=> Vec::new(),
+	};
+
 	let mut body = fmt!("<h1>{}</h1>\n", heading);
 
 	body.push_str(&fmt!(
@@ -394,6 +785,7 @@ fn handle_edit<
 				</select>\n\
 			</div>\n\
 		</div>\n\
+		{tags_block}\
 		<label for=\"source\">Text</label>\n\
 		<textarea id=\"source\" name=\"source\" rows=\"24\" spellcheck=\"true\" \
 			placeholder=\"# The title goes here, as the first heading\">{source}</textarea>\n\
@@ -422,6 +814,8 @@ fn handle_edit<
 		md_sel		= selected(r.markup == Markup::Markdown),
 		djot_sel	= selected(r.markup == Markup::Djot),
 		source		= html_escape(&r.source),
+		// A whole block, pre-built, so the inline script's braces never reach the format string.
+		tags_block	= tags_field(&r.tags, &palette),
 	));
 
 	if existing {
@@ -648,7 +1042,42 @@ fn post_json<
 		Dat::Map(dm)
 	}).collect();
 	m.insert(dat!("deliveries"),	Dat::List(dlist));
+	// The post's tags, so the editor fills its chips from the record it is editing. Always an array,
+	// empty for an untagged post, so the front-end need not ask whether the key is there.
+	m.insert(dat!("tags"),
+		Dat::List(rec.tags.iter().map(|t| dat!(t.clone())).collect()));
 	Ok(json_body(&res!(Dat::Map(m).encode_string_with_config(&EncoderConfig::<(), ()>::json(None)))))
+}
+
+/// The site's tag vocabulary as JSON: every tag any post wears, sorted.
+///
+/// Feeds the composer's palette, so a tag is offered as soon as one post uses it. Gated as every
+/// console read is -- the gate ran before this -- so a non-admin never reaches it.
+fn tags_json<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	cfg:	&PublishConfig,
+	db:	Option<&(Arc<RwLock<DB>>, UID)>,
+	id:	&str,
+)
+	-> Outcome<HttpMessage>
+{
+	// A directory-backed site keeps no tags, so its vocabulary is empty rather than an error.
+	if cfg.source != Source::Store {
+		return Ok(json_body("{\"tags\":[]}"));
+	}
+	let db = match db {
+		Some(db)	=> db,
+		None		=> return Ok(json_body("{\"tags\":[]}")),
+	};
+	let tags = res!(store::all_tags(db, id));
+	let list = Dat::List(tags.iter().map(|t| dat!(t.clone())).collect());
+	let body = create_dat_ordmap(vec![(dat!("tags"), list)]);
+	Ok(json_body(&res!(body.encode_string_with_config(&EncoderConfig::<(), ()>::json(None)))))
 }
 
 
@@ -715,6 +1144,7 @@ pub async fn handle_post<
 	admin:		&SiteAdmin,
 	db:		Option<&(Arc<RwLock<DB>>, UID)>,
 	tls_client:	&Option<Arc<ClientConfig>>,
+	mail:		&Option<Arc<MailSender>>,
 	request_path:	&str,
 	body:		&[u8],
 	json:		bool,
@@ -736,7 +1166,13 @@ pub async fn handle_post<
 	// be the source. Importing does not: it is how a site gets from one to the other, and must run
 	// before the switch or the switch empties the site. Setting a destination's credentials does not
 	// either: a remote is a remote whatever the posts are served from.
-	if cfg.source != Source::Store && request_path != PATH_IMPORT && request_path != PATH_CREDS {
+	// A subscriber lives in the database whatever the posts are served from, so unsubscribing or erasing
+	// one does not wait on the store being the source -- only the writes that touch a post do.
+	if cfg.source != Source::Store
+		&& request_path != PATH_IMPORT
+		&& request_path != PATH_CREDS
+		&& request_path != PATH_SUBS_ACTION
+	{
 		return Ok(back_with(
 			"this site serves its posts from a directory, so there is nothing to write into; set \
 			'source' to 'store' first",
@@ -753,8 +1189,185 @@ pub async fn handle_post<
 		PATH_DELETE	=> do_delete(db, body, &admin.username, json, id),
 		PATH_IMPORT	=> do_import(cfg, db, &admin.username, json, id),
 		PATH_CREDS	=> do_creds(db, body, &admin.username, json, id),
-		// Unreachable: `writes` names the same four paths.
+		PATH_NEWSLETTER	=> do_newsletter(cfg, db, mail, body, &admin.username, json, id).await,
+		PATH_NEWSLETTER_TEST	=> do_test_send(cfg, db, mail, body, &admin.username, json, id).await,
+		PATH_SUBS_ACTION	=> do_subs_action(db, body, &admin.username, json, id),
+		// Unreachable: `writes` names the same paths.
 		_		=> Ok(back(json)),
+	}
+}
+
+/// Sends a live post to every confirmed subscriber.
+///
+/// The console side of "own the send": it reads the slug the send form named, checks the post is live,
+/// and hands off to [`send::send_newsletter`], which signs and delivers a message per confirmed
+/// subscriber straight to their MX. Where mail is not configured on the host, it says so rather than
+/// pretending to send. The reason -- how many went, how many failed, or why none could -- rides back in
+/// the redirect the way every other console write's does.
+async fn do_newsletter<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	cfg:	&PublishConfig,
+	db:	&(Arc<RwLock<DB>>, UID),
+	mail:	&Option<Arc<MailSender>>,
+	body:	&[u8],
+	who:	&str,
+	json:	bool,
+	id:	&str,
+)
+	-> Outcome<HttpMessage>
+{
+	let sender = match mail {
+		Some(m)	=> m,
+		None	=> return Ok(subs_back_with(
+			"email is not set up on this host, so there is nowhere to send from", json)),
+	};
+	if cfg.base_url.is_empty() {
+		return Ok(subs_back_with(
+			"this site has no base_url, so a post's online link and the unsubscribe link cannot be built",
+			json));
+	}
+	let slug = super::form_field(body, "slug").unwrap_or_default();
+	let slug = slug.trim().to_string();
+	if !valid_slug(&slug) {
+		return Ok(subs_back_with("that is not a post's name", json));
+	}
+	let from = cfg.newsletter_from(sender);
+	match send::send_newsletter(sender, db, cfg, &from, &slug, id).await {
+		Ok(report)	=> {
+			info!("{}: console: '{}' sent newsletter '{}' ({} sent, {} failed, {} suppressed)",
+				id, who, slug, report.sent, report.failed, report.suppressed);
+			// One history entry per real send, stamped with the moment the way the mail's own Date header
+			// is. A history that will not write does not fail the send -- the mail has gone -- so it logs
+			// and carries on.
+			let at = send::iso_now().unwrap_or_default();
+			let entry = send::SendEntry::of(&slug, &at, &report);
+			if let Err(e) = send::record_send(db, &entry) {
+				warn!("{}: console: '{}' sent newsletter '{}' but the history would not record it: {}",
+					id, who, slug, e);
+			}
+			Ok(subs_back_with(
+				&fmt!("newsletter '{}' sent to {} subscriber(s), {} failed, {} suppressed",
+					slug, report.sent, report.failed, report.suppressed),
+				json))
+		}
+		Err(e)			=> {
+			warn!("{}: console: '{}' newsletter '{}' failed: {}", id, who, slug, e);
+			Ok(subs_back_with("the newsletter could not be sent; the log says why", json))
+		}
+	}
+}
+
+/// Sends a live post to a single address, to preview what a subscriber gets.
+///
+/// The console side of the test-send: it reads the slug and the `test_to` address the form named and
+/// hands off to [`send::send_test`], which delivers one message and touches no subscriber state and no
+/// history. Where mail is not set up on the host, or the site has no origin to build the post's links
+/// from, it says so rather than pretend to send.
+async fn do_test_send<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	cfg:	&PublishConfig,
+	db:	&(Arc<RwLock<DB>>, UID),
+	mail:	&Option<Arc<MailSender>>,
+	body:	&[u8],
+	who:	&str,
+	json:	bool,
+	id:	&str,
+)
+	-> Outcome<HttpMessage>
+{
+	let sender = match mail {
+		Some(m)	=> m,
+		None	=> return Ok(subs_back_with(
+			"email is not set up on this host, so there is nowhere to send from", json)),
+	};
+	if cfg.base_url.is_empty() {
+		return Ok(subs_back_with(
+			"this site has no base_url, so a post's online link cannot be built", json));
+	}
+	let slug = super::form_field(body, "slug").unwrap_or_default();
+	let slug = slug.trim().to_string();
+	if !valid_slug(&slug) {
+		return Ok(subs_back_with("that is not a post's name", json));
+	}
+	let to = super::form_field(body, "test_to").unwrap_or_default();
+	if to.trim().is_empty() {
+		return Ok(subs_back_with("type an address to send the test to", json));
+	}
+	let from = cfg.newsletter_from(sender);
+	match send::send_test(sender, db, cfg, &from, &slug, &to, id).await {
+		Ok(())	=> {
+			info!("{}: console: '{}' test-sent '{}'", id, who, slug);
+			// The address is not echoed back: the reply lands on a page anyone at the console can read, and
+			// the operator knows where they sent it.
+			Ok(subs_back_with(&fmt!("a test of '{}' was sent", slug), json))
+		}
+		Err(e)	=> {
+			warn!("{}: console: '{}' test-send of '{}' failed: {}", id, who, slug, e);
+			Ok(subs_back_with("the test could not be sent; the log says why", json))
+		}
+	}
+}
+
+/// Unsubscribes or erases one subscriber, by the address the admin named.
+///
+/// Two actions on one endpoint, told apart by the `action` field: `unsubscribe` sets the address
+/// [`unsubscribed`](subscribe::SubState::Unsubscribed), keeping the record so a re-subscribe opts in
+/// afresh; `delete` erases it outright, a GDPR removal that leaves nothing behind. Both name the target
+/// in the `email` field. CSRF is checked upstream, as for every console write.
+fn do_subs_action<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	body:	&[u8],
+	who:	&str,
+	json:	bool,
+	id:	&str,
+)
+	-> Outcome<HttpMessage>
+{
+	let email = super::form_field(body, "email").unwrap_or_default();
+	if email.trim().is_empty() {
+		return Ok(subs_back_with("no subscriber was named", json));
+	}
+	let action = super::form_field(body, "action").unwrap_or_default();
+	match action.as_str() {
+		"unsubscribe"	=> {
+			let found = res!(subscribe::unsubscribe_email(db, &email, id));
+			info!("{}: console: '{}' unsubscribed a subscriber (found: {})", id, who, found);
+			Ok(subs_back_with(
+				if found { "the subscriber was unsubscribed" } else { "no such subscriber" }, json))
+		}
+		"delete"	=> {
+			let existed = res!(subscribe::remove(db, &email, id));
+			info!("{}: console: '{}' erased a subscriber (existed: {})", id, who, existed);
+			Ok(subs_back_with(
+				if existed { "the subscriber was erased" } else { "no such subscriber" }, json))
+		}
+		other	=> Ok(subs_back_with(&fmt!("'{}' is not an action here", other), json)),
+	}
+}
+
+/// The answer to a newsletter write, carrying the reason back to the subscribers page rather than the
+/// posts list, since that is where the operator sent it from.
+fn subs_back_with(why: &str, json: bool) -> HttpMessage {
+	if json {
+		json_error(why)
+	} else {
+		redirect(&fmt!("{}?said={}", PATH_SUBS, url_encode(why)))
 	}
 }
 
@@ -802,6 +1415,11 @@ async fn do_save<
 	let state = PostState::of(&super::form_field(body, "state").unwrap_or_default());
 	let markup = Markup::of(&super::form_field(body, "markup").unwrap_or_default());
 	let date = if date.is_empty() { None } else { Some(date) };
+
+	// The comma-separated tags field, split and normalised and deduped. An invalid tag is dropped in
+	// silence, on the same footing as a slug's small alphabet, so a stray character does not fail the
+	// save. Empty or whitespace is no tags.
+	let tags = parse_tags(&super::form_field(body, "tags").unwrap_or_default());
 
 	// An edit must not lose where a post has already been sent. So the deliveries are carried forward
 	// from the post as it stands -- under its old name where this save renames it, since the deliveries
@@ -851,6 +1469,7 @@ async fn do_save<
 		date,
 		source,
 		deliveries,
+		tags,
 	};
 
 	res!(store::put(db, &rec, id));
@@ -1126,6 +1745,90 @@ fn selected(yes: bool) -> &'static str {
 	if yes { " selected" } else { "" }
 }
 
+/// The tags field: a text input that is the source of truth, the current tags as removable chips,
+/// and the site's vocabulary as a click-to-add palette.
+///
+/// The text input holds the tags comma-joined and is what the form submits, so the field saves with
+/// no script at all -- a person types `rust, web` and it is stored. The chips and the palette are a
+/// progressive enhancement: [`TAG_SCRIPT`] wires the close buttons and the palette to the input and
+/// keeps them in step, and does nothing where scripting is off, leaving the plain text field.
+///
+/// Built as one string rather than through the form's `fmt!`, so the script's braces are data here
+/// and never reach a format string.
+fn tags_field(tags: &[String], palette: &[String]) -> String {
+	let mut s = String::new();
+	s.push_str("<label for=\"tags\">Tags</label>\n");
+	s.push_str("<input type=\"text\" id=\"tags\" name=\"tags\" value=\"");
+	s.push_str(&html_escape(&tags.join(", ")));
+	s.push_str("\" placeholder=\"rust, web\">\n");
+
+	// The current tags as chips. Server-rendered so they show without a script; the script replaces
+	// them with wired-up ones where it runs.
+	s.push_str("<div class=\"tag-chips\" id=\"tag-chips\">");
+	for t in tags {
+		let e = html_escape(t);
+		s.push_str(&fmt!(
+			"<span class=\"tag-chip\">{tag}<button type=\"button\" class=\"tag-chip-close\" \
+			aria-label=\"Remove {tag}\">×</button></span>",
+			tag = e,
+		));
+	}
+	s.push_str("</div>\n");
+
+	// The vocabulary as a palette, where there is one. A click copies a tag into the set.
+	if !palette.is_empty() {
+		s.push_str("<div class=\"tag-palette\" id=\"tag-palette\">");
+		for t in palette {
+			s.push_str(&fmt!(
+				"<button type=\"button\" class=\"tag-palette-chip\">{tag}</button>",
+				tag = html_escape(t),
+			));
+		}
+		s.push_str("</div>\n");
+	}
+
+	s.push_str(TAG_SCRIPT);
+	s
+}
+
+/// The composer's tag script: chips from the input, the input from the chips, and the palette adding
+/// to both.
+///
+/// Reads the comma-joined `tags` input as the source of truth, renders a removable chip per tag,
+/// removes on a chip's close, and copies a palette chip in on a click, keeping the input in step so
+/// the form submits what the chips show. It touches nothing where it does not run, so the plain text
+/// field still saves.
+const TAG_SCRIPT: &str = "<script>\n\
+(function(){\n\
+  var input=document.getElementById('tags');\n\
+  var chips=document.getElementById('tag-chips');\n\
+  var palette=document.getElementById('tag-palette');\n\
+  if(!input||!chips){return;}\n\
+  function norm(t){return t.trim().toLowerCase();}\n\
+  function list(){return input.value.split(',').map(norm).filter(function(t){return t.length>0;});}\n\
+  function uniq(a){var o=[];a.forEach(function(t){if(o.indexOf(t)<0){o.push(t);}});return o;}\n\
+  function set(a){input.value=uniq(a).join(', ');render();}\n\
+  function add(t){t=norm(t);if(!t){return;}var a=list();if(a.indexOf(t)<0){a.push(t);set(a);}}\n\
+  function remove(t){set(list().filter(function(x){return x!==t;}));}\n\
+  function render(){\n\
+    chips.innerHTML='';\n\
+    uniq(list()).forEach(function(t){\n\
+      var s=document.createElement('span');s.className='tag-chip';s.textContent=t;\n\
+      var b=document.createElement('button');b.type='button';b.className='tag-chip-close';\n\
+      b.setAttribute('aria-label','Remove '+t);b.textContent='\\u00d7';\n\
+      b.addEventListener('click',function(){remove(t);});\n\
+      s.appendChild(b);chips.appendChild(s);\n\
+    });\n\
+  }\n\
+  if(palette){palette.addEventListener('click',function(e){\n\
+    var b=e.target.closest('.tag-palette-chip');if(!b){return;}\n\
+    e.preventDefault();add(b.textContent);\n\
+  });}\n\
+  input.addEventListener('change',render);\n\
+  render();\n\
+})();\n\
+</script>\n";
+
 /// One field out of a raw query substring, which has no leading `?`.
 fn query_field(query: &str, key: &str) -> Option<String> {
 	if query.is_empty() {
@@ -1206,15 +1909,20 @@ fn hex_nibble(b: u8) -> Option<u8> {
 mod tests {
 	use super::*;
 
-	/// The console writes to these three paths and reads the rest.
+	/// The console writes to its mutation paths and reads the rest.
 	#[test]
-	fn test_writes_are_the_three_mutations_00() -> Outcome<()> {
+	fn test_writes_are_the_mutations_00() -> Outcome<()> {
 		assert!(writes("/manage/save"));
 		assert!(writes("/manage/delete"));
 		assert!(writes("/manage/import"));
+		assert!(writes("/manage/creds"));
+		assert!(writes("/manage/newsletter"));
+		assert!(writes("/manage/newsletter/test"));
+		assert!(writes("/manage/subscribers/action"));
 		assert!(!writes("/manage"));
 		assert!(!writes("/manage/edit"));
 		assert!(!writes("/manage/preview"));
+		assert!(!writes("/manage/subscribers"));
 		Ok(())
 	}
 
@@ -1225,6 +1933,40 @@ mod tests {
 		assert_eq!(query_field("a=1&slug=on-rent", "slug"), Some(fmt!("on-rent")));
 		assert_eq!(query_field("slug=", "slug"), None);
 		assert_eq!(query_field("", "slug"), None);
+		Ok(())
+	}
+
+	/// The tags field emits the source-of-truth input, a removable chip per current tag, and a
+	/// palette chip per word of the vocabulary, under the class names the front-ends target.
+	#[test]
+	fn test_the_tags_field_emits_its_chips_03() -> Outcome<()> {
+		let cur = vec![fmt!("rust"), fmt!("web")];
+		let pal = vec![fmt!("rust"), fmt!("web"), fmt!("ozone")];
+		let s = tags_field(&cur, &pal);
+		// The input is the source of truth, comma-joined.
+		assert!(s.contains(r#"<input type="text" id="tags" name="tags" value="rust, web""#),
+			"got: {}", s);
+		// A removable chip per current tag.
+		assert!(s.contains(r#"<span class="tag-chip">rust<button type="button" class="tag-chip-close""#),
+			"got: {}", s);
+		// The palette carries the vocabulary as click-to-add chips.
+		assert!(s.contains(r#"<div class="tag-palette" id="tag-palette">"#), "got: {}", s);
+		assert!(s.contains(r#"<button type="button" class="tag-palette-chip">ozone</button>"#),
+			"got: {}", s);
+		// The enhancement script is present.
+		assert!(s.contains("<script>"), "no script: {}", s);
+		Ok(())
+	}
+
+	/// A field with no tags and no vocabulary is still a working input, with an empty chip container
+	/// and no palette.
+	#[test]
+	fn test_the_tags_field_is_empty_gracefully_04() -> Outcome<()> {
+		let s = tags_field(&[], &[]);
+		assert!(s.contains(r#"value="""#), "got: {}", s);
+		assert!(s.contains(r#"<div class="tag-chips" id="tag-chips"></div>"#), "got: {}", s);
+		// No palette div (the script still references the id, so the div, not the word, is the check).
+		assert!(!s.contains(r#"<div class="tag-palette""#), "an empty vocabulary drew a palette: {}", s);
 		Ok(())
 	}
 

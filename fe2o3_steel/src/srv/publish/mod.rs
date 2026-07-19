@@ -37,6 +37,7 @@ pub mod json;
 pub mod page;
 pub mod send;
 pub mod store;
+pub mod subscribe;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_iop_crypto::enc::Encrypter;
@@ -137,6 +138,11 @@ pub struct PublishConfig {
 	/// The remotes this site is configured to post to, and the credentials to reach them. Empty where
 	/// the site publishes only to its own pages, which is the default.
 	pub creds:	send::DestCreds,
+	/// The address the newsletter is sent from, e.g. `README <news@oxedyne.com>`. Empty falls back to
+	/// the mail configuration's derived default (`news@<mail-domain>`), which is aligned with the DKIM
+	/// signing domain so the signature authenticates. A `#[optional]` field: a `publish` block that
+	/// names none still loads, and the newsletter takes the default.
+	pub newsletter_from:	String,
 }
 
 impl PublishConfig {
@@ -217,6 +223,9 @@ impl PublishConfig {
 			base_url,
 			css,
 			creds,
+			// A site that names no From takes the mail default; the field is optional, so an existing
+			// `publish` block that predates the newsletter still loads.
+			newsletter_from:	res!(get_str("newsletter_from", "")),
 		})
 	}
 
@@ -269,6 +278,75 @@ impl PublishConfig {
 		s
 	}
 
+	/// The URL path a sign-up posts to, and the themed form is served at.
+	pub fn subscribe_path(&self) -> String {
+		let mut s = self.path.clone();
+		s.push_str("/subscribe");
+		s
+	}
+
+	/// The URL path a confirmation link points at, carrying the subscriber's token.
+	pub fn confirm_path(&self, token: &str) -> String {
+		let mut s = self.path.clone();
+		s.push_str("/confirm?token=");
+		s.push_str(token);
+		s
+	}
+
+	/// The URL path an unsubscribe link points at, carrying the subscriber's token.
+	pub fn unsubscribe_path(&self, token: &str) -> String {
+		let mut s = self.path.clone();
+		s.push_str("/unsubscribe?token=");
+		s.push_str(token);
+		s
+	}
+
+	/// Whether a request path is one of the subscription endpoints -- the sign-up, the confirm, or the
+	/// unsubscribe -- so the reader dispatch can hand it to [`subscribe`] before it reads the posts.
+	///
+	/// The bare path only: the query, where the token rides, is matched apart. So `{path}/confirm` is
+	/// this whether or not it carries a token, and the handler answers a missing one with the same
+	/// bad-token page a wrong one gets.
+	pub fn subscription_of(&self, path: &str) -> Option<Subscription> {
+		if path == self.subscribe_path() {
+			Some(Subscription::Subscribe)
+		} else if path == self.confirm_bare_path() {
+			Some(Subscription::Confirm)
+		} else if path == self.unsubscribe_bare_path() {
+			Some(Subscription::Unsubscribe)
+		} else {
+			None
+		}
+	}
+
+	/// The confirm endpoint's path without its query.
+	fn confirm_bare_path(&self) -> String {
+		let mut s = self.path.clone();
+		s.push_str("/confirm");
+		s
+	}
+
+	/// The unsubscribe endpoint's path without its query.
+	fn unsubscribe_bare_path(&self) -> String {
+		let mut s = self.path.clone();
+		s.push_str("/unsubscribe");
+		s
+	}
+
+}
+
+/// Which subscription endpoint a request named.
+///
+/// A small enum rather than three string comparisons at the call site, so the reader dispatch reads as
+/// a match and a new endpoint is a new arm.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Subscription {
+	/// `{path}/subscribe`: the sign-up form (GET) and where it posts (POST).
+	Subscribe,
+	/// `{path}/confirm`: a confirmation link followed.
+	Confirm,
+	/// `{path}/unsubscribe`: an unsubscribe link followed.
+	Unsubscribe,
 }
 
 
@@ -293,6 +371,57 @@ pub fn valid_slug(s: &str) -> bool {
 	!s.is_empty()
 		&& s.len() <= SLUG_MAX
 		&& s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// The longest a tag may be, once normalised.
+///
+/// A tag is a facet in a URL and a word on a card, neither with a natural limit worth relying on.
+/// The number is arbitrary; having one is not.
+pub const TAG_MAX: usize = 32;
+
+/// Whether a word may be a tag, once normalised.
+///
+/// A small alphabet rather than a reject-list, on the same reasoning as [`valid_slug`]: lowercase
+/// letters, digits and the hyphen, and nothing else. A tag is pasted into a query (`?tag=rust`) and
+/// shown to a reader, so a space, a slash or a capital in one would be a tag that reaches somewhere
+/// as something other than it looks.
+///
+/// The check is against the normalised form, so `valid_tag` normalises first and a caller may pass
+/// what a person typed: `Rust` normalises to `rust` and passes, `a b` normalises to `a b` and does
+/// not -- a space is dropped, not guessed into a hyphen.
+pub fn valid_tag(s: &str) -> bool {
+	let t = normalise_tag(s);
+	!t.is_empty()
+		&& t.len() <= TAG_MAX
+		&& t.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// A tag as the store keeps it, from a tag as a person typed it.
+///
+/// Trimmed and lowercased, so `Rust` and ` rust ` are the one tag `rust`. A space is left as a
+/// space, deliberately: [`valid_tag`] then drops such a tag rather than this guessing that a space
+/// meant a hyphen and minting a tag the author did not type.
+pub fn normalise_tag(s: &str) -> String {
+	s.trim().to_lowercase()
+}
+
+/// The tags a record keeps, from the comma-separated field a form said.
+///
+/// Split on commas, each normalised and validated, the invalid dropped in silence -- a small
+/// alphabet, not a reject-list, as [`valid_tag`] is -- and deduped keeping first appearance. Empty
+/// or whitespace gives no tags.
+pub fn parse_tags(s: &str) -> Vec<String> {
+	let mut out: Vec<String> = Vec::new();
+	for part in s.split(',') {
+		let t = normalise_tag(part);
+		if !valid_tag(&t) {
+			continue;
+		}
+		if !out.iter().any(|x| x == &t) {
+			out.push(t);
+		}
+	}
+	out
 }
 
 /// The length of a date that names a day.
@@ -502,6 +631,9 @@ pub struct Post {
 	/// on the page as "also on …", so a reader can follow the post to where the conversation is. Empty
 	/// for a post read from a directory, which records no deliveries, and for one sent nowhere.
 	pub also_on:	Vec<(dest::Destination, String)>,
+	/// The tags the post carries, normalised. Drawn on the page and the card as tag links, one per
+	/// entry in the feed. Empty for a post with none, and for one read from a directory.
+	pub tags:	Vec<String>,
 }
 
 
@@ -623,6 +755,8 @@ pub fn render_source(
 		html:		html::render(&doc),
 		// A post made from source alone has no delivery record; the store fills this where there is one.
 		also_on:	Vec::new(),
+		// Nor any tags: they are a record's field, which the store threads in where it has one.
+		tags:		Vec::new(),
 	})
 }
 
@@ -769,6 +903,38 @@ mod tests {
 		assert_eq!(cfg.path, "/asides");
 		assert_eq!(cfg.feed_path(), "/asides/feed.xml");
 		assert_eq!(cfg.path_of("on-rent"), "/asides/on-rent");
+		Ok(())
+	}
+
+	/// A tag is validated against its normalised form, so what a person types is judged by what the
+	/// store would keep: case and surrounding space do not decide it, a space inside does.
+	#[test]
+	fn test_a_tag_is_a_small_alphabet_06() -> Outcome<()> {
+		assert!(valid_tag("rust"));
+		assert!(valid_tag("Rust"));		// normalised to `rust`
+		assert!(valid_tag("  web  "));		// trimmed
+		assert!(valid_tag("web-dev"));
+		assert!(valid_tag("c99"));
+		assert!(!valid_tag(""));
+		assert!(!valid_tag("   "));
+		assert!(!valid_tag("a b"));		// a space is dropped, not hyphenated
+		assert!(!valid_tag("a/b"));
+		assert!(!valid_tag("café"));
+		assert!(!valid_tag(&"x".repeat(TAG_MAX + 1)));
+		Ok(())
+	}
+
+	/// The comma field splits, normalises, drops the invalid in silence, and dedupes keeping first
+	/// appearance.
+	#[test]
+	fn test_tags_parse_from_a_comma_field_07() -> Outcome<()> {
+		assert_eq!(parse_tags("rust, web"), vec![fmt!("rust"), fmt!("web")]);
+		assert_eq!(parse_tags("Rust, RUST, rust"), vec![fmt!("rust")]);
+		assert_eq!(parse_tags(" web , , rust "), vec![fmt!("web"), fmt!("rust")]);
+		// The invalid drop out and the valid stay.
+		assert_eq!(parse_tags("rust, a b, web"), vec![fmt!("rust"), fmt!("web")]);
+		assert!(parse_tags("").is_empty());
+		assert!(parse_tags("  ,  ").is_empty());
 		Ok(())
 	}
 

@@ -93,8 +93,11 @@ impl Destination {
 	/// What this destination will take, and what it costs.
 	pub fn capability(&self) -> Capability {
 		match self {
-			// The newsletter is the whole post, not a blurb, so it has no length worth enforcing here;
-			// `fe2o3_mail` is live, but the sender that reaches it is not written yet.
+			// The newsletter is the whole post, not a blurb, so it has no length worth enforcing here.
+			// `wired` stays false because email is not a per-remote queue delivery with a single
+			// permalink to return: it is a fan-out to the site's own subscriber list, sent from the
+			// subscribers page (`/manage/subscribers`) through the site's DKIM sender, not queued as a
+			// `Delivery` on the post the way Mastodon and Bluesky are.
 			Self::Email	=> Capability {
 				name:		"Email",
 				max_chars:	None,

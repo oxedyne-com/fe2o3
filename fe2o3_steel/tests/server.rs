@@ -121,6 +121,7 @@ pub async fn test_server(filter: &'static str) -> Outcome<()> {
                 proxy_routes:           Vec::new(),
                 term_config:            None,
                 publish:                None,
+                site_admins:            Vec::new(),
             };
 
             let web_handler: AppWebHandler<HashMap<String, OsPath>> = AppWebHandler::new(
@@ -137,6 +138,8 @@ pub async fn test_server(filter: &'static str) -> Outcome<()> {
                 None,              // admin_state
                 None,              // traffic
                 None,              // publish
+                None,              // mail
+                Arc::new(Vec::new()), // site_admins
             );
 
             let ws_handler = AppWebSocketHandler::new(None);

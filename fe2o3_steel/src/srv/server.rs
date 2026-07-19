@@ -307,17 +307,24 @@ impl<
 
         let tls_acceptor = TlsAcceptor::from(Arc::new(loaded.server_config));
 
-        // Spawn mail listeners if a mail block is configured.
+        // Spawn the mail listeners only when the mail server is enabled. A site that
+        // merely sends newsletters wants a DKIM identity and an outbound client, not
+        // to bind SMTP-receive, submission and IMAP and become an MX -- so sending is
+        // built separately (see the newsletter sender in `app/server.rs`), and this
+        // gate keeps a send-only host from standing up a mail server it never asked
+        // for.
         if let Some(mail_cfg) = res!(self.context.cfg.get_mail()) {
-            if let Err(e) = spawn_mail_listeners(
-                &mail_cfg,
-                &self.context.root,
-                tls_acceptor.clone(),
-                &self.context.cfg.server_address,
-            ).await {
-                error!(err!(e,
-                    "Failed to spawn mail listeners.";
-                    Init, Network));
+            if mail_cfg.enabled {
+                if let Err(e) = spawn_mail_listeners(
+                    &mail_cfg,
+                    &self.context.root,
+                    tls_acceptor.clone(),
+                    &self.context.cfg.server_address,
+                ).await {
+                    error!(err!(e,
+                        "Failed to spawn mail listeners.";
+                        Init, Network));
+                }
             }
         }
 

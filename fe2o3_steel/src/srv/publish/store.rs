@@ -58,6 +58,14 @@ pub const KEY_PREFIX: &str = "publish/post/";
 /// The key the list of slugs lives under.
 pub const INDEX_KEY: &str = "publish/index";
 
+/// The key the list of database-granted site admins lives under.
+///
+/// The companion to the config's [`site_admins`](crate::srv::cfg::VhostConfig::site_admins): the
+/// admins a site grants itself from the browser, kept apart from the operator's failsafe list so the
+/// two can be reasoned about separately. The functions in the ADMINS section below are its only
+/// writers.
+pub const ADMINS_KEY: &str = "publish/admins";
+
 
 /// A post's key.
 fn key_of(slug: &str) -> Dat {
@@ -87,6 +95,9 @@ pub struct Record {
 	/// Where this post has been sent besides the site's own pages, one entry per remote. Empty for a
 	/// post that lives only at home, which every post read from a directory does.
 	pub deliveries:	Vec<Delivery>,
+	/// The tags the author gave it, normalised and deduped, in first-seen order. Empty for an
+	/// untagged post, which is what every record written before tags were a field reads as.
+	pub tags:	Vec<String>,
 }
 
 impl Record {
@@ -112,6 +123,12 @@ impl Record {
 		if !self.deliveries.is_empty() {
 			let list = Dat::List(self.deliveries.iter().map(|d| d.to_dat()).collect());
 			m.insert(dat!("deliveries"), list);
+		}
+		// A post with no tags carries no tags key, for the same reason it carries no empty deliveries:
+		// an absent key and an empty list say the same thing, and one of them is enough.
+		if !self.tags.is_empty() {
+			let list = Dat::List(self.tags.iter().map(|t| dat!(t.clone())).collect());
+			m.insert(dat!("tags"), list);
 		}
 		Dat::Map(m)
 	}
@@ -169,6 +186,19 @@ impl Record {
 				out.deliveries.push(d);
 			}
 		}
+		// Tags are a list of strings, read apart from the string fields above like the deliveries. An
+		// absent key is a post with no tags, which every record written before tags were a field is. A
+		// tag is taken as stored here; the composer is where one is normalised and checked.
+		let tags = match m.get(&dat!("tags")) {
+			Some(Dat::List(items))	=> items.as_slice(),
+			Some(Dat::Vek(vek))	=> vek.as_slice(),
+			_			=> &[],
+		};
+		for item in tags {
+			if let Dat::Str(s) = item {
+				out.tags.push(s.clone());
+			}
+		}
 		Ok(out)
 	}
 
@@ -183,6 +213,9 @@ impl Record {
 				Some((d.dest, permalink.clone())),
 			_								=> None,
 		}).collect();
+		// The tags travel with the rendered post, so every read surface can show them without knowing a
+		// record from a directory.
+		post.tags = self.tags.clone();
 		Ok(post)
 	}
 }
@@ -303,6 +336,39 @@ pub fn list_records<
 	Ok(recs)
 }
 
+/// Every tag any post carries, drafts included, sorted and deduped.
+///
+/// The site's accumulating vocabulary: a tag is offered as soon as one post wears it, so the
+/// composer's palette grows as the site does, and a draft counts -- a tag is available the moment it
+/// is first used.
+///
+/// Built from [`list_records`], which is the index read and a read per post the composer already
+/// pays, rather than [`Database::scan`], which is the expensive thing the index exists to avoid.
+pub fn all_tags<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	id:	&str,
+)
+	-> Outcome<Vec<String>>
+{
+	let recs = res!(list_records(db, id));
+	let mut out: Vec<String> = Vec::new();
+	for rec in &recs {
+		for t in &rec.tags {
+			if !out.iter().any(|s| s == t) {
+				out.push(t.clone());
+			}
+		}
+	}
+	out.sort();
+	Ok(out)
+}
+
 /// Every live post, newest first, rendered.
 ///
 /// A record that will not render is passed over with a complaint in the log rather than failing the
@@ -390,6 +456,127 @@ fn put_index<
 	res!(guard.insert(dat!(INDEX_KEY), list, *user, None));
 	Ok(())
 }
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ ADMINS                                                                    │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// The database-granted admins: every member id-hash the console has added.
+///
+/// The read that lets a site bootstrap its own administration without a config edit. An absent key is
+/// a site that has granted none -- which every site is until the first admin claims it -- and reads as
+/// the empty list, not an error, on the same reasoning [`index`] takes for a store that has published
+/// nothing.
+pub fn admins_get<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	_id:	&str,
+)
+	-> Outcome<Vec<String>>
+{
+	let (db_arc, _) = db;
+	let guard = lock_read!(db_arc);
+	let val = match res!(guard.get(&dat!(ADMINS_KEY), None)) {
+		Some((v, _))	=> v,
+		// No key is a site that has granted no admins from the browser, which is not an error: its
+		// database admin list is the empty one it never wrote.
+		None		=> return Ok(Vec::new()),
+	};
+	let items = match &val {
+		Dat::List(items)	=> items.clone(),
+		Dat::Vek(vek)		=> vek.as_slice().to_vec(),
+		_			=> return Err(err!(
+			"publish: the admin list must be a list, not {:?}.", val.kind();
+			Invalid, Input, Mismatch)),
+	};
+	let mut out = Vec::new();
+	for item in &items {
+		if let Dat::Str(s) = item {
+			out.push(s.clone());
+		}
+	}
+	Ok(out)
+}
+
+/// Adds an id-hash to the database admin list, once.
+///
+/// Idempotent: a hash the list already holds is left as it is, so granting the same admin twice grants
+/// them once. The caller owns validating the hash's shape; this stores what it is given.
+pub fn admins_add<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	id:	&str,
+	hash:	&str,
+)
+	-> Outcome<()>
+{
+	let mut hashes = res!(admins_get(db, id));
+	if !hashes.iter().any(|h| h == hash) {
+		hashes.push(hash.to_string());
+		res!(put_admins(db, &hashes));
+		debug!("{}: publish: granted site admin to '{}'", id, hash);
+	}
+	Ok(())
+}
+
+/// Removes an id-hash from the database admin list.
+///
+/// Only the database list: a hash the operator has pinned in config is not here to remove and stays an
+/// admin regardless, which is the point of the config list being the failsafe. Removing a hash the
+/// list does not hold is a no-op, not an error.
+pub fn admins_remove<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	id:	&str,
+	hash:	&str,
+)
+	-> Outcome<()>
+{
+	let hashes = res!(admins_get(db, id));
+	let kept: Vec<String> = hashes.into_iter().filter(|h| h != hash).collect();
+	res!(put_admins(db, &kept));
+	debug!("{}: publish: revoked site admin from '{}'", id, hash);
+	Ok(())
+}
+
+/// Writes the database admin list.
+///
+/// Private, and the only writer of [`ADMINS_KEY`] besides the two above that go through it: the list is
+/// derived from nothing, so it is written whole where it changes and nowhere else.
+fn put_admins<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	hashes:	&[String],
+)
+	-> Outcome<()>
+{
+	let (db_arc, user) = db;
+	let list = Dat::List(hashes.iter().map(|s| dat!(s.clone())).collect());
+	let guard = lock_read!(db_arc);
+	res!(guard.insert(dat!(ADMINS_KEY), list, *user, None));
+	Ok(())
+}
+
 
 /// Rebuilds the index from what the database actually holds.
 ///
@@ -487,6 +674,9 @@ pub fn import_dir<
 			source,
 			// A file has been sent nowhere: a directory is prose, not a record of where it went.
 			deliveries:	Vec::new(),
+			// A directory carries no tags: there is no front matter to put them in, and a filename is
+			// the slug and the date, nothing else.
+			tags:	Vec::new(),
 		};
 		res!(put(db, &rec, id));
 		n += 1;
@@ -527,6 +717,7 @@ mod tests {
 				},
 				Delivery::new(Destination::Bluesky, Rendition::default()),
 			],
+			tags:	vec![fmt!("rust"), fmt!("web")],
 		};
 		let back = res!(Record::from_dat(&rec.to_dat()));
 		assert_eq!(back, rec);
@@ -535,6 +726,34 @@ mod tests {
 		let back = res!(Record::from_dat(&undated.to_dat()));
 		assert_eq!(back, undated);
 		assert_eq!(back.date, None);
+		Ok(())
+	}
+
+	/// An untagged post writes no tags key, and a record with no tags key reads as untagged -- the
+	/// absent key and the empty list saying the one thing.
+	#[test]
+	fn test_tags_follow_the_empty_list_idiom_05() -> Outcome<()> {
+		let rec = Record {
+			slug:	fmt!("on-rent"),
+			source:	fmt!("Words."),
+			tags:	Vec::new(),
+			..Default::default()
+		};
+		// No tags, no key.
+		if let Dat::Map(m) = rec.to_dat() {
+			assert!(m.get(&dat!("tags")).is_none(), "an untagged post wrote a tags key");
+		}
+		// A record with no tags key reads as untagged.
+		let mut m = DaticleMap::new();
+		m.insert(dat!("slug"),		dat!("on-rent"));
+		m.insert(dat!("source"),	dat!("Words."));
+		let back = res!(Record::from_dat(&Dat::Map(m)));
+		assert!(back.tags.is_empty(), "a record with no tags key read as tagged");
+
+		// Tags given survive the trip, in order.
+		let tagged = Record { tags: vec![fmt!("rust"), fmt!("web")], ..rec };
+		let back = res!(Record::from_dat(&tagged.to_dat()));
+		assert_eq!(back.tags, vec![fmt!("rust"), fmt!("web")]);
 		Ok(())
 	}
 

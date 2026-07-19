@@ -42,6 +42,10 @@ pub fn serve(cfg: &PublishConfig, posts: &[Post], id: &str) -> Outcome<HttpMessa
 				(dat!("url"),		dat!(cfg.path_of(&p.slug))),
 				(dat!("excerpt"),	dat!(p.excerpt.clone())),
 				(dat!("html"),		dat!(p.html.clone())),
+				// The tags, always present as an array so a page reading this need not ask whether the
+				// key is there -- an untagged post carries the empty list, which is the same thing said
+				// once. A tag is a plain string the store already normalised.
+				(dat!("tags"),		Dat::List(p.tags.iter().map(|t| dat!(t.clone())).collect())),
 			];
 			// A post without a date carries no date key, rather than a key saying nothing. The reader
 			// asks whether the post has one; it should not also have to ask what a date of nothing means.

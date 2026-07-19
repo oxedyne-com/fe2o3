@@ -2167,6 +2167,20 @@ impl ServerConfig {
         Ok(Some(cfg))
     }
 
+    /// The mail config regardless of `enabled`.
+    ///
+    /// [`get_mail`](Self::get_mail) gates on `enabled` because it answers "should the mail *server*
+    /// (the listeners) start?". Sending a newsletter is a different question: a site can hold a DKIM
+    /// identity and an outbound client to send with, without binding SMTP-receive/submission/IMAP and
+    /// becoming an MX. So the newsletter sender reads the block here, `enabled` or not, and is built
+    /// whenever there is a hostname and a signing key.
+    pub fn get_mail_any(&self) -> Outcome<Option<MailConfig>> {
+        if self.mail.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(res!(MailConfig::from_datmap(&self.mail))))
+    }
+
     /// Parse the `alerts` block. An empty map, or an `enabled: false`
     /// map, disables alerting.
     pub fn get_alerts(&self) -> Outcome<Option<AlertConfig>> {
