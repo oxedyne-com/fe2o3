@@ -127,5 +127,26 @@ has "the limit box echoes what was asked" "$body" 'value="2"'
 hasnt "and the scan actually filtered" "$body" "publish/post/from-the-dir"
 
 echo
+echo "== the reports page =="
+# Reports read the subscriber store and the send history and aggregate them. A
+# site that has sent nothing must say so rather than draw an empty table, and the
+# page is a read behind the same gate as the rest of the console.
+MJ="$RIG_DIR/mjar"
+curl -sk -c $MJ -o /dev/null -X POST -d "passphrase=$PASS" "$B/manage/login"
+anon=$(curl -sk "$B/manage/reports")
+has "anonymous gets the login, not the numbers" "$anon" 'name="passphrase"'
+# The class names all appear in the stylesheet every console page inlines, so a
+# leak shows as a class being *used*, not merely defined.
+hasnt "and no subscriber figures leak to it" "$anon" 'class="mc-stat-n"'
+body=$(curl -sk -b $MJ "$B/manage/reports")
+has "an admin gets the reports page" "$body" "<h1>Reports</h1>"
+has "it reports on the list" "$body" "The list"
+has "and on the sends" "$body" "Newsletter sends"
+has "an empty list says so" "$body" "Nobody has subscribed yet"
+has "and an unsent newsletter says so" "$body" "No post has been mailed"
+hasnt "rather than drawing an empty table" "$body" 'class="mc-bar-fill"'
+has "the console links to it" "$(curl -sk -b $MJ "$B/manage")" "/manage/reports"
+
+echo
 echo "$pass passed, $fail failed"
 [ $fail -eq 0 ]

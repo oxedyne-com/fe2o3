@@ -1084,6 +1084,8 @@ pub fn page(theme: &Theme, admin: &SiteAdmin, title: &str, body: &str) -> HttpMe
 	s.push_str(" <span class=\"mc-brand-sub\">manage</span></div>\n");
 	s.push_str("<nav class=\"mc-nav\">");
 	s.push_str(&fmt!("<a href=\"{}\">Posts</a>", PATH_ROOT));
+	s.push_str(&fmt!("<a href=\"{}\">Subscribers</a>", publish::PATH_SUBS));
+	s.push_str(&fmt!("<a href=\"{}\">Reports</a>", publish::PATH_REPORTS));
 	s.push_str(&fmt!("<a href=\"{}\">View site</a>", html_escape(&theme.home)));
 	s.push_str(&fmt!("<span class=\"mc-who\">{}…</span>", html_escape(&admin.username[..8.min(admin.username.len())])));
 	s.push_str("</nav>\n");
@@ -1211,6 +1213,18 @@ padding:0.1rem 0.45rem;border-radius:4px;border:1px solid var(--border,var(--asi
 color:var(--text-secondary,var(--aside-date-color,#8a97a6));}\
 .mc-tag-live{border-color:#4f8f57;color:#7bc084;}\
 .mc-tag-err{border-color:#c0554e;color:#d9776f;}\
+.mc-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(9rem,1fr));gap:0.8rem;\
+margin:0.6rem 0 1.4rem;}\
+.mc-stat{border:1px solid var(--border,var(--aside-rule-color,#333c47));border-radius:6px;\
+padding:0.8rem 0.9rem;}\
+.mc-stat-n{font-size:1.7rem;line-height:1.1;color:var(--text,var(--aside-text-color,#d8dee6));}\
+.mc-stat-k{font-size:0.75rem;text-transform:uppercase;letter-spacing:0.06em;margin-top:0.3rem;\
+color:var(--accent,var(--aside-link-color,#7fb0e0));}\
+.mc-stat-note{font-size:0.78rem;margin-top:0.2rem;\
+color:var(--text-secondary,var(--aside-date-color,#8a97a6));}\
+.mc-bar{background:var(--border,var(--aside-rule-color,#333c47));border-radius:3px;height:0.5rem;\
+min-width:6rem;}\
+.mc-bar-fill{background:var(--accent,var(--aside-link-color,#7fb0e0));border-radius:3px;height:100%;}\
 .mc-form label{display:block;font-size:0.8rem;text-transform:uppercase;letter-spacing:0.05em;\
 color:var(--text-secondary,var(--aside-date-color,#8a97a6));margin:1rem 0 0.3rem;}\
 .mc-form input[type=text],.mc-form input[type=password],.mc-form select,.mc-form textarea{width:100%;box-sizing:border-box;\

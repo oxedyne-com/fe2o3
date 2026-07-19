@@ -139,7 +139,11 @@ async function main() {
 	let r = await call('GET', '/manage/status');
 	has('status answers the anonymous', r.body, '"admin":false');
 	r = await call('GET', '/manage');
-	check('the console redirects the anonymous away', r.status, 303);
+	// Not a redirect: the console answers an anonymous visitor with its own themed
+	// passphrase login, in the site's skin. What matters is that it is the login and
+	// not the console.
+	check('the console shows the anonymous a login', r.status, 200);
+	has('and it is the login, not the console', r.body, 'name="passphrase"');
 	r = await call('POST', '/manage/save', { form: { slug: 'x', source: 'y', csrf: 'z' } });
 	check('an anonymous write is turned away', r.status, 303);
 
@@ -183,7 +187,7 @@ async function main() {
 		const r2 = await call('GET', '/manage', { cookie: c2 });
 		check('a non-admin member is refused', r2.status, 403);
 		has('but is shown their own id', r2.body, otherUser);
-		has('and told what to ask for', r2.body, 'site_admins');
+		has('and told what to ask for', r2.body, 'give an existing administrator this id');
 		hasnt('status does not call them an admin', (await call('GET', '/manage/status', { cookie: c2 })).body, '"admin":true');
 	}
 

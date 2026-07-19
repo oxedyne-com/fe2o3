@@ -74,9 +74,12 @@ use oxedyne_fe2o3_net::http::{
 
 use tokio_rustls::rustls::ClientConfig;
 
-use std::sync::{
-	Arc,
-	RwLock,
+use std::{
+	collections::BTreeMap,
+	sync::{
+		Arc,
+		RwLock,
+	},
 };
 
 use super::html_escape;
@@ -124,6 +127,12 @@ pub const PATH_SUBS: &str = "/manage/subscribers";
 
 /// The subscriber list as CSV, for the site to keep the list it owns.
 pub const PATH_SUBS_CSV: &str = "/manage/subscribers.csv";
+
+/// The reports page: what the list is made of, and what has been sent to it.
+pub const PATH_REPORTS: &str = "/manage/reports";
+
+/// The bucket a report counts a record under when it carries no month to file it by.
+const UNDATED: &str = "unknown";
 
 /// Where the "send to subscribers" form posts a live post's slug.
 pub const PATH_NEWSLETTER: &str = "/manage/newsletter";
@@ -199,6 +208,7 @@ pub fn handle_get<
 		PATH_PREVIEW	=> handle_preview(cfg, theme, admin, db, query, id),
 		PATH_SUBS	=> subscribers_page(cfg, theme, admin, csrf, db, query, id),
 		PATH_SUBS_CSV	=> subscribers_csv(db, id),
+		PATH_REPORTS	=> reports_page(theme, admin, db, id),
 		PATH_LIST_JSON	=> list_json(cfg, db, id),
 		PATH_POST_JSON	=> post_json(cfg, db, query, id),
 		PATH_TAGS_JSON	=> tags_json(cfg, db, id),
@@ -395,6 +405,277 @@ fn history_table(hist: &[send::SendEntry]) -> String {
 	}
 	s.push_str("</tbody>\n</table>\n");
 	s
+}
+
+/// The reports page: what the list is made of, how it grew, and what has been sent to it.
+///
+/// Two questions, answered from what the site already records: who is on the list, and what happened
+/// to the posts mailed to it. Both are aggregations over the subscriber store and the send history --
+/// nothing here is measured for the purpose, and nothing is asked of a reader. There is deliberately
+/// no open or click tracking: an open pixel and a rewritten link are surveillance of a person who
+/// only asked to be sent some prose, and the site does not do it.
+///
+/// The honest ceiling, stated on the page as well as here: a subscriber records the moment it signed
+/// up and nothing else, so growth is knowable and cohort behaviour is not. Where a rate would be a
+/// guess, a share of the list as it stands is given instead, and said to be that.
+fn reports_page<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	theme:	&Theme,
+	admin:	&SiteAdmin,
+	db:	Option<&(Arc<RwLock<DB>>, UID)>,
+	id:	&str,
+)
+	-> Outcome<HttpMessage>
+{
+	let mut body = String::new();
+	body.push_str("<h1>Reports</h1>\n");
+
+	let db = match db {
+		Some(db)	=> db,
+		None		=> {
+			body.push_str(&notice(
+				"This site keeps its subscribers in its database, and has no database configured. Set \
+				<code>db_dir_rel</code> on the vhost.",
+			));
+			return Ok(page(theme, admin, "Reports", &body));
+		}
+	};
+
+	// The list. A read that fails costs its half of the page, not the page, so the send half still
+	// renders.
+	match subscribe::list(db, id) {
+		Ok(subs)	=> body.push_str(&list_report(&subs)),
+		Err(e)		=> {
+			error!(e, "{}: console: cannot list the subscribers for the report", id);
+			body.push_str(&notice("The subscribers could not be listed. The log says why."));
+		}
+	}
+
+	// The sends.
+	match send::send_history(db) {
+		Ok(hist)	=> body.push_str(&send_report(&hist)),
+		Err(e)		=> {
+			warn!("{}: console: cannot read the send history for the report: {}", id, e);
+			body.push_str(&notice("The send history could not be read. The log says why."));
+		}
+	}
+
+	Ok(page(theme, admin, "Reports", &body))
+}
+
+/// The list half of the report: the states as they stand, the shares they make, and growth by month.
+fn list_report(subs: &[subscribe::Subscriber]) -> String {
+	let mut s = String::new();
+	s.push_str("<h2>The list</h2>\n");
+
+	if subs.is_empty() {
+		s.push_str(&notice("Nobody has subscribed yet, so there is nothing to report."));
+		return s;
+	}
+
+	let confirmed = subs.iter().filter(|x| x.state == subscribe::SubState::Confirmed).count();
+	let pending = subs.iter().filter(|x| x.state == subscribe::SubState::Pending).count();
+	let unsubbed = subs.iter().filter(|x| x.state == subscribe::SubState::Unsubscribed).count();
+	let bounced = subs.iter().filter(|x| x.state == subscribe::SubState::Bounced).count();
+	let total = subs.len();
+
+	s.push_str(&stat_cards(&[
+		("Reach", fmt!("{}", confirmed), "confirmed, and receiving"),
+		("Awaiting", fmt!("{}", pending), "signed up, not yet confirmed"),
+		("Left", fmt!("{}", unsubbed), "unsubscribed"),
+		("Suppressed", fmt!("{}", bounced), "bounced, never retried"),
+	]));
+
+	s.push_str(&fmt!(
+		"<p class=\"mc-muted\">{total} addresses on record. {conf_pct} of them are confirmed and \
+		{pend_pct} are still to confirm. Of those who confirmed, {churn} have since unsubscribed.</p>\n",
+		total		= total,
+		conf_pct	= pct(confirmed, total),
+		pend_pct	= pct(pending, total),
+		churn		= pct(unsubbed, confirmed + unsubbed),
+	));
+
+	s.push_str(&notice(
+		"These are shares of the list as it stands, not rates over time. A subscriber records when it \
+		signed up and nothing else -- there is no confirmed-on or unsubscribed-on date -- so an address \
+		that confirmed and later left counts only in <em>left</em>, and the confirmed share therefore \
+		understates how many ever confirmed.",
+	));
+
+	s.push_str(&month_table(
+		"Signed up by month",
+		"Sign-ups",
+		&by_month(subs.iter().map(|x| x.created.as_deref().unwrap_or(""))),
+	));
+	s
+}
+
+/// The send half of the report: the totals across every send, the rate they make, and the per-post
+/// and per-month rollups.
+fn send_report(hist: &[send::SendEntry]) -> String {
+	let mut s = String::new();
+	s.push_str("<h2>Newsletter sends</h2>\n");
+
+	if hist.is_empty() {
+		s.push_str(&notice("No post has been mailed to the list yet, so there is nothing to report."));
+		return s;
+	}
+
+	let attempted: usize = hist.iter().map(|e| e.attempted).sum();
+	let sent: usize = hist.iter().map(|e| e.sent).sum();
+	let failed: usize = hist.iter().map(|e| e.failed).sum();
+	let suppressed: usize = hist.iter().map(|e| e.suppressed).sum();
+
+	s.push_str(&stat_cards(&[
+		("Sends", fmt!("{}", hist.len()), "posts mailed to the list"),
+		("Accepted", fmt!("{}", sent), "taken by a receiving server"),
+		("Delivery", pct(sent, attempted), "of every address attempted"),
+		("Suppressed", fmt!("{}", suppressed), "hard failures, now off the list"),
+	]));
+
+	s.push_str(&fmt!(
+		"<p class=\"mc-muted\">{attempted} addresses attempted across {sends} sends: {sent} accepted, \
+		{failed} failed for now and will be tried on the next send, {suppressed} refused for good and \
+		suppressed.</p>\n",
+		attempted	= attempted,
+		sends		= hist.len(),
+		sent		= sent,
+		failed		= failed,
+		suppressed	= suppressed,
+	));
+
+	s.push_str(&notice(
+		"<em>Accepted</em> is what a receiving server took, which is not the same as what a person read. \
+		Whether a message was opened, and whether a link in it was followed, are deliberately not \
+		recorded.",
+	));
+
+	// Per post, most attempted first: which post reached the most people.
+	let mut per_post: BTreeMap<&str, (usize, usize, usize, usize, usize)> = BTreeMap::new();
+	for e in hist {
+		let row = per_post.entry(e.slug.as_str()).or_insert((0, 0, 0, 0, 0));
+		row.0 += 1;
+		row.1 += e.attempted;
+		row.2 += e.sent;
+		row.3 += e.failed;
+		row.4 += e.suppressed;
+	}
+	let mut rows: Vec<(&str, (usize, usize, usize, usize, usize))> = per_post.into_iter().collect();
+	rows.sort_by(|a, b| b.1.1.cmp(&a.1.1));
+
+	s.push_str("<h3>By post</h3>\n");
+	s.push_str("<table class=\"mc-table\">\n<thead><tr>\
+		<th>Post</th><th>Sends</th><th>Attempted</th><th>Accepted</th><th>Delivery</th>\
+		<th>Suppressed</th>\
+		</tr></thead>\n<tbody>\n");
+	for (slug, (sends, att, ok, _fail, supp)) in &rows {
+		s.push_str(&fmt!(
+			"<tr><td><span class=\"mc-slug\">{slug}</span></td><td>{sends}</td><td>{att}</td>\
+			<td>{ok}</td><td>{rate}</td><td>{supp}</td></tr>\n",
+			slug	= html_escape(slug),
+			sends	= sends,
+			att	= att,
+			ok	= ok,
+			rate	= pct(*ok, *att),
+			supp	= supp,
+		));
+	}
+	s.push_str("</tbody>\n</table>\n");
+
+	s.push_str(&month_table(
+		"Sends by month",
+		"Sends",
+		&by_month(hist.iter().map(|e| e.at.as_str())),
+	));
+	s
+}
+
+/// A row of headline numbers: a big figure, what it counts, and a word on what it means.
+///
+/// Four at most read well on a phone, which is the width this is built for.
+fn stat_cards(cards: &[(&str, String, &str)]) -> String {
+	let mut s = String::new();
+	s.push_str("<div class=\"mc-stats\">\n");
+	for (key, value, note) in cards {
+		s.push_str(&fmt!(
+			"<div class=\"mc-stat\"><div class=\"mc-stat-n\">{value}</div>\
+			<div class=\"mc-stat-k\">{key}</div><div class=\"mc-stat-note\">{note}</div></div>\n",
+			value	= html_escape(value),
+			key	= html_escape(key),
+			note	= html_escape(note),
+		));
+	}
+	s.push_str("</div>\n");
+	s
+}
+
+/// Counts by calendar month, newest first, from a run of ISO timestamps.
+///
+/// A timestamp this cannot read a month from is counted under `unknown` rather than dropped: a
+/// subscriber that predates the sign-up date being recorded is still a subscriber, and a total that
+/// quietly disagreed with the list above it would be worse than an honest bucket.
+fn by_month<'a, I: Iterator<Item = &'a str>>(stamps: I) -> Vec<(String, usize)> {
+	let mut months: BTreeMap<String, usize> = BTreeMap::new();
+	for stamp in stamps {
+		let key = if stamp.len() >= 7 && stamp.is_char_boundary(7) {
+			stamp[..7].to_string()
+		} else {
+			fmt!("{}", UNDATED)
+		};
+		*months.entry(key).or_insert(0) += 1;
+	}
+	// Newest month first -- and `unknown` last whatever it sorts as, since it is not a month and would
+	// otherwise sit above every real one on a plain descending sort.
+	let mut out: Vec<(String, usize)> = months.into_iter().collect();
+	out.sort_by(|a, b| {
+		let (a_odd, b_odd) = (a.0 == UNDATED, b.0 == UNDATED);
+		a_odd.cmp(&b_odd).then_with(|| b.0.cmp(&a.0))
+	});
+	out
+}
+
+/// A month-by-month table with a bar for the shape of it, the widest month full width.
+fn month_table(heading: &str, unit: &str, months: &[(String, usize)]) -> String {
+	if months.is_empty() {
+		return String::new();
+	}
+	let peak = months.iter().map(|(_, n)| *n).max().unwrap_or(0);
+	let mut s = String::new();
+	s.push_str(&fmt!("<h3>{}</h3>\n", html_escape(heading)));
+	s.push_str(&fmt!(
+		"<table class=\"mc-table\">\n<thead><tr><th>Month</th><th>{}</th><th></th></tr></thead>\n\
+		<tbody>\n",
+		html_escape(unit),
+	));
+	for (month, n) in months {
+		// The bar is decoration over the number beside it, so a zero peak simply draws nothing.
+		let width = if peak > 0 { (n * 100) / peak } else { 0 };
+		s.push_str(&fmt!(
+			"<tr><td>{month}</td><td>{n}</td>\
+			<td><div class=\"mc-bar\"><div class=\"mc-bar-fill\" style=\"width:{width}%\"></div></div></td>\
+			</tr>\n",
+			month	= html_escape(month),
+			n	= n,
+			width	= width,
+		));
+	}
+	s.push_str("</tbody>\n</table>\n");
+	s
+}
+
+/// A percentage of a total, to one decimal place, or a dash where the total is zero.
+///
+/// Nothing out of nothing is not zero per cent, and printing it as such would invent a fact.
+fn pct(n: usize, d: usize) -> String {
+	if d == 0 {
+		return fmt!("--");
+	}
+	fmt!("{:.1}%", (n as f64 * 100.0) / d as f64)
 }
 
 /// The "send a post to subscribers" form: a live post picked from a select, and the send.
@@ -1978,4 +2259,134 @@ mod tests {
 		assert_eq!(url_decode(&enc), "a post with no prose in it is not a post");
 		Ok(())
 	}
+
+	/// A subscriber in a given state, signed up at a given moment, for the report tests.
+	fn sub_at(email: &str, state: subscribe::SubState, created: Option<&str>) -> subscribe::Subscriber {
+		subscribe::Subscriber {
+			email:		fmt!("{}", email),
+			state:		state,
+			token:		fmt!("t0000000000000000000000000000000"),
+			created:	created.map(|c| fmt!("{}", c)),
+		}
+	}
+
+	/// A send of a post, for the report tests.
+	fn sent_at(slug: &str, at: &str, attempted: usize, sent: usize, failed: usize, suppressed: usize)
+		-> send::SendEntry
+	{
+		send::SendEntry {
+			slug:		fmt!("{}", slug),
+			at:		fmt!("{}", at),
+			attempted:	attempted,
+			sent:		sent,
+			failed:		failed,
+			suppressed:	suppressed,
+		}
+	}
+
+	/// Nothing out of nothing is not zero per cent, and a share is given to one decimal place.
+	#[test]
+	fn test_a_share_of_nothing_is_a_dash_05() -> Outcome<()> {
+		assert_eq!(pct(0, 0), fmt!("--"));
+		assert_eq!(pct(7, 0), fmt!("--"));
+		assert_eq!(pct(1, 3), fmt!("33.3%"));
+		assert_eq!(pct(3, 3), fmt!("100.0%"));
+		assert_eq!(pct(0, 4), fmt!("0.0%"));
+		Ok(())
+	}
+
+	/// Months group by their first seven characters, newest first, and a stamp with no month in it is
+	/// counted under `unknown` rather than dropped.
+	#[test]
+	fn test_months_group_newest_first_06() -> Outcome<()> {
+		let stamps = vec![
+			"2026-07-19T08:00:00Z",
+			"2026-07-01T00:00:00Z",
+			"2026-06-30T23:59:59Z",
+			"",
+			"nope",
+		];
+		let months = by_month(stamps.into_iter());
+		assert_eq!(months.len(), 3);
+		assert_eq!(months[0], (fmt!("2026-07"), 2));
+		assert_eq!(months[1], (fmt!("2026-06"), 1));
+		assert_eq!(months[2], (fmt!("unknown"), 2));
+		// Nothing is lost: the buckets total what went in.
+		let total: usize = months.iter().map(|(_, n)| *n).sum();
+		assert_eq!(total, 5);
+		Ok(())
+	}
+
+	/// An empty month run draws no table at all, rather than an empty one.
+	#[test]
+	fn test_no_months_draw_no_table_07() -> Outcome<()> {
+		assert_eq!(month_table("Signed up by month", "Sign-ups", &[]), fmt!(""));
+		let one = vec![(fmt!("2026-07"), 3), (fmt!("2026-06"), 1)];
+		let html = month_table("Signed up by month", "Sign-ups", &one);
+		assert!(html.contains("Signed up by month"));
+		// The peak month fills the bar and the lesser one is scaled against it.
+		assert!(html.contains("width:100%"));
+		assert!(html.contains("width:33%"));
+		Ok(())
+	}
+
+	/// The list report counts each state, and says so where there is nobody to count.
+	#[test]
+	fn test_the_list_report_counts_the_states_08() -> Outcome<()> {
+		let empty = list_report(&[]);
+		assert!(empty.contains("Nobody has subscribed yet"));
+		assert!(!empty.contains("mc-stat-n"));
+
+		let subs = vec![
+			sub_at("a@example.com", subscribe::SubState::Confirmed, Some("2026-07-19T08:00:00Z")),
+			sub_at("b@example.com", subscribe::SubState::Confirmed, Some("2026-06-02T08:00:00Z")),
+			sub_at("c@example.com", subscribe::SubState::Pending, Some("2026-07-18T08:00:00Z")),
+			sub_at("d@example.com", subscribe::SubState::Unsubscribed, Some("2026-05-01T08:00:00Z")),
+			sub_at("e@example.com", subscribe::SubState::Bounced, None),
+		];
+		let html = list_report(&subs);
+		assert!(html.contains("5 addresses on record"));
+		// Two of five confirmed, one of five pending, and one of the three who confirmed has left.
+		assert!(html.contains("40.0%"));
+		assert!(html.contains("20.0%"));
+		assert!(html.contains("33.3%"));
+		// The undated subscriber still appears, under `unknown`.
+		assert!(html.contains("unknown"));
+		// The ceiling of the data is stated on the page, not only in the source.
+		assert!(html.contains("shares of the list as it stands"));
+		Ok(())
+	}
+
+	/// The send report totals every send, rolls up by post, and never claims an open or a click.
+	#[test]
+	fn test_the_send_report_rolls_up_by_post_09() -> Outcome<()> {
+		let empty = send_report(&[]);
+		assert!(empty.contains("No post has been mailed"));
+
+		let hist = vec![
+			sent_at("on-rent", "2026-07-19T08:00:00Z", 10, 8, 1, 1),
+			sent_at("on-rent", "2026-07-18T08:00:00Z", 4, 4, 0, 0),
+			sent_at("on-time", "2026-06-02T08:00:00Z", 6, 3, 3, 0),
+		];
+		let html = send_report(&hist);
+		// Three sends, twenty attempts, fifteen accepted.
+		assert!(html.contains("20 addresses attempted across 3 sends"));
+		assert!(html.contains("75.0%"));
+		// The two sends of one post are one row carrying both.
+		assert!(html.contains("on-rent"));
+		assert!(html.contains("on-time"));
+		assert!(html.contains("<td>14</td>"));
+		// The privacy floor is stated where an operator would look for an open rate.
+		assert!(html.contains("deliberately not"));
+		Ok(())
+	}
+
+	/// The reports page is a read: it is not a write, and not a POST.
+	#[test]
+	fn test_the_reports_page_is_a_read_10() -> Outcome<()> {
+		assert!(!writes(PATH_REPORTS));
+		assert!(!posts(PATH_REPORTS));
+		Ok(())
+	}
 }
+
