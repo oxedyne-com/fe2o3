@@ -148,6 +148,7 @@ pub enum ErrTag {
     Overflow,
     Panic,
     Path,
+    Permanent, // A failure that retrying will not cure; the operation must not be attempted again.
     Poisoned,
     Range,
     Read,

@@ -237,20 +237,36 @@ impl OutboundClient {
         targets.sort_by_key(|t| t.preference);
 
         let mut last_err: Option<String> = None;
+        // Whether any exchange refused this recipient with a 5xx. A permanent rejection -- an unknown
+        // mailbox, a blocked sender -- is authoritative for the domain, so retrying another exchange or a
+        // later sweep will not cure it, and the caller wants to suppress the address rather than keep
+        // trying. A 4xx, a timeout or a connection error is transient and carries no such tag.
+        let mut permanent = false;
         for tgt in &targets {
             match self.try_one(tgt, mail_from, rcpt_to, body).await {
                 Ok(qid) => return Ok(qid),
                 Err(e) => {
+                    if e.tags().contains(&ErrTag::Permanent) {
+                        permanent = true;
+                    }
                     let msg = fmt!("MX {} ({}): {}", tgt.host, tgt.addr, e);
                     warn!("Outbound SMTP attempt failed: {}", msg);
                     last_err = Some(msg);
                 }
             }
         }
-        Err(err!(
-            "All MX delivery attempts failed; last error: {}",
-            last_err.unwrap_or_else(|| "(none)".to_string());
-            IO, Network))
+        let last = last_err.unwrap_or_else(|| "(none)".to_string());
+        // The permanence is carried on the collapsed error so a single failed `deliver` still tells the
+        // caller whether to retry the address or give up on it, without unpicking the wrapped causes.
+        if permanent {
+            Err(err!(
+                "All MX delivery attempts failed; last error: {}", last;
+                IO, Network, Permanent))
+        } else {
+            Err(err!(
+                "All MX delivery attempts failed; last error: {}", last;
+                IO, Network))
+        }
     }
 
     /// Post a message through the account holder's own provider, authenticating first.
@@ -474,6 +490,13 @@ async fn transact(
     res!(write_command(stream, &fmt!("MAIL FROM:<{}>", mail_from)).await);
     let resp = res!(read_smtp_response(stream).await);
     if resp.code / 100 != 2 {
+        // A 5xx is a permanent refusal, tagged so the caller can suppress rather than retry; a 4xx is
+        // transient and carries no such tag.
+        if resp.code / 100 == 5 {
+            return Err(err!(
+                "MAIL FROM rejected: {} {}", resp.code, resp.text;
+                IO, Network, Wire, Permanent));
+        }
         return Err(err!(
             "MAIL FROM rejected: {} {}", resp.code, resp.text;
             IO, Network, Wire));
@@ -482,6 +505,13 @@ async fn transact(
         res!(write_command(stream, &fmt!("RCPT TO:<{}>", r)).await);
         let resp = res!(read_smtp_response(stream).await);
         if resp.code / 100 != 2 {
+            // A 5xx here is the no-such-mailbox case: permanent for this recipient, so it is tagged for
+            // suppression. A 4xx (greylisting, a full mailbox) is transient and is not.
+            if resp.code / 100 == 5 {
+                return Err(err!(
+                    "RCPT TO:<{}> rejected: {} {}", r, resp.code, resp.text;
+                    IO, Network, Wire, Permanent));
+            }
             return Err(err!(
                 "RCPT TO:<{}> rejected: {} {}", r, resp.code, resp.text;
                 IO, Network, Wire));
@@ -514,11 +544,30 @@ async fn transact(
 
     let resp = res!(read_smtp_response(stream).await);
     if resp.code / 100 != 2 {
+        // A 5xx on the message itself -- refused content, a policy block -- will not be cured by resending
+        // the same message, so it is tagged permanent for the caller to suppress on.
+        if resp.code / 100 == 5 {
+            return Err(err!(
+                "Server rejected message: {} {}", resp.code, resp.text;
+                IO, Network, Wire, Permanent));
+        }
         return Err(err!(
             "Server rejected message: {} {}", resp.code, resp.text;
             IO, Network, Wire));
     }
     Ok(resp.text)
+}
+
+/// Whether a delivery error is a permanent rejection -- a 5xx from the receiving server -- that
+/// retrying will not cure.
+///
+/// The one predicate a caller needs to tell "this address is bad, suppress it" from "the network
+/// hiccupped, try again later". A permanent failure is tagged [`ErrTag::Permanent`] where the 5xx is
+/// read off the wire in [`transact`], and [`OutboundClient::deliver`] carries the tag out through the
+/// collapsed per-exchange error, so this reads the tag rather than parse a status code out of a
+/// message.
+pub fn is_permanent(e: &Error<ErrTag>) -> bool {
+    e.tags().contains(&ErrTag::Permanent)
 }
 
 /// Prove to the provider that the sender holds the account.
