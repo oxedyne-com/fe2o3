@@ -53,6 +53,7 @@
 pub mod djot;
 pub mod html;
 pub mod markdown;
+pub mod policy;
 
 /// The attributes a [`Block::Div`] or an [`Inline::Span`] carries: an id, classes, and key-value
 /// pairs.
