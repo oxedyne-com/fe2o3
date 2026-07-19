@@ -185,6 +185,20 @@ else no "the index or the feed counted as a read"; fi
 has "the page says a read is not a reader" "$after" "a reading, not a reader"
 
 echo
+echo "== no management surface invites a crawler =="
+# A login page indexes nothing worth having and advertises where the dashboard
+# is. The console had this and the dashboard did not, which is how oxedyne.com's
+# /admin/login came to be indexable. Both are pages a crawler can reach without
+# a session, so both must say so themselves.
+has "the dashboard login says noindex" "$(curl -sk "$B/admin/login")" 'name="robots" content="noindex"'
+has "and the console login too" "$(curl -sk "$B/manage")" 'name="robots" content="noindex"'
+has "as does the console itself" "$(curl -sk -b $MJ "$B/manage")" 'name="robots" content="noindex"'
+has "and the dashboard itself" "$(curl -sk -b $J "$B/admin")" 'name="robots" content="noindex"'
+# The prose is the opposite case: it exists to be found, and must not be told
+# otherwise by a stray blanket rule.
+hasnt "the posts stay findable" "$(curl -sk "$B/posts")" 'name="robots" content="noindex"'
+
+echo
 echo "== the JSON an app draws its own console from =="
 # The app's Manage tab draws the subscribers and the reports itself rather than
 # opening a page of the server's, so both must be available as data and both must

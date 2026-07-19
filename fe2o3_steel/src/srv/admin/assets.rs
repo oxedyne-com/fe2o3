@@ -287,6 +287,7 @@ pub fn render_layout(
         <head>\n\
         <meta charset=\"utf-8\">\n\
         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+        <meta name=\"robots\" content=\"noindex\">\n\
         <title>{title} :: Steel admin</title>\n\
         <style>{css}</style>\n\
         <script>{theme_js}</script>\n\
@@ -348,6 +349,7 @@ pub fn render_login_layout(
         <head>\n\
         <meta charset=\"utf-8\">\n\
         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+        <meta name=\"robots\" content=\"noindex\">\n\
         <title>{title} :: Steel admin</title>\n\
         <style>{css}</style>\n\
         <script>{theme_js}</script>\n\
