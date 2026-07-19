@@ -185,6 +185,24 @@ else no "the index or the feed counted as a read"; fi
 has "the page says a read is not a reader" "$after" "a reading, not a reader"
 
 echo
+echo "== the JSON an app draws its own console from =="
+# The app's Manage tab draws the subscribers and the reports itself rather than
+# opening a page of the server's, so both must be available as data and both must
+# be behind the same gate as the pages.
+anon=$(curl -sk "$B/manage/subscribers.json")
+hasnt "anonymous gets no subscriber data" "$anon" '"subscribers"'
+anon=$(curl -sk "$B/manage/reports.json")
+hasnt "anonymous gets no report data" "$anon" '"reads"'
+body=$(curl -sk -b $MJ "$B/manage/subscribers.json")
+has "an admin gets the subscriber list as JSON" "$body" '"subscribers"'
+has "with the counts beside it" "$body" '"confirmed"'
+body=$(curl -sk -b $MJ "$B/manage/reports.json")
+has "an admin gets the reports as JSON" "$body" '"list"'
+has "including the sends" "$body" '"sends"'
+has "and the reads" "$body" '"reads"'
+has "the reads name each post" "$body" '"from-the-dir"'
+
+echo
 echo "== the destinations page =="
 # The server-rendered twin of the app's Destinations panel: the only one a site
 # without the app has. Every secret is write-only, so a stored secret must never

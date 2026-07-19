@@ -125,6 +125,12 @@ pub const PATH_CREDS: &str = "/manage/creds";
 /// The destinations page: the remotes a post can be sent on to, and the credentials for each.
 pub const PATH_DESTS: &str = "/manage/destinations";
 
+/// The subscriber list as JSON, for an app that draws the list itself.
+pub const PATH_SUBS_JSON: &str = "/manage/subscribers.json";
+
+/// The reports as JSON, for an app that draws them itself.
+pub const PATH_REPORTS_JSON: &str = "/manage/reports.json";
+
 /// The subscribers page: the newsletter's list, its count, and where a post is sent to it.
 pub const PATH_SUBS: &str = "/manage/subscribers";
 
@@ -217,6 +223,8 @@ pub fn handle_get<
 		PATH_POST_JSON	=> post_json(cfg, db, query, id),
 		PATH_TAGS_JSON	=> tags_json(cfg, db, id),
 		PATH_CREDS_JSON	=> creds_json(cfg, db, id),
+		PATH_SUBS_JSON	=> subs_json(db, id),
+		PATH_REPORTS_JSON	=> reports_json(db, id),
 		_		=> Ok(HttpMessage::respond_with_text(
 			HttpStatus::NotFound,
 			"Not found.",
@@ -1901,6 +1909,150 @@ fn dest_panel(
 		));
 	}
 	s
+}
+
+/// The subscriber list as JSON.
+///
+/// The same data the subscribers page renders, for an app that would rather draw it in its own idiom
+/// than open a page of the server's. The addresses are the site's own list and the session asking has
+/// already been established as a site admin, so they are given in full -- this is the same admin
+/// reading the same list, in a different surface.
+fn subs_json<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	Option<&(Arc<RwLock<DB>>, UID)>,
+	id:	&str,
+)
+	-> Outcome<HttpMessage>
+{
+	let db = match db {
+		Some(db)	=> db,
+		None		=> return Ok(json_error("this site has no database configured")),
+	};
+	let subs = res!(subscribe::list(db, id));
+
+	let count = |s: subscribe::SubState| subs.iter().filter(|x| x.state == s).count();
+	let mut counts = DaticleMap::new();
+	counts.insert(dat!("confirmed"),	dat!(count(subscribe::SubState::Confirmed) as u64));
+	counts.insert(dat!("pending"),		dat!(count(subscribe::SubState::Pending) as u64));
+	counts.insert(dat!("unsubscribed"),	dat!(count(subscribe::SubState::Unsubscribed) as u64));
+	counts.insert(dat!("bounced"),		dat!(count(subscribe::SubState::Bounced) as u64));
+	counts.insert(dat!("total"),		dat!(subs.len() as u64));
+
+	let mut items = Vec::new();
+	for s in &subs {
+		let mut m = DaticleMap::new();
+		m.insert(dat!("email"),	dat!(s.email.clone()));
+		m.insert(dat!("state"),	dat!(s.state.as_str().to_string()));
+		m.insert(dat!("since"),	dat!(s.created.clone().unwrap_or_default()));
+		items.push(Dat::Map(m));
+	}
+
+	let body = create_dat_ordmap(vec![
+		(dat!("counts"),	Dat::Map(counts)),
+		(dat!("subscribers"),	Dat::List(items)),
+	]);
+	Ok(json_body(&res!(body.encode_string_with_config(&EncoderConfig::<(), ()>::json(None)))))
+}
+
+/// The reports as JSON.
+///
+/// The three halves the reports page renders -- the list, the sends and the reads -- as data rather
+/// than as a table, so an app can draw them in its own idiom. The ceilings the page states in prose
+/// are not repeated here: they are properties of the data that the drawing surface must state, and a
+/// caller that omits them is showing figures without their caveats. Both surfaces in this tree do.
+fn reports_json<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	Option<&(Arc<RwLock<DB>>, UID)>,
+	id:	&str,
+)
+	-> Outcome<HttpMessage>
+{
+	let db = match db {
+		Some(db)	=> db,
+		None		=> return Ok(json_error("this site has no database configured")),
+	};
+
+	// The list.
+	let subs = res!(subscribe::list(db, id));
+	let count = |s: subscribe::SubState| subs.iter().filter(|x| x.state == s).count();
+	let mut list = DaticleMap::new();
+	list.insert(dat!("confirmed"),		dat!(count(subscribe::SubState::Confirmed) as u64));
+	list.insert(dat!("pending"),		dat!(count(subscribe::SubState::Pending) as u64));
+	list.insert(dat!("unsubscribed"),	dat!(count(subscribe::SubState::Unsubscribed) as u64));
+	list.insert(dat!("bounced"),		dat!(count(subscribe::SubState::Bounced) as u64));
+	list.insert(dat!("total"),		dat!(subs.len() as u64));
+	list.insert(dat!("by_month"),		months_dat(&by_month(subs.iter().map(|x| x.created.as_deref().unwrap_or("")))));
+
+	// The sends.
+	let hist = res!(send::send_history(db));
+	let sent: usize = hist.iter().map(|h| h.sent).sum();
+	let failed: usize = hist.iter().map(|h| h.failed).sum();
+	let mut sends = DaticleMap::new();
+	sends.insert(dat!("sends"),	dat!(hist.len() as u64));
+	sends.insert(dat!("accepted"),	dat!(sent as u64));
+	sends.insert(dat!("failed"),	dat!(failed as u64));
+	sends.insert(dat!("suppressed"),	dat!(hist.iter().map(|e| e.suppressed).sum::<usize>() as u64));
+	sends.insert(dat!("by_month"),	months_dat(&by_month(hist.iter().map(|e| e.at.as_str()))));
+
+	// The reads.
+	let reads = res!(store::reads_all(db, id));
+	let recs = res!(store::list_records(db, id));
+	let mut rows = Vec::new();
+	let mut live_total: u64 = 0;
+	let mut read_posts = 0usize;
+	for rec in &recs {
+		let title = match rec.render() {
+			Ok(p)	=> p.title,
+			Err(_)	=> rec.slug.clone(),
+		};
+		let n = reads.get(&rec.slug).copied().unwrap_or(0);
+		live_total = live_total.saturating_add(n);
+		if n > 0 {
+			read_posts += 1;
+		}
+		let mut m = DaticleMap::new();
+		m.insert(dat!("slug"),	dat!(rec.slug.clone()));
+		m.insert(dat!("title"),	dat!(title));
+		m.insert(dat!("reads"),	dat!(n));
+		rows.push((n, Dat::Map(m)));
+	}
+	rows.sort_by(|a, b| b.0.cmp(&a.0));
+	let total: u64 = reads.values().sum();
+	let mut reads_m = DaticleMap::new();
+	reads_m.insert(dat!("total"),		dat!(total));
+	reads_m.insert(dat!("posts"),		dat!(recs.len() as u64));
+	reads_m.insert(dat!("posts_read"),	dat!(read_posts as u64));
+	// Reads counted against posts that no longer exist. Real, and named apart rather than folded in,
+	// so a caller's rows and its total agree.
+	reads_m.insert(dat!("deleted"),		dat!(total.saturating_sub(live_total)));
+	reads_m.insert(dat!("rows"),		Dat::List(rows.into_iter().map(|(_, d)| d).collect()));
+
+	let body = create_dat_ordmap(vec![
+		(dat!("list"),	Dat::Map(list)),
+		(dat!("sends"),	Dat::Map(sends)),
+		(dat!("reads"),	Dat::Map(reads_m)),
+	]);
+	Ok(json_body(&res!(body.encode_string_with_config(&EncoderConfig::<(), ()>::json(None)))))
+}
+
+/// Counts by month as a list of maps, for the JSON reports.
+fn months_dat(months: &[(String, usize)]) -> Dat {
+	Dat::List(months.iter().map(|(m, n)| {
+		let mut e = DaticleMap::new();
+		e.insert(dat!("month"),	dat!(m.clone()));
+		e.insert(dat!("n"),	dat!(*n as u64));
+		Dat::Map(e)
+	}).collect())
 }
 
 /// A site's destination settings as JSON, for the settings form.
