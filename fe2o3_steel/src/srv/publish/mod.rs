@@ -373,6 +373,47 @@ pub fn valid_slug(s: &str) -> bool {
 		&& s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+/// The marks in a user-agent that name a thing which is not a reader.
+///
+/// A substring list is a poor way to identify a browser and an adequate way to discard the obvious
+/// machines, which is all this is for. It will miss a crawler that lies, and that is tolerable: a
+/// tally is a rough shape, not a headcount, and a bot pretending to be Chrome will not be caught by
+/// any list at all.
+const BOT_MARKS: &[&str] = &[
+	"bot", "crawl", "spider", "slurp", "archiver", "curl", "wget", "python-requests",
+	"headlesschrome", "facebookexternalhit", "embedly", "preview", "monitor", "uptime",
+	"scrapy", "feedfetcher", "pingdom", "lighthouse", "http-client",
+];
+
+/// Whether a user-agent names something that is not a person reading.
+///
+/// Lowercased before the comparison, because a user-agent's capitalisation is the sender's choice.
+/// An absent or empty user-agent counts as a bot: every real browser sends one, and a request with
+/// none is a script that did not bother.
+pub fn looks_automated(ua: Option<&str>) -> bool {
+	let ua = match ua {
+		Some(s) if !s.trim().is_empty()	=> s.to_lowercase(),
+		_				=> return true,
+	};
+	BOT_MARKS.iter().any(|m| ua.contains(m))
+}
+
+/// Whether a request for a post should add one to its tally.
+///
+/// Two exclusions, and each is here for a reason worth keeping:
+///
+/// - **A request carrying a management session is the author.** A count that climbs while its author
+///   re-reads their own draft measures the author's attention, not a reader's, and is worse than no
+///   count because it looks like one.
+/// - **A request from an obvious machine is not a read.** See [`looks_automated`].
+///
+/// There is deliberately nothing here about *who* the reader is: no identifier is derived, stored or
+/// compared, so two reads by one person count twice and the site never learns they were one person.
+/// That is the trade this counter makes on purpose -- it is a tally of readings, not of readers.
+pub fn counts_as_read(has_manage_session: bool, user_agent: Option<&str>) -> bool {
+	!has_manage_session && !looks_automated(user_agent)
+}
+
 /// The longest a tag may be, once normalised.
 ///
 /// A tag is a facet in a URL and a word on a card, neither with a natural limit worth relying on.
@@ -948,6 +989,49 @@ mod tests {
 				"'{}' was not refused", bad,
 			);
 		}
+		Ok(())
+	}
+
+	/// The obvious machines are discarded, whatever case they announce themselves in, and a request
+	/// with no user-agent at all is one of them.
+	#[test]
+	fn test_a_machine_is_not_a_reader_08() -> Outcome<()> {
+		for ua in [
+			"Googlebot/2.1 (+http://www.google.com/bot.html)",
+			"Mozilla/5.0 (compatible; bingbot/2.0)",
+			"curl/8.5.0",
+			"python-requests/2.31.0",
+			"facebookexternalhit/1.1",
+			"Mozilla/5.0 HeadlessChrome/120.0.0.0",
+		] {
+			assert!(looks_automated(Some(ua)), "'{}' was taken for a reader", ua);
+		}
+		// No user-agent, and an empty one, are scripts that did not bother.
+		assert!(looks_automated(None));
+		assert!(looks_automated(Some("   ")));
+
+		// A real browser is a reader.
+		for ua in [
+			"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
+			 Chrome/120.0.0.0 Safari/537.36",
+			"Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
+		] {
+			assert!(!looks_automated(Some(ua)), "'{}' was taken for a machine", ua);
+		}
+		Ok(())
+	}
+
+	/// The author reading their own post is not a read, whatever they are browsing with.
+	#[test]
+	fn test_the_author_is_not_a_reader_09() -> Outcome<()> {
+		let browser = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0";
+		// A management session is the author, so it never counts.
+		assert!(!counts_as_read(true, Some(browser)));
+		// The same request without one is a reader.
+		assert!(counts_as_read(false, Some(browser)));
+		// And a machine is not a reader either way.
+		assert!(!counts_as_read(false, Some("Googlebot/2.1")));
+		assert!(!counts_as_read(true, Some("Googlebot/2.1")));
 		Ok(())
 	}
 }

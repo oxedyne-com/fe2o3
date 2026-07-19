@@ -148,6 +148,43 @@ hasnt "rather than drawing an empty table" "$body" 'class="mc-bar-fill"'
 has "the console links to it" "$(curl -sk -b $MJ "$B/manage")" "/manage/reports"
 
 echo
+echo "== read counts =="
+# A read is counted when a post is served to somebody who is neither the author
+# nor an obvious machine. All three of those exclusions can only be proved from
+# outside, by actually fetching the post as each of them in turn.
+BROWSER='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+body=$(curl -sk -b $MJ "$B/manage/reports")
+has "an unread site says so" "$body" "Nothing has been read yet"
+
+# curl announces itself, and is therefore not a reader. Ten fetches, no count.
+for _ in $(seq 1 10); do curl -sk -o /dev/null "$B/posts/from-the-dir"; done
+body=$(curl -sk -b $MJ "$B/manage/reports")
+has "ten fetches by a machine count for nothing" "$body" "Nothing has been read yet"
+
+# The author, carrying a management session, is not a reader of their own post.
+curl -sk -b $MJ -o /dev/null -A "$BROWSER" "$B/posts/from-the-dir"
+body=$(curl -sk -b $MJ "$B/manage/reports")
+has "nor does the author reading their own post" "$body" "Nothing has been read yet"
+
+# A browser with no management session is a reader, and is counted.
+curl -sk -o /dev/null -A "$BROWSER" "$B/posts/from-the-dir"
+body=$(curl -sk -b $MJ "$B/manage/reports")
+hasnt "a reader is counted" "$body" "Nothing has been read yet"
+has "and the post is named with its tally" "$body" "from-the-dir"
+
+# The index is not a post, so browsing it does not count as reading everything on it.
+before=$(curl -sk -b $MJ "$B/manage/reports")
+curl -sk -o /dev/null -A "$BROWSER" "$B/posts"
+curl -sk -o /dev/null -A "$BROWSER" "$B/posts/feed.xml"
+after=$(curl -sk -b $MJ "$B/manage/reports")
+if [ "$before" = "$after" ]; then ok "the index and the feed are not reads"
+else no "the index or the feed counted as a read"; fi
+
+# The page states what it cannot know, rather than leaving the absence to be read
+# as an oversight.
+has "the page says a read is not a reader" "$after" "a reading, not a reader"
+
+echo
 echo "== the destinations page =="
 # The server-rendered twin of the app's Destinations panel: the only one a site
 # without the app has. Every secret is write-only, so a stored secret must never

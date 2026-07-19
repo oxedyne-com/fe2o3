@@ -565,7 +565,97 @@ fn reports_page<
 		}
 	}
 
+	// The reads. Two reads that must both land, so a failure in either costs this section alone.
+	match (store::reads_all(db, id), store::list_records(db, id)) {
+		(Ok(reads), Ok(recs))	=> body.push_str(&reads_report(&reads, &recs)),
+		(Err(e), _)		=> {
+			warn!("{}: console: cannot read the read tallies for the report: {}", id, e);
+			body.push_str(&notice("The read counts could not be read. The log says why."));
+		}
+		(_, Err(e))		=> {
+			warn!("{}: console: cannot list the posts for the read report: {}", id, e);
+			body.push_str(&notice("The posts could not be listed. The log says why."));
+		}
+	}
+
 	Ok(page(theme, admin, "Reports", &body))
+}
+
+/// The reads half of the report: how often each post has been read, most-read first.
+///
+/// What is counted, said on the page rather than left to be inferred: a request that served the post
+/// to somebody who was neither carrying a management session nor an obvious machine. What is *not*
+/// counted is the more important half -- nothing identifies a reader, so this is a tally of readings
+/// and never of people, and it cannot answer "how many different readers" because it never knew.
+///
+/// A tally whose post no longer exists is folded into one line rather than listed. The count is real
+/// and dropping it silently would make the total disagree with the rows; naming each deleted slug
+/// would be a list of things the reader cannot act on.
+fn reads_report(reads: &BTreeMap<String, u64>, recs: &[Record]) -> String {
+	let mut s = String::new();
+	s.push_str("<h2>Reads</h2>\n");
+
+	if reads.is_empty() {
+		s.push_str(&notice(
+			"Nothing has been read yet. A read is counted when a post is served to somebody who is \
+			neither signed in to manage the site nor an obvious machine.",
+		));
+		return s;
+	}
+
+	// The rows a reader can act on: a live post and its tally, most-read first. A post nobody has
+	// read yet is shown at nought rather than omitted -- "which of my posts is unread" is exactly
+	// the question this page should answer.
+	let mut rows: Vec<(&str, String, u64)> = Vec::new();
+	for rec in recs {
+		let title = match rec.render() {
+			Ok(p)	=> p.title,
+			Err(_)	=> rec.slug.clone(),
+		};
+		rows.push((&rec.slug, title, reads.get(&rec.slug).copied().unwrap_or(0)));
+	}
+	rows.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.1.cmp(&b.1)));
+
+	let total: u64 = reads.values().sum();
+	let live: u64 = rows.iter().map(|r| r.2).sum();
+	let gone = total.saturating_sub(live);
+	let read_posts = rows.iter().filter(|r| r.2 > 0).count();
+
+	s.push_str(&stat_cards(&[
+		("Reads",	fmt!("{}", total),	"posts served, all time"),
+		("Posts read",	fmt!("{}/{}", read_posts, rows.len()),	"have been read at least once"),
+	]));
+
+	s.push_str("<table class=\"mc-table\">\n<thead><tr>\
+		<th>Post</th><th>Reads</th><th>Share</th>\
+		</tr></thead>\n<tbody>\n");
+	for (slug, title, n) in &rows {
+		s.push_str(&fmt!(
+			"<tr><td>{title}<br><span class=\"mc-slug\">{slug}</span></td>\
+			<td>{n}</td><td>{share}</td></tr>\n",
+			title	= html_escape(title),
+			slug	= html_escape(slug),
+			n	= n,
+			share	= if live == 0 { fmt!("&mdash;") } else { pct(*n as usize, live as usize) },
+		));
+	}
+	s.push_str("</tbody>\n</table>\n");
+
+	if gone > 0 {
+		s.push_str(&fmt!(
+			"<p class=\"mc-muted\">{} {} counted against posts that have since been deleted.</p>\n",
+			gone,
+			if gone == 1 { "read was" } else { "reads were" },
+		));
+	}
+
+	// The ceiling, on the page, for the same reason the list report states its own: an absent figure
+	// reads as an oversight unless it is named as a decision.
+	s.push_str(&notice(
+		"A read is a reading, not a reader: nothing identifies who asked, so one person returning \
+		twice counts twice. There is no open or click tracking anywhere on this site.",
+	));
+	s
 }
 
 /// The list half of the report: the states as they stand, the shares they make, and growth by month.
@@ -2908,6 +2998,59 @@ mod tests {
 		assert!(set.contains("Set."));
 		assert!(set.contains("name=\"clear\" value=\"1\""));
 		assert!(set.contains("mc-btn-danger"));
+		Ok(())
+	}
+
+	/// An unread site says so, and says what a read is rather than showing an empty table.
+	#[test]
+	fn test_the_reads_report_says_when_nothing_is_read_14() -> Outcome<()> {
+		let s = reads_report(&BTreeMap::new(), &[]);
+		assert!(s.contains("Nothing has been read yet"));
+		assert!(!s.contains("<table"));
+		Ok(())
+	}
+
+	/// Posts are listed most-read first, an unread post is shown at nought rather than dropped, and
+	/// the page states the ceiling on what a tally means.
+	#[test]
+	fn test_the_reads_report_ranks_by_reads_15() -> Outcome<()> {
+		let mut recs = Vec::new();
+		for slug in ["quiet", "popular", "middling"] {
+			let mut r = Record::default();
+			r.slug = fmt!("{}", slug);
+			r.source = fmt!("# {}\n\nprose.\n", slug);
+			recs.push(r);
+		}
+		let mut reads = BTreeMap::new();
+		reads.insert(fmt!("popular"), 90u64);
+		reads.insert(fmt!("middling"), 10u64);
+
+		let s = reads_report(&reads, &recs);
+		let at = |n: &str| s.find(n).unwrap_or(usize::MAX);
+		// Most-read first, and the unread post is present rather than omitted.
+		assert!(at("popular") < at("middling"), "the most-read post comes first");
+		assert!(at("middling") < at("quiet"), "an unread post sorts last, and is still shown");
+		assert!(s.contains("100"), "the whole of the reads belongs to the two that were read");
+		// One of three posts is unread, so two have been read.
+		assert!(s.contains("2/3"));
+		assert!(s.contains("a reading, not a reader"));
+		Ok(())
+	}
+
+	/// A tally whose post is gone is counted in the total and named once, not lost and not listed.
+	#[test]
+	fn test_the_reads_report_accounts_for_a_deleted_post_16() -> Outcome<()> {
+		let mut rec = Record::default();
+		rec.slug = fmt!("here");
+		rec.source = fmt!("# here\n\nprose.\n");
+		let mut reads = BTreeMap::new();
+		reads.insert(fmt!("here"), 4u64);
+		reads.insert(fmt!("deleted-long-ago"), 3u64);
+
+		let s = reads_report(&reads, &[rec]);
+		assert!(s.contains("3 reads were counted against posts that have since been deleted"));
+		// Named as a total, not listed as a row anybody could act on.
+		assert!(!s.contains("deleted-long-ago"));
 		Ok(())
 	}
 

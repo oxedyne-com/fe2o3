@@ -500,3 +500,40 @@ async fn a_test_send_touches_no_state_or_history() -> Outcome<()> {
 
     Ok(())
 }
+
+/// The read tallies against a real database: an uncounted post is nought rather than an error, a bump
+/// accumulates, posts are counted apart from one another, and the scan reads back what was written.
+#[test]
+fn read_tallies_survive_the_database() -> Outcome<()> {
+    let (db, uid, _tmp) = match common::test_db() {
+        Ok(t)   => t,
+        Err(e)  => {
+            println!("no test database available, skipping: {}", e);
+            return Ok(());
+        }
+    };
+    let handle = (db, uid);
+
+    // A post nobody has read is nought, not an error and not a missing key the caller must handle.
+    assert_eq!(res!(store::reads_get(&handle, "unread")), 0);
+    assert!(res!(store::reads_all(&handle, "test")).is_empty(), "a fresh store has tallies");
+
+    // A bump answers the new total, and it accumulates.
+    assert_eq!(res!(store::reads_bump(&handle, "popular")), 1);
+    assert_eq!(res!(store::reads_bump(&handle, "popular")), 2);
+    assert_eq!(res!(store::reads_bump(&handle, "popular")), 3);
+    assert_eq!(res!(store::reads_get(&handle, "popular")), 3);
+
+    // Two posts are counted apart: reading one does not touch the other.
+    assert_eq!(res!(store::reads_bump(&handle, "quiet")), 1);
+    assert_eq!(res!(store::reads_get(&handle, "popular")), 3, "one post's reads reached another");
+
+    // The scan reads back exactly what was written, and nothing that was not.
+    let all = res!(store::reads_all(&handle, "test"));
+    assert_eq!(all.len(), 2, "the scan found {:?}", all);
+    assert_eq!(all.get("popular").copied(), Some(3));
+    assert_eq!(all.get("quiet").copied(), Some(1));
+    assert_eq!(all.get("unread").copied(), None, "a post that was never read gained a key");
+
+    Ok(())
+}

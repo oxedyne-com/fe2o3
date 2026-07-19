@@ -46,6 +46,7 @@ use oxedyne_fe2o3_jdat::{
 	id::NumIdDat,
 };
 
+use std::collections::BTreeMap;
 use std::sync::{
 	Arc,
 	RwLock,
@@ -58,6 +59,13 @@ pub const KEY_PREFIX: &str = "publish/post/";
 /// The key the list of slugs lives under.
 pub const INDEX_KEY: &str = "publish/index";
 
+/// The key every post's read tally begins with.
+///
+/// One key per post rather than one map for the site: a read touches only the post that was read, so
+/// two posts being read at once do not contend, and a tally cannot take the whole site's counts with
+/// it when it goes wrong.
+pub const READS_PREFIX: &str = "publish/reads/";
+
 /// The key the list of database-granted site admins lives under.
 ///
 /// The companion to the config's [`site_admins`](crate::srv::cfg::VhostConfig::site_admins): the
@@ -66,6 +74,13 @@ pub const INDEX_KEY: &str = "publish/index";
 /// writers.
 pub const ADMINS_KEY: &str = "publish/admins";
 
+
+/// A post's read-tally key.
+fn reads_key_of(slug: &str) -> Dat {
+	let mut s = String::from(READS_PREFIX);
+	s.push_str(slug);
+	dat!(s)
+}
 
 /// A post's key.
 fn key_of(slug: &str) -> Dat {
@@ -455,6 +470,112 @@ fn put_index<
 	let guard = lock_read!(db_arc);
 	res!(guard.insert(dat!(INDEX_KEY), list, *user, None));
 	Ok(())
+}
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ READS                                                                     │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// Reads a post's tally.
+///
+/// An absent key is a post nobody has read yet, which is nought rather than an error -- the same
+/// reasoning [`index`] takes for a store that has published nothing.
+pub fn reads_get<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	slug:	&str,
+)
+	-> Outcome<u64>
+{
+	let (db_arc, _) = db;
+	let guard = lock_read!(db_arc);
+	match res!(guard.get(&reads_key_of(slug), None)) {
+		Some((Dat::U64(n), _))	=> Ok(n),
+		Some((v, _))		=> Err(err!(
+			"publish: a read tally must be a count, not {:?}.", v.kind();
+			Invalid, Input, Mismatch)),
+		None			=> Ok(0),
+	}
+}
+
+/// Adds one to a post's tally and answers the new total.
+///
+/// Read-add-write rather than an atomic increment, because the store offers no increment. Two reads
+/// landing together can therefore lose one of the two. That is accepted deliberately: this counts
+/// roughly how many people read a post, a question that does not become better answered by a lock
+/// held across the render path of every request. It is not billing.
+pub fn reads_bump<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	slug:	&str,
+)
+	-> Outcome<u64>
+{
+	let now = res!(reads_get(db, slug)).saturating_add(1);
+	let (db_arc, user) = db;
+	let guard = lock_read!(db_arc);
+	res!(guard.insert(reads_key_of(slug), dat!(now), *user, None));
+	Ok(now)
+}
+
+/// Every post's tally, by slug.
+///
+/// What the reports page aggregates. A tally whose post has since been deleted is still returned --
+/// the caller knows which slugs it published and can decide whether a count without a post is worth
+/// showing; throwing it away here would be this function deciding that on their behalf.
+pub fn reads_all<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	id:	&str,
+)
+	-> Outcome<BTreeMap<String, u64>>
+{
+	let (db_arc, _) = db;
+	// The scan selects keys and the reads fetch values, which is not an optimisation to undo: scan v1
+	// answers `Dat::Empty` for every value whatever `include_values` asks for, and says so in a log
+	// line rather than an error. Asking it for values yields a tally of nothing, silently. This is the
+	// same shape `rebuild_index` takes, for the same reason.
+	let found = {
+		let guard = lock_read!(db_arc);
+		let mut opts = ScanOpts::default();
+		opts.prefix = Some(dat!(READS_PREFIX));
+		opts.include_values = false;
+		res!(guard.scan(&opts, None))
+	};
+	let mut out = BTreeMap::new();
+	for (k, _, _) in &found {
+		let s = match k {
+			Dat::Str(s)	=> s,
+			_		=> continue,
+		};
+		let slug = match s.strip_prefix(READS_PREFIX) {
+			Some(slug)	=> slug,
+			None		=> continue,
+		};
+		// A tally that will not read is a bug elsewhere, and losing the whole page over one bad key
+		// would be the wrong trade. It is logged and passed over.
+		match reads_get(db, slug) {
+			Ok(n)	=> { out.insert(slug.to_string(), n); }
+			Err(e)	=> debug!(
+				"{}: publish: the read tally for '{}' will not read: {}", id, slug, e),
+		}
+	}
+	Ok(out)
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐

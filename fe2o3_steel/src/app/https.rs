@@ -23,6 +23,7 @@ use crate::srv::{
         Subscription,
         page as publish_page,
         send::MailSender,
+        store as publish_store,
         subscribe as publish_subscribe,
     },
     webhook::{
@@ -410,6 +411,32 @@ impl<
                         &request_query,
                         &id,
                     ));
+                    // The tally, where a post was actually served to somebody who is neither its
+                    // author nor a machine. It is kept here because this is the last place holding
+                    // the database: the renderers take a slice of posts on purpose.
+                    //
+                    // A tally that cannot be written costs the tally and never the page. A reader
+                    // asked for prose, and a counter failing is not their problem; it is logged and
+                    // the response goes out regardless.
+                    if let (Some(db), Some(post)) = (
+                        db.as_ref(),
+                        publish_page::served_post(cfg.as_ref(), &posts, &request_path),
+                    ) {
+                        let ua = match req_headers.get_one(&HeaderName::UserAgent) {
+                            Some(HeaderFieldValue::Generic(s)) => Some(s.as_str()),
+                            _ => None,
+                        };
+                        let seen = publish::counts_as_read(
+                            site_console::session::cookie_value(&req_headers).is_some(),
+                            ua,
+                        );
+                        if seen {
+                            if let Err(e) = publish_store::reads_bump(db, &post.slug) {
+                                warn!("{}: publish: the read of '{}' was not counted: {}",
+                                    id, post.slug, e);
+                            }
+                        }
+                    }
                     return Ok(Some(resp));
                 }
             }

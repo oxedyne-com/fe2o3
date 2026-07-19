@@ -78,6 +78,31 @@ pub fn handle_get(
 	}
 }
 
+/// The post a request path names, where it names one that exists.
+///
+/// The renderers take a slice of posts and touch no database, so the read tally -- which is a write --
+/// cannot be kept here. This is the half of that decision which is pure: given the same path the
+/// renderer was given, it says whether a post was served and which. The caller, which still holds the
+/// database, does the counting.
+///
+/// The index, the feed and the JSON are not posts and answer `None`, so a reader browsing the index
+/// does not add to the tally of everything on it.
+pub fn served_post<'a>(cfg: &PublishConfig, posts: &'a [Post], path: &str) -> Option<&'a Post> {
+	if path == cfg.path || path == cfg.feed_path() || path == cfg.json_path() {
+		return None;
+	}
+	// The same slicing the renderer does, and the same guard: a path that is not under the prefix
+	// with room for a name is not a post.
+	if path.len() < cfg.path.len() + 2 {
+		return None;
+	}
+	let slug = &path[cfg.path.len() + 1..];
+	if !is_slug(slug) {
+		return None;
+	}
+	posts.iter().find(|p| p.slug == slug)
+}
+
 /// Whether a string is a name a post may wear.
 fn is_slug(s: &str) -> bool {
 	!s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
@@ -741,6 +766,33 @@ mod tests {
 		let body = String::from_utf8_lossy(&resp.body).to_string();
 		assert_eq!(status_of(&resp), Some(HttpStatus::NotFound));
 		assert!(body.contains(r#"<a href="/asides">Asides</a>"#), "no way back: {}", body);
+		Ok(())
+	}
+
+	/// Only a post that was actually served is a post that was read.
+	///
+	/// The index, the feed and the JSON are not posts: counting a browse of the index as a read of
+	/// everything listed on it would make the tally meaningless in exactly the direction that
+	/// flatters.
+	#[test]
+	fn test_only_a_served_post_is_counted_08() -> Outcome<()> {
+		let mut a = post();
+		a.slug = fmt!("here");
+		let posts = vec![a];
+		let c = cfg();
+
+		assert_eq!(served_post(&c, &posts, "/asides/here").map(|p| p.slug.as_str()), Some("here"));
+
+		// Not posts.
+		assert!(served_post(&c, &posts, "/asides").is_none(), "the index counted as a read");
+		assert!(served_post(&c, &posts, &c.feed_path()).is_none(), "the feed counted as a read");
+		assert!(served_post(&c, &posts, &c.json_path()).is_none(), "the JSON counted as a read");
+
+		// A post that does not exist was not served, and a path that is not a name never reaches a
+		// lookup -- the same guard the renderer applies.
+		assert!(served_post(&c, &posts, "/asides/nonesuch").is_none());
+		assert!(served_post(&c, &posts, "/asides/../../etc/passwd").is_none());
+		assert!(served_post(&c, &posts, "/asides/").is_none());
 		Ok(())
 	}
 }
