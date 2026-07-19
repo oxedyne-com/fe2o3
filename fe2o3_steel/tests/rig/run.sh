@@ -185,6 +185,76 @@ else no "the index or the feed counted as a read"; fi
 has "the page says a read is not a reader" "$after" "a reading, not a reader"
 
 echo
+echo "== comments =="
+# The whole pipeline from outside: a stranger posts, the comment does not appear,
+# the queue holds it, an admin approves, and it appears. Nothing here can be
+# proved from inside the process -- the point is what a reader actually sees.
+POST_URL="$B/posts/from-the-dir"
+# The console's write token, off a console page the session can already open.
+MCSRF=$(curl -sk -b $MJ "$B/manage/edit?slug=from-the-dir" \
+    | grep -o 'name="csrf" value="[^"]*"' | head -1 | sed 's/.*value="//;s/"//')
+if [ -n "$MCSRF" ]; then ok "the console offers a write token"
+else no "no console write token could be read"; fi
+CHAL=$(curl -sk "$POST_URL" | grep -o 'id="comment-challenge" value="[a-f0-9]*"' | head -1 | sed 's/.*value="//;s/"//')
+if [ -n "$CHAL" ]; then ok "a post offers a comment form with a challenge"
+else no "a post offers no comment challenge"; fi
+
+# A comment with no proof: accepted, and held rather than refused, because a
+# reader without scripting is still a reader.
+curl -sk -o /dev/null -X POST \
+    --data-urlencode "name=Ada" --data-urlencode "email=ada@example.com" \
+    --data-urlencode "body=A first remark from a stranger." \
+    --data-urlencode "challenge=$CHAL" --data-urlencode "nonce=" \
+    --data-urlencode "website=" "$POST_URL/comment"
+page=$(curl -sk "$POST_URL")
+hasnt "an unapproved comment is not shown to a reader" "$page" "A first remark from a stranger"
+q=$(curl -sk -b $MJ "$B/manage/comments")
+has "but it is waiting in the queue" "$q" "A first remark from a stranger"
+has "and the queue says why it is waiting" "$q" "mc-comment-why"
+
+# The honeypot: filled, and nothing is stored.
+curl -sk -o /dev/null -X POST \
+    --data-urlencode "name=Bot" --data-urlencode "body=Buy things at example.com" \
+    --data-urlencode "challenge=$CHAL" --data-urlencode "website=http://spam.example" \
+    "$POST_URL/comment"
+q=$(curl -sk -b $MJ "$B/manage/comments?state=any")
+hasnt "a comment that filled the honeypot is not stored at all" "$q" "Buy things at example.com"
+
+# A proof answering a challenge this site never set is refused.
+curl -sk -o /dev/null -X POST \
+    --data-urlencode "name=Forger" --data-urlencode "body=A forged proof attempt." \
+    --data-urlencode "challenge=0000000000000000" --data-urlencode "nonce=1" \
+    --data-urlencode "website=" "$POST_URL/comment"
+q=$(curl -sk -b $MJ "$B/manage/comments?state=any")
+hasnt "a proof for a challenge the site never set is refused" "$q" "A forged proof attempt"
+
+# A stranger's script does not reach the page, and their words do.
+curl -sk -o /dev/null -X POST \
+    --data-urlencode "name=Mallory" \
+    --data-urlencode "body=Nice. [click](javascript:alert(1)) <script>steal()</script> ![x](https://tracker.example/p.gif)" \
+    --data-urlencode "challenge=$CHAL" --data-urlencode "website=" "$POST_URL/comment"
+# The id belongs to a card, and a card has several forms in it, so the id is taken
+# from the first one *after* the author's name rather than by position in the page.
+cid=$(curl -sk -b $MJ "$B/manage/comments" | tr '\n' ' ' \
+    | grep -o 'Mallory.*' | grep -o 'name="id" value="[a-z0-9]*"' | head -1 \
+    | sed 's/.*value="//;s/"//')
+curl -sk -o /dev/null -b $MJ -X POST -d "csrf=$MCSRF" -d "slug=from-the-dir" -d "id=$cid" \
+    -d "action=approve" "$B/manage/comments/action"
+page=$(curl -sk "$POST_URL")
+has "an approved comment appears to a reader" "$page" "Nice."
+hasnt "and its script destination does not" "$page" "javascript:alert"
+hasnt "nor its script tag" "$page" "<script>steal"
+hasnt "nor its tracking image" "$page" "tracker.example"
+
+# The commenter is now known, so their next comment does not wait.
+curl -sk -o /dev/null -X POST \
+    --data-urlencode "name=Ada" --data-urlencode "email=ada@example.com" \
+    --data-urlencode "body=A second remark, from somebody now known." \
+    --data-urlencode "challenge=$CHAL" --data-urlencode "website=" "$POST_URL/comment"
+q=$(curl -sk -b $MJ "$B/manage/comments?state=any")
+has "a second comment from a known commenter is recorded" "$q" "A second remark"
+
+echo
 echo "== no management surface invites a crawler =="
 # A login page indexes nothing worth having and advertises where the dashboard
 # is. The console had this and the dashboard did not, which is how oxedyne.com's

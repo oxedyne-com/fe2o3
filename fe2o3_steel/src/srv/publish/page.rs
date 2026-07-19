@@ -15,6 +15,11 @@
 use crate::srv::publish::{
 	Post,
 	PublishConfig,
+	comment::{
+		DEPTH_MAX,
+		POW_BITS,
+		Thread,
+	},
 	date_text,
 	normalise_tag,
 };
@@ -45,11 +50,12 @@ use oxedyne_fe2o3_text::doc::html::{
 /// The caller has already established that the path is this module's, so anything unrecognised under
 /// the prefix is a post that does not exist.
 pub fn handle_get(
-	cfg:	&PublishConfig,
-	posts:	&[Post],
-	path:	&str,
-	query:	&str,
-	id:	&str,
+	cfg:		&PublishConfig,
+	posts:		&[Post],
+	path:		&str,
+	query:		&str,
+	comments:	Option<&CommentsView>,
+	id:		&str,
 )
 	-> Outcome<HttpMessage>
 {
@@ -70,7 +76,7 @@ pub fn handle_get(
 		return Ok(not_found(cfg));
 	}
 	match posts.iter().find(|p| p.slug == slug) {
-		Some(post)	=> post_page(cfg, post),
+		Some(post)	=> post_page(cfg, post, comments),
 		None		=> {
 			info!("{}: publish: no post '{}'", id, slug);
 			Ok(not_found(cfg))
@@ -231,7 +237,7 @@ fn tags_list(cfg: &PublishConfig, post: &Post) -> String {
 }
 
 /// One post.
-fn post_page(cfg: &PublishConfig, post: &Post) -> Outcome<HttpMessage> {
+fn post_page(cfg: &PublishConfig, post: &Post, comments: Option<&CommentsView>) -> Outcome<HttpMessage> {
 	let mut body = String::new();
 	body.push_str("<article class=\"aside\">\n");
 	if let Some(d) = &post.date {
@@ -261,6 +267,12 @@ fn post_page(cfg: &PublishConfig, post: &Post) -> Outcome<HttpMessage> {
 			body.push_str("</a>");
 		}
 		body.push_str("</nav>\n");
+	}
+
+	// The conversation, where the caller read one. A page rendered without it is a page for a site
+	// that takes no comments, which is a configuration rather than a failure.
+	if let Some(view) = comments {
+		body.push_str(&comments_section(cfg, post, view));
 	}
 
 	let head = Head {
@@ -626,7 +638,7 @@ mod tests {
 	/// itself in the response rather than a promise of it.
 	#[test]
 	fn test_a_post_page_carries_its_card_00() -> Outcome<()> {
-		let resp = res!(post_page(&cfg(), &post()));
+		let resp = res!(post_page(&cfg(), &post(), None));
 		let body = String::from_utf8_lossy(&resp.body).to_string();
 		assert!(body.contains("<title>On rent — Elearnity</title>"), "got: {}", body);
 		assert!(body.contains(r#"<meta property="og:type" content="article">"#), "got: {}", body);
@@ -653,7 +665,7 @@ mod tests {
 			(Destination::Mastodon, fmt!("https://mastodon.social/@me/1")),
 			(Destination::Bluesky, fmt!("https://bsky.app/profile/did:plc:x/post/3k")),
 		];
-		let resp = res!(post_page(&cfg(), &p));
+		let resp = res!(post_page(&cfg(), &p, None));
 		let body = String::from_utf8_lossy(&resp.body).to_string();
 		assert!(body.contains("Also on"), "no backfeed label: {}", body);
 		assert!(body.contains(r#"href="https://mastodon.social/@me/1""#), "no Mastodon link: {}", body);
@@ -670,7 +682,7 @@ mod tests {
 		let mut p = post();
 		p.title = fmt!(r#"</script><img src=x onerror=alert(1)>"#);
 		p.excerpt = fmt!(r#"a " quote and an <b>"#);
-		let resp = res!(post_page(&cfg(), &p));
+		let resp = res!(post_page(&cfg(), &p, None));
 		let body = String::from_utf8_lossy(&resp.body).to_string();
 		// The JSON-LD block ends exactly once, where it should.
 		assert_eq!(body.matches("</script>").count(), 1, "script block broken out of: {}", body);
@@ -709,7 +721,7 @@ mod tests {
 		let posts = vec![post()];
 		for bad in ["../../etc/passwd", "..", "a.b", "a%2Fb"] {
 			let path = fmt!("/asides/{}", bad);
-			let resp = res!(handle_get(&cfg(), &posts, &path, "", "test"));
+			let resp = res!(handle_get(&cfg(), &posts, &path, "", None, "test"));
 			assert_eq!(status_of(&resp), Some(HttpStatus::NotFound), "'{}' was not refused", bad);
 		}
 		Ok(())
@@ -721,14 +733,14 @@ mod tests {
 	fn test_a_post_page_carries_its_tags_06() -> Outcome<()> {
 		let mut p = post();
 		p.tags = vec![fmt!("rust"), fmt!("web")];
-		let resp = res!(post_page(&cfg(), &p));
+		let resp = res!(post_page(&cfg(), &p, None));
 		let body = String::from_utf8_lossy(&resp.body).to_string();
 		assert!(body.contains(r#"<ul class="post-tags">"#), "no tag list: {}", body);
 		assert!(body.contains(r#"<a class="tag" href="/asides?tag=rust">rust</a>"#), "got: {}", body);
 		assert!(body.contains(r#"<a class="tag" href="/asides?tag=web">web</a>"#), "got: {}", body);
 
 		// A post with no tags has no empty shell.
-		let resp = res!(post_page(&cfg(), &post()));
+		let resp = res!(post_page(&cfg(), &post(), None));
 		let body = String::from_utf8_lossy(&resp.body).to_string();
 		assert!(!body.contains("post-tags"), "an untagged post drew a tag element: {}", body);
 		Ok(())
@@ -795,4 +807,342 @@ mod tests {
 		assert!(served_post(&c, &posts, "/asides/").is_none());
 		Ok(())
 	}
+}
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ COMMENTS                                                                  │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// What a post's page needs to draw its conversation.
+///
+/// Assembled by the caller, which holds the database; the rendering here takes data and touches
+/// nothing, on the same terms as the rest of this module.
+pub struct CommentsView {
+	/// The approved comments, threaded and in the ranker's order.
+	pub threads:	Vec<Thread>,
+	/// How many comments that is, at every depth.
+	pub count:	usize,
+	/// The challenge a sender's proof must answer.
+	pub challenge:	String,
+	/// What the last attempt said, where the reader has just made one.
+	pub said:	Option<String>,
+	/// Whether the site is taking comments at all.
+	pub open:	bool,
+}
+
+/// The conversation below a post, and the form to join it.
+pub fn comments_section(cfg: &PublishConfig, post: &Post, view: &CommentsView) -> String {
+	let mut s = String::new();
+	s.push_str("<section class=\"comments\" id=\"comments\">\n");
+	s.push_str(&fmt!("<h2 class=\"comments-h\">{}</h2>\n", match view.count {
+		0	=> fmt!("No comments yet"),
+		1	=> fmt!("One comment"),
+		n	=> fmt!("{} comments", n),
+	}));
+
+	// What the last attempt said, where there was one. Shown at the top, because it is the answer to
+	// something the reader just did and they should not have to hunt for it.
+	if let Some(said) = &view.said {
+		s.push_str("<p class=\"comments-said\">");
+		escape_text(&mut s, said);
+		s.push_str("</p>\n");
+	}
+
+	if !view.threads.is_empty() {
+		s.push_str("<ol class=\"comment-list\">\n");
+		for t in &view.threads {
+			s.push_str(&thread_item(t, 0));
+		}
+		s.push_str("</ol>\n");
+	}
+
+	if view.open {
+		s.push_str(&comment_form(cfg, post, view, None));
+	} else {
+		s.push_str("<p class=\"comments-shut\">Comments are closed on this post.</p>\n");
+	}
+
+	s.push_str("</section>\n");
+	s
+}
+
+/// One comment and its replies.
+fn thread_item(t: &Thread, depth: usize) -> String {
+	let mut s = String::new();
+	s.push_str(&fmt!("<li class=\"comment\" id=\"c-{}\">\n", esc_id(&t.comment.id)));
+
+	s.push_str("<div class=\"comment-by\">");
+	s.push_str("<span class=\"comment-who\">");
+	escape_text(&mut s, t.comment.author.display_name());
+	s.push_str("</span>");
+	if !t.comment.created.is_empty() {
+		s.push_str(" <time class=\"comment-when\" datetime=\"");
+		escape_attr(&mut s, &t.comment.created);
+		s.push_str("\">");
+		escape_text(&mut s, &t.comment.created[..10.min(t.comment.created.len())]);
+		s.push_str("</time>");
+	}
+	s.push_str("</div>\n");
+
+	// The prose, already brought within the policy by `Comment::render`. A comment whose source will
+	// not parse shows as its own words rather than vanishing: it is still what somebody said.
+	s.push_str("<div class=\"comment-body\">");
+	match t.comment.render() {
+		Ok(html)	=> s.push_str(&html),
+		Err(_)		=> {
+			s.push_str("<p>");
+			escape_text(&mut s, &t.comment.body);
+			s.push_str("</p>");
+		}
+	}
+	s.push_str("</div>\n");
+
+	// A reply link, down to the depth the module threads. Below that a reader replies to the parent,
+	// which is where the flattened comment already sits.
+	if depth + 1 < DEPTH_MAX {
+		s.push_str(&fmt!(
+			"<a class=\"comment-reply\" href=\"#comment-form\" data-reply-to=\"{id}\" \
+			data-reply-name=\"{who}\">Reply</a>\n",
+			id	= esc_id(&t.comment.id),
+			who	= {
+				let mut a = String::new();
+				escape_attr(&mut a, t.comment.author.display_name());
+				a
+			},
+		));
+	}
+
+	if !t.replies.is_empty() {
+		s.push_str("<ol class=\"comment-replies\">\n");
+		for r in &t.replies {
+			s.push_str(&thread_item(r, depth + 1));
+		}
+		s.push_str("</ol>\n");
+	}
+	s.push_str("</li>\n");
+	s
+}
+
+/// The form for writing one.
+///
+/// Three things a reader does not see and one they do. The honeypot is a field a person cannot fill
+/// because it is not shown, so anything in it was put there by something filling every field it
+/// found. The challenge and the nonce are the proof: the browser spends about a second finding a
+/// nonce, which costs a reader nothing they notice and costs a machine posting ten thousand comments
+/// ten thousand seconds. The parent is which comment is being answered.
+fn comment_form(cfg: &PublishConfig, post: &Post, view: &CommentsView, parent: Option<&str>) -> String {
+	let mut s = String::new();
+	s.push_str("<form class=\"comment-form\" id=\"comment-form\" method=\"POST\" action=\"");
+	escape_attr(&mut s, &cfg.comment_path(&post.slug));
+	s.push_str("\">\n");
+	s.push_str("<h3 class=\"comment-form-h\">Leave a comment</h3>\n");
+
+	// Where a reply is being written, said plainly, with a way out of it.
+	s.push_str("<p class=\"comment-replying\" id=\"comment-replying\" hidden>Replying to \
+		<span id=\"comment-replying-who\"></span> \
+		<a href=\"#comment-form\" id=\"comment-reply-cancel\">(cancel)</a></p>\n");
+	s.push_str(&fmt!("<input type=\"hidden\" name=\"parent\" id=\"comment-parent\" value=\"{}\">\n",
+		parent.unwrap_or("")));
+	s.push_str("<input type=\"hidden\" name=\"challenge\" id=\"comment-challenge\" value=\"");
+	escape_attr(&mut s, &view.challenge);
+	s.push_str("\">\n");
+	s.push_str("<input type=\"hidden\" name=\"nonce\" id=\"comment-nonce\" value=\"\">\n");
+	s.push_str(&fmt!("<input type=\"hidden\" name=\"bits\" value=\"{}\">\n", POW_BITS));
+
+	// The honeypot. Hidden from a person by every means at once -- off-screen, no tab stop, told to
+	// assistive technology that it is not for them -- and left in the markup for anything that reads
+	// the markup rather than the page.
+	// The hiding is an inline style and not a class, deliberately. This module does not own the site's
+	// stylesheet -- a site brings its own -- so a class here is a rule that may never exist, and a
+	// honeypot a reader can see is a field they will fill in and have their comment silently refused
+	// for. Measured in a browser: with only a class, it rendered as an ordinary visible input.
+	s.push_str("<div class=\"comment-hp\" aria-hidden=\"true\" \
+		style=\"position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden\">\
+		<label for=\"comment-website\">Website</label>\
+		<input type=\"text\" id=\"comment-website\" name=\"website\" tabindex=\"-1\" \
+		autocomplete=\"off\"></div>\n");
+
+	s.push_str("<div class=\"comment-fields\">\n");
+	s.push_str("<label class=\"comment-lbl\" for=\"comment-name\">Name\
+		<input type=\"text\" id=\"comment-name\" name=\"name\" maxlength=\"64\" required></label>\n");
+	// The address is optional, and what it is for is said where it is asked for rather than in a
+	// policy page nobody opens.
+	s.push_str("<label class=\"comment-lbl\" for=\"comment-email\">Email \
+		<span class=\"comment-hint\">optional, never shown or shared</span>\
+		<input type=\"email\" id=\"comment-email\" name=\"email\" autocomplete=\"email\"></label>\n");
+	s.push_str("</div>\n");
+
+	s.push_str(&fmt!("<label class=\"comment-lbl\" for=\"comment-body\">Comment\
+		<textarea id=\"comment-body\" name=\"body\" rows=\"6\" maxlength=\"{}\" required></textarea>\
+		</label>\n", crate::srv::publish::comment::BODY_MAX));
+	s.push_str("<p class=\"comment-note\">Markdown works. Links are kept, images and scripts are not. \
+		A first comment waits for the author to see it.</p>\n");
+
+	s.push_str("<button type=\"submit\" class=\"comment-send\" id=\"comment-send\">Post comment</button>\n");
+	s.push_str("<span class=\"comment-working\" id=\"comment-working\" hidden>Working…</span>\n");
+	s.push_str("</form>\n");
+	s.push_str(COMMENT_JS);
+	s
+}
+
+/// An id, reduced to what may sit in one.
+///
+/// A comment's name is minted from a small alphabet so this changes nothing in practice; it is here
+/// so that a record written by hand, or by a later version with a wider alphabet, cannot put anything
+/// into an `id` attribute or a fragment that does not belong there.
+fn esc_id(s: &str) -> String {
+	s.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect()
+}
+
+/// The script the form needs: the proof, and the reply wiring.
+///
+/// Vanilla, inline, and small enough to read. It uses the browser's own SHA-256 -- the one strong
+/// digest every browser implements natively -- rather than carrying an implementation of its own,
+/// which is why the server verifies the proof with the same.
+///
+/// **The form works without it**, which is the point of doing the proof on submit rather than
+/// gating the fields: a reader with no scripting posts a comment with no nonce, and the server holds
+/// it for a person instead of refusing it. The proof buys a queue that is not full of machines; it is
+/// not a condition of being heard.
+const COMMENT_JS: &str = r#"<script>
+(function () {
+	var form = document.getElementById('comment-form');
+	if (!form || !window.crypto || !window.crypto.subtle) return;
+
+	/* Replying: which comment, said plainly, and a way back out. */
+	var parent = document.getElementById('comment-parent');
+	var banner = document.getElementById('comment-replying');
+	var who = document.getElementById('comment-replying-who');
+	document.querySelectorAll('.comment-reply').forEach(function (a) {
+		a.addEventListener('click', function () {
+			parent.value = a.getAttribute('data-reply-to') || '';
+			who.textContent = a.getAttribute('data-reply-name') || '';
+			banner.hidden = false;
+		});
+	});
+	var cancel = document.getElementById('comment-reply-cancel');
+	if (cancel) cancel.addEventListener('click', function (ev) {
+		ev.preventDefault();
+		parent.value = '';
+		banner.hidden = true;
+	});
+
+	/* The proof. Count leading zero bits of SHA-256(challenge + nonce) until the
+	   width is met. Done on submit so a reader who never comments never pays. */
+	function zeros(buf) {
+		var b = new Uint8Array(buf), n = 0;
+		for (var i = 0; i < b.length; i++) {
+			if (b[i] === 0) { n += 8; continue; }
+			var v = b[i], c = 0;
+			while ((v & 0x80) === 0) { c++; v = (v << 1) & 0xff; }
+			return n + c;
+		}
+		return n;
+	}
+
+	var enc = new TextEncoder();
+	form.addEventListener('submit', function (ev) {
+		if (form.dataset.proved === '1') return;      /* already done; let it go */
+		ev.preventDefault();
+		var challenge = document.getElementById('comment-challenge').value;
+		var bits = parseInt(form.querySelector('input[name=bits]').value, 10) || 0;
+		var send = document.getElementById('comment-send');
+		var working = document.getElementById('comment-working');
+		send.disabled = true;
+		if (working) working.hidden = false;
+
+		var n = 0;
+		function attempt() {
+			/* A slice at a time, yielding between, so the page never locks up. */
+			var deadline = Date.now() + 60;
+			function step() {
+				if (Date.now() > deadline) { setTimeout(attempt, 0); return; }
+				crypto.subtle.digest('SHA-256', enc.encode(challenge + n)).then(function (d) {
+					if (zeros(d) >= bits) {
+						document.getElementById('comment-nonce').value = String(n);
+						form.dataset.proved = '1';
+						form.submit();
+						return;
+					}
+					n++;
+					step();
+				});
+			}
+			step();
+		}
+		attempt();
+	});
+})();
+</script>
+"#;
+
+/// What the last comment attempt said, read out of the query a redirect landed with.
+///
+/// Percent-decoded only for the space, which is all a sentence of ours carries once encoded by
+/// [`comment_posted`]; anything else stands as written rather than being guessed at.
+pub fn said_of(query: &str) -> Option<String> {
+	for pair in query.split('&') {
+		let mut kv = pair.splitn(2, '=');
+		if kv.next() == Some("said") {
+			let v = kv.next().unwrap_or("");
+			if v.is_empty() {
+				return None;
+			}
+			return Some(percent_decode(v));
+		}
+	}
+	None
+}
+
+/// The answer to a posted comment: back to the post, carrying what to tell the reader.
+///
+/// A redirect rather than a rendered page, so a reload does not post the comment again -- the same
+/// reasoning the console's writes take. The fragment puts the reader at the conversation rather than
+/// at the top of prose they have just read.
+pub fn comment_posted(cfg: &PublishConfig, slug: &str, said: &str) -> HttpMessage {
+	let to = fmt!("{}?said={}#comments", cfg.path_of(slug), percent_encode(said));
+	let mut resp = HttpMessage::new_response(HttpStatus::SeeOther);
+	resp = resp.with_field(HeaderName::Location, HeaderFieldValue::Generic(to));
+	resp
+}
+
+/// Percent-encodes what a redirect carries.
+///
+/// Only what has to be: a query value's own delimiters, and the characters a browser would otherwise
+/// treat as structure. Everything else is left legible, since this lands in a URL a reader may see.
+fn percent_encode(s: &str) -> String {
+	let mut out = String::with_capacity(s.len());
+	for b in s.bytes() {
+		match b {
+			b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~'
+				=> out.push(b as char),
+			b' '	=> out.push('+'),
+			_	=> out.push_str(&fmt!("%{:02X}", b)),
+		}
+	}
+	out
+}
+
+/// Reverses [`percent_encode`].
+fn percent_decode(s: &str) -> String {
+	let bytes = s.as_bytes();
+	let mut out = Vec::with_capacity(bytes.len());
+	let mut i = 0;
+	while i < bytes.len() {
+		match bytes[i] {
+			b'+' => { out.push(b' '); i += 1; }
+			b'%' if i + 2 < bytes.len() => {
+				let hi = (bytes[i + 1] as char).to_digit(16);
+				let lo = (bytes[i + 2] as char).to_digit(16);
+				match (hi, lo) {
+					(Some(h), Some(l))	=> { out.push((h * 16 + l) as u8); i += 3; }
+					// Not a pair of hex digits, so not an escape: the byte stands as itself.
+					_			=> { out.push(bytes[i]); i += 1; }
+				}
+			}
+			b => { out.push(b); i += 1; }
+		}
+	}
+	String::from_utf8_lossy(&out).to_string()
 }

@@ -21,6 +21,7 @@ use crate::srv::{
         self,
         PublishConfig,
         Subscription,
+        comment as publish_comment,
         page as publish_page,
         send::MailSender,
         store as publish_store,
@@ -404,11 +405,47 @@ impl<
                             )));
                         }
                     };
+                    // The conversation below the post, where the site has a database to keep one
+                    // in. A comments read that fails costs the conversation and never the prose: a
+                    // reader came for the post.
+                    let served = publish_page::served_post(cfg.as_ref(), &posts, &request_path);
+                    let view = match (db.as_ref(), served) {
+                        (Some(dbh), Some(post)) => {
+                            match publish_comment::site_secret(dbh) {
+                                Ok(secret) => {
+                                    let threads = match publish_comment::public_for_post(
+                                        dbh, &post.slug, publish_comment::Ranker::default(), &id,
+                                    ) {
+                                        Ok(items) => publish_comment::thread(items),
+                                        Err(e) => {
+                                            warn!("{}: publish: comments on '{}' will not read: {}",
+                                                id, post.slug, e);
+                                            Vec::new()
+                                        }
+                                    };
+                                    let count = publish_comment::count_threads(&threads);
+                                    Some(publish_page::CommentsView {
+                                        threads,
+                                        count,
+                                        challenge: publish_comment::pow_challenge(&post.slug, &secret),
+                                        said: publish_page::said_of(&request_query),
+                                        open: true,
+                                    })
+                                }
+                                Err(e) => {
+                                    warn!("{}: publish: no comment secret: {}", id, e);
+                                    None
+                                }
+                            }
+                        }
+                        _ => None,
+                    };
                     let resp = res!(publish_page::handle_get(
                         cfg.as_ref(),
                         &posts,
                         &request_path,
                         &request_query,
+                        view.as_ref(),
                         &id,
                     ));
                     // The tally, where a post was actually served to somebody who is neither its
@@ -650,6 +687,41 @@ impl<
                     let resp = res!(publish_subscribe::handle_subscribe(
                         cfg.as_ref(), db.as_ref(), &mail, &body, &id).await);
                     return Ok(Some(resp));
+                }
+                // A comment on a post: a public POST under the post's own path, so which post is
+                // being commented on is carried by the URL and cannot be swapped in the body. The
+                // reader is answered with a redirect back to the post, carrying what to tell them --
+                // so a reload does not post the comment twice.
+                if let Some(slug) = cfg.comment_slug(&request_path) {
+                    let said = match db.as_ref() {
+                        Some(dbh) => {
+                            let secret = res!(publish_comment::site_secret(dbh));
+                            let f = |k: &str| site_console::form_field(&body, k).unwrap_or_default();
+                            let sub = publish_comment::Submission {
+                                slug,
+                                parent:     site_console::form_field(&body, "parent"),
+                                name:       f("name"),
+                                email:      site_console::form_field(&body, "email"),
+                                body:       f("body"),
+                                honeypot:   f("website"),
+                                challenge:  f("challenge"),
+                                nonce:      f("nonce"),
+                                from:       Some(peer.ip().to_string()),
+                                now:        publish_comment::now_stamp(),
+                            };
+                            let got = res!(publish_comment::receive(
+                                dbh,
+                                &publish_comment::Moderator::default(),
+                                sub,
+                                &secret,
+                                &secret,
+                                &id,
+                            ));
+                            got.tell_reader().to_string()
+                        }
+                        None => "Comments are not available on this site.".to_string(),
+                    };
+                    return Ok(Some(publish_page::comment_posted(cfg.as_ref(), slug, &said)));
                 }
             }
 

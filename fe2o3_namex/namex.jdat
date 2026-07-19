@@ -429,6 +429,24 @@
       (b32|"/TmhhCg6oJazKJxaQePSwhzvjuMSnjU5bucC9kH+TCs="): "variant of",
     },
   },
+  (b32|"kCnQluCVX4v62XUObBIPJhg+VZaXjXHQOLoNDVrOZso="): {
+    (nams): (vek|[
+      "SHA-256",
+    ]),
+    (lang): "English",
+    (desc): "SHA-256, a member of the SHA-2 family specified in FIPS 180-4, \
+      producing a 256 bit digest.  It is the strongest digest common to \
+      Hematite and the Web Crypto API, which offers no SHA3.,
+    (lnks): {
+      (b32|"/TmhhCg6oJazKJxaQePSwhzvjuMSnjU5bucC9kH+TCs="): "variant of",
+    },
+    (tags): (vek|[
+      "Algorithm",
+      "Cryptographic",
+      "Hash",
+      "Transformation",
+    ]),
+  },
   (b32|"QByizewdCnRH/E6ksx4rOnqv5lFuB6PX1EA4Z5kNQwA="): {
     (nams): (vek|[
       "Ozone Database",

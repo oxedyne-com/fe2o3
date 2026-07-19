@@ -34,5 +34,6 @@ pub mod map;
 pub mod hash;
 pub mod kdf;
 pub mod pow;
+pub mod sha256;
 
 pub const VERSION: SemVer = SemVer::new(0,0,1);

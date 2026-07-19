@@ -1086,6 +1086,7 @@ pub fn page(theme: &Theme, admin: &SiteAdmin, title: &str, body: &str) -> HttpMe
 	s.push_str(&fmt!("<a href=\"{}\">Posts</a>", PATH_ROOT));
 	s.push_str(&fmt!("<a href=\"{}\">Subscribers</a>", publish::PATH_SUBS));
 	s.push_str(&fmt!("<a href=\"{}\">Reports</a>", publish::PATH_REPORTS));
+	s.push_str(&fmt!("<a href=\"{}\">Comments</a>", publish::PATH_COMMENTS));
 	s.push_str(&fmt!("<a href=\"{}\">Destinations</a>", publish::PATH_DESTS));
 	s.push_str(&fmt!("<span class=\"mc-who\">{}…</span>", html_escape(&admin.username[..8.min(admin.username.len())])));
 	// The way out of the console is a close, in the corner, as it is on every page within it --
@@ -1319,6 +1320,23 @@ margin-top:0.8rem;}\
    side-by-side panes; a field for a handle or a host is not made better by being 80rem\
    of it, and a row of them that wide reads as unconsidered rather than spacious. */\
 .mc-settings{max-width:34rem;}\
+/* The moderation queue. A comment is shown rendered, framed, with its verbs beneath: a\
+   decision about what to publish is made looking at what would be published. */\
+.mc-comment{border:1px solid var(--border,var(--aside-rule-color,#333c47));border-radius:6px;\
+padding:0.9rem 1.1rem;margin:0.8rem 0;}\
+.mc-comment-by{font-size:0.92rem;margin-bottom:0.2rem;}\
+/* The post a comment is on, in the console's own link colour: without this the anchor falls\
+   through to the browser default blue, which no other link on any console page wears. */\
+.mc-comment-by a{color:var(--accent,var(--aside-link-color,#7fb0e0));text-decoration:none;}\
+.mc-comment-by a:hover{text-decoration:underline;}\
+.mc-comment-why{font-size:0.85rem;margin:0.1rem 0 0.4rem;}\
+.mc-comment-body{margin:0.5rem 0 0.7rem;}\
+.mc-comment-acts{display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center;}\
+.mc-inline{display:inline;}\
+.mc-tag{display:inline-block;font-size:0.72rem;text-transform:uppercase;letter-spacing:0.06em;\
+padding:0.1rem 0.4rem;border-radius:4px;border:1px solid var(--border,#333c47);opacity:0.75;}\
+.mc-tag-live{border-color:#4c9a6a;color:#7fc79b;opacity:1;}\
+.mc-tag-err{border-color:#c0554e;color:#d9776f;opacity:1;}\
 .mc-settings + .mc-settings{margin-top:0.6rem;}\
 .tag-chips{display:flex;flex-wrap:wrap;gap:0.4rem;margin:0.4rem 0 0;}\
 .tag-chip{display:inline-flex;align-items:center;gap:0.2rem;font-size:0.82rem;\

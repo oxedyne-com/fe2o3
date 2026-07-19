@@ -1,3 +1,5 @@
+use crate::sha256;
+
 use oxedyne_fe2o3_core::{
     prelude::*,
     alt::{
@@ -35,6 +37,8 @@ use tiny_keccak::{
 pub enum HashScheme {
     // Crypto
     SHA3_256(keccak::Sha3),
+    #[allow(non_camel_case_types)]
+    SHA_256(sha256::Sha256),
     // Non-crypto
     Seahash(seahash::SeaHasher),
 }
@@ -43,6 +47,7 @@ impl fmt::Debug for HashScheme {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::SHA3_256(..) => write!(f, "SHA3_256"),
+            Self::SHA_256(..) => write!(f, "SHA_256"),
             Self::Seahash(..) => write!(f, "Seahash"),
         }
     }
@@ -54,6 +59,8 @@ impl InNamex for HashScheme {
 	    Ok(match self {
             Self::SHA3_256(..) =>
                 res!(NamexId::try_from("VybbHNWeNXeTqTrXj66TzZScbSTsEFVy0W79QnbroFA=")),
+            Self::SHA_256(..) =>
+                res!(NamexId::try_from("kCnQluCVX4v62XUObBIPJhg+VZaXjXHQOLoNDVrOZso=")),
             Self::Seahash(..) =>
                 res!(NamexId::try_from("O/3zgxf8/f6mjc0RBau1MMtkfNi9B1eeFB5Q9f6ZfAM=")),
         })
@@ -62,6 +69,7 @@ impl InNamex for HashScheme {
     fn local_id(&self) -> LocalId {
 	    match self {
             Self::SHA3_256(..)  => LocalId(1),
+            Self::SHA_256(..)   => LocalId(3),
             Self::Seahash(..)   => LocalId(2),
         }
     }
@@ -77,6 +85,7 @@ impl InNamex for HashScheme {
         let ids = match gname {
             "schemes" => [
 	            ("SHA3_256", "VybbHNWeNXeTqTrXj66TzZScbSTsEFVy0W79QnbroFA="),
+	            ("SHA_256", "kCnQluCVX4v62XUObBIPJhg+VZaXjXHQOLoNDVrOZso="),
 	            ("Seahash", "O/3zgxf8/f6mjc0RBau1MMtkfNi9B1eeFB5Q9f6ZfAM="),
             ],
             _ => return Err(err!(
@@ -106,6 +115,13 @@ impl Hasher for HashScheme {
                 hasher.finalize(&mut hash);
                 Hash::new(HashForm::Bytes32(hash), salt)
             },
+            Self::SHA_256(mut hasher) => {
+                for slice in input {
+                    hasher.update(slice);
+                }
+                hasher.update(&salt);
+                Hash::new(HashForm::Bytes32(hasher.finish()), salt)
+            },
             Self::Seahash(mut hasher) => {
                 for slice in input {
                     hasher.write(slice);
@@ -120,6 +136,7 @@ impl Hasher for HashScheme {
     fn hash_length(&self) -> Gnomon<usize> {
         match self {
             Self::SHA3_256(..)  => Gnomon::Known(Self::SHA3_256_BYTE_LEN),
+            Self::SHA_256(..)   => Gnomon::Known(Self::SHA_256_BYTE_LEN),
             Self::Seahash(..)   => Gnomon::Known(Self::SEAHASH_BYTE_LEN),
         }
     }
@@ -133,6 +150,7 @@ impl str::FromStr for HashScheme {
     fn from_str(name: &str) -> std::result::Result<Self, Self::Err> {
         match name {
             "SHA3_256" => Ok(Self::new_sha3_256()),
+            "SHA_256"  => Ok(Self::new_sha256()),
             "Seahash" => Ok(Self::new_seahash()),
             _ => Err(err!(
                 "The hash scheme '{}' is not recognised.", name;
@@ -156,6 +174,7 @@ impl TryFrom<LocalId> for HashScheme {
         match n {
             LocalId(1) => Ok(Self::new_sha3_256()),
             LocalId(2) => Ok(Self::new_seahash()),
+            LocalId(3) => Ok(Self::new_sha256()),
             _ => Err(err!(
                 "The hash scheme with local id {} is not recognised.", n;
             Invalid, Input)),
@@ -167,9 +186,16 @@ impl HashScheme {
 
     pub const SEAHASH_BYTE_LEN:     usize   = 8;
     pub const SHA3_256_BYTE_LEN:    usize   = 32;
+    pub const SHA_256_BYTE_LEN:     usize   = 32;
 
     pub fn new_sha3_256() -> Self {
         Self::SHA3_256(keccak::Sha3::v256())
+    }
+
+    /// Creates a SHA-256 hasher, the digest of choice when the other party is a web browser using
+    /// the Web Crypto API, which offers no SHA3.
+    pub fn new_sha256() -> Self {
+        Self::SHA_256(sha256::Sha256::new())
     }
 
     pub fn new_seahash() -> Self {
@@ -483,6 +509,52 @@ mod tests {
         req!(len, 32);
         let seahash = HashScheme::new_seahash();
         req!(*res!(seahash.hash_length().required("Seahash hash length")), 8);
+        let sha256 = HashScheme::new_sha256();
+        req!(*res!(sha256.hash_length().required("SHA-256 hash length")), 32);
+        req!(HashScheme::SHA_256_BYTE_LEN, 32);
+        Ok(())
+    }
+
+    /// The scheme must reach the same digest through `Hasher` as the module does directly, and
+    /// must agree with the published digest of "abc".
+    #[test]
+    fn test_sha_256_via_hash_scheme() -> Outcome<()> {
+        let expected = crate::sha256::digest(b"abc");
+        let hasher = HashScheme::new_sha256();
+        let hash = res!(digest(hasher.hash(&[b"abc"], [])));
+        req!(hash, expected);
+        Ok(())
+    }
+
+    /// The salt follows the input for SHA-256 too, giving `H(input ‖ salt)`.
+    #[test]
+    fn test_sha_256_salt_follows_input() -> Outcome<()> {
+        let expected = crate::sha256::digest(b"hello world");
+        let hasher = HashScheme::new_sha256();
+        let hash = res!(digest(hasher.hash(&[b"hello"], *b" world")));
+        req!(hash, expected);
+        Ok(())
+    }
+
+    /// SHA-256 must survive the round trip through both the string name and the local id, since
+    /// those are how a scheme is recorded and recovered.
+    #[test]
+    fn test_sha_256_round_trips() -> Outcome<()> {
+        req!(fmt!("{:?}", HashScheme::new_sha256()), "SHA_256".to_string());
+
+        let from_name = res!(HashScheme::try_from("SHA_256"));
+        req!(fmt!("{:?}", from_name), "SHA_256".to_string());
+
+        let id = HashScheme::new_sha256().local_id();
+        req!(id, LocalId(3));
+        let from_id = res!(HashScheme::try_from(id));
+        req!(fmt!("{:?}", from_id), "SHA_256".to_string());
+
+        // The Namex id must be distinct from that of the other schemes.
+        let sha256_id = res!(HashScheme::new_sha256().name_id());
+        let sha3_id = res!(HashScheme::new_sha3_256().name_id());
+        let ids_differ = sha256_id != sha3_id;
+        req!(ids_differ, true, "SHA-256 and SHA3-256 Namex ids must differ");
         Ok(())
     }
 }

@@ -286,6 +286,28 @@ impl PublishConfig {
 		s
 	}
 
+	/// The URL path a comment on a post is posted to.
+	///
+	/// Under the post's own path rather than a shared endpoint, so which post is being commented on is
+	/// carried by the URL and cannot be swapped for another in the body.
+	pub fn comment_path(&self, slug: &str) -> String {
+		let mut s = self.path.clone();
+		s.push('/');
+		s.push_str(slug);
+		s.push_str("/comment");
+		s
+	}
+
+	/// The slug a comment-posting path names, where it names one.
+	pub fn comment_slug<'a>(&self, path: &'a str) -> Option<&'a str> {
+		let rest = path.strip_prefix(&self.path)?.strip_prefix('/')?;
+		let slug = rest.strip_suffix("/comment")?;
+		if slug.is_empty() || !valid_slug(slug) {
+			return None;
+		}
+		Some(slug)
+	}
+
 	/// The URL path a confirmation link points at, carrying the subscriber's token.
 	pub fn confirm_path(&self, token: &str) -> String {
 		let mut s = self.path.clone();

@@ -39,10 +39,7 @@ use oxedyne_fe2o3_iop_db::api::{
 	Database,
 	ScanOpts,
 };
-use oxedyne_fe2o3_iop_hash::api::{
-	Hasher,
-	HashForm,
-};
+use oxedyne_fe2o3_iop_hash::api::Hasher;
 use oxedyne_fe2o3_jdat::{
 	prelude::*,
 	id::NumIdDat,
@@ -1448,5 +1445,248 @@ mod tests {
 			assert!(seen.insert(id), "a minted id repeated within 256");
 		}
 		Ok(())
+	}
+}
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ RECEIVING                                                                 │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// What a submitted comment turned into.
+///
+/// A caller answers a reader with the same page either way; this says what to tell them. It never
+/// says *which rule* refused, deliberately: a spammer tuning against a precise reason is being given
+/// a test suite, and a reader who wrote something ordinary does not need to know the machinery.
+pub enum Received {
+	/// Stored and published at once, because the site already knows the commenter.
+	Published,
+	/// Stored and waiting for the author to see it.
+	Held,
+	/// Not stored. The reader is told the same thing as `Held` -- see below.
+	Refused(String),
+}
+
+impl Received {
+
+	/// What a reader is told.
+	///
+	/// **A refusal reads like a hold.** Anything else is an oracle: a machine that is told "your proof
+	/// was wrong" retries with a better proof, and one told "held for review" learns nothing about
+	/// whether it worked. The cost is that a genuine reader whose comment was binned is told it is
+	/// waiting; the alternative is a tuning signal for everybody, which is worse.
+	pub fn tell_reader(&self) -> &'static str {
+		match self {
+			Self::Published	=> "Thank you — your comment is below.",
+			Self::Held
+			| Self::Refused(_)
+				=> "Thank you — your comment has been sent to the author for review.",
+		}
+	}
+}
+
+/// Everything a submitted comment arrives with.
+pub struct Submission<'a> {
+	/// The post being commented on.
+	pub slug:	&'a str,
+	/// The comment being replied to, where one is.
+	pub parent:	Option<String>,
+	/// The name given.
+	pub name:	String,
+	/// The address given, where one was.
+	pub email:	Option<String>,
+	/// The prose.
+	pub body:	String,
+	/// The honeypot field. Anything in it and the sender is not a person.
+	pub honeypot:	String,
+	/// The challenge the form carried.
+	pub challenge:	String,
+	/// The nonce the browser found, where it found one.
+	pub nonce:	String,
+	/// Who sent it, for the salted hash.
+	pub from:	Option<String>,
+	/// When it arrived.
+	pub now:	String,
+}
+
+/// Takes a submitted comment: checks it, judges it, stores it.
+///
+/// The order is the point. **What can be decided without touching the database is decided first** --
+/// the honeypot and the shape of the fields cost nothing and refuse most of what arrives. The proof
+/// is checked next, and is *not* a condition of being heard: a browser with no scripting sends no
+/// nonce, and that comment is held for a person rather than refused, because a reader without
+/// JavaScript is still a reader. Only then does anything read from or write to the store.
+pub fn receive<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:		&(Arc<RwLock<DB>>, UID),
+	moderator:	&Moderator,
+	sub:		Submission<'_>,
+	salt:		&[u8],
+	secret:		&[u8],
+	id:		&str,
+)
+	-> Outcome<Received>
+{
+	// The honeypot. A field no person can see, so anything in it was put there by something filling
+	// every field it found. Nothing is stored and nothing is logged beyond the count.
+	if !sub.honeypot.trim().is_empty() {
+		info!("{}: publish: a comment on '{}' filled the honeypot", id, sub.slug);
+		return Ok(Received::Refused(fmt!("honeypot")));
+	}
+
+	let name = sub.name.trim().to_string();
+	let body = sub.body.trim().to_string();
+	if !valid_body(&body) {
+		return Ok(Received::Refused(fmt!("the comment is empty or too long")));
+	}
+	// A name is optional in the sense that a reader may leave it blank and be anonymous; a name that
+	// is *given* must be a name.
+	if !name.is_empty() && !valid_name(&name) {
+		return Ok(Received::Refused(fmt!("that is not a name")));
+	}
+
+	// The proof, where one was sent. A wrong proof is a refusal -- it was attempted and failed, which
+	// a browser does not do by accident. No proof at all is not: see the note above.
+	let proved = if sub.nonce.trim().is_empty() {
+		false
+	} else {
+		if sub.challenge != pow_challenge(sub.slug, secret) {
+			return Ok(Received::Refused(fmt!("the proof answers a challenge this site did not set")));
+		}
+		if !pow_verify(&sub.challenge, sub.nonce.trim(), POW_BITS) {
+			return Ok(Received::Refused(fmt!("the proof does not meet the width")));
+		}
+		true
+	};
+
+	let email = sub.email
+		.map(|e| e.trim().to_lowercase())
+		.filter(|e| !e.is_empty());
+	// An address that is given must look like one; one that is not given is fine. It is never shown,
+	// so a malformed address is only ever a reply that will not arrive -- worth refusing at the door
+	// rather than storing something useless.
+	if let Some(e) = &email {
+		if !crate::srv::publish::subscribe::valid_email(e) {
+			return Ok(Received::Refused(fmt!("that is not an address")));
+		}
+	}
+
+	let author = if name.is_empty() && email.is_none() {
+		Identity::Anon
+	} else {
+		Identity::Local {
+			name:	if name.is_empty() { fmt!("Anonymous") } else { name },
+			email:	email,
+		}
+	};
+
+	let c = Comment {
+		id:		mint_id(),
+		slug:		sub.slug.to_string(),
+		parent:		sub.parent.filter(|p| !p.trim().is_empty()),
+		author,
+		body,
+		created:	sub.now.clone(),
+		state:		CommentState::Pending,
+		reason:		None,
+		from:		sub.from.as_deref().map(|a| from_hash(a, salt)),
+	};
+
+	// What the site already knows about this commenter, where there is anything to know.
+	let known = match c.author.handle() {
+		Some(h)	=> res!(commenter(db, &h)),
+		None	=> None,
+	};
+
+	let mut verdict = moderator.judge(&c, known.as_ref());
+	// A comment with no proof is held even where the moderator would have allowed it. The proof is
+	// what distinguishes a reader who has a browser from something that posts to a URL, and a trusted
+	// commenter's address is exactly what a spammer would forge to skip the queue.
+	if !proved {
+		verdict = verdict.and_then(Verdict::Hold(fmt!("no proof of work was sent")));
+	}
+
+	let mut stored = c;
+	stored.state = verdict.state();
+	stored.reason = verdict.reason();
+
+	// Spam is stored rather than dropped: a wrong judgement must be recoverable, and what arrives is
+	// worth being able to look at.
+	res!(put(db, &stored));
+
+	// A new commenter with a handle is remembered now, unapproved, so the queue can show that this is
+	// their first and so blocking them later has something to attach to.
+	if let Some(h) = stored.author.handle() {
+		if known.is_none() {
+			res!(set_trust(db, &h, false, &sub.now));
+		}
+	}
+
+	Ok(match stored.state {
+		CommentState::Approved	=> Received::Published,
+		CommentState::Spam	=> Received::Refused(fmt!("judged spam")),
+		_			=> Received::Held,
+	})
+}
+
+
+/// The key the site's comment secret lives under.
+const SECRET_KEY: &str = "publish/comment-secret";
+
+/// How many bytes of secret.
+const SECRET_LEN: usize = 32;
+
+/// The site's own comment secret, made once and kept.
+///
+/// Used for two things that must not be guessable and must be *stable*: the proof-of-work challenge,
+/// and the salt a sender's address is hashed with. Domain-separated at each use, so the same bytes
+/// serve both without either becoming an oracle for the other.
+///
+/// **Stored rather than per-process** for a plain reason: a challenge that changed on restart would
+/// refuse every comment written against a form fetched before it, and the reader would have done the
+/// work for nothing. A site's secret outlives its process.
+pub fn site_secret<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+)
+	-> Outcome<Vec<u8>>
+{
+	let (db_arc, user) = db;
+	{
+		let guard = lock_read!(db_arc);
+		if let Some((Dat::BU8(bytes), _)) = res!(guard.get(&dat!(SECRET_KEY), None)) {
+			if bytes.len() == SECRET_LEN {
+				return Ok(bytes);
+			}
+		}
+	}
+	let mut fresh = vec![0u8; SECRET_LEN];
+	Rand::fill_u8(&mut fresh);
+	let guard = lock_read!(db_arc);
+	res!(guard.insert(dat!(SECRET_KEY), Dat::BU8(fresh.clone()), *user, None));
+	Ok(fresh)
+}
+
+/// An ISO timestamp for now.
+///
+/// A comment's arrival is a real instant rather than a date somebody chose, so it is stamped from the
+/// clock here rather than taken from anything a sender supplied.
+pub fn now_stamp() -> String {
+	use oxedyne_fe2o3_datime::time::CalClock;
+	match CalClock::now_utc() {
+		Ok(t)	=> t.to_string(),
+		// A clock that will not read is not a reason to lose a comment. An empty stamp sorts first
+		// and is visibly wrong in the queue, which is the right way for this to fail.
+		Err(_)	=> String::new(),
 	}
 }

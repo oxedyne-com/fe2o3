@@ -40,6 +40,7 @@ use crate::srv::{
 			self,
 			MailSender,
 		},
+		comment,
 		store::{
 			self,
 			Record,
@@ -125,6 +126,15 @@ pub const PATH_CREDS: &str = "/manage/creds";
 /// The destinations page: the remotes a post can be sent on to, and the credentials for each.
 pub const PATH_DESTS: &str = "/manage/destinations";
 
+/// The moderation queue: what has been said and what is waiting on a decision.
+pub const PATH_COMMENTS: &str = "/manage/comments";
+
+/// Where the queue's approve, spam, remove, erase and block actions post.
+pub const PATH_COMMENTS_ACTION: &str = "/manage/comments/action";
+
+/// The moderation queue as JSON, for an app that draws it itself.
+pub const PATH_COMMENTS_JSON: &str = "/manage/comments.json";
+
 /// The subscriber list as JSON, for an app that draws the list itself.
 pub const PATH_SUBS_JSON: &str = "/manage/subscribers.json";
 
@@ -165,6 +175,7 @@ pub fn writes(path: &str) -> bool {
 		|| path == PATH_CREDS
 		|| path == PATH_NEWSLETTER
 		|| path == PATH_SUBS_ACTION
+		|| path == PATH_COMMENTS_ACTION
 		|| path == PATH_NEWSLETTER_TEST
 }
 
@@ -224,6 +235,8 @@ pub fn handle_get<
 		PATH_TAGS_JSON	=> tags_json(cfg, db, id),
 		PATH_CREDS_JSON	=> creds_json(cfg, db, id),
 		PATH_SUBS_JSON	=> subs_json(db, id),
+		PATH_COMMENTS	=> comments_page(theme, admin, csrf, db, query, id),
+		PATH_COMMENTS_JSON	=> comments_json(db, query, id),
 		PATH_REPORTS_JSON	=> reports_json(db, id),
 		_		=> Ok(HttpMessage::respond_with_text(
 			HttpStatus::NotFound,
@@ -2166,6 +2179,7 @@ pub async fn handle_post<
 		PATH_NEWSLETTER	=> do_newsletter(cfg, db, mail, body, &admin.username, json, id).await,
 		PATH_NEWSLETTER_TEST	=> do_test_send(cfg, db, mail, body, &admin.username, json, id).await,
 		PATH_SUBS_ACTION	=> do_subs_action(db, body, &admin.username, json, id),
+		PATH_COMMENTS_ACTION	=> do_comment_action(db, body, &admin.username, json, id),
 		// Unreachable: `writes` names the same paths.
 		_		=> Ok(back(json)),
 	}
@@ -3218,3 +3232,334 @@ mod tests {
 	}
 }
 
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ COMMENTS                                                                  │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// The moderation queue.
+///
+/// What is waiting first, because that is the reason to open this page. Everything else is reachable
+/// by the filter, since a decision already made is worth being able to revisit -- especially a wrong
+/// one, which is the whole reason spam is kept rather than dropped.
+fn comments_page<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	theme:	&Theme,
+	admin:	&SiteAdmin,
+	csrf:	&str,
+	db:	Option<&(Arc<RwLock<DB>>, UID)>,
+	query:	&str,
+	id:	&str,
+)
+	-> Outcome<HttpMessage>
+{
+	let mut body = String::new();
+	body.push_str("<h1>Comments</h1>\n");
+
+	if let Some(said) = query_field(query, "said") {
+		body.push_str(&notice(&html_escape(&said)));
+	}
+
+	let db = match db {
+		Some(db)	=> db,
+		None		=> {
+			body.push_str(&notice(
+				"This site keeps its comments in its database, and has no database configured. Set \
+				<code>db_dir_rel</code> on the vhost.",
+			));
+			return Ok(page(theme, admin, "Comments", &body));
+		}
+	};
+
+	let all = match comment::queue(db, None, id) {
+		Ok(v)	=> v,
+		Err(e)	=> {
+			error!(e, "{}: console: cannot read the comment queue", id);
+			body.push_str(&notice("The comments could not be read. The log says why."));
+			return Ok(page(theme, admin, "Comments", &body));
+		}
+	};
+
+	let count = |s: comment::CommentState| all.iter().filter(|c| c.state == s).count();
+	let waiting = count(comment::CommentState::Pending);
+	body.push_str(&fmt!(
+		"<p class=\"mc-muted\">{} waiting &middot; {} published &middot; {} spam &middot; {} removed</p>\n",
+		waiting,
+		count(comment::CommentState::Approved),
+		count(comment::CommentState::Spam),
+		count(comment::CommentState::Removed),
+	));
+
+	// Waiting is the default view, because it is the only one that needs anybody.
+	let want = query_field(query, "state").unwrap_or_else(|| fmt!("pending"));
+	body.push_str(&comments_filter(&want, all.len()));
+
+	let shown: Vec<&comment::Comment> = all.iter()
+		.filter(|c| want == "any" || c.state.as_str() == want)
+		.collect();
+
+	if shown.is_empty() {
+		body.push_str(&notice(if want == "pending" {
+			"Nothing is waiting. Comments appear here when somebody who is not yet known writes one."
+		} else {
+			"No comment is in that state."
+		}));
+		return Ok(page(theme, admin, "Comments", &body));
+	}
+
+	for c in &shown {
+		body.push_str(&comment_card(c, csrf));
+	}
+
+	Ok(page(theme, admin, "Comments", &body))
+}
+
+/// One comment in the queue, with what can be done to it.
+///
+/// The prose is shown **rendered**, through the same policy a reader's page uses, because a decision
+/// about what to publish should be made looking at what would be published. The reason it is here is
+/// shown too: a moderator deciding blind is a moderator guessing.
+fn comment_card(c: &comment::Comment, csrf: &str) -> String {
+	let mut s = String::new();
+	s.push_str("<div class=\"mc-comment\">\n");
+
+	s.push_str(&fmt!(
+		"<div class=\"mc-comment-by\"><strong>{who}</strong> on <a href=\"{post}\">{slug}</a> \
+		<span class=\"mc-muted\">{when}</span> {tag}</div>\n",
+		who	= html_escape(c.author.display_name()),
+		post	= html_escape(&fmt!("{}?slug={}", PATH_PREVIEW, c.slug)),
+		slug	= html_escape(&c.slug),
+		when	= html_escape(&c.created[..10.min(c.created.len())]),
+		tag	= state_tag(c.state),
+	));
+
+	if let Some(r) = &c.reason {
+		s.push_str(&fmt!("<p class=\"mc-muted mc-comment-why\">{}</p>\n", html_escape(r)));
+	}
+
+	s.push_str("<div class=\"mc-comment-body mc-prose\">");
+	match c.render() {
+		Ok(html)	=> s.push_str(&html),
+		Err(_)		=> s.push_str(&fmt!("<p>{}</p>", html_escape(&c.body))),
+	}
+	s.push_str("</div>\n");
+
+	s.push_str("<div class=\"mc-comment-acts\">\n");
+	for (action, label, class, confirm) in [
+		("approve",	"Approve",	"mc-btn mc-btn-quiet",	""),
+		("spam",	"Spam",		"mc-btn mc-btn-quiet",	""),
+		("remove",	"Remove",	"mc-btn mc-btn-quiet",	""),
+		("erase",	"Erase",	"mc-btn mc-btn-danger",
+			"Erase this comment entirely? This cannot be undone."),
+	] {
+		s.push_str(&fmt!(
+			"<form method=\"POST\" action=\"{path}\" class=\"mc-inline\"{on}>\
+			<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+			<input type=\"hidden\" name=\"slug\" value=\"{slug}\">\
+			<input type=\"hidden\" name=\"id\" value=\"{id}\">\
+			<input type=\"hidden\" name=\"action\" value=\"{action}\">\
+			<button type=\"submit\" class=\"{class}\">{label}</button></form>\n",
+			path	= PATH_COMMENTS_ACTION,
+			on	= if confirm.is_empty() { String::new() }
+					else { fmt!(" onsubmit=\"return confirm('{}')\"", confirm) },
+			csrf	= html_escape(csrf),
+			slug	= html_escape(&c.slug),
+			id	= html_escape(&c.id),
+			action	= action,
+			class	= class,
+			label	= label,
+		));
+	}
+	// Blocking needs somebody to block: an anonymous comment has no handle to attach it to.
+	if c.author.handle().is_some() {
+		s.push_str(&fmt!(
+			"<form method=\"POST\" action=\"{path}\" class=\"mc-inline\" \
+			onsubmit=\"return confirm('Block this commenter? Their comments will go straight to spam.')\">\
+			<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+			<input type=\"hidden\" name=\"slug\" value=\"{slug}\">\
+			<input type=\"hidden\" name=\"id\" value=\"{id}\">\
+			<input type=\"hidden\" name=\"action\" value=\"block\">\
+			<button type=\"submit\" class=\"mc-btn mc-btn-danger\">Block</button></form>\n",
+			path	= PATH_COMMENTS_ACTION,
+			csrf	= html_escape(csrf),
+			slug	= html_escape(&c.slug),
+			id	= html_escape(&c.id),
+		));
+	}
+	s.push_str("</div>\n</div>\n");
+	s
+}
+
+/// The tag a comment's state wears in the queue.
+fn state_tag(state: comment::CommentState) -> String {
+	let (cls, word) = match state {
+		comment::CommentState::Pending	=> ("mc-tag",		"waiting"),
+		comment::CommentState::Approved	=> ("mc-tag mc-tag-live",	"published"),
+		comment::CommentState::Spam	=> ("mc-tag mc-tag-err",	"spam"),
+		comment::CommentState::Removed	=> ("mc-tag",		"removed"),
+	};
+	fmt!("<span class=\"{}\">{}</span>", cls, word)
+}
+
+/// The state filter over the queue.
+fn comments_filter(want: &str, total: usize) -> String {
+	fmt!(
+		"<form class=\"mc-filter mc-form\" method=\"GET\" action=\"{path}\">\n\
+		<div class=\"mc-f-sel\"><label for=\"state\">Showing</label>\
+		<select id=\"state\" name=\"state\">\
+		<option value=\"pending\"{p}>Waiting</option>\
+		<option value=\"approved\"{a}>Published</option>\
+		<option value=\"spam\"{s}>Spam</option>\
+		<option value=\"removed\"{r}>Removed</option>\
+		<option value=\"any\"{n}>Everything</option>\
+		</select></div>\n\
+		<button type=\"submit\" class=\"mc-btn mc-btn-quiet\">Filter</button>\n\
+		<span class=\"mc-muted\" style=\"margin:0 0 0 auto\">{total} in all</span>\n\
+		</form>\n",
+		path	= PATH_COMMENTS,
+		p	= selected(want == "pending"),
+		a	= selected(want == "approved"),
+		s	= selected(want == "spam"),
+		r	= selected(want == "removed"),
+		n	= selected(want == "any"),
+		total	= total,
+	)
+}
+
+/// The queue as JSON, for an app that draws it itself.
+fn comments_json<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	Option<&(Arc<RwLock<DB>>, UID)>,
+	query:	&str,
+	id:	&str,
+)
+	-> Outcome<HttpMessage>
+{
+	let db = match db {
+		Some(db)	=> db,
+		None		=> return Ok(json_error("this site has no database configured")),
+	};
+	let want = query_field(query, "state").unwrap_or_else(|| fmt!("pending"));
+	let all = res!(comment::queue(db, None, id));
+
+	let count = |s: comment::CommentState| all.iter().filter(|c| c.state == s).count();
+	let mut counts = DaticleMap::new();
+	counts.insert(dat!("pending"),	dat!(count(comment::CommentState::Pending) as u64));
+	counts.insert(dat!("approved"),	dat!(count(comment::CommentState::Approved) as u64));
+	counts.insert(dat!("spam"),	dat!(count(comment::CommentState::Spam) as u64));
+	counts.insert(dat!("removed"),	dat!(count(comment::CommentState::Removed) as u64));
+
+	let mut items = Vec::new();
+	for c in all.iter().filter(|c| want == "any" || c.state.as_str() == want) {
+		let mut m = DaticleMap::new();
+		m.insert(dat!("id"),		dat!(c.id.clone()));
+		m.insert(dat!("slug"),		dat!(c.slug.clone()));
+		m.insert(dat!("who"),		dat!(c.author.display_name().to_string()));
+		m.insert(dat!("when"),		dat!(c.created.clone()));
+		m.insert(dat!("state"),		dat!(c.state.as_str().to_string()));
+		m.insert(dat!("body"),		dat!(c.body.clone()));
+		m.insert(dat!("html"),		dat!(c.render().unwrap_or_default()));
+		m.insert(dat!("blockable"),	Dat::Bool(c.author.handle().is_some()));
+		// The reason a moderator gave, which is for the moderator. **Never the address**: it is not
+		// in this map and must not be added to it.
+		if let Some(r) = &c.reason {
+			m.insert(dat!("reason"), dat!(r.clone()));
+		}
+		items.push(Dat::Map(m));
+	}
+
+	let body = create_dat_ordmap(vec![
+		(dat!("counts"),	Dat::Map(counts)),
+		(dat!("comments"),	Dat::List(items)),
+	]);
+	Ok(json_body(&res!(body.encode_string_with_config(&EncoderConfig::<(), ()>::json(None)))))
+}
+
+/// Approves, bins, removes, erases a comment, or blocks its author.
+fn do_comment_action<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	body:	&[u8],
+	who:	&str,
+	json:	bool,
+	id:	&str,
+)
+	-> Outcome<HttpMessage>
+{
+	let slug = super::form_field(body, "slug").unwrap_or_default();
+	let cid = super::form_field(body, "id").unwrap_or_default();
+	let action = super::form_field(body, "action").unwrap_or_default();
+	if slug.is_empty() || cid.is_empty() {
+		return Ok(comments_back_with("no comment was named", json));
+	}
+
+	let done = match action.as_str() {
+		"approve"	=> res!(comment::set_state(
+			db, &slug, &cid, comment::CommentState::Approved, None)),
+		"spam"		=> res!(comment::set_state(
+			db, &slug, &cid, comment::CommentState::Spam, Some(fmt!("marked by {}", who)))),
+		"remove"	=> res!(comment::set_state(
+			db, &slug, &cid, comment::CommentState::Removed, Some(fmt!("taken down by {}", who)))),
+		"erase"		=> res!(comment::erase(db, &slug, &cid)),
+		"block"		=> {
+			// Blocking bins what is in hand as well as what comes next: leaving this one published
+			// while blocking its author would be a decision that half applied.
+			let c = match res!(comment::get(db, &slug, &cid)) {
+				Some(c)	=> c,
+				None	=> return Ok(comments_back_with("that comment is not there", json)),
+			};
+			match c.author.handle() {
+				Some(h)	=> {
+					res!(comment::set_blocked(db, &h, true, &c.created));
+					res!(comment::set_state(db, &slug, &cid,
+						comment::CommentState::Spam, Some(fmt!("blocked by {}", who))))
+				}
+				None	=> return Ok(comments_back_with(
+					"that commenter gave nothing to recognise them by, so they cannot be blocked",
+					json)),
+			}
+		}
+		other		=> return Ok(comments_back_with(
+			&fmt!("'{}' is not an action here", other), json)),
+	};
+
+	if !done {
+		return Ok(comments_back_with("that comment is not there", json));
+	}
+	info!("{}: console: '{}' {} comment '{}/{}'", id, who, action, slug, cid);
+	Ok(comments_back(json))
+}
+
+/// The answer to a moderation write, landing back on the queue.
+fn comments_back(json: bool) -> HttpMessage {
+	if json {
+		json_body("{\"ok\":true}")
+	} else {
+		redirect(PATH_COMMENTS)
+	}
+}
+
+/// The answer to a moderation write that did not go through.
+fn comments_back_with(why: &str, json: bool) -> HttpMessage {
+	if json {
+		json_error(why)
+	} else {
+		redirect(&fmt!("{}?said={}", PATH_COMMENTS, url_encode(why)))
+	}
+}
