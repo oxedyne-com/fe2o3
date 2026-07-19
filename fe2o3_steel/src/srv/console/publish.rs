@@ -892,6 +892,11 @@ fn preview_script(csrf: &str) -> String {
 /// Inline rather than a file: the console is one response with no asset it can be separated from,
 /// and a stylesheet that reaches for an image is a stylesheet that can arrive without one. Unknown
 /// names give nothing, so a typo shows as a bare button rather than a broken glyph.
+/// The close icon, for the page shell, which draws the way out of the console itself.
+pub fn icon_close() -> &'static str {
+	icon("close")
+}
+
 fn icon(name: &str) -> &'static str {
 	match name {
 		"close"	=> "<svg viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\" \
@@ -2287,6 +2292,13 @@ fn notice(html: &str) -> String {
 
 /// The button that reads the directory in.
 fn import_form(csrf: &str, dir: &str) -> String {
+	// Importing reads a directory of Markdown on the server into the store. It is the migration
+	// path off `source: dir`, and once a site has made that move it is a control that can only
+	// overwrite what the site now writes here. So it appears where there is something to import
+	// and nowhere else, rather than sitting under every list explaining itself for ever.
+	if !dir_has_files(dir) {
+		return String::new();
+	}
 	fmt!(
 		"<form class=\"mc-form\" method=\"POST\" action=\"{import}\">\n\
 		<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\n\
@@ -2299,6 +2311,21 @@ fn import_form(csrf: &str, dir: &str) -> String {
 		csrf	= html_escape(csrf),
 		dir	= html_escape(dir),
 	)
+}
+
+/// Whether a directory holds anything an import would read.
+///
+/// A directory that cannot be read is answered `false` rather than an error: the question is only
+/// ever asked to decide whether to offer a control, and a site with no such directory is the
+/// ordinary case, not a fault.
+fn dir_has_files(dir: &str) -> bool {
+	match std::fs::read_dir(dir) {
+		Ok(entries)	=> entries.flatten().any(|e| match e.file_type() {
+			Ok(t)	=> t.is_file(),
+			Err(_)	=> false,
+		}),
+		Err(_)		=> false,
+	}
 }
 
 /// `selected`, where it is.

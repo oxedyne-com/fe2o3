@@ -1086,8 +1086,15 @@ pub fn page(theme: &Theme, admin: &SiteAdmin, title: &str, body: &str) -> HttpMe
 	s.push_str(&fmt!("<a href=\"{}\">Posts</a>", PATH_ROOT));
 	s.push_str(&fmt!("<a href=\"{}\">Subscribers</a>", publish::PATH_SUBS));
 	s.push_str(&fmt!("<a href=\"{}\">Reports</a>", publish::PATH_REPORTS));
-	s.push_str(&fmt!("<a href=\"{}\">View site</a>", html_escape(&theme.home)));
 	s.push_str(&fmt!("<span class=\"mc-who\">{}…</span>", html_escape(&admin.username[..8.min(admin.username.len())])));
+	// The way out of the console is a close, in the corner, as it is on every page within it --
+	// rather than a link competing for attention with the pages themselves.
+	s.push_str(&fmt!(
+		"<a class=\"mc-close\" href=\"{home}\" title=\"Back to the site\" \
+		aria-label=\"Back to the site\">{close}</a>",
+		home	= html_escape(&theme.home),
+		close	= publish::icon_close(),
+	));
 	s.push_str("</nav>\n");
 	s.push_str("</div>\n</header>\n");
 
@@ -1177,7 +1184,7 @@ const CONSOLE_CSS: &str = "\
 .mc-body{margin:0;background:var(--bg-primary,var(--body-bg,#14181d));color:var(--text-primary,var(--body-color,#e6e6e6));\
 font-family:var(--font,var(--font-ui,var(--font-body,system-ui,sans-serif)));line-height:1.5;}\
 .mc-head{border-bottom:1px solid var(--border,var(--aside-rule-color,#333c47));}\
-.mc-head-in{max-width:52rem;margin:0 auto;padding:0.9rem 1.2rem;display:flex;\
+.mc-head-in{max-width:80rem;margin:0 auto;padding:0.9rem 1.2rem;display:flex;\
 align-items:baseline;justify-content:space-between;gap:1rem;flex-wrap:wrap;}\
 .mc-brand{font-weight:600;font-size:1.05rem;}\
 .mc-brand-sub{color:var(--text-secondary,var(--aside-date-color,#8a97a6));font-weight:400;font-size:0.8rem;\
@@ -1186,7 +1193,9 @@ text-transform:uppercase;letter-spacing:0.08em;}\
 .mc-nav a{color:var(--accent,var(--aside-link-color,#7fb0e0));text-decoration:none;}\
 .mc-nav a:hover{text-decoration:underline;}\
 .mc-who{color:var(--text-secondary,var(--aside-date-color,#8a97a6));font-family:var(--font-mono,monospace);font-size:0.8rem;}\
-.mc-main{max-width:52rem;margin:0 auto;padding:1.4rem 1.2rem 4rem;}\
+/* A management screen is tables and side-by-side panes, not prose, so it takes the width it is \
+   given. Running text inside it is held to a readable measure separately, below. */\
+.mc-main{max-width:80rem;margin:0 auto;padding:1.4rem 1.2rem 4rem;}\
 /* The whole heading scale, not just the first rung. Setting h1 alone leaves h2 and h3 to the \
    site's own stylesheet, whose scale is built for prose -- and a site whose h2 is larger than \
    the console's h1 inverts the hierarchy on every page that has a section in it. */\
@@ -1242,11 +1251,12 @@ min-width:6rem;}\
 .mc-head-row h1{margin:0;}\
 .mc-head-row .mc-actions{margin-top:0;}\
 /* The close: an icon, not a word. Same corner on every page that can be left. */\
-.mc-close{display:inline-flex;align-items:center;justify-content:center;width:2.4rem;height:2.4rem;\
+.mc-close{display:inline-flex;align-items:center;justify-content:center;width:1.8rem;height:1.8rem;\
 border-radius:6px;color:var(--text-secondary,var(--aside-date-color,#8a97a6));text-decoration:none;\
 border:1px solid transparent;}\
 .mc-close:hover{color:var(--text,var(--aside-text-color,#d8dee6));\
 border-color:var(--border,var(--aside-rule-color,#333c47));}\
+.mc-close svg{width:1.15rem;height:1.15rem;display:block;}\
 /* A row action: an icon button sized to the row, quiet until pointed at. */\
 .mc-ico{display:inline-flex;align-items:center;justify-content:center;width:2rem;height:2rem;padding:0;\
 background:transparent;border:1px solid transparent;border-radius:6px;cursor:pointer;\
@@ -1301,7 +1311,8 @@ line-height:1.5;resize:vertical;}\
 .mc-row{display:flex;gap:1rem;flex-wrap:wrap;}\
 .mc-row>div{flex:1 1 8rem;}\
 .mc-actions{margin-top:1.2rem;display:flex;gap:0.7rem;align-items:center;flex-wrap:wrap;}\
-.mc-prose{border:1px solid var(--border,var(--aside-rule-color,#333c47));border-radius:6px;padding:1.2rem 1.4rem;\
+/* Prose keeps a readable measure even where the page around it is wide. */\
+.mc-prose{max-width:40rem;border:1px solid var(--border,var(--aside-rule-color,#333c47));border-radius:6px;padding:1.2rem 1.4rem;\
 margin-top:0.8rem;}\
 .tag-chips{display:flex;flex-wrap:wrap;gap:0.4rem;margin:0.4rem 0 0;}\
 .tag-chip{display:inline-flex;align-items:center;gap:0.2rem;font-size:0.82rem;\
