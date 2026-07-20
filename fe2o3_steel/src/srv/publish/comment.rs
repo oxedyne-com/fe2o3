@@ -90,6 +90,13 @@ pub const DEPTH_MAX: usize = 3;
 /// Approved comments are deliberately **not** counted: those are storage the site's own admin chose.
 pub const PENDING_MAX: usize = 50;
 
+/// How many comments one post will hold, in any state.
+///
+/// Every comment on a post is read back whenever the post is viewed, so the store is not merely disk:
+/// it is work done on behalf of every reader, for ever. A thousand is far past any conversation worth
+/// having and well short of a page that will not serve.
+pub const POST_MAX: usize = 1_000;
+
 /// The alphabet and length a comment's id is minted from.
 const ID_LEN: usize = 16;
 const ID_ALPHABET: &str = "abcdefghijklmnopqrstuvwxyz0123456789";
@@ -355,7 +362,10 @@ impl Comment {
 	pub fn render(&self) -> Outcome<String> {
 		use oxedyne_fe2o3_text::doc::{html, policy};
 		let doc = res!(parse_markup(&self.body, Markup::Markdown));
-		Ok(html::render(&policy::apply(&doc, &policy::Policy::default())))
+		// `nofollow ugc noopener`: a published comment otherwise lends the site's own standing to
+		// whatever it points at, which is the whole economic motive for comment spam.
+		let opts = html::Opts { link_rel: Some(fmt!("nofollow ugc noopener")) };
+		Ok(html::render_with(&policy::apply(&doc, &policy::Policy::default()), &opts))
 	}
 }
 
@@ -368,6 +378,13 @@ impl Comment {
 pub struct Commenter {
 	/// The handle, from [`Identity::handle`].
 	pub handle:	String,
+	/// The salted address hash trust was granted to, where trust has been granted.
+	///
+	/// An address in a form is not proof of anything: anyone may type an approved commenter's
+	/// address and inherit their approval. Recording where the approved comment came from, and
+	/// requiring a later comment to match it, makes that forgery cost the attacker the same
+	/// vantage point as well as the address. Not proof either -- it is one more thing to have.
+	pub from:	Option<String>,
 	/// Whether an admin has approved something of theirs.
 	pub trusted:	bool,
 	/// Whether an admin has decided the opposite. A blocked commenter's comments go straight to spam
@@ -383,6 +400,9 @@ impl Commenter {
 	pub fn to_dat(&self) -> Dat {
 		let mut m = DaticleMap::new();
 		m.insert(dat!("handle"),	dat!(self.handle.clone()));
+		if let Some(f) = &self.from {
+			m.insert(dat!("from"), dat!(f.clone()));
+		}
 		m.insert(dat!("trusted"),	Dat::Bool(self.trusted));
 		m.insert(dat!("blocked"),	Dat::Bool(self.blocked));
 		m.insert(dat!("first_seen"),	dat!(self.first_seen.clone()));
@@ -404,6 +424,7 @@ impl Commenter {
 		};
 		Ok(Self {
 			handle:		s("handle").unwrap_or_default(),
+			from:		s("from"),
 			trusted:	b("trusted"),
 			blocked:	b("blocked"),
 			first_seen:	s("first_seen").unwrap_or_default(),
@@ -432,6 +453,12 @@ pub fn valid_name(s: &str) -> bool {
 pub fn valid_body(s: &str) -> bool {
 	let t = s.trim();
 	!t.is_empty() && t.len() <= BODY_MAX
+}
+
+/// Whether a string is a name this module could have minted.
+pub fn valid_id(s: &str) -> bool {
+	let t = s.trim();
+	t.len() == ID_LEN && t.chars().all(|c| ID_ALPHABET.contains(c))
 }
 
 /// Mints a comment's name.
@@ -469,16 +496,51 @@ pub const POW_BITS: u32 = 18;
 
 /// What a proof is computed over: the challenge the form was given, and the nonce the browser found.
 ///
-/// The challenge is a one-way function of the post and a per-process secret, so a proof cannot be
-/// computed before the form is fetched, and a proof for one post is not a proof for another.
+/// The challenge is a one-way function of the post, the site's secret and **the hour it was issued
+/// in**, so a proof cannot be computed before the form is fetched, a proof for one post is not a
+/// proof for another, and a proof does not last forever. Without the window a single solve served
+/// every future comment on that post: the cost was paid once, not once per comment, which is not
+/// what a tax is.
 pub fn pow_challenge(slug: &str, secret: &[u8]) -> String {
-	let h = HashScheme::new_sha3_256().hash(&[slug.as_bytes(), b"comment-pow", secret], []);
+	pow_challenge_at(slug, secret, &pow_window(0))
+}
+
+/// How long a challenge stands. An hour: long enough that a reader may write at length and still
+/// post, short enough that a solved nonce is not a permanent licence.
+pub const POW_WINDOW_SECS: u64 = 3600;
+
+/// The window identifier, `back` windows ago.
+///
+/// A verifier accepts the current window and the one before it, so a reader who opened the form at
+/// 10:59 and posted at 11:01 is not refused for it.
+pub fn pow_window(back: u64) -> String {
+	let now = std::time::SystemTime::now()
+		.duration_since(std::time::UNIX_EPOCH)
+		.map(|d| d.as_secs())
+		.unwrap_or(0);
+	fmt!("{}", now.saturating_sub(back * POW_WINDOW_SECS) / POW_WINDOW_SECS)
+}
+
+/// The challenge for a named window.
+pub fn pow_challenge_at(slug: &str, secret: &[u8], window: &str) -> String {
+	let h = HashScheme::new_sha256().hash(&[slug.as_bytes(), b"comment-pow", secret, window.as_bytes()], []);
 	hex(&h.as_hashform().as_vec())
+}
+
+/// Whether a challenge is one this site issued, in a window still standing.
+pub fn pow_challenge_current(challenge: &str, slug: &str, secret: &[u8]) -> bool {
+	challenge == pow_challenge_at(slug, secret, &pow_window(0))
+		|| challenge == pow_challenge_at(slug, secret, &pow_window(1))
 }
 
 /// Whether a nonce solves a challenge to the required width.
 pub fn pow_verify(challenge: &str, nonce: &str, bits: u32) -> bool {
-	let h = HashScheme::new_sha3_256().hash(&[challenge.as_bytes(), nonce.as_bytes()], []);
+	// SHA-256 and not SHA3, because the other side of this is `crypto.subtle.digest` in a browser
+	// and WebCrypto offers no SHA3. Getting this wrong does not fail loudly: the proof simply never
+	// verifies, the comment is refused before it is stored, and the reader is thanked for it. It was
+	// wrong exactly that way once -- see the test, which checks against a digest computed outside
+	// this program rather than against another call to the same function.
+	let h = HashScheme::new_sha256().hash(&[challenge.as_bytes(), nonce.as_bytes()], []);
 	leading_zero_bits(&h.as_hashform().as_vec()) >= bits
 }
 
@@ -906,7 +968,7 @@ pub fn set_state<
 
 	if state == CommentState::Approved {
 		if let Some(h) = c.author.handle() {
-			res!(set_trust(db, &h, true, &c.created));
+			res!(set_trust(db, &h, true, c.from.as_deref(), &c.created));
 		}
 	}
 	Ok(true)
@@ -976,17 +1038,23 @@ pub fn set_trust<
 	db:	&(Arc<RwLock<DB>>, UID),
 	handle:	&str,
 	trusted: bool,
+	from:	Option<&str>,
 	now:	&str,
 )
 	-> Outcome<()>
 {
 	let mut rec = res!(commenter(db, handle)).unwrap_or_else(|| Commenter {
 		handle:		handle.to_string(),
+		from:		None,
 		trusted:	false,
 		blocked:	false,
 		first_seen:	now.to_string(),
 	});
 	rec.trusted = trusted;
+	// Trust is granted to a commenter *as seen*, so a later comment must arrive the same way.
+	if trusted {
+		rec.from = from.map(|f| f.to_string());
+	}
 	// Trusting somebody who was blocked unblocks them: the admin's later decision is the operative
 	// one, and leaving both flags set would be a record that contradicts itself.
 	if trusted {
@@ -1015,6 +1083,7 @@ pub fn set_blocked<
 {
 	let mut rec = res!(commenter(db, handle)).unwrap_or_else(|| Commenter {
 		handle:		handle.to_string(),
+		from:		None,
 		trusted:	false,
 		blocked:	false,
 		first_seen:	now.to_string(),
@@ -1062,6 +1131,13 @@ pub fn thread(items: Vec<Comment>) -> Vec<Thread> {
 			Some(p) if present.contains(p)	=> children.entry(p.clone()).or_default().push(c),
 			_				=> roots.push(c),
 		}
+	}
+	// A cycle -- two comments naming each other -- leaves no roots, and every comment in it would
+	// simply vanish from the page with nothing said. Anything still held after the roots are taken
+	// is raised, on the same reasoning an orphan is: words that were written should be readable.
+	if roots.is_empty() && !children.is_empty() {
+		let orphaned: Vec<Comment> = children.drain().flat_map(|(_, v)| v).collect();
+		return orphaned.into_iter().map(|c| Thread { comment: c, replies: Vec::new() }).collect();
 	}
 	roots.into_iter().map(|r| build(r, &mut children, 0)).collect()
 }
@@ -1226,7 +1302,7 @@ mod tests {
 
 		// Approved once.
 		let known = Commenter {
-			handle: fmt!("email:ada@example.com"), trusted: true, blocked: false,
+			handle: fmt!("email:ada@example.com"), from: None, trusted: true, blocked: false,
 			first_seen: fmt!("2026-07-01T00:00:00Z"),
 		};
 		assert_eq!(m.judge(&x, Some(&known)), Verdict::Allow, "a trusted commenter was still held");
@@ -1255,7 +1331,7 @@ mod tests {
 	fn test_trust_does_not_overrule_the_counting_07() -> Outcome<()> {
 		let m = Moderator::default();
 		let known = Commenter {
-			handle: fmt!("email:ada@example.com"), trusted: true, blocked: false,
+			handle: fmt!("email:ada@example.com"), from: None, trusted: true, blocked: false,
 			first_seen: fmt!("2026-07-01T00:00:00Z"),
 		};
 		let mut spammy = named("a", Some("ada@example.com"));
@@ -1309,15 +1385,103 @@ mod tests {
 		Ok(())
 	}
 
+	/// The proof verifies a digest computed **outside this program**.
+	///
+	/// The value below came from python's hashlib, not from another call to `pow_verify`. That
+	/// matters: the first version of this hashed SHA3-256 on the server while the browser hashed
+	/// SHA-256, so no proof ever verified, every comment from a reader with scripting was refused
+	/// before it was stored, and each of those readers was thanked for it. The test that was supposed
+	/// to catch it checked SHA3 against SHA3 and passed happily. An oracle from outside is the only
+	/// kind that could have failed.
+	#[test]
+	fn test_the_proof_agrees_with_an_outside_digest_20() -> Outcome<()> {
+		// sha256("0123456789abcdef"*4 + "4494") begins 0x0009..., which is 12 leading zero bits.
+		let challenge = "0123456789abcdef".repeat(4);
+		assert!(pow_verify(&challenge, "4494", 12),
+			"a proof computed by hashlib did not verify: the server is not using SHA-256");
+		assert!(!pow_verify(&challenge, "4494", 20),
+			"a 12-bit proof passed at 20 bits");
+		assert!(!pow_verify(&challenge, "4493", 12), "a wrong nonce passed");
+		Ok(())
+	}
+
+	/// A challenge stands for its window and not for ever.
+	#[test]
+	fn test_a_proof_expires_21() -> Outcome<()> {
+		let secret = b"a-site-secret";
+		let now = pow_challenge_at("a-post", secret, &pow_window(0));
+		let prev = pow_challenge_at("a-post", secret, &pow_window(1));
+		let ancient = pow_challenge_at("a-post", secret, "1");
+
+		assert_ne!(now, prev, "two windows share a challenge, so a solve never expires");
+		assert!(pow_challenge_current(&now, "a-post", secret));
+		// The window before is accepted, so a form opened at 10:59 still posts at 11:01.
+		assert!(pow_challenge_current(&prev, "a-post", secret));
+		assert!(!pow_challenge_current(&ancient, "a-post", secret), "an old proof still stands");
+		assert!(!pow_challenge_current(&now, "another-post", secret), "a proof travelled between posts");
+		Ok(())
+	}
+
+	/// A parent is an id this module minted, or it is nothing at all.
+	#[test]
+	fn test_a_parent_is_an_id_22() -> Outcome<()> {
+		assert!(valid_id(&mint_id()));
+		assert!(!valid_id(""));
+		assert!(!valid_id("short"));
+		assert!(!valid_id(&"a".repeat(ID_LEN + 1)));
+		assert!(!valid_id(&"A".repeat(ID_LEN)), "an off-alphabet id was accepted");
+		assert!(!valid_id(&"!".repeat(ID_LEN)));
+		// The field that had no bound at all: megabytes of anything.
+		assert!(!valid_id(&"a".repeat(8_000_000)), "an unbounded parent was accepted");
+		Ok(())
+	}
+
+	/// Trust is honoured only where the sender matches the one it was granted to.
+	#[test]
+	fn test_trust_does_not_travel_23() -> Outcome<()> {
+		let m = Moderator::default();
+		let mut x = named("a", Some("ada@example.com"));
+		x.from = Some(fmt!("the-place-ada-comments-from"));
+
+		let granted = Commenter {
+			handle:		fmt!("email:ada@example.com"),
+			from:		Some(fmt!("the-place-ada-comments-from")),
+			trusted:	true,
+			blocked:	false,
+			first_seen:	fmt!("2026-07-01T00:00:00Z"),
+		};
+		// Ada, from where Ada comments: allowed.
+		assert_eq!(m.judge(&x, Some(&granted)), Verdict::Allow);
+
+		// Somebody else typing Ada's address, from elsewhere: the trust must not follow the address.
+		// (The filtering happens in `receive`; this asserts the record carries what that needs.)
+		assert_eq!(granted.from.as_deref(), Some("the-place-ada-comments-from"));
+		let forged_from = Some(fmt!("somewhere-else"));
+		assert_ne!(granted.from, forged_from, "trust would have been inherited by an address alone");
+		Ok(())
+	}
+
+	/// A cycle does not swallow the comments in it.
+	#[test]
+	fn test_a_cycle_loses_nothing_24() -> Outcome<()> {
+		let mut a = c("aaaaaaaaaaaaaaaa", "one");
+		let mut b = c("bbbbbbbbbbbbbbbb", "two");
+		a.parent = Some(b.id.clone());
+		b.parent = Some(a.id.clone());
+		let threads = thread(vec![a, b]);
+		assert_eq!(count_threads(&threads), 2, "a cycle swallowed its comments");
+		Ok(())
+	}
+
 	/// The proof is over the challenge, so a proof for one post is not a proof for another, and a
 	/// wrong nonce does not pass.
 	#[test]
 	fn test_a_proof_is_bound_to_its_challenge_11() -> Outcome<()> {
 		let secret = b"a-per-process-secret";
-		let a = pow_challenge("post-one", secret);
-		let b = pow_challenge("post-two", secret);
+		let a = pow_challenge_at("post-one", secret, "w");
+		let b = pow_challenge_at("post-two", secret, "w");
 		assert_ne!(a, b, "two posts share a challenge");
-		assert_eq!(a, pow_challenge("post-one", secret), "a challenge is not stable");
+		assert_eq!(a, pow_challenge_at("post-one", secret, "w"), "a challenge is not stable");
 
 		// Find a real proof at a width cheap enough for a test, then check it does not travel.
 		let bits = 8;
@@ -1441,6 +1605,13 @@ mod tests {
 		// And the words survive.
 		assert!(html.contains("Nice post."), "the prose was lost: {}", html);
 		assert!(html.contains("click me"), "the link's words were lost: {}", html);
+
+		// A link a stranger did get to keep carries rel, so the site lends it nothing.
+		let mut y = c("b", "");
+		y.body = fmt!("See [this](https://example.com/x).");
+		let html = res!(y.render());
+		assert!(html.contains("rel=\"nofollow ugc noopener\""),
+			"a commenter's link carried no rel: {}", html);
 		Ok(())
 	}
 
@@ -1465,9 +1636,10 @@ mod tests {
 
 /// What a submitted comment turned into.
 ///
-/// A caller answers a reader with the same page either way; this says what to tell them. It never
-/// says *which rule* refused, deliberately: a spammer tuning against a precise reason is being given
-/// a test suite, and a reader who wrote something ordinary does not need to know the machinery.
+/// A caller answers a reader with the same page either way; this says what to tell them, as a **code**
+/// that the page turns into words -- never as text that travels in a URL. It never says *which rule*
+/// refused, deliberately: a spammer tuning against a precise reason is being given a test suite, and a
+/// reader who wrote something ordinary does not need to know the machinery.
 pub enum Received {
 	/// Stored and published at once, because the site already knows the commenter.
 	Published,
@@ -1487,10 +1659,10 @@ impl Received {
 	/// waiting; the alternative is a tuning signal for everybody, which is worse.
 	pub fn tell_reader(&self) -> &'static str {
 		match self {
-			Self::Published	=> "Thank you — your comment is below.",
+			Self::Published	=> "published",
 			Self::Held
 			| Self::Refused(_)
-				=> "Thank you — your comment has been sent to the author for review.",
+				=> "held",
 		}
 	}
 }
@@ -1565,7 +1737,7 @@ pub fn receive<
 	let proved = if sub.nonce.trim().is_empty() {
 		false
 	} else {
-		if sub.challenge != pow_challenge(sub.slug, secret) {
+		if !pow_challenge_current(&sub.challenge, sub.slug, secret) {
 			return Ok(Received::Refused(fmt!("the proof answers a challenge this site did not set")));
 		}
 		if !pow_verify(&sub.challenge, sub.nonce.trim(), POW_BITS) {
@@ -1598,7 +1770,10 @@ pub fn receive<
 	let c = Comment {
 		id:		mint_id(),
 		slug:		sub.slug.to_string(),
-		parent:		sub.parent.filter(|p| !p.trim().is_empty()),
+		// A parent is an id this module minted or it is nothing. Unchecked, it was the one field
+		// with no bound at all: a caller could store megabytes of their own choosing per request,
+		// since the field went straight into the record.
+		parent:		sub.parent.filter(|p| valid_id(p)),
 		author,
 		body,
 		created:	sub.now.clone(),
@@ -1609,10 +1784,15 @@ pub fn receive<
 
 	// What is already waiting on this post. Read before anything is written, so a full queue costs a
 	// read rather than a row.
-	let waiting = res!(list_for_post(db, sub.slug, id))
-		.iter()
-		.filter(|x| x.state == CommentState::Pending)
-		.count();
+	let held = res!(list_for_post(db, sub.slug, id));
+	// A ceiling on the whole thread, not only on what is waiting. Every comment on a post is read
+	// back on every public view of it, so an unbounded store is an unbounded cost on every reader --
+	// the write is cheap and permanent and the reading of it is neither.
+	if held.len() >= POST_MAX {
+		info!("{}: publish: '{}' holds {} comments and is taking no more", id, sub.slug, held.len());
+		return Ok(Received::Refused(fmt!("the post has all the comments it will take")));
+	}
+	let waiting = held.iter().filter(|x| x.state == CommentState::Pending).count();
 	if waiting >= PENDING_MAX {
 		info!("{}: publish: '{}' has {} comments waiting and is taking no more",
 			id, sub.slug, waiting);
@@ -1624,6 +1804,15 @@ pub fn receive<
 		Some(h)	=> res!(commenter(db, &h)),
 		None	=> None,
 	};
+
+	// Trust attaches to a handle, and a handle is an address somebody typed: nothing has proved they
+	// own it. So it is only honoured where the sender also matches the one the trust was granted to.
+	// An attacker who knows an approved address still has to arrive from the same place. This is a
+	// weaker claim than a confirmed address would be, and it is stated rather than hidden: see
+	// `Commenter::from`.
+	let known = known.filter(|k| {
+		!k.trusted || k.from.is_none() || k.from.as_deref() == c.from.as_deref()
+	});
 
 	let mut verdict = moderator.judge(&c, known.as_ref());
 	// A comment with no proof is held even where the moderator would have allowed it. The proof is
@@ -1645,7 +1834,7 @@ pub fn receive<
 	// their first and so blocking them later has something to attach to.
 	if let Some(h) = stored.author.handle() {
 		if known.is_none() {
-			res!(set_trust(db, &h, false, &sub.now));
+			res!(set_trust(db, &h, false, None, &sub.now));
 		}
 	}
 

@@ -146,12 +146,14 @@ impl Policy {
 				// A colon that comes after a path separator is part of the path, not a scheme.
 				let before = &cleaned[..i];
 				if before.contains('/') || before.contains('?') || before.contains('#') {
-					return self.allow_relative;
+					return self.allow_relative && !cleaned.starts_with("//");
 				}
 				before
 			}
-			// No colon at all: a relative destination.
-			None => return self.allow_relative,
+			// No colon at all: a relative destination -- unless it opens `//`, which is not
+			// relative at all. `//evil.example/x` inherits the page's scheme and goes straight
+			// off-site, and reading it as "relative" is how a link allowlist is walked past.
+			None => return self.allow_relative && !cleaned.starts_with("//"),
 		};
 		if scheme.is_empty() {
 			// A destination beginning `:` names no scheme and is nonsense; refuse it rather than

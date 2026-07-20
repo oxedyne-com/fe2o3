@@ -54,9 +54,11 @@ use crate::doc::Doc;
 use oxedyne_fe2o3_core::prelude::*;
 
 pub use self::write::{
+	Opts,
 	escape_attr,
 	escape_text,
 	render,
+	render_with,
 };
 
 /// Reads HTML and produces its document tree.

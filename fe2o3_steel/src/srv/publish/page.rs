@@ -943,8 +943,12 @@ fn comment_form(cfg: &PublishConfig, post: &Post, view: &CommentsView, parent: O
 	s.push_str("<p class=\"comment-replying\" id=\"comment-replying\" hidden>Replying to \
 		<span id=\"comment-replying-who\"></span> \
 		<a href=\"#comment-form\" id=\"comment-reply-cancel\">(cancel)</a></p>\n");
-	s.push_str(&fmt!("<input type=\"hidden\" name=\"parent\" id=\"comment-parent\" value=\"{}\">\n",
-		parent.unwrap_or("")));
+	// Escaped like every other value here. The sole caller passes None today, which is exactly why
+	// this was missed -- and `parent` is attacker-supplied, so the moment somebody wires it up an
+	// unescaped value is an attribute breakout.
+	s.push_str("<input type=\"hidden\" name=\"parent\" id=\"comment-parent\" value=\"");
+	escape_attr(&mut s, parent.unwrap_or(""));
+	s.push_str("\">\n");
 	s.push_str("<input type=\"hidden\" name=\"challenge\" id=\"comment-challenge\" value=\"");
 	escape_attr(&mut s, &view.challenge);
 	s.push_str("\">\n");
@@ -1080,17 +1084,22 @@ const COMMENT_JS: &str = r#"<script>
 
 /// What the last comment attempt said, read out of the query a redirect landed with.
 ///
-/// Percent-decoded only for the space, which is all a sentence of ours carries once encoded by
-/// [`comment_posted`]; anything else stands as written rather than being guessed at.
+/// **A code, not a sentence.** The query is a thing anybody can put in a link and send to somebody
+/// else, so carrying the message text in it would let a stranger make this site say whatever they
+/// liked above its own comment form -- "your payment failed", say, over a plausible-looking URL. The
+/// redirect carries a word this function knows, and the words themselves live here. A code this does
+/// not know says nothing at all.
 pub fn said_of(query: &str) -> Option<String> {
 	for pair in query.split('&') {
 		let mut kv = pair.splitn(2, '=');
 		if kv.next() == Some("said") {
-			let v = kv.next().unwrap_or("");
-			if v.is_empty() {
-				return None;
-			}
-			return Some(percent_decode(v));
+			return match kv.next().unwrap_or("") {
+				"published"	=> Some(fmt!("Thank you — your comment is below.")),
+				"held"		=> Some(fmt!(
+					"Thank you — your comment has been sent to the author for review.")),
+				"shut"		=> Some(fmt!("Comments are not open on this site.")),
+				_		=> None,
+			};
 		}
 	}
 	None
@@ -1102,6 +1111,7 @@ pub fn said_of(query: &str) -> Option<String> {
 /// reasoning the console's writes take. The fragment puts the reader at the conversation rather than
 /// at the top of prose they have just read.
 pub fn comment_posted(cfg: &PublishConfig, slug: &str, said: &str) -> HttpMessage {
+	// `said` is one of the codes `said_of` knows, never a sentence. See its documentation.
 	let to = fmt!("{}?said={}#comments", cfg.path_of(slug), percent_encode(said));
 	let mut resp = HttpMessage::new_response(HttpStatus::SeeOther);
 	resp = resp.with_field(HeaderName::Location, HeaderFieldValue::Generic(to));

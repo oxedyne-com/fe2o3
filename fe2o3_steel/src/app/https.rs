@@ -740,7 +740,7 @@ impl<
                             ));
                             got.tell_reader().to_string()
                         }
-                        None => "Comments are not available on this site.".to_string(),
+                        None => "shut".to_string(),
                     };
                     return Ok(Some(publish_page::comment_posted(cfg.as_ref(), slug, &said)));
                 }

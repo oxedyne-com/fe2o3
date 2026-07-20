@@ -40,8 +40,24 @@ use crate::doc::{
 
 /// Renders a document to an HTML fragment.
 pub fn render(doc: &Doc) -> String {
+	render_with(doc, &Opts::default())
+}
+
+/// What a caller may vary about the rendering.
+#[derive(Clone, Debug, Default)]
+pub struct Opts {
+	/// The `rel` every link carries, where a caller wants one.
+	///
+	/// Prose by a trusted author wants none: a link an author chose is a link the site vouches for.
+	/// Prose by a stranger wants `nofollow ugc noopener` -- a published comment otherwise lends the
+	/// site's standing to whatever it points at, which is the entire economic motive for comment spam.
+	pub link_rel: Option<String>,
+}
+
+/// Renders a document, varying what [`Opts`] allows.
+pub fn render_with(doc: &Doc, opts: &Opts) -> String {
 	let mut out = String::new();
-	blocks(&mut out, &doc.blocks);
+	blocks_with(&mut out, &doc.blocks, opts);
 	out
 }
 
@@ -63,15 +79,15 @@ fn close(out: &mut String, tag: &str) {
 }
 
 /// Renders a run of blocks, each on its own line.
-fn blocks(out: &mut String, items: &[Block]) {
+fn blocks_with(out: &mut String, items: &[Block], opts: &Opts) {
 	for item in items {
-		block(out, item);
+		block(out, item, opts);
 		out.push('\n');
 	}
 }
 
 /// Renders one block.
-fn block(out: &mut String, item: &Block) {
+fn block(out: &mut String, item: &Block, opts: &Opts) {
 	match item {
 		Block::Heading { level, content } => {
 			// The tree says 1 to 6 and the Markdown reader gives no other, but the type admits one, and
@@ -85,12 +101,12 @@ fn block(out: &mut String, item: &Block) {
 				_	=> "h6",
 			};
 			open(out, tag);
-			inlines(out, content);
+			inlines(out, content, opts);
 			close(out, tag);
 		}
 		Block::Para(content) => {
 			open(out, "p");
-			inlines(out, content);
+			inlines(out, content, opts);
 			close(out, "p");
 		}
 		Block::List { ordered, items } => {
@@ -104,10 +120,10 @@ fn block(out: &mut String, item: &Block) {
 				// what a reader wrote as a plain item, and wrapping it in a `<p>` would space a shopping
 				// list out like an essay. An item holding anything more is rendered as the blocks it is.
 				match item.as_slice() {
-					[Block::Para(content)]	=> inlines(out, content),
+					[Block::Para(content)]	=> inlines(out, content, opts),
 					_			=> {
 						out.push('\n');
-						blocks(out, item);
+						blocks_with(out, item, opts);
 					}
 				}
 				out.push_str("</li>\n");
@@ -129,19 +145,19 @@ fn block(out: &mut String, item: &Block) {
 		}
 		Block::Quote(inner) => {
 			out.push_str("<blockquote>\n");
-			blocks(out, inner);
+			blocks_with(out, inner, opts);
 			out.push_str("</blockquote>");
 		}
 		Block::Table { head, rows, cols } => {
 			out.push_str("<table>\n");
 			if let Some(head) = head {
 				out.push_str("<thead>\n");
-				row(out, head, cols, "th");
+				row(out, head, cols, "th", opts);
 				out.push_str("</thead>\n");
 			}
 			out.push_str("<tbody>\n");
 			for r in rows {
-				row(out, r, cols, "td");
+				row(out, r, cols, "td", opts);
 			}
 			out.push_str("</tbody>\n</table>");
 		}
@@ -150,7 +166,7 @@ fn block(out: &mut String, item: &Block) {
 			out.push_str("<div");
 			write_attrs(out, attrs);
 			out.push_str(">\n");
-			blocks(out, content);
+			blocks_with(out, content, opts);
 			out.push_str("</div>");
 		}
 	}
@@ -188,7 +204,7 @@ fn write_attrs(out: &mut String, attrs: &Attrs) {
 }
 
 /// Renders one row of a table, its cells tagged `th` or `td` and aligned by column.
-fn row(out: &mut String, r: &Row, cols: &[Align], tag: &str) {
+fn row(out: &mut String, r: &Row, cols: &[Align], tag: &str, opts: &Opts) {
 	out.push_str("<tr>");
 	for (i, cell) in r.0.iter().enumerate() {
 		out.push('<');
@@ -197,7 +213,7 @@ fn row(out: &mut String, r: &Row, cols: &[Align], tag: &str) {
 		// nothing, which is the same as a column that named no alignment.
 		align(out, cols.get(i).copied().unwrap_or_default());
 		out.push('>');
-		cells(out, cell);
+		cells(out, cell, opts);
 		close(out, tag);
 	}
 	out.push_str("</tr>\n");
@@ -227,32 +243,36 @@ fn align(out: &mut String, a: Align) {
 }
 
 /// Renders a cell's inline content.
-fn cells(out: &mut String, cell: &Cell) {
-	inlines(out, &cell.0);
+fn cells(out: &mut String, cell: &Cell, opts: &Opts) {
+	inlines(out, &cell.0, opts);
 }
 
 /// Renders a run of inlines.
-fn inlines(out: &mut String, content: &[Inline]) {
+fn inlines(out: &mut String, content: &[Inline], opts: &Opts) {
 	for item in content {
-		inline(out, item);
+		inline(out, item, opts);
 	}
 }
 
 /// Renders one inline.
-fn inline(out: &mut String, item: &Inline) {
+fn inline(out: &mut String, item: &Inline, opts: &Opts) {
 	match item {
 		Inline::Text(t) => escape_text(out, t),
 		Inline::Emph { strong, content } => {
 			let tag = if *strong { "strong" } else { "em" };
 			open(out, tag);
-			inlines(out, content);
+			inlines(out, content, opts);
 			close(out, tag);
 		}
 		Inline::Link { to, content } => {
 			out.push_str("<a href=\"");
 			escape_attr(out, to);
+			if let Some(rel) = &opts.link_rel {
+				out.push_str("\" rel=\"");
+				escape_attr(out, rel);
+			}
 			out.push_str("\">");
-			inlines(out, content);
+			inlines(out, content, opts);
 			out.push_str("</a>");
 		}
 		Inline::Image { src, alt } => {
@@ -266,7 +286,7 @@ fn inline(out: &mut String, item: &Inline) {
 			out.push_str("<span");
 			write_attrs(out, attrs);
 			out.push('>');
-			inlines(out, content);
+			inlines(out, content, opts);
 			out.push_str("</span>");
 		}
 		Inline::Code(c) => {

@@ -221,6 +221,36 @@ q=$(curl -sk -b $MJ "$B/manage/comments")
 has "but it is waiting in the queue" "$q" "A first remark from a stranger"
 has "and the queue says why it is waiting" "$q" "mc-comment-why"
 
+# A real proof, computed here with python's SHA-256 rather than by this program.
+# The server verified with SHA3 once while the browser hashed SHA-256, so no proof
+# ever passed and every comment from a reader with scripting was refused before it
+# was stored -- and the reader was thanked for it. Only an outside digest catches
+# that; a check that hashed the same way the server does would have agreed happily.
+NONCE=$(python3 -c "
+import hashlib,sys
+ch=sys.argv[1]; bits=18; n=0
+while True:
+    d=hashlib.sha256((ch+str(n)).encode()).digest()
+    if int.from_bytes(d,'big') >> (256-bits) == 0: print(n); break
+    n+=1
+" "$CHAL")
+curl -sk -o /dev/null -X POST \
+    --data-urlencode "name=Proven" --data-urlencode "email=proven@example.com" \
+    --data-urlencode "body=A comment carrying a genuine proof of work." \
+    --data-urlencode "challenge=$CHAL" --data-urlencode "nonce=$NONCE" \
+    --data-urlencode "website=" "$POST_URL/comment"
+q=$(curl -sk -b $MJ "$B/manage/comments?state=any")
+has "a comment with a real proof is stored" "$q" "A comment carrying a genuine proof"
+hasnt "and it is not refused for its proof" "$q" "the proof does not meet the width"
+
+# A nonce that does not solve the challenge is refused.
+curl -sk -o /dev/null -X POST \
+    --data-urlencode "name=Liar" --data-urlencode "body=A nonce that solves nothing." \
+    --data-urlencode "challenge=$CHAL" --data-urlencode "nonce=1" \
+    --data-urlencode "website=" "$POST_URL/comment"
+q=$(curl -sk -b $MJ "$B/manage/comments?state=any")
+hasnt "a nonce that solves nothing is refused" "$q" "A nonce that solves nothing"
+
 # The honeypot: filled, and nothing is stored.
 curl -sk -o /dev/null -X POST \
     --data-urlencode "name=Bot" --data-urlencode "body=Buy things at example.com" \
