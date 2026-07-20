@@ -251,6 +251,19 @@ curl -sk -o /dev/null -X POST \
 q=$(curl -sk -b $MJ "$B/manage/comments?state=any")
 hasnt "a nonce that solves nothing is refused" "$q" "A nonce that solves nothing"
 
+# The form's script is a file, not an inline block, so a site can run a
+# Content-Security-Policy without unsafe-inline -- the layer that would contain a
+# mistake in the render policy, and the same untrusted prose reaches the console.
+page=$(curl -sk "$POST_URL")
+hasnt "the post page carries no inline script" "$page" "<script>"
+has "it references the form script as a file" "$page" "/posts/comments.js"
+js=$(curl -sk "$B/posts/comments.js")
+has "which is served" "$js" "comment-nonce"
+has "and computes SHA-256, as the server verifies" "$js" "SHA-256"
+check "with a JavaScript content type" \
+    "$(curl -sk -o /dev/null -w '%{content_type}' "$B/posts/comments.js")" \
+    "text/javascript; charset=utf-8"
+
 # The honeypot: filled, and nothing is stored.
 curl -sk -o /dev/null -X POST \
     --data-urlencode "name=Bot" --data-urlencode "body=Buy things at example.com" \

@@ -57,6 +57,8 @@
           "site_name":  "Rig",
           "base_url":   "https://localhost:@PORT@",
           "comments":   true,
+          "comment_rate_secs":   0,
+          "comment_rate_hourly": 0,
           "css":        (vek|[])
         },
         "site_admins": (vek|[

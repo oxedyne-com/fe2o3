@@ -139,6 +139,16 @@ pub struct PublishConfig {
 	/// The remotes this site is configured to post to, and the credentials to reach them. Empty where
 	/// the site publishes only to its own pages, which is the default.
 	pub creds:	send::DestCreds,
+	/// The least seconds between two comments from one sender. `0` turns the interval off.
+	///
+	/// **Operational policy, not a constant**, because the thing being counted is an address and an
+	/// address is not a person: a household, an office and a university share one. A site whose
+	/// readers are behind shared addresses wants this low or off; one being flooded wants it high.
+	/// It also does nothing useful where the server sits behind a proxy that does not pass the
+	/// client's address through, since then every reader is one address.
+	pub comment_rate_secs:		u64,
+	/// How many comments one sender may leave in an hour. `0` turns the count off.
+	pub comment_rate_hourly:	u32,
 	/// Whether this site takes comments on its posts.
 	///
 	/// **Off unless a site asks for it.** A comment endpoint is an unauthenticated public write, and
@@ -163,6 +173,26 @@ impl PublishConfig {
 				None			=> Ok(default.to_string()),
 				_			=> Err(err!(
 					"PublishConfig: '{}' must be a string.", key;
+					Invalid, Input, Mismatch)),
+			}
+		};
+
+		// A count, however narrowly the grammar happened to type it. A bare `0` is not a `u64` to
+		// the decoder -- it is the smallest thing that holds it -- so a match on one variant refuses
+		// exactly the value an operator is most likely to write.
+		let get_count = |key: &str, default: u64| -> Outcome<u64> {
+			match m.get(&dat!(key)) {
+				None			=> Ok(default),
+				Some(Dat::U8(n))	=> Ok(*n as u64),
+				Some(Dat::U16(n))	=> Ok(*n as u64),
+				Some(Dat::U32(n))	=> Ok(*n as u64),
+				Some(Dat::U64(n))	=> Ok(*n),
+				Some(Dat::I8(n)) if *n >= 0	=> Ok(*n as u64),
+				Some(Dat::I16(n)) if *n >= 0	=> Ok(*n as u64),
+				Some(Dat::I32(n)) if *n >= 0	=> Ok(*n as u64),
+				Some(Dat::I64(n)) if *n >= 0	=> Ok(*n as u64),
+				_			=> Err(err!(
+					"PublishConfig: '{}' must be a count of zero or more.", key;
 					Invalid, Input, Mismatch)),
 			}
 		};
@@ -233,6 +263,8 @@ impl PublishConfig {
 			creds,
 			// A site that names no From takes the mail default; the field is optional, so an existing
 			// `publish` block that predates the newsletter still loads.
+			comment_rate_secs:	res!(get_count("comment_rate_secs", 30)),
+			comment_rate_hourly:	res!(get_count("comment_rate_hourly", 10)) as u32,
 			comments:		match m.get(&dat!("comments")) {
 				Some(Dat::Bool(b))	=> *b,
 				None			=> false,
@@ -297,6 +329,18 @@ impl PublishConfig {
 	pub fn subscribe_path(&self) -> String {
 		let mut s = self.path.clone();
 		s.push_str("/subscribe");
+		s
+	}
+
+	/// The URL path the comment form's script is served at.
+	///
+	/// A file rather than an inline block, so a site can run a Content-Security-Policy without
+	/// `unsafe-inline`. An inline script forces every page that carries it to allow inline scripts,
+	/// which switches off the one layer that would contain a mistake in the render policy -- and the
+	/// same untrusted prose is rendered into the admin console, where a mistake would be worst.
+	pub fn comment_js_path(&self) -> String {
+		let mut s = self.path.clone();
+		s.push_str("/comments.js");
 		s
 	}
 

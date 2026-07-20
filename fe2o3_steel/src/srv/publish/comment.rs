@@ -1471,6 +1471,33 @@ mod tests {
 		Ok(())
 	}
 
+	/// The rate limit switches off cleanly, and a site that says nothing gets the defaults.
+	#[test]
+	fn test_the_rate_limit_is_policy_26() -> Outcome<()> {
+		use crate::srv::publish::PublishConfig;
+
+		// A site that says nothing is rate limited, because most sites should be.
+		let cfg = res!(PublishConfig::from_datmap(&DaticleMap::new()));
+		assert_eq!(cfg.comment_rate_secs, 30);
+		assert_eq!(cfg.comment_rate_hourly, 10);
+
+		// A site behind a shared address turns it off, and is taken at its word.
+		// Written as a bare zero, which the grammar types as narrowly as it can -- the shape an
+		// operator actually writes, and the one a match on `Dat::U64` alone would refuse.
+		let mut m = DaticleMap::new();
+		m.insert(dat!("comment_rate_secs"), dat!(0u8));
+		m.insert(dat!("comment_rate_hourly"), dat!(0u8));
+		let cfg = res!(PublishConfig::from_datmap(&m));
+		assert_eq!(cfg.comment_rate_secs, 0);
+		assert_eq!(cfg.comment_rate_hourly, 0);
+
+		// And a value that is not a count is refused rather than guessed at.
+		let mut m = DaticleMap::new();
+		m.insert(dat!("comment_rate_secs"), dat!("often".to_string()));
+		assert!(PublishConfig::from_datmap(&m).is_err());
+		Ok(())
+	}
+
 	/// A submission cannot claim to be the site's author, whatever it sends.
 	#[test]
 	fn test_a_submission_cannot_claim_authorship_25() -> Outcome<()> {
@@ -1737,6 +1764,7 @@ pub fn receive<
 >(
 	db:		&(Arc<RwLock<DB>>, UID),
 	moderator:	&Moderator,
+	rate:		(u64, u32),
 	sub:		Submission<'_>,
 	salt:		&[u8],
 	secret:		&[u8],
@@ -1816,6 +1844,16 @@ pub fn receive<
 
 	// What is already waiting on this post. Read before anything is written, so a full queue costs a
 	// read rather than a row.
+	// What the sender is allowed, before the post's own ceilings are read. A refusal here costs one
+	// read and writes nothing, which is the point of putting it first.
+	if let Some(addr) = &sub.from {
+		let hashed = from_hash(addr, salt);
+		if !res!(rate_allows(db, &hashed, rate.0, rate.1)) {
+			info!("{}: publish: a sender is commenting faster than this site allows", id);
+			return Ok(Received::Refused(fmt!("too many comments from one sender")));
+		}
+	}
+
 	let held = res!(list_for_post(db, sub.slug, id));
 	// A ceiling on the whole thread, not only on what is waiting. Every comment on a post is read
 	// back on every public view of it, so an unbounded store is an unbounded cost on every reader --
@@ -1877,6 +1915,86 @@ pub fn receive<
 	})
 }
 
+
+/// The key a sender's rate record lives under.
+const RATE_PREFIX: &str = "publish/comment-rate/";
+
+/// The least time between two comments from one sender.
+/// See [`PublishConfig::comment_rate_secs`](crate::srv::publish::PublishConfig::comment_rate_secs).
+
+/// Whether a sender may comment now, and the record of their having done so.
+///
+/// Keyed on the **salted address hash**, not on the address they typed: an attacker varies the
+/// address freely and cannot as easily vary where they are. This is the one durable signal about a
+/// sender, and it was collected and ignored until an adversarial review pointed that out.
+///
+/// Two bounds, because they stop different things. The interval stops a flood; the hourly count
+/// stops a slow drip that would otherwise never trip an interval at all. A sender with no address
+/// hash -- which should not happen, since the caller supplies one -- is not rate limited here, and
+/// is bounded by the per-post caps instead.
+pub fn rate_allows<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:		&(Arc<RwLock<DB>>, UID),
+	from:		&str,
+	interval:	u64,
+	hourly:		u32,
+)
+	-> Outcome<bool>
+{
+	// Both off: the site has decided its readers share addresses, or that the per-post ceilings are
+	// bound enough. Nothing is read and nothing is written.
+	if interval == 0 && hourly == 0 {
+		return Ok(true);
+	}
+	let now = std::time::SystemTime::now()
+		.duration_since(std::time::UNIX_EPOCH)
+		.map(|d| d.as_secs())
+		.unwrap_or(0);
+	let key = dat!(fmt!("{}{}", RATE_PREFIX, from));
+
+	let (db_arc, user) = db;
+	let (last, count, window) = {
+		let guard = lock_read!(db_arc);
+		match res!(guard.get(&key, None)) {
+			Some((Dat::List(v), _)) if v.len() == 3 => {
+				let n = |i: usize| match v.get(i) {
+					Some(Dat::U64(x))	=> *x,
+					_			=> 0,
+				};
+				(n(0), n(1) as u32, n(2))
+			}
+			_ => (0, 0, 0),
+		}
+	};
+
+	// A new hour resets the count. The window is the hour the first of them landed in, not a
+	// rolling one: a rolling window needs every timestamp kept, and this needs three numbers.
+	let (count, window) = if now.saturating_sub(window) >= 3600 {
+		(0, now)
+	} else {
+		(count, window)
+	};
+
+	if (interval > 0 && now.saturating_sub(last) < interval)
+		|| (hourly > 0 && count >= hourly)
+	{
+		return Ok(false);
+	}
+
+	let guard = lock_read!(db_arc);
+	res!(guard.insert(
+		key,
+		Dat::List(vec![dat!(now), dat!((count + 1) as u64), dat!(window)]),
+		*user,
+		None,
+	));
+	Ok(true)
+}
 
 /// The key the site's comment secret lives under.
 const SECRET_KEY: &str = "publish/comment-secret";

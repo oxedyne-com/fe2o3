@@ -68,6 +68,9 @@ pub fn handle_get(
 	if path == cfg.json_path() {
 		return super::json::serve(cfg, posts, id);
 	}
+	if path == cfg.comment_js_path() {
+		return Ok(comment_js());
+	}
 	// Everything else under the prefix names a post. The slug is what a reader put in a URL, so it is
 	// checked before it is used: a name is letters, digits, a dash or an underscore.
 	let slug = &path[cfg.path.len() + 1..];
@@ -618,6 +621,8 @@ mod tests {
 			css:		vec![fmt!("/css/a.css")],
 			creds:		Default::default(),
 			comments:		true,
+		comment_rate_secs:	0,
+		comment_rate_hourly:	0,
 		newsletter_from:	String::new(),
 		}
 	}
@@ -994,8 +999,30 @@ fn comment_form(cfg: &PublishConfig, post: &Post, view: &CommentsView, parent: O
 	s.push_str("<button type=\"submit\" class=\"comment-send\" id=\"comment-send\">Post comment</button>\n");
 	s.push_str("<span class=\"comment-working\" id=\"comment-working\" hidden>Working…</span>\n");
 	s.push_str("</form>\n");
-	s.push_str(COMMENT_JS);
+	// Referenced, not inlined: see `comment_js_path`. `defer` because it only wires handlers, and a
+	// form that works without it is the point -- a reader with no scripting posts a comment with no
+	// proof, and the server holds it rather than refusing it.
+	s.push_str("<script defer src=\"");
+	escape_attr(&mut s, &cfg.comment_js_path());
+	s.push_str("\"></script>\n");
 	s
+}
+
+/// Serves the comment form's script.
+///
+/// Cached hard: it is the same bytes for every post on every site, and it changes only when this
+/// server does.
+pub fn comment_js() -> HttpMessage {
+	let mut resp = HttpMessage::ok_respond_with_text(COMMENT_JS.to_string());
+	resp = resp.with_field(
+		HeaderName::ContentType,
+		HeaderFieldValue::Generic(fmt!("text/javascript; charset=utf-8")),
+	);
+	resp = resp.with_field(
+		HeaderName::CacheControl,
+		HeaderFieldValue::Generic(fmt!("public, max-age=86400")),
+	);
+	resp
 }
 
 /// An id, reduced to what may sit in one.
@@ -1017,8 +1044,7 @@ fn esc_id(s: &str) -> String {
 /// gating the fields: a reader with no scripting posts a comment with no nonce, and the server holds
 /// it for a person instead of refusing it. The proof buys a queue that is not full of machines; it is
 /// not a condition of being heard.
-const COMMENT_JS: &str = r#"<script>
-(function () {
+const COMMENT_JS: &str = r#"(function () {
 	var form = document.getElementById('comment-form');
 	if (!form || !window.crypto || !window.crypto.subtle) return;
 
@@ -1086,7 +1112,6 @@ const COMMENT_JS: &str = r#"<script>
 		attempt();
 	});
 })();
-</script>
 "#;
 
 /// What the last comment attempt said, read out of the query a redirect landed with.

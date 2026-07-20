@@ -733,6 +733,7 @@ impl<
                             let got = res!(publish_comment::receive(
                                 dbh,
                                 &publish_comment::Moderator::default(),
+                                (cfg.comment_rate_secs, cfg.comment_rate_hourly),
                                 sub,
                                 &secret,
                                 &secret,
