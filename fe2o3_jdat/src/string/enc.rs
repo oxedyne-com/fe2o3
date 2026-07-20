@@ -220,6 +220,19 @@ pub struct EncoderConfig<
     pub comment1_end_char:      char,
     pub comment2_start_char:    char,
     pub comment2_end_char:      char,
+    /// Encode an absent optional as the `null` literal rather than as the kind
+    /// label.
+    ///
+    /// JDAT writes a missing option as `none`, which is its own keyword and
+    /// round-trips through JDAT's own decoder. JSON has no such keyword: it has
+    /// `null`, and a reader given the string `"none"` instead sees a present
+    /// value whose content happens to be a word. In JavaScript that string is
+    /// truthy, so `if (x.field)` takes the branch for a value that is not there.
+    /// Set for the JSON presets and left off elsewhere, so JDAT output is
+    /// unchanged. It applies to `Opt` alone: a user kind carrying no value
+    /// encodes as its own label, which names the kind and is not the same
+    /// statement as "there is nothing here".
+    pub none_as_null:           bool,
 }
 
 impl<
@@ -244,6 +257,7 @@ impl<
             comment1_end_char:      '!',
             comment2_start_char:    '#',
             comment2_end_char:      '#',
+            none_as_null:           false,
         }
     }   
 }
@@ -346,6 +360,7 @@ impl<
             byte_encoding:      ByteEncoding::Decimal,
             ukinds_opt,
             comment_allowed:    false,
+            none_as_null:       true,
             ..Default::default()
         }
     }
@@ -733,6 +748,7 @@ impl Dat {
             Self::Box(d) => (fmt!("{}", res!(d.recursive_encode(&cfg, state.recurse()))), false),
             Self::Opt(boxoptd) => {
                 match &**boxoptd {
+                    None if cfg.none_as_null => (fmt!("null"), false),
                     None => (fmt!("\"{}\"", typ_str), true),
                     Some(d) => (fmt!("{}", res!(d.recursive_encode(&cfg, state.recurse()))), false),
                 }

@@ -2018,5 +2018,26 @@ pub fn test_string_encdec_func(filter: &'static str) -> Outcome<()> {
         Ok(())
     }));
 
+
+    res!(test_it(filter, &["String encode decode 140", "all", "opt", "json"], || {
+        // An absent option must encode as JSON's own `null`, not as the JDAT
+        // keyword `none` in quotes. A JSON reader given the string "none" sees
+        // a present value whose content is a word; in JavaScript that string is
+        // truthy, so a `if (x.field)` guard takes the wrong branch for a field
+        // that is not there.
+        let json_enc = EncoderConfig::<(), ()>::json(None);
+        let jdat_enc = EncoderConfig::<(), ()>::jdat(None);
+        let d1 = Dat::Opt(Box::new(None));
+        let json_str = res!(d1.encode_string_with_config(&json_enc));
+        req!(json_str, "null".to_string());
+        // A present option is unaffected.
+        let d2 = Dat::Opt(Box::new(Some(dat!(7u8))));
+        req!(res!(d2.encode_string_with_config(&json_enc)), "7".to_string());
+        // JDAT output is untouched: `none` is its keyword and round-trips.
+        let jdat_str = res!(d1.encode_string_with_config(&jdat_enc));
+        req!(jdat_str.contains("none"), true, "(jdat should still say none)");
+        Ok(())
+    }));
+
     Ok(())
 }
