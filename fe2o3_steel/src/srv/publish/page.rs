@@ -33,6 +33,7 @@ use crate::srv::publish::{
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_net::http::{
 	fields::{
+		HeaderFields,
 		HeaderFieldValue,
 		HeaderName,
 	},
@@ -843,6 +844,8 @@ pub struct CommentsView {
 	pub said:	Option<String>,
 	/// Whether the site is taking comments at all.
 	pub open:	bool,
+	/// The comment this reader may still correct, and the token proving they wrote it.
+	pub editable:	Option<(String, String)>,
 }
 
 /// The conversation below a post, and the form to join it.
@@ -870,7 +873,7 @@ pub fn comments_section(cfg: &PublishConfig, post: &Post, view: &CommentsView) -
 		}
 		s.push_str("<ol class=\"comment-list\">\n");
 		for t in &view.threads {
-			s.push_str(&thread_item(t, 0));
+			s.push_str(&thread_item(t, 0, &view.path, &view.editable));
 		}
 		s.push_str("</ol>\n");
 		s.push_str(&comments_pager(view));
@@ -942,7 +945,14 @@ fn comments_pager(view: &CommentsView) -> String {
 }
 
 /// One comment and its replies.
-fn thread_item(t: &Thread, depth: usize) -> String {
+fn thread_item(
+	t:		&Thread,
+	depth:		usize,
+	path:		&str,
+	editable:	&Option<(String, String)>,
+)
+	-> String
+{
 	let mut s = String::new();
 	s.push_str(&fmt!("<li class=\"comment\" id=\"c-{}\">\n", esc_id(&t.comment.id)));
 
@@ -994,14 +1004,42 @@ fn thread_item(t: &Thread, depth: usize) -> String {
 		));
 	}
 
+	// The author's own way to correct what they just wrote, shown only to whoever holds the token
+	// for this comment and only while the window stands.
+	if let Some((cid, token)) = editable {
+		if *cid == t.comment.id {
+			s.push_str(&edit_form(path, &t.comment, token));
+		}
+	}
+
 	if !t.replies.is_empty() {
 		s.push_str("<ol class=\"comment-replies\">\n");
 		for r in &t.replies {
-			s.push_str(&thread_item(r, depth + 1));
+			s.push_str(&thread_item(r, depth + 1, path, editable));
 		}
 		s.push_str("</ol>\n");
 	}
 	s.push_str("</li>\n");
+	s
+}
+
+/// The form a comment's own author corrects it with.
+fn edit_form(path: &str, c: &crate::srv::publish::comment::Comment, token: &str) -> String {
+	let mut s = String::new();
+	s.push_str("<details class=\"comment-edit\"><summary>Correct this</summary>\n");
+	s.push_str("<form method=\"POST\" action=\"");
+	escape_attr(&mut s, &fmt!("{}/comment/edit", path));
+	s.push_str("\">\n");
+	s.push_str("<input type=\"hidden\" name=\"id\" value=\"");
+	escape_attr(&mut s, &c.id);
+	s.push_str("\">\n<input type=\"hidden\" name=\"token\" value=\"");
+	escape_attr(&mut s, token);
+	s.push_str("\">\n<textarea name=\"body\" rows=\"5\">");
+	escape_text(&mut s, &c.body);
+	s.push_str("</textarea>\n");
+	s.push_str("<p class=\"comment-note\">A comment that has already been published goes back to \
+		the author to look at again.</p>\n");
+	s.push_str("<button type=\"submit\">Save the correction</button>\n</form>\n</details>\n");
 	s
 }
 
@@ -1259,6 +1297,12 @@ pub fn said_of(query: &str) -> Option<String> {
 				"held"		=> Some(fmt!(
 					"Thank you — your comment has been sent to the author for review.")),
 				"shut"		=> Some(fmt!("Comments are not open on this site.")),
+				"edited"	=> Some(fmt!(
+					"Your comment has been changed. A comment that was already published goes \
+					back to the author to look at again.")),
+				"noedit"	=> Some(fmt!(
+					"That comment could not be changed. The few minutes for correcting it may \
+					have passed.")),
 				_		=> None,
 			};
 		}
@@ -1277,6 +1321,39 @@ pub fn comment_posted(cfg: &PublishConfig, slug: &str, said: &str) -> HttpMessag
 	let mut resp = HttpMessage::new_response(HttpStatus::SeeOther);
 	resp = resp.with_field(HeaderName::Location, HeaderFieldValue::Generic(to));
 	resp
+}
+
+/// The comment a request's cookie claims to have written, and the token it offers.
+///
+/// Read only; whether the token is any good is the caller's to check, since only the caller holds
+/// the site's secret.
+pub fn edit_claim(headers: &std::sync::Arc<HeaderFields>) -> Option<(String, String)> {
+	use oxedyne_fe2o3_net::http::fields::HeaderFieldValue as V;
+	if let Some(V::Cookie(cookies)) = headers.get_one(&HeaderName::Cookie) {
+		for c in cookies {
+			if c.key == "comment_edit" {
+				let (id, token) = c.val.split_once('.')?;
+				if id.is_empty() || token.is_empty() {
+					return None;
+				}
+				return Some((id.to_string(), token.to_string()));
+			}
+		}
+	}
+	None
+}
+
+/// Attaches the token that lets a comment's author correct it.
+///
+/// A cookie, because it is the only thing a browser will carry back on its own and the alternative
+/// is a token in a URL that lands in history, in a referrer and in anything the reader pastes. It
+/// expires with the window, is `HttpOnly` so no script reads it, and names one comment.
+pub fn with_edit_cookie(resp: HttpMessage, id: &str, token: &str) -> HttpMessage {
+	let value = fmt!(
+		"comment_edit={}.{}; Path=/; Max-Age={}; HttpOnly; SameSite=Lax",
+		id, token, crate::srv::publish::comment::EDIT_WINDOW_SECS,
+	);
+	resp.with_field(HeaderName::SetCookie, HeaderFieldValue::Generic(value))
 }
 
 /// Percent-encodes what a redirect carries.

@@ -288,6 +288,28 @@ pv=$(curl -sk -X POST --data-urlencode "body=**bold** and [a link](javascript:al
 has "a preview renders the markup" "$pv" "<strong>bold</strong>"
 hasnt "and applies the policy to it" "$pv" "javascript:alert"
 
+# A commenter may correct what they just wrote, and only they may.
+CJ="$RIG_DIR/cjar"
+curl -sk -c $CJ -o /dev/null -X POST --data-urlencode "name=Corrector" \
+    --data-urlencode "body=A commnet with a typo in it." \
+    --data-urlencode "challenge=$CHAL" --data-urlencode "website=" "$POST_URL/comment"
+has "posting hands back an edit token" "$(cat $CJ)" "comment_edit"
+EDIT=$(grep comment_edit $CJ | awk '{print $7}')
+ECID=${EDIT%%.*}
+ETOK=${EDIT#*.}
+curl -sk -o /dev/null -X POST --data-urlencode "id=$ECID" --data-urlencode "token=$ETOK" \
+    --data-urlencode "body=A comment with the typo fixed." "$POST_URL/comment/edit"
+q=$(curl -sk -b $MJ "$B/manage/comments?state=any")
+has "the correction is stored" "$q" "A comment with the typo fixed"
+hasnt "and the typo is gone" "$q" "A commnet with a typo"
+
+# Somebody else's token does not work on this comment.
+curl -sk -o /dev/null -X POST --data-urlencode "id=$ECID" \
+    --data-urlencode "token=0000000000000000000000000000000f" \
+    --data-urlencode "body=Edited by somebody who did not write it." "$POST_URL/comment/edit"
+q=$(curl -sk -b $MJ "$B/manage/comments?state=any")
+hasnt "a wrong token changes nothing" "$q" "Edited by somebody who did not write it"
+
 # The honeypot: filled, and nothing is stored.
 curl -sk -o /dev/null -X POST \
     --data-urlencode "name=Bot" --data-urlencode "body=Buy things at example.com" \

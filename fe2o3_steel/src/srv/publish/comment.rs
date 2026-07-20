@@ -1533,6 +1533,90 @@ mod tests {
 		Ok(())
 	}
 
+	/// An edit token names one comment and cannot be guessed from another.
+	#[test]
+	fn test_an_edit_token_names_one_comment_28() -> Outcome<()> {
+		let secret = b"a-site-secret";
+		let a = edit_token("aaaaaaaaaaaaaaaa", secret);
+		let b = edit_token("bbbbbbbbbbbbbbbb", secret);
+		assert_ne!(a, b, "two comments share an edit token");
+		assert!(edit_token_ok("aaaaaaaaaaaaaaaa", secret, &a));
+		assert!(!edit_token_ok("aaaaaaaaaaaaaaaa", secret, &b), "another comment's token was taken");
+		assert!(!edit_token_ok("aaaaaaaaaaaaaaaa", secret, ""), "an empty token was taken");
+		assert!(!edit_token_ok("aaaaaaaaaaaaaaaa", b"another-secret", &a),
+			"a token from another site was taken");
+		Ok(())
+	}
+
+	/// The window closes, and an unreadable stamp is not editable.
+	#[test]
+	fn test_the_edit_window_closes_29() -> Outcome<()> {
+		let mut c = c("aaaaaaaaaaaaaaaa", "words");
+		c.created = fmt!("2026-07-20T10:00:00Z");
+		let at = match parse_stamp_secs(&c.created) {
+			Some(t)	=> t,
+			None	=> panic!("the test's own stamp will not parse"),
+		};
+		assert!(editable(&c, at), "a comment was not editable the moment it was written");
+		assert!(editable(&c, at + EDIT_WINDOW_SECS - 1), "the window closed early");
+		assert!(!editable(&c, at + EDIT_WINDOW_SECS), "the window did not close");
+		assert!(!editable(&c, at + 86_400), "a day-old comment was still editable");
+
+		// A stamp that will not read is not editable: an unreadable time cannot be shown to be
+		// recent, and guessing permissively would make the window unbounded.
+		for bad in ["not a time at all", "", "2026-07-20", "20260720T100000Z", "yyyy-mm-ddThh:mm:ss"] {
+			c.created = fmt!("{}", bad);
+			assert!(!editable(&c, at), "'{}' granted an unbounded window", bad);
+		}
+		Ok(())
+	}
+
+	/// The stamp reader agrees with known instants, and refuses what is not one.
+	#[test]
+	fn test_the_stamp_reader_is_strict_30() -> Outcome<()> {
+		// Values from `date -u -d "<stamp>" +%s`, not from this function and not from memory. The
+		// first draft of this test had one of them three days out, written from recall; the code
+		// was right and the expectation was wrong.
+		assert_eq!(parse_stamp_secs("1970-01-01T00:00:00Z"), Some(0));
+		assert_eq!(parse_stamp_secs("2000-01-01T00:00:00Z"), Some(946_684_800));
+		assert_eq!(parse_stamp_secs("2026-07-20T03:00:00Z"), Some(1_784_516_400));
+		// A leap day, which a naive day count gets wrong.
+		assert_eq!(parse_stamp_secs("2024-02-29T00:00:00Z"), Some(1_709_164_800));
+		// And the shapes that are not a stamp.
+		for bad in ["", "not a time", "2026-07-20", "2026-13-01T00:00:00Z",
+			"2026-07-32T00:00:00Z", "2026-07-20T25:00:00Z", "2026-07-20T00:60:00Z",
+			"20xx-07-20T00:00:00Z"] {
+			assert_eq!(parse_stamp_secs(bad), None, "'{}' was read as a time", bad);
+		}
+		Ok(())
+	}
+
+	/// A comment claiming a known commenter from a new place is held and says so.
+	#[test]
+	fn test_a_claim_from_elsewhere_is_flagged_27() -> Outcome<()> {
+		// The record `receive` consults, and what it would compare against.
+		let granted = Commenter {
+			handle:		fmt!("email:ada@example.com"),
+			from:		Some(fmt!("where-ada-comments-from")),
+			trusted:	true,
+			blocked:	false,
+			first_seen:	fmt!("2026-07-01T00:00:00Z"),
+		};
+		// Somebody typing Ada's address from somewhere else: the mismatch is detectable, which is
+		// what `receive` turns into a held comment carrying a reason.
+		let forged = Some(fmt!("somewhere-ada-has-never-been"));
+		let is_mismatch = granted.trusted
+			&& granted.from.is_some()
+			&& granted.from != forged;
+		assert!(is_mismatch, "an impersonation attempt would not have been noticed");
+
+		// And Ada herself, from her usual place, is not flagged.
+		let hers = granted.from.clone();
+		assert!(!(granted.trusted && granted.from.is_some() && granted.from != hers),
+			"a regular commenter was flagged as an impostor");
+		Ok(())
+	}
+
 	/// A cycle does not swallow the comments in it.
 	#[test]
 	fn test_a_cycle_loses_nothing_24() -> Outcome<()> {
@@ -1819,24 +1903,24 @@ pub fn receive<
 	secret:		&[u8],
 	id:		&str,
 )
-	-> Outcome<Received>
+	-> Outcome<(Received, Option<String>)>
 {
 	// The honeypot. A field no person can see, so anything in it was put there by something filling
 	// every field it found. Nothing is stored and nothing is logged beyond the count.
 	if !sub.honeypot.trim().is_empty() {
 		info!("{}: publish: a comment on '{}' filled the honeypot", id, sub.slug);
-		return Ok(Received::Refused(fmt!("honeypot")));
+		return Ok((Received::Refused(fmt!("honeypot")), None));
 	}
 
 	let name = sub.name.trim().to_string();
 	let body = sub.body.trim().to_string();
 	if !valid_body(&body) {
-		return Ok(Received::Refused(fmt!("the comment is empty or too long")));
+		return Ok((Received::Refused(fmt!("the comment is empty or too long")), None));
 	}
 	// A name is optional in the sense that a reader may leave it blank and be anonymous; a name that
 	// is *given* must be a name.
 	if !name.is_empty() && !valid_name(&name) {
-		return Ok(Received::Refused(fmt!("that is not a name")));
+		return Ok((Received::Refused(fmt!("that is not a name")), None));
 	}
 
 	// The proof, where one was sent. A wrong proof is a refusal -- it was attempted and failed, which
@@ -1845,10 +1929,10 @@ pub fn receive<
 		false
 	} else {
 		if !pow_challenge_current(&sub.challenge, sub.slug, secret) {
-			return Ok(Received::Refused(fmt!("the proof answers a challenge this site did not set")));
+			return Ok((Received::Refused(fmt!("the proof answers a challenge this site did not set")), None));
 		}
 		if !pow_verify(&sub.challenge, sub.nonce.trim(), POW_BITS) {
-			return Ok(Received::Refused(fmt!("the proof does not meet the width")));
+			return Ok((Received::Refused(fmt!("the proof does not meet the width")), None));
 		}
 		true
 	};
@@ -1861,7 +1945,7 @@ pub fn receive<
 	// rather than storing something useless.
 	if let Some(e) = &email {
 		if !crate::srv::publish::subscribe::valid_email(e) {
-			return Ok(Received::Refused(fmt!("that is not an address")));
+			return Ok((Received::Refused(fmt!("that is not an address")), None));
 		}
 	}
 
@@ -1899,7 +1983,7 @@ pub fn receive<
 		let hashed = from_hash(addr, salt);
 		if !res!(rate_allows(db, &hashed, rate.0, rate.1)) {
 			info!("{}: publish: a sender is commenting faster than this site allows", id);
-			return Ok(Received::Refused(fmt!("too many comments from one sender")));
+			return Ok((Received::Refused(fmt!("too many comments from one sender")), None));
 		}
 	}
 
@@ -1909,13 +1993,13 @@ pub fn receive<
 	// the write is cheap and permanent and the reading of it is neither.
 	if held.len() >= POST_MAX {
 		info!("{}: publish: '{}' holds {} comments and is taking no more", id, sub.slug, held.len());
-		return Ok(Received::Refused(fmt!("the post has all the comments it will take")));
+		return Ok((Received::Refused(fmt!("the post has all the comments it will take")), None));
 	}
 	let waiting = held.iter().filter(|x| x.state == CommentState::Pending).count();
 	if waiting >= PENDING_MAX {
 		info!("{}: publish: '{}' has {} comments waiting and is taking no more",
 			id, sub.slug, waiting);
-		return Ok(Received::Refused(fmt!("the post's queue is full")));
+		return Ok((Received::Refused(fmt!("the post's queue is full")), None));
 	}
 
 	// What the site already knows about this commenter, where there is anything to know.
@@ -1929,11 +2013,23 @@ pub fn receive<
 	// An attacker who knows an approved address still has to arrive from the same place. This is a
 	// weaker claim than a confirmed address would be, and it is stated rather than hidden: see
 	// `Commenter::from`.
+	let mismatch = known.as_ref().map(|k: &Commenter| {
+		k.trusted && k.from.is_some() && k.from.as_deref() != c.from.as_deref()
+	}).unwrap_or(false);
 	let known = known.filter(|k| {
 		!k.trusted || k.from.is_none() || k.from.as_deref() == c.from.as_deref()
 	});
 
 	let mut verdict = moderator.judge(&c, known.as_ref());
+
+	// A comment claiming a commenter this site trusts, arriving from somewhere that commenter has
+	// never used. Usually innocent -- people travel, and addresses change -- but it is also exactly
+	// what impersonating a regular looks like, and it is the one case where a name in a queue is
+	// worth a second look. Said plainly in the queue rather than left for a moderator to spot.
+	if mismatch {
+		verdict = verdict.and_then(Verdict::Hold(fmt!(
+			"claims a commenter this site knows, but from somewhere they have not commented from 			before -- worth checking it is them")));
+	}
 	// A comment with no proof is held even where the moderator would have allowed it. The proof is
 	// what distinguishes a reader who has a browser from something that posts to a URL, and a trusted
 	// commenter's address is exactly what a spammer would forge to skip the queue.
@@ -1957,13 +2053,142 @@ pub fn receive<
 		}
 	}
 
-	Ok(match stored.state {
+	// The id goes back with the answer so the caller can hand its author a token: this is the only
+	// moment anybody can prove they wrote this, and there is no second chance to say so. Spam gets
+	// none -- there is nothing to correct.
+	let told = match stored.state {
 		CommentState::Approved	=> Received::Published,
 		CommentState::Spam	=> Received::Refused(fmt!("judged spam")),
 		_			=> Received::Held,
-	})
+	};
+	let editable = stored.state != CommentState::Spam;
+	Ok((told, if editable { Some(stored.id) } else { None }))
 }
 
+
+/// How long a commenter may correct what they just wrote.
+///
+/// Long enough to notice a typo and fix it, short enough that the right to edit does not outlive the
+/// moment of writing.
+pub const EDIT_WINDOW_SECS: u64 = 900;
+
+/// A token proving the holder wrote a particular comment.
+///
+/// One-way from the comment's id and the site's secret, so it cannot be computed by somebody who
+/// did not receive it, and it names exactly one comment. Handed back once, in a cookie, when the
+/// comment is taken.
+pub fn edit_token(id: &str, secret: &[u8]) -> String {
+	let h = HashScheme::new_sha256().hash(&[id.as_bytes(), b"comment-edit", secret], []);
+	hex(&h.as_hashform().as_vec())[..32].to_string()
+}
+
+/// Whether a token is the one for this comment, compared without leaking where it differs.
+pub fn edit_token_ok(id: &str, secret: &[u8], given: &str) -> bool {
+	let want = edit_token(id, secret);
+	if want.len() != given.len() {
+		return false;
+	}
+	// Constant time in the length compared: a token is a secret, and an early return on the first
+	// wrong character tells whoever is guessing how much of their guess was right.
+	let mut diff = 0u8;
+	for (a, b) in want.bytes().zip(given.bytes()) {
+		diff |= a ^ b;
+	}
+	diff == 0
+}
+
+/// Whether a comment is still within the window its author may correct it in.
+pub fn editable(c: &Comment, now_secs: u64) -> bool {
+	// A comment whose stamp will not read is not editable: an unreadable time cannot be shown to be
+	// recent, and guessing in the permissive direction would make the window unbounded.
+	match parse_stamp_secs(&c.created) {
+		Some(t)	=> now_secs.saturating_sub(t) < EDIT_WINDOW_SECS,
+		None	=> false,
+	}
+}
+
+/// Unix seconds from a stamp this module wrote, where it reads as one.
+///
+/// **Strict on purpose, and not `CalClock::parse_iso`.** That delegates to a general datetime parser
+/// which is lenient by design -- it reads "not a time at all" as *some* time, which was caught by the
+/// test below. A permissive read here would hand an unbounded edit window to any comment whose stamp
+/// was unreadable, so this accepts exactly the shape [`now_stamp`] writes and nothing else.
+fn parse_stamp_secs(s: &str) -> Option<u64> {
+	let b = s.as_bytes();
+	if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || b[13] != b':' || b[16] != b':' {
+		return None;
+	}
+	if b[10] != b'T' && b[10] != b' ' {
+		return None;
+	}
+	let num = |from: usize, to: usize| -> Option<i64> {
+		let part = s.get(from..to)?;
+		if !part.bytes().all(|c| c.is_ascii_digit()) {
+			return None;
+		}
+		part.parse::<i64>().ok()
+	};
+	let (y, mo, d) = (num(0, 4)?, num(5, 7)?, num(8, 10)?);
+	let (h, mi, sec) = (num(11, 13)?, num(14, 16)?, num(17, 19)?);
+	if !(1..=12).contains(&mo) || !(1..=31).contains(&d)
+		|| h > 23 || mi > 59 || sec > 60
+	{
+		return None;
+	}
+	let days = days_from_civil(y, mo, d);
+	let secs = days * 86_400 + h * 3600 + mi * 60 + sec;
+	if secs < 0 { None } else { Some(secs as u64) }
+}
+
+/// Days from the Unix epoch to a civil date, by Howard Hinnant's algorithm.
+///
+/// Shifts the year to start in March so the leap day falls at the end of a four-century cycle, which
+/// is what makes the whole thing arithmetic rather than a table.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+	let y = if m <= 2 { y - 1 } else { y };
+	let era = if y >= 0 { y } else { y - 399 } / 400;
+	let yoe = y - era * 400;
+	let mp = (m + 9) % 12;
+	let doy = (153 * mp + 2) / 5 + d - 1;
+	let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+	era * 146_097 + doe - 719_468
+}
+
+/// Replaces what a comment says, keeping who wrote it and when.
+///
+/// **An edit to a published comment returns it to the queue.** Otherwise the edit window is a
+/// bait-and-switch: write something agreeable, be approved, then change it to whatever you liked,
+/// with the site's endorsement already attached. A comment still waiting is edited in place, since
+/// nobody has seen it and nothing has been endorsed.
+pub fn edit<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	slug:	&str,
+	id:	&str,
+	body:	&str,
+)
+	-> Outcome<bool>
+{
+	let mut c = match res!(get(db, slug, id)) {
+		Some(c)	=> c,
+		None	=> return Ok(false),
+	};
+	if !valid_body(body) {
+		return Ok(false);
+	}
+	c.body = body.trim().to_string();
+	if c.state == CommentState::Approved {
+		c.state = CommentState::Pending;
+		c.reason = Some(fmt!("edited by its author after it was published"));
+	}
+	res!(put(db, &c));
+	Ok(true)
+}
 
 /// The key the site's own comments-open switch lives under.
 const OPEN_KEY: &str = "publish/comments-open";

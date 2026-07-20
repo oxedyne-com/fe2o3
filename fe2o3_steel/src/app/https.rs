@@ -451,6 +451,12 @@ impl<
                                         challenge: publish_comment::pow_challenge(&post.slug, &secret),
                                         said: publish_page::said_of(&request_query),
                                         open,
+                                        // Whoever holds the cookie for a comment on this page may
+                                        // still correct it, if the window stands.
+                                        editable: publish_page::edit_claim(&req_headers)
+                                            .filter(|(cid, token)| {
+                                                publish_comment::edit_token_ok(cid, &secret, token)
+                                            }),
                                     })
                                 }
                                 Err(e) => {
@@ -713,6 +719,40 @@ impl<
                 // being commented on is carried by the URL and cannot be swapped in the body. The
                 // reader is answered with a redirect back to the post, carrying what to tell them --
                 // so a reload does not post the comment twice.
+                // An edit: only from whoever holds the token this comment was answered with, and
+                // only while the window stands.
+                if let Some(slug) = cfg.comment_edit_slug(&request_path)
+                    .filter(|_| publish_comment::comments_open(db.as_ref(), cfg.comments))
+                {
+                    if let Some(dbh) = db.as_ref() {
+                        let secret = res!(publish_comment::site_secret(dbh));
+                        let cid = site_console::form_field(&body, "id").unwrap_or_default();
+                        let token = site_console::form_field(&body, "token").unwrap_or_default();
+                        let source = site_console::form_field(&body, "body").unwrap_or_default();
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        let ok = match res!(publish_comment::get(dbh, slug, &cid)) {
+                            Some(c) => {
+                                publish_comment::edit_token_ok(&cid, &secret, &token)
+                                    && publish_comment::editable(&c, now)
+                            }
+                            None => false,
+                        };
+                        // One answer whether the token was wrong, the window had closed or the
+                        // comment was never there: none of those is anybody's business to learn by
+                        // asking.
+                        let said = if ok
+                            && res!(publish_comment::edit(dbh, slug, &cid, &source))
+                        {
+                            "edited"
+                        } else {
+                            "noedit"
+                        };
+                        return Ok(Some(publish_page::comment_posted(cfg.as_ref(), slug, said)));
+                    }
+                }
                 // A preview: renders and stores nothing. Answered before the comment route, since
                 // its path is the comment path with a suffix.
                 if let Some(_slug) = cfg.comment_preview_slug(&request_path)
@@ -751,6 +791,7 @@ impl<
                         return Ok(Some(HttpMessage::respond_with_text(
                             HttpStatus::NotFound, "No such post.")));
                     }
+                    let mut edit_cookie: Option<(String, String)> = None;
                     let said = match db.as_ref() {
                         Some(dbh) => {
                             let secret = res!(publish_comment::site_secret(dbh));
@@ -776,11 +817,24 @@ impl<
                                 &secret,
                                 &id,
                             ));
-                            got.tell_reader().to_string()
+                            // The token that lets its author correct it, handed back once, in a
+                            // cookie that expires with the window. It names one comment and proves
+                            // nothing else, so it is safe to hold in a browser.
+                            if let Some(cid) = &got.1 {
+                                edit_cookie = Some((
+                                    cid.clone(),
+                                    publish_comment::edit_token(cid, &secret),
+                                ));
+                            }
+                            got.0.tell_reader().to_string()
                         }
                         None => "shut".to_string(),
                     };
-                    return Ok(Some(publish_page::comment_posted(cfg.as_ref(), slug, &said)));
+                    let mut resp = publish_page::comment_posted(cfg.as_ref(), slug, &said);
+                    if let Some((cid, token)) = edit_cookie {
+                        resp = publish_page::with_edit_cookie(resp, &cid, &token);
+                    }
+                    return Ok(Some(resp));
                 }
             }
 
