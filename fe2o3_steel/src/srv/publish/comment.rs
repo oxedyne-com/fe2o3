@@ -292,6 +292,12 @@ pub struct Comment {
 	/// Why it stands there, where something decided: the moderator's own words. Shown to the site's
 	/// admin in the queue and never to a reader.
 	pub reason:	Option<String>,
+	/// Whether the site's own admin wrote this, rather than a visitor claiming to be them.
+	///
+	/// A display name is whatever somebody typed, so it can never distinguish the site's author from
+	/// a stranger who typed their name. This can: it is set only by the console, never by anything a
+	/// form carries, and it is what the page marks.
+	pub by_site_author:	bool,
 	/// A salted hash of the address it came from. **Not the address**: enough to recognise a
 	/// returning nuisance, not enough to reconstruct who they are, and never shown.
 	pub from:	Option<String>,
@@ -308,6 +314,9 @@ impl Comment {
 		m.insert(dat!("body"),		dat!(self.body.clone()));
 		m.insert(dat!("created"),	dat!(self.created.clone()));
 		m.insert(dat!("state"),		dat!(self.state.as_str().to_string()));
+		if self.by_site_author {
+			m.insert(dat!("by_site_author"), Dat::Bool(true));
+		}
 		// Absent keys rather than empty ones, as everywhere else in this grammar: one way to say
 		// nothing is enough.
 		if let Some(p) = &self.parent {
@@ -348,6 +357,7 @@ impl Comment {
 			body:		s("body").unwrap_or_default(),
 			created:	s("created").unwrap_or_default(),
 			state:		CommentState::of(&s("state").unwrap_or_default()),
+			by_site_author:	matches!(m.get(&dat!("by_site_author")), Some(Dat::Bool(true))),
 			reason:		s("reason"),
 			from:		s("from"),
 		})
@@ -1461,6 +1471,26 @@ mod tests {
 		Ok(())
 	}
 
+	/// A submission cannot claim to be the site's author, whatever it sends.
+	#[test]
+	fn test_a_submission_cannot_claim_authorship_25() -> Outcome<()> {
+		// The struct's own default is false, and `receive` sets it explicitly rather than taking it
+		// from anything a form carried -- there is no field on `Submission` that could reach it.
+		let x = Comment::default();
+		assert!(!x.by_site_author);
+
+		// It survives a round trip when the console does set it.
+		let mut y = named("a", Some("me@example.com"));
+		y.by_site_author = true;
+		assert!(res!(Comment::from_dat(&y.to_dat())).by_site_author);
+
+		// And a record that says nothing about it is not the author's.
+		let mut m = DaticleMap::new();
+		m.insert(dat!("id"), dat!("abcdefghijklmnop".to_string()));
+		assert!(!res!(Comment::from_dat(&Dat::Map(m))).by_site_author);
+		Ok(())
+	}
+
 	/// A cycle does not swallow the comments in it.
 	#[test]
 	fn test_a_cycle_loses_nothing_24() -> Outcome<()> {
@@ -1779,6 +1809,8 @@ pub fn receive<
 		created:	sub.now.clone(),
 		state:		CommentState::Pending,
 		reason:		None,
+		// Never from the form. A submission cannot claim this, whatever it sends.
+		by_site_author:	false,
 		from:		sub.from.as_deref().map(|a| from_hash(a, salt)),
 	};
 

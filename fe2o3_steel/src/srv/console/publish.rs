@@ -3313,9 +3313,19 @@ fn comments_page<
 		return Ok(page(theme, admin, "Comments", &body));
 	}
 
-	for c in &shown {
+	// Paged, and not as a nicety. Every card renders its comment's Markdown, so a page of all of
+	// them is the most expensive page on the site -- and it is the page an operator opens *because*
+	// something has flooded the queue. The recovery path must not be the thing that fails first.
+	let page_at = query_field(query, "page").and_then(|p| p.parse::<usize>().ok()).unwrap_or(1).max(1);
+	let pages = shown.len().div_ceil(PAGE_SIZE).max(1);
+	let page_at = page_at.min(pages);
+	let from = (page_at - 1) * PAGE_SIZE;
+	let upto = (from + PAGE_SIZE).min(shown.len());
+
+	for c in &shown[from..upto] {
 		body.push_str(&comment_card(c, csrf));
 	}
+	body.push_str(&comments_pager(&want, page_at, pages));
 
 	Ok(page(theme, admin, "Comments", &body))
 }
@@ -3405,6 +3415,25 @@ fn state_tag(state: comment::CommentState) -> String {
 		comment::CommentState::Removed	=> ("mc-tag",		"removed"),
 	};
 	fmt!("<span class=\"{}\">{}</span>", cls, word)
+}
+
+/// The queue's pager, keeping the state filter across a page turn.
+fn comments_pager(want: &str, at: usize, pages: usize) -> String {
+	if pages <= 1 {
+		return String::new();
+	}
+	let mut s = String::from("<nav class=\"mc-pager\">");
+	if at > 1 {
+		s.push_str(&fmt!("<a href=\"{}?state={}&page={}\">Newer</a>",
+			PATH_COMMENTS, html_escape(want), at - 1));
+	}
+	s.push_str(&fmt!("<span class=\"mc-muted\">{} of {}</span>", at, pages));
+	if at < pages {
+		s.push_str(&fmt!("<a href=\"{}?state={}&page={}\">Older</a>",
+			PATH_COMMENTS, html_escape(want), at + 1));
+	}
+	s.push_str("</nav>\n");
+	s
 }
 
 /// The state filter over the queue.

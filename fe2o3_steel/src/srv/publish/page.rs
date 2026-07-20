@@ -877,6 +877,13 @@ fn thread_item(t: &Thread, depth: usize) -> String {
 	s.push_str("<span class=\"comment-who\">");
 	escape_text(&mut s, t.comment.author.display_name());
 	s.push_str("</span>");
+	// A commenter may call themselves anything, including the name of the person whose site this
+	// is. Nothing can stop them typing it, so the site says which comments it wrote instead: an
+	// absent mark is the claim, not the name. Only an approved comment can carry it, and only where
+	// the site's own admin wrote it.
+	if t.comment.by_site_author {
+		s.push_str(" <span class=\"comment-author-mark\" title=\"Written by the author of this site\">author</span>");
+	}
 	if !t.comment.created.is_empty() {
 		s.push_str(" <time class=\"comment-when\" datetime=\"");
 		escape_attr(&mut s, &t.comment.created);
