@@ -12,16 +12,27 @@
 //!
 //! # Example
 //!
-//! ```rust
-//! use oxedyne_fe2o3_namex::{Namex, Entity};
+//! ```no_run
+//! use oxedyne_fe2o3_core::prelude::*;
+//! use oxedyne_fe2o3_namex::{
+//!     db::{Entity, MapKey, Namex},
+//!     id::NamexId,
+//! };
 //! use std::collections::BTreeMap;
 //!
-//! // Load an existing namex database
-//! let namex = Namex::<BTreeMap<_,_>, BTreeMap<_,_>>::load("namex.jdat")?;
+//! fn example() -> Outcome<()> {
+//!     // Load an existing namex database.
+//!     let namex = res!(Namex::<
+//!         BTreeMap<MapKey, Entity>,
+//!         BTreeMap<NamexId, Entity>,
+//!     >::load("namex.jdat"));
 //!
-//! // Export as JDAT or JSON
-//! let jdat_lines = namex.export_jdat()?;
-//! namex.to_file(jdat_lines, "export.jdat")?;
+//!     // Export as JDAT or JSON.
+//!     let jdat_lines = res!(namex.export_jdat());
+//!     res!(namex.to_file(jdat_lines, "export.jdat"));
+//!
+//!     Ok(())
+//! }
 //! ```
 //!
 #![forbid(unsafe_code)]

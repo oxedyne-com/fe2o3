@@ -118,9 +118,11 @@ impl Entity {
                     map.insert(
                         oxedyne_fe2o3_jdat::map::MapKey::new(700, Dat::Usr(ukid.clone(), None)),
                         {
+                            // Keys are written in the canonical base64 text form, not as
+                            // `b32` daticles, whose quoted form uses a different alphabet.
                             let mut map = BTreeMap::new();
                             for (k, v) in lnks {
-                                map.insert(**k, v.clone());
+                                map.insert(k.to_string(), v.clone());
                             }
                             dat!(map)
                         }
@@ -227,7 +229,10 @@ impl<
 
     pub fn load<P: AsRef<Path>>(path: P) -> Outcome<Self> {
         let s = res!(std::fs::read_to_string(path.as_ref()));
-        let jdat_dec = DecoderConfig::<_, _>::jdat(Some(res!(Namex::<M1, M2>::ukinds())));
+        let mut jdat_dec = DecoderConfig::<_, _>::jdat(Some(res!(Namex::<M1, M2>::ukinds())));
+        // The registry preserves the order of entities and of each entity's attributes, so the
+        // decoder must retain the ordinals rather than collapsing maps to plain `Map`s.
+        jdat_dec.use_ordmaps = true;
         let dat = res!(Dat::decode_string_with_config(s, &jdat_dec));
         if let Dat::OrdMap(map0) = dat {
             let mut map1 = M1::default();
@@ -382,7 +387,7 @@ impl<
         let mut map = BTreeMap::new();
         for (umk, v) in self.ordered.iter() {
             map.insert(
-                oxedyne_fe2o3_jdat::map::MapKey::new(umk.ord(), dat!(*umk.id().clone())),
+                oxedyne_fe2o3_jdat::map::MapKey::new(umk.ord(), dat!(umk.id().to_string())),
                 res!(v.to_datmap::<M1, M2>()),
             );    
         }

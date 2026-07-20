@@ -52,9 +52,12 @@ impl TryFrom<&Dat> for NamexId {
     fn try_from(dat: &Dat) -> std::result::Result<Self, Self::Error> {
         Ok(match dat {
             Dat::B32(a) => Self::from(a),
+            // The canonical textual form of a Namex id is standard base64, which is what
+            // `Display` emits and what callers pass to `TryFrom<&str>`.
+            Dat::Str(s) => res!(Self::try_from(s.as_str())),
             _ => return Err(err!(
-                "Expected a daticle of kind {:?}, received a {:?}.",
-                Kind::B32, dat.kind();
+                "Expected a daticle of kind {:?} or {:?}, received a {:?}.",
+                Kind::B32, Kind::Str, dat.kind();
             Invalid, Input, Mismatch)),
         })
     }
@@ -70,9 +73,10 @@ impl FromDat for NamexId {
     fn from_dat(dat: Dat) -> Outcome<Self> {
         Ok(match dat {
             Dat::B32(a) => Self::from(a),
+            Dat::Str(ref s) => res!(Self::try_from(s.as_str())),
             _ => return Err(err!(
-                "Expected a daticle of kind {:?}, received a {:?}.",
-                Kind::B32, dat.kind();
+                "Expected a daticle of kind {:?} or {:?}, received a {:?}.",
+                Kind::B32, Kind::Str, dat.kind();
             Invalid, Input, Mismatch)),
         })
     }
