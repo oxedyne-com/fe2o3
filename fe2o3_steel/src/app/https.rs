@@ -408,7 +408,11 @@ impl<
                     // The conversation below the post, where the site has a database to keep one
                     // in. A comments read that fails costs the conversation and never the prose: a
                     // reader came for the post.
-                    let served = publish_page::served_post(cfg.as_ref(), &posts, &request_path);
+                    let served = if cfg.comments {
+                        publish_page::served_post(cfg.as_ref(), &posts, &request_path)
+                    } else {
+                        None
+                    };
                     let view = match (db.as_ref(), served) {
                         (Some(dbh), Some(post)) => {
                             match publish_comment::site_secret(dbh) {
@@ -692,7 +696,24 @@ impl<
                 // being commented on is carried by the URL and cannot be swapped in the body. The
                 // reader is answered with a redirect back to the post, carrying what to tell them --
                 // so a reload does not post the comment twice.
-                if let Some(slug) = cfg.comment_slug(&request_path) {
+                if let Some(slug) = cfg.comment_slug(&request_path).filter(|_| cfg.comments) {
+                    // The slug must name a post a reader can actually see. Without this the endpoint
+                    // writes a record under any name at all -- an unauthenticated write to storage
+                    // keyed on a string the sender chose, which is a way to fill a disk rather than a
+                    // way to comment. Measured against a live site before it was fixed: a POST to
+                    // /readme/anything/comment answered 303 and stored a comment.
+                    let posts = match publish::read(cfg.as_ref(), db.as_ref(), &id) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            error!(e, "{}: publish: cannot read the posts to place a comment", id);
+                            Vec::new()
+                        }
+                    };
+                    if !posts.iter().any(|p| p.slug == slug) {
+                        info!("{}: publish: a comment named no post of ours ('{}')", id, slug);
+                        return Ok(Some(HttpMessage::respond_with_text(
+                            HttpStatus::NotFound, "No such post.")));
+                    }
                     let said = match db.as_ref() {
                         Some(dbh) => {
                             let secret = res!(publish_comment::site_secret(dbh));

@@ -80,6 +80,16 @@ pub const NAME_MAX: usize = 64;
 /// something, and losing their words to a structural rule would be the wrong answer.
 pub const DEPTH_MAX: usize = 3;
 
+/// How many comments may be waiting on one post before it stops taking more.
+///
+/// The bound on what an unauthenticated write can cost. A comment that is held is storage somebody
+/// else chose to spend, and without a ceiling a machine that ignores the proof-of-work can spend it
+/// without limit. Once a post's queue is this full it takes nothing further until a person clears
+/// some -- which is a visible, recoverable state, unlike a disk that filled overnight.
+///
+/// Approved comments are deliberately **not** counted: those are storage the site's own admin chose.
+pub const PENDING_MAX: usize = 50;
+
 /// The alphabet and length a comment's id is minted from.
 const ID_LEN: usize = 16;
 const ID_ALPHABET: &str = "abcdefghijklmnopqrstuvwxyz0123456789";
@@ -1596,6 +1606,18 @@ pub fn receive<
 		reason:		None,
 		from:		sub.from.as_deref().map(|a| from_hash(a, salt)),
 	};
+
+	// What is already waiting on this post. Read before anything is written, so a full queue costs a
+	// read rather than a row.
+	let waiting = res!(list_for_post(db, sub.slug, id))
+		.iter()
+		.filter(|x| x.state == CommentState::Pending)
+		.count();
+	if waiting >= PENDING_MAX {
+		info!("{}: publish: '{}' has {} comments waiting and is taking no more",
+			id, sub.slug, waiting);
+		return Ok(Received::Refused(fmt!("the post's queue is full")));
+	}
 
 	// What the site already knows about this commenter, where there is anything to know.
 	let known = match c.author.handle() {

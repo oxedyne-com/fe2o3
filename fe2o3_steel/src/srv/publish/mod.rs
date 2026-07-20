@@ -139,6 +139,13 @@ pub struct PublishConfig {
 	/// The remotes this site is configured to post to, and the credentials to reach them. Empty where
 	/// the site publishes only to its own pages, which is the default.
 	pub creds:	send::DestCreds,
+	/// Whether this site takes comments on its posts.
+	///
+	/// **Off unless a site asks for it.** A comment endpoint is an unauthenticated public write, and
+	/// turning one on for every site that happens to publish prose -- which is what a default of `true`
+	/// would do -- is not a decision this module gets to make on an operator's behalf. A `publish` block
+	/// that names nothing takes no comments and serves no form.
+	pub comments:	bool,
 	/// The address the newsletter is sent from, e.g. `README <news@oxedyne.com>`. Empty falls back to
 	/// the mail configuration's derived default (`news@<mail-domain>`), which is aligned with the DKIM
 	/// signing domain so the signature authenticates. A `#[optional]` field: a `publish` block that
@@ -226,6 +233,13 @@ impl PublishConfig {
 			creds,
 			// A site that names no From takes the mail default; the field is optional, so an existing
 			// `publish` block that predates the newsletter still loads.
+			comments:		match m.get(&dat!("comments")) {
+				Some(Dat::Bool(b))	=> *b,
+				None			=> false,
+				_			=> return Err(err!(
+					"PublishConfig: 'comments' must be true or false.";
+					Invalid, Input, Mismatch)),
+			},
 			newsletter_from:	res!(get_str("newsletter_from", "")),
 		})
 	}
@@ -1055,6 +1069,46 @@ mod tests {
 		// And a machine is not a reader either way.
 		assert!(!counts_as_read(false, Some("Googlebot/2.1")));
 		assert!(!counts_as_read(true, Some("Googlebot/2.1")));
+		Ok(())
+	}
+
+	/// Comments are off unless a site asks, and a config that says nothing still loads.
+	#[test]
+	fn test_comments_are_off_unless_asked_10() -> Outcome<()> {
+		// A publish block naming nothing: loads, and takes no comments.
+		let m = DaticleMap::new();
+		let cfg = res!(PublishConfig::from_datmap(&m));
+		assert!(!cfg.comments, "a site that said nothing was given a public write endpoint");
+
+		// One that asks gets them.
+		let mut m = DaticleMap::new();
+		m.insert(dat!("comments"), Dat::Bool(true));
+		assert!(res!(PublishConfig::from_datmap(&m)).comments);
+
+		// And one that says something else is refused rather than guessed at.
+		let mut m = DaticleMap::new();
+		m.insert(dat!("comments"), dat!("yes".to_string()));
+		assert!(PublishConfig::from_datmap(&m).is_err(), "a non-boolean 'comments' was accepted");
+		Ok(())
+	}
+
+	/// The comment path names its post, and only a real slug.
+	#[test]
+	fn test_a_comment_path_names_its_post_11() -> Outcome<()> {
+		let mut m = DaticleMap::new();
+		m.insert(dat!("path"), dat!("/posts".to_string()));
+		let cfg = res!(PublishConfig::from_datmap(&m));
+
+		assert_eq!(cfg.comment_path("a-post"), "/posts/a-post/comment");
+		assert_eq!(cfg.comment_slug("/posts/a-post/comment"), Some("a-post"));
+
+		// Not comment paths at all.
+		assert_eq!(cfg.comment_slug("/posts/a-post"), None);
+		assert_eq!(cfg.comment_slug("/posts/comment"), None);
+		assert_eq!(cfg.comment_slug("/elsewhere/a/comment"), None);
+		// A slug that is not a name a post may wear reaches no lookup.
+		assert_eq!(cfg.comment_slug("/posts/../../etc/comment"), None);
+		assert_eq!(cfg.comment_slug("/posts//comment"), None);
 		Ok(())
 	}
 }

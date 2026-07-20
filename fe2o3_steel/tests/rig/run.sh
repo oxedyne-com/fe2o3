@@ -190,6 +190,15 @@ echo "== comments =="
 # the queue holds it, an admin approves, and it appears. Nothing here can be
 # proved from inside the process -- the point is what a reader actually sees.
 POST_URL="$B/posts/from-the-dir"
+# A comment names a post, and a post that exists. Without this the endpoint wrote a
+# record under any name a sender chose -- an unauthenticated write to storage keyed
+# on a string from outside. Measured against a live site: it answered 303 and stored.
+code=$(curl -sk -o /dev/null -w '%{http_code}' -X POST \
+    --data-urlencode "name=Probe" --data-urlencode "body=Against a post that is not there." \
+    --data-urlencode "website=" "$B/posts/no-such-post-at-all/comment")
+check "a comment on a post that does not exist is refused" "$code" "404"
+q=$(curl -sk -b $MJ "$B/manage/comments?state=any")
+hasnt "and nothing was stored for it" "$q" "Against a post that is not there"
 # The console's write token, off a console page the session can already open.
 MCSRF=$(curl -sk -b $MJ "$B/manage/edit?slug=from-the-dir" \
     | grep -o 'name="csrf" value="[^"]*"' | head -1 | sed 's/.*value="//;s/"//')

@@ -617,7 +617,8 @@ mod tests {
 			base_url:	fmt!("https://example.com"),
 			css:		vec![fmt!("/css/a.css")],
 			creds:		Default::default(),
-			newsletter_from:	String::new(),
+			comments:		true,
+		newsletter_from:	String::new(),
 		}
 	}
 
