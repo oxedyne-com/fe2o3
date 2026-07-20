@@ -1333,6 +1333,10 @@ padding:0.9rem 1.1rem;margin:0.8rem 0;}\
 .mc-comment-body{margin:0.5rem 0 0.7rem;}\
 .mc-comment-acts{display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center;}\
 .mc-inline{display:inline;}\
+/* The site's comments switch, above the queue: the state, the control, and what it will do. */\
+.mc-switch{display:flex;align-items:center;gap:0.8rem;flex-wrap:wrap;margin:0.6rem 0 1.2rem;\
+padding:0.8rem 1rem;border:1px solid var(--border,var(--aside-rule-color,#333c47));border-radius:6px;}\
+.mc-switch-state{font-size:0.95rem;}\
 .mc-tag{display:inline-block;font-size:0.72rem;text-transform:uppercase;letter-spacing:0.06em;\
 padding:0.1rem 0.4rem;border-radius:4px;border:1px solid var(--border,#333c47);opacity:0.75;}\
 .mc-tag-live{border-color:#4c9a6a;color:#7fc79b;opacity:1;}\

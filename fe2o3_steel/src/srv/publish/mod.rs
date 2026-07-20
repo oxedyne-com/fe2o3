@@ -332,6 +332,25 @@ impl PublishConfig {
 		s
 	}
 
+	/// The URL path a comment preview is asked for.
+	pub fn comment_preview_path(&self, slug: &str) -> String {
+		let mut s = self.path.clone();
+		s.push('/');
+		s.push_str(slug);
+		s.push_str("/comment/preview");
+		s
+	}
+
+	/// The slug a preview path names, where it names one.
+	pub fn comment_preview_slug<'a>(&self, path: &'a str) -> Option<&'a str> {
+		let rest = path.strip_prefix(&self.path)?.strip_prefix('/')?;
+		let slug = rest.strip_suffix("/comment/preview")?;
+		if slug.is_empty() || !valid_slug(slug) {
+			return None;
+		}
+		Some(slug)
+	}
+
 	/// The URL path the comment form's script is served at.
 	///
 	/// A file rather than an inline block, so a site can run a Content-Security-Policy without

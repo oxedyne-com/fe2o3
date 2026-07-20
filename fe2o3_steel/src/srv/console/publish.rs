@@ -235,8 +235,8 @@ pub fn handle_get<
 		PATH_TAGS_JSON	=> tags_json(cfg, db, id),
 		PATH_CREDS_JSON	=> creds_json(cfg, db, id),
 		PATH_SUBS_JSON	=> subs_json(db, id),
-		PATH_COMMENTS	=> comments_page(theme, admin, csrf, db, query, id),
-		PATH_COMMENTS_JSON	=> comments_json(db, query, id),
+		PATH_COMMENTS	=> comments_page(cfg.comments, theme, admin, csrf, db, query, id),
+		PATH_COMMENTS_JSON	=> comments_json(cfg.comments, db, query, id),
 		PATH_REPORTS_JSON	=> reports_json(db, id),
 		_		=> Ok(HttpMessage::respond_with_text(
 			HttpStatus::NotFound,
@@ -3250,6 +3250,7 @@ fn comments_page<
 	KH:	Hasher,
 	DB:	Database<UIDL, UID, ENC, KH>,
 >(
+	cfg_comments: bool,
 	theme:	&Theme,
 	admin:	&SiteAdmin,
 	csrf:	&str,
@@ -3285,6 +3286,11 @@ fn comments_page<
 			return Ok(page(theme, admin, "Comments", &body));
 		}
 	};
+
+	// Whether the site is taking comments, and the control that changes it. First, because it is
+	// the thing an operator comes here to change when something has gone wrong.
+	let open = comment::comments_open(Some(db), cfg_comments);
+	body.push_str(&comments_switch(open, csrf));
 
 	let count = |s: comment::CommentState| all.iter().filter(|c| c.state == s).count();
 	let waiting = count(comment::CommentState::Pending);
@@ -3417,6 +3423,43 @@ fn state_tag(state: comment::CommentState) -> String {
 	fmt!("<span class=\"{}\">{}</span>", cls, word)
 }
 
+/// The site's comments switch: where it stands, and the one control that changes it.
+///
+/// A button and not a checkbox, because a checkbox that saves on change is a switch somebody flips
+/// by scrolling past it. This says what it will do and does that when pressed.
+fn comments_switch(open: bool, csrf: &str) -> String {
+	fmt!(
+		"<div class=\"mc-switch\">\n\
+		<span class=\"mc-switch-state\">{state}</span>\n\
+		<form method=\"POST\" action=\"{path}\" class=\"mc-inline\"{on}>\
+		<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+		<input type=\"hidden\" name=\"action\" value=\"{act}\">\
+		<button type=\"submit\" class=\"mc-btn {cls}\">{label}</button></form>\n\
+		<span class=\"mc-muted\">{note}</span>\n\
+		</div>\n",
+		state	= if open {
+			"<strong>Comments are open.</strong>"
+		} else {
+			"<strong>Comments are closed.</strong>"
+		},
+		path	= PATH_COMMENTS_ACTION,
+		on	= if open {
+			" onsubmit=\"return confirm('Close comments? The form disappears from every post 			and no new comment is taken. Nothing already here is lost.')\""
+		} else {
+			""
+		},
+		csrf	= html_escape(csrf),
+		act	= if open { "shut" } else { "open" },
+		cls	= if open { "mc-btn-danger" } else { "mc-btn" },
+		label	= if open { "Close comments" } else { "Open comments" },
+		note	= if open {
+			"A reader sees the form on every post."
+		} else {
+			"No post shows a form, and a comment sent anyway is refused."
+		},
+	)
+}
+
 /// The queue's pager, keeping the state filter across a page turn.
 fn comments_pager(want: &str, at: usize, pages: usize) -> String {
 	if pages <= 1 {
@@ -3469,6 +3512,7 @@ fn comments_json<
 	KH:	Hasher,
 	DB:	Database<UIDL, UID, ENC, KH>,
 >(
+	cfg_comments: bool,
 	db:	Option<&(Arc<RwLock<DB>>, UID)>,
 	query:	&str,
 	id:	&str,
@@ -3481,6 +3525,7 @@ fn comments_json<
 	};
 	let want = query_field(query, "state").unwrap_or_else(|| fmt!("pending"));
 	let all = res!(comment::queue(db, None, id));
+	let open = comment::comments_open(Some(db), cfg_comments);
 
 	let count = |s: comment::CommentState| all.iter().filter(|c| c.state == s).count();
 	let mut counts = DaticleMap::new();
@@ -3509,6 +3554,7 @@ fn comments_json<
 	}
 
 	let body = create_dat_ordmap(vec![
+		(dat!("open"),		Dat::Bool(open)),
 		(dat!("counts"),	Dat::Map(counts)),
 		(dat!("comments"),	Dat::List(items)),
 	]);
@@ -3534,6 +3580,14 @@ fn do_comment_action<
 	let slug = super::form_field(body, "slug").unwrap_or_default();
 	let cid = super::form_field(body, "id").unwrap_or_default();
 	let action = super::form_field(body, "action").unwrap_or_default();
+	// The switch acts on the site rather than on a comment, so it is taken before a comment is
+	// required.
+	if action == "open" || action == "shut" {
+		res!(comment::set_comments_open(db, action == "open"));
+		info!("{}: console: '{}' {} comments", id, who,
+			if action == "open" { "opened" } else { "closed" });
+		return Ok(comments_back(json));
+	}
 	if slug.is_empty() || cid.is_empty() {
 		return Ok(comments_back_with("no comment was named", json));
 	}
@@ -3546,6 +3600,7 @@ fn do_comment_action<
 		"remove"	=> res!(comment::set_state(
 			db, &slug, &cid, comment::CommentState::Removed, Some(fmt!("taken down by {}", who)))),
 		"erase"		=> res!(comment::erase(db, &slug, &cid)),
+
 		"block"		=> {
 			// Blocking bins what is in hand as well as what comes next: leaving this one published
 			// while blocking its author would be a decision that half applied.

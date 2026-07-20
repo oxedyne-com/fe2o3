@@ -49,6 +49,10 @@ where they bite:
   EOF on stdin ends the process. Hence the fifo.
 - **`dev_cfg` is a required config block.** Every `FromDatMap` field is, unless it
   says otherwise.
+- **Run one rig at a time.** A second run while another is held (`RIG_HOLD=1`)
+  produces false failures in `console_rig`, which authenticates over a WebSocket
+  and will find the wrong server. It looks exactly like a gate regression — a
+  non-admin getting 200 instead of 403 — and is not one. Kill the held rig first.
 
 ## The passphrase
 

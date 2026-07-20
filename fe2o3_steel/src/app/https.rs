@@ -408,17 +408,26 @@ impl<
                     // The conversation below the post, where the site has a database to keep one
                     // in. A comments read that fails costs the conversation and never the prose: a
                     // reader came for the post.
-                    let served = if cfg.comments {
-                        publish_page::served_post(cfg.as_ref(), &posts, &request_path)
-                    } else {
-                        None
-                    };
+                    // The site's own switch, which the console sets; the config is only where it
+                    // started. Closing stops new comments and does **not** hide the ones already
+                    // published: a conversation that happened still happened, and taking it off the
+                    // page would be a deletion nobody asked for.
+                    let open = publish_comment::comments_open(db.as_ref(), cfg.comments);
+                    let served = publish_page::served_post(cfg.as_ref(), &posts, &request_path);
                     let view = match (db.as_ref(), served) {
                         (Some(dbh), Some(post)) => {
                             match publish_comment::site_secret(dbh) {
                                 Ok(secret) => {
-                                    let threads = match publish_comment::public_for_post(
-                                        dbh, &post.slug, publish_comment::Ranker::default(), &id,
+                                    // The order a reader asked for, and the page of it they are on.
+                                    let newest = publish_page::query_word(&request_query, "order")
+                                        .as_deref() == Some("newest");
+                                    let ranker = if newest {
+                                        publish_comment::Ranker::Recent
+                                    } else {
+                                        publish_comment::Ranker::Chronological
+                                    };
+                                    let all = match publish_comment::public_for_post(
+                                        dbh, &post.slug, ranker, &id,
                                     ) {
                                         Ok(items) => publish_comment::thread(items),
                                         Err(e) => {
@@ -427,13 +436,21 @@ impl<
                                             Vec::new()
                                         }
                                     };
-                                    let count = publish_comment::count_threads(&threads);
+                                    let count = publish_comment::count_threads(&all);
+                                    let want = publish_page::query_word(&request_query, "cpage")
+                                        .and_then(|p| p.parse::<usize>().ok())
+                                        .unwrap_or(1);
+                                    let (threads, at, pages) = publish_comment::page_of(all, want);
                                     Some(publish_page::CommentsView {
                                         threads,
                                         count,
+                                        page: at,
+                                        pages,
+                                        order: if newest { "newest" } else { "oldest" },
+                                        path: cfg.path_of(&post.slug),
                                         challenge: publish_comment::pow_challenge(&post.slug, &secret),
                                         said: publish_page::said_of(&request_query),
-                                        open: true,
+                                        open,
                                     })
                                 }
                                 Err(e) => {
@@ -696,7 +713,27 @@ impl<
                 // being commented on is carried by the URL and cannot be swapped in the body. The
                 // reader is answered with a redirect back to the post, carrying what to tell them --
                 // so a reload does not post the comment twice.
-                if let Some(slug) = cfg.comment_slug(&request_path).filter(|_| cfg.comments) {
+                // A preview: renders and stores nothing. Answered before the comment route, since
+                // its path is the comment path with a suffix.
+                if let Some(_slug) = cfg.comment_preview_slug(&request_path)
+                    .filter(|_| publish_comment::comments_open(db.as_ref(), cfg.comments))
+                {
+                    if let Some(dbh) = db.as_ref() {
+                        let secret = res!(publish_comment::site_secret(dbh));
+                        let source = site_console::form_field(&body, "body").unwrap_or_default();
+                        let html = res!(publish_comment::preview(
+                            dbh,
+                            &source,
+                            Some(&peer.ip().to_string()),
+                            &secret,
+                            cfg.comment_rate_secs,
+                        ));
+                        return Ok(Some(publish_page::comment_preview(html)));
+                    }
+                }
+                if let Some(slug) = cfg.comment_slug(&request_path)
+                    .filter(|_| publish_comment::comments_open(db.as_ref(), cfg.comments))
+                {
                     // The slug must name a post a reader can actually see. Without this the endpoint
                     // writes a record under any name at all -- an unauthenticated write to storage
                     // keyed on a string the sender chose, which is a way to fill a disk rather than a

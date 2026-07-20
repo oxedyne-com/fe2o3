@@ -264,6 +264,30 @@ check "with a JavaScript content type" \
     "$(curl -sk -o /dev/null -w '%{content_type}' "$B/posts/comments.js")" \
     "text/javascript; charset=utf-8"
 
+# The switch: a site opens and closes comments from its console, without a
+# config edit or a restart.
+sw=$(curl -sk -b $MJ "$B/manage/comments")
+has "the console says whether comments are open" "$sw" "Comments are open"
+curl -sk -o /dev/null -b $MJ -X POST -d "csrf=$MCSRF" -d "action=shut" "$B/manage/comments/action"
+page=$(curl -sk "$POST_URL")
+hasnt "a closed site shows no form" "$page" 'id="comment-body"'
+has "and says so" "$page" "Comments are closed on this post"
+code=$(curl -sk -o /dev/null -w '%{http_code}' -X POST --data-urlencode "name=X" \
+    --data-urlencode "body=Sent while comments were closed." \
+    --data-urlencode "website=" "$POST_URL/comment")
+check "a comment sent anyway is refused" "$code" "404"
+q=$(curl -sk -b $MJ "$B/manage/comments?state=any")
+hasnt "and nothing was stored for it" "$q" "Sent while comments were closed"
+curl -sk -o /dev/null -b $MJ -X POST -d "csrf=$MCSRF" -d "action=open" "$B/manage/comments/action"
+has "and opening again brings the form back" "$(curl -sk "$POST_URL")" 'id="comment-body"'
+
+# A reader may preview their prose before posting it, through the same renderer
+# and the same policy the page uses.
+pv=$(curl -sk -X POST --data-urlencode "body=**bold** and [a link](javascript:alert(1))" \
+    "$POST_URL/comment/preview")
+has "a preview renders the markup" "$pv" "<strong>bold</strong>"
+hasnt "and applies the policy to it" "$pv" "javascript:alert"
+
 # The honeypot: filled, and nothing is stored.
 curl -sk -o /dev/null -X POST \
     --data-urlencode "name=Bot" --data-urlencode "body=Buy things at example.com" \

@@ -422,12 +422,22 @@
   },
   (b32|"VybbHNWeNXeTqTrXj66TzZScbSTsEFVy0W79QnbroFA="): {
     (nams): (vek|[
-      "SHA_256",
+      "SHA3_256",
+      "SHA3-256",
     ]),
     (lang): "English",
+    (desc): "SHA3-256, a member of the SHA-3 family specified in FIPS 202 and \
+      built on Keccak.  A different construction from SHA-2 and not \
+      interchangeable with it.,
     (lnks): {
       (b32|"/TmhhCg6oJazKJxaQePSwhzvjuMSnjU5bucC9kH+TCs="): "variant of",
     },
+    (tags): (vek|[
+      "Algorithm",
+      "Cryptographic",
+      "Hash",
+      "Transformation",
+    ]),
   },
   (b32|"kCnQluCVX4v62XUObBIPJhg+VZaXjXHQOLoNDVrOZso="): {
     (nams): (vek|[

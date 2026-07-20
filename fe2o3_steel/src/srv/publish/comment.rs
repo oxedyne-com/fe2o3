@@ -1194,6 +1194,21 @@ fn drain(
 	out
 }
 
+/// How many top-level threads a page of a conversation shows.
+///
+/// Counted in threads rather than comments: a reply belongs with what it answers, and splitting a
+/// thread across a page boundary would leave an answer on one page and its question on another.
+pub const PAGE_THREADS: usize = 25;
+
+/// One page of a threaded conversation, and how many pages there are.
+pub fn page_of(threads: Vec<Thread>, page: usize) -> (Vec<Thread>, usize, usize) {
+	let pages = threads.len().div_ceil(PAGE_THREADS).max(1);
+	let at = page.max(1).min(pages);
+	let from = (at - 1) * PAGE_THREADS;
+	let upto = (from + PAGE_THREADS).min(threads.len());
+	(threads[from..upto].to_vec(), at, pages)
+}
+
 /// How many comments a run of threads holds, at every depth.
 pub fn count_threads(threads: &[Thread]) -> usize {
 	threads.iter().map(|t| 1 + count_threads(&t.replies)).sum()
@@ -1748,6 +1763,40 @@ pub struct Submission<'a> {
 	pub now:	String,
 }
 
+/// Renders a comment's prose as the reader would see it, storing nothing.
+///
+/// A preview is a rendering service offered to anybody, which is why it is bounded rather than
+/// merely offered: the body is capped as a comment's is, and a sender is held to the same interval
+/// as a comment. It counts against **its own** budget, not the comment budget -- previewing twice
+/// then posting should not find the post refused, which is what sharing one counter would do.
+pub fn preview<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:		&(Arc<RwLock<DB>>, UID),
+	body:		&str,
+	from:		Option<&str>,
+	salt:		&[u8],
+	interval:	u64,
+)
+	-> Outcome<Option<String>>
+{
+	if !valid_body(body) {
+		return Ok(None);
+	}
+	if let Some(addr) = from {
+		let key = fmt!("preview:{}", from_hash(addr, salt));
+		if !res!(rate_allows(db, &key, interval, 0)) {
+			return Ok(None);
+		}
+	}
+	let c = Comment { body: body.to_string(), ..Default::default() };
+	Ok(Some(res!(c.render())))
+}
+
 /// Takes a submitted comment: checks it, judges it, stores it.
 ///
 /// The order is the point. **What can be decided without touching the database is decided first** --
@@ -1915,6 +1964,63 @@ pub fn receive<
 	})
 }
 
+
+/// The key the site's own comments-open switch lives under.
+const OPEN_KEY: &str = "publish/comments-open";
+
+/// Whether this site is taking comments, as the site itself has decided.
+///
+/// The config's `comments` is the **starting position**, not the standing one: an operator sets it
+/// once when a site is built, and after that the person running the site opens and closes comments
+/// from the console without touching a file or restarting anything. A site that has never decided
+/// takes the config's word.
+pub fn comments_open<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:		Option<&(Arc<RwLock<DB>>, UID)>,
+	from_config:	bool,
+)
+	-> bool
+{
+	let db = match db {
+		Some(d)	=> d,
+		None	=> return from_config,
+	};
+	let (db_arc, _) = db;
+	let guard = match db_arc.read() {
+		Ok(g)	=> g,
+		// A lock this cannot take is not a reason to open comments on a site that wanted them
+		// shut, so the config's answer stands.
+		Err(_)	=> return from_config,
+	};
+	match guard.get(&dat!(OPEN_KEY), None) {
+		Ok(Some((Dat::Bool(b), _)))	=> b,
+		_				=> from_config,
+	}
+}
+
+/// Records whether the site is taking comments.
+pub fn set_comments_open<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	open:	bool,
+)
+	-> Outcome<()>
+{
+	let (db_arc, user) = db;
+	let guard = lock_read!(db_arc);
+	res!(guard.insert(dat!(OPEN_KEY), Dat::Bool(open), *user, None));
+	Ok(())
+}
 
 /// The key a sender's rate record lives under.
 const RATE_PREFIX: &str = "publish/comment-rate/";

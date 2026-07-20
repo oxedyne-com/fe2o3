@@ -829,6 +829,14 @@ pub struct CommentsView {
 	pub threads:	Vec<Thread>,
 	/// How many comments that is, at every depth.
 	pub count:	usize,
+	/// Which page of the conversation is shown, from one.
+	pub page:	usize,
+	/// How many pages there are.
+	pub pages:	usize,
+	/// Which order the reader asked for.
+	pub order:	&'static str,
+	/// The post's own path, for the links the pager and the ordering build.
+	pub path:	String,
 	/// The challenge a sender's proof must answer.
 	pub challenge:	String,
 	/// What the last attempt said, where the reader has just made one.
@@ -856,20 +864,80 @@ pub fn comments_section(cfg: &PublishConfig, post: &Post, view: &CommentsView) -
 	}
 
 	if !view.threads.is_empty() {
+		// The ordering, where there is more than one comment to order.
+		if view.count > 1 {
+			s.push_str(&comments_order(view));
+		}
 		s.push_str("<ol class=\"comment-list\">\n");
 		for t in &view.threads {
 			s.push_str(&thread_item(t, 0));
 		}
 		s.push_str("</ol>\n");
+		s.push_str(&comments_pager(view));
 	}
 
 	if view.open {
 		s.push_str(&comment_form(cfg, post, view, None));
 	} else {
+		// Said once, whether or not there is a conversation above it: a reader looking for the form
+		// should learn why it is not there rather than assume the page is broken.
 		s.push_str("<p class=\"comments-shut\">Comments are closed on this post.</p>\n");
 	}
 
 	s.push_str("</section>\n");
+	s
+}
+
+/// The order the conversation is read in.
+///
+/// Two links rather than a form, so it works with nothing running and a reader can share the URL of
+/// the view they are looking at.
+fn comments_order(view: &CommentsView) -> String {
+	let mut s = String::from("<nav class=\"comment-order\">");
+	for (i, (key, label)) in [("oldest", "Oldest first"), ("newest", "Newest first")]
+		.iter().enumerate()
+	{
+		// A separator in the markup, not only in a stylesheet. This module leaves the look to the
+		// site, but a site that has not styled this yet should still read as two choices rather than
+		// as one run-together word -- which is what it did.
+		if i > 0 {
+			s.push_str(" <span class=\"comment-order-sep\">&middot;</span> ");
+		}
+		if view.order == *key {
+			s.push_str(&fmt!("<span class=\"comment-order-on\">{}</span>", label));
+		} else {
+			s.push_str("<a href=\"");
+			escape_attr(&mut s, &fmt!("{}?order={}#comments", view.path, key));
+			s.push_str("\">");
+			s.push_str(label);
+			s.push_str("</a>");
+		}
+	}
+	s.push_str("</nav>\n");
+	s
+}
+
+/// The pager beneath a long conversation.
+fn comments_pager(view: &CommentsView) -> String {
+	if view.pages <= 1 {
+		return String::new();
+	}
+	let link = |p: usize, label: &str, s: &mut String| {
+		s.push_str("<a href=\"");
+		escape_attr(s, &fmt!("{}?order={}&cpage={}#comments", view.path, view.order, p));
+		s.push_str("\">");
+		s.push_str(label);
+		s.push_str("</a>");
+	};
+	let mut s = String::from("<nav class=\"comment-pager\">");
+	if view.page > 1 {
+		link(view.page - 1, "Earlier comments", &mut s);
+	}
+	s.push_str(&fmt!("<span class=\"comment-pager-at\">Page {} of {}</span>", view.page, view.pages));
+	if view.page < view.pages {
+		link(view.page + 1, "More comments", &mut s);
+	}
+	s.push_str("</nav>\n");
 	s
 }
 
@@ -996,6 +1064,11 @@ fn comment_form(cfg: &PublishConfig, post: &Post, view: &CommentsView, parent: O
 	s.push_str("<p class=\"comment-note\">Markdown works. Links are kept, images and scripts are not. \
 		A first comment waits for the author to see it.</p>\n");
 
+	s.push_str("<button type=\"button\" class=\"comment-preview-btn\" id=\"comment-preview-btn\" \
+		data-to=\"");
+	escape_attr(&mut s, &cfg.comment_preview_path(&post.slug));
+	s.push_str("\">Preview</button>\n");
+	s.push_str("<div class=\"comment-preview\" id=\"comment-preview\" hidden></div>\n");
 	s.push_str("<button type=\"submit\" class=\"comment-send\" id=\"comment-send\">Post comment</button>\n");
 	s.push_str("<span class=\"comment-working\" id=\"comment-working\" hidden>Working…</span>\n");
 	s.push_str("</form>\n");
@@ -1006,6 +1079,22 @@ fn comment_form(cfg: &PublishConfig, post: &Post, view: &CommentsView, parent: O
 	escape_attr(&mut s, &cfg.comment_js_path());
 	s.push_str("\"></script>\n");
 	s
+}
+
+/// A rendered preview, or the reason there is none.
+///
+/// HTML rather than JSON: what comes back is dropped straight into the page, and wrapping a fragment
+/// in JSON only to unwrap it is a step that buys nothing.
+pub fn comment_preview(html: Option<String>) -> HttpMessage {
+	let body = html.unwrap_or_else(|| fmt!(
+		"<p class=\"comment-preview-none\">Nothing to preview yet, or you have previewed very \
+		recently.</p>"));
+	let mut resp = HttpMessage::ok_respond_with_text(body);
+	resp = resp.with_field(
+		HeaderName::ContentType,
+		HeaderFieldValue::Generic(fmt!("text/html; charset=utf-8")),
+	);
+	resp
 }
 
 /// Serves the comment form's script.
@@ -1066,6 +1155,27 @@ const COMMENT_JS: &str = r#"(function () {
 		banner.hidden = true;
 	});
 
+	/* Preview: ask the server for the same rendering a reader would get, since the
+	   parser that matters is the one in Rust and there is not a second one here. */
+	var pv = document.getElementById('comment-preview-btn');
+	var pvOut = document.getElementById('comment-preview');
+	if (pv && pvOut) pv.addEventListener('click', function () {
+		var src = document.getElementById('comment-body').value;
+		if (!src.trim()) return;
+		var data = new URLSearchParams();
+		data.set('body', src);
+		pv.disabled = true;
+		fetch(pv.getAttribute('data-to'), {
+			method: 'POST',
+			credentials: 'same-origin',
+			headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+			body: data.toString(),
+		}).then(function (r) { return r.text(); })
+		  .then(function (html) { pvOut.innerHTML = html; pvOut.hidden = false; })
+		  .catch(function () { /* a preview that will not come is not an error worth a dialog */ })
+		  .then(function () { pv.disabled = false; });
+	});
+
 	/* The proof. Count leading zero bits of SHA-256(challenge + nonce) until the
 	   width is met. Done on submit so a reader who never comments never pays. */
 	function zeros(buf) {
@@ -1113,6 +1223,25 @@ const COMMENT_JS: &str = r#"(function () {
 	});
 })();
 "#;
+
+/// A query value made of the few characters this module's own links use.
+///
+/// No percent-decoding: every value read with this is one the page itself wrote, from a small
+/// alphabet, so anything needing decoding is something else and reads as absent -- which is the
+/// right answer to a value no link of ours produces.
+pub fn query_word(query: &str, key: &str) -> Option<String> {
+	for pair in query.split('&') {
+		let mut kv = pair.splitn(2, '=');
+		if kv.next() == Some(key) {
+			let v = kv.next().unwrap_or("");
+			if v.is_empty() || !v.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+				return None;
+			}
+			return Some(v.to_string());
+		}
+	}
+	None
+}
 
 /// What the last comment attempt said, read out of the query a redirect landed with.
 ///
