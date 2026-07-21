@@ -1,4 +1,5 @@
 pub mod client;
+pub mod data_url;
 pub mod fields;
 pub mod handler;
 pub mod header;

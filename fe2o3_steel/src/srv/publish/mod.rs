@@ -446,6 +446,23 @@ impl PublishConfig {
 		s
 	}
 
+	/// The URL prefix a member's uploaded picture is served under.
+	pub fn avatar_prefix(&self) -> String {
+		let mut s = self.path.clone();
+		s.push_str("/avatar/");
+		s
+	}
+
+	/// The URL a member's uploaded picture is served at.
+	///
+	/// The path a profile stores once a member uploads one, so a byline points at this module rather
+	/// than at a file somewhere on disk that a deploy could take away.
+	pub fn avatar_path(&self, username: &str) -> String {
+		let mut s = self.avatar_prefix();
+		s.push_str(username);
+		s
+	}
+
 	/// The URL path a comment on a post is posted to.
 	///
 	/// Under the post's own path rather than a shared endpoint, so which post is being commented on is
@@ -815,6 +832,9 @@ pub struct Author {
 	pub name:	String,
 	/// A path or URL to the avatar image. Empty draws an initial from the name instead.
 	pub avatar:	String,
+	/// What the author says they write about. Shown above the posts and under a byline; empty shows
+	/// nothing, rather than an empty box where a description would be.
+	pub bio:	String,
 }
 
 impl Author {
@@ -831,6 +851,7 @@ impl Author {
 				profile.name.clone()
 			},
 			avatar:		profile.avatar.clone(),
+			bio:		profile.bio.clone(),
 		}
 	}
 

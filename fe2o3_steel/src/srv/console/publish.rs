@@ -27,6 +27,7 @@ use crate::srv::{
 		redirect,
 	},
 	publish::{
+		Author,
 		Markup,
 		PostState,
 		PublishConfig,
@@ -65,6 +66,7 @@ use oxedyne_fe2o3_jdat::{
 	string::enc::EncoderConfig,
 };
 use oxedyne_fe2o3_net::http::{
+	data_url,
 	fields::{
 		HeaderFieldValue,
 		HeaderName,
@@ -92,8 +94,12 @@ pub const PATH_ROOT: &str = "/manage";
 /// The editor, for one post or for a new one.
 pub const PATH_EDIT: &str = "/manage/edit";
 
-/// A member's own profile: the name and avatar readers see, which their login username cannot be.
+/// A member's own profile: the name, picture and description readers see, which their login username
+/// cannot be.
 pub const PATH_PROFILE: &str = "/manage/profile";
+
+/// A member's own profile as JSON, for an app that draws the form itself.
+pub const PATH_PROFILE_JSON: &str = "/manage/profile.json";
 
 /// Where the profile form posts.
 pub const PATH_PROFILE_SAVE: &str = "/manage/profile/save";
@@ -259,6 +265,7 @@ pub fn handle_get<
 		PATH_POST_JSON	=> post_json(cfg, db, query, id),
 		PATH_TAGS_JSON	=> tags_json(cfg, db, id),
 		PATH_CREDS_JSON	=> creds_json(cfg, db, id),
+		PATH_PROFILE_JSON	=> profile_json(cfg, admin, db, id),
 		PATH_SUBS_JSON	=> subs_json(db, id),
 		PATH_COMMENTS	=> comments_page(cfg.comments, theme, admin, csrf, db, query, id),
 		PATH_COMMENTS_JSON	=> comments_json(cfg.comments, db, query, id),
@@ -1560,7 +1567,7 @@ fn profile_page<
 	KH:	Hasher,
 	DB:	Database<UIDL, UID, ENC, KH>,
 >(
-	_cfg:	&PublishConfig,
+	cfg:	&PublishConfig,
 	theme:	&Theme,
 	admin:	&SiteAdmin,
 	csrf:	&str,
@@ -1582,34 +1589,119 @@ fn profile_page<
 	} else {
 		fmt!("<img class=\"mc-avatar-pic\" alt=\"\" src=\"{}\">", html_escape(&profile.avatar))
 	};
+	// Whether the picture in the form is one this site holds. A member who uploaded one is offered a
+	// way to take it off again; one who gave a URL edits the URL.
+	let uploaded = profile.avatar == cfg.avatar_path(&admin.username);
 	debug!("{}: console: '{}' opened their profile", id, admin.username);
 	let body = fmt!(
 		"<div class=\"mc-head-row\"><h1>Your profile</h1>\
 		<a class=\"mc-close\" href=\"{root}\" title=\"Close\" aria-label=\"Close\">{close}</a></div>\n\
-		<p class=\"mc-muted\">The name and picture readers see on your posts. Your login is not shown to \
+		<p class=\"mc-muted\">The name, picture and description readers see. Your login is not shown to \
 		anyone.</p>\n\
 		<form class=\"mc-form\" method=\"POST\" action=\"{save}\">\n\
 		<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\n\
-		<div class=\"mc-avatar-row\">{preview}</div>\n\
+		<div class=\"mc-avatar-row\" id=\"mcAvatarRow\">{preview}\n\
+		<div class=\"mc-avatar-pick\">\n\
+		<label class=\"mc-btn mc-btn-quiet\" for=\"picture\">Choose a picture</label>\n\
+		<input type=\"file\" id=\"picture\" accept=\"image/png,image/jpeg,image/gif,image/webp\" hidden>\n\
+		{drop}\
+		<p class=\"mc-hint\" id=\"mcPicHint\">PNG, JPEG, GIF or WebP, up to {cap} KB. Kept by this \
+		site and served from it.</p>\n</div>\n</div>\n\
+		<input type=\"hidden\" name=\"picture_data\" id=\"mcPicData\" value=\"\">\n\
 		<div>\n<label for=\"name\">Display name</label>\n\
 		<input type=\"text\" id=\"name\" name=\"name\" value=\"{name}\" placeholder=\"Your name\">\n</div>\n\
-		<div>\n<label for=\"avatar\">Avatar image URL</label>\n\
+		<div>\n<label for=\"bio\">What you write about</label>\n\
+		<textarea id=\"bio\" name=\"bio\" rows=\"4\" \
+		placeholder=\"A sentence or two. Readers meet this above your posts.\">{bio}</textarea>\n\
+		<p class=\"mc-hint\">Shown at the top of the blog and under each of your posts. Where you are \
+		the only person writing here, this is what the blog is about.</p>\n</div>\n\
+		<div>\n<label for=\"avatar\">Or a picture's address</label>\n\
 		<input type=\"text\" id=\"avatar\" name=\"avatar\" value=\"{avatar}\" \
 		placeholder=\"/img/authors/you.jpg\">\n\
-		<p class=\"mc-hint\">A path on this site, or a full URL. Left empty, your posts show your \
-		initial.</p>\n</div>\n\
+		<p class=\"mc-hint\">A path on this site, or a full URL. Choosing a picture above fills this \
+		in. Left empty, your posts show your initial.</p>\n</div>\n\
 		<div class=\"mc-actions\"><button type=\"submit\" class=\"mc-btn\">Save profile</button></div>\n\
-		</form>\n",
+		</form>\n{script}",
 		root	= PATH_ROOT,
 		close	= icon("close"),
 		save	= PATH_PROFILE_SAVE,
 		csrf	= html_escape(csrf),
 		preview	= preview,
+		drop	= if uploaded {
+			fmt!("<button type=\"button\" class=\"mc-btn mc-btn-quiet\" id=\"mcPicDrop\">Remove \
+				picture</button>\n")
+		} else {
+			String::new()
+		},
+		cap	= AVATAR_MAX_BYTES / 1024,
 		name	= html_escape(&profile.name),
+		bio	= html_escape(&profile.bio),
 		avatar	= html_escape(&profile.avatar),
+		script	= PROFILE_SCRIPT,
 	);
 	Ok(page(theme, admin, "Profile", &body))
 }
+
+/// The largest picture a member may upload, before base64.
+///
+/// A quarter of a megabyte is a generous avatar and a poor way to move a photograph, which is the
+/// balance wanted: the record lives in the site's own database beside its posts.
+pub const AVATAR_MAX_BYTES: usize = 256 * 1024;
+
+/// Wires the profile's picker: the chosen file becomes a data URL in a hidden field, and the preview
+/// changes at once so a member sees what they are about to save.
+///
+/// Without it the form still works -- a member types an address into the field below, which is what
+/// the picker fills in for them. This is the enhancement, not the mechanism.
+const PROFILE_SCRIPT: &str = r#"<script>
+(function () {
+	"use strict";
+	var pick = document.getElementById("picture");
+	var data = document.getElementById("mcPicData");
+	var row  = document.getElementById("mcAvatarRow");
+	var url  = document.getElementById("avatar");
+	var hint = document.getElementById("mcPicHint");
+	var drop = document.getElementById("mcPicDrop");
+	if (!pick || !data || !row) { return; }
+	var cap = 256 * 1024;
+	pick.addEventListener("change", function () {
+		var f = pick.files && pick.files[0];
+		if (!f) { return; }
+		if (f.size > cap) {
+			if (hint) { hint.textContent = "That picture is too big. The most is 256 KB."; }
+			pick.value = "";
+			return;
+		}
+		var r = new FileReader();
+		r.onload = function () {
+			data.value = r.result;
+			var img = row.querySelector("img");
+			if (!img) {
+				var old = row.querySelector(".mc-avatar-initial");
+				img = document.createElement("img");
+				img.className = "mc-avatar-pic";
+				img.alt = "";
+				if (old) { old.parentNode.replaceChild(img, old); }
+				else { row.insertBefore(img, row.firstChild); }
+			}
+			img.src = r.result;
+			// The address field says where the picture will be served from once it is saved, so the
+			// two controls never disagree about which picture this is.
+			if (url) { url.value = ""; }
+			if (hint) { hint.textContent = "Ready to save."; }
+		};
+		r.readAsDataURL(f);
+	});
+	if (drop) {
+		drop.addEventListener("click", function () {
+			data.value = "";
+			if (url) { url.value = ""; }
+			if (hint) { hint.textContent = "The picture goes when you save."; }
+		});
+	}
+})();
+</script>
+"#;
 
 /// A post as a reader would get it, whether or not a reader can.
 ///
@@ -2166,6 +2258,43 @@ fn months_dat(months: &[(String, usize)]) -> Dat {
 	}).collect())
 }
 
+/// A member's own profile as JSON: what an app drawing its own profile form needs to fill it in.
+///
+/// Their own and nobody else's, since the username read is the signed-in one. `uploaded` says whether
+/// the picture is one this site holds, which is the difference between offering to remove it and
+/// offering to edit an address.
+fn profile_json<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	cfg:	&PublishConfig,
+	admin:	&SiteAdmin,
+	db:	Option<&(Arc<RwLock<DB>>, UID)>,
+	id:	&str,
+)
+	-> Outcome<HttpMessage>
+{
+	let db = match db {
+		Some(d)	=> d,
+		None	=> return Ok(json_error("this site has no database configured")),
+	};
+	debug!("{}: console: GET profile.json", id);
+	let p = store::get_profile(db, &admin.username).unwrap_or_default();
+	let mut m = DaticleMap::new();
+	m.insert(dat!("name"),		dat!(p.name.clone()));
+	m.insert(dat!("avatar"),	dat!(p.avatar.clone()));
+	m.insert(dat!("bio"),		dat!(p.bio.clone()));
+	m.insert(dat!("uploaded"),	Dat::Bool(p.avatar == cfg.avatar_path(&admin.username)));
+	m.insert(dat!("max_bytes"),	dat!(AVATAR_MAX_BYTES as u64));
+	// The initial a form draws where there is no picture, from the same rule the reader's pages use.
+	m.insert(dat!("initial"),	dat!(Author::from_profile(&admin.username, &p).initial()));
+	Ok(json_body(&res!(Dat::Map(m).encode_string_with_config(&EncoderConfig::<(), ()>::json(None)))))
+}
+
+
 /// A site's destination settings as JSON, for the settings form.
 ///
 /// Each remote's public fields -- an instance URL, a handle -- and whether its secret is set, and
@@ -2280,7 +2409,7 @@ pub async fn handle_post<
 		PATH_NEWSLETTER_TEST	=> do_test_send(cfg, db, mail, body, &admin.username, json, id).await,
 		PATH_SUBS_ACTION	=> do_subs_action(db, body, &admin.username, json, id),
 		PATH_COMMENTS_ACTION	=> do_comment_action(db, body, &admin.username, json, id),
-		PATH_PROFILE_SAVE	=> do_profile_save(db, body, &admin.username, json, id),
+		PATH_PROFILE_SAVE	=> do_profile_save(cfg, db, body, &admin.username, json, id),
 		PATH_TAG_DELETE		=> do_tag_delete(db, body, is_curator(site_admins, admin),
 			&admin.username, json, id),
 		// Unreachable: `writes` names the same paths.
@@ -2727,11 +2856,18 @@ fn do_creds<
 }
 
 /// Deletes a post.
-/// Saves a member's own profile: the display name and avatar readers see.
+/// Saves a member's own profile: the display name, picture and description readers see.
 ///
 /// A member sets only their own -- the username the profile is stored against is the signed-in one,
 /// never the form's word for it, so nobody edits another member's face. Empty fields are a profile of
 /// defaults, which the store keeps as nothing rather than as a record of blanks.
+///
+/// A picture may arrive two ways. `avatar` is an address the member typed, kept as given. `picture_data`
+/// is a file they chose, which the browser hands over as a data URL: it is decoded, refused unless it
+/// is an image type a browser draws and inside [`AVATAR_MAX_BYTES`], stored in the site's own database,
+/// and the profile then points at the path this module serves it from. A picture that will not be read
+/// costs the picture and not the save, since a member editing their description should not lose it to
+/// a bad file.
 fn do_profile_save<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -2739,6 +2875,7 @@ fn do_profile_save<
 	KH:	Hasher,
 	DB:	Database<UIDL, UID, ENC, KH>,
 >(
+	cfg:	&PublishConfig,
 	db:	&(Arc<RwLock<DB>>, UID),
 	body:	&[u8],
 	who:	&str,
@@ -2747,16 +2884,41 @@ fn do_profile_save<
 )
 	-> Outcome<HttpMessage>
 {
+	let mut said = fmt!("profile saved");
+	let mut avatar = super::form_field(body, "avatar").unwrap_or_default().trim().to_string();
+	// The chosen file, where the member chose one. It is decoded before anything is written, so a
+	// picture that will not read never displaces the one already there.
+	let chosen = super::form_field(body, "picture_data").unwrap_or_default();
+	if !chosen.is_empty() {
+		match data_url::parse(&chosen, AVATAR_MAX_BYTES) {
+			Ok(u) if u.is_web_image() => {
+				res!(store::put_avatar(db, who, &u.media_type, &u.bytes));
+				avatar = cfg.avatar_path(who);
+				info!("{}: console: '{}' uploaded a picture, {} bytes of {}",
+					id, who, u.bytes.len(), u.media_type);
+			}
+			Ok(u) => {
+				warn!("{}: console: '{}' sent a picture of type '{}', which is not an image this \
+					site will serve", id, who, u.media_type);
+				said = fmt!("profile saved, but that file is not a picture");
+			}
+			Err(e) => {
+				warn!("{}: console: '{}' sent a picture that will not read: {}", id, who, e);
+				said = fmt!("profile saved, but that picture would not read");
+			}
+		}
+	}
 	let profile = store::Profile {
 		name:	super::form_field(body, "name").unwrap_or_default().trim().to_string(),
-		avatar:	super::form_field(body, "avatar").unwrap_or_default().trim().to_string(),
+		avatar,
+		bio:	super::form_field(body, "bio").unwrap_or_default().trim().to_string(),
 	};
 	res!(store::put_profile(db, who, &profile));
 	info!("{}: console: '{}' saved their profile", id, who);
 	if json {
 		Ok(json_body("{\"ok\":true}"))
 	} else {
-		Ok(redirect(&fmt!("{}?said={}", PATH_PROFILE, url_encode("profile saved"))))
+		Ok(redirect(&fmt!("{}?said={}", PATH_PROFILE, url_encode(&said))))
 	}
 }
 

@@ -82,7 +82,8 @@ pub fn handle_get(
 		return Ok(not_found(cfg));
 	}
 	match posts.iter().find(|p| p.slug == slug) {
-		Some(post)	=> post_page(cfg, post, comments),
+		Some(post)	=> post_page(cfg, post,
+			authors.iter().find(|a| a.username == post.author), comments),
 		None		=> {
 			info!("{}: publish: no post '{}'", id, slug);
 			Ok(not_found(cfg))
@@ -144,6 +145,9 @@ fn index(
 	escape_text(&mut body, &cfg.title);
 	body.push_str("</h1></header>\n");
 
+	// What the site is about, in the words of whoever writes it, above everything else on the page.
+	body.push_str(&about_block(authors));
+
 	// The filter: the reader's own instrument for narrowing the list. Rendered before the list so it
 	// is the first thing to hand, and wired by the served script; without the script it does nothing
 	// and the whole list stands, which is the point of building it as an enhancement.
@@ -177,6 +181,17 @@ fn index(
 			body.push_str("\">");
 			escape_text(&mut body, &date_text(d));
 			body.push_str("</time></div>");
+		}
+		// Who wrote it, where more than one person writes here. On a blog of one it would be the same
+		// name under every title, which tells a reader choosing between them nothing.
+		if authors.len() > 1 {
+			if let Some(a) = authors.iter().find(|a| a.username == p.author) {
+				body.push_str("<div class=\"aside-byline\">");
+				body.push_str(&author_face(a));
+				body.push_str("<span class=\"aside-byline-name\">");
+				escape_text(&mut body, &a.name);
+				body.push_str("</span></div>");
+			}
 		}
 		body.push_str("<h2><a href=\"");
 		escape_attr(&mut body, &cfg.path_of(&p.slug));
@@ -266,7 +281,12 @@ fn filter_shell(cfg: &PublishConfig, posts: &[Post], authors: &[Author]) -> Stri
 		placeholder=\"Search posts\" aria-label=\"Search posts\" autocomplete=\"off\">\n");
 
 	// The authors, each a face that toggles the list to that author. None pressed is every author, so
-	// the row starts showing all. Drawn only where a post names an author.
+	// the row starts showing all. Only those with a post in the list are offered: `authors` also holds
+	// whoever else may write here, for the description above, and a face that narrows the list to
+	// nothing is a control that can only disappoint.
+	let authors: Vec<&Author> = authors.iter()
+		.filter(|a| posts.iter().any(|p| p.author == a.username))
+		.collect();
 	if !authors.is_empty() {
 		s.push_str("<div class=\"aside-filter-authors\" id=\"aside-filter-authors\" \
 			aria-label=\"Filter by author\">\n");
@@ -276,15 +296,7 @@ fn filter_shell(cfg: &PublishConfig, posts: &[Post], authors: &[Author]) -> Stri
 			s.push_str("\" title=\"");
 			escape_attr(&mut s, &a.name);
 			s.push_str("\" aria-pressed=\"false\">");
-			if a.avatar.is_empty() {
-				s.push_str("<span class=\"aside-author-initial\" aria-hidden=\"true\">");
-				escape_text(&mut s, &a.initial());
-				s.push_str("</span>");
-			} else {
-				s.push_str("<img class=\"aside-author-pic\" alt=\"\" src=\"");
-				escape_attr(&mut s, &a.avatar);
-				s.push_str("\">");
-			}
+			s.push_str(&author_face(a));
 			s.push_str("<span class=\"aside-author-name\">");
 			escape_text(&mut s, &a.name);
 			s.push_str("</span></button>\n");
@@ -370,6 +382,57 @@ fn filter_shell(cfg: &PublishConfig, posts: &[Post], authors: &[Author]) -> Stri
 	s
 }
 
+/// An author's picture, or the initial drawn in its place.
+///
+/// One definition, so a byline, the note under a post and the filter's author row all draw the same
+/// face. An avatar the author uploaded is served by this module; one they gave as a URL is fetched
+/// from wherever they said.
+fn author_face(a: &Author) -> String {
+	let mut s = String::new();
+	if a.avatar.is_empty() {
+		s.push_str("<span class=\"aside-author-initial\" aria-hidden=\"true\">");
+		escape_text(&mut s, &a.initial());
+		s.push_str("</span>");
+	} else {
+		s.push_str("<img class=\"aside-author-pic\" alt=\"\" src=\"");
+		escape_attr(&mut s, &a.avatar);
+		s.push_str("\">");
+	}
+	s
+}
+
+/// What the site is about, above the posts: each author's own description of what they write.
+///
+/// The first thing a reader meets, because a stranger landing on a list of titles has no way to tell
+/// what the blog is for. Where one person writes the blog, their description *is* the blog's, which is
+/// why nothing here is configured separately -- an author who writes what they are about has said what
+/// the site is about, and there is no second place for the two to disagree.
+///
+/// Nothing at all where no author has written one, rather than an empty panel.
+fn about_block(authors: &[Author]) -> String {
+	if !authors.iter().any(|a| !a.bio.is_empty()) {
+		return String::new();
+	}
+	let mut s = String::from("<section class=\"aside-about\" aria-label=\"About\">\n");
+	for a in authors.iter().filter(|a| !a.bio.is_empty()) {
+		s.push_str("<div class=\"aside-about-who\">");
+		s.push_str(&author_face(a));
+		s.push_str("<div class=\"aside-about-body\">");
+		// The name is drawn only where more than one person writes here: on a blog of one, the name
+		// is on every post already, and a heading repeating it says nothing.
+		if authors.len() > 1 {
+			s.push_str("<span class=\"aside-about-name\">");
+			escape_text(&mut s, &a.name);
+			s.push_str("</span>");
+		}
+		s.push_str("<p class=\"aside-about-bio\">");
+		escape_text(&mut s, &a.bio);
+		s.push_str("</p></div></div>\n");
+	}
+	s.push_str("</section>\n");
+	s
+}
+
 /// A post's tags as a list of links, each narrowing the index to that tag.
 ///
 /// Nothing at all for a post with no tags, so the element is never an empty shell. The link is the
@@ -399,9 +462,25 @@ fn read_time(words: usize) -> String {
 }
 
 /// One post.
-fn post_page(cfg: &PublishConfig, post: &Post, comments: Option<&CommentsView>) -> Outcome<HttpMessage> {
+fn post_page(
+	cfg:		&PublishConfig,
+	post:		&Post,
+	author:		Option<&Author>,
+	comments:	Option<&CommentsView>,
+)
+	-> Outcome<HttpMessage>
+{
 	let mut body = String::new();
 	body.push_str("<article class=\"aside\">\n");
+	// Who wrote it, before the prose: on a blog more than one person writes, the byline is part of
+	// reading the piece rather than a credit to find afterwards.
+	if let Some(a) = author {
+		body.push_str("<div class=\"aside-byline\">");
+		body.push_str(&author_face(a));
+		body.push_str("<span class=\"aside-byline-name\">");
+		escape_text(&mut body, &a.name);
+		body.push_str("</span></div>\n");
+	}
 	// The date, and beside it how long the piece takes to read. A reader deciding whether to start
 	// wants both, and wants them before the prose rather than after it.
 	if post.date.is_some() || post.words > 0 {
@@ -426,6 +505,19 @@ fn post_page(cfg: &PublishConfig, post: &Post, comments: Option<&CommentsView>) 
 	// entirely for a post with none.
 	body.push_str(&tags_list(cfg, post));
 	body.push_str("</article>\n");
+
+	// Who wrote it, in their own words, for the reader who has just finished and wants to know whose
+	// piece it was. Only where they have written a description: an empty one draws nothing rather
+	// than a box with a name in it.
+	if let Some(a) = author.filter(|a| !a.bio.is_empty()) {
+		body.push_str("<aside class=\"aside-author-note\">");
+		body.push_str(&author_face(a));
+		body.push_str("<div class=\"aside-author-note-body\"><span class=\"aside-author-note-name\">");
+		escape_text(&mut body, &a.name);
+		body.push_str("</span><p>");
+		escape_text(&mut body, &a.bio);
+		body.push_str("</p></div></aside>\n");
+	}
 
 	// Where the post also lives, and where the conversation about it may be. `nofollow`, since these
 	// are the site's own syndicated copies and not endorsements to pass rank to, and a new tab, since a
@@ -818,7 +910,7 @@ mod tests {
 	/// itself in the response rather than a promise of it.
 	#[test]
 	fn test_a_post_page_carries_its_card_00() -> Outcome<()> {
-		let resp = res!(post_page(&cfg(), &post(), None));
+		let resp = res!(post_page(&cfg(), &post(), None, None));
 		let body = String::from_utf8_lossy(&resp.body).to_string();
 		assert!(body.contains("<title>On rent — Elearnity</title>"), "got: {}", body);
 		assert!(body.contains(r#"<meta property="og:type" content="article">"#), "got: {}", body);
@@ -845,7 +937,7 @@ mod tests {
 			(Destination::Mastodon, fmt!("https://mastodon.social/@me/1")),
 			(Destination::Bluesky, fmt!("https://bsky.app/profile/did:plc:x/post/3k")),
 		];
-		let resp = res!(post_page(&cfg(), &p, None));
+		let resp = res!(post_page(&cfg(), &p, None, None));
 		let body = String::from_utf8_lossy(&resp.body).to_string();
 		assert!(body.contains("Also on"), "no backfeed label: {}", body);
 		assert!(body.contains(r#"href="https://mastodon.social/@me/1""#), "no Mastodon link: {}", body);
@@ -862,7 +954,7 @@ mod tests {
 		let mut p = post();
 		p.title = fmt!(r#"</script><img src=x onerror=alert(1)>"#);
 		p.excerpt = fmt!(r#"a " quote and an <b>"#);
-		let resp = res!(post_page(&cfg(), &p, None));
+		let resp = res!(post_page(&cfg(), &p, None, None));
 		let body = String::from_utf8_lossy(&resp.body).to_string();
 		// The JSON-LD block ends exactly once, where it should.
 		assert_eq!(body.matches("</script>").count(), 1, "script block broken out of: {}", body);
@@ -918,14 +1010,14 @@ mod tests {
 	fn test_a_post_page_carries_its_tags_06() -> Outcome<()> {
 		let mut p = post();
 		p.tags = vec![fmt!("rust"), fmt!("web")];
-		let resp = res!(post_page(&cfg(), &p, None));
+		let resp = res!(post_page(&cfg(), &p, None, None));
 		let body = String::from_utf8_lossy(&resp.body).to_string();
 		assert!(body.contains(r#"<ul class="post-tags">"#), "no tag list: {}", body);
 		assert!(body.contains(r#"<a class="tag" href="/asides?tag=rust">rust</a>"#), "got: {}", body);
 		assert!(body.contains(r#"<a class="tag" href="/asides?tag=web">web</a>"#), "got: {}", body);
 
 		// A post with no tags has no empty shell.
-		let resp = res!(post_page(&cfg(), &post(), None));
+		let resp = res!(post_page(&cfg(), &post(), None, None));
 		let body = String::from_utf8_lossy(&resp.body).to_string();
 		assert!(!body.contains("post-tags"), "an untagged post drew a tag element: {}", body);
 		Ok(())
@@ -946,7 +1038,12 @@ mod tests {
 		b.tags = Vec::new();
 		let posts = vec![a, b];
 
-		let author = Author { username: fmt!("jason"), name: fmt!("Jason"), avatar: String::new() };
+		let author = Author {
+			username:	fmt!("jason"),
+			name:		fmt!("Jason"),
+			avatar:		String::new(),
+			bio:		fmt!("Notes on rent, housing and what follows."),
+		};
 		let resp = res!(index(&cfg(), &posts, &[author], "", "test"));
 		let body = String::from_utf8_lossy(&resp.body).to_string();
 
@@ -978,11 +1075,150 @@ mod tests {
 		Ok(())
 	}
 
+	/// What the site is about stands above the posts, in the words of whoever writes it. On a blog of
+	/// one, the description carries no name over it, since the name is on every post already; where
+	/// more than one person writes, each description is attributed.
+	#[test]
+	fn test_the_index_says_what_the_site_is_about_13() -> Outcome<()> {
+		let one = Author {
+			username:	fmt!("jason"),
+			name:		fmt!("Jason"),
+			avatar:		String::new(),
+			bio:		fmt!("Notes on rent and what follows."),
+		};
+		let resp = res!(index(&cfg(), &[post()], std::slice::from_ref(&one), "", "test"));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(body.contains("aside-about"), "no description above the posts: {}", body);
+		assert!(body.contains("Notes on rent and what follows."), "the description is not shown: {}", body);
+		assert!(!body.contains("aside-about-name"), "a lone author was named over their own line: {}", body);
+		// It is above the filter, which is above the list: what the site is about is met first.
+		let about = body.find("aside-about").unwrap_or(usize::MAX);
+		let filter = body.find("aside-filter").unwrap_or(usize::MAX);
+		let list = body.find("aside-index-list").unwrap_or(usize::MAX);
+		assert!(about < filter && filter < list, "the page is out of order: {}", body);
+
+		// A second author, and each description carries a name.
+		let two = Author {
+			username:	fmt!("ada"),
+			name:		fmt!("Ada"),
+			avatar:		fmt!("/asides/avatar/ada"),
+			bio:		fmt!("Writes about machines."),
+		};
+		let resp = res!(index(&cfg(), &[post()], &[one, two], "", "test"));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(body.contains("aside-about-name"), "two authors and no names: {}", body);
+		assert!(body.contains("Writes about machines."), "the second description is missing: {}", body);
+		assert!(body.contains(r#"<img class="aside-author-pic" alt="" src="/asides/avatar/ada">"#),
+			"an uploaded picture is not drawn: {}", body);
+
+		// A blog whose first post is not written yet still says what it will be about: the description
+		// stands on an empty index, and the filter offers no face, there being nothing to narrow.
+		let one = Author {
+			username:	fmt!("jason"),
+			name:		fmt!("Jason"),
+			avatar:		String::new(),
+			bio:		fmt!("Notes on rent and what follows."),
+		};
+		let resp = res!(index(&cfg(), &[], std::slice::from_ref(&one), "", "test"));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(body.contains("Notes on rent and what follows."),
+			"an empty blog said nothing about itself: {}", body);
+		assert!(!body.contains("aside-filter-authors"),
+			"a face was offered for an author with no posts: {}", body);
+
+		// An author who has written no description draws no panel at all, rather than an empty one.
+		let bare = Author {
+			username:	fmt!("mel"),
+			name:		fmt!("Mel"),
+			avatar:		String::new(),
+			bio:		String::new(),
+		};
+		let resp = res!(index(&cfg(), &[post()], &[bare], "", "test"));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(!body.contains("aside-about"), "an empty description drew a panel: {}", body);
+		Ok(())
+	}
+
+	/// A post carries a byline above the prose and, where its author has written a description, a note
+	/// about them beneath it. A post whose author is unknown carries neither rather than a blank.
+	#[test]
+	fn test_a_post_says_who_wrote_it_14() -> Outcome<()> {
+		let a = Author {
+			username:	fmt!("jason"),
+			name:		fmt!("Jason Hoogland"),
+			avatar:		String::new(),
+			bio:		fmt!("Notes on rent."),
+		};
+		let resp = res!(post_page(&cfg(), &post(), Some(&a), None));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(body.contains("aside-byline"), "no byline: {}", body);
+		assert!(body.contains(r#"<span class="aside-byline-name">Jason Hoogland</span>"#),
+			"the byline names nobody: {}", body);
+		assert!(body.contains("aside-author-note"), "no note about the author: {}", body);
+		assert!(body.contains("Notes on rent."), "the description is not under the post: {}", body);
+		// The byline is above the prose and the note below it.
+		let byline = body.find("aside-byline").unwrap_or(usize::MAX);
+		let prose = body.find("<h1>On rent</h1>").unwrap_or(usize::MAX);
+		let note = body.find("aside-author-note").unwrap_or(usize::MAX);
+		assert!(byline < prose && prose < note, "the post is out of order: {}", body);
+
+		// An author with nothing written about them keeps the byline and drops the note.
+		let quiet = Author { bio: String::new(), ..a.clone() };
+		let resp = res!(post_page(&cfg(), &post(), Some(&quiet), None));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(body.contains("aside-byline"), "the byline went with the description: {}", body);
+		assert!(!body.contains("aside-author-note"), "an empty description drew a note: {}", body);
+
+		// A post whose author could not be resolved carries neither.
+		let resp = res!(post_page(&cfg(), &post(), None, None));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(!body.contains("aside-byline"), "an unattributed post drew a byline: {}", body);
+		Ok(())
+	}
+
+	/// A name a reader could put in a byline is escaped everywhere it is drawn, since a display name is
+	/// whatever a member typed into their own profile.
+	#[test]
+	fn test_a_hostile_profile_cannot_break_out_15() -> Outcome<()> {
+		let a = Author {
+			username:	fmt!("jason"),
+			name:		fmt!(r#"<img src=x onerror=alert(1)>"#),
+			avatar:		fmt!(r#""onload="alert(1)"#),
+			bio:		fmt!(r#"</p><script>alert(1)</script>"#),
+		};
+		let resp = res!(index(&cfg(), &[post()], std::slice::from_ref(&a), "", "test"));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(!body.contains("<img src=x"), "a name reached the page as markup: {}", body);
+		assert!(!body.contains("<script>alert(1)</script>"), "a description reached the page as markup: {}",
+			body);
+		assert!(!body.contains(r#"src=""onload="#), "an avatar broke out of its attribute: {}", body);
+
+		let resp = res!(post_page(&cfg(), &post(), Some(&a), None));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(!body.contains("<img src=x"), "a name reached the post as markup: {}", body);
+		assert!(!body.contains("<script>alert(1)</script>"), "a description reached the post as markup: {}",
+			body);
+		Ok(())
+	}
+
+	/// A member's uploaded picture is served from this module, under the site's own prefix.
+	#[test]
+	fn test_a_picture_has_a_path_of_its_own_16() -> Outcome<()> {
+		let c = cfg();
+		assert_eq!(c.avatar_path("abc123"), "/asides/avatar/abc123");
+		assert_eq!(c.avatar_prefix(), "/asides/avatar/");
+		// It is not a post, so a request for one is never counted as a read.
+		assert!(served_post(&c, &[post()], &c.avatar_path("abc123")).is_none(),
+			"a picture counted as a post");
+		Ok(())
+	}
+
+
 	/// A post says how long it takes to read, beside its date and above the prose, so a reader deciding
 	/// whether to start is told before rather than after.
 	#[test]
 	fn test_a_post_says_how_long_it_takes_to_read_09() -> Outcome<()> {
-		let resp = res!(post_page(&cfg(), &post(), None));
+		let resp = res!(post_page(&cfg(), &post(), None, None));
 		let body = String::from_utf8_lossy(&resp.body).to_string();
 		// 420 words at 200 a minute rounds up to 3.
 		assert!(body.contains(r#"<span class="aside-read">3 min read</span>"#), "got: {}", body);
@@ -990,13 +1226,13 @@ mod tests {
 		// A piece shorter than a minute is still a minute, since "0 min read" tells a reader nothing.
 		let mut p = post();
 		p.words = 12;
-		let resp = res!(post_page(&cfg(), &p, None));
+		let resp = res!(post_page(&cfg(), &p, None, None));
 		let body = String::from_utf8_lossy(&resp.body).to_string();
 		assert!(body.contains("1 min read"), "a short post lost its minute: {}", body);
 
 		// A post whose words were never counted says nothing rather than "0 min read".
 		p.words = 0;
-		let resp = res!(post_page(&cfg(), &p, None));
+		let resp = res!(post_page(&cfg(), &p, None, None));
 		let body = String::from_utf8_lossy(&resp.body).to_string();
 		assert!(!body.contains("aside-read"), "an uncounted post claimed a reading time: {}", body);
 		assert!(body.contains(r#"<time datetime="2026-07-17">"#), "the date went with it: {}", body);

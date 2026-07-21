@@ -74,10 +74,18 @@ pub const READS_PREFIX: &str = "publish/reads/";
 /// writers.
 pub const ADMINS_KEY: &str = "publish/admins";
 
-/// A member profile's key prefix. The record at `publish/profile/<username>` holds the display name
-/// and avatar the author shows to readers, which their login username -- the hash of a passphrase --
-/// cannot. A member with no profile record is drawn from their username alone.
+/// A member profile's key prefix. The record at `publish/profile/<username>` holds the display name,
+/// avatar and description the author shows to readers, which their login username -- the hash of a
+/// passphrase -- cannot. A member with no profile record is drawn from their username alone.
 pub const PROFILE_PREFIX: &str = "publish/profile/";
+
+/// A member's uploaded picture, kept at `publish/avatar/<username>`.
+///
+/// Apart from the profile because it is bytes and the profile is fields: a page drawing a byline reads
+/// the profile and wants the path, not a picture it will not show, and a browser asking for the
+/// picture wants the picture and none of the rest. A member whose avatar is a URL somewhere else has
+/// no record here at all.
+pub const AVATAR_PREFIX: &str = "publish/avatar/";
 
 
 /// A post's read-tally key.
@@ -94,18 +102,29 @@ fn profile_key_of(username: &str) -> Dat {
 	dat!(s)
 }
 
+/// A member's uploaded picture's key.
+fn avatar_key_of(username: &str) -> Dat {
+	let mut s = String::from(AVATAR_PREFIX);
+	s.push_str(username);
+	dat!(s)
+}
 
-/// What a member shows to readers: a display name and an avatar, apart from the opaque username their
-/// login is. Set by the member in the console; read wherever an author is drawn.
+
+/// What a member shows to readers: a display name, an avatar and a description, apart from the opaque
+/// username their login is. Set by the member in the console; read wherever an author is drawn.
 ///
-/// Both fields are optional in effect: an empty name falls back to the username, and an empty avatar
-/// to a drawn initial. A member who never sets a profile is still an author, drawn from their username.
+/// Every field is optional in effect: an empty name falls back to the username, an empty avatar to a
+/// drawn initial, and an empty description to nothing shown at all. A member who never sets a profile
+/// is still an author, drawn from their username.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Profile {
 	/// The name a reader sees, e.g. `Jason Hoogland`. Empty falls back to the username.
 	pub name:	String,
 	/// A path or URL to the member's avatar image. Empty draws an initial instead.
 	pub avatar:	String,
+	/// What the author writes about, in their own words: the line a reader is met with above the
+	/// posts, and what stands as the description of a blog only one person writes. Plain text.
+	pub bio:	String,
 }
 
 impl Profile {
@@ -120,6 +139,9 @@ impl Profile {
 		if !self.avatar.is_empty() {
 			m.insert(dat!("avatar"), dat!(self.avatar.clone()));
 		}
+		if !self.bio.is_empty() {
+			m.insert(dat!("bio"), dat!(self.bio.clone()));
+		}
 		Dat::Map(m)
 	}
 
@@ -133,6 +155,9 @@ impl Profile {
 			}
 			if let Some(Dat::Str(s)) = m.get(&dat!("avatar")) {
 				out.avatar = s.clone();
+			}
+			if let Some(Dat::Str(s)) = m.get(&dat!("bio")) {
+				out.bio = s.clone();
 			}
 		}
 		out
@@ -578,6 +603,70 @@ pub fn put_profile<
 	let (db_arc, user) = db;
 	let guard = lock_read!(db_arc);
 	res!(guard.insert(profile_key_of(username), profile.to_dat(), *user, None));
+	Ok(())
+}
+
+/// A member's uploaded picture, and what it is, or nothing where they uploaded none.
+///
+/// The bytes go out as they came in, under the media type they were stored with -- which is why only
+/// the types a browser draws are ever stored. See [`put_avatar`].
+pub fn get_avatar<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:		&(Arc<RwLock<DB>>, UID),
+	username:	&str,
+)
+	-> Outcome<Option<(String, Vec<u8>)>>
+{
+	let (db_arc, _) = db;
+	let guard = lock_read!(db_arc);
+	match res!(guard.get(&avatar_key_of(username), None)) {
+		Some((Dat::Map(m), _)) => {
+			let kind = match m.get(&dat!("type")) {
+				Some(Dat::Str(s))	=> s.clone(),
+				_			=> return Ok(None),
+			};
+			// The bytes are a `BU64`, whose length is a `u64`: a `BU8` would take a picture of more
+			// than 255 bytes and keep its length modulo 256, which is to say lose it.
+			match m.get(&dat!("data")) {
+				Some(Dat::BU64(b))	=> Ok(Some((kind, b.clone()))),
+				_			=> Ok(None),
+			}
+		}
+		_ => Ok(None),
+	}
+}
+
+/// Writes a member's picture, replacing whatever they had.
+///
+/// The media type is stored beside the bytes because it is what they will be served as, and a caller
+/// must have satisfied itself that the type is one a browser draws -- see
+/// [`DataUrl::is_web_image`](oxedyne_fe2o3_net::http::data_url::DataUrl::is_web_image). Serving bytes
+/// under a type the sender chose freely is how a picture becomes a page.
+pub fn put_avatar<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:		&(Arc<RwLock<DB>>, UID),
+	username:	&str,
+	media_type:	&str,
+	bytes:		&[u8],
+)
+	-> Outcome<()>
+{
+	let (db_arc, user) = db;
+	let mut m = DaticleMap::new();
+	m.insert(dat!("type"), dat!(media_type.to_string()));
+	m.insert(dat!("data"), Dat::BU64(bytes.to_vec()));
+	let guard = lock_read!(db_arc);
+	res!(guard.insert(avatar_key_of(username), Dat::Map(m), *user, None));
 	Ok(())
 }
 
@@ -1111,7 +1200,11 @@ mod tests {
 	/// a member who set nothing is stored as nothing, not as a record of blanks.
 	#[test]
 	fn test_a_profile_round_trips_and_keeps_the_empty_idiom_06() -> Outcome<()> {
-		let p = Profile { name: fmt!("Jason Hoogland"), avatar: fmt!("/img/jason.jpg") };
+		let p = Profile {
+			name:	fmt!("Jason Hoogland"),
+			avatar:	fmt!("/img/jason.jpg"),
+			bio:	fmt!("Writes about rent, housing and the things that follow from them."),
+		};
 		assert_eq!(Profile::from_dat(&p.to_dat()), p);
 
 		let empty = Profile::default();
@@ -1128,9 +1221,14 @@ mod tests {
 	/// an avatarless author yields the initial of that name for a drawn badge.
 	#[test]
 	fn test_an_author_falls_back_to_its_username_07() -> Outcome<()> {
-		let named = Author::from_profile("jason", &Profile { name: fmt!("Jason"), avatar: fmt!("/a.jpg") });
+		let named = Author::from_profile("jason", &Profile {
+			name:	fmt!("Jason"),
+			avatar:	fmt!("/a.jpg"),
+			bio:	fmt!("A line about the writing."),
+		});
 		assert_eq!(named.name, "Jason");
 		assert_eq!(named.avatar, "/a.jpg");
+		assert_eq!(named.bio, "A line about the writing.");
 		assert_eq!(named.initial(), "J");
 
 		let bare = Author::from_profile("mel99", &Profile::default());

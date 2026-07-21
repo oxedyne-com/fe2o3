@@ -390,6 +390,47 @@ impl<
                         }
                         None => {}
                     }
+                    // A member's uploaded picture: bytes in the site's own database, asked for by
+                    // the byline that points at it. Answered here, before the posts are read,
+                    // because it is not a post and reading every post to serve a picture would be
+                    // work for nothing.
+                    if let Some(user) = request_path.strip_prefix(&cfg.avatar_prefix()) {
+                        let found = match db.as_ref() {
+                            Some(dbh) => match publish_store::get_avatar(dbh, user) {
+                                Ok(found) => found,
+                                Err(e) => {
+                                    error!(e, "{}: publish: the picture of '{}' will not read",
+                                        id, user);
+                                    None
+                                }
+                            },
+                            None => None,
+                        };
+                        return Ok(Some(match found {
+                            Some((kind, bytes)) => {
+                                info!("{}: publish: picture of '{}', {} bytes",
+                                    id, user, bytes.len());
+                                HttpMessage::new_response(HttpStatus::OK)
+                                    .with_field(
+                                        HeaderName::ContentType,
+                                        HeaderFieldValue::Generic(kind),
+                                    )
+                                    // A picture changes when its owner changes it and not otherwise,
+                                    // so it is worth an hour of a reader's cache -- long enough to
+                                    // matter over a page of bylines, short enough that a new one
+                                    // shows up the same day.
+                                    .with_field(
+                                        HeaderName::CacheControl,
+                                        HeaderFieldValue::Generic(fmt!("public, max-age=3600")),
+                                    )
+                                    .with_body(bytes)
+                            }
+                            None => HttpMessage::respond_with_text(
+                                HttpStatus::NotFound,
+                                "no such picture",
+                            ),
+                        }));
+                    }
                     // The read is the only part that touches the database, so the generics stop here
                     // and the renderers take a slice of posts.
                     let posts = match publish::read(cfg.as_ref(), db.as_ref(), &id) {
@@ -412,17 +453,42 @@ impl<
                     // and a read per author on every one of those would be work nobody asked for. A
                     // directory has a database for none of this, and a post from one names no author
                     // regardless.
-                    let authors = if request_path == cfg.path || request_path == cfg.json_path() {
-                        let author_names: Vec<String> = posts.iter()
-                            .map(|p| p.author.clone())
-                            .filter(|a| !a.is_empty())
-                            .collect();
+                    let author_names: Vec<String> =
+                        if request_path == cfg.path || request_path == cfg.json_path() {
+                            // Everyone the list names, for the filter's author row, and after them
+                            // whoever else may write here, for the block above it saying what the
+                            // site is about. A blog whose first post is not written yet still has
+                            // someone who can say what it will be about, and this is how their
+                            // description reaches an empty index.
+                            let mut names: Vec<String> = posts.iter()
+                                .map(|p| p.author.clone())
+                                .filter(|a| !a.is_empty())
+                                .collect();
+                            names.extend(site_admins.iter().cloned());
+                            if let Some(dbh) = db.as_ref() {
+                                match publish_store::admins_get(dbh, &id) {
+                                    Ok(granted) => names.extend(granted),
+                                    Err(e) => warn!(
+                                        "{}: publish: the granted admins will not read: {}", id, e),
+                                }
+                            }
+                            names
+                        } else {
+                            // A post being read wants one face: whoever wrote it, for the byline and
+                            // the note beneath it. The feed and the filter script want none.
+                            publish_page::served_post(cfg.as_ref(), &posts, &request_path)
+                                .map(|p| p.author.clone())
+                                .filter(|a| !a.is_empty())
+                                .into_iter()
+                                .collect()
+                        };
+                    let authors = if author_names.is_empty() {
+                        Vec::new()
+                    } else {
                         match db.as_ref() {
                             Some(dbh) => publish_store::resolve_authors(dbh, &author_names),
                             None => Vec::new(),
                         }
-                    } else {
-                        Vec::new()
                     };
                     // The conversation below the post, where the site has a database to keep one
                     // in. A comments read that fails costs the conversation and never the prose: a

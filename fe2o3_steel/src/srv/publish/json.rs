@@ -83,6 +83,9 @@ pub fn serve(
 			(dat!("username"),	dat!(a.username.clone())),
 			(dat!("name"),		dat!(a.name.clone())),
 			(dat!("avatar"),	dat!(a.avatar.clone())),
+			// What the author writes about, which a page drawing its own reader shows above the
+			// posts the way the index page does.
+			(dat!("bio"),		dat!(a.bio.clone())),
 			// The letter drawn where there is no avatar, worked out once here rather than in every
 			// client that would have to know the same fallback rule.
 			(dat!("initial"),	dat!(a.initial())),
@@ -158,6 +161,7 @@ mod tests {
 			username:	fmt!("abc123"),
 			name:		fmt!("Jason"),
 			avatar:		String::new(),
+			bio:		fmt!("Notes on rent."),
 		}];
 		let resp = res!(serve(&cfg(), &[post()], &authors, "test"));
 		let body = String::from_utf8_lossy(&resp.body).to_string();
@@ -165,6 +169,8 @@ mod tests {
 		assert!(body.contains(r#""name": "Jason""#), "no author name: {}", body);
 		// The letter a client draws where an author has no picture, settled here.
 		assert!(body.contains(r#""initial": "J""#), "no drawn initial: {}", body);
+		// What the author says they write about, which a client shows above the posts.
+		assert!(body.contains(r#""bio": "Notes on rent.""#), "no description: {}", body);
 		// Every category the site offers, not only the one the post wears.
 		assert!(body.contains(r#""Personal""#), "an unworn category is still offered: {}", body);
 		assert!(body.contains(r#""Big Ideas""#), "no category with a space: {}", body);

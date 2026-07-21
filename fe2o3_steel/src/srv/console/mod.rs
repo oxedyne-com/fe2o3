@@ -1380,7 +1380,12 @@ border-color:var(--accent,var(--aside-link-color,#3b6ea5));color:#fff;}\
 .mc-chip-x,.mc-chip-del{font-size:0.95rem;line-height:1;opacity:0.75;}\
 .mc-chip-del{color:#e57373;}\
 .mc-chip:hover .mc-chip-x,.mc-chip:hover .mc-chip-del{opacity:1;}\
-.mc-avatar-row{margin:0 0 1rem;}\
+.mc-avatar-row{margin:0 0 1rem;display:flex;align-items:center;gap:1rem;flex-wrap:wrap;}\
+.mc-avatar-pick{display:flex;flex-direction:column;align-items:flex-start;gap:0.4rem;}\
+.mc-avatar-pick .mc-btn-quiet{cursor:pointer;}\
+/* The description is prose, not source, so it takes the page's own font and a few lines rather \
+   than the tall monospace box an editor wants. */\
+.mc-form textarea#bio{min-height:0;font-family:inherit;font-size:0.95rem;}\
 .mc-avatar-pic,.mc-avatar-initial{width:4rem;height:4rem;border-radius:50%;object-fit:cover;\
 display:inline-flex;align-items:center;justify-content:center;font-size:1.6rem;font-weight:600;\
 color:#fff;background:var(--accent,var(--aside-link-color,#3b6ea5));}\
