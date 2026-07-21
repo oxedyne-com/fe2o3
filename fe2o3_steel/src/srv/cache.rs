@@ -80,6 +80,31 @@ pub fn is_document(content_type: &str) -> bool {
     content_type.contains("text/html")
 }
 
+/// Stamp a response the server generated, so no store may serve it unasked.
+///
+/// A generated response describes the site at the instant it was asked for, and
+/// the next thing an author writes changes it. Carrying no directive and no
+/// validator, it is not merely uncached -- RFC 9111 §4.2.2 lets a store invent a
+/// freshness lifetime for it, and a browser will then redraw a page from a copy
+/// taken before the post existed. That is the stale index an author has to force
+/// a refresh to get past, and forcing a refresh is not something a reader will
+/// think to do. `no-cache` keeps the store and forbids the guess: the response
+/// may be held, and may never be used without asking first.
+///
+/// A response that already says how long it may be held keeps what it said. This
+/// is a default for the responses that say nothing, not an override -- and
+/// `Cache-Control` is a list field, so appending a second directive would leave
+/// both in force rather than replacing the first.
+pub fn generated(resp: HttpMessage) -> HttpMessage {
+    if resp.header.fields.get_one(&HeaderName::CacheControl).is_some() {
+        return resp;
+    }
+    resp.with_field(
+        HeaderName::CacheControl,
+        HeaderFieldValue::Generic(fmt!("no-cache")),
+    )
+}
+
 /// A `304 Not Modified`: the validators and directives, and no body.
 pub fn not_modified(etag: String, directive: String) -> Outcome<HttpMessage> {
     Ok(HttpMessage::new_response(HttpStatus::NotModified)
@@ -133,6 +158,42 @@ mod tests {
     fn a_document_always_revalidates_however_long_the_max_age() {
         assert_eq!(cache_control("text/html; charset=utf-8", 31536000), "no-cache");
         assert_eq!(cache_control("text/html", 0), "no-cache");
+    }
+
+    /// A generated response says so, rather than leaving a store to guess a lifetime for it.
+    #[test]
+    fn a_generated_response_is_never_served_unasked() -> Outcome<()> {
+        let resp = generated(HttpMessage::new_response(HttpStatus::OK));
+        let held = res!(resp.header.fields.get_one(&HeaderName::CacheControl).ok_or_else(||
+            err!("A generated response carried no cache directive."; Missing)));
+        assert_eq!(fmt!("{}", held), "no-cache");
+        Ok(())
+    }
+
+    /// `Cache-Control` is a list field, so a second stamp would leave both directives in force.
+    #[test]
+    fn stamping_twice_leaves_one_directive() -> Outcome<()> {
+        let resp = generated(generated(HttpMessage::new_response(HttpStatus::OK)));
+        let all = res!(resp.header.fields.get_list(&HeaderName::CacheControl).ok_or_else(||
+            err!("A generated response carried no cache directive."; Missing)));
+        assert_eq!(all.len(), 1, "The directive was repeated rather than replaced.");
+        Ok(())
+    }
+
+    /// A response that has said how long it may be held is not overruled by the default.
+    #[test]
+    fn an_explicit_directive_survives_the_default() -> Outcome<()> {
+        let held = HttpMessage::new_response(HttpStatus::OK)
+            .with_field(
+                HeaderName::CacheControl,
+                HeaderFieldValue::Generic(fmt!("public, max-age=86400")),
+            );
+        let resp = generated(held);
+        let all = res!(resp.header.fields.get_list(&HeaderName::CacheControl).ok_or_else(||
+            err!("The directive went missing."; Missing)));
+        assert_eq!(all.len(), 1);
+        assert_eq!(fmt!("{}", all[0]), "public, max-age=86400");
+        Ok(())
     }
 
     #[test]

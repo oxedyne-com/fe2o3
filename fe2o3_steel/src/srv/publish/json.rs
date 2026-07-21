@@ -9,6 +9,7 @@
 //! is a post however it is asked for. A slug cannot collide with this: `index.json` is not a name a
 //! slug may wear, punctuation not being allowed in one.
 
+use crate::srv::cache;
 use crate::srv::publish::{
 	Author,
 	Post,
@@ -117,7 +118,9 @@ pub fn serve(
 		HeaderName::ContentType,
 		HeaderFieldValue::Generic(fmt!("application/json")),
 	);
-	Ok(resp)
+	// An app drawing its own stream from this must see a publication at once, and will not
+	// think to force a refresh.
+	Ok(cache::generated(resp))
 }
 
 

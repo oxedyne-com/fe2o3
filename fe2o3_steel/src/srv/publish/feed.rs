@@ -20,6 +20,7 @@
 //! UTC, because a post carries no zone and inventing one from where the server happens to be would
 //! make the same post's feed entry move when the server did.
 
+use crate::srv::cache;
 use crate::srv::publish::{
 	DATE_LEN,
 	Post,
@@ -129,7 +130,8 @@ pub fn serve(cfg: &PublishConfig, posts: &[Post], id: &str) -> Outcome<HttpMessa
 		HeaderName::ContentType,
 		HeaderFieldValue::Generic(fmt!("application/atom+xml; charset=utf-8")),
 	);
-	Ok(resp)
+	// A feed reader polls this on a schedule; a store answering from a copy would defeat the poll.
+	Ok(cache::generated(resp))
 }
 
 /// A post's date, as the instant the feed claims for it.

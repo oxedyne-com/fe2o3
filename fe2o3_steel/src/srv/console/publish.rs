@@ -20,6 +20,7 @@
 //! rendered HTML a reader would get.
 
 use crate::srv::{
+	cache,
 	console::{
 		SiteAdmin,
 		Theme,
@@ -1222,7 +1223,8 @@ fn subscribers_csv<
 		HeaderName::ContentType,
 		HeaderFieldValue::Generic(fmt!("text/csv; charset=utf-8")),
 	);
-	Ok(resp)
+	// The list as it stands, and it stands behind a session.
+	Ok(cache::generated(resp))
 }
 
 /// The list of posts, drafts and all.
@@ -3080,13 +3082,16 @@ fn back_with(why: &str, json: bool) -> HttpMessage {
 }
 
 /// A JSON body, already encoded.
+///
+/// Never held: this is what an app draws its console from, so a store answering it would show a
+/// post list taken before the post was saved.
 fn json_body(body: &str) -> HttpMessage {
 	let mut resp = HttpMessage::ok_respond_with_text(body.to_string());
 	resp = resp.with_field(
 		HeaderName::ContentType,
 		HeaderFieldValue::Generic(fmt!("application/json")),
 	);
-	resp
+	cache::generated(resp)
 }
 
 /// A JSON error a caller can read, its reason escaped for a string literal.

@@ -50,6 +50,7 @@ use crate::srv::{
 		},
 		state::AdminState,
 	},
+	cache,
 	publish::{
 		PublishConfig,
 		send::MailSender,
@@ -1112,12 +1113,16 @@ pub fn page(theme: &Theme, admin: &SiteAdmin, title: &str, body: &str) -> HttpMe
 	s.push_str(body);
 	s.push_str("</main>\n</body>\n</html>\n");
 
-	HttpMessage::new_response(HttpStatus::OK)
-		.with_field(
-			HeaderName::ContentType,
-			HeaderFieldValue::Generic("text/html; charset=utf-8".to_string()),
-		)
-		.with_body(s.into_bytes())
+	// Never held. A console page shows the site as it stands, and it stands behind a session --
+	// so a store keeping it would show one admin's page to whoever asked next on that machine.
+	cache::generated(
+		HttpMessage::new_response(HttpStatus::OK)
+			.with_field(
+				HeaderName::ContentType,
+				HeaderFieldValue::Generic("text/html; charset=utf-8".to_string()),
+			)
+			.with_body(s.into_bytes())
+	)
 }
 
 /// What a signed-in member who is not an admin is shown.

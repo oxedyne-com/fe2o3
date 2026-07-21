@@ -12,6 +12,7 @@
 //! font would be deciding something that is not its to decide, and a site that could not restyle its
 //! own prose would not really own it.
 
+use crate::srv::cache;
 use crate::srv::publish::{
 	Author,
 	Post,
@@ -852,13 +853,16 @@ fn subscribe_page(cfg: &PublishConfig, title: &str, body: &str, status: HttpStat
 }
 
 /// An HTML response with the type and status a browser expects.
+///
+/// Never held: an index is stale the moment a post is published, and a post page
+/// the moment it is edited or commented on.
 fn html_response(status: HttpStatus, body: &str) -> HttpMessage {
 	let mut resp = HttpMessage::respond_with_text(status, body);
 	resp = resp.with_field(
 		HeaderName::ContentType,
 		HeaderFieldValue::Generic(fmt!("text/html; charset=utf-8")),
 	);
-	resp
+	cache::generated(resp)
 }
 
 #[cfg(test)]
@@ -1605,7 +1609,7 @@ pub fn comment_preview(html: Option<String>) -> HttpMessage {
 		HeaderName::ContentType,
 		HeaderFieldValue::Generic(fmt!("text/html; charset=utf-8")),
 	);
-	resp
+	cache::generated(resp)
 }
 
 /// Serves the comment form's script.
