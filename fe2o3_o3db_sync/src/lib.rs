@@ -148,6 +148,7 @@ pub mod api;
 pub mod base;
 pub mod bots;
 pub mod cas; // Content-addressed storage: SHA-256 chunk addressing for large syncable payloads.
+pub mod cas_o3db; // Cas trait backed by a local O3db instance.
 pub mod comm;
 pub mod dal; // Data Abstraction Layer.
 pub mod data;
