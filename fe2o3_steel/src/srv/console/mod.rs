@@ -390,7 +390,14 @@ pub async fn handle_get<
 			_				=> Vec::new(),
 		};
 		let dests: Vec<&str> = offered.iter().map(|d| d.as_str()).collect();
-		return Ok(status_json(admin.is_some(), claimable, csrf.as_deref(), &dests));
+		// The site's category taxonomy, so the composer draws a checkbox per category. Only an admin
+		// composes, and only where the vhost publishes at all; a non-admin, or a site with no publish
+		// block, is given the empty set.
+		let cats: &[String] = match (&admin, publish) {
+			(Some(_), Some(p))	=> &p.categories,
+			_			=> &[],
+		};
+		return Ok(status_json(admin.is_some(), claimable, csrf.as_deref(), &dests, cats));
 	}
 
 	let admin = match admin {
@@ -1392,18 +1399,43 @@ color:#fff;background:var(--accent,var(--aside-link-color,#3b6ea5));}\
 /// and only a caller with the session cookie reaches this with `admin` true. A cross-site page has
 /// neither the cookie (it is `SameSite=Lax`, unsent on a cross-site request) nor the reply (the
 /// same-origin policy hides it), so it learns nothing.
-fn status_json(admin: bool, claimable: bool, csrf: Option<&str>, dests: &[&str]) -> HttpMessage {
+fn status_json(
+	admin:		bool,
+	claimable:	bool,
+	csrf:		Option<&str>,
+	dests:		&[&str],
+	categories:	&[String],
+)
+	-> HttpMessage
+{
 	// The destinations the site can offer, as a JSON array. The words are a fixed vocabulary
 	// (`Destination::as_str`), so they need no escaping.
 	let items: Vec<String> = dests.iter().map(|d| fmt!("\"{}\"", d)).collect();
 	let dest_arr = fmt!("[{}]", items.join(","));
+	// The categories, as a JSON array. Unlike the destinations these are free config strings, so each
+	// is escaped for a JSON string literal -- a quote or a backslash in a category name must not break
+	// the document.
+	let cat_items: Vec<String> = categories.iter().map(|c| {
+		let mut s = String::from("\"");
+		for ch in c.chars() {
+			match ch {
+				'"'	=> s.push_str("\\\""),
+				'\\'	=> s.push_str("\\\\"),
+				c if (c as u32) < 0x20	=> s.push_str(&fmt!("\\u{:04x}", c as u32)),
+				c	=> s.push(c),
+			}
+		}
+		s.push('"');
+		s
+	}).collect();
+	let cat_arr = fmt!("[{}]", cat_items.join(","));
 	let body = match csrf {
 		Some(t)	=> fmt!(
-			"{{\"admin\":{},\"claimable\":{},\"csrf\":\"{}\",\"destinations\":{}}}",
-			admin, claimable, t, dest_arr),
+			"{{\"admin\":{},\"claimable\":{},\"csrf\":\"{}\",\"destinations\":{},\"categories\":{}}}",
+			admin, claimable, t, dest_arr, cat_arr),
 		None	=> fmt!(
-			"{{\"admin\":{},\"claimable\":{},\"destinations\":{}}}",
-			admin, claimable, dest_arr),
+			"{{\"admin\":{},\"claimable\":{},\"destinations\":{},\"categories\":{}}}",
+			admin, claimable, dest_arr, cat_arr),
 	};
 	HttpMessage::new_response(HttpStatus::OK)
 		.with_field(
