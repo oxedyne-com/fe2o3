@@ -1655,9 +1655,11 @@ mod tests {
 		Post {
 			slug:		fmt!("on-rent"),
 			title:		fmt!("On rent"),
-			kind:		crate::srv::publish::PostKind::Note,
+			author:		String::new(),
+			categories:	Vec::new(),
 			date:		None,
 			excerpt:	fmt!("An opening sentence."),
+			words:		3,
 			html:		fmt!("<h1>On rent</h1>\n<p>An opening sentence.</p>\n"),
 			also_on:	Vec::new(),
 			tags:		Vec::new(),

@@ -22,9 +22,9 @@
 //! anything normal takes.
 
 use crate::srv::publish::{
+	Author,
 	Post,
 	Markup,
-	PostKind,
 	PostState,
 	dest::{
 		Delivery,
@@ -74,12 +74,69 @@ pub const READS_PREFIX: &str = "publish/reads/";
 /// writers.
 pub const ADMINS_KEY: &str = "publish/admins";
 
+/// A member profile's key prefix. The record at `publish/profile/<username>` holds the display name
+/// and avatar the author shows to readers, which their login username -- the hash of a passphrase --
+/// cannot. A member with no profile record is drawn from their username alone.
+pub const PROFILE_PREFIX: &str = "publish/profile/";
+
 
 /// A post's read-tally key.
 fn reads_key_of(slug: &str) -> Dat {
 	let mut s = String::from(READS_PREFIX);
 	s.push_str(slug);
 	dat!(s)
+}
+
+/// A member profile's key.
+fn profile_key_of(username: &str) -> Dat {
+	let mut s = String::from(PROFILE_PREFIX);
+	s.push_str(username);
+	dat!(s)
+}
+
+
+/// What a member shows to readers: a display name and an avatar, apart from the opaque username their
+/// login is. Set by the member in the console; read wherever an author is drawn.
+///
+/// Both fields are optional in effect: an empty name falls back to the username, and an empty avatar
+/// to a drawn initial. A member who never sets a profile is still an author, drawn from their username.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Profile {
+	/// The name a reader sees, e.g. `Jason Hoogland`. Empty falls back to the username.
+	pub name:	String,
+	/// A path or URL to the member's avatar image. Empty draws an initial instead.
+	pub avatar:	String,
+}
+
+impl Profile {
+
+	/// The profile as a daticle, on the empty-idiom the records keep: a field that is empty writes no
+	/// key, so a profile that is all defaults writes an empty map and reads back the same.
+	pub fn to_dat(&self) -> Dat {
+		let mut m = DaticleMap::new();
+		if !self.name.is_empty() {
+			m.insert(dat!("name"), dat!(self.name.clone()));
+		}
+		if !self.avatar.is_empty() {
+			m.insert(dat!("avatar"), dat!(self.avatar.clone()));
+		}
+		Dat::Map(m)
+	}
+
+	/// The profile from a daticle. An absent or mistyped field is the default, on the same footing as
+	/// the post record: a reader that cannot read forwards makes every addition a migration.
+	pub fn from_dat(d: &Dat) -> Self {
+		let mut out = Self::default();
+		if let Dat::Map(m) = d {
+			if let Some(Dat::Str(s)) = m.get(&dat!("name")) {
+				out.name = s.clone();
+			}
+			if let Some(Dat::Str(s)) = m.get(&dat!("avatar")) {
+				out.avatar = s.clone();
+			}
+		}
+		out
+	}
 }
 
 /// A post's key.
@@ -97,8 +154,14 @@ fn key_of(slug: &str) -> Dat {
 pub struct Record {
 	/// The post's name in a URL.
 	pub slug:	String,
-	/// Long or short.
-	pub kind:	PostKind,
+	/// The member who wrote it, by their site-login username. Empty for a post with no named author,
+	/// which is what every record written before authorship was a field reads as, and what a post read
+	/// from a directory carries unless a default author is configured.
+	pub author:	String,
+	/// The categories the post sits in, from the site's configured set, in first-seen order. Empty for
+	/// an uncategorised post, which is what every record written before categories were a field reads
+	/// as. The free-form counterpart is [`tags`](Record::tags).
+	pub categories:	Vec<String>,
 	/// Draft or live.
 	pub state:	PostState,
 	/// Markdown or Djot.
@@ -124,7 +187,6 @@ impl Record {
 	pub fn to_dat(&self) -> Dat {
 		let mut m = DaticleMap::new();
 		m.insert(dat!("slug"),		dat!(self.slug.clone()));
-		m.insert(dat!("kind"),		dat!(self.kind.as_str().to_string()));
 		m.insert(dat!("state"),		dat!(self.state.as_str().to_string()));
 		m.insert(dat!("markup"),	dat!(self.markup.as_str().to_string()));
 		m.insert(dat!("source"),	dat!(self.source.clone()));
@@ -132,6 +194,16 @@ impl Record {
 		// nothing, and two ways to say one thing is one too many.
 		if let Some(d) = &self.date {
 			m.insert(dat!("date"), dat!(d.clone()));
+		}
+		// A post with no named author carries no author key, on the empty-idiom the date and tags keep:
+		// an absent key and an empty string say the same thing, and one is enough.
+		if !self.author.is_empty() {
+			m.insert(dat!("author"), dat!(self.author.clone()));
+		}
+		// An uncategorised post carries no categories key, on the same idiom the tags below keep.
+		if !self.categories.is_empty() {
+			let list = Dat::List(self.categories.iter().map(|c| dat!(c.clone())).collect());
+			m.insert(dat!("categories"), list);
 		}
 		// A post sent nowhere carries no deliveries key, for the same reason it carries no empty date:
 		// an absent key and an empty list say the same thing, and one of them is enough.
@@ -169,7 +241,7 @@ impl Record {
 			};
 			match key.as_str() {
 				"slug"		=> out.slug = val,
-				"kind"		=> out.kind = PostKind::of(&val),
+				"author"	=> out.author = val,
 				"state"		=> out.state = PostState::of(&val),
 				// A record written before markup was a field carries none, and reads as Markdown --
 				// which is what every such post was. The default falls out of `Markup::of`.
@@ -214,13 +286,25 @@ impl Record {
 				out.tags.push(s.clone());
 			}
 		}
+		// Categories are a list of strings, read like the tags. An absent key is an uncategorised post,
+		// which every record written before categories were a field is.
+		let cats = match m.get(&dat!("categories")) {
+			Some(Dat::List(items))	=> items.as_slice(),
+			Some(Dat::Vek(vek))	=> vek.as_slice(),
+			_			=> &[],
+		};
+		for item in cats {
+			if let Dat::Str(s) = item {
+				out.categories.push(s.clone());
+			}
+		}
 		Ok(out)
 	}
 
 	/// The record as a reader gets it, "also on …" links and all.
 	pub fn render(&self) -> Outcome<Post> {
 		let mut post = res!(render_source(
-			&self.source, self.slug.clone(), self.date.clone(), self.kind, self.markup));
+			&self.source, self.slug.clone(), self.date.clone(), self.markup));
 		// The remotes the post actually reached, with the address it landed at, for the backlinks. Only
 		// a sent delivery has a permalink; a queued or failed one has nowhere to point.
 		post.also_on = self.deliveries.iter().filter_map(|d| match &d.state {
@@ -231,6 +315,9 @@ impl Record {
 		// The tags travel with the rendered post, so every read surface can show them without knowing a
 		// record from a directory.
 		post.tags = self.tags.clone();
+		// So do the author and the categories, for the same reason.
+		post.author = self.author.clone();
+		post.categories = self.categories.clone();
 		Ok(post)
 	}
 }
@@ -382,6 +469,145 @@ pub fn all_tags<
 	}
 	out.sort();
 	Ok(out)
+}
+
+/// How far a tag reaches: how many posts wear it, and how many distinct authors those posts belong
+/// to. What a curator is shown before deleting one, so the cost of the act is named before it is done.
+pub fn tag_usage<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	tag:	&str,
+	id:	&str,
+)
+	-> Outcome<(usize, usize)>
+{
+	let recs = res!(list_records(db, id));
+	let mut posts = 0;
+	let mut authors: Vec<String> = Vec::new();
+	for rec in &recs {
+		if rec.tags.iter().any(|t| t == tag) {
+			posts += 1;
+			if !rec.author.is_empty() && !authors.iter().any(|a| a == &rec.author) {
+				authors.push(rec.author.clone());
+			}
+		}
+	}
+	Ok((posts, authors.len()))
+}
+
+/// Deletes a tag from every post that wears it, rewriting each, and returns how many were touched.
+///
+/// The one destructive act on the shared vocabulary, a curator's alone. It reaches across authors, so
+/// it is a deliberate rewrite of every affected record rather than a flag: a tag exists only through
+/// the posts wearing it, so taking it off all of them is what deleting it means. A post that will not
+/// rewrite is logged and passed over rather than failing the sweep -- the others still lose the tag.
+pub fn delete_tag<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	tag:	&str,
+	id:	&str,
+)
+	-> Outcome<usize>
+{
+	let recs = res!(list_records(db, id));
+	let mut n = 0;
+	for mut rec in recs {
+		if rec.tags.iter().any(|t| t == tag) {
+			rec.tags.retain(|t| t != tag);
+			match put(db, &rec, id) {
+				Ok(())	=> n += 1,
+				Err(e)	=> warn!(
+					"{}: publish: deleting tag '{}' but '{}' would not rewrite: {}", id, tag, rec.slug, e),
+			}
+		}
+	}
+	if n > 0 {
+		info!("{}: publish: deleted tag '{}' from {} post(s)", id, tag, n);
+	}
+	Ok(n)
+}
+
+/// One member's profile, or the default where they have set none.
+///
+/// The default is not an error: a member who never opened their profile is still an author, and asks
+/// to be drawn from their username. Only a database that will not read is a fault.
+pub fn get_profile<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:		&(Arc<RwLock<DB>>, UID),
+	username:	&str,
+)
+	-> Outcome<Profile>
+{
+	let (db_arc, _) = db;
+	let guard = lock_read!(db_arc);
+	match res!(guard.get(&profile_key_of(username), None)) {
+		Some((val, _))	=> Ok(Profile::from_dat(&val)),
+		None		=> Ok(Profile::default()),
+	}
+}
+
+/// Writes a member's profile.
+pub fn put_profile<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:		&(Arc<RwLock<DB>>, UID),
+	username:	&str,
+	profile:	&Profile,
+)
+	-> Outcome<()>
+{
+	let (db_arc, user) = db;
+	let guard = lock_read!(db_arc);
+	res!(guard.insert(profile_key_of(username), profile.to_dat(), *user, None));
+	Ok(())
+}
+
+/// The authors a set of usernames names, each resolved to what a reader is shown.
+///
+/// One read per distinct username, the profile where it has one and the username alone where it does
+/// not. Order follows the input, deduped: a filter draws one face per author, in the order the posts
+/// first named them. A username whose profile will not read is drawn from the username rather than
+/// failing the page -- a broken profile costs a name, not the index.
+pub fn resolve_authors<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:		&(Arc<RwLock<DB>>, UID),
+	usernames:	&[String],
+)
+	-> Vec<Author>
+{
+	let mut out: Vec<Author> = Vec::new();
+	for u in usernames {
+		if u.is_empty() || out.iter().any(|a| &a.username == u) {
+			continue;
+		}
+		let profile = get_profile(db, u).unwrap_or_default();
+		out.push(Author::from_profile(u, &profile));
+	}
+	out
 }
 
 /// Every live post, newest first, rendered.
@@ -786,17 +1012,19 @@ pub fn import_dir<
 		let (date, slug) = split_date(&stem);
 		let rec = Record {
 			slug,
+			// A directory carries no author or categories: there is no front matter to hold them, and
+			// a filename is the slug and the date, nothing else. An imported post is attributed and
+			// categorised afterwards in the composer, or left as it came.
+			author:		String::new(),
+			categories:	Vec::new(),
 			// Everything a directory holds is live: a file on disk is not a draft, or it would not be
 			// on the disk of a server.
-			kind:	PostKind::Note,
 			state:	PostState::Live,
 			markup:	Markup::Markdown,
 			date,
 			source,
 			// A file has been sent nowhere: a directory is prose, not a record of where it went.
 			deliveries:	Vec::new(),
-			// A directory carries no tags: there is no front matter to put them in, and a filename is
-			// the slug and the date, nothing else.
 			tags:	Vec::new(),
 		};
 		res!(put(db, &rec, id));
@@ -822,7 +1050,8 @@ mod tests {
 	fn test_a_record_round_trips_00() -> Outcome<()> {
 		let rec = Record {
 			slug:	fmt!("on-rent"),
-			kind:	PostKind::Essay,
+			author:		fmt!("jason"),
+			categories:	vec![fmt!("Personal"), fmt!("Technical")],
 			state:	PostState::Draft,
 			markup:	Markup::Djot,
 			date:	Some(fmt!("2026-07-17")),
@@ -875,6 +1104,39 @@ mod tests {
 		let tagged = Record { tags: vec![fmt!("rust"), fmt!("web")], ..rec };
 		let back = res!(Record::from_dat(&tagged.to_dat()));
 		assert_eq!(back.tags, vec![fmt!("rust"), fmt!("web")]);
+		Ok(())
+	}
+
+	/// A profile round-trips, and a profile of all defaults writes an empty map and reads back the same:
+	/// a member who set nothing is stored as nothing, not as a record of blanks.
+	#[test]
+	fn test_a_profile_round_trips_and_keeps_the_empty_idiom_06() -> Outcome<()> {
+		let p = Profile { name: fmt!("Jason Hoogland"), avatar: fmt!("/img/jason.jpg") };
+		assert_eq!(Profile::from_dat(&p.to_dat()), p);
+
+		let empty = Profile::default();
+		if let Dat::Map(m) = empty.to_dat() {
+			assert!(m.is_empty(), "a default profile wrote a key");
+		} else {
+			panic!("a profile did not encode as a map");
+		}
+		assert_eq!(Profile::from_dat(&empty.to_dat()), empty);
+		Ok(())
+	}
+
+	/// An author falls back where a profile named nothing: the display name becomes the username, and
+	/// an avatarless author yields the initial of that name for a drawn badge.
+	#[test]
+	fn test_an_author_falls_back_to_its_username_07() -> Outcome<()> {
+		let named = Author::from_profile("jason", &Profile { name: fmt!("Jason"), avatar: fmt!("/a.jpg") });
+		assert_eq!(named.name, "Jason");
+		assert_eq!(named.avatar, "/a.jpg");
+		assert_eq!(named.initial(), "J");
+
+		let bare = Author::from_profile("mel99", &Profile::default());
+		assert_eq!(bare.name, "mel99", "an unset profile should show the username");
+		assert!(bare.avatar.is_empty());
+		assert_eq!(bare.initial(), "M");
 		Ok(())
 	}
 

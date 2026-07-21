@@ -13,6 +13,7 @@ use crate::srv::publish::{
 	Post,
 	PublishConfig,
 	date_text,
+	read_mins,
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -34,18 +35,20 @@ pub fn serve(cfg: &PublishConfig, posts: &[Post], id: &str) -> Outcome<HttpMessa
 			let mut fields = vec![
 				(dat!("slug"),		dat!(p.slug.clone())),
 				(dat!("title"),		dat!(p.title.clone())),
-				// Which the post is, because a page showing these cannot tell otherwise, and the
-				// difference is the whole reason the two kinds exist. Without it a passing thought
-				// and an essay arrive identical and get shown identically -- which is precisely the
-				// furniture a note is defined by not wearing.
-				(dat!("kind"),		dat!(p.kind.as_str().to_string())),
+				// The author, by their site-login username, so the filter can group posts under a face.
+				// Empty where none is named, drawn as no author rather than as a missing one.
+				(dat!("author"),	dat!(p.author.clone())),
 				(dat!("url"),		dat!(cfg.path_of(&p.slug))),
 				(dat!("excerpt"),	dat!(p.excerpt.clone())),
 				(dat!("html"),		dat!(p.html.clone())),
-				// The tags, always present as an array so a page reading this need not ask whether the
-				// key is there -- an untagged post carries the empty list, which is the same thing said
-				// once. A tag is a plain string the store already normalised.
+				// Reading time in whole minutes, so a filter can offer a min/max slider without recounting
+				// words in the client. The figure the post's own badge shows, from the one definition.
+				(dat!("read_mins"),	dat!(read_mins(p.words) as u64)),
+				// The tags and categories, always present as arrays so a page reading this need not ask
+				// whether the key is there -- an empty post carries the empty list, the same thing said
+				// once. Each is a plain string the store already normalised.
 				(dat!("tags"),		Dat::List(p.tags.iter().map(|t| dat!(t.clone())).collect())),
+				(dat!("categories"),	Dat::List(p.categories.iter().map(|c| dat!(c.clone())).collect())),
 			];
 			// A post without a date carries no date key, rather than a key saying nothing. The reader
 			// asks whether the post has one; it should not also have to ask what a date of nothing means.

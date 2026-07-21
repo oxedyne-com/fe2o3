@@ -431,7 +431,7 @@ pub async fn handle_get<
 		return admins_page(&theme, &admin, &csrf, site_admins, db, query, id);
 	}
 
-	publish::handle_get(publish, &theme, &admin, &csrf, db, request_path, query, id)
+	publish::handle_get(publish, &theme, &admin, &csrf, site_admins, db, request_path, query, id)
 }
 
 /// The admin-management page: who administers the site, and the forms to grant and revoke.
@@ -625,7 +625,7 @@ pub async fn handle_post<
 	}
 
 	let resp = res!(publish::handle_post(
-		publish, &admin, db, tls_client, mail, request_path, body, json, id,
+		publish, &admin, site_admins, db, tls_client, mail, request_path, body, json, id,
 	).await);
 	Ok(Some(resp))
 }
@@ -1088,6 +1088,7 @@ pub fn page(theme: &Theme, admin: &SiteAdmin, title: &str, body: &str) -> HttpMe
 	s.push_str(&fmt!("<a href=\"{}\">Reports</a>", publish::PATH_REPORTS));
 	s.push_str(&fmt!("<a href=\"{}\">Comments</a>", publish::PATH_COMMENTS));
 	s.push_str(&fmt!("<a href=\"{}\">Destinations</a>", publish::PATH_DESTS));
+	s.push_str(&fmt!("<a href=\"{}\">Profile</a>", publish::PATH_PROFILE));
 	s.push_str(&fmt!("<span class=\"mc-who\">{}…</span>", html_escape(&admin.username[..8.min(admin.username.len())])));
 	// The way out of the console is a close, in the corner, as it is on every page within it --
 	// rather than a link competing for attention with the pages themselves.
@@ -1342,18 +1343,42 @@ padding:0.1rem 0.4rem;border-radius:4px;border:1px solid var(--border,#333c47);o
 .mc-tag-live{border-color:#4c9a6a;color:#7fc79b;opacity:1;}\
 .mc-tag-err{border-color:#c0554e;color:#d9776f;opacity:1;}\
 .mc-settings + .mc-settings{margin-top:0.6rem;}\
-.tag-chips{display:flex;flex-wrap:wrap;gap:0.4rem;margin:0.4rem 0 0;}\
-.tag-chip{display:inline-flex;align-items:center;gap:0.2rem;font-size:0.82rem;\
-padding:0.12rem 0.15rem 0.12rem 0.55rem;border-radius:999px;\
-border:1px solid var(--border,var(--aside-rule-color,#333c47));}\
-.tag-chip-close{font:inherit;line-height:1;cursor:pointer;border:none;background:transparent;\
-color:var(--text-secondary,var(--aside-date-color,#8a97a6));padding:0 0.35rem;border-radius:999px;}\
-.tag-chip-close:hover{color:var(--text-primary,var(--body-color,#e6e6e6));}\
-.tag-palette{display:flex;flex-wrap:wrap;gap:0.4rem;margin:0.5rem 0 0;}\
-.tag-palette-chip{font:inherit;font-size:0.82rem;cursor:pointer;padding:0.12rem 0.55rem;\
-border-radius:999px;border:1px dashed var(--border,var(--aside-rule-color,#333c47));background:transparent;\
-color:var(--accent,var(--aside-link-color,#7fb0e0));}\
-.tag-palette-chip:hover{border-style:solid;}\
+.mc-author{display:flex;align-items:flex-end;gap:0.4rem;font-size:0.85rem;\
+color:var(--text-secondary,var(--aside-date-color,#8a97a6));}\
+.mc-author-lbl{text-transform:uppercase;letter-spacing:0.05em;font-size:0.72rem;}\
+.mc-author-name{color:var(--text-primary,var(--body-color,#e6e6e6));font-weight:600;}\
+.mc-cats-field{margin:0.2rem 0 0.9rem;}\
+.mc-cats{display:flex;flex-wrap:wrap;gap:0.4rem 1rem;margin:0.3rem 0 0;}\
+.mc-cat{display:inline-flex;align-items:center;gap:0.35rem;font-size:0.85rem;text-transform:none;\
+letter-spacing:0;cursor:pointer;color:var(--text-secondary,var(--aside-date-color,#8a97a6));}\
+.mc-tags-field{margin:0.2rem 0 0.9rem;}\
+.mc-tags-boxes{display:grid;grid-template-columns:1fr 1fr;gap:0.8rem;margin:0.3rem 0 0;}\
+.mc-tagbox{min-width:0;}\
+.mc-tagbox-lbl{display:block;font-size:0.72rem;text-transform:uppercase;letter-spacing:0.06em;\
+margin:0 0 0.35rem;color:var(--text-secondary,var(--aside-date-color,#8a97a6));}\
+.mc-tags-search{width:100%;box-sizing:border-box;font:inherit;font-size:0.85rem;\
+padding:0.35rem 0.55rem;margin:0 0 0.4rem;border-radius:6px;\
+border:1px solid var(--border,var(--aside-rule-color,#333c47));background:transparent;\
+color:var(--text-primary,var(--body-color,#e6e6e6));}\
+.mc-chips{display:flex;flex-wrap:wrap;gap:0.4rem;align-content:flex-start;min-height:2.6rem;\
+padding:0.45rem;border-radius:6px;border:1px dashed var(--border,var(--aside-rule-color,#333c47));}\
+.mc-chips.mc-drop{border-style:solid;border-color:var(--accent,var(--aside-link-color,#7fb0e0));}\
+.mc-chip{display:inline-flex;align-items:center;gap:0.25rem;font:inherit;font-size:0.82rem;\
+cursor:pointer;padding:0.14rem 0.55rem;border-radius:999px;user-select:none;\
+border:1px solid var(--border,var(--aside-rule-color,#333c47));background:transparent;\
+color:var(--text-primary,var(--body-color,#e6e6e6));}\
+.mc-chip:hover{border-color:var(--accent,var(--aside-link-color,#7fb0e0));}\
+.mc-chips-selected .mc-chip{background:var(--accent,var(--aside-link-color,#3b6ea5));\
+border-color:var(--accent,var(--aside-link-color,#3b6ea5));color:#fff;}\
+.mc-chip-x,.mc-chip-del{font-size:0.95rem;line-height:1;opacity:0.75;}\
+.mc-chip-del{color:#e57373;}\
+.mc-chip:hover .mc-chip-x,.mc-chip:hover .mc-chip-del{opacity:1;}\
+.mc-avatar-row{margin:0 0 1rem;}\
+.mc-avatar-pic,.mc-avatar-initial{width:4rem;height:4rem;border-radius:50%;object-fit:cover;\
+display:inline-flex;align-items:center;justify-content:center;font-size:1.6rem;font-weight:600;\
+color:#fff;background:var(--accent,var(--aside-link-color,#3b6ea5));}\
+.mc-hint{font-size:0.8rem;color:var(--text-secondary,var(--aside-date-color,#8a97a6));margin:0.3rem 0 0;}\
+@media (max-width:32rem){.mc-tags-boxes{grid-template-columns:1fr;}}\
 ";
 
 

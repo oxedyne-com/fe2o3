@@ -140,6 +140,15 @@ impl Doc {
 		}
 		top.map(|(_, content)| text_of(content))
 	}
+
+	/// The number of words in the document's prose.
+	///
+	/// Counts what a reader reads: headings, paragraphs, lists, quotations, divisions and the cells of
+	/// a table. A code block is left out, because a listing is scanned rather than read, and counting
+	/// one at prose speed puts minutes on a piece that no reader spends.
+	pub fn word_count(&self) -> usize {
+		count_blocks(&self.blocks)
+	}
 }
 
 /// A block-level element: the things a document is a sequence of.
@@ -328,6 +337,38 @@ pub fn text_of(content: &[Inline]) -> String {
 	s
 }
 
+/// The number of words in a run of blocks, descending into those that hold blocks of their own.
+fn count_blocks(blocks: &[Block]) -> usize {
+	let mut n = 0;
+	for block in blocks {
+		n += match block {
+			Block::Heading { content, .. }	=> count_inlines(content),
+			Block::Para(content)		=> count_inlines(content),
+			Block::List { items, .. }	=> items.iter().map(|item| count_blocks(item)).sum(),
+			Block::Quote(content)		=> count_blocks(content),
+			Block::Div { content, .. }	=> count_blocks(content),
+			Block::Table { head, rows, .. }	=> head.iter().chain(rows)
+				.map(|row| row.0.iter().map(|cell| count_inlines(&cell.0)).sum::<usize>())
+				.sum(),
+			// A listing is scanned rather than read, and a rule holds no words. See `Doc::word_count`.
+			Block::Code { .. } | Block::Rule	=> 0,
+		};
+	}
+	n
+}
+
+/// The number of words in a run of inlines, flattened.
+///
+/// A word is a segment holding at least one alphanumeric character, which is what separates the words
+/// from the runs of space and punctuation that [`words`](crate::unicode::segment::words) returns
+/// between them.
+fn count_inlines(content: &[Inline]) -> usize {
+	crate::unicode::segment::words(&text_of(content))
+		.iter()
+		.filter(|w| w.chars().any(char::is_alphanumeric))
+		.count()
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -397,6 +438,47 @@ mod tests {
 	#[test]
 	fn test_an_alignment_defaults_to_none_02() -> Outcome<()> {
 		assert_eq!(Align::default(), Align::None);
+		Ok(())
+	}
+
+	/// The count is of words and not of the punctuation and spaces between them, and it reaches the
+	/// words a nested block holds.
+	#[test]
+	fn test_a_document_counts_the_words_a_reader_reads_03() -> Outcome<()> {
+		let text = |s: &str| vec![Inline::Text(s.to_string())];
+		let doc = Doc {
+			blocks: vec![
+				Block::Heading { level: 1, content: text("A short title") },	// 3
+				Block::Para(text("Four words, one comma.")),			// 4
+				Block::Quote(vec![Block::Para(text("Two words"))]),		// 2
+				Block::List {
+					ordered:	false,
+					items:		vec![
+						vec![Block::Para(text("One"))],			// 1
+						vec![Block::Para(text("Another two"))],		// 2
+					],
+				},
+				Block::Rule,
+			],
+		};
+		assert_eq!(doc.word_count(), 12);
+		Ok(())
+	}
+
+	/// A listing is scanned rather than read, so it is not counted: a post whose bulk is code would
+	/// otherwise be given minutes no reader spends on it.
+	#[test]
+	fn test_a_code_block_is_not_counted_04() -> Outcome<()> {
+		let doc = Doc {
+			blocks: vec![
+				Block::Para(vec![Inline::Text("Three words here".to_string())]),
+				Block::Code {
+					lang:	Some("rust".to_string()),
+					text:	"let a = 1; let b = 2; let c = 3;".to_string(),
+				},
+			],
+		};
+		assert_eq!(doc.word_count(), 3);
 		Ok(())
 	}
 }

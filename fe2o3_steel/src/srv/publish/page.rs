@@ -13,6 +13,7 @@
 //! own prose would not really own it.
 
 use crate::srv::publish::{
+	Author,
 	Post,
 	PublishConfig,
 	comment::{
@@ -21,14 +22,11 @@ use crate::srv::publish::{
 		Thread,
 	},
 	date_text,
-	normalise_tag,
+	read_mins,
 };
 
 #[cfg(test)]
-use crate::srv::publish::{
-	PostKind,
-	Source,
-};
+use crate::srv::publish::Source;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_net::http::{
@@ -53,6 +51,7 @@ use oxedyne_fe2o3_text::doc::html::{
 pub fn handle_get(
 	cfg:		&PublishConfig,
 	posts:		&[Post],
+	authors:	&[Author],
 	path:		&str,
 	query:		&str,
 	comments:	Option<&CommentsView>,
@@ -61,7 +60,7 @@ pub fn handle_get(
 	-> Outcome<HttpMessage>
 {
 	if path == cfg.path {
-		return index(cfg, posts, query, id);
+		return index(cfg, posts, authors, query, id);
 	}
 	if path == cfg.feed_path() {
 		return super::feed::serve(cfg, posts, id);
@@ -71,6 +70,9 @@ pub fn handle_get(
 	}
 	if path == cfg.comment_js_path() {
 		return Ok(comment_js());
+	}
+	if path == cfg.filter_js_path() {
+		return Ok(filter_js());
 	}
 	// Everything else under the prefix names a post. The slug is what a reader put in a URL, so it is
 	// checked before it is used: a name is letters, digits, a dash or an underscore.
@@ -118,32 +120,54 @@ fn is_slug(s: &str) -> bool {
 	!s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-/// The index: every post, newest first, as a link and its opening.
+/// The index: every post, newest first, above a filter that narrows them in the reader's browser.
 ///
-/// A `?tag=` in the query narrows it to the posts carrying that tag, so a tag link on a card or a
-/// post is never a dead end. A narrowed index names the tag it is filtered by, so a reader knows
-/// they are looking at a slice rather than the whole.
-fn index(cfg: &PublishConfig, posts: &[Post], query: &str, id: &str) -> Outcome<HttpMessage> {
-	// The facet the index is narrowed to, normalised the way a stored tag is, so `?tag=Rust` finds
-	// the posts tagged `rust`.
-	let filter = tag_filter(query);
-	let shown: Vec<&Post> = match &filter {
-		Some(t)	=> posts.iter().filter(|p| p.tags.iter().any(|x| x == t)).collect(),
-		None	=> posts.iter().collect(),
-	};
-
+/// The whole list is rendered, each item carrying its author, tags, categories and reading time as
+/// data attributes; the filter shows and hides items against those. So a reader with no JavaScript
+/// gets every post, and a reader with it gets the filter, over the same markup -- the filter is an
+/// enhancement of the list, never the thing that fetches it.
+///
+/// `authors` are the distinct authors the posts name, resolved to a face, drawn as the filter's
+/// author row. A `?tag=` in the query is read by the script, not here, so a tag link lands on the
+/// index with that tag alone selected; without the script the whole list stands, tag and all.
+fn index(
+	cfg:		&PublishConfig,
+	posts:		&[Post],
+	authors:	&[Author],
+	_query:		&str,
+	id:		&str,
+)
+	-> Outcome<HttpMessage>
+{
 	let mut body = String::new();
 	body.push_str("<header class=\"aside-index-head\"><h1>");
 	escape_text(&mut body, &cfg.title);
-	body.push_str("</h1>");
-	if let Some(t) = &filter {
-		body.push_str("<p class=\"aside-index-tag\">Tagged <span class=\"tag\">");
-		escape_text(&mut body, t);
-		body.push_str("</span></p>");
-	}
-	body.push_str("</header>\n<ul class=\"aside-index\">\n");
-	for p in &shown {
-		body.push_str("<li class=\"aside-index-item\">");
+	body.push_str("</h1></header>\n");
+
+	// The filter: the reader's own instrument for narrowing the list. Rendered before the list so it
+	// is the first thing to hand, and wired by the served script; without the script it does nothing
+	// and the whole list stands, which is the point of building it as an enhancement.
+	body.push_str(&filter_shell(cfg, posts, authors));
+
+	body.push_str("<ul class=\"aside-index\" id=\"aside-index-list\">\n");
+	for p in posts {
+		// The item carries what the filter matches on, so the script reads the list rather than a second
+		// copy of it: the author's username, the tags and categories space-joined, the reading time, and
+		// a lower-cased haystack of the title and opening for the search box.
+		body.push_str("<li class=\"aside-index-item\" data-author=\"");
+		escape_attr(&mut body, &p.author);
+		body.push_str("\" data-tags=\"");
+		// Tags are `[a-z0-9-]`, so a space joins them safely. Categories are free config strings that
+		// may hold a space, so they are joined on a comma the config forbids inside a category, and the
+		// script splits on the same.
+		escape_attr(&mut body, &p.tags.join(" "));
+		body.push_str("\" data-categories=\"");
+		escape_attr(&mut body, &p.categories.join(","));
+		body.push_str("\" data-read-mins=\"");
+		body.push_str(&fmt!("{}", read_mins(p.words)));
+		body.push_str("\" data-search=\"");
+		escape_attr(&mut body, &fmt!("{} {}", p.title, p.excerpt).to_lowercase());
+		body.push_str("\">");
 		if let Some(d) = &p.date {
 			// The attribute is the stored ISO form and the text is the readable one, which is what
 			// `<time>` has two of them for: a post dated to the minute would otherwise show a reader
@@ -169,9 +193,13 @@ fn index(cfg: &PublishConfig, posts: &[Post], query: &str, id: &str) -> Outcome<
 	}
 	body.push_str("</ul>\n");
 
-	if shown.is_empty() {
-		body.push_str("<p class=\"aside-empty\">Nothing here yet.</p>\n");
+	// Where the filter lands a reader on nothing, the script shows this line; the server shows it only
+	// when the site itself is empty. Both say the same thing, so the reader is never left at a blank.
+	body.push_str("<p class=\"aside-empty\" id=\"aside-empty\"");
+	if !posts.is_empty() {
+		body.push_str(" hidden");
 	}
+	body.push_str(">Nothing here yet.</p>\n");
 
 	// A newsletter sign-up beneath the list, so a reader subscribes in place rather than hunting for
 	// it. It posts to the same endpoint as the standalone page; where mail is not configured that
@@ -185,7 +213,14 @@ fn index(cfg: &PublishConfig, posts: &[Post], query: &str, id: &str) -> Outcome<
 	body.push_str("<button type=\"submit\" class=\"aside-subscribe-btn\">Subscribe</button>\n");
 	body.push_str("</form>\n</section>\n");
 
-	info!("{}: publish: index, {} posts", id, shown.len());
+	// The script that wires the filter. Referenced rather than inlined, on the same reasoning as the
+	// comment script: a site may run a Content-Security-Policy that forbids inline script, and the
+	// filter is an enhancement -- `defer`, since it only reads the list already in the page.
+	body.push_str("<script defer src=\"");
+	escape_attr(&mut body, &cfg.filter_js_path());
+	body.push_str("\"></script>\n");
+
+	info!("{}: publish: index, {} posts", id, posts.len());
 
 	let head = Head {
 		title:		cfg.title.clone(),
@@ -197,25 +232,142 @@ fn index(cfg: &PublishConfig, posts: &[Post], query: &str, id: &str) -> Outcome<
 	Ok(html_response(HttpStatus::OK, &page(cfg, &head, &body, None)))
 }
 
-/// The tag a `?tag=` query narrows the index to, normalised as a stored tag is.
+/// The filter above the index: the controls a reader narrows the list with.
 ///
-/// Read from the raw query with no percent-decoding: a tag is `[a-z0-9-]`, which carries nothing a
-/// query string would encode, so a value that needed decoding is a value no post is tagged with and
-/// narrows to nothing -- which is the right answer to a tag that does not exist.
-fn tag_filter(query: &str) -> Option<String> {
-	for pair in query.split('&') {
-		let mut kv = pair.splitn(2, '=');
-		let k = kv.next().unwrap_or("");
-		let v = kv.next().unwrap_or("");
-		if k == "tag" {
-			let t = normalise_tag(v);
-			if t.is_empty() {
-				return None;
+/// Rendered whole and static; the served script wires it. Every control starts in the state that
+/// shows every post, so the page a reader lands on is the whole list and the filter only ever takes
+/// away: no author pressed, every category checked, every tag in the selected box under `Includes`,
+/// and the reading-time slider spanning the full range. The vocabulary and the range are read from
+/// the posts, so the filter offers exactly what the list holds and nothing it does not.
+fn filter_shell(cfg: &PublishConfig, posts: &[Post], authors: &[Author]) -> String {
+	// The tag vocabulary: every tag any shown post wears, sorted, deduped. What the two chip boxes are
+	// filled from -- the selected box by default, since the default is to hide nothing.
+	let mut tags: Vec<&str> = Vec::new();
+	for p in posts {
+		for t in &p.tags {
+			if !tags.iter().any(|x| *x == t.as_str()) {
+				tags.push(t.as_str());
 			}
-			return Some(t);
 		}
 	}
-	None
+	tags.sort_unstable();
+
+	// The reading-time range across the posts, the slider's bounds. A site whose posts run one to nine
+	// minutes gets a one-to-nine slider, not a dead one-to-sixty. Equal bounds (one post, or all of a
+	// length) leave a slider with nothing to drag, which the script hides.
+	let mins: Vec<usize> = posts.iter().map(|p| read_mins(p.words)).collect();
+	let rt_lo = mins.iter().copied().min().unwrap_or(1);
+	let rt_hi = mins.iter().copied().max().unwrap_or(1);
+
+	let mut s = String::from("<section class=\"aside-filter\" aria-label=\"Filter posts\">\n");
+
+	// The search box, over the title and opening of each post.
+	s.push_str("<input type=\"search\" class=\"aside-filter-search\" id=\"aside-filter-search\" \
+		placeholder=\"Search posts\" aria-label=\"Search posts\" autocomplete=\"off\">\n");
+
+	// The authors, each a face that toggles the list to that author. None pressed is every author, so
+	// the row starts showing all. Drawn only where a post names an author.
+	if !authors.is_empty() {
+		s.push_str("<div class=\"aside-filter-authors\" id=\"aside-filter-authors\" \
+			aria-label=\"Filter by author\">\n");
+		for a in authors {
+			s.push_str("<button type=\"button\" class=\"aside-author\" data-author=\"");
+			escape_attr(&mut s, &a.username);
+			s.push_str("\" title=\"");
+			escape_attr(&mut s, &a.name);
+			s.push_str("\" aria-pressed=\"false\">");
+			if a.avatar.is_empty() {
+				s.push_str("<span class=\"aside-author-initial\" aria-hidden=\"true\">");
+				escape_text(&mut s, &a.initial());
+				s.push_str("</span>");
+			} else {
+				s.push_str("<img class=\"aside-author-pic\" alt=\"\" src=\"");
+				escape_attr(&mut s, &a.avatar);
+				s.push_str("\">");
+			}
+			s.push_str("<span class=\"aside-author-name\">");
+			escape_text(&mut s, &a.name);
+			s.push_str("</span></button>\n");
+		}
+		s.push_str("</div>\n");
+	}
+
+	// The tag machinery: the mode, then the two boxes. Shown only where the site has tags at all.
+	if !tags.is_empty() {
+		// Includes / Only / Excludes, over the selected set. `Includes` is the default, being the one
+		// that with every tag selected still shows every tagged post.
+		s.push_str("<div class=\"aside-filter-mode\" id=\"aside-filter-mode\" role=\"radiogroup\" \
+			aria-label=\"Tag match\">\n");
+		for (val, label, on) in [("includes", "Includes", true), ("only", "Only", false),
+			("excludes", "Excludes", false)]
+		{
+			s.push_str("<label class=\"aside-mode\"><input type=\"radio\" name=\"aside-mode\" value=\"");
+			s.push_str(val);
+			s.push('"');
+			if on {
+				s.push_str(" checked");
+			}
+			s.push('>');
+			s.push_str(label);
+			s.push_str("</label>\n");
+		}
+		s.push_str("</div>\n");
+
+		// The two boxes. The selected box holds every tag by default, each with a closer that moves it to
+		// the source box; the source box starts empty and its chips carry no closer -- a click, or a
+		// drag, moves a chip either way. The labels name which is which, since the two look alike.
+		s.push_str("<div class=\"aside-filter-tags\">\n");
+		s.push_str("<div class=\"aside-tagbox\">\n<span class=\"aside-tagbox-lbl\">Selected</span>\n\
+			<div class=\"aside-chips aside-chips-selected\" id=\"aside-tags-selected\" \
+			data-box=\"selected\" role=\"list\">\n");
+		for t in &tags {
+			s.push_str("<button type=\"button\" class=\"aside-chip\" draggable=\"true\" data-tag=\"");
+			escape_attr(&mut s, t);
+			s.push_str("\" role=\"listitem\">");
+			escape_text(&mut s, t);
+			s.push_str(" <span class=\"aside-chip-x\" aria-hidden=\"true\">\u{00d7}</span></button>\n");
+		}
+		s.push_str("</div>\n</div>\n");
+		s.push_str("<div class=\"aside-tagbox\">\n<span class=\"aside-tagbox-lbl\">Available</span>\n\
+			<div class=\"aside-chips aside-chips-source\" id=\"aside-tags-source\" \
+			data-box=\"source\" role=\"list\"></div>\n</div>\n");
+		s.push_str("</div>\n");
+	}
+
+	// The categories, a checkbox each, every one checked so the default hides nothing. A post with no
+	// category the script always passes, on the same footing as an untagged post under the tag filter.
+	if !cfg.categories.is_empty() {
+		s.push_str("<div class=\"aside-filter-cats\" id=\"aside-filter-cats\" aria-label=\"Categories\">\n");
+		for c in &cfg.categories {
+			s.push_str("<label class=\"aside-cat\"><input type=\"checkbox\" checked value=\"");
+			escape_attr(&mut s, c);
+			s.push_str("\">");
+			escape_text(&mut s, c);
+			s.push_str("</label>\n");
+		}
+		s.push_str("</div>\n");
+	}
+
+	// The reading-time slider: two thumbs over the range the posts span, so a reader keeps the short
+	// ones, the long ones, or a band between. Hidden by the script where every post reads alike, since
+	// a slider that cannot move is furniture. The read-out beside it the script keeps current.
+	if rt_hi > rt_lo {
+		s.push_str(&fmt!(
+			"<div class=\"aside-filter-time\" id=\"aside-filter-time\" data-lo=\"{lo}\" data-hi=\"{hi}\">\n\
+			<span class=\"aside-time-lbl\">Reading time</span>\n\
+			<div class=\"aside-time-track\">\n\
+			<input type=\"range\" class=\"aside-time-min\" id=\"aside-time-min\" \
+				min=\"{lo}\" max=\"{hi}\" value=\"{lo}\" step=\"1\" aria-label=\"Least minutes\">\n\
+			<input type=\"range\" class=\"aside-time-max\" id=\"aside-time-max\" \
+				min=\"{lo}\" max=\"{hi}\" value=\"{hi}\" step=\"1\" aria-label=\"Most minutes\">\n\
+			</div>\n\
+			<span class=\"aside-time-out\" id=\"aside-time-out\">{lo}\u{2013}{hi} min</span>\n\
+			</div>\n",
+			lo = rt_lo, hi = rt_hi));
+	}
+
+	s.push_str("</section>\n");
+	s
 }
 
 /// A post's tags as a list of links, each narrowing the index to that tag.
@@ -240,16 +392,33 @@ fn tags_list(cfg: &PublishConfig, post: &Post) -> String {
 	s
 }
 
+/// The reading time above a post, as its label. The minutes are [`read_mins`], the site's one
+/// definition, so this badge and the filter's slider count alike.
+fn read_time(words: usize) -> String {
+	fmt!("{} min read", read_mins(words))
+}
+
 /// One post.
 fn post_page(cfg: &PublishConfig, post: &Post, comments: Option<&CommentsView>) -> Outcome<HttpMessage> {
 	let mut body = String::new();
 	body.push_str("<article class=\"aside\">\n");
-	if let Some(d) = &post.date {
-		body.push_str("<div class=\"aside-date\"><time datetime=\"");
-		escape_attr(&mut body, d);
-		body.push_str("\">");
-		escape_text(&mut body, &date_text(d));
-		body.push_str("</time></div>\n");
+	// The date, and beside it how long the piece takes to read. A reader deciding whether to start
+	// wants both, and wants them before the prose rather than after it.
+	if post.date.is_some() || post.words > 0 {
+		body.push_str("<div class=\"aside-date\">");
+		if let Some(d) = &post.date {
+			body.push_str("<time datetime=\"");
+			escape_attr(&mut body, d);
+			body.push_str("\">");
+			escape_text(&mut body, &date_text(d));
+			body.push_str("</time>");
+		}
+		if post.words > 0 {
+			body.push_str("<span class=\"aside-read\">");
+			escape_text(&mut body, &read_time(post.words));
+			body.push_str("</span>");
+		}
+		body.push_str("</div>\n");
 	}
 	// The prose was escaped where it was rendered.
 	body.push_str(&post.html);
@@ -625,6 +794,8 @@ mod tests {
 		comment_rate_secs:	0,
 		comment_rate_hourly:	0,
 		newsletter_from:	String::new(),
+		categories:	vec![fmt!("Personal"), fmt!("Technical")],
+		default_author:	String::new(),
 		}
 	}
 
@@ -632,8 +803,10 @@ mod tests {
 		Post {
 			slug:		fmt!("on-rent"),
 			title:		fmt!("On rent"),
-			kind:		PostKind::Note,
+			author:		fmt!("jason"),
+			categories:	vec![fmt!("Personal")],
 			date:		Some(fmt!("2026-07-17")),
+			words:		420,
 			excerpt:	fmt!("An opening sentence."),
 			html:		fmt!("<h1>On rent</h1>\n<p>An opening sentence.</p>\n"),
 			also_on:	Vec::new(),
@@ -704,18 +877,23 @@ mod tests {
 	#[test]
 	fn test_the_index_links_its_posts_02() -> Outcome<()> {
 		let posts = vec![post()];
-		let resp = res!(index(&cfg(), &posts, "", "test"));
+		let resp = res!(index(&cfg(), &posts, &[], "", "test"));
 		let body = String::from_utf8_lossy(&resp.body).to_string();
 		assert_eq!(status_of(&resp), Some(HttpStatus::OK));
 		assert!(body.contains(r#"<a href="/asides/on-rent">On rent</a>"#), "got: {}", body);
 		assert!(body.contains("An opening sentence."), "no excerpt: {}", body);
+		// The list item carries the facts the filter matches on.
+		assert!(body.contains(r#"data-read-mins="3""#), "no reading-time datum: {}", body);
+		assert!(body.contains(r#"data-categories="Personal""#), "no category datum: {}", body);
+		// And the filter's own script is linked, once.
+		assert_eq!(body.matches("/asides/filter.js").count(), 1, "filter script not linked once: {}", body);
 		Ok(())
 	}
 
 	/// An index with nothing in it says so, rather than being a blank page that looks broken.
 	#[test]
 	fn test_an_empty_index_says_so_04() -> Outcome<()> {
-		let resp = res!(index(&cfg(), &[], "", "test"));
+		let resp = res!(index(&cfg(), &[], &[], "", "test"));
 		let body = String::from_utf8_lossy(&resp.body).to_string();
 		assert!(body.contains("Nothing here yet."), "got: {}", body);
 		Ok(())
@@ -728,7 +906,7 @@ mod tests {
 		let posts = vec![post()];
 		for bad in ["../../etc/passwd", "..", "a.b", "a%2Fb"] {
 			let path = fmt!("/asides/{}", bad);
-			let resp = res!(handle_get(&cfg(), &posts, &path, "", None, "test"));
+			let resp = res!(handle_get(&cfg(), &posts, &[], &path, "", None, "test"));
 			assert_eq!(status_of(&resp), Some(HttpStatus::NotFound), "'{}' was not refused", bad);
 		}
 		Ok(())
@@ -753,9 +931,11 @@ mod tests {
 		Ok(())
 	}
 
-	/// A `?tag=` narrows the index to the posts wearing that tag, and names the tag it narrowed by.
+	/// The index renders the whole list and the filter above it: every post is present, whatever its
+	/// tags, and the filter offers the vocabulary the posts hold. Narrowing is the reader's, in the
+	/// browser, so the server draws the tools and all the posts and never a slice.
 	#[test]
-	fn test_the_index_filters_by_tag_07() -> Outcome<()> {
+	fn test_the_index_renders_the_filter_07() -> Outcome<()> {
 		let mut a = post();
 		a.slug = fmt!("tagged");
 		a.title = fmt!("Tagged");
@@ -763,18 +943,63 @@ mod tests {
 		let mut b = post();
 		b.slug = fmt!("untagged");
 		b.title = fmt!("Untagged");
+		b.tags = Vec::new();
 		let posts = vec![a, b];
 
-		let resp = res!(index(&cfg(), &posts, "tag=rust", "test"));
+		let author = Author { username: fmt!("jason"), name: fmt!("Jason"), avatar: String::new() };
+		let resp = res!(index(&cfg(), &posts, &[author], "", "test"));
 		let body = String::from_utf8_lossy(&resp.body).to_string();
-		assert!(body.contains(r#"<a href="/asides/tagged">Tagged</a>"#), "the tagged post is missing: {}", body);
-		assert!(!body.contains(">Untagged</a>"), "an untagged post survived the filter: {}", body);
-		assert!(body.contains(r#"<span class="tag">rust</span>"#), "the filter is not named: {}", body);
 
-		// A `?tag=` naming no post's tag narrows to nothing and says so.
-		let resp = res!(index(&cfg(), &posts, "tag=nonesuch", "test"));
+		// Both posts are on the page: the server narrows nothing.
+		assert!(body.contains(">Tagged</a>"), "the tagged post is missing: {}", body);
+		assert!(body.contains(">Untagged</a>"), "the untagged post is missing: {}", body);
+		// The filter is there: the search box, the mode radios, the two chip boxes, and the tag from the
+		// posts sits in the selected box by default.
+		assert!(body.contains(r#"id="aside-filter-search""#), "no search box: {}", body);
+		assert!(body.contains(r#"value="includes" checked"#), "Includes is not the default mode: {}", body);
+		assert!(body.contains(r#"id="aside-tags-selected""#), "no selected box: {}", body);
+		assert!(body.contains(r#"data-tag="rust""#), "the tag is not a chip: {}", body);
+		// A multi-word category rides in data-categories comma-joined, so the filter's comma-split keeps
+		// it whole rather than tearing "Big Ideas" into "Big" and "Ideas".
+		let mut c = post();
+		c.slug = fmt!("multi");
+		c.categories = vec![fmt!("Big Ideas"), fmt!("Personal")];
+		let resp = res!(index(&cfg(), &[c], &[], "", "test"));
+		let cbody = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(cbody.contains(r#"data-categories="Big Ideas,Personal""#),
+			"multi-word category not comma-joined: {}", cbody);
+
+		// The author drew a face with an initial, since the fixture set no avatar.
+		assert!(body.contains(r#"data-author="jason""#), "no author face: {}", body);
+		assert!(body.contains("aside-author-initial"), "no drawn initial for an avatarless author: {}", body);
+		// The category checkboxes are drawn from the config, checked.
+		assert!(body.contains(r#"<label class="aside-cat"><input type="checkbox" checked value="Personal">"#),
+			"no category checkbox: {}", body);
+		Ok(())
+	}
+
+	/// A post says how long it takes to read, beside its date and above the prose, so a reader deciding
+	/// whether to start is told before rather than after.
+	#[test]
+	fn test_a_post_says_how_long_it_takes_to_read_09() -> Outcome<()> {
+		let resp = res!(post_page(&cfg(), &post(), None));
 		let body = String::from_utf8_lossy(&resp.body).to_string();
-		assert!(body.contains("Nothing here yet."), "an empty filter did not say so: {}", body);
+		// 420 words at 200 a minute rounds up to 3.
+		assert!(body.contains(r#"<span class="aside-read">3 min read</span>"#), "got: {}", body);
+
+		// A piece shorter than a minute is still a minute, since "0 min read" tells a reader nothing.
+		let mut p = post();
+		p.words = 12;
+		let resp = res!(post_page(&cfg(), &p, None));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(body.contains("1 min read"), "a short post lost its minute: {}", body);
+
+		// A post whose words were never counted says nothing rather than "0 min read".
+		p.words = 0;
+		let resp = res!(post_page(&cfg(), &p, None));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(!body.contains("aside-read"), "an uncounted post claimed a reading time: {}", body);
+		assert!(body.contains(r#"<time datetime="2026-07-17">"#), "the date went with it: {}", body);
 		Ok(())
 	}
 
@@ -1152,6 +1377,20 @@ pub fn comment_js() -> HttpMessage {
 	resp
 }
 
+/// The index filter's script, served as a file. Static, cacheable, and CSP-friendly.
+pub fn filter_js() -> HttpMessage {
+	let mut resp = HttpMessage::ok_respond_with_text(FILTER_JS.to_string());
+	resp = resp.with_field(
+		HeaderName::ContentType,
+		HeaderFieldValue::Generic(fmt!("text/javascript; charset=utf-8")),
+	);
+	resp = resp.with_field(
+		HeaderName::CacheControl,
+		HeaderFieldValue::Generic(fmt!("public, max-age=86400")),
+	);
+	resp
+}
+
 /// An id, reduced to what may sit in one.
 ///
 /// A comment's name is minted from a small alphabet so this changes nothing in practice; it is here
@@ -1261,6 +1500,232 @@ const COMMENT_JS: &str = r#"(function () {
 	});
 })();
 "#;
+
+/// The index filter. Reads the post list already in the page and shows or hides each item against the
+/// controls above it: a search box, the author faces, the tag mode and its two boxes, the category
+/// checkboxes and the reading-time slider. It renders nothing and fetches nothing -- every post is in
+/// the markup, and this only ever narrows what is seen.
+const FILTER_JS: &str = r##"(function () {
+	"use strict";
+	var list = document.getElementById("aside-index-list");
+	if (!list) { return; }
+	var items = Array.prototype.slice.call(list.querySelectorAll(".aside-index-item"));
+	var empty = document.getElementById("aside-empty");
+
+	// Each item's filterable facts, read once from its data attributes.
+	var rows = items.map(function (li) {
+		var tags = (li.getAttribute("data-tags") || "").split(" ").filter(Boolean);
+		var cats = (li.getAttribute("data-categories") || "").split(",").filter(Boolean);
+		return {
+			el:     li,
+			author: li.getAttribute("data-author") || "",
+			tags:   tags,
+			cats:   cats,
+			mins:   parseInt(li.getAttribute("data-read-mins") || "0", 10),
+			text:   li.getAttribute("data-search") || ""
+		};
+	});
+
+	// The filter's state. Every field starts in the value that hides nothing.
+	var search = "";
+	var authors = {};          // pressed authors; empty means every author
+	var mode = "includes";
+	var selected = {};         // tags in the selected box
+	var cats = {};             // checked categories
+	var offered = {};          // every category the filter offers, checked or not
+	var tmin = -Infinity, tmax = Infinity;
+
+	function keys(o) { var k = []; for (var x in o) { if (o[x]) { k.push(x); } } return k; }
+	function any(o) { for (var x in o) { if (o[x]) { return true; } } return false; }
+
+	// Whether one item passes every control at once.
+	function passes(r) {
+		if (search && r.text.indexOf(search) === -1) { return false; }
+		if (any(authors) && !authors[r.author]) { return false; }
+		// Categories: the filter constrains only against the categories it offers. A post is hidden only
+		// when at least one of its categories is offered and every offered one it has is unchecked. A
+		// post with no category, or one whose categories the filter does not offer at all -- an operator
+		// dropped the category from the config after the post used it -- is left alone, never vanished.
+		if (r.cats.length) {
+			var constrained = false, ok = false;
+			for (var i = 0; i < r.cats.length; i++) {
+				if (offered[r.cats[i]]) { constrained = true; if (cats[r.cats[i]]) { ok = true; break; } }
+			}
+			if (constrained && !ok) { return false; }
+		}
+		// Tags: an untagged post always passes; an empty selected box imposes nothing.
+		if (r.tags.length && any(selected)) {
+			var inter = 0, outside = 0;
+			for (var j = 0; j < r.tags.length; j++) {
+				if (selected[r.tags[j]]) { inter++; } else { outside++; }
+			}
+			if (mode === "includes" && inter === 0) { return false; }
+			if (mode === "only" && outside > 0) { return false; }
+			if (mode === "excludes" && inter > 0) { return false; }
+		}
+		if (r.mins < tmin || r.mins > tmax) { return false; }
+		return true;
+	}
+
+	function apply() {
+		var shown = 0;
+		for (var i = 0; i < rows.length; i++) {
+			var ok = passes(rows[i]);
+			rows[i].el.hidden = !ok;
+			if (ok) { shown++; }
+		}
+		if (empty) { empty.hidden = shown !== 0; }
+	}
+
+	// The search box.
+	var box = document.getElementById("aside-filter-search");
+	if (box) {
+		box.addEventListener("input", function () {
+			search = box.value.trim().toLowerCase();
+			apply();
+		});
+	}
+
+	// The author faces: press to narrow to that author, press again to release. None pressed is all.
+	var authorRow = document.getElementById("aside-filter-authors");
+	if (authorRow) {
+		authorRow.addEventListener("click", function (e) {
+			var b = e.target.closest(".aside-author");
+			if (!b) { return; }
+			var u = b.getAttribute("data-author");
+			authors[u] = !authors[u];
+			b.setAttribute("aria-pressed", authors[u] ? "true" : "false");
+			apply();
+		});
+	}
+
+	// The tag mode.
+	var modeRow = document.getElementById("aside-filter-mode");
+	if (modeRow) {
+		modeRow.addEventListener("change", function (e) {
+			if (e.target.name === "aside-mode") { mode = e.target.value; apply(); }
+		});
+	}
+
+	// The two chip boxes. A chip lives in one box; clicking it, or dragging it, sends it to the other.
+	var selBox = document.getElementById("aside-tags-selected");
+	var srcBox = document.getElementById("aside-tags-source");
+
+	function refreshSelected() {
+		selected = {};
+		if (selBox) {
+			selBox.querySelectorAll(".aside-chip").forEach(function (c) {
+				selected[c.getAttribute("data-tag")] = true;
+			});
+		}
+	}
+	refreshSelected();
+
+	// A chip carries its closer only in the selected box; moving it re-dresses it for its new home.
+	function dress(chip, inSelected) {
+		var x = chip.querySelector(".aside-chip-x");
+		if (inSelected && !x) {
+			chip.insertAdjacentHTML("beforeend",
+				' <span class="aside-chip-x" aria-hidden="true">×</span>');
+		} else if (!inSelected && x) {
+			x.parentNode.removeChild(x);
+		}
+	}
+
+	function move(chip, toSource) {
+		if (!selBox || !srcBox) { return; }
+		var dest = toSource ? srcBox : selBox;
+		dest.appendChild(chip);
+		dress(chip, !toSource);
+		refreshSelected();
+		apply();
+	}
+
+	function wireBox(boxEl, toSource) {
+		if (!boxEl) { return; }
+		boxEl.addEventListener("click", function (e) {
+			var chip = e.target.closest(".aside-chip");
+			if (chip) { move(chip, toSource); }
+		});
+		// Drop target: a chip dragged here lands here, whichever box it came from.
+		boxEl.addEventListener("dragover", function (e) { e.preventDefault(); boxEl.classList.add("aside-drop"); });
+		boxEl.addEventListener("dragleave", function () { boxEl.classList.remove("aside-drop"); });
+		boxEl.addEventListener("drop", function (e) {
+			e.preventDefault();
+			boxEl.classList.remove("aside-drop");
+			var tag = e.dataTransfer.getData("text/plain");
+			var chip = document.querySelector('.aside-chip[data-tag="' + (window.CSS && CSS.escape ? CSS.escape(tag) : tag) + '"]');
+			if (chip && chip.parentNode !== boxEl) {
+				boxEl.appendChild(chip);
+				dress(chip, boxEl === selBox);
+				refreshSelected();
+				apply();
+			}
+		});
+	}
+	wireBox(selBox, true);
+	wireBox(srcBox, false);
+
+	// A tag link lands here as `?tag=x`. Honour it by leaving only that tag in the selected box and
+	// sending every other tag to the source, so the reader arrives on that tag as the tag chips say.
+	(function () {
+		var m = /[?&]tag=([a-z0-9-]+)/.exec(location.search);
+		if (!m || !selBox || !srcBox) { return; }
+		var want = m[1];
+		Array.prototype.slice.call(selBox.querySelectorAll(".aside-chip")).forEach(function (chip) {
+			if (chip.getAttribute("data-tag") !== want) { srcBox.appendChild(chip); dress(chip, false); }
+		});
+		refreshSelected();
+	})();
+
+	// Dragging a chip carries its tag; both boxes read it on drop.
+	document.addEventListener("dragstart", function (e) {
+		var chip = e.target.closest && e.target.closest(".aside-chip");
+		if (chip && e.dataTransfer) {
+			e.dataTransfer.setData("text/plain", chip.getAttribute("data-tag"));
+			e.dataTransfer.effectAllowed = "move";
+		}
+	});
+
+	// The category checkboxes.
+	var catRow = document.getElementById("aside-filter-cats");
+	if (catRow) {
+		catRow.querySelectorAll('input[type="checkbox"]').forEach(function (cb) {
+			cats[cb.value] = cb.checked;
+			offered[cb.value] = true;
+		});
+		catRow.addEventListener("change", function (e) {
+			if (e.target.type === "checkbox") { cats[e.target.value] = e.target.checked; apply(); }
+		});
+	}
+
+	// The reading-time slider: two thumbs that may not cross. The read-out follows them.
+	var timeWrap = document.getElementById("aside-filter-time");
+	var tminEl = document.getElementById("aside-time-min");
+	var tmaxEl = document.getElementById("aside-time-max");
+	var tout = document.getElementById("aside-time-out");
+	if (timeWrap && tminEl && tmaxEl) {
+		tmin = parseInt(tminEl.value, 10);
+		tmax = parseInt(tmaxEl.value, 10);
+		var syncTime = function () {
+			var lo = parseInt(tminEl.value, 10);
+			var hi = parseInt(tmaxEl.value, 10);
+			if (lo > hi) {
+				// Whichever thumb crossed the other is pushed back to meet it.
+				if (this === tminEl) { hi = lo; tmaxEl.value = hi; }
+				else { lo = hi; tminEl.value = lo; }
+			}
+			tmin = lo; tmax = hi;
+			if (tout) { tout.textContent = lo + "–" + hi + " min"; }
+			apply();
+		};
+		tminEl.addEventListener("input", syncTime);
+		tmaxEl.addEventListener("input", syncTime);
+	}
+
+	apply();
+})();
+"##;
 
 /// A query value made of the few characters this module's own links use.
 ///

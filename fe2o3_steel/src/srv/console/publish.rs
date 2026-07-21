@@ -28,7 +28,6 @@ use crate::srv::{
 	},
 	publish::{
 		Markup,
-		PostKind,
 		PostState,
 		PublishConfig,
 		Source,
@@ -48,6 +47,7 @@ use crate::srv::{
 		subscribe,
 		date_text,
 		normalise_date,
+		normalise_tag,
 		parse_tags,
 		render_source,
 		valid_date,
@@ -91,6 +91,15 @@ pub const PATH_ROOT: &str = "/manage";
 
 /// The editor, for one post or for a new one.
 pub const PATH_EDIT: &str = "/manage/edit";
+
+/// A member's own profile: the name and avatar readers see, which their login username cannot be.
+pub const PATH_PROFILE: &str = "/manage/profile";
+
+/// Where the profile form posts.
+pub const PATH_PROFILE_SAVE: &str = "/manage/profile/save";
+
+/// Where a curator's tag deletion posts.
+pub const PATH_TAG_DELETE: &str = "/manage/tag/delete";
 
 /// A draft as a reader would get it, if it were not a draft.
 pub const PATH_PREVIEW: &str = "/manage/preview";
@@ -177,6 +186,8 @@ pub fn writes(path: &str) -> bool {
 		|| path == PATH_SUBS_ACTION
 		|| path == PATH_COMMENTS_ACTION
 		|| path == PATH_NEWSLETTER_TEST
+		|| path == PATH_PROFILE_SAVE
+		|| path == PATH_TAG_DELETE
 }
 
 /// Whether a path is a POST this module answers.
@@ -195,6 +206,18 @@ pub fn posts(path: &str) -> bool {
 // └───────────────────────────────────────────────────────────────────────────┘
 
 /// Serves the console's post pages. The gate ran before this: `admin` is a proven site admin.
+/// Whether a member may curate the shared tag vocabulary -- rename or delete a tag across every
+/// author's posts, not merely edit their own.
+///
+/// A curator is a *pinned* admin: one the operator named in the vhost's `site_admins`, the same
+/// distinction the admin-management page draws between a pinned admin and one the site granted itself.
+/// Deleting a tag reaches into other authors' posts, so it is held to the operator's own grant rather
+/// than to anyone a site admin later added. Every author still adds tags and edits their own post's;
+/// only this reaches across the site.
+fn is_curator(site_admins: &[String], admin: &SiteAdmin) -> bool {
+	site_admins.iter().any(|u| u == &admin.username)
+}
+
 pub fn handle_get<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -206,6 +229,7 @@ pub fn handle_get<
 	theme:		&Theme,
 	admin:		&SiteAdmin,
 	csrf:		&str,
+	site_admins:	&[String],
 	db:		Option<&(Arc<RwLock<DB>>, UID)>,
 	request_path:	&str,
 	query:		&str,
@@ -224,7 +248,8 @@ pub fn handle_get<
 
 	match request_path {
 		PATH_ROOT	=> handle_list(cfg, theme, admin, csrf, db, query, id),
-		PATH_EDIT	=> handle_edit(cfg, theme, admin, csrf, db, query, id),
+		PATH_EDIT	=> handle_edit(cfg, theme, admin, csrf, is_curator(site_admins, admin), db, query, id),
+		PATH_PROFILE	=> profile_page(cfg, theme, admin, csrf, db, id),
 		PATH_PREVIEW	=> handle_preview(cfg, theme, admin, db, query, id),
 		PATH_SUBS	=> subscribers_page(cfg, theme, admin, csrf, db, query, id),
 		PATH_SUBS_CSV	=> subscribers_csv(db, id),
@@ -1312,7 +1337,7 @@ fn handle_list<
 	let upto = (from + PAGE_SIZE).min(rows.len());
 
 	body.push_str("<table class=\"mc-table\">\n<thead><tr>\
-		<th>Post</th><th>Kind</th><th>State</th><th>Date</th><th></th>\
+		<th>Post</th><th>Categories</th><th>State</th><th>Date</th><th></th>\
 		</tr></thead>\n<tbody>\n");
 	for (rec, title, broken) in &rows[from..upto] {
 		let rec = *rec;
@@ -1330,7 +1355,7 @@ fn handle_list<
 		body.push_str(&fmt!(
 			"<tr>\
 			<td><a href=\"{edit}?slug={slug}\">{title}</a><br><span class=\"mc-slug\">{slug}</span></td>\
-			<td>{kind}</td>\
+			<td>{cats}</td>\
 			<td>{state}</td>\
 			<td>{date}</td>\
 			<td>{actions}</td>\
@@ -1338,7 +1363,11 @@ fn handle_list<
 			edit	= PATH_EDIT,
 			slug	= slug,
 			title	= title,
-			kind	= rec.kind.as_str(),
+			cats	= if rec.categories.is_empty() {
+				fmt!("<span class=\"mc-slug\">--</span>")
+			} else {
+				html_escape(&rec.categories.join(", "))
+			},
 			state	= state,
 			date	= html_escape(&rec.date.as_deref().map(date_text)
 				.unwrap_or_else(|| fmt!("--"))),
@@ -1360,13 +1389,14 @@ fn handle_edit<
 	KH:	Hasher,
 	DB:	Database<UIDL, UID, ENC, KH>,
 >(
-	cfg:	&PublishConfig,
-	theme:	&Theme,
-	admin:	&SiteAdmin,
-	csrf:	&str,
-	db:	Option<&(Arc<RwLock<DB>>, UID)>,
-	query:	&str,
-	id:	&str,
+	cfg:		&PublishConfig,
+	theme:		&Theme,
+	admin:		&SiteAdmin,
+	csrf:		&str,
+	curator:	bool,
+	db:		Option<&(Arc<RwLock<DB>>, UID)>,
+	query:		&str,
+	id:		&str,
 )
 	-> Outcome<HttpMessage>
 {
@@ -1423,6 +1453,17 @@ fn handle_edit<
 		None		=> Vec::new(),
 	};
 
+	// Who the post is written as: its own author where it has one, otherwise whoever is composing --
+	// a new post belongs to its writer until said otherwise. Resolved to a display name for the note,
+	// falling back to the username where the member set no profile.
+	let author_user = if r.author.is_empty() { admin.username.clone() } else { r.author.clone() };
+	let author_name = match db {
+		Some(db)	=> store::get_profile(db, &author_user)
+			.map(|p| if p.name.is_empty() { author_user.clone() } else { p.name })
+			.unwrap_or_else(|_| author_user.clone()),
+		None		=> author_user.clone(),
+	};
+
 	// The title row: what this is, and the way out. The way out is the close, not a Cancel button --
 	// leaving is not an action of the same weight as saving, and should not look like one.
 	let mut body = fmt!(
@@ -1449,13 +1490,6 @@ fn handle_edit<
 					placeholder=\"2026-07-17 14:30\">\n\
 			</div>\n\
 			<div>\n\
-				<label for=\"kind\">Kind</label>\n\
-				<select id=\"kind\" name=\"kind\">\n\
-					<option value=\"note\"{note_sel}>Note</option>\n\
-					<option value=\"essay\"{essay_sel}>Essay</option>\n\
-				</select>\n\
-			</div>\n\
-			<div>\n\
 				<label for=\"state\">State</label>\n\
 				<select id=\"state\" name=\"state\">\n\
 					<option value=\"draft\"{draft_sel}>Draft</option>\n\
@@ -1469,7 +1503,9 @@ fn handle_edit<
 					<option value=\"djot\"{djot_sel}>Djot</option>\n\
 				</select>\n\
 			</div>\n\
+			{author_field}\
 		</div>\n\
+		{cats_block}\
 		{tags_block}\
 		<div class=\"mc-split\">\n\
 			<div class=\"mc-pane\">\n\
@@ -1494,15 +1530,17 @@ fn handle_edit<
 		// The readable form in the box: a person edits what a person reads, and the `T` goes back in
 		// at the door on the way to the store.
 		date		= html_escape(&r.date.as_deref().map(date_text).unwrap_or_default()),
-		note_sel	= selected(r.kind == PostKind::Note),
-		essay_sel	= selected(r.kind == PostKind::Essay),
 		draft_sel	= selected(r.state == PostState::Draft),
 		live_sel	= selected(r.state == PostState::Live),
 		md_sel		= selected(r.markup == Markup::Markdown),
 		djot_sel	= selected(r.markup == Markup::Djot),
 		source		= html_escape(&r.source),
-		// A whole block, pre-built, so the inline script's braces never reach the format string.
-		tags_block	= tags_field(&r.tags, &palette),
+		// A hidden author field carrying the username, and a line naming who the post is written as.
+		author_field	= author_field(&author_user, &author_name),
+		// The category checkboxes, from the site's taxonomy, ticked where the post already sits.
+		cats_block	= cats_field(&cfg.categories, &r.categories),
+		// Whole blocks, pre-built, so the inline scripts' braces never reach the format string.
+		tags_block	= tags_field(&r.tags, &palette, curator),
 	));
 
 	// Deleting is not an editing action: it belongs beside the post in the list, where a person is
@@ -1511,6 +1549,66 @@ fn handle_edit<
 	body.push_str(&preview_script(csrf));
 
 	Ok(page(theme, admin, "Edit", &body))
+}
+
+/// A member's own profile: the name and avatar readers see, which their login username -- a hash --
+/// cannot be. The one place a member sets what a byline and the index's author row show for them.
+fn profile_page<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	_cfg:	&PublishConfig,
+	theme:	&Theme,
+	admin:	&SiteAdmin,
+	csrf:	&str,
+	db:	Option<&(Arc<RwLock<DB>>, UID)>,
+	id:	&str,
+)
+	-> Outcome<HttpMessage>
+{
+	let profile = match db {
+		Some(db)	=> store::get_profile(db, &admin.username).unwrap_or_default(),
+		None		=> return Ok(page(theme, admin, "Profile", &notice(
+			"This site has no database, so there is no profile to keep."))),
+	};
+	let preview = if profile.avatar.is_empty() {
+		let initial = profile.name.chars().next()
+			.or_else(|| admin.username.chars().next())
+			.map(|c| c.to_uppercase().to_string()).unwrap_or_else(|| fmt!("?"));
+		fmt!("<span class=\"mc-avatar-initial\">{}</span>", html_escape(&initial))
+	} else {
+		fmt!("<img class=\"mc-avatar-pic\" alt=\"\" src=\"{}\">", html_escape(&profile.avatar))
+	};
+	debug!("{}: console: '{}' opened their profile", id, admin.username);
+	let body = fmt!(
+		"<div class=\"mc-head-row\"><h1>Your profile</h1>\
+		<a class=\"mc-close\" href=\"{root}\" title=\"Close\" aria-label=\"Close\">{close}</a></div>\n\
+		<p class=\"mc-muted\">The name and picture readers see on your posts. Your login is not shown to \
+		anyone.</p>\n\
+		<form class=\"mc-form\" method=\"POST\" action=\"{save}\">\n\
+		<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\n\
+		<div class=\"mc-avatar-row\">{preview}</div>\n\
+		<div>\n<label for=\"name\">Display name</label>\n\
+		<input type=\"text\" id=\"name\" name=\"name\" value=\"{name}\" placeholder=\"Your name\">\n</div>\n\
+		<div>\n<label for=\"avatar\">Avatar image URL</label>\n\
+		<input type=\"text\" id=\"avatar\" name=\"avatar\" value=\"{avatar}\" \
+		placeholder=\"/img/authors/you.jpg\">\n\
+		<p class=\"mc-hint\">A path on this site, or a full URL. Left empty, your posts show your \
+		initial.</p>\n</div>\n\
+		<div class=\"mc-actions\"><button type=\"submit\" class=\"mc-btn\">Save profile</button></div>\n\
+		</form>\n",
+		root	= PATH_ROOT,
+		close	= icon("close"),
+		save	= PATH_PROFILE_SAVE,
+		csrf	= html_escape(csrf),
+		preview	= preview,
+		name	= html_escape(&profile.name),
+		avatar	= html_escape(&profile.avatar),
+	);
+	Ok(page(theme, admin, "Profile", &body))
 }
 
 /// A post as a reader would get it, whether or not a reader can.
@@ -1639,7 +1737,6 @@ fn list_json<
 		let mut m = DaticleMap::new();
 		m.insert(dat!("slug"),		dat!(rec.slug.clone()));
 		m.insert(dat!("title"),		dat!(title));
-		m.insert(dat!("kind"),		dat!(rec.kind.as_str().to_string()));
 		m.insert(dat!("markup"),	dat!(rec.markup.as_str().to_string()));
 		m.insert(dat!("state"),		dat!(rec.state.as_str().to_string()));
 		m.insert(dat!("broken"),	Dat::Bool(broken));
@@ -1699,7 +1796,8 @@ fn post_json<
 	let mut m = DaticleMap::new();
 	m.insert(dat!("slug"),		dat!(rec.slug.clone()));
 	m.insert(dat!("source"),	dat!(rec.source.clone()));
-	m.insert(dat!("kind"),		dat!(rec.kind.as_str().to_string()));
+	m.insert(dat!("author"),	dat!(rec.author.clone()));
+	m.insert(dat!("categories"),	Dat::List(rec.categories.iter().map(|c| dat!(c.clone())).collect()));
 	m.insert(dat!("markup"),	dat!(rec.markup.as_str().to_string()));
 	m.insert(dat!("state"),		dat!(rec.state.as_str().to_string()));
 	m.insert(dat!("html"),		dat!(html));
@@ -2129,6 +2227,7 @@ pub async fn handle_post<
 >(
 	cfg:		Option<&PublishConfig>,
 	admin:		&SiteAdmin,
+	site_admins:	&[String],
 	db:		Option<&(Arc<RwLock<DB>>, UID)>,
 	tls_client:	&Option<Arc<ClientConfig>>,
 	mail:		&Option<Arc<MailSender>>,
@@ -2159,6 +2258,7 @@ pub async fn handle_post<
 		&& request_path != PATH_IMPORT
 		&& request_path != PATH_CREDS
 		&& request_path != PATH_SUBS_ACTION
+		&& request_path != PATH_PROFILE_SAVE
 	{
 		return Ok(back_with(
 			"this site serves its posts from a directory, so there is nothing to write into; set \
@@ -2180,6 +2280,9 @@ pub async fn handle_post<
 		PATH_NEWSLETTER_TEST	=> do_test_send(cfg, db, mail, body, &admin.username, json, id).await,
 		PATH_SUBS_ACTION	=> do_subs_action(db, body, &admin.username, json, id),
 		PATH_COMMENTS_ACTION	=> do_comment_action(db, body, &admin.username, json, id),
+		PATH_PROFILE_SAVE	=> do_profile_save(db, body, &admin.username, json, id),
+		PATH_TAG_DELETE		=> do_tag_delete(db, body, is_curator(site_admins, admin),
+			&admin.username, json, id),
 		// Unreachable: `writes` names the same paths.
 		_		=> Ok(back(json)),
 	}
@@ -2420,10 +2523,27 @@ async fn do_save<
 		return Ok(back_with("a post with no prose in it is not a post", json));
 	}
 
-	let kind = PostKind::of(&super::form_field(body, "kind").unwrap_or_default());
 	let state = PostState::of(&super::form_field(body, "state").unwrap_or_default());
 	let markup = Markup::of(&super::form_field(body, "markup").unwrap_or_default());
 	let date = if date.is_empty() { None } else { Some(date) };
+
+	// The author, by site-login username. The form carries it so an editor could reassign a post, but
+	// it defaults to whoever is signed in -- a post's author is the person writing it unless said
+	// otherwise. Empty falls back to the signer rather than to no author.
+	let author = super::form_field(body, "author")
+		.map(|a| a.trim().to_string())
+		.filter(|a| !a.is_empty())
+		.unwrap_or_else(|| who.to_string());
+
+	// The categories the author ticked, from the site's configured set. A comma-separated field like
+	// the tags, but the case is kept: a category is matched against a fixed set where `Personal` and
+	// `personal` are not the same entry, whereas a tag is folded. An unknown category is dropped.
+	let categories: Vec<String> = super::form_field(body, "categories")
+		.unwrap_or_default()
+		.split(',')
+		.map(|c| c.trim().to_string())
+		.filter(|c| !c.is_empty() && cfg.categories.iter().any(|k| k == c))
+		.collect();
 
 	// The comma-separated tags field, split and normalised and deduped. An invalid tag is dropped in
 	// silence, on the same footing as a slug's small alphabet, so a stray character does not fail the
@@ -2460,7 +2580,7 @@ async fn do_save<
 	let deliveries = if state == PostState::Live && !chosen.is_empty() {
 		// The title and canonical link a social rendition is derived from. The title is the post's own
 		// heading, as everywhere else; the link is where the post will live on this site.
-		let title = match render_source(&source, slug.clone(), date.clone(), kind, markup) {
+		let title = match render_source(&source, slug.clone(), date.clone(), markup) {
 			Ok(p)	=> p.title,
 			Err(_)	=> slug.clone(),
 		};
@@ -2472,7 +2592,8 @@ async fn do_save<
 
 	let rec = Record {
 		slug:	slug.clone(),
-		kind,
+		author,
+		categories,
 		state,
 		markup,
 		date,
@@ -2606,6 +2727,77 @@ fn do_creds<
 }
 
 /// Deletes a post.
+/// Saves a member's own profile: the display name and avatar readers see.
+///
+/// A member sets only their own -- the username the profile is stored against is the signed-in one,
+/// never the form's word for it, so nobody edits another member's face. Empty fields are a profile of
+/// defaults, which the store keeps as nothing rather than as a record of blanks.
+fn do_profile_save<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	body:	&[u8],
+	who:	&str,
+	json:	bool,
+	id:	&str,
+)
+	-> Outcome<HttpMessage>
+{
+	let profile = store::Profile {
+		name:	super::form_field(body, "name").unwrap_or_default().trim().to_string(),
+		avatar:	super::form_field(body, "avatar").unwrap_or_default().trim().to_string(),
+	};
+	res!(store::put_profile(db, who, &profile));
+	info!("{}: console: '{}' saved their profile", id, who);
+	if json {
+		Ok(json_body("{\"ok\":true}"))
+	} else {
+		Ok(redirect(&fmt!("{}?said={}", PATH_PROFILE, url_encode("profile saved"))))
+	}
+}
+
+/// Deletes a tag across every author's posts. A curator's act alone.
+///
+/// Held to a curator whatever the form says: a non-curator reaching this path -- a stale page, a
+/// crafted request -- is refused, not obeyed. The count of posts touched rides back so the caller can
+/// say what happened.
+fn do_tag_delete<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:		&(Arc<RwLock<DB>>, UID),
+	body:		&[u8],
+	curator:	bool,
+	who:		&str,
+	json:		bool,
+	id:		&str,
+)
+	-> Outcome<HttpMessage>
+{
+	if !curator {
+		warn!("{}: console: '{}' tried to delete a tag without curator standing", id, who);
+		return Ok(back_with("only a curator may delete a shared tag", json));
+	}
+	let tag = normalise_tag(&super::form_field(body, "tag").unwrap_or_default());
+	if tag.is_empty() {
+		return Ok(back_with("no tag was named", json));
+	}
+	let n = res!(store::delete_tag(db, &tag, id));
+	info!("{}: console: curator '{}' deleted tag '{}' from {} post(s)", id, who, tag, n);
+	if json {
+		Ok(json_body(&fmt!("{{\"ok\":true,\"posts\":{}}}", n)))
+	} else {
+		Ok(back_with(&fmt!("tag '{}' removed from {} post(s)", tag, n), json))
+	}
+}
+
 fn do_delete<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -2776,87 +2968,197 @@ fn selected(yes: bool) -> &'static str {
 	if yes { " selected" } else { "" }
 }
 
-/// The tags field: a text input that is the source of truth, the current tags as removable chips,
-/// and the site's vocabulary as a click-to-add palette.
-///
-/// The text input holds the tags comma-joined and is what the form submits, so the field saves with
-/// no script at all -- a person types `rust, web` and it is stored. The chips and the palette are a
-/// progressive enhancement: [`TAG_SCRIPT`] wires the close buttons and the palette to the input and
-/// keeps them in step, and does nothing where scripting is off, leaving the plain text field.
-///
-/// Built as one string rather than through the form's `fmt!`, so the script's braces are data here
-/// and never reach a format string.
-fn tags_field(tags: &[String], palette: &[String]) -> String {
-	let mut s = String::new();
-	s.push_str("<label for=\"tags\">Tags</label>\n");
-	s.push_str("<input type=\"text\" id=\"tags\" name=\"tags\" value=\"");
-	s.push_str(&html_escape(&tags.join(", ")));
-	s.push_str("\" placeholder=\"rust, web\">\n");
+/// The author field: a hidden input carrying the username the post is stored against, and a line
+/// naming who that is. Not a free text box, because an author is a member and a member is a login,
+/// not a name typed at save time; reassigning a post is a curator's job elsewhere, not a slip here.
+fn author_field(username: &str, name: &str) -> String {
+	fmt!(
+		"<div class=\"mc-author\">\n\
+		<input type=\"hidden\" name=\"author\" value=\"{user}\">\n\
+		<span class=\"mc-author-lbl\">Writing as</span> <span class=\"mc-author-name\">{name}</span>\n\
+		</div>\n",
+		user = html_escape(username),
+		name = html_escape(name),
+	)
+}
 
-	// The current tags as chips. Server-rendered so they show without a script; the script replaces
-	// them with wired-up ones where it runs.
-	s.push_str("<div class=\"tag-chips\" id=\"tag-chips\">");
-	for t in tags {
-		let e = html_escape(t);
+/// The category checkboxes: the site's taxonomy, one box each, ticked where the post already sits.
+///
+/// The boxes are the control; a hidden `categories` input, comma-joined, is what the form submits and
+/// what [`CATS_SCRIPT`] keeps in step. So the field saves what it shows with the script, and re-saves
+/// the post's existing categories without one -- the hidden field carries them whether or not a box is
+/// ever touched. A site that defines no categories draws nothing.
+fn cats_field(categories: &[String], on: &[String]) -> String {
+	if categories.is_empty() {
+		return String::new();
+	}
+	let mut s = String::from("<div class=\"mc-cats-field\">\n<label>Categories</label>\n");
+	s.push_str("<input type=\"hidden\" name=\"categories\" id=\"mc-cats\" value=\"");
+	s.push_str(&html_escape(&on.join(",")));
+	s.push_str("\">\n<div class=\"mc-cats\" id=\"mc-cats-boxes\">\n");
+	for c in categories {
+		let checked = if on.iter().any(|x| x == c) { " checked" } else { "" };
 		s.push_str(&fmt!(
-			"<span class=\"tag-chip\">{tag}<button type=\"button\" class=\"tag-chip-close\" \
-			aria-label=\"Remove {tag}\">×</button></span>",
-			tag = e,
+			"<label class=\"mc-cat\"><input type=\"checkbox\" value=\"{cat}\"{checked}>{cat}</label>\n",
+			cat = html_escape(c), checked = checked,
 		));
 	}
-	s.push_str("</div>\n");
+	s.push_str("</div>\n</div>\n");
+	s.push_str(CATS_SCRIPT);
+	s
+}
 
-	// The vocabulary as a palette, where there is one. A click copies a tag into the set.
-	if !palette.is_empty() {
-		s.push_str("<div class=\"tag-palette\" id=\"tag-palette\">");
-		for t in palette {
-			s.push_str(&fmt!(
-				"<button type=\"button\" class=\"tag-palette-chip\">{tag}</button>",
-				tag = html_escape(t),
-			));
-		}
-		s.push_str("</div>\n");
+/// The composer's tag field: this post's tags in a Selected box and the site's vocabulary in a Source
+/// box, a chip moved between them by a click or a drag, and a search-or-create line that filters the
+/// Source as a person types and mints a new tag where none matches. A hidden `tags` input, comma-
+/// joined, is the source of truth the form submits.
+///
+/// A `curator` also gets a closer on each Source chip: pressing it asks to delete that tag across every
+/// author's post, the one destructive act here, held behind a confirmation that names the cost. A
+/// non-curator's Source chips carry no closer, so ordinary authoring can only ever add a tag or take
+/// one off the post in hand.
+///
+/// Built as one string, so the script's braces are data and never reach a format string.
+fn tags_field(tags: &[String], palette: &[String], curator: bool) -> String {
+	let mut s = String::new();
+	s.push_str("<div class=\"mc-tags-field\">\n<label>Tags</label>\n");
+	// The submit source: comma-joined, server-rendered with the post's tags so it saves them with no
+	// script, and kept in step by the script where one runs.
+	s.push_str("<input type=\"hidden\" name=\"tags\" id=\"mc-tags\" value=\"");
+	s.push_str(&html_escape(&tags.join(",")));
+	s.push_str("\">\n");
+	s.push_str(&fmt!("<input type=\"hidden\" id=\"mc-tags-curator\" value=\"{}\">\n",
+		if curator { "1" } else { "0" }));
+	s.push_str(&fmt!("<input type=\"hidden\" id=\"mc-tags-delpath\" value=\"{}\">\n",
+		html_escape(PATH_TAG_DELETE)));
+
+	s.push_str("<div class=\"mc-tags-boxes\">\n");
+	// Selected: this post's tags, a closer on each. Server-rendered so they show without a script.
+	s.push_str("<div class=\"mc-tagbox\">\n<span class=\"mc-tagbox-lbl\">On this post</span>\n\
+		<div class=\"mc-chips mc-chips-selected\" id=\"mc-tags-selected\" data-box=\"selected\">\n");
+	for t in tags {
+		s.push_str(&fmt!(
+			"<button type=\"button\" class=\"mc-chip\" draggable=\"true\" data-tag=\"{tag}\">{tag} \
+			<span class=\"mc-chip-x\" aria-hidden=\"true\">\u{00d7}</span></button>\n",
+			tag = html_escape(t)));
 	}
+	s.push_str("</div>\n</div>\n");
+	// Source: the vocabulary not already on the post. A search-or-create line sits above it.
+	s.push_str("<div class=\"mc-tagbox\">\n<span class=\"mc-tagbox-lbl\">Available</span>\n\
+		<input type=\"search\" class=\"mc-tags-search\" id=\"mc-tags-search\" \
+		placeholder=\"Search or add a tag, then Enter\" autocomplete=\"off\">\n\
+		<div class=\"mc-chips mc-chips-source\" id=\"mc-tags-source\" data-box=\"source\">\n");
+	for t in palette {
+		if tags.iter().any(|x| x == t) {
+			continue;
+		}
+		s.push_str(&fmt!(
+			"<button type=\"button\" class=\"mc-chip\" draggable=\"true\" data-tag=\"{tag}\">{tag}</button>\n",
+			tag = html_escape(t)));
+	}
+	s.push_str("</div>\n</div>\n</div>\n</div>\n");
 
 	s.push_str(TAG_SCRIPT);
 	s
 }
 
-/// The composer's tag script: chips from the input, the input from the chips, and the palette adding
-/// to both.
-///
-/// Reads the comma-joined `tags` input as the source of truth, renders a removable chip per tag,
-/// removes on a chip's close, and copies a palette chip in on a click, keeping the input in step so
-/// the form submits what the chips show. It touches nothing where it does not run, so the plain text
-/// field still saves.
+/// Keeps the hidden `categories` input in step with the checkboxes, so the form submits the ticked
+/// set. Does nothing where it does not run: the hidden field already carries the post's categories.
+const CATS_SCRIPT: &str = "<script>\n\
+(function(){\n\
+  var hidden=document.getElementById('mc-cats');\n\
+  var boxes=document.getElementById('mc-cats-boxes');\n\
+  if(!hidden||!boxes){return;}\n\
+  function sync(){\n\
+    var on=[];\n\
+    boxes.querySelectorAll('input[type=checkbox]').forEach(function(c){if(c.checked){on.push(c.value);}});\n\
+    hidden.value=on.join(',');\n\
+  }\n\
+  boxes.addEventListener('change',sync);sync();\n\
+})();\n\
+</script>\n";
+
+/// The composer's tag script: the two boxes, the search-or-create line, and a curator's tag deletion,
+/// all kept in step with the hidden `tags` input the form submits.
 const TAG_SCRIPT: &str = "<script>\n\
 (function(){\n\
-  var input=document.getElementById('tags');\n\
-  var chips=document.getElementById('tag-chips');\n\
-  var palette=document.getElementById('tag-palette');\n\
-  if(!input||!chips){return;}\n\
-  function norm(t){return t.trim().toLowerCase();}\n\
-  function list(){return input.value.split(',').map(norm).filter(function(t){return t.length>0;});}\n\
-  function uniq(a){var o=[];a.forEach(function(t){if(o.indexOf(t)<0){o.push(t);}});return o;}\n\
-  function set(a){input.value=uniq(a).join(', ');render();}\n\
-  function add(t){t=norm(t);if(!t){return;}var a=list();if(a.indexOf(t)<0){a.push(t);set(a);}}\n\
-  function remove(t){set(list().filter(function(x){return x!==t;}));}\n\
-  function render(){\n\
-    chips.innerHTML='';\n\
-    uniq(list()).forEach(function(t){\n\
-      var s=document.createElement('span');s.className='tag-chip';s.textContent=t;\n\
-      var b=document.createElement('button');b.type='button';b.className='tag-chip-close';\n\
-      b.setAttribute('aria-label','Remove '+t);b.textContent='\\u00d7';\n\
-      b.addEventListener('click',function(){remove(t);});\n\
-      s.appendChild(b);chips.appendChild(s);\n\
+  var hidden=document.getElementById('mc-tags');\n\
+  var sel=document.getElementById('mc-tags-selected');\n\
+  var src=document.getElementById('mc-tags-source');\n\
+  var search=document.getElementById('mc-tags-search');\n\
+  if(!hidden||!sel||!src){return;}\n\
+  var curator=(document.getElementById('mc-tags-curator')||{}).value==='1';\n\
+  var delpath=(document.getElementById('mc-tags-delpath')||{}).value||'';\n\
+  var csrf=(document.querySelector('input[name=csrf]')||{}).value||'';\n\
+  function norm(t){return t.trim().toLowerCase().replace(/\\s+/g,'-');}\n\
+  function sync(){\n\
+    var on=[];\n\
+    sel.querySelectorAll('.mc-chip').forEach(function(c){on.push(c.getAttribute('data-tag'));});\n\
+    hidden.value=on.join(',');\n\
+  }\n\
+  function chip(tag,inSel){\n\
+    var b=document.createElement('button');b.type='button';b.className='mc-chip';\n\
+    b.setAttribute('draggable','true');b.setAttribute('data-tag',tag);b.textContent=tag+' ';\n\
+    if(inSel){var x=document.createElement('span');x.className='mc-chip-x';\n\
+      x.setAttribute('aria-hidden','true');x.textContent='\\u00d7';b.appendChild(x);}\n\
+    else if(curator){var d=document.createElement('span');d.className='mc-chip-del';\n\
+      d.setAttribute('title','Delete this tag everywhere');d.textContent='\\u00d7';b.appendChild(d);}\n\
+    return b;\n\
+  }\n\
+  function has(box,tag){return !!box.querySelector('.mc-chip[data-tag=\"'+(window.CSS&&CSS.escape?CSS.escape(tag):tag)+'\"]');}\n\
+  function move(b,toSel){\n\
+    var tag=b.getAttribute('data-tag');b.parentNode.removeChild(b);\n\
+    (toSel?sel:src).appendChild(chip(tag,toSel));sync();\n\
+  }\n\
+  function delTag(tag){\n\
+    if(!curator||!delpath){return;}\n\
+    if(!window.confirm('Delete the tag \\u201c'+tag+'\\u201d from every post, by all authors? This cannot be undone.')){return;}\n\
+    var f=new FormData();f.append('csrf',csrf);f.append('tag',tag);\n\
+    fetch(delpath,{method:'POST',body:new URLSearchParams(f)}).then(function(r){\n\
+      if(r.ok){var b=src.querySelector('.mc-chip[data-tag=\"'+(window.CSS&&CSS.escape?CSS.escape(tag):tag)+'\"]');if(b){b.parentNode.removeChild(b);}\n\
+        var s=sel.querySelector('.mc-chip[data-tag=\"'+(window.CSS&&CSS.escape?CSS.escape(tag):tag)+'\"]');if(s){s.parentNode.removeChild(s);sync();}}\n\
+      else{window.alert('The tag could not be deleted.');}\n\
     });\n\
   }\n\
-  if(palette){palette.addEventListener('click',function(e){\n\
-    var b=e.target.closest('.tag-palette-chip');if(!b){return;}\n\
-    e.preventDefault();add(b.textContent);\n\
+  sel.addEventListener('click',function(e){var b=e.target.closest('.mc-chip');if(b){move(b,false);}});\n\
+  src.addEventListener('click',function(e){\n\
+    var b=e.target.closest('.mc-chip');if(!b){return;}\n\
+    if(curator&&e.target.classList.contains('mc-chip-del')){delTag(b.getAttribute('data-tag'));return;}\n\
+    move(b,true);\n\
+  });\n\
+  [sel,src].forEach(function(box){\n\
+    box.addEventListener('dragover',function(e){e.preventDefault();box.classList.add('mc-drop');});\n\
+    box.addEventListener('dragleave',function(){box.classList.remove('mc-drop');});\n\
+    box.addEventListener('drop',function(e){e.preventDefault();box.classList.remove('mc-drop');\n\
+      var tag=e.dataTransfer.getData('text/plain');if(!tag)return;\n\
+      var b=document.querySelector('.mc-chip[data-tag=\"'+(window.CSS&&CSS.escape?CSS.escape(tag):tag)+'\"]');\n\
+      if(b&&b.parentNode!==box){move(b,box===sel);}\n\
+    });\n\
+  });\n\
+  document.addEventListener('dragstart',function(e){\n\
+    var b=e.target.closest&&e.target.closest('.mc-chip');\n\
+    if(b&&e.dataTransfer){e.dataTransfer.setData('text/plain',b.getAttribute('data-tag'));}\n\
+  });\n\
+  if(search){\n\
+    search.addEventListener('input',function(){\n\
+      var q=norm(search.value);\n\
+      src.querySelectorAll('.mc-chip').forEach(function(c){\n\
+        c.hidden=q.length>0&&c.getAttribute('data-tag').indexOf(q)<0;\n\
+      });\n\
+    });\n\
+    search.addEventListener('keydown',function(e){\n\
+      if(e.key!=='Enter')return;e.preventDefault();\n\
+      var t=norm(search.value);if(!t)return;\n\
+      if(!has(sel,t)){if(has(src,t)){move(src.querySelector('.mc-chip[data-tag=\"'+(window.CSS&&CSS.escape?CSS.escape(t):t)+'\"]'),true);}\n\
+        else{sel.appendChild(chip(t,true));sync();}}\n\
+      search.value='';src.querySelectorAll('.mc-chip').forEach(function(c){c.hidden=false;});\n\
+    });\n\
+  }\n\
+  if(curator){src.querySelectorAll('.mc-chip').forEach(function(c){\n\
+    if(!c.querySelector('.mc-chip-del')){var d=document.createElement('span');d.className='mc-chip-del';\n\
+      d.setAttribute('title','Delete this tag everywhere');d.textContent=' \\u00d7';c.appendChild(d);}\n\
   });}\n\
-  input.addEventListener('change',render);\n\
-  render();\n\
+  sync();\n\
 })();\n\
 </script>\n";
 
@@ -2967,37 +3269,54 @@ mod tests {
 		Ok(())
 	}
 
-	/// The tags field emits the source-of-truth input, a removable chip per current tag, and a
-	/// palette chip per word of the vocabulary, under the class names the front-ends target.
+	/// The tags field emits the hidden source-of-truth input, this post's tags as chips in the Selected
+	/// box, and the rest of the vocabulary in the Source box -- a tag already on the post is not offered
+	/// twice.
 	#[test]
-	fn test_the_tags_field_emits_its_chips_03() -> Outcome<()> {
+	fn test_the_tags_field_emits_two_boxes_03() -> Outcome<()> {
 		let cur = vec![fmt!("rust"), fmt!("web")];
 		let pal = vec![fmt!("rust"), fmt!("web"), fmt!("ozone")];
-		let s = tags_field(&cur, &pal);
-		// The input is the source of truth, comma-joined.
-		assert!(s.contains(r#"<input type="text" id="tags" name="tags" value="rust, web""#),
+		let s = tags_field(&cur, &pal, false);
+		// The hidden input is the source of truth, comma-joined, no spaces.
+		assert!(s.contains(r#"<input type="hidden" name="tags" id="mc-tags" value="rust,web">"#),
 			"got: {}", s);
-		// A removable chip per current tag.
-		assert!(s.contains(r#"<span class="tag-chip">rust<button type="button" class="tag-chip-close""#),
-			"got: {}", s);
-		// The palette carries the vocabulary as click-to-add chips.
-		assert!(s.contains(r#"<div class="tag-palette" id="tag-palette">"#), "got: {}", s);
-		assert!(s.contains(r#"<button type="button" class="tag-palette-chip">ozone</button>"#),
-			"got: {}", s);
-		// The enhancement script is present.
-		assert!(s.contains("<script>"), "no script: {}", s);
+		// This post's tags sit in the Selected box, each with a closer.
+		assert!(s.contains(r#"id="mc-tags-selected""#), "no selected box: {}", s);
+		assert!(s.contains(r#"data-tag="rust"#), "no rust chip: {}", s);
+		// The Source box offers only vocabulary not already on the post.
+		assert!(s.contains(r#"data-tag="ozone"#), "ozone not offered: {}", s);
+		assert_eq!(s.matches(r#"data-tag="web""#).count(), 1,
+			"a tag on the post was also offered in the source box: {}", s);
+		// A non-curator's flag is off, so the script wires no delete affordance.
+		assert!(s.contains(r#"id="mc-tags-curator" value="0""#), "curator flag should be off: {}", s);
 		Ok(())
 	}
 
-	/// A field with no tags and no vocabulary is still a working input, with an empty chip container
-	/// and no palette.
+	/// A curator's source chips carry a delete affordance; the search-or-create line is always present.
 	#[test]
-	fn test_the_tags_field_is_empty_gracefully_04() -> Outcome<()> {
-		let s = tags_field(&[], &[]);
-		assert!(s.contains(r#"value="""#), "got: {}", s);
-		assert!(s.contains(r#"<div class="tag-chips" id="tag-chips"></div>"#), "got: {}", s);
-		// No palette div (the script still references the id, so the div, not the word, is the check).
-		assert!(!s.contains(r#"<div class="tag-palette""#), "an empty vocabulary drew a palette: {}", s);
+	fn test_a_curator_gets_source_deletes_04() -> Outcome<()> {
+		let s = tags_field(&[], &[fmt!("ozone")], true);
+		assert!(s.contains(r#"id="mc-tags-search""#), "no search-or-create box: {}", s);
+		assert!(s.contains(r#"id="mc-tags-curator" value="1""#), "curator flag not set: {}", s);
+		// The empty-post value is empty, and the source box holds the one vocabulary word.
+		assert!(s.contains(r#"id="mc-tags" value="""#), "got: {}", s);
+		assert!(s.contains(r#"data-tag="ozone"#), "the vocabulary word is missing: {}", s);
+		Ok(())
+	}
+
+	/// The category field ticks the boxes the post sits in and leaves the rest clear, and carries the
+	/// ticked set in the hidden input the form submits.
+	#[test]
+	fn test_the_cats_field_ticks_the_right_boxes_08() -> Outcome<()> {
+		let cats = vec![fmt!("Personal"), fmt!("Technical"), fmt!("Ideas")];
+		let s = cats_field(&cats, &[fmt!("Technical")]);
+		assert!(s.contains(r#"<input type="hidden" name="categories" id="mc-cats" value="Technical">"#),
+			"got: {}", s);
+		assert!(s.contains(r#"<input type="checkbox" value="Technical" checked>Technical"#), "got: {}", s);
+		assert!(s.contains(r#"<input type="checkbox" value="Personal">Personal"#),
+			"an unticked box was ticked: {}", s);
+		// A site with no taxonomy draws nothing.
+		assert!(cats_field(&[], &[]).is_empty(), "an empty taxonomy drew a field");
 		Ok(())
 	}
 

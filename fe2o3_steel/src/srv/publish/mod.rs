@@ -73,11 +73,32 @@ pub const DIR_DEFAULT: &str = "./www/public/content/posts";
 /// URL prefix the posts are served under, where the config names no other.
 pub const PATH_DEFAULT: &str = "/posts";
 
+/// The categories a site starts with where its config names none: a small, thematic taxonomy of the
+/// kind a general blog keeps, the defined counterpart to the free-form tags. An operator narrows,
+/// renames or empties this in one place. In config order, which is the order the filter draws them.
+pub const CATEGORIES_DEFAULT: [&str; 6] =
+	["Personal", "Technical", "Ideas", "Reviews", "Projects", "Announcements"];
+
 /// The extension a post wears.
 const EXT: &str = "md";
 
 /// How much of a post's opening stands in for it in a card and a feed.
 const EXCERPT_LEN: usize = 200;
+
+/// Words a minute, for a post's reading time.
+///
+/// Two hundred is the low end of the range measured for silent reading of English prose, so the
+/// estimate errs towards telling a reader a piece is longer than they will find it.
+pub const READ_WPM: usize = 200;
+
+/// How long a post of the given length takes to read, in whole minutes.
+///
+/// The one definition of reading time, so the badge a page shows and the slider a filter offers count
+/// the same way. Rounded up, and never below one: "0 min read" tells a reader nothing they wanted to
+/// know, and a slider whose floor is zero has a dead notch.
+pub fn read_mins(words: usize) -> usize {
+	words.div_ceil(READ_WPM).max(1)
+}
 
 
 /// Where a vhost's posts are kept.
@@ -161,6 +182,15 @@ pub struct PublishConfig {
 	/// signing domain so the signature authenticates. A `#[optional]` field: a `publish` block that
 	/// names none still loads, and the newsletter takes the default.
 	pub newsletter_from:	String,
+	/// The categories a post may sit in: the site's defined taxonomy, the checkbox counterpart to the
+	/// free-form tags. Drawn as the filter's category row and offered in the composer. An optional
+	/// field: a `publish` block naming none takes [`CATEGORIES_DEFAULT`], so a site gets a sensible set
+	/// without configuring one, and an operator narrows or renames it in one place.
+	pub categories:	Vec<String>,
+	/// The author a post carries when its own source names none -- chiefly a directory post, which has
+	/// no front matter to hold one. Empty leaves such a post unattributed. A member's site-login
+	/// username. An optional field.
+	pub default_author:	String,
 }
 
 impl PublishConfig {
@@ -273,6 +303,32 @@ impl PublishConfig {
 					Invalid, Input, Mismatch)),
 			},
 			newsletter_from:	res!(get_str("newsletter_from", "")),
+			// The taxonomy, or the built-in set where a site names none. A site that wants no categories
+			// at all writes an empty list, which is distinct from naming none: the first is a deliberate
+			// nothing, the second takes the default.
+			categories:	{
+				let cats = match m.get(&dat!("categories")) {
+					Some(Dat::List(list))	=> res!(strings(list)),
+					Some(Dat::Vek(vek))	=> res!(strings(vek.as_slice())),
+					None			=> CATEGORIES_DEFAULT.iter().map(|c| c.to_string()).collect(),
+					_			=> return Err(err!(
+						"PublishConfig: 'categories' must be a list of strings.";
+						Invalid, Input, Mismatch)),
+				};
+				// A category is joined into a comma-separated field in the composer and in the filter's
+				// data attribute, so a comma inside a category name would split into two. A space is
+				// fine, and common ("Book reviews"); a comma is refused here rather than left to corrupt
+				// the field silently at a distance.
+				for c in &cats {
+					if c.contains(',') {
+						return Err(err!(
+							"PublishConfig: a category name may not contain a comma: '{}'.", c;
+							Invalid, Input));
+					}
+				}
+				cats
+			},
+			default_author:	res!(get_str("default_author", "")),
 		})
 	}
 
@@ -379,6 +435,14 @@ impl PublishConfig {
 	pub fn comment_js_path(&self) -> String {
 		let mut s = self.path.clone();
 		s.push_str("/comments.js");
+		s
+	}
+
+	/// The URL path the index filter's script is served at. A file rather than an inline block, so a
+	/// site can run a Content-Security-Policy that forbids inline script and still get the filter.
+	pub fn filter_js_path(&self) -> String {
+		let mut s = self.path.clone();
+		s.push_str("/filter.js");
 		s
 	}
 
@@ -669,41 +733,6 @@ pub fn date_text(date: &str) -> String {
 }
 
 
-/// What shape a post is.
-///
-/// The two are not a taxonomy for its own sake. A note is the thing an author writes most and an
-/// essay the thing they write hardest, and a surface that made a passing thought wear an essay's
-/// furniture -- a slug typed by hand, a cover, an excerpt -- would quietly stop them writing the
-/// passing thought down. So the tree carries which it is, and each renders as what it is.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum PostKind {
-	/// Short. The default, because most of what gets written is.
-	#[default]
-	Note,
-	/// Long.
-	Essay,
-}
-
-impl PostKind {
-
-	/// The word a record stores.
-	pub fn as_str(&self) -> &'static str {
-		match self {
-			Self::Note	=> "note",
-			Self::Essay	=> "essay",
-		}
-	}
-
-	/// The kind a word names. An unknown word is a note, that being the lesser claim: calling an essay
-	/// a note under-dresses it, where the reverse would put furniture around a passing thought.
-	pub fn of(s: &str) -> Self {
-		match s {
-			"essay"	=> Self::Essay,
-			_	=> Self::Note,
-		}
-	}
-}
-
 /// The syntax a post is written in.
 ///
 /// Both read into the same document tree, so a post's kind of markup is a fact about how it was
@@ -772,6 +801,49 @@ impl PostState {
 	}
 }
 
+/// An author, as a reader is shown one: the login username a post stores, resolved to a display name
+/// and an avatar through the member's profile.
+///
+/// What the filter draws a face from, and what a post's byline reads. Built by
+/// [`store::resolve_authors`] from a username and its profile, so the page layer never touches the
+/// database to draw an author.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Author {
+	/// The login username a post stores. The stable key the filter matches a post's `author` against.
+	pub username:	String,
+	/// The name a reader sees. The profile's name, or the username where the profile named none.
+	pub name:	String,
+	/// A path or URL to the avatar image. Empty draws an initial from the name instead.
+	pub avatar:	String,
+}
+
+impl Author {
+
+	/// An author from a username and the profile it resolved to, applying the fallbacks: an empty
+	/// profile name shows the username, an empty avatar shows nothing and lets the reader draw an
+	/// initial.
+	pub fn from_profile(username: &str, profile: &store::Profile) -> Self {
+		Self {
+			username:	username.to_string(),
+			name:		if profile.name.is_empty() {
+				username.to_string()
+			} else {
+				profile.name.clone()
+			},
+			avatar:		profile.avatar.clone(),
+		}
+	}
+
+	/// The initial a reader draws where the author has no avatar: the first character of the display
+	/// name, upper-cased, or `?` where even that is empty.
+	pub fn initial(&self) -> String {
+		self.name.chars().next()
+			.map(|c| c.to_uppercase().to_string())
+			.unwrap_or_else(|| "?".to_string())
+	}
+}
+
+
 /// One post, as a reader gets it.
 #[derive(Clone, Debug)]
 pub struct Post {
@@ -779,14 +851,21 @@ pub struct Post {
 	pub slug:	String,
 	/// The post's own most prominent heading, or its slug where it has none.
 	pub title:	String,
-	/// Long or short.
-	pub kind:	PostKind,
+	/// The member who wrote it, by their site-login username. Empty where none is named. Resolved to a
+	/// display name and avatar through the member's profile at the point it is drawn.
+	pub author:	String,
+	/// The categories the post sits in, from the site's configured set. Empty for an uncategorised
+	/// post. The free-form counterpart is [`tags`](Post::tags).
+	pub categories:	Vec<String>,
 	/// The date it was given, where it was given one.
 	pub date:	Option<String>,
 	/// The opening of the prose, flattened, for a card and a feed.
 	pub excerpt:	String,
 	/// The prose, rendered.
 	pub html:	String,
+	/// How many words the prose runs to, for the reading time shown above it. Counted from the tree
+	/// rather than the rendered HTML, so no tag or attribute is mistaken for a word.
+	pub words:	usize,
 	/// Where else the post has been published, as a destination and the permalink it landed at. Drawn
 	/// on the page as "also on …", so a reader can follow the post to where the conversation is. Empty
 	/// for a post read from a directory, which records no deliveries, and for one sent nowhere.
@@ -809,11 +888,10 @@ pub fn read_all(dir: &str, id: &str) -> Outcome<Vec<Post>> {
 	let mut posts = Vec::new();
 	for (stem, source) in sources {
 		let (date, slug) = split_date(&stem);
-		// A file on disk is not a draft, or it would not be on the disk of a server, so a directory
-		// holds no kind or state of its own: everything in one is a live note.
-		// A directory of files is Markdown: it is the form prose already exists in, and a file on
-		// disk carries no field to say otherwise.
-		match render_source(&source, slug, date, PostKind::Note, Markup::Markdown) {
+		// A file on disk is not a draft, or it would not be on the disk of a server: everything in a
+		// directory is live. A directory of files is Markdown: it is the form prose already exists in,
+		// and a file on disk carries no field to name an author, a category or another markup.
+		match render_source(&source, slug, date, Markup::Markdown) {
 			Ok(p)	=> posts.push(p),
 			Err(e)	=> warn!(
 				"{}: posts: skipping '{}', which will not read as Markdown: {}", id, stem, e),
@@ -899,7 +977,6 @@ pub fn render_source(
 	source:	&str,
 	slug:	String,
 	date:	Option<String>,
-	kind:	PostKind,
 	markup:	Markup,
 )
 	-> Outcome<Post>
@@ -909,13 +986,15 @@ pub fn render_source(
 	Ok(Post {
 		slug,
 		title,
-		kind,
+		// A post made from source alone names no author or categories: those are a record's fields,
+		// which the store threads in where it has one, as it does the tags and deliveries below.
+		author:		String::new(),
+		categories:	Vec::new(),
 		date,
 		excerpt:	excerpt_of(&doc),
+		words:		doc.word_count(),
 		html:		html::render(&doc),
-		// A post made from source alone has no delivery record; the store fills this where there is one.
 		also_on:	Vec::new(),
-		// Nor any tags: they are a record's field, which the store threads in where it has one.
 		tags:		Vec::new(),
 	})
 }
@@ -1171,6 +1250,28 @@ mod tests {
 		let mut m = DaticleMap::new();
 		m.insert(dat!("comments"), dat!("yes".to_string()));
 		assert!(PublishConfig::from_datmap(&m).is_err(), "a non-boolean 'comments' was accepted");
+		Ok(())
+	}
+
+	/// The categories default where none are named, take a named list, and refuse a comma inside a
+	/// name -- the character that joins them in the composer and the filter, which a name may not hold.
+	#[test]
+	fn test_categories_default_and_reject_commas_12() -> Outcome<()> {
+		// Named none: the built-in set.
+		let cfg = res!(PublishConfig::from_datmap(&DaticleMap::new()));
+		assert_eq!(cfg.categories, CATEGORIES_DEFAULT.iter().map(|c| c.to_string()).collect::<Vec<_>>());
+
+		// A multi-word name is fine: a space is not the delimiter.
+		let mut m = DaticleMap::new();
+		m.insert(dat!("categories"), Dat::List(vec![dat!("Book reviews".to_string()),
+			dat!("Personal".to_string())]));
+		let cfg = res!(PublishConfig::from_datmap(&m));
+		assert_eq!(cfg.categories, vec![fmt!("Book reviews"), fmt!("Personal")]);
+
+		// A comma in a name is refused, since it would split the joined field in two.
+		let mut m = DaticleMap::new();
+		m.insert(dat!("categories"), Dat::List(vec![dat!("Reviews, essays".to_string())]));
+		assert!(PublishConfig::from_datmap(&m).is_err(), "a comma in a category name was accepted");
 		Ok(())
 	}
 
