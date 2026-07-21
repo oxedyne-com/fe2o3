@@ -56,7 +56,10 @@ use crate::srv::{
 	},
 };
 
-use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::{
+	prelude::*,
+	rand::Rand,
+};
 use oxedyne_fe2o3_iop_crypto::enc::Encrypter;
 use oxedyne_fe2o3_iop_db::api::Database;
 use oxedyne_fe2o3_iop_hash::api::Hasher;
@@ -1591,7 +1594,7 @@ fn profile_page<
 	};
 	// Whether the picture in the form is one this site holds. A member who uploaded one is offered a
 	// way to take it off again; one who gave a URL edits the URL.
-	let uploaded = profile.avatar == cfg.avatar_path(&admin.username);
+	let uploaded = !profile.handle.is_empty() && profile.avatar == cfg.avatar_path(&profile.handle);
 	debug!("{}: console: '{}' opened their profile", id, admin.username);
 	let body = fmt!(
 		"<div class=\"mc-head-row\"><h1>Your profile</h1>\
@@ -2287,10 +2290,11 @@ fn profile_json<
 	m.insert(dat!("name"),		dat!(p.name.clone()));
 	m.insert(dat!("avatar"),	dat!(p.avatar.clone()));
 	m.insert(dat!("bio"),		dat!(p.bio.clone()));
-	m.insert(dat!("uploaded"),	Dat::Bool(p.avatar == cfg.avatar_path(&admin.username)));
+	m.insert(dat!("uploaded"),
+		Dat::Bool(!p.handle.is_empty() && p.avatar == cfg.avatar_path(&p.handle)));
 	m.insert(dat!("max_bytes"),	dat!(AVATAR_MAX_BYTES as u64));
 	// The initial a form draws where there is no picture, from the same rule the reader's pages use.
-	m.insert(dat!("initial"),	dat!(Author::from_profile(&admin.username, &p).initial()));
+	m.insert(dat!("initial"),	dat!(Author::from_profile(&admin.username, &p, "").initial()));
 	Ok(json_body(&res!(Dat::Map(m).encode_string_with_config(&EncoderConfig::<(), ()>::json(None)))))
 }
 
@@ -2886,14 +2890,23 @@ fn do_profile_save<
 {
 	let mut said = fmt!("profile saved");
 	let mut avatar = super::form_field(body, "avatar").unwrap_or_default().trim().to_string();
+	// The handle this member wears in public, minted the first time they save and kept thereafter:
+	// their username is the SHA-256 of their passphrase and must never reach a page, so the public
+	// name for them is drawn from randomness instead of from anything of theirs.
+	let held = store::get_profile(db, who).unwrap_or_default();
+	let handle = if held.handle.is_empty() {
+		Rand::generate_random_string(16, "abcdefghijklmnopqrstuvwxyz0123456789")
+	} else {
+		held.handle.clone()
+	};
 	// The chosen file, where the member chose one. It is decoded before anything is written, so a
 	// picture that will not read never displaces the one already there.
 	let chosen = super::form_field(body, "picture_data").unwrap_or_default();
 	if !chosen.is_empty() {
 		match data_url::parse(&chosen, AVATAR_MAX_BYTES) {
 			Ok(u) if u.is_web_image() => {
-				res!(store::put_avatar(db, who, &u.media_type, &u.bytes));
-				avatar = cfg.avatar_path(who);
+				res!(store::put_avatar(db, &handle, &u.media_type, &u.bytes));
+				avatar = cfg.avatar_path(&handle);
 				info!("{}: console: '{}' uploaded a picture, {} bytes of {}",
 					id, who, u.bytes.len(), u.media_type);
 			}
@@ -2912,6 +2925,7 @@ fn do_profile_save<
 		name:	super::form_field(body, "name").unwrap_or_default().trim().to_string(),
 		avatar,
 		bio:	super::form_field(body, "bio").unwrap_or_default().trim().to_string(),
+		handle,
 	};
 	res!(store::put_profile(db, who, &profile));
 	info!("{}: console: '{}' saved their profile", id, who);

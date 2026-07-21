@@ -79,12 +79,16 @@ pub const ADMINS_KEY: &str = "publish/admins";
 /// passphrase -- cannot. A member with no profile record is drawn from their username alone.
 pub const PROFILE_PREFIX: &str = "publish/profile/";
 
-/// A member's uploaded picture, kept at `publish/avatar/<username>`.
+/// A member's uploaded picture, kept at `publish/avatar/<handle>`.
 ///
 /// Apart from the profile because it is bytes and the profile is fields: a page drawing a byline reads
 /// the profile and wants the path, not a picture it will not show, and a browser asking for the
 /// picture wants the picture and none of the rest. A member whose avatar is a URL somewhere else has
 /// no record here at all.
+///
+/// Kept under the member's public handle rather than their username, because the path it is served at
+/// is the key: a picture asked for by URL is found without the server having to map anything back to
+/// a username, and no page ever carries one.
 pub const AVATAR_PREFIX: &str = "publish/avatar/";
 
 
@@ -102,10 +106,10 @@ fn profile_key_of(username: &str) -> Dat {
 	dat!(s)
 }
 
-/// A member's uploaded picture's key.
-fn avatar_key_of(username: &str) -> Dat {
+/// A member's uploaded picture's key, by their public handle.
+fn avatar_key_of(handle: &str) -> Dat {
 	let mut s = String::from(AVATAR_PREFIX);
-	s.push_str(username);
+	s.push_str(handle);
 	dat!(s)
 }
 
@@ -125,6 +129,15 @@ pub struct Profile {
 	/// What the author writes about, in their own words: the line a reader is met with above the
 	/// posts, and what stands as the description of a blog only one person writes. Plain text.
 	pub bio:	String,
+	/// The name this member wears in public: a random word minted the first time they save, and the
+	/// only identifier of theirs that ever reaches a page.
+	///
+	/// A member's login username is the SHA-256 of their passphrase. Publishing that would hand
+	/// anyone who reads the page a verifier to guess passphrases against, offline and unwatched, so
+	/// nothing public is ever derived from it -- not a prefix of it, not a hash of it, since either
+	/// is still a thing a guess can be tested against. A random word is derived from nothing and
+	/// tells a guesser nothing.
+	pub handle:	String,
 }
 
 impl Profile {
@@ -142,6 +155,9 @@ impl Profile {
 		if !self.bio.is_empty() {
 			m.insert(dat!("bio"), dat!(self.bio.clone()));
 		}
+		if !self.handle.is_empty() {
+			m.insert(dat!("handle"), dat!(self.handle.clone()));
+		}
 		Dat::Map(m)
 	}
 
@@ -158,6 +174,9 @@ impl Profile {
 			}
 			if let Some(Dat::Str(s)) = m.get(&dat!("bio")) {
 				out.bio = s.clone();
+			}
+			if let Some(Dat::Str(s)) = m.get(&dat!("handle")) {
+				out.handle = s.clone();
 			}
 		}
 		out
@@ -618,13 +637,13 @@ pub fn get_avatar<
 	DB:	Database<UIDL, UID, ENC, KH>,
 >(
 	db:		&(Arc<RwLock<DB>>, UID),
-	username:	&str,
+	handle:		&str,
 )
 	-> Outcome<Option<(String, Vec<u8>)>>
 {
 	let (db_arc, _) = db;
 	let guard = lock_read!(db_arc);
-	match res!(guard.get(&avatar_key_of(username), None)) {
+	match res!(guard.get(&avatar_key_of(handle), None)) {
 		Some((Dat::Map(m), _)) => {
 			let kind = match m.get(&dat!("type")) {
 				Some(Dat::Str(s))	=> s.clone(),
@@ -655,7 +674,7 @@ pub fn put_avatar<
 	DB:	Database<UIDL, UID, ENC, KH>,
 >(
 	db:		&(Arc<RwLock<DB>>, UID),
-	username:	&str,
+	handle:		&str,
 	media_type:	&str,
 	bytes:		&[u8],
 )
@@ -666,16 +685,20 @@ pub fn put_avatar<
 	m.insert(dat!("type"), dat!(media_type.to_string()));
 	m.insert(dat!("data"), Dat::BU64(bytes.to_vec()));
 	let guard = lock_read!(db_arc);
-	res!(guard.insert(avatar_key_of(username), Dat::Map(m), *user, None));
+	res!(guard.insert(avatar_key_of(handle), Dat::Map(m), *user, None));
 	Ok(())
 }
 
 /// The authors a set of usernames names, each resolved to what a reader is shown.
 ///
-/// One read per distinct username, the profile where it has one and the username alone where it does
-/// not. Order follows the input, deduped: a filter draws one face per author, in the order the posts
-/// first named them. A username whose profile will not read is drawn from the username rather than
-/// failing the page -- a broken profile costs a name, not the index.
+/// One read per distinct username, the profile where it has one and the defaults where it does not.
+/// Order follows the input, deduped: a filter draws one face per author, in the order the posts first
+/// named them. A username whose profile will not read is drawn from the defaults rather than failing
+/// the page -- a broken profile costs a name, not the index.
+///
+/// A member with no profile is given a handle made from their position here (`author-1`, `author-2`),
+/// which distinguishes them within one page and means nothing outside it. It is not derived from the
+/// username, which is the SHA-256 of a passphrase and must not reach a page in any form.
 pub fn resolve_authors<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -694,7 +717,8 @@ pub fn resolve_authors<
 			continue;
 		}
 		let profile = get_profile(db, u).unwrap_or_default();
-		out.push(Author::from_profile(u, &profile));
+		let spare = fmt!("author-{}", out.len() + 1);
+		out.push(Author::from_profile(u, &profile, &spare));
 	}
 	out
 }
@@ -1204,6 +1228,7 @@ mod tests {
 			name:	fmt!("Jason Hoogland"),
 			avatar:	fmt!("/img/jason.jpg"),
 			bio:	fmt!("Writes about rent, housing and the things that follow from them."),
+			handle:	fmt!("k3n8x1qv7m2ab9dz"),
 		};
 		assert_eq!(Profile::from_dat(&p.to_dat()), p);
 
@@ -1217,24 +1242,31 @@ mod tests {
 		Ok(())
 	}
 
-	/// An author falls back where a profile named nothing: the display name becomes the username, and
-	/// an avatarless author yields the initial of that name for a drawn badge.
+	/// An author falls back where a profile named nothing, and the username -- which is the SHA-256 of
+	/// a passphrase -- reaches none of it: not the name, not the handle, not the initial. A member who
+	/// has set nothing is Anonymous, under the handle the caller made for the page.
 	#[test]
-	fn test_an_author_falls_back_to_its_username_07() -> Outcome<()> {
+	fn test_an_author_never_wears_its_username_07() -> Outcome<()> {
 		let named = Author::from_profile("jason", &Profile {
 			name:	fmt!("Jason"),
 			avatar:	fmt!("/a.jpg"),
 			bio:	fmt!("A line about the writing."),
-		});
+			handle:	fmt!("k3n8x1qv7m2ab9dz"),
+		}, "author-1");
 		assert_eq!(named.name, "Jason");
 		assert_eq!(named.avatar, "/a.jpg");
 		assert_eq!(named.bio, "A line about the writing.");
+		assert_eq!(named.handle, "k3n8x1qv7m2ab9dz", "a saved handle should be kept");
 		assert_eq!(named.initial(), "J");
 
-		let bare = Author::from_profile("mel99", &Profile::default());
-		assert_eq!(bare.name, "mel99", "an unset profile should show the username");
+		let bare = Author::from_profile("mel99", &Profile::default(), "author-2");
+		assert_eq!(bare.name, "Anonymous", "an unset profile showed the login username");
+		assert_eq!(bare.handle, "author-2", "an unset profile took no handle for the page");
 		assert!(bare.avatar.is_empty());
-		assert_eq!(bare.initial(), "M");
+		assert_eq!(bare.initial(), "A");
+		// Nothing public carries the username in any form.
+		assert!(!bare.name.contains("mel99") && !bare.handle.contains("mel99"),
+			"the username reached something a page draws");
 		Ok(())
 	}
 

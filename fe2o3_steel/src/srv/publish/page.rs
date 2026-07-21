@@ -159,7 +159,10 @@ fn index(
 		// copy of it: the author's username, the tags and categories space-joined, the reading time, and
 		// a lower-cased haystack of the title and opening for the search box.
 		body.push_str("<li class=\"aside-index-item\" data-author=\"");
-		escape_attr(&mut body, &p.author);
+		// The author's public handle, never the username a post stores: that is the SHA-256 of a
+		// passphrase, and a page is read by anyone.
+		escape_attr(&mut body, authors.iter().find(|a| a.username == p.author)
+			.map(|a| a.handle.as_str()).unwrap_or(""));
 		body.push_str("\" data-tags=\"");
 		// Tags are `[a-z0-9-]`, so a space joins them safely. Categories are free config strings that
 		// may hold a space, so they are joined on a comma the config forbids inside a category, and the
@@ -292,7 +295,7 @@ fn filter_shell(cfg: &PublishConfig, posts: &[Post], authors: &[Author]) -> Stri
 			aria-label=\"Filter by author\">\n");
 		for a in authors {
 			s.push_str("<button type=\"button\" class=\"aside-author\" data-author=\"");
-			escape_attr(&mut s, &a.username);
+			escape_attr(&mut s, &a.handle);
 			s.push_str("\" title=\"");
 			escape_attr(&mut s, &a.name);
 			s.push_str("\" aria-pressed=\"false\">");
@@ -1040,6 +1043,7 @@ mod tests {
 
 		let author = Author {
 			username:	fmt!("jason"),
+			handle:		fmt!("h-jason"),
 			name:		fmt!("Jason"),
 			avatar:		String::new(),
 			bio:		fmt!("Notes on rent, housing and what follows."),
@@ -1067,7 +1071,9 @@ mod tests {
 			"multi-word category not comma-joined: {}", cbody);
 
 		// The author drew a face with an initial, since the fixture set no avatar.
-		assert!(body.contains(r#"data-author="jason""#), "no author face: {}", body);
+		// The face carries the author's public handle; the login username is nowhere on the page.
+		assert!(body.contains(r#"data-author="h-jason""#), "no author face: {}", body);
+		assert!(!body.contains(r#"data-author="jason""#), "the login username reached the page: {}", body);
 		assert!(body.contains("aside-author-initial"), "no drawn initial for an avatarless author: {}", body);
 		// The category checkboxes are drawn from the config, checked.
 		assert!(body.contains(r#"<label class="aside-cat"><input type="checkbox" checked value="Personal">"#),
@@ -1082,6 +1088,7 @@ mod tests {
 	fn test_the_index_says_what_the_site_is_about_13() -> Outcome<()> {
 		let one = Author {
 			username:	fmt!("jason"),
+			handle:		fmt!("h-jason"),
 			name:		fmt!("Jason"),
 			avatar:		String::new(),
 			bio:		fmt!("Notes on rent and what follows."),
@@ -1100,6 +1107,7 @@ mod tests {
 		// A second author, and each description carries a name.
 		let two = Author {
 			username:	fmt!("ada"),
+			handle:		fmt!("h-ada"),
 			name:		fmt!("Ada"),
 			avatar:		fmt!("/asides/avatar/ada"),
 			bio:		fmt!("Writes about machines."),
@@ -1115,6 +1123,7 @@ mod tests {
 		// stands on an empty index, and the filter offers no face, there being nothing to narrow.
 		let one = Author {
 			username:	fmt!("jason"),
+			handle:		fmt!("h-jason"),
 			name:		fmt!("Jason"),
 			avatar:		String::new(),
 			bio:		fmt!("Notes on rent and what follows."),
@@ -1129,6 +1138,7 @@ mod tests {
 		// An author who has written no description draws no panel at all, rather than an empty one.
 		let bare = Author {
 			username:	fmt!("mel"),
+			handle:		fmt!("h-mel"),
 			name:		fmt!("Mel"),
 			avatar:		String::new(),
 			bio:		String::new(),
@@ -1145,6 +1155,7 @@ mod tests {
 	fn test_a_post_says_who_wrote_it_14() -> Outcome<()> {
 		let a = Author {
 			username:	fmt!("jason"),
+			handle:		fmt!("h-jason"),
 			name:		fmt!("Jason Hoogland"),
 			avatar:		String::new(),
 			bio:		fmt!("Notes on rent."),
@@ -1182,6 +1193,7 @@ mod tests {
 	fn test_a_hostile_profile_cannot_break_out_15() -> Outcome<()> {
 		let a = Author {
 			username:	fmt!("jason"),
+			handle:		fmt!("h-jason"),
 			name:		fmt!(r#"<img src=x onerror=alert(1)>"#),
 			avatar:		fmt!(r#""onload="alert(1)"#),
 			bio:		fmt!(r#"</p><script>alert(1)</script>"#),

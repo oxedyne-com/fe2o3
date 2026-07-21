@@ -818,17 +818,30 @@ impl PostState {
 	}
 }
 
-/// An author, as a reader is shown one: the login username a post stores, resolved to a display name
-/// and an avatar through the member's profile.
+/// An author, as a reader is shown one: the login username a post stores, resolved to a display name,
+/// an avatar and a public handle through the member's profile.
 ///
 /// What the filter draws a face from, and what a post's byline reads. Built by
 /// [`store::resolve_authors`] from a username and its profile, so the page layer never touches the
 /// database to draw an author.
+///
+/// # The username never reaches a page
+///
+/// It is the SHA-256 of the member's passphrase. Anything public derived from it -- the whole hash, a
+/// prefix of it, a hash of it -- is a verifier a guess can be tested against, offline and unwatched,
+/// and a page is read by anyone. So [`handle`](Author::handle) is what is drawn and matched on, and
+/// `username` stays on the server side of the resolution: it is here only to pair an author with the
+/// posts that name them.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Author {
-	/// The login username a post stores. The stable key the filter matches a post's `author` against.
+	/// The login username a post stores. Matched against a post's `author` **on the server**, and
+	/// never rendered, emitted or put in a path. See the note above.
 	pub username:	String,
-	/// The name a reader sees. The profile's name, or the username where the profile named none.
+	/// The name this author wears in public: the profile's handle, or a name made for the page where
+	/// the member has no profile yet. What a page matches a post to an author by.
+	pub handle:	String,
+	/// The name a reader sees. The profile's name, or `Anonymous` where the profile named none --
+	/// never the username, which is not a name and is not for showing.
 	pub name:	String,
 	/// A path or URL to the avatar image. Empty draws an initial from the name instead.
 	pub avatar:	String,
@@ -839,14 +852,23 @@ pub struct Author {
 
 impl Author {
 
-	/// An author from a username and the profile it resolved to, applying the fallbacks: an empty
-	/// profile name shows the username, an empty avatar shows nothing and lets the reader draw an
-	/// initial.
-	pub fn from_profile(username: &str, profile: &store::Profile) -> Self {
+	/// An author from a username and the profile it resolved to, applying the fallbacks: an unnamed
+	/// member is `Anonymous`, an avatarless one lets the reader draw an initial, and one who has never
+	/// saved a profile takes the handle the caller made for the page.
+	///
+	/// `spare_handle` is used only where the profile holds none -- a member who has written a post but
+	/// never opened their profile. It must not be derived from the username; callers pass a position
+	/// on the page, which identifies an author within one rendering and says nothing anywhere else.
+	pub fn from_profile(username: &str, profile: &store::Profile, spare_handle: &str) -> Self {
 		Self {
 			username:	username.to_string(),
+			handle:		if profile.handle.is_empty() {
+				spare_handle.to_string()
+			} else {
+				profile.handle.clone()
+			},
 			name:		if profile.name.is_empty() {
-				username.to_string()
+				fmt!("Anonymous")
 			} else {
 				profile.name.clone()
 			},

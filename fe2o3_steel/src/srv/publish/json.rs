@@ -44,14 +44,22 @@ pub fn serve(
 )
 	-> Outcome<HttpMessage>
 {
+	// A post's author, by the handle the page shows, resolved through the authors this request already
+	// read. The stored username is the SHA-256 of a passphrase and never leaves the server.
+	let handle_of = |username: &str| -> String {
+		authors.iter().find(|a| a.username == username)
+			.map(|a| a.handle.clone())
+			.unwrap_or_default()
+	};
 	let list = posts.iter()
 		.map(|p| {
 			let mut fields = vec![
 				(dat!("slug"),		dat!(p.slug.clone())),
 				(dat!("title"),		dat!(p.title.clone())),
-				// The author, by their site-login username, so the filter can group posts under a face.
-				// Empty where none is named, drawn as no author rather than as a missing one.
-				(dat!("author"),	dat!(p.author.clone())),
+				// The author, by the public handle the faces below carry, so a page can group posts
+				// under one. Empty where none is named, or where the author could not be resolved,
+				// which draws as no author rather than as a missing one.
+				(dat!("author"),	dat!(handle_of(&p.author))),
 				(dat!("url"),		dat!(cfg.path_of(&p.slug))),
 				(dat!("excerpt"),	dat!(p.excerpt.clone())),
 				(dat!("html"),		dat!(p.html.clone())),
@@ -80,7 +88,7 @@ pub fn serve(
 	// A client matches a post to a face on that username, as the server's own filter does.
 	let faces = authors.iter()
 		.map(|a| create_dat_ordmap(vec![
-			(dat!("username"),	dat!(a.username.clone())),
+			(dat!("handle"),	dat!(a.handle.clone())),
 			(dat!("name"),		dat!(a.name.clone())),
 			(dat!("avatar"),	dat!(a.avatar.clone())),
 			// What the author writes about, which a page drawing its own reader shows above the
@@ -142,7 +150,7 @@ mod tests {
 		Post {
 			slug:		fmt!("on-rent"),
 			title:		fmt!("On rent"),
-			author:		fmt!("abc123"),
+			author:		fmt!("9f3ac1"),
 			categories:	vec![fmt!("Big Ideas")],
 			date:		Some(fmt!("2026-07-17")),
 			words:		420,
@@ -158,14 +166,18 @@ mod tests {
 	#[test]
 	fn test_the_json_carries_faces_and_a_taxonomy_00() -> Outcome<()> {
 		let authors = vec![Author {
-			username:	fmt!("abc123"),
+			username:	fmt!("9f3ac1"),
+			handle:		fmt!("qv7m2ab9dz"),
 			name:		fmt!("Jason"),
 			avatar:		String::new(),
 			bio:		fmt!("Notes on rent."),
 		}];
 		let resp = res!(serve(&cfg(), &[post()], &authors, "test"));
 		let body = String::from_utf8_lossy(&resp.body).to_string();
-		assert!(body.contains(r#""username": "abc123""#), "no author key: {}", body);
+		// The public handle, and nowhere the login username, which is the SHA-256 of a passphrase.
+		assert!(body.contains(r#""handle": "qv7m2ab9dz""#), "no author handle: {}", body);
+		assert!(!body.contains("9f3ac1"), "the login username reached the feed: {}", body);
+		assert!(body.contains(r#""author": "qv7m2ab9dz""#), "a post is not keyed to its author: {}", body);
 		assert!(body.contains(r#""name": "Jason""#), "no author name: {}", body);
 		// The letter a client draws where an author has no picture, settled here.
 		assert!(body.contains(r#""initial": "J""#), "no drawn initial: {}", body);
