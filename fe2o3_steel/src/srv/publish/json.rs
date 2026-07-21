@@ -193,6 +193,17 @@ mod tests {
 		Ok(())
 	}
 
+	/// The feed says it may not be served from a store unasked. Without that an app redraws its
+	/// stream from a copy taken before the post was published, and only a forced refresh gets past it.
+	#[test]
+	fn test_the_json_is_never_served_from_a_store_unasked_02() -> Outcome<()> {
+		let resp = res!(serve(&cfg(), &[post()], &[], "test"));
+		let held = res!(resp.header.fields.get_one(&HeaderName::CacheControl).ok_or_else(||
+			err!("The feed carried no cache directive, so a store is free to guess one."; Missing)));
+		assert_eq!(fmt!("{}", held), "no-cache");
+		Ok(())
+	}
+
 	/// A site with no authors and no posts still answers the three keys, each an empty list, so a page
 	/// reading it never has to ask whether a key is there.
 	#[test]

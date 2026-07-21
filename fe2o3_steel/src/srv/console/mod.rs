@@ -621,12 +621,12 @@ pub async fn handle_post<
 	if !csrf_ok(&seed, &sent) {
 		warn!("{}: console: a write arrived without a good csrf token", id);
 		return Ok(Some(if json {
-			HttpMessage::new_response(HttpStatus::Forbidden)
+			cache::generated(HttpMessage::new_response(HttpStatus::Forbidden)
 				.with_field(
 					HeaderName::ContentType,
 					HeaderFieldValue::Generic("application/json".to_string()),
 				)
-				.with_body(fmt!("{{\"error\":\"stale session; reload\"}}").into_bytes())
+				.with_body(fmt!("{{\"error\":\"stale session; reload\"}}").into_bytes()))
 		} else {
 			redirect(PATH_ROOT)
 		}));
@@ -906,12 +906,12 @@ fn do_logout(
 /// so the response never says whether a given passphrase was close.
 fn login_deny(theme: &Theme, json: bool, why: &str) -> HttpMessage {
 	if json {
-		HttpMessage::new_response(HttpStatus::OK)
+		cache::generated(HttpMessage::new_response(HttpStatus::OK)
 			.with_field(
 				HeaderName::ContentType,
 				HeaderFieldValue::Generic("application/json".to_string()),
 			)
-			.with_body(fmt!("{{\"ok\":false,\"error\":\"{}\"}}", json_escape(why)).into_bytes())
+			.with_body(fmt!("{{\"ok\":false,\"error\":\"{}\"}}", json_escape(why)).into_bytes()))
 	} else {
 		login_page(theme, Some(why))
 	}
@@ -992,12 +992,16 @@ fn login_page(theme: &Theme, error: Option<&str>) -> HttpMessage {
 	s.push_str(&body);
 	s.push_str("</main>\n</body>\n</html>\n");
 
-	HttpMessage::new_response(HttpStatus::OK)
-		.with_field(
-			HeaderName::ContentType,
-			HeaderFieldValue::Generic("text/html; charset=utf-8".to_string()),
-		)
-		.with_body(s.into_bytes())
+	// Never held. Held, this page would be shown to somebody already signed in, and would
+	// carry any notice the last attempt earned back to whoever asked next.
+	cache::generated(
+		HttpMessage::new_response(HttpStatus::OK)
+			.with_field(
+				HeaderName::ContentType,
+				HeaderFieldValue::Generic("text/html; charset=utf-8".to_string()),
+			)
+			.with_body(s.into_bytes())
+	)
 }
 
 
@@ -1182,12 +1186,12 @@ fn not_yet_admin(theme: &Theme, username: &str, claimable: bool, csrf: &str) -> 
 	s.push_str(&body);
 	s.push_str("</main>\n</body>\n</html>\n");
 
-	HttpMessage::new_response(HttpStatus::Forbidden)
+	cache::generated(HttpMessage::new_response(HttpStatus::Forbidden)
 		.with_field(
 			HeaderName::ContentType,
 			HeaderFieldValue::Generic("text/html; charset=utf-8".to_string()),
 		)
-		.with_body(s.into_bytes())
+		.with_body(s.into_bytes()))
 }
 
 /// The console's own styling, consuming the site's custom properties where they are set.
@@ -1447,12 +1451,13 @@ fn status_json(
 			"{{\"admin\":{},\"claimable\":{},\"destinations\":{},\"categories\":{}}}",
 			admin, claimable, dest_arr, cat_arr),
 	};
-	HttpMessage::new_response(HttpStatus::OK)
+	// Never held: this carries the CSRF token, and a stale one fails every write that uses it.
+	cache::generated(HttpMessage::new_response(HttpStatus::OK)
 		.with_field(
 			HeaderName::ContentType,
 			HeaderFieldValue::Generic("application/json".to_string()),
 		)
-		.with_body(body.into_bytes())
+		.with_body(body.into_bytes()))
 }
 
 /// A redirect, for turning a visitor away or sending them back after a write.
@@ -1466,22 +1471,22 @@ pub fn redirect(to: &str) -> HttpMessage {
 
 /// A plain JSON yes, for a fetch caller whose write went through.
 fn json_ok() -> HttpMessage {
-	HttpMessage::new_response(HttpStatus::OK)
+	cache::generated(HttpMessage::new_response(HttpStatus::OK)
 		.with_field(
 			HeaderName::ContentType,
 			HeaderFieldValue::Generic("application/json".to_string()),
 		)
-		.with_body("{\"ok\":true}".to_string().into_bytes())
+		.with_body("{\"ok\":true}".to_string().into_bytes()))
 }
 
 /// A plain JSON error a fetch caller can read, its reason escaped for a string literal.
 fn json_err(why: &str) -> HttpMessage {
-	HttpMessage::new_response(HttpStatus::OK)
+	cache::generated(HttpMessage::new_response(HttpStatus::OK)
 		.with_field(
 			HeaderName::ContentType,
 			HeaderFieldValue::Generic("application/json".to_string()),
 		)
-		.with_body(fmt!("{{\"error\":\"{}\"}}", json_escape(why)).into_bytes())
+		.with_body(fmt!("{{\"error\":\"{}\"}}", json_escape(why)).into_bytes()))
 }
 
 /// A CSRF refusal, in the shape the caller asked for: JSON for a fetch, a redirect home for a form.
@@ -1489,12 +1494,12 @@ fn json_err(why: &str) -> HttpMessage {
 /// The same answer the post console gives, so a stale session fails one way wherever it is presented.
 fn csrf_deny(json: bool) -> HttpMessage {
 	if json {
-		HttpMessage::new_response(HttpStatus::Forbidden)
+		cache::generated(HttpMessage::new_response(HttpStatus::Forbidden)
 			.with_field(
 				HeaderName::ContentType,
 				HeaderFieldValue::Generic("application/json".to_string()),
 			)
-			.with_body("{\"error\":\"stale session; reload\"}".to_string().into_bytes())
+			.with_body("{\"error\":\"stale session; reload\"}".to_string().into_bytes()))
 	} else {
 		redirect(PATH_ROOT)
 	}
