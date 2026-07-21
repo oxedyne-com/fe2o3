@@ -10,6 +10,7 @@
 //! slug may wear, punctuation not being allowed in one.
 
 use crate::srv::publish::{
+	Author,
 	Post,
 	PublishConfig,
 	date_text,
@@ -29,7 +30,20 @@ use oxedyne_fe2o3_net::http::{
 
 
 /// Serves the posts as JSON: rendered, newest first.
-pub fn serve(cfg: &PublishConfig, posts: &[Post], id: &str) -> Outcome<HttpMessage> {
+///
+/// Beside the posts go the two things a page cannot work out from them: the authors they name,
+/// resolved to a face, and the categories the site offers. A post carries its author as a login
+/// username, which is a hash and shows a reader nothing, and it carries only the categories it wears
+/// rather than the ones it could have worn -- so a client drawing its own filter would otherwise
+/// offer a taxonomy narrower than the site's and a row of hashes for faces.
+pub fn serve(
+	cfg:		&PublishConfig,
+	posts:		&[Post],
+	authors:	&[Author],
+	id:		&str,
+)
+	-> Outcome<HttpMessage>
+{
 	let list = posts.iter()
 		.map(|p| {
 			let mut fields = vec![
@@ -62,8 +76,25 @@ pub fn serve(cfg: &PublishConfig, posts: &[Post], id: &str) -> Outcome<HttpMessa
 		})
 		.collect::<Vec<_>>();
 
+	// The authors, each with the name and avatar a reader sees, keyed by the username a post stores.
+	// A client matches a post to a face on that username, as the server's own filter does.
+	let faces = authors.iter()
+		.map(|a| create_dat_ordmap(vec![
+			(dat!("username"),	dat!(a.username.clone())),
+			(dat!("name"),		dat!(a.name.clone())),
+			(dat!("avatar"),	dat!(a.avatar.clone())),
+			// The letter drawn where there is no avatar, worked out once here rather than in every
+			// client that would have to know the same fallback rule.
+			(dat!("initial"),	dat!(a.initial())),
+		]))
+		.collect::<Vec<_>>();
+
 	let body_dat = create_dat_ordmap(vec![
 		(dat!("posts"), Dat::List(list)),
+		(dat!("authors"), Dat::List(faces)),
+		// The site's whole category vocabulary, in the order the config gives, so a client's checkboxes
+		// stand in that order and offer what the composer offers.
+		(dat!("categories"), Dat::List(cfg.categories.iter().map(|c| dat!(c.clone())).collect())),
 	]);
 	let json_cfg = EncoderConfig::<(), ()>::json(None);
 	let body_json = res!(body_dat.encode_string_with_config(&json_cfg));
@@ -76,4 +107,79 @@ pub fn serve(cfg: &PublishConfig, posts: &[Post], id: &str) -> Outcome<HttpMessa
 		HeaderFieldValue::Generic(fmt!("application/json")),
 	);
 	Ok(resp)
+}
+
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	use crate::srv::publish::Source;
+
+	fn cfg() -> PublishConfig {
+		PublishConfig {
+			path:			fmt!("/asides"),
+			dir:			fmt!("/nonexistent"),
+			source:			Source::Dir,
+			title:			fmt!("Asides"),
+			site_name:		fmt!("Elearnity"),
+			base_url:		fmt!("https://example.com"),
+			css:			vec![],
+			creds:			Default::default(),
+			comments:		true,
+			comment_rate_secs:	0,
+			comment_rate_hourly:	0,
+			newsletter_from:	String::new(),
+			categories:		vec![fmt!("Personal"), fmt!("Big Ideas")],
+			default_author:		String::new(),
+		}
+	}
+
+	fn post() -> Post {
+		Post {
+			slug:		fmt!("on-rent"),
+			title:		fmt!("On rent"),
+			author:		fmt!("abc123"),
+			categories:	vec![fmt!("Big Ideas")],
+			date:		Some(fmt!("2026-07-17")),
+			words:		420,
+			excerpt:	fmt!("An opening sentence."),
+			html:		fmt!("<p>An opening sentence.</p>\n"),
+			also_on:	Vec::new(),
+			tags:		vec![fmt!("rent")],
+		}
+	}
+
+	/// The feed a page draws itself from carries the two things it cannot work out from the posts: the
+	/// faces behind the usernames, and the whole category vocabulary the site offers.
+	#[test]
+	fn test_the_json_carries_faces_and_a_taxonomy_00() -> Outcome<()> {
+		let authors = vec![Author {
+			username:	fmt!("abc123"),
+			name:		fmt!("Jason"),
+			avatar:		String::new(),
+		}];
+		let resp = res!(serve(&cfg(), &[post()], &authors, "test"));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(body.contains(r#""username": "abc123""#), "no author key: {}", body);
+		assert!(body.contains(r#""name": "Jason""#), "no author name: {}", body);
+		// The letter a client draws where an author has no picture, settled here.
+		assert!(body.contains(r#""initial": "J""#), "no drawn initial: {}", body);
+		// Every category the site offers, not only the one the post wears.
+		assert!(body.contains(r#""Personal""#), "an unworn category is still offered: {}", body);
+		assert!(body.contains(r#""Big Ideas""#), "no category with a space: {}", body);
+		assert!(body.contains(r#""read_mins": 3"#), "no reading time: {}", body);
+		Ok(())
+	}
+
+	/// A site with no authors and no posts still answers the three keys, each an empty list, so a page
+	/// reading it never has to ask whether a key is there.
+	#[test]
+	fn test_an_empty_site_still_answers_in_shape_01() -> Outcome<()> {
+		let resp = res!(serve(&cfg(), &[], &[], "test"));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(body.contains(r#""posts": []"#), "no empty post list: {}", body);
+		assert!(body.contains(r#""authors": []"#), "no empty author list: {}", body);
+		Ok(())
+	}
 }

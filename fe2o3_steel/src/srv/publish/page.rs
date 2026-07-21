@@ -66,7 +66,7 @@ pub fn handle_get(
 		return super::feed::serve(cfg, posts, id);
 	}
 	if path == cfg.json_path() {
-		return super::json::serve(cfg, posts, id);
+		return super::json::serve(cfg, posts, authors, id);
 	}
 	if path == cfg.comment_js_path() {
 		return Ok(comment_js());

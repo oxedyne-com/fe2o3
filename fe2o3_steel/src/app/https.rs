@@ -406,12 +406,13 @@ impl<
                         }
                     };
                     // The distinct authors the posts name, resolved to a face -- a display name and
-                    // an avatar -- for the index filter's author row. Only the index draws them, so
-                    // they are resolved only for the index: a post view, the feed, the JSON and the
-                    // filter script all read the same posts but none wants the author row, and a read
-                    // per author on every one of those would be work nobody asked for. A directory has
-                    // a database for none of this, and a post from one names no author regardless.
-                    let authors = if request_path == cfg.path {
+                    // an avatar -- for an author row. Two requests draw one: the index, which renders
+                    // its own filter, and the JSON, which hands the same faces to a page that renders
+                    // the filter itself. A post view, the feed and the filter script want none of it,
+                    // and a read per author on every one of those would be work nobody asked for. A
+                    // directory has a database for none of this, and a post from one names no author
+                    // regardless.
+                    let authors = if request_path == cfg.path || request_path == cfg.json_path() {
                         let author_names: Vec<String> = posts.iter()
                             .map(|p| p.author.clone())
                             .filter(|a| !a.is_empty())
