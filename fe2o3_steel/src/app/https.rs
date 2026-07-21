@@ -423,6 +423,25 @@ impl<
                                         HeaderName::CacheControl,
                                         HeaderFieldValue::Generic(fmt!("public, max-age=3600")),
                                     )
+                                    // An SVG is a document, and a document served from this origin
+                                    // may carry script that runs as this site. The picture is drawn
+                                    // in an `<img>`, where no browser runs it, but a URL can be
+                                    // opened directly -- so the response is sandboxed and given
+                                    // nothing it may fetch or execute. The same headers cost a PNG
+                                    // nothing, so they are not conditional on the type: a rule that
+                                    // applies sometimes is a rule that will one day be missed.
+                                    .with_field(
+                                        HeaderName::ContentSecurityPolicy,
+                                        HeaderFieldValue::Generic(
+                                            fmt!("default-src 'none'; style-src 'unsafe-inline'; \
+                                                sandbox")),
+                                    )
+                                    // And it is what it says it is: no sniffing a mistyped upload
+                                    // into something with a script in it.
+                                    .with_field(
+                                        HeaderName::XContentTypeOptions,
+                                        HeaderFieldValue::Generic(fmt!("nosniff")),
+                                    )
                                     .with_body(bytes)
                             }
                             None => HttpMessage::respond_with_text(

@@ -28,9 +28,24 @@ impl DataUrl {
 	/// A caller storing a picture should ask this and refuse the rest: the media type is a claim by
 	/// whoever sent it, so it decides what will be served back with the bytes, and serving arbitrary
 	/// content under a type of its own choosing is how a picture becomes a page.
+	///
+	/// **`image/svg+xml` is included, and it is a document, not a picture.** An SVG may hold script,
+	/// which runs as whatever origin serves it. A caller that stores one must serve it defanged --
+	/// `Content-Security-Policy: default-src 'none'; sandbox` and `X-Content-Type-Options: nosniff` --
+	/// or use [`is_raster_image`] instead and turn SVG away at the door.
 	pub fn is_web_image(&self) -> bool {
 		matches!(self.media_type.as_str(),
 			"image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/svg+xml")
+	}
+
+	/// Whether the payload calls itself an image made of pixels rather than of markup.
+	///
+	/// The same question as [`is_web_image`](DataUrl::is_web_image) without SVG, for a caller that
+	/// would rather not think about serving a document it was handed. A raster carries no script and
+	/// no reference to anything else, so the worst a bad one does is fail to decode.
+	pub fn is_raster_image(&self) -> bool {
+		matches!(self.media_type.as_str(),
+			"image/png" | "image/jpeg" | "image/gif" | "image/webp")
 	}
 }
 
@@ -166,6 +181,18 @@ mod tests {
 			"an oversized payload was taken");
 		let ok = res!(parse(&fmt!("data:image/png;base64,{}", big), 64));
 		assert_eq!(ok.bytes.len(), 60);
+		Ok(())
+	}
+
+	/// An SVG is an image a browser draws and a document that may hold script, so the two questions
+	/// answer differently -- a caller that will not defang what it serves asks the narrower one.
+	#[test]
+	fn test_an_svg_is_an_image_but_not_a_raster_04() -> Outcome<()> {
+		let svg = res!(parse("data:image/svg+xml;base64,PHN2Zy8+", 1024));
+		assert!(svg.is_web_image(), "an SVG is an image a browser draws");
+		assert!(!svg.is_raster_image(), "an SVG is not made of pixels");
+		let png = res!(parse("data:image/png;base64,iVBORw0KGgo=", 1024));
+		assert!(png.is_raster_image(), "a PNG is made of pixels");
 		Ok(())
 	}
 
