@@ -438,7 +438,7 @@ pub async fn handle_get<
 		return admins_page(&theme, &admin, &csrf, site_admins, db, query, id);
 	}
 
-	publish::handle_get(publish, &theme, &admin, &csrf, site_admins, db, request_path, query, id)
+	publish::handle_get(publish, &theme, &admin, &csrf, db, request_path, query, id)
 }
 
 /// The admin-management page: who administers the site, and the forms to grant and revoke.
@@ -632,7 +632,7 @@ pub async fn handle_post<
 	}
 
 	let resp = res!(publish::handle_post(
-		publish, &admin, site_admins, db, tls_client, mail, request_path, body, json, id,
+		publish, &admin, db, tls_client, mail, request_path, body, json, id,
 	).await);
 	Ok(Some(resp))
 }

@@ -517,6 +517,39 @@ pub fn all_tags<
 
 /// How far a tag reaches: how many posts wear it, and how many distinct authors those posts belong
 /// to. What a curator is shown before deleting one, so the cost of the act is named before it is done.
+/// Every tag the site uses, each with how many posts wear it and how many authors those posts belong
+/// to, in the order [`all_tags`] gives.
+///
+/// One pass over the records for the whole vocabulary, where [`tag_usage`] is one pass per tag: a
+/// console listing thirty tags should read the posts once, not thirty times. Use that one for a single
+/// tag about to be deleted, and this one for a list.
+pub fn tag_counts<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	id:	&str,
+)
+	-> Outcome<Vec<(String, usize, usize)>>
+{
+	let recs = res!(list_records(db, id));
+	// Tag -> (posts, the distinct authors seen wearing it).
+	let mut seen: BTreeMap<String, (usize, Vec<String>)> = BTreeMap::new();
+	for rec in &recs {
+		for t in &rec.tags {
+			let e = seen.entry(t.clone()).or_insert((0, Vec::new()));
+			e.0 += 1;
+			if !rec.author.is_empty() && !e.1.iter().any(|a| a == &rec.author) {
+				e.1.push(rec.author.clone());
+			}
+		}
+	}
+	Ok(seen.into_iter().map(|(t, (posts, authors))| (t, posts, authors.len())).collect())
+}
+
 pub fn tag_usage<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,

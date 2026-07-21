@@ -348,7 +348,10 @@ fn join(pb: &mut PathBuilder, v: Pt, d0: Pt, d1: Pt, pen: &Stroke, r: f32) {
 	let n1 = mul(outer(d1), r);
 	// The signed angle the pen turns through, which is also the angle from `n0` to `n1`, a normal
 	// being nothing but its direction under a quarter turn.
-	let phi = cross.atan2(dot);
+	//
+	// Taken at double width and brought back. See [`arc_steps`] for why: the single-width form of this
+	// function is what ties a binary to the C library it was built against.
+	let phi = (cross as f64).atan2(dot as f64) as f32;
 
 	match pen.join {
 		Join::Bevel => piece(pb, &[v, add(v, n0), add(v, n1)]),
@@ -586,7 +589,18 @@ fn arc_steps(r: f32, sweep: f32, tol: f32) -> usize {
 		return 1;
 	}
 	let cos = (1.0 - tol / r).clamp(-1.0, 1.0);
-	let a = 2.0 * cos.acos(); // The widest angle one chord may span.
+	// The widest angle one chord may span. Taken at DOUBLE width and brought back, rather than in single
+	// width directly.
+	//
+	// This is a portability matter, not a numerical one. The single-width transcendentals -- `acosf`,
+	// `atan2f` and their kin -- gained fresh symbol versions in glibc 2.43, so a binary built against it
+	// asks for `acosf@GLIBC_2.43` and will not load on a machine whose C library is older, however little
+	// of it the program actually uses. The double-width forms have carried the same version since
+	// glibc 2.2.5 and are on every machine that will ever run this. A binary built on the newest
+	// distribution therefore still runs on the ones beside it -- which for a library whose whole point is
+	// to be self-contained is the behaviour to want. The double-width answer is also the more accurate of
+	// the two; nothing is given up.
+	let a = 2.0 * (cos as f64).acos() as f32;
 	if !a.is_finite() || a <= 0.0 {
 		return MAX_ARC_STEPS;
 	}

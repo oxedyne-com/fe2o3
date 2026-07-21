@@ -215,17 +215,19 @@ pub fn posts(path: &str) -> bool {
 // └───────────────────────────────────────────────────────────────────────────┘
 
 /// Serves the console's post pages. The gate ran before this: `admin` is a proven site admin.
-/// Whether a member may curate the shared tag vocabulary -- rename or delete a tag across every
-/// author's posts, not merely edit their own.
+/// Whether a member may curate the shared tag vocabulary -- delete a tag across every author's posts,
+/// not merely edit their own.
 ///
-/// A curator is a *pinned* admin: one the operator named in the vhost's `site_admins`, the same
-/// distinction the admin-management page draws between a pinned admin and one the site granted itself.
-/// Deleting a tag reaches into other authors' posts, so it is held to the operator's own grant rather
-/// than to anyone a site admin later added. Every author still adds tags and edits their own post's;
-/// only this reaches across the site.
-fn is_curator(site_admins: &[String], admin: &SiteAdmin) -> bool {
-	site_admins.iter().any(|u| u == &admin.username)
-}
+/// Every site admin may, whether the operator pinned them in the vhost's `site_admins` or the site
+/// granted them from the browser. The two were held apart for a while, on the reasoning that reaching
+/// into another author's posts should want the operator's own grant; the answer is that a site admin is
+/// already trusted with the site's prose, its subscribers and its comments, and a second rank that
+/// governs one destructive act is a rank nobody can keep straight. The act is guarded where it belongs
+/// -- by the count of posts it will touch, shown before it happens -- rather than by a standing nobody
+/// remembers they have.
+///
+/// Authorship is untouched by this: every author adds tags and edits their own post's tags, admin or
+/// not. Only deletion across the site is held here.
 
 pub fn handle_get<
 	const UIDL: usize,
@@ -238,7 +240,6 @@ pub fn handle_get<
 	theme:		&Theme,
 	admin:		&SiteAdmin,
 	csrf:		&str,
-	site_admins:	&[String],
 	db:		Option<&(Arc<RwLock<DB>>, UID)>,
 	request_path:	&str,
 	query:		&str,
@@ -257,7 +258,7 @@ pub fn handle_get<
 
 	match request_path {
 		PATH_ROOT	=> handle_list(cfg, theme, admin, csrf, db, query, id),
-		PATH_EDIT	=> handle_edit(cfg, theme, admin, csrf, is_curator(site_admins, admin), db, query, id),
+		PATH_EDIT	=> handle_edit(cfg, theme, admin, csrf, true, db, query, id),
 		PATH_PROFILE	=> profile_page(cfg, theme, admin, csrf, db, id),
 		PATH_PREVIEW	=> handle_preview(cfg, theme, admin, db, query, id),
 		PATH_SUBS	=> subscribers_page(cfg, theme, admin, csrf, db, query, id),
@@ -1453,7 +1454,7 @@ fn handle_edit<
 	// pays for the list; a failure to read it costs the palette, not the editor, so it logs and
 	// carries on with an empty one rather than refusing the page.
 	let palette = match db {
-		Some(db)	=> match store::all_tags(db, id) {
+		Some(db)	=> match store::tag_counts(db, id) {
 			Ok(t)	=> t,
 			Err(e)	=> {
 				warn!("{}: console: cannot list the tag vocabulary: {}", id, e);
@@ -1948,8 +1949,16 @@ fn tags_json<
 		Some(db)	=> db,
 		None		=> return Ok(json_body("{\"tags\":[]}")),
 	};
-	let tags = res!(store::all_tags(db, id));
-	let list = Dat::List(tags.iter().map(|t| dat!(t.clone())).collect());
+	// Each tag with how far it reaches: how many posts wear it and how many authors those posts
+	// belong to, read in one pass. An app offering to delete a tag across the site shows that count
+	// before it asks, which is the guard on the act -- see `do_tag_delete`.
+	let list = Dat::List(res!(store::tag_counts(db, id)).into_iter()
+		.map(|(t, posts, authors)| create_dat_ordmap(vec![
+			(dat!("tag"),		dat!(t)),
+			(dat!("posts"),		dat!(posts as u64)),
+			(dat!("authors"),	dat!(authors as u64)),
+		]))
+		.collect());
 	let body = create_dat_ordmap(vec![(dat!("tags"), list)]);
 	Ok(json_body(&res!(body.encode_string_with_config(&EncoderConfig::<(), ()>::json(None)))))
 }
@@ -2360,7 +2369,6 @@ pub async fn handle_post<
 >(
 	cfg:		Option<&PublishConfig>,
 	admin:		&SiteAdmin,
-	site_admins:	&[String],
 	db:		Option<&(Arc<RwLock<DB>>, UID)>,
 	tls_client:	&Option<Arc<ClientConfig>>,
 	mail:		&Option<Arc<MailSender>>,
@@ -2414,8 +2422,7 @@ pub async fn handle_post<
 		PATH_SUBS_ACTION	=> do_subs_action(db, body, &admin.username, json, id),
 		PATH_COMMENTS_ACTION	=> do_comment_action(db, body, &admin.username, json, id),
 		PATH_PROFILE_SAVE	=> do_profile_save(cfg, db, body, &admin.username, json, id),
-		PATH_TAG_DELETE		=> do_tag_delete(db, body, is_curator(site_admins, admin),
-			&admin.username, json, id),
+		PATH_TAG_DELETE		=> do_tag_delete(db, body, &admin.username, json, id),
 		// Unreachable: `writes` names the same paths.
 		_		=> Ok(back(json)),
 	}
@@ -2936,11 +2943,12 @@ fn do_profile_save<
 	}
 }
 
-/// Deletes a tag across every author's posts. A curator's act alone.
+/// Deletes a tag across every author's posts. A site admin's act.
 ///
-/// Held to a curator whatever the form says: a non-curator reaching this path -- a stale page, a
-/// crafted request -- is refused, not obeyed. The count of posts touched rides back so the caller can
-/// say what happened.
+/// The gate above this path is the whole check: only a proven site admin reaches any console write,
+/// and every site admin curates the shared vocabulary. The count of posts touched rides back so the
+/// caller can say what happened -- and the composer shows that count before it asks, since the guard
+/// that matters here is knowing how far the deletion reaches.
 fn do_tag_delete<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -2950,23 +2958,18 @@ fn do_tag_delete<
 >(
 	db:		&(Arc<RwLock<DB>>, UID),
 	body:		&[u8],
-	curator:	bool,
 	who:		&str,
 	json:		bool,
 	id:		&str,
 )
 	-> Outcome<HttpMessage>
 {
-	if !curator {
-		warn!("{}: console: '{}' tried to delete a tag without curator standing", id, who);
-		return Ok(back_with("only a curator may delete a shared tag", json));
-	}
 	let tag = normalise_tag(&super::form_field(body, "tag").unwrap_or_default());
 	if tag.is_empty() {
 		return Ok(back_with("no tag was named", json));
 	}
 	let n = res!(store::delete_tag(db, &tag, id));
-	info!("{}: console: curator '{}' deleted tag '{}' from {} post(s)", id, who, tag, n);
+	info!("{}: console: '{}' deleted tag '{}' from {} post(s)", id, who, tag, n);
 	if json {
 		Ok(json_body(&fmt!("{{\"ok\":true,\"posts\":{}}}", n)))
 	} else {
@@ -3146,7 +3149,7 @@ fn selected(yes: bool) -> &'static str {
 
 /// The author field: a hidden input carrying the username the post is stored against, and a line
 /// naming who that is. Not a free text box, because an author is a member and a member is a login,
-/// not a name typed at save time; reassigning a post is a curator's job elsewhere, not a slip here.
+/// not a name typed at save time; reassigning a post is a job elsewhere, not a slip here.
 fn author_field(username: &str, name: &str) -> String {
 	fmt!(
 		"<div class=\"mc-author\">\n\
@@ -3189,13 +3192,13 @@ fn cats_field(categories: &[String], on: &[String]) -> String {
 /// Source as a person types and mints a new tag where none matches. A hidden `tags` input, comma-
 /// joined, is the source of truth the form submits.
 ///
-/// A `curator` also gets a closer on each Source chip: pressing it asks to delete that tag across every
+/// A `curator` gets a closer on each Source chip: pressing it asks to delete that tag across every
 /// author's post, the one destructive act here, held behind a confirmation that names the cost. A
 /// non-curator's Source chips carry no closer, so ordinary authoring can only ever add a tag or take
 /// one off the post in hand.
 ///
 /// Built as one string, so the script's braces are data and never reach a format string.
-fn tags_field(tags: &[String], palette: &[String], curator: bool) -> String {
+fn tags_field(tags: &[String], palette: &[(String, usize, usize)], curator: bool) -> String {
 	let mut s = String::new();
 	s.push_str("<div class=\"mc-tags-field\">\n<label>Tags</label>\n");
 	// The submit source: comma-joined, server-rendered with the post's tags so it saves them with no
@@ -3224,13 +3227,16 @@ fn tags_field(tags: &[String], palette: &[String], curator: bool) -> String {
 		<input type=\"search\" class=\"mc-tags-search\" id=\"mc-tags-search\" \
 		placeholder=\"Search or add a tag, then Enter\" autocomplete=\"off\">\n\
 		<div class=\"mc-chips mc-chips-source\" id=\"mc-tags-source\" data-box=\"source\">\n");
-	for t in palette {
+	for (t, posts, authors) in palette {
 		if tags.iter().any(|x| x == t) {
 			continue;
 		}
+		// How far the tag reaches, on the chip itself: the script asks with these numbers in hand, so
+		// nobody is asked to confirm a deletion whose cost they have not been told.
 		s.push_str(&fmt!(
-			"<button type=\"button\" class=\"mc-chip\" draggable=\"true\" data-tag=\"{tag}\">{tag}</button>\n",
-			tag = html_escape(t)));
+			"<button type=\"button\" class=\"mc-chip\" draggable=\"true\" data-tag=\"{tag}\" \
+			data-posts=\"{posts}\" data-authors=\"{authors}\">{tag}</button>\n",
+			tag = html_escape(t), posts = posts, authors = authors));
 	}
 	s.push_str("</div>\n</div>\n</div>\n</div>\n");
 
@@ -3272,9 +3278,15 @@ const TAG_SCRIPT: &str = "<script>\n\
     sel.querySelectorAll('.mc-chip').forEach(function(c){on.push(c.getAttribute('data-tag'));});\n\
     hidden.value=on.join(',');\n\
   }\n\
+  function reach(tag){\n\
+    var b=document.querySelector('.mc-chip[data-tag=\"'+(window.CSS&&CSS.escape?CSS.escape(tag):tag)+'\"][data-posts]');\n\
+    return b?{posts:+b.getAttribute('data-posts')||0,authors:+b.getAttribute('data-authors')||0}:null;\n\
+  }\n\
   function chip(tag,inSel){\n\
     var b=document.createElement('button');b.type='button';b.className='mc-chip';\n\
     b.setAttribute('draggable','true');b.setAttribute('data-tag',tag);b.textContent=tag+' ';\n\
+    var r=reach(tag);\n\
+    if(r){b.setAttribute('data-posts',r.posts);b.setAttribute('data-authors',r.authors);}\n\
     if(inSel){var x=document.createElement('span');x.className='mc-chip-x';\n\
       x.setAttribute('aria-hidden','true');x.textContent='\\u00d7';b.appendChild(x);}\n\
     else if(curator){var d=document.createElement('span');d.className='mc-chip-del';\n\
@@ -3288,7 +3300,11 @@ const TAG_SCRIPT: &str = "<script>\n\
   }\n\
   function delTag(tag){\n\
     if(!curator||!delpath){return;}\n\
-    if(!window.confirm('Delete the tag \\u201c'+tag+'\\u201d from every post, by all authors? This cannot be undone.')){return;}\n\
+    var r=reach(tag)||{posts:0,authors:0};\n\
+    var cost=r.posts===0?'It is on no post yet.'\n\
+      :('It is on '+r.posts+(r.posts===1?' post':' posts')+' by '+r.authors\n\
+        +(r.authors===1?' author':' authors')+'.');\n\
+    if(!window.confirm('Delete the tag \\u201c'+tag+'\\u201d everywhere? '+cost+' This cannot be undone.')){return;}\n\
     var f=new FormData();f.append('csrf',csrf);f.append('tag',tag);\n\
     fetch(delpath,{method:'POST',body:new URLSearchParams(f)}).then(function(r){\n\
       if(r.ok){var b=src.querySelector('.mc-chip[data-tag=\"'+(window.CSS&&CSS.escape?CSS.escape(tag):tag)+'\"]');if(b){b.parentNode.removeChild(b);}\n\
@@ -3451,7 +3467,11 @@ mod tests {
 	#[test]
 	fn test_the_tags_field_emits_two_boxes_03() -> Outcome<()> {
 		let cur = vec![fmt!("rust"), fmt!("web")];
-		let pal = vec![fmt!("rust"), fmt!("web"), fmt!("ozone")];
+		let pal = vec![
+			(fmt!("rust"), 3, 2),
+			(fmt!("web"), 1, 1),
+			(fmt!("ozone"), 4, 1),
+		];
 		let s = tags_field(&cur, &pal, false);
 		// The hidden input is the source of truth, comma-joined, no spaces.
 		assert!(s.contains(r#"<input type="hidden" name="tags" id="mc-tags" value="rust,web">"#),
@@ -3468,10 +3488,13 @@ mod tests {
 		Ok(())
 	}
 
-	/// A curator's source chips carry a delete affordance; the search-or-create line is always present.
+	/// A curator's source chips carry a delete affordance and how far the tag reaches, since the
+	/// confirmation names that cost; the search-or-create line is always present.
 	#[test]
 	fn test_a_curator_gets_source_deletes_04() -> Outcome<()> {
-		let s = tags_field(&[], &[fmt!("ozone")], true);
+		let s = tags_field(&[], &[(fmt!("ozone"), 4, 2)], true);
+		assert!(s.contains(r#"data-posts="4""#), "the chip does not say how many posts: {}", s);
+		assert!(s.contains(r#"data-authors="2""#), "the chip does not say how many authors: {}", s);
 		assert!(s.contains(r#"id="mc-tags-search""#), "no search-or-create box: {}", s);
 		assert!(s.contains(r#"id="mc-tags-curator" value="1""#), "curator flag not set: {}", s);
 		// The empty-post value is empty, and the source box holds the one vocabulary word.
