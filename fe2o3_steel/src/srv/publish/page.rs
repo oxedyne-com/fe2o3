@@ -255,9 +255,13 @@ fn index(
 ///
 /// Rendered whole and static; the served script wires it. Every control starts in the state that
 /// shows every post, so the page a reader lands on is the whole list and the filter only ever takes
-/// away: no author pressed, every category checked, every tag in the selected box under `Includes`,
+/// away: no author pressed, every category and every tag in its own selected box under `Includes`,
 /// and the reading-time slider spanning the full range. The vocabulary and the range are read from
 /// the posts, so the filter offers exactly what the list holds and nothing it does not.
+///
+/// Categories and tags are the same widget twice, differing only in which chips they hold: the two
+/// are different kinds of thing to a reader, but they are narrowed by the same gesture, and a reader
+/// who has learnt one has learnt both.
 fn filter_shell(cfg: &PublishConfig, posts: &[Post], authors: &[Author]) -> String {
 	// The tag vocabulary: every tag any shown post wears, sorted, deduped. What the two chip boxes are
 	// filled from -- the selected box by default, since the default is to hide nothing.
@@ -308,60 +312,17 @@ fn filter_shell(cfg: &PublishConfig, posts: &[Post], authors: &[Author]) -> Stri
 		s.push_str("</div>\n");
 	}
 
-	// The tag machinery: the mode, then the two boxes. Shown only where the site has tags at all.
-	if !tags.is_empty() {
-		// Includes / Only / Excludes, over the selected set. `Includes` is the default, being the one
-		// that with every tag selected still shows every tagged post.
-		s.push_str("<div class=\"aside-filter-mode\" id=\"aside-filter-mode\" role=\"radiogroup\" \
-			aria-label=\"Tag match\">\n");
-		for (val, label, on) in [("includes", "Includes", true), ("only", "Only", false),
-			("excludes", "Excludes", false)]
-		{
-			s.push_str("<label class=\"aside-mode\"><input type=\"radio\" name=\"aside-mode\" value=\"");
-			s.push_str(val);
-			s.push('"');
-			if on {
-				s.push_str(" checked");
-			}
-			s.push('>');
-			s.push_str(label);
-			s.push_str("</label>\n");
-		}
-		s.push_str("</div>\n");
-
-		// The two boxes. The selected box holds every tag by default, each with a closer that moves it to
-		// the source box; the source box starts empty and its chips carry no closer -- a click, or a
-		// drag, moves a chip either way. The labels name which is which, since the two look alike.
-		s.push_str("<div class=\"aside-filter-tags\">\n");
-		s.push_str("<div class=\"aside-tagbox\">\n<span class=\"aside-tagbox-lbl\">Selected</span>\n\
-			<div class=\"aside-chips aside-chips-selected\" id=\"aside-tags-selected\" \
-			data-box=\"selected\" role=\"list\">\n");
-		for t in &tags {
-			s.push_str("<button type=\"button\" class=\"aside-chip\" draggable=\"true\" data-tag=\"");
-			escape_attr(&mut s, t);
-			s.push_str("\" role=\"listitem\">");
-			escape_text(&mut s, t);
-			s.push_str(" <span class=\"aside-chip-x\" aria-hidden=\"true\">\u{00d7}</span></button>\n");
-		}
-		s.push_str("</div>\n</div>\n");
-		s.push_str("<div class=\"aside-tagbox\">\n<span class=\"aside-tagbox-lbl\">Available</span>\n\
-			<div class=\"aside-chips aside-chips-source\" id=\"aside-tags-source\" \
-			data-box=\"source\" role=\"list\"></div>\n</div>\n");
-		s.push_str("</div>\n");
+	// The categories, then the tags. The coarser vocabulary leads, on the same reasoning the chips
+	// under a post follow: a reader scanning controls wants the section before the specifics. The
+	// categories are the site's configured list, in the order the site wrote it -- an order somebody
+	// chose, which sorting would throw away -- while the tags are gathered from the posts and sorted,
+	// nobody having chosen an order for them.
+	let cats: Vec<&str> = cfg.categories.iter().map(|c| c.as_str()).collect();
+	if !cats.is_empty() {
+		s.push_str(&facet_block("cat", "Categories", &cats));
 	}
-
-	// The categories, a checkbox each, every one checked so the default hides nothing. A post with no
-	// category the script always passes, on the same footing as an untagged post under the tag filter.
-	if !cfg.categories.is_empty() {
-		s.push_str("<div class=\"aside-filter-cats\" id=\"aside-filter-cats\" aria-label=\"Categories\">\n");
-		for c in &cfg.categories {
-			s.push_str("<label class=\"aside-cat\"><input type=\"checkbox\" checked value=\"");
-			escape_attr(&mut s, c);
-			s.push_str("\">");
-			escape_text(&mut s, c);
-			s.push_str("</label>\n");
-		}
-		s.push_str("</div>\n");
+	if !tags.is_empty() {
+		s.push_str(&facet_block("tag", "Tags", &tags));
 	}
 
 	// The reading-time slider: two thumbs over the range the posts span, so a reader keeps the short
@@ -383,6 +344,71 @@ fn filter_shell(cfg: &PublishConfig, posts: &[Post], authors: &[Author]) -> Stri
 	}
 
 	s.push_str("</section>\n");
+	s
+}
+
+/// One facet family's controls: a mode row, and a pair of boxes the reader moves chips between.
+///
+/// Categories and tags are drawn by this one function, so the two are the same instrument twice
+/// rather than two instruments a reader has to learn separately. `facet` is the short name the markup
+/// and the script both key on -- `cat` or `tag` -- and `label` is what the reader is shown.
+///
+/// Every value starts in the selected box, since the default state of a filter is to hide nothing,
+/// and `Includes` is the default mode, being the one that with everything selected still shows every
+/// post. A chip carries its closer in either box: which box it is in is what the chip means, and the
+/// stylesheet decides whether the closer is worth drawing there.
+fn facet_block(facet: &str, label: &str, values: &[&str]) -> String {
+	let mut s = String::from("<div class=\"aside-facet\" data-facet=\"");
+	s.push_str(facet);
+	s.push_str("\">\n<div class=\"aside-facet-head\">\n<span class=\"aside-facet-lbl\">");
+	escape_text(&mut s, label);
+	s.push_str("</span>\n<div class=\"aside-facet-mode\" role=\"radiogroup\" aria-label=\"");
+	escape_attr(&mut s, &fmt!("{} match", label));
+	s.push_str("\">\n");
+	for (val, name, on) in [("includes", "Includes", true), ("only", "Only", false),
+		("excludes", "Excludes", false)]
+	{
+		s.push_str("<label class=\"aside-mode\"><input type=\"radio\" name=\"aside-mode-");
+		s.push_str(facet);
+		s.push_str("\" value=\"");
+		s.push_str(val);
+		s.push('"');
+		if on {
+			s.push_str(" checked");
+		}
+		s.push('>');
+		s.push_str(name);
+		s.push_str("</label>\n");
+	}
+	s.push_str("</div>\n</div>\n<div class=\"aside-facet-boxes\">\n");
+
+	// The selected box, holding the whole vocabulary, and the empty source box beside it. The labels
+	// name which is which, since the two look alike.
+	s.push_str("<div class=\"aside-facetbox\">\n<span class=\"aside-facetbox-lbl\">Selected</span>\n\
+		<div class=\"aside-chips aside-chips-selected\" data-box=\"selected\" data-facet=\"");
+	s.push_str(facet);
+	s.push_str("\" role=\"list\">\n");
+	for v in values {
+		// No whitespace inside the chip: it is an inline-flex box, and a text node between the label and
+		// the closer becomes a gap nothing in the stylesheet asked for.
+		s.push_str("<button type=\"button\" class=\"aside-chip aside-chip-");
+		s.push_str(facet);
+		s.push_str("\" draggable=\"true\" data-facet=\"");
+		s.push_str(facet);
+		s.push_str("\" data-value=\"");
+		// The raw value, not a slug of it: a category may hold a space and a capital, and the script
+		// matches what the post itself carries.
+		escape_attr(&mut s, v);
+		s.push_str("\" role=\"listitem\"><span class=\"aside-chip-lbl\">");
+		escape_text(&mut s, v);
+		s.push_str("</span><span class=\"aside-chip-x\" aria-hidden=\"true\">&#215;</span></button>\n");
+	}
+	s.push_str("</div>\n</div>\n");
+	s.push_str("<div class=\"aside-facetbox\">\n<span class=\"aside-facetbox-lbl\">Available</span>\n\
+		<div class=\"aside-chips aside-chips-source\" data-box=\"source\" data-facet=\"");
+	s.push_str(facet);
+	s.push_str("\" role=\"list\"></div>\n</div>\n");
+	s.push_str("</div>\n</div>\n");
 	s
 }
 
@@ -460,7 +486,7 @@ fn facets_list(cfg: &PublishConfig, post: &Post) -> String {
 		s.push_str("<li><a class=\"post-cat\" href=\"");
 		escape_attr(&mut s, &cfg.path);
 		s.push_str("?cat=");
-		escape_attr(&mut s, &url_encode(c));
+		escape_attr(&mut s, &percent_encode(c));
 		s.push_str("\">");
 		escape_text(&mut s, c);
 		s.push_str("</a></li>");
@@ -476,24 +502,6 @@ fn facets_list(cfg: &PublishConfig, post: &Post) -> String {
 	}
 	s.push_str("</ul>");
 	s
-}
-
-/// A category as it may sit in a query string.
-///
-/// A category is drawn from the site's configured list, which may hold a space or a capital -- so
-/// unlike a tag it cannot go into a URL as it stands. Percent-encoding by hand rather than reaching
-/// for a general encoder: the set that must survive is small and known, and the rule is the one a
-/// reader of this function would want stated in it.
-fn url_encode(s: &str) -> String {
-	let mut out = String::with_capacity(s.len());
-	for b in s.bytes() {
-		match b {
-			b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~'	=>
-				out.push(b as char),
-			_	=> out.push_str(&fmt!("%{:02X}", b)),
-		}
-	}
-	out
 }
 
 /// The reading time above a post, as its label. The minutes are [`read_mins`], the site's one
@@ -1073,7 +1081,7 @@ mod tests {
 		spaced.tags = Vec::new();
 		let resp = res!(post_page(&cfg(), &spaced, None, None));
 		let body = String::from_utf8_lossy(&resp.body).to_string();
-		assert!(body.contains(r#"href="/asides?cat=Big%20Ideas""#), "unencoded category: {}", body);
+		assert!(body.contains(r#"href="/asides?cat=Big+Ideas""#), "unencoded category: {}", body);
 		assert!(body.contains(">Big Ideas</a>"), "the chip does not read as written: {}", body);
 
 		// A post with neither has no empty shell.
@@ -1119,8 +1127,9 @@ mod tests {
 		// posts sits in the selected box by default.
 		assert!(body.contains(r#"id="aside-filter-search""#), "no search box: {}", body);
 		assert!(body.contains(r#"value="includes" checked"#), "Includes is not the default mode: {}", body);
-		assert!(body.contains(r#"id="aside-tags-selected""#), "no selected box: {}", body);
-		assert!(body.contains(r#"data-tag="rust""#), "the tag is not a chip: {}", body);
+		assert!(body.contains(r#"<div class="aside-chips aside-chips-selected" data-box="selected" data-facet="tag" role="list">"#),
+			"no selected tag box: {}", body);
+		assert!(body.contains(r#"data-facet="tag" data-value="rust""#), "the tag is not a chip: {}", body);
 		// A multi-word category rides in data-categories comma-joined, so the filter's comma-split keeps
 		// it whole rather than tearing "Big Ideas" into "Big" and "Ideas".
 		let mut c = post();
@@ -1136,9 +1145,103 @@ mod tests {
 		assert!(body.contains(r#"data-author="h-jason""#), "no author face: {}", body);
 		assert!(!body.contains(r#"data-author="jason""#), "the login username reached the page: {}", body);
 		assert!(body.contains("aside-author-initial"), "no drawn initial for an avatarless author: {}", body);
-		// The category checkboxes are drawn from the config, checked.
-		assert!(body.contains(r#"<label class="aside-cat"><input type="checkbox" checked value="Personal">"#),
-			"no category checkbox: {}", body);
+		// The categories are chips of the same make, drawn from the config.
+		assert!(body.contains(r#"data-facet="cat" data-value="Personal""#),
+			"no category chip: {}", body);
+		Ok(())
+	}
+
+	/// Categories and tags are the same instrument twice: one block each, categories first, each with
+	/// its own mode row and its own pair of boxes, every value starting in Selected.
+	#[test]
+	fn test_the_filter_draws_a_block_per_facet_17() -> Outcome<()> {
+		let mut p = post();
+		p.tags = vec![fmt!("web"), fmt!("rust")];
+		let resp = res!(index(&cfg(), &[p], &[], "", "test"));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+
+		// Both blocks, and the coarser vocabulary leads.
+		let cat_at = res!(body.find(r#"<div class="aside-facet" data-facet="cat">"#)
+			.ok_or_else(|| err!("no category block"; Missing)));
+		let tag_at = res!(body.find(r#"<div class="aside-facet" data-facet="tag">"#)
+			.ok_or_else(|| err!("no tag block"; Missing)));
+		assert!(cat_at < tag_at, "the tags came before the categories: {}", body);
+
+		// A mode row each, named apart so the two do not share a selection.
+		assert!(body.contains(r#"name="aside-mode-cat" value="includes" checked"#),
+			"no category mode row: {}", body);
+		assert!(body.contains(r#"name="aside-mode-tag" value="includes" checked"#),
+			"no tag mode row: {}", body);
+		assert!(body.contains(r#"aria-label="Categories match""#), "the mode row is unlabelled: {}", body);
+
+		// A source box each, empty: everything starts selected, since a filter's default is to hide
+		// nothing.
+		assert_eq!(body.matches(r#"data-box="source""#).count(), 2, "not two source boxes: {}", body);
+		assert!(body.contains(r#"data-facet="cat" role="list"></div>"#), "the category source box is not empty: {}", body);
+
+		// The chips themselves: the label and the closer with nothing between them, since a text node
+		// there is a gap the stylesheet never asked for.
+		assert!(body.contains(concat!(
+			r#"<button type="button" class="aside-chip aside-chip-tag" draggable="true" "#,
+			r#"data-facet="tag" data-value="rust" role="listitem">"#,
+			r#"<span class="aside-chip-lbl">rust</span>"#,
+			r#"<span class="aside-chip-x" aria-hidden="true">&#215;</span></button>"#)),
+			"the tag chip is not as the contract draws it: {}", body);
+
+		// The tags are sorted, nobody having chosen an order for them; the categories keep the order the
+		// site wrote them in, which somebody did choose.
+		let rust_at = res!(body.find(r#"data-value="rust""#).ok_or_else(|| err!("no rust chip"; Missing)));
+		let web_at = res!(body.find(r#"data-value="web""#).ok_or_else(|| err!("no web chip"; Missing)));
+		assert!(rust_at < web_at, "the tags are not sorted: {}", body);
+		let pers_at = res!(body.find(r#"data-value="Personal""#)
+			.ok_or_else(|| err!("no Personal chip"; Missing)));
+		let tech_at = res!(body.find(r#"data-value="Technical""#)
+			.ok_or_else(|| err!("no Technical chip"; Missing)));
+		assert!(pers_at < tech_at, "the configured order of the categories was not kept: {}", body);
+		Ok(())
+	}
+
+	/// A category is a free string the site chose, so a space and a capital reach the chip whole -- in
+	/// the value the script matches on and in the words the reader sees.
+	#[test]
+	fn test_a_spaced_category_survives_into_a_chip_18() -> Outcome<()> {
+		let mut c = cfg();
+		c.categories = vec![fmt!("Big Ideas")];
+		let resp = res!(index(&c, &[post()], &[], "", "test"));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(body.contains(r#"data-facet="cat" data-value="Big Ideas""#),
+			"the category was mangled into its chip: {}", body);
+		assert!(body.contains(r#"<span class="aside-chip-lbl">Big Ideas</span>"#),
+			"the chip does not read as written: {}", body);
+		Ok(())
+	}
+
+	/// Each block stands on its own vocabulary. The categories are the site's list, so they are offered
+	/// whether or not a post has reached for one yet; the tags are gathered from the posts, so a site
+	/// whose posts carry none draws no tag block rather than an empty pair of boxes.
+	#[test]
+	fn test_a_facet_block_stands_on_its_own_vocabulary_19() -> Outcome<()> {
+		let mut bare = post();
+		bare.categories = Vec::new();
+		bare.tags = Vec::new();
+		let resp = res!(index(&cfg(), &[bare], &[], "", "test"));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(body.contains(r#"data-facet="cat" data-value="Personal""#),
+			"a configured category was not offered because no post wore it: {}", body);
+		assert!(!body.contains(r#"data-facet="tag""#),
+			"a tag block was drawn for a site with no tags: {}", body);
+
+		// And a site that has configured no categories draws no category block.
+		let mut c = cfg();
+		c.categories = Vec::new();
+		let mut tagged = post();
+		tagged.categories = Vec::new();
+		tagged.tags = vec![fmt!("rust")];
+		let resp = res!(index(&c, &[tagged], &[], "", "test"));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(!body.contains(r#"data-facet="cat""#),
+			"a category block was drawn for a site with no categories: {}", body);
+		assert!(body.contains(r#"data-facet="tag" data-value="rust""#), "no tag block: {}", body);
 		Ok(())
 	}
 
@@ -1811,9 +1914,14 @@ const COMMENT_JS: &str = r#"(function () {
 "#;
 
 /// The index filter. Reads the post list already in the page and shows or hides each item against the
-/// controls above it: a search box, the author faces, the tag mode and its two boxes, the category
-/// checkboxes and the reading-time slider. It renders nothing and fetches nothing -- every post is in
-/// the markup, and this only ever narrows what is seen.
+/// controls above it: a search box, the author faces, a facet block for each of categories and tags,
+/// and the reading-time slider. It renders nothing and fetches nothing -- every post is in the
+/// markup, and this only ever narrows what is seen.
+///
+/// The two facet families run through one rule set rather than two. What differs between a category
+/// and a tag is which attribute an item carries its values in and what those values are joined on;
+/// everything after that -- the modes, the boxes, the dragging, the deep link -- is the same code
+/// twice over, which is the only way the two stay in step as either changes.
 const FILTER_JS: &str = r##"(function () {
 	"use strict";
 	var list = document.getElementById("aside-index-list");
@@ -1821,15 +1929,25 @@ const FILTER_JS: &str = r##"(function () {
 	var items = Array.prototype.slice.call(list.querySelectorAll(".aside-index-item"));
 	var empty = document.getElementById("aside-empty");
 
+	// The two facet families, and what tells them apart: which attribute an item carries its values in,
+	// and what those values are joined on. A tag is [a-z0-9-] so a space separates them safely; a
+	// category is a free string that may hold a space, so it is joined on a comma the config forbids
+	// inside one. Nothing else below knows which family it is working on.
+	var FAMILY = [
+		{ name: "cat", attr: "data-categories", sep: "," },
+		{ name: "tag", attr: "data-tags", sep: " " }
+	];
+
 	// Each item's filterable facts, read once from its data attributes.
 	var rows = items.map(function (li) {
-		var tags = (li.getAttribute("data-tags") || "").split(" ").filter(Boolean);
-		var cats = (li.getAttribute("data-categories") || "").split(",").filter(Boolean);
+		var vals = {};
+		FAMILY.forEach(function (f) {
+			vals[f.name] = (li.getAttribute(f.attr) || "").split(f.sep).filter(Boolean);
+		});
 		return {
 			el:     li,
 			author: li.getAttribute("data-author") || "",
-			tags:   tags,
-			cats:   cats,
+			vals:   vals,
 			mins:   parseInt(li.getAttribute("data-read-mins") || "0", 10),
 			text:   li.getAttribute("data-search") || ""
 		};
@@ -1838,39 +1956,68 @@ const FILTER_JS: &str = r##"(function () {
 	// The filter's state. Every field starts in the value that hides nothing.
 	var search = "";
 	var authors = {};          // pressed authors; empty means every author
-	var mode = "includes";
-	var selected = {};         // tags in the selected box
-	var cats = {};             // checked categories
-	var offered = {};          // every category the filter offers, checked or not
+	var facets = [];           // one entry per family the page drew
 	var tmin = -Infinity, tmax = Infinity;
 
-	function keys(o) { var k = []; for (var x in o) { if (o[x]) { k.push(x); } } return k; }
 	function any(o) { for (var x in o) { if (o[x]) { return true; } } return false; }
+
+	// The blocks the page drew, one per family it had a vocabulary for. A site with no categories has
+	// no category block, and this simply finds nothing.
+	FAMILY.forEach(function (f) {
+		var block = document.querySelector('.aside-facet[data-facet="' + f.name + '"]');
+		if (!block) { return; }
+		var st = {
+			name:    f.name,
+			block:   block,
+			sel:     block.querySelector('.aside-chips[data-box="selected"]'),
+			src:     block.querySelector('.aside-chips[data-box="source"]'),
+			mode:    "includes",
+			chosen:  {},          // values in the selected box
+			offered: {}           // every value the block holds, in either box
+		};
+		block.querySelectorAll(".aside-chip").forEach(function (c) {
+			st.offered[c.getAttribute("data-value")] = true;
+		});
+		facets.push(st);
+	});
+
+	// Which values of a family sit in its selected box, re-read after every move.
+	function refresh(st) {
+		st.chosen = {};
+		if (!st.sel) { return; }
+		st.sel.querySelectorAll(".aside-chip").forEach(function (c) {
+			st.chosen[c.getAttribute("data-value")] = true;
+		});
+	}
+	facets.forEach(refresh);
+
+	// Whether one item passes one family. Three rules hold whichever family it is: a post with no
+	// values in it is not participating and always passes; an empty selected box imposes nothing; and
+	// a value the block never offered -- a category the site has since dropped, still worn by an old
+	// post -- cannot hide anything, which is why the comparison is against the offered set alone.
+	function passesFacet(r, st) {
+		var mine = [], v = r.vals[st.name] || [];
+		for (var i = 0; i < v.length; i++) {
+			if (st.offered[v[i]]) { mine.push(v[i]); }
+		}
+		if (!mine.length) { return true; }
+		if (!any(st.chosen)) { return true; }
+		var inter = 0, outside = 0;
+		for (var j = 0; j < mine.length; j++) {
+			if (st.chosen[mine[j]]) { inter++; } else { outside++; }
+		}
+		if (st.mode === "includes" && inter === 0) { return false; }
+		if (st.mode === "only" && outside > 0) { return false; }
+		if (st.mode === "excludes" && inter > 0) { return false; }
+		return true;
+	}
 
 	// Whether one item passes every control at once.
 	function passes(r) {
 		if (search && r.text.indexOf(search) === -1) { return false; }
 		if (any(authors) && !authors[r.author]) { return false; }
-		// Categories: the filter constrains only against the categories it offers. A post is hidden only
-		// when at least one of its categories is offered and every offered one it has is unchecked. A
-		// post with no category, or one whose categories the filter does not offer at all -- an operator
-		// dropped the category from the config after the post used it -- is left alone, never vanished.
-		if (r.cats.length) {
-			var constrained = false, ok = false;
-			for (var i = 0; i < r.cats.length; i++) {
-				if (offered[r.cats[i]]) { constrained = true; if (cats[r.cats[i]]) { ok = true; break; } }
-			}
-			if (constrained && !ok) { return false; }
-		}
-		// Tags: an untagged post always passes; an empty selected box imposes nothing.
-		if (r.tags.length && any(selected)) {
-			var inter = 0, outside = 0;
-			for (var j = 0; j < r.tags.length; j++) {
-				if (selected[r.tags[j]]) { inter++; } else { outside++; }
-			}
-			if (mode === "includes" && inter === 0) { return false; }
-			if (mode === "only" && outside > 0) { return false; }
-			if (mode === "excludes" && inter > 0) { return false; }
+		for (var i = 0; i < facets.length; i++) {
+			if (!passesFacet(r, facets[i])) { return false; }
 		}
 		if (r.mins < tmin || r.mins > tmax) { return false; }
 		return true;
@@ -1881,6 +2028,10 @@ const FILTER_JS: &str = r##"(function () {
 		for (var i = 0; i < rows.length; i++) {
 			var ok = passes(rows[i]);
 			rows[i].el.hidden = !ok;
+			// Which item is at the top changes as the filter narrows, and the one at the top is often
+			// drawn differently; the class says which it is, since :first-child cannot see past a hidden
+			// sibling.
+			rows[i].el.classList.toggle("aside-first", ok && shown === 0);
 			if (ok) { shown++; }
 		}
 		if (empty) { empty.hidden = shown !== 0; }
@@ -1908,123 +2059,81 @@ const FILTER_JS: &str = r##"(function () {
 		});
 	}
 
-	// The tag mode.
-	var modeRow = document.getElementById("aside-filter-mode");
-	if (modeRow) {
-		modeRow.addEventListener("change", function (e) {
-			if (e.target.name === "aside-mode") { mode = e.target.value; apply(); }
+	// Each family's mode row, and its pair of boxes. A chip lives in one box; clicking it, or dragging
+	// it, sends it to the other, and which box it is in is the whole of what it means.
+	facets.forEach(function (st) {
+		st.block.addEventListener("change", function (e) {
+			if (e.target.name === "aside-mode-" + st.name) { st.mode = e.target.value; apply(); }
 		});
-	}
 
-	// The two chip boxes. A chip lives in one box; clicking it, or dragging it, sends it to the other.
-	var selBox = document.getElementById("aside-tags-selected");
-	var srcBox = document.getElementById("aside-tags-source");
-
-	function refreshSelected() {
-		selected = {};
-		if (selBox) {
-			selBox.querySelectorAll(".aside-chip").forEach(function (c) {
-				selected[c.getAttribute("data-tag")] = true;
+		function wireBox(boxEl, other) {
+			if (!boxEl || !other) { return; }
+			boxEl.addEventListener("click", function (e) {
+				var chip = e.target.closest(".aside-chip");
+				if (chip && chip.parentNode === boxEl) {
+					other.appendChild(chip);
+					refresh(st);
+					apply();
+				}
+			});
+			boxEl.addEventListener("dragover", function (e) {
+				e.preventDefault();
+				boxEl.classList.add("aside-drop");
+			});
+			boxEl.addEventListener("dragleave", function () { boxEl.classList.remove("aside-drop"); });
+			boxEl.addEventListener("drop", function (e) {
+				e.preventDefault();
+				boxEl.classList.remove("aside-drop");
+				var chip = chipOf(e.dataTransfer.getData("text/plain"));
+				// A chip may only land in a box of its own family: a tag dragged onto the categories is
+				// a gesture with no meaning, and honouring it would put a chip where nothing can ever
+				// match it.
+				if (!chip || chip.getAttribute("data-facet") !== st.name) { return; }
+				if (chip.parentNode !== boxEl) {
+					boxEl.appendChild(chip);
+					refresh(st);
+					apply();
+				}
 			});
 		}
+		wireBox(st.sel, st.src);
+		wireBox(st.src, st.sel);
+	});
+
+	// A dragged chip is carried as its family and its value, since a value alone does not say which
+	// box may accept it -- and a category and a tag may read the same.
+	function esc(v) { return window.CSS && CSS.escape ? CSS.escape(v) : v; }
+	function chipOf(payload) {
+		var at = payload.indexOf(":");
+		if (at < 0) { return null; }
+		return document.querySelector('.aside-chip[data-facet="' + esc(payload.slice(0, at)) +
+			'"][data-value="' + esc(payload.slice(at + 1)) + '"]');
 	}
-	refreshSelected();
-
-	// A chip carries its closer only in the selected box; moving it re-dresses it for its new home.
-	function dress(chip, inSelected) {
-		var x = chip.querySelector(".aside-chip-x");
-		if (inSelected && !x) {
-			chip.insertAdjacentHTML("beforeend",
-				' <span class="aside-chip-x" aria-hidden="true">×</span>');
-		} else if (!inSelected && x) {
-			x.parentNode.removeChild(x);
-		}
-	}
-
-	function move(chip, toSource) {
-		if (!selBox || !srcBox) { return; }
-		var dest = toSource ? srcBox : selBox;
-		dest.appendChild(chip);
-		dress(chip, !toSource);
-		refreshSelected();
-		apply();
-	}
-
-	function wireBox(boxEl, toSource) {
-		if (!boxEl) { return; }
-		boxEl.addEventListener("click", function (e) {
-			var chip = e.target.closest(".aside-chip");
-			if (chip) { move(chip, toSource); }
-		});
-		// Drop target: a chip dragged here lands here, whichever box it came from.
-		boxEl.addEventListener("dragover", function (e) { e.preventDefault(); boxEl.classList.add("aside-drop"); });
-		boxEl.addEventListener("dragleave", function () { boxEl.classList.remove("aside-drop"); });
-		boxEl.addEventListener("drop", function (e) {
-			e.preventDefault();
-			boxEl.classList.remove("aside-drop");
-			var tag = e.dataTransfer.getData("text/plain");
-			var chip = document.querySelector('.aside-chip[data-tag="' + (window.CSS && CSS.escape ? CSS.escape(tag) : tag) + '"]');
-			if (chip && chip.parentNode !== boxEl) {
-				boxEl.appendChild(chip);
-				dress(chip, boxEl === selBox);
-				refreshSelected();
-				apply();
-			}
-		});
-	}
-	wireBox(selBox, true);
-	wireBox(srcBox, false);
-
-	// A tag link lands here as `?tag=x`. Honour it by leaving only that tag in the selected box and
-	// sending every other tag to the source, so the reader arrives on that tag as the tag chips say.
-	(function () {
-		var m = /[?&]tag=([a-z0-9-]+)/.exec(location.search);
-		if (!m || !selBox || !srcBox) { return; }
-		var want = m[1];
-		Array.prototype.slice.call(selBox.querySelectorAll(".aside-chip")).forEach(function (chip) {
-			if (chip.getAttribute("data-tag") !== want) { srcBox.appendChild(chip); dress(chip, false); }
-		});
-		refreshSelected();
-	})();
-
-	// A category chip lands here as `?cat=x`. Honour it by leaving only that category ticked, so
-	// the reader arrives on the section the chip named -- the same promise a tag link makes.
-	// Decoded because a category may hold a space or a capital, unlike a tag.
-	(function () {
-		var m = /[?&]cat=([^&]+)/.exec(location.search);
-		var row = document.getElementById("aside-filter-cats");
-		if (!m || !row) { return; }
-		var want;
-		try { want = decodeURIComponent(m[1].replace(/\+/g, " ")); } catch (e) { return; }
-		var boxes = row.querySelectorAll('input[type="checkbox"]');
-		// An unoffered category ticks nothing off: a stale link narrows to nothing rather than
-		// hiding the whole site, which is the same rule the category filter keeps elsewhere.
-		var known = false;
-		boxes.forEach(function (cb) { if (cb.value === want) { known = true; } });
-		if (!known) { return; }
-		boxes.forEach(function (cb) { cb.checked = (cb.value === want); });
-	})();
-
-	// Dragging a chip carries its tag; both boxes read it on drop.
 	document.addEventListener("dragstart", function (e) {
 		var chip = e.target.closest && e.target.closest(".aside-chip");
 		if (chip && e.dataTransfer) {
-			e.dataTransfer.setData("text/plain", chip.getAttribute("data-tag"));
+			e.dataTransfer.setData("text/plain",
+				chip.getAttribute("data-facet") + ":" + chip.getAttribute("data-value"));
 			e.dataTransfer.effectAllowed = "move";
 		}
 	});
 
-	// The category checkboxes.
-	var catRow = document.getElementById("aside-filter-cats");
-	if (catRow) {
-		catRow.querySelectorAll('input[type="checkbox"]').forEach(function (cb) {
-			cats[cb.value] = cb.checked;
-			offered[cb.value] = true;
+	// A chip under a post links back here as `?cat=x` or `?tag=x`. Honour it by leaving only that value
+	// in its family's selected box and sending the rest across, so the reader arrives on the thing the
+	// chip named. Decoded, because a category may hold a space or a capital, unlike a tag; a value the
+	// block does not offer changes nothing, so a stale link shows the whole list rather than none of
+	// it. The two may arrive together and are read one family at a time.
+	facets.forEach(function (st) {
+		var m = new RegExp("[?&]" + st.name + "=([^&]*)").exec(location.search);
+		if (!m || !st.sel || !st.src) { return; }
+		var want;
+		try { want = decodeURIComponent(m[1].replace(/\+/g, " ")); } catch (e) { return; }
+		if (!st.offered[want]) { return; }
+		Array.prototype.slice.call(st.sel.querySelectorAll(".aside-chip")).forEach(function (chip) {
+			if (chip.getAttribute("data-value") !== want) { st.src.appendChild(chip); }
 		});
-		catRow.addEventListener("change", function (e) {
-			if (e.target.type === "checkbox") { cats[e.target.value] = e.target.checked; apply(); }
-		});
-	}
+		refresh(st);
+	});
 
 	// The reading-time slider: two thumbs that may not cross. The read-out follows them.
 	var timeWrap = document.getElementById("aside-filter-time");
@@ -2148,10 +2257,12 @@ pub fn with_edit_cookie(resp: HttpMessage, id: &str, token: &str) -> HttpMessage
 	resp.with_field(HeaderName::SetCookie, HeaderFieldValue::Generic(value))
 }
 
-/// Percent-encodes what a redirect carries.
+/// Percent-encodes a value going into a query string.
 ///
 /// Only what has to be: a query value's own delimiters, and the characters a browser would otherwise
-/// treat as structure. Everything else is left legible, since this lands in a URL a reader may see.
+/// treat as structure. Everything else is left legible, since this lands in a URL a reader may see --
+/// which is also why a space becomes `+` rather than `%20`. Used by a comment redirect and by a
+/// category chip's link, a category being the one facet that may hold a space and a capital.
 fn percent_encode(s: &str) -> String {
 	let mut out = String::with_capacity(s.len());
 	for b in s.bytes() {
@@ -2165,25 +2276,3 @@ fn percent_encode(s: &str) -> String {
 	out
 }
 
-/// Reverses [`percent_encode`].
-fn percent_decode(s: &str) -> String {
-	let bytes = s.as_bytes();
-	let mut out = Vec::with_capacity(bytes.len());
-	let mut i = 0;
-	while i < bytes.len() {
-		match bytes[i] {
-			b'+' => { out.push(b' '); i += 1; }
-			b'%' if i + 2 < bytes.len() => {
-				let hi = (bytes[i + 1] as char).to_digit(16);
-				let lo = (bytes[i + 2] as char).to_digit(16);
-				match (hi, lo) {
-					(Some(h), Some(l))	=> { out.push((h * 16 + l) as u8); i += 3; }
-					// Not a pair of hex digits, so not an escape: the byte stands as itself.
-					_			=> { out.push(bytes[i]); i += 1; }
-				}
-			}
-			b => { out.push(b); i += 1; }
-		}
-	}
-	String::from_utf8_lossy(&out).to_string()
-}

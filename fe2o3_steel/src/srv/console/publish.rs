@@ -1467,14 +1467,18 @@ fn handle_edit<
 	};
 
 	// Who the post is written as: its own author where it has one, otherwise whoever is composing --
-	// a new post belongs to its writer until said otherwise. Resolved to a display name for the note,
-	// falling back to the username where the member set no profile.
+	// a new post belongs to its writer until said otherwise.
 	let author_user = if r.author.is_empty() { admin.username.clone() } else { r.author.clone() };
+	// Resolved to a display name, falling back to `Anonymous` and NEVER to the username. A site
+	// login's username is the SHA-256 of its passphrase, so drawing one on a page hands whoever
+	// reads that page an offline verifier for a guess -- and on a blog more than one person writes,
+	// the page an admin opens to edit somebody else's post is read by someone who is not its owner.
+	// The same reasoning removed usernames from the reader's pages; the console is not exempt.
 	let author_name = match db {
 		Some(db)	=> store::get_profile(db, &author_user)
-			.map(|p| if p.name.is_empty() { author_user.clone() } else { p.name })
-			.unwrap_or_else(|_| author_user.clone()),
-		None		=> author_user.clone(),
+			.map(|p| if p.name.is_empty() { fmt!("Anonymous") } else { p.name })
+			.unwrap_or_else(|_| fmt!("Anonymous")),
+		None		=> fmt!("Anonymous"),
 	};
 
 	// The title row: what this is, and the way out. The way out is the close, not a Cancel button --
@@ -3175,28 +3179,61 @@ fn author_field(username: &str, name: &str) -> String {
 	)
 }
 
-/// The category checkboxes: the site's taxonomy, one box each, ticked where the post already sits.
+/// The composer's category field: the same two-box chip widget as [`tags_field`], with this post's
+/// categories in the Selected box and the rest of the site's taxonomy in the Available box, a chip
+/// moved between them by a click or a drag.
 ///
-/// The boxes are the control; a hidden `categories` input, comma-joined, is what the form submits and
+/// One deliberate difference from the tag field: there is no search-or-create line and no delete
+/// affordance. The category vocabulary is fixed by config, so a category can be neither minted nor
+/// destroyed from here; only the post's membership of one changes.
+///
+/// The chips are the control; a hidden `categories` input, comma-joined, is what the form submits and
 /// what [`CATS_SCRIPT`] keeps in step. So the field saves what it shows with the script, and re-saves
-/// the post's existing categories without one -- the hidden field carries them whether or not a box is
-/// ever touched. A site that defines no categories draws nothing.
+/// the post's existing categories without one -- the hidden field carries them whether or not a chip is
+/// ever moved. A category may hold a space and capitals, so it is attribute-escaped and never folded.
+/// A site that defines no categories draws nothing.
 fn cats_field(categories: &[String], on: &[String]) -> String {
 	if categories.is_empty() {
 		return String::new();
 	}
 	let mut s = String::from("<div class=\"mc-cats-field\">\n<label>Categories</label>\n");
+	// The submit source: comma-joined, server-rendered with the post's categories so it saves them with
+	// no script, and kept in step by the script where one runs.
 	s.push_str("<input type=\"hidden\" name=\"categories\" id=\"mc-cats\" value=\"");
 	s.push_str(&html_escape(&on.join(",")));
-	s.push_str("\">\n<div class=\"mc-cats\" id=\"mc-cats-boxes\">\n");
+	s.push_str("\">\n");
+
+	s.push_str("<div class=\"mc-cats-boxes\">\n");
+	// Selected: the categories this post sits in, a closer on each.
+	s.push_str("<div class=\"mc-catbox\">\n<span class=\"mc-catbox-lbl\">On this post</span>\n\
+		<div class=\"mc-chips mc-chips-selected\" id=\"mc-cats-selected\" data-box=\"selected\">\n");
 	for c in categories {
-		let checked = if on.iter().any(|x| x == c) { " checked" } else { "" };
+		if !on.iter().any(|x| x == c) {
+			continue;
+		}
+		// No whitespace between the label and the closer: the chip is an inline flex box and a stray
+		// text node becomes a stray gap.
 		s.push_str(&fmt!(
-			"<label class=\"mc-cat\"><input type=\"checkbox\" value=\"{cat}\"{checked}>{cat}</label>\n",
-			cat = html_escape(c), checked = checked,
-		));
+			"<button type=\"button\" class=\"mc-chip mc-chip-cat\" draggable=\"true\" \
+			data-cat=\"{cat}\">{cat}<span class=\"mc-chip-x\" aria-hidden=\"true\">\u{00d7}</span>\
+			</button>\n",
+			cat = html_escape(c)));
 	}
 	s.push_str("</div>\n</div>\n");
+	// Available: the rest of the taxonomy. No search line, because the set is fixed and short.
+	s.push_str("<div class=\"mc-catbox\">\n<span class=\"mc-catbox-lbl\">Available</span>\n\
+		<div class=\"mc-chips mc-chips-source\" id=\"mc-cats-source\" data-box=\"source\">\n");
+	for c in categories {
+		if on.iter().any(|x| x == c) {
+			continue;
+		}
+		s.push_str(&fmt!(
+			"<button type=\"button\" class=\"mc-chip mc-chip-cat\" draggable=\"true\" \
+			data-cat=\"{cat}\">{cat}</button>\n",
+			cat = html_escape(c)));
+	}
+	s.push_str("</div>\n</div>\n</div>\n</div>\n");
+
 	s.push_str(CATS_SCRIPT);
 	s
 }
@@ -3231,7 +3268,10 @@ fn tags_field(tags: &[String], palette: &[(String, usize, usize)], curator: bool
 		<div class=\"mc-chips mc-chips-selected\" id=\"mc-tags-selected\" data-box=\"selected\">\n");
 	for t in tags {
 		s.push_str(&fmt!(
-			"<button type=\"button\" class=\"mc-chip\" draggable=\"true\" data-tag=\"{tag}\">{tag} \
+			// No space before the closer: the chip is an inline-flex box whose `gap` already
+			// separates the two, and a stray text node adds a second, uneven one. The category
+			// chips next to these are drawn the same way, so the two widgets match.
+			"<button type=\"button\" class=\"mc-chip\" draggable=\"true\" data-tag=\"{tag}\">{tag}\
 			<span class=\"mc-chip-x\" aria-hidden=\"true\">\u{00d7}</span></button>\n",
 			tag = html_escape(t)));
 	}
@@ -3258,19 +3298,57 @@ fn tags_field(tags: &[String], palette: &[(String, usize, usize)], curator: bool
 	s
 }
 
-/// Keeps the hidden `categories` input in step with the checkboxes, so the form submits the ticked
-/// set. Does nothing where it does not run: the hidden field already carries the post's categories.
+/// Moves a category chip between the two boxes on a click or a drag, and keeps the hidden `categories`
+/// input in step so the form submits the Selected set. Does nothing where it does not run: the hidden
+/// field already carries the post's categories.
+///
+/// Every selector here is qualified by `[data-cat]` and every lookup is scoped to this field's own two
+/// boxes, so the category chips and the tag chips -- which share the `mc-chip` class and so the one
+/// look -- can never be picked up by each other's script.
 const CATS_SCRIPT: &str = "<script>\n\
 (function(){\n\
   var hidden=document.getElementById('mc-cats');\n\
-  var boxes=document.getElementById('mc-cats-boxes');\n\
-  if(!hidden||!boxes){return;}\n\
+  var sel=document.getElementById('mc-cats-selected');\n\
+  var src=document.getElementById('mc-cats-source');\n\
+  if(!hidden||!sel||!src){return;}\n\
+  function esc(v){return window.CSS&&CSS.escape?CSS.escape(v):v;}\n\
   function sync(){\n\
     var on=[];\n\
-    boxes.querySelectorAll('input[type=checkbox]').forEach(function(c){if(c.checked){on.push(c.value);}});\n\
+    sel.querySelectorAll('.mc-chip[data-cat]').forEach(function(c){on.push(c.getAttribute('data-cat'));});\n\
     hidden.value=on.join(',');\n\
   }\n\
-  boxes.addEventListener('change',sync);sync();\n\
+  function chip(cat,inSel){\n\
+    var b=document.createElement('button');b.type='button';b.className='mc-chip mc-chip-cat';\n\
+    b.setAttribute('draggable','true');b.setAttribute('data-cat',cat);b.textContent=cat;\n\
+    if(inSel){var x=document.createElement('span');x.className='mc-chip-x';\n\
+      x.setAttribute('aria-hidden','true');x.textContent='\\u00d7';b.appendChild(x);}\n\
+    return b;\n\
+  }\n\
+  function move(b,toSel){\n\
+    var cat=b.getAttribute('data-cat');b.parentNode.removeChild(b);\n\
+    (toSel?sel:src).appendChild(chip(cat,toSel));sync();\n\
+  }\n\
+  sel.addEventListener('click',function(e){\n\
+    var b=e.target.closest('.mc-chip[data-cat]');if(b){move(b,false);}\n\
+  });\n\
+  src.addEventListener('click',function(e){\n\
+    var b=e.target.closest('.mc-chip[data-cat]');if(b){move(b,true);}\n\
+  });\n\
+  [sel,src].forEach(function(box){\n\
+    box.addEventListener('dragover',function(e){e.preventDefault();box.classList.add('mc-drop');});\n\
+    box.addEventListener('dragleave',function(){box.classList.remove('mc-drop');});\n\
+    box.addEventListener('drop',function(e){e.preventDefault();box.classList.remove('mc-drop');\n\
+      var cat=e.dataTransfer.getData('text/plain');if(!cat)return;\n\
+      var q='.mc-chip[data-cat=\"'+esc(cat)+'\"]';\n\
+      var b=sel.querySelector(q)||src.querySelector(q);\n\
+      if(b&&b.parentNode!==box){move(b,box===sel);}\n\
+    });\n\
+  });\n\
+  document.addEventListener('dragstart',function(e){\n\
+    var b=e.target.closest&&e.target.closest('.mc-chip[data-cat]');\n\
+    if(b&&e.dataTransfer){e.dataTransfer.setData('text/plain',b.getAttribute('data-cat'));}\n\
+  });\n\
+  sync();\n\
 })();\n\
 </script>\n";
 
@@ -3337,12 +3415,13 @@ const TAG_SCRIPT: &str = "<script>\n\
     box.addEventListener('dragleave',function(){box.classList.remove('mc-drop');});\n\
     box.addEventListener('drop',function(e){e.preventDefault();box.classList.remove('mc-drop');\n\
       var tag=e.dataTransfer.getData('text/plain');if(!tag)return;\n\
-      var b=document.querySelector('.mc-chip[data-tag=\"'+(window.CSS&&CSS.escape?CSS.escape(tag):tag)+'\"]');\n\
+      var q='.mc-chip[data-tag=\"'+(window.CSS&&CSS.escape?CSS.escape(tag):tag)+'\"]';\n\
+      var b=sel.querySelector(q)||src.querySelector(q);\n\
       if(b&&b.parentNode!==box){move(b,box===sel);}\n\
     });\n\
   });\n\
   document.addEventListener('dragstart',function(e){\n\
-    var b=e.target.closest&&e.target.closest('.mc-chip');\n\
+    var b=e.target.closest&&e.target.closest('.mc-chip[data-tag]');\n\
     if(b&&e.dataTransfer){e.dataTransfer.setData('text/plain',b.getAttribute('data-tag'));}\n\
   });\n\
   if(search){\n\
@@ -3517,19 +3596,69 @@ mod tests {
 		Ok(())
 	}
 
-	/// The category field ticks the boxes the post sits in and leaves the rest clear, and carries the
-	/// ticked set in the hidden input the form submits.
+	/// The category field puts the post's categories in the Selected box and the rest of the taxonomy in
+	/// the Available box, and carries the selected set in the hidden input the form submits.
 	#[test]
-	fn test_the_cats_field_ticks_the_right_boxes_08() -> Outcome<()> {
+	fn test_the_cats_field_splits_the_two_boxes_08() -> Outcome<()> {
 		let cats = vec![fmt!("Personal"), fmt!("Technical"), fmt!("Ideas")];
 		let s = cats_field(&cats, &[fmt!("Technical")]);
+		// The hidden input is the source of truth, comma-joined, no spaces.
 		assert!(s.contains(r#"<input type="hidden" name="categories" id="mc-cats" value="Technical">"#),
 			"got: {}", s);
-		assert!(s.contains(r#"<input type="checkbox" value="Technical" checked>Technical"#), "got: {}", s);
-		assert!(s.contains(r#"<input type="checkbox" value="Personal">Personal"#),
-			"an unticked box was ticked: {}", s);
+		// The post's category sits in the Selected box, with a closer; the rest sit in Available.
+		let cut = s.find(r#"id="mc-cats-source""#).unwrap_or(0);
+		assert!(cut > 0, "no source box: {}", s);
+		let (sel, src) = s.split_at(cut);
+		assert!(sel.contains(r#"id="mc-cats-selected""#), "no selected box: {}", s);
+		assert!(sel.contains(r#"data-cat="Technical">Technical<span class="mc-chip-x""#),
+			"the post's category is not a selected chip: {}", s);
+		assert!(!sel.contains(r#"data-cat="Personal""#), "an unselected category was selected: {}", s);
+		assert!(src.contains(r#"data-cat="Personal">Personal</button>"#),
+			"the rest of the taxonomy is not offered: {}", s);
+		assert!(src.contains(r#"data-cat="Ideas">Ideas</button>"#), "got: {}", s);
+		// A category is offered once, never in both boxes at once.
+		assert_eq!(s.matches(r#"data-cat="Technical""#).count(), 1,
+			"a selected category was also offered: {}", s);
+		// The vocabulary is fixed by config, so there is no create line and no delete affordance.
+		assert!(!s.contains("mc-cats-search"), "the category field grew a create line: {}", s);
+		assert!(!s.contains("mc-chip-del"), "the category field grew a delete affordance: {}", s);
 		// A site with no taxonomy draws nothing.
 		assert!(cats_field(&[], &[]).is_empty(), "an empty taxonomy drew a field");
+		Ok(())
+	}
+
+	/// A category holding a space and capitals survives into the chip and the hidden input unfolded, and
+	/// two of them comma-join without a space.
+	#[test]
+	fn test_a_category_with_a_space_survives_09() -> Outcome<()> {
+		let cats = vec![fmt!("Long Reads"), fmt!("Field Notes"), fmt!("Ideas")];
+		let on = vec![fmt!("Long Reads"), fmt!("Ideas")];
+		let s = cats_field(&cats, &on);
+		assert!(s.contains(r#"<input type="hidden" name="categories" id="mc-cats" value="Long Reads,Ideas">"#),
+			"got: {}", s);
+		assert!(s.contains(r#"data-cat="Long Reads">Long Reads<span"#),
+			"the space or the case was lost: {}", s);
+		let cut = s.find(r#"id="mc-cats-source""#).unwrap_or(0);
+		assert!(cut > 0, "no source box: {}", s);
+		let (sel, src) = s.split_at(cut);
+		assert!(sel.contains(r#"data-cat="Ideas""#), "got: {}", s);
+		assert!(src.contains(r#"data-cat="Field Notes">Field Notes</button>"#), "got: {}", s);
+		Ok(())
+	}
+
+	/// The username never reaches the page as a name. It is the SHA-256 of a passphrase, so a page
+	/// carrying one is an offline verifier for whoever reads that page -- which on a multi-author
+	/// blog is not only its owner.
+	#[test]
+	fn test_the_author_note_never_says_the_username_20() -> Outcome<()> {
+		let user = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+		let s = author_field(user, "Anonymous");
+		assert!(s.contains(r#"<span class="mc-author-name">Anonymous</span>"#),
+			"the note does not name the author: {}", s);
+		// The hidden input still carries it -- the post is stored against it -- but nothing drawn does.
+		let visible = s.split("</span>").filter(|part| !part.contains("type=\"hidden\""))
+			.collect::<Vec<_>>().join("");
+		assert!(!visible.contains(user), "the username is drawn on the page: {}", s);
 		Ok(())
 	}
 

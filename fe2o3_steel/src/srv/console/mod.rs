@@ -1200,7 +1200,16 @@ fn not_yet_admin(theme: &Theme, username: &str, claimable: bool, csrf: &str) -> 
 /// legible page; a site that defines the Elearnity-style tokens gets its own palette. Kept small and
 /// inline: it is chrome for a handful of pages, not a stylesheet worth a request.
 const CONSOLE_CSS: &str = "\
-.mc-body{margin:0;background:var(--bg-primary,var(--body-bg,#14181d));color:var(--text-primary,var(--body-color,#e6e6e6));\
+/* The console's surface. \
+\
+   `--bg-primary` and `--text-primary` are a PAIR and are read as one: a site that wants the \
+   console in its own colours sets both, and a site that sets neither gets the two literals below, \
+   which are known to contrast. What this must never do is take the background from one source and \
+   the foreground from another -- an earlier version fell through to `--body-bg` and `--body-color` \
+   independently, and on a site where both name the same colour (because its body text never sits \
+   on its body background) the whole console rendered in its own background colour and every word \
+   of it vanished. A contrast bug cannot be seen in a stylesheet; it is only ever seen on a page. */\
+.mc-body{margin:0;background:var(--bg-primary,#14181d);color:var(--text-primary,#e6e6e6);\
 font-family:var(--font,var(--font-ui,var(--font-body,system-ui,sans-serif)));line-height:1.5;}\
 .mc-head{border-bottom:1px solid var(--border,var(--aside-rule-color,#333c47));}\
 .mc-head-in{max-width:80rem;margin:0 auto;padding:0.9rem 1.2rem;display:flex;\
@@ -1362,43 +1371,42 @@ padding:0.1rem 0.4rem;border-radius:4px;border:1px solid var(--border,#333c47);o
 .mc-author{display:flex;align-items:flex-end;gap:0.4rem;font-size:0.85rem;\
 color:var(--text-secondary,var(--aside-date-color,#8a97a6));}\
 .mc-author-lbl{text-transform:uppercase;letter-spacing:0.05em;font-size:0.72rem;}\
-.mc-author-name{color:var(--text-primary,var(--body-color,#e6e6e6));font-weight:600;}\
-.mc-cats-field{margin:0.2rem 0 0.9rem;}\
-.mc-cats{display:flex;flex-wrap:wrap;gap:0.4rem 1rem;margin:0.3rem 0 0;}\
-/* Named through `.mc-form` to outrank `.mc-form label`, which shouts every field's NAME in \
-uppercase and lays it out as a block. Right for the name of a field, wrong for the name of a \
-category -- and the block also stops the label being a flex container, which silently drops the \
-`gap` and jams the word against its own checkbox. Specificity, not order: both rules are in this \
-one sheet, so moving them past each other would not settle it. */\
-.mc-form label.mc-cat,.mc-cat{display:inline-flex;align-items:center;gap:0.4rem;font-size:0.85rem;\
-text-transform:none;letter-spacing:0;font-weight:400;margin:0;cursor:pointer;\
-color:var(--text-secondary,var(--aside-date-color,#8a97a6));}\
+.mc-author-name{color:var(--text-primary,#e6e6e6);font-weight:600;}\
 /* The tick in the site's own colour rather than the browser's default blue-or-red, which lands \
 in whatever palette the site set and belongs to none of them. */\
-.mc-cat input[type=checkbox],.mc-form input[type=checkbox]{accent-color:var(--accent,\
+.mc-form input[type=checkbox]{accent-color:var(--accent,\
 var(--col-teal,#4c8bf5));width:0.95rem;height:0.95rem;margin:0;flex:none;}\
-.mc-tags-field{margin:0.2rem 0 0.9rem;}\
-.mc-tags-boxes{display:grid;grid-template-columns:1fr 1fr;gap:0.8rem;margin:0.3rem 0 0;}\
-.mc-tagbox{min-width:0;}\
-.mc-tagbox-lbl{display:block;font-size:0.72rem;text-transform:uppercase;letter-spacing:0.06em;\
-margin:0 0 0.35rem;color:var(--text-secondary,var(--aside-date-color,#8a97a6));}\
+/* Categories and tags are the one widget twice, so they take the one set of rules. Nothing inside \
+either is a `<label>` -- the box names are spans and the chips are buttons -- which is deliberate: \
+`.mc-form label` has specificity (0,1,1) and would beat any bare class here, forcing `display:block` \
+(killing the flex `gap`) and shouting the value in uppercase. A category is not a field name. Where \
+a rule below must reach a `<label>`, it is named through `.mc-form` to outrank it; source order \
+would not settle it, since both rules sit in this one sheet. */\
+.mc-cats-field,.mc-tags-field{margin:0.2rem 0 0.9rem;}\
+.mc-cats-boxes,.mc-tags-boxes{display:grid;grid-template-columns:1fr 1fr;gap:0.8rem;margin:0.3rem 0 0;}\
+.mc-catbox,.mc-tagbox{min-width:0;}\
+.mc-catbox-lbl,.mc-tagbox-lbl{display:block;font-size:0.72rem;text-transform:uppercase;\
+letter-spacing:0.06em;margin:0 0 0.35rem;\
+color:var(--text-secondary,var(--aside-date-color,#8a97a6));}\
 .mc-tags-search{width:100%;box-sizing:border-box;font:inherit;font-size:0.85rem;\
 padding:0.35rem 0.55rem;margin:0 0 0.4rem;border-radius:6px;\
 border:1px solid var(--border,var(--aside-rule-color,#333c47));background:transparent;\
-color:var(--text-primary,var(--body-color,#e6e6e6));}\
+color:var(--text-primary,#e6e6e6);}\
 .mc-chips{display:flex;flex-wrap:wrap;gap:0.4rem;align-content:flex-start;min-height:2.6rem;\
 padding:0.45rem;border-radius:6px;border:1px dashed var(--border,var(--aside-rule-color,#333c47));}\
 .mc-chips.mc-drop{border-style:solid;border-color:var(--accent,var(--aside-link-color,#7fb0e0));}\
 .mc-chip{display:inline-flex;align-items:center;gap:0.25rem;font:inherit;font-size:0.82rem;\
 cursor:pointer;padding:0.14rem 0.55rem;border-radius:999px;user-select:none;\
 border:1px solid var(--border,var(--aside-rule-color,#333c47));background:transparent;\
-color:var(--text-primary,var(--body-color,#e6e6e6));}\
+color:var(--text-primary,#e6e6e6);}\
 .mc-chip:hover{border-color:var(--accent,var(--aside-link-color,#7fb0e0));}\
 .mc-chips-selected .mc-chip{background:var(--accent,var(--aside-link-color,#3b6ea5));\
 border-color:var(--accent,var(--aside-link-color,#3b6ea5));color:#fff;}\
 .mc-chip-x,.mc-chip-del{font-size:0.95rem;line-height:1;opacity:0.75;}\
 .mc-chip-del{color:#e57373;}\
 .mc-chip:hover .mc-chip-x,.mc-chip:hover .mc-chip-del{opacity:1;}\
+/* A category may hold a space, and a two-word category is one chip, not two lines of one. */\
+.mc-chip-cat{white-space:nowrap;}\
 .mc-avatar-row{margin:0 0 1rem;display:flex;align-items:center;gap:1rem;flex-wrap:wrap;}\
 .mc-avatar-pick{display:flex;flex-direction:column;align-items:flex-start;gap:0.4rem;}\
 .mc-avatar-pick .mc-btn-quiet{cursor:pointer;}\
@@ -1409,7 +1417,7 @@ border-color:var(--accent,var(--aside-link-color,#3b6ea5));color:#fff;}\
 display:inline-flex;align-items:center;justify-content:center;font-size:1.6rem;font-weight:600;\
 color:#fff;background:var(--accent,var(--aside-link-color,#3b6ea5));}\
 .mc-hint{font-size:0.8rem;color:var(--text-secondary,var(--aside-date-color,#8a97a6));margin:0.3rem 0 0;}\
-@media (max-width:32rem){.mc-tags-boxes{grid-template-columns:1fr;}}\
+@media (max-width:32rem){.mc-cats-boxes,.mc-tags-boxes{grid-template-columns:1fr;}}\
 ";
 
 
