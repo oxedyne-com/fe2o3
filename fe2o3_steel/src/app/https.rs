@@ -598,6 +598,9 @@ impl<
                         let seen = publish::counts_as_read(
                             site_console::session::cookie_value(&req_headers).is_some(),
                             ua,
+                            // Set by the dispatch where the request was a HEAD, which asked
+                            // for no prose and so read none.
+                            matches!(loc.data.get(&dat!("head_only")), Some(Dat::Bool(true))),
                         );
                         if seen {
                             if let Err(e) = publish_store::reads_bump(db, &post.slug) {

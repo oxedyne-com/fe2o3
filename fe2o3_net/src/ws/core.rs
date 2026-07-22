@@ -84,8 +84,9 @@ pub fn connect_request(
     );
     Ok((
         HttpMessage {
-            header: res!(HttpHeader::parse(msg, Some(true))),
-            body:   Vec::new(),
+            header:    res!(HttpHeader::parse(msg, Some(true))),
+            body:      Vec::new(),
+            head_only: false,
         },
         key_str,
     ))

@@ -490,7 +490,27 @@ impl<
                                 );
                                 let body = request.body;
                                 match method {
-                                    HttpMethod::GET => {
+                                    // A `HEAD` asks what the `GET` would answer, minus the
+                                    // answer. RFC 9110 9.3.2 says the fields must be the ones
+                                    // the `GET` would carry, so the only honest way to produce
+                                    // them is to do the `GET` and withhold the body at the
+                                    // wire. Handled here rather than left to fall through:
+                                    // unhandled, it reached no branch at all, no response was
+                                    // ever built, and the caller sat until the read timed out
+                                    // -- so `curl -I`, and every uptime monitor that speaks
+                                    // `HEAD` first, saw a 408 from a server that was fine.
+                                    HttpMethod::GET | HttpMethod::HEAD => {
+                                        let head_only = method == HttpMethod::HEAD;
+                                        // Told to the handler as well as applied at the wire,
+                                        // so a `GET` path that keeps a tally can decline to
+                                        // count a request that asked for no prose.
+                                        let mut loc = loc;
+                                        if head_only {
+                                            loc.data.insert(
+                                                dat!("head_only"),
+                                                dat!(true),
+                                            );
+                                        }
                                         let vhost_db = self.db_for_vhost(
                                             vhost.primary_hostname(),
                                         );
@@ -505,6 +525,9 @@ impl<
                                             &id,
                                         ).await;
                                         response = res!(result);
+                                        if head_only {
+                                            response = response.map(|r| r.head_only());
+                                        }
                                     }
                                     HttpMethod::POST => {
                                         // Carry Content-Type from the incoming

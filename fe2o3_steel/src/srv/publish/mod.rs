@@ -41,6 +41,10 @@ pub mod store;
 pub mod subscribe;
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_datime::time::{
+	CalClock,
+	CalClockZone,
+};
 use oxedyne_fe2o3_iop_crypto::enc::Encrypter;
 use oxedyne_fe2o3_iop_db::api::Database;
 use oxedyne_fe2o3_iop_hash::api::Hasher;
@@ -600,18 +604,21 @@ pub fn looks_automated(ua: Option<&str>) -> bool {
 
 /// Whether a request for a post should add one to its tally.
 ///
-/// Two exclusions, and each is here for a reason worth keeping:
+/// Three exclusions, and each is here for a reason worth keeping:
 ///
 /// - **A request carrying a management session is the author.** A count that climbs while its author
 ///   re-reads their own draft measures the author's attention, not a reader's, and is worse than no
 ///   count because it looks like one.
 /// - **A request from an obvious machine is not a read.** See [`looks_automated`].
+/// - **A `HEAD` asked for no prose.** It is how a monitor checks the site is up and how a chat client
+///   fetches a link preview, several times an hour and forever. Counted, the tally would measure the
+///   monitor.
 ///
 /// There is deliberately nothing here about *who* the reader is: no identifier is derived, stored or
 /// compared, so two reads by one person count twice and the site never learns they were one person.
 /// That is the trade this counter makes on purpose -- it is a tally of readings, not of readers.
-pub fn counts_as_read(has_manage_session: bool, user_agent: Option<&str>) -> bool {
-	!has_manage_session && !looks_automated(user_agent)
+pub fn counts_as_read(has_manage_session: bool, user_agent: Option<&str>, head_only: bool) -> bool {
+	!head_only && !has_manage_session && !looks_automated(user_agent)
 }
 
 /// The longest a tag may be, once normalised.
@@ -723,6 +730,32 @@ pub fn valid_date(s: &str) -> bool {
 		&& b[13] == b':'
 		&& b[14].is_ascii_digit()
 		&& b[15].is_ascii_digit()
+}
+
+/// Today, as a post writes a date: `2026-07-22`, in UTC.
+///
+/// What an author who gave no date meant. A post reaches a feed, and Atom requires every entry to
+/// say when it was updated -- so an undated post is not a post without a date on the page, it is a
+/// post the feed has to invent one for, and the invention was the epoch. That sorts the piece below
+/// everything written since 1970 in every reader in the world, silently. Dating it on the way in
+/// costs the author nothing (the field is filled in for them, and they may change it) and is the
+/// only version of the story where nothing downstream has to guess.
+///
+/// [`CalClock`] does the civil arithmetic, per the fe2o3 calendar. A clock that will not read gives
+/// nothing rather than a wrong day: the caller then keeps the post undated, which is the behaviour
+/// that has always been there.
+pub fn today() -> Option<String> {
+	let secs = match std::time::SystemTime::now()
+		.duration_since(std::time::UNIX_EPOCH)
+	{
+		Ok(d)	=> d.as_secs() as i64,
+		Err(_)	=> return None,
+	};
+	let cc = match CalClock::from_unix_timestamp_seconds(secs, CalClockZone::utc()) {
+		Ok(cc)	=> cc,
+		Err(_)	=> return None,
+	};
+	Some(fmt!("{:04}-{:02}-{:02}", cc.year(), cc.month(), cc.day()))
 }
 
 /// The date a record keeps, from the date a form said.
@@ -1267,12 +1300,15 @@ mod tests {
 	fn test_the_author_is_not_a_reader_09() -> Outcome<()> {
 		let browser = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0";
 		// A management session is the author, so it never counts.
-		assert!(!counts_as_read(true, Some(browser)));
+		assert!(!counts_as_read(true, Some(browser), false));
 		// The same request without one is a reader.
-		assert!(counts_as_read(false, Some(browser)));
+		assert!(counts_as_read(false, Some(browser), false));
 		// And a machine is not a reader either way.
-		assert!(!counts_as_read(false, Some("Googlebot/2.1")));
-		assert!(!counts_as_read(true, Some("Googlebot/2.1")));
+		assert!(!counts_as_read(false, Some("Googlebot/2.1"), false));
+		assert!(!counts_as_read(true, Some("Googlebot/2.1"), false));
+		// A HEAD asked for no prose, so it read none -- however browser-like it looks. This is
+		// the uptime monitor that would otherwise be the site's most devoted reader.
+		assert!(!counts_as_read(false, Some(browser), true));
 		Ok(())
 	}
 
@@ -1335,6 +1371,20 @@ mod tests {
 		// A slug that is not a name a post may wear reaches no lookup.
 		assert_eq!(cfg.comment_slug("/posts/../../etc/comment"), None);
 		assert_eq!(cfg.comment_slug("/posts//comment"), None);
+		Ok(())
+	}
+
+	/// Today is a date the store will take and the feed will date an entry by. A day the composer
+	/// offers and the save falls back to is worth nothing if it fails the module's own check.
+	#[test]
+	fn test_today_is_a_date_a_post_may_wear_13() -> Outcome<()> {
+		let d = res!(today().ok_or_else(|| err!("The clock would not read."; Missing)));
+		assert_eq!(d.len(), DATE_LEN, "today is not a day-only date: {}", d);
+		assert!(valid_date(&d), "the store would refuse today: {}", d);
+		// Not the epoch, which is the thing the fallback exists to stop the feed emitting.
+		assert!(!d.starts_with("1970-"), "the clock read as the epoch: {}", d);
+		// Shaped as the store keeps it, so it round-trips without normalisation.
+		assert_eq!(normalise_date(&d), d);
 		Ok(())
 	}
 }

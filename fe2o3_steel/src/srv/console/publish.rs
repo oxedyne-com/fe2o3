@@ -1542,7 +1542,12 @@ fn handle_edit<
 		slug		= html_escape(&r.slug),
 		// The readable form in the box: a person edits what a person reads, and the `T` goes back in
 		// at the door on the way to the store.
-		date		= html_escape(&r.date.as_deref().map(date_text).unwrap_or_default()),
+		// A post that has a date shows it; one that has none is offered today, which is what an
+		// author writing now means. Offered rather than imposed -- it is an ordinary field and
+		// they may type over it or clear it, and a cleared field still saves as today.
+		date		= html_escape(&r.date.as_deref().map(date_text)
+					.or_else(crate::srv::publish::today)
+					.unwrap_or_default()),
 		draft_sel	= selected(r.state == PostState::Draft),
 		live_sel	= selected(r.state == PostState::Live),
 		md_sel		= selected(r.markup == Markup::Markdown),
@@ -2667,7 +2672,11 @@ async fn do_save<
 
 	let state = PostState::of(&super::form_field(body, "state").unwrap_or_default());
 	let markup = Markup::of(&super::form_field(body, "markup").unwrap_or_default());
-	let date = if date.is_empty() { None } else { Some(date) };
+	// An author who gave no date meant today. Left undated the post reaches the feed, which must say
+	// when every entry was updated, and the only answer available was the epoch -- filing the piece
+	// under 1970 in every reader that takes it. The form offers today already; this is for the save
+	// that arrives with the field cleared.
+	let date = if date.is_empty() { crate::srv::publish::today() } else { Some(date) };
 
 	// The author, by site-login username. The form carries it so an editor could reassign a post, but
 	// it defaults to whoever is signed in -- a post's author is the person writing it unless said

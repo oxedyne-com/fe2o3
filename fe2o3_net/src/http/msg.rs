@@ -90,6 +90,13 @@ impl ReadLimits {
 pub struct HttpMessage {
     pub header:     HttpHeader,
     pub body:       Vec<u8>,
+    /// Send the headers and stop.
+    ///
+    /// A `HEAD` asks what a `GET` would answer without the answer itself, and RFC 9110 9.3.2
+    /// requires the header fields to be the ones the `GET` would carry -- `Content-Length`
+    /// included, describing a body that is deliberately not sent. So the body is built as
+    /// usual, counted as usual, and withheld at the wire.
+    pub head_only:  bool,
 }
 
 impl HttpMessage {
@@ -102,6 +109,7 @@ impl HttpMessage {
                 fields:     HeaderFields::default(),
             },
             body: Vec::new(),
+            head_only: false,
         }
     }
 
@@ -119,6 +127,7 @@ impl HttpMessage {
                 fields,
             },
             body: txt.as_ref().as_bytes().to_vec(),
+            head_only: false,
         }
     }
 
@@ -418,11 +427,25 @@ impl HttpMessage {
         self.log(log_get_level!());
         let result = stream.write_all(&self.header.as_vec()).await;
         res!(result);
-        let result = stream.write_all(&self.body).await;
-        res!(result);
+        // The answer to a `HEAD` is the header the matching `GET` would have sent, and nothing
+        // after it. `Content-Length` above still counts the body that was built, which is what
+        // the field is for -- a caller asking how big a thing is deserves the true answer.
+        if !self.head_only {
+            let result = stream.write_all(&self.body).await;
+            res!(result);
+        }
         let result = stream.flush().await;
         res!(result);
         Ok(())
+    }
+
+    /// Answer with the headers and no body, as a `HEAD` asks.
+    ///
+    /// `Content-Length` still counts the body that was built -- withholding it is the point of
+    /// the method, and lying about its size would defeat the reason anyone asks.
+    pub fn head_only(mut self) -> Self {
+        self.head_only = true;
+        self
     }
 
     pub fn body_text(&mut self, txt: &str) {
@@ -750,6 +773,36 @@ mod body_tests {
             None,
         )));
         Ok(msg)
+    }
+
+    /// Write a response to a buffer, as the server writing to a socket does.
+    fn on_the_wire(msg: HttpMessage) -> Outcome<String> {
+        let mut out: Vec<u8> = Vec::new();
+        let rt = res!(tokio::runtime::Runtime::new());
+        res!(rt.block_on(msg.write_all(&mut out)));
+        Ok(String::from_utf8_lossy(&out).to_string())
+    }
+
+    /// A `HEAD` answer is the headers the matching `GET` would have sent, and nothing after them
+    /// -- `Content-Length` included, still counting the body that was withheld. RFC 9110 9.3.2.
+    #[test]
+    fn test_a_head_answer_carries_the_length_and_no_body() -> Outcome<()> {
+        let body = "<!doctype html><p>Twenty-nine bytes</p>";
+        let get = HttpMessage::respond_with_text(HttpStatus::OK, body);
+        let head = HttpMessage::respond_with_text(HttpStatus::OK, body).head_only();
+
+        let get_wire = res!(on_the_wire(get));
+        let head_wire = res!(on_the_wire(head));
+
+        let n = fmt!("content-length: {}", body.len());
+        assert!(get_wire.to_lowercase().contains(&n), "the GET lost its length: {}", get_wire);
+        // The same length, describing a body deliberately not sent -- a caller asking how big a
+        // thing is deserves the true answer, which is the whole reason to ask with a HEAD.
+        assert!(head_wire.to_lowercase().contains(&n), "the HEAD lost its length: {}", head_wire);
+        assert!(!head_wire.contains(body), "the HEAD sent the body: {}", head_wire);
+        // Headers to the blank line and not a byte past it.
+        assert!(head_wire.ends_with("\r\n\r\n"), "the HEAD wrote past its headers: {:?}", head_wire);
+        Ok(())
     }
 
     #[test]
