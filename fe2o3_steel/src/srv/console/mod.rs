@@ -1365,8 +1365,18 @@ color:var(--text-secondary,var(--aside-date-color,#8a97a6));}\
 .mc-author-name{color:var(--text-primary,var(--body-color,#e6e6e6));font-weight:600;}\
 .mc-cats-field{margin:0.2rem 0 0.9rem;}\
 .mc-cats{display:flex;flex-wrap:wrap;gap:0.4rem 1rem;margin:0.3rem 0 0;}\
-.mc-cat{display:inline-flex;align-items:center;gap:0.35rem;font-size:0.85rem;text-transform:none;\
-letter-spacing:0;cursor:pointer;color:var(--text-secondary,var(--aside-date-color,#8a97a6));}\
+/* Named through `.mc-form` to outrank `.mc-form label`, which shouts every field's NAME in \
+uppercase and lays it out as a block. Right for the name of a field, wrong for the name of a \
+category -- and the block also stops the label being a flex container, which silently drops the \
+`gap` and jams the word against its own checkbox. Specificity, not order: both rules are in this \
+one sheet, so moving them past each other would not settle it. */\
+.mc-form label.mc-cat,.mc-cat{display:inline-flex;align-items:center;gap:0.4rem;font-size:0.85rem;\
+text-transform:none;letter-spacing:0;font-weight:400;margin:0;cursor:pointer;\
+color:var(--text-secondary,var(--aside-date-color,#8a97a6));}\
+/* The tick in the site's own colour rather than the browser's default blue-or-red, which lands \
+in whatever palette the site set and belongs to none of them. */\
+.mc-cat input[type=checkbox],.mc-form input[type=checkbox]{accent-color:var(--accent,\
+var(--col-teal,#4c8bf5));width:0.95rem;height:0.95rem;margin:0;flex:none;}\
 .mc-tags-field{margin:0.2rem 0 0.9rem;}\
 .mc-tags-boxes{display:grid;grid-template-columns:1fr 1fr;gap:0.8rem;margin:0.3rem 0 0;}\
 .mc-tagbox{min-width:0;}\

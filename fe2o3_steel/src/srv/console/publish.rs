@@ -4179,3 +4179,153 @@ fn comments_back_with(why: &str, json: bool) -> HttpMessage {
 		redirect(&fmt!("{}?said={}", PATH_COMMENTS, url_encode(why)))
 	}
 }
+
+/// Rendering the console's pages to disk, so they can be looked at.
+///
+/// # Why this exists
+///
+/// Every other test in this module asserts on a substring of the markup -- that a chip carries
+/// `data-tag`, that a box is `checked`. All of them pass with the styling completely broken, because
+/// none of them draws a page: they call a fragment builder and read the string it returns. The
+/// console is also the one surface a browser cannot be pointed at without a passphrase, so it was
+/// never seen either. Between the two, a rule that shouts a label or a box that clips its own text
+/// reaches production with a green suite behind it, which is exactly what happened.
+///
+/// So: set `STEEL_UI_DUMP` to a directory and run the suite, and each console screen is written
+/// there as a whole page. `STEEL_UI_CSS` names a directory of the site's real stylesheets, linked by
+/// absolute path so a `file://` render carries the site's own palette, fonts and metrics rather than
+/// a browser's defaults -- an unstyled dump would be worse than none, since it would look wrong in
+/// ways that mean nothing.
+///
+/// ```text
+/// STEEL_UI_DUMP=/tmp/ui STEEL_UI_CSS=~/…/elearnity/www/public/css \
+///     cargo test -p oxedyne_fe2o3_steel --lib ui_dump -- --nocapture
+/// ```
+///
+/// Unset, it writes nothing and costs a directory lookup, so the ordinary suite is unaffected.
+#[cfg(test)]
+mod ui_dump {
+	use super::*;
+
+	/// The database the renderers are named over. Every page here is drawn with `None`, so the type
+	/// is needed and the value is not.
+	type NoDb = oxedyne_fe2o3_o3db_sync::O3db<
+		{ crate::srv::id::UID_LEN },
+		crate::srv::id::Uid,
+		oxedyne_fe2o3_crypto::enc::EncryptionScheme,
+		oxedyne_fe2o3_hash::hash::HashScheme,
+		oxedyne_fe2o3_hash::hash::HashScheme,
+		oxedyne_fe2o3_hash::csum::ChecksumScheme,
+	>;
+
+	/// The site whose console is being drawn: the stylesheets by absolute path, so the page carries
+	/// the site's own look when it is opened from a file.
+	fn theme() -> Theme {
+		let dir = std::env::var("STEEL_UI_CSS").unwrap_or_default();
+		let sheets = ["variables.css", "fonts.css", "base.css", "asides.css", "manage.css"];
+		Theme {
+			site_name:	fmt!("Elearnity"),
+			css:		sheets.iter()
+					.map(|f| fmt!("file://{}/{}", dir, f))
+					.filter(|_| !dir.is_empty())
+					.collect(),
+			home:		fmt!("https://example.com"),
+		}
+	}
+
+	fn admin() -> SiteAdmin {
+		SiteAdmin { username: fmt!("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef") }
+	}
+
+	fn dump_cfg() -> PublishConfig {
+		let mut c = PublishConfig::default();
+		c.path = fmt!("/asides");
+		c.title = fmt!("Asides");
+		c.site_name = fmt!("Elearnity");
+		c.base_url = fmt!("https://example.com");
+		c.source = Source::Store;
+		c.categories = vec![
+			fmt!("Personal"), fmt!("Technical"), fmt!("Ideas"),
+			fmt!("Reviews"), fmt!("Projects"), fmt!("Announcements"),
+		];
+		c
+	}
+
+	/// Write one page, named for the screen it is.
+	fn put(dir: &str, name: &str, resp: &HttpMessage) -> Outcome<()> {
+		let path = fmt!("{}/{}.html", dir, name);
+		res!(std::fs::write(&path, &resp.body), IO, File);
+		println!("ui-dump: {}", path);
+		Ok(())
+	}
+
+	#[test]
+	fn ui_dump_the_console_screens() -> Outcome<()> {
+		let dir = match std::env::var("STEEL_UI_DUMP") {
+			Ok(d) if !d.is_empty()	=> d,
+			_			=> return Ok(()), // Not asked for; costs nothing.
+		};
+		res!(std::fs::create_dir_all(&dir), IO, File);
+
+		let cfg = dump_cfg();
+		let t = theme();
+		let a = admin();
+		let csrf = "csrf0000000000000000000000000000";
+
+		// The composer for a new post: the screen an author spends their time in, and the one
+		// nothing has ever rendered.
+		let resp = res!(handle_edit::<
+			{ crate::srv::id::UID_LEN },
+			crate::srv::id::Uid,
+			oxedyne_fe2o3_crypto::enc::EncryptionScheme,
+			oxedyne_fe2o3_hash::hash::HashScheme,
+			NoDb,
+		>(&cfg, &t, &a, csrf, true, None, "", "ui-dump"));
+		res!(put(&dir, "composer-new", &resp));
+
+		// The post list, with nothing in it -- a site's first sight of its own console.
+		let resp = res!(handle_list::<
+			{ crate::srv::id::UID_LEN },
+			crate::srv::id::Uid,
+			oxedyne_fe2o3_crypto::enc::EncryptionScheme,
+			oxedyne_fe2o3_hash::hash::HashScheme,
+			NoDb,
+		>(&cfg, &t, &a, csrf, None, "", "ui-dump"));
+		res!(put(&dir, "posts-empty", &resp));
+
+		// The report pages, built from the same fixtures the report tests use, so what is drawn
+		// here is what a site with traffic sees rather than a set of zeroes.
+		let sub = |email: &str, state: subscribe::SubState, created: &str| subscribe::Subscriber {
+			email:		fmt!("{}", email),
+			state:		state,
+			token:		fmt!("t0000000000000000000000000000000"),
+			created:	Some(fmt!("{}", created)),
+		};
+		let subs = vec![
+			sub("a@example.com", subscribe::SubState::Confirmed, "2026-07-19T08:00:00Z"),
+			sub("b@example.com", subscribe::SubState::Confirmed, "2026-06-02T08:00:00Z"),
+			sub("c@example.com", subscribe::SubState::Pending, "2026-07-18T08:00:00Z"),
+			sub("d@example.com", subscribe::SubState::Unsubscribed, "2026-05-01T08:00:00Z"),
+		];
+		let sent = |slug: &str, at: &str, attempted: usize, ok: usize, failed: usize, sup: usize|
+			send::SendEntry {
+				slug:		fmt!("{}", slug),
+				at:		fmt!("{}", at),
+				attempted:	attempted,
+				sent:		ok,
+				failed:		failed,
+				suppressed:	sup,
+			};
+		let hist = vec![
+			sent("on-rent", "2026-07-19T09:00:00Z", 40, 38, 2, 0),
+			sent("on-work", "2026-06-11T09:00:00Z", 22, 22, 0, 1),
+		];
+		let mut body = String::new();
+		body.push_str("<h1>Reports</h1>\n");
+		body.push_str(&list_report(&subs));
+		body.push_str(&send_report(&hist));
+		res!(put(&dir, "reports", &page(&t, &a, "Reports", &body)));
+
+		Ok(())
+	}
+}

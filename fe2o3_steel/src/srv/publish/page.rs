@@ -207,7 +207,7 @@ fn index(
 			escape_text(&mut body, &p.excerpt);
 			body.push_str("</p>");
 		}
-		body.push_str(&tags_list(cfg, p));
+		body.push_str(&facets_list(cfg, p));
 		body.push_str("</li>\n");
 	}
 	body.push_str("</ul>\n");
@@ -437,15 +437,34 @@ fn about_block(authors: &[Author]) -> String {
 	s
 }
 
-/// A post's tags as a list of links, each narrowing the index to that tag.
+/// A post's facets as a list of links: its categories first, then its tags.
 ///
-/// Nothing at all for a post with no tags, so the element is never an empty shell. The link is the
-/// index with the tag as a facet; the tag is `[a-z0-9-]`, so it needs no encoding to sit in a query.
-fn tags_list(cfg: &PublishConfig, post: &Post) -> String {
-	if post.tags.is_empty() {
+/// The two are different kinds of thing and read as different kinds of chip. A **category** comes
+/// from a fixed vocabulary the site chose, so it says where the piece sits in the whole; a **tag**
+/// is whatever the author reached for, so it says what this piece is about. Drawn alike they would
+/// be one undifferentiated row and the distinction the two exist to make would be invisible --
+/// hence `.post-cat` ahead of `.tag`, the category solid and the tag outlined.
+///
+/// Categories lead because the fixed thing is the coarser one: a reader scanning a row of chips
+/// wants the section before the specifics.
+///
+/// Nothing at all for a post with neither, so the element is never an empty shell. Each link is the
+/// index narrowed to that facet. A tag is `[a-z0-9-]` and needs no encoding; a category is from the
+/// site's own list and may hold a space or a capital, so it is percent-encoded.
+fn facets_list(cfg: &PublishConfig, post: &Post) -> String {
+	if post.categories.is_empty() && post.tags.is_empty() {
 		return String::new();
 	}
 	let mut s = String::from("<ul class=\"post-tags\">");
+	for c in &post.categories {
+		s.push_str("<li><a class=\"post-cat\" href=\"");
+		escape_attr(&mut s, &cfg.path);
+		s.push_str("?cat=");
+		escape_attr(&mut s, &url_encode(c));
+		s.push_str("\">");
+		escape_text(&mut s, c);
+		s.push_str("</a></li>");
+	}
 	for t in &post.tags {
 		s.push_str("<li><a class=\"tag\" href=\"");
 		escape_attr(&mut s, &cfg.path);
@@ -457,6 +476,24 @@ fn tags_list(cfg: &PublishConfig, post: &Post) -> String {
 	}
 	s.push_str("</ul>");
 	s
+}
+
+/// A category as it may sit in a query string.
+///
+/// A category is drawn from the site's configured list, which may hold a space or a capital -- so
+/// unlike a tag it cannot go into a URL as it stands. Percent-encoding by hand rather than reaching
+/// for a general encoder: the set that must survive is small and known, and the rule is the one a
+/// reader of this function would want stated in it.
+fn url_encode(s: &str) -> String {
+	let mut out = String::with_capacity(s.len());
+	for b in s.bytes() {
+		match b {
+			b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~'	=>
+				out.push(b as char),
+			_	=> out.push_str(&fmt!("%{:02X}", b)),
+		}
+	}
+	out
 }
 
 /// The reading time above a post, as its label. The minutes are [`read_mins`], the site's one
@@ -507,7 +544,7 @@ fn post_page(
 	body.push_str(&post.html);
 	// The tags, in the article's footer, each a link back to the index narrowed to that tag. Omitted
 	// entirely for a post with none.
-	body.push_str(&tags_list(cfg, post));
+	body.push_str(&facets_list(cfg, post));
 	body.push_str("</article>\n");
 
 	// Who wrote it, in their own words, for the reader who has just finished and wants to know whose
@@ -1011,8 +1048,8 @@ mod tests {
 		Ok(())
 	}
 
-	/// A tagged post carries its tags as `.tag` links to the filtered index, and an untagged one
-	/// carries no `.post-tags` element at all.
+	/// A post carries its facets: categories first as `.post-cat`, then tags as `.tag`, each a link
+	/// narrowing the index. A post with neither carries no `.post-tags` element at all.
 	#[test]
 	fn test_a_post_page_carries_its_tags_06() -> Outcome<()> {
 		let mut p = post();
@@ -1022,11 +1059,31 @@ mod tests {
 		assert!(body.contains(r#"<ul class="post-tags">"#), "no tag list: {}", body);
 		assert!(body.contains(r#"<a class="tag" href="/asides?tag=rust">rust</a>"#), "got: {}", body);
 		assert!(body.contains(r#"<a class="tag" href="/asides?tag=web">web</a>"#), "got: {}", body);
+		// The category leads, and wears the other class -- the two are different kinds of thing
+		// and a reader must be able to see which is which.
+		assert!(body.contains(r#"<a class="post-cat" href="/asides?cat=Personal">Personal</a>"#),
+			"no category chip: {}", body);
+		let cat_at = res!(body.find("post-cat").ok_or_else(|| err!("no category chip"; Missing)));
+		let tag_at = res!(body.find(r#"class="tag""#).ok_or_else(|| err!("no tag chip"; Missing)));
+		assert!(cat_at < tag_at, "the tags came before the categories: {}", body);
 
-		// A post with no tags has no empty shell.
-		let resp = res!(post_page(&cfg(), &post(), None, None));
+		// A category holding a space or a capital survives the query it is put into.
+		let mut spaced = post();
+		spaced.categories = vec![fmt!("Big Ideas")];
+		spaced.tags = Vec::new();
+		let resp = res!(post_page(&cfg(), &spaced, None, None));
 		let body = String::from_utf8_lossy(&resp.body).to_string();
-		assert!(!body.contains("post-tags"), "an untagged post drew a tag element: {}", body);
+		assert!(body.contains(r#"href="/asides?cat=Big%20Ideas""#), "unencoded category: {}", body);
+		assert!(body.contains(">Big Ideas</a>"), "the chip does not read as written: {}", body);
+
+		// A post with neither has no empty shell.
+		let mut bare = post();
+		bare.categories = Vec::new();
+		bare.tags = Vec::new();
+		let resp = res!(post_page(&cfg(), &bare, None, None));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(!body.contains("post-tags"),
+			"a post with no categories and no tags drew the element: {}", body);
 		Ok(())
 	}
 
@@ -1928,6 +1985,24 @@ const FILTER_JS: &str = r##"(function () {
 			if (chip.getAttribute("data-tag") !== want) { srcBox.appendChild(chip); dress(chip, false); }
 		});
 		refreshSelected();
+	})();
+
+	// A category chip lands here as `?cat=x`. Honour it by leaving only that category ticked, so
+	// the reader arrives on the section the chip named -- the same promise a tag link makes.
+	// Decoded because a category may hold a space or a capital, unlike a tag.
+	(function () {
+		var m = /[?&]cat=([^&]+)/.exec(location.search);
+		var row = document.getElementById("aside-filter-cats");
+		if (!m || !row) { return; }
+		var want;
+		try { want = decodeURIComponent(m[1].replace(/\+/g, " ")); } catch (e) { return; }
+		var boxes = row.querySelectorAll('input[type="checkbox"]');
+		// An unoffered category ticks nothing off: a stale link narrows to nothing rather than
+		// hiding the whole site, which is the same rule the category filter keeps elsewhere.
+		var known = false;
+		boxes.forEach(function (cb) { if (cb.value === want) { known = true; } });
+		if (!known) { return; }
+		boxes.forEach(function (cb) { cb.checked = (cb.value === want); });
 	})();
 
 	// Dragging a chip carries its tag; both boxes read it on drop.
