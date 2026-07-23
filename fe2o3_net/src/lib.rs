@@ -93,6 +93,7 @@ pub mod hmac;
 pub mod http;
 pub mod id;
 pub mod imap;
+pub mod llm;
 pub mod mail;
 pub mod media;
 pub mod smtp;
