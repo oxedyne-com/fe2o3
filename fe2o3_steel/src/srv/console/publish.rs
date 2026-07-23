@@ -1536,7 +1536,7 @@ fn handle_edit<
 			</div>\n\
 		</div>\n\
 		<div class=\"mc-actions\">\n\
-			<button type=\"submit\" class=\"mc-btn\">Save</button>\n\
+			<span class=\"mc-autosave\" id=\"mc-autosave\" aria-live=\"polite\"></span>\n\
 		</div>\n\
 		</form>\n",
 		save		= PATH_SAVE,
@@ -1569,6 +1569,7 @@ fn handle_edit<
 	// choosing between posts, not in the editor, where a person is working on one. The editor's only
 	// verb is Save.
 	body.push_str(&preview_script(csrf));
+	body.push_str(AUTOSAVE_SCRIPT);
 
 	Ok(page(theme, admin, "Edit", &body))
 }
@@ -3316,6 +3317,7 @@ const CATS_SCRIPT: &str = "<script>\n\
     var on=[];\n\
     sel.querySelectorAll('.mc-chip[data-cat]').forEach(function(c){on.push(c.getAttribute('data-cat'));});\n\
     hidden.value=on.join(',');\n\
+    hidden.dispatchEvent(new Event('change',{bubbles:true}));\n\
   }\n\
   function chip(cat,inSel){\n\
     var b=document.createElement('button');b.type='button';b.className='mc-chip mc-chip-cat';\n\
@@ -3352,6 +3354,85 @@ const CATS_SCRIPT: &str = "<script>\n\
 })();\n\
 </script>\n";
 
+/// The composer's autosave: the Save button is gone, and the form writes itself as the author works.
+///
+/// The twin of the app's own composer autosave, and safe for the same reason: a draft save reaches
+/// nobody -- the server delivers nothing, mails nobody, syndicates to no one until a post is live --
+/// so persisting a draft as it is typed costs a reader nothing. Publishing stays a decision: the
+/// State selector set to Live is the one save that can reach the world, so it saves at once rather
+/// than after the usual pause, and the line says so.
+///
+/// Static, like the sibling scripts: everything it needs is in the DOM. The CSRF token rides in the
+/// form's own hidden field, and the save URL is the form's `action`, so nothing is interpolated. The
+/// save asks for JSON (`Accept`), which the handler answers with `{ok}` or `{error}` rather than the
+/// redirect a plain form post would get. A `pagehide` beacon flushes a pending edit whichever way the
+/// author leaves the page, so nothing typed is lost to the gap before the next scheduled save.
+const AUTOSAVE_SCRIPT: &str = "<script>\n\
+(function(){\n\
+  var form=document.querySelector('.mc-form');\n\
+  var status=document.getElementById('mc-autosave');\n\
+  if(!form||!status){return;}\n\
+  var slugEl=document.getElementById('slug');\n\
+  var srcEl=document.getElementById('source');\n\
+  var stateEl=document.getElementById('state');\n\
+  var wasEl=form.querySelector('input[name=was]');\n\
+  var savedSlug=wasEl?wasEl.value:'';\n\
+  var existing=!!savedSlug;\n\
+  var savedAt=null,dirty=false,saving=false,timer=null,errMsg='';\n\
+  function elapsed(since){\n\
+    var s=Math.round((Date.now()-since)/1000);\n\
+    if(s<3){return 'just now';}\n\
+    if(s<60){return s+' [s] ago';}\n\
+    var m=Math.round(s/60);if(m<60){return m+' [m] ago';}\n\
+    var h=Math.round(m/60);if(h<24){return h+' [h] ago';}\n\
+    return Math.round(h/24)+' [d] ago';\n\
+  }\n\
+  function paint(){\n\
+    status.className='mc-autosave';\n\
+    if(errMsg){status.textContent=errMsg;status.classList.add('is-error');return;}\n\
+    if(saving){status.textContent='Saving\\u2026';status.classList.add('is-working');return;}\n\
+    var live=stateEl&&stateEl.value==='live';\n\
+    if(savedAt!=null){status.textContent=(live?'Published \\u00b7 saved ':'Saved ')+elapsed(savedAt);}\n\
+    else if(existing){status.textContent=live?'Published \\u00b7 saved earlier':'Saved earlier';}\n\
+    else{status.textContent=dirty?'Not saved yet':'Nothing to save yet';}\n\
+  }\n\
+  function valid(v){return /^[A-Za-z0-9_-]+$/.test(v);}\n\
+  function body(){\n\
+    var fd=new FormData(form);fd.set('was',savedSlug);\n\
+    return new URLSearchParams(fd).toString();\n\
+  }\n\
+  function save(done){\n\
+    if(!slugEl||!valid(slugEl.value)){errMsg='Add a name to save';paint();if(done){done(false);}return;}\n\
+    if(!srcEl||!srcEl.value.trim()){errMsg='Write something to save';paint();if(done){done(false);}return;}\n\
+    errMsg='';saving=true;paint();\n\
+    fetch(form.action,{method:'POST',credentials:'same-origin',\n\
+      headers:{'Content-Type':'application/x-www-form-urlencoded','Accept':'application/json'},\n\
+      body:body()})\n\
+      .then(function(r){return r.json();})\n\
+      .then(function(d){\n\
+        saving=false;\n\
+        if(d&&d.ok){savedSlug=slugEl.value;savedAt=Date.now();dirty=false;errMsg='';}\n\
+        else{errMsg='Not saved \\u2014 '+((d&&d.error)||'try again');}\n\
+        paint();if(done){done(!!(d&&d.ok));}\n\
+      })\n\
+      .catch(function(){saving=false;errMsg='Not saved \\u2014 the server did not answer';paint();if(done){done(false);}});\n\
+  }\n\
+  function schedule(){dirty=true;errMsg='';paint();clearTimeout(timer);timer=setTimeout(function(){save(null);},1500);}\n\
+  form.addEventListener('input',schedule);\n\
+  form.addEventListener('change',function(e){\n\
+    if(e.target&&e.target.id==='state'){clearTimeout(timer);save(null);}else{schedule();}\n\
+  });\n\
+  form.addEventListener('submit',function(e){e.preventDefault();clearTimeout(timer);save(null);});\n\
+  setInterval(paint,5000);\n\
+  paint();\n\
+  window.addEventListener('pagehide',function(){\n\
+    if(dirty&&!saving&&slugEl&&valid(slugEl.value)&&srcEl&&srcEl.value.trim()){\n\
+      try{navigator.sendBeacon(form.action,new Blob([body()],{type:'application/x-www-form-urlencoded'}));}catch(e){}\n\
+    }\n\
+  });\n\
+})();\n\
+</script>\n";
+
 /// The composer's tag script: the two boxes, the search-or-create line, and a curator's tag deletion,
 /// all kept in step with the hidden `tags` input the form submits.
 const TAG_SCRIPT: &str = "<script>\n\
@@ -3369,6 +3450,7 @@ const TAG_SCRIPT: &str = "<script>\n\
     var on=[];\n\
     sel.querySelectorAll('.mc-chip').forEach(function(c){on.push(c.getAttribute('data-tag'));});\n\
     hidden.value=on.join(',');\n\
+    hidden.dispatchEvent(new Event('change',{bubbles:true}));\n\
   }\n\
   function reach(tag){\n\
     var b=document.querySelector('.mc-chip[data-tag=\"'+(window.CSS&&CSS.escape?CSS.escape(tag):tag)+'\"][data-posts]');\n\

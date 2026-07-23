@@ -1339,6 +1339,13 @@ line-height:1.5;resize:vertical;}\
 .mc-row{display:flex;gap:1rem;flex-wrap:wrap;}\
 .mc-row>div{flex:1 1 8rem;}\
 .mc-actions{margin-top:1.2rem;display:flex;gap:0.7rem;align-items:center;flex-wrap:wrap;}\
+/* The autosave line where Save used to be: quiet, a little louder mid-save, red only when it \
+needs an eye. `tabular-nums` keeps the count from nudging the line as it grows. */\
+.mc-autosave{font-size:0.85rem;letter-spacing:0.02em;\
+color:var(--text-secondary,var(--aside-date-color,#8a97a6));\
+font-variant-numeric:tabular-nums;transition:color 120ms ease,opacity 120ms ease;}\
+.mc-autosave.is-working{color:var(--text-primary,#e6e6e6);}\
+.mc-autosave.is-error{color:#e57373;font-weight:600;}\
 /* Prose keeps a readable measure even where the page around it is wide. */\
 .mc-prose{max-width:40rem;border:1px solid var(--border,var(--aside-rule-color,#333c47));border-radius:6px;padding:1.2rem 1.4rem;\
 margin-top:0.8rem;}\
