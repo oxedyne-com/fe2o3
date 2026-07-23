@@ -1354,6 +1354,20 @@ margin-top:0.8rem;}\
    side-by-side panes; a field for a handle or a host is not made better by being 80rem\
    of it, and a row of them that wide reads as unconsidered rather than spacious. */\
 .mc-settings{max-width:34rem;}\
+/* The Fix button sits with the Text label, quiet, above the editor. */\
+.mc-pane-head{display:flex;align-items:baseline;justify-content:space-between;gap:0.6rem;}\
+.mc-fix-btn{flex:0 0 auto;}\
+/* The suggestion panel: the model's proposed text, shown as a line diff against the author's own so \
+   a copy-edit is a change to see, not a wall to re-read. */\
+.mc-fix-panel{margin:1rem 0;padding:1rem;border:1px solid var(--border,var(--aside-rule-color,#333c47));\
+border-radius:6px;}\
+.mc-fix-head{margin-bottom:0.6rem;}\
+.mc-fix-diff{font-family:var(--font-mono,monospace);font-size:0.9rem;line-height:1.5;\
+white-space:pre-wrap;word-break:break-word;max-height:24rem;overflow-y:auto;}\
+.mc-fix-diff div{white-space:pre-wrap;}\
+.mc-fix-diff ins{background:rgba(76,154,106,0.22);text-decoration:none;display:block;}\
+.mc-fix-diff del{background:rgba(192,85,78,0.20);text-decoration:line-through;display:block;opacity:0.8;}\
+.mc-fix-plain{white-space:pre-wrap;margin:0;}\
 /* A settings textarea is a prompt or a short list, not the 22rem post editor, so it honours its own \
    `rows` and reads as prose rather than code. */\
 .mc-settings textarea{min-height:0;font-family:inherit;font-size:0.95rem;line-height:1.5;}\

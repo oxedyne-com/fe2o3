@@ -153,6 +153,9 @@ pub const PATH_AI: &str = "/manage/ai";
 /// Where the AI settings form posts.
 pub const PATH_AI_SAVE: &str = "/manage/ai/save";
 
+/// Where the editor's Fix button posts a post's text to be tidied.
+pub const PATH_AI_FIX: &str = "/manage/ai/fix";
+
 /// The moderation queue: what has been said and what is waiting on a decision.
 pub const PATH_COMMENTS: &str = "/manage/comments";
 
@@ -207,6 +210,7 @@ pub fn writes(path: &str) -> bool {
 		|| path == PATH_PROFILE_SAVE
 		|| path == PATH_TAG_DELETE
 		|| path == PATH_AI_SAVE
+		|| path == PATH_AI_FIX
 }
 
 /// Whether a path is a POST this module answers.
@@ -1536,13 +1540,25 @@ fn handle_edit<
 		{tags_block}\
 		<div class=\"mc-split\">\n\
 			<div class=\"mc-pane\">\n\
-				<label for=\"source\">Text</label>\n\
+				<div class=\"mc-pane-head\"><label for=\"source\">Text</label>\
+				<button type=\"button\" class=\"mc-btn mc-btn-quiet mc-fix-btn\" id=\"mc-fix\">Fix\
+				</button></div>\n\
 				<textarea id=\"source\" name=\"source\" rows=\"24\" spellcheck=\"true\" \
 					placeholder=\"# The title goes here, as the first heading\">{source}</textarea>\n\
 			</div>\n\
 			<div class=\"mc-pane\">\n\
 				<label for=\"mc-preview\">Preview</label>\n\
 				<div class=\"mc-preview\" id=\"mc-preview\"></div>\n\
+			</div>\n\
+		</div>\n\
+		<div class=\"mc-fix-panel\" id=\"mc-fix-panel\" hidden>\n\
+			<div class=\"mc-fix-head\"><strong>Suggested fixes</strong>\
+			<span class=\"mc-note mc-inline\" id=\"mc-fix-note\"></span></div>\n\
+			<div class=\"mc-fix-diff\" id=\"mc-fix-diff\"></div>\n\
+			<div class=\"mc-actions\">\n\
+				<button type=\"button\" class=\"mc-btn\" id=\"mc-fix-use\">Use this</button>\n\
+				<button type=\"button\" class=\"mc-btn mc-btn-quiet\" id=\"mc-fix-discard\">Discard\
+				</button>\n\
 			</div>\n\
 		</div>\n\
 		<div class=\"mc-actions\">\n\
@@ -1580,6 +1596,7 @@ fn handle_edit<
 	// verb is Save.
 	body.push_str(&preview_script(csrf));
 	body.push_str(AUTOSAVE_SCRIPT);
+	body.push_str(FIX_SCRIPT);
 
 	Ok(page(theme, admin, "Edit", &body))
 }
@@ -2554,6 +2571,7 @@ pub async fn handle_post<
 		&& request_path != PATH_SUBS_ACTION
 		&& request_path != PATH_PROFILE_SAVE
 		&& request_path != PATH_AI_SAVE
+		&& request_path != PATH_AI_FIX
 	{
 		return Ok(back_with(
 			"this site serves its posts from a directory, so there is nothing to write into; set \
@@ -2572,6 +2590,7 @@ pub async fn handle_post<
 		PATH_IMPORT	=> do_import(cfg, db, &admin.username, json, id),
 		PATH_CREDS	=> do_creds(db, body, &admin.username, json, id),
 		PATH_AI_SAVE	=> do_ai_save(db, body, &admin.username, json, id),
+		PATH_AI_FIX	=> do_ai_fix(db, tls_client, body, id).await,
 		PATH_NEWSLETTER	=> do_newsletter(cfg, db, mail, body, &admin.username, json, id).await,
 		PATH_NEWSLETTER_TEST	=> do_test_send(cfg, db, mail, body, &admin.username, json, id).await,
 		PATH_SUBS_ACTION	=> do_subs_action(db, body, &admin.username, json, id),
@@ -2845,6 +2864,64 @@ fn do_ai_save<
 		if s.provider.is_empty() { "no" } else { &s.provider },
 		s.alert_emails.len());
 	Ok(ai_back(json))
+}
+
+/// Tidies a post's text with the site's model, and returns the suggestion for the author to accept.
+///
+/// The one AI call the author makes by hand. It sends the fix prompt and the post's current source to
+/// the model and hands back what it says, as JSON, for the editor to show beside the original -- it
+/// changes nothing here, because the author decides whether the suggestion is better than what they
+/// wrote. Every way it can fail -- no AI set up, no outbound TLS, a model that will not answer -- comes
+/// back as a plain reason the editor can show, not a broken page.
+async fn do_ai_fix<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:		&(Arc<RwLock<DB>>, UID),
+	tls_client:	&Option<Arc<ClientConfig>>,
+	body:		&[u8],
+	id:		&str,
+)
+	-> Outcome<HttpMessage>
+{
+	let source = super::form_field(body, "source").unwrap_or_default();
+	if source.trim().is_empty() {
+		return Ok(json_error("There is nothing to fix yet."));
+	}
+
+	let settings = res!(ai::get_settings(db));
+	if !settings.ready() {
+		return Ok(json_error(
+			"AI is not set up. Set a provider, a model and a key on the AI page first."));
+	}
+	let tls = match tls_client {
+		Some(t)	=> t.clone(),
+		None	=> return Ok(json_error(
+			"The server has no outbound connection, so it cannot reach the model.")),
+	};
+	let cfg = res!(settings.llm());
+
+	let fixed = match oxedyne_fe2o3_net::llm::complete(
+		&cfg, settings.fix_prompt(), &source, tls).await
+	{
+		Ok(f)	=> f.trim().to_string(),
+		Err(e)	=> {
+			// The reason is logged for the operator; the reader gets a plain one, since a model's own
+			// error can carry a key or a quota figure that does not belong on a page.
+			warn!("{}: console: an AI fix could not be made: {}", id, e);
+			return Ok(json_error(
+				"The model could not be reached, or would not answer. The log says why."));
+		}
+	};
+
+	let mut m = DaticleMap::new();
+	m.insert(dat!("ok"), Dat::Bool(true));
+	m.insert(dat!("fixed"), dat!(fixed));
+	info!("{}: console: an AI fix was suggested", id);
+	Ok(json_body(&res!(Dat::Map(m).json())))
 }
 
 /// The answer to a destination write that did not go through, carrying the reason back to its own page.
@@ -3651,6 +3728,80 @@ const AUTOSAVE_SCRIPT: &str = "<script>\n\
       try{navigator.sendBeacon(form.action,new Blob([body()],{type:'application/x-www-form-urlencoded'}));}catch(e){}\n\
     }\n\
   });\n\
+})();\n\
+</script>\n";
+
+/// The composer's Fix button: ask the model to tidy the post, show what it changed, and change
+/// nothing until the author says so.
+///
+/// Propose, then accept: the suggestion is shown as a line diff against the author's own text -- what
+/// the model would remove struck through, what it would add underlined -- so the author sees the
+/// change rather than a wall of text to re-read, and decides. "Use this" writes the suggestion into
+/// the editor (and dispatches an input so autosave picks it up); "Discard" leaves everything as it
+/// was. The diff is over lines, which is cheap for a post and enough to see a copy-edit; a very long
+/// post falls back to showing the suggestion plainly rather than building a table nobody waits for.
+const FIX_SCRIPT: &str = "<script>\n\
+(function(){\n\
+  var form=document.querySelector('.mc-form');\n\
+  var btn=document.getElementById('mc-fix');\n\
+  var src=document.getElementById('source');\n\
+  var panel=document.getElementById('mc-fix-panel');\n\
+  var diff=document.getElementById('mc-fix-diff');\n\
+  var note=document.getElementById('mc-fix-note');\n\
+  var useBtn=document.getElementById('mc-fix-use');\n\
+  var discardBtn=document.getElementById('mc-fix-discard');\n\
+  if(!form||!btn||!src||!panel||!diff||!useBtn||!discardBtn){return;}\n\
+  var csrfEl=form.querySelector('input[name=csrf]');\n\
+  var suggestion='';\n\
+  function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}\n\
+  function close(){panel.hidden=true;diff.innerHTML='';suggestion='';}\n\
+  // A line diff by longest common subsequence: cheap for a post, and it shows a copy-edit clearly.\n\
+  function render(a,b){\n\
+    var A=a.split('\\n'),B=b.split('\\n');\n\
+    if(A.length>600||B.length>600){\n\
+      // Too long to diff pleasantly; show the suggestion plainly.\n\
+      diff.innerHTML='<pre class=\\\"mc-fix-plain\\\">'+esc(b)+'</pre>';return;\n\
+    }\n\
+    var n=A.length,m=B.length,i,j;\n\
+    var dp=[];for(i=0;i<=n;i++){dp[i]=new Array(m+1).fill(0);}\n\
+    for(i=n-1;i>=0;i--)for(j=m-1;j>=0;j--)\n\
+      dp[i][j]=A[i]===B[j]?dp[i+1][j+1]+1:Math.max(dp[i+1][j],dp[i][j+1]);\n\
+    var out='';i=0;j=0;\n\
+    while(i<n&&j<m){\n\
+      if(A[i]===B[j]){out+='<div>'+esc(A[i]||' ')+'</div>';i++;j++;}\n\
+      else if(dp[i+1][j]>=dp[i][j+1]){out+='<del>'+esc(A[i]||' ')+'</del>';i++;}\n\
+      else{out+='<ins>'+esc(B[j]||' ')+'</ins>';j++;}\n\
+    }\n\
+    while(i<n){out+='<del>'+esc(A[i]||' ')+'</del>';i++;}\n\
+    while(j<m){out+='<ins>'+esc(B[j]||' ')+'</ins>';j++;}\n\
+    diff.innerHTML=out;\n\
+  }\n\
+  btn.addEventListener('click',function(){\n\
+    if(!src.value.trim()){note.textContent='';diff.innerHTML='';panel.hidden=false;\n\
+      diff.innerHTML='<p class=\\\"mc-note\\\">Write something first.</p>';return;}\n\
+    var was=btn.textContent;btn.disabled=true;btn.textContent='Fixing\\u2026';\n\
+    var b='csrf='+encodeURIComponent(csrfEl?csrfEl.value:'')\n\
+      +'&source='+encodeURIComponent(src.value);\n\
+    fetch(form.action.replace(/\\/save$/,'')+'/ai/fix',{method:'POST',credentials:'same-origin',\n\
+      headers:{'Content-Type':'application/x-www-form-urlencoded','Accept':'application/json'},body:b})\n\
+      .then(function(r){return r.json();})\n\
+      .then(function(d){\n\
+        btn.disabled=false;btn.textContent=was;\n\
+        if(d&&d.ok&&typeof d.fixed==='string'){\n\
+          suggestion=d.fixed;panel.hidden=false;\n\
+          if(suggestion===src.value){note.textContent='No changes suggested.';diff.innerHTML='';}\n\
+          else{note.textContent='';render(src.value,suggestion);}\n\
+        }else{panel.hidden=false;diff.innerHTML='<p class=\\\"mc-note\\\">'\n\
+          +esc((d&&d.error)||'The fix could not be made.')+'</p>';note.textContent='';}\n\
+      })\n\
+      .catch(function(){btn.disabled=false;btn.textContent=was;panel.hidden=false;\n\
+        diff.innerHTML='<p class=\\\"mc-note\\\">The server did not answer.</p>';});\n\
+  });\n\
+  useBtn.addEventListener('click',function(){\n\
+    if(suggestion){src.value=suggestion;src.dispatchEvent(new Event('input',{bubbles:true}));}\n\
+    close();\n\
+  });\n\
+  discardBtn.addEventListener('click',close);\n\
 })();\n\
 </script>\n";
 
