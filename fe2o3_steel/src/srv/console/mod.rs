@@ -1395,18 +1395,28 @@ color:var(--text-primary,#e6e6e6);}\
 .mc-chips{display:flex;flex-wrap:wrap;gap:0.4rem;align-content:flex-start;min-height:2.6rem;\
 padding:0.45rem;border-radius:6px;border:1px dashed var(--border,var(--aside-rule-color,#333c47));}\
 .mc-chips.mc-drop{border-style:solid;border-color:var(--accent,var(--aside-link-color,#7fb0e0));}\
-.mc-chip{display:inline-flex;align-items:center;gap:0.25rem;font:inherit;font-size:0.82rem;\
-cursor:pointer;padding:0.14rem 0.55rem;border-radius:999px;user-select:none;\
+/* A chip -- the console's twin of the reader's, so the two consoles and both blogs draw the one \
+thing. A fixed height, a closer square filling the right cap, the cross on its centre. */\
+.mc-chip{--chip-h:1.55rem;position:relative;box-sizing:border-box;display:inline-flex;\
+align-items:center;gap:0.25rem;height:var(--chip-h);font:inherit;font-size:0.82rem;\
+cursor:pointer;padding:0 0.6rem;border-radius:999px;user-select:none;\
 border:1px solid var(--border,var(--aside-rule-color,#333c47));background:transparent;\
-color:var(--text-primary,#e6e6e6);}\
+color:var(--text-primary,#e6e6e6);white-space:nowrap;}\
 .mc-chip:hover{border-color:var(--accent,var(--aside-link-color,#7fb0e0));}\
-.mc-chips-selected .mc-chip{background:var(--accent,var(--aside-link-color,#3b6ea5));\
+.mc-chips-selected .mc-chip{padding-right:var(--chip-h);\
+background:var(--accent,var(--aside-link-color,#3b6ea5));\
 border-color:var(--accent,var(--aside-link-color,#3b6ea5));color:#fff;}\
-.mc-chip-x,.mc-chip-del{font-size:0.95rem;line-height:1;opacity:0.75;}\
-.mc-chip-del{color:#e57373;}\
+/* The closer: a square filling the padding-box height, so the cross sits on the cap centre \
+regardless of the border; the glyph hidden and two bars drawn in its place. */\
+.mc-chip-x{position:absolute;right:0;top:0;height:100%;aspect-ratio:1;font-size:0;opacity:0.75;}\
+.mc-chip-x::before,.mc-chip-x::after{content:\"\";position:absolute;left:50%;top:50%;\
+width:calc(var(--chip-h)*0.34);height:1.4px;border-radius:2px;background:currentColor;}\
+.mc-chip-x::before{transform:translate(-50%,-50%) rotate(45deg);}\
+.mc-chip-x::after{transform:translate(-50%,-50%) rotate(-45deg);}\
+/* The curator's delete-from-vocabulary mark is a distinct, rarer power -- kept a glyph, and red, \
+so it never reads as the ordinary remove-from-post closer. */\
+.mc-chip-del{font-size:0.95rem;line-height:1;opacity:0.75;color:#e57373;}\
 .mc-chip:hover .mc-chip-x,.mc-chip:hover .mc-chip-del{opacity:1;}\
-/* A category may hold a space, and a two-word category is one chip, not two lines of one. */\
-.mc-chip-cat{white-space:nowrap;}\
 .mc-avatar-row{margin:0 0 1rem;display:flex;align-items:center;gap:1rem;flex-wrap:wrap;}\
 .mc-avatar-pick{display:flex;flex-direction:column;align-items:flex-start;gap:0.4rem;}\
 .mc-avatar-pick .mc-btn-quiet{cursor:pointer;}\
