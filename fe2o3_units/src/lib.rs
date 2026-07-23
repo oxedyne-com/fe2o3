@@ -16,7 +16,7 @@
 //! 
 //! Working with data sizes using binary prefixes:
 //! ```rust
-//! use oxedyne_fe2o3_units::{Units, SI};
+//! use oxedyne_fe2o3_units::{system::Units, si::SI};
 //! use oxedyne_fe2o3_core::prelude::*;
 //! 
 //! fn main() -> Outcome<()> {
@@ -43,7 +43,7 @@
 //!     
 //!     // Convert to a human-readable form (automatically scales to seconds)
 //!     let human_time = time.humanise();
-//!     assert_eq!(human_time.val(), 1.234);
+//!     assert_eq!(human_time.val, 1.234);
 //!     assert_eq!(human_time.prefix(), "");  // No prefix needed for base unit
 //!     Ok(())
 //! }
@@ -72,6 +72,8 @@
 //! ```
 //!
 #![forbid(unsafe_code)]
+pub mod dimension;
+pub mod quantity;
 pub mod scale;
 pub mod si;
 pub mod system;

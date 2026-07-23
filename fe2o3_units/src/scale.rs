@@ -416,7 +416,11 @@ impl PartialEq for Mag {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+    use crate::{
+        si::SI,
+        system::Units,
+    };
+
     #[test]
     fn test_simple_mag_one_01() -> Outcome<()> {
         let a = res!(Mag::one_decimal(123456.0, 3));
