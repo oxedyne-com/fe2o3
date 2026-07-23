@@ -18,5 +18,6 @@
 //!
 #![forbid(unsafe_code)]
 pub mod dim;
+pub mod planar;
 pub mod rect;
 pub mod shape;
