@@ -33,6 +33,7 @@ use crate::srv::{
 		PostState,
 		PublishConfig,
 		Source,
+		ai,
 		dest::{
 			DeliveryState,
 			Destination,
@@ -145,6 +146,13 @@ pub const PATH_CREDS: &str = "/manage/creds";
 /// The destinations page: the remotes a post can be sent on to, and the credentials for each.
 pub const PATH_DESTS: &str = "/manage/destinations";
 
+/// The AI page: the model to call, the key to call it with, the two prompts, and the addresses told
+/// when a comment needs a human.
+pub const PATH_AI: &str = "/manage/ai";
+
+/// Where the AI settings form posts.
+pub const PATH_AI_SAVE: &str = "/manage/ai/save";
+
 /// The moderation queue: what has been said and what is waiting on a decision.
 pub const PATH_COMMENTS: &str = "/manage/comments";
 
@@ -198,6 +206,7 @@ pub fn writes(path: &str) -> bool {
 		|| path == PATH_NEWSLETTER_TEST
 		|| path == PATH_PROFILE_SAVE
 		|| path == PATH_TAG_DELETE
+		|| path == PATH_AI_SAVE
 }
 
 /// Whether a path is a POST this module answers.
@@ -266,6 +275,7 @@ pub fn handle_get<
 		PATH_SUBS_CSV	=> subscribers_csv(db, id),
 		PATH_REPORTS	=> reports_page(theme, admin, db, id),
 		PATH_DESTS	=> destinations_page(cfg, theme, admin, csrf, db, query, id),
+		PATH_AI		=> ai_page(theme, admin, csrf, db, query, id),
 		PATH_LIST_JSON	=> list_json(cfg, db, id),
 		PATH_POST_JSON	=> post_json(cfg, db, query, id),
 		PATH_TAGS_JSON	=> tags_json(cfg, db, id),
@@ -2081,6 +2091,137 @@ fn destinations_page<
 	Ok(page(theme, admin, "Destinations", &body))
 }
 
+/// The AI settings: the model to call, the key to call it with, the two prompts, and the addresses
+/// told when a comment is held.
+///
+/// One form, because these are one setting -- a site turns AI on by filling it in and off by clearing
+/// the key. The key is write-only, exactly as a destination token is: a stored key comes back as the
+/// word that one is held, never as its value, and a blank key field keeps what is stored, so the model
+/// or a prompt can be changed without re-typing the key. The prompts prefill with their defaults where
+/// none is stored, so an operator edits from a sensible starting point rather than a blank; clearing a
+/// prompt box restores the default rather than sending none.
+fn ai_page<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	theme:	&Theme,
+	admin:	&SiteAdmin,
+	csrf:	&str,
+	db:	Option<&(Arc<RwLock<DB>>, UID)>,
+	query:	&str,
+	id:	&str,
+)
+	-> Outcome<HttpMessage>
+{
+	let mut body = String::new();
+	body.push_str("<h1>AI</h1>\n");
+
+	if let Some(said) = query_field(query, "said") {
+		body.push_str(&notice(&html_escape(&said)));
+	}
+
+	let db = match db {
+		Some(db)	=> db,
+		None		=> {
+			body.push_str(&notice(
+				"This site keeps its AI settings in its database, and has no database configured. \
+				Set <code>db_dir_rel</code> on the vhost.",
+			));
+			return Ok(page(theme, admin, "AI", &body));
+		}
+	};
+
+	let s = match ai::get_settings(db) {
+		Ok(s)	=> s,
+		Err(e)	=> {
+			error!(e, "{}: console: cannot read the AI settings", id);
+			body.push_str(&notice("The AI settings could not be read. The log says why."));
+			return Ok(page(theme, admin, "AI", &body));
+		}
+	};
+
+	body.push_str(&ai_form(&s, csrf));
+	Ok(page(theme, admin, "AI", &body))
+}
+
+/// The AI settings form, built from the settings a site has stored. Pure, so it can be seen without a
+/// database behind it: the provider is selected, the key shown only as held-or-not, the prompts
+/// prefilled with their defaults, and the clear-key form offered only where a key is stored.
+fn ai_form(s: &ai::AiSettings, csrf: &str) -> String {
+	let mut body = String::new();
+
+	let opt = |val: &str, label: &str| fmt!(
+		"<option value=\"{val}\"{sel}>{label}</option>",
+		val = val, label = label,
+		sel = if s.provider == val { " selected" } else { "" },
+	);
+
+	body.push_str(&fmt!(
+		"<p class=\"mc-muted\">Your own key, used to tidy a post you are editing and to sort a comment \
+		before it waits for you. The key is stored encrypted and never shown again &mdash; leave it \
+		blank to keep the one held. {status}</p>\n\
+		<form class=\"mc-form mc-settings\" method=\"POST\" action=\"{save}\">\n\
+		<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\n\
+		<div class=\"mc-f-text\"><label for=\"provider\">Provider</label>\
+		<select id=\"provider\" name=\"provider\">{none}{openrouter}{fireworks}{mistral}</select></div>\n\
+		<div class=\"mc-f-text\"><label for=\"model\">Model</label>\
+		<input type=\"text\" id=\"model\" name=\"model\" value=\"{model}\" \
+		placeholder=\"mistral-large-latest\"></div>\n\
+		<div class=\"mc-f-text\"><label for=\"api_key\">API key</label>\
+		<input type=\"password\" id=\"api_key\" name=\"api_key\" autocomplete=\"new-password\" \
+		placeholder=\"{hint}\"></div>\n\
+		<div class=\"mc-f-text\"><label for=\"fix_prompt\">Fix prompt</label>\
+		<textarea id=\"fix_prompt\" name=\"fix_prompt\" rows=\"5\">{fix}</textarea>\
+		<span class=\"mc-note\">Sent with the text when you press Fix while editing a post.</span></div>\n\
+		<div class=\"mc-f-text\"><label for=\"comment_prompt\">Comment prompt</label>\
+		<textarea id=\"comment_prompt\" name=\"comment_prompt\" rows=\"4\">{comment}</textarea>\
+		<span class=\"mc-note\">Sent with each posted comment. Ask for one word: APPROVE, SPAM or HOLD.\
+		</span></div>\n\
+		<div class=\"mc-f-text\"><label for=\"alert_emails\">Tell these addresses when a comment is held\
+		</label>\
+		<textarea id=\"alert_emails\" name=\"alert_emails\" rows=\"3\" \
+		placeholder=\"you@example.com\">{emails}</textarea>\
+		<span class=\"mc-note\">One per line, or separated by commas. Leave blank to be told nothing and \
+		find held comments in the queue.</span></div>\n\
+		<button type=\"submit\" class=\"mc-btn\">Save</button>\n\
+		</form>\n",
+		status		= if s.api_key.is_empty() { "No key is set." } else { "A key is set." },
+		save		= PATH_AI_SAVE,
+		csrf		= html_escape(csrf),
+		none		= opt("", "\u{2014} none \u{2014}"),
+		openrouter	= opt("openrouter", "OpenRouter"),
+		fireworks	= opt("fireworks", "Fireworks"),
+		mistral		= opt("mistral", "Mistral"),
+		model		= html_escape(&s.model),
+		hint		= if s.api_key.is_empty() { "required" } else { "kept" },
+		// Prefilled with the default where none is stored, so the box is edited from a sensible start;
+		// the empty-is-default rule in `ai` means clearing the box later restores the default.
+		fix		= html_escape(s.fix_prompt()),
+		comment		= html_escape(s.comment_prompt()),
+		emails		= html_escape(&s.alert_emails.join("\n")),
+	));
+
+	// Clearing the key is a second form, so a save cannot turn AI off by accident; offered only where
+	// a key is stored to clear.
+	if !s.api_key.is_empty() {
+		body.push_str(&fmt!(
+			"<form class=\"mc-form mc-settings\" method=\"POST\" action=\"{save}\" \
+			onsubmit=\"return confirm('Clear the stored API key? This turns AI off until a new one is set.')\">\n\
+			<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\n\
+			<input type=\"hidden\" name=\"clear\" value=\"key\">\n\
+			<button type=\"submit\" class=\"mc-btn mc-btn-danger\">Clear the key</button>\n\
+			</form>\n",
+			save	= PATH_AI_SAVE,
+			csrf	= html_escape(csrf),
+		));
+	}
+
+	body
+}
+
 /// One remote's settings: its fields, whether it is set, and the ways to set or clear it.
 ///
 /// Clearing is a second form rather than a checkbox in the first, so that saving cannot clear by
@@ -2412,6 +2553,7 @@ pub async fn handle_post<
 		&& request_path != PATH_CREDS
 		&& request_path != PATH_SUBS_ACTION
 		&& request_path != PATH_PROFILE_SAVE
+		&& request_path != PATH_AI_SAVE
 	{
 		return Ok(back_with(
 			"this site serves its posts from a directory, so there is nothing to write into; set \
@@ -2429,6 +2571,7 @@ pub async fn handle_post<
 		PATH_DELETE	=> do_delete(db, body, &admin.username, json, id),
 		PATH_IMPORT	=> do_import(cfg, db, &admin.username, json, id),
 		PATH_CREDS	=> do_creds(db, body, &admin.username, json, id),
+		PATH_AI_SAVE	=> do_ai_save(db, body, &admin.username, json, id),
 		PATH_NEWSLETTER	=> do_newsletter(cfg, db, mail, body, &admin.username, json, id).await,
 		PATH_NEWSLETTER_TEST	=> do_test_send(cfg, db, mail, body, &admin.username, json, id).await,
 		PATH_SUBS_ACTION	=> do_subs_action(db, body, &admin.username, json, id),
@@ -2624,6 +2767,84 @@ fn dests_back(json: bool) -> HttpMessage {
 	} else {
 		redirect(PATH_DESTS)
 	}
+}
+
+/// The answer to an AI settings write, back to its own page.
+fn ai_back(json: bool) -> HttpMessage {
+	if json {
+		json_body("{\"ok\":true}")
+	} else {
+		redirect(PATH_AI)
+	}
+}
+
+/// The answer to an AI write that did not go through, carrying the reason back to its own page.
+fn ai_back_with(why: &str, json: bool) -> HttpMessage {
+	if json {
+		json_error(why)
+	} else {
+		redirect(&fmt!("{}?said={}", PATH_AI, url_encode(why)))
+	}
+}
+
+/// Saves a site's AI settings.
+///
+/// The key is kept where the field is left blank and one is already stored, so the model or a prompt
+/// can be changed without re-typing it; a provider without a model or key is allowed, since a
+/// half-filled panel is a site part-way through setting AI up, not an error. Clearing the key is a
+/// distinct action that turns AI off. The stored line names no secret, deliberately.
+fn do_ai_save<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	body:	&[u8],
+	who:	&str,
+	json:	bool,
+	id:	&str,
+)
+	-> Outcome<HttpMessage>
+{
+	let mut s = res!(ai::get_settings(db));
+
+	if super::form_field(body, "clear").as_deref() == Some("key") {
+		s.api_key = String::new();
+		res!(ai::put_settings(db, &s));
+		info!("{}: console: '{}' cleared the AI key", id, who);
+		return Ok(ai_back(json));
+	}
+
+	// A provider must be one the client can reach, or nothing at all -- an unknown word is a typo the
+	// operator should hear about rather than a call that fails later at a host that does not exist.
+	let provider = super::form_field(body, "provider").unwrap_or_default().trim().to_string();
+	if !provider.is_empty() && oxedyne_fe2o3_net::llm::Provider::of(&provider).is_err() {
+		return Ok(ai_back_with(
+			"the provider must be OpenRouter, Fireworks or Mistral", json));
+	}
+	s.provider = provider;
+	s.model = super::form_field(body, "model").unwrap_or_default().trim().to_string();
+
+	// The key is kept where the field is blank and one is held, so the rest can be edited without it.
+	if let Some(k) = super::form_field(body, "api_key") {
+		if !k.trim().is_empty() {
+			s.api_key = k.trim().to_string();
+		}
+	}
+
+	// The prompts are stored as typed; empty is not an error, it means "use the default" at call time.
+	s.fix_prompt = super::form_field(body, "fix_prompt").unwrap_or_default();
+	s.comment_prompt = super::form_field(body, "comment_prompt").unwrap_or_default();
+	s.alert_emails = ai::parse_emails(&super::form_field(body, "alert_emails").unwrap_or_default());
+
+	res!(ai::put_settings(db, &s));
+	info!("{}: console: '{}' saved the AI settings ({} provider, {} alert address(es))",
+		id, who,
+		if s.provider.is_empty() { "no" } else { &s.provider },
+		s.alert_emails.len());
+	Ok(ai_back(json))
 }
 
 /// The answer to a destination write that did not go through, carrying the reason back to its own page.
@@ -3753,6 +3974,39 @@ mod tests {
 		Ok(())
 	}
 
+	/// The AI form selects the stored provider, shows a held key as held and never as its value,
+	/// prefills a blank prompt with its default, and offers the clear-key form only when a key is set.
+	#[test]
+	fn test_the_ai_form_hides_the_key_21() -> Outcome<()> {
+		let set = ai::AiSettings {
+			provider:	fmt!("mistral"),
+			model:		fmt!("mistral-large-latest"),
+			api_key:	fmt!("sk-super-secret"),
+			fix_prompt:	String::new(),
+			comment_prompt:	fmt!("Say APPROVE or SPAM."),
+			alert_emails:	vec![fmt!("me@example.com")],
+		};
+		let s = ai_form(&set, "csrf0");
+		// The stored provider is the selected option.
+		assert!(s.contains(r#"<option value="mistral" selected>Mistral</option>"#),
+			"provider not selected: {}", s);
+		// The key is never rendered; the field says it is kept.
+		assert!(!s.contains("sk-super-secret"), "the key was rendered into the page: {}", s);
+		assert!(s.contains(r#"placeholder="kept""#), "no kept hint for a held key: {}", s);
+		// A blank fix prompt prefills the default; a set comment prompt shows itself.
+		assert!(s.contains("meticulous copy-editor"), "the default fix prompt was not prefilled: {}", s);
+		assert!(s.contains("Say APPROVE or SPAM."), "the set comment prompt is missing: {}", s);
+		// The alert address is prefilled, and clearing the key is offered because one is held.
+		assert!(s.contains("me@example.com"), "the alert address is missing: {}", s);
+		assert!(s.contains("Clear the key"), "no clear-key form for a held key: {}", s);
+
+		// With nothing set, the field asks for a key and offers no clear form.
+		let empty = ai_form(&ai::AiSettings::default(), "csrf0");
+		assert!(empty.contains(r#"placeholder="required""#), "no required hint for a missing key: {}", empty);
+		assert!(!empty.contains("Clear the key"), "a clear form was offered with no key: {}", empty);
+		Ok(())
+	}
+
 	/// A subscriber in a given state, signed up at a given moment, for the report tests.
 	fn sub_at(email: &str, state: subscribe::SubState, created: Option<&str>) -> subscribe::Subscriber {
 		subscribe::Subscriber {
@@ -4536,6 +4790,20 @@ mod ui_dump {
 		body.push_str(&list_report(&subs));
 		body.push_str(&send_report(&hist));
 		res!(put(&dir, "reports", &page(&t, &a, "Reports", &body)));
+
+		// The AI panel, part-configured, so the provider is chosen, the key shows as held, and the
+		// prompts show real text rather than an empty box.
+		let ai_set = ai::AiSettings {
+			provider:	fmt!("mistral"),
+			model:		fmt!("mistral-large-latest"),
+			api_key:	fmt!("sk-held"),
+			fix_prompt:	String::new(),
+			comment_prompt:	String::new(),
+			alert_emails:	vec![fmt!("jason@example.com")],
+		};
+		let mut ai_body = String::from("<h1>AI</h1>\n");
+		ai_body.push_str(&ai_form(&ai_set, csrf));
+		res!(put(&dir, "ai", &page(&t, &a, "AI", &ai_body)));
 
 		Ok(())
 	}

@@ -1100,6 +1100,7 @@ pub fn page(theme: &Theme, admin: &SiteAdmin, title: &str, body: &str) -> HttpMe
 	s.push_str(&fmt!("<a href=\"{}\">Reports</a>", publish::PATH_REPORTS));
 	s.push_str(&fmt!("<a href=\"{}\">Comments</a>", publish::PATH_COMMENTS));
 	s.push_str(&fmt!("<a href=\"{}\">Destinations</a>", publish::PATH_DESTS));
+	s.push_str(&fmt!("<a href=\"{}\">AI</a>", publish::PATH_AI));
 	s.push_str(&fmt!("<a href=\"{}\">Profile</a>", publish::PATH_PROFILE));
 	s.push_str(&fmt!("<span class=\"mc-who\">{}…</span>", html_escape(&admin.username[..8.min(admin.username.len())])));
 	// The way out of the console is a close, in the corner, as it is on every page within it --
@@ -1353,6 +1354,12 @@ margin-top:0.8rem;}\
    side-by-side panes; a field for a handle or a host is not made better by being 80rem\
    of it, and a row of them that wide reads as unconsidered rather than spacious. */\
 .mc-settings{max-width:34rem;}\
+/* A settings textarea is a prompt or a short list, not the 22rem post editor, so it honours its own \
+   `rows` and reads as prose rather than code. */\
+.mc-settings textarea{min-height:0;font-family:inherit;font-size:0.95rem;line-height:1.5;}\
+/* A hint under a field: quiet, and it does not want the field's own bottom margin doubled. */\
+.mc-note{display:block;margin:0.25rem 0 0;font-size:0.82rem;\
+color:var(--text-secondary,var(--aside-date-color,#8a97a6));}\
 /* The moderation queue. A comment is shown rendered, framed, with its verbs beneath: a\
    decision about what to publish is made looking at what would be published. */\
 .mc-comment{border:1px solid var(--border,var(--aside-rule-color,#333c47));border-radius:6px;\
