@@ -176,16 +176,25 @@ fn index(
 		body.push_str("\" data-search=\"");
 		escape_attr(&mut body, &fmt!("{} {}", p.title, p.excerpt).to_lowercase());
 		body.push_str("\">");
+		// The meta line: when it was written and how long it takes to read, the two facts a reader
+		// weighs before opening a post. An index is a set of choices, not the reading itself -- the
+		// prose lives at the post's own page, one click away, so here a post is its title and the
+		// little that helps a reader pick it.
+		body.push_str("<div class=\"aside-item-meta\">");
 		if let Some(d) = &p.date {
 			// The attribute is the stored ISO form and the text is the readable one, which is what
 			// `<time>` has two of them for: a post dated to the minute would otherwise show a reader
 			// the `T` in the middle of its own date.
-			body.push_str("<div class=\"aside-date\"><time datetime=\"");
+			body.push_str("<time class=\"aside-date\" datetime=\"");
 			escape_attr(&mut body, d);
 			body.push_str("\">");
 			escape_text(&mut body, &date_text(d));
-			body.push_str("</time></div>");
+			body.push_str("</time>");
 		}
+		body.push_str("<span class=\"aside-read\">");
+		escape_text(&mut body, &read_time(p.words));
+		body.push_str("</span>");
+		body.push_str("</div>");
 		// Who wrote it, where more than one person writes here. On a blog of one it would be the same
 		// name under every title, which tells a reader choosing between them nothing.
 		if authors.len() > 1 {
@@ -197,16 +206,11 @@ fn index(
 				body.push_str("</span></div>");
 			}
 		}
-		body.push_str("<h2><a href=\"");
+		body.push_str("<h2 class=\"aside-item-title\"><a href=\"");
 		escape_attr(&mut body, &cfg.path_of(&p.slug));
 		body.push_str("\">");
 		escape_text(&mut body, &p.title);
 		body.push_str("</a></h2>");
-		if !p.excerpt.is_empty() {
-			body.push_str("<p class=\"aside-excerpt\">");
-			escape_text(&mut body, &p.excerpt);
-			body.push_str("</p>");
-		}
 		body.push_str(&facets_list(cfg, p));
 		body.push_str("</li>\n");
 	}
@@ -325,22 +329,33 @@ fn filter_shell(cfg: &PublishConfig, posts: &[Post], authors: &[Author]) -> Stri
 		s.push_str(&facet_block("tag", "Tags", &tags));
 	}
 
-	// The reading-time slider: two thumbs over the range the posts span, so a reader keeps the short
-	// ones, the long ones, or a band between. Hidden by the script where every post reads alike, since
-	// a slider that cannot move is furniture. The read-out beside it the script keeps current.
-	if rt_hi > rt_lo {
-		s.push_str(&fmt!(
-			"<div class=\"aside-filter-time\" id=\"aside-filter-time\" data-lo=\"{lo}\" data-hi=\"{hi}\">\n\
-			<span class=\"aside-time-lbl\">Reading time</span>\n\
-			<div class=\"aside-time-track\">\n\
-			<input type=\"range\" class=\"aside-time-min\" id=\"aside-time-min\" \
-				min=\"{lo}\" max=\"{hi}\" value=\"{lo}\" step=\"1\" aria-label=\"Least minutes\">\n\
-			<input type=\"range\" class=\"aside-time-max\" id=\"aside-time-max\" \
-				min=\"{lo}\" max=\"{hi}\" value=\"{hi}\" step=\"1\" aria-label=\"Most minutes\">\n\
-			</div>\n\
-			<span class=\"aside-time-out\" id=\"aside-time-out\">{lo}\u{2013}{hi} min</span>\n\
-			</div>\n",
-			lo = rt_lo, hi = rt_hi));
+	// Reading time, the last cut a reader makes: two thumbs over the range the posts span, to keep the
+	// short ones, the long ones, or a band between. Where every post reads alike -- one post, or all of
+	// a length -- there is no range to drag, so the same row shows the single figure instead of a
+	// slider that could only sit still. Either way the control is present, since reading time is a
+	// dimension a reader filters on and the row says so; the script keeps the read-out current.
+	if !posts.is_empty() {
+		if rt_hi > rt_lo {
+			s.push_str(&fmt!(
+				"<div class=\"aside-filter-time\" id=\"aside-filter-time\" data-lo=\"{lo}\" data-hi=\"{hi}\">\n\
+				<span class=\"aside-time-lbl\">Reading time</span>\n\
+				<div class=\"aside-time-track\">\n\
+				<input type=\"range\" class=\"aside-time-min\" id=\"aside-time-min\" \
+					min=\"{lo}\" max=\"{hi}\" value=\"{lo}\" step=\"1\" aria-label=\"Least minutes\">\n\
+				<input type=\"range\" class=\"aside-time-max\" id=\"aside-time-max\" \
+					min=\"{lo}\" max=\"{hi}\" value=\"{hi}\" step=\"1\" aria-label=\"Most minutes\">\n\
+				</div>\n\
+				<span class=\"aside-time-out\" id=\"aside-time-out\">{lo}\u{2013}{hi} min</span>\n\
+				</div>\n",
+				lo = rt_lo, hi = rt_hi));
+		} else {
+			s.push_str(&fmt!(
+				"<div class=\"aside-filter-time aside-filter-time-single\">\n\
+				<span class=\"aside-time-lbl\">Reading time</span>\n\
+				<span class=\"aside-time-out\">{n} min</span>\n\
+				</div>\n",
+				n = rt_lo));
+		}
 	}
 
 	s.push_str("</section>\n");
@@ -1017,20 +1032,50 @@ mod tests {
 		Ok(())
 	}
 
-	/// The index links every post and says what each one opens with.
+	/// The index is a list of choices: each post its title as a link, its date and reading time, and
+	/// its chips -- not the prose itself, which lives one click away at the post's own page.
 	#[test]
 	fn test_the_index_links_its_posts_02() -> Outcome<()> {
 		let posts = vec![post()];
 		let resp = res!(index(&cfg(), &posts, &[], "", "test"));
 		let body = String::from_utf8_lossy(&resp.body).to_string();
 		assert_eq!(status_of(&resp), Some(HttpStatus::OK));
-		assert!(body.contains(r#"<a href="/asides/on-rent">On rent</a>"#), "got: {}", body);
-		assert!(body.contains("An opening sentence."), "no excerpt: {}", body);
+		assert!(body.contains(r#"<h2 class="aside-item-title"><a href="/asides/on-rent">On rent</a></h2>"#),
+			"no title link: {}", body);
+		// The reading time is shown, not just carried as a datum for the filter.
+		assert!(body.contains(r#"<span class="aside-read">3 min read</span>"#), "no reading time: {}", body);
+		// The prose stays at the post's own page: an index item carries no excerpt or body.
+		assert!(!body.contains("An opening sentence."), "the index inlined the prose: {}", body);
+		assert!(!body.contains("aside-excerpt"), "the index kept the excerpt: {}", body);
 		// The list item carries the facts the filter matches on.
 		assert!(body.contains(r#"data-read-mins="3""#), "no reading-time datum: {}", body);
 		assert!(body.contains(r#"data-categories="Personal""#), "no category datum: {}", body);
 		// And the filter's own script is linked, once.
 		assert_eq!(body.matches("/asides/filter.js").count(), 1, "filter script not linked once: {}", body);
+		Ok(())
+	}
+
+	/// The reading-time control is always present: a dual-thumb slider where the posts vary in length,
+	/// and a single figure where they do not, so the row never becomes a slider that cannot move.
+	#[test]
+	fn test_the_time_filter_degrades_to_a_figure_20() -> Outcome<()> {
+		// One post: nothing to drag, so the single figure.
+		let one = res!(index(&cfg(), &[post()], &[], "", "test"));
+		let body = String::from_utf8_lossy(&one.body).to_string();
+		assert!(body.contains("aside-filter-time-single"), "no single-figure time row: {}", body);
+		assert!(!body.contains("aside-time-min"), "a dead slider was drawn for one post: {}", body);
+
+		// Two posts of different lengths: the dual slider.
+		let mut short = post();
+		short.slug = fmt!("short");
+		short.words = 100;
+		let mut long = post();
+		long.slug = fmt!("long");
+		long.words = 2000;
+		let two = res!(index(&cfg(), &[short, long], &[], "", "test"));
+		let body = String::from_utf8_lossy(&two.body).to_string();
+		assert!(body.contains(r#"id="aside-time-min""#), "no slider where posts vary: {}", body);
+		assert!(!body.contains("aside-filter-time-single"), "a figure where a slider belongs: {}", body);
 		Ok(())
 	}
 
