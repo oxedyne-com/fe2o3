@@ -2,7 +2,10 @@
 
 pub use crate::{
 	blur::Shadow,
-	colour::Rgba,
+	colour::{
+		ColourVision,
+		Rgba,
+	},
 	path::{
 		Bounds,
 		Path,

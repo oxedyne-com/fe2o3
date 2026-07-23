@@ -2,22 +2,36 @@
 //!
 //! A vector mark -- an icon, a logo -- is drawn in a drawing program and leaves it as SVG, where all
 //! of the geometry sits in the `d` attribute of a `<path>` element: a terse string of one-letter
-//! commands and numbers. This module reads that string and nothing else. No XML, no styling, no
-//! document: the caller keeps whatever it wants of the file and hands the geometry here.
+//! commands and numbers. This module reads that string with [`path_data`] and writes it back with
+//! [`write_path_data`], and nothing else. No XML, no styling, no document: the caller keeps whatever
+//! it wants of the file and hands the geometry here.
 //!
 //! That boundary is the point. Path data is a small, closed, fully specified grammar, and it is the
 //! part every drawing program agrees on. Everything above it -- elements, attributes, gradients,
 //! filters, referenced content -- is a document format, and a caller that wants an icon does not want
 //! a document.
 //!
+//! The one concession above bare geometry is [`presentation`], which renders the paint a
+//! [`crate::stroke::Stroke`] and an [`Rgba`] already model -- fill, stroke, width, caps, joins,
+//! dashes -- as the attribute string a `<path>` carries alongside its `d`. It writes the attributes
+//! and no element around them, for the same reason the reader stops at the `d`: the element tree is
+//! the caller's format.
+//!
 //! Every command in the grammar is read, including elliptical arcs. An arc has no [`crate::path::Seg`]
 //! of its own, so it is converted to cubic béziers on the way in and no caller has to know it was
 //! ever an arc.
 
+use crate::colour::Rgba;
 use crate::path::{
 	Path,
 	PathBuilder,
 	Pt,
+	Seg,
+};
+use crate::stroke::{
+	Cap,
+	Join,
+	Stroke,
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -324,6 +338,154 @@ fn angle(ux: f64, uy: f64, vx: f64, vy: f64) -> f64 {
 		-a
 	} else {
 		a
+	}
+}
+
+/// Writes a [`Path`] out as SVG path data -- the `d` attribute of a `<path>` element.
+///
+/// The exact inverse of [`path_data`]: every segment becomes the one command that names it, and a
+/// string this writes is one that reader reads back to the same geometry. Only absolute commands are
+/// emitted -- `M`, `L`, `Q`, `C`, `Z` -- since those are the segments the path types hold, and the
+/// relative and shorthand forms the reader also accepts are a convenience of hand-written data, not
+/// a distinction the geometry keeps.
+///
+/// The commands are separated by spaces, and the two coordinates of a point by a comma, which is the
+/// form drawing programs write and the eye reads most easily. No document, element or attribute is
+/// written -- only the path data -- for the reason [`path_data`] reads only the same: the structure
+/// above a `<path>` is the caller's format, not this crate's.
+///
+/// # Arguments
+/// * `path` - The path to write.
+///
+/// # Returns
+/// The path data, as it would appear in the attribute. An empty path writes an empty string.
+pub fn write_path_data(path: &Path) -> String {
+	let mut out = String::new();
+	for seg in path.segs() {
+		if !out.is_empty() {
+			out.push(' ');
+		}
+		match *seg {
+			Seg::MoveTo(p) => {
+				out.push('M');
+				point(&mut out, p);
+			},
+			Seg::LineTo(p) => {
+				out.push('L');
+				point(&mut out, p);
+			},
+			Seg::QuadTo(c, p) => {
+				out.push('Q');
+				point(&mut out, c);
+				out.push(' ');
+				point(&mut out, p);
+			},
+			Seg::CubicTo(c0, c1, p) => {
+				out.push('C');
+				point(&mut out, c0);
+				out.push(' ');
+				point(&mut out, c1);
+				out.push(' ');
+				point(&mut out, p);
+			},
+			Seg::Close => out.push('Z'),
+		}
+	}
+	out
+}
+
+/// Appends a point as `x,y`, each coordinate in its shortest exact form.
+fn point(out: &mut String, p: Pt) {
+	out.push_str(&num(p.x));
+	out.push(',');
+	out.push_str(&num(p.y));
+}
+
+/// One coordinate, in the shortest decimal that reads back to the same `f32`.
+///
+/// Rust's own float formatting already gives the shortest round-tripping form -- `10` for `10.0`,
+/// `0.15` for a fifth and a bit -- so a whole coordinate carries no trailing `.0` and the data stays
+/// terse, exactly as a drawing program would write it.
+fn num(v: f32) -> String {
+	fmt!("{}", v)
+}
+
+/// Renders the SVG presentation attributes for a fill and a stroke, as one attribute string.
+///
+/// This is the counterpart to [`write_path_data`] for everything that is not geometry: the colours,
+/// the pen width, the caps and joins and dashes that [`crate::stroke::Stroke`] and [`Rgba`] already
+/// model. It writes the attributes and their values -- `fill="#..."`, `stroke-width="2"`, and so on
+/// -- and nothing around them, so a caller drops the string straight into the `<path>` element its
+/// own format builds.
+///
+/// The fill and the stroke are each optional, because a shape may be filled, stroked, or both:
+/// * A fill of `Some(c)` writes `fill` and, where the colour is not opaque, `fill-opacity`. A fill
+///   of `None` writes `fill="none"`, since SVG fills black by default and a caller that wants no
+///   fill must say so.
+/// * A stroke of `Some((c, pen))` writes the stroke colour, its opacity where it is not opaque, the
+///   width, the cap, the join, the miter limit, and the dash pattern and offset where the pen
+///   carries one. A stroke of `None` writes nothing, and the shape is filled only.
+///
+/// The stroke colour travels with the pen because neither draws a stroke without the other: a width
+/// with no colour paints nothing, and a colour with no width has nothing to paint.
+pub fn presentation(fill: Option<Rgba>, stroke: Option<(Rgba, &Stroke)>) -> String {
+	let mut at: Vec<String> = Vec::new();
+	match fill {
+		None => at.push(fmt!("fill=\"none\"")),
+		Some(c) => {
+			at.push(fmt!("fill=\"{}\"", rgb(c)));
+			if !c.is_opaque() {
+				at.push(fmt!("fill-opacity=\"{}\"", opacity(c)));
+			}
+		},
+	}
+	if let Some((c, pen)) = stroke {
+		at.push(fmt!("stroke=\"{}\"", rgb(c)));
+		if !c.is_opaque() {
+			at.push(fmt!("stroke-opacity=\"{}\"", opacity(c)));
+		}
+		at.push(fmt!("stroke-width=\"{}\"", num(pen.width)));
+		at.push(fmt!("stroke-linecap=\"{}\"", cap(pen.cap)));
+		at.push(fmt!("stroke-linejoin=\"{}\"", join(pen.join)));
+		at.push(fmt!("stroke-miterlimit=\"{}\"", num(pen.miter_limit)));
+		if let Some(d) = &pen.dash {
+			let lens: Vec<String> = d.pattern.iter().map(|v| num(*v)).collect();
+			at.push(fmt!("stroke-dasharray=\"{}\"", lens.join(",")));
+			if d.offset != 0.0 {
+				at.push(fmt!("stroke-dashoffset=\"{}\"", num(d.offset)));
+			}
+		}
+	}
+	at.join(" ")
+}
+
+/// A colour's `#rrggbb`, the paint value an SVG attribute takes. The alpha, if any, is carried
+/// separately by an opacity attribute, which is the form every SVG renderer understands.
+fn rgb(c: Rgba) -> String {
+	fmt!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b)
+}
+
+/// A colour's alpha as an opacity from 0 to 1, to three places, which resolves every one of the 256
+/// steps an eight-bit alpha can take.
+fn opacity(c: Rgba) -> String {
+	fmt!("{:.3}", (c.a as f32) / 255.0)
+}
+
+/// The SVG name of a line cap.
+fn cap(c: Cap) -> &'static str {
+	match c {
+		Cap::Butt	=> "butt",
+		Cap::Round	=> "round",
+		Cap::Square	=> "square",
+	}
+}
+
+/// The SVG name of a line join.
+fn join(j: Join) -> &'static str {
+	match j {
+		Join::Miter	=> "miter",
+		Join::Round	=> "round",
+		Join::Bevel	=> "bevel",
 	}
 }
 
@@ -722,6 +884,102 @@ mod tests {
 		// It is measured from a pen at the origin, so it lands on its own coordinates.
 		let p = res!(path_data("m 10 20 l 1 1"));
 		assert_eq!(p.segs()[0], Seg::MoveTo(Pt::new(10.0, 20.0)));
+		Ok(())
+	}
+
+	#[test]
+	fn test_a_line_writes_the_expected_data_25() -> Outcome<()> {
+		// The hand-known case: a move to the origin and a line to (10, 0) is exactly "M0,0 L10,0".
+		// Whole coordinates carry no decimal point, and a comma joins each pair, a space each
+		// command.
+		let p = res!(path_data("M 0 0 L 10 0"));
+		assert_eq!(write_path_data(&p), "M0,0 L10,0");
+		Ok(())
+	}
+
+	#[test]
+	fn test_every_command_writes_its_letter_26() -> Outcome<()> {
+		// One of each segment kind, so the writer's whole command vocabulary is pinned to a known
+		// string.
+		let mut pb = PathBuilder::new();
+		pb.move_to(Pt::new(1.0, 2.0));
+		pb.line_to(Pt::new(3.0, 4.0));
+		pb.quad_to(Pt::new(5.0, 6.0), Pt::new(7.0, 8.0));
+		pb.cubic_to(Pt::new(9.0, 10.0), Pt::new(11.0, 12.0), Pt::new(13.0, 14.0));
+		pb.close();
+		let p = res!(pb.finish());
+		assert_eq!(write_path_data(&p), "M1,2 L3,4 Q5,6 7,8 C9,10 11,12 13,14 Z");
+		Ok(())
+	}
+
+	#[test]
+	fn test_an_empty_path_writes_an_empty_string_27() -> Outcome<()> {
+		let p = res!(PathBuilder::new().finish());
+		assert_eq!(write_path_data(&p), "");
+		Ok(())
+	}
+
+	#[test]
+	fn test_the_writer_round_trips_through_the_reader_28() -> Outcome<()> {
+		// The writer is the reader's inverse: a path written to data and read back is the path it
+		// began as, segment for segment. The reader is the external oracle here -- the geometry is
+		// checked against the module that already reads what every drawing program writes, not
+		// against the writer restated. Fractional coordinates are used deliberately, so the test
+		// bites on the number formatting and not only on round integers.
+		let mut pb = PathBuilder::new();
+		pb.move_to(Pt::new(1.5, -2.25));
+		pb.line_to(Pt::new(10.0, 0.5));
+		pb.quad_to(Pt::new(12.5, 3.75), Pt::new(20.0, -1.5));
+		pb.cubic_to(Pt::new(21.0, 2.0), Pt::new(23.5, 4.5), Pt::new(30.0, 0.0));
+		pb.close();
+		let p = res!(pb.finish());
+		let back = res!(path_data(&write_path_data(&p)));
+		assert_eq!(p.segs(), back.segs(), "the path did not survive the round trip");
+		Ok(())
+	}
+
+	#[test]
+	fn test_a_curved_shape_round_trips_29() -> Outcome<()> {
+		// A whole built shape -- a rounded rectangle, all lines and cubics -- survives the round
+		// trip through data and back, so the writer holds up on geometry it did not itself hand-pick.
+		use crate::path::Bounds;
+		let p = res!(Path::round_rect(Bounds::new(2.0, 3.0, 40.0, 25.0), 6.0));
+		let back = res!(path_data(&write_path_data(&p)));
+		assert_eq!(p.segs(), back.segs());
+		Ok(())
+	}
+
+	#[test]
+	fn test_presentation_writes_fill_and_stroke_attributes_30() -> Outcome<()> {
+		use crate::stroke::{
+			Cap,
+			Dash,
+			Join,
+		};
+		let pen = res!(Stroke::new(2.0))
+			.with_cap(Cap::Round)
+			.with_join(Join::Bevel)
+			.with_dash(Dash::new(vec![4.0, 2.0]).with_offset(1.0));
+		let attrs = presentation(Some(res!(Rgba::from_hex("#ff8800"))), Some((Rgba::BLACK, &pen)));
+		assert!(attrs.contains("fill=\"#ff8800\""), "the fill colour, found: {}", attrs);
+		assert!(attrs.contains("stroke=\"#000000\""), "the stroke colour");
+		assert!(attrs.contains("stroke-width=\"2\""), "the pen width");
+		assert!(attrs.contains("stroke-linecap=\"round\""), "the cap");
+		assert!(attrs.contains("stroke-linejoin=\"bevel\""), "the join");
+		assert!(attrs.contains("stroke-dasharray=\"4,2\""), "the dash pattern");
+		assert!(attrs.contains("stroke-dashoffset=\"1\""), "the dash offset");
+		Ok(())
+	}
+
+	#[test]
+	fn test_presentation_says_none_for_no_fill_and_carries_alpha_31() -> Outcome<()> {
+		// No fill must be stated outright, since SVG fills black by default. A translucent stroke
+		// splits into a colour and a separate opacity, the form every renderer reads.
+		let pen = res!(Stroke::new(1.0));
+		let attrs = presentation(None, Some((Rgba::new(0, 0, 0, 128), &pen)));
+		assert!(attrs.contains("fill=\"none\""), "no fill, found: {}", attrs);
+		assert!(attrs.contains("stroke=\"#000000\""), "the stroke colour without its alpha");
+		assert!(attrs.contains("stroke-opacity=\"0.502\""), "the alpha as an opacity, found: {}", attrs);
 		Ok(())
 	}
 }

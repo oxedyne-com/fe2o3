@@ -32,10 +32,19 @@
 //!
 //! # SVG path data
 //!
-//! [`svg`] reads the `d` attribute of an SVG `<path>` -- and only that. Path data is a small closed
-//! grammar and the one part every drawing program agrees on, so it is where a vector mark drawn
-//! elsewhere can be let in without letting in a document format. Elliptical arcs, which the path
-//! types have no segment for, become cubic béziers on the way in.
+//! [`svg`] reads the `d` attribute of an SVG `<path>` -- and writes it back -- and only that. Path
+//! data is a small closed grammar and the one part every drawing program agrees on, so it is where a
+//! vector mark drawn elsewhere can be let in, or handed back out, without letting in a document
+//! format. Elliptical arcs, which the path types have no segment for, become cubic béziers on the
+//! way in. The paint a [`stroke::Stroke`] and an [`colour::Rgba`] model is rendered as a `<path>`'s
+//! presentation attributes beside its geometry.
+//!
+//! # Colour and accessibility
+//!
+//! [`colour`] carries `Rgba` and its compositing, and beside it the WCAG relative luminance and
+//! contrast ratio a design is checked for legibility against, and a simulation of the three
+//! dichromacies for checking that a palette does not lean on a colour distinction a
+//! colour-blind viewer cannot see.
 #![forbid(unsafe_code)]
 
 pub mod blur;
