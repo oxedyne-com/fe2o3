@@ -28,6 +28,7 @@
 
 use crate::srv::publish::{
 	Markup,
+	ai,
 	parse_markup,
 };
 
@@ -49,6 +50,8 @@ use std::sync::{
 	Arc,
 	RwLock,
 };
+
+use tokio_rustls::rustls::ClientConfig;
 
 
 /// The key every comment's key begins with.
@@ -1888,7 +1891,7 @@ pub fn preview<
 /// is checked next, and is *not* a condition of being heard: a browser with no scripting sends no
 /// nonce, and that comment is held for a person rather than refused, because a reader without
 /// JavaScript is still a reader. Only then does anything read from or write to the store.
-pub fn receive<
+pub async fn receive<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
 	ENC:	Encrypter,
@@ -1897,6 +1900,11 @@ pub fn receive<
 >(
 	db:		&(Arc<RwLock<DB>>, UID),
 	moderator:	&Moderator,
+	// The site's AI, where it has one, and the connection to reach it. Consulted on a comment the
+	// rules would make wait, and never on one they already refused -- asking a model about a comment
+	// the arithmetic binned is both a waste and a way for a persuasive comment to talk its way out.
+	ai_settings:	Option<&ai::AiSettings>,
+	tls:		&Option<Arc<ClientConfig>>,
 	rate:		(u64, u32),
 	sub:		Submission<'_>,
 	salt:		&[u8],
@@ -2021,6 +2029,30 @@ pub fn receive<
 	});
 
 	let mut verdict = moderator.judge(&c, known.as_ref());
+
+	// The model refines an ordinary hold, and only that. A comment the rules would publish (a trusted
+	// commenter) or bin (a blocked one, a shape that fails) is already decided; the model is asked
+	// only about the comment that would otherwise sit in the queue -- a stranger's first say -- and it
+	// may publish it, bin it, or leave it waiting. Its decision replaces the rules' hold, but the
+	// security holds below are applied *after* and strictest-wins, so the model can never carry a
+	// comment past a missing proof of work or a trusted address arriving from a new place. A model
+	// that is not configured, or will not answer, changes nothing: the comment simply waits, which is
+	// what it would have done without any AI at all.
+	if let Verdict::Hold(_) = &verdict {
+		if let (Some(settings), Some(tls_arc)) = (ai_settings, tls.as_ref()) {
+			if settings.ready() {
+				match ai::judge_comment(settings, tls_arc.clone(), &c.body).await {
+					Some(ai::CommentVerdict::Approve)	=> verdict = Verdict::Allow,
+					Some(ai::CommentVerdict::Spam)		=>
+						verdict = Verdict::Spam(fmt!("judged spam by the site's model")),
+					Some(ai::CommentVerdict::Hold)		=>
+						verdict = Verdict::Hold(fmt!("held for a person by the site's model")),
+					// The model could not be reached; the comment keeps the hold it already had.
+					None					=> {}
+				}
+			}
+		}
+	}
 
 	// A comment claiming a commenter this site trusts, arriving from somewhere that commenter has
 	// never used. Usually innocent -- people travel, and addresses change -- but it is also exactly

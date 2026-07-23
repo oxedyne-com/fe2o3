@@ -21,6 +21,7 @@ use oxedyne_fe2o3_jdat::{
 	id::NumIdDat,
 };
 use oxedyne_fe2o3_net::llm::{
+	self,
 	LlmConfig,
 	Provider,
 };
@@ -29,6 +30,8 @@ use std::sync::{
 	Arc,
 	RwLock,
 };
+
+use tokio_rustls::rustls::ClientConfig;
 
 
 /// The key a vhost's AI settings live under in its store.
@@ -155,6 +158,62 @@ impl AiSettings {
 	}
 }
 
+/// What the model said to do with a comment.
+///
+/// The three a moderator can reach, and no more. Kept here rather than in the comment module so the
+/// dependency runs one way -- the comment module maps this to its own verdict -- and so the parsing
+/// of a model's reply lives beside the prompt that asked for it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CommentVerdict {
+	/// Publish it.
+	Approve,
+	/// Bin it.
+	Spam,
+	/// A person should look.
+	Hold,
+}
+
+/// Reads a one-word reply into a verdict.
+///
+/// The prompt asks for one word, but a model is not a promise: it may wrap the word in a sentence, add
+/// a full stop, or answer in a different case. So this looks for the first of the three words anywhere
+/// in the reply, case-folded, and **falls back to holding** -- the safe direction -- when it finds
+/// none. A reply that says nothing recognisable is exactly when a person should look, not when a guess
+/// should publish.
+pub fn parse_comment_verdict(reply: &str) -> CommentVerdict {
+	let up = reply.to_uppercase();
+	// SPAM is checked before APPROVE so a reply that mentions both ("not spam, approve") is read the
+	// strict way; a model torn between the two is a comment worth holding, but binning is the safer
+	// of the two decisive readings and the words rarely co-occur innocently.
+	if up.contains("SPAM") {
+		CommentVerdict::Spam
+	} else if up.contains("APPROVE") {
+		CommentVerdict::Approve
+	} else {
+		CommentVerdict::Hold
+	}
+}
+
+/// Judges a comment's text with the site's model.
+///
+/// `None` where the call could not be made -- AI is not configured, or the model would not answer --
+/// so the caller keeps the comment held rather than treating a network failure as a decision. A
+/// judgement is only ever `Some` when the model actually spoke. The comment's text is all that is sent;
+/// no address, no name, nothing about who wrote it, since none of that is the model's business here.
+pub async fn judge_comment(
+	settings:	&AiSettings,
+	tls:		Arc<ClientConfig>,
+	body:		&str,
+)
+	-> Option<CommentVerdict>
+{
+	let cfg = settings.llm().ok()?;
+	match llm::complete(&cfg, settings.comment_prompt(), body, tls).await {
+		Ok(reply)	=> Some(parse_comment_verdict(&reply)),
+		Err(_)		=> None,
+	}
+}
+
 /// Parses an address list a person typed -- one per line, or separated by commas -- keeping the valid
 /// ones in order and dropping blanks and duplicates.
 ///
@@ -270,6 +329,23 @@ mod tests {
 		// An unknown provider word is refused at the point of the call.
 		s.provider = fmt!("nope");
 		assert!(s.llm().is_err());
+		Ok(())
+	}
+
+	/// A one-word reply reads to a verdict; a reply in a sentence, in the wrong case, or saying
+	/// nothing recognisable still reads safely -- towards holding, never towards publishing on a guess.
+	#[test]
+	fn test_comment_verdict_parsing_04() -> Outcome<()> {
+		assert_eq!(parse_comment_verdict("APPROVE"), CommentVerdict::Approve);
+		assert_eq!(parse_comment_verdict("spam"), CommentVerdict::Spam);
+		assert_eq!(parse_comment_verdict("HOLD"), CommentVerdict::Hold);
+		// Wrapped in a sentence, still read.
+		assert_eq!(parse_comment_verdict("This looks fine, so APPROVE."), CommentVerdict::Approve);
+		// Torn between the two decisive words is read the strict way.
+		assert_eq!(parse_comment_verdict("not spam, I would approve"), CommentVerdict::Spam);
+		// Nothing recognisable holds, rather than guessing publish.
+		assert_eq!(parse_comment_verdict("I am not sure about this one."), CommentVerdict::Hold);
+		assert_eq!(parse_comment_verdict(""), CommentVerdict::Hold);
 		Ok(())
 	}
 

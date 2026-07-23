@@ -21,6 +21,7 @@ use crate::srv::{
         self,
         PublishConfig,
         Subscription,
+        ai as publish_ai,
         comment as publish_comment,
         page as publish_page,
         send::MailSender,
@@ -916,15 +917,22 @@ impl<
                                 from:       Some(peer.ip().to_string()),
                                 now:        publish_comment::now_stamp(),
                             };
+                            // The site's AI, where it has set one up, so a stranger's first comment
+                            // can be judged rather than always made to wait. A settings read that
+                            // fails is no AI, not a failed comment: the comment falls back to the
+                            // queue, which is where it would have gone anyway.
+                            let ai_settings = publish_ai::get_settings(dbh).ok();
                             let got = res!(publish_comment::receive(
                                 dbh,
                                 &publish_comment::Moderator::default(),
+                                ai_settings.as_ref(),
+                                &tls_client,
                                 (cfg.comment_rate_secs, cfg.comment_rate_hourly),
                                 sub,
                                 &secret,
                                 &secret,
                                 &id,
-                            ));
+                            ).await);
                             // The token that lets its author correct it, handed back once, in a
                             // cookie that expires with the window. It names one comment and proves
                             // nothing else, so it is safe to hold in a browser.
@@ -933,6 +941,37 @@ impl<
                                     cid.clone(),
                                     publish_comment::edit_token(cid, &secret),
                                 ));
+                            }
+
+                            // A comment that ended up waiting for a person, and operators who asked to
+                            // be told: send each of them the alert. Spawned, not awaited, because it is
+                            // the operator's business and not the reader's -- the reader has posted and
+                            // should not wait on an SMTP round-trip to hear so. Best-effort: a mail
+                            // that will not send is logged, and the comment waits in the queue either
+                            // way, which is where the operator will find it regardless.
+                            if matches!(got.0, publish_comment::Received::Held) {
+                                if let (Some(settings), Some(mail_arc)) =
+                                    (ai_settings.as_ref(), mail.as_ref())
+                                {
+                                    if !settings.alert_emails.is_empty() {
+                                        let from = cfg.newsletter_from(mail_arc);
+                                        let site = cfg.site_name.clone();
+                                        let slug_s = slug.to_string();
+                                        let addrs = settings.alert_emails.clone();
+                                        let mailer = mail_arc.clone();
+                                        let idc = id.clone();
+                                        tokio::spawn(async move {
+                                            for to in &addrs {
+                                                if let Err(e) = mailer.send_moderation_alert(
+                                                    &from, to, &site, &slug_s).await
+                                                {
+                                                    warn!("{}: publish: a moderation alert to {} \
+                                                        could not be sent: {}", idc, to, e);
+                                                }
+                                            }
+                                        });
+                                    }
+                                }
                             }
                             got.0.tell_reader().to_string()
                         }

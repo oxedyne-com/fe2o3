@@ -909,6 +909,25 @@ impl MailSender {
 		let msg = build_confirmation_email(from, to, confirm_url, site_name);
 		self.deliver_signed(from, to, &msg).await
 	}
+
+	/// Tells an operator that a comment is waiting for a person.
+	///
+	/// Carries no comment text, on purpose. What is waiting is unmoderated, and forwarding a spam or an
+	/// abuse into an operator's inbox is doing the spammer's delivery for them; the message says only
+	/// that one is held and on which post, so the operator opens the queue where they can see it in
+	/// context and act on it. One plain line, auto-generated, from the site's own address.
+	pub async fn send_moderation_alert(
+		&self,
+		from:		&str,
+		to:		&str,
+		site_name:	&str,
+		post_slug:	&str,
+	)
+		-> Outcome<String>
+	{
+		let msg = build_moderation_alert_email(from, to, site_name, post_slug);
+		self.deliver_signed(from, to, &msg).await
+	}
 }
 
 /// The From address a newsletter is sent with, the site's own where it names one and the sender's
@@ -1252,6 +1271,35 @@ pub fn send_history<
 ///
 /// Pure over its strings, so what a subscriber is sent can be tested without a socket. The body is
 /// deliberately spare -- an address that never opted in gets a link and an explanation, no more.
+/// The moderation-alert message: one line, no comment text, from the site to an operator.
+fn build_moderation_alert_email(from: &str, to: &str, site_name: &str, post_slug: &str) -> String {
+	let who = if site_name.trim().is_empty() { fmt!("your site") } else { site_name.to_string() };
+	let subject = fmt!("A comment is waiting on {}", who);
+	let body = fmt!(
+		"A comment on the post \"{slug}\" is held for your review on {who}.\r\n\
+		\r\n\
+		Open the site's manage area to read it in context and approve or bin it. This message \
+		carries none of the comment's text on purpose -- what is waiting is unmoderated.\r\n\
+		\r\n\
+		You are told this because your address is on the alert list on the AI page. Remove it there \
+		to stop these.\r\n",
+		slug = post_slug, who = who,
+	);
+	let date = rfc5322_date_now();
+	fmt!(
+		"From: {from}\r\n\
+		To: {to}\r\n\
+		Subject: {subject}\r\n\
+		Date: {date}\r\n\
+		MIME-Version: 1.0\r\n\
+		Auto-Submitted: auto-generated\r\n\
+		Content-Type: text/plain; charset=utf-8\r\n\
+		\r\n\
+		{body}",
+		from = from, to = to, subject = subject, date = date, body = body,
+	)
+}
+
 fn build_confirmation_email(from: &str, to: &str, confirm_url: &str, site_name: &str) -> String {
 	let who = if site_name.trim().is_empty() {
 		fmt!("this site")
