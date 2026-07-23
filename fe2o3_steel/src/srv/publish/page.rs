@@ -329,33 +329,25 @@ fn filter_shell(cfg: &PublishConfig, posts: &[Post], authors: &[Author]) -> Stri
 		s.push_str(&facet_block("tag", "Tags", &tags));
 	}
 
-	// Reading time, the last cut a reader makes: two thumbs over the range the posts span, to keep the
-	// short ones, the long ones, or a band between. Where every post reads alike -- one post, or all of
-	// a length -- there is no range to drag, so the same row shows the single figure instead of a
-	// slider that could only sit still. Either way the control is present, since reading time is a
-	// dimension a reader filters on and the row says so; the script keeps the read-out current.
+	// Reading time, the last cut a reader makes, always a slider: two thumbs over the range the posts
+	// span, to keep the short ones, the long ones, or a band between. Where every post reads alike
+	// there is nothing to narrow, so the range is floored at one minute up to the longest -- the
+	// slider is still there and still moves, and becomes the posts' own range the moment a second
+	// length exists. The read-out beside it the script keeps current.
 	if !posts.is_empty() {
-		if rt_hi > rt_lo {
-			s.push_str(&fmt!(
-				"<div class=\"aside-filter-time\" id=\"aside-filter-time\" data-lo=\"{lo}\" data-hi=\"{hi}\">\n\
-				<span class=\"aside-time-lbl\">Reading time</span>\n\
-				<div class=\"aside-time-track\">\n\
-				<input type=\"range\" class=\"aside-time-min\" id=\"aside-time-min\" \
-					min=\"{lo}\" max=\"{hi}\" value=\"{lo}\" step=\"1\" aria-label=\"Least minutes\">\n\
-				<input type=\"range\" class=\"aside-time-max\" id=\"aside-time-max\" \
-					min=\"{lo}\" max=\"{hi}\" value=\"{hi}\" step=\"1\" aria-label=\"Most minutes\">\n\
-				</div>\n\
-				<span class=\"aside-time-out\" id=\"aside-time-out\">{lo}\u{2013}{hi} min</span>\n\
-				</div>\n",
-				lo = rt_lo, hi = rt_hi));
-		} else {
-			s.push_str(&fmt!(
-				"<div class=\"aside-filter-time aside-filter-time-single\">\n\
-				<span class=\"aside-time-lbl\">Reading time</span>\n\
-				<span class=\"aside-time-out\">{n} min</span>\n\
-				</div>\n",
-				n = rt_lo));
-		}
+		let (tlo, thi) = if rt_hi > rt_lo { (rt_lo, rt_hi) } else { (1, rt_hi.max(2)) };
+		s.push_str(&fmt!(
+			"<div class=\"aside-filter-time\" id=\"aside-filter-time\" data-lo=\"{lo}\" data-hi=\"{hi}\">\n\
+			<span class=\"aside-time-lbl\">Reading time</span>\n\
+			<div class=\"aside-time-track\">\n\
+			<input type=\"range\" class=\"aside-time-min\" id=\"aside-time-min\" \
+				min=\"{lo}\" max=\"{hi}\" value=\"{lo}\" step=\"1\" aria-label=\"Least minutes\">\n\
+			<input type=\"range\" class=\"aside-time-max\" id=\"aside-time-max\" \
+				min=\"{lo}\" max=\"{hi}\" value=\"{hi}\" step=\"1\" aria-label=\"Most minutes\">\n\
+			</div>\n\
+			<span class=\"aside-time-out\" id=\"aside-time-out\">{lo}\u{2013}{hi} min</span>\n\
+			</div>\n",
+			lo = tlo, hi = thi));
 	}
 
 	s.push_str("</section>\n");
@@ -1055,17 +1047,19 @@ mod tests {
 		Ok(())
 	}
 
-	/// The reading-time control is always present: a dual-thumb slider where the posts vary in length,
-	/// and a single figure where they do not, so the row never becomes a slider that cannot move.
+	/// The reading-time slider is always present and always drawable: over the posts' own range where
+	/// they vary, and floored at one minute up to the longest where they read alike, so the row is
+	/// never a slider that cannot move.
 	#[test]
-	fn test_the_time_filter_degrades_to_a_figure_20() -> Outcome<()> {
-		// One post: nothing to drag, so the single figure.
+	fn test_the_time_filter_is_always_a_slider_20() -> Outcome<()> {
+		// One post at two minutes: a slider from one to two, not a dead figure.
 		let one = res!(index(&cfg(), &[post()], &[], "", "test"));
 		let body = String::from_utf8_lossy(&one.body).to_string();
-		assert!(body.contains("aside-filter-time-single"), "no single-figure time row: {}", body);
-		assert!(!body.contains("aside-time-min"), "a dead slider was drawn for one post: {}", body);
+		assert!(body.contains(r#"id="aside-time-min""#), "no slider for one post: {}", body);
+		assert!(!body.contains("aside-filter-time-single"), "the single-figure fallback returned: {}", body);
+		assert!(body.contains(r#"data-lo="1" data-hi="3""#), "the one-post range was not floored: {}", body);
 
-		// Two posts of different lengths: the dual slider.
+		// Two posts of different lengths: the slider spans their own range.
 		let mut short = post();
 		short.slug = fmt!("short");
 		short.words = 100;
@@ -1074,8 +1068,7 @@ mod tests {
 		long.words = 2000;
 		let two = res!(index(&cfg(), &[short, long], &[], "", "test"));
 		let body = String::from_utf8_lossy(&two.body).to_string();
-		assert!(body.contains(r#"id="aside-time-min""#), "no slider where posts vary: {}", body);
-		assert!(!body.contains("aside-filter-time-single"), "a figure where a slider belongs: {}", body);
+		assert!(body.contains(r#"data-lo="1" data-hi="10""#), "the range is not the posts' own: {}", body);
 		Ok(())
 	}
 
