@@ -123,6 +123,35 @@ impl HttpLocator {
         //)
     }
 
+    /// A query parameter as a string, if it is present and is one.
+    ///
+    /// The parsed map holds daticles, because a query string is parsed with the
+    /// same reader as everything else, so a bare `view=geo` arrives as a
+    /// `Dat::Str` while `page=2` arrives as a number. Reading one out therefore
+    /// takes a match rather than a `get`, and every caller was writing the same
+    /// one.
+    pub fn query_str(&self, key: &str) -> Option<String> {
+        match self.data.get(&dat!(key)) {
+            Some(Dat::Str(s)) => Some(s.clone()),
+            _                 => None,
+        }
+    }
+
+    /// A query parameter as an integer, coerced from any numeric or string
+    /// value, falling back to `default` when it is absent or unreadable.
+    ///
+    /// The coercion matters: whether `page=2` parses as a number or as a string
+    /// is a detail of the query reader, and no caller should have to care.
+    pub fn query_i64(&self, key: &str, default: i64) -> i64 {
+        match self.data.get(&dat!(key)) {
+            Some(d) => d.get_i64().or_else(|| match d {
+                Dat::Str(s) => s.trim().parse::<i64>().ok(),
+                _           => None,
+            }).unwrap_or(default),
+            None => default,
+        }
+    }
+
 }
 
 
@@ -375,6 +404,34 @@ mod url_tests {
     fn test_a_locator_with_no_query_has_an_empty_query() -> Outcome<()> {
         let loc = res!(HttpLocator::new("/api/health"));
         assert_eq!(loc.query, "");
+        Ok(())
+    }
+
+    #[test]
+    fn test_query_parameters_read_out_by_name() -> Outcome<()> {
+        let loc = res!(HttpLocator::new("/api/admin?view=geo&page=2"));
+        assert_eq!(loc.query_str("view"), Some(fmt!("geo")));
+        // A numeric parameter is not a string, so query_str declines it rather
+        // than handing back a spelling of it.
+        assert_eq!(loc.query_str("page"), None);
+        // query_i64 coerces either way, which is the point of having it.
+        assert_eq!(loc.query_i64("page", 1), 2);
+        assert_eq!(loc.query_i64("view", 7), 7,   "a non-numeric value falls back");
+        assert_eq!(loc.query_i64("absent", 5), 5, "an absent parameter falls back");
+        assert_eq!(loc.query_str("absent"), None);
+        Ok(())
+    }
+
+    #[test]
+    fn test_a_numeric_looking_string_parameter_still_coerces() -> Outcome<()> {
+        // A bare `12` parses as a number and a quoted `"12"` as a string, which
+        // is the query reader's business and not the caller's. Asking for an
+        // integer gets one either way.
+        assert_eq!(res!(HttpLocator::new("/x?n=12")).query_i64("n", 0), 12);
+        assert_eq!(res!(HttpLocator::new("/x?n=\"12\"")).query_i64("n", 0), 12);
+        // And a value that is not a number at all falls back rather than
+        // yielding some partial reading of it.
+        assert_eq!(res!(HttpLocator::new("/x?n=12abc")).query_i64("n", 0), 0);
         Ok(())
     }
 
