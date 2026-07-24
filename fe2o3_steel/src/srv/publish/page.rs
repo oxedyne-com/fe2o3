@@ -291,7 +291,7 @@ fn index(
 		kind:		"website",
 		date:		None,
 	};
-	Ok(html_response(HttpStatus::OK, &page(cfg, &head, &body, None)))
+	Ok(html_response(HttpStatus::OK, &page(cfg, &head, &body, None, true)))
 }
 
 /// The filter above the index: the controls a reader narrows the list with.
@@ -709,7 +709,7 @@ fn post_page(
 		kind:		"article",
 		date:		post.date.clone(),
 	};
-	Ok(html_response(HttpStatus::OK, &page(cfg, &head, &body, Some(post))))
+	Ok(html_response(HttpStatus::OK, &page(cfg, &head, &body, Some(post), false)))
 }
 
 /// A post that is not there.
@@ -731,7 +731,7 @@ fn not_found(cfg: &PublishConfig) -> HttpMessage {
 		kind:		"website",
 		date:		None,
 	};
-	html_response(HttpStatus::NotFound, &page(cfg, &head, &body, None))
+	html_response(HttpStatus::NotFound, &page(cfg, &head, &body, None, false))
 }
 
 
@@ -749,8 +749,46 @@ struct Head {
 	date:		Option<String>,
 }
 
+/// The line at the top of every page: the site's mark, and the way back to the posts.
+///
+/// The mark is the site's logo where one is configured and the blog's own title where none is, and it
+/// leads to the site's front page where the configuration names one. A blog is usually one part of a
+/// larger site, and a reader who arrives at a post from elsewhere has otherwise no way into the rest
+/// of it.
+///
+/// Where the mark leads away from the posts, a page that is not the index carries a second link back
+/// to it -- the mark used to be that link, and a reader deep in a post would otherwise lose the list.
+/// On the index itself that link would point at the page it is on, so it is not drawn; and a site
+/// naming no front page keeps the single link it always had, the mark being it.
+fn nav(cfg: &PublishConfig, on_index: bool) -> String {
+	let mut s = String::from("<nav class=\"aside-nav\"><a class=\"aside-home\" href=\"");
+	escape_attr(&mut s, if cfg.home.is_empty() { &cfg.path } else { &cfg.home });
+	s.push_str("\">");
+	if cfg.logo.is_empty() {
+		escape_text(&mut s, &cfg.title);
+	} else {
+		// The site's name is what the mark says, so that is what a reader who cannot see it is told;
+		// a site that has not named itself falls back to what it calls its posts.
+		s.push_str("<img class=\"aside-logo\" src=\"");
+		escape_attr(&mut s, &cfg.logo);
+		s.push_str("\" alt=\"");
+		escape_attr(&mut s, if cfg.site_name.is_empty() { &cfg.title } else { &cfg.site_name });
+		s.push_str("\">");
+	}
+	s.push_str("</a>");
+	if !on_index && !cfg.home.is_empty() {
+		s.push_str("<a class=\"aside-back\" href=\"");
+		escape_attr(&mut s, &cfg.path);
+		s.push_str("\">");
+		escape_text(&mut s, &cfg.title);
+		s.push_str("</a>");
+	}
+	s.push_str("</nav>\n");
+	s
+}
+
 /// Wraps a body in the document a browser reads.
-fn page(cfg: &PublishConfig, head: &Head, body: &str, post: Option<&Post>) -> String {
+fn page(cfg: &PublishConfig, head: &Head, body: &str, post: Option<&Post>, on_index: bool) -> String {
 	let mut s = String::new();
 	s.push_str("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n");
 	s.push_str("<meta charset=\"utf-8\">\n");
@@ -813,11 +851,7 @@ fn page(cfg: &PublishConfig, head: &Head, body: &str, post: Option<&Post>) -> St
 	}
 
 	s.push_str("</head>\n<body class=\"aside-body\">\n<main class=\"aside-page\">\n");
-	s.push_str("<nav class=\"aside-nav\"><a href=\"");
-	escape_attr(&mut s, &cfg.path);
-	s.push_str("\">");
-	escape_text(&mut s, &cfg.title);
-	s.push_str("</a></nav>\n");
+	s.push_str(&nav(cfg, on_index));
 	s.push_str(body);
 	s.push_str("</main>\n</body>\n</html>\n");
 	s
@@ -1007,7 +1041,7 @@ fn subscribe_page(cfg: &PublishConfig, title: &str, body: &str, status: HttpStat
 		kind:		"website",
 		date:		None,
 	};
-	html_response(status, &page(cfg, &head, body, None))
+	html_response(status, &page(cfg, &head, body, None, false))
 }
 
 /// An HTML response with the type and status a browser expects.
@@ -1053,6 +1087,8 @@ mod tests {
 		newsletter_from:	String::new(),
 		categories:	vec![fmt!("Personal"), fmt!("Technical")],
 		default_author:	String::new(),
+		logo:		String::new(),
+		home:		String::new(),
 		}
 	}
 
@@ -1381,6 +1417,52 @@ mod tests {
 		assert!(body.contains(r#"<div class="aside-about-who" data-author="h-jason">"#),
 			"the intro box carries no handle: {}", body);
 		assert!(!body.contains(r#"data-author="jason""#), "the login username reached the page: {}", body);
+		Ok(())
+	}
+
+	/// A site that configures a mark and a front page gets its logo at the top of the index, leading to
+	/// the front page rather than to the page the reader is already on.
+	#[test]
+	fn test_the_mark_is_the_site_logo_25() -> Outcome<()> {
+		let mut c = cfg();
+		c.logo = fmt!("/assets/logo.svg");
+		c.home = fmt!("https://example.com");
+		let resp = res!(index(&c, &[post()], &[], "", "test"));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(body.contains(r#"<a class="aside-home" href="https://example.com">"#),
+			"the mark does not lead to the front page: {}", body);
+		assert!(body.contains(r#"<img class="aside-logo" src="/assets/logo.svg" alt="Elearnity">"#),
+			"the mark is not the logo: {}", body);
+		// The index is the page it would lead to, so it draws no second link back to itself.
+		assert!(!body.contains("aside-back"), "the index links back to itself: {}", body);
+		Ok(())
+	}
+
+	/// A post keeps its way back to the list. The mark now leads off to the site's front page, so the
+	/// link the mark used to be is drawn beside it rather than lost.
+	#[test]
+	fn test_a_post_keeps_its_way_back_to_the_list_26() -> Outcome<()> {
+		let mut c = cfg();
+		c.logo = fmt!("/assets/logo.svg");
+		c.home = fmt!("https://example.com");
+		let resp = res!(post_page(&c, &post(), None, None));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(body.contains(r#"<a class="aside-home" href="https://example.com">"#),
+			"the post has no mark: {}", body);
+		assert!(body.contains(r#"<a class="aside-back" href="/asides">Asides</a>"#),
+			"the post has no way back to the list: {}", body);
+		Ok(())
+	}
+
+	/// A site naming neither a mark nor a front page keeps the single line it always had: the blog's
+	/// own title, leading to the index, and no second link duplicating it.
+	#[test]
+	fn test_an_unconfigured_mark_is_the_title_27() -> Outcome<()> {
+		let resp = res!(post_page(&cfg(), &post(), None, None));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(body.contains(r#"<nav class="aside-nav"><a class="aside-home" href="/asides">Asides</a></nav>"#),
+			"the unconfigured mark is not the title: {}", body);
+		assert!(!body.contains("aside-logo"), "a logo was drawn for a site with none: {}", body);
 		Ok(())
 	}
 

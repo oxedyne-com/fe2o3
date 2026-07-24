@@ -146,6 +146,8 @@ mod tests {
 			newsletter_from:	String::new(),
 			categories:		vec![fmt!("Personal"), fmt!("Big Ideas")],
 			default_author:		String::new(),
+			logo:			String::new(),
+			home:			String::new(),
 		}
 	}
 

@@ -196,6 +196,14 @@ pub struct PublishConfig {
 	/// no front matter to hold one. Empty leaves such a post unattributed. A member's site-login
 	/// username. An optional field.
 	pub default_author:	String,
+	/// The site's mark, drawn at the top of every page: a URL the served pages can reach, e.g.
+	/// `/assets/logo.svg`. Empty draws [`Self::title`] as a word instead, which is what a site that
+	/// configures no mark has always had. An optional field.
+	pub logo:	String,
+	/// Where the mark at the top of a page leads: the site's own front page, e.g. `https://example.com`
+	/// or `/`. Empty leads back to the index of the posts, which is right for a site whose posts are
+	/// all there is of it, and wrong for a blog that is one part of a larger site. An optional field.
+	pub home:	String,
 }
 
 impl PublishConfig {
@@ -334,6 +342,8 @@ impl PublishConfig {
 				cats
 			},
 			default_author:	res!(get_str("default_author", "")),
+			logo:		res!(get_str("logo", "")),
+			home:		res!(get_str("home", "")),
 		})
 	}
 
