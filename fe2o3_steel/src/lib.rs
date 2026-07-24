@@ -121,6 +121,7 @@ pub mod prelude {
         // Utilities for handler implementations.
         url_encode,
         extract_value,
+        extract_top_level_value,
         extract_json_string,
         // Stripe webhook signature verification.
         verify_stripe_signature,

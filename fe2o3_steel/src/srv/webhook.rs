@@ -206,6 +206,60 @@ pub fn extract_json_string(json: &str, section_key: &str, key: &str) -> Option<S
     extract_value(block, key)
 }
 
+/// Extract a JSON string value for a key at the TOP level of the object -- brace
+/// depth one -- ignoring a same-named key nested deeper.
+///
+/// [`extract_value`] returns the first match anywhere, which is wrong for a
+/// top-level field that a nested object also carries. A Stripe event is the
+/// case this exists for: it orders the top-level `"type"` (e.g.
+/// `"charge.refunded"`) *after* `"data"`, and the nested charge object holds an
+/// `"outcome": { "type": "authorized" }`, so the first `"type"` in the payload
+/// is the wrong one. Matching only at depth one returns the event type.
+///
+/// `key` includes its surrounding quotes, as [`extract_value`] expects (e.g.
+/// `"\"type\""`). Strings and their escapes are respected while tracking depth,
+/// so a brace inside a string value does not shift the count.
+pub fn extract_top_level_value(block: &str, key: &str) -> Option<String> {
+    let bytes = block.as_bytes();
+    let mut depth: i32 = 0;
+    let mut in_str = false;
+    let mut esc = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_str {
+            // Inside a string: consume until the unescaped closing quote, so a
+            // brace or a quote in the text cannot move the depth or end the
+            // string early.
+            if esc { esc = false; }
+            else if c == b'\\' { esc = true; }
+            else if c == b'"' { in_str = false; }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'"' => {
+                // A key at depth one is `"key" :` -- a string, at the object's
+                // own level, followed by a colon. A value that happens to equal
+                // the key text is followed by a comma or a brace, not a colon,
+                // so the colon check keeps this to keys.
+                if depth == 1 && block[i..].starts_with(key) {
+                    let after = block[i + key.len()..].trim_start();
+                    if after.starts_with(':') {
+                        return extract_value(&block[i..], key);
+                    }
+                }
+                in_str = true;
+            }
+            b'{' | b'[' => depth += 1,
+            b'}' | b']' => depth -= 1,
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ STRIPE WEBHOOK SIGNATURE VERIFICATION                                     │
@@ -366,6 +420,31 @@ mod tests {
             out.push(char::from(b"0123456789abcdef"[(b & 0x0F) as usize]));
         }
         out
+    }
+
+    #[test]
+    fn top_level_value_ignores_a_nested_key_of_the_same_name() {
+        // A Stripe event, ordered as Stripe orders it: the top-level `type`
+        // comes AFTER `data`, and the nested charge carries `outcome.type`.
+        let event = r#"{"id":"evt_1","object":"event","data":{"object":{"id":"ch_1",
+            "object":"charge","outcome":{"network_status":"approved","type":"authorized"},
+            "payment_method_details":{"type":"card"},"amount_refunded":1000}},
+            "type":"charge.refunded"}"#;
+        // The naive scan grabs the first `type` -- the wrong one.
+        assert_eq!(extract_value(event, "\"type\""), Some(fmt!("authorized")));
+        // The depth-aware one returns the event type.
+        assert_eq!(extract_top_level_value(event, "\"type\""), Some(fmt!("charge.refunded")));
+        // The top-level `id` is returned even though a nested `id` exists.
+        assert_eq!(extract_top_level_value(event, "\"id\""), Some(fmt!("evt_1")));
+        // A brace inside a string value does not shift the depth count.
+        let tricky = r#"{"note":"a } brace { in text","type":"top"}"#;
+        assert_eq!(extract_top_level_value(tricky, "\"type\""), Some(fmt!("top")));
+        // A key present only deeper than the top level is not found at all.
+        let nested_only = r#"{"data":{"object":{"kind":"deep"}}}"#;
+        assert_eq!(extract_top_level_value(nested_only, "\"kind\""), None);
+        // A top-level value that equals the key text is not mistaken for the key.
+        let valueish = r#"{"a":"type","type":"real"}"#;
+        assert_eq!(extract_top_level_value(valueish, "\"type\""), Some(fmt!("real")));
     }
 
     /// Build a valid Stripe-Signature header for a body at time `t`.
