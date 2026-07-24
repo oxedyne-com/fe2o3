@@ -146,20 +146,36 @@ fn index(
 	escape_text(&mut body, &cfg.title);
 	body.push_str("</h1></header>\n");
 
-	// What the site is about, in the words of whoever writes it, above everything else on the page.
+	// The reader is two columns on a wide screen -- the posts on the left, the filter on the right --
+	// and a single column on a narrow one, the filter folded behind a button. The whole is a plain
+	// enhancement: the served script wires the folding and the narrowing, and without it the panel
+	// stands open at desktop widths (the stylesheet's doing) and every post shows, which is the point.
+	body.push_str("<div class=\"aside-layout\">\n");
+
+	// The toggle that unfolds the filter on a narrow screen. The stylesheet hides it where the filter
+	// is a column of its own, so it is only ever seen on a phone; the script gives it its one job.
+	body.push_str("<button type=\"button\" class=\"aside-filter-toggle\" id=\"aside-filter-toggle\" \
+		aria-controls=\"aside-side\" aria-expanded=\"false\">Filter</button>\n");
+
+	// The filter column: the reader's own instrument for narrowing the list, wired by the served
+	// script. It is drawn before the posts in the source so a reader on a phone meets the toggle and
+	// the panel before scrolling into the stream.
+	body.push_str("<aside class=\"aside-side\" id=\"aside-side\">\n");
+	body.push_str(&filter_shell(cfg, posts, authors));
+	body.push_str("</aside>\n");
+
+	// The posts column.
+	body.push_str("<div class=\"aside-main\">\n");
+
+	// What the site is about, in the words of whoever writes it, above the posts.
 	body.push_str(&about_block(authors));
 
-	// The filter: the reader's own instrument for narrowing the list. Rendered before the list so it
-	// is the first thing to hand, and wired by the served script; without the script it does nothing
-	// and the whole list stands, which is the point of building it as an enhancement.
-	body.push_str(&filter_shell(cfg, posts, authors));
-
-	body.push_str("<ul class=\"aside-index\" id=\"aside-index-list\">\n");
+	body.push_str("<div class=\"aside-cards aside-list\" id=\"aside-index-list\">\n");
 	for p in posts {
-		// The item carries what the filter matches on, so the script reads the list rather than a second
-		// copy of it: the author's username, the tags and categories space-joined, the reading time, and
-		// a lower-cased haystack of the title and opening for the search box.
-		body.push_str("<li class=\"aside-index-item\" data-author=\"");
+		// The card carries what the filter matches on, so the script reads the stream rather than a
+		// second copy of it: the author's public handle, the tags and categories joined, the reading
+		// time, and a lower-cased haystack of the title and opening for the search box.
+		body.push_str("<article class=\"aside-card\" data-author=\"");
 		// The author's public handle, never the username a post stores: that is the SHA-256 of a
 		// passphrase, and a page is read by anyone.
 		escape_attr(&mut body, authors.iter().find(|a| a.username == p.author)
@@ -175,11 +191,11 @@ fn index(
 		body.push_str(&fmt!("{}", read_mins(p.words)));
 		body.push_str("\" data-search=\"");
 		escape_attr(&mut body, &fmt!("{} {}", p.title, p.excerpt).to_lowercase());
-		body.push_str("\">");
-		// The meta line: when it was written and how long it takes to read, the two facts a reader
-		// weighs before opening a post. An index is a set of choices, not the reading itself -- the
-		// prose lives at the post's own page, one click away, so here a post is its title and the
-		// little that helps a reader pick it.
+		body.push_str("\">\n");
+
+		// The head: the facts a reader weighs before opening a post, the byline where several write,
+		// and the title that opens the whole piece.
+		body.push_str("<div class=\"aside-card-head\">\n");
 		body.push_str("<div class=\"aside-item-meta\">");
 		if let Some(d) = &p.date {
 			// The attribute is the stored ISO form and the text is the readable one, which is what
@@ -194,7 +210,7 @@ fn index(
 		body.push_str("<span class=\"aside-read\">");
 		escape_text(&mut body, &read_time(p.words));
 		body.push_str("</span>");
-		body.push_str("</div>");
+		body.push_str("</div>\n");
 		// Who wrote it, where more than one person writes here. On a blog of one it would be the same
 		// name under every title, which tells a reader choosing between them nothing.
 		if authors.len() > 1 {
@@ -206,15 +222,35 @@ fn index(
 				body.push_str("</span></div>");
 			}
 		}
-		body.push_str("<h2 class=\"aside-item-title\"><a href=\"");
+		body.push_str("<h2 class=\"aside-card-title\"><a href=\"");
 		escape_attr(&mut body, &cfg.path_of(&p.slug));
 		body.push_str("\">");
 		escape_text(&mut body, &p.title);
-		body.push_str("</a></h2>");
+		body.push_str("</a></h2>\n");
+		body.push_str("</div>\n");
+
+		// The preview: a fixed-height window onto the formatted prose. The head already carries the
+		// title, so a heading the post opens with is dropped here rather than said twice; the whole
+		// read, one click away, keeps it. The stylesheet clips the window and fades its foot, and the
+		// script lifts the fade off a preview that is not actually cut.
+		body.push_str("<div class=\"aside-card-preview\">\n<div class=\"aside aside-card-prose\">");
+		// The post's own rendered prose, trusted as `post_page` trusts it -- it is the site's markup,
+		// escaped where it was rendered, not a value from a reader.
+		body.push_str(strip_leading_heading(&p.html));
+		body.push_str("</div>\n</div>\n");
+
+		// The foot: the way in to the whole piece, a plain link to the post's own page since this is a
+		// multi-page site and the post is a page, and the post's chips beside it.
+		body.push_str("<div class=\"aside-card-foot\">\n");
+		body.push_str("<a class=\"aside-readmore\" href=\"");
+		escape_attr(&mut body, &cfg.path_of(&p.slug));
+		body.push_str("\">Read more</a>");
 		body.push_str(&facets_list(cfg, p));
-		body.push_str("</li>\n");
+		body.push_str("</div>\n");
+
+		body.push_str("</article>\n");
 	}
-	body.push_str("</ul>\n");
+	body.push_str("</div>\n");
 
 	// Where the filter lands a reader on nothing, the script shows this line; the server shows it only
 	// when the site itself is empty. Both say the same thing, so the reader is never left at a blank.
@@ -235,6 +271,9 @@ fn index(
 		placeholder=\"you@example.com\" autocomplete=\"email\" aria-label=\"Email\" required>\n");
 	body.push_str("<button type=\"submit\" class=\"aside-subscribe-btn\">Subscribe</button>\n");
 	body.push_str("</form>\n</section>\n");
+
+	// Close the posts column and the two-column layout.
+	body.push_str("</div>\n</div>\n");
 
 	// The script that wires the filter. Referenced rather than inlined, on the same reasoning as the
 	// comment script: a site may run a Content-Security-Policy that forbids inline script, and the
@@ -288,14 +327,41 @@ fn filter_shell(cfg: &PublishConfig, posts: &[Post], authors: &[Author]) -> Stri
 
 	let mut s = String::from("<section class=\"aside-filter\" aria-label=\"Filter posts\">\n");
 
-	// The search box, over the title and opening of each post.
+	// Search, dressed as a facet like the two vocabularies below it: a heading, the same
+	// Include / Only / Exclude row they wear, and a box in the whole site's own search look. Include
+	// keeps the posts that carry the words, Only those that carry them as a whole word, Exclude those
+	// that do not. The box searches the title and opening of each post.
+	s.push_str("<div class=\"aside-facet aside-facet-search\" data-facet=\"search\">\n\
+		<div class=\"aside-facet-head\">\n<span class=\"aside-facet-lbl\">Search</span>\n\
+		<div class=\"aside-facet-mode\" role=\"radiogroup\" aria-label=\"Search match\">\n");
+	for (val, name, on) in [("includes", "Include", true), ("only", "Only", false),
+		("excludes", "Exclude", false)]
+	{
+		s.push_str("<label class=\"aside-mode\"><input type=\"radio\" name=\"aside-search-mode\" value=\"");
+		s.push_str(val);
+		s.push('"');
+		if on {
+			s.push_str(" checked");
+		}
+		s.push('>');
+		s.push_str(name);
+		s.push_str("</label>\n");
+	}
+	s.push_str("</div>\n</div>\n");
+	// The box. The magnifier is drawn inline so no asset must ship for it -- a missing icon file is a
+	// broken square on a live page, and this leaves nothing to forget to deploy.
+	s.push_str("<div class=\"search-box aside-search-box\">\n");
+	s.push_str(SEARCH_ICON);
 	s.push_str("<input type=\"search\" class=\"aside-filter-search\" id=\"aside-filter-search\" \
 		placeholder=\"Search posts\" aria-label=\"Search posts\" autocomplete=\"off\">\n");
+	s.push_str("</div>\n</div>\n");
 
-	// The authors, each a face that toggles the list to that author. None pressed is every author, so
-	// the row starts showing all. Only those with a post in the list are offered: `authors` also holds
-	// whoever else may write here, for the description above, and a face that narrows the list to
-	// nothing is a control that can only disappoint.
+	// The authors, each a face that narrows the list to that author. Every face starts pressed -- the
+	// default is all of them, shown selected the way each vocabulary starts with every chip in its
+	// Selected box -- and deselecting narrows; deselecting the last imposes nothing, so the stream
+	// opens back up rather than empties. Only those with a post in the list are offered: `authors`
+	// also holds whoever else may write here, for the description above, and a face that narrows the
+	// list to nothing is a control that can only disappoint.
 	let authors: Vec<&Author> = authors.iter()
 		.filter(|a| posts.iter().any(|p| p.author == a.username))
 		.collect();
@@ -307,7 +373,7 @@ fn filter_shell(cfg: &PublishConfig, posts: &[Post], authors: &[Author]) -> Stri
 			escape_attr(&mut s, &a.handle);
 			s.push_str("\" title=\"");
 			escape_attr(&mut s, &a.name);
-			s.push_str("\" aria-pressed=\"false\">");
+			s.push_str("\" aria-pressed=\"true\">");
 			s.push_str(&author_face(a));
 			s.push_str("<span class=\"aside-author-name\">");
 			escape_text(&mut s, &a.name);
@@ -340,6 +406,8 @@ fn filter_shell(cfg: &PublishConfig, posts: &[Post], authors: &[Author]) -> Stri
 			"<div class=\"aside-filter-time\" id=\"aside-filter-time\" data-lo=\"{lo}\" data-hi=\"{hi}\">\n\
 			<span class=\"aside-time-lbl\">Reading time</span>\n\
 			<div class=\"aside-time-track\">\n\
+			<div class=\"aside-time-rail\"></div>\n\
+			<div class=\"aside-time-fill\" id=\"aside-time-fill\"></div>\n\
 			<input type=\"range\" class=\"aside-time-min\" id=\"aside-time-min\" \
 				min=\"{lo}\" max=\"{hi}\" value=\"{lo}\" step=\"1\" aria-label=\"Least minutes\">\n\
 			<input type=\"range\" class=\"aside-time-max\" id=\"aside-time-max\" \
@@ -353,6 +421,16 @@ fn filter_shell(cfg: &PublishConfig, posts: &[Post], authors: &[Author]) -> Stri
 	s.push_str("</section>\n");
 	s
 }
+
+/// The magnifier beside the filter's search box, drawn inline.
+///
+/// Inline rather than an `<img>` to a file, so nothing has to be shipped for it: a search box wants a
+/// glyph and a missing icon file is a broken square on a live page. `currentColor` so it takes the
+/// box's own ink.
+const SEARCH_ICON: &str = "<svg class=\"aside-search-ico\" viewBox=\"0 0 24 24\" aria-hidden=\"true\" \
+	fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\">\
+	<circle cx=\"11\" cy=\"11\" r=\"7\"></circle><line x1=\"20\" y1=\"20\" x2=\"16.65\" y2=\"16.65\">\
+	</line></svg>";
 
 /// One facet family's controls: a mode row, and a pair of boxes the reader moves chips between.
 ///
@@ -372,8 +450,8 @@ fn facet_block(facet: &str, label: &str, values: &[&str]) -> String {
 	s.push_str("</span>\n<div class=\"aside-facet-mode\" role=\"radiogroup\" aria-label=\"");
 	escape_attr(&mut s, &fmt!("{} match", label));
 	s.push_str("\">\n");
-	for (val, name, on) in [("includes", "Includes", true), ("only", "Only", false),
-		("excludes", "Excludes", false)]
+	for (val, name, on) in [("includes", "Include", true), ("only", "Only", false),
+		("excludes", "Exclude", false)]
 	{
 		s.push_str("<label class=\"aside-mode\"><input type=\"radio\" name=\"aside-mode-");
 		s.push_str(facet);
@@ -452,7 +530,11 @@ fn about_block(authors: &[Author]) -> String {
 	}
 	let mut s = String::from("<section class=\"aside-about\" aria-label=\"About\">\n");
 	for a in authors.iter().filter(|a| !a.bio.is_empty()) {
-		s.push_str("<div class=\"aside-about-who\">");
+		// The public handle, so the script can narrow the intros to the selected authors the same way
+		// it narrows the posts -- and never the login username, which is the hash of a passphrase.
+		s.push_str("<div class=\"aside-about-who\" data-author=\"");
+		escape_attr(&mut s, &a.handle);
+		s.push_str("\">");
 		s.push_str(&author_face(a));
 		s.push_str("<div class=\"aside-about-body\">");
 		// The name is drawn only where more than one person writes here: on a blog of one, the name
@@ -515,6 +597,30 @@ fn facets_list(cfg: &PublishConfig, post: &Post) -> String {
 /// definition, so this badge and the filter's slider count alike.
 fn read_time(words: usize) -> String {
 	fmt!("{} min read", read_mins(words))
+}
+
+/// A post's rendered HTML with a leading heading removed, for a card's clipped preview.
+///
+/// The card draws the post's title in its own head, so a post whose prose opens with that same
+/// heading would show it twice. One leading `<h1>`--`<h6>` element and the whitespace around it are
+/// dropped, matching the reader script's own leading-heading rule so the card the server draws and
+/// the card the app draws agree to the word. Anything that is not a heading at the very start is
+/// left untouched, and a malformed heading with no close is left rather than swallowing the post.
+///
+/// The renderer emits lowercase tags, so the close is matched literally; an unexpected case simply
+/// leaves the heading in place, which shows a title twice but breaks nothing.
+fn strip_leading_heading(html: &str) -> &str {
+	let t = html.trim_start();
+	let b = t.as_bytes();
+	// A leading `<hN` where N is 1..6, the open tag case-folded so `<H1>` is caught too.
+	if b.len() < 4 || b[0] != b'<' || (b[1] | 0x20) != b'h' || !(b'1'..=b'6').contains(&b[2]) {
+		return t;
+	}
+	let close = fmt!("</h{}>", b[2] as char);
+	match t.find(&close) {
+		Some(i)	=> t[i + close.len()..].trim_start(),
+		None	=> t,
+	}
 }
 
 /// One post.
@@ -1024,26 +1130,53 @@ mod tests {
 		Ok(())
 	}
 
-	/// The index is a list of choices: each post its title as a link, its date and reading time, and
-	/// its chips -- not the prose itself, which lives one click away at the post's own page.
+	/// The index is a stream of cards, each a post: its title a link to the post's own page, its date
+	/// and reading time, a clipped preview of the formatted prose with the opening heading dropped so
+	/// the title is not said twice, and a "Read more" that is a plain link to the post -- this is a
+	/// multi-page site, so the whole read is a page, not an overlay.
 	#[test]
-	fn test_the_index_links_its_posts_02() -> Outcome<()> {
+	fn test_the_index_draws_a_card_per_post_02() -> Outcome<()> {
 		let posts = vec![post()];
 		let resp = res!(index(&cfg(), &posts, &[], "", "test"));
 		let body = String::from_utf8_lossy(&resp.body).to_string();
 		assert_eq!(status_of(&resp), Some(HttpStatus::OK));
-		assert!(body.contains(r#"<h2 class="aside-item-title"><a href="/asides/on-rent">On rent</a></h2>"#),
+		// Each post is a card whose title links to its own page.
+		assert!(body.contains(r#"<article class="aside-card" data-author=""#), "no post card: {}", body);
+		assert!(body.contains(r#"<h2 class="aside-card-title"><a href="/asides/on-rent">On rent</a></h2>"#),
 			"no title link: {}", body);
 		// The reading time is shown, not just carried as a datum for the filter.
 		assert!(body.contains(r#"<span class="aside-read">3 min read</span>"#), "no reading time: {}", body);
-		// The prose stays at the post's own page: an index item carries no excerpt or body.
-		assert!(!body.contains("An opening sentence."), "the index inlined the prose: {}", body);
-		assert!(!body.contains("aside-excerpt"), "the index kept the excerpt: {}", body);
-		// The list item carries the facts the filter matches on.
+		// The card carries a clipped preview of the prose, its opening heading dropped so the card's
+		// own title is not doubled.
+		assert!(body.contains(r#"<div class="aside-card-preview">"#), "no preview window: {}", body);
+		assert!(body.contains("<p>An opening sentence.</p>"), "the preview did not carry the prose: {}", body);
+		assert!(!body.contains("<h1>On rent</h1>"), "the leading heading was not stripped: {}", body);
+		// Read more is a plain link to the post's own page, not a button into an overlay.
+		assert!(body.contains(r#"<a class="aside-readmore" href="/asides/on-rent">Read more</a>"#),
+			"no Read more link: {}", body);
+		// The card carries the facts the filter matches on.
 		assert!(body.contains(r#"data-read-mins="3""#), "no reading-time datum: {}", body);
 		assert!(body.contains(r#"data-categories="Personal""#), "no category datum: {}", body);
 		// And the filter's own script is linked, once.
 		assert_eq!(body.matches("/asides/filter.js").count(), 1, "filter script not linked once: {}", body);
+		Ok(())
+	}
+
+	/// The reader is two columns -- the posts on the left, the filter on the right -- with a toggle
+	/// that folds the filter away on a narrow screen. The whole is one enhancement: without the
+	/// script the panel is a plain column and every post shows.
+	#[test]
+	fn test_the_index_is_two_columns_21() -> Outcome<()> {
+		let resp = res!(index(&cfg(), &[post()], &[], "", "test"));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(body.contains(r#"<div class="aside-layout">"#), "no two-column layout: {}", body);
+		assert!(body.contains(r#"<aside class="aside-side" id="aside-side">"#), "no filter column: {}", body);
+		assert!(body.contains(r#"<div class="aside-main">"#), "no posts column: {}", body);
+		// The toggle that unfolds the filter on a phone, wired to the panel it opens.
+		assert!(body.contains(concat!(
+			r#"<button type="button" class="aside-filter-toggle" id="aside-filter-toggle" "#,
+			r#"aria-controls="aside-side" aria-expanded="false">Filter</button>"#)),
+			"no filter toggle: {}", body);
 		Ok(())
 	}
 
@@ -1189,6 +1322,68 @@ mod tests {
 		Ok(())
 	}
 
+	/// Search is a facet like the vocabularies: a heading, an Include / Only / Exclude row named for
+	/// its own group, and the box in the site's search look with an inline magnifier -- no icon file
+	/// to ship, so no broken square where one was forgotten. The mode labels read in the singular.
+	#[test]
+	fn test_the_search_is_a_facet_22() -> Outcome<()> {
+		let resp = res!(index(&cfg(), &[post()], &[], "", "test"));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(body.contains(r#"<div class="aside-facet aside-facet-search" data-facet="search">"#),
+			"no search facet: {}", body);
+		assert!(body.contains(r#"name="aside-search-mode" value="includes" checked"#),
+			"search has no default mode: {}", body);
+		assert!(body.contains(r#"name="aside-search-mode" value="only""#), "no Only mode: {}", body);
+		assert!(body.contains(r#"name="aside-search-mode" value="excludes""#), "no Exclude mode: {}", body);
+		// The labels are singular throughout: the search row and the vocabularies' rows.
+		assert!(body.contains(">Include</label>"), "the mode label is not singular: {}", body);
+		assert!(body.contains(">Only</label>"), "no Only label: {}", body);
+		assert!(body.contains(">Exclude</label>"), "the mode label is not singular: {}", body);
+		assert!(!body.contains(">Includes</label>"), "a plural mode label survived: {}", body);
+		assert!(!body.contains(">Excludes</label>"), "a plural mode label survived: {}", body);
+		// The box, with an inline magnifier rather than an <img> to a file.
+		assert!(body.contains(r#"<div class="search-box aside-search-box">"#), "no search box: {}", body);
+		assert!(body.contains("<svg class=\"aside-search-ico\""), "no inline magnifier: {}", body);
+		assert!(!body.contains("search.svg"), "the search box referenced an asset file: {}", body);
+		assert!(body.contains(r#"id="aside-filter-search""#), "no search input: {}", body);
+		Ok(())
+	}
+
+	/// The reading-time slider carries a rail and a filled span the script paints between the thumbs,
+	/// so the chosen band reads at a glance rather than being inferred from two dots.
+	#[test]
+	fn test_the_slider_carries_a_fill_23() -> Outcome<()> {
+		let resp = res!(index(&cfg(), &[post()], &[], "", "test"));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(body.contains(r#"<div class="aside-time-rail"></div>"#), "no slider rail: {}", body);
+		assert!(body.contains(r#"<div class="aside-time-fill" id="aside-time-fill"></div>"#),
+			"no slider fill: {}", body);
+		Ok(())
+	}
+
+	/// Every author face starts pressed -- the default is all of them, shown selected the way each
+	/// vocabulary starts with every chip in Selected -- and the intro boxes carry the author's public
+	/// handle, so the script can narrow the intros to the selected authors and never a login username.
+	#[test]
+	fn test_the_authors_start_selected_24() -> Outcome<()> {
+		let one = Author {
+			username:	fmt!("jason"),
+			handle:		fmt!("h-jason"),
+			name:		fmt!("Jason"),
+			avatar:		String::new(),
+			bio:		fmt!("Notes on rent and what follows."),
+		};
+		let resp = res!(index(&cfg(), &[post()], std::slice::from_ref(&one), "", "test"));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(body.contains(r#"class="aside-author" data-author="h-jason" title="Jason" aria-pressed="true""#),
+			"the author face does not start pressed: {}", body);
+		// The intro box carries the handle for the script, never the login username.
+		assert!(body.contains(r#"<div class="aside-about-who" data-author="h-jason">"#),
+			"the intro box carries no handle: {}", body);
+		assert!(!body.contains(r#"data-author="jason""#), "the login username reached the page: {}", body);
+		Ok(())
+	}
+
 	/// Categories and tags are the same instrument twice: one block each, categories first, each with
 	/// its own mode row and its own pair of boxes, every value starting in Selected.
 	#[test]
@@ -1300,11 +1495,13 @@ mod tests {
 		assert!(body.contains("aside-about"), "no description above the posts: {}", body);
 		assert!(body.contains("Notes on rent and what follows."), "the description is not shown: {}", body);
 		assert!(!body.contains("aside-about-name"), "a lone author was named over their own line: {}", body);
-		// It is above the filter, which is above the list: what the site is about is met first.
+		// The description leads the posts column: whatever the filter does off to the side, what the
+		// site is about is met above the stream. (The filter is its own column now, drawn first in the
+		// source so a phone meets its toggle before scrolling in; ordering it against the about would
+		// assert the column layout, not the reading order that matters here.)
 		let about = body.find("aside-about").unwrap_or(usize::MAX);
-		let filter = body.find("aside-filter").unwrap_or(usize::MAX);
-		let list = body.find("aside-index-list").unwrap_or(usize::MAX);
-		assert!(about < filter && filter < list, "the page is out of order: {}", body);
+		let list = body.find("aside-index-list").unwrap_or(0);
+		assert!(about < list, "the description does not lead the posts: {}", body);
 
 		// A second author, and each description carries a name.
 		let two = Author {
@@ -1964,10 +2161,10 @@ const FILTER_JS: &str = r##"(function () {
 	"use strict";
 	var list = document.getElementById("aside-index-list");
 	if (!list) { return; }
-	var items = Array.prototype.slice.call(list.querySelectorAll(".aside-index-item"));
+	var items = Array.prototype.slice.call(list.querySelectorAll(".aside-card"));
 	var empty = document.getElementById("aside-empty");
 
-	// The two facet families, and what tells them apart: which attribute an item carries its values in,
+	// The two facet families, and what tells them apart: which attribute a card carries its values in,
 	// and what those values are joined on. A tag is [a-z0-9-] so a space separates them safely; a
 	// category is a free string that may hold a space, so it is joined on a comma the config forbids
 	// inside one. Nothing else below knows which family it is working on.
@@ -1976,7 +2173,7 @@ const FILTER_JS: &str = r##"(function () {
 		{ name: "tag", attr: "data-tags", sep: " " }
 	];
 
-	// Each item's filterable facts, read once from its data attributes.
+	// Each card's filterable facts, read once from its data attributes.
 	var rows = items.map(function (li) {
 		var vals = {};
 		FAMILY.forEach(function (f) {
@@ -1993,11 +2190,26 @@ const FILTER_JS: &str = r##"(function () {
 
 	// The filter's state. Every field starts in the value that hides nothing.
 	var search = "";
-	var authors = {};          // pressed authors; empty means every author
-	var facets = [];           // one entry per family the page drew
+	var searchMode = "includes";   // include / only / exclude, over the typed query
+	var authors = {};              // which authors are selected (all, by default)
+	var authorOffered = {};        // which authors the filter offers a face for
+	var facets = [];               // one entry per family the page drew
 	var tmin = -Infinity, tmax = Infinity;
 
 	function any(o) { for (var x in o) { if (o[x]) { return true; } } return false; }
+
+	// A query escaped for use inside a word-boundary regex, for the Only mode.
+	function escRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+
+	// Whether a card answers the search, in the mode the radios name: Include keeps the posts that
+	// carry the words, Only those that carry them as a whole word, Exclude those that do not. An empty
+	// box asks nothing.
+	function passesSearch(r) {
+		if (!search) { return true; }
+		if (searchMode === "excludes") { return r.text.indexOf(search) === -1; }
+		if (searchMode === "only") { return new RegExp("\\b" + escRe(search) + "\\b").test(r.text); }
+		return r.text.indexOf(search) !== -1;
+	}
 
 	// The blocks the page drew, one per family it had a vocabulary for. A site with no categories has
 	// no category block, and this simply finds nothing.
@@ -2029,7 +2241,7 @@ const FILTER_JS: &str = r##"(function () {
 	}
 	facets.forEach(refresh);
 
-	// Whether one item passes one family. Three rules hold whichever family it is: a post with no
+	// Whether one card passes one family. Three rules hold whichever family it is: a post with no
 	// values in it is not participating and always passes; an empty selected box imposes nothing; and
 	// a value the block never offered -- a category the site has since dropped, still worn by an old
 	// post -- cannot hide anything, which is why the comparison is against the offered set alone.
@@ -2050,10 +2262,13 @@ const FILTER_JS: &str = r##"(function () {
 		return true;
 	}
 
-	// Whether one item passes every control at once.
+	// Whether one card passes every control at once.
 	function passes(r) {
-		if (search && r.text.indexOf(search) === -1) { return false; }
-		if (any(authors) && !authors[r.author]) { return false; }
+		if (!passesSearch(r)) { return false; }
+		// An author the filter offers but the reader has switched off hides that author's posts,
+		// unless every author is off, which imposes nothing (an empty selection, like an empty chip
+		// box). A post by an author with no face is never hidden by this cut.
+		if (any(authors) && authorOffered[r.author] && !authors[r.author]) { return false; }
 		for (var i = 0; i < facets.length; i++) {
 			if (!passesFacet(r, facets[i])) { return false; }
 		}
@@ -2061,21 +2276,40 @@ const FILTER_JS: &str = r##"(function () {
 		return true;
 	}
 
+	// The author intro boxes above the posts follow the author selection: with every face pressed
+	// every author is shown (the default), and releasing faces narrows the intros to just those
+	// authors, the same set the posts are narrowed to. An intro exists only for an author who wrote a
+	// description, so where a selection leaves none the section folds away rather than sit empty.
+	var aboutSection = document.querySelector(".aside-about");
+	var aboutBoxes = aboutSection ? aboutSection.querySelectorAll(".aside-about-who") : [];
+	function applyAbout() {
+		if (!aboutSection) { return; }
+		var narrowed = any(authors), visible = 0;
+		Array.prototype.forEach.call(aboutBoxes, function (box) {
+			var h = box.getAttribute("data-author");
+			// A bio-only author has no face to switch off, so their intro always stands; a faced
+			// author's intro drops the moment their face is released, and returns when it is pressed
+			// again or the filter is cleared.
+			var show = !authorOffered[h] || !narrowed || authors[h];
+			box.style.display = show ? "" : "none";
+			if (show) { visible++; }
+		});
+		aboutSection.style.display = visible ? "" : "none";
+	}
+
 	function apply() {
+		applyAbout();
 		var shown = 0;
 		for (var i = 0; i < rows.length; i++) {
 			var ok = passes(rows[i]);
 			rows[i].el.hidden = !ok;
-			// Which item is at the top changes as the filter narrows, and the one at the top is often
-			// drawn differently; the class says which it is, since :first-child cannot see past a hidden
-			// sibling.
-			rows[i].el.classList.toggle("aside-first", ok && shown === 0);
 			if (ok) { shown++; }
 		}
 		if (empty) { empty.hidden = shown !== 0; }
 	}
 
-	// The search box.
+	// The search box, and its match mode -- the twin of the vocabularies' mode rows. The facet holds
+	// no chips, so the mode is wired here rather than in the chip-box loop below.
 	var box = document.getElementById("aside-filter-search");
 	if (box) {
 		box.addEventListener("input", function () {
@@ -2083,11 +2317,30 @@ const FILTER_JS: &str = r##"(function () {
 			apply();
 		});
 	}
+	Array.prototype.forEach.call(document.querySelectorAll('input[name="aside-search-mode"]'),
+		function (el) {
+			el.addEventListener("change", function () {
+				if (el.checked) { searchMode = el.value; apply(); }
+			});
+		});
 
-	// The author faces: press to narrow to that author, press again to release. None pressed is all.
+	// The author faces. Every one starts selected -- the default is all of them, shown pressed the
+	// way each vocabulary starts with every chip in its Selected box -- and releasing one narrows;
+	// releasing the last imposes nothing, so the stream opens back up rather than empties.
 	var authorRow = document.getElementById("aside-filter-authors");
 	if (authorRow) {
+		Array.prototype.forEach.call(authorRow.querySelectorAll(".aside-author"), function (b) {
+			var h = b.getAttribute("data-author");
+			authors[h] = true;
+			authorOffered[h] = true;
+		});
+		// A lone author cannot be switched off: there is nothing to narrow to, and a filter that could
+		// hide the only writer would just empty the page. The face stays selected, inert, until a
+		// second author exists.
+		var lone = Object.keys(authorOffered).length < 2;
+		if (lone) { authorRow.classList.add("aside-authors-lone"); }
 		authorRow.addEventListener("click", function (e) {
+			if (lone) { return; }
 			var b = e.target.closest(".aside-author");
 			if (!b) { return; }
 			var u = b.getAttribute("data-author");
@@ -2173,14 +2426,23 @@ const FILTER_JS: &str = r##"(function () {
 		refresh(st);
 	});
 
-	// The reading-time slider: two thumbs that may not cross. The read-out follows them.
+	// The reading-time slider: two thumbs that may not cross, the span between them painted so the
+	// chosen band reads at a glance rather than being left for the eye to infer from two dots.
 	var timeWrap = document.getElementById("aside-filter-time");
 	var tminEl = document.getElementById("aside-time-min");
 	var tmaxEl = document.getElementById("aside-time-max");
 	var tout = document.getElementById("aside-time-out");
+	var tfill = document.getElementById("aside-time-fill");
 	if (timeWrap && tminEl && tmaxEl) {
 		tmin = parseInt(tminEl.value, 10);
 		tmax = parseInt(tmaxEl.value, 10);
+		var paintTime = function () {
+			if (!tfill) { return; }
+			var mn = parseInt(tminEl.min, 10), mx = parseInt(tminEl.max, 10);
+			var span = (mx - mn) || 1;
+			tfill.style.left  = ((tmin - mn) / span * 100) + "%";
+			tfill.style.right = ((mx - tmax) / span * 100) + "%";
+		};
 		var syncTime = function () {
 			var lo = parseInt(tminEl.value, 10);
 			var hi = parseInt(tmaxEl.value, 10);
@@ -2191,10 +2453,36 @@ const FILTER_JS: &str = r##"(function () {
 			}
 			tmin = lo; tmax = hi;
 			if (tout) { tout.textContent = lo + "–" + hi + " min"; }
+			paintTime();
 			apply();
 		};
 		tminEl.addEventListener("input", syncTime);
 		tmaxEl.addEventListener("input", syncTime);
+		paintTime();
+	}
+
+	// Drop the fade from a preview whose prose is not cut -- the fade promises more, and a post that
+	// fits has none to promise. A height read while the panel is hidden reads 0, so a preview with no
+	// laid-out box is left alone; the fade, the safe default, stands until a run when it is visible.
+	function markAsideFits() {
+		Array.prototype.forEach.call(document.querySelectorAll(".aside-card-preview"), function (pv) {
+			if (!pv.offsetParent && pv.offsetHeight === 0) { return; }
+			pv.classList.toggle("aside-card-fit", pv.scrollHeight <= pv.clientHeight + 2);
+		});
+	}
+	markAsideFits();
+	if (document.fonts && document.fonts.ready) { document.fonts.ready.then(markAsideFits); }
+	window.addEventListener("load", markAsideFits);
+
+	// On a narrow screen the filter is folded behind a button; toggling a class rather than redrawing
+	// keeps every selection the reader has made while it was open.
+	var toggle = document.getElementById("aside-filter-toggle");
+	var side = document.getElementById("aside-side");
+	if (toggle && side) {
+		toggle.addEventListener("click", function () {
+			var open = side.classList.toggle("open");
+			toggle.setAttribute("aria-expanded", open ? "true" : "false");
+		});
 	}
 
 	apply();
