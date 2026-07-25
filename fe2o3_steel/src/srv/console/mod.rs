@@ -1374,6 +1374,9 @@ white-space:pre-wrap;word-break:break-word;max-height:24rem;overflow-y:auto;}\
 /* A hint under a field: quiet, and it does not want the field's own bottom margin doubled. */\
 .mc-note{display:block;margin:0.25rem 0 0;font-size:0.82rem;\
 color:var(--text-secondary,var(--aside-date-color,#8a97a6));}\
+/* A test result reads its outcome by colour: the model answered, or it did not. */\
+.mc-note.mc-ok{color:#5fae5f;}\
+.mc-note.mc-err{color:#d9776f;}\
 /* The moderation queue. A comment is shown rendered, framed, with its verbs beneath: a\
    decision about what to publish is made looking at what would be published. */\
 .mc-comment{border:1px solid var(--border,var(--aside-rule-color,#333c47));border-radius:6px;\

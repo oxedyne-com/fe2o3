@@ -156,6 +156,12 @@ pub const PATH_AI_SAVE: &str = "/manage/ai/save";
 /// Where the editor's Fix button posts a post's text to be tidied.
 pub const PATH_AI_FIX: &str = "/manage/ai/fix";
 
+/// Where the AI page's Test button posts, to check the key reaches the model.
+pub const PATH_AI_TEST: &str = "/manage/ai/test";
+
+/// The AI settings as JSON, for an app that draws the panel itself.
+pub const PATH_AI_JSON: &str = "/manage/ai.json";
+
 /// The moderation queue: what has been said and what is waiting on a decision.
 pub const PATH_COMMENTS: &str = "/manage/comments";
 
@@ -211,6 +217,7 @@ pub fn writes(path: &str) -> bool {
 		|| path == PATH_TAG_DELETE
 		|| path == PATH_AI_SAVE
 		|| path == PATH_AI_FIX
+		|| path == PATH_AI_TEST
 }
 
 /// Whether a path is a POST this module answers.
@@ -284,6 +291,7 @@ pub fn handle_get<
 		PATH_POST_JSON	=> post_json(cfg, db, query, id),
 		PATH_TAGS_JSON	=> tags_json(cfg, db, id),
 		PATH_CREDS_JSON	=> creds_json(cfg, db, id),
+		PATH_AI_JSON	=> ai_json(db, id),
 		PATH_PROFILE_JSON	=> profile_json(cfg, admin, db, id),
 		PATH_SUBS_JSON	=> subs_json(db, id),
 		PATH_COMMENTS	=> comments_page(cfg.comments, theme, admin, csrf, db, query, id),
@@ -2161,8 +2169,39 @@ fn ai_page<
 	};
 
 	body.push_str(&ai_form(&s, csrf));
+	body.push_str(AI_TEST_SCRIPT);
 	Ok(page(theme, admin, "AI", &body))
 }
+
+/// The AI page's Test button: it posts nothing of the operator's, asks the server to reach the model,
+/// and shows what came back beside the button. It reads the CSRF token from the settings form it sits
+/// in, so it needs nothing passed to it.
+const AI_TEST_SCRIPT: &str = "<script>\n\
+(function(){\n\
+  var btn=document.getElementById('ai-test');\n\
+  var msg=document.getElementById('ai-test-msg');\n\
+  if(!btn||!msg){return;}\n\
+  var form=btn.closest('form');\n\
+  var csrfEl=form?form.querySelector('input[name=csrf]'):null;\n\
+  btn.addEventListener('click',function(){\n\
+    var was=btn.textContent;btn.disabled=true;btn.textContent='Testing\\u2026';\n\
+    msg.textContent='';msg.className='mc-note';\n\
+    var b='csrf='+encodeURIComponent(csrfEl?csrfEl.value:'');\n\
+    fetch('/manage/ai/test',{method:'POST',credentials:'same-origin',\n\
+      headers:{'Content-Type':'application/x-www-form-urlencoded','Accept':'application/json'},body:b})\n\
+      .then(function(r){return r.json();})\n\
+      .then(function(d){\n\
+        btn.disabled=false;btn.textContent=was;\n\
+        if(d&&d.ok){msg.textContent='The model answered: '+(d.reply||'(nothing)');\n\
+          msg.className='mc-note mc-ok';}\n\
+        else{msg.textContent=(d&&d.error)||'The test did not go through.';\n\
+          msg.className='mc-note mc-err';}\n\
+      })\n\
+      .catch(function(){btn.disabled=false;btn.textContent=was;\n\
+        msg.textContent='The server did not answer.';msg.className='mc-note mc-err';});\n\
+  });\n\
+})();\n\
+</script>\n";
 
 /// The AI settings form, built from the settings a site has stored. Pure, so it can be seen without a
 /// database behind it: the provider is selected, the key shown only as held-or-not, the prompts
@@ -2203,7 +2242,11 @@ fn ai_form(s: &ai::AiSettings, csrf: &str) -> String {
 		placeholder=\"you@example.com\">{emails}</textarea>\
 		<span class=\"mc-note\">One per line, or separated by commas. Leave blank to be told nothing and \
 		find held comments in the queue.</span></div>\n\
+		<div class=\"mc-actions\">\
 		<button type=\"submit\" class=\"mc-btn\">Save</button>\n\
+		<button type=\"button\" class=\"mc-btn mc-btn-quiet\" id=\"ai-test\">Test the connection</button>\n\
+		</div>\
+		<p class=\"mc-note\" id=\"ai-test-msg\" role=\"status\"></p>\n\
 		</form>\n",
 		status		= if s.api_key.is_empty() { "No key is set." } else { "A key is set." },
 		save		= PATH_AI_SAVE,
@@ -2524,6 +2567,42 @@ fn creds_json<
 	Ok(json_body(&res!(Dat::Map(m).encode_string_with_config(&EncoderConfig::<(), ()>::json(None)))))
 }
 
+/// The AI settings as JSON.
+///
+/// The same settings the AI page renders, for an app that would rather draw the panel itself. The key
+/// is never among them -- it is write-only, and a page that showed it, even once, is a page a shoulder
+/// reads -- so only whether one is *set* is told; the prompts are the resolved ones, so a blank box in
+/// the app still starts from the default, exactly as the server form prefills it.
+fn ai_json<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	Option<&(Arc<RwLock<DB>>, UID)>,
+	id:	&str,
+)
+	-> Outcome<HttpMessage>
+{
+	let db = match db {
+		Some(d)	=> d,
+		None	=> return Ok(json_error("this site has no database configured")),
+	};
+	debug!("{}: console: GET ai.json", id);
+	let s = res!(ai::get_settings(db));
+
+	let mut m = DaticleMap::new();
+	m.insert(dat!("provider"),	dat!(s.provider.clone()));
+	m.insert(dat!("model"),		dat!(s.model.clone()));
+	// Never the key itself, only whether one is held -- the app draws a "kept" placeholder from this.
+	m.insert(dat!("key_set"),	Dat::Bool(!s.api_key.is_empty()));
+	m.insert(dat!("fix_prompt"),	dat!(s.fix_prompt().to_string()));
+	m.insert(dat!("comment_prompt"),dat!(s.comment_prompt().to_string()));
+	m.insert(dat!("alert_emails"),	dat!(s.alert_emails.join("\n")));
+	Ok(json_body(&res!(Dat::Map(m).encode_string_with_config(&EncoderConfig::<(), ()>::json(None)))))
+}
+
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ POST                                                                      │
@@ -2572,6 +2651,7 @@ pub async fn handle_post<
 		&& request_path != PATH_PROFILE_SAVE
 		&& request_path != PATH_AI_SAVE
 		&& request_path != PATH_AI_FIX
+		&& request_path != PATH_AI_TEST
 	{
 		return Ok(back_with(
 			"this site serves its posts from a directory, so there is nothing to write into; set \
@@ -2591,6 +2671,7 @@ pub async fn handle_post<
 		PATH_CREDS	=> do_creds(db, body, &admin.username, json, id),
 		PATH_AI_SAVE	=> do_ai_save(db, body, &admin.username, json, id),
 		PATH_AI_FIX	=> do_ai_fix(db, tls_client, body, id).await,
+		PATH_AI_TEST	=> do_ai_test(db, tls_client, id).await,
 		PATH_NEWSLETTER	=> do_newsletter(cfg, db, mail, body, &admin.username, json, id).await,
 		PATH_NEWSLETTER_TEST	=> do_test_send(cfg, db, mail, body, &admin.username, json, id).await,
 		PATH_SUBS_ACTION	=> do_subs_action(db, body, &admin.username, json, id),
@@ -2921,6 +3002,67 @@ async fn do_ai_fix<
 	m.insert(dat!("ok"), Dat::Bool(true));
 	m.insert(dat!("fixed"), dat!(fixed));
 	info!("{}: console: an AI fix was suggested", id);
+	Ok(json_body(&res!(Dat::Map(m).json())))
+}
+
+/// Checks the site's AI settings actually reach the model, and says so.
+///
+/// The one call that finishes setting AI up: the operator has typed a provider, a model and a key, and
+/// wants to know they were right before a real comment or a real post rides on them. It sends a tiny,
+/// fixed exchange -- not the operator's prompts, not any post or comment -- and reports only whether the
+/// model answered. Every way it can fail comes back as a plain reason, since a wrong key, a wrong model
+/// name and no outbound connection are exactly what this is for and each wants a different fix. The
+/// model's own words are trimmed to a short echo, so the operator sees it truly spoke, and a key or a
+/// quota figure a provider might return does not sprawl onto the page.
+async fn do_ai_test<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:		&(Arc<RwLock<DB>>, UID),
+	tls_client:	&Option<Arc<ClientConfig>>,
+	id:		&str,
+)
+	-> Outcome<HttpMessage>
+{
+	let settings = res!(ai::get_settings(db));
+	if !settings.ready() {
+		return Ok(json_error(
+			"AI is not set up. Set a provider, a model and a key first, then test."));
+	}
+	let tls = match tls_client {
+		Some(t)	=> t.clone(),
+		None	=> return Ok(json_error(
+			"The server has no outbound connection, so it cannot reach the model.")),
+	};
+	let cfg = res!(settings.llm());
+
+	// A fixed, tiny exchange the operator's own prompts have no part in: this proves the connection,
+	// not the wording, so the wording it uses is the module's, not the site's.
+	let reply = match oxedyne_fe2o3_net::llm::complete(
+		&cfg,
+		"You are a connection test. Reply with exactly the word: OK.",
+		"ping",
+		tls,
+	).await {
+		Ok(r)	=> r.trim().to_string(),
+		Err(e)	=> {
+			warn!("{}: console: the AI test call failed: {}", id, e);
+			return Ok(json_error(
+				"The model could not be reached, or would not answer. Check the provider, the model \
+				name and the key. The log says more."));
+		}
+	};
+
+	// The model spoke; that is the whole of the test. Its words are echoed, trimmed short, so the
+	// operator sees a real answer rather than taking "it worked" on faith.
+	let echo: String = reply.chars().take(80).collect();
+	let mut m = DaticleMap::new();
+	m.insert(dat!("ok"),	Dat::Bool(true));
+	m.insert(dat!("reply"),	dat!(echo));
+	info!("{}: console: the AI test call reached the model", id);
 	Ok(json_body(&res!(Dat::Map(m).json())))
 }
 
@@ -4155,6 +4297,12 @@ mod tests {
 		let empty = ai_form(&ai::AiSettings::default(), "csrf0");
 		assert!(empty.contains(r#"placeholder="required""#), "no required hint for a missing key: {}", empty);
 		assert!(!empty.contains("Clear the key"), "a clear form was offered with no key: {}", empty);
+
+		// The Test button and its status line ride in the settings form, so the script can read the
+		// form's CSRF token; the button posts nothing and is not a submit.
+		assert!(s.contains(r#"id="ai-test""#), "no test button: {}", s);
+		assert!(s.contains(r#"type="button""#), "the test button is a submit: {}", s);
+		assert!(s.contains(r#"id="ai-test-msg""#), "no test status line: {}", s);
 		Ok(())
 	}
 
@@ -4954,6 +5102,7 @@ mod ui_dump {
 		};
 		let mut ai_body = String::from("<h1>AI</h1>\n");
 		ai_body.push_str(&ai_form(&ai_set, csrf));
+		ai_body.push_str(AI_TEST_SCRIPT);
 		res!(put(&dir, "ai", &page(&t, &a, "AI", &ai_body)));
 
 		Ok(())
