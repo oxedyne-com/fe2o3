@@ -547,6 +547,124 @@ impl Segment {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Triangle
+// ---------------------------------------------------------------------------------------------
+
+/// A triangle, stored as its three corners in the order they were given.
+///
+/// Its reason for existing here is [`Triangle::barycentric`] and its inverse
+/// [`Triangle::point_at`], which together are the standard way to carry a point from one
+/// triangle into another: read the point's weights in the first, then rebuild it from the
+/// second's corners. That is how a triangulated region warps whatever lies inside it, and it
+/// is also how a value sampled at three points is interpolated across the space between them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Triangle {
+    /// The first corner.
+    pub a: Pt,
+    /// The second corner.
+    pub b: Pt,
+    /// The third corner.
+    pub c: Pt,
+}
+
+impl Triangle {
+    /// Creates a triangle from three corners.
+    ///
+    /// # Errors
+    /// Fails when the three corners are collinear to within [`EPSILON`], since a degenerate
+    /// triangle has no interior and no barycentric coordinates.
+    pub fn new(a: Pt, b: Pt, c: Pt) -> Outcome<Self> {
+        let t = Self { a, b, c };
+        if t.signed_area().abs() <= EPSILON {
+            return Err(err!(
+                "Cannot build a triangle from the collinear points {:?}, {:?} and {:?}.", a, b, c;
+            Invalid, Input, Range));
+        }
+        Ok(t)
+    }
+
+    /// Returns twice the signed area, positive when the corners wind anticlockwise in a
+    /// y-up frame. This is the cross product of two edges, so it is also the quantity a
+    /// degeneracy test and an orientation test both want.
+    pub fn signed_area2(&self) -> f64 {
+        (self.b - self.a).cross(&(self.c - self.a))
+    }
+
+    /// Returns the signed area, positive when the corners wind anticlockwise in a y-up frame.
+    pub fn signed_area(&self) -> f64 {
+        self.signed_area2() / 2.0
+    }
+
+    /// Returns the area.
+    pub fn area(&self) -> f64 {
+        self.signed_area().abs()
+    }
+
+    /// Returns the centroid, the average of the three corners.
+    pub fn centroid(&self) -> Pt {
+        Pt::new(
+            (self.a.x + self.b.x + self.c.x) / 3.0,
+            (self.a.y + self.b.y + self.c.y) / 3.0,
+        )
+    }
+
+    /// Returns the barycentric coordinates of `pt`: the three weights that sum to one and
+    /// rebuild the point from the corners.
+    ///
+    /// All three are non-negative exactly when the point lies inside the triangle or on its
+    /// boundary, which is what [`Triangle::contains`] tests. A negative weight says which
+    /// side the point fell out of, so the value is useful beyond the containment question.
+    ///
+    /// # Errors
+    /// Fails on a degenerate triangle, which the constructor already forbids but which a
+    /// caller can still produce by mutating the fields.
+    pub fn barycentric(&self, pt: &Pt) -> Outcome<(f64, f64, f64)> {
+        let d = self.signed_area2();
+        if d.abs() <= EPSILON {
+            return Err(err!(
+                "Cannot take barycentric coordinates in a degenerate triangle {:?}.", self;
+            Invalid, Input, Range));
+        }
+        // Each weight is the signed area of the sub-triangle opposite its corner, over the
+        // whole, which is the definition rather than a rearrangement of it.
+        let u = (self.b - *pt).cross(&(self.c - *pt)) / d;
+        let v = (self.c - *pt).cross(&(self.a - *pt)) / d;
+        Ok((u, v, 1.0 - u - v))
+    }
+
+    /// Returns the point with the given barycentric weights, the inverse of
+    /// [`Triangle::barycentric`]. The weights are not required to sum to one, so a caller
+    /// extrapolating deliberately outside the triangle gets the point it asked for.
+    pub fn point_at(&self, u: f64, v: f64, w: f64) -> Pt {
+        Pt::new(
+            self.a.x * u + self.b.x * v + self.c.x * w,
+            self.a.y * u + self.b.y * v + self.c.y * w,
+        )
+    }
+
+    /// Whether `pt` lies inside the triangle or on its boundary, to within `eps` of the
+    /// boundary. The tolerance is in barycentric weight, so it scales with the triangle
+    /// rather than with the coordinate system.
+    pub fn contains(&self, pt: &Pt, eps: f64) -> bool {
+        match self.barycentric(pt) {
+            Ok((u, v, w))   => u >= -eps && v >= -eps && w >= -eps,
+            Err(_)          => false,
+        }
+    }
+
+    /// Carries a point from this triangle into `other`, by reading its weights here and
+    /// rebuilding it there. This is the mapping a warp is made of, and it is affine, so a
+    /// straight line inside the triangle stays straight.
+    ///
+    /// # Errors
+    /// Propagates the degeneracy failure of [`Triangle::barycentric`].
+    pub fn map_point(&self, other: &Triangle, pt: &Pt) -> Outcome<Pt> {
+        let (u, v, w) = res!(self.barycentric(pt));
+        Ok(other.point_at(u, v, w))
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Circle
 // ---------------------------------------------------------------------------------------------
 
@@ -947,5 +1065,88 @@ mod test {
         let a = Angle::from_degrees(180.0);
         assert!(approx_eq(a.radians(), PI, T));
         assert!(approx_eq(a.degrees(), 180.0, T));
+    }
+
+    // -- triangle: area, barycentric coordinates and the affine map ----------------------------
+
+    #[test]
+    fn test_triangle_area_00() -> Outcome<()> {
+        // The 3-4-5 right triangle: area 6 by the half-base-times-height oracle.
+        let t = res!(Triangle::new(Pt::new(0.0, 0.0), Pt::new(4.0, 0.0), Pt::new(0.0, 3.0)));
+        assert!(approx_eq(t.area(), 6.0, T));
+        // Anticlockwise in a y-up frame, so the signed area is positive.
+        assert!(t.signed_area() > 0.0);
+        // Reversing two corners reverses the winding and nothing else.
+        let r = res!(Triangle::new(Pt::new(0.0, 0.0), Pt::new(0.0, 3.0), Pt::new(4.0, 0.0)));
+        assert!(approx_eq(r.signed_area(), -6.0, T));
+        assert!(approx_eq(r.area(), 6.0, T));
+        Ok(())
+    }
+
+    #[test]
+    fn test_triangle_collinear_fails() {
+        // Three points on the line y = 2x have no interior.
+        let res = Triangle::new(Pt::new(0.0, 0.0), Pt::new(1.0, 2.0), Pt::new(3.0, 6.0));
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_triangle_barycentric_corners_and_centroid() -> Outcome<()> {
+        let (a, b, c) = (Pt::new(0.0, 0.0), Pt::new(4.0, 0.0), Pt::new(0.0, 3.0));
+        let t = res!(Triangle::new(a, b, c));
+        // Each corner carries all of its own weight.
+        for (p, want) in [(a, (1.0, 0.0, 0.0)), (b, (0.0, 1.0, 0.0)), (c, (0.0, 0.0, 1.0))] {
+            let (u, v, w) = res!(t.barycentric(&p));
+            assert!(approx_eq(u, want.0, T) && approx_eq(v, want.1, T) && approx_eq(w, want.2, T),
+                "corner {:?} gave ({}, {}, {})", p, u, v, w);
+        }
+        // The centroid is a third of each.
+        let (u, v, w) = res!(t.barycentric(&t.centroid()));
+        assert!(approx_eq(u, 1.0 / 3.0, T) && approx_eq(v, 1.0 / 3.0, T) && approx_eq(w, 1.0 / 3.0, T));
+        // A midpoint of an edge splits its two corners and excludes the third.
+        let (u, v, w) = res!(t.barycentric(&a.midpoint(&b)));
+        assert!(approx_eq(u, 0.5, T) && approx_eq(v, 0.5, T) && approx_eq(w, 0.0, T));
+        Ok(())
+    }
+
+    #[test]
+    fn test_triangle_contains_00() -> Outcome<()> {
+        let t = res!(Triangle::new(Pt::new(0.0, 0.0), Pt::new(4.0, 0.0), Pt::new(0.0, 3.0)));
+        // Inside, on an edge, on a corner, and outside past the hypotenuse.
+        assert!(t.contains(&Pt::new(1.0, 1.0), T));
+        assert!(t.contains(&Pt::new(2.0, 0.0), T));
+        assert!(t.contains(&Pt::new(0.0, 3.0), T));
+        assert!(!t.contains(&Pt::new(3.0, 3.0), T));
+        assert!(!t.contains(&Pt::new(-0.5, 1.0), T));
+        Ok(())
+    }
+
+    #[test]
+    fn test_triangle_barycentric_round_trips() -> Outcome<()> {
+        // Reading a point's weights and rebuilding it returns the same point.
+        let t = res!(Triangle::new(Pt::new(-2.0, 1.0), Pt::new(5.0, -3.0), Pt::new(1.0, 6.0)));
+        for p in [Pt::new(1.0, 1.0), Pt::new(0.0, 0.0), Pt::new(4.0, 2.0)] {
+            let (u, v, w) = res!(t.barycentric(&p));
+            assert!(approx_eq(u + v + w, 1.0, T), "weights must sum to one");
+            let q = t.point_at(u, v, w);
+            assert!(p.approx_eq(&q, 1.0e-9), "{:?} rebuilt as {:?}", p, q);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_triangle_map_point_is_affine() -> Outcome<()> {
+        // Map the unit right triangle onto one scaled by two in x, three in y and shifted.
+        // The image of (0.25, 0.5) is therefore (10 + 0.5, 20 + 1.5) by hand.
+        let src = res!(Triangle::new(Pt::new(0.0, 0.0), Pt::new(1.0, 0.0), Pt::new(0.0, 1.0)));
+        let dst = res!(Triangle::new(Pt::new(10.0, 20.0), Pt::new(12.0, 20.0), Pt::new(10.0, 23.0)));
+        let q = res!(src.map_point(&dst, &Pt::new(0.25, 0.5)));
+        assert!(q.approx_eq(&Pt::new(10.5, 21.5), 1.0e-9), "mapped to {:?}", q);
+        // Being affine, the image of a midpoint is the midpoint of the images.
+        let (p0, p1) = (Pt::new(0.1, 0.1), Pt::new(0.6, 0.2));
+        let (i0, i1) = (res!(src.map_point(&dst, &p0)), res!(src.map_point(&dst, &p1)));
+        let mid = res!(src.map_point(&dst, &p0.midpoint(&p1)));
+        assert!(mid.approx_eq(&i0.midpoint(&i1), 1.0e-9));
+        Ok(())
     }
 }
