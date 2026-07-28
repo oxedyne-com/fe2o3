@@ -6,12 +6,14 @@ use crate::{
     charset::Charset,
     http::fields::HeaderFieldValue,
     media::{
+        Audio,
         ContentTypeValue,
         Font,
         Image,
         MediaType,
         MEDIA_PLAIN_TEXT,
         Text,
+        Video,
     },
 };
 
@@ -156,8 +158,105 @@ impl RequestPath {
                 MediaType::Font(Font::Woff2),
                 None,
             )),
+            // Recordings. A browser plays what the server says a thing is, not
+            // what its name suggests, so a video served as text is a video that
+            // downloads instead of playing -- and one that never gets a scrubber,
+            // however well the server answers a `Range`.
+            Some("mp4") | Some("m4v") => ContentTypeValue::MediaType((
+                MediaType::Video(Video::Mp4),
+                None,
+            )),
+            Some("webm") => ContentTypeValue::MediaType((
+                MediaType::Video(Video::Webm),
+                None,
+            )),
+            Some("ogv") => ContentTypeValue::MediaType((
+                MediaType::Video(Video::Ogg),
+                None,
+            )),
+            Some("mov") => ContentTypeValue::MediaType((
+                MediaType::Video(Video::Quicktime),
+                None,
+            )),
+            Some("mkv") => ContentTypeValue::MediaType((
+                MediaType::Video(Video::XMatroska),
+                None,
+            )),
+            Some("avi") => ContentTypeValue::MediaType((
+                MediaType::Video(Video::XMsVideo),
+                None,
+            )),
+            Some("mpeg") | Some("mpg") => ContentTypeValue::MediaType((
+                MediaType::Video(Video::Mpeg),
+                None,
+            )),
+            Some("mp3") => ContentTypeValue::MediaType((
+                MediaType::Audio(Audio::Mpeg),
+                None,
+            )),
+            Some("m4a") => ContentTypeValue::MediaType((
+                MediaType::Audio(Audio::Mp4),
+                None,
+            )),
+            Some("oga") | Some("ogg") => ContentTypeValue::MediaType((
+                MediaType::Audio(Audio::Ogg),
+                None,
+            )),
+            Some("wav") => ContentTypeValue::MediaType((
+                MediaType::Audio(Audio::Wav),
+                None,
+            )),
+            Some("flac") => ContentTypeValue::MediaType((
+                MediaType::Audio(Audio::Flac),
+                None,
+            )),
+            Some("aac") => ContentTypeValue::MediaType((
+                MediaType::Audio(Audio::Aac),
+                None,
+            )),
             _ => MEDIA_PLAIN_TEXT,
         })
     }
 
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A browser plays what the server says a thing is, not what its name
+    /// suggests. A recording served as `text/plain` downloads rather than plays,
+    /// and never gets a scrubber however well the server answers a `Range`.
+    #[test]
+    fn test_a_recording_is_served_as_a_recording() {
+        for (name, expected) in [
+            ("clip.mp4",    "video/mp4"),
+            ("clip.m4v",    "video/mp4"),
+            ("clip.webm",   "video/webm"),
+            ("clip.ogv",    "video/ogg"),
+            ("clip.mov",    "video/quicktime"),
+            ("clip.mkv",    "video/x-matroska"),
+            ("clip.avi",    "video/x-msvideo"),
+            ("clip.mpg",    "video/mpeg"),
+            ("track.mp3",   "audio/mpeg"),
+            ("track.m4a",   "audio/mp4"),
+            ("track.ogg",   "audio/ogg"),
+            ("track.wav",   "audio/wav"),
+            ("track.flac",  "audio/flac"),
+            ("track.aac",   "audio/aac"),
+        ] {
+            let got = fmt!("{}", RequestPath::content_type(Path::new(name)));
+            assert_eq!(got, expected, "{} was served as {}", name, got);
+        }
+    }
+
+    /// What the map does not know is still plain text, as it always was.
+    #[test]
+    fn test_an_unknown_extension_is_still_plain_text() {
+        assert_eq!(
+            fmt!("{}", RequestPath::content_type(Path::new("thing.xyzzy"))),
+            "text/plain; charset=utf-8",
+        );
+    }
 }
