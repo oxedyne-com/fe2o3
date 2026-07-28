@@ -1399,6 +1399,26 @@ impl<
         resp.recv_number(n, wait)
     }
 
+    /// Pings every bot and returns the total number of errors they have logged, together
+    /// with the number that reported.
+    pub fn bot_error_count(&self, wait: Wait) -> Outcome<(usize, usize)> {
+        let (_, msgs) = res!(self.ping_bots(wait));
+        let mut nbots: usize    = 0;
+        let mut errs:  usize    = 0;
+        for msg in msgs {
+            match msg {
+                OzoneMsg::Pong(_ozid, n) => {
+                    nbots += 1;
+                    errs = errs.saturating_add(n);
+                },
+                msg => return Err(err!(
+                    "{}: Unexpected response to bot ping: {:?}", self.ozid(), msg;
+                    Channel)),
+            }
+        }
+        Ok((errs, nbots))
+    }
+
     /// Requests a directory listing from every zone and prints a formatted
     /// per-zone file table, with sizes and modification times, to the log.
     pub fn list_files(&self, wait: Wait) -> Outcome<()> {

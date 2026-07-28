@@ -48,6 +48,7 @@ use oxedyne_fe2o3_o3db_sync::{
         FileStateMap,
     },
     test::setup,
+    O3db,
 };
 
 use std::{
@@ -234,6 +235,7 @@ fn supersession_accounting(
             label, nold, noldcnt;
             Test, Mismatch, Data));
     }
+    res!(assert_no_bot_errors(&db, label));
 
     res!(db.shutdown());
     thread::sleep(Duration::from_millis(200));
@@ -316,11 +318,39 @@ fn gc_reclaims_sealed_files(
             nold, nwrites - NKEYS;
             Test, Mismatch, Data));
     }
+    res!(assert_no_bot_errors(&db, "garbage collection"));
 
     res!(db.shutdown());
     thread::sleep(Duration::from_millis(200));
 
     test!(sync_log::stream(), "+--- rollover: garbage collection : passed ---");
+    Ok(())
+}
+
+/// Fails if any bot in the database has logged an error. The flag-as-old
+/// failure this test exists for is logged by a file bot rather than returned
+/// to the caller, so this is how the log storm itself is asserted away.
+fn assert_no_bot_errors<
+    ENC:    oxedyne_fe2o3_iop_crypto::enc::Encrypter + 'static,
+    KH:     oxedyne_fe2o3_iop_hash::api::Hasher + 'static,
+    PR:     oxedyne_fe2o3_iop_hash::api::Hasher + 'static,
+    CS:     oxedyne_fe2o3_iop_hash::csum::Checksummer + 'static,
+>(
+    db:     &O3db<{ setup::UID_LEN }, setup::Uid, ENC, KH, PR, CS>,
+    label:  &str,
+)
+    -> Outcome<()>
+{
+    let (errs, nbots) = res!(db.api().bot_error_count(constant::USER_REQUEST_WAIT));
+    test!(sync_log::stream(), "{}: {} bots reported {} errors.", label, nbots, errs);
+    if errs > 0 {
+        return Err(err!(
+            "{}: the {} bots of the database logged {} errors during the run. \
+            A supersession that cannot be registered is logged, not returned, \
+            so any error here means the rollover bookkeeping is still wrong.",
+            label, nbots, errs;
+            Test, Mismatch, Data));
+    }
     Ok(())
 }
 

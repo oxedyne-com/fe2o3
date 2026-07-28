@@ -211,8 +211,8 @@ pub enum OzoneMsg<
     OzoneStateRequest(Responder<UIDL, UID, ENC, KH>),
     /// A liveness probe from the named bot.
     Ping(OzoneBotId, Responder<UIDL, UID, ENC, KH>),
-    /// A liveness reply from the named bot.
-    Pong(OzoneBotId),
+    /// A liveness reply from the named bot, with the number of errors it has logged.
+    Pong(OzoneBotId, usize),
     /// Requests a value read, given the key, the owning cache-bot pool index and a reply channel.
     Read(Key, usize, Responder<UIDL, UID, ENC, KH>),
     /// Signals that a bot is ready.
