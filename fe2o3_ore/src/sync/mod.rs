@@ -23,20 +23,44 @@
 //! the operation and the parent nobody holds, and a batch that fails is refused
 //! whole.
 //!
+//! # Two modes, one message set
+//!
+//! - The **frontier walk** is the default and is correct at any divergence. The
+//!   peers exchange their frontiers, and each sends every operation the other's
+//!   frontier does not cover. It costs one round trip and never fails.
+//! - **Sketch reconciliation** is the optimisation. Each peer sends an
+//!   invertible Bloom lookup table over the names of the operations it holds;
+//!   subtracting one from the other yields the difference directly, in bytes
+//!   proportional to the difference rather than to the history. It is worth it
+//!   when two large logs differ by a little, which is the steady state of a
+//!   repository that syncs often.
+//!
+//! A sketch is sized from an estimate, and an estimate can be wrong. When the
+//! peeling decoder stalls the difference is not half taken: the outcome says so,
+//! and the walk answers instead, from the frontier the sketch message carried
+//! for exactly that purpose.
+//!
 //! # Layout
 //!
 //! - [`msg`] is the message set, with a daticle form and a version-tagged byte
 //!   form.
 //! - [`walk`] computes what a peer at a given frontier is owed, and the closure
 //!   checks that hold at both ends.
+//! - [`sketch`] is the invertible Bloom lookup table over operation names: how a
+//!   name is keyed, how the table is sized, and what a decode yields.
 
 pub mod msg;
+pub mod sketch;
 pub mod walk;
 
 pub use msg::{
 	Message,
 	MAGIC,
 	VERSION,
+};
+pub use sketch::{
+	Diff,
+	Fallback,
 };
 pub use walk::{
 	arrival_gap,
