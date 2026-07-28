@@ -117,6 +117,31 @@ impl FileWindow {
         }
     }
 
+    /// Read the window into memory.
+    ///
+    /// The opposite of what naming a window is for, and asked only when the
+    /// bytes have to be transformed before they go out -- a body about to be
+    /// encoded cannot be copied straight from the file, because the file is no
+    /// longer what is being sent. The eligibility rules that lead here exclude
+    /// the large media types, so what is read is markup, script or a module.
+    pub async fn read(&self) -> Outcome<Vec<u8>> {
+        let mut file = match tokio::fs::File::open(&self.path).await {
+            Ok(f)  => f,
+            Err(e) => return Err(err!(e,
+                "Opening {:?} to read bytes {} to {} of it.",
+                self.path, self.start, self.start + self.len;
+                IO, File, Read)),
+        };
+        if self.start > 0 {
+            let result = file.seek(std::io::SeekFrom::Start(self.start)).await;
+            res!(result, IO, File, Seek);
+        }
+        let mut buf = vec![0u8; self.len as usize];
+        let result = file.read_exact(&mut buf).await;
+        res!(result, IO, File, Read);
+        Ok(buf)
+    }
+
     /// Copy the window from the file to the given sink, in chunks of
     /// `CHUNK_SIZE`.
     ///

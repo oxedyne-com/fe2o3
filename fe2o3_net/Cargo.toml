@@ -23,6 +23,7 @@ oxedyne_fe2o3_text					= { path = "../fe2o3_text" }
 
 base64 = "0.13.0"
 chrono = "0.4"
+flate2 = "1.0"
 rcgen = "0.12.0"
 ring = "0.17"
 secrecy = "0.8.0"

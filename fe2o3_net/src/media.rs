@@ -138,6 +138,43 @@ impl MediaType {
             _ => false,
         }
     }
+
+    /// Is a body of this type worth compressing on the way out?
+    ///
+    /// Text of every shape is, and so is WebAssembly, whose binary format is
+    /// mostly indices and opcodes and halves under DEFLATE. Everything already
+    /// compressed is not: a second pass over a PNG, a JPEG, a WebP, an AVIF, a
+    /// WOFF2, an Opus stream or a Zip spends the processor and *adds* bytes,
+    /// since a compressor that finds no redundancy still pays for its own
+    /// framing. RFC 9110 §8.4.1 names content coding as an aid to transfer, not
+    /// a second encoding of an already-encoded representation.
+    ///
+    /// The default is `false`, so a type this crate does not model is sent as it
+    /// is. That is the safe way round: a missed saving costs bandwidth, whereas
+    /// compressing something already compressed costs the processor and gains
+    /// nothing.
+    pub fn is_compressible(&self) -> bool {
+        match self {
+            // Every text subtype, plus the text-shaped application subtypes and
+            // SVG, which `is_text` already recognises.
+            _ if self.is_text() => true,
+            // Binary, but highly redundant: a module is mostly LEB128 indices.
+            Self::Application(Application::Wasm)            => true,
+            // Structured documents that travel uncompressed.
+            Self::Application(Application::Sql)             |
+            Self::Application(Application::OpenDocument)    => true,
+            // The uncompressed font formats. WOFF and WOFF2 carry their own
+            // compression and are deliberately absent.
+            Self::Font(Font::Collection)                    |
+            Self::Font(Font::Otf)                           |
+            Self::Font(Font::Sfnt)                          |
+            Self::Font(Font::Ttf)                           => true,
+            // An uncompressed raster format, unlike every other image type.
+            Self::Image(Image::Tiff)                        => true,
+            Self::Model(Model::Obj)                         => true,
+            _ => false,
+        }
+    }
 }
 
 /// ╭────────────────────────────────────────────╮
@@ -626,6 +663,38 @@ mod tests {
                 Ok(read) => assert_eq!(read, mt, "{} was read back as {:?}", registered, read),
                 Err(e) => panic!("{} was refused: {}", registered, e),
             }
+        }
+    }
+
+    /// A format that carries its own compression gains nothing from a second
+    /// pass and pays for the framing, so the default is to leave a type alone.
+    #[test]
+    fn test_only_a_type_that_gains_by_it_is_compressible() {
+        for mt in [
+            MediaType::Text(Text::Html),
+            MediaType::Text(Text::Css),
+            MediaType::Text(Text::Javascript),
+            MediaType::Application(Application::Json),
+            MediaType::Application(Application::Wasm),
+            MediaType::Image(Image::SvgXml),
+            MediaType::Font(Font::Ttf),
+            MediaType::Image(Image::Tiff),
+        ] {
+            assert!(mt.is_compressible(), "{} gains by being compressed", mt);
+        }
+        for mt in [
+            MediaType::Image(Image::Png),
+            MediaType::Image(Image::Jpeg),
+            MediaType::Image(Image::Webp),
+            MediaType::Image(Image::Avif),
+            MediaType::Font(Font::Woff2),
+            MediaType::Audio(Audio::Ogg),
+            MediaType::Video(Video::Mp4),
+            MediaType::Application(Application::Zip),
+            MediaType::Application(Application::Zstd),
+            MediaType::Application(Application::Pdf),
+        ] {
+            assert!(!mt.is_compressible(), "{} is already compressed", mt);
         }
     }
 
