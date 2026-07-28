@@ -29,10 +29,11 @@
 //! - Multi-part content support
 //! - Response code handling
 //!
-//! ## SSDP Discovery
+//! ## SSDP Discovery and UPnP
 //! - The three UPnP discovery messages: search, answer and announcement
 //! - Parsing forgiving enough for the devices actually on a network
-//! - A per-interface multicast responder for 239.255.255.250:1900
+//! - A multicast responder for 239.255.255.250:1900, async or blocking
+//! - Device and service description documents, SOAP actions, and DIDL-Lite
 //!
 //! ## DNS and Addressing
 //! - FQDN (Fully Qualified Domain Name) validation
@@ -105,6 +106,7 @@ pub mod smtp;
 pub mod ssdp;
 pub mod time;
 pub mod tls;
+pub mod upnp;
 pub mod ws;
 
 pub use ws::core::WebSocket;
