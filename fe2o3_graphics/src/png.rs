@@ -506,8 +506,21 @@ pub fn decode(buf: &[u8]) -> Outcome<Pixmap> {
 		let mut prev = vec![0u8; stride];
 		let mut line = vec![0u8; stride];
 		for j in 0..p.h {
-			let ftype = raw[at];
-			line.copy_from_slice(&raw[at + 1..at + 1 + stride]);
+			// The pass arithmetic above sized `raw` for exactly these reads, but the slice is
+			// taken through `get` all the same: an indexing panic is not a refusal.
+			let ftype = match raw.get(at) {
+				Some(b) => *b,
+				None => return Err(err!(
+					"The PNG's image data ends before the filter byte of scanline {} of a pass.", j;
+				Invalid, Input, Decode, Missing)),
+			};
+			match raw.get(at + 1..at + 1 + stride) {
+				Some(s) => line.copy_from_slice(s),
+				None => return Err(err!(
+					"The PNG's image data ends {} bytes into scanline {} of a pass, which needs {}.",
+					raw.len().saturating_sub(at + 1), j, stride;
+				Invalid, Input, Decode, Missing)),
+			}
 			at += stride + 1;
 			res!(unfilter_scanline(ftype, &mut line, &prev, bpp, j));
 			let y = p.y0 + j * p.dy;
@@ -521,7 +534,7 @@ pub fn decode(buf: &[u8]) -> Outcome<Pixmap> {
 	Ok(pm)
 }
 
-/// Reads the image header, and refuses what this codec does not implement, by name.
+/// Reads the image header, and refuses by name every combination the format does not define.
 fn decode_header(data: &[u8]) -> Outcome<Header> {
 	if data.len() != 13 {
 		return Err(err!(
