@@ -35,3 +35,4 @@ pub mod envelope;
 pub mod id;
 pub mod log;
 pub mod op;
+pub mod seq;
