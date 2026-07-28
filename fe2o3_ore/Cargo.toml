@@ -1,0 +1,20 @@
+[package]
+name = "oxedyne_fe2o3_ore"
+version = "0.5.0"
+authors = ["h00gs <hello@oxedyne.io>"]
+edition = "2021"
+license = "BSD-2-Clause/Apache-2.0"
+description = "Hematite operation-based version control primitives, where the unit of history is a whole edit carrying signed provenance."
+repository = "https://github.com/oxedyne-io/fe2o3"
+
+[dependencies]
+oxedyne_fe2o3_core 		   		= { path = "../fe2o3_core" }
+oxedyne_fe2o3_jdat 		   		= { path = "../fe2o3_jdat" }
+oxedyne_fe2o3_iop_crypto 		= { path = "../fe2o3_iop_crypto" }
+oxedyne_fe2o3_iop_hash 			= { path = "../fe2o3_iop_hash" }
+
+# Implementing the Signer trait requires implementing its InNamex supertrait,
+# which fe2o3_iop_crypto does not re-export.  Needed only by the test stand-in
+# signature scheme, so the library's own dependency set is unaffected.
+[dev-dependencies]
+oxedyne_fe2o3_namex 			= { path = "../fe2o3_namex" }
