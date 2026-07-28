@@ -32,6 +32,7 @@
 #![forbid(unsafe_code)]
 
 pub mod envelope;
+pub mod fastexport;
 pub mod id;
 pub mod log;
 pub mod op;
