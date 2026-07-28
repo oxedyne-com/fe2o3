@@ -2,6 +2,7 @@
 //! 
 //! This crate provides several core data structures:
 //! 
+//! - Interval maps ([`interval`]) - Disjoint half-open integer ranges mapped to values
 //! - Ring buffers ([`ring`]) - Fixed-size circular buffers with position tracking
 //! - Stacks ([`stack`]) - Immutable stack implementation using Arc for thread-safety
 //! - Trees ([`tree`]) - Generic tree structure with navigation and display capabilities
@@ -21,6 +22,7 @@
 pub mod digraph;
 pub mod hll;
 pub mod iblt;
+pub mod interval;
 pub mod ring;
 pub mod stack;
 pub mod time;
