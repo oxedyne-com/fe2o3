@@ -441,14 +441,16 @@ mod tests {
 
     /// A suffix longer than the representation is the whole of it, not an error.
     #[test]
-    fn test_a_suffix_longer_than_the_file_is_the_whole_file() {
+    fn test_a_suffix_longer_than_the_file_is_the_whole_file() -> Outcome<()> {
         let outcome = RangeRequest::parse("bytes=-5000").resolve(1000);
         assert_eq!(outcome,
             RangeOutcome::Partial(ByteWindow { start: 0, end: 999, total: 1000 }));
         match outcome {
             RangeOutcome::Partial(w) => assert!(w.is_whole()),
-            _ => panic!("the whole file was not recognised as whole"),
+            other => return Err(err!(
+                "The whole file was resolved as {:?}.", other; Test, Mismatch)),
         }
+        Ok(())
     }
 
     /// `bytes=-0` asks for the last nothing, which no representation holds.
