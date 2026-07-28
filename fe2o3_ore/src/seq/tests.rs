@@ -668,21 +668,7 @@ fn the_wire_vocabulary_renders_the_same_file() -> Outcome<()> {
 	// read back through the log's own vocabulary.
 	let mut replayed = Sequence::new();
 	for (head, edit) in [first, mv, ed] {
-		let op = match &edit {
-			Edit::Splice { left, right, remove, insert } => Op::Splice {
-				file:	fmt!("shopping.txt"),
-				left:	*left,
-				right:	*right,
-				remove:	remove.clone(),
-				insert:	insert.clone(),
-			},
-			Edit::Move { src, left, right } => Op::Move {
-				file:	fmt!("shopping.txt"),
-				src:	src.clone(),
-				left:	*left,
-				right:	*right,
-			},
-		};
+		let op = edit.clone().into_op(fmt!("shopping.txt"));
 		let rec = Record::new(head, op);
 		let back = res!(Record::decode_all(&res!(rec.encode())));
 		assert_eq!(rec, back);
@@ -697,6 +683,31 @@ fn the_wire_vocabulary_renders_the_same_file() -> Outcome<()> {
 		assert!(res!(replayed.apply_record(&back)), "a content operation crosses");
 	}
 	assert_eq!(res!(replayed.render()).text_lossy(), "- Soy\n- Eggs\n- Cheese\n");
+	Ok(())
+}
+
+/// The bridge between the two vocabularies is an exact inverse in both
+/// directions, for both content operations, and carries the path across.
+#[test]
+fn an_edit_and_an_operation_are_the_same_thing() -> Outcome<()> {
+	let (mut reps, _) = res!(seed(LIST, 1));
+	let (_, mv) = res!(reps[0].move_range(7, 7, 0));
+	let (_, sp) = res!(reps[0].replace(2, 4, b"Soy"));
+	for edit in [mv, sp] {
+		let op = edit.clone().into_op(fmt!("shopping.txt"));
+		assert_eq!(op.file(), Some("shopping.txt"));
+		assert_eq!(op.name(), edit.name(), "a Move is a Move and a Splice a Splice");
+		match Edit::from_op(&op) {
+			Some(back)	=> assert_eq!(back, edit, "the round trip changed the operation"),
+			None		=> return Err(err!(
+				"An Op::{} should have crossed back into the sequence.", op.name();
+			Test, Mismatch)),
+		}
+	}
+	// The path is whatever it is given, and nothing about the edit says what it
+	// should be.
+	let (_, edit) = res!(reps[0].insert(0, b"x"));
+	assert_eq!(edit.into_op(fmt!("elsewhere/notes.md")).file(), Some("elsewhere/notes.md"));
 	Ok(())
 }
 

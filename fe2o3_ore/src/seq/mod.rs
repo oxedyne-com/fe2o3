@@ -283,6 +283,32 @@ impl Edit {
 			Op::Mark { .. }			=> None,
 		}
 	}
+
+	/// Writes an operation back into the durable vocabulary, against the file it
+	/// edits.
+	///
+	/// The exact inverse of [`Edit::from_op`], which takes the file off on the
+	/// way in: `Edit::from_op(&edit.clone().into_op(file))` is `Some(edit)` for
+	/// every operation and every path. A frontend that authored through
+	/// [`Rendered::splice`] or [`Rendered::move_range`] has an [`Edit`] and wants
+	/// a [`Record`], and putting the path back on is the whole of the difference.
+	pub fn into_op(self, file: String) -> Op {
+		match self {
+			Self::Splice { left, right, remove, insert } => Op::Splice {
+				file,
+				left,
+				right,
+				remove,
+				insert,
+			},
+			Self::Move { src, left, right } => Op::Move {
+				file,
+				src,
+				left,
+				right,
+			},
+		}
+	}
 }
 
 
