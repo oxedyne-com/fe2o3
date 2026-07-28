@@ -547,6 +547,11 @@ impl Record {
 
 	/// Hashes the record's canonical encoding under a hasher the caller
 	/// supplies, so that the parents are covered along with the operation.
+	///
+	/// This value is not the digest a segment stores for the record: a segment
+	/// digests the record's kind byte and unframed body, while this hashes the
+	/// framed encoding, so the two are computed over different byte strings
+	/// and will not match.
 	pub fn hash<H: Hasher, const S: usize>(&self, hasher: H, salt: [u8; S])
 		-> Outcome<Hash<S>>
 	{
