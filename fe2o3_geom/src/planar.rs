@@ -544,6 +544,59 @@ impl Segment {
         let t = ((*pt - self.a).dot(&ab) / l2).clamp(0.0, 1.0);
         self.a + ab * t
     }
+
+    /// The point a fraction `t` of the way from `a` to `b`, unclamped.
+    pub fn point_at(&self, t: f64) -> Pt {
+        self.a + (self.b - self.a) * t
+    }
+
+    /// The infinite line this segment lies on.
+    ///
+    /// # Errors
+    /// Fails when the segment is degenerate, which its constructor already forbids.
+    pub fn to_line(&self) -> Outcome<Line> {
+        Line::through(self.a, self.b)
+    }
+
+    /// Crosses this segment with an infinite line, returning where along the *segment* they
+    /// meet as a fraction from `a` to `b`, or `None` when they do not meet within it.
+    ///
+    /// This is the primitive a scanline needs: sweeping a family of parallel lines across a
+    /// shape and asking each of its edges where it is cut. A crossing exactly at an endpoint
+    /// counts, since dropping it would open a gap in the sweep; an edge lying *along* the line
+    /// does not, since it has no single crossing to report.
+    pub fn cross_line(&self, line: &Line, eps: f64) -> Option<f64> {
+        let ab = self.b - self.a;
+        let denom = line.dir.cross(&ab);
+        if denom.abs() <= eps {
+            return None; // Parallel to the line, coincident or not.
+        }
+        let t = line.dir.cross(&(line.origin - self.a)) / denom;
+        if t < -eps || t > 1.0 + eps {
+            return None;
+        }
+        Some(t.clamp(0.0, 1.0))
+    }
+
+    /// Crosses this segment with another, returning the meeting point when both are cut
+    /// within their own extents.
+    ///
+    /// Parallel and collinear pairs report nothing: a collinear overlap has no single point
+    /// to name, and a caller wanting the overlap wants a different question answered.
+    pub fn intersect_segment(&self, other: &Segment, eps: f64) -> Option<Pt> {
+        let (r, s) = (self.b - self.a, other.b - other.a);
+        let denom = r.cross(&s);
+        if denom.abs() <= eps {
+            return None;
+        }
+        let w = other.a - self.a;
+        let t = w.cross(&s) / denom;
+        let u = w.cross(&r) / denom;
+        if t < -eps || t > 1.0 + eps || u < -eps || u > 1.0 + eps {
+            return None;
+        }
+        Some(self.point_at(t.clamp(0.0, 1.0)))
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1147,6 +1200,50 @@ mod test {
         let (i0, i1) = (res!(src.map_point(&dst, &p0)), res!(src.map_point(&dst, &p1)));
         let mid = res!(src.map_point(&dst, &p0.midpoint(&p1)));
         assert!(mid.approx_eq(&i0.midpoint(&i1), 1.0e-9));
+        Ok(())
+    }
+
+    #[test]
+    fn test_segment_cross_line_reports_the_fraction_along_the_segment() -> Outcome<()> {
+        // A vertical line at x = 3 cuts the segment from (1,0) to (5,0) at a quarter of
+        // the way along, by hand: (3 - 1) / (5 - 1).
+        let seg = res!(Segment::new(Pt::new(1.0, 0.0), Pt::new(5.0, 0.0)));
+        let line = res!(Line::new(Pt::new(3.0, -7.0), Vec2::new(0.0, 1.0)));
+        let t = res!(seg.cross_line(&line, 1.0e-9)
+            .ok_or_else(|| err!("the line crosses the segment"; Test)));
+        assert!(approx_eq(t, 0.5, 1.0e-9), "crossed at {}", t);
+        assert!(seg.point_at(t).approx_eq(&Pt::new(3.0, 0.0), 1.0e-9));
+
+        // A line beyond the far end misses it, and one along it reports nothing to name.
+        let past = res!(Line::new(Pt::new(9.0, 0.0), Vec2::new(0.0, 1.0)));
+        assert_eq!(seg.cross_line(&past, 1.0e-9), None);
+        let along = res!(Line::new(Pt::new(0.0, 0.0), Vec2::new(1.0, 0.0)));
+        assert_eq!(seg.cross_line(&along, 1.0e-9), None);
+
+        // A crossing exactly at an endpoint counts: dropping it would open a gap in a sweep.
+        let at_end = res!(Line::new(Pt::new(5.0, 0.0), Vec2::new(0.0, 1.0)));
+        assert_eq!(seg.cross_line(&at_end, 1.0e-9), Some(1.0));
+        Ok(())
+    }
+
+    #[test]
+    fn test_segment_intersect_segment_only_within_both() -> Outcome<()> {
+        // The diagonals of the unit square meet at its centre.
+        let d1 = res!(Segment::new(Pt::new(0.0, 0.0), Pt::new(1.0, 1.0)));
+        let d2 = res!(Segment::new(Pt::new(0.0, 1.0), Pt::new(1.0, 0.0)));
+        let p = res!(d1.intersect_segment(&d2, 1.0e-9)
+            .ok_or_else(|| err!("the diagonals meet"; Test)));
+        assert!(p.approx_eq(&Pt::new(0.5, 0.5), 1.0e-9), "met at {:?}", p);
+
+        // Crossing lines whose segments stop short of each other do not meet.
+        let short = res!(Segment::new(Pt::new(0.0, 1.0), Pt::new(0.2, 0.8)));
+        assert_eq!(d1.intersect_segment(&short, 1.0e-9), None);
+
+        // Parallel and collinear pairs both report nothing.
+        let par = res!(Segment::new(Pt::new(0.0, 1.0), Pt::new(1.0, 2.0)));
+        assert_eq!(d1.intersect_segment(&par, 1.0e-9), None);
+        let over = res!(Segment::new(Pt::new(0.5, 0.5), Pt::new(2.0, 2.0)));
+        assert_eq!(d1.intersect_segment(&over, 1.0e-9), None);
         Ok(())
     }
 }
