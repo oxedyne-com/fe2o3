@@ -9,6 +9,7 @@
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_net::http::{
+    encoding,
     fields::{
         HeaderFields,
         HeaderFieldValue,
@@ -20,6 +21,7 @@ use oxedyne_fe2o3_net::http::{
 
 use std::{
     fs::Metadata,
+    path::Path,
     time::UNIX_EPOCH,
 };
 
@@ -61,14 +63,37 @@ pub fn is_current(req: &HeaderFields, etag: &str) -> bool {
 
 /// Cache directive for a static response.
 ///
+/// Three cases, in order.
+///
 /// An entry document is always revalidated, because a deploy that changes it is
-/// invisible to anyone still holding the old one. Every other asset may be held
-/// for `max_age_secs`, which an operator should raise above zero only when the
-/// filenames carry a content hash, since a cached asset under a stable name
-/// survives the deploy that replaced it. The default of zero revalidates
-/// everything, which the entity tag makes cheap.
-pub fn cache_control(content_type: &str, max_age_secs: u32) -> String {
-    if is_document(content_type) || max_age_secs == 0 {
+/// invisible to anyone still holding the old one. That holds whatever the
+/// filename says, since a document is the thing a reader has bookmarked.
+///
+/// An asset whose filename carries a content hash may be held for
+/// `fingerprint_max_age_secs` and marked `immutable` (RFC 8246): the name is a
+/// promise that the bytes under it cannot change, so revalidating it can only
+/// ever confirm what the client already has. `immutable` is what stops a browser
+/// asking again on a manual reload.
+///
+/// Every other asset may be held for `max_age_secs`, which an operator should
+/// raise above zero only when the filenames carry a content hash, since a cached
+/// asset under a stable name survives the deploy that replaced it. The default
+/// of zero revalidates everything, which the entity tag makes cheap.
+pub fn cache_control(
+    content_type:   &str,
+    path:           &Path,
+    max_age_secs:   u32,
+    fingerprint_secs: u32,
+)
+    -> String
+{
+    if is_document(content_type) {
+        return fmt!("no-cache");
+    }
+    if fingerprint_secs > 0 && is_fingerprinted(path) {
+        return fmt!("public, max-age={}, immutable", fingerprint_secs);
+    }
+    if max_age_secs == 0 {
         fmt!("no-cache")
     } else {
         fmt!("public, max-age={}", max_age_secs)
@@ -78,6 +103,43 @@ pub fn cache_control(content_type: &str, max_age_secs: u32) -> String {
 /// Is this an entry document, rather than an asset it refers to?
 pub fn is_document(content_type: &str) -> bool {
     content_type.contains("text/html")
+}
+
+/// Does this filename carry a content hash?
+///
+/// Every build tool that fingerprints its output puts a run of hex in the name
+/// -- `app.4f3a9c21.js`, `main-8ab19c7e.css`, `module_1f2e3d4c_bg.wasm` -- and
+/// the point of doing so is that a changed file gets a different name. That is
+/// what makes a year-long `max-age` safe, and nothing else does.
+///
+/// The test is deliberately narrow, because a false positive means a browser
+/// holding a stale file for a year:
+///
+/// - the run is at least eight characters, which is the shortest hash any of
+///   these tools emits;
+/// - every character is a hex digit, so words are not mistaken for hashes;
+/// - at least one is a numeral and at least one a letter, so neither a run of
+///   letters that happens to be hex (`deadbeef`, `facecafe`, and every English
+///   word spellable in `a`--`f`) nor a run of numerals that is plainly a date or
+///   an identifier (`20260728`) is mistaken for a hash;
+/// - and it stands as its own segment, delimited by `.`, `-` or `_`, so a hash
+///   is never read out of the middle of a longer word.
+///
+/// A real hash trips all four almost always: an eight-character hex digest
+/// misses only when it happens to be all letters or all numerals, which is about
+/// one name in forty, and the miss costs a revalidation rather than a stale
+/// file.
+pub fn is_fingerprinted(path: &Path) -> bool {
+    let name = match path.file_name().and_then(|n| n.to_str()) {
+        Some(n) => n,
+        None    => return false,
+    };
+    name.split(|c| c == '.' || c == '-' || c == '_').any(|seg|
+        seg.len() >= 8
+        && seg.bytes().all(|b| b.is_ascii_hexdigit())
+        && seg.bytes().any(|b| b.is_ascii_digit())
+        && seg.bytes().any(|b| b.is_ascii_alphabetic())
+    )
 }
 
 /// Stamp a response the server generated, so no store may serve it unasked.
@@ -106,12 +168,28 @@ pub fn generated(resp: HttpMessage) -> HttpMessage {
 }
 
 /// A `304 Not Modified`: the validators and directives, and no body.
-pub fn not_modified(etag: String, directive: String) -> Outcome<HttpMessage> {
-    Ok(HttpMessage::new_response(HttpStatus::NotModified)
+///
+/// `varies_by_encoding` says whether the representation is one the server would
+/// have offered a content coding for. It has to be said here as much as on a
+/// `200`: RFC 9111 §4.3.4 has a cache update its stored response from the fields
+/// of the `304`, so a `Vary` omitted here would undo the one stored with the
+/// body, and the cache would go back to serving one encoding to everybody.
+pub fn not_modified(
+    etag:               String,
+    directive:          String,
+    varies_by_encoding: bool,
+)
+    -> Outcome<HttpMessage>
+{
+    let mut msg = HttpMessage::new_response(HttpStatus::NotModified)
         .with_field(HeaderName::ETag, res!(HeaderFieldValue::new(
             &HeaderName::ETag, &etag)))
         .with_field(HeaderName::CacheControl, res!(HeaderFieldValue::new(
-            &HeaderName::CacheControl, &directive))))
+            &HeaderName::CacheControl, &directive)));
+    if varies_by_encoding {
+        encoding::mark_varying(&mut msg);
+    }
+    Ok(msg)
 }
 
 
@@ -154,10 +232,68 @@ mod tests {
         Ok(())
     }
 
+    const YEAR: u32 = 31_536_000;
+
+    fn at(name: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from("/srv/www").join(name)
+    }
+
     #[test]
     fn a_document_always_revalidates_however_long_the_max_age() {
-        assert_eq!(cache_control("text/html; charset=utf-8", 31536000), "no-cache");
-        assert_eq!(cache_control("text/html", 0), "no-cache");
+        assert_eq!(
+            cache_control("text/html; charset=utf-8", &at("index.html"), YEAR, YEAR),
+            "no-cache");
+        assert_eq!(cache_control("text/html", &at("index.html"), 0, YEAR), "no-cache");
+        // Even one whose own name carries a hash: a document is the thing a
+        // reader has bookmarked, and a deploy that changes it must be seen.
+        assert_eq!(
+            cache_control("text/html", &at("page.4f3a9c21.html"), 0, YEAR),
+            "no-cache");
+    }
+
+    /// A name that carries a content hash is a promise the bytes cannot change
+    /// under it, which is the only thing that makes a year safe.
+    #[test]
+    fn a_hashed_name_is_held_and_never_revalidated() {
+        assert_eq!(
+            cache_control("application/wasm", &at("module_1f2e3d4c_bg.wasm"), 0, YEAR),
+            fmt!("public, max-age={}, immutable", YEAR));
+        // The operator can switch the whole treatment off.
+        assert_eq!(
+            cache_control("application/wasm", &at("module_1f2e3d4c_bg.wasm"), 0, 0),
+            "no-cache");
+    }
+
+    /// Narrow on purpose: a false positive means a browser holding a stale file
+    /// for a year.
+    #[test]
+    fn only_a_name_that_really_carries_a_hash_is_read_as_one() {
+        for name in [
+            "app.4f3a9c21.js",
+            "main-8ab19c7e.css",
+            "module_1f2e3d4c_bg.wasm",
+            "sha-2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae.bin",
+        ] {
+            assert!(is_fingerprinted(&at(name)), "{} carries a hash", name);
+        }
+        for name in [
+            "index.html",
+            "explayna_bg.wasm",
+            "app.js",
+            "style.css",
+            // Hex, but all letters: an English word, not a digest.
+            "deadbeef.js",
+            "facecafe.css",
+            // All numerals: a date or an identifier, not a digest.
+            "20260728.json",
+            "post-20260728.html",
+            // Too short to be any tool's output.
+            "app.4f3a9c.js",
+            // Hash-shaped, but buried in a longer word rather than its own segment.
+            "prefix4f3a9c21suffix.js",
+        ] {
+            assert!(!is_fingerprinted(&at(name)), "{} does not carry a hash", name);
+        }
     }
 
     /// A generated response says so, rather than leaving a store to guess a lifetime for it.
@@ -198,7 +334,25 @@ mod tests {
 
     #[test]
     fn an_asset_is_held_only_when_the_operator_asks_for_it() {
-        assert_eq!(cache_control("application/wasm", 0), "no-cache");
-        assert_eq!(cache_control("application/wasm", 3600), "public, max-age=3600");
+        assert_eq!(cache_control("application/wasm", &at("app_bg.wasm"), 0, YEAR),
+            "no-cache");
+        assert_eq!(cache_control("application/wasm", &at("app_bg.wasm"), 3600, YEAR),
+            "public, max-age=3600");
+    }
+
+    /// A `304` restates the fields a cache stores, so one that dropped `Vary`
+    /// would send the cache back to serving one encoding to everybody.
+    #[test]
+    fn a_not_modified_repeats_what_the_response_varies_by() -> Outcome<()> {
+        let varying = res!(not_modified(
+            fmt!("\"abc-10-gzip\""), fmt!("no-cache"), true));
+        let held = res!(varying.header.fields.get_one(&HeaderName::Vary).ok_or_else(||
+            err!("The 304 did not say what it varies by."; Missing)));
+        assert_eq!(fmt!("{}", held).to_ascii_lowercase(), "accept-encoding");
+
+        let fixed = res!(not_modified(fmt!("\"abc-10\""), fmt!("no-cache"), false));
+        assert!(fixed.header.fields.get_one(&HeaderName::Vary).is_none(),
+            "a representation with only one form does not vary");
+        Ok(())
     }
 }

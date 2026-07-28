@@ -36,15 +36,12 @@
 //   - Max number of headers
 //   - Different limits for different routes/content types
 // 
-// 5. Compression:
-// - No response compression
-// - Could add:
-//   - gzip/deflate/brotli support
-//   - Compression level configuration
-//   - Size threshold for compression
-//   - MIME type based compression rules
-//   - Client capability detection
-// 
+// 5. Compression: done. `fe2o3_net::http::encoding` negotiates on
+//    `Accept-Encoding` and gzips every eligible response; `compression_enabled`
+//    and `compression_min_bytes` in `server_cfg` tune it. Still open: brotli,
+//    which needs a dependency, and a store of encoded bodies so a hot static
+//    file is not encoded once per request.
+//
 #![forbid(unsafe_code)]
 pub mod app;
 pub mod srv;

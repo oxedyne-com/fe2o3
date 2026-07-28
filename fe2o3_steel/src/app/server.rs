@@ -618,6 +618,7 @@ impl AppShellContext {
                 redirects:      vh.redirects.clone(),
                 proxy_routes:   vh.proxy_routes.clone(),
                 term_manager:   None,
+                uses_sessions:  vh.uses_sessions(),
             });
 
             let primary_lc = vh.primary_hostname().to_lowercase();

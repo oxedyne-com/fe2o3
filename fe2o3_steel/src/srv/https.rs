@@ -31,6 +31,7 @@ use oxedyne_fe2o3_jdat::{
 use oxedyne_fe2o3_net::{
     conc::AsyncReadIterator,
     http::{
+        encoding,
         fields::{
             Cookie,
             HeaderFieldValue,
@@ -187,12 +188,28 @@ impl<
                         }
                     }
 
+                    // What content codings the client will take, kept as a
+                    // string because the request itself is moved into the
+                    // dispatch chain long before the response is encoded.
+                    let accept_encoding = encoding::accept_encoding(
+                        &request.header.fields,
+                    );
+
                     // Resolve (or issue) the session identifier for this
                     // request. If the client already carries a session
                     // cookie, parse it. Otherwise, when anonymous sessions
-                    // are enabled, mint a fresh `Sid`, remember it as a
-                    // pending `Set-Cookie` header to attach to the response,
-                    // and use it to scope session commands on this request.
+                    // are enabled *and this vhost has somewhere to keep one*,
+                    // mint a fresh `Sid`, remember it as a pending
+                    // `Set-Cookie` header to attach to the response, and use
+                    // it to scope session commands on this request.
+                    //
+                    // A vhost with no database is excluded because a session
+                    // identifier is a key prefix into that database and
+                    // nothing else. Issuing one there set a cookie on every
+                    // response a static site made -- every stylesheet, every
+                    // image, every module -- which no shared cache will store,
+                    // and which the operator would then have to account for to
+                    // anyone asking what it was for. It was for nothing.
                     let raw_sid_str = request.header.fields.get_session_id();
                     let mut issued_cookie: Option<Cookie> = None;
                     let (sid_opt, sid_str) = match raw_sid_str {
@@ -201,7 +218,7 @@ impl<
                             (parsed, raw_sid_str.clone())
                         }
                         None => {
-                            if self.cfg.allow_anonymous_sessions {
+                            if self.cfg.allow_anonymous_sessions && vhost.uses_sessions {
                                 let new_sid: Sid = Sid::randef();
                                 let s = fmt!("{}", new_sid);
                                 issued_cookie = Some(
@@ -655,6 +672,51 @@ impl<
                             {
                                 rec_status = *status as u16;
                             }
+                            // Encode the body, if the type gains by it and the
+                            // client said it would take one. Done here, at the
+                            // last point before the wire, so every response the
+                            // server produces is covered by one rule -- a
+                            // static file, a rendered page, a JSON answer --
+                            // rather than each producer having to remember.
+                            //
+                            // `Content-Length` is taken from the body when the
+                            // message is written, so it describes the encoded
+                            // body by construction. Getting that wrong is not a
+                            // cosmetic fault: a length that does not match
+                            // leaves the client waiting for bytes that never
+                            // arrive, and every message after it on a
+                            // kept-alive connection is read at the wrong offset.
+                            if self.cfg.compression_enabled {
+                                let content_type = msg.header.fields
+                                    .get_one(&HeaderName::ContentType)
+                                    .map(|v| fmt!("{}", v))
+                                    .unwrap_or_default();
+                                if encoding::is_compressible(&content_type) {
+                                    let coding = encoding::choose_for(
+                                        accept_encoding.as_deref(),
+                                        &content_type,
+                                        msg.body_len(),
+                                        self.cfg.compression_min_bytes as usize,
+                                    );
+                                    // On the blocking pool: encoding a
+                                    // megabyte of markup is processor work,
+                                    // and a single-core host has one async
+                                    // worker to starve.
+                                    msg = match tokio::task::spawn_blocking(move ||
+                                        tokio::runtime::Handle::current().block_on(
+                                            encoding::encode(msg, coding))
+                                    ).await {
+                                        Ok(Ok(encoded)) => encoded,
+                                        Ok(Err(e)) => return Err(err!(e,
+                                            "{}: Could not encode the response body.", id;
+                                            IO, Encode)),
+                                        Err(e) => return Err(err!(e,
+                                            "{}: The response encoder did not finish.", id;
+                                            IO, Encode)),
+                                    };
+                                }
+                            }
+
                             // The length the response actually carries, which for a
                             // body sent from a file is the window rather than the
                             // empty buffer beside it.

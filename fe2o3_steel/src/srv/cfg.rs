@@ -23,6 +23,7 @@ use oxedyne_fe2o3_net::{
     constant::SESSION_ID_KEY_LABEL,
     dns::Fqdn,
     http::{
+        encoding,
         fields::{
             Cookie,
             SetCookieAttributes,
@@ -900,6 +901,23 @@ impl VhostConfig {
     /// Primary (canonical) hostname.
     pub fn primary_hostname(&self) -> &str {
         self.hostnames.first().map(|s| s.as_str()).unwrap_or("")
+    }
+
+    /// Has this vhost anywhere to keep a session?
+    ///
+    /// A session identifier is a key prefix into the vhost's own database:
+    /// `sess:<sid>:...` for what a session holds, `sess_meta:<sid>` for the
+    /// session itself. A vhost configured without a database has nowhere to put
+    /// either, and its session commands already answer "no database available",
+    /// so an identifier issued to one of its visitors can never be used for
+    /// anything.
+    ///
+    /// Issuing one anyway is not free. A `Set-Cookie` on a static asset makes
+    /// every response uncacheable by a shared cache, and a cookie set without a
+    /// purpose is a cookie an operator has to account for to anyone who asks
+    /// what it is for. So a vhost with no database mints none.
+    pub fn uses_sessions(&self) -> bool {
+        self.db_dir_rel.is_some()
     }
 
     /// Parse a vhost configuration from a `DaticleMap`.
@@ -1937,6 +1955,27 @@ pub struct ServerConfig {
     /// unchanged asset into a bodiless `304`.
     #[optional]
     pub static_max_age_secs:            u32,
+    /// `Cache-Control` `max-age` in seconds for an asset whose filename carries
+    /// a content hash, which is a promise that the file cannot change under that
+    /// name. Such a response also says `immutable`, so a browser does not
+    /// revalidate it even on a manual reload. Entry documents are excluded
+    /// whatever their name. Defaults to one year, the conventional value and the
+    /// longest RFC 9111 §5.2.2.1 suggests anyone use. Set to `0` if a build here
+    /// emits hash-shaped names that it then overwrites in place, which would
+    /// otherwise leave a browser holding a stale copy for a year.
+    #[optional]
+    pub fingerprint_max_age_secs:       u32,
+    /// Whether to encode eligible responses with gzip when the client says it
+    /// will accept one. Markup, script, stylesheets, JSON, SVG and WebAssembly
+    /// typically go out at a third to a half of their raw weight; formats that
+    /// carry their own compression are never encoded twice. Defaults to `true`.
+    #[optional]
+    pub compression_enabled:            bool,
+    /// Smallest response body, in bytes, worth encoding. A gzip member costs
+    /// eighteen bytes of framing before it encodes anything, so under about a
+    /// kilobyte the saving is noise. Defaults to `1024`.
+    #[optional]
+    pub compression_min_bytes:          u64,
     /// Optional plaintext HTTP listener bound to `127.0.0.1` for the
     /// admin dashboard only. When non-zero, Steel binds this port on
     /// the loopback interface and serves the `/admin/*` routes
@@ -2073,6 +2112,9 @@ impl Default for ServerConfig {
             server_port_tcp_plaintext:      0,      // disabled by default
             hsts_max_age_secs:              0,      // disabled by default
             static_max_age_secs:            0,      // revalidate every asset
+            fingerprint_max_age_secs:       31_536_000, // one year, for a hashed name
+            compression_enabled:            true,
+            compression_min_bytes:          encoding::MIN_BYTES_DEFAULT as u64,
             admin_local_port:               0,      // disabled by default
             session_expiry_default_secs:    604_800, // 1 week.
             ws_ping_interval_secs:          30,
@@ -2381,5 +2423,51 @@ impl AdminKey {
             Err(_) => Vec::new(),
         };
         Ok(Self { name, scheme, public_key, scopes })
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A field added to `ServerConfig` without `#[optional]` invalidates every
+    /// config file already on disk, which is an outage rather than a feature.
+    /// The compression and fingerprint settings are new, so a config written
+    /// before they existed must still load and must come up with the defaults.
+    #[test]
+    fn a_config_written_before_these_fields_existed_still_loads() -> Outcome<()> {
+        let mut m = DaticleMap::new();
+        m.insert(dat!("tls_dir_rel"),                 dat!("./tls"));
+        m.insert(dat!("log_level"),                   dat!("debug"));
+        m.insert(dat!("num_server_bots"),             Dat::U16(1));
+        m.insert(dat!("server_address"),              dat!("0.0.0.0"));
+        m.insert(dat!("server_port_tcp"),             Dat::U16(8443));
+        m.insert(dat!("server_port_tcp_plaintext"),   Dat::U16(0));
+        m.insert(dat!("hsts_max_age_secs"),           Dat::U32(0));
+        m.insert(dat!("session_expiry_default_secs"), Dat::U32(604_800));
+        m.insert(dat!("ws_ping_interval_secs"),       Dat::U8(30));
+        m.insert(dat!("server_max_errors_allowed"),   Dat::U8(30));
+        m.insert(dat!("allow_anonymous_sessions"),    Dat::Bool(true));
+        m.insert(dat!("vhosts"),                      Dat::List(Vec::new()));
+        m.insert(dat!("acme"),                        Dat::Map(DaticleMap::new()));
+        m.insert(dat!("mail"),                        Dat::Map(DaticleMap::new()));
+
+        let cfg = res!(ServerConfig::from_datmap(m));
+        assert!(cfg.compression_enabled,
+            "compression must be on for a config that says nothing about it");
+        assert_eq!(cfg.compression_min_bytes, 1024);
+        assert_eq!(cfg.fingerprint_max_age_secs, 31_536_000);
+        Ok(())
+    }
+
+    /// A session identifier is a key prefix into the vhost's own database, so a
+    /// vhost without one has nowhere to keep a session and issues none.
+    #[test]
+    fn only_a_vhost_with_a_database_keeps_sessions() {
+        let mut vh = VhostConfig::default();
+        assert!(vh.uses_sessions(), "the default vhost is configured with a database");
+        vh.db_dir_rel = None;
+        assert!(!vh.uses_sessions(), "a static vhost has nowhere to keep a session");
     }
 }

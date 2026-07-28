@@ -57,6 +57,7 @@ use oxedyne_fe2o3_net::{
             http_request,
             https_request,
         },
+        encoding,
         fields::{
             HeaderFields,
             HeaderFieldValue,
@@ -681,6 +682,12 @@ impl<
             let id_clone = id.clone();
             let req_headers_clone = req_headers.clone();
             let static_max_age_secs = self.cfg.static_max_age_secs;
+            let fingerprint_secs = self.cfg.fingerprint_max_age_secs;
+            let compression_min_bytes = if self.cfg.compression_enabled {
+                self.cfg.compression_min_bytes as usize
+            } else {
+                usize::MAX // No body reaches the floor, so none is encoded.
+            };
             let result = tokio::task::spawn_blocking(move || {
                 tokio::runtime::Handle::current().block_on(async {
                     Ok(match tokio::fs::File::open(&abs_path).await {
@@ -713,11 +720,27 @@ impl<
                             // it is simply resent, whole, every time.
                             let verbatim = !(dev_mode && cache::is_document(&content_type_str));
 
+                            // Which form of this file the client would end up
+                            // holding, decided here so the conditional request
+                            // below is answered about the copy it actually has.
+                            // The `200` carries the plain tag and the encoder
+                            // names the coding in it on the way out, so the
+                            // naming happens exactly once.
+                            let coding = encoding::choose(
+                                &req_headers_clone,
+                                &content_type_str,
+                                total as usize,
+                                compression_min_bytes,
+                            );
+                            let varies = encoding::is_compressible(&content_type_str);
+
                             let validators = if verbatim {
                                 let etag = res!(cache::entity_tag(&meta));
                                 let directive = cache::cache_control(
                                     &content_type_str,
+                                    abs_path.as_path(),
                                     static_max_age_secs,
+                                    fingerprint_secs,
                                 );
                                 Some((etag, directive))
                             } else {
@@ -725,11 +748,26 @@ impl<
                             };
 
                             if let Some((etag, directive)) = &validators {
-                                if cache::is_current(&req_headers_clone, etag) {
+                                // Either form of the tag settles it. A client
+                                // holding the encoded copy sends the tag with
+                                // the coding in it; one holding the plain copy
+                                // sends the plain tag, and is equally entitled
+                                // to be told it is current -- what it holds is
+                                // what it would get.
+                                let encoded_tag = encoding::tagged(etag, coding);
+                                let held = if cache::is_current(&req_headers_clone, &encoded_tag) {
+                                    Some(encoded_tag)
+                                } else if cache::is_current(&req_headers_clone, etag) {
+                                    Some(etag.clone())
+                                } else {
+                                    None
+                                };
+                                if let Some(held) = held {
                                     debug!("{}: {:?} is unchanged; 304.", id_clone, abs_path);
                                     return Ok(res!(cache::not_modified(
-                                        etag.clone(),
+                                        held,
                                         directive.clone(),
+                                        varies,
                                     )));
                                 }
                             }

@@ -152,6 +152,7 @@ pub async fn test_server(filter: &'static str) -> Outcome<()> {
                 redirects:      vhost_cfg.redirects.clone(),
                 proxy_routes:   vhost_cfg.proxy_routes.clone(),
                 term_manager:   None,
+                uses_sessions:  vhost_cfg.uses_sessions(),
             });
 
             let mut vhosts = HashMap::new();

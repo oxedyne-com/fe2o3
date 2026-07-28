@@ -97,6 +97,13 @@ pub struct VhostRuntime<
     /// for this vhost.  `None` disables term_* commands and the
     /// /term/<session> WS endpoint.
     pub term_manager:   Option<Arc<crate::srv::ws::term::TerminalManager>>,
+    /// Whether this vhost has anywhere to keep a session, which is to say
+    /// whether it was configured with a database. Taken from
+    /// [`VhostConfig::uses_sessions`](crate::srv::cfg::VhostConfig::uses_sessions)
+    /// at start-up. A vhost that answers `false` issues no anonymous session
+    /// cookie, because a session identifier is a key prefix into a database it
+    /// does not have.
+    pub uses_sessions:  bool,
 }
 
 impl<
