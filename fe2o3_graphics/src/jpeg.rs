@@ -23,6 +23,10 @@
 //! Arithmetic coding, lossless and hierarchical modes, and twelve-bit samples are refused by name
 //! rather than misread.
 //!
+//! A progressive file whose later scans never arrived takes the Annex K.8 block smoothing libjpeg
+//! applies by default, which estimates the lowest few AC coefficients of each block from the mean of
+//! its neighbours rather than showing the flat squares of a half-loaded photograph.
+//!
 //! # Damaged files
 //!
 //! A photograph library holds files that were truncated by a failed copy or a full disk, and a
@@ -657,6 +661,9 @@ struct Frame {
 	mcuy:	usize,
 	/// The components, in the order the frame header gives them.
 	comps:	Vec<Comp>,
+	/// For each component, the successive-approximation bit at which each coefficient was last
+	/// received, or -1 for a coefficient no scan ever carried.
+	seen:	Vec<[i8; DCTSIZE2]>,
 }
 
 /// Rounds a division up.
@@ -875,6 +882,7 @@ fn read_frame(data: &[u8], marker: u8, at: usize, alloc: bool) -> Outcome<Frame>
 	}
 
 	Ok(Frame {
+		seen: vec![[-1i8; DCTSIZE2]; comps.len()],
 		prog: marker == 0xC2,
 		w,
 		h,
@@ -1667,6 +1675,98 @@ fn colourise(
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
+// │ BLOCK SMOOTHING                                                            │
+// └───────────────────────────────────────────────────────────────────────────┘
+//
+// A progressive file whose later scans never arrived, or whose encoder stopped short of the last
+// approximation bit, holds blocks whose low-frequency detail is missing. Rendered as they stand
+// they show the flat squares of a half-loaded photograph. The specification's Annex K.8 estimates
+// the five lowest AC coefficients from the DC values of the eight neighbouring blocks, which is a
+// smooth surface fitted through the block means, and libjpeg applies it by default. A file whose
+// scans all completed is untouched, because there is then nothing to estimate.
+
+/// The five coefficients an estimate may fill in: their zigzag position, their natural position, and
+/// the multiplier and neighbour combination Annex K.8 gives each.
+const SMOOTH: [(usize, usize, i64); 5] = [
+	(1, 1, 36),	// One cycle across.
+	(2, 8, 36),	// One cycle down.
+	(3, 16, 9),	// Two cycles down.
+	(4, 9, 5),	// One cycle each way.
+	(5, 2, 9),	// Two cycles across.
+];
+
+/// Whether a frame is one block smoothing has anything to say about.
+///
+/// Every component's DC must have arrived, since the estimates are built from it, and at least one
+/// of the five estimated coefficients must be inexact somewhere.
+fn smoothing_helps(frame: &Frame) -> bool {
+	if !frame.prog {
+		return false;
+	}
+	let mut useful = false;
+	for seen in &frame.seen {
+		if seen[0] < 0 {
+			return false;
+		}
+		for (zz, _, _) in SMOOTH {
+			if seen[zz] != 0 {
+				useful = true;
+			}
+		}
+	}
+	useful
+}
+
+/// Fills in the five lowest AC coefficients of one block from its neighbours' DC values.
+///
+/// A coefficient is estimated only where it is still zero and no scan has pinned it down exactly.
+fn smooth(
+	ws:	&mut [i16; DCTSIZE2],
+	coef:	&[i16],
+	c:	&Comp,
+	bx:	usize,
+	by:	usize,
+	q:	&[u16; DCTSIZE2],
+	seen:	&[i8; DCTSIZE2],
+) {
+	// The DC values of the three by three neighbourhood, with the edges replicating.
+	let dc = |dx: i32, dy: i32| -> i64 {
+		let x = (bx as i32 + dx).clamp(0, c.bw as i32 - 1) as usize;
+		let y = (by as i32 + dy).clamp(0, c.bh as i32 - 1) as usize;
+		coef[(y * c.bwp + x) * DCTSIZE2] as i64
+	};
+	let (d1, d2, d3) = (dc(-1, -1), dc(0, -1), dc(1, -1));
+	let (d4, d5, d6) = (dc(-1, 0), dc(0, 0), dc(1, 0));
+	let (d7, d8, d9) = (dc(-1, 1), dc(0, 1), dc(1, 1));
+	let q00 = q[0] as i64;
+
+	for (zz, nat, mul) in SMOOTH {
+		let al = seen[zz];
+		if al == 0 || ws[nat] != 0 {
+			continue;
+		}
+		let comb = match zz {
+			1	=> d4 - d6,
+			2	=> d2 - d8,
+			3	=> d2 + d8 - 2 * d5,
+			4	=> d1 - d3 - d7 + d9,
+			_	=> d4 + d6 - 2 * d5,
+		};
+		let num = mul * q00 * comb;
+		let qn = q[nat] as i64;
+		let mut pred = ((qn << 7) + num.abs()) / (qn << 8);
+		// An estimate may not claim more precision than the scans that did arrive left room for.
+		if al > 0 && pred >= (1i64 << al) {
+			pred = (1i64 << al) - 1;
+		}
+		if num < 0 {
+			pred = -pred;
+		}
+		ws[nat] = pred as i16;
+	}
+}
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
 // │ THE DECODER                                                                │
 // └───────────────────────────────────────────────────────────────────────────┘
 
@@ -1776,6 +1876,11 @@ fn parse(buf: &[u8]) -> Outcome<Reader> {
 						ac: r.ac[sc.ta].as_ref(),
 					});
 				}
+				for sc in &scan.comps {
+					for k in scan.ss..=scan.se.min(DCTSIZE2 - 1) {
+						frame.seen[sc.ci][k] = scan.al as i8;
+					}
+				}
 				pos = res!(decode_scan(buf, b, frame, &scan, &tabs, r.ri));
 				scans += 1;
 			},
@@ -1828,9 +1933,11 @@ pub fn decode(buf: &[u8]) -> Outcome<Pixmap> {
 	let space = res!(space_of(&frame.comps, r.jfif, r.adobe));
 	let (w, h) = (frame.w, frame.h);
 	let (hmax, vmax) = (frame.hmax, frame.vmax);
+	let smoothing = smoothing_helps(&frame);
+	let seen = frame.seen.clone();
 
 	let mut chans: Vec<Vec<u8>> = Vec::with_capacity(frame.comps.len());
-	for c in frame.comps.iter_mut() {
+	for (ci, c) in frame.comps.iter_mut().enumerate() {
 		let q = res!(quant_of(&r, c));
 		let stride = c.bwp * DCTSIZE;
 		let mut plane = Plane {
@@ -1840,11 +1947,21 @@ pub fn decode(buf: &[u8]) -> Outcome<Pixmap> {
 			dh: c.dh,
 		};
 		let coef = std::mem::take(&mut c.coef);
-		for by in 0..c.bhp {
-			for bx in 0..c.bwp {
+		// Only the blocks that carry image are transformed: the upsampler reads no further, and the
+		// MCU grid's padding blocks would only be cropped away.
+		let mut ws = [0i16; DCTSIZE2];
+		for by in 0..c.bh {
+			for bx in 0..c.bw {
 				let at = (by * c.bwp + bx) * DCTSIZE2;
+				let src = if smoothing {
+					ws.copy_from_slice(&coef[at..at + DCTSIZE2]);
+					smooth(&mut ws, &coef, c, bx, by, &q, &seen[ci]);
+					&ws[..]
+				} else {
+					&coef[at..at + DCTSIZE2]
+				};
 				idct(
-					&coef[at..at + DCTSIZE2],
+					src,
 					&q,
 					&mut plane.data,
 					by * DCTSIZE * stride + bx * DCTSIZE,
@@ -2910,6 +3027,74 @@ mod tests {
 				"the last row of a truncated file is mid-grey, and pixel {} is {:?}", x, c,
 			);
 		}
+		Ok(())
+	}
+
+	/// A three by three grid of blocks whose DC values ramp from left to right.
+	fn ramp_blocks() -> Comp {
+		let mut c = Comp {
+			id: 1, h: 1, v: 1, tq: 0,
+			dw: 24, dh: 24, bw: 3, bh: 3, bwp: 3, bhp: 3,
+			coef: vec![0i16; 9 * DCTSIZE2],
+		};
+		for by in 0..3 {
+			for bx in 0..3 {
+				c.coef[(by * 3 + bx) * DCTSIZE2] = (100 + 100 * bx) as i16;
+			}
+		}
+		c
+	}
+
+	#[test]
+	fn test_block_smoothing_estimates_from_the_neighbouring_means_18() {
+		// The middle block of a left-to-right ramp. Annex K.8 estimates the first horizontal AC
+		// coefficient as 36 * Q00 * (left - right), scaled by its own quantiser: with Q00 of 16, a
+		// ramp of 100 to 300 and a quantiser of 11 that is -41 before the approximation clamp.
+		let c = ramp_blocks();
+		let mut q = [1u16; DCTSIZE2];
+		q[0] = 16;
+		q[1] = 11;
+		let mut seen = [0i8; DCTSIZE2];
+
+		// A coefficient no scan ever carried takes the estimate whole.
+		seen[1] = -1;
+		let mut ws = [0i16; DCTSIZE2];
+		ws.copy_from_slice(&c.coef[DCTSIZE2 * 4..DCTSIZE2 * 5]);
+		smooth(&mut ws, &c.coef, &c, 1, 1, &q, &seen);
+		assert_eq!(ws[1], -41, "the estimate follows the ramp, and downwards");
+
+		// A coefficient received down to bit 1 is known to within two, so the estimate is clamped.
+		seen[1] = 1;
+		let mut ws = [0i16; DCTSIZE2];
+		smooth(&mut ws, &c.coef, &c, 1, 1, &q, &seen);
+		assert_eq!(ws[1], -1, "an estimate may not exceed what the scans left undetermined");
+
+		// A coefficient a scan pinned down exactly is never estimated.
+		seen[1] = 0;
+		let mut ws = [0i16; DCTSIZE2];
+		smooth(&mut ws, &c.coef, &c, 1, 1, &q, &seen);
+		assert_eq!(ws[1], 0, "a coefficient known exactly must be left alone");
+
+		// Nor is one that already carries a value.
+		seen[1] = -1;
+		let mut ws = [0i16; DCTSIZE2];
+		ws[1] = 7;
+		smooth(&mut ws, &c.coef, &c, 1, 1, &q, &seen);
+		assert_eq!(ws[1], 7, "a coefficient already received must be left alone");
+	}
+
+	#[test]
+	fn test_block_smoothing_applies_only_where_it_can_help_19() -> Outcome<()> {
+		// A sequential frame is never smoothed, and neither is a progressive one whose scans all
+		// reached the last approximation bit: there is then nothing left to estimate.
+		let pm = res!(sample(32, 32));
+		let buf = res!(encode(&pm));
+		let r = res!(parse(&buf));
+		let frame = match r.frame {
+			Some(f) => f,
+			None => return Err(err!("The file carries no frame header."; Test, Missing)),
+		};
+		assert!(!smoothing_helps(&frame), "a sequential frame is never smoothed");
 		Ok(())
 	}
 }
