@@ -11,8 +11,7 @@
 //! implementation to sign or verify. That keeps the crate free of key handling
 //! and free of any particular algorithm's baggage.
 
-use crate::id::OpId;
-use crate::op::Op;
+use crate::op::Record;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_iop_crypto::sign::Signer;
@@ -21,10 +20,10 @@ use oxedyne_fe2o3_jdat::prelude::*;
 
 /// An operation's bytes together with the provenance that attests to them.
 ///
-/// The payload is opaque here. [`Envelope::seal_op`] fills it with an operation
-/// and the identifier that names it, encoded together, so that the identifier
-/// is inside what was signed: an operation lifted out and re-labelled with a
-/// different identifier will not verify.
+/// The payload is opaque here. [`Envelope::seal_record`] fills it with a whole
+/// record -- the operation together with the header that names it and lists its
+/// parents -- so that both are inside what was signed: an operation lifted out,
+/// re-labelled or re-parented will not verify.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Envelope {
 	/// The signed bytes, exactly as they were presented to the signer.
@@ -62,14 +61,14 @@ impl Envelope {
 		Ok(Self { payload, signer, sig })
 	}
 
-	/// Seals an operation and the identifier that names it.
+	/// Seals a record, header and operation together.
 	///
-	/// The pair is encoded as `[id, op]` in binary daticle form, so the
-	/// identifier is covered by the signature.
-	pub fn seal_op<S: Signer>(scheme: &S, id: &OpId, op: &Op)
+	/// The record is encoded in binary daticle form, so the identifier and the
+	/// parents are covered by the signature along with the operation.
+	pub fn seal_record<S: Signer>(scheme: &S, rec: &Record)
 		-> Outcome<Self>
 	{
-		Self::seal(scheme, res!(encode_pair(id, op)))
+		Self::seal(scheme, res!(rec.to_dat().to_bytes(Vec::new())))
 	}
 
 	/// Verifies the signature against the payload, using the enclosed public
@@ -87,13 +86,13 @@ impl Envelope {
 		bound.verify(&self.payload, &self.sig)
 	}
 
-	/// Verifies the envelope and, if it checks out, returns the identifier and
-	/// operation it carries.
+	/// Verifies the envelope and, if it checks out, returns the record it
+	/// carries.
 	///
 	/// Fails rather than returning anything if the signature does not verify,
 	/// so a caller cannot use the contents by mistake.
-	pub fn open_op<S: Signer>(&self, scheme: &S)
-		-> Outcome<(OpId, Op)>
+	pub fn open_record<S: Signer>(&self, scheme: &S)
+		-> Outcome<Record>
 	{
 		if !res!(self.verify(scheme)) {
 			return Err(err!(
@@ -101,17 +100,17 @@ impl Envelope {
 				key, so its contents are not attributable.";
 			Invalid, Input, Security, Mismatch));
 		}
-		decode_pair(&self.payload)
+		decode_record(&self.payload)
 	}
 
-	/// Returns the identifier and operation without checking the signature.
+	/// Returns the record without checking the signature.
 	///
 	/// For a caller that has already verified, or that is inspecting something
-	/// it does not intend to trust. Prefer [`Envelope::open_op`].
-	pub fn peek_op(&self)
-		-> Outcome<(OpId, Op)>
+	/// it does not intend to trust. Prefer [`Envelope::open_record`].
+	pub fn peek_record(&self)
+		-> Outcome<Record>
 	{
-		decode_pair(&self.payload)
+		decode_record(&self.payload)
 	}
 
 	/// Returns the signed bytes.
@@ -202,20 +201,9 @@ fn field_bytes(dat: &Dat, what: &str)
 	}
 }
 
-/// Encodes an identifier and operation as one signable byte string.
-fn encode_pair(id: &OpId, op: &Op)
-	-> Outcome<Vec<u8>>
-{
-	let dat = Dat::List(vec![
-		id.to_dat(),
-		op.to_dat(),
-	]);
-	Ok(res!(dat.to_bytes(Vec::new())))
-}
-
-/// Decodes an identifier and operation from a signable byte string.
-fn decode_pair(buf: &[u8])
-	-> Outcome<(OpId, Op)>
+/// Decodes a record from a signable byte string.
+fn decode_record(buf: &[u8])
+	-> Outcome<Record>
 {
 	let (dat, used) = res!(Dat::from_bytes(buf));
 	if used != buf.len() {
@@ -224,22 +212,22 @@ fn decode_pair(buf: &[u8])
 			buf.len(), used;
 		Decode, Input, Mismatch));
 	}
-	let v = match &dat {
-		Dat::List(v) if v.len() == 2 => v,
-		other => return Err(err!(
-			"An envelope payload expects a 2-element Dat::List, got {:?}.", other;
-		Decode, Input, Mismatch)),
-	};
-	let id = res!(OpId::from_dat(&v[0]));
-	let op = res!(Op::from_dat(&v[1]));
-	Ok((id, op))
+	Record::from_dat(&dat)
 }
 
 
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::id::ReplicaId;
+	use crate::id::{
+		ContentRange,
+		OpId,
+		ReplicaId,
+	};
+	use crate::op::{
+		Header,
+		Op,
+	};
 
 	use oxedyne_fe2o3_iop_crypto::{
 		InNamex,
@@ -357,14 +345,28 @@ mod tests {
 		}
 	}
 
+	/// An operation identifier.
+	fn oid(replica: u64, counter: u64) -> OpId {
+		OpId::new(ReplicaId::new(replica), counter)
+	}
+
 	/// A representative operation.
-	fn sample_op() -> Op {
-		Op::Splice {
-			file:		fmt!("notes.md"),
-			at:			12,
-			delete_len:	3,
-			insert:		vec![0x7e; 900],	// Beyond what a BU8 length could hold.
-		}
+	fn sample_op() -> Outcome<Op> {
+		Ok(Op::Splice {
+			file:	fmt!("notes.md"),
+			left:	None,
+			right:	None,
+			remove:	vec![res!(ContentRange::new(oid(1, 1), 12, 15))],
+			insert:	vec![0x7e; 900],	// Beyond what a BU8 length could hold.
+		})
+	}
+
+	/// A representative record, carrying two parents.
+	fn sample_record(id: OpId) -> Outcome<Record> {
+		Ok(Record::new(
+			res!(Header::new(id, vec![oid(1, 1), oid(2, 4)])),
+			res!(sample_op()),
+		))
 	}
 
 	/// The stand-in's key relation holds, so that a failure below is the
@@ -450,16 +452,13 @@ mod tests {
 		Ok(())
 	}
 
-	/// An operation and its identifier survive sealing and opening.
+	/// A whole record survives sealing and opening.
 	#[test]
-	fn op_survives_seal_and_open() -> Outcome<()> {
+	fn a_record_survives_seal_and_open() -> Outcome<()> {
 		let s = StubSigner::with_seed(11);
-		let id = OpId::new(ReplicaId::new(4), 17);
-		let op = sample_op();
-		let env = res!(Envelope::seal_op(&s, &id, &op));
-		let (got_id, got_op) = res!(env.open_op(&s));
-		assert_eq!(got_id, id);
-		assert_eq!(got_op, op);
+		let rec = res!(sample_record(oid(4, 17)));
+		let env = res!(Envelope::seal_record(&s, &rec));
+		assert_eq!(res!(env.open_record(&s)), rec);
 		Ok(())
 	}
 
@@ -468,11 +467,31 @@ mod tests {
 	#[test]
 	fn the_identifier_is_covered_by_the_signature() -> Outcome<()> {
 		let s = StubSigner::with_seed(11);
-		let op = sample_op();
-		let env = res!(Envelope::seal_op(&s, &OpId::new(ReplicaId::new(4), 17), &op));
-		let relabelled = res!(encode_pair(&OpId::new(ReplicaId::new(4), 18), &op));
+		let rec = res!(sample_record(oid(4, 17)));
+		let env = res!(Envelope::seal_record(&s, &rec));
+		let relabelled = res!(sample_record(oid(4, 18)));
 		let forged = Envelope::new(
-			relabelled,
+			res!(relabelled.to_dat().to_bytes(Vec::new())),
+			env.signer().to_vec(),
+			env.signature().to_vec(),
+		);
+		assert!(!res!(forged.verify(&s)));
+		Ok(())
+	}
+
+	/// The parents are covered too: re-parenting an operation breaks the
+	/// signature, so a causal claim cannot be forged from a genuine edit.
+	#[test]
+	fn the_parents_are_covered_by_the_signature() -> Outcome<()> {
+		let s = StubSigner::with_seed(11);
+		let rec = res!(sample_record(oid(4, 17)));
+		let env = res!(Envelope::seal_record(&s, &rec));
+		let reparented = Record::new(
+			res!(Header::new(oid(4, 17), vec![oid(1, 1)])),
+			rec.op.clone(),
+		);
+		let forged = Envelope::new(
+			res!(reparented.to_dat().to_bytes(Vec::new())),
 			env.signer().to_vec(),
 			env.signature().to_vec(),
 		);
@@ -484,15 +503,14 @@ mod tests {
 	#[test]
 	fn open_refuses_an_unverified_envelope() -> Outcome<()> {
 		let s = StubSigner::with_seed(11);
-		let id = OpId::new(ReplicaId::new(1), 1);
-		let env = res!(Envelope::seal_op(&s, &id, &sample_op()));
+		let rec = res!(sample_record(oid(5, 1)));
+		let env = res!(Envelope::seal_record(&s, &rec));
 		let mut sig = env.signature().to_vec();
 		sig[3] ^= 0x01;
 		let forged = Envelope::new(env.payload().to_vec(), env.signer().to_vec(), sig);
-		assert!(forged.open_op(&s).is_err());
+		assert!(forged.open_record(&s).is_err());
 		// Peeking still works, for a caller that knows it is not trusting the result.
-		let (got_id, _) = res!(forged.peek_op());
-		assert_eq!(got_id, id);
+		assert_eq!(res!(forged.peek_record()).id(), rec.id());
 		Ok(())
 	}
 
@@ -500,7 +518,7 @@ mod tests {
 	#[test]
 	fn envelope_dat_round_trip() -> Outcome<()> {
 		let s = StubSigner::with_seed(11);
-		let env = res!(Envelope::seal_op(&s, &OpId::new(ReplicaId::new(2), 5), &sample_op()));
+		let env = res!(Envelope::seal_record(&s, &res!(sample_record(oid(2, 5)))));
 		let back = res!(Envelope::from_dat(&env.to_dat()));
 		assert_eq!(env, back);
 		assert!(res!(back.verify(&s)));
@@ -512,7 +530,7 @@ mod tests {
 	#[test]
 	fn envelope_byte_round_trip() -> Outcome<()> {
 		let s = StubSigner::with_seed(11);
-		let env = res!(Envelope::seal_op(&s, &OpId::new(ReplicaId::new(2), 5), &sample_op()));
+		let env = res!(Envelope::seal_record(&s, &res!(sample_record(oid(2, 5)))));
 		assert!(env.payload().len() > 255);
 		let buf = res!(env.encode());
 		let (back, used) = res!(Envelope::decode(&buf));
@@ -538,13 +556,13 @@ mod tests {
 		Ok(())
 	}
 
-	/// A payload that is not an identifier and operation pair is refused.
+	/// A payload that is not a record is refused.
 	#[test]
-	fn a_payload_that_is_not_an_op_pair_is_refused() -> Outcome<()> {
+	fn a_payload_that_is_not_a_record_is_refused() -> Outcome<()> {
 		let s = StubSigner::with_seed(11);
 		let env = res!(Envelope::seal(&s, b"not a daticle at all".to_vec()));
-		assert!(env.peek_op().is_err());
-		assert!(env.open_op(&s).is_err());
+		assert!(env.peek_record().is_err());
+		assert!(env.open_record(&s).is_err());
 		Ok(())
 	}
 }

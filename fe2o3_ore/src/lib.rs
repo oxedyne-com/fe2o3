@@ -12,12 +12,16 @@
 //! # Layout
 //!
 //! - [`id`] names operations: a replica identifier and that replica's counter,
-//!   with a compact varint encoding.
-//! - [`op`] is the operation vocabulary, an enum. It is provisional, pending
-//!   the sequence-structure design note.
-//! - [`log`] is the append-only log, with a per-replica monotonic counter
-//!   guard.
-//! - [`envelope`] binds an operation's bytes to a public key and a signature.
+//!   with a compact varint encoding. Above it sit the names for content, which
+//!   are arithmetic over an operation identifier rather than minted.
+//! - [`op`] is the operation vocabulary, an enum, together with the header that
+//!   names an operation and records the frontier it was written against.
+//!   Everything that speaks about bytes speaks about them by name.
+//! - [`log`] is the append-only log, with a per-replica monotonic counter guard
+//!   and a causal one: an operation may not arrive before its parents.
+//! - [`envelope`] binds a record's bytes to a public key and a signature.
+//! - [`seq`] is the convergent sequence: it consumes the operation vocabulary
+//!   directly and renders a file's bytes from an operation set.
 //!
 //! # A pure primitive
 //!

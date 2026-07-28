@@ -41,12 +41,13 @@
 //!
 //! # Preconditions
 //!
-//! Rendering requires a **causally complete** operation set: every operation
-//! whose content another operation names must be present. An anchor naming an
-//! atom that has not arrived cannot be resolved, and rather than guess, the
-//! render fails and says which operation named what. A log that delivers in
-//! causal order supplies this; a caller assembling operations by hand must
-//! arrange it.
+//! Rendering requires a **causally complete** operation set, and that is now
+//! checked against the operations' own parents rather than inferred from what
+//! they happen to name. Every parent must be present, and so must every atom
+//! whose content an anchor or a range names. An anchor naming an atom that has
+//! not arrived cannot be resolved, and rather than guess, the render fails and
+//! says which operation named what. [`crate::log::OpLog`] supplies a closed set
+//! by construction; a caller assembling operations by hand must arrange it.
 //!
 //! # Op order
 //!
@@ -70,7 +71,12 @@ use crate::id::{
 	OpId,
 	Side,
 };
-use crate::op::Op;
+use crate::log::Causality;
+use crate::op::{
+	Header,
+	Op,
+	Record,
+};
 use crate::seq::atom::Atoms;
 use crate::seq::claim::{
 	Claims,
@@ -123,9 +129,10 @@ impl OpOrder {
 /// a concurrent move could invalidate, and that single property is what the rest
 /// of the module is built on.
 ///
-/// The identity of an operation is not part of it. The log names operations, and
-/// the same operation applied under two identities is two operations, so the
-/// identity is passed alongside to [`Sequence::apply`].
+/// This is [`Op`] with the file and the header taken off: what is left is
+/// exactly what decides where bytes go. The identity and the parents are not
+/// part of it, because the same edit written by two authors is two operations,
+/// so the [`Header`] is passed alongside to [`Sequence::apply`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Edit {
 	/// Inserts bytes at a gap, and kills runs of existing content.
@@ -238,28 +245,53 @@ impl Edit {
 		Ok(())
 	}
 
-	/// Reads a move out of the durable operation vocabulary.
+	/// Reads an operation out of the durable vocabulary.
 	///
-	/// Only [`Op::Move`] crosses: it is already content-anchored, because a move
-	/// that named positions would be the thing this module exists to avoid.
-	/// [`Op::Splice`] names a byte offset and cannot be resolved without knowing
-	/// the version its author was looking at, so the two vocabularies meet here
-	/// and nowhere else.
+	/// Both content operations cross unchanged, because both are anchored in
+	/// content: this is a rename of the fields and nothing more. There is no
+	/// translation step and no version to translate against, which is the point
+	/// -- a positional splice would have needed to know what its author was
+	/// looking at, and no such splice exists any more.
+	///
+	/// `None` is returned for an operation that says nothing about the order of
+	/// bytes: a file created, deleted or renamed, or a mark. Those are history,
+	/// and the log keeps them, but a sequence has no use for them.
+	///
+	/// The file an operation names is dropped here. A [`Sequence`] is one file's
+	/// worth of operations and does not carry a path, so partitioning by
+	/// [`Op::file`] is the caller's job.
 	pub fn from_op(op: &Op)
-		-> Outcome<Self>
+		-> Option<Self>
 	{
 		match op {
-			Op::Move { src, left, right, .. } => Ok(Self::Move {
+			Op::Splice { left, right, remove, insert, .. } => Some(Self::Splice {
+				left:	*left,
+				right:	*right,
+				remove:	remove.clone(),
+				insert:	insert.clone(),
+			}),
+			Op::Move { src, left, right, .. } => Some(Self::Move {
 				src:	src.clone(),
 				left:	*left,
 				right:	*right,
 			}),
-			other => Err(err!(
-				"An Op::{} carries no content anchors, so the sequence structure \
-				cannot consume it.", other.name();
-			Invalid, Input, Mismatch)),
+			Op::FileCreate { .. }	|
+			Op::FileDelete { .. }	|
+			Op::FileRename { .. }	|
+			Op::Mark { .. }			=> None,
 		}
 	}
+}
+
+
+/// An operation as the sequence holds it: what it says, and what its author had
+/// seen when they said it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Applied {
+	/// The author's frontier when the operation was written.
+	parents:	Vec<OpId>,
+	/// What the operation says about the order of bytes.
+	edit:		Edit,
 }
 
 
@@ -271,7 +303,7 @@ impl Edit {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Sequence {
 	/// The operations, by identity.
-	ops: BTreeMap<OpId, Edit>,
+	ops: BTreeMap<OpId, Applied>,
 }
 
 impl Sequence {
@@ -285,35 +317,55 @@ impl Sequence {
 	pub fn build<I>(ops: I)
 		-> Outcome<Self>
 	where
-		I: IntoIterator<Item = (OpId, Edit)>,
+		I: IntoIterator<Item = (Header, Edit)>,
 	{
 		let mut seq = Self::new();
-		for (id, op) in ops {
-			res!(seq.apply(id, op));
+		for (head, op) in ops {
+			res!(seq.apply(head, op));
 		}
 		Ok(seq)
 	}
 
-	/// Applies an operation.
+	/// Applies an operation under the header that names it.
 	///
 	/// Applying the same operation twice does nothing the second time. Applying
 	/// two different operations under one identity is refused: an identity names
 	/// one operation, and a structure that quietly kept the first would converge
-	/// on whichever replica saw which.
-	pub fn apply(&mut self, id: OpId, op: Edit)
+	/// on whichever replica saw which. Two headers differing only in their
+	/// parents are two different operations for the same reason.
+	pub fn apply(&mut self, head: Header, op: Edit)
 		-> Outcome<()>
 	{
 		res!(op.validate());
-		match self.ops.get(&id) {
-			Some(seen) if *seen != op => Err(err!(
+		let applied = Applied { parents: head.parents, edit: op };
+		match self.ops.get(&head.id) {
+			Some(seen) if *seen != applied => Err(err!(
 				"The identity {} already names a different {}; an operation \
-				identity names one operation.", id, seen.name();
+				identity names one operation.", head.id, seen.edit.name();
 			Invalid, Input, Conflict)),
 			Some(_)	=> Ok(()),
 			None	=> {
-				self.ops.insert(id, op);
+				self.ops.insert(head.id, applied);
 				Ok(())
 			},
+		}
+	}
+
+	/// Applies a durable record, if it carries anything the sequence can use.
+	///
+	/// Returns whether the record said something about the order of bytes. This
+	/// is the whole of the bridge between the log and the structure: a caller
+	/// walks a causally ordered log, hands every record to the sequence for the
+	/// file it names, and the sequence takes what belongs to it.
+	pub fn apply_record(&mut self, rec: &Record)
+		-> Outcome<bool>
+	{
+		match Edit::from_op(&rec.op) {
+			Some(edit) => {
+				res!(self.apply(rec.head.clone(), edit));
+				Ok(true)
+			},
+			None => Ok(false),
 		}
 	}
 
@@ -336,20 +388,36 @@ impl Sequence {
 	pub fn get(&self, id: &OpId)
 		-> Option<&Edit>
 	{
-		self.ops.get(id)
+		self.ops.get(id).map(|a| &a.edit)
+	}
+
+	/// Returns the parents of an operation that has been applied.
+	pub fn parents_of(&self, id: &OpId)
+		-> Option<&[OpId]>
+	{
+		self.ops.get(id).map(|a| a.parents.as_slice())
 	}
 
 	/// Iterates the operations, in ascending order of identity.
 	pub fn iter(&self)
 		-> impl Iterator<Item = (&OpId, &Edit)>
 	{
-		self.ops.iter()
+		self.ops.iter().map(|(id, a)| (id, &a.edit))
+	}
+
+	/// Returns the causal graph over the operations applied.
+	pub fn causality(&self)
+		-> Causality<'_>
+	{
+		Causality::new(self.ops.iter().map(|(id, a)| (*id, a.parents.as_slice())))
 	}
 
 	/// Returns the operations in op order, which is the order every stage of the
 	/// render reads them in.
 	fn in_op_order(&self) -> Vec<(OpId, &Edit)> {
-		let mut ops: Vec<(OpId, &Edit)> = self.ops.iter().map(|(id, op)| (*id, op)).collect();
+		let mut ops: Vec<(OpId, &Edit)> = self.ops.iter()
+			.map(|(id, a)| (*id, &a.edit))
+			.collect();
 		ops.sort_by_key(|(id, _)| OpOrder::of(id));
 		ops
 	}
@@ -363,6 +431,8 @@ impl Sequence {
 		-> Outcome<Rendered>
 	{
 		let ops = self.in_op_order();
+		let cause = self.causality();
+		res!(Self::check_parents(&cause));
 		let atoms = res!(Atoms::build(&ops));
 		res!(Self::check_complete(&ops, &atoms));
 		let dead = res!(Dead::build(&ops));
@@ -379,7 +449,7 @@ impl Sequence {
 			flags.push(Flag::Dropped { op: *op, sub: *sub, origin: *origin });
 		}
 		flags.extend(res!(Self::torn(&ops, &claims)));
-		flags.extend(res!(Self::overlaps(&ops)));
+		flags.extend(res!(Self::overlaps(&ops, &cause)));
 		flags.sort();
 		flags.dedup();
 
@@ -415,6 +485,24 @@ impl Sequence {
 		let atoms = res!(Atoms::build(&ops));
 		let dead = res!(Dead::build(&ops));
 		Self::conserved(rendered, &atoms, &dead)
+	}
+
+	/// Checks that every operation an operation was written against is present.
+	///
+	/// This is the causal precondition proper, read off the parents rather than
+	/// guessed at from the content. An operation whose parent is absent has been
+	/// delivered ahead of history it depends on, and no amount of anchor
+	/// resolution can make up the difference.
+	fn check_parents(cause: &Causality<'_>)
+		-> Outcome<()>
+	{
+		if let Some((id, missing)) = cause.gap() {
+			return Err(err!(
+				"The operation {} was written against {}, which the operation set \
+				does not hold; the set is not causally complete.", id, missing;
+			Invalid, Input, Missing));
+		}
+		Ok(())
 	}
 
 	/// Checks that every content identifier an operation names exists.
@@ -473,13 +561,20 @@ impl Sequence {
 		Ok(out)
 	}
 
-	/// Finds the pairs of operations that named the same content.
+	/// Finds the pairs of concurrent operations that named the same content.
 	///
 	/// A sweep over the named runs, atom by atom: two operations overlap when one
 	/// starts before another ends. Origins are not counted, because an origin
 	/// names a gap rather than a claim on content, and two insertions at one gap
 	/// are ordered rather than in conflict.
-	fn overlaps(ops: &[(OpId, &Edit)])
+	///
+	/// A pair that overlaps is then asked of the parents graph whether it was
+	/// concurrent, and only a concurrent pair is flagged. An author who deleted a
+	/// run they could already see was not in conflict with whoever wrote it, and
+	/// saying so would make the flag noise. The concurrency test costs a walk of
+	/// the graph per overlapping pair, and overlapping pairs are rare, so nothing
+	/// is paid for the histories that have no conflict in them.
+	fn overlaps(ops: &[(OpId, &Edit)], cause: &Causality<'_>)
 		-> Outcome<Vec<Flag>>
 	{
 		let mut named: Vec<(ContentRange, OpId)> = Vec::new();
@@ -498,6 +593,9 @@ impl Sequence {
 			open.retain(|(o, _)| o.op == r.op && o.to > r.from);
 			for (o, other) in &open {
 				if *other == id {
+					continue;
+				}
+				if !cause.concurrent(other, &id) {
 					continue;
 				}
 				if let Some(region) = o.intersection(&r) {

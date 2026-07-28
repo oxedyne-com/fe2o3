@@ -14,7 +14,11 @@ use crate::id::{
 	OpId,
 	ReplicaId,
 };
-use crate::op::Op;
+use crate::op::{
+	Header,
+	Op,
+	Record,
+};
 use crate::seq::render::{
 	Flag,
 	Rendered,
@@ -53,14 +57,20 @@ impl Replica {
 		Self { id, seq: Sequence::new() }
 	}
 
-	/// Mints the next operation identity, with a Lamport counter.
-	fn next_id(&self) -> OpId {
+	/// Mints the next header: a Lamport counter, and everything this replica can
+	/// see as the operation's parents.
+	fn next_head(&self)
+		-> Outcome<Header>
+	{
 		let seen = self.seq.iter().map(|(id, _)| id.counter).max().unwrap_or(0);
-		OpId::new(ReplicaId::new(self.id), seen + 1)
+		Header::new(
+			OpId::new(ReplicaId::new(self.id), seen + 1),
+			self.seq.causality().heads(),
+		)
 	}
 
 	/// Receives an operation from another replica.
-	fn recv(&mut self, op: (OpId, Edit))
+	fn recv(&mut self, op: (Header, Edit))
 		-> Outcome<()>
 	{
 		self.seq.apply(op.0, op.1)
@@ -75,16 +85,16 @@ impl Replica {
 
 	/// Records an operation of this replica's own, and applies it.
 	fn author(&mut self, op: Edit)
-		-> Outcome<(OpId, Edit)>
+		-> Outcome<(Header, Edit)>
 	{
-		let id = self.next_id();
-		res!(self.seq.apply(id, op.clone()));
-		Ok((id, op))
+		let head = res!(self.next_head());
+		res!(self.seq.apply(head.clone(), op.clone()));
+		Ok((head, op))
 	}
 
 	/// Inserts bytes at a rendered index.
 	fn insert(&mut self, at: usize, bytes: &[u8])
-		-> Outcome<(OpId, Edit)>
+		-> Outcome<(Header, Edit)>
 	{
 		let op = res!(res!(self.view()).splice(at, 0, bytes.to_vec()));
 		self.author(op)
@@ -92,7 +102,7 @@ impl Replica {
 
 	/// Deletes a run at a rendered index.
 	fn delete(&mut self, at: usize, len: usize)
-		-> Outcome<(OpId, Edit)>
+		-> Outcome<(Header, Edit)>
 	{
 		let op = res!(res!(self.view()).splice(at, len, Vec::new()));
 		self.author(op)
@@ -100,7 +110,7 @@ impl Replica {
 
 	/// Replaces a run at a rendered index, in one operation.
 	fn replace(&mut self, at: usize, len: usize, bytes: &[u8])
-		-> Outcome<(OpId, Edit)>
+		-> Outcome<(Header, Edit)>
 	{
 		let op = res!(res!(self.view()).splice(at, len, bytes.to_vec()));
 		self.author(op)
@@ -108,7 +118,7 @@ impl Replica {
 
 	/// Moves a rendered run to a rendered index.
 	fn move_range(&mut self, at: usize, len: usize, to: usize)
-		-> Outcome<(OpId, Edit)>
+		-> Outcome<(Header, Edit)>
 	{
 		let op = res!(res!(self.view()).move_range(at, len, to));
 		self.author(op)
@@ -117,7 +127,7 @@ impl Replica {
 
 /// Seeds `replicas` replicas with one splice carrying the whole initial text.
 fn seed(text: &[u8], replicas: u64)
-	-> Outcome<(Vec<Replica>, (OpId, Edit))>
+	-> Outcome<(Vec<Replica>, (Header, Edit))>
 {
 	let mut origin = Replica::new(0);
 	let op = res!(origin.insert(0, text));
@@ -145,7 +155,7 @@ fn permute(idx: &mut Vec<usize>, k: usize, out: &mut Vec<Vec<usize>>) {
 
 /// Applies an operation set in every delivery order, requiring that all of them
 /// render the same bytes and raise the same flags, and returns that render.
-fn converge(ops: &[(OpId, Edit)])
+fn converge(ops: &[(Header, Edit)])
 	-> Outcome<Rendered>
 {
 	let n = ops.len();
@@ -163,7 +173,7 @@ fn converge(ops: &[(OpId, Edit)])
 	for order in &orders {
 		let mut seq = Sequence::new();
 		for i in order {
-			res!(seq.apply(ops[*i].0, ops[*i].1.clone()));
+			res!(seq.apply(ops[*i].0.clone(), ops[*i].1.clone()));
 		}
 		let got = res!(seq.render());
 		res!(seq.check_conservation(&got));
@@ -193,7 +203,7 @@ fn converge(ops: &[(OpId, Edit)])
 
 /// Runs an operation set under every delivery order and checks the render
 /// against the answer the case prescribes.
-fn case(expect: &str, ops: &[(OpId, Edit)])
+fn case(expect: &str, ops: &[(Header, Edit)])
 	-> Outcome<Rendered>
 {
 	let got = res!(converge(ops));
@@ -257,14 +267,14 @@ fn an_edit_inside_a_moved_line_travels_with_it() -> Outcome<()> {
 #[test]
 fn two_moves_of_one_run_leave_one_copy() -> Outcome<()> {
 	let (mut reps, first) = res!(seed(LIST, 2));
-	let seed_id = first.0;
+	let seed_id = first.0.id;
 	let (r1, r2) = reps.split_at_mut(1);
 	let lost = res!(r1[0].move_range(7, 7, 0));		// Replica 1 loses.
 	let won = res!(r2[0].move_range(7, 7, 23));		// Replica 2 wins.
 	let out = res!(case("- Eggs\n- Cheese\n- Milk\n", &[first, lost.clone(), won]));
 	assert_eq!(count(&out, is_torn), 1);
 	assert!(out.flags().contains(&Flag::Torn {
-		op:		lost.0,
+		op:		lost.0.id,
 		lost:	vec![res!(ContentRange::new(seed_id, 7, 14))],
 	}), "flags were {:?}", out.flags());
 	assert_eq!(count(&out, is_overlap), 1,
@@ -280,14 +290,14 @@ fn two_moves_of_one_run_leave_one_copy() -> Outcome<()> {
 #[test]
 fn overlapping_moves_tear_at_the_overlap() -> Outcome<()> {
 	let (mut reps, first) = res!(seed(ALPHA, 2));
-	let seed_id = first.0;
+	let seed_id = first.0.id;
 	let (r1, r2) = reps.split_at_mut(1);
 	let torn = res!(r1[0].move_range(0, 10, 20));	// Replica 1 loses the overlap.
 	let won = res!(r2[0].move_range(5, 10, 0));		// Replica 2 wins it.
 	let out = res!(case("FGHIJ56789ABCDE01234", &[first, torn.clone(), won]));
 	assert_eq!(count(&out, is_torn), 1);
 	assert!(out.flags().contains(&Flag::Torn {
-		op:		torn.0,
+		op:		torn.0.id,
 		lost:	vec![res!(ContentRange::new(seed_id, 5, 10))],
 	}), "flags were {:?}", out.flags());
 	Ok(())
@@ -312,8 +322,8 @@ fn mutually_nested_destinations_break_the_cycle_without_loss() -> Outcome<()> {
 	// Both origins of the lower move in op order give way, and the higher move
 	// keeps the destination it asked for.
 	assert_eq!(out.flags(), &[
-		Flag::Demoted { op: m1.0, sub: 0, origin: Origin::Left },
-		Flag::Demoted { op: m1.0, sub: 0, origin: Origin::Right },
+		Flag::Demoted { op: m1.0.id, sub: 0, origin: Origin::Left },
+		Flag::Demoted { op: m1.0.id, sub: 0, origin: Origin::Right },
 	]);
 	Ok(())
 }
@@ -386,7 +396,7 @@ fn a_move_and_a_deletion_inside_it_compose() -> Outcome<()> {
 #[test]
 fn moves_with_different_boundaries_split_between_them() -> Outcome<()> {
 	let (mut reps, first) = res!(seed(ALPHA, 2));
-	let seed_id = first.0;
+	let seed_id = first.0.id;
 	let (r1, r2) = reps.split_at_mut(1);
 	// Replica 1 treats "0123456789" as the block.
 	let m1 = res!(r1[0].move_range(0, 10, 20));
@@ -395,7 +405,7 @@ fn moves_with_different_boundaries_split_between_them() -> Outcome<()> {
 	let out = res!(case("ABCDEFGHIJ6789012345", &[first, m1.clone(), m2]));
 	assert_eq!(count(&out, is_torn), 1);
 	assert!(out.flags().contains(&Flag::Torn {
-		op:		m1.0,
+		op:		m1.0.id,
 		lost:	vec![res!(ContentRange::new(seed_id, 0, 6))],
 	}), "flags were {:?}", out.flags());
 	Ok(())
@@ -508,7 +518,7 @@ fn random_operation_sets_render_alike_and_conserve() -> Outcome<()> {
 				order.swap(i, next() % (i + 1));
 			}
 			for i in order {
-				res!(seq.apply(ops[i].0, ops[i].1.clone()));
+				res!(seq.apply(ops[i].0.clone(), ops[i].1.clone()));
 			}
 			let got = res!(seq.render());
 			res!(seq.check_conservation(&got));
@@ -558,6 +568,7 @@ fn conservation_holds_through_a_tear_and_a_cycle() -> Outcome<()> {
 #[test]
 fn conservation_notices_a_missing_byte() -> Outcome<()> {
 	let (_, first) = res!(seed(b"abcdef", 0));
+	let seed_id = first.0.id;
 	let mut seq = Sequence::new();
 	res!(seq.apply(first.0, first.1));
 	let out = res!(seq.render());
@@ -565,7 +576,7 @@ fn conservation_notices_a_missing_byte() -> Outcome<()> {
 		out.bytes()[..5].to_vec(),
 		vec![Run {
 			at:			0,
-			content:	res!(ContentRange::new(first.0, 0, 5)),
+			content:	res!(ContentRange::new(seed_id, 0, 5)),
 		}],
 		Vec::new(),
 		*out.stats(),
@@ -575,18 +586,20 @@ fn conservation_notices_a_missing_byte() -> Outcome<()> {
 	Ok(())
 }
 
-/// An operation set missing the atom another operation names cannot be resolved,
-/// and says which operation named what rather than guessing.
+/// An operation set missing what its operations were written against cannot be
+/// resolved, and says which operation named what rather than guessing.
 #[test]
 fn a_causally_incomplete_set_is_refused() -> Outcome<()> {
 	let (mut reps, first) = res!(seed(LIST, 1));
 	let ins = res!(reps[0].insert(9, b"!"));
 	let mv = res!(reps[0].move_range(7, 7, 0));
-	// The insertion's anchor names content the seeding splice created.
+	// The insertion names the seeding splice as its parent, and its anchor names
+	// the content that splice created.
+	assert_eq!(ins.0.parents, vec![first.0.id]);
 	let mut without_seed = Sequence::new();
-	res!(without_seed.apply(ins.0, ins.1.clone()));
+	res!(without_seed.apply(ins.0.clone(), ins.1.clone()));
 	assert!(without_seed.render().is_err(),
-		"an anchor naming an absent atom cannot be resolved");
+		"an operation without its parent cannot be resolved");
 	// The move's source names the same absent content.
 	let mut moved = Sequence::new();
 	res!(moved.apply(mv.0, mv.1));
@@ -600,65 +613,109 @@ fn a_causally_incomplete_set_is_refused() -> Outcome<()> {
 	Ok(())
 }
 
+/// The causal precondition is read off the parents, so an operation delivered
+/// ahead of one it was written against is refused even where every byte it names
+/// is present.
+#[test]
+fn an_operation_ahead_of_its_parent_is_refused() -> Outcome<()> {
+	let (mut reps, first) = res!(seed(LIST, 1));
+	// Two operations from one replica: the second was written knowing the first.
+	let one = res!(reps[0].insert(0, b"# "));
+	let two = res!(reps[0].insert(0, b"! "));
+	assert_eq!(two.0.parents, vec![one.0.id]);
+	let mut without_middle = Sequence::new();
+	res!(without_middle.apply(first.0.clone(), first.1.clone()));
+	res!(without_middle.apply(two.0.clone(), two.1.clone()));
+	assert!(without_middle.render().is_err(),
+		"the operation names a parent the set does not hold");
+	// The same set with the middle operation restored renders.
+	let mut whole = Sequence::new();
+	for op in [first, one, two] {
+		res!(whole.apply(op.0, op.1));
+	}
+	assert!(whole.render().is_ok());
+	Ok(())
+}
+
 /// An anchor reaching past the end of an atom it does name is refused for the
 /// same reason: the set does not hold the byte.
 #[test]
 fn an_anchor_past_the_end_of_its_atom_is_refused() -> Outcome<()> {
 	let (_, first) = res!(seed(b"abc", 0));
+	let seed_id = first.0.id;
 	let mut seq = Sequence::new();
 	res!(seq.apply(first.0, first.1));
 	let stray = Edit::Splice {
-		left:	Some(Anchor::after(ContentId::new(first.0, 99))),
+		left:	Some(Anchor::after(ContentId::new(seed_id, 99))),
 		right:	None,
 		remove:	Vec::new(),
 		insert:	b"x".to_vec(),
 	};
-	res!(seq.apply(OpId::new(ReplicaId::new(1), 2), stray));
+	let head = res!(Header::new(OpId::new(ReplicaId::new(1), 2), vec![seed_id]));
+	res!(seq.apply(head, stray));
 	assert!(seq.render().is_err());
 	Ok(())
 }
 
-/// A move recorded in the durable vocabulary, put through the wire codec and
-/// read back, is the same move and renders the same file.
+/// Both content operations, recorded in the durable vocabulary and put through
+/// the wire codec, come back as the same operations and render the same file.
 #[test]
-fn a_move_survives_the_wire_and_renders_the_same() -> Outcome<()> {
+fn the_wire_vocabulary_renders_the_same_file() -> Outcome<()> {
 	let (mut reps, first) = res!(seed(LIST, 1));
 	let mv = res!(reps[0].move_range(7, 7, 0));
-	let (src, left, right) = match &mv.1 {
-		Edit::Move { src, left, right }	=> (src.clone(), *left, *right),
-		other => return Err(err!(
-			"Expected a Move, got a {}.", other.name(); Test, Mismatch)),
-	};
-	let logged = Op::Move {
-		file:	fmt!("shopping.txt"),
-		src,
-		left,
-		right,
-	};
-	let back = res!(Op::decode_all(&res!(logged.encode())));
-	assert_eq!(logged, back);
-	assert_eq!(res!(Op::from_dat(&logged.to_dat())), logged);
-	let recovered = res!(Edit::from_op(&back));
-	assert_eq!(recovered, mv.1);
-	let mut seq = Sequence::new();
-	res!(seq.apply(first.0, first.1));
-	res!(seq.apply(mv.0, recovered));
-	assert_eq!(res!(seq.render()).text_lossy(), "- Milk\n- Eggs\n- Cheese\n");
+	let ed = res!(reps[0].replace(2, 4, b"Soy"));
+	// Every operation of the sequence is written down as a record, encoded, and
+	// read back through the log's own vocabulary.
+	let mut replayed = Sequence::new();
+	for (head, edit) in [first, mv, ed] {
+		let op = match &edit {
+			Edit::Splice { left, right, remove, insert } => Op::Splice {
+				file:	fmt!("shopping.txt"),
+				left:	*left,
+				right:	*right,
+				remove:	remove.clone(),
+				insert:	insert.clone(),
+			},
+			Edit::Move { src, left, right } => Op::Move {
+				file:	fmt!("shopping.txt"),
+				src:	src.clone(),
+				left:	*left,
+				right:	*right,
+			},
+		};
+		let rec = Record::new(head, op);
+		let back = res!(Record::decode_all(&res!(rec.encode())));
+		assert_eq!(rec, back);
+		assert_eq!(res!(Record::from_dat(&rec.to_dat())), rec);
+		// The recovered operation is the edit it started as, field for field.
+		match Edit::from_op(&back.op) {
+			Some(recovered)	=> assert_eq!(recovered, edit),
+			None => return Err(err!(
+				"An Op::{} should have crossed into the sequence.", back.op.name();
+			Test, Mismatch)),
+		}
+		assert!(res!(replayed.apply_record(&back)), "a content operation crosses");
+	}
+	assert_eq!(res!(replayed.render()).text_lossy(), "- Soy\n- Eggs\n- Cheese\n");
 	Ok(())
 }
 
-/// The positional splice of the durable vocabulary is not a sequence operation,
-/// and refusing it says why.
+/// An operation that says nothing about the order of bytes does not cross into
+/// the sequence, and the sequence says so rather than failing.
 #[test]
-fn a_positional_splice_does_not_cross_into_the_sequence() -> Outcome<()> {
-	let op = Op::Splice {
-		file:		fmt!("f"),
-		at:			0,
-		delete_len:	0,
-		insert:		b"x".to_vec(),
-	};
-	assert!(Edit::from_op(&op).is_err());
-	assert!(Edit::from_op(&Op::Mark { name: fmt!("v1") }).is_err());
+fn a_lifecycle_operation_does_not_cross_into_the_sequence() -> Outcome<()> {
+	let mut seq = Sequence::new();
+	for op in [
+		Op::FileCreate { path: fmt!("f") },
+		Op::FileDelete { path: fmt!("f") },
+		Op::FileRename { from: fmt!("f"), to: fmt!("g") },
+		Op::Mark { name: fmt!("v1") },
+	] {
+		assert!(Edit::from_op(&op).is_none(), "an Op::{} carries no order", op.name());
+		let rec = Record::root(OpId::new(ReplicaId::new(1), 1), op);
+		assert!(!res!(seq.apply_record(&rec)));
+	}
+	assert!(seq.is_empty(), "nothing of any of them reached the structure");
 	Ok(())
 }
 
@@ -668,8 +725,8 @@ fn a_positional_splice_does_not_cross_into_the_sequence() -> Outcome<()> {
 fn an_identity_names_one_operation() -> Outcome<()> {
 	let (_, first) = res!(seed(b"abc", 0));
 	let mut seq = Sequence::new();
-	res!(seq.apply(first.0, first.1.clone()));
-	res!(seq.apply(first.0, first.1));
+	res!(seq.apply(first.0.clone(), first.1.clone()));
+	res!(seq.apply(first.0.clone(), first.1.clone()));
 	assert_eq!(seq.len(), 1);
 	let other = Edit::Splice {
 		left:	None,
@@ -677,7 +734,10 @@ fn an_identity_names_one_operation() -> Outcome<()> {
 		remove:	Vec::new(),
 		insert:	b"different".to_vec(),
 	};
-	assert!(seq.apply(first.0, other).is_err());
+	assert!(seq.apply(first.0.clone(), other).is_err());
+	// Two headers differing only in their parents are two operations too.
+	let reparented = res!(Header::new(first.0.id, vec![OpId::new(ReplicaId::new(9), 1)]));
+	assert!(seq.apply(reparented, first.1).is_err());
 	Ok(())
 }
 
@@ -693,14 +753,14 @@ fn an_operation_the_structure_cannot_resolve_is_refused() -> Outcome<()> {
 		remove:	Vec::new(),
 		insert:	b"x".to_vec(),
 	};
-	assert!(seq.apply(OpId::new(ReplicaId::new(2), 2), wrong_left).is_err());
+	assert!(seq.apply(Header::root(OpId::new(ReplicaId::new(2), 2)), wrong_left).is_err());
 	let wrong_right = Edit::Splice {
 		left:	None,
 		right:	Some(Anchor::after(cid)),
 		remove:	Vec::new(),
 		insert:	b"x".to_vec(),
 	};
-	assert!(seq.apply(OpId::new(ReplicaId::new(2), 2), wrong_right).is_err());
+	assert!(seq.apply(Header::root(OpId::new(ReplicaId::new(2), 2)), wrong_right).is_err());
 	let twice = Edit::Move {
 		src:	vec![
 			res!(ContentRange::new(id, 0, 4)),
@@ -709,7 +769,7 @@ fn an_operation_the_structure_cannot_resolve_is_refused() -> Outcome<()> {
 		left:	None,
 		right:	None,
 	};
-	assert!(seq.apply(OpId::new(ReplicaId::new(2), 2), twice).is_err());
+	assert!(seq.apply(Header::root(OpId::new(ReplicaId::new(2), 2)), twice).is_err());
 	Ok(())
 }
 
@@ -724,6 +784,7 @@ fn a_move_into_its_own_source_keeps_its_bytes() -> Outcome<()> {
 	let src = res!(view.span(0, 10));
 	let (left, right) = res!(view.gap(5));
 	let op = res!(reps[0].author(Edit::Move { src, left, right }));
+	let op_id = op.0.id;
 	let mut seq = Sequence::new();
 	res!(seq.apply(first.0, first.1));
 	res!(seq.apply(op.0, op.1));
@@ -731,8 +792,8 @@ fn a_move_into_its_own_source_keeps_its_bytes() -> Outcome<()> {
 	res!(seq.check_conservation(&out));
 	assert_eq!(out.len(), 20, "the moved bytes must not vanish");
 	assert_eq!(out.flags(), &[
-		Flag::Demoted { op: op.0, sub: 0, origin: Origin::Left },
-		Flag::Demoted { op: op.0, sub: 0, origin: Origin::Right },
+		Flag::Demoted { op: op_id, sub: 0, origin: Origin::Left },
+		Flag::Demoted { op: op_id, sub: 0, origin: Origin::Right },
 	]);
 	Ok(())
 }
@@ -766,6 +827,7 @@ fn the_render_reports_what_it_cost() -> Outcome<()> {
 #[test]
 fn provenance_follows_the_bytes() -> Outcome<()> {
 	let (mut reps, first) = res!(seed(LIST, 1));
+	let seed_id = first.0.id;
 	let mv = res!(reps[0].move_range(7, 7, 0));
 	let mut seq = Sequence::new();
 	res!(seq.apply(first.0, first.1));
@@ -773,9 +835,9 @@ fn provenance_follows_the_bytes() -> Outcome<()> {
 	let out = res!(seq.render());
 	assert_eq!(out.text_lossy(), "- Milk\n- Eggs\n- Cheese\n");
 	// The first rendered byte is now the eighth byte the seeding splice made.
-	assert_eq!(res!(out.content_at(0)), ContentId::new(first.0, 7));
-	assert_eq!(res!(out.content_at(7)), ContentId::new(first.0, 0));
-	assert_eq!(res!(out.span(0, 7)), vec![res!(ContentRange::new(first.0, 7, 14))]);
+	assert_eq!(res!(out.content_at(0)), ContentId::new(seed_id, 7));
+	assert_eq!(res!(out.content_at(7)), ContentId::new(seed_id, 0));
+	assert_eq!(res!(out.span(0, 7)), vec![res!(ContentRange::new(seed_id, 7, 14))]);
 	assert!(out.content_at(out.len()).is_err());
 	Ok(())
 }

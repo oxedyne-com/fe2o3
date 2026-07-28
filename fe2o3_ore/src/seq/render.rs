@@ -73,12 +73,14 @@ pub enum Flag {
 		/// Which of the two origins.
 		origin:	Origin,
 	},
-	/// Two operations named overlapping content: both removed it, both moved it,
-	/// or one removed what the other moved.
+	/// Two concurrent operations named overlapping content: both removed it,
+	/// both moved it, or one removed what the other moved.
 	///
-	/// Whether the two were concurrent is a question about the causal graph,
-	/// which this layer does not hold; what it can say, and does, is that they
-	/// spoke about the same bytes.
+	/// Concurrency is decided from the operations' own parents, so the flag now
+	/// means what its name says: neither author could see what the other was
+	/// doing. Two operations touching the same bytes where one was written in
+	/// knowledge of the other are a sequence of edits and not a conflict, and
+	/// raise nothing.
 	Overlap {
 		/// The operations involved, in ascending order of identifier.
 		ops:	Vec<OpId>,
