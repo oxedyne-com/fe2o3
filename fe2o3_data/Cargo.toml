@@ -7,10 +7,16 @@ license = "BSD-2-Clause/Apache-2.0"
 description = "Hematite specialised data structures library."
 repository = "https://github.com/oxedyne-io/fe2o3"
 
+[features]
+default = ["par"]
+# Parallel graph search via rayon, which is unavailable on wasm32 targets.
+par = ["dep:rayon"]
+
 [dependencies]
 oxedyne_fe2o3_core 		   		= { path = "../fe2o3_core" }
 oxedyne_fe2o3_jdat 		   		= { path = "../fe2o3_jdat" }
-rayon = "1.10"
+
+rayon = { version = "1.10", optional = true }
 
 [dev-dependencies]
 oxedyne_fe2o3_text 		   		= { path = "../fe2o3_text" }

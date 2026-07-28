@@ -3,6 +3,9 @@
 //! This module provides a generic directed graph implementation where nodes
 //! and links can carry arbitrary data. The graph supports efficient lookups
 //! and traversals through HashMap-based storage.
+//!
+//! The parallel search methods are behind the `par` feature, which is enabled
+//! by default. Disable default features to build for targets without threads.
 
 use std::{
     collections::HashMap,
@@ -10,6 +13,7 @@ use std::{
     hash::Hash,
 };
 
+#[cfg(feature = "par")]
 use rayon::prelude::*;
 
 /// Trait for types that can serve as node identifiers in the graph.
@@ -281,10 +285,10 @@ impl<ID: NodeId, ND: NodeData, LD: LinkData> DiGraph<ID, ND, LD> {
     }
 
     /// Finds all nodes matching a predicate using parallel processing.
-    /// 
+    ///
     /// This method parallelises the search across CPU cores for better performance
-    /// with large graphs.
-    /// 
+    /// with large graphs. Requires the `par` feature, which is enabled by default.
+    ///
     /// # Arguments
     /// 
     /// * `predicate` - A closure that returns `true` for matching node data.
@@ -313,6 +317,7 @@ impl<ID: NodeId, ND: NodeData, LD: LinkData> DiGraph<ID, ND, LD> {
     /// let large_nodes = graph.find_nodes_par(|value| value.0 > 5000);
     /// assert!(!large_nodes.is_empty());
     /// ```
+    #[cfg(feature = "par")]
     pub fn find_nodes_par<F>(&self, predicate: F) -> Vec<ID>
     where
         F: Fn(&ND) -> bool + Sync + Send,
@@ -332,10 +337,11 @@ impl<ID: NodeId, ND: NodeData, LD: LinkData> DiGraph<ID, ND, LD> {
     }
 
     /// Finds all nodes matching a predicate using parallel processing, returning both identifiers and data.
-    /// 
+    ///
     /// This method parallelises the search and returns both the identifier and
-    /// data reference for matched nodes.
-    /// 
+    /// data reference for matched nodes. Requires the `par` feature, which is
+    /// enabled by default.
+    ///
     /// # Arguments
     /// 
     /// * `predicate` - A closure that returns `true` for matching node data.
@@ -378,6 +384,7 @@ impl<ID: NodeId, ND: NodeData, LD: LinkData> DiGraph<ID, ND, LD> {
     /// let hot_sensors = graph.find_nodes_with_data_par(|sensor| sensor.temperature > 500.0);
     /// assert!(!hot_sensors.is_empty());
     /// ```
+    #[cfg(feature = "par")]
     pub fn find_nodes_with_data_par<F>(&self, predicate: F) -> Vec<(ID, &ND)>
     where
         F: Fn(&ND) -> bool + Sync + Send,
