@@ -586,6 +586,88 @@ mod tests {
 		Ok(())
 	}
 
+	/// Randomised snapshots, of any number of files carrying any mixture of runs
+	/// and flags, come back exactly as they went in.
+	#[test]
+	fn random_snapshots_round_trip() -> Outcome<()> {
+		// A small linear congruential generator, so a failure can be reproduced.
+		let mut state = 0x0f1e_2d3c_4b5a_6978u64;
+		let mut next = move || {
+			state = state
+				.wrapping_mul(6_364_136_223_846_793_005)
+				.wrapping_add(1_442_695_040_888_963_407);
+			(state >> 33) as usize
+		};
+		for trial in 0..50 {
+			let mut frontier: Vec<OpId> = Vec::new();
+			for _ in 0..next() % 6 {
+				frontier.push(oid((next() % 9) as u64, (next() % 900) as u64));
+			}
+			let mut files: Vec<FileState> = Vec::new();
+			let mut paths: Vec<String> = Vec::new();
+			for _ in 0..next() % 5 {
+				let path = fmt!("f{}", next() % 20);
+				if paths.contains(&path) {
+					continue;
+				}
+				paths.push(path.clone());
+				let mut runs: Vec<Run> = Vec::new();
+				let mut at = 0u64;
+				for _ in 0..next() % 6 {
+					let len = (next() % 40) as u64;
+					runs.push(Run {
+						at,
+						content: res!(ContentRange::new(
+							oid((next() % 5) as u64, (next() % 50) as u64),
+							0,
+							len,
+						)),
+					});
+					at += len;
+				}
+				let mut flags: Vec<Flag> = Vec::new();
+				for _ in 0..next() % 4 {
+					let op = oid((next() % 5) as u64, (next() % 50) as u64);
+					flags.push(match next() % 4 {
+						0 => Flag::Torn {
+							op,
+							lost: vec![res!(ContentRange::new(op, 0, (next() % 30) as u64))],
+						},
+						1 => Flag::Demoted {
+							op,
+							sub:	(next() % 100) as u64,
+							origin:	if next() % 2 == 0 { Origin::Left } else { Origin::Right },
+						},
+						2 => Flag::Dropped {
+							op,
+							sub:	(next() % 100) as u64,
+							origin:	if next() % 2 == 0 { Origin::Left } else { Origin::Right },
+						},
+						_ => Flag::Overlap {
+							ops:	vec![op, oid((next() % 5) as u64, (next() % 50) as u64)],
+							region:	res!(ContentRange::new(op, 1, (next() % 30) as u64 + 1)),
+						},
+					});
+				}
+				files.push(FileState {
+					path,
+					bytes: (0..at).map(|i| (i % 251) as u8).collect(),
+					runs,
+					flags,
+				});
+			}
+			let snap = res!(Snapshot::new(frontier, files));
+			let bytes = res!(snap.encode());
+			assert_eq!(res!(Snapshot::decode(&bytes)), snap, "trial {}", trial);
+			// And every truncation of it is an error rather than a panic.
+			for cut in 0..bytes.len() {
+				assert!(Snapshot::decode(&bytes[..cut]).is_err(),
+					"trial {} cut at {}", trial, cut);
+			}
+		}
+		Ok(())
+	}
+
 	/// The bytes of a small snapshot, frozen.
 	///
 	/// The same discipline as the segment's golden test: a format that changes by

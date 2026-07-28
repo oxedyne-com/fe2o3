@@ -22,6 +22,10 @@
 //! - [`envelope`] binds a record's bytes to a public key and a signature.
 //! - [`seq`] is the convergent sequence: it consumes the operation vocabulary
 //!   directly and renders a file's bytes from an operation set.
+//! - [`segment`] is the durable form of a run of operations, read incrementally
+//!   and checked with a hasher the caller brings.
+//! - [`snapshot`] is the durable form of a rendered state at a frontier, so a
+//!   reader can start there and replay only what came after.
 //!
 //! # A pure primitive
 //!
