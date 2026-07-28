@@ -19,6 +19,16 @@
 //! window at a time -- and a multipart body costs a boundary generator, a second
 //! framing to get wrong, and a client population that would rather have the file.
 //!
+//! # Not yet: `If-Range`
+//!
+//! RFC 9110 §13.1.5 lets a client attach the validator it holds to a `Range`, so
+//! that a representation which changed underneath it is answered whole rather
+//! than as a window of something else. Nothing here reads that field, so a client
+//! resuming a download of a file that has since been replaced splices two
+//! different files together and does not find out. The fix is to compare the
+//! `If-Range` value against the entity tag before resolving, and to answer `200`
+//! rather than `206` when they disagree.
+//!
 //! # A field that cannot fail
 //!
 //! RFC 9110 §14.2 requires an unsatisfiable *unit* and a malformed field alike to
