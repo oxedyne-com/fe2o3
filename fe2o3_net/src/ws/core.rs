@@ -87,6 +87,7 @@ pub fn connect_request(
             header:    res!(HttpHeader::parse(msg, Some(true))),
             body:      Vec::new(),
             head_only: false,
+            file:      None,
         },
         key_str,
     ))
