@@ -847,7 +847,7 @@ mod tests {
 		Ok(())
 	}
 
-	/// The display forms read as the design note writes them.
+	/// The display forms name the operation, the offset and the side.
 	#[test]
 	fn content_names_display_readably() -> Outcome<()> {
 		let cid = ContentId::new(an_op(), 4);

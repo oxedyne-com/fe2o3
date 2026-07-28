@@ -353,8 +353,8 @@ fn three_concurrent_runs_at_one_point_do_not_interleave() -> Outcome<()> {
 /// immediately after its end. The asymmetry is inherent and worth stating: an
 /// insertion abutting the start stays where it was, one abutting the end travels
 /// with the move. Under the published ordering rule read literally, the first of
-/// them lands at the end of the file instead, which is the one correctness
-/// failure the oracle found.
+/// them lands at the end of the file instead, which is the failure the successor
+/// rule exists to prevent.
 #[test]
 fn edits_abutting_a_moved_run_stay_beside_their_neighbour() -> Outcome<()> {
 	let (mut reps, first) = res!(seed(LIST, 2));
