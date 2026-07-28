@@ -13,14 +13,20 @@
 //!
 //! * one `dmap` entry per record written,
 //! * exactly one `Cur` entry per distinct key,
-//! * every other entry `Old`.
+//! * every other entry `Old`,
+//! * an old-record counter that agrees with the map,
+//! * not one error logged by any bot.
 //!
 //! When the zone hands a writer a file number that is already in use, the
 //! receiving file bot replaces that file's `FileState` wholesale and the
 //! entries recorded so far are lost.  Every later supersession of one of those
 //! records then fails in `FileState::register_old` with "a data entry starting
 //! at position N in the FileState was not found", garbage is never registered,
-//! and the store grows without bound.  The invariant below catches that.
+//! and the store grows without bound.  The invariant above catches that.
+//!
+//! The remaining phases cover a restart, which takes over the incomplete live
+//! file left behind and rebuilds the caches from the index files, and garbage
+//! collection, measured against the same churn run with collection disabled.
 
 use oxedyne_fe2o3_core::{
     prelude::*,
@@ -63,9 +69,9 @@ use std::{
 };
 
 /// Number of distinct keys churned through the rollover.
-const NKEYS:    usize = 40;
+const NKEYS:     usize = 40;
 /// Number of times each key is overwritten after its first write.
-const NOVER:    usize = 12;
+const NOVER:     usize = 12;
 /// Number of overwrite rounds in the garbage collection phase.
 const GC_ROUNDS: usize = 40;
 
