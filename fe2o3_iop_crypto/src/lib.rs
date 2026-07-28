@@ -19,3 +19,10 @@ pub mod enc;
 pub mod kem;
 pub mod keys;
 pub mod sign;
+
+/// A supertrait of every trait here, so an implementor need not name fe2o3_namex to satisfy it.
+pub use oxedyne_fe2o3_namex::id::InNamex;
+/// The short, local form of a name, returned by [`InNamex::local_id`].
+pub use oxedyne_fe2o3_namex::id::LocalId;
+/// The universal identifier an implementor of [`InNamex`] must return.
+pub use oxedyne_fe2o3_namex::id::NamexId;

@@ -241,10 +241,10 @@ mod tests {
 	use super::*;
 	use crate::id::ReplicaId;
 
-	use oxedyne_fe2o3_iop_crypto::keys::KeyManager;
-	use oxedyne_fe2o3_namex::id::{
+	use oxedyne_fe2o3_iop_crypto::{
 		InNamex,
 		NamexId,
+		keys::KeyManager,
 	};
 
 	/// A stand-in signature scheme, present only to exercise the envelope's
