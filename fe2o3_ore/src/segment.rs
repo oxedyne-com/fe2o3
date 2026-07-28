@@ -37,6 +37,13 @@
 //! than memory can be read a chunk at a time. Memory is bounded by the largest
 //! single record rather than by the segment, and feeding a segment one byte at
 //! a time yields exactly what feeding it all at once yields.
+//!
+//! Writing is incremental in the same way, and across runs as well as within
+//! one: [`Writer::resume`] continues a segment already written and emits only
+//! the records appended to it, so a caller holding a segment on disk adds to it
+//! by writing at the end. Resuming reads the existing bytes first, under the
+//! hasher and salt it is given, so a segment that a later reader could not get
+//! to the end of is refused before anything is added to it.
 
 use crate::envelope::Envelope;
 use crate::id::{
@@ -258,6 +265,12 @@ impl Entry {
 /// business. A writer is generic over the hasher rather than taking one per
 /// call, so that every record of a segment is checked the same way by
 /// construction.
+///
+/// A writer either starts a segment, with [`Writer::new`], or continues one
+/// already written, with [`Writer::resume`]. The difference is only whether the
+/// header is emitted, since a segment is its header and then records to the end;
+/// what a resumed writer hands back is the records alone, to be appended to the
+/// bytes they continue.
 #[derive(Clone, Debug)]
 pub struct Writer<H: Hasher, const S: usize> {
 	/// The hash function each record's digest is computed with.
@@ -266,7 +279,7 @@ pub struct Writer<H: Hasher, const S: usize> {
 	salt:	[u8; S],
 	/// The bytes written so far.
 	buf:	Vec<u8>,
-	/// How many records have been written.
+	/// How many records the segment holds, those resumed from included.
 	count:	usize,
 }
 
@@ -277,6 +290,36 @@ impl<H: Hasher, const S: usize> Writer<H, S> {
 		let mut buf = Vec::new();
 		head.encode_into(&mut buf);
 		Self { hasher, salt, buf, count: 0 }
+	}
+
+	/// Continues a segment already written, so that records can be appended to
+	/// it without rewriting what is there.
+	///
+	/// The bytes handed back afterwards are the new records alone, which a caller
+	/// appends to the segment they were resumed from; the header is not emitted a
+	/// second time. [`Writer::count`] carries on from the records already there.
+	///
+	/// `existing` is read through first, under the hasher and the salt given, and
+	/// that is what makes appending safe: a different hash function, a different
+	/// salt, a segment written in another format version, and a segment left
+	/// half-written by an interrupted append all fail here, rather than being
+	/// quietly extended into bytes no reader can get to the end of.
+	pub fn resume(existing: &[u8], hasher: H, salt: [u8; S])
+		-> Outcome<Self>
+	{
+		let mut reader: Reader<H, S> = Reader::new(hasher.clone(), salt);
+		reader.feed(existing);
+		reader.end();
+		// Every record is decoded and its digest checked, and nothing is kept:
+		// what is wanted is the count and the assurance, not the operations.
+		while res!(reader.next_entry()).is_some() {}
+		if reader.head().is_none() {
+			return Err(err!(
+				"A segment of {} bytes carries no header, so there is nothing to \
+				continue.", existing.len();
+			Decode, Input, Missing));
+		}
+		Ok(Self { hasher, salt, buf: Vec::new(), count: reader.count() })
 	}
 
 	/// Appends a record.
@@ -307,17 +350,20 @@ impl<H: Hasher, const S: usize> Writer<H, S> {
 		Ok(())
 	}
 
-	/// Returns how many records have been written.
+	/// Returns how many records the segment holds, counting those a resumed
+	/// writer was given as well as those it has written.
 	pub fn count(&self) -> usize {
 		self.count
 	}
 
-	/// Returns the bytes written so far.
+	/// Returns the bytes written so far, which for a resumed writer are the new
+	/// records alone.
 	pub fn bytes(&self) -> &[u8] {
 		&self.buf
 	}
 
-	/// Returns the finished segment.
+	/// Returns the finished segment, or, where the writer was resumed, the bytes
+	/// to append to the segment it continues.
 	pub fn finish(self) -> Vec<u8> {
 		self.buf
 	}
@@ -929,6 +975,90 @@ mod tests {
 		}
 		assert_eq!(writer.count(), entries.len());
 		assert_eq!(writer.finish(), res!(encode(&head, &entries, Fold, [0u8; 0])));
+		Ok(())
+	}
+
+	/// A segment written in two goes is the segment written in one, and every
+	/// record is there afterwards.
+	#[test]
+	fn a_segment_resumes_where_it_left_off() -> Outcome<()> {
+		let entries = res!(bare());
+		let head = Head::new(Some(ReplicaId::new(11)));
+		// The first go: a header and the first two records.
+		let mut writer: Writer<Fold, 0> = Writer::new(&head, Fold, [0u8; 0]);
+		res!(writer.extend(&entries[..2]));
+		let mut file = writer.finish();
+		// The second go, which starts by reading what is already there.
+		let mut more: Writer<Fold, 0> = res!(Writer::resume(&file, Fold, [0u8; 0]));
+		assert_eq!(more.count(), 2, "the records it was resumed from");
+		res!(more.extend(&entries[2..]));
+		assert_eq!(more.count(), entries.len());
+		let tail = more.finish();
+		file.extend_from_slice(&tail);
+		// Which is the segment written in one go, byte for byte.
+		assert_eq!(file, res!(encode(&head, &entries, Fold, [0u8; 0])));
+		let (got_head, got) = res!(decode(&file, Fold, [0u8; 0]));
+		assert_eq!(got_head, head);
+		assert_eq!(got, entries);
+		Ok(())
+	}
+
+	/// An empty segment is a header and nothing else, and resuming one appends
+	/// its first record.
+	#[test]
+	fn an_empty_segment_resumes() -> Outcome<()> {
+		let head = Head::new(None);
+		let mut file = head.encode();
+		let mut writer: Writer<Fold, 0> = res!(Writer::resume(&file, Fold, [0u8; 0]));
+		assert_eq!(writer.count(), 0);
+		let entries = res!(bare());
+		res!(writer.push(&entries[0]));
+		file.extend_from_slice(&writer.finish());
+		let (_, got) = res!(decode(&file, Fold, [0u8; 0]));
+		assert_eq!(got, entries[..1]);
+		Ok(())
+	}
+
+	/// Resuming under a hasher or a salt the segment was not written with is
+	/// refused, because appending would leave a segment nobody could read whole.
+	#[test]
+	fn resuming_a_segment_written_otherwise_is_refused() -> Outcome<()> {
+		let entries = res!(bare());
+		let bytes = res!(encode(&Head::new(None), &entries, Fold, [0u8; 0]));
+		assert!(Writer::<Fold, 4>::resume(&bytes, Fold, [1u8; 4]).is_err(), "a different salt");
+		assert!(Writer::<(), 0>::resume(&bytes, (), [0u8; 0]).is_err(), "a different function");
+		// A segment left half-written by an interrupted append, which is the
+		// failure a resumed writer exists to avoid compounding. Every cut that
+		// is not a record boundary is refused, and every cut that is one is a
+		// shorter segment and resumes as such.
+		let mut ends: Vec<usize> = Vec::new();
+		let mut probe: Writer<Fold, 0> = Writer::new(&Head::new(None), Fold, [0u8; 0]);
+		ends.push(probe.bytes().len());
+		for entry in &entries {
+			res!(probe.push(entry));
+			ends.push(probe.bytes().len());
+		}
+		for cut in 1..bytes.len() {
+			match ends.iter().position(|e| *e == cut) {
+				Some(n) => {
+					let w: Writer<Fold, 0> = res!(Writer::resume(&bytes[..cut], Fold, [0u8; 0]));
+					assert_eq!(w.count(), n, "a segment of {} records cut at {}", n, cut);
+				},
+				None => if Writer::<Fold, 0>::resume(&bytes[..cut], Fold, [0u8; 0]).is_ok() {
+					return Err(err!(
+						"A segment cut at {} of {}, part way through a record, was \
+						resumed.", cut, bytes.len();
+					Test, Mismatch));
+				},
+			}
+		}
+		// And what is not a segment at all, including nothing.
+		assert!(Writer::<Fold, 0>::resume(b"", Fold, [0u8; 0]).is_err());
+		assert!(Writer::<Fold, 0>::resume(b"not a segment", Fold, [0u8; 0]).is_err());
+		let mut wrong = MAGIC.to_vec();
+		wrong.push(VERSION + 1);
+		wrong.push(0);
+		assert!(Writer::<Fold, 0>::resume(&wrong, Fold, [0u8; 0]).is_err(), "another version");
 		Ok(())
 	}
 
