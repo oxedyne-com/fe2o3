@@ -1,5 +1,6 @@
 mod hash;
 mod map;
+mod phash;
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -25,6 +26,7 @@ fn run_tests() -> Outcome<()> {
     let filter = "all";
     res!(hash::test_hash(filter));
     res!(map::test_map(filter));
+    res!(phash::test_phash(filter));
 
     Ok(())
 }

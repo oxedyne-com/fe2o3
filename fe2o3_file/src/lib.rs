@@ -21,4 +21,5 @@
 //! The crate builds on Hematite's core data structures and error handling patterns to provide a
 //! safe and maintainable approach to file system operations.
 //!
+pub mod exif;
 pub mod tree;

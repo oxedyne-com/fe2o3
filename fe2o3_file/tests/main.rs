@@ -1,3 +1,4 @@
+mod exif;
 mod tree;
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -22,9 +23,10 @@ fn main() -> Outcome<()> {
 
 fn run_tests() -> Outcome<()> {
 
-    let filter = "tree";
+    let filter = "all";
 
     res!(tree::test_tree(filter));
+    res!(exif::test_exif(filter));
 
     Ok(())
 }
