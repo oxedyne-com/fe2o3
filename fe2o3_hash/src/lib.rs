@@ -6,6 +6,7 @@
 //! - Cryptographic hashing via the [`hash`] module, supporting algorithms like SHA3-256
 //! - Key derivation functions in the [`kdf`] module, implementing Argon2
 //! - A concurrent sharded hashmap in the [`map`] module for high-performance applications
+//! - Perceptual image hashing for near-duplicate detection in the [`phash`] module
 //! - Proof-of-work mining and verification in the [`pow`] module
 //! 
 //! The crate integrates with Hematite's error handling system and Namex scheme identification,
@@ -33,6 +34,7 @@ pub mod csum;
 pub mod map;
 pub mod hash;
 pub mod kdf;
+pub mod phash;
 pub mod pow;
 pub mod sha256;
 
