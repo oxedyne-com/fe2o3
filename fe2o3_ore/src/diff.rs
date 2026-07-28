@@ -18,7 +18,7 @@
 //!   out, with no knowledge of operation identifiers, anchors or history;
 //! - the caller: for each splice in turn, `rendered.splice(at, delete, insert)`,
 //!   which resolves the offsets against the render and yields a content
-//!   anchored [`crate::seq::Edit`].
+//!   anchored [`crate::op::Op`].
 //!
 //! Because every offset is in the old bytes, and the render the caller holds is
 //! the old bytes, the whole list is resolved against that one render. The
