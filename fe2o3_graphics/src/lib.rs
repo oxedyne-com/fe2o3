@@ -49,6 +49,7 @@
 
 pub mod blur;
 pub mod colour;
+pub mod jpeg;
 pub mod path;
 pub mod pixmap;
 pub mod png;
