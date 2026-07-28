@@ -29,6 +29,8 @@
 //! - [`diff`] recovers the edit between two versions of a file's bytes, for the
 //!   author who worked in a filesystem rather than in an editor and so has no
 //!   intent to record.
+//! - [`sync`] brings two logs into agreement: a peer-symmetric state machine
+//!   over typed messages, which delivers causal closures and never subsets.
 //!
 //! # A pure primitive
 //!
@@ -51,6 +53,7 @@ pub mod op;
 pub mod segment;
 pub mod seq;
 pub mod snapshot;
+pub mod sync;
 
 #[cfg(test)]
 mod test_support;

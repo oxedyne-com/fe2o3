@@ -1,0 +1,542 @@
+//! What one peer says to another.
+//!
+//! Four messages, and both peers may send all four. A message has a daticle
+//! form, for a caller that keeps its wire in daticles, and a byte form that
+//! begins with a magic and a version, for a caller that keeps a wire of bytes.
+//! The version is there because these bytes cross between machines that were
+//! built at different times, and a reader that cannot tell an old spelling from
+//! a new one will eventually mistake one for the other.
+//!
+//! # Framing belongs to the transport
+//!
+//! [`Message::decode`] reads a message that occupies the whole of the buffer it
+//! is given. Where one message ends and the next begins is a question the
+//! carrier already answers -- a datagram has a length, a stream has whatever
+//! framing it was given -- and answering it twice is how the two answers come to
+//! disagree.
+
+use crate::id::OpId;
+use crate::segment::Entry;
+
+use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_jdat::prelude::*;
+
+
+/// The bytes every sync message begins with.
+pub const MAGIC: [u8; 6] = *b"ORESYN";
+
+/// The format version this module writes.
+pub const VERSION: u8 = 1;
+
+/// Kind code of a [`Message::Hello`].
+pub const KIND_HELLO:	u8 = 1;
+/// Kind code of a [`Message::Sketch`].
+pub const KIND_SKETCH:	u8 = 2;
+/// Kind code of a [`Message::Send`].
+pub const KIND_SEND:	u8 = 3;
+/// Kind code of a [`Message::Done`].
+pub const KIND_DONE:	u8 = 4;
+
+
+/// One thing a peer says.
+///
+/// The fields are public because a caller may legitimately want to work on a
+/// message before it goes out -- to seal the records of a [`Message::Send`] with
+/// a key this crate knows nothing about, most obviously. The encoding is
+/// canonical whatever a caller builds: frontiers are written ascending and
+/// without repetition, and a decoder refuses anything else.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Message {
+	/// The frontier the speaker holds, opening a frontier walk.
+	Hello {
+		/// The speaker's frontier.
+		heads: Vec<OpId>,
+	},
+	/// A sketch of every operation name the speaker holds, opening a
+	/// reconciliation.
+	///
+	/// The frontier rides along so that a receiver whose decode stalls can
+	/// answer with the walk in the same turn, rather than spending a round trip
+	/// asking for what it was already told.
+	Sketch {
+		/// The speaker's frontier.
+		heads:	Vec<OpId>,
+		/// The serialised table, as [`crate::sync::sketch::sketch`] built it.
+		cells:	Vec<u8>,
+		/// How many operations the speaker's log holds. Advisory: it lets a peer
+		/// judge whether the estimate the table was sized from was sensible, and
+		/// nothing is decided by it.
+		count:	u64,
+	},
+	/// Operations the speaker owes, causally closed against what the receiver
+	/// holds.
+	///
+	/// Order carries no meaning -- [`crate::log::OpLog::absorb`] places a batch
+	/// however it is shuffled -- but the sender writes them in a causal order
+	/// anyway, so that one pass places them all.
+	Send {
+		/// The operations, bare or sealed.
+		entries: Vec<Entry>,
+	},
+	/// The speaker owes nothing further.
+	Done,
+}
+
+impl Message {
+
+	/// Constructs a hello, putting the frontier in canonical order.
+	pub fn hello(heads: Vec<OpId>) -> Self {
+		Self::Hello { heads: canonical(heads) }
+	}
+
+	/// Constructs a sketch message, putting the frontier in canonical order.
+	pub fn sketch(heads: Vec<OpId>, cells: Vec<u8>, count: u64) -> Self {
+		Self::Sketch { heads: canonical(heads), cells, count }
+	}
+
+	/// Returns the kind code identifying the message.
+	pub fn kind(&self) -> u8 {
+		match self {
+			Self::Hello { .. }	=> KIND_HELLO,
+			Self::Sketch { .. }	=> KIND_SKETCH,
+			Self::Send { .. }	=> KIND_SEND,
+			Self::Done			=> KIND_DONE,
+		}
+	}
+
+	/// Returns the message's name, for messages about messages.
+	pub fn name(&self) -> &'static str {
+		match self {
+			Self::Hello { .. }	=> "hello",
+			Self::Sketch { .. }	=> "sketch",
+			Self::Send { .. }	=> "send",
+			Self::Done			=> "done",
+		}
+	}
+
+	/// Reports whether the message opens an exchange, which is what a peer
+	/// answers.
+	pub fn is_opening(&self) -> bool {
+		matches!(self, Self::Hello { .. } | Self::Sketch { .. })
+	}
+
+	/// Returns the frontier the message carries, which is empty for those that
+	/// carry none.
+	pub fn heads(&self) -> &[OpId] {
+		match self {
+			Self::Hello { heads }			=> heads,
+			Self::Sketch { heads, .. }		=> heads,
+			Self::Send { .. } | Self::Done	=> &[],
+		}
+	}
+
+	/// Returns the operations the message carries, which is empty for those that
+	/// carry none.
+	///
+	/// This is where a caller that requires provenance does its checking, before
+	/// the message reaches a session: every [`Entry::Sealed`] can be put to
+	/// [`crate::envelope::Envelope::verify`] under whatever scheme the caller
+	/// holds. No scheme is chosen here and none is assumed.
+	pub fn entries(&self) -> &[Entry] {
+		match self {
+			Self::Send { entries }								=> entries,
+			Self::Hello { .. } | Self::Sketch { .. } | Self::Done	=> &[],
+		}
+	}
+
+	/// Serialises the message to a [`Dat`]. The shape is `[kind, body]`.
+	///
+	/// The table of a sketch is a [`Dat::BU64`]: it readily exceeds the 255 bytes
+	/// a [`Dat::BU8`] length field can express, and a truncated length there
+	/// would corrupt silently.
+	pub fn to_dat(&self) -> Dat {
+		let body = match self {
+			Self::Hello { heads } => Dat::List(
+				canonical(heads.clone()).iter().map(|h| h.to_dat()).collect(),
+			),
+			Self::Sketch { heads, cells, count } => Dat::List(vec![
+				Dat::List(canonical(heads.clone()).iter().map(|h| h.to_dat()).collect()),
+				Dat::BU64(cells.clone()),
+				Dat::U64(*count),
+			]),
+			Self::Send { entries } => Dat::List(
+				entries.iter().map(|e| e.to_dat()).collect(),
+			),
+			Self::Done => Dat::List(Vec::new()),
+		};
+		Dat::List(vec![Dat::U8(self.kind()), body])
+	}
+
+	/// Reconstructs a message from a [`Dat`] produced by [`Message::to_dat`].
+	pub fn from_dat(dat: &Dat)
+		-> Outcome<Self>
+	{
+		let v = match dat {
+			Dat::List(v) if v.len() == 2 => v,
+			_ => return Err(err!(
+				"A Message expects a 2-element Dat::List, got {:?}.", dat;
+			Decode, Input, Mismatch)),
+		};
+		let kind = match &v[0] {
+			Dat::U8(k) => *k,
+			other => return Err(err!(
+				"A Message kind expects Dat::U8, got {:?}.", other;
+			Decode, Input, Mismatch)),
+		};
+		match kind {
+			KIND_HELLO => Ok(Self::Hello {
+				heads: res!(heads_from_dat(&v[1], "hello")),
+			}),
+			KIND_SKETCH => {
+				let f = match &v[1] {
+					Dat::List(f) if f.len() == 3 => f,
+					other => return Err(err!(
+						"A sketch message expects a 3-element Dat::List, got {:?}.",
+						other;
+					Decode, Input, Mismatch)),
+				};
+				let cells = match &f[1] {
+					Dat::BU64(b) => b.clone(),
+					other => return Err(err!(
+						"A sketch message's table expects Dat::BU64, got {:?}.", other;
+					Decode, Input, Mismatch)),
+				};
+				let count = match &f[2] {
+					Dat::U64(n) => *n,
+					other => return Err(err!(
+						"A sketch message's count expects Dat::U64, got {:?}.", other;
+					Decode, Input, Mismatch)),
+				};
+				Ok(Self::Sketch {
+					heads: res!(heads_from_dat(&f[0], "sketch")),
+					cells,
+					count,
+				})
+			},
+			KIND_SEND => {
+				let listed = match &v[1] {
+					Dat::List(e) => e,
+					other => return Err(err!(
+						"A send message's operations expect Dat::List, got {:?}.", other;
+					Decode, Input, Mismatch)),
+				};
+				let mut entries = Vec::with_capacity(listed.len());
+				for item in listed {
+					entries.push(res!(Entry::from_dat(item)));
+				}
+				Ok(Self::Send { entries })
+			},
+			KIND_DONE => match &v[1] {
+				Dat::List(f) if f.is_empty() => Ok(Self::Done),
+				other => Err(err!(
+					"A done message expects an empty Dat::List, got {:?}.", other;
+				Decode, Input, Mismatch)),
+			},
+			other => Err(err!(
+				"A Message is tagged {}, which names no message this version knows.",
+				other;
+			Decode, Input, Invalid)),
+		}
+	}
+
+	/// Appends the byte encoding of the message to `buf`: the magic, the
+	/// version, and the daticle form.
+	pub fn encode_into(&self, buf: &mut Vec<u8>)
+		-> Outcome<()>
+	{
+		buf.extend_from_slice(&MAGIC);
+		buf.push(VERSION);
+		let body = res!(self.to_dat().to_bytes(Vec::new()));
+		buf.extend_from_slice(&body);
+		Ok(())
+	}
+
+	/// Returns the byte encoding of the message.
+	pub fn encode(&self)
+		-> Outcome<Vec<u8>>
+	{
+		let mut buf = Vec::new();
+		res!(self.encode_into(&mut buf));
+		Ok(buf)
+	}
+
+	/// Decodes a message that must occupy the whole of `buf`.
+	pub fn decode(buf: &[u8])
+		-> Outcome<Self>
+	{
+		let at = MAGIC.len() + 1;
+		if buf.len() < at {
+			return Err(err!(
+				"A sync message of {} byte{} is too short to carry even its header.",
+				buf.len(), if buf.len() == 1 { "" } else { "s" };
+			Decode, Input, Missing));
+		}
+		if buf[..MAGIC.len()] != MAGIC {
+			return Err(err!(
+				"A sync message begins {:02x?}, which is not the magic {:02x?}.",
+				&buf[..MAGIC.len()], MAGIC;
+			Decode, Input, Invalid));
+		}
+		let version = buf[MAGIC.len()];
+		if version != VERSION {
+			return Err(err!(
+				"A sync message declares format version {}, and this reader knows only \
+				version {}.", version, VERSION;
+			Decode, Input, Version, Mismatch));
+		}
+		let (dat, used) = res!(Dat::from_bytes(&buf[at..]));
+		if used != buf.len() - at {
+			return Err(err!(
+				"A sync message body of {} bytes decoded from only {} of them.",
+				buf.len() - at, used;
+			Decode, Input, Mismatch));
+		}
+		Self::from_dat(&dat)
+	}
+}
+
+
+/// Puts a frontier in the order the encoding spells it: ascending, without
+/// repetition.
+fn canonical(heads: Vec<OpId>) -> Vec<OpId> {
+	let mut heads = heads;
+	heads.sort();
+	heads.dedup();
+	heads
+}
+
+/// Reads a frontier, refusing one that is not in canonical order.
+fn heads_from_dat(dat: &Dat, what: &str)
+	-> Outcome<Vec<OpId>>
+{
+	let listed = match dat {
+		Dat::List(v) => v,
+		other => return Err(err!(
+			"A {} message's frontier expects Dat::List, got {:?}.", what, other;
+		Decode, Input, Mismatch)),
+	};
+	let mut heads: Vec<OpId> = Vec::with_capacity(listed.len());
+	for item in listed {
+		let id = res!(OpId::from_dat(item));
+		if let Some(last) = heads.last() {
+			if id <= *last {
+				return Err(err!(
+					"A {} message lists {} after {}; a frontier is encoded ascending \
+					and without repetition.", what, id, last;
+				Decode, Input, Order));
+			}
+		}
+		heads.push(id);
+	}
+	Ok(heads)
+}
+
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	use crate::envelope::Envelope;
+	use crate::id::ReplicaId;
+	use crate::op::{
+		Header,
+		Op,
+		Record,
+	};
+	use crate::test_support::StubSigner;
+
+	/// An operation identifier.
+	fn oid(replica: u64, counter: u64) -> OpId {
+		OpId::new(ReplicaId::new(replica), counter)
+	}
+
+	/// One of each message, with both entry forms among them.
+	fn samples()
+		-> Outcome<Vec<Message>>
+	{
+		let rec = Record::new(
+			res!(Header::new(oid(2, 3), vec![oid(1, 1), oid(1, 2)])),
+			Op::FileCreate { path: b"notes.md".to_vec() },
+		);
+		let sealed = res!(Envelope::seal_record(
+			&StubSigner::with_seed(3),
+			&Record::root(oid(1, 1), Op::Mark { name: fmt!("start") }),
+		));
+		Ok(vec![
+			Message::hello(vec![oid(3, 9), oid(1, 2)]),
+			Message::hello(Vec::new()),
+			Message::sketch(vec![oid(1, 2)], vec![0x11; 300], 42),
+			Message::Send { entries: vec![
+				Entry::Bare(rec),
+				Entry::Sealed(sealed),
+			] },
+			Message::Send { entries: Vec::new() },
+			Message::Done,
+		])
+	}
+
+	/// Every message survives the daticle round trip and the byte round trip.
+	#[test]
+	fn messages_round_trip() -> Outcome<()> {
+		for msg in res!(samples()) {
+			assert_eq!(res!(Message::from_dat(&msg.to_dat())), msg, "as a daticle");
+			let bytes = res!(msg.encode());
+			assert_eq!(res!(Message::decode(&bytes)), msg, "as bytes");
+			assert_eq!(&bytes[..MAGIC.len()], &MAGIC);
+			assert_eq!(bytes[MAGIC.len()], VERSION);
+		}
+		Ok(())
+	}
+
+	/// A frontier is a set, so it is encoded ascending and without repetition
+	/// however it was handed over, and a decoder refuses any other spelling.
+	#[test]
+	fn a_frontier_is_encoded_canonically() -> Outcome<()> {
+		let msg = Message::hello(vec![oid(3, 1), oid(1, 1), oid(3, 1), oid(2, 1)]);
+		assert_eq!(msg.heads(), vec![oid(1, 1), oid(2, 1), oid(3, 1)]);
+		// Built by hand, out of order, it still encodes canonically.
+		let odd = Message::Hello { heads: vec![oid(3, 1), oid(1, 1)] };
+		assert_eq!(
+			res!(Message::from_dat(&odd.to_dat())),
+			Message::hello(vec![oid(1, 1), oid(3, 1)]),
+		);
+		// And a daticle spelling it otherwise is refused rather than sorted.
+		let wrong = Dat::List(vec![
+			Dat::U8(KIND_HELLO),
+			Dat::List(vec![oid(3, 1).to_dat(), oid(1, 1).to_dat()]),
+		]);
+		let _ = msg;
+		let e = match Message::from_dat(&wrong) {
+			Ok(_) => return Err(err!("A frontier out of order was accepted."; Test)),
+			Err(e) => e,
+		};
+		assert!(fmt!("{}", e).contains("ascending"), "message was {}", e);
+		// Repetition likewise.
+		let twice = Dat::List(vec![
+			Dat::U8(KIND_HELLO),
+			Dat::List(vec![oid(1, 1).to_dat(), oid(1, 1).to_dat()]),
+		]);
+		assert!(Message::from_dat(&twice).is_err());
+		Ok(())
+	}
+
+	/// Truncating a message anywhere is a typed error, never a panic and never a
+	/// half-read message.
+	#[test]
+	fn truncation_at_every_offset_is_clean() -> Outcome<()> {
+		for msg in res!(samples()) {
+			let bytes = res!(msg.encode());
+			for cut in 0..bytes.len() {
+				match Message::decode(&bytes[..cut]) {
+					Ok(got) => return Err(err!(
+						"A {} message cut at {} of {} decoded as a {}.",
+						msg.name(), cut, bytes.len(), got.name();
+					Test, Mismatch)),
+					Err(_) => {},
+				}
+			}
+			assert_eq!(res!(Message::decode(&bytes)), msg);
+			// And trailing rubbish is refused, not ignored.
+			let mut extra = bytes.clone();
+			extra.push(0x00);
+			assert!(Message::decode(&extra).is_err(), "{} with a trailing byte", msg.name());
+		}
+		Ok(())
+	}
+
+	/// Rubbish where a message should be is refused, and an unknown version is
+	/// refused by name.
+	#[test]
+	fn a_message_that_is_not_one_is_refused() -> Outcome<()> {
+		assert!(Message::decode(b"").is_err());
+		assert!(Message::decode(b"not a sync message").is_err());
+		let mut wrong = MAGIC.to_vec();
+		wrong.push(VERSION + 1);
+		wrong.push(0);
+		let e = match Message::decode(&wrong) {
+			Ok(_) => return Err(err!("An unknown version was accepted."; Test)),
+			Err(e) => e,
+		};
+		assert!(fmt!("{}", e).contains("version"), "message was {}", e);
+		// A kind nobody knows.
+		let odd = Dat::List(vec![Dat::U8(99), Dat::List(Vec::new())]);
+		assert!(Message::from_dat(&odd).is_err());
+		// A done message carrying something.
+		let heavy = Dat::List(vec![
+			Dat::U8(KIND_DONE),
+			Dat::List(vec![Dat::U64(1)]),
+		]);
+		assert!(Message::from_dat(&heavy).is_err());
+		Ok(())
+	}
+
+	/// The accessors say what each message carries and what it does not.
+	#[test]
+	fn accessors_report_what_is_there() -> Outcome<()> {
+		let msgs = res!(samples());
+		assert!(msgs[0].is_opening());
+		assert!(msgs[2].is_opening());
+		assert!(!msgs[3].is_opening());
+		assert!(!Message::Done.is_opening());
+		assert_eq!(msgs[2].heads(), vec![oid(1, 2)]);
+		assert!(msgs[3].heads().is_empty());
+		assert_eq!(msgs[3].entries().len(), 2);
+		assert!(msgs[0].entries().is_empty());
+		assert_eq!(Message::Done.name(), "done");
+		assert_eq!(Message::Done.kind(), KIND_DONE);
+		Ok(())
+	}
+
+	/// The bytes of one message, frozen.
+	///
+	/// A format that changes by accident leaves two versions of this crate unable
+	/// to speak to each other, and every other test in this file would pass
+	/// regardless: they all encode and decode with the same code. This one is the
+	/// fixed point. If it fails and the change was deliberate, the version byte is
+	/// the thing to raise.
+	#[test]
+	fn the_message_bytes_are_frozen() -> Outcome<()> {
+		let msg = Message::Send {
+			entries: vec![Entry::Bare(Record::new(
+				res!(Header::new(oid(2, 3), vec![oid(1, 7)])),
+				Op::Mark { name: fmt!("v1") },
+			))],
+		};
+		let want: &[u8] = &[
+			// The magic and the version.
+			0x4f, 0x52, 0x45, 0x53, 0x59, 0x4e,
+			0x01,
+			// The message: a two-element list of the kind and the body, 71 bytes.
+			0x33, 0x21, 0x47,
+				// The kind: send.
+				0x0a, 0x03,
+				// The body: a list of one entry, 66 bytes.
+				0x33, 0x21, 0x42,
+					// The entry, 63 bytes: the kind, and the record.
+					0x33, 0x21, 0x3f,
+						// Bare.
+						0x0a, 0x01,
+						// The record, 58 bytes: the header, the operation.
+						0x33, 0x21, 0x3a,
+							// The header, 45 bytes: the identifier, then the parents.
+							0x33, 0x21, 0x2d,
+								// The identifier r2:3, as two 64-bit integers.
+								0x33, 0x21, 0x12,
+									0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
+									0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03,
+								// One parent, r1:7.
+								0x33, 0x21, 0x15,
+									0x33, 0x21, 0x12,
+										0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+										0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07,
+							// The operation, 7 bytes: the Mark code, and the name "v1".
+							0x33, 0x21, 0x07,
+								0x0a, 0x04,
+								0x29, 0x21, 0x02, 0x76, 0x31,
+		];
+		assert_eq!(res!(msg.encode()), want, "the sync message format has changed");
+		// And the frozen bytes still read.
+		assert_eq!(res!(Message::decode(want)), msg);
+		Ok(())
+	}
+}
