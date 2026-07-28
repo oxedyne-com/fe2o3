@@ -229,6 +229,49 @@ impl Entry {
 		Ok(res!(self.peek()).head.id())
 	}
 
+	/// Serialises the entry to a [`Dat`], tagged with its kind. The shape is
+	/// `[kind, body]`.
+	///
+	/// This is the form for a carrier that is itself a daticle, such as a sync
+	/// message. A segment does not use it: there the kind is a byte of the frame
+	/// and the body stands alone, so that the digest can cover both without
+	/// re-encoding.
+	pub fn to_dat(&self) -> Dat {
+		Dat::List(vec![
+			Dat::U8(self.kind()),
+			match self {
+				Self::Bare(rec)	=> rec.to_dat(),
+				Self::Sealed(e)	=> e.to_dat(),
+			},
+		])
+	}
+
+	/// Reconstructs an entry from a [`Dat`] produced by [`Entry::to_dat`].
+	pub fn from_dat(dat: &Dat)
+		-> Outcome<Self>
+	{
+		let v = match dat {
+			Dat::List(v) if v.len() == 2 => v,
+			_ => return Err(err!(
+				"An Entry expects a 2-element Dat::List, got {:?}.", dat;
+			Decode, Input, Mismatch)),
+		};
+		let kind = match &v[0] {
+			Dat::U8(k) => *k,
+			other => return Err(err!(
+				"An Entry kind expects Dat::U8, got {:?}.", other;
+			Decode, Input, Mismatch)),
+		};
+		match kind {
+			KIND_BARE	=> Ok(Self::Bare(res!(Record::from_dat(&v[1])))),
+			KIND_SEALED	=> Ok(Self::Sealed(res!(Envelope::from_dat(&v[1])))),
+			other => Err(err!(
+				"An Entry is tagged {}, which is neither {} for a bare record nor {} \
+				for a sealed envelope.", other, KIND_BARE, KIND_SEALED;
+			Decode, Input, Invalid)),
+		}
+	}
+
 	/// Returns the body bytes, which are the daticle form of whichever shape the
 	/// entry holds.
 	fn body(&self)
@@ -764,6 +807,21 @@ mod tests {
 		assert_eq!(got, entries);
 		assert_eq!(got[0].kind(), KIND_SEALED);
 		assert_eq!(got[2].kind(), KIND_BARE);
+		Ok(())
+	}
+
+	/// Both forms survive the tagged daticle round trip, which is what a carrier
+	/// that is itself a daticle uses, and a tag that is neither is refused.
+	#[test]
+	fn entries_round_trip_as_daticles() -> Outcome<()> {
+		let (mut entries, _) = res!(sealed());
+		entries.extend(res!(bare()));
+		for entry in &entries {
+			assert_eq!(&res!(Entry::from_dat(&entry.to_dat())), entry);
+		}
+		let odd = Dat::List(vec![Dat::U8(9), Dat::List(Vec::new())]);
+		assert!(Entry::from_dat(&odd).is_err());
+		assert!(Entry::from_dat(&Dat::List(Vec::new())).is_err());
 		Ok(())
 	}
 
