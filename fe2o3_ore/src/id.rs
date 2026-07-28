@@ -267,6 +267,18 @@ impl ContentId {
 		Self { op, off }
 	}
 
+	/// Names a file's **origin anchor**: byte zero of the one-byte atom that the
+	/// file's creation mints.
+	///
+	/// The byte is born dead and never renders, so nothing a reader points at can
+	/// name it; what it is for is that an empty file is not empty in identifier
+	/// space, and a splice into one therefore binds after a byte like every other
+	/// splice does. `file` is the identity of the file, which is the identity of
+	/// the [`crate::op::Op::FileCreate`] that brought it into existence.
+	pub const fn origin(file: OpId) -> Self {
+		Self { op: file, off: 0 }
+	}
+
 	/// Serialises the identifier to a [`Dat`]. The shape is `[op, off]`.
 	pub fn to_dat(&self) -> Dat {
 		Dat::List(vec![
@@ -533,6 +545,16 @@ impl Anchor {
 	/// right origin takes.
 	pub const fn before(content: ContentId) -> Self {
 		Self { content, side: Side::Before }
+	}
+
+	/// Constructs the anchor naming the start of a file: the gap after that
+	/// file's origin anchor.
+	///
+	/// This is the left origin of a splice into an empty file, and it is an
+	/// ordinary anchor over an ordinary content identifier. Nothing new is spelled
+	/// on the wire for it; see [`ContentId::origin`].
+	pub const fn origin(file: OpId) -> Self {
+		Self::after(ContentId::origin(file))
 	}
 
 	/// Serialises the anchor to a [`Dat`]. The shape is `[content, side]`.
@@ -911,6 +933,19 @@ mod tests {
 			Dat::U8(7),
 		])).is_err());
 		assert!(Anchor::opt_from_dat(&Dat::U8(0)).is_err());
+		Ok(())
+	}
+
+	/// A file's origin anchor is byte zero of the atom its creation mints, and
+	/// the anchor naming the start of that file binds after it.
+	#[test]
+	fn the_origin_anchor_is_an_ordinary_name() -> Outcome<()> {
+		let file = an_op();
+		assert_eq!(ContentId::origin(file), ContentId::new(file, 0));
+		assert_eq!(Anchor::origin(file), Anchor::after(ContentId::new(file, 0)));
+		// Nothing new is spelled: it round trips as any other anchor does.
+		let a = Anchor::origin(file);
+		assert_eq!(a, res!(Anchor::from_dat(&a.to_dat())));
 		Ok(())
 	}
 

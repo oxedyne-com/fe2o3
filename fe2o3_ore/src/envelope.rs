@@ -220,6 +220,7 @@ fn decode_record(buf: &[u8])
 mod tests {
 	use super::*;
 	use crate::id::{
+		Anchor,
 		ContentRange,
 		OpId,
 		ReplicaId,
@@ -240,8 +241,7 @@ mod tests {
 	/// A representative operation.
 	fn sample_op() -> Outcome<Op> {
 		Ok(Op::Splice {
-			file:	fmt!("notes.md"),
-			left:	None,
+			left:	Some(Anchor::origin(oid(1, 1))),
 			right:	None,
 			remove:	vec![res!(ContentRange::new(oid(1, 1), 12, 15))],
 			insert:	vec![0x7e; 900],	// Beyond what a BU8 length could hold.

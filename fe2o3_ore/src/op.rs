@@ -15,6 +15,27 @@
 //! the property [`crate::seq`] is built on and the reason the two vocabularies
 //! are now one.
 //!
+//! # Nothing names a file either
+//!
+//! A content operation names content and stops there. [`Op::Splice`] and
+//! [`Op::Move`] carry no file, because the file a placement lands in is read off
+//! the content it anchors to rather than asserted beside it: an author who
+//! recorded a file could contradict the anchor, and the format would have no way
+//! to say which of the two was right.
+//!
+//! What makes that total is the **origin anchor**. [`Op::FileCreate`] mints a
+//! file, whose identity is the creating operation's own identity, and with it one
+//! byte of content born dead -- [`crate::id::ContentId::origin`] -- so that an
+//! empty file is not empty in identifier space. A splice into an empty file
+//! anchors after that byte exactly as any other splice anchors after any other
+//! byte, and the rule that replaces the file field is
+//! [`Op::check_placement`]: an operation that places anything must carry at least
+//! one origin, since that origin is what says where it lands.
+//!
+//! [`Op::FileRename`] and [`Op::FileDelete`] name a file by that identity. A path
+//! is metadata carried by the lifecycle operations and nothing else, and it is
+//! bytes rather than a string, because a path is not required to be UTF-8.
+//!
 //! # Every operation carries its parents
 //!
 //! An operation records the frontier its author could see when they wrote it,
@@ -31,6 +52,7 @@ use crate::id::{
 	Anchor,
 	ContentRange,
 	OpId,
+	Side,
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -67,25 +89,33 @@ pub const CODE_MOVE:		u8 = 6;
 /// run's new home rather than on a tombstone. Nothing in a move says where
 /// anything is -- the source is content, the destination is an anchor -- and
 /// since a splice says the same, the sequence structure in [`crate::seq`] can
-/// resolve any two of them against each other however they happen to arrive.
+/// resolve any two of them against each other however they happen to arrive, in
+/// one file or across two.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Op {
 	/// Brings a file into existence, empty.
+	///
+	/// The operation's own identity is the file's identity, for as long as the
+	/// history lasts and through any number of renames. It also mints the file's
+	/// origin anchor, one byte of content born dead and named
+	/// [`crate::id::ContentId::origin`] of that identity, which is what a splice
+	/// into the empty file binds after.
 	FileCreate {
-		/// Path of the new file.
-		path: String,
+		/// Where the file sits, as bytes rather than as a string.
+		path: Vec<u8>,
 	},
-	/// Removes a file.
+	/// Retires a file. Its content is held back rather than destroyed, so
+	/// whatever moved out of it before it went still renders where it went.
 	FileDelete {
-		/// Path of the file removed.
-		path: String,
+		/// The file, named by the operation that created it.
+		file: OpId,
 	},
-	/// Renames a file, leaving its contents untouched.
+	/// Moves a file to another path, leaving its contents untouched.
 	FileRename {
-		/// Path before the rename.
-		from: String,
-		/// Path after the rename.
-		to: String,
+		/// The file, named by the operation that created it.
+		file: OpId,
+		/// Where it moves to.
+		path: Vec<u8>,
 	},
 	/// Names a point in history, so that it can be referred to later.
 	Mark {
@@ -98,13 +128,12 @@ pub enum Op {
 	/// replacement does both in one operation.
 	///
 	/// The gap is named by the content either side of it and the removed runs
-	/// are named by their content, so neither half carries a position.
+	/// are named by their content, so neither half carries a position, and
+	/// neither names a file.
 	Splice {
-		/// Path of the file edited.
-		file: String,
-		/// Left origin of the inserted bytes; `None` is the start of the file.
+		/// Left origin of the inserted bytes, binding after a byte.
 		left: Option<Anchor>,
-		/// Right origin of the inserted bytes; `None` is the end of the file.
+		/// Right origin of the inserted bytes, binding before a byte.
 		right: Option<Anchor>,
 		/// What dies.
 		remove: Vec<ContentRange>,
@@ -114,19 +143,16 @@ pub enum Op {
 	/// Relocates runs of existing content, which keep their identity, to a
 	/// position named by the content already there.
 	///
-	/// The source names bytes and not a file, because a byte's identity is
-	/// repository-wide: the same operation moves a run within one file or from
-	/// one file to another, and only `file` says which file the run lands in.
+	/// The source names bytes, and a byte's identity is repository-wide, so one
+	/// operation moves a run within a file or from one file to another with
+	/// nothing in it saying which case it is. The destination anchor is what
+	/// decides.
 	Move {
-		/// Path of the file the content lands in.
-		file: String,
 		/// What moves, in the order it lands in.
 		src: Vec<ContentRange>,
-		/// The gap the content lands in, on its left; `None` is the start of the
-		/// file.
+		/// The gap the content lands in, on its left.
 		left: Option<Anchor>,
-		/// The gap the content lands in, on its right; `None` is the end of the
-		/// file.
+		/// The gap the content lands in, on its right.
 		right: Option<Anchor>,
 	},
 }
@@ -156,16 +182,130 @@ impl Op {
 		}
 	}
 
-	/// Returns the file the operation edits the contents of, if it edits any.
+	/// Returns the file an operation names by identity, which only a lifecycle
+	/// change does.
 	///
-	/// A file lifecycle change names paths but edits no content, and a mark
-	/// names no file at all, so both give `None`.
-	pub fn file(&self) -> Option<&str> {
+	/// A content operation gives `None`, and that is the whole of candidate B: it
+	/// names content, and the file follows from the content. A file's creation
+	/// gives `None` too, because the file it names is itself, and the identity is
+	/// the operation's own.
+	pub fn names_file(&self) -> Option<OpId> {
 		match self {
-			Self::Splice { file, .. }	=> Some(file),
-			Self::Move { file, .. }		=> Some(file),
-			_							=> None,
+			Self::FileDelete { file }		=> Some(*file),
+			Self::FileRename { file, .. }	=> Some(*file),
+			_								=> None,
 		}
+	}
+
+	/// Returns the operation's two origins, absent for anything that places
+	/// nothing.
+	pub fn origins(&self) -> (Option<Anchor>, Option<Anchor>) {
+		match self {
+			Self::Splice { left, right, .. }	=> (*left, *right),
+			Self::Move { left, right, .. }		=> (*left, *right),
+			_									=> (None, None),
+		}
+	}
+
+	/// Returns the content the operation names: what a splice removes, or what a
+	/// move takes with it.
+	pub fn regions(&self) -> &[ContentRange] {
+		match self {
+			Self::Splice { remove, .. }	=> remove,
+			Self::Move { src, .. }		=> src,
+			_							=> &[],
+		}
+	}
+
+	/// Reports whether the operation is a move.
+	pub fn is_move(&self) -> bool {
+		matches!(self, Self::Move { .. })
+	}
+
+	/// Returns the number of bytes the operation places, which is what a splice
+	/// inserts or what a move brings with it.
+	pub fn placed_len(&self) -> u64 {
+		match self {
+			Self::Splice { insert, .. }	=> insert.len() as u64,
+			Self::Move { src, .. }		=> src.iter().map(|r| r.len()).sum(),
+			_							=> 0,
+		}
+	}
+
+	/// Checks the rule that replaces the file field.
+	///
+	/// An operation that places anything -- a splice with a non-empty `insert`,
+	/// or any move -- must carry at least one origin, because that origin is what
+	/// says which file it lands in. A splice that only removes places nothing and
+	/// needs none: it names the content it kills, and content is repository-wide.
+	///
+	/// This is enforced on the way off the wire as well as on the way into the
+	/// sequence, because an operation that satisfies neither origin belongs to no
+	/// file and there is nowhere for a reader to put it.
+	pub fn check_placement(&self)
+		-> Outcome<()>
+	{
+		let (left, right) = self.origins();
+		if left.is_some() || right.is_some() {
+			return Ok(());
+		}
+		match self {
+			Self::Splice { insert, .. } if !insert.is_empty() => Err(err!(
+				"A Splice inserting {} bytes carries no origin; an operation that \
+				places anything names at least one, an empty file's origin anchor \
+				being what a splice into an empty file names.", insert.len();
+			Invalid, Input, Missing)),
+			Self::Move { .. } => Err(err!(
+				"A Move carries no origin; a move always places what it names, so it \
+				always names where.";
+			Invalid, Input, Missing)),
+			_ => Ok(()),
+		}
+	}
+
+	/// Checks the operation is one the sequence structure can resolve.
+	///
+	/// A left origin binds after a byte and a right origin before one; a move may
+	/// not name the same byte twice, since a byte has exactly one owning slot and
+	/// could not otherwise be shown once; and [`Op::check_placement`] must hold.
+	pub fn validate(&self)
+		-> Outcome<()>
+	{
+		let (left, right) = self.origins();
+		if let Some(a) = left {
+			if a.side != Side::After {
+				return Err(err!(
+					"An {} names {} as its left origin; a left origin binds after a \
+					byte, not before it.", self.name(), a;
+				Invalid, Input));
+			}
+		}
+		if let Some(a) = right {
+			if a.side != Side::Before {
+				return Err(err!(
+					"An {} names {} as its right origin; a right origin binds before a \
+					byte, not after it.", self.name(), a;
+				Invalid, Input));
+			}
+		}
+		if let Self::Move { src, .. } = self {
+			// Sorted by creating operation and then by offset, any overlap at all
+			// shows up between neighbours.
+			let mut spans: Vec<&ContentRange> = src.iter()
+				.filter(|r| !r.is_empty())
+				.collect();
+			spans.sort_by_key(|r| (r.op(), r.from()));
+			for pair in spans.windows(2) {
+				if pair[0].intersects(pair[1]) {
+					return Err(err!(
+						"A Move names {} and {}, which overlap; one byte cannot be \
+						moved to two places by one operation.", pair[0], pair[1];
+					Invalid, Input, Conflict));
+				}
+			}
+		}
+		res!(self.check_placement());
+		Ok(())
 	}
 
 	/// Serialises the operation to a [`Dat`]. The shape is
@@ -173,37 +313,36 @@ impl Op {
 	///
 	/// Byte payloads use [`Dat::BU64`] rather than [`Dat::BU8`], whose length
 	/// field is a single byte and so keeps only the low eight bits of the
-	/// length of anything longer than 255 bytes.
+	/// length of anything longer than 255 bytes. A path is a byte payload for the
+	/// same reason a path is not a string: neither is the caller's to constrain.
 	pub fn to_dat(&self) -> Dat {
 		match self {
 			Self::FileCreate { path } => Dat::List(vec![
 				Dat::U8(CODE_FILE_CREATE),
-				Dat::Str(path.clone()),
+				Dat::BU64(path.clone()),
 			]),
-			Self::FileDelete { path } => Dat::List(vec![
+			Self::FileDelete { file } => Dat::List(vec![
 				Dat::U8(CODE_FILE_DELETE),
-				Dat::Str(path.clone()),
+				file.to_dat(),
 			]),
-			Self::FileRename { from, to } => Dat::List(vec![
+			Self::FileRename { file, path } => Dat::List(vec![
 				Dat::U8(CODE_FILE_RENAME),
-				Dat::Str(from.clone()),
-				Dat::Str(to.clone()),
+				file.to_dat(),
+				Dat::BU64(path.clone()),
 			]),
 			Self::Mark { name } => Dat::List(vec![
 				Dat::U8(CODE_MARK),
 				Dat::Str(name.clone()),
 			]),
-			Self::Splice { file, left, right, remove, insert } => Dat::List(vec![
+			Self::Splice { left, right, remove, insert } => Dat::List(vec![
 				Dat::U8(CODE_SPLICE),
-				Dat::Str(file.clone()),
 				Anchor::opt_to_dat(left),
 				Anchor::opt_to_dat(right),
 				Dat::List(remove.iter().map(|r| r.to_dat()).collect()),
 				Dat::BU64(insert.clone()),
 			]),
-			Self::Move { file, src, left, right } => Dat::List(vec![
+			Self::Move { src, left, right } => Dat::List(vec![
 				Dat::U8(CODE_MOVE),
-				Dat::Str(file.clone()),
 				Dat::List(src.iter().map(|r| r.to_dat()).collect()),
 				Anchor::opt_to_dat(left),
 				Anchor::opt_to_dat(right),
@@ -212,6 +351,10 @@ impl Op {
 	}
 
 	/// Reconstructs an operation from a [`Dat`] produced by [`Op::to_dat`].
+	///
+	/// The placement rule is checked here rather than left to the sequence,
+	/// because an operation that places bytes and names no origin belongs to no
+	/// file and no later stage could decide one for it.
 	pub fn from_dat(dat: &Dat)
 		-> Outcome<Self>
 	{
@@ -227,55 +370,55 @@ impl Op {
 				"An Op code expects Dat::U8, got {:?}.", other;
 			Decode, Input, Mismatch)),
 		};
-		match code {
+		let op = match code {
 			CODE_FILE_CREATE => {
 				res!(expect_len(v, 2, "FileCreate"));
-				Ok(Self::FileCreate {
-					path: res!(as_str(&v[1], "FileCreate path")),
-				})
+				Self::FileCreate {
+					path: res!(as_bytes(&v[1], "FileCreate path")),
+				}
 			},
 			CODE_FILE_DELETE => {
 				res!(expect_len(v, 2, "FileDelete"));
-				Ok(Self::FileDelete {
-					path: res!(as_str(&v[1], "FileDelete path")),
-				})
+				Self::FileDelete {
+					file: res!(OpId::from_dat(&v[1])),
+				}
 			},
 			CODE_FILE_RENAME => {
 				res!(expect_len(v, 3, "FileRename"));
-				Ok(Self::FileRename {
-					from:	res!(as_str(&v[1], "FileRename from")),
-					to:		res!(as_str(&v[2], "FileRename to")),
-				})
+				Self::FileRename {
+					file:	res!(OpId::from_dat(&v[1])),
+					path:	res!(as_bytes(&v[2], "FileRename path")),
+				}
 			},
 			CODE_MARK => {
 				res!(expect_len(v, 2, "Mark"));
-				Ok(Self::Mark {
+				Self::Mark {
 					name: res!(as_str(&v[1], "Mark name")),
-				})
+				}
 			},
 			CODE_SPLICE => {
-				res!(expect_len(v, 6, "Splice"));
-				Ok(Self::Splice {
-					file:	res!(as_str(&v[1], "Splice file")),
-					left:	res!(Anchor::opt_from_dat(&v[2])),
-					right:	res!(Anchor::opt_from_dat(&v[3])),
-					remove:	res!(as_ranges(&v[4], "Splice remove")),
-					insert:	res!(as_bytes(&v[5], "Splice insert")),
-				})
+				res!(expect_len(v, 5, "Splice"));
+				Self::Splice {
+					left:	res!(Anchor::opt_from_dat(&v[1])),
+					right:	res!(Anchor::opt_from_dat(&v[2])),
+					remove:	res!(as_ranges(&v[3], "Splice remove")),
+					insert:	res!(as_bytes(&v[4], "Splice insert")),
+				}
 			},
 			CODE_MOVE => {
-				res!(expect_len(v, 5, "Move"));
-				Ok(Self::Move {
-					file:	res!(as_str(&v[1], "Move file")),
-					src:	res!(as_ranges(&v[2], "Move src")),
-					left:	res!(Anchor::opt_from_dat(&v[3])),
-					right:	res!(Anchor::opt_from_dat(&v[4])),
-				})
+				res!(expect_len(v, 4, "Move"));
+				Self::Move {
+					src:	res!(as_ranges(&v[1], "Move src")),
+					left:	res!(Anchor::opt_from_dat(&v[2])),
+					right:	res!(Anchor::opt_from_dat(&v[3])),
+				}
 			},
-			other => Err(err!(
+			other => return Err(err!(
 				"Op code {} is not recognised.", other;
 			Decode, Input, Invalid)),
-		}
+		};
+		res!(op.check_placement());
+		Ok(op)
 	}
 
 	/// Appends the byte encoding of the operation to `buf`, as a varint length
@@ -350,15 +493,19 @@ impl Op {
 /// what decides whether two edits to the same bytes were a conflict or a
 /// sequence.
 ///
-/// Parents are held sorted and without repetition, so that a set of parents has
-/// exactly one byte spelling. Two spellings would both verify against a
-/// signature, which is not a property a provenance chain can afford.
+/// Both fields are private, because the canonical form is an invariant and not a
+/// convention: parents are held sorted and without repetition, and an operation
+/// is never its own parent. A public field would let a struct literal build a
+/// header that breaks all three, and two byte spellings of one frontier would
+/// both verify against a signature, which is not a property a provenance chain
+/// can afford. [`Header::new`] establishes the invariant and
+/// [`Header::from_dat`] refuses anything that arrives without it.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Header {
 	/// The operation's own name.
-	pub id:			OpId,
+	id:			OpId,
 	/// The author's frontier when the operation was written, ascending.
-	pub parents:	Vec<OpId>,
+	parents:	Vec<OpId>,
 }
 
 impl Header {
@@ -383,6 +530,17 @@ impl Header {
 	/// Constructs the header of a root operation, one written against nothing.
 	pub fn root(id: OpId) -> Self {
 		Self { id, parents: Vec::new() }
+	}
+
+	/// Returns the operation's own name.
+	pub const fn id(&self) -> OpId {
+		self.id
+	}
+
+	/// Returns the author's frontier when the operation was written, ascending
+	/// and without repetition.
+	pub fn parents(&self) -> &[OpId] {
+		&self.parents
 	}
 
 	/// Reports whether the operation was written against nothing, which is what
@@ -470,12 +628,12 @@ impl Record {
 
 	/// Returns the operation's name.
 	pub fn id(&self) -> OpId {
-		self.head.id
+		self.head.id()
 	}
 
 	/// Returns the author's frontier when the operation was written.
 	pub fn parents(&self) -> &[OpId] {
-		&self.head.parents
+		self.head.parents()
 	}
 
 	/// Serialises the record to a [`Dat`]. The shape is `[head, op]`.
@@ -677,23 +835,22 @@ mod tests {
 	/// One of every variant, including payloads that stress the encoding.
 	fn samples() -> Vec<Op> {
 		vec![
-			Op::FileCreate { path: fmt!("src/lib.rs") },
-			Op::FileDelete { path: fmt!("src/old.rs") },
+			Op::FileCreate { path: b"src/lib.rs".to_vec() },
+			Op::FileDelete { file: oid(1, 1) },
 			Op::FileRename {
-				from:	fmt!("a/b.txt"),
-				to:		fmt!("c/d.txt"),
+				file:	oid(2, 5),
+				path:	b"c/d.txt".to_vec(),
 			},
-			// An insertion at the start of a file.
+			// An insertion into an empty file, anchored after its origin anchor,
+			// which is what an empty file has instead of nothing.
 			Op::Splice {
-				file:	fmt!("notes.md"),
-				left:	None,
+				left:	Some(Anchor::origin(oid(1, 1))),
 				right:	None,
 				remove:	Vec::new(),
 				insert:	b"hello".to_vec(),
 			},
-			// A deletion, which places nothing and so has no origins.
+			// A deletion, which places nothing and so needs no origin.
 			Op::Splice {
-				file:	fmt!("notes.md"),
 				left:	None,
 				right:	None,
 				remove:	vec![range(1, 12, 17)],
@@ -702,7 +859,6 @@ mod tests {
 			// A replacement whose payload exceeds what a BU8 length can hold,
 			// killing several fragmented runs at once.
 			Op::Splice {
-				file:	fmt!("big.bin"),
 				left:	Some(Anchor::after(content(2, u64::MAX))),
 				right:	Some(Anchor::before(content(3, 0))),
 				remove:	vec![
@@ -711,43 +867,42 @@ mod tests {
 				],
 				insert:	vec![0xa5; 1000],
 			},
-			// Empty strings and non-ASCII paths.
-			Op::FileCreate { path: String::new() },
+			// An empty path, and a path that is not UTF-8 at all, which the old
+			// vocabulary could not spell.
+			Op::FileCreate { path: Vec::new() },
+			Op::FileCreate { path: vec![0xff, 0xfe, 0x2f, 0x00, 0x80] },
 			Op::Mark { name: fmt!("release-caf\u{e9}") },
 			// A move of one run into the middle of a file.
 			Op::Move {
-				file:	fmt!("src/lib.rs"),
 				src:	vec![range(1, 0, 40)],
 				left:	Some(Anchor::after(content(2, 3))),
 				right:	Some(Anchor::before(content(2, 4))),
 			},
 			// A move to the very start of a file, of a run fragmented by the
-			// edits it has already survived.
+			// edits it has already survived: the destination is the gap after
+			// that file's origin anchor.
 			Op::Move {
-				file:	fmt!("src/lib.rs"),
 				src:	vec![
 					range(1, 0, 4),
 					range(3, 7, 9),
 					range(1, 4, 40),
 				],
-				left:	None,
+				left:	Some(Anchor::origin(oid(9, 1))),
 				right:	Some(Anchor::before(content(1, 41))),
 			},
 			// A move to the end of a file, whose destination is bounded by
 			// nothing on the right.
 			Op::Move {
-				file:	String::new(),
 				src:	vec![range(u64::MAX, 0, u64::MAX)],
 				left:	Some(Anchor::after(content(7, u64::MAX))),
 				right:	None,
 			},
-			// A move of nothing, to nowhere in particular: the degenerate shape
+			// A move of nothing to somewhere in particular: the degenerate shape
 			// the codec still has to spell.
 			Op::Move {
-				file:	fmt!("empty"),
 				src:	Vec::new(),
 				left:	None,
-				right:	None,
+				right:	Some(Anchor::before(content(1, 0))),
 			},
 		]
 	}
@@ -790,13 +945,12 @@ mod tests {
 	}
 
 	/// A payload longer than 255 bytes keeps its full length, which a
-	/// `Dat::BU8` length field could not express.
+	/// `Dat::BU8` length field could not express. The same goes for a path.
 	#[test]
-	fn splice_payload_survives_beyond_a_byte_length() -> Outcome<()> {
+	fn payloads_survive_beyond_a_byte_length() -> Outcome<()> {
 		for len in [255usize, 256, 257, 4096, 70_000] {
 			let op = Op::Splice {
-				file:	fmt!("f"),
-				left:	None,
+				left:	Some(Anchor::origin(oid(1, 1))),
 				right:	None,
 				remove:	Vec::new(),
 				insert:	vec![0x5a; len],
@@ -806,6 +960,12 @@ mod tests {
 				Op::Splice { insert, .. } => assert_eq!(insert.len(), len),
 				other => return Err(err!(
 					"Expected a Splice, got {}.", other.name(); Test, Mismatch)),
+			}
+			let op = Op::FileCreate { path: vec![0x2f; len] };
+			match res!(Op::decode_all(&res!(op.encode()))) {
+				Op::FileCreate { path } => assert_eq!(path.len(), len),
+				other => return Err(err!(
+					"Expected a FileCreate, got {}.", other.name(); Test, Mismatch)),
 			}
 		}
 		Ok(())
@@ -852,31 +1012,121 @@ mod tests {
 		Ok(())
 	}
 
-	/// Only the two content operations name a file whose bytes they edit.
+	/// Only a rename and a delete name a file, and they name it by identity. A
+	/// content operation names content and nothing else, which is the whole of
+	/// what file identity changed here.
 	#[test]
-	fn only_content_operations_name_a_file() -> Outcome<()> {
+	fn only_a_lifecycle_change_names_a_file() -> Outcome<()> {
+		assert_eq!(Op::FileDelete { file: oid(3, 1) }.names_file(), Some(oid(3, 1)));
 		assert_eq!(
-			Op::Splice {
-				file:	fmt!("a.txt"),
-				left:	None,
-				right:	None,
-				remove:	Vec::new(),
-				insert:	b"x".to_vec(),
-			}.file(),
-			Some("a.txt"),
+			Op::FileRename { file: oid(3, 1), path: b"x".to_vec() }.names_file(),
+			Some(oid(3, 1)),
 		);
-		assert_eq!(
-			Op::Move {
-				file:	fmt!("b.txt"),
-				src:	Vec::new(),
-				left:	None,
-				right:	None,
-			}.file(),
-			Some("b.txt"),
-		);
-		assert_eq!(Op::FileCreate { path: fmt!("c.txt") }.file(), None);
-		assert_eq!(Op::FileDelete { path: fmt!("c.txt") }.file(), None);
-		assert_eq!(Op::Mark { name: fmt!("v1") }.file(), None);
+		assert_eq!(Op::FileCreate { path: b"c.txt".to_vec() }.names_file(), None,
+			"a file's creation is its identity, so it names nothing else");
+		assert_eq!(Op::Mark { name: fmt!("v1") }.names_file(), None);
+		assert_eq!(Op::Splice {
+			left:	Some(Anchor::origin(oid(1, 1))),
+			right:	None,
+			remove:	Vec::new(),
+			insert:	b"x".to_vec(),
+		}.names_file(), None);
+		assert_eq!(Op::Move {
+			src:	Vec::new(),
+			left:	Some(Anchor::origin(oid(1, 1))),
+			right:	None,
+		}.names_file(), None);
+		Ok(())
+	}
+
+	/// An operation that places bytes names at least one origin, and one that
+	/// places nothing need not.
+	#[test]
+	fn a_placement_names_where_it_lands() -> Outcome<()> {
+		// A splice inserting bytes with neither origin belongs to no file.
+		let stray = Op::Splice {
+			left:	None,
+			right:	None,
+			remove:	Vec::new(),
+			insert:	b"x".to_vec(),
+		};
+		assert!(stray.check_placement().is_err());
+		assert!(stray.validate().is_err());
+		// And the decoder refuses it rather than leaving it to a later stage.
+		assert!(Op::from_dat(&stray.to_dat()).is_err());
+		assert!(Op::decode_all(&res!(stray.encode())).is_err());
+		// Either origin alone satisfies the rule.
+		for (left, right) in [
+			(Some(Anchor::origin(oid(1, 1))), None),
+			(None, Some(Anchor::before(content(1, 0)))),
+		] {
+			let op = Op::Splice { left, right, remove: Vec::new(), insert: b"x".to_vec() };
+			res!(op.check_placement());
+			assert_eq!(op, res!(Op::from_dat(&op.to_dat())));
+		}
+		// A splice that only removes places nothing and needs no origin.
+		let del = Op::Splice {
+			left:	None,
+			right:	None,
+			remove:	vec![range(1, 0, 4)],
+			insert:	Vec::new(),
+		};
+		res!(del.validate());
+		assert_eq!(del, res!(Op::from_dat(&del.to_dat())));
+		// A move always places what it names, so it always names where.
+		let nowhere = Op::Move { src: vec![range(1, 0, 4)], left: None, right: None };
+		assert!(nowhere.check_placement().is_err());
+		assert!(Op::from_dat(&nowhere.to_dat()).is_err());
+		// Even a move of nothing, since the rule is about the operation and not
+		// about how much it happens to carry.
+		let empty = Op::Move { src: Vec::new(), left: None, right: None };
+		assert!(empty.check_placement().is_err());
+		Ok(())
+	}
+
+	/// The origins an operation carries and the content it names read back
+	/// whatever the variant, and a lifecycle change names neither.
+	#[test]
+	fn an_operation_reports_its_origins_and_its_content() -> Outcome<()> {
+		let mv = Op::Move {
+			src:	vec![range(1, 0, 4), range(2, 0, 6)],
+			left:	Some(Anchor::origin(oid(9, 1))),
+			right:	None,
+		};
+		assert_eq!(mv.origins(), (Some(Anchor::origin(oid(9, 1))), None));
+		assert_eq!(mv.regions().len(), 2);
+		assert_eq!(mv.placed_len(), 10);
+		assert!(mv.is_move());
+		let create = Op::FileCreate { path: b"f".to_vec() };
+		assert_eq!(create.origins(), (None, None));
+		assert!(create.regions().is_empty());
+		assert_eq!(create.placed_len(), 0);
+		assert!(!create.is_move());
+		Ok(())
+	}
+
+	/// An operation the structure cannot resolve is refused: an origin on the
+	/// wrong side, or a move naming one byte twice.
+	#[test]
+	fn validate_refuses_what_cannot_be_resolved() -> Outcome<()> {
+		let cid = content(1, 0);
+		assert!(Op::Splice {
+			left:	Some(Anchor::before(cid)),
+			right:	None,
+			remove:	Vec::new(),
+			insert:	b"x".to_vec(),
+		}.validate().is_err());
+		assert!(Op::Splice {
+			left:	None,
+			right:	Some(Anchor::after(cid)),
+			remove:	Vec::new(),
+			insert:	b"x".to_vec(),
+		}.validate().is_err());
+		assert!(Op::Move {
+			src:	vec![range(1, 0, 4), range(1, 2, 6)],
+			left:	Some(Anchor::origin(oid(9, 1))),
+			right:	None,
+		}.validate().is_err());
 		Ok(())
 	}
 
@@ -888,16 +1138,21 @@ mod tests {
 		assert!(Op::from_dat(&Dat::List(vec![Dat::U8(200), Dat::Str(fmt!("x"))])).is_err());
 		// Right code, wrong arity.
 		assert!(Op::from_dat(&Dat::List(vec![Dat::U8(CODE_FILE_RENAME)])).is_err());
-		// Right arity, wrong field kind.
+		// Right arity, wrong field kind: a path that is a string rather than
+		// bytes, which is exactly what the old vocabulary spelled.
 		assert!(Op::from_dat(&Dat::List(vec![
 			Dat::U8(CODE_FILE_CREATE),
-			Dat::U64(3),
+			Dat::Str(fmt!("src/lib.rs")),
+		])).is_err());
+		// A file named by something that is not an identifier.
+		assert!(Op::from_dat(&Dat::List(vec![
+			Dat::U8(CODE_FILE_DELETE),
+			Dat::Str(fmt!("src/lib.rs")),
 		])).is_err());
 		// A Splice whose payload is not a byte vector.
 		assert!(Op::from_dat(&Dat::List(vec![
 			Dat::U8(CODE_SPLICE),
-			Dat::Str(fmt!("f")),
-			Anchor::opt_to_dat(&None),
+			Anchor::opt_to_dat(&Some(Anchor::origin(oid(1, 1)))),
 			Anchor::opt_to_dat(&None),
 			Dat::List(vec![]),
 			Dat::Str(fmt!("not bytes")),
@@ -905,7 +1160,6 @@ mod tests {
 		// A Splice whose removed runs are not ranges.
 		assert!(Op::from_dat(&Dat::List(vec![
 			Dat::U8(CODE_SPLICE),
-			Dat::Str(fmt!("f")),
 			Anchor::opt_to_dat(&None),
 			Anchor::opt_to_dat(&None),
 			Dat::Str(fmt!("not ranges")),
@@ -914,15 +1168,13 @@ mod tests {
 		// A Move whose source is not a list of ranges.
 		assert!(Op::from_dat(&Dat::List(vec![
 			Dat::U8(CODE_MOVE),
-			Dat::Str(fmt!("f")),
 			Dat::Str(fmt!("not ranges")),
-			Anchor::opt_to_dat(&None),
+			Anchor::opt_to_dat(&Some(Anchor::origin(oid(1, 1)))),
 			Anchor::opt_to_dat(&None),
 		])).is_err());
 		// A Move whose anchor is bare rather than optional.
 		assert!(Op::from_dat(&Dat::List(vec![
 			Dat::U8(CODE_MOVE),
-			Dat::Str(fmt!("f")),
 			Dat::List(vec![range(1, 0, 2).to_dat()]),
 			Anchor::after(content(1, 0)).to_dat(),
 			Anchor::opt_to_dat(&None),
@@ -938,7 +1190,6 @@ mod tests {
 			.map(|i| range(i % 7 + 1, i, i + 5))
 			.collect();
 		let op = Op::Move {
-			file:	fmt!("src/seq.rs"),
 			src:	src.clone(),
 			left:	Some(Anchor::after(content(1, 9))),
 			right:	None,
@@ -962,17 +1213,16 @@ mod tests {
 	fn move_anchors_keep_their_side() -> Outcome<()> {
 		let cid = content(2, 11);
 		for (left, right) in [
-			(None, None),
 			(Some(Anchor::after(cid)), None),
 			(None, Some(Anchor::before(cid))),
 			(Some(Anchor::after(cid)), Some(Anchor::before(cid))),
 			// The sides the sequence structure refuses are still spelled
 			// faithfully; refusing them is the structure's business, not the
-			// codec's.
+			// codec's. What the codec does refuse is an operation carrying no
+			// origin at all, which belongs to no file.
 			(Some(Anchor::before(cid)), Some(Anchor::after(cid))),
 		] {
 			let op = Op::Move {
-				file:	fmt!("f"),
 				src:	vec![range(1, 0, 3)],
 				left,
 				right,
@@ -981,7 +1231,6 @@ mod tests {
 			assert_eq!(op, res!(Op::from_dat(&op.to_dat())));
 			// A splice carrying the same origins spells them the same way.
 			let sp = Op::Splice {
-				file:	fmt!("f"),
 				left,
 				right,
 				remove:	vec![range(1, 0, 3)],
@@ -1004,11 +1253,10 @@ mod tests {
 		assert_eq!(got, want);
 		// An operation differing in one field hashes differently.
 		let other = Op::Splice {
-			file:	fmt!("notes.md"),
 			left:	None,
 			right:	None,
 			remove:	vec![range(1, 12, 16)],
-			insert:	b"abc".to_vec(),
+			insert:	Vec::new(),
 		};
 		assert!(res!(other.hash((), [0u8; 0])).as_vec() != want);
 		Ok(())
@@ -1017,11 +1265,10 @@ mod tests {
 	/// The operation used by the hashing test.
 	fn sample_op_for_hashing() -> Op {
 		Op::Splice {
-			file:	fmt!("notes.md"),
 			left:	None,
 			right:	None,
 			remove:	vec![range(1, 12, 15)],
-			insert:	b"abc".to_vec(),
+			insert:	Vec::new(),
 		}
 	}
 
@@ -1029,7 +1276,6 @@ mod tests {
 	#[test]
 	fn op_decode_rejects_truncation() -> Outcome<()> {
 		let op = Op::Splice {
-			file:	fmt!("notes.md"),
 			left:	Some(Anchor::after(content(1, 0))),
 			right:	None,
 			remove:	vec![range(1, 1, 3)],
@@ -1055,13 +1301,15 @@ mod tests {
 	}
 
 	/// Parents are sorted and deduplicated on construction, so the same frontier
-	/// given in any order has one encoding.
+	/// given in any order has one encoding, and nothing outside the module can
+	/// build a header that says otherwise.
 	#[test]
 	fn parents_are_canonical() -> Outcome<()> {
 		let a = res!(Header::new(oid(9, 1), vec![oid(1, 2), oid(3, 1), oid(1, 2)]));
 		let b = res!(Header::new(oid(9, 1), vec![oid(3, 1), oid(1, 2)]));
 		assert_eq!(a, b);
-		assert_eq!(a.parents, vec![oid(1, 2), oid(3, 1)]);
+		assert_eq!(a.parents(), &[oid(1, 2), oid(3, 1)]);
+		assert_eq!(a.id(), oid(9, 1));
 		assert_eq!(res!(a.to_dat().to_bytes(Vec::new())), res!(b.to_dat().to_bytes(Vec::new())));
 		// The decoder refuses the non-canonical spellings the constructor fixes.
 		let unsorted = Dat::List(vec![
@@ -1094,7 +1342,7 @@ mod tests {
 	fn a_root_header_has_no_parents() -> Outcome<()> {
 		let head = Header::root(oid(1, 1));
 		assert!(head.is_root());
-		assert!(head.parents.is_empty());
+		assert!(head.parents().is_empty());
 		assert!(!res!(Header::new(oid(1, 2), vec![oid(1, 1)])).is_root());
 		Ok(())
 	}
@@ -1134,8 +1382,7 @@ mod tests {
 		let rec = Record::new(
 			res!(Header::new(oid(2, 3), vec![oid(1, 1), oid(1, 2)])),
 			Op::Splice {
-				file:	fmt!("f"),
-				left:	None,
+				left:	Some(Anchor::origin(oid(1, 1))),
 				right:	None,
 				remove:	Vec::new(),
 				insert:	b"abcdef".to_vec(),

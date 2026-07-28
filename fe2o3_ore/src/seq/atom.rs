@@ -5,19 +5,36 @@
 //! operation `a` is named `a+k` for as long as the history lasts, in every file,
 //! before and after any number of moves, which is the property the whole
 //! structure is built on.
+//!
+//! # Origin anchors
+//!
+//! A file's creation mints an atom too: one byte, [`ORIGIN`], born dead. It never
+//! renders, because [`crate::seq::claim::Dead`] buries it the moment it is made,
+//! and no frontend can name it, because nothing dead appears in a render. What it
+//! is for is that an empty file then has a byte in it, so a splice into an empty
+//! file anchors after a byte like every other splice, and every operation without
+//! exception is placed by the content it names rather than by a file it asserts.
 
 use crate::id::{
 	ContentRange,
 	OpId,
 };
-use crate::seq::Edit;
+use crate::op::Op;
 
 use oxedyne_fe2o3_core::prelude::*;
 
 use std::collections::BTreeMap;
 
 
-/// Every atom an operation set creates, keyed by the splice that created it.
+/// The byte a file's origin anchor holds.
+///
+/// It is born dead and never renders, so its value is arbitrary and nothing
+/// reads it; it is here so that the atom has a length of one and the offset zero
+/// names something.
+pub const ORIGIN: u8 = 0;
+
+
+/// Every atom an operation set creates, keyed by the operation that created it.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Atoms {
 	/// Inserted bytes, by creating operation.
@@ -34,22 +51,23 @@ impl Atoms {
 	/// Collects the atoms an operation set creates.
 	///
 	/// A splice inserting nothing creates no atom, so no identifier is spent on
-	/// a pure deletion.
-	pub fn build(ops: &[(OpId, &Edit)])
+	/// a pure deletion. A file's creation always creates one, of a single
+	/// [`ORIGIN`] byte, which is that file's origin anchor.
+	pub fn build(ops: &[(OpId, &Op)])
 		-> Outcome<Self>
 	{
 		let mut map: BTreeMap<OpId, Vec<u8>> = BTreeMap::new();
 		for (id, op) in ops {
-			if let Edit::Splice { insert, .. } = op {
-				if insert.is_empty() {
-					continue;
-				}
-				if map.insert(*id, insert.clone()).is_some() {
-					return Err(err!(
-						"Two operations were given the identity {}; an operation \
-						identity names exactly one atom.", id;
-					Invalid, Input, Duplicate));
-				}
+			let made = match op {
+				Op::FileCreate { .. }				=> vec![ORIGIN],
+				Op::Splice { insert, .. } if !insert.is_empty()	=> insert.clone(),
+				_						=> continue,
+			};
+			if map.insert(*id, made).is_some() {
+				return Err(err!(
+					"Two operations were given the identity {}; an operation \
+					identity names exactly one atom.", id;
+				Invalid, Input, Duplicate));
 			}
 		}
 		Ok(Self { map })

@@ -1,4 +1,4 @@
-//! A convergent ordered sequence in which a move is recorded as a move.
+//! A convergent repository in which a move is recorded as a move.
 //!
 //! Bytes take their identity from the splice that created them and never lose
 //! it. Position is a separate, derived layer: an ordered set of slots, each
@@ -10,6 +10,20 @@
 //! origin names a byte, and that byte's owning slot is wherever it currently
 //! lives, the insertion follows the move without anything being written to make
 //! it do so.
+//!
+//! # A file is a subtree
+//!
+//! There is one forest for the whole repository, and its root children are the
+//! files' **origin anchors**: one byte per file, born dead, minted by the
+//! [`Op::FileCreate`] whose identity is the file's identity. A file is the
+//! subtree beneath one of them, so a slot's file is read off the tree rather
+//! than off the record, and no operation carries a file at all.
+//!
+//! Two consequences are the point of the arrangement. A move between files needs
+//! no routing, because its destination anchor already names content in the file
+//! it lands in; and an edit made concurrently inside a range that moves between
+//! files follows it, for exactly the reason it follows an in-file move -- its
+//! anchor never mentioned a file either.
 //!
 //! # What it guarantees, and what it does not
 //!
@@ -24,7 +38,13 @@
 //!   what either author meant. It is flagged.
 //! - Two moves whose destinations sit inside each other's sources form a cycle,
 //!   and one of them lands where its anchor content was originally written
-//!   rather than where it now lives. It is flagged.
+//!   rather than where it now lives. It is flagged. **Where the cycle runs
+//!   between two files, the demoted move lands in the other file and the file it
+//!   left is emptied**; that outcome is deterministic, loses nothing, and reads
+//!   badly, so [`Flag::CrossedFile`] says so in those terms. A rule that confines
+//!   a cross-file cycle instead is design work owed.
+//! - Content moved into a file that has been deleted renders nowhere a reader
+//!   looks. Nothing is lost and [`Flag::MovedIntoDeleted`] says so.
 //!
 //! The posture is to converge always and to say what happened always. Every
 //! [`render::Flag`] is a function of the operation set, so a flag is a fact
@@ -41,13 +61,20 @@
 //!
 //! # Preconditions
 //!
-//! Rendering requires a **causally complete** operation set, and that is now
-//! checked against the operations' own parents rather than inferred from what
-//! they happen to name. Every parent must be present, and so must every atom
-//! whose content an anchor or a range names. An anchor naming an atom that has
-//! not arrived cannot be resolved, and rather than guess, the render fails and
-//! says which operation named what. [`crate::log::OpLog`] supplies a closed set
-//! by construction; a caller assembling operations by hand must arrange it.
+//! Rendering requires a **causally complete** operation set, and that is checked
+//! against the operations' own parents rather than inferred from what they happen
+//! to name. Every parent must be present, and so must every atom whose content an
+//! anchor or a range names, the origin anchors of the files included. An anchor
+//! naming an atom that has not arrived cannot be resolved, and rather than guess,
+//! the render fails and says which operation named what. [`crate::log::OpLog`]
+//! supplies a closed set by construction; a caller assembling operations by hand
+//! must arrange it.
+//!
+//! Rendering also lays out the whole repository, because ordering is
+//! repository-wide. Laying out only the closure of one file's origin anchor under
+//! the claim register would suffice and would usually be the file's own
+//! operations; that is design work owed, and until it is done, opening one file
+//! costs the repository.
 //!
 //! # Op order
 //!
@@ -65,13 +92,13 @@ pub mod render;
 pub mod slot;
 
 #[cfg(test)]
+mod file_tests;
+#[cfg(test)]
 mod tests;
 
 use crate::id::{
-	Anchor,
 	ContentRange,
 	OpId,
-	Side,
 };
 use crate::log::Causality;
 use crate::op::{
@@ -87,10 +114,14 @@ use crate::seq::claim::{
 use crate::seq::render::{
 	Flag,
 	Rendered,
+	Repo,
 	Run,
 	Stats,
 };
-use crate::seq::slot::Slots;
+use crate::seq::slot::{
+	Origin,
+	Slots,
+};
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_data::interval::IntervalMap;
@@ -123,211 +154,35 @@ impl OpOrder {
 }
 
 
-/// An operation in the form the sequence structure consumes: content-anchored,
-/// so that nothing in it names a position.
-///
-/// A splice inserts bytes and kills runs; a move reclaims runs somewhere else.
-/// Neither carries a numeric offset, a line number or a position identifier that
-/// a concurrent move could invalidate, and that single property is what the rest
-/// of the module is built on.
-///
-/// This is [`Op`] with the file and the header taken off: what is left is
-/// exactly what decides where bytes go. The identity and the parents are not
-/// part of it, because the same edit written by two authors is two operations,
-/// so the [`Header`] is passed alongside to [`Sequence::apply`].
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Edit {
-	/// Inserts bytes at a gap, and kills runs of existing content.
-	///
-	/// Either half may be empty: an insertion removes nothing, a deletion
-	/// inserts nothing, and a replacement does both in one operation.
-	Splice {
-		/// Left origin of the inserted bytes; `None` is the start of the file.
-		left:	Option<Anchor>,
-		/// Right origin of the inserted bytes; `None` is the end of the file.
-		right:	Option<Anchor>,
-		/// What dies.
-		remove:	Vec<ContentRange>,
-		/// What is inserted.
-		insert:	Vec<u8>,
-	},
-	/// Reclaims runs of existing content at a new position, in the order given.
-	Move {
-		/// What moves.
-		src:	Vec<ContentRange>,
-		/// Left origin of the destination; `None` is the start of the file.
-		left:	Option<Anchor>,
-		/// Right origin of the destination; `None` is the end of the file.
-		right:	Option<Anchor>,
-	},
-}
-
-impl Edit {
-
-	/// Returns the operation's two origins.
-	pub fn origins(&self) -> (Option<Anchor>, Option<Anchor>) {
-		match self {
-			Self::Splice { left, right, .. }	=> (*left, *right),
-			Self::Move { left, right, .. }		=> (*left, *right),
-		}
-	}
-
-	/// Returns the content the operation names: what a splice removes, or what a
-	/// move takes with it.
-	pub fn regions(&self) -> &[ContentRange] {
-		match self {
-			Self::Splice { remove, .. }	=> remove,
-			Self::Move { src, .. }		=> src,
-		}
-	}
-
-	/// Reports whether the operation is a move.
-	pub fn is_move(&self) -> bool {
-		matches!(self, Self::Move { .. })
-	}
-
-	/// Returns the variant name, for messages.
-	pub fn name(&self) -> &'static str {
-		match self {
-			Self::Splice { .. }	=> "Splice",
-			Self::Move { .. }	=> "Move",
-		}
-	}
-
-	/// Returns the total number of bytes the operation places, which is what a
-	/// splice inserts or what a move brings with it.
-	pub fn placed_len(&self) -> u64 {
-		match self {
-			Self::Splice { insert, .. }	=> insert.len() as u64,
-			Self::Move { src, .. }		=> src.iter().map(|r| r.len()).sum(),
-		}
-	}
-
-	/// Checks the operation is one the structure can resolve.
-	///
-	/// A left origin binds after a byte and a right origin before one; a move
-	/// may not name the same byte twice, since a byte has exactly one owning
-	/// slot and could not otherwise be shown once.
-	pub fn validate(&self)
-		-> Outcome<()>
-	{
-		let (left, right) = self.origins();
-		if let Some(a) = left {
-			if a.side != Side::After {
-				return Err(err!(
-					"An {} names {} as its left origin; a left origin binds after \
-					a byte, not before it.", self.name(), a;
-				Invalid, Input));
-			}
-		}
-		if let Some(a) = right {
-			if a.side != Side::Before {
-				return Err(err!(
-					"An {} names {} as its right origin; a right origin binds \
-					before a byte, not after it.", self.name(), a;
-				Invalid, Input));
-			}
-		}
-		if let Self::Move { src, .. } = self {
-			// Sorted by creating operation and then by offset, any overlap at all
-			// shows up between neighbours.
-			let mut spans: Vec<&ContentRange> = src.iter()
-				.filter(|r| !r.is_empty())
-				.collect();
-			spans.sort_by_key(|r| (r.op(), r.from()));
-			for pair in spans.windows(2) {
-				if pair[0].intersects(pair[1]) {
-					return Err(err!(
-						"A Move names {} and {}, which overlap; one byte cannot be \
-						moved to two places by one operation.", pair[0], pair[1];
-					Invalid, Input, Conflict));
-				}
-			}
-		}
-		Ok(())
-	}
-
-	/// Reads an operation out of the durable vocabulary.
-	///
-	/// Both content operations cross unchanged, because both are anchored in
-	/// content: this is a rename of the fields and nothing more. There is no
-	/// translation step and no version to translate against, which is the point
-	/// -- a positional splice would have needed to know what its author was
-	/// looking at, and no such splice exists any more.
-	///
-	/// `None` is returned for an operation that says nothing about the order of
-	/// bytes: a file created, deleted or renamed, or a mark. Those are history,
-	/// and the log keeps them, but a sequence has no use for them.
-	///
-	/// The file an operation names is dropped here. A [`Sequence`] is one file's
-	/// worth of operations and does not carry a path, so partitioning by
-	/// [`Op::file`] is the caller's job.
-	pub fn from_op(op: &Op)
-		-> Option<Self>
-	{
-		match op {
-			Op::Splice { left, right, remove, insert, .. } => Some(Self::Splice {
-				left:	*left,
-				right:	*right,
-				remove:	remove.clone(),
-				insert:	insert.clone(),
-			}),
-			Op::Move { src, left, right, .. } => Some(Self::Move {
-				src:	src.clone(),
-				left:	*left,
-				right:	*right,
-			}),
-			Op::FileCreate { .. }	|
-			Op::FileDelete { .. }	|
-			Op::FileRename { .. }	|
-			Op::Mark { .. }			=> None,
-		}
-	}
-
-	/// Writes an operation back into the durable vocabulary, against the file it
-	/// edits.
-	///
-	/// The exact inverse of [`Edit::from_op`], which takes the file off on the
-	/// way in: `Edit::from_op(&edit.clone().into_op(file))` is `Some(edit)` for
-	/// every operation and every path. A frontend that authored through
-	/// [`Rendered::splice`] or [`Rendered::move_range`] has an [`Edit`] and wants
-	/// a [`Record`], and putting the path back on is the whole of the difference.
-	pub fn into_op(self, file: String) -> Op {
-		match self {
-			Self::Splice { left, right, remove, insert } => Op::Splice {
-				file,
-				left,
-				right,
-				remove,
-				insert,
-			},
-			Self::Move { src, left, right } => Op::Move {
-				file,
-				src,
-				left,
-				right,
-			},
-		}
-	}
-}
-
-
 /// An operation as the sequence holds it: what it says, and what its author had
 /// seen when they said it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Applied {
 	/// The author's frontier when the operation was written.
 	parents:	Vec<OpId>,
-	/// What the operation says about the order of bytes.
-	edit:		Edit,
+	/// What the operation says.
+	op:			Op,
 }
 
 
-/// A file's worth of operations, and the sequence they describe.
+/// What the lifecycle operations say about one file.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FileInfo {
+	/// Where the file sits, after every rename the set holds.
+	path:	Vec<u8>,
+	/// Whether it still exists.
+	live:	bool,
+}
+
+
+/// A repository's worth of operations, and the state they describe.
 ///
 /// The state is the operation set and nothing else, so applying an operation is
-/// idempotent, commutative and cheap, and the sequence itself is computed by
-/// [`Sequence::render`] when it is wanted.
+/// idempotent, commutative and cheap, and the files themselves are computed by
+/// [`Sequence::render`] when they are wanted. There is one sequence per
+/// repository rather than one per file: a file is a subtree of the forest the
+/// render lays out, and which subtree a slot is in is not knowable until the
+/// forest is laid out.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Sequence {
 	/// The operations, by identity.
@@ -336,16 +191,16 @@ pub struct Sequence {
 
 impl Sequence {
 
-	/// Constructs an empty sequence.
+	/// Constructs an empty repository.
 	pub fn new() -> Self {
 		Self { ops: BTreeMap::new() }
 	}
 
-	/// Builds a sequence from an operation set, in any order.
+	/// Builds a repository from an operation set, in any order.
 	pub fn build<I>(ops: I)
 		-> Outcome<Self>
 	where
-		I: IntoIterator<Item = (Header, Edit)>,
+		I: IntoIterator<Item = (Header, Op)>,
 	{
 		let mut seq = Self::new();
 		for (head, op) in ops {
@@ -361,42 +216,40 @@ impl Sequence {
 	/// one operation, and a structure that quietly kept the first would converge
 	/// on whichever replica saw which. Two headers differing only in their
 	/// parents are two different operations for the same reason.
-	pub fn apply(&mut self, head: Header, op: Edit)
+	pub fn apply(&mut self, head: Header, op: Op)
 		-> Outcome<()>
 	{
 		res!(op.validate());
-		let applied = Applied { parents: head.parents, edit: op };
-		match self.ops.get(&head.id) {
+		let id = head.id();
+		let applied = Applied { parents: head.parents().to_vec(), op };
+		match self.ops.get(&id) {
 			Some(seen) if *seen != applied => Err(err!(
 				"The identity {} already names a different {}; an operation \
-				identity names one operation.", head.id, seen.edit.name();
+				identity names one operation.", id, seen.op.name();
 			Invalid, Input, Conflict)),
 			Some(_)	=> Ok(()),
 			None	=> {
-				self.ops.insert(head.id, applied);
+				self.ops.insert(id, applied);
 				Ok(())
 			},
 		}
 	}
 
-	/// Takes every operation of another sequence, and returns how many of them
+	/// Takes every operation of another repository, and returns how many of them
 	/// were new.
 	///
-	/// This is what a merge of one file's history is. The state is the operation
-	/// set and nothing else, so two branches meet by taking the union of their
-	/// sets, and the render of the union is the convergent merge -- which is a
-	/// fact about the two sets and not about which branch absorbed which.
+	/// This is what a merge is. The state is the operation set and nothing else,
+	/// so two branches meet by taking the union of their sets, and the render of
+	/// the union is the convergent merge -- which is a fact about the two sets and
+	/// not about which branch absorbed which.
 	///
-	/// Nothing is asked of the two sets causally. A branch's operations name
-	/// parents in the repository's history rather than in the file's, so a
-	/// sequence is routinely not closed within itself; closure is checked where
-	/// it matters, at [`Sequence::render_with`], against the graph the caller
-	/// holds.
+	/// Nothing is asked of the two sets causally. Closure is checked where it
+	/// matters, at [`Sequence::render_with`], against the graph the caller holds.
 	///
-	/// An identity naming a different operation in each sequence is refused, for
-	/// the reason [`Sequence::apply`] refuses it, and nothing at all is taken:
-	/// the two sets are not two versions of one history and no part of the merge
-	/// is worth keeping.
+	/// An identity naming a different operation in each set is refused, for the
+	/// reason [`Sequence::apply`] refuses it, and nothing at all is taken: the two
+	/// sets are not two versions of one history and no part of the merge is worth
+	/// keeping.
 	pub fn absorb(&mut self, other: &Self)
 		-> Outcome<usize>
 	{
@@ -404,9 +257,9 @@ impl Sequence {
 		for (id, applied) in &other.ops {
 			match self.ops.get(id) {
 				Some(seen) if seen != applied => return Err(err!(
-					"The identity {} names a {} in one sequence and a {} in the other; \
-					an operation identity names one operation, so the two are not \
-					branches of one history.", id, seen.edit.name(), applied.edit.name();
+					"The identity {} names a {} in one repository and a {} in the \
+					other; an operation identity names one operation, so the two are \
+					not branches of one history.", id, seen.op.name(), applied.op.name();
 				Invalid, Input, Conflict)),
 				Some(_)	=> (),
 				None	=> fresh.push((*id, applied)),
@@ -419,22 +272,18 @@ impl Sequence {
 		Ok(n)
 	}
 
-	/// Applies a durable record, if it carries anything the sequence can use.
+	/// Applies a durable record.
 	///
-	/// Returns whether the record said something about the order of bytes. This
-	/// is the whole of the bridge between the log and the structure: a caller
-	/// walks a causally ordered log, hands every record to the sequence for the
-	/// file it names, and the sequence takes what belongs to it.
+	/// Everything the log holds belongs here, because the repository is what the
+	/// structure now models: a file's creation mints its origin anchor, a rename
+	/// changes its path, a deletion retires it, and the two content operations
+	/// place bytes. Only a mark says nothing about any of it, and it is kept
+	/// anyway so that the causal graph the render is judged by is not full of
+	/// holes.
 	pub fn apply_record(&mut self, rec: &Record)
-		-> Outcome<bool>
+		-> Outcome<()>
 	{
-		match Edit::from_op(&rec.op) {
-			Some(edit) => {
-				res!(self.apply(rec.head.clone(), edit));
-				Ok(true)
-			},
-			None => Ok(false),
-		}
+		self.apply(rec.head.clone(), rec.op.clone())
 	}
 
 	/// Returns the number of operations applied.
@@ -454,9 +303,9 @@ impl Sequence {
 
 	/// Returns the operation of that identity, if it has been applied.
 	pub fn get(&self, id: &OpId)
-		-> Option<&Edit>
+		-> Option<&Op>
 	{
-		self.ops.get(id).map(|a| &a.edit)
+		self.ops.get(id).map(|a| &a.op)
 	}
 
 	/// Returns the parents of an operation that has been applied.
@@ -468,9 +317,9 @@ impl Sequence {
 
 	/// Iterates the operations, in ascending order of identity.
 	pub fn iter(&self)
-		-> impl Iterator<Item = (&OpId, &Edit)>
+		-> impl Iterator<Item = (&OpId, &Op)>
 	{
-		self.ops.iter().map(|(id, a)| (id, &a.edit))
+		self.ops.iter().map(|(id, a)| (id, &a.op))
 	}
 
 	/// Returns the causal graph over the operations applied.
@@ -482,63 +331,112 @@ impl Sequence {
 
 	/// Returns the operations in op order, which is the order every stage of the
 	/// render reads them in.
-	fn in_op_order(&self) -> Vec<(OpId, &Edit)> {
-		let mut ops: Vec<(OpId, &Edit)> = self.ops.iter()
-			.map(|(id, a)| (*id, &a.edit))
+	fn in_op_order(&self) -> Vec<(OpId, &Op)> {
+		let mut ops: Vec<(OpId, &Op)> = self.ops.iter()
+			.map(|(id, a)| (*id, &a.op))
 			.collect();
 		ops.sort_by_key(|(id, _)| OpOrder::of(id));
 		ops
 	}
 
-	/// Renders the file, judging causality by the operations the sequence itself
-	/// holds.
+	/// Renders the repository, judging causality by the operations it holds.
 	///
-	/// This is right where the sequence holds the whole history, which is to say
-	/// a repository of one file. Where it holds one file of several, the parents
-	/// of its operations name operations in the other files, and the graph to
-	/// judge by is the repository's; use [`Sequence::render_with`] and give it
-	/// one, from [`crate::log::OpLog::causality`] or from wherever else the whole
-	/// history is held.
+	/// This is the ordinary path, the sequence being the whole history. Where a
+	/// caller holds the graph elsewhere -- a log covering more than this set --
+	/// use [`Sequence::render_with`].
 	pub fn render(&self)
-		-> Outcome<Rendered>
+		-> Outcome<Repo>
 	{
 		self.render_with(&self.causality())
 	}
 
-	/// Renders the file against a causal graph the caller holds.
+	/// Renders the repository against a causal graph the caller holds.
 	///
 	/// Fails if the graph is not causally closed, if it does not hold every
-	/// operation the sequence does, or if the operation set names content it does
-	/// not hold. Under a debug build the render is checked for conservation
-	/// before it is returned; see [`Sequence::check_conservation`].
+	/// operation the sequence does, or if the operation set names content or a
+	/// file it does not hold. Under a debug build the render is checked for
+	/// conservation before it is returned; see [`Sequence::check_conservation`].
 	pub fn render_with(&self, cause: &Causality<'_>)
-		-> Outcome<Rendered>
+		-> Outcome<Repo>
 	{
 		let ops = self.in_op_order();
 		res!(self.check_described(cause));
 		res!(Self::check_parents(cause));
 		let atoms = res!(Atoms::build(&ops));
 		res!(Self::check_complete(&ops, &atoms));
+		let files = res!(Self::files(&ops));
 		let dead = res!(Dead::build(&ops));
 		let claims = res!(Claims::build(&ops));
 		let slots = res!(Slots::place(&ops));
 		let order = res!(slots.order(&claims));
 		let walk = res!(render::traverse(&slots, &order, &claims, &dead, &atoms));
 
+		// The association a wire field would have asserted, derived instead.
+		let mut index: BTreeMap<OpId, OpId> = BTreeMap::new();
+		for (i, slot) in slots.all().iter().enumerate() {
+			if let Some(f) = walk.owner[i] {
+				index.insert(slot.place, f);
+			}
+		}
+
 		let mut flags: Vec<Flag> = Vec::new();
 		for (op, sub, origin) in &order.demoted {
 			flags.push(Flag::Demoted { op: *op, sub: *sub, origin: *origin });
+			if let Some(f) = Self::crossed_file(
+				&slots, &claims, &walk.owner, *op, *sub, *origin)
+			{
+				flags.push(f);
+			}
 		}
 		for (op, sub, origin) in &order.dropped {
 			flags.push(Flag::Dropped { op: *op, sub: *sub, origin: *origin });
 		}
-		flags.extend(res!(Self::torn(&ops, &claims)));
+		for (op, sub) in &walk.orphans {
+			flags.push(Flag::Orphaned { op: *op, sub: *sub });
+		}
+		for (id, op) in &ops {
+			if !op.is_move() {
+				continue;
+			}
+			if let Some(f) = index.get(id) {
+				if !files.get(f).map(|i| i.live).unwrap_or(false) {
+					flags.push(Flag::MovedIntoDeleted { op: *id, file: *f });
+				}
+			}
+		}
+		flags.extend(res!(Self::torn(&ops, &claims, cause)));
 		flags.extend(res!(Self::overlaps(&ops, cause)));
 		flags.sort();
 		flags.dedup();
 
+		// Each file keeps the flags that concern it, and the repository keeps all
+		// of them; a flag naming an operation that reached no file is the
+		// repository's alone.
+		let mut per_file: BTreeMap<OpId, Vec<Flag>> = BTreeMap::new();
+		for flag in &flags {
+			for f in Self::flag_files(flag, &index) {
+				per_file.entry(f).or_default().push(flag.clone());
+			}
+		}
+
+		let mut walk_files = walk.files;
+		let mut out: Vec<Rendered> = Vec::new();
+		let mut rendered = 0u64;
+		let mut withheld = 0u64;
+		for (id, info) in &files {
+			let (bytes, runs) = walk_files.remove(id).unwrap_or_default();
+			rendered += bytes.len() as u64;
+			if !info.live {
+				withheld += bytes.len() as u64;
+			}
+			let mut flags = per_file.remove(id).unwrap_or_default();
+			flags.dedup();
+			out.push(Rendered::new(*id, info.path.clone(), info.live, bytes, runs, flags));
+		}
+
 		let stats = Stats {
 			ops:				ops.len(),
+			files:				files.len(),
 			atoms:				atoms.count(),
 			atom_bytes:			atoms.total(),
 			slots_placed:		slots.placed(),
@@ -546,29 +444,133 @@ impl Sequence {
 			claim_intervals:	claims.intervals(),
 			dead_intervals:		dead.intervals(),
 			max_depth:			walk.max_depth,
-			rendered:			walk.bytes.len() as u64,
+			rendered,
+			withheld,
+			orphaned:			walk.orphaned,
 		};
-		let rendered = Rendered::new(walk.bytes, walk.runs, flags, stats);
+		let repo = Repo::new(out, flags, index, stats);
 		if cfg!(debug_assertions) {
-			res!(Self::conserved(&rendered, &atoms, &dead));
+			res!(Self::conserved(&repo, &atoms, &dead));
 		}
-		Ok(rendered)
+		Ok(repo)
 	}
 
 	/// Checks that the render accounts for every byte the operation set created:
-	/// each is either rendered exactly once or dead.
+	/// each is either rendered exactly once, somewhere in the repository, or
+	/// dead, or owned by a slot that reached no file at all.
 	///
-	/// This is the property that catches a structural mistake the eye cannot,
-	/// because a slot detached from the tree renders nothing and says nothing.
-	/// The render runs it under a debug build; a caller wanting it in a release
-	/// build calls it.
-	pub fn check_conservation(&self, rendered: &Rendered)
+	/// The check is repository-wide because that is where it bites. A byte
+	/// rendered in two files at once is what a claim register scoped to one file
+	/// produces, and no per-file check would see it: each file would agree with
+	/// itself while the same bytes appeared in both. The render runs this under a
+	/// debug build; a caller wanting it in a release build calls it.
+	pub fn check_conservation(&self, repo: &Repo)
 		-> Outcome<()>
 	{
 		let ops = self.in_op_order();
 		let atoms = res!(Atoms::build(&ops));
 		let dead = res!(Dead::build(&ops));
-		Self::conserved(rendered, &atoms, &dead)
+		Self::conserved(repo, &atoms, &dead)
+	}
+
+	/// Collects what the lifecycle operations say about each file, in op order.
+	fn files(ops: &[(OpId, &Op)])
+		-> Outcome<BTreeMap<OpId, FileInfo>>
+	{
+		let mut files: BTreeMap<OpId, FileInfo> = BTreeMap::new();
+		for (id, op) in ops {
+			match op {
+				Op::FileCreate { path } => {
+					files.insert(*id, FileInfo { path: path.clone(), live: true });
+				},
+				Op::FileRename { file, path } => {
+					match files.get_mut(file) {
+						Some(info)	=> info.path = path.clone(),
+						None		=> return Err(err!(
+							"The operation {} renames the file {}, which no operation \
+							in the set created; the set is not causally complete.",
+							id, file;
+						Invalid, Input, Missing)),
+					}
+				},
+				Op::FileDelete { file } => {
+					match files.get_mut(file) {
+						Some(info)	=> info.live = false,
+						None		=> return Err(err!(
+							"The operation {} deletes the file {}, which no operation \
+							in the set created; the set is not causally complete.",
+							id, file;
+						Invalid, Input, Missing)),
+					}
+				},
+				_ => (),
+			}
+		}
+		Ok(files)
+	}
+
+	/// Raises a cross-file flag where a cycle demotion put a placement in a
+	/// different file from the one its anchor content lives in.
+	fn crossed_file(
+		slots:	&Slots,
+		claims:	&Claims,
+		owner:	&[Option<OpId>],
+		op:		OpId,
+		sub:	u64,
+		origin:	Origin,
+	)
+		-> Option<Flag>
+	{
+		let i = match slots.find(&op, sub) {
+			Some(i)	=> i,
+			None	=> return None,
+		};
+		let slot = match slots.get(i) {
+			Ok(s)	=> s,
+			Err(_)	=> return None,
+		};
+		let anchor = match origin {
+			Origin::Left	=> slot.left,
+			Origin::Right	=> slot.right,
+		}?;
+		// Where the anchored content lives now, which is where the placement
+		// would have gone had the cycle not forced it elsewhere.
+		let target = slots.owner_slot(&anchor.content, claims, false).ok()?;
+		let from = (*owner.get(target)?)?;
+		let to = (*owner.get(i)?)?;
+		if from == to {
+			return None;
+		}
+		Some(Flag::CrossedFile { op, sub, origin, from, to })
+	}
+
+	/// Returns the files a flag concerns, so that each file keeps its own.
+	fn flag_files(flag: &Flag, index: &BTreeMap<OpId, OpId>) -> Vec<OpId> {
+		let mut out: Vec<OpId> = Vec::new();
+		match flag {
+			Flag::Overlap { ops, .. } => {
+				for id in ops {
+					if let Some(f) = index.get(id) {
+						out.push(*f);
+					}
+				}
+			},
+			Flag::CrossedFile { from, to, .. } => {
+				out.push(*from);
+				out.push(*to);
+			},
+			Flag::MovedIntoDeleted { file, .. } => out.push(*file),
+			other => {
+				if let Some(id) = other.op() {
+					if let Some(f) = index.get(&id) {
+						out.push(*f);
+					}
+				}
+			},
+		}
+		out.sort();
+		out.dedup();
+		out
 	}
 
 	/// Checks that the graph describes every operation the sequence holds.
@@ -606,7 +608,11 @@ impl Sequence {
 	}
 
 	/// Checks that every content identifier an operation names exists.
-	fn check_complete(ops: &[(OpId, &Edit)], atoms: &Atoms)
+	///
+	/// A file's origin anchor is one such identifier, so an operation anchored at
+	/// the start of a file the set does not hold is refused here along with
+	/// everything else it might have named.
+	fn check_complete(ops: &[(OpId, &Op)], atoms: &Atoms)
 		-> Outcome<()>
 	{
 		for (id, op) in ops {
@@ -631,8 +637,15 @@ impl Sequence {
 		Ok(())
 	}
 
-	/// Finds the moves whose source is no longer wholly their own.
-	fn torn(ops: &[(OpId, &Edit)], claims: &Claims)
+	/// Finds the moves whose source was taken from them by a **concurrent** move.
+	///
+	/// The claim register alone cannot tell a race from a sequence: a move
+	/// superseded on purpose, by a later move of the same content, looks exactly
+	/// like one that lost a race, because in both cases the register names
+	/// somebody else. The parents say which it was, and only a concurrent claim
+	/// tears. An author who moved a block and then moved it again is owed no flag,
+	/// and a flag they cannot act on is noise that hides the ones they can.
+	fn torn(ops: &[(OpId, &Op)], claims: &Claims, cause: &Causality<'_>)
 		-> Outcome<Vec<Flag>>
 	{
 		let mut out: Vec<Flag> = Vec::new();
@@ -642,8 +655,8 @@ impl Sequence {
 			}
 			let mut lost: Vec<ContentRange> = Vec::new();
 			for r in op.regions() {
-				for (span, owner) in claims.runs(r) {
-					if owner == *id {
+				for (span, holder) in claims.runs(r) {
+					if holder == *id || !cause.concurrent(&holder, id) {
 						continue;
 					}
 					let gone = res!(ContentRange::new(r.op(), span.start, span.end));
@@ -674,7 +687,7 @@ impl Sequence {
 	/// saying so would make the flag noise. The concurrency test costs a walk of
 	/// the graph per overlapping pair, and overlapping pairs are rare, so nothing
 	/// is paid for the histories that have no conflict in them.
-	fn overlaps(ops: &[(OpId, &Edit)], cause: &Causality<'_>)
+	fn overlaps(ops: &[(OpId, &Op)], cause: &Causality<'_>)
 		-> Outcome<Vec<Flag>>
 	{
 		let mut named: Vec<(ContentRange, OpId)> = Vec::new();
@@ -709,18 +722,20 @@ impl Sequence {
 		Ok(out)
 	}
 
-	/// The conservation check proper.
-	fn conserved(rendered: &Rendered, atoms: &Atoms, dead: &Dead)
+	/// The conservation check proper, over the whole repository.
+	fn conserved(repo: &Repo, atoms: &Atoms, dead: &Dead)
 		-> Outcome<()>
 	{
 		let mut seen: BTreeMap<OpId, IntervalMap<()>> = BTreeMap::new();
 		let mut emitted = 0u64;
-		for Run { content, .. } in rendered.runs() {
-			if content.is_empty() {
-				continue;
+		for file in repo.files() {
+			for Run { content, .. } in file.runs() {
+				if content.is_empty() {
+					continue;
+				}
+				emitted += content.len();
+				res!(seen.entry(content.op()).or_default().insert(content.offsets(), ()));
 			}
-			emitted += content.len();
-			res!(seen.entry(content.op()).or_default().insert(content.offsets(), ()));
 		}
 		let distinct: u64 = seen.values()
 			.flat_map(|m| m.iter())
@@ -728,15 +743,17 @@ impl Sequence {
 			.sum();
 		if distinct != emitted {
 			return Err(err!(
-				"Conservation failed: {} bytes were rendered but only {} of them \
-				are distinct, so a byte was shown in two places.", emitted, distinct;
+				"Conservation failed: {} bytes were rendered across the repository \
+				but only {} of them are distinct, so a byte was shown in two places.",
+				emitted, distinct;
 			Bug, Conflict));
 		}
 		let buried = dead.within(atoms);
-		if distinct + buried != atoms.total() {
+		let orphaned = repo.stats().orphaned;
+		if distinct + buried + orphaned != atoms.total() {
 			return Err(err!(
-				"Conservation failed: {} bytes rendered plus {} dead against {} \
-				created.", distinct, buried, atoms.total();
+				"Conservation failed: {} bytes rendered plus {} dead plus {} orphaned \
+				against {} created.", distinct, buried, orphaned, atoms.total();
 			Bug, Mismatch));
 		}
 		Ok(())

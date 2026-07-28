@@ -1,12 +1,21 @@
 //! The placement layer: slots, how they divide, and how they order.
 //!
-//! A file is an ordered set of slots, each claiming a run of content. The order
-//! is Fugue's -- slots form a left-child / right-child tree whose in-order
-//! traversal is the file -- with one departure: an origin names a content
+//! A repository is an ordered set of slots, each claiming a run of content. The
+//! order is Fugue's -- slots form a left-child / right-child tree whose in-order
+//! traversal is the text -- with one departure: an origin names a content
 //! identifier rather than an element, and is resolved through the claim register
 //! at render time. That departure is the whole design, because it is what lets
 //! an insertion follow the content it was written against when a move takes that
-//! content elsewhere.
+//! content elsewhere, into another file included.
+//!
+//! # One forest, and a file is a subtree
+//!
+//! There is one tree for the whole repository rather than one per file, and its
+//! root children are exactly the **seed** slots: one per file, claiming that
+//! file's origin anchor. A file is the subtree beneath its seed, so a slot's file
+//! is read off the tree rather than off the record, and a move between files
+//! needs no routing -- its destination anchor already names content in the file
+//! it lands in.
 //!
 //! Resolving origins induces a directed graph over slots, an edge from S to T
 //! when S's origin names content T owns. Where that graph is acyclic the order
@@ -23,11 +32,9 @@ use crate::id::{
 	OpId,
 	Side,
 };
+use crate::op::Op;
 use crate::seq::claim::Claims;
-use crate::seq::{
-	Edit,
-	OpOrder,
-};
+use crate::seq::OpOrder;
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -95,10 +102,14 @@ pub struct Slot {
 	pub sub:	u64,
 	/// The content the slot shows.
 	pub claim:	ContentRange,
-	/// Left origin as recorded, or `None` for the start of the file.
+	/// Left origin as recorded, or `None` where the operation named none.
 	pub left:	Option<Anchor>,
-	/// Right origin as recorded, or `None` for the end of the file.
+	/// Right origin as recorded, or `None` where the operation named none.
 	pub right:	Option<Anchor>,
+	/// Whether the slot is a file's origin anchor, in which case its placing
+	/// operation is that file's identity and the slot is a root child of the
+	/// forest.
+	pub seed:	bool,
 }
 
 impl Slot {
@@ -125,19 +136,30 @@ pub struct Slots {
 
 impl Slots {
 
-	/// Places one slot per splice and one per source run of a move, then divides
-	/// every slot at every anchor that falls strictly inside its claim.
+	/// Places one seed slot per file, one slot per splice and one per source run
+	/// of a move, then divides every slot at every anchor that falls strictly
+	/// inside its claim.
 	///
 	/// Dividing at every anchor, whether or not the anchor is used, is what
 	/// makes the division a function of the operation set rather than of the
 	/// order the anchors arrived in.
-	pub fn place(ops: &[(OpId, &Edit)])
+	pub fn place(ops: &[(OpId, &Op)])
 		-> Outcome<Self>
 	{
 		let mut slots: Vec<Slot> = Vec::new();
 		for (id, op) in ops {
 			match op {
-				Edit::Splice { left, right, insert, .. } => {
+				Op::FileCreate { .. } => {
+					slots.push(Slot {
+						place:	*id,
+						sub:	0,
+						claim:	res!(ContentRange::new(*id, 0, 1)),
+						left:	None,
+						right:	None,
+						seed:	true,
+					});
+				},
+				Op::Splice { left, right, insert, .. } => {
 					if insert.is_empty() {
 						continue;
 					}
@@ -147,9 +169,10 @@ impl Slots {
 						claim:	res!(ContentRange::new(*id, 0, insert.len() as u64)),
 						left:	*left,
 						right:	*right,
+						seed:	false,
 					});
 				},
-				Edit::Move { src, left, right } => {
+				Op::Move { src, left, right } => {
 					let mut sub = 0u64;
 					for r in src {
 						if r.is_empty() {
@@ -161,10 +184,12 @@ impl Slots {
 							claim:	*r,
 							left:	*left,
 							right:	*right,
+							seed:	false,
 						});
 						sub += r.len();
 					}
 				},
+				_ => (),
 			}
 		}
 		let placed = slots.len();
@@ -194,6 +219,7 @@ impl Slots {
 						claim:	res!(ContentRange::new(slot.claim.op(), from, *cut)),
 						left:	slot.left,
 						right:	slot.right,
+						seed:	slot.seed,
 					});
 					from = *cut;
 				}
@@ -204,6 +230,7 @@ impl Slots {
 				claim:	res!(ContentRange::new(slot.claim.op(), from, slot.claim.to())),
 				left:	slot.left,
 				right:	slot.right,
+				seed:	slot.seed,
 			});
 		}
 		let slots = divided;
@@ -258,6 +285,18 @@ impl Slots {
 	/// splice and one per source run of a move.
 	pub fn placed(&self) -> usize {
 		self.placed
+	}
+
+	/// Returns the slot a placing operation put at an offset within its
+	/// placement, if there is one.
+	///
+	/// This is how a flag raised against `(operation, offset)` finds the slot it
+	/// is about, the pair being what the flags name and what a reader can act on.
+	pub fn find(&self, place: &OpId, sub: u64)
+		-> Option<usize>
+	{
+		self.by_place.get(place)
+			.and_then(|idxs| idxs.iter().copied().find(|i| self.slots[*i].sub == sub))
 	}
 
 	/// Returns the piece preceding this one within its placement, if it is not

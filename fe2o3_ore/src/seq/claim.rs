@@ -23,7 +23,7 @@ use crate::id::{
 	OpId,
 };
 use crate::seq::atom::Atoms;
-use crate::seq::Edit;
+use crate::op::Op;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_data::interval::IntervalMap;
@@ -57,12 +57,12 @@ impl Claims {
 	/// covers, so feeding the moves in op order leaves each byte claimed by the
 	/// highest mover in op order, which is the register's merge rule stated as a
 	/// loop.
-	pub fn build(ops: &[(OpId, &Edit)])
+	pub fn build(ops: &[(OpId, &Op)])
 		-> Outcome<Self>
 	{
 		let mut map: BTreeMap<OpId, IntervalMap<OpId>> = BTreeMap::new();
 		for (id, op) in ops {
-			if let Edit::Move { src, .. } = op {
+			if let Op::Move { src, .. } = op {
 				for r in src {
 					if r.is_empty() {
 						continue;
@@ -142,18 +142,27 @@ impl Dead {
 	}
 
 	/// Builds the tombstone set from an operation set, in any order.
-	pub fn build(ops: &[(OpId, &Edit)])
+	///
+	/// A file's creation buries the one byte it mints, that byte being the file's
+	/// origin anchor: it exists to be named and must never be seen.
+	pub fn build(ops: &[(OpId, &Op)])
 		-> Outcome<Self>
 	{
 		let mut map: BTreeMap<OpId, IntervalMap<()>> = BTreeMap::new();
-		for (_, op) in ops {
-			if let Edit::Splice { remove, .. } = op {
-				for r in remove {
-					if r.is_empty() {
-						continue;
+		for (id, op) in ops {
+			match op {
+				Op::FileCreate { .. } => {
+					res!(map.entry(*id).or_default().insert(0..1, ()));
+				},
+				Op::Splice { remove, .. } => {
+					for r in remove {
+						if r.is_empty() {
+							continue;
+						}
+						res!(map.entry(r.op()).or_default().insert(r.offsets(), ()));
 					}
-					res!(map.entry(r.op()).or_default().insert(r.offsets(), ()));
-				}
+				},
+				_ => (),
 			}
 		}
 		Ok(Self { map })

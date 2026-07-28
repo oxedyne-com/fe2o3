@@ -64,7 +64,12 @@ use oxedyne_fe2o3_jdat::prelude::*;
 pub const MAGIC: [u8; 6] = *b"ORESEG";
 
 /// The format version this module writes.
-pub const VERSION: u8 = 1;
+///
+/// Raised to 2 when the operation vocabulary changed for file identity: a
+/// content operation no longer carries a file, a lifecycle operation names one
+/// by identity, and a path is bytes rather than a string. Nothing was ever
+/// written in version 1 that needs to be read again.
+pub const VERSION: u8 = 2;
 
 /// Kind byte of a record carrying a bare [`Record`].
 pub const KIND_BARE:	u8 = 1;
@@ -221,7 +226,7 @@ impl Entry {
 	pub fn id(&self)
 		-> Outcome<OpId>
 	{
-		Ok(res!(self.peek()).head.id)
+		Ok(res!(self.peek()).head.id())
 	}
 
 	/// Returns the body bytes, which are the daticle form of whichever shape the
@@ -654,12 +659,11 @@ mod tests {
 	/// their headers.
 	fn records() -> Outcome<Vec<Record>> {
 		Ok(vec![
-			Record::root(oid(1, 1), Op::FileCreate { path: fmt!("notes.md") }),
+			Record::root(oid(1, 1), Op::FileCreate { path: b"notes.md".to_vec() }),
 			Record::new(
 				res!(Header::new(oid(1, 2), vec![oid(1, 1)])),
 				Op::Splice {
-					file:	fmt!("notes.md"),
-					left:	None,
+					left:	Some(Anchor::origin(oid(1, 1))),
 					right:	None,
 					remove:	Vec::new(),
 					insert:	b"the quick brown fox".to_vec(),
@@ -668,7 +672,6 @@ mod tests {
 			Record::new(
 				res!(Header::new(oid(2, 3), vec![oid(1, 2)])),
 				Op::Move {
-					file:	fmt!("notes.md"),
 					src:	vec![res!(ContentRange::new(oid(1, 2), 4, 9))],
 					left:	Some(Anchor::after(ContentId::new(oid(1, 2), 18))),
 					right:	None,
@@ -677,7 +680,6 @@ mod tests {
 			Record::new(
 				res!(Header::new(oid(3, 9), vec![oid(1, 2), oid(2, 3)])),
 				Op::Splice {
-					file:	fmt!("notes.md"),
 					left:	Some(Anchor::after(ContentId::new(oid(1, 2), 0))),
 					right:	Some(Anchor::before(ContentId::new(oid(1, 2), 1))),
 					remove:	vec![res!(ContentRange::new(oid(1, 2), 10, 15))],
@@ -686,6 +688,14 @@ mod tests {
 			),
 			Record::new(
 				res!(Header::new(oid(3, 10), vec![oid(3, 9)])),
+				Op::FileRename { file: oid(1, 1), path: vec![0xff, 0x2f, 0x00] },
+			),
+			Record::new(
+				res!(Header::new(oid(3, 11), vec![oid(3, 10)])),
+				Op::FileDelete { file: oid(1, 1) },
+			),
+			Record::new(
+				res!(Header::new(oid(3, 12), vec![oid(3, 11)])),
 				Op::Mark { name: fmt!("release-caf\u{e9}") },
 			),
 		])
@@ -1091,20 +1101,24 @@ mod tests {
 					}
 				}
 				let head = res!(Header::new(id, parents));
-				let op = match next() % 4 {
-					0 => Op::FileCreate { path: fmt!("f{}", next() % 100) },
+				let anchored = Some(Anchor::origin(oid((next() % 5) as u64 + 1, 1)));
+				let op = match next() % 6 {
+					0 => Op::FileCreate { path: fmt!("f{}", next() % 100).into_bytes() },
 					1 => Op::Mark { name: fmt!("m{}", next() % 100) },
-					2 => Op::Splice {
-						file:	fmt!("f{}", next() % 3),
-						left:	None,
+					2 => Op::FileRename {
+						file:	oid((next() % 5) as u64 + 1, 1),
+						path:	vec![(next() % 256) as u8; next() % 40],
+					},
+					3 => Op::FileDelete { file: oid((next() % 5) as u64 + 1, 1) },
+					4 => Op::Splice {
+						left:	anchored,
 						right:	None,
 						remove:	Vec::new(),
-						insert:	vec![(next() % 256) as u8; next() % 700],
+						insert:	vec![(next() % 256) as u8; 1 + next() % 700],
 					},
 					_ => Op::Move {
-						file:	fmt!("f{}", next() % 3),
 						src:	vec![res!(ContentRange::new(id, 0, (next() % 50) as u64))],
-						left:	None,
+						left:	anchored,
 						right:	None,
 					},
 				};
@@ -1152,6 +1166,11 @@ mod tests {
 	/// it, and nothing else in this file would notice: every other test encodes
 	/// and decodes with the same code. This one is the fixed point. If it fails
 	/// and the change was deliberate, the version byte is the thing to raise.
+	///
+	/// It was raised to 2 for file identity. The record below carries a mark,
+	/// whose encoding did not change, so the only byte that moved is the version
+	/// itself -- which is exactly what a reader of an old segment must trip over,
+	/// since the operations beside a mark did change.
 	#[test]
 	fn the_segment_bytes_are_frozen() -> Outcome<()> {
 		let rec = Record::new(
@@ -1168,7 +1187,7 @@ mod tests {
 			// The segment header: the magic, the version, a hint follows, and the
 			// replica it names.
 			0x4f, 0x52, 0x45, 0x53, 0x45, 0x47,
-			0x01,
+			0x02,
 			0x01,
 			0x02,
 			// The record: a bare one, and 61 bytes of body.

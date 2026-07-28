@@ -6,6 +6,12 @@
 //! delivery orders is nearly free. What the cases test is that the answer
 //! converged on is the right one: the one the published counter-examples say a
 //! correct structure must give.
+//!
+//! Every case here is single-file, and every expectation is what it was before
+//! file identity: the repository now holds a file rather than a bare sequence,
+//! and a splice into that file anchors after its origin anchor rather than after
+//! nothing, and none of the ten answers moves. The multi-file cases are beside
+//! this file in `file_tests.rs`.
 
 use crate::id::{
 	Anchor,
@@ -22,15 +28,16 @@ use crate::op::{
 use crate::seq::render::{
 	Flag,
 	Rendered,
+	Repo,
 	Run,
+	Stats,
 };
 use crate::seq::slot::Origin;
-use crate::seq::{
-	Edit,
-	Sequence,
-};
+use crate::seq::Sequence;
 
 use oxedyne_fe2o3_core::prelude::*;
+
+use std::collections::BTreeMap;
 
 
 /// The shopping list of the published worked case, with plain hyphens so that
@@ -41,20 +48,23 @@ const LIST: &[u8] = b"- Eggs\n- Milk\n- Cheese\n";
 const ALPHA: &[u8] = b"0123456789ABCDEFGHIJ";
 
 
-/// One replica: the frontend that turns index-based editing intent into
-/// content-anchored operations, which is what a real editor would be.
+/// One replica of a repository holding one file: the frontend that turns
+/// index-based editing intent into content-anchored operations, which is what a
+/// real editor would be.
 struct Replica {
 	/// The replica number every operation of this replica is named by.
 	id:		u64,
 	/// The operations it holds.
 	seq:	Sequence,
+	/// The file it is editing.
+	file:	OpId,
 }
 
 impl Replica {
 
-	/// Constructs a replica holding nothing.
-	fn new(id: u64) -> Self {
-		Self { id, seq: Sequence::new() }
+	/// Constructs a replica holding nothing, editing the named file.
+	fn new(id: u64, file: OpId) -> Self {
+		Self { id, seq: Sequence::new(), file }
 	}
 
 	/// Mints the next header: a Lamport counter, and everything this replica can
@@ -70,22 +80,27 @@ impl Replica {
 	}
 
 	/// Receives an operation from another replica.
-	fn recv(&mut self, op: (Header, Edit))
+	fn recv(&mut self, op: (Header, Op))
 		-> Outcome<()>
 	{
 		self.seq.apply(op.0, op.1)
 	}
 
-	/// Renders the replica's own view.
+	/// Renders the replica's own view of its file.
 	fn view(&self)
 		-> Outcome<Rendered>
 	{
-		self.seq.render()
+		let repo = res!(self.seq.render());
+		match repo.file(self.file) {
+			Some(f)	=> Ok(f.clone()),
+			None	=> Err(err!(
+				"The replica has no file {}.", self.file; Test, Missing)),
+		}
 	}
 
 	/// Records an operation of this replica's own, and applies it.
-	fn author(&mut self, op: Edit)
-		-> Outcome<(Header, Edit)>
+	fn author(&mut self, op: Op)
+		-> Outcome<(Header, Op)>
 	{
 		let head = res!(self.next_head());
 		res!(self.seq.apply(head.clone(), op.clone()));
@@ -94,7 +109,7 @@ impl Replica {
 
 	/// Inserts bytes at a rendered index.
 	fn insert(&mut self, at: usize, bytes: &[u8])
-		-> Outcome<(Header, Edit)>
+		-> Outcome<(Header, Op)>
 	{
 		let op = res!(res!(self.view()).splice(at, 0, bytes.to_vec()));
 		self.author(op)
@@ -102,7 +117,7 @@ impl Replica {
 
 	/// Deletes a run at a rendered index.
 	fn delete(&mut self, at: usize, len: usize)
-		-> Outcome<(Header, Edit)>
+		-> Outcome<(Header, Op)>
 	{
 		let op = res!(res!(self.view()).splice(at, len, Vec::new()));
 		self.author(op)
@@ -110,7 +125,7 @@ impl Replica {
 
 	/// Replaces a run at a rendered index, in one operation.
 	fn replace(&mut self, at: usize, len: usize, bytes: &[u8])
-		-> Outcome<(Header, Edit)>
+		-> Outcome<(Header, Op)>
 	{
 		let op = res!(res!(self.view()).splice(at, len, bytes.to_vec()));
 		self.author(op)
@@ -118,26 +133,49 @@ impl Replica {
 
 	/// Moves a rendered run to a rendered index.
 	fn move_range(&mut self, at: usize, len: usize, to: usize)
-		-> Outcome<(Header, Edit)>
+		-> Outcome<(Header, Op)>
 	{
 		let op = res!(res!(self.view()).move_range(at, len, to));
 		self.author(op)
 	}
 }
 
-/// Seeds `replicas` replicas with one splice carrying the whole initial text.
+
+/// A repository staged with one file carrying some initial text, and the
+/// replicas that have seen it.
+struct Stage {
+	/// The replicas, each holding everything staged.
+	reps:	Vec<Replica>,
+	/// The staging operations: the file's creation, then the seeding splice.
+	ops:	Vec<(Header, Op)>,
+	/// The file's identity.
+	file:	OpId,
+	/// The identity of the splice that wrote the initial text.
+	seed:	OpId,
+}
+
+/// Creates one file, writes `text` into it, and hands out `replicas` replicas
+/// that have seen both operations.
 fn seed(text: &[u8], replicas: u64)
-	-> Outcome<(Vec<Replica>, (Header, Edit))>
+	-> Outcome<Stage>
 {
-	let mut origin = Replica::new(0);
-	let op = res!(origin.insert(0, text));
+	let mut origin = Replica::new(0, OpId::default());
+	let create = res!(origin.author(Op::FileCreate { path: b"f".to_vec() }));
+	let file = create.0.id();
+	origin.file = file;
+	let mut ops = vec![create];
+	let seed = res!(origin.insert(0, text));
+	let seed_id = seed.0.id();
+	ops.push(seed);
 	let mut out = Vec::new();
 	for i in 1..=replicas {
-		let mut r = Replica::new(i);
-		res!(r.recv(op.clone()));
+		let mut r = Replica::new(i, file);
+		for op in &ops {
+			res!(r.recv(op.clone()));
+		}
 		out.push(r);
 	}
-	Ok((out, op))
+	Ok(Stage { reps: out, ops, file, seed: seed_id })
 }
 
 /// Generates every permutation of `idx`.
@@ -154,9 +192,10 @@ fn permute(idx: &mut Vec<usize>, k: usize, out: &mut Vec<Vec<usize>>) {
 }
 
 /// Applies an operation set in every delivery order, requiring that all of them
-/// render the same bytes and raise the same flags, and returns that render.
-fn converge(ops: &[(Header, Edit)])
-	-> Outcome<Rendered>
+/// render the same bytes in every file and raise the same flags, and returns
+/// that render.
+fn converge(ops: &[(Header, Op)])
+	-> Outcome<Repo>
 {
 	let n = ops.len();
 	let mut orders: Vec<Vec<usize>> = Vec::new();
@@ -169,7 +208,7 @@ fn converge(ops: &[(Header, Edit)])
 		}
 		orders.push((0..n).rev().collect());
 	}
-	let mut first: Option<Rendered> = None;
+	let mut first: Option<Repo> = None;
 	for order in &orders {
 		let mut seq = Sequence::new();
 		for i in order {
@@ -180,10 +219,10 @@ fn converge(ops: &[(Header, Edit)])
 		match &first {
 			None => first = Some(got),
 			Some(want) => {
-				if want.bytes() != got.bytes() {
+				if listing(want) != listing(&got) {
 					return Err(err!(
-						"Delivery order changed the render: {:?} against {:?}.",
-						want.text_lossy(), got.text_lossy();
+						"Delivery order changed the render: {} against {}.",
+						listing(want), listing(&got);
 					Test, Mismatch));
 				}
 				if want.flags() != got.flags() {
@@ -201,19 +240,38 @@ fn converge(ops: &[(Header, Edit)])
 	}
 }
 
-/// Runs an operation set under every delivery order and checks the render
+/// A one-line rendering of every file, for test messages and comparison.
+fn listing(repo: &Repo) -> String {
+	let mut s = String::new();
+	for f in repo.files() {
+		s.push_str(&fmt!(
+			"{}{}={:?} ",
+			f.path_lossy(),
+			if f.is_live() { "" } else { " (deleted)" },
+			f.text_lossy(),
+		));
+	}
+	s.trim_end().to_string()
+}
+
+/// Runs an operation set under every delivery order and checks one file's render
 /// against the answer the case prescribes.
-fn case(expect: &str, ops: &[(Header, Edit)])
+fn case(file: OpId, expect: &str, ops: &[(Header, Op)])
 	-> Outcome<Rendered>
 {
-	let got = res!(converge(ops));
+	let repo = res!(converge(ops));
+	let got = match repo.file(file) {
+		Some(f)	=> f.clone(),
+		None	=> return Err(err!(
+			"The render holds no file {}.", file; Test, Missing)),
+	};
 	assert_eq!(got.text_lossy(), expect);
 	Ok(got)
 }
 
-/// Counts the flags of one kind.
-fn count(rendered: &Rendered, kind: fn(&Flag) -> bool) -> usize {
-	rendered.flags().iter().filter(|f| kind(f)).count()
+/// Counts the flags of one kind, over the whole repository.
+fn count(repo: &Rendered, kind: fn(&Flag) -> bool) -> usize {
+	repo.flags().iter().filter(|f| kind(f)).count()
 }
 
 /// Whether a flag reports a torn move.
@@ -248,13 +306,13 @@ fn is_overlap(flag: &Flag) -> bool {
 /// insertion goes where the content went.
 #[test]
 fn an_edit_inside_a_moved_line_travels_with_it() -> Outcome<()> {
-	let (mut reps, first) = res!(seed(LIST, 2));
-	let (b, a) = reps.split_at_mut(1);
+	let mut st = res!(seed(LIST, 2));
+	let (b, a) = st.reps.split_at_mut(1);
 	// Replica 1 moves "- Milk\n" to the top.
-	let mv = res!(b[0].move_range(7, 7, 0));
+	st.ops.push(res!(b[0].move_range(7, 7, 0)));
 	// Replica 2 concurrently turns "Milk" into "Soy milk".
-	let ed = res!(a[0].replace(9, 1, b"Soy m"));
-	let out = res!(case("- Soy milk\n- Eggs\n- Cheese\n", &[first, mv, ed]));
+	st.ops.push(res!(a[0].replace(9, 1, b"Soy m")));
+	let out = res!(case(st.file, "- Soy milk\n- Eggs\n- Cheese\n", &st.ops));
 	assert_eq!(count(&out, is_torn), 0);
 	assert_eq!(count(&out, is_demoted), 0);
 	Ok(())
@@ -266,15 +324,17 @@ fn an_edit_inside_a_moved_line_travels_with_it() -> Outcome<()> {
 /// anomaly the published single-element construction exists to remove.
 #[test]
 fn two_moves_of_one_run_leave_one_copy() -> Outcome<()> {
-	let (mut reps, first) = res!(seed(LIST, 2));
-	let seed_id = first.0.id;
-	let (r1, r2) = reps.split_at_mut(1);
+	let mut st = res!(seed(LIST, 2));
+	let seed_id = st.seed;
+	let (r1, r2) = st.reps.split_at_mut(1);
 	let lost = res!(r1[0].move_range(7, 7, 0));		// Replica 1 loses.
 	let won = res!(r2[0].move_range(7, 7, 23));		// Replica 2 wins.
-	let out = res!(case("- Eggs\n- Cheese\n- Milk\n", &[first, lost.clone(), won]));
+	st.ops.push(lost.clone());
+	st.ops.push(won);
+	let out = res!(case(st.file, "- Eggs\n- Cheese\n- Milk\n", &st.ops));
 	assert_eq!(count(&out, is_torn), 1);
 	assert!(out.flags().contains(&Flag::Torn {
-		op:		lost.0.id,
+		op:		lost.0.id(),
 		lost:	vec![res!(ContentRange::new(seed_id, 7, 14))],
 	}), "flags were {:?}", out.flags());
 	assert_eq!(count(&out, is_overlap), 1,
@@ -289,15 +349,17 @@ fn two_moves_of_one_run_leave_one_copy() -> Outcome<()> {
 /// tolerable.
 #[test]
 fn overlapping_moves_tear_at_the_overlap() -> Outcome<()> {
-	let (mut reps, first) = res!(seed(ALPHA, 2));
-	let seed_id = first.0.id;
-	let (r1, r2) = reps.split_at_mut(1);
+	let mut st = res!(seed(ALPHA, 2));
+	let seed_id = st.seed;
+	let (r1, r2) = st.reps.split_at_mut(1);
 	let torn = res!(r1[0].move_range(0, 10, 20));	// Replica 1 loses the overlap.
 	let won = res!(r2[0].move_range(5, 10, 0));		// Replica 2 wins it.
-	let out = res!(case("FGHIJ56789ABCDE01234", &[first, torn.clone(), won]));
+	st.ops.push(torn.clone());
+	st.ops.push(won);
+	let out = res!(case(st.file, "FGHIJ56789ABCDE01234", &st.ops));
 	assert_eq!(count(&out, is_torn), 1);
 	assert!(out.flags().contains(&Flag::Torn {
-		op:		torn.0.id,
+		op:		torn.0.id(),
 		lost:	vec![res!(ContentRange::new(seed_id, 5, 10))],
 	}), "flags were {:?}", out.flags());
 	Ok(())
@@ -310,20 +372,23 @@ fn overlapping_moves_tear_at_the_overlap() -> Outcome<()> {
 /// than where it now lives.
 #[test]
 fn mutually_nested_destinations_break_the_cycle_without_loss() -> Outcome<()> {
-	let (mut reps, first) = res!(seed(ALPHA, 2));
-	let (r1, r2) = reps.split_at_mut(1);
+	let mut st = res!(seed(ALPHA, 2));
+	let (r1, r2) = st.reps.split_at_mut(1);
 	// Replica 1 moves "01234" into the middle of "ABCDE".
 	let m1 = res!(r1[0].move_range(0, 5, 12));
 	// Replica 2 moves "ABCDE" into the middle of "01234".
 	let m2 = res!(r2[0].move_range(10, 5, 2));
-	let out = res!(case("5678901ABCDE234FGHIJ", &[first, m1.clone(), m2]));
+	st.ops.push(m1.clone());
+	st.ops.push(m2);
+	let out = res!(case(st.file, "5678901ABCDE234FGHIJ", &st.ops));
 	assert_eq!(out.len(), 20, "no byte may be lost to a cycle");
 	assert_eq!(count(&out, is_dropped), 0, "demotion sufficed");
 	// Both origins of the lower move in op order give way, and the higher move
-	// keeps the destination it asked for.
+	// keeps the destination it asked for. The cycle is inside one file, so
+	// nothing crossed a boundary and no cross-file flag is raised.
 	assert_eq!(out.flags(), &[
-		Flag::Demoted { op: m1.0.id, sub: 0, origin: Origin::Left },
-		Flag::Demoted { op: m1.0.id, sub: 0, origin: Origin::Right },
+		Flag::Demoted { op: m1.0.id(), sub: 0, origin: Origin::Left },
+		Flag::Demoted { op: m1.0.id(), sub: 0, origin: Origin::Right },
 	]);
 	Ok(())
 }
@@ -332,11 +397,11 @@ fn mutually_nested_destinations_break_the_cycle_without_loss() -> Outcome<()> {
 /// its destination.
 #[test]
 fn an_insertion_inside_a_moved_run_goes_with_it() -> Outcome<()> {
-	let (mut reps, first) = res!(seed(LIST, 2));
-	let (r1, r2) = reps.split_at_mut(1);
-	let mv = res!(r1[0].move_range(7, 7, 0));
-	let ed = res!(r2[0].insert(11, b"!"));
-	res!(case("- Mi!lk\n- Eggs\n- Cheese\n", &[first, mv, ed]));
+	let mut st = res!(seed(LIST, 2));
+	let (r1, r2) = st.reps.split_at_mut(1);
+	st.ops.push(res!(r1[0].move_range(7, 7, 0)));
+	st.ops.push(res!(r2[0].insert(11, b"!")));
+	res!(case(st.file, "- Mi!lk\n- Eggs\n- Cheese\n", &st.ops));
 	Ok(())
 }
 
@@ -345,17 +410,16 @@ fn an_insertion_inside_a_moved_run_goes_with_it() -> Outcome<()> {
 /// exhibit.
 #[test]
 fn three_concurrent_runs_at_one_point_do_not_interleave() -> Outcome<()> {
-	let (mut reps, first) = res!(seed(b"AB", 3));
-	let mut ops = vec![first];
-	for (i, r) in reps.iter_mut().enumerate() {
+	let mut st = res!(seed(b"AB", 3));
+	for (i, r) in st.reps.iter_mut().enumerate() {
 		let run = match i {
 			0	=> b"xxx".to_vec(),
 			1	=> b"yyy".to_vec(),
 			_	=> b"zzz".to_vec(),
 		};
-		ops.push(res!(r.insert(1, &run)));
+		st.ops.push(res!(r.insert(1, &run)));
 	}
-	res!(case("AxxxyyyzzzB", &ops));
+	res!(case(st.file, "AxxxyyyzzzB", &st.ops));
 	Ok(())
 }
 
@@ -367,12 +431,12 @@ fn three_concurrent_runs_at_one_point_do_not_interleave() -> Outcome<()> {
 /// rule exists to prevent.
 #[test]
 fn edits_abutting_a_moved_run_stay_beside_their_neighbour() -> Outcome<()> {
-	let (mut reps, first) = res!(seed(LIST, 2));
-	let (r1, r2) = reps.split_at_mut(1);
-	let mv = res!(r1[0].move_range(7, 7, 0));
-	let before = res!(r2[0].insert(7, b"<"));
-	let after = res!(r2[0].insert(15, b">"));
-	res!(case("- Milk\n>- Eggs\n<- Cheese\n", &[first, mv, before, after]));
+	let mut st = res!(seed(LIST, 2));
+	let (r1, r2) = st.reps.split_at_mut(1);
+	st.ops.push(res!(r1[0].move_range(7, 7, 0)));
+	st.ops.push(res!(r2[0].insert(7, b"<")));
+	st.ops.push(res!(r2[0].insert(15, b">")));
+	res!(case(st.file, "- Milk\n>- Eggs\n<- Cheese\n", &st.ops));
 	Ok(())
 }
 
@@ -381,11 +445,11 @@ fn edits_abutting_a_moved_run_stay_beside_their_neighbour() -> Outcome<()> {
 /// wherever it is.
 #[test]
 fn a_move_and_a_deletion_inside_it_compose() -> Outcome<()> {
-	let (mut reps, first) = res!(seed(LIST, 2));
-	let (r1, r2) = reps.split_at_mut(1);
-	let mv = res!(r1[0].move_range(7, 7, 0));
-	let del = res!(r2[0].delete(9, 4));				// "Milk"
-	res!(case("- \n- Eggs\n- Cheese\n", &[first, mv, del]));
+	let mut st = res!(seed(LIST, 2));
+	let (r1, r2) = st.reps.split_at_mut(1);
+	st.ops.push(res!(r1[0].move_range(7, 7, 0)));
+	st.ops.push(res!(r2[0].delete(9, 4)));			// "Milk"
+	res!(case(st.file, "- \n- Eggs\n- Cheese\n", &st.ops));
 	Ok(())
 }
 
@@ -395,17 +459,19 @@ fn a_move_and_a_deletion_inside_it_compose() -> Outcome<()> {
 /// apart from each other. Deterministic, flagged, and not what its author meant.
 #[test]
 fn moves_with_different_boundaries_split_between_them() -> Outcome<()> {
-	let (mut reps, first) = res!(seed(ALPHA, 2));
-	let seed_id = first.0.id;
-	let (r1, r2) = reps.split_at_mut(1);
+	let mut st = res!(seed(ALPHA, 2));
+	let seed_id = st.seed;
+	let (r1, r2) = st.reps.split_at_mut(1);
 	// Replica 1 treats "0123456789" as the block.
 	let m1 = res!(r1[0].move_range(0, 10, 20));
 	// Replica 2 treats "012345" as the block.
 	let m2 = res!(r2[0].move_range(0, 6, 20));
-	let out = res!(case("ABCDEFGHIJ6789012345", &[first, m1.clone(), m2]));
+	st.ops.push(m1.clone());
+	st.ops.push(m2);
+	let out = res!(case(st.file, "ABCDEFGHIJ6789012345", &st.ops));
 	assert_eq!(count(&out, is_torn), 1);
 	assert!(out.flags().contains(&Flag::Torn {
-		op:		m1.0.id,
+		op:		m1.0.id(),
 		lost:	vec![res!(ContentRange::new(seed_id, 0, 6))],
 	}), "flags were {:?}", out.flags());
 	Ok(())
@@ -417,16 +483,67 @@ fn moves_with_different_boundaries_split_between_them() -> Outcome<()> {
 /// than the per-element granularity the published proof is stated over.
 #[test]
 fn a_heading_added_after_the_fact_stays_with_its_section() -> Outcome<()> {
-	let (mut reps, first) = res!(seed(b"\n", 2));
-	let (r1, r2) = reps.split_at_mut(1);
-	let s1 = res!(r1[0].insert(1, b"section A\n"));
-	let h1 = res!(r1[0].insert(1, b"HEADING A\n"));
-	let s2 = res!(r2[0].insert(1, b"section B\n"));
-	let h2 = res!(r2[0].insert(1, b"HEADING B\n"));
+	let mut st = res!(seed(b"\n", 2));
+	let (r1, r2) = st.reps.split_at_mut(1);
+	st.ops.push(res!(r1[0].insert(1, b"section A\n")));
+	st.ops.push(res!(r1[0].insert(1, b"HEADING A\n")));
+	st.ops.push(res!(r2[0].insert(1, b"section B\n")));
+	st.ops.push(res!(r2[0].insert(1, b"HEADING B\n")));
 	res!(case(
+		st.file,
 		"\nHEADING A\nsection A\nHEADING B\nsection B\n",
-		&[first, s1, h1, s2, h2],
+		&st.ops,
 	));
+	Ok(())
+}
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ THE TORN FLAG AND CAUSALITY                                               │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// A move superseded by a later move of the same content, by the same author,
+/// is a sequence of two decisions and not a race, and raises nothing.
+///
+/// The claim register cannot tell the two apart on its own: in both cases it
+/// names somebody other than the earlier move. The parents can, and the flag
+/// consults them. Before it did, every deliberate re-move reported a tear, which
+/// is a flag nobody can act on sitting on top of the ones they can.
+#[test]
+fn a_move_superseded_on_purpose_does_not_tear() -> Outcome<()> {
+	let mut st = res!(seed(LIST, 1));
+	let first = res!(st.reps[0].move_range(7, 7, 0));
+	// The same author, having seen the first move, moves the same line again.
+	let second = res!(st.reps[0].move_range(0, 7, 23));
+	assert!(second.0.parents().contains(&first.0.id()),
+		"the second move was written knowing the first");
+	st.ops.push(first.clone());
+	st.ops.push(second);
+	let out = res!(case(st.file, "- Eggs\n- Cheese\n- Milk\n", &st.ops));
+	assert_eq!(count(&out, is_torn), 0, "flags were {:?}", out.flags());
+	assert_eq!(count(&out, is_overlap), 0,
+		"nor were the two moves in conflict, one having seen the other");
+	Ok(())
+}
+
+/// The same two moves written concurrently do tear, so the fix narrows the flag
+/// rather than removing it.
+#[test]
+fn genuinely_concurrent_moves_still_tear() -> Outcome<()> {
+	let mut st = res!(seed(LIST, 2));
+	let (r1, r2) = st.reps.split_at_mut(1);
+	let lower = res!(r1[0].move_range(7, 7, 0));
+	let higher = res!(r2[0].move_range(7, 7, 23));
+	assert!(!lower.0.parents().contains(&higher.0.id()));
+	assert!(!higher.0.parents().contains(&lower.0.id()));
+	st.ops.push(lower.clone());
+	st.ops.push(higher);
+	let out = res!(case(st.file, "- Eggs\n- Cheese\n- Milk\n", &st.ops));
+	assert_eq!(count(&out, is_torn), 1, "flags were {:?}", out.flags());
+	match out.flags().iter().find(|f| is_torn(f)) {
+		Some(Flag::Torn { op, .. })	=> assert_eq!(*op, lower.0.id()),
+		_ => return Err(err!("The torn flag went missing."; Test, Missing)),
+	}
 	Ok(())
 }
 
@@ -439,15 +556,19 @@ fn a_heading_added_after_the_fact_stays_with_its_section() -> Outcome<()> {
 /// bytes and raises the same flags.
 #[test]
 fn every_delivery_order_of_a_mixed_set_agrees() -> Outcome<()> {
-	let (mut reps, first) = res!(seed(b"alpha beta gamma", 3));
-	let (r1, rest) = reps.split_at_mut(1);
+	let mut st = res!(seed(b"alpha beta gamma", 3));
+	let (r1, rest) = st.reps.split_at_mut(1);
 	let (r2, r3) = rest.split_at_mut(1);
-	let mv = res!(r1[0].move_range(0, 6, 16));		// "alpha " to the end.
-	let ins = res!(r2[0].insert(11, b"very "));		// Before "gamma".
-	let del = res!(r3[0].delete(6, 4));				// "beta".
-	let out = res!(converge(&[first, mv, ins, del]));
-	assert_eq!(out.stats().ops, 4);
-	assert_eq!(out.len(), 16 + 5 - 4 - 6 + 6);
+	st.ops.push(res!(r1[0].move_range(0, 6, 16)));	// "alpha " to the end.
+	st.ops.push(res!(r2[0].insert(11, b"very ")));	// Before "gamma".
+	st.ops.push(res!(r3[0].delete(6, 4)));			// "beta".
+	let out = res!(converge(&st.ops));
+	assert_eq!(out.stats().ops, 5);
+	let file = match out.file(st.file) {
+		Some(f)	=> f,
+		None	=> return Err(err!("The file went missing."; Test, Missing)),
+	};
+	assert_eq!(file.len(), 16 + 5 - 4 - 6 + 6);
 	Ok(())
 }
 
@@ -470,20 +591,21 @@ fn random_operation_sets_render_alike_and_conserve() -> Outcome<()> {
 		(seed_state >> 33) as usize
 	};
 	for trial in 0..60 {
-		let (mut reps, first) = res!(seed(b"0123456789abcdefghij", 3));
-		let mut ops = vec![first];
+		let mut st = res!(seed(b"0123456789abcdefghij", 3));
+		let staged = st.ops.len();
 		// How much of the operation list each replica has received. Operations
 		// are delivered as a prefix, because an operation is anchored in what
 		// its author could see, so a prefix is always causally complete.
-		let mut upto = vec![1usize; reps.len()];
+		let mut upto = vec![staged; st.reps.len()];
 		for _ in 0..16 {
-			let who = next() % reps.len();
-			let target = upto[who] + next() % (ops.len() - upto[who] + 1);
+			let who = next() % st.reps.len();
+			let target = upto[who] + next() % (st.ops.len() - upto[who] + 1);
 			while upto[who] < target {
-				res!(reps[who].recv(ops[upto[who]].clone()));
+				let op = st.ops[upto[who]].clone();
+				res!(st.reps[who].recv(op));
 				upto[who] += 1;
 			}
-			let view = res!(reps[who].view());
+			let view = res!(st.reps[who].view());
 			let n = view.len();
 			if n == 0 {
 				continue;
@@ -506,26 +628,27 @@ fn random_operation_sets_render_alike_and_conserve() -> Outcome<()> {
 					res!(view.move_range(at, len, next() % (n + 1)))
 				},
 			};
-			ops.push(res!(reps[who].author(op)));
+			let made = res!(st.reps[who].author(op));
+			st.ops.push(made);
 		}
 		// Every replica ends up holding everything, in a different order each
 		// time, and must agree.
-		let mut want: Option<Rendered> = None;
+		let mut want: Option<Repo> = None;
 		for round in 0..4 {
 			let mut seq = Sequence::new();
-			let mut order: Vec<usize> = (0..ops.len()).collect();
+			let mut order: Vec<usize> = (0..st.ops.len()).collect();
 			for i in (1..order.len()).rev() {
 				order.swap(i, next() % (i + 1));
 			}
 			for i in order {
-				res!(seq.apply(ops[i].0.clone(), ops[i].1.clone()));
+				res!(seq.apply(st.ops[i].0.clone(), st.ops[i].1.clone()));
 			}
 			let got = res!(seq.render());
 			res!(seq.check_conservation(&got));
 			match &want {
 				None => want = Some(got),
 				Some(first) => {
-					assert_eq!(first.bytes(), got.bytes(),
+					assert_eq!(listing(first), listing(&got),
 						"trial {} round {} disagreed on the bytes", trial, round);
 					assert_eq!(first.flags(), got.flags(),
 						"trial {} round {} disagreed on the flags", trial, round);
@@ -541,21 +664,23 @@ fn random_operation_sets_render_alike_and_conserve() -> Outcome<()> {
 /// dead.
 #[test]
 fn conservation_holds_through_a_tear_and_a_cycle() -> Outcome<()> {
-	let (mut reps, first) = res!(seed(ALPHA, 3));
-	let (r1, rest) = reps.split_at_mut(1);
+	let mut st = res!(seed(ALPHA, 3));
+	let (r1, rest) = st.reps.split_at_mut(1);
 	let (r2, r3) = rest.split_at_mut(1);
-	let m1 = res!(r1[0].move_range(0, 10, 20));
-	let m2 = res!(r2[0].move_range(5, 10, 0));
-	let m3 = res!(r3[0].move_range(10, 5, 2));
-	let del = res!(r3[0].delete(18, 2));
+	st.ops.push(res!(r1[0].move_range(0, 10, 20)));
+	st.ops.push(res!(r2[0].move_range(5, 10, 0)));
+	st.ops.push(res!(r3[0].move_range(10, 5, 2)));
+	st.ops.push(res!(r3[0].delete(18, 2)));
 	let mut seq = Sequence::new();
-	for op in [first, m1, m2, m3, del] {
-		res!(seq.apply(op.0, op.1));
+	for op in &st.ops {
+		res!(seq.apply(op.0.clone(), op.1.clone()));
 	}
 	let out = res!(seq.render());
 	res!(seq.check_conservation(&out));
+	// Two bytes died, and one more is the file's origin anchor, which is born
+	// dead and never rendered.
 	assert_eq!(
-		out.len() as u64 + 2,
+		out.stats().rendered + 2 + 1,
 		out.stats().atom_bytes,
 		"every byte is rendered once or dead",
 	);
@@ -563,23 +688,36 @@ fn conservation_holds_through_a_tear_and_a_cycle() -> Outcome<()> {
 }
 
 /// A conservation failure is reported rather than rendered. The check is fed a
-/// render short of a byte, which is what a slot detached from the tree would
+/// render short of a byte, which is what a slot detached from the forest would
 /// produce, and it says so.
 #[test]
 fn conservation_notices_a_missing_byte() -> Outcome<()> {
-	let (_, first) = res!(seed(b"abcdef", 0));
-	let seed_id = first.0.id;
+	let st = res!(seed(b"abcdef", 0));
+	let seed_id = st.seed;
 	let mut seq = Sequence::new();
-	res!(seq.apply(first.0, first.1));
+	for op in &st.ops {
+		res!(seq.apply(op.0.clone(), op.1.clone()));
+	}
 	let out = res!(seq.render());
-	let short = Rendered::new(
-		out.bytes()[..5].to_vec(),
-		vec![Run {
-			at:			0,
-			content:	res!(ContentRange::new(seed_id, 0, 5)),
-		}],
+	let file = match out.file(st.file) {
+		Some(f)	=> f,
+		None	=> return Err(err!("The file went missing."; Test, Missing)),
+	};
+	let short = Repo::new(
+		vec![Rendered::new(
+			st.file,
+			b"f".to_vec(),
+			true,
+			file.bytes()[..5].to_vec(),
+			vec![Run {
+				at:			0,
+				content:	res!(ContentRange::new(seed_id, 0, 5)),
+			}],
+			Vec::new(),
+		)],
 		Vec::new(),
-		*out.stats(),
+		BTreeMap::new(),
+		Stats::default(),
 	);
 	assert!(seq.check_conservation(&short).is_err(),
 		"five of six bytes accounted for is not conservation");
@@ -590,12 +728,12 @@ fn conservation_notices_a_missing_byte() -> Outcome<()> {
 /// resolved, and says which operation named what rather than guessing.
 #[test]
 fn a_causally_incomplete_set_is_refused() -> Outcome<()> {
-	let (mut reps, first) = res!(seed(LIST, 1));
-	let ins = res!(reps[0].insert(9, b"!"));
-	let mv = res!(reps[0].move_range(7, 7, 0));
+	let mut st = res!(seed(LIST, 1));
+	let ins = res!(st.reps[0].insert(9, b"!"));
+	let mv = res!(st.reps[0].move_range(7, 7, 0));
 	// The insertion names the seeding splice as its parent, and its anchor names
 	// the content that splice created.
-	assert_eq!(ins.0.parents, vec![first.0.id]);
+	assert_eq!(ins.0.parents(), &[st.seed]);
 	let mut without_seed = Sequence::new();
 	res!(without_seed.apply(ins.0.clone(), ins.1.clone()));
 	assert!(without_seed.render().is_err(),
@@ -605,11 +743,39 @@ fn a_causally_incomplete_set_is_refused() -> Outcome<()> {
 	res!(moved.apply(mv.0, mv.1));
 	assert!(moved.render().is_err(),
 		"a move naming an absent atom cannot be resolved");
-	// With the seeding splice present, both render.
+	// With the whole staging present, both render.
 	let mut whole = Sequence::new();
-	res!(whole.apply(first.0, first.1));
+	for op in &st.ops {
+		res!(whole.apply(op.0.clone(), op.1.clone()));
+	}
 	res!(whole.apply(ins.0, ins.1));
 	assert!(whole.render().is_ok());
+	Ok(())
+}
+
+/// A file's origin anchor is content the set has to hold like any other, so an
+/// operation anchored at the start of a file nobody created is refused.
+#[test]
+fn an_operation_anchored_in_an_absent_file_is_refused() -> Outcome<()> {
+	let ghost = OpId::new(ReplicaId::new(9), 1);
+	let mut seq = Sequence::new();
+	res!(seq.apply(Header::root(OpId::new(ReplicaId::new(1), 1)), Op::Splice {
+		left:	Some(Anchor::origin(ghost)),
+		right:	None,
+		remove:	Vec::new(),
+		insert:	b"orphan".to_vec(),
+	}));
+	assert!(seq.render().is_err(),
+		"the origin anchor names a file no operation created");
+	// So is a rename or a deletion of a file nobody created.
+	for op in [
+		Op::FileRename { file: ghost, path: b"g".to_vec() },
+		Op::FileDelete { file: ghost },
+	] {
+		let mut seq = Sequence::new();
+		res!(seq.apply(Header::root(OpId::new(ReplicaId::new(1), 1)), op));
+		assert!(seq.render().is_err());
+	}
 	Ok(())
 }
 
@@ -618,19 +784,21 @@ fn a_causally_incomplete_set_is_refused() -> Outcome<()> {
 /// is present.
 #[test]
 fn an_operation_ahead_of_its_parent_is_refused() -> Outcome<()> {
-	let (mut reps, first) = res!(seed(LIST, 1));
+	let mut st = res!(seed(LIST, 1));
 	// Two operations from one replica: the second was written knowing the first.
-	let one = res!(reps[0].insert(0, b"# "));
-	let two = res!(reps[0].insert(0, b"! "));
-	assert_eq!(two.0.parents, vec![one.0.id]);
+	let one = res!(st.reps[0].insert(0, b"# "));
+	let two = res!(st.reps[0].insert(0, b"! "));
+	assert_eq!(two.0.parents(), &[one.0.id()]);
 	let mut without_middle = Sequence::new();
-	res!(without_middle.apply(first.0.clone(), first.1.clone()));
+	for op in &st.ops {
+		res!(without_middle.apply(op.0.clone(), op.1.clone()));
+	}
 	res!(without_middle.apply(two.0.clone(), two.1.clone()));
 	assert!(without_middle.render().is_err(),
 		"the operation names a parent the set does not hold");
 	// The same set with the middle operation restored renders.
 	let mut whole = Sequence::new();
-	for op in [first, one, two] {
+	for op in st.ops.iter().cloned().chain([one, two]) {
 		res!(whole.apply(op.0, op.1));
 	}
 	assert!(whole.render().is_ok());
@@ -641,100 +809,137 @@ fn an_operation_ahead_of_its_parent_is_refused() -> Outcome<()> {
 /// same reason: the set does not hold the byte.
 #[test]
 fn an_anchor_past_the_end_of_its_atom_is_refused() -> Outcome<()> {
-	let (_, first) = res!(seed(b"abc", 0));
-	let seed_id = first.0.id;
+	let st = res!(seed(b"abc", 0));
 	let mut seq = Sequence::new();
-	res!(seq.apply(first.0, first.1));
-	let stray = Edit::Splice {
-		left:	Some(Anchor::after(ContentId::new(seed_id, 99))),
+	for op in &st.ops {
+		res!(seq.apply(op.0.clone(), op.1.clone()));
+	}
+	let stray = Op::Splice {
+		left:	Some(Anchor::after(ContentId::new(st.seed, 99))),
 		right:	None,
 		remove:	Vec::new(),
 		insert:	b"x".to_vec(),
 	};
-	let head = res!(Header::new(OpId::new(ReplicaId::new(1), 2), vec![seed_id]));
+	let head = res!(Header::new(OpId::new(ReplicaId::new(1), 3), vec![st.seed]));
 	res!(seq.apply(head, stray));
 	assert!(seq.render().is_err());
 	Ok(())
 }
 
-/// Both content operations, recorded in the durable vocabulary and put through
-/// the wire codec, come back as the same operations and render the same file.
+/// Every operation the sequence consumes, written down as a record and put
+/// through the wire codec, comes back as the same operation and renders the same
+/// repository.
 #[test]
-fn the_wire_vocabulary_renders_the_same_file() -> Outcome<()> {
-	let (mut reps, first) = res!(seed(LIST, 1));
-	let mv = res!(reps[0].move_range(7, 7, 0));
-	let ed = res!(reps[0].replace(2, 4, b"Soy"));
-	// Every operation of the sequence is written down as a record, encoded, and
-	// read back through the log's own vocabulary.
+fn the_wire_vocabulary_renders_the_same_repository() -> Outcome<()> {
+	let mut st = res!(seed(LIST, 1));
+	st.ops.push(res!(st.reps[0].move_range(7, 7, 0)));
+	st.ops.push(res!(st.reps[0].replace(2, 4, b"Soy")));
 	let mut replayed = Sequence::new();
-	for (head, edit) in [first, mv, ed] {
-		let op = edit.clone().into_op(fmt!("shopping.txt"));
-		let rec = Record::new(head, op);
+	for (head, op) in &st.ops {
+		let rec = Record::new(head.clone(), op.clone());
 		let back = res!(Record::decode_all(&res!(rec.encode())));
 		assert_eq!(rec, back);
 		assert_eq!(res!(Record::from_dat(&rec.to_dat())), rec);
-		// The recovered operation is the edit it started as, field for field.
-		match Edit::from_op(&back.op) {
-			Some(recovered)	=> assert_eq!(recovered, edit),
-			None => return Err(err!(
-				"An Op::{} should have crossed into the sequence.", back.op.name();
-			Test, Mismatch)),
-		}
-		assert!(res!(replayed.apply_record(&back)), "a content operation crosses");
+		res!(replayed.apply_record(&back));
 	}
-	assert_eq!(res!(replayed.render()).text_lossy(), "- Soy\n- Eggs\n- Cheese\n");
+	let repo = res!(replayed.render());
+	match repo.file(st.file) {
+		Some(f)	=> assert_eq!(f.text_lossy(), "- Soy\n- Eggs\n- Cheese\n"),
+		None	=> return Err(err!("The file went missing."; Test, Missing)),
+	}
 	Ok(())
 }
 
-/// The bridge between the two vocabularies is an exact inverse in both
-/// directions, for both content operations, and carries the path across.
+/// What a frontend authors names content and never a file, and the file it lands
+/// in is what the render works out.
 #[test]
-fn an_edit_and_an_operation_are_the_same_thing() -> Outcome<()> {
-	let (mut reps, _) = res!(seed(LIST, 1));
-	let (_, mv) = res!(reps[0].move_range(7, 7, 0));
-	let (_, sp) = res!(reps[0].replace(2, 4, b"Soy"));
-	for edit in [mv, sp] {
-		let op = edit.clone().into_op(fmt!("shopping.txt"));
-		assert_eq!(op.file(), Some("shopping.txt"));
-		assert_eq!(op.name(), edit.name(), "a Move is a Move and a Splice a Splice");
-		match Edit::from_op(&op) {
-			Some(back)	=> assert_eq!(back, edit, "the round trip changed the operation"),
-			None		=> return Err(err!(
-				"An Op::{} should have crossed back into the sequence.", op.name();
-			Test, Mismatch)),
-		}
+fn an_authored_operation_names_no_file() -> Outcome<()> {
+	let mut st = res!(seed(LIST, 1));
+	let (_, mv) = res!(st.reps[0].move_range(7, 7, 0));
+	let (_, sp) = res!(st.reps[0].replace(2, 4, b"Soy"));
+	for op in [&mv, &sp] {
+		assert_eq!(op.names_file(), None);
+		res!(op.check_placement());
 	}
-	// The path is whatever it is given, and nothing about the edit says what it
-	// should be.
-	let (_, edit) = res!(reps[0].insert(0, b"x"));
-	assert_eq!(edit.into_op(fmt!("elsewhere/notes.md")).file(), Some("elsewhere/notes.md"));
+	// A splice at the start of a file is anchored after that file's origin
+	// anchor, which is how it says where it lands without saying which file.
+	let (_, ins) = res!(st.reps[0].insert(0, b"x"));
+	assert_eq!(ins.origins().0, Some(Anchor::origin(st.file)));
+	assert_eq!(ins.names_file(), None);
 	Ok(())
 }
 
-/// Two branches of one file meet by absorbing one another's operations, and what
-/// the union renders is what each branch renders once it has heard the other.
+/// Every operation the log holds belongs to the repository, including the
+/// lifecycle changes, and a mark says nothing about any byte.
 #[test]
-fn two_divergent_branches_absorb_into_one_sequence() -> Outcome<()> {
-	let (mut reps, _) = res!(seed(LIST, 2));
+fn every_operation_crosses_into_the_repository() -> Outcome<()> {
+	let mut seq = Sequence::new();
+	let file = OpId::new(ReplicaId::new(1), 1);
+	let ops = vec![
+		(Header::root(file), Op::FileCreate { path: b"f".to_vec() }),
+		(
+			res!(Header::new(OpId::new(ReplicaId::new(1), 2), vec![file])),
+			Op::Mark { name: fmt!("v1") },
+		),
+		(
+			res!(Header::new(OpId::new(ReplicaId::new(1), 3), vec![
+				OpId::new(ReplicaId::new(1), 2),
+			])),
+			Op::FileRename { file, path: b"g".to_vec() },
+		),
+		(
+			res!(Header::new(OpId::new(ReplicaId::new(1), 4), vec![
+				OpId::new(ReplicaId::new(1), 3),
+			])),
+			Op::FileDelete { file },
+		),
+	];
+	for (head, op) in &ops {
+		res!(seq.apply_record(&Record::new(head.clone(), op.clone())));
+	}
+	assert_eq!(seq.len(), 4, "a mark is kept, so the causal graph has no holes");
+	let repo = res!(seq.render());
+	match repo.file(file) {
+		Some(f) => {
+			assert_eq!(f.path(), b"g", "the rename moved it");
+			assert!(!f.is_live(), "the deletion retired it");
+			assert!(f.is_empty());
+		},
+		None => return Err(err!("The file went missing."; Test, Missing)),
+	}
+	assert!(repo.live().is_empty());
+	Ok(())
+}
+
+/// Two branches meet by absorbing one another's operations, and what the union
+/// renders is what each branch renders once it has heard the other.
+#[test]
+fn two_divergent_branches_absorb_into_one_repository() -> Outcome<()> {
+	let mut st = res!(seed(LIST, 2));
 	// Each branch edits without having seen the other.
-	let left = res!(reps[0].insert(0, b"- Bread\n"));
-	let right = res!(reps[1].delete(7, 7));
-	// A third party takes the union, and the seed is not taken twice.
+	let left = res!(st.reps[0].insert(0, b"- Bread\n"));
+	let right = res!(st.reps[1].delete(7, 7));
+	// A third party takes the union, and the staging is not taken twice.
 	let mut both = Sequence::new();
-	assert_eq!(res!(both.absorb(&reps[0].seq)), 2, "the seed and the branch's own edit");
-	assert_eq!(res!(both.absorb(&reps[1].seq)), 1, "the seed is already held");
-	assert_eq!(both.len(), 3);
+	assert_eq!(res!(both.absorb(&st.reps[0].seq)), 3,
+		"the file, the seeding splice and the branch's own edit");
+	assert_eq!(res!(both.absorb(&st.reps[1].seq)), 1, "the staging is already held");
+	assert_eq!(both.len(), 4);
 	// Which is what each branch renders once it has received the other's edit.
-	res!(reps[0].recv(right));
-	res!(reps[1].recv(left));
+	res!(st.reps[0].recv(right));
+	res!(st.reps[1].recv(left));
 	let merged = res!(both.render());
-	assert_eq!(merged.text_lossy(), res!(reps[0].view()).text_lossy());
-	assert_eq!(merged.text_lossy(), res!(reps[1].view()).text_lossy());
-	assert_eq!(merged.text_lossy(), "- Bread\n- Eggs\n- Cheese\n");
+	let want = match merged.file(st.file) {
+		Some(f)	=> f.text_lossy(),
+		None	=> return Err(err!("The file went missing."; Test, Missing)),
+	};
+	assert_eq!(want, res!(st.reps[0].view()).text_lossy());
+	assert_eq!(want, res!(st.reps[1].view()).text_lossy());
+	assert_eq!(want, "- Bread\n- Eggs\n- Cheese\n");
 	// Absorbing what is already held says so, and changes nothing.
 	let before = both.clone();
-	assert_eq!(res!(both.absorb(&reps[0].seq)), 0);
-	assert_eq!(res!(both.absorb(&reps[1].seq)), 0);
+	assert_eq!(res!(both.absorb(&st.reps[0].seq)), 0);
+	assert_eq!(res!(both.absorb(&st.reps[1].seq)), 0);
 	assert_eq!(both, before);
 	Ok(())
 }
@@ -742,16 +947,16 @@ fn two_divergent_branches_absorb_into_one_sequence() -> Outcome<()> {
 /// Absorption is the union of two sets, so it does not matter which way round it
 /// is taken, nor in how many steps.
 #[test]
-fn absorbing_either_way_round_gives_one_sequence() -> Outcome<()> {
-	let (mut reps, _) = res!(seed(ALPHA, 2));
-	res!(reps[0].insert(4, b"xy"));
-	res!(reps[1].move_range(0, 3, 10));
-	let mut left = reps[0].seq.clone();
-	res!(left.absorb(&reps[1].seq));
-	let mut right = reps[1].seq.clone();
-	res!(right.absorb(&reps[0].seq));
+fn absorbing_either_way_round_gives_one_repository() -> Outcome<()> {
+	let mut st = res!(seed(ALPHA, 2));
+	res!(st.reps[0].insert(4, b"xy"));
+	res!(st.reps[1].move_range(0, 3, 10));
+	let mut left = st.reps[0].seq.clone();
+	res!(left.absorb(&st.reps[1].seq));
+	let mut right = st.reps[1].seq.clone();
+	res!(right.absorb(&st.reps[0].seq));
 	assert_eq!(left, right, "the union is the union");
-	assert_eq!(res!(left.render()).bytes(), res!(right.render()).bytes());
+	assert_eq!(listing(&res!(left.render())), listing(&res!(right.render())));
 	Ok(())
 }
 
@@ -759,33 +964,39 @@ fn absorbing_either_way_round_gives_one_sequence() -> Outcome<()> {
 /// history, and the merge is refused whole rather than half taken.
 #[test]
 fn absorbing_a_clashing_identity_is_refused() -> Outcome<()> {
-	let (_, first) = res!(seed(b"abc", 0));
-	let seed_id = first.0.id;
-	let head = res!(Header::new(OpId::new(ReplicaId::new(1), 2), vec![seed_id]));
-	let insert = |bytes: &[u8]| Edit::Splice {
+	let st = res!(seed(b"abc", 0));
+	let seed_id = st.seed;
+	let head = res!(Header::new(OpId::new(ReplicaId::new(1), 3), vec![seed_id]));
+	let insert = |bytes: &[u8]| Op::Splice {
 		left:	Some(Anchor::after(ContentId::new(seed_id, 0))),
 		right:	None,
 		remove:	Vec::new(),
 		insert:	bytes.to_vec(),
 	};
 	let mut mine = Sequence::new();
-	res!(mine.apply(first.0.clone(), first.1.clone()));
+	for op in &st.ops {
+		res!(mine.apply(op.0.clone(), op.1.clone()));
+	}
 	res!(mine.apply(head.clone(), insert(b"one")));
-	// The other sequence holds the seed, something new, and a clash.
+	// The other repository holds the staging, something new, and a clash.
 	let mut theirs = Sequence::new();
-	res!(theirs.apply(first.0, first.1));
+	for op in &st.ops {
+		res!(theirs.apply(op.0.clone(), op.1.clone()));
+	}
 	res!(theirs.apply(head, insert(b"two")));
-	let other = res!(Header::new(OpId::new(ReplicaId::new(2), 3), vec![seed_id]));
+	let other = res!(Header::new(OpId::new(ReplicaId::new(2), 4), vec![seed_id]));
 	res!(theirs.apply(other.clone(), insert(b"three")));
 	assert!(mine.absorb(&theirs).is_err());
-	assert_eq!(mine.len(), 2, "nothing at all was taken");
-	assert!(!mine.contains(&other.id));
+	assert_eq!(mine.len(), 3, "nothing at all was taken");
+	assert!(!mine.contains(&other.id()));
 	Ok(())
 }
 
-/// A repository of two files, replayed out of the log. Each file's sequence holds
-/// only its own operations, so the graph to judge causality by is the log's and
-/// not the sequence's own.
+/// A repository of two files, replayed out of the log into one sequence.
+///
+/// There is no routing step: every record goes to the same place, and which file
+/// each operation landed in is what the render works out and reports, which is
+/// the association a wire field would have asserted.
 #[test]
 fn a_repository_of_two_files_replays_from_the_log() -> Outcome<()> {
 	use crate::log::OpLog;
@@ -795,79 +1006,59 @@ fn a_repository_of_two_files_replays_from_the_log() -> Outcome<()> {
 	let r2 = ReplicaId::new(2);
 	// A file each, written alternately, so that every operation's parents name
 	// operations of the other file.
-	let a = res!(log.author(r1, Op::FileCreate { path: fmt!("a.txt") }));
-	let b = res!(log.author(r2, Op::FileCreate { path: fmt!("b.txt") }));
+	let a = res!(log.author(r1, Op::FileCreate { path: b"a.txt".to_vec() }));
+	let b = res!(log.author(r2, Op::FileCreate { path: b"b.txt".to_vec() }));
 	let a_seed = res!(log.author(r1, Op::Splice {
-		file:	fmt!("a.txt"),
-		left:	None,
+		left:	Some(Anchor::origin(a.id())),
 		right:	None,
 		remove:	Vec::new(),
 		insert:	b"alpha".to_vec(),
 	}));
 	let b_seed = res!(log.author(r2, Op::Splice {
-		file:	fmt!("b.txt"),
-		left:	None,
+		left:	Some(Anchor::origin(b.id())),
 		right:	None,
 		remove:	Vec::new(),
 		insert:	b"beta".to_vec(),
 	}));
-	// Each operation is written against the whole frontier, which after the second
-	// file was created is that creation alone.
-	assert_eq!(b.parents, vec![a.id]);
-	assert_eq!(a_seed.parents, vec![b.id]);
-	assert_eq!(b_seed.parents, vec![a_seed.id]);
-	res!(log.author(r1, Op::Splice {
-		file:	fmt!("a.txt"),
-		left:	Some(Anchor::after(ContentId::new(a_seed.id, 4))),
+	// Each operation is written against the whole frontier, which after the
+	// second file was created is that creation alone.
+	assert_eq!(b.parents(), &[a.id()]);
+	assert_eq!(a_seed.parents(), &[b.id()]);
+	assert_eq!(b_seed.parents(), &[a_seed.id()]);
+	let tail = res!(log.author(r1, Op::Splice {
+		left:	Some(Anchor::after(ContentId::new(a_seed.id(), 4))),
 		right:	None,
 		remove:	Vec::new(),
 		insert:	b" and omega".to_vec(),
 	}));
-	// Replay: each record goes to the sequence of the file it names.
-	let mut a_seq = Sequence::new();
-	let mut b_seq = Sequence::new();
+	// Replay: every record goes to the one repository.
+	let mut seq = Sequence::new();
 	for rec in log.iter() {
-		match rec.op.file() {
-			Some("a.txt")	=> { res!(a_seq.apply_record(rec)); },
-			Some("b.txt")	=> { res!(b_seq.apply_record(rec)); },
-			Some(other) => return Err(err!(
-				"An operation names the unexpected file {:?}.", other; Test, Mismatch)),
-			None => assert!(!res!(a_seq.apply_record(rec)), "a lifecycle operation"),
-		}
+		res!(seq.apply_record(rec));
 	}
-	assert_eq!(a_seq.len(), 2);
-	assert_eq!(b_seq.len(), 1);
-	// Judged by its own operations, each file looks incomplete, because its
-	// parents name the other file.
-	assert!(a_seq.render().is_err());
-	assert!(b_seq.render().is_err());
-	// Judged by the log's graph, both render.
+	assert_eq!(seq.len(), 5);
+	let repo = res!(seq.render());
+	match repo.file(a.id()) {
+		Some(f)	=> assert_eq!(f.text_lossy(), "alpha and omega"),
+		None	=> return Err(err!("The file a.txt went missing."; Test, Missing)),
+	}
+	match repo.file(b.id()) {
+		Some(f)	=> assert_eq!(f.text_lossy(), "beta"),
+		None	=> return Err(err!("The file b.txt went missing."; Test, Missing)),
+	}
+	// The derived association: which file each placement landed in, computed by
+	// the render rather than asserted on the wire.
+	assert_eq!(repo.file_of(&a_seed.id()), Some(a.id()));
+	assert_eq!(repo.file_of(&b_seed.id()), Some(b.id()));
+	assert_eq!(repo.file_of(&tail.id()), Some(a.id()));
+	assert_eq!(repo.index().len(), 5, "two files and three placements");
+	// Rendering against the log's own graph gives the same answer.
 	let cause = log.causality();
-	assert_eq!(res!(a_seq.render_with(&cause)).text_lossy(), "alpha and omega");
-	assert_eq!(res!(b_seq.render_with(&cause)).text_lossy(), "beta");
+	assert_eq!(listing(&res!(seq.render_with(&cause))), listing(&repo));
 	// A graph that does not describe an operation the sequence holds is refused
 	// rather than guessed at.
 	let empty = Sequence::new();
-	assert!(a_seq.render_with(&empty.causality()).is_err());
-	Ok(())
-}
-
-/// An operation that says nothing about the order of bytes does not cross into
-/// the sequence, and the sequence says so rather than failing.
-#[test]
-fn a_lifecycle_operation_does_not_cross_into_the_sequence() -> Outcome<()> {
-	let mut seq = Sequence::new();
-	for op in [
-		Op::FileCreate { path: fmt!("f") },
-		Op::FileDelete { path: fmt!("f") },
-		Op::FileRename { from: fmt!("f"), to: fmt!("g") },
-		Op::Mark { name: fmt!("v1") },
-	] {
-		assert!(Edit::from_op(&op).is_none(), "an Op::{} carries no order", op.name());
-		let rec = Record::root(OpId::new(ReplicaId::new(1), 1), op);
-		assert!(!res!(seq.apply_record(&rec)));
-	}
-	assert!(seq.is_empty(), "nothing of any of them reached the structure");
+	assert!(seq.render_with(&empty.causality()).is_err());
 	Ok(())
 }
 
@@ -875,74 +1066,90 @@ fn a_lifecycle_operation_does_not_cross_into_the_sequence() -> Outcome<()> {
 /// different operations under one identity is refused.
 #[test]
 fn an_identity_names_one_operation() -> Outcome<()> {
-	let (_, first) = res!(seed(b"abc", 0));
+	let st = res!(seed(b"abc", 0));
+	let first = st.ops[1].clone();
 	let mut seq = Sequence::new();
+	for op in &st.ops {
+		res!(seq.apply(op.0.clone(), op.1.clone()));
+	}
 	res!(seq.apply(first.0.clone(), first.1.clone()));
-	res!(seq.apply(first.0.clone(), first.1.clone()));
-	assert_eq!(seq.len(), 1);
-	let other = Edit::Splice {
-		left:	None,
+	assert_eq!(seq.len(), 2);
+	let other = Op::Splice {
+		left:	Some(Anchor::origin(st.file)),
 		right:	None,
 		remove:	Vec::new(),
 		insert:	b"different".to_vec(),
 	};
 	assert!(seq.apply(first.0.clone(), other).is_err());
 	// Two headers differing only in their parents are two operations too.
-	let reparented = res!(Header::new(first.0.id, vec![OpId::new(ReplicaId::new(9), 1)]));
+	let reparented = res!(Header::new(first.0.id(), vec![OpId::new(ReplicaId::new(9), 1)]));
 	assert!(seq.apply(reparented, first.1).is_err());
 	Ok(())
 }
 
-/// Origins bind on one side each, and a move may not name a byte twice.
+/// Origins bind on one side each, a move may not name a byte twice, and an
+/// operation that places bytes names at least one origin.
 #[test]
 fn an_operation_the_structure_cannot_resolve_is_refused() -> Outcome<()> {
 	let id = OpId::new(ReplicaId::new(1), 1);
 	let cid = ContentId::new(id, 0);
 	let mut seq = Sequence::new();
-	let wrong_left = Edit::Splice {
+	let head = || Header::root(OpId::new(ReplicaId::new(2), 2));
+	assert!(seq.apply(head(), Op::Splice {
 		left:	Some(Anchor::before(cid)),
 		right:	None,
 		remove:	Vec::new(),
 		insert:	b"x".to_vec(),
-	};
-	assert!(seq.apply(Header::root(OpId::new(ReplicaId::new(2), 2)), wrong_left).is_err());
-	let wrong_right = Edit::Splice {
+	}).is_err());
+	assert!(seq.apply(head(), Op::Splice {
 		left:	None,
 		right:	Some(Anchor::after(cid)),
 		remove:	Vec::new(),
 		insert:	b"x".to_vec(),
-	};
-	assert!(seq.apply(Header::root(OpId::new(ReplicaId::new(2), 2)), wrong_right).is_err());
-	let twice = Edit::Move {
+	}).is_err());
+	assert!(seq.apply(head(), Op::Move {
 		src:	vec![
 			res!(ContentRange::new(id, 0, 4)),
 			res!(ContentRange::new(id, 2, 6)),
 		],
+		left:	Some(Anchor::origin(id)),
+		right:	None,
+	}).is_err());
+	// And one that places bytes without naming where.
+	assert!(seq.apply(head(), Op::Splice {
 		left:	None,
 		right:	None,
-	};
-	assert!(seq.apply(Header::root(OpId::new(ReplicaId::new(2), 2)), twice).is_err());
+		remove:	Vec::new(),
+		insert:	b"x".to_vec(),
+	}).is_err());
+	assert!(seq.is_empty());
 	Ok(())
 }
 
 /// A move whose destination sits inside its own source is a cycle of length one.
-/// Left unseen it detaches the move's slots from the tree and loses their bytes;
-/// the demotion rule sees it, and every byte survives.
+/// Left unseen it detaches the move's slots from the forest and loses their
+/// bytes; the demotion rule sees it, and every byte survives.
 #[test]
 fn a_move_into_its_own_source_keeps_its_bytes() -> Outcome<()> {
-	let (mut reps, first) = res!(seed(ALPHA, 1));
-	let view = res!(reps[0].view());
+	let mut st = res!(seed(ALPHA, 1));
+	let view = res!(st.reps[0].view());
 	// Take "0123456789" and land it in the middle of itself.
 	let src = res!(view.span(0, 10));
 	let (left, right) = res!(view.gap(5));
-	let op = res!(reps[0].author(Edit::Move { src, left, right }));
-	let op_id = op.0.id;
+	let op = res!(st.reps[0].author(Op::Move { src, left, right }));
+	let op_id = op.0.id();
 	let mut seq = Sequence::new();
-	res!(seq.apply(first.0, first.1));
+	for staged in &st.ops {
+		res!(seq.apply(staged.0.clone(), staged.1.clone()));
+	}
 	res!(seq.apply(op.0, op.1));
 	let out = res!(seq.render());
 	res!(seq.check_conservation(&out));
-	assert_eq!(out.len(), 20, "the moved bytes must not vanish");
+	let file = match out.file(st.file) {
+		Some(f)	=> f,
+		None	=> return Err(err!("The file went missing."; Test, Missing)),
+	};
+	assert_eq!(file.len(), 20, "the moved bytes must not vanish");
 	assert_eq!(out.flags(), &[
 		Flag::Demoted { op: op_id, sub: 0, origin: Origin::Left },
 		Flag::Demoted { op: op_id, sub: 0, origin: Origin::Right },
@@ -953,24 +1160,31 @@ fn a_move_into_its_own_source_keeps_its_bytes() -> Outcome<()> {
 /// The render reports what it cost in the terms the cost model is stated in.
 #[test]
 fn the_render_reports_what_it_cost() -> Outcome<()> {
-	let (mut reps, first) = res!(seed(LIST, 2));
-	let (r1, r2) = reps.split_at_mut(1);
-	let mv = res!(r1[0].move_range(7, 7, 0));
-	let ed = res!(r2[0].replace(9, 1, b"Soy m"));
+	let mut st = res!(seed(LIST, 2));
+	let (r1, r2) = st.reps.split_at_mut(1);
+	st.ops.push(res!(r1[0].move_range(7, 7, 0)));
+	st.ops.push(res!(r2[0].replace(9, 1, b"Soy m")));
 	let mut seq = Sequence::new();
-	for op in [first, mv, ed] {
-		res!(seq.apply(op.0, op.1));
+	for op in &st.ops {
+		res!(seq.apply(op.0.clone(), op.1.clone()));
 	}
 	let out = res!(seq.render());
 	let stats = out.stats();
-	assert_eq!(stats.ops, 3);
-	assert_eq!(stats.atoms, 2, "the two splices, not the move");
-	assert_eq!(stats.atom_bytes, LIST.len() as u64 + 5);
+	assert_eq!(stats.ops, 4);
+	assert_eq!(stats.files, 1);
+	assert_eq!(stats.atoms, 3, "the file's origin anchor and the two splices");
+	assert_eq!(stats.atom_bytes, LIST.len() as u64 + 5 + 1,
+		"the origin anchor is a byte like any other, and is born dead");
 	assert!(stats.slots_divided >= stats.slots_placed,
 		"dividing a slot never yields fewer");
 	assert_eq!(stats.claim_intervals, 1, "one contiguous run moved");
-	assert_eq!(stats.dead_intervals, 1, "one byte died");
-	assert_eq!(stats.rendered, out.len() as u64);
+	assert_eq!(stats.dead_intervals, 2, "one byte died, and the origin anchor");
+	assert_eq!(stats.withheld, 0, "no file was deleted");
+	assert_eq!(stats.orphaned, 0);
+	match out.file(st.file) {
+		Some(f)	=> assert_eq!(stats.rendered, f.len() as u64),
+		None	=> return Err(err!("The file went missing."; Test, Missing)),
+	}
 	Ok(())
 }
 
@@ -978,18 +1192,27 @@ fn the_render_reports_what_it_cost() -> Outcome<()> {
 /// made them, so an index in the render can be turned back into a name.
 #[test]
 fn provenance_follows_the_bytes() -> Outcome<()> {
-	let (mut reps, first) = res!(seed(LIST, 1));
-	let seed_id = first.0.id;
-	let mv = res!(reps[0].move_range(7, 7, 0));
+	let mut st = res!(seed(LIST, 1));
+	let seed_id = st.seed;
+	st.ops.push(res!(st.reps[0].move_range(7, 7, 0)));
 	let mut seq = Sequence::new();
-	res!(seq.apply(first.0, first.1));
-	res!(seq.apply(mv.0, mv.1));
+	for op in &st.ops {
+		res!(seq.apply(op.0.clone(), op.1.clone()));
+	}
 	let out = res!(seq.render());
-	assert_eq!(out.text_lossy(), "- Milk\n- Eggs\n- Cheese\n");
+	let file = match out.file(st.file) {
+		Some(f)	=> f,
+		None	=> return Err(err!("The file went missing."; Test, Missing)),
+	};
+	assert_eq!(file.text_lossy(), "- Milk\n- Eggs\n- Cheese\n");
 	// The first rendered byte is now the eighth byte the seeding splice made.
-	assert_eq!(res!(out.content_at(0)), ContentId::new(seed_id, 7));
-	assert_eq!(res!(out.content_at(7)), ContentId::new(seed_id, 0));
-	assert_eq!(res!(out.span(0, 7)), vec![res!(ContentRange::new(seed_id, 7, 14))]);
-	assert!(out.content_at(out.len()).is_err());
+	assert_eq!(res!(file.content_at(0)), ContentId::new(seed_id, 7));
+	assert_eq!(res!(file.content_at(7)), ContentId::new(seed_id, 0));
+	assert_eq!(res!(file.span(0, 7)), vec![res!(ContentRange::new(seed_id, 7, 14))]);
+	assert!(file.content_at(file.len()).is_err());
+	// The gap at the start of a file names that file's origin anchor, which is
+	// what an operation binds to when there is nothing else to bind to.
+	let (left, _) = res!(file.gap(0));
+	assert_eq!(left, Some(Anchor::origin(st.file)));
 	Ok(())
 }

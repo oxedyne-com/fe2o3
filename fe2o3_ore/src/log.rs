@@ -231,7 +231,7 @@ impl OpLog {
 	pub fn append(&mut self, rec: Record)
 		-> Outcome<()>
 	{
-		let id = rec.head.id;
+		let id = rec.head.id();
 		if id.counter == 0 {
 			return Err(err!(
 				"Operation counters start at one, so {} is not a valid identifier.", id;
@@ -340,7 +340,7 @@ impl OpLog {
 
 	/// Iterates over the entries authored by one replica, in append order.
 	pub fn iter_replica(&self, replica: ReplicaId) -> impl Iterator<Item = &Record> {
-		self.entries.iter().filter(move |rec| rec.head.id.replica == replica)
+		self.entries.iter().filter(move |rec| rec.head.id().replica == replica)
 	}
 
 	/// Returns the highest counter accepted for `replica`, if it has authored
@@ -393,7 +393,7 @@ impl OpLog {
 	pub fn frontier(&self) -> Vec<OpId> {
 		let mut v: Vec<OpId> = self.entries
 			.iter()
-			.map(|rec| rec.head.id)
+			.map(|rec| rec.head.id())
 			.filter(|id| !self.named.contains(id))
 			.collect();
 		v.sort();
@@ -404,7 +404,7 @@ impl OpLog {
 	pub fn causality(&self)
 		-> Causality<'_>
 	{
-		Causality::new(self.entries.iter().map(|rec| (rec.head.id, rec.parents())))
+		Causality::new(self.entries.iter().map(|rec| (rec.head.id(), rec.parents())))
 	}
 
 	/// Reports whether a set of identifiers is causally closed: every operation
@@ -506,7 +506,7 @@ mod tests {
 		assert_eq!(log.op(&b), Some(&mark("b")));
 		assert!(log.contains(&c));
 		assert_eq!(log.position(&c), Some(2));
-		let order: Vec<OpId> = log.iter().map(|rec| rec.head.id).collect();
+		let order: Vec<OpId> = log.iter().map(|rec| rec.head.id()).collect();
 		assert_eq!(order, vec![a, b, c]);
 		Ok(())
 	}
@@ -588,12 +588,12 @@ mod tests {
 		let mut log = OpLog::new();
 		let a = res!(log.author(r, mark("a")));
 		let b = res!(log.author(r, mark("b")));
-		assert_eq!(a.id, oid(5, 1));
-		assert_eq!(b.id, oid(5, 2));
+		assert_eq!(a.id(), oid(5, 1));
+		assert_eq!(b.id(), oid(5, 2));
 		assert!(a.is_root());
-		assert_eq!(b.parents, vec![a.id]);
+		assert_eq!(b.parents(), vec![a.id()]);
 		assert_eq!(log.next_id(r), oid(5, 3));
-		assert_eq!(log.frontier(), vec![b.id]);
+		assert_eq!(log.frontier(), vec![b.id()]);
 		Ok(())
 	}
 
@@ -607,10 +607,10 @@ mod tests {
 		assert_eq!(log.max_counter(), 40);
 		assert_eq!(log.next_counter(), 41);
 		let fresh = res!(log.author(ReplicaId::new(1), mark("fresh")));
-		assert_eq!(fresh.id, oid(1, 41), "one past everything seen, not one past nothing");
+		assert_eq!(fresh.id(), oid(1, 41), "one past everything seen, not one past nothing");
 		// And the replica that was ahead carries on past that in its turn.
 		let on = res!(log.author(ReplicaId::new(2), mark("on")));
-		assert_eq!(on.id, oid(2, 42));
+		assert_eq!(on.id(), oid(2, 42));
 		Ok(())
 	}
 
@@ -623,7 +623,7 @@ mod tests {
 		let mut log = OpLog::new();
 		let mut mine: Vec<u64> = Vec::new();
 		for i in 0..5 {
-			mine.push(res!(log.author(r1, mark(&fmt!("a{}", i)))).id.counter);
+			mine.push(res!(log.author(r1, mark(&fmt!("a{}", i)))).id().counter);
 			res!(log.author(r2, mark(&fmt!("b{}", i))));
 		}
 		assert_eq!(mine, vec![1, 3, 5, 7, 9], "interleaved, so not consecutive");
@@ -650,20 +650,20 @@ mod tests {
 		// Replica 9 writes alone.
 		let mut first = OpLog::new();
 		let early = res!(first.author(nine, mark("early")));
-		assert_eq!(early.id, oid(9, 1));
+		assert_eq!(early.id(), oid(9, 1));
 		// Replica 1 absorbs that, and then edits having seen it.
 		let mut second = OpLog::new();
 		let batch: Vec<Record> = first.iter().cloned().collect();
 		assert!(res!(second.absorb(batch)).is_empty());
 		let late = res!(second.author(one, mark("late")));
-		assert_eq!(late.parents, vec![early.id]);
-		assert_eq!(late.id, oid(1, 2));
+		assert_eq!(late.parents(), vec![early.id()]);
+		assert_eq!(late.id(), oid(1, 2));
 		assert!(
-			OpOrder::of(&late.id) > OpOrder::of(&early.id),
+			OpOrder::of(&late.id()) > OpOrder::of(&early.id()),
 			"the edit written afterwards must order afterwards",
 		);
 		// What per-replica minting would have given, and why it is wrong.
-		assert!(OpOrder::of(&oid(1, 1)) < OpOrder::of(&early.id));
+		assert!(OpOrder::of(&oid(1, 1)) < OpOrder::of(&early.id()));
 		Ok(())
 	}
 
@@ -678,9 +678,9 @@ mod tests {
 		res!(log.append(res!(rec(oid(3, 1), vec![seed], "right"))));
 		assert_eq!(log.frontier(), vec![oid(2, 1), oid(3, 1)]);
 		let merge = res!(log.author(ReplicaId::new(4), mark("merge")));
-		assert_eq!(merge.id, oid(4, 2), "the merge is later than what it merged");
-		assert_eq!(merge.parents, vec![oid(2, 1), oid(3, 1)]);
-		assert_eq!(log.frontier(), vec![merge.id]);
+		assert_eq!(merge.id(), oid(4, 2), "the merge is later than what it merged");
+		assert_eq!(merge.parents(), vec![oid(2, 1), oid(3, 1)]);
+		assert_eq!(log.frontier(), vec![merge.id()]);
 		Ok(())
 	}
 
@@ -739,7 +739,7 @@ mod tests {
 		res!(log.append(res!(rec(oid(2, 1), vec![oid(1, 1)], "b"))));
 		res!(log.append(res!(rec(oid(1, 2), vec![oid(2, 1)], "c"))));
 		let got: Vec<OpId> = log.iter_replica(ReplicaId::new(1))
-			.map(|rec| rec.head.id)
+			.map(|rec| rec.head.id())
 			.collect();
 		assert_eq!(got, vec![oid(1, 1), oid(1, 2)]);
 		assert_eq!(log.iter_replica(ReplicaId::new(9)).count(), 0);
@@ -828,7 +828,7 @@ mod tests {
 		res!(log.append(res!(rec(oid(1, 2), vec![oid(1, 1)], "b"))));
 		match log.at(1) {
 			Some(rec) => {
-				assert_eq!(rec.head.id, oid(1, 2));
+				assert_eq!(rec.head.id(), oid(1, 2));
 				assert_eq!(rec.op, mark("b"));
 			},
 			None => return Err(err!("Expected an entry at position 1."; Test, Missing)),
