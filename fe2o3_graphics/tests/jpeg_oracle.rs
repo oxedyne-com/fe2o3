@@ -51,6 +51,9 @@ const CASES: &[(&str, usize, usize, bool)] = &[
 	("odd_q88_444",		17, 13,	true),
 	("odd_q64_420",		17, 13,	false),
 	("odd_q88_prog",	17, 13,	false),
+	("gradient_q80_1x2",	64, 48,	false),
+	("narrow_q90_420",	4, 6,	false),
+	("narrow_q90_422",	4, 6,	false),
 	("ramp_q90_grey",	40, 24,	true),
 	("ramp_q90_prog",	40, 24,	true),
 ];

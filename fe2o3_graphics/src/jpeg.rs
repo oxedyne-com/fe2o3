@@ -23,6 +23,13 @@
 //! Arithmetic coding, lossless and hierarchical modes, and twelve-bit samples are refused by name
 //! rather than misread.
 //!
+//! # Damaged files
+//!
+//! A photograph library holds files that were truncated by a failed copy or a full disk, and a
+//! decoder that refuses them shows nothing where it could have shown most of the picture. Where the
+//! entropy-coded data runs out, the rest of the image is left flat mid-grey and what did arrive is
+//! returned. A malformed *header* is still an error, because there is then no picture to show.
+//!
 //! # Agreement with other decoders
 //!
 //! The inverse DCT is the integer one from the specification's informative annex, in the arrangement
@@ -215,28 +222,31 @@ struct Bits<'a> {
 	cnt:	u32,
 	/// Set once a marker or the end of the file has been met, after which the reader pads.
 	hit:	bool,
+	/// How many of the `cnt` bits are padding rather than data, which is how the reader knows the
+	/// difference between reading ahead over the end and having genuinely run out.
+	pad:	u32,
 }
 
 impl<'a> Bits<'a> {
 
 	/// Starts reading entropy-coded data at an offset.
 	fn new(buf: &'a [u8], pos: usize) -> Self {
-		Self { buf, pos, acc: 0, cnt: 0, hit: false }
+		Self { buf, pos, acc: 0, cnt: 0, hit: false, pad: 0 }
 	}
 
-	/// The next byte of entropy-coded data, unstuffed, or zero once a marker has been met.
-	fn byte(&mut self) -> u8 {
+	/// The next byte of entropy-coded data, unstuffed, or `None` once a marker has been met.
+	fn byte(&mut self) -> Option<u8> {
 		if self.hit {
-			return 0;
+			return None;
 		}
 		if self.pos >= self.buf.len() {
 			self.hit = true;
-			return 0;
+			return None;
 		}
 		let b = self.buf[self.pos];
 		if b != 0xFF {
 			self.pos += 1;
-			return b;
+			return Some(b);
 		}
 		// A 0xFF is a stuffed literal, padding before a marker, or the marker itself.
 		let mut k = self.pos + 1;
@@ -245,19 +255,33 @@ impl<'a> Bits<'a> {
 		}
 		if k < self.buf.len() && self.buf[k] == 0x00 {
 			self.pos = k + 1;
-			return 0xFF;
+			return Some(0xFF);
 		}
 		self.hit = true;
-		0
+		None
 	}
 
 	/// Tops the bit buffer up to at least 25 bits, padding with zeros past the end of the data.
 	fn fill(&mut self) {
 		while self.cnt <= 24 {
-			let b = self.byte();
-			self.acc = (self.acc << 8) | (b as u32);
+			match self.byte() {
+				Some(b) => self.acc = (self.acc << 8) | (b as u32),
+				None => {
+					self.acc <<= 8;
+					self.pad += 8;
+				},
+			}
 			self.cnt += 8;
 		}
+	}
+
+	/// Whether every bit left is padding, so the entropy-coded data has genuinely run out.
+	///
+	/// This is not the same as having met the marker that ends the segment: the buffer reads ahead,
+	/// so the marker is normally in hand while several real bits are still to be spent.
+	fn starved(&mut self) -> bool {
+		self.fill();
+		self.hit && self.pad >= self.cnt
 	}
 
 	/// The next bit.
@@ -266,6 +290,7 @@ impl<'a> Bits<'a> {
 			self.fill();
 		}
 		self.cnt -= 1;
+		self.pad = self.pad.min(self.cnt);
 		(self.acc >> self.cnt) & 1
 	}
 
@@ -278,6 +303,7 @@ impl<'a> Bits<'a> {
 			self.fill();
 		}
 		self.cnt -= n;
+		self.pad = self.pad.min(self.cnt);
 		(self.acc >> self.cnt) & ((1u32 << n) - 1)
 	}
 
@@ -289,6 +315,7 @@ impl<'a> Bits<'a> {
 			let (l, v) = t.look[peek];
 			if l != 0 {
 				self.cnt -= l as u32;
+				self.pad = self.pad.min(self.cnt);
 				return Ok(v);
 			}
 		}
@@ -321,6 +348,7 @@ impl<'a> Bits<'a> {
 	fn restart(&mut self) {
 		self.acc = 0;
 		self.cnt = 0;
+		self.pad = 0;
 		let n = self.buf.len();
 		let mut k = self.pos;
 		while k + 1 < n {
@@ -654,6 +682,8 @@ struct Reader {
 	ac:	[Option<Huff>; 4],
 	/// The restart interval in MCUs, or zero for none.
 	ri:	usize,
+	/// Whether a JFIF APP0 segment was seen, which by itself makes a three-component frame YCbCr.
+	jfif:	bool,
 	/// The colour transform an Adobe APP14 segment declared, if there was one.
 	adobe:	Option<u8>,
 	/// The frame, once its header has been read.
@@ -1122,6 +1152,17 @@ fn decode_scan(
 			st.eobrun = 0;
 			todo = ri;
 		}
+		if bits.starved() {
+			// The entropy-coded data has run out before the scan did. The coefficients left behind
+			// are zero, which the inverse DCT turns into a flat mid-grey, and that is what every
+			// other decoder shows for the tail of a truncated file. Carrying on with whatever the
+			// padding decodes to would fill it with noise instead.
+			if ri == 0 {
+				break;
+			}
+			todo -= 1;
+			continue;
+		}
 		let (ux, uy) = (i % nx, i / nx);
 		if single {
 			let sc = scan.comps[0];
@@ -1448,7 +1489,26 @@ fn upsample(p: &Plane, xf: usize, yf: usize, ow: usize, oh: usize) -> Vec<u8> {
 		}
 		return out;
 	}
-	if xf == 2 && (yf == 1 || yf == 2) {
+	if xf == 1 && yf == 2 {
+		// Subsampled down the vertical only: the filter runs in that direction alone.
+		for oy in 0..oh {
+			let iy = oy / 2;
+			let far = if oy % 2 == 0 {
+				iy.saturating_sub(1)
+			} else {
+				(iy + 1).min(p.dh - 1)
+			};
+			// The two output rows take different rounding terms, as the horizontal filter's do.
+			let r = if oy % 2 == 0 { 1 } else { 2 };
+			for ox in 0..ow {
+				out[oy * ow + ox] = clamp8((3 * p.at(ox, iy) + p.at(ox, far) + r) >> 2);
+			}
+		}
+		return out;
+	}
+	// A plane only two samples wide has no interior for the filter to work over, and libjpeg drops
+	// to replication there rather than filtering across the whole width.
+	if xf == 2 && (yf == 1 || yf == 2) && p.dw > 2 {
 		for oy in 0..oh {
 			let (near, far) = if yf == 1 {
 				(oy, oy)
@@ -1517,16 +1577,24 @@ fn rescale(p: &Plane, ow: usize, oh: usize) -> Vec<u8> {
 	out
 }
 
-/// Which colour the components of a frame carry, given their count and whatever Adobe said.
-fn space_of(comps: &[Comp], adobe: Option<u8>) -> Outcome<Space> {
+/// Which colour the components of a frame carry, given their count and what the file's application
+/// segments said.
+///
+/// The order of the tests is libjpeg's, and it matters: a JFIF segment settles the question by
+/// itself, because JFIF is defined as YCbCr. Files exist that carry a JFIF segment and an Adobe one
+/// declaring no transform, and reading the Adobe segment first turns them into false colour.
+fn space_of(comps: &[Comp], jfif: bool, adobe: Option<u8>) -> Outcome<Space> {
 	match comps.len() {
 		1 => Ok(Space::Grey),
 		3 => {
+			if jfif {
+				return Ok(Space::Ycc);
+			}
 			if let Some(t) = adobe {
 				return Ok(if t == 0 { Space::Rgb } else { Space::Ycc });
 			}
-			// Without an Adobe segment, component identifiers spelling RGB are the only sign that a
-			// three-component frame is not YCbCr; this is the rule libjpeg follows.
+			// With neither segment, component identifiers spelling RGB are the only sign that a
+			// three-component frame is not YCbCr.
 			if comps[0].id == b'R' && comps[1].id == b'G' && comps[2].id == b'B' {
 				Ok(Space::Rgb)
 			} else {
@@ -1613,6 +1681,7 @@ fn parse(buf: &[u8]) -> Outcome<Reader> {
 		dc: [None, None, None, None],
 		ac: [None, None, None, None],
 		ri: 0,
+		jfif: false,
 		adobe: None,
 		frame: None,
 	};
@@ -1658,6 +1727,9 @@ fn parse(buf: &[u8]) -> Outcome<Reader> {
 			Invalid, Input, Decode, NoImpl)),
 			APP0..=APP15 => {
 				let (a, b) = res!(segment(buf, pos, marker));
+				if marker == APP0 && b - a >= 5 && &buf[a..a + 5] == b"JFIF\0" {
+					r.jfif = true;
+				}
 				if marker == 0xEE && b - a >= 12 && &buf[a..a + 5] == b"Adobe" {
 					r.adobe = Some(buf[b - 1]);
 				}
@@ -1753,7 +1825,7 @@ pub fn decode(buf: &[u8]) -> Outcome<Pixmap> {
 		Some(f) => f,
 		None => return Err(err!("The file carries no frame header."; Invalid, Input, Decode, Missing)),
 	};
-	let space = res!(space_of(&frame.comps, r.adobe));
+	let space = res!(space_of(&frame.comps, r.jfif, r.adobe));
 	let (w, h) = (frame.w, frame.h);
 	let (hmax, vmax) = (frame.hmax, frame.vmax);
 
@@ -1803,7 +1875,7 @@ pub fn decode_eighth(buf: &[u8]) -> Outcome<Pixmap> {
 		Some(f) => f,
 		None => return Err(err!("The file carries no frame header."; Invalid, Input, Decode, Missing)),
 	};
-	let space = res!(space_of(&frame.comps, r.adobe));
+	let space = res!(space_of(&frame.comps, r.jfif, r.adobe));
 	let w = ceil_div(frame.w, DCTSIZE);
 	let h = ceil_div(frame.h, DCTSIZE);
 
@@ -2769,6 +2841,75 @@ mod tests {
 			"transparent red should encode as white, and came back as {:?}", c,
 		);
 		assert_eq!(c.a, 255, "a decoded JPEG is opaque");
+		Ok(())
+	}
+
+	#[test]
+	fn test_a_jfif_segment_outranks_an_adobe_one_16() -> Outcome<()> {
+		// Files exist carrying both a JFIF segment and an Adobe segment declaring no transform. JFIF
+		// is defined as YCbCr, so it settles the question and the Adobe segment is not consulted;
+		// reading the Adobe segment first turns such a file into false colour, red for blue.
+		let pm = res!(Pixmap::filled(32, 32, crate::colour::Rgba::new(220, 30, 40, 255)));
+		let opts = Options { quality: 95, chroma: Chroma::Full, grey: false };
+		let buf = res!(encode_with(&pm, &opts));
+
+		// An Adobe APP14 segment declaring transform 0, spliced in after the JFIF segment.
+		let adobe: [u8; 16] = [
+			0xFF, 0xEE, 0x00, 0x0E,
+			b'A', b'd', b'o', b'b', b'e',
+			0x00, 0x64, // Version.
+			0x00, 0x00, 0x00, 0x00, // Two flag words.
+			0x00, // Transform: none.
+		];
+		let at = match buf.windows(2).position(|w| w[0] == 0xFF && w[1] == DQT) {
+			Some(i) => i,
+			None => return Err(err!("The encoder wrote no DQT marker."; Test, Missing)),
+		};
+		let mut spliced = Vec::with_capacity(buf.len() + adobe.len());
+		spliced.extend_from_slice(&buf[..at]);
+		spliced.extend_from_slice(&adobe);
+		spliced.extend_from_slice(&buf[at..]);
+
+		let back = res!(decode(&spliced));
+		let c = match back.pixel(16, 16) {
+			Some(c) => c,
+			None => return Err(err!("A 32 by 32 pixmap has a pixel at 16, 16."; Test, Missing)),
+		};
+		assert!(
+			(c.r as i32 - 220).abs() < 8 && (c.g as i32 - 30).abs() < 8 && (c.b as i32 - 40).abs() < 8,
+			"a file with both segments is YCbCr, so it should decode near (220, 30, 40), not {:?}", c,
+		);
+		Ok(())
+	}
+
+	#[test]
+	fn test_a_truncated_scan_leaves_the_rest_mid_grey_17() -> Outcome<()> {
+		// When the entropy-coded data runs out, the coefficients not yet read stay at zero, which the
+		// inverse DCT renders as a flat mid-grey. Carrying on with whatever the zero padding decodes
+		// to would fill the tail of the picture with noise instead, which is what this codec did
+		// until a truncated photograph was decoded beside another implementation's reading of it.
+		let pm = res!(sample(64, 64));
+		let opts = Options { quality: 90, chroma: Chroma::Full, grey: false };
+		let buf = res!(encode_with(&pm, &opts));
+		let sos = match buf.windows(2).position(|w| w[0] == 0xFF && w[1] == SOS) {
+			Some(i) => i,
+			None => return Err(err!("The encoder wrote no SOS marker."; Test, Missing)),
+		};
+		// Keep the scan header and a little of its data, and drop the rest along with the EOI.
+		let cut = (sos + 40).min(buf.len());
+		let back = res!(decode(&buf[..cut]));
+		assert_eq!(back.width(), 64);
+		assert_eq!(back.height(), 64);
+		for x in 0..64 {
+			let c = match back.pixel(x, 63) {
+				Some(c) => c,
+				None => return Err(err!("No pixel at ({}, 63).", x; Test, Missing)),
+			};
+			assert_eq!(
+				(c.r, c.g, c.b), (128, 128, 128),
+				"the last row of a truncated file is mid-grey, and pixel {} is {:?}", x, c,
+			);
+		}
 		Ok(())
 	}
 }

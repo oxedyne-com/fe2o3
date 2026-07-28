@@ -53,6 +53,10 @@ ppm("odd", 17, 13, lambda x, y: (
 	int(127 + 120 * math.sin((x + y) * 0.5)),
 ))
 
+# Four pixels across: the chrominance plane is then two samples wide, which is where the triangle
+# filter has no interior to work over and libjpeg falls back to replicating.
+ppm("narrow", 4, 6, lambda x, y: (255 if x < 2 else 0, 0 if x < 2 else 255, (x * 60 + y * 20) % 256))
+
 # A grey ramp, for the single-component path.
 ppm("ramp", 40, 24, lambda x, y: ((x * 6) % 256,) * 3)
 PYEOF
@@ -74,6 +78,9 @@ c tiny      tiny_q90_420      -quality 90 -sampling-factor 2x2
 c odd       odd_q88_444       -quality 88 -sampling-factor 1x1
 c odd       odd_q64_420       -quality 64 -sampling-factor 2x2
 c odd       odd_q88_prog      -quality 88 -sampling-factor 2x2 -interlace JPEG
+c gradient  gradient_q80_1x2  -quality 80 -sampling-factor 1x2
+c narrow    narrow_q90_420    -quality 90 -sampling-factor 2x2
+c narrow    narrow_q90_422    -quality 90 -sampling-factor 2x1
 c ramp      ramp_q90_grey     -quality 90 -colorspace Gray -type Grayscale
 c ramp      ramp_q90_prog     -quality 90 -colorspace Gray -type Grayscale -interlace JPEG
 
