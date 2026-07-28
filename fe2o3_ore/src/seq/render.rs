@@ -31,6 +31,17 @@ use crate::seq::{
 };
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_jdat::prelude::*;
+
+
+/// Wire code for [`Flag::Torn`].
+pub const CODE_TORN:	u8 = 1;
+/// Wire code for [`Flag::Demoted`].
+pub const CODE_DEMOTED:	u8 = 2;
+/// Wire code for [`Flag::Dropped`].
+pub const CODE_DROPPED:	u8 = 3;
+/// Wire code for [`Flag::Overlap`].
+pub const CODE_OVERLAP:	u8 = 4;
 
 
 /// Something the renderer noticed that the reader should be told.
@@ -90,6 +101,158 @@ pub enum Flag {
 }
 
 
+impl Flag {
+	/// Returns the wire code identifying the variant.
+	pub fn code(&self) -> u8 {
+		match self {
+			Self::Torn { .. }		=> CODE_TORN,
+			Self::Demoted { .. }	=> CODE_DEMOTED,
+			Self::Dropped { .. }	=> CODE_DROPPED,
+			Self::Overlap { .. }	=> CODE_OVERLAP,
+		}
+	}
+
+	/// Returns the variant name, for messages.
+	pub fn name(&self) -> &'static str {
+		match self {
+			Self::Torn { .. }		=> "Torn",
+			Self::Demoted { .. }	=> "Demoted",
+			Self::Dropped { .. }	=> "Dropped",
+			Self::Overlap { .. }	=> "Overlap",
+		}
+	}
+
+	/// Serialises the flag to a [`Dat`]. The shape is `[code, field, ...]`, the
+	/// fields in declaration order.
+	pub fn to_dat(&self) -> Dat {
+		match self {
+			Self::Torn { op, lost } => Dat::List(vec![
+				Dat::U8(CODE_TORN),
+				op.to_dat(),
+				Dat::List(lost.iter().map(|r| r.to_dat()).collect()),
+			]),
+			Self::Demoted { op, sub, origin } => Dat::List(vec![
+				Dat::U8(CODE_DEMOTED),
+				op.to_dat(),
+				Dat::U64(*sub),
+				Dat::U8(origin.code()),
+			]),
+			Self::Dropped { op, sub, origin } => Dat::List(vec![
+				Dat::U8(CODE_DROPPED),
+				op.to_dat(),
+				Dat::U64(*sub),
+				Dat::U8(origin.code()),
+			]),
+			Self::Overlap { ops, region } => Dat::List(vec![
+				Dat::U8(CODE_OVERLAP),
+				Dat::List(ops.iter().map(|id| id.to_dat()).collect()),
+				region.to_dat(),
+			]),
+		}
+	}
+
+	/// Reconstructs a flag from a [`Dat`] produced by [`Flag::to_dat`].
+	pub fn from_dat(dat: &Dat)
+		-> Outcome<Self>
+	{
+		let v = match dat {
+			Dat::List(v) if !v.is_empty() => v,
+			_ => return Err(err!(
+				"A Flag expects a non-empty Dat::List, got {:?}.", dat;
+			Decode, Input, Mismatch)),
+		};
+		let code = match &v[0] {
+			Dat::U8(c) => *c,
+			other => return Err(err!(
+				"A Flag code expects Dat::U8, got {:?}.", other;
+			Decode, Input, Mismatch)),
+		};
+		match code {
+			CODE_TORN => {
+				res!(flag_len(v, 3, "Torn"));
+				Ok(Self::Torn {
+					op:		res!(OpId::from_dat(&v[1])),
+					lost:	res!(flag_ranges(&v[2], "Torn lost")),
+				})
+			},
+			CODE_DEMOTED | CODE_DROPPED => {
+				let what = if code == CODE_DEMOTED { "Demoted" } else { "Dropped" };
+				res!(flag_len(v, 4, what));
+				let op = res!(OpId::from_dat(&v[1]));
+				let sub = match &v[2] {
+					Dat::U64(n) => *n,
+					other => return Err(err!(
+						"A Flag::{} offset expects Dat::U64, got {:?}.", what, other;
+					Decode, Input, Mismatch)),
+				};
+				let origin = match &v[3] {
+					Dat::U8(c) => res!(Origin::from_code(*c)),
+					other => return Err(err!(
+						"A Flag::{} origin expects Dat::U8, got {:?}.", what, other;
+					Decode, Input, Mismatch)),
+				};
+				Ok(if code == CODE_DEMOTED {
+					Self::Demoted { op, sub, origin }
+				} else {
+					Self::Dropped { op, sub, origin }
+				})
+			},
+			CODE_OVERLAP => {
+				res!(flag_len(v, 3, "Overlap"));
+				let listed = match &v[1] {
+					Dat::List(l) => l,
+					other => return Err(err!(
+						"A Flag::Overlap operation list expects Dat::List, got {:?}.",
+						other;
+					Decode, Input, Mismatch)),
+				};
+				let mut ops = Vec::with_capacity(listed.len());
+				for item in listed {
+					ops.push(res!(OpId::from_dat(item)));
+				}
+				Ok(Self::Overlap {
+					ops,
+					region: res!(ContentRange::from_dat(&v[2])),
+				})
+			},
+			other => Err(err!(
+				"Flag code {} is not recognised.", other;
+			Decode, Input, Invalid)),
+		}
+	}
+}
+
+/// Checks that a decoded flag list has exactly the expected length.
+fn flag_len(v: &[Dat], want: usize, what: &str)
+	-> Outcome<()>
+{
+	if v.len() != want {
+		return Err(err!(
+			"A Flag::{} expects {} list elements, got {}.", what, want, v.len();
+		Decode, Input, Mismatch));
+	}
+	Ok(())
+}
+
+/// Extracts a list of content ranges, naming it if the kind is wrong.
+fn flag_ranges(dat: &Dat, what: &str)
+	-> Outcome<Vec<ContentRange>>
+{
+	match dat {
+		Dat::List(v) => {
+			let mut out = Vec::with_capacity(v.len());
+			for item in v {
+				out.push(res!(ContentRange::from_dat(item)));
+			}
+			Ok(out)
+		},
+		other => Err(err!(
+			"A Flag {} expects Dat::List, got {:?}.", what, other;
+		Decode, Input, Mismatch)),
+	}
+}
+
+
 /// What a render cost, in the terms the cost model is stated in.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Stats {
@@ -122,6 +285,39 @@ pub struct Run {
 	pub at:			u64,
 	/// The content the run shows.
 	pub content:	ContentRange,
+}
+
+
+impl Run {
+	/// Serialises the run to a [`Dat`]. The shape is `[at, content]`.
+	pub fn to_dat(&self) -> Dat {
+		Dat::List(vec![
+			Dat::U64(self.at),
+			self.content.to_dat(),
+		])
+	}
+
+	/// Reconstructs a run from a [`Dat`] produced by [`Run::to_dat`].
+	pub fn from_dat(dat: &Dat)
+		-> Outcome<Self>
+	{
+		let v = match dat {
+			Dat::List(v) if v.len() == 2 => v,
+			_ => return Err(err!(
+				"A Run expects a 2-element Dat::List, got {:?}.", dat;
+			Decode, Input, Mismatch)),
+		};
+		let at = match &v[0] {
+			Dat::U64(n) => *n,
+			other => return Err(err!(
+				"A Run offset expects Dat::U64, got {:?}.", other;
+			Decode, Input, Mismatch)),
+		};
+		Ok(Self {
+			at,
+			content: res!(ContentRange::from_dat(&v[1])),
+		})
+	}
 }
 
 
