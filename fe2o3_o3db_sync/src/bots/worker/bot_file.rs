@@ -447,13 +447,21 @@ impl<
             None => false, // No need to do anything.
         };
         if process_buffer {
-            if let Some(gcbuf) = self.gc_buffer().get(&fnum) {
-                // An immutable borrow of gc_buffer allows the mutable borrows needed for work_msg.
-                for msg in gcbuf.clone() {
-                    self.listen_work(&OzoneMsg::ProcessGcBuffer(Box::new(msg)));
+            // Take the buffer out before replaying it.  Replaying a message can start a
+            // fresh collection of the same file, which creates a new, empty buffer; removing
+            // the entry after the replay would take that new buffer with it, and every
+            // later message for the file would then be applied to a data file in the middle
+            // of being transcribed, with a second collector free to start on it as well.
+            if let Some(gcbuf) = self.gc_buffer_mut().remove(&fnum) {
+                for msg in gcbuf {
+                    // Once a fresh collection has started, the rest of the replay belongs to
+                    // its buffer rather than to the file being transcribed.
+                    match self.gc_buffer_mut().get_mut(&fnum) {
+                        Some(newbuf) => newbuf.push(msg),
+                        None => { self.listen_work(&OzoneMsg::ProcessGcBuffer(Box::new(msg))); },
+                    }
                 }
             }
-            self.gc_buffer_mut().remove(&fnum);
         }
         gc_active
     }
@@ -501,6 +509,7 @@ impl<
                     if ((oldfrac > trigger) || fstat.is_all_data_old()) &&
                         fstat.no_pending_moves() &&
                         !fstat.is_live() &&
+                        !fstat.gc_active() && // Never set a second collector on the same file.
                         fstat.no_readers() &&
                         self.gc_auto_active()
                     {

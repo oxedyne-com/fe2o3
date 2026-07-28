@@ -111,6 +111,15 @@ pub fn test_rollover(_filter: &'static str) -> Outcome<()> {
         2,
     ));
 
+    // A restart takes over the incomplete live file left behind, which is the
+    // other way the zone counter could be left at a number already in use.
+    res!(restart_keeps_file_numbers_unique(
+        &db_root,
+        &schms_input,
+        schms2,
+        user,
+    ));
+
     res!(gc_reclaims_sealed_files(
         &db_root,
         &schms_input,
@@ -244,6 +253,124 @@ fn supersession_accounting(
 
     test!(sync_log::stream(), "+--- rollover: {} : passed ---", label);
     Ok(())
+}
+
+/// Churns, shuts the database down, restarts it over the files left behind and
+/// churns again.  On restart a writer bot takes over the incomplete live file,
+/// so the zone live file counter must be left above it: if the counter is
+/// wound back below a file already in use, the first rollover after the restart
+/// hands that number out again and the file's record entries are lost.
+fn restart_keeps_file_numbers_unique(
+    db_root:     &PathBuf,
+    schms_input: &RestSchemesInput<
+                     EncryptionScheme,
+                     HashScheme,
+                     HashScheme,
+                     ChecksumScheme,
+                 >,
+    schms2:      Option<&RestSchemesOverride<EncryptionScheme, HashScheme>>,
+    user:        setup::Uid,
+)
+    -> Outcome<()>
+{
+    test!(sync_log::stream(), "+--- rollover: restart ---");
+
+    let cfg = res!(rollover_cfg(1));
+
+    // First run, from empty.
+    let db = res!(setup::start_db(
+        db_root.clone(),
+        Some(cfg.clone()),
+        schms_input.clone(),
+        None,
+        false, // gc off.
+        true,  // wipe.
+    ));
+    thread::sleep(Duration::from_millis(200));
+    let n1 = res!(churn(&db, "sk", user, schms2, NOVER + 1));
+    thread::sleep(Duration::from_millis(500));
+    res!(assert_no_bot_errors(&db, "restart: first run"));
+    res!(db.shutdown());
+    thread::sleep(Duration::from_millis(500));
+
+    // Second run, over the files the first left behind.
+    let db = res!(setup::start_db(
+        db_root.clone(),
+        Some(cfg.clone()),
+        schms_input.clone(),
+        None,
+        false, // gc off.
+        false, // no wipe: this is the point of the phase.
+    ));
+    thread::sleep(Duration::from_millis(500));
+    res!(assert_no_bot_errors(&db, "restart: after reload"));
+    let n2 = res!(churn(&db, "sk", user, schms2, NOVER + 1));
+    thread::sleep(Duration::from_millis(500));
+
+    let states = res!(db.api().collect_file_states(constant::USER_REQUEST_WAIT));
+    let (nfiles, ncur, nold, noldcnt) = count_data_states(&states);
+
+    test!(sync_log::stream(),
+        "restart: {} writes before and {} after, {} tracked files: {} current, \
+        {} old, {} tracked total, {} counted old.",
+        n1, n2, nfiles, ncur, nold, ncur + nold, noldcnt);
+
+    if ncur + nold != n1 + n2 {
+        return Err(err!(
+            "restart: {} records were written across the two runs but the file \
+            states track {} ({} current + {} old).",
+            n1 + n2, ncur + nold, ncur, nold;
+            Test, Mismatch, Data));
+    }
+    if ncur != NKEYS {
+        return Err(err!(
+            "restart: {} distinct keys were written but {} records are flagged \
+            current.", NKEYS, ncur;
+            Test, Mismatch, Data));
+    }
+    if noldcnt != nold {
+        return Err(err!(
+            "restart: {} records are flagged old in the record maps but the \
+            old-record counters total {}.", nold, noldcnt;
+            Test, Mismatch, Data));
+    }
+    res!(assert_no_bot_errors(&db, "restart: second run"));
+
+    res!(db.shutdown());
+    thread::sleep(Duration::from_millis(200));
+
+    test!(sync_log::stream(), "+--- rollover: restart : passed ---");
+    Ok(())
+}
+
+/// Writes `NKEYS` keys `rounds` times each, returning the number of writes.
+fn churn<
+    ENC:    oxedyne_fe2o3_iop_crypto::enc::Encrypter + 'static,
+    KH:     oxedyne_fe2o3_iop_hash::api::Hasher + 'static,
+    PR:     oxedyne_fe2o3_iop_hash::api::Hasher + 'static,
+    CS:     oxedyne_fe2o3_iop_hash::csum::Checksummer + 'static,
+>(
+    db:     &O3db<{ setup::UID_LEN }, setup::Uid, ENC, KH, PR, CS>,
+    prefix: &str,
+    user:   setup::Uid,
+    schms2: Option<&RestSchemesOverride<ENC, KH>>,
+    rounds: usize,
+)
+    -> Outcome<usize>
+{
+    let mut nwrites = 0;
+    for round in 0..rounds {
+        for k in 0..NKEYS {
+            res!(db.insert(
+                dat!(fmt!("{}{:03}", prefix, k)),
+                dat!(fmt!("{}v{:03}r{:02}", prefix, k, round)),
+                user,
+                schms2,
+            ));
+            nwrites += 1;
+        }
+    }
+    Ok(nwrites)
 }
 
 /// Heavy overwrite churn over many sealed data files, run twice: once with

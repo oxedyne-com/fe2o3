@@ -508,8 +508,26 @@ impl<
             let path = entry.path();
             if path.is_file() {
                 trace!(sync_log::stream(), "{}: Processing file {:?}", self.ozid(), path);
+                // 3.1 Remove any abandoned garbage collection transcription.  The data file it
+                //     was copied from is intact, so the leftover is of no use, and leaving it
+                //     in place would fail the survey for the whole zone.
+                if ZoneDir::is_gc_temp_file(&path) {
+                    warn!(sync_log::stream(),
+                        "{}: Removing {:?}, an abandoned garbage collection temporary.",
+                        self.ozid(), path);
+                    res!(fs::remove_file(&path));
+                    continue;
+                }
                 // 4. We found a file, now extract the file number and type from the file name.
-                let (fnum, ftyp) = res!(ZoneDir::ozone_file_number_and_type(&path));
+                let (fnum, ftyp) = match ZoneDir::ozone_file_number_and_type(&path) {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        warn!(sync_log::stream(),
+                            "{}: Ignoring {:?}, which is not an ozone data or index file, \
+                            caused by {}.", self.ozid(), path, e);
+                        continue;
+                    },
+                };
                 // 5. Get the file size.
                 let file = res!(std::fs::OpenOptions::new()
                     .read(true)

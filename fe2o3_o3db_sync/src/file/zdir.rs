@@ -74,6 +74,24 @@ impl ZoneDir {
         result
     }
     
+    /// Returns the path, relative to the zone directory, of the temporary file written
+    /// while the given file's garbage is collected.
+    pub fn relative_gc_temp_path(typ: &FileType, n: FileNum) -> PathBuf {
+        let mut result = PathBuf::from(constant::GC_TEMP_FILE_PREFIX);
+        result.set_extension(Self::relative_file_path(typ, n));
+        result
+    }
+
+    /// Returns whether the path names a garbage collection temporary.  Such a file is an
+    /// abandoned transcription left by a collection that did not finish; the data file it
+    /// was copied from is untouched, so the temporary can simply be removed.
+    pub fn is_gc_temp_file(p: &Path) -> bool {
+        match p.file_name().and_then(|s| s.to_str()) {
+            Some(name) => name.starts_with(constant::GC_TEMP_FILE_PREFIX),
+            None => false,
+        }
+    }
+
     pub fn open_ozone_file(
         &self,
         fnum:   FileNum,

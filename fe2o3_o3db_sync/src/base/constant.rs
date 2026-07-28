@@ -59,6 +59,9 @@ pub const CONFIG_FILENAME:              &'static str = "config.jdat";
 pub const DB_UID_CHAR_LEN:              usize = 5;
 
 pub const DATA_FILE_EXT:                &'static str = "dat";
+// Prefix of the temporary data file written into a zone directory while a data file's
+// garbage is collected.  One left behind is an abandoned transcription.
+pub const GC_TEMP_FILE_PREFIX:          &'static str = ".gc";
 pub const INDEX_FILE_EXT:               &'static str = "ind";
 pub const DB_DIR_PREFIX:                &'static str = "o3db";
 pub const HASH_BYTES:                   usize = 8; // u64
