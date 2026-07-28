@@ -655,8 +655,13 @@ mod tests {
 	};
 
 	/// A content range of the given replica's first operation.
+	///
+	/// The bounds are put in order before the constructor sees them, so the
+	/// helper is total and can be called from the fixtures that return an
+	/// operation rather than an [`Outcome`].
 	fn range(replica: u64, from: u64, to: u64) -> ContentRange {
-		ContentRange { op: OpId::new(ReplicaId::new(replica), 1), from, to }
+		let op = OpId::new(ReplicaId::new(replica), 1);
+		ContentRange::new(op, from.min(to), from.max(to)).unwrap_or_default()
 	}
 
 	/// A content identifier of the given replica's first operation.

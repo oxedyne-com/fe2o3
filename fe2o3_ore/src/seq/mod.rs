@@ -234,7 +234,7 @@ impl Edit {
 			let mut spans: Vec<&ContentRange> = src.iter()
 				.filter(|r| !r.is_empty())
 				.collect();
-			spans.sort_by_key(|r| (r.op, r.from));
+			spans.sort_by_key(|r| (r.op(), r.from()));
 			for pair in spans.windows(2) {
 				if pair[0].intersects(pair[1]) {
 					return Err(err!(
@@ -611,7 +611,7 @@ impl Sequence {
 	{
 		for (id, op) in ops {
 			for r in op.regions() {
-				if r.to > atoms.run_len(&r.op) {
+				if r.to() > atoms.run_len(&r.op()) {
 					return Err(err!(
 						"The operation {} names the content {}, which the operation \
 						set does not hold; the set is not causally complete.", id, r;
@@ -646,10 +646,10 @@ impl Sequence {
 					if owner == *id {
 						continue;
 					}
-					let gone = res!(ContentRange::new(r.op, span.start, span.end));
+					let gone = res!(ContentRange::new(r.op(), span.start, span.end));
 					match lost.last_mut() {
-						Some(last) if last.op == gone.op && last.to == gone.from
-							=> last.to = gone.to,
+						Some(last) if last.op() == gone.op() && last.to() == gone.from()
+							=> res!(last.set_to(gone.to())),
 						_ => lost.push(gone),
 					}
 				}
@@ -685,12 +685,12 @@ impl Sequence {
 				}
 			}
 		}
-		named.sort_by_key(|(r, id)| (r.op, r.from, r.to, *id));
+		named.sort_by_key(|(r, id)| (r.op(), r.from(), r.to(), *id));
 		let mut out: Vec<Flag> = Vec::new();
 		// Runs still open at the current position, oldest first.
 		let mut open: Vec<(ContentRange, OpId)> = Vec::new();
 		for (r, id) in named {
-			open.retain(|(o, _)| o.op == r.op && o.to > r.from);
+			open.retain(|(o, _)| o.op() == r.op() && o.to() > r.from());
 			for (o, other) in &open {
 				if *other == id {
 					continue;
@@ -720,7 +720,7 @@ impl Sequence {
 				continue;
 			}
 			emitted += content.len();
-			res!(seen.entry(content.op).or_default().insert(content.offsets(), ()));
+			res!(seen.entry(content.op()).or_default().insert(content.offsets(), ()));
 		}
 		let distinct: u64 = seen.values()
 			.flat_map(|m| m.iter())

@@ -391,7 +391,7 @@ impl Rendered {
 		if pos > 0 {
 			let run = self.runs[pos - 1];
 			if at < run.at + run.content.len() {
-				return Ok(ContentId::new(run.content.op, run.content.from + (at - run.at)));
+				return Ok(ContentId::new(run.content.op(), run.content.from() + (at - run.at)));
 			}
 		}
 		Err(err!(
@@ -439,9 +439,9 @@ impl Rendered {
 			}
 			let take = (run.content.len() - within).min(end - pos);
 			out.push(res!(ContentRange::new(
-				run.content.op,
-				run.content.from + within,
-				run.content.from + within + take,
+				run.content.op(),
+				run.content.from() + within,
+				run.content.from() + within + take,
 			)));
 			pos += take;
 			next += 1;
@@ -631,18 +631,19 @@ pub(super) fn traverse(
 			// A slot shows the parts of its claim it still owns, minus whatever
 			// has died. A slot that has lost all of its claim shows nothing and
 			// stays as an anchor target.
+			let claimed = slot.claim.op();
 			for (span, owner) in claims.runs(&slot.claim) {
 				if owner != slot.place {
 					continue;
 				}
-				for live in dead.live_runs(&slot.claim.op, span.clone()) {
-					let run = res!(ContentRange::new(slot.claim.op, live.start, live.end));
+				for live in dead.live_runs(&claimed, span.clone()) {
+					let run = res!(ContentRange::new(claimed, live.start, live.end));
 					let at = bytes.len() as u64;
 					bytes.extend_from_slice(res!(atoms.slice(&run)));
 					match runs.last_mut() {
-						Some(last) if last.content.op == run.op
-							&& last.content.to == run.from
-							=> last.content.to = run.to,
+						Some(last) if last.content.op() == run.op()
+							&& last.content.to() == run.from()
+							=> res!(last.content.set_to(run.to())),
 						_ => runs.push(Run { at, content: run }),
 					}
 				}

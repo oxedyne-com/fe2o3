@@ -185,13 +185,13 @@ impl Slots {
 
 		let mut divided: Vec<Slot> = Vec::with_capacity(slots.len());
 		for slot in slots.drain(..) {
-			let mut from = slot.claim.from;
-			if let Some(set) = cuts.get(&slot.claim.op) {
-				for cut in set.range((slot.claim.from + 1)..slot.claim.to) {
+			let mut from = slot.claim.from();
+			if let Some(set) = cuts.get(&slot.claim.op()) {
+				for cut in set.range((slot.claim.from() + 1)..slot.claim.to()) {
 					divided.push(Slot {
 						place:	slot.place,
-						sub:	slot.sub + (from - slot.claim.from),
-						claim:	res!(ContentRange::new(slot.claim.op, from, *cut)),
+						sub:	slot.sub + (from - slot.claim.from()),
+						claim:	res!(ContentRange::new(slot.claim.op(), from, *cut)),
 						left:	slot.left,
 						right:	slot.right,
 					});
@@ -200,8 +200,8 @@ impl Slots {
 			}
 			divided.push(Slot {
 				place:	slot.place,
-				sub:	slot.sub + (from - slot.claim.from),
-				claim:	res!(ContentRange::new(slot.claim.op, from, slot.claim.to)),
+				sub:	slot.sub + (from - slot.claim.from()),
+				claim:	res!(ContentRange::new(slot.claim.op(), from, slot.claim.to())),
 				left:	slot.left,
 				right:	slot.right,
 			});
@@ -216,7 +216,7 @@ impl Slots {
 		}
 		let mut prev: Vec<Option<usize>> = vec![None; n];
 		for idxs in by_place.values_mut() {
-			idxs.sort_by_key(|i| (slots[*i].claim.op, slots[*i].claim.from));
+			idxs.sort_by_key(|i| (slots[*i].claim.op(), slots[*i].claim.from()));
 			let mut chain: Vec<usize> = idxs.clone();
 			chain.sort_by_key(|i| slots[*i].sub);
 			for pair in chain.windows(2) {
@@ -288,7 +288,7 @@ impl Slots {
 		// if there is one, is the last whose claim starts at or before it.
 		let key = (cid.op, cid.off);
 		let pos = idxs.partition_point(
-			|i| (self.slots[*i].claim.op, self.slots[*i].claim.from) <= key);
+			|i| (self.slots[*i].claim.op(), self.slots[*i].claim.from()) <= key);
 		if pos > 0 {
 			let i = idxs[pos - 1];
 			if self.slots[i].claim.contains(cid) {

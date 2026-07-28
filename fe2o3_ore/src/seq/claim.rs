@@ -67,7 +67,7 @@ impl Claims {
 					if r.is_empty() {
 						continue;
 					}
-					res!(map.entry(r.op).or_default().insert(r.offsets(), *id));
+					res!(map.entry(r.op()).or_default().insert(r.offsets(), *id));
 				}
 			}
 		}
@@ -94,13 +94,13 @@ impl Claims {
 		-> Vec<(Range<u64>, OpId)>
 	{
 		let mut out: Vec<(Range<u64>, OpId)> = Vec::new();
-		let mut at = range.from;
-		if let Some(m) = self.map.get(&range.op) {
+		let mut at = range.from();
+		if let Some(m) = self.map.get(&range.op()) {
 			for (iv, owner) in m.overlapping(range.offsets()) {
-				let from = iv.start.max(range.from);
-				let to = iv.end.min(range.to);
+				let from = iv.start.max(range.from());
+				let to = iv.end.min(range.to());
 				if from > at {
-					out.push((at..from, range.op));
+					out.push((at..from, range.op()));
 				}
 				if to > from {
 					out.push((from..to, *owner));
@@ -108,8 +108,8 @@ impl Claims {
 				}
 			}
 		}
-		if at < range.to {
-			out.push((at..range.to, range.op));
+		if at < range.to() {
+			out.push((at..range.to(), range.op()));
 		}
 		out
 	}
@@ -152,7 +152,7 @@ impl Dead {
 					if r.is_empty() {
 						continue;
 					}
-					res!(map.entry(r.op).or_default().insert(r.offsets(), ()));
+					res!(map.entry(r.op()).or_default().insert(r.offsets(), ()));
 				}
 			}
 		}

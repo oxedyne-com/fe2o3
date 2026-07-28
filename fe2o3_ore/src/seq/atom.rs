@@ -93,19 +93,19 @@ impl Atoms {
 	pub fn slice(&self, range: &ContentRange)
 		-> Outcome<&[u8]>
 	{
-		let atom = match self.map.get(&range.op) {
+		let atom = match self.map.get(&range.op()) {
 			Some(a) => a,
 			None => return Err(err!(
 				"The content range {} names an atom that no operation in the set \
 				created.", range;
 			Invalid, Input, Missing)),
 		};
-		if range.to > atom.len() as u64 {
+		if range.to() > atom.len() as u64 {
 			return Err(err!(
 				"The content range {} reaches past the {} bytes its atom holds.",
 				range, atom.len();
 			Invalid, Input, Range));
 		}
-		Ok(&atom[range.from as usize..range.to as usize])
+		Ok(&atom[range.from() as usize..range.to() as usize])
 	}
 }

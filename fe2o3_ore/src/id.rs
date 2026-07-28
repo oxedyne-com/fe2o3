@@ -313,14 +313,21 @@ impl fmt::Display for ContentId {
 /// what a move takes with it. Naming a run costs one operation identifier and
 /// two offsets however long the run is, which is why the structure's bookkeeping
 /// tracks edits rather than bytes.
+///
+/// The bounds are private because [`ContentRange::new`] refuses a reversed
+/// range, and a public field would let a struct literal build one anyway. The
+/// arithmetic below subtracts the start from the end, so a reversed range is a
+/// panic in a debug build and a wraparound in a release one; the invariant has
+/// to hold for every range that exists, not only for those that came through
+/// the constructor.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ContentRange {
 	/// The operation that created the bytes.
-	pub op:		OpId,
+	op:		OpId,
 	/// First offset, inclusive.
-	pub from:	u64,
+	from:	u64,
 	/// Last offset, exclusive.
-	pub to:		u64,
+	to:		u64,
 }
 
 impl ContentRange {
@@ -339,6 +346,38 @@ impl ContentRange {
 			Invalid, Input, Range));
 		}
 		Ok(Self { op, from, to })
+	}
+
+	/// Returns the operation that created the bytes.
+	pub const fn op(&self) -> OpId {
+		self.op
+	}
+
+	/// Returns the first offset, inclusive.
+	pub const fn from(&self) -> u64 {
+		self.from
+	}
+
+	/// Returns the last offset, exclusive.
+	pub const fn to(&self) -> u64 {
+		self.to
+	}
+
+	/// Moves the end of the range, refusing an end that precedes the start.
+	///
+	/// This is how a caller coalescing abutting runs grows one without rebuilding
+	/// it, and the only way the end moves from outside this module.
+	pub fn set_to(&mut self, to: u64)
+		-> Outcome<()>
+	{
+		if to < self.from {
+			return Err(err!(
+				"A ContentRange of {}+{}..{} would be reversed; the end may not \
+				precede the start.", self.op, self.from, to;
+			Invalid, Input, Range));
+		}
+		self.to = to;
+		Ok(())
 	}
 
 	/// Returns the number of bytes the range names.
@@ -799,6 +838,34 @@ mod tests {
 		let empty = res!(ContentRange::new(an_op(), 5, 5));
 		assert!(empty.is_empty());
 		assert_eq!(empty.len(), 0);
+		Ok(())
+	}
+
+	/// The bounds read back as they went in, since nothing else can now see
+	/// them.
+	#[test]
+	fn content_range_reports_its_bounds() -> Outcome<()> {
+		let r = res!(ContentRange::new(an_op(), 4, 11));
+		assert_eq!(r.op(), an_op());
+		assert_eq!(r.from(), 4);
+		assert_eq!(r.to(), 11);
+		assert_eq!(r.len(), 7);
+		assert_eq!(r.offsets(), 4..11);
+		Ok(())
+	}
+
+	/// Moving the end keeps the invariant the constructor established: forward
+	/// or back to the start is allowed, past it is not, and a refusal leaves the
+	/// range as it was.
+	#[test]
+	fn content_range_end_may_not_pass_its_start() -> Outcome<()> {
+		let mut r = res!(ContentRange::new(an_op(), 4, 11));
+		res!(r.set_to(20));
+		assert_eq!(r.len(), 16);
+		res!(r.set_to(4));
+		assert!(r.is_empty());
+		assert!(r.set_to(3).is_err());
+		assert_eq!(r.to(), 4, "a refused move leaves the range alone");
 		Ok(())
 	}
 
