@@ -70,7 +70,7 @@ pub enum MediaType {
     Image(Image),
     Model(Model),
     Text(Text),
-    //Video(Video),
+    Video(Video),
     // Composite
     //Message(Message),
     Multipart(Multipart),
@@ -85,6 +85,7 @@ impl Display for MediaType {
             Self::Image(inner)          => fmt!("image/{}", inner),
             Self::Model(inner)          => fmt!("model/{}", inner),
             Self::Text(inner)           => fmt!("text/{}", inner),
+            Self::Video(inner)          => fmt!("video/{}", inner),
             Self::Multipart(inner)      => fmt!("multipart/{}", inner),
         })
     }
@@ -102,6 +103,7 @@ impl FromStr for MediaType {
                 "image"         => Self::Image(res!(Image::from_str(right))),
                 "model"         => Self::Model(res!(Model::from_str(right))),
                 "text"          => Self::Text(res!(Text::from_str(right))),
+                "video"         => Self::Video(res!(Video::from_str(right))),
                 "multipart"     => Self::Multipart(res!(Multipart::from_str(right))),
                 _ => return Err(err!(
                     "Unrecognised Media type '{}' in '{}'.", left, s;
@@ -232,15 +234,28 @@ impl FromStr for Application {
 /// ╰────────────────────────────────────────────╯
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum Audio {
+    Aac,
+    Flac,
+    Mp4,
     Mpeg,
     Ogg,
+    Wav,
+    Webm,
 }
 
+/// The subtype alone, because [`MediaType`] writes the `audio/` before it.
+/// Writing it here as well once put `audio/audio/mpeg` on the wire, which no
+/// player recognises as anything.
 impl Display for Audio {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "audio/{}", match self {
+        write!(f, "{}", match self {
+            Self::Aac       => "aac",
+            Self::Flac      => "flac",
+            Self::Mp4       => "mp4",
             Self::Mpeg      => "mpeg",
             Self::Ogg       => "ogg",
+            Self::Wav       => "wav",
+            Self::Webm      => "webm",
         })
     }
 }
@@ -250,10 +265,69 @@ impl FromStr for Audio {
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         Ok(match s {
-            "mpeg"          => Self::Mpeg,                  
-            "ogg"           => Self::Ogg,               
+            "aac"           => Self::Aac,
+            "flac"          => Self::Flac,
+            "mp4"           => Self::Mp4,
+            "mpeg"          => Self::Mpeg,
+            "ogg"           => Self::Ogg,
+            "wav"           => Self::Wav,
+            "webm"          => Self::Webm,
             _ => return Err(err!(
                 "Unrecognised Audio Media subtype '{}'.", s;
+            IO, Network, Unknown, Input)),
+        })
+    }
+}
+
+/// ╭────────────────────────────────────────────╮
+/// │ IANA Top Level Media Type: Video           │
+/// │ Subtypes                                   │
+/// ╰────────────────────────────────────────────╯
+///
+/// A recording served under the wrong type is a recording no browser will play,
+/// however well the bytes are delivered, so the seekable media this crate exists
+/// to serve needs its types named.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum Video {
+    Mp4,
+    Mpeg,
+    Ogg,
+    Quicktime,
+    Webm,
+    /// Matroska, which IANA has not registered but every player expects.
+    XMatroska,
+    /// AVI, likewise unregistered and likewise expected.
+    XMsVideo,
+}
+
+impl Display for Video {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", match self {
+            Self::Mp4           => "mp4",
+            Self::Mpeg          => "mpeg",
+            Self::Ogg           => "ogg",
+            Self::Quicktime     => "quicktime",
+            Self::Webm          => "webm",
+            Self::XMatroska     => "x-matroska",
+            Self::XMsVideo      => "x-msvideo",
+        })
+    }
+}
+
+impl FromStr for Video {
+    type Err = Error<ErrTag>;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(match s {
+            "mp4"           => Self::Mp4,
+            "mpeg"          => Self::Mpeg,
+            "ogg"           => Self::Ogg,
+            "quicktime"     => Self::Quicktime,
+            "webm"          => Self::Webm,
+            "x-matroska"    => Self::XMatroska,
+            "x-msvideo"     => Self::XMsVideo,
+            _ => return Err(err!(
+                "Unrecognised Video Media subtype '{}'.", s;
             IO, Network, Unknown, Input)),
         })
     }
@@ -451,5 +525,49 @@ impl FromStr for Text {
                 "Unrecognised Text Media subtype '{}'.", s;
             IO, Network, Unknown, Input)),
         })
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `MediaType` writes the top-level type, so a subtype that writes it again
+    /// puts `audio/audio/mpeg` on the wire, which no player recognises.
+    #[test]
+    fn test_a_media_type_names_its_top_level_once() {
+        assert_eq!(fmt!("{}", MediaType::Audio(Audio::Mpeg)), "audio/mpeg");
+        assert_eq!(fmt!("{}", MediaType::Video(Video::Mp4)), "video/mp4");
+        assert_eq!(fmt!("{}", MediaType::Font(Font::Woff2)), "font/woff2");
+        assert_eq!(fmt!("{}", MediaType::Text(Text::Html)), "text/html");
+    }
+
+    /// Every type this crate writes it can also read back, which is what a proxy
+    /// forwarding a `Content-Type` needs of it.
+    #[test]
+    fn test_every_recording_type_survives_a_round_trip() -> Outcome<()> {
+        let types = [
+            MediaType::Video(Video::Mp4),
+            MediaType::Video(Video::Mpeg),
+            MediaType::Video(Video::Ogg),
+            MediaType::Video(Video::Quicktime),
+            MediaType::Video(Video::Webm),
+            MediaType::Video(Video::XMatroska),
+            MediaType::Video(Video::XMsVideo),
+            MediaType::Audio(Audio::Aac),
+            MediaType::Audio(Audio::Flac),
+            MediaType::Audio(Audio::Mp4),
+            MediaType::Audio(Audio::Mpeg),
+            MediaType::Audio(Audio::Ogg),
+            MediaType::Audio(Audio::Wav),
+            MediaType::Audio(Audio::Webm),
+        ];
+        for mt in types {
+            let written = fmt!("{}", mt);
+            let read = res!(MediaType::from_str(&written));
+            assert_eq!(read, mt, "{:?} did not survive being written as {:?}", mt, written);
+        }
+        Ok(())
     }
 }

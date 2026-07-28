@@ -58,3 +58,32 @@ where they bite:
 
 `rig-test-passphrase-not-a-secret`, in the clear, on purpose. It protects a
 wallet that exists for thirty seconds and holds nothing.
+
+## The byte range rig
+
+`range.sh` is the second script here, and it answers a different question: does a
+window of a file, asked for over the wire, arrive as the bytes that are actually
+in the file at that offset?
+
+```
+fe2o3_steel/tests/rig/range.sh
+RIG_TRANSCRIPT=1 fe2o3_steel/tests/rig/range.sh   # print the exchanges too
+```
+
+It serves a ten megabyte file of a counting pattern and drives it with curl:
+`-r 0-99`, `-r 100-`, `-r -50`, a window from the middle, a start past the end, a
+suffix longer than the file, a unit that is not `bytes`, several ranges at once,
+an empty file, a one byte file, and a `HEAD`. Every body is compared with `cmp`
+against the same window cut out of the file with `dd` -- because a response of the
+right length carrying the wrong bytes is exactly the failure a length check
+misses, and exactly what a viewer sees as a video that will not play.
+
+The whole sweep runs twice, once as curl chooses and once under `--http2`. Steel
+offers only `http/1.1` over ALPN today, so `--http2` negotiates 1.1 and falls
+back; the second pass is there so that the day ALPN offers `h2`, the sweep already
+covers it.
+
+The last check asks for two windows down one connection. A body that is shorter or
+longer than the `Content-Length` promised desynchronises every message after it,
+and that can only be seen when a second request follows the first on the same
+connection.

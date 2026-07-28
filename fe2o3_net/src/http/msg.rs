@@ -29,6 +29,7 @@ use oxedyne_fe2o3_core::prelude::*;
 use std::{
     str::FromStr,
     future::Future,
+    path::PathBuf,
     pin::Pin,
     time::Duration,
 };
@@ -37,6 +38,7 @@ use tokio::{
     io::{
         AsyncRead,
         AsyncReadExt,
+        AsyncSeekExt,
         AsyncWriteExt,
     },
 };
@@ -86,6 +88,82 @@ impl ReadLimits {
     }
 }
 
+/// A body that is read off a file as it is written, rather than gathered into
+/// memory first.
+///
+/// A two hour recording is a couple of gigabytes, and a player seeking through it
+/// asks for a megabyte at a time. Reading the file to answer such a request costs
+/// two thousand times what the answer weighs, and a handful of concurrent viewers
+/// then costs the machine its memory. So the window is named here and copied
+/// straight from the file to the socket when the message is written.
+#[derive(Clone, Debug)]
+pub struct FileWindow {
+    /// The file to read from.
+    pub path:   PathBuf,
+    /// Offset of the first byte sent.
+    pub start:  u64,
+    /// How many bytes to send.
+    pub len:    u64,
+}
+
+impl FileWindow {
+
+    /// Name a window of a file as a message body.
+    pub fn new(path: PathBuf, start: u64, len: u64) -> Self {
+        Self {
+            path,
+            start,
+            len,
+        }
+    }
+
+    /// Copy the window from the file to the given sink, in chunks of
+    /// `CHUNK_SIZE`.
+    ///
+    /// Exactly `len` bytes are written, or the write fails. A file that shrank
+    /// between the length being measured and the body being sent would otherwise
+    /// leave the connection short of the `Content-Length` already promised, which
+    /// desynchronises every message after it on a kept-alive connection -- so a
+    /// short read is an error, and the caller drops the connection.
+    pub async fn write_to<const CHUNK_SIZE: usize, W: AsyncWriteExt + Unpin>(
+        &self,
+        sink: &mut W,
+    )
+        -> Outcome<()>
+    {
+        let mut file = match tokio::fs::File::open(&self.path).await {
+            Ok(f)  => f,
+            Err(e) => return Err(err!(e,
+                "Opening {:?} to send bytes {} to {} of it.",
+                self.path, self.start, self.start + self.len;
+                IO, File, Read)),
+        };
+        if self.start > 0 {
+            let result = file.seek(std::io::SeekFrom::Start(self.start)).await;
+            res!(result, IO, File, Seek);
+        }
+        let mut left = self.len;
+        let mut buf = vec![0u8; CHUNK_SIZE];
+        while left > 0 {
+            let want = std::cmp::min(left as usize, CHUNK_SIZE);
+            let n = match file.read(&mut buf[..want]).await {
+                Ok(0)  => return Err(err!(
+                    "{:?} ended {} bytes short of the {} promised from offset {}.",
+                    self.path, left, self.len, self.start;
+                    IO, File, Read, Size)),
+                Ok(n)  => n,
+                Err(e) => return Err(err!(e,
+                    "Reading {:?} at offset {}.", self.path, self.start + (self.len - left);
+                    IO, File, Read)),
+            };
+            let result = sink.write_all(&buf[..n]).await;
+            res!(result, IO, Network, Wire, Write);
+            left -= n as u64;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct HttpMessage {
     pub header:     HttpHeader,
@@ -97,6 +175,11 @@ pub struct HttpMessage {
     /// included, describing a body that is deliberately not sent. So the body is built as
     /// usual, counted as usual, and withheld at the wire.
     pub head_only:  bool,
+    /// A body held on disk rather than in `body`, sent straight from the file.
+    ///
+    /// When set this *is* the body: `body` is not sent, and `Content-Length` is
+    /// the window's length. See [`FileWindow`].
+    pub file:       Option<FileWindow>,
 }
 
 impl HttpMessage {
@@ -110,6 +193,7 @@ impl HttpMessage {
             },
             body: Vec::new(),
             head_only: false,
+            file: None,
         }
     }
 
@@ -128,6 +212,7 @@ impl HttpMessage {
             },
             body: txt.as_ref().as_bytes().to_vec(),
             head_only: false,
+            file: None,
         }
     }
 
@@ -234,7 +319,14 @@ impl HttpMessage {
                 }
             }
 
-            // Body.
+            // Body. A body on disk is never read to be logged: the point of
+            // naming it as a window is that nothing gathers it into memory.
+            if let Some(window) = &self.file {
+                trace!("HTTP Body: bytes {} to {} of {:?}, {} bytes, sent from the file.",
+                    window.start, window.start + window.len, window.path, window.len);
+                return;
+            }
+
             let body_is_text = match self.body_is_text() {
                 Some(true) => true,
                 Some(false) => false,
@@ -421,7 +513,7 @@ impl HttpMessage {
         // its own framing and does not acquire a second, contradictory one.
         let _ = self.insert(
             HeaderName::ContentLength,
-            HeaderFieldValue::ContentLength(self.body.len()),
+            HeaderFieldValue::ContentLength(self.body_len()),
             Some(HeaderFieldCategory::Entity as u16),
         );
         self.log(log_get_level!());
@@ -431,12 +523,43 @@ impl HttpMessage {
         // after it. `Content-Length` above still counts the body that was built, which is what
         // the field is for -- a caller asking how big a thing is deserves the true answer.
         if !self.head_only {
-            let result = stream.write_all(&self.body).await;
-            res!(result);
+            match &self.file {
+                // A body on disk goes to the socket a chunk at a time and is
+                // never gathered into memory, which is the whole point of
+                // naming it as a window rather than reading it.
+                Some(window) => res!(window.write_to::<
+                    { constant::HTTP_FILE_BODY_CHUNK_SIZE },
+                    _,
+                >(stream).await),
+                None => {
+                    let result = stream.write_all(&self.body).await;
+                    res!(result);
+                }
+            }
         }
         let result = stream.flush().await;
         res!(result);
         Ok(())
+    }
+
+    /// How many bytes the body comes to, whether it is held in memory or named
+    /// as a window of a file.
+    ///
+    /// This is the `Content-Length` the message will carry, and a `HEAD` answer
+    /// states it too -- a caller asking how big a thing is deserves the true
+    /// answer.
+    pub fn body_len(&self) -> usize {
+        match &self.file {
+            Some(window)    => window.len as usize,
+            None            => self.body.len(),
+        }
+    }
+
+    /// Send a window of a file as the body, rather than a buffer of bytes.
+    pub fn with_file_window(mut self, window: FileWindow) -> Self {
+        self.file = Some(window);
+        self.body = Vec::new();
+        self
     }
 
     /// Answer with the headers and no body, as a `HEAD` asks.
@@ -776,11 +899,15 @@ mod body_tests {
     }
 
     /// Write a response to a buffer, as the server writing to a socket does.
-    fn on_the_wire(msg: HttpMessage) -> Outcome<String> {
+    fn on_the_wire_bytes(msg: HttpMessage) -> Outcome<Vec<u8>> {
         let mut out: Vec<u8> = Vec::new();
         let rt = res!(tokio::runtime::Runtime::new());
         res!(rt.block_on(msg.write_all(&mut out)));
-        Ok(String::from_utf8_lossy(&out).to_string())
+        Ok(out)
+    }
+
+    fn on_the_wire(msg: HttpMessage) -> Outcome<String> {
+        Ok(String::from_utf8_lossy(&res!(on_the_wire_bytes(msg))).to_string())
     }
 
     /// A `HEAD` answer is the headers the matching `GET` would have sent, and nothing after them
@@ -802,6 +929,70 @@ mod body_tests {
         assert!(!head_wire.contains(body), "the HEAD sent the body: {}", head_wire);
         // Headers to the blank line and not a byte past it.
         assert!(head_wire.ends_with("\r\n\r\n"), "the HEAD wrote past its headers: {:?}", head_wire);
+        Ok(())
+    }
+
+    /// A file that stands in for a large one: a counting pattern, so a window cut
+    /// from the wrong offset is obvious rather than plausible.
+    fn counting_file(name: &str, len: usize) -> Outcome<std::path::PathBuf> {
+        let path = std::env::temp_dir().join(fmt!("fe2o3-window-{}-{}", std::process::id(), name));
+        let bytes: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+        res!(std::fs::write(&path, &bytes), IO, File);
+        Ok(path)
+    }
+
+    /// The body is a window of the file, and the message carries the window's
+    /// length rather than the file's.
+    #[test]
+    fn test_a_file_window_writes_only_its_own_bytes() -> Outcome<()> {
+        let path = res!(counting_file("window", 10_000));
+        let msg = HttpMessage::new_response(HttpStatus::PartialContent)
+            .with_file_window(FileWindow::new(path.clone(), 4_000, 1_000));
+        assert_eq!(msg.body_len(), 1_000);
+
+        let wire = res!(on_the_wire_bytes(msg));
+        let split = match wire.windows(4).position(|w| w == b"\r\n\r\n") {
+            Some(i) => i + 4,
+            None    => return Err(err!("The response had no header terminator."; Test, Missing)),
+        };
+        let head = String::from_utf8_lossy(&wire[..split]).to_lowercase();
+        assert!(head.contains("content-length: 1000"), "unexpected head: {}", head);
+
+        let body = &wire[split..];
+        let expected: Vec<u8> = (4_000..5_000).map(|i: usize| (i % 251) as u8).collect();
+        assert_eq!(body.len(), 1_000, "the window was the wrong length");
+        assert_eq!(body, &expected[..], "the window came from the wrong offset");
+
+        let _ = std::fs::remove_file(&path);
+        Ok(())
+    }
+
+    /// A `HEAD` over a file window states the window's length and sends none of it,
+    /// so a caller learns the size without the server reading the file at all.
+    #[test]
+    fn test_a_head_over_a_file_window_sends_no_bytes() -> Outcome<()> {
+        let path = res!(counting_file("head", 10_000));
+        let msg = HttpMessage::new_response(HttpStatus::OK)
+            .with_file_window(FileWindow::new(path.clone(), 0, 10_000))
+            .head_only();
+        let wire = res!(on_the_wire_bytes(msg));
+        let text = String::from_utf8_lossy(&wire).to_lowercase();
+        assert!(text.contains("content-length: 10000"), "unexpected head: {}", text);
+        assert!(text.ends_with("\r\n\r\n"), "the HEAD wrote past its headers");
+        let _ = std::fs::remove_file(&path);
+        Ok(())
+    }
+
+    /// A window that runs past the end of the file is an error, not a short body:
+    /// a body shorter than the `Content-Length` already promised desynchronises
+    /// every message after it on a kept-alive connection.
+    #[test]
+    fn test_a_window_past_the_end_of_the_file_is_an_error() -> Outcome<()> {
+        let path = res!(counting_file("short", 100));
+        let msg = HttpMessage::new_response(HttpStatus::PartialContent)
+            .with_file_window(FileWindow::new(path.clone(), 0, 1_000));
+        assert!(on_the_wire_bytes(msg).is_err());
+        let _ = std::fs::remove_file(&path);
         Ok(())
     }
 

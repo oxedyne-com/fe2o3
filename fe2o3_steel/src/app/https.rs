@@ -65,7 +65,14 @@ use oxedyne_fe2o3_net::{
         handler::WebHandler,
         header::HttpMethod,
         loc::HttpLocator,
-        msg::HttpMessage,
+        msg::{
+            FileWindow,
+            HttpMessage,
+        },
+        range::{
+            self,
+            RangeOutcome,
+        },
         status::HttpStatus,
     },
 };
@@ -681,19 +688,32 @@ impl<
                             let content_type = RequestPath::content_type(abs_path.as_path());
                             let content_type_str = content_type.to_string();
 
+                            // The filesystem is asked before the file is read: the
+                            // length answers a range, the modification time makes an
+                            // entity tag, and a client that already holds the entity
+                            // needs no body at all -- reading one would be the very
+                            // cost the tag exists to avoid.
+                            let meta = res!(file.metadata().await);
+                            // A directory opens like a file on Linux and reads like
+                            // nothing at all, so the route that reached one is a route
+                            // to nothing.
+                            if !meta.is_file() {
+                                debug!("{}: {:?} is not a file.", id_clone, abs_path);
+                                return Ok(HttpMessage::respond_with_text(
+                                    HttpStatus::NotFound,
+                                    "File not found.",
+                                ));
+                            }
+                            let total = meta.len();
+
                             // In development an entry document is rewritten on the
                             // way out to carry the refresh hook, so the file on disk
-                            // is not the entity being sent, and no tag drawn from it
-                            // would describe the response. Such a document is never
-                            // cached, and never revalidated -- it is simply resent.
-                            let cacheable = !(dev_mode && cache::is_document(&content_type_str));
+                            // is not the entity being sent. Such a document is never
+                            // cached, never revalidated and never cut into windows --
+                            // it is simply resent, whole, every time.
+                            let verbatim = !(dev_mode && cache::is_document(&content_type_str));
 
-                            // Ask the filesystem before reading the file. A client
-                            // that already holds this entity needs no body, and
-                            // reading one would be the very cost the tag exists to
-                            // avoid.
-                            let validators = if cacheable {
-                                let meta = res!(file.metadata().await);
+                            let validators = if verbatim {
                                 let etag = res!(cache::entity_tag(&meta));
                                 let directive = cache::cache_control(
                                     &content_type_str,
@@ -714,42 +734,81 @@ impl<
                                 }
                             }
 
-                            let mut contents = Vec::new();
-                            match file.read_to_end(&mut contents).await {
-                                Ok(_n) => {
-                                    let mut response = HttpMessage::new_response(HttpStatus::OK)
-                                        .with_field(HeaderName::ContentType, content_type);
-
-                                    if let Some((etag, directive)) = validators {
-                                        response = response
-                                            .with_field(HeaderName::ETag, res!(
-                                                HeaderFieldValue::new(&HeaderName::ETag, &etag)))
-                                            .with_field(HeaderName::CacheControl, res!(
-                                                HeaderFieldValue::new(
-                                                    &HeaderName::CacheControl, &directive)));
-                                    }
-
-                                    if dev_mode && content_type_str.contains("text/html") {
-                                        let contents_str = res!(String::from_utf8(contents.clone()));
-                                        let modified =
-                                            res!(HtmlModifier::inject_dev_refresh(&contents_str));
-                                        response.with_body(modified.into_bytes())
-                                    } else {
-                                        response.with_body(contents)
+                            if !verbatim {
+                                // The development refresh hook, injected into a
+                                // document that is read whole because it is rewritten
+                                // whole.
+                                let mut contents = Vec::new();
+                                match file.read_to_end(&mut contents).await {
+                                    Ok(_n) => (),
+                                    Err(e) => {
+                                        let err_id = Self::err_id();
+                                        error!(e.into(),
+                                            "{}: While trying to serve file '{:?}' (err_id: {})",
+                                            id_clone, abs_path, err_id,
+                                        );
+                                        return Ok(HttpMessage::respond_with_text(
+                                            HttpStatus::InternalServerError,
+                                            fmt!("Problem during request processing \
+                                                (err_id: {}).", err_id),
+                                        ));
                                     }
                                 }
-                                Err(e) => {
-                                    let err_id = Self::err_id();
-                                    error!(e.into(),
-                                        "{}: While trying to server file '{:?}' (err_id: {})",
-                                        id_clone, abs_path, err_id,
-                                    );
-                                    HttpMessage::respond_with_text(
-                                        HttpStatus::InternalServerError,
-                                        fmt!("Problem during request processing (err_id: {}).",
-                                            err_id),
+                                let contents_str = res!(String::from_utf8(contents));
+                                let modified =
+                                    res!(HtmlModifier::inject_dev_refresh(&contents_str));
+                                return Ok(HttpMessage::new_response(HttpStatus::OK)
+                                    .with_field(HeaderName::ContentType, content_type)
+                                    .with_body(modified.into_bytes()));
+                            }
+
+                            // The bytes on disk are the bytes sent, so a window of
+                            // them can be asked for and answered. Every such response
+                            // says so, because a browser will not offer a scrubber on
+                            // a video the server has not advertised.
+                            let outcome = range::resolve(&req_headers_clone, total);
+                            if let RangeOutcome::NotSatisfiable = outcome {
+                                debug!("{}: {:?} cannot answer the range asked of it; 416.",
+                                    id_clone, abs_path);
+                                return Ok(range::not_satisfiable(total));
+                            }
+
+                            let (status, window) = match outcome {
+                                RangeOutcome::Partial(w) => {
+                                    debug!("{}: {:?} {}.", id_clone, abs_path, w.content_range());
+                                    (HttpStatus::PartialContent, Some(w))
+                                }
+                                _ => (HttpStatus::OK, None),
+                            };
+
+                            let mut response = range::with_accept_ranges(
+                                HttpMessage::new_response(status)
+                                    .with_field(HeaderName::ContentType, content_type)
+                            );
+
+                            if let Some((etag, directive)) = validators {
+                                response = response
+                                    .with_field(HeaderName::ETag, res!(
+                                        HeaderFieldValue::new(&HeaderName::ETag, &etag)))
+                                    .with_field(HeaderName::CacheControl, res!(
+                                        HeaderFieldValue::new(
+                                            &HeaderName::CacheControl, &directive)));
+                            }
+
+                            // The body is named rather than read: a window of a two
+                            // gigabyte recording weighs what the window weighs, and
+                            // the file goes to the socket a chunk at a time when the
+                            // message is written.
+                            match window {
+                                Some(w) => response
+                                    .with_field(
+                                        HeaderName::ContentRange,
+                                        range::content_range_field(&w),
                                     )
-                                }
+                                    .with_file_window(FileWindow::new(
+                                        abs_path.clone(), w.start, w.len())),
+                                None => response.with_file_window(FileWindow::new(
+                                    abs_path.clone(), 0, total)),
                             }
                         }
                         Err(_e) => {

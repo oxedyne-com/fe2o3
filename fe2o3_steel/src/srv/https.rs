@@ -655,7 +655,10 @@ impl<
                             {
                                 rec_status = *status as u16;
                             }
-                            rec_bytes = Some(msg.body.len() as u64);
+                            // The length the response actually carries, which for a
+                            // body sent from a file is the window rather than the
+                            // empty buffer beside it.
+                            rec_bytes = Some(msg.body_len() as u64);
                             match msg.write_all(&mut write_stream).await {
                                 Ok(()) => (),
                                 Err(e) => return Err(err!(e,
