@@ -1,5 +1,5 @@
 use crate::{
-    time::tzif::{TZifData, LocalTimeResult},
+    time::tzif::{TZifData, TZifParser, LocalTimeResult},
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -7,6 +7,8 @@ use oxedyne_fe2o3_core::prelude::*;
 use std::{
 	collections::HashMap,
 	fmt::{self, Display},
+	fs,
+	path::Path,
 	sync::OnceLock,
 };
 
@@ -259,7 +261,13 @@ impl CalClockZone {
 				tzif_data: None,
 			});
 		}
-		
+
+		// A name the embedded table does not hold may still be on the system's
+		// own zoneinfo tree, whose rules are better than a silent zero offset.
+		if let Ok(zone) = Self::from_zoneinfo_name(&id) {
+			return Ok(zone);
+		}
+
 		// Default to UTC for unrecognised zones (matches Java behaviour)
 		Ok(Self {
 			id,
@@ -320,7 +328,13 @@ impl CalClockZone {
 				tzif_data: None,
 			});
 		}
-		
+
+		// A name the embedded table does not hold may still be on the system's
+		// own zoneinfo tree, whose rules are better than a silent zero offset.
+		if let Ok(zone) = Self::from_zoneinfo_name(&id) {
+			return Ok(zone);
+		}
+
 		// Default to UTC for unrecognised zones (matches Java behaviour)
 		Ok(Self {
 			id,
@@ -666,16 +680,107 @@ impl CalClockZone {
 	
 	/// Detects the system timezone using platform-specific methods.
 	fn detect_system_timezone() -> Outcome<Self> {
-		// Try TZ environment variable first
+		// TZ first, as POSIX says: an optional leading colon, then either a
+		// zone name or a path to a TZif file.
 		if let Ok(tz) = std::env::var("TZ") {
 			if !tz.is_empty() {
-				return Self::new(tz);
+				let name = tz.strip_prefix(':').unwrap_or(&tz);
+				if name.starts_with('/') {
+					if let Ok(zone) = Self::from_tzif_file(name, Path::new(name)) {
+						return Ok(zone);
+					}
+				}
+				if let Ok(zone) = Self::from_zoneinfo_name(name) {
+					return Ok(zone);
+				}
+				return Self::new(name);
 			}
 		}
-		
-		// Platform-specific detection would go here
-		// For now, return UTC as fallback
+
+		// /etc/localtime: on every modern Linux and macOS a symlink into the
+		// zoneinfo tree, and a TZif file either way. The symlink target names
+		// the zone; the bytes carry its rules, so the answer is right even for
+		// a zone the embedded table does not hold. Reading the machine's own
+		// setting is the whole purpose of local(), so no consent machinery
+		// applies here -- that gate belongs to the manager that scans zone
+		// data wholesale.
+		let localtime = Path::new("/etc/localtime");
+		if localtime.exists() {
+			let id = fs::read_link(localtime).ok()
+				.and_then(|target| Self::zone_name_from_path(&target))
+				.unwrap_or_else(|| "Local".to_string());
+			if let Ok(zone) = Self::from_tzif_file(&id, localtime) {
+				return Ok(zone);
+			}
+		}
+
+		// /etc/timezone: the Debian name file, no longer shipped everywhere
+		// (Ubuntu 25.10 dropped it) but still authoritative where it exists.
+		if let Ok(name) = fs::read_to_string("/etc/timezone") {
+			let name = name.trim();
+			if !name.is_empty() {
+				if let Ok(zone) = Self::from_zoneinfo_name(name) {
+					return Ok(zone);
+				}
+				return Self::new(name);
+			}
+		}
+
 		Err(err!("Could not detect system timezone"; System))
+	}
+
+	/// Builds a zone from a TZif file on disk, carrying the file's rules.
+	fn from_tzif_file(id: &str, path: &Path) -> Outcome<Self> {
+		let mut parser = TZifParser::new();
+		res!(parser.load_from_file(path));
+		match parser.timezone_data() {
+			Some(data) => Self::from_tzif_data(id, data.clone()),
+			None => Err(err!(
+				"The TZif file {:?} parsed to no timezone data.", path;
+			System, Missing, Data)),
+		}
+	}
+
+	/// Resolves a zone name through the system zoneinfo tree, where there is
+	/// one.
+	fn from_zoneinfo_name(name: &str) -> Outcome<Self> {
+		// The name may have come from the environment; keep it inside the
+		// tree.
+		if name.starts_with('/') || name.contains("..") {
+			return Err(err!(
+				"'{}' is not a plain zone name.", name;
+			Invalid, Input));
+		}
+		for base in ["/usr/share/zoneinfo", "/usr/lib/zoneinfo", "/etc/zoneinfo"] {
+			let path = Path::new(base).join(name);
+			if path.is_file() {
+				return Self::from_tzif_file(name, &path);
+			}
+		}
+		Err(err!(
+			"No zoneinfo file for '{}' on this system.", name;
+		System, Missing))
+	}
+
+	/// The zone name in a zoneinfo path: the components after `zoneinfo`,
+	/// joined again -- `/usr/share/zoneinfo/Australia/Perth` names
+	/// `Australia/Perth`.
+	fn zone_name_from_path(path: &Path) -> Option<String> {
+		let mut parts: Vec<String> = Vec::new();
+		let mut seen = false;
+		for component in path.components() {
+			let text = component.as_os_str().to_string_lossy();
+			if seen {
+				parts.push(text.into_owned());
+			} else if text == "zoneinfo" {
+				seen = true;
+			}
+		}
+		if parts.is_empty() {
+			None
+		} else {
+			Some(parts.join("/"))
+		}
 	}
 	
 	/// Calculates DST offset at a specific time.

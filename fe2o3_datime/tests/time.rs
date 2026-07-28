@@ -165,5 +165,64 @@ pub fn test_time(filter: &str) -> Outcome<()> {
         Ok(())
     }));
     
+    res!(test_it(filter, &["local_zone_oracle", "all", "time", "zone"], || {
+        // The system's own date command is the oracle. Only run where a
+        // zoneinfo tree exists; a container without one detects nothing and
+        // that is the documented fallback, not a fault.
+        if !std::path::Path::new("/usr/share/zoneinfo").is_dir() {
+            return Ok(());
+        }
+        let now_ms = res!(std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| err!("{}", e; System))).as_millis() as i64;
+
+        // local() must agree with `date +%z` on the current offset.
+        let out = res!(std::process::Command::new("date").arg("+%z").output(),
+            System);
+        let text = String::from_utf8_lossy(&out.stdout);
+        let want = res!(parse_offset_minutes(text.trim()));
+        let zone = CalClockZone::local();
+        let got = i64::from(res!(zone.offset_millis_at_time(now_ms))) / 60_000;
+        assert_eq!(got, want,
+            "local() answers {} minutes, the date command says {}.", got, want);
+
+        // A named zone absent from the embedded table must resolve through
+        // the system tree rather than silently answering zero.
+        for name in ["Australia/Perth", "Australia/Sydney"] {
+            if !std::path::Path::new("/usr/share/zoneinfo").join(name).is_file() {
+                continue;
+            }
+            let out = res!(std::process::Command::new("date")
+                .env("TZ", name)
+                .arg("+%z")
+                .output(), System);
+            let text = String::from_utf8_lossy(&out.stdout);
+            let want = res!(parse_offset_minutes(text.trim()));
+            let zone = res!(CalClockZone::new(name));
+            let got = i64::from(res!(zone.offset_millis_at_time(now_ms))) / 60_000;
+            assert_eq!(got, want,
+                "{} answers {} minutes, the date command says {}.",
+                name, got, want);
+        }
+        Ok(())
+    }));
+
     Ok(())
+}
+
+/// Reads a `+0800`-style offset as minutes.
+fn parse_offset_minutes(text: &str) -> Outcome<i64> {
+    if text.len() < 5 {
+        return Err(err!("'{}' is not a +hhmm offset.", text; Invalid, Input));
+    }
+    let sign = match &text[..1] {
+        "+" => 1i64,
+        "-" => -1i64,
+        _ => return Err(err!("'{}' is not a +hhmm offset.", text; Invalid, Input)),
+    };
+    let hours: i64 = res!(text[1..3].parse().map_err(|_|
+        err!("'{}' is not a +hhmm offset.", text; Invalid, Input)));
+    let minutes: i64 = res!(text[3..5].parse().map_err(|_|
+        err!("'{}' is not a +hhmm offset.", text; Invalid, Input)));
+    Ok(sign * (hours * 60 + minutes))
 }
