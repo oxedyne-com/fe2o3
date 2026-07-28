@@ -10,14 +10,33 @@
 //!
 //! # What is supported
 //!
-//! Eight bits per channel, all five colour types (greyscale, truecolour, palette, greyscale with
-//! alpha, truecolour with alpha), and no interlacing. Sixteen-bit channels and Adam7 interlacing
-//! are refused by name rather than misread.
+//! The decoder reads every combination of bit depth and colour type the specification allows -- 1,
+//! 2, 4, 8 and 16 bits per channel across greyscale, truecolour, palette, greyscale with alpha and
+//! truecolour with alpha -- with or without Adam7 interlacing. The two are independent, so an
+//! interlaced 1-bit palette image and a non-interlaced 16-bit truecolour one are both read.
+//!
+//! Samples narrower than eight bits are widened so that the widest value the depth can hold becomes
+//! 255: a 1-bit sample is 0 or 255, a 2-bit one a multiple of 85, a 4-bit one a multiple of 17.
+//! Sixteen-bit samples are reduced to their high byte, which is a deliberate loss: a [`Pixmap`] is
+//! eight bits a channel, and a lossless path for 16 would be a second pixel type rather than a
+//! change here. Palette indices are never widened, since they are indices and not intensities.
 //!
 //! The `tRNS` chunk is read. It is nominally ancillary, but it is the one ancillary chunk that
 //! carries pixel data: for the three colour types without an alpha channel of their own it is where
 //! the alpha channel is written, so a decoder that skips it does not drop decoration, it reports the
-//! wrong image.
+//! wrong image. Its samples are compared against the file's own samples at the file's own depth,
+//! before any widening, so the match is the one the specification describes.
+//!
+//! # What is refused, by name
+//!
+//! A colour type outside 0, 2, 3, 4 and 6; a bit depth outside 1, 2, 4, 8 and 16; a depth the
+//! declared colour type does not allow; a compression method other than DEFLATE; a filter method
+//! other than the adaptive one; an interlace method other than none or Adam7; a `tRNS` sample wider
+//! than the declared depth; a `tRNS` chunk under a colour type that already carries alpha, or out
+//! of order; a palette index beyond the palette; a chunk whose CRC does not match; and image data
+//! that decompresses to anything other than the exact size the header implies.
+//!
+//! The encoder writes one form only: eight-bit truecolour with alpha, not interlaced.
 
 use crate::{
 	colour::Rgba,
@@ -75,8 +94,8 @@ impl ColourType {
 		}
 	}
 
-	/// The number of bytes each pixel occupies in the filtered scanlines, at eight bits a channel.
-	fn bytes_per_pixel(&self) -> usize {
+	/// The number of samples each pixel carries.
+	fn channels(&self) -> usize {
 		match self {
 			Self::Grey		=> 1,
 			Self::Rgb		=> 3,
@@ -85,18 +104,35 @@ impl ColourType {
 			Self::Rgba		=> 4,
 		}
 	}
+
+	/// The bit depths the specification allows this colour type.
+	///
+	/// Only the two one-channel types may go below eight bits, and only the types whose samples are
+	/// intensities rather than palette indices may go above it.
+	fn depths(&self) -> &'static [u8] {
+		match self {
+			Self::Grey		=> &[1, 2, 4, 8, 16],
+			Self::Rgb		=> &[8, 16],
+			Self::Palette		=> &[1, 2, 4, 8],
+			Self::GreyAlpha		=> &[8, 16],
+			Self::Rgba		=> &[8, 16],
+		}
+	}
 }
 
 /// What a `tRNS` chunk says, which is a different thing for each colour type that may carry one.
+///
+/// The greyscale and truecolour forms hold the sample as the file writes it, at the file's own bit
+/// depth, because that is what they are compared against.
 #[derive(Clone, Debug)]
 enum Trns {
 	/// One alpha byte per palette entry, in palette order. It may be shorter than the palette, and
 	/// every entry beyond its end is opaque.
 	Palette(Vec<u8>),
 	/// The one luminance that is fully transparent. Every other luminance is opaque.
-	Grey(u8),
+	Grey(u16),
 	/// The one colour that is fully transparent. Every other colour is opaque.
-	Rgb(u8, u8, u8),
+	Rgb(u16, u16, u16),
 }
 
 /// A PNG's image header, once believed.
@@ -108,7 +144,42 @@ struct Header {
 	h:	usize,
 	/// What each pixel carries.
 	ct:	ColourType,
+	/// Bits per sample: 1, 2, 4, 8 or 16.
+	depth:	u8,
+	/// Whether the image data is Adam7 interlaced.
+	laced:	bool,
 }
+
+/// One pass of image data: where its pixels begin, how far apart they sit, and how many there are.
+///
+/// A non-interlaced image is one pass with a step of one in each direction, so the interlaced and
+/// non-interlaced cases share every line of the decoding below.
+#[derive(Clone, Copy, Debug)]
+struct Pass {
+	/// Column of the pass's first pixel.
+	x0:	usize,
+	/// Row of the pass's first pixel.
+	y0:	usize,
+	/// Columns between one of the pass's pixels and the next.
+	dx:	usize,
+	/// Rows between one of the pass's scanlines and the next.
+	dy:	usize,
+	/// Pixels across the pass.
+	w:	usize,
+	/// Scanlines down the pass.
+	h:	usize,
+}
+
+/// The seven Adam7 passes, as the offset and step at which each lays its pixels into the image.
+const ADAM7: [(usize, usize, usize, usize); 7] = [
+	(0, 0, 8, 8),
+	(4, 0, 8, 8),
+	(0, 4, 4, 8),
+	(2, 0, 4, 4),
+	(0, 2, 2, 4),
+	(1, 0, 2, 2),
+	(0, 1, 1, 2),
+];
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ CRC-32                                                                     │
@@ -239,6 +310,76 @@ fn paeth(a: u8, b: u8, c: u8) -> u8 {
 // │ DECODING                                                                   │
 // └───────────────────────────────────────────────────────────────────────────┘
 
+/// The passes the image data is written in: one for a plain image, up to seven for an interlaced
+/// one.
+///
+/// An Adam7 pass whose grid falls entirely outside a small image holds no pixels and no scanlines,
+/// and contributes nothing at all to the stream -- not even a filter byte. Such passes are dropped
+/// here, so that everything downstream, the size arithmetic included, sees only passes that exist.
+fn passes_of(hdr: &Header) -> Vec<Pass> {
+	if !hdr.laced {
+		return vec![Pass { x0: 0, y0: 0, dx: 1, dy: 1, w: hdr.w, h: hdr.h }];
+	}
+	let mut out = Vec::with_capacity(ADAM7.len());
+	for (x0, y0, dx, dy) in ADAM7 {
+		// The pixels of a pass are those at x0, x0 + dx, x0 + 2dx and so on that fall inside the
+		// image, which is a count of zero once x0 reaches the width.
+		let w = if hdr.w > x0 { (hdr.w - x0 + dx - 1) / dx } else { 0 };
+		let h = if hdr.h > y0 { (hdr.h - y0 + dy - 1) / dy } else { 0 };
+		if w > 0 && h > 0 {
+			out.push(Pass { x0, y0, dx, dy, w, h });
+		}
+	}
+	out
+}
+
+/// The number of bytes one scanline of `w` pixels occupies, rounded up to a whole byte.
+fn row_bytes(ct: ColourType, depth: u8, w: usize) -> Outcome<usize> {
+	let bits = match w.checked_mul(ct.channels()).and_then(|n| n.checked_mul(depth as usize)) {
+		Some(n) => n,
+		None => return Err(err!(
+			"A PNG scanline of {} pixels at {} channels of {} bits overflows a count of bits.",
+			w, ct.channels(), depth;
+		Invalid, Input, Decode, Overflow)),
+	};
+	Ok((bits + 7) / 8)
+}
+
+/// The number of bytes a pixel occupies in a filtered scanline, which is what the filters step by.
+///
+/// The specification rounds this up to one, so that samples narrower than a byte filter against the
+/// byte beside them rather than against a fraction of one.
+fn filter_bpp(ct: ColourType, depth: u8) -> usize {
+	let bits = ct.channels() * depth as usize;
+	std::cmp::max(1, bits / 8)
+}
+
+/// The exact number of bytes the image data must decompress to.
+///
+/// Each scanline of each pass carries one filter byte ahead of its samples, so an interlaced image
+/// carries as many filter bytes as all seven passes have scanlines between them, which is more than
+/// the image has rows. Getting this wrong in either direction either refuses a sound file or lets a
+/// larger stream through the ceiling, so it is summed over the passes rather than estimated.
+fn expected_size(hdr: &Header, passes: &[Pass]) -> Outcome<usize> {
+	let mut total = 0usize;
+	for p in passes {
+		let stride = res!(row_bytes(hdr.ct, hdr.depth, p.w));
+		let pass = match (stride + 1).checked_mul(p.h) {
+			Some(n) => n,
+			None => return Err(err!(
+				"A PNG pass of {} by {} pixels overflows a count of bytes.", p.w, p.h;
+			Invalid, Input, Decode, Overflow)),
+		};
+		total = match total.checked_add(pass) {
+			Some(n) => n,
+			None => return Err(err!(
+				"A PNG of {} by {} pixels overflows a count of image bytes.", hdr.w, hdr.h;
+			Invalid, Input, Decode, Overflow)),
+		};
+	}
+	Ok(total)
+}
+
 /// Decodes a PNG into a pixmap.
 ///
 /// Every length is checked against the bytes actually present, every chunk's CRC is verified, and
@@ -311,7 +452,7 @@ pub fn decode(buf: &[u8]) -> Outcome<Pixmap> {
 						"The PNG carries a tRNS chunk before its IHDR chunk.";
 					Invalid, Input, Decode, Missing)),
 				};
-				trns = Some(res!(decode_transparency(data, h.ct, &palette)));
+				trns = Some(res!(decode_transparency(data, h.ct, h.depth, &palette)));
 			},
 			b"IDAT" => idat.extend_from_slice(data),
 			b"IEND" => {
@@ -338,34 +479,44 @@ pub fn decode(buf: &[u8]) -> Outcome<Pixmap> {
 		Invalid, Input, Decode, Missing));
 	}
 
-	// Inflate, refusing anything larger than the header says it should be.
-	let bpp = hdr.ct.bytes_per_pixel();
-	let stride = hdr.w * bpp;
-	let expect = hdr.h * (stride + 1); // One filter byte per scanline.
-	let mut raw = Vec::with_capacity(expect);
+	// Inflate, refusing anything larger than the header says it should be. The buffer starts small
+	// whatever the header claims, so that a handful of bytes declaring a large image cannot make us
+	// reserve a large allocation before a single byte of it has been inflated.
+	let passes = passes_of(&hdr);
+	let expect = res!(expected_size(&hdr, &passes));
+	let mut raw = Vec::with_capacity(std::cmp::min(expect, 1 << 20));
 	let mut z = ZlibDecoder::new(&idat[..]).take((expect as u64) + 1);
 	res!(z.read_to_end(&mut raw));
 	if raw.len() != expect {
 		return Err(err!(
-			"The PNG's image data decompresses to {} bytes, but its header of {} by {} pixels \
-			implies {}.", raw.len(), hdr.w, hdr.h, expect;
+			"The PNG's image data decompresses to {} bytes, but its header of {} by {} pixels at {} \
+			bits a channel{} implies {}.",
+			raw.len(), hdr.w, hdr.h, hdr.depth,
+			if hdr.laced { ", interlaced," } else { "," }, expect;
 		Invalid, Input, Decode, Mismatch));
 	}
 
-	// Unfilter, then expand into RGBA.
+	// Unfilter each pass, then expand into RGBA. A pass's scanlines filter against each other and
+	// not against the image's rows, so `prev` restarts at each pass.
+	let bpp = filter_bpp(hdr.ct, hdr.depth);
 	let mut pm = res!(Pixmap::new(hdr.w, hdr.h));
-	let mut prev = vec![0u8; stride];
-	let mut line = vec![0u8; stride];
-	for y in 0..hdr.h {
-		let at = y * (stride + 1);
-		let ftype = raw[at];
-		line.copy_from_slice(&raw[at + 1..at + 1 + stride]);
-		res!(unfilter_scanline(ftype, &mut line, &prev, bpp, y));
-		for x in 0..hdr.w {
-			let c = res!(pixel_of(hdr.ct, &line, x, bpp, &palette, trns.as_ref()));
-			pm.set_pixel(x, y, c);
+	let mut at = 0;
+	for p in &passes {
+		let stride = res!(row_bytes(hdr.ct, hdr.depth, p.w));
+		let mut prev = vec![0u8; stride];
+		let mut line = vec![0u8; stride];
+		for j in 0..p.h {
+			let ftype = raw[at];
+			line.copy_from_slice(&raw[at + 1..at + 1 + stride]);
+			at += stride + 1;
+			res!(unfilter_scanline(ftype, &mut line, &prev, bpp, j));
+			let y = p.y0 + j * p.dy;
+			for i in 0..p.w {
+				let c = res!(pixel_of(&hdr, &line, i, &palette, trns.as_ref()));
+				pm.set_pixel(p.x0 + i * p.dx, y, c);
+			}
+			prev.copy_from_slice(&line);
 		}
-		prev.copy_from_slice(&line);
 	}
 	Ok(pm)
 }
@@ -381,6 +532,8 @@ fn decode_header(data: &[u8]) -> Outcome<Header> {
 	let h = u32::from_be_bytes([data[4], data[5], data[6], data[7]]) as usize;
 	let depth = data[8];
 	let ct = res!(ColourType::from_code(data[9]));
+	let comp = data[10];
+	let filt = data[11];
 	let interlace = data[12];
 
 	if w == 0 || h == 0 {
@@ -398,17 +551,38 @@ fn decode_header(data: &[u8]) -> Outcome<Header> {
 			"The PNG header declares {} by {} pixels, over the ceiling of {}.", w, h, MAX_PIXELS;
 		Invalid, Input, Decode, Excessive));
 	}
-	if depth != 8 {
+	if !matches!(depth, 1 | 2 | 4 | 8 | 16) {
 		return Err(err!(
-			"The PNG declares {} bits per channel. This codec implements 8.", depth;
-		Invalid, Input, Decode, NoImpl));
+			"The PNG declares {} bits per channel, which is not one of 1, 2, 4, 8 or 16.", depth;
+		Invalid, Input, Decode));
 	}
-	if interlace != 0 {
+	if !ct.depths().contains(&depth) {
 		return Err(err!(
-			"The PNG is Adam7 interlaced. This codec implements the non-interlaced form only.";
-		Invalid, Input, Decode, NoImpl));
+			"The PNG declares {} bits per channel under colour type {:?}, which the specification \
+			allows only at {:?} bits.", depth, ct, ct.depths();
+		Invalid, Input, Decode));
 	}
-	Ok(Header { w, h, ct })
+	if comp != 0 {
+		return Err(err!(
+			"The PNG declares compression method {}. DEFLATE, method 0, is the only one the \
+			specification defines.", comp;
+		Invalid, Input, Decode));
+	}
+	if filt != 0 {
+		return Err(err!(
+			"The PNG declares filter method {}. The adaptive filtering of method 0 is the only one \
+			the specification defines.", filt;
+		Invalid, Input, Decode));
+	}
+	let laced = match interlace {
+		0	=> false,
+		1	=> true,
+		_	=> return Err(err!(
+			"The PNG declares interlace method {}, which is neither 0, no interlacing, nor 1, \
+			Adam7.", interlace;
+		Invalid, Input, Decode)),
+	};
+	Ok(Header { w, h, ct, depth, laced })
 }
 
 /// Reads a palette: three bytes a colour, opaque.
@@ -425,7 +599,7 @@ fn decode_palette(data: &[u8]) -> Outcome<Vec<Rgba>> {
 ///
 /// The specification forbids `tRNS` to the two colour types that already carry an alpha channel, so
 /// its presence there is a malformed file rather than a chunk to ignore.
-fn decode_transparency(data: &[u8], ct: ColourType, palette: &[Rgba]) -> Outcome<Trns> {
+fn decode_transparency(data: &[u8], ct: ColourType, depth: u8, palette: &[Rgba]) -> Outcome<Trns> {
 	match ct {
 		ColourType::Palette => {
 			if palette.is_empty() {
@@ -449,7 +623,7 @@ fn decode_transparency(data: &[u8], ct: ColourType, palette: &[Rgba]) -> Outcome
 					bytes.", data.len();
 				Invalid, Input, Decode));
 			}
-			Ok(Trns::Grey(res!(trns_sample(&data[0..2], "luminance"))))
+			Ok(Trns::Grey(res!(trns_sample(&data[0..2], "luminance", depth))))
 		},
 		ColourType::Rgb => {
 			if data.len() != 6 {
@@ -459,9 +633,9 @@ fn decode_transparency(data: &[u8], ct: ColourType, palette: &[Rgba]) -> Outcome
 				Invalid, Input, Decode));
 			}
 			Ok(Trns::Rgb(
-				res!(trns_sample(&data[0..2], "red")),
-				res!(trns_sample(&data[2..4], "green")),
-				res!(trns_sample(&data[4..6], "blue")),
+				res!(trns_sample(&data[0..2], "red", depth)),
+				res!(trns_sample(&data[2..4], "green", depth)),
+				res!(trns_sample(&data[4..6], "blue", depth)),
 			))
 		},
 		ColourType::GreyAlpha | ColourType::Rgba => Err(err!(
@@ -474,18 +648,77 @@ fn decode_transparency(data: &[u8], ct: ColourType, palette: &[Rgba]) -> Outcome
 /// Reads one of `tRNS`'s samples, which the specification writes as 16 bits big-endian whatever the
 /// bit depth.
 ///
-/// At eight bits a channel the value must fall in 0 to 255, since it is compared against a pixel of
-/// that width. A larger one names a sample no pixel here can hold, and is refused rather than
-/// truncated into a match that was never in the file.
-fn trns_sample(be: &[u8], name: &str) -> Outcome<u8> {
+/// The value must fit the declared depth, since it is compared against samples of that width. A
+/// larger one names a sample no pixel in the file can hold, and is refused rather than truncated
+/// into a match that was never there.
+fn trns_sample(be: &[u8], name: &str, depth: u8) -> Outcome<u16> {
 	let v = u16::from_be_bytes([be[0], be[1]]);
-	if v > 255 {
+	let max = if depth >= 16 { u16::MAX } else { (1u16 << depth) - 1 };
+	if v > max {
 		return Err(err!(
-			"The PNG's tRNS chunk names a transparent {} of {}, but at 8 bits a channel its samples \
-			run from 0 to 255.", name, v;
+			"The PNG's tRNS chunk names a transparent {} of {}, but at {} bits a channel its \
+			samples run from 0 to {}.", name, v, depth, max;
 		Invalid, Input, Decode, Range));
 	}
-	Ok(v as u8)
+	Ok(v)
+}
+
+/// Reads the `i`th sample of an unfiltered scanline, at the bit depth the header declares.
+///
+/// Samples narrower than a byte are packed most significant first, and the row is padded out to a
+/// whole byte. The padding is masked away rather than merely left unread, so bits a hostile file
+/// sets there cannot reach a pixel.
+fn sample_at(line: &[u8], i: usize, depth: u8) -> Outcome<u16> {
+	match depth {
+		1 | 2 | 4 => {
+			let per = 8 / depth as usize; // Samples to the byte.
+			let byte = match line.get(i / per) {
+				Some(b) => *b,
+				None => return Err(err!(
+					"Sample {} at {} bits lies beyond a scanline of {} bytes.", i, depth, line.len();
+				Invalid, Input, Decode, Range)),
+			};
+			let shift = 8 - depth as usize * (i % per + 1);
+			Ok(((byte >> shift) as u16) & ((1u16 << depth) - 1))
+		},
+		8 => match line.get(i) {
+			Some(b) => Ok(*b as u16),
+			None => Err(err!(
+				"Sample {} at 8 bits lies beyond a scanline of {} bytes.", i, line.len();
+			Invalid, Input, Decode, Range)),
+		},
+		16 => match (line.get(2 * i), line.get(2 * i + 1)) {
+			(Some(hi), Some(lo)) => Ok(u16::from_be_bytes([*hi, *lo])),
+			_ => Err(err!(
+				"Sample {} at 16 bits lies beyond a scanline of {} bytes.", i, line.len();
+			Invalid, Input, Decode, Range)),
+		},
+		_ => Err(err!(
+			"A scanline was read at {} bits a sample, which the header should have refused.", depth;
+		Bug, Unreachable)),
+	}
+}
+
+/// Widens a sample of the declared bit depth to the eight bits a pixmap holds.
+///
+/// The narrow depths are scaled so that the widest value the depth can hold becomes 255, which is
+/// what the specification's sample-depth scaling amounts to and what makes a 1-bit image black and
+/// white rather than black and very-nearly-black.
+///
+/// Sixteen bits are reduced by keeping the high byte, the same reduction `libpng` performs for
+/// `png_set_strip_16`. It is a truncation and not a rounding: a sample that is an eight-bit value
+/// written twice, which is what almost every 16-bit file in practice holds, survives it exactly,
+/// and anything else loses at most one part in 256. A pixmap is eight bits a channel, so some
+/// reduction has to happen here; a lossless path would be a wider pixel type, not a change to this
+/// function.
+fn widen(v: u16, depth: u8) -> u8 {
+	match depth {
+		1	=> if v == 0 { 0 } else { 255 },
+		2	=> (v as u8) * 85,
+		4	=> (v as u8) * 17,
+		8	=> v as u8,
+		_	=> (v >> 8) as u8,
+	}
 }
 
 /// Reverses one scanline's filter, in place.
@@ -518,46 +751,57 @@ fn unfilter_scanline(
 	Ok(())
 }
 
-/// Reads one pixel out of an unfiltered scanline, whatever the colour type.
+/// Reads one pixel out of an unfiltered scanline, whatever the colour type and bit depth.
 ///
 /// The three colour types that carry no alpha channel take theirs from `tRNS`, if the file gave one.
+/// The comparison against `tRNS` happens on the raw sample, before widening, because that is the
+/// sample the chunk names; comparing widened values would make every 1-bit black pixel match a
+/// `tRNS` of 0 whether or not the file said so.
 fn pixel_of(
-	ct:	ColourType,
+	hdr:	&Header,
 	line:	&[u8],
 	x:	usize,
-	bpp:	usize,
 	palette: &[Rgba],
 	trns:	Option<&Trns>,
 )
 	-> Outcome<Rgba>
 {
-	let i = x * bpp;
-	match ct {
+	let d = hdr.depth;
+	let i = x * hdr.ct.channels(); // Index of the pixel's first sample.
+	match hdr.ct {
 		ColourType::Grey => {
-			let g = line[i];
+			let s = res!(sample_at(line, i, d));
 			let a = match trns {
-				Some(Trns::Grey(t)) if g == *t	=> 0,
+				Some(Trns::Grey(t)) if s == *t	=> 0,
 				_				=> 255,
 			};
+			let g = widen(s, d);
 			Ok(Rgba::new(g, g, g, a))
 		},
 		ColourType::Rgb => {
-			let (r, g, b) = (line[i], line[i + 1], line[i + 2]);
+			let r = res!(sample_at(line, i, d));
+			let g = res!(sample_at(line, i + 1, d));
+			let b = res!(sample_at(line, i + 2, d));
 			let a = match trns {
 				Some(Trns::Rgb(tr, tg, tb)) if r == *tr && g == *tg && b == *tb	=> 0,
 				_								=> 255,
 			};
-			Ok(Rgba::new(r, g, b, a))
+			Ok(Rgba::new(widen(r, d), widen(g, d), widen(b, d), a))
 		},
-		ColourType::GreyAlpha		=> Ok(Rgba::new(line[i], line[i], line[i], line[i + 1])),
+		ColourType::GreyAlpha => {
+			let g = widen(res!(sample_at(line, i, d)), d);
+			let a = widen(res!(sample_at(line, i + 1, d)), d);
+			Ok(Rgba::new(g, g, g, a))
+		},
 		ColourType::Rgba		=> Ok(Rgba::new(
-							line[i],
-							line[i + 1],
-							line[i + 2],
-							line[i + 3],
+							widen(res!(sample_at(line, i, d)), d),
+							widen(res!(sample_at(line, i + 1, d)), d),
+							widen(res!(sample_at(line, i + 2, d)), d),
+							widen(res!(sample_at(line, i + 3, d)), d),
 						)),
 		ColourType::Palette => {
-			let idx = line[i] as usize;
+			// A palette sample is an index and not an intensity, so it is never widened.
+			let idx = res!(sample_at(line, i, d)) as usize;
 			match palette.get(idx) {
 				Some(c) => {
 					let mut c = *c;
@@ -763,10 +1007,15 @@ mod tests {
 
 	/// An image header, eight bits a channel and not interlaced.
 	fn ihdr(w: u32, h: u32, ct: u8) -> Vec<u8> {
+		ihdr_at(w, h, 8, ct, 0)
+	}
+
+	/// An image header at a given bit depth and interlace method.
+	fn ihdr_at(w: u32, h: u32, depth: u8, ct: u8, laced: u8) -> Vec<u8> {
 		let mut v = Vec::with_capacity(13);
 		v.extend_from_slice(&w.to_be_bytes());
 		v.extend_from_slice(&h.to_be_bytes());
-		v.extend_from_slice(&[8, ct, 0, 0, 0]);
+		v.extend_from_slice(&[depth, ct, 0, 0, laced]);
 		v
 	}
 
@@ -853,6 +1102,285 @@ mod tests {
 			None => return Err(err!("A 1 by 1 pixmap has a pixel."; Invalid, Input)),
 		};
 		assert_eq!(got, Rgba::new(255, 0, 0, 0), "the palette's first entry is transparent");
+		Ok(())
+	}
+
+	// ┌───────────────────────────────────────────────────────────────────────┐
+	// │ ADAM7, BIT DEPTH, AND THE SIZES THEY IMPLY                             │
+	// └───────────────────────────────────────────────────────────────────────┘
+
+	/// A header for the pass and size arithmetic below, which reads nothing else from it.
+	fn hdr_of(w: usize, h: usize, ct: ColourType, depth: u8, laced: bool) -> Header {
+		Header { w, h, ct, depth, laced }
+	}
+
+	#[test]
+	fn test_the_adam7_passes_partition_the_image_12() -> Outcome<()> {
+		// Whatever the size, the seven passes between them name every pixel exactly once. Summing
+		// their areas is therefore a check on all seven width and height formulae at once, and it
+		// catches the off-by-one that a size smaller than a pass's grid invites.
+		for w in 1..=20usize {
+			for h in 1..=20usize {
+				let hdr = hdr_of(w, h, ColourType::Grey, 8, true);
+				let passes = passes_of(&hdr);
+				let area: usize = passes.iter().map(|p| p.w * p.h).sum();
+				assert_eq!(area, w * h, "the passes of a {} by {} image cover it once", w, h);
+
+				// And no pass may lay a pixel outside the image.
+				for p in &passes {
+					assert!(p.x0 + (p.w - 1) * p.dx < w, "a pass of {} by {} runs off the right", w, h);
+					assert!(p.y0 + (p.h - 1) * p.dy < h, "a pass of {} by {} runs off the bottom", w, h);
+				}
+			}
+		}
+
+		// The passes a small image leaves empty are dropped, not carried as zero-sized ones: an
+		// empty pass contributes no scanline and no filter byte to the stream at all.
+		assert_eq!(passes_of(&hdr_of(1, 1, ColourType::Grey, 8, true)).len(), 1);
+		assert_eq!(passes_of(&hdr_of(3, 2, ColourType::Grey, 8, true)).len(), 4);
+		assert_eq!(passes_of(&hdr_of(8, 8, ColourType::Grey, 8, true)).len(), 7);
+		assert_eq!(passes_of(&hdr_of(9, 9, ColourType::Grey, 8, false)).len(), 1);
+		Ok(())
+	}
+
+	#[test]
+	fn test_the_expected_size_sums_the_passes_13() -> Outcome<()> {
+		// A 64 by 64 greyscale image carries 64 filter bytes when it is not interlaced, and 112 --
+		// the scanlines of all seven passes -- when it is. A ceiling computed from the
+		// non-interlaced figure would refuse a sound interlaced file as too large.
+		let plain = hdr_of(64, 64, ColourType::Grey, 8, false);
+		let laced = hdr_of(64, 64, ColourType::Grey, 8, true);
+		req!(res!(expected_size(&plain, &passes_of(&plain))), 64 * 65);
+		req!(res!(expected_size(&laced, &passes_of(&laced))), 4216);
+
+		// A sub-byte depth rounds each scanline up to a whole byte, so a 17-pixel row of 1-bit
+		// greyscale is three bytes and not two and an eighth.
+		let bits = hdr_of(17, 2, ColourType::Grey, 1, false);
+		req!(res!(expected_size(&bits, &passes_of(&bits))), 2 * 4);
+
+		// Sixteen bits double every scanline.
+		let wide = hdr_of(5, 3, ColourType::Rgba, 16, false);
+		req!(res!(expected_size(&wide, &passes_of(&wide))), 3 * (5 * 8 + 1));
+
+		// And the filter's stride is the pixel in bytes, rounded up to one.
+		req!(filter_bpp(ColourType::Grey, 1), 1);
+		req!(filter_bpp(ColourType::Grey, 16), 2);
+		req!(filter_bpp(ColourType::Rgb, 16), 6);
+		req!(filter_bpp(ColourType::Rgba, 16), 8);
+		req!(filter_bpp(ColourType::Palette, 4), 1);
+		Ok(())
+	}
+
+	#[test]
+	fn test_an_interlaced_stream_of_the_wrong_length_is_refused_14() -> Outcome<()> {
+		// The image data must decompress to the sum over the passes, exactly. A stream cut short,
+		// a stream run long, and a stream of exactly the size the image would have taken without
+		// interlacing are all wrong, and the last is the one a decoder that got the arithmetic
+		// wrong would accept.
+		let full = 4216usize;
+		for n in [full - 1, full + 1, 64 * 65] {
+			let buf = assemble(&[
+				(b"IHDR", ihdr_at(64, 64, 8, 0, 1)),
+				(b"IDAT", res!(idat_of(&vec![0u8; n]))),
+			]);
+			assert!(decode(&buf).is_err(), "an interlaced stream of {} bytes must be refused", n);
+		}
+
+		// The right length decodes.
+		let buf = assemble(&[
+			(b"IHDR", ihdr_at(64, 64, 8, 0, 1)),
+			(b"IDAT", res!(idat_of(&vec![0u8; full]))),
+		]);
+		let pm = res!(decode(&buf));
+		req!(pm.width(), 64usize);
+		req!(pm.height(), 64usize);
+		Ok(())
+	}
+
+	#[test]
+	fn test_a_bomb_cannot_grow_past_the_interlaced_ceiling_15() -> Outcome<()> {
+		// Half a megabyte of zeroes deflates to a few hundred bytes. The header says the image is
+		// 64 by 64, so the decoder must stop well short of inflating it, and refuse.
+		let buf = assemble(&[
+			(b"IHDR", ihdr_at(64, 64, 8, 0, 1)),
+			(b"IDAT", res!(idat_of(&vec![0u8; 512 * 1024]))),
+		]);
+		assert!(decode(&buf).is_err(), "a stream far larger than the header allows must be refused");
+		Ok(())
+	}
+
+	// ┌───────────────────────────────────────────────────────────────────────┐
+	// │ SUB-BYTE DEPTHS                                                        │
+	// └───────────────────────────────────────────────────────────────────────┘
+	//
+	// The two files below are written out byte by byte, and the pixels they are checked against
+	// come from ImageMagick reading these exact bytes, not from this decoder.
+	//
+	// Pillow, which wrote the eight-bit fixtures further up, reads the second of them wrongly: it
+	// reports every pixel opaque, because it compares the tRNS sample against the widened value
+	// rather than the raw one. ImageMagick and the specification agree with the reading below.
+
+	/// Colour type 0 at 1 bit, 3 by 1. The row's five padding bits are all set, and none of them
+	/// may reach a pixel.
+	const GREY1_PAD: [u8; 67] = [
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
+		0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01,
+		0x01, 0x00, 0x00, 0x00, 0x00, 0x33, 0x9B, 0x29, 0x19, 0x00, 0x00, 0x00,
+		0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0xD8, 0x0F, 0x00, 0x00,
+		0xC1, 0x00, 0xC0, 0xD5, 0xE9, 0xCD, 0x5C, 0x00, 0x00, 0x00, 0x00, 0x49,
+		0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+	];
+
+	/// Colour type 0 at 4 bits, 5 by 2, with a tRNS chunk naming the raw sample 5. Both rows carry
+	/// a set padding nibble, and the two pixels of sample 5 widen to 85 and are transparent.
+	const GREY4_TRNS: [u8; 87] = [
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
+		0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x02,
+		0x04, 0x00, 0x00, 0x00, 0x00, 0x70, 0xF1, 0xA4, 0x80, 0x00, 0x00, 0x00,
+		0x02, 0x74, 0x52, 0x4E, 0x53, 0x00, 0x05, 0x06, 0xF9, 0x39, 0xB7, 0x00,
+		0x00, 0x00, 0x10, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x60, 0xFD,
+		0x11, 0xCF, 0xF0, 0x21, 0xF8, 0x38, 0x00, 0x0C, 0x13, 0x03, 0x67, 0x9B,
+		0x2A, 0x44, 0xD0, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
+		0x42, 0x60, 0x82,
+	];
+
+	#[test]
+	fn test_the_padding_of_a_sub_byte_row_stays_out_of_the_pixels_16() -> Outcome<()> {
+		let pm = res!(decode(&GREY1_PAD));
+		req!(pm.width(), 3usize);
+		req!(pm.height(), 1usize);
+		let want = [Rgba::WHITE, Rgba::new(0, 0, 0, 255), Rgba::WHITE];
+		for (x, exp) in want.iter().enumerate() {
+			let got = match pm.pixel(x, 0) {
+				Some(c) => c,
+				None => return Err(err!("Pixel {},0 lies outside the pixmap.", x; Invalid, Input)),
+			};
+			assert_eq!(got, *exp, "pixel {},0 of a 1-bit row whose padding is all ones", x);
+		}
+		Ok(())
+	}
+
+	#[test]
+	fn test_trns_compares_the_raw_sample_at_a_sub_byte_depth_17() -> Outcome<()> {
+		let pm = res!(decode(&GREY4_TRNS));
+		req!(pm.width(), 5usize);
+		req!(pm.height(), 2usize);
+		let want: [[(u8, u8); 5]; 2] = [
+			// Sample, then the alpha ImageMagick reads. The sample 5 is the transparent one.
+			[(0, 255),	(85, 0),	(255, 255),	(136, 255),	(85, 0)],
+			[(255, 255),	(0, 255),	(85, 0),	(51, 255),	(204, 255)],
+		];
+		for (y, row) in want.iter().enumerate() {
+			for (x, (g, a)) in row.iter().enumerate() {
+				let got = match pm.pixel(x, y) {
+					Some(c) => c,
+					None => return Err(err!(
+						"Pixel {},{} lies outside the pixmap.", x, y; Invalid, Input)),
+				};
+				assert_eq!(got, Rgba::new(*g, *g, *g, *a), "pixel {},{} of the 4-bit tRNS file", x, y);
+			}
+		}
+		Ok(())
+	}
+
+	#[test]
+	fn test_a_narrow_sample_widens_to_the_full_range_18() {
+		// The widest value a depth can hold must become 255, or a 1-bit image comes out black and
+		// very-nearly-black rather than black and white.
+		assert_eq!(widen(0, 1), 0);
+		assert_eq!(widen(1, 1), 255);
+		assert_eq!((0..4).map(|v| widen(v, 2)).collect::<Vec<_>>(), vec![0, 85, 170, 255]);
+		assert_eq!(widen(0, 4), 0);
+		assert_eq!(widen(15, 4), 255);
+		assert_eq!(widen(200, 8), 200);
+		// Sixteen bits keep the high byte, so an eight-bit value written twice survives exactly.
+		for v in 0..=255u16 {
+			assert_eq!(widen(v * 257, 16), v as u8, "the sample {} repeated", v);
+		}
+		assert_eq!(widen(0xFFFE, 16), 255);
+	}
+
+	#[test]
+	fn test_a_sample_is_read_from_the_right_bits_19() -> Outcome<()> {
+		// Sub-byte samples are packed most significant first.
+		let line = [0b1101_0010u8, 0b0011_1000];
+		req!(res!(sample_at(&line, 0, 1)), 1u16);
+		req!(res!(sample_at(&line, 1, 1)), 1u16);
+		req!(res!(sample_at(&line, 2, 1)), 0u16);
+		req!(res!(sample_at(&line, 8, 1)), 0u16);
+		req!(res!(sample_at(&line, 0, 2)), 0b11u16);
+		req!(res!(sample_at(&line, 3, 2)), 0b10u16);
+		req!(res!(sample_at(&line, 0, 4)), 0b1101u16);
+		req!(res!(sample_at(&line, 1, 4)), 0b0010u16);
+		req!(res!(sample_at(&line, 0, 8)), 0b1101_0010u16);
+		req!(res!(sample_at(&line, 0, 16)), 0xD238u16);
+		// And a sample past the end of the row is an error rather than a panic or a zero.
+		assert!(sample_at(&line, 16, 1).is_err());
+		assert!(sample_at(&line, 2, 8).is_err());
+		assert!(sample_at(&line, 1, 16).is_err());
+		Ok(())
+	}
+
+	#[test]
+	fn test_the_header_refuses_what_it_cannot_read_20() -> Outcome<()> {
+		// A bit depth outside the five the format defines.
+		for depth in [0u8, 3, 5, 7, 9, 12, 32] {
+			let buf = assemble(&[
+				(b"IHDR", ihdr_at(1, 1, depth, 0, 0)),
+				(b"IDAT", res!(idat_of(&[0, 0]))),
+			]);
+			assert!(decode(&buf).is_err(), "a bit depth of {} must be refused", depth);
+		}
+
+		// A depth the declared colour type does not allow: truecolour and the two alpha types
+		// start at eight bits, and a palette index cannot be sixteen.
+		for (ct, depth) in [(2u8, 4u8), (2, 1), (4, 2), (6, 4), (3, 16)] {
+			let buf = assemble(&[
+				(b"IHDR", ihdr_at(1, 1, depth, ct, 0)),
+				(b"PLTE", vec![1, 2, 3]),
+				(b"IDAT", res!(idat_of(&[0, 0, 0, 0, 0, 0, 0, 0, 0]))),
+			]);
+			assert!(decode(&buf).is_err(),
+				"colour type {} at {} bits must be refused", ct, depth);
+		}
+
+		// A compression, filter or interlace method the format does not define. The header is
+		// built by hand here because these three bytes are the ones `ihdr_at` fixes.
+		for (at, v) in [(10usize, 1u8), (11, 1), (12, 2), (12, 255)] {
+			let mut h = ihdr(1, 1, 0);
+			h[at] = v;
+			let buf = assemble(&[(b"IHDR", h), (b"IDAT", res!(idat_of(&[0, 0])))]);
+			assert!(decode(&buf).is_err(),
+				"byte {} of the header set to {} must be refused", at, v);
+		}
+
+		// The same header, untouched, decodes: it is the byte and not the file that is refused.
+		let buf = assemble(&[(b"IHDR", ihdr(1, 1, 0)), (b"IDAT", res!(idat_of(&[0, 0])))]);
+		assert!(decode(&buf).is_ok(), "a sound 1 by 1 greyscale file decodes");
+		Ok(())
+	}
+
+	#[test]
+	fn test_a_palette_index_beyond_the_palette_is_refused_at_every_depth_21() -> Outcome<()> {
+		// A four-bit index of 3 against a palette of two entries names a colour that is not there.
+		// Widening it into range, or reading past the palette, would paint something the file does
+		// not hold.
+		let buf = assemble(&[
+			(b"IHDR", ihdr_at(2, 1, 4, 3, 0)),
+			(b"PLTE", vec![255, 0, 0, 0, 255, 0]),
+			(b"IDAT", res!(idat_of(&[0, 0x03]))),
+		]);
+		assert!(decode(&buf).is_err(), "a palette index of 3 against two entries must be refused");
+
+		// The same row with both indices in range decodes.
+		let buf = assemble(&[
+			(b"IHDR", ihdr_at(2, 1, 4, 3, 0)),
+			(b"PLTE", vec![255, 0, 0, 0, 255, 0]),
+			(b"IDAT", res!(idat_of(&[0, 0x01]))),
+		]);
+		let pm = res!(decode(&buf));
+		req!(pm.pixel(0, 0), Some(Rgba::opaque(255, 0, 0)));
+		req!(pm.pixel(1, 0), Some(Rgba::opaque(0, 255, 0)));
 		Ok(())
 	}
 }
