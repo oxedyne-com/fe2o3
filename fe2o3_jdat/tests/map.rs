@@ -85,5 +85,26 @@ pub fn test_map_func(filter: &'static str) -> Outcome<()> {
         Ok(())
     }));
 
+    res!(test_it(filter, &["Map Get I64 000", "all", "map", "get"], || {
+        // A u64 written through mapdat! must be readable back as i64, as the
+        // doc comment promises; it was not before the U64 getter arm existed.
+        let d = mapdat!{
+            "size" => 1_048_576u64,
+            "count" => 42u32,
+        };
+        req!(1_048_576i64, res!(d.map_get_i64(&dat!("size"))));
+        req!(42i64, res!(d.map_get_i64(&dat!("count"))));
+
+        // Above i64::MAX the conversion must refuse, not wrap.
+        let big = mapdat!{ "size" => u64::MAX };
+        match big.map_get_i64(&dat!("size")) {
+            Err(_) => (),
+            Ok(n) => return Err(err!(
+                "u64::MAX coerced to i64 as {}, expected a refusal.", n;
+            Test, Mismatch)),
+        }
+        Ok(())
+    }));
+
     Ok(())
 }

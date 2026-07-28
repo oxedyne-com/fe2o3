@@ -1386,6 +1386,10 @@ macro_rules! enum_getter_numeric {
                 Self::U8(v)     => Some(*v as i64),
                 Self::U16(v)    => Some(*v as i64),
                 Self::U32(v)    => Some(*v as i64),
+                // Checked: a u64 above i64::MAX cannot be represented, and
+                // None is honest where a wrapping cast would be a lie.
+                Self::U64(v)    => i64::try_from(*v).ok(),
+                Self::C64(v)    => i64::try_from(*v).ok(),
                 Self::I8(v)     => Some(*v as i64),
                 Self::I16(v)    => Some(*v as i64),
                 Self::I32(v)    => Some(*v as i64),
