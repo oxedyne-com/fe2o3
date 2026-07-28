@@ -711,6 +711,78 @@ fn an_edit_and_an_operation_are_the_same_thing() -> Outcome<()> {
 	Ok(())
 }
 
+/// Two branches of one file meet by absorbing one another's operations, and what
+/// the union renders is what each branch renders once it has heard the other.
+#[test]
+fn two_divergent_branches_absorb_into_one_sequence() -> Outcome<()> {
+	let (mut reps, _) = res!(seed(LIST, 2));
+	// Each branch edits without having seen the other.
+	let left = res!(reps[0].insert(0, b"- Bread\n"));
+	let right = res!(reps[1].delete(7, 7));
+	// A third party takes the union, and the seed is not taken twice.
+	let mut both = Sequence::new();
+	assert_eq!(res!(both.absorb(&reps[0].seq)), 2, "the seed and the branch's own edit");
+	assert_eq!(res!(both.absorb(&reps[1].seq)), 1, "the seed is already held");
+	assert_eq!(both.len(), 3);
+	// Which is what each branch renders once it has received the other's edit.
+	res!(reps[0].recv(right));
+	res!(reps[1].recv(left));
+	let merged = res!(both.render());
+	assert_eq!(merged.text_lossy(), res!(reps[0].view()).text_lossy());
+	assert_eq!(merged.text_lossy(), res!(reps[1].view()).text_lossy());
+	assert_eq!(merged.text_lossy(), "- Bread\n- Eggs\n- Cheese\n");
+	// Absorbing what is already held says so, and changes nothing.
+	let before = both.clone();
+	assert_eq!(res!(both.absorb(&reps[0].seq)), 0);
+	assert_eq!(res!(both.absorb(&reps[1].seq)), 0);
+	assert_eq!(both, before);
+	Ok(())
+}
+
+/// Absorption is the union of two sets, so it does not matter which way round it
+/// is taken, nor in how many steps.
+#[test]
+fn absorbing_either_way_round_gives_one_sequence() -> Outcome<()> {
+	let (mut reps, _) = res!(seed(ALPHA, 2));
+	res!(reps[0].insert(4, b"xy"));
+	res!(reps[1].move_range(0, 3, 10));
+	let mut left = reps[0].seq.clone();
+	res!(left.absorb(&reps[1].seq));
+	let mut right = reps[1].seq.clone();
+	res!(right.absorb(&reps[0].seq));
+	assert_eq!(left, right, "the union is the union");
+	assert_eq!(res!(left.render()).bytes(), res!(right.render()).bytes());
+	Ok(())
+}
+
+/// One identity naming two different operations is not two branches of one
+/// history, and the merge is refused whole rather than half taken.
+#[test]
+fn absorbing_a_clashing_identity_is_refused() -> Outcome<()> {
+	let (_, first) = res!(seed(b"abc", 0));
+	let seed_id = first.0.id;
+	let head = res!(Header::new(OpId::new(ReplicaId::new(1), 2), vec![seed_id]));
+	let insert = |bytes: &[u8]| Edit::Splice {
+		left:	Some(Anchor::after(ContentId::new(seed_id, 0))),
+		right:	None,
+		remove:	Vec::new(),
+		insert:	bytes.to_vec(),
+	};
+	let mut mine = Sequence::new();
+	res!(mine.apply(first.0.clone(), first.1.clone()));
+	res!(mine.apply(head.clone(), insert(b"one")));
+	// The other sequence holds the seed, something new, and a clash.
+	let mut theirs = Sequence::new();
+	res!(theirs.apply(first.0, first.1));
+	res!(theirs.apply(head, insert(b"two")));
+	let other = res!(Header::new(OpId::new(ReplicaId::new(2), 3), vec![seed_id]));
+	res!(theirs.apply(other.clone(), insert(b"three")));
+	assert!(mine.absorb(&theirs).is_err());
+	assert_eq!(mine.len(), 2, "nothing at all was taken");
+	assert!(!mine.contains(&other.id));
+	Ok(())
+}
+
 /// A repository of two files, replayed out of the log. Each file's sequence holds
 /// only its own operations, so the graph to judge causality by is the log's and
 /// not the sequence's own.

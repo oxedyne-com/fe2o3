@@ -379,6 +379,46 @@ impl Sequence {
 		}
 	}
 
+	/// Takes every operation of another sequence, and returns how many of them
+	/// were new.
+	///
+	/// This is what a merge of one file's history is. The state is the operation
+	/// set and nothing else, so two branches meet by taking the union of their
+	/// sets, and the render of the union is the convergent merge -- which is a
+	/// fact about the two sets and not about which branch absorbed which.
+	///
+	/// Nothing is asked of the two sets causally. A branch's operations name
+	/// parents in the repository's history rather than in the file's, so a
+	/// sequence is routinely not closed within itself; closure is checked where
+	/// it matters, at [`Sequence::render_with`], against the graph the caller
+	/// holds.
+	///
+	/// An identity naming a different operation in each sequence is refused, for
+	/// the reason [`Sequence::apply`] refuses it, and nothing at all is taken:
+	/// the two sets are not two versions of one history and no part of the merge
+	/// is worth keeping.
+	pub fn absorb(&mut self, other: &Self)
+		-> Outcome<usize>
+	{
+		let mut fresh: Vec<(OpId, &Applied)> = Vec::new();
+		for (id, applied) in &other.ops {
+			match self.ops.get(id) {
+				Some(seen) if seen != applied => return Err(err!(
+					"The identity {} names a {} in one sequence and a {} in the other; \
+					an operation identity names one operation, so the two are not \
+					branches of one history.", id, seen.edit.name(), applied.edit.name();
+				Invalid, Input, Conflict)),
+				Some(_)	=> (),
+				None	=> fresh.push((*id, applied)),
+			}
+		}
+		let n = fresh.len();
+		for (id, applied) in fresh {
+			self.ops.insert(id, applied.clone());
+		}
+		Ok(n)
+	}
+
 	/// Applies a durable record, if it carries anything the sequence can use.
 	///
 	/// Returns whether the record said something about the order of bytes. This
