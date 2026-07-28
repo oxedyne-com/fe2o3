@@ -55,7 +55,9 @@
 //! `(counter, replica)` ascending. Convergence needs only that the order is
 //! total, which it is for any counters at all; the intuition that a later edit
 //! wins needs the counter to be a Lamport clock, one greater than the greatest
-//! the replica has seen.
+//! the replica has seen. [`crate::log::OpLog::next_counter`] mints exactly that,
+//! so an author who takes identifiers from the log gets the intuition for
+//! nothing; an author minting its own is responsible for the same rule.
 
 pub mod atom;
 pub mod claim;

@@ -10,6 +10,24 @@
 //! backwards is refused: a counter already spent cannot be spent again, and
 //! silently accepting it would let one identifier name two different edits.
 //!
+//! # Counters are a Lamport clock
+//!
+//! [`OpLog::next_counter`] mints one past the greatest counter the log has seen
+//! from *any* replica, not one past the authoring replica's own. That is what
+//! makes the op order in [`crate::seq`] -- the pair `(counter, replica)`
+//! ascending -- mean what it is read as meaning: an edit written in knowledge of
+//! another orders after it, whoever wrote it and whatever the two replica
+//! numbers are. Minting per replica would leave two edits at the same counter
+//! with the lower replica number winning, which is the opposite answer whenever
+//! the higher-numbered replica wrote first.
+//!
+//! Nothing is given up by it. A replica's own counters still strictly increase,
+//! because the greatest counter the log has seen is at least that replica's own
+//! head, so the guard [`OpLog::append`] applies is unaffected; what the replica
+//! loses is only that its counters are no longer consecutive, and gaps were
+//! always permitted. Two replicas editing concurrently still mint the same
+//! counter, and the replica number breaks that tie, which is all it is for.
+//!
 //! # Causality
 //!
 //! Every record names the frontier its author could see, so the log is a
@@ -180,6 +198,9 @@ pub struct OpLog {
 	index:		HashMap<OpId, usize>,
 	/// Highest counter accepted so far for each replica.
 	counters:	HashMap<ReplicaId, u64>,
+	/// Highest counter accepted so far from any replica, which is the Lamport
+	/// clock the next operation is minted against.
+	top:		u64,
 	/// Every identifier some entry names as a parent.
 	named:		HashSet<OpId>,
 }
@@ -239,6 +260,7 @@ impl OpLog {
 		}
 		self.index.insert(id, self.entries.len());
 		self.counters.insert(id.replica, id.counter);
+		self.top = self.top.max(id.counter);
 		for p in rec.parents() {
 			self.named.insert(*p);
 		}
@@ -327,10 +349,29 @@ impl OpLog {
 		self.counters.get(&replica).copied()
 	}
 
-	/// Returns the identifier a replica should use for its next operation,
-	/// which is one past its current head.
+	/// Returns the greatest counter the log has seen, from any replica.
+	///
+	/// Zero means the log is empty, since counters start at one.
+	pub fn max_counter(&self) -> u64 {
+		self.top
+	}
+
+	/// Returns the counter the next operation should carry, whoever authors it,
+	/// which is one past the greatest the log has seen from any replica.
+	///
+	/// This is the Lamport clock: an operation minted here is later, in op order,
+	/// than everything its author could see when it was minted.
+	pub fn next_counter(&self) -> u64 {
+		self.top + 1
+	}
+
+	/// Returns the identifier a replica should use for its next operation.
+	///
+	/// The counter is [`OpLog::next_counter`] and not one past the replica's own
+	/// head, so a replica's counters are strictly increasing but not
+	/// consecutive.
 	pub fn next_id(&self, replica: ReplicaId) -> OpId {
-		OpId::new(replica, self.head(replica).unwrap_or(0) + 1)
+		OpId::new(replica, self.next_counter())
 	}
 
 	/// Returns the highest counter seen per replica, which is what a peer needs
@@ -443,6 +484,8 @@ mod tests {
 		assert!(log.is_empty());
 		assert_eq!(log.len(), 0);
 		assert_eq!(log.head(ReplicaId::new(1)), None);
+		assert_eq!(log.max_counter(), 0);
+		assert_eq!(log.next_counter(), 1);
 		assert_eq!(log.next_id(ReplicaId::new(1)), oid(1, 1));
 		assert!(log.counters().is_empty());
 		assert!(log.frontier().is_empty());
@@ -510,6 +553,8 @@ mod tests {
 		res!(log.append(root(oid(2, 1), "b")));
 		assert_eq!(log.head(ReplicaId::new(1)), Some(100));
 		assert_eq!(log.head(ReplicaId::new(2)), Some(1));
+		// The Lamport clock is not per replica, and stands at the greater.
+		assert_eq!(log.max_counter(), 100);
 		Ok(())
 	}
 
@@ -535,10 +580,10 @@ mod tests {
 		Ok(())
 	}
 
-	/// Authoring mints consecutive identifiers and takes the frontier as
-	/// parents, so a replica editing alone builds a chain.
+	/// Authoring mints the next counter and takes the frontier as parents, so a
+	/// replica editing alone builds a chain of consecutive identifiers.
 	#[test]
-	fn author_mints_consecutive_ids_and_parents_them() -> Outcome<()> {
+	fn author_mints_the_next_counter_and_parents_it() -> Outcome<()> {
 		let r = ReplicaId::new(5);
 		let mut log = OpLog::new();
 		let a = res!(log.author(r, mark("a")));
@@ -549,6 +594,76 @@ mod tests {
 		assert_eq!(b.parents, vec![a.id]);
 		assert_eq!(log.next_id(r), oid(5, 3));
 		assert_eq!(log.frontier(), vec![b.id]);
+		Ok(())
+	}
+
+	/// Minting is against the whole log and not against the author, so a replica
+	/// that has seen another's work carries on from where that work left off.
+	#[test]
+	fn minting_is_against_every_replica_seen() -> Outcome<()> {
+		let mut log = OpLog::new();
+		// One replica is a long way ahead, and another has never written.
+		res!(log.append(root(oid(2, 40), "far")));
+		assert_eq!(log.max_counter(), 40);
+		assert_eq!(log.next_counter(), 41);
+		let fresh = res!(log.author(ReplicaId::new(1), mark("fresh")));
+		assert_eq!(fresh.id, oid(1, 41), "one past everything seen, not one past nothing");
+		// And the replica that was ahead carries on past that in its turn.
+		let on = res!(log.author(ReplicaId::new(2), mark("on")));
+		assert_eq!(on.id, oid(2, 42));
+		Ok(())
+	}
+
+	/// A replica's own counters still strictly increase under Lamport minting,
+	/// which is what the append guard insists on; only consecutiveness is lost.
+	#[test]
+	fn a_replicas_own_counters_still_increase() -> Outcome<()> {
+		let r1 = ReplicaId::new(1);
+		let r2 = ReplicaId::new(2);
+		let mut log = OpLog::new();
+		let mut mine: Vec<u64> = Vec::new();
+		for i in 0..5 {
+			mine.push(res!(log.author(r1, mark(&fmt!("a{}", i)))).id.counter);
+			res!(log.author(r2, mark(&fmt!("b{}", i))));
+		}
+		assert_eq!(mine, vec![1, 3, 5, 7, 9], "interleaved, so not consecutive");
+		for pair in mine.windows(2) {
+			assert!(pair[1] > pair[0], "{} does not advance {}", pair[1], pair[0]);
+		}
+		assert_eq!(log.head(r1), Some(9));
+		assert_eq!(log.max_counter(), 10);
+		Ok(())
+	}
+
+	/// An edit written in knowledge of another orders after it, whoever wrote it.
+	///
+	/// This is the whole point of the Lamport clock. Replica 9 writes first and
+	/// replica 1 answers it; under minting per replica both would hold counter
+	/// one and the op order would put the lower replica number first, which is
+	/// the reverse of what happened.
+	#[test]
+	fn a_later_edit_orders_after_the_one_it_saw() -> Outcome<()> {
+		use crate::seq::OpOrder;
+
+		let nine = ReplicaId::new(9);
+		let one = ReplicaId::new(1);
+		// Replica 9 writes alone.
+		let mut first = OpLog::new();
+		let early = res!(first.author(nine, mark("early")));
+		assert_eq!(early.id, oid(9, 1));
+		// Replica 1 absorbs that, and then edits having seen it.
+		let mut second = OpLog::new();
+		let batch: Vec<Record> = first.iter().cloned().collect();
+		assert!(res!(second.absorb(batch)).is_empty());
+		let late = res!(second.author(one, mark("late")));
+		assert_eq!(late.parents, vec![early.id]);
+		assert_eq!(late.id, oid(1, 2));
+		assert!(
+			OpOrder::of(&late.id) > OpOrder::of(&early.id),
+			"the edit written afterwards must order afterwards",
+		);
+		// What per-replica minting would have given, and why it is wrong.
+		assert!(OpOrder::of(&oid(1, 1)) < OpOrder::of(&early.id));
 		Ok(())
 	}
 
@@ -563,6 +678,7 @@ mod tests {
 		res!(log.append(res!(rec(oid(3, 1), vec![seed], "right"))));
 		assert_eq!(log.frontier(), vec![oid(2, 1), oid(3, 1)]);
 		let merge = res!(log.author(ReplicaId::new(4), mark("merge")));
+		assert_eq!(merge.id, oid(4, 2), "the merge is later than what it merged");
 		assert_eq!(merge.parents, vec![oid(2, 1), oid(3, 1)]);
 		assert_eq!(log.frontier(), vec![merge.id]);
 		Ok(())
