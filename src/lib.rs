@@ -11,11 +11,17 @@ pub use oxedyne_fe2o3_crypto        as crypto;
 #[cfg(feature = "data")]
 pub use oxedyne_fe2o3_data          as data;
 
+#[cfg(feature = "datime")]
+pub use oxedyne_fe2o3_datime        as datime;
+
 #[cfg(feature = "file")]
 pub use oxedyne_fe2o3_file          as file;
 
 #[cfg(feature = "geom")]
 pub use oxedyne_fe2o3_geom          as geom;
+
+#[cfg(feature = "graphics")]
+pub use oxedyne_fe2o3_graphics      as graphics;
 
 #[cfg(feature = "hash")]
 pub use oxedyne_fe2o3_hash          as hash;
@@ -31,6 +37,9 @@ pub use oxedyne_fe2o3_iop_hash      as iop_hash;
 
 #[cfg(feature = "jdat")]
 pub use oxedyne_fe2o3_jdat          as jdat;
+
+#[cfg(feature = "mail")]
+pub use oxedyne_fe2o3_mail          as mail;
 
 #[cfg(feature = "namex")]
 pub use oxedyne_fe2o3_namex         as namex;
@@ -58,6 +67,9 @@ pub use oxedyne_fe2o3_steel         as steel;
 
 #[cfg(feature = "syntax")]
 pub use oxedyne_fe2o3_syntax        as syntax;
+
+#[cfg(feature = "sys")]
+pub use oxedyne_fe2o3_sys           as sys;
 
 #[cfg(feature = "test")]
 pub use oxedyne_fe2o3_test          as test;
