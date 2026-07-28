@@ -1,8 +1,8 @@
-//! Content-addressed storage (CAS): fixed-size chunking and SHA-256 content
-//! addressing for opaque byte payloads.
+//! Content-addressed storage (CAS): fixed-size and content-defined chunking,
+//! with SHA-256 content addressing, for opaque byte payloads.
 //!
 //! This module underpins large, syncable payloads that must not be shipped
-//! whole. A payload is split into fixed-size chunks; each chunk is addressed by
+//! whole. A payload is split into chunks; each chunk is addressed by
 //! the SHA-256 of its bytes, and an ordered [`Manifest`] of those addresses
 //! reconstructs it. A store keyed by content address then holds a chunk once
 //! however many manifests reference it, and a consumer fetches only the chunks
@@ -25,11 +25,22 @@
 //! Encryption is the caller's concern. For a *content-blind* store the caller
 //! encrypts each chunk before handing it here, so the address is over
 //! ciphertext and the store never sees plaintext; deduplication is therefore
-//! within one caller's keyspace, never across callers. Chunking is deliberately
-//! fixed-size for a first cut: simple, and enough to break the whole-payload
-//! ceiling. A content-defined (rolling-hash) chunker that localises the churn an
-//! edit causes is a later refinement, and can be added without changing
-//! [`Manifest`] or [`Cas`].
+//! within one caller's keyspace, never across callers.
+//!
+//! # Two chunkers
+//!
+//! [`Chunker`] cuts at fixed offsets: simple, and enough to break the
+//! whole-payload ceiling, but every boundary is an offset rather than a place in
+//! the content, so inserting one byte near the front shifts every boundary after
+//! it and the whole payload re-uploads.
+//!
+//! [`CdcChunker`] cuts where the content says to. A FastCDC-style gear rolling
+//! hash reads the payload and declares a boundary wherever the hash of the
+//! preceding bytes hits a mask, so an insertion moves only the boundaries around
+//! it: the chunks either side keep their addresses and are never re-sent. That
+//! is the refinement the fixed chunker was a first cut for, and it arrived
+//! without changing [`Manifest`] or [`Cas`] -- both chunkers return the same
+//! manifest shape, and a store cannot tell which produced what it holds.
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_hash::sha256;
@@ -49,6 +60,43 @@ pub const ADDR_LEN: usize = 32;
 /// overhead stays a small fraction of a multi-megabyte payload, small enough
 /// that an edit confined to one region re-uploads little.
 pub const DEFAULT_CHUNK_SIZE: usize = 256 * 1024;
+
+/// Default minimum content-defined chunk size, 64 KiB.
+///
+/// A floor stops a run of unlucky hash hits producing a swarm of tiny chunks,
+/// each of which costs an address in every manifest that names it.
+pub const DEFAULT_MIN_CHUNK_SIZE: usize = 64 * 1024;
+
+/// Default maximum content-defined chunk size, 1 MiB.
+///
+/// A ceiling bounds the damage when the hash finds no boundary at all, which is
+/// what happens across a long run of identical bytes.
+pub const DEFAULT_MAX_CHUNK_SIZE: usize = 1024 * 1024;
+
+/// Seed for the gear table's generator.
+///
+/// The table must be identical on every machine and in every release, because a
+/// changed table changes every boundary and so every address, which would make
+/// a store's existing chunks unreachable. Fixing the seed here, and deriving the
+/// table from it rather than shipping a literal, is what pins it. The value is
+/// the golden-ratio constant splitmix64 conventionally uses.
+const GEAR_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
+
+/// Normalisation level: how many bits the mask tightens below the average chunk
+/// size and loosens above it.
+///
+/// Plain gear chunking gives an exponential spread of chunk sizes, so short
+/// chunks dominate and the tail is long. Cutting less readily before the average
+/// and more readily after it pulls the spread in towards the average without
+/// forcing boundaries at fixed offsets. Two is the level the FastCDC paper
+/// settles on.
+const NORM_LEVEL: u32 = 2;
+
+/// The 256-entry gear table, one random u64 per byte value.
+///
+/// Generated at compile time from [`GEAR_SEED`] by splitmix64, so there is no
+/// dependency to pull in and no table to keep in the source.
+static GEAR: [u64; 256] = gear_table();
 
 
 /// A content address: the SHA-256 digest of a chunk's bytes.
@@ -348,6 +396,151 @@ impl Chunker {
 }
 
 
+/// Splits a payload into content-defined, content-addressed chunks, cutting
+/// where a FastCDC-style gear rolling hash says the content changes.
+///
+/// The hash reads the payload one byte at a time, keeping a value that depends
+/// only on the last few dozen bytes. Where that value hits a mask, a boundary is
+/// declared. Because the boundary follows the bytes and not the offset, an
+/// insertion or deletion perturbs only the chunks around it: every chunk beyond
+/// the disturbance re-synchronises on the same content and keeps the address it
+/// had, so a store already holding it needs nothing sent.
+///
+/// Boundaries are constrained to `[min, max]` and steered towards `avg` by
+/// normalised chunking: below the average the mask is a couple of bits
+/// stricter, above it a couple of bits looser. The bytes before `min` are not
+/// hashed at all -- no boundary could be accepted there -- which is the
+/// cut-point skipping that makes the scan cheap.
+///
+/// The manifest it produces is the same [`Manifest`] the fixed-size [`Chunker`]
+/// produces, and reassembles the same way.
+#[derive(Clone, Copy, Debug)]
+pub struct CdcChunker {
+	/// Smallest permitted chunk, except for a payload shorter than this.
+	min:	usize,
+	/// Target average chunk size, the point at which the mask loosens.
+	avg:	usize,
+	/// Largest permitted chunk; a boundary is forced here.
+	max:	usize,
+	/// Strict mask, applied below `avg`.
+	mask_s:	u64,
+	/// Loose mask, applied at and above `avg`.
+	mask_l:	u64,
+}
+
+impl Default for CdcChunker {
+	fn default() -> Self {
+		Self::sizes(
+			DEFAULT_MIN_CHUNK_SIZE,
+			DEFAULT_CHUNK_SIZE,
+			DEFAULT_MAX_CHUNK_SIZE,
+		)
+	}
+}
+
+impl CdcChunker {
+	/// Constructs a chunker with the given minimum, average and maximum chunk
+	/// sizes, which must satisfy `0 < min <= avg <= max`.
+	pub fn new(min: usize, avg: usize, max: usize)
+		-> Outcome<Self>
+	{
+		if min == 0 {
+			return Err(err!(
+				"Minimum chunk size must be non-zero.";
+			Invalid, Input, Range));
+		}
+		if min > avg || avg > max {
+			return Err(err!(
+				"Chunk sizes must satisfy min <= avg <= max, got {}, {}, {}.",
+				min, avg, max;
+			Invalid, Input, Range));
+		}
+		Ok(Self::sizes(min, avg, max))
+	}
+
+	/// Builds a chunker from already-valid sizes, deriving the two masks.
+	fn sizes(min: usize, avg: usize, max: usize) -> Self {
+		let bits = log2_floor(avg);				// Mask width for the average.
+		let strict = (bits + NORM_LEVEL).min(63);
+		let loose = bits.saturating_sub(NORM_LEVEL).max(1);
+		Self {
+			min,
+			avg,
+			max,
+			mask_s:	high_mask(strict),
+			mask_l:	high_mask(loose),
+		}
+	}
+
+	/// Returns the minimum chunk size.
+	pub fn min_size(&self) -> usize {
+		self.min
+	}
+
+	/// Returns the target average chunk size.
+	pub fn avg_size(&self) -> usize {
+		self.avg
+	}
+
+	/// Returns the maximum chunk size.
+	pub fn max_size(&self) -> usize {
+		self.max
+	}
+
+	/// Splits `payload` into chunks, returning the ordered [`Manifest`] and the
+	/// chunk bytes.
+	///
+	/// The contract matches [`Chunker::split`]: an empty payload yields an empty
+	/// manifest and no chunks, a payload shorter than the minimum chunk size
+	/// yields a single chunk, and byte-identical chunks share an address, so the
+	/// returned `Vec<Chunk>` may contain duplicates that a deduplicating store
+	/// collapses on write.
+	pub fn split(&self, payload: &[u8])
+		-> (Manifest, Vec<Chunk>)
+	{
+		let mut refs = Vec::new();
+		let mut chunks = Vec::new();
+		let mut pos = 0;
+		while pos < payload.len() {
+			let len = self.cut(&payload[pos..]);
+			let chunk = Chunk::new(payload[pos..pos + len].to_vec());
+			refs.push(ChunkRef { id: chunk.id, len: chunk.bytes.len() });
+			chunks.push(chunk);
+			pos += len;
+		}
+		(Manifest { total_len: payload.len(), chunks: refs }, chunks)
+	}
+
+	/// Returns the length of the first chunk of `data`, always at least one byte
+	/// so that [`CdcChunker::split`] terminates.
+	fn cut(&self, data: &[u8]) -> usize {
+		let n = data.len();
+		if n <= self.min {
+			return n;	// Too short to cut: the whole remainder is one chunk.
+		}
+		let end = self.max.min(n);			// Forced boundary.
+		let mid = self.avg.min(end);		// Where the mask loosens.
+		let mut fp = 0u64;					// The rolling gear hash.
+		let mut i = self.min;				// Skip: no boundary may land below.
+		while i < mid {
+			fp = (fp << 1).wrapping_add(GEAR[data[i] as usize]);
+			if fp & self.mask_s == 0 {
+				return i + 1;
+			}
+			i += 1;
+		}
+		while i < end {
+			fp = (fp << 1).wrapping_add(GEAR[data[i] as usize]);
+			if fp & self.mask_l == 0 {
+				return i + 1;
+			}
+			i += 1;
+		}
+		end
+	}
+}
+
+
 /// A store of chunks keyed by content address.
 ///
 /// Implementations must be internally thread-safe. The store is deliberately
@@ -469,6 +662,40 @@ impl Cas for MemoryCas {
 	}
 }
 
+
+/// Generates the gear table by running splitmix64 from [`GEAR_SEED`].
+///
+/// Splitmix64 is a handful of multiplies and shifts, which is why it can run in
+/// a `const` context and save the crate a dependency and a 2 KiB literal.
+const fn gear_table() -> [u64; 256] {
+	let mut table = [0u64; 256];
+	let mut state = GEAR_SEED;
+	let mut i = 0;
+	while i < 256 {
+		state = state.wrapping_add(GEAR_SEED);
+		let mut z = state;
+		z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+		z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+		table[i] = z ^ (z >> 31);
+		i += 1;
+	}
+	table
+}
+
+/// Builds a mask over the top `bits` bits of a `u64`, for `1 <= bits <= 63`.
+///
+/// The top bits are the ones to test. A gear hash shifts left by one per byte,
+/// so bit `k` of the hash depends on the last `k + 1` bytes; testing the high
+/// bits therefore tests a window dozens of bytes wide, while testing the low
+/// bits would decide a boundary on almost nothing.
+const fn high_mask(bits: u32) -> u64 {
+	((1u64 << bits) - 1) << (64 - bits)
+}
+
+/// Floor of the base-2 logarithm of a non-zero value.
+fn log2_floor(n: usize) -> u32 {
+	(usize::BITS - 1) - n.leading_zeros()
+}
 
 /// Converts a 4-bit nibble to its lowercase hex character.
 fn hex_char(nib: u8) -> char {
@@ -625,6 +852,220 @@ mod tests {
 		assert_eq!(removed, 1);
 		assert_eq!(res!(store.len()), 1);
 		assert!(res!(store.has(&keep)));
+		Ok(())
+	}
+
+	/// A deterministic pseudorandom byte stream.
+	///
+	/// Splitmix64 again, seeded separately from the gear table, so a test needs
+	/// no `rand` crate and produces the same payload on every machine and every
+	/// run -- a shift-resistance figure is only worth quoting if it is stable.
+	fn pseudorandom(len: usize, seed: u64) -> Vec<u8> {
+		let mut out = Vec::with_capacity(len);
+		let mut state = seed;
+		while out.len() < len {
+			state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+			let mut z = state;
+			z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+			z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+			z ^= z >> 31;
+			for b in z.to_le_bytes() {
+				if out.len() == len {
+					break;
+				}
+				out.push(b);
+			}
+		}
+		out
+	}
+
+	/// The fraction of `edited`'s chunks whose addresses also occur in `orig`,
+	/// counting multiplicity. This is the quantity that matters: it is the share
+	/// of the edited payload a store already holds, and so need not be sent.
+	fn shared_fraction(orig: &Manifest, edited: &Manifest) -> f64 {
+		let mut have: HashMap<ContentId, usize> = HashMap::new();
+		for cref in &orig.chunks {
+			*have.entry(cref.id).or_insert(0) += 1;
+		}
+		let mut shared = 0usize;
+		for cref in &edited.chunks {
+			if let Some(n) = have.get_mut(&cref.id) {
+				if *n > 0 {
+					*n -= 1;
+					shared += 1;
+				}
+			}
+		}
+		shared as f64 / edited.chunks.len() as f64
+	}
+
+	/// Inserts one byte at `at`, the smallest edit that shifts everything after
+	/// it.
+	fn insert_byte(payload: &[u8], at: usize) -> Vec<u8> {
+		let mut out = payload.to_vec();
+		out.insert(at, 0x5a);
+		out
+	}
+
+	/// The size triple is validated, and the accessors report it back.
+	#[test]
+	fn cdc_validates_its_sizes() -> Outcome<()> {
+		assert!(CdcChunker::new(0, 16, 64).is_err());		// Zero minimum.
+		assert!(CdcChunker::new(32, 16, 64).is_err());		// min > avg.
+		assert!(CdcChunker::new(16, 128, 64).is_err());		// avg > max.
+		let cdc = res!(CdcChunker::new(16, 64, 256));
+		assert_eq!(cdc.min_size(), 16);
+		assert_eq!(cdc.avg_size(), 64);
+		assert_eq!(cdc.max_size(), 256);
+		let def = CdcChunker::default();
+		assert_eq!(def.min_size(), DEFAULT_MIN_CHUNK_SIZE);
+		assert_eq!(def.avg_size(), DEFAULT_CHUNK_SIZE);
+		assert_eq!(def.max_size(), DEFAULT_MAX_CHUNK_SIZE);
+		Ok(())
+	}
+
+	/// The same payload and the same configuration give the same manifest, and
+	/// the degenerate payloads behave as the fixed chunker's do.
+	#[test]
+	fn cdc_split_is_deterministic() -> Outcome<()> {
+		let cdc = res!(CdcChunker::new(64, 256, 1024));
+		let payload = pseudorandom(300_000, 7);
+		let (m1, c1) = cdc.split(&payload);
+		let (m2, c2) = cdc.split(&payload);
+		assert_eq!(m1, m2);
+		assert_eq!(c1, c2);
+		assert!(m1.len() > 1);					// It really did cut.
+
+		let (empty, chunks) = cdc.split(&[]);	// Empty payload, empty manifest.
+		assert!(empty.is_empty());
+		assert_eq!(empty.total_len, 0);
+		assert!(chunks.is_empty());
+
+		let short = pseudorandom(30, 9);		// Below the minimum: one chunk.
+		let (m, chunks) = cdc.split(&short);
+		assert_eq!(m.len(), 1);
+		assert_eq!(m.total_len, 30);
+		assert_eq!(chunks[0].bytes, short);
+		Ok(())
+	}
+
+	/// An insertion near the front of a payload disturbs only the chunks around
+	/// it; the rest keep their addresses.
+	///
+	/// The fixed-size chunker is measured on the same payload for contrast. It
+	/// cuts at offsets, so one inserted byte shifts every boundary after it and
+	/// almost nothing survives, which is the whole reason for the
+	/// content-defined chunker.
+	#[test]
+	fn cdc_survives_an_insertion_near_the_front() -> Outcome<()> {
+		let payload = pseudorandom(4 * 1024 * 1024, 0x0da7_a5ee_d1);
+		let edited = insert_byte(&payload, 1024);
+
+		let cdc = res!(CdcChunker::new(16 * 1024, 64 * 1024, 256 * 1024));
+		let (before, _) = cdc.split(&payload);
+		let (after, _) = cdc.split(&edited);
+		let kept = shared_fraction(&before, &after);
+		assert!(
+			kept > 0.90,
+			"CDC kept only {:.3} of {} chunks across a front insertion.",
+			kept, after.len(),
+		);
+
+		let fixed = res!(Chunker::new(64 * 1024));
+		let (fbefore, _) = fixed.split(&payload);
+		let (fafter, _) = fixed.split(&edited);
+		let fkept = shared_fraction(&fbefore, &fafter);
+		assert!(
+			fkept < 0.10,
+			"The fixed chunker was expected to lose nearly everything, kept {:.3}.",
+			fkept,
+		);
+		Ok(())
+	}
+
+	/// An edit in the middle of a payload leaves both halves alone.
+	#[test]
+	fn cdc_survives_an_insertion_in_the_middle() -> Outcome<()> {
+		let payload = pseudorandom(4 * 1024 * 1024, 0x0da7_a5ee_d2);
+		let edited = insert_byte(&payload, 2 * 1024 * 1024);
+
+		let cdc = res!(CdcChunker::new(16 * 1024, 64 * 1024, 256 * 1024));
+		let (before, _) = cdc.split(&payload);
+		let (after, _) = cdc.split(&edited);
+		let kept = shared_fraction(&before, &after);
+		assert!(
+			kept > 0.90,
+			"CDC kept only {:.3} of {} chunks across a middle insertion.",
+			kept, after.len(),
+		);
+		Ok(())
+	}
+
+	/// Every chunk lands inside the configured bounds, and the mean sits near
+	/// the requested average.
+	#[test]
+	fn cdc_chunk_sizes_stay_within_bounds() -> Outcome<()> {
+		let cdc = CdcChunker::default();
+		let payload = pseudorandom(4 * 1024 * 1024, 0x51ce_51ce);
+		let (manifest, _) = cdc.split(&payload);
+		assert!(manifest.len() > 4);
+		for (i, cref) in manifest.chunks.iter().enumerate() {
+			assert!(
+				cref.len <= cdc.max_size(),
+				"Chunk {} of {} bytes exceeds the maximum.", i, cref.len,
+			);
+			if i + 1 < manifest.len() {
+				// Only the last chunk may fall below the minimum.
+				assert!(
+					cref.len >= cdc.min_size(),
+					"Chunk {} of {} bytes falls below the minimum.", i, cref.len,
+				);
+			}
+		}
+		let mean = payload.len() as f64 / manifest.len() as f64;
+		let avg = cdc.avg_size() as f64;
+		assert!(
+			mean > avg / 2.0 && mean < avg * 2.0,
+			"Mean chunk size {:.0} strays from the {:.0} requested.", mean, avg,
+		);
+		Ok(())
+	}
+
+	/// A content-defined split reassembles byte for byte through a store.
+	#[test]
+	fn cdc_reassembles_byte_for_byte() -> Outcome<()> {
+		let cdc = res!(CdcChunker::new(1024, 4096, 16384));
+		let store = MemoryCas::new();
+		for payload in [
+			Vec::new(),
+			pseudorandom(1, 1),
+			pseudorandom(999, 2),				// Below the minimum.
+			pseudorandom(200_000, 3),
+			vec![0u8; 200_000],					// A long identical run.
+		] {
+			let (manifest, chunks) = cdc.split(&payload);
+			for chunk in &chunks {
+				res!(store.put(chunk));
+			}
+			assert_eq!(manifest.total_len, payload.len());
+			let got = res!(manifest.reassemble(|id| {
+				match res!(store.get(id)) {
+					Some(b) => Ok(b),
+					None => Err(err!("missing chunk {}", id; Test, Missing)),
+				}
+			}));
+			assert_eq!(got, payload);
+		}
+		Ok(())
+	}
+
+	/// The gear table is fully populated and free of duplicates, which a broken
+	/// generator would not manage.
+	#[test]
+	fn gear_table_is_distinct() -> Outcome<()> {
+		let seen: HashSet<u64> = GEAR.iter().copied().collect();
+		assert_eq!(seen.len(), 256);
+		assert!(!GEAR.iter().any(|g| *g == 0));
 		Ok(())
 	}
 }
