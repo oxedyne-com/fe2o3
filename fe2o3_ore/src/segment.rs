@@ -772,12 +772,10 @@ mod tests {
 			reader.feed(&bytes[..cut]);
 			reader.end();
 			let mut whole = 0usize;
-			let mut ended = false;
 			loop {
 				match reader.next_entry() {
-					Ok(Some(_))	=> whole += 1,
-					Ok(None)	=> { ended = true; break },
-					Err(_)		=> break,
+					Ok(Some(_))				=> whole += 1,
+					Ok(None) | Err(_)		=> break,
 				}
 			}
 			assert!(whole < entries.len(), "cut at {} yielded every record", cut);
@@ -794,7 +792,6 @@ mod tests {
 						complete.", cut, bytes.len(); Test)),
 				}
 			}
-			let _ = ended;
 		}
 		// The whole segment reads every record.
 		let (_, got) = res!(decode(&bytes, Fold, [0u8; 0]));
