@@ -123,6 +123,7 @@ impl MediaType {
             Self::Image(Image::SvgXml)                      |
             Self::Application(Application::Json)            |
             Self::Application(Application::JsonLd)          |
+            Self::Application(Application::ManifestJson)    |
             Self::Application(Application::FormUrlEncoded)  |
             Self::Application(Application::Xml)             => true,
             // Structured syntax suffixes per RFC 6838 §4.2.8: anything
@@ -157,6 +158,9 @@ impl MediaType {
 pub enum Application {
     Json,
     JsonLd,
+    /// `application/manifest+json`, registered with IANA by the W3C Web
+    /// Application Manifest specification.
+    ManifestJson,
     Pdf,
     Sql,
     MicrosoftDocument,
@@ -167,6 +171,11 @@ pub enum Application {
     OpenXmlPresentation,
     OpenXmlSpreadsheet,
     FormUrlEncoded,
+    /// `application/wasm`, registered with IANA by the WebAssembly Core
+    /// specification. A browser compiles a module as it arrives only when the
+    /// server says this; under any other type `compileStreaming` refuses the
+    /// response and the whole module must be buffered first.
+    Wasm,
     Xml,
     Zip,
     Zstd,
@@ -180,6 +189,7 @@ impl Display for Application {
         match self {
             Self::Json                      => write!(f, "json"),
             Self::JsonLd                    => write!(f, "ld+json"),
+            Self::ManifestJson              => write!(f, "manifest+json"),
             Self::Pdf                       => write!(f, "pdf"),
             Self::Sql                       => write!(f, "sql"),
             Self::MicrosoftDocument         => write!(f, "msword"),
@@ -190,6 +200,7 @@ impl Display for Application {
             Self::OpenXmlPresentation       => write!(f, "vnd.openxmlformats-officedocument.presentationml.presentation"),
             Self::OpenXmlSpreadsheet        => write!(f, "vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
             Self::FormUrlEncoded            => write!(f, "x-www-form-urlencoded"),
+            Self::Wasm                      => write!(f, "wasm"),
             Self::Xml                       => write!(f, "xml"),
             Self::Zip                       => write!(f, "zip"),
             Self::Zstd                      => write!(f, "zstd"),
@@ -205,6 +216,7 @@ impl FromStr for Application {
         Ok(match s {
             "json"                                                          => Self::Json,
             "ld+json"                                                       => Self::JsonLd,
+            "manifest+json"                                                 => Self::ManifestJson,
             "pdf"                                                           => Self::Pdf,
             "sql"                                                           => Self::Sql,
             "msword"                                                        => Self::MicrosoftDocument,
@@ -215,6 +227,7 @@ impl FromStr for Application {
             "vnd.openxmlformats-officedocument.presentationml.presentation" => Self::OpenXmlPresentation,
             "vnd.openxmlformats-officedocument.spreadsheetml.sheet"         => Self::OpenXmlSpreadsheet,
             "x-www-form-urlencoded"                                         => Self::FormUrlEncoded,
+            "wasm"                                                          => Self::Wasm,
             "xml"                                                           => Self::Xml,
             "zip"                                                           => Self::Zip,
             "zstd"                                                          => Self::Zstd,
@@ -271,6 +284,12 @@ impl FromStr for Audio {
             "mpeg"          => Self::Mpeg,
             "ogg"           => Self::Ogg,
             "wav"           => Self::Wav,
+            // WAVE has never had one name. IANA registers `audio/vnd.wave`
+            // (RFC 2361) and lists `audio/wav`, `audio/wave` and `audio/x-wav`
+            // as the names in use; the WHATWG mime sniffing standard emits
+            // `audio/wave`. All three are read, and `audio/wav` is written.
+            "wave" | "x-wav" | "vnd.wave"
+                            => Self::Wav,
             "webm"          => Self::Webm,
             _ => return Err(err!(
                 "Unrecognised Audio Media subtype '{}'.", s;
@@ -386,10 +405,15 @@ impl FromStr for Font {
 pub enum Image {
     Avif,
     Gif,
+    /// `image/vnd.microsoft.icon`, the IANA registration for the favicon
+    /// format; `image/x-icon` is the unregistered name browsers also accept.
+    Icon,
     Jpeg,
     Png,
     SvgXml,
     Tiff,
+    /// `image/webp`, registered with IANA by RFC 9649.
+    Webp,
 }
 
 impl Display for Image {
@@ -397,10 +421,12 @@ impl Display for Image {
         write!(f, "{}", match self {
             Self::Avif      => "avif",
             Self::Gif       => "gif",
+            Self::Icon      => "vnd.microsoft.icon",
             Self::Jpeg      => "jpeg",
             Self::Png       => "png",
-            Self::SvgXml    => "svg+xml",   
+            Self::SvgXml    => "svg+xml",
             Self::Tiff      => "tiff",
+            Self::Webp      => "webp",
         })
     }
 }
@@ -410,12 +436,17 @@ impl FromStr for Image {
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         Ok(match s {
-            "avif"          => Self::Avif,   
-            "gif"           => Self::Gif,   
-            "jpeg"          => Self::Jpeg,   
-            "png"           => Self::Png,    
-            "svg+xml"       => Self::SvgXml,
-            "tiff"          => Self::Tiff,   
+            "avif"                  => Self::Avif,
+            "gif"                   => Self::Gif,
+            "vnd.microsoft.icon"    => Self::Icon,
+            // The unregistered name browsers have always sent and accepted, so
+            // a proxy forwarding one upstream's favicon type does not fail.
+            "x-icon"                => Self::Icon,
+            "jpeg"                  => Self::Jpeg,
+            "png"                   => Self::Png,
+            "svg+xml"               => Self::SvgXml,
+            "tiff"                  => Self::Tiff,
+            "webp"                  => Self::Webp,
             _ => return Err(err!(
                 "Unrecognised Image Media subtype '{}'.", s;
             IO, Network, Unknown, Input)),
@@ -568,6 +599,46 @@ mod tests {
             let read = res!(MediaType::from_str(&written));
             assert_eq!(read, mt, "{:?} did not survive being written as {:?}", mt, written);
         }
+        Ok(())
+    }
+
+    /// The exact strings in the IANA media types registry. A type spelled a
+    /// little differently is a type the receiver does not recognise, and the
+    /// registry is the only authority on the spelling.
+    #[test]
+    fn test_a_registered_type_is_spelled_as_the_registry_spells_it() {
+        for (mt, registered) in [
+            // WebAssembly Core, IANA registered.
+            (MediaType::Application(Application::Wasm),          "application/wasm"),
+            // W3C Web Application Manifest, IANA registered.
+            (MediaType::Application(Application::ManifestJson),  "application/manifest+json"),
+            // RFC 9649.
+            (MediaType::Image(Image::Webp),                      "image/webp"),
+            // IANA registered; `image/x-icon` is the unregistered name.
+            (MediaType::Image(Image::Icon),                      "image/vnd.microsoft.icon"),
+            // AVIF: IANA registered by the AV1 Image File Format specification.
+            (MediaType::Image(Image::Avif),                      "image/avif"),
+            // TIFF: RFC 3302.
+            (MediaType::Image(Image::Tiff),                      "image/tiff"),
+        ] {
+            assert_eq!(fmt!("{}", mt), registered);
+            match MediaType::from_str(registered) {
+                Ok(read) => assert_eq!(read, mt, "{} was read back as {:?}", registered, read),
+                Err(e) => panic!("{} was refused: {}", registered, e),
+            }
+        }
+    }
+
+    /// One format, several registered names. A proxy that refuses the name an
+    /// upstream chose forwards nothing, so all of them are read even though only
+    /// one is written.
+    #[test]
+    fn test_the_alternative_names_for_one_format_are_all_read() -> Outcome<()> {
+        for name in ["audio/wav", "audio/wave", "audio/x-wav", "audio/vnd.wave"] {
+            let read = res!(MediaType::from_str(name));
+            assert_eq!(read, MediaType::Audio(Audio::Wav), "reading {}", name);
+        }
+        assert_eq!(res!(MediaType::from_str("image/x-icon")), MediaType::Image(Image::Icon));
         Ok(())
     }
 }

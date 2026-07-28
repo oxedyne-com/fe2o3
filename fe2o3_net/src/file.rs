@@ -6,6 +6,7 @@ use crate::{
     charset::Charset,
     http::fields::HeaderFieldValue,
     media::{
+        Application,
         Audio,
         ContentTypeValue,
         Font,
@@ -214,6 +215,66 @@ impl RequestPath {
                 MediaType::Audio(Audio::Aac),
                 None,
             )),
+            // A WebAssembly module compiles as it arrives only when the server
+            // says `application/wasm`. Under any other type, and `text/plain`
+            // is what an unknown extension gets, `compileStreaming` refuses the
+            // response and the module is buffered whole before it starts.
+            Some("wasm") => ContentTypeValue::MediaType((
+                MediaType::Application(Application::Wasm),
+                None,
+            )),
+            // The manifest that makes an installable web application. Served as
+            // anything else, the browser declines to install it.
+            Some("webmanifest") => ContentTypeValue::MediaType((
+                MediaType::Application(Application::ManifestJson),
+                None,
+            )),
+            Some("json") => ContentTypeValue::MediaType((
+                MediaType::Application(Application::Json),
+                None,
+            )),
+            Some("pdf") => ContentTypeValue::MediaType((
+                MediaType::Application(Application::Pdf),
+                None,
+            )),
+            Some("zip") => ContentTypeValue::MediaType((
+                MediaType::Application(Application::Zip),
+                None,
+            )),
+            Some("webp") => ContentTypeValue::MediaType((
+                MediaType::Image(Image::Webp),
+                None,
+            )),
+            Some("avif") => ContentTypeValue::MediaType((
+                MediaType::Image(Image::Avif),
+                None,
+            )),
+            Some("ico") => ContentTypeValue::MediaType((
+                MediaType::Image(Image::Icon),
+                None,
+            )),
+            Some("tif") | Some("tiff") => ContentTypeValue::MediaType((
+                MediaType::Image(Image::Tiff),
+                None,
+            )),
+            Some("txt") => ContentTypeValue::MediaType((
+                MediaType::Text(Text::Plain),
+                Some(Charset::Utf_8),
+            )),
+            Some("csv") => ContentTypeValue::MediaType((
+                MediaType::Text(Text::Csv),
+                Some(Charset::Utf_8),
+            )),
+            // `text/xml` defaults to US-ASCII without a charset (RFC 7303 §3.1),
+            // so the charset is not decoration here.
+            Some("xml") => ContentTypeValue::MediaType((
+                MediaType::Text(Text::Xml),
+                Some(Charset::Utf_8),
+            )),
+            Some("mjs") => ContentTypeValue::MediaType((
+                MediaType::Text(Text::Javascript),
+                Some(Charset::Utf_8),
+            )),
             _ => MEDIA_PLAIN_TEXT,
         })
     }
@@ -245,6 +306,32 @@ mod tests {
             ("track.wav",   "audio/wav"),
             ("track.flac",  "audio/flac"),
             ("track.aac",   "audio/aac"),
+        ] {
+            let got = fmt!("{}", RequestPath::content_type(Path::new(name)));
+            assert_eq!(got, expected, "{} was served as {}", name, got);
+        }
+    }
+
+    /// A module served as anything but `application/wasm` cannot be compiled as
+    /// it arrives, and the rest of these are the same fault: the browser does
+    /// what the type says, not what the name suggests.
+    #[test]
+    fn test_a_web_payload_is_served_as_what_it_is() {
+        for (name, expected) in [
+            ("module.wasm",     "application/wasm"),
+            ("app.webmanifest", "application/manifest+json"),
+            ("data.json",       "application/json"),
+            ("doc.pdf",         "application/pdf"),
+            ("bundle.zip",      "application/zip"),
+            ("photo.webp",      "image/webp"),
+            ("photo.avif",      "image/avif"),
+            ("favicon.ico",     "image/vnd.microsoft.icon"),
+            ("scan.tiff",       "image/tiff"),
+            ("scan.tif",        "image/tiff"),
+            ("notes.txt",       "text/plain; charset=utf-8"),
+            ("rows.csv",        "text/csv; charset=utf-8"),
+            ("feed.xml",        "text/xml; charset=utf-8"),
+            ("mod.mjs",         "text/javascript; charset=utf-8"),
         ] {
             let got = fmt!("{}", RequestPath::content_type(Path::new(name)));
             assert_eq!(got, expected, "{} was served as {}", name, got);
