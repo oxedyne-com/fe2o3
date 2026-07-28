@@ -1,5 +1,5 @@
 //! A 2D graphics library: paths, affine transforms, an anti-aliased rasteriser, pixmaps with
-//! alpha compositing, blur and drop shadows, and a PNG codec.
+//! alpha compositing, blur and drop shadows, and PNG and JPEG codecs.
 //!
 //! Painting is not geometry, which is why this crate sits beside `fe2o3_geom` rather than inside
 //! it. `fe2o3_geom` serves integer layout, where a rectangle is a cell of a terminal or a widget
@@ -7,7 +7,16 @@
 //! output is a buffer of pixels.
 //!
 //! The only third-party dependency is `flate2`, for the DEFLATE stream a PNG carries; the CRC-32 a
-//! PNG chunk carries is small enough to own outright.
+//! PNG chunk carries is small enough to own outright. Nothing in JPEG is a general-purpose
+//! compressor that could sensibly be borrowed, so [`jpeg`] owns the whole of it -- Huffman coding,
+//! the discrete cosine transform, chroma resampling and the colour transform alike.
+//!
+//! # Codecs
+//!
+//! [`png`] and [`jpeg`] present the same pair of functions over the same [`pixmap::Pixmap`], so a
+//! caller that reads pictures need not care which it was handed. JPEG adds two entry points a
+//! photograph library wants and PNG has no use for: a size probe that stops at the frame header, and
+//! a decode at an eighth scale that reads one coefficient a block and never runs a transform.
 //!
 //! # The rasteriser
 //!
@@ -49,6 +58,7 @@
 
 pub mod blur;
 pub mod colour;
+pub mod jpeg;
 pub mod path;
 pub mod pixmap;
 pub mod png;

@@ -6,6 +6,10 @@ pub use crate::{
 		ColourVision,
 		Rgba,
 	},
+	jpeg::{
+		Chroma,
+		Options as JpegOptions,
+	},
 	path::{
 		Bounds,
 		Path,

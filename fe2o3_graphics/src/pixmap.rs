@@ -2,6 +2,7 @@
 
 use crate::{
 	colour::Rgba,
+	jpeg,
 	path::{
 		Bounds,
 		Path,
@@ -321,6 +322,31 @@ impl Pixmap {
 	pub fn load_png<P: AsRef<FilePath>>(path: P) -> Outcome<Self> {
 		let buf = res!(std::fs::read(path.as_ref()));
 		Self::from_png(&buf)
+	}
+
+	/// Encodes the pixmap as a baseline JPEG at the default quality.
+	///
+	/// JPEG carries no alpha channel, so a pixel that is not opaque is composited over white.
+	pub fn to_jpeg(&self) -> Outcome<Vec<u8>> {
+		jpeg::encode(self)
+	}
+
+	/// Decodes a JPEG into a pixmap.
+	pub fn from_jpeg(buf: &[u8]) -> Outcome<Self> {
+		jpeg::decode(buf)
+	}
+
+	/// Writes the pixmap to a file as a baseline JPEG at the default quality.
+	pub fn save_jpeg<P: AsRef<FilePath>>(&self, path: P) -> Outcome<()> {
+		let buf = res!(self.to_jpeg());
+		res!(std::fs::write(path.as_ref(), &buf));
+		Ok(())
+	}
+
+	/// Reads a JPEG file into a pixmap.
+	pub fn load_jpeg<P: AsRef<FilePath>>(path: P) -> Outcome<Self> {
+		let buf = res!(std::fs::read(path.as_ref()));
+		Self::from_jpeg(&buf)
 	}
 }
 
