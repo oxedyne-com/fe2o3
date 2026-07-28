@@ -74,6 +74,8 @@ impl FileState {
     pub fn is_live(&self)               -> bool                             { self.live }
     /// Returns the total size in bytes of old (superseded) records in the file.
     pub fn get_old_sum(&self)           -> u64                              { self.oldsum }
+    /// Returns the number of old (superseded) records in the file.
+    pub fn get_old_count(&self)         -> usize                            { self.oldcnt }
     /// Returns the map of record start positions to their liveness state.
     pub fn data_map(&self)              -> &BTreeMap<u64, DataState>        { &self.dmap }
     /// Returns a mutable reference to the record start-position map.

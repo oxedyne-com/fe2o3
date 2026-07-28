@@ -4,6 +4,7 @@ mod dal;
 mod delete_replay;
 mod durability;
 mod perf;
+mod rollover;
 mod scan;
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -29,6 +30,8 @@ fn main() -> Outcome<()> {
 fn run_tests() -> Outcome<()> {
 
     let filter = "all";
+    res!(rollover::test_rollover(filter));
+    res!(rollover::test_rollover(filter));
     res!(basic::test_basic(filter));
     res!(dal::test_docs(filter));
     res!(scan::test_scan(filter));

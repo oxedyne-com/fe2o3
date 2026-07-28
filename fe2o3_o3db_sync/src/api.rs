@@ -44,7 +44,10 @@ use crate::{
             Value,
         },
     },
-    file::zdir::ZoneDir,
+    file::{
+        state::FileStateMap,
+        zdir::ZoneDir,
+    },
 };
 
 use oxedyne_fe2o3_jdat::{
@@ -1304,9 +1307,13 @@ impl<
         }
     }
 
-    /// Dump all zone file states to the log file.
-    pub fn dump_file_states(&self, wait: Wait) -> Outcome<()> {
-        // Gather.
+    /// Gathers the file state map held by every file bot in every zone, keyed by worker index.
+    pub fn collect_file_states(
+        &self,
+        wait: Wait,
+    )
+        -> Outcome<BTreeMap<WorkerInd, FileStateMap>>
+    {
         let resp = self.responder();
         if let Err(e) = self.chans().sup().send(
             OzoneMsg::DumpFileStatesRequest(resp.clone())
@@ -1331,6 +1338,13 @@ impl<
                     Channel)),
             }
         }
+        Ok(sorted)
+    }
+
+    /// Dump all zone file states to the log file.
+    pub fn dump_file_states(&self, wait: Wait) -> Outcome<()> {
+        // Gather.
+        let sorted = res!(self.collect_file_states(wait));
         // Display.
         for (wind, fstates) in sorted {
             info!(sync_log::stream(), "{} file states dump:", wind); 
