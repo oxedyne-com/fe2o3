@@ -44,6 +44,9 @@ pub use oxedyne_fe2o3_num           as num;
 #[cfg(feature = "o3db")]
 pub use oxedyne_fe2o3_o3db_sync          as o3db;
 
+#[cfg(feature = "ore")]
+pub use oxedyne_fe2o3_ore           as ore;
+
 #[cfg(feature = "shield")]
 pub use oxedyne_fe2o3_shield        as shield;
 
