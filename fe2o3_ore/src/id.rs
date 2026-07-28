@@ -1,4 +1,5 @@
-//! Identifiers for replicas and for the operations they author.
+//! Identifiers for replicas, for the operations they author, and for the bytes
+//! those operations create.
 //!
 //! An operation is named by the replica that authored it together with that
 //! replica's own counter. A name can therefore be minted without consulting any
@@ -10,11 +11,22 @@
 //! replica number and a small counter cost two bytes. The decoder rejects
 //! overlong encodings, giving every identifier exactly one byte spelling --
 //! necessary where those bytes are hashed or signed.
+//!
+//! # Content is named, not located
+//!
+//! Above the operation identifier sit three more names, and none of them is
+//! minted: each is arithmetic over an operation identifier and an offset. A
+//! [`ContentId`] names one byte by the splice that created it, a
+//! [`ContentRange`] names a run of them, and an [`Anchor`] names a gap by the
+//! byte on one side of it. Because a byte's name says what created it rather
+//! than where it sits, the name survives the byte being moved, and an edit
+//! anchored to it travels with the content it was written against.
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_jdat::prelude::*;
 
 use std::fmt;
+use std::ops::Range;
 
 
 /// Maximum number of bytes the varint encoding of a `u64` occupies.
@@ -234,6 +246,316 @@ impl fmt::Display for OpId {
 }
 
 
+/// Names one byte of content: the operation that created the run it belongs to,
+/// and the byte's offset within that run.
+///
+/// The name is computed, never minted: a splice inserting a thousand bytes
+/// brings a thousand content identifiers into existence at the cost of the one
+/// operation identifier it already has. A byte keeps its name for as long as the
+/// history does, wherever the byte is later placed.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ContentId {
+	/// The operation that created the byte.
+	pub op:		OpId,
+	/// Offset of the byte within that operation's inserted run.
+	pub off:	u64,
+}
+
+impl ContentId {
+	/// Constructs a content identifier.
+	pub const fn new(op: OpId, off: u64) -> Self {
+		Self { op, off }
+	}
+
+	/// Serialises the identifier to a [`Dat`]. The shape is `[op, off]`.
+	pub fn to_dat(&self) -> Dat {
+		Dat::List(vec![
+			self.op.to_dat(),
+			Dat::U64(self.off),
+		])
+	}
+
+	/// Reconstructs an identifier from a [`Dat`] produced by
+	/// [`ContentId::to_dat`].
+	pub fn from_dat(dat: &Dat)
+		-> Outcome<Self>
+	{
+		let pair = match dat {
+			Dat::List(v) if v.len() == 2 => v,
+			_ => return Err(err!(
+				"A ContentId expects a 2-element Dat::List, got {:?}.", dat;
+			Decode, Input, Mismatch)),
+		};
+		let off = match &pair[1] {
+			Dat::U64(n) => *n,
+			other => return Err(err!(
+				"A ContentId offset expects Dat::U64, got {:?}.", other;
+			Decode, Input, Mismatch)),
+		};
+		Ok(Self {
+			op:		res!(OpId::from_dat(&pair[0])),
+			off,
+		})
+	}
+}
+
+impl fmt::Display for ContentId {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(f, "{}+{}", self.op, self.off)
+	}
+}
+
+
+/// Names a half-open run `[from, to)` of content identifiers sharing one
+/// creating operation.
+///
+/// A run is the unit in which content is spoken about: what a splice removes,
+/// what a move takes with it. Naming a run costs one operation identifier and
+/// two offsets however long the run is, which is why the structure's bookkeeping
+/// tracks edits rather than bytes.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ContentRange {
+	/// The operation that created the bytes.
+	pub op:		OpId,
+	/// First offset, inclusive.
+	pub from:	u64,
+	/// Last offset, exclusive.
+	pub to:		u64,
+}
+
+impl ContentRange {
+	/// Constructs a content range, refusing one whose end precedes its start.
+	///
+	/// An empty range is allowed, because splitting a run at its own edge is
+	/// arithmetic that should not have to be special-cased; a reversed one names
+	/// nothing and is a mistake.
+	pub fn new(op: OpId, from: u64, to: u64)
+		-> Outcome<Self>
+	{
+		if to < from {
+			return Err(err!(
+				"A ContentRange of {}+{}..{} is reversed; the end may not precede \
+				the start.", op, from, to;
+			Invalid, Input, Range));
+		}
+		Ok(Self { op, from, to })
+	}
+
+	/// Returns the number of bytes the range names.
+	pub const fn len(&self) -> u64 {
+		self.to - self.from
+	}
+
+	/// Reports whether the range names no bytes.
+	pub const fn is_empty(&self) -> bool {
+		self.to == self.from
+	}
+
+	/// Returns the offsets as a half-open range, for interval bookkeeping.
+	pub const fn offsets(&self) -> Range<u64> {
+		self.from..self.to
+	}
+
+	/// Reports whether the range names the given byte.
+	pub fn contains(&self, cid: &ContentId) -> bool {
+		cid.op == self.op && cid.off >= self.from && cid.off < self.to
+	}
+
+	/// Reports whether two ranges name at least one byte in common.
+	pub fn intersects(&self, other: &Self) -> bool {
+		self.op == other.op && self.from < other.to && other.from < self.to
+	}
+
+	/// Returns the bytes two ranges have in common, if any.
+	pub fn intersection(&self, other: &Self)
+		-> Option<Self>
+	{
+		if !self.intersects(other) {
+			return None;
+		}
+		Some(Self {
+			op:		self.op,
+			from:	self.from.max(other.from),
+			to:		self.to.min(other.to),
+		})
+	}
+
+	/// Serialises the range to a [`Dat`]. The shape is `[op, from, to]`.
+	pub fn to_dat(&self) -> Dat {
+		Dat::List(vec![
+			self.op.to_dat(),
+			Dat::U64(self.from),
+			Dat::U64(self.to),
+		])
+	}
+
+	/// Reconstructs a range from a [`Dat`] produced by [`ContentRange::to_dat`].
+	pub fn from_dat(dat: &Dat)
+		-> Outcome<Self>
+	{
+		let v = match dat {
+			Dat::List(v) if v.len() == 3 => v,
+			_ => return Err(err!(
+				"A ContentRange expects a 3-element Dat::List, got {:?}.", dat;
+			Decode, Input, Mismatch)),
+		};
+		let mut bound = [0u64; 2];
+		for (i, dat) in v[1..].iter().enumerate() {
+			bound[i] = match dat {
+				Dat::U64(n) => *n,
+				other => return Err(err!(
+					"A ContentRange bound expects Dat::U64, got {:?}.", other;
+				Decode, Input, Mismatch)),
+			};
+		}
+		Self::new(res!(OpId::from_dat(&v[0])), bound[0], bound[1])
+	}
+}
+
+impl fmt::Display for ContentRange {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(f, "{}+{}..{}", self.op, self.from, self.to)
+	}
+}
+
+
+/// Which side of a byte a gap lies on.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum Side {
+	/// The gap immediately preceding the byte.
+	Before,
+	/// The gap immediately following the byte.
+	After,
+}
+
+impl Side {
+	/// Returns the wire code for the side.
+	pub const fn code(&self) -> u8 {
+		match self {
+			Self::Before	=> 0,
+			Self::After		=> 1,
+		}
+	}
+
+	/// Reconstructs a side from its wire code.
+	pub fn from_code(code: u8)
+		-> Outcome<Self>
+	{
+		match code {
+			0 => Ok(Self::Before),
+			1 => Ok(Self::After),
+			other => Err(err!(
+				"A Side code is 0 for Before or 1 for After, got {}.", other;
+			Decode, Input, Invalid)),
+		}
+	}
+}
+
+impl fmt::Display for Side {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			Self::Before	=> write!(f, "before"),
+			Self::After		=> write!(f, "after"),
+		}
+	}
+}
+
+
+/// Names a gap in a file by the byte on one side of it.
+///
+/// An anchor is what an edit records instead of a position. Because it names
+/// content, a later move of that content carries the anchor with it, and an
+/// insertion written against it lands beside the same neighbour it was written
+/// beside rather than at the offset that neighbour happened to occupy.
+///
+/// An absent anchor -- `None` where one is expected -- means the start or the
+/// end of the file, which no byte names.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct Anchor {
+	/// The byte the gap is named by.
+	pub content:	ContentId,
+	/// Which side of that byte the gap lies on.
+	pub side:		Side,
+}
+
+impl Anchor {
+	/// Constructs an anchor.
+	pub const fn new(content: ContentId, side: Side) -> Self {
+		Self { content, side }
+	}
+
+	/// Constructs the anchor immediately following a byte, which is the form a
+	/// left origin takes.
+	pub const fn after(content: ContentId) -> Self {
+		Self { content, side: Side::After }
+	}
+
+	/// Constructs the anchor immediately preceding a byte, which is the form a
+	/// right origin takes.
+	pub const fn before(content: ContentId) -> Self {
+		Self { content, side: Side::Before }
+	}
+
+	/// Serialises the anchor to a [`Dat`]. The shape is `[content, side]`.
+	pub fn to_dat(&self) -> Dat {
+		Dat::List(vec![
+			self.content.to_dat(),
+			Dat::U8(self.side.code()),
+		])
+	}
+
+	/// Reconstructs an anchor from a [`Dat`] produced by [`Anchor::to_dat`].
+	pub fn from_dat(dat: &Dat)
+		-> Outcome<Self>
+	{
+		let pair = match dat {
+			Dat::List(v) if v.len() == 2 => v,
+			_ => return Err(err!(
+				"An Anchor expects a 2-element Dat::List, got {:?}.", dat;
+			Decode, Input, Mismatch)),
+		};
+		let side = match &pair[1] {
+			Dat::U8(c) => res!(Side::from_code(*c)),
+			other => return Err(err!(
+				"An Anchor side expects Dat::U8, got {:?}.", other;
+			Decode, Input, Mismatch)),
+		};
+		Ok(Self {
+			content:	res!(ContentId::from_dat(&pair[0])),
+			side,
+		})
+	}
+
+	/// Serialises an optional anchor to a [`Dat`], absence being the start or
+	/// the end of the file.
+	pub fn opt_to_dat(anchor: &Option<Self>) -> Dat {
+		Dat::Opt(Box::new(anchor.as_ref().map(|a| a.to_dat())))
+	}
+
+	/// Reconstructs an optional anchor from a [`Dat`] produced by
+	/// [`Anchor::opt_to_dat`].
+	pub fn opt_from_dat(dat: &Dat)
+		-> Outcome<Option<Self>>
+	{
+		match dat {
+			Dat::Opt(boxed) => match boxed.as_ref() {
+				Some(inner)	=> Ok(Some(res!(Self::from_dat(inner)))),
+				None		=> Ok(None),
+			},
+			other => Err(err!(
+				"An optional Anchor expects Dat::Opt, got {:?}.", other;
+			Decode, Input, Mismatch)),
+		}
+	}
+}
+
+impl fmt::Display for Anchor {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(f, "{} {}", self.side, self.content)
+	}
+}
+
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -429,6 +751,109 @@ mod tests {
 	fn op_id_displays_both_parts() -> Outcome<()> {
 		let id = OpId::new(ReplicaId::new(4), 17);
 		assert_eq!(fmt!("{}", id), "r4:17");
+		Ok(())
+	}
+
+	/// A sample operation identifier, for the content identifier tests.
+	fn an_op() -> OpId {
+		OpId::new(ReplicaId::new(3), 9)
+	}
+
+	/// Content identifiers survive a [`Dat`] round trip at the boundaries of the
+	/// offset.
+	#[test]
+	fn content_id_dat_round_trip() -> Outcome<()> {
+		for off in boundary_values() {
+			let cid = ContentId::new(an_op(), off);
+			assert_eq!(cid, res!(ContentId::from_dat(&cid.to_dat())));
+		}
+		Ok(())
+	}
+
+	/// Content ranges survive a [`Dat`] round trip, and a malformed one is
+	/// refused.
+	#[test]
+	fn content_range_dat_round_trip() -> Outcome<()> {
+		for (from, to) in [(0u64, 0u64), (0, 1), (7, 9), (0, u64::MAX)] {
+			let r = res!(ContentRange::new(an_op(), from, to));
+			assert_eq!(r, res!(ContentRange::from_dat(&r.to_dat())));
+		}
+		assert!(ContentRange::from_dat(&Dat::U64(1)).is_err());
+		assert!(ContentRange::from_dat(&Dat::List(vec![
+			an_op().to_dat(),
+			Dat::U64(5),
+		])).is_err());
+		// A range whose end precedes its start is refused on the way back in.
+		assert!(ContentRange::from_dat(&Dat::List(vec![
+			an_op().to_dat(),
+			Dat::U64(9),
+			Dat::U64(2),
+		])).is_err());
+		Ok(())
+	}
+
+	/// A reversed range is refused, and an empty one is not.
+	#[test]
+	fn content_range_refuses_only_reversal() -> Outcome<()> {
+		assert!(ContentRange::new(an_op(), 5, 4).is_err());
+		let empty = res!(ContentRange::new(an_op(), 5, 5));
+		assert!(empty.is_empty());
+		assert_eq!(empty.len(), 0);
+		Ok(())
+	}
+
+	/// Containment and intersection read the half-open bounds, and neither
+	/// crosses from one creating operation to another.
+	#[test]
+	fn content_range_arithmetic_is_half_open() -> Outcome<()> {
+		let op = an_op();
+		let other = OpId::new(ReplicaId::new(4), 1);
+		let r = res!(ContentRange::new(op, 10, 20));
+		assert!(!r.contains(&ContentId::new(op, 9)));
+		assert!(r.contains(&ContentId::new(op, 10)));
+		assert!(r.contains(&ContentId::new(op, 19)));
+		assert!(!r.contains(&ContentId::new(op, 20)), "the end is exclusive");
+		assert!(!r.contains(&ContentId::new(other, 15)),
+			"a byte of another atom is never in this range");
+		assert!(r.intersects(&res!(ContentRange::new(op, 15, 25))));
+		assert!(!r.intersects(&res!(ContentRange::new(op, 20, 30))),
+			"abutting ranges do not intersect");
+		assert!(!r.intersects(&res!(ContentRange::new(other, 10, 20))));
+		assert_eq!(
+			r.intersection(&res!(ContentRange::new(op, 15, 25))),
+			Some(res!(ContentRange::new(op, 15, 20))),
+		);
+		assert_eq!(r.intersection(&res!(ContentRange::new(op, 30, 40))), None);
+		Ok(())
+	}
+
+	/// Anchors, present and absent, survive a [`Dat`] round trip, and a side is
+	/// not invented from an unknown code.
+	#[test]
+	fn anchor_dat_round_trip() -> Outcome<()> {
+		let cid = ContentId::new(an_op(), 4);
+		for a in [Anchor::after(cid), Anchor::before(cid)] {
+			assert_eq!(a, res!(Anchor::from_dat(&a.to_dat())));
+			let opt = Some(a);
+			assert_eq!(opt, res!(Anchor::opt_from_dat(&Anchor::opt_to_dat(&opt))));
+		}
+		let none: Option<Anchor> = None;
+		assert_eq!(none, res!(Anchor::opt_from_dat(&Anchor::opt_to_dat(&none))));
+		assert!(Anchor::from_dat(&Dat::List(vec![
+			cid.to_dat(),
+			Dat::U8(7),
+		])).is_err());
+		assert!(Anchor::opt_from_dat(&Dat::U8(0)).is_err());
+		Ok(())
+	}
+
+	/// The display forms read as the design note writes them.
+	#[test]
+	fn content_names_display_readably() -> Outcome<()> {
+		let cid = ContentId::new(an_op(), 4);
+		assert_eq!(fmt!("{}", cid), "r3:9+4");
+		assert_eq!(fmt!("{}", res!(ContentRange::new(an_op(), 4, 7))), "r3:9+4..7");
+		assert_eq!(fmt!("{}", Anchor::after(cid)), "after r3:9+4");
 		Ok(())
 	}
 }
