@@ -29,6 +29,11 @@
 //! - Multi-part content support
 //! - Response code handling
 //!
+//! ## SSDP Discovery
+//! - The three UPnP discovery messages: search, answer and announcement
+//! - Parsing forgiving enough for the devices actually on a network
+//! - A per-interface multicast responder for 239.255.255.250:1900
+//!
 //! ## DNS and Addressing
 //! - FQDN (Fully Qualified Domain Name) validation
 //! - Email address parsing and validation
@@ -97,6 +102,7 @@ pub mod llm;
 pub mod mail;
 pub mod media;
 pub mod smtp;
+pub mod ssdp;
 pub mod time;
 pub mod tls;
 pub mod ws;
