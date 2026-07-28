@@ -312,8 +312,11 @@ impl FileState {
     )
         -> Outcome<()>
     {
-        match self.dmap.insert(dloc.start, DataState::Old) {
-            Some(DataState::Cur) => (),
+        // Look the entry up before writing to it: a failed flagging must leave the record
+        // map exactly as it was, otherwise a missing entry is replaced by a spurious old
+        // one that the old-record counters below never see, and the two disagree forever.
+        match self.dmap.get_mut(&dloc.start) {
+            Some(dstat @ DataState::Cur) => *dstat = DataState::Old,
             Some(DataState::Old) => {
                 return Err(err!(
                     "{:?} has already been marked as old.", dloc;
@@ -473,19 +476,28 @@ impl FileStateMap {
         self.map.insert(fnum, fs);
     }
 
-    /// Registers a new live file with the given initial data and index sizes.
+    /// Marks the given file as the live file, creating its state with the given initial
+    /// sizes if the file is new to this shard.
+    ///
+    /// A file already known to the shard keeps its record map and its accounting: replacing
+    /// the state of a file that already holds records would discard the record start
+    /// positions, after which no record in that file could be flagged old and its garbage
+    /// would never be reclaimed.
     pub fn new_live_file(
         &mut self,
         num:        FileNum,
         dat_size:   u64,
         ind_size:   u64,
     ) {
-        self.new_file_state(num, FileState {
-            dat_size:   dat_size as usize,
-            ind_size:   ind_size as usize,
-            live:       true,
-            ..Default::default()
-        });
+        match self.map.get_mut(&num) {
+            Some(fstat) => fstat.set_live(true),
+            None => self.new_file_state(num, FileState {
+                dat_size:   dat_size as usize,
+                ind_size:   ind_size as usize,
+                live:       true,
+                ..Default::default()
+            }),
+        }
     }
 
     /// Records a newly written record into the appropriate file's state,

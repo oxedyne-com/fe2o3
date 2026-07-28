@@ -31,7 +31,6 @@ fn run_tests() -> Outcome<()> {
 
     let filter = "all";
     res!(rollover::test_rollover(filter));
-    res!(rollover::test_rollover(filter));
     res!(basic::test_basic(filter));
     res!(dal::test_docs(filter));
     res!(scan::test_scan(filter));
