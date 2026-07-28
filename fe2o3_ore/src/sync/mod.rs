@@ -36,9 +36,10 @@
 //!   repository that syncs often.
 //!
 //! A sketch is sized from an estimate, and an estimate can be wrong. When the
-//! peeling decoder stalls the difference is not half taken: the outcome says so,
-//! and the walk answers instead, from the frontier the sketch message carried
-//! for exactly that purpose.
+//! peeling decoder stalls the difference is not half taken: the outcome says so
+//! -- [`Step::FellBack`] -- and the walk answers instead, from the frontier the
+//! sketch message carried for exactly that purpose. Nothing is guessed and no
+//! round trip is lost.
 //!
 //! # Layout
 //!
@@ -48,15 +49,27 @@
 //!   checks that hold at both ends.
 //! - [`sketch`] is the invertible Bloom lookup table over operation names: how a
 //!   name is keyed, how the table is sized, and what a decode yields.
+//! - [`session`] is the driver: feed it a message, take the messages it hands
+//!   back, and read the outcome.
 
 pub mod msg;
+pub mod session;
 pub mod sketch;
 pub mod walk;
+
+#[cfg(test)]
+mod tests;
 
 pub use msg::{
 	Message,
 	MAGIC,
 	VERSION,
+};
+pub use session::{
+	Mode,
+	Session,
+	Step,
+	Turn,
 };
 pub use sketch::{
 	Diff,
