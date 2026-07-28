@@ -36,7 +36,7 @@ pub fn round_to_sf(n: f64, sf: u8) -> f64 {
     let mut mag = n.abs().log10().floor() as i32;
     // A logarithm is not exact, so the place is checked against the value it is
     // meant to describe and nudged if it names the wrong decade.
-    let lead = shift_dec(n.abs(), -mag);
+    let lead = mul_pow10(n.abs(), -mag);
     if lead >= 10.0 {
         mag += 1;
     } else if lead < 1.0 {
@@ -44,7 +44,7 @@ pub fn round_to_sf(n: f64, sf: u8) -> f64 {
     }
     // Places the decimal point moves right to leave sf digits before it.
     let shift = (sf as i32) - 1 - mag;
-    let scaled = shift_dec(n, shift);
+    let scaled = mul_pow10(n, shift);
     if !scaled.is_finite() {
         return n;
     }
@@ -55,20 +55,26 @@ pub fn round_to_sf(n: f64, sf: u8) -> f64 {
     if shift.abs() > 22 && (scaled - rnd).abs() <= scaled.abs() * 16.0 * f64::EPSILON {
         return n;
     }
-    let out = shift_dec(rnd, -shift);
+    let out = mul_pow10(rnd, -shift);
     if out.is_finite() { out } else { n }
 }
 
-/// Multiplies by ten raised to `exp`, always forming a positive power of ten so
-/// that the factor is exact over the range where it can be, and splitting the
-/// factor in two when a single power would overflow.
-fn shift_dec(n: f64, exp: i32) -> f64 {
+/// Multiplies a number by ten raised to `exp`.
+///
+/// The factor is always formed as a positive power of ten and then multiplied
+/// or divided by, so it is exact wherever a power of ten is itself exactly
+/// representable, which is up to the twenty-second, and within a unit in the
+/// last place beyond that. The factor is split in two when a single power
+/// would overflow, so a small number can be scaled up by more than the type's
+/// own exponent range without passing through infinity on the way. A plain
+/// `n * 10f64.powi(exp)` does neither.
+pub fn mul_pow10(n: f64, exp: i32) -> f64 {
     if exp.abs() <= 300 {
         let p = 10.0f64.powi(exp.abs());
         if exp >= 0 { n * p } else { n / p }
     } else {
         let half = exp / 2;
-        shift_dec(shift_dec(n, half), exp - half)
+        mul_pow10(mul_pow10(n, half), exp - half)
     }
 }
 
@@ -342,6 +348,54 @@ mod round_to_sf_tests {
             let got = round_to_sf(v, 3);
             let rel = ((got - want) / want).abs();
             assert!(rel < 1.0e-15, "1.2345e{} gave {:e}, wanted {:e}", exp, got, want);
+        }
+    }
+}
+
+#[cfg(test)]
+mod mul_pow10_tests {
+    use super::*;
+
+    /// A power of ten up to the twenty-second is exactly representable, so
+    /// scaling one by it must give the literal back bit for bit.
+    #[test]
+    fn test_mul_pow10_exact_range_01() {
+        for exp in -22i32..=22 {
+            let want = match format!("1e{}", exp).parse::<f64>() {
+                Ok(v)   => v,
+                Err(_)  => continue,
+            };
+            assert_eq!(mul_pow10(1.0, exp), want, "10^{}", exp);
+            assert_eq!(mul_pow10(-1.0, exp), -want, "-10^{}", exp);
+        }
+        assert_eq!(mul_pow10(1.234, 0), 1.234);
+    }
+
+    /// The factor is split where a single power of ten would overflow, so a
+    /// small number can be scaled up by more than the type's own exponent
+    /// range without passing through infinity on the way. A plain
+    /// `n * 10f64.powi(320)` gives infinity here.
+    #[test]
+    fn test_mul_pow10_beyond_a_single_power_01() {
+        assert_eq!(1.0e-300 * 10.0f64.powi(320), f64::INFINITY);
+        let got = mul_pow10(1.0e-300, 320);
+        assert!(((got - 1.0e20) / 1.0e20).abs() < 1.0e-15, "got {:e}", got);
+        let got = mul_pow10(1.0e300, -320);
+        assert!(((got - 1.0e-20) / 1.0e-20).abs() < 1.0e-15, "got {:e}", got);
+    }
+
+    /// Scaling up and back down again returns the value it started from, bit
+    /// for bit while the power of ten is exact and to within a unit in the
+    /// last place beyond that.
+    #[test]
+    fn test_mul_pow10_round_trip_01() {
+        let v = 1.234567;
+        for exp in -22i32..=22 {
+            assert_eq!(mul_pow10(mul_pow10(v, exp), -exp), v, "10^{}", exp);
+        }
+        for exp in -300i32..=300 {
+            let got = mul_pow10(mul_pow10(v, exp), -exp);
+            assert!(((got - v) / v).abs() < 4.0 * f64::EPSILON, "10^{} gave {}", exp, got);
         }
     }
 }

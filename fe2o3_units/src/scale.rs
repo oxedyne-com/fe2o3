@@ -225,43 +225,51 @@ impl Scale {
         }
     }
 
-    pub fn dec_exp_lookup(&self, exp: i32) -> Self {
-        match self.basis() {
+    /// Returns the scale of this basis whose decimal exponent is `exp`, and
+    /// errors where the prefix table has no entry for it. The decimal table
+    /// runs from atto to exa and the binary one from one to exbi, so an
+    /// exponent outside that span, or one that is not a prefix's, has no name.
+    pub fn dec_exp_lookup(&self, exp: i32) -> Outcome<Self> {
+        Ok(match self.basis() {
             ScaleBasis::Decimal => {
                 match exp {
                     -18 => Self::Atto,
-                    -15 => Self::Femto, 
-                    -12 => Self::Pico, 
-                    -9  => Self::Nano, 
+                    -15 => Self::Femto,
+                    -12 => Self::Pico,
+                    -9  => Self::Nano,
                     -6  => Self::Micro,
                     -3  => Self::Milli,
                     -2  => Self::Centi,
-                    -1  => Self::Deci, 
-                    0   => Self::One(ScaleBasis::Decimal), 
-                    1   => Self::Deca, 
+                    -1  => Self::Deci,
+                    0   => Self::One(ScaleBasis::Decimal),
+                    1   => Self::Deca,
                     2   => Self::Hecto,
-                    3   => Self::Kilo, 
-                    6   => Self::Mega, 
-                    9   => Self::Giga, 
-                    12  => Self::Tera, 
-                    15  => Self::Peta, 
-                    18  => Self::Exa, 
-                    _ => unimplemented!("{:?} decimal exponent lookup value {}", self, exp),
+                    3   => Self::Kilo,
+                    6   => Self::Mega,
+                    9   => Self::Giga,
+                    12  => Self::Tera,
+                    15  => Self::Peta,
+                    18  => Self::Exa,
+                    _ => return Err(err!(
+                        "No decimal prefix has the exponent {}.", exp;
+                    Input, Invalid, Missing)),
                 }
             },
             ScaleBasis::Binary => {
                 match exp {
-                    0   => Self::One(ScaleBasis::Binary), 
+                    0   => Self::One(ScaleBasis::Binary),
                     3   => Self::Kibi,
                     6   => Self::Mebi,
                     9   => Self::Gibi,
                     12  => Self::Tebi,
                     15  => Self::Pebi,
                     18  => Self::Exbi,
-                    _ => unimplemented!("{:?} decimal exponent lookup value {}", self, exp),
+                    _ => return Err(err!(
+                        "No binary prefix has the exponent {}.", exp;
+                    Input, Invalid, Missing)),
                 }
             },
-        }
+        })
     }
 
     pub fn prefix(&self) -> &'static str {
@@ -316,8 +324,24 @@ impl Mag {
             val:    val,
             scale:  scale,   
             sf:     sf,
-            zero:   if val.abs() < std::f64::MIN_POSITIVE { true } else { false },
+            zero:   val.abs() < f64::MIN_POSITIVE,
         })
+    }
+
+    /// Builds a magnitude that inherits this one's significant figure count.
+    ///
+    /// The count came through [`Mag::new`] and so is already known to be
+    /// greater than zero, which is the only thing that constructor checks.
+    /// Deriving rather than reconstructing is therefore how a method that
+    /// returns a magnitude rather than an [`Outcome`] stays free of a
+    /// panicking unwrap.
+    fn derived(&self, val: f64, scale: Scale) -> Self {
+        Self {
+            val,
+            scale,
+            sf:     self.sf,
+            zero:   val.abs() < f64::MIN_POSITIVE,
+        }
     }
 
     // decimal
@@ -360,43 +384,53 @@ impl Mag {
 
     /// Adjust value to make the scale `Scale::One`.
     pub fn unitise(&self) -> Self {
-        Self::new(
+        self.derived(
             if self.zero {
                 0.0f64
             } else {
                 self.val * (10u64 as f64).powf(self.scale.dec_exp())
             },
             Scale::One(self.basis()),
-            self.sf,
-        ).unwrap()
+        )
     }
 
     /// Return a value in the range (-10, -1) or (1, 10) rounded to the required number of
     /// significant figures, and the decimal exponent.
+    ///
+    /// A logarithm has nothing to say about a negative number, so the exponent
+    /// comes from the magnitude and the sign is carried by the value. A zero,
+    /// or a value that is not finite, has no exponent and is returned with one
+    /// of zero.
     pub fn normalise(&self) -> (f64, i32) {
-        let exp = self.val.log10().floor() as i32;
-        let mut val = self.val/(10.0f64.powi(exp));
-        val = (val * (10.0f64.powi((self.sf - 1) as i32))).round();
-        val = val / (10.0f64.powi((self.sf - 1) as i32));
-        (val, exp)
+        if self.zero || !self.val.is_finite() {
+            return (self.val, 0);
+        }
+        let exp = self.val.abs().log10().floor() as i32;
+        let sig = float::round_to_sf(float::mul_pow10(self.val, -exp), self.sf);
+        (sig, exp)
     }
 
     /// Implements engineering notation (i.e that is, use of standard decimal exponent), and rounds
     /// the value according to the required number of significant figures.
+    ///
+    /// The prefix is chosen from the magnitude, so a negative value takes the
+    /// same prefix as its positive counterpart. A magnitude the prefix table
+    /// cannot reach, below atto or above exa, is returned unscaled rather than
+    /// mislabelled.
     pub fn humanise(&self) -> Self {
         let n = self.unitise();
         if self.zero {
             return n;
         }
-        let expbase = n.val.log10() / self.basis().log_factor();
+        let expbase = n.val.abs().log10() / self.basis().log_factor();
         let engexp = (3.0 * (expbase / 3.0).floor()) as i32;
-        let newscale = self.scale.dec_exp_lookup(engexp);
-        let newval = n.val / (self.basis().base().powi(engexp));
-        Self::new(
-            float::round_to_sf(newval, self.sf),
-            newscale,
-            self.sf,
-        ).unwrap()
+        match self.scale.dec_exp_lookup(engexp) {
+            Ok(newscale) => {
+                let newval = n.val / (self.basis().base().powi(engexp));
+                n.derived(float::round_to_sf(newval, self.sf), newscale)
+            },
+            Err(_) => n,
+        }
     }
 
 }
