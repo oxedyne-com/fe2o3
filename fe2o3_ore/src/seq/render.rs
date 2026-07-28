@@ -110,25 +110,29 @@ pub enum Flag {
 		/// The content they have in common.
 		region:	ContentRange,
 	},
-	/// A cycle demotion carried a placement across a file boundary: the content
-	/// landed in one file while the content it was anchored to lives in another.
+	/// Breaking a cycle carried content across a file boundary: the placement was
+	/// demoted, and what it holds was written into one file and now renders in
+	/// another.
 	///
 	/// In one file a demoted origin lands at a stale position, which is bad
-	/// enough. Across two it lands in the wrong *file*, and where the cycle runs
-	/// between two files the file the content left is emptied. A reader who sees
-	/// a file go from four bytes to none is owed this in those terms, which is why
-	/// the flag names both files rather than only saying that a cycle was broken.
+	/// enough and is what [`Flag::Demoted`] says. Across two it lands in another
+	/// *file*, and where the cycle runs between two files the file the content
+	/// left is emptied into the file it went to; at length three, two files are.
+	/// A reader who sees a file go from four bytes to none will not read that as a
+	/// stale anchor, so this names both files and says so in those terms.
+	///
+	/// The outcome is deterministic and loses nothing, and it is not a rule
+	/// anybody chose: a rule that confines a cross-file cycle instead of
+	/// collapsing it is design work owed, and until it exists this flag is what
+	/// stands between the reader and a file that emptied itself.
 	CrossedFile {
 		/// The operation whose origin was demoted.
 		op:		OpId,
 		/// Offset within that operation's placement.
 		sub:	u64,
-		/// Which of the two origins.
-		origin:	Origin,
-		/// The file the anchored content lives in, which is where the placement
-		/// would have gone.
+		/// The file the content it holds was written into.
 		from:	OpId,
-		/// The file the placement landed in instead.
+		/// The file it renders in instead.
 		to:		OpId,
 	},
 	/// A move landed content in a file that has been deleted, so the content is
@@ -224,11 +228,10 @@ impl Flag {
 				Dat::List(ops.iter().map(|id| id.to_dat()).collect()),
 				region.to_dat(),
 			]),
-			Self::CrossedFile { op, sub, origin, from, to } => Dat::List(vec![
+			Self::CrossedFile { op, sub, from, to } => Dat::List(vec![
 				Dat::U8(CODE_CROSSED_FILE),
 				op.to_dat(),
 				Dat::U64(*sub),
-				Dat::U8(origin.code()),
 				from.to_dat(),
 				to.to_dat(),
 			]),
@@ -300,13 +303,12 @@ impl Flag {
 				})
 			},
 			CODE_CROSSED_FILE => {
-				res!(flag_len(v, 6, "CrossedFile"));
+				res!(flag_len(v, 5, "CrossedFile"));
 				Ok(Self::CrossedFile {
 					op:		res!(OpId::from_dat(&v[1])),
 					sub:	res!(flag_u64(&v[2], "CrossedFile", "offset")),
-					origin:	res!(flag_origin(&v[3], "CrossedFile")),
-					from:	res!(OpId::from_dat(&v[4])),
-					to:		res!(OpId::from_dat(&v[5])),
+					from:	res!(OpId::from_dat(&v[3])),
+					to:		res!(OpId::from_dat(&v[4])),
 				})
 			},
 			CODE_MOVED_INTO_DELETED => {

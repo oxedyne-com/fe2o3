@@ -97,6 +97,7 @@ mod file_tests;
 mod tests;
 
 use crate::id::{
+	ContentId,
 	ContentRange,
 	OpId,
 };
@@ -118,10 +119,7 @@ use crate::seq::render::{
 	Run,
 	Stats,
 };
-use crate::seq::slot::{
-	Origin,
-	Slots,
-};
+use crate::seq::slot::Slots;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_data::interval::IntervalMap;
@@ -382,9 +380,7 @@ impl Sequence {
 		let mut flags: Vec<Flag> = Vec::new();
 		for (op, sub, origin) in &order.demoted {
 			flags.push(Flag::Demoted { op: *op, sub: *sub, origin: *origin });
-			if let Some(f) = Self::crossed_file(
-				&slots, &claims, &walk.owner, *op, *sub, *origin)
-			{
+			if let Some(f) = Self::crossed_file(&slots, &claims, &walk.owner, *op, *sub) {
 				flags.push(f);
 			}
 		}
@@ -509,39 +505,34 @@ impl Sequence {
 		Ok(files)
 	}
 
-	/// Raises a cross-file flag where a cycle demotion put a placement in a
-	/// different file from the one its anchor content lives in.
+	/// Raises a cross-file flag where breaking a cycle left a placement holding
+	/// content that was written into one file and renders in another.
+	///
+	/// The comparison is between where the content was written and where the
+	/// demoted placement put it, not between the two ends of the demoted origin:
+	/// once a two-file cycle has collapsed, both ends are in the same file, and
+	/// asking about them would report nothing while a file sat empty.
 	fn crossed_file(
 		slots:	&Slots,
 		claims:	&Claims,
 		owner:	&[Option<OpId>],
 		op:		OpId,
 		sub:	u64,
-		origin:	Origin,
 	)
 		-> Option<Flag>
 	{
-		let i = match slots.find(&op, sub) {
-			Some(i)	=> i,
-			None	=> return None,
-		};
-		let slot = match slots.get(i) {
-			Ok(s)	=> s,
-			Err(_)	=> return None,
-		};
-		let anchor = match origin {
-			Origin::Left	=> slot.left,
-			Origin::Right	=> slot.right,
-		}?;
-		// Where the anchored content lives now, which is where the placement
-		// would have gone had the cycle not forced it elsewhere.
-		let target = slots.owner_slot(&anchor.content, claims, false).ok()?;
-		let from = (*owner.get(target)?)?;
+		let i = slots.find(&op, sub)?;
+		let slot = slots.get(i).ok()?;
+		// The slot placed by the splice that created this content, which is where
+		// the content was written and is where it would still be but for a move.
+		let born = ContentId::new(slot.claim.op(), slot.claim.from());
+		let home = slots.owner_slot(&born, claims, true).ok()?;
+		let from = (*owner.get(home)?)?;
 		let to = (*owner.get(i)?)?;
 		if from == to {
 			return None;
 		}
-		Some(Flag::CrossedFile { op, sub, origin, from, to })
+		Some(Flag::CrossedFile { op, sub, from, to })
 	}
 
 	/// Returns the files a flag concerns, so that each file keeps its own.

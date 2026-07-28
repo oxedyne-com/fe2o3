@@ -473,7 +473,6 @@ mod tests {
 			Flag::CrossedFile {
 				op:		oid(5, 1),
 				sub:	7,
-				origin:	Origin::Left,
 				from:	oid(1, 1),
 				to:		oid(2, 1),
 			},
@@ -753,7 +752,6 @@ mod tests {
 						3 => Flag::CrossedFile {
 							op,
 							sub:	(next() % 100) as u64,
-							origin:	if next() % 2 == 0 { Origin::Left } else { Origin::Right },
 							from:	oid((next() % 5) as u64, (next() % 50) as u64),
 							to:		oid((next() % 5) as u64, (next() % 50) as u64),
 						},
