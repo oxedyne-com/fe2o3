@@ -99,6 +99,42 @@ impl<V> IntervalMap<V> {
 	{
 		self.map.iter().map(|(start, (end, val))| (*start..*end, val))
 	}
+
+	/// Iterates over the intervals overlapping `range`, in ascending order of
+	/// start.
+	///
+	/// Intervals are yielded as they are stored, so the first and last may reach
+	/// beyond `range`; a caller wanting only the covered ground clips them. An
+	/// empty or reversed `range` overlaps nothing and yields nothing.
+	///
+	/// # Examples
+	///
+	/// ```
+	/// use oxedyne_fe2o3_data::interval::IntervalMap;
+	///
+	/// let mut map: IntervalMap<char> = IntervalMap::new();
+	/// assert!(map.insert(0..10, 'a').is_ok());
+	/// assert!(map.insert(20..30, 'b').is_ok());
+	///
+	/// let hit: Vec<char> = map.overlapping(5..25).map(|(_, v)| *v).collect();
+	/// assert_eq!(hit, vec!['a', 'b']);
+	/// assert_eq!(map.overlapping(10..20).count(), 0);
+	/// ```
+	pub fn overlapping(&self, range: Range<u64>)
+		-> impl Iterator<Item = (Range<u64>, &V)>
+	{
+		let (start, end) = (range.start, range.end);
+		let live = end > start;
+		// At most one interval begins before the range and reaches into it; the
+		// rest begin inside it.
+		let head = match self.map.range(..start).next_back() {
+			Some((s, (e, val))) if live && *e > start	=> Some((*s..*e, val)),
+			_						=> None,
+		};
+		let hi = if live { end } else { start };
+		head.into_iter()
+			.chain(self.map.range(start..hi).map(|(s, (e, val))| (*s..*e, val)))
+	}
 }
 
 impl<V: Clone + PartialEq> IntervalMap<V> {
@@ -524,6 +560,36 @@ mod tests {
 				prev = Some((r.start, r.end, *v));
 			}
 		}
+	}
+
+	#[test]
+	fn test_overlapping_yields_only_what_it_touches_00() {
+		let mut map = IntervalMap::new();
+		assert!(map.insert(0..10, 'a').is_ok());
+		assert!(map.insert(20..30, 'b').is_ok());
+		assert!(map.insert(40..50, 'c').is_ok());
+		let hit = |r: Range<u64>| -> Vec<(u64, u64, char)> {
+			map.overlapping(r).map(|(i, v)| (i.start, i.end, *v)).collect()
+		};
+		assert_eq!(hit(0..50), vec![(0, 10, 'a'), (20, 30, 'b'), (40, 50, 'c')]);
+		assert_eq!(hit(10..20), vec![],
+			"the gap between two intervals overlaps neither");
+		assert_eq!(hit(5..25), vec![(0, 10, 'a'), (20, 30, 'b')],
+			"an interval reaching into the range from the left is included whole");
+		assert_eq!(hit(9..10), vec![(0, 10, 'a')]);
+		assert_eq!(hit(10..11), vec![], "the end of an interval is exclusive");
+		assert_eq!(hit(29..31), vec![(20, 30, 'b')]);
+		assert_eq!(hit(30..31), vec![]);
+	}
+
+	#[test]
+	fn test_overlapping_refuses_to_be_confused_by_an_empty_range_00() {
+		let mut map = IntervalMap::new();
+		assert!(map.insert(0..100, 'a').is_ok());
+		assert_eq!(map.overlapping(50..50).count(), 0,
+			"a zero-width range covers no ground");
+		assert_eq!(map.overlapping(60..50).count(), 0,
+			"a reversed range covers no ground");
 	}
 
 	#[test]
