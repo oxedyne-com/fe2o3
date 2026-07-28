@@ -44,7 +44,10 @@ use crate::{
             Value,
         },
     },
-    file::zdir::ZoneDir,
+    file::{
+        state::FileStateMap,
+        zdir::ZoneDir,
+    },
 };
 
 use oxedyne_fe2o3_jdat::{
@@ -1304,9 +1307,13 @@ impl<
         }
     }
 
-    /// Dump all zone file states to the log file.
-    pub fn dump_file_states(&self, wait: Wait) -> Outcome<()> {
-        // Gather.
+    /// Gathers the file state map held by every file bot in every zone, keyed by worker index.
+    pub fn collect_file_states(
+        &self,
+        wait: Wait,
+    )
+        -> Outcome<BTreeMap<WorkerInd, FileStateMap>>
+    {
         let resp = self.responder();
         if let Err(e) = self.chans().sup().send(
             OzoneMsg::DumpFileStatesRequest(resp.clone())
@@ -1331,6 +1338,13 @@ impl<
                     Channel)),
             }
         }
+        Ok(sorted)
+    }
+
+    /// Dump all zone file states to the log file.
+    pub fn dump_file_states(&self, wait: Wait) -> Outcome<()> {
+        // Gather.
+        let sorted = res!(self.collect_file_states(wait));
         // Display.
         for (wind, fstates) in sorted {
             info!(sync_log::stream(), "{} file states dump:", wind); 
@@ -1383,6 +1397,26 @@ impl<
         let self_id = self.ozid().clone();
         let n = res!(self.chans().send_to_all(OzoneMsg::Ping(self_id, resp.clone())));
         resp.recv_number(n, wait)
+    }
+
+    /// Pings every bot and returns the total number of errors they have logged, together
+    /// with the number that reported.
+    pub fn bot_error_count(&self, wait: Wait) -> Outcome<(usize, usize)> {
+        let (_, msgs) = res!(self.ping_bots(wait));
+        let mut nbots: usize    = 0;
+        let mut errs:  usize    = 0;
+        for msg in msgs {
+            match msg {
+                OzoneMsg::Pong(_ozid, n) => {
+                    nbots += 1;
+                    errs = errs.saturating_add(n);
+                },
+                msg => return Err(err!(
+                    "{}: Unexpected response to bot ping: {:?}", self.ozid(), msg;
+                    Channel)),
+            }
+        }
+        Ok((errs, nbots))
     }
 
     /// Requests a directory listing from every zone and prints a formatted

@@ -490,7 +490,6 @@ impl<
         let nf = self.cfg().num_fbots_per_zone();
         let mut dir_size: usize = 0;
         let mut max_data_fnum: u32 = 0;
-        let mut max_data_size: usize = 0;
         // Track incomplete data files for WriterBot initialization.
         let mut incomplete_files = Vec::new();
     
@@ -509,8 +508,26 @@ impl<
             let path = entry.path();
             if path.is_file() {
                 trace!(sync_log::stream(), "{}: Processing file {:?}", self.ozid(), path);
+                // 3.1 Remove any abandoned garbage collection transcription.  The data file it
+                //     was copied from is intact, so the leftover is of no use, and leaving it
+                //     in place would fail the survey for the whole zone.
+                if ZoneDir::is_gc_temp_file(&path) {
+                    warn!(sync_log::stream(),
+                        "{}: Removing {:?}, an abandoned garbage collection temporary.",
+                        self.ozid(), path);
+                    res!(fs::remove_file(&path));
+                    continue;
+                }
                 // 4. We found a file, now extract the file number and type from the file name.
-                let (fnum, ftyp) = res!(ZoneDir::ozone_file_number_and_type(&path));
+                let (fnum, ftyp) = match ZoneDir::ozone_file_number_and_type(&path) {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        warn!(sync_log::stream(),
+                            "{}: Ignoring {:?}, which is not an ozone data or index file, \
+                            caused by {}.", self.ozid(), path, e);
+                        continue;
+                    },
+                };
                 // 5. Get the file size.
                 let file = res!(std::fs::OpenOptions::new()
                     .read(true)
@@ -524,7 +541,6 @@ impl<
                 if ftyp == FileType::Data {
                     if fnum > max_data_fnum {
                         max_data_fnum = fnum;
-                        max_data_size = flen;
                     }
                     // Check if this is an incomplete data file.
                     let ratio = flen as f64 / self.cfg().data_file_max_bytes as f64;
@@ -574,30 +590,30 @@ impl<
     
         // Sort incomplete files by number descending.
         incomplete_files.sort_by(|a, b| b.0.cmp(&a.0));
-    
+
+        // 8. Seed the live file number counter for the zone with the highest file number
+        //    found on disk.  The function ozone_file_number_and_type ensures that
+        //    max_data_fnum does not exceed u32::MAX.  This must happen before the writer
+        //    bots are given their live files, because init_writer_live_files advances the
+        //    counter past every new file number it creates.  The counter must never be left
+        //    at or below a file number that is already in use: handing an in-use number back
+        //    out as the next live file makes the receiving fbot replace that file's
+        //    FileState, silently discarding every record entry it holds, after which no
+        //    record in that file can ever be flagged old and its garbage is unreclaimable.
+        self.fnum = max_data_fnum;
+
         // Initialise WriterBot live files.
         let result = self.init_writer_live_files(&incomplete_files);
         self.result(&result);
-    
-        // 8. Set the live file number for the zone.  The function ozone_file_number_and_type
-        //    ensures that max_data_filenum does not exceed u32::MAX.  The
-        //    zone::Zone::init_live method increments the first live file in the zone by one,
-        //    so to avoid restarts simply creating additional empty files, wind the counter
-        //    back one when necessary.
-        let max_data_file_size_ratio =
-            (max_data_size as f64) / (self.cfg().data_file_max_bytes as f64);
-        if max_data_fnum > 0
-            && max_data_file_size_ratio < constant::LIVE_FILE_INIT_SIZE_RATIO_THRESHOLD {
-            max_data_fnum = max_data_fnum - 1;
-        }
-        self.fnum = max_data_fnum;
+
         // 9. Set the directory size for the zone.
         self.size = dir_size;
-    
+
         Ok(shards)
     }
 
-    /// Assigns live files to WriterBots using discovered incomplete files.
+    /// Assigns live files to WriterBots, re-using discovered incomplete files before creating
+    /// new ones, and leaves the zone live file counter above every number assigned.
     fn init_writer_live_files(
         &mut self,
         incomplete_files: &[(FileNum, usize)],
@@ -612,7 +628,9 @@ impl<
         let resp = Responder::new(Some(self.ozid()));
         for i in 0..n_w {
             let fnum = if i < incomplete_files.len() {
-                // Use existing incomplete file.
+                // Use existing incomplete file.  Its number is at or below the counter,
+                // which was seeded with the highest file number on disk, so the counter
+                // needs no adjustment.
                 incomplete_files[i].0
             } else {
                 // There are not enough existing incomplete files to assign to wbots, create new
@@ -620,7 +638,7 @@ impl<
                 self.fnum += 1;
                 self.fnum
             };
-    
+
             let wbot = res!(wbots.get_bot(i));
             res!(wbot.send(OzoneMsg::NewLiveFile(Some(fnum), resp.clone())));
         }

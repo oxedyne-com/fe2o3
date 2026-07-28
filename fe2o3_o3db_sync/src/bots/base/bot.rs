@@ -143,7 +143,13 @@ pub trait OzoneBot<
                 trace!(sync_log::stream(), "{}: Channel update received.", self.ozid());
             },
             OzoneMsg::Ping(id, resp) => {
-                if let Err(e) = resp.send(OzoneMsg::Pong(self.ozid().clone())) {
+                // A ping reports the bot's error tally as well as its liveness, so a
+                // caller can tell a healthy bot from one that is running but failing.
+                let errs = match self.error_count() {
+                    Ok(n) => n,
+                    Err(_) => usize::MAX,
+                };
+                if let Err(e) = resp.send(OzoneMsg::Pong(self.ozid().clone(), errs)) {
                     self.err_cannot_send(err!(e,
                         "Attempt to return a ping from {:?} failed", id;
                         IO, Channel));

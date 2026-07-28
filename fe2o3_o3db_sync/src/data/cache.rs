@@ -216,7 +216,11 @@ impl<
     }
 
     /// Insert key, value and location into the cache.
-    /// Returns the old location, if the key was present.
+    ///
+    /// Returns the location of whichever copy of the key is now superseded, for the caller
+    /// to schedule for garbage collection, or `None` when nothing was superseded.  That is
+    /// usually the copy the cache held, but when the offered copy is the older of the two
+    /// the cache keeps what it has and the offered location comes back instead.
     pub fn insert(
         &mut self,
         kbyts:  Vec<u8>,
@@ -266,13 +270,23 @@ impl<
         // 2. See if the key already exists.
         match self.map.get_mut(&kbyts) {
             Some(CacheEntry::LocatedValue(mloc, val2)) => {
-                // 2.1 Only insert if the given data is newer.
+                // 2.1 Only insert if the given data is newer.  The cache keeps the newer
+                //     copy, which makes the copy just offered the superseded one, so its
+                //     location is what goes back for flagging as old.  Returning nothing
+                //     here would leave that copy marked current in its file state forever,
+                //     and its bytes would never be reclaimable.  A copy at the location
+                //     already cached is the same record arriving twice, not a supersession,
+                //     and must be left alone.
                 if meta.time <= mloc.meta.time {
-                    warn!(sync_log::stream(), "{:?}: Attempt to insert new value at key = {:?} with timestamp = {:?}, \
-                        when existing timestamp is newer at {:?}",
-                        self.ozid.clone(), kbyts, meta.time, mloc.meta.time,
+                    if floc == *mloc.file_location() {
+                        return Ok(None);
+                    }
+                    trace!(sync_log::stream(),
+                        "{:?}: The value offered for key = {:?} at {:?} is stamped {:?}, \
+                        no newer than the cached {:?}, so the offered copy is superseded.",
+                        self.ozid.clone(), kbyts, floc, meta.time, mloc.meta.time,
                     );
-                    return Ok(None);
+                    return Ok(Some(floc));
                 }
                 // 2.2 It does, insert the new info and return the old floc.
                 let new_mloc = MetaLocation {

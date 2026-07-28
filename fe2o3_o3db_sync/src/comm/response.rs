@@ -288,7 +288,7 @@ impl<
                         Recv::Result(Err(e)) => return Err(err!(e,
                             "Could not read from responder channel.";
                             Channel, Read)),
-                        Recv::Result(Ok(OzoneMsg::Pong(ozid))) => {
+                        Recv::Result(Ok(OzoneMsg::Pong(ozid, _errs))) => {
                             ozids.insert(ozid);
                         }
                         Recv::Result(Ok(msg)) => {

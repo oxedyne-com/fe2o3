@@ -52,7 +52,6 @@ use std::{
         Read,
         Write,
     },
-    path::PathBuf,
     sync::Arc,
 };
 
@@ -621,11 +620,7 @@ impl<
 
         // 2. Create new, temporary data file for writing.
         let mut tmp_data_path = self.zdir().dir.clone();
-        let mut filename = PathBuf::from(".gc");
-        filename.set_extension(
-            ZoneDir::relative_file_path(&typ, fnum)
-        );
-        tmp_data_path.push(filename);
+        tmp_data_path.push(ZoneDir::relative_gc_temp_path(&typ, fnum));
         let mut new_start: u64 = 0;
         let old_sum = try_into!(usize, fstat.get_old_sum());
         
