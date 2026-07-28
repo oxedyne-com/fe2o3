@@ -7,14 +7,15 @@
 //!
 //! # Provisional
 //!
-//! This set is provisional, pending the sequence-structure design note. It is
-//! deliberately small: enough to express file lifecycle and byte-level edits,
-//! and no more. Variants may be added, and the wire codes below are not
-//! promised stable until that note lands.
+//! This set is provisional. It is deliberately small: enough to express file
+//! lifecycle and byte-level edits, and no more. Variants may be added, and the
+//! wire codes below are not promised stable.
 
 use crate::id::{
 	varint_decode,
 	varint_encode,
+	Anchor,
+	ContentRange,
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -35,6 +36,8 @@ pub const CODE_FILE_RENAME:	u8 = 3;
 pub const CODE_SPLICE:		u8 = 4;
 /// Wire code for [`Op::Mark`].
 pub const CODE_MARK:		u8 = 5;
+/// Wire code for [`Op::Move`].
+pub const CODE_MOVE:		u8 = 6;
 
 
 /// A single unit of history: one whole edit.
@@ -43,12 +46,13 @@ pub const CODE_MARK:		u8 = 5;
 /// enumerate everything history is able to say and the compiler can insist that
 /// every consumer handles all of it.
 ///
-/// A `Move` operation -- relocating a run of bytes within or between files
-/// while preserving its identity -- is deliberately absent. Its design is being
-/// worked separately, because a move is not a delete plus an insert: it must
-/// carry the moved run's identity so that concurrent edits landing inside the
-/// run follow it rather than being stranded. The code space and this note are
-/// reserved for it.
+/// [`Op::Move`] is why the vocabulary needs more than a splice. A move is not a
+/// delete plus an insert: it names the run it relocates by the identity of the
+/// bytes themselves, so an edit made concurrently inside that run lands in the
+/// run's new home rather than on a tombstone. Nothing in a move says where
+/// anything is -- the source is content, the destination is an anchor -- which
+/// is what lets the sequence structure in [`crate::seq`] resolve the two against
+/// each other however the two operations happen to arrive.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Op {
 	/// Brings a file into existence, empty.
@@ -86,6 +90,24 @@ pub enum Op {
 		/// The name given to this point.
 		name: String,
 	},
+	/// Relocates runs of existing content, which keep their identity, to a
+	/// position named by the content already there.
+	///
+	/// The source names bytes and not a file, because a byte's identity is
+	/// repository-wide: the same operation moves a run within one file or from
+	/// one file to another, and only `file` says which file the run lands in.
+	Move {
+		/// Path of the file the content lands in.
+		file: String,
+		/// What moves, in the order it lands in.
+		src: Vec<ContentRange>,
+		/// The gap the content lands in, on its left; `None` is the start of the
+		/// file.
+		left: Option<Anchor>,
+		/// The gap the content lands in, on its right; `None` is the end of the
+		/// file.
+		right: Option<Anchor>,
+	},
 }
 
 impl Op {
@@ -97,6 +119,7 @@ impl Op {
 			Self::FileRename { .. }	=> CODE_FILE_RENAME,
 			Self::Splice { .. }		=> CODE_SPLICE,
 			Self::Mark { .. }		=> CODE_MARK,
+			Self::Move { .. }		=> CODE_MOVE,
 		}
 	}
 
@@ -108,6 +131,7 @@ impl Op {
 			Self::FileRename { .. }	=> "FileRename",
 			Self::Splice { .. }		=> "Splice",
 			Self::Mark { .. }		=> "Mark",
+			Self::Move { .. }		=> "Move",
 		}
 	}
 
@@ -142,6 +166,13 @@ impl Op {
 			Self::Mark { name } => Dat::List(vec![
 				Dat::U8(CODE_MARK),
 				Dat::Str(name.clone()),
+			]),
+			Self::Move { file, src, left, right } => Dat::List(vec![
+				Dat::U8(CODE_MOVE),
+				Dat::Str(file.clone()),
+				Dat::List(src.iter().map(|r| r.to_dat()).collect()),
+				Anchor::opt_to_dat(left),
+				Anchor::opt_to_dat(right),
 			]),
 		}
 	}
@@ -195,6 +226,15 @@ impl Op {
 				res!(expect_len(v, 2, "Mark"));
 				Ok(Self::Mark {
 					name: res!(as_str(&v[1], "Mark name")),
+				})
+			},
+			CODE_MOVE => {
+				res!(expect_len(v, 5, "Move"));
+				Ok(Self::Move {
+					file:	res!(as_str(&v[1], "Move file")),
+					src:	res!(as_ranges(&v[2], "Move src")),
+					left:	res!(Anchor::opt_from_dat(&v[3])),
+					right:	res!(Anchor::opt_from_dat(&v[4])),
 				})
 			},
 			other => Err(err!(
@@ -321,6 +361,24 @@ fn as_u64(dat: &Dat, what: &str)
 	}
 }
 
+/// Extracts a list of content ranges, naming it if the kind is wrong.
+fn as_ranges(dat: &Dat, what: &str)
+	-> Outcome<Vec<ContentRange>>
+{
+	match dat {
+		Dat::List(v) => {
+			let mut out = Vec::with_capacity(v.len());
+			for item in v {
+				out.push(res!(ContentRange::from_dat(item)));
+			}
+			Ok(out)
+		},
+		other => Err(err!(
+			"An Op {} expects Dat::List, got {:?}.", what, other;
+		Decode, Input, Mismatch)),
+	}
+}
+
 /// Extracts a byte vector field, naming it if the kind is wrong.
 fn as_bytes(dat: &Dat, what: &str)
 	-> Outcome<Vec<u8>>
@@ -337,6 +395,22 @@ fn as_bytes(dat: &Dat, what: &str)
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	use crate::id::{
+		ContentId,
+		OpId,
+		ReplicaId,
+	};
+
+	/// A content range of the given replica's first operation.
+	fn range(replica: u64, from: u64, to: u64) -> ContentRange {
+		ContentRange { op: OpId::new(ReplicaId::new(replica), 1), from, to }
+	}
+
+	/// A content identifier of the given replica's first operation.
+	fn content(replica: u64, off: u64) -> ContentId {
+		ContentId::new(OpId::new(ReplicaId::new(replica), 1), off)
+	}
 
 	/// One of every variant, including payloads that stress the encoding.
 	fn samples() -> Vec<Op> {
@@ -371,6 +445,41 @@ mod tests {
 			// Empty strings and non-ASCII paths.
 			Op::FileCreate { path: String::new() },
 			Op::Mark { name: fmt!("release-caf\u{e9}") },
+			// A move of one run into the middle of a file.
+			Op::Move {
+				file:	fmt!("src/lib.rs"),
+				src:	vec![range(1, 0, 40)],
+				left:	Some(Anchor::after(content(2, 3))),
+				right:	Some(Anchor::before(content(2, 4))),
+			},
+			// A move to the very start of a file, of a run fragmented by the
+			// edits it has already survived.
+			Op::Move {
+				file:	fmt!("src/lib.rs"),
+				src:	vec![
+					range(1, 0, 4),
+					range(3, 7, 9),
+					range(1, 4, 40),
+				],
+				left:	None,
+				right:	Some(Anchor::before(content(1, 41))),
+			},
+			// A move to the end of a file, whose destination is bounded by
+			// nothing on the right.
+			Op::Move {
+				file:	String::new(),
+				src:	vec![range(u64::MAX, 0, u64::MAX)],
+				left:	Some(Anchor::after(content(7, u64::MAX))),
+				right:	None,
+			},
+			// A move of nothing, to nowhere in particular: the degenerate shape
+			// the codec still has to spell.
+			Op::Move {
+				file:	fmt!("empty"),
+				src:	Vec::new(),
+				left:	None,
+				right:	None,
+			},
 		]
 	}
 
@@ -478,6 +587,75 @@ mod tests {
 			Dat::U64(0),
 			Dat::Str(fmt!("not bytes")),
 		])).is_err());
+		// A Move whose source is not a list of ranges.
+		assert!(Op::from_dat(&Dat::List(vec![
+			Dat::U8(CODE_MOVE),
+			Dat::Str(fmt!("f")),
+			Dat::Str(fmt!("not ranges")),
+			Anchor::opt_to_dat(&None),
+			Anchor::opt_to_dat(&None),
+		])).is_err());
+		// A Move whose anchor is bare rather than optional.
+		assert!(Op::from_dat(&Dat::List(vec![
+			Dat::U8(CODE_MOVE),
+			Dat::Str(fmt!("f")),
+			Dat::List(vec![range(1, 0, 2).to_dat()]),
+			Anchor::after(content(1, 0)).to_dat(),
+			Anchor::opt_to_dat(&None),
+		])).is_err());
+		Ok(())
+	}
+
+	/// A move carrying many source runs keeps every one of them, in order,
+	/// through both round trips.
+	#[test]
+	fn move_keeps_its_source_runs_in_order() -> Outcome<()> {
+		let src: Vec<ContentRange> = (0..300u64)
+			.map(|i| range(i % 7 + 1, i, i + 5))
+			.collect();
+		let op = Op::Move {
+			file:	fmt!("src/seq.rs"),
+			src:	src.clone(),
+			left:	Some(Anchor::after(content(1, 9))),
+			right:	None,
+		};
+		for back in [
+			res!(Op::from_dat(&op.to_dat())),
+			res!(Op::decode_all(&res!(op.encode()))),
+		] {
+			match back {
+				Op::Move { src: got, .. } => assert_eq!(got, src),
+				other => return Err(err!(
+					"Expected a Move, got {}.", other.name(); Test, Mismatch)),
+			}
+		}
+		Ok(())
+	}
+
+	/// Both destination anchors keep their side, which decides whether an
+	/// insertion abutting the moved run travels with it.
+	#[test]
+	fn move_anchors_keep_their_side() -> Outcome<()> {
+		let cid = content(2, 11);
+		for (left, right) in [
+			(None, None),
+			(Some(Anchor::after(cid)), None),
+			(None, Some(Anchor::before(cid))),
+			(Some(Anchor::after(cid)), Some(Anchor::before(cid))),
+			// The sides the sequence structure refuses are still spelled
+			// faithfully; refusing them is the structure's business, not the
+			// codec's.
+			(Some(Anchor::before(cid)), Some(Anchor::after(cid))),
+		] {
+			let op = Op::Move {
+				file:	fmt!("f"),
+				src:	vec![range(1, 0, 3)],
+				left,
+				right,
+			};
+			assert_eq!(op, res!(Op::decode_all(&res!(op.encode()))));
+			assert_eq!(op, res!(Op::from_dat(&op.to_dat())));
+		}
 		Ok(())
 	}
 
