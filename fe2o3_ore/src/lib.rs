@@ -40,4 +40,8 @@ pub mod fastexport;
 pub mod id;
 pub mod log;
 pub mod op;
+pub mod segment;
 pub mod seq;
+
+#[cfg(test)]
+mod test_support;
