@@ -700,6 +700,75 @@ fn the_wire_vocabulary_renders_the_same_file() -> Outcome<()> {
 	Ok(())
 }
 
+/// A repository of two files, replayed out of the log. Each file's sequence holds
+/// only its own operations, so the graph to judge causality by is the log's and
+/// not the sequence's own.
+#[test]
+fn a_repository_of_two_files_replays_from_the_log() -> Outcome<()> {
+	use crate::log::OpLog;
+
+	let mut log = OpLog::new();
+	let r1 = ReplicaId::new(1);
+	let r2 = ReplicaId::new(2);
+	// A file each, written alternately, so that every operation's parents name
+	// operations of the other file.
+	let a = res!(log.author(r1, Op::FileCreate { path: fmt!("a.txt") }));
+	let b = res!(log.author(r2, Op::FileCreate { path: fmt!("b.txt") }));
+	let a_seed = res!(log.author(r1, Op::Splice {
+		file:	fmt!("a.txt"),
+		left:	None,
+		right:	None,
+		remove:	Vec::new(),
+		insert:	b"alpha".to_vec(),
+	}));
+	let b_seed = res!(log.author(r2, Op::Splice {
+		file:	fmt!("b.txt"),
+		left:	None,
+		right:	None,
+		remove:	Vec::new(),
+		insert:	b"beta".to_vec(),
+	}));
+	// Each operation is written against the whole frontier, which after the second
+	// file was created is that creation alone.
+	assert_eq!(b.parents, vec![a.id]);
+	assert_eq!(a_seed.parents, vec![b.id]);
+	assert_eq!(b_seed.parents, vec![a_seed.id]);
+	res!(log.author(r1, Op::Splice {
+		file:	fmt!("a.txt"),
+		left:	Some(Anchor::after(ContentId::new(a_seed.id, 4))),
+		right:	None,
+		remove:	Vec::new(),
+		insert:	b" and omega".to_vec(),
+	}));
+	// Replay: each record goes to the sequence of the file it names.
+	let mut a_seq = Sequence::new();
+	let mut b_seq = Sequence::new();
+	for rec in log.iter() {
+		match rec.op.file() {
+			Some("a.txt")	=> { res!(a_seq.apply_record(rec)); },
+			Some("b.txt")	=> { res!(b_seq.apply_record(rec)); },
+			Some(other) => return Err(err!(
+				"An operation names the unexpected file {:?}.", other; Test, Mismatch)),
+			None => assert!(!res!(a_seq.apply_record(rec)), "a lifecycle operation"),
+		}
+	}
+	assert_eq!(a_seq.len(), 2);
+	assert_eq!(b_seq.len(), 1);
+	// Judged by its own operations, each file looks incomplete, because its
+	// parents name the other file.
+	assert!(a_seq.render().is_err());
+	assert!(b_seq.render().is_err());
+	// Judged by the log's graph, both render.
+	let cause = log.causality();
+	assert_eq!(res!(a_seq.render_with(&cause)).text_lossy(), "alpha and omega");
+	assert_eq!(res!(b_seq.render_with(&cause)).text_lossy(), "beta");
+	// A graph that does not describe an operation the sequence holds is refused
+	// rather than guessed at.
+	let empty = Sequence::new();
+	assert!(a_seq.render_with(&empty.causality()).is_err());
+	Ok(())
+}
+
 /// An operation that says nothing about the order of bytes does not cross into
 /// the sequence, and the sequence says so rather than failing.
 #[test]

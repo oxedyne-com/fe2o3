@@ -422,17 +422,33 @@ impl Sequence {
 		ops
 	}
 
-	/// Renders the file.
+	/// Renders the file, judging causality by the operations the sequence itself
+	/// holds.
 	///
-	/// Fails if the operation set is not causally complete. Under a debug build
-	/// the render is checked for conservation before it is returned; see
-	/// [`Sequence::check_conservation`].
+	/// This is right where the sequence holds the whole history, which is to say
+	/// a repository of one file. Where it holds one file of several, the parents
+	/// of its operations name operations in the other files, and the graph to
+	/// judge by is the repository's; use [`Sequence::render_with`] and give it
+	/// one, from [`crate::log::OpLog::causality`] or from wherever else the whole
+	/// history is held.
 	pub fn render(&self)
 		-> Outcome<Rendered>
 	{
+		self.render_with(&self.causality())
+	}
+
+	/// Renders the file against a causal graph the caller holds.
+	///
+	/// Fails if the graph is not causally closed, if it does not hold every
+	/// operation the sequence does, or if the operation set names content it does
+	/// not hold. Under a debug build the render is checked for conservation
+	/// before it is returned; see [`Sequence::check_conservation`].
+	pub fn render_with(&self, cause: &Causality<'_>)
+		-> Outcome<Rendered>
+	{
 		let ops = self.in_op_order();
-		let cause = self.causality();
-		res!(Self::check_parents(&cause));
+		res!(self.check_described(cause));
+		res!(Self::check_parents(cause));
 		let atoms = res!(Atoms::build(&ops));
 		res!(Self::check_complete(&ops, &atoms));
 		let dead = res!(Dead::build(&ops));
@@ -449,7 +465,7 @@ impl Sequence {
 			flags.push(Flag::Dropped { op: *op, sub: *sub, origin: *origin });
 		}
 		flags.extend(res!(Self::torn(&ops, &claims)));
-		flags.extend(res!(Self::overlaps(&ops, &cause)));
+		flags.extend(res!(Self::overlaps(&ops, cause)));
 		flags.sort();
 		flags.dedup();
 
@@ -485,6 +501,22 @@ impl Sequence {
 		let atoms = res!(Atoms::build(&ops));
 		let dead = res!(Dead::build(&ops));
 		Self::conserved(rendered, &atoms, &dead)
+	}
+
+	/// Checks that the graph describes every operation the sequence holds.
+	fn check_described(&self, cause: &Causality<'_>)
+		-> Outcome<()>
+	{
+		for id in self.ops.keys() {
+			if !cause.contains(id) {
+				return Err(err!(
+					"The causal graph does not hold the operation {}, which the \
+					sequence does, so it cannot judge what that operation was \
+					written against.", id;
+				Invalid, Input, Missing));
+			}
+		}
+		Ok(())
 	}
 
 	/// Checks that every operation an operation was written against is present.
