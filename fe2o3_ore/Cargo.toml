@@ -10,5 +10,8 @@ repository = "https://github.com/oxedyne-io/fe2o3"
 [dependencies]
 oxedyne_fe2o3_core 		   		= { path = "../fe2o3_core" }
 oxedyne_fe2o3_jdat 		   		= { path = "../fe2o3_jdat" }
+# Default features off keeps rayon, which is unavailable on wasm32, out of the
+# dependency graph; only the interval map is wanted here.
+oxedyne_fe2o3_data 		   		= { path = "../fe2o3_data", default-features = false }
 oxedyne_fe2o3_iop_crypto 		= { path = "../fe2o3_iop_crypto" }
 oxedyne_fe2o3_iop_hash 			= { path = "../fe2o3_iop_hash" }
