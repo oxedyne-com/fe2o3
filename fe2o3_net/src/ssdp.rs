@@ -26,7 +26,15 @@
 //! # What is not
 //!
 //! The description document a `LOCATION` points at, and the SOAP services behind
-//! it, are UPnP rather than SSDP and belong to whatever is being announced.
+//! it, are UPnP rather than SSDP and live in [`crate::upnp`].
+//!
+//! # Two responders
+//!
+//! [`Responder`] is async over tokio. [`SyncResponder`] is the same protocol over
+//! `std::net`, for a binary that wants no runtime: discovery is one socket, three
+//! message shapes and a thread that blocks on a read, and pulling in an executor
+//! to run it is a poor trade. Neither is a wrapper around the other; they share
+//! the messages above, which is where the protocol actually is.
 
 use crate::time::Time;
 
@@ -712,6 +720,296 @@ impl Responder {
     }
 }
 
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ THE SAME SOCKET, WITHOUT A RUNTIME                                        │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// A blocking SSDP socket: the same protocol as [`Responder`] over `std::net`.
+///
+/// A media server is a thread that blocks on a read and answers what arrives.
+/// That is the whole of discovery, and it needs no executor.
+///
+/// # Where the datagrams go
+///
+/// One socket is bound to `0.0.0.0` on the SSDP port and joined to the group on
+/// each interface named by [`SyncResponder::join`]. A search is answered by
+/// unicast back to whoever sent it, which the routing table places correctly
+/// however many interfaces there are. A multicast announcement, though, leaves by
+/// the interface the kernel picks, because `IP_MULTICAST_IF` is not reachable
+/// through the standard library and this crate carries no socket-options
+/// dependency. On a machine with one network -- which is what a household has --
+/// the two are the same interface.
+///
+/// # Sharing the port
+///
+/// Two processes cannot both hold port 1900 here: `SO_REUSEADDR` and
+/// `SO_REUSEPORT` are likewise out of the standard library's reach. A machine
+/// already running a UPnP daemon refuses the bind, with the address in the error.
+#[derive(Debug)]
+pub struct SyncResponder {
+    socket: std::net::UdpSocket,
+    /// The interfaces the group was successfully joined on.
+    joined: Vec<Ipv4Addr>,
+}
+
+impl SyncResponder {
+
+    /// Bind the SSDP port on every address, joining no group yet.
+    pub fn bind() -> Outcome<Self> {
+        Self::bind_to_port(PORT)
+    }
+
+    /// The same, on a port of the caller's choosing. A test wants an ephemeral
+    /// one; a real responder wants 1900, because that is where searches are sent.
+    pub fn bind_to_port(port: u16) -> Outcome<Self> {
+        let bind_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port);
+        let socket = match std::net::UdpSocket::bind(bind_addr) {
+            Ok(s)  => s,
+            Err(e) => return Err(err!(e,
+                "Binding the SSDP port {}. A UPnP daemon already listening there \
+                holds it exclusively, since this socket does not ask to share it.",
+                port;
+            IO, Network, Init)),
+        };
+        // An announcement should be heard by the machine that sent it, since a
+        // control point may be running beside the device it is discovering.
+        let result = socket.set_multicast_loop_v4(true);
+        res!(result, IO, Network, Init);
+        Ok(Self {
+            socket,
+            joined: Vec::new(),
+        })
+    }
+
+    /// Join the group on one interface, named by its local IPv4 address.
+    ///
+    /// Joining the same interface twice is an error from the kernel and is
+    /// reported as one; [`Self::join_every_interface`] is the call that tolerates
+    /// it, since it does not know what is already joined.
+    pub fn join(&mut self, iface: Ipv4Addr) -> Outcome<()> {
+        let result = self.socket.join_multicast_v4(&MULTICAST_ADDR, &iface);
+        res!(result, IO, Network, Init);
+        self.joined.push(iface);
+        Ok(())
+    }
+
+    /// Join the group on every interface this machine appears to have, and say how
+    /// many were joined.
+    ///
+    /// Best effort by design: an interface that refuses the join is skipped rather
+    /// than failing the lot, because one unusable interface on a machine with three
+    /// must not stop a television on the other two from finding anything. An answer
+    /// of zero is the caller's cue to complain.
+    pub fn join_every_interface(&mut self) -> Outcome<usize> {
+        let mut joined = 0usize;
+        for iface in local_interfaces() {
+            if self.joined.contains(&iface) {
+                continue;
+            }
+            match self.join(iface) {
+                Ok(())  => joined += 1,
+                Err(e)  => debug!("SSDP could not join the group on {}: {}", iface, e),
+            }
+        }
+        Ok(joined)
+    }
+
+    /// The interfaces the group is joined on.
+    pub fn interfaces(&self) -> &[Ipv4Addr] {
+        &self.joined
+    }
+
+    /// The address this responder is bound to.
+    pub fn local_addr(&self) -> Outcome<SocketAddr> {
+        let result = self.socket.local_addr();
+        Ok(res!(result, IO, Network))
+    }
+
+    /// How long a read may block before it gives up. `None` blocks for ever,
+    /// which leaves no way to shut the thread down.
+    pub fn set_timeout(&self, how_long: Option<Duration>) -> Outcome<()> {
+        let result = self.socket.set_read_timeout(how_long);
+        res!(result, IO, Network);
+        Ok(())
+    }
+
+    /// Another handle on the same socket, so that one thread can read while
+    /// another announces.
+    pub fn try_clone(&self) -> Outcome<Self> {
+        let result = self.socket.try_clone();
+        let socket = res!(result, IO, Network);
+        Ok(Self {
+            socket,
+            joined: self.joined.clone(),
+        })
+    }
+
+    /// Wait for the next datagram this crate understands.
+    ///
+    /// `Ok(None)` means the read timed out, which is how a shutdown flag gets
+    /// looked at. A datagram that does not parse is not an error the caller can do
+    /// anything about -- the network carries plenty of them -- so it is logged and
+    /// the wait resumes.
+    pub fn recv(&self) -> Outcome<Option<(SsdpMessage, SocketAddr)>> {
+        let mut buf = vec![0u8; MAX_DATAGRAM];
+        loop {
+            let (n, from) = match self.socket.recv_from(&mut buf) {
+                Ok(pair) => pair,
+                Err(e) => {
+                    // A timeout is spelled two ways depending on the platform,
+                    // and neither is a failure.
+                    if matches!(e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)
+                    {
+                        return Ok(None);
+                    }
+                    return Err(err!(e,
+                        "Reading an SSDP datagram."; IO, Network, Wire, Read));
+                },
+            };
+            match SsdpMessage::parse(&buf[..n]) {
+                Ok(msg) => return Ok(Some((msg, from))),
+                Err(e)  => {
+                    debug!("An SSDP datagram from {} did not parse: {}", from, e);
+                    continue;
+                },
+            }
+        }
+    }
+
+    /// Send a message to the group, where everyone hears it.
+    pub fn multicast(&self, msg: &SsdpMessage) -> Outcome<()> {
+        let to = SocketAddrV4::new(MULTICAST_ADDR, PORT);
+        res!(self.send_to(msg, SocketAddr::V4(to)));
+        Ok(())
+    }
+
+    /// Send a message to one address, as an answer to a search goes back to
+    /// whoever asked.
+    pub fn send_to(&self, msg: &SsdpMessage, to: SocketAddr) -> Outcome<()> {
+        let bytes = msg.as_bytes();
+        let result = self.socket.send_to(&bytes, to);
+        let sent = res!(result, IO, Network, Wire, Write);
+        if sent != bytes.len() {
+            return Err(err!(
+                "An SSDP datagram of {} bytes went out as {}.", bytes.len(), sent;
+            IO, Network, Wire, Write, Size));
+        }
+        Ok(())
+    }
+
+    /// Answer a search, back to the address it came from.
+    ///
+    /// The `ST` of the answer is the target actually being announced, not the
+    /// `ssdp:all` that may have been asked: a control point matches the two, and an
+    /// answer that echoes `ssdp:all` is discarded.
+    pub fn answer(
+        &self,
+        to:         SocketAddr,
+        target:     Target,
+        usn:        String,
+        location:   String,
+        server:     String,
+    )
+        -> Outcome<()>
+    {
+        let response = SearchResponse {
+            max_age:    DEFAULT_MAX_AGE,
+            date:       Some(res!(http_date())),
+            location,
+            server,
+            target,
+            usn,
+            boot_id:    None,
+            config_id:  None,
+            extra:      BTreeMap::new(),
+        };
+        res!(self.send_to(&SsdpMessage::Response(response), to));
+        Ok(())
+    }
+}
+
+/// The local address of the interface that would carry a packet to the SSDP
+/// group, which on a machine with one network is the only answer there is.
+///
+/// No packet is sent: connecting a UDP socket only chooses a route.
+pub fn route_interface() -> Option<Ipv4Addr> {
+    let socket = match std::net::UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)) {
+        Ok(s)  => s,
+        Err(_) => return None,
+    };
+    if socket.connect(SocketAddrV4::new(MULTICAST_ADDR, PORT)).is_err() {
+        return None;
+    }
+    match socket.local_addr() {
+        Ok(SocketAddr::V4(addr))    => Some(*addr.ip()),
+        _                           => None,
+    }
+}
+
+/// Every IPv4 address this machine holds, as interfaces to join a group on.
+///
+/// The route this machine would use to reach the group is always first, because
+/// it is the one that matters and the only one some platforms can be asked for.
+/// On Linux the rest are read from the kernel's routing table; elsewhere the list
+/// is the route interface and the loopback, which covers a machine with one
+/// network and understates a machine with several.
+pub fn local_interfaces() -> Vec<Ipv4Addr> {
+    let mut out: Vec<Ipv4Addr> = Vec::new();
+    if let Some(addr) = route_interface() {
+        out.push(addr);
+    }
+    for addr in host_addresses() {
+        if !out.contains(&addr) {
+            out.push(addr);
+        }
+    }
+    if !out.contains(&Ipv4Addr::LOCALHOST) {
+        out.push(Ipv4Addr::LOCALHOST);
+    }
+    out
+}
+
+/// Every address the kernel calls local, read from `/proc/net/fib_trie`.
+///
+/// The file lists the routing trie, and a machine's own addresses appear in it as
+/// a `/32 host LOCAL` route under the address itself. That is a Linux detail and a
+/// stable one; on any other platform this answers nothing and
+/// [`local_interfaces`] falls back to the route interface alone.
+#[cfg(target_os = "linux")]
+fn host_addresses() -> Vec<Ipv4Addr> {
+    let text = match std::fs::read_to_string("/proc/net/fib_trie") {
+        Ok(t)  => t,
+        Err(_) => return Vec::new(),
+    };
+    let mut out: Vec<Ipv4Addr> = Vec::new();
+    let mut candidate: Option<Ipv4Addr> = None;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("|-- ") {
+            candidate = Ipv4Addr::from_str(rest.trim()).ok();
+            continue;
+        }
+        // The line after an address says what kind of route it is. Only a host
+        // route to the machine itself is an interface address.
+        if trimmed.starts_with("/32 host LOCAL") {
+            if let Some(addr) = candidate.take() {
+                if !addr.is_loopback() && !out.contains(&addr) {
+                    out.push(addr);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Nothing, on a platform whose routing table is not a file.
+#[cfg(not(target_os = "linux"))]
+fn host_addresses() -> Vec<Ipv4Addr> {
+    Vec::new()
+}
+
 /// Now, as an HTTP date, for the `DATE` field of an answer.
 fn http_date() -> Outcome<String> {
     let since = match SystemTime::now().duration_since(UNIX_EPOCH) {
@@ -1028,5 +1326,79 @@ mod tests {
             }
             Ok(())
         })
+    }
+
+    /// The same, with no runtime under it: a search goes out, comes back, and is
+    /// answered to the address it came from.
+    #[test]
+    fn test_a_blocking_responder_carries_a_search_and_its_answer() -> Outcome<()> {
+        let mut responder = res!(SyncResponder::bind_to_port(0));
+        match responder.join(Ipv4Addr::LOCALHOST) {
+            Ok(())  => {},
+            Err(e)  => {
+                // A machine with no loopback multicast cannot run this, and that
+                // is the machine's business rather than a failure of the code.
+                warn!("SSDP loopback multicast is unavailable here: {}", e);
+                return Ok(());
+            },
+        }
+        res!(responder.set_timeout(Some(Duration::from_secs(2))));
+        let addr = res!(responder.local_addr());
+
+        let search = SsdpMessage::Search(Search::new(
+            Target::Urn("schemas-upnp-org:device:MediaServer:1".to_string())));
+        res!(responder.send_to(&search, addr));
+        let (msg, from) = match res!(responder.recv()) {
+            Some(pair) => pair,
+            None => return Err(err!(
+                "The responder never heard the search."; Test, Timeout)),
+        };
+        req!(msg, search);
+
+        // And the answer goes back to the asker, echoing the target that was
+        // asked for rather than the one that was searched under.
+        res!(responder.answer(
+            from,
+            Target::Urn("schemas-upnp-org:device:MediaServer:1".to_string()),
+            "uuid:test::urn:schemas-upnp-org:device:MediaServer:1".to_string(),
+            "http://127.0.0.1:8336/dlna/desc.xml".to_string(),
+            "Test/1.0 UPnP/1.0 Ochre/0.1".to_string(),
+        ));
+        match res!(responder.recv()) {
+            Some((SsdpMessage::Response(r), _)) => {
+                req!(r.location, "http://127.0.0.1:8336/dlna/desc.xml".to_string());
+                req!(r.target,
+                    Target::Urn("schemas-upnp-org:device:MediaServer:1".to_string()));
+                assert!(r.usn.ends_with(&fmt!("::{}", r.target)),
+                    "the answer's USN and ST disagree: {} against {}", r.usn, r.target);
+            },
+            other => return Err(err!(
+                "The answer came back as {:?}.", other; Test, Mismatch)),
+        }
+        Ok(())
+    }
+
+    /// A read that finds nothing is not a failure, and is what lets a serving
+    /// thread look at its shutdown flag.
+    #[test]
+    fn test_a_blocking_read_that_finds_nothing_says_so() -> Outcome<()> {
+        let responder = res!(SyncResponder::bind_to_port(0));
+        res!(responder.set_timeout(Some(Duration::from_millis(200))));
+        req!(res!(responder.recv()).is_none(), true);
+        Ok(())
+    }
+
+    /// The machine is asked what interfaces it has, and every answer is an
+    /// address a group can actually be joined on.
+    #[test]
+    fn test_the_interfaces_offered_are_addresses_of_this_machine() -> Outcome<()> {
+        let ifaces = local_interfaces();
+        assert!(ifaces.contains(&Ipv4Addr::LOCALHOST),
+            "the loopback is always usable and was not offered: {:?}", ifaces);
+        for addr in &ifaces {
+            assert!(!addr.is_multicast(), "{} is a group, not an interface", addr);
+            assert!(!addr.is_unspecified(), "0.0.0.0 is not an interface");
+        }
+        Ok(())
     }
 }
