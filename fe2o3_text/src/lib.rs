@@ -10,7 +10,8 @@
 //!
 //! - Thread-safe text containers supporting concurrent access with highlighting capabilities
 //!
-//! - Base-2^x encodings with customisable alphabets for binary-to-text conversion
+//! - Base-2^x encodings with customisable alphabets for binary-to-text conversion, alongside
+//!   standard RFC 4648 Base64 for talking to everybody else
 //!
 //! - Text splitting with quote protection and hyphenation awareness
 //!
@@ -23,6 +24,7 @@
 #![allow(dead_code)]
 pub mod access;
 pub mod base2x;
+pub mod base64;
 pub mod core;
 pub mod highlight;
 pub mod html;
