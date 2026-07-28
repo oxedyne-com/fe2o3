@@ -66,6 +66,8 @@ use std::{
 const NKEYS:    usize = 40;
 /// Number of times each key is overwritten after its first write.
 const NOVER:    usize = 12;
+/// Number of overwrite rounds in the garbage collection phase.
+const GC_ROUNDS: usize = 40;
 
 pub fn test_rollover(_filter: &'static str) -> Outcome<()> {
 
@@ -159,7 +161,7 @@ fn supersession_accounting(
     test!(sync_log::stream(), "+--- rollover: {} ---", label);
 
     let cfg = res!(rollover_cfg(nwbots));
-    let mut db = res!(setup::start_db(
+    let db = res!(setup::start_db(
         db_root.clone(),
         Some(cfg.clone()),
         schms_input.clone(),
@@ -244,9 +246,12 @@ fn supersession_accounting(
     Ok(())
 }
 
-/// With garbage collection on, heavy overwrite churn over many sealed files
-/// must actually shrink the zone directory rather than let it grow with every
-/// superseded copy.
+/// Heavy overwrite churn over many sealed data files, run twice: once with
+/// garbage collection off and once with it on.  The store with collection on
+/// must be a fraction of the size of the store without it.  The run with
+/// collection off is the oracle: it is the same workload measured with the only
+/// mechanism that can reclaim bytes disabled, so the comparison cannot be
+/// satisfied by anything other than reclamation actually happening.
 fn gc_reclaims_sealed_files(
     db_root:     &PathBuf,
     schms_input: &RestSchemesInput<
@@ -262,22 +267,62 @@ fn gc_reclaims_sealed_files(
 {
     test!(sync_log::stream(), "+--- rollover: garbage collection ---");
 
+    let uncollected = res!(churn_and_measure(
+        db_root, schms_input, schms2, user, false));
+    let collected = res!(churn_and_measure(
+        db_root, schms_input, schms2, user, true));
+
+    test!(sync_log::stream(),
+        "gc: {} bytes of data files with collection off, {} with it on.",
+        uncollected, collected);
+
+    // The live set is a fortieth of everything written, so a working collector
+    // should leave well under a quarter of the uncollected store.  Anything at
+    // or above it means sealed files are not being reclaimed.
+    if collected * 4 >= uncollected {
+        return Err(err!(
+            "Garbage collection reclaimed little or nothing: the same churn \
+            left {} bytes of data files with collection on against {} with it \
+            off.", collected, uncollected;
+            Test, Mismatch, Data));
+    }
+
+    test!(sync_log::stream(), "+--- rollover: garbage collection : passed ---");
+    Ok(())
+}
+
+/// Runs the overwrite churn on a freshly wiped database and returns the total
+/// size in bytes of the data files it leaves behind.
+fn churn_and_measure(
+    db_root:     &PathBuf,
+    schms_input: &RestSchemesInput<
+                     EncryptionScheme,
+                     HashScheme,
+                     HashScheme,
+                     ChecksumScheme,
+                 >,
+    schms2:      Option<&RestSchemesOverride<EncryptionScheme, HashScheme>>,
+    user:        setup::Uid,
+    gc_on:       bool,
+)
+    -> Outcome<u64>
+{
+    let label = if gc_on { "collection on" } else { "collection off" };
     let cfg = res!(rollover_cfg(1));
-    let mut db = res!(setup::start_db(
+    let db = res!(setup::start_db(
         db_root.clone(),
         Some(cfg.clone()),
         schms_input.clone(),
         None,
-        true, // gc on.
+        gc_on,
         true, // wipe.
     ));
 
     thread::sleep(Duration::from_millis(200));
 
     // Enough churn that the superseded copies vastly outweigh the live set.
-    let rounds = 40;
     let mut nwrites = 0usize;
-    for round in 0..rounds {
+    for round in 0..GC_ROUNDS {
         for k in 0..NKEYS {
             res!(db.insert(
                 dat!(fmt!("gk{:03}", k)),
@@ -292,39 +337,27 @@ fn gc_reclaims_sealed_files(
     // Give the gbots time to finish transcribing.
     thread::sleep(Duration::from_secs(2));
 
-    let live_bytes = res!(zone_data_bytes(&db_root));
+    let bytes = res!(zone_data_bytes(&db_root));
     let states = res!(db.api().collect_file_states(constant::USER_REQUEST_WAIT));
-    let (_, ncur, nold, _) = count_data_states(&states);
+    let (nfiles, ncur, nold, _) = count_data_states(&states);
 
     test!(sync_log::stream(),
-        "gc: {} writes, {} bytes of data files remain, {} current and {} old \
-        records tracked.", nwrites, live_bytes, ncur, nold);
+        "gc {}: {} writes, {} bytes of data files remain over {} tracked \
+        files, {} current and {} old records tracked.",
+        label, nwrites, bytes, nfiles, ncur, nold);
 
-    // Every key was written `rounds` times; without reclamation the data files
-    // hold every copy. Allow generous slack for records not yet collected, but
-    // require that the great majority of the dead bytes are gone.
-    let all_copies = res!(zone_data_bytes_estimate(nwrites, NKEYS, live_bytes, ncur + nold));
-    if live_bytes >= all_copies {
-        return Err(err!(
-            "Garbage collection reclaimed nothing: {} bytes of data files \
-            remain after {} writes of {} keys, which is no better than \
-            retaining every superseded copy.",
-            live_bytes, nwrites, NKEYS;
-            Test, Mismatch, Data));
-    }
     if nold > nwrites - NKEYS {
         return Err(err!(
-            "More records are flagged old ({}) than were superseded ({}).",
-            nold, nwrites - NKEYS;
+            "gc {}: more records are flagged old ({}) than were superseded ({}).",
+            label, nold, nwrites - NKEYS;
             Test, Mismatch, Data));
     }
-    res!(assert_no_bot_errors(&db, "garbage collection"));
+    res!(assert_no_bot_errors(&db, label));
 
     res!(db.shutdown());
     thread::sleep(Duration::from_millis(200));
 
-    test!(sync_log::stream(), "+--- rollover: garbage collection : passed ---");
-    Ok(())
+    Ok(bytes)
 }
 
 /// Fails if any bot in the database has logged an error. The flag-as-old
@@ -400,26 +433,6 @@ fn walk_data_files(dir: &Path, total: &mut u64) -> Outcome<()> {
         }
     }
     Ok(())
-}
-
-/// Estimates the bytes an uncollected store would hold, from the mean record
-/// size implied by what is on disk now.
-fn zone_data_bytes_estimate(
-    nwrites:    usize,
-    _nkeys:     usize,
-    live_bytes: u64,
-    ntracked:   usize,
-)
-    -> Outcome<u64>
-{
-    if ntracked == 0 {
-        return Err(err!(
-            "No records are tracked in any file state, so no size estimate \
-            can be made.";
-            Test, Missing, Data));
-    }
-    let mean = live_bytes / (ntracked as u64);
-    Ok(mean * (nwrites as u64))
 }
 
 /// Canonicalise a directory path, creating it if it does not exist.
