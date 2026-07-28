@@ -1,21 +1,36 @@
 //! The operation vocabulary: what a single unit of history can say.
 //!
 //! History here is a sequence of operations rather than a sequence of
-//! snapshots. An operation states an intent -- create this file, replace this
-//! run of bytes with these -- so the intent survives into the record and can be
+//! snapshots. An operation states an intent -- create this file, put these
+//! bytes beside those -- so the intent survives into the record and can be
 //! reasoned about later, instead of being inferred back out of a diff.
 //!
-//! # Provisional
+//! # Nothing names a position
 //!
-//! This set is provisional. It is deliberately small: enough to express file
-//! lifecycle and byte-level edits, and no more. Variants may be added, and the
-//! wire codes below are not promised stable.
+//! Every operation that speaks about bytes speaks about them by name. A splice
+//! says which gap its bytes go in, by naming the content either side of that
+//! gap, and says which content it removes, by naming that content; a move says
+//! the same of the run it relocates. No operation carries a byte offset, a line
+//! number or anything else that a concurrent edit could invalidate, which is
+//! the property [`crate::seq`] is built on and the reason the two vocabularies
+//! are now one.
+//!
+//! # Every operation carries its parents
+//!
+//! An operation records the frontier its author could see when they wrote it,
+//! in [`Header::parents`]. That is what makes the history a graph rather than a
+//! list: with it, [`crate::log::OpLog`] can say whether a set is causally
+//! complete, and [`crate::seq`] can say whether two operations that touched the
+//! same bytes were concurrent or merely consecutive. Parents live on the header
+//! and not on the variants, because causality is a property of every operation
+//! alike and duplicating it six times would let the six drift.
 
 use crate::id::{
 	varint_decode,
 	varint_encode,
 	Anchor,
 	ContentRange,
+	OpId,
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -32,10 +47,10 @@ pub const CODE_FILE_CREATE:	u8 = 1;
 pub const CODE_FILE_DELETE:	u8 = 2;
 /// Wire code for [`Op::FileRename`].
 pub const CODE_FILE_RENAME:	u8 = 3;
-/// Wire code for [`Op::Splice`].
-pub const CODE_SPLICE:		u8 = 4;
 /// Wire code for [`Op::Mark`].
-pub const CODE_MARK:		u8 = 5;
+pub const CODE_MARK:		u8 = 4;
+/// Wire code for [`Op::Splice`].
+pub const CODE_SPLICE:		u8 = 5;
 /// Wire code for [`Op::Move`].
 pub const CODE_MOVE:		u8 = 6;
 
@@ -50,9 +65,9 @@ pub const CODE_MOVE:		u8 = 6;
 /// delete plus an insert: it names the run it relocates by the identity of the
 /// bytes themselves, so an edit made concurrently inside that run lands in the
 /// run's new home rather than on a tombstone. Nothing in a move says where
-/// anything is -- the source is content, the destination is an anchor -- which
-/// is what lets the sequence structure in [`crate::seq`] resolve the two against
-/// each other however the two operations happen to arrive.
+/// anything is -- the source is content, the destination is an anchor -- and
+/// since a splice says the same, the sequence structure in [`crate::seq`] can
+/// resolve any two of them against each other however they happen to arrive.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Op {
 	/// Brings a file into existence, empty.
@@ -72,23 +87,29 @@ pub enum Op {
 		/// Path after the rename.
 		to: String,
 	},
-	/// Replaces a run of bytes in a file with another, which is the single
-	/// primitive from which insertion, deletion and replacement all follow: an
-	/// insertion has `delete_len` of zero, a deletion has an empty `insert`.
-	Splice {
-		/// Path of the file edited.
-		file: String,
-		/// Byte offset at which the replaced run begins.
-		at: u64,
-		/// Number of bytes removed at that offset.
-		delete_len: u64,
-		/// Bytes put in their place.
-		insert: Vec<u8>,
-	},
 	/// Names a point in history, so that it can be referred to later.
 	Mark {
 		/// The name given to this point.
 		name: String,
+	},
+	/// Puts bytes in a gap and kills runs of existing content, which is the
+	/// single primitive from which insertion, deletion and replacement all
+	/// follow: an insertion removes nothing, a deletion inserts nothing, and a
+	/// replacement does both in one operation.
+	///
+	/// The gap is named by the content either side of it and the removed runs
+	/// are named by their content, so neither half carries a position.
+	Splice {
+		/// Path of the file edited.
+		file: String,
+		/// Left origin of the inserted bytes; `None` is the start of the file.
+		left: Option<Anchor>,
+		/// Right origin of the inserted bytes; `None` is the end of the file.
+		right: Option<Anchor>,
+		/// What dies.
+		remove: Vec<ContentRange>,
+		/// What is inserted.
+		insert: Vec<u8>,
 	},
 	/// Relocates runs of existing content, which keep their identity, to a
 	/// position named by the content already there.
@@ -117,8 +138,8 @@ impl Op {
 			Self::FileCreate { .. }	=> CODE_FILE_CREATE,
 			Self::FileDelete { .. }	=> CODE_FILE_DELETE,
 			Self::FileRename { .. }	=> CODE_FILE_RENAME,
-			Self::Splice { .. }		=> CODE_SPLICE,
 			Self::Mark { .. }		=> CODE_MARK,
+			Self::Splice { .. }		=> CODE_SPLICE,
 			Self::Move { .. }		=> CODE_MOVE,
 		}
 	}
@@ -129,9 +150,21 @@ impl Op {
 			Self::FileCreate { .. }	=> "FileCreate",
 			Self::FileDelete { .. }	=> "FileDelete",
 			Self::FileRename { .. }	=> "FileRename",
-			Self::Splice { .. }		=> "Splice",
 			Self::Mark { .. }		=> "Mark",
+			Self::Splice { .. }		=> "Splice",
 			Self::Move { .. }		=> "Move",
+		}
+	}
+
+	/// Returns the file the operation edits the contents of, if it edits any.
+	///
+	/// A file lifecycle change names paths but edits no content, and a mark
+	/// names no file at all, so both give `None`.
+	pub fn file(&self) -> Option<&str> {
+		match self {
+			Self::Splice { file, .. }	=> Some(file),
+			Self::Move { file, .. }		=> Some(file),
+			_							=> None,
 		}
 	}
 
@@ -156,16 +189,17 @@ impl Op {
 				Dat::Str(from.clone()),
 				Dat::Str(to.clone()),
 			]),
-			Self::Splice { file, at, delete_len, insert } => Dat::List(vec![
-				Dat::U8(CODE_SPLICE),
-				Dat::Str(file.clone()),
-				Dat::U64(*at),
-				Dat::U64(*delete_len),
-				Dat::BU64(insert.clone()),
-			]),
 			Self::Mark { name } => Dat::List(vec![
 				Dat::U8(CODE_MARK),
 				Dat::Str(name.clone()),
+			]),
+			Self::Splice { file, left, right, remove, insert } => Dat::List(vec![
+				Dat::U8(CODE_SPLICE),
+				Dat::Str(file.clone()),
+				Anchor::opt_to_dat(left),
+				Anchor::opt_to_dat(right),
+				Dat::List(remove.iter().map(|r| r.to_dat()).collect()),
+				Dat::BU64(insert.clone()),
 			]),
 			Self::Move { file, src, left, right } => Dat::List(vec![
 				Dat::U8(CODE_MOVE),
@@ -213,19 +247,20 @@ impl Op {
 					to:		res!(as_str(&v[2], "FileRename to")),
 				})
 			},
-			CODE_SPLICE => {
-				res!(expect_len(v, 5, "Splice"));
-				Ok(Self::Splice {
-					file:		res!(as_str(&v[1], "Splice file")),
-					at:			res!(as_u64(&v[2], "Splice at")),
-					delete_len:	res!(as_u64(&v[3], "Splice delete_len")),
-					insert:		res!(as_bytes(&v[4], "Splice insert")),
-				})
-			},
 			CODE_MARK => {
 				res!(expect_len(v, 2, "Mark"));
 				Ok(Self::Mark {
 					name: res!(as_str(&v[1], "Mark name")),
+				})
+			},
+			CODE_SPLICE => {
+				res!(expect_len(v, 6, "Splice"));
+				Ok(Self::Splice {
+					file:	res!(as_str(&v[1], "Splice file")),
+					left:	res!(Anchor::opt_from_dat(&v[2])),
+					right:	res!(Anchor::opt_from_dat(&v[3])),
+					remove:	res!(as_ranges(&v[4], "Splice remove")),
+					insert:	res!(as_bytes(&v[5], "Splice insert")),
 				})
 			},
 			CODE_MOVE => {
@@ -271,27 +306,7 @@ impl Op {
 	pub fn decode(buf: &[u8])
 		-> Outcome<(Self, usize)>
 	{
-		let (len, hdr) = res!(varint_decode(buf));
-		let len = len as usize;
-		let end = match hdr.checked_add(len) {
-			Some(e) => e,
-			None => return Err(err!(
-				"An Op declares a length of {} bytes, which overflows the buffer \
-				offset.", len;
-			Decode, Input, Overflow)),
-		};
-		if end > buf.len() {
-			return Err(err!(
-				"An Op declares {} bytes of body but only {} remain.",
-				len, buf.len() - hdr;
-			Decode, Input, Missing));
-		}
-		let (dat, used) = res!(Dat::from_bytes(&buf[hdr..end]));
-		if used != len {
-			return Err(err!(
-				"An Op body of {} bytes decoded from only {} of them.", len, used;
-			Decode, Input, Mismatch));
-		}
+		let (dat, end) = res!(decode_framed(buf, "Op"));
 		Ok((res!(Self::from_dat(&dat)), end))
 	}
 
@@ -325,6 +340,251 @@ impl Op {
 }
 
 
+/// What every operation carries whatever it says: its own name, and the names
+/// of the operations its author had already seen.
+///
+/// The parents are the author's frontier at the moment of writing, which is
+/// what turns a heap of operations into a partial order. Two operations are
+/// concurrent exactly when neither is reachable from the other by following
+/// parents, and that question -- not the accident of which arrived first -- is
+/// what decides whether two edits to the same bytes were a conflict or a
+/// sequence.
+///
+/// Parents are held sorted and without repetition, so that a set of parents has
+/// exactly one byte spelling. Two spellings would both verify against a
+/// signature, which is not a property a provenance chain can afford.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Header {
+	/// The operation's own name.
+	pub id:			OpId,
+	/// The author's frontier when the operation was written, ascending.
+	pub parents:	Vec<OpId>,
+}
+
+impl Header {
+	/// Constructs a header, sorting the parents and dropping repetitions.
+	///
+	/// Fails if the operation names itself as its own parent, which no frontier
+	/// can contain.
+	pub fn new(id: OpId, parents: Vec<OpId>)
+		-> Outcome<Self>
+	{
+		let mut parents = parents;
+		parents.sort();
+		parents.dedup();
+		if parents.binary_search(&id).is_ok() {
+			return Err(err!(
+				"The operation {} names itself as one of its own parents.", id;
+			Invalid, Input, Conflict));
+		}
+		Ok(Self { id, parents })
+	}
+
+	/// Constructs the header of a root operation, one written against nothing.
+	pub fn root(id: OpId) -> Self {
+		Self { id, parents: Vec::new() }
+	}
+
+	/// Reports whether the operation was written against nothing, which is what
+	/// the first operation of a history looks like.
+	pub fn is_root(&self) -> bool {
+		self.parents.is_empty()
+	}
+
+	/// Serialises the header to a [`Dat`]. The shape is `[id, [parent, ...]]`.
+	pub fn to_dat(&self) -> Dat {
+		Dat::List(vec![
+			self.id.to_dat(),
+			Dat::List(self.parents.iter().map(|p| p.to_dat()).collect()),
+		])
+	}
+
+	/// Reconstructs a header from a [`Dat`] produced by [`Header::to_dat`].
+	///
+	/// Parents out of order, repeated, or naming the operation itself are
+	/// refused rather than normalised, so that the encoding stays canonical.
+	pub fn from_dat(dat: &Dat)
+		-> Outcome<Self>
+	{
+		let v = match dat {
+			Dat::List(v) if v.len() == 2 => v,
+			_ => return Err(err!(
+				"A Header expects a 2-element Dat::List, got {:?}.", dat;
+			Decode, Input, Mismatch)),
+		};
+		let id = res!(OpId::from_dat(&v[0]));
+		let listed = match &v[1] {
+			Dat::List(p) => p,
+			other => return Err(err!(
+				"A Header's parents expect Dat::List, got {:?}.", other;
+			Decode, Input, Mismatch)),
+		};
+		let mut parents = Vec::with_capacity(listed.len());
+		for item in listed {
+			let p = res!(OpId::from_dat(item));
+			if let Some(last) = parents.last() {
+				if p <= *last {
+					return Err(err!(
+						"A Header of {} lists the parent {} after {}; parents are \
+						encoded ascending and without repetition.", id, p, last;
+					Decode, Input, Order));
+				}
+			}
+			if p == id {
+				return Err(err!(
+					"A Header of {} names itself as one of its own parents.", id;
+				Decode, Input, Conflict));
+			}
+			parents.push(p);
+		}
+		Ok(Self { id, parents })
+	}
+}
+
+
+/// One whole operation as history records it: the header that names it and
+/// places it in the graph, and the operation itself.
+///
+/// This is the unit that is logged, sealed into an [`crate::envelope::Envelope`]
+/// and written into a segment. The header is not part of the operation because
+/// the same edit written by two authors is two operations, and the vocabulary
+/// should not have to say so six times over.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Record {
+	/// Who this operation is and what it was written against.
+	pub head:	Header,
+	/// What it says.
+	pub op:		Op,
+}
+
+impl Record {
+	/// Constructs a record from a header and an operation.
+	pub fn new(head: Header, op: Op) -> Self {
+		Self { head, op }
+	}
+
+	/// Constructs a record of an operation written against nothing.
+	pub fn root(id: OpId, op: Op) -> Self {
+		Self { head: Header::root(id), op }
+	}
+
+	/// Returns the operation's name.
+	pub fn id(&self) -> OpId {
+		self.head.id
+	}
+
+	/// Returns the author's frontier when the operation was written.
+	pub fn parents(&self) -> &[OpId] {
+		&self.head.parents
+	}
+
+	/// Serialises the record to a [`Dat`]. The shape is `[head, op]`.
+	pub fn to_dat(&self) -> Dat {
+		Dat::List(vec![
+			self.head.to_dat(),
+			self.op.to_dat(),
+		])
+	}
+
+	/// Reconstructs a record from a [`Dat`] produced by [`Record::to_dat`].
+	pub fn from_dat(dat: &Dat)
+		-> Outcome<Self>
+	{
+		let v = match dat {
+			Dat::List(v) if v.len() == 2 => v,
+			_ => return Err(err!(
+				"A Record expects a 2-element Dat::List, got {:?}.", dat;
+			Decode, Input, Mismatch)),
+		};
+		Ok(Self {
+			head:	res!(Header::from_dat(&v[0])),
+			op:		res!(Op::from_dat(&v[1])),
+		})
+	}
+
+	/// Appends the byte encoding of the record to `buf`, as a varint length
+	/// followed by the binary daticle form.
+	pub fn encode_into(&self, buf: &mut Vec<u8>)
+		-> Outcome<()>
+	{
+		let body = res!(self.to_dat().to_bytes(Vec::new()));
+		varint_encode(body.len() as u64, buf);
+		buf.extend_from_slice(&body);
+		Ok(())
+	}
+
+	/// Returns the byte encoding of the record.
+	pub fn encode(&self)
+		-> Outcome<Vec<u8>>
+	{
+		let mut buf = Vec::new();
+		res!(self.encode_into(&mut buf));
+		Ok(buf)
+	}
+
+	/// Decodes a record from the front of `buf`, returning it and the number of
+	/// bytes consumed.
+	pub fn decode(buf: &[u8])
+		-> Outcome<(Self, usize)>
+	{
+		let (dat, end) = res!(decode_framed(buf, "Record"));
+		Ok((res!(Self::from_dat(&dat)), end))
+	}
+
+	/// Decodes a record that must occupy the whole of `buf`.
+	pub fn decode_all(buf: &[u8])
+		-> Outcome<Self>
+	{
+		let (rec, len) = res!(Self::decode(buf));
+		if len != buf.len() {
+			return Err(err!(
+				"A Record consumed {} of {} bytes, leaving {} trailing.",
+				len, buf.len(), buf.len() - len;
+			Decode, Input, Excessive));
+		}
+		Ok(rec)
+	}
+
+	/// Hashes the record's canonical encoding under a hasher the caller
+	/// supplies, so that the parents are covered along with the operation.
+	pub fn hash<H: Hasher, const S: usize>(&self, hasher: H, salt: [u8; S])
+		-> Outcome<Hash<S>>
+	{
+		let bytes = res!(self.encode());
+		Ok(hasher.hash(&[&bytes], salt))
+	}
+}
+
+
+/// Reads a varint length prefix and the daticle it frames, returning the
+/// daticle and the offset just past it.
+fn decode_framed(buf: &[u8], what: &str)
+	-> Outcome<(Dat, usize)>
+{
+	let (len, hdr) = res!(varint_decode(buf));
+	let len = len as usize;
+	let end = match hdr.checked_add(len) {
+		Some(e) => e,
+		None => return Err(err!(
+			"A {} declares a length of {} bytes, which overflows the buffer \
+			offset.", what, len;
+		Decode, Input, Overflow)),
+	};
+	if end > buf.len() {
+		return Err(err!(
+			"A {} declares {} bytes of body but only {} remain.",
+			what, len, buf.len() - hdr;
+		Decode, Input, Missing));
+	}
+	let (dat, used) = res!(Dat::from_bytes(&buf[hdr..end]));
+	if used != len {
+		return Err(err!(
+			"A {} body of {} bytes decoded from only {} of them.", what, len, used;
+		Decode, Input, Mismatch));
+	}
+	Ok((dat, end))
+}
+
 /// Checks that a decoded operation list has exactly the expected length.
 fn expect_len(v: &[Dat], want: usize, what: &str)
 	-> Outcome<()>
@@ -345,18 +605,6 @@ fn as_str(dat: &Dat, what: &str)
 		Dat::Str(s) => Ok(s.clone()),
 		other => Err(err!(
 			"An Op {} expects Dat::Str, got {:?}.", what, other;
-		Decode, Input, Mismatch)),
-	}
-}
-
-/// Extracts an unsigned integer field, naming it if the kind is wrong.
-fn as_u64(dat: &Dat, what: &str)
-	-> Outcome<u64>
-{
-	match dat {
-		Dat::U64(n) => Ok(*n),
-		other => Err(err!(
-			"An Op {} expects Dat::U64, got {:?}.", what, other;
 		Decode, Input, Mismatch)),
 	}
 }
@@ -398,7 +646,6 @@ mod tests {
 
 	use crate::id::{
 		ContentId,
-		OpId,
 		ReplicaId,
 	};
 
@@ -412,6 +659,11 @@ mod tests {
 		ContentId::new(OpId::new(ReplicaId::new(replica), 1), off)
 	}
 
+	/// An operation identifier.
+	fn oid(replica: u64, counter: u64) -> OpId {
+		OpId::new(ReplicaId::new(replica), counter)
+	}
+
 	/// One of every variant, including payloads that stress the encoding.
 	fn samples() -> Vec<Op> {
 		vec![
@@ -421,26 +673,33 @@ mod tests {
 				from:	fmt!("a/b.txt"),
 				to:		fmt!("c/d.txt"),
 			},
-			// An insertion.
+			// An insertion at the start of a file.
 			Op::Splice {
-				file:		fmt!("notes.md"),
-				at:			0,
-				delete_len:	0,
-				insert:		b"hello".to_vec(),
+				file:	fmt!("notes.md"),
+				left:	None,
+				right:	None,
+				remove:	Vec::new(),
+				insert:	b"hello".to_vec(),
 			},
-			// A deletion.
+			// A deletion, which places nothing and so has no origins.
 			Op::Splice {
-				file:		fmt!("notes.md"),
-				at:			12,
-				delete_len:	5,
-				insert:		Vec::new(),
+				file:	fmt!("notes.md"),
+				left:	None,
+				right:	None,
+				remove:	vec![range(1, 12, 17)],
+				insert:	Vec::new(),
 			},
-			// A replacement whose payload exceeds what a BU8 length can hold.
+			// A replacement whose payload exceeds what a BU8 length can hold,
+			// killing several fragmented runs at once.
 			Op::Splice {
-				file:		fmt!("big.bin"),
-				at:			u64::MAX / 2,
-				delete_len:	u64::MAX,
-				insert:		vec![0xa5; 1000],
+				file:	fmt!("big.bin"),
+				left:	Some(Anchor::after(content(2, u64::MAX))),
+				right:	Some(Anchor::before(content(3, 0))),
+				remove:	vec![
+					range(1, 0, u64::MAX),
+					range(4, 7, 9),
+				],
+				insert:	vec![0xa5; 1000],
 			},
 			// Empty strings and non-ASCII paths.
 			Op::FileCreate { path: String::new() },
@@ -483,6 +742,22 @@ mod tests {
 		]
 	}
 
+	/// Headers spanning no parents, one, and many.
+	fn sample_heads() -> Outcome<Vec<Header>> {
+		Ok(vec![
+			Header::root(oid(1, 1)),
+			res!(Header::new(oid(2, 9), vec![oid(1, 1)])),
+			res!(Header::new(oid(3, 4), vec![
+				oid(1, 1),
+				oid(2, 9),
+				oid(9, u64::MAX),
+			])),
+			res!(Header::new(oid(4, u64::MAX), (1..=200)
+				.map(|i| oid(i % 13, i))
+				.collect())),
+		])
+	}
+
 	/// Every variant survives a [`Dat`] round trip.
 	#[test]
 	fn op_dat_round_trip() -> Outcome<()> {
@@ -510,10 +785,11 @@ mod tests {
 	fn splice_payload_survives_beyond_a_byte_length() -> Outcome<()> {
 		for len in [255usize, 256, 257, 4096, 70_000] {
 			let op = Op::Splice {
-				file:		fmt!("f"),
-				at:			0,
-				delete_len:	0,
-				insert:		vec![0x5a; len],
+				file:	fmt!("f"),
+				left:	None,
+				right:	None,
+				remove:	Vec::new(),
+				insert:	vec![0x5a; len],
 			};
 			let back = res!(Op::decode_all(&res!(op.encode())));
 			match back {
@@ -566,6 +842,34 @@ mod tests {
 		Ok(())
 	}
 
+	/// Only the two content operations name a file whose bytes they edit.
+	#[test]
+	fn only_content_operations_name_a_file() -> Outcome<()> {
+		assert_eq!(
+			Op::Splice {
+				file:	fmt!("a.txt"),
+				left:	None,
+				right:	None,
+				remove:	Vec::new(),
+				insert:	b"x".to_vec(),
+			}.file(),
+			Some("a.txt"),
+		);
+		assert_eq!(
+			Op::Move {
+				file:	fmt!("b.txt"),
+				src:	Vec::new(),
+				left:	None,
+				right:	None,
+			}.file(),
+			Some("b.txt"),
+		);
+		assert_eq!(Op::FileCreate { path: fmt!("c.txt") }.file(), None);
+		assert_eq!(Op::FileDelete { path: fmt!("c.txt") }.file(), None);
+		assert_eq!(Op::Mark { name: fmt!("v1") }.file(), None);
+		Ok(())
+	}
+
 	/// An unrecognised code, a wrong shape or a wrong field kind is refused.
 	#[test]
 	fn op_from_dat_rejects_rubbish() -> Outcome<()> {
@@ -583,9 +887,19 @@ mod tests {
 		assert!(Op::from_dat(&Dat::List(vec![
 			Dat::U8(CODE_SPLICE),
 			Dat::Str(fmt!("f")),
-			Dat::U64(0),
-			Dat::U64(0),
+			Anchor::opt_to_dat(&None),
+			Anchor::opt_to_dat(&None),
+			Dat::List(vec![]),
 			Dat::Str(fmt!("not bytes")),
+		])).is_err());
+		// A Splice whose removed runs are not ranges.
+		assert!(Op::from_dat(&Dat::List(vec![
+			Dat::U8(CODE_SPLICE),
+			Dat::Str(fmt!("f")),
+			Anchor::opt_to_dat(&None),
+			Anchor::opt_to_dat(&None),
+			Dat::Str(fmt!("not ranges")),
+			Dat::BU64(Vec::new()),
 		])).is_err());
 		// A Move whose source is not a list of ranges.
 		assert!(Op::from_dat(&Dat::List(vec![
@@ -655,6 +969,16 @@ mod tests {
 			};
 			assert_eq!(op, res!(Op::decode_all(&res!(op.encode()))));
 			assert_eq!(op, res!(Op::from_dat(&op.to_dat())));
+			// A splice carrying the same origins spells them the same way.
+			let sp = Op::Splice {
+				file:	fmt!("f"),
+				left,
+				right,
+				remove:	vec![range(1, 0, 3)],
+				insert:	b"x".to_vec(),
+			};
+			assert_eq!(sp, res!(Op::decode_all(&res!(sp.encode()))));
+			assert_eq!(sp, res!(Op::from_dat(&sp.to_dat())));
 		}
 		Ok(())
 	}
@@ -670,10 +994,11 @@ mod tests {
 		assert_eq!(got, want);
 		// An operation differing in one field hashes differently.
 		let other = Op::Splice {
-			file:		fmt!("notes.md"),
-			at:			13,
-			delete_len:	3,
-			insert:		b"abc".to_vec(),
+			file:	fmt!("notes.md"),
+			left:	None,
+			right:	None,
+			remove:	vec![range(1, 12, 16)],
+			insert:	b"abc".to_vec(),
 		};
 		assert!(res!(other.hash((), [0u8; 0])).as_vec() != want);
 		Ok(())
@@ -682,10 +1007,11 @@ mod tests {
 	/// The operation used by the hashing test.
 	fn sample_op_for_hashing() -> Op {
 		Op::Splice {
-			file:		fmt!("notes.md"),
-			at:			12,
-			delete_len:	3,
-			insert:		b"abc".to_vec(),
+			file:	fmt!("notes.md"),
+			left:	None,
+			right:	None,
+			remove:	vec![range(1, 12, 15)],
+			insert:	b"abc".to_vec(),
 		}
 	}
 
@@ -693,15 +1019,145 @@ mod tests {
 	#[test]
 	fn op_decode_rejects_truncation() -> Outcome<()> {
 		let op = Op::Splice {
-			file:		fmt!("notes.md"),
-			at:			1,
-			delete_len:	2,
-			insert:		b"abcdef".to_vec(),
+			file:	fmt!("notes.md"),
+			left:	Some(Anchor::after(content(1, 0))),
+			right:	None,
+			remove:	vec![range(1, 1, 3)],
+			insert:	b"abcdef".to_vec(),
 		};
 		let buf = res!(op.encode());
 		for cut in 1..buf.len() {
 			assert!(Op::decode(&buf[..cut]).is_err(), "cut at {}", cut);
 		}
+		Ok(())
+	}
+
+	/// A header survives both round trips with no parents, with one, and with
+	/// many.
+	#[test]
+	fn header_round_trips_at_every_arity() -> Outcome<()> {
+		for head in res!(sample_heads()) {
+			assert_eq!(head, res!(Header::from_dat(&head.to_dat())));
+			let rec = Record::new(head.clone(), Op::Mark { name: fmt!("m") });
+			assert_eq!(rec, res!(Record::decode_all(&res!(rec.encode()))));
+		}
+		Ok(())
+	}
+
+	/// Parents are sorted and deduplicated on construction, so the same frontier
+	/// given in any order has one encoding.
+	#[test]
+	fn parents_are_canonical() -> Outcome<()> {
+		let a = res!(Header::new(oid(9, 1), vec![oid(1, 2), oid(3, 1), oid(1, 2)]));
+		let b = res!(Header::new(oid(9, 1), vec![oid(3, 1), oid(1, 2)]));
+		assert_eq!(a, b);
+		assert_eq!(a.parents, vec![oid(1, 2), oid(3, 1)]);
+		assert_eq!(res!(a.to_dat().to_bytes(Vec::new())), res!(b.to_dat().to_bytes(Vec::new())));
+		// The decoder refuses the non-canonical spellings the constructor fixes.
+		let unsorted = Dat::List(vec![
+			oid(9, 1).to_dat(),
+			Dat::List(vec![oid(3, 1).to_dat(), oid(1, 2).to_dat()]),
+		]);
+		assert!(Header::from_dat(&unsorted).is_err());
+		let repeated = Dat::List(vec![
+			oid(9, 1).to_dat(),
+			Dat::List(vec![oid(1, 2).to_dat(), oid(1, 2).to_dat()]),
+		]);
+		assert!(Header::from_dat(&repeated).is_err());
+		Ok(())
+	}
+
+	/// An operation may not be its own parent, on the way in or on the way out.
+	#[test]
+	fn an_operation_is_not_its_own_parent() -> Outcome<()> {
+		assert!(Header::new(oid(1, 4), vec![oid(2, 1), oid(1, 4)]).is_err());
+		let itself = Dat::List(vec![
+			oid(1, 4).to_dat(),
+			Dat::List(vec![oid(1, 4).to_dat()]),
+		]);
+		assert!(Header::from_dat(&itself).is_err());
+		Ok(())
+	}
+
+	/// A root header carries no parents and says so.
+	#[test]
+	fn a_root_header_has_no_parents() -> Outcome<()> {
+		let head = Header::root(oid(1, 1));
+		assert!(head.is_root());
+		assert!(head.parents.is_empty());
+		assert!(!res!(Header::new(oid(1, 2), vec![oid(1, 1)])).is_root());
+		Ok(())
+	}
+
+	/// A record round trips whatever operation it carries, and a malformed one
+	/// is refused.
+	#[test]
+	fn record_round_trips_every_variant() -> Outcome<()> {
+		let head = res!(Header::new(oid(5, 7), vec![oid(1, 1), oid(2, 2)]));
+		for op in samples() {
+			let rec = Record::new(head.clone(), op);
+			assert_eq!(rec, res!(Record::from_dat(&rec.to_dat())));
+			assert_eq!(rec, res!(Record::decode_all(&res!(rec.encode()))));
+		}
+		assert!(Record::from_dat(&Dat::U8(1)).is_err());
+		assert!(Record::from_dat(&Dat::List(vec![Dat::U8(1)])).is_err());
+		Ok(())
+	}
+
+	/// The parents are inside what a record hashes, so an operation re-parented
+	/// hashes differently.
+	#[test]
+	fn the_parents_are_covered_by_the_hash() -> Outcome<()> {
+		let op = Op::Mark { name: fmt!("v1") };
+		let one = Record::new(res!(Header::new(oid(1, 5), vec![oid(2, 1)])), op.clone());
+		let two = Record::new(res!(Header::new(oid(1, 5), vec![oid(2, 2)])), op);
+		assert!(
+			res!(one.hash((), [0u8; 0])).as_vec() != res!(two.hash((), [0u8; 0])).as_vec(),
+			"re-parenting must change the hash",
+		);
+		Ok(())
+	}
+
+	/// A truncated record is refused at every cut.
+	#[test]
+	fn record_decode_rejects_truncation() -> Outcome<()> {
+		let rec = Record::new(
+			res!(Header::new(oid(2, 3), vec![oid(1, 1), oid(1, 2)])),
+			Op::Splice {
+				file:	fmt!("f"),
+				left:	None,
+				right:	None,
+				remove:	Vec::new(),
+				insert:	b"abcdef".to_vec(),
+			},
+		);
+		let buf = res!(rec.encode());
+		for cut in 1..buf.len() {
+			assert!(Record::decode(&buf[..cut]).is_err(), "cut at {}", cut);
+		}
+		Ok(())
+	}
+
+	/// Records laid end to end each decode in turn.
+	#[test]
+	fn records_decode_back_to_back() -> Outcome<()> {
+		let heads = res!(sample_heads());
+		let recs: Vec<Record> = samples()
+			.into_iter()
+			.enumerate()
+			.map(|(i, op)| Record::new(heads[i % heads.len()].clone(), op))
+			.collect();
+		let mut buf = Vec::new();
+		for rec in &recs {
+			res!(rec.encode_into(&mut buf));
+		}
+		let mut at = 0;
+		for want in &recs {
+			let (got, used) = res!(Record::decode(&buf[at..]));
+			assert_eq!(&got, want);
+			at += used;
+		}
+		assert_eq!(at, buf.len());
 		Ok(())
 	}
 }

@@ -47,6 +47,29 @@ pub enum Origin {
 	Right,
 }
 
+impl Origin {
+	/// Returns the wire code for the origin.
+	pub const fn code(&self) -> u8 {
+		match self {
+			Self::Left	=> 0,
+			Self::Right	=> 1,
+		}
+	}
+
+	/// Reconstructs an origin from its wire code.
+	pub fn from_code(code: u8)
+		-> Outcome<Self>
+	{
+		match code {
+			0 => Ok(Self::Left),
+			1 => Ok(Self::Right),
+			other => Err(err!(
+				"An Origin code is 0 for Left or 1 for Right, got {}.", other;
+			Decode, Input, Invalid)),
+		}
+	}
+}
+
 impl fmt::Display for Origin {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
