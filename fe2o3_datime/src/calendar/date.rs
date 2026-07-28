@@ -137,7 +137,10 @@ impl CalendarDate {
         let century = year / 100;
         let year_of_century = year % 100;
         
-        let h = (day + (13 * (month + 1)) / 5 + year_of_century + year_of_century / 4 + century / 4 - 2 * century) % 7;
+        // rem_euclid, not %: the numerator is negative for many ordinary dates
+        // (e.g. 2004-03-15), and a negative remainder would fall through every
+        // match arm below.
+        let h = (day + (13 * (month + 1)) / 5 + year_of_century + year_of_century / 4 + century / 4 - 2 * century).rem_euclid(7);
         
         // Convert from Zeller's output (0 = Saturday) to our enum (1 = Monday)
         match h {

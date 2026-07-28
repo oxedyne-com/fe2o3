@@ -408,7 +408,18 @@ pub fn test_calendar(filter: &str) -> Outcome<()> {
         
         let date3 = res!(gregorian.date(2000, 1, 1, zone.clone())); // Saturday
         assert_eq!(date3.day_of_week(), DayOfWeek::Saturday);
-        
+
+        // Dates whose Zeller numerator is negative, which a plain % turned
+        // into an unreachable panic. Weekdays confirmed against `date -d`.
+        let date4 = res!(gregorian.date(2004, 3, 15, zone.clone())); // Monday
+        assert_eq!(date4.day_of_week(), DayOfWeek::Monday);
+
+        let date5 = res!(gregorian.date(2000, 5, 1, zone.clone())); // Monday
+        assert_eq!(date5.day_of_week(), DayOfWeek::Monday);
+
+        let date6 = res!(gregorian.date(1999, 8, 14, zone.clone())); // Saturday
+        assert_eq!(date6.day_of_week(), DayOfWeek::Saturday);
+
         println!("✅ Day of week calculations work correctly");
         Ok(())
     }));
