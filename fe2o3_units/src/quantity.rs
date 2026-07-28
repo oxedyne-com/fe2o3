@@ -53,13 +53,15 @@ impl Quantity {
     /// The dimension.
     pub fn dim(&self) -> Dimension { self.dim }
 
-    /// Returns the magnitude rounded to its tracked significant figures.
+    /// Returns the magnitude rounded to its tracked significant figures, with
+    /// a tie taken away from zero.
+    ///
+    /// The figures counted are those of the magnitude, so a sign changes
+    /// nothing about which digits survive: a slope of -0.475 to two figures is
+    /// -0.48, exactly as 0.475 is 0.48. A zero carries no scale and rounds to
+    /// zero.
     pub fn rounded(&self) -> f64 {
-        if self.val == 0.0 {
-            0.0
-        } else {
-            float::round_to_sf(self.val, self.sf)
-        }
+        float::round_to_sf(self.val, self.sf)
     }
 
     /// The decimal place of the least significant digit, i.e. the power of ten
