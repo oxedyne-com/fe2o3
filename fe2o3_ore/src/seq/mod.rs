@@ -36,13 +36,14 @@
 //! - Two moves of partly overlapping runs tear at the overlap. Both halves
 //!   survive, in two places, which is deterministic and is almost certainly not
 //!   what either author meant. It is flagged.
-//! - Two moves whose destinations sit inside each other's sources form a cycle,
-//!   and one of them lands where its anchor content was originally written
-//!   rather than where it now lives. It is flagged. **Where the cycle runs
-//!   between two files, the demoted move lands in the other file and the file it
-//!   left is emptied**; that outcome is deterministic, loses nothing, and reads
-//!   badly, so [`Flag::CrossedFile`] says so in those terms. A rule that confines
-//!   a cross-file cycle instead is design work owed.
+//! - Two moves whose destinations sit inside each other's sources form a cycle.
+//!   Inside one file it is broken by demotion: one move lands where its anchor
+//!   content was originally written rather than where it now lives, which is
+//!   flagged. **Where the cycle crosses a file boundary it is arbitrated instead**,
+//!   as one concurrent group: the member highest in op order completes, and every
+//!   other member is confined -- its claims are not written, so its content stays
+//!   where it was, and both files are told by [`Flag::Confined`]. Nothing has to be
+//!   undone, because nothing was done.
 //! - Content moved into a file that has been deleted renders nowhere a reader
 //!   looks. Nothing is lost and [`Flag::MovedIntoDeleted`] says so.
 //!
@@ -124,7 +125,10 @@ use crate::seq::slot::Slots;
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_data::interval::IntervalMap;
 
-use std::collections::BTreeMap;
+use std::collections::{
+	BTreeMap,
+	BTreeSet,
+};
 
 
 /// The total order every tie-break in the structure is decided by: the Lamport
@@ -364,10 +368,47 @@ impl Sequence {
 		res!(Self::check_complete(&ops, &atoms));
 		let files = res!(Self::files(&ops));
 		let dead = res!(Dead::build(&ops));
-		let claims = res!(Claims::build(&ops));
-		let slots = res!(Slots::place(&ops));
-		let order = res!(slots.order(&claims));
-		let walk = res!(render::traverse(&slots, &order, &claims, &dead, &atoms));
+
+		// Where every byte was written, which is one of the two readings the
+		// classifier takes. It costs one layout and no iteration, since a layout
+		// with every move voided is acyclic by construction.
+		let birth = res!(Self::birth_files(&ops, &dead, &atoms));
+
+		// The render is a fixed point over the moves a cross-file cycle has
+		// confined. Each pass arbitrates at most one cycle, and a pass that
+		// arbitrates one voids at least one move and never un-voids any, so it
+		// terminates.
+		let mut voided: BTreeSet<OpId> = BTreeSet::new();
+		let mut confined: Vec<(OpId, OpId, OpId)> = Vec::new();
+		let mut won: Vec<OpId> = Vec::new();
+		let (claims, slots, order, walk) = loop {
+			let claims = res!(Claims::build_without(&ops, &voided));
+			let slots = res!(Slots::place_without(&ops, &voided));
+			match res!(self.arbitrate(
+				&ops, &slots, &claims, &dead, &atoms, &birth, &voided, cause))
+			{
+				Some(decision) => {
+					for (op, home, denied) in decision.losers {
+						if !voided.insert(op) {
+							return Err(err!(
+								"The move {} was confined twice, so the cross-file cycle \
+								rule is not making progress.", op;
+							Bug));
+						}
+						confined.push((op, home, denied));
+					}
+					if let Some(w) = decision.winner {
+						won.push(w);
+					}
+				},
+				None => {
+					let order = res!(slots.order(&claims));
+					let walk = res!(render::traverse(
+						&slots, &order, &claims, &dead, &atoms));
+					break (claims, slots, order, walk);
+				},
+			}
+		};
 
 		// The association a wire field would have asserted, derived instead.
 		let mut index: BTreeMap<OpId, OpId> = BTreeMap::new();
@@ -390,6 +431,12 @@ impl Sequence {
 		for (op, sub) in &walk.orphans {
 			flags.push(Flag::Orphaned { op: *op, sub: *sub });
 		}
+		for (op, home, denied) in &confined {
+			flags.push(Flag::Confined { op: *op, home: *home, denied: *denied });
+		}
+		for op in &won {
+			flags.push(Flag::Won { op: *op });
+		}
 		for (id, op) in &ops {
 			if !op.is_move() {
 				continue;
@@ -400,7 +447,7 @@ impl Sequence {
 				}
 			}
 		}
-		flags.extend(res!(Self::torn(&ops, &claims, cause)));
+		flags.extend(res!(Self::torn(&ops, &claims, &voided, cause)));
 		flags.extend(res!(Self::overlaps(&ops, cause)));
 		flags.sort();
 		flags.dedup();
@@ -505,13 +552,94 @@ impl Sequence {
 		Ok(files)
 	}
 
+	/// Arbitrates the first cross-file cycle the anchor graph holds, if it holds
+	/// one, and returns what it decided.
+	///
+	/// Every cycle is asked in turn and the first that decides anything is the
+	/// answer, the caller voiding what it names and rendering again. A cycle inside
+	/// one file decides nothing and falls through to demotion, which is where it
+	/// has always been settled.
+	#[allow(clippy::too_many_arguments)]
+	fn arbitrate(
+		&self,
+		ops:	&[(OpId, &Op)],
+		slots:	&Slots,
+		claims:	&Claims,
+		dead:	&Dead,
+		atoms:	&Atoms,
+		birth:	&BTreeMap<OpId, OpId>,
+		voided:	&BTreeSet<OpId>,
+		cause:	&Causality<'_>,
+	)
+		-> Outcome<Option<Decision>>
+	{
+		let arbiter = Arbiter { ops, dead, atoms, birth, cause };
+		for cycle in res!(slots.cycles(claims)) {
+			if let Some(decision) = res!(arbiter.judge(&cycle, slots, voided)) {
+				return Ok(Some(decision));
+			}
+		}
+		Ok(None)
+	}
+
+	/// The file every atom was written into.
+	///
+	/// Read off a layout with every move voided, so that the answer is where the
+	/// content would sit if nothing had ever been moved, which is what "the file
+	/// its origin names" means. That layout is always acyclic -- an origin names
+	/// content its author had already seen, so with no claims in play every edge
+	/// runs strictly downwards in op order -- so it costs one layout and no
+	/// iteration.
+	fn birth_files(ops: &[(OpId, &Op)], dead: &Dead, atoms: &Atoms)
+		-> Outcome<BTreeMap<OpId, OpId>>
+	{
+		let all: BTreeSet<OpId> = ops.iter()
+			.filter(|(_, op)| op.is_move())
+			.map(|(id, _)| *id)
+			.collect();
+		let laid = res!(Self::layout(ops, dead, atoms, &all));
+		let mut birth: BTreeMap<OpId, OpId> = BTreeMap::new();
+		for (i, slot) in laid.slots.all().iter().enumerate() {
+			// The slot the creating splice placed, which is where the content was
+			// written; a file's seed names the file itself.
+			if slot.place != slot.claim.op() {
+				continue;
+			}
+			if let Some(f) = laid.owner.get(i).copied().flatten() {
+				birth.insert(slot.claim.op(), f);
+			}
+		}
+		Ok(birth)
+	}
+
+	/// Lays the repository out with a set of moves voided, keeping enough of the
+	/// result to ask which file any byte sits in.
+	fn layout(
+		ops:	&[(OpId, &Op)],
+		dead:	&Dead,
+		atoms:	&Atoms,
+		voided:	&BTreeSet<OpId>,
+	)
+		-> Outcome<Layout>
+	{
+		let claims = res!(Claims::build_without(ops, voided));
+		let slots = res!(Slots::place_without(ops, voided));
+		let order = res!(slots.order(&claims));
+		let walk = res!(render::traverse(&slots, &order, &claims, dead, atoms));
+		Ok(Layout { slots, claims, owner: walk.owner })
+	}
+
 	/// Raises a cross-file flag where breaking a cycle left a placement holding
 	/// content that was written into one file and renders in another.
 	///
 	/// The comparison is between where the content was written and where the
-	/// demoted placement put it, not between the two ends of the demoted origin:
-	/// once a two-file cycle has collapsed, both ends are in the same file, and
-	/// asking about them would report nothing while a file sat empty.
+	/// demoted placement put it, not between the two ends of the demoted origin,
+	/// which a cycle drawn tight around one gap would report nothing about.
+	///
+	/// Every demotion this sees is now inside one file, a cross-file cycle having
+	/// been arbitrated before the order was asked for. What still trips the flag is
+	/// a demoted placement whose content had legitimately changed files earlier,
+	/// and the flag is then telling the truth about the two files.
 	fn crossed_file(
 		slots:	&Slots,
 		claims:	&Claims,
@@ -549,6 +677,10 @@ impl Sequence {
 			Flag::CrossedFile { from, to, .. } => {
 				out.push(*from);
 				out.push(*to);
+			},
+			Flag::Confined { home, denied, .. } => {
+				out.push(*home);
+				out.push(*denied);
 			},
 			Flag::MovedIntoDeleted { file, .. } => out.push(*file),
 			other => {
@@ -636,12 +768,22 @@ impl Sequence {
 	/// somebody else. The parents say which it was, and only a concurrent claim
 	/// tears. An author who moved a block and then moved it again is owed no flag,
 	/// and a flag they cannot act on is noise that hides the ones they can.
-	fn torn(ops: &[(OpId, &Op)], claims: &Claims, cause: &Causality<'_>)
+	///
+	/// A move confined by the cross-file cycle rule owns nothing either, and would
+	/// look torn to a register that could not tell why. It is told
+	/// [`Flag::Confined`] instead: the two flags name different events, and an
+	/// author is owed the one that happened.
+	fn torn(
+		ops:	&[(OpId, &Op)],
+		claims:	&Claims,
+		voided:	&BTreeSet<OpId>,
+		cause:	&Causality<'_>,
+	)
 		-> Outcome<Vec<Flag>>
 	{
 		let mut out: Vec<Flag> = Vec::new();
 		for (id, op) in ops {
-			if !op.is_move() {
+			if !op.is_move() || voided.contains(id) {
 				continue;
 			}
 			let mut lost: Vec<ContentRange> = Vec::new();
@@ -748,5 +890,222 @@ impl Sequence {
 			Bug, Mismatch));
 		}
 		Ok(())
+	}
+}
+
+
+/// One trial layout of the repository, kept only to be asked where things are.
+struct Layout {
+	/// The slots it placed.
+	slots:	Slots,
+	/// The register they were laid out against.
+	claims:	Claims,
+	/// The file each slot ended up in.
+	owner:	Vec<Option<OpId>>,
+}
+
+impl Layout {
+	/// The file a byte sits in, or `None` where no slot in this layout shows it.
+	fn file_of(&self, cid: &ContentId) -> Option<OpId> {
+		let i = match self.slots.owner_slot(cid, &self.claims, false) {
+			Ok(i)	=> i,
+			Err(_)	=> return None,
+		};
+		self.owner.get(i).copied().flatten()
+	}
+}
+
+
+/// What arbitrating one cycle decided.
+struct Decision {
+	/// The move that won the cycle outright, where the arbitration names one.
+	winner:	Option<OpId>,
+	/// The moves confined: each with the file its content stays in and the file
+	/// it was denied.
+	losers:	Vec<(OpId, OpId, OpId)>,
+}
+
+
+/// What deciding a cycle takes: the operation set, the two structures a trial
+/// layout needs, where every byte was written, and what each author had seen.
+struct Arbiter<'a> {
+	/// The operations, in op order.
+	ops:	&'a [(OpId, &'a Op)],
+	/// The tombstones, which a trial layout needs and does not change.
+	dead:	&'a Dead,
+	/// The atoms, likewise.
+	atoms:	&'a Atoms,
+	/// The file every atom was written into.
+	birth:	&'a BTreeMap<OpId, OpId>,
+	/// The causal graph, which is what tells a race from a sequence.
+	cause:	&'a Causality<'a>,
+}
+
+impl Arbiter<'_> {
+
+	/// Decides what to do with one cycle, or nothing.
+	///
+	/// Returns `None` where the rule declines, in which case the caller falls back
+	/// to demotion: that is what happens to a cycle inside one file, to a cycle
+	/// with no move in it to void, and to a cycle every one of whose members is
+	/// informed.
+	///
+	/// **The rule.** A cycle in the anchor graph that crosses a file boundary is
+	/// arbitrated as one concurrent group: the member highest in op order completes
+	/// wholly, and every other member is voided back to its source and flagged. The
+	/// design has already argued for this once, over the overlapping range move --
+	/// one of your two moves happened and you were told which is easier to explain,
+	/// and to undo, than half a block at each end of the repository.
+	fn judge(
+		&self,
+		cycle:	&[usize],
+		slots:	&Slots,
+		voided:	&BTreeSet<OpId>,
+	)
+		-> Outcome<Option<Decision>>
+	{
+		// The moves the cycle runs through, in op order. A splice in a cycle is not
+		// voidable, since voiding an insertion would destroy content.
+		let mut members: Vec<OpId> = Vec::new();
+		for k in cycle {
+			let place = res!(slots.get(*k)).place;
+			if voided.contains(&place) || members.contains(&place) {
+				continue;
+			}
+			if self.op(&place).map(|o| o.is_move()).unwrap_or(false) {
+				members.push(place);
+			}
+		}
+		members.sort_by_key(OpOrder::of);
+		if members.is_empty() {
+			return Ok(None);
+		}
+
+		// A member crosses a boundary when its content and its destination are in
+		// different files, and that question is asked twice, of two repositories,
+		// because neither answer alone is sound.
+		//
+		// **Where the bytes would be if this cycle had not happened.** One layout
+		// with the cycle's members voided and nothing else. Asking which file a
+		// member's content is in is circular while the cycle is unbroken -- the file
+		// is read off the tree, and the tree is what the cycle is blocking -- and
+		// voiding every member removes every edge of the cycle, so it lays out.
+		//
+		// **Where the bytes were written.** The birth layout, which is the only
+		// reading that sees a cycle whose members supersede an earlier move of their
+		// own: voiding such a cycle resurrects the superseded move, which carries
+		// the content over the boundary itself, and both readings of the cycle then
+		// come out inside one file when it is two.
+		//
+		// The rule is the union. Both failures are false negatives -- each reading
+		// misses cycles, neither invents them -- and a false negative is a collapse
+		// while a false positive is a voided move, which is flagged and reversible.
+		let mut without: BTreeSet<OpId> = voided.clone();
+		for m in &members {
+			without.insert(*m);
+		}
+		let site = res!(Sequence::layout(self.ops, self.dead, self.atoms, &without));
+
+		let mut home: BTreeMap<OpId, OpId> = BTreeMap::new();
+		let mut dest: BTreeMap<OpId, OpId> = BTreeMap::new();
+		let mut cross: Vec<OpId> = Vec::new();
+		for m in &members {
+			let op = match self.op(m) {
+				Some(o)	=> o,
+				None	=> continue,
+			};
+			let (left, right) = op.origins();
+			let anchor = match left.or(right) {
+				Some(a)	=> a.content,
+				None	=> continue,
+			};
+			let born_to = self.birth.get(&anchor.op).copied();
+			let now_to = site.file_of(&anchor);
+			let mut h: Option<OpId> = None;
+			let mut differs = false;
+			for r in op.regions() {
+				if r.is_empty() {
+					continue;
+				}
+				let first = ContentId::new(r.op(), r.from());
+				let born_from = self.birth.get(&r.op()).copied();
+				let now_from = site.file_of(&first);
+				if h.is_none() {
+					h = now_from.or(born_from);
+				}
+				if born_from.is_some() && born_from != born_to {
+					differs = true;
+				}
+				if now_from.is_some() && now_to.is_some() && now_from != now_to {
+					differs = true;
+				}
+			}
+			let h = match h {
+				Some(f)	=> f,
+				None	=> continue,
+			};
+			let d = match now_to.or(born_to) {
+				Some(f)	=> f,
+				None	=> continue,
+			};
+			home.insert(*m, h);
+			dest.insert(*m, d);
+			if differs {
+				cross.push(*m);
+			}
+		}
+		if cross.is_empty() {
+			return Ok(None);
+		}
+
+		// A member that saw another member is informed rather than racing, and an
+		// informed move is not voided for a race it did not have. This is the
+		// distinction the torn flag had to learn: the claim register cannot tell a
+		// race from a sequence, and the parents can.
+		//
+		// The exemption is for the causally *last* informed member only. Exempting
+		// every member with another in its past is defeated by a chain of moves:
+		// where a replica has made three in a row, each informed by the one before,
+		// every member but the first is exempt, and where the first is not the one
+		// that has to go the rule declines and the collapse happens anyway. A member
+		// superseded by a later member of the same cycle is owed nothing, its own
+		// author having moved on.
+		let informed = |m: &OpId| {
+			members.iter().any(|n| n != m && self.cause.reaches(m, n))
+				&& !members.iter().any(|n| n != m && self.cause.reaches(n, m))
+		};
+
+		// Where the cycle runs through only one move -- its other members being
+		// splices, or the move anchoring inside its own source -- there is nothing
+		// to arbitrate between, and a winner-takes-all rule that keeps its only
+		// member would break no cycle at all. That move is confined instead, and the
+		// cycle keeps no winner.
+		let highest = members.iter().copied().max_by_key(OpOrder::of);
+		let (winner, chosen): (Option<OpId>, Vec<OpId>) = if members.len() == 1 {
+			(None, cross.iter().copied().filter(|m| !informed(m)).collect())
+		} else {
+			(highest, members.iter()
+				.copied()
+				.filter(|m| Some(*m) != highest && !informed(m))
+				.collect())
+		};
+		let mut losers: Vec<(OpId, OpId, OpId)> = Vec::new();
+		for m in chosen {
+			let h = match home.get(&m) {
+				Some(f)	=> *f,
+				None	=> continue,
+			};
+			let d = dest.get(&m).copied().unwrap_or(h);
+			losers.push((m, h, d));
+		}
+		if losers.is_empty() {
+			return Ok(None);
+		}
+		Ok(Some(Decision { winner, losers }))
+	}
+
+	/// The operation of that identity, if the set holds it.
+	fn op(&self, id: &OpId) -> Option<&Op> {
+		self.ops.iter().find(|(i, _)| i == id).map(|(_, op)| *op)
 	}
 }
