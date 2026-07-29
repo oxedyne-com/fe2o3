@@ -478,6 +478,19 @@ mod tests {
 			},
 			Flag::MovedIntoDeleted { op: oid(5, 2), file: oid(2, 1) },
 			Flag::Orphaned { op: oid(5, 3), sub: 11 },
+			Flag::Confined {
+				op:		oid(5, 4),
+				home:	oid(1, 1),
+				denied:	oid(2, 1),
+			},
+			// A move confined by a cycle that never left its file names one file at
+			// both ends, which is a thing the renderer says and must survive saying.
+			Flag::Confined {
+				op:		oid(5, 5),
+				home:	oid(1, 1),
+				denied:	oid(1, 1),
+			},
+			Flag::Won { op: oid(5, 6) },
 		];
 		for flag in &flags {
 			assert_eq!(*flag, res!(Flag::from_dat(&flag.to_dat())), "flag {}", flag.name());
@@ -686,6 +699,18 @@ mod tests {
 			Dat::U64(0),
 			Dat::U8(7),
 		])).is_err());
+		// A confinement missing the file it was denied, and a win with a file it
+		// has no room for.
+		assert!(Flag::from_dat(&Dat::List(vec![
+			Dat::U8(8),
+			oid(1, 1).to_dat(),
+			oid(2, 1).to_dat(),
+		])).is_err());
+		assert!(Flag::from_dat(&Dat::List(vec![
+			Dat::U8(9),
+			oid(1, 1).to_dat(),
+			oid(2, 1).to_dat(),
+		])).is_err());
 		assert!(Run::from_dat(&Dat::U64(1)).is_err());
 		Ok(())
 	}
@@ -734,7 +759,7 @@ mod tests {
 				let mut flags: Vec<Flag> = Vec::new();
 				for _ in 0..next() % 4 {
 					let op = oid((next() % 5) as u64, (next() % 50) as u64);
-					flags.push(match next() % 7 {
+					flags.push(match next() % 9 {
 						0 => Flag::Torn {
 							op,
 							lost: vec![res!(ContentRange::new(op, 0, (next() % 30) as u64))],
@@ -760,6 +785,12 @@ mod tests {
 							file: oid((next() % 5) as u64, (next() % 50) as u64),
 						},
 						5 => Flag::Orphaned { op, sub: (next() % 100) as u64 },
+						6 => Flag::Confined {
+							op,
+							home:	oid((next() % 5) as u64, (next() % 50) as u64),
+							denied:	oid((next() % 5) as u64, (next() % 50) as u64),
+						},
+						7 => Flag::Won { op },
 						_ => Flag::Overlap {
 							ops:	vec![op, oid((next() % 5) as u64, (next() % 50) as u64)],
 							region:	res!(ContentRange::new(op, 1, (next() % 30) as u64 + 1)),
