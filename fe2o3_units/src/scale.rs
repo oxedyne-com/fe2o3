@@ -435,16 +435,71 @@ impl Mag {
 
 }
 
+/// Two magnitudes are equal when they denote the same quantity, to the coarser
+/// of the two significant figure counts.
+///
+/// It is the quantity that is compared and not the number written on it, so a
+/// mega and a giga carrying the same significand are a thousand apart and
+/// differ, while one mega and a thousand kilo are one quantity and match. Each
+/// side is therefore reduced to a scale-free value first, and only then to a
+/// decimal exponent and a significand; both must agree.
+///
+/// The coarser count governs so that the answer does not depend on which side
+/// of the operator a magnitude sits.
+///
+/// Zero is zero whatever prefix it wears, and is no other quantity. A value
+/// that is not a number equals nothing, itself included, as [`f64`] has it, so
+/// this is [`PartialEq`] and not [`Eq`].
 impl PartialEq for Mag {
     fn eq(&self, other: &Self) -> bool {
-        let lhs = self.val/(10.0f64.powi(self.val.log10().floor() as i32));
-        let rhs = other.val/(10.0f64.powi(other.val.log10().floor() as i32));
-        if (lhs * (10.0f64.powi((self.sf - 1) as i32))).round() ==
-            (rhs * (10.0f64.powi((self.sf - 1) as i32))).round() {
-            return true;
+        // Fold each prefix into its value, which is the only way a mega and a
+        // kilo can be put side by side at all.
+        let a = self.unitise().val;
+        let b = other.unitise().val;
+
+        if a.is_nan() || b.is_nan() {
+            return false;
         }
-        false
+        if a == 0.0 || b == 0.0 {
+            return a == 0.0 && b == 0.0;
+        }
+        if a.is_sign_negative() != b.is_sign_negative() {
+            return false;
+        }
+        if a.is_infinite() || b.is_infinite() {
+            return a == b;
+        }
+
+        // A count of zero can only arrive through the public fields, since the
+        // constructor refuses it; one figure is the least a comparison can be
+        // made at, and seventeen is the most an f64 carries.
+        let sf = self.sf.min(other.sf).clamp(1, 17);
+        significand(a, sf) == significand(b, sf)
     }
+}
+
+/// Reduces a finite, non-zero value to the decimal exponent of its leading digit
+/// and its significand rounded to `sf` figures, which is what "the same quantity
+/// at this precision" comes down to. The sign is the caller's business.
+fn significand(val: f64, sf: u8) -> (i32, i64) {
+    let mag = val.abs();
+    let mut exp = mag.log10().floor() as i32;
+    // A logarithm is not exact, so the exponent is checked against the value it
+    // is meant to describe and nudged if it names the wrong decade.
+    let lead = float::mul_pow10(mag, -exp);
+    if lead >= 10.0 {
+        exp += 1;
+    } else if lead < 1.0 {
+        exp -= 1;
+    }
+    let mut sig = float::mul_pow10(mag, (sf as i32) - 1 - exp).round() as i64;
+    // Rounding can carry into the next decade: 9.99 to two figures is 10.
+    let ceiling = 10i64.pow(sf as u32);
+    if sig >= ceiling {
+        sig /= 10;
+        exp += 1;
+    }
+    (exp, sig)
 }
 
 #[cfg(test)]
@@ -512,6 +567,103 @@ mod tests {
         let b = a.humanise();
         assert_eq!(a, a.unitise());
         assert_eq!(a, b.unitise());
+        Ok(())
+    }
+
+    /// The same significand under two prefixes is two different quantities, and
+    /// the arithmetic is not in dispute: 1.234 mega is 1 234 000 and 1.234 giga
+    /// is 1 234 000 000, a thousand apart. Equality compared the significands
+    /// alone and called them the same number.
+    #[test]
+    fn test_a_prefix_apart_is_not_the_same_quantity_00() -> Outcome<()> {
+        assert_ne!(res!(Mag::mega(1.234, 4)), res!(Mag::giga(1.234, 4)));
+        assert_ne!(res!(Mag::milli(5.0, 3)), res!(Mag::micro(5.0, 3)));
+        assert_ne!(res!(Mag::kilo(1.0, 3)), res!(Mag::one_decimal(1.0, 3)));
+        Ok(())
+    }
+
+    /// One mega is a thousand kilo is a million, written three ways.
+    #[test]
+    fn test_one_quantity_under_three_prefixes_is_one_quantity_00() -> Outcome<()> {
+        let m = res!(Mag::mega(1.0, 4));
+        assert_eq!(m, res!(Mag::kilo(1000.0, 4)));
+        assert_eq!(m, res!(Mag::one_decimal(1_000_000.0, 4)));
+        assert_eq!(res!(Mag::milli(1234.0, 4)), res!(Mag::one_decimal(1.234, 4)));
+        Ok(())
+    }
+
+    /// Zero is zero whatever prefix it wears. The old comparison took the
+    /// logarithm of it, got minus infinity, and made every zero unequal to
+    /// itself.
+    #[test]
+    fn test_zero_equals_zero_00() -> Outcome<()> {
+        assert_eq!(res!(Mag::one_decimal(0.0, 3)), res!(Mag::one_decimal(0.0, 3)));
+        assert_eq!(res!(Mag::mega(0.0, 3)), res!(Mag::nano(0.0, 5)));
+        assert_ne!(res!(Mag::one_decimal(0.0, 3)), res!(Mag::one_decimal(1.0, 3)));
+        Ok(())
+    }
+
+    /// A logarithm has nothing to say about a negative number, so the old
+    /// comparison divided by ten to the power of a not-a-number cast to zero
+    /// and compared the raw values. Two magnitudes below zero compare like
+    /// their magnitudes, and a sign is a difference.
+    #[test]
+    fn test_negatives_compare_by_magnitude_00() -> Outcome<()> {
+        assert_eq!(res!(Mag::milli(-5.0, 3)), res!(Mag::milli(-5.0, 3)));
+        assert_eq!(res!(Mag::milli(-5.0, 3)), res!(Mag::micro(-5000.0, 3)));
+        assert_ne!(res!(Mag::milli(-5.0, 3)), res!(Mag::milli(5.0, 3)));
+        assert_ne!(res!(Mag::mega(-1.234, 4)), res!(Mag::giga(-1.234, 4)));
+        Ok(())
+    }
+
+    /// Precision belongs to the comparison, not to the left-hand side: the
+    /// coarser of the two counts governs, so the answer is the same either way
+    /// round. 1.04 kilo and 1.0 kilo are one figure apart and agree at one.
+    #[test]
+    fn test_the_comparison_is_symmetric_00() -> Outcome<()> {
+        let coarse = res!(Mag::kilo(1.0, 1));
+        let fine = res!(Mag::kilo(1.04, 3));
+        assert_eq!(coarse, fine);
+        assert_eq!(fine, coarse);
+        let apart = res!(Mag::kilo(1.6, 3));
+        assert_ne!(coarse, apart);
+        assert_ne!(apart, coarse);
+        Ok(())
+    }
+
+    /// Rounding carries into the next decade: 9.99 kilo to two figures is ten
+    /// thousand, and an exponent that does not follow the carry would call it
+    /// nine thousand nine hundred.
+    #[test]
+    fn test_a_rounding_carry_moves_the_exponent_00() -> Outcome<()> {
+        assert_eq!(res!(Mag::kilo(9.99, 2)), res!(Mag::kilo(10.0, 2)));
+        assert_eq!(res!(Mag::one_decimal(0.0999, 2)), res!(Mag::one_decimal(0.1, 2)));
+        Ok(())
+    }
+
+    /// The fields are public, so a count of zero can be built around the
+    /// constructor that refuses it. Subtracting one from it used to wrap a `u8`
+    /// to 255.
+    #[test]
+    fn test_a_zero_figure_count_does_not_wrap_00() -> Outcome<()> {
+        let mut a = res!(Mag::kilo(1.234, 4));
+        a.sf = 0;
+        let b = res!(Mag::kilo(1.2, 2));
+        // One figure is the floor, and 1.234 k and 1.2 k are both 1 k at it.
+        assert_eq!(a, b);
+        assert_ne!(a, res!(Mag::mega(1.234, 4)));
+        Ok(())
+    }
+
+    /// A value that is not a number equals nothing, itself included.
+    #[test]
+    fn test_a_value_that_is_not_a_number_equals_nothing_00() -> Outcome<()> {
+        let nan = res!(Mag::one_decimal(f64::NAN, 3));
+        assert_ne!(nan, res!(Mag::one_decimal(f64::NAN, 3)));
+        assert_ne!(nan, res!(Mag::one_decimal(1.0, 3)));
+        let inf = res!(Mag::one_decimal(f64::INFINITY, 3));
+        assert_eq!(inf, res!(Mag::one_decimal(f64::INFINITY, 3)));
+        assert_ne!(inf, res!(Mag::one_decimal(f64::NEG_INFINITY, 3)));
         Ok(())
     }
 }
