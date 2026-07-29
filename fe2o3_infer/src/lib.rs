@@ -1,8 +1,18 @@
 //! Convolutional inference on the CPU, with no dependency beyond `fe2o3_core`.
 //!
-//! This is the numerical floor: safe `f32` kernels behind one runtime dispatch,
-//! so that a binary built for a stock target still reaches the vector unit of
-//! the machine it lands on.
+//! The crate carries two layers so far:
+//!
+//! - [`kern`] -- safe `f32` kernels behind one runtime dispatch, so that a
+//!   binary built for a stock target still reaches the vector unit of the
+//!   machine it lands on.
+//! - [`onnx`] and [`graph`] -- a loader for the subset of ONNX that a small
+//!   convolutional network uses, and a runner over the operators it yields.
+//!
+//! # Owning nothing
+//!
+//! Nothing here reads a file, opens a socket, or starts a thread. Weights
+//! arrive as `&[u8]`; where they came from and how the work is spread across
+//! cores are the caller's business.
 //!
 //! # Layout
 //!
@@ -22,5 +32,7 @@
 #[macro_use]
 pub mod macros;
 
+pub mod graph;
 pub mod kern;
+pub mod onnx;
 pub mod tensor;
