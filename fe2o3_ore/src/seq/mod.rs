@@ -464,7 +464,7 @@ impl Sequence {
 
 		// Notes are read back off the provenance the walk produced, which is where
 		// every move the operation set holds has already happened.
-		let (mut per_file_notes, repo_notes) = res!(render::notes(&ops, &walk.files));
+		let (mut per_file_notes, repo_notes) = render::notes(&ops, &walk.files);
 
 		let mut walk_files = walk.files;
 		let mut out: Vec<Rendered> = Vec::new();

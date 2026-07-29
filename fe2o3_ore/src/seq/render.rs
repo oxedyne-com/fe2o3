@@ -1427,7 +1427,7 @@ pub(super) fn notes(
 	ops:	&[(OpId, &Op)],
 	files:	&BTreeMap<OpId, (Vec<u8>, Vec<Run>)>,
 )
-	-> Outcome<(BTreeMap<OpId, Vec<Note>>, Vec<RepoNote>)>
+	-> (BTreeMap<OpId, Vec<Note>>, Vec<RepoNote>)
 {
 	// Where each atom's bytes render: for one atom, the offsets it shows, the
 	// file showing them, and the rendered offset the run begins at. Disjoint by
@@ -1508,7 +1508,7 @@ pub(super) fn notes(
 		v.sort_by_key(|n| (n.spans.first().map(|s| s.at).unwrap_or(0), n.note));
 	}
 	repo.sort_by_key(|n| n.note);
-	Ok((per_file, repo))
+	(per_file, repo)
 }
 
 /// Returns the in-order successor of `v` among the nodes placed so far.
