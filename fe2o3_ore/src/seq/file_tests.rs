@@ -916,6 +916,114 @@ fn random_multi_file_sets_render_alike_and_conserve() -> Outcome<()> {
 	Ok(())
 }
 
+/// Cycles planted deliberately, at every length from two to four, with and
+/// without a concurrent edit inside a cycling block: each converges, conserves,
+/// and leaves every confined move's content in the file its flag names.
+///
+/// The last of those is the property the whole rule rests on, and it is not the
+/// same claim as convergence. A move that did not happen has to leave its bytes
+/// where they were, and a check that only compared two replicas would agree with
+/// itself while they went somewhere else together.
+#[test]
+fn planted_cross_file_cycles_leave_confined_content_at_home() -> Outcome<()> {
+	const NAMES: [&[u8]; 4] = [b"a.txt", b"b.txt", b"c.txt", b"d.txt"];
+	const TEXTS: [&[u8]; 4] = [b"abcd\n", b"wxyz\n", b"1234\n", b"pqrs\n"];
+	let mut state = 0x9e37_79b9_7f4a_7c15u64;
+	let mut next = move || {
+		state = state
+			.wrapping_mul(6_364_136_223_846_793_005)
+			.wrapping_add(1_442_695_040_888_963_407);
+		(state >> 33) as usize
+	};
+	let mut planted = 0usize;
+	let mut confinements = 0usize;
+	for trial in 0..12 {
+		let k = 2 + trial % 3;
+		let staged: Vec<(&[u8], &[u8])> = (0..k).map(|i| (NAMES[i], TEXTS[i])).collect();
+		// One replica per move, and one more for the edit where there is one.
+		let (mut reps, mut ops, ids) = res!(stage(&staged, k as u64 + 1));
+		// Each replica moves the whole of one file into the next, at an index
+		// strictly inside what that file holds, which is what closes the loop.
+		for i in 0..k {
+			let n = res!(reps[i].view(ids[(i + 1) % k])).len();
+			let at = 1 + next() % (n - 1);
+			ops.push(res!(reps[i].move_across(ids[i], 0, n, ids[(i + 1) % k], at)));
+			planted += 1;
+		}
+		if trial % 2 == 0 {
+			// An edit inside the first file's block, concurrent with every move.
+			ops.push(res!(reps[k].insert(ids[0], 2, b"!")));
+		}
+		let repo = res!(converge(&ops));
+		for flag in repo.flags() {
+			let (op, home) = match flag {
+				Flag::Confined { op, home, .. }	=> (*op, *home),
+				_				=> continue,
+			};
+			confinements += 1;
+			let named = match ops.iter().find(|(head, _)| head.id() == op) {
+				Some((_, o))	=> o.regions().to_vec(),
+				None		=> return Err(err!(
+					"A flag named an operation the case did not author."; Test, Bug)),
+			};
+			let file = match repo.file(home) {
+				Some(f)	=> f,
+				None	=> return Err(err!(
+					"A confinement named a file the render does not hold."; Test, Missing)),
+			};
+			for r in &named {
+				for off in r.from()..r.to() {
+					let cid = ContentId::new(r.op(), off);
+					assert!(
+						file.runs().iter().any(|run| run.content.contains(&cid)),
+						"trial {}: the confined move {} lost {} out of {}",
+						trial, op, cid, file.path_lossy(),
+					);
+				}
+			}
+		}
+	}
+	assert!(planted >= 12, "only {} moves were planted", planted);
+	assert!(confinements > 10, "only {} moves were confined", confinements);
+	Ok(())
+}
+
+/// A cycle with a single move in it, which winner-takes-all cannot arbitrate.
+///
+/// Whole-cycle arbitration keeps the member highest in op order, so a cycle whose
+/// only move *is* that member would keep it and break nothing. Such a move is
+/// confined instead, which is what every alternative rule does with it anyway.
+///
+/// The construction also shows the classifier's known false positive, stated
+/// rather than hidden. The move is entirely within a.txt at the time it is made,
+/// and it is judged to cross a boundary because the block it moves is by then made
+/// of bytes born in two files and it anchors inside the part born in the other
+/// one. The price of that reading is a confined move, which is flagged and can be
+/// re-issued; the price of not having it is a cycle whose members supersede an
+/// earlier move going unseen, and a file emptying itself.
+#[test]
+fn a_cycle_with_one_move_in_it_confines_that_move() -> Outcome<()> {
+	let (mut reps, mut ops, ids) = res!(stage(
+		&[(b"a.txt", b"abc\n"), (b"b.txt", b"xyz\n")], 1));
+	let (a, b) = (ids[0], ids[1]);
+	// "xyz" out of b.txt and into the middle of a.txt, which leaves a.txt holding
+	// bytes born in two files.
+	ops.push(res!(reps[0].move_across(b, 0, 3, a, 1)));
+	// The whole of a.txt to an index inside itself, which is a cycle of length one,
+	// and the index falls inside the part born in b.txt.
+	let mv = res!(reps[0].move_across(a, 0, 7, a, 3));
+	let mv_id = mv.0.id();
+	ops.push(mv);
+	let repo = res!(case("a.txt=\"axyzbc\\n\" b.txt=\"\\n\"", &ops));
+	assert!(repo.flags().contains(&Flag::Confined { op: mv_id, home: a, denied: a }),
+		"flags were {:?}", repo.flags());
+	// Confined, not won: there was nothing for it to win against.
+	assert!(!repo.flags().iter().any(|f| matches!(f, Flag::Won { .. })),
+		"a cycle of one move named a winner: {:?}", repo.flags());
+	assert_eq!(res!(text(&repo, b)), "\n");
+	Ok(())
+}
+
 /// Every operation that placed anything landed in exactly one file, and the
 /// derived index says which.
 ///
@@ -1006,3 +1114,4 @@ fn an_empty_file_is_not_empty_in_identifier_space() -> Outcome<()> {
 	);
 	Ok(())
 }
+
