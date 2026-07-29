@@ -10,6 +10,17 @@
 //! been deleted. Flags are facts derived from the operation set, not a
 //! log of what the renderer happened to do, so two replicas holding the same
 //! operations report the same flags.
+//!
+//! # Notes are resolved here too
+//!
+//! An [`crate::op::Op::Note`] names content and renders none. What a reader wants
+//! is where that content ended up, and the render is the one place that is known,
+//! so the same walk that produced the bytes is read backwards to produce a
+//! [`Note`]: the note's identity, its text, and the spans of rendered bytes its
+//! content occupies. A note is resolved against a file where its content renders
+//! there, against the repository once however many files it is scattered over, and
+//! reported as [`RepoNote::on_dead`] where its content renders nowhere at all.
+//! Like a flag, a resolved note is a function of the operation set alone.
 
 use crate::id::{
 	Anchor,
@@ -34,6 +45,7 @@ use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_jdat::prelude::*;
 
 use std::collections::BTreeMap;
+use std::ops::Range;
 
 
 /// Wire code for [`Flag::Torn`].
@@ -473,6 +485,9 @@ pub struct Stats {
 	pub claim_intervals:	usize,
 	/// Intervals in the tombstone set.
 	pub dead_intervals:	usize,
+	/// Notes the operation set holds, resolved ones and notes on dead content
+	/// alike.
+	pub notes:			usize,
 	/// Deepest path in the Fugue forest.
 	pub max_depth:		u32,
 	/// Bytes rendered anywhere, in live files and deleted ones alike.
@@ -529,6 +544,248 @@ impl Run {
 }
 
 
+/// A run of rendered bytes, named by where it begins and how far it goes.
+///
+/// This is what a note resolves to, and it is deliberately not a [`Run`]: a run
+/// says which content is being shown, and a span says only which bytes of the
+/// render a margin should be drawn against. A frontend that wants the content
+/// under a span asks [`Rendered::span`] for it.
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+pub struct Span {
+	/// Offset in the rendered bytes at which the span begins.
+	pub at:		u64,
+	/// How many bytes it covers.
+	pub len:	u64,
+}
+
+impl Span {
+	/// Constructs a span.
+	pub const fn new(at: u64, len: u64) -> Self {
+		Self { at, len }
+	}
+
+	/// Returns the offset just past the span.
+	pub const fn end(&self) -> u64 {
+		self.at + self.len
+	}
+
+	/// Serialises the span to a [`Dat`]. The shape is `[at, len]`.
+	pub fn to_dat(&self) -> Dat {
+		Dat::List(vec![
+			Dat::U64(self.at),
+			Dat::U64(self.len),
+		])
+	}
+
+	/// Reconstructs a span from a [`Dat`] produced by [`Span::to_dat`].
+	pub fn from_dat(dat: &Dat)
+		-> Outcome<Self>
+	{
+		let v = match dat {
+			Dat::List(v) if v.len() == 2 => v,
+			_ => return Err(err!(
+				"A Span expects a 2-element Dat::List, got {:?}.", dat;
+			Decode, Input, Mismatch)),
+		};
+		let mut n = [0u64; 2];
+		for (i, dat) in v.iter().enumerate() {
+			n[i] = match dat {
+				Dat::U64(x) => *x,
+				other => return Err(err!(
+					"A Span bound expects Dat::U64, got {:?}.", other;
+				Decode, Input, Mismatch)),
+			};
+		}
+		Ok(Self { at: n[0], len: n[1] })
+	}
+}
+
+
+/// A note as one file's render resolved it: what the note says, and where in this
+/// file the content it is about now sits.
+///
+/// The spans are ascending, disjoint and maximal. There may be several, because
+/// the content a note was written against can be torn apart by later edits and by
+/// moves; there is never a span of no bytes, because a note that resolves to
+/// nothing here is not reported here at all.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Note {
+	/// The operation that wrote the note.
+	note:	OpId,
+	/// What it says, as bytes.
+	text:	Vec<u8>,
+	/// Where its content renders in this file, ascending.
+	spans:	Vec<Span>,
+}
+
+impl Note {
+	/// Assembles a resolved note from its parts.
+	pub fn new(note: OpId, text: Vec<u8>, spans: Vec<Span>) -> Self {
+		Self { note, text, spans }
+	}
+
+	/// Returns the operation that wrote the note.
+	pub const fn note(&self) -> OpId {
+		self.note
+	}
+
+	/// Returns what the note says, as bytes.
+	pub fn text(&self) -> &[u8] {
+		&self.text
+	}
+
+	/// Returns what the note says as a string, with anything that is not valid
+	/// UTF-8 replaced. For messages and tests; the bytes themselves are the record.
+	pub fn text_lossy(&self) -> String {
+		String::from_utf8_lossy(&self.text).into_owned()
+	}
+
+	/// Returns where the note's content renders in this file, ascending.
+	pub fn spans(&self) -> &[Span] {
+		&self.spans
+	}
+
+	/// Returns the number of bytes the note's content occupies in this file.
+	pub fn len(&self) -> u64 {
+		self.spans.iter().map(|s| s.len).sum()
+	}
+
+	/// Reports whether the note covers no bytes of this file, which a resolved
+	/// note never does.
+	pub fn is_empty(&self) -> bool {
+		self.spans.is_empty()
+	}
+
+	/// Serialises the note to a [`Dat`]. The shape is `[note, text, [span, ...]]`.
+	///
+	/// The text is a [`Dat::BU64`] for the reason a file's bytes are: a note may
+	/// be longer than the 255 bytes a [`Dat::BU8`] length field can express, and a
+	/// truncated length there would corrupt silently.
+	pub fn to_dat(&self) -> Dat {
+		Dat::List(vec![
+			self.note.to_dat(),
+			Dat::BU64(self.text.clone()),
+			Dat::List(self.spans.iter().map(|s| s.to_dat()).collect()),
+		])
+	}
+
+	/// Reconstructs a note from a [`Dat`] produced by [`Note::to_dat`].
+	pub fn from_dat(dat: &Dat)
+		-> Outcome<Self>
+	{
+		let v = match dat {
+			Dat::List(v) if v.len() == 3 => v,
+			_ => return Err(err!(
+				"A Note expects a 3-element Dat::List, got {:?}.", dat;
+			Decode, Input, Mismatch)),
+		};
+		let note = res!(OpId::from_dat(&v[0]));
+		let text = match &v[1] {
+			Dat::BU64(b) => b.clone(),
+			other => return Err(err!(
+				"The text of the note {} expects Dat::BU64, got {:?}.", note, other;
+			Decode, Input, Mismatch)),
+		};
+		let listed = match &v[2] {
+			Dat::List(l) => l,
+			other => return Err(err!(
+				"The spans of the note {} expect Dat::List, got {:?}.", note, other;
+			Decode, Input, Mismatch)),
+		};
+		let mut spans = Vec::with_capacity(listed.len());
+		for item in listed {
+			spans.push(res!(Span::from_dat(item)));
+		}
+		Ok(Self { note, text, spans })
+	}
+}
+
+
+/// Where a note's content renders in one file.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct NotePlace {
+	/// The file.
+	pub file:	OpId,
+	/// Where the content renders in it, ascending.
+	pub spans:	Vec<Span>,
+}
+
+
+/// A note as the repository's render resolved it: what it says, every file its
+/// content reaches, and whether it reaches any.
+///
+/// A note is listed here once however many files its content is scattered over,
+/// which is the difference between this and [`Rendered::notes`]: the file view
+/// answers "what should this margin show", and the repository view answers "where
+/// did this note end up".
+///
+/// There is no codec for this type, and that is deliberate: a repository view is
+/// derived from the file views a snapshot already carries, except for a note on
+/// dead content, which is derived from the operation log. Storing it would be
+/// storing a join.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RepoNote {
+	/// The operation that wrote the note.
+	note:		OpId,
+	/// What it says, as bytes.
+	text:		Vec<u8>,
+	/// The files its content reaches, in ascending order of identity.
+	files:		Vec<NotePlace>,
+	/// Whether none of the content it names renders anywhere at all.
+	on_dead:	bool,
+}
+
+impl RepoNote {
+	/// Assembles a repository-wide resolved note from its parts.
+	pub(super) fn new(note: OpId, text: Vec<u8>, files: Vec<NotePlace>) -> Self {
+		let on_dead = files.is_empty();
+		Self { note, text, files, on_dead }
+	}
+
+	/// Returns the operation that wrote the note.
+	pub const fn note(&self) -> OpId {
+		self.note
+	}
+
+	/// Returns what the note says, as bytes.
+	pub fn text(&self) -> &[u8] {
+		&self.text
+	}
+
+	/// Returns what the note says as a string, with anything that is not valid
+	/// UTF-8 replaced.
+	pub fn text_lossy(&self) -> String {
+		String::from_utf8_lossy(&self.text).into_owned()
+	}
+
+	/// Returns the files the note's content reaches, ascending by identity.
+	pub fn files(&self) -> &[NotePlace] {
+		&self.files
+	}
+
+	/// Returns where the note's content renders in one file.
+	pub fn spans_in(&self, file: OpId) -> &[Span] {
+		self.files
+			.iter()
+			.find(|p| p.file == file)
+			.map(|p| p.spans.as_slice())
+			.unwrap_or(&[])
+	}
+
+	/// Reports whether every byte the note is about has been deleted, so that the
+	/// note renders nowhere.
+	///
+	/// A note in this state is not lost and is not a fault: the log still holds
+	/// what it says and what it was about, and this is what says a reader will not
+	/// find it in any margin. A note on content that moved into a *deleted file*
+	/// is not in this state, because those bytes still render -- into a file no
+	/// reader looks at, which is what [`Flag::MovedIntoDeleted`] is for.
+	pub const fn on_dead(&self) -> bool {
+		self.on_dead
+	}
+}
+
+
 /// One file as a render produced it: which file it is, where it sits, whether it
 /// still exists, its bytes, what they are made of, and what the renderer noticed
 /// about it.
@@ -551,11 +808,14 @@ pub struct Rendered {
 	runs:	Vec<Run>,
 	/// What the renderer noticed that concerns this file.
 	flags:	Vec<Flag>,
+	/// The notes whose content renders here, in render order.
+	notes:	Vec<Note>,
 }
 
 impl Rendered {
 
 	/// Assembles a file's render from its parts.
+	#[allow(clippy::too_many_arguments)]
 	pub(super) fn new(
 		file:	OpId,
 		path:	Vec<u8>,
@@ -563,10 +823,11 @@ impl Rendered {
 		bytes:	Vec<u8>,
 		runs:	Vec<Run>,
 		flags:	Vec<Flag>,
+		notes:	Vec<Note>,
 	)
 		-> Self
 	{
-		Self { file, path, live, bytes, runs, flags }
+		Self { file, path, live, bytes, runs, flags, notes }
 	}
 
 	/// Returns the file's identity.
@@ -606,6 +867,26 @@ impl Rendered {
 	/// Returns what the renderer noticed that concerns this file.
 	pub fn flags(&self) -> &[Flag] {
 		&self.flags
+	}
+
+	/// Returns the notes whose content renders in this file, in the order a
+	/// margin would draw them: by where each note's first span begins, and then by
+	/// the identity of the note.
+	///
+	/// A note appears here for every file its content reaches, which is more than
+	/// one where a later move split that content across two; the whole of it is
+	/// [`Repo::notes`]. A note whose content has been deleted appears in no file
+	/// at all, and is reported by [`RepoNote::on_dead`].
+	pub fn notes(&self) -> &[Note] {
+		&self.notes
+	}
+
+	/// Returns one note by the identity of the operation that wrote it, if its
+	/// content renders here.
+	pub fn note(&self, note: OpId)
+		-> Option<&Note>
+	{
+		self.notes.iter().find(|n| n.note == note)
 	}
 
 	/// Returns the number of bytes rendered.
@@ -766,6 +1047,23 @@ impl Rendered {
 		let (left, right) = res!(dest.gap(to));
 		Ok(Op::Move { src, left, right })
 	}
+
+	/// Builds a content-anchored note from index-based intent: say `text` about
+	/// the `len` bytes at `at`.
+	///
+	/// This is the same bridge [`Rendered::splice`] is, for the same reason: the
+	/// reader points at a region of the screen, and the render is where that region
+	/// acquires the names that will follow it through every later edit.
+	///
+	/// Fails on a region of no bytes, since a note is about something.
+	pub fn note_on(&self, at: usize, len: usize, text: Vec<u8>)
+		-> Outcome<Op>
+	{
+		let on = res!(self.span(at, len));
+		let op = Op::Note { on, text };
+		res!(op.check_note());
+		Ok(op)
+	}
 }
 
 
@@ -783,6 +1081,8 @@ pub struct Repo {
 	files:	Vec<Rendered>,
 	/// Everything the renderer noticed, sorted and without repetition.
 	flags:	Vec<Flag>,
+	/// Every note the operation set holds, in ascending order of identity.
+	notes:	Vec<RepoNote>,
 	/// Which file each placing operation landed in.
 	index:	BTreeMap<OpId, OpId>,
 	/// What the render cost.
@@ -795,12 +1095,13 @@ impl Repo {
 	pub(super) fn new(
 		files:	Vec<Rendered>,
 		flags:	Vec<Flag>,
+		notes:	Vec<RepoNote>,
 		index:	BTreeMap<OpId, OpId>,
 		stats:	Stats,
 	)
 		-> Self
 	{
-		Self { files, flags, index, stats }
+		Self { files, flags, notes, index, stats }
 	}
 
 	/// Returns every file, in ascending order of identity, deleted ones included.
@@ -859,6 +1160,32 @@ impl Repo {
 	/// Returns everything the renderer noticed, over the whole repository.
 	pub fn flags(&self) -> &[Flag] {
 		&self.flags
+	}
+
+	/// Returns every note the operation set holds, in ascending order of
+	/// identity, each listed once however many files its content is scattered
+	/// over.
+	///
+	/// A note whose content has been deleted entirely is here too, saying so; see
+	/// [`RepoNote::on_dead`].
+	pub fn notes(&self) -> &[RepoNote] {
+		&self.notes
+	}
+
+	/// Returns one note by the identity of the operation that wrote it.
+	pub fn note(&self, note: OpId)
+		-> Option<&RepoNote>
+	{
+		self.notes
+			.binary_search_by(|n| n.note.cmp(&note))
+			.ok()
+			.and_then(|i| self.notes.get(i))
+	}
+
+	/// Returns the notes whose content renders nowhere at all, in ascending order
+	/// of identity.
+	pub fn dead_notes(&self) -> Vec<&RepoNote> {
+		self.notes.iter().filter(|n| n.on_dead).collect()
 	}
 
 	/// Returns what the render cost.
@@ -1080,6 +1407,108 @@ pub(super) fn traverse(
 	}
 
 	Ok(Traversal { files, owner, orphans, orphaned, max_depth })
+}
+
+/// Resolves every note the operation set holds against the bytes the walk
+/// produced, giving the notes each file should show and the repository's own view
+/// of all of them.
+///
+/// The work is a reverse lookup over the provenance the walk already returned:
+/// each run says which content is showing and where, so a note's content is
+/// intersected with the runs and each intersection becomes a span. Nothing here
+/// consults an anchor, a claim or a slot, which is why a note follows a move for
+/// nothing -- the move has already happened, in the runs.
+///
+/// Everything the function reads is a function of the operation set, and every
+/// list it returns is sorted by a total order over that set, so two replicas
+/// holding the same operations resolve the same notes whatever order they arrived
+/// in.
+pub(super) fn notes(
+	ops:	&[(OpId, &Op)],
+	files:	&BTreeMap<OpId, (Vec<u8>, Vec<Run>)>,
+)
+	-> Outcome<(BTreeMap<OpId, Vec<Note>>, Vec<RepoNote>)>
+{
+	// Where each atom's bytes render: for one atom, the offsets it shows, the
+	// file showing them, and the rendered offset the run begins at. Disjoint by
+	// conservation, and sorted, so a note's range is found by binary search.
+	let mut shown: BTreeMap<OpId, Vec<(Range<u64>, OpId, u64)>> = BTreeMap::new();
+	for (file, (_, runs)) in files {
+		for run in runs {
+			if run.content.is_empty() {
+				continue;
+			}
+			shown.entry(run.content.op())
+				.or_default()
+				.push((run.content.offsets(), *file, run.at));
+		}
+	}
+	for v in shown.values_mut() {
+		v.sort_by_key(|(iv, file, at)| (iv.start, iv.end, *file, *at));
+	}
+
+	let mut per_file: BTreeMap<OpId, Vec<Note>> = BTreeMap::new();
+	let mut repo: Vec<RepoNote> = Vec::new();
+	for (id, op) in ops {
+		let text = match op {
+			Op::Note { text, .. }	=> text,
+			_						=> continue,
+		};
+		let mut found: BTreeMap<OpId, Vec<Span>> = BTreeMap::new();
+		for r in op.note_on() {
+			if r.is_empty() {
+				continue;
+			}
+			let line = match shown.get(&r.op()) {
+				Some(v)	=> v,
+				None	=> continue,
+			};
+			// The first entry that can reach the range, and every one after it that
+			// still starts before the range ends.
+			let mut k = line.partition_point(|(iv, _, _)| iv.end <= r.from());
+			while k < line.len() && line[k].0.start < r.to() {
+				let (iv, file, at) = &line[k];
+				let lo = iv.start.max(r.from());
+				let hi = iv.end.min(r.to());
+				if hi > lo {
+					found.entry(*file).or_default().push(Span {
+						at:		at + (lo - iv.start),
+						len:	hi - lo,
+					});
+				}
+				k += 1;
+			}
+		}
+		let mut places: Vec<NotePlace> = Vec::with_capacity(found.len());
+		for (file, mut spans) in found {
+			spans.sort();
+			// Abutting spans are one span: the render may show a note's content in
+			// several runs, and a reader wants the region rather than the seams.
+			let mut merged: Vec<Span> = Vec::with_capacity(spans.len());
+			for span in spans {
+				match merged.last_mut() {
+					Some(last) if last.end() >= span.at => {
+						let end = last.end().max(span.end());
+						last.len = end - last.at;
+					},
+					_ => merged.push(span),
+				}
+			}
+			per_file.entry(file)
+				.or_default()
+				.push(Note::new(*id, text.clone(), merged.clone()));
+			places.push(NotePlace { file, spans: merged });
+		}
+		repo.push(RepoNote::new(*id, text.clone(), places));
+	}
+
+	// In each file, the order a margin draws them in; over the repository, the
+	// order every other list in the render is in.
+	for v in per_file.values_mut() {
+		v.sort_by_key(|n| (n.spans.first().map(|s| s.at).unwrap_or(0), n.note));
+	}
+	repo.sort_by_key(|n| n.note);
+	Ok((per_file, repo))
 }
 
 /// Returns the in-order successor of `v` among the nodes placed so far.

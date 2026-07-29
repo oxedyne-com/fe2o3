@@ -31,6 +31,7 @@ use crate::seq::render::{
 	Flag,
 	Rendered,
 	Repo,
+	Span,
 };
 use crate::seq::{
 	OpOrder,
@@ -167,6 +168,14 @@ impl Replica {
 		let op = res!(src.move_into(at, len, &dst, dest));
 		self.author(op)
 	}
+
+	/// Writes a note about a run of a file.
+	fn note(&mut self, file: OpId, at: usize, len: usize, text: &[u8])
+		-> Outcome<(Header, Op)>
+	{
+		let op = res!(res!(self.view(file)).note_on(at, len, text.to_vec()));
+		self.author(op)
+	}
 }
 
 
@@ -280,6 +289,23 @@ fn converge(ops: &[(Header, Op)])
 						"Delivery order changed the flags: {:?} against {:?}.",
 						want.flags(), got.flags();
 					Test, Mismatch));
+				}
+				// A note is derived from the render, so this ought to come for
+				// nothing; it is asserted anyway, in every case, because "ought to"
+				// is not a test.
+				if want.notes() != got.notes() {
+					return Err(err!(
+						"Delivery order changed the notes: {:?} against {:?}.",
+						want.notes(), got.notes();
+					Test, Mismatch));
+				}
+				for (a, b) in want.files().iter().zip(got.files()) {
+					if a.notes() != b.notes() {
+						return Err(err!(
+							"Delivery order changed the notes of the file {}: {:?} \
+							against {:?}.", a.file(), a.notes(), b.notes();
+						Test, Mismatch));
+					}
 				}
 			},
 		}
@@ -1115,3 +1141,152 @@ fn an_empty_file_is_not_empty_in_identifier_space() -> Outcome<()> {
 	Ok(())
 }
 
+
+/// A note crosses a file boundary with the content it is about: the run is moved
+/// into another file, and the note is now that file's to show.
+///
+/// This is the claim the whole vocabulary rests on, stated for notes: a note
+/// names content, content is repository-wide, and nothing in the note ever
+/// mentioned a file.
+#[test]
+fn a_note_crosses_a_file_boundary_with_its_content() -> Outcome<()> {
+	let (mut reps, mut ops, ids) = res!(stage(&[
+		(b"a.txt", b"alpha beta gamma"),
+		(b"b.txt", b"one two"),
+	], 1));
+	let (a, b) = (ids[0], ids[1]);
+	// A note about "beta", then "beta " taken to the end of the other file.
+	ops.push(res!(reps[0].note(a, 6, 4, b"beta needs a citation")));
+	let repo = res!(converge(&ops));
+	match repo.file(a) {
+		Some(f)	=> assert_eq!(f.notes()[0].spans(), &[Span::new(6, 4)]),
+		None	=> return Err(err!("The file went missing."; Test, Missing)),
+	}
+	ops.push(res!(reps[0].move_across(a, 6, 5, b, 7)));
+	let repo = res!(case("a.txt=\"alpha gamma\" b.txt=\"one twobeta \"", &ops));
+	// The note is no longer in the file it was written in.
+	match repo.file(a) {
+		Some(f)	=> assert!(f.notes().is_empty(), "the content left"),
+		None	=> return Err(err!("The file went missing."; Test, Missing)),
+	}
+	// It is in the file the content went to, over the bytes it named.
+	let dest = match repo.file(b) {
+		Some(f)	=> f,
+		None	=> return Err(err!("The file went missing."; Test, Missing)),
+	};
+	assert_eq!(dest.notes().len(), 1);
+	assert_eq!(dest.notes()[0].spans(), &[Span::new(7, 4)]);
+	assert_eq!(dest.notes()[0].text_lossy(), "beta needs a citation");
+	let span = dest.notes()[0].spans()[0];
+	assert_eq!(&dest.bytes()[span.at as usize..span.end() as usize], b"beta");
+	// And the repository lists it once, in the one file it reaches.
+	assert_eq!(repo.notes().len(), 1);
+	assert!(!repo.notes()[0].on_dead());
+	assert_eq!(repo.notes()[0].files().len(), 1);
+	assert_eq!(repo.notes()[0].files()[0].file, b);
+	Ok(())
+}
+
+/// A note whose content is torn across two files is reported in both and listed
+/// once: each file says where its share of the content is, and the repository
+/// says the note is in two places.
+#[test]
+fn a_note_torn_across_two_files_is_listed_once() -> Outcome<()> {
+	let (mut reps, mut ops, ids) = res!(stage(&[
+		(b"a.txt", b"0123456789"),
+		(b"b.txt", b"----"),
+	], 1));
+	let (a, b) = (ids[0], ids[1]);
+	ops.push(res!(reps[0].note(a, 2, 6, b"about 234567")));
+	// Half of the noted run goes to the other file.
+	ops.push(res!(reps[0].move_across(a, 4, 3, b, 2)));
+	let repo = res!(case("a.txt=\"0123789\" b.txt=\"--456--\"", &ops));
+	// "23" and "7" are what is left in a, and the move closed the gap between
+	// them, so they are one region of the render and one span: a span is a run of
+	// rendered bytes, not a run of content.
+	match repo.file(a) {
+		Some(f)	=> assert_eq!(f.notes()[0].spans(), &[Span::new(2, 3)]),
+		None	=> return Err(err!("The file went missing."; Test, Missing)),
+	}
+	// Put something between them, and the note is in two places in one file.
+	ops.push(res!(reps[0].insert(a, 4, b"|")));
+	let repo = res!(case("a.txt=\"0123|789\" b.txt=\"--456--\"", &ops));
+	let left = match repo.file(a) {
+		Some(f)	=> f,
+		None	=> return Err(err!("The file went missing."; Test, Missing)),
+	};
+	let right = match repo.file(b) {
+		Some(f)	=> f,
+		None	=> return Err(err!("The file went missing."; Test, Missing)),
+	};
+	// "23" stayed, "456" left, "7" stayed: two spans in one file, one in the
+	// other, and six bytes in all.
+	assert_eq!(left.notes().len(), 1);
+	assert_eq!(left.notes()[0].spans(), &[Span::new(2, 2), Span::new(5, 1)]);
+	assert_eq!(right.notes().len(), 1);
+	assert_eq!(right.notes()[0].spans(), &[Span::new(2, 3)]);
+	// One note, in two files, over the six bytes it named.
+	assert_eq!(repo.notes().len(), 1);
+	let note = &repo.notes()[0];
+	assert!(!note.on_dead());
+	assert_eq!(note.files().len(), 2);
+	assert_eq!(note.files()[0].file, a);
+	assert_eq!(note.files()[1].file, b);
+	let total: u64 = note.files().iter()
+		.flat_map(|p| p.spans.iter())
+		.map(|s| s.len)
+		.sum();
+	assert_eq!(total, 6, "no byte of the noted run went missing");
+	assert_eq!(note.spans_in(b), &[Span::new(2, 3)]);
+	assert!(note.spans_in(OpId::default()).is_empty());
+	Ok(())
+}
+
+/// A note on content that was moved into a deleted file is not a note on dead
+/// content: the bytes still render, into a file no reader looks at, and that is
+/// what the flag beside it says.
+#[test]
+fn a_note_in_a_deleted_file_is_not_a_note_on_dead_content() -> Outcome<()> {
+	let (mut reps, mut ops, ids) = res!(stage(&[
+		(b"a.txt", b"keep this line"),
+		(b"b.txt", b""),
+	], 1));
+	let (a, b) = (ids[0], ids[1]);
+	ops.push(res!(reps[0].note(a, 5, 4, b"about this")));
+	ops.push(res!(reps[0].move_across(a, 5, 4, b, 0)));
+	ops.push(res!(reps[0].remove(b)));
+	let repo = res!(converge(&ops));
+	// The deleted file still holds the bytes, and still resolves the note.
+	let gone = match repo.file(b) {
+		Some(f)	=> f,
+		None	=> return Err(err!("The file went missing."; Test, Missing)),
+	};
+	assert!(!gone.is_live());
+	assert_eq!(gone.text_lossy(), "this");
+	assert_eq!(gone.notes().len(), 1);
+	assert_eq!(gone.notes()[0].spans(), &[Span::new(0, 4)]);
+	// So the note is placed, not dead, and the repository says which file.
+	assert_eq!(repo.notes().len(), 1);
+	assert!(!repo.notes()[0].on_dead());
+	assert!(repo.dead_notes().is_empty());
+	assert_eq!(repo.notes()[0].files()[0].file, b);
+	Ok(())
+}
+
+/// A note names content, and content the operation set does not hold is a hole
+/// in the history rather than a note on nothing.
+#[test]
+fn a_note_on_content_the_set_lacks_is_refused() -> Outcome<()> {
+	let (mut reps, mut ops, ids) = res!(stage(&[(b"a.txt", b"alpha beta")], 1));
+	let note = res!(reps[0].note(ids[0], 0, 5, b"about alpha"));
+	// The whole set renders; the set without the splice the note names does not.
+	ops.push(note.clone());
+	res!(converge(&ops));
+	let mut seq = Sequence::new();
+	res!(seq.apply(ops[0].0.clone(), ops[0].1.clone()));
+	res!(seq.apply(note.0.clone(), note.1.clone()));
+	assert!(seq.render().is_err(),
+		"a note whose subject has not arrived cannot be told from a note on \
+		content that has died");
+	Ok(())
+}

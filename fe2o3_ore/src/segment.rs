@@ -741,6 +741,13 @@ mod tests {
 				res!(Header::new(oid(3, 12), vec![oid(3, 11)])),
 				Op::Mark { name: fmt!("release-caf\u{e9}") },
 			),
+			Record::new(
+				res!(Header::new(oid(4, 13), vec![oid(3, 12)])),
+				Op::Note {
+					on:		vec![res!(ContentRange::new(oid(1, 2), 4, 9))],
+					text:	b"the fox is doing the work here".to_vec(),
+				},
+			),
 		])
 	}
 
@@ -1160,7 +1167,7 @@ mod tests {
 				}
 				let head = res!(Header::new(id, parents));
 				let anchored = Some(Anchor::origin(oid((next() % 5) as u64 + 1, 1)));
-				let op = match next() % 6 {
+				let op = match next() % 7 {
 					0 => Op::FileCreate { path: fmt!("f{}", next() % 100).into_bytes() },
 					1 => Op::Mark { name: fmt!("m{}", next() % 100) },
 					2 => Op::FileRename {
@@ -1174,10 +1181,14 @@ mod tests {
 						remove:	Vec::new(),
 						insert:	vec![(next() % 256) as u8; 1 + next() % 700],
 					},
-					_ => Op::Move {
+					5 => Op::Move {
 						src:	vec![res!(ContentRange::new(id, 0, (next() % 50) as u64))],
 						left:	anchored,
 						right:	None,
+					},
+					_ => Op::Note {
+						on:		vec![res!(ContentRange::new(id, 0, (next() % 50) as u64 + 1))],
+						text:	fmt!("note {}", next() % 1000).into_bytes(),
 					},
 				};
 				let rec = Record::new(head, op);

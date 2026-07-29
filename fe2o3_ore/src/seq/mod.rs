@@ -462,6 +462,10 @@ impl Sequence {
 			}
 		}
 
+		// Notes are read back off the provenance the walk produced, which is where
+		// every move the operation set holds has already happened.
+		let (mut per_file_notes, repo_notes) = res!(render::notes(&ops, &walk.files));
+
 		let mut walk_files = walk.files;
 		let mut out: Vec<Rendered> = Vec::new();
 		let mut rendered = 0u64;
@@ -474,7 +478,9 @@ impl Sequence {
 			}
 			let mut flags = per_file.remove(id).unwrap_or_default();
 			flags.dedup();
-			out.push(Rendered::new(*id, info.path.clone(), info.live, bytes, runs, flags));
+			let notes = per_file_notes.remove(id).unwrap_or_default();
+			out.push(Rendered::new(
+				*id, info.path.clone(), info.live, bytes, runs, flags, notes));
 		}
 
 		let stats = Stats {
@@ -486,12 +492,13 @@ impl Sequence {
 			slots_divided:		slots.len(),
 			claim_intervals:	claims.intervals(),
 			dead_intervals:		dead.intervals(),
+			notes:				repo_notes.len(),
 			max_depth:			walk.max_depth,
 			rendered,
 			withheld,
 			orphaned:			walk.orphaned,
 		};
-		let repo = Repo::new(out, flags, index, stats);
+		let repo = Repo::new(out, flags, repo_notes, index, stats);
 		if cfg!(debug_assertions) {
 			res!(Self::conserved(&repo, &atoms, &dead));
 		}
@@ -735,11 +742,16 @@ impl Sequence {
 	/// A file's origin anchor is one such identifier, so an operation anchored at
 	/// the start of a file the set does not hold is refused here along with
 	/// everything else it might have named.
+	///
+	/// The content a note is *about* is named here too, although the note claims
+	/// none of it. A note whose subject has not arrived cannot be resolved, and
+	/// resolving it to nothing would be indistinguishable from a note on content
+	/// that has been deleted, which is a different fact about the repository.
 	fn check_complete(ops: &[(OpId, &Op)], atoms: &Atoms)
 		-> Outcome<()>
 	{
 		for (id, op) in ops {
-			for r in op.regions() {
+			for r in op.regions().iter().chain(op.note_on()) {
 				if r.to() > atoms.run_len(&r.op()) {
 					return Err(err!(
 						"The operation {} names the content {}, which the operation \

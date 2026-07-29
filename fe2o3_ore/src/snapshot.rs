@@ -7,11 +7,13 @@
 //! frontier does not already cover.
 //!
 //! What is stored is a render and not a state machine. Per file: its identity,
-//! its path, the bytes, the provenance of those bytes, and what the renderer
-//! noticed. The provenance is there because without it the bytes are dumb -- a
-//! frontend that means to author a content-anchored splice against what it is
-//! showing needs to know what the byte under the cursor is called, and that is
-//! exactly what a run says.
+//! its path, the bytes, the provenance of those bytes, what the renderer noticed,
+//! and the notes resolved against them. The provenance is there because without
+//! it the bytes are dumb -- a frontend that means to author a content-anchored
+//! splice against what it is showing needs to know what the byte under the cursor
+//! is called, and that is exactly what a run says. The notes are there for the
+//! same reason a flag is: a reader that can see the state should be able to see
+//! what has been said about it, without going back to the log for either.
 //!
 //! # A file is named by identity
 //!
@@ -40,6 +42,7 @@
 use crate::id::OpId;
 use crate::seq::render::{
 	Flag,
+	Note,
 	Rendered,
 	Run,
 };
@@ -54,10 +57,12 @@ pub const MAGIC: [u8; 6] = *b"ORESNP";
 /// The format version this module writes.
 ///
 /// Version 1 keyed a file by its path and spelled that path as a string. Version
-/// 2 keys by identity and spells the path as bytes; nothing was ever written in
-/// version 1 that needs to be read again, so the old form is gone rather than
-/// carried.
-pub const VERSION: u8 = 2;
+/// 2 keys by identity and spells the path as bytes. Version 3 carries the notes
+/// resolved against each file, beside the flags and for the same reason: a
+/// frontend reading a snapshot can draw the margins without replaying the log.
+/// Nothing was ever written in an older version that needs to be read again, so
+/// each old form is gone rather than carried.
+pub const VERSION: u8 = 3;
 
 
 /// One file, as it stood.
@@ -74,6 +79,14 @@ pub struct FileState {
 	pub runs:	Vec<Run>,
 	/// What the renderer noticed while producing them.
 	pub flags:	Vec<Flag>,
+	/// The notes whose content renders here, resolved into spans of those bytes.
+	///
+	/// Carried for the reason the provenance is carried: without it the bytes are
+	/// dumb, and a frontend that means to show a margin against a snapshot would
+	/// have to replay the log to find out where the margins go. A note whose
+	/// content has been deleted renders in no file and so appears in no state,
+	/// exactly as a flag that names no file appears in none.
+	pub notes:	Vec<Note>,
 }
 
 impl FileState {
@@ -85,6 +98,7 @@ impl FileState {
 			bytes:	rendered.bytes().to_vec(),
 			runs:	rendered.runs().to_vec(),
 			flags:	rendered.flags().to_vec(),
+			notes:	rendered.notes().to_vec(),
 		}
 	}
 
@@ -95,7 +109,7 @@ impl FileState {
 	}
 
 	/// Serialises the state to a [`Dat`]. The shape is
-	/// `[file, path, bytes, [run, ...], [flag, ...]]`.
+	/// `[file, path, bytes, [run, ...], [flag, ...], [note, ...]]`.
 	///
 	/// Both the path and the bytes are a [`Dat::BU64`]: a file is routinely
 	/// longer than the 255 bytes a [`Dat::BU8`] length field can express, and a
@@ -107,6 +121,7 @@ impl FileState {
 			Dat::BU64(self.bytes.clone()),
 			Dat::List(self.runs.iter().map(|r| r.to_dat()).collect()),
 			Dat::List(self.flags.iter().map(|f| f.to_dat()).collect()),
+			Dat::List(self.notes.iter().map(|n| n.to_dat()).collect()),
 		])
 	}
 
@@ -115,9 +130,9 @@ impl FileState {
 		-> Outcome<Self>
 	{
 		let v = match dat {
-			Dat::List(v) if v.len() == 5 => v,
+			Dat::List(v) if v.len() == 6 => v,
 			_ => return Err(err!(
-				"A FileState expects a 5-element Dat::List, got {:?}.", dat;
+				"A FileState expects a 6-element Dat::List, got {:?}.", dat;
 			Decode, Input, Mismatch)),
 		};
 		let file = res!(OpId::from_dat(&v[0]));
@@ -154,7 +169,17 @@ impl FileState {
 		for item in listed {
 			flags.push(res!(Flag::from_dat(item)));
 		}
-		Ok(Self { file, path, bytes, runs, flags })
+		let listed = match &v[5] {
+			Dat::List(l) => l,
+			other => return Err(err!(
+				"The notes of the file {} expect Dat::List, got {:?}.", file, other;
+			Decode, Input, Mismatch)),
+		};
+		let mut notes = Vec::with_capacity(listed.len());
+		for item in listed {
+			notes.push(res!(Note::from_dat(item)));
+		}
+		Ok(Self { file, path, bytes, runs, flags, notes })
 	}
 }
 
@@ -372,7 +397,10 @@ mod tests {
 		Header,
 		Op,
 	};
-	use crate::seq::render::Repo;
+	use crate::seq::render::{
+		Repo,
+		Span,
+	};
 	use crate::seq::slot::Origin;
 	use crate::seq::Sequence;
 
@@ -389,6 +417,7 @@ mod tests {
 			bytes:	Vec::new(),
 			runs:	Vec::new(),
 			flags:	Vec::new(),
+			notes:	Vec::new(),
 		}
 	}
 
@@ -418,8 +447,12 @@ mod tests {
 		res!(seq.apply(res!(Header::new(oid(2, 3), vec![seed_id])), mv));
 		let ed = res!(view.splice(9, 1, b"Soy m".to_vec()));
 		res!(seq.apply(res!(Header::new(oid(3, 3), vec![seed_id])), ed));
+		// And a note about the line that is about to move, so that a snapshot has
+		// a resolved note in it to carry.
+		let note = res!(view.note_on(7, 6, b"buy this one first".to_vec()));
+		res!(seq.apply(res!(Header::new(oid(4, 3), vec![seed_id])), note));
 		let out = res!(seq.render());
-		Ok((out, create, vec![oid(2, 3), oid(3, 3)]))
+		Ok((out, create, vec![oid(2, 3), oid(3, 3), oid(4, 3)]))
 	}
 
 	/// A snapshot of a rendered file survives the round trip with its identity,
@@ -442,6 +475,18 @@ mod tests {
 		assert_eq!(got.path, b"shopping.txt");
 		assert_eq!(String::from_utf8_lossy(&got.bytes), "- Soy milk\n- Eggs\n- Cheese\n");
 		assert_eq!(got.path_lossy(), "shopping.txt");
+		// The note came through with its text and the spans it resolved to, so a
+		// reader of the snapshot can draw the margin without the log. It was
+		// written about "- Milk"; that line moved to the front, and the concurrent
+		// edit replaced the M inside it, so what is left of the noted content is
+		// "- " and "ilk" with the inserted "Soy m" between them.
+		assert_eq!(got.notes.len(), 1);
+		assert_eq!(got.notes[0].text_lossy(), "buy this one first");
+		assert_eq!(got.notes[0].note(), oid(4, 3));
+		assert_eq!(got.notes[0].spans(), &[Span::new(0, 2), Span::new(7, 3)]);
+		assert_eq!(got.notes[0].len(), 5, "five of the six noted bytes survive");
+		let span = got.notes[0].spans()[1];
+		assert_eq!(&got.bytes[span.at as usize..span.end() as usize], b"ilk");
 		Ok(())
 	}
 
@@ -572,7 +617,7 @@ mod tests {
 	}
 
 	/// A file of more bytes than a single byte length field could express keeps
-	/// all of them, and so does a path.
+	/// all of them, and so do a path and a note's text.
 	#[test]
 	fn a_long_file_keeps_its_length() -> Outcome<()> {
 		for len in [255usize, 256, 70_000] {
@@ -585,10 +630,16 @@ mod tests {
 					content:	res!(ContentRange::new(oid(1, 1), 0, len as u64)),
 				}],
 				flags:	Vec::new(),
+				notes:	vec![Note::new(
+					oid(2, 1),
+					vec![b'n'; len],
+					vec![Span::new(0, len as u64)],
+				)],
 			}]));
 			let back = res!(Snapshot::decode(&res!(snap.encode())));
 			assert_eq!(back.files()[0].bytes.len(), len);
 			assert_eq!(back.files()[0].path.len(), len);
+			assert_eq!(back.files()[0].notes[0].text().len(), len);
 		}
 		Ok(())
 	}
@@ -625,11 +676,14 @@ mod tests {
 			Err(e) => e,
 		};
 		assert!(fmt!("{}", e).contains("version"), "message was {}", e);
-		// The version this reader knows is not the one the old form used, so a
-		// snapshot written before file identity is refused rather than misread.
-		let mut old = res!(snap.encode());
-		old[MAGIC.len()] = 1;
-		assert!(Snapshot::decode(&old).is_err());
+		// The version this reader knows is not one an older form used, so a
+		// snapshot written before file identity, or before resolved notes, is
+		// refused rather than misread.
+		for stale in [1u8, 2] {
+			let mut old = res!(snap.encode());
+			old[MAGIC.len()] = stale;
+			assert!(Snapshot::decode(&old).is_err(), "version {}", stale);
+		}
 		// Trailing rubbish after a whole snapshot is refused too.
 		let mut extra = res!(snap.encode());
 		extra.extend_from_slice(b"and more");
@@ -666,11 +720,21 @@ mod tests {
 		assert!(Snapshot::from_dat(&Dat::U8(1)).is_err());
 		assert!(Snapshot::from_dat(&Dat::List(vec![Dat::List(vec![])])).is_err());
 		assert!(FileState::from_dat(&Dat::List(vec![Dat::Str(fmt!("f"))])).is_err());
+		// The five-element shape a version 2 snapshot spelled, which is now short
+		// of its notes.
+		assert!(FileState::from_dat(&Dat::List(vec![
+			oid(1, 1).to_dat(),
+			Dat::BU64(Vec::new()),
+			Dat::BU64(Vec::new()),
+			Dat::List(vec![]),
+			Dat::List(vec![]),
+		])).is_err());
 		// A file named by something that is not an identifier.
 		assert!(FileState::from_dat(&Dat::List(vec![
 			Dat::U64(1),
 			Dat::BU64(Vec::new()),
 			Dat::BU64(Vec::new()),
+			Dat::List(vec![]),
 			Dat::List(vec![]),
 			Dat::List(vec![]),
 		])).is_err());
@@ -682,6 +746,7 @@ mod tests {
 			Dat::BU64(Vec::new()),
 			Dat::List(vec![]),
 			Dat::List(vec![]),
+			Dat::List(vec![]),
 		])).is_err());
 		// And bytes that are not bytes.
 		assert!(FileState::from_dat(&Dat::List(vec![
@@ -690,7 +755,31 @@ mod tests {
 			Dat::Str(fmt!("not bytes")),
 			Dat::List(vec![]),
 			Dat::List(vec![]),
+			Dat::List(vec![]),
 		])).is_err());
+		// Notes that are not a list.
+		assert!(FileState::from_dat(&Dat::List(vec![
+			oid(1, 1).to_dat(),
+			Dat::BU64(Vec::new()),
+			Dat::BU64(Vec::new()),
+			Dat::List(vec![]),
+			Dat::List(vec![]),
+			Dat::Str(fmt!("not notes")),
+		])).is_err());
+		// A note at the wrong arity, with text that is not bytes, and with a span
+		// that is not a pair of numbers.
+		assert!(Note::from_dat(&Dat::List(vec![oid(1, 1).to_dat()])).is_err());
+		assert!(Note::from_dat(&Dat::List(vec![
+			oid(1, 1).to_dat(),
+			Dat::Str(fmt!("not bytes")),
+			Dat::List(vec![]),
+		])).is_err());
+		assert!(Note::from_dat(&Dat::List(vec![
+			oid(1, 1).to_dat(),
+			Dat::BU64(Vec::new()),
+			Dat::List(vec![Dat::List(vec![Dat::U64(0), Dat::Str(fmt!("x"))])]),
+		])).is_err());
+		assert!(Span::from_dat(&Dat::U64(1)).is_err());
 		// A flag at an unknown code, and an origin at an unknown one.
 		assert!(Flag::from_dat(&Dat::List(vec![Dat::U8(99), oid(1, 1).to_dat()])).is_err());
 		assert!(Flag::from_dat(&Dat::List(vec![
@@ -797,12 +886,28 @@ mod tests {
 						},
 					});
 				}
+				let mut notes: Vec<Note> = Vec::new();
+				for _ in 0..next() % 4 {
+					let mut spans: Vec<Span> = Vec::new();
+					let mut span_at = 0u64;
+					for _ in 0..1 + next() % 3 {
+						let len = (next() % 20) as u64 + 1;
+						spans.push(Span::new(span_at, len));
+						span_at += len + 1 + (next() % 5) as u64;
+					}
+					notes.push(Note::new(
+						oid((next() % 5) as u64, (next() % 50) as u64),
+						fmt!("note {}", next() % 1000).into_bytes(),
+						spans,
+					));
+				}
 				files.push(FileState {
 					file,
 					path,
 					bytes: (0..at).map(|i| (i % 251) as u8).collect(),
 					runs,
 					flags,
+					notes,
 				});
 			}
 			let snap = res!(Snapshot::new(frontier, files));
@@ -822,8 +927,8 @@ mod tests {
 	/// The same discipline as the segment's golden test: a format that changes by
 	/// accident orphans every store already written in it, and every other test
 	/// here would agree with itself while it happened. The values below were
-	/// rewritten by hand when the format changed for file identity, each line
-	/// annotated with the field it spells.
+	/// rewritten by hand when the format changed for file identity and again when
+	/// it changed for resolved notes, each line annotated with the field it spells.
 	#[test]
 	fn the_snapshot_bytes_are_frozen() -> Outcome<()> {
 		let snap = res!(Snapshot::new(vec![oid(1, 2)], vec![FileState {
@@ -835,23 +940,24 @@ mod tests {
 				content:	res!(ContentRange::new(oid(1, 2), 0, 2)),
 			}],
 			flags:	Vec::new(),
+			notes:	vec![Note::new(oid(2, 1), b"hm".to_vec(), vec![Span::new(0, 2)])],
 		}]));
 		let want: &[u8] = &[
-			// The magic and the version, which is 2 since file identity.
+			// The magic and the version, which is 3 since resolved notes.
 			0x4f, 0x52, 0x45, 0x53, 0x4e, 0x50,
-			0x02,
-			// A daticle list of 131 bytes: the frontier (24), then the files (107).
-			0x33, 0x21, 0x83,
+			0x03,
+			// A daticle list of 193 bytes: the frontier (24), then the files (169).
+			0x33, 0x21, 0xc1,
 				// The frontier, 21 bytes: one identifier, r1:2.
 				0x33, 0x21, 0x15,
 					0x33, 0x21, 0x12,
 						0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
 						0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
-				// The files, 104 bytes: one of them.
-				0x33, 0x21, 0x68,
-					// The file, 101 bytes: 21 of identity, 10 of path, 11 of
-					// bytes, 57 of runs and 2 of flags.
-					0x33, 0x21, 0x65,
+				// The files, 166 bytes: one of them.
+				0x33, 0x21, 0xa6,
+					// The file, 163 bytes: 21 of identity, 10 of path, 11 of
+					// bytes, 57 of runs, 2 of flags and 62 of notes.
+					0x33, 0x21, 0xa3,
 						// Its identity, r1:2, which is what a snapshot keys by.
 						0x33, 0x21, 0x12,
 							0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
@@ -876,6 +982,21 @@ mod tests {
 									0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
 						// No flags, which is a list of no bytes.
 						0x33, 0x20,
+						// The notes, 59 bytes: one of them, 56 bytes.
+						0x33, 0x21, 0x3b,
+							0x33, 0x21, 0x38,
+								// Written by r2:1.
+								0x33, 0x21, 0x12,
+									0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
+									0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+								// Saying "hm", as bytes under a 64-bit length.
+								0x47, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
+								0x68, 0x6d,
+								// Over one span, 21 bytes: two bytes at offset zero.
+								0x33, 0x21, 0x15,
+									0x33, 0x21, 0x12,
+										0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+										0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
 		];
 		assert_eq!(res!(snap.encode()), want, "the snapshot format has changed");
 		assert_eq!(res!(Snapshot::decode(want)), snap);

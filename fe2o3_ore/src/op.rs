@@ -36,6 +36,16 @@
 //! is metadata carried by the lifecycle operations and nothing else, and it is
 //! bytes rather than a string, because a path is not required to be UTF-8.
 //!
+//! # Naming content is not only for editing it
+//!
+//! [`Op::Note`] says something *about* content by naming it, and thereby inherits
+//! the whole of the anchoring machinery: the note narrows when the content is
+//! edited, travels when the content is moved, and crosses a file boundary when
+//! the content does, none of which anything had to be written to make happen. A
+//! note is not sequence content -- it mints no bytes and renders none -- so what
+//! the render does with it is resolve it into spans; see
+//! [`crate::seq::render::Note`].
+//!
 //! # Every operation carries its parents
 //!
 //! An operation records the frontier its author could see when they wrote it,
@@ -44,7 +54,7 @@
 //! complete, and [`crate::seq`] can say whether two operations that touched the
 //! same bytes were concurrent or merely consecutive. Parents live on the header
 //! and not on the variants, because causality is a property of every operation
-//! alike and duplicating it six times would let the six drift.
+//! alike and duplicating it seven times would let the seven drift.
 
 use crate::id::{
 	varint_decode,
@@ -75,6 +85,8 @@ pub const CODE_MARK:		u8 = 4;
 pub const CODE_SPLICE:		u8 = 5;
 /// Wire code for [`Op::Move`].
 pub const CODE_MOVE:		u8 = 6;
+/// Wire code for [`Op::Note`].
+pub const CODE_NOTE:		u8 = 7;
 
 
 /// A single unit of history: one whole edit.
@@ -155,6 +167,27 @@ pub enum Op {
 		/// The gap the content lands in, on its right.
 		right: Option<Anchor>,
 	},
+	/// Says something about content, and goes on saying it about that same
+	/// content wherever the content ends up.
+	///
+	/// A note names bytes, not a line and not an offset, so the machinery that
+	/// carries an anchor through an edit carries the note with it for nothing: the
+	/// content is edited around and the note narrows to what survived; the content
+	/// is moved, within a file or into another, and the note goes with it.
+	///
+	/// It is history and not sequence content. A note mints no atom, claims no
+	/// byte and renders no byte; the sequence keeps it so that the causal graph is
+	/// whole, exactly as it keeps a [`Op::Mark`], and the render resolves it into
+	/// the spans a margin can be drawn against.
+	///
+	/// `on` must name something. A note about nothing is a mark with extra
+	/// spelling, and [`Op::Mark`] already says "about this point in history".
+	Note {
+		/// The content the note is about.
+		on: Vec<ContentRange>,
+		/// What it says, as bytes: a note is not this crate's to decode.
+		text: Vec<u8>,
+	},
 }
 
 impl Op {
@@ -167,6 +200,7 @@ impl Op {
 			Self::Mark { .. }		=> CODE_MARK,
 			Self::Splice { .. }		=> CODE_SPLICE,
 			Self::Move { .. }		=> CODE_MOVE,
+			Self::Note { .. }		=> CODE_NOTE,
 		}
 	}
 
@@ -179,6 +213,7 @@ impl Op {
 			Self::Mark { .. }		=> "Mark",
 			Self::Splice { .. }		=> "Splice",
 			Self::Move { .. }		=> "Move",
+			Self::Note { .. }		=> "Note",
 		}
 	}
 
@@ -207,13 +242,33 @@ impl Op {
 		}
 	}
 
-	/// Returns the content the operation names: what a splice removes, or what a
-	/// move takes with it.
+	/// Returns the content the operation **acts on**: what a splice removes, or
+	/// what a move takes with it.
+	///
+	/// A note is not here, although it names content too. What this answers is
+	/// which bytes an operation asserts something about -- which is what decides
+	/// whether two operations were in conflict -- and a note asserts nothing: it
+	/// neither kills content nor takes it anywhere, so a note and a concurrent
+	/// deletion of the same run are not two authors disagreeing. See
+	/// [`Op::note_on`] for the other reading.
 	pub fn regions(&self) -> &[ContentRange] {
 		match self {
 			Self::Splice { remove, .. }	=> remove,
 			Self::Move { src, .. }		=> src,
 			_							=> &[],
+		}
+	}
+
+	/// Returns the content a note is about, empty for everything else.
+	///
+	/// Kept apart from [`Op::regions`] because the two are asked different
+	/// questions: what an operation claims, and what an operation refers to. Both
+	/// have to exist for the render to resolve them, which is the one place the two
+	/// are read together.
+	pub fn note_on(&self) -> &[ContentRange] {
+		match self {
+			Self::Note { on, .. }	=> on,
+			_						=> &[],
 		}
 	}
 
@@ -263,6 +318,34 @@ impl Op {
 		}
 	}
 
+	/// Checks the rule that a note is about something.
+	///
+	/// [`Op::Note`] must name at least one byte. An empty list names nothing, and
+	/// a list of empty ranges names nothing either, so both are refused: such a
+	/// note could never resolve to a span and would be reported forever as a note
+	/// on dead content, which is not what "dead" is for. An author wanting to say
+	/// something about a point in history rather than about content writes an
+	/// [`Op::Mark`].
+	///
+	/// Checked on the way off the wire as well as on the way into the sequence,
+	/// for the reason [`Op::check_placement`] is.
+	pub fn check_note(&self)
+		-> Outcome<()>
+	{
+		let on = match self {
+			Self::Note { on, .. }	=> on,
+			_						=> return Ok(()),
+		};
+		if on.iter().any(|r| !r.is_empty()) {
+			return Ok(());
+		}
+		Err(err!(
+			"A Note is about {} content ranges, none of which names a byte; a note \
+			is about something, and a Mark is what says something about a point in \
+			history.", on.len();
+		Invalid, Input, Missing))
+	}
+
 	/// Checks the operation is one the sequence structure can resolve.
 	///
 	/// A left origin binds after a byte and a right origin before one; a move may
@@ -305,6 +388,7 @@ impl Op {
 			}
 		}
 		res!(self.check_placement());
+		res!(self.check_note());
 		Ok(())
 	}
 
@@ -347,6 +431,11 @@ impl Op {
 				Anchor::opt_to_dat(left),
 				Anchor::opt_to_dat(right),
 			]),
+			Self::Note { on, text } => Dat::List(vec![
+				Dat::U8(CODE_NOTE),
+				Dat::List(on.iter().map(|r| r.to_dat()).collect()),
+				Dat::BU64(text.clone()),
+			]),
 		}
 	}
 
@@ -354,7 +443,9 @@ impl Op {
 	///
 	/// The placement rule is checked here rather than left to the sequence,
 	/// because an operation that places bytes and names no origin belongs to no
-	/// file and no later stage could decide one for it.
+	/// file and no later stage could decide one for it. [`Op::check_note`] is
+	/// checked here for the same reason: a note about nothing resolves to nothing,
+	/// wherever it is read.
 	pub fn from_dat(dat: &Dat)
 		-> Outcome<Self>
 	{
@@ -413,11 +504,19 @@ impl Op {
 					right:	res!(Anchor::opt_from_dat(&v[3])),
 				}
 			},
+			CODE_NOTE => {
+				res!(expect_len(v, 3, "Note"));
+				Self::Note {
+					on:		res!(as_ranges(&v[1], "Note on")),
+					text:	res!(as_bytes(&v[2], "Note text")),
+				}
+			},
 			other => return Err(err!(
 				"Op code {} is not recognised.", other;
 			Decode, Input, Invalid)),
 		};
 		res!(op.check_placement());
+		res!(op.check_note());
 		Ok(op)
 	}
 
@@ -904,6 +1003,26 @@ mod tests {
 				left:	None,
 				right:	Some(Anchor::before(content(1, 0))),
 			},
+			// A note on one run.
+			Op::Note {
+				on:		vec![range(1, 4, 19)],
+				text:	b"this loop is quadratic".to_vec(),
+			},
+			// A note on content already fragmented across two atoms, whose text is
+			// longer than a single byte length field could hold and is not UTF-8.
+			Op::Note {
+				on:		vec![
+					range(2, 0, u64::MAX),
+					range(5, 7, 9),
+				],
+				text:	vec![0xc3; 900],
+			},
+			// A note whose list carries an empty range beside a real one, which is
+			// legal: what is refused is a note that names no byte at all.
+			Op::Note {
+				on:		vec![range(3, 5, 5), range(3, 5, 6)],
+				text:	Vec::new(),
+			},
 		]
 	}
 
@@ -967,6 +1086,15 @@ mod tests {
 				other => return Err(err!(
 					"Expected a FileCreate, got {}.", other.name(); Test, Mismatch)),
 			}
+			let op = Op::Note {
+				on:		vec![range(1, 0, 1)],
+				text:	vec![0x21; len],
+			};
+			match res!(Op::decode_all(&res!(op.encode()))) {
+				Op::Note { text, .. } => assert_eq!(text.len(), len),
+				other => return Err(err!(
+					"Expected a Note, got {}.", other.name(); Test, Mismatch)),
+			}
 		}
 		Ok(())
 	}
@@ -1025,6 +1153,10 @@ mod tests {
 		assert_eq!(Op::FileCreate { path: b"c.txt".to_vec() }.names_file(), None,
 			"a file's creation is its identity, so it names nothing else");
 		assert_eq!(Op::Mark { name: fmt!("v1") }.names_file(), None);
+		assert_eq!(Op::Note {
+			on:		vec![range(1, 0, 2)],
+			text:	b"x".to_vec(),
+		}.names_file(), None, "a note follows its content, wherever that is");
 		assert_eq!(Op::Splice {
 			left:	Some(Anchor::origin(oid(1, 1))),
 			right:	None,
@@ -1081,6 +1213,64 @@ mod tests {
 		// about how much it happens to carry.
 		let empty = Op::Move { src: Vec::new(), left: None, right: None };
 		assert!(empty.check_placement().is_err());
+		Ok(())
+	}
+
+	/// A note is about something: a note naming no byte is refused, on the way
+	/// into the structure and on the way off the wire alike.
+	#[test]
+	fn a_note_is_about_something() -> Outcome<()> {
+		// An empty list names nothing.
+		let vacant = Op::Note { on: Vec::new(), text: b"about what?".to_vec() };
+		assert!(vacant.check_note().is_err());
+		assert!(vacant.validate().is_err());
+		assert!(Op::from_dat(&vacant.to_dat()).is_err());
+		assert!(Op::decode_all(&res!(vacant.encode())).is_err());
+		// A list of empty ranges names nothing either.
+		let hollow = Op::Note {
+			on:		vec![range(1, 3, 3), range(2, 0, 0)],
+			text:	b"still nothing".to_vec(),
+		};
+		assert!(hollow.check_note().is_err());
+		assert!(Op::from_dat(&hollow.to_dat()).is_err());
+		// One byte is enough.
+		let real = Op::Note {
+			on:		vec![range(1, 3, 3), range(2, 0, 1)],
+			text:	Vec::new(),
+		};
+		res!(real.validate());
+		assert_eq!(real, res!(Op::from_dat(&real.to_dat())));
+		// And every other variant is unaffected by the rule.
+		for op in samples() {
+			if matches!(op, Op::Note { .. }) {
+				continue;
+			}
+			res!(op.check_note());
+		}
+		Ok(())
+	}
+
+	/// A note names content and claims none: it is not among the regions two
+	/// operations could be in conflict over, and it places nothing.
+	#[test]
+	fn a_note_refers_without_claiming() -> Outcome<()> {
+		let note = Op::Note {
+			on:		vec![range(1, 4, 9), range(2, 0, 3)],
+			text:	b"see the ticket".to_vec(),
+		};
+		assert!(note.regions().is_empty(), "a note claims nothing");
+		assert_eq!(note.note_on().len(), 2);
+		assert_eq!(note.origins(), (None, None));
+		assert_eq!(note.placed_len(), 0);
+		assert!(!note.is_move());
+		res!(note.check_placement());
+		// The other variants refer to nothing, whatever they claim.
+		assert!(Op::Move {
+			src:	vec![range(1, 0, 4)],
+			left:	Some(Anchor::origin(oid(9, 1))),
+			right:	None,
+		}.note_on().is_empty());
+		assert!(Op::Mark { name: fmt!("v1") }.note_on().is_empty());
 		Ok(())
 	}
 
@@ -1178,6 +1368,24 @@ mod tests {
 			Dat::List(vec![range(1, 0, 2).to_dat()]),
 			Anchor::after(content(1, 0)).to_dat(),
 			Anchor::opt_to_dat(&None),
+		])).is_err());
+		// A Note at the wrong arity.
+		assert!(Op::from_dat(&Dat::List(vec![
+			Dat::U8(CODE_NOTE),
+			Dat::List(vec![range(1, 0, 2).to_dat()]),
+		])).is_err());
+		// A Note whose subject is not a list of ranges.
+		assert!(Op::from_dat(&Dat::List(vec![
+			Dat::U8(CODE_NOTE),
+			Dat::Str(fmt!("not ranges")),
+			Dat::BU64(b"text".to_vec()),
+		])).is_err());
+		// A Note whose text is a string rather than bytes, which is the mistake a
+		// reader of Op::Mark would make.
+		assert!(Op::from_dat(&Dat::List(vec![
+			Dat::U8(CODE_NOTE),
+			Dat::List(vec![range(1, 0, 2).to_dat()]),
+			Dat::Str(fmt!("not bytes")),
 		])).is_err());
 		Ok(())
 	}
@@ -1284,6 +1492,14 @@ mod tests {
 		let buf = res!(op.encode());
 		for cut in 1..buf.len() {
 			assert!(Op::decode(&buf[..cut]).is_err(), "cut at {}", cut);
+		}
+		let note = Op::Note {
+			on:		vec![range(1, 1, 3), range(2, 0, 8)],
+			text:	b"a note that is cut short".to_vec(),
+		};
+		let buf = res!(note.encode());
+		for cut in 1..buf.len() {
+			assert!(Op::decode(&buf[..cut]).is_err(), "note cut at {}", cut);
 		}
 		Ok(())
 	}

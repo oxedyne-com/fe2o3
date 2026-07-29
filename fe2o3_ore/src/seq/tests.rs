@@ -30,6 +30,7 @@ use crate::seq::render::{
 	Rendered,
 	Repo,
 	Run,
+	Span,
 	Stats,
 };
 use crate::seq::slot::Origin;
@@ -138,6 +139,14 @@ impl Replica {
 		let op = res!(res!(self.view()).move_range(at, len, to));
 		self.author(op)
 	}
+
+	/// Writes a note about a rendered run.
+	fn note(&mut self, at: usize, len: usize, text: &[u8])
+		-> Outcome<(Header, Op)>
+	{
+		let op = res!(res!(self.view()).note_on(at, len, text.to_vec()));
+		self.author(op)
+	}
 }
 
 
@@ -230,6 +239,20 @@ fn converge(ops: &[(Header, Op)])
 						"Delivery order changed the flags: {:?} against {:?}.",
 						want.flags(), got.flags();
 					Test, Mismatch));
+				}
+				if want.notes() != got.notes() {
+					return Err(err!(
+						"Delivery order changed the notes: {:?} against {:?}.",
+						want.notes(), got.notes();
+					Test, Mismatch));
+				}
+				for (a, b) in want.files().iter().zip(got.files()) {
+					if a.notes() != b.notes() {
+						return Err(err!(
+							"Delivery order changed the notes of the file {}: {:?} \
+							against {:?}.", a.file(), a.notes(), b.notes();
+						Test, Mismatch));
+					}
 				}
 			},
 		}
@@ -714,7 +737,9 @@ fn conservation_notices_a_missing_byte() -> Outcome<()> {
 				content:	res!(ContentRange::new(seed_id, 0, 5)),
 			}],
 			Vec::new(),
+			Vec::new(),
 		)],
+		Vec::new(),
 		Vec::new(),
 		BTreeMap::new(),
 		Stats::default(),
@@ -1214,5 +1239,164 @@ fn provenance_follows_the_bytes() -> Outcome<()> {
 	// what an operation binds to when there is nothing else to bind to.
 	let (left, _) = res!(file.gap(0));
 	assert_eq!(left, Some(Anchor::origin(st.file)));
+	Ok(())
+}
+
+/// A note follows the content it is about through a move: the run is taken to
+/// the front of the file, and the note's spans move with it.
+///
+/// Nothing was written to make this happen. A note names bytes, the render says
+/// where each byte is, and the move had already changed the answer.
+#[test]
+fn a_note_follows_a_move() -> Outcome<()> {
+	let mut st = res!(seed(ALPHA, 1));
+	st.ops.push(res!(st.reps[0].note(5, 5, b"why five?")));
+	let before = res!(converge(&st.ops));
+	let file = match before.file(st.file) {
+		Some(f)	=> f,
+		None	=> return Err(err!("The file went missing."; Test, Missing)),
+	};
+	assert_eq!(file.notes().len(), 1);
+	assert_eq!(file.notes()[0].spans(), &[Span::new(5, 5)]);
+	assert_eq!(file.notes()[0].text_lossy(), "why five?");
+	// Take the noted run to the front.
+	st.ops.push(res!(st.reps[0].move_range(5, 5, 0)));
+	let after = res!(converge(&st.ops));
+	let file = match after.file(st.file) {
+		Some(f)	=> f,
+		None	=> return Err(err!("The file went missing."; Test, Missing)),
+	};
+	assert_eq!(file.text_lossy(), "5678901234ABCDEFGHIJ");
+	assert_eq!(file.notes().len(), 1);
+	assert_eq!(file.notes()[0].spans(), &[Span::new(0, 5)],
+		"the note went where the bytes went");
+	// And the repository says the same, once.
+	assert_eq!(after.notes().len(), 1);
+	assert!(!after.notes()[0].on_dead());
+	assert_eq!(after.notes()[0].files().len(), 1);
+	assert_eq!(after.notes()[0].spans_in(st.file), &[Span::new(0, 5)]);
+	Ok(())
+}
+
+/// An edit inside a noted run narrows the note to what survived: the note is
+/// about content, and some of that content is gone.
+#[test]
+fn a_note_narrows_to_the_surviving_content() -> Outcome<()> {
+	let mut st = res!(seed(ALPHA, 1));
+	st.ops.push(res!(st.reps[0].note(5, 5, b"about 56789")));
+	// Delete "67" from the middle of the noted run.
+	st.ops.push(res!(st.reps[0].delete(6, 2)));
+	let repo = res!(converge(&st.ops));
+	let file = match repo.file(st.file) {
+		Some(f)	=> f,
+		None	=> return Err(err!("The file went missing."; Test, Missing)),
+	};
+	assert_eq!(file.text_lossy(), "01234589ABCDEFGHIJ");
+	assert_eq!(file.notes().len(), 1);
+	// Three of the five bytes are left, and they are still adjacent.
+	assert_eq!(file.notes()[0].spans(), &[Span::new(5, 3)]);
+	assert_eq!(file.notes()[0].len(), 3);
+	// An insertion inside the run is not part of the note: the note is about the
+	// bytes it named, and those are not among them.
+	st.ops.push(res!(st.reps[0].insert(6, b"xx")));
+	let repo = res!(converge(&st.ops));
+	let file = match repo.file(st.file) {
+		Some(f)	=> f,
+		None	=> return Err(err!("The file went missing."; Test, Missing)),
+	};
+	assert_eq!(file.text_lossy(), "012345xx89ABCDEFGHIJ");
+	assert_eq!(file.notes()[0].spans(), &[Span::new(5, 1), Span::new(8, 2)]);
+	Ok(())
+}
+
+/// A note whose content has been deleted entirely is not lost: it is reported as
+/// a note on dead content, and it shows in no file.
+#[test]
+fn a_note_on_deleted_content_says_so() -> Outcome<()> {
+	let mut st = res!(seed(ALPHA, 1));
+	st.ops.push(res!(st.reps[0].note(5, 5, b"doomed")));
+	st.ops.push(res!(st.reps[0].delete(5, 5)));
+	let repo = res!(converge(&st.ops));
+	let file = match repo.file(st.file) {
+		Some(f)	=> f,
+		None	=> return Err(err!("The file went missing."; Test, Missing)),
+	};
+	assert_eq!(file.text_lossy(), "01234ABCDEFGHIJ");
+	assert!(file.notes().is_empty(), "no margin has anything to point at");
+	assert_eq!(repo.notes().len(), 1, "the note itself is not lost");
+	assert!(repo.notes()[0].on_dead());
+	assert!(repo.notes()[0].files().is_empty());
+	assert_eq!(repo.notes()[0].text_lossy(), "doomed");
+	assert_eq!(repo.dead_notes().len(), 1);
+	assert_eq!(repo.stats().notes, 1);
+	Ok(())
+}
+
+/// A note on a run that is later torn in two shows two spans, because that is
+/// where its content is.
+#[test]
+fn a_note_tears_with_its_content() -> Outcome<()> {
+	let mut st = res!(seed(ALPHA, 1));
+	st.ops.push(res!(st.reps[0].note(5, 5, b"one run, for now")));
+	// Take the middle two bytes of the noted run to the end of the file.
+	st.ops.push(res!(st.reps[0].move_range(7, 2, 20)));
+	let repo = res!(converge(&st.ops));
+	let file = match repo.file(st.file) {
+		Some(f)	=> f,
+		None	=> return Err(err!("The file went missing."; Test, Missing)),
+	};
+	assert_eq!(file.text_lossy(), "01234569ABCDEFGHIJ78");
+	assert_eq!(file.notes().len(), 1);
+	assert_eq!(file.notes()[0].spans().len(), 2,
+		"the noted run is in two places, so the note is in two places");
+	assert_eq!(file.notes()[0].len(), 5, "and no byte of it was lost");
+	Ok(())
+}
+
+/// Two notes on one file are handed over in the order a margin would draw them,
+/// and a note lands on the exact bytes it named.
+#[test]
+fn notes_arrive_in_render_order() -> Outcome<()> {
+	let mut st = res!(seed(ALPHA, 1));
+	st.ops.push(res!(st.reps[0].note(12, 4, b"second")));
+	st.ops.push(res!(st.reps[0].note(2, 3, b"first")));
+	let repo = res!(converge(&st.ops));
+	let file = match repo.file(st.file) {
+		Some(f)	=> f,
+		None	=> return Err(err!("The file went missing."; Test, Missing)),
+	};
+	let texts: Vec<String> = file.notes().iter().map(|n| n.text_lossy()).collect();
+	assert_eq!(texts, vec![fmt!("first"), fmt!("second")]);
+	// The repository lists them in identifier order instead, which is what every
+	// other list in the render is in.
+	let ids: Vec<OpId> = repo.notes().iter().map(|n| n.note()).collect();
+	let mut sorted = ids.clone();
+	sorted.sort();
+	assert_eq!(ids, sorted);
+	// The span names exactly the bytes the note was written against.
+	let n = match file.note(ids[0]) {
+		Some(n)	=> n,
+		None	=> return Err(err!("A note went missing."; Test, Missing)),
+	};
+	let span = n.spans()[0];
+	assert_eq!(
+		&file.bytes()[span.at as usize..span.end() as usize],
+		match n.text_lossy().as_str() {
+			"second"	=> &b"CDEF"[..],
+			_			=> &b"234"[..],
+		},
+	);
+	Ok(())
+}
+
+/// A note about nothing is refused by the frontend that would have written it,
+/// and by the structure that would have held it.
+#[test]
+fn a_note_about_nothing_is_refused() -> Outcome<()> {
+	let st = res!(seed(ALPHA, 1));
+	let view = res!(st.reps[0].view());
+	assert!(view.note_on(4, 0, b"about what?".to_vec()).is_err());
+	// And beyond the file, which is the other way to name nothing.
+	assert!(view.note_on(40, 2, b"beyond".to_vec()).is_err());
 	Ok(())
 }
