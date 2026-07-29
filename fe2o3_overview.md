@@ -147,6 +147,25 @@ These have no internal cross-dependencies (or only depend on `fe2o3_stds`).
 
 ---
 
+#### fe2o3_infer -- Convolutional Inference
+
+**Purpose:** CPU inference for small convolutional networks, and the face detection and face embedding built on it.
+
+**Dependencies:** `fe2o3_core`.
+
+**Current capabilities:**
+- `kern` -- safe `f32` kernels (blocked matrix product, matrix--vector, patch gather, depthwise convolution, per-channel scale, parametric rectifier, rectifier, sigmoid, maximum pool, nearest-neighbour doubling, element-wise sum) behind one runtime dispatch, with a fused-multiply-add path and a baseline path.
+- `onnx` -- a reader for the subset of the ONNX wire format these networks use.
+- `graph` -- weight preparation (layout permutation, batch-norm folding) and a runner over the prepared operators.
+- `face` -- letterbox, detection with anchor-free decode and non-maximum suppression, five-point similarity alignment, and a 128-dimensional embedding with cosine comparison.
+
+**What is next:**
+- Clustering over a corpus of embeddings; an `aarch64` dispatch arm; the `f16` weight form.
+
+**Tests:** 2 test files (`guard.rs`, `models.rs`) plus in-module tests. Weights are not in the repository; `models.rs` skips without `FE2O3_INFER_MODELS`.
+
+---
+
 ### Fundamental Crates
 
 These have 1-3 internal cross-dependencies.
