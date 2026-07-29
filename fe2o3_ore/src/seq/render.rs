@@ -5,9 +5,9 @@
 //! that are still alive, into the file whose subtree it turned out to be in.
 //! Everything the walk noticed is returned with the bytes as a [`Flag`], because
 //! a structure that always converges owes the reader an account of what it
-//! converged to: a torn move, an anchor demoted to break a cycle, a demotion that
-//! carried a placement across a file boundary, or content moved into a file that
-//! has since been deleted. Flags are facts derived from the operation set, not a
+//! converged to: a torn move, an anchor demoted to break a cycle, a move confined
+//! because it lost a cross-file cycle, or content moved into a file that has since
+//! been deleted. Flags are facts derived from the operation set, not a
 //! log of what the renderer happened to do, so two replicas holding the same
 //! operations report the same flags.
 
@@ -50,6 +50,10 @@ pub const CODE_CROSSED_FILE:	u8 = 5;
 pub const CODE_MOVED_INTO_DELETED: u8 = 6;
 /// Wire code for [`Flag::Orphaned`].
 pub const CODE_ORPHANED:	u8 = 7;
+/// Wire code for [`Flag::Confined`].
+pub const CODE_CONFINED:	u8 = 8;
+/// Wire code for [`Flag::Won`].
+pub const CODE_WON:		u8 = 9;
 
 
 /// Something the renderer noticed that the reader should be told.
@@ -116,15 +120,15 @@ pub enum Flag {
 	///
 	/// In one file a demoted origin lands at a stale position, which is bad
 	/// enough and is what [`Flag::Demoted`] says. Across two it lands in another
-	/// *file*, and where the cycle runs between two files the file the content
-	/// left is emptied into the file it went to; at length three, two files are.
-	/// A reader who sees a file go from four bytes to none will not read that as a
-	/// stale anchor, so this names both files and says so in those terms.
+	/// *file*, and a reader who sees a file go from four bytes to none will not
+	/// read that as a stale anchor, so this names both files and says so in those
+	/// terms.
 	///
-	/// The outcome is deterministic and loses nothing, and it is not a rule
-	/// anybody chose: a rule that confines a cross-file cycle instead of
-	/// collapsing it is design work owed, and until it exists this flag is what
-	/// stands between the reader and a file that emptied itself.
+	/// A cross-file *cycle* no longer reaches demotion at all: it is arbitrated,
+	/// and [`Flag::Confined`] is what the losers are told. What still reaches this
+	/// flag is a demotion inside one file whose content had legitimately changed
+	/// files earlier, and it is then telling the truth about where the content was
+	/// written and where it now renders.
 	CrossedFile {
 		/// The operation whose origin was demoted.
 		op:		OpId,
@@ -159,6 +163,34 @@ pub enum Flag {
 		/// Offset within that operation's placement.
 		sub:	u64,
 	},
+	/// A move that lost a cross-file cycle: it did not happen, and its content is
+	/// where it was before.
+	///
+	/// A cycle in the anchor graph that crosses a file boundary is arbitrated as
+	/// one concurrent group. The member highest in op order completes; every other
+	/// member is confined, which is to say its claims are not written, so its bytes
+	/// stay with whoever owned them before it and its slots place nothing. Nothing
+	/// has to be undone, because nothing was done, and re-issuing the move is one
+	/// operation.
+	///
+	/// Both files are told, since the flag is about the pair of them.
+	Confined {
+		/// The move that did not happen.
+		op:		OpId,
+		/// The file its content stays in.
+		home:	OpId,
+		/// The file it was aimed at and did not reach.
+		denied:	OpId,
+	},
+	/// A move that won a cross-file cycle outright and completed.
+	///
+	/// Derivable from the [`Flag::Confined`] flags and the operation set, and kept
+	/// anyway: the loser's flag reads badly alone, and the two together are the
+	/// whole story of what the arbitration did.
+	Won {
+		/// The move that won.
+		op:		OpId,
+	},
 }
 
 
@@ -173,6 +205,8 @@ impl Flag {
 			Self::CrossedFile { .. }		=> CODE_CROSSED_FILE,
 			Self::MovedIntoDeleted { .. }	=> CODE_MOVED_INTO_DELETED,
 			Self::Orphaned { .. }			=> CODE_ORPHANED,
+			Self::Confined { .. }			=> CODE_CONFINED,
+			Self::Won { .. }				=> CODE_WON,
 		}
 	}
 
@@ -186,6 +220,8 @@ impl Flag {
 			Self::CrossedFile { .. }		=> "CrossedFile",
 			Self::MovedIntoDeleted { .. }	=> "MovedIntoDeleted",
 			Self::Orphaned { .. }			=> "Orphaned",
+			Self::Confined { .. }			=> "Confined",
+			Self::Won { .. }				=> "Won",
 		}
 	}
 
@@ -199,6 +235,8 @@ impl Flag {
 			Self::CrossedFile { op, .. }		=> Some(*op),
 			Self::MovedIntoDeleted { op, .. }	=> Some(*op),
 			Self::Orphaned { op, .. }			=> Some(*op),
+			Self::Confined { op, .. }			=> Some(*op),
+			Self::Won { op }					=> Some(*op),
 		}
 	}
 
@@ -244,6 +282,16 @@ impl Flag {
 				Dat::U8(CODE_ORPHANED),
 				op.to_dat(),
 				Dat::U64(*sub),
+			]),
+			Self::Confined { op, home, denied } => Dat::List(vec![
+				Dat::U8(CODE_CONFINED),
+				op.to_dat(),
+				home.to_dat(),
+				denied.to_dat(),
+			]),
+			Self::Won { op } => Dat::List(vec![
+				Dat::U8(CODE_WON),
+				op.to_dat(),
 			]),
 		}
 	}
@@ -323,6 +371,20 @@ impl Flag {
 				Ok(Self::Orphaned {
 					op:		res!(OpId::from_dat(&v[1])),
 					sub:	res!(flag_u64(&v[2], "Orphaned", "offset")),
+				})
+			},
+			CODE_CONFINED => {
+				res!(flag_len(v, 4, "Confined"));
+				Ok(Self::Confined {
+					op:		res!(OpId::from_dat(&v[1])),
+					home:	res!(OpId::from_dat(&v[2])),
+					denied:	res!(OpId::from_dat(&v[3])),
+				})
+			},
+			CODE_WON => {
+				res!(flag_len(v, 2, "Won"));
+				Ok(Self::Won {
+					op:	res!(OpId::from_dat(&v[1])),
 				})
 			},
 			other => Err(err!(

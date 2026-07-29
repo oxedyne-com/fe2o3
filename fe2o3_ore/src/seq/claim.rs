@@ -28,7 +28,10 @@ use crate::op::Op;
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_data::interval::IntervalMap;
 
-use std::collections::BTreeMap;
+use std::collections::{
+	BTreeMap,
+	BTreeSet,
+};
 use std::ops::Range;
 
 
@@ -60,8 +63,24 @@ impl Claims {
 	pub fn build(ops: &[(OpId, &Op)])
 		-> Outcome<Self>
 	{
+		Self::build_without(ops, &BTreeSet::new())
+	}
+
+	/// Builds the register from an operation set given **in ascending op order**,
+	/// leaving out the moves named in `voided`.
+	///
+	/// A voided move is one the cross-file cycle rule has confined, and confining
+	/// it is exactly this: its claims are not written, so its bytes are owned by
+	/// whoever owned them before it -- the previous claimant, or the splice that
+	/// created them -- and they render where they already were.
+	pub fn build_without(ops: &[(OpId, &Op)], voided: &BTreeSet<OpId>)
+		-> Outcome<Self>
+	{
 		let mut map: BTreeMap<OpId, IntervalMap<OpId>> = BTreeMap::new();
 		for (id, op) in ops {
+			if voided.contains(id) {
+				continue;
+			}
 			if let Op::Move { src, .. } = op {
 				for r in src {
 					if r.is_empty() {
