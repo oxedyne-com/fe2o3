@@ -171,6 +171,49 @@ impl MailboxInfo {
     pub fn selectable(&self) -> bool {
         !self.attrs.iter().any(|a| a.eq_ignore_ascii_case("\\Noselect"))
     }
+
+    /// The RFC 6154 special-use role, if the server declared one.
+    ///
+    /// This is how a client recognises the Sent folder on a mailbox whose
+    /// names are localised -- Gmail spells it "[Gmail]/Gesendet" for a German
+    /// account, but the attribute is `\Sent` everywhere.
+    pub fn special_use(&self) -> Option<SpecialUse> {
+        for a in &self.attrs {
+            let role = match a.to_uppercase().as_str() {
+                "\\SENT"     => Some(SpecialUse::Sent),
+                "\\DRAFTS"   => Some(SpecialUse::Drafts),
+                "\\TRASH"    => Some(SpecialUse::Trash),
+                "\\JUNK"     => Some(SpecialUse::Junk),
+                "\\ARCHIVE"  => Some(SpecialUse::Archive),
+                "\\ALL"      => Some(SpecialUse::All),
+                "\\FLAGGED"  => Some(SpecialUse::Flagged),
+                _            => None,
+            };
+            if role.is_some() {
+                return role;
+            }
+        }
+        None
+    }
+}
+
+/// The special-use roles of RFC 6154, one per mailbox at most.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpecialUse {
+    /// Sent messages land here.
+    Sent,
+    /// Unfinished drafts.
+    Drafts,
+    /// Deleted messages await expunge.
+    Trash,
+    /// Spam.
+    Junk,
+    /// Messages filed out of the inbox.
+    Archive,
+    /// Every message, however filed (Gmail's "All Mail").
+    All,
+    /// Messages the user has starred or flagged.
+    Flagged,
 }
 
 /// The state of a mailbox after `SELECT` or `EXAMINE`.
@@ -517,7 +560,14 @@ impl ImapClient {
     /// List mailboxes under `reference` matching `pattern` (`"*"` for all,
     /// `"%"` for one level).
     pub async fn list(&mut self, reference: &str, pattern: &str) -> Outcome<Vec<MailboxInfo>> {
-        let cmd  = fmt!("LIST {} {}", quoted(reference), quoted(pattern));
+        // Ask for the RFC 6154 roles when the server offers them, so a
+        // localised "[Gmail]/Gesendet" still carries `\Sent`. A server
+        // without the capability gets the plain command it expects.
+        let cmd = if self.has_cap("SPECIAL-USE") {
+            fmt!("LIST {} {} RETURN (SPECIAL-USE)", quoted(reference), quoted(pattern))
+        } else {
+            fmt!("LIST {} {}", quoted(reference), quoted(pattern))
+        };
         let resp = res!(self.command(&cmd).await);
         let mut out = Vec::new();
         for line in &resp.untagged {
@@ -1398,6 +1448,24 @@ mod tests {
         assert_eq!(mb.name,      "[Gmail]");
         assert_eq!(mb.delimiter, Some('.'));
         assert!(!mb.selectable());
+    }
+
+    #[test]
+    fn test_special_use_survives_localised_names() {
+        // A German Gmail account: the NAME is localised, the ROLE is not.
+        let l = line("* LIST (\\HasNoChildren \\Sent) \"/\" \"[Gmail]/Gesendet\"", vec![]);
+        let mb = parse_list_line(&l).unwrap().unwrap();
+        assert_eq!(mb.name,           "[Gmail]/Gesendet");
+        assert_eq!(mb.special_use(),  Some(SpecialUse::Sent));
+
+        let l = line("* LIST (\\HasNoChildren \\All) \"/\" \"[Gmail]/Alle Nachrichten\"", vec![]);
+        let mb = parse_list_line(&l).unwrap().unwrap();
+        assert_eq!(mb.special_use(),  Some(SpecialUse::All));
+
+        // No role declared: an ordinary user folder.
+        let l = line("* LIST (\\HasNoChildren) \"/\" \"receipts\"", vec![]);
+        let mb = parse_list_line(&l).unwrap().unwrap();
+        assert_eq!(mb.special_use(),  None);
     }
 
     #[test]
