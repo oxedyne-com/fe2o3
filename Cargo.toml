@@ -28,6 +28,7 @@ all = [
 	"geom",
 	"graphics",
 	"hash",
+	"infer",
 	"iop_crypto",
 	"iop_db",
 	"iop_hash",
@@ -57,6 +58,7 @@ file 		= ["dep:oxedyne_fe2o3_file"]
 geom 		= ["dep:oxedyne_fe2o3_geom"]
 graphics 	= ["dep:oxedyne_fe2o3_graphics"]
 hash 		= ["dep:oxedyne_fe2o3_hash"]
+infer 		= ["dep:oxedyne_fe2o3_infer"]
 iop_crypto 	= ["dep:oxedyne_fe2o3_iop_crypto"]
 iop_db 		= ["dep:oxedyne_fe2o3_iop_db"]
 iop_hash 	= ["dep:oxedyne_fe2o3_iop_hash"]
@@ -87,6 +89,7 @@ oxedyne_fe2o3_file =        { path = "fe2o3_file",			optional = true }
 oxedyne_fe2o3_geom =        { path = "fe2o3_geom",			optional = true }
 oxedyne_fe2o3_graphics =    { path = "fe2o3_graphics",		optional = true }
 oxedyne_fe2o3_hash =        { path = "fe2o3_hash",			optional = true }
+oxedyne_fe2o3_infer =       { path = "fe2o3_infer",			optional = true }
 oxedyne_fe2o3_iop_crypto =  { path = "fe2o3_iop_crypto",	optional = true }
 oxedyne_fe2o3_iop_db =      { path = "fe2o3_iop_db",		optional = true }
 oxedyne_fe2o3_iop_hash =    { path = "fe2o3_iop_hash",		optional = true }

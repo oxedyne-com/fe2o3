@@ -2006,6 +2006,7 @@ dependencies = [
  "oxedyne_fe2o3_geom",
  "oxedyne_fe2o3_graphics",
  "oxedyne_fe2o3_hash",
+ "oxedyne_fe2o3_infer",
  "oxedyne_fe2o3_iop_crypto",
  "oxedyne_fe2o3_iop_db",
  "oxedyne_fe2o3_iop_hash",
@@ -2154,6 +2155,13 @@ dependencies = [
  "rust-argon2",
  "seahash",
  "tiny-keccak",
+]
+
+[[package]]
+name = "oxedyne_fe2o3_infer"
+version = "0.5.0"
+dependencies = [
+ "oxedyne_fe2o3_core",
 ]
 
 [[package]]
