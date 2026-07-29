@@ -115,10 +115,56 @@ async fn main() -> Outcome<()> {
         res!(store.append(&user, &inbox, s, MessageFlags::default(), None));
     }
 
+    // A mailbox is not an inbox. Five of these are named exactly what the
+    // server's SPECIAL-USE table recognises, so a client sees a role rather
+    // than a name; the last is an ordinary folder with a space and a hierarchy
+    // in it, which is what an ordinary folder actually looks like and what a
+    // client that flattens names onto a filesystem has to survive.
+    let others: Vec<(&str, Vec<Vec<u8>>)> = vec![
+        ("Sent", vec![
+            fmt!("From: {}\r\n\
+                  To: bob@example.org\r\n\
+                  Subject: Thursday works\r\n\
+                  Message-ID: <sent-1@test.local>\r\n\
+                  Date: Tue, 07 Jul 2026 13:05:00 +0000\r\n\
+                  \r\n\
+                  Bourke Street it is.\r\n", USER).into_bytes(),
+        ]),
+        ("Drafts",  vec![]),
+        ("Archive", vec![
+            fmt!("From: hr@example.org\r\n\
+                  To: {}\r\n\
+                  Subject: Your 2025 summary\r\n\
+                  Message-ID: <arch-1@example.org>\r\n\
+                  Date: Fri, 09 Jan 2026 08:00:00 +0000\r\n\
+                  \r\n\
+                  Filed for reference.\r\n", USER).into_bytes(),
+        ]),
+        ("Junk",  vec![]),
+        ("Trash", vec![]),
+        ("Projects/Bourke Street", vec![
+            fmt!("From: bob@example.org\r\n\
+                  To: {}\r\n\
+                  Subject: The new place\r\n\
+                  Message-ID: <proj-1@example.org>\r\n\
+                  Date: Wed, 08 Jul 2026 10:00:00 +0000\r\n\
+                  \r\n\
+                  Booked for one.\r\n", USER).into_bytes(),
+        ]),
+    ];
+    for (name, msgs) in &others {
+        let folder = FolderName::new(*name);
+        res!(store.create_folder(&user, &folder));
+        res!(store.subscribe(&user, &folder));
+        for m in msgs {
+            res!(store.append(&user, &folder, m, MessageFlags::default(), None));
+        }
+    }
+
     let addr = fmt!("127.0.0.1:{}", port);
     let listener = res!(TcpListener::bind(&addr).await, IO, Network);
-    println!("IMAP fixture: {} messages for {} (password {}) on {}",
-        seeds.len(), USER, PASS, addr);
+    println!("IMAP fixture: {} messages in INBOX and {} more folders for {} (password {}) on {}",
+        seeds.len(), others.len(), USER, PASS, addr);
 
     let server = ImapServer {
         store,
