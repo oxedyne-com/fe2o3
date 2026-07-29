@@ -1,0 +1,5 @@
+# A vertical two-stop gradient over the whole plane, which is the commonest form of all.
+linear 0 0 0 256
+stop 0 4a5268ff
+stop 1 333a4cff
+rect 0 0 256 256

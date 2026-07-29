@@ -1,0 +1,6 @@
+# Stops that differ in alpha as well as in colour, drawn over nothing, so the alpha channel is
+# the gradient's own and not a composite.
+linear 0 32 0 224
+stop 0 d6008eff
+stop 1 d6008e00
+rect 16 16 240 240

@@ -1,0 +1,5 @@
+# Outwards from a centre that is not the middle, with a radius that leaves a padded corner.
+radial 96 112 90
+stop 0 ffffffff
+stop 1 0e9bb0ff
+rect 0 0 256 256

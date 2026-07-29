@@ -1,0 +1,7 @@
+# The gradient's axis lies well inside the shape, so the flat regions each side of it are what
+# most of the picture is: this is the padding, and a renderer that wrapped or reflected instead
+# would differ over three quarters of the area.
+linear 96 0 160 0
+stop 0 ffcd84ff
+stop 1 f3b160ff
+rect 0 0 256 256

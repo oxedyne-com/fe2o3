@@ -204,6 +204,166 @@ impl Rgba {
 	}
 }
 
+/// One colour of a gradient, at a position along it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Stop {
+	/// Where along the gradient this colour sits, from zero at the start to one at the end.
+	pub at:	f32,
+	/// The colour there.
+	pub colour: Rgba,
+}
+
+impl Stop {
+
+	/// A stop of a colour at a position.
+	pub fn new(at: f32, colour: Rgba) -> Self {
+		Self { at, colour }
+	}
+}
+
+/// A paint whose colour varies with position, as a concrete pair rather than a trait object.
+///
+/// Both forms carry their stops in the same order and are read the same way, so the only difference
+/// between them is what "along the gradient" means: a distance along an axis, or a distance from a
+/// centre. A position before the first stop takes the first stop's colour and one past the last
+/// takes the last's, which is the padding an SVG gradient does unless it is told otherwise.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Gradient {
+	/// A gradient along the line from one point to another, in the path's own coordinates.
+	Linear {
+		/// Where the gradient starts.
+		from:	(f32, f32),
+		/// Where it ends.
+		to:	(f32, f32),
+		/// The colours along it, which need not be sorted.
+		stops:	Vec<Stop>,
+	},
+	/// A gradient outwards from a centre, in the path's own coordinates.
+	Radial {
+		/// The centre, which is position zero.
+		centre:	(f32, f32),
+		/// The distance at which position one is reached. Must be positive.
+		radius:	f32,
+		/// The colours along it, which need not be sorted.
+		stops:	Vec<Stop>,
+	},
+}
+
+impl Gradient {
+
+	/// A gradient of two colours along a line.
+	pub fn two(from: (f32, f32), to: (f32, f32), start: Rgba, end: Rgba) -> Self {
+		Self::Linear {
+			from,
+			to,
+			stops: vec![Stop::new(0.0, start), Stop::new(1.0, end)],
+		}
+	}
+
+	/// The stops, in the order they were given.
+	pub fn stops(&self) -> &[Stop] {
+		match self {
+			Self::Linear { stops, .. }	=> stops,
+			Self::Radial { stops, .. }	=> stops,
+		}
+	}
+
+	/// Checks the gradient can be sampled, and sorts its stops into order.
+	///
+	/// A gradient with no stops paints nothing and one whose radius is not positive divides by
+	/// zero, so both are refused here rather than at a pixel. The stops are sorted because the
+	/// sampling walks them in order and a caller listing them out of order means the positions
+	/// rather than the order they typed.
+	pub fn prepare(&self) -> Outcome<Self> {
+		let mut g = self.clone();
+		let stops = match &mut g {
+			Self::Linear { stops, .. }	=> stops,
+			Self::Radial { radius, stops, .. }	=> {
+				if !(*radius > 0.0) || !radius.is_finite() {
+					return Err(err!(
+						"A radial gradient's radius is {}, and must be a positive number.", radius;
+					Invalid, Input));
+				}
+				stops
+			},
+		};
+		if stops.is_empty() {
+			return Err(err!("A gradient must carry at least one stop, and carries none.";
+			Invalid, Input, Missing));
+		}
+		for s in stops.iter() {
+			if !s.at.is_finite() {
+				return Err(err!("A gradient stop sits at {}, which is not a position.", s.at;
+				Invalid, Input));
+			}
+		}
+		stops.sort_by(|a, b| a.at.partial_cmp(&b.at).unwrap_or(std::cmp::Ordering::Equal));
+		Ok(g)
+	}
+
+	/// Where the point `(x, y)` falls along the gradient, from zero to one, unclamped.
+	///
+	/// A linear gradient whose two points coincide has no direction and no length, so every point
+	/// is at its end: the whole shape takes the last stop's colour, which is what a gradient of no
+	/// extent degenerates to and is better than a division by zero.
+	pub fn position(&self, x: f32, y: f32) -> f32 {
+		match self {
+			Self::Linear { from, to, .. } => {
+				let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+				let len2 = dx * dx + dy * dy;
+				if len2 <= 0.0 {
+					return 1.0;
+				}
+				((x - from.0) * dx + (y - from.1) * dy) / len2
+			},
+			Self::Radial { centre, radius, .. } => {
+				let (dx, dy) = (x - centre.0, y - centre.1);
+				(dx * dx + dy * dy).sqrt() / radius
+			},
+		}
+	}
+
+	/// The colour at a position along the gradient, the stops taken as already sorted.
+	///
+	/// Interpolation is linear in straight, non-premultiplied sRGB on all four channels, which is
+	/// what an SVG gradient specifies and so what a caller comparing against a browser will see.
+	pub fn sample(&self, t: f32) -> Rgba {
+		let stops = self.stops();
+		let first = match stops.first() {
+			Some(s) => s,
+			None => return Rgba::TRANSPARENT,
+		};
+		if t <= first.at {
+			return first.colour;
+		}
+		let last = &stops[stops.len() - 1];
+		if t >= last.at {
+			return last.colour;
+		}
+		for pair in stops.windows(2) {
+			let (a, b) = (&pair[0], &pair[1]);
+			if t >= a.at && t <= b.at {
+				let span = b.at - a.at;
+				// Two stops at the same position are a hard edge, and the second wins.
+				if span <= 0.0 {
+					return b.colour;
+				}
+				let f = (t - a.at) / span;
+				let ch = |p: u8, q: u8| -> u8 {
+					((p as f32) + ((q as f32) - (p as f32)) * f + 0.5).clamp(0.0, 255.0) as u8
+				};
+				return Rgba {
+					r: ch(a.colour.r, b.colour.r),
+					g: ch(a.colour.g, b.colour.g),
+					b: ch(a.colour.b, b.colour.b),
+					a: ch(a.colour.a, b.colour.a),
+				};
+			}
+		}
+		last.colour
+	}
+}
+
 /// A form of colour blindness, for [`Rgba::simulate`] to show a colour through.
 ///
 /// The three dichromacies, each the loss of one of the eye's three cones. Protanopia and
@@ -373,4 +533,69 @@ mod tests {
 			normal, seen,
 		);
 	}
+	#[test]
+	fn test_a_gradient_pads_at_both_ends_11() -> Outcome<()> {
+		let g = res!(Gradient::two((10.0, 0.0), (20.0, 0.0), Rgba::BLACK, Rgba::WHITE).prepare());
+		// Before the start and after the end, the end stops hold rather than repeating or
+		// reflecting, which is what an SVG gradient does unless told otherwise.
+		req!(g.sample(g.position(0.0, 0.0)), Rgba::BLACK);
+		req!(g.sample(g.position(-500.0, 0.0)), Rgba::BLACK);
+		req!(g.sample(g.position(20.0, 0.0)), Rgba::WHITE);
+		req!(g.sample(g.position(500.0, 0.0)), Rgba::WHITE);
+		req!(g.sample(g.position(15.0, 0.0)), Rgba::new(128, 128, 128, 255));
+		Ok(())
+	}
+
+	#[test]
+	fn test_a_gradient_is_read_along_its_axis_and_not_across_it_12() -> Outcome<()> {
+		// The axis runs down the page, so moving across it must change nothing at all. A sampler
+		// that took a distance rather than a projection would shade this in rings.
+		let g = res!(Gradient::two((0.0, 0.0), (0.0, 100.0), Rgba::BLACK, Rgba::WHITE).prepare());
+		let at = g.sample(g.position(0.0, 40.0));
+		req!(g.sample(g.position(-300.0, 40.0)), at);
+		req!(g.sample(g.position(900.0, 40.0)), at);
+		Ok(())
+	}
+
+	#[test]
+	fn test_a_radial_gradient_is_read_as_a_distance_13() -> Outcome<()> {
+		let g = res!(Gradient::Radial {
+			centre: (50.0, 50.0),
+			radius: 10.0,
+			stops: vec![Stop::new(0.0, Rgba::BLACK), Stop::new(1.0, Rgba::WHITE)],
+		}.prepare());
+		req!(g.sample(g.position(50.0, 50.0)), Rgba::BLACK);
+		// Every point at the radius is at the end, whichever way it lies from the centre.
+		req!(g.sample(g.position(60.0, 50.0)), Rgba::WHITE);
+		req!(g.sample(g.position(50.0, 40.0)), Rgba::WHITE);
+		// The position is the distance and not its square: half way out is half way along.
+		req!(g.sample(g.position(55.0, 50.0)), Rgba::new(128, 128, 128, 255));
+		Ok(())
+	}
+
+	#[test]
+	fn test_a_gradient_refuses_what_it_cannot_sample_14() {
+		let none = Gradient::Linear { from: (0.0, 0.0), to: (1.0, 0.0), stops: Vec::new() };
+		assert!(none.prepare().is_err(), "a gradient with no stops must be refused");
+		let flat = Gradient::Radial { centre: (0.0, 0.0), radius: 0.0, stops: vec![
+			Stop::new(0.0, Rgba::BLACK)] };
+		assert!(flat.prepare().is_err(), "a radial gradient of no radius must be refused");
+	}
+
+	#[test]
+	fn test_stops_out_of_order_are_sorted_rather_than_believed_15() -> Outcome<()> {
+		let g = res!(Gradient::Linear {
+			from: (0.0, 0.0),
+			to: (10.0, 0.0),
+			stops: vec![
+				Stop::new(1.0, Rgba::WHITE),
+				Stop::new(0.0, Rgba::BLACK),
+			],
+		}.prepare());
+		req!(g.sample(0.0), Rgba::BLACK);
+		req!(g.sample(1.0), Rgba::WHITE);
+		req!(g.sample(0.5), Rgba::new(128, 128, 128, 255));
+		Ok(())
+	}
+
 }

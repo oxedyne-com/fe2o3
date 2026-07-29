@@ -92,6 +92,28 @@ impl Transform {
 	pub fn is_identity(&self) -> bool {
 		*self == Self::IDENTITY
 	}
+
+	/// The transform that undoes this one, or `None` where there is none.
+	///
+	/// A transform with a zero determinant has collapsed the plane onto a line or a point and
+	/// cannot be undone, since everything on that line came from somewhere different. A caller
+	/// carrying a pixel back into the coordinates a shape was defined in -- to read a gradient, a
+	/// pattern or a texture there -- is what this is for.
+	pub fn invert(&self) -> Option<Self> {
+		let det = self.a * self.d - self.b * self.c;
+		if det == 0.0 || !det.is_finite() {
+			return None;
+		}
+		let k = 1.0 / det;
+		Some(Self {
+			a: self.d * k,
+			b: -self.b * k,
+			c: -self.c * k,
+			d: self.a * k,
+			e: (self.c * self.f - self.d * self.e) * k,
+			f: (self.b * self.e - self.a * self.f) * k,
+		})
+	}
 }
 
 #[cfg(test)]
@@ -123,4 +145,29 @@ mod tests {
 		assert_eq!(Transform::scale(3.0, 3.0).scale_factor(), 3.0);
 		assert_eq!(Transform::IDENTITY.scale_factor(), 1.0);
 	}
+	#[test]
+	fn test_a_transform_and_its_inverse_return_a_point_04() {
+		let t = Transform::scale(3.0, -2.0)
+			.then(&Transform::rotate(0.7))
+			.then(&Transform::translate(11.0, -4.0));
+		let inv = match t.invert() {
+			Some(inv) => inv,
+			None => panic!("a transform of non-zero determinant must invert"),
+		};
+		for p in [Pt::new(0.0, 0.0), Pt::new(1.0, 0.0), Pt::new(-13.5, 7.25)] {
+			let back = inv.apply(t.apply(p));
+			assert!((back.x - p.x).abs() < 1e-3 && (back.y - p.y).abs() < 1e-3,
+				"({}, {}) came back as ({}, {})", p.x, p.y, back.x, back.y);
+		}
+	}
+
+	#[test]
+	fn test_a_collapsed_transform_has_no_inverse_05() {
+		// A scale of zero on one axis folds the plane onto a line, and everything on that line
+		// came from somewhere different.
+		assert!(Transform::scale(1.0, 0.0).invert().is_none());
+		assert!(Transform::scale(0.0, 0.0).invert().is_none());
+		assert!(Transform::IDENTITY.invert().is_some());
+	}
+
 }

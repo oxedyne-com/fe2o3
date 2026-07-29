@@ -1,0 +1,6 @@
+# Three stops, unevenly spaced, along a diagonal that does not start at a corner.
+linear 40 20 210 230
+stop 0 ff0000ff
+stop 0.35 00ff00ff
+stop 1 0000ffff
+rect 0 0 256 256

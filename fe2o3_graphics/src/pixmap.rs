@@ -1,7 +1,10 @@
 //! A buffer of pixels, and the painting done onto it.
 
 use crate::{
-	colour::Rgba,
+	colour::{
+		Gradient,
+		Rgba,
+	},
 	jpeg,
 	path::{
 		Bounds,
@@ -245,6 +248,88 @@ impl Pixmap {
 		Ok(())
 	}
 
+	/// Fills a path with a gradient, anti-aliased, under a fill rule.
+	///
+	/// The gradient is expressed in the path's own coordinates and carried through the same
+	/// transform, so a shape and the shading on it move, rotate and scale together -- which is what
+	/// an SVG gradient without its own transform does, and what a caller who has just scaled a
+	/// drawing expects. A gradient that is not invertible under the transform, which is one that
+	/// has been collapsed to a line or a point, degenerates to the last stop's colour rather than
+	/// failing: a shape squashed flat has no shading left to compute.
+	pub fn fill_gradient(
+		&mut self,
+		path:	&Path,
+		t:	&Transform,
+		grad:	&Gradient,
+		clip:	Option<Bounds>,
+		rule:	FillRule,
+	)
+		-> Outcome<()>
+	{
+		if path.is_empty() {
+			return Ok(());
+		}
+		let grad = res!(grad.prepare());
+		let inv = match t.invert() {
+			Some(inv) => inv,
+			// A degenerate transform paints the shape's own last colour rather than nothing, since
+			// the shape is still there to be filled even where its shading is not.
+			None => {
+				let last = match grad.stops().last() {
+					Some(s) => s.colour,
+					None => return Ok(()),
+				};
+				return self.fill_path_with(path, t, last, clip, rule);
+			},
+		};
+		let bb = match path.bounds(t) {
+			Some(bb) => bb,
+			None => return Ok(()),
+		};
+		let mut win = bb.intersect(self.bounds());
+		if let Some(c) = clip {
+			win = win.intersect(c);
+		}
+		if win.is_empty() {
+			return Ok(());
+		}
+		let ix0 = win.x0.floor().max(0.0) as usize;
+		let iy0 = win.y0.floor().max(0.0) as usize;
+		let ix1 = (win.x1.ceil() as usize).min(self.w);
+		let iy1 = (win.y1.ceil() as usize).min(self.h);
+		if ix1 <= ix0 || iy1 <= iy0 {
+			return Ok(());
+		}
+		let (ww, wh) = (ix1 - ix0, iy1 - iy0);
+
+		let mut r = Raster::new(ww, wh);
+		let (ox, oy) = (ix0 as f32, iy0 as f32);
+		for contour in path.flatten(t, TOLERANCE) {
+			let local: Vec<Pt> = contour
+				.into_iter()
+				.map(|p| Pt::new(p.x - ox, p.y - oy))
+				.collect();
+			r.add_contour(&local);
+		}
+		let cov = r.coverage_with(rule);
+
+		for wy in 0..wh {
+			for wx in 0..ww {
+				let c = cov[wy * ww + wx];
+				if c > 0.0 {
+					// The pixel's centre, carried back into the coordinates the gradient is
+					// expressed in, which is where its position along the gradient is read.
+					let p = inv.apply(Pt::new(ox + (wx as f32) + 0.5, oy + (wy as f32) + 0.5));
+					let colour = grad.sample(grad.position(p.x, p.y));
+					if !colour.is_transparent() {
+						self.blend_pixel(ix0 + wx, iy0 + wy, colour.with_coverage(c));
+					}
+				}
+			}
+		}
+		Ok(())
+	}
+
 	/// Strokes a path with a pen and fills the ink it leaves.
 	///
 	/// The pen's width is in the path's own coordinates, so the transform scales the line along
@@ -437,4 +522,53 @@ mod tests {
 		assert_eq!(dst.width(), 8, "the destination must not have grown");
 		Ok(())
 	}
+	#[test]
+	fn test_a_gradient_fill_shades_along_its_axis_08() -> Outcome<()> {
+		let mut pm = res!(Pixmap::new(64, 8));
+		let path = res!(Path::rect(Bounds::new(0.0, 0.0, 64.0, 8.0)));
+		let g = Gradient::two((0.0, 0.0), (64.0, 0.0), Rgba::BLACK, Rgba::WHITE);
+		res!(pm.fill_gradient(&path, &Transform::IDENTITY, &g, None, FillRule::NonZero));
+		// Along the axis the red channel rises and never falls.
+		let mut last = 0u8;
+		for x in 0..64 {
+			let c = match pm.pixel(x, 4) {
+				Some(c) => c,
+				None => return Err(err!("Reading pixel {}.", x; Invalid, Input, Range)),
+			};
+			req!(c.a, 255);
+			assert!(c.r >= last, "the ramp fell at x = {}: {} after {}", x, c.r, last);
+			last = c.r;
+		}
+		// Across the axis nothing changes.
+		req!(pm.pixel(20, 0), pm.pixel(20, 7));
+		Ok(())
+	}
+
+	#[test]
+	fn test_a_gradient_travels_with_the_transform_09() -> Outcome<()> {
+		// The gradient is expressed in the path\'s coordinates, so scaling the drawing scales the
+		// shading with it: the pixel at twice the distance is the colour that was at half of it.
+		let g = Gradient::two((0.0, 0.0), (32.0, 0.0), Rgba::BLACK, Rgba::WHITE);
+		let path = res!(Path::rect(Bounds::new(0.0, 0.0, 32.0, 4.0)));
+
+		let mut plain = res!(Pixmap::new(64, 8));
+		res!(plain.fill_gradient(&path, &Transform::IDENTITY, &g, None, FillRule::NonZero));
+		let mut twice = res!(Pixmap::new(64, 8));
+		res!(twice.fill_gradient(&path, &Transform::scale(2.0, 2.0), &g, None, FillRule::NonZero));
+
+		for x in (2..30).step_by(4) {
+			let a = match plain.pixel(x, 1) {
+				Some(c) => c,
+				None => return Err(err!("Reading pixel {}.", x; Invalid, Input, Range)),
+			};
+			let b = match twice.pixel(x * 2 + 1, 3) {
+				Some(c) => c,
+				None => return Err(err!("Reading pixel {}.", x * 2 + 1; Invalid, Input, Range)),
+			};
+			assert!((a.r as i32 - b.r as i32).abs() <= 4,
+				"at x = {} the scaled shading reads {} where {} was drawn", x, b.r, a.r);
+		}
+		Ok(())
+	}
+
 }
