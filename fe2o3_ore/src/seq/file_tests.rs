@@ -1290,3 +1290,190 @@ fn a_note_on_content_the_set_lacks_is_refused() -> Outcome<()> {
 		content that has died");
 	Ok(())
 }
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ THE SILENT-DELETION CASES                                                 │
+// └───────────────────────────────────────────────────────────────────────────┘
+//
+// The self-hosting trial's two silent rounds, reproduced exactly: work that is
+// durable in the log and invisible in the converged tree must be flagged, and a
+// deletion causally ordered with the work -- supersession -- must not be. The
+// rendered bytes in every case here are what the engine rendered before the
+// flags existed; the flags are reportage, not placement.
+
+/// The trial's round four. Replica one records a cross-file block move the way
+/// a diff-based capture does -- a deletion in one file and a fresh insertion in
+/// another, with no move operation -- while replica two concurrently edits
+/// inside the block. The edit's anchors die with the block, its bytes strand at
+/// the deletion site, and the flag names both operations.
+#[test]
+fn an_edit_inside_a_captured_move_strands_and_is_flagged() -> Outcome<()> {
+	let (mut reps, mut ops, ids) = res!(stage(
+		&[(b"a.txt", b"keep\nmove\n"), (b"b.txt", b"")], 2));
+	let (a, b) = (ids[0], ids[1]);
+	let (r1, r2) = reps.split_at_mut(1);
+	// The captured "move": splice the block out of a.txt, splice its bytes into
+	// b.txt, and say nothing about the two being one intent.
+	let del = res!(r1[0].delete(a, 5, 5));
+	let del_id = del.0.id();
+	ops.push(del);
+	ops.push(res!(r1[0].insert(b, 0, b"move\n")));
+	// The concurrent edit inside the block.
+	let edit = res!(r2[0].insert(a, 7, b"XY"));
+	let edit_id = edit.0.id();
+	ops.push(edit);
+	// The block lands unedited, and the edit strands where the block was.
+	let repo = res!(case("a.txt=\"keep\\nXY\" b.txt=\"move\\n\"", &ops));
+	assert!(repo.flags().contains(&Flag::Stranded { op: edit_id, by: del_id }),
+		"flags were {:?}", repo.flags());
+	// The file the sliver renders in keeps the flag, so a reader of a.txt is
+	// told without asking the repository.
+	let stranded_in_a = match repo.file(a) {
+		Some(f)	=> f.flags().contains(&Flag::Stranded { op: edit_id, by: del_id }),
+		None	=> false,
+	};
+	assert!(stranded_in_a, "a.txt did not keep the flag");
+	assert!(!repo.flags().iter().any(|f| matches!(f, Flag::SplicedIntoDeleted { .. })),
+		"no file was deleted: {:?}", repo.flags());
+	Ok(())
+}
+
+/// The trial's round five. Replica one deletes a file; replica two concurrently
+/// edits inside it. The file is gone from both trees, the edit renders only
+/// into the deleted file, and the flag names the edit, the file and the
+/// deletion.
+#[test]
+fn an_edit_inside_a_concurrently_deleted_file_is_flagged() -> Outcome<()> {
+	let (mut reps, mut ops, ids) = res!(stage(
+		&[(b"a.txt", b"fn main() {}\n")], 2));
+	let a = ids[0];
+	let (r1, r2) = reps.split_at_mut(1);
+	let del = res!(r1[0].remove(a));
+	let del_id = del.0.id();
+	ops.push(del);
+	let edit = res!(r2[0].insert(a, 11, b" ok"));
+	let edit_id = edit.0.id();
+	ops.push(edit);
+	// No live files, and the edit whole inside the withheld render.
+	let repo = res!(case("", &ops));
+	assert_eq!(res!(text(&repo, a)), "fn main() { ok}\n");
+	assert_eq!(repo.stats().withheld, 16);
+	assert!(repo.flags().contains(
+		&Flag::SplicedIntoDeleted { op: edit_id, file: a, del: del_id }),
+		"flags were {:?}", repo.flags());
+	// The deleted file keeps the flag, so a recovery verb has it to hand.
+	let kept = match repo.file(a) {
+		Some(f)	=> f.flags().contains(
+			&Flag::SplicedIntoDeleted { op: edit_id, file: a, del: del_id }),
+		None	=> false,
+	};
+	assert!(kept, "a.txt did not keep the flag");
+	// The file's own deletion killed no anchor, so nothing is stranded.
+	assert!(!repo.flags().iter().any(|f| matches!(f, Flag::Stranded { .. })),
+		"flags were {:?}", repo.flags());
+	Ok(())
+}
+
+/// The region-level supersession control: the same shape as the stranded case,
+/// but the deletion was written in knowledge of the edit. A deleter who could
+/// see the insertion chose to remove the region around it, and is owed no flag
+/// for a race that did not happen.
+#[test]
+fn a_deletion_that_saw_the_edit_supersedes_and_raises_nothing() -> Outcome<()> {
+	let (mut reps, mut ops, ids) = res!(stage(
+		&[(b"a.txt", b"keep\nmove\n")], 2));
+	let a = ids[0];
+	let (r1, r2) = reps.split_at_mut(1);
+	let edit = res!(r2[0].insert(a, 7, b"XY"));
+	res!(r1[0].recv(edit.clone()));
+	ops.push(edit);
+	// Replica one deletes the whole block, the insertion included, seeing it.
+	ops.push(res!(r1[0].delete(a, 5, 7)));
+	let repo = res!(case("a.txt=\"keep\\n\"", &ops));
+	assert!(!repo.flags().iter().any(|f| matches!(f, Flag::Stranded { .. })),
+		"an informed deletion was flagged as a race: {:?}", repo.flags());
+	assert!(!repo.flags().iter().any(|f| matches!(f, Flag::SplicedIntoDeleted { .. })),
+		"flags were {:?}", repo.flags());
+	Ok(())
+}
+
+/// The file-level supersession controls, both ways round. A deleter who had
+/// seen the edit deleted it on purpose; an editor who had seen the deletion
+/// wrote into a file they knew was dead. Neither is a race, and neither flags.
+#[test]
+fn a_file_deletion_ordered_with_the_edit_raises_nothing() -> Outcome<()> {
+	// The deletion after the edit, seeing it.
+	let (mut reps, mut ops, ids) = res!(stage(
+		&[(b"a.txt", b"fn main() {}\n")], 2));
+	let a = ids[0];
+	{
+		let (r1, r2) = reps.split_at_mut(1);
+		let edit = res!(r2[0].insert(a, 11, b" ok"));
+		res!(r1[0].recv(edit.clone()));
+		ops.push(edit);
+		ops.push(res!(r1[0].remove(a)));
+	}
+	let repo = res!(case("", &ops));
+	assert!(!repo.flags().iter().any(|f| matches!(f, Flag::SplicedIntoDeleted { .. })),
+		"an informed deletion was flagged as a race: {:?}", repo.flags());
+
+	// The edit after the deletion, seeing it.
+	let (mut reps, mut ops, ids) = res!(stage(
+		&[(b"a.txt", b"fn main() {}\n")], 2));
+	let a = ids[0];
+	{
+		let (r1, r2) = reps.split_at_mut(1);
+		let del = res!(r1[0].remove(a));
+		res!(r2[0].recv(del.clone()));
+		ops.push(del);
+		ops.push(res!(r2[0].insert(a, 11, b" ok")));
+	}
+	let repo = res!(case("", &ops));
+	assert!(!repo.flags().iter().any(|f| matches!(f, Flag::SplicedIntoDeleted { .. })),
+		"an informed edit was flagged as a race: {:?}", repo.flags());
+	Ok(())
+}
+
+/// The same collision with the move recorded as a move: the edit follows the
+/// block into the other file, nothing strands, and neither of the deletion
+/// flags has anything to say. This is the round the trial says the engine was
+/// built for, and the new flags must leave it alone.
+#[test]
+fn a_recorded_move_carries_the_edit_and_the_new_flags_stay_quiet() -> Outcome<()> {
+	let (mut reps, mut ops, ids) = res!(stage(
+		&[(b"a.txt", b"keep\nmove\n"), (b"b.txt", b"")], 2));
+	let (a, b) = (ids[0], ids[1]);
+	let (r1, r2) = reps.split_at_mut(1);
+	ops.push(res!(r1[0].move_across(a, 5, 5, b, 0)));
+	ops.push(res!(r2[0].insert(a, 7, b"XY")));
+	let repo = res!(case("a.txt=\"keep\\n\" b.txt=\"moXYve\\n\"", &ops));
+	assert!(!repo.flags().iter().any(|f| matches!(f,
+		Flag::Stranded { .. } | Flag::SplicedIntoDeleted { .. })),
+		"flags were {:?}", repo.flags());
+	Ok(())
+}
+
+/// A move into a concurrently deleted file is [`Flag::MovedIntoDeleted`]'s
+/// territory, and stays so: the new flags concern splices, and the file's own
+/// content ops, all causally before the deletion, raise nothing either.
+#[test]
+fn moved_into_deleted_keeps_its_territory() -> Outcome<()> {
+	let (mut reps, mut ops, ids) = res!(stage(
+		&[(b"a.txt", b"keep\nmove\n"), (b"b.txt", b"B\n")], 2));
+	let (a, b) = (ids[0], ids[1]);
+	let (r1, r2) = reps.split_at_mut(1);
+	let mv = res!(r1[0].move_across(a, 5, 5, b, 0));
+	let mv_id = mv.0.id();
+	ops.push(mv);
+	ops.push(res!(r2[0].remove(b)));
+	let repo = res!(case("a.txt=\"keep\\n\"", &ops));
+	assert!(repo.flags().contains(&Flag::MovedIntoDeleted { op: mv_id, file: b }),
+		"flags were {:?}", repo.flags());
+	// b.txt's own seed content went dark too, but its author's edit was seen by
+	// the deleter: supersession, not a race, and not a flag.
+	assert!(!repo.flags().iter().any(|f| matches!(f,
+		Flag::Stranded { .. } | Flag::SplicedIntoDeleted { .. })),
+		"flags were {:?}", repo.flags());
+	Ok(())
+}
