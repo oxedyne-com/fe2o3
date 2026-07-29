@@ -27,6 +27,16 @@
 //! not a video codec: there is no motion estimation and no lossy transform, which makes it right for
 //! line drawing, flat colour and text and wrong for a photographic sequence.
 //!
+//! # A container, without a codec
+//!
+//! [`mp4`] writes an MP4 -- ISO base media file format boxes, a sample table and the media -- around
+//! a video track it can neither encode nor decode. That is an odd thing for a graphics crate to
+//! hold and it is deliberate: an H.264 encoder is months of rate control, motion estimation and
+//! entropy coding at a quality the encoder already in the caller's browser or silicon reaches
+//! anyway, while a container is a few hundred lines of length-prefixed boxes with no compression in
+//! it, and it is the part that describes the caller's own frames and their timing. So the caller
+//! encodes and hands the samples and the decoder configuration over, and gets back a file.
+//!
 //! # The rasteriser
 //!
 //! [`raster`] accumulates the signed area each edge contributes to each pixel, then takes a prefix
@@ -68,6 +78,7 @@
 pub mod blur;
 pub mod colour;
 pub mod jpeg;
+pub mod mp4;
 pub mod path;
 pub mod pixmap;
 pub mod png;
