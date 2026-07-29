@@ -6,8 +6,9 @@
 //! Everything the walk noticed is returned with the bytes as a [`Flag`], because
 //! a structure that always converges owes the reader an account of what it
 //! converged to: a torn move, an anchor demoted to break a cycle, a move confined
-//! because it lost a cross-file cycle, or content moved into a file that has since
-//! been deleted. Flags are facts derived from the operation set, not a
+//! because it lost a cross-file cycle, content moved into a file that has since
+//! been deleted, or an edit whose context or whose whole file a concurrent
+//! operation deleted. Flags are facts derived from the operation set, not a
 //! log of what the renderer happened to do, so two replicas holding the same
 //! operations report the same flags.
 //!
@@ -66,6 +67,10 @@ pub const CODE_ORPHANED:	u8 = 7;
 pub const CODE_CONFINED:	u8 = 8;
 /// Wire code for [`Flag::Won`].
 pub const CODE_WON:		u8 = 9;
+/// Wire code for [`Flag::Stranded`].
+pub const CODE_STRANDED:	u8 = 10;
+/// Wire code for [`Flag::SplicedIntoDeleted`].
+pub const CODE_SPLICED_INTO_DELETED: u8 = 11;
 
 
 /// Something the renderer noticed that the reader should be told.
@@ -203,6 +208,52 @@ pub enum Flag {
 		/// The move that won.
 		op:		OpId,
 	},
+	/// A splice whose insertion anchored into content a **concurrent** operation
+	/// deleted: every neighbour the insertion was written beside is a tombstone,
+	/// so the inserted bytes render as a fragment at the deletion site rather
+	/// than inside the context their author saw.
+	///
+	/// This is what a capture-side "move" -- a deletion in one file and a fresh
+	/// insertion in another, with no [`crate::op::Op::Move`] to say so -- does to
+	/// a concurrent edit inside the block: the edit's anchors die with the block,
+	/// and its bytes are left stranded where the block used to be. Had the move
+	/// been recorded as a move, the edit would have followed it and there would
+	/// be nothing to flag.
+	///
+	/// Concurrency is decided from the operations' own parents. A deletion
+	/// causally ordered against the splice raises nothing: an author who deleted
+	/// a region knowing the insertion was in it made a decision rather than
+	/// losing a race, and so did an author who inserted knowing the region was
+	/// gone. The flag fires only where no anchored neighbour survives, since an
+	/// insertion still touching living context renders beside it, where its
+	/// author put it; and it names one concurrent deleter per flag, so both
+	/// authors are answerable from the pair.
+	Stranded {
+		/// The splice whose insertion lost its context.
+		op:		OpId,
+		/// The concurrent operation that deleted the content it anchored into.
+		by:		OpId,
+	},
+	/// A splice that placed content in a file a **concurrent**
+	/// [`crate::op::Op::FileDelete`] retired: the edit is durable in the log and
+	/// renders only into the deleted file, where no reader looks.
+	///
+	/// The moved twin of this is [`Flag::MovedIntoDeleted`], which fires however
+	/// the move and the deletion were ordered, because relocating content into a
+	/// dead file hides it whoever knew what. An edit is different: every edit
+	/// ever made becomes invisible when its file is deliberately deleted, and
+	/// flagging all of them would bury the one fact worth raising -- an edit and
+	/// a deletion that raced, neither author able to see the other's decision.
+	/// Only that race is flagged, from the operations' own parents, and both
+	/// operations are named.
+	SplicedIntoDeleted {
+		/// The splice whose content renders only in the deleted file.
+		op:		OpId,
+		/// The file it placed content in, which is not live.
+		file:	OpId,
+		/// The concurrent deletion the splice did not see.
+		del:	OpId,
+	},
 }
 
 
@@ -219,6 +270,8 @@ impl Flag {
 			Self::Orphaned { .. }			=> CODE_ORPHANED,
 			Self::Confined { .. }			=> CODE_CONFINED,
 			Self::Won { .. }				=> CODE_WON,
+			Self::Stranded { .. }			=> CODE_STRANDED,
+			Self::SplicedIntoDeleted { .. }	=> CODE_SPLICED_INTO_DELETED,
 		}
 	}
 
@@ -234,6 +287,8 @@ impl Flag {
 			Self::Orphaned { .. }			=> "Orphaned",
 			Self::Confined { .. }			=> "Confined",
 			Self::Won { .. }				=> "Won",
+			Self::Stranded { .. }			=> "Stranded",
+			Self::SplicedIntoDeleted { .. }	=> "SplicedIntoDeleted",
 		}
 	}
 
@@ -249,6 +304,8 @@ impl Flag {
 			Self::Orphaned { op, .. }			=> Some(*op),
 			Self::Confined { op, .. }			=> Some(*op),
 			Self::Won { op }					=> Some(*op),
+			Self::Stranded { op, .. }			=> Some(*op),
+			Self::SplicedIntoDeleted { op, .. }	=> Some(*op),
 		}
 	}
 
@@ -304,6 +361,17 @@ impl Flag {
 			Self::Won { op } => Dat::List(vec![
 				Dat::U8(CODE_WON),
 				op.to_dat(),
+			]),
+			Self::Stranded { op, by } => Dat::List(vec![
+				Dat::U8(CODE_STRANDED),
+				op.to_dat(),
+				by.to_dat(),
+			]),
+			Self::SplicedIntoDeleted { op, file, del } => Dat::List(vec![
+				Dat::U8(CODE_SPLICED_INTO_DELETED),
+				op.to_dat(),
+				file.to_dat(),
+				del.to_dat(),
 			]),
 		}
 	}
@@ -397,6 +465,21 @@ impl Flag {
 				res!(flag_len(v, 2, "Won"));
 				Ok(Self::Won {
 					op:	res!(OpId::from_dat(&v[1])),
+				})
+			},
+			CODE_STRANDED => {
+				res!(flag_len(v, 3, "Stranded"));
+				Ok(Self::Stranded {
+					op:	res!(OpId::from_dat(&v[1])),
+					by:	res!(OpId::from_dat(&v[2])),
+				})
+			},
+			CODE_SPLICED_INTO_DELETED => {
+				res!(flag_len(v, 4, "SplicedIntoDeleted"));
+				Ok(Self::SplicedIntoDeleted {
+					op:		res!(OpId::from_dat(&v[1])),
+					file:	res!(OpId::from_dat(&v[2])),
+					del:	res!(OpId::from_dat(&v[3])),
 				})
 			},
 			other => Err(err!(

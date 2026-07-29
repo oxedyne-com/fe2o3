@@ -46,6 +46,14 @@
 //!   undone, because nothing was done.
 //! - Content moved into a file that has been deleted renders nowhere a reader
 //!   looks. Nothing is lost and [`Flag::MovedIntoDeleted`] says so.
+//! - An insertion whose every anchored neighbour was deleted by a concurrent
+//!   operation renders as a fragment at the deletion site, its context gone.
+//!   Nothing is lost and [`Flag::Stranded`] says so, naming both operations.
+//! - An edit concurrent with the deletion of its own file renders only into the
+//!   deleted file, which no reader looks at. Nothing is lost and
+//!   [`Flag::SplicedIntoDeleted`] says so, naming the edit and the deletion. A
+//!   deletion causally ordered with the edit -- either seeing the other -- is a
+//!   decision rather than a race, and raises nothing.
 //!
 //! The posture is to converge always and to say what happened always. Every
 //! [`render::Flag`] is a function of the operation set, so a flag is a fact
@@ -129,6 +137,7 @@ use std::collections::{
 	BTreeMap,
 	BTreeSet,
 };
+use std::ops::Range;
 
 
 /// The total order every tie-break in the structure is decided by: the Lamport
@@ -449,6 +458,8 @@ impl Sequence {
 		}
 		flags.extend(res!(Self::torn(&ops, &claims, &voided, cause)));
 		flags.extend(res!(Self::overlaps(&ops, cause)));
+		flags.extend(res!(Self::stranded(&ops, &files, cause)));
+		flags.extend(res!(Self::spliced_into_deleted(&ops, &files, &index, cause)));
 		flags.sort();
 		flags.dedup();
 
@@ -690,6 +701,14 @@ impl Sequence {
 				out.push(*denied);
 			},
 			Flag::MovedIntoDeleted { file, .. } => out.push(*file),
+			Flag::Stranded { op, by } => {
+				for id in [op, by] {
+					if let Some(f) = index.get(id) {
+						out.push(*f);
+					}
+				}
+			},
+			Flag::SplicedIntoDeleted { file, .. } => out.push(*file),
 			other => {
 				if let Some(id) = other.op() {
 					if let Some(f) = index.get(&id) {
@@ -863,6 +882,138 @@ impl Sequence {
 				}
 			}
 			open.push((r, id));
+		}
+		Ok(out)
+	}
+
+	/// Finds the splices whose insertion anchored into content a **concurrent**
+	/// operation deleted, so that the inserted bytes render at a deletion site
+	/// rather than inside the context their author wrote them into.
+	///
+	/// The context of an insertion is the content its origins name; a file's
+	/// origin anchor names no content a splice can remove, so it is not context.
+	/// The flag fires only where every contextual neighbour is dead -- an
+	/// insertion with a living neighbour renders beside it, where its author put
+	/// it -- and only a **concurrent** deleter is named. A deletion causally
+	/// ordered against the splice, either way round, was a decision made in
+	/// knowledge of the other operation and raises nothing; this is the same
+	/// distinction [`Sequence::torn`] draws, for the same reason.
+	fn stranded(
+		ops:	&[(OpId, &Op)],
+		files:	&BTreeMap<OpId, FileInfo>,
+		cause:	&Causality<'_>,
+	)
+		-> Outcome<Vec<Flag>>
+	{
+		// Every run a splice removed, with the splice that removed it. Only a
+		// splice kills bytes: a move relocates them, and an anchor follows.
+		let mut removed: BTreeMap<OpId, Vec<(Range<u64>, OpId)>> = BTreeMap::new();
+		for (id, op) in ops {
+			if let Op::Splice { remove, .. } = op {
+				for r in remove {
+					if !r.is_empty() {
+						removed.entry(r.op()).or_default().push((r.offsets(), *id));
+					}
+				}
+			}
+		}
+		let mut out: Vec<Flag> = Vec::new();
+		for (id, op) in ops {
+			let (left, right) = match op {
+				Op::Splice { left, right, insert, .. } if !insert.is_empty()
+					=> (left, right),
+				_	=> continue,
+			};
+			// The neighbours the insertion was written beside. An absent origin
+			// is the edge of the file, and a file's origin anchor is the same
+			// edge spelled as content; neither is context that can die.
+			let mut ctx: Vec<ContentId> = Vec::new();
+			for a in [left, right].into_iter().flatten() {
+				if !files.contains_key(&a.content.op) {
+					ctx.push(a.content);
+				}
+			}
+			if ctx.is_empty() {
+				continue;
+			}
+			let mut deleters: Vec<OpId> = Vec::new();
+			let mut all_dead = true;
+			for c in &ctx {
+				let mut dead_here = false;
+				if let Some(runs) = removed.get(&c.op) {
+					for (span, by) in runs {
+						if span.contains(&c.off) {
+							dead_here = true;
+							if by != id && cause.concurrent(by, id) {
+								deleters.push(*by);
+							}
+						}
+					}
+				}
+				if !dead_here {
+					all_dead = false;
+					break;
+				}
+			}
+			if !all_dead {
+				continue;
+			}
+			deleters.sort();
+			deleters.dedup();
+			for by in deleters {
+				out.push(Flag::Stranded { op: *id, by });
+			}
+		}
+		Ok(out)
+	}
+
+	/// Finds the splices that placed content in a file a **concurrent**
+	/// [`Op::FileDelete`] retired.
+	///
+	/// Only the race is flagged. Every edit ever made goes dark when its file is
+	/// deliberately deleted, and a deleter who could see the edit chose to delete
+	/// it, exactly as an editor who could see the deletion chose to write into a
+	/// dead file; neither is owed a flag, and the parents say which happened.
+	/// This is narrower than [`Flag::MovedIntoDeleted`], which fires however move
+	/// and deletion were ordered, because a move actively relocates content into
+	/// the dead file rather than being overtaken in place.
+	fn spliced_into_deleted(
+		ops:	&[(OpId, &Op)],
+		files:	&BTreeMap<OpId, FileInfo>,
+		index:	&BTreeMap<OpId, OpId>,
+		cause:	&Causality<'_>,
+	)
+		-> Outcome<Vec<Flag>>
+	{
+		// The deletions of each file. More than one is legal, and each is its
+		// own author's decision, judged on its own parents.
+		let mut dels: BTreeMap<OpId, Vec<OpId>> = BTreeMap::new();
+		for (id, op) in ops {
+			if let Op::FileDelete { file } = op {
+				dels.entry(*file).or_default().push(*id);
+			}
+		}
+		let mut out: Vec<Flag> = Vec::new();
+		for (id, op) in ops {
+			// A splice that removes without inserting places nothing, and loses
+			// nothing to the deletion either: the file's death does strictly more
+			// than the removal asked for.
+			match op {
+				Op::Splice { insert, .. } if !insert.is_empty()	=> (),
+				_												=> continue,
+			}
+			let f = match index.get(id) {
+				Some(f)	=> *f,
+				None	=> continue,
+			};
+			if files.get(&f).map(|i| i.live).unwrap_or(true) {
+				continue;
+			}
+			for del in dels.get(&f).map(|v| v.as_slice()).unwrap_or(&[]) {
+				if cause.concurrent(del, id) {
+					out.push(Flag::SplicedIntoDeleted { op: *id, file: f, del: *del });
+				}
+			}
 		}
 		Ok(out)
 	}

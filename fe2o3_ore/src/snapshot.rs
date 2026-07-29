@@ -400,6 +400,8 @@ mod tests {
 	use crate::seq::render::{
 		Repo,
 		Span,
+		CODE_SPLICED_INTO_DELETED,
+		CODE_STRANDED,
 	};
 	use crate::seq::slot::Origin;
 	use crate::seq::Sequence;
@@ -546,6 +548,44 @@ mod tests {
 		}]));
 		let back = res!(Snapshot::decode(&res!(snap.encode())));
 		assert_eq!(back.files()[0].flags, flags);
+		Ok(())
+	}
+
+	/// The two deletion-collision flags ride the snapshot the way Confined and
+	/// Won did when they were added: a new code in the same self-describing
+	/// list, and no change to the format version.
+	#[test]
+	fn the_deletion_collision_flags_round_trip() -> Outcome<()> {
+		let flags = vec![
+			Flag::Stranded { op: oid(6, 1), by: oid(7, 2) },
+			Flag::SplicedIntoDeleted {
+				op:		oid(6, 3),
+				file:	oid(1, 1),
+				del:	oid(7, 4),
+			},
+		];
+		for flag in &flags {
+			assert_eq!(*flag, res!(Flag::from_dat(&flag.to_dat())), "flag {}", flag.name());
+		}
+		let snap = res!(Snapshot::new(vec![oid(1, 1)], vec![FileState {
+			flags: flags.clone(),
+			..bare(oid(1, 1), b"f")
+		}]));
+		let bytes = res!(snap.encode());
+		assert_eq!(bytes[MAGIC.len()], VERSION,
+			"an additive flag kind must not bump the format");
+		let back = res!(Snapshot::decode(&bytes));
+		assert_eq!(back.files()[0].flags, flags);
+		// A truncated spelling of either is refused rather than guessed at.
+		assert!(Flag::from_dat(&Dat::List(vec![
+			Dat::U8(CODE_STRANDED),
+			oid(6, 1).to_dat(),
+		])).is_err());
+		assert!(Flag::from_dat(&Dat::List(vec![
+			Dat::U8(CODE_SPLICED_INTO_DELETED),
+			oid(6, 3).to_dat(),
+			oid(1, 1).to_dat(),
+		])).is_err());
 		Ok(())
 	}
 
