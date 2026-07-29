@@ -24,6 +24,10 @@
 //! destination sits inside its own source -- one edge is demoted to the splice
 //! that created the anchored content, which is strictly earlier in op order than
 //! anything in the cycle and so cannot be in it.
+//!
+//! Demotion is the answer for a cycle inside one file, and only for that. A cycle
+//! that crosses a file boundary is arbitrated instead, by the render, and
+//! [`Slots::cycles`] is what tells it where the cycles are.
 
 use crate::id::{
 	Anchor,
@@ -146,8 +150,30 @@ impl Slots {
 	pub fn place(ops: &[(OpId, &Op)])
 		-> Outcome<Self>
 	{
+		Self::place_without(ops, &BTreeSet::new())
+	}
+
+	/// Places the slots as [`Slots::place`] does, except that a move named in
+	/// `voided` places none.
+	///
+	/// A voided move holds no claim either (see [`Claims::build_without`]), so no
+	/// origin can resolve to it and nothing is left behind by leaving its slots
+	/// out: the bytes render from whoever owns them now, which is where they were
+	/// before the move.
+	///
+	/// **The cut points are still taken from every operation's origins, voided
+	/// ones included.** Division has to be a function of the operation set alone,
+	/// or two replicas that void at different moments would divide their slots
+	/// differently and diverge, and the whole point of the render is that they do
+	/// not.
+	pub fn place_without(ops: &[(OpId, &Op)], voided: &BTreeSet<OpId>)
+		-> Outcome<Self>
+	{
 		let mut slots: Vec<Slot> = Vec::new();
 		for (id, op) in ops {
+			if voided.contains(id) && op.is_move() {
+				continue;
+			}
 			match op {
 				Op::FileCreate { .. } => {
 					slots.push(Slot {
@@ -374,6 +400,111 @@ impl Slots {
 		Ok((left, right))
 	}
 
+	/// Returns the cycles of the anchor graph, before anything is demoted.
+	///
+	/// The graph is the one [`Slots::order`] builds on its first pass, and a cycle
+	/// is a strongly connected component with more than one member, or one member
+	/// with an edge to itself. Each is returned in op order, and a slot that is not
+	/// on a cycle is in none of them.
+	///
+	/// This is what the cross-file rule needs and demotion does not. Demotion asks
+	/// only which slot is blocked, and a blocked slot need not be on a cycle -- it
+	/// may merely sit downstream of one -- whereas a rule that voids a whole move
+	/// has to name the moves the cycle actually runs through.
+	pub fn cycles(&self, claims: &Claims)
+		-> Outcome<Vec<Vec<usize>>>
+	{
+		let n = self.slots.len();
+		let dem: Vec<(bool, bool)> = vec![(false, false); n];
+		let mut deps: Vec<Vec<usize>> = vec![Vec::new(); n];
+		for (i, dep) in deps.iter_mut().enumerate() {
+			if let Some(x) = self.prev(i) {
+				dep.push(x);
+				continue;
+			}
+			let (l, r) = res!(self.origins_of(i, claims, &dem));
+			for x in [l, r].into_iter().flatten() {
+				dep.push(x);
+			}
+		}
+		Ok(self.components(&deps))
+	}
+
+	/// Returns the strongly connected components of a dependency graph that are
+	/// cycles, each sorted by op order, by Tarjan's algorithm run iteratively.
+	fn components(&self, deps: &[Vec<usize>]) -> Vec<Vec<usize>> {
+		let n = deps.len();
+		// Depth-first index and low link of each slot, and whether it is on the
+		// component stack.
+		let mut index: Vec<Option<usize>> = vec![None; n];
+		let mut low: Vec<usize> = vec![0; n];
+		let mut on: Vec<bool> = vec![false; n];
+		let mut stack: Vec<usize> = Vec::new();
+		let mut next = 0usize;
+		let mut out: Vec<Vec<usize>> = Vec::new();
+		// The explicit call stack: a slot, and how far through its dependencies the
+		// walk had got when it descended.
+		let mut work: Vec<(usize, usize)> = Vec::new();
+		for root in 0..n {
+			if index[root].is_some() {
+				continue;
+			}
+			work.push((root, 0));
+			while let Some((v, at)) = work.pop() {
+				if at == 0 {
+					index[v] = Some(next);
+					low[v] = next;
+					next += 1;
+					stack.push(v);
+					on[v] = true;
+				}
+				let mut descended = false;
+				for (k, w) in deps[v].iter().enumerate().skip(at) {
+					match index[*w] {
+						None => {
+							work.push((v, k + 1));
+							work.push((*w, 0));
+							descended = true;
+							break;
+						},
+						Some(seen) => {
+							if on[*w] {
+								low[v] = low[v].min(seen);
+							}
+						},
+					}
+				}
+				if descended {
+					continue;
+				}
+				if Some(low[v]) == index[v] {
+					let mut scc: Vec<usize> = Vec::new();
+					while let Some(w) = stack.pop() {
+						on[w] = false;
+						scc.push(w);
+						if w == v {
+							break;
+						}
+					}
+					if scc.len() > 1 || deps[v].contains(&v) {
+						scc.sort_by_key(|i| {
+							let (ord, sub) = self.slots[*i].order_key();
+							(ord, sub, *i)
+						});
+						out.push(scc);
+					}
+				}
+				// A finished slot hands its low link back to whoever descended into
+				// it, which is the entry now on top of the work stack.
+				if let Some((parent, _)) = work.last().copied() {
+					low[parent] = low[parent].min(low[v]);
+				}
+			}
+		}
+		out.sort_by_key(|scc| scc.first().copied().unwrap_or(0));
+		out
+	}
+
 	/// Orders the slots topologically over the anchor graph, breaking any cycle
 	/// by demotion.
 	///
@@ -388,6 +519,14 @@ impl Slots {
 	/// components once and demoting every cycle's lowest edge in a single pass
 	/// would reach the same answer for less, and is the obvious thing to do when
 	/// this becomes the render's cost centre.
+	///
+	/// **Every cycle this sees is inside one file.** A cycle that crosses a file
+	/// boundary is arbitrated before the order is asked for, by
+	/// [`crate::seq::Sequence::render_with`], and its losing moves are voided, so
+	/// by the time this runs no such cycle is left. Demoting an origin inside one
+	/// file lands a placement at a stale position, which is deterministic,
+	/// flagged and safe; demoting one across two would land it in the other file,
+	/// and that is the outcome the arbitration exists to prevent.
 	pub fn order(&self, claims: &Claims)
 		-> Outcome<Order>
 	{
