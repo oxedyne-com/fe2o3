@@ -1,4 +1,5 @@
 mod exif;
+mod glob;
 mod tree;
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -27,6 +28,7 @@ fn run_tests() -> Outcome<()> {
 
     res!(tree::test_tree(filter));
     res!(exif::test_exif(filter));
+    res!(glob::test_glob(filter));
 
     Ok(())
 }

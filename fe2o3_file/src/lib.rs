@@ -22,4 +22,5 @@
 //! safe and maintainable approach to file system operations.
 //!
 pub mod exif;
+pub mod glob;
 pub mod tree;
