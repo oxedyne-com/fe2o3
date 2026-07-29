@@ -18,9 +18,17 @@
 //! header field prepended. The original CRLF line-ending convention is
 //! preserved.
 
-use oxedyne_fe2o3_core::prelude::*;
+//! # Base64
+//!
+//! The `b=`, `bh=` and `p=` tags are RFC 4648 §4 base64, which is what
+//! [`oxedyne_fe2o3_text::base64`] speaks. That decoder refuses whitespace, and a
+//! `b=` tag arrives folded across lines, so anything read back out of a header
+//! must be unfolded before it is handed over. The signer itself only ever
+//! encodes.
 
-use base64;
+use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_text::base64;
+
 use ring::{
     digest::{
         digest as sha,
@@ -219,7 +227,7 @@ impl DkimSigner {
             ),
             DkimKey::Rsa(kp) => (
                 "rsa",
-                base64::encode(rsa_spki_der(kp.public_key().as_ref())),
+                base64::encode(&rsa_spki_der(kp.public_key().as_ref())),
             ),
         };
         fmt!("v=DKIM1; k={}; p={}", k, p)
@@ -622,7 +630,13 @@ mod tests {
     const TEST_RSA_PKCS8_B64: &str = include_str!("../tests/data/dkim_rsa_test_key.b64");
 
     fn rsa_signer() -> DkimSigner {
-        let der = match base64::decode(TEST_RSA_PKCS8_B64.trim()) {
+        // The fixture is one unwrapped line, but a decoder that refuses
+        // whitespace should not be the thing that breaks if it is ever
+        // regenerated without `-w0`.
+        let stripped: String = TEST_RSA_PKCS8_B64.chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let der = match base64::decode(&stripped) {
             Ok(d) => d,
             Err(e) => panic!("decoding the test key: {}", e),
         };
@@ -730,7 +744,9 @@ mod tests {
             Err(e) => panic!("signing: {}", e),
         };
 
-        // Pull b= back out of the header we just wrote, unfolding it.
+        // Pull b= back out of the header we just wrote, unfolding it. The tag is
+        // written folded, and base64 decoding refuses whitespace, so the fold
+        // has to come out here rather than be tolerated there.
         let text = String::from_utf8_lossy(&signed);
         let b_tag = match text.split("b=").nth(1) {
             Some(t) => t,
@@ -840,6 +856,62 @@ mod tests {
         };
         assert_eq!(ed_input, ed_input_after,
             "the second signature changed what the first one covers");
+    }
+
+    /// Every base64 string this signer puts on the wire must be character for
+    /// character what the `base64` crate would have written, because that is
+    /// what it did write until this module changed encoders, and a receiver
+    /// checks the string it was sent.
+    ///
+    /// The values are taken from a real signing run rather than a fixture:
+    /// `p=` from the DNS record, `bh=` and `b=` from the header. The external
+    /// crate decodes each one and re-encodes it, and its answer must be the
+    /// string that came out of here.
+    #[test]
+    fn test_the_wire_base64_matches_the_base64_crate_00() {
+        let s = rsa_signer();
+        let signed = match s.sign(&message(), &[], 1_784_000_000) {
+            Ok(b) => b,
+            Err(e) => panic!("signing: {}", e),
+        };
+        let text = String::from_utf8_lossy(&signed);
+
+        // One tag's value, unfolded, up to the separator that ends it.
+        let tag = |name: &str| -> String {
+            let after = match text.split(name).nth(1) {
+                Some(t) => t,
+                None => panic!("no {} tag in:\n{}", name, text),
+            };
+            after.chars()
+                .take_while(|c| *c != ';' && *c != '\r' && *c != '\n')
+                .filter(|c| !c.is_whitespace())
+                .collect()
+        };
+        let rec = s.dns_txt_record();
+        let p = match rec.split("p=").nth(1) {
+            Some(p) => p.to_string(),
+            None => panic!("no p= tag in: {}", rec),
+        };
+        let values = [
+            ("bh=",	tag("bh=")),
+            ("b=",	tag("b=")),
+            ("p=",	p),
+        ];
+
+        for (name, encoded) in &values {
+            assert!(!encoded.is_empty(), "the {} tag is empty", name);
+            let theirs = match ::base64::decode(encoded) {
+                Ok(v) => v,
+                Err(e) => panic!("the base64 crate rejected our {} tag: {}", name, e),
+            };
+            assert_eq!(::base64::encode(&theirs), *encoded,
+                "the {} tag is not what the base64 crate writes for those bytes", name);
+            match base64::decode(encoded) {
+                Ok(ours) => assert_eq!(ours, theirs,
+                    "the two decoders disagree about the {} tag", name),
+                Err(e) => panic!("our decoder rejected our own {} tag: {}", name, e),
+            }
+        }
     }
 
     // ── RFC 8463 Appendix A: the specification's own test vector ─────────
