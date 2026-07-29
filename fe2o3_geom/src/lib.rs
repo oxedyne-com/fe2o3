@@ -19,5 +19,6 @@
 #![forbid(unsafe_code)]
 pub mod dim;
 pub mod planar;
+pub mod proj;
 pub mod rect;
 pub mod shape;
