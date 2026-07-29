@@ -72,7 +72,7 @@
 //!
 //! Myers costs O(ND) in time and, as written here, O(D²) in memory, where D is
 //! the length of the edit script. Both are fine while D is small and neither is
-//! acceptable when it is not, so D is capped at [`MAX_LINE_SCRIPT`] insertions
+//! acceptable when it is not, so D is capped at [`MAX_PIECE_SCRIPT`] insertions
 //! and deletions over pieces, and [`MAX_BYTE_SCRIPT`] within a refined run. A
 //! piece script that would exceed its cap means the two versions have little left
 //! in common. The line pass then hands over to the chunk pass where the content is
@@ -97,7 +97,11 @@ use std::ops::Range;
 
 /// Greatest piece level edit script the diff will compute on one route before
 /// handing on to the next.
-pub const MAX_LINE_SCRIPT: usize = 1024;
+///
+/// A piece is a line on one route and a content-defined chunk on the other, and
+/// the cap is the same for both: what it bounds is the working memory of the
+/// Myers pass, which does not care what it is comparing.
+pub const MAX_PIECE_SCRIPT: usize = 1024;
 
 /// Greatest byte level edit script the refinement of one changed run will
 /// compute before leaving the run as a single splice.
@@ -248,11 +252,11 @@ impl Splice {
 /// The list is ascending by offset and non-overlapping, and is empty when the
 /// two are already the same.
 pub fn diff(old: &[u8], new: &[u8]) -> Vec<Splice> {
-	diff_with_budget(old, new, MAX_LINE_SCRIPT)
+	diff_with_budget(old, new, MAX_PIECE_SCRIPT)
 }
 
 /// Returns the ordered splices that turn `old` into `new`, with the piece level
-/// edit script capped at `budget` rather than at [`MAX_LINE_SCRIPT`].
+/// edit script capped at `budget` rather than at [`MAX_PIECE_SCRIPT`].
 ///
 /// A budget of zero forces the single trimmed splice: no piece route can produce
 /// a script of no steps for two versions that differ, so both give up and the
@@ -1205,7 +1209,7 @@ mod tests {
 	#[test]
 	fn the_route_follows_the_content() -> Outcome<()> {
 		// Nothing to do.
-		assert_eq!(diff_routed(b"same", b"same", MAX_LINE_SCRIPT).1, Route::Same);
+		assert_eq!(diff_routed(b"same", b"same", MAX_PIECE_SCRIPT).1, Route::Same);
 		// Text, of any size, cuts at the newlines.
 		let mut lines = String::new();
 		for i in 0..4000 {
@@ -1214,18 +1218,18 @@ mod tests {
 		let old = lines.clone().into_bytes();
 		let new = lines.replace("line 2000 ", "line 2000! ").into_bytes();
 		assert!(old.len() > MIN_CHUNKED_LEN, "large enough to have a choice");
-		assert_eq!(diff_routed(&old, &new, MAX_LINE_SCRIPT).1, Route::Line);
+		assert_eq!(diff_routed(&old, &new, MAX_PIECE_SCRIPT).1, Route::Line);
 		// Newline-poor content long enough to chunk takes the chunk route.
 		let old = binary(MIN_CHUNKED_LEN * 4, 0x2545_F491_4F6C_DD1D);
 		let mut new = old.clone();
 		new[MIN_CHUNKED_LEN] ^= 0xff;
-		assert_eq!(diff_routed(&old, &new, MAX_LINE_SCRIPT).1, Route::Chunk);
+		assert_eq!(diff_routed(&old, &new, MAX_PIECE_SCRIPT).1, Route::Chunk);
 		// The same content, too short to be worth chunking, falls to one splice.
 		let short = &old[..MIN_CHUNKED_LEN - 1];
 		let mut new = short.to_vec();
 		new[10] ^= 0xff;
 		new[MIN_CHUNKED_LEN - 100] ^= 0xff;
-		let (sp, route) = diff_routed(short, &new, MAX_LINE_SCRIPT);
+		let (sp, route) = diff_routed(short, &new, MAX_PIECE_SCRIPT);
 		assert_eq!(route, Route::Line, "one line, refined by the byte pass");
 		assert_eq!(res!(apply(short, &sp)), new);
 		// And a budget no piece route can meet falls through both of them.
@@ -1253,7 +1257,7 @@ mod tests {
 		}
 		let (old, new) = (old.into_bytes(), new.into_bytes());
 		assert!(old.len() > MIN_CHUNKED_LEN);
-		assert_eq!(diff_routed(&old, &new, MAX_LINE_SCRIPT).1, Route::Line,
+		assert_eq!(diff_routed(&old, &new, MAX_PIECE_SCRIPT).1, Route::Line,
 			"a full budget stays on the line route");
 		let (sp, route) = diff_routed(&old, &new, 16);
 		assert_eq!(route, Route::Chunk, "a starved line pass is not the end of it");
@@ -1304,7 +1308,7 @@ mod tests {
 		for at in [100_000usize, 2_000_000, 4_000_000] {
 			new[at] ^= 0xff;
 		}
-		let (sp, route) = diff_routed(&old, &new, MAX_LINE_SCRIPT);
+		let (sp, route) = diff_routed(&old, &new, MAX_PIECE_SCRIPT);
 		assert_eq!(route, Route::Chunk);
 		assert_eq!(res!(apply(&old, &sp)), new);
 		assert_well_formed(&old, &sp);
@@ -1377,7 +1381,7 @@ mod tests {
 					},
 				}
 			}
-			let (sp, route) = diff_routed(&old, &new, MAX_LINE_SCRIPT);
+			let (sp, route) = diff_routed(&old, &new, MAX_PIECE_SCRIPT);
 			assert_eq!(res!(apply(&old, &sp)), new, "trial {} on {}", trial, route.name());
 			assert_well_formed(&old, &sp);
 			if route == Route::Chunk {
