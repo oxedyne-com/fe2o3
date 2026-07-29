@@ -18,6 +18,10 @@ pub use crate::{
 		Pt,
 	},
 	pixmap::Pixmap,
+	png::{
+		Animation,
+		Delay,
+	},
 	qr::{
 		QrEcc,
 		QrMatrix,

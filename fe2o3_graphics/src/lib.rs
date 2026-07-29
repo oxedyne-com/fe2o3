@@ -18,6 +18,15 @@
 //! photograph library wants and PNG has no use for: a size probe that stops at the frame header, and
 //! a decode at an eighth scale that reads one coefficient a block and never runs a transform.
 //!
+//! # Animation
+//!
+//! [`png::Animation`] writes a sequence of pixmaps as one APNG. Only the rectangle in which a frame
+//! differs from the one before it is stored, so a drawing that moves one figure across a still
+//! background costs the figure rather than the background, and the file's default image is its first
+//! frame, so a reader that knows nothing of animation shows that frame and reports no error. It is
+//! not a video codec: there is no motion estimation and no lossy transform, which makes it right for
+//! line drawing, flat colour and text and wrong for a photographic sequence.
+//!
 //! # The rasteriser
 //!
 //! [`raster`] accumulates the signed area each edge contributes to each pixel, then takes a prefix

@@ -224,21 +224,39 @@ pub fn encode(pm: &Pixmap) -> Outcome<Vec<u8>> {
 	write_chunk(&mut out, b"IHDR", &ihdr);
 
 	// The image data: each scanline filtered, then the lot deflated.
+	let idat = res!(deflate_region(pm, 0, 0, w, h));
+	write_chunk(&mut out, b"IDAT", &idat);
+
+	write_chunk(&mut out, b"IEND", &[]);
+	Ok(out)
+}
+
+/// Filters and deflates a rectangle of a pixmap, giving the bytes an `IDAT` or an `fdAT` carries.
+///
+/// The rectangle is the whole image for a still, and the part that changed for a frame of an
+/// animation. Filtering runs across the rectangle rather than the image, because that is what the
+/// rectangle's own scanlines are: a frame is decoded as a picture in its own right, and its left
+/// edge has no neighbour to the left of it whatever the canvas holds there.
+fn deflate_region(pm: &Pixmap, x0: usize, y0: usize, w: usize, h: usize) -> Outcome<Vec<u8>> {
+	if x0 + w > pm.width() || y0 + h > pm.height() {
+		return Err(err!(
+			"A region {} by {} at ({}, {}) runs outside a pixmap of {} by {}.",
+			w, h, x0, y0, pm.width(), pm.height();
+		Invalid, Input, Range));
+	}
 	let stride = w * 4;
+	let src = pm.width() * 4;
 	let mut raw = Vec::with_capacity(h * (stride + 1));
 	let mut prev = vec![0u8; stride];
 	for y in 0..h {
-		let line = &pm.data()[y * stride..(y + 1) * stride];
+		let from = (y0 + y) * src + x0 * 4;
+		let line = &pm.data()[from..from + stride];
 		filter_scanline(line, &prev, 4, &mut raw);
 		prev.copy_from_slice(line);
 	}
 	let mut z = ZlibEncoder::new(Vec::new(), Compression::default());
 	res!(z.write_all(&raw));
-	let idat = res!(z.finish());
-	write_chunk(&mut out, b"IDAT", &idat);
-
-	write_chunk(&mut out, b"IEND", &[]);
-	Ok(out)
+	Ok(res!(z.finish()))
 }
 
 /// Appends a chunk: its length, its type, its data, and the CRC over type and data.
@@ -303,6 +321,260 @@ fn paeth(a: u8, b: u8, c: u8) -> u8 {
 		b
 	} else {
 		c
+	}
+}
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ ANIMATION                                                                  │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// The most frames one animation may hold, a ceiling against a length that is a mistake.
+///
+/// A hundred thousand frames is about fifty-five minutes at thirty a second, which is longer than
+/// anything this format is the right container for.
+pub const MAX_FRAMES: u32 = 100_000;
+
+/// How long a frame is shown, as the exact rational a frame control chunk carries.
+///
+/// A rational rather than a count of milliseconds because that is what the chunk holds, and because
+/// the rates that matter divide badly: a thirtieth of a second is 1/30 exactly and 33.333
+/// milliseconds not at all, so an animation timed in milliseconds drifts and one timed in frames
+/// does not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Delay {
+	/// The numerator of the delay in seconds.
+	pub num: u16,
+	/// The denominator of the delay in seconds.
+	pub den: u16,
+}
+
+impl Delay {
+
+	/// One frame of a sequence played at the given rate.
+	pub fn fps(rate: u16) -> Outcome<Self> {
+		if rate == 0 {
+			return Err(err!("A frame rate of zero names no delay."; Invalid, Input));
+		}
+		Ok(Self { num: 1, den: rate })
+	}
+
+	/// A delay of a whole number of milliseconds.
+	pub fn ms(ms: u16) -> Self {
+		Self { num: ms, den: 1000 }
+	}
+
+	/// The delay in seconds.
+	pub fn seconds(&self) -> f64 {
+		if self.den == 0 {
+			0.0
+		} else {
+			(self.num as f64) / (self.den as f64)
+		}
+	}
+}
+
+/// An animation, encoded as an APNG: frames pushed one at a time, and the bytes taken at the end.
+///
+/// The file an [`Animation`] writes is a PNG first and an animation second. Its default image is the
+/// first frame, so a reader that knows nothing of the animation chunks shows that frame and reports
+/// no error -- which is the whole reason the format is laid out the way it is, and the reason a
+/// caller who wants one file for both purposes need not write two.
+///
+/// # What each frame costs
+///
+/// Only the rectangle in which a frame differs from the one before it is written, so a drawing that
+/// moves a hand across a still background costs the hand. That is the difference between a usable
+/// file and an unusable one for the material this is for, where most of the canvas is unchanged for
+/// most of the run, and it is why frames are pushed through here rather than encoded separately and
+/// concatenated.
+///
+/// # What this is not
+///
+/// It is not a video codec. Every frame is compressed against its own predecessor by subtraction of
+/// a rectangle and by DEFLATE, with no motion estimation and no lossy transform, so a photographic
+/// sequence will be many times the size of the same sequence in a video container. Line drawing,
+/// flat colour and text -- which is what a vector document rasterises to -- is what it is good at.
+pub struct Animation {
+	/// Canvas width in pixels.
+	w:	usize,
+	/// Canvas height in pixels.
+	h:	usize,
+	/// How many times to play; zero is forever.
+	plays:	u32,
+	/// The previous frame, against which the next one is differenced.
+	prev:	Option<Pixmap>,
+	/// The frame chunks written so far, in order.
+	body:	Vec<u8>,
+	/// The next APNG sequence number.
+	seq:	u32,
+	/// How many frames have been pushed.
+	n:	u32,
+}
+
+impl Animation {
+
+	/// Begins an animation on a canvas of the given size, playing forever.
+	pub fn new(w: usize, h: usize) -> Outcome<Self> {
+		// A canvas is sized by the same rules a pixmap is, and refusing here rather than at the
+		// first frame tells the caller before they have rendered anything.
+		let _ = res!(Pixmap::new(w, h));
+		Ok(Self {
+			w,
+			h,
+			plays:	0,
+			prev:	None,
+			body:	Vec::new(),
+			seq:	0,
+			n:	0,
+		})
+	}
+
+	/// Sets how many times the animation plays, zero being forever.
+	pub fn plays(mut self, n: u32) -> Self {
+		self.plays = n;
+		self
+	}
+
+	/// The number of frames pushed so far.
+	pub fn frames(&self) -> u32 {
+		self.n
+	}
+
+	/// Adds a frame, shown for the given delay.
+	///
+	/// The frame must be the size of the canvas. A frame of another size is refused rather than
+	/// scaled or cropped: an animation whose frames disagree about their size is one whose author
+	/// and encoder disagree about what is being drawn, and guessing which is right animates
+	/// something nobody rendered.
+	pub fn push(&mut self, pm: &Pixmap, delay: Delay) -> Outcome<()> {
+		if pm.width() != self.w || pm.height() != self.h {
+			return Err(err!(
+				"Frame {} is {} by {} pixels, but the animation's canvas is {} by {}.",
+				self.n, pm.width(), pm.height(), self.w, self.h;
+			Invalid, Input, Mismatch));
+		}
+		if delay.den == 0 {
+			return Err(err!(
+				"Frame {} is given a delay of {}/0 seconds, which names no duration.",
+				self.n, delay.num;
+			Invalid, Input));
+		}
+		if self.n >= MAX_FRAMES {
+			return Err(err!(
+				"An animation may hold {} frames, and this is frame {}.", MAX_FRAMES, self.n + 1;
+			Invalid, Input, Excessive));
+		}
+
+		// The rectangle to write: the whole canvas for the first frame, and afterwards only where
+		// this frame differs from the last. A frame identical to its predecessor still has to be
+		// written, because it carries the delay that holds the picture on the screen, so it is
+		// written as the smallest rectangle a frame control chunk permits.
+		let (x0, y0, w, h) = match &self.prev {
+			None		=> (0, 0, self.w, self.h),
+			Some(prev)	=> match difference(prev, pm) {
+				Some(r)	=> r,
+				None	=> (0, 0, 1, 1),
+			},
+		};
+
+		let mut fctl = Vec::with_capacity(26);
+		fctl.extend_from_slice(&self.seq.to_be_bytes());
+		fctl.extend_from_slice(&(w as u32).to_be_bytes());
+		fctl.extend_from_slice(&(h as u32).to_be_bytes());
+		fctl.extend_from_slice(&(x0 as u32).to_be_bytes());
+		fctl.extend_from_slice(&(y0 as u32).to_be_bytes());
+		fctl.extend_from_slice(&delay.num.to_be_bytes());
+		fctl.extend_from_slice(&delay.den.to_be_bytes());
+		fctl.push(0); // Dispose: leave the canvas as this frame left it.
+		fctl.push(0); // Blend: the frame's pixels replace what is under them, alpha included.
+		write_chunk(&mut self.body, b"fcTL", &fctl);
+		self.seq += 1;
+
+		let data = res!(deflate_region(pm, x0, y0, w, h));
+		if self.n == 0 {
+			// The first frame is the file's default image, so it is an `IDAT` and takes no
+			// sequence number of its own.
+			write_chunk(&mut self.body, b"IDAT", &data);
+		} else {
+			let mut fdat = Vec::with_capacity(data.len() + 4);
+			fdat.extend_from_slice(&self.seq.to_be_bytes());
+			fdat.extend_from_slice(&data);
+			write_chunk(&mut self.body, b"fdAT", &fdat);
+			self.seq += 1;
+		}
+
+		self.prev = Some(pm.clone());
+		self.n += 1;
+		Ok(())
+	}
+
+	/// Finishes the animation and gives the file's bytes.
+	pub fn finish(self) -> Outcome<Vec<u8>> {
+		if self.n == 0 {
+			return Err(err!(
+				"An animation must hold at least one frame, and none were pushed.";
+			Invalid, Input, Missing));
+		}
+		let mut out = Vec::with_capacity(self.body.len() + 128);
+		out.extend_from_slice(&SIG);
+
+		let mut ihdr = Vec::with_capacity(13);
+		ihdr.extend_from_slice(&(self.w as u32).to_be_bytes());
+		ihdr.extend_from_slice(&(self.h as u32).to_be_bytes());
+		ihdr.push(8); // Bit depth.
+		ihdr.push(6); // Colour type: truecolour with alpha.
+		ihdr.push(0); // Compression method: DEFLATE, the only one there is.
+		ihdr.push(0); // Filter method: the only one there is.
+		ihdr.push(0); // Interlace method: none.
+		write_chunk(&mut out, b"IHDR", &ihdr);
+
+		// The animation control chunk, which must precede the first `IDAT` and which is why the
+		// frames were held rather than written: it counts them.
+		let mut actl = Vec::with_capacity(8);
+		actl.extend_from_slice(&self.n.to_be_bytes());
+		actl.extend_from_slice(&self.plays.to_be_bytes());
+		write_chunk(&mut out, b"acTL", &actl);
+
+		out.extend_from_slice(&self.body);
+		write_chunk(&mut out, b"IEND", &[]);
+		Ok(out)
+	}
+}
+
+/// The smallest rectangle outside which two pixmaps of the same size hold the same pixels, as
+/// `(x, y, width, height)`, or `None` where they are identical.
+fn difference(a: &Pixmap, b: &Pixmap) -> Option<(usize, usize, usize, usize)> {
+	if a.width() != b.width() || a.height() != b.height() {
+		return Some((0, 0, b.width(), b.height()));
+	}
+	let (w, h) = (b.width(), b.height());
+	let stride = w * 4;
+	let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0usize, 0usize);
+	for y in 0..h {
+		let ra = &a.data()[y * stride..(y + 1) * stride];
+		let rb = &b.data()[y * stride..(y + 1) * stride];
+		if ra == rb {
+			continue;
+		}
+		if y < y0 {
+			y0 = y;
+		}
+		y1 = y + 1;
+		for x in 0..w {
+			if ra[x * 4..x * 4 + 4] != rb[x * 4..x * 4 + 4] {
+				if x < x0 {
+					x0 = x;
+				}
+				if x + 1 > x1 {
+					x1 = x + 1;
+				}
+			}
+		}
+	}
+	if x1 <= x0 || y1 <= y0 {
+		None
+	} else {
+		Some((x0, y0, x1 - x0, y1 - y0))
 	}
 }
 
@@ -1394,6 +1666,161 @@ mod tests {
 		let pm = res!(decode(&buf));
 		req!(pm.pixel(0, 0), Some(Rgba::opaque(255, 0, 0)));
 		req!(pm.pixel(1, 0), Some(Rgba::opaque(0, 255, 0)));
+		Ok(())
+	}
+
+	/// Walks an animation's chunks, giving each one's type and data.
+	fn chunks(buf: &[u8]) -> Outcome<Vec<(String, Vec<u8>)>> {
+		let mut out = Vec::new();
+		let mut i = 8; // Past the signature.
+		while i + 8 <= buf.len() {
+			let len = u32::from_be_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]) as usize;
+			let kind = String::from_utf8_lossy(&buf[i + 4..i + 8]).to_string();
+			let from = i + 8;
+			if from + len + 4 > buf.len() {
+				return Err(err!("Chunk {} runs past the end of {} bytes.", kind, buf.len();
+				Invalid, Input));
+			}
+			// Every chunk's CRC is checked here, because a writer that frames its chunks wrongly
+			// writes a file that only a lenient reader will take.
+			let crc = u32::from_be_bytes([
+				buf[from + len],
+				buf[from + len + 1],
+				buf[from + len + 2],
+				buf[from + len + 3],
+			]);
+			req!(crc32(&buf[i + 4..from + len]), crc);
+			out.push((kind, buf[from..from + len].to_vec()));
+			i = from + len + 4;
+		}
+		Ok(out)
+	}
+
+	#[test]
+	fn test_an_animation_is_a_png_a_still_reader_can_read_22() -> Outcome<()> {
+		let a = res!(Pixmap::filled(6, 4, Rgba::opaque(200, 30, 40)));
+		let b = res!(Pixmap::filled(6, 4, Rgba::opaque(30, 200, 40)));
+		let mut anim = res!(Animation::new(6, 4));
+		res!(anim.push(&a, res!(Delay::fps(25))));
+		res!(anim.push(&b, res!(Delay::fps(25))));
+		req!(anim.frames(), 2);
+		let buf = res!(anim.finish());
+
+		// The default image is the first frame, so our own still decoder reads it and reports no
+		// error: that is the whole claim the format makes about backwards compatibility.
+		let pm = res!(decode(&buf));
+		req!(pm.width(), 6);
+		req!(pm.height(), 4);
+		req!(pm.pixel(0, 0), Some(Rgba::opaque(200, 30, 40)));
+		req!(pm.pixel(5, 3), Some(Rgba::opaque(200, 30, 40)));
+		Ok(())
+	}
+
+	#[test]
+	fn test_the_animation_chunks_are_ordered_and_numbered_23() -> Outcome<()> {
+		let a = res!(Pixmap::filled(6, 4, Rgba::opaque(200, 30, 40)));
+		let mut b = a.clone();
+		res!(b.fill_bounds(Bounds::new(1.0, 1.0, 3.0, 3.0), Rgba::opaque(0, 0, 255), None));
+		let mut anim = res!(Animation::new(6, 4)).plays(3);
+		res!(anim.push(&a, res!(Delay::fps(10))));
+		res!(anim.push(&b, res!(Delay::fps(10))));
+		res!(anim.push(&a, res!(Delay::fps(10))));
+		let buf = res!(anim.finish());
+
+		let cs = res!(chunks(&buf));
+		let kinds: Vec<&str> = cs.iter().map(|(k, _)| k.as_str()).collect();
+		req!(kinds, vec!["IHDR", "acTL", "fcTL", "IDAT", "fcTL", "fdAT", "fcTL", "fdAT", "IEND"]);
+
+		// The control chunk counts the frames and carries the play count.
+		let actl = &cs[1].1;
+		req!(u32::from_be_bytes([actl[0], actl[1], actl[2], actl[3]]), 3u32);
+		req!(u32::from_be_bytes([actl[4], actl[5], actl[6], actl[7]]), 3u32);
+
+		// Sequence numbers run 0, 1, 2, 3, 4 across the frame control and frame data chunks with no
+		// gap and no repeat, which is what a reader checks and the easiest thing to get wrong.
+		let mut seqs = Vec::new();
+		for (kind, data) in &cs {
+			if kind == "fcTL" || kind == "fdAT" {
+				seqs.push(u32::from_be_bytes([data[0], data[1], data[2], data[3]]));
+			}
+		}
+		req!(seqs, vec![0u32, 1, 2, 3, 4]);
+		Ok(())
+	}
+
+	#[test]
+	fn test_a_frame_writes_only_the_rectangle_that_changed_24() -> Outcome<()> {
+		let a = res!(Pixmap::filled(40, 40, Rgba::opaque(255, 255, 255)));
+		let mut b = a.clone();
+		// A rectangle from (10, 12) to (14, 15), which is 4 wide and 3 high.
+		res!(b.fill_bounds(Bounds::new(10.0, 12.0, 14.0, 15.0), Rgba::opaque(0, 0, 0), None));
+		let mut anim = res!(Animation::new(40, 40));
+		res!(anim.push(&a, Delay::ms(40)));
+		res!(anim.push(&b, Delay::ms(40)));
+		let buf = res!(anim.finish());
+
+		let cs = res!(chunks(&buf));
+		// The second frame control chunk: width, height, x, y at bytes 4 through 19.
+		let f = &cs[4].1;
+		req!(cs[4].0, "fcTL".to_string());
+		req!(u32::from_be_bytes([f[4], f[5], f[6], f[7]]), 4u32);
+		req!(u32::from_be_bytes([f[8], f[9], f[10], f[11]]), 3u32);
+		req!(u32::from_be_bytes([f[12], f[13], f[14], f[15]]), 10u32);
+		req!(u32::from_be_bytes([f[16], f[17], f[18], f[19]]), 12u32);
+		// The delay, as the rational it was given as.
+		req!(u16::from_be_bytes([f[20], f[21]]), 40u16);
+		req!(u16::from_be_bytes([f[22], f[23]]), 1000u16);
+		Ok(())
+	}
+
+	#[test]
+	fn test_a_frame_identical_to_the_last_still_carries_its_delay_25() -> Outcome<()> {
+		let a = res!(Pixmap::filled(8, 8, Rgba::opaque(1, 2, 3)));
+		let mut anim = res!(Animation::new(8, 8));
+		res!(anim.push(&a, Delay::ms(100)));
+		res!(anim.push(&a, Delay::ms(500)));
+		let buf = res!(anim.finish());
+		let cs = res!(chunks(&buf));
+		let f = &cs[4].1;
+		// A frame that changed nothing is written as the one pixel a frame control chunk must
+		// name at least: a held picture is a frame, not an absence.
+		req!(u32::from_be_bytes([f[4], f[5], f[6], f[7]]), 1u32);
+		req!(u32::from_be_bytes([f[8], f[9], f[10], f[11]]), 1u32);
+		req!(u16::from_be_bytes([f[20], f[21]]), 500u16);
+		Ok(())
+	}
+
+	#[test]
+	fn test_an_animation_refuses_what_it_cannot_write_26() -> Outcome<()> {
+		let empty = res!(Animation::new(8, 8));
+		assert!(empty.finish().is_err(), "an animation with no frames must be refused");
+
+		let mut anim = res!(Animation::new(8, 8));
+		let wrong = res!(Pixmap::new(9, 8));
+		assert!(anim.push(&wrong, Delay::ms(40)).is_err(), "a frame of the wrong size must be refused");
+
+		let right = res!(Pixmap::new(8, 8));
+		assert!(
+			anim.push(&right, Delay { num: 1, den: 0 }).is_err(),
+			"a delay with a zero denominator must be refused",
+		);
+		assert!(Delay::fps(0).is_err(), "a frame rate of zero must be refused");
+		Ok(())
+	}
+
+	#[test]
+	fn test_the_difference_of_two_frames_is_the_tightest_rectangle_27() -> Outcome<()> {
+		let a = res!(Pixmap::filled(10, 10, Rgba::opaque(0, 0, 0)));
+		req!(difference(&a, &a), None::<(usize, usize, usize, usize)>);
+
+		let mut b = a.clone();
+		b.set_pixel(3, 7, Rgba::opaque(255, 255, 255));
+		req!(difference(&a, &b), Some((3, 7, 1, 1)));
+
+		let mut c = a.clone();
+		c.set_pixel(2, 1, Rgba::opaque(255, 0, 0));
+		c.set_pixel(8, 6, Rgba::opaque(0, 255, 0));
+		req!(difference(&a, &c), Some((2, 1, 7, 6)));
 		Ok(())
 	}
 }
