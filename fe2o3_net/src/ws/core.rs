@@ -108,6 +108,342 @@ pub fn accept_key(key: &str) -> String {
     base64::encode(&hash)
 }
 
+/// Builds the `101 Switching Protocols` response that answers a client's upgrade request.
+///
+/// The request's `Sec-WebSocket-Key` is validated (present, valid base64, 16 bytes once decoded)
+/// before the accept value is derived from it, so a malformed handshake is refused here rather
+/// than half-completed.
+///
+/// A free function, because a server that owns its own socket -- one that reads the upgrade
+/// request itself and then splits the stream into halves for two tasks -- needs the response text
+/// without needing a [`WebSocket`], whose type parameters describe a database it has no use for.
+pub fn accept_response(request: &HttpMessage) -> Outcome<String> {
+    let key = match request.header.get_the_field_value(&HeaderName::SecWebSocketKey) {
+        Ok(HeaderFieldValue::SecWebSocketKey(key)) => {
+            let key_byts = match base64::decode(&key) {
+                Ok(byts) => byts,
+                Err(e) => return Err(err!(e,
+                    "The websocket key provided is not valid base64.";
+                IO, Network, Invalid, Input, String, Conversion)),
+            };
+            if key_byts.len() != 16 {
+                return Err(err!(
+                    "The websocket key is {} bytes long, expected 16.", key_byts.len();
+                IO, Network, Invalid, Input, Mismatch, Size));
+            }
+            key
+        },
+        _ => return Err(err!(
+            "The websocket key string is missing.";
+        IO, Network, Input, Missing)),
+    };
+    Ok(fmt!(
+        "HTTP/1.1 101 Switching Protocols\r\n\
+        Upgrade: websocket\r\n\
+        Connection: Upgrade\r\n\
+        Sec-WebSocket-Accept: {}\r\n\r\n",
+        accept_key(&key),
+    ))
+}
+
+/// Encodes a message as the bytes of one or more RFC 6455 frames.
+///
+/// `mask` is set by a client and clear by a server: RFC 6455 §5.3 requires client-to-server frames
+/// to be masked and forbids the mask on server-to-client frames. A payload longer than
+/// `chunk_thresh` is fragmented into frames of at most `chunk_size` bytes, the first carrying the
+/// message's opcode and the rest the continuation opcode, with `FIN` on the last.
+///
+/// A free function so that the write half of a split stream can be framed by a task that never
+/// touches the read half.
+pub fn encode_message(
+    message:        &WebSocketMessage,
+    mask:           bool,
+    chunk_size:     usize,
+    chunk_thresh:   usize,
+)
+    -> Outcome<Vec<u8>>
+{
+    if chunk_size == 0 {
+        return Err(err!(
+            "A websocket chunk size of zero cannot make progress.";
+        Invalid, Input, Size));
+    }
+
+    // Determine the opcode based on the message type.
+    let initial_opcode = match message {
+        WebSocketMessage::Text(_) => 0x1,
+        WebSocketMessage::Binary(_) => 0x2,
+        WebSocketMessage::Ping(_) => 0x9,
+        WebSocketMessage::Pong(_) => 0xA,
+        WebSocketMessage::Close(_, _) => 0x8,
+    };
+
+    // Get the payload data.
+    let payload = match message {
+        WebSocketMessage::Text(text) => text.as_bytes().to_vec(),
+        WebSocketMessage::Binary(data) => data.clone(),
+        WebSocketMessage::Ping(data) => data.clone(),
+        WebSocketMessage::Pong(data) => data.clone(),
+        WebSocketMessage::Close(status_code, reason) => {
+            let mut data = Vec::new();
+            if let Some(code) = status_code {
+                data.extend_from_slice(&code.to_bytes());
+            }
+            if let Some(reason_str) = reason {
+                data.extend_from_slice(reason_str.as_bytes());
+            }
+            data
+        }
+    };
+    let payload_length = payload.len();
+
+    // Generate the masking key for client-side masking.
+    let mut masking_key = [0u8; 4];
+    if mask {
+        Rand::fill_u8(&mut masking_key);
+    }
+    let mask_bit = if mask { 0x80 } else { 0x00 };
+
+    let mut out = Vec::with_capacity(payload_length + 16);
+    if payload_length > chunk_thresh {
+        // Send the message in chunks.
+        let mut bytes_sent = 0;
+        while bytes_sent < payload_length {
+            let remaining_bytes = payload_length - bytes_sent;
+            let chunk = std::cmp::min(remaining_bytes, chunk_size);
+            let is_final = remaining_bytes <= chunk_size;
+
+            // Use the initial opcode for the first frame, continuation (0x0) for the others.
+            let opcode = if bytes_sent == 0 { initial_opcode } else { 0x0 };
+
+            // First byte: FIN bit and opcode.
+            out.push(if is_final { 0x80 | opcode } else { opcode });
+
+            // Second byte: mask bit and payload length.
+            if chunk <= 125 {
+                out.push(mask_bit | chunk as u8);
+            } else if chunk <= 65535 {
+                out.push(mask_bit | 126);
+                out.extend_from_slice(&(chunk as u16).to_be_bytes());
+            } else {
+                out.push(mask_bit | 127);
+                out.extend_from_slice(&(chunk as u64).to_be_bytes());
+            }
+            if mask {
+                out.extend_from_slice(&masking_key);
+            }
+            for i in 0..chunk {
+                let b = payload[bytes_sent + i];
+                out.push(if mask { b ^ masking_key[i % 4] } else { b });
+            }
+            bytes_sent += chunk;
+        }
+    } else {
+        // Send the message as a single frame.
+        out.push(0x80 | initial_opcode);
+        if payload_length <= 125 {
+            out.push(mask_bit | payload_length as u8);
+        } else if payload_length <= 65535 {
+            out.push(mask_bit | 126);
+            out.extend_from_slice(&(payload_length as u16).to_be_bytes());
+        } else {
+            out.push(mask_bit | 127);
+            out.extend_from_slice(&(payload_length as u64).to_be_bytes());
+        }
+        if mask {
+            out.extend_from_slice(&masking_key);
+        }
+        for (i, b) in payload.iter().enumerate() {
+            out.push(if mask { b ^ masking_key[i % 4] } else { *b });
+        }
+    }
+    Ok(out)
+}
+
+/// Reads one message -- however many frames it arrives in -- from `stream`.
+///
+/// `buffer` accumulates the payload across the frames of a fragmented message and is cleared
+/// before the message is returned, so the same buffer can be reused for the next call. `Ok(None)`
+/// means the peer closed the connection.
+///
+/// A free function so that the read half of a split stream can be decoded by a task that never
+/// touches the write half.
+pub async fn read_message<R: AsyncRead + Unpin>(
+    stream:     &mut R,
+    buffer:     &mut Vec<u8>,
+    chunk_size: usize,
+)
+    -> Outcome<Option<WebSocketMessage>>
+{
+    if chunk_size == 0 {
+        return Err(err!(
+            "A websocket chunk size of zero cannot make progress.";
+        Invalid, Input, Size));
+    }
+    let mut is_final_frame = false;
+    let mut opcode = 0;
+
+    while !is_final_frame {
+        // Read the first byte of the frame header.
+        let mut header_byte = [0u8; 1];
+        match stream.read_exact(&mut header_byte).await {
+            Ok(_n) => (),
+            Err(e) if e.kind() == tokio::io::ErrorKind::UnexpectedEof => {
+                return Ok(None);
+            }
+            Err(e) => return Err(err!(e,
+                "While trying to read first byte of the frame header.";
+            IO, Network, Read, Wire)),
+        }
+
+        // Extract the FIN bit and opcode from the header byte.
+        is_final_frame = (header_byte[0] & 0x80) != 0;
+
+        if opcode == 0 {
+            opcode = header_byte[0] & 0x0F;
+        }
+
+        // Read the second byte of the frame header.
+        let mut length_byte = [0u8; 1];
+        match stream.read_exact(&mut length_byte).await {
+            Ok(_n) => (),
+            Err(e) if e.kind() == tokio::io::ErrorKind::UnexpectedEof => {
+                return Ok(None);
+            }
+            Err(e) => return Err(err!(e,
+                "While trying to read second byte of the frame header.";
+            IO, Network, Read, Wire)),
+        }
+
+        // Extract the payload length and mask flag from the length byte.
+        let masked = (length_byte[0] & 0x80) != 0;
+        let payload_length = match length_byte[0] & 0x7F {
+            127 => {
+                // 64-bit extended payload length.
+                let mut extended_length_bytes = [0u8; 8];
+                match stream.read_exact(&mut extended_length_bytes).await {
+                    Ok(_n) => (),
+                    Err(e) if e.kind() == tokio::io::ErrorKind::UnexpectedEof => {
+                        return Ok(None);
+                    }
+                    Err(e) => return Err(err!(e,
+                        "While trying to read the 64-bit extended payload length.";
+                    IO, Network, Read, Wire)),
+                }
+                u64::from_be_bytes(extended_length_bytes) as usize
+            }
+            126 => {
+                // 16-bit extended payload length.
+                let mut extended_length_bytes = [0u8; 2];
+                match stream.read_exact(&mut extended_length_bytes).await {
+                    Ok(_n) => (),
+                    Err(e) if e.kind() == tokio::io::ErrorKind::UnexpectedEof => {
+                        return Ok(None);
+                    }
+                    Err(e) => return Err(err!(e,
+                        "While trying to read the 16-bit extended payload length.";
+                    IO, Network, Read, Wire)),
+                }
+                u16::from_be_bytes(extended_length_bytes) as usize
+            }
+            len => len as usize,
+        };
+
+        // Read the masking key if the frame is masked.
+        let mut masking_key = [0u8; 4];
+        if masked {
+            match stream.read_exact(&mut masking_key).await {
+                Ok(_n) => (),
+                Err(e) if e.kind() == tokio::io::ErrorKind::UnexpectedEof => {
+                    return Ok(None);
+                }
+                Err(e) => return Err(err!(e,
+                    "While trying to read the frame masking key.";
+                IO, Network, Read, Wire)),
+            }
+        }
+
+        // Read the payload data, unmasking each chunk as it lands.
+        let mut payload = vec![0u8; payload_length];
+        let mut bytes_read = 0;
+        while bytes_read < payload_length {
+            let chunk = std::cmp::min(chunk_size, payload_length - bytes_read);
+            match stream.read_exact(&mut payload[bytes_read..bytes_read + chunk]).await {
+                Ok(_n) => {
+                    if masked {
+                        for i in 0..chunk {
+                            payload[bytes_read + i] ^= masking_key[(bytes_read + i) % 4];
+                        }
+                    }
+                    bytes_read += chunk;
+                    buffer.extend_from_slice(&payload[bytes_read - chunk..bytes_read]);
+                }
+                Err(e) if e.kind() == tokio::io::ErrorKind::UnexpectedEof => {
+                    return Ok(None);
+                }
+                Err(e) => return Err(err!(e,
+                    "While trying to read payload chunk.";
+                IO, Network, Read, Wire)),
+            }
+        }
+    }
+
+    // Construct the appropriate WebSocketMessage variant based on the opcode.
+    let message = match opcode {
+        0x0 => {
+            // A continuation frame with nothing to continue: the peer either lost track of the
+            // message it was sending or is probing for a panic. Neither is our business to
+            // complete.
+            return Err(err!(
+                "The first frame of a message carries the continuation opcode, so there is \
+                no message for it to continue.";
+            IO, Network, Invalid, Input, Wire));
+        }
+        0x1 => {
+            // Text frame.
+            let text = res!(std::str::from_utf8(buffer)).to_string();
+            WebSocketMessage::Text(text)
+        }
+        0x2 => {
+            // Binary frame.
+            WebSocketMessage::Binary(buffer.clone())
+        }
+        0x8 => {
+            // Close frame.
+            let status_code = if buffer.len() >= 2 {
+                let nu16 = u16::from_be_bytes([buffer[0], buffer[1]]);
+                let code = res!(WebSocketStatusCode::try_from(nu16));
+                Some(code)
+            } else {
+                None
+            };
+            let reason = if buffer.len() > 2 {
+                Some(res!(std::str::from_utf8(&buffer[2..])).to_string())
+            } else {
+                None
+            };
+            WebSocketMessage::Close(status_code, reason)
+        }
+        0x9 => {
+            // Ping frame.
+            WebSocketMessage::Ping(buffer.clone())
+        }
+        0xA => {
+            // Pong frame.
+            WebSocketMessage::Pong(buffer.clone())
+        }
+        _ => {
+            // Unknown opcode.
+            return Err(err!("Unknown opcode: {}", opcode; IO, Network, Invalid, Input));
+        }
+    };
+
+    // Clear the buffer for the next message.
+    buffer.clear();
+
+    Ok(Some(message))
+}
+
 pub struct WebSocket<
     'a,
     const UIDL: usize,
@@ -259,36 +595,7 @@ impl<
     )
         -> Outcome<()>
     {
-        let key = match request.header.get_the_field_value(&HeaderName::SecWebSocketKey) { 
-            Ok(HeaderFieldValue::SecWebSocketKey(key)) => { 
-                let key_byts = match base64::decode(key) {
-                    Ok(byts) => byts,
-                    Err(e) => return Err(err!(e,
-                        "The websocket key provided is not valid base64.";
-                    IO, Network, Invalid, Input, String, Conversion)),
-                };
-                if key_byts.len() == 16 {
-                    key
-                } else {
-                    return Err(err!(
-                        "The websocket key is {} bytes long, expected 16.", key_byts.len();
-                    IO, Network, Invalid, Input, Mismatch, Size));
-                }
-            },
-            _ => return Err(err!(
-                "The websocket key string is missing.";
-            IO, Network, Input, Missing)),
-        };
-
-        let accept_key = accept_key(&key);
-
-        let response = fmt!(
-            "HTTP/1.1 101 Switching Protocols\r\n\
-            Upgrade: websocket\r\n\
-            Connection: Upgrade\r\n\
-            Sec-WebSocket-Accept: {}\r\n\r\n",
-            accept_key,
-        );
+        let response = res!(accept_response(&request));
 
         match self.stream.write_all(response.as_bytes()).await {
             Ok(()) => (),
@@ -302,328 +609,37 @@ impl<
         Ok(())
     }
 
+    /// Reads one message from the stream, however many frames it arrives in. `Ok(None)` means the
+    /// peer closed the connection.
     pub async fn read(&mut self) -> Outcome<Option<WebSocketMessage>> {
-        let mut is_final_frame = false;
-        let mut opcode = 0;
-    
-        while !is_final_frame {
-            // Read the first byte of the frame header.
-            let mut header_byte = [0u8; 1];
-            let result = self.stream.read_exact(&mut header_byte).await;
-            match result {
-                Ok(_n) => (),
-                Err(e) if e.kind() == tokio::io::ErrorKind::UnexpectedEof => {
-                    return Ok(None);
-                }
-                Err(e) => return Err(err!(e,
-                    "While trying to read first byte of the frame header.";
-                IO, Network, Read, Wire)),
-            }
-    
-            // Extract the FIN bit and opcode from the header byte.
-            is_final_frame = (header_byte[0] & 0x80) != 0;
-            
-            if opcode == 0 {
-                opcode = header_byte[0] & 0x0F;
-            }
-        
-            // Read the second byte of the frame header.
-            let mut length_byte = [0u8; 1];
-            let result = self.stream.read_exact(&mut length_byte).await;
-            match result {
-                Ok(_n) => (),
-                Err(e) if e.kind() == tokio::io::ErrorKind::UnexpectedEof => {
-                    return Ok(None);
-                }
-                Err(e) => return Err(err!(e,
-                    "While trying to read second byte of the frame header.";
-                IO, Network, Read, Wire)),
-            }
-        
-            // Extract the payload length and mask flag from the length byte.
-            let masked = (length_byte[0] & 0x80) != 0;
-            let payload_length = match length_byte[0] & 0x7F {
-                127 => {
-                    // 64-bit extended payload length.
-                    let mut extended_length_bytes = [0u8; 8];
-                    let result = self.stream.read_exact(&mut extended_length_bytes).await;
-                    match result {
-                        Ok(_n) => (),
-                        Err(e) if e.kind() == tokio::io::ErrorKind::UnexpectedEof => {
-                            return Ok(None);
-                        }
-                        Err(e) => return Err(err!(e,
-                            "While trying to read second byte of the frame header.";
-                        IO, Network, Read, Wire)),
-                    }
-                    u64::from_be_bytes(extended_length_bytes) as usize
-                }
-                126 => {
-                    // 16-bit extended payload length.
-                    let mut extended_length_bytes = [0u8; 2];
-                    let result = self.stream.read_exact(&mut extended_length_bytes).await;
-                    match result {
-                        Ok(_n) => (),
-                        Err(e) if e.kind() == tokio::io::ErrorKind::UnexpectedEof => {
-                            return Ok(None);
-                        }
-                        Err(e) => return Err(err!(e,
-                            "While trying to read second byte of the frame header.";
-                        IO, Network, Read, Wire)),
-                    }
-                    u16::from_be_bytes(extended_length_bytes) as usize
-                }
-                len => len as usize,
-            };
+        let chunk_size = self.chunk_size;
+        let mut buffer = std::mem::take(&mut self.buffer);
+        let result = read_message(
+            self.stream.as_mut().get_mut(),
+            &mut buffer,
+            chunk_size,
+        ).await;
+        self.buffer = buffer;
+        result
+    }
 
-            // Read the masking key if the frame is masked.
-            let mut masking_key = [0u8; 4];
-            if masked {
-                let result = self.stream.read_exact(&mut masking_key).await;
-                match result {
-                    Ok(_n) => (),
-                    Err(e) if e.kind() == tokio::io::ErrorKind::UnexpectedEof => {
-                        return Ok(None);
-                    }
-                    Err(e) => return Err(err!(e,
-                        "While trying to read second byte of the frame header.";
-                    IO, Network, Read, Wire)),
-                }
-            }
-        
-            // Read the (possibly fragmented) payload data.
-            let mut payload = vec![0u8; payload_length];
-            let mut bytes_read = 0;
-            while bytes_read < payload_length {
-                let chunk_size = std::cmp::min(
-                    self.chunk_size,
-                    payload_length - bytes_read,
-                );
-                let result = self.stream.read_exact(&mut payload[
-                    bytes_read..bytes_read + chunk_size
-                ]).await;
-                match result {
-                    Ok(_n) => {
-                        // Unmask the payload chunk if the frame is masked.
-                        if masked {
-                            for i in 0..chunk_size {
-                                payload[bytes_read + i] ^= masking_key[(bytes_read + i) % 4];
-                            }
-                        }
-                        bytes_read += chunk_size;
-                        self.buffer.extend_from_slice(&payload[
-                            bytes_read - chunk_size..bytes_read
-                        ]);
-                    }
-                    Err(e) if e.kind() == tokio::io::ErrorKind::UnexpectedEof => {
-                        return Ok(None);
-                    }
-                    Err(e) => return Err(err!(e,
-                        "While trying to read payload chunk.";
-                    IO, Network, Read, Wire)),
-                }
-            }
-
-            // Unmask the payload if the frame is masked.
-            if masked {
-                for i in 0..payload_length {
-                    payload[i] ^= masking_key[i % 4];
-                }
-            }
-        }
-        
-        // Construct the appropriate WebSocketMessage variant based on the opcode.
-        let message = match opcode {
-            0x0 => {
-                // Continuation frame (not supported in this example).
-                unimplemented!("Continuation frames are not supported");
-            }
-            0x1 => {
-                // Text frame.
-                let text = res!(std::str::from_utf8(&self.buffer)).to_string();
-                WebSocketMessage::Text(text)
-            }
-            0x2 => {
-                // Binary frame.
-                WebSocketMessage::Binary(self.buffer.clone())
-            }
-            0x8 => {
-                // Close frame.
-                let status_code = if self.buffer.len() >= 2 {
-                    let nu16 = u16::from_be_bytes([self.buffer[0], self.buffer[1]]);
-                    let code = res!(WebSocketStatusCode::try_from(nu16));
-                    Some(code)
-                } else {
-                    None
-                };
-                let reason = if self.buffer.len() > 2 {
-                    Some(res!(std::str::from_utf8(&self.buffer[2..])).to_string())
-                } else {
-                    None
-                };
-                WebSocketMessage::Close(status_code, reason)
-            }
-            0x9 => {
-                // Ping frame.
-                WebSocketMessage::Ping(self.buffer.clone())
-            }
-            0xA => {
-                // Pong frame.
-                WebSocketMessage::Pong(self.buffer.clone())
-            }
-            _ => {
-                // Unknown opcode.
-                return Err(err!("Unknown opcode: {}", opcode; IO, Network, Invalid, Input));
-            }
-        };
-    
-        // Clear the buffer for the next message.
-        self.buffer.clear();
-    
-        Ok(Some(message))
-    }    
-
+    /// Frames `message` and writes it to the stream, masking it when this end is the client.
     pub async fn send(
         &mut self,
         message: &WebSocketMessage,
     )
         -> Outcome<()>
     {
-        // Determine the opcode based on the message type.
-        let initial_opcode = match message {
-            WebSocketMessage::Text(_) => 0x1,
-            WebSocketMessage::Binary(_) => 0x2,
-            WebSocketMessage::Ping(_) => 0x9,
-            WebSocketMessage::Pong(_) => 0xA,
-            WebSocketMessage::Close(_, _) => 0x8,
-        };
-    
-        // Get the payload data and its length.
-        let payload = match message {
-            WebSocketMessage::Text(text) => text.as_bytes().to_vec(),
-            WebSocketMessage::Binary(data) => data.clone(),
-            WebSocketMessage::Ping(data) => data.clone(),
-            WebSocketMessage::Pong(data) => data.clone(),
-            WebSocketMessage::Close(status_code, reason) => {
-                let mut data = Vec::new();
-                if let Some(code) = status_code {
-                    data.extend_from_slice(&code.to_bytes());
-                }
-                if let Some(reason_str) = reason {
-                    data.extend_from_slice(reason_str.as_bytes());
-                }
-                data
-            }
-        };
-
-        let payload_length = payload.len();
-    
-        // Generate masking key for client-side masking.
-        let mut masking_key = [0u8; 4];
-        if self.is_client() {
-            Rand::fill_u8(&mut masking_key);
-        }
-
-        // Determine if chunking is required based on the chunking threshold.
-        if payload_length > self.chunk_thresh {
-            // Send the message in chunks.
-            let mut bytes_sent = 0;
-            while bytes_sent < payload_length {
-                let remaining_bytes = payload_length - bytes_sent;
-                let chunk_size = std::cmp::min(remaining_bytes, self.chunk_size);
-                let is_final = remaining_bytes <= self.chunk_size;
-
-                // Use initial opcode for first frame, continuation (0x0) for others
-                let opcode = if bytes_sent == 0 { initial_opcode } else { 0x0 };
-
-                // Construct the frame header.
-                let mut header = Vec::new();
-
-                // First byte: FIN bit and opcode
-                header.push(if is_final { 0x80 | opcode } else { opcode });
-
-                // Second byte: Mask bit set for client-side masking and payload length.
-                let mask_bit = if self.is_client() { 0x80 } else { 0x00 };
-                if chunk_size <= 125 {
-                    header.push(mask_bit | chunk_size as u8);
-                } else if chunk_size <= 65535 {
-                    header.push(mask_bit | 126);
-                    header.extend_from_slice(&(chunk_size as u16).to_be_bytes());
-                } else {
-                    header.push(mask_bit | 127);
-                    header.extend_from_slice(&(chunk_size as u64).to_be_bytes());
-                }
-
-                // Write the masking key for client-side masking.
-                if self.is_client() {
-                    header.extend_from_slice(&masking_key);
-                }
-
-                // Write the frame header to the stream.
-                let result = self.stream.write_all(&header).await;
-                res!(result);
-
-                // Mask and send payload chunk.
-                let mut chunk = payload[bytes_sent..bytes_sent + chunk_size].to_vec();
-
-                if self.is_client() {
-                    for i in 0..chunk_size {
-                        chunk[i] ^= masking_key[i % 4];
-                    }
-                }
-
-                // Write the payload chunk to the stream.
-                let result = self.stream.write_all(&chunk).await;
-                res!(result);
-
-                bytes_sent += chunk_size;
-            }
-        } else {
-            // Send the message as a single frame.
-            // Construct the frame header.
-            let mut header = Vec::new();
-
-            // First byte: FIN bit set and opcode.
-            header.push(0x80 | initial_opcode);
-
-            // Second byte: Mask bit set for client-side masking and payload length.
-            let mask_bit = if self.is_client() { 0x80 } else { 0x00 };
-            if payload_length <= 125 {
-                header.push(mask_bit | payload_length as u8);
-            } else if payload_length <= 65535 {
-                header.push(mask_bit | 126);
-                header.extend_from_slice(&(payload_length as u16).to_be_bytes());
-            } else {
-                header.push(mask_bit | 127);
-                header.extend_from_slice(&(payload_length as u64).to_be_bytes());
-            }
-
-            // Write the masking key for client-side masking.
-            if self.is_client() {
-                header.extend_from_slice(&masking_key);
-            }
-
-            // Write the frame header to the stream.
-            let result = self.stream.write_all(&header).await;
-            res!(result);
-
-            // Apply masking to the payload for client-side masking.
-            let mut masked_payload = payload.clone();
-            if self.is_client() {
-                for i in 0..payload_length {
-                    masked_payload[i] ^= masking_key[i % 4];
-                }
-            }
-
-            // Write the masked payload to the stream.
-            let result = self.stream.write_all(&masked_payload).await;
-            res!(result);
-        }
-    
-        // Flush the stream.
+        let byts = res!(encode_message(
+            message,
+            self.is_client(),
+            self.chunk_size,
+            self.chunk_thresh,
+        ));
+        let result = self.stream.write_all(&byts).await;
+        res!(result);
         let result = self.stream.flush().await;
         res!(result);
-    
         Ok(())
     }
 
@@ -1004,5 +1020,150 @@ mod tests {
         let mut hasher = Sha1::new();
         hasher.update(b"dGhlIHNhbXBsZSBub25jZQ==");
         assert_ne!(base64::encode(&hasher.finalize()), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+    }
+
+    /// The upgrade request RFC 6455 §1.2 prints, answered. The accept value is the RFC's, and the
+    /// three header lines are the ones a browser insists on before it will call the socket open.
+    #[test]
+    fn test_accept_response_rfc6455_request_00() -> Outcome<()> {
+        let req = HttpMessage {
+            header:    res!(HttpHeader::parse(fmt!(
+                "GET /chat HTTP/1.1\r\n\
+                Host: server.example.com\r\n\
+                Upgrade: websocket\r\n\
+                Connection: Upgrade\r\n\
+                Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+                Sec-WebSocket-Version: 13\r\n\r\n"), Some(true))),
+            body:      Vec::new(),
+            head_only: false,
+            file:      None,
+        };
+        let response = res!(accept_response(&req));
+        assert_eq!(
+            response,
+            "HTTP/1.1 101 Switching Protocols\r\n\
+            Upgrade: websocket\r\n\
+            Connection: Upgrade\r\n\
+            Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n",
+        );
+        Ok(())
+    }
+
+    /// A request with no key at all cannot be answered, and must say so rather than answer with a
+    /// digest of nothing.
+    #[test]
+    fn test_accept_response_rejects_missing_key_00() -> Outcome<()> {
+        let req = HttpMessage {
+            header:    res!(HttpHeader::parse(fmt!(
+                "GET /chat HTTP/1.1\r\n\
+                Host: server.example.com\r\n\
+                Upgrade: websocket\r\n\
+                Connection: Upgrade\r\n\
+                Sec-WebSocket-Version: 13\r\n\r\n"), Some(true))),
+            body:      Vec::new(),
+            head_only: false,
+            file:      None,
+        };
+        assert!(accept_response(&req).is_err(),
+            "a handshake with no Sec-WebSocket-Key must be refused");
+        Ok(())
+    }
+
+    /// A server frame is unmasked and, for a short payload, exactly two header bytes: RFC 6455
+    /// §5.2 fixes FIN|opcode then the length. The bytes below are what a browser's own decoder
+    /// expects to see, so they are written out rather than recomputed.
+    #[test]
+    fn test_encode_message_server_text_frame_00() -> Outcome<()> {
+        let byts = res!(encode_message(
+            &WebSocketMessage::Text("hello".to_string()), false, 1024, 4096,
+        ));
+        assert_eq!(byts, vec![0x81, 0x05, b'h', b'e', b'l', b'l', b'o']);
+        Ok(())
+    }
+
+    /// A client frame carries the mask bit and a four-byte key, and the payload is the plaintext
+    /// XORed with it. RFC 6455 §5.3 requires this of every client-to-server frame.
+    #[test]
+    fn test_encode_message_client_masks_payload_00() -> Outcome<()> {
+        let byts = res!(encode_message(
+            &WebSocketMessage::Text("hello".to_string()), true, 1024, 4096,
+        ));
+        assert_eq!(byts[0], 0x81);
+        assert_eq!(byts[1], 0x80 | 0x05, "the mask bit must be set on a client frame");
+        assert_eq!(byts.len(), 2 + 4 + 5);
+        let key = &byts[2..6];
+        let unmasked: Vec<u8> = byts[6..].iter().enumerate()
+            .map(|(i, b)| b ^ key[i % 4])
+            .collect();
+        assert_eq!(unmasked, b"hello".to_vec());
+        Ok(())
+    }
+
+    /// What one end frames, the other end reads: a masked client message decodes back to the same
+    /// text on the server side.
+    #[tokio::test]
+    async fn test_read_message_round_trip_masked_00() -> Outcome<()> {
+        let byts = res!(encode_message(
+            &WebSocketMessage::Text("the ceremony begins".to_string()), true, 1024, 4096,
+        ));
+        let mut src = &byts[..];
+        let mut buffer = Vec::new();
+        match res!(read_message(&mut src, &mut buffer, 1024).await) {
+            Some(WebSocketMessage::Text(txt)) => assert_eq!(txt, "the ceremony begins"),
+            other => return Err(err!(
+                "Expected a text message, got {:?}.", other; Test, Mismatch)),
+        }
+        assert!(buffer.is_empty(), "the buffer must be left ready for the next message");
+        Ok(())
+    }
+
+    /// A payload past the chunking threshold goes out as several frames -- first opcode, then
+    /// continuations, `FIN` only on the last -- and arrives as one message.
+    #[tokio::test]
+    async fn test_read_message_reassembles_fragments_00() -> Outcome<()> {
+        let payload: String = std::iter::repeat('x').take(300).collect();
+        let byts = res!(encode_message(
+            &WebSocketMessage::Binary(payload.as_bytes().to_vec()), false, 100, 100,
+        ));
+        // Four frames of 100 bytes' payload, each with a two-byte header.
+        assert_eq!(byts.len(), 3 * (2 + 100));
+        assert_eq!(byts[0], 0x02, "the first frame carries the opcode and no FIN");
+        assert_eq!(byts[102], 0x00, "a middle frame carries the continuation opcode");
+        assert_eq!(byts[204], 0x80, "the last frame carries FIN and the continuation opcode");
+        let mut src = &byts[..];
+        let mut buffer = Vec::new();
+        match res!(read_message(&mut src, &mut buffer, 64).await) {
+            Some(WebSocketMessage::Binary(got)) => {
+                assert_eq!(got.len(), 300);
+                assert_eq!(got, payload.as_bytes().to_vec());
+            },
+            other => return Err(err!(
+                "Expected a binary message, got {:?}.", other; Test, Mismatch)),
+        }
+        Ok(())
+    }
+
+    /// A first frame carrying the continuation opcode continues nothing. It must be an error: this
+    /// arrives from whoever is on the other end of the socket, and a panic there is a server a
+    /// stranger can stop.
+    #[tokio::test]
+    async fn test_read_message_rejects_lone_continuation_00() -> Outcome<()> {
+        let byts = vec![0x80, 0x02, b'h', b'i'];
+        let mut src = &byts[..];
+        let mut buffer = Vec::new();
+        assert!(read_message(&mut src, &mut buffer, 1024).await.is_err(),
+            "a lone continuation frame must be refused, not unwound");
+        Ok(())
+    }
+
+    /// A closed connection reads as the end of the stream, not as an error.
+    #[tokio::test]
+    async fn test_read_message_eof_is_none_00() -> Outcome<()> {
+        let byts: Vec<u8> = Vec::new();
+        let mut src = &byts[..];
+        let mut buffer = Vec::new();
+        assert!(res!(read_message(&mut src, &mut buffer, 1024).await).is_none(),
+            "an immediately-closed stream must read as None");
+        Ok(())
     }
 }

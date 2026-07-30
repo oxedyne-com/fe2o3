@@ -17,3 +17,4 @@ pub mod server;
 //pub mod smtps;
 pub mod webhook;
 pub mod ws;
+pub mod wsproxy;

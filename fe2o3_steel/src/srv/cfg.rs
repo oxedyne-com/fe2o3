@@ -705,6 +705,129 @@ impl ProxyRoute {
 
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
+// │ WEBSOCKET ROUTES                                                          │
+// │                                                                           │
+// │ A WebSocket route hands one path's upgrades to a WebSocket server of its   │
+// │ own, on loopback.  Unlike ProxyRoute (a whole application behind a path    │
+// │ prefix) it matches one exact path and forwards nothing else, so a site     │
+// │ whose pages, files and API stay with Steel can still give a single         │
+// │ endpoint to a separate process that speaks its own protocol.               │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// A route that forwards the WebSocket upgrade on one path to an upstream
+/// WebSocket server.
+///
+/// On an HTTP/1.1 `GET` with `Upgrade: websocket` whose path equals
+/// [`WsRoute::path`], Steel opens a plain TCP connection to the upstream,
+/// forwards the handshake, relays the `101 Switching Protocols` back to the
+/// client, and then copies bytes in both directions until either end closes.
+/// The frames themselves are never parsed: what the client sends is what the
+/// upstream receives.
+///
+/// Checked before proxy routes, because a route naming one exact path is more
+/// specific than a prefix that happens to contain it. A request to the same
+/// path that is *not* an upgrade is left alone, and falls through to the rest
+/// of the dispatch chain.
+///
+/// The upstream URL is `ws://host[:port]/path`. There is deliberately no
+/// `wss://` form: this exists to reach a server on the same machine, whose
+/// traffic never leaves the loopback interface, and an operator who needs TLS
+/// to the upstream is not describing loopback and should say so with a
+/// [`ProxyRoute`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WsRoute {
+    /// Local path whose upgrades this route claims, matched exactly
+    /// (e.g. `/ws`).
+    pub path:           String,
+    /// Upstream hostname or IP address (e.g. `127.0.0.1`).
+    pub upstream_host:  String,
+    /// Upstream TCP port. Defaults to 80 when the URL gives none.
+    pub upstream_port:  u16,
+    /// Path requested of the upstream, which need not be the local one.
+    pub upstream_path:  String,
+}
+
+impl WsRoute {
+    /// Parse a WebSocket route from a `DaticleMap`.
+    ///
+    /// Both fields are required: `path` is the local path, `upstream` the
+    /// `ws://host[:port]/path` URL to forward it to.
+    pub fn from_datmap(m: &DaticleMap) -> Outcome<Self> {
+        let path = match m.get(&dat!("path")) {
+            Some(Dat::Str(s)) => s.clone(),
+            _ => return Err(err!(
+                "WsRoute: 'path' is required and must be a string.";
+                Invalid, Input, Missing)),
+        };
+        let upstream = match m.get(&dat!("upstream")) {
+            Some(Dat::Str(s)) => s.clone(),
+            _ => return Err(err!(
+                "WsRoute '{}': 'upstream' is required and must be a string.", path;
+                Invalid, Input, Missing)),
+        };
+        let (upstream_host, upstream_port, upstream_path) =
+            res!(Self::parse_upstream(&upstream));
+        Ok(Self {
+            path,
+            upstream_host,
+            upstream_port,
+            upstream_path,
+        })
+    }
+
+    /// Parse a `ws://host[:port][/path]` URL into `(host, port, path)`.
+    ///
+    /// A `wss://` URL is refused with an explanation rather than quietly
+    /// treated as plaintext, which is what a scheme this route cannot honour
+    /// would otherwise become.
+    pub fn parse_upstream(url: &str) -> Outcome<(String, u16, String)> {
+        let rest = match url.strip_prefix("ws://") {
+            Some(r) => r,
+            None => {
+                if url.starts_with("wss://") {
+                    return Err(err!(
+                        "WsRoute: 'wss://' upstream '{}' cannot be honoured: a ws_route \
+                        forwards to a loopback server over plain TCP. Use a proxy_route \
+                        with upstream_tls for a TLS upstream.", url;
+                        Invalid, Input, Unimplemented));
+                }
+                return Err(err!(
+                    "WsRoute: upstream URL must start with 'ws://'. Got: '{}'.", url;
+                    Invalid, Input));
+            },
+        };
+        let (host_port, path) = match rest.find('/') {
+            Some(i) => (&rest[..i], &rest[i..]),
+            None    => (rest, "/"),
+        };
+        if host_port.is_empty() {
+            return Err(err!(
+                "WsRoute: upstream URL '{}' names no host.", url;
+                Invalid, Input, Missing));
+        }
+        let (host, port) = match host_port.rfind(':') {
+            Some(i) => {
+                let p: u16 = match host_port[i + 1..].parse() {
+                    Ok(n)  => n,
+                    Err(_) => return Err(err!(
+                        "WsRoute: invalid port in upstream URL '{}'.", url;
+                        Invalid, Input)),
+                };
+                (host_port[..i].to_string(), p)
+            }
+            None => (host_port.to_string(), 80u16),
+        };
+        Ok((host, port, path.to_string()))
+    }
+
+    /// Returns `true` when `request_path` is the path this route claims.
+    pub fn matches(&self, request_path: &str) -> bool {
+        self.path == request_path
+    }
+}
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
 // │ TERMINAL CONFIG                                                           │
 // │                                                                           │
 // │ Enables terminal session management for a vhost.  When configured,        │
@@ -811,6 +934,12 @@ pub struct VhostConfig {
     /// and streaming response support.  Checked after redirects but
     /// before static files and API routes; longest prefix wins.
     pub proxy_routes:           Vec<ProxyRoute>,
+    /// WebSocket routes. Each hands the upgrades arriving on one exact
+    /// path to an upstream WebSocket server on loopback, relaying the
+    /// handshake and then the bytes. Checked before proxy routes, and
+    /// only for a request that is an upgrade. Empty by default, which
+    /// is what every config written before the field existed says.
+    pub ws_routes:              Vec<WsRoute>,
     /// Terminal session configuration.  When present, enables the
     /// `term_new`, `term_list`, `term_close` and `term_set_name`
     /// WS commands and the `/term/<session>` binary WS endpoint
@@ -891,6 +1020,7 @@ impl Default for VhostConfig {
             admin_keys:             Vec::new(),
             head_injection_url:     None,
             proxy_routes:           Vec::new(),
+            ws_routes:              Vec::new(),
             term_config:            None,
             site_admins:            Vec::new(),
         }
@@ -1161,6 +1291,25 @@ impl VhostConfig {
                 "VhostConfig: 'proxy_routes' must be a list of maps.";
                 Invalid, Input, Mismatch)),
         };
+        // WebSocket routes (optional).
+        let ws_routes = match m.get(&dat!("ws_routes")) {
+            Some(Dat::List(list)) => {
+                let mut out = Vec::new();
+                for item in list {
+                    match item {
+                        Dat::Map(sub) => out.push(res!(WsRoute::from_datmap(sub))),
+                        _ => return Err(err!(
+                            "VhostConfig: 'ws_routes' entries must be maps.";
+                            Invalid, Input, Mismatch)),
+                    }
+                }
+                out
+            }
+            None => Vec::new(),
+            _ => return Err(err!(
+                "VhostConfig: 'ws_routes' must be a list of maps.";
+                Invalid, Input, Mismatch)),
+        };
         let term_config = match m.get(&dat!("term_config")) {
             Some(Dat::Map(sub)) => Some(res!(TermConfig::from_datmap(sub))),
             None => None,
@@ -1222,6 +1371,7 @@ impl VhostConfig {
             admin_keys,
             head_injection_url,
             proxy_routes,
+            ws_routes,
             term_config,
             publish,
             site_admins,

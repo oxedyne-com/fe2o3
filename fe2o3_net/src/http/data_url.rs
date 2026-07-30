@@ -97,7 +97,7 @@ pub fn parse(s: &str, max_bytes: usize) -> Outcome<DataUrl> {
 				Invalid, Input, Decode)),
 		}
 	} else {
-		res!(percent_decode(payload))
+		res!(crate::http::pct::decode(payload))
 	};
 	if bytes.len() > max_bytes {
 		return Err(err!(
@@ -107,40 +107,6 @@ pub fn parse(s: &str, max_bytes: usize) -> Outcome<DataUrl> {
 	Ok(DataUrl { media_type, bytes })
 }
 
-/// Percent-decoding, over bytes rather than characters, since what is decoded need not be text.
-fn percent_decode(s: &str) -> Outcome<Vec<u8>> {
-	let src = s.as_bytes();
-	let mut out = Vec::with_capacity(src.len());
-	let mut i = 0;
-	while i < src.len() {
-		match src[i] {
-			b'%' => {
-				if i + 2 >= src.len() {
-					return Err(err!(
-						"A percent in a data URL is followed by two hexadecimal digits.";
-						Invalid, Input, Decode));
-				}
-				let hex = match std::str::from_utf8(&src[i + 1..i + 3]) {
-					Ok(h)	=> h,
-					Err(_)	=> return Err(err!(
-						"A percent escape in a data URL is not text."; Invalid, Input, Decode)),
-				};
-				match u8::from_str_radix(hex, 16) {
-					Ok(b)	=> out.push(b),
-					Err(e)	=> return Err(err!(e,
-						"'{}' is not a pair of hexadecimal digits.", hex;
-						Invalid, Input, Decode)),
-				}
-				i += 3;
-			}
-			b => {
-				out.push(b);
-				i += 1;
-			}
-		}
-	}
-	Ok(out)
-}
 
 
 #[cfg(test)]
