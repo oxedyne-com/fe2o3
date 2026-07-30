@@ -392,8 +392,15 @@ fn filter_shell(cfg: &PublishConfig, posts: &[Post], authors: &[Author]) -> Stri
 	// categories are the site's configured list, in the order the site wrote it -- an order somebody
 	// chose, which sorting would throw away -- while the tags are gathered from the posts and sorted,
 	// nobody having chosen an order for them.
+	//
+	// Neither block is drawn where no post carries a value in that family. A config's categories are a
+	// vocabulary the site *may* file under, not a claim that anything is filed: offered against posts
+	// that wear none, every chip narrows the list to nothing, which is a row of controls that can only
+	// disappoint. The tags were already suppressed on this reasoning and the categories were not, so a
+	// blog whose posts carry neither drew six category chips and no tag chips over the same nothing.
 	let cats: Vec<&str> = cfg.categories.iter().map(|c| c.as_str()).collect();
-	if !cats.is_empty() {
+	let filed = posts.iter().any(|p| !p.categories.is_empty());
+	if !cats.is_empty() && filed {
 		s.push_str(&facet_block("cat", "Categories", &cats));
 	}
 	if !tags.is_empty() {
@@ -1563,26 +1570,41 @@ mod tests {
 		Ok(())
 	}
 
-	/// Each block stands on its own vocabulary. The categories are the site's list, so they are offered
-	/// whether or not a post has reached for one yet; the tags are gathered from the posts, so a site
-	/// whose posts carry none draws no tag block rather than an empty pair of boxes.
+	/// A facet block is drawn only where a post carries a value in that family -- both families, on the
+	/// same rule.
+	///
+	/// A config's categories are a vocabulary the site may file under, not a claim that anything is
+	/// filed. Offered against posts wearing none, every chip narrows the list to nothing, which is a
+	/// row of controls that can only disappoint. The tags were suppressed on that reasoning and the
+	/// categories were not, so a blog whose posts carried neither drew the whole configured taxonomy
+	/// over the same nothing the tags declined to draw anything over.
 	#[test]
-	fn test_a_facet_block_stands_on_its_own_vocabulary_19() -> Outcome<()> {
+	fn test_a_facet_block_needs_a_post_that_wears_one_19() -> Outcome<()> {
+		// A post wearing neither: neither block.
 		let mut bare = post();
 		bare.categories = Vec::new();
 		bare.tags = Vec::new();
-		let resp = res!(index(&cfg(), &[bare], &[], "", "test"));
+		let resp = res!(index(&cfg(), &[bare.clone()], &[], "", "test"));
 		let body = String::from_utf8_lossy(&resp.body).to_string();
-		assert!(body.contains(r#"data-facet="cat" data-value="Personal""#),
-			"a configured category was not offered because no post wore it: {}", body);
+		assert!(!body.contains(r#"data-facet="cat""#),
+			"the configured taxonomy was offered over posts that wear none of it: {}", body);
 		assert!(!body.contains(r#"data-facet="tag""#),
 			"a tag block was drawn for a site with no tags: {}", body);
 
-		// And a site that has configured no categories draws no category block.
+		// One post filed under a category: the block, and the whole configured vocabulary in it. What
+		// the site offers is what a reader may narrow to, not only what this one post happens to wear.
+		let filed = post();
+		assert!(!filed.categories.is_empty(), "the fixture stopped carrying a category");
+		let resp = res!(index(&cfg(), &[filed], &[], "", "test"));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(body.contains(r#"data-facet="cat" data-value="Personal""#), "no category block: {}", body);
+		assert!(body.contains(r#"data-facet="cat" data-value="Technical""#),
+			"an unworn category was dropped from the vocabulary: {}", body);
+
+		// One post carrying a tag: the tag block, and no category block, the same rule the other way.
 		let mut c = cfg();
 		c.categories = Vec::new();
-		let mut tagged = post();
-		tagged.categories = Vec::new();
+		let mut tagged = bare;
 		tagged.tags = vec![fmt!("rust")];
 		let resp = res!(index(&c, &[tagged], &[], "", "test"));
 		let body = String::from_utf8_lossy(&resp.body).to_string();
