@@ -121,20 +121,25 @@ with open(path, "wb") as f:
 PY
 : > "$RIG_DIR/www/public/empty.mp4"
 printf 'x' > "$RIG_DIR/www/public/one.mp4"
-# A page worth encoding, for the coding checks: markup is highly redundant, so
-# the encoded form is a fraction of the weight and the two lengths cannot be
+# A file worth encoding, for the coding checks: a stylesheet is highly redundant,
+# so the encoded form is a fraction of the weight and the two lengths cannot be
 # confused for each other.
-MARKUP="$RIG_DIR/www/public/page.html"
-python3 - "$MARKUP" <<'PY'
+#
+# A stylesheet rather than a page, deliberately. The rig runs Steel in
+# development mode, where an HTML document is rewritten on the way out to carry
+# the refresh hook -- so the file on disk is not the entity sent, and `stat`
+# would be the wrong oracle for its length. `text/css` is compressible and is not
+# a document, so what is on disk is what goes out. Not `styles.css`, which the
+# development CSS bundler owns.
+BULK="$RIG_DIR/www/public/bulk.css"
+python3 - "$BULK" <<'PY'
 import sys
-line = "<p>a paragraph of markup that repeats and so encodes well</p>\n"
+rule = ".a-class-name-that-repeats { margin: 0; padding: 0; color: #123456; }\n"
 with open(sys.argv[1], "w") as f:
-    f.write("<!DOCTYPE html>\n<html><body>\n")
-    f.write(line * 4000)
-    f.write("</body></html>\n")
+    f.write(rule * 4000)
 PY
-PAGE=$(stat -c %s "$MARKUP")
-echo "  $(stat -c %s "$MEDIA") bytes at clip.mp4, $PAGE bytes at page.html"
+BULK_LEN=$(stat -c %s "$BULK")
+echo "  $(stat -c %s "$MEDIA") bytes at clip.mp4, $BULK_LEN bytes at bulk.css"
 
 echo "== wallet =="
 python3 "$HERE/make_wallet.py" > "$RIG_DIR/wallet.out" 2>&1
@@ -248,21 +253,25 @@ for HTTPARG in "" "--http2"; do
     echo
     echo "  -- a HEAD of something worth encoding, ${label} --"
     # The GET is encoded, and says so.
-    hd=$(curl -sk $HTTPARG -H "Accept-Encoding: gzip" -D - -o /dev/null "$B/page.html")
+    hd=$(curl -sk $HTTPARG -H "Accept-Encoding: gzip" -D - -o /dev/null "$B/bulk.css")
     has "a GET that accepts gzip is encoded" "$hd" "content-encoding: gzip"
     has "and says it varies by coding" "$hd" "vary: accept-encoding"
     # The HEAD is not: encoding it would mean reading and compressing the whole
-    # page to throw the result away. So it reports the identity length, which is
+    # file to throw the result away. So it reports the identity length, which is
     # what a GET accepting no coding would be told, and names no coding it has
     # not applied.
-    hd=$(curl -sk $HTTPARG -I -H "Accept-Encoding: gzip" -D - -o /dev/null "$B/page.html")
+    hd=$(curl -sk $HTTPARG -I -H "Accept-Encoding: gzip" -D - -o /dev/null "$B/bulk.css")
     has "a HEAD that accepts gzip is not encoded" "$hd" "200 OK"
     hasnt "and names no coding" "$hd" "content-encoding"
-    has "and states the identity length" "$hd" "content-length: $PAGE"
+    has "and states the identity length" "$hd" "content-length: $BULK_LEN"
     has "and still says it varies by coding" "$hd" "vary: accept-encoding"
     # The property a live monitor rests on: a plain HEAD is the GET's byte count.
-    hd=$(curl -sk $HTTPARG -I -D - -o /dev/null "$B/page.html")
-    has "a plain HEAD states the GET's byte count" "$hd" "content-length: $PAGE"
+    hd=$(curl -sk $HTTPARG -I -D - -o /dev/null "$B/bulk.css")
+    has "a plain HEAD states the GET's byte count" "$hd" "content-length: $BULK_LEN"
+    ch="$RIG_DIR/ch.$$"
+    curl -sk $HTTPARG -D "$ch" -o /dev/null "$B/bulk.css"
+    check "and the GET agrees" "$(field "$ch" content-length)" "$BULK_LEN"
+    rm -f "$ch"
 
     echo
     echo "  -- a one byte file, ${label} --"
