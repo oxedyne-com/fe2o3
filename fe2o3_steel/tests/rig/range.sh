@@ -121,7 +121,20 @@ with open(path, "wb") as f:
 PY
 : > "$RIG_DIR/www/public/empty.mp4"
 printf 'x' > "$RIG_DIR/www/public/one.mp4"
-echo "  $(stat -c %s "$MEDIA") bytes at clip.mp4"
+# A page worth encoding, for the coding checks: markup is highly redundant, so
+# the encoded form is a fraction of the weight and the two lengths cannot be
+# confused for each other.
+MARKUP="$RIG_DIR/www/public/page.html"
+python3 - "$MARKUP" <<'PY'
+import sys
+line = "<p>a paragraph of markup that repeats and so encodes well</p>\n"
+with open(sys.argv[1], "w") as f:
+    f.write("<!DOCTYPE html>\n<html><body>\n")
+    f.write(line * 4000)
+    f.write("</body></html>\n")
+PY
+PAGE=$(stat -c %s "$MARKUP")
+echo "  $(stat -c %s "$MEDIA") bytes at clip.mp4, $PAGE bytes at page.html"
 
 echo "== wallet =="
 python3 "$HERE/make_wallet.py" > "$RIG_DIR/wallet.out" 2>&1
@@ -223,11 +236,33 @@ for HTTPARG in "" "--http2"; do
     has "HEAD names the recording's type" "$hd" "content-type: video/mp4"
     body=$(curl -sk $HTTPARG -I -o "$RIG_DIR/hb.$$" -w '%{size_download}' "$B/clip.mp4")
     check "HEAD sends no body" "$body" "0"
-    # A HEAD carrying a Range answers as the GET would, minus the answer.
+    # RFC 9110 §14.2 defines range handling for GET alone and requires a server
+    # to ignore the field on any other method. So a HEAD carrying a Range is
+    # answered about the whole file: a 206 there would name a window nobody can
+    # read and understate the size of the thing being asked about.
     hd=$(curl -sk $HTTPARG -I -H "Range: bytes=0-99" -D - -o /dev/null "$B/clip.mp4")
-    has "a ranged HEAD is a 206" "$hd" "206 Partial Content"
-    has "and names the window" "$hd" "content-range: bytes 0-99/$SIZE"
-    has "and states the window's length" "$hd" "content-length: 100"
+    has "a ranged HEAD ignores the range" "$hd" "200 OK"
+    hasnt "and names no window" "$hd" "content-range"
+    has "and states the full length" "$hd" "content-length: $SIZE"
+
+    echo
+    echo "  -- a HEAD of something worth encoding, ${label} --"
+    # The GET is encoded, and says so.
+    hd=$(curl -sk $HTTPARG -H "Accept-Encoding: gzip" -D - -o /dev/null "$B/page.html")
+    has "a GET that accepts gzip is encoded" "$hd" "content-encoding: gzip"
+    has "and says it varies by coding" "$hd" "vary: accept-encoding"
+    # The HEAD is not: encoding it would mean reading and compressing the whole
+    # page to throw the result away. So it reports the identity length, which is
+    # what a GET accepting no coding would be told, and names no coding it has
+    # not applied.
+    hd=$(curl -sk $HTTPARG -I -H "Accept-Encoding: gzip" -D - -o /dev/null "$B/page.html")
+    has "a HEAD that accepts gzip is not encoded" "$hd" "200 OK"
+    hasnt "and names no coding" "$hd" "content-encoding"
+    has "and states the identity length" "$hd" "content-length: $PAGE"
+    has "and still says it varies by coding" "$hd" "vary: accept-encoding"
+    # The property a live monitor rests on: a plain HEAD is the GET's byte count.
+    hd=$(curl -sk $HTTPARG -I -D - -o /dev/null "$B/page.html")
+    has "a plain HEAD states the GET's byte count" "$hd" "content-length: $PAGE"
 
     echo
     echo "  -- a one byte file, ${label} --"

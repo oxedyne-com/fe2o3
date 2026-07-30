@@ -295,6 +295,14 @@ impl<
         let admin_state = self.admin_state.clone();
         let publish = self.publish.clone();
         let site_admins = self.site_admins.clone();
+        // A `HEAD` reached this branch because it asks what the `GET` would
+        // answer; the dispatch said so in `loc.data`. Read once here, since two
+        // things below turn on it: the read tally, and whether a `Range` is
+        // honoured at all.
+        let head_only = matches!(
+            loc.data.get(&dat!("head_only")),
+            Some(Dat::Bool(true)),
+        );
 
         async move {
             // The dashboard owns the entire `/admin` and `/admin/*`
@@ -609,7 +617,7 @@ impl<
                             ua,
                             // Set by the dispatch where the request was a HEAD, which asked
                             // for no prose and so read none.
-                            matches!(loc.data.get(&dat!("head_only")), Some(Dat::Bool(true))),
+                            head_only,
                         );
                         if seen {
                             if let Err(e) = publish_store::reads_bump(db, &post.slug) {
@@ -804,7 +812,20 @@ impl<
                             // them can be asked for and answered. Every such response
                             // says so, because a browser will not offer a scrubber on
                             // a video the server has not advertised.
-                            let outcome = range::resolve(&req_headers_clone, total);
+                            //
+                            // Except to a `HEAD`. RFC 9110 14.2 defines range
+                            // handling for `GET` alone and requires a server to
+                            // ignore the field on any other method, so a `HEAD`
+                            // carrying one is answered about the whole file: a `200`
+                            // and the length of all of it, which is what the asker
+                            // wanted to know. Answering `206` there would name a
+                            // window nobody can read and understate the size of what
+                            // they were asking about.
+                            let outcome = if head_only {
+                                RangeOutcome::Whole
+                            } else {
+                                range::resolve(&req_headers_clone, total)
+                            };
                             if let RangeOutcome::NotSatisfiable = outcome {
                                 debug!("{}: {:?} cannot answer the range asked of it; 416.",
                                     id_clone, abs_path);
