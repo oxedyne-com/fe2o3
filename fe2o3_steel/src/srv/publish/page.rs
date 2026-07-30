@@ -252,13 +252,18 @@ fn index(
 	}
 	body.push_str("</div>\n");
 
-	// Where the filter lands a reader on nothing, the script shows this line; the server shows it only
-	// when the site itself is empty. Both say the same thing, so the reader is never left at a blank.
+	// Two states, and they say different things, so they are two lines. A blog with nothing in it is
+	// the server's to know, and it says so. A filter that has excluded every post is the script's to
+	// know, and what it has to say is that there is prose here and none of it matches -- which is not
+	// the same news at all. One element doing both told a reader who had narrowed too far that the blog
+	// was empty, and the way out of that is to widen the filter, which is the one thing the words did
+	// not suggest.
 	body.push_str("<p class=\"aside-empty\" id=\"aside-empty\"");
 	if !posts.is_empty() {
 		body.push_str(" hidden");
 	}
 	body.push_str(">Nothing here yet.</p>\n");
+	body.push_str("<p class=\"aside-empty\" id=\"aside-none\" hidden>Nothing matches that.</p>\n");
 
 	// A newsletter sign-up beneath the list, so a reader subscribes in place rather than hunting for
 	// it. It posts to the same endpoint as the standalone page; where mail is not configured that
@@ -1242,11 +1247,38 @@ mod tests {
 	}
 
 	/// An index with nothing in it says so, rather than being a blank page that looks broken.
+	///
+	/// And it says the right one of two things. A blog with no posts is empty; a filter that has
+	/// excluded every post is not, and a reader who has narrowed too far needs to be told to widen
+	/// rather than that the blog has nothing in it. So there are two lines: the server draws the first
+	/// and decides whether it shows, the script shows the second and never touches the first.
 	#[test]
 	fn test_an_empty_index_says_so_04() -> Outcome<()> {
 		let resp = res!(index(&cfg(), &[], &[], "", "test"));
 		let body = String::from_utf8_lossy(&resp.body).to_string();
-		assert!(body.contains("Nothing here yet."), "got: {}", body);
+		assert!(body.contains(r#"<p class="aside-empty" id="aside-empty">Nothing here yet.</p>"#),
+			"an empty blog does not say it is empty: {}", body);
+		// The filter's line is there and hidden, whether or not there is anything to filter.
+		assert!(body.contains(
+			r#"<p class="aside-empty" id="aside-none" hidden>Nothing matches that.</p>"#),
+			"no line for a filter that matches nothing: {}", body);
+
+		// With posts, the blog-is-empty line is hidden and the other still waits.
+		let resp = res!(index(&cfg(), &[post()], &[], "", "test"));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(body.contains(r#"<p class="aside-empty" id="aside-empty" hidden>Nothing here yet.</p>"#),
+			"a blog with a post claims to be empty: {}", body);
+		assert!(body.contains(r#"id="aside-none" hidden>Nothing matches that.</p>"#),
+			"no line for a filter that matches nothing: {}", body);
+
+		// And the script shows the second without ever touching the first, which is the whole of the
+		// distinction: it reveals `aside-none` only where there were posts to exclude.
+		let js = String::from_utf8_lossy(&filter_js().body).to_string();
+		assert!(js.contains(r#"getElementById("aside-none")"#), "the script does not find the line: {}", js);
+		assert!(js.contains("none.hidden = !(rows.length && shown === 0)"),
+			"the script does not reveal it on an empty result: {}", js);
+		assert!(!js.contains("aside-empty"),
+			"the script still moves the blog-is-empty line, so a filter reads as an empty blog: {}", js);
 		Ok(())
 	}
 
@@ -2268,7 +2300,11 @@ const FILTER_JS: &str = r##"(function () {
 	var list = document.getElementById("aside-index-list");
 	if (!list) { return; }
 	var items = Array.prototype.slice.call(list.querySelectorAll(".aside-card"));
-	var empty = document.getElementById("aside-empty");
+	// The line for a filter that has narrowed to nothing. Not the one beside it: that one says the blog
+	// is empty, which the server settled and this cannot change -- a reader who filtered too far has
+	// prose in front of them, and telling them the blog is empty sends them away from the widening that
+	// would bring it back.
+	var none = document.getElementById("aside-none");
 
 	// The two facet families, and what tells them apart: which attribute a card carries its values in,
 	// and what those values are joined on. A tag is [a-z0-9-] so a space separates them safely; a
@@ -2411,7 +2447,9 @@ const FILTER_JS: &str = r##"(function () {
 			rows[i].el.hidden = !ok;
 			if (ok) { shown++; }
 		}
-		if (empty) { empty.hidden = shown !== 0; }
+		// Only where there were posts to exclude: a blog with none says so already, in the line the
+		// server drew, and saying both would be two answers to one question.
+		if (none) { none.hidden = !(rows.length && shown === 0); }
 	}
 
 	// The search box, and its match mode -- the twin of the vocabularies' mode rows. The facet holds
