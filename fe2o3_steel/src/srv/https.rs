@@ -701,11 +701,20 @@ impl<
                                     // On the blocking pool: encoding a
                                     // megabyte of markup is processor work,
                                     // and a single-core host has one async
-                                    // worker to starve.
-                                    msg = match tokio::task::spawn_blocking(move ||
-                                        tokio::runtime::Handle::current().block_on(
-                                            encoding::encode(msg, coding))
-                                    ).await {
+                                    // worker to starve. The handle is asked
+                                    // for rather than assumed: `current`
+                                    // panics where there is no runtime, and a
+                                    // panic in a pool thread is an error the
+                                    // caller cannot read.
+                                    msg = match tokio::task::spawn_blocking(move || {
+                                        let rt = match tokio::runtime::Handle::try_current() {
+                                            Ok(rt) => rt,
+                                            Err(e) => return Err(err!(e,
+                                                "The response encoder found no runtime \
+                                                to wait on."; Init, Missing)),
+                                        };
+                                        rt.block_on(encoding::encode(msg, coding))
+                                    }).await {
                                         Ok(Ok(encoded)) => encoded,
                                         Ok(Err(e)) => return Err(err!(e,
                                             "{}: Could not encode the response body.", id;

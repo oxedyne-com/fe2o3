@@ -697,7 +697,16 @@ impl<
                 usize::MAX // No body reaches the floor, so none is encoded.
             };
             let result = tokio::task::spawn_blocking(move || {
-                tokio::runtime::Handle::current().block_on(async {
+                // Asked for rather than assumed: `current` panics where there is no
+                // runtime, and a panic in a pool thread is an error the caller
+                // cannot read.
+                let rt = match tokio::runtime::Handle::try_current() {
+                    Ok(rt) => rt,
+                    Err(e) => return Err(err!(e,
+                        "{}: The file reader found no runtime to wait on.", id_clone;
+                        Init, Missing)),
+                };
+                rt.block_on(async {
                     Ok(match tokio::fs::File::open(&abs_path).await {
                         Ok(mut file) => {
                             let content_type = RequestPath::content_type(abs_path.as_path());
