@@ -25,9 +25,15 @@
 
 use oxedyne_fe2o3_core::prelude::*;
 
-use ring::signature::{
-    UnparsedPublicKey,
-    ECDSA_P256_SHA256_FIXED,
+use ring::{
+    rand::SystemRandom,
+    signature::{
+        EcdsaKeyPair,
+        KeyPair,
+        UnparsedPublicKey,
+        ECDSA_P256_SHA256_FIXED,
+        ECDSA_P256_SHA256_FIXED_SIGNING,
+    },
 };
 
 
@@ -50,10 +56,93 @@ pub fn verify_p256_sha256_fixed(pubkey: &[u8], msg: &[u8], sig: &[u8]) -> bool {
     key.verify(msg, sig).is_ok()
 }
 
+/// A P-256 key pair that signs in the encodings [`verify_p256_sha256_fixed`] accepts.
+///
+/// The counterpart to the verifier above: where that checks what a browser produced, this produces
+/// the same shapes from Rust -- a 65-byte uncompressed SEC1 public key and 64-byte `r || s`
+/// signatures over SHA-256. A Rust client of a gateway that authenticates device keys needs it, and
+/// so does any test that must present a real signature rather than a fixture.
+///
+/// The PKCS#8 bytes are retained so the key can be written to disk and reloaded: `ring` consumes
+/// them at load time and does not hand them back.
+pub struct P256KeyPair {
+    /// PKCS#8 serialisation of the private key, kept for persistence.
+    pkcs8:      Vec<u8>,
+    /// The live `ring` key pair.
+    key_pair:   EcdsaKeyPair,
+    /// Random source `ring` requires for each signature.
+    rng:        SystemRandom,
+}
+
+impl P256KeyPair {
+    /// Generate a fresh P-256 key pair.
+    pub fn generate() -> Outcome<Self> {
+        let rng = SystemRandom::new();
+        let pkcs8 = match EcdsaKeyPair::generate_pkcs8(
+            &ECDSA_P256_SHA256_FIXED_SIGNING,
+            &rng,
+        ) {
+            Ok(doc) => doc.as_ref().to_vec(),
+            Err(e) => return Err(err!(
+                "ring could not generate a P-256 PKCS#8 document: {}.", e;
+                Init, Unknown)),
+        };
+        let key_pair = res!(Self::load_pair(&pkcs8, &rng));
+        Ok(Self { pkcs8, key_pair, rng })
+    }
+
+    /// Load an existing P-256 key pair from its PKCS#8 encoding.
+    pub fn from_pkcs8(pkcs8: &[u8]) -> Outcome<Self> {
+        let rng = SystemRandom::new();
+        let key_pair = res!(Self::load_pair(pkcs8, &rng));
+        Ok(Self {
+            pkcs8:  pkcs8.to_vec(),
+            key_pair,
+            rng,
+        })
+    }
+
+    /// The PKCS#8 serialisation of the private key, for on-disk persistence. The bytes round-trip
+    /// through [`P256KeyPair::from_pkcs8`].
+    pub fn pkcs8_bytes(&self) -> &[u8] {
+        &self.pkcs8
+    }
+
+    /// The public key as the 65-byte uncompressed SEC1 point `0x04 || X || Y`, the same encoding
+    /// WebCrypto `exportKey('raw')` yields and [`verify_p256_sha256_fixed`] expects.
+    pub fn public_key(&self) -> Vec<u8> {
+        self.key_pair.public_key().as_ref().to_vec()
+    }
+
+    /// Sign `msg` and return the 64-byte fixed-length `r || s` signature.
+    ///
+    /// `msg` is the raw message, not a digest: SHA-256 is applied internally, matching WebCrypto's
+    /// `sign({ name: 'ECDSA', hash: 'SHA-256' })`.
+    pub fn sign(&self, msg: &[u8]) -> Outcome<Vec<u8>> {
+        match self.key_pair.sign(&self.rng, msg) {
+            Ok(sig) => Ok(sig.as_ref().to_vec()),
+            Err(e) => Err(err!(
+                "ring could not produce a P-256 signature: {}.", e;
+                Unknown)),
+        }
+    }
+
+    fn load_pair(pkcs8: &[u8], rng: &SystemRandom) -> Outcome<EcdsaKeyPair> {
+        match EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8, rng) {
+            Ok(kp) => Ok(kp),
+            Err(e) => Err(err!(
+                "ring rejected the supplied P-256 PKCS#8 bytes: {}.", e;
+                Init, Invalid, Input)),
+        }
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::acme::jose::base64url_encode;
 
     use ring::{
         rand::SystemRandom,
@@ -141,6 +230,64 @@ mod tests {
         assert!(!verify_p256_sha256_fixed(&[], msg, &sig),
             "verify should reject an empty public key");
 
+        Ok(())
+    }
+
+    /// A loaded key's public point must be the one that is actually in the DER. The expected `x`
+    /// and `y` below were derived from the same DER by `openssl` (see the documentation on
+    /// `TEST_P256_PKCS8`), so this checks the loader against a tool that is not us.
+    #[test]
+    fn test_p256_keypair_public_key_matches_openssl_00() -> Outcome<()> {
+        let kp = res!(P256KeyPair::from_pkcs8(&crate::acme::jose::TEST_P256_PKCS8));
+        let pk = kp.public_key();
+        assert_eq!(pk.len(), 65);
+        assert_eq!(pk[0], 0x04);
+        assert_eq!(
+            base64url_encode(&pk[1..33]),
+            "cMAYIYJu7A2aNTTrurSWBFMwr8uyVRYGvrrgsUz8I6Q",
+        );
+        assert_eq!(
+            base64url_encode(&pk[33..65]),
+            "Ktqy2hcvjIy_FofO47MfWeHLgjN7Vdxw0Bp2MRQyG8Y",
+        );
+        Ok(())
+    }
+
+    /// What this crate signs, this crate verifies -- in the encodings a browser uses. The signature
+    /// must be the 64-byte fixed form, and a tampered message must fail.
+    #[test]
+    fn test_p256_keypair_sign_verifies_00() -> Outcome<()> {
+        let kp = res!(P256KeyPair::generate());
+        let msg = b"verify:sid-of-the-oxedation";
+        let sig = res!(kp.sign(msg));
+        assert_eq!(sig.len(), 64, "the fixed form is 64 bytes of r || s");
+        assert!(verify_p256_sha256_fixed(&kp.public_key(), msg, &sig),
+            "a freshly-signed message must verify");
+        assert!(!verify_p256_sha256_fixed(&kp.public_key(), b"verify:another-sid", &sig),
+            "the signature must not verify over a different message");
+        Ok(())
+    }
+
+    /// A key written to disk and read back is the same key: same public point, and signatures made
+    /// after the reload still verify.
+    #[test]
+    fn test_p256_keypair_pkcs8_round_trip_00() -> Outcome<()> {
+        let kp = res!(P256KeyPair::generate());
+        let reloaded = res!(P256KeyPair::from_pkcs8(kp.pkcs8_bytes()));
+        assert_eq!(kp.public_key(), reloaded.public_key());
+        let msg = b"a message signed after the reload";
+        let sig = res!(reloaded.sign(msg));
+        assert!(verify_p256_sha256_fixed(&kp.public_key(), msg, &sig),
+            "the reloaded key must be the same key");
+        Ok(())
+    }
+
+    /// Bytes that are not a P-256 PKCS#8 document must be refused, with an error rather than a
+    /// panic.
+    #[test]
+    fn test_p256_keypair_rejects_junk_pkcs8_00() -> Outcome<()> {
+        assert!(P256KeyPair::from_pkcs8(b"not a key at all").is_err(),
+            "junk PKCS#8 must be refused");
         Ok(())
     }
 }
