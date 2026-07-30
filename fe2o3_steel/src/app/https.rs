@@ -328,10 +328,10 @@ impl<
                     ).await);
                     return Ok(Some(resp));
                 }
-                return Ok(Some(HttpMessage::respond_with_text(
+                return Ok(Some(cache::generated(HttpMessage::respond_with_text(
                     HttpStatus::NotFound,
                     "Not found.",
-                )));
+                ))));
             }
             if request_path == "/admin"
                 || request_path.starts_with("/admin/")
@@ -349,10 +349,10 @@ impl<
                 // Dashboard not configured. Pretend the route does
                 // not exist so we do not leak the existence of an
                 // admin endpoint.
-                return Ok(Some(HttpMessage::respond_with_text(
+                return Ok(Some(cache::generated(HttpMessage::respond_with_text(
                     HttpStatus::NotFound,
                     "Not found.",
-                )));
+                ))));
             }
 
             // The site console, at `/manage`, before static files. A site that
@@ -461,10 +461,14 @@ impl<
                                     )
                                     .with_body(bytes)
                             }
-                            None => HttpMessage::respond_with_text(
+                            // A miss is not held. RFC 9110 15.5.5 makes a `404`
+                            // heuristically cacheable, so a browser that asked
+                            // before the member uploaded anything would keep the
+                            // miss and never show the picture they then chose.
+                            None => cache::generated(HttpMessage::respond_with_text(
                                 HttpStatus::NotFound,
                                 "no such picture",
-                            ),
+                            )),
                         }));
                     }
                     // The read is the only part that touches the database, so the generics stop here
@@ -675,7 +679,10 @@ impl<
                 Err(e) => {
                     // Tap out early if the route is definitely not known.
                     error!(e);
-                    return Ok(Some(
+                    // A file that is not there today may be there after the next
+                    // deploy, and a `404` a store was free to invent a lifetime
+                    // for outlives the absence it describes.
+                    return Ok(Some(cache::generated(
                         HttpMessage::respond_with_text(
                             HttpStatus::NotFound,
                             "File not found.",
@@ -683,7 +690,7 @@ impl<
                             HeaderName::ContentType,
                             RequestPath::content_type(rpath.as_path()),
                         )
-                    ));
+                    )));
                 }
             };
             
@@ -723,10 +730,11 @@ impl<
                             // to nothing.
                             if !meta.is_file() {
                                 debug!("{}: {:?} is not a file.", id_clone, abs_path);
-                                return Ok(HttpMessage::respond_with_text(
-                                    HttpStatus::NotFound,
-                                    "File not found.",
-                                ));
+                                return Ok(cache::generated(
+                                    HttpMessage::respond_with_text(
+                                        HttpStatus::NotFound,
+                                        "File not found.",
+                                    )));
                             }
                             let total = meta.len();
 
@@ -881,13 +889,13 @@ impl<
                         }
                         Err(_e) => {
                             debug!("{}: File {:?} not found.", id_clone, abs_path);
-                            HttpMessage::respond_with_text(
+                            cache::generated(HttpMessage::respond_with_text(
                                 HttpStatus::NotFound,
                                 "File not found.",
                             ).with_field(
                                 HeaderName::ContentType,
                                 RequestPath::content_type(abs_path.as_path()),
-                            )
+                            ))
                         }
                     })
                 })

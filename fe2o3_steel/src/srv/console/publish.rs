@@ -297,10 +297,13 @@ pub fn handle_get<
 		PATH_COMMENTS	=> comments_page(cfg.comments, theme, admin, csrf, db, query, id),
 		PATH_COMMENTS_JSON	=> comments_json(cfg.comments, db, query, id),
 		PATH_REPORTS_JSON	=> reports_json(db, id),
-		_		=> Ok(HttpMessage::respond_with_text(
+		// Never held, on the same reasoning as every other console answer: RFC 9110 15.5.5 makes a
+		// `404` heuristically cacheable, and a route that does not exist in this version of the
+		// console may exist in the next one a reader is served.
+		_		=> Ok(cache::generated(HttpMessage::respond_with_text(
 			HttpStatus::NotFound,
 			"Not found.",
-		)),
+		))),
 	}
 }
 
@@ -1236,8 +1239,8 @@ fn subscribers_csv<
 {
 	let db = match db {
 		Some(db)	=> db,
-		None		=> return Ok(HttpMessage::respond_with_text(
-			HttpStatus::NotFound, "Not found.")),
+		None		=> return Ok(cache::generated(HttpMessage::respond_with_text(
+			HttpStatus::NotFound, "Not found."))),
 	};
 	let csv = res!(subscribe::export(db, id));
 	let mut resp = HttpMessage::ok_respond_with_text(csv);
