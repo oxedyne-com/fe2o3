@@ -646,6 +646,15 @@ impl Verdict {
 	}
 }
 
+/// Why a comment claiming a known commenter from a new place is held.
+///
+/// A const rather than a literal at the one place it is used, because a reason is shown to a person:
+/// it is worth being able to test that it reads as a sentence, which the wrapped literal it replaces
+/// did not -- the source indentation was inside the string, and the queue said "commented from
+/// &#x9;&#x9;&#x9;before".
+pub const REASON_MISMATCH: &str = "claims a commenter this site knows, but from somewhere they have \
+	not commented from before -- worth checking it is them";
+
 /// What decides whether a comment appears.
 ///
 /// An enum rather than a trait object, per the house rules, and the reason it is worth having at all
@@ -1786,6 +1795,47 @@ mod tests {
 		}
 		Ok(())
 	}
+
+	/// Every reason a moderator gives reads as a sentence, because a person reads it in the queue.
+	///
+	/// The one that did not was a literal wrapped across two lines without the continuation, so the
+	/// source's own indentation was inside the string and the queue said "commented from
+	/// &#x9;&#x9;&#x9;before". Nothing about the moderation was wrong, and nothing tested the words.
+	#[test]
+	fn test_a_reason_reads_as_a_sentence_31() -> Outcome<()> {
+		let m = Moderator::default();
+		let anon = named("a", None);
+		let mut spammy = named("b", Some("ada@example.com"));
+		spammy.body = fmt!("buy https://a.example buy https://b.example buy https://c.example");
+		let mut empty = named("c", Some("ada@example.com"));
+		empty.body = fmt!("   ");
+		let blocked = Commenter {
+			handle: fmt!("email:ada@example.com"), from: None, trusted: false, blocked: true,
+			first_seen: fmt!("2026-07-01T00:00:00Z"),
+		};
+
+		let mut reasons = vec![fmt!("{}", REASON_MISMATCH)];
+		for v in [
+			m.judge(&anon, None),
+			m.judge(&named("d", Some("ada@example.com")), None),
+			m.judge(&spammy, None),
+			m.judge(&empty, None),
+			m.judge(&anon, Some(&blocked)),
+		] {
+			if let Some(r) = v.reason() {
+				reasons.push(r);
+			}
+		}
+		assert!(reasons.len() >= 6, "the reasons were not all gathered: {:?}", reasons);
+		for r in &reasons {
+			assert!(!r.contains('\t'), "a reason carries a tab: {:?}", r);
+			assert!(!r.contains('\n'), "a reason carries a newline: {:?}", r);
+			assert!(!r.contains("  "), "a reason carries a run of spaces: {:?}", r);
+			assert_eq!(r.trim(), r.as_str(), "a reason is padded: {:?}", r);
+			assert!(!r.is_empty(), "a reason says nothing");
+		}
+		Ok(())
+	}
 }
 
 
@@ -2059,8 +2109,7 @@ pub async fn receive<
 	// what impersonating a regular looks like, and it is the one case where a name in a queue is
 	// worth a second look. Said plainly in the queue rather than left for a moderator to spot.
 	if mismatch {
-		verdict = verdict.and_then(Verdict::Hold(fmt!(
-			"claims a commenter this site knows, but from somewhere they have not commented from 			before -- worth checking it is them")));
+		verdict = verdict.and_then(Verdict::Hold(fmt!("{}", REASON_MISMATCH)));
 	}
 	// A comment with no proof is held even where the moderator would have allowed it. The proof is
 	// what distinguishes a reader who has a browser from something that posts to a URL, and a trusted
