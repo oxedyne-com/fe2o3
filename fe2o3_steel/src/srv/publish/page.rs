@@ -60,6 +60,21 @@ pub fn handle_get(
 )
 	-> Outcome<HttpMessage>
 {
+	// A trailing slash is the same place. A reader types one, a link carries one, and a directory-shaped
+	// URL is what most of the web looks like -- so `/asides/` answering `404` while `/asides` renders is
+	// a distinction nobody meant to draw, and the reader is told the blog does not exist.
+	//
+	// Sent to the canonical spelling rather than served under both, so the prose has one address: two
+	// URLs for one page split a reader's history, a shared link and a search engine's idea of where the
+	// piece lives.
+	if path.ends_with('/') {
+		let bare = path.trim_end_matches('/');
+		// Never past the prefix itself, so a site whose configured path ends in a slash cannot be sent
+		// round a loop.
+		if bare.len() >= cfg.path.len() {
+			return Ok(moved_to(bare, query));
+		}
+	}
 	if path == cfg.path {
 		return index(cfg, posts, authors, query, id);
 	}
@@ -115,6 +130,23 @@ pub fn served_post<'a>(cfg: &PublishConfig, posts: &'a [Post], path: &str) -> Op
 		return None;
 	}
 	posts.iter().find(|p| p.slug == slug)
+}
+
+/// The canonical address of a page a reader reached by another spelling of it.
+///
+/// A `301`, since the two spellings name one page and always will: a browser that learns the mapping
+/// stops asking, and a search engine files the prose under one URL rather than two.
+///
+/// The query is carried across, so a link with something in it lands where it meant to -- but only when
+/// every character of it is printable ASCII. It came off the request line and it is going into a
+/// response header, which is the shape a response-splitting attempt takes; anything else and the reader
+/// arrives at the bare path, which is where they were going anyway.
+fn moved_to(path: &str, query: &str) -> HttpMessage {
+	let safe = !query.is_empty()
+		&& query.bytes().all(|b| (0x21..=0x7e).contains(&b));
+	let to = if safe { fmt!("{}?{}", path, query) } else { path.to_string() };
+	HttpMessage::new_response(HttpStatus::MovedPermanently)
+		.with_field(HeaderName::Location, HeaderFieldValue::Generic(to))
 }
 
 /// Whether a string is a name a post may wear.
@@ -1286,6 +1318,49 @@ mod tests {
 			"the script does not reveal it on an empty result: {}", js);
 		assert!(!js.contains("aside-empty"),
 			"the script still moves the blog-is-empty line, so a filter reads as an empty blog: {}", js);
+		Ok(())
+	}
+
+	/// A trailing slash is the same place, and is sent to the canonical spelling of it.
+	///
+	/// `/asides/` answering `404` while `/asides` rendered told a reader who typed the slash -- or
+	/// followed a link that carried one -- that the blog did not exist.
+	#[test]
+	fn test_a_trailing_slash_is_the_same_place_29() -> Outcome<()> {
+		let c = cfg();
+		let posts = vec![post()];
+		let at = |path: &str, query: &str| -> Outcome<HttpMessage> {
+			handle_get(&c, &posts, &[], path, query, None, "test")
+		};
+		let to = |resp: &HttpMessage| -> Option<String> {
+			resp.header.fields.get_one(&HeaderName::Location).map(|v| fmt!("{}", v))
+		};
+
+		// The index, and the post, each by the spelling with the slash on it.
+		let resp = res!(at("/asides/", ""));
+		assert_eq!(status_of(&resp), Some(HttpStatus::MovedPermanently));
+		assert_eq!(to(&resp).as_deref(), Some("/asides"));
+		let resp = res!(at("/asides/on-rent/", ""));
+		assert_eq!(status_of(&resp), Some(HttpStatus::MovedPermanently));
+		assert_eq!(to(&resp).as_deref(), Some("/asides/on-rent"));
+		// More than one slash is still the one place, and does not bounce twice.
+		assert_eq!(to(&res!(at("/asides///", ""))).as_deref(), Some("/asides"));
+
+		// A query is carried across, so a chip link with a slash on the path still lands narrowed.
+		assert_eq!(to(&res!(at("/asides/", "cat=Big+Ideas"))).as_deref(),
+			Some("/asides?cat=Big+Ideas"));
+		// But nothing that could break the header out of its line: this value came off the request
+		// line and is going into a `Location`.
+		assert_eq!(to(&res!(at("/asides/", "a=b\r\nX-Evil: 1"))).as_deref(), Some("/asides"),
+			"a query with a line break in it reached a response header");
+
+		// And the canonical spellings are untouched: still the page, not a redirect.
+		let resp = res!(at("/asides", ""));
+		assert_eq!(status_of(&resp), Some(HttpStatus::OK));
+		assert!(to(&resp).is_none(), "the index became a redirect");
+		let resp = res!(at("/asides/on-rent", ""));
+		assert_eq!(status_of(&resp), Some(HttpStatus::OK));
+		assert!(to(&resp).is_none(), "a post became a redirect");
 		Ok(())
 	}
 
