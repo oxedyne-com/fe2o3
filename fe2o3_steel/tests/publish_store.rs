@@ -8,7 +8,6 @@ use oxedyne_fe2o3_steel::srv::{
     console::union_admins,
     publish::{
         Markup,
-        PostKind,
         PostState,
         PublishConfig,
         send::{
@@ -49,7 +48,8 @@ fn a_post_survives_the_database() -> Outcome<()> {
 
     let rec = Record {
         slug:   fmt!("on-rent"),
-        kind:   PostKind::Essay,
+        author: String::new(),
+        categories: Vec::new(),
         state:  PostState::Live,
         markup: Markup::Markdown,
         date:   Some(fmt!("2026-07-17")),
@@ -470,7 +470,8 @@ async fn a_test_send_touches_no_state_or_history() -> Outcome<()> {
     res!(subscribe::confirm(&handle, &sub.token, "test"));
     let draft = Record {
         slug:   fmt!("wip"),
-        kind:   PostKind::Note,
+        author: String::new(),
+        categories: Vec::new(),
         state:  PostState::Draft,
         markup: Markup::Markdown,
         date:   None,
