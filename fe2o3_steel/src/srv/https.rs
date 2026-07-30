@@ -7,9 +7,11 @@ use crate::srv::{
         ProxyRoute,
         RedirectMatch,
         RedirectRule,
+        WsRoute,
     },
     constant,
     context::ServerContext,
+    wsproxy,
 };
 
 use oxedyne_fe2o3_core::{
@@ -234,7 +236,39 @@ impl<
                     };
 
                     if request.is_websocket_upgrade() {
-                        // Check proxy routes first — if a proxy route
+                        // ── WebSocket routes ───────────────────────
+                        // Checked first: a route naming one exact path
+                        // is more specific than a proxy prefix that
+                        // happens to contain it, and more specific
+                        // than Steel's own WS handler, which answers
+                        // every other path.
+                        if !vhost.ws_routes.is_empty() {
+                            if let HttpHeadline::Request { ref loc, .. } =
+                                request.header.headline
+                            {
+                                let ws_path = loc.path.as_string().to_string();
+                                if let Some(ws_route) = vhost.ws_routes.iter()
+                                    .find(|r| r.matches(&ws_path))
+                                {
+                                    log!(log_level,
+                                        "{}: ws route {} -> ws://{}:{}{}",
+                                        id, ws_path,
+                                        ws_route.upstream_host,
+                                        ws_route.upstream_port,
+                                        ws_route.upstream_path,
+                                    );
+                                    let reunited = read_stream.unsplit(write_stream);
+                                    return self.handle_ws_route(
+                                        reunited,
+                                        request,
+                                        ws_route,
+                                        src_addr,
+                                        &id,
+                                    ).await;
+                                }
+                            }
+                        }
+                        // Check proxy routes next — if a proxy route
                         // matches, tunnel the WebSocket to the upstream
                         // instead of handling it with Steel's own WS
                         // handler.  This allows proxied applications
@@ -1012,11 +1046,9 @@ impl<
 
     /// Tunnel a WebSocket upgrade request to the upstream proxy target.
     ///
-    /// Reconstructs the upgrade handshake, sends it to the upstream,
-    /// forwards the upstream's 101 response to the client, then
-    /// bidirectionally pipes raw bytes between client and upstream for
-    /// the lifetime of the WebSocket connection.  Returns when either
-    /// direction closes.
+    /// The relay itself lives in [`crate::srv::wsproxy`], which a `ws_route`
+    /// uses too: the two kinds of route differ in how they match a request,
+    /// not in what forwarding a handshake means.
     async fn handle_proxy_websocket<S>(
         self,
         client:     &mut S,
@@ -1028,162 +1060,52 @@ impl<
         -> Outcome<()>
         where S: AsyncRead + AsyncWrite + Unpin,
     {
-        // Extract path and raw query from the request, forwarding the query
-        // verbatim as the HTTP path does.
-        let (path, query) = match &request.header.headline {
-            HttpHeadline::Request { loc, .. } =>
-                (loc.path.as_string().to_string(), loc.query.clone()),
+        let path = match &request.header.headline {
+            HttpHeadline::Request { loc, .. } => loc.path.as_string().to_string(),
             _ => return Err(err!(
                 "{}: proxy ws: request is not an HTTP request.", id;
                 Invalid, Bug)),
         };
-        let upstream_path = match query.is_empty() {
-            true  => route.upstream_path_for(&path),
-            false => fmt!("{}?{}", route.upstream_path_for(&path), query),
-        };
+        let upstream_path = res!(wsproxy::upstream_target(
+            &request,
+            &route.upstream_path_for(&path),
+        ));
+        wsproxy::tunnel_upgrade(
+            client,
+            &request,
+            &route.upstream_host,
+            route.upstream_port,
+            &upstream_path,
+            src_addr,
+            id,
+        ).await
+    }
 
-        // Connect to the upstream.
-        let mut upstream = match TcpStream::connect(
-            (route.upstream_host.as_str(), route.upstream_port),
-        ).await {
-            Ok(s) => s,
-            Err(e) => return Err(err!(e,
-                "{}: proxy ws: failed to connect to {}:{}.",
-                id, route.upstream_host, route.upstream_port;
-                IO, Network, Init)),
-        };
-
-        // Reconstruct the WebSocket upgrade request for the upstream.
-        let mut req = String::with_capacity(512);
-        req.push_str(&fmt!("GET {} HTTP/1.1\r\n", upstream_path));
-        req.push_str(&fmt!("Host: {}\r\n", route.upstream_host));
-
-        // Forward all original headers except Host, Connection and
-        // Content-Length which we manage.  WebSocket upgrade headers
-        // (Upgrade, Sec-WebSocket-Key, Sec-WebSocket-Version, etc.)
-        // are forwarded verbatim.
-        for (name, values) in request.header.fields.iter() {
-            let name_str = fmt!("{}", name);
-            if name_str.eq_ignore_ascii_case("host")
-                || name_str.eq_ignore_ascii_case("connection")
-                || name_str.eq_ignore_ascii_case("content-length")
-            {
-                continue;
-            }
-            for value in values {
-                req.push_str(&fmt!("{}: {}\r\n", name_str, value));
-            }
-        }
-
-        // Connection: Upgrade for the upstream.
-        req.push_str("Connection: Upgrade\r\n");
-        req.push_str(&fmt!("X-Forwarded-For: {}\r\n", src_addr));
-        req.push_str("X-Forwarded-Proto: https\r\n");
-        req.push_str("\r\n");
-
-        // Send the upgrade request to the upstream.
-        match upstream.write_all(req.as_bytes()).await {
-            Ok(()) => (),
-            Err(e) => return Err(err!(e,
-                "{}: proxy ws: failed to send upgrade request to upstream.", id;
-                IO, Network, Wire, Write)),
-        }
-        match upstream.flush().await {
-            Ok(()) => (),
-            Err(e) => return Err(err!(e,
-                "{}: proxy ws: failed to flush upstream.", id;
-                IO, Network, Wire, Write)),
-        }
-
-        // Read the upstream's response (should be 101 Switching Protocols)
-        // and forward it to the client.  Read until we find \r\n\r\n.
-        let mut buf = vec![0u8; 8192];
-        let mut accum: Vec<u8> = Vec::new();
-        loop {
-            let n = match upstream.read(&mut buf).await {
-                Ok(0) => {
-                    return Err(err!(
-                        "{}: proxy ws: upstream closed before sending \
-                        a WebSocket upgrade response.", id;
-                        IO, Network, Wire, Read, Missing));
-                }
-                Ok(n) => n,
-                Err(e) => return Err(err!(e,
-                    "{}: proxy ws: error reading upstream response.", id;
-                    IO, Network, Wire, Read)),
-            };
-            accum.extend_from_slice(&buf[..n]);
-            if let Some(pos) = accum.windows(4).position(|w| w == b"\r\n\r\n") {
-                let header_end = pos + 4;
-                let response_bytes = &accum[..header_end];
-                let extra_bytes = &accum[header_end..];
-
-                // Forward the response to the client.
-                match client.write_all(response_bytes).await {
-                    Ok(()) => (),
-                    Err(e) => return Err(err!(e,
-                        "{}: proxy ws: failed to forward upgrade response.", id;
-                        IO, Network, Wire, Write)),
-                }
-
-                // If the upstream sent any data after the headers
-                // (early WebSocket frames), forward those too.
-                if !extra_bytes.is_empty() {
-                    match client.write_all(extra_bytes).await {
-                        Ok(()) => (),
-                        Err(e) => return Err(err!(e,
-                            "{}: proxy ws: failed to forward early frames.", id;
-                            IO, Network, Wire, Write)),
-                    }
-                }
-                match client.flush().await {
-                    Ok(()) => (),
-                    Err(e) => return Err(err!(e,
-                        "{}: proxy ws: failed to flush client.", id;
-                        IO, Network, Wire, Write)),
-                }
-                break;
-            }
-            if accum.len() > 65536 {
-                return Err(err!(
-                    "{}: proxy ws: upstream response headers exceed 64 KiB.", id;
-                    IO, Network, Input, TooBig));
-            }
-        }
-
-        // Bidirectionally pipe between client and upstream.
-        // Split both streams and use tokio::select to wait for
-        // either direction to close.
-        let (mut client_r, mut client_w) = tokio::io::split(client);
-        let (mut upstream_r, mut upstream_w) = upstream.into_split();
-
-        log!(log_get_level!(),
-            "{}: proxy ws: tunnel established, piping bidirectionally.", id);
-
-        tokio::select! {
-            // Client -> Upstream
-            res = tokio::io::copy(&mut client_r, &mut upstream_w) => {
-                match res {
-                    Ok(_) => log!(log_get_level!(),
-                        "{}: proxy ws: client -> upstream closed.", id),
-                    Err(e) => log!(log_get_level!(),
-                        "{}: proxy ws: client -> upstream error: {}", id, e),
-                }
-                let _ = upstream_w.shutdown().await;
-            }
-            // Upstream -> Client
-            res = tokio::io::copy(&mut upstream_r, &mut client_w) => {
-                match res {
-                    Ok(_) => log!(log_get_level!(),
-                        "{}: proxy ws: upstream -> client closed.", id),
-                    Err(e) => log!(log_get_level!(),
-                        "{}: proxy ws: upstream -> client error: {}", id, e),
-                }
-                let _ = client_w.shutdown().await;
-            }
-        }
-
-        log!(log_get_level!(), "{}: proxy ws: tunnel closed.", id);
-        Ok(())
+    /// Hand the upgrade on this path to the WebSocket server the route names.
+    ///
+    /// Unlike a proxy route there is no prefix to strip and no application
+    /// behind it: one path, one upstream, and the upstream's own path taken
+    /// from the configured URL.
+    async fn handle_ws_route<S>(
+        self,
+        client:     &mut S,
+        request:    HttpMessage,
+        route:      &WsRoute,
+        src_addr:   SocketAddr,
+        id:         &str,
+    )
+        -> Outcome<()>
+        where S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let upstream_path = res!(wsproxy::upstream_target(&request, &route.upstream_path));
+        wsproxy::tunnel_upgrade(
+            client,
+            &request,
+            &route.upstream_host,
+            route.upstream_port,
+            &upstream_path,
+            src_addr,
+            id,
+        ).await
     }
 }

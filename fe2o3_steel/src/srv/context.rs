@@ -7,6 +7,7 @@ use crate::srv::{
         ProxyRoute,
         RedirectRule,
         ServerConfig,
+        WsRoute,
     },
     id,
 };
@@ -93,6 +94,9 @@ pub struct VhostRuntime<
     /// Reverse-proxy routes, checked after redirects but before static
     /// files.  Longest matching prefix wins.
     pub proxy_routes:   Vec<ProxyRoute>,
+    /// WebSocket routes, checked before proxy routes and only for a
+    /// request that is an upgrade. Each claims one exact path.
+    pub ws_routes:      Vec<WsRoute>,
     /// Terminal session manager, when terminal features are enabled
     /// for this vhost.  `None` disables term_* commands and the
     /// /term/<session> WS endpoint.
