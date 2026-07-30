@@ -4270,6 +4270,74 @@ mod tests {
 		Ok(())
 	}
 
+	/// Nothing the console answers may be served from a store unasked -- a `404` included.
+	///
+	/// RFC 9110 15.5.5 makes a `404` heuristically cacheable, so a store is free to invent a lifetime
+	/// for a miss. That is the one class of answer that must never be held: a route the console does
+	/// not know today it may know after the next deploy, and a picture that is not there yet is
+	/// exactly what somebody is about to upload.
+	#[test]
+	fn test_nothing_the_console_answers_is_held_22() -> Outcome<()> {
+		use crate::srv::console::{
+			SiteAdmin,
+			Theme,
+		};
+
+		// The database type the answers below are instantiated over. None of them consults it: a
+		// missing route is a missing route, and a site with no publish block has nothing to read.
+		type TestDb = oxedyne_fe2o3_o3db_sync::O3db<
+			{ crate::srv::id::UID_LEN },
+			crate::srv::id::Uid,
+			oxedyne_fe2o3_crypto::enc::EncryptionScheme,
+			oxedyne_fe2o3_hash::hash::HashScheme,
+			oxedyne_fe2o3_hash::hash::HashScheme,
+			oxedyne_fe2o3_hash::csum::ChecksumScheme,
+		>;
+		let none: Option<&(Arc<RwLock<TestDb>>, crate::srv::id::Uid)> = None;
+
+		let theme = Theme {
+			site_name:	fmt!("Elearnity"),
+			css:		vec![],
+			home:		fmt!("/"),
+		};
+		let admin = SiteAdmin { username: "a".repeat(64) };
+		let cfg = PublishConfig {
+			path:			fmt!("/asides"),
+			dir:			fmt!("/nonexistent"),
+			source:			crate::srv::publish::Source::Dir,
+			title:			fmt!("Asides"),
+			site_name:		fmt!("Elearnity"),
+			base_url:		fmt!("https://example.com"),
+			css:			vec![],
+			creds:			Default::default(),
+			comments:		true,
+			comment_rate_secs:	0,
+			comment_rate_hourly:	0,
+			newsletter_from:	String::new(),
+			categories:		vec![],
+			default_author:		String::new(),
+			logo:			String::new(),
+			home:			String::new(),
+		};
+
+		// A route the console does not know.
+		let resp = res!(handle_get(
+			Some(&cfg), &theme, &admin, "csrf", none, "/manage/nonesuch", "", "test"));
+		cache::assert_not_held(&resp, "a console route that does not exist");
+
+		// A JSON answer, which is what an app draws its console from.
+		cache::assert_not_held(&json_body("{\"posts\":[]}"), "a console JSON answer");
+		cache::assert_not_held(&json_error("no"), "a console JSON error");
+
+		// The export, asked of a site with no database to export from.
+		cache::assert_not_held(&res!(subscribers_csv(none, "test")), "a CSV export that has no list");
+
+		// And the page a site with nothing to publish is shown.
+		let resp = res!(handle_get(None, &theme, &admin, "csrf", none, "/manage", "", "test"));
+		cache::assert_not_held(&resp, "the page a site with no publish block gets");
+		Ok(())
+	}
+
 	/// The AI form selects the stored provider, shows a held key as held and never as its value,
 	/// prefills a blank prompt with its default, and offers the clear-key form only when a key is set.
 	#[test]

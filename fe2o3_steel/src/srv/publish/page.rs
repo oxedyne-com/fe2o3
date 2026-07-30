@@ -1768,6 +1768,30 @@ mod tests {
 		assert!(served_post(&c, &posts, "/asides/").is_none());
 		Ok(())
 	}
+
+	/// Nothing this module renders may be served from a store unasked.
+	///
+	/// A page describes the site at the instant it was asked for, and the next thing an author writes
+	/// changes it. Carrying no directive it is not merely uncached: RFC 9111 4.2.2 lets a store invent
+	/// a lifetime for it, and the author then has to force a refresh to see their own post -- which is
+	/// not something a reader would ever think to do. The scripts are the exception and say so: the
+	/// same bytes for every site, changing only when this server does.
+	#[test]
+	fn test_nothing_rendered_here_is_held_28() -> Outcome<()> {
+		let c = cfg();
+		cache::assert_not_held(&res!(index(&c, &[post()], &[], "", "test")), "the index");
+		cache::assert_not_held(&res!(index(&c, &[], &[], "", "test")), "an empty index");
+		cache::assert_not_held(&res!(post_page(&c, &post(), None, None)), "a post");
+		cache::assert_not_held(&not_found(&c), "a post that does not exist");
+
+		// The scripts are held on purpose, which is the other half of the rule.
+		for (what, resp) in [("the filter script", filter_js()), ("the comment script", comment_js())] {
+			let held = res!(resp.header.fields.get_one(&HeaderName::CacheControl).ok_or_else(||
+				err!("{} carried no cache directive.", what; Missing)));
+			assert!(fmt!("{}", held).contains("max-age="), "{} is not held: {}", what, held);
+		}
+		Ok(())
+	}
 }
 
 

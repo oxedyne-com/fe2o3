@@ -167,6 +167,25 @@ pub fn generated(resp: HttpMessage) -> HttpMessage {
     )
 }
 
+/// Fails unless a response forbids a store from serving it unasked.
+///
+/// The invariant [`generated`] exists to keep, in one place so that the tests of every surface that
+/// must hold it say the same thing -- and so a refactor that drops one of those calls fails a test
+/// rather than going out. Six surfaces hold it and one of them was tested; that is how five of them
+/// came to be able to break quietly.
+#[cfg(test)]
+pub fn assert_not_held(resp: &HttpMessage, what: &str) {
+    match resp.header.fields.get_one(&HeaderName::CacheControl) {
+        Some(val) => {
+            let directive = fmt!("{}", val).to_ascii_lowercase();
+            assert!(directive.contains("no-cache") || directive.contains("no-store"),
+                "{} may be served from a store unasked: '{}'", what, directive);
+        }
+        None => panic!(
+            "{} carried no cache directive, so a store is free to invent a lifetime for it", what),
+    }
+}
+
 /// A `304 Not Modified`: the validators and directives, and no body.
 ///
 /// `varies_by_encoding` says whether the representation is one the server would

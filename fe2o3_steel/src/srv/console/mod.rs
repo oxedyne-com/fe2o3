@@ -2099,4 +2099,24 @@ mod tests {
 		assert!(!attrs.contains(&SetCookieAttributes::Path("/admin".to_string())));
 		Ok(())
 	}
+
+	/// A console page may not be served from a store unasked.
+	///
+	/// It shows the site as it stands and it stands behind a session, so a store keeping one would
+	/// show an admin's page to whoever asked next on that machine.
+	#[test]
+	fn test_a_console_page_is_never_held_12() -> Outcome<()> {
+		let theme = Theme {
+			site_name:	fmt!("Elearnity"),
+			css:		vec![fmt!("/css/a.css")],
+			home:		fmt!("/"),
+		};
+		let admin = SiteAdmin { username: "a".repeat(64) };
+		cache::assert_not_held(&page(&theme, &admin, "Posts", "<p>a body</p>"), "a console page");
+		cache::assert_not_held(&not_yet_admin(&theme, &admin.username, true, "csrf"),
+			"the claim page");
+		cache::assert_not_held(&not_yet_admin(&theme, &admin.username, false, "csrf"),
+			"the not-an-admin page");
+		Ok(())
+	}
 }

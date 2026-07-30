@@ -197,4 +197,43 @@ mod tests {
 		assert_eq!(instant("2026-02-31"), "2026-02-31T00:00:00Z");
 		Ok(())
 	}
+
+	/// The feed may not be served from a store unasked. A feed reader polls this on a schedule, and a
+	/// store answering the poll from a copy is the poll not happening.
+	#[test]
+	fn test_the_feed_is_never_served_from_a_store_unasked_04() -> Outcome<()> {
+		let cfg = PublishConfig {
+			path:			fmt!("/asides"),
+			dir:			fmt!("/nonexistent"),
+			source:			crate::srv::publish::Source::Dir,
+			title:			fmt!("Asides"),
+			site_name:		fmt!("Elearnity"),
+			base_url:		fmt!("https://example.com"),
+			css:			vec![],
+			creds:			Default::default(),
+			comments:		true,
+			comment_rate_secs:	0,
+			comment_rate_hourly:	0,
+			newsletter_from:	String::new(),
+			categories:		vec![],
+			default_author:		String::new(),
+			logo:			String::new(),
+			home:			String::new(),
+		};
+		let post = Post {
+			slug:		fmt!("on-rent"),
+			title:		fmt!("On rent"),
+			author:		fmt!("jason"),
+			categories:	vec![],
+			date:		Some(fmt!("2026-07-17")),
+			words:		420,
+			excerpt:	fmt!("An opening sentence."),
+			html:		fmt!("<p>An opening sentence.</p>\n"),
+			also_on:	Vec::new(),
+			tags:		vec![fmt!("rent")],
+		};
+		cache::assert_not_held(&res!(serve(&cfg, &[post], "test")), "the feed");
+		cache::assert_not_held(&res!(serve(&cfg, &[], "test")), "an empty feed");
+		Ok(())
+	}
 }
