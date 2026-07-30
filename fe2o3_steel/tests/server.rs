@@ -119,6 +119,7 @@ pub async fn test_server(filter: &'static str) -> Outcome<()> {
                 admin_keys:             Vec::new(),
                 head_injection_url:     None,
                 proxy_routes:           Vec::new(),
+                ws_routes:              Vec::new(),
                 term_config:            None,
                 publish:                None,
                 site_admins:            Vec::new(),
@@ -151,6 +152,7 @@ pub async fn test_server(filter: &'static str) -> Outcome<()> {
                 ws_syntax,
                 redirects:      vhost_cfg.redirects.clone(),
                 proxy_routes:   vhost_cfg.proxy_routes.clone(),
+                ws_routes:      vhost_cfg.ws_routes.clone(),
                 term_manager:   None,
                 uses_sessions:  vhost_cfg.uses_sessions(),
             });
