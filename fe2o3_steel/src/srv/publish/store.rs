@@ -1132,6 +1132,18 @@ pub fn rebuild_index<
 	Ok(n)
 }
 
+/// The date and slug a file's name means to an import, dated today where the name gave none.
+///
+/// A file called `on-rent.md` says nothing about when it was written, and an undated post is not a
+/// post without a date on the page -- it is a post the feed has to invent one for, and the invention
+/// is the epoch, which files the piece under 1970 in every reader that takes it. The composer's save
+/// path has dated an empty field to today since that was found; an import writes the same records and
+/// has to do the same thing, or the bug simply comes back in through the other door.
+fn imported_date(stem: &str) -> (Option<String>, String) {
+	let (date, slug) = split_date(stem);
+	(date.or_else(super::today), slug)
+}
+
 /// Reads a directory of Markdown into the store.
 ///
 /// How prose that already exists gets in, and the reason a directory stays a first-class way to write
@@ -1155,7 +1167,7 @@ pub fn import_dir<
 	let sources = res!(super::read_sources(dir, id));
 	let mut n = 0;
 	for (stem, source) in sources {
-		let (date, slug) = split_date(&stem);
+		let (date, slug) = imported_date(&stem);
 		let rec = Record {
 			slug,
 			// A directory carries no author or categories: there is no front matter to hold them, and
@@ -1222,6 +1234,35 @@ mod tests {
 		let back = res!(Record::from_dat(&undated.to_dat()));
 		assert_eq!(back, undated);
 		assert_eq!(back.date, None);
+		Ok(())
+	}
+
+	/// An imported file whose name says no date is dated today, not left for the feed to date to 1970.
+	///
+	/// The pairing that matters: the composer's save has dated an empty field to today since the
+	/// epoch bug was found, and an import writes the same records by another route. A fallback on one
+	/// path and not the other is the same bug with a different way in.
+	#[test]
+	fn test_an_imported_file_with_no_date_is_dated_today_08() -> Outcome<()> {
+		// A name that says when: taken as written, and today has nothing to do with it.
+		let (date, slug) = imported_date("2026-07-17-on-rent");
+		assert_eq!(date, Some(fmt!("2026-07-17")));
+		assert_eq!(slug, fmt!("on-rent"));
+
+		// A name that says nothing: today, and never `None`.
+		let (date, slug) = imported_date("on-rent");
+		assert_eq!(slug, fmt!("on-rent"));
+		assert_eq!(date, crate::srv::publish::today(),
+			"an imported file with no date prefix was left undated");
+		let date = res!(date.ok_or_else(|| err!(
+			"The clock gave no date, so this run cannot say what the import would have written.";
+			Missing)));
+		assert!(crate::srv::publish::valid_date(&date), "'{}' is not a date the store takes", date);
+
+		// A prefix that is not a date is part of the name, and the post is still dated.
+		let (date, slug) = imported_date("2026-13-on-rent");
+		assert_eq!(slug, fmt!("2026-13-on-rent"));
+		assert!(date.is_some(), "a name with no date prefix was left undated");
 		Ok(())
 	}
 
