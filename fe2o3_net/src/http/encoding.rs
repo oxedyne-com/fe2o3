@@ -408,11 +408,21 @@ pub fn mark_varying(msg: &mut HttpMessage) {
 /// - A status with no body has nothing to encode; `304` in particular must carry
 ///   the validators of the representation it stands for, which
 ///   [`tagged`] has already named.
+/// - A `HEAD` answer withholds its body at the wire, so coding one buys nothing
+///   and costs everything: the whole body has to be materialised to be encoded --
+///   a file window read off the disk included -- and then thrown away unsent. The
+///   answer keeps the `Content-Length` of the identity representation, which is
+///   what a `GET` accepting no coding would be told and what anyone asking how
+///   big a thing is wants to know. RFC 9110 §9.3.2 asks for the fields the `GET`
+///   would carry; it does not ask a server to do the `GET`'s work to find out.
 pub fn is_encodable(msg: &HttpMessage) -> bool {
     use crate::http::{
         header::HttpHeadline,
         status::HttpStatus,
     };
+    if msg.head_only {
+        return false;
+    }
     if msg.header.fields.get_one(&HeaderName::ContentEncoding).is_some() {
         return false;
     }
@@ -489,6 +499,8 @@ pub async fn encode(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::http::status::HttpStatus;
 
     /// RFC 9110 §12.5.3: a request that names no coding is offered none.
     #[test]
@@ -662,6 +674,55 @@ mod tests {
         assert_eq!(tagged("W/\"68a1-3b\"", ContentCoding::Gzip), "W/\"68a1-3b-gzip\"");
         // Not a quoted tag; better left alone than turned into a malformed one.
         assert_eq!(tagged("68a1", ContentCoding::Gzip), "68a1");
+    }
+
+    /// A `HEAD` answer is not encoded, and keeps the length of the identity
+    /// representation -- which is what a `GET` accepting no coding would be told,
+    /// and what anyone asking how big a thing is wants to know.
+    #[tokio::test]
+    async fn a_head_answer_is_not_encoded() -> Outcome<()> {
+        let body = "<p>a paragraph of markup</p>\n".repeat(500).into_bytes();
+        let plain = body.len();
+        let msg = HttpMessage::new_response(HttpStatus::OK)
+            .with_field(
+                HeaderName::ContentType,
+                HeaderFieldValue::Generic(fmt!("text/html; charset=utf-8")),
+            )
+            .with_body(body)
+            .head_only();
+        assert!(!is_encodable(&msg), "a HEAD answer was offered to the encoder");
+        let out = res!(encode(msg, ContentCoding::Gzip).await);
+        assert_eq!(out.body_len(), plain, "a HEAD answer did not state the identity length");
+        assert!(out.header.fields.get_one(&HeaderName::ContentEncoding).is_none(),
+            "a HEAD answer named a coding it had not applied");
+        // It still says the representation varies by coding: a store keyed on the
+        // URL alone would otherwise hand this to the next client along.
+        let vary = res!(out.header.fields.get_one(&HeaderName::Vary).ok_or_else(||
+            err!("The HEAD answer did not say it varies by coding."; Missing)));
+        assert!(fmt!("{}", vary).to_ascii_lowercase().contains("accept-encoding"),
+            "got: {}", vary);
+        Ok(())
+    }
+
+    /// The file a `HEAD` answer names is never opened, which is the cost the guard
+    /// is there to save: encoding a window means reading it off the disk first, and
+    /// a `HEAD` throws the result away unsent.
+    #[tokio::test]
+    async fn a_head_answer_leaves_its_file_unread() -> Outcome<()> {
+        use crate::http::msg::FileWindow;
+        // A window on a path that does not exist, so a run that reads it fails
+        // rather than merely being slower than it should be.
+        let msg = HttpMessage::new_response(HttpStatus::OK)
+            .with_field(
+                HeaderName::ContentType,
+                HeaderFieldValue::Generic(fmt!("text/html; charset=utf-8")),
+            )
+            .with_file_window(FileWindow::new(
+                std::path::PathBuf::from("/nonexistent/no-such-file.html"), 0, 4096))
+            .head_only();
+        let out = res!(encode(msg, ContentCoding::Gzip).await);
+        assert_eq!(out.body_len(), 4096, "the window was not left as the body");
+        Ok(())
     }
 
     /// The encoder's own output, read back by the decoder beside it. This says
