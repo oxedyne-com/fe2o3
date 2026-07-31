@@ -1402,3 +1402,53 @@ fn a_note_about_nothing_is_refused() -> Outcome<()> {
 	assert!(view.note_on(40, 2, b"beyond".to_vec()).is_err());
 	Ok(())
 }
+
+/// The render read backwards puts named content where a reader will find it,
+/// wherever a move has since taken it.
+///
+/// This is the lookup a note resolves through, asked directly, because a flag
+/// names content too and its reader wants a position in a file rather than an
+/// offset into an operation.
+#[test]
+fn content_is_found_where_it_now_renders() -> Outcome<()> {
+	let mut st = res!(seed(ALPHA, 1));
+	// Take "56789" to the front, so that the seeded content renders in three runs
+	// and none of them where it was written.
+	st.ops.push(res!(st.reps[0].move_range(5, 5, 0)));
+	let repo = res!(converge(&st.ops));
+	let file = match repo.file(st.file) {
+		Some(f)	=> f,
+		None	=> return Err(err!("The file went missing."; Test, Missing)),
+	};
+	assert_eq!(file.text_lossy(), "5678901234ABCDEFGHIJ");
+	let placed = repo.placement();
+	// The moved run, which is at the front now.
+	let found = placed.find(&[res!(ContentRange::new(st.seed, 5, 10))]);
+	assert_eq!(found.len(), 1, "one file shows it");
+	assert_eq!(found[0].file, st.file);
+	assert_eq!(found[0].spans, vec![Span::new(0, 5)]);
+	// A range straddling the move renders in two places, and the two runs that
+	// abut are reported as one span rather than as the seam between them.
+	let found = placed.find(&[res!(ContentRange::new(st.seed, 3, 12))]);
+	assert_eq!(found.len(), 1);
+	assert_eq!(found[0].spans, vec![Span::new(0, 5), Span::new(8, 4)]);
+	Ok(())
+}
+
+/// Content that renders nowhere is answered with nowhere, which is what lets a
+/// caller say so rather than invent a place.
+#[test]
+fn dead_content_is_found_in_no_file() -> Outcome<()> {
+	let mut st = res!(seed(ALPHA, 1));
+	st.ops.push(res!(st.reps[0].delete(5, 5)));
+	let repo = res!(converge(&st.ops));
+	let placed = repo.placement();
+	assert!(placed.find(&[res!(ContentRange::new(st.seed, 5, 10))]).is_empty(),
+		"the bytes are dead, so no file shows them");
+	// The live neighbours of the dead run are still found, so the emptiness is
+	// about the content and not about the lookup.
+	let found = placed.find(&[res!(ContentRange::new(st.seed, 0, 20))]);
+	assert_eq!(found.len(), 1);
+	assert_eq!(found[0].spans, vec![Span::new(0, 15)]);
+	Ok(())
+}

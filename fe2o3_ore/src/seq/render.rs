@@ -22,6 +22,12 @@
 //! there, against the repository once however many files it is scattered over, and
 //! reported as [`RepoNote::on_dead`] where its content renders nowhere at all.
 //! Like a flag, a resolved note is a function of the operation set alone.
+//!
+//! That backwards reading is [`Placement`], and it is public because a note is
+//! not the only thing that names content and wants a position: a flag names
+//! content too, and a reader of one wants the file and the offset rather than an
+//! offset into an operation. Content that renders nowhere is answered with no
+//! place, which is the truth about it.
 
 use crate::id::{
 	Anchor,
@@ -875,13 +881,113 @@ impl Note {
 }
 
 
-/// Where a note's content renders in one file.
+/// Where a stretch of content renders: the file showing it, and the spans of
+/// that file's bytes it occupies.
+///
+/// A note resolves to a list of these, and so does anything else that names
+/// content and wants to say where a reader will find it; see [`Placement`].
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct NotePlace {
+pub struct Place {
 	/// The file.
 	pub file:	OpId,
 	/// Where the content renders in it, ascending.
 	pub spans:	Vec<Span>,
+}
+
+
+/// The render read backwards: which file shows a given stretch of content, and
+/// where in it.
+///
+/// A render says, for each file, which content each run of its bytes shows. This
+/// is the other direction -- given content, where is it -- and it is what turns
+/// an operation's name for some bytes into a position a reader can go to. Notes
+/// are resolved through it, and so is a flag whose reader wants a line number
+/// rather than an offset into an operation.
+///
+/// Content that renders nowhere is not found rather than refused: [`Placement::find`]
+/// answers with no place at all for a range that is dead, buried or in a slot that
+/// reached no file, which is the truthful answer to "where is it" and not a fault.
+#[derive(Clone, Debug, Default)]
+pub struct Placement {
+	/// For each atom, the offsets of it that render, the file showing them, and
+	/// the rendered offset the run begins at. Ascending, and disjoint by
+	/// conservation, so a range is found by binary search.
+	shown:	BTreeMap<OpId, Vec<(Range<u64>, OpId, u64)>>,
+}
+
+impl Placement {
+
+	/// Builds the lookup from each file's provenance runs.
+	pub fn of<'a, I>(files: I) -> Self
+	where
+		I: IntoIterator<Item = (OpId, &'a [Run])>,
+	{
+		let mut shown: BTreeMap<OpId, Vec<(Range<u64>, OpId, u64)>> = BTreeMap::new();
+		for (file, runs) in files {
+			for run in runs {
+				if run.content.is_empty() {
+					continue;
+				}
+				shown.entry(run.content.op())
+					.or_default()
+					.push((run.content.offsets(), file, run.at));
+			}
+		}
+		for v in shown.values_mut() {
+			v.sort_by_key(|(iv, file, at)| (iv.start, iv.end, *file, *at));
+		}
+		Self { shown }
+	}
+
+	/// Returns where the content the ranges name renders, one entry per file,
+	/// ascending by file identity.
+	///
+	/// Abutting spans are merged, because what a reader wants is the region and
+	/// not the seams a later edit left in it, and a range that renders nowhere
+	/// contributes nothing.
+	pub fn find(&self, ranges: &[ContentRange]) -> Vec<Place> {
+		let mut found: BTreeMap<OpId, Vec<Span>> = BTreeMap::new();
+		for r in ranges {
+			if r.is_empty() {
+				continue;
+			}
+			let line = match self.shown.get(&r.op()) {
+				Some(v)	=> v,
+				None	=> continue,
+			};
+			// The first entry that can reach the range, and every one after it that
+			// still starts before the range ends.
+			let mut k = line.partition_point(|(iv, _, _)| iv.end <= r.from());
+			while k < line.len() && line[k].0.start < r.to() {
+				let (iv, file, at) = &line[k];
+				let lo = iv.start.max(r.from());
+				let hi = iv.end.min(r.to());
+				if hi > lo {
+					found.entry(*file).or_default().push(Span {
+						at:		at + (lo - iv.start),
+						len:	hi - lo,
+					});
+				}
+				k += 1;
+			}
+		}
+		let mut out: Vec<Place> = Vec::with_capacity(found.len());
+		for (file, mut spans) in found {
+			spans.sort();
+			let mut merged: Vec<Span> = Vec::with_capacity(spans.len());
+			for span in spans {
+				match merged.last_mut() {
+					Some(last) if last.end() >= span.at => {
+						let end = last.end().max(span.end());
+						last.len = end - last.at;
+					},
+					_ => merged.push(span),
+				}
+			}
+			out.push(Place { file, spans: merged });
+		}
+		out
+	}
 }
 
 
@@ -904,14 +1010,14 @@ pub struct RepoNote {
 	/// What it says, as bytes.
 	text:		Vec<u8>,
 	/// The files its content reaches, in ascending order of identity.
-	files:		Vec<NotePlace>,
+	files:		Vec<Place>,
 	/// Whether none of the content it names renders anywhere at all.
 	on_dead:	bool,
 }
 
 impl RepoNote {
 	/// Assembles a repository-wide resolved note from its parts.
-	pub(super) fn new(note: OpId, text: Vec<u8>, files: Vec<NotePlace>) -> Self {
+	pub(super) fn new(note: OpId, text: Vec<u8>, files: Vec<Place>) -> Self {
 		let on_dead = files.is_empty();
 		Self { note, text, files, on_dead }
 	}
@@ -933,7 +1039,7 @@ impl RepoNote {
 	}
 
 	/// Returns the files the note's content reaches, ascending by identity.
-	pub fn files(&self) -> &[NotePlace] {
+	pub fn files(&self) -> &[Place] {
 		&self.files
 	}
 
@@ -1403,6 +1509,18 @@ impl Repo {
 	pub fn index(&self) -> &BTreeMap<OpId, OpId> {
 		&self.index
 	}
+
+	/// Returns the render read backwards, which answers where named content
+	/// ended up.
+	///
+	/// [`Repo::file_of`] answers the coarser question, which file an operation's
+	/// placement reached; this answers where in that file, and it answers it for
+	/// content the asking operation did not write. Building it walks every run
+	/// once, so a caller with several questions builds it once and asks it
+	/// repeatedly.
+	pub fn placement(&self) -> Placement {
+		Placement::of(self.files.iter().map(|f| (f.file, f.runs.as_slice())))
+	}
 }
 
 
@@ -1599,11 +1717,11 @@ pub(super) fn traverse(
 /// produced, giving the notes each file should show and the repository's own view
 /// of all of them.
 ///
-/// The work is a reverse lookup over the provenance the walk already returned:
-/// each run says which content is showing and where, so a note's content is
-/// intersected with the runs and each intersection becomes a span. Nothing here
-/// consults an anchor, a claim or a slot, which is why a note follows a move for
-/// nothing -- the move has already happened, in the runs.
+/// The work is a reverse lookup over the provenance the walk already returned,
+/// which is [`Placement`]: each run says which content is showing and where, so a
+/// note's content is intersected with the runs and each intersection becomes a
+/// span. Nothing here consults an anchor, a claim or a slot, which is why a note
+/// follows a move for nothing -- the move has already happened, in the runs.
 ///
 /// Everything the function reads is a function of the operation set, and every
 /// list it returns is sorted by a total order over that set, so two replicas
@@ -1615,23 +1733,8 @@ pub(super) fn notes(
 )
 	-> (BTreeMap<OpId, Vec<Note>>, Vec<RepoNote>)
 {
-	// Where each atom's bytes render: for one atom, the offsets it shows, the
-	// file showing them, and the rendered offset the run begins at. Disjoint by
-	// conservation, and sorted, so a note's range is found by binary search.
-	let mut shown: BTreeMap<OpId, Vec<(Range<u64>, OpId, u64)>> = BTreeMap::new();
-	for (file, (_, runs)) in files {
-		for run in runs {
-			if run.content.is_empty() {
-				continue;
-			}
-			shown.entry(run.content.op())
-				.or_default()
-				.push((run.content.offsets(), *file, run.at));
-		}
-	}
-	for v in shown.values_mut() {
-		v.sort_by_key(|(iv, file, at)| (iv.start, iv.end, *file, *at));
-	}
+	let placed = Placement::of(
+		files.iter().map(|(file, (_, runs))| (*file, runs.as_slice())));
 
 	let mut per_file: BTreeMap<OpId, Vec<Note>> = BTreeMap::new();
 	let mut repo: Vec<RepoNote> = Vec::new();
@@ -1640,50 +1743,11 @@ pub(super) fn notes(
 			Op::Note { text, .. }	=> text,
 			_						=> continue,
 		};
-		let mut found: BTreeMap<OpId, Vec<Span>> = BTreeMap::new();
-		for r in op.note_on() {
-			if r.is_empty() {
-				continue;
-			}
-			let line = match shown.get(&r.op()) {
-				Some(v)	=> v,
-				None	=> continue,
-			};
-			// The first entry that can reach the range, and every one after it that
-			// still starts before the range ends.
-			let mut k = line.partition_point(|(iv, _, _)| iv.end <= r.from());
-			while k < line.len() && line[k].0.start < r.to() {
-				let (iv, file, at) = &line[k];
-				let lo = iv.start.max(r.from());
-				let hi = iv.end.min(r.to());
-				if hi > lo {
-					found.entry(*file).or_default().push(Span {
-						at:		at + (lo - iv.start),
-						len:	hi - lo,
-					});
-				}
-				k += 1;
-			}
-		}
-		let mut places: Vec<NotePlace> = Vec::with_capacity(found.len());
-		for (file, mut spans) in found {
-			spans.sort();
-			// Abutting spans are one span: the render may show a note's content in
-			// several runs, and a reader wants the region rather than the seams.
-			let mut merged: Vec<Span> = Vec::with_capacity(spans.len());
-			for span in spans {
-				match merged.last_mut() {
-					Some(last) if last.end() >= span.at => {
-						let end = last.end().max(span.end());
-						last.len = end - last.at;
-					},
-					_ => merged.push(span),
-				}
-			}
-			per_file.entry(file)
+		let places = placed.find(op.note_on());
+		for place in &places {
+			per_file.entry(place.file)
 				.or_default()
-				.push(Note::new(*id, text.clone(), merged.clone()));
-			places.push(NotePlace { file, spans: merged });
+				.push(Note::new(*id, text.clone(), place.spans.clone()));
 		}
 		repo.push(RepoNote::new(*id, text.clone(), places));
 	}
