@@ -26,6 +26,10 @@
 //!   and checked with a hasher the caller brings.
 //! - [`snapshot`] is the durable form of a rendered state at a frontier, so a
 //!   reader can start there and replay only what came after.
+//! - [`fastexport`] parses git's fast-import stream, which is the one interface
+//!   git keeps for foreign consumers of a repository.
+//! - [`gitexport`] emits it, so a history written here becomes a git repository
+//!   without this crate ever learning what a packfile is.
 //! - [`diff`] recovers the edit between two versions of a file's bytes, for the
 //!   author who worked in a filesystem rather than in an editor and so has no
 //!   intent to record.
@@ -47,6 +51,7 @@
 pub mod diff;
 pub mod envelope;
 pub mod fastexport;
+pub mod gitexport;
 pub mod id;
 pub mod log;
 pub mod op;
