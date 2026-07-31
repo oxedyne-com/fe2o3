@@ -113,6 +113,7 @@ use crate::id::{
 use crate::log::Causality;
 use crate::op::{
 	Header,
+	Mode,
 	Op,
 	Record,
 };
@@ -181,6 +182,8 @@ struct Applied {
 struct FileInfo {
 	/// Where the file sits, after every rename the set holds.
 	path:	Vec<u8>,
+	/// What the file is, after every mode assertion the set holds.
+	mode:	Mode,
 	/// Whether it still exists.
 	live:	bool,
 }
@@ -491,7 +494,7 @@ impl Sequence {
 			flags.dedup();
 			let notes = per_file_notes.remove(id).unwrap_or_default();
 			out.push(Rendered::new(
-				*id, info.path.clone(), info.live, bytes, runs, flags, notes));
+				*id, info.path.clone(), info.mode, info.live, bytes, runs, flags, notes));
 		}
 
 		let stats = Stats {
@@ -542,7 +545,11 @@ impl Sequence {
 		for (id, op) in ops {
 			match op {
 				Op::FileCreate { path } => {
-					files.insert(*id, FileInfo { path: path.clone(), live: true });
+					files.insert(*id, FileInfo {
+						path:	path.clone(),
+						mode:	Mode::default(),
+						live:	true,
+					});
 				},
 				Op::FileRename { file, path } => {
 					match files.get_mut(file) {
@@ -551,6 +558,16 @@ impl Sequence {
 							"The operation {} renames the file {}, which no operation \
 							in the set created; the set is not causally complete.",
 							id, file;
+						Invalid, Input, Missing)),
+					}
+				},
+				Op::FileMode { file, mode } => {
+					match files.get_mut(file) {
+						Some(info)	=> info.mode = *mode,
+						None		=> return Err(err!(
+							"The operation {} sets the mode of the file {}, which no \
+							operation in the set created; the set is not causally \
+							complete.", id, file;
 						Invalid, Input, Missing)),
 					}
 				},

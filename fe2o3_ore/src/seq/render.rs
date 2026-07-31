@@ -29,7 +29,10 @@ use crate::id::{
 	ContentRange,
 	OpId,
 };
-use crate::op::Op;
+use crate::op::{
+	Mode,
+	Op,
+};
 use crate::seq::atom::Atoms;
 use crate::seq::claim::{
 	Claims,
@@ -869,9 +872,9 @@ impl RepoNote {
 }
 
 
-/// One file as a render produced it: which file it is, where it sits, whether it
-/// still exists, its bytes, what they are made of, and what the renderer noticed
-/// about it.
+/// One file as a render produced it: which file it is, where it sits, what it
+/// is, whether it still exists, its bytes, what they are made of, and what the
+/// renderer noticed about it.
 ///
 /// A file is named by the identity of the [`Op::FileCreate`] that minted it, and
 /// its path is metadata that a rename may change. Two live files may share a
@@ -883,6 +886,8 @@ pub struct Rendered {
 	file:	OpId,
 	/// Where the file sits, as bytes.
 	path:	Vec<u8>,
+	/// What the file is, after every [`Op::FileMode`] the set holds.
+	mode:	Mode,
 	/// Whether the file still exists.
 	live:	bool,
 	/// The rendered bytes.
@@ -902,6 +907,7 @@ impl Rendered {
 	pub(super) fn new(
 		file:	OpId,
 		path:	Vec<u8>,
+		mode:	Mode,
 		live:	bool,
 		bytes:	Vec<u8>,
 		runs:	Vec<Run>,
@@ -910,7 +916,7 @@ impl Rendered {
 	)
 		-> Self
 	{
-		Self { file, path, live, bytes, runs, flags, notes }
+		Self { file, path, mode, live, bytes, runs, flags, notes }
 	}
 
 	/// Returns the file's identity.
@@ -927,6 +933,12 @@ impl Rendered {
 	/// replaced. For messages and tests; the bytes themselves are the record.
 	pub fn path_lossy(&self) -> String {
 		String::from_utf8_lossy(&self.path).into_owned()
+	}
+
+	/// Returns what the file is, which is [`Mode::Normal`] unless an
+	/// [`Op::FileMode`] said otherwise.
+	pub const fn mode(&self) -> Mode {
+		self.mode
 	}
 
 	/// Reports whether the file still exists.

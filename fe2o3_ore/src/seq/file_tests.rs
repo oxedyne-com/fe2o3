@@ -25,6 +25,7 @@ use crate::id::{
 };
 use crate::op::{
 	Header,
+	Mode,
 	Op,
 };
 use crate::seq::render::{
@@ -128,6 +129,13 @@ impl Replica {
 		self.author(Op::FileDelete { file })
 	}
 
+	/// Says what a file is.
+	fn set_mode(&mut self, file: OpId, mode: Mode)
+		-> Outcome<(Header, Op)>
+	{
+		self.author(Op::FileMode { file, mode })
+	}
+
 	/// Inserts bytes at an index of a file.
 	fn insert(&mut self, file: OpId, at: usize, bytes: &[u8])
 		-> Outcome<(Header, Op)>
@@ -225,7 +233,16 @@ fn listing(repo: &Repo) -> String {
 	files.sort_by_key(|f| (f.path().to_vec(), OpOrder::of(&f.file())));
 	let mut s = String::new();
 	for f in files {
-		s.push_str(&fmt!("{}={:?} ", f.path_lossy(), f.text_lossy()));
+		// A mode is shown only where it is not the one a file has by default, so
+		// that every case written before the vocabulary had modes reads as it did
+		// -- and every one of them now proves, for nothing, that the mode is a
+		// function of the operation set and not of the delivery order.
+		let mode = if f.mode().is_normal() {
+			String::new()
+		} else {
+			fmt!("[{}]", f.mode())
+		};
+		s.push_str(&fmt!("{}{}={:?} ", f.path_lossy(), mode, f.text_lossy()));
 	}
 	s.trim_end().to_string()
 }
@@ -1475,5 +1492,131 @@ fn moved_into_deleted_keeps_its_territory() -> Outcome<()> {
 	assert!(!repo.flags().iter().any(|f| matches!(f,
 		Flag::Stranded { .. } | Flag::SplicedIntoDeleted { .. })),
 		"flags were {:?}", repo.flags());
+	Ok(())
+}
+
+/// A mode is asserted of a file's identity, so it survives everything that
+/// happens to the file's path and to its bytes.
+///
+/// This is the whole argument for [`Op::FileMode`] being shaped like a rename
+/// rather than being a field on one. The script is made executable once; it is
+/// then renamed, edited, and edited again by another replica, and it is still
+/// executable, because none of those operations said anything about what it is.
+#[test]
+fn a_mode_survives_a_rename_and_an_edit() -> Outcome<()> {
+	let (mut reps, mut ops, ids) = res!(stage(&[(b"build.sh", b"#!/bin/sh\n")], 2));
+	let a = ids[0];
+	let (r1, r2) = reps.split_at_mut(1);
+	ops.push(res!(r1[0].set_mode(a, Mode::Executable)));
+	ops.push(res!(r1[0].rename(a, b"tools/build.sh")));
+	ops.push(res!(r2[0].insert(a, 10, b"set -e\n")));
+	let repo = res!(case(
+		"tools/build.sh[executable]=\"#!/bin/sh\\nset -e\\n\"", &ops));
+	let f = match repo.file(a) {
+		Some(f)	=> f,
+		None	=> return Err(err!("The file went missing."; Test, Missing)),
+	};
+	assert_eq!(f.mode(), Mode::Executable);
+	Ok(())
+}
+
+/// A file nothing has spoken about is a normal file, whatever else the history
+/// did to it.
+#[test]
+fn a_file_nobody_named_is_normal() -> Outcome<()> {
+	let (mut reps, mut ops, ids) = res!(stage(&[(b"a.txt", b"hello\n")], 1));
+	let a = ids[0];
+	ops.push(res!(reps[0].insert(a, 5, b" there")));
+	let repo = res!(case("a.txt=\"hello there\\n\"", &ops));
+	match repo.file(a) {
+		Some(f)	=> assert_eq!(f.mode(), Mode::Normal),
+		None	=> return Err(err!("The file went missing."; Test, Missing)),
+	}
+	Ok(())
+}
+
+/// Two replicas saying different things about one file at once settle the way
+/// two concurrent renames settle: by operation order, the same answer whatever
+/// order the operations arrive in.
+#[test]
+fn concurrent_modes_settle_by_op_order() -> Outcome<()> {
+	let (mut reps, mut ops, ids) = res!(stage(&[(b"s.sh", b"x\n")], 2));
+	let a = ids[0];
+	let (r1, r2) = reps.split_at_mut(1);
+	let one = res!(r1[0].set_mode(a, Mode::Executable));
+	let two = res!(r2[0].set_mode(a, Mode::Symlink));
+	// Neither saw the other, and the later in op order is the one that stands.
+	let later = if OpOrder::of(&one.0.id()) > OpOrder::of(&two.0.id()) {
+		Mode::Executable
+	} else {
+		Mode::Symlink
+	};
+	ops.push(one);
+	ops.push(two);
+	let repo = res!(converge(&ops));
+	match repo.file(a) {
+		Some(f)	=> assert_eq!(f.mode(), later, "the later assertion stands"),
+		None	=> return Err(err!("The file went missing."; Test, Missing)),
+	}
+	// Setting a mode back is an ordinary later assertion, not a special case.
+	ops.push(res!(reps[0].set_mode(a, Mode::Normal)));
+	let repo = res!(converge(&ops));
+	match repo.file(a) {
+		Some(f)	=> assert_eq!(f.mode(), Mode::Normal),
+		None	=> return Err(err!("The file went missing."; Test, Missing)),
+	}
+	Ok(())
+}
+
+/// A mode named against a file no operation in the set created is refused, and
+/// the message says the set is not causally complete.
+///
+/// The same refusal a rename and a delete get, for the same reason: the render
+/// cannot say what it does not hold.
+#[test]
+fn a_mode_of_an_absent_file_is_refused() -> Outcome<()> {
+	let mut seq = Sequence::new();
+	let ghost = OpId::new(ReplicaId::new(9), 1);
+	res!(seq.apply(
+		Header::root(OpId::new(ReplicaId::new(1), 1)),
+		Op::FileMode { file: ghost, mode: Mode::Executable },
+	));
+	let e = match seq.render() {
+		Ok(_) => return Err(err!("A mode of an absent file rendered."; Test)),
+		Err(e) => e,
+	};
+	let msg = fmt!("{}", e);
+	assert!(msg.contains("causally complete"), "message was {}", msg);
+	assert!(msg.contains(&fmt!("{}", ghost)), "message was {}", msg);
+	Ok(())
+}
+
+/// A file's mode goes into a snapshot and comes back out of it, which is the
+/// point of carrying it there: a checkout reads a snapshot instead of the log.
+#[test]
+fn a_mode_rides_the_snapshot() -> Outcome<()> {
+	use crate::snapshot::{
+		FileState,
+		Snapshot,
+	};
+	let (mut reps, mut ops, ids) = res!(stage(
+		&[(b"run.sh", b"#!/bin/sh\n"), (b"link", b"run.sh"), (b"plain.txt", b"hi\n")],
+		1,
+	));
+	ops.push(res!(reps[0].set_mode(ids[0], Mode::Executable)));
+	ops.push(res!(reps[0].set_mode(ids[1], Mode::Symlink)));
+	let repo = res!(converge(&ops));
+	let states: Vec<FileState> = repo.live().into_iter().map(FileState::of).collect();
+	let frontier: Vec<OpId> = ops.iter().map(|o| o.0.id()).collect();
+	let snap = res!(Snapshot::new(frontier, states));
+	let back = res!(Snapshot::decode(&res!(snap.encode())));
+	assert_eq!(back, snap);
+	let modes: Vec<(String, Mode)> = back.files()
+		.iter()
+		.map(|f| (f.path_lossy(), f.mode))
+		.collect();
+	assert!(modes.contains(&(fmt!("run.sh"), Mode::Executable)), "modes were {:?}", modes);
+	assert!(modes.contains(&(fmt!("link"), Mode::Symlink)), "modes were {:?}", modes);
+	assert!(modes.contains(&(fmt!("plain.txt"), Mode::Normal)), "modes were {:?}", modes);
 	Ok(())
 }

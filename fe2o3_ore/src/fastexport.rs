@@ -45,6 +45,8 @@
 //! # }
 //! ```
 
+use crate::op::Mode;
+
 use oxedyne_fe2o3_core::prelude::*;
 
 use std::fmt;
@@ -136,6 +138,24 @@ impl FileMode {
 			other => Err(err!(
 				"File mode {:?} is not one of the modes git records.", show(other);
 			Decode, Input, Invalid)),
+		}
+	}
+
+	/// Returns what the vocabulary calls this mode, where the mode names
+	/// something the vocabulary can hold.
+	///
+	/// `None` is a gitlink or a directory entry: both are things a tree can point
+	/// at and neither is a file with bytes, so there is nothing for
+	/// [`crate::op::Op::FileMode`] to say about them. A consumer that meets one
+	/// has a decision to make -- refuse, or leave the entry out -- and it is the
+	/// consumer that knows which path and which commit to name, so it makes that
+	/// decision rather than being handed a guess.
+	pub const fn as_op_mode(&self) -> Option<Mode> {
+		match self {
+			Self::Normal						=> Some(Mode::Normal),
+			Self::Executable					=> Some(Mode::Executable),
+			Self::Symlink						=> Some(Mode::Symlink),
+			Self::Gitlink | Self::Subdirectory	=> None,
 		}
 	}
 
@@ -1884,6 +1904,20 @@ mod test {
 			assert_eq!(res!(FileMode::from_bytes(bytes)), want);
 		}
 		assert!(FileMode::from_bytes(b"100664").is_err());
+		Ok(())
+	}
+
+	/// Three of git's five modes name something the vocabulary can hold, and the
+	/// other two name something that is not a file with bytes in it.
+	#[test]
+	fn modes_that_name_a_file() -> Outcome<()> {
+		assert_eq!(FileMode::Normal.as_op_mode(), Some(Mode::Normal));
+		assert_eq!(FileMode::Executable.as_op_mode(), Some(Mode::Executable));
+		assert_eq!(FileMode::Symlink.as_op_mode(), Some(Mode::Symlink));
+		assert_eq!(FileMode::Gitlink.as_op_mode(), None,
+			"a submodule is another repository, not this one's file");
+		assert_eq!(FileMode::Subdirectory.as_op_mode(), None,
+			"a tree entry is not content");
 		Ok(())
 	}
 

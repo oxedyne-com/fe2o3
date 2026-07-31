@@ -22,6 +22,7 @@ use crate::id::{
 };
 use crate::op::{
 	Header,
+	Mode,
 	Op,
 	Record,
 };
@@ -730,6 +731,7 @@ fn conservation_notices_a_missing_byte() -> Outcome<()> {
 		vec![Rendered::new(
 			st.file,
 			b"f".to_vec(),
+			Mode::Normal,
 			true,
 			file.bytes()[..5].to_vec(),
 			vec![Run {

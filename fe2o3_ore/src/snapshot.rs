@@ -7,11 +7,11 @@
 //! frontier does not already cover.
 //!
 //! What is stored is a render and not a state machine. Per file: its identity,
-//! its path, the bytes, the provenance of those bytes, what the renderer noticed,
-//! and the notes resolved against them. The provenance is there because without
-//! it the bytes are dumb -- a frontend that means to author a content-anchored
-//! splice against what it is showing needs to know what the byte under the cursor
-//! is called, and that is exactly what a run says. The notes are there for the
+//! its path, its mode, the bytes, the provenance of those bytes, what the
+//! renderer noticed, and the notes resolved against them. The provenance is
+//! there because without it the bytes are dumb -- a frontend that means to
+//! author a content-anchored splice against what it is showing needs to know
+//! what the byte under the cursor is called, and that is exactly what a run says. The notes are there for the
 //! same reason a flag is: a reader that can see the state should be able to see
 //! what has been said about it, without going back to the log for either.
 //!
@@ -40,6 +40,7 @@
 //! the caller's business.
 
 use crate::id::OpId;
+use crate::op::Mode;
 use crate::seq::render::{
 	Flag,
 	Note,
@@ -60,9 +61,15 @@ pub const MAGIC: [u8; 6] = *b"ORESNP";
 /// 2 keys by identity and spells the path as bytes. Version 3 carries the notes
 /// resolved against each file, beside the flags and for the same reason: a
 /// frontend reading a snapshot can draw the margins without replaying the log.
+/// Version 4 carries each file's mode, because a snapshot exists precisely so
+/// that a checkout need not replay the log, and a checkout has to know whether
+/// to set the executable bit.
+///
 /// Nothing was ever written in an older version that needs to be read again, so
-/// each old form is gone rather than carried.
-pub const VERSION: u8 = 3;
+/// each old form is gone rather than carried. That is what a snapshot is for:
+/// nothing is lost by discarding one, and a reader that meets an old one throws
+/// it away and renders the log.
+pub const VERSION: u8 = 4;
 
 
 /// One file, as it stood.
@@ -73,6 +80,14 @@ pub struct FileState {
 	pub file:	OpId,
 	/// Where the file sat, as bytes: metadata, and not a name for it.
 	pub path:	Vec<u8>,
+	/// What the file was: an ordinary file unless an [`crate::op::Op::FileMode`]
+	/// said otherwise.
+	///
+	/// Here for the reason the path is here. A checkout reads a snapshot instead
+	/// of replaying the log, and a checkout that could not tell an executable
+	/// script from a normal file would write out a tree the history does not
+	/// describe.
+	pub mode:	Mode,
 	/// The rendered bytes.
 	pub bytes:	Vec<u8>,
 	/// What those bytes are made of, in render order and coalesced.
@@ -95,6 +110,7 @@ impl FileState {
 		Self {
 			file:	rendered.file(),
 			path:	rendered.path().to_vec(),
+			mode:	rendered.mode(),
 			bytes:	rendered.bytes().to_vec(),
 			runs:	rendered.runs().to_vec(),
 			flags:	rendered.flags().to_vec(),
@@ -109,7 +125,10 @@ impl FileState {
 	}
 
 	/// Serialises the state to a [`Dat`]. The shape is
-	/// `[file, path, bytes, [run, ...], [flag, ...], [note, ...]]`.
+	/// `[file, path, mode, bytes, [run, ...], [flag, ...], [note, ...]]`.
+	///
+	/// The mode sits beside the path because the two are the same kind of thing:
+	/// what a working copy has to know about a file over and above its bytes.
 	///
 	/// Both the path and the bytes are a [`Dat::BU64`]: a file is routinely
 	/// longer than the 255 bytes a [`Dat::BU8`] length field can express, and a
@@ -118,6 +137,7 @@ impl FileState {
 		Dat::List(vec![
 			self.file.to_dat(),
 			Dat::BU64(self.path.clone()),
+			self.mode.to_dat(),
 			Dat::BU64(self.bytes.clone()),
 			Dat::List(self.runs.iter().map(|r| r.to_dat()).collect()),
 			Dat::List(self.flags.iter().map(|f| f.to_dat()).collect()),
@@ -130,9 +150,9 @@ impl FileState {
 		-> Outcome<Self>
 	{
 		let v = match dat {
-			Dat::List(v) if v.len() == 6 => v,
+			Dat::List(v) if v.len() == 7 => v,
 			_ => return Err(err!(
-				"A FileState expects a 6-element Dat::List, got {:?}.", dat;
+				"A FileState expects a 7-element Dat::List, got {:?}.", dat;
 			Decode, Input, Mismatch)),
 		};
 		let file = res!(OpId::from_dat(&v[0]));
@@ -142,14 +162,15 @@ impl FileState {
 				"The path of the file {} expects Dat::BU64, got {:?}.", file, other;
 			Decode, Input, Mismatch)),
 		};
-		let bytes = match &v[2] {
+		let mode = res!(Mode::from_dat(&v[2]));
+		let bytes = match &v[3] {
 			Dat::BU64(b) => b.clone(),
 			other => return Err(err!(
 				"The rendered bytes of the file {} expect Dat::BU64, got {:?}.",
 				file, other;
 			Decode, Input, Mismatch)),
 		};
-		let listed = match &v[3] {
+		let listed = match &v[4] {
 			Dat::List(l) => l,
 			other => return Err(err!(
 				"The runs of the file {} expect Dat::List, got {:?}.", file, other;
@@ -159,7 +180,7 @@ impl FileState {
 		for item in listed {
 			runs.push(res!(Run::from_dat(item)));
 		}
-		let listed = match &v[4] {
+		let listed = match &v[5] {
 			Dat::List(l) => l,
 			other => return Err(err!(
 				"The flags of the file {} expect Dat::List, got {:?}.", file, other;
@@ -169,7 +190,7 @@ impl FileState {
 		for item in listed {
 			flags.push(res!(Flag::from_dat(item)));
 		}
-		let listed = match &v[5] {
+		let listed = match &v[6] {
 			Dat::List(l) => l,
 			other => return Err(err!(
 				"The notes of the file {} expect Dat::List, got {:?}.", file, other;
@@ -179,7 +200,7 @@ impl FileState {
 		for item in listed {
 			notes.push(res!(Note::from_dat(item)));
 		}
-		Ok(Self { file, path, bytes, runs, flags, notes })
+		Ok(Self { file, path, mode, bytes, runs, flags, notes })
 	}
 }
 
@@ -395,6 +416,7 @@ mod tests {
 	};
 	use crate::op::{
 		Header,
+		Mode,
 		Op,
 	};
 	use crate::seq::render::{
@@ -416,6 +438,7 @@ mod tests {
 		FileState {
 			file,
 			path:	path.to_vec(),
+			mode:	Mode::Normal,
 			bytes:	Vec::new(),
 			runs:	Vec::new(),
 			flags:	Vec::new(),
@@ -664,6 +687,7 @@ mod tests {
 			let snap = res!(Snapshot::new(Vec::new(), vec![FileState {
 				file:	oid(1, 1),
 				path:	vec![b'p'; len],
+				mode:	Mode::Normal,
 				bytes:	vec![0x5a; len],
 				runs:	vec![Run {
 					at:			0,
@@ -717,9 +741,10 @@ mod tests {
 		};
 		assert!(fmt!("{}", e).contains("version"), "message was {}", e);
 		// The version this reader knows is not one an older form used, so a
-		// snapshot written before file identity, or before resolved notes, is
-		// refused rather than misread.
-		for stale in [1u8, 2] {
+		// snapshot written before file identity, before resolved notes, or before
+		// the file mode is refused rather than misread. Nothing is lost by it: a
+		// snapshot is a view, and a reader that meets an old one renders the log.
+		for stale in [1u8, 2, 3] {
 			let mut old = res!(snap.encode());
 			old[MAGIC.len()] = stale;
 			assert!(Snapshot::decode(&old).is_err(), "version {}", stale);
@@ -760,12 +785,13 @@ mod tests {
 		assert!(Snapshot::from_dat(&Dat::U8(1)).is_err());
 		assert!(Snapshot::from_dat(&Dat::List(vec![Dat::List(vec![])])).is_err());
 		assert!(FileState::from_dat(&Dat::List(vec![Dat::Str(fmt!("f"))])).is_err());
-		// The five-element shape a version 2 snapshot spelled, which is now short
-		// of its notes.
+		// The six-element shape a version 3 snapshot spelled, which is now short
+		// of its mode.
 		assert!(FileState::from_dat(&Dat::List(vec![
 			oid(1, 1).to_dat(),
 			Dat::BU64(Vec::new()),
 			Dat::BU64(Vec::new()),
+			Dat::List(vec![]),
 			Dat::List(vec![]),
 			Dat::List(vec![]),
 		])).is_err());
@@ -773,6 +799,7 @@ mod tests {
 		assert!(FileState::from_dat(&Dat::List(vec![
 			Dat::U64(1),
 			Dat::BU64(Vec::new()),
+			Mode::Normal.to_dat(),
 			Dat::BU64(Vec::new()),
 			Dat::List(vec![]),
 			Dat::List(vec![]),
@@ -783,6 +810,27 @@ mod tests {
 		assert!(FileState::from_dat(&Dat::List(vec![
 			oid(1, 1).to_dat(),
 			Dat::Str(fmt!("f")),
+			Mode::Normal.to_dat(),
+			Dat::BU64(Vec::new()),
+			Dat::List(vec![]),
+			Dat::List(vec![]),
+			Dat::List(vec![]),
+		])).is_err());
+		// A mode outside the three the vocabulary spells, and a mode that is not
+		// even a number.
+		assert!(FileState::from_dat(&Dat::List(vec![
+			oid(1, 1).to_dat(),
+			Dat::BU64(Vec::new()),
+			Dat::U8(9),
+			Dat::BU64(Vec::new()),
+			Dat::List(vec![]),
+			Dat::List(vec![]),
+			Dat::List(vec![]),
+		])).is_err());
+		assert!(FileState::from_dat(&Dat::List(vec![
+			oid(1, 1).to_dat(),
+			Dat::BU64(Vec::new()),
+			Dat::Str(fmt!("executable")),
 			Dat::BU64(Vec::new()),
 			Dat::List(vec![]),
 			Dat::List(vec![]),
@@ -792,6 +840,7 @@ mod tests {
 		assert!(FileState::from_dat(&Dat::List(vec![
 			oid(1, 1).to_dat(),
 			Dat::BU64(Vec::new()),
+			Mode::Normal.to_dat(),
 			Dat::Str(fmt!("not bytes")),
 			Dat::List(vec![]),
 			Dat::List(vec![]),
@@ -801,6 +850,7 @@ mod tests {
 		assert!(FileState::from_dat(&Dat::List(vec![
 			oid(1, 1).to_dat(),
 			Dat::BU64(Vec::new()),
+			Mode::Normal.to_dat(),
 			Dat::BU64(Vec::new()),
 			Dat::List(vec![]),
 			Dat::List(vec![]),
@@ -944,6 +994,11 @@ mod tests {
 				files.push(FileState {
 					file,
 					path,
+					mode: match next() % 3 {
+						0		=> Mode::Normal,
+						1		=> Mode::Executable,
+						_		=> Mode::Symlink,
+					},
 					bytes: (0..at).map(|i| (i % 251) as u8).collect(),
 					runs,
 					flags,
@@ -967,13 +1022,20 @@ mod tests {
 	/// The same discipline as the segment's golden test: a format that changes by
 	/// accident orphans every store already written in it, and every other test
 	/// here would agree with itself while it happened. The values below were
-	/// rewritten by hand when the format changed for file identity and again when
-	/// it changed for resolved notes, each line annotated with the field it spells.
+	/// rewritten by hand when the format changed for file identity, again when it
+	/// changed for resolved notes, and again on 12026-07-30 when it gained the
+	/// file mode, each line annotated with the field it spells.
+	///
+	/// The mode below is deliberately not the default. A fixture pinning
+	/// [`Mode::Normal`] would agree with a decoder that dropped the field on the
+	/// floor, since a dropped mode reads back as normal, so the frozen file is an
+	/// executable one.
 	#[test]
 	fn the_snapshot_bytes_are_frozen() -> Outcome<()> {
 		let snap = res!(Snapshot::new(vec![oid(1, 2)], vec![FileState {
 			file:	oid(1, 2),
 			path:	b"a".to_vec(),
+			mode:	Mode::Executable,
 			bytes:	b"hi".to_vec(),
 			runs:	vec![Run {
 				at:			0,
@@ -983,21 +1045,21 @@ mod tests {
 			notes:	vec![Note::new(oid(2, 1), b"hm".to_vec(), vec![Span::new(0, 2)])],
 		}]));
 		let want: &[u8] = &[
-			// The magic and the version, which is 3 since resolved notes.
+			// The magic and the version, which is 4 since the file mode.
 			0x4f, 0x52, 0x45, 0x53, 0x4e, 0x50,
-			0x03,
-			// A daticle list of 193 bytes: the frontier (24), then the files (169).
-			0x33, 0x21, 0xc1,
+			0x04,
+			// A daticle list of 195 bytes: the frontier (24), then the files (171).
+			0x33, 0x21, 0xc3,
 				// The frontier, 21 bytes: one identifier, r1:2.
 				0x33, 0x21, 0x15,
 					0x33, 0x21, 0x12,
 						0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
 						0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
-				// The files, 166 bytes: one of them.
-				0x33, 0x21, 0xa6,
-					// The file, 163 bytes: 21 of identity, 10 of path, 11 of
-					// bytes, 57 of runs, 2 of flags and 62 of notes.
-					0x33, 0x21, 0xa3,
+				// The files, 168 bytes: one of them.
+				0x33, 0x21, 0xa8,
+					// The file, 165 bytes: 21 of identity, 10 of path, 2 of mode,
+					// 11 of bytes, 57 of runs, 2 of flags and 62 of notes.
+					0x33, 0x21, 0xa5,
 						// Its identity, r1:2, which is what a snapshot keys by.
 						0x33, 0x21, 0x12,
 							0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
@@ -1005,6 +1067,8 @@ mod tests {
 						// The path "a", as bytes under a 64-bit length.
 						0x47, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
 						0x61,
+						// The mode, one byte under its own tag: 1 is executable.
+						0x0a, 0x01,
 						// The bytes "hi", under a 64-bit length.
 						0x47, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
 						0x68, 0x69,
