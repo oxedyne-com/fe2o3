@@ -424,6 +424,7 @@ mod tests {
 		Span,
 		CODE_SPLICED_INTO_DELETED,
 		CODE_STRANDED,
+		CODE_YIELDED,
 	};
 	use crate::seq::slot::Origin;
 	use crate::seq::Sequence;
@@ -608,6 +609,48 @@ mod tests {
 			Dat::U8(CODE_SPLICED_INTO_DELETED),
 			oid(6, 3).to_dat(),
 			oid(1, 1).to_dat(),
+		])).is_err());
+		Ok(())
+	}
+
+	/// The overlap-arbitration flag rides the snapshot the way Confined, Won,
+	/// Stranded and SplicedIntoDeleted did: a new code in the same self-describing
+	/// list, and no change to the format version. Frozen snapshot bytes carry no
+	/// flag of a kind that did not exist when they were written, so nothing already
+	/// on disk decodes differently.
+	#[test]
+	fn the_overlap_arbitration_flag_round_trips() -> Outcome<()> {
+		let flags = vec![
+			Flag::Yielded {
+				op:			oid(6, 5),
+				to:			oid(7, 9),
+				group:		vec![oid(6, 5), oid(7, 6), oid(7, 9)],
+				through:	None,
+			},
+			Flag::Yielded {
+				op:			oid(6, 7),
+				to:			oid(7, 9),
+				group:		vec![oid(6, 5), oid(7, 6), oid(7, 9)],
+				through:	Some(oid(6, 5)),
+			},
+		];
+		for flag in &flags {
+			assert_eq!(*flag, res!(Flag::from_dat(&flag.to_dat())), "flag {}", flag.name());
+		}
+		let snap = res!(Snapshot::new(vec![oid(1, 1)], vec![FileState {
+			flags: flags.clone(),
+			..bare(oid(1, 1), b"f")
+		}]));
+		let bytes = res!(snap.encode());
+		assert_eq!(bytes[MAGIC.len()], VERSION,
+			"an additive flag kind must not bump the format");
+		let back = res!(Snapshot::decode(&bytes));
+		assert_eq!(back.files()[0].flags, flags);
+		// A truncated spelling is refused rather than guessed at.
+		assert!(Flag::from_dat(&Dat::List(vec![
+			Dat::U8(CODE_YIELDED),
+			oid(6, 5).to_dat(),
+			oid(7, 9).to_dat(),
 		])).is_err());
 		Ok(())
 	}
