@@ -25,6 +25,7 @@ use crate::sync::session::{
 	Mode,
 	Session,
 	Step,
+	FANOUT,
 };
 use crate::sync::sketch::Fallback;
 
@@ -648,5 +649,37 @@ fn a_session_counts_what_it_moved() -> Outcome<()> {
 	assert_eq!(sb.ops_sent(), 4);
 	assert_eq!(sb.ops_absorbed(), 9);
 	assert_eq!(sa.mode(), Mode::Walk);
+	Ok(())
+}
+
+/// The mode two peers should open in, judged from nothing but the shapes of the
+/// two logs.
+///
+/// The cases the rule exists for: a clone, where one log is empty and a sketch
+/// would be sized for the whole history; a small divergence over a large shared
+/// history, which is what the sketch is for; and a difference guessed to be as
+/// large as the smaller log, where a sketch costs more than the history it would
+/// save.
+///
+/// The rule is judged on shapes alone and cannot see overlap, so two logs of a
+/// size that in fact share nothing are still offered a sketch. That is exactly
+/// the bad estimate the fallback exists for, and it costs no round trip.
+#[test]
+fn the_mode_is_chosen_from_the_two_shapes() -> Outcome<()> {
+	// A clone: nothing here, a history there.
+	assert_eq!(Mode::between(0, 0, 400, 1), Mode::Walk);
+	// A small divergence over a large shared history.
+	match Mode::between(400, 1, 402, 1) {
+		Mode::Sketch { estimate, .. } => assert_eq!(estimate, 2 + FANOUT * 2),
+		other => return Err(err!("A small divergence chose {:?}.", other; Test, Mismatch)),
+	}
+	// Two logs of a size, both wide open: the guess reaches the smaller log, so
+	// the walk is the cheaper answer.
+	assert_eq!(Mode::between(20, 4, 20, 4), Mode::Walk);
+	// One head each over the same length is a sketch, whatever the two logs turn
+	// out to share.
+	assert!(matches!(Mode::between(30, 1, 30, 1), Mode::Sketch { .. }));
+	// And two empty logs do not divide by nothing.
+	assert_eq!(Mode::between(0, 0, 0, 0), Mode::Walk);
 	Ok(())
 }
