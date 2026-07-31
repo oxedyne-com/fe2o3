@@ -15,18 +15,27 @@
 //! size the HEIF container's `ispe` property declares, and those two numbers are written into the
 //! file by different parts of an encoder.
 //!
-//! Still to come, in the order they are needed: the slice segment header, the CABAC arithmetic
-//! decoder, the coding quadtree, residual coding, the inverse transforms, intra prediction,
-//! deblocking, the sample adaptive offset, and the conversion out of 4:2:0 into RGB.
+//! The slice segment header too, including the entry points that say where each row of the picture
+//! begins. Still to come, in the order they are needed: the CABAC arithmetic decoder, the coding
+//! quadtree, residual coding, the inverse transforms, intra prediction, deblocking, the sample
+//! adaptive offset, and the conversion out of 4:2:0 into RGB.
 //!
 //! # What the pictures in one real library actually are
 //!
 //! Every sequence parameter set in 359 HEIC photographs out of a family library was read, and they
 //! are uniform: **8-bit 4:2:0, coding tree blocks of 32, the sample adaptive offset on, no PCM, no
 //! scaling lists, one tile**. The tiles are 512 by 512 in 350 of them, 1024 by 1024 in eight, and
-//! the one photograph not stored as a grid is 720 by 720. That is what the paths below are written
-//! for first; the others are refused with a message that names what was met, rather than decoded
-//! approximately.
+//! the one photograph not stored as a grid is 720 by 720.
+//!
+//! One of those measurements was a surprise and it changes the shape of the decoder: **every one of
+//! them is coded in wavefronts** (`entropy_coding_sync_enabled_flag`). The arithmetic decoder is
+//! therefore reset at the start of every row of coding tree blocks, from the state saved after the
+//! second block of the row above, and the slice header carries a byte offset for each row. That is
+//! not an exotic case to be refused; it is the case. All 359 slice headers read, and in each the
+//! number of rows the header names agrees with the number the sequence parameter set implies --
+//! sixteen for a 512-pixel tile at 32, twenty-three for the 720-pixel picture -- which is the
+//! check that caught the first reading, where the flag was mistaken for something rare and every
+//! photograph in the corpus was refused.
 //!
 //! # References
 //!
@@ -142,6 +151,18 @@ pub struct Pps {
 	pub deblocking:	bool,
 	/// Whether a slice header may carry a further quantisation offset for chroma.
 	pub slice_chroma_qp:	bool,
+	/// How many reserved flags a slice header carries before anything else.
+	///
+	/// Kept because the slice header cannot be read without it: they are bits to be stepped over,
+	/// and stepping over the wrong number puts every field after them one place out.
+	pub extra_header_bits:	u8,
+	/// Whether a slice header carries a picture output flag.
+	pub output_flag:	bool,
+	/// Whether a slice header may override the deblocking settings.
+	pub deblocking_override:	bool,
+	/// Whether the loop filter runs across slice boundaries, and therefore whether a slice header
+	/// carries a flag of its own about it.
+	pub filter_across_slices:	bool,
 }
 
 /// Splits a byte-stream of length-prefixed NAL units, as `hvcC` and `mdat` carry them.
@@ -360,6 +381,11 @@ impl<'a> Bits<'a> {
 	/// The next bit as a flag.
 	pub fn flag(&mut self) -> Outcome<bool> {
 		Ok(res!(self.u(1)) == 1)
+	}
+
+	/// How many bits have been read.
+	pub fn consumed(&self) -> Outcome<usize> {
+		Ok(self.pos)
 	}
 
 	/// Steps over `n` bits.
@@ -669,8 +695,8 @@ pub fn pps(body: &[u8]) -> Outcome<Pps> {
 		Invalid, Input, Decode));
 	}
 	let _dependent_slice_segments = res!(b.flag());
-	let _output_flag_present = res!(b.flag());
-	let _num_extra_slice_header_bits = res!(b.u(3));
+	let output_flag = res!(b.flag());
+	let extra_header_bits = res!(b.u(3)) as u8;
 	let sign_hiding = res!(b.flag());
 	let _cabac_init_present = res!(b.flag());
 	let _num_ref_idx_l0 = res!(b.ue());
@@ -688,18 +714,34 @@ pub fn pps(body: &[u8]) -> Outcome<Pps> {
 	let transquant_bypass = res!(b.flag());
 	let tiles = res!(b.flag());
 	let wavefront = res!(b.flag());
-	// The tile geometry itself is not read here: a still picture is one tile, and a decoder that
-	// meets tiles has to be told so rather than quietly decode the first of them.
-	let mut deblocking = true;
-	if !tiles {
-		let _loop_filter_across_slices = res!(b.flag());
-		if res!(b.flag()) {
-			let _deblocking_override = res!(b.flag());
-			deblocking = !res!(b.flag());
-			if deblocking {
-				let _beta_offset = res!(b.se());
-				let _tc_offset = res!(b.se());
+	if tiles {
+		// The geometry of the tiles is read past rather than kept: what this decoder needs from a
+		// tiled picture is to know it is one, and to say so.
+		let columns = res!(b.ue()) as usize;
+		let rows = res!(b.ue()) as usize;
+		if columns > 1024 || rows > 1024 {
+			return Err(err!(
+				"A picture in {} by {} tiles.", columns + 1, rows + 1; Invalid, Input, Decode));
+		}
+		if !res!(b.flag()) {
+			for _ in 0..columns {
+				let _width = res!(b.ue());
 			}
+			for _ in 0..rows {
+				let _height = res!(b.ue());
+			}
+		}
+		let _loop_filter_across_tiles = res!(b.flag());
+	}
+	let filter_across_slices = res!(b.flag());
+	let mut deblocking = true;
+	let mut deblocking_override = false;
+	if res!(b.flag()) {
+		deblocking_override = res!(b.flag());
+		deblocking = !res!(b.flag());
+		if deblocking {
+			let _beta_offset = res!(b.se());
+			let _tc_offset = res!(b.se());
 		}
 	}
 	Ok(Pps {
@@ -717,6 +759,169 @@ pub fn pps(body: &[u8]) -> Outcome<Pps> {
 		wavefront,
 		deblocking,
 		slice_chroma_qp,
+		extra_header_bits,
+		output_flag,
+		deblocking_override,
+		filter_across_slices,
+	})
+}
+
+/// What a slice segment header says, for the one kind of slice a still picture has.
+///
+/// A picture is one slice and the slice is intra, so most of the syntax -- reference lists,
+/// weighted prediction, temporal motion vectors -- is not reached at all. What matters here is
+/// where the header **ends**: the arithmetic decoder starts at the next byte boundary after it, and
+/// a header read one bit short starts the whole of the rest of the decode in the wrong place.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Slice {
+	/// Which picture parameter set the slice references.
+	pub pps_id:	u8,
+	/// The slice type: 2 is intra, and this decoder reads no other.
+	pub kind:	u8,
+	/// The quantisation parameter this slice starts at.
+	pub qp:		i32,
+	/// Whether the sample adaptive offset filter runs on luma in this slice.
+	pub sao_luma:	bool,
+	/// Whether it runs on chroma.
+	pub sao_chroma:	bool,
+	/// Where the entropy-coded data begins, as a byte offset into the payload.
+	///
+	/// This is the header's own end rounded up to a byte, which is where §9.3.1 says the
+	/// arithmetic decoder is initialised from.
+	pub data_at:	usize,
+	/// Whether the deblocking filter runs on this slice.
+	pub deblocking:	bool,
+	/// Where each piece after the first begins, as the length in bytes of the piece before it.
+	///
+	/// One a row of coding tree blocks, under wavefront coding, which is what every photograph
+	/// measured uses.
+	pub entries:	Vec<u64>,
+}
+
+/// Reads a slice segment header (§7.3.6.1).
+///
+/// Only the independent, intra case: a dependent slice segment continues another one's context and
+/// a still picture has no reason to carry one, so it is refused by name.
+pub fn slice(body: &[u8], sps: &Sps, pps: &Pps) -> Outcome<Slice> {
+	let mut b = Bits::new(body);
+	let first = res!(b.flag());
+	if !first {
+		return Err(err!(
+			"A slice segment that is not the first of its picture. A still picture is one slice.";
+		Invalid, Input, Unknown));
+	}
+	// Only an IRAP picture carries this flag, and every still is one.
+	let _no_output_of_prior_pics = res!(b.flag());
+	let pps_id = res!(b.ue());
+	if pps_id as u8 != pps.id {
+		return Err(err!(
+			"A slice references picture parameter set {} and the one in hand is {}.",
+			pps_id, pps.id;
+		Invalid, Input, Missing));
+	}
+	let kind = res!(b.ue());
+	if kind != 2 {
+		return Err(err!(
+			"A slice of type {}, and a still picture's slices are all intra (type 2).", kind;
+		Invalid, Input, Unknown));
+	}
+	if pps.output_flag {
+		let _pic_output_flag = res!(b.flag());
+	}
+	// Reserved, and to be stepped over rather than understood. Stepping over the wrong number of
+	// them puts every field after them one place out, which is why the count is carried here from
+	// the picture parameter set rather than assumed to be zero.
+	res!(b.skip(pps.extra_header_bits as usize));
+	let mut sao_luma = false;
+	let mut sao_chroma = false;
+	if sps.sao {
+		sao_luma = res!(b.flag());
+		if sps.chroma != 0 {
+			sao_chroma = res!(b.flag());
+		}
+	}
+	let qp = pps.init_qp + res!(b.se());
+	if qp < -(6 * (sps.luma_bits as i32 - 8)) || qp > 51 {
+		return Err(err!(
+			"A slice starts at a quantisation parameter of {}, outside the legal range.", qp;
+		Invalid, Input, Decode));
+	}
+	if pps.slice_chroma_qp {
+		let _cb = res!(b.se());
+		let _cr = res!(b.se());
+	}
+	let mut deblocking = pps.deblocking;
+	if pps.deblocking_override && res!(b.flag()) {
+		deblocking = !res!(b.flag());
+		if deblocking {
+			let _beta = res!(b.se());
+			let _tc = res!(b.se());
+		}
+	}
+	if pps.filter_across_slices && (sao_luma || sao_chroma || deblocking) {
+		let _across = res!(b.flag());
+	}
+	// Where the picture is cut up for parallel decoding, the header says where each piece begins.
+	//
+	// **A still photograph out of a phone is coded this way.** Every one of the 359 HEIC files
+	// measured sets `entropy_coding_sync_enabled_flag`, which is wavefront coding: the arithmetic
+	// decoder is reset at the start of every row of coding tree blocks, from the state saved after
+	// the second block of the row above. So this is not an exotic case to be refused -- it is the
+	// case, and the offsets below are how the rows are found.
+	let mut entries: Vec<u64> = Vec::new();
+	if pps.tiles || pps.wavefront {
+		let count = res!(b.ue()) as usize;
+		if count > 4096 {
+			return Err(err!(
+				"A slice names {} entry points, and no picture this decoder reads has so many.",
+				count;
+			Invalid, Input, Decode));
+		}
+		if count > 0 {
+			let width = res!(b.ue()) as usize + 1;
+			if width > 32 {
+				return Err(err!(
+					"An entry point offset of {} bits, and 32 is the widest.", width;
+				Invalid, Input, Decode));
+			}
+			for _ in 0..count {
+				entries.push(res!(b.u(width)) as u64 + 1);
+			}
+		}
+		// Under wavefront coding there is one piece per row of coding tree blocks, so the count
+		// has to agree with the picture's own geometry -- and the geometry came out of the
+		// sequence parameter set, a different NAL unit written at a different time. A slice header
+		// read one bit out of step produces a count that is nonsense against it, which makes this
+		// the cheapest check there is on the whole header: it is what caught the reading that
+		// refused every photograph in the corpus rather than reading its entry points.
+		if pps.wavefront && !pps.tiles {
+			let rows = ((sps.coded_h + sps.ctb_size - 1) / sps.ctb_size) as usize;
+			if entries.len() + 1 != rows {
+				return Err(err!(
+					"A slice names {} pieces and the picture is {} rows of coding tree blocks \
+					deep. The header has been read out of step.", entries.len() + 1, rows;
+				Invalid, Input, Decode));
+			}
+		}
+	}
+	// The header ends with a stop bit and however many zeroes reach the byte boundary, and the
+	// arithmetic decoder starts at that boundary (§9.3.1).
+	let bits = res!(b.consumed());
+	let data_at = (bits + 1 + 7) / 8;
+	if data_at >= body.len() {
+		return Err(err!(
+			"A slice header of {} bits leaves no data in a payload of {} bytes.", bits, body.len();
+		Invalid, Input, Decode));
+	}
+	Ok(Slice {
+		pps_id: pps_id as u8,
+		kind: kind as u8,
+		qp,
+		sao_luma,
+		sao_chroma,
+		data_at,
+		deblocking,
+		entries,
 	})
 }
 
