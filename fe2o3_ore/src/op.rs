@@ -32,9 +32,12 @@
 //! [`Op::check_placement`]: an operation that places anything must carry at least
 //! one origin, since that origin is what says where it lands.
 //!
-//! [`Op::FileRename`] and [`Op::FileDelete`] name a file by that identity. A path
-//! is metadata carried by the lifecycle operations and nothing else, and it is
-//! bytes rather than a string, because a path is not required to be UTF-8.
+//! [`Op::FileRename`], [`Op::FileMode`] and [`Op::FileDelete`] name a file by
+//! that identity. A path is metadata carried by the lifecycle operations and
+//! nothing else, and it is bytes rather than a string, because a path is not
+//! required to be UTF-8. A file's mode is metadata of the same kind, asserted by
+//! naming the file rather than by naming its bytes, so it survives every edit
+//! those bytes go on to have.
 //!
 //! # Naming content is not only for editing it
 //!
@@ -54,7 +57,7 @@
 //! complete, and [`crate::seq`] can say whether two operations that touched the
 //! same bytes were concurrent or merely consecutive. Parents live on the header
 //! and not on the variants, because causality is a property of every operation
-//! alike and duplicating it seven times would let the seven drift.
+//! alike and duplicating it eight times would let the eight drift.
 
 use crate::id::{
 	varint_decode,
@@ -87,6 +90,98 @@ pub const CODE_SPLICE:		u8 = 5;
 pub const CODE_MOVE:		u8 = 6;
 /// Wire code for [`Op::Note`].
 pub const CODE_NOTE:		u8 = 7;
+/// Wire code for [`Op::FileMode`].
+pub const CODE_FILE_MODE:	u8 = 8;
+
+
+/// Wire code for [`Mode::Normal`].
+pub const MODE_NORMAL:		u8 = 0;
+/// Wire code for [`Mode::Executable`].
+pub const MODE_EXECUTABLE:	u8 = 1;
+/// Wire code for [`Mode::Symlink`].
+pub const MODE_SYMLINK:		u8 = 2;
+
+
+/// What a file is, over and above the bytes in it.
+///
+/// A working copy records exactly one bit of metadata about an ordinary file --
+/// whether it may be run -- and one further kind of thing that lives at a path
+/// and holds bytes, which is a symbolic link. So this is a three-value enum and
+/// not a number: a mode outside the set is not a state a working copy can be
+/// in, and a reader should not have to guess what one would mean.
+///
+/// [`Mode::Normal`] is the default, and that is what makes the operation
+/// additive: a file no [`Op::FileMode`] ever named is a normal file, so every
+/// history written before the operation existed means today what it meant
+/// yesterday.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum Mode {
+	/// An ordinary file, which is what a file is until something says otherwise.
+	#[default]
+	Normal,
+	/// A file a working copy marks executable.
+	Executable,
+	/// A symbolic link, whose bytes are the path it points at.
+	Symlink,
+}
+
+impl Mode {
+	/// Returns the wire code identifying the mode.
+	pub const fn code(&self) -> u8 {
+		match self {
+			Self::Normal		=> MODE_NORMAL,
+			Self::Executable	=> MODE_EXECUTABLE,
+			Self::Symlink		=> MODE_SYMLINK,
+		}
+	}
+
+	/// Returns the mode's name, for messages and logs.
+	pub const fn name(&self) -> &'static str {
+		match self {
+			Self::Normal		=> "normal",
+			Self::Executable	=> "executable",
+			Self::Symlink		=> "symlink",
+		}
+	}
+
+	/// Reports whether the mode is the one a file has said nothing about.
+	pub const fn is_normal(&self) -> bool {
+		matches!(self, Self::Normal)
+	}
+
+	/// Serialises the mode as the single [`Dat::U8`] it is spelled as.
+	pub const fn to_dat(&self) -> Dat {
+		Dat::U8(self.code())
+	}
+
+	/// Reconstructs a mode from a [`Dat`] produced by [`Mode::to_dat`].
+	pub fn from_dat(dat: &Dat)
+		-> Outcome<Self>
+	{
+		let code = match dat {
+			Dat::U8(c) => *c,
+			other => return Err(err!(
+				"A file mode expects Dat::U8, got {:?}.", other;
+			Decode, Input, Mismatch)),
+		};
+		match code {
+			MODE_NORMAL		=> Ok(Self::Normal),
+			MODE_EXECUTABLE	=> Ok(Self::Executable),
+			MODE_SYMLINK	=> Ok(Self::Symlink),
+			other => Err(err!(
+				"File mode {} is not one of {} for normal, {} for executable and {} \
+				for a symbolic link.",
+				other, MODE_NORMAL, MODE_EXECUTABLE, MODE_SYMLINK;
+			Decode, Input, Invalid)),
+		}
+	}
+}
+
+impl std::fmt::Display for Mode {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "{}", self.name())
+	}
+}
 
 
 /// A single unit of history: one whole edit.
@@ -128,6 +223,24 @@ pub enum Op {
 		file: OpId,
 		/// Where it moves to.
 		path: Vec<u8>,
+	},
+	/// Asserts what a file is, from this point on, leaving its contents
+	/// untouched.
+	///
+	/// Shaped like [`Op::FileRename`], and for the same reason: it names a file
+	/// by identity and states a piece of that file's metadata, so the assertion
+	/// survives every rename and every edit the file goes on to have. A file no
+	/// such operation names is [`Mode::Normal`], which is why the operation could
+	/// join the vocabulary without disturbing a byte of what was written before
+	/// it.
+	///
+	/// Two of these written concurrently settle the way two concurrent renames
+	/// settle: the later in operation order is the one the render reports.
+	FileMode {
+		/// The file, named by the operation that created it.
+		file: OpId,
+		/// What the file is from here on.
+		mode: Mode,
 	},
 	/// Names a point in history, so that it can be referred to later.
 	Mark {
@@ -197,6 +310,7 @@ impl Op {
 			Self::FileCreate { .. }	=> CODE_FILE_CREATE,
 			Self::FileDelete { .. }	=> CODE_FILE_DELETE,
 			Self::FileRename { .. }	=> CODE_FILE_RENAME,
+			Self::FileMode { .. }	=> CODE_FILE_MODE,
 			Self::Mark { .. }		=> CODE_MARK,
 			Self::Splice { .. }		=> CODE_SPLICE,
 			Self::Move { .. }		=> CODE_MOVE,
@@ -210,6 +324,7 @@ impl Op {
 			Self::FileCreate { .. }	=> "FileCreate",
 			Self::FileDelete { .. }	=> "FileDelete",
 			Self::FileRename { .. }	=> "FileRename",
+			Self::FileMode { .. }	=> "FileMode",
 			Self::Mark { .. }		=> "Mark",
 			Self::Splice { .. }		=> "Splice",
 			Self::Move { .. }		=> "Move",
@@ -228,6 +343,7 @@ impl Op {
 		match self {
 			Self::FileDelete { file }		=> Some(*file),
 			Self::FileRename { file, .. }	=> Some(*file),
+			Self::FileMode { file, .. }		=> Some(*file),
 			_								=> None,
 		}
 	}
@@ -414,6 +530,11 @@ impl Op {
 				file.to_dat(),
 				Dat::BU64(path.clone()),
 			]),
+			Self::FileMode { file, mode } => Dat::List(vec![
+				Dat::U8(CODE_FILE_MODE),
+				file.to_dat(),
+				mode.to_dat(),
+			]),
 			Self::Mark { name } => Dat::List(vec![
 				Dat::U8(CODE_MARK),
 				Dat::Str(name.clone()),
@@ -479,6 +600,13 @@ impl Op {
 				Self::FileRename {
 					file:	res!(OpId::from_dat(&v[1])),
 					path:	res!(as_bytes(&v[2], "FileRename path")),
+				}
+			},
+			CODE_FILE_MODE => {
+				res!(expect_len(v, 3, "FileMode"));
+				Self::FileMode {
+					file:	res!(OpId::from_dat(&v[1])),
+					mode:	res!(Mode::from_dat(&v[2])),
 				}
 			},
 			CODE_MARK => {
@@ -940,6 +1068,11 @@ mod tests {
 				file:	oid(2, 5),
 				path:	b"c/d.txt".to_vec(),
 			},
+			// Every mode the vocabulary spells, including the one a file has
+			// anyway, which an author may still want said out loud.
+			Op::FileMode { file: oid(2, 5), mode: Mode::Normal },
+			Op::FileMode { file: oid(2, 5), mode: Mode::Executable },
+			Op::FileMode { file: oid(7, 1), mode: Mode::Symlink },
 			// An insertion into an empty file, anchored after its origin anchor,
 			// which is what an empty file has instead of nothing.
 			Op::Splice {
@@ -1317,6 +1450,81 @@ mod tests {
 			left:	Some(Anchor::origin(oid(9, 1))),
 			right:	None,
 		}.validate().is_err());
+		Ok(())
+	}
+
+	/// A mode is one of three things and says which, on the wire and in a
+	/// message, and a file that has said nothing about its mode is normal.
+	#[test]
+	fn a_mode_is_one_of_three_things() -> Outcome<()> {
+		assert_eq!(Mode::default(), Mode::Normal, "silence means an ordinary file");
+		assert!(Mode::Normal.is_normal());
+		assert!(!Mode::Executable.is_normal());
+		assert!(!Mode::Symlink.is_normal());
+		let all = [Mode::Normal, Mode::Executable, Mode::Symlink];
+		for mode in all {
+			assert_eq!(mode, res!(Mode::from_dat(&mode.to_dat())), "mode {}", mode);
+			assert_eq!(fmt!("{}", mode), mode.name());
+		}
+		// The codes are distinct, and pinned: they are on the wire.
+		assert_eq!(Mode::Normal.code(), 0);
+		assert_eq!(Mode::Executable.code(), 1);
+		assert_eq!(Mode::Symlink.code(), 2);
+		// A fourth mode is refused rather than guessed at, and so is a spelling
+		// that is not a number at all.
+		assert!(Mode::from_dat(&Dat::U8(3)).is_err());
+		assert!(Mode::from_dat(&Dat::U8(255)).is_err());
+		assert!(Mode::from_dat(&Dat::Str(fmt!("executable"))).is_err());
+		assert!(Mode::from_dat(&Dat::U64(1)).is_err());
+		Ok(())
+	}
+
+	/// The mode operation names a file by identity, carries the code the
+	/// vocabulary event gave it, and survives both round trips at every mode.
+	#[test]
+	fn a_mode_operation_names_a_file() -> Outcome<()> {
+		for mode in [Mode::Normal, Mode::Executable, Mode::Symlink] {
+			let op = Op::FileMode { file: oid(3, 1), mode };
+			assert_eq!(op.code(), CODE_FILE_MODE);
+			assert_eq!(op.code(), 8, "the wire code is what the event fixed");
+			assert_eq!(op.name(), "FileMode");
+			// It is a lifecycle change, so it names its file the way a rename and
+			// a delete do.
+			assert_eq!(op.names_file(), Some(oid(3, 1)));
+			// And it says nothing about content: it places nothing, claims
+			// nothing and refers to nothing.
+			assert_eq!(op.origins(), (None, None));
+			assert!(op.regions().is_empty());
+			assert!(op.note_on().is_empty());
+			assert_eq!(op.placed_len(), 0);
+			assert!(!op.is_move());
+			res!(op.validate());
+			assert_eq!(op, res!(Op::from_dat(&op.to_dat())));
+			assert_eq!(op, res!(Op::decode_all(&res!(op.encode()))));
+		}
+		// The arity is exact, as it is everywhere else, and the mode is checked
+		// on the way off the wire rather than left to a later stage.
+		assert!(Op::from_dat(&Dat::List(vec![
+			Dat::U8(CODE_FILE_MODE),
+			oid(3, 1).to_dat(),
+		])).is_err());
+		assert!(Op::from_dat(&Dat::List(vec![
+			Dat::U8(CODE_FILE_MODE),
+			oid(3, 1).to_dat(),
+			Dat::U8(MODE_SYMLINK),
+			Dat::U8(0),
+		])).is_err());
+		assert!(Op::from_dat(&Dat::List(vec![
+			Dat::U8(CODE_FILE_MODE),
+			oid(3, 1).to_dat(),
+			Dat::U8(200),
+		])).is_err());
+		// A file named by something that is not an identifier.
+		assert!(Op::from_dat(&Dat::List(vec![
+			Dat::U8(CODE_FILE_MODE),
+			Dat::Str(fmt!("src/lib.rs")),
+			Dat::U8(MODE_EXECUTABLE),
+		])).is_err());
 		Ok(())
 	}
 
