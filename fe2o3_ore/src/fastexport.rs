@@ -599,7 +599,7 @@ fn first_line(src: &[u8]) -> &[u8] {
 }
 
 /// Renders stream bytes for an error message, lossily and shortened.
-fn show(bytes: &[u8]) -> String {
+pub(crate) fn show(bytes: &[u8]) -> String {
 	let cut = bytes.len().min(SHOW_LIMIT);
 	let mut out = String::new();
 	for b in &bytes[..cut] {
