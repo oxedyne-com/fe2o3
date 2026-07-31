@@ -1356,7 +1356,10 @@ pub(super) struct Traversal {
 /// with "the next element" read at render time rather than taken from the
 /// recorded anchor. Without that, an insertion abutting a moved range lands at
 /// the far end of its left origin's subtree, which for a document of any size is
-/// the end of the file.
+/// the end of the file. One recorded sense of the re-run: where the anchor pair
+/// is not adjacent, concurrent authors' blocks order by descending op order
+/// rather than Algorithm 1's ascending, each block whole either way -- a
+/// departure only from an ordering the paper calls arbitrary.
 pub(super) fn traverse(
 	slots:	&Slots,
 	ord:	&Order,
