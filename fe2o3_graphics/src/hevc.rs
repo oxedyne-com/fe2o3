@@ -16,9 +16,18 @@
 //! file by different parts of an encoder.
 //!
 //! The slice segment header too, including the entry points that say where each row of the picture
-//! begins. Still to come, in the order they are needed: the CABAC arithmetic decoder, the coding
+//! begins, and the CABAC arithmetic decoder that reads the entropy-coded data after it. Still to
+//! come, in the order they are needed: the context variables each syntax element uses, the coding
 //! quadtree, residual coding, the inverse transforms, intra prediction, deblocking, the sample
 //! adaptive offset, and the conversion out of 4:2:0 into RGB.
+//!
+//! The arithmetic decoder is the last piece that can be held to a standard before a picture comes
+//! out, and it is held to two: every context starts in a state the probability tables actually
+//! have -- all 256 initialisation values against every quantisation parameter a slice may carry --
+//! and the coding interval is between 256 and 510 after every bin, whatever is fed in. A
+//! renormalisation one shift short satisfies neither and decodes plausible rubbish rather than
+//! failing, which is the kind of fault that otherwise survives until a photograph comes out
+//! wrong.
 //!
 //! # What the pictures in one real library actually are
 //!
@@ -925,6 +934,220 @@ pub fn slice(body: &[u8], sps: &Sps, pps: &Pps) -> Outcome<Slice> {
 	})
 }
 
+/// The probability state a context variable is in: an index 0 to 62, and the more probable symbol.
+///
+/// One byte rather than two fields, because there are hundreds of these and they are copied whole
+/// at the start of every row of blocks under wavefront coding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ctx(u8);
+
+impl Ctx {
+
+	/// The state a context starts in, from its initialisation value and the slice's quantisation
+	/// parameter (§9.3.2.2).
+	///
+	/// The arithmetic is the specification's, and the clamp on the quantisation parameter is
+	/// load-bearing rather than defensive: a slice may legally start at a negative one on a
+	/// high-bit-depth picture, and the table this indexes has no entries there.
+	pub fn start(init: u8, qp: i32) -> Self {
+		let q = qp.clamp(0, 51);
+		let slope = ((init >> 4) as i32) * 5 - 45;
+		let offset = (((init & 15) as i32) << 3) - 16;
+		let pre = ((slope * q) >> 4) + offset;
+		let pre = pre.clamp(1, 126);
+		if pre <= 63 {
+			Self((((63 - pre) as u8) << 1) & 0x7e)
+		} else {
+			Self(((((pre - 64) as u8) << 1) | 1) & 0x7f)
+		}
+	}
+
+	/// The probability state index, 0 to 62.
+	fn state(self) -> usize {
+		(self.0 >> 1) as usize
+	}
+
+	/// The more probable symbol, 0 or 1.
+	fn mps(self) -> u32 {
+		(self.0 & 1) as u32
+	}
+}
+
+/// How the range is narrowed for the less probable symbol, indexed by state and by the two bits
+/// the current range contributes (§9.3.4.3.2.1, Table 9-46).
+const LPS: [[u8; 4]; 64] = [
+	[128, 176, 208, 240], [128, 167, 197, 227], [128, 158, 187, 216], [123, 150, 178, 205],
+	[116, 142, 169, 195], [111, 135, 160, 185], [105, 128, 152, 175], [100, 122, 144, 166],
+	[95, 116, 137, 158],  [90, 110, 130, 150],  [85, 104, 123, 142],  [81, 99, 117, 135],
+	[77, 94, 111, 128],   [73, 89, 105, 122],   [69, 85, 100, 116],   [66, 80, 95, 110],
+	[62, 76, 90, 104],    [59, 72, 86, 99],     [56, 69, 81, 94],     [53, 65, 77, 89],
+	[51, 62, 73, 85],     [48, 59, 69, 80],     [46, 56, 66, 76],     [43, 53, 63, 72],
+	[41, 50, 59, 69],     [39, 48, 56, 65],     [37, 45, 54, 62],     [35, 43, 51, 59],
+	[33, 41, 48, 56],     [32, 39, 46, 53],     [30, 37, 43, 50],     [29, 35, 41, 48],
+	[27, 33, 39, 45],     [26, 31, 37, 43],     [24, 30, 35, 41],     [23, 28, 33, 39],
+	[22, 27, 32, 37],     [21, 26, 30, 35],     [20, 24, 29, 33],     [19, 23, 27, 31],
+	[18, 22, 26, 30],     [17, 21, 25, 28],     [16, 20, 23, 27],     [15, 19, 22, 25],
+	[14, 18, 21, 24],     [14, 17, 20, 23],     [13, 16, 19, 22],     [12, 15, 18, 21],
+	[12, 14, 17, 20],     [11, 14, 16, 19],     [11, 13, 15, 18],     [10, 12, 15, 17],
+	[10, 12, 14, 16],     [9, 11, 13, 15],      [9, 11, 12, 14],      [8, 10, 12, 14],
+	[8, 9, 11, 13],       [7, 9, 11, 12],       [7, 9, 10, 12],       [7, 8, 10, 11],
+	[6, 8, 9, 11],        [6, 7, 9, 10],        [6, 7, 8, 9],         [2, 2, 2, 2],
+];
+
+/// The state to move to after coding the more probable symbol (Table 9-47).
+const NEXT_MPS: [u8; 64] = [
+	1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+	17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32,
+	33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48,
+	49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 62, 63,
+];
+
+/// The state to move to after coding the less probable symbol (Table 9-47).
+const NEXT_LPS: [u8; 64] = [
+	0, 0, 1, 2, 2, 4, 4, 5, 6, 7, 8, 9, 9, 11, 11, 12,
+	13, 13, 15, 15, 16, 16, 18, 18, 19, 19, 21, 21, 22, 22, 23, 24,
+	24, 25, 26, 26, 27, 27, 28, 29, 29, 30, 30, 30, 31, 32, 32, 33,
+	33, 33, 34, 34, 35, 35, 35, 36, 36, 36, 37, 37, 37, 38, 38, 63,
+];
+
+/// The arithmetic decoder itself (§9.3.4.3).
+///
+/// It reads bits and answers questions of the form "was the next symbol a one?", where the odds are
+/// carried by whichever context variable the syntax says applies. There are three ways to ask: with
+/// a context, which is the usual one and adapts as it goes; **bypassed**, at even odds, for the
+/// parts of a value that carry no useful correlation; and **terminating**, which is how the end of
+/// a slice or a piece of one is found.
+pub struct Cabac<'a> {
+	/// The bytes being read.
+	buf:	&'a [u8],
+	/// The next byte to be taken into the window.
+	at:	usize,
+	/// The current interval's width.
+	range:	u32,
+	/// Where in the interval the coded value sits.
+	offset:	u32,
+	/// How many bits of the window have been used.
+	bits:	i32,
+}
+
+impl<'a> Cabac<'a> {
+
+	/// Starts the decoder at the beginning of a piece of entropy-coded data (§9.3.2.5).
+	pub fn new(buf: &'a [u8]) -> Outcome<Self> {
+		if buf.len() < 2 {
+			return Err(err!(
+				"An arithmetic decoder was started on {} bytes, and it reads two before it \
+				answers anything.", buf.len();
+			Invalid, Input, Decode));
+		}
+		Ok(Self {
+			buf,
+			at:	2,
+			range:	510,
+			offset:	((buf[0] as u32) << 1) | ((buf[1] as u32) >> 7),
+			bits:	7,
+		})
+	}
+
+	/// The next byte, or zeroes past the end.
+	///
+	/// A decoder is allowed to read a little past the last byte of a slice -- the final bins are
+	/// coded against bits the encoder never had to write -- so running out is not a fault. What
+	/// would be a fault is reading far past it, and that is caught by the terminating bin, which
+	/// says where the data ends.
+	fn byte(&mut self) -> u32 {
+		let b = self.buf.get(self.at).copied().unwrap_or(0) as u32;
+		self.at += 1;
+		b
+	}
+
+	/// One bin against a context, which is then moved on (§9.3.4.3.2).
+	pub fn bin(&mut self, ctx: &mut Ctx) -> u32 {
+		let state = ctx.state();
+		let lps = LPS[state][((self.range >> 6) & 3) as usize] as u32;
+		self.range -= lps;
+		let value;
+		if self.offset >= (self.range << self.bits) {
+			// The less probable symbol.
+			self.offset -= self.range << self.bits;
+			value = 1 - ctx.mps();
+			self.range = lps;
+			if state == 0 {
+				// State zero is where the two symbols are equally likely, so being wrong there
+				// exchanges which one is called the more probable.
+				ctx.0 ^= 1;
+			}
+			ctx.0 = (NEXT_LPS[state] << 1) | (ctx.0 & 1);
+		} else {
+			value = ctx.mps();
+			ctx.0 = (NEXT_MPS[state] << 1) | (ctx.0 & 1);
+		}
+		// Renormalise: the interval is kept at nine bits or more.
+		while self.range < 256 {
+			self.range <<= 1;
+			self.bits -= 1;
+			if self.bits < 0 {
+				self.offset = (self.offset << 8) | self.byte();
+				self.bits += 8;
+			}
+		}
+		value
+	}
+
+	/// One bin at even odds, with no context to move on (§9.3.4.3.4).
+	pub fn bypass(&mut self) -> u32 {
+		self.bits -= 1;
+		if self.bits < 0 {
+			self.offset = (self.offset << 8) | self.byte();
+			self.bits += 8;
+		}
+		let scaled = self.range << self.bits;
+		if self.offset >= scaled {
+			self.offset -= scaled;
+			1
+		} else {
+			0
+		}
+	}
+
+	/// `n` bins at even odds, most significant first.
+	pub fn bypass_bits(&mut self, n: usize) -> u32 {
+		let mut v = 0u32;
+		for _ in 0..n.min(32) {
+			v = (v << 1) | self.bypass();
+		}
+		v
+	}
+
+	/// The bin that says whether this is the end (§9.3.4.3.5).
+	///
+	/// One at the end of a slice, and at the end of each piece of one under wavefront coding.
+	pub fn terminate(&mut self) -> u32 {
+		self.range -= 2;
+		if self.offset >= (self.range << self.bits) {
+			1
+		} else {
+			while self.range < 256 {
+				self.range <<= 1;
+				self.bits -= 1;
+				if self.bits < 0 {
+					self.offset = (self.offset << 8) | self.byte();
+					self.bits += 8;
+				}
+			}
+			0
+		}
+	}
+
+	/// How many bytes have been taken out of the buffer.
+	///
+	/// After a terminating bin says the piece has ended, this is where the next piece begins --
+	/// which is how the entry point offsets in the slice header are checked against the data.
+	pub fn consumed(&self) -> usize {
+		self.at
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -942,6 +1165,84 @@ mod tests {
 		let stream = [0u8, 0, 0, 8, 0x26, 1, 9];
 		req!(split_lengthed(&stream, 4).is_err(), true,
 			"A unit running past the end of the buffer was read as if it fitted.");
+		Ok(())
+	}
+
+	#[test]
+	fn test_every_context_starts_in_a_state_that_exists_03() -> Outcome<()> {
+		// Two hundred and fifty-six initialisation values against every quantisation parameter a
+		// slice may carry, including the negative ones a high-bit-depth picture allows. The state
+		// this yields indexes a table of sixty-four rows, and the arithmetic that produces it is
+		// the specification's own -- so an index outside it is a transcription error, and the only
+		// way to find one before the whole decoder exists is to try them all.
+		for init in 0..=255u8 {
+			for qp in -12..=51i32 {
+				let ctx = Ctx::start(init, qp);
+				let state = ctx.state();
+				if state > 62 {
+					return Err(err!(
+						"An initialisation value of {} at a quantisation parameter of {} starts in \
+						state {}, and 62 is the highest.", init, qp, state;
+					Test, Invalid));
+				}
+			}
+		}
+		Ok(())
+	}
+
+	#[test]
+	fn test_the_interval_is_renormalised_after_every_bin_04() -> Outcome<()> {
+		// The invariant the whole arithmetic decoder rests on: the interval is at least 256 and at
+		// most 510 whenever a bin has been answered. A renormalisation that stops one shift short
+		// decodes plausible rubbish rather than failing, which is exactly the sort of fault that
+		// survives until a picture comes out wrong, so it is asserted directly.
+		//
+		// The data is a run of bytes from a small linear congruential sequence: it is not a coded
+		// picture and does not have to be, since the invariant holds over any input at all.
+		let mut seed = 0x2545_f491_4f6c_dd1du64;
+		let mut data = Vec::with_capacity(4096);
+		for _ in 0..4096 {
+			seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+			data.push((seed >> 33) as u8);
+		}
+		let mut cabac = res!(Cabac::new(&data));
+		let mut ctxs: Vec<Ctx> = (0..16).map(|i| Ctx::start(i * 17, 26)).collect();
+		let mut ones = 0usize;
+		let total = 20_000usize;
+		for i in 0..total {
+			match i % 8 {
+				7 => {
+					// A terminating bin, which is asked once a block. Where it says the data has
+					// ended, the decoder stops -- and on random bytes it will, eventually.
+					if cabac.terminate() == 1 {
+						break;
+					}
+				},
+				6 => {
+					ones += cabac.bypass() as usize;
+				},
+				k => {
+					ones += cabac.bin(&mut ctxs[k * 2]) as usize;
+				},
+			}
+			if cabac.range < 256 || cabac.range > 510 {
+				return Err(err!(
+					"After {} bins the interval is {}, outside 256 to 510.", i + 1, cabac.range;
+				Test, Invalid));
+			}
+		}
+		// A decoder that answered every bin the same way would satisfy the invariant above and be
+		// useless, so the answers are required to be mixed.
+		if ones == 0 {
+			return Err(err!("Not one bin came back as a one."; Test, Invalid));
+		}
+		Ok(())
+	}
+
+	#[test]
+	fn test_a_decoder_needs_two_bytes_to_begin_05() -> Outcome<()> {
+		req!(Cabac::new(&[0x40]).is_err(), true,
+			"A decoder started on one byte, and it reads two before answering anything.");
 		Ok(())
 	}
 
