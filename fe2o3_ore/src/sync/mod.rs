@@ -70,6 +70,7 @@ pub use session::{
 	Session,
 	Step,
 	Turn,
+	FANOUT,
 };
 pub use sketch::{
 	Diff,

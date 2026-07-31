@@ -74,10 +74,50 @@ pub enum Mode {
 	},
 }
 
+/// How many operations a head of a frontier is taken to stand for when the
+/// difference between two logs is being guessed at.
+///
+/// A log that has diverged carries more than one head, and each head is a branch
+/// somebody wrote since the two last spoke. How much they wrote is exactly what
+/// nobody knows, so this is a guess with a fallback under it.
+pub const FANOUT: usize = 8;
+
 impl Mode {
+
 	/// Sketch reconciliation at the given estimate, under the usual seed.
 	pub fn sketch(estimate: usize) -> Self {
 		Self::Sketch { estimate, seed: SEED }
+	}
+
+	/// Returns the mode two logs of the given shapes should open in.
+	///
+	/// The guess at the difference is the two logs' difference in length, which
+	/// is a lower bound on how far apart they are, plus [`FANOUT`] for every head
+	/// either frontier carries, which is the part that stands for concurrent
+	/// writing. Where the guess comes to as much as the smaller log, sketching is
+	/// pointless -- a sketch sized for the whole history costs more than the
+	/// history -- and the walk is both cheaper and exact. That covers the clone
+	/// case, where one log is empty, and the case of two logs that share nothing.
+	///
+	/// A guess of nothing means two empty logs, which the walk settles in one
+	/// message; a sketch of nothing would be a table nobody needs.
+	///
+	/// Both peers may call this and neither has to: the modes need not agree,
+	/// since a session answers whatever it is given.
+	pub fn between(
+		here_len:		usize,	// operations this peer holds
+		here_heads:		usize,	// heads of this peer's frontier
+		there_len:		usize,	// operations the other peer holds
+		there_heads:	usize,	// heads of the other peer's frontier
+	)
+		-> Self
+	{
+		let spread = here_len.abs_diff(there_len) + FANOUT * (here_heads + there_heads);
+		if spread == 0 || spread >= here_len.min(there_len).max(1) {
+			Self::Walk
+		} else {
+			Self::sketch(spread)
+		}
 	}
 }
 
