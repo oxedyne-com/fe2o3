@@ -69,7 +69,40 @@ pub const MAGIC: [u8; 6] = *b"ORESEG";
 /// content operation no longer carries a file, a lifecycle operation names one
 /// by identity, and a path is bytes rather than a string. Nothing was ever
 /// written in version 1 that needs to be read again.
-pub const VERSION: u8 = 2;
+///
+/// Raised to 3 when the vocabulary gained [`crate::op::Op::FileMode`] at wire
+/// code 8. The framing did not move a byte; what the version declares is which
+/// operations the records inside may be.
+pub const VERSION: u8 = 3;
+
+/// The oldest format version this module reads.
+///
+/// Version 2 stays readable because version 3 is a strict superset of it: the
+/// framing is identical and the vocabulary only grew, so every version 2 segment
+/// ever written means in version 3 exactly what it meant in version 2. That is
+/// what the bump buys -- a reader meeting a version it does not know says which
+/// version it met, rather than reporting an operation code it cannot place --
+/// and it is why the bump costs a repository nothing.
+///
+/// Version 1 is not read. Its operations spelled a file as a path and a path as
+/// a string, so its records are not the same records under another number.
+pub const VERSION_MIN: u8 = 2;
+
+/// Returns the highest operation code a segment of the given format version is
+/// allowed to carry.
+///
+/// Version 2 was frozen with [`crate::op::CODE_NOTE`] at the top of the
+/// vocabulary; version 3 added [`crate::op::Op::FileMode`] above it and nothing
+/// else. A writer continuing a segment somebody else wrote asks this rather than
+/// assuming, so that "version 2 is a strict subset of version 3" stays true of
+/// the bytes and not only of the intention.
+pub const fn highest_code(version: u8) -> u8 {
+	if version <= VERSION_MIN {
+		crate::op::CODE_NOTE
+	} else {
+		crate::op::CODE_FILE_MODE
+	}
+}
 
 /// Kind byte of a record carrying a bare [`Record`].
 pub const KIND_BARE:	u8 = 1;
@@ -154,10 +187,10 @@ impl Head {
 		}
 		let version = buf[at];
 		at += 1;
-		if version != VERSION {
+		if !(VERSION_MIN..=VERSION).contains(&version) {
 			return Err(err!(
-				"A segment declares format version {}, and this reader knows only \
-				version {}.", version, VERSION;
+				"A segment declares format version {}, and this reader knows versions \
+				{} to {}.", version, VERSION_MIN, VERSION;
 			Decode, Input, Version, Mismatch));
 		}
 		if buf.len() <= at {
@@ -322,13 +355,16 @@ impl Entry {
 #[derive(Clone, Debug)]
 pub struct Writer<H: Hasher, const S: usize> {
 	/// The hash function each record's digest is computed with.
-	hasher:	H,
+	hasher:		H,
 	/// The salt each digest is computed under.
-	salt:	[u8; S],
+	salt:		[u8; S],
+	/// The format version the segment declares, which bounds the vocabulary its
+	/// records may be drawn from.
+	version:	u8,
 	/// The bytes written so far.
-	buf:	Vec<u8>,
+	buf:		Vec<u8>,
 	/// How many records the segment holds, those resumed from included.
-	count:	usize,
+	count:		usize,
 }
 
 impl<H: Hasher, const S: usize> Writer<H, S> {
@@ -337,7 +373,7 @@ impl<H: Hasher, const S: usize> Writer<H, S> {
 	pub fn new(head: &Head, hasher: H, salt: [u8; S]) -> Self {
 		let mut buf = Vec::new();
 		head.encode_into(&mut buf);
-		Self { hasher, salt, buf, count: 0 }
+		Self { hasher, salt, version: head.version, buf, count: 0 }
 	}
 
 	/// Continues a segment already written, so that records can be appended to
@@ -361,19 +397,43 @@ impl<H: Hasher, const S: usize> Writer<H, S> {
 		// Every record is decoded and its digest checked, and nothing is kept:
 		// what is wanted is the count and the assurance, not the operations.
 		while res!(reader.next_entry()).is_some() {}
-		if reader.head().is_none() {
-			return Err(err!(
+		let version = match reader.head() {
+			Some(head) => head.version,
+			None => return Err(err!(
 				"A segment of {} bytes carries no header, so there is nothing to \
 				continue.", existing.len();
-			Decode, Input, Missing));
-		}
-		Ok(Self { hasher, salt, buf: Vec::new(), count: reader.count() })
+			Decode, Input, Missing)),
+		};
+		Ok(Self { hasher, salt, version, buf: Vec::new(), count: reader.count() })
+	}
+
+	/// Returns the format version the segment declares.
+	pub const fn version(&self) -> u8 {
+		self.version
 	}
 
 	/// Appends a record.
+	///
+	/// A record is refused where the segment's declared version has no code for
+	/// the operation it carries, which is what keeps an older version a genuine
+	/// subset of a newer one rather than a promise the bytes break. A caller with
+	/// such a record to write starts a segment at the current version instead;
+	/// nothing about a log says its segments share a version.
 	pub fn push(&mut self, entry: &Entry)
 		-> Outcome<()>
 	{
+		if self.version < VERSION {
+			let op = res!(entry.peek()).op;
+			let top = highest_code(self.version);
+			if op.code() > top {
+				return Err(err!(
+					"A segment declaring format version {} cannot carry an {}, whose \
+					wire code {} is above the {} that version spells; version {} is \
+					where that operation was added.",
+					self.version, op.name(), op.code(), top, VERSION;
+				Invalid, Input, Version, Mismatch));
+			}
+		}
 		let kind = entry.kind();
 		let body = res!(entry.body());
 		let digest = self.hasher.clone().hash(&[&[kind], &body], self.salt).as_vec();
@@ -684,6 +744,7 @@ mod tests {
 	};
 	use crate::op::{
 		Header,
+		Mode,
 		Op,
 	};
 	use crate::test_support::{
@@ -735,14 +796,18 @@ mod tests {
 			),
 			Record::new(
 				res!(Header::new(oid(3, 11), vec![oid(3, 10)])),
-				Op::FileDelete { file: oid(1, 1) },
+				Op::FileMode { file: oid(1, 1), mode: Mode::Executable },
 			),
 			Record::new(
 				res!(Header::new(oid(3, 12), vec![oid(3, 11)])),
+				Op::FileDelete { file: oid(1, 1) },
+			),
+			Record::new(
+				res!(Header::new(oid(3, 13), vec![oid(3, 12)])),
 				Op::Mark { name: fmt!("release-caf\u{e9}") },
 			),
 			Record::new(
-				res!(Header::new(oid(4, 13), vec![oid(3, 12)])),
+				res!(Header::new(oid(4, 14), vec![oid(3, 13)])),
 				Op::Note {
 					on:		vec![res!(ContentRange::new(oid(1, 2), 4, 9))],
 					text:	b"the fox is doing the work here".to_vec(),
@@ -1017,6 +1082,136 @@ mod tests {
 		Ok(())
 	}
 
+	/// A version 2 segment reads, a version 1 segment does not, and the refusal
+	/// says which versions this reader knows.
+	///
+	/// This is the half of the version 3 event that costs a repository nothing:
+	/// version 2 held codes 1 to 7 and version 3 holds 1 to 8, so every segment
+	/// written before the bump means under the new reader exactly what it meant
+	/// under the old one. Version 1 is a different matter -- its operations
+	/// spelled a file as a path -- and stays refused.
+	#[test]
+	fn a_version_two_segment_still_reads() -> Outcome<()> {
+		// Everything but the FileMode, which is the one operation version 2 has
+		// no code for.
+		let entries: Vec<Entry> = res!(bare())
+			.into_iter()
+			.filter(|e| !matches!(e.peek(), Ok(Record { op: Op::FileMode { .. }, .. })))
+			.collect();
+		let old = Head { version: VERSION_MIN, replica: Some(ReplicaId::new(7)) };
+		let bytes = res!(encode(&old, &entries, Fold, [0u8; 0]));
+		assert_eq!(bytes[MAGIC.len()], VERSION_MIN, "the segment declares version 2");
+		let (head, got) = res!(decode(&bytes, Fold, [0u8; 0]));
+		assert_eq!(head, old, "the header reads back at the version it was written");
+		assert_eq!(got, entries, "and every record with it");
+		// Version 1 is below what this reader knows, and the message says so.
+		let mut ancient = bytes.clone();
+		ancient[MAGIC.len()] = VERSION_MIN - 1;
+		let e = match decode(&ancient, Fold, [0u8; 0]) {
+			Ok(_) => return Err(err!("Version 1 was accepted."; Test)),
+			Err(e) => e,
+		};
+		let msg = fmt!("{}", e);
+		assert!(msg.contains(&fmt!("{}", VERSION_MIN)), "message was {}", msg);
+		assert!(msg.contains(&fmt!("{}", VERSION)), "message was {}", msg);
+		Ok(())
+	}
+
+	/// A segment declaring an older version will not be given an operation that
+	/// version has no code for.
+	///
+	/// Without this the subset claim would hold of the intention and not of the
+	/// bytes: appending a FileMode to a version 2 segment would leave a file
+	/// whose header promises a vocabulary its records exceed.
+	#[test]
+	fn an_old_segment_refuses_a_newer_operation() -> Outcome<()> {
+		assert_eq!(highest_code(VERSION_MIN), crate::op::CODE_NOTE);
+		assert_eq!(highest_code(VERSION), crate::op::CODE_FILE_MODE);
+		let old = Head { version: VERSION_MIN, replica: None };
+		let mode = Entry::Bare(Record::root(
+			oid(1, 1),
+			Op::FileMode { file: oid(1, 1), mode: Mode::Symlink },
+		));
+		let mark = Entry::Bare(Record::root(oid(1, 2), Op::Mark { name: fmt!("v1") }));
+		// Starting one.
+		let mut writer: Writer<Fold, 0> = Writer::new(&old, Fold, [0u8; 0]);
+		assert_eq!(writer.version(), VERSION_MIN);
+		// An operation version 2 does spell goes in without complaint.
+		res!(writer.push(&mark));
+		let e = match writer.push(&mode) {
+			Ok(()) => return Err(err!("A FileMode was written into a version 2 \
+				segment."; Test)),
+			Err(e) => e,
+		};
+		let msg = fmt!("{}", e);
+		assert!(msg.contains("FileMode"), "message was {}", msg);
+		assert!(msg.contains(&fmt!("{}", VERSION_MIN)), "message was {}", msg);
+		// And continuing one, which is where a real repository would meet it.
+		let bytes = res!(encode(&old, &[mark], Fold, [0u8; 0]));
+		let mut writer: Writer<Fold, 0> = res!(Writer::resume(&bytes, Fold, [0u8; 0]));
+		assert_eq!(writer.version(), VERSION_MIN);
+		assert!(writer.push(&mode).is_err());
+		// A segment at the current version takes it.
+		let mut writer: Writer<Fold, 0> = Writer::new(&Head::new(None), Fold, [0u8; 0]);
+		assert_eq!(writer.version(), VERSION);
+		res!(writer.push(&mode));
+		Ok(())
+	}
+
+	/// The bytes of a one-record segment carrying a FileMode, frozen.
+	///
+	/// The operation that the version 3 bump exists for, pinned in the encoding
+	/// it was added in on 12026-07-30. It is shaped like a FileRename -- a code,
+	/// an identifier, a field -- and the field is a single tagged byte.
+	#[test]
+	fn the_file_mode_bytes_are_frozen() -> Outcome<()> {
+		let rec = Record::root(oid(1, 1), Op::FileMode {
+			file:	oid(1, 1),
+			mode:	Mode::Executable,
+		});
+		let bytes = res!(encode(&Head::new(None), &[Entry::Bare(rec)], Fold, [0u8; 0]));
+		let want: &[u8] = &[
+			// The magic, version 3, and no replica hint.
+			0x4f, 0x52, 0x45, 0x53, 0x45, 0x47,
+			0x03,
+			0x00,
+			// The record: a bare one, and 57 bytes of body.
+			0x01,
+			0x39,
+			// The body is a daticle list of 54 bytes: the header, the operation.
+			0x33, 0x21, 0x36,
+				// The header, 23 bytes: the identifier r1:1, and no parents.
+				0x33, 0x21, 0x17,
+					0x33, 0x21, 0x12,
+						0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+						0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+					0x33, 0x20,
+				// The operation, 25 bytes: the FileMode code 8, the file it
+				// names, and the mode, which is 1 for executable.
+				0x33, 0x21, 0x19,
+					0x0a, 0x08,
+					0x33, 0x21, 0x12,
+						0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+						0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+					0x0a, 0x01,
+			// The digest: eight bytes of the folding hasher, and its length.
+			0x08,
+			0xd4, 0x4c, 0xdb, 0x41, 0x34, 0x92, 0x1e, 0xe8,
+		];
+		assert_eq!(bytes, want, "the FileMode encoding has changed");
+		let (_, got) = res!(decode(want, Fold, [0u8; 0]));
+		assert_eq!(got.len(), 1);
+		match res!(got[0].peek()).op {
+			Op::FileMode { file, mode } => {
+				assert_eq!(file, oid(1, 1));
+				assert_eq!(mode, Mode::Executable);
+			},
+			other => return Err(err!(
+				"Expected a FileMode, got a {}.", other.name(); Test, Mismatch)),
+		}
+		Ok(())
+	}
+
 	/// A replica hint of any size survives, and its absence is distinguishable
 	/// from a hint of zero.
 	#[test]
@@ -1167,7 +1362,7 @@ mod tests {
 				}
 				let head = res!(Header::new(id, parents));
 				let anchored = Some(Anchor::origin(oid((next() % 5) as u64 + 1, 1)));
-				let op = match next() % 7 {
+				let op = match next() % 8 {
 					0 => Op::FileCreate { path: fmt!("f{}", next() % 100).into_bytes() },
 					1 => Op::Mark { name: fmt!("m{}", next() % 100) },
 					2 => Op::FileRename {
@@ -1185,6 +1380,14 @@ mod tests {
 						src:	vec![res!(ContentRange::new(id, 0, (next() % 50) as u64))],
 						left:	anchored,
 						right:	None,
+					},
+					6 => Op::FileMode {
+						file:	oid((next() % 5) as u64 + 1, 1),
+						mode:	match next() % 3 {
+							0	=> Mode::Normal,
+							1	=> Mode::Executable,
+							_	=> Mode::Symlink,
+						},
 					},
 					_ => Op::Note {
 						on:		vec![res!(ContentRange::new(id, 0, (next() % 50) as u64 + 1))],
@@ -1236,10 +1439,13 @@ mod tests {
 	/// and decodes with the same code. This one is the fixed point. If it fails
 	/// and the change was deliberate, the version byte is the thing to raise.
 	///
-	/// It was raised to 2 for file identity. The record below carries a mark,
-	/// whose encoding did not change, so the only byte that moved is the version
-	/// itself -- which is exactly what a reader of an old segment must trip over,
-	/// since the operations beside a mark did change.
+	/// It was raised to 2 for file identity, and to 3 on 12026-07-30 for
+	/// [`crate::op::Op::FileMode`]. The record below carries a mark, whose
+	/// encoding did not change either time, so the only byte that has ever moved
+	/// here is the version itself. That is the whole of the version 3 event as
+	/// the framing sees it: what changed is which operations may appear inside,
+	/// and a version 2 segment stays readable because its operations are a subset
+	/// of version 3's.
 	#[test]
 	fn the_segment_bytes_are_frozen() -> Outcome<()> {
 		let rec = Record::new(
@@ -1256,7 +1462,7 @@ mod tests {
 			// The segment header: the magic, the version, a hint follows, and the
 			// replica it names.
 			0x4f, 0x52, 0x45, 0x53, 0x45, 0x47,
-			0x02,
+			0x03,
 			0x01,
 			0x02,
 			// The record: a bare one, and 61 bytes of body.
