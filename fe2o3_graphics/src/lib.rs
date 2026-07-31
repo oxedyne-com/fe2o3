@@ -27,6 +27,15 @@
 //! not a video codec: there is no motion estimation and no lossy transform, which makes it right for
 //! line drawing, flat colour and text and wrong for a photographic sequence.
 //!
+//! # Containers
+//!
+//! [`heif`] reads the other side of the same box structure: a HEIC file's items, which of them is
+//! the photograph, the grid of tiles it is cut into, where each tile's bytes are, and the Exif
+//! block the camera wrote. It decodes nothing either -- what it hands back is a run of bytes and
+//! the decoder configuration that describes them -- and it exists before any HEVC decoder does
+//! because the two things a photograph library needs first, the size and the Exif, are in the
+//! container and not in the coded picture.
+//!
 //! # A container, without a codec
 //!
 //! [`mp4`] writes an MP4 -- ISO base media file format boxes, a sample table and the media -- around
@@ -77,6 +86,7 @@
 
 pub mod blur;
 pub mod colour;
+pub mod heif;
 pub mod jpeg;
 pub mod mp4;
 pub mod path;
