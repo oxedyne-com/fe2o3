@@ -6,11 +6,11 @@
 //! Everything the walk noticed is returned with the bytes as a [`Flag`], because
 //! a structure that always converges owes the reader an account of what it
 //! converged to: a torn move, an anchor demoted to break a cycle, a move confined
-//! because it lost a cross-file cycle, content moved into a file that has since
-//! been deleted, or an edit whose context or whose whole file a concurrent
-//! operation deleted. Flags are facts derived from the operation set, not a
-//! log of what the renderer happened to do, so two replicas holding the same
-//! operations report the same flags.
+//! because it lost a cross-file cycle, a splice that lost an overlap arbitration,
+//! content moved into a file that has since been deleted, or an edit whose context
+//! or whose whole file a concurrent operation deleted. Flags are facts derived from
+//! the operation set, not a log of what the renderer happened to do, so two
+//! replicas holding the same operations report the same flags.
 //!
 //! # Notes are resolved here too
 //!
@@ -74,6 +74,8 @@ pub const CODE_WON:		u8 = 9;
 pub const CODE_STRANDED:	u8 = 10;
 /// Wire code for [`Flag::SplicedIntoDeleted`].
 pub const CODE_SPLICED_INTO_DELETED: u8 = 11;
+/// Wire code for [`Flag::Yielded`].
+pub const CODE_YIELDED:		u8 = 12;
 
 
 /// Something the renderer noticed that the reader should be told.
@@ -128,6 +130,17 @@ pub enum Flag {
 	/// what its name says: neither author could see what the other was doing. Two
 	/// operations touching the same bytes where one was written in knowledge of
 	/// the other are a sequence of edits and not a conflict, and raise nothing.
+	///
+	/// **This is the raw fact beneath the arbitration**, in the relation
+	/// [`Flag::Demoted`] has to [`Flag::Confined`]: it says two operations raced
+	/// over some content, and [`Flag::Yielded`] says what the renderer then did
+	/// about it. It is kept for two reasons the implementation made plain. It is
+	/// pair-wise and edge-shaped, and the arbitration is component-shaped, so it is
+	/// the only flag that says *which* two operations actually met -- the yield
+	/// flag names a group and its maximum, and its maximum routinely never named a
+	/// byte the yielder named. And it fires over a move as well as a splice, where
+	/// the arbitration is deliberately confined to splices, so a race between a
+	/// deletion and a move is reported here and nowhere else.
 	Overlap {
 		/// The operations involved, in ascending order of identifier.
 		ops:	Vec<OpId>,
@@ -257,6 +270,43 @@ pub enum Flag {
 		/// The concurrent deletion the splice did not see.
 		del:	OpId,
 	},
+	/// A splice that lost an overlap arbitration: its removals did not bury and its
+	/// insertion is buried whole, so the edit is in the log and not in the file.
+	///
+	/// Concurrent splices whose named content overlaps form one group -- the
+	/// connected components of the overlap graph, with components contended by the
+	/// same replicas over the same files taken together -- and the member highest in
+	/// op order prevails. Every member concurrent with it yields; a member in its
+	/// causal past does not, which is what keeps a winner's own earlier hunks. A
+	/// splice anchored wholly inside a buried insertion yields too, or it would
+	/// render as a fragment at a dead site.
+	///
+	/// **The decision is the group's, not a pair's.** A group is a connected
+	/// component, so a yielding operation routinely never named a byte the
+	/// prevailing one named: three authors in a chain, where the first overlaps the
+	/// second and the second the third, put the first and the third in one group
+	/// although they are disjoint. Anything said of this flag has to say that the
+	/// *group* prevailed and name its maximum, or it says something false about
+	/// roughly three yields in ten.
+	///
+	/// **What the region then reads as.** Whole hunks, never an interleave. It is
+	/// not a promise of one author: where a member is in the winner's causal past
+	/// the exemption keeps it, so a third party who synced with one side of a
+	/// collision and not the other leaves the region composed of two authors' whole
+	/// hunks. That is a consequence of the exemption, which is load-bearing, and not
+	/// a defect.
+	Yielded {
+		/// The splice that yielded.
+		op:		OpId,
+		/// The group's op-order maximum, which prevailed.
+		to:		OpId,
+		/// The group, in ascending op order, so that the last is `to`. A yielder
+		/// that reached the group transitively is not itself in it.
+		group:	Vec<OpId>,
+		/// For a transitive yield, the buried insertion this edit sits inside;
+		/// `None` where the operation was a member of the group itself.
+		through: Option<OpId>,
+	},
 }
 
 
@@ -275,6 +325,7 @@ impl Flag {
 			Self::Won { .. }				=> CODE_WON,
 			Self::Stranded { .. }			=> CODE_STRANDED,
 			Self::SplicedIntoDeleted { .. }	=> CODE_SPLICED_INTO_DELETED,
+			Self::Yielded { .. }			=> CODE_YIELDED,
 		}
 	}
 
@@ -292,6 +343,7 @@ impl Flag {
 			Self::Won { .. }				=> "Won",
 			Self::Stranded { .. }			=> "Stranded",
 			Self::SplicedIntoDeleted { .. }	=> "SplicedIntoDeleted",
+			Self::Yielded { .. }			=> "Yielded",
 		}
 	}
 
@@ -309,6 +361,7 @@ impl Flag {
 			Self::Won { op }					=> Some(*op),
 			Self::Stranded { op, .. }			=> Some(*op),
 			Self::SplicedIntoDeleted { op, .. }	=> Some(*op),
+			Self::Yielded { op, .. }			=> Some(*op),
 		}
 	}
 
@@ -375,6 +428,13 @@ impl Flag {
 				op.to_dat(),
 				file.to_dat(),
 				del.to_dat(),
+			]),
+			Self::Yielded { op, to, group, through } => Dat::List(vec![
+				Dat::U8(CODE_YIELDED),
+				op.to_dat(),
+				to.to_dat(),
+				Dat::List(group.iter().map(|id| id.to_dat()).collect()),
+				Dat::Opt(Box::new(through.as_ref().map(|id| id.to_dat()))),
 			]),
 		}
 	}
@@ -483,6 +543,34 @@ impl Flag {
 					op:		res!(OpId::from_dat(&v[1])),
 					file:	res!(OpId::from_dat(&v[2])),
 					del:	res!(OpId::from_dat(&v[3])),
+				})
+			},
+			CODE_YIELDED => {
+				res!(flag_len(v, 5, "Yielded"));
+				let listed = match &v[3] {
+					Dat::List(l) => l,
+					other => return Err(err!(
+						"A Flag::Yielded group expects Dat::List, got {:?}.", other;
+					Decode, Input, Mismatch)),
+				};
+				let mut group = Vec::with_capacity(listed.len());
+				for item in listed {
+					group.push(res!(OpId::from_dat(item)));
+				}
+				let through = match &v[4] {
+					Dat::Opt(boxed) => match boxed.as_ref() {
+						Some(d)	=> Some(res!(OpId::from_dat(d))),
+						None	=> None,
+					},
+					other => return Err(err!(
+						"A Flag::Yielded host expects Dat::Opt, got {:?}.", other;
+					Decode, Input, Mismatch)),
+				};
+				Ok(Self::Yielded {
+					op:	res!(OpId::from_dat(&v[1])),
+					to:	res!(OpId::from_dat(&v[2])),
+					group,
+					through,
 				})
 			},
 			other => Err(err!(

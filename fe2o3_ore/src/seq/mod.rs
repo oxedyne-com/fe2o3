@@ -44,6 +44,15 @@
 //!   other member is confined -- its claims are not written, so its content stays
 //!   where it was, and both files are told by [`Flag::Confined`]. Nothing has to be
 //!   undone, because nothing was done.
+//! - Two splices that concurrently named overlapping content are arbitrated as
+//!   one group, so that the contended region holds whole hunks rather than two
+//!   authors' bytes interleaved. The member highest in op order prevails; every
+//!   member concurrent with it **yields**, its removals not burying and its
+//!   insertion buried whole, and [`Flag::Yielded`] names the group and its
+//!   maximum. A member in the winner's causal past keeps its work, which is what
+//!   leaves a winner's own earlier hunks alone -- and is also why the region is a
+//!   promise of whole hunks and not a promise of one author. [`Flag::Overlap`]
+//!   still fires beneath the arbitration, as the raw fact it always was.
 //! - Content moved into a file that has been deleted renders nowhere a reader
 //!   looks. Nothing is lost and [`Flag::MovedIntoDeleted`] says so.
 //! - An insertion whose every anchored neighbour was deleted by a concurrent
@@ -103,12 +112,15 @@ pub mod slot;
 #[cfg(test)]
 mod file_tests;
 #[cfg(test)]
+mod overlap_tests;
+#[cfg(test)]
 mod tests;
 
 use crate::id::{
 	ContentId,
 	ContentRange,
 	OpId,
+	ReplicaId,
 };
 use crate::log::Causality;
 use crate::op::{
@@ -379,21 +391,34 @@ impl Sequence {
 		let atoms = res!(Atoms::build(&ops));
 		res!(Self::check_complete(&ops, &atoms));
 		let files = res!(Self::files(&ops));
-		let dead = res!(Dead::build(&ops));
 
 		// Where every byte was written, which is one of the two readings the
-		// classifier takes. It costs one layout and no iteration, since a layout
-		// with every move voided is acyclic by construction.
-		let birth = res!(Self::birth_files(&ops, &dead, &atoms));
+		// cross-file classifier takes and is also what tells the overlap groups
+		// which file they are contending over. It is read off a layout with every
+		// move voided and no arbitration applied, so it costs one layout and no
+		// iteration: that layout is acyclic by construction.
+		let birth = res!(Self::birth_files(&ops, &res!(Dead::build(&ops)), &atoms));
 
-		// The render is a fixed point over the moves a cross-file cycle has
-		// confined. Each pass arbitrates at most one cycle, and a pass that
-		// arbitrates one voids at least one move and never un-voids any, so it
-		// terminates.
+		// The render is one fixed point over two arbitrations. A cross-file cycle
+		// confines moves; an overlap group yields splices; and the two are the same
+		// kind of decision, so they are settled in one loop rather than in two that
+		// would each have to be right about the other's answer. Each pass arbitrates
+		// at most one cycle, and a pass that arbitrates one voids at least one move
+		// and never un-voids any, so it terminates.
+		//
+		// The yields are recomputed on every pass. Today they cannot change, being a
+		// function of the operation set and the causal graph alone, and confining a
+		// move changes neither; recomputing them is what keeps the loop correct if a
+		// later rule ever lets a confinement change what overlaps. The traffic runs
+		// the other way and is real: yielding changes the tombstones, the tombstones
+		// change what a trial layout shows, and a trial layout is what tells the
+		// cycle rule which file a block is in.
 		let mut voided: BTreeSet<OpId> = BTreeSet::new();
 		let mut confined: Vec<(OpId, OpId, OpId)> = Vec::new();
 		let mut won: Vec<OpId> = Vec::new();
-		let (claims, slots, order, walk) = loop {
+		let (claims, slots, order, walk, dead, yields) = loop {
+			let yields = res!(Self::yields(&ops, &birth, cause));
+			let dead = res!(Dead::build_without(&ops, &yields.buried));
 			let claims = res!(Claims::build_without(&ops, &voided));
 			let slots = res!(Slots::place_without(&ops, &voided));
 			match res!(self.arbitrate(
@@ -417,7 +442,7 @@ impl Sequence {
 					let order = res!(slots.order(&claims));
 					let walk = res!(render::traverse(
 						&slots, &order, &claims, &dead, &atoms));
-					break (claims, slots, order, walk);
+					break (claims, slots, order, walk, dead, yields);
 				},
 			}
 		};
@@ -449,6 +474,14 @@ impl Sequence {
 		for op in &won {
 			flags.push(Flag::Won { op: *op });
 		}
+		for (op, y) in &yields.map {
+			flags.push(Flag::Yielded {
+				op:			*op,
+				to:			y.to,
+				group:		y.group.clone(),
+				through:	y.through,
+			});
+		}
 		for (id, op) in &ops {
 			if !op.is_move() {
 				continue;
@@ -461,7 +494,7 @@ impl Sequence {
 		}
 		flags.extend(res!(Self::torn(&ops, &claims, &voided, cause)));
 		flags.extend(res!(Self::overlaps(&ops, cause)));
-		flags.extend(res!(Self::stranded(&ops, &files, cause)));
+		flags.extend(res!(Self::stranded(&ops, &files, &yields.buried, cause)));
 		flags.extend(res!(Self::spliced_into_deleted(&ops, &files, &index, cause)));
 		flags.sort();
 		flags.dedup();
@@ -528,12 +561,21 @@ impl Sequence {
 	/// produces, and no per-file check would see it: each file would agree with
 	/// itself while the same bytes appeared in both. The render runs this under a
 	/// debug build; a caller wanting it in a release build calls it.
+	///
+	/// The tombstones are rebuilt under the same overlap arbitration the render
+	/// used, since a yielded insertion is dead rather than homeless and a check told
+	/// otherwise would report every yield as a byte gone missing. Causality is
+	/// judged by the sequence's own operations, so a caller who rendered against a
+	/// wider graph should check the render it holds rather than this.
 	pub fn check_conservation(&self, repo: &Repo)
 		-> Outcome<()>
 	{
 		let ops = self.in_op_order();
+		let cause = self.causality();
 		let atoms = res!(Atoms::build(&ops));
-		let dead = res!(Dead::build(&ops));
+		let birth = res!(Self::birth_files(&ops, &res!(Dead::build(&ops)), &atoms));
+		let yields = res!(Self::yields(&ops, &birth, &cause));
+		let dead = res!(Dead::build_without(&ops, &yields.buried));
 		Self::conserved(repo, &atoms, &dead)
 	}
 
@@ -726,6 +768,18 @@ impl Sequence {
 				}
 			},
 			Flag::SplicedIntoDeleted { file, .. } => out.push(*file),
+			// The yielder's file and the prevailing operation's, by the Stranded
+			// route, so that both authors are told where they are looking. The rest
+			// of the group is in the flag and is one lookup away; spraying the flag
+			// over every member's file would put a five-party collision into five
+			// files and tell nobody anything they could act on.
+			Flag::Yielded { op, to, .. } => {
+				for id in [op, to] {
+					if let Some(f) = index.get(id) {
+						out.push(*f);
+					}
+				}
+			},
 			other => {
 				if let Some(id) = other.op() {
 					if let Some(f) = index.get(&id) {
@@ -903,6 +957,178 @@ impl Sequence {
 		Ok(out)
 	}
 
+	/// Decides which splices yield, from the operation set, the causal graph, and
+	/// the file each byte was written into.
+	///
+	/// **The rule.** Concurrent splices whose named content intersects form a graph,
+	/// one edge per pair [`Sequence::overlaps`] flags, and its connected components
+	/// are the arbitration groups; components contending over the same files by the
+	/// same set of replicas are taken together. The member highest in op order
+	/// prevails and every member concurrent with it yields, its removals not burying
+	/// and its insertion buried whole. A splice anchored wholly inside a buried
+	/// insertion yields too.
+	///
+	/// **Why the component and not the pair.** Arbitrating the intersection alone
+	/// says nothing about either author's insertion, which is where the unreadable
+	/// text comes from; arbitrating the whole file would void the work of somebody
+	/// who was not contending. The component is the smallest unit that leaves the
+	/// contended region reading as whole hunks. The same-contenders merge is what
+	/// stops two components of one file being won by different replicas, which at
+	/// two parties -- the case a small team hits -- is the whole of the fix.
+	///
+	/// **The causal exemption.** A member in the winner's causal past does not
+	/// yield. It is not decoration: an author whose capture emitted two hunks
+	/// authored the second with the first as its parent, so without the exemption a
+	/// winner would void its own other hunk. The price is that the region is a
+	/// promise of whole hunks rather than a promise of one author, since a third
+	/// party who synced with one side of a collision and not the other joins the
+	/// group as its maximum and leaves two authors' hunks composed.
+	///
+	/// **Which file a component is in** is read off the birth layout, where every
+	/// byte was written. A component whose members named content born in more than
+	/// one file has that whole set as its key and merges only with a component whose
+	/// key matches, which is the per-file restriction stated so that it means
+	/// something in a repository rather than in a single document.
+	fn yields(
+		ops:	&[(OpId, &Op)],
+		birth:	&BTreeMap<OpId, OpId>,
+		cause:	&Causality<'_>,
+	)
+		-> Outcome<Yields>
+	{
+		// The splices, which is what arbitration reaches. A move already has two
+		// arbitration rules of its own -- tearing, and the cross-file cycle -- and a
+		// third interacting with the same fixed point is unbounded work for a case
+		// nobody has yet observed.
+		let sp: Vec<(OpId, &Op)> = ops.iter()
+			.filter(|(_, op)| matches!(op, Op::Splice { .. }))
+			.copied()
+			.collect();
+
+		// The overlap graph, by the sweep `overlaps` uses: sort every named run by
+		// atom and offset, and a run still open when another begins intersects it.
+		let mut named: Vec<(ContentRange, usize)> = Vec::new();
+		for (i, (_, op)) in sp.iter().enumerate() {
+			for r in op.regions() {
+				if !r.is_empty() {
+					named.push((*r, i));
+				}
+			}
+		}
+		named.sort_by_key(|(r, i)| (r.op(), r.from(), r.to(), sp[*i].0));
+		let mut up: Vec<usize> = (0..sp.len()).collect();
+		let mut met: BTreeSet<usize> = BTreeSet::new();
+		let mut open: Vec<(ContentRange, usize)> = Vec::new();
+		for (r, i) in named {
+			open.retain(|(o, _)| o.op() == r.op() && o.to() > r.from());
+			for (_, j) in &open {
+				if *j == i || !cause.concurrent(&sp[*j].0, &sp[i].0) {
+					continue;
+				}
+				met.insert(i);
+				met.insert(*j);
+				join(&mut up, i, *j);
+			}
+			open.push((r, i));
+		}
+		let mut out = Yields::default();
+		if met.is_empty() {
+			return Ok(out);
+		}
+
+		// The connected components, and then the same-contenders merge over them.
+		let mut comps: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+		for i in met {
+			let root = find(&mut up, i);
+			comps.entry(root).or_default().push(i);
+		}
+		let mut groups: BTreeMap<(BTreeSet<ReplicaId>, BTreeSet<OpId>), Vec<usize>>
+			= BTreeMap::new();
+		for members in comps.values() {
+			let mut reps: BTreeSet<ReplicaId> = BTreeSet::new();
+			let mut over: BTreeSet<OpId> = BTreeSet::new();
+			for i in members {
+				reps.insert(sp[*i].0.replica);
+				for r in sp[*i].1.regions() {
+					if let Some(f) = birth.get(&r.op()) {
+						over.insert(*f);
+					}
+				}
+			}
+			groups.entry((reps, over)).or_default().extend(members.iter().copied());
+		}
+
+		// The op-order maximum prevails; every member concurrent with it yields.
+		for members in groups.values_mut() {
+			members.sort_by_key(|i| OpOrder::of(&sp[*i].0));
+			let group: Vec<OpId> = members.iter().map(|i| sp[*i].0).collect();
+			let winner = match group.last() {
+				Some(w)	=> *w,
+				None	=> return Err(err!("An overlap group with no members."; Bug)),
+			};
+			for id in &group {
+				if cause.concurrent(&winner, id) {
+					out.map.insert(*id, Yield {
+						to:			winner,
+						group:		group.clone(),
+						through:	None,
+					});
+				}
+			}
+		}
+
+		// Yielding is transitive. A splice whose insertion is anchored wholly within
+		// an insertion that is buried is buried too: left where it is, it renders as
+		// a fragment at a dead site, and no flag fires for it, because no concurrent
+		// operation deleted anything. The winner cannot be reached this way -- to
+		// anchor inside a buried insertion is to have seen it, and everything buried
+		// is concurrent with the winner -- so the closure cannot bury a whole group.
+		let mut inserted: BTreeSet<OpId> = BTreeSet::new();
+		for (id, op) in ops {
+			if let Op::Splice { insert, .. } = op {
+				if !insert.is_empty() {
+					inserted.insert(*id);
+				}
+			}
+		}
+		loop {
+			let buried: BTreeSet<OpId> = out.map.keys()
+				.copied()
+				.filter(|o| inserted.contains(o))
+				.collect();
+			let inside = |a: &Option<crate::id::Anchor>| -> Option<OpId> {
+				let host = a.as_ref()?.content.op;
+				buried.contains(&host).then_some(host)
+			};
+			let mut added = false;
+			for (id, op) in ops {
+				if out.map.contains_key(id) || !matches!(op, Op::Splice { .. }) {
+					continue;
+				}
+				let (l, r) = op.origins();
+				let host = match (inside(&l), inside(&r)) {
+					(Some(h), Some(_))	=> h,
+					_					=> continue,
+				};
+				let parent = match out.map.get(&host) {
+					Some(y)	=> y.clone(),
+					None	=> continue,
+				};
+				out.map.insert(*id, Yield {
+					to:			parent.to,
+					group:		parent.group,
+					through:	Some(host),
+				});
+				added = true;
+			}
+			if !added {
+				break;
+			}
+		}
+		out.buried = out.map.keys().copied().collect();
+		Ok(out)
+	}
+
 	/// Finds the splices whose insertion anchored into content a **concurrent**
 	/// operation deleted, so that the inserted bytes render at a deletion site
 	/// rather than inside the context their author wrote them into.
@@ -915,10 +1141,17 @@ impl Sequence {
 	/// ordered against the splice, either way round, was a decision made in
 	/// knowledge of the other operation and raises nothing; this is the same
 	/// distinction [`Sequence::torn`] draws, for the same reason.
+	///
+	/// A splice that yielded an overlap arbitration is left out of both halves of
+	/// the question, because the arbitration answered it first. Its own insertion is
+	/// buried, so it renders nowhere at all and cannot render at a deletion site;
+	/// and its removals do not bury, so they leave nobody's context dead. Reporting
+	/// either would name an event the render did not produce.
 	fn stranded(
-		ops:	&[(OpId, &Op)],
-		files:	&BTreeMap<OpId, FileInfo>,
-		cause:	&Causality<'_>,
+		ops:		&[(OpId, &Op)],
+		files:		&BTreeMap<OpId, FileInfo>,
+		yielded:	&BTreeSet<OpId>,
+		cause:		&Causality<'_>,
 	)
 		-> Outcome<Vec<Flag>>
 	{
@@ -926,6 +1159,9 @@ impl Sequence {
 		// splice kills bytes: a move relocates them, and an anchor follows.
 		let mut removed: BTreeMap<OpId, Vec<(Range<u64>, OpId)>> = BTreeMap::new();
 		for (id, op) in ops {
+			if yielded.contains(id) {
+				continue;
+			}
 			if let Op::Splice { remove, .. } = op {
 				for r in remove {
 					if !r.is_empty() {
@@ -936,6 +1172,9 @@ impl Sequence {
 		}
 		let mut out: Vec<Flag> = Vec::new();
 		for (id, op) in ops {
+			if yielded.contains(id) {
+				continue;
+			}
 			let (left, right) = match op {
 				Op::Splice { left, right, insert, .. } if !insert.is_empty()
 					=> (left, right),
@@ -1070,6 +1309,54 @@ impl Sequence {
 			Bug, Mismatch));
 		}
 		Ok(())
+	}
+}
+
+
+/// What the overlap arbitration decided about one splice.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Yield {
+	/// The group's op-order maximum, which prevailed.
+	to:			OpId,
+	/// The group, in ascending op order, so that the last of it is the winner.
+	group:		Vec<OpId>,
+	/// The buried insertion this splice sits inside, where it yielded for that
+	/// reason rather than for having contended itself.
+	through:	Option<OpId>,
+}
+
+
+/// What the overlap arbitration decided about a whole operation set.
+#[derive(Clone, Debug, Default)]
+struct Yields {
+	/// Every yielding splice, and what it yielded to.
+	map:	BTreeMap<OpId, Yield>,
+	/// The same operations as a set, which is what the tombstones are built
+	/// against.
+	buried:	BTreeSet<OpId>,
+}
+
+
+/// The representative of a disjoint set, with the path halved on the way.
+fn find(up: &mut [usize], i: usize) -> usize {
+	let mut r = i;
+	while up[r] != r {
+		r = up[r];
+	}
+	let mut c = i;
+	while up[c] != c {
+		let n = up[c];
+		up[c] = r;
+		c = n;
+	}
+	r
+}
+
+/// Joins two disjoint sets.
+fn join(up: &mut [usize], a: usize, b: usize) {
+	let (ra, rb) = (find(up, a), find(up, b));
+	if ra != rb {
+		up[ra] = rb;
 	}
 }
 

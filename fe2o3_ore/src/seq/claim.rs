@@ -167,13 +167,45 @@ impl Dead {
 	pub fn build(ops: &[(OpId, &Op)])
 		-> Outcome<Self>
 	{
+		Self::build_without(ops, &BTreeSet::new())
+	}
+
+	/// Builds the tombstone set as [`Dead::build`] does, except that a splice named
+	/// in `yielded` buries its **own** insertion and none of what it removed.
+	///
+	/// This is what yielding an overlap group is. A concurrent group of splices that
+	/// named overlapping content is arbitrated, the op-order maximum prevails, and
+	/// every member concurrent with it yields: within the contended region the file
+	/// then holds whole hunks rather than two authors' bytes interleaved.
+	///
+	/// A confined *move* costs nothing, because its bytes fall back to a previous
+	/// owner. A splice's insertion has no previous owner, so declining to place its
+	/// slot would leave its bytes owned by nothing, which is [`crate::seq::render::Flag::Orphaned`]
+	/// and a fault. The mechanism that is already right is the tombstone: the
+	/// insertion is buried whole, the removals are dropped so that they do not bury,
+	/// and the slot itself is still placed, so anything anchored into the yielded
+	/// content still resolves against a target that is there.
+	///
+	/// Yielding is therefore not only subtractive. Where the yielding splice deleted
+	/// text the prevailing one did not, that text comes back, and the arbitrating
+	/// render is *larger* than the unarbitrated one.
+	pub fn build_without(ops: &[(OpId, &Op)], yielded: &BTreeSet<OpId>)
+		-> Outcome<Self>
+	{
 		let mut map: BTreeMap<OpId, IntervalMap<()>> = BTreeMap::new();
 		for (id, op) in ops {
 			match op {
 				Op::FileCreate { .. } => {
 					res!(map.entry(*id).or_default().insert(0..1, ()));
 				},
-				Op::Splice { remove, .. } => {
+				Op::Splice { remove, insert, .. } => {
+					if yielded.contains(id) {
+						if !insert.is_empty() {
+							res!(map.entry(*id).or_default()
+								.insert(0..insert.len() as u64, ()));
+						}
+						continue;
+					}
 					for r in remove {
 						if r.is_empty() {
 							continue;
