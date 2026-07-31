@@ -87,6 +87,7 @@
 pub mod blur;
 pub mod colour;
 pub mod heif;
+pub mod hevc;
 pub mod jpeg;
 pub mod mp4;
 pub mod path;
