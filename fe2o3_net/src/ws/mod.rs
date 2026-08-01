@@ -9,5 +9,6 @@ pub use self::core::{
     encode_message,
     read_message,
     WebSocket,
+    WebSocketLimits,
     WebSocketMessage,
 };

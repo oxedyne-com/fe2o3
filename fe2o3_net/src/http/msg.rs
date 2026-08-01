@@ -455,7 +455,15 @@ impl HttpMessage {
                 }
 
                 if content_length > 0 {
-                    let mut body = Vec::with_capacity(content_length);
+                    // Reserve for the body the peer declares, but only as far as
+                    // `HTTP_BODY_RESERVE_MAX`: a caller that set no `max_body_bytes` -- an
+                    // outbound client, or a test -- would otherwise hand a stranger's header
+                    // straight to the allocator, and a `Content-Length` of a terabyte costs
+                    // nothing to write. The vector still grows to whatever genuinely arrives; all
+                    // that is given up is one reservation on a body that large.
+                    let mut body = Vec::with_capacity(
+                        std::cmp::min(content_length, constant::HTTP_BODY_RESERVE_MAX),
+                    );
                     body.extend_from_slice(&remnant);
                     let mut bytes_read = body.len();
 

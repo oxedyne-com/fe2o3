@@ -18,6 +18,7 @@ use oxedyne_fe2o3_net::{
         connect_request,
         encode_message,
         read_message,
+        WebSocketLimits,
         WebSocketMessage,
     },
 };
@@ -138,7 +139,7 @@ async fn spawn_echo_upstream(saw: Arc<Mutex<UpstreamSaw>>) -> Outcome<SocketAddr
         // Echo until told otherwise.
         let mut buffer = Vec::new();
         loop {
-            let msg = match read_message(&mut stream, &mut buffer, 1024).await {
+            let msg = match read_message(&mut stream, &mut buffer, 1024, WebSocketLimits::default()).await {
                 Ok(Some(m)) => m,
                 Ok(None) => return,
                 Err(e) => {
@@ -255,7 +256,7 @@ async fn test_ws_route_relays_handshake_and_bytes_00() -> Outcome<()> {
     let out = res!(client_frame(&WebSocketMessage::Text("oxe1:hello".to_string())));
     res!(browser.write_all(&out).await, IO, Network, Write);
     let mut buffer = Vec::new();
-    match res!(read_message(&mut browser, &mut buffer, 1024).await) {
+    match res!(read_message(&mut browser, &mut buffer, 1024, WebSocketLimits::default()).await) {
         Some(WebSocketMessage::Text(txt)) => assert_eq!(txt, "oxe1:hello"),
         other => return Err(err!("Expected the echo, got {:?}.", other; Test, Mismatch)),
     }
@@ -263,7 +264,7 @@ async fn test_ws_route_relays_handshake_and_bytes_00() -> Outcome<()> {
     // And a second one, to show the tunnel is still open rather than one-shot.
     let out = res!(client_frame(&WebSocketMessage::Text("second".to_string())));
     res!(browser.write_all(&out).await, IO, Network, Write);
-    match res!(read_message(&mut browser, &mut buffer, 1024).await) {
+    match res!(read_message(&mut browser, &mut buffer, 1024, WebSocketLimits::default()).await) {
         Some(WebSocketMessage::Text(txt)) => assert_eq!(txt, "second"),
         other => return Err(err!("Expected the second echo, got {:?}.", other; Test, Mismatch)),
     }
@@ -283,13 +284,13 @@ async fn test_ws_route_relays_handshake_and_bytes_00() -> Outcome<()> {
     // Closing from the far end ends the relay.
     let out = res!(client_frame(&WebSocketMessage::Text("bye".to_string())));
     res!(browser.write_all(&out).await, IO, Network, Write);
-    match res!(read_message(&mut browser, &mut buffer, 1024).await) {
+    match res!(read_message(&mut browser, &mut buffer, 1024, WebSocketLimits::default()).await) {
         Some(WebSocketMessage::Close(_, _)) => (),
         other => return Err(err!(
             "Expected the upstream's close frame, got {:?}.", other; Test, Mismatch)),
     }
     // And with the upstream gone, the client's side ends too.
-    match res!(read_message(&mut browser, &mut buffer, 1024).await) {
+    match res!(read_message(&mut browser, &mut buffer, 1024, WebSocketLimits::default()).await) {
         None => (),
         other => return Err(err!(
             "Expected the relay to close after the upstream did, got {:?}.", other;

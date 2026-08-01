@@ -56,6 +56,78 @@ use tokio::{
 };
 
 
+/// Bounds on what a peer may make a websocket reader allocate.
+///
+/// Both numbers are needed. A frame declares its own payload length, so the frame bound stops one
+/// frame naming a size no machine can honour; but a message may arrive as any number of
+/// continuation frames, each of them under the frame bound, so the message bound stops a peer
+/// reaching the same total in instalments.
+///
+/// The defaults are [`constant::WEBSOCKET_MAX_FRAME_BYTES`] and
+/// [`constant::WEBSOCKET_MAX_MESSAGE_BYTES`]. An application that knows its own traffic can raise
+/// or lower them; there is deliberately no way to express "no bound".
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WebSocketLimits {
+    /// Most a single frame may declare, in bytes.
+    pub max_frame:  usize,
+    /// Most an assembled message may reach, in bytes.
+    pub max_msg:    usize,
+}
+
+impl Default for WebSocketLimits {
+    fn default() -> Self {
+        Self {
+            max_frame:  constant::WEBSOCKET_MAX_FRAME_BYTES,
+            max_msg:    constant::WEBSOCKET_MAX_MESSAGE_BYTES,
+        }
+    }
+}
+
+impl WebSocketLimits {
+
+    /// Bounds a message at `max_msg` bytes, and each of its frames at the same number.
+    ///
+    /// The common case: an application knows how big its largest message is and does not care how
+    /// the peer chooses to fragment it.
+    pub fn new(max_msg: usize) -> Self {
+        Self {
+            max_frame:  max_msg,
+            max_msg,
+        }
+    }
+
+    /// Refuses a frame whose declared payload length is over the frame bound.
+    ///
+    /// The length is checked while it is still the 64-bit number that came off the wire, because
+    /// narrowing it first would truncate on a 32-bit target: a declared 2^32 + 1 bytes becomes one
+    /// byte, and the frame passes a bound it is vastly over. Nothing is allocated until this
+    /// returns.
+    pub fn check_frame(&self, declared: u64) -> Outcome<()> {
+        if declared > self.max_frame as u64 {
+            return Err(err!(
+                "A websocket frame declares a payload of {} bytes, over the {} byte frame limit.",
+                declared, self.max_frame;
+            IO, Network, Invalid, Input, Wire, TooBig));
+        }
+        Ok(())
+    }
+
+    /// Refuses a message whose assembled payload would be over the message bound.
+    ///
+    /// Called with what is already buffered plus what the next frame declares, so a run of legal
+    /// continuation frames is stopped at the one that would take the total past the bound, before
+    /// that frame is allocated for.
+    pub fn check_msg(&self, total: usize) -> Outcome<()> {
+        if total > self.max_msg {
+            return Err(err!(
+                "A websocket message would reach {} bytes, over the {} byte message limit.",
+                total, self.max_msg;
+            IO, Network, Invalid, Input, Wire, TooBig));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 pub enum WebSocketMessage {
     Text(String),
@@ -266,12 +338,19 @@ pub fn encode_message(
 /// before the message is returned, so the same buffer can be reused for the next call. `Ok(None)`
 /// means the peer closed the connection.
 ///
+/// `limits` bounds what the peer can make this allocate. Every frame declares its own payload
+/// length, and that number is checked against [`WebSocketLimits`] before a byte is reserved for it,
+/// so a frame announcing more than the connection will accept costs nothing but the eight bytes of
+/// header it was declared in. An error from either bound carries the `TooBig` tag, which is how
+/// [`WebSocket::read`] knows to answer with a 1009 close.
+///
 /// A free function so that the read half of a split stream can be decoded by a task that never
 /// touches the write half.
 pub async fn read_message<R: AsyncRead + Unpin>(
     stream:     &mut R,
     buffer:     &mut Vec<u8>,
     chunk_size: usize,
+    limits:     WebSocketLimits,
 )
     -> Outcome<Option<WebSocketMessage>>
 {
@@ -298,9 +377,10 @@ pub async fn read_message<R: AsyncRead + Unpin>(
 
         // Extract the FIN bit and opcode from the header byte.
         is_final_frame = (header_byte[0] & 0x80) != 0;
+        let frame_opcode = header_byte[0] & 0x0F;
 
         if opcode == 0 {
-            opcode = header_byte[0] & 0x0F;
+            opcode = frame_opcode;
         }
 
         // Read the second byte of the frame header.
@@ -315,9 +395,11 @@ pub async fn read_message<R: AsyncRead + Unpin>(
             IO, Network, Read, Wire)),
         }
 
-        // Extract the payload length and mask flag from the length byte.
+        // Extract the payload length and mask flag from the length byte. The length stays 64 bits
+        // wide until it has been checked, since narrowing it first would truncate on a 32-bit
+        // target and let a huge declaration through as a small one.
         let masked = (length_byte[0] & 0x80) != 0;
-        let payload_length = match length_byte[0] & 0x7F {
+        let declared: u64 = match length_byte[0] & 0x7F {
             127 => {
                 // 64-bit extended payload length.
                 let mut extended_length_bytes = [0u8; 8];
@@ -330,7 +412,7 @@ pub async fn read_message<R: AsyncRead + Unpin>(
                         "While trying to read the 64-bit extended payload length.";
                     IO, Network, Read, Wire)),
                 }
-                u64::from_be_bytes(extended_length_bytes) as usize
+                u64::from_be_bytes(extended_length_bytes)
             }
             126 => {
                 // 16-bit extended payload length.
@@ -344,10 +426,32 @@ pub async fn read_message<R: AsyncRead + Unpin>(
                         "While trying to read the 16-bit extended payload length.";
                     IO, Network, Read, Wire)),
                 }
-                u16::from_be_bytes(extended_length_bytes) as usize
+                u16::from_be_bytes(extended_length_bytes) as u64
             }
-            len => len as usize,
+            len => len as u64,
         };
+
+        // A control frame carries at most 125 bytes and is never fragmented (RFC 6455 §5.5), so a
+        // control opcode declaring more than that is malformed however generous the limits are.
+        if (frame_opcode & 0x08) != 0 && declared > constant::WEBSOCKET_MAX_CONTROL_FRAME_BYTES {
+            return Err(err!(
+                "A websocket control frame with opcode {:#x} declares a payload of {} bytes; \
+                RFC 6455 §5.5 allows at most {}.",
+                frame_opcode, declared, constant::WEBSOCKET_MAX_CONTROL_FRAME_BYTES;
+            IO, Network, Invalid, Input, Wire, TooBig));
+        }
+
+        // Bound the frame, and then the message the frame would join, before anything is allocated
+        // to hold either. The peer's number is not believed until it has been agreed to.
+        //
+        // `TooBig` is repeated on the wrapper deliberately: `Error::tags` reads the outermost frame
+        // of an error and not the chain beneath it, so a tag that is only on the inner error is a
+        // tag no caller will find, and answering with a 1009 close depends on finding it.
+        res!(limits.check_frame(declared),
+            IO, Network, Invalid, Input, Wire, TooBig);
+        let payload_length = declared as usize; // Narrowing is safe: `check_frame` bounded it.
+        res!(limits.check_msg(buffer.len().saturating_add(payload_length)),
+            IO, Network, Invalid, Input, Wire, TooBig);
 
         // Read the masking key if the frame is masked.
         let mut masking_key = [0u8; 4];
@@ -461,6 +565,7 @@ pub struct WebSocket<
     pub handler:    WSH,
     chunk_size:     usize,
     chunk_thresh:   usize,
+    limits:         WebSocketLimits,
     phantom1:       PhantomData<UID>,
     phantom2:       PhantomData<ENC>,
     phantom3:       PhantomData<KH>,
@@ -495,6 +600,7 @@ impl<
             handler,
             chunk_size,
             chunk_thresh,
+            limits:         WebSocketLimits::default(),
             phantom1:       PhantomData,
             phantom2:       PhantomData,
             phantom3:       PhantomData,
@@ -518,6 +624,7 @@ impl<
             handler,
             chunk_size,
             chunk_thresh,
+            limits:         WebSocketLimits::default(),
             phantom1:       PhantomData,
             phantom2:       PhantomData,
             phantom3:       PhantomData,
@@ -527,6 +634,16 @@ impl<
 
     pub fn is_server(&self) -> bool { self.is_server }
     pub fn is_client(&self) -> bool { !self.is_server }
+
+    /// The bounds applied to incoming messages.
+    pub fn limits(&self) -> WebSocketLimits { self.limits }
+
+    /// Replaces the bounds applied to incoming messages, for an application whose traffic differs
+    /// from the defaults in [`WebSocketLimits`].
+    pub fn with_limits(mut self, limits: WebSocketLimits) -> Self {
+        self.limits = limits;
+        self
+    }
 
     pub async fn connect(
         &mut self,
@@ -611,15 +728,43 @@ impl<
 
     /// Reads one message from the stream, however many frames it arrives in. `Ok(None)` means the
     /// peer closed the connection.
+    ///
+    /// A message that breaches this socket's [`WebSocketLimits`] is answered with a close frame
+    /// carrying status 1009, which is what RFC 6455 §7.4.1 reserves for a message too big to
+    /// process, and is the only notice the peer gets that its message was refused rather than
+    /// lost. The refusal leaves the stream part way through a frame whose payload was never read,
+    /// so there is nothing to resynchronise to and the connection ends: the close frame is the
+    /// last thing sent on it.
     pub async fn read(&mut self) -> Outcome<Option<WebSocketMessage>> {
         let chunk_size = self.chunk_size;
+        let limits = self.limits;
         let mut buffer = std::mem::take(&mut self.buffer);
         let result = read_message(
             self.stream.as_mut().get_mut(),
             &mut buffer,
             chunk_size,
+            limits,
         ).await;
         self.buffer = buffer;
+        if let Err(e) = &result {
+            if e.tags().contains(&ErrTag::TooBig) {
+                // Whatever was gathered of the refused message is dropped here rather than left to
+                // join the front of whatever is read next.
+                self.buffer.clear();
+                let close = WebSocketMessage::Close(
+                    Some(WebSocketStatusCode::MessageTooBig),
+                    Some(fmt!("Message too big")),
+                );
+                if let Err(e) = self.send(&close).await {
+                    // The error being returned is the peer's, and stands whether or not it heard
+                    // about it.
+                    error!(err!(e,
+                        "While sending a 1009 close frame to a peer whose message was over the \
+                        limit.";
+                    IO, Network, Wire, Write));
+                }
+            }
+        }
         result
     }
 
@@ -923,9 +1068,21 @@ impl<
                             break;
                         }
                         Err(e) => {
+                            // Asked before the wrap, because wrapping puts the outer frame's tags
+                            // in front of the ones underneath and `Error::tags` reads no deeper.
+                            let too_big = e.tags().contains(&ErrTag::TooBig);
                             let e = err!(e,
                                 "{}: Error reading websocket message:", id;
                             IO, Network, Wire, Read);
+                            // A message over the limits was refused part way through a frame, so
+                            // the stream no longer starts on a frame boundary and every further
+                            // read would be of payload mistaken for a header. `read` has already
+                            // sent the 1009 close; the connection ends here rather than counting
+                            // this as one error among a permitted few.
+                            if too_big {
+                                error!(e);
+                                break;
+                            }
                             let result = self.response_handler(
                                 Err(e),
                                 &mut err_count,
@@ -1108,7 +1265,7 @@ mod tests {
         ));
         let mut src = &byts[..];
         let mut buffer = Vec::new();
-        match res!(read_message(&mut src, &mut buffer, 1024).await) {
+        match res!(read_message(&mut src, &mut buffer, 1024, WebSocketLimits::default()).await) {
             Some(WebSocketMessage::Text(txt)) => assert_eq!(txt, "the ceremony begins"),
             other => return Err(err!(
                 "Expected a text message, got {:?}.", other; Test, Mismatch)),
@@ -1132,7 +1289,7 @@ mod tests {
         assert_eq!(byts[204], 0x80, "the last frame carries FIN and the continuation opcode");
         let mut src = &byts[..];
         let mut buffer = Vec::new();
-        match res!(read_message(&mut src, &mut buffer, 64).await) {
+        match res!(read_message(&mut src, &mut buffer, 64, WebSocketLimits::default()).await) {
             Some(WebSocketMessage::Binary(got)) => {
                 assert_eq!(got.len(), 300);
                 assert_eq!(got, payload.as_bytes().to_vec());
@@ -1151,7 +1308,7 @@ mod tests {
         let byts = vec![0x80, 0x02, b'h', b'i'];
         let mut src = &byts[..];
         let mut buffer = Vec::new();
-        assert!(read_message(&mut src, &mut buffer, 1024).await.is_err(),
+        assert!(read_message(&mut src, &mut buffer, 1024, WebSocketLimits::default()).await.is_err(),
             "a lone continuation frame must be refused, not unwound");
         Ok(())
     }
@@ -1162,8 +1319,175 @@ mod tests {
         let byts: Vec<u8> = Vec::new();
         let mut src = &byts[..];
         let mut buffer = Vec::new();
-        assert!(res!(read_message(&mut src, &mut buffer, 1024).await).is_none(),
+        assert!(res!(read_message(&mut src, &mut buffer, 1024, WebSocketLimits::default()).await)
+            .is_none(),
             "an immediately-closed stream must read as None");
+        Ok(())
+    }
+
+    /// The header of a frame that declares more than the connection accepts, with as much of the
+    /// payload as `tail` says following it. Written by hand rather than by `encode_message`,
+    /// because a length no honest sender would write is the whole point.
+    fn oversize_frame_header(declared: u64, tail: &[u8]) -> Vec<u8> {
+        let mut byts = vec![0x82]; // FIN, binary.
+        byts.push(127); // 64-bit extended length follows.
+        byts.extend_from_slice(&declared.to_be_bytes());
+        byts.extend_from_slice(tail);
+        byts
+    }
+
+    /// A frame declaring more than the limit allows is refused, and refused on the strength of the
+    /// declaration alone: the reader stops at the header, so the bytes that followed it are still
+    /// unread when the error comes back.
+    ///
+    /// Before the bound existed this returned `Ok(None)` -- the reader allocated the megabyte the
+    /// frame asked for, found the stream ended, and reported a closed connection.
+    #[tokio::test]
+    async fn test_read_message_refuses_oversize_frame_00() -> Outcome<()> {
+        let limits = WebSocketLimits::new(1_024);
+        let byts = oversize_frame_header(1_025, b"payload");
+        let mut src = &byts[..];
+        let mut buffer = Vec::new();
+        let result = read_message(&mut src, &mut buffer, 256, limits).await;
+        match result {
+            Err(e) => assert!(e.tags().contains(&ErrTag::TooBig),
+                "an over-limit frame must be tagged TooBig, so that a 1009 close can answer it; \
+                got tags {:?}", e.tags()),
+            Ok(other) => return Err(err!(
+                "Expected a frame of 1025 bytes to be refused against a 1024 byte limit, got \
+                {:?}.", other; Test, Mismatch)),
+        }
+        assert_eq!(src.len(), 7,
+            "the seven payload bytes must be left unread: the frame was refused on its declared \
+            length, before anything was reserved or read for it");
+        assert!(buffer.is_empty(), "nothing of a refused frame belongs in the message buffer");
+        Ok(())
+    }
+
+    /// A frame declaring more bytes than the machine has memory for is refused just the same, and
+    /// the run of this test is itself the proof that the check precedes the allocation: a reader
+    /// that allocated first would abort the process here, and an abort cannot be caught or
+    /// reported. Nothing but a check before the `vec!` can make this test pass.
+    #[tokio::test]
+    async fn test_read_message_refuses_impossible_length_00() -> Outcome<()> {
+        // The largest length RFC 6455 §5.2 permits: the most significant bit must be clear.
+        let byts = oversize_frame_header(0x7FFF_FFFF_FFFF_FFFF, &[]);
+        let mut src = &byts[..];
+        let mut buffer = Vec::new();
+        assert!(read_message(&mut src, &mut buffer, 1_024, WebSocketLimits::default()).await
+            .is_err(),
+            "a frame declaring eight exabytes must be refused, not reserved for");
+        Ok(())
+    }
+
+    /// A large frame that is nonetheless within the limits still arrives whole. A bound that is
+    /// only ever proved by what it rejects could be a reader that rejects everything.
+    #[tokio::test]
+    async fn test_read_message_allows_large_frame_within_limits_00() -> Outcome<()> {
+        let payload: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        // One frame, so the 64-bit length branch is the one exercised.
+        let byts = res!(encode_message(
+            &WebSocketMessage::Binary(payload.clone()), false, 1_000_000, 1_000_000,
+        ));
+        assert_eq!(byts[1] & 0x7F, 127, "a payload this size is framed with a 64-bit length");
+        let limits = WebSocketLimits::new(256 * 1_024);
+        let mut src = &byts[..];
+        let mut buffer = Vec::new();
+        match res!(read_message(&mut src, &mut buffer, 4_096, limits).await) {
+            Some(WebSocketMessage::Binary(got)) => assert_eq!(got, payload),
+            other => return Err(err!(
+                "Expected a 200,000 byte binary message, got {:?}.", other; Test, Mismatch)),
+        }
+        Ok(())
+    }
+
+    /// Frames that each pass the frame bound can still add up past the message bound, since a
+    /// message may be fragmented into as many continuations as the peer likes. The message bound
+    /// is what stops the total, and it stops it at the frame that would breach it rather than
+    /// after.
+    #[tokio::test]
+    async fn test_read_message_refuses_oversize_message_00() -> Outcome<()> {
+        // Four frames of 1,000 bytes each: every one of them inside the 1,024 byte frame bound,
+        // and together over the 2,048 byte message bound.
+        let payload = vec![b'x'; 4_000];
+        let byts = res!(encode_message(
+            &WebSocketMessage::Binary(payload), false, 1_000, 1_000,
+        ));
+        assert_eq!(byts[0], 0x02, "the first of several frames carries the opcode and no FIN");
+        let limits = WebSocketLimits {
+            max_frame:  1_024,
+            max_msg:    2_048,
+        };
+        let mut src = &byts[..];
+        let mut buffer = Vec::new();
+        match read_message(&mut src, &mut buffer, 256, limits).await {
+            Err(e) => assert!(e.tags().contains(&ErrTag::TooBig),
+                "an over-limit message must be tagged TooBig; got tags {:?}", e.tags()),
+            Ok(other) => return Err(err!(
+                "Expected four 1,000 byte frames to breach a 2,048 byte message limit, got {:?}.",
+                other; Test, Mismatch)),
+        }
+        // Two frames were taken; the third was refused on its four-byte header, so the rest of
+        // that frame and the whole of the fourth are still unread.
+        assert_eq!(src.len(), 2 * (4 + 1_000) - 4,
+            "the reader must stop at the header of the frame that would breach the limit");
+        Ok(())
+    }
+
+    /// Every frame of a fragmented message is bounded, not merely the first: a peer that opens
+    /// with a modest frame and continues with an enormous one is refused on the continuation.
+    #[tokio::test]
+    async fn test_read_message_bounds_continuation_frames_00() -> Outcome<()> {
+        let mut byts = vec![0x02, 0x02, b'h', b'i']; // Binary, no FIN, two bytes.
+        // A continuation frame with FIN set, declaring far more than the bound.
+        byts.push(0x80);
+        byts.push(127);
+        byts.extend_from_slice(&(1u64 << 40).to_be_bytes());
+        let mut src = &byts[..];
+        let mut buffer = Vec::new();
+        assert!(read_message(&mut src, &mut buffer, 256, WebSocketLimits::new(4_096)).await.is_err(),
+            "a continuation frame is as capable of declaring a huge payload as a first frame");
+        Ok(())
+    }
+
+    /// RFC 6455 §5.5 caps a control frame at 125 bytes, so a ping declaring more than that is
+    /// malformed whatever the connection's own limits say. Checked separately because a generous
+    /// limit would otherwise let a peer make the reader hold megabytes for a frame the protocol
+    /// says is small.
+    #[tokio::test]
+    async fn test_read_message_refuses_oversize_control_frame_00() -> Outcome<()> {
+        // FIN, ping, 16-bit length of 126 -- one byte over what a control frame may carry.
+        let mut byts = vec![0x89, 126];
+        byts.extend_from_slice(&126u16.to_be_bytes());
+        byts.extend_from_slice(&vec![0u8; 126]);
+        let mut src = &byts[..];
+        let mut buffer = Vec::new();
+        assert!(read_message(&mut src, &mut buffer, 256, WebSocketLimits::default()).await.is_err(),
+            "a control frame over 125 bytes must be refused");
+        Ok(())
+    }
+
+    /// The defaults bound both dimensions, and the message bound is the looser of the two -- a
+    /// message bound below the frame bound would make the frame bound unreachable and the pair
+    /// misleading.
+    #[test]
+    fn test_websocket_limits_defaults_00() {
+        let limits = WebSocketLimits::default();
+        assert_eq!(limits.max_frame, constant::WEBSOCKET_MAX_FRAME_BYTES);
+        assert_eq!(limits.max_msg, constant::WEBSOCKET_MAX_MESSAGE_BYTES);
+        assert!(limits.max_msg >= limits.max_frame,
+            "a message must be allowed to be at least as large as one frame of it");
+    }
+
+    /// The declared length is checked as the 64-bit number it arrived as. Narrowed to a `usize`
+    /// first, this length would be one byte on a 32-bit target and would pass any bound at all.
+    #[test]
+    fn test_websocket_limits_check_frame_is_64_bit_00() -> Outcome<()> {
+        let limits = WebSocketLimits::new(1_024);
+        assert!(limits.check_frame((1u64 << 32) + 1).is_err(),
+            "a length that truncates to 1 in 32 bits must still be refused");
+        assert!(limits.check_frame(1_024).is_ok(), "a length exactly at the bound is allowed");
+        assert!(limits.check_frame(1_025).is_err(), "a length one over the bound is refused");
         Ok(())
     }
 }
