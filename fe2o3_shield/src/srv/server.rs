@@ -122,6 +122,21 @@ impl<
     pub async fn bind(&self) -> Outcome<Arc<UdpSocket>> {
         let port = self.context.cfg.server_port_udp;
         let ip = res!(self.context.cfg.bind_ip());
+        // The proof of work on every packet is bound to the address it was sent
+        // *to* as well as the address it came from, and a socket on the
+        // wildcard address cannot say which of this machine's addresses a
+        // datagram arrived at. A server bound there would therefore reject
+        // every packet, which is a worse way to find out than this one.
+        if ip.is_unspecified() {
+            return Err(err!(
+                "server_address is '{}', and a Shield server cannot listen on the \
+                wildcard address: the proof of work on each packet is bound to the \
+                address the packet was sent to, and a wildcard socket is not told \
+                which of this machine's addresses that was. Name one, or write \
+                'local' for whichever this machine has on its network.",
+                self.context.cfg.server_address;
+                Invalid, Configuration, Network));
+        }
         let addr = SocketAddr::new(ip, port);
         match UdpSocket::bind(addr).await {
             Ok(sock) => Ok(Arc::new(sock)),

@@ -42,7 +42,10 @@ use oxedyne_fe2o3_core::{
 use oxedyne_fe2o3_syntax::SyntaxRef;
 
 use std::{
-    net::SocketAddr,
+    net::{
+        IpAddr,
+        SocketAddr,
+    },
     sync::Arc,
     time::Duration,
 };
@@ -112,6 +115,40 @@ impl<
         self.sock.clone()
     }
 
+    /// The address this client's packets will appear to have come from, at
+    /// `trg_addr`.
+    ///
+    /// A socket bound to the unspecified address -- which is what a peer that
+    /// does not care which interface it leaves by asks for -- reports that
+    /// address as its own, and the receiver sees the interface the routing
+    /// table actually chose. The proof of work is bound to both ends'
+    /// addresses, so the two have to agree on which one the sender has, and
+    /// the sender is the one that can find out: a throwaway socket connected
+    /// to the same destination is given the same source address by the same
+    /// routing table.
+    pub async fn source_ip(&self, trg_addr: SocketAddr) -> Outcome<IpAddr> {
+        let local = res!(self.local_addr());
+        if !local.ip().is_unspecified() {
+            return Ok(local.ip());
+        }
+        let any = match trg_addr {
+            SocketAddr::V4(..) => "0.0.0.0:0",
+            SocketAddr::V6(..) => "[::]:0",
+        };
+        let probe = match UdpSocket::bind(any).await {
+            Ok(s) => s,
+            Err(e) => return Err(err!(e,
+                "Could not find which address packets to {} leave by.", trg_addr;
+                IO, Network)),
+        };
+        if let Err(e) = probe.connect(trg_addr).await {
+            return Err(err!(e,
+                "Could not find which address packets to {} leave by.", trg_addr;
+                IO, Network));
+        }
+        Ok(res!(probe.local_addr(), IO, Network).ip())
+    }
+
     /// Send a payload and return the message identifier it went out under.
     ///
     /// Nothing is waited for. A caller with something to tell rather than to
@@ -125,7 +162,7 @@ impl<
         -> Outcome<<P::ID as IdTypes<ML, SL, UL>>::M>
     {
         let mid = <P::ID as IdTypes<ML, SL, UL>>::M::randef();
-        let src_ip = res!(self.local_addr()).ip();
+        let src_ip = res!(self.source_ip(trg_addr).await);
         let packets = res!(self.protocol.build_app(
             self.syntax.clone(),
             AppMsgKind::Request,
@@ -155,7 +192,6 @@ impl<
         -> Outcome<Vec<u8>>
     {
         let deadline = tokio::time::Instant::now() + wait;
-        let src_ip = res!(self.local_addr()).ip();
         let mut buf = [0u8; constant::UDP_BUFFER_SIZE];
         loop {
             let left = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -176,6 +212,9 @@ impl<
                     IO, Network)),
                 Ok(Ok(pair)) => pair,
             };
+            // The address the answer was sent to is the one the question left
+            // by, which is what the sender bound its proof of work to.
+            let src_ip = res!(self.source_ip(trg_addr).await);
             let accepted = match self.protocol.clone().accept(&buf[..n], trg_addr, src_ip) {
                 Ok(Some(a)) => a,
                 Ok(None) => continue, // Dropped, or the message is still incomplete.
