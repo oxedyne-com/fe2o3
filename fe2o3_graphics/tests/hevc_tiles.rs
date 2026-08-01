@@ -5,8 +5,8 @@
 //! implies, but the only thing that says a *picture* is right is another decoder's picture.
 //!
 //! So this decodes real HEIC photographs and compares them, sample by sample, with what `ffmpeg`
-//! makes of the same file. It is driven by an environment variable naming a directory of them,
-//! because no checkout carries a photograph:
+//! makes of the same file -- the whole way, both loop filters included. It is driven by an
+//! environment variable naming a directory of them, because no checkout carries a photograph:
 //!
 //! ```bash
 //! HEVC_CORPUS=/srv/nfs4/Gallery/2021 \
@@ -121,13 +121,14 @@ fn compare(file: &Path, out: &Path) -> Outcome<Option<Verdict>> {
 	// make an exact answer impossible and hide a decoder that was nearly right.
 	let raw = out.join("reference.yuv");
 	let _ = std::fs::remove_file(&raw);
-	// With the loop filters turned off, because this decoder does not run them yet. Their whole
-	// contribution to a tile of this corpus is 8,722 samples out of 262,144, none by more than
-	// two, so leaving them in would bury the faults being hunted under a haze of ones and twos.
-	let filters = std::env::var("HEVC_FILTERS").is_ok();
+	// With the loop filters on, because this decoder runs them. `HEVC_NO_FILTERS` turns them off
+	// at both ends, which is how a fault in the codec proper is separated from one in the two
+	// filters over it -- their whole contribution to a tile of this corpus is 8,722 samples out of
+	// 262,144, none by more than two, so with a filter wrong the codec's own faults hide under a
+	// haze of ones and twos.
 	let mut cmd = Command::new("ffmpeg");
 	cmd.args(["-v", "error"]);
-	if !filters {
+	if std::env::var("HEVC_NO_FILTERS").is_ok() {
 		cmd.args(["-skip_loop_filter", "all"]);
 	}
 	let run = res!(cmd

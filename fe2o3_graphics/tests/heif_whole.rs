@@ -109,7 +109,7 @@ fn test_a_whole_photograph_is_the_photograph_00() -> Outcome<()> {
 			let raw = out.join("tile.yuv");
 			let _ = std::fs::remove_file(&raw);
 			let run = res!(Command::new("ffmpeg")
-				.args(["-v", "error", "-skip_loop_filter", "all", "-i"])
+				.args(["-v", "error", "-i"])
 				.arg(file)
 				.args(["-map", &fmt!("0:v:{}", n), "-frames:v", "1",
 					"-pix_fmt", "yuv420p", "-f", "rawvideo", "-y"])

@@ -56,6 +56,7 @@
 pub mod cabac;
 pub mod colour;
 pub mod decode;
+pub mod filter;
 pub mod intra;
 pub mod scan;
 pub mod transform;

@@ -35,6 +35,7 @@
 //! asked and is impossible to get subtly wrong.
 
 use crate::hevc::{
+	filter,
 	cabac::{
 		Cabac,
 		Contexts,
@@ -208,6 +209,14 @@ struct Frame<'a> {
 	mode:	Vec<u8>,
 	/// The luma quantisation parameter of the coding unit covering each.
 	qp:	Vec<i8>,
+	/// Whether each four-sample block has a transform boundary on its left, and on its top.
+	///
+	/// Every prediction boundary in an intra picture is a transform boundary too -- a coding unit
+	/// split into four prediction blocks has its transform tree forced down to match -- so
+	/// recording the transform blocks records both.
+	edge_v:	Vec<bool>,
+	/// The same for the top of each.
+	edge_h:	Vec<bool>,
 
 	/// The filter settings of each coding tree block, for the pass at the end.
 	sao:	Vec<Sao>,
@@ -277,6 +286,8 @@ pub fn picture(sps: &Sps, pps: &Pps, slice: &Slice, data: &[u8]) -> Outcome<Pict
 		ct_depth: vec![0; gw * gh],
 		mode:	vec![intra::DC; gw * gh],
 		qp:	vec![slice.qp as i8; gw * gh],
+		edge_v:	vec![false; gw * gh],
+		edge_h:	vec![false; gw * gh],
 		sao:	vec![Sao::default(); ctbs_w * ctbs_h],
 		ctbs_w,
 		ctbs_h,
@@ -347,6 +358,23 @@ pub fn picture(sps: &Sps, pps: &Pps, slice: &Slice, data: &[u8]) -> Outcome<Pict
 				"Row {} of blocks is {} bytes and reading it took {}. The row was read out of \
 				step.", ry, have, used; Invalid, Input, Decode));
 		}
+	}
+	// The two in-loop filters, in the order the specification runs them: every block boundary
+	// softened, and then the offsets that put back what quantisation rounded away. The encoder ran
+	// both, so a picture without them is not a rougher picture but a different one.
+	if slice.deblocking {
+		let edges = filter::Edges {
+			gw:	frame.gw,
+			gh:	frame.gh,
+			vertical:	&frame.edge_v,
+			horizontal:	&frame.edge_h,
+			qp:	&frame.qp,
+			chroma_offset:	[pps.cb_qp_offset, pps.cr_qp_offset],
+		};
+		filter::deblock(&mut frame.pic, &edges, sps.luma_bits as u32);
+	}
+	if slice.sao_luma || slice.sao_chroma {
+		filter::sao(&mut frame.pic, &frame.sao, ctbs_w, ctb, sps.luma_bits as u32);
 	}
 	Ok(frame.pic)
 }
@@ -985,6 +1013,15 @@ impl<'a> Frame<'a> {
 				self.plane_mut(cidx).put(x + i, y + j, v as u16);
 			}
 		}
+		if !chroma {
+			// Where this block's edges are, for the deblocking filter to find later.
+			for j in (y / 4)..((y + size).div_ceil(4)).min(self.gh) {
+				self.edge_v[j * self.gw + x / 4] = true;
+			}
+			for i in (x / 4)..((x + size).div_ceil(4)).min(self.gw) {
+				self.edge_h[(y / 4) * self.gw + i] = true;
+			}
+		}
 		Ok(())
 	}
 
@@ -1395,7 +1432,7 @@ fn chroma_mode(syntax: usize, luma: u8) -> u8 {
 /// Chroma is quantised more gently than luma above a parameter of thirty, because the eye is less
 /// able to see colour noise than brightness noise -- but only up to a point, past which the two run
 /// parallel again six steps apart.
-fn chroma_qp(qpi: i32) -> i32 {
+pub fn chroma_qp(qpi: i32) -> i32 {
 	match qpi {
 		i32::MIN..=29	=> qpi,
 		30..=43		=> [29, 30, 31, 32, 33, 33, 34, 34, 35, 35, 36, 36, 37, 37][(qpi - 30) as usize],
