@@ -152,22 +152,65 @@ impl Kind {
 /// Undoes the quantiser (§8.6.3), in place.
 ///
 /// `coeffs` is the block in raster order, `size` its side, `qp` the quantisation parameter that
-/// applies to it and `depth` the bit depth of the component. Scaling lists are not applied: no
-/// photograph in the corpus carries one, and a sequence that does is refused where it is read
-/// rather than quietly decoded with the flat matrix a picture was not coded against.
-pub fn scale(coeffs: &mut [i32], size: usize, qp: i32, depth: u32) {
+/// applies to it, `depth` the bit depth of the component and `m` the scaling matrix, which is
+/// sixteen everywhere unless the sequence says otherwise.
+pub fn scale(coeffs: &mut [i32], size: usize, qp: i32, depth: u32, m: &[i32]) {
 	// Fifteen is the transform range every profile this decoder meets uses; the extended-precision
 	// flag that widens it belongs to profiles that do not appear in a photograph.
 	let shift = depth as i32 + log2(size) as i32 + 10 - 15;
 	let scale = LEVEL_SCALE[(qp % 6) as usize];
 	let up = qp / 6;
 	let round = 1i64 << (shift - 1);
-	for c in coeffs.iter_mut().take(size * size) {
+	for (i, c) in coeffs.iter_mut().take(size * size).enumerate() {
+		let factor = m.get(i).copied().unwrap_or(16) as i64;
 		// In sixty-four bits because the intermediate overflows thirty-two: a coefficient may be
 		// fifteen bits, the scale seven, and the shift up to eight more.
-		let v = (((*c as i64) * 16 * (scale as i64)) << up) + round;
+		let v = (((*c as i64) * factor * (scale as i64)) << up) + round;
 		*c = ((v >> shift).clamp(-32_768, 32_767)) as i32;
 	}
+}
+
+/// The default scaling lists (§7.4.5, Table 7-6), which is what a sequence that turns the lists on
+/// without carrying any of its own means.
+///
+/// Sixty-four values for an eight-by-eight block, in the diagonal scan's order; the sixteen and
+/// thirty-two sample matrices are this one with each value covering two or four samples each way,
+/// and the four-sample matrix is flat. The numbers climb away from the corner because the eye
+/// notices an error in the coarse detail of a block more than in the fine, so the fine detail is
+/// quantised harder.
+///
+/// The first row is for a block predicted from within the picture and the second for one predicted
+/// from another picture, which a still photograph never is -- it is here because the two are one
+/// table in the document and splitting them would invite the wrong one being used.
+pub const DEFAULT_LIST: [[u8; 64]; 2] = [
+	[
+		16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 17, 16, 17, 16, 17, 18,
+		17, 18, 18, 17, 18, 21, 19, 20, 21, 20, 19, 21, 24, 22, 22, 24,
+		24, 22, 22, 24, 25, 25, 27, 30, 27, 25, 25, 29, 31, 35, 35, 31,
+		29, 36, 41, 44, 41, 36, 47, 54, 54, 47, 65, 70, 65, 88, 88, 115,
+	],
+	[
+		16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 17, 17, 17, 17, 17, 18,
+		18, 18, 18, 18, 18, 20, 20, 20, 20, 20, 20, 20, 24, 24, 24, 24,
+		24, 24, 24, 24, 25, 25, 25, 25, 25, 25, 25, 28, 28, 28, 28, 28,
+		28, 33, 33, 33, 33, 33, 41, 41, 41, 41, 54, 54, 54, 71, 71, 91,
+	],
+];
+
+/// The default eight-by-eight scaling matrix, in raster order.
+///
+/// The published list is in the diagonal scan's order, so laying it out takes the same scan the
+/// coefficients themselves are read in.
+pub fn default_matrix(inter: bool) -> [u8; 64] {
+	let mut out = [16u8; 64];
+	let list = DEFAULT_LIST[inter as usize];
+	for (i, (x, y)) in crate::hevc::scan::positions(8, crate::hevc::scan::Order::Diagonal)
+		.iter()
+		.enumerate()
+	{
+		out[*y as usize * 8 + *x as usize] = list[i];
+	}
+	out
 }
 
 /// The base-two logarithm of a power of two.
@@ -403,8 +446,8 @@ mod tests {
 		for qp in 0..46i32 {
 			let mut low = [1i32; 16];
 			let mut high = [1i32; 16];
-			scale(&mut low, 4, qp, 8);
-			scale(&mut high, 4, qp + 6, 8);
+			scale(&mut low, 4, qp, 8, &[16; 16]);
+			scale(&mut high, 4, qp + 6, 8, &[16; 16]);
 			let doubled = (high[0] - low[0] * 2).abs() <= 1;
 			req!(doubled, true,
 				"qp {} scales to {} and qp {} to {}", qp, low[0], qp + 6, high[0]);

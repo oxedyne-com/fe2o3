@@ -126,7 +126,18 @@ impl<'a> Cabac<'a> {
 			buf,
 			at:	2,
 			range:	510,
-			offset:	((buf[0] as u32) << 1) | ((buf[1] as u32) >> 7),
+			// The specification reads nine bits into `ivlOffset` and compares it against the
+			// interval directly, reading one more bit at every renormalisation. This decoder keeps
+			// those bits **pre-read** instead -- `offset` holds `ivlOffset` shifted up by `bits`,
+			// with `bits` more of the stream already in the low end -- so a renormalisation is a
+			// subtraction from `bits` rather than a read. That is what makes it a byte-at-a-time
+			// decoder rather than a bit-at-a-time one, and it means the two bytes go in whole:
+			// `ivlOffset` is the top nine bits of them and the other seven are the window.
+			//
+			// Putting the unshifted nine-bit value here instead leaves every comparison against
+			// `range << bits` too small by a factor of 128, so the first hundred or so bins all
+			// come back as the more probable symbol and the picture is plausible and wrong.
+			offset:	((buf[0] as u32) << 8) | (buf[1] as u32),
 			bits:	7,
 		})
 	}

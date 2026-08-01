@@ -54,7 +54,9 @@
 //! ISO/IEC 14496-15 §8.3.3. Every constant below names the clause it comes from.
 
 pub mod cabac;
+pub mod decode;
 pub mod intra;
+pub mod scan;
 pub mod transform;
 
 pub use cabac::{
@@ -97,6 +99,14 @@ pub struct Unit {
 	pub layer:	u8,
 	/// The payload, after the header and with every emulation prevention byte removed.
 	pub body:	Vec<u8>,
+	/// The same payload as it arrived, escaping and all.
+	///
+	/// Kept because the entry point offsets in a slice header are counted in **escaped** bytes:
+	/// "emulation prevention bytes that appear in the slice segment data portion of the coded
+	/// slice segment NAL unit are counted as part of the slice segment data for purposes of subset
+	/// identification" (§7.4.7.1). Splitting the unescaped payload at those offsets puts every row
+	/// of blocks after the first escaped byte in the wrong place.
+	pub raw:	Vec<u8>,
 }
 
 /// What a sequence parameter set says about the pictures that follow it.
@@ -138,8 +148,15 @@ pub struct Sps {
 	pub pcm:	bool,
 	/// Whether the stronger of the two intra smoothing filters may be used at 32 by 32.
 	pub strong_smoothing:	bool,
-	/// Whether the scaling lists are in use at all, and whether this set carries its own.
+	/// Whether the scaling lists are in use at all.
+	///
+	/// **On does not mean bespoke.** Every photograph in the corpus turns them on and carries none
+	/// of its own, which means the *default* lists apply -- and those are not flat, so a decoder
+	/// that reads this as "no scaling" quantises every block wrongly and produces a picture that is
+	/// recognisable and wrong.
 	pub scaling_lists:	bool,
+	/// Whether this sequence carries lists of its own rather than taking the default ones.
+	pub own_scaling_lists:	bool,
 }
 
 /// What a picture parameter set says about the slices that reference it.
@@ -279,6 +296,7 @@ pub fn unit(raw: &[u8]) -> Outcome<Unit> {
 		kind:	(raw[0] >> 1) & 0x3f,
 		layer:	raw[1] & 0x07,
 		body:	rbsp(&raw[2..]),
+		raw:	raw[2..].to_vec(),
 	})
 }
 
@@ -298,6 +316,28 @@ pub fn rbsp(nal: &[u8]) -> Vec<u8> {
 		zeros = if b == 0 { zeros + 1 } else { 0 };
 	}
 	out
+}
+
+/// Where an unescaped position sits in the payload it was unescaped from.
+///
+/// Emulation prevention only ever *removes* bytes, so the escaped position is the unescaped one
+/// plus however many were removed before it. This walks the same state machine [`rbsp`] does rather
+/// than inverting it, because the two staying in step is the whole point.
+pub fn escaped_at(nal: &[u8], unescaped: usize) -> usize {
+	let mut out = 0usize;
+	let mut zeros = 0usize;
+	for (i, b) in nal.iter().enumerate() {
+		if out == unescaped {
+			return i;
+		}
+		if *b == 3 && zeros >= 2 {
+			zeros = 0;
+			continue;
+		}
+		out += 1;
+		zeros = if *b == 0 { zeros + 1 } else { 0 };
+	}
+	nal.len()
 }
 
 /// The parameter sets carried in an `hvcC` decoder configuration record (ISO/IEC 14496-15 §8.3.3).
@@ -641,7 +681,9 @@ pub fn sps(body: &[u8]) -> Outcome<Sps> {
 	let _max_depth_inter = res!(b.ue());
 	let max_depth_intra = res!(b.ue()) as u8;
 	let scaling_lists = res!(b.flag());
+	let mut own_scaling_lists = false;
 	if scaling_lists && res!(b.flag()) {
+		own_scaling_lists = true;
 		res!(scaling_list(&mut b));
 	}
 	let _amp = res!(b.flag());
@@ -703,6 +745,7 @@ pub fn sps(body: &[u8]) -> Outcome<Sps> {
 		pcm,
 		strong_smoothing,
 		scaling_lists,
+		own_scaling_lists,
 	})
 }
 
@@ -813,6 +856,10 @@ pub struct Slice {
 	pub data_at:	usize,
 	/// Whether the deblocking filter runs on this slice.
 	pub deblocking:	bool,
+	/// What this slice adds to the picture's own chroma quantisation offsets.
+	pub cb_qp_offset:	i32,
+	/// The same for the other chroma component.
+	pub cr_qp_offset:	i32,
 	/// Where each piece after the first begins, as the length in bytes of the piece before it.
 	///
 	/// One a row of coding tree blocks, under wavefront coding, which is what every photograph
@@ -868,9 +915,13 @@ pub fn slice(body: &[u8], sps: &Sps, pps: &Pps) -> Outcome<Slice> {
 			"A slice starts at a quantisation parameter of {}, outside the legal range.", qp;
 		Invalid, Input, Decode));
 	}
+	// The chroma offsets a slice may add to the picture's own. Kept rather than stepped over:
+	// they go into the chroma quantisation parameter of every block, so a picture whose slice
+	// carries one and whose decoder ignores it comes out with the wrong colour saturation.
+	let (mut cb_offset, mut cr_offset) = (0i32, 0i32);
 	if pps.slice_chroma_qp {
-		let _cb = res!(b.se());
-		let _cr = res!(b.se());
+		cb_offset = res!(b.se());
+		cr_offset = res!(b.se());
 	}
 	let mut deblocking = pps.deblocking;
 	if pps.deblocking_override && res!(b.flag()) {
@@ -939,6 +990,8 @@ pub fn slice(body: &[u8], sps: &Sps, pps: &Pps) -> Outcome<Slice> {
 		pps_id: pps_id as u8,
 		kind: kind as u8,
 		qp,
+		cb_qp_offset:	cb_offset,
+		cr_qp_offset:	cr_offset,
 		sao_luma,
 		sao_chroma,
 		data_at,
@@ -988,4 +1041,55 @@ mod tests {
 		req!(res!(c.se()), 2);
 		Ok(())
 	}
+}
+
+// ---------------------------------------------------------------- the whole of one picture
+
+/// Decodes one coded picture: an HEIC tile, or a whole photograph that was not cut into tiles.
+///
+/// `config` is the `hvcC` record from the container, which carries the parameter sets, and `data`
+/// is the item's bytes -- NAL units with a length prefix each, which is how a HEIF file stores
+/// them rather than with start codes.
+///
+/// The picture comes back in 4:2:0 at whatever depth it was coded, which for every photograph this
+/// was written against is eight bits. It has **not** been through the deblocking filter or the
+/// sample adaptive offset, which are separate passes over a finished picture.
+pub fn picture(record: &[u8], data: &[u8]) -> Outcome<decode::Picture> {
+	let cfg = res!(config(record));
+	let mut seq: Option<Sps> = None;
+	let mut pic: Option<Pps> = None;
+	// The parameter sets ride in the configuration record, in Annex B form.
+	for unit in &cfg.sets {
+		match unit.kind {
+			nal::SPS => seq = Some(res!(sps(&unit.body))),
+			nal::PPS => pic = Some(res!(pps(&unit.body))),
+			_ => {},
+		}
+	}
+	let sps = match seq {
+		Some(s) => s,
+		None => return Err(err!(
+			"The decoder configuration carries no sequence parameter set."; Invalid, Input)),
+	};
+	let pps = match pic {
+		Some(p) => p,
+		None => return Err(err!(
+			"The decoder configuration carries no picture parameter set."; Invalid, Input)),
+	};
+
+	// And the slice is in the item's own bytes.
+	let units = res!(split_lengthed(data, cfg.length_size));
+	for unit in &units {
+		match unit.kind {
+			nal::IDR_W_RADL | nal::IDR_N_LP | 21 => {
+				let head = res!(slice(&unit.body, &sps, &pps));
+				// The header was read from the unescaped payload; the data after it has to be
+				// handed over escaped, because that is what the entry point offsets count.
+				let at = escaped_at(&unit.raw, head.data_at);
+				return decode::picture(&sps, &pps, &head, &unit.raw[at..]);
+			},
+			_ => {},
+		}
+	}
+	Err(err!("Those bytes hold no coded slice."; Invalid, Input, Decode))
 }
