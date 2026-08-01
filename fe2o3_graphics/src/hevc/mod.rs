@@ -54,6 +54,7 @@
 //! ISO/IEC 14496-15 §8.3.3. Every constant below names the clause it comes from.
 
 pub mod cabac;
+pub mod colour;
 pub mod decode;
 pub mod intra;
 pub mod scan;

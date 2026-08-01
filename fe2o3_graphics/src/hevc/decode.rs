@@ -72,6 +72,11 @@ impl Plane {
 		Self { w, h, px: vec![0; w * h] }
 	}
 
+	/// The same, for a caller assembling a grid out of tiles.
+	pub fn empty(w: usize, h: usize) -> Self {
+		Self::new(w, h)
+	}
+
 	/// One sample, or `None` outside the plane.
 	pub fn at(&self, x: usize, y: usize) -> Option<u16> {
 		if x < self.w && y < self.h {
@@ -100,6 +105,30 @@ pub struct Picture {
 	pub cr:	Plane,
 	/// Bits a sample.
 	pub depth:	u32,
+}
+
+impl Picture {
+
+	/// Copies another picture into this one at a position, for assembling a grid of tiles.
+	///
+	/// The colour planes are half size both ways, so the position halves with them.
+	pub fn paste(&mut self, from: &Self, x: usize, y: usize) {
+		for (dst, src, at) in [
+			(&mut self.y, &from.y, (x, y)),
+			(&mut self.cb, &from.cb, (x / 2, y / 2)),
+			(&mut self.cr, &from.cr, (x / 2, y / 2)),
+		] {
+			for row in 0..src.h {
+				let into = at.1 + row;
+				if into >= dst.h {
+					break;
+				}
+				let take = src.w.min(dst.w.saturating_sub(at.0));
+				let (a, b) = (into * dst.w + at.0, row * src.w);
+				dst.px[a..a + take].copy_from_slice(&src.px[b..b + take]);
+			}
+		}
+	}
 }
 
 /// What one coding tree block's sample adaptive offset filter was told to do.

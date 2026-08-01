@@ -49,6 +49,11 @@
 //! §6.5 for the properties, §6.6.2.3 for the grid). The decoder configuration record `hvcC` carries
 //! is ISO/IEC 14496-15 §8.3.3. Each non-obvious constant below names the clause it comes from.
 
+use crate::{
+	hevc,
+	pixmap::Pixmap,
+};
+
 use oxedyne_fe2o3_core::prelude::*;
 
 use std::collections::BTreeMap;
@@ -617,8 +622,14 @@ impl<'a> Heif<'a> {
 			Invalid, Input, Decode));
 		}
 		let wide = data[1] & 1 == 1;
-		let cols = data[2] as u16 + 1;
-		let rows = data[3] as u16 + 1;
+		// Rows first, then columns (ISO/IEC 23008-12 §6.6.2.3.2). The two were the other way round
+		// here until something assembled a grid rather than merely counting its tiles: a
+		// photograph 3,088 wide out of 512-sample tiles needs seven across and five down, and
+		// reading them swapped gave five across and seven down -- which counts to the same
+		// thirty-five tiles, so the check that a grid names as many tiles as it has rows times
+		// columns passed all along.
+		let rows = data[2] as u16 + 1;
+		let cols = data[3] as u16 + 1;
 		let (width, height) = if wide {
 			if data.len() < 12 {
 				return Err(err!(
@@ -1372,4 +1383,93 @@ mod tests {
 		req!(res!(heif.size()), (3024, 4032), "A quarter turn left the measurements as they were.");
 		Ok(())
 	}
+}
+
+// ------------------------------------------------------------------- the whole photograph
+
+/// Decodes a HEIC file into a picture.
+///
+/// The whole way: the container's boxes, the coded tiles, the HEVC decoder, the assembly of the
+/// grid and the conversion out of colour difference into red, green and blue.
+///
+/// **The grid is larger than the photograph.** Tiles are whole coding units and a picture is not,
+/// so the assembled grid is rounded up to the tile size and the photograph is cropped out of its
+/// **top left**; the `ispe` property on the grid says how big the photograph is, and that is what
+/// comes back here.
+///
+/// The camera's rotation is *not* applied. Ochre and everything like it turn a photograph by the
+/// Exif orientation, and a phone writes both -- applying both turns a portrait twice.
+pub fn decode(bytes: &[u8]) -> Outcome<Pixmap> {
+	let (assembled, want) = res!(planes(bytes));
+	let full = res!(hevc::colour::rgb(&assembled, hevc::colour::Matrix::Hd, false));
+	// Cropped out of the top left, which is where the photograph sits in its grid.
+	if want.0 >= full.width() && want.1 >= full.height() {
+		return Ok(full);
+	}
+	crop(&full, want.0.min(full.width()), want.1.min(full.height()))
+}
+
+/// The same, stopping at the coded planes: brightness and colour difference, the grid assembled but
+/// **not** cropped, and the size the photograph says it is.
+///
+/// Handed out so that a caller checking the assembly against another decoder can compare what came
+/// out of the codec rather than what came out of a colour conversion neither of them is specified
+/// to agree about.
+pub fn planes(bytes: &[u8]) -> Outcome<(hevc::decode::Picture, (usize, usize))> {
+	let heif = res!(Heif::read(bytes));
+	let picture = res!(heif.picture());
+	Ok(match picture {
+		Picture::One { item, size } => {
+			let config = res!(heif.config(item));
+			let data = res!(heif.data(item));
+			(res!(hevc::picture(config, &data)), (size.0 as usize, size.1 as usize))
+		},
+		Picture::Tiled { grid, tiles } => {
+			let first = match tiles.first() {
+				Some(t) => *t,
+				None => return Err(err!("A grid with no tiles in it."; Invalid, Input, Decode)),
+			};
+			let config = res!(heif.config(first));
+			// One tile decoded first, to learn how big a tile is; every tile of a grid shares one
+			// decoder configuration, so they are all this size.
+			let data = res!(heif.data(first));
+			let one = res!(hevc::picture(config, &data));
+			let (tw, th) = (one.y.w, one.y.h);
+			let (gw, gh) = (tw * grid.cols as usize, th * grid.rows as usize);
+			let mut out = hevc::decode::Picture {
+				y:	hevc::decode::Plane::empty(gw, gh),
+				cb:	hevc::decode::Plane::empty(gw / 2, gh / 2),
+				cr:	hevc::decode::Plane::empty(gw / 2, gh / 2),
+				depth:	one.depth,
+			};
+			for (i, tile) in tiles.iter().enumerate() {
+				let (col, row) = (i % grid.cols as usize, i / grid.cols as usize);
+				if row >= grid.rows as usize {
+					break;
+				}
+				let piece = if i == 0 {
+					one.clone()
+				} else {
+					let data = res!(heif.data(*tile));
+					res!(hevc::picture(res!(heif.config(*tile)), &data))
+				};
+				out.paste(&piece, col * tw, row * th);
+			}
+			(out, (grid.width as usize, grid.height as usize))
+		},
+		Picture::Foreign { kind, .. } => return Err(err!(
+			"This file holds {:?}, which is not HEVC.",
+			String::from_utf8_lossy(&kind); Unimplemented)),
+	})
+}
+
+/// The top left of a picture, at the size a photograph says it is.
+fn crop(src: &Pixmap, w: usize, h: usize) -> Outcome<Pixmap> {
+	let mut out = Vec::with_capacity(w * h * 4);
+	let px = src.data();
+	for y in 0..h {
+		let row = y * src.width() * 4;
+		out.extend_from_slice(&px[row..row + w * 4]);
+	}
+	Pixmap::from_data(w, h, out)
 }
