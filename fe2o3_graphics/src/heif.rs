@@ -1190,7 +1190,12 @@ mod tests {
 	fn test_a_grid_gives_the_assembled_extent_and_its_tiles_03() -> Outcome<()> {
 		// Six tiles of 512 square assembling to 1280 by 960, which is what a phone writes and is
 		// the case a reader that adds up its tiles gets wrong in both directions.
-		let mut grid = vec![0u8, 0, 2, 1];
+		//
+		// **Rows before columns** (ISO/IEC 23008-12 §6.6.2.3.2). This fixture used to be written
+		// the other way about, to match a reader that had them swapped, and the two wrongs made a
+		// passing test. What settled it is a real photograph: 3,088 samples wide out of 512-sample
+		// tiles needs seven across, and only one reading of the box gives seven.
+		let mut grid = vec![0u8, 0, 1, 2];
 		grid.extend_from_slice(&1280u16.to_be_bytes());
 		grid.extend_from_slice(&960u16.to_be_bytes());
 		let geometry = Grid { rows: 2, cols: 3, width: 1280, height: 960 };
