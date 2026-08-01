@@ -1148,6 +1148,314 @@ impl<'a> Cabac<'a> {
 	}
 }
 
+// ------------------------------------------------------- the context variables themselves
+
+/// A set of context variables belonging to one syntax element (§9.3.2.2, Table 9-4).
+///
+/// **Only the sets an intra still picture uses, and only their intra initialisation values.** The
+/// specification gives three initialisation types -- one for I slices and two for P and B -- and a
+/// picture out of a HEIC file is one intra slice, so the other two are as much use here as the
+/// motion vector syntax they mostly belong to. Where a table's intra column is a subset of its rows
+/// (`sig_coeff_flag` uses 0 to 41 and then 126 and 127, and nothing between), that is what is kept,
+/// and the gap is recorded in [`Set::runs`] so the whole lot can be checked back against the
+/// published table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Set {
+	/// Whether this block reuses the block to its left's or above's sample adaptive offset.
+	SaoMerge,
+	/// Which kind of sample adaptive offset a block has.
+	SaoType,
+	/// Whether a block of the coding quadtree splits into four.
+	SplitCu,
+	/// Whether a coding unit skips the transform and the quantiser entirely.
+	TransquantBypass,
+	/// How a coding unit is divided into prediction units.
+	PartMode,
+	/// Whether a block's intra mode is one of the three its neighbours suggest.
+	PrevIntraLumaPred,
+	/// Which intra mode the chroma blocks take.
+	IntraChromaPredMode,
+	/// Whether a block of the transform tree splits into four.
+	SplitTransform,
+	/// Whether a luma transform block has any coefficient in it at all.
+	CbfLuma,
+	/// The same for the two chroma blocks.
+	CbfChroma,
+	/// How far this block's quantisation parameter is from the one predicted for it.
+	CuQpDeltaAbs,
+	/// Whether a transform block is coded without its transform.
+	TransformSkip,
+	/// Where the last coefficient of a block sits, across.
+	LastSigX,
+	/// And down.
+	LastSigY,
+	/// Whether a four-by-four group within a transform block holds anything.
+	CodedSubBlock,
+	/// Whether one coefficient is not zero.
+	SigCoeff,
+	/// Whether a coefficient's magnitude is more than one.
+	Greater1,
+	/// Whether it is more than two.
+	Greater2,
+}
+
+impl Set {
+
+	/// Every set, in the order their context variables are laid out.
+	pub const ALL: [Self; 18] = [
+		Self::SaoMerge,
+		Self::SaoType,
+		Self::SplitCu,
+		Self::TransquantBypass,
+		Self::PartMode,
+		Self::PrevIntraLumaPred,
+		Self::IntraChromaPredMode,
+		Self::SplitTransform,
+		Self::CbfLuma,
+		Self::CbfChroma,
+		Self::CuQpDeltaAbs,
+		Self::TransformSkip,
+		Self::LastSigX,
+		Self::LastSigY,
+		Self::CodedSubBlock,
+		Self::SigCoeff,
+		Self::Greater1,
+		Self::Greater2,
+	];
+
+	/// The initialisation values of this set's context variables, for an intra slice.
+	pub const fn init(self) -> &'static [u8] {
+		match self {
+			Self::SaoMerge		=> &[153],
+			Self::SaoType		=> &[200],
+			Self::SplitCu		=> &[139, 141, 157],
+			Self::TransquantBypass	=> &[154],
+			Self::PartMode		=> &[184],
+			Self::PrevIntraLumaPred	=> &[184],
+			Self::IntraChromaPredMode => &[63],
+			Self::SplitTransform	=> &[153, 138, 138],
+			Self::CbfLuma		=> &[111, 141],
+			// Four by depth in the transform tree, and a fifth for the second chroma block of a
+			// 4:2:2 picture, which this decoder will not meet but which sits in the same table.
+			Self::CbfChroma		=> &[94, 138, 182, 154, 154],
+			Self::CuQpDeltaAbs	=> &[154, 154],
+			// One for luma and one for chroma; the specification numbers them 0 and 3.
+			Self::TransformSkip	=> &[139, 139],
+			Self::LastSigX		=> &[
+				110, 110, 124, 125, 140, 153, 125, 127, 140,
+				109, 111, 143, 127, 111, 79, 108, 123, 63,
+			],
+			Self::LastSigY		=> &[
+				110, 110, 124, 125, 140, 153, 125, 127, 140,
+				109, 111, 143, 127, 111, 79, 108, 123, 63,
+			],
+			Self::CodedSubBlock	=> &[91, 171, 134, 141],
+			Self::SigCoeff		=> &[
+				111, 111, 125, 110, 110, 94, 124, 108,
+				124, 107, 125, 141, 179, 153, 125, 107,
+				125, 141, 179, 153, 125, 107, 125, 141,
+				179, 153, 125, 140, 139, 182, 182, 152,
+				136, 152, 136, 153, 136, 139, 111, 136,
+				139, 111,
+				// The two the specification puts at 126 and 127, for a block coded without its
+				// transform.
+				141, 111,
+			],
+			Self::Greater1		=> &[
+				140, 92, 137, 138, 140, 152, 138, 139,
+				153, 74, 149, 92, 139, 107, 122, 152,
+				140, 179, 166, 182, 140, 227, 122, 197,
+			],
+			Self::Greater2		=> &[138, 153, 136, 167, 152, 152],
+		}
+	}
+
+	/// How many context variables the set holds.
+	pub const fn len(self) -> usize {
+		self.init().len()
+	}
+
+	/// Whether it holds none, which none of these do.
+	pub const fn is_empty(self) -> bool {
+		self.len() == 0
+	}
+
+	/// Where the set's variables begin in the flat array [`Contexts`] holds.
+	pub const fn base(self) -> usize {
+		let mut at = 0;
+		let mut i = 0;
+		while i < Self::ALL.len() {
+			if Self::ALL[i] as u8 == self as u8 {
+				return at;
+			}
+			at += Self::ALL[i].len();
+			i += 1;
+		}
+		at
+	}
+
+	/// Which published table the values in [`Set::init`] were taken from, as its number within
+	/// clause 9 -- `5` for Table 9-5.
+	///
+	/// Kept so that the transcription can be checked against the document rather than against
+	/// itself; `tests` does exactly that where a copy of the specification is to hand.
+	pub const fn table(self) -> usize {
+		match self {
+			Self::SaoMerge		=> 5,
+			Self::SaoType		=> 6,
+			Self::SplitCu		=> 7,
+			Self::TransquantBypass	=> 8,
+			Self::PartMode		=> 11,
+			Self::PrevIntraLumaPred	=> 12,
+			Self::IntraChromaPredMode => 13,
+			Self::SplitTransform	=> 20,
+			Self::CbfLuma		=> 21,
+			Self::CbfChroma		=> 22,
+			Self::CuQpDeltaAbs	=> 24,
+			Self::TransformSkip	=> 25,
+			Self::LastSigX		=> 26,
+			Self::LastSigY		=> 27,
+			Self::CodedSubBlock	=> 28,
+			Self::SigCoeff		=> 29,
+			Self::Greater1		=> 30,
+			Self::Greater2		=> 31,
+		}
+	}
+
+	/// Which of that table's entries an intra slice takes, as runs of `(first, how many)`.
+	///
+	/// Table 9-4 gives these as ranges against the initialisation type, and for an intra slice they
+	/// are the first ones -- except where a table serves two syntax elements at once, or where the
+	/// entries a still picture wants are not next to each other.
+	pub const fn runs(self) -> &'static [(usize, usize)] {
+		match self {
+			// Four by depth at 0..3, and the odd one out at 12.
+			Self::CbfChroma		=> &[(0, 4), (12, 1)],
+			// Luma at 0 and chroma at 3.
+			Self::TransformSkip	=> &[(0, 1), (3, 1)],
+			// Nought to forty-one, and then two a long way further on.
+			Self::SigCoeff		=> &[(0, 42), (126, 2)],
+			// Everything else is a run from the start of its table.
+			other			=> match other.len() {
+				// One run, as long as the set is. Written this way because a `const fn` cannot
+				// hold a reference to a temporary, so each length that occurs gets its own.
+				1	=> &[(0, 1)],
+				2	=> &[(0, 2)],
+				3	=> &[(0, 3)],
+				4	=> &[(0, 4)],
+				6	=> &[(0, 6)],
+				18	=> &[(0, 18)],
+				24	=> &[(0, 24)],
+				_	=> &[],
+			},
+		}
+	}
+}
+
+/// How many context variables a picture's decoder carries altogether.
+pub const CONTEXTS: usize = {
+	let mut at = 0;
+	let mut i = 0;
+	while i < Set::ALL.len() {
+		at += Set::ALL[i].len();
+		i += 1;
+	}
+	at
+};
+
+/// Every context variable a still picture's decoder needs, in one array.
+///
+/// One flat array with a base per set, rather than a struct of named arrays, because the whole lot
+/// is **copied** at the start of every row of blocks under wavefront coding -- which every
+/// photograph in the corpus this was written against uses -- and a copy of one fixed-size array is
+/// as cheap as copying gets.
+#[derive(Clone, Copy, Debug)]
+pub struct Contexts {
+	v:	[Ctx; CONTEXTS],
+}
+
+impl Contexts {
+
+	/// The state every context starts a slice in, given that slice's quantisation parameter.
+	pub fn start(qp: i32) -> Self {
+		let mut v = [Ctx::start(154, 26); CONTEXTS];
+		for set in Set::ALL {
+			let base = set.base();
+			let init = set.init();
+			let mut i = 0;
+			while i < init.len() {
+				v[base + i] = Ctx::start(init[i], qp);
+				i += 1;
+			}
+		}
+		Self { v }
+	}
+
+	/// One context variable: which set, and which of that set's variables the syntax says applies.
+	///
+	/// An index past the end of its set is a fault in whoever worked out the increment, not a thing
+	/// to be clamped quietly into range: a decoder that reads the wrong context produces a picture
+	/// rather than an error, and a picture that is subtly wrong is the hardest kind of fault to
+	/// find. So it is refused, and the message says which set and which index.
+	pub fn at(&mut self, set: Set, i: usize) -> Outcome<&mut Ctx> {
+		if i >= set.len() {
+			return Err(err!(
+				"Context {} of {:?} was asked for, and that set holds {}.", i, set, set.len();
+			Invalid, Input, Decode));
+		}
+		Ok(&mut self.v[set.base() + i])
+	}
+}
+
+/// The context state carried from one row of blocks to the next, under wavefront coding.
+///
+/// Every photograph in the corpus is coded in wavefronts (`entropy_coding_sync_enabled_flag`),
+/// which is the surprise that shapes this decoder: the arithmetic coder is **restarted at every row
+/// of coding tree blocks**, and the contexts it restarts with are not fresh ones but the ones saved
+/// after the *second* block of the row above. That is what lets an encoder code the rows in
+/// parallel while still learning from what came before, and it means a decoder that treats a row
+/// boundary as a fresh start decodes plausible rubbish from the second row onward.
+///
+/// This holds the one-slice, one-tile case, which is every picture in the corpus and every picture a
+/// still image is likely to be. A second tile would need one of these each, since a tile boundary
+/// breaks the dependency; the widening is a field, not a redesign, and is left until a picture
+/// wants it.
+#[derive(Clone, Copy, Debug)]
+pub struct Rows {
+	/// What a slice starts from, for the first row, which has nothing above it.
+	qp:	i32,
+	/// What was saved after the second block of the row above.
+	saved:	Option<Contexts>,
+}
+
+impl Rows {
+
+	/// A picture whose first row has nothing to inherit.
+	pub fn new(qp: i32) -> Self {
+		Self { qp, saved: None }
+	}
+
+	/// The contexts a row of blocks begins with.
+	///
+	/// The row above's second block where there was one, and a fresh set where there was not --
+	/// which is the first row, and only the first row.
+	pub fn begin(&self) -> Contexts {
+		match self.saved {
+			Some(ctxs) => ctxs,
+			None => Contexts::start(self.qp),
+		}
+	}
+
+	/// Keeps the state as it stands, which the caller does once the **second** block of a row has
+	/// been decoded (§9.3.2.3).
+	///
+	/// Not the first: the row above has to be two blocks ahead before the row below may start, or
+	/// the two would be coding the same neighbourhood at once.
+	pub fn after_second(&mut self, ctxs: &Contexts) {
+		self.saved = Some(*ctxs);
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -1236,6 +1544,145 @@ mod tests {
 		if ones == 0 {
 			return Err(err!("Not one bin came back as a one."; Test, Invalid));
 		}
+		Ok(())
+	}
+
+	#[test]
+	fn test_the_context_tables_are_the_published_ones_06() -> Outcome<()> {
+		// Two hundred and thirty numbers copied out of a document by hand, every one of which
+		// silently ruins a picture if it is wrong. Checking them against the decoder that uses them
+		// proves nothing at all -- the only thing worth checking them against is the specification
+		// they came from, so this reads it.
+		//
+		//   pdftotext -layout T-REC-H.265-202108.pdf h265.txt
+		//   HEVC_SPEC_TEXT=~/.cache/specs/h265.txt cargo test -p oxedyne_fe2o3_graphics hevc
+		//
+		// Absent, it says so rather than passing quietly: a check that skipped in silence would be
+		// a check nobody ran.
+		let path = match std::env::var("HEVC_SPEC_TEXT") {
+			Ok(p) => p,
+			Err(_) => {
+				println!("  skipped: set HEVC_SPEC_TEXT to a text rendering of Rec. ITU-T H.265");
+				return Ok(());
+			},
+		};
+		let text = match std::fs::read_to_string(&path) {
+			Ok(t) => t,
+			Err(e) => {
+				println!("  skipped: {} would not read ({})", path, e);
+				return Ok(());
+			},
+		};
+		let lines: Vec<&str> = text.lines().collect();
+
+		for set in Set::ALL {
+			// The table's own numbers, in ctxIdx order: every "initValue" row under the heading,
+			// until the next table begins. The document lays a wide table out as alternating rows
+			// of indices and values, so the values arrive in several pieces and in order.
+			let heading = fmt!("Table 9-{} – Values of initValue", set.table());
+			// The heading occurs twice: once in the table of contents, trailing dot leaders and a
+			// page number, and once over the table itself. Taking whichever one has values under it
+			// needs no rule about which is which.
+			let mut published: Vec<u8> = Vec::new();
+			for (start, _) in lines.iter().enumerate().filter(|(_, l)| l.contains(&heading)) {
+				let mut found: Vec<u8> = Vec::new();
+				for line in lines.iter().skip(start + 1) {
+					let trimmed = line.trim_start();
+					if trimmed.starts_with("Table 9-") {
+						break;
+					}
+					if !trimmed.starts_with("initValue") {
+						continue;
+					}
+					for word in trimmed.trim_start_matches("initValue").split_whitespace() {
+						match word.parse::<u16>() {
+							// Every initValue is a byte. A page number caught in the same row
+							// would not be, and shows up here rather than as a wrong picture.
+							Ok(n) if n <= 255 => found.push(n as u8),
+							_ => return Err(err!(
+								"Table 9-{} holds {:?}, which is not an initialisation value.",
+								set.table(), word; Test, Invalid)),
+						}
+					}
+				}
+				if !found.is_empty() {
+					published = found;
+					break;
+				}
+			}
+			if published.is_empty() {
+				return Err(err!(
+					"Table 9-{} is not in {}, or holds no values.", set.table(), path;
+				Test, Missing));
+			}
+			// What an intra slice takes out of it, per Table 9-4.
+			let mut wanted: Vec<u8> = Vec::new();
+			for (first, count) in set.runs() {
+				let end = first + count;
+				if end > published.len() {
+					return Err(err!(
+						"{:?} wants entries {}..{} of Table 9-{}, which holds {}.",
+						set, first, end, set.table(), published.len(); Test, Invalid));
+				}
+				wanted.extend_from_slice(&published[*first..end]);
+			}
+			let held: Vec<u8> = set.init().to_vec();
+			if held != wanted {
+				return Err(err!(
+					"{:?} is initialised from {:?}, and Table 9-{} entries {:?} are {:?}.",
+					set, held, set.table(), set.runs(), wanted; Test, Mismatch));
+			}
+		}
+		Ok(())
+	}
+
+	#[test]
+	fn test_a_row_of_blocks_inherits_the_row_above_it_07() -> Outcome<()> {
+		// The wavefront rule, which is the one every photograph in the corpus depends on: a row of
+		// blocks starts from the contexts saved after the *second* block of the row above, not from
+		// fresh ones. A decoder that starts each row afresh decodes rubbish from the second row on,
+		// and this is the smallest statement of the difference.
+		let mut rows = Rows::new(26);
+		let fresh = rows.begin();
+		let mut moved = fresh;
+		// Something the first row learned, which the second must not lose.
+		let ctx = res!(moved.at(Set::SigCoeff, 0));
+		let before = *ctx;
+		*ctx = Ctx::start(200, 51);
+		let learned = *res!(moved.at(Set::SigCoeff, 0));
+		let changed = learned != before;
+		req!(changed, true, "the fixture did not change anything, so it proves nothing");
+
+		rows.after_second(&moved);
+		let next = rows.begin();
+		let carried = next.v[Set::SigCoeff.base()];
+		req!(carried, learned, "a row began afresh instead of from the row above it");
+
+		// And a picture whose first row has nothing above it starts from the table.
+		let first = Rows::new(26).begin();
+		req!(first.v[Set::SigCoeff.base()], before);
+		Ok(())
+	}
+
+	#[test]
+	fn test_the_context_sets_do_not_overlap_or_leave_gaps_08() -> Outcome<()> {
+		// The bases are worked out by summing the lengths in front of each set, so a set added in
+		// the middle of the list moves every one after it. That is the intended behaviour and it is
+		// also exactly how one set would come to share variables with another, so it is asserted.
+		let mut at = 0usize;
+		for set in Set::ALL {
+			req!(set.base(), at, "{:?} does not begin where the set before it ends", set);
+			at += set.len();
+			let empty = set.is_empty();
+			req!(empty, false, "{:?} holds no context variables at all", set);
+		}
+		req!(at, CONTEXTS);
+		// And the last one is reachable, while one past it is refused rather than read.
+		let mut ctxs = Contexts::start(26);
+		let last = Set::Greater2.len() - 1;
+		req!(ctxs.at(Set::Greater2, last).is_ok(), true);
+		req!(ctxs.at(Set::Greater2, last + 1).is_err(), true,
+			"a context past the end of its set was handed out");
 		Ok(())
 	}
 
