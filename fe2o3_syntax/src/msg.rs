@@ -81,16 +81,19 @@ impl fmt::Display for Msg {
             first = false;
         }
         for (k, argvals) in &self.args {
-            if !first { ok!(write!(f, " ")); } 
-            ok!(write!(f, "{}", k));
+            if !first { ok!(write!(f, " ")); }
+            // Written as a reader would type it, not as the message files it.
+            ok!(write!(f, "{}", self.arg_short_name(k)));
             for val in argvals {
                 ok!(write!(f, " {:?}", val));
             }
             first = false;
         }
-        for (k, cmd) in &self.cmds {
-            if !first { ok!(write!(f, " ")); } 
-            ok!(write!(f, "{} {}", k, cmd));
+        // A command prints its own name, so printing the key as well said it
+        // twice.
+        for (_k, cmd) in &self.cmds {
+            if !first { ok!(write!(f, " ")); }
+            ok!(write!(f, "{}", cmd));
             first = false;
         }
         Ok(())
@@ -190,6 +193,36 @@ impl Msg {
         Missing))
     }
 
+    /// The one name an argument is filed under, whichever of its names the
+    /// caller wrote.
+    ///
+    /// A syntax gives every argument a canonical name and one or two hyphenated
+    /// aliases, and a message read off the wire is filed under the canonical
+    /// one. A message built by hand used to be filed under whatever the caller
+    /// happened to type, so the same argument had two names depending on which
+    /// way it was travelling: a required argument added as `-zb` failed
+    /// validation for being absent, and one that arrived as `PowZeroBits` could
+    /// not be read back as `-zb`. An argument the syntax does not know keeps
+    /// the name it was given, so a lookup of something that is not there still
+    /// answers `None` rather than failing.
+    fn arg_key<S: Into<String>>(&self, arg_name: S) -> String {
+        let arg_name = arg_name.into();
+        match self.syntax().args.get_recursive(&Key::Str(arg_name.clone())) {
+            Some(arg) => arg.canonical_name(),
+            None => arg_name,
+        }
+    }
+
+    /// The short, hyphenated name an argument is written with, for a message
+    /// printing itself.
+    fn arg_short_name<S: Into<String>>(&self, arg_name: S) -> String {
+        let arg_name = arg_name.into();
+        match self.syntax().args.get_recursive(&Key::Str(arg_name.clone())) {
+            Some(arg) => arg.short_name(),
+            None => arg_name,
+        }
+    }
+
     pub fn add_cmd(
         mut self,
         msgcmd: MsgCmd,
@@ -221,16 +254,17 @@ impl Msg {
                 arg_name, self.sname;
             Invalid, Input));
         }
+        let key = self.arg_key(arg_name.clone());
         // Check whether it has already been added to the Msg.
-        if self.args.contains_key(&arg_name) {
+        if self.args.contains_key(&key) {
             return Err(err!(
                 "Argument '{}' has already been added to message.", arg_name;
             Invalid, Input, Exists));
         }
-        self.args.insert(arg_name, Vec::new());
+        self.args.insert(key, Vec::new());
         Ok(self)
     }
-    
+
     pub fn add_msg_val(
         self,
         val: Dat,
@@ -265,6 +299,9 @@ impl Msg {
             },
             None => self.syntax().config().vals.clone(),
         };
+        // File the value under the argument's one name, whichever of its names
+        // the caller wrote.
+        let arg_opt = arg_opt.map(|name| self.arg_key(name));
 
         let v: &mut Vec<Dat> = match arg_opt {
             Some(arg_name) => match self.args.get_mut(&arg_name) {
@@ -314,7 +351,7 @@ impl Msg {
     }
 
     pub fn get_arg_vals<S: Into<String>>(&self, a: S) -> Option<&Vec<Dat>> {
-        match self.args.get(&(a.into())) {
+        match self.args.get(&self.arg_key(a)) {
             Some(vals) => if vals.len() == 0 {
                 None
             } else {
@@ -325,7 +362,8 @@ impl Msg {
     }
 
     pub fn get_arg_vals_mut<S: Into<String>>(&mut self, a: S) -> Option<&mut Vec<Dat>> {
-        match self.args.get_mut(&(a.into())) {
+        let key = self.arg_key(a);
+        match self.args.get_mut(&key) {
             Some(vals) => if vals.len() == 0 {
                 None
             } else {
@@ -353,16 +391,16 @@ impl Msg {
     }
 
     pub fn has_arg<S: Into<String>>(&self, a: S) -> bool {
-        self.args.contains_key(&(a.into()))
+        self.args.contains_key(&self.arg_key(a))
     }
 
     pub fn has_only_arg<S: Into<String>>(&self, a: S) -> Outcome<bool> {
         let a = a.into();
-        let has = self.args.contains_key(&a);
+        let has = self.args.contains_key(&self.arg_key(a.clone()));
         if self.args.len() > 1 {
             Err(err!(
                 "The argument '{}' {}", a, if has {
-                    "does not exist and there are other arguments."    
+                    "does not exist and there are other arguments."
                 } else {
                     "does exist but there are other arguments."
                 };
@@ -1886,20 +1924,16 @@ pub struct MsgCmd {
 
 impl fmt::Display for MsgCmd {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        ok!(write!(f, "{} ", self.name));
-        let mut first = true;
+        ok!(write!(f, "{}", self.name));
         for val in &self.vals {
-            if !first { ok!(write!(f, " ")); } 
-            ok!(write!(f, "{}", val));
-            first = false;
+            ok!(write!(f, " {:?}", val));
         }
         for (k, argvals) in &self.args {
-            if !first { ok!(write!(f, " ")); } 
-            ok!(write!(f, "{}", k));
+            // Written as a reader would type it, not as the command files it.
+            ok!(write!(f, " {}", self.arg_short_name(k)));
             for val in argvals {
-                ok!(write!(f, " {}", val));
+                ok!(write!(f, " {:?}", val));
             }
-            first = false;
         }
         Ok(())
     }
@@ -1957,6 +1991,32 @@ impl MsgCmd {
             Invalid, Mismatch))
     }
 
+    /// The one name a command argument is filed under, whichever of its names
+    /// the caller wrote. See [`Msg::arg_key`] for why there has to be one.
+    fn arg_key<S: Into<String>>(&self, arg_name: S) -> String {
+        let arg_name = arg_name.into();
+        match self.get_syntax_cmd() {
+            Ok(cmd) => match cmd.args.get_recursive(&Key::Str(arg_name.clone())) {
+                Some(arg) => arg.canonical_name(),
+                None => arg_name,
+            },
+            Err(_) => arg_name,
+        }
+    }
+
+    /// The short, hyphenated name a command argument is written with, for a
+    /// command printing itself.
+    fn arg_short_name<S: Into<String>>(&self, arg_name: S) -> String {
+        let arg_name = arg_name.into();
+        match self.get_syntax_cmd() {
+            Ok(cmd) => match cmd.args.get_recursive(&Key::Str(arg_name.clone())) {
+                Some(arg) => arg.short_name(),
+                None => arg_name,
+            },
+            Err(_) => arg_name,
+        }
+    }
+
     pub fn add_arg<S: Into<String>>(
         mut self,
         arg_name: S,
@@ -1971,14 +2031,15 @@ impl MsgCmd {
                 self.name, arg_name, self.sname;
             Invalid, Input));
         }
+        let key = self.arg_key(arg_name.clone());
         // Check whether it has already been added to the MsgCmd.
-        if self.args.contains_key(&arg_name) {
+        if self.args.contains_key(&key) {
             return Err(err!(
                 "Command '{}' argument '{}' has already been added to message.",
                 self.name, arg_name;
             Invalid, Input, Exists));
         }
-        self.args.insert(arg_name, Vec::new());
+        self.args.insert(key, Vec::new());
         Ok(self)
     }
     
@@ -2016,6 +2077,9 @@ impl MsgCmd {
             },
             None => (res!(self.get_syntax_cmd()).config().vals.clone(), fmt!("")),
         };
+        // File the value under the argument's one name, whichever of its names
+        // the caller wrote.
+        let arg_opt = arg_opt.map(|name| self.arg_key(name));
 
         let v: &mut Vec<Dat> = match arg_opt {
             Some(arg_name) => match self.args.get_mut(&arg_name) {
@@ -2075,7 +2139,7 @@ impl MsgCmd {
     }
 
     pub fn get_arg_vals<S: Into<String>>(&self, a: S) -> Option<&Vec<Dat>> {
-        match self.args.get(&(a.into())) {
+        match self.args.get(&self.arg_key(a)) {
             Some(vals) => if vals.len() == 0 {
                 None
             } else {
@@ -2086,7 +2150,8 @@ impl MsgCmd {
     }
 
     pub fn get_arg_vals_mut<S: Into<String>>(&mut self, a: S) -> Option<&mut Vec<Dat>> {
-        match self.args.get_mut(&(a.into())) {
+        let key = self.arg_key(a);
+        match self.args.get_mut(&key) {
             Some(vals) => {
                 if vals.len() == 0 {
                     None
@@ -2099,7 +2164,7 @@ impl MsgCmd {
     }
 
     pub fn has_arg<S: Into<String>>(&self, a: S) -> bool {
-        self.args.contains_key(&(a.into()))
+        self.args.contains_key(&self.arg_key(a))
     }
 
     pub fn has_args(&self) -> bool {
@@ -2108,7 +2173,7 @@ impl MsgCmd {
 
     pub fn has_only_arg<S: Into<String>>(&self, a: S) -> Outcome<bool> {
         let a = a.into();
-        let has = self.args.contains_key(&a);
+        let has = self.args.contains_key(&self.arg_key(a.clone()));
         if self.args.len() > 1 {
             Err(err!(
                 "The argument '{}' {}", a, if has {
