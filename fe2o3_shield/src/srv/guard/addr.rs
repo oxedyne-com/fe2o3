@@ -42,6 +42,13 @@ use std::{
 /// and blacklist grounds; this function adds the SHIELD-specific constraint that the first
 /// packet from a new address must be an `HReq1` and that subsequent packets must follow the
 /// recorded handshake sequence within `hreq_exp`.
+///
+/// Every packet goes through the rate limiter, whatever its message type. A packet that is
+/// not part of the handshake sequence -- an application payload, say -- has no sequence to
+/// be checked against, and skipping the sequence check is not the same as skipping the
+/// guard: an address that floods a peer with payloads is an address the guard exists for.
+/// It is also what creates the address log the proof-of-work difficulty is read from a few
+/// lines later, so a packet type that bypassed the guard could not be validated at all.
 pub fn drop_packet<
     const C: usize,
     M: MapMut<HashForm, AddressLog<N, AddressData>> + Clone + Debug,
@@ -57,21 +64,24 @@ pub fn drop_packet<
     -> Outcome<bool>
 {
     let htyp = HandshakeType::from(msg_typ);
-    if htyp == HandshakeType::Unknown {
-        return Ok(false);
-    }
-
     let ip = src_addr.ip();
 
-    // Pre-check: an unknown address may only contact us with an HReq1. Drop otherwise
-    // without polluting the guard with a fresh log entry.
-    if res!(guard.peek(&ip)).is_none() && htyp != HandshakeType::Req1 {
+    // Pre-check: an unknown address may only open the handshake with an HReq1. Drop a later
+    // step otherwise, without polluting the guard with a fresh log entry.
+    if htyp != HandshakeType::Unknown
+        && htyp != HandshakeType::Req1
+        && res!(guard.peek(&ip)).is_none()
+    {
         return Ok(true);
     }
 
     // Feed the generic state machine. Under the same shard lock, validate the handshake
     // sequence on the shield-specific `AddressData`.
     let (decision, hs_drop) = res!(guard.update_log(&ip, |log, _was_new| {
+        if htyp == HandshakeType::Unknown {
+            // Not a handshake step, so there is no sequence to be out of.
+            return Ok(false);
+        }
         let pending = log.data.pending;
         match pending {
             Some((typ, when)) => {

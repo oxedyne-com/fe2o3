@@ -155,11 +155,6 @@ use oxedyne_fe2o3_syntax::{
 };
 use oxedyne_fe2o3_text::string::Stringer;
 
-use std::{
-    net::UdpSocket,
-    sync::Arc,
-};
-
 
 /// Stage of the six-message handshake exchange a packet belongs to.
 #[repr(u16)]
@@ -340,7 +335,7 @@ impl<
         //src_addr:   &SocketAddr,
         //chunker:    Chunker,
         ////pack_size:  usize,
-        _src:       Arc<UdpSocket>,
+        //src:        Arc<UdpSocket>,
         //trg_addr:   &SocketAddr,
     )
         -> Outcome<()>

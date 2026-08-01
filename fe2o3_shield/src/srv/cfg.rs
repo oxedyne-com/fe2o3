@@ -43,10 +43,14 @@ use oxedyne_fe2o3_hash::{
 use std::{
     collections::BTreeMap,
     net::{
+        IpAddr,
         SocketAddr,
         ToSocketAddrs,
     },
+    str::FromStr,
 };
+
+use local_ip_address::local_ip;
 
 
 /// Runtime configuration for a Shield server, serialisable to and from a
@@ -149,6 +153,30 @@ impl ServerConfig {
     /// Returns the default configuration as an [`Outcome`].
     pub fn try_default() -> Outcome<Self> {
         Ok(Self::default())
+    }
+
+    /// The IP address the server binds its UDP socket to.
+    ///
+    /// The empty setting, and the word `local`, both mean whatever address this
+    /// machine has on its network, which is what a peer meant to be reachable
+    /// from elsewhere wants. Anything else is read as an address and used as
+    /// written, so a peer that wants loopback -- a development machine, a peer
+    /// behind a front-end, two peers in one test -- can have it. The server
+    /// used to take the machine's network address whatever the configuration
+    /// said, which made loopback unaskable-for and `server_address` a setting
+    /// that did nothing.
+    pub fn bind_ip(&self) -> Outcome<IpAddr> {
+        let raw = self.server_address.trim();
+        if raw.is_empty() || raw.eq_ignore_ascii_case("local") {
+            return Ok(res!(local_ip(), IO, Network));
+        }
+        match IpAddr::from_str(raw) {
+            Ok(ip) => Ok(ip),
+            Err(e) => Err(err!(e,
+                "ServerConfig: server_address '{}' is neither an IP address nor the \
+                word 'local'.", self.server_address;
+                Invalid, Input, Network)),
+        }
     }
 
     //pub fn syntax_default() -> Outcome<SyntaxRef> {

@@ -44,7 +44,10 @@ use oxedyne_fe2o3_hash::{
         HashScheme,
     },
     map::ShardMap,
-    pow::ProofOfWork,
+    pow::{
+        ProofOfWork,
+        ZeroBits,
+    },
 };
 use oxedyne_fe2o3_data::ring::RingTimer;
 use oxedyne_fe2o3_iop_crypto::sign::SignerDefAlt;
@@ -126,10 +129,16 @@ pub struct Protocol<
     P: ProtocolTypes<ML, SL, UL>,
 > {
     // Let user define these generic parameters.
-    _code_template:     [u8; C],
     _mid_template:      <P::ID as IdTypes<ML, SL, UL>>::M,
     _sid_template:      <P::ID as IdTypes<ML, SL, UL>>::S,
-    _uid_template:      <P::ID as IdTypes<ML, SL, UL>>::U,
+
+    /// Proof-of-work challenge code this peer builds its own packets against.
+    pub code:           [u8; C],
+    /// Identifier this peer sends its own messages under.
+    pub uid:            <P::ID as IdTypes<ML, SL, UL>>::U,
+    /// Proof-of-work difficulty this peer puts into its own packets. The
+    /// receiver decides what it will accept; this is what is offered.
+    pub tx_zbits:       ZeroBits,
 
     /// Operating mode of this protocol instance.
     pub mode:           ProtocolMode,
@@ -204,15 +213,19 @@ impl<
 {
     /// Constructs a protocol instance from server configuration and wire
     /// schemes, initialising the address guard, user guard, packet validator
-    /// and message assembler with the crate's compile-time constants. The
-    /// identifier and code template arguments fix the concrete generic types.
+    /// and message assembler with the crate's compile-time constants.
+    ///
+    /// `code` is the proof-of-work challenge code this peer builds its own
+    /// packets against, and `uid` is the identifier it sends them under. The
+    /// message and session identifier arguments are templates, present only to
+    /// fix the concrete generic types.
     pub fn new(
         cfg:            &ServerConfig,
         schms_input:    WireSchemesInput<P::W>,
-        _code_template: [u8; C],
+        code:           [u8; C],
         _mid_template:  <P::ID as IdTypes<ML, SL, UL>>::M,
         _sid_template:  <P::ID as IdTypes<ML, SL, UL>>::S,
-        _uid_template:  <P::ID as IdTypes<ML, SL, UL>>::U,
+        uid:            <P::ID as IdTypes<ML, SL, UL>>::U,
         mode:           ProtocolMode,
     )
         -> Outcome<Self>
@@ -310,10 +323,11 @@ impl<
         };
         
         Ok(Self {
-            _code_template,
             _mid_template,
             _sid_template,
-            _uid_template,
+            code,
+            uid,
+            tx_zbits:       cfg.server_pow_zbits_min.max(constant::POW_TX_MIN_ZERO_BITS),
             mode,
             schms,
             timer:          Arc::new(RwLock::new(RingTimer::<{ constant::REQ_TIMER_LEN }>::default())),

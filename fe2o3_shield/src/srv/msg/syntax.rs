@@ -24,9 +24,10 @@ use oxedyne_fe2o3_syntax::{
 };
 
 
-/// Builds the base Shield message syntax, defining the shared arguments and
-/// the handshake commands (`hreq1`, `hresp1`, `hreq2`, `hresp2`) that incoming
-/// and outgoing messages are validated against.
+/// Builds the base Shield message syntax, defining the shared arguments, the
+/// handshake commands (`hreq1`, `hresp1`, `hreq2`, `hresp2`) and the two
+/// application payload commands (`app`, `appr`) that incoming and outgoing
+/// messages are validated against.
 pub fn base_msg() -> Outcome<SyntaxRef> {
 
     let mut s = Syntax::from(SyntaxConfig {
@@ -174,6 +175,36 @@ pub fn base_msg() -> Outcome<SyntaxRef> {
         ..Default::default()
     });
     c = res!(c.add_arg(arg_skey_enc.required(true)));
+    s = res!(s.add_cmd(c));
+
+    // Application payload ====================================================
+    //
+    // The one pair of commands the protocol carries without reading: a
+    // caller's bytes out, and a caller's bytes back under the same message
+    // identifier.
+    let arg_payload = Arg::from(ArgConfig {
+        name:   fmt!("Payload"),
+        hyph1:  fmt!("p"),
+        hyph2:  Some(fmt!("payload")),
+        vals:   vec![(Kind::BU64, fmt!("Opaque application bytes"))],
+        help:   Some(fmt!("Application payload, which the protocol does not read")),
+        ..Default::default()
+    });
+
+    let mut c = Cmd::from(CmdConfig {
+        name:   fmt!("{}", constant::MSG_CMD_APP_REQUEST),
+        help:   Some(fmt!("Application payload sent to a peer")),
+        ..Default::default()
+    });
+    c = res!(c.add_arg(arg_payload.clone().required(true)));
+    s = res!(s.add_cmd(c));
+
+    let mut c = Cmd::from(CmdConfig {
+        name:   fmt!("{}", constant::MSG_CMD_APP_REPLY),
+        help:   Some(fmt!("Answer to an application payload")),
+        ..Default::default()
+    });
+    c = res!(c.add_arg(arg_payload.required(true)));
     s = res!(s.add_cmd(c));
 
     Ok(SyntaxRef::new(s))
