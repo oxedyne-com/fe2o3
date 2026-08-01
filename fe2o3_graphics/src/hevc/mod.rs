@@ -155,8 +155,9 @@ pub struct Sps {
 	/// that reads this as "no scaling" quantises every block wrongly and produces a picture that is
 	/// recognisable and wrong.
 	pub scaling_lists:	bool,
-	/// Whether this sequence carries lists of its own rather than taking the default ones.
-	pub own_scaling_lists:	bool,
+	/// The weights themselves, where the lists are in use: this sequence's own where it carries
+	/// them, and the default ones where it does not.
+	pub weights:	Option<Scaling>,
 }
 
 /// What a picture parameter set says about the slices that reference it.
@@ -529,28 +530,130 @@ fn profile_tier_level(b: &mut Bits, profile_present: bool, max_sub_layers: usize
 	Ok(())
 }
 
-/// Steps over a scaling list (§7.3.4).
-fn scaling_list(b: &mut Bits) -> Outcome<()> {
-	for size in 0..4 {
-		let mut id = 0;
-		while id < 6 {
-			let predicted = !res!(b.flag());
-			if predicted {
-				let _delta = res!(b.ue());
-			} else {
-				let coefficients = 64.min(1 << (4 + (size << 1)));
-				if size > 1 {
-					let _dc = res!(b.se());
+/// The weights a picture quantises each block against (§7.3.4, §7.4.5).
+///
+/// Six lists a size -- one each for the three colour components, predicted from within the picture
+/// and from another, though a still photograph only ever uses the first three. The numbers climb
+/// away from the corner because the eye notices an error in a block's coarse detail more than in
+/// its fine, so the fine detail is quantised harder.
+///
+/// A sequence that turns the lists on and carries none of its own takes the default ones, which are
+/// not flat; a decoder that reads "on" as "no scaling" quantises every block wrongly and produces a
+/// picture that is recognisable and wrong.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Scaling {
+	/// `ScalingList[sizeId][matrixId][i]`, in the diagonal scan's order. Sixteen entries are used
+	/// at the smallest size and sixty-four at the other three.
+	pub list:	[[[u8; 64]; 6]; 4],
+	/// What sits in the corner at the two largest sizes, which is coded on its own.
+	pub dc:		[[u8; 6]; 2],
+}
+
+impl Scaling {
+
+	/// The default lists, which is what a sequence carrying none of its own means.
+	pub fn default_lists() -> Self {
+		let mut out = Self { list: [[[16u8; 64]; 6]; 4], dc: [[16u8; 6]; 2] };
+		for size in 1..4 {
+			for id in 0..6 {
+				let from = crate::hevc::transform::DEFAULT_LIST[(id >= 3) as usize];
+				out.list[size][id] = from;
+			}
+		}
+		out
+	}
+
+	/// One weight, by size, matrix and position within the block (equations 7-44 to 7-49).
+	///
+	/// The sixteen and thirty-two sample matrices are the eight-sample one with each of its values
+	/// covering two or four samples each way, and a corner of their own.
+	pub fn factor(&self, log2: u32, matrix: usize, x: usize, y: usize, raster: &[u8; 64]) -> i32 {
+		match log2 {
+			2	=> raster[(y & 3) * 4 + (x & 3)] as i32,
+			3	=> raster[y * 8 + x] as i32,
+			_ => {
+				if x == 0 && y == 0 {
+					return self.dc[(log2 - 4) as usize][matrix] as i32;
 				}
-				for _ in 0..coefficients {
-					let _delta = res!(b.se());
+				let shrink = log2 - 3;
+				raster[(y >> shrink) * 8 + (x >> shrink)] as i32
+			},
+		}
+	}
+
+	/// One list laid out in raster order rather than in the diagonal scan's.
+	pub fn raster(&self, log2: u32, matrix: usize) -> [u8; 64] {
+		let size_id = (log2 - 2).min(3) as usize;
+		let side = if size_id == 0 { 4 } else { 8 };
+		let list = &self.list[size_id][matrix];
+		let mut out = [16u8; 64];
+		for (i, (x, y)) in crate::hevc::scan::positions(side, crate::hevc::scan::Order::Diagonal)
+			.iter()
+			.enumerate()
+		{
+			out[*y as usize * side + *x as usize] = list[i];
+		}
+		out
+	}
+}
+
+/// Reads a scaling list (§7.3.4).
+///
+/// A list is either coded outright as a chain of differences, or taken from an earlier list in the
+/// same set, or -- where it names itself as its own source -- from the default.
+fn scaling_list(b: &mut Bits) -> Outcome<Scaling> {
+	let mut out = Scaling::default_lists();
+	let defaults = Scaling::default_lists();
+	for size in 0..4usize {
+		let mut id = 0usize;
+		while id < 6 {
+			let coefficients = 64usize.min(1 << (4 + (size << 1)));
+			if !res!(b.flag()) {
+				// Taken from another list rather than coded. A delta of nought means the default,
+				// which is the one case where "predicted from" does not mean "copied from".
+				let delta = res!(b.ue()) as usize;
+				if delta == 0 {
+					out.list[size][id] = defaults.list[size][id];
+					if size > 1 {
+						out.dc[size - 2][id] = 16;
+					}
+				} else {
+					let from = id.saturating_sub(delta * if size == 3 { 3 } else { 1 });
+					out.list[size][id] = out.list[size][from];
+					if size > 1 {
+						out.dc[size - 2][id] = out.dc[size - 2][from];
+					}
+				}
+			} else {
+				let mut next = 8i32;
+				if size > 1 {
+					let dc = res!(b.se()) + 8;
+					if !(1..=255).contains(&dc) {
+						return Err(err!(
+							"A scaling list's corner value is {}, outside 1 to 255.", dc;
+						Invalid, Input, Decode));
+					}
+					out.dc[size - 2][id] = dc as u8;
+					next = dc;
+				}
+				for i in 0..coefficients {
+					let delta = res!(b.se());
+					next = (next + delta + 256).rem_euclid(256);
+					out.list[size][id][i] = next as u8;
 				}
 			}
 			// The 32 by 32 lists come in twos rather than sixes.
 			id += if size == 3 { 3 } else { 1 };
 		}
 	}
-	Ok(())
+	// A 32 by 32 chroma list does not exist below 4:4:4, but the arrays are square; filling the
+	// gaps from luma keeps a lookup by matrix identifier from finding sixteens.
+	for id in [1usize, 2, 4, 5] {
+		let from = if id < 3 { 0 } else { 3 };
+		out.list[3][id] = out.list[3][from];
+		out.dc[1][id] = out.dc[1][from];
+	}
+	Ok(out)
 }
 
 /// Steps over one short-term reference picture set (§7.3.7).
@@ -681,10 +784,13 @@ pub fn sps(body: &[u8]) -> Outcome<Sps> {
 	let _max_depth_inter = res!(b.ue());
 	let max_depth_intra = res!(b.ue()) as u8;
 	let scaling_lists = res!(b.flag());
-	let mut own_scaling_lists = false;
-	if scaling_lists && res!(b.flag()) {
-		own_scaling_lists = true;
-		res!(scaling_list(&mut b));
+	let mut weights = None;
+	if scaling_lists {
+		weights = Some(if res!(b.flag()) {
+			res!(scaling_list(&mut b))
+		} else {
+			Scaling::default_lists()
+		});
 	}
 	let _amp = res!(b.flag());
 	let sao = res!(b.flag());
@@ -745,7 +851,7 @@ pub fn sps(body: &[u8]) -> Outcome<Sps> {
 		pcm,
 		strong_smoothing,
 		scaling_lists,
-		own_scaling_lists,
+		weights,
 	})
 }
 

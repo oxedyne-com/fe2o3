@@ -166,10 +166,8 @@ struct Frame<'a> {
 	pic:	Picture,
 	/// The scan orders, worked out once.
 	scans:	Scans,
-	/// The default eight-by-eight scaling matrix, from which every size is read.
-	///
-	/// Empty where the sequence does not use scaling lists at all, which means sixteen everywhere.
-	weights:	[u8; 64],
+	/// The weights each block is quantised against, or `None` where the sequence quantises flat.
+	weights:	Option<crate::hevc::Scaling>,
 
 	/// The width of the four-by-four grid the per-block records are kept on.
 	gw:	usize,
@@ -244,7 +242,7 @@ pub fn picture(sps: &Sps, pps: &Pps, slice: &Slice, data: &[u8]) -> Outcome<Pict
 			depth:	sps.luma_bits as u32,
 		},
 		scans:	Scans::new(),
-		weights: transform::default_matrix(false),
+		weights: sps.weights.clone(),
 		gw,
 		gh,
 		ct_depth: vec![0; gw * gh],
@@ -335,11 +333,6 @@ fn refuse_what_is_not_built(sps: &Sps, pps: &Pps) -> Outcome<()> {
 		return Err(err!(
 			"This decoder reads eight-bit pictures, and this one is {} and {}.",
 			sps.luma_bits, sps.chroma_bits; Unimplemented));
-	}
-	if sps.own_scaling_lists {
-		return Err(err!(
-			"This picture carries scaling lists of its own, which are not read; only the default \
-			ones are."; Unimplemented));
 	}
 	if sps.pcm {
 		return Err(err!(
@@ -945,7 +938,7 @@ impl<'a> Frame<'a> {
 			if self.bypass {
 				// Nothing was quantised and nothing transformed: the coefficients are the residual.
 			} else {
-				let m = self.weights_for(size, log2);
+				let m = self.weights_for(size, log2, cidx);
 				transform::scale(&mut coeffs, size, qp, depth, &m);
 				if self.skip_tr {
 					transform::skipped(&mut coeffs, size);
@@ -972,15 +965,19 @@ impl<'a> Frame<'a> {
 	/// larger sizes take it with each of its values covering two or four samples each way. All
 	/// three colour components share one matrix here, because the default lists give the same
 	/// numbers to all three.
-	fn weights_for(&self, size: usize, log2: u32) -> Vec<i32> {
-		if !self.sps.scaling_lists || log2 == 2 {
-			return vec![16; size * size];
-		}
-		let shrink = log2 - 3;
+	fn weights_for(&self, size: usize, log2: u32, cidx: usize) -> Vec<i32> {
+		let scaling = match &self.weights {
+			Some(s) => s,
+			None => return vec![16; size * size],
+		};
+		// An intra picture only ever uses the first three of the six lists: the other three belong
+		// to blocks predicted from another picture, which a still photograph has none of.
+		let matrix = cidx;
+		let raster = scaling.raster(log2, matrix);
 		let mut out = Vec::with_capacity(size * size);
 		for y in 0..size {
 			for x in 0..size {
-				out.push(self.weights[(y >> shrink) * 8 + (x >> shrink)] as i32);
+				out.push(scaling.factor(log2, matrix, x, y, &raster));
 			}
 		}
 		out
