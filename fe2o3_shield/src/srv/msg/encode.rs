@@ -7,6 +7,10 @@ use crate::{
             WireSchemeTypes,
         },
         msg::{
+            app::{
+                AppMsg,
+                AppMsgKind,
+            },
             core::{
                 IdentifiedMessage,
                 IdTypes,
@@ -19,6 +23,10 @@ use crate::{
                 PacketCount,
                 PacketMeta,
                 PacketValidator,
+            },
+            protocol::{
+                Protocol,
+                ProtocolTypes,
             },
         },
         pow::{
@@ -34,7 +42,6 @@ use oxedyne_fe2o3_core::{
         IntoBytes,
         ToBytes,
     },
-    rand::RanDef,
 };
 use oxedyne_fe2o3_hash::{
     pow::{
@@ -118,6 +125,11 @@ pub trait ShieldCommand<
     /// Serialises the command, computes its proof of work, splits it into
     /// chunks and wraps each in a packet with metadata and validation
     /// artefacts, returning the ready-to-send packet byte vectors.
+    ///
+    /// The message identifier is given rather than drawn here, because it is
+    /// what an answer is correlated by: a caller that could not say which
+    /// identifier its question went out under would have no way of recognising
+    /// the reply.
     fn build<
         const C: usize,
         // Proof of work validator.
@@ -128,6 +140,7 @@ pub trait ShieldCommand<
         W: WireSchemeTypes + 'static, // Contains the chunker, the pow hasher and the signer.
     >(
         self,
+        mid:        ID::M,
         src_addr:   IpAddr,
         trg_addr:   IpAddr,
         code:       [u8; C],
@@ -200,7 +213,6 @@ pub trait ShieldCommand<
         }
 
         let mut packets = Vec::new();
-        let mid = ID::M::randef();
         for i in 0..nc {
             let chunk_len = chunks[i].len();
             let chnk = PacketChunkState {
@@ -259,21 +271,23 @@ pub trait ShieldCommand<
         Ok(())
     }
 
-    /// Builds this command into packets using the standard proof-of-work
-    /// parameters and sends them to the target address.
-    fn send<
+    /// Builds this command into packets using the crate's standard
+    /// proof-of-work parameters, saving every caller from repeating the
+    /// const-generic arithmetic that binds the pristine to the hash input.
+    fn build_standard<
         const C: usize,
         W: WireSchemeTypes + 'static,
     >(
         self,
-        src:        Arc<UdpSocket>,
-        trg_addr:   &SocketAddr,
+        mid:        ID::M,
+        src_addr:   IpAddr,
+        trg_addr:   IpAddr,
         code:       [u8; C],
         schms:      WireSchemes<W>,
     )
-        -> Outcome<()>
+        -> Outcome<Vec<Vec<u8>>>
     {
-        let packets = res!(self.build::<
+        self.build::<
             C,
             {constant::POW_INPUT_LEN},      // N
             {constant::POW_PREFIX_LEN},     // P0
@@ -285,6 +299,31 @@ pub trait ShieldCommand<
             >,
             W,
         >(
+            mid,
+            src_addr,
+            trg_addr,
+            code,
+            schms,
+        )
+    }
+
+    /// Builds this command into packets using the standard proof-of-work
+    /// parameters and sends them to the target address.
+    fn send<
+        const C: usize,
+        W: WireSchemeTypes + 'static,
+    >(
+        self,
+        mid:        ID::M,
+        src:        Arc<UdpSocket>,
+        trg_addr:   &SocketAddr,
+        code:       [u8; C],
+        schms:      WireSchemes<W>,
+    )
+        -> Outcome<()>
+    {
+        let packets = res!(self.build_standard::<C, W>(
+            mid,
             res!(src.local_addr()).ip(),
             trg_addr.ip(),
             code,
@@ -294,5 +333,56 @@ pub trait ShieldCommand<
             res!(src.send_to(&packet, trg_addr));
         }
         Ok(())
+    }
+}
+
+impl<
+    const C: usize,
+    const ML: usize,
+    const SL: usize,
+    const UL: usize,
+    P: ProtocolTypes<ML, SL, UL> + 'static,
+>
+    Protocol<C, ML, SL, UL, P>
+    where <P as ProtocolTypes<ML, SL, UL>>::W: 'static,
+{
+    /// Build the packets carrying an opaque application payload, ready to be
+    /// put on a socket.
+    ///
+    /// Both halves of an exchange come through here, and the only difference
+    /// between them is `kind` and where `mid` came from: a question draws a
+    /// fresh identifier, and an answer travels under the one the question
+    /// arrived with, because that is the whole of the correlation.
+    pub fn build_app(
+        &self,
+        syntax:     SyntaxRef,
+        kind:       AppMsgKind,
+        mid:        <P::ID as IdTypes<ML, SL, UL>>::M,
+        payload:    Vec<u8>,
+        src_ip:     IpAddr,
+        trg_ip:     IpAddr,
+    )
+        -> Outcome<Vec<Vec<u8>>>
+    {
+        let cmd: AppMsg<ML, SL, UL, P::ID> = AppMsg {
+            fmt:    MsgFmt {
+                        syntax,
+                        encoding: constant::DEFAULT_MSG_ENCODING,
+                    },
+            pow:    MsgPow { zbits: self.tx_zbits },
+            mid:    MsgIds {
+                        sid_opt:    None,
+                        uid:        self.uid,
+                    },
+            kind,
+            payload,
+        };
+        cmd.build_standard::<C, P::W>(
+            mid,
+            src_ip,
+            trg_ip,
+            self.code,
+            self.schms.clone(),
+        )
     }
 }

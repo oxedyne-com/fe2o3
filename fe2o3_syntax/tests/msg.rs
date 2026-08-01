@@ -397,11 +397,35 @@ pub fn test_msg(filter: &'static str) -> Outcome<()> {
 
         let msgrx = res!(msgrx.from_str("hello 42 -a goodbye 1", None));
         req!(msgrx.vals, vec![dat!("hello"), dat!(42u8)]);  
-        let argrx_vals = res!(msgrx.get_arg_vals("Arg_a").ok_or(err!(
-            "Failed to detect message argument '-a'."), Invalid, Output)));
+        let argrx_vals = res!(msgrx.get_arg_vals("Arg_a").ok_or_else(|| err!(
+            "Failed to detect message argument '-a'."; Invalid, Output)));
         req!(argrx_vals.len(), 2);
         req!(argrx_vals[0], dat!("goodbye"));
-        req!(argrx_vals[1], dat!(1i8));  
+        req!(argrx_vals[1], dat!(1i8));
+        // An argument has one set of values, whichever of its names is used to
+        // ask for them. It used to have as many as it has names, and which one
+        // answered depended on whether the message had been parsed or built.
+        for alias in ["Arg_a", "-a", "--a0"] {
+            let by_alias = res!(msgrx.get_arg_vals(alias).ok_or_else(|| err!(
+                "Failed to detect message argument '{}'.", alias; Invalid, Output)));
+            req!(by_alias.len(), 2);
+            req!(by_alias[0], dat!("goodbye"));
+            req!(msgrx.has_arg(alias), true);
+        }
+        // A message built by hand files its arguments under the same name a
+        // parsed one does, so what is required is found and what is added can
+        // be read back.
+        let built = Msg::new(msgrx.syntaxref());
+        let built = res!(built.add_msg_val(dat!("hello")));
+        let built = res!(built.add_msg_val(dat!(42u8)));
+        let built = res!(built.add_arg_val("-a", Some(dat!("goodbye"))));
+        let built = res!(built.add_arg_val("-a", Some(dat!(1i8))));
+        res!(built.validate());
+        let built_vals = res!(built.get_arg_vals("Arg_a").ok_or_else(|| err!(
+            "An argument added as '-a' could not be read back as 'Arg_a'.";
+            Invalid, Output)));
+        req!(built_vals.len(), 2);
+        req!(built_vals[0], dat!("goodbye"));
 
         let msgrx = res!(msgrx.from_str("hello   42 --a0  goodbye ", None));
         if let Some(argrx) = &msgrx.end.arg {
@@ -466,13 +490,13 @@ pub fn test_msg(filter: &'static str) -> Outcome<()> {
 
         let msgrx = res!(msgrx.from_str("hello 42 -a goodbye 1 cmd again -3", None));
         req!(msgrx.vals, vec![dat!("hello"), dat!(42u8)]);  
-        let argrx_vals = res!(msgrx.get_arg_vals("Arg_a").ok_or(err!(
-            "Failed to detect message argument '-a'."), Invalid, Output)));
+        let argrx_vals = res!(msgrx.get_arg_vals("Arg_a").ok_or_else(|| err!(
+            "Failed to detect message argument '-a'."; Invalid, Output)));
         req!(argrx_vals.len(), 2);
         req!(argrx_vals[0], dat!("goodbye"));
         req!(argrx_vals[1], dat!(1i8));  
-        let cmdrx = res!(msgrx.get_cmd("cmd").ok_or(err!(
-            "Failed to detect command 'cmd'."), Invalid, Output)));
+        let cmdrx = res!(msgrx.get_cmd("cmd").ok_or_else(|| err!(
+            "Failed to detect command 'cmd'."; Invalid, Output)));
         req!(cmdrx.vals.len(), 2);
         req!(cmdrx.vals[0], dat!("again"));
         req!(cmdrx.vals[1], dat!(-3i16));  
@@ -579,18 +603,18 @@ pub fn test_msg(filter: &'static str) -> Outcome<()> {
 
         let msgrx = res!(msgrx.from_str("hello 42 -a goodbye 1 cmd again -3 -b dejavu 42", None));
         req!(msgrx.vals, vec![dat!("hello"), dat!(42i128)]);  
-        let argrx_vals = res!(msgrx.get_arg_vals("Arg_a").ok_or(err!(
-            "Failed to detect message argument '-a'."), Invalid, Output)));
+        let argrx_vals = res!(msgrx.get_arg_vals("Arg_a").ok_or_else(|| err!(
+            "Failed to detect message argument '-a'."; Invalid, Output)));
         req!(argrx_vals.len(), 2);
         req!(argrx_vals[0], dat!("goodbye"));
         req!(argrx_vals[1], dat!(1i32));  
-        let cmdrx = res!(msgrx.get_cmd("cmd").ok_or(err!(
-            "Failed to detect command 'cmd'."), Invalid, Output)));
+        let cmdrx = res!(msgrx.get_cmd("cmd").ok_or_else(|| err!(
+            "Failed to detect command 'cmd'."; Invalid, Output)));
         req!(cmdrx.vals.len(), 2);
         req!(cmdrx.vals[0], dat!("again"));
         req!(cmdrx.vals[1], dat!(-3i16));  
-        let argrx_vals = res!(cmdrx.get_arg_vals("Arg_b").ok_or(err!(
-            "Failed to detect command 'cmd' argument '-b'."), Invalid, Output)));
+        let argrx_vals = res!(cmdrx.get_arg_vals("Arg_b").ok_or_else(|| err!(
+            "Failed to detect command 'cmd' argument '-b'."; Invalid, Output)));
         req!(argrx_vals.len(), 2);
         req!(argrx_vals[0], dat!("dejavu"));
         req!(argrx_vals[1], dat!(42u8));  
@@ -697,17 +721,17 @@ pub fn test_msg(filter: &'static str) -> Outcome<()> {
 
         let msgrx = res!(msgrx.from_str("42 cmd1 hello cmd2 goodbye -42 -a1 --arg2 done    ", None));
         req!(msgrx.vals, vec![dat!(42u8)]);  
-        let cmdrx = res!(msgrx.get_cmd("cmd1").ok_or(err!(
-            "Failed to detect command 'cmd1'."), Invalid, Output)));
+        let cmdrx = res!(msgrx.get_cmd("cmd1").ok_or_else(|| err!(
+            "Failed to detect command 'cmd1'."; Invalid, Output)));
         req!(cmdrx.vals.len(), 1);
         req!(cmdrx.vals[0], dat!("hello"));
-        let cmdrx = res!(msgrx.get_cmd("cmd2").ok_or(err!(
-            "Failed to detect command 'cmd2'."), Invalid, Output)));
+        let cmdrx = res!(msgrx.get_cmd("cmd2").ok_or_else(|| err!(
+            "Failed to detect command 'cmd2'."; Invalid, Output)));
         req!(cmdrx.vals.len(), 2);
         req!(cmdrx.vals[0], dat!("goodbye"));
         req!(cmdrx.vals[1], dat!(-42i8));
         assert!(cmdrx.has_arg("arg1"));
-        let argrx_vals = res!(cmdrx.get_arg_vals("arg2").ok_or(err!(
+        let argrx_vals = res!(cmdrx.get_arg_vals("arg2").ok_or_else(|| err!(
             "Failed to detect command 'cmd2' argument '-a2'.";
         Invalid, Output)));
         req!(argrx_vals.len(), 1);

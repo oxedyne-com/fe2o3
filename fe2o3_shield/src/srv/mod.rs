@@ -5,6 +5,7 @@
 //! (packets, assembly and handshake), the proof-of-work engine, cryptographic
 //! scheme selection and the UDP server loop itself.
 pub mod cfg;
+pub mod client;
 pub mod cmd;
 pub mod constant;
 pub mod context;

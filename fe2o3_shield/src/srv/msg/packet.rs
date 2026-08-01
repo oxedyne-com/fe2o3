@@ -2,6 +2,7 @@ use crate::{
     srv::{
         constant,
         msg::{
+            app::AppMsgKind,
             core::MsgType,
             handshake::HandshakeType,
         },
@@ -486,6 +487,18 @@ impl<
         Ok(buf)
     }
 
+    /// Whether a packet of this message type may carry the public key its signature is to
+    /// be checked against.
+    ///
+    /// It may where the receiver has no way of already holding one: the opening handshake
+    /// request, and an application payload, which travels outside any session.
+    pub fn may_carry_signing_key(msg_typ: MsgType) -> bool {
+        if HandshakeType::from(msg_typ) == HandshakeType::Req1 {
+            return true;
+        }
+        AppMsgKind::from_msg_type(msg_typ).is_some()
+    }
+
     /// The signature is based on the entire packet up to but not including the signature artefact.
     pub fn validate<
         const P0: usize,
@@ -534,12 +547,20 @@ impl<
                     ))
                 },
                 Some((range, Some((pk_rng, sig_rng)))) => { // range covers the public key and the signature.
-                    // Provision of the public key is only valid if the message is a
-                    // HandshakeType::Req1.
-                    if HandshakeType::from(msg_typ) != HandshakeType::Req1 {
+                    // A packet may carry the key it was signed with only where the
+                    // receiver could not be expected to hold one already: the handshake's
+                    // opening request, and an application payload, which is outside any
+                    // session and so has nothing to have exchanged a key through.
+                    //
+                    // Anywhere else the key is refused, and refused as a *failed*
+                    // signature rather than as no signature at all. Reporting it as
+                    // unchecked let a packet that carried its own key be accepted on its
+                    // proof of work alone, which is to say by anybody willing to spend
+                    // the work.
+                    if !Self::may_carry_signing_key(msg_typ) {
                         return Ok(PacketValidationResult {
                             pow,
-                            sig: None,
+                            sig: Some((false, None)),
                         });
                     }
                     let len = range.len() + PacketValidationArtefactRelativeIndices::BYTE_PREFIX_LEN;

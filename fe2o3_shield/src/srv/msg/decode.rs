@@ -1,3 +1,17 @@
+//! Taking an incoming packet apart, in the order a hostile network makes
+//! sensible.
+//!
+//! The work splits in two, and the split is what lets a peer that dials and a
+//! peer that listens share it. [`Protocol::accept`] does everything that is
+//! true of any packet whatever it turns out to say: rate-limit the address it
+//! came from, look up what proof of work is being demanded of that address,
+//! validate the artefacts, and hand the chunk to the assembler. What comes back
+//! is either nothing -- the message is still incomplete, or the packet was
+//! dropped -- or a whole message, which [`Protocol::read`] then parses against
+//! the syntax. Deciding what to *do* with the commands in it is the caller's,
+//! because a server answers requests and a client hears answers, and neither
+//! wants the other's dispatch table.
+
 use crate::{
     srv::{
         constant,
@@ -8,7 +22,6 @@ use crate::{
                 MsgIds,
                 MsgPow,
             },
-            handshake::HReq1,
             packet::{
                 PacketMeta,
                 PacketValidationArtefactRelativeIndices,
@@ -36,14 +49,48 @@ use oxedyne_fe2o3_syntax::{
 };
 use oxedyne_fe2o3_text::string::Stringer;
 
-use std::{
-    net::{
-        SocketAddr,
-        UdpSocket,
-    },
-    sync::Arc,
+use std::net::{
+    IpAddr,
+    SocketAddr,
 };
 
+
+/// A message that arrived whole, together with the header of the packet that
+/// completed it.
+///
+/// The header is kept because the parts of it that matter outside the packet
+/// layer -- which message this was, who sent it, and what kind of message it
+/// claims to be -- are exactly what an answer has to be addressed with.
+#[derive(Clone, Debug)]
+pub struct Accepted<
+    const MIDL: usize,
+    const UIDL: usize,
+    MID: oxedyne_fe2o3_jdat::id::NumIdDat<MIDL>,
+    UID: oxedyne_fe2o3_jdat::id::NumIdDat<UIDL>,
+> {
+    /// Header of the packet that completed the message.
+    pub meta:   PacketMeta<MIDL, UIDL, MID, UID>,
+    /// The assembled message bytes, ready to be parsed against a syntax.
+    pub byts:   Vec<u8>,
+}
+
+/// A message parsed against the syntax, with the parts every command needs.
+#[derive(Clone, Debug)]
+pub struct Received<
+    const SL: usize,
+    const UL: usize,
+    SID: oxedyne_fe2o3_jdat::id::NumIdDat<SL>,
+    UID: oxedyne_fe2o3_jdat::id::NumIdDat<UL>,
+> {
+    /// Syntax the message was validated against, and the outgoing encoding.
+    pub fmt:    MsgFmt,
+    /// Proof-of-work parameters the sender declared.
+    pub pow:    MsgPow,
+    /// Session and user identifiers.
+    pub ids:    MsgIds<SL, UL, SID, UID>,
+    /// The parsed message, whose commands the caller dispatches.
+    pub msg:    Msg,
+}
 
 impl<
     const C: usize,
@@ -54,50 +101,32 @@ impl<
 >
     Protocol<C, ML, SL, UL, P>
 {
-    /// Processes an incoming UDP packet, wrapping any error with the source
-    /// address for context. Delegates the decode, guard checks, validation and
-    /// message assembly to the internal handler.
-    pub async fn handle(
-        self,
-        buf:        [u8; constant::UDP_BUFFER_SIZE],
-        n:          usize,
-        src_addr:   SocketAddr,
-        trg:        Arc<UdpSocket>,
-        syntax:     SyntaxRef,
-    )
-        -> Outcome<()>
-    {
-        let src_addr_str = fmt!("{:?}", src_addr);
-        match self.handler(
-            buf,
-            n, 
-            src_addr,
-            trg,
-            syntax,
-        ) {
-            Err(e) => {
-                let e2 = err!(e,
-                    "While processing incoming packet from {}.", src_addr_str;
-                    IO, Network);
-                error!(e2.clone());
-                Err(e2)
-            },
-            Ok(()) => {
-                Ok(())
-            },
-        }
-    }
-    
-    fn handler(
+    /// Guard, validate and assemble one incoming packet.
+    ///
+    /// Returns the whole message when this packet was the one that completed
+    /// it, and `None` whenever there is nothing yet to hand on: a packet
+    /// dropped by a guard, a packet whose validation failed, or a chunk of a
+    /// message still missing others. A dropped packet is not an error, because
+    /// most of what arrives at a public UDP port is not addressed to anybody
+    /// in good faith, and a loop that errored on each one would be a loop an
+    /// attacker could fill with logging.
+    ///
+    /// `trg_ip` is the address the packet was received on, which the proof of
+    /// work is bound to at both ends.
+    pub fn accept(
         mut self,
-        buf:        [u8; constant::UDP_BUFFER_SIZE], 
-        n:          usize,
+        buf:        &[u8],
         src_addr:   SocketAddr,
-        trg:        Arc<UdpSocket>,
-        syntax:     SyntaxRef,
+        trg_ip:     IpAddr,
     )
-        -> Outcome<()>
+        -> Outcome<Option<Accepted<
+            ML,
+            UL,
+            <P::ID as IdTypes<ML, SL, UL>>::M,
+            <P::ID as IdTypes<ML, SL, UL>>::U,
+        >>>
     {
+        let n = buf.len();
         {
             let mut unlocked_timer = lock_write!(self.timer);
             unlocked_timer.update();
@@ -114,7 +143,7 @@ impl<
         // +-------------+--------------------------------+-------------+
         //        |                        |                +----+ +----+
         //        |                        |
-        //        |                        |                     |  
+        //        |                        |                     |
         //       meta                   message              validation
         //                               chunk               artefacts
         //
@@ -129,18 +158,7 @@ impl<
         for line in Stringer::new(fmt!("{:?}", meta)).to_lines("  ") {
             debug!(async_log::stream(), "{}", line);
         }
-        //let uid = alias::Uid::from_be_bytes(
-        //    res!(<[u8; constant::USER_ID_BYTE_LEN]>::try_from(&meta.uid), Decode, Bytes)
-        //);
-        //  pub struct PacketMeta<const U: usize> {
-        //      pub typ:    MsgType,
-        //      pub ver:    SemVer,
-        //      pub mid:    MsgIds,
-        //      pub uid:    [u8; U], // user id
-        //      pub chnk:   PacketChunkState,
-        //      pub tstamp: u64,
-        //  }
-        // 
+        //
         // 1. First line of defence: rate limiting and blacklisting against the source address.  We
         //    don't know if the sender of the packet is who they say they are, they could be
         //    address spoofing.  The threat of primary concern is DDOS, so we are looking for any
@@ -155,22 +173,34 @@ impl<
             &src_addr,
         )) {
             debug!(async_log::stream(), "Address guard dropping packet.");
-            return Ok(()); // Drop silently.
+            return Ok(None); // Drop silently.
         }
         if res!(self.ugrd.drop_packet(&meta.uid, self.accept_unknown)) { // Accesses the user log.
             debug!(async_log::stream(), "User guard dropping packet.");
-            return Ok(()); // Drop silently.
+            return Ok(None); // Drop silently.
         }
         debug!(async_log::stream(), "");
+        // A packet claiming a chunk it did not bring is a packet whose validation artefacts
+        // would be read from somebody else's bytes. Refuse it here rather than slicing past
+        // the end of the buffer.
         let n2 = n1 + (meta.chnk.chunk_size as usize);
+        if n2 > n
+            || n - n2 < PacketValidationArtefactRelativeIndices::BYTE_PREFIX_LEN
+        {
+            debug!(async_log::stream(),
+                "Dropping packet of {} bytes: its header claims a {}-byte chunk after {} \
+                bytes of metadata, leaving no room for the validation artefacts.",
+                n, meta.chnk.chunk_size, n1);
+            return Ok(None); // Drop silently.
+        }
         let (afact_rel_ind, _) =
             res!(PacketValidationArtefactRelativeIndices::from_bytes(&buf[n2..n]));
-    
+
         // Get the (locked) shared address and user maps, and unlock them in tight scopes when we
         // need to read or write.
         let (akey, locked_amap) = res!(self.agrd.get_locked_map(&src_addr));
         let (ukey, locked_umap) = res!(self.ugrd.get_locked_map(&meta.uid));
-        
+
         debug!(async_log::stream(), "");
         // What are our proof of work requirements for the packet?
         let powvars = match self.packval.pow {
@@ -180,7 +210,7 @@ impl<
                     if let Some(alog) = unlocked_amap.get(&akey) {
                         let unlocked_timer = lock_read!(self.timer);
                         let zbits = res!(
-                            self.gpzparams.required_global_zbits(unlocked_timer.avg_rps() as u16),
+                            self.gpzparams.required_global_zbits(unlocked_timer.avg_rps()),
                             IO,
                         );
                         if zbits >= alog.data.my_zbits {
@@ -213,8 +243,8 @@ impl<
                 >::new_rx(
                     code,
                     src_addr.ip(),
-                    res!(trg.local_addr()).ip(),
-                    self.pow_time_horiz, 
+                    trg_ip,
+                    self.pow_time_horiz,
                 ));
                 trace!(async_log::stream(), "POW Pristine rx:");
                 res!(pristine.trace());
@@ -269,12 +299,15 @@ impl<
                     artefact,
                 ));
             },
-            None => return Err(err!(
-                "Proof of work validation missing artefact.";
-                Bug, Configuration, Missing)),
+            None => {
+                debug!(async_log::stream(),
+                    "Dropping packet from {}: proof of work required, none supplied.",
+                    src_addr);
+                return Ok(None); // Drop silently.
+            },
         }
         ////////
-        
+
         let validation = res!(self.packval.validate(
             &buf[..n],
             n2,
@@ -291,7 +324,7 @@ impl<
             Some((valid, sigpk_opt)) => if !valid {
                 // TODO Take action on an invalid signature provided by this address and user id.
                 trace!(async_log::stream(), "Dropping packet: {}", validity);
-                return Ok(()); // Drop silently.
+                return Ok(None); // Drop silently.
             } else {
                 // The packet signature was valid.
                 debug!(async_log::stream(), "The packet is valid: {}", validity);
@@ -309,10 +342,6 @@ impl<
                                         // to sign with it.  I won't regard the key you supplied as
                                         // genuine until you are validated using the old key.
                                         ulog.data.sigtpk_opt_old = Some(sigtpk.clone());
-                                        //ulog.data.sigtpk = Some(PublicKey {
-                                        //    sts: SchemeTimestamp::now(nid),
-                                        //    key: sigpk_given,
-                                        //});
                                     } else {
                                         // The key you supplied perfectly matches the one I've got.
                                         match &ulog.data.sigtpk_opt_old {
@@ -321,9 +350,6 @@ impl<
                                                 // that I simply missed the key update.  So find the latest public
                                                 // key I do have, in order to ask the peer to sign HReq2 using it,
                                                 // so I can be sure this is the user I think it is.
-                                                //if let Some(pk) = ulog.data.pack_sigpk_set.iter().next() {
-                                                // TODO Replace line above with line below when
-                                                // https://github.com/rust-lang/rust/issues/62924 stablises.
                                                 if let Some(pk) = ulog.data.pack_sigpk_set.first() {
                                                     ulog.data.sign_pack_this = Some(pk.key.clone());
                                                 }
@@ -342,7 +368,7 @@ impl<
                                                     // TODO If arranging for periodic garbage collection of users
                                                     // who lack packet public keys is more efficient, don't delete
                                                     // user just yet.
-                                                    return Ok(());
+                                                    return Ok(None);
                                                 }
                                             },
                                         }
@@ -362,118 +388,67 @@ impl<
             },
             None => (),
         }
-        // Ok, we're almost done on a packet level.  Insert the message chunk into the AddressLog
-        // partial message map, which returns the message when complete.  However, I may also have
-        // to drop the packet if there is a problem.
+        // Ok, we're almost done on a packet level.  Insert the message chunk into the message
+        // assembler, which returns the message when complete.  However, I may also have to drop
+        // the packet if there is a problem.
         debug!(async_log::stream(), "");
         match res!(self.massembler.get_msg( // Message checkpoint, drop the partial message?
             &meta,
-            &buf[n1..n2], // payload + validator data
+            &buf[n1..n2], // payload chunk
             &self.ma_params,
         )) { // Returns whether to drop the packet, and the potential syntax protocol message.
-            (false, None) => return Ok(()), // Payload remains incomplete.
-            (false, Some(msg_byts)) => { // We have a complete message.
-                let msgrx = Msg::new(syntax.clone());
-                let mut msgrx = res!(msgrx.from_bytes(&msg_byts, None));
-                debug!(async_log::stream(), "msgrx [{}]: {}", msg_byts.len(), msgrx);
-                // Gather the proof of work parameters required by the
-                // client.
-                let msgids: MsgIds<
-                    SL,
-                    UL,
-                    <P::ID as IdTypes<ML, SL, UL>>::S,
-                    <P::ID as IdTypes<ML, SL, UL>>::U,
-                > = res!(MsgIds::from_msg(
-                    meta.uid,
-                    &mut msgrx,
-                ));
-                let msgpow = res!(MsgPow::from_msg(&mut msgrx));
-                // The MsgFmt captures the syntax protocol against which incoming and outgoing
-                // messages are validated, and the encoding for any outgoing messages.
-                let msgfmt = MsgFmt {
-                    syntax: syntax.clone(),
-                    encoding: constant::DEFAULT_MSG_ENCODING, // TODO allow client to change
-                };
-        
-                // Multiple commands in a single message are permitted.
-                for (cmd_name, mut msgcmd) in msgrx.cmds {
-                    match cmd_name.as_str() {
-                        "hreq1" => {
-                            debug!(async_log::stream(), "HREQ1");
-                            let mut scmd: HReq1<ML, SL, UL, P::ID> = HReq1 {
-                                fmt: msgfmt.clone(),
-                                pow: msgpow.clone(),
-                                mid: msgids.clone(),
-                                ..Default::default()
-                            };
-                            // Each command type can implement its own
-                            // custom process method, which captures
-                            // only the parameters it needs.
-                            let mut unlocked_amap = lock_write!(locked_amap);
-                            if let Some(alog) = unlocked_amap.get_mut(&akey) {
-                                //if let Some(mut alog_data) = alog.data.as_mut() {
-                                    res!(scmd.respond(
-                                        &mut msgcmd,
-                                        //alog.data.as_mut(), // For pow parameters.
-                                        &mut alog.data, // For pow parameters.
-                                        //&mut self.ugrd, // For user signing pk.
-                                        // For sending HResp1.
-                                        //&self.sock_addr,
-                                        //Config::chunker(self.wschms.clone_chunk_config()),
-                                        trg.clone(),
-                                        //&self.src_addr,
-                                    ));
-                                //}
-                            }
-                        },
-                    //    "hresp1" => {
-                    //        let mut scmd = syntax::HResp1 {
-                    //            fmt: msgfmt.clone(),
-                    //            mid: msgid.clone(),
-                    //            ..Default::default()
-                    //        };
-                    //        debug!(async_log::stream(), "hresp1 recvd");
-                    //        Ok(())
-                    //        //scmd.process(
-                    //        //    &mut msgcmd,
-                    //        //    &mut self.ugrd, // For user signing pk.
-                    //        //    // For sending.
-                    //        //    self.sock_addr.clone(),
-                    //        //    self.pack_size,
-                    //        //    &self.sock,
-                    //        //    &src_addr,
-                    //        //)
-                    //    },
-                    //    //"hreq2" => {
-                    //    //    let mut scmd = syntax::HReq1 {
-                    //    //        fmt: msgfmt.clone(),
-                    //    //        mid: msgid.clone(),
-                    //    //        ..Default::default()
-                    //    //    };
-                    //    //    // Each command type can implement its own
-                    //    //    // custom process method, which captures
-                    //    //    // only the parameters it needs.
-                    //    //    scmd.server_process(
-                    //    //        &mut msgcmd,
-                    //    //        &mut alog.data, // For pow parameters.
-                    //    //        &mut self.ugrd, // For user signing pk.
-                    //    //        // For sending HResp1.
-                    //    //        self.sock_addr.clone(),
-                    //    //        self.pack_size,
-                    //    //        &self.sock,
-                    //    //        &src_addr,
-                    //    //    )
-                    //    //},
-                        _ => return Err(err!(
-                            "Unrecognised message command '{}'.", cmd_name;
-                            Bug, Unimplemented)),
-                    }
-                }
-            }, // Read payload.
+            (false, None) => Ok(None), // Payload remains incomplete.
+            (false, Some(byts)) => Ok(Some(Accepted { meta, byts })),
             (true, _) => { // Drop the message completely.
                 res!(self.massembler.remove(&meta.mid));
+                Ok(None)
             },
-        } // Assemble payload packets.
-        Ok(())
+        }
+    }
+
+    /// Parse an assembled message against the syntax, gathering the identifiers
+    /// and proof-of-work parameters every command shares.
+    pub fn read(
+        &self,
+        accepted:   &Accepted<
+                        ML,
+                        UL,
+                        <P::ID as IdTypes<ML, SL, UL>>::M,
+                        <P::ID as IdTypes<ML, SL, UL>>::U,
+                    >,
+        syntax:     SyntaxRef,
+    )
+        -> Outcome<Received<
+            SL,
+            UL,
+            <P::ID as IdTypes<ML, SL, UL>>::S,
+            <P::ID as IdTypes<ML, SL, UL>>::U,
+        >>
+    {
+        let msgrx = Msg::new(syntax.clone());
+        let mut msgrx = res!(msgrx.from_bytes(&accepted.byts, None));
+        debug!(async_log::stream(), "msgrx [{}]: {}", accepted.byts.len(), msgrx);
+        let ids: MsgIds<
+            SL,
+            UL,
+            <P::ID as IdTypes<ML, SL, UL>>::S,
+            <P::ID as IdTypes<ML, SL, UL>>::U,
+        > = res!(MsgIds::from_msg(
+            accepted.meta.uid,
+            &mut msgrx,
+        ));
+        let pow = res!(MsgPow::from_msg(&mut msgrx));
+        // The MsgFmt captures the syntax protocol against which incoming and outgoing
+        // messages are validated, and the encoding for any outgoing messages.
+        let fmt = MsgFmt {
+            syntax,
+            encoding: constant::DEFAULT_MSG_ENCODING, // TODO allow client to change
+        };
+        Ok(Received {
+            fmt,
+            pow,
+            ids,
+            msg: msgrx,
+        })
     }
 }

@@ -9,31 +9,41 @@
 //! favours simplicity and transparency over abstraction.
 //!
 //! # Example
-//! ```rust
-//! use oxedyne_fe2o3_syntax::{Syntax, SyntaxRef};
-//! use oxedyne_fe2o3_jdat::kind::Kind;
-//! 
-//! // Create a new syntax
-//! let mut syntax = Syntax::new("example")
-//!     .expected_vals(vec![(Kind::Str, "Protocol name".to_string())]);
 //!
-//! // Add commands with arguments
-//! let cmd = Cmd::new("connect")?
-//!     .expected_vals(vec![(Kind::Str, "Host to connect to".to_string())])
-//!     .help("Connect to a remote host");
-//! 
-//! syntax = syntax.add_cmd(cmd)?;
+//! A syntax is built from configuration structs, a message is parsed against
+//! it, and what the message said is read by matching rather than by dispatch.
 //!
-//! // Process commands through direct matching
+//! ```ignore
+//! use oxedyne_fe2o3_syntax::{
+//!     cmd::{Cmd, CmdConfig},
+//!     core::{Syntax, SyntaxConfig, SyntaxRef},
+//!     msg::Msg,
+//! };
+//! use oxedyne_fe2o3_jdat::prelude::*;
+//! use oxedyne_fe2o3_core::prelude::*;
+//!
+//! // A syntax, with one command that takes one string value.
+//! let mut syntax = Syntax::from(SyntaxConfig {
+//!     name:   fmt!("example"),
+//!     ..Default::default()
+//! });
+//! let cmd = Cmd::from(CmdConfig {
+//!     name:   fmt!("connect"),
+//!     vals:   vec![(Kind::Str, fmt!("Host to connect to"))],
+//!     help:   Some(fmt!("Connect to a remote host")),
+//!     ..Default::default()
+//! });
+//! syntax = res!(syntax.add_cmd(cmd));
+//! let syntax = SyntaxRef::new(syntax);
+//!
+//! // A message read against it.
+//! let msg = res!(Msg::new(syntax).from_str("connect example.com", None));
 //! match msg.get_cmd("connect") {
-//!     Some(cmd) => {
-//!         if let Some(vals) = cmd.get_vals() {
-//!             // Handle connect command...
-//!         }
-//!     }
-//!     None => {
-//!         // Command not found...
-//!     }
+//!     Some(cmd) => match cmd.get_vals() {
+//!         Some(_vals) => (), // Handle the connect command.
+//!         None => (),        // It named no host.
+//!     },
+//!     None => (),            // The message said something else.
 //! }
 //! ```
 //! 

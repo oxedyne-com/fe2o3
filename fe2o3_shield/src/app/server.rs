@@ -19,6 +19,7 @@ use crate::{
         },
         schemes::WireSchemesInput,
         server::{
+            answer_nothing,
             Server,
         },
     },
@@ -181,9 +182,12 @@ pub async fn start_server(
         info!(async_log::stream(), "{}", line);
     }
 
+    // The reference server has no application of its own, so it hears payloads
+    // and answers none of them. An application built on the library passes its
+    // own handler here.
     let handle = tokio::spawn(async_log::LOG_STREAM_ID.scope(
         test_stream.unwrap_or_else(|| fmt!("main")),
-        async move { server.start().await },
+        async move { server.start(answer_nothing).await },
     ));
 
     Ok((Evaluation::Exit, Some((cmd_chan, handle))))

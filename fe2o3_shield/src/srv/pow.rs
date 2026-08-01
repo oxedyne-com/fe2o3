@@ -56,13 +56,32 @@ pub struct DifficultyParams {
 impl DifficultyParams {
     /// Computes the globally required proof-of-work zero bits for a given
     /// requests-per-second rate under the configured profile.
+    ///
+    /// The rate is taken as a `u64` because that is what the request timer
+    /// measures, and a burst measured inside one millisecond reports a rate of
+    /// `u64::MAX`. Narrowing that to a `u16` first turned an unmeasurably fast
+    /// burst into an arbitrary number, and the arithmetic that followed
+    /// overflowed on the way to demanding more zero bits than the hash has.
+    /// The curve saturates at [`Self::max`] instead: an attacker can raise the
+    /// difficulty to the configured ceiling, and no further.
     #[inline(always)]
-    pub fn required_global_zbits(&self, rps: u16) -> Outcome<ZeroBits> {
+    pub fn required_global_zbits(&self, rps: u64) -> Outcome<ZeroBits> {
+        if self.max < self.min {
+            return Err(err!(
+                "The maximum proof of work difficulty, {} zero bits, is below the \
+                minimum of {}.", self.max, self.min;
+                Invalid, Configuration));
+        }
         match self.profile {
-            DifficultyProfile::Linear => Ok(
-                ((((self.max - self.min) * rps)
-                / self.max) + self.min) as ZeroBits
-            ),
+            DifficultyProfile::Linear => {
+                if self.max == 0 {
+                    return Ok(0);
+                }
+                let span = (self.max - self.min) as u64;
+                let scaled = span.saturating_mul(rps) / (self.max as u64);
+                let zbits = (self.min as u64).saturating_add(scaled);
+                Ok(zbits.min(self.max as u64) as ZeroBits)
+            },
         }
     }
 }

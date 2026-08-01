@@ -71,6 +71,17 @@ impl Arg {
         self.cfg.name.clone()
     }
 
+    /// The argument's short name as it is written on a command line, hyphen
+    /// and all.
+    ///
+    /// This is what a message prints itself with, because the canonical name is
+    /// the one it is filed under and not one a reader could type back.
+    pub fn short_name(&self) -> String {
+        let mut s = self.cfg.prefs.arg_hyph1_pfx.clone();
+        s.push_str(&self.cfg.hyph1);
+        s
+    }
+
     pub fn hyphen_check(&self, s: &str) -> Outcome<()> {
         if s.starts_with('-') || s.contains(' ') {
             return Err(err!(

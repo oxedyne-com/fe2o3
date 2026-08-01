@@ -296,3 +296,110 @@ pub trait Database<
     )
         -> Outcome<Vec<(Dat, Dat, Meta<UIDL, UID>)>>;
 }
+
+/// A database that is not there.
+///
+/// Plenty of things are parameterised by a [`Database`] because they *may* hold
+/// one -- a server that persists what it hears, say -- and are perfectly usable
+/// without. Before this, such a caller had to name a real database type it
+/// never intended to instantiate, which meant taking a dependency on an
+/// implementation in order to pass `None`.
+///
+/// Every operation refuses rather than pretending to succeed, so a caller that
+/// reaches for a database it does not have is told so at the call rather than
+/// finding an empty answer later.
+#[derive(Debug)]
+pub struct NoDatabase<
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL>,
+    ENC:    Encrypter,
+    KH:     Hasher,
+> {
+    uid:    std::marker::PhantomData<UID>,
+    enc:    std::marker::PhantomData<ENC>,
+    kh:     std::marker::PhantomData<KH>,
+}
+
+impl<
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL>,
+    ENC:    Encrypter,
+    KH:     Hasher,
+>
+    Default for NoDatabase<UIDL, UID, ENC, KH>
+{
+    fn default() -> Self {
+        Self {
+            uid:    std::marker::PhantomData,
+            enc:    std::marker::PhantomData,
+            kh:     std::marker::PhantomData,
+        }
+    }
+}
+
+impl<
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL>,
+    ENC:    Encrypter,
+    KH:     Hasher,
+>
+    InNamex for NoDatabase<UIDL, UID, ENC, KH>
+{
+    fn name_id(&self) -> Outcome<oxedyne_fe2o3_namex::id::NamexId> {
+        Err(err!(
+            "There is no database here, so it has no name.";
+            Invalid, Missing))
+    }
+}
+
+impl<
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL>,
+    ENC:    Encrypter,
+    KH:     Hasher,
+>
+    Database<UIDL, UID, ENC, KH> for NoDatabase<UIDL, UID, ENC, KH>
+{
+    fn insert(
+        &self,
+        _key:   Dat,
+        _val:   Dat,
+        _user:  UID,
+        _or:    Option<&RestSchemesOverride<ENC, KH>>,
+    )
+        -> Outcome<(bool, usize)>
+    {
+        Err(err!("There is no database here to insert into."; Invalid, Missing))
+    }
+
+    fn get(
+        &self,
+        _key:   &Dat,
+        _or:    Option<&RestSchemesOverride<ENC, KH>>,
+    )
+        -> Outcome<Option<(Dat, Meta<UIDL, UID>)>>
+    {
+        Err(err!("There is no database here to read from."; Invalid, Missing))
+    }
+
+    fn delete(
+        &self,
+        _key:   &Dat,
+        _user:  UID,
+        _or:    Option<&RestSchemesOverride<ENC, KH>>,
+    )
+        -> Outcome<bool>
+    {
+        Err(err!("There is no database here to delete from."; Invalid, Missing))
+    }
+
+    fn scan(
+        &self,
+        _opts:  &ScanOpts,
+        _or:    Option<&RestSchemesOverride<ENC, KH>>,
+    )
+        -> Outcome<Vec<(Dat, Dat, Meta<UIDL, UID>)>>
+    {
+        Err(err!("There is no database here to scan."; Invalid, Missing))
+    }
+}
