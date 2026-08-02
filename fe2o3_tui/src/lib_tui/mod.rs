@@ -8,5 +8,6 @@ pub mod input;
 pub mod render;
 pub mod repl;
 pub mod style;
+pub mod term;
 pub mod text;
 pub mod window;
