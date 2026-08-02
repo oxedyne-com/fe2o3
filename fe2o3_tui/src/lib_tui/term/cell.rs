@@ -280,6 +280,13 @@ pub enum Wide {
 	Lead,
 	/// The right half of a double width character; the cell holds no character of its own.
 	Trail,
+	/// A column left over at the end of a row because the double width character that came next
+	/// would not fit in it.
+	///
+	/// It has to be told apart from a space that the application actually printed there, because a
+	/// rewrap drops the one and keeps the other, and in the grid the two look identical. A renderer
+	/// draws it as a blank in the cell's own pen.
+	Filler,
 }
 
 /// One cell of the grid.
@@ -316,9 +323,24 @@ impl Cell {
 		}
 	}
 
+	/// A column left over at the end of a row because a double width character would not fit in it.
+	pub fn filler(pen: Pen) -> Self {
+		Self {
+			chr:	' ',
+			pen,
+			wide:	Wide::Filler,
+		}
+	}
+
 	/// Whether the cell holds nothing but a space in the default pen.
+	///
+	/// A leftover column counts as blank, since it holds no text of anybody's and a rewrap is going
+	/// to drop it in any case.
 	pub fn is_blank(&self) -> bool {
-		self.chr == ' ' && self.pen.is_plain() && self.wide == Wide::No
+		match self.wide {
+			Wide::No | Wide::Filler	=> self.chr == ' ' && self.pen.is_plain(),
+			Wide::Lead | Wide::Trail	=> false,
+		}
 	}
 }
 
@@ -349,9 +371,10 @@ pub fn runs(row: &[Cell]) -> Outcome<Vec<Run>> {
 	let mut col = 0;
 	while col < end {
 		let cell = row[col];
-		if cell.wide == Wide::Trail {
+		if cell.wide == Wide::Trail || cell.wide == Wide::Filler {
 			// A trailing half with no lead before it, which can only arise from a resize that
-			// cut the character in two. Treat it as a space.
+			// cut the character in two, or a column left over at the end of a row. Either way
+			// there is nothing to draw but a space.
 			match out.last_mut() {
 				Some(run) if run.pen == cell.pen => {
 					run.text.push(' ');

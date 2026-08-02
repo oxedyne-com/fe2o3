@@ -20,6 +20,10 @@ use crate::lib_tui::term::{
 		ATTR_STRIKE,
 		ATTR_UNDERLINE,
 	},
+	charset::{
+		Charset,
+		Charsets,
+	},
 	parse::{
 		Act,
 		Csi,
@@ -89,6 +93,10 @@ pub struct Terminal {
 	replies: Vec<u8>,
 	/// The last character printed, which `REP` repeats.
 	last_print: Option<char>,
+	/// The designated character sets and which of them is in front.
+	sets:	Charsets,
+	/// The character sets `DECSC` saved.
+	saved_sets: Option<Charsets>,
 }
 
 impl Terminal {
@@ -121,6 +129,8 @@ impl Terminal {
 			bells:		0,
 			replies:	Vec::new(),
 			last_print:	None,
+			sets:		Charsets::new(),
+			saved_sets:	None,
 		}
 	}
 
@@ -151,6 +161,11 @@ impl Terminal {
 	/// The mode flags.
 	pub fn modes(&self) -> &Modes {
 		&self.modes
+	}
+
+	/// The designated character sets and which of them is mapped over the printable range.
+	pub fn charsets(&self) -> &Charsets {
+		&self.sets
 	}
 
 	/// The window title the stream last asked for.
@@ -222,8 +237,11 @@ impl Terminal {
 	fn act(&mut self, act: &Act) {
 		match act {
 			Act::Print(c)	=> {
-				self.screen.print(*c);
-				self.last_print = Some(*c);
+				// A designated set stands in front of the printable ASCII range only, so a
+				// character that arrived as UTF-8 passes through whatever is designated.
+				let c = self.sets.map(*c);
+				self.screen.print(c);
+				self.last_print = Some(c);
 			}
 			Act::Ctrl(c)	=> self.ctrl(*c),
 			Act::Csi(seq)	=> self.csi(seq),
@@ -246,6 +264,8 @@ impl Terminal {
 				}
 			}
 			C0::CarriageReturn	=> self.screen.carriage_return(),
+			C0::ShiftOut		=> self.sets.shift_to(1),
+			C0::ShiftIn		=> self.sets.shift_to(0),
 		}
 	}
 
@@ -256,13 +276,19 @@ impl Terminal {
 	/// Carries out an escape sequence, ignoring any it does not recognise.
 	fn esc(&mut self, seq: &Esc) {
 		match (seq.inter, seq.fin) {
-			// Character set designation, which a UTF-8 terminal has no use for.
-			(Some(b'(' | b')' | b'*' | b'+' | b'-' | b'.' | b'/'), _)	=> {}
+			// Character set designation into G0 to G3. The `-`, `.` and `/` forms designate a 96
+			// character set into G1 to G3, which no set this model knows how to be, so they are
+			// consumed and dropped rather than being allowed to shadow the ASCII range.
+			(Some(b'('), c)	=> self.designate(0, c),
+			(Some(b')'), c)	=> self.designate(1, c),
+			(Some(b'*'), c)	=> self.designate(2, c),
+			(Some(b'+'), c)	=> self.designate(3, c),
+			(Some(b'-' | b'.' | b'/'), _)	=> {}
 			// DECALN, the alignment pattern.
 			(Some(b'#'), b'8')	=> self.screen.fill_alignment(),
 			(Some(_), _)		=> {}
-			(None, b'7')		=> self.screen.save_cursor(),
-			(None, b'8')		=> self.screen.restore_cursor(),
+			(None, b'7')		=> self.save_cursor(),
+			(None, b'8')		=> self.restore_cursor(),
 			(None, b'D')		=> self.screen.line_feed(),
 			(None, b'E')		=> self.screen.next_line(),
 			(None, b'M')		=> self.screen.reverse_index(),
@@ -290,11 +316,38 @@ impl Terminal {
 		}
 	}
 
+	/// Designates a character set into one of G0 to G3.
+	///
+	/// A designator this model does not know names ASCII, so an unrecognised set leaves the bytes
+	/// as they arrived rather than substituting something invented here.
+	fn designate(&mut self, g: usize, designator: u8) {
+		self.sets.designate(g, Charset::from_designator(designator));
+	}
+
+	/// Saves the cursor, the pen, origin mode and the character sets, as `DECSC` asks.
+	///
+	/// The character sets are part of what `DECSC` saves, which matters to a programme that draws a
+	/// box, saves, prints a label in ASCII and restores expecting to go on drawing the box.
+	fn save_cursor(&mut self) {
+		self.screen.save_cursor();
+		self.saved_sets = Some(self.sets);
+	}
+
+	/// Restores what [`Terminal::save_cursor`] saved.
+	fn restore_cursor(&mut self) {
+		self.screen.restore_cursor();
+		if let Some(sets) = self.saved_sets {
+			self.sets = sets;
+		}
+	}
+
 	/// Returns the terminal to its power on state.
 	fn hard_reset(&mut self) {
 		self.screen.reset();
 		self.modes = Modes::default();
 		self.last_print = None;
+		self.sets.reset();
+		self.saved_sets = None;
 	}
 
 	/// Returns the terminal to a known state without clearing the grid, as `DECSTR` asks.
@@ -302,6 +355,12 @@ impl Terminal {
 	/// The cursor does not move. Several accounts of `DECSTR` say that it homes the cursor, but
 	/// xterm and tmux both leave it where it was, and an application that sends a soft reset in the
 	/// middle of drawing would be badly served by a terminal that moved it.
+	///
+	/// The character sets are returned to ASCII. This is one of the few places where tmux is not
+	/// followed: tmux 3.6 leaves a designated graphics set in place across `DECSTR`, while the
+	/// VT510 manual lists the character sets among what a soft reset restores, and xterm resets
+	/// them. The manual is followed here, since a terminal that keeps the line drawing set through
+	/// a reset shows a screenful of `qqqq` to the next programme that prints plain text.
 	fn soft_reset(&mut self) {
 		let cur = *self.screen.cursor();
 		self.screen.set_pen(Pen::plain());
@@ -311,8 +370,9 @@ impl Terminal {
 		self.screen.set_cursor_visible(true);
 		let rows = self.screen.rows();
 		self.screen.set_region(0, rows - 1);
+		self.sets.reset();
 		// Setting the region has homed the cursor, which is what the saved position becomes.
-		self.screen.save_cursor();
+		self.save_cursor();
 		self.screen.move_to(cur.col, cur.row);
 		self.modes = Modes::default();
 	}
@@ -401,8 +461,10 @@ impl Terminal {
 				}
 			}
 			// ── Cursor save and restore ────────────────────────
-			(None, None, b's')	=> self.screen.save_cursor(),
-			(None, None, b'u')	=> self.screen.restore_cursor(),
+			// tmux makes these the same thing as `DECSC` and `DECRC`, character sets included,
+			// rather than the position only save of ANSI.SYS.
+			(None, None, b's')	=> self.save_cursor(),
+			(None, None, b'u')	=> self.restore_cursor(),
 			// Everything else is consumed and dropped.
 			(None, None, _)		=> {}
 		}

@@ -27,7 +27,10 @@
 //!
 //! - [`parse`] is the state machine over the byte stream. It turns bytes into [`parse::Act`]s and
 //!   holds whatever is incomplete between calls.
-//! - [`screen`] is the grid, the cursor, the scrolling region, the tab stops and the scrollback.
+//! - [`charset`] is the DEC special graphics set and the machinery that puts it in front of the
+//!   printable ASCII range, which is how a curses programme draws a line.
+//! - [`screen`] is the grid, the cursor, the scrolling region, the tab stops, the scrollback and
+//!   the rewrapping a resize does.
 //! - [`cell`] is what one cell holds: a character, a pen and whether it is half of a wide one.
 //! - [`width`] answers how many cells a character occupies.
 //! - [`emu`] joins the parser to the screen and is what a caller holds.
@@ -52,6 +55,7 @@
 //! defer to it once it exposes a width function.
 
 pub mod cell;
+pub mod charset;
 pub mod emu;
 pub mod parse;
 pub mod screen;
@@ -67,6 +71,10 @@ pub use cell::{
 	TermColour,
 	Wide,
 };
+pub use charset::{
+	Charset,
+	Charsets,
+};
 pub use emu::{
 	Modes,
 	Terminal,
@@ -79,6 +87,7 @@ pub use screen::{
 	Cursor,
 	Damage,
 	Erase,
+	Line,
 	Screen,
 	Surface,
 };

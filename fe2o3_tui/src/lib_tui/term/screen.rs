@@ -16,6 +16,11 @@
 //! Erasure paints with the current background colour, not with the default one. An application
 //! that selects a background and then erases expects to see that background, and does not repaint
 //! it itself.
+//!
+//! Every row records whether the text on it ran into the row below, which is what [`Screen::resize`]
+//! needs in order to put a narrowed window's text back together rather than cutting it off. The
+//! record is written in one place only, where the wrap actually happens, and an erase that reaches
+//! the end of a row takes it away again.
 
 use crate::lib_tui::term::{
 	cell::{
@@ -61,6 +66,35 @@ impl Erase {
 			2	=> Some(Self::All),
 			_	=> None,
 		}
+	}
+}
+
+/// One line of the grid or of the scrollback, and whether it ran into the one below.
+///
+/// The `wrapped` flag is what makes rewrapping on resize possible at all. Without a record of which
+/// rows are continuations of the row above, a terminal narrowing its window can only truncate,
+/// because it cannot tell a paragraph that ran on from two separate lines that happen to be
+/// adjacent. The flag is set where the wrap actually happens, in [`Screen::wrap`], and nowhere else.
+#[derive(Clone, Debug, Default)]
+pub struct Line {
+	/// The cells, which for a wrapped line are exactly as wide as the screen then was.
+	pub cells:	Vec<Cell>,
+	/// Whether the text carried on into the line below rather than ending here.
+	pub wrapped:	bool,
+}
+
+impl Line {
+	/// A blank line of `cols` cells.
+	pub fn blank(cols: usize) -> Self {
+		Self {
+			cells:		vec![Cell::default(); cols],
+			wrapped:	false,
+		}
+	}
+
+	/// The text of the line, with trailing blanks removed.
+	pub fn text(&self) -> String {
+		Screen::cells_text(&self.cells)
 	}
 }
 
@@ -190,8 +224,12 @@ pub struct Screen {
 	rows:	usize,
 	/// The visible grid, `rows` by `cols`, in row major order.
 	grid:	Vec<Cell>,
+	/// Whether each row of the visible grid ran into the row below.
+	wrapped: Vec<bool>,
 	/// The grid that is not in front, held while the other is shown.
 	spare:	Vec<Cell>,
+	/// Whether each row of the grid that is not in front ran into the row below.
+	spare_wrapped: Vec<bool>,
 	/// Which grid is in front.
 	surface: Surface,
 	/// The cursor.
@@ -213,9 +251,12 @@ pub struct Screen {
 	/// Whether row addressing is relative to the scrolling region.
 	origin:	bool,
 	/// Lines that have left the top of the screen.
-	scrollback: VecDeque<Vec<Cell>>,
+	scrollback: VecDeque<Line>,
 	/// The most lines of scrollback that will be kept.
 	scrollback_max: usize,
+	/// How many lines of scrollback the viewport is shown above the live screen, where zero is the
+	/// live screen itself.
+	view:	usize,
 	/// What has changed since a renderer last looked.
 	damage:	Damage,
 }
@@ -249,7 +290,9 @@ impl Screen {
 			cols,
 			rows,
 			grid:		vec![Cell::default(); cols * rows],
+			wrapped:	vec![false; rows],
 			spare:		Vec::new(),
+			spare_wrapped:	Vec::new(),
 			surface:	Surface::Primary,
 			cursor:		Cursor::default(),
 			pen:		Pen::default(),
@@ -262,6 +305,7 @@ impl Screen {
 			origin:		false,
 			scrollback:	VecDeque::new(),
 			scrollback_max,
+			view:		0,
 			damage:		Damage::new(rows),
 		})
 	}
@@ -325,6 +369,11 @@ impl Screen {
 		Some(&self.grid[a..a + self.cols])
 	}
 
+	/// Whether a visible row ran into the row below rather than ending there.
+	pub fn row_wrapped(&self, row: usize) -> bool {
+		self.wrapped.get(row).copied().unwrap_or(false)
+	}
+
 	/// One cell, or `None` if it is off the grid.
 	pub fn cell(&self, col: usize, row: usize) -> Option<&Cell> {
 		if col >= self.cols || row >= self.rows {
@@ -355,15 +404,22 @@ impl Screen {
 	}
 
 	/// The text of a run of cells, with trailing blanks removed.
-	fn cells_text(cells: &[Cell]) -> String {
+	pub fn cells_text(cells: &[Cell]) -> String {
 		let mut end = cells.len();
-		while end > 0 && cells[end - 1].chr == ' ' && cells[end - 1].wide == Wide::No {
+		while end > 0
+			&& cells[end - 1].chr == ' '
+			&& (cells[end - 1].wide == Wide::No || cells[end - 1].wide == Wide::Filler)
+		{
 			end -= 1;
 		}
 		let mut out = String::new();
 		for cell in &cells[..end] {
-			if cell.wide != Wide::Trail {
-				out.push(cell.chr);
+			match cell.wide {
+				// Neither the right hand half of a wide character nor a leftover column at the
+				// end of a row carries text of its own.
+				Wide::Trail	=> {}
+				Wide::Filler	=> out.push(' '),
+				_		=> out.push(cell.chr),
 			}
 		}
 		out
@@ -385,12 +441,56 @@ impl Screen {
 	/// returned is usually shorter than the screen is wide, and is never longer than the screen was
 	/// wide when the line left it.
 	pub fn scrollback_line(&self, i: usize) -> Option<&[Cell]> {
-		self.scrollback.get(i).map(|v| v.as_slice())
+		self.scrollback.get(i).map(|l| l.cells.as_slice())
 	}
 
 	/// The text of a line of scrollback, counting zero as the oldest.
 	pub fn scrollback_text(&self, i: usize) -> Option<String> {
-		self.scrollback.get(i).map(|v| Self::cells_text(v))
+		self.scrollback.get(i).map(|l| Self::cells_text(&l.cells))
+	}
+
+	/// Whether a line of scrollback ran into the line below rather than ending there.
+	pub fn scrollback_wrapped(&self, i: usize) -> bool {
+		self.scrollback.get(i).map(|l| l.wrapped).unwrap_or(false)
+	}
+
+	/// How many lines of scrollback the viewport is shown above the live screen.
+	///
+	/// Zero is the live screen. The value never exceeds [`Screen::scrollback_len`], and a resize
+	/// keeps the viewport on the same text rather than on the same number.
+	pub fn view_offset(&self) -> usize {
+		self.view
+	}
+
+	/// Scrolls the viewport back by `n` lines, clamped to what the scrollback holds.
+	pub fn set_view_offset(&mut self, n: usize) {
+		let want = n.min(self.scrollback.len());
+		if want != self.view {
+			self.view = want;
+			self.touch_all();
+		}
+	}
+
+	/// The cells of a row of the viewport, which is the live screen unless the view is scrolled
+	/// back, or `None` if the row is off the viewport.
+	pub fn view_row(&self, row: usize) -> Option<&[Cell]> {
+		if row >= self.rows {
+			return None;
+		}
+		if row < self.view {
+			// A row from the scrollback, counting up from the oldest line still shown.
+			let i = self.scrollback.len() - self.view + row;
+			return self.scrollback.get(i).map(|l| l.cells.as_slice());
+		}
+		self.row(row - self.view)
+	}
+
+	/// The text of a row of the viewport, with trailing blanks removed.
+	pub fn view_row_text(&self, row: usize) -> String {
+		match self.view_row(row) {
+			Some(cells)	=> Self::cells_text(cells),
+			None		=> fmt!(""),
+		}
 	}
 
 	/// What has changed since a renderer last looked.
@@ -503,6 +603,10 @@ impl Screen {
 		}
 		if self.cursor.col + n > self.cols {
 			if self.autowrap {
+				// The character will not fit in the columns left, so those columns are marked
+				// as the padding they are and the character starts the next row whole. Without
+				// the mark a later rewrap cannot tell them from spaces somebody printed.
+				self.pad_to_edge();
 				self.wrap();
 			} else {
 				self.cursor.col = self.cols - n;
@@ -543,6 +647,18 @@ impl Screen {
 		self.touch_cursor();
 	}
 
+	/// Marks the columns from the cursor to the end of the row as leftover padding.
+	fn pad_to_edge(&mut self) {
+		let row = self.cursor.row;
+		let base = row * self.cols;
+		for col in self.cursor.col..self.cols {
+			if let Some(cell) = self.grid.get_mut(base + col) {
+				*cell = Cell::filler(cell.pen);
+			}
+		}
+		self.touch(row);
+	}
+
 	/// Blanks the other half of any wide character the write at `col` would cut in two.
 	fn clear_overlapped(&mut self, col: usize, n: usize) {
 		let row = self.cursor.row;
@@ -569,9 +685,15 @@ impl Screen {
 	}
 
 	/// Moves to the start of the next line, scrolling if the cursor is at the foot of the region.
+	///
+	/// This is the only place a row is marked as running into the row below, and that mark is what
+	/// lets a later resize put the text back together.
 	fn wrap(&mut self) {
 		self.cursor.wrap_pending = false;
 		self.cursor.col = 0;
+		if let Some(w) = self.wrapped.get_mut(self.cursor.row) {
+			*w = true;
+		}
 		self.line_feed_inner();
 	}
 
@@ -887,12 +1009,21 @@ impl Screen {
 	}
 
 	/// Blanks the cells of `row` in `[a, b)` with the erase pen.
+	///
+	/// An erase that reaches the end of the row also ends it: whatever ran on from it is no longer
+	/// the same text, so the row stops being a continuation. tmux does the same, which is why
+	/// erasing a line and then widening the window does not glue the remains back together.
 	fn blank_span(&mut self, row: usize, a: usize, b: usize) {
 		let pen = self.erase_pen();
 		let base = row * self.cols;
 		for col in a..b {
 			if let Some(cell) = self.grid.get_mut(base + col) {
 				*cell = Cell::blank(pen);
+			}
+		}
+		if b >= self.cols {
+			if let Some(w) = self.wrapped.get_mut(row) {
+				*w = false;
 			}
 		}
 		self.touch(row);
@@ -1001,7 +1132,10 @@ impl Screen {
 		if keep {
 			for r in top..top + n {
 				let a = r * self.cols;
-				let line = self.grid[a..a + self.cols].to_vec();
+				let line = Line {
+					cells:		self.grid[a..a + self.cols].to_vec(),
+					wrapped:	self.row_wrapped(r),
+				};
 				self.push_scrollback(line);
 			}
 		}
@@ -1011,6 +1145,7 @@ impl Screen {
 			for c in 0..self.cols {
 				self.grid[dst + c] = self.grid[src + c];
 			}
+			self.wrapped[r] = self.wrapped[r + n];
 		}
 		let pen = self.erase_pen();
 		for r in bottom + 1 - n..=bottom {
@@ -1018,6 +1153,7 @@ impl Screen {
 			for c in 0..self.cols {
 				self.grid[a + c] = Cell::blank(pen);
 			}
+			self.wrapped[r] = false;
 		}
 	}
 
@@ -1033,6 +1169,7 @@ impl Screen {
 			for c in 0..self.cols {
 				self.grid[dst + c] = self.grid[src + c];
 			}
+			self.wrapped[r] = self.wrapped[r - n];
 		}
 		let pen = self.erase_pen();
 		for r in top..top + n {
@@ -1040,29 +1177,43 @@ impl Screen {
 			for c in 0..self.cols {
 				self.grid[a + c] = Cell::blank(pen);
 			}
+			self.wrapped[r] = false;
 		}
 	}
 
 	/// Appends a line to the scrollback, trimming its trailing blanks and evicting the oldest line
 	/// once the bound is reached.
-	fn push_scrollback(&mut self, mut line: Vec<Cell>) {
+	///
+	/// A wrapped line keeps its trailing blanks. Its length is the width the screen had when it was
+	/// stored, and a rewrap needs that width in order to put the text back together: a wrapped line
+	/// whose last cells happen to be spaces would otherwise lose those columns when it is joined to
+	/// the line below.
+	fn push_scrollback(&mut self, mut line: Line) {
 		if self.scrollback_max == 0 {
 			self.damage.scrolled += 1;
 			return;
 		}
-		while line.len() > 0 {
-			let last = line.len() - 1;
-			if line[last].is_blank() {
-				line.truncate(last);
-			} else {
-				break;
+		if !line.wrapped {
+			while line.cells.len() > 0 {
+				let last = line.cells.len() - 1;
+				if line.cells[last].is_blank() {
+					line.cells.truncate(last);
+				} else {
+					break;
+				}
 			}
 		}
-		line.shrink_to_fit();
+		line.cells.shrink_to_fit();
 		while self.scrollback.len() >= self.scrollback_max {
 			self.scrollback.pop_front();
+			self.view = self.view.saturating_sub(1);
 		}
 		self.scrollback.push_back(line);
+		if self.view > 0 {
+			// The viewport stays on the text it was showing rather than sliding with the screen.
+			self.view += 1;
+			self.view = self.view.min(self.scrollback.len());
+		}
 		self.damage.scrolled += 1;
 	}
 
@@ -1083,7 +1234,11 @@ impl Screen {
 		if self.spare.len() != self.grid.len() {
 			self.spare = vec![Cell::default(); self.grid.len()];
 		}
+		if self.spare_wrapped.len() != self.wrapped.len() {
+			self.spare_wrapped = vec![false; self.wrapped.len()];
+		}
 		std::mem::swap(&mut self.grid, &mut self.spare);
+		std::mem::swap(&mut self.wrapped, &mut self.spare_wrapped);
 		let outgoing = self.cursor;
 		self.cursor = self.spare_cursor;
 		self.spare_cursor = outgoing;
@@ -1101,6 +1256,9 @@ impl Screen {
 				let pen = self.erase_pen();
 				for cell in self.grid.iter_mut() {
 					*cell = Cell::blank(pen);
+				}
+				for w in self.wrapped.iter_mut() {
+					*w = false;
 				}
 				self.cursor = Cursor {
 					row:		0,
@@ -1130,21 +1288,32 @@ impl Screen {
 	// │ RESIZE AND RESET            │
 	// └─────────────────────────────┘
 
-	/// Changes the size of the screen.
+	/// Changes the size of the screen, putting the text back together at the new width.
 	///
-	/// Rows and columns are handled differently, and deliberately.
-	///
-	/// Columns truncate and pad. Text is not reflowed, because reflow needs a record of which rows
-	/// are continuations of the row above, and that record is wrong the moment a full screen
-	/// application has drawn over the grid. A terminal that reflows an editor's screen scrambles
-	/// it. Truncation loses characters beyond the new width, which is visible and understood, and
-	/// applications redraw after a resize in any case.
+	/// Height is settled first, then width, because the rewrap has to know how many rows the screen
+	/// is going to keep.
 	///
 	/// Rows keep the cursor on the screen. Shrinking removes rows from the top, so that the most
-	/// recent output survives, and those rows go to the scrollback if the ordinary screen is in
-	/// front; if the cursor is near the top and rows can be spared below it, they are taken from
-	/// the bottom instead. Growing pulls lines back out of the scrollback where any are held, and
-	/// pads at the foot for the rest.
+	/// recent output survives, and those rows go to the scrollback; if the cursor is near the top
+	/// and rows can be spared below it, they are taken from the bottom instead and discarded.
+	/// Growing pulls lines back out of the scrollback where any are held, and pads at the foot for
+	/// the rest.
+	///
+	/// Columns rewrap. The scrollback and the ordinary screen are joined back into the lines the
+	/// application actually printed, using the record [`Line::wrapped`] keeps of which rows ran on
+	/// into the row below, and are then split again at the new width. Narrowing a window therefore
+	/// keeps every character; only a terminal that truncates loses text a reader could still have
+	/// read. A double width character that will not fit in the columns left at the end of a row is
+	/// moved whole to the next row, leaving the odd column blank, which is what the same character
+	/// does when it is printed there in the first place.
+	///
+	/// The alternate screen is not rewrapped. A full screen application draws at absolute positions
+	/// and its rows are not continuations of anything, so joining them would scramble the display;
+	/// it is truncated and padded, and the application redraws.
+	///
+	/// The cursor follows the character it was on rather than the coordinates it had, and the
+	/// viewport follows the line it was showing, so a resize while the view is scrolled back does
+	/// not jump.
 	///
 	/// The scrolling region is reset to the whole screen, which is what a real terminal does, since
 	/// a region set for the old height rarely means anything at the new one.
@@ -1161,69 +1330,71 @@ impl Screen {
 		if cols == self.cols && rows == self.rows {
 			return Ok(());
 		}
-		// Take the grid apart into rows so that both dimensions can be worked on.
-		let mut lines: Vec<Vec<Cell>> = Vec::with_capacity(self.rows);
-		for r in 0..self.rows {
-			let a = r * self.cols;
-			lines.push(self.grid[a..a + self.cols].to_vec());
-		}
-		let mut spare_lines: Vec<Vec<Cell>> = Vec::new();
-		if self.spare.len() == self.grid.len() {
-			for r in 0..self.rows {
-				let a = r * self.cols;
-				spare_lines.push(self.spare[a..a + self.cols].to_vec());
-			}
-		}
+		let alt = self.surface == Surface::Alternate;
+		// `main` is the ordinary screen wherever it happens to be, since that is the one holding
+		// the scrollback and the one worth rewrapping; `other` is the alternate one.
+		let (mut main, mut other) = if alt {
+			(
+				Self::split_grid(&self.spare, &self.spare_wrapped, self.cols, self.rows),
+				Self::split_grid(&self.grid, &self.wrapped, self.cols, self.rows),
+			)
+		} else {
+			(
+				Self::split_grid(&self.grid, &self.wrapped, self.cols, self.rows),
+				Self::split_grid(&self.spare, &self.spare_wrapped, self.cols, self.rows),
+			)
+		};
+		let mut main_cur = if alt { self.spare_cursor } else { self.cursor };
+		let mut other_cur = if alt { self.cursor } else { self.spare_cursor };
+
 		// Height.
-		let keep = self.surface == Surface::Primary;
-		while lines.len() > rows {
-			// Prefer to lose a row below the cursor; otherwise lose the topmost.
-			if self.cursor.row + 1 < lines.len() {
-				lines.pop();
-			} else {
-				let gone = lines.remove(0);
-				if keep {
-					self.push_scrollback(gone);
-				}
-				self.cursor.row = self.cursor.row.saturating_sub(1);
-			}
+		if main.is_empty() {
+			main = vec![Line::blank(self.cols); rows];
+		} else {
+			self.fit_height(&mut main, &mut main_cur, rows);
 		}
-		while lines.len() < rows {
-			let taken = if keep {
-				self.scrollback.pop_back()
-			} else {
-				None
-			};
-			match taken {
-				Some(mut line)	=> {
-					line.resize(self.cols, Cell::default());
-					lines.insert(0, line);
-					self.cursor.row += 1;
-				}
-				None		=> lines.push(vec![Cell::default(); self.cols]),
-			}
+		while other.len() > rows {
+			other.pop();
 		}
-		while spare_lines.len() > rows {
-			spare_lines.pop();
+		while !other.is_empty() && other.len() < rows {
+			other.push(Line::blank(self.cols));
 		}
-		while spare_lines.len() < rows && !spare_lines.is_empty() {
-			spare_lines.push(vec![Cell::default(); self.cols]);
-		}
+
 		// Width.
-		for line in lines.iter_mut() {
-			Self::resize_line(line, cols);
+		if cols == self.cols {
+			for line in main.iter_mut() {
+				Self::resize_line(&mut line.cells, cols);
+			}
+		} else {
+			self.rewrap(&mut main, &mut main_cur, cols, rows);
 		}
-		for line in spare_lines.iter_mut() {
-			Self::resize_line(line, cols);
+		for line in other.iter_mut() {
+			Self::resize_line(&mut line.cells, cols);
+			line.wrapped = false;
 		}
+		other_cur.row = other_cur.row.min(rows - 1);
+		other_cur.col = other_cur.col.min(cols - 1);
+
 		// Reassemble.
+		let (front, back) = if alt { (other, main) } else { (main, other) };
 		self.grid = Vec::with_capacity(cols * rows);
-		for line in lines {
-			self.grid.extend_from_slice(&line);
+		self.wrapped = Vec::with_capacity(rows);
+		for line in front {
+			self.grid.extend_from_slice(&line.cells);
+			self.wrapped.push(line.wrapped);
 		}
 		self.spare = Vec::with_capacity(cols * rows);
-		for line in spare_lines {
-			self.spare.extend_from_slice(&line);
+		self.spare_wrapped = Vec::with_capacity(rows);
+		for line in back {
+			self.spare.extend_from_slice(&line.cells);
+			self.spare_wrapped.push(line.wrapped);
+		}
+		if alt {
+			self.cursor = other_cur;
+			self.spare_cursor = main_cur;
+		} else {
+			self.cursor = main_cur;
+			self.spare_cursor = other_cur;
 		}
 		// Tab stops keep whatever the application set within the old width.
 		let mut tabs = Self::default_tabs(cols);
@@ -1236,13 +1407,233 @@ impl Screen {
 		self.region = (0, rows - 1);
 		self.cursor.row = self.cursor.row.min(rows - 1);
 		self.cursor.col = self.cursor.col.min(cols - 1);
-		self.cursor.wrap_pending = false;
 		self.spare_cursor.row = self.spare_cursor.row.min(rows - 1);
 		self.spare_cursor.col = self.spare_cursor.col.min(cols - 1);
+		self.view = self.view.min(self.scrollback.len());
 		let scrolled = self.damage.scrolled;
 		self.damage = Damage::new(rows);
 		self.damage.scrolled = scrolled;
 		Ok(())
+	}
+
+	/// Takes a grid apart into lines, or gives nothing back if the grid is not the size claimed.
+	fn split_grid(grid: &[Cell], wrapped: &[bool], cols: usize, rows: usize) -> Vec<Line> {
+		if grid.len() < cols * rows || cols == 0 {
+			return Vec::new();
+		}
+		let mut out = Vec::with_capacity(rows);
+		for r in 0..rows {
+			let a = r * cols;
+			out.push(Line {
+				cells:		grid[a..a + cols].to_vec(),
+				wrapped:	wrapped.get(r).copied().unwrap_or(false),
+			});
+		}
+		out
+	}
+
+	/// Brings the ordinary screen to `rows` rows, keeping the cursor on it.
+	fn fit_height(&mut self, lines: &mut Vec<Line>, cur: &mut Cursor, rows: usize) {
+		while lines.len() > rows {
+			// Prefer to lose a row below the cursor; otherwise lose the topmost.
+			if cur.row + 1 < lines.len() {
+				lines.pop();
+			} else {
+				let gone = lines.remove(0);
+				self.push_scrollback(gone);
+				cur.row = cur.row.saturating_sub(1);
+			}
+		}
+		while lines.len() < rows {
+			match self.scrollback.pop_back() {
+				Some(mut line)	=> {
+					line.cells.resize(self.cols, Cell::default());
+					lines.insert(0, line);
+					cur.row += 1;
+					self.view = self.view.saturating_sub(1);
+				}
+				None		=> lines.push(Line::blank(self.cols)),
+			}
+		}
+	}
+
+	/// Joins the scrollback and the ordinary screen back into the lines that were printed, splits
+	/// them again at `cols`, and hands the screen back its last `rows` of them.
+	///
+	/// Whatever the rewrap produces above those rows becomes the new scrollback, which is why
+	/// narrowing a window pushes text upwards into the history rather than losing it.
+	fn rewrap(&mut self, lines: &mut Vec<Line>, cur: &mut Cursor, cols: usize, rows: usize) {
+		let hist = self.scrollback.len();
+		let cur_line = hist + cur.row;
+		let cur_col = cur.reported_col();
+		let top_line = hist.saturating_sub(self.view);
+		let mut all: Vec<Line> = Vec::with_capacity(hist + lines.len());
+		all.extend(self.scrollback.drain(..));
+		all.append(lines);
+
+		// Join. A line that ran on is glued to the one below it, and where each line started in
+		// the joined text is remembered so that the cursor and the viewport can be found again.
+		let mut logical: Vec<Vec<Cell>> = Vec::new();
+		let mut place: Vec<(usize, usize)> = Vec::with_capacity(all.len());
+		let mut open = false;
+		for line in all {
+			if !open {
+				logical.push(Vec::new());
+			}
+			let i = logical.len() - 1;
+			place.push((i, logical[i].len()));
+			// A column left over at the end of a row belongs to the width the row had, not to
+			// the text, so it goes no further.
+			let mut end = line.cells.len();
+			while end > 0 && line.cells[end - 1].wide == Wide::Filler {
+				end -= 1;
+			}
+			logical[i].extend_from_slice(&line.cells[..end]);
+			open = line.wrapped;
+		}
+		// Trailing blanks are padding rather than text, so they are not carried into the rewrap;
+		// a blank cell painted with a background colour is not blank and stays.
+		for cells in logical.iter_mut() {
+			while let Some(last) = cells.last() {
+				if last.is_blank() {
+					cells.pop();
+				} else {
+					break;
+				}
+			}
+		}
+
+		// Split again.
+		let (cur_log, cur_base) = place.get(cur_line).copied().unwrap_or((0, 0));
+		let cur_off = cur_base + cur_col;
+		let (top_log, top_off) = place.get(top_line).copied().unwrap_or((0, 0));
+		let mut out: Vec<Line> = Vec::new();
+		let mut cur_at = (0usize, 0usize);
+		let mut top_at = 0usize;
+		for (li, cells) in logical.iter().enumerate() {
+			let (made, starts) = Self::split_line(cells, cols);
+			let base = out.len();
+			if li == cur_log {
+				let (k, c) = Self::locate(&starts, cur_off);
+				cur_at = (base + k, c);
+			}
+			if li == top_log {
+				let (k, _) = Self::locate(&starts, top_off);
+				top_at = base + k;
+			}
+			out.extend(made);
+		}
+		while out.len() < rows {
+			out.push(Line::blank(cols));
+		}
+
+		// The screen keeps the last `rows` of what the rewrap made; the rest is history.
+		let hist_new = out.len() - rows;
+		let skip = hist_new.saturating_sub(self.scrollback_max);
+		self.scrollback.clear();
+		let mut i = 0;
+		for line in out.drain(..hist_new) {
+			if i >= skip {
+				self.scrollback.push_back(line);
+			}
+			i += 1;
+		}
+		*lines = out;
+		self.view = if top_at >= hist_new {
+			0
+		} else if top_at >= skip {
+			self.scrollback.len() - (top_at - skip)
+		} else {
+			self.scrollback.len()
+		};
+		cur.row = cur_at.0.saturating_sub(hist_new).min(rows - 1);
+		if cur_at.1 >= cols {
+			cur.col = cols - 1;
+			cur.wrap_pending = true;
+		} else {
+			cur.col = cur_at.1;
+			cur.wrap_pending = false;
+		}
+	}
+
+	/// Splits a joined line into rows of `cols` cells, and says where in the joined line each row
+	/// begins.
+	///
+	/// A double width character that will not fit in the columns left at the end of a row is moved
+	/// whole to the next row and the odd column is left blank, which is what the same character
+	/// does when it is printed at the edge of a screen.
+	fn split_line(cells: &[Cell], cols: usize) -> (Vec<Line>, Vec<usize>) {
+		let mut made: Vec<Line> = Vec::new();
+		let mut starts: Vec<usize> = Vec::new();
+		let mut i = 0;
+		loop {
+			starts.push(i);
+			let mut row: Vec<Cell> = Vec::with_capacity(cols);
+			while i < cells.len() && row.len() < cols {
+				let cell = cells[i];
+				match cell.wide {
+					Wide::Lead	=> {
+						if row.len() + 2 > cols {
+							// It will not fit in what is left of the row.
+							row.push(Cell::filler(Pen::default()));
+							break;
+						}
+						row.push(cell);
+						i += 1;
+						if i < cells.len() && cells[i].wide == Wide::Trail {
+							row.push(cells[i]);
+							i += 1;
+						} else {
+							row.push(Cell {
+								chr:	' ',
+								pen:	cell.pen,
+								wide:	Wide::Trail,
+							});
+						}
+					}
+					Wide::Trail	=> {
+						// A trailing half with no lead before it, which only an earlier cut can
+						// leave behind. It stands as a blank of its own.
+						row.push(Cell::blank(cell.pen));
+						i += 1;
+					}
+					Wide::Filler	=> {
+						// Padding from a width the text no longer has.
+						i += 1;
+					}
+					Wide::No	=> {
+						row.push(cell);
+						i += 1;
+					}
+				}
+			}
+			let wrapped = i < cells.len();
+			while row.len() < cols {
+				row.push(Cell::default());
+			}
+			made.push(Line { cells: row, wrapped });
+			if i >= cells.len() {
+				break;
+			}
+		}
+		(made, starts)
+	}
+
+	/// Finds the row and column a position in a joined line ended up at, given where each row of
+	/// the split began.
+	///
+	/// A position one past the end of a full row comes back as that row and a column equal to the
+	/// width, which is the pending wrap the caller turns back into a cursor.
+	fn locate(starts: &[usize], off: usize) -> (usize, usize) {
+		let mut k = 0;
+		for (j, s) in starts.iter().enumerate() {
+			if *s <= off {
+				k = j;
+			} else {
+				break;
+			}
+		}
+		(k, off - starts.get(k).copied().unwrap_or(0))
 	}
 
 	/// Truncates or pads one line to `cols`, blanking a wide character the truncation would cut.
@@ -1269,6 +1660,12 @@ impl Screen {
 		for cell in self.spare.iter_mut() {
 			*cell = Cell::blank(pen);
 		}
+		for w in self.wrapped.iter_mut() {
+			*w = false;
+		}
+		for w in self.spare_wrapped.iter_mut() {
+			*w = false;
+		}
 		self.surface = Surface::Primary;
 		self.cursor = Cursor::default();
 		self.spare_cursor = Cursor::default();
@@ -1280,6 +1677,7 @@ impl Screen {
 		self.insert = false;
 		self.origin = false;
 		self.scrollback.clear();
+		self.view = 0;
 		self.damage = Damage::new(self.rows);
 	}
 
@@ -1292,6 +1690,9 @@ impl Screen {
 				pen,
 				wide:	Wide::No,
 			};
+		}
+		for w in self.wrapped.iter_mut() {
+			*w = false;
 		}
 		self.cursor = Cursor {
 			row:		0,

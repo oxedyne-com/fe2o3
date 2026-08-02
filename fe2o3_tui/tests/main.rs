@@ -22,7 +22,9 @@ fn main() -> Outcome<()> {
 
 fn run_tests() -> Outcome<()> {
 
-    let filter = "range";
+    // Every tag matches an empty filter, so this runs the lot; narrow it to "range" or "extract"
+    // to run one group.
+    let filter = "";
 
     res!(draw::test_text(filter));
 

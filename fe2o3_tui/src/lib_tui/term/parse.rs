@@ -151,6 +151,10 @@ pub enum C0 {
 	LineFeed,
 	/// `CR`, 0x0D.
 	CarriageReturn,
+	/// `SO`, 0x0E, which maps G1 over the printable range.
+	ShiftOut,
+	/// `SI`, 0x0F, which maps G0 over the printable range.
+	ShiftIn,
 }
 
 /// A control sequence introduced by `CSI`.
@@ -380,9 +384,11 @@ impl Parser {
 			0x09	=> out.push(Act::Ctrl(C0::Tab)),
 			0x0A | 0x0B | 0x0C	=> out.push(Act::Ctrl(C0::LineFeed)),
 			0x0D	=> out.push(Act::Ctrl(C0::CarriageReturn)),
+			0x0E	=> out.push(Act::Ctrl(C0::ShiftOut)),
+			0x0F	=> out.push(Act::Ctrl(C0::ShiftIn)),
 			0x18 | 0x1A	=> self.abandon(),
 			0x1B	=> self.begin_escape(),
-			// Everything else, including SO and SI, is consumed without effect.
+			// Everything else is consumed without effect.
 			_	=> {}
 		}
 	}
