@@ -1,8 +1,4 @@
-use crate::{
-    prelude::*,
-    try_extract_tup3dat,
-    tup3dat,
-};
+use crate::prelude::*;
 
 use oxedyne_fe2o3_core::{
     prelude::*,

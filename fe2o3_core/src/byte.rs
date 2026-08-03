@@ -1,7 +1,6 @@
 use crate::{
     prelude::*,
     id::ParseId,
-    impls_for_native_integer,
     string::{
         parse_hex_char,
         ToHexString,

@@ -1,7 +1,4 @@
-use crate::{
-    prelude::*,
-    new_type_priv,
-};
+use crate::prelude::*;
 
 use std::{
     ops::Deref,
