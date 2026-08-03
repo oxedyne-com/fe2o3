@@ -12,7 +12,7 @@
 //! # Example Usage
 //! 
 //! In your `tests/main.rs`:
-//! ```rust
+//! ```ignore
 //! mod map;
 //! mod string;
 //! 
@@ -71,3 +71,6 @@
 #![forbid(unsafe_code)]
 pub mod data;
 pub mod error;
+/// Scratch directories for fixtures that need a real filesystem, kept out of the
+/// system temporary directory and swept clean of what earlier runs left behind.
+pub mod scratch;
