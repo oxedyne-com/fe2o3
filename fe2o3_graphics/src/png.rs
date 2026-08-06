@@ -202,6 +202,55 @@ fn crc32(bytes: &[u8]) -> u32 {
 	crc ^ 0xFFFF_FFFF
 }
 
+/// Reads a PNG's size without inflating a single scanline.
+///
+/// The specification requires IHDR to be the first chunk, so this reads the signature and that one
+/// chunk and stops -- twenty-nine bytes whatever the size of the file. The counterpart to
+/// [`crate::jpeg::dimensions`], and for the same reason: a caller that only needs to know how big
+/// an image is should not pay to decompress it.
+///
+/// The header is validated exactly as [`decode`] validates it, so a size this returns is a size
+/// the decoder would also accept.
+///
+/// # Arguments
+/// * `buf` - The PNG file's bytes, from the signature.
+pub fn dimensions(buf: &[u8]) -> Outcome<(usize, usize)> {
+	if buf.len() < SIG.len() || buf[..SIG.len()] != SIG {
+		return Err(err!(
+			"The bytes do not begin with the PNG signature."; Invalid, Input, Decode));
+	}
+	let pos = SIG.len();
+	if pos + 8 > buf.len() {
+		return Err(err!(
+			"A PNG chunk header needs 8 bytes at offset {}, but only {} remain.",
+			pos, buf.len() - pos;
+		Invalid, Input, Decode));
+	}
+	let len = u32::from_be_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]]) as usize;
+	let kind = [buf[pos + 4], buf[pos + 5], buf[pos + 6], buf[pos + 7]];
+	if &kind != b"IHDR" {
+		return Err(err!(
+			"A PNG begins with its IHDR chunk, but this one begins with '{}'.",
+			String::from_utf8_lossy(&kind);
+		Invalid, Input, Decode, Missing));
+	}
+	let data_start = pos + 8;
+	let data_end = match data_start.checked_add(len) {
+		Some(e) => e,
+		None => return Err(err!(
+			"The PNG IHDR chunk declares a length of {}, which overflows.", len;
+		Invalid, Input, Decode, Overflow)),
+	};
+	if data_end > buf.len() {
+		return Err(err!(
+			"The PNG IHDR chunk declares {} bytes, but only {} remain.",
+			len, buf.len().saturating_sub(data_start);
+		Invalid, Input, Decode));
+	}
+	let hdr = res!(decode_header(&buf[data_start..data_end]));
+	Ok((hdr.w, hdr.h))
+}
+
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ ENCODING                                                                   │
 // └───────────────────────────────────────────────────────────────────────────┘
@@ -1128,6 +1177,37 @@ mod tests {
 	fn test_the_signature_is_checked_01() {
 		assert!(decode(&[0u8; 8]).is_err());
 		assert!(decode(&[]).is_err());
+	}
+
+	/// The size read from the header is the size the decoder produces, and it is read from the
+	/// first twenty-nine bytes rather than from the image data.
+	#[test]
+	fn test_the_size_is_read_without_decoding_02() -> Outcome<()> {
+		let pm = res!(Pixmap::filled(37, 11, Rgba::new(1, 2, 3, 255)));
+		let buf = res!(encode(&pm));
+		assert_eq!((37, 11), res!(dimensions(&buf)));
+		// Signature plus one whole IHDR chunk is 8 + 8 + 13 + 4; everything after it is data.
+		assert_eq!((37, 11), res!(dimensions(&buf[..33])));
+		Ok(())
+	}
+
+	/// Bytes that are not a PNG, or a PNG whose first chunk is not IHDR, are refused rather than
+	/// answered with a guess.
+	#[test]
+	fn test_a_size_is_refused_rather_than_guessed_03() {
+		assert!(dimensions(&[]).is_err());
+		assert!(dimensions(b"GIF89a\x01\x00").is_err());
+		let mut wrong = SIG.to_vec();
+		wrong.extend_from_slice(&13u32.to_be_bytes());
+		wrong.extend_from_slice(b"IDAT");
+		wrong.extend_from_slice(&[0u8; 13]);
+		assert!(dimensions(&wrong).is_err(), "a first chunk that is not IHDR must be refused");
+		// A header that says it is longer than the bytes present.
+		let mut short = SIG.to_vec();
+		short.extend_from_slice(&13u32.to_be_bytes());
+		short.extend_from_slice(b"IHDR");
+		short.extend_from_slice(&[0u8; 4]);
+		assert!(dimensions(&short).is_err());
 	}
 
 	#[test]
