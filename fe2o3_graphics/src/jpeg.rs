@@ -78,6 +78,10 @@ const RST7:	u8 = 0xD7;
 const APP0:	u8 = 0xE0;
 /// The last application segment.
 const APP15:	u8 = 0xEF;
+/// The application segment an ICC colour profile travels in.
+const ICC_APP2:	u8 = 0xE2;
+/// The application segment Adobe uses to declare a colour transform.
+const ADOBE_APP14: u8 = 0xEE;
 /// A comment.
 const COM:	u8 = 0xFE;
 /// A temporary marker used only by arithmetic coding, and carrying no length.
@@ -695,6 +699,64 @@ struct Reader {
 	adobe:	Option<u8>,
 	/// The frame, once its header has been read.
 	frame:	Option<Frame>,
+}
+
+/// Removes the metadata a JPEG carries, without touching the image itself.
+///
+/// A photograph off a phone arrives with an Exif block naming the camera, the moment and, very
+/// often, the coordinates of whoever pressed the shutter. Publishing the file publishes all of it.
+/// This walks the marker segments and drops the ones that describe the picture rather than encode
+/// it, leaving the entropy-coded scan untouched: the result decodes to exactly the same pixels, so
+/// nothing is re-compressed and no quality is lost.
+///
+/// Removed: every application segment except those below, and every comment segment. That takes
+/// Exif and XMP (APP1), Photoshop and IPTC (APP13), maker notes, and any JUMBF or C2PA assertion
+/// (APP11) with them -- so a caller relying on embedded provenance must read it before calling.
+///
+/// Kept, because dropping them changes how the file decodes or renders: JFIF (APP0), an ICC colour
+/// profile (APP2), and the Adobe colour transform (APP14).
+///
+/// # Errors
+///
+/// Fails if the input is not a JPEG, or if a segment runs past the end of the buffer.
+pub fn strip_metadata(buf: &[u8]) -> Outcome<Vec<u8>> {
+	if buf.len() < 2 || buf[0] != 0xFF || buf[1] != SOI {
+		return Err(err!("The data does not begin with a JPEG start-of-image marker."; 
+			Invalid, Input, Decode));
+	}
+	let mut out = Vec::with_capacity(buf.len());
+	out.extend_from_slice(&buf[..2]);
+
+	let mut pos = 2;
+	loop {
+		let (marker, after) = res!(next_marker(buf, pos));
+		// The scan and everything after it is image data; copy the remainder untouched.
+		if marker == SOS {
+			out.extend_from_slice(&buf[pos..]);
+			return Ok(out);
+		}
+		// Markers that stand alone carry no length.
+		if marker == EOI || marker == TEM || (RST0..=RST7).contains(&marker) {
+			out.extend_from_slice(&buf[pos..after]);
+			if marker == EOI {
+				return Ok(out);
+			}
+			pos = after;
+			continue;
+		}
+		let (_start, end) = res!(segment(buf, after, marker));
+		let drop = match marker {
+			APP0 | ADOBE_APP14	=> false,	// JFIF and the Adobe colour transform.
+			ICC_APP2			=> false,	// A colour profile is how the pixels are read.
+			COM					=> true,
+			m if (APP0..=APP15).contains(&m) => true,
+			_					=> false,
+		};
+		if !drop {
+			out.extend_from_slice(&buf[pos..end]);
+		}
+		pos = end;
+	}
 }
 
 /// The two-byte length a marker segment begins with, and the bounds of its payload.
