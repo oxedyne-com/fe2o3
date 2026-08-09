@@ -1671,24 +1671,7 @@ fn track(bytes: &[u8], from: usize, to: usize, t: &mut Tables) -> Outcome<()> {
 				}
 			},
 			b"tkhd" => {
-				// The transformation matrix sits at a fixed offset that depends on the version:
-				// the version-1 header carries 64-bit times and is twelve bytes longer. Only the
-				// four rotation entries are read, because a matrix that is not a rotation is not
-				// something a photograph library can act on anyway.
-				let ver = bytes.get(body).copied().unwrap_or(0);
-				let at = body + if ver == 1 { 52 } else { 40 };
-				let mut m = [0i32; 4];
-				for (i, v) in m.iter_mut().enumerate() {
-					*v = res!(be32(bytes, at + i * 4)) as i32;
-				}
-				// The four are a, b, c, d in 16.16 fixed point.
-				let one = 0x0001_0000i32;
-				t.rotation = match (m[0], m[1], m[2], m[3]) {
-					(0, x, y, 0) if x == one && y == -one	=> 90,
-					(x, 0, 0, y) if x == -one && y == -one	=> 180,
-					(0, x, y, 0) if x == -one && y == one	=> 270,
-					_					=> 0,
-				};
+				t.rotation = rotation_of(&bytes[body..end.min(bytes.len())]);
 			},
 			b"stsd" => {
 				// Not read here. A track's boxes arrive in whatever order the writer chose, and a
@@ -1765,6 +1748,42 @@ fn track(bytes: &[u8], from: usize, to: usize, t: &mut Tables) -> Outcome<()> {
 		}
 		Ok(false)
 	})
+}
+
+/// How far a track header's transformation matrix turns the picture, in degrees clockwise.
+///
+/// A phone writes the angle it was held at here rather than turning the samples, so this is what a
+/// viewer must do with a decoder's output. The matrix sits at a fixed offset that depends on the
+/// version -- the version-1 header carries 64-bit times and is twelve bytes longer -- and only the
+/// four entries that rotate are read, because a matrix that is not a rotation is not something a
+/// picture library can act on anyway. Anything else answers nought, which shows the picture as it
+/// was coded.
+///
+/// `tkhd` is the box's payload, from its version byte onwards.
+pub fn rotation_of(tkhd: &[u8]) -> u16 {
+	let ver = match tkhd.first() {
+		Some(v) => *v,
+		None => return 0,
+	};
+	let at = if ver == 1 { 52 } else { 40 };
+	// The matrix is nine values in the order a, b, u, c, d, v, x, y, w (§8.3.2.3), and the four
+	// that rotate are a, b, c and d -- which are **not** the first four: the projection entry `u`
+	// sits between b and c. Reading four in a row instead takes `u` for `c`, and since `u` is
+	// nought in every matrix any camera writes, every rotation then looks like no rotation at all.
+	let one = 0x0001_0000i32;
+	let mut m = [0i32; 4];
+	for (i, off) in [0usize, 4, 12, 16].iter().enumerate() {
+		m[i] = match tkhd.get(at + off..at + off + 4) {
+			Some(s) => i32::from_be_bytes([s[0], s[1], s[2], s[3]]),
+			None => return 0,
+		};
+	}
+	match (m[0], m[1], m[2], m[3]) {
+		(0, x, y, 0) if x == one && y == -one	=> 90,
+		(x, 0, 0, y) if x == -one && y == -one	=> 180,
+		(0, x, y, 0) if x == -one && y == one	=> 270,
+		_					=> 0,
+	}
 }
 
 /// Reads the first sample entry of a sample description, and the configuration record inside it.
@@ -1887,6 +1906,33 @@ fn assemble(bytes: &[u8], t: Tables) -> Outcome<Film> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn test_a_quarter_turn_in_a_track_header_is_read_00() -> Outcome<()> {
+		// The four entries that rotate are a, b, c and d, and they are not four in a row: the
+		// projection entry `u` sits between b and c, and it is nought in every matrix a camera
+		// writes. A reader that takes four in a row therefore answers "no rotation" for every
+		// turned film there is, which is what this decoder did until a film held sideways said so.
+		let one = 0x0001_0000u32;
+		let neg = (-(one as i32)) as u32;
+		let head = |a: u32, b: u32, c: u32, d: u32| {
+			let mut body = vec![0u8; 84];
+			body[40..44].copy_from_slice(&a.to_be_bytes());
+			body[44..48].copy_from_slice(&b.to_be_bytes());
+			// 48 is `u`, and stays nought.
+			body[52..56].copy_from_slice(&c.to_be_bytes());
+			body[56..60].copy_from_slice(&d.to_be_bytes());
+			body
+		};
+		req!(rotation_of(&head(0, one, neg, 0)), 90u16, "a quarter turn clockwise");
+		req!(rotation_of(&head(neg, 0, 0, neg)), 180u16, "a half turn");
+		req!(rotation_of(&head(0, neg, one, 0)), 270u16, "three quarters clockwise");
+		req!(rotation_of(&head(one, 0, 0, one)), 0u16, "unity is no turn");
+		// A matrix that is not a rotation is shown as it was coded rather than guessed at.
+		req!(rotation_of(&head(one, one, one, one)), 0u16, "a matrix that is not a rotation");
+		req!(rotation_of(&[]), 0u16, "an empty header");
+		Ok(())
+	}
 
 	/// The sequence parameter set of a 64 by 48 stream, as libx264 wrote it: the NAL unit that
 	/// followed the first start code of
@@ -2359,6 +2405,12 @@ mod tests {
 
 		// Turn it a quarter clockwise by writing the matrix a phone would: a = 0, b = 1, c = -1,
 		// d = 0, in 16.16 fixed point.
+		//
+		// **The four are not four in a row.** The matrix is a, b, u, c, d, v, x, y, w, so c and d
+		// are the fourth and fifth entries; this test used to write them third and fourth, which
+		// is exactly where the reader used to look for them, so the two agreed with each other and
+		// with no real film. Every rotated film in a library of seven thousand was read as
+		// upright. The positions below are the specification's.
 		let at = match file.windows(4).position(|w| w == b"tkhd") {
 			Some(at) => at + 4 + 40,
 			None => return Err(err!("the writer emitted no track header."; Test, Missing)),
@@ -2367,17 +2419,20 @@ mod tests {
 			file[at + i * 4..at + i * 4 + 4].copy_from_slice(&(v as u32).to_be_bytes());
 		};
 		let one = 0x0001_0000i32;
-		put(&mut file, 0, 0);
-		put(&mut file, 1, one);
-		put(&mut file, 2, -one);
-		put(&mut file, 3, 0);
+		let matrix = |file: &mut Vec<u8>, a: i32, b: i32, c: i32, d: i32| {
+			put(file, 0, a);
+			put(file, 1, b);
+			put(file, 3, c);
+			put(file, 4, d);
+		};
+		matrix(&mut file, 0, one, -one, 0);
 		req!(res!(Film::read(&file)).rotation(), 90u16);
 		// And a half turn.
-		put(&mut file, 0, -one);
-		put(&mut file, 1, 0);
-		put(&mut file, 2, 0);
-		put(&mut file, 3, -one);
+		matrix(&mut file, -one, 0, 0, -one);
 		req!(res!(Film::read(&file)).rotation(), 180u16);
+		// And three quarters.
+		matrix(&mut file, 0, -one, one, 0);
+		req!(res!(Film::read(&file)).rotation(), 270u16);
 		Ok(())
 	}
 }
