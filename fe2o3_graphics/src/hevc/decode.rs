@@ -102,6 +102,31 @@ impl Plane {
 			self.px[y * self.w + x] = v;
 		}
 	}
+
+	/// The plane cropped to a window at its top left.
+	///
+	/// A coded picture is a whole number of coding tree blocks and a shown one is not, so a
+	/// 1920 by 1080 film is coded 1920 by 1088 and the eight rows the encoder filled to reach the
+	/// block boundary are not part of the picture. This is what takes them off.
+	pub fn cropped(&self, w: usize, h: usize) -> Self {
+		self.window(0, 0, w, h)
+	}
+
+	/// The rectangle of the plane starting at a position, clamped to what is there.
+	pub fn window(&self, x: usize, y: usize, w: usize, h: usize) -> Self {
+		let mut out = Self::new(w, h);
+		for row in 0..h {
+			let sy = y + row;
+			if sy >= self.h || x >= self.w {
+				break;
+			}
+			let take = w.min(self.w - x);
+			let from = sy * self.w + x;
+			let at = row * w;
+			out.px[at..at + take].copy_from_slice(&self.px[from..from + take]);
+		}
+		out
+	}
 }
 
 /// A decoded picture, before it is turned into anything anybody can look at.
@@ -137,6 +162,27 @@ impl Picture {
 				let (a, b) = (into * dst.w + at.0, row * src.w);
 				dst.px[a..a + take].copy_from_slice(&src.px[b..b + take]);
 			}
+		}
+	}
+
+	/// The picture cropped to the size it is meant to be shown at, from its top left corner.
+	///
+	/// The colour planes are half size both ways and are rounded **up**, since a picture of an odd
+	/// width still has a colour sample for its last column.
+	pub fn cropped(&self, w: usize, h: usize) -> Self {
+		self.window(0, 0, w, h)
+	}
+
+	/// The rectangle of the picture that is meant to be shown.
+	///
+	/// A window need not sit at the corner: a stabilised film is coded larger than it shows and
+	/// moves the window about inside it, so taking the corner instead moves the whole picture.
+	pub fn window(&self, x: usize, y: usize, w: usize, h: usize) -> Self {
+		Self {
+			y:	self.y.window(x, y, w, h),
+			cb:	self.cb.window(x / 2, y / 2, w.div_ceil(2), h.div_ceil(2)),
+			cr:	self.cr.window(x / 2, y / 2, w.div_ceil(2), h.div_ceil(2)),
+			depth:	self.depth,
 		}
 	}
 }
@@ -200,7 +246,10 @@ impl<'a> Ent<'a> {
 struct Frame<'a> {
 	sps:	&'a Sps,
 	pps:	&'a Pps,
+	/// The slice being read now, which changes as the walk crosses from one to the next.
 	slice:	&'a Slice,
+	/// Which slice each coding tree block belongs to, for the availability rule.
+	slice_at:	Vec<u16>,
 	/// The samples, filled in as the walk goes.
 	pic:	Picture,
 	/// The scan orders, worked out once.
@@ -265,23 +314,75 @@ struct Frame<'a> {
 	cu_size:	usize,
 }
 
-/// Decodes one intra picture.
+/// Decodes one intra picture out of its single slice.
 ///
 /// `data` is the slice segment's entropy-coded bytes **as they arrived**, escaping and all, from
 /// the slice header's end onwards. It has to be the escaped form: the entry point offsets that say
 /// where each row of blocks begins are counted in escaped bytes (§7.4.7.1), so the cut is made here
 /// and each piece unescaped afterwards.
 pub fn picture(sps: &Sps, pps: &Pps, slice: &Slice, data: &[u8]) -> Outcome<Picture> {
+	picture_of(sps, pps, &[(slice, data)])
+}
+
+/// Decodes one intra picture out of the several slices it is cut into.
+///
+/// A photograph is one slice and a film's frame need not be: an encoder that cuts a picture into
+/// four so that four processors may code it writes four slice segments, each with a header of its
+/// own and each beginning at the coding tree block its header names. They arrive here in the order
+/// they were coded, which is the order the picture is walked in.
+///
+/// Two things follow from a picture being cut up, and both are in this function rather than in the
+/// block reader. **A slice predicts from nothing outside itself** -- that is the whole point of
+/// cutting one, since otherwise the pieces could not be coded independently -- so the availability
+/// rule gains a second half beyond decoding order. And the arithmetic decoder starts afresh at each
+/// slice, from contexts initialised at that slice's own quantisation parameter.
+pub fn picture_of(sps: &Sps, pps: &Pps, parts: &[(&Slice, &[u8])]) -> Outcome<Picture> {
 	res!(refuse_what_is_not_built(sps, pps));
+	let slice = match parts.first() {
+		Some((s, _)) => *s,
+		None => return Err(err!("A picture cut into no slices at all."; Invalid, Input, Missing)),
+	};
 	let (w, h) = (sps.coded_w as usize, sps.coded_h as usize);
 	let ctb = sps.ctb_size as usize;
 	let ctbs_w = w.div_ceil(ctb);
 	let ctbs_h = h.div_ceil(ctb);
+	let blocks = ctbs_w * ctbs_h;
 	let (gw, gh) = (w.div_ceil(4), h.div_ceil(4));
+	// Which slice each coding tree block belongs to. The segments tile the picture in raster order,
+	// so a block's slice is settled by where the segments begin -- and a picture whose first
+	// segment does not begin at the first block, or whose segments do not ascend, is one this
+	// decoder would fill in the wrong order rather than one it can draw.
+	let mut slice_at = vec![0u16; blocks];
+	if slice.address != 0 {
+		return Err(err!(
+			"The first slice segment of a picture begins at block {} rather than at its first.",
+			slice.address; Invalid, Input, Decode));
+	}
+	if parts.len() > u16::MAX as usize {
+		return Err(err!(
+			"A picture cut into {} slices, which no encoder writes.", parts.len();
+		Invalid, Input, Excessive));
+	}
+	for (i, (part, _)) in parts.iter().enumerate() {
+		let from = part.address as usize;
+		let to = match parts.get(i + 1) {
+			Some((next, _)) => next.address as usize,
+			None => blocks,
+		};
+		if from >= to || to > blocks {
+			return Err(err!(
+				"Slice segment {} covers blocks {} to {} of a picture of {}. The segments do not \
+				tile it.", i, from, to, blocks; Invalid, Input, Decode));
+		}
+		for a in slice_at.iter_mut().take(to).skip(from) {
+			*a = i as u16;
+		}
+	}
 	let mut frame = Frame {
 		sps,
 		pps,
 		slice,
+		slice_at,
 		pic: Picture {
 			y:	Plane::new(w, h),
 			cb:	Plane::new(w / 2, h / 2),
@@ -316,62 +417,134 @@ pub fn picture(sps: &Sps, pps: &Pps, slice: &Slice, data: &[u8]) -> Outcome<Pict
 		cu_size: ctb,
 	};
 
-	// One piece of data a row of blocks, at the offsets the slice header named, each unescaped on
-	// its own once the cut has been made in the escaped bytes.
-	let pieces: Vec<Vec<u8>> = res!(split_rows(data, slice, ctbs_h))
-		.into_iter()
-		.map(crate::hevc::rbsp)
-		.collect();
-	let mut rows = Rows::new(slice.qp);
-	for (ry, piece) in pieces.iter().enumerate() {
-		let mut ent = Ent {
-			cabac:	res!(Cabac::new(piece)),
-			ctxs:	rows.begin(),
+	// Wavefront coding cuts a slice into one piece a row of blocks, at the offsets its header
+	// names, and starts the arithmetic decoder afresh at each; without it a slice is one piece and
+	// one arithmetic decoder from its first block to its last. Every photograph in the corpus is
+	// coded the first way and a good many films are coded the second, so both are here.
+	for (i, (part, data)) in parts.iter().enumerate() {
+		frame.slice = part;
+		let from = part.address as usize;
+		let to = match parts.get(i + 1) {
+			Some((next, _)) => next.address as usize,
+			None => blocks,
 		};
-		// Every row of a wavefront-coded picture starts predicting its quantisation parameter
-		// afresh, because the row above may not have been decoded yet where an encoder ran them
-		// in parallel (§8.6.1).
-		frame.qp_prev = slice.qp;
-		for rx in 0..ctbs_w {
-			res!(frame.ctu(&mut ent, rx, ry));
-			if rx == 1 {
-				rows.after_second(&ent.ctxs);
-			}
-			// The bin that says whether the slice ends here. It has to be read whether or not it
-			// says so: it moves the arithmetic decoder on.
-			let ended = ent.cabac.terminate();
-			if ended == 1 && !(ry == ctbs_h - 1 && rx == ctbs_w - 1) {
-				// A slice that stops early is not a fault in a still picture -- it is a picture
-				// this decoder has misread, and saying so beats returning half of one.
+		if pps.wavefront {
+			// A slice cut into wavefronts is one piece a row of **its own** blocks, which is the
+			// whole picture where the picture is one slice. A slice that began part way along a
+			// row would have a piece that is neither a row nor a slice, and there is nothing here
+			// that could find its end.
+			if from % ctbs_w != 0 || to % ctbs_w != 0 {
 				return Err(err!(
-					"The slice ended at block ({}, {}) of {} by {}.",
-					rx, ry, ctbs_w, ctbs_h; Invalid, Input, Decode));
+					"A slice coded in wavefronts covers blocks {} to {} of a picture {} blocks \
+					wide, so it begins or ends part way along a row.", from, to, ctbs_w;
+				Unimplemented));
 			}
-		}
-		// A row one block wide never reaches the save above, and the row below it still has to
-		// start from somewhere.
-		if ctbs_w == 1 {
-			rows.after_second(&ent.ctxs);
-		}
-		// The encoder said how long this row's data is; the decoder has just read it. The two
-		// agreeing is the cheapest check there is that the row was read in step, and it is
-		// checkable a row at a time rather than only at the end of the picture -- which is what
-		// makes it worth having: it names the row that went wrong.
-		//
-		// A little short is normal. The arithmetic decoder reads ahead into a window it may not
-		// use, and the final bins are coded against bits the encoder never had to write.
-		let used = ent.cabac.consumed();
-		let have = piece.len();
-		if used > have + 2 || used + 8 < have {
-			return Err(err!(
-				"Row {} of blocks is {} bytes and reading it took {}. The row was read out of \
-				step.", ry, have, used; Invalid, Input, Decode));
+			let (row0, rows_here) = (from / ctbs_w, (to - from) / ctbs_w);
+			// One piece a row of blocks, each unescaped on its own once the cut has been made in
+			// the escaped bytes.
+			let pieces: Vec<Vec<u8>> = res!(split_rows(data, part, rows_here))
+				.into_iter()
+				.map(crate::hevc::rbsp)
+				.collect();
+			// Each slice starts its rows afresh: the row above the first of them is in another
+			// slice, and a slice inherits nothing from one.
+			let mut rows = Rows::new(part.qp);
+			for (i, piece) in pieces.iter().enumerate() {
+				let ry = row0 + i;
+				let mut ent = Ent {
+					cabac:	res!(Cabac::new(piece)),
+					ctxs:	rows.begin(),
+				};
+				// Every row of a wavefront-coded picture starts predicting its quantisation
+				// parameter afresh, because the row above may not have been decoded yet where an
+				// encoder ran them in parallel (§8.6.1).
+				frame.qp_prev = part.qp;
+				for rx in 0..ctbs_w {
+					res!(frame.ctu(&mut ent, rx, ry));
+					if rx == 1 {
+						rows.after_second(&ent.ctxs);
+					}
+					// The bin that says whether the slice ends here. It has to be read whether or
+					// not it says so: it moves the arithmetic decoder on.
+					let ended = ent.cabac.terminate();
+					if ended == 1 && !(ry == row0 + rows_here - 1 && rx == ctbs_w - 1) {
+						// A slice that stops early is not a fault in a still picture -- it is a
+						// picture this decoder has misread, and saying so beats returning half of
+						// one.
+						return Err(err!(
+							"The slice ended at block ({}, {}) of {} by {}.",
+							rx, ry, ctbs_w, ctbs_h; Invalid, Input, Decode));
+					}
+				}
+				// A row one block wide never reaches the save above, and the row below it still
+				// has to start from somewhere.
+				if ctbs_w == 1 {
+					rows.after_second(&ent.ctxs);
+				}
+				// The encoder said how long this row's data is; the decoder has just read it. The
+				// two agreeing is the cheapest check there is that the row was read in step, and
+				// it is checkable a row at a time rather than only at the end of the picture --
+				// which is what makes it worth having: it names the row that went wrong.
+				//
+				// A little short is normal. The arithmetic decoder reads ahead into a window it
+				// may not use, and the final bins are coded against bits the encoder never had to
+				// write.
+				let used = ent.cabac.consumed();
+				let have = piece.len();
+				if used > have + 2 || used + 8 < have {
+					return Err(err!(
+						"Row {} of blocks is {} bytes and reading it took {}. The row was read \
+						out of step.", ry, have, used; Invalid, Input, Decode));
+				}
+			}
+		} else {
+			// One arithmetic decoder over the whole slice, and one set of contexts that carries
+			// from each block to the next: there is no row boundary here for anything to be reset
+			// at, which is what wavefront coding adds and this does not have.
+			let piece = crate::hevc::rbsp(data);
+			let mut ent = Ent {
+				cabac:	res!(Cabac::new(&piece)),
+				ctxs:	Contexts::start(part.qp),
+			};
+			frame.qp_prev = part.qp;
+			for at in from..to {
+				let (rx, ry) = (at % ctbs_w, at / ctbs_w);
+				res!(frame.ctu(&mut ent, rx, ry));
+				let ended = ent.cabac.terminate();
+				if ended == 1 && at != to - 1 {
+					return Err(err!(
+						"A slice covering blocks {} to {} ended at {}.", from, to, at;
+					Invalid, Input, Decode));
+				}
+			}
+			// The same check the rows above are held to, over the whole slice: the encoder said
+			// how long it is and the decoder has just read it.
+			let used = ent.cabac.consumed();
+			let have = piece.len();
+			if used > have + 2 || used + 8 < have {
+				return Err(err!(
+					"A slice of {} bytes took {} to read. It was read out of step.", have, used;
+				Invalid, Input, Decode));
+			}
 		}
 	}
 	// The two in-loop filters, in the order the specification runs them: every block boundary
 	// softened, and then the offsets that put back what quantisation rounded away. The encoder ran
 	// both, so a picture without them is not a rougher picture but a different one.
-	if slice.deblocking {
+	// Whether a filter runs is a slice's own answer, and a picture cut into slices may hold both
+	// answers. Each filter runs over the whole picture where any slice asks for it, which is right
+	// where they agree -- and every picture measured does.
+	let deblocking = parts.iter().any(|(p, _)| p.deblocking);
+	let sao_on = parts.iter().any(|(p, _)| p.sao_luma || p.sao_chroma);
+	// Both filters run over block boundaries wherever they fall, including the ones between
+	// slices. A picture that asks for them to stop at a slice boundary would need the boundaries
+	// carried into the filter, and saying so beats filtering across one that should not be.
+	if parts.len() > 1 && !parts.iter().all(|(p, _)| p.across_slices) && (deblocking || sao_on) {
+		return Err(err!(
+			"A picture cut into {} slices whose loop filters are not to run across the boundaries \
+			between them.", parts.len(); Unimplemented));
+	}
+	if deblocking {
 		let edges = filter::Edges {
 			gw:	frame.gw,
 			gh:	frame.gh,
@@ -382,7 +555,7 @@ pub fn picture(sps: &Sps, pps: &Pps, slice: &Slice, data: &[u8]) -> Outcome<Pict
 		};
 		filter::deblock(&mut frame.pic, &edges, sps.luma_bits as u32);
 	}
-	if slice.sao_luma || slice.sao_chroma {
+	if sao_on {
 		filter::sao(&mut frame.pic, &frame.sao, ctbs_w, ctb, sps.luma_bits as u32);
 	}
 	Ok(frame.pic)
@@ -470,7 +643,10 @@ impl<'a> Frame<'a> {
 	/// such block the flat mode as its candidate, and picks the wrong mode out of the list -- with
 	/// no change to how many bins were read, so the picture stays in step and comes out wrong.
 	///
-	/// One slice and one tile, so nothing else can make a neighbour unavailable.
+	/// **And in the same slice.** A slice predicts from nothing outside itself, which is the whole
+	/// point of cutting a picture into slices, so a neighbour on the other side of a slice boundary
+	/// is not available however early it was decoded. One tile, so nothing else can make a
+	/// neighbour unavailable.
 	fn available(&self, cx: usize, cy: usize, nx: i32, ny: i32) -> bool {
 		if nx < 0 || ny < 0 {
 			return false;
@@ -479,7 +655,17 @@ impl<'a> Frame<'a> {
 		if nx >= self.pic.y.w || ny >= self.pic.y.h {
 			return false;
 		}
-		self.z_order(nx, ny) < self.z_order(cx, cy)
+		if self.z_order(nx, ny) >= self.z_order(cx, cy) {
+			return false;
+		}
+		self.slice_of(nx, ny) == self.slice_of(cx, cy)
+	}
+
+	/// Which slice the coding tree block covering a position belongs to.
+	fn slice_of(&self, x: usize, y: usize) -> u16 {
+		let ctb = self.sps.ctb_size as usize;
+		let at = (y / ctb) * self.ctbs_w + (x / ctb);
+		self.slice_at.get(at).copied().unwrap_or(0)
 	}
 
 	/// Records how deep in the quadtree a coding unit sits, against every block it covers.

@@ -40,6 +40,15 @@
 
 use oxedyne_fe2o3_core::prelude::*;
 
+use std::{
+	fs::File,
+	io::{
+		Read,
+		Seek,
+		SeekFrom,
+	},
+};
+
 /// The most samples one track may hold, a ceiling against a length that is a mistake.
 ///
 /// A million frames is about eleven and a half hours at twenty-four a second, which is longer than
@@ -1172,6 +1181,8 @@ pub struct Film {
 	height:	u16,
 	/// How far the picture is to be turned before it is shown, in degrees clockwise.
 	rotation:	u16,
+	/// The rectangle of the coded picture that is the picture: left, top, width and height.
+	aperture:	Option<(u32, u32, u32, u32)>,
 	/// Each sample's offset in the file and its length.
 	samples:	Vec<(u64, u32)>,
 	/// Which samples a reader may begin decoding at, as `stss` lists them, counted from nought.
@@ -1251,6 +1262,16 @@ impl Film {
 		self.rotation
 	}
 
+	/// The rectangle of the coded picture that is actually the picture: left, top, width, height.
+	///
+	/// `None` where the track states none, which means the whole of it. A phone stabilises a film
+	/// by coding a picture larger than it shows and moving a window about inside it; the window is
+	/// the clean aperture, and a viewer that ignores it shows about nine per cent more of the
+	/// frame than the film means to show, wobbling margin and all.
+	pub fn aperture(&self) -> Option<(u32, u32, u32, u32)> {
+		self.aperture
+	}
+
 	/// How many samples the track holds.
 	pub fn samples(&self) -> usize {
 		self.samples.len()
@@ -1293,6 +1314,230 @@ impl Film {
 			None => Err(err!("The track holds no samples."; Invalid, Input, Missing)),
 		}
 	}
+
+	/// Reads a film's first video track out of a file, holding none of the film.
+	///
+	/// This is the form a caller wanting one frame of a large film uses: the top-level boxes are
+	/// walked by their headers, the `moov` box alone is read, and the handle is left open so that
+	/// [`Film::read_sample`] can fetch the one sample the index names. A film of four gigabytes
+	/// costs its metadata, and a caller that cannot hold the file -- which is most callers, since
+	/// most films are past any sensible buffer -- is not shut out of its first frame.
+	pub fn of(f: &mut File) -> Outcome<Self> {
+		let moov = match res!(moov_of(f)) {
+			Some(m) => m,
+			None => return Err(err!(
+				"The file carries no `moov` box, so nothing says where its samples are.";
+			Invalid, Input, Missing)),
+		};
+		Self::from_moov(&moov)
+	}
+
+	/// One sample's bytes, read out of the file the index was read from.
+	///
+	/// The counterpart of [`Film::sample`] for a caller with a handle rather than a buffer. The
+	/// offsets in a sample table are absolute file offsets, so this needs nothing of where the
+	/// movie box sat.
+	pub fn read_sample(&self, f: &mut File, i: usize) -> Outcome<Vec<u8>> {
+		let (off, len) = res!(self.span(i));
+		if len > SAMPLE_MAX {
+			return Err(err!(
+				"Sample {} says it is {} bytes long, and {} is this reader's ceiling for one \
+				coded picture.", i, len, SAMPLE_MAX;
+			Invalid, Input, Excessive));
+		}
+		let mut buf = vec![0u8; len as usize];
+		res!(f.seek(SeekFrom::Start(off)), IO, File);
+		res!(f.read_exact(&mut buf), IO, File);
+		Ok(buf)
+	}
+
+	/// The bytes of the first sample a decoder may begin at.
+	///
+	/// The one call a poster frame needs: which sample to start at, and its bytes.
+	pub fn read_first_sync(&self, f: &mut File) -> Outcome<Vec<u8>> {
+		let i = res!(self.first_sync());
+		self.read_sample(f, i)
+	}
+}
+
+// ------------------------------------------------------------- a film's index, out of a file
+
+/// The most bytes a movie box may occupy before the file is called a mistake.
+///
+/// A `moov` is an index and not media: the sample tables of a track at this reader's ceiling of a
+/// million samples come to a few tens of megabytes, and anything past this is a length field read
+/// out of the wrong place rather than a film.
+pub const MOOV_MAX: u64 = 64 * 1024 * 1024;
+
+/// The most bytes one sample may occupy.
+///
+/// One coded picture. A 4K intra frame is a few megabytes; this is a ceiling against a length that
+/// is a mistake, since the length is what a buffer is sized from.
+pub const SAMPLE_MAX: u32 = 64 * 1024 * 1024;
+
+/// How much of a movie header is read back, which is more than either version of the box occupies.
+pub const MVHD_BYTES: u64 = 256;
+
+/// The most boxes walked at one level looking for one of them.
+const MAX_BOXES: usize = 4096;
+
+/// The body of the first box of a given type between two offsets in a file, as its offset and its
+/// length.
+///
+/// **Only the box headers are read**: eight bytes each, or the sixteen a 64-bit length needs. An
+/// `mdat` holding two gigabytes of film is stepped over by its declared length and never touched,
+/// which is what makes finding a film's index affordable on a file nobody wants in memory.
+///
+/// A length that does not fit inside the range being walked ends the walk and answers `None`
+/// rather than failing. A file truncated in transfer is a thing to report absence for, and the
+/// caller asking this question has a plain answer for absence: the box is not there.
+pub fn find_box(f: &mut File, want: &[u8; 4], from: u64, to: u64)
+	-> Outcome<Option<(u64, u64)>>
+{
+	let mut at = from;
+	for _ in 0..MAX_BOXES {
+		if at + 8 > to {
+			return Ok(None);
+		}
+		res!(f.seek(SeekFrom::Start(at)), IO, File);
+		let mut head = [0u8; 16];
+		if res!(fill(f, &mut head[..8])) != 8 {
+			return Ok(None);
+		}
+		let size = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as u64;
+		let mut kind = [0u8; 4];
+		kind.copy_from_slice(&head[4..8]);
+		// A size of nought means the box runs to the end of its parent; a size of one means the
+		// real length is the eight bytes after the type (ISO/IEC 14496-12 §4.2).
+		let (body, next) = match size {
+			0 => (at + 8, to),
+			1 => {
+				if res!(fill(f, &mut head[8..16])) != 8 {
+					return Ok(None);
+				}
+				let mut wide = [0u8; 8];
+				wide.copy_from_slice(&head[8..16]);
+				let wide = u64::from_be_bytes(wide);
+				if wide < 16 {
+					return Ok(None);
+				}
+				(at + 16, at.saturating_add(wide))
+			},
+			n if n < 8 => return Ok(None),
+			n => (at + 8, at.saturating_add(n)),
+		};
+		if next > to || next <= at || body > next {
+			return Ok(None);
+		}
+		if &kind == want {
+			return Ok(Some((body, next - body)));
+		}
+		at = next;
+	}
+	Ok(None)
+}
+
+/// The body of a film's movie box, lifted out of a file.
+///
+/// What comes back is the box's **children**, which is what [`Film::from_moov`] reads. QuickTime
+/// writes `moov` at the end of a file as often as at the front, and either is reached by the same
+/// walk over the top-level headers.
+pub fn moov_of(f: &mut File) -> Outcome<Option<Vec<u8>>> {
+	let end = res!(f.metadata(), IO, File).len();
+	let (body, len) = match res!(find_box(f, b"moov", 0, end)) {
+		Some(span) => span,
+		None => return Ok(None),
+	};
+	if len > MOOV_MAX {
+		return Err(err!(
+			"A movie box of {} bytes, and {} is this reader's ceiling. A `moov` is an index and \
+			not media.", len, MOOV_MAX;
+		Invalid, Input, Excessive));
+	}
+	let mut buf = vec![0u8; len as usize];
+	res!(f.seek(SeekFrom::Start(body)), IO, File);
+	res!(f.read_exact(&mut buf), IO, File);
+	Ok(Some(buf))
+}
+
+/// The payload of a film's movie header, lifted out of a file.
+///
+/// The header is `moov`'s first child and carries the timescale, the duration and the times the
+/// film was recorded and last changed. Reaching it costs a handful of eight-byte reads and as many
+/// seeks, and it is deliberately not the whole of `moov`: a caller asking only how long a film runs
+/// should not read a long film's sample tables to find out.
+pub fn mvhd_of(f: &mut File) -> Outcome<Option<Vec<u8>>> {
+	let end = res!(f.metadata(), IO, File).len();
+	let (moov, moov_len) = match res!(find_box(f, b"moov", 0, end)) {
+		Some(span) => span,
+		None => return Ok(None),
+	};
+	let (body, len) = match res!(find_box(f, b"mvhd", moov, moov + moov_len)) {
+		Some(span) => span,
+		None => return Ok(None),
+	};
+	let take = len.min(MVHD_BYTES) as usize;
+	res!(f.seek(SeekFrom::Start(body)), IO, File);
+	let mut buf = vec![0u8; take];
+	let got = res!(fill(f, &mut buf));
+	buf.truncate(got);
+	Ok(Some(buf))
+}
+
+/// The timescale and the duration a movie header carries: ticks a second, and ticks.
+///
+/// The two are only meaningful together, since the header counts in units of its own choosing.
+/// Version 1 of the box widens both the times and the duration while the timescale stays 32 bits in
+/// both. A timescale of nought, a duration of nought, and the all-ones a writer that did not know
+/// the duration leaves behind are all absence rather than numbers to divide.
+pub fn movie_ticks(mvhd: &[u8]) -> Option<(u32, u64)> {
+	let (scale, ticks) = match mvhd.first() {
+		Some(0) => {
+			if mvhd.len() < 20 {
+				return None;
+			}
+			let scale = u32::from_be_bytes([mvhd[12], mvhd[13], mvhd[14], mvhd[15]]);
+			let ticks = u32::from_be_bytes([mvhd[16], mvhd[17], mvhd[18], mvhd[19]]);
+			if ticks == u32::MAX {
+				return None;
+			}
+			(scale, ticks as u64)
+		},
+		Some(1) => {
+			if mvhd.len() < 32 {
+				return None;
+			}
+			let scale = u32::from_be_bytes([mvhd[20], mvhd[21], mvhd[22], mvhd[23]]);
+			let mut wide = [0u8; 8];
+			wide.copy_from_slice(&mvhd[24..32]);
+			let ticks = u64::from_be_bytes(wide);
+			if ticks == u64::MAX {
+				return None;
+			}
+			(scale, ticks)
+		},
+		_ => return None,
+	};
+	if scale == 0 || ticks == 0 {
+		None
+	} else {
+		Some((scale, ticks))
+	}
+}
+
+/// Reads until the buffer is full or the file ends, answering how many bytes arrived.
+///
+/// A single `read` may come back short of what was asked for without anything being wrong, and a
+/// box header read short by one byte is a film refused for nothing.
+fn fill(f: &mut File, buf: &mut [u8]) -> Outcome<usize> {
+	let mut got = 0usize;
+	while got < buf.len() {
+		match res!(f.read(&mut buf[got..]), IO, File) {
+			0 => break,
+			n => got += n,
+		}
+	}
+	Ok(got)
 }
 
 /// Reads a box header, giving its whole length and the length of the header itself.
@@ -1383,6 +1628,8 @@ struct Tables {
 	kind:		Option<Kind>,
 	/// The configuration record's span in the file.
 	config:		Option<(usize, usize)>,
+	/// The clean aperture, as its box states it: width, height, and the offsets of its centre.
+	clap:		Option<(f64, f64, f64, f64)>,
 	/// The coded size the sample entry declares.
 	size:		(u16, u16),
 	/// Each sample's length in bytes, from `stsz`.
@@ -1438,24 +1685,7 @@ fn track(bytes: &[u8], from: usize, to: usize, t: &mut Tables) -> Outcome<()> {
 				}
 			},
 			b"tkhd" => {
-				// The transformation matrix sits at a fixed offset that depends on the version:
-				// the version-1 header carries 64-bit times and is twelve bytes longer. Only the
-				// four rotation entries are read, because a matrix that is not a rotation is not
-				// something a photograph library can act on anyway.
-				let ver = bytes.get(body).copied().unwrap_or(0);
-				let at = body + if ver == 1 { 52 } else { 40 };
-				let mut m = [0i32; 4];
-				for (i, v) in m.iter_mut().enumerate() {
-					*v = res!(be32(bytes, at + i * 4)) as i32;
-				}
-				// The four are a, b, c, d in 16.16 fixed point.
-				let one = 0x0001_0000i32;
-				t.rotation = match (m[0], m[1], m[2], m[3]) {
-					(0, x, y, 0) if x == one && y == -one	=> 90,
-					(x, 0, 0, y) if x == -one && y == -one	=> 180,
-					(0, x, y, 0) if x == -one && y == one	=> 270,
-					_					=> 0,
-				};
+				t.rotation = rotation_of(&bytes[body..end.min(bytes.len())]);
 			},
 			b"stsd" => {
 				// Not read here. A track's boxes arrive in whatever order the writer chose, and a
@@ -1534,6 +1764,42 @@ fn track(bytes: &[u8], from: usize, to: usize, t: &mut Tables) -> Outcome<()> {
 	})
 }
 
+/// How far a track header's transformation matrix turns the picture, in degrees clockwise.
+///
+/// A phone writes the angle it was held at here rather than turning the samples, so this is what a
+/// viewer must do with a decoder's output. The matrix sits at a fixed offset that depends on the
+/// version -- the version-1 header carries 64-bit times and is twelve bytes longer -- and only the
+/// four entries that rotate are read, because a matrix that is not a rotation is not something a
+/// picture library can act on anyway. Anything else answers nought, which shows the picture as it
+/// was coded.
+///
+/// `tkhd` is the box's payload, from its version byte onwards.
+pub fn rotation_of(tkhd: &[u8]) -> u16 {
+	let ver = match tkhd.first() {
+		Some(v) => *v,
+		None => return 0,
+	};
+	let at = if ver == 1 { 52 } else { 40 };
+	// The matrix is nine values in the order a, b, u, c, d, v, x, y, w (§8.3.2.3), and the four
+	// that rotate are a, b, c and d -- which are **not** the first four: the projection entry `u`
+	// sits between b and c. Reading four in a row instead takes `u` for `c`, and since `u` is
+	// nought in every matrix any camera writes, every rotation then looks like no rotation at all.
+	let one = 0x0001_0000i32;
+	let mut m = [0i32; 4];
+	for (i, off) in [0usize, 4, 12, 16].iter().enumerate() {
+		m[i] = match tkhd.get(at + off..at + off + 4) {
+			Some(s) => i32::from_be_bytes([s[0], s[1], s[2], s[3]]),
+			None => return 0,
+		};
+	}
+	match (m[0], m[1], m[2], m[3]) {
+		(0, x, y, 0) if x == one && y == -one	=> 90,
+		(x, 0, 0, y) if x == -one && y == -one	=> 180,
+		(0, x, y, 0) if x == -one && y == one	=> 270,
+		_					=> 0,
+	}
+}
+
 /// Reads the first sample entry of a sample description, and the configuration record inside it.
 fn sample_description(bytes: &[u8], body: usize, end: usize, t: &mut Tables) -> Outcome<()> {
 	let count = res!(be32(bytes, body + 4));
@@ -1559,13 +1825,39 @@ fn sample_description(bytes: &[u8], body: usize, end: usize, t: &mut Tables) -> 
 	);
 	// The configuration box sits among the sample entry's own children.
 	let mut conf = None;
+	let mut clap: Option<(f64, f64, f64, f64)> = None;
 	res!(walk(bytes, code, visual + 70, at + size, 0, &mut |kind, _parent, cbody, cend| {
 		if matches!(&kind, b"avcC" | b"hvcC") && conf.is_none() {
 			conf = Some((cbody, cend));
 		}
+		// The clean aperture: the rectangle of the coded picture that is the picture. A phone
+		// stabilises a film by coding it larger than it shows and moving the window about inside
+		// it, and this is where the result is written -- eight rationals, four of which are the
+		// width and height and four the offset of the window's centre from the picture's
+		// (ISO/IEC 14496-12 §12.1.4.3).
+		if &kind == b"clap" && clap.is_none() && cend >= cbody + 32 {
+			let mut v = [0i64; 8];
+			for (i, n) in v.iter_mut().enumerate() {
+				*n = match bytes.get(cbody + i * 4..cbody + i * 4 + 4) {
+					Some(s) => i32::from_be_bytes([s[0], s[1], s[2], s[3]]) as i64,
+					None => return Ok(false),
+				};
+			}
+			// The denominators are the odd entries, and a zero one is a box to be ignored rather
+			// than divided by.
+			if v[1] != 0 && v[3] != 0 && v[5] != 0 && v[7] != 0 {
+				clap = Some((
+					v[0] as f64 / v[1] as f64,
+					v[2] as f64 / v[3] as f64,
+					v[4] as f64 / v[5] as f64,
+					v[6] as f64 / v[7] as f64,
+				));
+			}
+		}
 		Ok(false)
 	}));
 	t.config = conf;
+	t.clap = clap;
 	Ok(())
 }
 
@@ -1640,12 +1932,27 @@ fn assemble(bytes: &[u8], t: Tables) -> Outcome<Film> {
 		}
 		sync.push(*s - 1);
 	}
+	// The aperture is stated as a size and the offset of its centre from the picture's, so the
+	// corner it starts at is worked out here rather than by every caller.
+	let aperture = t.clap.and_then(|(w, h, dx, dy)| {
+		let (full_w, full_h) = (t.size.0 as f64, t.size.1 as f64);
+		if w <= 0.0 || h <= 0.0 || w > full_w || h > full_h {
+			return None;
+		}
+		let x = ((full_w - w) / 2.0 + dx).round();
+		let y = ((full_h - h) / 2.0 + dy).round();
+		if x < 0.0 || y < 0.0 || x + w > full_w || y + h > full_h {
+			return None;
+		}
+		Some((x as u32, y as u32, w.round() as u32, h.round() as u32))
+	});
 	Ok(Film {
 		kind,
 		config,
 		width:	t.size.0,
 		height:	t.size.1,
 		rotation: t.rotation,
+		aperture,
 		samples,
 		sync,
 	})
@@ -1654,6 +1961,33 @@ fn assemble(bytes: &[u8], t: Tables) -> Outcome<Film> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn test_a_quarter_turn_in_a_track_header_is_read_00() -> Outcome<()> {
+		// The four entries that rotate are a, b, c and d, and they are not four in a row: the
+		// projection entry `u` sits between b and c, and it is nought in every matrix a camera
+		// writes. A reader that takes four in a row therefore answers "no rotation" for every
+		// turned film there is, which is what this decoder did until a film held sideways said so.
+		let one = 0x0001_0000u32;
+		let neg = (-(one as i32)) as u32;
+		let head = |a: u32, b: u32, c: u32, d: u32| {
+			let mut body = vec![0u8; 84];
+			body[40..44].copy_from_slice(&a.to_be_bytes());
+			body[44..48].copy_from_slice(&b.to_be_bytes());
+			// 48 is `u`, and stays nought.
+			body[52..56].copy_from_slice(&c.to_be_bytes());
+			body[56..60].copy_from_slice(&d.to_be_bytes());
+			body
+		};
+		req!(rotation_of(&head(0, one, neg, 0)), 90u16, "a quarter turn clockwise");
+		req!(rotation_of(&head(neg, 0, 0, neg)), 180u16, "a half turn");
+		req!(rotation_of(&head(0, neg, one, 0)), 270u16, "three quarters clockwise");
+		req!(rotation_of(&head(one, 0, 0, one)), 0u16, "unity is no turn");
+		// A matrix that is not a rotation is shown as it was coded rather than guessed at.
+		req!(rotation_of(&head(one, one, one, one)), 0u16, "a matrix that is not a rotation");
+		req!(rotation_of(&[]), 0u16, "an empty header");
+		Ok(())
+	}
 
 	/// The sequence parameter set of a 64 by 48 stream, as libx264 wrote it: the NAL unit that
 	/// followed the first start code of
@@ -2126,6 +2460,12 @@ mod tests {
 
 		// Turn it a quarter clockwise by writing the matrix a phone would: a = 0, b = 1, c = -1,
 		// d = 0, in 16.16 fixed point.
+		//
+		// **The four are not four in a row.** The matrix is a, b, u, c, d, v, x, y, w, so c and d
+		// are the fourth and fifth entries; this test used to write them third and fourth, which
+		// is exactly where the reader used to look for them, so the two agreed with each other and
+		// with no real film. Every rotated film in a library of seven thousand was read as
+		// upright. The positions below are the specification's.
 		let at = match file.windows(4).position(|w| w == b"tkhd") {
 			Some(at) => at + 4 + 40,
 			None => return Err(err!("the writer emitted no track header."; Test, Missing)),
@@ -2134,17 +2474,20 @@ mod tests {
 			file[at + i * 4..at + i * 4 + 4].copy_from_slice(&(v as u32).to_be_bytes());
 		};
 		let one = 0x0001_0000i32;
-		put(&mut file, 0, 0);
-		put(&mut file, 1, one);
-		put(&mut file, 2, -one);
-		put(&mut file, 3, 0);
+		let matrix = |file: &mut Vec<u8>, a: i32, b: i32, c: i32, d: i32| {
+			put(file, 0, a);
+			put(file, 1, b);
+			put(file, 3, c);
+			put(file, 4, d);
+		};
+		matrix(&mut file, 0, one, -one, 0);
 		req!(res!(Film::read(&file)).rotation(), 90u16);
 		// And a half turn.
-		put(&mut file, 0, -one);
-		put(&mut file, 1, 0);
-		put(&mut file, 2, 0);
-		put(&mut file, 3, -one);
+		matrix(&mut file, -one, 0, 0, -one);
 		req!(res!(Film::read(&file)).rotation(), 180u16);
+		// And three quarters.
+		matrix(&mut file, 0, -one, one, 0);
+		req!(res!(Film::read(&file)).rotation(), 270u16);
 		Ok(())
 	}
 }

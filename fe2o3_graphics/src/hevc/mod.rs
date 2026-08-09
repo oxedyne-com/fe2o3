@@ -164,6 +164,41 @@ pub struct Sps {
 	/// The weights themselves, where the lists are in use: this sequence's own where it carries
 	/// them, and the default ones where it does not.
 	pub weights:	Option<Scaling>,
+	/// Where the shown picture begins inside the coded one, in luma samples.
+	///
+	/// Both windows may sit off the top left corner: the conformance window usually does not and
+	/// the default display window of a stabilised film always does, since it is centred in a
+	/// picture coded larger than it shows. Cropping from the corner instead moves the whole
+	/// picture by that offset.
+	pub show_x0:	u32,
+	/// The same downwards.
+	pub show_y0:	u32,
+	/// Whether the samples run the full range rather than the studio one.
+	///
+	/// Out of the video usability information, where a stream says how it is to be shown. A
+	/// conversion into red, green and blue that guesses this wrong makes a photograph with no real
+	/// black in it, or one whose blacks are crushed.
+	pub full_range:	bool,
+	/// Which matrix the colour difference was coded against, as ISO/IEC 23091-2 numbers them: 1 is
+	/// the high-definition one, 5 and 6 the standard-definition ones, and 2 is "unspecified".
+	pub matrix:	u8,
+	/// How many bits the picture order count's lower part is coded in.
+	///
+	/// Kept because a slice header carries one -- for every picture except an IDR, which has no
+	/// order count to state. A film's first frame is very often a clean random access picture
+	/// rather than an IDR, and a header read as though it were an IDR's is a header read out of
+	/// step from this field on.
+	pub poc_bits:	u8,
+	/// How many pictures each short-term reference picture set names, negative and positive.
+	///
+	/// A still picture references nothing and needs none of them; what this is for is the slice
+	/// header, which may name one of these sets or write a new one predicted from them, and either
+	/// way the bits cannot be stepped over without knowing how large the set referred to is.
+	pub st_sets:	Vec<(u32, u32)>,
+	/// Whether a slice header may name long-term reference pictures.
+	pub long_term:	bool,
+	/// Whether a slice header carries the temporal motion vector predictor flag.
+	pub temporal_mvp:	bool,
 }
 
 /// What a picture parameter set says about the slices that reference it.
@@ -209,6 +244,12 @@ pub struct Pps {
 	/// Whether the loop filter runs across slice boundaries, and therefore whether a slice header
 	/// carries a flag of its own about it.
 	pub filter_across_slices:	bool,
+	/// Whether a slice segment may continue the header of the one before it.
+	///
+	/// Kept because the slice header cannot be read without it: a segment that is not the first of
+	/// its picture carries a flag saying whether it is such a continuation, and only where this
+	/// says one may.
+	pub dependent_slices:	bool,
 }
 
 /// Splits a byte-stream of length-prefixed NAL units, as `hvcC` and `mdat` carry them.
@@ -664,8 +705,9 @@ fn scaling_list(b: &mut Bits) -> Outcome<Scaling> {
 
 /// Steps over one short-term reference picture set (§7.3.7).
 ///
-/// A still picture references nothing, so nothing here is kept -- but a sequence parameter set is
-/// allowed to carry these before fields that *are* wanted, and they are variable-length.
+/// A still picture references nothing, so no *picture* is kept -- but how many the set names is,
+/// because the next set may be coded as a difference from this one and a slice header may be coded
+/// as a difference from any of them, and neither can be stepped over without the count.
 fn short_term_ref_pic_set(b: &mut Bits, idx: usize, count: usize, previous: &mut Vec<(u32, u32)>)
 	-> Outcome<()>
 {
@@ -674,21 +716,37 @@ fn short_term_ref_pic_set(b: &mut Bits, idx: usize, count: usize, previous: &mut
 		predicted = res!(b.flag());
 	}
 	if predicted {
+		// Which earlier set this one is a difference from. Only a set written in a slice header
+		// says so; a set in the sequence parameter set is always a difference from the one before
+		// it (§7.4.8).
+		let mut back = 1usize;
 		if idx == count {
-			let _ = res!(b.ue());
+			back = res!(b.ue()) as usize + 1;
 		}
 		let _delta_rps_sign = res!(b.flag());
 		let _abs_delta_rps = res!(b.ue());
-		let (negative, positive) = previous.last().copied().unwrap_or((0, 0));
+		let (negative, positive) = match idx.checked_sub(back).and_then(|at| previous.get(at)) {
+			Some(pair) => *pair,
+			None => return Err(err!(
+				"A reference picture set is coded as a difference from set {} of {}, which is not \
+				there.", idx as i64 - back as i64, previous.len();
+			Invalid, Input, Decode)),
+		};
+		// One flag pair for each picture of the set referred to, and one for the picture that set
+		// is itself relative to. The ones kept are what this set names, which is what the next
+		// difference will be measured against.
+		let mut kept = 0u32;
 		for _ in 0..(negative + positive + 1) {
 			let used = res!(b.flag());
+			let mut keep = used;
 			if !used {
-				let _use_delta = res!(b.flag());
+				keep = res!(b.flag());
+			}
+			if keep {
+				kept += 1;
 			}
 		}
-		// The count after prediction cannot be worked out without keeping the whole set, and this
-		// decoder does not need it: what matters is that the bits have been consumed.
-		previous.push((negative, positive));
+		previous.push((kept, 0));
 		return Ok(());
 	}
 	let negative = res!(b.ue());
@@ -768,7 +826,12 @@ pub fn sps(body: &[u8]) -> Outcome<Sps> {
 			"A sample of {} bits, and 16 is the most this decoder reads.", luma_bits.max(chroma_bits);
 		Invalid, Input, Unknown));
 	}
-	let _log2_max_poc = res!(b.ue());
+	let poc_bits = res!(b.ue()) as u8 + 4;
+	if poc_bits > 16 {
+		return Err(err!(
+			"A picture order count of {} bits, and 16 is the most.", poc_bits;
+		Invalid, Input, Decode));
+	}
 	// The ordering information is given either once for the highest sub-layer or once for each.
 	let for_each = res!(b.flag());
 	let first = if for_each { 0 } else { max_sub_layers - 1 };
@@ -819,7 +882,8 @@ pub fn sps(body: &[u8]) -> Outcome<Sps> {
 	for i in 0..short_term_sets {
 		res!(short_term_ref_pic_set(&mut b, i, short_term_sets, &mut previous));
 	}
-	if res!(b.flag()) {
+	let long_term_present = res!(b.flag());
+	if long_term_present {
 		let long_term = res!(b.ue()) as usize;
 		if long_term > 32 {
 			return Err(err!(
@@ -837,15 +901,78 @@ pub fn sps(body: &[u8]) -> Outcome<Sps> {
 			Invalid, Input, Unknown));
 		}
 	}
-	let _temporal_mvp = res!(b.flag());
+	let temporal_mvp = res!(b.flag());
 	let strong_smoothing = res!(b.flag());
+	// The video usability information, which is where a stream says how it is to be *shown*: which
+	// weights its colour was coded against, whether its samples run the full range, and -- the one
+	// that changes the picture's size -- the default display window.
+	//
+	// **A phone's stabilised film carries one.** Stabilisation works by coding a picture larger
+	// than it shows and moving the window about inside it, and the window is written here. A
+	// decoder that ignores it hands back the wobbly margin as though it were part of the film,
+	// about nine per cent wider and taller than every player shows.
+	let (mut full_range, mut matrix) = (false, 2u8);
+	let (mut show_x, mut show_y) = (0u32, 0u32);
+	let (mut show_x0, mut show_y0) = (0u32, 0u32);
+	if res!(b.flag()) {
+		if res!(b.flag()) {
+			// The sample aspect ratio, read past: a picture is drawn at the size it is coded and
+			// stretching it is the caller's business.
+			let idc = res!(b.u(8));
+			if idc == 255 {
+				let _sar_w = res!(b.u(16));
+				let _sar_h = res!(b.u(16));
+			}
+		}
+		if res!(b.flag()) {
+			let _overscan_appropriate = res!(b.flag());
+		}
+		if res!(b.flag()) {
+			let _video_format = res!(b.u(3));
+			full_range = res!(b.flag());
+			if res!(b.flag()) {
+				let _primaries = res!(b.u(8));
+				let _transfer = res!(b.u(8));
+				matrix = res!(b.u(8)) as u8;
+			}
+		}
+		if res!(b.flag()) {
+			let _chroma_loc_top = res!(b.ue());
+			let _chroma_loc_bottom = res!(b.ue());
+		}
+		let _neutral_chroma = res!(b.flag());
+		let _field_seq = res!(b.flag());
+		let _frame_field_info = res!(b.flag());
+		if res!(b.flag()) {
+			let dw_left = res!(b.ue());
+			let dw_right = res!(b.ue());
+			let dw_top = res!(b.ue());
+			let dw_bottom = res!(b.ue());
+			show_x = dw_left.saturating_add(dw_right).saturating_mul(sub_w);
+			show_y = dw_top.saturating_add(dw_bottom).saturating_mul(sub_h);
+			show_x0 = dw_left.saturating_mul(sub_w);
+			show_y0 = dw_top.saturating_mul(sub_h);
+		}
+		// Nothing after the window is read: the timing information, the bitstream restrictions and
+		// the hypothetical reference decoder say nothing about the samples.
+	}
+	let width = coded_w - trim_x;
+	let height = coded_h - trim_y;
+	if show_x >= width || show_y >= height {
+		return Err(err!(
+			"A default display window trims {} by {} from a picture of {} by {}.",
+			show_x, show_y, width, height;
+		Invalid, Input, Range));
+	}
 	Ok(Sps {
 		id: id as u8,
 		chroma: chroma as u8,
 		coded_w,
 		coded_h,
-		width: coded_w - trim_x,
-		height: coded_h - trim_y,
+		width: width - show_x,
+		height: height - show_y,
+		show_x0: left.saturating_mul(sub_w) + show_x0,
+		show_y0: top.saturating_mul(sub_h) + show_y0,
 		luma_bits,
 		chroma_bits,
 		ctb_size,
@@ -858,6 +985,12 @@ pub fn sps(body: &[u8]) -> Outcome<Sps> {
 		strong_smoothing,
 		scaling_lists,
 		weights,
+		poc_bits,
+		full_range,
+		matrix,
+		st_sets: previous,
+		long_term: long_term_present,
+		temporal_mvp,
 	})
 }
 
@@ -871,7 +1004,7 @@ pub fn pps(body: &[u8]) -> Outcome<Pps> {
 			"A picture parameter set numbered {} against sequence set {}.", id, sps_id;
 		Invalid, Input, Decode));
 	}
-	let _dependent_slice_segments = res!(b.flag());
+	let dependent_slices = res!(b.flag());
 	let output_flag = res!(b.flag());
 	let extra_header_bits = res!(b.u(3)) as u8;
 	let sign_hiding = res!(b.flag());
@@ -940,6 +1073,7 @@ pub fn pps(body: &[u8]) -> Outcome<Pps> {
 		output_flag,
 		deblocking_override,
 		filter_across_slices,
+		dependent_slices,
 	})
 }
 
@@ -951,6 +1085,17 @@ pub fn pps(body: &[u8]) -> Outcome<Pps> {
 /// a header read one bit short starts the whole of the rest of the decode in the wrong place.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Slice {
+	/// Whether this segment is the first of its picture.
+	pub first:	bool,
+	/// The coding tree block this segment begins at, counted in raster order from nought.
+	///
+	/// Nought for the first segment of a picture, which is every segment of a picture that is one
+	/// slice -- which every photograph is and many films are not.
+	pub address:	u32,
+	/// Whether the loop filters run across this slice's boundaries with its neighbours.
+	///
+	/// Where the header does not carry it, it is the picture parameter set's answer (§7.4.7.1).
+	pub across_slices:	bool,
 	/// Which picture parameter set the slice references.
 	pub pps_id:	u8,
 	/// The slice type: 2 is intra, and this decoder reads no other.
@@ -983,15 +1128,11 @@ pub struct Slice {
 ///
 /// The identifier is the third element of the header and none of the three before it depends on a
 /// parameter set, so it can be had before choosing one -- which is the point: a caller holding
-/// several sets has to know which it is being asked for.
+/// several sets has to know which it is being asked for. It sits before the segment address, so
+/// this reads the same three elements whether or not the segment is the first of its picture.
 pub fn slice_pps_id(body: &[u8]) -> Outcome<u8> {
 	let mut b = Bits::new(body);
-	let first = res!(b.flag());
-	if !first {
-		return Err(err!(
-			"A slice segment that is not the first of its picture. A still picture is one slice.";
-		Invalid, Input, Unknown));
-	}
+	let _first = res!(b.flag());
 	// Only an IRAP picture carries this flag, and every still is one.
 	let _no_output_of_prior_pics = res!(b.flag());
 	Ok(res!(b.ue()) as u8)
@@ -999,38 +1140,103 @@ pub fn slice_pps_id(body: &[u8]) -> Outcome<u8> {
 
 /// Reads a slice segment header (§7.3.6.1).
 ///
-/// Only the independent, intra case: a dependent slice segment continues another one's context and
-/// a still picture has no reason to carry one, so it is refused by name.
+/// Only the independent, intra case: a **dependent** slice segment carries no header of its own but
+/// continues the one before it, and is refused by name.
+///
+/// A segment that is not the first of its picture carries the coding tree block it begins at, in as
+/// many bits as it takes to count the picture's blocks -- which is why the sequence parameter set is
+/// needed to read a header at all.
 pub fn slice(body: &[u8], sps: &Sps, pps: &Pps) -> Outcome<Slice> {
+	slice_of(nal::IDR_W_RADL, body, sps, pps)
+}
+
+/// The same, for a slice of a picture that may not be an IDR.
+///
+/// **A film's first frame very often is not one.** A clean random access picture opens a stream
+/// just as an IDR does and is decoded exactly as one -- it references nothing before itself -- but
+/// its slice header carries the picture order count and the reference picture set that an IDR's
+/// does not, because the pictures *after* it may reference what it names. A header read as though
+/// it were an IDR's is read out of step from that field onwards, and what comes out is a plausible
+/// number of entry points and a picture of noise.
+///
+/// `kind` is the NAL unit type, which is the only thing that says which of the two this is.
+pub fn slice_of(kind: u8, body: &[u8], sps: &Sps, pps: &Pps) -> Outcome<Slice> {
 	let mut b = Bits::new(body);
 	let first = res!(b.flag());
-	if !first {
-		return Err(err!(
-			"A slice segment that is not the first of its picture. A still picture is one slice.";
-		Invalid, Input, Unknown));
-	}
 	// Only an IRAP picture carries this flag, and every still is one.
 	let _no_output_of_prior_pics = res!(b.flag());
 	let pps_id = res!(b.ue());
+	let mut address = 0u32;
+	if !first {
+		if pps.dependent_slices && res!(b.flag()) {
+			return Err(err!(
+				"A dependent slice segment, which carries no header of its own but continues the \
+				one before it."; Unimplemented));
+		}
+		// As many bits as it takes to count the picture's coding tree blocks (§7.4.7.1).
+		let ctb = sps.ctb_size.max(1);
+		let blocks = ((sps.coded_w + ctb - 1) / ctb) as u64 * ((sps.coded_h + ctb - 1) / ctb) as u64;
+		let mut width = 0usize;
+		while (1u64 << width) < blocks {
+			width += 1;
+		}
+		address = res!(b.u(width)) as u32;
+		if address as u64 >= blocks {
+			return Err(err!(
+				"A slice segment begins at block {} of a picture holding {}.", address, blocks;
+			Invalid, Input, Decode));
+		}
+	}
 	if pps_id as u8 != pps.id {
 		return Err(err!(
 			"A slice references picture parameter set {} and the one in hand is {}.",
 			pps_id, pps.id;
 		Invalid, Input, Missing));
 	}
-	let kind = res!(b.ue());
-	if kind != 2 {
+	// Reserved, and to be stepped over rather than understood. Stepping over the wrong number of
+	// them puts every field after them one place out, which is why the count is carried here from
+	// the picture parameter set rather than assumed to be zero. They come **before** the slice
+	// type (§7.3.6.1).
+	res!(b.skip(pps.extra_header_bits as usize));
+	let slice_kind = res!(b.ue());
+	if slice_kind != 2 {
 		return Err(err!(
-			"A slice of type {}, and a still picture's slices are all intra (type 2).", kind;
+			"A slice of type {}, and a still picture's slices are all intra (type 2).", slice_kind;
 		Invalid, Input, Unknown));
 	}
 	if pps.output_flag {
 		let _pic_output_flag = res!(b.flag());
 	}
-	// Reserved, and to be stepped over rather than understood. Stepping over the wrong number of
-	// them puts every field after them one place out, which is why the count is carried here from
-	// the picture parameter set rather than assumed to be zero.
-	res!(b.skip(pps.extra_header_bits as usize));
+	// What an IDR does not carry, and everything else does: where this picture sits in output
+	// order, and which pictures the ones after it may reference.
+	if kind != nal::IDR_W_RADL && kind != nal::IDR_N_LP {
+		let _poc_lsb = res!(b.u(sps.poc_bits as usize));
+		let from_sps = res!(b.flag());
+		if !from_sps {
+			// A set of its own, written here and coded as a difference from one of the sequence's.
+			let mut sets = sps.st_sets.clone();
+			let count = sets.len();
+			res!(short_term_ref_pic_set(&mut b, count, count, &mut sets));
+		} else if sps.st_sets.len() > 1 {
+			// As many bits as it takes to count them (§7.4.7.1).
+			let mut width = 0usize;
+			while (1usize << width) < sps.st_sets.len() {
+				width += 1;
+			}
+			let _which = res!(b.u(width));
+		}
+		if sps.long_term {
+			// A sequence carrying long-term reference pictures is refused where it is read, so
+			// reaching this means the flag is set and the sequence names none of them.
+			let _num_long_term_pics = res!(b.ue());
+			return Err(err!(
+				"A slice names long-term reference pictures, which a picture decoded on its own \
+				has no use for and this reader does not follow."; Unimplemented));
+		}
+		if sps.temporal_mvp {
+			let _temporal_mvp = res!(b.flag());
+		}
+	}
 	let mut sao_luma = false;
 	let mut sao_chroma = false;
 	if sps.sao {
@@ -1061,8 +1267,11 @@ pub fn slice(body: &[u8], sps: &Sps, pps: &Pps) -> Outcome<Slice> {
 			let _tc = res!(b.se());
 		}
 	}
+	// Whether the loop filters run across this slice's boundaries. Where the header does not carry
+	// it, the picture parameter set's answer stands (§7.4.7.1).
+	let mut across_slices = pps.filter_across_slices;
 	if pps.filter_across_slices && (sao_luma || sao_chroma || deblocking) {
-		let _across = res!(b.flag());
+		across_slices = res!(b.flag());
 	}
 	// Where the picture is cut up for parallel decoding, the header says where each piece begins.
 	//
@@ -1097,9 +1306,15 @@ pub fn slice(body: &[u8], sps: &Sps, pps: &Pps) -> Outcome<Slice> {
 		// read one bit out of step produces a count that is nonsense against it, which makes this
 		// the cheapest check there is on the whole header: it is what caught the reading that
 		// refused every photograph in the corpus rather than reading its entry points.
+		//
+		// A segment covering part of a picture names fewer pieces than the picture has rows, and
+		// how many fewer is not knowable from the header alone -- so what is checked here is that
+		// it names no more, and the exact form is checked by [`whole_picture_rows`] once the number
+		// of segments is known.
 		if pps.wavefront && !pps.tiles {
 			let rows = ((sps.coded_h + sps.ctb_size - 1) / sps.ctb_size) as usize;
-			if entries.len() + 1 != rows {
+			let over = entries.len() + 1 > rows;
+			if over {
 				return Err(err!(
 					"A slice names {} pieces and the picture is {} rows of coding tree blocks \
 					deep. The header has been read out of step.", entries.len() + 1, rows;
@@ -1117,8 +1332,11 @@ pub fn slice(body: &[u8], sps: &Sps, pps: &Pps) -> Outcome<Slice> {
 		Invalid, Input, Decode));
 	}
 	Ok(Slice {
+		first,
+		address,
+		across_slices,
 		pps_id: pps_id as u8,
-		kind: kind as u8,
+		kind: slice_kind as u8,
 		qp,
 		cb_qp_offset:	cb_offset,
 		cr_qp_offset:	cr_offset,
@@ -1185,6 +1403,33 @@ mod tests {
 /// was written against is eight bits. It has **not** been through the deblocking filter or the
 /// sample adaptive offset, which are separate passes over a finished picture.
 pub fn picture(record: &[u8], data: &[u8]) -> Outcome<decode::Picture> {
+	let (pic, _sps) = res!(coded(record, data));
+	Ok(pic)
+}
+
+/// The same picture, cropped to the size it is meant to be **shown** at.
+///
+/// A coded picture is a whole number of coding tree blocks and a shown one is not: a 1920 by 1080
+/// film is coded 1920 by 1088, and the sequence parameter set's conformance window says which of
+/// those rows are the picture. [`picture`] hands back what was coded, because the HEIC path crops to
+/// the size the container declares instead and cropping twice would take the same rows off again.
+/// A caller with no container to ask -- a film's first frame -- wants this one.
+pub fn picture_shown(record: &[u8], data: &[u8]) -> Outcome<decode::Picture> {
+	let (pic, sps) = res!(coded(record, data));
+	let (w, h) = (sps.width as usize, sps.height as usize);
+	let (x0, y0) = (sps.show_x0 as usize, sps.show_y0 as usize);
+	if x0 == 0 && y0 == 0 && w >= pic.y.w && h >= pic.y.h {
+		return Ok(pic);
+	}
+	Ok(pic.window(x0, y0, w.min(pic.y.w), h.min(pic.y.h)))
+}
+
+/// Decodes one coded picture, and answers the sequence parameter set it was coded against.
+///
+/// The set is handed back because what a caller does with the picture next depends on it: the
+/// conformance window is in it, and so is everything a caller would otherwise have to parse the
+/// parameter sets again to learn.
+fn coded(record: &[u8], data: &[u8]) -> Outcome<(decode::Picture, Sps)> {
 	let cfg = res!(config(record));
 	// Every set the record carries, not the last of each. A photograph out of a
 	// camera carries one apiece and either would do; a film carries several, and
@@ -1209,9 +1454,13 @@ pub fn picture(record: &[u8], data: &[u8]) -> Outcome<decode::Picture> {
 			"The decoder configuration carries no picture parameter set."; Invalid, Input));
 	}
 
-	// And the slice is in the item's own bytes.
+	// And the slices are in the item's own bytes. **Every** slice of the picture, not the first:
+	// a photograph is one slice and a film's frame need not be, and a picture read from one of
+	// four segments is a quarter of a picture.
 	let units = res!(split_lengthed(data, cfg.length_size));
-	for unit in &units {
+	let mut heads: Vec<(Slice, usize)> = Vec::new();
+	let mut chosen: Option<(Sps, Pps)> = None;
+	for (i, unit) in units.iter().enumerate() {
 		match unit.kind {
 			nal::IDR_W_RADL | nal::IDR_N_LP | 21 => {
 				// Which sets this slice was coded against: the picture set it
@@ -1233,14 +1482,53 @@ pub fn picture(record: &[u8], data: &[u8]) -> Outcome<decode::Picture> {
 						seqs.iter().map(|s| s.id.to_string()).collect::<Vec<_>>().join(", ");
 					Invalid, Input, Missing)),
 				};
-				let head = res!(slice(&unit.body, &sps, &pps));
-				// The header was read from the unescaped payload; the data after it has to be
-				// handed over escaped, because that is what the entry point offsets count.
-				let at = escaped_at(&unit.raw, head.data_at);
-				return decode::picture(&sps, &pps, &head, &unit.raw[at..]);
+				let head = res!(slice_of(unit.kind, &unit.body, &sps, &pps));
+				// A second coded picture in the same access unit is somebody else's frame: this
+				// reads the first picture, and the first picture ends where the next one begins.
+				if head.first && !heads.is_empty() {
+					break;
+				}
+				match &chosen {
+					Some((have_sps, have_pps)) => {
+						if have_sps.id != sps.id || have_pps.id != pps.id {
+							return Err(err!(
+								"Two slices of one picture reference different parameter sets.";
+							Invalid, Input, Mismatch));
+						}
+					},
+					None => chosen = Some((sps, pps)),
+				}
+				heads.push((head, i));
 			},
 			_ => {},
 		}
 	}
-	Err(err!("Those bytes hold no coded slice."; Invalid, Input, Decode))
+	let (sps, pps) = match chosen {
+		Some(pair) => pair,
+		None => return Err(err!("Those bytes hold no coded slice."; Invalid, Input, Decode)),
+	};
+	// A picture that is one slice must name one piece a row of blocks, since that is what
+	// wavefront coding is. It is the cheapest check there is on the whole header -- the count and
+	// the geometry come out of different NAL units written at different times -- and it is what
+	// caught the reading that refused every photograph in the corpus.
+	if heads.len() == 1 && pps.wavefront && !pps.tiles {
+		let rows = ((sps.coded_h + sps.ctb_size - 1) / sps.ctb_size) as usize;
+		let named = heads[0].0.entries.len() + 1;
+		if named != rows {
+			return Err(err!(
+				"A slice names {} pieces and the picture is {} rows of coding tree blocks deep. \
+				The header has been read out of step.", named, rows;
+			Invalid, Input, Decode));
+		}
+	}
+	// The header was read from the unescaped payload; the data after it has to be handed over
+	// escaped, because that is what the entry point offsets count.
+	let parts: Vec<(&Slice, &[u8])> = heads.iter()
+		.map(|(head, i)| {
+			let raw = &units[*i].raw;
+			(head, &raw[escaped_at(raw, head.data_at).min(raw.len())..])
+		})
+		.collect();
+	let pic = res!(decode::picture_of(&sps, &pps, &parts));
+	Ok((pic, sps))
 }
