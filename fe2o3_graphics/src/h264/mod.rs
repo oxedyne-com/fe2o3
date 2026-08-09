@@ -105,6 +105,7 @@
 //! §9.2 and CABAC §9.3. The `avcC` record the parameter sets arrive in is ISO/IEC 14496-15 §5.3.3.1.
 //! Every constant below names the clause it comes from.
 
+pub mod cabac;
 pub mod cavlc;
 pub mod decode;
 pub mod filter;
