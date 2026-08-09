@@ -268,6 +268,13 @@ pub enum Task<'a> {
 		/// Buffer, rewritten in place.
 		x:	&'a mut [f32],
 	},
+	/// Leaky rectified linear unit, one slope for every channel.
+	Leaky {
+		/// Buffer, rewritten in place.
+		x:		&'a mut [f32],
+		/// Negative slope.
+		slope:	f32,
+	},
 	/// Logistic sigmoid.
 	Sigmoid {
 		/// Buffer, rewritten in place.
@@ -385,6 +392,8 @@ fn dispatch_avx2_fma(task: Task<'_>) {
 			prelu_tf(ch, x, slope),
 		Task::Relu { x } =>
 			relu_tf(x),
+		Task::Leaky { x, slope } =>
+			leaky_tf(x, slope),
 		Task::Sigmoid { x } =>
 			sigmoid_tf(x),
 		Task::MaxPool { ch, h, w, kh, kw, sy, sx, pt, pl, oh, ow, x, y } =>
@@ -414,6 +423,8 @@ fn dispatch_baseline(task: Task<'_>) {
 			prelu(ch, x, slope),
 		Task::Relu { x } =>
 			relu(x),
+		Task::Leaky { x, slope } =>
+			leaky(x, slope),
 		Task::Sigmoid { x } =>
 			sigmoid(x),
 		Task::MaxPool { ch, h, w, kh, kw, sy, sx, pt, pl, oh, ow, x, y } =>
@@ -560,6 +571,13 @@ fn resize_tf(
 	y:		&mut [f32],
 ) {
 	resize(ch, h, w, oh, ow, sample, coord, x, y)
+}
+
+/// The leaky rectifier, compiled for AVX2.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+fn leaky_tf(x: &mut [f32], slope: f32) {
+	leaky(x, slope)
 }
 
 /// The element-wise sum, compiled for AVX2.
@@ -917,6 +935,16 @@ fn relu(x: &mut [f32]) {
 	}
 }
 
+/// Leaky rectified linear unit, written branchlessly so the loop vectorises.
+#[inline(always)]
+fn leaky(x: &mut [f32], slope: f32) {
+	for v in x.iter_mut() {
+		// `max` and `min` split the value into its positive and negative parts,
+		// which costs two instructions and no branch.
+		*v = v.max(0.0) + slope * v.min(0.0);
+	}
+}
+
 /// Logistic sigmoid.
 #[inline(always)]
 fn sigmoid(x: &mut [f32]) {
@@ -1039,6 +1067,95 @@ fn add(x: &mut [f32], y: &[f32]) {
 	for (a, b) in x.iter_mut().zip(y.iter()) {
 		*a += *b;
 	}
+}
+
+/// Cuts an activation along its channels, into runs of the given widths.
+///
+/// Channels are the innermost axis, so each part is a strided gather rather than
+/// a slice; this is the price the channels-last layout charges for an operator
+/// that names an axis, and it is paid a handful of times per model.
+pub fn split_channels(t: &Tensor, widths: &[usize]) -> Outcome<Vec<Tensor>> {
+	let (n, h, w, c) = res!(t.nhwc());
+	let total = widths.iter().sum::<usize>();
+	if total != c {
+		return Err(err!(
+			"A split of {:?} covers {} channels, but the activation has {}.",
+			widths, total, c;
+		Invalid, Input, Mismatch));
+	}
+	let rows = n * h * w;
+	let mut parts = Vec::with_capacity(widths.len());
+	let mut base = 0;
+	for width in widths {
+		let mut out = vec![0.0f32; rows * width];
+		for r in 0..rows {
+			let src = r * c + base;
+			out[r * width..(r + 1) * width].copy_from_slice(&t.data[src..src + width]);
+		}
+		parts.push(res!(Tensor::new(vec![n, h, w, *width], out)));
+		base += width;
+	}
+	Ok(parts)
+}
+
+/// Joins activations along their channels, in the order given.
+pub fn concat_channels(parts: &[&Tensor]) -> Outcome<Tensor> {
+	let first = match parts.first() {
+		Some(t) => *t,
+		None => return Err(err!("A concatenation was given no operands."; Invalid, Input, Missing)),
+	};
+	let (n, h, w, _) = res!(first.nhwc());
+	let mut widths = Vec::with_capacity(parts.len());
+	for p in parts {
+		let (pn, ph, pw, pc) = res!(p.nhwc());
+		if (pn, ph, pw) != (n, h, w) {
+			return Err(err!(
+				"A concatenation of {:?} and {:?} disagrees away from the channels.",
+				first.dims, p.dims;
+			Invalid, Input, Mismatch));
+		}
+		widths.push(pc);
+	}
+	let c = widths.iter().sum::<usize>();
+	let rows = n * h * w;
+	let mut out = vec![0.0f32; rows * c];
+	let mut base = 0;
+	for (p, width) in parts.iter().zip(widths.iter()) {
+		for r in 0..rows {
+			let dst = r * c + base;
+			out[dst..dst + width].copy_from_slice(&p.data[r * width..(r + 1) * width]);
+		}
+		base += width;
+	}
+	Tensor::new(vec![n, h, w, c], out)
+}
+
+/// Interleaves the channels of a grouped activation.
+///
+/// This is ShuffleNet's channel shuffle. A model writes it as a reshape into
+/// `[n, g, c/g, h, w]`, a transpose of the two new axes and a reshape back,
+/// which in a channels-first layout moves every value; here the spatial axes are
+/// untouched and it is a permutation of the innermost axis alone. Output channel
+/// `i` takes input channel `(i mod g)·(c/g) + i div g`.
+pub fn shuffle_channels(t: &Tensor, groups: usize) -> Outcome<Tensor> {
+	let (n, h, w, c) = res!(t.nhwc());
+	if groups == 0 || c % groups != 0 {
+		return Err(err!(
+			"A shuffle into {} groups does not divide {} channels.", groups, c;
+		Invalid, Input, Mismatch));
+	}
+	let per = c / groups;
+	// The gather, worked out once and reused for every position.
+	let take = (0..c).map(|i| (i % groups) * per + i / groups).collect::<Vec<_>>();
+	let rows = n * h * w;
+	let mut out = vec![0.0f32; t.len()];
+	for r in 0..rows {
+		let (src, dst) = (r * c, r * c);
+		for (i, from) in take.iter().enumerate() {
+			out[dst + i] = t.data[src + from];
+		}
+	}
+	Tensor::new(t.dims.clone(), out)
 }
 
 /// Rewrites an `[n, h, w, c]` activation as the `[n, c·h·w]` row an ONNX

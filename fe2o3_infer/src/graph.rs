@@ -149,6 +149,18 @@ pub enum Op {
 	},
 	/// Rectified linear unit.
 	Relu,
+	/// Leaky rectified linear unit, one slope for every channel.
+	Leaky(f32),
+	/// Cuts the channels into runs of the given widths, one output each.
+	Split(Vec<usize>),
+	/// Joins its operands along their channels, in the order given.
+	Concat,
+	/// Interleaves the channels of a grouped activation. See
+	/// [`kern::shuffle_channels`].
+	Shuffle {
+		/// How many groups the channels were split into.
+		groups:	usize,
+	},
 	/// Logistic sigmoid.
 	Sigmoid,
 	/// Maximum pool over any kernel, stride and padding.
@@ -285,14 +297,27 @@ impl Graph {
 	pub fn prepare(m: &onnx::Model) -> Outcome<Self> {
 		let mut names = Names::default();
 		let mut layers: Vec<Layer> = Vec::with_capacity(m.nodes.len());
+		let fixed = res!(relabellings(m));
 
-		for node in &m.nodes {
+		for (ni, node) in m.nodes.iter().enumerate() {
+			if let Some(op) = fixed.get(&ni) {
+				let inputs = node.inputs.iter()
+					.filter(|n| m.init(n).is_none() && !n.is_empty())
+					.map(|n| names.intern(n))
+					.collect::<Vec<_>>();
+				let outputs = node.outputs.iter().map(|n| names.intern(n)).collect::<Vec<_>>();
+				layers.push(Layer { op: op.clone(), inputs, outputs });
+				continue;
+			}
 			let op = match node.op.as_str() {
 				"Conv"					=> res!(load_conv(m, node)),
 				"BatchNormalization"	=> res!(load_batch_norm(m, node)),
 				"PRelu"					=> res!(load_prelu(m, node)),
 				"Gemm"					=> res!(load_gemm(m, node)),
 				"Relu"					=> Op::Relu,
+				"LeakyRelu"				=> Op::Leaky(res!(res!(node.need("alpha")).float())),
+				"Split"					=> res!(load_split(node)),
+				"Concat"				=> res!(load_concat(node)),
 				"Sigmoid"				=> Op::Sigmoid,
 				"MaxPool"				=> res!(load_max_pool(node)),
 				"Resize" | "Upsample"	=> res!(load_resize(m, node)),
@@ -559,6 +584,27 @@ impl Graph {
 				}
 				res!(Tensor::new(vec![1, *n], c))
 			},
+			Op::Leaky(slope) => {
+				let mut x = x;
+				kern::run(cpu, Task::Leaky { x: &mut x.data, slope: *slope });
+				x
+			},
+			Op::Split(widths)	=> return kern::split_channels(&x, widths),
+			Op::Concat => {
+				// The first operand came through `x`; the rest are still in the
+				// pool, and each is wanted only here.
+				let mut rest = Vec::with_capacity(l.inputs.len());
+				for idx in l.inputs.iter().skip(1) {
+					rest.push(res!(take(vals, left, Some(*idx), &self.names)));
+				}
+				let mut parts = Vec::with_capacity(rest.len() + 1);
+				parts.push(&x);
+				for t in &rest {
+					parts.push(t);
+				}
+				res!(kern::concat_channels(&parts))
+			},
+			Op::Shuffle { groups }	=> res!(kern::shuffle_channels(&x, *groups)),
 			Op::Identity		=> x,
 			Op::Reshape(spec)	=> {
 				let mut x = x;
@@ -928,9 +974,12 @@ fn scalar_operand(m: &onnx::Model, node: &onnx::Node) -> Outcome<f32> {
 
 /// Reads a transpose. Channels-first to channels-last is what the activations
 /// already are, so it costs nothing; anything else would need a real permutation.
+///
+/// The three-axis form is the same relabelling after the spatial axes have been
+/// folded into one, which is how a detection head presents its predictions.
 fn load_transpose(node: &onnx::Node) -> Outcome<Op> {
 	let perm = res!(res!(node.need("perm")).ints()).to_vec();
-	if perm == vec![0, 2, 3, 1] {
+	if perm == vec![0, 2, 3, 1] || perm == vec![0, 2, 1] {
 		Ok(Op::Identity)
 	} else {
 		Err(err!(
@@ -938,6 +987,116 @@ fn load_transpose(node: &onnx::Node) -> Outcome<Op> {
 			channels-first to channels-last relabelling.", perm;
 		Invalid, Input, Unimplemented))
 	}
+}
+
+/// Reads a split, which this crate carries along the channels only.
+fn load_split(node: &onnx::Node) -> Outcome<Op> {
+	let axis = match node.attr("axis") {
+		Some(a) => res!(a.int()),
+		None => 0,
+	};
+	if axis != 1 {
+		return Err(err!(
+			"A split along axis {} is outside the subset this crate carries, which is the \
+			channels.", axis;
+		Invalid, Input, Unimplemented));
+	}
+	let widths = res!(res!(node.need("split")).ints());
+	let mut out = Vec::with_capacity(widths.len());
+	for w in widths {
+		if *w <= 0 {
+			return Err(err!("A split of width {} is not a run of channels.", w;
+				Invalid, Input, Range));
+		}
+		out.push(*w as usize);
+	}
+	Ok(Op::Split(out))
+}
+
+/// Reads a concatenation, which this crate carries along the channels only.
+fn load_concat(node: &onnx::Node) -> Outcome<Op> {
+	let axis = match node.attr("axis") {
+		Some(a) => res!(a.int()),
+		None => 1,
+	};
+	if axis != 1 {
+		return Err(err!(
+			"A concatenation along axis {} is outside the subset this crate carries, which \
+			is the channels.", axis;
+		Invalid, Input, Unimplemented));
+	}
+	Ok(Op::Concat)
+}
+
+/// Finds the runs of nodes that are shape bookkeeping in a channels-first model
+/// and nothing at all in a channels-last one, and says what each becomes.
+///
+/// Two shapes occur, and both are written as a reshape with a transpose in the
+/// middle because that is the only way a channels-first graph can say them.
+///
+/// - **A channel shuffle**, `[n, c, h, w]` to `[n, g, c/g, h, w]`, transposed by
+///   `[0, 2, 1, 3, 4]` and reshaped back. Here the spatial axes never move and
+///   the whole of it is a permutation of the innermost axis, so the two reshapes
+///   are nothing and the transpose is the permutation.
+/// - **A detection head's relabelling**, `[n, c, h, w]` to `[n, c, h·w]`
+///   transposed by `[0, 2, 1]`. Channels-last data is already in the order the
+///   result wants, so the pair together is one reshape that moves no value.
+///
+/// Matching the run rather than the node is deliberate. Each of these operators
+/// alone would need a real permutation of a channels-last activation; it is only
+/// as a run that they come to nothing, and a graph that used one on its own
+/// should be refused rather than quietly mishandled.
+fn relabellings(m: &onnx::Model) -> Outcome<std::collections::BTreeMap<usize, Op>> {
+	let mut out = std::collections::BTreeMap::new();
+	for (i, node) in m.nodes.iter().enumerate() {
+		if node.op != "Transpose" {
+			continue;
+		}
+		let perm = match node.attr("perm") {
+			Some(a) => res!(a.ints()).to_vec(),
+			None => continue,
+		};
+
+		if perm == vec![0, 2, 1, 3, 4] {
+			// The reshape before it names the groups in its second position.
+			if i == 0 || m.nodes[i - 1].op != "Reshape" || i + 1 >= m.nodes.len()
+				|| m.nodes[i + 1].op != "Reshape"
+			{
+				return Err(err!(
+					"A five-axis transpose by {:?} is only carried as the middle of a \
+					channel shuffle, and this one is not.", perm;
+				Invalid, Input, Unimplemented));
+			}
+			let target = res!(reshape_target(m, &m.nodes[i - 1]));
+			if target.len() != 5 || target[1] <= 0 {
+				return Err(err!(
+					"A channel shuffle reshapes to {:?}, which names no group count.", target;
+				Invalid, Input, Mismatch));
+			}
+			out.insert(i - 1, Op::Identity);
+			out.insert(i, Op::Shuffle { groups: target[1] as usize });
+			out.insert(i + 1, Op::Identity);
+		} else if perm == vec![0, 2, 1] {
+			// The reshape before it says how many channels the head predicts.
+			if i == 0 || m.nodes[i - 1].op != "Reshape" {
+				continue;
+			}
+			let target = res!(reshape_target(m, &m.nodes[i - 1]));
+			if target.len() != 3 {
+				continue;
+			}
+			out.insert(i - 1, Op::Reshape(vec![target[0], -1, target[1]]));
+			out.insert(i, Op::Identity);
+		}
+	}
+	Ok(out)
+}
+
+/// The target shape a reshape names, which the model stores as an initialiser.
+fn reshape_target(m: &onnx::Model, node: &onnx::Node) -> Outcome<Vec<i64>> {
+	let name = some!(node.inputs.get(1), "A reshape names no target.");
+	let init = some!(m.init(name), "The reshape target is not an initialiser.");
+	Ok(res!(init.ints()).to_vec())
 }
 
 /// Reads a reshape, whose target the model stores as an initialiser.
