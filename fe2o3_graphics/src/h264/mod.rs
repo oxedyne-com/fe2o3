@@ -66,24 +66,28 @@
 //!
 //! # What is decoded, and what is not
 //!
-//! **The CAVLC half is complete and verified.** The container reading, the parameter sets, the
-//! slice headers, the macroblock layer, all four families of intra prediction, all four inverse
-//! transforms and the deblocking filter are here, and a film coded with the variable-length entropy
-//! coder decodes to a picture identical to FFmpeg's own, luma and chroma, every sample.
+//! **Both entropy coders are complete and verified.** The container reading, the parameter sets, the
+//! slice headers, both entropy layers, the macroblock layer, all four families of intra prediction,
+//! all four inverse transforms and the deblocking filter are here. Every one of the 1,658 H.264
+//! films in the library decodes to a picture identical to FFmpeg's own, luma and chroma, every
+//! sample: 711 coded with the variable-length coder and 947 with the arithmetic one.
 //!
-//! **The CABAC half is not written.** A film whose picture parameter set sets
-//! `entropy_coding_mode_flag` is refused by name, and refused *before* any sample is produced,
-//! rather than decoded with the wrong entropy coder into a picture that would look plausible. That
-//! is 947 of the 1,658 H.264 films. Everything below the entropy layer -- prediction, transforms,
-//! the deblocking filter, the macroblock walk -- is shared and already verified, so what is missing
-//! is the arithmetic decoder itself, its context initialisation tables, and the binarisation of
-//! each syntax element: clause 9.3 and Tables 9-12 to 9-33.
+//! Everything below the entropy layer -- prediction, transforms, the deblocking filter, the
+//! macroblock walk -- is shared between the two, so what [`cabac`] adds is the arithmetic decoder
+//! itself, its context variables, and the binarisation of each syntax element: clause 9.3 and the
+//! I-slice column of Tables 9-12 to 9-24.
 //!
-//! The one thing to know before writing it: those tables are about 260 pairs of numbers for an
-//! intra slice, and in a text rendering of the specification their digits wrap across lines, so
-//! they cannot be parsed out the way Table 9-5 and Table 8-13 were. They will have to be
-//! transcribed against the PDF and then checked some other way -- against a decode, most likely,
-//! since a wrong initialisation value produces a picture rather than an error.
+//! Its dangerous part is those tables: 261 pairs of signed numbers for an intra 4:2:0 slice, each of
+//! which **produces a picture rather than an error if it is wrong**, since the decoder stays in step
+//! with the encoder and hands back samples that look decoded. They are transcribed by hand and then
+//! held to the specification's own text entry by entry, which is the check that would catch a
+//! misread; the count of rows a table gives up is what catches a value the text rendering dropped.
+//!
+//! Two things a picture that is nearly right will not tell you, and both are asserted instead. The
+//! slices of a picture **tile** it, so a macroblock left undecoded means the coder lost the
+//! bitstream -- which is the only outward sign it gives, because a desynchronised arithmetic decoder
+//! goes on answering bins for as long as it is asked. And the six families of residual block must
+//! not share a context variable, which an offset one place out would quietly arrange.
 //!
 //! # What a caller gets, and what it still has to do
 //!
@@ -96,14 +100,20 @@
 //!   yet, and until they are a caller must copy the planes across.
 //! - **Turning it the right way up.** A phone writes the angle it was held at into the track
 //!   header rather than into the samples, and [`crate::mp4::Film::rotation`] reports it. A decoder
-//!   produces the picture as it was coded; nothing in a coded picture says which way is up.
+//!   produces the picture as it was coded; nothing in a coded picture says which way is up. Two
+//!   further things a container may ask for and a coded picture knows nothing of are a clean
+//!   aperture, which crops the picture again beyond the sequence parameter set's own window, and a
+//!   presentation order that differs from the coded one -- nine films in the corpus show a
+//!   bidirectionally predicted picture *before* the first intra one, so "the opening frame" and
+//!   "the first sync sample" are two different pictures.
 //!
 //! # References
 //!
 //! Rec. ITU-T H.264 (08/2021). The NAL unit header is §7.3.1, the sequence parameter set §7.3.2.1.1,
 //! the picture parameter set §7.3.2.2, the slice header §7.3.3, the macroblock layer §7.3.5, CAVLC
 //! §9.2 and CABAC §9.3. The `avcC` record the parameter sets arrive in is ISO/IEC 14496-15 §5.3.3.1.
-//! Every constant below names the clause it comes from.
+//! Every constant below names the clause it comes from, and the tests read the tables back out of a
+//! text rendering of the specification where `H264_SPEC_TEXT` points at one.
 
 pub mod cabac;
 pub mod cavlc;
@@ -1127,7 +1137,9 @@ pub fn slice(u: &Unit, sets: &[Sps], pics: &[Pps]) -> Outcome<Slice> {
 		}
 	}
 	// `cabac_init_idc` is coded only for a slice that is not intra, so it is never read here; it
-	// is kept in the header for the shape of the thing and is always nought.
+	// is kept in the header for the shape of the thing and is always nought. An intra slice's
+	// context variables come from the I-slice column of Tables 9-12 to 9-24, which no
+	// `cabac_init_idc` chooses between.
 	let cabac_init_idc = 0u32;
 	let qp_delta = res!(b.se());
 	let qp = pps.init_qp + qp_delta;

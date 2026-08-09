@@ -18,11 +18,11 @@
 //!
 //! # What this decodes and what it refuses
 //!
-//! Intra pictures in 4:2:0 at eight bits, coded in frames, with one slice group -- which is every
-//! film in the library it was written against. Anything else is refused where it is read, by name,
-//! rather than decoded into a wrong picture: field coding, macroblock-adaptive frame/field coding,
-//! monochrome and 4:2:2 and 4:4:4, bit depths above eight, slice groups, and any slice that is not
-//! intra.
+//! Intra pictures in 4:2:0 at eight bits, coded in frames, with one slice group, with either entropy
+//! coder -- which is every film in the library it was written against. Anything else is refused where
+//! it is read, by name, rather than decoded into a wrong picture: field coding, macroblock-adaptive
+//! frame/field coding, monochrome and 4:2:2 and 4:4:4, bit depths above eight, slice groups, and any
+//! slice that is not intra.
 //!
 //! # The two things that have to be got right and cannot be seen
 //!
@@ -36,6 +36,14 @@
 //! of the number of coefficients in the blocks above and to the left, and it selects which of six
 //! code tables reads the next token. Get it wrong and the right bits are read with the wrong code,
 //! which desynchronises everything after it in the slice.
+//!
+//! **The neighbours CABAC chooses its contexts by.** The arithmetic coder asks the same question of
+//! nearly every syntax element -- what did the macroblock to the left and the macroblock above do?
+//! -- and answers it differently each time: for `coded_block_pattern` the neighbouring block counts
+//! when it holds *nothing*, for `coded_block_flag` an *absent* neighbour counts as coded, and for
+//! `mb_qp_delta` the neighbour is the macroblock decoded before this one rather than either of
+//! those. Getting one of these wrong does not stop the decode; it feeds the right bins to the wrong
+//! probability, and the picture comes out plausible and wrong.
 
 use crate::h264::{
 	cabac::{
