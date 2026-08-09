@@ -85,6 +85,19 @@
 //! transcribed against the PDF and then checked some other way -- against a decode, most likely,
 //! since a wrong initialisation value produces a picture rather than an error.
 //!
+//! # What a caller gets, and what it still has to do
+//!
+//! [`decode::picture`] hands back three planes of eight-bit samples, cropped to the size the
+//! sequence parameter set says the picture is meant to be shown at. Two things remain the caller's:
+//!
+//! - **Turning it into something to look at.** The conversion out of 4:2:0 and out of the studio
+//!   range lives in [`crate::hevc::colour`], and is the same arithmetic for both codecs; it takes
+//!   that module's own picture type, so the two should be one type rather than two. They are not
+//!   yet, and until they are a caller must copy the planes across.
+//! - **Turning it the right way up.** A phone writes the angle it was held at into the track
+//!   header rather than into the samples, and [`crate::mp4::Film::rotation`] reports it. A decoder
+//!   produces the picture as it was coded; nothing in a coded picture says which way is up.
+//!
 //! # References
 //!
 //! Rec. ITU-T H.264 (08/2021). The NAL unit header is §7.3.1, the sequence parameter set §7.3.2.1.1,
