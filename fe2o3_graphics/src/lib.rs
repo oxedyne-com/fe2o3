@@ -85,6 +85,7 @@
 //! colour-blind viewer cannot see.
 #![forbid(unsafe_code)]
 
+pub mod avi;
 pub mod blur;
 pub mod colour;
 pub mod h264;
