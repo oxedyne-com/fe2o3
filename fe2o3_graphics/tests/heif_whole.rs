@@ -16,12 +16,13 @@
 //!     cargo test -p oxedyne_fe2o3_graphics --test heif_whole -- --nocapture
 //! ```
 //!
-//! **The two will not agree sample for sample and are not asked to.** The tiles are exact, and
-//! everything after them is not defined to the bit: the two loop filters this decoder does not yet
-//! run are worth a level or two, and stretching the half-size colour planes back up is a choice
-//! rather than a specification. What is asserted is that the *geometry* is right and that the
-//! picture is the same photograph, which is what a difference of a couple of levels means and a
-//! difference of forty does not.
+//! **The two agree sample for sample, and are asked to.** Both loop filters run, and the comparison
+//! is made on the coded planes rather than on anything converted out of colour difference, so
+//! nothing that is a choice rather than a specification is in the way. The assertion is that the
+//! worst difference over every tile is nought. What that catches, and nothing else does, is a grid
+//! assembled transposed or one tile out of place: the count of tiles is the same either way, so the
+//! check that a grid names as many tiles as rows times columns passes regardless -- which is how a
+//! reader that had the rows and columns the wrong way round survived until this test existed.
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_graphics::heif;

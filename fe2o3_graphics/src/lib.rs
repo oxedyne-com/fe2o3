@@ -31,10 +31,11 @@
 //!
 //! [`heif`] reads the other side of the same box structure: a HEIC file's items, which of them is
 //! the photograph, the grid of tiles it is cut into, where each tile's bytes are, and the Exif
-//! block the camera wrote. It decodes nothing either -- what it hands back is a run of bytes and
-//! the decoder configuration that describes them -- and it exists before any HEVC decoder does
-//! because the two things a photograph library needs first, the size and the Exif, are in the
-//! container and not in the coded picture.
+//! block the camera wrote. Reading the container decodes nothing -- what it hands back is a run of
+//! bytes and the decoder configuration that describes them -- and it was written before any HEVC
+//! decoder existed, because the two things a photograph library needs first, the size and the Exif,
+//! are in the container and not in the coded picture. [`heif::decode`] now carries the rest of the
+//! way, through [`hevc`] and the assembly of the grid, to a picture.
 //!
 //! # A container, without a codec
 //!

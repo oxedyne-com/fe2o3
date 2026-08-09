@@ -21,9 +21,18 @@
 //! # What this decodes and what it refuses
 //!
 //! Intra pictures in 4:2:0 at eight bits, which is every HEIC photograph in the library it was
-//! written against. Anything else is refused where it is read rather than decoded into a wrong
-//! picture: no scaling lists, no raw sample blocks, no palettes, no cross-component prediction, no
-//! residual rotation. A refusal names the tool, so a photograph that needs one says which.
+//! written against. Four things are refused where they are read rather than decoded into a wrong
+//! picture, and a refusal names the tool so a photograph that needs one says which: another chroma
+//! format, another bit depth, raw sample blocks, and a picture cut into tiles.
+//!
+//! Scaling lists are **not** among them. Two in five of the survey corpus carry their own, and the
+//! default lists are not flat, so reading the flag as "no scaling" would quantise every block
+//! wrongly; they are read and applied.
+//!
+//! Palettes, cross-component prediction and residual rotation are enabled by the sequence and
+//! picture parameter set *extensions*, and this reader stops before the extension flags. So a
+//! stream using one is neither refused nor decoded correctly -- it is outside what is read at all,
+//! which is a weaker guarantee than a refusal and is stated here rather than implied.
 //!
 //! # The one thing that has to be got right and cannot be seen
 //!

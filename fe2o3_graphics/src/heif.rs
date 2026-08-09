@@ -1402,8 +1402,8 @@ mod tests {
 /// **top left**; the `ispe` property on the grid says how big the photograph is, and that is what
 /// comes back here.
 ///
-/// The camera's rotation is *not* applied. Ochre and everything like it turn a photograph by the
-/// Exif orientation, and a phone writes both -- applying both turns a portrait twice.
+/// The camera's rotation is *not* applied. A caller that shows photographs turns them by the Exif
+/// orientation, and a phone writes both -- applying both turns a portrait twice.
 pub fn decode(bytes: &[u8]) -> Outcome<Pixmap> {
 	let (assembled, want) = res!(planes(bytes));
 	let full = res!(hevc::colour::rgb(&assembled, hevc::colour::Matrix::Hd, false));

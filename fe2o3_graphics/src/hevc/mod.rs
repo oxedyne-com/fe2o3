@@ -6,20 +6,20 @@
 //! motion, reference pictures and prediction between frames is absent by construction rather than
 //! unimplemented.
 //!
-//! # What is here so far
+//! # What is here
 //!
-//! The bitstream side: splitting a stream into NAL units, undoing the emulation-prevention bytes,
-//! and reading the sequence and picture parameter sets that say how big the picture is and how it
-//! is cut up. That is the part every later stage is written against, and it is the part that can be
-//! checked before any pixel exists: the size a sequence parameter set codes must agree with the
-//! size the HEIF container's `ispe` property declares, and those two numbers are written into the
-//! file by different parts of an encoder.
+//! The whole of it, for the intra case. The bitstream side: splitting a stream into NAL units,
+//! undoing the emulation-prevention bytes, and reading the sequence and picture parameter sets that
+//! say how big the picture is and how it is cut up. That is the part every later stage is written
+//! against, and the part that can be checked before any pixel exists: the size a sequence parameter
+//! set codes must agree with the size the HEIF container's `ispe` property declares, and those two
+//! numbers are written into the file by different parts of an encoder.
 //!
-//! The slice segment header too, including the entry points that say where each row of the picture
-//! begins, and the CABAC arithmetic decoder that reads the entropy-coded data after it. Still to
-//! come, in the order they are needed: the context variables each syntax element uses, the coding
-//! quadtree, residual coding, the inverse transforms, intra prediction, deblocking, the sample
-//! adaptive offset, and the conversion out of 4:2:0 into RGB.
+//! Then the slice segment header, including the entry points that say where each row of the picture
+//! begins; the CABAC arithmetic decoder; the context variables each syntax element uses; the coding
+//! quadtree; residual coding; dequantisation and the inverse transforms; all thirty-five intra
+//! prediction modes; deblocking and the sample adaptive offset; and the conversion out of 4:2:0
+//! into red, green and blue. [`picture`] is the entry point and runs the lot.
 //!
 //! The arithmetic decoder is the last piece that can be held to a standard before a picture comes
 //! out, and it is held to two: every context starts in a state the probability tables actually
@@ -28,6 +28,10 @@
 //! renormalisation one shift short satisfies neither and decodes plausible rubbish rather than
 //! failing, which is the kind of fault that otherwise survives until a photograph comes out
 //! wrong.
+//!
+//! Everything after it is held to another decoder instead, because by then there is a picture to
+//! compare: `tests/hevc_tiles.rs` puts every brightness and colour sample beside what FFmpeg makes
+//! of the same file, with both loop filters running at both ends.
 //!
 //! # What the pictures in one real library actually are
 //!
