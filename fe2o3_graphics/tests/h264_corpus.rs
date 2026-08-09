@@ -499,7 +499,7 @@ fn test_the_first_frame_matches_ffmpeg_04() -> Outcome<()> {
 		let (wv, dv, _) = compare(&mine.cr.px, &theirs[luma + chroma..], w / 2);
 		if wy == 0 && wu == 0 && wv == 0 {
 			exact += 1;
-		} else if differ.len() < 12 {
+		} else {
 			differ.push(fmt!(
 				"{:?} {}x{}: luma {} wrong (worst {}) first at {:?}, Cb {} (worst {}), \
 				Cr {} (worst {})",
@@ -516,17 +516,30 @@ fn test_the_first_frame_matches_ffmpeg_04() -> Outcome<()> {
 	for line in &differ {
 		println!("  DIFFERS {}", line);
 	}
+	if !differ.is_empty() {
+		return Err(err!(
+			"{} of {} films decoded to something other than what FFmpeg decoded. A picture that \
+			is nearly right is a wrong picture.", differ.len(), tried; Test, Mismatch));
+	}
 	if exact == 0 && tried > 0 {
 		return Err(err!(
-			"Not one of {} films matched FFmpeg.", tried; Test, Mismatch));
+			"Not one of {} films matched FFmpeg, so nothing was proved.", tried; Test, Mismatch));
 	}
 	Ok(())
 }
 
 #[test]
-fn test_zz_debug_dump() -> Outcome<()> {
-	// A scratch view of the top-left corner of one film, beside FFmpeg's. Not a check: a window,
-	// for finding out which of the two decodes went wrong and where.
+fn test_zz_a_window_onto_one_film_05() -> Outcome<()> {
+	// Not a check but a window, and it earned its place: every fault found in this decoder was
+	// found by looking through it. Point `H264_DUMP` at one film and it prints that film's
+	// parameter sets, its NAL units, its slice headers, and an eight-by-eight patch of luma beside
+	// FFmpeg's -- `H264_X0` and `H264_Y0` move the patch, `H264_UNFILTERED` takes the deblocking
+	// filter out of both sides.
+	//
+	// The point of the patch is that a whole-frame difference count says nothing about *what* went
+	// wrong, while eight rows of samples beside eight rows of somebody else's say a great deal: a
+	// prediction using the wrong direction, a coefficient at the wrong frequency and a filter run
+	// one sample too deep all look different from each other here, and identical in a count.
 	let one = match std::env::var("H264_DUMP") {
 		Ok(p) => std::path::PathBuf::from(p),
 		Err(_) => return Ok(()),

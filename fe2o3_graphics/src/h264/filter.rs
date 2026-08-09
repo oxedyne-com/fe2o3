@@ -30,7 +30,10 @@
 //! samples the macroblocks before it have already filtered. Filtering all the vertical edges of the
 //! picture and then all the horizontal ones gives a different answer.
 
-use crate::h264::decode::View;
+use crate::h264::decode::{
+	Filter,
+	View,
+};
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -79,7 +82,18 @@ const TC0: [[i32; 52]; 3] = [
 /// arise, and are not implemented rather than being implemented and unreachable.
 pub fn deblock(v: &mut View) -> Outcome<()> {
 	for mb in 0..v.mbs_w * v.mbs_h {
-		if v.slice_of[mb].is_none() {
+		let slice = match v.slice_of[mb] {
+			Some(s) => s,
+			None => continue,
+		};
+		// Each slice says for itself whether its macroblocks are filtered at all, and with what
+		// thresholds. A picture of one slice makes this look like a constant; a picture of two
+		// does not.
+		let ask = match v.filters.get(slice) {
+			Some(f) => *f,
+			None => continue,
+		};
+		if ask.idc == 1 {
 			continue;
 		}
 		let (mx, my) = ((mb % v.mbs_w) * 16, (mb / v.mbs_w) * 16);
@@ -97,7 +111,7 @@ pub fn deblock(v: &mut View) -> Outcome<()> {
 			if x == 0 && mx == 0 {
 				continue;
 			}
-			res!(edge(v, mb, mx, my, x, 0, true));
+				res!(edge(v, mb, mx, my, x, 0, true, &ask));
 		}
 		// Then the horizontal ones, top to bottom.
 		let mut ys: Vec<usize> = vec![0];
@@ -110,15 +124,16 @@ pub fn deblock(v: &mut View) -> Outcome<()> {
 			if y == 0 && my == 0 {
 				continue;
 			}
-			res!(edge(v, mb, mx, my, 0, y, false));
+				res!(edge(v, mb, mx, my, 0, y, false, &ask));
 		}
 	}
 	Ok(())
 }
 
 /// Filters one edge of one macroblock, luma and both colour differences.
-fn edge(v: &mut View, mb: usize, mx: usize, my: usize, ex: usize, ey: usize, vertical: bool)
-	-> Outcome<()>
+#[allow(clippy::too_many_arguments)]
+fn edge(v: &mut View, mb: usize, mx: usize, my: usize, ex: usize, ey: usize, vertical: bool,
+	ask: &Filter) -> Outcome<()>
 {
 	let mb_edge = if vertical { ex == 0 } else { ey == 0 };
 	// The macroblock on the other side of the edge.
@@ -130,6 +145,12 @@ fn edge(v: &mut View, mb: usize, mx: usize, my: usize, ex: usize, ey: usize, ver
 		mb - v.mbs_w
 	};
 	if v.slice_of[other].is_none() {
+		return Ok(());
+	}
+	// A disposition of 2 filters everything within the slice and nothing across its boundary. The
+	// two films this was found by both use it, and the difference it makes is three rows of samples
+	// either side of one horizontal line across the picture -- small, and wrong.
+	if ask.idc == 2 && mb_edge && v.slice_of[other] != v.slice_of[mb] {
 		return Ok(());
 	}
 	// Every macroblock here is intra, so a macroblock edge takes the strongest filter the
@@ -148,7 +169,7 @@ fn edge(v: &mut View, mb: usize, mx: usize, my: usize, ex: usize, ey: usize, ver
 		} else {
 			(mx + i, my + ey)
 		};
-		res!(one(v, px, py, vertical, bs, qp_p, qp_q, false));
+		res!(one(v, px, py, vertical, bs, qp_p, qp_q, false, ask));
 	}
 	// Chroma: eight sets, at half the resolution, so only the edges at even luma positions have a
 	// chroma counterpart -- which for 4:2:0 is every edge this filter visits except the ones at
@@ -166,7 +187,7 @@ fn edge(v: &mut View, mb: usize, mx: usize, my: usize, ex: usize, ey: usize, ver
 			} else {
 				(mx / 2 + i, my / 2 + ey / 2)
 			};
-			res!(one_chroma(v, c, px, py, vertical, bs, cp, cq));
+			res!(one_chroma(v, c, px, py, vertical, bs, cp, cq, ask));
 		}
 	}
 	Ok(())
@@ -209,14 +230,14 @@ fn give(px: &mut [u8], w: usize, h: usize, x: usize, y: usize, vertical: bool, s
 /// Filters one set of luma samples across an edge (§8.7.2.3, §8.7.2.4).
 #[allow(clippy::too_many_arguments)]
 fn one(v: &mut View, x: usize, y: usize, vertical: bool, bs: i32, qp_p: i32, qp_q: i32,
-	chroma_style: bool) -> Outcome<()>
+	chroma_style: bool, ask: &Filter) -> Outcome<()>
 {
 	let (w, h) = (v.pic.y.w, v.pic.y.h);
 	let mut s = match take(&v.pic.y.px, w, h, x, y, vertical) {
 		Some(s) => s,
 		None => return Ok(()),
 	};
-	if filter(&mut s, bs, qp_p, qp_q, v.alpha, v.beta, chroma_style) {
+	if filter(&mut s, bs, qp_p, qp_q, ask.alpha, ask.beta, chroma_style) {
 		give(&mut v.pic.y.px, w, h, x, y, vertical, &s);
 	}
 	Ok(())
@@ -225,7 +246,7 @@ fn one(v: &mut View, x: usize, y: usize, vertical: bool, bs: i32, qp_p: i32, qp_
 /// The same for one colour difference plane, which is always filtered in the chroma style.
 #[allow(clippy::too_many_arguments)]
 fn one_chroma(v: &mut View, c: usize, x: usize, y: usize, vertical: bool, bs: i32, qp_p: i32,
-	qp_q: i32) -> Outcome<()>
+	qp_q: i32, ask: &Filter) -> Outcome<()>
 {
 	let plane = if c == 0 { &mut v.pic.cb } else { &mut v.pic.cr };
 	let (w, h) = (plane.w, plane.h);
@@ -233,7 +254,7 @@ fn one_chroma(v: &mut View, c: usize, x: usize, y: usize, vertical: bool, bs: i3
 		Some(s) => s,
 		None => return Ok(()),
 	};
-	if filter(&mut s, bs, qp_p, qp_q, v.alpha, v.beta, true) {
+	if filter(&mut s, bs, qp_p, qp_q, ask.alpha, ask.beta, true) {
 		give(&mut plane.px, w, h, x, y, vertical, &s);
 	}
 	Ok(())

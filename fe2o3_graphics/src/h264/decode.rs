@@ -342,9 +342,10 @@ pub fn decode(units: &[Unit], sets: &mut Vec<Sps>, pics: &mut Vec<Pps>, deblock:
 	};
 	res!(refuse_what_is_not_read(sps, pps));
 	let mut frame = res!(Frame::new(sps, pps));
-	let mut deblocking = 0u32;
-	let mut alpha = 0i32;
-	let mut beta = 0i32;
+	// Each slice carries its own deblocking disposition and its own thresholds, and they are not
+	// a formality: 92 pictures in the corpus have more than one slice, and the two films whose
+	// decode this was found by both turn the filter off *across slice boundaries only*.
+	let mut filters: Vec<Filter> = Vec::with_capacity(slices.len());
 
 	for (index, u) in slices.iter().enumerate() {
 		let head = res!(crate::h264::slice(u, sets, pics));
@@ -359,11 +360,11 @@ pub fn decode(units: &[Unit], sets: &mut Vec<Sps>, pics: &mut Vec<Pps>, deblock:
 			qp:		head.qp,
 			transform_8x8:	pps.transform_8x8,
 		};
-		if index == 0 {
-			deblocking = head.deblocking;
-			alpha = head.alpha_offset;
-			beta = head.beta_offset;
-		}
+		filters.push(Filter {
+			idc:	head.deblocking,
+			alpha:	head.alpha_offset,
+			beta:	head.beta_offset,
+		});
 		if pps.cabac {
 			return Err(err!(
 				"The slice is coded with the arithmetic entropy coder (CABAC, clause 9.3), and \
@@ -376,10 +377,9 @@ pub fn decode(units: &[Unit], sets: &mut Vec<Sps>, pics: &mut Vec<Pps>, deblock:
 		}
 		res!(slice_data(&mut frame, &mut run, u, head.first_mb as usize, head.data_bit));
 	}
-	if deblock && deblocking != 1 {
+	if deblock {
 		let mut view = frame_view(&mut frame);
-		view.alpha = alpha;
-		view.beta = beta;
+		view.filters = &filters;
 		res!(crate::h264::filter::deblock(&mut view));
 	}
 	Ok(crop(&frame))
@@ -935,6 +935,18 @@ fn reconstruct(f: &mut Frame, run: &SliceRun, mb: usize, kind: Kind, qp: i32, pr
 	Ok(())
 }
 
+/// What one slice asks of the deblocking filter (§7.4.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Filter {
+	/// 0 to filter everything, 1 to filter nothing, 2 to filter everything but the edges between
+	/// this slice and another.
+	pub idc:	u32,
+	/// The offset added to the filter's first threshold.
+	pub alpha:	i32,
+	/// The offset added to its second.
+	pub beta:	i32,
+}
+
 /// A borrow of the frame's fields the deblocking filter needs.
 pub struct View<'a> {
 	/// The picture being filtered.
@@ -949,10 +961,8 @@ pub struct View<'a> {
 	pub slice_of:	&'a [Option<usize>],
 	/// Whether each macroblock is coded with the eight-by-eight transform.
 	pub big:	&'a [bool],
-	/// The offset added to the filter's first threshold.
-	pub alpha:	i32,
-	/// The offset added to its second.
-	pub beta:	i32,
+	/// What each slice asks of the deblocking filter, in the order the slices were decoded.
+	pub filters:	&'a [Filter],
 	/// The offset applied to the Cb quantisation parameter.
 	pub cb_qp_offset:	i32,
 	/// The same for Cr.
@@ -967,8 +977,7 @@ fn frame_view<'b>(f: &'b mut Frame) -> View<'b> {
 		qp:		&f.qp,
 		slice_of:	&f.slice_of,
 		big:		&f.big,
-		alpha:		0,
-		beta:		0,
+		filters:	&[],
 		cb_qp_offset:	f.pps.cb_qp_offset,
 		cr_qp_offset:	f.pps.cr_qp_offset,
 		pic:		&mut f.pic,
