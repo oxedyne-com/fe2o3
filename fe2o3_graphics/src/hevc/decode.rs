@@ -102,6 +102,22 @@ impl Plane {
 			self.px[y * self.w + x] = v;
 		}
 	}
+
+	/// The plane cropped to a window at its top left.
+	///
+	/// A coded picture is a whole number of coding tree blocks and a shown one is not, so a
+	/// 1920 by 1080 film is coded 1920 by 1088 and the eight rows the encoder filled to reach the
+	/// block boundary are not part of the picture. This is what takes them off.
+	pub fn cropped(&self, w: usize, h: usize) -> Self {
+		let mut out = Self::new(w, h);
+		for y in 0..h.min(self.h) {
+			let from = y * self.w;
+			let to = from + w.min(self.w);
+			let at = y * w;
+			out.px[at..at + (to - from)].copy_from_slice(&self.px[from..to]);
+		}
+		out
+	}
 }
 
 /// A decoded picture, before it is turned into anything anybody can look at.
@@ -137,6 +153,19 @@ impl Picture {
 				let (a, b) = (into * dst.w + at.0, row * src.w);
 				dst.px[a..a + take].copy_from_slice(&src.px[b..b + take]);
 			}
+		}
+	}
+
+	/// The picture cropped to the size it is meant to be shown at.
+	///
+	/// The colour planes are half size both ways and are rounded **up**, since a picture of an odd
+	/// width still has a colour sample for its last column.
+	pub fn cropped(&self, w: usize, h: usize) -> Self {
+		Self {
+			y:	self.y.cropped(w, h),
+			cb:	self.cb.cropped(w.div_ceil(2), h.div_ceil(2)),
+			cr:	self.cr.cropped(w.div_ceil(2), h.div_ceil(2)),
+			depth:	self.depth,
 		}
 	}
 }

@@ -1185,6 +1185,32 @@ mod tests {
 /// was written against is eight bits. It has **not** been through the deblocking filter or the
 /// sample adaptive offset, which are separate passes over a finished picture.
 pub fn picture(record: &[u8], data: &[u8]) -> Outcome<decode::Picture> {
+	let (pic, _sps) = res!(coded(record, data));
+	Ok(pic)
+}
+
+/// The same picture, cropped to the size it is meant to be **shown** at.
+///
+/// A coded picture is a whole number of coding tree blocks and a shown one is not: a 1920 by 1080
+/// film is coded 1920 by 1088, and the sequence parameter set's conformance window says which of
+/// those rows are the picture. [`picture`] hands back what was coded, because the HEIC path crops to
+/// the size the container declares instead and cropping twice would take the same rows off again.
+/// A caller with no container to ask -- a film's first frame -- wants this one.
+pub fn picture_shown(record: &[u8], data: &[u8]) -> Outcome<decode::Picture> {
+	let (pic, sps) = res!(coded(record, data));
+	let (w, h) = (sps.width as usize, sps.height as usize);
+	if w >= pic.y.w && h >= pic.y.h {
+		return Ok(pic);
+	}
+	Ok(pic.cropped(w.min(pic.y.w), h.min(pic.y.h)))
+}
+
+/// Decodes one coded picture, and answers the sequence parameter set it was coded against.
+///
+/// The set is handed back because what a caller does with the picture next depends on it: the
+/// conformance window is in it, and so is everything a caller would otherwise have to parse the
+/// parameter sets again to learn.
+fn coded(record: &[u8], data: &[u8]) -> Outcome<(decode::Picture, Sps)> {
 	let cfg = res!(config(record));
 	// Every set the record carries, not the last of each. A photograph out of a
 	// camera carries one apiece and either would do; a film carries several, and
@@ -1237,7 +1263,8 @@ pub fn picture(record: &[u8], data: &[u8]) -> Outcome<decode::Picture> {
 				// The header was read from the unescaped payload; the data after it has to be
 				// handed over escaped, because that is what the entry point offsets count.
 				let at = escaped_at(&unit.raw, head.data_at);
-				return decode::picture(&sps, &pps, &head, &unit.raw[at..]);
+				let pic = res!(decode::picture(&sps, &pps, &head, &unit.raw[at..]));
+				return Ok((pic, sps));
 			},
 			_ => {},
 		}
