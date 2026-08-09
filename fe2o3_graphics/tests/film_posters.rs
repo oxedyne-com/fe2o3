@@ -139,8 +139,15 @@ fn test_how_many_films_get_a_poster_00() -> Outcome<()> {
 	let mut named: BTreeMap<String, Vec<String>> = BTreeMap::new();
 	let (mut looked, mut drawn, mut turned) = (0usize, 0usize, 0usize);
 
+	let began = std::time::Instant::now();
 	for path in &films {
 		looked += 1;
+		// A run over thousands of films is minutes long, and a test that says nothing until it
+		// ends is a test nobody can tell from a hung one.
+		if looked % 250 == 0 {
+			println!("    {} of {} looked at, {} drawn, {:.1}/s", looked, films.len(), drawn,
+				looked as f64 / began.elapsed().as_secs_f64().max(0.001));
+		}
 		let (film, sample) = match first_frame(path) {
 			Ok(f) => f,
 			Err(e) => {
