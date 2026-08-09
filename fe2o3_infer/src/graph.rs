@@ -21,7 +21,9 @@
 
 use crate::kern::{
 	self,
+	Coord,
 	Cpu,
+	Sample,
 	Scratch,
 	Task,
 };
@@ -59,6 +61,73 @@ pub struct Conv {
 	pub bias:	Vec<f32>,
 }
 
+/// Everything a maximum pool needs.
+#[derive(Clone, Copy, Debug)]
+pub struct Pool {
+	/// Kernel height.
+	pub kh:	usize,
+	/// Kernel width.
+	pub kw:	usize,
+	/// Vertical stride.
+	pub sy:	usize,
+	/// Horizontal stride.
+	pub sx:	usize,
+	/// Padding above.
+	pub pt:	usize,
+	/// Padding to the left.
+	pub pl:	usize,
+	/// Padding below.
+	pub pb:	usize,
+	/// Padding to the right.
+	pub pr:	usize,
+}
+
+impl Pool {
+	/// The extent one axis pools down to.
+	pub fn out(&self, n: usize, k: usize, s: usize, before: usize, after: usize)
+		-> Outcome<usize>
+	{
+		let padded = n + before + after;
+		if padded < k {
+			return Err(err!(
+				"A pool of kernel {} wants at least that many samples, found {}.", k, padded;
+			Invalid, Input, Mismatch));
+		}
+		Ok((padded - k) / s + 1)
+	}
+}
+
+/// How large a resize makes its result.
+///
+/// Both forms occur in the models this crate carries: a face detector writes a
+/// scale, and a category detector writes the size it wants outright.
+#[derive(Clone, Copy, Debug)]
+pub enum Extent {
+	/// Multiply the height and the width.
+	Scale(f32, f32),
+	/// A fixed height and width.
+	Size(usize, usize),
+}
+
+impl Extent {
+	/// The output extents, given the input's.
+	pub fn applied(&self, h: usize, w: usize) -> Outcome<(usize, usize)> {
+		let (oh, ow) = match self {
+			Self::Scale(sy, sx)	=> (
+				(h as f32 * sy).round() as usize,
+				(w as f32 * sx).round() as usize,
+			),
+			Self::Size(oh, ow)	=> (*oh, *ow),
+		};
+		if oh == 0 || ow == 0 {
+			return Err(err!(
+				"A resize of {} by {} to {} by {} has an empty axis.", h, w, oh, ow;
+			Invalid, Input, Range));
+		}
+		Ok((oh, ow))
+	}
+}
+
 /// One prepared operator.
 #[derive(Clone, Debug)]
 pub enum Op {
@@ -82,10 +151,17 @@ pub enum Op {
 	Relu,
 	/// Logistic sigmoid.
 	Sigmoid,
-	/// Two by two maximum pool, stride two.
-	MaxPool2x2,
-	/// Nearest-neighbour doubling.
-	Upsample2x,
+	/// Maximum pool over any kernel, stride and padding.
+	MaxPool(Pool),
+	/// Resampling of the two spatial axes, up or down.
+	Resize {
+		/// How large the result is.
+		extent:	Extent,
+		/// How a value is taken.
+		sample:	Sample,
+		/// How an output position maps back into the source.
+		coord:	Coord,
+	},
 	/// Element-wise sum of two activations of the same shape.
 	Add,
 	/// Subtracts a scalar from every value.
@@ -419,21 +495,28 @@ impl Graph {
 				kern::run(cpu, Task::Sigmoid { x: &mut x.data });
 				x
 			},
-			Op::MaxPool2x2 => {
+			Op::MaxPool(p) => {
 				let (n, h, w, ch) = res!(x.nhwc());
-				if h % 2 != 0 || w % 2 != 0 {
-					return Err(err!(
-						"A two by two pool wants even extents, found {} by {}.", h, w;
-					Invalid, Input, Mismatch));
-				}
-				let mut y = Tensor::zeros(vec![n, h / 2, w / 2, ch]);
-				kern::run(cpu, Task::MaxPool2x2 { ch, h, w, x: &x.data, y: &mut y.data });
+				let oh = res!(p.out(h, p.kh, p.sy, p.pt, p.pb));
+				let ow = res!(p.out(w, p.kw, p.sx, p.pl, p.pr));
+				let mut y = Tensor::zeros(vec![n, oh, ow, ch]);
+				kern::run(cpu, Task::MaxPool {
+					ch, h, w,
+					kh: p.kh, kw: p.kw, sy: p.sy, sx: p.sx, pt: p.pt, pl: p.pl,
+					oh, ow,
+					x: &x.data, y: &mut y.data,
+				});
 				y
 			},
-			Op::Upsample2x => {
+			Op::Resize { extent, sample, coord } => {
 				let (n, h, w, ch) = res!(x.nhwc());
-				let mut y = Tensor::zeros(vec![n, h * 2, w * 2, ch]);
-				kern::run(cpu, Task::Upsample2x { ch, h, w, x: &x.data, y: &mut y.data });
+				let (oh, ow) = res!(extent.applied(h, w));
+				let mut y = Tensor::zeros(vec![n, oh, ow, ch]);
+				kern::run(cpu, Task::Resize {
+					ch, h, w, oh, ow,
+					sample: *sample, coord: *coord,
+					x: &x.data, y: &mut y.data,
+				});
 				y
 			},
 			Op::Add => {
@@ -753,45 +836,80 @@ fn load_max_pool(node: &onnx::Node) -> Outcome<Op> {
 		Some(a) => res!(a.int()),
 		None => 0,
 	};
-	if k != vec![2, 2] || sy != 2 || sx != 2 || (pt, pl, pb, pr) != (0, 0, 0, 0) || ceil != 0 {
+	if k.len() != 2 {
 		return Err(err!(
-			"A maximum pool with kernel {:?}, strides {:?} and padding {:?} is outside the \
-			subset this crate carries.", k, (sy, sx), (pt, pl, pb, pr);
+			"A two-dimensional maximum pool wants a kernel of two extents, found {:?}.", k;
+		Invalid, Input, Mismatch));
+	}
+	// Rounding the output up rather than down would need the kernel to run off
+	// the end of the source, which nothing here does.
+	if ceil != 0 {
+		return Err(err!(
+			"A maximum pool rounding its output up is outside the subset this crate carries.";
 		Invalid, Input, Unimplemented));
 	}
-	Ok(Op::MaxPool2x2)
+	Ok(Op::MaxPool(Pool {
+		kh: k[0] as usize,
+		kw: k[1] as usize,
+		sy, sx, pt, pl, pb, pr,
+	}))
 }
 
-/// Reads a resize, which this crate carries only as an exact nearest-neighbour
-/// doubling of the two spatial axes.
+/// Reads a resize of the two spatial axes.
+///
+/// ONNX writes the target either as a scale or as an outright size, and the
+/// convention mapping an output position back into the source as an attribute.
+/// All three are read rather than assumed: the two models this crate carries
+/// disagree on every one of them, and a half-sample error in the mapping moves
+/// every box a detector predicts.
 fn load_resize(m: &onnx::Model, node: &onnx::Node) -> Outcome<Op> {
-	if let Some(mode) = node.attr("mode") {
-		let mode = res!(mode.text());
-		if mode != "nearest" {
-			return Err(err!(
-				"A resize in {} mode is outside the subset this crate carries.", mode;
-			Invalid, Input, Unimplemented));
-		}
-	}
-	// The scale operand is the last float initialiser the node names.
-	let mut scales: Option<Vec<f32>> = None;
+	let sample = match node.attr("mode") {
+		None => Sample::Nearest,
+		Some(a) => match res!(a.text()) {
+			"nearest"	=> Sample::Nearest,
+			"linear"	=> Sample::Bilinear,
+			other => return Err(err!(
+				"A resize in {} mode is outside the subset this crate carries, which is \
+				nearest and linear.", other;
+			Invalid, Input, Unimplemented)),
+		},
+	};
+	let coord = match node.attr("coordinate_transformation_mode") {
+		None => Coord::Asymmetric,
+		Some(a) => match res!(a.text()) {
+			"asymmetric"			=> Coord::Asymmetric,
+			"pytorch_half_pixel"	=> Coord::HalfPixel,
+			// `half_pixel` differs from PyTorch's only for an output of one,
+			// which no model here asks for, but it is not silently accepted.
+			other => return Err(err!(
+				"A resize transforming coordinates by {} is outside the subset this crate \
+				carries.", other;
+			Invalid, Input, Unimplemented)),
+		},
+	};
+
+	// The target is the last constant operand: floats are scales, integers are
+	// the size outright. An empty initialiser is the `roi` operand, skipped.
+	let mut extent: Option<Extent> = None;
 	for name in node.inputs.iter().skip(1) {
-		if let Some(init) = m.init(name) {
-			if let Ok(v) = init.floats() {
-				if v.len() == 4 {
-					scales = Some(v.to_vec());
-				}
+		let init = match m.init(name) {
+			Some(i) => i,
+			None => continue,
+		};
+		if let Ok(v) = init.floats() {
+			if v.len() == 4 {
+				extent = Some(Extent::Scale(v[2], v[3]));
+				continue;
+			}
+		}
+		if let Ok(v) = init.ints() {
+			if v.len() == 4 {
+				extent = Some(Extent::Size(v[2] as usize, v[3] as usize));
 			}
 		}
 	}
-	let s = some!(scales, "A resize names no four-element scale operand.");
-	if s[0] != 1.0 || s[1] != 1.0 || s[2] != 2.0 || s[3] != 2.0 {
-		return Err(err!(
-			"A resize by {:?} is outside the subset this crate carries, which is an exact \
-			doubling.", s;
-		Invalid, Input, Unimplemented));
-	}
-	Ok(Op::Upsample2x)
+	let extent = some!(extent, "A resize names neither a scale nor a size operand.");
+	Ok(Op::Resize { extent, sample, coord })
 }
 
 /// Reads the scalar second operand of an element-wise node.

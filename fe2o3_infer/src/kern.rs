@@ -101,6 +101,44 @@ impl Scratch {
 	}
 }
 
+/// How a resize takes its value once the source position is known.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Sample {
+	/// The value at the floor of the source position.
+	Nearest,
+	/// The weighted mean of the four samples around it.
+	Bilinear,
+}
+
+/// How a resize maps an output position back into the source.
+///
+/// The two conventions differ by half a sample and no more, and that is enough
+/// to move every box a network built on one of them predicts. Both models this
+/// crate carries name theirs in the graph, so neither is guessed at.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Coord {
+	/// `src = dst / scale`. ONNX calls it `asymmetric`.
+	Asymmetric,
+	/// `src = (dst + ½) / scale − ½`, clamped at zero. ONNX calls it
+	/// `pytorch_half_pixel`, and it degenerates to zero when the output has a
+	/// single row or column.
+	HalfPixel,
+}
+
+impl Coord {
+	/// Maps one output index to a position in the source.
+	pub fn source(&self, dst: usize, scale: f32, out: usize) -> f32 {
+		match self {
+			Self::Asymmetric	=> dst as f32 / scale,
+			Self::HalfPixel		=> if out > 1 {
+				((dst as f32 + 0.5) / scale - 0.5).max(0.0)
+			} else {
+				0.0
+			},
+		}
+	}
+}
+
 /// One unit of numerical work, named so that a single dispatch point can carry
 /// every kernel across the feature boundary.
 ///
@@ -235,31 +273,59 @@ pub enum Task<'a> {
 		/// Buffer, rewritten in place.
 		x:	&'a mut [f32],
 	},
-	/// Two by two maximum pool, stride two, no padding, in `NHWC`.
-	MaxPool2x2 {
+	/// Maximum pool in `NHWC`, over any kernel, stride and padding.
+	///
+	/// Padding contributes nothing rather than zero: a zero would win the
+	/// maximum wherever the real samples are negative, which after a leaky
+	/// rectifier they routinely are.
+	MaxPool {
 		/// Channels.
 		ch:	usize,
 		/// Input height.
 		h:	usize,
 		/// Input width.
 		w:	usize,
+		/// Kernel height.
+		kh:	usize,
+		/// Kernel width.
+		kw:	usize,
+		/// Vertical stride.
+		sy:	usize,
+		/// Horizontal stride.
+		sx:	usize,
+		/// Padding above.
+		pt:	usize,
+		/// Padding to the left.
+		pl:	usize,
+		/// Output height.
+		oh:	usize,
+		/// Output width.
+		ow:	usize,
 		/// Source, `[h, w, ch]`.
 		x:	&'a [f32],
-		/// Destination, `[h/2, w/2, ch]`.
+		/// Destination, `[oh, ow, ch]`.
 		y:	&'a mut [f32],
 	},
-	/// Nearest-neighbour doubling in `NHWC`.
-	Upsample2x {
+	/// Resampling of the two spatial axes in `NHWC`, up or down.
+	Resize {
 		/// Channels.
-		ch:	usize,
+		ch:		usize,
 		/// Input height.
-		h:	usize,
+		h:		usize,
 		/// Input width.
-		w:	usize,
+		w:		usize,
+		/// Output height.
+		oh:		usize,
+		/// Output width.
+		ow:		usize,
+		/// How a value is taken once the source position is known.
+		sample:	Sample,
+		/// How an output position maps back to a source position.
+		coord:	Coord,
 		/// Source, `[h, w, ch]`.
-		x:	&'a [f32],
-		/// Destination, `[2h, 2w, ch]`.
-		y:	&'a mut [f32],
+		x:		&'a [f32],
+		/// Destination, `[oh, ow, ch]`.
+		y:		&'a mut [f32],
 	},
 	/// Element-wise sum, accumulated into the first operand.
 	Add {
@@ -321,10 +387,10 @@ fn dispatch_avx2_fma(task: Task<'_>) {
 			relu_tf(x),
 		Task::Sigmoid { x } =>
 			sigmoid_tf(x),
-		Task::MaxPool2x2 { ch, h, w, x, y } =>
-			maxpool2x2_tf(ch, h, w, x, y),
-		Task::Upsample2x { ch, h, w, x, y } =>
-			upsample2x_tf(ch, h, w, x, y),
+		Task::MaxPool { ch, h, w, kh, kw, sy, sx, pt, pl, oh, ow, x, y } =>
+			maxpool_tf(ch, h, w, kh, kw, sy, sx, pt, pl, oh, ow, x, y),
+		Task::Resize { ch, h, w, oh, ow, sample, coord, x, y } =>
+			resize_tf(ch, h, w, oh, ow, sample, coord, x, y),
 		Task::Add { x, y } =>
 			add_tf(x, y),
 	}
@@ -350,10 +416,10 @@ fn dispatch_baseline(task: Task<'_>) {
 			relu(x),
 		Task::Sigmoid { x } =>
 			sigmoid(x),
-		Task::MaxPool2x2 { ch, h, w, x, y } =>
-			maxpool2x2(ch, h, w, x, y),
-		Task::Upsample2x { ch, h, w, x, y } =>
-			upsample2x(ch, h, w, x, y),
+		Task::MaxPool { ch, h, w, kh, kw, sy, sx, pt, pl, oh, ow, x, y } =>
+			maxpool(ch, h, w, kh, kw, sy, sx, pt, pl, oh, ow, x, y),
+		Task::Resize { ch, h, w, oh, ow, sample, coord, x, y } =>
+			resize(ch, h, w, oh, ow, sample, coord, x, y),
 		Task::Add { x, y } =>
 			add(x, y),
 	}
@@ -459,15 +525,41 @@ fn sigmoid_tf(x: &mut [f32]) {
 /// The maximum pool, compiled for AVX2.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
-fn maxpool2x2_tf(ch: usize, h: usize, w: usize, x: &[f32], y: &mut [f32]) {
-	maxpool2x2(ch, h, w, x, y)
+#[allow(clippy::too_many_arguments)]
+fn maxpool_tf(
+	ch:	usize,
+	h:	usize,
+	w:	usize,
+	kh:	usize,
+	kw:	usize,
+	sy:	usize,
+	sx:	usize,
+	pt:	usize,
+	pl:	usize,
+	oh:	usize,
+	ow:	usize,
+	x:	&[f32],
+	y:	&mut [f32],
+) {
+	maxpool(ch, h, w, kh, kw, sy, sx, pt, pl, oh, ow, x, y)
 }
 
-/// The nearest-neighbour doubling, compiled for AVX2.
+/// The resampling, compiled for AVX2.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
-fn upsample2x_tf(ch: usize, h: usize, w: usize, x: &[f32], y: &mut [f32]) {
-	upsample2x(ch, h, w, x, y)
+#[allow(clippy::too_many_arguments)]
+fn resize_tf(
+	ch:		usize,
+	h:		usize,
+	w:		usize,
+	oh:		usize,
+	ow:		usize,
+	sample:	Sample,
+	coord:	Coord,
+	x:		&[f32],
+	y:		&mut [f32],
+) {
+	resize(ch, h, w, oh, ow, sample, coord, x, y)
 }
 
 /// The element-wise sum, compiled for AVX2.
@@ -833,41 +925,109 @@ fn sigmoid(x: &mut [f32]) {
 	}
 }
 
-/// Two by two maximum pool, stride two, in `NHWC`.
+/// Maximum pool in `NHWC`, over any kernel, stride and padding.
+///
+/// A padded position contributes nothing at all rather than a zero. Zero is not
+/// the identity of a maximum: after a leaky rectifier a whole window can be
+/// negative, and a padding zero would then be the answer.
 #[inline(always)]
-fn maxpool2x2(ch: usize, h: usize, w: usize, x: &[f32], y: &mut [f32]) {
-	let (oh, ow) = (h / 2, w / 2);
+#[allow(clippy::too_many_arguments)]
+fn maxpool(
+	ch:	usize,
+	h:	usize,
+	w:	usize,
+	kh:	usize,
+	kw:	usize,
+	sy:	usize,
+	sx:	usize,
+	pt:	usize,
+	pl:	usize,
+	oh:	usize,
+	ow:	usize,
+	x:	&[f32],
+	y:	&mut [f32],
+) {
 	for oy in 0..oh {
 		for ox in 0..ow {
-			let o = &mut y[(oy * ow + ox) * ch..(oy * ow + ox) * ch + ch];
-			let ra = (2 * oy * w + 2 * ox) * ch;
-			let rb = (2 * oy * w + 2 * ox + 1) * ch;
-			let rc = ((2 * oy + 1) * w + 2 * ox) * ch;
-			let rd = ((2 * oy + 1) * w + 2 * ox + 1) * ch;
-			let a = &x[ra..ra + ch];
-			let b = &x[rb..rb + ch];
-			let c = &x[rc..rc + ch];
-			let d = &x[rd..rd + ch];
-			for i in 0..ch {
-				o[i] = a[i].max(b[i]).max(c[i].max(d[i]));
+			let o = (oy * ow + ox) * ch;
+			let out = &mut y[o..o + ch];
+			for v in out.iter_mut() {
+				*v = f32::NEG_INFINITY;
+			}
+			// Where this window starts in the source, before padding is removed.
+			let top = (oy * sy) as isize - pt as isize;
+			let left = (ox * sx) as isize - pl as isize;
+			for ky in 0..kh {
+				let iy = top + ky as isize;
+				if iy < 0 || iy as usize >= h {
+					continue;
+				}
+				for kx in 0..kw {
+					let ix = left + kx as isize;
+					if ix < 0 || ix as usize >= w {
+						continue;
+					}
+					let s = (iy as usize * w + ix as usize) * ch;
+					let src = &x[s..s + ch];
+					for i in 0..ch {
+						out[i] = out[i].max(src[i]);
+					}
+				}
 			}
 		}
 	}
 }
 
-/// Nearest-neighbour doubling in `NHWC`.
+/// Resampling of the two spatial axes in `NHWC`, up or down.
 #[inline(always)]
-fn upsample2x(ch: usize, h: usize, w: usize, x: &[f32], y: &mut [f32]) {
-	let ow = w * 2;
-	for iy in 0..h {
-		for ix in 0..w {
-			let src = &x[(iy * w + ix) * ch..(iy * w + ix) * ch + ch];
-			for dy in 0..2 {
-				let orow = (iy * 2 + dy) * ow;
-				for dx in 0..2 {
-					let o = (orow + ix * 2 + dx) * ch;
-					y[o..o + ch].copy_from_slice(src);
-				}
+#[allow(clippy::too_many_arguments)]
+fn resize(
+	ch:		usize,
+	h:		usize,
+	w:		usize,
+	oh:		usize,
+	ow:		usize,
+	sample:	Sample,
+	coord:	Coord,
+	x:		&[f32],
+	y:		&mut [f32],
+) {
+	let scale_y = oh as f32 / h as f32;
+	let scale_x = ow as f32 / w as f32;
+	for oy in 0..oh {
+		let sy = coord.source(oy, scale_y, oh);
+		for ox in 0..ow {
+			let sx = coord.source(ox, scale_x, ow);
+			let o = (oy * ow + ox) * ch;
+			match sample {
+				Sample::Nearest => {
+					let iy = (sy.floor() as usize).min(h - 1);
+					let ix = (sx.floor() as usize).min(w - 1);
+					let s = (iy * w + ix) * ch;
+					y[o..o + ch].copy_from_slice(&x[s..s + ch]);
+				},
+				Sample::Bilinear => {
+					let y0 = sy.floor().max(0.0) as usize;
+					let x0 = sx.floor().max(0.0) as usize;
+					let y1 = (y0 + 1).min(h - 1);
+					let x1 = (x0 + 1).min(w - 1);
+					let y0 = y0.min(h - 1);
+					let x0 = x0.min(w - 1);
+					let fy = sy - sy.floor();
+					let fx = sx - sx.floor();
+					// The four corners, weighted by how far the source position
+					// sits between them.
+					let (wa, wb) = ((1.0 - fy) * (1.0 - fx), (1.0 - fy) * fx);
+					let (wc, wd) = (fy * (1.0 - fx), fy * fx);
+					let a = (y0 * w + x0) * ch;
+					let b = (y0 * w + x1) * ch;
+					let c = (y1 * w + x0) * ch;
+					let d = (y1 * w + x1) * ch;
+					for i in 0..ch {
+						y[o + i] = wa * x[a + i] + wb * x[b + i]
+							+ wc * x[c + i] + wd * x[d + i];
+					}
+				},
 			}
 		}
 	}
@@ -1072,13 +1232,98 @@ mod tests {
 	}
 
 	#[test]
+	fn a_padded_pool_is_not_won_by_its_padding() -> Outcome<()> {
+		// Every sample is negative, which is what a leaky rectifier hands on.
+		// A padding zero would beat all of them at every edge.
+		let (ch, h, w) = (1, 3, 3);
+		let x = vec![-9.0, -8.0, -7.0, -6.0, -5.0, -4.0, -3.0, -2.0, -1.0];
+		let (oh, ow) = (2, 2);
+		let mut y = vec![0.0f32; oh * ow * ch];
+		run(Cpu::detect(), Task::MaxPool {
+			ch, h, w,
+			kh: 3, kw: 3, sy: 2, sx: 2, pt: 1, pl: 1,
+			oh, ow,
+			x: &x, y: &mut y,
+		});
+		// Each window covers a corner quadrant of the plane, the rest being pad.
+		let want = [-5.0, -4.0, -2.0, -1.0];
+		for (i, w) in want.iter().enumerate() {
+			req!(y[i], *w, "The pool took the padding rather than a sample.");
+		}
+		Ok(())
+	}
+
+	#[test]
+	fn a_bilinear_doubling_puts_the_quarters_where_they_belong() -> Outcome<()> {
+		// Two samples, 0 and 4, doubled under the half-pixel rule. The output
+		// centres fall at source -0.25, 0.25, 0.75 and 1.25, and the first is
+		// clamped to zero, so the values are 0, 1, 3, 4.
+		let (ch, h, w) = (1, 1, 2);
+		let x = vec![0.0, 4.0];
+		let mut y = vec![0.0f32; 4];
+		run(Cpu::detect(), Task::Resize {
+			ch, h, w, oh: 1, ow: 4,
+			sample: Sample::Bilinear, coord: Coord::HalfPixel,
+			x: &x, y: &mut y,
+		});
+		let want = [0.0, 1.0, 3.0, 4.0];
+		for (i, v) in want.iter().enumerate() {
+			let close = (y[i] - *v).abs() < 1e-5;
+			req!(close, true, "Bilinear at {} gave {}, wanted {}.", i, y[i], v);
+		}
+
+		// The asymmetric rule reads the same source at every output, which is
+		// what separates the two conventions and is worth failing on.
+		let mut z = vec![0.0f32; 4];
+		run(Cpu::detect(), Task::Resize {
+			ch, h, w, oh: 1, ow: 4,
+			sample: Sample::Bilinear, coord: Coord::Asymmetric,
+			x: &x, y: &mut z,
+		});
+		let differs = z.iter().zip(y.iter()).any(|(a, b)| (a - b).abs() > 1e-5);
+		req!(differs, true, "The two coordinate rules gave the same answer.");
+		Ok(())
+	}
+
+	#[test]
+	fn a_resize_to_the_same_size_changes_nothing() -> Outcome<()> {
+		let (ch, h, w) = (2, 3, 5);
+		let x = fill(h * w * ch, 17);
+		for sample in [Sample::Nearest, Sample::Bilinear] {
+			for coord in [Coord::Asymmetric, Coord::HalfPixel] {
+				let mut y = vec![0.0f32; x.len()];
+				run(Cpu::detect(), Task::Resize {
+					ch, h, w, oh: h, ow: w, sample, coord,
+					x: &x, y: &mut y,
+				});
+				for i in 0..x.len() {
+					let same = (y[i] - x[i]).abs() < 1e-5;
+					req!(same, true,
+						"{:?}/{:?} moved value {} from {} to {}.",
+						sample, coord, i, x[i], y[i]);
+				}
+			}
+		}
+		Ok(())
+	}
+
+	#[test]
 	fn pooling_and_doubling_invert_a_constant() -> Outcome<()> {
 		let (ch, h, w) = (3, 4, 6);
 		let x = fill(h * w * ch, 41);
 		let mut pooled = vec![0.0f32; (h / 2) * (w / 2) * ch];
-		run(Cpu::detect(), Task::MaxPool2x2 { ch, h, w, x: &x, y: &mut pooled });
+		run(Cpu::detect(), Task::MaxPool {
+			ch, h, w,
+			kh: 2, kw: 2, sy: 2, sx: 2, pt: 0, pl: 0,
+			oh: h / 2, ow: w / 2,
+			x: &x, y: &mut pooled,
+		});
 		let mut back = vec![0.0f32; h * w * ch];
-		run(Cpu::detect(), Task::Upsample2x { ch, h: h / 2, w: w / 2, x: &pooled, y: &mut back });
+		run(Cpu::detect(), Task::Resize {
+			ch, h: h / 2, w: w / 2, oh: h, ow: w,
+			sample: Sample::Nearest, coord: Coord::Asymmetric,
+			x: &pooled, y: &mut back,
+		});
 		// Each pooled maximum is repeated over the two by two block it came from.
 		for oy in 0..h / 2 {
 			for ox in 0..w / 2 {
