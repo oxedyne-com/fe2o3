@@ -30,7 +30,13 @@ secrecy = "0.8.0"
 sha1 = "0.10.6"
 strum = { version = "0.25", features = ["derive"] }
 tokio = { version = "1.35", features = ["full"] }
-tokio-rustls = "0.26"
+# Rustls on `ring`, which this crate already carries, rather than on its default
+# `aws-lc-rs`. Taking the default meant every caller linked a second cryptography
+# library in C -- including callers that serve plain HTTP and use none of it --
+# and cross-compiling it for Windows builds its POSIX threading backend for a
+# target with no pthreads, so the link then needs the posix mingw and
+# `-lwinpthread`. `fe2o3_steel` already pins rustls this way.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 
 [dev-dependencies]
 oxedyne_fe2o3_data 					= { path = "../fe2o3_data" }

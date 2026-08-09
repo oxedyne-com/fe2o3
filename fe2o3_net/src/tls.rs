@@ -167,7 +167,7 @@ pub fn ensure_crypto_provider() {
     if tokio_rustls::rustls::crypto::CryptoProvider::get_default().is_some() {
         return;
     }
-    let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider()
+    let _ = tokio_rustls::rustls::crypto::ring::default_provider()
         .install_default();
 }
 
