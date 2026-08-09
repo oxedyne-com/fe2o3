@@ -18,11 +18,11 @@
 //!
 //! # What this decodes and what it refuses
 //!
-//! Intra pictures in 4:2:0 at eight bits, coded in frames, with one slice group -- which is every
-//! film in the library it was written against. Anything else is refused where it is read, by name,
-//! rather than decoded into a wrong picture: field coding, macroblock-adaptive frame/field coding,
-//! monochrome and 4:2:2 and 4:4:4, bit depths above eight, slice groups, and any slice that is not
-//! intra.
+//! Intra pictures in 4:2:0 at eight bits, coded in frames, with one slice group, with either entropy
+//! coder -- which is every film in the library it was written against. Anything else is refused where
+//! it is read, by name, rather than decoded into a wrong picture: field coding, macroblock-adaptive
+//! frame/field coding, monochrome and 4:2:2 and 4:4:4, bit depths above eight, slice groups, and any
+//! slice that is not intra.
 //!
 //! # The two things that have to be got right and cannot be seen
 //!
@@ -36,8 +36,20 @@
 //! of the number of coefficients in the blocks above and to the left, and it selects which of six
 //! code tables reads the next token. Get it wrong and the right bits are read with the wrong code,
 //! which desynchronises everything after it in the slice.
+//!
+//! **The neighbours CABAC chooses its contexts by.** The arithmetic coder asks the same question of
+//! nearly every syntax element -- what did the macroblock to the left and the macroblock above do?
+//! -- and answers it differently each time: for `coded_block_pattern` the neighbouring block counts
+//! when it holds *nothing*, for `coded_block_flag` an *absent* neighbour counts as coded, and for
+//! `mb_qp_delta` the neighbour is the macroblock decoded before this one rather than either of
+//! those. Getting one of these wrong does not stop the decode; it feeds the right bins to the wrong
+//! probability, and the picture comes out plausible and wrong.
 
 use crate::h264::{
+	cabac::{
+		self,
+		Cat,
+	},
 	cavlc,
 	intra::{
 		self,
@@ -157,6 +169,26 @@ const fn blk_xy(i: usize) -> (usize, usize) {
 	(((quad % 2) * 2) + (within % 2), ((quad / 2) * 2) + (within / 2))
 }
 
+/// Which of a macroblock's transform blocks were coded with anything in them (§9.3.3.1.1.9).
+///
+/// The arithmetic coder reads each block's `coded_block_flag` against a context chosen by the flags
+/// of the blocks above and to the left, so a block's answer has to be kept for its neighbours -- and
+/// the neighbour may be in another macroblock, which is why this is kept per macroblock rather than
+/// discarded with the block.
+#[derive(Clone, Copy, Debug, Default)]
+struct Cbf {
+	/// The block of direct current terms a macroblock predicted whole carries.
+	luma_dc:	bool,
+	/// The sixteen four-by-four luma blocks, in the macroblock's own block order.
+	luma4:		[bool; 16],
+	/// The four eight-by-eight ones, where the macroblock uses that transform.
+	luma8:		[bool; 4],
+	/// Each colour difference component's block of direct current terms.
+	chroma_dc:	[bool; 2],
+	/// Their four alternating current blocks each.
+	chroma_ac:	[[bool; 4]; 2],
+}
+
 /// Everything a picture's decoder carries from one macroblock to the next.
 struct Frame<'a> {
 	/// The sequence parameter set in force.
@@ -183,6 +215,17 @@ struct Frame<'a> {
 	/// How many coefficients each four-by-four block holds, for CAVLC's neighbour counts: sixteen
 	/// luma then four of each colour difference.
 	counts:	Vec<[u8; 24]>,
+	/// Each macroblock's luma coded block pattern, which CABAC's neighbour contexts ask about.
+	cbp_luma:	Vec<u8>,
+	/// The same for the colour difference planes.
+	cbp_chroma:	Vec<u8>,
+	/// Each macroblock's chroma prediction mode, which is one of CABAC's contexts too.
+	chroma_mode:	Vec<u8>,
+	/// Whether each macroblock's quantisation parameter moved, which chooses the context the next
+	/// one's delta is read against.
+	qp_moved:	Vec<bool>,
+	/// Which of each macroblock's transform blocks hold a coefficient.
+	cbf:	Vec<Cbf>,
 	/// The luma weights, already scanned.
 	w_luma:	Weights,
 	/// The Cb weights.
@@ -218,6 +261,11 @@ impl<'a> Frame<'a> {
 			big:		vec![false; n],
 			modes:		vec![[2u8; 16]; n],
 			counts:		vec![[0u8; 24]; n],
+			cbp_luma:	vec![0; n],
+			cbp_chroma:	vec![0; n],
+			chroma_mode:	vec![0; n],
+			qp_moved:	vec![false; n],
+			cbf:		vec![Cbf::default(); n],
 			w_luma:		Weights::intra(&scaling, 0),
 			w_cb:		Weights::intra(&scaling, 1),
 			w_cr:		Weights::intra(&scaling, 2),
@@ -366,16 +414,21 @@ pub fn decode(units: &[Unit], sets: &mut Vec<Sps>, pics: &mut Vec<Pps>, deblock:
 			beta:	head.beta_offset,
 		});
 		if pps.cabac {
-			return Err(err!(
-				"The slice is coded with the arithmetic entropy coder (CABAC, clause 9.3), and \
-				this decoder reads only the variable-length one (CAVLC, clause 9.2). Both are in \
-				use: of the 1,658 H.264 films in the library this was written against, 947 are \
-				CABAC and 711 are CAVLC. Everything below the entropy layer is shared and is \
-				already held to FFmpeg sample for sample, so what is missing is the arithmetic \
-				decoder, its context initialisation tables and the binarisations.";
-			Invalid, Input, Unimplemented));
+			res!(slice_data_cabac(&mut frame, &mut run, u, head.first_mb as usize, head.data_bit));
+		} else {
+			res!(slice_data(&mut frame, &mut run, u, head.first_mb as usize, head.data_bit));
 		}
-		res!(slice_data(&mut frame, &mut run, u, head.first_mb as usize, head.data_bit));
+	}
+	// The slices of a picture tile it: between them they cover every macroblock exactly once. A
+	// macroblock left undecoded means a slice ended before it should have, and for a slice coded with
+	// the arithmetic coder that means the coder lost the bitstream -- which otherwise shows up only
+	// as a picture, since a desynchronised arithmetic decoder goes on answering bins.
+	if let Some(missing) = frame.slice_of.iter().position(|s| s.is_none()) {
+		return Err(err!(
+			"Macroblock {} of {} was never decoded: the picture's {} slices did not cover it. \
+			Either a slice ended early or the picture is not whole.",
+			missing, frame.slice_of.len(), slices.len();
+		Invalid, Input, Decode));
 	}
 	if deblock {
 		let mut view = frame_view(&mut frame);
@@ -646,6 +699,657 @@ fn pcm(f: &mut Frame, run: &mut SliceRun, b: &mut Bits, mb: usize) -> Outcome<()
 	f.modes[mb] = [2u8; 16];
 	// A raw macroblock counts as sixteen coefficients everywhere, for its neighbours' tables.
 	f.counts[mb] = [16u8; 24];
+	Ok(())
+}
+
+// -------------------------------------------------------------- the arithmetically coded walk
+
+/// The arithmetic coder's state for one slice.
+struct Entropy<'a> {
+	/// The slice's payload, from the first bit of the NAL unit's own body.
+	body:	&'a [u8],
+	/// Where in that payload the decoding engine's own buffer begins, in bytes. It moves only for a
+	/// raw-sample macroblock, after which the engine is started afresh.
+	base:	usize,
+	/// The decoding engine.
+	c:	cabac::Cabac<'a>,
+	/// The context variables.
+	x:	cabac::Contexts,
+	/// The macroblock decoded immediately before this one **in this slice**, where there was one.
+	prev:	Option<usize>,
+}
+
+impl<'a> Entropy<'a> {
+
+	/// The coder as a slice's entropy-coded data begins (§7.3.4, §9.3.1).
+	///
+	/// `at` is where the slice header ended, in bits. The data begins at the next byte boundary, and
+	/// the bits between are `cabac_alignment_one_bit`s, which are all ones. They are checked rather
+	/// than skipped: a header read one bit short lands here with a zero among them, and saying so is
+	/// far better than decoding the whole picture from one bit out.
+	fn new(body: &'a [u8], at: usize, qp: i32) -> Outcome<Self> {
+		let mut b = Bits::at(body, at);
+		while b.consumed() % 8 != 0 {
+			if !res!(b.flag()) {
+				return Err(err!(
+					"A slice's cabac_alignment_one_bit at bit {} is nought, so the slice header was \
+					not read to its end.", b.consumed() - 1;
+				Invalid, Input, Decode));
+			}
+		}
+		let base = b.consumed() / 8;
+		Ok(Self {
+			body,
+			base,
+			c:	res!(cabac::Cabac::new(&body[base..])),
+			x:	cabac::Contexts::start(qp),
+			prev:	None,
+		})
+	}
+
+	/// One bin against the context at a `ctxIdx`.
+	fn bin(&mut self, ctx_idx: usize) -> Outcome<u32> {
+		self.x.bin(&mut self.c, ctx_idx)
+	}
+
+	/// Where the engine's next unread bit sits, in bytes from the start of the payload, rounded up.
+	fn byte(&self) -> usize {
+		self.base + self.c.consumed_bits().div_ceil(8)
+	}
+
+	/// Starts the engine afresh at a byte of the payload, which is what follows a raw-sample
+	/// macroblock (§9.3.1.2).
+	fn restart(&mut self, at: usize) -> Outcome<()> {
+		let body = self.body;
+		if at >= body.len() {
+			return Err(err!(
+				"An arithmetic decoder was to restart at byte {} of a payload of {}.", at, body.len();
+			Invalid, Input, Decode));
+		}
+		self.base = at;
+		self.c = res!(cabac::Cabac::new(&body[at..]));
+		Ok(())
+	}
+}
+
+/// What a macroblock's own neighbour lookups need before it has been recorded against the picture.
+///
+/// A block predicts its context from the blocks above and to the left, and half of those are inside
+/// the macroblock being read. Reading them out of the picture instead would give every one of them
+/// the answer for "not yet decoded", which decodes the first block of each macroblock correctly and
+/// the rest wrongly.
+struct Partial {
+	/// How the macroblock is predicted.
+	kind:	Kind,
+	/// Its luma coded block pattern, as far as it has been read.
+	cbp_luma:	u8,
+	/// Its chroma one.
+	cbp_chroma:	u8,
+	/// Which of its transform blocks have been read, and what they held.
+	cbf:	Cbf,
+}
+
+/// The macroblock to the left and the macroblock above, where each is available (§6.4.11.1).
+fn ab(f: &Frame, run: &SliceRun, mb: usize) -> [Option<usize>; 2] {
+	let around = f.around(mb, run.index);
+	[around[0], around[1]]
+}
+
+/// The macroblock and four-by-four luma block each of a block's two neighbours sits in (§6.4.11.4).
+fn luma4_ab(f: &Frame, run: &SliceRun, mb: usize, blk: usize) -> [Option<(usize, usize)>; 2] {
+	let (bx, by) = blk_xy(blk);
+	let around = f.around(mb, run.index);
+	[
+		if bx > 0 {
+			Some((mb, blk_index(bx - 1, by)))
+		} else {
+			around[0].map(|n| (n, blk_index(3, by)))
+		},
+		if by > 0 {
+			Some((mb, blk_index(bx, by - 1)))
+		} else {
+			around[1].map(|n| (n, blk_index(bx, 3)))
+		},
+	]
+}
+
+/// The same for an eight-by-eight luma block, which sit in plain raster order (§6.4.11.2).
+fn luma8_ab(f: &Frame, run: &SliceRun, mb: usize, blk: usize) -> [Option<(usize, usize)>; 2] {
+	let (bx, by) = (blk % 2, blk / 2);
+	let around = f.around(mb, run.index);
+	[
+		if bx > 0 {
+			Some((mb, by * 2 + bx - 1))
+		} else {
+			around[0].map(|n| (n, by * 2 + 1))
+		},
+		if by > 0 {
+			Some((mb, (by - 1) * 2 + bx))
+		} else {
+			around[1].map(|n| (n, 2 + bx))
+		},
+	]
+}
+
+/// And for a four-by-four block of a 4:2:0 colour difference plane (§6.4.11.5).
+fn chroma4_ab(f: &Frame, run: &SliceRun, mb: usize, blk: usize) -> [Option<(usize, usize)>; 2] {
+	// A 4:2:0 macroblock's chroma is eight by eight, so its four blocks tile it two by two, which
+	// makes the arithmetic the same as an eight-by-eight luma block's.
+	luma8_ab(f, run, mb, blk)
+}
+
+/// Adds a neighbour's contribution to a context increment.
+///
+/// The left neighbour counts once and the upper one twice, wherever the specification writes
+/// `condTermFlagA + 2 * condTermFlagB`; where it writes `condTermFlagA + condTermFlagB` the caller
+/// sums them itself instead.
+fn weigh(terms: [usize; 2]) -> usize {
+	terms[0] + 2 * terms[1]
+}
+
+/// Reads `mb_type` in an intra slice (§9.3.2.5, Table 9-36, §9.3.3.1.1.3).
+fn read_mb_type(f: &Frame, run: &SliceRun, e: &mut Entropy, mb: usize) -> Outcome<u32> {
+	let base = cabac::offset::MB_TYPE;
+	// A neighbour coded as sixteen four-by-four or four eight-by-eight blocks contributes nothing,
+	// and any other available neighbour contributes one.
+	let mut inc = 0usize;
+	for n in ab(f, run, mb).into_iter().flatten() {
+		if !matches!(f.kind[n], Kind::I4x4 | Kind::I8x8) {
+			inc += 1;
+		}
+	}
+	if res!(e.bin(base + inc)) == 0 {
+		return Ok(0);
+	}
+	// The second bin is the one that names a raw-sample macroblock, and it is decoded by the
+	// terminating process rather than against a context of its own.
+	if e.c.terminate() == 1 {
+		return Ok(25);
+	}
+	// Whether all sixteen luma blocks are coded or none of them are.
+	let luma = res!(e.bin(base + 3));
+	// Whether the colour difference pattern is anything but nought.
+	let chroma_any = res!(e.bin(base + 4));
+	let first = res!(e.bin(base + if chroma_any != 0 { 5 } else { 6 }));
+	let second = res!(e.bin(base + if chroma_any != 0 { 6 } else { 7 }));
+	let (chroma, pred) = if chroma_any == 0 {
+		(0u32, first * 2 + second)
+	} else {
+		let third = res!(e.bin(base + 7));
+		(first + 1, second * 2 + third)
+	};
+	// Table 7-11 counts the twenty-four Intra_16x16 types off as the prediction mode, then the
+	// chroma pattern, then the luma one.
+	Ok(1 + pred + 4 * chroma + 12 * luma)
+}
+
+/// Reads `transform_size_8x8_flag` (§9.3.3.1.1.10).
+fn read_transform_8x8(f: &Frame, run: &SliceRun, e: &mut Entropy, mb: usize) -> Outcome<bool> {
+	let mut inc = 0usize;
+	for n in ab(f, run, mb).into_iter().flatten() {
+		if f.big[n] {
+			inc += 1;
+		}
+	}
+	Ok(res!(e.bin(cabac::offset::TRANSFORM_8X8 + inc)) == 1)
+}
+
+/// Reads one block's intra prediction mode, given the mode predicted for it (§9.3.2.4).
+fn read_mode_cabac(e: &mut Entropy, predicted: u8) -> Outcome<u8> {
+	if res!(e.bin(cabac::offset::PREV_PRED)) == 1 {
+		return Ok(predicted);
+	}
+	// Three bins at one context, least significant first.
+	let mut rem = 0u8;
+	for i in 0..3 {
+		rem |= (res!(e.bin(cabac::offset::REM_PRED)) as u8) << i;
+	}
+	Ok(if rem < predicted { rem } else { rem + 1 })
+}
+
+/// Reads `intra_chroma_pred_mode` (§9.3.3.1.1.8).
+fn read_chroma_mode(f: &Frame, run: &SliceRun, e: &mut Entropy, mb: usize) -> Outcome<u32> {
+	let base = cabac::offset::CHROMA_PRED;
+	let mut inc = 0usize;
+	for n in ab(f, run, mb).into_iter().flatten() {
+		// A raw-sample neighbour has no mode, and one that predicted along the direct current mode
+		// contributes nothing.
+		if f.kind[n] != Kind::Pcm && f.chroma_mode[n] != 0 {
+			inc += 1;
+		}
+	}
+	if res!(e.bin(base + inc)) == 0 {
+		return Ok(0);
+	}
+	if res!(e.bin(base + 3)) == 0 {
+		return Ok(1);
+	}
+	if res!(e.bin(base + 3)) == 0 {
+		return Ok(2);
+	}
+	Ok(3)
+}
+
+/// Reads `coded_block_pattern`, luma part then chroma (§9.3.2.6, §9.3.3.1.1.4).
+fn read_cbp(f: &Frame, run: &SliceRun, e: &mut Entropy, mb: usize) -> Outcome<(u8, u8)> {
+	let mut luma = 0u8;
+	for blk in 0..4usize {
+		// `condTermFlagN` is one where the neighbouring eight-by-eight block holds **nothing**, which
+		// is the way round that reads oddly and is the specification's.
+		let sides = luma8_ab(f, run, mb, blk);
+		let mut terms = [0usize; 2];
+		for (i, side) in sides.into_iter().enumerate() {
+			terms[i] = match side {
+				None => 0,
+				Some((n, k)) => {
+					let empty = if n == mb {
+						luma & (1 << k) == 0
+					} else if f.kind[n] == Kind::Pcm {
+						false
+					} else {
+						f.cbp_luma[n] & (1 << k) == 0
+					};
+					usize::from(empty)
+				},
+			};
+		}
+		// The four bins are the four bits of the pattern, least significant first.
+		if res!(e.bin(cabac::offset::CBP_LUMA + weigh(terms))) == 1 {
+			luma |= 1 << blk;
+		}
+	}
+	let mut chroma = 0u8;
+	for bin in 0..2usize {
+		let mut terms = [0usize; 2];
+		for (i, side) in ab(f, run, mb).into_iter().enumerate() {
+			terms[i] = match side {
+				None => 0,
+				Some(n) => {
+					let term = if f.kind[n] == Kind::Pcm {
+						true
+					} else if bin == 0 {
+						f.cbp_chroma[n] != 0
+					} else {
+						f.cbp_chroma[n] == 2
+					};
+					usize::from(term)
+				},
+			};
+		}
+		let inc = weigh(terms) + if bin == 1 { 4 } else { 0 };
+		if res!(e.bin(cabac::offset::CBP_CHROMA + inc)) == 0 {
+			break;
+		}
+		chroma = bin as u8 + 1;
+	}
+	Ok((luma, chroma))
+}
+
+/// Reads `mb_qp_delta` (§9.3.2.7, Table 9-3, §9.3.3.1.1.5).
+fn read_qp_delta(f: &Frame, e: &mut Entropy) -> Outcome<i32> {
+	let base = cabac::offset::MB_QP_DELTA;
+	let first = match e.prev {
+		None => 0usize,
+		Some(p) => {
+			if f.kind[p] == Kind::Pcm {
+				0
+			} else if f.kind[p] != Kind::I16x16 && f.cbp_luma[p] == 0 && f.cbp_chroma[p] == 0 {
+				0
+			} else {
+				usize::from(f.qp_moved[p])
+			}
+		},
+	};
+	let mut k = 0u32;
+	if res!(e.bin(base + first)) == 1 {
+		k = 1;
+		if res!(e.bin(base + 2)) == 1 {
+			k = 2;
+			while res!(e.bin(base + 3)) == 1 {
+				k += 1;
+				// The delta runs from −26 to 25 at eight bits, so its mapped value runs to 51. A
+				// longer run is a decoder that has lost the syntax rather than a legal value.
+				if k > 87 {
+					return Err(err!(
+						"An mb_qp_delta was coded as a unary run of more than 87 bins, which no legal \
+						value is.";
+					Invalid, Input, Decode));
+				}
+			}
+		}
+	}
+	// Table 9-3 alternates: nought, then one, then minus one, and so on.
+	Ok(if k % 2 == 1 {
+		((k + 1) / 2) as i32
+	} else {
+		-((k / 2) as i32)
+	})
+}
+
+/// One neighbour's contribution to a `coded_block_flag` context increment (§9.3.3.1.1.9).
+///
+/// `kind` is how the neighbouring macroblock is predicted, or `None` where there is no such
+/// macroblock; `flag` is the neighbouring transform block's own flag, or `None` where that block does
+/// not exist. **An absent neighbour counts as coded**, because every macroblock this decoder reads is
+/// intra; for an inter one it would count as nought, and reading that way round gives every
+/// macroblock along the top and left edges of a picture the wrong context.
+fn cbf_term(kind: Option<Kind>, flag: Option<bool>) -> usize {
+	match kind {
+		None			=> 1,
+		// A raw-sample neighbour counts as coded whatever its blocks hold.
+		Some(Kind::Pcm)		=> 1,
+		Some(_)			=> usize::from(flag.unwrap_or(false)),
+	}
+}
+
+/// The `coded_block_flag` context increment for a macroblock's block of direct current terms.
+fn cbf_inc_luma_dc(f: &Frame, run: &SliceRun, mb: usize) -> usize {
+	let mut terms = [0usize; 2];
+	for (i, side) in ab(f, run, mb).into_iter().enumerate() {
+		terms[i] = match side {
+			None => cbf_term(None, None),
+			// Only a macroblock predicted whole has a block of direct current terms at all.
+			Some(n) => match f.kind[n] {
+				Kind::I16x16	=> cbf_term(Some(Kind::I16x16), Some(f.cbf[n].luma_dc)),
+				other		=> cbf_term(Some(other), None),
+			},
+		};
+	}
+	weigh(terms)
+}
+
+/// The same for one of a macroblock's four-by-four luma blocks.
+fn cbf_inc_luma4(f: &Frame, run: &SliceRun, mb: usize, blk: usize, here: &Partial) -> usize {
+	let mut terms = [0usize; 2];
+	for (i, side) in luma4_ab(f, run, mb, blk).into_iter().enumerate() {
+		terms[i] = match side {
+			None => cbf_term(None, None),
+			Some((n, k)) => {
+				let (kind, cbp, cbf) = if n == mb {
+					(here.kind, here.cbp_luma, &here.cbf)
+				} else {
+					(f.kind[n], f.cbp_luma[n], &f.cbf[n])
+				};
+				// The block exists only where the pattern says its quadrant carries anything.
+				let flag = if cbp & (1 << (k >> 2)) == 0 {
+					None
+				} else if kind == Kind::I8x8 {
+					// A neighbour that used the eight-by-eight transform offers that block instead,
+					// and in 4:2:0 its flag is not coded at all but inferred to be one.
+					Some(cbf.luma8[k >> 2])
+				} else {
+					Some(cbf.luma4[k])
+				};
+				cbf_term(Some(kind), flag)
+			},
+		};
+	}
+	weigh(terms)
+}
+
+/// The same for one colour difference component's block of direct current terms.
+fn cbf_inc_chroma_dc(f: &Frame, run: &SliceRun, mb: usize, c: usize) -> usize {
+	let mut terms = [0usize; 2];
+	for (i, side) in ab(f, run, mb).into_iter().enumerate() {
+		terms[i] = match side {
+			None => cbf_term(None, None),
+			Some(n) => {
+				let flag = if f.cbp_chroma[n] == 0 {
+					None
+				} else {
+					Some(f.cbf[n].chroma_dc[c])
+				};
+				cbf_term(Some(f.kind[n]), flag)
+			},
+		};
+	}
+	weigh(terms)
+}
+
+/// The same for one of its alternating current blocks.
+fn cbf_inc_chroma_ac(f: &Frame, run: &SliceRun, mb: usize, c: usize, blk: usize, here: &Partial)
+	-> usize
+{
+	let mut terms = [0usize; 2];
+	for (i, side) in chroma4_ab(f, run, mb, blk).into_iter().enumerate() {
+		terms[i] = match side {
+			None => cbf_term(None, None),
+			Some((n, k)) => {
+				let (kind, cbp, cbf) = if n == mb {
+					(here.kind, here.cbp_chroma, &here.cbf)
+				} else {
+					(f.kind[n], f.cbp_chroma[n], &f.cbf[n])
+				};
+				// An alternating current block exists only where the whole chroma pattern is coded.
+				let flag = if cbp == 2 { Some(cbf.chroma_ac[c][k]) } else { None };
+				cbf_term(Some(kind), flag)
+			},
+		};
+	}
+	weigh(terms)
+}
+
+/// Walks one arithmetically coded slice's macroblocks (§7.3.4).
+///
+/// Where a slice coded with the length tables ends at its payload, this one ends where the coder says
+/// it does: an `end_of_slice_flag` after every macroblock, decoded by the terminating process. There
+/// is no `more_rbsp_data` test to fall back on, because the arithmetic decoder reads a little past
+/// the last byte the encoder wrote.
+fn slice_data_cabac(f: &mut Frame, run: &mut SliceRun, u: &Unit, first_mb: usize, at: usize)
+	-> Outcome<()>
+{
+	let mut e = res!(Entropy::new(&u.body, at, run.qp));
+	let mut mb = first_mb;
+	let total = f.mbs_w * f.mbs_h;
+	loop {
+		if mb >= total {
+			return Err(err!(
+				"A slice ran past macroblock {} of a picture that holds {}.", mb, total;
+			Invalid, Input, Decode));
+		}
+		res!(macroblock_cabac(f, run, &mut e, mb));
+		e.prev = Some(mb);
+		mb += 1;
+		if e.c.terminate() == 1 {
+			break;
+		}
+	}
+	Ok(())
+}
+
+/// Reads and reconstructs one macroblock of an arithmetically coded slice (§7.3.5).
+fn macroblock_cabac(f: &mut Frame, run: &mut SliceRun, e: &mut Entropy, mb: usize) -> Outcome<()> {
+	let mb_type = res!(read_mb_type(f, run, e, mb));
+	if mb_type == 25 {
+		return pcm_cabac(f, run, e, mb);
+	}
+	let (kind, mut cbp_luma, mut cbp_chroma, pred16) = if mb_type == 0 {
+		(Kind::I4x4, 0u8, 0u8, Mode16::Dc)
+	} else {
+		let k = (mb_type - 1) as usize;
+		let pred = res!(Mode16::of((k % 4) as u32));
+		let chroma = ((k / 4) % 3) as u8;
+		let luma = if k >= 12 { 15u8 } else { 0 };
+		(Kind::I16x16, luma, chroma, pred)
+	};
+	let mut kind = kind;
+	if kind == Kind::I4x4 && run.transform_8x8 && res!(read_transform_8x8(f, run, e, mb)) {
+		kind = Kind::I8x8;
+	}
+	let mut modes = [2u8; 16];
+	if kind == Kind::I4x4 {
+		for i in 0..16 {
+			let predicted = res!(predicted_mode(f, run, mb, i, &modes, kind));
+			modes[i] = res!(read_mode_cabac(e, predicted));
+		}
+	} else if kind == Kind::I8x8 {
+		for i in 0..4 {
+			let predicted = res!(predicted_mode(f, run, mb, i * 4, &modes, kind));
+			let m = res!(read_mode_cabac(e, predicted));
+			for k in 0..4 {
+				modes[i * 4 + k] = m;
+			}
+		}
+	}
+	let chroma_code = res!(read_chroma_mode(f, run, e, mb));
+	let chroma_mode = res!(ModeC::of(chroma_code));
+	if kind != Kind::I16x16 {
+		let (luma, chroma) = res!(read_cbp(f, run, e, mb));
+		cbp_luma = luma;
+		cbp_chroma = chroma;
+	}
+	let mut qp = run.qp;
+	let mut moved = false;
+	if cbp_luma > 0 || cbp_chroma > 0 || kind == Kind::I16x16 {
+		let delta = res!(read_qp_delta(f, e));
+		if !(-26..=25).contains(&delta) {
+			return Err(err!(
+				"An mb_qp_delta of {} was coded, and it runs from -26 to 25.", delta;
+			Invalid, Input, Decode));
+		}
+		moved = delta != 0;
+		qp = (run.qp + delta + 52).rem_euclid(52);
+		run.qp = qp;
+	}
+	// The residual, block by block, with each block's flag kept for the next block's context.
+	let mut luma_dc = [0i32; 16];
+	let mut luma = [[0i32; 16]; 16];
+	let mut luma8 = [[0i32; 64]; 4];
+	let mut chroma_dc = [[0i32; 4]; 2];
+	let mut chroma = [[[0i32; 16]; 4]; 2];
+	let mut here = Partial {
+		kind,
+		cbp_luma,
+		cbp_chroma,
+		cbf: Cbf::default(),
+	};
+
+	if kind == Kind::I16x16 {
+		let inc = cbf_inc_luma_dc(f, run, mb) as u32;
+		let mut out = [0i32; 16];
+		here.cbf.luma_dc = res!(cabac::residual(&mut e.c, &mut e.x, Cat::LumaDc, Some(inc), &mut out));
+		for (i, at) in ZIGZAG_4X4.iter().enumerate() {
+			luma_dc[*at] = out[i];
+		}
+	}
+	for i8 in 0..4usize {
+		if cbp_luma & (1 << i8) == 0 {
+			continue;
+		}
+		if kind == Kind::I8x8 {
+			// A block of sixty-four coefficients, read whole. CAVLC has no table for that and reads
+			// four interleaved blocks of sixteen instead; the arithmetic coder has no such limit,
+			// and it carries no coded_block_flag for the block either (§7.3.5.3.3).
+			res!(cabac::residual(&mut e.c, &mut e.x, Cat::Luma8x8, None, &mut luma8[i8]));
+			here.cbf.luma8[i8] = true;
+			continue;
+		}
+		let (cat, start) = if kind == Kind::I16x16 {
+			(Cat::LumaAc, 1usize)
+		} else {
+			(Cat::Luma4x4, 0)
+		};
+		for i4 in 0..4usize {
+			let blk = i8 * 4 + i4;
+			let inc = cbf_inc_luma4(f, run, mb, blk, &here) as u32;
+			let mut out = [0i32; 16];
+			let held = &mut out[..cat.coeffs()];
+			here.cbf.luma4[blk] =
+				res!(cabac::residual(&mut e.c, &mut e.x, cat, Some(inc), held));
+			for i in 0..cat.coeffs() {
+				luma[blk][ZIGZAG_4X4[start + i]] = out[i];
+			}
+		}
+	}
+	if cbp_chroma & 3 != 0 {
+		for c in 0..2usize {
+			let inc = cbf_inc_chroma_dc(f, run, mb, c) as u32;
+			here.cbf.chroma_dc[c] = res!(cabac::residual(
+				&mut e.c, &mut e.x, Cat::ChromaDc, Some(inc), &mut chroma_dc[c]));
+		}
+	}
+	if cbp_chroma & 2 != 0 {
+		for c in 0..2usize {
+			for i in 0..4usize {
+				let inc = cbf_inc_chroma_ac(f, run, mb, c, i, &here) as u32;
+				let mut out = [0i32; 15];
+				here.cbf.chroma_ac[c][i] = res!(cabac::residual(
+					&mut e.c, &mut e.x, Cat::ChromaAc, Some(inc), &mut out));
+				for (k, v) in out.iter().enumerate() {
+					chroma[c][i][ZIGZAG_4X4[1 + k]] = *v;
+				}
+			}
+		}
+	}
+
+	if std::env::var("H264_TRACE").is_ok() && mb < 3 {
+		eprintln!("mb {} type {} kind {:?} cbpL {} cbpC {} qp {} p16 {:?} ch {:?} modes {:?} \
+			dc {:?} blk0 {:?} big0 {:?}",
+			mb, mb_type, kind, cbp_luma, cbp_chroma, qp, pred16, chroma_mode, &modes[..4],
+			&luma_dc[..4], &luma[0][..4], &luma8[0][..4]);
+	}
+	f.slice_of[mb] = Some(run.index);
+	f.kind[mb] = kind;
+	f.qp[mb] = qp;
+	f.modes[mb] = modes;
+	f.big[mb] = kind == Kind::I8x8;
+	f.cbp_luma[mb] = cbp_luma;
+	f.cbp_chroma[mb] = cbp_chroma;
+	f.chroma_mode[mb] = chroma_code as u8;
+	f.qp_moved[mb] = moved;
+	f.cbf[mb] = here.cbf;
+
+	res!(reconstruct(f, run, mb, kind, qp, pred16, chroma_mode, &modes, &luma_dc, &luma, &luma8,
+		&chroma_dc, &chroma));
+	Ok(())
+}
+
+/// Reads a raw-sample macroblock out of an arithmetically coded slice (§7.3.5, §9.3.1.2).
+///
+/// The samples are not entropy coded at all. They begin at the next byte boundary after the
+/// terminating bin that named the macroblock, and the arithmetic decoder is **started afresh** on the
+/// byte after them rather than carried across, which is what makes the bitstream position matter
+/// here: get it wrong and everything after this macroblock in the slice is noise.
+fn pcm_cabac(f: &mut Frame, run: &mut SliceRun, e: &mut Entropy, mb: usize) -> Outcome<()> {
+	let at = e.byte();
+	// Two hundred and fifty-six luma samples, then two of sixty-four for a 4:2:0 macroblock.
+	let need = 256 + 128;
+	let end = match at.checked_add(need) {
+		Some(end) if end <= e.body.len() => end,
+		_ => return Err(err!(
+			"A raw-sample macroblock needs {} bytes from byte {} of a payload of {}.",
+			need, at, e.body.len(); Invalid, Input, Decode)),
+	};
+	let raw = &e.body[at..end];
+	let (mx, my) = ((mb % f.mbs_w) * 16, (mb / f.mbs_w) * 16);
+	for y in 0..16 {
+		for x in 0..16 {
+			f.pic.y.put(mx + x, my + y, raw[y * 16 + x]);
+		}
+	}
+	let (cx, cy) = ((mb % f.mbs_w) * 8, (mb / f.mbs_w) * 8);
+	for c in 0..2usize {
+		for y in 0..8 {
+			for x in 0..8 {
+				let v = raw[256 + c * 64 + y * 8 + x];
+				if c == 0 {
+					f.pic.cb.put(cx + x, cy + y, v);
+				} else {
+					f.pic.cr.put(cx + x, cy + y, v);
+				}
+			}
+		}
+	}
+	res!(e.restart(end));
+	f.slice_of[mb] = Some(run.index);
+	f.kind[mb] = Kind::Pcm;
+	f.qp[mb] = 0;
+	f.modes[mb] = [2u8; 16];
+	f.counts[mb] = [16u8; 24];
+	f.big[mb] = false;
+	// A raw-sample macroblock is named in every neighbour rule of clause 9.3.3.1.1 in its own right,
+	// so the patterns and flags recorded here are never read; they are left at nought rather than
+	// invented.
 	Ok(())
 }
 

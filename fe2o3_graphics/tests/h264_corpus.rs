@@ -396,10 +396,17 @@ fn test_every_first_slice_header_reads_03() -> Outcome<()> {
 	Ok(())
 }
 
-/// FFmpeg's own decode of a film's first frame, as raw 4:2:0 planes.
+/// FFmpeg's own decode of a film's first intra-coded frame, as raw 4:2:0 planes.
 ///
 /// `skip_filter` asks FFmpeg to leave the deblocking filter out, which is how a fault in prediction
 /// or in the residual is told apart from a fault in the filter.
+///
+/// **The picture asked for is the first *intra* one, not the first one shown.** A decoder that draws
+/// a film's opening frame decodes the first sync sample, which is an IDR; where a film is coded with
+/// bidirectional prediction that picture is not the first in presentation order, and pictures shown
+/// before it refer forward to it. Nine films in the corpus are like that -- 4K, all-intra pictures
+/// interleaved with B pictures -- and without this the two sides decode different moments of the same
+/// wedding and disagree in every sample, with nothing to say why.
 fn ffmpeg_frame(path: &std::path::Path, skip_filter: bool) -> Outcome<Vec<u8>> {
 	let mut cmd = std::process::Command::new("ffmpeg");
 	// **`-noautorotate` is load-bearing.** A phone writes the rotation it was held at into the
@@ -407,12 +414,20 @@ fn ffmpeg_frame(path: &std::path::Path, skip_filter: bool) -> Outcome<Vec<u8>> {
 	// it was coded, and rotation is the container's business, so without this the two are compared
 	// after one of them has been turned -- and at ninety degrees the byte count is unchanged, so
 	// nothing but the samples says so.
-	cmd.args(["-v", "error", "-noautorotate"]);
+	//
+	// **`-apply_cropping:v codec` is load-bearing for the same reason.** A film may carry a clean
+	// aperture in its sample description, and FFmpeg crops to it by default; a decoder produces the
+	// picture the *coded* stream describes, cropped to the sequence parameter set's conformance
+	// window and nothing else. One film in the corpus is coded 1440 by 1080 and asks in its
+	// container to be shown as 1308 by 980, and without this the two are compared after one of them
+	// has been cut.
+	cmd.args(["-v", "error", "-noautorotate", "-apply_cropping:v", "codec"]);
 	if skip_filter {
 		cmd.args(["-skip_loop_filter", "all"]);
 	}
 	cmd.arg("-i").arg(path)
-		.args(["-map", "0:v:0", "-frames:v", "1", "-pix_fmt", "yuv420p", "-f", "rawvideo", "-"]);
+		.args(["-map", "0:v:0", "-vf", "select='eq(pict_type\\,I)'", "-frames:v", "1",
+			"-pix_fmt", "yuv420p", "-f", "rawvideo", "-"]);
 	let out = res!(cmd.output());
 	if out.stdout.is_empty() {
 		return Err(err!(
@@ -490,9 +505,13 @@ fn test_the_first_frame_matches_ffmpeg_04() -> Outcome<()> {
 		let luma = w * h;
 		let chroma = (w / 2) * (h / 2);
 		if theirs.len() != luma + 2 * chroma {
-			return Err(err!(
-				"{:?}: this decoder made a picture of {} by {} and FFmpeg gave {} bytes, which is \
-				not {} plus two of {}.", path, w, h, theirs.len(), luma, chroma; Test, Mismatch));
+			// A disagreement about the *size* is as much a difference as a disagreement about a
+			// sample, and it is recorded as one rather than ending the survey: one odd film would
+			// otherwise stop every film after it from being measured at all.
+			differ.push(fmt!(
+				"{:?} {}x{}: this decoder made {} bytes of picture and FFmpeg gave {}",
+				path.file_name().unwrap_or_default(), w, h, luma + 2 * chroma, theirs.len()));
+			continue;
 		}
 		let (wy, dy, fy) = compare(&mine.y.px, &theirs[..luma], w);
 		let (wu, du, _) = compare(&mine.cb.px, &theirs[luma..luma + chroma], w / 2);
