@@ -1116,6 +1116,541 @@ fn sps_geometry(sps: &[u8]) -> Outcome<(u16, u16)> {
 	Ok((w as u16, h as u16))
 }
 
+// ------------------------------------------------------------------------- reading a film
+
+/// The deepest a box tree may nest before it is called a mistake.
+const MAX_DEPTH: usize = 16;
+
+/// Which codec a track's samples are coded in, as its sample entry names it.
+///
+/// An enum rather than the four-character code, so that a caller matches on a thing the reader has
+/// already recognised rather than on a byte string of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+	/// H.264, described by an `avcC` record.
+	Avc,
+	/// HEVC, described by an `hvcC` record.
+	Hevc,
+	/// Motion JPEG: every sample is a whole JPEG and there is no configuration record at all.
+	Mjpeg,
+	/// Something else, carrying its four-character code so that a refusal can name it.
+	Other([u8; 4]),
+}
+
+impl Kind {
+
+	/// The codec a sample entry's four-character code names.
+	fn of(code: [u8; 4]) -> Self {
+		match &code {
+			// `avc1` carries its parameter sets in the configuration record only; `avc3` may also
+			// carry them in the samples. Both are read the same way here, because the sample is
+			// walked for parameter sets in either case.
+			b"avc1" | b"avc3"	=> Self::Avc,
+			b"hvc1" | b"hev1"	=> Self::Hevc,
+			b"jpeg" | b"mjpa" | b"mjpb"	=> Self::Mjpeg,
+			_			=> Self::Other(code),
+		}
+	}
+}
+
+/// One video track of a film, as its sample table describes it.
+///
+/// This is the reading half of this module, and it exists for one job: telling a decoder where a
+/// film's first coded picture is. It holds an **index and not the film**: the sample table of a
+/// four-gigabyte film is a few tens of kilobytes, and a caller that wants one frame of it should
+/// never have to hold the other four gigabytes to get it. So the samples are spans, and the bytes
+/// they name are the caller's to fetch.
+#[derive(Clone, Debug)]
+pub struct Film {
+	/// Which codec the track is coded in.
+	kind:	Kind,
+	/// The configuration record out of the sample entry, where the codec has one.
+	config:	Vec<u8>,
+	/// The coded width the sample entry declares.
+	width:	u16,
+	/// The coded height it declares.
+	height:	u16,
+	/// How far the picture is to be turned before it is shown, in degrees clockwise.
+	rotation:	u16,
+	/// Each sample's offset in the file and its length.
+	samples:	Vec<(u64, u32)>,
+	/// Which samples a reader may begin decoding at, as `stss` lists them, counted from nought.
+	///
+	/// Empty means the box was absent, which per ISO/IEC 14496-12 §8.6.2 means **every** sample is
+	/// a sync sample -- the opposite of what an empty list would otherwise suggest, and the reason
+	/// this is not an `Option` the caller has to remember to check.
+	sync:	Vec<u32>,
+}
+
+impl Film {
+
+	/// Reads a film's first video track out of a whole file.
+	///
+	/// A file with no video track, or with one whose sample table is incomplete, is refused: a
+	/// track whose samples cannot be located is not a track a picture can be drawn from.
+	pub fn read(bytes: &[u8]) -> Outcome<Self> {
+		let mut at = 0usize;
+		while at + 8 <= bytes.len() {
+			let (size, head) = res!(box_head(bytes, at, bytes.len()));
+			if &bytes[at + 4..at + 8] == b"moov" {
+				return match res!(movie(bytes, at + head, at + size)) {
+					Some(f) => Ok(f),
+					None => Err(err!(
+						"The file's movie box carries no video track. A film needs a track whose \
+						handler is `vide`.";
+					Invalid, Input, Missing)),
+				};
+			}
+			at += size;
+		}
+		Err(err!(
+			"The file carries no `moov` box, so nothing says where its samples are.";
+		Invalid, Input, Missing))
+	}
+
+	/// The same, from a `moov` box a caller has lifted out of a file on its own.
+	///
+	/// This is what a caller with a file handle rather than a buffer uses: the chunk offsets in
+	/// `stco` are absolute file offsets, so the index does not depend on where the movie box itself
+	/// sat, and a film of any size can be indexed by reading its metadata alone. QuickTime writes
+	/// `moov` at the end of the file as often as at the front, so this is not a rare path.
+	pub fn from_moov(moov: &[u8]) -> Outcome<Self> {
+		match res!(movie(moov, 0, moov.len())) {
+			Some(f) => Ok(f),
+			None => Err(err!(
+				"The movie box carries no video track. A film needs a track whose handler is \
+				`vide`.";
+			Invalid, Input, Missing)),
+		}
+	}
+
+	/// Which codec the track is coded in.
+	pub fn kind(&self) -> Kind {
+		self.kind
+	}
+
+	/// The decoder configuration record out of the sample entry: `avcC` or `hvcC`.
+	pub fn config(&self) -> &[u8] {
+		&self.config
+	}
+
+	/// The coded size the sample entry declares, which is not the cropped size the parameter set
+	/// implies and should not be shown as though it were.
+	pub fn size(&self) -> (u16, u16) {
+		(self.width, self.height)
+	}
+
+	/// How far the picture is to be turned before it is shown: 0, 90, 180 or 270 degrees clockwise.
+	///
+	/// A phone writes the angle it was held at into the track header's transformation matrix rather
+	/// than turning the samples, so a decoder's output is the picture as it was *coded* and this is
+	/// what a viewer must do with it. Ignoring it shows a great many holiday films on their side.
+	/// It also hides itself well at ninety degrees, where the turned picture has exactly as many
+	/// samples as the untured one.
+	pub fn rotation(&self) -> u16 {
+		self.rotation
+	}
+
+	/// How many samples the track holds.
+	pub fn samples(&self) -> usize {
+		self.samples.len()
+	}
+
+	/// Where one sample sits in the file, and how long it is.
+	pub fn span(&self, i: usize) -> Outcome<(u64, u32)> {
+		match self.samples.get(i) {
+			Some(s) => Ok(*s),
+			None => Err(err!(
+				"Sample {} was asked for and the track holds {}.", i, self.samples.len();
+			Invalid, Input, Range)),
+		}
+	}
+
+	/// One sample's bytes, out of the file the index was read from.
+	pub fn sample<'b>(&self, bytes: &'b [u8], i: usize) -> Outcome<&'b [u8]> {
+		let (off, len) = res!(self.span(i));
+		let from = off as usize;
+		let to = match from.checked_add(len as usize) {
+			Some(to) if to <= bytes.len() => to,
+			_ => return Err(err!(
+				"Sample {} sits at byte {} and is {} long, in a buffer of {}. A file read in part \
+				cannot give up its samples.", i, off, len, bytes.len();
+			Invalid, Input, Decode)),
+		};
+		Ok(&bytes[from..to])
+	}
+
+	/// Which sample a decoder may begin at.
+	///
+	/// Almost always the first sample of the track, since a film that cannot be played from its
+	/// start is a film no player will open, but a track whose `stss` says otherwise is followed
+	/// rather than assumed about.
+	pub fn first_sync(&self) -> Outcome<usize> {
+		match self.sync.first() {
+			Some(n) => Ok(*n as usize),
+			// An absent `stss` means every sample is a sync sample.
+			None if !self.samples.is_empty() => Ok(0),
+			None => Err(err!("The track holds no samples."; Invalid, Input, Missing)),
+		}
+	}
+}
+
+/// Reads a box header, giving its whole length and the length of the header itself.
+fn box_head(bytes: &[u8], at: usize, to: usize) -> Outcome<(usize, usize)> {
+	if at + 8 > to {
+		return Err(err!("A box header runs past the end of its parent."; Invalid, Input, Decode));
+	}
+	let size = u32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
+	let (size, head) = match size {
+		// A size of one means the real one is the next eight bytes (ISO/IEC 14496-12 §4.2).
+		1 => {
+			if at + 16 > to {
+				return Err(err!(
+					"A box says its length is sixty-four bits and its parent ends inside it.";
+				Invalid, Input, Decode));
+			}
+			let mut wide = [0u8; 8];
+			wide.copy_from_slice(&bytes[at + 8..at + 16]);
+			(u64::from_be_bytes(wide) as usize, 16usize)
+		},
+		// A size of zero means the box runs to the end of its parent.
+		0 => (to - at, 8usize),
+		n => (n as usize, 8usize),
+	};
+	if size < head || at.saturating_add(size) > to {
+		return Err(err!(
+			"A {} box at byte {} says it is {} bytes long, and its parent ends at {}.",
+			String::from_utf8_lossy(&bytes[at + 4..at + 8]), at, size, to;
+		Invalid, Input, Decode));
+	}
+	Ok((size, head))
+}
+
+/// Walks the children of a box, handing each one's four-character code and body to a visitor.
+///
+/// The visitor answers whether the walk should descend into it. Every box is length-prefixed and
+/// the lengths have to tile the parent; a box that claims to end beyond its parent is a malformed
+/// file, and is refused rather than clamped, since clamping turns one wrong length into a
+/// plausible-looking picture.
+fn walk<F>(bytes: &[u8], parent: [u8; 4], from: usize, to: usize, depth: usize, visit: &mut F)
+	-> Outcome<()>
+where
+	F: FnMut([u8; 4], [u8; 4], usize, usize) -> Outcome<bool>,
+{
+	if depth > MAX_DEPTH {
+		return Err(err!(
+			"The box tree nests more than {} deep, which no legal file does.", MAX_DEPTH;
+		Invalid, Input, Decode));
+	}
+	let mut at = from;
+	while at + 8 <= to {
+		let (size, head) = res!(box_head(bytes, at, to));
+		let mut kind = [0u8; 4];
+		kind.copy_from_slice(&bytes[at + 4..at + 8]);
+		if res!(visit(kind, parent, at + head, at + size)) {
+			res!(walk(bytes, kind, at + head, at + size, depth + 1, visit));
+		}
+		at += size;
+	}
+	Ok(())
+}
+
+/// Reads a four-byte big-endian number out of a box body.
+fn be32(bytes: &[u8], at: usize) -> Outcome<u32> {
+	match bytes.get(at..at + 4) {
+		Some(s) => Ok(u32::from_be_bytes([s[0], s[1], s[2], s[3]])),
+		None => Err(err!("A box ends inside a four-byte field."; Invalid, Input, Decode)),
+	}
+}
+
+/// Reads an eight-byte big-endian number out of a box body.
+fn be64(bytes: &[u8], at: usize) -> Outcome<u64> {
+	match bytes.get(at..at + 8) {
+		Some(s) => Ok(u64::from_be_bytes(
+			[s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]])),
+		None => Err(err!("A box ends inside an eight-byte field."; Invalid, Input, Decode)),
+	}
+}
+
+/// The tables one track's sample table holds, before they are turned into sample positions.
+#[derive(Default)]
+struct Tables {
+	/// The handler type: `vide` for a video track.
+	handler:	[u8; 4],
+	/// Where the sample description sits, to be read once the handler says this is video.
+	stsd:		Option<(usize, usize)>,
+	/// The codec, from the sample entry.
+	kind:		Option<Kind>,
+	/// The configuration record's span in the file.
+	config:		Option<(usize, usize)>,
+	/// The coded size the sample entry declares.
+	size:		(u16, u16),
+	/// Each sample's length in bytes, from `stsz`.
+	sizes:		Vec<u32>,
+	/// The runs of `(first_chunk, samples_per_chunk)` from `stsc`, first chunk counted from one.
+	runs:		Vec<(u32, u32)>,
+	/// Each chunk's offset in the file, from `stco` or `co64`.
+	chunks:		Vec<u64>,
+	/// The sync sample numbers, counted from one as `stss` writes them.
+	sync:		Vec<u32>,
+	/// The rotation the track header's matrix codes, in degrees clockwise.
+	rotation:	u16,
+}
+
+/// Reads the first video track out of a `moov` box.
+fn movie(bytes: &[u8], from: usize, to: usize) -> Outcome<Option<Film>> {
+	let mut out: Option<Film> = None;
+	let mut at = from;
+	while at + 8 <= to {
+		let (size, head) = res!(box_head(bytes, at, to));
+		if &bytes[at + 4..at + 8] == b"trak" {
+			let mut t = Tables::default();
+			res!(track(bytes, at + head, at + size, &mut t));
+			if &t.handler == b"vide" {
+				if let Some((body, end)) = t.stsd {
+					res!(sample_description(bytes, body, end, &mut t));
+				}
+				out = Some(res!(assemble(bytes, t)));
+				break;
+			}
+		}
+		at += size;
+	}
+	Ok(out)
+}
+
+/// Reads one track's handler and sample table.
+fn track(bytes: &[u8], from: usize, to: usize, t: &mut Tables) -> Outcome<()> {
+	walk(bytes, *b"trak", from, to, 0, &mut |kind, parent, body, end| {
+		match &kind {
+			b"mdia" | b"minf" | b"stbl" => return Ok(true),
+			b"hdlr" => {
+				// version and flags, then a pre-defined word, then the handler type.
+				//
+				// **Only the one directly inside `mdia`.** QuickTime puts a second `hdlr` inside
+				// `minf` naming the *data* handler -- `alis` for a file, `url ` for a reference --
+				// and a walk that takes whichever it meets last decides a video track is not one.
+				// That is how a 2003 camcorder's film comes to be refused as having no video in it.
+				if &parent == b"mdia" {
+					if let Some(s) = bytes.get(body + 8..body + 12) {
+						t.handler.copy_from_slice(s);
+					}
+				}
+			},
+			b"tkhd" => {
+				// The transformation matrix sits at a fixed offset that depends on the version:
+				// the version-1 header carries 64-bit times and is twelve bytes longer. Only the
+				// four rotation entries are read, because a matrix that is not a rotation is not
+				// something a photograph library can act on anyway.
+				let ver = bytes.get(body).copied().unwrap_or(0);
+				let at = body + if ver == 1 { 52 } else { 40 };
+				let mut m = [0i32; 4];
+				for (i, v) in m.iter_mut().enumerate() {
+					*v = res!(be32(bytes, at + i * 4)) as i32;
+				}
+				// The four are a, b, c, d in 16.16 fixed point.
+				let one = 0x0001_0000i32;
+				t.rotation = match (m[0], m[1], m[2], m[3]) {
+					(0, x, y, 0) if x == one && y == -one	=> 90,
+					(x, 0, 0, y) if x == -one && y == -one	=> 180,
+					(0, x, y, 0) if x == -one && y == one	=> 270,
+					_					=> 0,
+				};
+			},
+			b"stsd" => {
+				// Not read here. A track's boxes arrive in whatever order the writer chose, and a
+				// sound track's sample entry is not a visual one; reading every `stsd` as though it
+				// were refuses a film for the shape of a track nobody asked about.
+				t.stsd = Some((body, end));
+			},
+			b"stsz" => {
+				let sample_size = res!(be32(bytes, body + 4));
+				let count = res!(be32(bytes, body + 8)) as usize;
+				if count > MAX_SAMPLES {
+					return Err(err!(
+						"A track holds {} samples, and {} is this reader's ceiling.",
+						count, MAX_SAMPLES;
+					Invalid, Input, Excessive));
+				}
+				t.sizes = if sample_size != 0 {
+					vec![sample_size; count]
+				} else {
+					let mut v = Vec::with_capacity(count);
+					for i in 0..count {
+						v.push(res!(be32(bytes, body + 12 + i * 4)));
+					}
+					v
+				};
+			},
+			b"stsc" => {
+				let count = res!(be32(bytes, body + 4)) as usize;
+				if count > MAX_SAMPLES {
+					return Err(err!(
+						"A sample-to-chunk table holds {} runs, and {} is this reader's ceiling.",
+						count, MAX_SAMPLES;
+					Invalid, Input, Excessive));
+				}
+				t.runs = Vec::with_capacity(count);
+				for i in 0..count {
+					let first = res!(be32(bytes, body + 8 + i * 12));
+					let per = res!(be32(bytes, body + 12 + i * 12));
+					t.runs.push((first, per));
+				}
+			},
+			b"stco" | b"co64" => {
+				let wide = &kind == b"co64";
+				let count = res!(be32(bytes, body + 4)) as usize;
+				if count > MAX_SAMPLES {
+					return Err(err!(
+						"A chunk offset table holds {} entries, and {} is this reader's ceiling.",
+						count, MAX_SAMPLES;
+					Invalid, Input, Excessive));
+				}
+				t.chunks = Vec::with_capacity(count);
+				for i in 0..count {
+					t.chunks.push(if wide {
+						res!(be64(bytes, body + 8 + i * 8))
+					} else {
+						res!(be32(bytes, body + 8 + i * 4)) as u64
+					});
+				}
+			},
+			b"stss" => {
+				let count = res!(be32(bytes, body + 4)) as usize;
+				if count > MAX_SAMPLES {
+					return Err(err!(
+						"A sync sample table holds {} entries, and {} is this reader's ceiling.",
+						count, MAX_SAMPLES;
+					Invalid, Input, Excessive));
+				}
+				t.sync = Vec::with_capacity(count);
+				for i in 0..count {
+					t.sync.push(res!(be32(bytes, body + 8 + i * 4)));
+				}
+			},
+			_ => {},
+		}
+		Ok(false)
+	})
+}
+
+/// Reads the first sample entry of a sample description, and the configuration record inside it.
+fn sample_description(bytes: &[u8], body: usize, end: usize, t: &mut Tables) -> Outcome<()> {
+	let count = res!(be32(bytes, body + 4));
+	if count == 0 {
+		return Ok(());
+	}
+	let at = body + 8;
+	let (size, head) = res!(box_head(bytes, at, end));
+	let mut code = [0u8; 4];
+	code.copy_from_slice(&bytes[at + 4..at + 8]);
+	t.kind = Some(Kind::of(code));
+	// A visual sample entry: six reserved bytes and a two-byte data reference index, then 70 bytes
+	// of visual fields, of which the width and height sit at 16 and 18 (ISO/IEC 14496-12 §8.5.2).
+	let visual = at + head + 8;
+	if visual + 70 > at + size {
+		return Err(err!(
+			"A {} sample entry is too short to be a visual one.", String::from_utf8_lossy(&code);
+		Invalid, Input, Decode));
+	}
+	t.size = (
+		u16::from_be_bytes([bytes[visual + 16], bytes[visual + 17]]),
+		u16::from_be_bytes([bytes[visual + 18], bytes[visual + 19]]),
+	);
+	// The configuration box sits among the sample entry's own children.
+	let mut conf = None;
+	res!(walk(bytes, code, visual + 70, at + size, 0, &mut |kind, _parent, cbody, cend| {
+		if matches!(&kind, b"avcC" | b"hvcC") && conf.is_none() {
+			conf = Some((cbody, cend));
+		}
+		Ok(false)
+	}));
+	t.config = conf;
+	Ok(())
+}
+
+/// Turns a sample table into the position and length of every sample.
+fn assemble(bytes: &[u8], t: Tables) -> Outcome<Film> {
+	let kind = match t.kind {
+		Some(k) => k,
+		None => return Err(err!(
+			"A video track carries no sample description, so nothing says how it is coded.";
+		Invalid, Input, Missing)),
+	};
+	if t.runs.is_empty() || t.chunks.is_empty() {
+		return Err(err!(
+			"A video track's sample table has no sample-to-chunk or chunk offset box, so no \
+			sample can be located.";
+		Invalid, Input, Missing));
+	}
+	// Walk the runs, laying samples into chunks. `stsc` names the first chunk of each run counted
+	// from one, and a run continues until the next one begins (ISO/IEC 14496-12 §8.7.4).
+	let mut samples: Vec<(u64, u32)> = Vec::with_capacity(t.sizes.len());
+	let mut n = 0usize;
+	for (r, (first, per)) in t.runs.iter().enumerate() {
+		if *first == 0 {
+			return Err(err!(
+				"A sample-to-chunk run begins at chunk 0, and the chunks are counted from one.";
+			Invalid, Input, Decode));
+		}
+		let start = (*first - 1) as usize;
+		let stop = match t.runs.get(r + 1) {
+			Some((next, _)) if *next >= 1 => ((*next - 1) as usize).min(t.chunks.len()),
+			_ => t.chunks.len(),
+		};
+		for c in start..stop {
+			let base = t.chunks[c];
+			let mut off = base;
+			for _ in 0..*per {
+				let len = match t.sizes.get(n) {
+					Some(l) => *l,
+					// A chunk table that runs on past the sample sizes is not a fault: the sizes
+					// are the authority on how many samples there are.
+					None => break,
+				};
+				samples.push((off, len));
+				off = off.saturating_add(len as u64);
+				n += 1;
+			}
+		}
+	}
+	if samples.len() != t.sizes.len() {
+		return Err(err!(
+			"A sample table lays out {} samples and names the size of {}. The two disagree, so \
+			no sample can be trusted to be where the table says.", samples.len(), t.sizes.len();
+		Invalid, Input, Mismatch));
+	}
+	let config = match t.config {
+		Some((from, to)) => match bytes.get(from..to) {
+			Some(s) => s.to_vec(),
+			None => return Err(err!(
+				"A decoder configuration record runs past the end of the file.";
+			Invalid, Input, Decode)),
+		},
+		// Motion JPEG has none, and needs none.
+		None => Vec::new(),
+	};
+	// `stss` counts from one and everything else here counts from nought.
+	let mut sync = Vec::with_capacity(t.sync.len());
+	for s in &t.sync {
+		if *s == 0 {
+			return Err(err!(
+				"A sync sample table names sample 0, and the samples are counted from one.";
+			Invalid, Input, Decode));
+		}
+		sync.push(*s - 1);
+	}
+	Ok(Film {
+		kind,
+		config,
+		width:	t.size.0,
+		height:	t.size.1,
+		rotation: t.rotation,
+		samples,
+		sync,
+	})
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -1545,6 +2080,71 @@ mod tests {
 			t.finish()
 		};
 		req!(res!(build()), res!(build()));
+		Ok(())
+	}
+	#[test]
+	fn test_a_written_film_reads_back_17() -> Outcome<()> {
+		// The two halves of this module, held to each other. The writer lays out a sample table and
+		// the reader walks it back, and what they must agree on is the thing neither can check
+		// alone: where each sample's bytes actually are. A chunk offset measured from the wrong
+		// origin, or a sample-to-chunk run read as though its first chunk were counted from nought,
+		// produces a perfectly well-formed index that points at the wrong bytes.
+		let mut t = res!(Track::new(64, 48, 1000, Codec::Avc(avcc())));
+		let mut wrote: Vec<Vec<u8>> = Vec::new();
+		for i in 0..6usize {
+			let data = nal(20 + i);
+			wrote.push(data.clone());
+			res!(t.push(Sample { data, dur: 40, sync: i == 0 }));
+		}
+		let file = res!(t.finish());
+		let film = res!(Film::read(&file));
+		req!(film.kind(), Kind::Avc);
+		req!(film.samples(), wrote.len());
+		req!(film.size(), (64u16, 48u16));
+		for (i, want) in wrote.iter().enumerate() {
+			let got = res!(film.sample(&file, i));
+			req!(got, &want[..], "sample {} came back from the wrong place", i);
+		}
+		// The first sample is the only sync sample, and a reader must begin there.
+		req!(res!(film.first_sync()), 0usize);
+		// A sample past the end is refused rather than answered.
+		req!(film.span(wrote.len()).is_err(), true, "a sample past the end was handed out");
+		Ok(())
+	}
+
+	#[test]
+	fn test_a_track_that_is_turned_says_so_18() -> Outcome<()> {
+		// The writer writes a unity matrix, so a film it wrote is shown as it was coded. What is
+		// asserted here is the reading of the four entries that matter, because the fault this
+		// guards against hides perfectly: a picture turned by ninety degrees has exactly as many
+		// samples as one that is not, so a decoder and a viewer that disagree about the angle
+		// produce output of the right size and the wrong shape.
+		let mut t = res!(Track::new(64, 48, 1000, Codec::Avc(avcc())));
+		res!(t.push(Sample { data: nal(24), dur: 40, sync: true }));
+		let mut file = res!(t.finish());
+		req!(res!(Film::read(&file)).rotation(), 0u16, "a unity matrix was read as a rotation");
+
+		// Turn it a quarter clockwise by writing the matrix a phone would: a = 0, b = 1, c = -1,
+		// d = 0, in 16.16 fixed point.
+		let at = match file.windows(4).position(|w| w == b"tkhd") {
+			Some(at) => at + 4 + 40,
+			None => return Err(err!("the writer emitted no track header."; Test, Missing)),
+		};
+		let put = |file: &mut Vec<u8>, i: usize, v: i32| {
+			file[at + i * 4..at + i * 4 + 4].copy_from_slice(&(v as u32).to_be_bytes());
+		};
+		let one = 0x0001_0000i32;
+		put(&mut file, 0, 0);
+		put(&mut file, 1, one);
+		put(&mut file, 2, -one);
+		put(&mut file, 3, 0);
+		req!(res!(Film::read(&file)).rotation(), 90u16);
+		// And a half turn.
+		put(&mut file, 0, -one);
+		put(&mut file, 1, 0);
+		put(&mut file, 2, 0);
+		put(&mut file, 3, -one);
+		req!(res!(Film::read(&file)).rotation(), 180u16);
 		Ok(())
 	}
 }

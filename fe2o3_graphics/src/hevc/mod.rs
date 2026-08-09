@@ -979,6 +979,24 @@ pub struct Slice {
 	pub entries:	Vec<u64>,
 }
 
+/// Which picture parameter set a slice names, read without the set itself.
+///
+/// The identifier is the third element of the header and none of the three before it depends on a
+/// parameter set, so it can be had before choosing one -- which is the point: a caller holding
+/// several sets has to know which it is being asked for.
+pub fn slice_pps_id(body: &[u8]) -> Outcome<u8> {
+	let mut b = Bits::new(body);
+	let first = res!(b.flag());
+	if !first {
+		return Err(err!(
+			"A slice segment that is not the first of its picture. A still picture is one slice.";
+		Invalid, Input, Unknown));
+	}
+	// Only an IRAP picture carries this flag, and every still is one.
+	let _no_output_of_prior_pics = res!(b.flag());
+	Ok(res!(b.ue()) as u8)
+}
+
 /// Reads a slice segment header (§7.3.6.1).
 ///
 /// Only the independent, intra case: a dependent slice segment continues another one's context and
@@ -1168,32 +1186,53 @@ mod tests {
 /// sample adaptive offset, which are separate passes over a finished picture.
 pub fn picture(record: &[u8], data: &[u8]) -> Outcome<decode::Picture> {
 	let cfg = res!(config(record));
-	let mut seq: Option<Sps> = None;
-	let mut pic: Option<Pps> = None;
-	// The parameter sets ride in the configuration record, in Annex B form.
+	// Every set the record carries, not the last of each. A photograph out of a
+	// camera carries one apiece and either would do; a film carries several, and
+	// a slice names which one it was coded against. Keeping the last read meant
+	// four films in ten were refused for referring to a set that was in hand all
+	// along.
+	let mut seqs: Vec<Sps> = Vec::new();
+	let mut pics: Vec<Pps> = Vec::new();
 	for unit in &cfg.sets {
 		match unit.kind {
-			nal::SPS => seq = Some(res!(sps(&unit.body))),
-			nal::PPS => pic = Some(res!(pps(&unit.body))),
+			nal::SPS => seqs.push(res!(sps(&unit.body))),
+			nal::PPS => pics.push(res!(pps(&unit.body))),
 			_ => {},
 		}
 	}
-	let sps = match seq {
-		Some(s) => s,
-		None => return Err(err!(
-			"The decoder configuration carries no sequence parameter set."; Invalid, Input)),
-	};
-	let pps = match pic {
-		Some(p) => p,
-		None => return Err(err!(
-			"The decoder configuration carries no picture parameter set."; Invalid, Input)),
-	};
+	if seqs.is_empty() {
+		return Err(err!(
+			"The decoder configuration carries no sequence parameter set."; Invalid, Input));
+	}
+	if pics.is_empty() {
+		return Err(err!(
+			"The decoder configuration carries no picture parameter set."; Invalid, Input));
+	}
 
 	// And the slice is in the item's own bytes.
 	let units = res!(split_lengthed(data, cfg.length_size));
 	for unit in &units {
 		match unit.kind {
 			nal::IDR_W_RADL | nal::IDR_N_LP | 21 => {
+				// Which sets this slice was coded against: the picture set it
+				// names, and the sequence set that one belongs to.
+				let want = res!(slice_pps_id(&unit.body));
+				let pps = match pics.iter().find(|p| p.id == want) {
+					Some(p) => p.clone(),
+					None => return Err(err!(
+						"A slice references picture parameter set {}, and the configuration \
+						carries {}.", want,
+						pics.iter().map(|p| p.id.to_string()).collect::<Vec<_>>().join(", ");
+					Invalid, Input, Missing)),
+				};
+				let sps = match seqs.iter().find(|s| s.id == pps.sps_id) {
+					Some(s) => s.clone(),
+					None => return Err(err!(
+						"Picture parameter set {} belongs to sequence parameter set {}, and the \
+						configuration carries {}.", pps.id, pps.sps_id,
+						seqs.iter().map(|s| s.id.to_string()).collect::<Vec<_>>().join(", ");
+					Invalid, Input, Missing)),
+				};
 				let head = res!(slice(&unit.body, &sps, &pps));
 				// The header was read from the unescaped payload; the data after it has to be
 				// handed over escaped, because that is what the entry point offsets count.
