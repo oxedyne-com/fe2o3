@@ -387,6 +387,19 @@ impl PublishConfig {
 				&& path.as_bytes().get(self.path.len()) == Some(&b'/'))
 	}
 
+	/// Where a reader who has finished with a subscription page should be sent.
+	///
+	/// The site's own front door where it names one, and the index of the posts otherwise -- which
+	/// is right for a site whose posts are all there is of it, and is at least somewhere for one
+	/// where they are not.
+	pub fn home_or_index(&self) -> String {
+		if self.home.trim().is_empty() {
+			self.path.clone()
+		} else {
+			self.home.clone()
+		}
+	}
+
 	/// The absolute URL of a path under this site.
 	pub fn url_of(&self, path: &str) -> String {
 		let mut s = self.base_url.clone();

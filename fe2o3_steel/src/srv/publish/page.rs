@@ -809,7 +809,11 @@ fn nav(cfg: &PublishConfig, on_index: bool) -> String {
 	escape_attr(&mut s, if cfg.home.is_empty() { &cfg.path } else { &cfg.home });
 	s.push_str("\">");
 	if cfg.logo.is_empty() {
-		escape_text(&mut s, &cfg.title);
+		// What the site is called, not what it calls its posts. The link beside this one already
+		// says the latter, and a site that sets `home` was getting the same word twice, side by
+		// side, going to two different places. The logo's alt text below has always read it this
+		// way round; only the wordmark did not.
+		escape_text(&mut s, if cfg.site_name.is_empty() { &cfg.title } else { &cfg.site_name });
 	} else {
 		// The site's name is what the mark says, so that is what a reader who cannot see it is told;
 		// a site that has not named itself falls back to what it calls its posts.
@@ -1016,30 +1020,39 @@ pub fn subscribe_sent_page(cfg: &PublishConfig) -> HttpMessage {
 /// The same page whether the link was fresh or followed a second time, so a double-click is not an
 /// error to a reader who did nothing wrong.
 pub fn subscribe_confirmed_page(cfg: &PublishConfig) -> HttpMessage {
-	let body = subscribe_result(
+	let who = if cfg.site_name.trim().is_empty() {
+		fmt!("this site")
+	} else {
+		cfg.site_name.clone()
+	};
+	let body = subscribe_result_home(
 		"You are subscribed",
-		"Your subscription is confirmed. New posts will arrive by email, and every one carries a link \
-		to unsubscribe.",
+		&fmt!("That is it -- your address is confirmed, and {} will write to it now and then. \
+			Every message carries a link that takes you off the list in one click, and the \
+			address is not given to anyone else.", who),
+		&cfg.home_or_index(),
 	);
 	subscribe_page(cfg, "Subscribed", &body, HttpStatus::OK)
 }
 
 /// The answer to an unsubscribe link followed: no more mail reaches this address.
 pub fn subscribe_unsubscribed_page(cfg: &PublishConfig) -> HttpMessage {
-	let body = subscribe_result(
+	let body = subscribe_result_home(
 		"Unsubscribed",
 		"You will receive no further posts at this address. You are welcome back any time from the \
 		subscribe page.",
+		&cfg.home_or_index(),
 	);
 	subscribe_page(cfg, "Unsubscribed", &body, HttpStatus::OK)
 }
 
 /// The answer to a token that names nobody: malformed, already spent by a re-subscribe, or never real.
 pub fn subscribe_bad_token_page(cfg: &PublishConfig) -> HttpMessage {
-	let body = subscribe_result(
+	let body = subscribe_result_home(
 		"This link did not work",
 		"That link is not one we recognise -- it may be old, or already used. Try subscribing again \
 		if you meant to.",
+		&cfg.home_or_index(),
 	);
 	subscribe_page(cfg, "Link not recognised", &body, HttpStatus::NotFound)
 }
@@ -1065,11 +1078,26 @@ pub fn subscribe_unavailable_page(cfg: &PublishConfig) -> HttpMessage {
 
 /// A titled paragraph, the body every subscription-result page shares.
 fn subscribe_result(heading: &str, para: &str) -> String {
+	subscribe_result_home(heading, para, "")
+}
+
+/// As [`subscribe_result`], ending with a way back to the site.
+///
+/// A page reached from an email is the end of a road: the reader followed a link out of their
+/// inbox, and without somewhere to go next they are left on a page with a sentence on it. Where the
+/// site says where its front door is, the page offers it.
+fn subscribe_result_home(heading: &str, para: &str, home: &str) -> String {
 	let mut s = String::from("<article class=\"aside aside-subscribe-result\">\n<h1>");
 	escape_text(&mut s, heading);
 	s.push_str("</h1>\n<p>");
 	escape_text(&mut s, para);
-	s.push_str("</p>\n</article>\n");
+	s.push_str("</p>\n");
+	if !home.is_empty() {
+		s.push_str("<p class=\"aside-subscribe-home\"><a href=\"");
+		escape_attr(&mut s, home);
+		s.push_str("\">Back to the site</a></p>\n");
+	}
+	s.push_str("</article>\n");
 	s
 }
 

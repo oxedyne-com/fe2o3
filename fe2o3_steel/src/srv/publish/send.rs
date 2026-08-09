@@ -881,7 +881,9 @@ impl MailSender {
 			Ok(d)	=> d.as_secs(),
 			Err(_)	=> 0,
 		};
-		for signer in &self.dkim {
+		// Signed as the domain the message says it is from, so the signature is aligned and the
+		// receiver can read it as evidence about this sender.
+		for signer in &self.signers_for(domain_of(envelope_of(from))) {
 			match signer.sign(&bytes, &[], now) {
 				Ok(b)	=> bytes = b,
 				Err(e)	=> warn!("publish: signing newsletter mail with the {} key for selector \
@@ -896,6 +898,37 @@ impl MailSender {
 		// a permanent failure and suppresses the subscriber for good. So the documented shape of
 		// `newsletter_from` would have quietly bounced every address it was ever used with.
 		self.client.deliver(envelope_of(from), &rcpt, &bytes).await
+	}
+
+	/// The signers this message should carry, given the domain its From speaks for.
+	///
+	/// A signature is only worth something to the receiver if its `d=` matches the From address:
+	/// that match is what lets DMARC treat the signature as evidence about *this* sender rather
+	/// than about whoever runs the machine. A host serving several domains therefore signs each
+	/// one's mail as itself, from the same key, published under each domain.
+	///
+	/// Where the caller names no domain, or names the one the signers already carry, the signers
+	/// are used as they are. A key that will not re-derive is passed over with a warning rather
+	/// than failing the send: an unaligned signature still beats no message.
+	fn signers_for(&self, domain: &str) -> Vec<Arc<DkimSigner>> {
+		if domain.is_empty() {
+			return self.dkim.clone();
+		}
+		self.dkim.iter().map(|s| {
+			if s.domain() == domain {
+				s.clone()
+			} else {
+				match s.for_domain(domain) {
+					Ok(d)	=> Arc::new(d),
+					Err(e)	=> {
+						warn!("publish: cannot sign as {} with the {} key for selector '{}'; \
+							signing as {} instead: {}",
+							domain, s.algorithm(), s.selector(), s.domain(), e);
+						s.clone()
+					}
+				}
+			}
+		}).collect()
 	}
 
 	/// Sends the double opt-in confirmation to a pending subscriber.
@@ -1296,12 +1329,14 @@ fn build_moderation_alert_email(from: &str, to: &str, site_name: &str, post_slug
 		To: {to}\r\n\
 		Subject: {subject}\r\n\
 		Date: {date}\r\n\
+		Message-ID: {msgid}\r\n\
 		MIME-Version: 1.0\r\n\
 		Auto-Submitted: auto-generated\r\n\
 		Content-Type: text/plain; charset=utf-8\r\n\
 		\r\n\
 		{body}",
-		from = from, to = to, subject = subject, date = date, body = body,
+		from = from, to = to, subject = subject, date = date, msgid = message_id(from),
+		body = body,
 	)
 }
 
@@ -1315,6 +1350,32 @@ pub fn envelope_of(from: &str) -> &str {
 		(Some(a), Some(b)) if b > a	=> from[a + 1..b].trim(),
 		_				=> from.trim(),
 	}
+}
+
+/// The domain part of a bare address, empty where there is none.
+pub fn domain_of(addr: &str) -> &str {
+	match addr.rsplit_once('@') {
+		Some((_, d))	=> d.trim(),
+		None		=> "",
+	}
+}
+
+/// A unique `Message-ID` for one message, in the sending domain.
+///
+/// **Every message needs one.** A message without a `Message-ID` cannot be threaded, cannot be
+/// de-duplicated by a receiving server, and is treated by the large mail providers as the mark of
+/// something not sent by real mail software -- which is exactly the judgement a confirmation link
+/// cannot afford. The value must be unique: the clock gives it an order and the random tail keeps
+/// two messages sent in one second apart.
+fn message_id(from: &str) -> String {
+	let secs = match SystemTime::now().duration_since(UNIX_EPOCH) {
+		Ok(d)	=> d.as_secs(),
+		Err(_)	=> 0,
+	};
+	let tail = Rand::generate_random_string(16, "abcdefghijklmnopqrstuvwxyz0123456789");
+	let domain = domain_of(envelope_of(from));
+	let domain = if domain.is_empty() { "localhost" } else { domain };
+	fmt!("<{}.{}@{}>", secs, tail, domain)
 }
 
 fn build_confirmation_email(from: &str, to: &str, confirm_url: &str, site_name: &str) -> String {
@@ -1342,12 +1403,14 @@ fn build_confirmation_email(from: &str, to: &str, confirm_url: &str, site_name: 
 		To: {to}\r\n\
 		Subject: {subject}\r\n\
 		Date: {date}\r\n\
+		Message-ID: {msgid}\r\n\
 		MIME-Version: 1.0\r\n\
 		Auto-Submitted: auto-generated\r\n\
 		Content-Type: text/plain; charset=utf-8\r\n\
 		\r\n\
 		{body}",
-		from = from, to = to, subject = subject, date = date, body = body,
+		from = from, to = to, subject = subject, date = date, msgid = message_id(from),
+		body = body,
 	)
 }
 
@@ -1409,8 +1472,10 @@ fn build_newsletter_email(
 		To: {to}\r\n\
 		Subject: {subject}\r\n\
 		Date: {date}\r\n\
+		Message-ID: {msgid}\r\n\
 		MIME-Version: 1.0\r\n\
 		List-Unsubscribe: <{unsub}>\r\n\
+		List-Unsubscribe-Post: List-Unsubscribe=One-Click\r\n\
 		Content-Type: multipart/alternative; boundary=\"{boundary}\"\r\n\
 		\r\n\
 		--{boundary}\r\n\
@@ -1423,6 +1488,7 @@ fn build_newsletter_email(
 		{html}\r\n\
 		--{boundary}--\r\n",
 		from = from, to = to, subject = post.title, date = date, unsub = unsub_url,
+		msgid = message_id(from),
 		boundary = boundary, text = text, html = html,
 	)
 }
@@ -1788,6 +1854,32 @@ mod tests {
 		assert_eq!(named.newsletter_from(&sender), "README <hi@x.test>");
 		let unnamed = PublishConfig { newsletter_from: String::new(), ..Default::default() };
 		assert_eq!(unnamed.newsletter_from(&sender), "news@x.test");
+		Ok(())
+	}
+
+	/// A message carries a unique Message-ID in the domain it is sent from.
+	///
+	/// Its absence is read by the large providers as the mark of something not sent by real mail
+	/// software. The confirmation to a new subscriber is the one message that must arrive, so it is
+	/// the one that can least afford the judgement.
+	#[test]
+	fn test_a_message_carries_an_id_26() -> Outcome<()> {
+		let a = message_id("need2know <news@need2know.ai>");
+		assert!(a.starts_with('<') && a.ends_with('>'), "not in angle brackets: {}", a);
+		assert!(a.ends_with("@need2know.ai>"), "not in the sending domain: {}", a);
+		// Unique, or a receiving server is entitled to treat the second as a duplicate of the first.
+		assert_ne!(a, message_id("need2know <news@need2know.ai>"));
+		// A From with no domain still yields a well-formed id rather than a malformed header.
+		assert!(message_id("postmaster").ends_with("@localhost>"));
+		Ok(())
+	}
+
+	/// The domain is taken from the address, not from the display name around it.
+	#[test]
+	fn test_the_domain_comes_from_the_address_27() -> Outcome<()> {
+		assert_eq!(domain_of(envelope_of("need2know <news@need2know.ai>")), "need2know.ai");
+		assert_eq!(domain_of(envelope_of("news@x.test")), "x.test");
+		assert_eq!(domain_of("not-an-address"), "");
 		Ok(())
 	}
 

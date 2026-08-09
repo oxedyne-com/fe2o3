@@ -202,6 +202,20 @@ impl DkimSigner {
     /// PKCS#8 serialisation of the private key, for on-disk persistence.
     pub fn pkcs8_bytes(&self) -> &[u8] { &self.pkcs8 }
 
+    /// The same key and selector, signing for another domain.
+    ///
+    /// A DKIM key is not bound to a domain: what binds them is the public key published at
+    /// `<selector>._domainkey.<domain>`. A host serving several domains signs each one's mail as
+    /// itself from one key, by publishing that key under each domain -- and it must, because a
+    /// signature whose `d=` does not match the From address is unaligned, and an unaligned
+    /// signature is worth very little to the receiver deciding whether to believe the message.
+    ///
+    /// The caller is responsible for having published the key under the domain it names here. A
+    /// signature for a domain with no record is worse than none: it fails rather than being absent.
+    pub fn for_domain(&self, domain: impl Into<String>) -> Outcome<Self> {
+        Self::from_pkcs8(&self.pkcs8, domain, self.selector.clone())
+    }
+
     /// Domain this signer signs for.
     pub fn domain(&self) -> &str { &self.domain }
 

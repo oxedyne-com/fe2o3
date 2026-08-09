@@ -936,6 +936,9 @@ impl<
         -> impl std::future::Future<Output = Outcome<Option<HttpMessage>>> + Send
     {
         let request_path = loc.path.as_string().to_string();
+        // A one-click unsubscribe arrives as a POST carrying its token in the query, so this
+        // handler needs the query as well as the path.
+        let request_query = loc.query.clone();
         let id = id.to_string();
         let api_routes = self.api_routes.clone();
         let webhook_routes = self.webhook_routes.clone();
@@ -958,6 +961,15 @@ impl<
                     let peer_ip = peer.ip().to_string();
                     let resp = res!(publish_subscribe::handle_subscribe(
                         cfg.as_ref(), db.as_ref(), &mail, &body, Some(&peer_ip), &id).await);
+                    return Ok(Some(resp));
+                }
+                // An unsubscribe by POST, which is what one-click means: the newsletter carries
+                // `List-Unsubscribe-Post`, and a mail client that honours it posts to the same URL
+                // rather than opening a browser. The token rides in the query exactly as it does
+                // for the link, so the two paths remove the same subscriber by the same means.
+                if let Some(Subscription::Unsubscribe) = cfg.subscription_of(&request_path) {
+                    let resp = res!(publish_subscribe::handle_unsubscribe(
+                        cfg.as_ref(), db.as_ref(), &request_query, &id));
                     return Ok(Some(resp));
                 }
                 // A comment on a post: a public POST under the post's own path, so which post is
