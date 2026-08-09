@@ -19,6 +19,21 @@
 //! create our own PTY for the `tmux attach` process so it sees a
 //! real terminal.  The tmux session persists after the WebSocket
 //! disconnects; reconnecting reattaches.
+//!
+//! # Platforms
+//!
+//! The management layer is portable: it runs a command and reads its output. The
+//! **bridge is Unix-only**, and deliberately so. It rests on a pseudo-terminal
+//! whose slave end becomes a child's three standard streams, and Windows has no
+//! counterpart to that pair of ideas -- its console pseudo-terminal is a
+//! different mechanism with a different lifetime, and a shim over it would be a
+//! second implementation rather than a translation. On a platform without a
+//! pseudo-terminal the bridge therefore refuses by name, and the refusal says
+//! which half is missing, so a caller learns it at the handshake rather than
+//! from a connection that goes quiet.
+//!
+//! This is the only place in the crate that reaches for `nix`, which is why it
+//! is the whole of the Windows task for the server.
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_jdat::{
@@ -30,12 +45,16 @@ use oxedyne_fe2o3_iop_crypto::enc::Encrypter;
 use oxedyne_fe2o3_iop_db::api::Database;
 use oxedyne_fe2o3_iop_hash::api::Hasher;
 
+use std::process::Command;
+
+#[cfg(unix)]
 use std::{
     fs::File,
     os::fd::AsFd,
-    process::{Command, Stdio},
+    process::Stdio,
 };
 
+#[cfg(unix)]
 use tokio::{
     process::Command as TokioCommand,
 };
@@ -191,6 +210,7 @@ impl TerminalManager {
 ///
 /// The tmux session persists after the WebSocket disconnects;
 /// reconnecting with the same session name reattaches.
+#[cfg(unix)]
 pub async fn handle_terminal_websocket<
     const UIDL: usize,
     UID:    NumIdDat<UIDL> + 'static,
@@ -396,4 +416,59 @@ pub async fn handle_terminal_websocket<
         None, Some("session ended".to_string()))).await;
     debug!("{}: Terminal bridge closed for '{}'.", id, session_name);
     Ok(())
+}
+
+/// The same, on a platform with no pseudo-terminal: the handshake is completed
+/// and the bridge then refuses by name.
+///
+/// The handshake happens first on purpose. A client that has asked to attach to
+/// a terminal is owed the reason it cannot, and a WebSocket that is closed
+/// before it opens carries no reason at all -- the browser reports a failed
+/// connection and nothing about why. So the socket is established, the refusal
+/// is sent as text on it in the same shape as every other error this bridge
+/// reports, and only then does the call return an error for the log.
+#[cfg(not(unix))]
+pub async fn handle_terminal_websocket<
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL> + 'static,
+    ENC:    Encrypter + 'static,
+    KH:     Hasher + 'static,
+    DB:     Database<UIDL, UID, ENC, KH> + 'static,
+    S:      tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+>(
+    mut stream:     S,
+    session_name:   String,
+    request:        oxedyne_fe2o3_net::http::msg::HttpMessage,
+    id:             &String,
+)
+    -> Outcome<()>
+{
+    let mut ws: WebSocket<
+        '_,
+        UIDL, UID, ENC, KH, DB,
+        S,
+        oxedyne_fe2o3_net::ws::handler::WebSocketEchoHandler,
+    > = WebSocket::new_server(
+        &mut stream,
+        oxedyne_fe2o3_net::ws::handler::WebSocketEchoHandler,
+        crate::srv::constant::WEBSOCKET_CHUNK_SIZE,
+        crate::srv::constant::WEBSOCKET_CHUNKING_THRESHOLD,
+    );
+    match ws.connect_as_server(request).await {
+        Ok(()) => (),
+        Err(e) => return Err(err!(e,
+            "{}: Terminal WS handshake failed.", id;
+            IO, Network, Wire)),
+    }
+    let msg = WebSocketMessage::Text(fmt!(
+        "error \"A terminal session needs a pseudo-terminal, which this platform \
+        does not provide.\""));
+    let _ = ws.send(&msg).await;
+    let _ = ws.send(&WebSocketMessage::Close(
+        None, Some("no pseudo-terminal".to_string()))).await;
+    Err(err!(
+        "{}: A bridge to terminal session '{}' was asked for on a platform with no \
+        pseudo-terminal. The management commands work here; the bridge does not.",
+        id, session_name;
+        Unimplemented, System))
 }

@@ -36,7 +36,6 @@ oxedyne_fe2o3_text				= { path = "../fe2o3_text" }
 oxedyne_fe2o3_tui				= { path = "../fe2o3_tui" }
 
 notify = "6.1.1"
-nix = { version = "0.31", features = ["term", "fs"] }
 libc = "0.2"
 rustls-pemfile = "2"
 rustls = { version = "0.23", features = ["ring"] }
@@ -74,6 +73,11 @@ oxedyne_fe2o3_core 				= { path = "../fe2o3_core" }
 [dev-dependencies]
 # For test client
 rustls-pki-types = "1.0"
+
+# The pseudo-terminal the WebSocket terminal bridge rests on. Unix-only, and the
+# only place in the crate that reaches for it -- see `srv::ws::term`.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", features = ["term", "fs"] }
 
 [target.'cfg(windows)'.dependencies]
 is_elevated = "0.1"
