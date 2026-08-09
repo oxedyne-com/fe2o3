@@ -238,5 +238,28 @@ how Gilgamesh went
         Ok(())
     }));
 
+    res!(test_it(filter, &["Tidy label 000", "all", "string", "label"], || {
+        let tests = [
+            ("  Ningaloo  ",     8,  Some("Ningaloo")),
+            ("Two\nlines",       80, Some("Twolines")),
+            ("Rosie\tsmith",     80, Some("Rosiesmith")),
+            ("   ",              80, None),
+            ("",                 80, None),
+            ("\n\t\u{7}",        80, None),
+            // The bound is in characters, so a name in another script is cut
+            // where a reader would count and not where the bytes happen to fall.
+            ("Ολυμπία",          4,  Some("Ολυμ")),
+            ("abcdef",           3,  Some("abc")),
+            // A cut that lands on a space leaves no trailing one.
+            ("ab cdef",          3,  Some("ab")),
+        ];
+        for (input, max, expected) in tests {
+            let got = Stringer::new(input).tidy_label(max);
+            req!(got, expected.map(|s| s.to_string()),
+                "(L: got, R: expected), input {:?} at {}", input, max);
+        }
+        Ok(())
+    }));
+
     Ok(())
 }

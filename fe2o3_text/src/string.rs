@@ -293,6 +293,33 @@ impl Stringer {
         Self::new(fmt!(" {} ", self))
     }
 
+    /// One line of text a person typed, fit to be stored as a label.
+    ///
+    /// Control characters are dropped rather than escaped, because a newline in
+    /// the middle of a name is a paste gone wrong and not a choice; the ends are
+    /// trimmed; and the result is bounded in **characters** rather than bytes, so
+    /// that a limit means the same thing in every script. Nothing is answered
+    /// where nothing readable is left, since a label nobody can tell from an
+    /// empty one is worse than a refusal the caller can explain.
+    pub fn tidy_label(&self, max: usize) -> Option<String> {
+        let mut out = String::with_capacity(self.0.len());
+        for c in self.0.trim().chars() {
+            if c.is_control() {
+                continue;
+            }
+            if out.chars().count() >= max {
+                break;
+            }
+            out.push(c);
+        }
+        let out = out.trim().to_string();
+        if out.is_empty() {
+            None
+        } else {
+            Some(out)
+        }
+    }
+
     pub fn fit_into(
         &mut self,
         new_len:        usize,
