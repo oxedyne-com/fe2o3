@@ -1170,6 +1170,8 @@ pub struct Film {
 	width:	u16,
 	/// The coded height it declares.
 	height:	u16,
+	/// How far the picture is to be turned before it is shown, in degrees clockwise.
+	rotation:	u16,
 	/// Each sample's offset in the file and its length.
 	samples:	Vec<(u64, u32)>,
 	/// Which samples a reader may begin decoding at, as `stss` lists them, counted from nought.
@@ -1236,6 +1238,17 @@ impl Film {
 	/// implies and should not be shown as though it were.
 	pub fn size(&self) -> (u16, u16) {
 		(self.width, self.height)
+	}
+
+	/// How far the picture is to be turned before it is shown: 0, 90, 180 or 270 degrees clockwise.
+	///
+	/// A phone writes the angle it was held at into the track header's transformation matrix rather
+	/// than turning the samples, so a decoder's output is the picture as it was *coded* and this is
+	/// what a viewer must do with it. Ignoring it shows a great many holiday films on their side.
+	/// It also hides itself well at ninety degrees, where the turned picture has exactly as many
+	/// samples as the untured one.
+	pub fn rotation(&self) -> u16 {
+		self.rotation
 	}
 
 	/// How many samples the track holds.
@@ -1380,6 +1393,8 @@ struct Tables {
 	chunks:		Vec<u64>,
 	/// The sync sample numbers, counted from one as `stss` writes them.
 	sync:		Vec<u32>,
+	/// The rotation the track header's matrix codes, in degrees clockwise.
+	rotation:	u16,
 }
 
 /// Reads the first video track out of a `moov` box.
@@ -1421,6 +1436,26 @@ fn track(bytes: &[u8], from: usize, to: usize, t: &mut Tables) -> Outcome<()> {
 						t.handler.copy_from_slice(s);
 					}
 				}
+			},
+			b"tkhd" => {
+				// The transformation matrix sits at a fixed offset that depends on the version:
+				// the version-1 header carries 64-bit times and is twelve bytes longer. Only the
+				// four rotation entries are read, because a matrix that is not a rotation is not
+				// something a photograph library can act on anyway.
+				let ver = bytes.get(body).copied().unwrap_or(0);
+				let at = body + if ver == 1 { 52 } else { 40 };
+				let mut m = [0i32; 4];
+				for (i, v) in m.iter_mut().enumerate() {
+					*v = res!(be32(bytes, at + i * 4)) as i32;
+				}
+				// The four are a, b, c, d in 16.16 fixed point.
+				let one = 0x0001_0000i32;
+				t.rotation = match (m[0], m[1], m[2], m[3]) {
+					(0, x, y, 0) if x == one && y == -one	=> 90,
+					(x, 0, 0, y) if x == -one && y == -one	=> 180,
+					(0, x, y, 0) if x == -one && y == one	=> 270,
+					_					=> 0,
+				};
 			},
 			b"stsd" => {
 				// Not read here. A track's boxes arrive in whatever order the writer chose, and a
@@ -1610,6 +1645,7 @@ fn assemble(bytes: &[u8], t: Tables) -> Outcome<Film> {
 		config,
 		width:	t.size.0,
 		height:	t.size.1,
+		rotation: t.rotation,
 		samples,
 		sync,
 	})

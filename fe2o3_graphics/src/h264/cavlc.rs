@@ -297,17 +297,18 @@ pub fn residual(b: &mut Bits, nc: i32, max_coeffs: usize) -> Outcome<Block> {
 	if let Some(last) = runs.last_mut() {
 		*last = zeros_left;
 	}
-	// Lay the levels out, highest frequency first (§9.2.4).
-	let mut at = total as i32 - 1;
-	for i in 0..total {
-		at += runs[i];
+	// Lay the levels out (§9.2.4). The levels were read from the *highest* frequency down, and the
+	// runs count the zeroes in front of each, so the walk goes backwards through both and forwards
+	// through the block: the last level read is the one nearest the direct current term.
+	let mut at: i32 = -1;
+	for i in (0..total).rev() {
+		at += runs[i] + 1;
 		if at < 0 || at as usize >= max_coeffs {
 			return Err(err!(
 				"A coefficient lands at position {} of a block of {}.", at, max_coeffs;
 			Invalid, Input, Decode));
 		}
 		out.levels[at as usize] = levels[i];
-		at -= 1;
 	}
 	Ok(out)
 }

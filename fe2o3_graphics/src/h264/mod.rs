@@ -72,6 +72,8 @@
 //! Every constant below names the clause it comes from.
 
 pub mod cavlc;
+pub mod decode;
+pub mod filter;
 pub mod intra;
 pub mod transform;
 
