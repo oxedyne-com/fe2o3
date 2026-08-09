@@ -71,6 +71,10 @@
 //! §9.2 and CABAC §9.3. The `avcC` record the parameter sets arrive in is ISO/IEC 14496-15 §5.3.3.1.
 //! Every constant below names the clause it comes from.
 
+pub mod cavlc;
+pub mod intra;
+pub mod transform;
+
 use oxedyne_fe2o3_core::prelude::*;
 
 /// The largest picture this decoder will describe, in luma samples each way.
@@ -1151,8 +1155,8 @@ mod tests {
 		// reader that says "no more data" one bit early decodes every one of them as a picture with
 		// no eight-by-eight transform, which is a wrong picture rather than an error.
 		//
-		// A payload of one byte 0b1010_1000: three bits of syntax, then the stop bit, then padding.
-		let buf = [0b1010_1000u8];
+		// A payload of one byte 0b1011_0000: three bits of syntax, then the stop bit, then padding.
+		let buf = [0b1011_0000u8];
 		let mut b = Bits::new(&buf);
 		for i in 0..3 {
 			let more = b.more_data();
