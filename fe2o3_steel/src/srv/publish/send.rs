@@ -890,7 +890,12 @@ impl MailSender {
 			}
 		}
 		let rcpt = [to.to_string()];
-		self.client.deliver(from, &rcpt, &bytes).await
+		// The envelope takes the address alone. The header keeps the display name, which is what a
+		// reader sees; the reverse-path may not carry one, and a server handed
+		// `MAIL FROM:<README <news@example.com>>` refuses it with a 5xx -- which this module reads as
+		// a permanent failure and suppresses the subscriber for good. So the documented shape of
+		// `newsletter_from` would have quietly bounced every address it was ever used with.
+		self.client.deliver(envelope_of(from), &rcpt, &bytes).await
 	}
 
 	/// Sends the double opt-in confirmation to a pending subscriber.
@@ -1298,6 +1303,18 @@ fn build_moderation_alert_email(from: &str, to: &str, site_name: &str, post_slug
 		{body}",
 		from = from, to = to, subject = subject, date = date, body = body,
 	)
+}
+
+/// The bare address inside a From, for the SMTP reverse-path.
+///
+/// `News <news@example.com>` addresses a person and `news@example.com` addresses a mail server, and
+/// only the second belongs in an envelope. A From carrying no angle brackets is already bare and is
+/// returned as it stands, trimmed.
+pub fn envelope_of(from: &str) -> &str {
+	match (from.rfind('<'), from.rfind('>')) {
+		(Some(a), Some(b)) if b > a	=> from[a + 1..b].trim(),
+		_				=> from.trim(),
+	}
 }
 
 fn build_confirmation_email(from: &str, to: &str, confirm_url: &str, site_name: &str) -> String {
@@ -1771,6 +1788,30 @@ mod tests {
 		assert_eq!(named.newsletter_from(&sender), "README <hi@x.test>");
 		let unnamed = PublishConfig { newsletter_from: String::new(), ..Default::default() };
 		assert_eq!(unnamed.newsletter_from(&sender), "news@x.test");
+		Ok(())
+	}
+
+	/// The envelope takes the address alone, whatever display name the From wears.
+	///
+	/// The documented shape of `newsletter_from` carries a display name, and that whole string went
+	/// into `MAIL FROM:<...>`. A receiving server refuses that reverse-path with a 5xx, which this
+	/// module reads as a permanent failure and answers by suppressing the subscriber -- so every
+	/// address a named From was ever used with would have been marked bounced and never mailed
+	/// again.
+	#[test]
+	fn test_the_envelope_takes_the_address_alone_25() -> Outcome<()> {
+		assert_eq!(envelope_of("README <hi@x.test>"), "hi@x.test");
+		assert_eq!(envelope_of("need2know <news@need2know.ai>"), "news@need2know.ai");
+		// Already bare, and stays so.
+		assert_eq!(envelope_of("news@x.test"), "news@x.test");
+		assert_eq!(envelope_of("  news@x.test  "), "news@x.test");
+		// Whitespace inside the brackets is not part of the address.
+		assert_eq!(envelope_of("A Name < news@x.test >"), "news@x.test");
+		// A name carrying an angle bracket does not truncate the address: the last pair wins.
+		assert_eq!(envelope_of("A > B <news@x.test>"), "news@x.test");
+		// Nothing usable is returned as it stands rather than as an empty reverse-path, which would
+		// silently become a bounce address.
+		assert_eq!(envelope_of("not an address"), "not an address");
 		Ok(())
 	}
 
