@@ -40,6 +40,15 @@
 
 use oxedyne_fe2o3_core::prelude::*;
 
+use std::{
+	fs::File,
+	io::{
+		Read,
+		Seek,
+		SeekFrom,
+	},
+};
+
 /// The most samples one track may hold, a ceiling against a length that is a mistake.
 ///
 /// A million frames is about eleven and a half hours at twenty-four a second, which is longer than
@@ -1293,6 +1302,230 @@ impl Film {
 			None => Err(err!("The track holds no samples."; Invalid, Input, Missing)),
 		}
 	}
+
+	/// Reads a film's first video track out of a file, holding none of the film.
+	///
+	/// This is the form a caller wanting one frame of a large film uses: the top-level boxes are
+	/// walked by their headers, the `moov` box alone is read, and the handle is left open so that
+	/// [`Film::read_sample`] can fetch the one sample the index names. A film of four gigabytes
+	/// costs its metadata, and a caller that cannot hold the file -- which is most callers, since
+	/// most films are past any sensible buffer -- is not shut out of its first frame.
+	pub fn of(f: &mut File) -> Outcome<Self> {
+		let moov = match res!(moov_of(f)) {
+			Some(m) => m,
+			None => return Err(err!(
+				"The file carries no `moov` box, so nothing says where its samples are.";
+			Invalid, Input, Missing)),
+		};
+		Self::from_moov(&moov)
+	}
+
+	/// One sample's bytes, read out of the file the index was read from.
+	///
+	/// The counterpart of [`Film::sample`] for a caller with a handle rather than a buffer. The
+	/// offsets in a sample table are absolute file offsets, so this needs nothing of where the
+	/// movie box sat.
+	pub fn read_sample(&self, f: &mut File, i: usize) -> Outcome<Vec<u8>> {
+		let (off, len) = res!(self.span(i));
+		if len > SAMPLE_MAX {
+			return Err(err!(
+				"Sample {} says it is {} bytes long, and {} is this reader's ceiling for one \
+				coded picture.", i, len, SAMPLE_MAX;
+			Invalid, Input, Excessive));
+		}
+		let mut buf = vec![0u8; len as usize];
+		res!(f.seek(SeekFrom::Start(off)), IO, File);
+		res!(f.read_exact(&mut buf), IO, File);
+		Ok(buf)
+	}
+
+	/// The bytes of the first sample a decoder may begin at.
+	///
+	/// The one call a poster frame needs: which sample to start at, and its bytes.
+	pub fn read_first_sync(&self, f: &mut File) -> Outcome<Vec<u8>> {
+		let i = res!(self.first_sync());
+		self.read_sample(f, i)
+	}
+}
+
+// ------------------------------------------------------------- a film's index, out of a file
+
+/// The most bytes a movie box may occupy before the file is called a mistake.
+///
+/// A `moov` is an index and not media: the sample tables of a track at this reader's ceiling of a
+/// million samples come to a few tens of megabytes, and anything past this is a length field read
+/// out of the wrong place rather than a film.
+pub const MOOV_MAX: u64 = 64 * 1024 * 1024;
+
+/// The most bytes one sample may occupy.
+///
+/// One coded picture. A 4K intra frame is a few megabytes; this is a ceiling against a length that
+/// is a mistake, since the length is what a buffer is sized from.
+pub const SAMPLE_MAX: u32 = 64 * 1024 * 1024;
+
+/// How much of a movie header is read back, which is more than either version of the box occupies.
+pub const MVHD_BYTES: u64 = 256;
+
+/// The most boxes walked at one level looking for one of them.
+const MAX_BOXES: usize = 4096;
+
+/// The body of the first box of a given type between two offsets in a file, as its offset and its
+/// length.
+///
+/// **Only the box headers are read**: eight bytes each, or the sixteen a 64-bit length needs. An
+/// `mdat` holding two gigabytes of film is stepped over by its declared length and never touched,
+/// which is what makes finding a film's index affordable on a file nobody wants in memory.
+///
+/// A length that does not fit inside the range being walked ends the walk and answers `None`
+/// rather than failing. A file truncated in transfer is a thing to report absence for, and the
+/// caller asking this question has a plain answer for absence: the box is not there.
+pub fn find_box(f: &mut File, want: &[u8; 4], from: u64, to: u64)
+	-> Outcome<Option<(u64, u64)>>
+{
+	let mut at = from;
+	for _ in 0..MAX_BOXES {
+		if at + 8 > to {
+			return Ok(None);
+		}
+		res!(f.seek(SeekFrom::Start(at)), IO, File);
+		let mut head = [0u8; 16];
+		if res!(fill(f, &mut head[..8])) != 8 {
+			return Ok(None);
+		}
+		let size = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as u64;
+		let mut kind = [0u8; 4];
+		kind.copy_from_slice(&head[4..8]);
+		// A size of nought means the box runs to the end of its parent; a size of one means the
+		// real length is the eight bytes after the type (ISO/IEC 14496-12 §4.2).
+		let (body, next) = match size {
+			0 => (at + 8, to),
+			1 => {
+				if res!(fill(f, &mut head[8..16])) != 8 {
+					return Ok(None);
+				}
+				let mut wide = [0u8; 8];
+				wide.copy_from_slice(&head[8..16]);
+				let wide = u64::from_be_bytes(wide);
+				if wide < 16 {
+					return Ok(None);
+				}
+				(at + 16, at.saturating_add(wide))
+			},
+			n if n < 8 => return Ok(None),
+			n => (at + 8, at.saturating_add(n)),
+		};
+		if next > to || next <= at || body > next {
+			return Ok(None);
+		}
+		if &kind == want {
+			return Ok(Some((body, next - body)));
+		}
+		at = next;
+	}
+	Ok(None)
+}
+
+/// The body of a film's movie box, lifted out of a file.
+///
+/// What comes back is the box's **children**, which is what [`Film::from_moov`] reads. QuickTime
+/// writes `moov` at the end of a file as often as at the front, and either is reached by the same
+/// walk over the top-level headers.
+pub fn moov_of(f: &mut File) -> Outcome<Option<Vec<u8>>> {
+	let end = res!(f.metadata(), IO, File).len();
+	let (body, len) = match res!(find_box(f, b"moov", 0, end)) {
+		Some(span) => span,
+		None => return Ok(None),
+	};
+	if len > MOOV_MAX {
+		return Err(err!(
+			"A movie box of {} bytes, and {} is this reader's ceiling. A `moov` is an index and \
+			not media.", len, MOOV_MAX;
+		Invalid, Input, Excessive));
+	}
+	let mut buf = vec![0u8; len as usize];
+	res!(f.seek(SeekFrom::Start(body)), IO, File);
+	res!(f.read_exact(&mut buf), IO, File);
+	Ok(Some(buf))
+}
+
+/// The payload of a film's movie header, lifted out of a file.
+///
+/// The header is `moov`'s first child and carries the timescale, the duration and the times the
+/// film was recorded and last changed. Reaching it costs a handful of eight-byte reads and as many
+/// seeks, and it is deliberately not the whole of `moov`: a caller asking only how long a film runs
+/// should not read a long film's sample tables to find out.
+pub fn mvhd_of(f: &mut File) -> Outcome<Option<Vec<u8>>> {
+	let end = res!(f.metadata(), IO, File).len();
+	let (moov, moov_len) = match res!(find_box(f, b"moov", 0, end)) {
+		Some(span) => span,
+		None => return Ok(None),
+	};
+	let (body, len) = match res!(find_box(f, b"mvhd", moov, moov + moov_len)) {
+		Some(span) => span,
+		None => return Ok(None),
+	};
+	let take = len.min(MVHD_BYTES) as usize;
+	res!(f.seek(SeekFrom::Start(body)), IO, File);
+	let mut buf = vec![0u8; take];
+	let got = res!(fill(f, &mut buf));
+	buf.truncate(got);
+	Ok(Some(buf))
+}
+
+/// The timescale and the duration a movie header carries: ticks a second, and ticks.
+///
+/// The two are only meaningful together, since the header counts in units of its own choosing.
+/// Version 1 of the box widens both the times and the duration while the timescale stays 32 bits in
+/// both. A timescale of nought, a duration of nought, and the all-ones a writer that did not know
+/// the duration leaves behind are all absence rather than numbers to divide.
+pub fn movie_ticks(mvhd: &[u8]) -> Option<(u32, u64)> {
+	let (scale, ticks) = match mvhd.first() {
+		Some(0) => {
+			if mvhd.len() < 20 {
+				return None;
+			}
+			let scale = u32::from_be_bytes([mvhd[12], mvhd[13], mvhd[14], mvhd[15]]);
+			let ticks = u32::from_be_bytes([mvhd[16], mvhd[17], mvhd[18], mvhd[19]]);
+			if ticks == u32::MAX {
+				return None;
+			}
+			(scale, ticks as u64)
+		},
+		Some(1) => {
+			if mvhd.len() < 32 {
+				return None;
+			}
+			let scale = u32::from_be_bytes([mvhd[20], mvhd[21], mvhd[22], mvhd[23]]);
+			let mut wide = [0u8; 8];
+			wide.copy_from_slice(&mvhd[24..32]);
+			let ticks = u64::from_be_bytes(wide);
+			if ticks == u64::MAX {
+				return None;
+			}
+			(scale, ticks)
+		},
+		_ => return None,
+	};
+	if scale == 0 || ticks == 0 {
+		None
+	} else {
+		Some((scale, ticks))
+	}
+}
+
+/// Reads until the buffer is full or the file ends, answering how many bytes arrived.
+///
+/// A single `read` may come back short of what was asked for without anything being wrong, and a
+/// box header read short by one byte is a film refused for nothing.
+fn fill(f: &mut File, buf: &mut [u8]) -> Outcome<usize> {
+	let mut got = 0usize;
+	while got < buf.len() {
+		match res!(f.read(&mut buf[got..]), IO, File) {
+			0 => break,
+			n => got += n,
+		}
+	}
+	Ok(got)
 }
 
 /// Reads a box header, giving its whole length and the length of the header itself.
