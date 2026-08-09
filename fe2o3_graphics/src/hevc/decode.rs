@@ -109,12 +109,21 @@ impl Plane {
 	/// 1920 by 1080 film is coded 1920 by 1088 and the eight rows the encoder filled to reach the
 	/// block boundary are not part of the picture. This is what takes them off.
 	pub fn cropped(&self, w: usize, h: usize) -> Self {
+		self.window(0, 0, w, h)
+	}
+
+	/// The rectangle of the plane starting at a position, clamped to what is there.
+	pub fn window(&self, x: usize, y: usize, w: usize, h: usize) -> Self {
 		let mut out = Self::new(w, h);
-		for y in 0..h.min(self.h) {
-			let from = y * self.w;
-			let to = from + w.min(self.w);
-			let at = y * w;
-			out.px[at..at + (to - from)].copy_from_slice(&self.px[from..to]);
+		for row in 0..h {
+			let sy = y + row;
+			if sy >= self.h || x >= self.w {
+				break;
+			}
+			let take = w.min(self.w - x);
+			let from = sy * self.w + x;
+			let at = row * w;
+			out.px[at..at + take].copy_from_slice(&self.px[from..from + take]);
 		}
 		out
 	}
@@ -156,15 +165,23 @@ impl Picture {
 		}
 	}
 
-	/// The picture cropped to the size it is meant to be shown at.
+	/// The picture cropped to the size it is meant to be shown at, from its top left corner.
 	///
 	/// The colour planes are half size both ways and are rounded **up**, since a picture of an odd
 	/// width still has a colour sample for its last column.
 	pub fn cropped(&self, w: usize, h: usize) -> Self {
+		self.window(0, 0, w, h)
+	}
+
+	/// The rectangle of the picture that is meant to be shown.
+	///
+	/// A window need not sit at the corner: a stabilised film is coded larger than it shows and
+	/// moves the window about inside it, so taking the corner instead moves the whole picture.
+	pub fn window(&self, x: usize, y: usize, w: usize, h: usize) -> Self {
 		Self {
-			y:	self.y.cropped(w, h),
-			cb:	self.cb.cropped(w.div_ceil(2), h.div_ceil(2)),
-			cr:	self.cr.cropped(w.div_ceil(2), h.div_ceil(2)),
+			y:	self.y.window(x, y, w, h),
+			cb:	self.cb.window(x / 2, y / 2, w.div_ceil(2), h.div_ceil(2)),
+			cr:	self.cr.window(x / 2, y / 2, w.div_ceil(2), h.div_ceil(2)),
 			depth:	self.depth,
 		}
 	}
@@ -404,12 +421,6 @@ pub fn picture_of(sps: &Sps, pps: &Pps, parts: &[(&Slice, &[u8])]) -> Outcome<Pi
 	// names, and starts the arithmetic decoder afresh at each; without it a slice is one piece and
 	// one arithmetic decoder from its first block to its last. Every photograph in the corpus is
 	// coded the first way and a good many films are coded the second, so both are here.
-	if parts.len() > 1 && pps.wavefront {
-		return Err(err!(
-			"A picture cut into {} slices and coded in wavefronts. Each of the two is read; the \
-			pair, where a slice may begin part way along a row, is not.", parts.len();
-		Unimplemented));
-	}
 	for (i, (part, data)) in parts.iter().enumerate() {
 		frame.slice = part;
 		let from = part.address as usize;
@@ -418,14 +429,28 @@ pub fn picture_of(sps: &Sps, pps: &Pps, parts: &[(&Slice, &[u8])]) -> Outcome<Pi
 			None => blocks,
 		};
 		if pps.wavefront {
+			// A slice cut into wavefronts is one piece a row of **its own** blocks, which is the
+			// whole picture where the picture is one slice. A slice that began part way along a
+			// row would have a piece that is neither a row nor a slice, and there is nothing here
+			// that could find its end.
+			if from % ctbs_w != 0 || to % ctbs_w != 0 {
+				return Err(err!(
+					"A slice coded in wavefronts covers blocks {} to {} of a picture {} blocks \
+					wide, so it begins or ends part way along a row.", from, to, ctbs_w;
+				Unimplemented));
+			}
+			let (row0, rows_here) = (from / ctbs_w, (to - from) / ctbs_w);
 			// One piece a row of blocks, each unescaped on its own once the cut has been made in
 			// the escaped bytes.
-			let pieces: Vec<Vec<u8>> = res!(split_rows(data, part, ctbs_h))
+			let pieces: Vec<Vec<u8>> = res!(split_rows(data, part, rows_here))
 				.into_iter()
 				.map(crate::hevc::rbsp)
 				.collect();
+			// Each slice starts its rows afresh: the row above the first of them is in another
+			// slice, and a slice inherits nothing from one.
 			let mut rows = Rows::new(part.qp);
-			for (ry, piece) in pieces.iter().enumerate() {
+			for (i, piece) in pieces.iter().enumerate() {
+				let ry = row0 + i;
 				let mut ent = Ent {
 					cabac:	res!(Cabac::new(piece)),
 					ctxs:	rows.begin(),
@@ -442,7 +467,7 @@ pub fn picture_of(sps: &Sps, pps: &Pps, parts: &[(&Slice, &[u8])]) -> Outcome<Pi
 					// The bin that says whether the slice ends here. It has to be read whether or
 					// not it says so: it moves the arithmetic decoder on.
 					let ended = ent.cabac.terminate();
-					if ended == 1 && !(ry == ctbs_h - 1 && rx == ctbs_w - 1) {
+					if ended == 1 && !(ry == row0 + rows_here - 1 && rx == ctbs_w - 1) {
 						// A slice that stops early is not a fault in a still picture -- it is a
 						// picture this decoder has misread, and saying so beats returning half of
 						// one.

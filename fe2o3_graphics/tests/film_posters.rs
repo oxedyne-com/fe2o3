@@ -101,20 +101,25 @@ fn first_frame(path: &Path) -> Outcome<(Film, Vec<u8>)> {
 /// Both decoders answer the same planar picture -- `yuv::Frame` -- and each hands back the size the
 /// stream says is to be shown rather than the size it was coded at.
 fn decode(film: &Film, sample: &[u8]) -> Outcome<yuv::Frame> {
-	match film.kind() {
-		Kind::Hevc => hevc::picture_shown(film.config(), sample),
-		Kind::Avc => Ok((&res!(h264::decode::picture(film.config(), sample))).into()),
+	let pic = match film.kind() {
+		Kind::Hevc => res!(hevc::picture_shown(film.config(), sample)),
+		Kind::Avc => (&res!(h264::decode::picture(film.config(), sample))).into(),
 		Kind::Mjpeg => {
 			// A Motion JPEG sample is a whole JPEG, which is a different decoder and a picture
 			// that arrives already in red, green and blue. It has no place in a planar
 			// comparison, so this says so rather than pretending.
 			let _ = res!(jpeg::decode(sample));
-			Err(err!("A Motion JPEG frame is not a planar picture."; Unimplemented))
+			return Err(err!("A Motion JPEG frame is not a planar picture."; Unimplemented));
 		},
-		Kind::Other(code) => Err(err!(
+		Kind::Other(code) => return Err(err!(
 			"A film coded as {}, which there is no decoder for.", String::from_utf8_lossy(&code);
 		Unimplemented)),
-	}
+	};
+	// And then the window the container says is the picture, where it says so.
+	Ok(match film.aperture() {
+		Some((x, y, w, h)) => pic.window(x as usize, y as usize, w as usize, h as usize),
+		None => pic,
+	})
 }
 
 /// The first sentence of a refusal, which is the part that names the reason rather than the file.
@@ -463,6 +468,60 @@ fn test_a_poster_can_be_drawn_in_colour_03() -> Outcome<()> {
 		return Ok(());
 	}
 	println!("  no film in this corpus gave up a frame, so nothing was proved");
+	Ok(())
+}
+
+#[test]
+fn test_zz_a_window_onto_one_film_05() -> Outcome<()> {
+	// Not a check but a window. `FILM_POSTERS_DUMP` names one film and this writes its first
+	// frame's brightness plane beside FFmpeg's, so that a disagreement can be looked at rather
+	// than counted: a picture decoded from the wrong sample, one shifted by a few rows and one
+	// quantised against the wrong weights are indistinguishable in a difference count and obvious
+	// side by side.
+	let one = match env::var("FILM_POSTERS_DUMP") {
+		Ok(p) => PathBuf::from(p),
+		Err(_) => return Ok(()),
+	};
+	let (film, sample) = res!(first_frame(&one));
+	// The parameter sets and the slice header as this crate reads them, to be held beside what
+	// FFmpeg's `trace_headers` prints for the same bytes.
+	if film.kind() == Kind::Hevc {
+		let cfg = res!(hevc::config(film.config()));
+		for unit in &cfg.sets {
+			match unit.kind {
+				hevc::nal::SPS => println!("  sps: {:?}", res!(hevc::sps(&unit.body))),
+				hevc::nal::PPS => println!("  pps: {:?}", res!(hevc::pps(&unit.body))),
+				_ => {},
+			}
+		}
+		let units = res!(hevc::split_lengthed(&sample, cfg.length_size));
+		let mut seqs = Vec::new();
+		let mut pics = Vec::new();
+		for unit in &cfg.sets {
+			match unit.kind {
+				hevc::nal::SPS => seqs.push(res!(hevc::sps(&unit.body))),
+				hevc::nal::PPS => pics.push(res!(hevc::pps(&unit.body))),
+				_ => {},
+			}
+		}
+		for unit in &units {
+			println!("  nal {} of {} bytes", unit.kind, unit.body.len());
+			if matches!(unit.kind, 19 | 20 | 21) {
+				let want = res!(hevc::slice_pps_id(&unit.body));
+				if let Some(pps) = pics.iter().find(|p| p.id == want) {
+					if let Some(sps) = seqs.iter().find(|s| s.id == pps.sps_id) {
+						println!("    slice: {:?}", res!(hevc::slice_of(unit.kind, &unit.body, sps, pps)));
+					}
+				}
+			}
+		}
+	}
+	let pic = res!(decode(&film, &sample));
+	println!("  {} decoded {} by {}", name(&one), pic.y.w, pic.y.h);
+	let mine: Vec<u8> = pic.y.px.iter().map(|v| *v as u8).collect();
+	let out = std::env::temp_dir().join("film_poster_luma.gray");
+	res!(std::fs::write(&out, &mine));
+	println!("  wrote {} bytes of luma to {:?}", mine.len(), out);
 	Ok(())
 }
 

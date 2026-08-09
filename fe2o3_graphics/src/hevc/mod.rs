@@ -164,6 +164,41 @@ pub struct Sps {
 	/// The weights themselves, where the lists are in use: this sequence's own where it carries
 	/// them, and the default ones where it does not.
 	pub weights:	Option<Scaling>,
+	/// Where the shown picture begins inside the coded one, in luma samples.
+	///
+	/// Both windows may sit off the top left corner: the conformance window usually does not and
+	/// the default display window of a stabilised film always does, since it is centred in a
+	/// picture coded larger than it shows. Cropping from the corner instead moves the whole
+	/// picture by that offset.
+	pub show_x0:	u32,
+	/// The same downwards.
+	pub show_y0:	u32,
+	/// Whether the samples run the full range rather than the studio one.
+	///
+	/// Out of the video usability information, where a stream says how it is to be shown. A
+	/// conversion into red, green and blue that guesses this wrong makes a photograph with no real
+	/// black in it, or one whose blacks are crushed.
+	pub full_range:	bool,
+	/// Which matrix the colour difference was coded against, as ISO/IEC 23091-2 numbers them: 1 is
+	/// the high-definition one, 5 and 6 the standard-definition ones, and 2 is "unspecified".
+	pub matrix:	u8,
+	/// How many bits the picture order count's lower part is coded in.
+	///
+	/// Kept because a slice header carries one -- for every picture except an IDR, which has no
+	/// order count to state. A film's first frame is very often a clean random access picture
+	/// rather than an IDR, and a header read as though it were an IDR's is a header read out of
+	/// step from this field on.
+	pub poc_bits:	u8,
+	/// How many pictures each short-term reference picture set names, negative and positive.
+	///
+	/// A still picture references nothing and needs none of them; what this is for is the slice
+	/// header, which may name one of these sets or write a new one predicted from them, and either
+	/// way the bits cannot be stepped over without knowing how large the set referred to is.
+	pub st_sets:	Vec<(u32, u32)>,
+	/// Whether a slice header may name long-term reference pictures.
+	pub long_term:	bool,
+	/// Whether a slice header carries the temporal motion vector predictor flag.
+	pub temporal_mvp:	bool,
 }
 
 /// What a picture parameter set says about the slices that reference it.
@@ -670,8 +705,9 @@ fn scaling_list(b: &mut Bits) -> Outcome<Scaling> {
 
 /// Steps over one short-term reference picture set (§7.3.7).
 ///
-/// A still picture references nothing, so nothing here is kept -- but a sequence parameter set is
-/// allowed to carry these before fields that *are* wanted, and they are variable-length.
+/// A still picture references nothing, so no *picture* is kept -- but how many the set names is,
+/// because the next set may be coded as a difference from this one and a slice header may be coded
+/// as a difference from any of them, and neither can be stepped over without the count.
 fn short_term_ref_pic_set(b: &mut Bits, idx: usize, count: usize, previous: &mut Vec<(u32, u32)>)
 	-> Outcome<()>
 {
@@ -680,21 +716,37 @@ fn short_term_ref_pic_set(b: &mut Bits, idx: usize, count: usize, previous: &mut
 		predicted = res!(b.flag());
 	}
 	if predicted {
+		// Which earlier set this one is a difference from. Only a set written in a slice header
+		// says so; a set in the sequence parameter set is always a difference from the one before
+		// it (§7.4.8).
+		let mut back = 1usize;
 		if idx == count {
-			let _ = res!(b.ue());
+			back = res!(b.ue()) as usize + 1;
 		}
 		let _delta_rps_sign = res!(b.flag());
 		let _abs_delta_rps = res!(b.ue());
-		let (negative, positive) = previous.last().copied().unwrap_or((0, 0));
+		let (negative, positive) = match idx.checked_sub(back).and_then(|at| previous.get(at)) {
+			Some(pair) => *pair,
+			None => return Err(err!(
+				"A reference picture set is coded as a difference from set {} of {}, which is not \
+				there.", idx as i64 - back as i64, previous.len();
+			Invalid, Input, Decode)),
+		};
+		// One flag pair for each picture of the set referred to, and one for the picture that set
+		// is itself relative to. The ones kept are what this set names, which is what the next
+		// difference will be measured against.
+		let mut kept = 0u32;
 		for _ in 0..(negative + positive + 1) {
 			let used = res!(b.flag());
+			let mut keep = used;
 			if !used {
-				let _use_delta = res!(b.flag());
+				keep = res!(b.flag());
+			}
+			if keep {
+				kept += 1;
 			}
 		}
-		// The count after prediction cannot be worked out without keeping the whole set, and this
-		// decoder does not need it: what matters is that the bits have been consumed.
-		previous.push((negative, positive));
+		previous.push((kept, 0));
 		return Ok(());
 	}
 	let negative = res!(b.ue());
@@ -774,7 +826,12 @@ pub fn sps(body: &[u8]) -> Outcome<Sps> {
 			"A sample of {} bits, and 16 is the most this decoder reads.", luma_bits.max(chroma_bits);
 		Invalid, Input, Unknown));
 	}
-	let _log2_max_poc = res!(b.ue());
+	let poc_bits = res!(b.ue()) as u8 + 4;
+	if poc_bits > 16 {
+		return Err(err!(
+			"A picture order count of {} bits, and 16 is the most.", poc_bits;
+		Invalid, Input, Decode));
+	}
 	// The ordering information is given either once for the highest sub-layer or once for each.
 	let for_each = res!(b.flag());
 	let first = if for_each { 0 } else { max_sub_layers - 1 };
@@ -825,7 +882,8 @@ pub fn sps(body: &[u8]) -> Outcome<Sps> {
 	for i in 0..short_term_sets {
 		res!(short_term_ref_pic_set(&mut b, i, short_term_sets, &mut previous));
 	}
-	if res!(b.flag()) {
+	let long_term_present = res!(b.flag());
+	if long_term_present {
 		let long_term = res!(b.ue()) as usize;
 		if long_term > 32 {
 			return Err(err!(
@@ -843,15 +901,78 @@ pub fn sps(body: &[u8]) -> Outcome<Sps> {
 			Invalid, Input, Unknown));
 		}
 	}
-	let _temporal_mvp = res!(b.flag());
+	let temporal_mvp = res!(b.flag());
 	let strong_smoothing = res!(b.flag());
+	// The video usability information, which is where a stream says how it is to be *shown*: which
+	// weights its colour was coded against, whether its samples run the full range, and -- the one
+	// that changes the picture's size -- the default display window.
+	//
+	// **A phone's stabilised film carries one.** Stabilisation works by coding a picture larger
+	// than it shows and moving the window about inside it, and the window is written here. A
+	// decoder that ignores it hands back the wobbly margin as though it were part of the film,
+	// about nine per cent wider and taller than every player shows.
+	let (mut full_range, mut matrix) = (false, 2u8);
+	let (mut show_x, mut show_y) = (0u32, 0u32);
+	let (mut show_x0, mut show_y0) = (0u32, 0u32);
+	if res!(b.flag()) {
+		if res!(b.flag()) {
+			// The sample aspect ratio, read past: a picture is drawn at the size it is coded and
+			// stretching it is the caller's business.
+			let idc = res!(b.u(8));
+			if idc == 255 {
+				let _sar_w = res!(b.u(16));
+				let _sar_h = res!(b.u(16));
+			}
+		}
+		if res!(b.flag()) {
+			let _overscan_appropriate = res!(b.flag());
+		}
+		if res!(b.flag()) {
+			let _video_format = res!(b.u(3));
+			full_range = res!(b.flag());
+			if res!(b.flag()) {
+				let _primaries = res!(b.u(8));
+				let _transfer = res!(b.u(8));
+				matrix = res!(b.u(8)) as u8;
+			}
+		}
+		if res!(b.flag()) {
+			let _chroma_loc_top = res!(b.ue());
+			let _chroma_loc_bottom = res!(b.ue());
+		}
+		let _neutral_chroma = res!(b.flag());
+		let _field_seq = res!(b.flag());
+		let _frame_field_info = res!(b.flag());
+		if res!(b.flag()) {
+			let dw_left = res!(b.ue());
+			let dw_right = res!(b.ue());
+			let dw_top = res!(b.ue());
+			let dw_bottom = res!(b.ue());
+			show_x = dw_left.saturating_add(dw_right).saturating_mul(sub_w);
+			show_y = dw_top.saturating_add(dw_bottom).saturating_mul(sub_h);
+			show_x0 = dw_left.saturating_mul(sub_w);
+			show_y0 = dw_top.saturating_mul(sub_h);
+		}
+		// Nothing after the window is read: the timing information, the bitstream restrictions and
+		// the hypothetical reference decoder say nothing about the samples.
+	}
+	let width = coded_w - trim_x;
+	let height = coded_h - trim_y;
+	if show_x >= width || show_y >= height {
+		return Err(err!(
+			"A default display window trims {} by {} from a picture of {} by {}.",
+			show_x, show_y, width, height;
+		Invalid, Input, Range));
+	}
 	Ok(Sps {
 		id: id as u8,
 		chroma: chroma as u8,
 		coded_w,
 		coded_h,
-		width: coded_w - trim_x,
-		height: coded_h - trim_y,
+		width: width - show_x,
+		height: height - show_y,
+		show_x0: left.saturating_mul(sub_w) + show_x0,
+		show_y0: top.saturating_mul(sub_h) + show_y0,
 		luma_bits,
 		chroma_bits,
 		ctb_size,
@@ -864,6 +985,12 @@ pub fn sps(body: &[u8]) -> Outcome<Sps> {
 		strong_smoothing,
 		scaling_lists,
 		weights,
+		poc_bits,
+		full_range,
+		matrix,
+		st_sets: previous,
+		long_term: long_term_present,
+		temporal_mvp,
 	})
 }
 
@@ -1020,6 +1147,20 @@ pub fn slice_pps_id(body: &[u8]) -> Outcome<u8> {
 /// many bits as it takes to count the picture's blocks -- which is why the sequence parameter set is
 /// needed to read a header at all.
 pub fn slice(body: &[u8], sps: &Sps, pps: &Pps) -> Outcome<Slice> {
+	slice_of(nal::IDR_W_RADL, body, sps, pps)
+}
+
+/// The same, for a slice of a picture that may not be an IDR.
+///
+/// **A film's first frame very often is not one.** A clean random access picture opens a stream
+/// just as an IDR does and is decoded exactly as one -- it references nothing before itself -- but
+/// its slice header carries the picture order count and the reference picture set that an IDR's
+/// does not, because the pictures *after* it may reference what it names. A header read as though
+/// it were an IDR's is read out of step from that field onwards, and what comes out is a plausible
+/// number of entry points and a picture of noise.
+///
+/// `kind` is the NAL unit type, which is the only thing that says which of the two this is.
+pub fn slice_of(kind: u8, body: &[u8], sps: &Sps, pps: &Pps) -> Outcome<Slice> {
 	let mut b = Bits::new(body);
 	let first = res!(b.flag());
 	// Only an IRAP picture carries this flag, and every still is one.
@@ -1052,19 +1193,50 @@ pub fn slice(body: &[u8], sps: &Sps, pps: &Pps) -> Outcome<Slice> {
 			pps_id, pps.id;
 		Invalid, Input, Missing));
 	}
-	let kind = res!(b.ue());
-	if kind != 2 {
+	// Reserved, and to be stepped over rather than understood. Stepping over the wrong number of
+	// them puts every field after them one place out, which is why the count is carried here from
+	// the picture parameter set rather than assumed to be zero. They come **before** the slice
+	// type (§7.3.6.1).
+	res!(b.skip(pps.extra_header_bits as usize));
+	let slice_kind = res!(b.ue());
+	if slice_kind != 2 {
 		return Err(err!(
-			"A slice of type {}, and a still picture's slices are all intra (type 2).", kind;
+			"A slice of type {}, and a still picture's slices are all intra (type 2).", slice_kind;
 		Invalid, Input, Unknown));
 	}
 	if pps.output_flag {
 		let _pic_output_flag = res!(b.flag());
 	}
-	// Reserved, and to be stepped over rather than understood. Stepping over the wrong number of
-	// them puts every field after them one place out, which is why the count is carried here from
-	// the picture parameter set rather than assumed to be zero.
-	res!(b.skip(pps.extra_header_bits as usize));
+	// What an IDR does not carry, and everything else does: where this picture sits in output
+	// order, and which pictures the ones after it may reference.
+	if kind != nal::IDR_W_RADL && kind != nal::IDR_N_LP {
+		let _poc_lsb = res!(b.u(sps.poc_bits as usize));
+		let from_sps = res!(b.flag());
+		if !from_sps {
+			// A set of its own, written here and coded as a difference from one of the sequence's.
+			let mut sets = sps.st_sets.clone();
+			let count = sets.len();
+			res!(short_term_ref_pic_set(&mut b, count, count, &mut sets));
+		} else if sps.st_sets.len() > 1 {
+			// As many bits as it takes to count them (§7.4.7.1).
+			let mut width = 0usize;
+			while (1usize << width) < sps.st_sets.len() {
+				width += 1;
+			}
+			let _which = res!(b.u(width));
+		}
+		if sps.long_term {
+			// A sequence carrying long-term reference pictures is refused where it is read, so
+			// reaching this means the flag is set and the sequence names none of them.
+			let _num_long_term_pics = res!(b.ue());
+			return Err(err!(
+				"A slice names long-term reference pictures, which a picture decoded on its own \
+				has no use for and this reader does not follow."; Unimplemented));
+		}
+		if sps.temporal_mvp {
+			let _temporal_mvp = res!(b.flag());
+		}
+	}
 	let mut sao_luma = false;
 	let mut sao_chroma = false;
 	if sps.sao {
@@ -1164,7 +1336,7 @@ pub fn slice(body: &[u8], sps: &Sps, pps: &Pps) -> Outcome<Slice> {
 		address,
 		across_slices,
 		pps_id: pps_id as u8,
-		kind: kind as u8,
+		kind: slice_kind as u8,
 		qp,
 		cb_qp_offset:	cb_offset,
 		cr_qp_offset:	cr_offset,
@@ -1245,10 +1417,11 @@ pub fn picture(record: &[u8], data: &[u8]) -> Outcome<decode::Picture> {
 pub fn picture_shown(record: &[u8], data: &[u8]) -> Outcome<decode::Picture> {
 	let (pic, sps) = res!(coded(record, data));
 	let (w, h) = (sps.width as usize, sps.height as usize);
-	if w >= pic.y.w && h >= pic.y.h {
+	let (x0, y0) = (sps.show_x0 as usize, sps.show_y0 as usize);
+	if x0 == 0 && y0 == 0 && w >= pic.y.w && h >= pic.y.h {
 		return Ok(pic);
 	}
-	Ok(pic.cropped(w.min(pic.y.w), h.min(pic.y.h)))
+	Ok(pic.window(x0, y0, w.min(pic.y.w), h.min(pic.y.h)))
 }
 
 /// Decodes one coded picture, and answers the sequence parameter set it was coded against.
@@ -1309,7 +1482,7 @@ fn coded(record: &[u8], data: &[u8]) -> Outcome<(decode::Picture, Sps)> {
 						seqs.iter().map(|s| s.id.to_string()).collect::<Vec<_>>().join(", ");
 					Invalid, Input, Missing)),
 				};
-				let head = res!(slice(&unit.body, &sps, &pps));
+				let head = res!(slice_of(unit.kind, &unit.body, &sps, &pps));
 				// A second coded picture in the same access unit is somebody else's frame: this
 				// reads the first picture, and the first picture ends where the next one begins.
 				if head.first && !heads.is_empty() {

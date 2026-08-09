@@ -1181,6 +1181,8 @@ pub struct Film {
 	height:	u16,
 	/// How far the picture is to be turned before it is shown, in degrees clockwise.
 	rotation:	u16,
+	/// The rectangle of the coded picture that is the picture: left, top, width and height.
+	aperture:	Option<(u32, u32, u32, u32)>,
 	/// Each sample's offset in the file and its length.
 	samples:	Vec<(u64, u32)>,
 	/// Which samples a reader may begin decoding at, as `stss` lists them, counted from nought.
@@ -1258,6 +1260,16 @@ impl Film {
 	/// samples as the untured one.
 	pub fn rotation(&self) -> u16 {
 		self.rotation
+	}
+
+	/// The rectangle of the coded picture that is actually the picture: left, top, width, height.
+	///
+	/// `None` where the track states none, which means the whole of it. A phone stabilises a film
+	/// by coding a picture larger than it shows and moving a window about inside it; the window is
+	/// the clean aperture, and a viewer that ignores it shows about nine per cent more of the
+	/// frame than the film means to show, wobbling margin and all.
+	pub fn aperture(&self) -> Option<(u32, u32, u32, u32)> {
+		self.aperture
 	}
 
 	/// How many samples the track holds.
@@ -1616,6 +1628,8 @@ struct Tables {
 	kind:		Option<Kind>,
 	/// The configuration record's span in the file.
 	config:		Option<(usize, usize)>,
+	/// The clean aperture, as its box states it: width, height, and the offsets of its centre.
+	clap:		Option<(f64, f64, f64, f64)>,
 	/// The coded size the sample entry declares.
 	size:		(u16, u16),
 	/// Each sample's length in bytes, from `stsz`.
@@ -1811,13 +1825,39 @@ fn sample_description(bytes: &[u8], body: usize, end: usize, t: &mut Tables) -> 
 	);
 	// The configuration box sits among the sample entry's own children.
 	let mut conf = None;
+	let mut clap: Option<(f64, f64, f64, f64)> = None;
 	res!(walk(bytes, code, visual + 70, at + size, 0, &mut |kind, _parent, cbody, cend| {
 		if matches!(&kind, b"avcC" | b"hvcC") && conf.is_none() {
 			conf = Some((cbody, cend));
 		}
+		// The clean aperture: the rectangle of the coded picture that is the picture. A phone
+		// stabilises a film by coding it larger than it shows and moving the window about inside
+		// it, and this is where the result is written -- eight rationals, four of which are the
+		// width and height and four the offset of the window's centre from the picture's
+		// (ISO/IEC 14496-12 §12.1.4.3).
+		if &kind == b"clap" && clap.is_none() && cend >= cbody + 32 {
+			let mut v = [0i64; 8];
+			for (i, n) in v.iter_mut().enumerate() {
+				*n = match bytes.get(cbody + i * 4..cbody + i * 4 + 4) {
+					Some(s) => i32::from_be_bytes([s[0], s[1], s[2], s[3]]) as i64,
+					None => return Ok(false),
+				};
+			}
+			// The denominators are the odd entries, and a zero one is a box to be ignored rather
+			// than divided by.
+			if v[1] != 0 && v[3] != 0 && v[5] != 0 && v[7] != 0 {
+				clap = Some((
+					v[0] as f64 / v[1] as f64,
+					v[2] as f64 / v[3] as f64,
+					v[4] as f64 / v[5] as f64,
+					v[6] as f64 / v[7] as f64,
+				));
+			}
+		}
 		Ok(false)
 	}));
 	t.config = conf;
+	t.clap = clap;
 	Ok(())
 }
 
@@ -1892,12 +1932,27 @@ fn assemble(bytes: &[u8], t: Tables) -> Outcome<Film> {
 		}
 		sync.push(*s - 1);
 	}
+	// The aperture is stated as a size and the offset of its centre from the picture's, so the
+	// corner it starts at is worked out here rather than by every caller.
+	let aperture = t.clap.and_then(|(w, h, dx, dy)| {
+		let (full_w, full_h) = (t.size.0 as f64, t.size.1 as f64);
+		if w <= 0.0 || h <= 0.0 || w > full_w || h > full_h {
+			return None;
+		}
+		let x = ((full_w - w) / 2.0 + dx).round();
+		let y = ((full_h - h) / 2.0 + dy).round();
+		if x < 0.0 || y < 0.0 || x + w > full_w || y + h > full_h {
+			return None;
+		}
+		Some((x as u32, y as u32, w.round() as u32, h.round() as u32))
+	});
 	Ok(Film {
 		kind,
 		config,
 		width:	t.size.0,
 		height:	t.size.1,
 		rotation: t.rotation,
+		aperture,
 		samples,
 		sync,
 	})
