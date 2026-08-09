@@ -40,6 +40,7 @@ pub mod macros;
 pub mod face;
 pub mod graph;
 pub mod kern;
+pub mod object;
 pub mod onnx;
 pub mod prelude;
 pub mod tensor;

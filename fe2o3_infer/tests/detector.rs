@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_infer::graph::Graph;
 use oxedyne_fe2o3_infer::kern::Cpu;
+use oxedyne_fe2o3_infer::object::{self, Options};
 use oxedyne_fe2o3_infer::tensor::Tensor;
 
 /// The model and the reference directory, or `None` so the test can skip.
@@ -179,5 +180,95 @@ fn one_case(g: &Graph, refs: &Path) -> Outcome<(f32, String)> {
 		}
 	}
 
+	// The decode is held to the reference's own boxes, which is a separate claim
+	// from the network agreeing: the distribution integral, the anchor positions
+	// and the suppression are all this crate's and none of them is exercised by
+	// comparing tensors.
+	res!(check_detections(refs, &got));
+
 	Ok((worst, worst_at))
+}
+
+/// One line of the reference's decoded output.
+struct Ref {
+	/// Index into the category names.
+	class:	usize,
+	/// Confidence.
+	score:	f32,
+	/// Box, `(x, y, w, h)` in canvas pixels.
+	rect:	(f32, f32, f32, f32),
+}
+
+/// Compares this crate's decode with the reference's, box for box.
+fn check_detections(refs: &Path, out: &[Tensor]) -> Outcome<()> {
+	let path = refs.join("detections.txt");
+	if !path.exists() {
+		return Ok(());
+	}
+	let text = res!(fs::read_to_string(&path));
+	let mut want = Vec::new();
+	for line in text.lines() {
+		let f = line.split('\t').collect::<Vec<_>>();
+		if f.len() != 6 {
+			return Err(err!("A reference detection has {} fields.", f.len();
+				Invalid, Input, Mismatch));
+		}
+		want.push(Ref {
+			class:	res!(f[0].parse::<usize>()),
+			score:	res!(f[1].parse::<f32>()),
+			rect:	(
+				res!(f[2].parse::<f32>()),
+				res!(f[3].parse::<f32>()),
+				res!(f[4].parse::<f32>()),
+				res!(f[5].parse::<f32>()),
+			),
+		});
+	}
+
+	let got = res!(object::decode(out, &Options::default()));
+	if got.len() != want.len() {
+		let mine = got.iter()
+			.map(|o| fmt!("{} {:.2}", o.name(), o.score))
+			.collect::<Vec<_>>().join(", ");
+		let theirs = want.iter()
+			.map(|r| fmt!("{} {:.2}", object::NAMES[r.class], r.score))
+			.collect::<Vec<_>>().join(", ");
+		return Err(err!(
+			"The decode found {} objects and the reference {}. Mine: [{}]. Theirs: [{}].",
+			got.len(), want.len(), mine, theirs;
+		Invalid, Mismatch));
+	}
+
+	// Both are strongest first, so they line up.
+	for (i, (mine, theirs)) in got.iter().zip(want.iter()).enumerate() {
+		if mine.class != theirs.class {
+			return Err(err!(
+				"Detection {} is a {} here and a {} in the reference.",
+				i, mine.name(), object::NAMES[theirs.class];
+			Invalid, Mismatch));
+		}
+		let ds = (mine.score - theirs.score).abs();
+		if ds > 1.0e-5 {
+			return Err(err!(
+				"Detection {} scores {} here and {} in the reference.",
+				i, mine.score, theirs.score;
+			Invalid, Mismatch));
+		}
+		let (x, y, w, h) = theirs.rect;
+		let off = (mine.x - x).abs()
+			.max((mine.y - y).abs())
+			.max((mine.w - w).abs())
+			.max((mine.h - h).abs());
+		// A quarter of a pixel. The faults worth catching -- the anchor half a
+		// sample out, the distribution read the wrong way round -- move an edge
+		// by whole pixels at the finest head and by tens at the coarsest.
+		if off > 0.25 {
+			return Err(err!(
+				"Detection {} ({}) is at ({}, {}, {}, {}) here and ({}, {}, {}, {}) in the \
+				reference, {} pixels apart.",
+				i, mine.name(), mine.x, mine.y, mine.w, mine.h, x, y, w, h, off;
+			Invalid, Mismatch));
+		}
+	}
+	Ok(())
 }
