@@ -209,6 +209,12 @@ pub struct Pps {
 	/// Whether the loop filter runs across slice boundaries, and therefore whether a slice header
 	/// carries a flag of its own about it.
 	pub filter_across_slices:	bool,
+	/// Whether a slice segment may continue the header of the one before it.
+	///
+	/// Kept because the slice header cannot be read without it: a segment that is not the first of
+	/// its picture carries a flag saying whether it is such a continuation, and only where this
+	/// says one may.
+	pub dependent_slices:	bool,
 }
 
 /// Splits a byte-stream of length-prefixed NAL units, as `hvcC` and `mdat` carry them.
@@ -871,7 +877,7 @@ pub fn pps(body: &[u8]) -> Outcome<Pps> {
 			"A picture parameter set numbered {} against sequence set {}.", id, sps_id;
 		Invalid, Input, Decode));
 	}
-	let _dependent_slice_segments = res!(b.flag());
+	let dependent_slices = res!(b.flag());
 	let output_flag = res!(b.flag());
 	let extra_header_bits = res!(b.u(3)) as u8;
 	let sign_hiding = res!(b.flag());
@@ -940,6 +946,7 @@ pub fn pps(body: &[u8]) -> Outcome<Pps> {
 		output_flag,
 		deblocking_override,
 		filter_across_slices,
+		dependent_slices,
 	})
 }
 
@@ -951,6 +958,17 @@ pub fn pps(body: &[u8]) -> Outcome<Pps> {
 /// a header read one bit short starts the whole of the rest of the decode in the wrong place.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Slice {
+	/// Whether this segment is the first of its picture.
+	pub first:	bool,
+	/// The coding tree block this segment begins at, counted in raster order from nought.
+	///
+	/// Nought for the first segment of a picture, which is every segment of a picture that is one
+	/// slice -- which every photograph is and many films are not.
+	pub address:	u32,
+	/// Whether the loop filters run across this slice's boundaries with its neighbours.
+	///
+	/// Where the header does not carry it, it is the picture parameter set's answer (§7.4.7.1).
+	pub across_slices:	bool,
 	/// Which picture parameter set the slice references.
 	pub pps_id:	u8,
 	/// The slice type: 2 is intra, and this decoder reads no other.
@@ -983,15 +1001,11 @@ pub struct Slice {
 ///
 /// The identifier is the third element of the header and none of the three before it depends on a
 /// parameter set, so it can be had before choosing one -- which is the point: a caller holding
-/// several sets has to know which it is being asked for.
+/// several sets has to know which it is being asked for. It sits before the segment address, so
+/// this reads the same three elements whether or not the segment is the first of its picture.
 pub fn slice_pps_id(body: &[u8]) -> Outcome<u8> {
 	let mut b = Bits::new(body);
-	let first = res!(b.flag());
-	if !first {
-		return Err(err!(
-			"A slice segment that is not the first of its picture. A still picture is one slice.";
-		Invalid, Input, Unknown));
-	}
+	let _first = res!(b.flag());
 	// Only an IRAP picture carries this flag, and every still is one.
 	let _no_output_of_prior_pics = res!(b.flag());
 	Ok(res!(b.ue()) as u8)
@@ -999,19 +1013,39 @@ pub fn slice_pps_id(body: &[u8]) -> Outcome<u8> {
 
 /// Reads a slice segment header (§7.3.6.1).
 ///
-/// Only the independent, intra case: a dependent slice segment continues another one's context and
-/// a still picture has no reason to carry one, so it is refused by name.
+/// Only the independent, intra case: a **dependent** slice segment carries no header of its own but
+/// continues the one before it, and is refused by name.
+///
+/// A segment that is not the first of its picture carries the coding tree block it begins at, in as
+/// many bits as it takes to count the picture's blocks -- which is why the sequence parameter set is
+/// needed to read a header at all.
 pub fn slice(body: &[u8], sps: &Sps, pps: &Pps) -> Outcome<Slice> {
 	let mut b = Bits::new(body);
 	let first = res!(b.flag());
-	if !first {
-		return Err(err!(
-			"A slice segment that is not the first of its picture. A still picture is one slice.";
-		Invalid, Input, Unknown));
-	}
 	// Only an IRAP picture carries this flag, and every still is one.
 	let _no_output_of_prior_pics = res!(b.flag());
 	let pps_id = res!(b.ue());
+	let mut address = 0u32;
+	if !first {
+		if pps.dependent_slices && res!(b.flag()) {
+			return Err(err!(
+				"A dependent slice segment, which carries no header of its own but continues the \
+				one before it."; Unimplemented));
+		}
+		// As many bits as it takes to count the picture's coding tree blocks (§7.4.7.1).
+		let ctb = sps.ctb_size.max(1);
+		let blocks = ((sps.coded_w + ctb - 1) / ctb) as u64 * ((sps.coded_h + ctb - 1) / ctb) as u64;
+		let mut width = 0usize;
+		while (1u64 << width) < blocks {
+			width += 1;
+		}
+		address = res!(b.u(width)) as u32;
+		if address as u64 >= blocks {
+			return Err(err!(
+				"A slice segment begins at block {} of a picture holding {}.", address, blocks;
+			Invalid, Input, Decode));
+		}
+	}
 	if pps_id as u8 != pps.id {
 		return Err(err!(
 			"A slice references picture parameter set {} and the one in hand is {}.",
@@ -1061,8 +1095,11 @@ pub fn slice(body: &[u8], sps: &Sps, pps: &Pps) -> Outcome<Slice> {
 			let _tc = res!(b.se());
 		}
 	}
+	// Whether the loop filters run across this slice's boundaries. Where the header does not carry
+	// it, the picture parameter set's answer stands (§7.4.7.1).
+	let mut across_slices = pps.filter_across_slices;
 	if pps.filter_across_slices && (sao_luma || sao_chroma || deblocking) {
-		let _across = res!(b.flag());
+		across_slices = res!(b.flag());
 	}
 	// Where the picture is cut up for parallel decoding, the header says where each piece begins.
 	//
@@ -1097,9 +1134,15 @@ pub fn slice(body: &[u8], sps: &Sps, pps: &Pps) -> Outcome<Slice> {
 		// read one bit out of step produces a count that is nonsense against it, which makes this
 		// the cheapest check there is on the whole header: it is what caught the reading that
 		// refused every photograph in the corpus rather than reading its entry points.
+		//
+		// A segment covering part of a picture names fewer pieces than the picture has rows, and
+		// how many fewer is not knowable from the header alone -- so what is checked here is that
+		// it names no more, and the exact form is checked by [`whole_picture_rows`] once the number
+		// of segments is known.
 		if pps.wavefront && !pps.tiles {
 			let rows = ((sps.coded_h + sps.ctb_size - 1) / sps.ctb_size) as usize;
-			if entries.len() + 1 != rows {
+			let over = entries.len() + 1 > rows;
+			if over {
 				return Err(err!(
 					"A slice names {} pieces and the picture is {} rows of coding tree blocks \
 					deep. The header has been read out of step.", entries.len() + 1, rows;
@@ -1117,6 +1160,9 @@ pub fn slice(body: &[u8], sps: &Sps, pps: &Pps) -> Outcome<Slice> {
 		Invalid, Input, Decode));
 	}
 	Ok(Slice {
+		first,
+		address,
+		across_slices,
 		pps_id: pps_id as u8,
 		kind: kind as u8,
 		qp,
@@ -1235,9 +1281,13 @@ fn coded(record: &[u8], data: &[u8]) -> Outcome<(decode::Picture, Sps)> {
 			"The decoder configuration carries no picture parameter set."; Invalid, Input));
 	}
 
-	// And the slice is in the item's own bytes.
+	// And the slices are in the item's own bytes. **Every** slice of the picture, not the first:
+	// a photograph is one slice and a film's frame need not be, and a picture read from one of
+	// four segments is a quarter of a picture.
 	let units = res!(split_lengthed(data, cfg.length_size));
-	for unit in &units {
+	let mut heads: Vec<(Slice, usize)> = Vec::new();
+	let mut chosen: Option<(Sps, Pps)> = None;
+	for (i, unit) in units.iter().enumerate() {
 		match unit.kind {
 			nal::IDR_W_RADL | nal::IDR_N_LP | 21 => {
 				// Which sets this slice was coded against: the picture set it
@@ -1260,14 +1310,52 @@ fn coded(record: &[u8], data: &[u8]) -> Outcome<(decode::Picture, Sps)> {
 					Invalid, Input, Missing)),
 				};
 				let head = res!(slice(&unit.body, &sps, &pps));
-				// The header was read from the unescaped payload; the data after it has to be
-				// handed over escaped, because that is what the entry point offsets count.
-				let at = escaped_at(&unit.raw, head.data_at);
-				let pic = res!(decode::picture(&sps, &pps, &head, &unit.raw[at..]));
-				return Ok((pic, sps));
+				// A second coded picture in the same access unit is somebody else's frame: this
+				// reads the first picture, and the first picture ends where the next one begins.
+				if head.first && !heads.is_empty() {
+					break;
+				}
+				match &chosen {
+					Some((have_sps, have_pps)) => {
+						if have_sps.id != sps.id || have_pps.id != pps.id {
+							return Err(err!(
+								"Two slices of one picture reference different parameter sets.";
+							Invalid, Input, Mismatch));
+						}
+					},
+					None => chosen = Some((sps, pps)),
+				}
+				heads.push((head, i));
 			},
 			_ => {},
 		}
 	}
-	Err(err!("Those bytes hold no coded slice."; Invalid, Input, Decode))
+	let (sps, pps) = match chosen {
+		Some(pair) => pair,
+		None => return Err(err!("Those bytes hold no coded slice."; Invalid, Input, Decode)),
+	};
+	// A picture that is one slice must name one piece a row of blocks, since that is what
+	// wavefront coding is. It is the cheapest check there is on the whole header -- the count and
+	// the geometry come out of different NAL units written at different times -- and it is what
+	// caught the reading that refused every photograph in the corpus.
+	if heads.len() == 1 && pps.wavefront && !pps.tiles {
+		let rows = ((sps.coded_h + sps.ctb_size - 1) / sps.ctb_size) as usize;
+		let named = heads[0].0.entries.len() + 1;
+		if named != rows {
+			return Err(err!(
+				"A slice names {} pieces and the picture is {} rows of coding tree blocks deep. \
+				The header has been read out of step.", named, rows;
+			Invalid, Input, Decode));
+		}
+	}
+	// The header was read from the unescaped payload; the data after it has to be handed over
+	// escaped, because that is what the entry point offsets count.
+	let parts: Vec<(&Slice, &[u8])> = heads.iter()
+		.map(|(head, i)| {
+			let raw = &units[*i].raw;
+			(head, &raw[escaped_at(raw, head.data_at).min(raw.len())..])
+		})
+		.collect();
+	let pic = res!(decode::picture_of(&sps, &pps, &parts));
+	Ok((pic, sps))
 }
