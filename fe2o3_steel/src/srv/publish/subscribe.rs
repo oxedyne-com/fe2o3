@@ -249,6 +249,33 @@ pub fn mint_token() -> String {
 	Rand::generate_random_string(TOKEN_LEN, TOKEN_ALPHABET)
 }
 
+/// The name of the field no person fills in.
+///
+/// `website` because that is what a form-filler expects to find on a form, and filling it is the
+/// tell. The form must place it out of view without `display: none` or `hidden`, which the better
+/// form-fillers skip.
+pub const TRAP_FIELD: &str = "website";
+
+/// The key a sign-up's rate record lives under, kept apart from the comment counter.
+const RATE_PREFIX: &str = "publish/subscribe-rate/";
+
+/// Whether a submission filled in the field no person sees.
+///
+/// Whitespace is not a fill: a browser that helpfully trims or a proxy that pads should not cost a
+/// reader their sign-up.
+pub fn trapped(value: &str) -> bool {
+	!value.trim().is_empty()
+}
+
+/// A salted, one-way rendering of where a sign-up came from.
+///
+/// The same trade [`super::comment::from_hash`] makes, with its own domain separator so one
+/// counter's values are not the other's: enough to recognise a repeat, not enough to reconstruct an
+/// address. The store holds no readable record of who signed up from where.
+fn from_hash(addr: &str, salt: &[u8]) -> String {
+	super::comment::hash_with(addr, b"subscribe-from", salt)
+}
+
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ STORE                                                                     │
@@ -756,6 +783,24 @@ pub fn subscribe_form(cfg: &PublishConfig) -> HttpMessage {
 /// confirmed, so nothing here reveals whether an address is on the list. Where mail is not configured,
 /// or the site has no canonical origin to build an absolute confirmation link from, it says the
 /// newsletter is not set up rather than storing a pending subscriber it can never confirm.
+///
+/// # What stands between a stranger and this host's outbound mail
+///
+/// This endpoint is unauthenticated and its effect is a piece of mail to an address the sender
+/// chose. Left bare it is a mail-bombing tool wearing the site's own domain, and the cost is not
+/// the disk -- it is the sending reputation every later confirmation depends on. So, before
+/// anything is stored or sent:
+///
+/// - **The field no person fills in.** [`TRAP_FIELD`] filled means a machine filled it. The
+///   submission is dropped and answered with the ordinary page, since telling a bot it was spotted
+///   only teaches it which field to leave alone.
+/// - **A limit per sender**, keyed on a salted hash of where the request came from and counted
+///   apart from the comment limiter. Over it, the same page again: a form that says "you are doing
+///   that too often" is a form that tells a script exactly what it has found.
+///
+/// Double opt-in is the third layer and the one already here: an address that never confirms hears
+/// nothing further, so the worst a flood achieves is one message per address rather than a
+/// correspondence.
 pub async fn handle_subscribe<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -767,6 +812,7 @@ pub async fn handle_subscribe<
 	db:	Option<&(Arc<RwLock<DB>>, UID)>,
 	mail:	&Option<Arc<MailSender>>,
 	body:	&[u8],
+	from:	Option<&str>,
 	id:	&str,
 )
 	-> Outcome<HttpMessage>
@@ -785,6 +831,28 @@ pub async fn handle_subscribe<
 	if cfg.base_url.is_empty() {
 		warn!("{}: publish: a subscribe arrived but the site has no base_url for a confirm link", id);
 		return Ok(page::subscribe_unavailable_page(cfg));
+	}
+
+	// The trap, read before the address: a filled one means nothing else about this submission is
+	// worth the reads it would cost.
+	let trap = crate::srv::console::form_field(body, TRAP_FIELD).unwrap_or_default();
+	if trapped(&trap) {
+		info!("{}: publish: a sign-up filled the field no person sees; dropped", id);
+		return Ok(page::subscribe_sent_page(cfg));
+	}
+
+	// What this sender is allowed. A refusal costs one read and writes no subscriber, which is why
+	// it comes before the store and the mail. A request with no address behind it -- which should
+	// not happen, since the caller supplies one -- is not limited here.
+	if let Some(addr) = from {
+		let salt = res!(crate::srv::publish::comment::site_secret(db));
+		let hashed = from_hash(addr, &salt);
+		if !res!(crate::srv::publish::comment::rate_allows_at(
+			db, RATE_PREFIX, &hashed, cfg.subscribe_rate_secs, cfg.subscribe_rate_hourly))
+		{
+			info!("{}: publish: a sender is signing up faster than this site allows", id);
+			return Ok(page::subscribe_sent_page(cfg));
+		}
 	}
 
 	let email = crate::srv::console::form_field(body, "email").unwrap_or_default();
@@ -1009,6 +1077,71 @@ mod tests {
 	fn test_an_address_is_redacted_for_the_log_07() -> Outcome<()> {
 		assert_eq!(redact("jason@oxedyne.com"), "j***@oxedyne.com");
 		assert_eq!(redact("not-an-address"), "***");
+		Ok(())
+	}
+
+	/// The field no person sees catches a fill and forgives whitespace.
+	///
+	/// Whitespace matters: a browser or a proxy that pads the value must not cost a reader their
+	/// sign-up, and a bot that writes anything at all must lose theirs.
+	#[test]
+	fn test_the_trap_catches_a_fill_10() -> Outcome<()> {
+		assert!(!trapped(""));
+		assert!(!trapped("   "));
+		assert!(!trapped("\t\n"));
+		assert!(trapped("http://example.com"));
+		assert!(trapped("x"));
+		assert!(trapped("  x  "));
+		Ok(())
+	}
+
+	/// The sign-up limit is policy with a limiting default: a block that names none still limits.
+	///
+	/// The default matters more than the number. This endpoint sends mail to an address a stranger
+	/// chose, so the failure of omission -- a `publish` block written before these fields existed,
+	/// loading with no limit at all -- is the one worth designing against.
+	#[test]
+	fn test_the_signup_limit_defaults_to_limiting_11() -> Outcome<()> {
+		use crate::srv::publish::PublishConfig;
+
+		// A block that names nothing about sign-ups still limits them.
+		let cfg = res!(PublishConfig::from_datmap(&DaticleMap::new()));
+		assert_eq!(cfg.subscribe_rate_secs, 60);
+		assert_eq!(cfg.subscribe_rate_hourly, 5);
+
+		// A site that names its own numbers is taken at its word. Written as bare counts, which the
+		// grammar types as narrowly as it can -- the shape an operator actually writes.
+		let mut m = DaticleMap::new();
+		m.insert(dat!("subscribe_rate_secs"), dat!(120u8));
+		m.insert(dat!("subscribe_rate_hourly"), dat!(2u8));
+		let cfg = res!(PublishConfig::from_datmap(&m));
+		assert_eq!(cfg.subscribe_rate_secs, 120);
+		assert_eq!(cfg.subscribe_rate_hourly, 2);
+
+		// Off is a decision a site may take, and is distinct from naming nothing.
+		let mut off = DaticleMap::new();
+		off.insert(dat!("subscribe_rate_secs"), dat!(0u8));
+		off.insert(dat!("subscribe_rate_hourly"), dat!(0u8));
+		let cfg = res!(PublishConfig::from_datmap(&off));
+		assert_eq!(cfg.subscribe_rate_secs, 0);
+		assert_eq!(cfg.subscribe_rate_hourly, 0);
+		Ok(())
+	}
+
+	/// One address hashes to different values for the sign-up counter and the comment counter.
+	///
+	/// The separation is the point: a value taken from one counter must not be a lookup key for the
+	/// other, or the two features become one another's oracle.
+	#[test]
+	fn test_the_two_counters_do_not_share_a_hash_12() -> Outcome<()> {
+		let salt = b"a-site-secret";
+		let mine = from_hash("203.0.113.7", salt);
+		let theirs = super::super::comment::from_hash("203.0.113.7", salt);
+		assert_ne!(mine, theirs);
+		// Stable for one address, or a limiter counts every request as a new sender.
+		assert_eq!(mine, from_hash("203.0.113.7", salt));
+		// And separated by salt, so a value means nothing on another site.
+		assert_ne!(mine, from_hash("203.0.113.7", b"another-site"));
 		Ok(())
 	}
 

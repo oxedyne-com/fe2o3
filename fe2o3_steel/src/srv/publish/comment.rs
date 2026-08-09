@@ -586,7 +586,16 @@ fn hex(bytes: &[u8]) -> String {
 /// the salt is per-site and never leaves the host, so the value is meaningless anywhere else, and the
 /// address space being small enough to enumerate is exactly why the salt has to be there.
 pub fn from_hash(addr: &str, salt: &[u8]) -> String {
-	let h = HashScheme::new_sha3_256().hash(&[addr.as_bytes(), b"comment-from", salt], []);
+	hash_with(addr, b"comment-from", salt)
+}
+
+/// As [`from_hash`], under a caller's own domain separator.
+///
+/// The separator is what keeps two features' hashes of one address apart, so a value taken from one
+/// counter says nothing about the other. A caller supplying its own gets the salting and the
+/// truncation without having to restate either.
+pub fn hash_with(addr: &str, domain: &[u8], salt: &[u8]) -> String {
+	let h = HashScheme::new_sha3_256().hash(&[addr.as_bytes(), domain, salt], []);
 	hex(&h.as_hashform().as_vec())[..32].to_string()
 }
 
@@ -2358,6 +2367,30 @@ pub fn rate_allows<
 )
 	-> Outcome<bool>
 {
+	rate_allows_at(db, RATE_PREFIX, from, interval, hourly)
+}
+
+/// As [`rate_allows`], under a caller's own key prefix.
+///
+/// One counter per thing being limited. The newsletter's sign-ups and a post's comments are
+/// different acts at different costs, and a reader who has just commented has not thereby spent
+/// their sign-up: sharing one bucket between them would make each limit depend on the other's
+/// traffic.
+pub fn rate_allows_at<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:		&(Arc<RwLock<DB>>, UID),
+	prefix:		&str,
+	from:		&str,
+	interval:	u64,
+	hourly:		u32,
+)
+	-> Outcome<bool>
+{
 	// Both off: the site has decided its readers share addresses, or that the per-post ceilings are
 	// bound enough. Nothing is read and nothing is written.
 	if interval == 0 && hourly == 0 {
@@ -2367,7 +2400,7 @@ pub fn rate_allows<
 		.duration_since(std::time::UNIX_EPOCH)
 		.map(|d| d.as_secs())
 		.unwrap_or(0);
-	let key = dat!(fmt!("{}{}", RATE_PREFIX, from));
+	let key = dat!(fmt!("{}{}", prefix, from));
 
 	let (db_arc, user) = db;
 	let (last, count, window) = {

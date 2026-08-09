@@ -955,8 +955,9 @@ impl<
             // already known -- so the form is never an oracle for the list.
             if let Some(cfg) = &publish {
                 if let Some(Subscription::Subscribe) = cfg.subscription_of(&request_path) {
+                    let peer_ip = peer.ip().to_string();
                     let resp = res!(publish_subscribe::handle_subscribe(
-                        cfg.as_ref(), db.as_ref(), &mail, &body, &id).await);
+                        cfg.as_ref(), db.as_ref(), &mail, &body, Some(&peer_ip), &id).await);
                     return Ok(Some(resp));
                 }
                 // A comment on a post: a public POST under the post's own path, so which post is

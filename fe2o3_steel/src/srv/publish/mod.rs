@@ -175,6 +175,22 @@ pub struct PublishConfig {
 	pub comment_rate_secs:		u64,
 	/// How many comments one sender may leave in an hour. `0` turns the count off.
 	pub comment_rate_hourly:	u32,
+	/// The least seconds between two newsletter sign-ups from one address. `0` turns the interval
+	/// off.
+	///
+	/// **A sign-up is not a comment, and is worth limiting harder.** A comment costs a row; a
+	/// sign-up costs a piece of outbound mail to an address the sender chose, which is the whole of
+	/// a mail-bombing tool and lands the cost on this host's sending reputation rather than on its
+	/// disk. Double opt-in caps the damage at one message per address; it does not cap how many
+	/// addresses a script may name.
+	pub subscribe_rate_secs:	u64,
+	/// How many sign-ups one address may make in an hour. `0` turns the count off.
+	///
+	/// Deliberately small. A person signs up once, mistypes it, and signs up again; a handful an
+	/// hour covers that and nothing else. An office behind one address that genuinely needs more
+	/// raises it, the same operational judgement
+	/// [`comment_rate_secs`](Self::comment_rate_secs) documents.
+	pub subscribe_rate_hourly:	u32,
 	/// Whether this site takes comments on its posts.
 	///
 	/// **Off unless a site asks for it.** A comment endpoint is an unauthenticated public write, and
@@ -308,6 +324,10 @@ impl PublishConfig {
 			// `publish` block that predates the newsletter still loads.
 			comment_rate_secs:	res!(get_count("comment_rate_secs", 30)),
 			comment_rate_hourly:	res!(get_count("comment_rate_hourly", 10)) as u32,
+			// Optional, like the rest here: a `publish` block written before these fields existed
+			// loads and takes the defaults, which limit rather than not.
+			subscribe_rate_secs:	res!(get_count("subscribe_rate_secs", 60)),
+			subscribe_rate_hourly:	res!(get_count("subscribe_rate_hourly", 5)) as u32,
 			comments:		match m.get(&dat!("comments")) {
 				Some(Dat::Bool(b))	=> *b,
 				None			=> false,

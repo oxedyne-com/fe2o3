@@ -214,6 +214,8 @@ mod tests {
 			comments:		true,
 			comment_rate_secs:	0,
 			comment_rate_hourly:	0,
+			subscribe_rate_secs:	0,
+			subscribe_rate_hourly:	0,
 			newsletter_from:	String::new(),
 			categories:		vec![],
 			default_author:		String::new(),
