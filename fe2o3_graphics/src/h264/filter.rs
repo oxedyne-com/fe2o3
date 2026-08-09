@@ -197,8 +197,14 @@ fn edge(v: &mut View, mb: usize, mx: usize, my: usize, ex: usize, ey: usize, ver
 fn take(px: &[u8], w: usize, h: usize, x: usize, y: usize, vertical: bool) -> Option<[i32; 8]> {
 	let mut out = [0i32; 8];
 	for k in 0..4usize {
-		// `p` runs away from the edge on the near side, `q` away from it on the far side.
-		let (pxx, pyy) = if vertical { (x.checked_sub(k + 1)?, y) } else { (x, y.checked_sub(k + 1)?) };
+		// `p` runs away from the edge on the near side, `q` away from it on the far side. An edge
+		// with fewer than four samples behind it is at the picture's boundary, and there is nothing
+		// there to filter against.
+		let back = match if vertical { x.checked_sub(k + 1) } else { y.checked_sub(k + 1) } {
+			Some(v) => v,
+			None => return None,
+		};
+		let (pxx, pyy) = if vertical { (back, y) } else { (x, back) };
 		let (qxx, qyy) = if vertical { (x + k, y) } else { (x, y + k) };
 		if pxx >= w || pyy >= h || qxx >= w || qyy >= h {
 			return None;
