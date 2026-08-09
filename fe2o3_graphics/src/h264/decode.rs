@@ -411,6 +411,17 @@ pub fn decode(units: &[Unit], sets: &mut Vec<Sps>, pics: &mut Vec<Pps>, deblock:
 			res!(slice_data(&mut frame, &mut run, u, head.first_mb as usize, head.data_bit));
 		}
 	}
+	// The slices of a picture tile it: between them they cover every macroblock exactly once. A
+	// macroblock left undecoded means a slice ended before it should have, and for a slice coded with
+	// the arithmetic coder that means the coder lost the bitstream -- which otherwise shows up only
+	// as a picture, since a desynchronised arithmetic decoder goes on answering bins.
+	if let Some(missing) = frame.slice_of.iter().position(|s| s.is_none()) {
+		return Err(err!(
+			"Macroblock {} of {} was never decoded: the picture's {} slices did not cover it. \
+			Either a slice ended early or the picture is not whole.",
+			missing, frame.slice_of.len(), slices.len();
+		Invalid, Input, Decode));
+	}
 	if deblock {
 		let mut view = frame_view(&mut frame);
 		view.filters = &filters;
@@ -1263,6 +1274,12 @@ fn macroblock_cabac(f: &mut Frame, run: &mut SliceRun, e: &mut Entropy, mb: usiz
 		}
 	}
 
+	if std::env::var("H264_TRACE").is_ok() && mb < 3 {
+		eprintln!("mb {} type {} kind {:?} cbpL {} cbpC {} qp {} p16 {:?} ch {:?} modes {:?} \
+			dc {:?} blk0 {:?} big0 {:?}",
+			mb, mb_type, kind, cbp_luma, cbp_chroma, qp, pred16, chroma_mode, &modes[..4],
+			&luma_dc[..4], &luma[0][..4], &luma8[0][..4]);
+	}
 	f.slice_of[mb] = Some(run.index);
 	f.kind[mb] = kind;
 	f.qp[mb] = qp;
