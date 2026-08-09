@@ -2082,4 +2082,69 @@ mod tests {
 		req!(res!(build()), res!(build()));
 		Ok(())
 	}
+	#[test]
+	fn test_a_written_film_reads_back_17() -> Outcome<()> {
+		// The two halves of this module, held to each other. The writer lays out a sample table and
+		// the reader walks it back, and what they must agree on is the thing neither can check
+		// alone: where each sample's bytes actually are. A chunk offset measured from the wrong
+		// origin, or a sample-to-chunk run read as though its first chunk were counted from nought,
+		// produces a perfectly well-formed index that points at the wrong bytes.
+		let mut t = res!(Track::new(64, 48, 1000, Codec::Avc(avcc())));
+		let mut wrote: Vec<Vec<u8>> = Vec::new();
+		for i in 0..6usize {
+			let data = nal(20 + i);
+			wrote.push(data.clone());
+			res!(t.push(Sample { data, dur: 40, sync: i == 0 }));
+		}
+		let file = res!(t.finish());
+		let film = res!(Film::read(&file));
+		req!(film.kind(), Kind::Avc);
+		req!(film.samples(), wrote.len());
+		req!(film.size(), (64u16, 48u16));
+		for (i, want) in wrote.iter().enumerate() {
+			let got = res!(film.sample(&file, i));
+			req!(got, &want[..], "sample {} came back from the wrong place", i);
+		}
+		// The first sample is the only sync sample, and a reader must begin there.
+		req!(res!(film.first_sync()), 0usize);
+		// A sample past the end is refused rather than answered.
+		req!(film.span(wrote.len()).is_err(), true, "a sample past the end was handed out");
+		Ok(())
+	}
+
+	#[test]
+	fn test_a_track_that_is_turned_says_so_18() -> Outcome<()> {
+		// The writer writes a unity matrix, so a film it wrote is shown as it was coded. What is
+		// asserted here is the reading of the four entries that matter, because the fault this
+		// guards against hides perfectly: a picture turned by ninety degrees has exactly as many
+		// samples as one that is not, so a decoder and a viewer that disagree about the angle
+		// produce output of the right size and the wrong shape.
+		let mut t = res!(Track::new(64, 48, 1000, Codec::Avc(avcc())));
+		res!(t.push(Sample { data: nal(24), dur: 40, sync: true }));
+		let mut file = res!(t.finish());
+		req!(res!(Film::read(&file)).rotation(), 0u16, "a unity matrix was read as a rotation");
+
+		// Turn it a quarter clockwise by writing the matrix a phone would: a = 0, b = 1, c = -1,
+		// d = 0, in 16.16 fixed point.
+		let at = match file.windows(4).position(|w| w == b"tkhd") {
+			Some(at) => at + 4 + 40,
+			None => return Err(err!("the writer emitted no track header."; Test, Missing)),
+		};
+		let put = |file: &mut Vec<u8>, i: usize, v: i32| {
+			file[at + i * 4..at + i * 4 + 4].copy_from_slice(&(v as u32).to_be_bytes());
+		};
+		let one = 0x0001_0000i32;
+		put(&mut file, 0, 0);
+		put(&mut file, 1, one);
+		put(&mut file, 2, -one);
+		put(&mut file, 3, 0);
+		req!(res!(Film::read(&file)).rotation(), 90u16);
+		// And a half turn.
+		put(&mut file, 0, -one);
+		put(&mut file, 1, 0);
+		put(&mut file, 2, 0);
+		put(&mut file, 3, -one);
+		req!(res!(Film::read(&file)).rotation(), 180u16);
+		Ok(())
+	}
 }

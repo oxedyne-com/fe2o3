@@ -64,6 +64,27 @@
 //! Resolutions run 1920x1088 (669 films), 1280x720 (462), 640x480 (103), 1088x1920 (96), 720x480
 //! (85), 848x480 (77), down a tail to 176x144 (21), with 9 at 3840x2160.
 //!
+//! # What is decoded, and what is not
+//!
+//! **The CAVLC half is complete and verified.** The container reading, the parameter sets, the
+//! slice headers, the macroblock layer, all four families of intra prediction, all four inverse
+//! transforms and the deblocking filter are here, and a film coded with the variable-length entropy
+//! coder decodes to a picture identical to FFmpeg's own, luma and chroma, every sample.
+//!
+//! **The CABAC half is not written.** A film whose picture parameter set sets
+//! `entropy_coding_mode_flag` is refused by name, and refused *before* any sample is produced,
+//! rather than decoded with the wrong entropy coder into a picture that would look plausible. That
+//! is 947 of the 1,658 H.264 films. Everything below the entropy layer -- prediction, transforms,
+//! the deblocking filter, the macroblock walk -- is shared and already verified, so what is missing
+//! is the arithmetic decoder itself, its context initialisation tables, and the binarisation of
+//! each syntax element: clause 9.3 and Tables 9-12 to 9-33.
+//!
+//! The one thing to know before writing it: those tables are about 260 pairs of numbers for an
+//! intra slice, and in a text rendering of the specification their digits wrap across lines, so
+//! they cannot be parsed out the way Table 9-5 and Table 8-13 were. They will have to be
+//! transcribed against the PDF and then checked some other way -- against a decode, most likely,
+//! since a wrong initialisation value produces a picture rather than an error.
+//!
 //! # References
 //!
 //! Rec. ITU-T H.264 (08/2021). The NAL unit header is §7.3.1, the sequence parameter set §7.3.2.1.1,

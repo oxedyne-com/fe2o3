@@ -72,29 +72,6 @@ const TC0: [[i32; 52]; 3] = [
 	],
 ];
 
-/// Which macroblock a luma sample sits in, and where inside it.
-fn mb_of(x: usize, y: usize, mbs_w: usize) -> usize {
-	(y / 16) * mbs_w + (x / 16)
-}
-
-/// Whether the four-by-four block holding a luma sample carries any coefficient.
-///
-/// With the eight-by-eight transform the question is asked of the eight-by-eight block instead,
-/// which is four of these at once.
-fn has_coeffs(v: &View, mb: usize, x: usize, y: usize) -> bool {
-	let (bx, by) = ((x % 16) / 4, (y % 16) / 4);
-	let coded = v.coded[mb];
-	if v.big[mb] {
-		let base = (by / 2) * 2 + (bx / 2);
-		let quad = base * 4;
-		(0..4).any(|k| coded & (1 << (quad + k)) != 0)
-	} else {
-		let quad = (by / 2) * 2 + (bx / 2);
-		let within = (by % 2) * 2 + (bx % 2);
-		coded & (1 << (quad * 4 + within)) != 0
-	}
-}
-
 /// Runs the deblocking filter over a whole picture.
 ///
 /// Every macroblock in this decoder is intra, which fixes the boundary strength: 4 at a macroblock
@@ -155,12 +132,12 @@ fn edge(v: &mut View, mb: usize, mx: usize, my: usize, ex: usize, ey: usize, ver
 	if v.slice_of[other].is_none() {
 		return Ok(());
 	}
-	// Every macroblock here is intra, so a macroblock edge is the strongest the filter has and an
-	// internal one the next strongest. There is no case where an intra picture yields 2 or below.
+	// Every macroblock here is intra, so a macroblock edge takes the strongest filter the
+	// specification has and an internal one the next strongest (§8.7.2.1). The lower strengths are
+	// reached only through the coefficient and motion tests, and both are tested *after* the intra
+	// one, so an all-intra picture never sees them. They are absent rather than written and
+	// unreachable.
 	let bs = if mb_edge { 4 } else { 3 };
-	// Only where nothing at all is coded either side does the strength drop, and for an intra
-	// picture it does not: the intra condition is tested before the coefficient one.
-	let _ = has_coeffs(v, mb, mx, my);
 
 	let qp_p = v.qp[other];
 	let qp_q = v.qp[mb];

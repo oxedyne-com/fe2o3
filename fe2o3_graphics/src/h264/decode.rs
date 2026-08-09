@@ -175,9 +175,8 @@ struct Frame<'a> {
 	kind:	Vec<Kind>,
 	/// Each macroblock's quantisation parameter, for the deblocking filter.
 	qp:	Vec<i32>,
-	/// Which four-by-four luma blocks hold a coefficient, for the deblocking filter.
-	coded:	Vec<u16>,
-	/// Whether each macroblock is coded with the eight-by-eight transform, likewise.
+	/// Whether each macroblock is coded with the eight-by-eight transform, which says which of its
+	/// internal edges the deblocking filter visits.
 	big:	Vec<bool>,
 	/// The intra prediction mode of each four-by-four luma block, in the macroblock's own order.
 	modes:	Vec<[u8; 16]>,
@@ -216,7 +215,6 @@ impl<'a> Frame<'a> {
 			slice_of:	vec![None; n],
 			kind:		vec![Kind::Absent; n],
 			qp:		vec![0; n],
-			coded:		vec![0; n],
 			big:		vec![false; n],
 			modes:		vec![[2u8; 16]; n],
 			counts:		vec![[0u8; 24]; n],
@@ -368,9 +366,12 @@ pub fn decode(units: &[Unit], sets: &mut Vec<Sps>, pics: &mut Vec<Pps>, deblock:
 		}
 		if pps.cabac {
 			return Err(err!(
-				"The slice is coded with the arithmetic entropy coder (CABAC), and this decoder \
-				reads the variable-length one (CAVLC). 947 films in the corpus this was written \
-				against are CABAC and 711 are CAVLC.";
+				"The slice is coded with the arithmetic entropy coder (CABAC, clause 9.3), and \
+				this decoder reads only the variable-length one (CAVLC, clause 9.2). Both are in \
+				use: of the 1,658 H.264 films in the library this was written against, 947 are \
+				CABAC and 711 are CAVLC. Everything below the entropy layer is shared and is \
+				already held to FFmpeg sample for sample, so what is missing is the arithmetic \
+				decoder, its context initialisation tables and the binarisations.";
 			Invalid, Input, Unimplemented));
 		}
 		res!(slice_data(&mut frame, &mut run, u, head.first_mb as usize, head.data_bit));
@@ -601,20 +602,6 @@ fn macroblock(f: &mut Frame, run: &mut SliceRun, b: &mut Bits, mb: usize) -> Out
 	f.qp[mb] = qp;
 	f.modes[mb] = modes;
 	f.counts[mb] = counts;
-	let mut coded = 0u16;
-	for i in 0..16 {
-		let any = if kind == Kind::I16x16 {
-			luma_dc.iter().any(|v| *v != 0) || luma[i].iter().any(|v| *v != 0)
-		} else if kind == Kind::I8x8 {
-			luma8[i / 4].iter().any(|v| *v != 0)
-		} else {
-			luma[i].iter().any(|v| *v != 0)
-		};
-		if any {
-			coded |= 1 << i;
-		}
-	}
-	f.coded[mb] = coded;
 	f.big[mb] = kind == Kind::I8x8;
 
 	if std::env::var("H264_TRACE").is_ok() && mb < 3 {
@@ -656,7 +643,6 @@ fn pcm(f: &mut Frame, run: &mut SliceRun, b: &mut Bits, mb: usize) -> Outcome<()
 	f.slice_of[mb] = Some(run.index);
 	f.kind[mb] = Kind::Pcm;
 	f.qp[mb] = 0;
-	f.coded[mb] = 0xffff;
 	f.modes[mb] = [2u8; 16];
 	// A raw macroblock counts as sixteen coefficients everywhere, for its neighbours' tables.
 	f.counts[mb] = [16u8; 24];
@@ -959,8 +945,6 @@ pub struct View<'a> {
 	pub mbs_h:	usize,
 	/// Each macroblock's quantisation parameter.
 	pub qp:		&'a [i32],
-	/// Which four-by-four luma blocks hold a coefficient.
-	pub coded:	&'a [u16],
 	/// Which slice each macroblock belongs to.
 	pub slice_of:	&'a [Option<usize>],
 	/// Whether each macroblock is coded with the eight-by-eight transform.
@@ -981,7 +965,6 @@ fn frame_view<'b>(f: &'b mut Frame) -> View<'b> {
 		mbs_w:		f.mbs_w,
 		mbs_h:		f.mbs_h,
 		qp:		&f.qp,
-		coded:		&f.coded,
 		slice_of:	&f.slice_of,
 		big:		&f.big,
 		alpha:		0,
