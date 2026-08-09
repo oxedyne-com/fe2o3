@@ -101,3 +101,4 @@ pub mod raster;
 pub mod stroke;
 pub mod svg;
 pub mod transform;
+pub mod yuv;
