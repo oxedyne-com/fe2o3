@@ -102,6 +102,7 @@ pub mod imap;
 pub mod llm;
 pub mod mail;
 pub mod media;
+pub mod search;
 pub mod smtp;
 pub mod ssdp;
 pub mod time;
