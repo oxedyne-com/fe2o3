@@ -476,7 +476,16 @@ impl AppShellContext {
                         tls.clone(),
                         alert_host.to_string(),
                     ));
-                    tokio::spawn(w.run());
+                    // `rt.spawn`, NOT `tokio::spawn`. This function is sync: the
+                    // runtime is built at the top and is not current until
+                    // `block_on` further down, so `tokio::spawn` here panics with
+                    // "there is no reactor running" -- exactly as the comment
+                    // beside the samplers above says it will. That panic took a
+                    // live server into a restart loop on 2026-08-10, because the
+                    // code compiles perfectly and fails only when a server is
+                    // actually started. A change to this function is not tested
+                    // until something has been started with it.
+                    rt.spawn(w.run());
                 },
                 (None, _) => warn!("A watch list is configured but alerting is not, \
                     so nothing would be told about a peer going down. The watcher \
