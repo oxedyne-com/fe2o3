@@ -22,6 +22,7 @@ use oxedyne_fe2o3_jdat::{
 use oxedyne_fe2o3_net::{
     constant::SESSION_ID_KEY_LABEL,
     dns::Fqdn,
+    sms::Provider as SmsProvider,
     http::{
         encoding,
         fields::{
@@ -1940,6 +1941,235 @@ pub struct AlertConfig {
     /// campaign produces a sustained defence rather than a sustained
     /// mailbox.
     pub failed_cooldown_secs:   u64,
+    /// Where to send the text-message half, when there is one.
+    ///
+    /// Absent on most hosts. It belongs on whichever machines do the watching,
+    /// because a machine that has died cannot text anybody about it.
+    pub sms:                    Option<SmsAlertConfig>,
+}
+
+/// The text-message leg of alerting.
+///
+/// **Why a second channel at all.** Mail and a text fail for different reasons:
+/// mail needs a working MX, a mailbox somebody reads and a spam filter that
+/// lets it through; a text needs a funded account and a carrier. Two channels
+/// that fail independently is the entire value of having two. A text is also
+/// the only one that arrives with no data connection, which is the state a
+/// phone is in exactly often enough to matter.
+///
+/// **The credential is not here.** Only the names of the environment variables
+/// holding it. A configuration file is copied between machines, pasted into a
+/// chat window to ask why a server will not start, and committed by accident;
+/// an environment variable is none of those things by default.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SmsAlertConfig {
+    /// Master switch for this leg alone. Mail is unaffected.
+    pub enabled:    bool,
+    /// Which gateway.
+    pub provider:   SmsProvider,
+    /// Recipients, in E.164 with the leading `+`.
+    pub to:         Vec<String>,
+    /// Sender, as the gateway wants it. Empty asks the gateway for its default,
+    /// which is what an account with one number should do rather than repeat
+    /// itself in configuration.
+    pub from:       String,
+    /// Environment variable holding the gateway account identifier.
+    pub user_env:   String,
+    /// Environment variable holding the gateway secret.
+    pub secret_env: String,
+}
+
+impl Default for SmsAlertConfig {
+    fn default() -> Self {
+        Self {
+            enabled:    false,
+            provider:   SmsProvider::ClickSend,
+            to:         Vec::new(),
+            from:       String::new(),
+            user_env:   fmt!("STEEL_SMS_USER"),
+            secret_env: fmt!("STEEL_SMS_SECRET"),
+        }
+    }
+}
+
+/// One machine this node watches, and where to ask.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WatchPeer {
+    /// What to call it in an alert. A person's name for the machine, not a
+    /// hostname: the alert is read on a phone in the dark.
+    pub name: String,
+    /// The health URL, which must be `https`.
+    pub url:  String,
+}
+
+/// Watching the other machines in the estate.
+///
+/// See [`crate::srv::watch`] for why this is a mesh of peers rather than a
+/// monitoring server, and why adding a machine is one line here and nothing
+/// else anywhere.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WatchConfig {
+    /// Master switch.
+    pub enabled:        bool,
+    /// The machines this node watches. Not including itself: a node cannot
+    /// report its own death, which is the whole premise.
+    pub peers:          Vec<WatchPeer>,
+    /// Seconds between rounds.
+    pub interval_secs:  u64,
+    /// Consecutive failures before a peer is called down. Above one, so a
+    /// single dropped packet does not wake anybody.
+    pub fail_threshold: u32,
+    /// Seconds to wait for a health answer.
+    pub timeout_secs:   u64,
+    /// Seconds between reminders while a peer stays down. An alarm that fires
+    /// every round is an alarm that gets silenced, and the text leg costs money
+    /// per message.
+    pub repeat_secs:    u64,
+}
+
+impl SmsAlertConfig {
+    /// Parse an `SmsAlertConfig` from a `DaticleMap`.
+    ///
+    /// Every field falls back to the default, so an existing configuration that
+    /// has never heard of this block keeps loading unchanged. What is *not*
+    /// tolerated is an enabled block that cannot work: a gateway nobody
+    /// recognises, or nobody to text. Both are refused at start-up, because the
+    /// alternative is discovering them on the night the alert was needed.
+    pub fn from_datmap(m: &DaticleMap) -> Outcome<Self> {
+        let mut out = Self::default();
+        if let Some(Dat::Bool(b)) = m.get(&dat!("enabled")) {
+            out.enabled = *b;
+        }
+        if let Some(Dat::Str(s)) = m.get(&dat!("provider")) {
+            out.provider = res!(SmsProvider::from_id(s).ok_or_else(|| err!(
+                "alerts.sms.provider is '{}'. Known gateways: {}.",
+                s, SmsProvider::ALL.iter().map(|p| p.id())
+                    .collect::<Vec<_>>().join(", ");
+                Configuration, Invalid)));
+        }
+        if let Some(Dat::Str(s)) = m.get(&dat!("from")) {
+            out.from = s.clone();
+        }
+        if let Some(Dat::Str(s)) = m.get(&dat!("user_env")) {
+            out.user_env = s.clone();
+        }
+        if let Some(Dat::Str(s)) = m.get(&dat!("secret_env")) {
+            out.secret_env = s.clone();
+        }
+        if let Some(Dat::List(l)) = m.get(&dat!("to")) {
+            for d in l {
+                if let Dat::Str(s) = d {
+                    out.to.push(s.clone());
+                }
+            }
+        }
+        if out.enabled {
+            if out.to.is_empty() {
+                return Err(err!(
+                    "alerts.sms is enabled with no numbers in 'to'. An alerter \
+                    with nobody to tell is worse than none, because it looks \
+                    like cover.";
+                    Configuration, Invalid, Missing));
+            }
+            // Checked here rather than at the first alert. A number that a
+            // gateway will refuse is a text that never arrives, and the moment
+            // it is discovered would otherwise be an outage at three in the
+            // morning.
+            for n in &out.to {
+                if !oxedyne_fe2o3_net::sms::is_e164(n) {
+                    return Err(err!(
+                        "alerts.sms.to contains {:?}, which is not E.164. It \
+                        needs a leading '+' and the country code, e.g. \
+                        '+61400000000' -- every gateway refuses anything else, \
+                        so this would be a text that never arrived.", n;
+                        Configuration, Invalid, Input));
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
+impl WatchConfig {
+    /// Parse a `WatchConfig` from a `DaticleMap`.
+    ///
+    /// A peer with no name or no URL is refused rather than skipped: a watch
+    /// list that silently watches four machines out of five is the failure this
+    /// whole module exists to prevent.
+    pub fn from_datmap(m: &DaticleMap) -> Outcome<Self> {
+        let mut out = Self::default();
+        if let Some(Dat::Bool(b)) = m.get(&dat!("enabled")) {
+            out.enabled = *b;
+        }
+        if let Some(Dat::U64(n)) = m.get(&dat!("interval_secs")) {
+            out.interval_secs = *n;
+        }
+        if let Some(Dat::U64(n)) = m.get(&dat!("timeout_secs")) {
+            out.timeout_secs = *n;
+        }
+        if let Some(Dat::U64(n)) = m.get(&dat!("repeat_secs")) {
+            out.repeat_secs = *n;
+        }
+        if let Some(Dat::U32(n)) = m.get(&dat!("fail_threshold")) {
+            out.fail_threshold = *n;
+        }
+        if let Some(Dat::List(l)) = m.get(&dat!("peers")) {
+            for (i, d) in l.iter().enumerate() {
+                let pm = match d {
+                    Dat::Map(pm) => pm,
+                    _ => return Err(err!(
+                        "watch.peers entry {} is not a map.", i;
+                        Configuration, Invalid, Input)),
+                };
+                let get = |k: &str| -> String {
+                    match pm.get(&dat!(k)) {
+                        Some(Dat::Str(v)) => v.clone(),
+                        _ => String::new(),
+                    }
+                };
+                let name = get("name");
+                let url = get("url");
+                if name.is_empty() || url.is_empty() {
+                    return Err(err!(
+                        "watch.peers entry {} needs both a 'name' and a 'url'.", i;
+                        Configuration, Invalid, Missing));
+                }
+                out.peers.push(WatchPeer { name, url });
+            }
+        }
+        if out.enabled {
+            if out.peers.is_empty() {
+                return Err(err!(
+                    "watch is enabled with no peers. A watcher watching nothing \
+                    looks like cover and is not.";
+                    Configuration, Invalid, Missing));
+            }
+            if out.fail_threshold == 0 {
+                return Err(err!(
+                    "watch.fail_threshold is 0, which would call a machine down \
+                    on a single dropped packet.";
+                    Configuration, Invalid, Range));
+            }
+        }
+        Ok(out)
+    }
+}
+
+impl Default for WatchConfig {
+    fn default() -> Self {
+        Self {
+            enabled:        false,
+            peers:          Vec::new(),
+            interval_secs:  60,
+            // Three, against a sixty second round: a machine is called down
+            // after roughly three minutes of not answering. Long enough that a
+            // restart or a certificate renewal does not raise the alarm, short
+            // enough that fifty minutes of silence cannot happen again.
+            fail_threshold: 3,
+            timeout_secs:   10,
+            repeat_secs:    900,
+        }
+    }
 }
 
 impl Default for AlertConfig {
@@ -1953,6 +2183,7 @@ impl Default for AlertConfig {
             failed_threshold:       5,
             failed_window_secs:     900,    // 15 minutes
             failed_cooldown_secs:   3_600,  // 1 hour
+            sms:                    None,
         }
     }
 }
@@ -2038,6 +2269,9 @@ impl AlertConfig {
                 every failed attempt and turn the alerter into an amplifier \
                 pointed at the operator's mailbox.";
                 Configuration, Invalid, Range));
+        }
+        if let Some(Dat::Map(sm)) = m.get(&dat!("sms")) {
+            out.sms = Some(res!(SmsAlertConfig::from_datmap(sm)));
         }
         Ok(out)
     }
@@ -2221,6 +2455,18 @@ pub struct ServerConfig {
     /// even use. Any block added here in future should be `#[optional]` too.
     #[optional]
     pub alerts:                         DaticleMap,
+
+    // --- Watch --------------------------------------------------------------
+    /// The other machines this node watches (as a daticle map, parsed via
+    /// `get_watch()`). Absent, or an empty map, means this node watches
+    /// nobody -- which is the right default, since most hosts in an estate are
+    /// watched rather than watching.
+    ///
+    /// `#[optional]`, per the note above, and this block is the reason that
+    /// note was worth writing down: it was added to a struct backing two live
+    /// production configurations that had never heard of it.
+    #[optional]
+    pub watch:                          DaticleMap,
 }
 
 impl Config for ServerConfig {}
@@ -2285,6 +2531,7 @@ impl Default for ServerConfig {
             acme:                           AcmeConfig::default().to_datmap(),
             mail:                           DaticleMap::new(),
             alerts:                         DaticleMap::new(),
+            watch:                          DaticleMap::new(),
         }
     }
 }
@@ -2375,6 +2622,21 @@ impl ServerConfig {
 
     /// Parse the `alerts` block. An empty map, or an `enabled: false`
     /// map, disables alerting.
+    /// The watch block, parsed, or `None` when this node watches nobody.
+    ///
+    /// See [`crate::srv::watch`]: most hosts in an estate are watched rather
+    /// than watching, so absent is the ordinary answer.
+    pub fn get_watch(&self) -> Outcome<Option<WatchConfig>> {
+        if self.watch.is_empty() {
+            return Ok(None);
+        }
+        let cfg = res!(WatchConfig::from_datmap(&self.watch));
+        if !cfg.enabled {
+            return Ok(None);
+        }
+        Ok(Some(cfg))
+    }
+
     pub fn get_alerts(&self) -> Outcome<Option<AlertConfig>> {
         if self.alerts.is_empty() {
             return Ok(None);

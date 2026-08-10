@@ -445,7 +445,8 @@ impl AppShellContext {
                 } else {
                     fmt!("DKIM-signed with {} key(s)", dkim.len())
                 };
-                let a = res!(Alerter::new(cfg, alert_host.clone(), dkim));
+                let a = res!(Alerter::new(
+                    cfg, alert_host.clone(), dkim, tls_client.clone()));
                 info!("Alerting enabled; operator alerts go to {} ({}, {}).",
                     to, via, signed);
                 a
@@ -456,6 +457,36 @@ impl AppShellContext {
                 None
             }
         };
+
+        // Watching the other machines. This is the half of alerting that a host
+        // cannot do for itself: a machine that has died sends nothing, and
+        // silence reads exactly like health. See `srv::watch`.
+        //
+        // Requires an alerter, because a watcher with nothing to report through
+        // is a thread that discovers an outage and keeps it to itself. Requires
+        // an outbound TLS client for the same practical reason. Both absences
+        // are said out loud rather than logged at debug, since the operator who
+        // configured a watch believes they are covered.
+        match res!(server_cfg.get_watch()) {
+            Some(wcfg) => match (&alerter, &tls_client) {
+                (Some(a), Some(tls)) => {
+                    let w = res!(crate::srv::watch::Watcher::new(
+                        Arc::new(wcfg),
+                        Arc::new(a.clone()),
+                        tls.clone(),
+                        alert_host.to_string(),
+                    ));
+                    tokio::spawn(w.run());
+                },
+                (None, _) => warn!("A watch list is configured but alerting is not, \
+                    so nothing would be told about a peer going down. The watcher \
+                    was not started."),
+                (_, None) => warn!("A watch list is configured but this Steel has no \
+                    outbound TLS client, so it cannot probe anything. The watcher \
+                    was not started."),
+            },
+            None => {},
+        }
 
         // The site's own newsletter sender: the DKIM identities and an outbound SMTP client, built
         // from the same mail configuration the mail server and the alerter use, and shared by every

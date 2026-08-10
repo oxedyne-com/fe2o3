@@ -15,6 +15,7 @@ pub mod mail;
 pub mod publish;
 pub mod server;
 //pub mod smtps;
+pub mod watch;
 pub mod webhook;
 pub mod ws;
 pub mod wsproxy;

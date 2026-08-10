@@ -31,12 +31,19 @@ use crate::srv::cfg::AlertConfig;
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_net::{
     dkim::DkimSigner,
+    http::client::https_request,
     imap::client::Security,
     smtp::client::{
         OutboundClient,
         SubmissionConfig,
     },
+    sms::{
+        Credential,
+        Message as SmsMessage,
+    },
 };
+
+use tokio_rustls::rustls::ClientConfig;
 
 use std::{
     net::SocketAddr,
@@ -82,9 +89,108 @@ pub enum AlertEvent {
         window_secs: u64,
         last_peer:   SocketAddr,
     },
+    /// Another machine in the estate stopped answering.
+    ///
+    /// The one event this host can raise about somebody else, and the reason
+    /// [`crate::srv::watch`] exists: a dead machine sends nothing, so the alarm
+    /// has to come from a live one.
+    PeerDown {
+        /// The peer's name, as configured.
+        peer:       String,
+        /// What was probed.
+        url:        String,
+        /// Consecutive failed probes.
+        failures:   u32,
+        /// How long it has been failing.
+        down_secs:  u64,
+        /// Which machine noticed. Two watchers see one outage and send two
+        /// messages; without this they read as one message sent twice.
+        noticed_by: String,
+    },
+    /// A machine that was down is answering again.
+    ///
+    /// Sent because an operator who was woken is owed the end of the story, and
+    /// because a recovery nobody announced is one somebody drives to the office
+    /// for.
+    PeerRecovered {
+        peer:       String,
+        url:        String,
+        /// How long it was away.
+        away_secs:  u64,
+        noticed_by: String,
+    },
+    /// Proof that the alerting path itself still works.
+    ///
+    /// **The point of this event is that it is boring.** A path used twice a
+    /// year is broken when it is needed -- an expired credential, a rotated
+    /// key, a changed number, a dormant account -- and it is discovered during
+    /// the incident. This exercises every leg on a schedule, so the failure is
+    /// found on an ordinary afternoon instead.
+    Heartbeat {
+        /// How long this node has been up.
+        uptime_secs: u64,
+        /// How many peers it is watching, and how many are answering.
+        peers_ok:    usize,
+        peers_total: usize,
+    },
+}
+
+/// How loudly an event should be delivered.
+///
+/// The distinction is the whole of the routing rule, and it exists because the
+/// channels differ in cost and in how much they intrude. An operator who is
+/// texted about routine events stops reading the texts, and the one that
+/// mattered goes with the rest -- which is the same argument the module header
+/// makes for keeping the event set small.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Severity {
+    /// Worth interrupting a person for. Every channel, including the ones that
+    /// cost money and wake somebody.
+    Critical,
+    /// Worth a record. Mail only.
+    Notice,
 }
 
 impl AlertEvent {
+    /// How loudly this event should be delivered. See [`Severity`].
+    ///
+    /// A peer going down is the only thing here that reaches a phone, plus the
+    /// heartbeat that proves a phone still can be reached. Everything else is
+    /// about this machine, and this machine can only report it while it is
+    /// well enough to be read about later.
+    pub fn severity(&self) -> Severity {
+        match self {
+            Self::PeerDown { .. }		=> Severity::Critical,
+            Self::PeerRecovered { .. }		=> Severity::Critical,
+            Self::Heartbeat { .. }		=> Severity::Critical,
+            Self::SealedStart { .. }		=> Severity::Notice,
+            Self::Unsealed { .. }		=> Severity::Notice,
+            Self::FailedUnseals { .. }		=> Severity::Notice,
+        }
+    }
+
+    /// The whole event in one line, for a channel that has no subject and no
+    /// body and charges by the segment.
+    ///
+    /// Written separately rather than trimmed from [`Self::body`], because a
+    /// text message is read on a lock screen in the dark: it leads with the
+    /// machine and the verdict, and every word after that is optional.
+    pub fn short(&self, host: &str) -> String {
+        match self {
+            Self::PeerDown { peer, down_secs, noticed_by, .. } => fmt!(
+                "{} IS DOWN -- {}m, seen from {}. Payments, credits, sync and \
+                mail on it are unavailable.",
+                peer, down_secs / 60, noticed_by),
+            Self::PeerRecovered { peer, away_secs, noticed_by, .. } => fmt!(
+                "{} is back after {}m, seen from {}.",
+                peer, away_secs / 60, noticed_by),
+            Self::Heartbeat { peers_ok, peers_total, .. } => fmt!(
+                "{}: alerting is alive, {}/{} peers answering. Nothing is wrong.",
+                host, peers_ok, peers_total),
+            other => other.subject(host),
+        }
+    }
+
     /// Subject line. Prefixed so the operator can filter on it.
     pub fn subject(&self, host: &str) -> String {
         match self {
@@ -94,6 +200,13 @@ impl AlertEvent {
                 "[steel:{}] unsealed by '{}'", host, admin),
             Self::FailedUnseals { count, .. } => fmt!(
                 "[steel:{}] {} failed admin passphrase attempts", host, count),
+            Self::PeerDown { peer, down_secs, .. } => fmt!(
+                "[steel:{}] {} IS DOWN ({}m)", host, peer, down_secs / 60),
+            Self::PeerRecovered { peer, away_secs, .. } => fmt!(
+                "[steel:{}] {} recovered after {}m", host, peer, away_secs / 60),
+            Self::Heartbeat { peers_ok, peers_total, .. } => fmt!(
+                "[steel:{}] alerting alive, {}/{} peers answering",
+                host, peers_ok, peers_total),
         }
     }
 
@@ -131,6 +244,41 @@ impl AlertEvent {
                 if it does not need to face the internet.\n",
                 host = host, count = count, mins = window_secs / 60,
                 peer = last_peer),
+            Self::PeerDown { peer, url, failures, down_secs, noticed_by } => fmt!(
+                "{peer} is not answering.\n\n\
+                Probed:   {url}\n\
+                Failures: {failures} consecutive\n\
+                Down for: {mins} minute(s)\n\
+                Noticed by: {noticed_by}\n\n\
+                This machine is reporting on another one, because a host that has \
+                died cannot report its own death. Nothing has been restarted: a \
+                watcher that repairs can flap a service in a loop and hide the \
+                fault it was built to reveal, and a decision to restart belongs to \
+                somebody who has read why it stopped.\n\n\
+                If this is the Daimond gateway, its log is at \
+                ~/usr/daimond-gateway/log/, the pane is held open after an exit, \
+                and the last lines say what it said on the way out.\n",
+                peer = peer, url = url, failures = failures,
+                mins = down_secs / 60, noticed_by = noticed_by),
+            Self::PeerRecovered { peer, url, away_secs, noticed_by } => fmt!(
+                "{peer} is answering again after {mins} minute(s).\n\n\
+                Probed:   {url}\n\
+                Noticed by: {noticed_by}\n\n\
+                Nothing here did that; it came back on its own or somebody fixed \
+                it. Worth reading the log for what stopped it, because a fault \
+                that cleared itself is a fault that can return.\n",
+                peer = peer, url = url, mins = away_secs / 60, noticed_by = noticed_by),
+            Self::Heartbeat { uptime_secs, peers_ok, peers_total } => fmt!(
+                "Alerting on {host} is alive. Nothing is wrong.\n\n\
+                Uptime:  {days} day(s)\n\
+                Peers:   {ok} of {total} answering\n\n\
+                This message exists to prove the path still works. An alerting \
+                route used twice a year is broken when it is needed -- an expired \
+                credential, a rotated key, a changed number, a dormant account -- \
+                and it is discovered during the incident. If these stop arriving, \
+                the alerting is what has failed, not the estate.\n",
+                host = host, days = uptime_secs / 86400,
+                ok = peers_ok, total = peers_total),
         }
     }
 }
@@ -171,6 +319,10 @@ pub struct Alerter {
     /// Public hostname, used in subject lines and in the `/admin` link.
     host:    Arc<String>,
     failures: Arc<Mutex<FailureWindow>>,
+    /// Outbound TLS, for the SMS gateway. Absent on a host with no outbound
+    /// client, in which case the mail leg still works and the text leg says so
+    /// rather than failing silently.
+    tls:     Option<Arc<ClientConfig>>,
 }
 
 impl std::fmt::Debug for Alerter {
@@ -198,6 +350,7 @@ impl Alerter {
         cfg:    AlertConfig,
         host:   String,
         dkim:   Vec<Arc<DkimSigner>>,
+        tls:    Option<Arc<ClientConfig>>,
     )
         -> Outcome<Option<Self>>
     {
@@ -243,6 +396,7 @@ impl Alerter {
             cfg:      Arc::new(cfg),
             client:   Arc::new(client),
             submission,
+            tls,
             dkim,
             host:     Arc::new(host),
             failures: Arc::new(Mutex::new(FailureWindow {
@@ -263,13 +417,102 @@ impl Alerter {
     pub fn raise(&self, event: AlertEvent) {
         let this = self.clone();
         tokio::spawn(async move {
+            // Both legs are attempted, and neither is allowed to prevent the
+            // other. They fail for different reasons -- mail needs a working
+            // MX and a mailbox somebody reads, a text needs a funded account
+            // and a carrier -- and an alerter that abandoned the second
+            // because the first threw would have exactly one channel on the
+            // night both were needed.
             if let Err(e) = this.send(&event).await {
                 // Log loudly. This is the case where the operator believes
                 // they are covered and are not.
-                error!(e, "ALERT NOT DELIVERED. The event still happened: {}",
+                error!(e, "ALERT NOT DELIVERED BY MAIL. The event still happened: {}",
                     event.subject(&this.host));
             }
+            if event.severity() == Severity::Critical {
+                if let Err(e) = this.send_sms(&event).await {
+                    error!(e, "ALERT NOT DELIVERED BY SMS. The event still happened: {}",
+                        event.subject(&this.host));
+                }
+            }
         });
+    }
+
+    /// Send the one-line form of an event as a text message.
+    ///
+    /// A no-op when no gateway is configured, which is the ordinary case for a
+    /// host that is not the one doing the watching.
+    ///
+    /// **The credential is read from the environment, never from the
+    /// configuration file.** A configuration file is copied between machines,
+    /// pasted into a chat window to ask why a server will not start, and
+    /// committed by accident; an environment variable is none of those things
+    /// by default. The two names are configurable so a host can carry more than
+    /// one account without a second Steel.
+    async fn send_sms(&self, event: &AlertEvent) -> Outcome<()> {
+        let sms = match &self.cfg.sms {
+            Some(s) if s.enabled => s,
+            _ => return Ok(()),
+        };
+        let tls = match &self.tls {
+            Some(t) => t.clone(),
+            None => return Err(err!(
+                "An SMS alert cannot be sent: this Steel has no outbound TLS client, so it \
+                cannot reach {}.", sms.provider.id();
+                Init, Missing)),
+        };
+        let user = res!(std::env::var(&sms.user_env).map_err(|_| err!(
+            "The SMS gateway account is read from ${}, which is not set. The alert was not \
+            sent as a text.", sms.user_env;
+            Configuration, Missing)));
+        let secret = res!(std::env::var(&sms.secret_env).map_err(|_| err!(
+            "The SMS gateway secret is read from ${}, which is not set. The alert was not \
+            sent as a text.", sms.secret_env;
+            Configuration, Missing)));
+
+        let cred = Credential { user: &user, secret: &secret };
+        let text = event.short(&self.host);
+        let mut sent = 0usize;
+        let mut last: Option<Error<ErrTag>> = None;
+        for to in &sms.to {
+            let m = SmsMessage { to, from: &sms.from, body: &text };
+            let call = match sms.provider.request(&cred, &m) {
+                Ok(c) => c,
+                Err(e) => { last = Some(e); continue; },
+            };
+            let headers: Vec<(&str, &str)> = call.headers.iter()
+                .map(|(n, v)| (n.as_str(), v.as_str()))
+                .collect();
+            let reply = match https_request(
+                &call.host, call.port, call.method, &call.path,
+                &headers, &call.body, tls.clone(),
+            ).await {
+                Ok(r) => r,
+                Err(e) => { last = Some(e); continue; },
+            };
+            // The receipt is parsed rather than the status code trusted, because
+            // two of these gateways answer a rejected credential with 200 and an
+            // object explaining themselves. A sender that read only the code
+            // would report every alert as delivered while none of them was.
+            match sms.provider.parse(&reply.body) {
+                Ok(r) => {
+                    sent += 1;
+                    info!("Alert texted to {} ({} {}): {}",
+                        to, sms.provider.id(), r.status, event.subject(&self.host));
+                },
+                Err(e) => { last = Some(e); },
+            }
+        }
+        if sent == 0 {
+            return match last {
+                Some(e) => Err(err!(e,
+                    "No SMS alert reached any of the {} configured number(s).", sms.to.len();
+                    Network)),
+                None => Err(err!(
+                    "SMS alerting is enabled with no numbers to send to."; Configuration, Missing)),
+            };
+        }
+        Ok(())
     }
 
     /// Record a failed passphrase attempt, raising a coalesced alert once
@@ -417,8 +660,9 @@ mod tests {
             failed_threshold:       threshold,
             failed_window_secs:     900,
             failed_cooldown_secs:   cooldown_secs,
+            sms:                    None,
         };
-        match Alerter::new(cfg, "example.com".to_string(), Vec::new()) {
+        match Alerter::new(cfg, "example.com".to_string(), Vec::new(), None) {
             Ok(Some(a)) => a,
             _ => panic!("alerter"),
         }
@@ -488,7 +732,7 @@ mod tests {
             to:      Vec::new(),
             ..Default::default()
         };
-        assert!(Alerter::new(cfg, "example.com".to_string(), Vec::new()).is_err());
+        assert!(Alerter::new(cfg, "example.com".to_string(), Vec::new(), None).is_err());
     }
 
     /// End to end, through a stand-in provider: the alert must actually be
@@ -570,8 +814,9 @@ mod tests {
             failed_threshold:       5,
             failed_window_secs:     900,
             failed_cooldown_secs:   3600,
+            sms:                    None,
         };
-        let mut a = match Alerter::new(cfg, "example.com".to_string(), Vec::new()) {
+        let mut a = match Alerter::new(cfg, "example.com".to_string(), Vec::new(), None) {
             Ok(Some(a)) => a,
             other => panic!("alerter: {:?}", other.is_err()),
         };
