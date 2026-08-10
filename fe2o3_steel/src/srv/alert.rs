@@ -177,9 +177,13 @@ impl AlertEvent {
     /// machine and the verdict, and every word after that is optional.
     pub fn short(&self, host: &str) -> String {
         match self {
+            // What the peer DOES is the peer's name, which the operator chose --
+            // "jarrah (payments and mail)" says it once, in the place that
+            // travels with every message about it. A sentence here naming any
+            // particular service would be this library asserting what somebody
+            // else's machine is for, and wrong for the second peer anybody adds.
             Self::PeerDown { peer, down_secs, noticed_by, .. } => fmt!(
-                "{} IS DOWN -- {}m, seen from {}. Payments, credits, sync and \
-                mail on it are unavailable.",
+                "{} IS DOWN -- not answering for {}m, seen from {}.",
                 peer, down_secs / 60, noticed_by),
             Self::PeerRecovered { peer, away_secs, noticed_by, .. } => fmt!(
                 "{} is back after {}m, seen from {}.",

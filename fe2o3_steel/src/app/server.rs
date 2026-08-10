@@ -414,11 +414,30 @@ impl AppShellContext {
         };
         // Operator alerting. The public hostname of the primary vhost is what
         // an alert names, and what its `/admin` link points at.
+        // What an alert calls this machine.
+        //
+        // THE MACHINE, not the first website it happens to serve. This used to
+        // be `vhosts.first()`, so a host serving several sites announced itself
+        // as whichever one sorted first in the config -- karri reported an
+        // outage on jarrah as "seen from need2know.ai", naming a website that
+        // has nothing to do with either end of the sentence. An operator reads
+        // this half-awake and has to know which box to open.
+        //
+        // The kernel's own answer, read the way `fe2o3_sys` reads everything
+        // else about a host, with the first vhost kept only as a fallback for a
+        // system that does not carry one.
         let alert_host = {
-            let vhosts = res!(server_cfg.get_vhosts());
-            match vhosts.first() {
-                Some(v) => v.primary_hostname().to_string(),
-                None    => String::new(),
+            let machine = std::fs::read_to_string("/proc/sys/kernel/hostname")
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+            if !machine.is_empty() {
+                machine
+            } else {
+                let vhosts = res!(server_cfg.get_vhosts());
+                match vhosts.first() {
+                    Some(v) => v.primary_hostname().to_string(),
+                    None    => String::new(),
+                }
             }
         };
         let alerter = match res!(server_cfg.get_alerts()) {
