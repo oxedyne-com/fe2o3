@@ -2027,6 +2027,30 @@ pub struct WatchConfig {
     pub repeat_secs:    u64,
 }
 
+/// Every string in a named list, whatever list shape the daticle used.
+///
+/// A jdat list can arrive as `Dat::List` or, when it was written with the `vek`
+/// type tag, as `Dat::Vek`. They mean the same thing to a reader and a
+/// configuration file uses whichever its author typed -- so a parser that knows
+/// only one of them silently reads an empty list from a file that plainly has
+/// entries in it. That cost a live deploy: `alerts.sms.to` was written in the
+/// same `(vek|[...])` form as `alerts.to` beside it, and the SMS half read
+/// nothing and refused to start.
+fn strings_in(m: &DaticleMap, key: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let push = |out: &mut Vec<String>, d: &Dat| {
+        if let Dat::Str(s) = d {
+            out.push(s.clone());
+        }
+    };
+    match m.get(&dat!(key)) {
+        Some(Dat::List(l))  => for d in l { push(&mut out, d); },
+        Some(Dat::Vek(v))   => for d in v.iter() { push(&mut out, d); },
+        _                   => {},
+    }
+    out
+}
+
 impl SmsAlertConfig {
     /// Parse an `SmsAlertConfig` from a `DaticleMap`.
     ///
@@ -2056,13 +2080,7 @@ impl SmsAlertConfig {
         if let Some(Dat::Str(s)) = m.get(&dat!("secret_env")) {
             out.secret_env = s.clone();
         }
-        if let Some(Dat::List(l)) = m.get(&dat!("to")) {
-            for d in l {
-                if let Dat::Str(s) = d {
-                    out.to.push(s.clone());
-                }
-            }
-        }
+        out.to = strings_in(m, "to");
         if out.enabled {
             if out.to.is_empty() {
                 return Err(err!(
@@ -2237,23 +2255,7 @@ impl AlertConfig {
                 password:   get_str("password"),
             });
         }
-        match m.get(&dat!("to")) {
-            Some(Dat::List(l)) => {
-                for d in l {
-                    if let Dat::Str(s) = d {
-                        out.to.push(s.clone());
-                    }
-                }
-            }
-            Some(Dat::Vek(v)) => {
-                for d in v.iter() {
-                    if let Dat::Str(s) = d {
-                        out.to.push(s.clone());
-                    }
-                }
-            }
-            _ => (),
-        }
+        out.to = strings_in(m, "to");
         if let Some(Dat::U32(n)) = m.get(&dat!("failed_threshold")) {
             out.failed_threshold = *n;
         }
