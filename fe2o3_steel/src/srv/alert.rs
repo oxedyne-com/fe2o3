@@ -175,23 +175,21 @@ impl AlertEvent {
     /// Written separately rather than trimmed from [`Self::body`], because a
     /// text message is read on a lock screen in the dark: it leads with the
     /// machine and the verdict, and every word after that is optional.
+    /// The whole event in one line, for a channel that has no subject and no
+    /// body and charges by the segment.
+    ///
+    /// BLUNT ON PURPOSE. This is read on a lock screen in the dark, by somebody
+    /// who wants to know whether to get up. How long it has been down, which
+    /// machine noticed and what was probed are all in the email, which costs
+    /// nothing to make longer; here they are noise in front of the one word
+    /// that matters.
     pub fn short(&self, host: &str) -> String {
         match self {
-            // What the peer DOES is the peer's name, which the operator chose --
-            // "jarrah (payments and mail)" says it once, in the place that
-            // travels with every message about it. A sentence here naming any
-            // particular service would be this library asserting what somebody
-            // else's machine is for, and wrong for the second peer anybody adds.
-            Self::PeerDown { peer, down_secs, noticed_by, .. } => fmt!(
-                "{} IS DOWN -- not answering for {}m, seen from {}.",
-                peer, down_secs / 60, noticed_by),
-            Self::PeerRecovered { peer, away_secs, noticed_by, .. } => fmt!(
-                "{} is back after {}m, seen from {}.",
-                peer, away_secs / 60, noticed_by),
+            Self::PeerDown { peer, .. }         => fmt!("{} is DOWN", peer),
+            Self::PeerRecovered { peer, .. }    => fmt!("{} is back", peer),
             Self::Heartbeat { peers_ok, peers_total, .. } => fmt!(
-                "{}: alerting is alive, {}/{} peers answering. Nothing is wrong.",
-                host, peers_ok, peers_total),
-            other => other.subject(host),
+                "{}: alerting alive, {}/{} ok", host, peers_ok, peers_total),
+            other                               => other.subject(host),
         }
     }
 
@@ -361,17 +359,23 @@ impl Alerter {
         if !cfg.enabled {
             return Ok(None);
         }
-        if cfg.to.is_empty() {
+        // Mail is the usual channel and not the only one. A host that cannot
+        // send mail at all -- jarrah's outbound port 25 is blocked by its
+        // provider -- still has a phone to reach, and refusing to alert at all
+        // because one channel is unavailable would leave it silent for the
+        // reason it most needs to speak.
+        let texts = cfg.sms.as_ref().map(|s| s.enabled && !s.to.is_empty()).unwrap_or(false);
+        let mails = !cfg.to.is_empty() && !cfg.from.is_empty();
+        if !mails && !texts {
             return Err(err!(
-                "Alerting is enabled but no recipient is configured. Set \
-                'alerts.to' or disable alerting -- an alerter with nobody to \
+                "Alerting is enabled but has no way to reach anybody: set \
+                'alerts.from' and 'alerts.to' for mail, or 'alerts.sms' for \
+                text messages, or disable alerting. An alerter with nobody to \
                 tell is worse than none, because it looks like cover.";
                 Configuration, Invalid, Missing));
         }
-        if cfg.from.is_empty() {
-            return Err(err!(
-                "Alerting is enabled but 'alerts.from' is empty.";
-                Configuration, Invalid, Missing));
+        if !mails && texts {
+            info!("Alerting has no mail recipient; alerts go by text message only.");
         }
         let ehlo = if cfg.ehlo_hostname.is_empty() {
             host.clone()
@@ -427,11 +431,14 @@ impl Alerter {
             // and a carrier -- and an alerter that abandoned the second
             // because the first threw would have exactly one channel on the
             // night both were needed.
-            if let Err(e) = this.send(&event).await {
+            let mails = !this.cfg.to.is_empty() && !this.cfg.from.is_empty();
+            if mails {
+              if let Err(e) = this.send(&event).await {
                 // Log loudly. This is the case where the operator believes
                 // they are covered and are not.
                 error!(e, "ALERT NOT DELIVERED BY MAIL. The event still happened: {}",
                     event.subject(&this.host));
+              }
             }
             if event.severity() == Severity::Critical {
                 if let Err(e) = this.send_sms(&event).await {

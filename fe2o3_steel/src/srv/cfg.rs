@@ -2025,6 +2025,13 @@ pub struct WatchConfig {
     /// every round is an alarm that gets silenced, and the text leg costs money
     /// per message.
     pub repeat_secs:    u64,
+    /// Seconds between proof-of-life messages. Zero switches them off.
+    ///
+    /// The alerting path is used rarely by design, and a path used rarely is
+    /// broken when it is needed -- an expired credential, a rotated key, a
+    /// changed number, a lapsed verification. This exercises every leg on a
+    /// schedule so the failure is found on an ordinary afternoon.
+    pub heartbeat_secs: u64,
 }
 
 /// Every string in a named list, whatever list shape the daticle used.
@@ -2128,6 +2135,9 @@ impl WatchConfig {
         if let Some(Dat::U64(n)) = m.get(&dat!("repeat_secs")) {
             out.repeat_secs = *n;
         }
+        if let Some(Dat::U64(n)) = m.get(&dat!("heartbeat_secs")) {
+            out.heartbeat_secs = *n;
+        }
         if let Some(Dat::U32(n)) = m.get(&dat!("fail_threshold")) {
             out.fail_threshold = *n;
         }
@@ -2186,6 +2196,9 @@ impl Default for WatchConfig {
             fail_threshold: 3,
             timeout_secs:   10,
             repeat_secs:    900,
+            // Monthly. Often enough that a dead path is caught before it
+            // matters, rare enough that the message stays worth reading.
+            heartbeat_secs: 2_592_000,
         }
     }
 }

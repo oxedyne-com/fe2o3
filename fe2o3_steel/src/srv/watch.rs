@@ -165,11 +165,29 @@ impl Watcher {
         // peers may still be restarting too -- a shared power event, a rolling deploy -- and an
         // alarm raised in the first second of life is usually about the estate coming up, not
         // about anything being wrong.
+        let beat = Duration::from_secs(self.cfg.heartbeat_secs);
+        let started = Instant::now();
+        let mut last_beat = started;
         loop {
             tokio::time::sleep(every).await;
+            let mut ok_count = 0usize;
             for peer in self.cfg.peers.clone() {
                 let ok = self.probe(&peer.url).await;
+                if ok {
+                    ok_count += 1;
+                }
                 self.judge(&peer.name, &peer.url, ok, repeat);
+            }
+            // Proof of life, on the same loop that does the watching -- so a
+            // heartbeat arriving is evidence the watcher is running and not
+            // merely that a timer somewhere else still fires.
+            if self.cfg.heartbeat_secs > 0 && Instant::now().duration_since(last_beat) >= beat {
+                last_beat = Instant::now();
+                self.alerter.raise(AlertEvent::Heartbeat {
+                    uptime_secs: Instant::now().duration_since(started).as_secs(),
+                    peers_ok:    ok_count,
+                    peers_total: self.cfg.peers.len(),
+                });
             }
         }
     }
@@ -320,6 +338,7 @@ mod tests {
             fail_threshold: threshold,
             timeout_secs:   10,
             repeat_secs:    900,
+            heartbeat_secs: 2_592_000,
         };
         (cfg, PeerState::default())
     }
