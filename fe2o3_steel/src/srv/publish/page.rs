@@ -243,6 +243,9 @@ fn index(
 		body.push_str("<span class=\"aside-read\">");
 		escape_text(&mut body, &read_time(p.words));
 		body.push_str("</span>");
+		// Right of the reading time, as on the post itself: the two surfaces show the same facts in
+		// the same order, and a reader moving between them is not asked to look somewhere new.
+		body.push_str(&post_declaration(cfg, p, "aside-item-declare"));
 		body.push_str("</div>\n");
 		// Who wrote it, where more than one person writes here. On a blog of one it would be the same
 		// name under every title, which tells a reader choosing between them nothing.
@@ -278,10 +281,6 @@ fn index(
 		body.push_str("<a class=\"aside-readmore\" href=\"");
 		escape_attr(&mut body, &cfg.path_of(&p.slug));
 		body.push_str("\">Read more</a>");
-		// What the author declared, beside the way in to the piece. It sat in the head with the date
-		// and the reading time, and at the size a level has to be drawn to be readable it towered over
-		// that line -- the foot is where the card already carries something the size of a control.
-		body.push_str(&post_declaration(cfg, p, "aside-item-declare"));
 		body.push_str(&facets_list(cfg, p));
 		body.push_str("</div>\n");
 
@@ -1730,16 +1729,17 @@ mod tests {
 
 		let card_body = String::from_utf8_lossy(
 			&res!(index(&cfg(), &[p], &[], "", "test")).body).to_string();
-		let more_at = res!(card_body.find("aside-readmore")
-			.ok_or_else(|| err!("the card has no way in to sit beside"; Missing)));
+		let card_read_at = res!(card_body.find("aside-read")
+			.ok_or_else(|| err!("the card has no reading time to sit beside"; Missing)));
 		let card_mark_at = res!(card_body.find("ai-mark")
 			.ok_or_else(|| err!("the card drew no mark"; Missing)));
-		assert!(more_at < card_mark_at,
-			"the card's mark did not follow its Read more: {}", card_body);
+		assert!(card_read_at < card_mark_at,
+			"the card's mark came before its reading time: {}", card_body);
+		// And in the head, not down in the foot: the same place the post keeps it.
 		let head_end = res!(card_body.find("aside-card-preview")
 			.ok_or_else(|| err!("the card has no preview to mark the end of its head"; Missing)));
-		assert!(card_mark_at > head_end,
-			"the card's mark is still up in its head: {}", card_body);
+		assert!(card_mark_at < head_end,
+			"the card's mark fell out of its head: {}", card_body);
 		Ok(())
 	}
 
