@@ -243,10 +243,6 @@ fn index(
 		body.push_str("<span class=\"aside-read\">");
 		escape_text(&mut body, &read_time(p.words));
 		body.push_str("</span>");
-		// What the author declared about writing it, immediately right of how long it takes to read: a
-		// card is where a reader chooses which piece to read, so it is where the declaration is worth
-		// having.
-		body.push_str(&post_declaration(cfg, p, "aside-item-declare"));
 		body.push_str("</div>\n");
 		// Who wrote it, where more than one person writes here. On a blog of one it would be the same
 		// name under every title, which tells a reader choosing between them nothing.
@@ -282,6 +278,10 @@ fn index(
 		body.push_str("<a class=\"aside-readmore\" href=\"");
 		escape_attr(&mut body, &cfg.path_of(&p.slug));
 		body.push_str("\">Read more</a>");
+		// What the author declared, beside the way in to the piece. It sat in the head with the date
+		// and the reading time, and at the size a level has to be drawn to be readable it towered over
+		// that line -- the foot is where the card already carries something the size of a control.
+		body.push_str(&post_declaration(cfg, p, "aside-item-declare"));
 		body.push_str(&facets_list(cfg, p));
 		body.push_str("</div>\n");
 
@@ -1711,19 +1711,35 @@ mod tests {
 				"{}: the mark is not drawn at the one size: {}", what, body);
 			// No words anywhere near it: the mark carries the level by itself at this size.
 			assert!(!body.contains("ai-mark-words"), "{}: the mark carried words: {}", what, body);
-
-			// Placement, said as an order rather than as a count of elements: the reading time, then
-			// the mark, then the end of the line they share.
-			let read_at = res!(body.find("aside-read")
-				.ok_or_else(|| err!("{}: no reading time to sit beside", what; Missing)));
-			let mark_at = res!(body.find("ai-mark")
-				.ok_or_else(|| err!("{}: no mark at all", what; Missing)));
-			assert!(read_at < mark_at, "{}: the mark came before the reading time: {}", what, body);
-			let line_end = res!(body[read_at..].find("</div>")
-				.ok_or_else(|| err!("{}: the meta line never closed", what; Missing)));
-			assert!(mark_at - read_at < line_end,
-				"{}: the mark fell outside the line the reading time is on: {}", what, body);
 		}
+
+		// Placement, said as an order rather than as a count of elements. On a post the mark follows
+		// the reading time in the line they share; on a card it follows the way in to the piece,
+		// because at a readable size it towers over a line of small meta text.
+		let post_body = String::from_utf8_lossy(
+			&res!(post_page(&cfg(), &p, None, None)).body).to_string();
+		let read_at = res!(post_body.find("aside-read")
+			.ok_or_else(|| err!("the post has no reading time to sit beside"; Missing)));
+		let mark_at = res!(post_body.find("ai-mark")
+			.ok_or_else(|| err!("the post drew no mark"; Missing)));
+		assert!(read_at < mark_at, "the post's mark came before its reading time: {}", post_body);
+		let line_end = res!(post_body[read_at..].find("</div>")
+			.ok_or_else(|| err!("the post's meta line never closed"; Missing)));
+		assert!(mark_at - read_at < line_end,
+			"the post's mark fell outside the line its reading time is on: {}", post_body);
+
+		let card_body = String::from_utf8_lossy(
+			&res!(index(&cfg(), &[p], &[], "", "test")).body).to_string();
+		let more_at = res!(card_body.find("aside-readmore")
+			.ok_or_else(|| err!("the card has no way in to sit beside"; Missing)));
+		let card_mark_at = res!(card_body.find("ai-mark")
+			.ok_or_else(|| err!("the card drew no mark"; Missing)));
+		assert!(more_at < card_mark_at,
+			"the card's mark did not follow its Read more: {}", card_body);
+		let head_end = res!(card_body.find("aside-card-preview")
+			.ok_or_else(|| err!("the card has no preview to mark the end of its head"; Missing)));
+		assert!(card_mark_at > head_end,
+			"the card's mark is still up in its head: {}", card_body);
 		Ok(())
 	}
 

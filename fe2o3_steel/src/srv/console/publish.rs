@@ -1519,6 +1519,19 @@ fn handle_edit<
 			.unwrap_or_else(|_| fmt!("Anonymous")),
 		None		=> fmt!("Anonymous"),
 	};
+	// And the name of whoever is composing, for the control that takes a post over. Resolved the same
+	// way, so a signer who has set no profile is offered their own honest "Anonymous" rather than a
+	// username.
+	let signer_name = if admin.username == author_user {
+		author_name.clone()
+	} else {
+		match db {
+			Some(db)	=> store::get_profile(db, &admin.username)
+				.map(|p| if p.name.is_empty() { fmt!("Anonymous") } else { p.name })
+				.unwrap_or_else(|_| fmt!("Anonymous")),
+			None		=> fmt!("Anonymous"),
+		}
+	};
 
 	// The title row: what this is, and the way out. The way out is the close, not a Cancel button --
 	// leaving is not an action of the same weight as saving, and should not look like one.
@@ -1611,8 +1624,9 @@ fn handle_edit<
 		source		= html_escape(&r.source),
 		// How much the writing needed AI, where the site declares under a scheme at all.
 		declare_field	= declare_field(cfg, r.ai_level),
-		// A hidden author field carrying the username, and a line naming who the post is written as.
-		author_field	= author_field(&author_user, &author_name),
+		// A hidden author field carrying the username, a line naming who the post is written as, and
+		// -- where that is somebody else -- the one control that can take it over.
+		author_field	= author_field(&author_user, &author_name, &admin.username, &signer_name),
 		// The category checkboxes, from the site's taxonomy, ticked where the post already sits.
 		cats_block	= cats_field(&cfg.categories, &r.categories),
 		// Whole blocks, pre-built, so the inline scripts' braces never reach the format string.
@@ -1624,6 +1638,7 @@ fn handle_edit<
 	// verb is Save.
 	body.push_str(&preview_script(csrf));
 	body.push_str(AUTOSAVE_SCRIPT);
+	body.push_str(AUTHOR_SCRIPT);
 	body.push_str(FIX_SCRIPT);
 
 	Ok(page(theme, admin, "Edit", &body))
@@ -3901,16 +3916,42 @@ fn selected(yes: bool) -> &'static str {
 /// The author field: a hidden input carrying the username the post is stored against, and a line
 /// naming who that is. Not a free text box, because an author is a member and a member is a login,
 /// not a name typed at save time; reassigning a post is a job elsewhere, not a slip here.
-fn author_field(username: &str, name: &str) -> String {
+fn author_field(username: &str, name: &str, signer: &str, signer_name: &str) -> String {
+	// A post already written as the person composing has nothing to take over, so no control is
+	// offered: a button that does nothing is a question a reader has to answer.
+	let claim = if username == signer {
+		String::new()
+	} else {
+		fmt!(
+			" <button type=\"button\" class=\"mc-btn mc-btn-quiet\" id=\"mc-author-mine\" \
+			data-name=\"{name}\">Write as me</button>",
+			name = html_escape(signer_name),
+		)
+	};
 	fmt!(
 		"<div class=\"mc-author\">\n\
-		<input type=\"hidden\" name=\"author\" value=\"{user}\">\n\
-		<span class=\"mc-author-lbl\">Writing as</span> <span class=\"mc-author-name\">{name}</span>\n\
+		<input type=\"hidden\" name=\"author\" value=\"{user}\" id=\"mc-author\">\n\
+		<span class=\"mc-author-lbl\">Writing as</span> \
+		<span class=\"mc-author-name\" id=\"mc-author-name\">{name}</span>{claim}\n\
 		</div>\n",
 		user = html_escape(username),
 		name = html_escape(name),
+		claim = claim,
 	)
 }
+
+/// Takes a post over: the one way to re-attribute one from the console.
+///
+/// A post carries the username of whoever saved it, and a console that could not change that had no
+/// answer for the ordinary case of a post written under an earlier identity -- an import, a member
+/// account since retired, an operator entry renamed. Its byline then reads *Anonymous* for ever,
+/// because the name it points at has no profile and no way to acquire one.
+///
+/// Clearing the field is what does the work: the save handler attributes a post with no author named
+/// to whoever is signed in, so emptying the input and letting the ordinary autosave run is the whole
+/// mechanism. The `change` is dispatched by hand because setting a value in script fires no event,
+/// which is the same reason the chip scripts dispatch one.
+const AUTHOR_SCRIPT: &str = "<script>\n(function(){\n  var btn=document.getElementById('mc-author-mine');\n  var hidden=document.getElementById('mc-author');\n  var name=document.getElementById('mc-author-name');\n  if(!btn||!hidden||!name){return;}\n  btn.addEventListener('click',function(){\n    hidden.value='';\n    name.textContent=btn.getAttribute('data-name')||'you';\n    btn.remove();\n    hidden.dispatchEvent(new Event('change',{bubbles:true}));\n  });\n})();\n</script>\n";
 
 /// The composer's AI-declaration field: how much the writing of this post needed a model.
 ///
@@ -4572,8 +4613,8 @@ mod tests {
 	#[test]
 	fn test_the_author_note_never_says_the_username_20() -> Outcome<()> {
 		let user = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-		let s = author_field(user, "Anonymous");
-		assert!(s.contains(r#"<span class="mc-author-name">Anonymous</span>"#),
+		let s = author_field(user, "Anonymous", "oxedyne", "Jason");
+		assert!(s.contains(r#"class="mc-author-name" id="mc-author-name">Anonymous</span>"#),
 			"the note does not name the author: {}", s);
 		// The hidden input still carries it -- the post is stored against it -- but nothing drawn does.
 		let visible = s.split("</span>").filter(|part| !part.contains("type=\"hidden\""))
@@ -5394,6 +5435,35 @@ mod ui_dump {
 
 	fn admin() -> SiteAdmin {
 		SiteAdmin { username: fmt!("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef") }
+	}
+
+	/// A post written by somebody else offers the one control that can take it over, and a post
+	/// already the signer's does not -- a button that would do nothing is a question a reader has to
+	/// answer for no reason.
+	///
+	/// The control works by CLEARING the author, because that is what the save handler reads as "no
+	/// author named, use whoever is signed in". A test that only looked for the button would pass on
+	/// a control that cleared nothing.
+	#[test]
+	fn test_a_post_can_be_taken_over_by_its_composer_22() -> Outcome<()> {
+		let someone_else = author_field("older-identity", "Anonymous", "oxedyne", "Jason");
+		assert!(someone_else.contains("id=\"mc-author-mine\""),
+			"no way to take over a post written as somebody else: {}", someone_else);
+		assert!(someone_else.contains("data-name=\"Jason\""),
+			"the control does not say who it would attribute the post to: {}", someone_else);
+		assert!(someone_else.contains("value=\"older-identity\""),
+			"the post's own author is not carried: {}", someone_else);
+		// The mechanism, not just the button: the script empties the field and lets the ordinary save
+		// run, and the save handler is what turns an empty author into the signer.
+		assert!(AUTHOR_SCRIPT.contains("hidden.value=''"),
+			"the control does not clear the author, so a save would keep the old one");
+		assert!(AUTHOR_SCRIPT.contains("dispatchEvent"),
+			"clearing the field fires no event, so nothing would save it");
+
+		let already_mine = author_field("oxedyne", "Jason", "oxedyne", "Jason");
+		assert!(!already_mine.contains("mc-author-mine"),
+			"a post already the signer's offered to make it theirs: {}", already_mine);
+		Ok(())
 	}
 
 	fn dump_cfg() -> PublishConfig {
