@@ -243,10 +243,10 @@ fn index(
 		body.push_str("<span class=\"aside-read\">");
 		escape_text(&mut body, &read_time(p.words));
 		body.push_str("</span>");
-		// What the author declared about writing it, beside how long it takes to read: a card is where
-		// a reader chooses which piece to read, so it is where the declaration is worth having. At text
-		// size, so it carries its words.
-		body.push_str(&post_declaration(cfg, p, declare::Size::WithWords, "aside-item-declare"));
+		// What the author declared about writing it, immediately right of how long it takes to read: a
+		// card is where a reader chooses which piece to read, so it is where the declaration is worth
+		// having.
+		body.push_str(&post_declaration(cfg, p, "aside-item-declare"));
 		body.push_str("</div>\n");
 		// Who wrote it, where more than one person writes here. On a blog of one it would be the same
 		// name under every title, which tells a reader choosing between them nothing.
@@ -708,14 +708,9 @@ fn post_page(
 			escape_text(&mut body, &read_time(post.words));
 			body.push_str("</span>");
 		}
-		body.push_str("</div>\n");
-	}
-	// The declaration for the piece itself. The page has room, so the mark is drawn alone and big
-	// enough for its pins to be counted -- which is the only size at which a mark says anything.
-	let declared = post_declaration(cfg, post, declare::Size::alone(44), "aside-declare");
-	if !declared.is_empty() {
-		body.push_str("<div class=\"aside-declare-row\">");
-		body.push_str(&declared);
+		// The declaration sits with the date and the reading time, which is where a reader is already
+		// looking for what this piece is before starting it.
+		body.push_str(&post_declaration(cfg, post, "aside-declare"));
 		body.push_str("</div>\n");
 	}
 	// The prose was escaped where it was rendered.
@@ -914,27 +909,8 @@ fn page(cfg: &PublishConfig, head: &Head, body: &str, post: Option<&Post>, on_in
 	s.push_str("</head>\n<body class=\"aside-body\">\n<main class=\"aside-page\">\n");
 	s.push_str(&nav(cfg, on_index));
 	s.push_str(body);
-	s.push_str(&site_declaration(cfg));
 	s.push_str("</main>\n</body>\n</html>\n");
 	s
-}
-
-/// What the site says about its own use of AI, under everything else on the page.
-///
-/// A site-wide claim goes in the site-wide furniture: a reader who arrives at one post and leaves
-/// from it should still have met it. That is the opposite of where a *work's* declaration belongs --
-/// beside the work, where the choosing happens -- and the two are not in tension, because the thing
-/// being declared for is different.
-///
-/// At text size, so it carries its words. Nothing at all where the site declares nothing about
-/// itself, which is not the same as declaring that it used none.
-fn site_declaration(cfg: &PublishConfig) -> String {
-	match cfg.declare.site {
-		Some(d)	=> fmt!(
-			"<footer class=\"aside-foot\">{}</footer>\n",
-			declare::mark_html(&cfg.declare, d, declare::Size::WithWords, "aside-foot-mark")),
-		None	=> String::new(),
-	}
 }
 
 /// A post's own declaration, where its author made one.
@@ -942,12 +918,16 @@ fn site_declaration(cfg: &PublishConfig) -> String {
 /// Written prose, so the mark is the one for a document whatever else the site is. Empty where the
 /// author declared nothing: a post with no declaration is a post the site says nothing about, and an
 /// undeclared work must never be drawn as one declaring the bottom rung.
-fn post_declaration(cfg: &PublishConfig, post: &Post, size: declare::Size, class: &str) -> String {
+///
+/// Drawn alone, at one size, wherever a post says how long it takes to read -- the mark belongs with
+/// the other things a reader is told before deciding to read. No words: they would repeat on every
+/// card in the list, and the mark is drawn large enough to be read without them.
+fn post_declaration(cfg: &PublishConfig, post: &Post, class: &str) -> String {
 	match post.ai_level {
 		Some(level)	=> declare::mark_html(
 			&cfg.declare,
 			declare::Declaration::new(level, declare::Medium::Doc),
-			size,
+			declare::Size::alone(declare::MARK_SIZE_PX),
 			class,
 		),
 		None		=> String::new(),
@@ -1711,28 +1691,39 @@ mod tests {
 		Ok(())
 	}
 
-	/// A declared post wears its mark twice over, and each time at a size that can be read: alone and
-	/// countable on its own page, where there is room, and with its words on the card, where there is
-	/// not. The site's own declaration is a separate claim and sits in the footer of both.
+	/// A declared post wears its mark where a reader is already being told what the piece is: in the
+	/// meta line, immediately after the reading time. Alone, at one size, on the card and on the post
+	/// itself -- the words would say the same thing on every card in the list, and the mark is drawn
+	/// large enough to be read without them.
 	#[test]
-	fn test_a_declared_post_wears_a_legible_mark_28() -> Outcome<()> {
+	fn test_a_declared_post_wears_its_mark_by_the_reading_time_28() -> Outcome<()> {
 		let mut p = post();
 		p.ai_level = Some(declare::Level::Some);
 
-		let resp = res!(post_page(&cfg(), &p, None, None));
-		let body = String::from_utf8_lossy(&resp.body).to_string();
-		assert!(body.contains("ai-mark-alone"), "the post page drew no mark of its own: {}", body);
-		assert!(body.contains("--ai-mark-size:44px"), "the post's mark is not drawn at a size: {}", body);
-		assert!(body.contains("doc-some-ai.svg"), "the post wears the wrong artwork: {}", body);
-		// Written prose wears the mark for a document, whatever the site itself is made of.
-		assert!(body.contains("code-with-ai.svg"), "the site's own declaration went missing: {}", body);
+		for (what, body) in [
+			("the post", String::from_utf8_lossy(
+				&res!(post_page(&cfg(), &p, None, None)).body).to_string()),
+			("the card", String::from_utf8_lossy(
+				&res!(index(&cfg(), &[p.clone()], &[], "", "test")).body).to_string()),
+		] {
+			assert!(body.contains("doc-some-ai.svg"), "{}: wrong artwork: {}", what, body);
+			assert!(body.contains(&fmt!("--ai-mark-size:{}px", declare::MARK_SIZE_PX)),
+				"{}: the mark is not drawn at the one size: {}", what, body);
+			// No words anywhere near it: the mark carries the level by itself at this size.
+			assert!(!body.contains("ai-mark-words"), "{}: the mark carried words: {}", what, body);
 
-		let resp = res!(index(&cfg(), &[p], &[], "", "test"));
-		let body = String::from_utf8_lossy(&resp.body).to_string();
-		assert!(body.contains("ai-mark-inline"), "the card drew no mark: {}", body);
-		// A card is text-size, so the mark cannot be read without its words, so it carries them.
-		assert!(body.contains("Made with some AI"), "the card's mark carried no words: {}", body);
-		assert!(!body.contains("ai-mark-alone"), "a card drew a mark too small to read: {}", body);
+			// Placement, said as an order rather than as a count of elements: the reading time, then
+			// the mark, then the end of the line they share.
+			let read_at = res!(body.find("aside-read")
+				.ok_or_else(|| err!("{}: no reading time to sit beside", what; Missing)));
+			let mark_at = res!(body.find("ai-mark")
+				.ok_or_else(|| err!("{}: no mark at all", what; Missing)));
+			assert!(read_at < mark_at, "{}: the mark came before the reading time: {}", what, body);
+			let line_end = res!(body[read_at..].find("</div>")
+				.ok_or_else(|| err!("{}: the meta line never closed", what; Missing)));
+			assert!(mark_at - read_at < line_end,
+				"{}: the mark fell outside the line the reading time is on: {}", what, body);
+		}
 		Ok(())
 	}
 
@@ -1745,14 +1736,27 @@ mod tests {
 		assert!(p.ai_level.is_none(), "the fixture was declared, so this proves nothing");
 		let resp = res!(post_page(&cfg(), &p, None, None));
 		let body = String::from_utf8_lossy(&resp.body).to_string();
-		assert!(!body.contains("ai-mark-alone"), "an undeclared post was given a mark: {}", body);
+		assert!(!body.contains("ai-mark"), "an undeclared post was given a mark: {}", body);
 		assert!(!body.contains("doc-no-ai.svg"), "an undeclared post was drawn as declaring none: {}", body);
-		// The site's own footer declaration is unaffected: it is the site's claim, not the post's.
-		assert!(body.contains("aside-foot-mark"), "the site's own declaration went missing: {}", body);
 
 		let resp = res!(index(&cfg(), &[p], &[], "", "test"));
 		let body = String::from_utf8_lossy(&resp.body).to_string();
-		assert!(!body.contains("aside-item-declare"), "an undeclared post's card drew a mark: {}", body);
+		assert!(!body.contains("ai-mark"), "an undeclared post's card drew a mark: {}", body);
+		Ok(())
+	}
+
+	/// The site's own declaration is not the blog's business. It says something about the whole site,
+	/// belongs in the site's own furniture, and repeating it under every post said the same sentence
+	/// on every page a reader opened. The configured site declaration is still read -- it reaches the
+	/// front page through `declare.json` -- it is simply not drawn here.
+	#[test]
+	fn test_the_blog_does_not_carry_the_sites_own_declaration_30() -> Outcome<()> {
+		let c = cfg();
+		assert!(c.declare.site.is_some(), "the fixture declares nothing, so this proves nothing");
+		let resp = res!(post_page(&c, &post(), None, None));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(!body.contains("aside-foot"), "a post carried the site's own declaration: {}", body);
+		assert!(!body.contains("code-with-ai.svg"), "a post carried the site's own mark: {}", body);
 		Ok(())
 	}
 

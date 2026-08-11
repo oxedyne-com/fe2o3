@@ -54,6 +54,14 @@ use std::collections::BTreeMap;
 /// as advice.
 pub const MARK_MIN_PX: u32 = 40;
 
+/// The height a mark is drawn at, in CSS pixels, wherever this module draws one.
+///
+/// Above [`MARK_MIN_PX`] on purpose. The floor is where a level stops being readable at all, which is
+/// a bad place to sit: it leaves nothing for a cheap screen, a low zoom or a reader who is not
+/// looking closely. One size everywhere also means a mark is the same object on a card, on a post and
+/// in a footer, rather than a family of sizes to be judged one placement at a time.
+pub const MARK_SIZE_PX: u32 = 48;
+
 /// The file extension the artwork is kept in. The marks are line drawings, and a line drawing that
 /// has to sit at a byline and on a poster is a vector.
 const MARK_EXT: &str = ".svg";
@@ -384,8 +392,12 @@ fn declarables(items: &[Dat]) -> Outcome<Vec<Declarable>> {
 pub enum Size {
 	/// The mark by itself, at the given size in CSS pixels, which is at least [`MARK_MIN_PX`].
 	Alone(u32),
-	/// The mark at text size with its declaration in words beside it.
-	WithWords,
+	/// The mark at the given size with its declaration in words beside it.
+	///
+	/// Words are not only for a mark too small to read. A footer saying what a whole site is has room
+	/// for the sentence and a reason to spell it out; a mark beside a reading time does not, and the
+	/// words there would say the same thing on every card.
+	WithWords(u32),
 }
 
 impl Size {
@@ -396,7 +408,7 @@ impl Size {
 	/// gets a legible declaration. There is no way to spell the illegible arrangement.
 	pub fn alone(px: u32) -> Self {
 		if px < MARK_MIN_PX {
-			Self::WithWords
+			Self::WithWords(px)
 		} else {
 			Self::Alone(px)
 		}
@@ -425,8 +437,8 @@ pub fn mark_html(cfg: &DeclareConfig, decl: Declaration, size: Size, class: &str
 	let mut s = String::new();
 	s.push_str("<a class=\"ai-mark");
 	match size {
-		Size::Alone(_)	=> s.push_str(" ai-mark-alone"),
-		Size::WithWords	=> s.push_str(" ai-mark-inline"),
+		Size::Alone(_)		=> s.push_str(" ai-mark-alone"),
+		Size::WithWords(_)	=> s.push_str(" ai-mark-inline"),
 	}
 	if !class.is_empty() {
 		s.push(' ');
@@ -445,16 +457,16 @@ pub fn mark_html(cfg: &DeclareConfig, decl: Declaration, size: Size, class: &str
 	// The shape. Its size rides in a custom property rather than a class per size, because the sizes
 	// are a placement decision and the stylesheet should not have to grow a class for each one.
 	s.push_str("<span class=\"ai-mark-ink\" aria-hidden=\"true\" style=\"");
-	if let Size::Alone(px) = size {
-		s.push_str(&fmt!("--ai-mark-size:{}px;", px));
+	match size {
+		Size::Alone(px) | Size::WithWords(px)	=> s.push_str(&fmt!("--ai-mark-size:{}px;", px)),
 	}
 	let url = fmt!("{}/{}", cfg.marks, decl.mark_file());
 	s.push_str(&fmt!(
 		"-webkit-mask-image:url('{0}');mask-image:url('{0}')", css_url(&url)));
 	s.push_str("\"></span>");
 
-	// The words, where the mark is too small to be read without them.
-	if size == Size::WithWords {
+	// The words, where the caller asked for them.
+	if matches!(size, Size::WithWords(_)) {
 		s.push_str("<span class=\"ai-mark-words\">");
 		escape_text(&mut s, decl.level.words());
 		s.push_str("</span>");
@@ -620,9 +632,12 @@ mod tests {
 	#[test]
 	fn test_a_small_mark_cannot_lose_its_words_03() -> Outcome<()> {
 		assert_eq!(Size::alone(MARK_MIN_PX), Size::Alone(MARK_MIN_PX));
-		assert_eq!(Size::alone(MARK_MIN_PX + 8), Size::Alone(MARK_MIN_PX + 8));
-		assert_eq!(Size::alone(MARK_MIN_PX - 1), Size::WithWords, "a mark went wordless below the floor");
-		assert_eq!(Size::alone(16), Size::WithWords);
+		assert_eq!(Size::alone(MARK_SIZE_PX), Size::Alone(MARK_SIZE_PX));
+		assert_eq!(Size::alone(MARK_MIN_PX - 1), Size::WithWords(MARK_MIN_PX - 1),
+			"a mark went wordless below the floor");
+		assert_eq!(Size::alone(16), Size::WithWords(16));
+		// What the module actually draws sits above the floor rather than on it.
+		assert!(MARK_SIZE_PX >= MARK_MIN_PX, "the drawn size is below the readable floor");
 
 		// And the words really are drawn in that arrangement, not merely chosen.
 		let html = mark_html(&cfg(), Declaration::new(Level::Some, Medium::Doc), Size::alone(16), "");

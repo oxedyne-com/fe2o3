@@ -1963,6 +1963,11 @@ fn post_json<
 	m.insert(dat!("categories"),	Dat::List(rec.categories.iter().map(|c| dat!(c.clone())).collect()));
 	m.insert(dat!("markup"),	dat!(rec.markup.as_str().to_string()));
 	m.insert(dat!("state"),		dat!(rec.state.as_str().to_string()));
+	// What the author declared about writing it. **Without this the app's composer opens every post
+	// reading "Not declared" and the next autosave writes that back**, taking a declaration its
+	// author had made. An empty string is the honest answer for a post with none, and is what the
+	// chooser's first option carries.
+	m.insert(dat!("ai_level"),	dat!(rec.ai_level.map(|l| l.slug().to_string()).unwrap_or_default()));
 	m.insert(dat!("html"),		dat!(html));
 	m.insert(dat!("broken"),	Dat::Bool(broken));
 	// The readable form in the field; the `T` goes back in at save.
