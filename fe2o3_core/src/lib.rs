@@ -95,6 +95,11 @@ pub mod ord;
 pub mod path;
 pub mod prelude;
 pub mod rand;
+/// Hearing the operating system ask this process to stop.  There are no signals
+/// on `wasm32`, and the tokio feature that carries them must not reach that
+/// build.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod stop;
 pub mod string;
 pub mod term;
 pub mod test;
