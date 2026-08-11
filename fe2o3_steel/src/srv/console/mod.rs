@@ -1400,8 +1400,13 @@ padding:0.1rem 0.4rem;border-radius:4px;border:1px solid var(--border,#333c47);o
 .mc-tag-live{border-color:#4c9a6a;color:#7fc79b;opacity:1;}\
 .mc-tag-err{border-color:#c0554e;color:#d9776f;opacity:1;}\
 .mc-settings + .mc-settings{margin-top:0.6rem;}\
-.mc-author{display:flex;align-items:flex-end;gap:0.4rem;font-size:0.85rem;\
+.mc-author{display:flex;align-items:center;gap:0.5rem;font-size:0.85rem;\
 color:var(--text-secondary,var(--aside-date-color,#8a97a6));}\
+/* A line of its own at the foot of the field row. It is a note about the post rather than a field \
+of it, and sharing the row's `flex:1 1 8rem` with five fields crushed it into a column two words \
+wide -- the label wrapped, and the control wrapped inside that. */\
+.mc-row>.mc-author{flex:1 0 100%;margin-top:0.2rem;}\
+.mc-author-lbl,.mc-author .mc-btn{white-space:nowrap;}\
 .mc-author-lbl{text-transform:uppercase;letter-spacing:0.05em;font-size:0.72rem;}\
 .mc-author-name{color:var(--text-primary,#e6e6e6);font-weight:600;}\
 /* The tick in the site's own colour rather than the browser's default blue-or-red, which lands \
