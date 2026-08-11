@@ -62,6 +62,7 @@ use std::{
     },
     sync::{
         Arc,
+        Mutex,
         RwLock,
     },
     thread,
@@ -144,7 +145,29 @@ pub struct O3db<
     db_root:    PathBuf,
     chan_inbox: Simplex<OzoneMsg<UIDL, UID, ENC, KH>>,
     api:        OzoneApi<UIDL, UID, ENC, KH, PR, CS>,
-    wg_end:     WaitGroup,
+    closing:    Arc<Mutex<Closing>>,
+}
+
+/// What one shutdown of a database needs to know, shared by every handle to it.
+///
+/// `O3db` is `Clone`, and both fields here are the reason this sits behind an
+/// `Arc` rather than in the struct itself:
+///
+/// - A `WaitGroup` counts its clones, and `WaitGroup::wait` blocks until every
+///   *other* clone has been dropped. A copy per database handle therefore makes
+///   a shutdown wait for handles that are still alive and never returns. Exactly
+///   one clone lives here, however many handles share it, so the wait answers
+///   the question it was meant to: have the bot threads ended?
+/// - Two threads may both notice that the program has been asked to stop. The
+///   second must not send a second shutdown request to a supervisor that has
+///   already gone, so what has been done is recorded where both can see it.
+#[derive(Debug)]
+struct Closing {
+    /// The wait group the bot threads hold the other end of, taken by whichever
+    /// shutdown gets there first and waited on exactly once.
+    wg:     Option<WaitGroup>,
+    /// Whether the supervisor has already been asked to stop, and answered.
+    done:   bool,
 }
 
 impl<
@@ -221,7 +244,10 @@ impl<
             db_root,
             chan_inbox: simplex(),
             api,
-            wg_end: WaitGroup::default(),
+            closing: Arc::new(Mutex::new(Closing {
+                wg:     None,
+                done:   false,
+            })),
         })
     }
 
@@ -261,26 +287,44 @@ impl<
     /// Drains the inbox, absorbing the latest bot channel set and configuration
     /// broadcast to the database by the supervisor.
     pub fn update(&mut self) -> Outcome<()> {
+        let ozid = self.api.ozid.clone();
+        Self::drain(&self.chan_inbox, &ozid, &mut self.api.chans, &mut self.api.cfg)
+    }
+
+    /// The body of [`Self::update`], over whichever channel set and
+    /// configuration the caller offers.
+    ///
+    /// Split out so that [`Self::close`], which takes `&self` and therefore
+    /// cannot write anything back into the handle, still finds the latest
+    /// supervisor channel to send its shutdown request down.
+    fn drain(
+        inbox:  &Simplex<OzoneMsg<UIDL, UID, ENC, KH>>,
+        ozid:   &OzoneBotId,
+        chans:  &mut BotChannels<UIDL, UID, ENC, KH>,
+        cfg:    &mut OzoneConfig,
+    )
+        -> Outcome<()>
+    {
         loop { // loop to ensure we get the latest BotChannels
-            match self.chan_inbox.try_recv() {
+            match inbox.try_recv() {
                 Recv::Empty => break,
                 Recv::Result(Err(e)) => {
                     return Err(e);
                 },
                 Recv::Result(Ok(msg)) => match msg {
-                    OzoneMsg::Channels(chans, resp) => {
-                        self.api.chans = chans;
+                    OzoneMsg::Channels(new_chans, resp) => {
+                        *chans = new_chans;
                         res!(resp.send(
-                            OzoneMsg::ChannelsReceived(self.ozid().clone()))
+                            OzoneMsg::ChannelsReceived(ozid.clone()))
                         );
                     },
-                    OzoneMsg::Config(cfg) => {
-                        self.api.cfg = cfg;
+                    OzoneMsg::Config(new_cfg) => {
+                        *cfg = new_cfg;
                     },
                     _ => {
                         return Err(err!(
                             "{}: Unrecognised channel update message: {:?}.",
-                            self.ozid(), msg;
+                            ozid, msg;
                             Invalid, Input, Channel));
                     },
                 }
@@ -333,8 +377,15 @@ impl<
             self.chan_inbox.clone(),
         );
         res!(sup.init()); // Starts all the other bots.
-        self.wg_end = sup.handles().wait_end_ref().clone();
-        let wg_end = self.wg_end.clone();
+        // One clone for the database side, however many handles share it, and
+        // one for the supervisor thread to drop when it has ended.
+        let wg_end = sup.handles().wait_end_ref().clone();
+        {
+            let mut closing = lock_mutex!(self.closing,
+                "Taking the shutdown record while starting the database.");
+            closing.wg = Some(sup.handles().wait_end_ref().clone());
+            closing.done = false;
+        }
 
         let sup_ozid = sup.ozid().clone();
         
@@ -396,12 +447,54 @@ impl<
         Ok(found_files)
     }
 
-    /// Gracefully shut down the database, including the supervisor. 
-    pub fn shutdown(mut self) -> Outcome<()> {
-        res!(self.update());
+    /// Gracefully shut down the database, including the supervisor.
+    ///
+    /// Consumes the handle, which is the right shape when there is only one.
+    /// Where the database is shared -- an `Arc`, or a clone held by a worker
+    /// thread -- use [`Self::close`], which asks the same of the supervisor
+    /// through a borrow.
+    pub fn shutdown(self) -> Outcome<()> {
+        self.close()
+    }
+
+    /// Gracefully shut down the database, including the supervisor, through a
+    /// shared handle.
+    ///
+    /// **Closing twice is safe.** The first call stops the supervisor and waits
+    /// for every bot thread to end; any call after it returns `Ok(())` at once,
+    /// having done nothing, and a call arriving while the first is still working
+    /// waits for it and then returns the same way. Two threads noticing at the
+    /// same moment that the program has been asked to stop is the ordinary case,
+    /// not a mistake, and neither of them should have to find out whether it was
+    /// first.
+    ///
+    /// `&self` rather than `self` because `O3db` is `Clone` and the thing worth
+    /// closing is usually shared. A consuming shutdown cannot be reached through
+    /// an `Arc` that a scanner and a worker thread both hold, and
+    /// `Arc::try_unwrap` on a live handle never succeeds; and a shutdown called
+    /// on one clone of a database used to wait for its own siblings to be
+    /// dropped, which never happened either. See `Closing` for why the wait
+    /// group now lives behind one shared lock.
+    pub fn close(&self) -> Outcome<()> {
+        // Held for the whole of the shutdown, so that a second caller waits
+        // here and finds the work already done rather than doing it again.
+        let mut closing = lock_mutex!(self.closing,
+            "Taking the shutdown record while closing the database.");
+        if closing.done {
+            return Ok(());
+        }
+
+        // The latest channel set the supervisor has broadcast, since the
+        // shutdown request goes down whichever channel is current. Into local
+        // copies: `&self` cannot write them back into the handle, and after a
+        // shutdown there is nothing left for them to be useful to.
+        let mut chans = self.api.chans.clone();
+        let mut cfg = self.api.cfg.clone();
+        res!(Self::drain(&self.chan_inbox, &self.api.ozid, &mut chans, &mut cfg));
+
         let self_id = self.ozid();
         let resp = self.responder();
-        if let Err(e) = self.chans().sup().send(
+        if let Err(e) = chans.sup().send(
             OzoneMsg::Shutdown(self_id.clone(), resp.clone())
         ) {
             return Err(err!(e,
@@ -420,7 +513,12 @@ impl<
         }
         warn!(sync_log::stream(), "Shutdown: Succesfully completed by supervisor, waiting for final \
             verification of termination of all threads...");
-        self.wg_end.wait();
+        // Taken rather than cloned: `WaitGroup::wait` counts the clones that are
+        // left, so waiting on a copy while the original lives never returns.
+        if let Some(wg) = closing.wg.take() {
+            wg.wait();
+        }
+        closing.done = true;
         warn!(sync_log::stream(), "Shutdown: Verified.");
         Ok(())
     }
