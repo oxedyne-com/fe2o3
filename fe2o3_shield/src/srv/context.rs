@@ -124,34 +124,28 @@ pub fn new_db(
         ChecksumScheme,
     >>
 {
+    // Only the deviations from the library's own configuration are stated, so that a field
+    // added upstream reaches this caller instead of failing to compile here, and so that
+    // each value below reads as a decision rather than as one entry in a list of twenty.
+    // The values are those this server has always used; nothing about the store changes.
     let cfg = OzoneConfig {
-        format_version:                 oxedyne_fe2o3_o3db_sync::base::constant::CURRENT_FORMAT_VERSION,
-        // Key hashing
-        bytes_before_hashing:           32,
-        // Caches
+        // A Shield server's store is small, so it takes a tenth of the library's cache.
         cache_size_limit_bytes:         100_000_000,
-        init_load_caches:               true,
         // Files
         data_file_max_bytes:            1_000_000,
-        // Chunking
+        // Chunking. These are far below the library's own figures and match its *test*
+        // setup, which is where Steel found the same pair and replaced them; they are
+        // left alone here because changing them changes how values already in a Shield
+        // store were split. Worth revisiting deliberately.
         rest_chunk_threshold:           1_500,
         rest_chunk_bytes:               64,
-        // Bots
-        num_cbots_per_zone:             2,
-        num_fbots_per_zone:             2,
-        num_igbots_per_zone:            2,
-        num_rbots_per_zone:             2,
+        // One writer per zone: the store is write-light.
         num_wbots_per_zone:             1,
-        num_sbots:                      2,
-        // Zones
-        num_zones:                      2,
+        // Zone state is reported more often than the library default.
         zone_state_update_secs:         1,
+        // No per-zone size caps.
         zone_overrides:                 BTreeMap::new(),
-        // Durability barrier -- off by default, matching the pre-feature
-        // ozone behaviour.
-        sync_on_write:                  false,
-        sync_every_n_writes:            0,
-        sync_interval_ms:               0,
+        ..Default::default()
     };
 
 
