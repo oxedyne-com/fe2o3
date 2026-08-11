@@ -126,6 +126,7 @@ pub struct BotHandles<
     fbots:  Vec<Vec<Handle<UIDL, UID, ENC, KH>>>,
     igbots: Vec<Vec<Handle<UIDL, UID, ENC, KH>>>,
     rbots:  Vec<Vec<Handle<UIDL, UID, ENC, KH>>>,
+    scbots: Vec<Vec<Handle<UIDL, UID, ENC, KH>>>,
     wbots:  Vec<Vec<Handle<UIDL, UID, ENC, KH>>>,
     zbots:  Vec<Handle<UIDL, UID, ENC, KH>>,
     cfg:    Handle<UIDL, UID, ENC, KH>,
@@ -149,6 +150,7 @@ impl<
             fbots:      Vec::new(),
             igbots:     Vec::new(),
             rbots:      Vec::new(),
+            scbots:     Vec::new(),
             wbots:      Vec::new(),
             zbots:      Vec::new(),
             cfg:        Handle::default(),
@@ -175,6 +177,7 @@ impl<
         let nf = cfg.num_bots_per_zone(&WorkerType::File);
         let nig = cfg.num_bots_per_zone(&WorkerType::InitGarbage);
         let nr = cfg.num_bots_per_zone(&WorkerType::Reader);
+        let nsc = cfg.num_bots_per_zone(&WorkerType::Scan);
         let nw = cfg.num_bots_per_zone(&WorkerType::Writer);
         let mut cbots = Vec::new();
         for _ in 0..nz {
@@ -208,6 +211,14 @@ impl<
             }
             rbots.push(bots);
         }
+        let mut scbots = Vec::new();
+        for _ in 0..nz {
+            let mut bots = Vec::new();
+            for _ in 0..nsc {
+                bots.push(Handle::<UIDL, UID, ENC, KH>::default());
+            }
+            scbots.push(bots);
+        }
         let mut wbots = Vec::new();
         for _ in 0..nz {
             let mut bots = Vec::new();
@@ -230,6 +241,7 @@ impl<
             fbots,
             igbots,
             rbots,
+            scbots,
             wbots,
             zbots,
             sbots,
@@ -246,6 +258,8 @@ impl<
     pub fn all_igbots(&self)    -> &Vec<Vec<Handle<UIDL, UID, ENC, KH>>> { &self.igbots }
     /// Returns the per-zone reader-bot handles.
     pub fn all_rbots(&self)     -> &Vec<Vec<Handle<UIDL, UID, ENC, KH>>> { &self.rbots }
+    /// Returns the per-zone scan-bot handles.
+    pub fn all_scbots(&self)    -> &Vec<Vec<Handle<UIDL, UID, ENC, KH>>> { &self.scbots }
     /// Returns the per-zone writer-bot handles.
     pub fn all_wbots(&self)     -> &Vec<Vec<Handle<UIDL, UID, ENC, KH>>> { &self.wbots }
     /// Returns the zone-bot handles.
@@ -274,6 +288,8 @@ impl<
     pub fn igbots_mut(&mut self)    -> &mut Vec<Vec<Handle<UIDL, UID, ENC, KH>>> { &mut self.igbots }
     /// Returns a mutable reference to the per-zone reader-bot handles.
     pub fn rbots_mut(&mut self)     -> &mut Vec<Vec<Handle<UIDL, UID, ENC, KH>>> { &mut self.rbots }
+    /// Returns a mutable reference to the per-zone scan-bot handles.
+    pub fn scbots_mut(&mut self)    -> &mut Vec<Vec<Handle<UIDL, UID, ENC, KH>>> { &mut self.scbots }
     /// Returns a mutable reference to the per-zone writer-bot handles.
     pub fn wbots_mut(&mut self)     -> &mut Vec<Vec<Handle<UIDL, UID, ENC, KH>>> { &mut self.wbots }
     /// Returns a mutable reference to the zone-bot handles.
@@ -321,6 +337,7 @@ impl<
             WorkerType::File        => self.fbots[wind.z()][wind.b()] = hand,
             WorkerType::InitGarbage => self.igbots[wind.z()][wind.b()] = hand,
             WorkerType::Reader      => self.rbots[wind.z()][wind.b()] = hand,
+            WorkerType::Scan        => self.scbots[wind.z()][wind.b()] = hand,
             WorkerType::Writer      => self.wbots[wind.z()][wind.b()] = hand,
         }
         Ok(())
@@ -344,6 +361,7 @@ impl<
                 &self.fbots[z],
                 &self.igbots[z],
                 &self.rbots[z],
+                &self.scbots[z],
                 &self.wbots[z],
             ] {
                 for h in pool {
@@ -381,6 +399,7 @@ impl<
                 &self.fbots[z],
                 &self.igbots[z],
                 &self.rbots[z],
+                &self.scbots[z],
                 &self.wbots[z],
             ] {
                 for h in pool {
@@ -517,6 +536,7 @@ impl<
             self.handles.all_fbots(),
             self.handles.all_igbots(),
             self.handles.all_rbots(),
+            self.handles.all_scbots(),
             self.handles.all_wbots(),
         ];
 

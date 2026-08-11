@@ -79,6 +79,15 @@ pub struct OzoneConfig {
     pub num_rbots_per_zone:             u16, // reader bots
     pub num_wbots_per_zone:             u16, // writer bots
     pub num_sbots:                      u16, // server bots
+    /// Number of scan bots per zone.
+    ///
+    /// `#[optional]` so a config written before scanning had a pool of
+    /// its own still loads; a missing field falls through to the
+    /// `Default` impl below. A zone needs at least one, and
+    /// `check_and_fix` raises a zero to one rather than leaving a store
+    /// that cannot answer a scan at all.
+    #[optional]
+    pub num_scbots_per_zone:            u16, // scan bots
     // Zones
     pub num_zones:                      u16,
     pub zone_state_update_secs:         u8,
@@ -119,6 +128,7 @@ impl Config for OzoneConfig {
         res!(self.check_format_version());
         res!(self.check_rest_chunk_config(&self.chunk_config()));
         res!(self.check_file_size());
+        self.fix_scan_bot_count();
         Ok(())
     }
 }
@@ -144,6 +154,10 @@ impl Default for OzoneConfig {
             num_rbots_per_zone:             2,
             num_wbots_per_zone:             2,
             num_sbots:                      2,
+            // One scan bot answers a zone's scans in the order they
+            // arrive. A second only helps when concurrent scans of the
+            // same zone are wanted, and each costs a thread.
+            num_scbots_per_zone:            1,
             // Zones
             num_zones:                      2,
             zone_state_update_secs:         5, 
@@ -185,6 +199,22 @@ impl OzoneConfig {
                 Configuration, Invalid, Mismatch));
         }
         Ok(())
+    }
+
+    /// Raises a scan-bot count of zero to one.
+    ///
+    /// A zone with no scan bot cannot answer a scan at all, and a
+    /// config file written by hand, or one that simply predates the
+    /// pool, can easily carry a zero. Refusing the config would take a
+    /// working store offline over a field that has an obvious right
+    /// answer, so the count is corrected and the operator told.
+    pub fn fix_scan_bot_count(&mut self) {
+        if self.num_scbots_per_zone == 0 {
+            warn!(sync_log::stream(),
+                "Configured scan bots per zone is zero, which leaves no bot to \
+                answer a scan; using one.");
+            self.num_scbots_per_zone = 1;
+        }
     }
 
     /// Size in bytes of an individual value chunk when chunking is applied.
@@ -231,6 +261,7 @@ impl OzoneConfig {
             WorkerType::File        => self.num_fbots_per_zone,
             WorkerType::InitGarbage => self.num_igbots_per_zone,
             WorkerType::Reader      => self.num_rbots_per_zone,
+            WorkerType::Scan        => self.num_scbots_per_zone,
             WorkerType::Writer      => self.num_wbots_per_zone,
         }) as usize
     }
@@ -416,4 +447,59 @@ pub struct ZoneConfig {
     pub cache_size_lim:     usize,
     /// Whether file data is loaded into caches during initialisation.
     pub init_load_caches:   bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A config file written before scanning had a bot pool of its own
+    /// carries no `num_scbots_per_zone`, and every ozone store on disk
+    /// is in that state until its server rewrites its config. Refusing
+    /// such a file, or loading it with a zero count, would take a
+    /// working store offline over a field with an obvious right answer.
+    #[test]
+    fn config_without_scan_bot_count_loads_with_one() -> Outcome<()> {
+        let mut map = match OzoneConfig::to_datmap(OzoneConfig::default()) {
+            Dat::Map(m) => m,
+            other => return Err(err!(
+                "Expected a Dat::Map from to_datmap, got {:?}.", other;
+                Test, Invalid)),
+        };
+        // Take the field out, leaving the file an older server would
+        // have written.
+        map.remove(&Dat::Str(fmt!("num_scbots_per_zone")));
+        if map.contains_key(&Dat::Str(fmt!("num_scbots_per_zone"))) {
+            return Err(err!(
+                "The scan bot count was still present after removal, so the \
+                test would prove nothing.";
+                Test, Bug));
+        }
+        let mut cfg = res!(OzoneConfig::from_datmap(map));
+        res!(cfg.check_and_fix());
+        if cfg.num_bots_per_zone(&WorkerType::Scan) != 1 {
+            return Err(err!(
+                "A config with no scan bot count loaded with {} scan bots per \
+                zone; a zone with none cannot answer a scan at all.",
+                cfg.num_bots_per_zone(&WorkerType::Scan);
+                Test, Mismatch));
+        }
+        Ok(())
+    }
+
+    /// An explicit zero is corrected rather than obeyed, for the same
+    /// reason.
+    #[test]
+    fn zero_scan_bot_count_is_raised_to_one() -> Outcome<()> {
+        let mut cfg = OzoneConfig::default();
+        cfg.num_scbots_per_zone = 0;
+        res!(cfg.check_and_fix());
+        if cfg.num_bots_per_zone(&WorkerType::Scan) != 1 {
+            return Err(err!(
+                "A zero scan bot count survived check_and_fix as {}.",
+                cfg.num_bots_per_zone(&WorkerType::Scan);
+                Test, Mismatch));
+        }
+        Ok(())
+    }
 }

@@ -80,6 +80,8 @@ pub enum OzoneBotId {
     Master(Bid),
     /// A reader bot, in a given zone and pool position.
     ReaderBot(Bid, ZoneInd, BotPoolInd),
+    /// A scan bot, in a given zone and pool position.
+    ScanBot(Bid, ZoneInd, BotPoolInd),
     /// A server bot, in a given pool position (server bots are not zoned).
     ServerBot(Bid, BotPoolInd),
     /// The supervisor bot.
@@ -99,6 +101,7 @@ impl Debug for OzoneBotId {
             Self::InitGarbageBot(bid, zind, bpind)  => write!(f, "InitGarbageBot:{}:{}:{}", zind, bpind, bid),
             Self::Master(bid)                       => write!(f, "Master:{}", bid),
             Self::ReaderBot(bid, zind, bpind)       => write!(f, "ReaderBot:{}:{}:{}", zind, bpind, bid),
+            Self::ScanBot(bid, zind, bpind)         => write!(f, "ScanBot:{}:{}:{}", zind, bpind, bid),
             Self::ServerBot(bid, bpind)             => write!(f, "ServerBot:{}:{}", bpind, bid),
             Self::Supervisor(bid)                   => write!(f, "Supervisor:{}", bid),
             Self::WriterBot(bid, zind, bpind)       => write!(f, "WriterBot:{}:{}:{}", zind, bpind, bid),
@@ -123,6 +126,7 @@ impl OzoneBotId {
             Self::InitGarbageBot(bid, ..)   => *bid,
             Self::Master(bid)               => *bid,
             Self::ReaderBot(bid, ..)        => *bid,
+            Self::ScanBot(bid, ..)          => *bid,
             Self::ServerBot(bid, ..)        => *bid,
             Self::Supervisor(bid)           => *bid,
             Self::WriterBot(bid, ..)        => *bid,
@@ -137,6 +141,7 @@ impl OzoneBotId {
             WorkerType::File        => Self::FileBot(Bid::randef(), *wind.zind(), *wind.bpind()),
             WorkerType::InitGarbage => Self::InitGarbageBot(Bid::randef(), *wind.zind(), *wind.bpind()),
             WorkerType::Reader      => Self::ReaderBot(Bid::randef(), *wind.zind(), *wind.bpind()),
+            WorkerType::Scan        => Self::ScanBot(Bid::randef(), *wind.zind(), *wind.bpind()),
             WorkerType::Writer      => Self::WriterBot(Bid::randef(), *wind.zind(), *wind.bpind()),
         }
     }

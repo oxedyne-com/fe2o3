@@ -30,6 +30,7 @@ use crate::{
             bot_file::FileBot,
             bot_initgc::InitGarbageBot,
             bot_reader::ReaderBot,
+            bot_scan::ScanBot,
             bot_writer::WriterBot,
             worker_deps::*,
         },
@@ -531,6 +532,7 @@ impl<
                 WorkerType::File,
                 WorkerType::InitGarbage,
                 WorkerType::Reader,
+                WorkerType::Scan,
                 WorkerType::Writer,
             ] {
                 let nb = self.cfg().num_bots_per_zone(&wtyp);
@@ -565,6 +567,7 @@ impl<
                         WorkerType::File        => Box::new(FileBot::new(args)),
                         WorkerType::InitGarbage => Box::new(InitGarbageBot::new(args)),
                         WorkerType::Reader      => Box::new(ReaderBot::new(args)),
+                        WorkerType::Scan        => Box::new(ScanBot::new(args)),
                         WorkerType::Writer      => Box::new(WriterBot::new(args)),
                     };
                     

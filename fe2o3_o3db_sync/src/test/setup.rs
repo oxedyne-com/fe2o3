@@ -36,6 +36,7 @@ pub fn default_cfg() -> Outcome<OzoneConfig> {
         num_rbots_per_zone:             2,
         num_wbots_per_zone:             1,
         num_sbots:                      2,
+        num_scbots_per_zone:            1,
         // Zones
         num_zones:                      2,
         zone_state_update_secs:         1, 

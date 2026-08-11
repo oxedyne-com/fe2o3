@@ -27,18 +27,10 @@ use crate::{
     },
 };
 
-use oxedyne_fe2o3_core::byte::FromBytes;
-use oxedyne_fe2o3_iop_db::api::{
-    Meta,
-    ScanOpts,
-};
-use oxedyne_fe2o3_jdat::{
-    Dat,
-    id::NumIdDat,
-};
+use oxedyne_fe2o3_iop_db::api::Meta;
+use oxedyne_fe2o3_jdat::id::NumIdDat;
 
 use std::{
-    collections::HashMap,
     fs::{
         self,
         File,
@@ -181,19 +173,6 @@ impl<
                                 fbot_index,
                             );
                             self.result(&result);
-                        },
-                        // Scan
-                        OzoneMsg::ScanRequest {
-                            opts,
-                            schms2: _,
-                            resp,
-                        } => {
-                            let result = self.scan_zone(&opts);
-                            let msg = match result {
-                                Ok(entries) => OzoneMsg::ScanEntries(entries),
-                                Err(e) => OzoneMsg::Error(e),
-                            };
-                            self.respond(Ok(msg), &resp);
                         },
                         _ => return self.listen_more(msg),
                     }
@@ -427,17 +406,20 @@ impl<
         let typ = FileType::Data;
         let mut index_file_buffer = Vec::new();
 
-        // 1. Make sure the index file really is gone.
-        let mut path = self.zdir().dir.clone();
-        path.push(ZoneDir::relative_file_path(&FileType::Index, fnum));
-        if path.is_file() {
-            res!(fs::remove_file(path));
+        // 1. Name the index file and the temporary it is rebuilt through, so that an
+        //    index file on disk is always a complete one.  A rebuild interrupted part way
+        //    leaves only the temporary, which the zone survey discards on the next start.
+        let mut ind_path = self.zdir().dir.clone();
+        ind_path.push(ZoneDir::relative_file_path(&FileType::Index, fnum));
+        let mut tmp_ind_path = self.zdir().dir.clone();
+        tmp_ind_path.push(ZoneDir::relative_gc_temp_path(&FileType::Index, fnum));
+        if tmp_ind_path.is_file() {
+            res!(fs::remove_file(&tmp_ind_path));
         }
 
         // 2. Create the new index file.
-        let (_, file) = res!(self.zdir().open_ozone_file(
-            fnum,
-            &FileType::Index,
+        let file = res!(ZoneDir::open_file(
+            &tmp_ind_path,
             &FileAccess::Writing,
         ));
         let mut writer = BufWriter::new(file);
@@ -545,8 +527,11 @@ impl<
                 Mismatch, Data));
         }
 
-        // 10. Write the index file in one go.
+        // 10. Write the index file in one go, then put it in place.
         res!(writer.write(&index_file_buffer));
+        res!(writer.flush());
+        drop(writer);
+        res!(fs::rename(&tmp_ind_path, &ind_path));
 
         Ok(())
     }
@@ -780,11 +765,20 @@ impl<
         -> Outcome<FileState>
     {
         let typ = FileType::Data;
-        // 1. Make sure the index file really is gone.
-        let mut path = self.zdir().dir.clone();
-        path.push(ZoneDir::relative_file_path(&FileType::Index, fnum));
-        if path.is_file() {
-            res!(fs::remove_file(path));
+        // 1. Name the index file and the temporary the rebuild is written to.  The rebuild
+        //    goes to the temporary and is renamed over the index at the end, so a reader
+        //    walking index files alongside this collection sees either the whole old index
+        //    or the whole new one, never a gap.  Writing in place would leave the file
+        //    absent, then partial, for the length of the rebuild, and a scan arriving in
+        //    that window would drop every key whose current value lives in this file.
+        let mut ind_path = self.zdir().dir.clone();
+        ind_path.push(ZoneDir::relative_file_path(&FileType::Index, fnum));
+        let mut tmp_ind_path = self.zdir().dir.clone();
+        tmp_ind_path.push(ZoneDir::relative_gc_temp_path(&FileType::Index, fnum));
+        // An abandoned rebuild would otherwise be appended to, because ozone opens files
+        // for writing in append mode.
+        if tmp_ind_path.is_file() {
+            res!(fs::remove_file(&tmp_ind_path));
         }
         fstat.reset_index_file_size();
 
@@ -801,9 +795,8 @@ impl<
 
         {
             // 2. Create the new index file.
-            let (_, file) = res!(self.zdir().open_ozone_file(
-                fnum,
-                &FileType::Index,
+            let file = res!(ZoneDir::open_file(
+                &tmp_ind_path,
                 &FileAccess::Writing,
             ));
             let mut writer = BufWriter::new(file);
@@ -829,7 +822,14 @@ impl<
                             let meta: Meta<UIDL, UID> = skey.meta().clone();
                             let chash = skey.ref_chash().clone();
                             let key = skey.into_key();
-                            let index_entry = skbyts;
+                            // An index record starts with the cache hash, exactly as the
+                            // wbot writes it and as `StoredKey::load` expects to read it.
+                            // `load` returns the key bytes with that hash already drained
+                            // off the front, so it has to be put back; a rebuild that
+                            // omitted it left every record in the file misaligned by four
+                            // bytes and the file undecodable from its first byte.
+                            let mut index_entry = chash.to_vec();
+                            index_entry.extend_from_slice(&skbyts);
                             (key, klen, kpos, meta, index_entry, chash)
                         },
                     };
@@ -886,7 +886,15 @@ impl<
                     },
                 }
             }
+
+            // Flush explicitly: dropping a BufWriter flushes too, but discards any error
+            // doing so, and a rebuild that silently lost its tail would be renamed over a
+            // good index.
+            res!(writer.flush());
         } // close out that writer
+
+        // Put the rebuilt index in place in one step.
+        res!(fs::rename(&tmp_ind_path, &ind_path));
 
         // Send cache update request batches to each cbot.
         let bots = res!(self.cbots());
@@ -937,196 +945,4 @@ impl<
         Ok(fstat)
     }
 
-    // ┌───────────────────────────────────────────────────────────────────────┐
-    // │ SCAN                                                                  │
-    // └───────────────────────────────────────────────────────────────────────┘
-
-    /// Walk every index file in this bot's zone and return the live
-    /// user-visible `(key, value, meta)` entries that satisfy `opts`.
-    ///
-    /// Deduplication keeps the newest entry per raw key-bytes: index
-    /// files are walked in ascending file-number order, and within a
-    /// file in position order, so a later write of the same key
-    /// naturally overwrites the earlier one in the local map.
-    ///
-    /// Internal chunk entries (`cind >= 1`) are elided; only the
-    /// user-visible main keys are returned.
-    ///
-    /// Values are deferred to a later revision of scan: this handler
-    /// returns `Dat::Empty` as the value for every entry. Callers
-    /// that need the value fetch it with a separate `get()` call
-    /// once the operator has chosen a specific key.
-    ///
-    /// Prefix and limit filters are applied per zone before the
-    /// result ships to the coordinator, so the wire message stays
-    /// bounded even when the caller sets a small limit against a
-    /// large database.
-    fn scan_zone(
-        &mut self,
-        opts: &ScanOpts,
-    )
-        -> Outcome<Vec<(Dat, Dat, Meta<UIDL, UID>)>>
-    {
-        let fnums = res!(self.list_ind_fnums());
-        let mut live: HashMap<Vec<u8>, (Dat, Meta<UIDL, UID>)>
-            = HashMap::new();
-
-        for fnum in fnums {
-            res!(self.scan_walk_ind_file(fnum, &mut live));
-        }
-
-        let mut out: Vec<(Dat, Dat, Meta<UIDL, UID>)> =
-            Vec::with_capacity(live.len());
-        for (_kbyts, (kdat, meta)) in live.into_iter() {
-            if !scan_matches_prefix(&kdat, opts.prefix.as_ref()) {
-                continue;
-            }
-            out.push((kdat, Dat::Empty, meta));
-            if let Some(lim) = opts.limit {
-                if out.len() >= lim {
-                    break;
-                }
-            }
-        }
-        if opts.include_values {
-            warn!(sync_log::stream(),
-                "{}: scan called with include_values=true; scan v1 \
-                returns Dat::Empty for every value. Fetch individual \
-                values via get() once a key is selected.",
-                self.ozid());
-        }
-        Ok(out)
-    }
-
-    /// Enumerate the `.ind` file numbers in this bot's zone
-    /// directory, ascending. Unparseable or non-ind files are
-    /// skipped silently; the zone survey at startup already
-    /// rejects structurally invalid directories.
-    fn list_ind_fnums(&self) -> Outcome<Vec<FileNum>> {
-        let mut fnums: Vec<FileNum> = Vec::new();
-        for entry in res!(fs::read_dir(&self.zdir().dir)) {
-            let entry = res!(entry);
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            let (fnum, ftyp) = match ZoneDir::ozone_file_number_and_type(&path) {
-                Ok(t) => t,
-                Err(_) => continue,
-            };
-            if ftyp == FileType::Index {
-                fnums.push(fnum);
-            }
-        }
-        fnums.sort();
-        Ok(fnums)
-    }
-
-    /// Walk a single index file, populating `live` with the
-    /// user-visible entries it contains. Skips internal chunk
-    /// entries. A later call with a higher `fnum` for the same key
-    /// bytes overwrites the entry inserted here, which is the
-    /// correct stale-filtering behaviour for an append-only store.
-    fn scan_walk_ind_file(
-        &mut self,
-        fnum: FileNum,
-        live: &mut HashMap<Vec<u8>, (Dat, Meta<UIDL, UID>)>,
-    )
-        -> Outcome<()>
-    {
-        let (_, file) = res!(self.zdir().open_ozone_file(
-            fnum,
-            &FileType::Index,
-            &FileAccess::Reading,
-        ));
-        let mut reader = BufReader::new(file);
-        let typ = FileType::Index;
-        let mut pos = 0usize;
-
-        loop {
-            // 1. Load the StoredKey from the file.
-            let (key, meta) = match StoredKey::load(
-                &mut reader,
-                self.api().schemes().checksummer().clone(),
-            ) {
-                Err(e) => return Err(err!(e,
-                    "{}: While scanning {:?} file {} at position {}.",
-                    self.ozid(), typ, fnum, pos;
-                    IO, File, Read)),
-                Ok(None) => break,
-                Ok(Some((skey, _, n))) => {
-                    pos += n;
-                    let meta = skey.meta().clone();
-                    (skey.into_key(), meta)
-                },
-            };
-            // 2. Skip the matching StoredIndex. We do not need the
-            //    location -- we are not reading values in v1.
-            match StoredIndex::read(
-                &mut reader,
-                fnum,
-                self.api().schemes().checksummer().clone(),
-            ) {
-                Err(e) => return Err(err!(e,
-                    "{}: While scanning stored index in {:?} file {} \
-                    at position {}.",
-                    self.ozid(), typ, fnum, pos;
-                    IO, File, Read)),
-                Ok((None, _)) => return Err(err!(
-                    "{}: Missing StoredIndex at end of {:?} file {}.",
-                    self.ozid(), typ, fnum;
-                    Missing)),
-                Ok((Some(_sindex), n)) => {
-                    pos += n;
-                },
-            }
-
-            // 3. Elide internal chunk entries; only main user keys
-            //    appear in the scan result. Main keys are either
-            //    `Complete` (non-chunked values) or `Chunk(_, 0)`
-            //    (the bunch-key pointer for a chunked value).
-            let cind = key.index();
-            if let Some(c) = cind {
-                if c >= 1 {
-                    continue;
-                }
-            }
-
-            // 4. Decode the raw key bytes to a Dat.
-            let kbyts = key.into_bytes();
-            let (kdat, _n_decoded) = match Dat::from_bytes(&kbyts) {
-                Ok(pair) => pair,
-                Err(e) => {
-                    warn!(sync_log::stream(),
-                        "{}: Could not decode scanned key bytes in file {} \
-                        at position {}: {}. Skipping entry.",
-                        self.ozid(), fnum, pos, e);
-                    continue;
-                },
-            };
-
-            // 5. Insert into the live map. Later occurrences of the
-            //    same raw key bytes (from higher fnum or later in
-            //    the same file) overwrite, which is exactly the
-            //    stale-filtering behaviour we want.
-            live.insert(kbyts, (kdat, meta));
-        }
-        Ok(())
-    }
-}
-
-/// Return `true` if `kdat` satisfies the optional `prefix` filter.
-/// When the prefix is a `Dat::Str`, the comparison is a string
-/// prefix match against `kdat` if it is also a `Dat::Str`. For
-/// every other prefix variant the comparison is strict equality.
-/// A `None` prefix matches everything.
-fn scan_matches_prefix(kdat: &Dat, prefix: Option<&Dat>) -> bool {
-    match prefix {
-        None => true,
-        Some(Dat::Str(p)) => match kdat {
-            Dat::Str(s) => s.starts_with(p.as_str()),
-            _ => false,
-        },
-        Some(other) => kdat == other,
-    }
 }

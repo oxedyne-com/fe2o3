@@ -1070,11 +1070,19 @@ impl<
     /// Walk every zone and collect the live `(key, value, meta)`
     /// entries that satisfy `opts`.
     ///
-    /// Dispatches one `ScanRequest` per zone to its first igbot,
-    /// waits for every zone's `ScanEntries` response, merges the
-    /// vectors and applies the global `limit` (per-zone limits
-    /// have already been applied inside each igbot before
+    /// Dispatches one `ScanRequest` per zone to one of that zone's
+    /// scan bots, waits for every zone's `ScanEntries` response,
+    /// merges the vectors and applies the global `limit` (per-zone
+    /// limits have already been applied inside each scan bot before
     /// response).
+    ///
+    /// Scans have a bot pool of their own so that a scan waits only
+    /// on other scans. They were formerly answered by the zone's
+    /// init-garbage bot, where a scan issued while that bot was
+    /// collecting garbage waited for the collection to finish and,
+    /// on a store with a real backlog, failed at
+    /// `USER_REQUEST_TIMEOUT` with nothing to show the caller but a
+    /// channel error.
     ///
     /// Scan v1 does not read value payloads: every returned tuple
     /// has `Dat::Empty` as the value. Callers fetch a value via
@@ -1094,21 +1102,21 @@ impl<
         let nz = self.cfg().num_zones();
         let resp = self.responder();
 
-        // Send one ScanRequest to the first igbot of every zone.
+        // Send one ScanRequest to a scan bot of every zone.
         for z in 0..nz {
             let zind = ZoneInd::new(z);
-            let igbots = res!(self.chans().get_workers_of_type_in_zone(
-                &WorkerType::InitGarbage,
+            let scbots = res!(self.chans().get_workers_of_type_in_zone(
+                &WorkerType::Scan,
                 &zind,
             ));
-            let bot = res!(igbots.get_bot(0));
+            let (bot, _) = scbots.choose_bot(&ChooseBot::Randomly);
             if let Err(e) = bot.send(OzoneMsg::ScanRequest {
                 opts:   opts.clone(),
                 schms2: schms2.cloned(),
                 resp:   resp.clone(),
             }) {
                 return Err(err!(e,
-                    "{}: Cannot send scan request to igbot in zone {}.",
+                    "{}: Cannot send scan request to scan bot in zone {}.",
                     self.ozid(), z;
                     Channel, Write));
             }

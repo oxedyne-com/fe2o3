@@ -47,6 +47,8 @@ pub enum PoolType {
     InitGarbage,
     /// Reader-bot pool.
     Reader,
+    /// Scan-bot pool.
+    Scan,
     /// Writer-bot pool.
     Writer,
     /// Zone-bot pool.
@@ -62,6 +64,7 @@ impl From<&WorkerType> for PoolType {
             WorkerType::File        => PoolType::File,
             WorkerType::InitGarbage => PoolType::InitGarbage,
             WorkerType::Reader      => PoolType::Reader,
+            WorkerType::Scan        => PoolType::Scan,
             WorkerType::Writer      => PoolType::Writer,
         }
     }
@@ -218,6 +221,7 @@ pub struct ZoneMsgCount {
     fbots:  Vec<usize>,
     igbots: Vec<usize>,
     rbots:  Vec<usize>,
+    scbots: Vec<usize>,
     wbots:  Vec<usize>,
 }
 
@@ -229,6 +233,7 @@ impl ZoneMsgCount {
         total += self.fbots.iter().sum::<usize>();
         total += self.igbots.iter().sum::<usize>();
         total += self.rbots.iter().sum::<usize>();
+        total += self.scbots.iter().sum::<usize>();
         total += self.wbots.iter().sum::<usize>();
         total
     }
@@ -246,6 +251,7 @@ pub struct ZoneWorkerChannels<
     fbots:  ChannelPool<UIDL, UID, ENC, KH>,
     igbots: ChannelPool<UIDL, UID, ENC, KH>,
     rbots:  ChannelPool<UIDL, UID, ENC, KH>,
+    scbots: ChannelPool<UIDL, UID, ENC, KH>,
     wbots:  ChannelPool<UIDL, UID, ENC, KH>,
 }
 
@@ -264,6 +270,7 @@ impl<
             WorkerType::File        => &self.fbots,
             WorkerType::InitGarbage => &self.igbots,
             WorkerType::Reader      => &self.rbots,
+            WorkerType::Scan        => &self.scbots,
             WorkerType::Writer      => &self.wbots,
         }
     }
@@ -283,6 +290,7 @@ impl<
             WorkerType::File        => &mut self.fbots,
             WorkerType::InitGarbage => &mut self.igbots,
             WorkerType::Reader      => &mut self.rbots,
+            WorkerType::Scan        => &mut self.scbots,
             WorkerType::Writer      => &mut self.wbots,
         }
     }
@@ -302,12 +310,14 @@ impl<
         let nf = cfg.num_bots_per_zone(&WorkerType::File);
         let nig = cfg.num_bots_per_zone(&WorkerType::InitGarbage);
         let nr = cfg.num_bots_per_zone(&WorkerType::Reader);
+        let nsc = cfg.num_bots_per_zone(&WorkerType::Scan);
         let nw = cfg.num_bots_per_zone(&WorkerType::Writer);
         Self {
             cbots:  ChannelPool::new(&PoolType::Cache,      nc),
             fbots:  ChannelPool::new(&PoolType::File,       nf),
             igbots: ChannelPool::new(&PoolType::InitGarbage,nig),
             rbots:  ChannelPool::new(&PoolType::Reader,     nr),
+            scbots: ChannelPool::new(&PoolType::Scan,       nsc),
             wbots:  ChannelPool::new(&PoolType::Writer,     nw),
         }
     }
@@ -317,6 +327,7 @@ impl<
         self.fbots.msg_count_non_zero()   |
         self.igbots.msg_count_non_zero()  |
         self.rbots.msg_count_non_zero()   |
+        self.scbots.msg_count_non_zero()  |
         self.wbots.msg_count_non_zero()
     }
 
@@ -326,6 +337,7 @@ impl<
         self.fbots.dump_pending_messages("fbot", zopt);
         self.igbots.dump_pending_messages("igbot", zopt);
         self.rbots.dump_pending_messages("rbot", zopt);
+        self.scbots.dump_pending_messages("scbot", zopt);
         self.wbots.dump_pending_messages("wbot", zopt);
     }
 
@@ -335,6 +347,7 @@ impl<
         res!(self.fbots.finish_all());
         res!(self.igbots.finish_all());
         res!(self.rbots.finish_all());
+        res!(self.scbots.finish_all());
         res!(self.wbots.finish_all());
         Ok(())
     }
@@ -346,6 +359,7 @@ impl<
             fbots:  self.fbots.msg_count(),
             igbots: self.igbots.msg_count(),
             rbots:  self.rbots.msg_count(),
+            scbots: self.scbots.msg_count(),
             wbots:  self.wbots.msg_count(),
         }
     }
@@ -357,6 +371,7 @@ impl<
         count += self.fbots.len();
         count += self.igbots.len();
         count += self.rbots.len();
+        count += self.scbots.len();
         count += self.wbots.len();
         count
     }
@@ -368,6 +383,7 @@ impl<
         count += res!(self.fbots.send_to_all(msg.clone()));
         count += res!(self.igbots.send_to_all(msg.clone()));
         count += res!(self.rbots.send_to_all(msg.clone()));
+        count += res!(self.scbots.send_to_all(msg.clone()));
         count += res!(self.wbots.send_to_all(msg.clone()));
         Ok(count)
     }
@@ -537,6 +553,8 @@ impl<
                 res!(res!(self.get_zwbots(zind))[&WorkerType::InitGarbage].get_bot(**bpind)),
             OzoneBotId::ReaderBot(_, zind, bpind) =>
                 res!(res!(self.get_zwbots(zind))[&WorkerType::Reader].get_bot(**bpind)),
+            OzoneBotId::ScanBot(_, zind, bpind) =>
+                res!(res!(self.get_zwbots(zind))[&WorkerType::Scan].get_bot(**bpind)),
             OzoneBotId::WriterBot(_, zind, bpind) =>
                 res!(res!(self.get_zwbots(zind))[&WorkerType::Writer].get_bot(**bpind)),
             _ => return Err(err!(

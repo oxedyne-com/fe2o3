@@ -368,6 +368,7 @@ impl<
         res!(zwbots[&WorkerType::File].send_to_all(msg.clone()));
         res!(zwbots[&WorkerType::InitGarbage].send_to_all(msg.clone()));
         res!(zwbots[&WorkerType::Reader].send_to_all(msg.clone()));
+        res!(zwbots[&WorkerType::Scan].send_to_all(msg.clone()));
         res!(zwbots[&WorkerType::Writer].send_to_all(msg.clone()));
         Ok(zwbots)
     }
