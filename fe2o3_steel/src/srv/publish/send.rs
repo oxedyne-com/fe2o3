@@ -1794,6 +1794,7 @@ mod tests {
 			html:		fmt!("<h1>On rent</h1>\n<p>An opening sentence.</p>\n"),
 			also_on:	Vec::new(),
 			tags:		Vec::new(),
+			ai_level:	None,
 		}
 	}
 

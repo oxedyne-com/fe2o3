@@ -17,6 +17,7 @@ use crate::srv::publish::{
 	Author,
 	Post,
 	PublishConfig,
+	declare,
 	comment::{
 		DEPTH_MAX,
 		POW_BITS,
@@ -242,6 +243,10 @@ fn index(
 		body.push_str("<span class=\"aside-read\">");
 		escape_text(&mut body, &read_time(p.words));
 		body.push_str("</span>");
+		// What the author declared about writing it, beside how long it takes to read: a card is where
+		// a reader chooses which piece to read, so it is where the declaration is worth having. At text
+		// size, so it carries its words.
+		body.push_str(&post_declaration(cfg, p, declare::Size::WithWords, "aside-item-declare"));
 		body.push_str("</div>\n");
 		// Who wrote it, where more than one person writes here. On a blog of one it would be the same
 		// name under every title, which tells a reader choosing between them nothing.
@@ -705,6 +710,14 @@ fn post_page(
 		}
 		body.push_str("</div>\n");
 	}
+	// The declaration for the piece itself. The page has room, so the mark is drawn alone and big
+	// enough for its pins to be counted -- which is the only size at which a mark says anything.
+	let declared = post_declaration(cfg, post, declare::Size::alone(44), "aside-declare");
+	if !declared.is_empty() {
+		body.push_str("<div class=\"aside-declare-row\">");
+		body.push_str(&declared);
+		body.push_str("</div>\n");
+	}
 	// The prose was escaped where it was rendered.
 	body.push_str(&post.html);
 	// The tags, in the article's footer, each a link back to the index narrowed to that tag. Omitted
@@ -901,8 +914,44 @@ fn page(cfg: &PublishConfig, head: &Head, body: &str, post: Option<&Post>, on_in
 	s.push_str("</head>\n<body class=\"aside-body\">\n<main class=\"aside-page\">\n");
 	s.push_str(&nav(cfg, on_index));
 	s.push_str(body);
+	s.push_str(&site_declaration(cfg));
 	s.push_str("</main>\n</body>\n</html>\n");
 	s
+}
+
+/// What the site says about its own use of AI, under everything else on the page.
+///
+/// A site-wide claim goes in the site-wide furniture: a reader who arrives at one post and leaves
+/// from it should still have met it. That is the opposite of where a *work's* declaration belongs --
+/// beside the work, where the choosing happens -- and the two are not in tension, because the thing
+/// being declared for is different.
+///
+/// At text size, so it carries its words. Nothing at all where the site declares nothing about
+/// itself, which is not the same as declaring that it used none.
+fn site_declaration(cfg: &PublishConfig) -> String {
+	match cfg.declare.site {
+		Some(d)	=> fmt!(
+			"<footer class=\"aside-foot\">{}</footer>\n",
+			declare::mark_html(&cfg.declare, d, declare::Size::WithWords, "aside-foot-mark")),
+		None	=> String::new(),
+	}
+}
+
+/// A post's own declaration, where its author made one.
+///
+/// Written prose, so the mark is the one for a document whatever else the site is. Empty where the
+/// author declared nothing: a post with no declaration is a post the site says nothing about, and an
+/// undeclared work must never be drawn as one declaring the bottom rung.
+fn post_declaration(cfg: &PublishConfig, post: &Post, size: declare::Size, class: &str) -> String {
+	match post.ai_level {
+		Some(level)	=> declare::mark_html(
+			&cfg.declare,
+			declare::Declaration::new(level, declare::Medium::Doc),
+			size,
+			class,
+		),
+		None		=> String::new(),
+	}
 }
 
 /// What a search engine reads instead of guessing.
@@ -1163,6 +1212,13 @@ mod tests {
 		default_author:	String::new(),
 		logo:		String::new(),
 		home:		String::new(),
+		// A site in a declaration scheme, so the marks the tests below look for can be drawn at all.
+		declare:	declare::DeclareConfig {
+			url:	fmt!("https://example.org"),
+			marks:	fmt!("/assets/marks"),
+			site:	Some(declare::Declaration::new(declare::Level::With, declare::Medium::Code)),
+			items:	Vec::new(),
+		},
 		}
 	}
 
@@ -1178,6 +1234,7 @@ mod tests {
 			html:		fmt!("<h1>On rent</h1>\n<p>An opening sentence.</p>\n"),
 			also_on:	Vec::new(),
 			tags:		Vec::new(),
+			ai_level:	None,
 		}
 	}
 
@@ -1598,14 +1655,61 @@ mod tests {
 		Ok(())
 	}
 
-	/// A site naming neither a mark nor a front page keeps the single line it always had: the blog's
-	/// own title, leading to the index, and no second link duplicating it.
+	/// A declared post wears its mark twice over, and each time at a size that can be read: alone and
+	/// countable on its own page, where there is room, and with its words on the card, where there is
+	/// not. The site's own declaration is a separate claim and sits in the footer of both.
 	#[test]
-	fn test_an_unconfigured_mark_is_the_title_27() -> Outcome<()> {
+	fn test_a_declared_post_wears_a_legible_mark_28() -> Outcome<()> {
+		let mut p = post();
+		p.ai_level = Some(declare::Level::Some);
+
+		let resp = res!(post_page(&cfg(), &p, None, None));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(body.contains("ai-mark-alone"), "the post page drew no mark of its own: {}", body);
+		assert!(body.contains("--ai-mark-size:44px"), "the post's mark is not drawn at a size: {}", body);
+		assert!(body.contains("doc-some-ai.svg"), "the post wears the wrong artwork: {}", body);
+		// Written prose wears the mark for a document, whatever the site itself is made of.
+		assert!(body.contains("code-with-ai.svg"), "the site's own declaration went missing: {}", body);
+
+		let resp = res!(index(&cfg(), &[p], &[], "", "test"));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(body.contains("ai-mark-inline"), "the card drew no mark: {}", body);
+		// A card is text-size, so the mark cannot be read without its words, so it carries them.
+		assert!(body.contains("Made with some AI"), "the card's mark carried no words: {}", body);
+		assert!(!body.contains("ai-mark-alone"), "a card drew a mark too small to read: {}", body);
+		Ok(())
+	}
+
+	/// A post whose author declared nothing wears no mark at all. Nothing else would do: the bottom
+	/// rung is a claim, and putting it on somebody's prose unasked is the one output this must never
+	/// produce.
+	#[test]
+	fn test_an_undeclared_post_wears_no_mark_29() -> Outcome<()> {
+		let p = post();
+		assert!(p.ai_level.is_none(), "the fixture was declared, so this proves nothing");
+		let resp = res!(post_page(&cfg(), &p, None, None));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(!body.contains("ai-mark-alone"), "an undeclared post was given a mark: {}", body);
+		assert!(!body.contains("doc-no-ai.svg"), "an undeclared post was drawn as declaring none: {}", body);
+		// The site's own footer declaration is unaffected: it is the site's claim, not the post's.
+		assert!(body.contains("aside-foot-mark"), "the site's own declaration went missing: {}", body);
+
+		let resp = res!(index(&cfg(), &[p], &[], "", "test"));
+		let body = String::from_utf8_lossy(&resp.body).to_string();
+		assert!(!body.contains("aside-item-declare"), "an undeclared post's card drew a mark: {}", body);
+		Ok(())
+	}
+
+	/// A site naming neither a mark nor a front page keeps the single line it always had, leading to
+	/// the index, with no second link duplicating it. What it says is **the site's name**, not what
+	/// the site calls its posts -- the link beside it already says the latter, and a site setting
+	/// `home` was printing the same word twice, side by side, going to two different places.
+	#[test]
+	fn test_an_unconfigured_mark_is_the_site_name_27() -> Outcome<()> {
 		let resp = res!(post_page(&cfg(), &post(), None, None));
 		let body = String::from_utf8_lossy(&resp.body).to_string();
-		assert!(body.contains(r#"<nav class="aside-nav"><a class="aside-home" href="/asides">Asides</a></nav>"#),
-			"the unconfigured mark is not the title: {}", body);
+		assert!(body.contains(r#"<nav class="aside-nav"><a class="aside-home" href="/asides">Elearnity</a></nav>"#),
+			"the unconfigured mark is not the site's name: {}", body);
 		assert!(!body.contains("aside-logo"), "a logo was drawn for a site with none: {}", body);
 		Ok(())
 	}

@@ -1101,6 +1101,7 @@ pub fn page(theme: &Theme, admin: &SiteAdmin, title: &str, body: &str) -> HttpMe
 	s.push_str(&fmt!("<a href=\"{}\">Comments</a>", publish::PATH_COMMENTS));
 	s.push_str(&fmt!("<a href=\"{}\">Destinations</a>", publish::PATH_DESTS));
 	s.push_str(&fmt!("<a href=\"{}\">AI</a>", publish::PATH_AI));
+	s.push_str(&fmt!("<a href=\"{}\">Declarations</a>", publish::PATH_DECLARE));
 	s.push_str(&fmt!("<a href=\"{}\">Profile</a>", publish::PATH_PROFILE));
 	s.push_str(&fmt!("<span class=\"mc-who\">{}…</span>", html_escape(&admin.username[..8.min(admin.username.len())])));
 	// The way out of the console is a close, in the corner, as it is on every page within it --

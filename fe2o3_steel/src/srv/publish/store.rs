@@ -26,6 +26,7 @@ use crate::srv::publish::{
 	Post,
 	Markup,
 	PostState,
+	declare::Level,
 	dest::{
 		Delivery,
 		DeliveryState,
@@ -91,6 +92,20 @@ pub const PROFILE_PREFIX: &str = "publish/profile/";
 /// a username, and no page ever carries one.
 pub const AVATAR_PREFIX: &str = "publish/avatar/";
 
+
+/// A declared level's key prefix. The record at `publish/declare/<key>` holds the rung an admin chose
+/// for one of the things the site's config says may carry a declaration.
+///
+/// Apart from the posts because it is not a post: the thing being declared for lives somewhere else
+/// entirely -- a book in a catalogue, a project on a front page -- and the server holds nothing about
+/// it but this one word.
+pub const DECLARE_PREFIX: &str = "publish/declare/";
+
+
+/// A declared level's key.
+fn declare_key_of(key: &str) -> Dat {
+	dat!(fmt!("{}{}", DECLARE_PREFIX, key))
+}
 
 /// A post's read-tally key.
 fn reads_key_of(slug: &str) -> Dat {
@@ -220,6 +235,10 @@ pub struct Record {
 	/// The tags the author gave it, normalised and deduped, in first-seen order. Empty for an
 	/// untagged post, which is what every record written before tags were a field reads as.
 	pub tags:	Vec<String>,
+	/// How much the writing of it needed AI, where the author declared. Nothing where they declared
+	/// nothing, which is what every record written before the field existed reads as -- and what an
+	/// author who has not chosen still means.
+	pub ai_level:	Option<Level>,
 }
 
 impl Record {
@@ -261,6 +280,12 @@ impl Record {
 			let list = Dat::List(self.tags.iter().map(|t| dat!(t.clone())).collect());
 			m.insert(dat!("tags"), list);
 		}
+		// An undeclared post carries no level key, on the same idiom: a post whose author has said
+		// nothing about AI and a post written before the question was asked are the same post, and the
+		// store should not be able to tell them apart.
+		if let Some(l) = &self.ai_level {
+			m.insert(dat!("ai_level"), dat!(l.slug().to_string()));
+		}
 		Dat::Map(m)
 	}
 
@@ -292,6 +317,9 @@ impl Record {
 				"markup"	=> out.markup = Markup::of(&val),
 				"source"	=> out.source = val,
 				"date"		=> date = Some(val),
+				// A rung this version does not know reads as no declaration at all, which is the only
+				// safe reading: the alternative is showing a reader a claim the author did not make.
+				"ai_level"	=> out.ai_level = Level::of(&val),
 				// An unknown field is a field a later version wrote. Ignore it rather than refuse the
 				// record: a reader that cannot read forwards makes every addition a migration.
 				_		=> {},
@@ -362,6 +390,9 @@ impl Record {
 		// So do the author and the categories, for the same reason.
 		post.author = self.author.clone();
 		post.categories = self.categories.clone();
+		// And the author's declaration, which is a field of the record for the same reason the author
+		// is: prose alone cannot say who wrote it or what helped.
+		post.ai_level = self.ai_level;
 		Ok(post)
 	}
 }
@@ -414,6 +445,98 @@ pub fn get<
 		Some((val, _))	=> Ok(Some(res!(Record::from_dat(&val)))),
 		None		=> Ok(None),
 	}
+}
+
+/// The declared level of one named thing on the site, or nothing where nobody has set one.
+///
+/// A post keeps its own declaration in its own record, because a post is written here. This is for
+/// the things a site shows that are authored elsewhere -- a book, a project -- where the level is the
+/// only field the server holds and the config names what may hold one.
+pub fn get_level<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	key:	&str,
+)
+	-> Outcome<Option<Level>>
+{
+	let (db_arc, _) = db;
+	let guard = lock_read!(db_arc);
+	match res!(guard.get(&declare_key_of(key), None)) {
+		Some((Dat::Str(s), _))	=> Ok(Level::of(&s)),
+		// A record holding something other than a level is not a level. Undeclared is the safe reading
+		// of anything this version cannot place, here as everywhere else in the module.
+		_			=> Ok(None),
+	}
+}
+
+/// The declared levels of the things a config names, keyed as the config keys them.
+///
+/// Only the keys asked for, so a stale record left behind by a config that no longer names its item
+/// cannot put a mark on a page. The config is the list of what may be declared; the store only
+/// remembers what was chosen.
+pub fn get_levels<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	keys:	&[String],
+	id:	&str,
+)
+	-> Outcome<BTreeMap<String, Level>>
+{
+	let mut out = BTreeMap::new();
+	for key in keys {
+		match get_level(db, key) {
+			Ok(Some(level))	=> {
+				out.insert(key.clone(), level);
+			},
+			Ok(None)	=> {},
+			// One unreadable record should not take the other declarations off the page: a missing
+			// mark is a mark not drawn, and drawing none of them is worse than drawing the rest.
+			Err(e)		=> warn!(
+				"{}: publish: declaration for '{}' would not read: {}", id, key, e),
+		}
+	}
+	Ok(out)
+}
+
+/// Sets or clears the declared level of one named thing.
+///
+/// `None` deletes the record rather than storing a word for "undeclared". An admin taking a
+/// declaration back means the site no longer says anything about that work, and the absence of a
+/// record is how this module has always spelled that.
+pub fn put_level<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	key:	&str,
+	level:	Option<Level>,
+)
+	-> Outcome<()>
+{
+	let (db_arc, user) = db;
+	let guard = lock_read!(db_arc);
+	match level {
+		Some(l)	=> {
+			res!(guard.insert(declare_key_of(key), dat!(l.slug().to_string()), *user, None));
+		},
+		None	=> {
+			res!(guard.delete(&declare_key_of(key), *user, None));
+		},
+	}
+	Ok(())
 }
 
 /// Deletes a post and takes it out of the index.
@@ -1179,6 +1302,9 @@ pub fn import_dir<
 			// on the disk of a server.
 			state:	PostState::Live,
 			markup:	Markup::Markdown,
+			// And nothing a directory holds is declared: an import must not put a claim about AI on
+			// somebody's prose. The author declares in the composer, afterwards, or not at all.
+			ai_level:	None,
 			date,
 			source,
 			// A file has been sent nowhere: a directory is prose, not a record of where it went.
@@ -1213,6 +1339,7 @@ mod tests {
 			state:	PostState::Draft,
 			markup:	Markup::Djot,
 			date:	Some(fmt!("2026-07-17")),
+			ai_level:	Some(Level::Some),
 			source:	fmt!("# On rent\n\nWords.\n"),
 			deliveries:	vec![
 				Delivery {

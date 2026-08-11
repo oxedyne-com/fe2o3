@@ -221,6 +221,7 @@ mod tests {
 			default_author:		String::new(),
 			logo:			String::new(),
 			home:			String::new(),
+			declare:		Default::default(),
 		};
 		let post = Post {
 			slug:		fmt!("on-rent"),
@@ -233,6 +234,7 @@ mod tests {
 			html:		fmt!("<p>An opening sentence.</p>\n"),
 			also_on:	Vec::new(),
 			tags:		vec![fmt!("rent")],
+			ai_level:	None,
 		};
 		cache::assert_not_held(&res!(serve(&cfg, &[post], "test")), "the feed");
 		cache::assert_not_held(&res!(serve(&cfg, &[], "test")), "an empty feed");

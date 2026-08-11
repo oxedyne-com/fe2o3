@@ -33,6 +33,7 @@
 
 pub mod ai;
 pub mod comment;
+pub mod declare;
 pub mod dest;
 pub mod feed;
 pub mod json;
@@ -220,6 +221,10 @@ pub struct PublishConfig {
 	/// or `/`. Empty leads back to the index of the posts, which is right for a site whose posts are
 	/// all there is of it, and wrong for a blog that is one part of a larger site. An optional field.
 	pub home:	String,
+	/// What this site declares about its use of AI, and where the scheme it declares under lives. A
+	/// site configuring none declares nothing and draws no marks, which is not the same as declaring
+	/// that it used none. An optional field.
+	pub declare:	declare::DeclareConfig,
 }
 
 impl PublishConfig {
@@ -311,6 +316,14 @@ impl PublishConfig {
 				Invalid, Input, Mismatch)),
 		};
 
+		let declare = match m.get(&dat!("declare")) {
+			Some(Dat::Map(dm))	=> res!(declare::DeclareConfig::from_datmap(dm)),
+			None			=> declare::DeclareConfig::default(),
+			_			=> return Err(err!(
+				"PublishConfig: 'declare' must be a map.";
+				Invalid, Input, Mismatch)),
+		};
+
 		Ok(Self {
 			path,
 			dir:		res!(get_str("dir", DIR_DEFAULT)),
@@ -364,6 +377,7 @@ impl PublishConfig {
 			default_author:	res!(get_str("default_author", "")),
 			logo:		res!(get_str("logo", "")),
 			home:		res!(get_str("home", "")),
+			declare,
 		})
 	}
 
@@ -426,6 +440,17 @@ impl PublishConfig {
 	pub fn json_path(&self) -> String {
 		let mut s = self.path.clone();
 		s.push_str("/index.json");
+		s
+	}
+
+	/// The URL path the site's declarations are served at.
+	///
+	/// Public, and deliberately apart from [`json_path`](Self::json_path): a front page drawing a mark
+	/// beside a book wants a handful of levels, and would otherwise fetch every post and its rendered
+	/// prose to find them.
+	pub fn declare_path(&self) -> String {
+		let mut s = self.path.clone();
+		s.push_str("/declare.json");
 		s
 	}
 
@@ -993,6 +1018,11 @@ pub struct Post {
 	/// The tags the post carries, normalised. Drawn on the page and the card as tag links, one per
 	/// entry in the feed. Empty for a post with none, and for one read from a directory.
 	pub tags:	Vec<String>,
+	/// How much the writing of this post needed AI, where its author said. Nothing where they said
+	/// nothing, which every post written before the field existed reads as, and every post read from a
+	/// directory -- a file on disk carries no field to hold one. **Undeclared draws no mark**: a
+	/// declaration nobody made is not this module's to invent.
+	pub ai_level:	Option<declare::Level>,
 }
 
 
@@ -1116,6 +1146,9 @@ pub fn render_source(
 		html:		html::render(&doc),
 		also_on:	Vec::new(),
 		tags:		Vec::new(),
+		// Nor any declaration: a file on disk has no field to hold one, and a post the store threads
+		// its record into takes the level from there.
+		ai_level:	None,
 	})
 }
 

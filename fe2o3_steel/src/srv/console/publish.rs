@@ -34,6 +34,7 @@ use crate::srv::{
 		PublishConfig,
 		Source,
 		ai,
+		declare,
 		dest::{
 			DeliveryState,
 			Destination,
@@ -162,6 +163,16 @@ pub const PATH_AI_TEST: &str = "/manage/ai/test";
 /// The AI settings as JSON, for an app that draws the panel itself.
 pub const PATH_AI_JSON: &str = "/manage/ai.json";
 
+/// The declarations page: how much AI went into each of the things this site shows that are not
+/// posts. A post declares in the composer, beside the prose it is a declaration about.
+pub const PATH_DECLARE: &str = "/manage/declare";
+
+/// Where the declarations form posts one thing's level.
+pub const PATH_DECLARE_SAVE: &str = "/manage/declare/save";
+
+/// The declarations as JSON, for an app that draws the panel itself.
+pub const PATH_DECLARE_JSON: &str = "/manage/declare.json";
+
 /// The moderation queue: what has been said and what is waiting on a decision.
 pub const PATH_COMMENTS: &str = "/manage/comments";
 
@@ -218,6 +229,7 @@ pub fn writes(path: &str) -> bool {
 		|| path == PATH_AI_SAVE
 		|| path == PATH_AI_FIX
 		|| path == PATH_AI_TEST
+		|| path == PATH_DECLARE_SAVE
 }
 
 /// Whether a path is a POST this module answers.
@@ -287,6 +299,8 @@ pub fn handle_get<
 		PATH_REPORTS	=> reports_page(theme, admin, db, id),
 		PATH_DESTS	=> destinations_page(cfg, theme, admin, csrf, db, query, id),
 		PATH_AI		=> ai_page(theme, admin, csrf, db, query, id),
+		PATH_DECLARE	=> declare_page(cfg, theme, admin, csrf, db, query, id),
+		PATH_DECLARE_JSON	=> declare_json(cfg, db, id),
 		PATH_LIST_JSON	=> list_json(cfg, db, id),
 		PATH_POST_JSON	=> post_json(cfg, db, query, id),
 		PATH_TAGS_JSON	=> tags_json(cfg, db, id),
@@ -1545,6 +1559,7 @@ fn handle_edit<
 					<option value=\"djot\"{djot_sel}>Djot</option>\n\
 				</select>\n\
 			</div>\n\
+			{declare_field}\
 			{author_field}\
 		</div>\n\
 		{cats_block}\
@@ -1594,6 +1609,8 @@ fn handle_edit<
 		md_sel		= selected(r.markup == Markup::Markdown),
 		djot_sel	= selected(r.markup == Markup::Djot),
 		source		= html_escape(&r.source),
+		// How much the writing needed AI, where the site declares under a scheme at all.
+		declare_field	= declare_field(cfg, r.ai_level),
 		// A hidden author field carrying the username, and a line naming who the post is written as.
 		author_field	= author_field(&author_user, &author_name),
 		// The category checkboxes, from the site's taxonomy, ticked where the post already sits.
@@ -2022,6 +2039,252 @@ fn tags_json<
 /// handle can be corrected without re-typing a password. A remote the config file also provides is
 /// named as such, because a site whose credentials come from `{env:}` or `{file:}` should not be told
 /// its destination is unset.
+/// The declarations page: a level for each thing the site shows that is not a post.
+///
+/// A post declares in the composer, beside the prose the declaration is about. Everything else a site
+/// puts in front of a reader -- a book in a catalogue, a project on a front page -- is authored
+/// somewhere else entirely, so this is where its one field lives. What may be declared for is the
+/// config's business ([`DeclareConfig::items`]); what it says is this page's.
+fn declare_page<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	cfg:	&PublishConfig,
+	theme:	&Theme,
+	admin:	&SiteAdmin,
+	csrf:	&str,
+	db:	Option<&(Arc<RwLock<DB>>, UID)>,
+	query:	&str,
+	id:	&str,
+)
+	-> Outcome<HttpMessage>
+{
+	let mut body = String::new();
+	body.push_str("<h1>Declarations</h1>\n");
+
+	if let Some(said) = query_field(query, "said") {
+		body.push_str(&notice(&html_escape(&said)));
+	}
+
+	if !cfg.declare.is_on() {
+		body.push_str(&notice(
+			"This site declares nothing. Give the vhost's <code>publish</code> block a \
+			<code>declare</code> section naming the scheme's site and where the marks are served \
+			from.",
+		));
+		return Ok(page(theme, admin, "Declarations", &body));
+	}
+
+	let db = match db {
+		Some(db)	=> db,
+		None		=> {
+			body.push_str(&notice(
+				"This site keeps its declarations in its database, and has no database configured. \
+				Set <code>db_dir_rel</code> on the vhost.",
+			));
+			return Ok(page(theme, admin, "Declarations", &body));
+		}
+	};
+
+	if cfg.declare.items.is_empty() {
+		body.push_str(&notice(
+			"Nothing here but the posts, which declare in the composer. To declare for anything \
+			else, name it under <code>declare.items</code> in the vhost's config.",
+		));
+		body.push_str(&declare_site_note(cfg));
+		return Ok(page(theme, admin, "Declarations", &body));
+	}
+
+	let keys: Vec<String> = cfg.declare.items.iter().map(|i| i.key.clone()).collect();
+	// A read that fails costs the forms, not the page: a form that cannot say what is stored would
+	// show every level as unset, and one wrong save would then clear the lot.
+	let levels = match store::get_levels(db, &keys, id) {
+		Ok(l)	=> l,
+		Err(e)	=> {
+			error!(e, "{}: console: cannot read the declarations", id);
+			body.push_str(&notice("The declarations could not be read. The log says why."));
+			return Ok(page(theme, admin, "Declarations", &body));
+		}
+	};
+
+	body.push_str(
+		"<p class=\"mc-muted\">How much each of these needed AI. A declaration is your word on the \
+		record, so <em>Not declared</em> is a real answer and the one everything starts at.</p>\n");
+
+	for item in &cfg.declare.items {
+		let on = levels.get(&item.key).copied();
+		body.push_str(&fmt!(
+			"<form class=\"mc-settings mc-declare\" method=\"POST\" action=\"{save}\">\n\
+			<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\n\
+			<input type=\"hidden\" name=\"key\" value=\"{key}\">\n\
+			<div class=\"mc-row\">\n\
+			<div>\n\
+			<label for=\"lvl-{key}\">{name}</label>\n\
+			<select id=\"lvl-{key}\" name=\"ai_level\">\n\
+			<option value=\"\"{none_sel}>Not declared</option>\n\
+			{options}\
+			</select>\n\
+			</div>\n\
+			<div class=\"mc-actions\">\n\
+			<button type=\"submit\" class=\"mc-btn\">Save</button>\n\
+			</div>\n\
+			</div>\n\
+			</form>\n",
+			save		= PATH_DECLARE_SAVE,
+			csrf		= html_escape(csrf),
+			key		= html_escape(&item.key),
+			name		= html_escape(&item.name),
+			none_sel	= selected(on.is_none()),
+			options		= declare_options(on),
+		));
+	}
+	body.push_str(&declare_site_note(cfg));
+
+	Ok(page(theme, admin, "Declarations", &body))
+}
+
+/// The five rungs as options, the one in force selected.
+fn declare_options(on: Option<declare::Level>) -> String {
+	let mut s = String::new();
+	for level in declare::Level::ALL {
+		s.push_str(&fmt!(
+			"<option value=\"{slug}\"{sel}>{words}</option>\n",
+			slug	= html_escape(level.slug()),
+			sel	= selected(on == Some(level)),
+			words	= html_escape(level.words()),
+		));
+	}
+	s
+}
+
+/// What the site says about itself, which is config rather than a control.
+///
+/// Said on the page all the same: an admin looking at what this site declares should see every
+/// declaration it makes, including the one they cannot change here. A claim they cannot find is a
+/// claim they cannot correct.
+fn declare_site_note(cfg: &PublishConfig) -> String {
+	match cfg.declare.site {
+		Some(d)	=> fmt!(
+			"<p class=\"mc-muted\">This site declares itself <strong>{words}</strong>, in its \
+			footer, from the vhost's config.</p>\n",
+			words = html_escape(d.level.words()),
+		),
+		None	=> fmt!(
+			"<p class=\"mc-muted\">This site declares nothing about itself. Set \
+			<code>declare.site</code> on the vhost to have it say.</p>\n"),
+	}
+}
+
+/// The declarations as JSON, for an app that draws its own panel.
+///
+/// The whole vocabulary rides with them, so a client's chooser offers exactly the rungs this version
+/// knows rather than a list copied into a second place to drift.
+fn declare_json<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	cfg:	&PublishConfig,
+	db:	Option<&(Arc<RwLock<DB>>, UID)>,
+	id:	&str,
+)
+	-> Outcome<HttpMessage>
+{
+	let keys: Vec<String> = cfg.declare.items.iter().map(|i| i.key.clone()).collect();
+	let levels = match db {
+		Some(db)	=> res!(store::get_levels(db, &keys, id)),
+		None		=> BTreeMap::new(),
+	};
+	let items = cfg.declare.items.iter()
+		.map(|item| {
+			let mut f = vec![
+				(dat!("key"),		dat!(item.key.clone())),
+				(dat!("name"),		dat!(item.name.clone())),
+				(dat!("medium"),	dat!(item.medium.slug().to_string())),
+			];
+			// No key where nobody has declared, the empty idiom the store keeps.
+			if let Some(l) = levels.get(&item.key) {
+				f.push((dat!("level"), dat!(l.slug().to_string())));
+			}
+			create_dat_ordmap(f)
+		})
+		.collect::<Vec<_>>();
+	let vocabulary = declare::Level::ALL.iter()
+		.map(|l| create_dat_ordmap(vec![
+			(dat!("level"),	dat!(l.slug().to_string())),
+			(dat!("words"),	dat!(l.words().to_string())),
+		]))
+		.collect::<Vec<_>>();
+
+	let body = create_dat_ordmap(vec![
+		(dat!("on"),		Dat::Bool(cfg.declare.is_on())),
+		(dat!("items"),		Dat::List(items)),
+		(dat!("levels"),	Dat::List(vocabulary)),
+	]);
+	Ok(json_body(&res!(body.encode_string_with_config(&EncoderConfig::<(), ()>::json(None)))))
+}
+
+/// Sets or clears one thing's declared level.
+async fn do_declare_save<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	cfg:	&PublishConfig,
+	db:	&(Arc<RwLock<DB>>, UID),
+	body:	&[u8],
+	json:	bool,
+	id:	&str,
+)
+	-> Outcome<HttpMessage>
+{
+	let back = |said: &str| -> HttpMessage {
+		if json {
+			// Not an error: the app asked, the save happened, and the sentence is what to show for it.
+			let m = create_dat_ordmap(vec![(dat!("said"), dat!(said.to_string()))]);
+			match m.encode_string_with_config(&EncoderConfig::<(), ()>::json(None)) {
+				Ok(j)	=> json_body(&j),
+				Err(_)	=> json_error("saved"),
+			}
+		} else {
+			redirect(&fmt!("{}?said={}", PATH_DECLARE, url_encode(said)))
+		}
+	};
+
+	let key = super::form_field(body, "key").unwrap_or_default().trim().to_string();
+	// Only what the config says may be declared for. Without this the form's word for a key is a key,
+	// and a browser could write a record under any name it liked.
+	let item = match cfg.declare.item(&key) {
+		Some(item)	=> item.clone(),
+		None		=> return Ok(back("this site declares nothing by that name"),),
+	};
+
+	// An empty field is the answer "not declared", and it clears the record rather than storing a word
+	// for saying nothing. An unknown word is the same answer, for the same reason it is everywhere
+	// else here: a rung nobody defined must not become a claim.
+	let level = super::form_field(body, "ai_level")
+		.and_then(|s| declare::Level::of(s.trim()));
+
+	res!(store::put_level(db, &key, level));
+	match level {
+		Some(l)	=> {
+			info!("{}: console: '{}' declared {}", id, key, l.slug());
+			Ok(back(&fmt!("{} is declared {}.", item.name, l.words().to_lowercase())))
+		},
+		None	=> {
+			info!("{}: console: '{}' declares nothing", id, key);
+			Ok(back(&fmt!("{} declares nothing.", item.name)))
+		},
+	}
+}
+
 fn destinations_page<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -2655,6 +2918,10 @@ pub async fn handle_post<
 		&& request_path != PATH_AI_SAVE
 		&& request_path != PATH_AI_FIX
 		&& request_path != PATH_AI_TEST
+		// A declaration is about a book or a project, not about a post, so it does not wait on the
+		// posts being served from the store -- a site serving its prose from a directory still shows
+		// the things it declares for.
+		&& request_path != PATH_DECLARE_SAVE
 	{
 		return Ok(back_with(
 			"this site serves its posts from a directory, so there is nothing to write into; set \
@@ -2673,6 +2940,7 @@ pub async fn handle_post<
 		PATH_IMPORT	=> do_import(cfg, db, &admin.username, json, id),
 		PATH_CREDS	=> do_creds(db, body, &admin.username, json, id),
 		PATH_AI_SAVE	=> do_ai_save(db, body, &admin.username, json, id),
+		PATH_DECLARE_SAVE	=> do_declare_save(cfg, db, body, json, id).await,
 		PATH_AI_FIX	=> do_ai_fix(db, tls_client, body, id).await,
 		PATH_AI_TEST	=> do_ai_test(db, tls_client, id).await,
 		PATH_NEWSLETTER	=> do_newsletter(cfg, db, mail, body, &admin.username, json, id).await,
@@ -3149,6 +3417,12 @@ async fn do_save<
 	// save. Empty or whitespace is no tags.
 	let tags = parse_tags(&super::form_field(body, "tags").unwrap_or_default());
 
+	// How much the writing of it needed AI, where the author said. An empty field, an absent one and a
+	// word this version does not know all read as no declaration -- which is what an author who has
+	// not chosen means, and the only reading that cannot put a claim on a post nobody made.
+	let ai_level = super::form_field(body, "ai_level")
+		.and_then(|s| declare::Level::of(s.trim()));
+
 	// An edit must not lose where a post has already been sent. So the deliveries are carried forward
 	// from the post as it stands -- under its old name where this save renames it, since the deliveries
 	// move with the prose they belong to.
@@ -3199,6 +3473,7 @@ async fn do_save<
 		source,
 		deliveries,
 		tags,
+		ai_level,
 	};
 
 	res!(store::put(db, &rec, id));
@@ -3621,6 +3896,38 @@ fn author_field(username: &str, name: &str) -> String {
 		user = html_escape(username),
 		name = html_escape(name),
 	)
+}
+
+/// The composer's AI-declaration field: how much the writing of this post needed a model.
+///
+/// A select rather than a row of chips, because the answers are one ladder and exactly one of them is
+/// true. Its first option is **no declaration at all**, and it is what an unset post shows: the site
+/// must be able to say nothing, and saying nothing has to be as easy as saying anything, or the field
+/// quietly pressures an author into a claim to be rid of it.
+///
+/// Drawn only where the site declares ([`DeclareConfig::is_on`]). A site not in a scheme has nothing
+/// to put in the box and no page that would draw the answer.
+fn declare_field(cfg: &PublishConfig, on: Option<declare::Level>) -> String {
+	if !cfg.declare.is_on() {
+		return String::new();
+	}
+	let mut s = fmt!(
+		"<div>\n\
+		<label for=\"ai_level\">AI used</label>\n\
+		<select id=\"ai_level\" name=\"ai_level\">\n\
+		<option value=\"\"{none_sel}>Not declared</option>\n",
+		none_sel = selected(on.is_none()),
+	);
+	for level in declare::Level::ALL {
+		s.push_str(&fmt!(
+			"<option value=\"{slug}\"{sel}>{words}</option>\n",
+			slug	= html_escape(level.slug()),
+			sel	= selected(on == Some(level)),
+			words	= html_escape(level.words()),
+		));
+	}
+	s.push_str("</select>\n</div>\n");
+	s
 }
 
 /// The composer's category field: the same two-box chip widget as [`tags_field`], with this post's
@@ -4320,6 +4627,7 @@ mod tests {
 			default_author:		String::new(),
 			logo:			String::new(),
 			home:			String::new(),
+			declare:		Default::default(),
 		};
 
 		// A route the console does not know.

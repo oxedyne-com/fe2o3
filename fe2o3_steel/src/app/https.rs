@@ -23,6 +23,7 @@ use crate::srv::{
         Subscription,
         ai as publish_ai,
         comment as publish_comment,
+        declare as publish_declare,
         page as publish_page,
         send::MailSender,
         store as publish_store,
@@ -79,6 +80,7 @@ use oxedyne_fe2o3_net::{
 };
 
 use std::{
+    collections::BTreeMap,
     fmt::Debug,
     net::SocketAddr,
     path::{
@@ -406,6 +408,29 @@ impl<
                             return Ok(Some(resp));
                         }
                         None => {}
+                    }
+                    // What the site declares about itself and about the things it shows that are
+                    // not posts. Answered before the posts are read, for the same reason the
+                    // picture below is: a front page drawing a mark beside a book would otherwise
+                    // pull every post and its rendered prose to find one word.
+                    if request_path == cfg.declare_path() {
+                        let keys: Vec<String> =
+                            cfg.declare.items.iter().map(|i| i.key.clone()).collect();
+                        let levels = match db.as_ref() {
+                            Some(dbh) => match publish_store::get_levels(dbh, &keys, &id) {
+                                Ok(levels) => levels,
+                                Err(e) => {
+                                    // The site's own declarations will not read. Say nothing rather
+                                    // than guess: an unread level must not become an undeclared
+                                    // work that then reads as a claim nobody made.
+                                    error!(e, "{}: publish: the declarations will not read", id);
+                                    BTreeMap::new()
+                                }
+                            },
+                            None => BTreeMap::new(),
+                        };
+                        return Ok(Some(res!(publish_declare::serve_json(
+                            &cfg.declare, &levels, &id))));
                     }
                     // A member's uploaded picture: bytes in the site's own database, asked for by
                     // the byline that points at it. Answered here, before the posts are read,

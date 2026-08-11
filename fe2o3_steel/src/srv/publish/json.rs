@@ -15,6 +15,7 @@ use crate::srv::publish::{
 	Post,
 	PublishConfig,
 	date_text,
+	declare,
 	read_mins,
 };
 
@@ -73,6 +74,18 @@ pub fn serve(
 				(dat!("tags"),		Dat::List(p.tags.iter().map(|t| dat!(t.clone())).collect())),
 				(dat!("categories"),	Dat::List(p.categories.iter().map(|c| dat!(c.clone())).collect())),
 			];
+			// What the author declared about writing it, resolved to the words, the artwork and the
+			// link a page would draw -- so the one rule for building a mark stays here rather than
+			// being written a second time in every client. Absent where the author declared nothing.
+			if let Some(level) = p.ai_level {
+				let d = declare::Declaration::new(level, declare::Medium::Doc);
+				fields.push((dat!("declare"), create_dat_ordmap(vec![
+					(dat!("level"),	dat!(d.level.slug().to_string())),
+					(dat!("words"),	dat!(d.level.words().to_string())),
+					(dat!("mark"),	dat!(fmt!("{}/{}", cfg.declare.marks, d.mark_file()))),
+					(dat!("href"),	dat!(fmt!("{}{}", cfg.declare.url, d.path()))),
+				])));
+			}
 			// A post without a date carries no date key, rather than a key saying nothing. The reader
 			// asks whether the post has one; it should not also have to ask what a date of nothing means.
 			if let Some(d) = &p.date {
@@ -101,13 +114,24 @@ pub fn serve(
 		]))
 		.collect::<Vec<_>>();
 
-	let body_dat = create_dat_ordmap(vec![
+	let mut top = vec![
 		(dat!("posts"), Dat::List(list)),
 		(dat!("authors"), Dat::List(faces)),
 		// The site's whole category vocabulary, in the order the config gives, so a client's checkboxes
 		// stand in that order and offer what the composer offers.
 		(dat!("categories"), Dat::List(cfg.categories.iter().map(|c| dat!(c.clone())).collect())),
-	]);
+	];
+	// What the site declares about itself, so a page drawing its own footer needs no second fetch to
+	// know what to put in it. Absent where the site declares nothing about itself.
+	if let Some(d) = cfg.declare.site {
+		top.push((dat!("declare"), create_dat_ordmap(vec![
+			(dat!("level"),	dat!(d.level.slug().to_string())),
+			(dat!("words"),	dat!(d.level.words().to_string())),
+			(dat!("mark"),	dat!(fmt!("{}/{}", cfg.declare.marks, d.mark_file()))),
+			(dat!("href"),	dat!(fmt!("{}{}", cfg.declare.url, d.path()))),
+		])));
+	}
+	let body_dat = create_dat_ordmap(top);
 	let json_cfg = EncoderConfig::<(), ()>::json(None);
 	let body_json = res!(body_dat.encode_string_with_config(&json_cfg));
 
@@ -150,6 +174,14 @@ mod tests {
 			default_author:		String::new(),
 			logo:			String::new(),
 			home:			String::new(),
+			// A site in a declaration scheme, so a post's declaration has somewhere to point.
+			declare:		declare::DeclareConfig {
+				url:	fmt!("https://example.org"),
+				marks:	fmt!("/assets/marks"),
+				site:	Some(declare::Declaration::new(
+						declare::Level::With, declare::Medium::Code)),
+				items:	Vec::new(),
+			},
 		}
 	}
 
@@ -165,6 +197,7 @@ mod tests {
 			html:		fmt!("<p>An opening sentence.</p>\n"),
 			also_on:	Vec::new(),
 			tags:		vec![fmt!("rent")],
+			ai_level:	None,
 		}
 	}
 
