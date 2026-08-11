@@ -31,6 +31,7 @@ use crate::{
         },
         id,
         server::Server,
+        stop,
         ws::{
             handler::AppWebSocketHandler,
             syntax::WebSocketSyntax,
@@ -85,6 +86,17 @@ use std::{
 };
 
 use tokio;
+
+
+/// How long a stopping server waits for the tokio runtime's blocking pool
+/// before leaving it behind.
+///
+/// Short on purpose. Every blocking task worth waiting for has already been
+/// waited for by this point -- the connections in flight, inside
+/// [`Server::start`] -- and the one that is left in dev mode is a file watcher
+/// that never returns at all. This is the grace given to a database opener that
+/// happens to be part way through, and no more.
+pub const RUNTIME_STOP_SECS: u64 = 2;
 
 
 impl AppShellContext {
@@ -719,6 +731,13 @@ impl AppShellContext {
 
         let server = Server::new(server_context);
 
+        // From here until the stores are shut, a stop request is answered
+        // by the wind-up below rather than by the listener ending the
+        // process itself. Set before the opener is spawned, not after the
+        // listeners bind, so that a signal arriving while a store is being
+        // opened still finds somebody who will close it.
+        stop::serving(true);
+
         // The database opener waits for the master key and then opens
         // every configured Ozone instance. Spawned on the runtime handle
         // *before* `block_on` drives it, so it is already waiting on the
@@ -729,9 +748,11 @@ impl AppShellContext {
         // this returns without waiting -- so the familiar start-up path is
         // unchanged apart from the databases now opening in parallel with
         // the listeners binding, rather than before them.
+        // Cloned, not moved: the same map is what the wind-up reads to
+        // find the stores it has to close.
         rt.spawn(open_dbs_on_unseal(
             admin_state.clone(),
-            vhost_dbs,
+            vhost_dbs.clone(),
             db_specs,
             uid,
         ));
@@ -748,6 +769,25 @@ impl AppShellContext {
                 msg: fmt!("Result of the attempt to execute the server within the Tokio runtime."),
             })),
         }
+
+        // The runtime is shut down, not dropped. Dropping a runtime waits
+        // for its blocking pool, and in dev mode that pool holds the file
+        // watcher -- `notify`'s own event loop, which by design never
+        // returns. A stop therefore came all the way home, closed
+        // everything, said so, and then hung for ever in the drop, one
+        // line before the end of the function. Nothing here needs those
+        // threads: what mattered has already finished inside `block_on`,
+        // and asynchronous tasks are dropped at their await points.
+        rt.shutdown_timeout(Duration::from_secs(RUNTIME_STOP_SECS));
+
+        // The point of all of it. Whatever brought the server home --
+        // a stop request or a failure -- every store it holds is shut
+        // before the process ends, rather than being killed open. After
+        // the runtime has gone, so the periodic persist task cannot be
+        // writing into a database while it is being closed.
+        let closed = close_vhost_dbs(&vhost_dbs);
+        info!("{} database(s) closed.", closed);
+        stop::serving(false);
 
         log_finish_wait!();
 
@@ -830,8 +870,64 @@ pub fn build_outbound_tls_client()
 
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
-// │ DATABASE OPENER                                                           │
+// │ DATABASE OPENER AND CLOSER                                                │
 // └───────────────────────────────────────────────────────────────────────────┘
+
+/// The Ozone instance a Steel vhost holds. One per vhost that configures a
+/// `db_dir_rel`; a pure-redirect vhost has none.
+type VhostDb = O3db<
+    { id::UID_LEN },
+    id::Uid,
+    EncryptionScheme,
+    HashScheme,
+    HashScheme,
+    ChecksumScheme,
+>;
+
+/// Close every database this server holds, returning how many were shut.
+///
+/// A Steel process holds one Ozone instance per vhost that configures one, so
+/// this walks the map rather than assuming a single store: a host serving three
+/// sites has three, and closing the first and killing the other two would be the
+/// same fault in two thirds of the places it mattered.
+///
+/// Nothing here can fail the shutdown. A store that will not close is reported
+/// and the next one is tried, because one bad store is a poor reason to kill the
+/// others; and a poisoned lock is recovered from rather than propagated, since
+/// the alternative is to walk away from an open database because a thread
+/// panicked somewhere else.
+///
+/// Closing twice is harmless -- [`O3db::close`] takes `&self`, records that it
+/// has been done, and makes a second caller wait for the first rather than shut
+/// anything again -- so this may be reached by a path that has already run.
+fn close_vhost_dbs(
+    vhost_dbs: &VhostDbs<{ id::UID_LEN }, id::Uid, VhostDb>,
+) -> usize {
+    let dbs = lock_read_or_recover!(vhost_dbs,
+        "The per-vhost database map is poisoned. Closing what it holds anyway: \
+        an open store is the thing worth minding here.");
+    if dbs.is_empty() {
+        info!("No database is open, so there is none to close.");
+        return 0;
+    }
+    let mut closed = 0;
+    for (vhost, (db, _uid)) in dbs.iter() {
+        info!("Closing the database for vhost '{}'...", vhost);
+        let db = lock_read_or_recover!(db,
+            "The database handle for vhost '{}' is poisoned. Closing it anyway.",
+            vhost);
+        match db.close() {
+            Ok(()) => {
+                info!("Closed the database for vhost '{}'.", vhost);
+                closed += 1;
+            },
+            Err(e) => error!(e,
+                "Closing the database for vhost '{}'. Its files may need a \
+                repair pass on the next start.", vhost),
+        }
+    }
+    closed
+}
 
 /// Wait for an admin to unseal, then open every configured database and
 /// attach it to the live server context.

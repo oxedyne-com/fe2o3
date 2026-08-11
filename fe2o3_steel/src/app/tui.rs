@@ -196,6 +196,31 @@ pub fn run_with_extension<E: AppExtension>(extension: E) -> Outcome<()> {
     info!("│ New shell session.    │");
     info!("└───────────────────────┘");
 
+    // ┌───────────────────────┐
+    // │ Hear a stop request.  │
+    // └───────────────────────┘
+    //
+    // Here and nowhere else. A signal arrives at a process, so there is one
+    // listener to a process and the second is refused; and this function is the
+    // real `main` of every Steel application -- the stock binary reaches it
+    // through `run`, and an app with its own commands calls it directly.
+    // Installing it in `src/main.rs` instead would leave every app built on
+    // Steel as a library deaf to a reboot, which is most of the Steel processes
+    // that exist.
+    //
+    // After the logging is configured, so that what the listener says on the
+    // way out is written down rather than lost.
+    //
+    // A failure to install is not a failure to start. The server runs exactly
+    // as it did before -- and is killed rather than asked when the machine
+    // goes, which is the fault this exists to fix, so it is said at error
+    // level and not swallowed.
+    if let Err(e) = crate::srv::stop::listen() {
+        error!(e, "Installing the stop request listener. A Ctrl-C or a service \
+            manager's stop will kill this process where it stands, with \
+            whatever it holds open still open.");
+    }
+
     // ┌───────────────────────────────────────────────────────────────────────┐
     // │ BOOTSTRAP BYPASS FOR WALLET MIGRATE                                   │
     // │                                                                       │

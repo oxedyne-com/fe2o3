@@ -20,6 +20,7 @@ use crate::{
             run_smtp_listener,
             AppImapServer,
         },
+        stop,
     },
 };
 
@@ -46,7 +47,11 @@ use oxedyne_fe2o3_net::{
 
 use std::{
     net::SocketAddr,
-    sync::Arc,
+    sync::{
+        atomic::AtomicUsize,
+        Arc,
+    },
+    time::Duration,
 };
 
 use tokio::net::TcpListener;
@@ -56,6 +61,25 @@ use tokio_rustls::TlsAcceptor;
 /// crash can lose at most one tick's worth of derived history, which is
 /// a reasonable trade-off against ozone write load.
 pub const PERSIST_INTERVAL_SECS: u64 = 60;
+
+/// How long a stopping server waits for connections already in flight
+/// before it closes its stores anyway.
+///
+/// A response being written, a file being read off disk and a proxied
+/// request all finish in milliseconds, so this is generous for what it
+/// is for. It is a bound rather than a wait because a connection is
+/// counted for as long as it is *open*, not only while it is being
+/// answered, and plenty of open connections are not waiting on the
+/// server at all: an idle keep-alive sits there until its header read
+/// times out, which is longer than this, and a WebSocket sits there
+/// until the browser tab holding it closes, which could be tomorrow. A
+/// busy server will therefore usually wait the whole five seconds, and
+/// that is the price of not cutting off the one connection in the set
+/// that was mid-answer. Five seconds is also comfortably inside a
+/// service manager's own patience -- systemd's default `TimeoutStopSec`
+/// is ninety -- so it is never this wait that turns a stop into a
+/// `SIGKILL`.
+pub const DRAIN_SECS: u64 = 5;
 
 
 /// The Steel TCP/TLS server, wrapping a `ServerContext`.
@@ -346,8 +370,21 @@ impl<
         let addr_guard = self.context.admin_state.as_ref()
             .map(|a| a.addr_guard.clone());
 
+        // Connections being served right now. Read only by the wind-up
+        // below, so an idle server pays one atomic per connection for it.
+        let inflight = Arc::new(AtomicUsize::new(0));
+
         loop {
-            let (stream, src_addr) = match listener.accept().await {
+            // Two ways out of a wait that used to have none. Both arms are
+            // cancel-safe -- tokio documents `accept` as such, and a stop
+            // wait dropped part way through has consumed nothing -- which
+            // is what makes selecting on them legitimate rather than a way
+            // of losing every other connection.
+            let accepted = tokio::select! {
+                () = stop::wait() => break,
+                accepted = listener.accept() => accepted,
+            };
+            let (stream, src_addr) = match accepted {
                 Ok(pair) => pair,
                 Err(e) => {
                     error!(err!(e, "TCP connection aborted."; IO, Network));
@@ -383,7 +420,14 @@ impl<
             // prevent all new connections from being accepted.
             let context_clone = self.context.clone();
             let tls_acceptor_conn = tls_acceptor.clone();
+            // Counted from here until the task ends, so that a stop can
+            // wait for whatever is mid-response rather than cutting it
+            // off. Taken before the spawn: taking it inside would leave a
+            // connection uncounted for as long as the runtime took to get
+            // round to the task, which is exactly when a wind-up is busiest.
+            let counted = stop::InFlight::begin(&inflight);
             tokio::spawn(async move {
+                let _counted = counted;
                 // Peek at first bytes to detect TLS handshake.
                 // Non-TLS requests receive a 308 to redirect to HTTPS.
                 let mut peek_buf = [0u8; 5];
@@ -435,6 +479,39 @@ impl<
                 }
             });
         }
+
+        // ── The wind-up ──────────────────────────────────────────
+        //
+        // Reached only by the stop arm above: the loop has no other
+        // break, and an accept that errors goes round again as it always
+        // did. The listener is dropped here, so the port is given back
+        // before anything slow happens and a restart is not refused by
+        // the machine still holding it.
+        drop(listener);
+        info!("Stop requested; no longer accepting connections on {}.", addr);
+
+        // What is already in flight is allowed to finish, within a stated
+        // bound rather than for as long as it likes. See `DRAIN_SECS` for
+        // what the bound costs and why it is not longer.
+        let left = stop::drain(&inflight, Duration::from_secs(DRAIN_SECS)).await;
+        if left > 0 {
+            warn!("{} connection(s) were still open after {} seconds and are \
+                being dropped. Most of these will be idle ones waiting to be \
+                reused, which costs nothing to drop; anything still being \
+                answered after that long is a large download or a WebSocket.",
+                left, DRAIN_SECS);
+        } else {
+            info!("Every connection in flight finished.");
+        }
+
+        // The other listeners this server spawned -- the plaintext
+        // redirect, the localhost admin port, the mail listeners -- are
+        // tasks on the runtime the caller shuts down next, and go with
+        // it. None of them holds a store, and the worst a cut costs is a
+        // redirect that has to be asked for again or an SMTP session the
+        // sender will retry; a message is only acknowledged once it is on
+        // disk, so nothing accepted is lost.
+        Ok(())
     }
 }
 
