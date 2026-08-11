@@ -2123,9 +2123,6 @@ fn declare_page<
 			<div class=\"mc-f-text\"><label for=\"lvl-{key}\">{name}</label>\
 			<select id=\"lvl-{key}\" name=\"ai_level\">\
 			<option value=\"\"{none_sel}>Not declared</option>{options}</select></div>\n\
-			<div class=\"mc-actions\">\n\
-			<button type=\"submit\" class=\"mc-btn\">Save</button>\n\
-			</div>\n\
 			</form>\n",
 			save		= PATH_DECLARE_SAVE,
 			csrf		= html_escape(csrf),
@@ -2135,10 +2132,28 @@ fn declare_page<
 			options		= declare_options(on),
 		));
 	}
+	body.push_str("<p class=\"mc-autosave\" id=\"mc-declare-msg\" aria-live=\"polite\"></p>\n");
 	body.push_str(&declare_site_note(cfg));
+	body.push_str(DECLARE_SCRIPT);
 
 	Ok(page(theme, admin, "Declarations", &body))
 }
+
+/// Saves a declaration the moment it is chosen.
+///
+/// There is nothing here for a Save button to do. A row is one field with one answer, its whole
+/// state is what the select says, and a button beside each row would be a column of buttons all
+/// doing the same single thing -- which is exactly the reasoning that took the Save button off the
+/// composer ([`AUTOSAVE_SCRIPT`]) and never put one on the app's own version of this screen.
+///
+/// Static, like its siblings: the CSRF token rides in each form's hidden field and the save URL is
+/// the form's own `action`, so nothing is interpolated.
+///
+/// **Nothing is said on success.** The box already shows the answer, so a sentence repeating it
+/// states the same fact twice -- and one status line under a column of rows reads as belonging to
+/// the last row rather than to whichever was just changed. A failure still speaks: that is the one
+/// thing the select cannot show, since it goes on displaying a value the server did not take.
+const DECLARE_SCRIPT: &str = "<script>\n(function(){\n  var status=document.getElementById('mc-declare-msg');\n  var forms=document.querySelectorAll('form.mc-declare');\n  if(!status||!forms.length){return;}\n  function say(text,bad){\n    status.className='mc-autosave'+(bad?' is-error':'');\n    status.textContent=text;\n  }\n  forms.forEach(function(form){\n    var sel=form.querySelector('select');\n    if(!sel){return;}\n    sel.addEventListener('change',function(){\n      say('',false);\n      fetch(form.action,{method:'POST',credentials:'same-origin',\n        headers:{'Content-Type':'application/x-www-form-urlencoded','Accept':'application/json'},\n        body:new URLSearchParams(new FormData(form)).toString()})\n        .then(function(r){return r.json();})\n        .then(function(d){\n          if(d&&d.said){say('',false);}\n          else{say('Not saved \\u2014 '+((d&&d.error)||'try again'),true);}\n        })\n        .catch(function(){say('Not saved \\u2014 the server did not answer',true);});\n    });\n  });\n})();\n</script>\n";
 
 /// The five rungs as options, the one in force selected.
 fn declare_options(on: Option<declare::Level>) -> String {
@@ -5516,8 +5531,7 @@ mod ui_dump {
 				<div class=\"mc-f-text\"><label for=\"lvl-{key}\">{name}</label>\
 				<select id=\"lvl-{key}\" name=\"ai_level\">\
 				<option value=\"\"{none_sel}>Not declared</option>{options}</select></div>\n\
-				<div class=\"mc-actions\">\n<button type=\"submit\" class=\"mc-btn\">Save</button>\n\
-				</div>\n</form>\n",
+				</form>\n",
 				save		= PATH_DECLARE_SAVE,
 				key		= html_escape(&item.key),
 				name		= html_escape(&item.name),
@@ -5525,7 +5539,10 @@ mod ui_dump {
 				options		= declare_options(on),
 			));
 		}
+		d_body.push_str(
+			"<p class=\"mc-autosave\" id=\"mc-declare-msg\" aria-live=\"polite\"></p>\n");
 		d_body.push_str(&declare_site_note(&dcfg));
+		d_body.push_str(DECLARE_SCRIPT);
 		res!(put(&dir, "declarations", &page(&t, &a, "Declarations", &d_body)));
 
 		Ok(())
