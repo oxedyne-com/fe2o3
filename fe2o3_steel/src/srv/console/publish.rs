@@ -2117,20 +2117,14 @@ fn declare_page<
 	for item in &cfg.declare.items {
 		let on = levels.get(&item.key).copied();
 		body.push_str(&fmt!(
-			"<form class=\"mc-settings mc-declare\" method=\"POST\" action=\"{save}\">\n\
+			"<form class=\"mc-form mc-settings mc-declare\" method=\"POST\" action=\"{save}\">\n\
 			<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\n\
 			<input type=\"hidden\" name=\"key\" value=\"{key}\">\n\
-			<div class=\"mc-row\">\n\
-			<div>\n\
-			<label for=\"lvl-{key}\">{name}</label>\n\
-			<select id=\"lvl-{key}\" name=\"ai_level\">\n\
-			<option value=\"\"{none_sel}>Not declared</option>\n\
-			{options}\
-			</select>\n\
-			</div>\n\
+			<div class=\"mc-f-text\"><label for=\"lvl-{key}\">{name}</label>\
+			<select id=\"lvl-{key}\" name=\"ai_level\">\
+			<option value=\"\"{none_sel}>Not declared</option>{options}</select></div>\n\
 			<div class=\"mc-actions\">\n\
 			<button type=\"submit\" class=\"mc-btn\">Save</button>\n\
-			</div>\n\
 			</div>\n\
 			</form>\n",
 			save		= PATH_DECLARE_SAVE,
@@ -5485,6 +5479,54 @@ mod ui_dump {
 		ai_body.push_str(&ai_form(&ai_set, csrf));
 		ai_body.push_str(AI_TEST_SCRIPT);
 		res!(put(&dir, "ai", &page(&t, &a, "AI", &ai_body)));
+
+		// The declarations page, with one thing declared and one not, so the render shows both
+		// states of the only control on it.
+		let dcfg = PublishConfig {
+			declare: declare::DeclareConfig {
+				url:	fmt!("https://example.org"),
+				marks:	fmt!("/assets/marks"),
+				site:	Some(declare::Declaration::new(
+						declare::Level::With, declare::Medium::Code)),
+				items:	vec![
+					declare::Declarable {
+						key:	fmt!("first-book"),
+						name:	fmt!("The First Book"),
+						medium:	declare::Medium::Doc,
+					},
+					declare::Declarable {
+						key:	fmt!("second-book"),
+						name:	fmt!("The Second Book"),
+						medium:	declare::Medium::Doc,
+					},
+				],
+			},
+			..cfg.clone()
+		};
+		let mut d_body = String::from("<h1>Declarations</h1>\n");
+		d_body.push_str(
+			"<p class=\"mc-muted\">How much each of these needed AI. A declaration is your word on \
+			the record, so <em>Not declared</em> is a real answer and the one everything starts \
+			at.</p>\n");
+		for (item, on) in dcfg.declare.items.iter()
+			.zip([Some(declare::Level::Some), None])
+		{
+			d_body.push_str(&fmt!(
+				"<form class=\"mc-form mc-settings mc-declare\" method=\"POST\" action=\"{save}\">\n\
+				<div class=\"mc-f-text\"><label for=\"lvl-{key}\">{name}</label>\
+				<select id=\"lvl-{key}\" name=\"ai_level\">\
+				<option value=\"\"{none_sel}>Not declared</option>{options}</select></div>\n\
+				<div class=\"mc-actions\">\n<button type=\"submit\" class=\"mc-btn\">Save</button>\n\
+				</div>\n</form>\n",
+				save		= PATH_DECLARE_SAVE,
+				key		= html_escape(&item.key),
+				name		= html_escape(&item.name),
+				none_sel	= selected(on.is_none()),
+				options		= declare_options(on),
+			));
+		}
+		d_body.push_str(&declare_site_note(&dcfg));
+		res!(put(&dir, "declarations", &page(&t, &a, "Declarations", &d_body)));
 
 		Ok(())
 	}

@@ -1655,6 +1655,62 @@ mod tests {
 		Ok(())
 	}
 
+	/// Writes the reader's own screens to a directory, for looking at.
+	///
+	/// The counterpart of the console's `ui_dump`, and it exists for the same reason: two invisible
+	/// defects in this module were found by rendering it and none by reading it. Off unless
+	/// `STEEL_UI_DUMP` names a directory, so it costs an ordinary test run nothing.
+	///
+	/// The pages reference the site's own stylesheets by URL, so open the dump from a directory that
+	/// serves them, or point a harness's `css` at where they really are.
+	#[test]
+	fn ui_dump_the_reader_screens() -> Outcome<()> {
+		let dir = match std::env::var("STEEL_UI_DUMP") {
+			Ok(d) if !d.is_empty()	=> d,
+			_			=> return Ok(()), // Not asked for; costs nothing.
+		};
+		res!(std::fs::create_dir_all(&dir), IO, File);
+
+		let put = |name: &str, resp: &HttpMessage| -> Outcome<()> {
+			let path = fmt!("{}/{}.html", dir, name);
+			res!(std::fs::write(&path, &resp.body), IO, File);
+			println!("ui-dump: {}", path);
+			Ok(())
+		};
+
+		// The stylesheets a site really links, so the dump is the site's own look rather than
+		// unstyled markup. A harness serves these paths from wherever it keeps them.
+		let cfg = PublishConfig {
+			css: vec![
+				fmt!("/css/variables.css"),
+				fmt!("/css/blog.css"),
+				fmt!("/css/marks.css"),
+			],
+			..cfg()
+		};
+
+		// One post per rung, so every mark in the set is on one page and the five can be told apart
+		// by eye -- which is the only test of a mark that means anything.
+		let mut posts = Vec::new();
+		for (i, level) in declare::Level::ALL.iter().enumerate() {
+			let mut p = post();
+			p.slug = fmt!("post-{}", i);
+			p.title = fmt!("{}", level.words());
+			p.ai_level = Some(*level);
+			posts.push(p);
+		}
+		// And one that declares nothing, which must draw no mark at all.
+		let mut bare = post();
+		bare.slug = fmt!("post-undeclared");
+		bare.title = fmt!("Undeclared");
+		posts.push(bare);
+
+		res!(put("reader-index", &res!(index(&cfg, &posts, &[], "", "ui-dump"))));
+		res!(put("reader-post", &res!(post_page(&cfg, &posts[2], None, None))));
+		res!(put("reader-post-undeclared", &res!(post_page(&cfg, &posts[5], None, None))));
+		Ok(())
+	}
+
 	/// A declared post wears its mark twice over, and each time at a size that can be read: alone and
 	/// countable on its own page, where there is room, and with its words on the card, where there is
 	/// not. The site's own declaration is a separate claim and sits in the footer of both.

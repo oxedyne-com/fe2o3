@@ -511,9 +511,20 @@ pub fn serve_json(
 		]
 	};
 
+	// The ladder itself, so a page drawing a chooser -- a composer, an admin panel -- offers exactly
+	// the rungs this version knows. Without it every client keeps its own copy of the five, and a copy
+	// is a thing that drifts.
+	let vocabulary = Level::ALL.iter()
+		.map(|l| create_dat_ordmap(vec![
+			(dat!("level"),	dat!(l.slug().to_string())),
+			(dat!("words"),	dat!(l.words().to_string())),
+		]))
+		.collect::<Vec<_>>();
+
 	let mut fields = vec![
-		(dat!("url"),	dat!(cfg.url.clone())),
-		(dat!("marks"),	dat!(cfg.marks.clone())),
+		(dat!("url"),		dat!(cfg.url.clone())),
+		(dat!("marks"),		dat!(cfg.marks.clone())),
+		(dat!("levels"),	Dat::List(vocabulary)),
 	];
 	// What the site says about itself. Absent where it says nothing.
 	if let Some(d) = cfg.site {
@@ -699,13 +710,17 @@ mod tests {
 		// The site's own declaration rides alongside, so a footer needs one fetch and not two.
 		assert!(body.contains(r#""/assets/marks/code-with-ai.svg""#), "no site mark: {}", body);
 
-		// The same site with nothing declared about itself, so the only `level` a body could carry
-		// would be the item's own -- and there is none to carry.
-		let bare = DeclareConfig { site: None, ..cfg() };
-		let resp = res!(serve_json(&bare, &BTreeMap::new(), "test"));
+		// The vocabulary and the site's own declaration both carry the word `level`, so the item is
+		// read where it lives rather than by searching the whole body for it.
+		let resp = res!(serve_json(&cfg(), &BTreeMap::new(), "test"));
 		let body = String::from_utf8_lossy(&resp.body).to_string();
-		assert!(body.contains(r#""key": "widget""#), "the declarable itself went missing: {}", body);
-		assert!(!body.contains(r#""level""#), "an unset item was given a level: {}", body);
+		let items = res!(body.split_once(r#""items""#).map(|(_, rest)| rest.to_string())
+			.ok_or_else(|| err!("the body carried no items at all: {}", body; Missing)));
+		assert!(items.contains(r#""key": "widget""#), "the declarable itself went missing: {}", body);
+		assert!(!items.contains(r#""level""#), "an unset item was given a level: {}", body);
+		// The chooser a client draws is still offered every rung -- an undeclared item is not a site
+		// that has forgotten what the rungs are.
+		assert!(body.contains(r#""words": "Made mostly with AI""#), "no vocabulary: {}", body);
 		Ok(())
 	}
 
