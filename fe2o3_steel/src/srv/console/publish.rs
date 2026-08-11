@@ -5626,14 +5626,25 @@ mod ui_dump {
 		// geometry a person sees rather than the row in isolation -- which is exactly the difference
 		// that hid a crushed, three-line control from a render that looked fine.
 		let mut a_body = String::from(
-			"<h1>Edit a post</h1>\n<form class=\"mc-form\">\n<div class=\"mc-row\">\n\
+			"<h1>Edit a post</h1>\n<form class=\"mc-form\" method=\"POST\" action=\"/manage/save\">\n\
+			<div class=\"mc-row\">\n\
 			<div><label>Name in the URL</label><input type=\"text\" value=\"first-post\"></div>\n\
 			<div><label>Date</label><input type=\"text\" value=\"2026-07-23\"></div>\n\
 			<div><label>State</label><select><option>Live</option></select></div>\n\
 			<div><label>Written in</label><select><option>Markdown</option></select></div>\n\
 			<div><label>AI used</label><select><option>Made with no AI</option></select></div>\n");
 		a_body.push_str(&author_field("older-identity", "Anonymous", "oxedyne", "Jason"));
-		a_body.push_str("</div>\n</form>\n");
+		// The rest of what the composer's own autosave needs, because the take-over works by handing
+		// the save to it -- a dump carrying only the author row proves the button draws and nothing
+		// about whether pressing it saves anything.
+		a_body.push_str(&fmt!(
+			"</div>\n<input type=\"hidden\" name=\"was\" value=\"first-post\">\n\
+			<input type=\"text\" id=\"slug\" name=\"slug\" value=\"first-post\">\n\
+			<select id=\"state\" name=\"state\"><option value=\"live\">Live</option></select>\n\
+			<textarea id=\"source\" name=\"source\">Words.</textarea>\n\
+			<div class=\"mc-actions\"><span class=\"mc-autosave\" id=\"mc-autosave\"></span></div>\n\
+			</form>\n"));
+		a_body.push_str(AUTOSAVE_SCRIPT);
 		a_body.push_str(AUTHOR_SCRIPT);
 		res!(put(&dir, "author-takeover", &page(&t, &a, "Edit a post", &a_body)));
 
