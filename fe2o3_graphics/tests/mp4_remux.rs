@@ -122,8 +122,42 @@ fn a_repackaged_film_plays() -> Outcome<()> {
 				film.display(), made.count, decoded; Invalid, Mismatch));
 		}
 
-		println!("{}: {} frames repackaged, {} by {}, all decode",
-			film.display(), made.count, made.w, made.h);
+		// 3. Are the pictures shown when the source said they were?
+		//
+		// The decisive check, and the one the first two cannot make. A film
+		// whose composition offsets are wrong still opens, still counts right
+		// and **still decodes every frame** -- it simply plays them in the wrong
+		// order, which is the fault this whole table exists to prevent. So the
+		// written film's presentation times are read back and held against the
+		// source's. They may differ by ONE constant, because delaying the whole
+		// track is how a negative offset is avoided; they may not differ by two.
+		let back = match times_of(&path) {
+			Some(v) => v,
+			None => return Err(err!(
+				"{}: the written film's presentation times could not be read.",
+				film.display(); Invalid, Mismatch)),
+		};
+		if back.len() != made.times.len() {
+			return Err(err!(
+				"{}: {} presentation times were written and {} read back.",
+				film.display(), made.times.len(), back.len(); Invalid, Mismatch));
+		}
+		let shift = back[0] - made.times[0];
+		for i in 0..back.len() {
+			if back[i] - made.times[i] != shift {
+				return Err(err!(
+					"{}: frame {} is shown at {} and the source shows it at {}, \
+					a difference of {} against the film's {}. The pictures are \
+					in the wrong order.",
+					film.display(), i, back[i], made.times[i],
+					back[i] - made.times[i], shift;
+					Invalid, Mismatch));
+			}
+		}
+
+		println!("{}: {} frames repackaged, {} by {}, all decode, shown in order \
+			(whole film delayed {} ticks)",
+			film.display(), made.count, made.w, made.h, shift);
 		done += 1;
 	}
 
@@ -143,6 +177,8 @@ struct Made {
 	w:		u16,
 	h:		u16,
 	count:	usize,
+	/// The presentation times the source stated, in decode order.
+	times:	Vec<i64>,
 }
 
 /// Reads a film's picture frames and writes them into an MP4, decoding nothing.
@@ -186,7 +222,7 @@ fn repackage(path: &Path, want: usize) -> Outcome<Option<Made>> {
 	let mut file = res!(File::open(path));
 	let mut cl = Clusters::new(&mkv);
 	let mut buf: Vec<u8> = Vec::new();
-	let mut frames: Vec<(Vec<u8>, bool)> = Vec::new();
+	let mut frames: Vec<(Vec<u8>, bool, i64)> = Vec::new();
 	let mut eof = false;
 
 	while frames.len() < want {
@@ -205,7 +241,7 @@ fn repackage(path: &Path, want: usize) -> Outcome<Option<Made>> {
 		}
 		let fed = res!(cl.feed(&buf, &mut |frame| {
 			if frame.track == number && frames.len() < want {
-				frames.push((frame.data.to_vec(), frame.key));
+				frames.push((frame.data.to_vec(), frame.key, frame.time));
 			}
 			Ok(())
 		}));
@@ -228,20 +264,30 @@ fn repackage(path: &Path, want: usize) -> Outcome<Option<Made>> {
 
 	// A film must begin at a sync sample; anything before the first one cannot
 	// be decoded by a reader starting here and is dropped rather than written.
-	let first = match frames.iter().position(|(_, k)| *k) {
+	let first = match frames.iter().position(|(_, k, _)| *k) {
 		Some(i) => i,
 		None => return Ok(None),
 	};
+	let kept: Vec<(Vec<u8>, bool, i64)> = frames.drain(..).skip(first).collect();
+
+	// The frames arrive in decode order carrying the times they are SHOWN, and
+	// MP4 wants the times they are decoded plus the difference. Every duration
+	// here is the same, so the decoding times are `i * step` and the offsets are
+	// what is left -- which for a film with B-pictures is not nought.
+	let times: Vec<i64> = kept.iter().map(|(_, _, t)| *t).collect();
+	let durs: Vec<u32> = vec![step; kept.len()];
+	let offs = res!(oxedyne_fe2o3_graphics::mp4::composition_offsets(&times, &durs));
+
 	let mut count = 0usize;
-	for (data, key) in frames.drain(..).skip(first) {
+	for (i, (data, key, _)) in kept.into_iter().enumerate() {
 		let s = if key { Sample::key(data, step) } else { Sample::delta(data, step) };
-		res!(out.push(s));
+		res!(out.push(s.shown_after(offs[i])));
 		count += 1;
 	}
 	if count == 0 {
 		return Ok(None);
 	}
-	Ok(Some(Made { bytes: res!(out.finish()), w: w as u16, h: h as u16, count }))
+	Ok(Some(Made { bytes: res!(out.finish()), w: w as u16, h: h as u16, count, times }))
 }
 
 /// What ffprobe says the written film holds: codec, width, height, frames.
@@ -316,6 +362,35 @@ fn decode_count(path: &Path) -> Outcome<usize> {
 		Err(_) => Err(err!(
 			"ffprobe counted no frames in the written film."; Invalid, Mismatch)),
 	}
+}
+
+/// The presentation times of a written film's pictures, in decode order.
+fn times_of(path: &Path) -> Option<Vec<i64>> {
+	let out = match Command::new("ffprobe")
+		.args([
+			"-v", "error",
+			"-select_streams", "v:0",
+			"-show_entries", "packet=pts",
+			"-of", "csv=p=0",
+		])
+		.arg(path)
+		.output()
+	{
+		Ok(o) => o,
+		Err(_) => return None,
+	};
+	if !out.status.success() {
+		return None;
+	}
+	let text = String::from_utf8_lossy(&out.stdout);
+	let mut times = Vec::new();
+	for line in text.lines() {
+		match line.trim().parse::<i64>() {
+			Ok(v) => times.push(v),
+			Err(_) => return None,
+		}
+	}
+	Some(times)
 }
 
 /// Every `.mkv` under a directory.

@@ -101,18 +101,36 @@ pub struct Sample {
 	pub dur:	u32,
 	/// Whether decoding may begin here: a sync sample, which for AVC is an IDR picture.
 	pub sync:	bool,
+	/// How far after its decoding time this sample is shown, in the track's timescale.
+	///
+	/// Nought for a stream whose pictures are shown in the order they are decoded, which is what a
+	/// screen recording or a poster is. **A film is not such a stream.** Where B-pictures are used a
+	/// picture is decoded before the ones it is shown between, so the two orders differ and the
+	/// container has to state both: `stts` gives the decoding times and this gives the difference.
+	/// Writing a reordered stream with this left at nought produces a file that opens, reports the
+	/// right number of frames, and plays them in the wrong order.
+	pub off:	i32,
 }
 
 impl Sample {
 
 	/// A sync sample: one a reader may begin decoding at.
 	pub fn key(data: Vec<u8>, dur: u32) -> Self {
-		Self { data, dur, sync: true }
+		Self { data, dur, sync: true, off: 0 }
 	}
 
 	/// A sample that depends on those before it.
 	pub fn delta(data: Vec<u8>, dur: u32) -> Self {
-		Self { data, dur, sync: false }
+		Self { data, dur, sync: false, off: 0 }
+	}
+
+	/// The same sample, shown the given distance after it is decoded.
+	///
+	/// See [`composition_offsets`], which works the offsets out from the presentation times a
+	/// container states, since that is the form a film arrives in.
+	pub fn shown_after(mut self, off: i32) -> Self {
+		self.off = off;
+		self
 	}
 
 	/// The size of the sample in bytes.
@@ -630,6 +648,9 @@ impl Track {
 		let mut body = Vec::new();
 		body.extend_from_slice(&res!(self.stsd()));
 		body.extend_from_slice(&res!(self.stts()));
+		if let Some(ctts) = res!(self.ctts()) {
+			body.extend_from_slice(&ctts);
+		}
 		body.extend_from_slice(&res!(self.stsz()));
 		body.extend_from_slice(&res!(stsc()));
 		body.extend_from_slice(&res!(self.offsets(base, wide)));
@@ -696,6 +717,40 @@ impl Track {
 			b.extend_from_slice(&d.to_be_bytes());
 		}
 		bx(b"stts", &b)
+	}
+
+	/// The composition time to sample table, ISO/IEC 14496-12 §8.6.1.3, run-length coded.
+	///
+	/// `None` where every sample is shown in the order it is decoded, because a track that never
+	/// reorders must not carry the box at all -- an absent `ctts` is the statement that the two
+	/// orders are the same, and writing a table of zeroes says the same thing at the cost of four
+	/// bytes a sample.
+	///
+	/// Written at version 1, whose offsets are **signed**. Version 0's are unsigned, which forces
+	/// every decoding time to sit at or before the earliest presentation time and makes the first
+	/// pictures of a reordered stream inexpressible without shifting the whole track.
+	/// [`composition_offsets`] shifts anyway, so version 0 would serve -- but a signed table states
+	/// what is true rather than what has been arranged to be true, and a caller that works its own
+	/// offsets out is not forced into the same arrangement.
+	fn ctts(&self) -> Outcome<Option<Vec<u8>>> {
+		if self.samples.iter().all(|s| s.off == 0) {
+			return Ok(None);
+		}
+		let mut runs: Vec<(u32, i32)> = Vec::new();
+		for s in &self.samples {
+			match runs.last_mut() {
+				Some((n, o)) if *o == s.off	=> *n += 1,
+				_				=> runs.push((1, s.off)),
+			}
+		}
+		let mut b = Vec::with_capacity(8 + runs.len() * 8);
+		b.extend_from_slice(&full(1, 0));
+		b.extend_from_slice(&(runs.len() as u32).to_be_bytes());
+		for (n, o) in runs {
+			b.extend_from_slice(&n.to_be_bytes());
+			b.extend_from_slice(&o.to_be_bytes());
+		}
+		Ok(Some(res!(bx(b"ctts", &b))))
 	}
 
 	/// The sample size table, ISO/IEC 14496-12 §8.7.3.2.
@@ -835,6 +890,60 @@ fn dinf() -> Outcome<Vec<u8>> {
 ///
 /// A single entry: from chunk 1 onward, one sample a chunk, described by sample description 1.
 /// Entries are only written where the run changes, so one entry covers every chunk in the track.
+/// Works out each sample's composition offset from the times a source container states.
+///
+/// # Why a caller needs this at all
+///
+/// Matroska, and the other containers a film arrives in, state **only when a picture is shown**.
+/// MP4 states when it is decoded and how long after that it is shown. The decoding times are
+/// already fixed by the durations the caller is writing -- sample `i` is decoded after the sum of
+/// the durations before it -- so the offset is the difference, and this computes it.
+///
+/// `times` are presentation times **in decode order**, which is the order the frames come out of a
+/// container and the order they must be written in, in whatever unit the durations are given in.
+///
+/// # The shift, and why the whole track moves
+///
+/// A picture may be shown *before* a later-decoded picture that precedes it in decode order, so the
+/// raw difference is negative for the pictures at the head of a reordered run: they are decoded
+/// early precisely so the ones they are shown between can refer to them. A negative offset says a
+/// picture is shown before it is decoded, which is not something a decoder can do.
+///
+/// So every offset is raised by one constant -- the largest shortfall -- which delays the whole
+/// track by that much and leaves the intervals between pictures exactly as they were. Nothing about
+/// the film changes but the instant it starts, by a few frames.
+pub fn composition_offsets(times: &[i64], durs: &[u32]) -> Outcome<Vec<i32>> {
+	if times.len() != durs.len() {
+		return Err(err!(
+			"There are {} presentation times and {} durations, and each sample needs one of each.",
+			times.len(), durs.len();
+		Invalid, Input, Mismatch));
+	}
+	let mut raw = Vec::with_capacity(times.len());
+	let mut dts = 0i64;
+	let mut least = 0i64;
+	for (i, t) in times.iter().enumerate() {
+		let d = t - dts;
+		if d < least {
+			least = d;
+		}
+		raw.push(d);
+		dts += durs[i] as i64;
+	}
+	let mut out = Vec::with_capacity(raw.len());
+	for d in raw {
+		let v = d - least;
+		if v > i32::MAX as i64 {
+			return Err(err!(
+				"A composition offset of {} ticks will not fit the 32 bits the table holds, so the \
+				presentation times given are not those of one film.", v;
+			Invalid, Input, Excessive));
+		}
+		out.push(v as i32);
+	}
+	Ok(out)
+}
+
 fn stsc() -> Outcome<Vec<u8>> {
 	let mut b = Vec::with_capacity(20);
 	b.extend_from_slice(&full(0, 0));
@@ -2104,7 +2213,7 @@ mod tests {
 	fn test_stts_run_length_03() -> Outcome<()> {
 		let mut t = res!(Track::new(64, 48, 1000, Codec::Avc(avcc())));
 		for (i, d) in [10u32, 10, 10, 20, 20, 10].into_iter().enumerate() {
-			res!(t.push(Sample { data: nal(4 + i), dur: d, sync: i == 0 }));
+			res!(t.push(Sample { data: nal(4 + i), dur: d, sync: i == 0, off: 0 }));
 		}
 		let b = res!(t.stts());
 		req!(b.len(), 40usize);
@@ -2125,7 +2234,7 @@ mod tests {
 	fn test_stts_constant_rate_is_one_entry_04() -> Outcome<()> {
 		let mut t = res!(Track::new(64, 48, 1000, Codec::Avc(avcc())));
 		for i in 0..500 {
-			res!(t.push(Sample { data: nal(4), dur: 40, sync: i == 0 }));
+			res!(t.push(Sample { data: nal(4), dur: 40, sync: i == 0, off: 0 }));
 		}
 		let b = res!(t.stts());
 		req!(b.len(), 24usize);
@@ -2146,7 +2255,7 @@ mod tests {
 
 		let mut some = res!(Track::new(64, 48, 1000, Codec::Avc(avcc())));
 		for i in 0..5 {
-			res!(some.push(Sample { data: nal(4), dur: 10, sync: i == 0 || i == 3 }));
+			res!(some.push(Sample { data: nal(4), dur: 10, sync: i == 0 || i == 3, off: 0 }));
 		}
 		let b = match res!(some.stss()) {
 			Some(b)	=> b,
@@ -2168,7 +2277,7 @@ mod tests {
 		let sizes = [11usize, 5, 23, 7];
 		let mut t = res!(Track::new(64, 48, 600, Codec::Avc(avcc())));
 		for (i, n) in sizes.into_iter().enumerate() {
-			res!(t.push(Sample { data: nal(n), dur: 60, sync: i == 0 }));
+			res!(t.push(Sample { data: nal(n), dur: 60, sync: i == 0, off: 0 }));
 		}
 		let file = res!(t.finish());
 
@@ -2232,7 +2341,7 @@ mod tests {
 	fn test_durations_in_their_own_timescales_08() -> Outcome<()> {
 		let mut t = res!(Track::new(64, 48, 90_000, Codec::Avc(avcc())));
 		for i in 0..30 {
-			res!(t.push(Sample { data: nal(6), dur: 3003, sync: i == 0 }));
+			res!(t.push(Sample { data: nal(6), dur: 3003, sync: i == 0, off: 0 }));
 		}
 		req!(t.duration(), 90_090u64);
 		let file = res!(t.finish());
@@ -2384,7 +2493,7 @@ mod tests {
 	fn test_the_64_bit_offset_table_16() -> Outcome<()> {
 		let mut t = res!(Track::new(64, 48, 1000, Codec::Avc(avcc())));
 		for i in 0..3 {
-			res!(t.push(Sample { data: nal(20), dur: 40, sync: i == 0 }));
+			res!(t.push(Sample { data: nal(20), dur: 40, sync: i == 0, off: 0 }));
 		}
 		let base = 5_000_000_000u64;
 		let b = res!(t.offsets(base, true));
@@ -2409,7 +2518,7 @@ mod tests {
 		let build = || -> Outcome<Vec<u8>> {
 			let mut t = res!(Track::new(64, 48, 1000, Codec::Avc(avcc())));
 			for i in 0..8 {
-				res!(t.push(Sample { data: nal(12 + i), dur: 40, sync: i % 4 == 0 }));
+				res!(t.push(Sample { data: nal(12 + i), dur: 40, sync: i % 4 == 0, off: 0 }));
 			}
 			t.finish()
 		};
@@ -2428,7 +2537,7 @@ mod tests {
 		for i in 0..6usize {
 			let data = nal(20 + i);
 			wrote.push(data.clone());
-			res!(t.push(Sample { data, dur: 40, sync: i == 0 }));
+			res!(t.push(Sample { data, dur: 40, sync: i == 0, off: 0 }));
 		}
 		let file = res!(t.finish());
 		let film = res!(Film::read(&file));
@@ -2454,7 +2563,7 @@ mod tests {
 		// samples as one that is not, so a decoder and a viewer that disagree about the angle
 		// produce output of the right size and the wrong shape.
 		let mut t = res!(Track::new(64, 48, 1000, Codec::Avc(avcc())));
-		res!(t.push(Sample { data: nal(24), dur: 40, sync: true }));
+		res!(t.push(Sample { data: nal(24), dur: 40, sync: true, off: 0 }));
 		let mut file = res!(t.finish());
 		req!(res!(Film::read(&file)).rotation(), 0u16, "a unity matrix was read as a rotation");
 
@@ -2488,6 +2597,56 @@ mod tests {
 		// And three quarters.
 		matrix(&mut file, 0, -one, one, 0);
 		req!(res!(Film::read(&file)).rotation(), 270u16);
+		Ok(())
+	}
+
+	/// The presentation times are a real film's, read off the first frames of
+	/// `Dominion2018.mkv`: shown at 0, 160, 80, 40, 120 while decoded at 0, 40,
+	/// 80, 120, 160. A stream that never reordered would state the same list
+	/// twice.
+	#[test]
+	fn test_a_reordered_run_is_offset_forwards_19() -> Outcome<()> {
+		let times = [0i64, 160, 80, 40, 120];
+		let durs = [40u32; 5];
+		let offs = res!(composition_offsets(&times, &durs));
+
+		// Not one of them may be negative, whatever the film does: a negative
+		// offset says a picture is shown before it is decoded.
+		for (i, o) in offs.iter().enumerate() {
+			assert!(*o >= 0, "offset {} of sample {} is negative", o, i);
+		}
+		// And the intervals must survive: every picture keeps its distance from
+		// every other, so the whole run is the source's list plus one constant.
+		let mut dts = 0i64;
+		let mut shift = None;
+		for i in 0..times.len() {
+			let shown = dts + offs[i] as i64;
+			match shift {
+				None => shift = Some(shown - times[i]),
+				Some(s) => req!(shown - times[i], s),
+			}
+			dts += durs[i] as i64;
+		}
+		req!(shift, Some(80i64));
+		Ok(())
+	}
+
+	/// A track whose pictures are shown in the order they are decoded must
+	/// carry no `ctts` at all -- an absent box is the statement that the two
+	/// orders agree, and a table of zeroes says it again for four bytes a
+	/// sample.
+	#[test]
+	fn test_a_stream_in_order_writes_no_offset_table_20() -> Outcome<()> {
+		let times = [0i64, 40, 80, 120];
+		let durs = [40u32; 4];
+		let offs = res!(composition_offsets(&times, &durs));
+		req!(offs, vec![0i32, 0, 0, 0]);
+
+		let mut t = res!(Track::new(64, 48, 1000, Codec::Avc(avcc())));
+		for i in 0..4 {
+			res!(t.push(Sample { data: nal(8), dur: 40, sync: i == 0, off: 0 }));
+		}
+		req!(res!(t.ctts()).is_none(), true);
 		Ok(())
 	}
 }
