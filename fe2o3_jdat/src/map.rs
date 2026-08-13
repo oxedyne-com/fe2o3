@@ -151,6 +151,21 @@ impl Dat {
         }
     }
 
+    /// Look up a required key and return its value coerced to `u64`.
+    /// Any of the unsigned integer variants will convert. A signed variant
+    /// will not, so a count stored as a signed number is an error here
+    /// rather than a silent reinterpretation of its sign bit.
+    pub fn map_get_u64(&self, key: &Self) -> Outcome<u64> {
+        let val = res!(self.map_get_must(key));
+        match val.get_u64() {
+            Some(n) => Ok(n),
+            None => Err(err!(
+                "The key {:?} maps to a value of kind {:?}, \
+                expected a non-negative integer.", key, val.kind();
+            Input, Mismatch)),
+        }
+    }
+
     /// Look up a required key and return its value coerced to `f64`.
     /// Any numeric variant will convert.
     pub fn map_get_f64(&self, key: &Self) -> Outcome<f64> {
