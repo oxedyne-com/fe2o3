@@ -34,8 +34,11 @@
 //!   - `Tracks` -- a `TrackEntry` a stream, each with its `TrackType`,
 //!     `CodecID`, language, and, for a picture, its pixel size.
 //!
-//! `Cluster`s, which are the film itself, are skipped by their length without
-//! being looked at.
+//! [`Matroska::read`] skips the `Cluster`s, which are the film itself, by their
+//! length without looking at them. [`Clusters`] is the other half, for a caller
+//! that wants the coded frames rather than the description -- repackaging the
+//! streams into another container, which needs every frame and decodes none of
+//! them.
 //!
 //! # References
 //!
@@ -86,6 +89,7 @@ const ID_NAME:				u64 = 0x536E;
 const ID_LANGUAGE:			u64 = 0x22B59C;
 const ID_LANGUAGE_BCP47:	u64 = 0x22B59D;
 const ID_FLAG_DEFAULT:		u64 = 0x88;
+const ID_DEFAULT_DURATION:	u64 = 0x23E383;
 const ID_FLAG_FORCED:		u64 = 0x55AA;
 const ID_VIDEO:				u64 = 0xE0;
 const ID_PIXEL_W:			u64 = 0xB0;
@@ -95,6 +99,18 @@ const ID_DISPLAY_H:			u64 = 0x54BA;
 const ID_AUDIO:				u64 = 0xE1;
 const ID_CHANNELS:			u64 = 0x9F;
 const ID_SAMPLING:			u64 = 0xB5;
+const ID_CLUSTER:			u64 = 0x1F43B675;
+const ID_TIMESTAMP:			u64 = 0xE7;
+const ID_SIMPLE_BLOCK:		u64 = 0xA3;
+const ID_BLOCK_GROUP:		u64 = 0xA0;
+const ID_BLOCK:				u64 = 0xA1;
+const ID_REFERENCE_BLOCK:	u64 = 0xFB;
+
+/// The widest element header: a four-byte identifier and an eight-byte length.
+///
+/// What a caller must have in hand before [`Clusters::feed`] can say anything
+/// about the element in front of it, and therefore the smallest useful window.
+const HEADER_MAX: usize = 12;
 
 /// What a stream is for.
 ///
@@ -164,6 +180,14 @@ pub struct Track {
 	default:	bool,
 	/// Whether a player must show it whatever the viewer asked for.
 	forced:		bool,
+	/// Nanoseconds one frame of this stream lasts, where the file says.
+	///
+	/// Wanted for one reason and it is not decorative: **the frames of a laced
+	/// block are spaced by it**. A block carrying six frames of sound states one
+	/// timestamp, and the five after the first are that stamp plus one, two,
+	/// three of these. Without it they all appear at the same instant and a
+	/// repackaged film's sound walks away from its picture.
+	frame_ns:	u64,
 }
 
 impl Track {
@@ -213,6 +237,11 @@ impl Track {
 
 	/// Whether a player must show it whatever the viewer asked for.
 	pub fn is_forced(&self) -> bool { self.forced }
+
+	/// Nanoseconds one frame lasts, nought where the file states none.
+	///
+	/// See the field: this is what spaces the frames of a laced block.
+	pub fn frame_nanos(&self) -> u64 { self.frame_ns }
 }
 
 /// What a film's header says about it.
@@ -399,6 +428,463 @@ impl Matroska {
 	}
 }
 
+// ------------------------------------------------------------- the frames
+
+/// One coded frame, exactly as a cluster carries it.
+///
+/// The bytes are the codec's own and nothing here touches them: a caller
+/// repackaging the stream writes them into the new container unchanged, which is
+/// what makes a repackaging lossless and what makes it possible at all without a
+/// decoder.
+#[derive(Clone, Copy, Debug)]
+pub struct Frame<'a> {
+	/// Which stream it belongs to, matching [`Track::number`].
+	pub track:		u64,
+	/// When it is shown, in timestamp scale units from the start of the film.
+	///
+	/// Signed because a block states its own time as a *difference* from its
+	/// cluster's, and the difference is signed -- a cluster may carry a frame
+	/// shown fractionally before the cluster's own stamp.
+	pub time:		i64,
+	/// Whether decoding may begin here.
+	pub key:		bool,
+	/// Whether the file asks for it to be decoded but not shown.
+	pub invisible:	bool,
+	/// The coded bytes.
+	pub data:		&'a [u8],
+}
+
+/// What one feed of bytes yielded.
+///
+/// The two numbers are what lets a caller hold a window rather than a film. See
+/// [`Clusters::feed`] for the loop they are meant to drive.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Fed {
+	/// How many bytes from the front of the window were dealt with and may now
+	/// be dropped.
+	pub used:	usize,
+	/// How many bytes must be in hand, counting from the new front, before the
+	/// next element can be read.
+	///
+	/// Nought means the window merely ran out between elements and any further
+	/// bytes at all will make progress. A caller that cannot supply `want` --
+	/// because the file ended -- has a truncated file.
+	pub want:	usize,
+}
+
+/// A reader over the coded frames in a film's clusters.
+///
+/// # Why this is fed rather than handed the file
+///
+/// A film is gigabytes and a repackager must never hold one; the whole reason
+/// for repackaging in a photo library is to avoid decoding, so spending the
+/// memory a decode would have cost defeats it. So this descends into `Segment`
+/// and `Cluster` by consuming their **headers alone** and reading their children
+/// as though they sat at the top level. What a caller must keep in hand is
+/// therefore one *block* -- a frame, a few hundred kilobytes at worst -- and
+/// never one cluster, which is megabytes, and never the film.
+///
+/// Elements that are not wanted are passed over by their stated length without
+/// ever being in the window at all, which matters more than it sounds: a film
+/// with cover art carries an `Attachments` element of some megabytes, and a
+/// reader that had to hold what it skips would be holding that.
+///
+/// # The loop
+///
+/// ```ignore
+/// let mkv = res!(Matroska::read(&head));
+/// let mut cl = Clusters::new(&mkv);
+/// let mut buf = Vec::new();
+/// loop {
+///     // Top the window up, then let the reader take what it can.
+///     let fed = res!(cl.feed(&buf, &mut |frame| { … ; Ok(()) }));
+///     buf.drain(..fed.used);
+///     if fed.want > buf.len() { /* read at least fed.want bytes into buf */ }
+/// }
+/// ```
+#[derive(Clone, Debug, Default)]
+pub struct Clusters {
+	/// The timestamp of the cluster being read, in scale units.
+	now:	i64,
+	/// Bytes still to be passed over before an element begins again.
+	///
+	/// Kept as a count rather than by holding the bytes, so that skipping a
+	/// large element costs nothing and needs no window.
+	skip:	u64,
+	/// Nanoseconds a timestamp unit stands for.
+	scale:	u64,
+	/// How long one frame of each stream lasts, in nanoseconds, by track
+	/// number. A short list walked linearly, because a film has a handful of
+	/// streams and a map would cost more than it saved.
+	frames:	Vec<(u64, u64)>,
+}
+
+impl Clusters {
+
+	/// A reader positioned at the start of a file.
+	///
+	/// The header is wanted rather than optional: the timestamp scale and each
+	/// stream's frame duration are stated there, and without them the frames of
+	/// a laced block cannot be given their own times. A caller has read the
+	/// header already, since nothing else says which track numbers mean what.
+	pub fn new(mkv: &Matroska) -> Self {
+		Self {
+			now:	0,
+			skip:	0,
+			scale:	mkv.scale,
+			frames:	mkv.tracks.iter().map(|t| (t.number, t.frame_ns)).collect(),
+		}
+	}
+
+	/// Reads whole elements from the front of `b`, handing every frame to `f`.
+	///
+	/// Stops at the first element it cannot complete, and says in [`Fed`] both
+	/// what it consumed and what it needs. It never partially reports a frame:
+	/// a block that is not wholly in the window is left for the next feed.
+	pub fn feed<F>(&mut self, b: &[u8], f: &mut F) -> Outcome<Fed>
+	where
+		F: FnMut(Frame) -> Outcome<()>,
+	{
+		let mut i = 0usize;
+
+		// Whatever is left of an element being passed over goes first, and it
+		// is counted rather than held -- `skip` may be larger than any window.
+		if self.skip > 0 {
+			let n = self.skip.min(b.len() as u64) as usize;
+			i += n;
+			self.skip -= n as u64;
+			if self.skip > 0 {
+				return Ok(Fed { used: i, want: 0 });
+			}
+		}
+
+		while i < b.len() {
+			let rest = &b[i..];
+			let (id, id_len) = match vint_id(rest) {
+				Some(v) => v,
+				None => return Ok(Fed { used: i, want: HEADER_MAX }),
+			};
+			let (size, size_len) = match vint_size(&rest[id_len..]) {
+				Some(v) => v,
+				None => return Ok(Fed { used: i, want: HEADER_MAX }),
+			};
+			let at = id_len + size_len;
+
+			// A `Segment` states an unknown length in a file still being
+			// written, and it is descended into regardless -- which is the one
+			// case where an unknown length is not the end of the walk.
+			let take = match size {
+				Some(n) => n,
+				None => 0,
+			};
+
+			match id {
+				// Descended into by consuming the header alone, so their
+				// children are read as though they sat at the top. This is what
+				// keeps the window down to one block.
+				ID_SEGMENT | ID_CLUSTER => {
+					i += at;
+					continue;
+				},
+				// Inside a `Cluster`, and unambiguous *because* nothing else is
+				// descended into: `Info` holds elements of its own but is passed
+				// over whole, so a bare `0xE7` here can only be a cluster's.
+				ID_TIMESTAMP | ID_SIMPLE_BLOCK | ID_BLOCK_GROUP => {
+					let whole = at.saturating_add(take as usize);
+					if take > b.len() as u64 || whole > rest.len() {
+						return Ok(Fed { used: i, want: whole });
+					}
+					let body = &rest[at..whole];
+					match id {
+						ID_TIMESTAMP	=> self.now = uint(body) as i64,
+						ID_SIMPLE_BLOCK	=> res!(self.block(body, None, f)),
+						_				=> res!(self.group(body, f)),
+					}
+					i += whole;
+				},
+				// Everything else is passed over by its length, and the bytes
+				// never enter the window.
+				_ => {
+					i += at;
+					self.skip = take;
+					let n = self.skip.min((b.len() - i) as u64) as usize;
+					i += n;
+					self.skip -= n as u64;
+					if self.skip > 0 {
+						return Ok(Fed { used: i, want: 0 });
+					}
+				},
+			}
+		}
+		Ok(Fed { used: i, want: 0 })
+	}
+
+	/// Reads a `BlockGroup`, whose `Block` is a keyframe only if nothing in the
+	/// group refers to another frame.
+	///
+	/// The reference has to be looked for **before** the block is reported,
+	/// which is why a group is read whole rather than descended into: a
+	/// `ReferenceBlock` is a sibling of the `Block` and may follow it, so a
+	/// reader that reported the block on sight would have to take it back.
+	fn group<F>(&mut self, b: &[u8], f: &mut F) -> Outcome<()>
+	where
+		F: FnMut(Frame) -> Outcome<()>,
+	{
+		// Walked here rather than through [`each`], which hands its closure a
+		// slice of anonymous lifetime and so cannot be used to *keep* one.
+		let mut block: Option<&[u8]> = None;
+		let mut refers = false;
+		let mut i = 0usize;
+		while i < b.len() {
+			let rest = &b[i..];
+			let (id, id_len) = match vint_id(rest) {
+				Some(v) => v,
+				None => break,
+			};
+			let (size, size_len) = match vint_size(&rest[id_len..]) {
+				Some(v) => v,
+				None => break,
+			};
+			let at = id_len + size_len;
+			if at > rest.len() {
+				break;
+			}
+			// An unknown length inside a group ends the walk: nothing may follow
+			// an element that runs to the end of what there is.
+			let take = match size {
+				Some(n) => (n as usize).min(rest.len() - at),
+				None => break,
+			};
+			let body = &rest[at..at + take];
+			match id {
+				ID_BLOCK			=> block = Some(body),
+				ID_REFERENCE_BLOCK	=> refers = true,
+				_ => {},
+			}
+			let step = at.saturating_add(take);
+			if step == 0 {
+				break;
+			}
+			i += step;
+		}
+		match block {
+			Some(body) => self.block(body, Some(!refers), f),
+			// A group with no block in it is not a fault; it is a file carrying
+			// something this reader does not want.
+			None => Ok(()),
+		}
+	}
+
+	/// Reads one block, whether laced or not, and reports each frame in it.
+	///
+	/// `key` is the answer a `BlockGroup` worked out from its references; a
+	/// `SimpleBlock` states its own in its flags, so `None` means read it here.
+	fn block<F>(&mut self, b: &[u8], key: Option<bool>, f: &mut F) -> Outcome<()>
+	where
+		F: FnMut(Frame) -> Outcome<()>,
+	{
+		let (track, n) = match vint_size(b) {
+			Some((Some(t), n)) => (t, n),
+			// An unknown-length track number is not a thing the format allows.
+			_ => return Err(err!(
+				"A block stated no readable track number.";
+				Invalid, Input, Format)),
+		};
+		if b.len() < n + 3 {
+			return Err(err!(
+				"A block of {} bytes is too short to carry a track number, a \
+				timestamp and its flags.", b.len();
+				Invalid, Input, Format));
+		}
+		// The block's own time is a *difference* from its cluster's, and it is
+		// signed: two bytes, big-endian, two's complement.
+		let rel = i16::from_be_bytes([b[n], b[n + 1]]) as i64;
+		let flags = b[n + 2];
+		let body = &b[n + 3..];
+
+		let key = match key {
+			Some(k) => k,
+			None => flags & 0x80 != 0,
+		};
+		let frame = Frame {
+			track,
+			time:		self.now + rel,
+			key,
+			invisible:	flags & 0x08 != 0,
+			data:		&[],
+		};
+
+		// Lacing packs several frames of sound into one block to save the
+		// per-block overhead. It is uncommon in a film muxed by a modern tool
+		// and it is not rare enough to refuse: a reader that ignored it would
+		// hand a caller one frame made of six glued together, which no decoder
+		// and no container would accept and nothing would say why.
+		match (flags >> 1) & 0x03 {
+			0 => res!(f(Frame { data: body, ..frame })),
+			lacing => {
+				// A laced block states ONE time for all of its frames, and the
+				// rest follow it a frame duration apart. Giving them all the
+				// block's stamp is what the first version of this did, and the
+				// sound of a repackaged film then arrived in bursts: the sizes
+				// were right, every frame was there, and only the clock was
+				// wrong -- which is why the oracle compares times and not just
+				// bytes.
+				let step = self.frames.iter()
+					.find(|(n, _)| *n == track)
+					.map(|(_, d)| *d)
+					.unwrap_or(0);
+				let parts = res!(laced(body, lacing));
+				let laces = parts.len() as u64;
+				// The block's whole span first, then that divided among its
+				// frames -- **not** the frame duration multiplied up. The two
+				// differ because a timestamp unit cannot represent a frame of
+				// sound: AAC at 48 kHz lasts 21⅓ milliseconds, and eight of
+				// them are 170⅔. Multiplying accumulates the third of a
+				// millisecond until the last frame of a block is stamped later
+				// than dividing says, and in the limit past the start of the
+				// block after it. Dividing the span keeps every frame inside
+				// the block that carries it, which is the property that matters
+				// to whatever plays the result, and it is what a player does.
+				let span = if self.scale > 0 {
+					step.saturating_mul(laces) / self.scale
+				} else {
+					0
+				};
+				for (i, part) in parts.iter().enumerate() {
+					let on = if laces > 0 {
+						(i as u64).saturating_mul(span) / laces
+					} else {
+						0
+					};
+					res!(f(Frame {
+						data: part,
+						time: frame.time.saturating_add(on as i64),
+						..frame
+					}));
+				}
+			},
+		}
+		Ok(())
+	}
+}
+
+/// Splits a laced block body into its frames.
+///
+/// The three schemes differ only in how the sizes are written; the last frame's
+/// size is never stated in any of them, because it is whatever is left.
+fn laced(b: &[u8], lacing: u8) -> Outcome<Vec<&[u8]>> {
+	let count = match b.first() {
+		Some(n) => *n as usize + 1,
+		None => return Err(err!(
+			"A laced block stated no frame count."; Invalid, Input, Format)),
+	};
+	let mut at = 1usize;
+	let mut sizes = Vec::with_capacity(count);
+	match lacing {
+		// Fixed: every frame the same size, so nothing is written at all.
+		2 => {
+			let rest = b.len() - at;
+			if count == 0 || rest % count != 0 {
+				return Err(err!(
+					"A fixed-laced block of {} bytes does not divide into {} \
+					frames.", rest, count;
+					Invalid, Input, Format));
+			}
+			for _ in 0..count {
+				sizes.push(rest / count);
+			}
+		},
+		// Xiph: each size is a run of bytes, ended by one below 255.
+		1 => {
+			for _ in 0..count - 1 {
+				let mut n = 0usize;
+				loop {
+					let byte = match b.get(at) {
+						Some(v) => *v,
+						None => return Err(err!(
+							"A Xiph-laced block ended inside a frame size.";
+							Invalid, Input, Format)),
+					};
+					at += 1;
+					n += byte as usize;
+					if byte < 255 {
+						break;
+					}
+				}
+				sizes.push(n);
+			}
+		},
+		// EBML: the first size is a plain variable-width integer and every one
+		// after it is a *signed difference* from the one before.
+		_ => {
+			let (first, n) = match vint_size(&b[at..]) {
+				Some((Some(v), n)) => (v as i64, n),
+				_ => return Err(err!(
+					"An EBML-laced block stated no readable first frame size.";
+					Invalid, Input, Format)),
+			};
+			at += n;
+			sizes.push(first as usize);
+			let mut prev = first;
+			for _ in 0..count.saturating_sub(2) {
+				let (delta, n) = match svint(&b[at..]) {
+					Some(v) => v,
+					None => return Err(err!(
+						"An EBML-laced block ended inside a frame size.";
+						Invalid, Input, Format)),
+				};
+				at += n;
+				prev += delta;
+				if prev < 0 {
+					return Err(err!(
+						"An EBML-laced block gave a frame a negative size.";
+						Invalid, Input, Format));
+				}
+				sizes.push(prev as usize);
+			}
+		},
+	}
+
+	// The last frame is whatever the stated ones leave, and a file whose stated
+	// sizes overrun the block is one this must not read past the end of.
+	let stated: usize = sizes.iter().take(count - 1).sum();
+	if at.saturating_add(stated) > b.len() {
+		return Err(err!(
+			"A laced block states {} bytes of frames in {} bytes of body.",
+			stated, b.len() - at.min(b.len());
+			Invalid, Input, Format));
+	}
+	if sizes.len() < count {
+		sizes.push(b.len() - at - stated);
+	}
+
+	let mut out = Vec::with_capacity(count);
+	for size in sizes.iter().take(count) {
+		let end = at.saturating_add(*size);
+		if end > b.len() {
+			return Err(err!(
+				"A laced block's frame runs past the end of it.";
+				Invalid, Input, Format));
+		}
+		out.push(&b[at..end]);
+		at = end;
+	}
+	Ok(out)
+}
+
+/// A signed variable-width integer, as EBML lacing writes a size difference.
+///
+/// The unsigned value is read exactly as a length is, then shifted down by half
+/// its range, which is what makes the differences either way round representable.
+fn svint(b: &[u8]) -> Option<(i64, usize)> {
+	let (v, n) = match vint_size(b) {
+		Some((Some(v), n)) => (v, n),
+		_ => return None,
+	};
+	let bias = (1i64 << (7 * n as u32 - 1)) - 1;
+	Some((v as i64 - bias, n))
+}
+
 /// Which element a run of elements sits inside.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Scope {
@@ -453,6 +939,7 @@ fn read_entry(track: &mut Track, mut b: &[u8], depth: usize) -> Outcome<()> {
 			ID_LANGUAGE			=> if track.lang.is_empty() { track.lang = text(body) },
 			ID_FLAG_DEFAULT		=> track.default = uint(body) != 0,
 			ID_FLAG_FORCED		=> track.forced = uint(body) != 0,
+			ID_DEFAULT_DURATION	=> track.frame_ns = uint(body),
 			ID_VIDEO			=> res!(read_video(track, body, depth + 1)),
 			ID_AUDIO			=> res!(read_audio(track, body, depth + 1)),
 			_ => {},
