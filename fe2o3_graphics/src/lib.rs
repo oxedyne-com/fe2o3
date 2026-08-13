@@ -92,6 +92,7 @@ pub mod h264;
 pub mod heif;
 pub mod hevc;
 pub mod jpeg;
+pub mod matroska;
 pub mod mp4;
 pub mod path;
 pub mod pixmap;
