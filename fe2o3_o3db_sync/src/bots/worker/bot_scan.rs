@@ -25,11 +25,58 @@ use oxedyne_fe2o3_jdat::{
 };
 
 use std::{
-    collections::HashMap,
+    collections::{
+        BTreeMap,
+        HashMap,
+    },
     fs,
     io::BufReader,
     sync::Arc,
+    thread,
+    time::Duration,
 };
+
+/// Number of passes a scan makes before it declares an index file short of its data file.
+///
+/// Measuring the data file on both sides of the walk (see `ScanBot::scan_pass`) accounts for
+/// a record appended during the walk and for a garbage collection landing during it.  What it
+/// does not cover is a walk that begins after a collection has renamed its rebuilt index into
+/// place and ends before that same collection renames the transcribed data file over the old
+/// one -- one statement apart, so the walk would have to be shorter than the gap between two
+/// renames.  That is vanishingly unlikely and it is not impossible, and the difference between
+/// vanishingly unlikely and impossible is what a retry is for.
+///
+/// Repeating the pass separates a momentary shortfall from a permanent one without taking a
+/// lock that a collection would then have to wait on, and it costs nothing on the ordinary
+/// path, because a scan that adds up never repeats.
+const SCAN_COVERAGE_ATTEMPTS: usize = 3;
+
+/// Pause between those passes.  Long enough that an in-flight record has certainly landed,
+/// short enough that the caller waiting on a scan does not notice it.
+const SCAN_COVERAGE_SETTLE: Duration = Duration::from_millis(20);
+
+/// Which of a file number's two files were in the zone directory when it was listed.
+#[derive(Clone, Copy, Debug, Default)]
+struct ZoneFilePresence {
+    /// Whether a data file was there.
+    dat: bool,
+    /// Whether an index file was there.
+    ind: bool,
+}
+
+/// An index file that accounts for less than its data file holds.
+///
+/// The scan of that file is short by the difference, so the answer the caller would have been
+/// given is missing records without being wrong in any way the caller could detect.
+#[derive(Clone, Copy, Debug)]
+struct Shortfall {
+    /// The file number whose index came up short.
+    fnum:       FileNum,
+    /// Bytes of key-value data in the data file.
+    dat_len:    u64,
+    /// Bytes of key-value data the index file accounts for.
+    covered:    u64,
+}
 
 /// Answers scans for one zone by walking its index files.
 ///
@@ -214,18 +261,68 @@ impl<
     /// large database. The filters do not make the walk any cheaper:
     /// every index record in the zone is read and checksummed
     /// whatever the caller asked for.
+    ///
+    /// **A walk that cannot see everything fails rather than
+    /// answering short.** Every index record names the length of the
+    /// key and value it points at, so the records of one index file
+    /// add up to exactly the length of its data file. When they add
+    /// up to less, the index does not account for everything the
+    /// data file holds and the answer would be missing records --
+    /// with nothing in it to say so. That is not a hypothetical: an
+    /// index file left at zero bytes beside a data file full of
+    /// records makes this walk return an empty list, successfully,
+    /// while `get()` on those same records goes on working. The
+    /// gateway then read a limit through a scan, was told there was
+    /// no override set, answered the operator `200` for the change,
+    /// and enforced the old value for the life of the process.
+    ///
+    /// The caller is told, rather than the log, because a caller has
+    /// no way to distinguish "nothing there" from "I could not look"
+    /// and the log is not on the path of anyone waiting for the
+    /// answer. A scan that cannot report an under-count is the same
+    /// failure class as a check that cannot fail.
     fn scan_zone(
         &mut self,
         opts: &ScanOpts,
     )
         -> Outcome<Vec<(Dat, Dat, Meta<UIDL, UID>)>>
     {
-        let fnums = res!(self.list_ind_fnums());
         let mut live: HashMap<Vec<u8>, (Dat, Meta<UIDL, UID>)>
             = HashMap::new();
+        let mut short: Vec<Shortfall> = Vec::new();
 
-        for fnum in fnums {
-            res!(self.scan_walk_ind_file(fnum, &mut live));
+        // A pass that comes up short is repeated from scratch rather
+        // than patched, because the deduplication depends on files
+        // being visited in ascending order: re-walking one file after
+        // the others would let an older record overwrite a newer one.
+        for attempt in 0..SCAN_COVERAGE_ATTEMPTS {
+            live.clear();
+            short = res!(self.scan_pass(&mut live));
+            if short.is_empty() {
+                break;
+            }
+            if attempt + 1 < SCAN_COVERAGE_ATTEMPTS {
+                thread::sleep(SCAN_COVERAGE_SETTLE);
+            }
+        }
+
+        if !short.is_empty() {
+            let mut detail = String::new();
+            for s in &short {
+                detail.push_str(&fmt!(
+                    " file {} holds {} bytes of records and its index accounts for {};",
+                    s.fnum, s.dat_len, s.covered));
+            }
+            return Err(err!(
+                "{}: Scan of this zone is short: {} index file(s) do not account \
+                for what their data files hold, and there is no way to say how \
+                many records are missing, so nothing is reported rather than an \
+                answer that would look complete.{} The records themselves are \
+                intact and readable by key throughout; an index file that does \
+                not account for its data file is rebuilt from that data file on \
+                the next start.",
+                self.ozid(), short.len(), detail;
+                Data, Mismatch, Missing));
         }
 
         let mut out: Vec<(Dat, Dat, Meta<UIDL, UID>)> =
@@ -251,14 +348,84 @@ impl<
         Ok(out)
     }
 
-    /// Enumerate the `.ind` file numbers in this bot's zone
-    /// directory, ascending. Unparseable or non-ind files are
-    /// skipped silently; the zone survey at startup already
-    /// rejects structurally invalid directories, and a garbage
-    /// collection temporary carries a name that does not parse, so
+    /// One walk of every index file in the zone, in ascending file-number
+    /// order, reporting any file whose index does not account for its data
+    /// file.
+    ///
+    /// Each data file is measured on **both** sides of the walk of its index,
+    /// and the smaller of the two lengths is what the index has to account
+    /// for. Measuring once is not enough, and neither single choice is safe:
+    ///
+    /// - Measure before, and a garbage collection that lands during the walk
+    ///   makes an intact index look short. The collection replaces the index
+    ///   with one describing the smaller transcribed data file, and the
+    ///   earlier, larger measurement is then compared against it. Under a
+    ///   backlog a collection lands during almost every walk, so this is not
+    ///   a corner: it would be the ordinary case.
+    /// - Measure after, and a record appended during the walk makes an intact
+    ///   index look short, because the data file has grown past the point the
+    ///   walk read up to.
+    ///
+    /// Both movements are in a known direction -- a collection only shrinks a
+    /// data file, an append only grows one -- so the smaller of the two
+    /// measurements is below the index's coverage in either case, and a
+    /// genuine shortfall is below both.
+    fn scan_pass(
+        &mut self,
+        live: &mut HashMap<Vec<u8>, (Dat, Meta<UIDL, UID>)>,
+    )
+        -> Outcome<Vec<Shortfall>>
+    {
+        let files = res!(self.list_zone_files());
+        let mut short = Vec::new();
+        for (fnum, present) in files {
+            let before = self.data_file_len(fnum);
+            // Every index file present is walked, including one whose data
+            // file has gone: a collection that deletes a wholly superseded
+            // file removes the data file first, and every key that file held
+            // has a newer copy in a higher-numbered file which overwrites it
+            // here anyway.
+            let covered = if present.ind {
+                res!(self.scan_walk_ind_file(fnum, live))
+            } else {
+                0
+            };
+            let after = self.data_file_len(fnum);
+            // A data file absent on either side has been collected away, or
+            // was never there: there is nothing for the index to be short of.
+            let dat_len = match (present.dat, before, after) {
+                (true, Some(a), Some(b)) => std::cmp::min(a, b),
+                _                        => continue,
+            };
+            if covered < dat_len {
+                short.push(Shortfall { fnum, dat_len, covered });
+            }
+        }
+        Ok(short)
+    }
+
+    /// The length in bytes of one data file, or `None` if it is not there.
+    ///
+    /// A file that has gone is not an error: a collection deletes a data file
+    /// whose records have all been superseded.
+    fn data_file_len(&self, fnum: FileNum) -> Option<u64> {
+        let mut path = self.zdir().dir.clone();
+        path.push(ZoneDir::relative_file_path(&FileType::Data, fnum));
+        match fs::metadata(&path) {
+            Ok(m)  => Some(m.len()),
+            Err(_) => None,
+        }
+    }
+
+    /// Enumerate this bot's zone directory, ascending by file number, noting
+    /// which of the two files each number has.
+    ///
+    /// Unparseable or foreign files are skipped silently; the zone survey
+    /// at startup already rejects structurally invalid directories, and a
+    /// garbage collection temporary carries a name that does not parse, so
     /// a rebuild in progress is passed over rather than read.
-    fn list_ind_fnums(&self) -> Outcome<Vec<FileNum>> {
-        let mut fnums: Vec<FileNum> = Vec::new();
+    fn list_zone_files(&self) -> Outcome<BTreeMap<FileNum, ZoneFilePresence>> {
+        let mut files: BTreeMap<FileNum, ZoneFilePresence> = BTreeMap::new();
         for entry in res!(fs::read_dir(&self.zdir().dir)) {
             let entry = res!(entry);
             let path = entry.path();
@@ -272,12 +439,13 @@ impl<
                 Ok(t) => t,
                 Err(_) => continue,
             };
-            if ftyp == FileType::Index {
-                fnums.push(fnum);
+            let present = files.entry(fnum).or_insert_with(ZoneFilePresence::default);
+            match ftyp {
+                FileType::Data  => present.dat = true,
+                FileType::Index => present.ind = true,
             }
         }
-        fnums.sort();
-        Ok(fnums)
+        Ok(files)
     }
 
     /// Walk a single index file, populating `live` with the
@@ -290,12 +458,18 @@ impl<
     /// open is not an error: garbage collection deletes a file whose
     /// records have all been superseded, and every key that file held
     /// has a newer copy elsewhere in the zone.
+    ///
+    /// Returns the number of bytes of key-value data the index file
+    /// accounts for, which for an intact index is exactly the length
+    /// of its data file. The caller compares the two; that comparison
+    /// is the only thing standing between a short walk and an answer
+    /// that looks complete.
     fn scan_walk_ind_file(
         &mut self,
         fnum: FileNum,
         live: &mut HashMap<Vec<u8>, (Dat, Meta<UIDL, UID>)>,
     )
-        -> Outcome<()>
+        -> Outcome<u64>
     {
         let file = match self.zdir().open_ozone_file(
             fnum,
@@ -308,12 +482,14 @@ impl<
                     "{}: Index file {} went away between listing and opening, \
                     which is what collecting an entirely superseded file looks \
                     like; skipping it.", self.ozid(), fnum);
-                return Ok(());
+                return Ok(0);
             },
         };
         let mut reader = BufReader::new(file);
         let typ = FileType::Index;
         let mut pos = 0usize;
+        // Bytes of key-value data this index accounts for.
+        let mut covered = 0u64;
 
         loop {
             // 1. Load the StoredKey from the file.
@@ -348,8 +524,13 @@ impl<
                     "{}: Missing StoredIndex at end of {:?} file {}.",
                     self.ozid(), typ, fnum;
                     Missing)),
-                Ok((Some(_sindex), n)) => {
+                Ok((Some(sindex), n)) => {
                     pos += n;
+                    // Counted before the chunk entries are elided below:
+                    // the data file holds those records too, so leaving
+                    // them out here would make every chunked value look
+                    // like an under-count.
+                    covered += sindex.keyval_len();
                 },
             }
 
@@ -383,7 +564,7 @@ impl<
             //    stale-filtering behaviour we want.
             live.insert(kbyts, (kdat, meta));
         }
-        Ok(())
+        Ok(covered)
     }
 }
 

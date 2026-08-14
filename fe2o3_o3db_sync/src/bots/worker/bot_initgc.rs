@@ -217,7 +217,13 @@ impl<
         }
     }
 
-    /// Decide how to cache the file.
+    /// Decide how to cache the file, and repair the index file if it cannot be read.
+    ///
+    /// An empty index file beside a data file that holds records is not a curiosity: until the
+    /// index is rebuilt, `scan` walks that file and finds nothing, so a caller asking what the
+    /// zone holds is told "nothing" over a store that holds the answer.  Keyed `get()` is
+    /// unaffected, which is what makes it hard to see.  Both fallback paths below therefore
+    /// rebuild the index from the data file rather than only priming the cache from it.
     fn cache_file(
         &mut self,
         fnum:       FileNum,
@@ -237,9 +243,14 @@ impl<
         match typ {
             FileType::Index => {
                 if meta.len() == 0 {
-                    // If there is nothing to cache, try caching the data file.
-                    warn!(sync_log::stream(), "{}: The index file {} is empty, trying data file...",
-                        self.ozid(), fnum);
+                    // Nothing to cache from, so read the data file and write the index back
+                    // from what it holds.  Until that happens every scan of this zone is
+                    // short by everything this file holds, and says so to nobody.
+                    warn!(sync_log::stream(),
+                        "{}: Index file {} is empty beside a data file of {} bytes; \
+                        rebuilding the index by reading the data file. Until this \
+                        completes, a scan of this zone under-reports what it holds.",
+                        self.ozid(), fnum, dat_size);
                     let (_, file) = res!(self.zdir().open_ozone_file(
                         fnum,
                         &FileType::Data,
@@ -259,9 +270,13 @@ impl<
                         ind_size,
                     ) {
                         Err(e) => {
-                            // If caching the index file fails, cache the data file.
-                            warn!(sync_log::stream(), "{}: Error caching index file {}, trying data file, caused by {}.",
-                                self.ozid(), fnum, e);
+                            // The index file cannot be read, so it is of no use to a scan
+                            // either.  Read the data file and write the index back from it.
+                            warn!(sync_log::stream(),
+                                "{}: Index file {} could not be read, so it is rebuilt by \
+                                reading data file {}; until this completes, a scan of this \
+                                zone under-reports what it holds. Caused by {}.",
+                                self.ozid(), fnum, fnum, e);
                             let (_, file) = res!(self.zdir().open_ozone_file(
                                 fnum,
                                 &FileType::Data,
@@ -392,8 +407,28 @@ impl<
     }
 
     /// When a valid index file is not available, scan the data file directly and update the cache
-    /// with value locations.  We do not read and decode the values, so only the locations go into
-    /// the cache.
+    /// with value locations, and write the index file back from what the scan found.  We do not
+    /// read and decode the values, so only the locations go into the cache.
+    ///
+    /// The rebuilt index is written **into the existing index file, in place**, and not renamed
+    /// over it from a temporary the way garbage collection does.  The difference matters, and it
+    /// is the writer bot.  `ZoneBot::survey_files` hands each wbot its live `(data, index)` pair
+    /// at step 8, which is before `ZoneBot::init_caches` asks for any of this caching, so by the
+    /// time this method runs a wbot is already holding an open append handle on this very index
+    /// file.  A rename replaces the inode underneath it: the handle goes on referring to the old
+    /// one, now unlinked, and every index record the wbot writes for the rest of the process goes
+    /// into a file nothing will ever open again.  The data file is never renamed and so keeps
+    /// every record, which is why `get()` by key stays correct throughout while `scan`, which
+    /// walks index files, reports the zone as holding nothing.
+    ///
+    /// That is the whole of the symptom: an operator changes a limit, is answered `200`, sees the
+    /// new value in the console, and the gateway goes on using the old one for the life of the
+    /// process, because the read that would have found the new one goes through a scan and the
+    /// scan is blind.  It recurs on every restart, since a restart is what runs this method.
+    ///
+    /// Rewriting the same inode keeps the wbot's handle valid.  That handle is `O_APPEND`, so its
+    /// writes go to the true end of the file whatever length it believes the file to have, and
+    /// they land after the records written here.
     #[allow(unused_assignments, unused_variables)]
     pub fn init_cache_data_file(
         &mut self,
@@ -406,23 +441,10 @@ impl<
         let typ = FileType::Data;
         let mut index_file_buffer = Vec::new();
 
-        // 1. Name the index file and the temporary it is rebuilt through, so that an
-        //    index file on disk is always a complete one.  A rebuild interrupted part way
-        //    leaves only the temporary, which the zone survey discards on the next start.
+        // 1. Name the index file.  The records are gathered in memory and written at the end,
+        //    after the size check below has confirmed that the data file read whole.
         let mut ind_path = self.zdir().dir.clone();
         ind_path.push(ZoneDir::relative_file_path(&FileType::Index, fnum));
-        let mut tmp_ind_path = self.zdir().dir.clone();
-        tmp_ind_path.push(ZoneDir::relative_gc_temp_path(&FileType::Index, fnum));
-        if tmp_ind_path.is_file() {
-            res!(fs::remove_file(&tmp_ind_path));
-        }
-
-        // 2. Create the new index file.
-        let file = res!(ZoneDir::open_file(
-            &tmp_ind_path,
-            &FileAccess::Writing,
-        ));
-        let mut writer = BufWriter::new(file);
 
         let mut pos = 0;
         let mut kpos = 0;
@@ -518,7 +540,9 @@ impl<
             }
         }
 
-        // 8. Do size check.
+        // 8. Do size check.  This guards the truncation below: if a wbot appended to the data
+        //    file after the survey measured it, the walk reads more than was surveyed and the
+        //    rebuild is abandoned here, before anything is overwritten.
         if pos != dat_size {
             return Err(err!(
                 "{}: After initial caching of data file {}, the total data count \
@@ -527,11 +551,27 @@ impl<
                 Mismatch, Data));
         }
 
-        // 10. Write the index file in one go, then put it in place.
-        res!(writer.write(&index_file_buffer));
-        res!(writer.flush());
-        drop(writer);
-        res!(fs::rename(&tmp_ind_path, &ind_path));
+        // 9. Write the rebuilt index into the existing index file, keeping its inode so that
+        //    the wbot holding this file open for append goes on writing to it.  See the note on
+        //    this method for what renaming a fresh file over it costs.
+        let mut ind_file = match OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&ind_path)
+        {
+            Err(e) => return Err(err!(e,
+                "{}: While opening index file {:?} to rebuild it from data file {}.",
+                self.ozid(), ind_path, fnum;
+                IO, File, Write, Create)),
+            Ok(file) => file,
+        };
+        res!(ind_file.write_all(&index_file_buffer));
+        res!(ind_file.flush());
+        // The rebuild is the only copy of this index.  Losing it to a crash before it reaches
+        // the disk puts the zone straight back into the state this method exists to repair, and
+        // the repair is not free -- it reads the whole data file.
+        res!(ind_file.sync_data());
 
         Ok(())
     }
