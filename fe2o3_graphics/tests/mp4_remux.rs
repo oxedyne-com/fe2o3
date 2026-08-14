@@ -274,7 +274,13 @@ fn repackage(path: &Path, want: usize) -> Outcome<Option<Made>> {
 	// MP4 wants the times they are decoded plus the difference. Every duration
 	// here is the same, so the decoding times are `i * step` and the offsets are
 	// what is left -- which for a film with B-pictures is not nought.
-	let times: Vec<i64> = kept.iter().map(|(_, _, t)| *t).collect();
+	// Rebased on the first kept frame, because decoding starts at nought here and
+	// `composition_offsets` does not rebase: handed the absolute times of a film
+	// that starts an hour in, it would give every sample an offset of an hour.
+	// These films begin at nought, so it changes nothing today and stops the test
+	// passing for a reason that would not hold on a film that did not.
+	let t0 = kept.first().map(|(_, _, t)| *t).unwrap_or(0);
+	let times: Vec<i64> = kept.iter().map(|(_, _, t)| *t - t0).collect();
 	let durs: Vec<u32> = vec![step; kept.len()];
 	let offs = res!(oxedyne_fe2o3_graphics::mp4::composition_offsets(&times, &durs));
 

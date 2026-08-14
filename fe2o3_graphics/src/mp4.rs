@@ -21,6 +21,12 @@
 //! end. It costs a second pass over the box tree, because the chunk offsets in `stco` are absolute
 //! file offsets and cannot be known until the size of the index that precedes them is.
 //!
+//! [`Fragments`] writes the other shape, for the film a writer cannot hold: `ftyp` and a `moov`
+//! that names the streams and states no duration, then one `moof` and `mdat` for each run of
+//! samples handed over. Every sample's timing is stated in the fragment that carries it, so nothing
+//! is kept back and nothing is rewritten at the end, and a film of unknown length -- several hours
+//! of it, or several streams of it -- can be written a fragment at a time.
+//!
 //! # What is refused
 //!
 //! A track with no samples; a timescale of zero; a sample of zero duration; a sample whose bytes
@@ -144,6 +150,52 @@ impl Sample {
 	}
 }
 
+/// What a stream carries.
+///
+/// The distinction decides which media header a track is given, which handler declares it, and the
+/// shape of its sample entry -- three boxes that must agree, because a reader told two different
+/// things about one track believes whichever it reads last.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Media {
+	/// Moving pictures of the given size.
+	Picture {
+		w:	u16,
+		h:	u16,
+	},
+	/// Sound of the given channel count, sampled at the given rate.
+	Sound {
+		channels:	u16,
+		/// Samples a second. A track's timescale is usually this same number, so that a sample's
+		/// duration is a count of sound samples and no rounding enters.
+		rate:		u32,
+	},
+}
+
+/// One stream of a film, as its header describes it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stream {
+	/// What it carries.
+	pub media:		Media,
+	/// Ticks a second the stream's own durations are counted in.
+	///
+	/// Not required to be the sampling rate of a sound stream, though it often is. A repackaging
+	/// keeps the source's unit so that no time is rescaled between the two containers, and a
+	/// millisecond timescale against a 44,100 Hz stream is therefore ordinary rather than wrong.
+	pub timescale:	u32,
+	/// How the samples are coded, and the configuration a decoder needs.
+	pub codec:		Codec,
+	/// The decode time the stream's first sample lands at, in this stream's own timescale.
+	///
+	/// Nearly always nought, and it exists for the case that is not: **the streams of a film do not
+	/// begin together.** A film's first sound frame is rarely on the same instant as its first
+	/// picture, and a picture track shifted so that none of its composition offsets is negative has
+	/// moved relative to sound that was not shifted with it. Without this the two are nailed to a
+	/// common zero and the film carries an offset between picture and sound that no caller can
+	/// remove -- which is the characteristic fault of a bad repackaging and the one nobody notices
+	/// until the film is being watched.
+	pub start:		u64,
+}
+
 /// How a track's samples are coded, and the decoder configuration that goes with them.
 ///
 /// An enum rather than a trait object, so that adding HEVC later is a variant and a match arm
@@ -155,15 +207,32 @@ pub enum Codec {
 	/// the bytes a `VideoEncoder` hands back as its output's description, or the `avcC` box body
 	/// lifted out of another file.
 	Avc(Vec<u8>),
+	/// AAC, carrying the `AudioSpecificConfig` of ISO/IEC 14496-3 §1.6.2.1 verbatim: two bytes for
+	/// the common profiles, naming the object type, the sampling frequency and the channel
+	/// configuration. It is what a Matroska track entry's `CodecPrivate` holds for `A_AAC`, so a
+	/// repackaging copies it across exactly as the picture's record is copied.
+	///
+	/// The sample bytes are **raw AAC frames, not ADTS**: an ADTS header states again, once a
+	/// frame, what this record states once for the track, and a decoder handed both refuses.
+	Aac(Vec<u8>),
 }
 
 impl Codec {
+
+	/// Whether the stream is a picture, which decides the boxes its track is described by.
+	pub fn is_picture(&self) -> bool {
+		match self {
+			Self::Avc(_) => true,
+			Self::Aac(_) => false,
+		}
+	}
 
 	/// The four-character code of the sample entry this codec is described by, ISO/IEC 14496-15
 	/// §5.4.2.1.
 	fn entry(&self) -> &'static [u8; 4] {
 		match self {
 			Self::Avc(_) => b"avc1",
+			Self::Aac(_) => b"mp4a",
 		}
 	}
 
@@ -171,6 +240,7 @@ impl Codec {
 	fn config(&self) -> &'static [u8; 4] {
 		match self {
 			Self::Avc(_) => b"avcC",
+			Self::Aac(_) => b"esds",
 		}
 	}
 
@@ -178,6 +248,7 @@ impl Codec {
 	fn record(&self) -> &[u8] {
 		match self {
 			Self::Avc(rec) => rec,
+			Self::Aac(rec) => rec,
 		}
 	}
 
@@ -203,6 +274,10 @@ impl Codec {
 				}
 				Ok(n)
 			},
+			Self::Aac(_) => Err(err!(
+				"A sound sample is a coded frame and is not tiled by NAL length prefixes, so \
+				asking for its prefix width is a question about the wrong kind of stream.";
+			Invalid, Input)),
 		}
 	}
 
@@ -212,6 +287,10 @@ impl Codec {
 	/// derived from it and a truncated record produces a file that is well formed and unplayable.
 	fn geometry(&self) -> Outcome<(u16, u16)> {
 		match self {
+			Self::Aac(_) => Err(err!(
+				"A sound stream codes no frame geometry, so a track built from one cannot be \
+				checked against a declared picture size.";
+			Invalid, Input)),
 			Self::Avc(rec) => {
 				let _ = res!(self.nal_len());
 				if rec[0] != 1 {
@@ -302,6 +381,12 @@ impl Codec {
 	/// separated by start codes rather than lengths, handed straight through; that produces a file
 	/// every demuxer accepts and no decoder plays, so it is worth naming.
 	fn check_sample(&self, i: usize, data: &[u8]) -> Outcome<()> {
+		// A coded sound frame has no internal framing to check against: its length is the whole of
+		// what says where it ends. Refusing an empty one is done by the caller, and there is
+		// nothing else here that can be told from the bytes.
+		if let Self::Aac(_) = self {
+			return Ok(());
+		}
 		let n = res!(self.nal_len());
 		let mut at = 0usize;
 		let mut nals = 0usize;
@@ -829,6 +914,765 @@ impl Track {
 	}
 }
 
+// ------------------------------------------------------------------------- a fragmented film
+
+/// The flags a sync sample carries in a track run: `sample_depends_on` = 2, meaning it refers to no
+/// other picture, and `sample_is_non_sync_sample` = 0. ISO/IEC 14496-12 §8.8.3.1.
+const SAMPLE_SYNC: u32 = 0x0200_0000;
+
+/// The flags a sample that is not a sync sample carries: `sample_depends_on` = 1, meaning it refers
+/// to other pictures, and `sample_is_non_sync_sample` = 1.
+///
+/// Both halves are stated. A reader deciding where it may begin reads one or the other, and not
+/// always the same one, so a sample that says it depends on nothing while also saying it is not a
+/// sync sample is a contradiction each reader settles its own way.
+const SAMPLE_DELTA: u32 = 0x0101_0000;
+
+/// A film written as a header followed by fragments.
+///
+/// The counterpart of [`Track`], for the film whose samples are not all in hand. The header states
+/// what the streams are and states no duration at all, and each fragment after it carries its own
+/// timing for the samples it holds, so nothing is held back and nothing is rewritten at the end:
+/// the bytes can go out as they are produced, to a file being appended to or to a reader already
+/// playing the fragments before them.
+///
+/// What that costs against [`Track`] is the index. A fragmented film has no whole-film sample
+/// table, so a reader seeking into one walks the fragments to find where it is going. What it buys
+/// is that the writer never holds the film, and that a film of unknown length can be written.
+pub struct Fragments {
+	/// The streams, in the order given, whose track ids are their positions plus one.
+	streams:	Vec<Stream>,
+	/// Each stream's next decode time, in that stream's own timescale.
+	///
+	/// Kept here because a fragment states the decode time of its first sample outright, and
+	/// nothing in the fragments before it says where that time has got to: a reader handed only
+	/// fragment fifty must be able to place it, which is the whole point of the field.
+	times:		Vec<u64>,
+	/// The sequence number the next fragment carries, counting from one.
+	seq:		u32,
+}
+
+impl Fragments {
+
+	/// Begins a film of the given streams. Track ids are 1..=n in the order given.
+	///
+	/// Everything about a stream that can be checked is checked here rather than at the first
+	/// fragment, because the header describing it has by then been handed to a reader and cannot be
+	/// taken back.
+	pub fn new(streams: Vec<Stream>) -> Outcome<Self> {
+		if streams.is_empty() {
+			return Err(err!(
+				"A film is made of streams and none were given.";
+			Invalid, Input, Missing));
+		}
+		for (i, s) in streams.iter().enumerate() {
+			if s.timescale == 0 {
+				return Err(err!(
+					"Stream {} is given a timescale of zero ticks a second, so no sample duration \
+					written against it would mean anything.", i;
+				Invalid, Input, Range));
+			}
+			match s.media {
+				Media::Picture { w, h } => {
+					if !s.codec.is_picture() {
+						return Err(err!(
+							"Stream {} is declared as pictures and coded by a sound codec, so the \
+							handler, the media header and the sample entry its track carries cannot \
+							all be right.", i;
+						Invalid, Input, Mismatch));
+					}
+					let (cw, ch) = match s.codec.geometry() {
+						Ok(g)	=> g,
+						Err(e)	=> return Err(err!(e,
+							"Stream {}'s decoder configuration could not be read.", i;
+						Invalid, Input)),
+					};
+					if cw != w || ch != h {
+						return Err(err!(
+							"Stream {} is declared {} by {} pixels, but the sequence parameter set \
+							in its decoder configuration codes {} by {}.", i, w, h, cw, ch;
+						Invalid, Input, Mismatch));
+					}
+				},
+				Media::Sound { rate, .. } => {
+					if s.codec.is_picture() {
+						return Err(err!(
+							"Stream {} is declared as sound and coded by a picture codec, so the \
+							handler, the media header and the sample entry its track carries cannot \
+							all be right.", i;
+						Invalid, Input, Mismatch));
+					}
+					// The sample entry states the rate in 16.16 fixed point, whose whole part is
+					// sixteen bits. There is a version 1 entry that carries a wider one, and it is
+					// not written here, so a rate that will not fit is refused rather than truncated
+					// into a file that plays at the wrong speed.
+					if rate >= 1 << 16 {
+						return Err(err!(
+							"Stream {} is sampled at {} Hz, and the 16.16 fixed point field a sound \
+							sample entry states its rate in stops one short of 65536.", i, rate;
+						Invalid, Input, Excessive));
+					}
+				},
+			}
+		}
+		let times = streams.iter().map(|s| s.start).collect();
+		Ok(Self {
+			streams,
+			times,
+			seq:	1,
+		})
+	}
+
+	/// `ftyp` + `moov`: the initialisation segment, carrying no samples.
+	///
+	/// Every duration in it is nought, and in a fragmented film that is a statement rather than a
+	/// gap left to be filled: the length is not known, and a reader is told to take the timing from
+	/// the fragments. The sample tables under `stbl` are written empty for the same reason, and they
+	/// are written rather than left out because ISO/IEC 14496-12 §8.5.1 requires them present.
+	pub fn head(&self) -> Outcome<Vec<u8>> {
+		let ftyp = res!(ftyp_frag());
+		let moov = res!(self.moov());
+		let mut out = Vec::with_capacity(ftyp.len() + moov.len());
+		out.extend_from_slice(&ftyp);
+		out.extend_from_slice(&moov);
+		Ok(out)
+	}
+
+	/// One `moof` + `mdat` pair carrying the given samples.
+	///
+	/// Each entry is (index into the streams given to [`Fragments::new`], that stream's samples in
+	/// decode order). The samples are taken by value because they are moved into the media box and
+	/// not copied: a `Vec` behind a shared reference cannot be moved out of, so borrowing here would
+	/// clone every sample's bytes and carry the whole fragment twice.
+	///
+	/// An empty `Vec` of samples for a listed stream is legal and writes a track fragment whose
+	/// `sample_count` is nought. A stream with nothing in this fragment is ordinary -- sound and
+	/// pictures do not divide at the same instants -- and the empty run still says the stream is
+	/// there and where its decode time has got to.
+	///
+	/// Each fragment's decode times carry on from the fragments before it, so the same samples
+	/// handed over in two calls and in one produce the same timing.
+	pub fn next(&mut self, runs: Vec<(usize, Vec<Sample>)>) -> Outcome<Vec<u8>> {
+		let frag = self.seq;
+		let mut seen = vec![false; self.streams.len()];
+		let mut total = 0u64;
+		for (i, samples) in &runs {
+			let i = *i;
+			if i >= self.streams.len() {
+				return Err(err!(
+					"Fragment {} names stream {}, and the film has {}.",
+					frag, i, self.streams.len();
+				Invalid, Input, Index));
+			}
+			if seen[i] {
+				return Err(err!(
+					"Fragment {} names stream {} twice, and a stream has at most one track fragment \
+					in a movie fragment.", frag, i;
+				Invalid, Input, Duplicate));
+			}
+			seen[i] = true;
+			let codec = &self.streams[i].codec;
+			for (k, sam) in samples.iter().enumerate() {
+				if sam.data.is_empty() {
+					return Err(err!(
+						"Sample {} of stream {} in fragment {} carries no bytes.", k, i, frag;
+					Invalid, Input, Missing));
+				}
+				if sam.dur == 0 {
+					return Err(err!(
+						"Sample {} of stream {} in fragment {} is given a duration of zero ticks, \
+						so it is shown for no time at all.", k, i, frag;
+					Invalid, Input, Range));
+				}
+				if sam.data.len() > u32::MAX as usize {
+					return Err(err!(
+						"Sample {} of stream {} in fragment {} is {} bytes, which will not fit the \
+						32-bit size a track run states.", k, i, frag, sam.data.len();
+					Invalid, Input, Excessive));
+				}
+				if let Err(e) = codec.check_sample(k, &sam.data) {
+					return Err(err!(e,
+						"Sample {} of stream {} in fragment {} is not coded the way the stream's \
+						decoder configuration says it is.", k, i, frag;
+					Invalid, Input));
+				}
+				total += sam.data.len() as u64;
+			}
+		}
+
+		// The media box's header is eight bytes, unless its payload will not fit a 32-bit size, in
+		// which case ISO/IEC 14496-12 §4.2 writes 1 in the size field and a 64-bit `largesize` after
+		// the type. The width is settled here and not at the writing, because every data offset
+		// below is measured across it.
+		let mdat_hdr = if total + 8 > u32::MAX as u64 { 16u64 } else { 8u64 };
+
+		// Where each stream stands before this fragment adds to it. Taken now because the movie
+		// fragment box is built twice and both passes must state the same times.
+		let bases: Vec<u64> = runs.iter().map(|(i, _)| self.times[*i]).collect();
+
+		// Two passes. A track run's data offset is measured from the first byte of the movie
+		// fragment box that holds it, so it cannot be known until that box's size is -- and the size
+		// depends on the offsets only through fields of a fixed width, so sizing the box against
+		// placeholders and writing it again with the real values settles at once.
+		let blank = vec![0i32; runs.len()];
+		let probe = res!(self.moof(frag, &runs, &bases, &blank));
+		let mut offs = Vec::with_capacity(runs.len());
+		let mut at = probe.len() as u64 + mdat_hdr;
+		for (_, samples) in &runs {
+			if at > i32::MAX as u64 {
+				return Err(err!(
+					"Fragment {} puts a track run's data {} bytes past the movie fragment it is \
+					measured from, and that offset is a signed 32-bit field.", frag, at;
+				Invalid, Input, Excessive));
+			}
+			offs.push(at as i32);
+			for s in samples {
+				at += s.data.len() as u64;
+			}
+		}
+		let moof = res!(self.moof(frag, &runs, &bases, &offs));
+
+		// The rebuilt box must be the size the offsets were measured against, or every one of them
+		// is wrong by the difference. It holds by construction, and it is asserted because a file
+		// whose offsets are all out by a few bytes is well formed, opens, and plays rubbish.
+		if moof.len() != probe.len() {
+			return Err(err!(
+				"Fragment {}'s movie fragment box came to {} bytes when sized and {} bytes when \
+				written, so every data offset in it is out by {}.",
+				frag, probe.len(), moof.len(), moof.len() as i64 - probe.len() as i64;
+			Bug, Unreachable));
+		}
+		// And the walk that laid the offsets out must have covered exactly the samples that are
+		// about to be written, or a later track run points past the end of the media box.
+		if at != moof.len() as u64 + mdat_hdr + total {
+			return Err(err!(
+				"Fragment {} laid its data offsets out to byte {}, and the fragment ends at {}.",
+				frag, at, moof.len() as u64 + mdat_hdr + total;
+			Bug, Unreachable));
+		}
+
+		let mut out = Vec::with_capacity(moof.len() + mdat_hdr as usize + total as usize);
+		out.extend_from_slice(&moof);
+		if mdat_hdr == 16 {
+			out.extend_from_slice(&1u32.to_be_bytes());
+			out.extend_from_slice(b"mdat");
+			out.extend_from_slice(&(total + 16).to_be_bytes());
+		} else {
+			out.extend_from_slice(&((total + 8) as u32).to_be_bytes());
+			out.extend_from_slice(b"mdat");
+		}
+		// Track fragment order, then sample order: all of the first stream's bytes, then all of the
+		// second's. That is the order the offsets above were counted in.
+		for (_, samples) in &runs {
+			for s in samples {
+				out.extend_from_slice(&s.data);
+			}
+		}
+
+		// Only now is anything of the film's state moved on, so a refused fragment leaves the writer
+		// where it was and the caller may hand over a corrected one.
+		for (i, samples) in &runs {
+			let mut ticks = 0u64;
+			for s in samples {
+				ticks += s.dur as u64;
+			}
+			self.times[*i] += ticks;
+		}
+		self.seq += 1;
+		Ok(out)
+	}
+
+	/// The movie box: the movie header, one track for each stream, and the extends box that says
+	/// the sample descriptions are completed by fragments rather than by the tables above them.
+	fn moov(&self) -> Outcome<Vec<u8>> {
+		let mut body = Vec::new();
+		body.extend_from_slice(&res!(self.mvhd()));
+		for (i, s) in self.streams.iter().enumerate() {
+			body.extend_from_slice(&res!(self.trak(i, s)));
+		}
+		body.extend_from_slice(&res!(self.mvex()));
+		bx(b"moov", &body)
+	}
+
+	/// The movie header, ISO/IEC 14496-12 §8.2.2, version 0, stating no duration.
+	///
+	/// A duration of nought is the fragmented film's way of saying the length is not known yet; a
+	/// reader that wants it adds the fragments up, or reads an `mfra` at the end if one was written.
+	fn mvhd(&self) -> Outcome<Vec<u8>> {
+		let mut b = Vec::with_capacity(100);
+		b.extend_from_slice(&full(0, 0));
+		b.extend_from_slice(&0u32.to_be_bytes());	// Creation time, unset.
+		b.extend_from_slice(&0u32.to_be_bytes());	// Modification time, unset.
+		b.extend_from_slice(&MOVIE_TIMESCALE.to_be_bytes());
+		b.extend_from_slice(&0u32.to_be_bytes());	// Duration, not yet known.
+		b.extend_from_slice(&0x0001_0000u32.to_be_bytes());	// Rate: 1.0 in 16.16.
+		b.extend_from_slice(&0x0100u16.to_be_bytes());		// Volume: 1.0 in 8.8.
+		b.extend_from_slice(&0u16.to_be_bytes());		// Reserved.
+		b.extend_from_slice(&[0u8; 8]);				// Reserved.
+		for v in UNITY {
+			b.extend_from_slice(&v.to_be_bytes());
+		}
+		b.extend_from_slice(&[0u8; 24]);		// Pre-defined.
+		// One past the highest track id in use, which is what the field is defined as. ffmpeg
+		// writes the track count itself -- 2 for two tracks, whose ids are 1 and 2 -- and that is a
+		// violation: a tool adding a track would take an id already taken. Written correctly here.
+		b.extend_from_slice(&(self.streams.len() as u32 + 1).to_be_bytes());
+		bx(b"mvhd", &b)
+	}
+
+	/// One track: its header and its media.
+	fn trak(&self, i: usize, s: &Stream) -> Outcome<Vec<u8>> {
+		let mut body = Vec::new();
+		body.extend_from_slice(&res!(self.tkhd(i, s)));
+		body.extend_from_slice(&res!(self.mdia(i, s)));
+		bx(b"trak", &body)
+	}
+
+	/// The track header, ISO/IEC 14496-12 §8.3.2, version 0, stating no duration.
+	///
+	/// The flags are `0x000003`: enabled, and in the movie. The whole-file writer above sets
+	/// `track_in_preview` as well; nothing here writes a preview, so the bit is left clear, and
+	/// what matters is `track_enabled` -- a track without it is in the file and played by nothing.
+	fn tkhd(&self, i: usize, s: &Stream) -> Outcome<Vec<u8>> {
+		let mut b = Vec::with_capacity(84);
+		b.extend_from_slice(&full(0, 0x0000_0003));
+		b.extend_from_slice(&0u32.to_be_bytes());	// Creation time, unset.
+		b.extend_from_slice(&0u32.to_be_bytes());	// Modification time, unset.
+		b.extend_from_slice(&(i as u32 + 1).to_be_bytes());	// Track id; zero is not allowed.
+		b.extend_from_slice(&0u32.to_be_bytes());	// Reserved.
+		b.extend_from_slice(&0u32.to_be_bytes());	// Duration, not yet known.
+		b.extend_from_slice(&[0u8; 8]);			// Reserved.
+		b.extend_from_slice(&0u16.to_be_bytes());	// Layer: the front.
+		match s.media {
+			// A sound track is put in alternate group 1 and a picture track in none. The group says
+			// "play one of these, not both", which is right for the sound tracks of a film in
+			// several languages and wrong for a picture track, whose group must not name any
+			// alternative to it.
+			Media::Picture { .. }	=> b.extend_from_slice(&0u16.to_be_bytes()),
+			Media::Sound { .. }	=> b.extend_from_slice(&1u16.to_be_bytes()),
+		}
+		match s.media {
+			Media::Picture { .. }	=> b.extend_from_slice(&0u16.to_be_bytes()),
+			Media::Sound { .. }	=> b.extend_from_slice(&0x0100u16.to_be_bytes()),	// 1.0 in 8.8.
+		}
+		b.extend_from_slice(&0u16.to_be_bytes());	// Reserved.
+		for v in UNITY {
+			b.extend_from_slice(&v.to_be_bytes());
+		}
+		// The presentation size in 16.16 fixed point, and nought by nought for sound, which is
+		// drawn nowhere. A non-zero size on a sound track makes some players lay out a blank
+		// rectangle for it.
+		match s.media {
+			Media::Picture { w, h } => {
+				b.extend_from_slice(&((w as u32) << 16).to_be_bytes());
+				b.extend_from_slice(&((h as u32) << 16).to_be_bytes());
+			},
+			Media::Sound { .. } => {
+				b.extend_from_slice(&0u32.to_be_bytes());
+				b.extend_from_slice(&0u32.to_be_bytes());
+			},
+		}
+		bx(b"tkhd", &b)
+	}
+
+	/// The media box: the media header, the handler that declares what the track is, and the media
+	/// information.
+	fn mdia(&self, i: usize, s: &Stream) -> Outcome<Vec<u8>> {
+		let mut body = Vec::new();
+		body.extend_from_slice(&res!(self.mdhd(s)));
+		body.extend_from_slice(&res!(match s.media {
+			Media::Picture { .. }	=> handler(b"vide", "VideoHandler"),
+			Media::Sound { .. }	=> handler(b"soun", "SoundHandler"),
+		}));
+		body.extend_from_slice(&res!(self.minf(i, s)));
+		bx(b"mdia", &body)
+	}
+
+	/// The media header, ISO/IEC 14496-12 §8.4.2, version 0, carrying the stream's own timescale.
+	///
+	/// The timescale is the stream's and not the movie's, and it is the unit every duration in
+	/// every fragment of this track is counted in, so it is the one number here a fragment depends
+	/// on being right.
+	fn mdhd(&self, s: &Stream) -> Outcome<Vec<u8>> {
+		let mut b = Vec::with_capacity(24);
+		b.extend_from_slice(&full(0, 0));
+		b.extend_from_slice(&0u32.to_be_bytes());	// Creation time, unset.
+		b.extend_from_slice(&0u32.to_be_bytes());	// Modification time, unset.
+		b.extend_from_slice(&s.timescale.to_be_bytes());
+		b.extend_from_slice(&0u32.to_be_bytes());	// Duration, not yet known.
+		b.extend_from_slice(&LANG_UND.to_be_bytes());
+		b.extend_from_slice(&0u16.to_be_bytes());	// Pre-defined.
+		bx(b"mdhd", &b)
+	}
+
+	/// The media information box: the media header its kind requires, where the media lives, and
+	/// the sample table.
+	fn minf(&self, i: usize, s: &Stream) -> Outcome<Vec<u8>> {
+		let mut body = Vec::new();
+		body.extend_from_slice(&res!(match s.media {
+			Media::Picture { .. }	=> vmhd(),
+			Media::Sound { .. }	=> smhd(),
+		}));
+		body.extend_from_slice(&res!(dinf()));
+		body.extend_from_slice(&res!(self.stbl(i, s)));
+		bx(b"minf", &body)
+	}
+
+	/// The sample table: what the samples are, and four empty tables where a whole-file writer
+	/// would put the timing, the sizes and the offsets.
+	///
+	/// No `ctts` and no `stss`. A fragmented film states composition offsets and sync flags once a
+	/// sample in its track runs, so a table here would be a second, empty, statement of the same
+	/// thing -- and an empty `stss` in particular reads as "no sample is a sync sample", which would
+	/// leave a reader with nowhere to begin.
+	fn stbl(&self, i: usize, s: &Stream) -> Outcome<Vec<u8>> {
+		let mut body = Vec::new();
+		body.extend_from_slice(&res!(self.stsd(i, s)));
+		body.extend_from_slice(&res!(empty_table(b"stts")));
+		body.extend_from_slice(&res!(empty_table(b"stsc")));
+		body.extend_from_slice(&res!(empty_stsz()));
+		body.extend_from_slice(&res!(empty_table(b"stco")));
+		bx(b"stbl", &body)
+	}
+
+	/// The sample description: one entry, describing every sample the fragments will carry for this
+	/// stream.
+	fn stsd(&self, i: usize, s: &Stream) -> Outcome<Vec<u8>> {
+		let entry = match s.media {
+			Media::Picture { w, h }		=> res!(picture_entry(&s.codec, w, h)),
+			Media::Sound { channels, rate }	=> res!(sound_entry(
+				&s.codec, i as u32 + 1, channels, rate)),
+		};
+		let mut b = Vec::with_capacity(8 + entry.len());
+		b.extend_from_slice(&full(0, 0));
+		b.extend_from_slice(&1u32.to_be_bytes());	// Entry count.
+		b.extend_from_slice(&entry);
+		bx(b"stsd", &b)
+	}
+
+	/// The movie extends box: one `trex` a track, and no `mehd`.
+	///
+	/// Its presence is what tells a reader that the empty sample tables above are not an empty film
+	/// but a film continued in fragments. `mehd` would state the whole duration, which is the one
+	/// thing a writer that has not seen the end cannot say.
+	fn mvex(&self) -> Outcome<Vec<u8>> {
+		let mut body = Vec::new();
+		for i in 0..self.streams.len() {
+			body.extend_from_slice(&res!(trex(i as u32 + 1)));
+		}
+		bx(b"mvex", &body)
+	}
+
+	/// The movie fragment box: its header, then one track fragment for each entry of `runs`, in the
+	/// order given.
+	///
+	/// `bases` and `offs` are read positionally against `runs`: the decode time each track fragment
+	/// begins at, and the offset of its samples from the first byte of this box.
+	fn moof(
+		&self,
+		seq:	u32,
+		runs:	&[(usize, Vec<Sample>)],
+		bases:	&[u64],
+		offs:	&[i32],
+	)
+		-> Outcome<Vec<u8>>
+	{
+		let mut body = Vec::new();
+		body.extend_from_slice(&res!(mfhd(seq)));
+		for (n, (i, samples)) in runs.iter().enumerate() {
+			let base = match bases.get(n) {
+				Some(t)	=> *t,
+				None	=> return Err(err!(
+					"Fragment {} has {} track runs and {} decode times to place them at.",
+					seq, runs.len(), bases.len();
+				Bug, Unreachable)),
+			};
+			let off = match offs.get(n) {
+				Some(o)	=> *o,
+				None	=> return Err(err!(
+					"Fragment {} has {} track runs and {} data offsets for them.",
+					seq, runs.len(), offs.len();
+				Bug, Unreachable)),
+			};
+			body.extend_from_slice(&res!(traf(*i as u32 + 1, base, off, samples)));
+		}
+		bx(b"moof", &body)
+	}
+}
+
+/// The file type box of a fragmented film.
+///
+/// Written separately from [`ftyp`] rather than by a flag on it, because the two make different
+/// promises and the whole-file writer's must not move: `avc1` in that list promises a track whose
+/// sample table is in `moov`, which is exactly what this file does not have. `iso5` with a minor
+/// version of 512, and `iso5`, `iso6` and `mp41` behind it, is what ffmpeg writes for a fragmented
+/// file and so is the list the readers of one have been tried against.
+fn ftyp_frag() -> Outcome<Vec<u8>> {
+	let mut b = Vec::with_capacity(20);
+	b.extend_from_slice(b"iso5");
+	b.extend_from_slice(&512u32.to_be_bytes());
+	b.extend_from_slice(b"iso5");
+	b.extend_from_slice(b"iso6");
+	b.extend_from_slice(b"mp41");
+	bx(b"ftyp", &b)
+}
+
+/// A sample table box with no entries: a full box and a count of nought.
+///
+/// `stts`, `stsc` and `stco` all take that shape, and a fragmented film writes all three empty.
+/// They are written rather than left out because ISO/IEC 14496-12 §8.5.1 requires them in every
+/// sample table, and readers that check do refuse a table missing one.
+fn empty_table(kind: &[u8; 4]) -> Outcome<Vec<u8>> {
+	let mut b = Vec::with_capacity(8);
+	b.extend_from_slice(&full(0, 0));
+	b.extend_from_slice(&0u32.to_be_bytes());	// Entry count.
+	bx(kind, &b)
+}
+
+/// The sample size table with nothing in it.
+///
+/// Not the same shape as the other three: it carries a common size before its count, and both are
+/// nought here -- no common size, and no samples to give one to.
+fn empty_stsz() -> Outcome<Vec<u8>> {
+	let mut b = Vec::with_capacity(12);
+	b.extend_from_slice(&full(0, 0));
+	b.extend_from_slice(&0u32.to_be_bytes());	// Sizes vary, so each is listed.
+	b.extend_from_slice(&0u32.to_be_bytes());	// Sample count.
+	bx(b"stsz", &b)
+}
+
+/// The visual sample entry of a fragmented film, ISO/IEC 14496-12 §8.5.2, carrying the codec's
+/// configuration box.
+///
+/// The same 78-byte lead-in as the whole-file writer's, with one difference: the compressor name is
+/// left as 32 zero bytes. The field is a counted string, so a leading nought is a name of no
+/// characters, which is what a file that has nothing to say there should write -- and it is what
+/// ffmpeg writes for a fragmented file.
+fn picture_entry(codec: &Codec, w: u16, h: u16) -> Outcome<Vec<u8>> {
+	if !codec.is_picture() {
+		return Err(err!(
+			"A visual sample entry was asked for around a sound codec."; Bug, Invalid));
+	}
+	let mut b = Vec::with_capacity(86);
+	b.extend_from_slice(&[0u8; 6]);			// Reserved.
+	b.extend_from_slice(&1u16.to_be_bytes());	// Data reference index: the first `dref` entry.
+	b.extend_from_slice(&0u16.to_be_bytes());	// Pre-defined.
+	b.extend_from_slice(&0u16.to_be_bytes());	// Reserved.
+	b.extend_from_slice(&[0u8; 12]);		// Pre-defined.
+	b.extend_from_slice(&w.to_be_bytes());
+	b.extend_from_slice(&h.to_be_bytes());
+	b.extend_from_slice(&RESOLUTION_72.to_be_bytes());
+	b.extend_from_slice(&RESOLUTION_72.to_be_bytes());
+	b.extend_from_slice(&0u32.to_be_bytes());	// Reserved.
+	b.extend_from_slice(&1u16.to_be_bytes());	// Frames a sample: one coded picture each.
+	b.extend_from_slice(&[0u8; 32]);		// Compressor name: none given.
+	b.extend_from_slice(&0x0018u16.to_be_bytes());	// Depth: colour with no alpha.
+	b.extend_from_slice(&0xFFFFu16.to_be_bytes());	// Pre-defined: -1.
+	b.extend_from_slice(&res!(bx(codec.config(), codec.record())));
+	bx(codec.entry(), &b)
+}
+
+/// The sound sample entry, ISO/IEC 14496-12 §8.5.2, carrying the elementary stream descriptor.
+///
+/// The channel count and the rate are stated here as well as inside the `AudioSpecificConfig` the
+/// descriptor carries, and the two must agree: a reader shows what this says and a decoder produces
+/// what the configuration says, so a disagreement is a file that reports stereo and plays mono.
+/// They are not checked against each other here because parsing the configuration is a decoder's
+/// job, and the caller that copied both out of one source container has them consistent already.
+fn sound_entry(codec: &Codec, track_id: u32, channels: u16, rate: u32) -> Outcome<Vec<u8>> {
+	if codec.is_picture() {
+		return Err(err!(
+			"A sound sample entry was asked for around a picture codec."; Bug, Invalid));
+	}
+	if rate >= 1 << 16 {
+		return Err(err!(
+			"Track {} is sampled at {} Hz, which will not fit the whole part of the 16.16 fixed \
+			point field a sound sample entry states its rate in.", track_id, rate;
+		Invalid, Input, Excessive));
+	}
+	let mut b = Vec::with_capacity(64);
+	b.extend_from_slice(&[0u8; 6]);			// Reserved.
+	b.extend_from_slice(&1u16.to_be_bytes());	// Data reference index: the first `dref` entry.
+	b.extend_from_slice(&[0u8; 8]);			// Reserved.
+	b.extend_from_slice(&channels.to_be_bytes());
+	b.extend_from_slice(&16u16.to_be_bytes());	// Sample size in bits, which this field fixes at 16.
+	b.extend_from_slice(&0u16.to_be_bytes());	// Pre-defined.
+	b.extend_from_slice(&0u16.to_be_bytes());	// Reserved.
+	b.extend_from_slice(&(rate << 16).to_be_bytes());
+	b.extend_from_slice(&res!(esds(track_id, codec.record())));
+	bx(codec.entry(), &b)
+}
+
+/// A descriptor's length, in the four-byte form ISO/IEC 14496-1 §8.3.3 allows.
+///
+/// A length is a run of bytes carrying seven bits each, the top bit saying another follows, so
+/// anything under 128 could be written in one byte. Four are written whatever the length, padded
+/// with `0x80` bytes that contribute nothing: that is what ffmpeg writes, and a reader that assumed
+/// the fixed width and stepped four bytes on regardless has been met often enough that the padded
+/// form is the safe one to write.
+fn desc_len(n: usize) -> Outcome<[u8; 4]> {
+	if n >= 1 << 28 {
+		return Err(err!(
+			"A descriptor of {} bytes will not fit the four seven-bit length bytes a descriptor \
+			header carries.", n;
+		Invalid, Input, Excessive));
+	}
+	Ok([
+		0x80 | ((n >> 21) & 0x7F) as u8,
+		0x80 | ((n >> 14) & 0x7F) as u8,
+		0x80 | ((n >> 7) & 0x7F) as u8,
+		(n & 0x7F) as u8,
+	])
+}
+
+/// The elementary stream descriptor box of a sound sample entry, ISO/IEC 14496-1 §7.2.6.
+///
+/// Its contents are a tree of descriptors rather than boxes, so nothing inside is length-prefixed
+/// the way the rest of the file is, and each length has to be added up from the ones below it. They
+/// are computed here rather than written down: 34 and 20 are right for the two-byte configuration
+/// of common AAC-LC and wrong for every longer one, and a wrong length there produces a file whose
+/// box tree is perfectly well formed and whose audio decoder will not start.
+fn esds(track_id: u32, config: &[u8]) -> Outcome<Vec<u8>> {
+	if config.is_empty() {
+		return Err(err!(
+			"Track {} carries no AudioSpecificConfig, and a decoder cannot be started without one.",
+			track_id;
+		Invalid, Input, Missing));
+	}
+	// Each descriptor is one tag byte, four length bytes, and its payload, so a descriptor adds
+	// five bytes to whatever it holds.
+	let dsi = config.len();
+	let dcd = 13 + 5 + dsi;
+	let es = 3 + 5 + dcd + 5 + 1;
+	let mut b = Vec::with_capacity(4 + 5 + es);
+	b.extend_from_slice(&full(0, 0));
+
+	b.push(0x03);					// ES_Descriptor.
+	b.extend_from_slice(&res!(desc_len(es)));
+	// The elementary stream's id, which is the track's: two numbering schemes for one thing, and
+	// they are kept equal so that nothing has to map between them.
+	b.extend_from_slice(&(track_id as u16).to_be_bytes());
+	b.push(0x00);					// No stream dependence, no URL, no OCR stream, priority 0.
+
+	b.push(0x04);					// DecoderConfigDescriptor.
+	b.extend_from_slice(&res!(desc_len(dcd)));
+	b.push(0x40);					// Object type: MPEG-4 audio.
+	// Stream type 5, AudioStream, in the top six bits; upstream 0; and the reserved bit, which the
+	// specification requires set. A zero there is what a hand-written `0x14` gives, and some
+	// decoders take the whole descriptor as malformed.
+	b.push(0x15);
+	b.extend_from_slice(&[0u8; 3]);			// Decoding buffer size, unstated.
+	b.extend_from_slice(&0u32.to_be_bytes());	// Maximum bitrate, unstated.
+	b.extend_from_slice(&0u32.to_be_bytes());	// Average bitrate, unstated.
+
+	b.push(0x05);					// DecoderSpecificInfo.
+	b.extend_from_slice(&res!(desc_len(dsi)));
+	b.extend_from_slice(config);
+
+	b.push(0x06);					// SLConfigDescriptor.
+	b.extend_from_slice(&res!(desc_len(1)));
+	b.push(0x02);					// Predefined: the MP4 file setting.
+
+	bx(b"esds", &b)
+}
+
+/// A track extends box, ISO/IEC 14496-12 §8.8.3: the defaults a track fragment falls back on.
+///
+/// Every default but the sample description index is nought, and nothing falls back on them,
+/// because each track run below states every value for every sample. Defaults are how a fragmented
+/// file is usually made smaller; they are also how a fragment ends up timed by a value set in a
+/// header written hours earlier, and the saving is four bytes a sample.
+fn trex(track_id: u32) -> Outcome<Vec<u8>> {
+	let mut b = Vec::with_capacity(24);
+	b.extend_from_slice(&full(0, 0));
+	b.extend_from_slice(&track_id.to_be_bytes());
+	b.extend_from_slice(&1u32.to_be_bytes());	// Sample description index; one-based.
+	b.extend_from_slice(&0u32.to_be_bytes());	// Default sample duration.
+	b.extend_from_slice(&0u32.to_be_bytes());	// Default sample size.
+	b.extend_from_slice(&0u32.to_be_bytes());	// Default sample flags.
+	bx(b"trex", &b)
+}
+
+/// The movie fragment header, ISO/IEC 14496-12 §8.8.5, carrying the fragment's sequence number.
+///
+/// The numbers count from one and rise by one, which is what lets a reader that has been handed
+/// fragments out of order, or has missed one, say so.
+fn mfhd(seq: u32) -> Outcome<Vec<u8>> {
+	let mut b = Vec::with_capacity(8);
+	b.extend_from_slice(&full(0, 0));
+	b.extend_from_slice(&seq.to_be_bytes());
+	bx(b"mfhd", &b)
+}
+
+/// One track's part of a fragment: which track it is, where its decode time has got to, and the
+/// run of samples itself.
+fn traf(track_id: u32, base: u64, off: i32, samples: &[Sample]) -> Outcome<Vec<u8>> {
+	let mut body = Vec::new();
+	body.extend_from_slice(&res!(tfhd(track_id)));
+	body.extend_from_slice(&res!(tfdt(base)));
+	body.extend_from_slice(&res!(trun(off, samples)));
+	bx(b"traf", &body)
+}
+
+/// The track fragment header, ISO/IEC 14496-12 §8.8.7.
+///
+/// The flags are `0x020000`, `default-base-is-moof`, and nothing else. That fixes the origin every
+/// data offset below is measured from at the first byte of the enclosing `moof`, which is a
+/// position the fragment knows about itself -- the alternative bases are file offsets, and a
+/// fragment that has been cut out and served on its own no longer knows where in a file it was.
+///
+/// Deliberately simpler than ffmpeg, which also sets the default duration, size and flags. Every
+/// per-sample value is written in the track run instead: four bytes a sample against a class of
+/// fault where a sample takes a default nobody meant it to have.
+fn tfhd(track_id: u32) -> Outcome<Vec<u8>> {
+	let mut b = Vec::with_capacity(8);
+	b.extend_from_slice(&full(0, 0x0002_0000));
+	b.extend_from_slice(&track_id.to_be_bytes());
+	bx(b"tfhd", &b)
+}
+
+/// The track fragment decode time, ISO/IEC 14496-12 §8.8.12, version 1.
+///
+/// The absolute decode time of the fragment's first sample, in the track's own timescale. Version 1
+/// carries it in 64 bits: a 32-bit field overflows after thirteen hours at 90 kHz, which is a
+/// running time a recording reaches, and the box exists precisely so that a reader handed one
+/// fragment can place it without the fragments before it.
+fn tfdt(base: u64) -> Outcome<Vec<u8>> {
+	let mut b = Vec::with_capacity(12);
+	b.extend_from_slice(&full(1, 0));
+	b.extend_from_slice(&base.to_be_bytes());
+	bx(b"tfdt", &b)
+}
+
+/// The track run, ISO/IEC 14496-12 §8.8.8: the samples of this fragment, one row each.
+///
+/// Version 1, so that the composition offsets are **signed**. That is the point of the version: a
+/// version-0 run states them unsigned, so a picture shown before the one decoded before it cannot
+/// be expressed without shifting the whole track, and [`Sample::off`] is an `i32` exactly because
+/// the shift is the caller's business and not the container's.
+///
+/// The flags are `0x000F01`: the data offset, then a duration, a size, flags and a composition
+/// offset for every sample. Nothing is defaulted, so nothing depends on a header written earlier.
+fn trun(off: i32, samples: &[Sample]) -> Outcome<Vec<u8>> {
+	let mut b = Vec::with_capacity(16 + samples.len() * 16);
+	b.extend_from_slice(&full(1, 0x0000_0F01));
+	b.extend_from_slice(&(samples.len() as u32).to_be_bytes());
+	b.extend_from_slice(&off.to_be_bytes());
+	for s in samples {
+		if s.data.len() > u32::MAX as usize {
+			return Err(err!(
+				"A sample of {} bytes will not fit the 32-bit size a track run states.",
+				s.data.len();
+			Invalid, Input, Excessive));
+		}
+		b.extend_from_slice(&s.dur.to_be_bytes());
+		b.extend_from_slice(&(s.data.len() as u32).to_be_bytes());
+		b.extend_from_slice(&(if s.sync { SAMPLE_SYNC } else { SAMPLE_DELTA }).to_be_bytes());
+		b.extend_from_slice(&s.off.to_be_bytes());
+	}
+	bx(b"trun", &b)
+}
+
 /// The file type box, ISO/IEC 14496-12 §4.3.
 ///
 /// `isom` as the major brand with a minor version of 512 is what the reference muxers write, and
@@ -851,13 +1695,35 @@ fn ftyp() -> Outcome<Vec<u8>> {
 /// tools, following an older convention, and a reader that takes the specification at its word then
 /// shows the count byte as the first character of the name.
 fn hdlr() -> Outcome<Vec<u8>> {
-	let mut b = Vec::with_capacity(33);
+	handler(b"vide", "VideoHandler")
+}
+
+/// The handler reference for a track of the given kind.
+///
+/// `vide` for a picture and `soun` for sound, which is the field a reader uses to decide which
+/// media header to expect and how to present the track at all.
+fn handler(kind: &[u8; 4], name: &str) -> Outcome<Vec<u8>> {
+	let mut b = Vec::with_capacity(32 + name.len());
 	b.extend_from_slice(&full(0, 0));
 	b.extend_from_slice(&0u32.to_be_bytes());	// Pre-defined.
-	b.extend_from_slice(b"vide");			// Handler type: visual.
+	b.extend_from_slice(kind);
 	b.extend_from_slice(&[0u8; 12]);		// Reserved.
-	b.extend_from_slice(b"VideoHandler\0");
+	b.extend_from_slice(name.as_bytes());
+	b.push(0);
 	bx(b"hdlr", &b)
+}
+
+/// The sound media header, ISO/IEC 14496-12 §8.4.5.3.
+///
+/// The counterpart of [`vmhd`], and a track carries exactly one of the two: which one is what
+/// `hdlr` has just declared, and a reader meeting the wrong one has been told two different things
+/// about the same track.
+fn smhd() -> Outcome<Vec<u8>> {
+	let mut b = Vec::with_capacity(8);
+	b.extend_from_slice(&full(0, 0));
+	b.extend_from_slice(&0u16.to_be_bytes());	// Balance: centre.
+	b.extend_from_slice(&0u16.to_be_bytes());	// Reserved.
+	bx(b"smhd", &b)
 }
 
 /// The video media header, ISO/IEC 14496-12 §8.4.5.2.
@@ -901,6 +1767,19 @@ fn dinf() -> Outcome<Vec<u8>> {
 ///
 /// `times` are presentation times **in decode order**, which is the order the frames come out of a
 /// container and the order they must be written in, in whatever unit the durations are given in.
+///
+/// # They must be relative to the track's start, and this does not rebase them
+///
+/// A composition offset is the distance between a picture's decoding and its showing, and it is
+/// meant to be a handful of frames. Decoding here begins at nought, so handing this the *absolute*
+/// times of a film that starts an hour in gives every sample an offset of an hour: representable,
+/// wrong in meaning, and the sort of thing that plays correctly on the machine that wrote it and
+/// puzzles everything else. Subtract the first sample's time before calling, and put where the
+/// track actually begins in [`Stream::start`], which is what that field is for.
+///
+/// This deliberately does **not** rebase, because it cannot tell the two cases apart: the smallest
+/// raw difference is a real measurement when a track begins at nought, and rebasing on it would
+/// quietly discard a genuine reordering delay.
 ///
 /// # The shift, and why the whole track moves
 ///
@@ -2647,6 +3526,245 @@ mod tests {
 			res!(t.push(Sample { data: nal(8), dur: 40, sync: i == 0, off: 0 }));
 		}
 		req!(res!(t.ctts()).is_none(), true);
+		Ok(())
+	}
+
+	/// An `AudioSpecificConfig` for AAC-LC at 44,100 Hz in two channels, ISO/IEC 14496-3 §1.6.2.1:
+	/// object type 2 in five bits, sampling frequency index 4 in four, channel configuration 2 in
+	/// four, and three bits of padding.
+	const AAC_LC_44100_STEREO: [u8; 2] = [0x12, 0x10];
+
+	/// A picture stream of the fixture geometry, on a millisecond timescale.
+	fn picture_stream() -> Stream {
+		Stream {
+			media:		Media::Picture { w: 64, h: 48 },
+			timescale:	1000,
+			codec:		Codec::Avc(avcc()),
+			start:		0,
+		}
+	}
+
+	/// A sound stream on its own sampling rate as its timescale, beginning after the pictures do.
+	fn sound_stream(start: u64) -> Stream {
+		Stream {
+			media:		Media::Sound { channels: 2, rate: 44_100 },
+			timescale:	44_100,
+			codec:		Codec::Aac(AAC_LC_44100_STEREO.to_vec()),
+			start,
+		}
+	}
+
+	/// How many boxes of the given type sit at the top level of a box body.
+	fn count_boxes(buf: &[u8], kind: &[u8; 4]) -> Outcome<usize> {
+		let mut at = 0usize;
+		let mut n = 0usize;
+		while at + 8 <= buf.len() {
+			let size = u32::from_be_bytes([buf[at], buf[at + 1], buf[at + 2], buf[at + 3]]) as usize;
+			if size < 8 || at + size > buf.len() {
+				return Err(err!(
+					"A box of {} bytes at offset {} does not fit the {} bytes given.",
+					size, at, buf.len();
+				Test, Invalid));
+			}
+			if &buf[at + 4..at + 8] == kind {
+				n += 1;
+			}
+			at += size;
+		}
+		Ok(n)
+	}
+
+	/// Each track fragment of a fragment, as the decode time its `tfdt` states and the `data_offset`
+	/// its `trun` states, in the order the track fragments are written.
+	///
+	/// The boxes are walked by their sizes rather than found by searching for their names, because
+	/// a fragment holds two of each and a search finds only the first.
+	fn frag_runs(frag: &[u8]) -> Outcome<Vec<(u64, i32)>> {
+		if frag.len() < 8 || &frag[4..8] != b"moof" {
+			return Err(err!("A fragment must begin with a movie fragment box."; Test, Invalid));
+		}
+		let end = u32::from_be_bytes([frag[0], frag[1], frag[2], frag[3]]) as usize;
+		if end > frag.len() {
+			return Err(err!(
+				"The movie fragment box claims {} bytes and the whole fragment is {}.",
+				end, frag.len();
+			Test, Invalid));
+		}
+		let mut out = Vec::new();
+		let mut at = 8usize;
+		while at + 8 <= end {
+			let n = u32::from_be_bytes([frag[at], frag[at + 1], frag[at + 2], frag[at + 3]]) as usize;
+			if n < 8 || at + n > end {
+				return Err(err!(
+					"A box of {} bytes at offset {} does not fit the movie fragment.", n, at;
+				Test, Invalid));
+			}
+			if &frag[at + 4..at + 8] == b"traf" {
+				let mut time: Option<u64> = None;
+				let mut off: Option<i32> = None;
+				let mut k = at + 8;
+				while k + 8 <= at + n {
+					let m = u32::from_be_bytes([frag[k], frag[k + 1], frag[k + 2], frag[k + 3]])
+						as usize;
+					if m < 8 || k + m > at + n {
+						return Err(err!(
+							"A box of {} bytes at offset {} does not fit the track fragment.", m, k;
+						Test, Invalid));
+					}
+					// A `tfdt` body is a full box and a 64-bit time; a `trun` body is a full box,
+					// the sample count, and then the offset.
+					if &frag[k + 4..k + 8] == b"tfdt" && m >= 20 {
+						let o = k + 12;
+						time = Some(u64::from_be_bytes([
+							frag[o], frag[o + 1], frag[o + 2], frag[o + 3],
+							frag[o + 4], frag[o + 5], frag[o + 6], frag[o + 7],
+						]));
+					}
+					if &frag[k + 4..k + 8] == b"trun" && m >= 20 {
+						let o = k + 16;
+						off = Some(i32::from_be_bytes([
+							frag[o], frag[o + 1], frag[o + 2], frag[o + 3],
+						]));
+					}
+					k += m;
+				}
+				match (time, off) {
+					(Some(t), Some(o))	=> out.push((t, o)),
+					_			=> return Err(err!(
+						"The track fragment at offset {} carries no decode time or no track run.",
+						at;
+					Test, Missing)),
+				}
+			}
+			at += n;
+		}
+		Ok(out)
+	}
+
+	/// The initialisation segment describes every stream once: a `trak` each under `moov` and a
+	/// `trex` each under `mvex`, and a next track id one past the highest in use.
+	///
+	/// A missing `trex` is the failure worth guarding: the file opens, the track is listed, and
+	/// every fragment of it is ignored, because without the extends box the empty sample tables in
+	/// `moov` are the whole of what the track is said to hold.
+	#[test]
+	fn test_a_fragmented_head_describes_every_stream_21() -> Outcome<()> {
+		let f = res!(Fragments::new(vec![picture_stream(), sound_stream(0)]));
+		let head = res!(f.head());
+
+		let ftyp = match top(&head, b"ftyp") {
+			Some(b)	=> b,
+			None	=> return Err(err!("No file type box was written."; Test, Missing)),
+		};
+		req!(&ftyp[0..4], b"iso5" as &[u8], "the major brand is not the fragmented one");
+
+		let moov = match top(&head, b"moov") {
+			Some(b)	=> b,
+			None	=> return Err(err!("No movie box was written."; Test, Missing)),
+		};
+		req!(res!(count_boxes(&moov, b"trak")), 2usize, "one track a stream");
+		req!(res!(count_boxes(&moov, b"mvex")), 1usize, "one movie extends box");
+
+		let mvex = match top(&moov, b"mvex") {
+			Some(b)	=> b,
+			None	=> return Err(err!("No movie extends box was written."; Test, Missing)),
+		};
+		req!(res!(count_boxes(&mvex, b"trex")), 2usize, "one track extends box a stream");
+
+		// The next track id is the last field of the movie header, and it must exceed both ids in
+		// use rather than count them.
+		let mvhd = match top(&moov, b"mvhd") {
+			Some(b)	=> b,
+			None	=> return Err(err!("No movie header was written."; Test, Missing)),
+		};
+		let n = mvhd.len();
+		req!(u32::from_be_bytes([mvhd[n - 4], mvhd[n - 3], mvhd[n - 2], mvhd[n - 1]]), 3u32);
+		Ok(())
+	}
+
+	/// The first track run's data offset clears the movie fragment box and its media header, and
+	/// the media box holds exactly the samples.
+	///
+	/// The offset is measured from the first byte of the `moof`, because `default-base-is-moof` is
+	/// the only flag the track fragment header sets. An offset measured from anywhere else is a
+	/// file that opens, reports the right number of frames, and decodes rubbish.
+	#[test]
+	fn test_the_first_data_offset_clears_the_moof_22() -> Outcome<()> {
+		let mut f = res!(Fragments::new(vec![picture_stream()]));
+		let sizes = [30usize, 9, 17];
+		let mut samples = Vec::new();
+		for (i, n) in sizes.into_iter().enumerate() {
+			samples.push(Sample { data: nal(n), dur: 40, sync: i == 0, off: 0 });
+		}
+		let frag = res!(f.next(vec![(0, samples)]));
+
+		req!(&frag[4..8], b"moof" as &[u8]);
+		let moof = u32::from_be_bytes([frag[0], frag[1], frag[2], frag[3]]) as usize;
+		let runs = res!(frag_runs(&frag));
+		req!(runs.len(), 1usize);
+		req!(runs[0].1, moof as i32 + 8, "the data offset does not clear the moof and mdat header");
+
+		// The media box follows the movie fragment immediately, and its payload is the samples and
+		// nothing else: each is its own bytes with a four-byte NAL length in front.
+		req!(&frag[moof + 4..moof + 8], b"mdat" as &[u8]);
+		let payload: usize = sizes.iter().map(|n| n + 4).sum();
+		req!(u32::from_be_bytes([
+			frag[moof], frag[moof + 1], frag[moof + 2], frag[moof + 3],
+		]) as usize, payload + 8);
+		req!(frag.len(), moof + 8 + payload);
+
+		// And the offset names the first byte of the first sample, which is its NAL length field.
+		let at = runs[0].1 as usize;
+		req!(u32::from_be_bytes([
+			frag[at], frag[at + 1], frag[at + 2], frag[at + 3],
+		]) as usize, sizes[0]);
+		Ok(())
+	}
+
+	/// A second track fragment's data offset is the first's plus the first's sample bytes, and each
+	/// fragment states where its own streams have got to.
+	///
+	/// The two halves are one fault in two places. Both offsets are measured from the same origin,
+	/// so the second is only right if the first's samples have been counted exactly; and both
+	/// streams' decode times carry on across fragments, each in its own timescale and from its own
+	/// start, so a stream that began late must still be late in the second fragment.
+	#[test]
+	fn test_a_later_traf_starts_after_the_earlier_bytes_23() -> Outcome<()> {
+		let mut f = res!(Fragments::new(vec![picture_stream(), sound_stream(512)]));
+		let pictures = |first: bool| -> Vec<Sample> {
+			let mut v = Vec::new();
+			for i in 0..3usize {
+				v.push(Sample { data: nal(20 + i), dur: 40, sync: first && i == 0, off: 0 });
+			}
+			v
+		};
+		let sound = || -> Vec<Sample> {
+			vec![Sample::key(vec![0x21; 30], 1024), Sample::key(vec![0x21; 27], 1024)]
+		};
+		let first = res!(f.next(vec![(0, pictures(true)), (1, sound())]));
+
+		let moof = u32::from_be_bytes([first[0], first[1], first[2], first[3]]) as usize;
+		let runs = res!(frag_runs(&first));
+		req!(runs.len(), 2usize);
+		req!(runs[0].1, moof as i32 + 8);
+		// The pictures come to three NAL units of 20, 21 and 22 bytes, each with a four-byte length
+		// in front of it: 75 bytes, after which the sound begins.
+		req!(runs[1].1 - runs[0].1, 75i32, "the second run does not follow the first's bytes");
+		req!(runs[0].0, 0u64, "the pictures do not begin at nought");
+		req!(runs[1].0, 512u64, "the sound does not begin where its stream says");
+
+		// The second fragment carries the next sequence number, and each stream's decode time has
+		// moved on by that stream's own durations: three pictures of 40 ticks at 1000 a second, and
+		// two sound frames of 1024 at 44,100.
+		let second = res!(f.next(vec![(0, pictures(false)), (1, sound())]));
+		let seq = res!(want_box(&second, b"mfhd"));
+		req!(u32::from_be_bytes([
+			second[seq + 4], second[seq + 5], second[seq + 6], second[seq + 7],
+		]), 2u32);
+		let runs = res!(frag_runs(&second));
+		req!(runs.len(), 2usize);
+		req!(runs[0].0, 120u64);
+		req!(runs[1].0, 512u64 + 2048);
 		Ok(())
 	}
 }
