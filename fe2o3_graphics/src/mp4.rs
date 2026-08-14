@@ -40,9 +40,12 @@
 //!
 //! `ftyp`, `moov` and everything under it, and `mdat`, are ISO/IEC 14496-12 (the ISO base media
 //! file format). The `avc1` sample entry and the `avcC` configuration box it carries are ISO/IEC
-//! 14496-15 (the AVC file format). The sequence parameter set whose geometry is checked against the
-//! caller's declared dimensions is ITU-T H.264 §7.3.2.1.1. Each non-obvious constant below names
-//! the clause it comes from.
+//! 14496-15 (the AVC file format), and the `hvc1` entry and its `hvcC` box are ISO/IEC 14496-15
+//! §8.3 and §8.4. The sequence parameter set whose geometry is checked against the caller's
+//! declared dimensions is ITU-T H.264 §7.3.2.1.1 for AVC and ITU-T H.265 §7.3.2.2 for HEVC, the
+//! latter read by [`crate::hevc`]. Each non-obvious constant below names the clause it comes from.
+
+use crate::hevc;
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -105,7 +108,8 @@ pub struct Sample {
 	pub data:	Vec<u8>,
 	/// How long the sample is shown, in the track's timescale.
 	pub dur:	u32,
-	/// Whether decoding may begin here: a sync sample, which for AVC is an IDR picture.
+	/// Whether decoding may begin here: a sync sample, which is an IDR picture for AVC and an IRAP
+	/// picture -- an IDR, a broken link, or a clean random access picture -- for HEVC.
 	pub sync:	bool,
 	/// How far after its decoding time this sample is shown, in the track's timescale.
 	///
@@ -198,15 +202,19 @@ pub struct Stream {
 
 /// How a track's samples are coded, and the decoder configuration that goes with them.
 ///
-/// An enum rather than a trait object, so that adding HEVC later is a variant and a match arm
-/// rather than a second dispatch mechanism, and so that a caller can see from the type what the
-/// writer will accept.
+/// An enum rather than a trait object, so that adding a codec is a variant and a match arm rather
+/// than a second dispatch mechanism, and so that a caller can see from the type what the writer
+/// will accept. There is deliberately no catch-all arm anywhere it is matched on: the next codec
+/// added must be considered at every site rather than take whatever the last one does.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Codec {
 	/// H.264, carrying the `AVCDecoderConfigurationRecord` of ISO/IEC 14496-15 §5.3.3.1 verbatim:
 	/// the bytes a `VideoEncoder` hands back as its output's description, or the `avcC` box body
 	/// lifted out of another file.
 	Avc(Vec<u8>),
+	/// HEVC, carrying the `HEVCDecoderConfigurationRecord` of ISO/IEC 14496-15 §8.3.3.1
+	/// verbatim -- the `hvcC` box body lifted out of another file.
+	Hevc(Vec<u8>),
 	/// AAC, carrying the `AudioSpecificConfig` of ISO/IEC 14496-3 §1.6.2.1 verbatim: two bytes for
 	/// the common profiles, naming the object type, the sampling frequency and the channel
 	/// configuration. It is what a Matroska track entry's `CodecPrivate` holds for `A_AAC`, so a
@@ -222,33 +230,58 @@ impl Codec {
 	/// Whether the stream is a picture, which decides the boxes its track is described by.
 	pub fn is_picture(&self) -> bool {
 		match self {
-			Self::Avc(_) => true,
-			Self::Aac(_) => false,
+			Self::Avc(_)	=> true,
+			Self::Hevc(_)	=> true,
+			Self::Aac(_)	=> false,
 		}
 	}
 
-	/// The four-character code of the sample entry this codec is described by, ISO/IEC 14496-15
-	/// §5.4.2.1.
+	/// The four-character code of the sample entry this codec is described by: ISO/IEC 14496-15
+	/// §5.4.2.1 for AVC and §8.4.1 for HEVC.
+	///
+	/// `hvc1` rather than `hev1`. The two differ in one promise: `hvc1` states that every parameter
+	/// set is in the sample entry and none arrives in the samples, while `hev1` allows them in
+	/// either place. A repackaging from a container that keeps the sets in a `CodecPrivate` -- which
+	/// is what Matroska does, and what this writer is handed -- produces exactly the first, so that
+	/// is what is claimed. `hev1` would be true as well but weaker, and it makes a reader look for
+	/// sets in the samples that are not there.
 	fn entry(&self) -> &'static [u8; 4] {
 		match self {
-			Self::Avc(_) => b"avc1",
-			Self::Aac(_) => b"mp4a",
+			Self::Avc(_)	=> b"avc1",
+			Self::Hevc(_)	=> b"hvc1",
+			Self::Aac(_)	=> b"mp4a",
 		}
 	}
 
 	/// The four-character code of the configuration box carried inside that sample entry.
 	fn config(&self) -> &'static [u8; 4] {
 		match self {
-			Self::Avc(_) => b"avcC",
-			Self::Aac(_) => b"esds",
+			Self::Avc(_)	=> b"avcC",
+			Self::Hevc(_)	=> b"hvcC",
+			Self::Aac(_)	=> b"esds",
 		}
 	}
 
 	/// The configuration record's bytes, written into the configuration box unchanged.
 	fn record(&self) -> &[u8] {
 		match self {
-			Self::Avc(rec) => rec,
-			Self::Aac(rec) => rec,
+			Self::Avc(rec)	=> rec,
+			Self::Hevc(rec)	=> rec,
+			Self::Aac(rec)	=> rec,
+		}
+	}
+
+	/// The name a visual sample entry's compressor field displays.
+	///
+	/// Descriptive only -- nothing decodes from it -- but it is a field some viewers show, so it
+	/// says what the stream is rather than what the first codec this writer supported was. An empty
+	/// name is written as a count of nought, which is what a file with nothing to say there should
+	/// carry, and is what sound gets because sound has no visual sample entry to name.
+	fn picture_name(&self) -> &'static str {
+		match self {
+			Self::Avc(_)	=> "AVC Coding",
+			Self::Hevc(_)	=> "HEVC Coding",
+			Self::Aac(_)	=> "",
 		}
 	}
 
@@ -274,6 +307,11 @@ impl Codec {
 				}
 				Ok(n)
 			},
+			// The whole record is walked to reach a field that sits at a fixed offset in it,
+			// because [`crate::hevc::config`] is the reader this crate already holds to the
+			// specification and a second hand-rolled one would be a second thing to be wrong. It
+			// also means a malformed record is refused here rather than trusted as far as byte 21.
+			Self::Hevc(rec) => Ok(res!(hevc::config(rec)).length_size),
 			Self::Aac(_) => Err(err!(
 				"A sound sample is a coded frame and is not tiled by NAL length prefixes, so \
 				asking for its prefix width is a question about the wrong kind of stream.";
@@ -368,6 +406,51 @@ impl Codec {
 				};
 				sps_geometry(sps)
 			},
+			Self::Hevc(rec) => {
+				let cfg = res!(hevc::config(rec));
+				// The first sequence parameter set the record carries. A film's record often carries
+				// several, and a slice names which of them it was coded against, but every set in
+				// one record describes the same pictures at the same size -- a change of geometry
+				// mid-film is a new sample entry, not a new set in this one.
+				//
+				// `Unit::body` is the payload with the emulation prevention **already** undone:
+				// `hevc::unit` builds it through `hevc::rbsp` and keeps the escaped form beside it
+				// as `Unit::raw`. So nothing is unescaped again here. Doing it twice would take a
+				// genuine `00 00 03` out of the syntax and give a size that is wrong and plausible.
+				let mut sps = None;
+				let mut found: Vec<String> = Vec::with_capacity(cfg.sets.len());
+				for unit in &cfg.sets {
+					if unit.kind == hevc::nal::SPS && sps.is_none() {
+						sps = Some(res!(hevc::sps(&unit.body)));
+					}
+					found.push(unit.kind.to_string());
+				}
+				let sps = match sps {
+					Some(s) => s,
+					None => {
+						let carries = if found.is_empty() {
+							fmt!("no parameter sets at all")
+						} else {
+							fmt!("NAL unit types {}", found.join(", "))
+						};
+						return Err(err!(
+							"The HEVC decoder configuration record carries no sequence parameter \
+							set, which is NAL unit type {}, so the frame geometry it should \
+							describe is absent. It carries {}.", hevc::nal::SPS, carries;
+						Invalid, Input, Missing));
+					},
+				};
+				// `hevc::sps` refuses a picture wider or taller than 16,384, so this cannot fire
+				// today. It is written because the cast below is silent where that ceiling is not,
+				// and the two are in different crates' worth of code from each other.
+				if sps.width > u16::MAX as u32 || sps.height > u16::MAX as u32 {
+					return Err(err!(
+						"The sequence parameter set codes a frame of {} by {} pixels, beyond what a \
+						visual sample entry can state.", sps.width, sps.height;
+					Invalid, Input, Excessive));
+				}
+				Ok((sps.width as u16, sps.height as u16))
+			},
 		}
 	}
 
@@ -381,11 +464,16 @@ impl Codec {
 	/// separated by start codes rather than lengths, handed straight through; that produces a file
 	/// every demuxer accepts and no decoder plays, so it is worth naming.
 	fn check_sample(&self, i: usize, data: &[u8]) -> Outcome<()> {
-		// A coded sound frame has no internal framing to check against: its length is the whole of
-		// what says where it ends. Refusing an empty one is done by the caller, and there is
-		// nothing else here that can be told from the bytes.
-		if let Self::Aac(_) = self {
-			return Ok(());
+		match self {
+			// A coded sound frame has no internal framing to check against: its length is
+			// the whole of what says where it ends. Refusing an empty one is done by the
+			// caller, and there is nothing else here that can be told from the bytes.
+			Self::Aac(_) => return Ok(()),
+			// Both picture codecs are checked by the same walk, because both are tiled by
+			// length prefixes and the framing is the whole of what is being tested. The NAL
+			// unit types inside differ and nothing here reads one. Written as a match rather
+			// than a test for sound, so that a codec added later has to say which it is.
+			Self::Avc(_) | Self::Hevc(_) => {},
 		}
 		let n = res!(self.nal_len());
 		let mut at = 0usize;
@@ -578,7 +666,7 @@ impl Track {
 			Invalid, Input, Excessive));
 		}
 
-		let ftyp = res!(ftyp());
+		let ftyp = res!(ftyp(&self.codec));
 		// The `mdat` header is eight bytes, unless the media will not fit a 32-bit size, in which
 		// case ISO/IEC 14496-12 §4.2 puts a 64-bit `largesize` after the type and writes 1 in the
 		// size field.
@@ -770,8 +858,9 @@ impl Track {
 		b.extend_from_slice(&1u16.to_be_bytes());	// Frames a sample: one coded picture each.
 		// A fixed 32-byte field holding a counted string: a length byte, then that many bytes of
 		// name, then padding. Not a null-terminated string, and writing one there is a common way
-		// to put rubbish in front of a viewer that displays the field.
-		let name = b"AVC Coding";
+		// to put rubbish in front of a viewer that displays the field. The name comes from the
+		// codec, because a fixed one would go on saying "AVC Coding" over an HEVC track.
+		let name = self.codec.picture_name().as_bytes();
 		let mut cname = [0u8; 32];
 		cname[0] = name.len() as u8;
 		cname[1..1 + name.len()].copy_from_slice(name);
@@ -1407,6 +1496,13 @@ impl Fragments {
 /// sample table is in `moov`, which is exactly what this file does not have. `iso5` with a minor
 /// version of 512, and `iso5`, `iso6` and `mp41` behind it, is what ffmpeg writes for a fragmented
 /// file and so is the list the readers of one have been tried against.
+///
+/// **No `hvc1` for an HEVC film**, for three reasons. The brand is a conformance claim about the
+/// whole file (ISO/IEC 14496-15 §8.4.1) and a [`Fragments`] may carry several streams, only one of
+/// which is the picture; nothing here is handed the codec anyway, which is the same reason `avc1`
+/// is absent; and ffmpeg writes these same three brands and no fourth for a fragmented HEVC file,
+/// so adding one would be a list no reader of such a file has been tried against. A reader finds
+/// the codec in the sample entry, which is where the answer belongs.
 fn ftyp_frag() -> Outcome<Vec<u8>> {
 	let mut b = Vec::with_capacity(20);
 	b.extend_from_slice(b"iso5");
@@ -1678,13 +1774,25 @@ fn trun(off: i32, samples: &[Sample]) -> Outcome<Vec<u8>> {
 /// `isom` as the major brand with a minor version of 512 is what the reference muxers write, and
 /// the compatible brands list `isom`, `iso2`, `avc1` and `mp41`: a reader that knows only the AVC
 /// file format, and one that knows only version 1 of MP4, can both see a brand they recognise.
-fn ftyp() -> Outcome<Vec<u8>> {
+/// The third brand names the coding, and naming the wrong one is a false claim.
+///
+/// A brand in this list is a statement that the file conforms to that specification, so `avc1` on a
+/// film coded in HEVC says something untrue about it -- harmlessly to most readers, and the sort of
+/// untruth a strict one is entitled to refuse. ffmpeg agrees it matters: for a whole-file HEVC film
+/// it writes `isom iso2 mp41` and drops `avc1`, which it does include for H.264.
+fn ftyp(codec: &Codec) -> Outcome<Vec<u8>> {
 	let mut b = Vec::with_capacity(24);
 	b.extend_from_slice(b"isom");
 	b.extend_from_slice(&512u32.to_be_bytes());
 	b.extend_from_slice(b"isom");
 	b.extend_from_slice(b"iso2");
-	b.extend_from_slice(b"avc1");
+	match codec {
+		Codec::Avc(_)	=> b.extend_from_slice(b"avc1"),
+		Codec::Hevc(_)	=> b.extend_from_slice(b"hvc1"),
+		// Sound alone claims no picture coding, and the brand count changes with
+		// it rather than a placeholder being written.
+		Codec::Aac(_)	=> {},
+	}
 	b.extend_from_slice(b"mp41");
 	bx(b"ftyp", &b)
 }
@@ -3070,7 +3178,11 @@ mod tests {
 	/// `stsc`: 8 + 4 + 4 count + 12 for the one entry = 28.
 	#[test]
 	fn test_fixed_box_sizes_02() -> Outcome<()> {
-		req!(res!(ftyp()).len(), 32usize);
+		// Four brands for either picture coding, so the size is the same and it
+		// is the third brand that differs; sound alone drops one and is shorter.
+		req!(res!(ftyp(&Codec::Avc(avcc()))).len(), 32usize);
+		req!(res!(ftyp(&Codec::Hevc(hvcc(&[(hevc::nal::SPS, &HEVC_SPS[2..])])))).len(), 32usize);
+		req!(res!(ftyp(&Codec::Aac(vec![0x11, 0x90]))).len(), 28usize);
 		req!(res!(hdlr()).len(), 45usize);
 		req!(res!(vmhd()).len(), 20usize);
 		req!(res!(stsc()).len(), 28usize);
@@ -3765,6 +3877,119 @@ mod tests {
 		req!(runs.len(), 2usize);
 		req!(runs[0].0, 120u64);
 		req!(runs[1].0, 512u64 + 2048);
+		Ok(())
+	}
+
+	/// The sequence parameter set of a 96 by 64 HEVC stream, as libx265 wrote it: the NAL unit of
+	/// type 33 out of `ffmpeg -f lavfi -i testsrc=size=96x64:rate=10 -frames:v 2 -pix_fmt yuv420p
+	/// -c:v libx265 -f hevc`. Main profile, 8-bit 4:2:0, one temporal layer.
+	///
+	/// Four of its bytes are emulation prevention -- the `03` of each `00 00 03`, at offsets 7, 12,
+	/// 15 and 33 -- and the first of them sits well before the field that codes the width, so a
+	/// reading that left them in place answers some other size rather than failing. The unescaped
+	/// payload happens to carry no `03` at all, so the opposite fault, unescaping twice, is a
+	/// no-op on this particular set and is **not** exercised by it. The two bytes at the front are
+	/// the NAL unit header, which is what a record's parameter set array carries.
+	const HEVC_SPS: [u8; 40] = [
+		0x42, 0x01, 0x01, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x90,
+		0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x1E, 0xA0, 0x30,
+		0x81, 0x05, 0x96, 0x56, 0x69, 0x24, 0xCA, 0xF0, 0x16, 0x80,
+		0x80, 0x00, 0x00, 0x03, 0x00, 0x80, 0x00, 0x00, 0x05, 0x04,
+	];
+
+	/// The matching picture parameter set, from the same stream.
+	///
+	/// Nothing under test reads it. It is here so that the record has the shape a real one has, and
+	/// so that the refusal below has a parameter set to carry that is not a sequence parameter set.
+	const HEVC_PPS: [u8; 7] = [0x44, 0x01, 0xC1, 0x72, 0xB4, 0x22, 0x40];
+
+	/// The 22 fixed fields of an `HEVCDecoderConfigurationRecord`, copied verbatim out of the
+	/// `hvcC` box ffmpeg wrote when it muxed that same stream into an MP4.
+	///
+	/// Version 1, then the profile, tier and level of the sets above, then the sampling and the
+	/// depths, and finally `0x0F`: one temporal layer, nested, and a four-byte NAL length.
+	const HVCC_HEAD: [u8; 22] = [
+		0x01, 0x01, 0x60, 0x00, 0x00, 0x00, 0x90, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x1E, 0xF0, 0x00, 0xFC, 0xFD, 0xF8, 0xF8, 0x00, 0x00, 0x0F,
+	];
+
+	/// A record around the given parameter sets, each as `(NAL unit type, bytes)`, one array
+	/// apiece: the array's type byte, a count of one, and the set behind a two-byte length.
+	///
+	/// The type byte's top bit is `array_completeness`, which is set because a `hvc1` entry states
+	/// that these are all the sets there are; the bit below it is reserved and nought. That is the
+	/// byte ffmpeg writes -- `0xA0`, `0xA1`, `0xA2` for the three arrays of the record above.
+	fn hvcc(sets: &[(u8, &[u8])]) -> Vec<u8> {
+		let mut rec = HVCC_HEAD.to_vec();
+		rec.push(sets.len() as u8);
+		for &(kind, set) in sets {
+			rec.push(0x80 | kind);
+			rec.extend_from_slice(&1u16.to_be_bytes());	// One set in this array.
+			rec.extend_from_slice(&(set.len() as u16).to_be_bytes());
+			rec.extend_from_slice(set);
+		}
+		rec
+	}
+
+	/// An `hvcC` gives the size its sequence parameter set codes, and a track is held to it.
+	///
+	/// The size is not this crate's: 96 by 64 is what FFmpeg was given on the command line that
+	/// produced the parameter set, and what `ffprobe` reads back out of the stream it produced.
+	/// The set carries emulation prevention bytes before the field that codes the width, so a
+	/// reading that left them in place answers some other size rather than failing.
+	#[test]
+	fn test_an_hvcc_yields_the_size_its_sps_codes_24() -> Outcome<()> {
+		let sets: [(u8, &[u8]); 2] = [(33, &HEVC_SPS[..]), (34, &HEVC_PPS[..])];
+		let c = Codec::Hevc(hvcc(&sets));
+		req!(res!(c.geometry()), (96u16, 64u16));
+		req!(res!(c.nal_len()), 4usize);
+		req!(c.is_picture(), true);
+		req!(c.entry(), b"hvc1");
+		req!(c.config(), b"hvcC");
+
+		// A track is accepted at the size the set codes and refused at any other, which is the
+		// whole-file writer's existing check working over HEVC with nothing added to it.
+		req!(Track::new(96, 64, 1000, c.clone()).is_ok(), true, "the coded size was refused");
+		req!(Track::new(64, 48, 1000, c.clone()).is_err(), true,
+			"a track declared 64 by 48 over a 96 by 64 stream was accepted");
+
+		// And the tiling check is reached for HEVC as it is for AVC. An elementary stream handed
+		// straight through is the fault worth naming: it produces a file every demuxer accepts and
+		// no decoder plays.
+		let mut t = res!(Track::new(96, 64, 1000, c));
+		match t.push(Sample::key(vec![0, 0, 0, 1, 0x26, 0x01, 0xAF], 40)) {
+			Ok(_)	=> return Err(err!("An Annex B HEVC sample was accepted."; Test)),
+			Err(e)	=> req!(e.to_string().contains("Annex B"), true,
+				"The message does not name the format that was handed over."),
+		}
+		Ok(())
+	}
+
+	/// A record carrying no sequence parameter set is refused, and the refusal names the type that
+	/// is missing and the types that are there.
+	///
+	/// Naming both is the point. "No geometry" on its own leaves a caller guessing whether the
+	/// record was empty, truncated, or full of the wrong sets, and the three are fixed differently.
+	#[test]
+	fn test_an_hvcc_with_no_sps_is_refused_by_name_25() -> Outcome<()> {
+		let only_pps: [(u8, &[u8]); 1] = [(34, &HEVC_PPS[..])];
+		let msg = match Codec::Hevc(hvcc(&only_pps)).geometry() {
+			Ok((w, h))	=> return Err(err!(
+				"A record carrying only a picture parameter set gave a geometry of {} by {}.",
+				w, h; Test)),
+			Err(e)		=> e.to_string(),
+		};
+		req!(msg.contains("33"), true, "The message does not name the set that is missing.");
+		req!(msg.contains("34"), true, "The message does not name what the record does carry.");
+
+		let msg = match Codec::Hevc(hvcc(&[])).geometry() {
+			Ok((w, h))	=> return Err(err!(
+				"A record carrying no parameter sets at all gave a geometry of {} by {}.",
+				w, h; Test)),
+			Err(e)		=> e.to_string(),
+		};
+		req!(msg.contains("no parameter sets at all"), true,
+			"The message does not say that the record carries nothing.");
 		Ok(())
 	}
 }

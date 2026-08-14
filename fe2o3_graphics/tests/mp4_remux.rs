@@ -97,10 +97,10 @@ fn a_repackaged_film_plays() -> Outcome<()> {
 				"{}: ffprobe would not read the film written from it.",
 				film.display(); Invalid, Mismatch)),
 		};
-		if said.0 != "h264" {
+		if said.0 != made.coding {
 			return Err(err!(
-				"{}: the written film says it holds {} rather than h264.",
-				film.display(), said.0; Invalid, Mismatch));
+				"{}: the written film says it holds {} rather than {}.",
+				film.display(), said.0, made.coding; Invalid, Mismatch));
 		}
 		if said.1 != made.w as u32 || said.2 != made.h as u32 {
 			return Err(err!(
@@ -155,9 +155,9 @@ fn a_repackaged_film_plays() -> Outcome<()> {
 			}
 		}
 
-		println!("{}: {} frames repackaged, {} by {}, all decode, shown in order \
-			(whole film delayed {} ticks)",
-			film.display(), made.count, made.w, made.h, shift);
+		println!("{}: {} {} frames repackaged, {} by {}, all decode, shown in \
+			order (whole film delayed {} ticks)",
+			film.display(), made.count, made.coding, made.w, made.h, shift);
 		done += 1;
 	}
 
@@ -179,6 +179,8 @@ struct Made {
 	count:	usize,
 	/// The presentation times the source stated, in decode order.
 	times:	Vec<i64>,
+	/// What a player should call the coding of what was written.
+	coding:	&'static str,
 }
 
 /// Reads a film's picture frames and writes them into an MP4, decoding nothing.
@@ -196,9 +198,13 @@ fn repackage(path: &Path, want: usize) -> Outcome<Option<Made>> {
 		Some(t) => t,
 		None => return Ok(None),
 	};
-	if track.codec() != "V_MPEG4/ISO/AVC" {
-		return Ok(None);
-	}
+	// Both length-prefixed picture codings move across the same way: the record
+	// the source states is the record the sample entry wants, byte for byte.
+	let coding = match track.codec() {
+		"V_MPEG4/ISO/AVC"	=> "h264",
+		"V_MPEGH/ISO/HEVC"	=> "hevc",
+		_ => return Ok(None),
+	};
 	let (w, h) = track.size();
 	if w == 0 || h == 0 || w > u16::MAX as u32 || h > u16::MAX as u32 {
 		return Ok(None);
@@ -206,7 +212,11 @@ fn repackage(path: &Path, want: usize) -> Outcome<Option<Made>> {
 	// The configuration record moves across verbatim -- this is the whole trick.
 	// It is the `avcC` an MP4 sample entry wants and the `CodecPrivate` a
 	// Matroska track entry carries, and they are the same bytes.
-	let codec = Codec::Avc(track.private().to_vec());
+	let codec = if coding == "hevc" {
+		Codec::Hevc(track.private().to_vec())
+	} else {
+		Codec::Avc(track.private().to_vec())
+	};
 
 	// Milliseconds, matching the timestamps the frames come stamped in, so no
 	// rescaling is needed and no rounding is introduced.
@@ -293,7 +303,7 @@ fn repackage(path: &Path, want: usize) -> Outcome<Option<Made>> {
 	if count == 0 {
 		return Ok(None);
 	}
-	Ok(Some(Made { bytes: res!(out.finish()), w: w as u16, h: h as u16, count, times }))
+	Ok(Some(Made { bytes: res!(out.finish()), w: w as u16, h: h as u16, count, times, coding }))
 }
 
 /// What ffprobe says the written film holds: codec, width, height, frames.
