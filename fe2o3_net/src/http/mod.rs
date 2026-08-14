@@ -2,6 +2,7 @@ pub mod client;
 pub mod data_url;
 pub mod encoding;
 pub mod fields;
+pub mod fwd;
 pub mod handler;
 pub mod header;
 pub mod loc;

@@ -11,7 +11,10 @@
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_jdat::prelude::*;
 use oxedyne_fe2o3_net::{
-    http::msg::HttpMessage,
+    http::{
+        fwd::ForwardedPolicy,
+        msg::HttpMessage,
+    },
     ws::{
         accept_key,
         accept_response,
@@ -239,6 +242,7 @@ async fn test_ws_route_relays_handshake_and_bytes_00() -> Outcome<()> {
             upstream.port(),
             "/ws",
             src,
+            &ForwardedPolicy::none(),
             "Test|ws",
         ).await
     });
@@ -318,7 +322,8 @@ async fn test_ws_route_client_close_ends_the_tunnel_00() -> Outcome<()> {
 
     let relay = tokio::spawn(async move {
         tunnel_upgrade(
-            &mut steel, &request, "127.0.0.1", upstream.port(), "/ws", src, "Test|ws",
+            &mut steel, &request, "127.0.0.1", upstream.port(), "/ws", src,
+            &ForwardedPolicy::none(), "Test|ws",
         ).await
     });
 
@@ -361,7 +366,8 @@ async fn test_ws_route_relays_a_refusal_00() -> Outcome<()> {
     let src: SocketAddr = res!("203.0.113.9:51002".parse::<SocketAddr>(), Test);
     let relay = tokio::spawn(async move {
         tunnel_upgrade(
-            &mut steel, &request, "127.0.0.1", addr.port(), "/ws", src, "Test|ws",
+            &mut steel, &request, "127.0.0.1", addr.port(), "/ws", src,
+            &ForwardedPolicy::none(), "Test|ws",
         ).await
     });
 
@@ -391,7 +397,8 @@ async fn test_ws_route_errors_when_upstream_is_absent_00() -> Outcome<()> {
     let (request, _key) = res!(connect_request("oxegen.example"));
     let src: SocketAddr = res!("203.0.113.9:51003".parse::<SocketAddr>(), Test);
     let result = tunnel_upgrade(
-        &mut steel, &request, "127.0.0.1", addr.port(), "/ws", src, "Test|ws",
+        &mut steel, &request, "127.0.0.1", addr.port(), "/ws", src,
+        &ForwardedPolicy::none(), "Test|ws",
     ).await;
     assert!(result.is_err(), "an absent upstream must be reported");
     Ok(())

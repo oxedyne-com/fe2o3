@@ -12,6 +12,10 @@
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_net::http::{
+    fwd::{
+        self,
+        ForwardedPolicy,
+    },
     header::HttpHeadline,
     msg::HttpMessage,
 };
@@ -53,10 +57,15 @@ pub fn upstream_target(request: &HttpMessage, base_path: &str) -> Outcome<String
 /// `upstream_path`, relay the response to `client`, and then copy bytes both ways until either end
 /// closes.
 ///
-/// Every header the client sent is forwarded except the three this hop owns -- `Host`,
-/// `Connection` and `Content-Length` -- so `Sec-WebSocket-Key`, `Sec-WebSocket-Version`,
-/// `Sec-WebSocket-Protocol` and any cookies reach the upstream untouched. The upstream therefore
-/// computes the `Sec-WebSocket-Accept` the client will check, and this hop never has to.
+/// Every header the client sent is forwarded except the ones this hop owns -- see
+/// [`fwd::MANAGED_HEADERS`] and [`fwd::FORWARDED_HEADERS`] -- so `Sec-WebSocket-Key`,
+/// `Sec-WebSocket-Version`, `Sec-WebSocket-Protocol` and any cookies reach the upstream untouched.
+/// The upstream therefore computes the `Sec-WebSocket-Accept` the client will check, and this hop
+/// never has to.
+///
+/// `policy` decides whether the caller was entitled to speak the forwarding headers. With the
+/// default empty policy the caller's copies are dropped, so the values this hop appends are the
+/// only ones the upstream sees.
 ///
 /// Returns once a direction closes. A client that goes away closes the upstream's write half, and
 /// an upstream that goes away closes the client's, so neither end is left holding a socket the
@@ -68,6 +77,7 @@ pub async fn tunnel_upgrade<S>(
     port:           u16,
     upstream_path:  &str,
     src_addr:       SocketAddr,
+    policy:         &ForwardedPolicy,
     id:             &str,
 )
     -> Outcome<()>
@@ -81,26 +91,16 @@ pub async fn tunnel_upgrade<S>(
             IO, Network, Init)),
     };
 
-    // Reconstruct the upgrade request for the upstream.
-    let mut req = String::with_capacity(512);
-    req.push_str(&fmt!("GET {} HTTP/1.1\r\n", upstream_path));
-    req.push_str(&fmt!("Host: {}\r\n", host));
-    for (name, values) in request.header.fields.iter() {
-        let name_str = fmt!("{}", name);
-        if name_str.eq_ignore_ascii_case("host")
-            || name_str.eq_ignore_ascii_case("connection")
-            || name_str.eq_ignore_ascii_case("content-length")
-        {
-            continue;
-        }
-        for value in values {
-            req.push_str(&fmt!("{}: {}\r\n", name_str, value));
-        }
-    }
-    req.push_str("Connection: Upgrade\r\n");
-    req.push_str(&fmt!("X-Forwarded-For: {}\r\n", src_addr));
-    req.push_str("X-Forwarded-Proto: https\r\n");
-    req.push_str("\r\n");
+    // Reconstruct the upgrade request for the upstream. The header work is shared with the HTTP
+    // proxy path in `fe2o3_net::http::fwd`: two copies of it is how one gets fixed and the other
+    // does not.
+    let req = fwd::build_upgrade_request_head(
+        upstream_path,
+        host,
+        request,
+        &src_addr,
+        policy,
+    );
 
     match upstream.write_all(req.as_bytes()).await {
         Ok(()) => (),

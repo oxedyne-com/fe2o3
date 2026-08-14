@@ -13,6 +13,8 @@
 //! - Request and response message parsing
 //! - Cookie and session handling
 //! - Support for HTTP/1.1, HTTP/2 and HTTP/3
+//! - Forwarding-header policy for a proxy hop (`http::fwd`), deciding which peers
+//!   may be believed when they speak `X-Forwarded-For` and its companions
 //!
 //! ## WebSocket Protocol
 //! - Secure handshake implementation

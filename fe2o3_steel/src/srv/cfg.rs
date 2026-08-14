@@ -30,6 +30,7 @@ use oxedyne_fe2o3_net::{
             SetCookieAttributes,
             SameSite,
         },
+        fwd::ForwardedPolicy,
     },
 };
 
@@ -2443,6 +2444,42 @@ pub struct ServerConfig {
     /// auth path prefixes.
     #[optional]
     pub auth_rps_max:                   u64,
+    /// The immediate peers entitled to speak the forwarding headers --
+    /// `X-Forwarded-For`, `X-Forwarded-Proto`, `X-Forwarded-Host` and RFC 7239
+    /// `Forwarded` -- written either as a bare address, `198.51.100.7`, or as a
+    /// prefix, `198.51.100.0/24`.
+    ///
+    /// **Empty means trust nobody, which means a caller's copies of those
+    /// headers are stripped before Steel appends its own.** That is the default,
+    /// and it is the correct setting for a host facing the public directly:
+    /// nothing sits in front of Steel there, so nothing in front of Steel is
+    /// entitled to name the client.
+    ///
+    /// **Deleting this field, or emptying a populated one, is not tidying.** It
+    /// reads like hardening a later reader can drop, and it is the opposite. A
+    /// forged `X-Forwarded-For` copied through arrives ahead of Steel's own, and
+    /// the obvious way to read a repeated header -- `HeaderFields::get_one` --
+    /// returns the first. An upstream address guard keyed on that counts a fresh
+    /// allowance for every fresh invented address, so it is not a weaker limit
+    /// but no limit at all, while looking configured. A forged
+    /// `X-Forwarded-Proto: http` read the same way tells an upstream that a TLS
+    /// request arrived in plaintext, and an upstream that redirects plaintext to
+    /// HTTPS on that basis loops.
+    ///
+    /// Populate it only when something really does sit in front -- a CDN, a load
+    /// balancer -- naming that thing's egress addresses. Stripping
+    /// unconditionally would then discard the real client address rather than
+    /// preserve it, replacing every client with the CDN's egress, which is the
+    /// same bug wearing a safer face. When the peer is named here the caller's
+    /// chain is preserved and Steel's value appended to it; Steel's own value is
+    /// last in either case, which is why an upstream should read these headers
+    /// with `HeaderFields::get_last`.
+    ///
+    /// Entries are parsed at start-up, so a typo is a start-up failure rather
+    /// than a silently empty allow-list. The policy itself lives in
+    /// [`oxedyne_fe2o3_net::http::fwd`]; what stays here is the configuration.
+    #[optional]
+    pub trusted_proxies:                Vec<String>,
 
     // --- Virtual hosts ------------------------------------------------------
     /// Ordered list of virtual host configurations, stored as a `Dat::List`
@@ -2542,6 +2579,7 @@ impl Default for ServerConfig {
                 fmt!("/admin/login"),
             ],
             auth_rps_max:                   5,
+            trusted_proxies:                Vec::new(), // Trust nobody: always strip.
             vhosts:                         Dat::List(vec![Dat::Map(vhost_map)]),
             acme:                           AcmeConfig::default().to_datmap(),
             mail:                           DaticleMap::new(),
@@ -2579,7 +2617,19 @@ impl ServerConfig {
             res!(vh.validate_egress());
         }
         let _ = res!(self.get_acme());
+        // A mistyped trusted proxy must be a start-up failure. An entry that failed to parse and
+        // was skipped would leave an allow-list that looks populated and trusts nobody -- or, read
+        // the other way round, an operator who believes their CDN is named here when it is not.
+        let _ = res!(self.get_forwarded_policy());
         Ok(())
+    }
+
+    /// Which immediate peers are entitled to speak the forwarding headers.
+    ///
+    /// See [`trusted_proxies`](Self::trusted_proxies). An empty list yields a policy that trusts
+    /// nobody, which strips every caller-supplied forwarding header.
+    pub fn get_forwarded_policy(&self) -> Outcome<ForwardedPolicy> {
+        ForwardedPolicy::new(&self.trusted_proxies)
     }
 
     /// Parse and return all configured vhosts.

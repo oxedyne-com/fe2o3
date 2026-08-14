@@ -39,6 +39,10 @@ use oxedyne_fe2o3_net::{
             HeaderFieldValue,
             HeaderName,
         },
+        fwd::{
+            self,
+            ForwardedPolicy,
+        },
         handler::WebHandler,
         header::{
             HttpHeadline,
@@ -897,6 +901,9 @@ impl<
             false => fmt!("{}?{}", route.upstream_path_for(&path), query),
         };
 
+        // Who, if anybody, is entitled to have spoken the forwarding headers before this hop.
+        let policy = res!(ForwardedPolicy::new(&self.cfg.trusted_proxies));
+
         // Connect to the upstream.
         let mut upstream = match TcpStream::connect(
             (route.upstream_host.as_str(), route.upstream_port),
@@ -908,35 +915,18 @@ impl<
                 IO, Network, Init)),
         };
 
-        // Build the request bytes to send to the upstream.
-        // We reconstruct from the parsed HttpMessage, forwarding all
-        // original headers except Host, Connection and Content-Length
-        // which we manage ourselves.
-        let mut req = String::with_capacity(512 + request.body.len());
-        req.push_str(&fmt!("{} {} HTTP/1.1\r\n", method, upstream_path));
-        req.push_str(&fmt!("Host: {}\r\n", route.upstream_host));
-
-        // Forward original headers (skip hop-by-hop and managed ones).
-        for (name, values) in request.header.fields.iter() {
-            let name_str = fmt!("{}", name);
-            if name_str.eq_ignore_ascii_case("host")
-                || name_str.eq_ignore_ascii_case("connection")
-                || name_str.eq_ignore_ascii_case("content-length")
-                || name_str.eq_ignore_ascii_case("transfer-encoding")
-            {
-                continue;
-            }
-            for value in values {
-                req.push_str(&fmt!("{}: {}\r\n", name_str, value));
-            }
-        }
-
-        // Proxy headers.
-        req.push_str(&fmt!("X-Forwarded-For: {}\r\n", src_addr));
-        req.push_str("X-Forwarded-Proto: https\r\n");
-        req.push_str("Connection: close\r\n");
-        req.push_str(&fmt!("Content-Length: {}\r\n", request.body.len()));
-        req.push_str("\r\n");
+        // Build the request bytes to send to the upstream. The caller's headers ride through
+        // except the ones this hop owns, and the forwarding headers this hop appends go last --
+        // see `fe2o3_net::http::fwd`, which both proxy paths share so a fix to one fixes both.
+        let req = fwd::build_proxy_request_head(
+            &method,
+            &upstream_path,
+            &route.upstream_host,
+            &request,
+            &src_addr,
+            &policy,
+            request.body.len(),
+        );
 
         // Write request to upstream.
         match upstream.write_all(req.as_bytes()).await {
@@ -1079,6 +1069,7 @@ impl<
             &request,
             &route.upstream_path_for(&path),
         ));
+        let policy = res!(ForwardedPolicy::new(&self.cfg.trusted_proxies));
         wsproxy::tunnel_upgrade(
             client,
             &request,
@@ -1086,6 +1077,7 @@ impl<
             route.upstream_port,
             &upstream_path,
             src_addr,
+            &policy,
             id,
         ).await
     }
@@ -1107,6 +1099,7 @@ impl<
         where S: AsyncRead + AsyncWrite + Unpin,
     {
         let upstream_path = res!(wsproxy::upstream_target(&request, &route.upstream_path));
+        let policy = res!(ForwardedPolicy::new(&self.cfg.trusted_proxies));
         wsproxy::tunnel_upgrade(
             client,
             &request,
@@ -1114,6 +1107,7 @@ impl<
             route.upstream_port,
             &upstream_path,
             src_addr,
+            &policy,
             id,
         ).await
     }

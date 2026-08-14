@@ -1298,10 +1298,21 @@ impl HeaderFields {
         }
     }
 
+    /// The first value of the given field, or `None` if the field is absent or empty.
+    ///
+    /// Correct when the sender of the field is its authority and the field carries one value: a
+    /// singleton (see [`HeaderName::is_singleton`]), where `insert` replaces rather than
+    /// accumulates so first and last are the same value, or a field like `Cookie`, `Content-Type`
+    /// or `Authorization` whose only meaningful value is the one the client sent.
+    ///
+    /// **Wrong for any field that each hop appends to.** `X-Forwarded-For`, `X-Forwarded-Proto`,
+    /// `X-Forwarded-Host`, RFC 7239 `Forwarded` and `Via` accumulate left to right, so `list[0]` is
+    /// the value the *caller* supplied -- the one part of the chain nothing verified. Use
+    /// [`get_last`](Self::get_last) for those.
     pub fn get_one(
         &self,
-        nam: &HeaderName, 
-    ) 
+        nam: &HeaderName,
+    )
         -> Option<&HeaderFieldValue>
     {
         match self.fields.get(nam) {
@@ -1313,6 +1324,39 @@ impl HeaderFields {
                 }
             },
             _ => None,
+        }
+    }
+
+    /// The last value of the given field, or `None` if the field is absent or empty.
+    ///
+    /// Correct for every field a proxy chain appends to: `X-Forwarded-For`, `X-Forwarded-Proto`,
+    /// `X-Forwarded-Host`, RFC 7239 `Forwarded` and `Via`. Each hop adds its own account of the
+    /// request after whatever it received, so the last value is the nearest hop's -- the only one
+    /// written by something the reader is behind rather than by something in front of it.
+    ///
+    /// This method exists because its absence is what makes [`get_one`](Self::get_one) get reached
+    /// for, and `get_one` returns `list[0]`. For a forwarded header `list[0]` is the value the
+    /// *caller* supplied, and nothing stops a caller supplying one. A downstream service that
+    /// rate-limits by the first `X-Forwarded-For` therefore keys its limit on an address the
+    /// attacker chose, and grants a fresh allowance for every fresh invented address: not a weaker
+    /// limit but no limit at all, while looking configured. Read the same way,
+    /// `X-Forwarded-Proto: http` tells a service that a TLS request arrived in plaintext, and a
+    /// service that redirects plaintext to HTTPS on that basis loops.
+    ///
+    /// Two caveats. The last value is only as trustworthy as the hop that wrote it, so this is the
+    /// right reader on the assumption that the immediate hop is one the reader trusts -- see
+    /// [`crate::http::fwd::ForwardedPolicy`] for the writing side of that bargain. And a value here
+    /// is one *line*: a hop that wrote `X-Forwarded-For: a, b` on one line leaves one value holding
+    /// both, so this returns the last line rather than the last comma-separated element.
+    pub fn get_last(
+        &self,
+        nam: &HeaderName,
+    )
+        -> Option<&HeaderFieldValue>
+    {
+        match self.fields.get(nam) {
+            Some((list, _)) => list.last(),
+            None            => None,
         }
     }
 
@@ -1542,5 +1586,107 @@ mod wire_tests {
             response(fields).as_vec(),
             b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n".to_vec(),
         );
+    }
+}
+
+
+/// Which of a repeated field's values a reader should take.
+#[cfg(test)]
+mod value_choice_tests {
+    use super::*;
+
+    /// The name a proxy chain appends to, as the wire parser produces it.
+    fn xff() -> HeaderName {
+        HeaderName::from("x-forwarded-for")
+    }
+
+    /// A field holding the given values, in the order given.
+    fn with_values(nam: HeaderName, values: &[&str]) -> HeaderFields {
+        let mut fields = HeaderFields::default();
+        for value in values {
+            fields.insert(nam.clone(), HeaderFieldValue::Generic(value.to_string()), None);
+        }
+        fields
+    }
+
+    /// The case the whole method is for: two values, the caller's first and this hop's second.
+    ///
+    /// `get_one` returns the caller's, which is an address the attacker chose. `get_last` returns
+    /// the one the proxy appended, which is the address the proxy actually accepted the connection
+    /// from. A rate limiter keyed on the first grants a fresh allowance per invented address.
+    #[test]
+    fn test_get_last_returns_the_value_this_hop_appended_00() -> Outcome<()> {
+        let fields = with_values(xff(), &["9.9.9.9", "203.0.113.7:51000"]);
+
+        let first = res!(fields.get_one(&xff()).ok_or_else(|| err!(
+            "The field was inserted, so a first value must exist."; Test, Missing)));
+        assert_eq!(fmt!("{}", first), "9.9.9.9",
+            "get_one returns list[0], which is whatever the caller supplied");
+
+        let last = res!(fields.get_last(&xff()).ok_or_else(|| err!(
+            "The field was inserted, so a last value must exist."; Test, Missing)));
+        assert_eq!(fmt!("{}", last), "203.0.113.7:51000",
+            "get_last returns the value the nearest hop appended");
+        Ok(())
+    }
+
+    /// A longer chain: still the last, not the second, and not the first.
+    ///
+    /// A reader that took `list[1]` on the assumption of one proxy would be right for exactly one
+    /// deployment and wrong the day a second hop appeared, which is the kind of correctness that
+    /// stops being correct without anybody editing it.
+    #[test]
+    fn test_get_last_takes_the_end_of_any_chain_00() -> Outcome<()> {
+        let fields = with_values(xff(), &["9.9.9.9", "198.51.100.34", "203.0.113.7:51000"]);
+        let last = res!(fields.get_last(&xff()).ok_or_else(|| err!(
+            "The field was inserted, so a last value must exist."; Test, Missing)));
+        assert_eq!(fmt!("{}", last), "203.0.113.7:51000");
+        Ok(())
+    }
+
+    /// One value, and the two readers agree. An absent field is `None` from both.
+    #[test]
+    fn test_get_last_matches_get_one_for_a_single_value_00() -> Outcome<()> {
+        let fields = with_values(xff(), &["203.0.113.7:51000"]);
+        let one = res!(fields.get_one(&xff()).ok_or_else(|| err!(
+            "The field was inserted."; Test, Missing)));
+        let last = res!(fields.get_last(&xff()).ok_or_else(|| err!(
+            "The field was inserted."; Test, Missing)));
+        assert_eq!(fmt!("{}", one), fmt!("{}", last));
+
+        let empty = HeaderFields::default();
+        assert!(empty.get_one(&xff()).is_none());
+        assert!(empty.get_last(&xff()).is_none(),
+            "an absent field has no last value, rather than some default one");
+        Ok(())
+    }
+
+    /// A singleton field is replaced rather than accumulated, so both readers see the replacement.
+    ///
+    /// Without this, `get_last` would look like a way to reach a superseded `Host` -- and a reader
+    /// that could reach one would eventually be written to.
+    #[test]
+    fn test_get_last_on_a_singleton_is_the_surviving_value_00() -> Outcome<()> {
+        let fields = with_values(HeaderName::Host, &["app.example", "upstream.internal"]);
+        let one = res!(fields.get_one(&HeaderName::Host).ok_or_else(|| err!(
+            "The field was inserted."; Test, Missing)));
+        let last = res!(fields.get_last(&HeaderName::Host).ok_or_else(|| err!(
+            "The field was inserted."; Test, Missing)));
+        assert_eq!(fmt!("{}", one), "upstream.internal");
+        assert_eq!(fmt!("{}", last), "upstream.internal");
+        Ok(())
+    }
+
+    /// One line is one value, comma-separated list or not.
+    ///
+    /// The documented caveat, asserted so that a later change to how a line is stored is caught
+    /// here rather than by a reader who believed `get_last` returned the last address.
+    #[test]
+    fn test_get_last_returns_the_last_line_not_the_last_element_00() -> Outcome<()> {
+        let fields = with_values(xff(), &["8.8.8.8, 7.7.7.7"]);
+        let last = res!(fields.get_last(&xff()).ok_or_else(|| err!(
+            "The field was inserted."; Test, Missing)));
+        assert_eq!(fmt!("{}", last), "8.8.8.8, 7.7.7.7");
+        Ok(())
     }
 }
