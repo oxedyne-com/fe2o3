@@ -18,6 +18,7 @@ pub mod import;
 pub mod index;
 pub mod key;
 pub mod kinds;
+pub mod post;
 pub mod prelude;
 pub mod text;
 pub mod validate;
@@ -41,6 +42,13 @@ pub const SCHEMA_CHROME: &'static str = "oxeweb/chrome/0";
 /// Schema identifier for an application's tree, which admits the document kinds, the `edit` node and
 /// the `surface` node (§4.2).
 pub const SCHEMA_APP: &'static str = "oxeweb/app/0";
+
+/// Schema identifier for a signed message payload, which is a record rather than a node tree.
+///
+/// The first payload here that is not a document, and the reason the container names its schema
+/// inside the signing input: a message and a document are the same artefact with different
+/// payloads and different validators, and neither can be re-labelled as the other after signing.
+pub const SCHEMA_POST: &'static str = "daimond/post/0";
 
 /// Limits enforced before a document is trusted. See `SPEC.md` §5.
 pub mod limit {
