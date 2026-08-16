@@ -5,7 +5,7 @@
 //! the two comparable: a difference between them is a difference between the renderers, not between
 //! two documents that happened to look alike.
 //!
-//! Run with `cargo run -p sbj --example gen_demo -- <path>`.
+//! Run with `cargo run -p oxedyne_fe2o3_sbj --example gen_demo -- <path>`.
 
 use oxedyne_fe2o3_sbj::{
 	doc,
