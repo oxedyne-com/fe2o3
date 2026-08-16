@@ -255,17 +255,20 @@ impl<
                 OzoneMsg::NextLiveFile(resp) => {
                     // [4] Respond to the wbot request for the next live file in the sequence.
                     //
-                    // The number is claimed rather than counted to. A counter is a
-                    // statement about what this process has handed out, and a second
-                    // process running over the same zone keeps its own, so both would
-                    // name the same file and each writer would place records at offsets
-                    // predicted from its own cache of a length the other was changing.
-                    // Creating the file settles it instead: the create is atomic, so of
-                    // two writers racing for a number exactly one wins, and a writer that
-                    // holds a number is the only one appending to it.
+                    // The number is claimed rather than counted to, so that reusing one
+                    // is unconstructible rather than merely avoided.
                     //
-                    // Numbers are therefore not contiguous where a zone is written by
-                    // more than one process, which nothing depends on: the zone's files
+                    // The counter is seeded from the highest number the zone survey found
+                    // on disk, which is what makes it correct today. It was not always:
+                    // reissuing a number already in use replaced the sealed file's record
+                    // state wholesale, so its superseded bytes could never be reclaimed
+                    // and every supersession afterwards raised an error. Creating the file
+                    // is atomic, so a number that is taken cannot be handed out however
+                    // the counter came by it.
+                    //
+                    // It also makes a zone written by two processes safe, each seeding
+                    // from the same disk and so reaching the same next number. Numbers
+                    // are then not contiguous, which nothing depends on: a zone's files
                     // are found by reading the directory.
                     let mut fnum = self.fnum;
                     let mut claimed = false;

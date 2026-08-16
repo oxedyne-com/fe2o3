@@ -114,13 +114,12 @@ impl ZoneDir {
     /// exactly one succeeds and the loser is told at once rather than discovering
     /// it by writing into somebody else's file.
     ///
-    /// This is what makes a writer the sole appender to its own live files, which
-    /// is what the cached length in [`LiveFile`] depends on: a length read when a
-    /// file is opened stays true only while nobody else is adding to it. Two
-    /// writers sharing a file would each place records at offsets predicted from
-    /// their own cache, and the bytes would land correctly -- the files are opened
-    /// for append, so the kernel puts every record whole at the end -- while the
-    /// index entries pointed into the middle of each other's records.
+    /// A writer is handed its own live pair by `ZoneBot::survey_files` and is the
+    /// only bot appending to it, which is what the cached length in [`LiveFile`]
+    /// rests on: a length read when a file is opened stays true only while nobody
+    /// else adds to it. Claiming rather than counting is what keeps that true
+    /// however the number was arrived at, and what makes a zone written by two
+    /// processes safe, each having seeded its counter from the same disk.
     ///
     /// The data file is claimed first and the index second. A number whose data
     /// file was won and whose index was not is abandoned rather than used, and the
