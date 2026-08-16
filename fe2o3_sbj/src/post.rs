@@ -667,6 +667,53 @@ mod tests {
 		]
 	}
 
+	/// A reference kind this build does not know is REFUSED, and never quietly dropped.
+	///
+	/// The property that decides what a future fifth kind costs. Refused, and the message that
+	/// carries it is refused whole: an old build meets a new reference and says so, which is a
+	/// clean cliff. Dropped, the same build would render a message with a reference missing from
+	/// it, show no sign that anything was removed, and hash to an address the sender never
+	/// computed — a message quietly saying less than its author signed.
+	///
+	/// `daimond/share/0` is reserved as a SCHEMA rather than as a fifth kind here (see
+	/// `crate::SCHEMA_SHARE`), so nothing is expected to take this route. It is pinned anyway,
+	/// because the cost of the decision being revisited depends on it.
+	#[test]
+	fn test_an_unknown_reference_kind_is_refused_not_dropped() -> Outcome<()> {
+		let mut inner = DaticleMap::new();
+		inner.insert(dat!("id"), Dat::Str(fmt!("a-diamond")));
+		let mut target = DaticleMap::new();
+		target.insert(dat!("share"), Dat::Map(inner));
+		let mut r = DaticleMap::new();
+		r.insert(dat!(KEY_FALLBACK), Dat::Str(fmt!("a Diamond somebody sent")));
+		r.insert(dat!(KEY_TARGET), Dat::Map(target));
+
+		match Reference::from_dat(&Dat::Map(r.clone())) {
+			Ok(_) => return Err(err!(
+				"A reference of an unknown kind was read."; Test, Invalid)),
+			Err(e) => {
+				let msg = fmt!("{}", e);
+				assert!(msg.contains("share"), "The refusal does not name the kind: {}", msg);
+				assert!(msg.contains(REF_PROPOSAL), "The refusal does not say what is admitted.");
+			},
+		}
+
+		// And the message carrying it is refused WHOLE, rather than arriving with one reference
+		// fewer than its author signed.
+		let mut p = match res!(sample().to_dat()) {
+			Dat::Map(m) => m,
+			other => return Err(err!(
+				"A post encodes as a map, and this is a {:?}.", other.kind(); Test, Bug)),
+		};
+		p.insert(dat!(KEY_REFS), Dat::List(vec![Dat::Map(r)]));
+		match Post::from_dat(&Dat::Map(p)) {
+			Ok(_) => Err(err!(
+				"A post carrying an unknown reference kind was read, so the reference was dropped \
+				and the message says less than its author signed."; Test, Invalid)),
+			Err(_) => Ok(()),
+		}
+	}
+
 	#[test]
 	fn test_round_trip_minimal() -> Outcome<()> {
 		let p = sample();

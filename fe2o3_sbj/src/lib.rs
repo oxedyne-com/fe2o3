@@ -59,6 +59,44 @@ pub const SCHEMA_POST: &'static str = "daimond/post/0";
 /// who the holder is.
 pub const SCHEMA_CARD: &'static str = "daimond/card/0";
 
+/// Schema identifier RESERVED for one person sending another a copy of something they own.
+///
+/// **Nothing in this build constructs or reads one.** The name is claimed here, and the reasoning
+/// written down, so that the lane which implements it does not reach for the wrong mechanism. An
+/// artefact declaring this schema is refused by this build, saying so, which is the correct answer
+/// from a reader that does not implement it.
+///
+/// # Why this is a schema and not a fifth reference kind
+///
+/// The obvious-looking alternative is a fifth arm on [`post::Target`], and it is wrong three times
+/// over.
+///
+/// A share **carries** what it sends. The thing shared is a copy the receiver comes to own, sealed
+/// to their key, and a [`post::Reference`] is a pointer with a fallback sentence — four of them per
+/// message, each field capped at 128 bytes. There is nothing to point AT: the content travels.
+///
+/// A share is **private**. The four reference kinds are public anchors, globally named and
+/// resolvable by anybody holding a session, and [`post::Target`] says in its own documentation that
+/// private, device-local pointers are deliberately absent, because the other party cannot
+/// dereference one and an interface must never draw a pressable chip that will always fail. A fifth
+/// arm for a private object would make that sentence false.
+///
+/// And a share must carry **a consent bit that the signature covers**. Where the thing shared holds
+/// executable content, the receiver decides whether to run it, and they can only decide honestly if
+/// they can check that the SENDER marked it — a flag a relay could add or strip is not a consent
+/// flag. A `Reference` has room for no such thing: it carries exactly two keys, and `from_dat`
+/// refuses a third. That is the argument that settles it, since the other two might be argued
+/// around and this one cannot.
+///
+/// # Why reserving it costs nothing signed
+///
+/// A schema name reaches the signing input length-prefixed (§1.3), so a third name is unambiguous
+/// against every artefact already signed under the first two: no post and no card in existence is
+/// weakened, re-addressed or made forgeable by this name coming to exist. That is precisely what
+/// the length prefix bought, and it is why this can be reserved in a comment now and implemented
+/// later without a migration.
+pub const SCHEMA_SHARE: &'static str = "daimond/share/0";
+
 /// Limits enforced before a document is trusted. See `SPEC.md` §5.
 pub mod limit {
 	/// Maximum size of the tree region, in bytes.

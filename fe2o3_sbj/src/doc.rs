@@ -1277,6 +1277,85 @@ mod tests {
 		Ok(())
 	}
 
+	/// A schema this build does not implement is refused, and named.
+	///
+	/// `daimond/share/0` is reserved (see [`crate::SCHEMA_SHARE`]) and nothing here reads one. The
+	/// claim is that an artefact declaring it is REFUSED rather than read as whichever schema is
+	/// nearest, and that the refusal says which schema it was handed. The day the schema is
+	/// implemented, this test is what has to be changed on purpose.
+	#[test]
+	fn test_a_reserved_schema_is_refused_22() -> Outcome<()> {
+		let signer = SignatureScheme::new_ed25519();
+		let bytes = res!(sample_post().encode());
+		let env = res!(seal(&bytes, crate::SCHEMA_SHARE, &signer, TIME));
+		let buf = res!(assemble(&env, &bytes));
+
+		// Steps 1 to 5 touch no content, so the container is sound and the signature is the
+		// author's: the refusal can only be the schema's.
+		res!(verify_only(&buf));
+		match read_artefact(&buf) {
+			Ok(_) => Err(err!(
+				"An artefact declaring the reserved schema '{}' was read.", crate::SCHEMA_SHARE;
+			Test, Invalid)),
+			Err(e) => {
+				assert!(fmt!("{}", e).contains(crate::SCHEMA_SHARE),
+					"The refusal does not name the schema it refused: {}", e);
+				Ok(())
+			},
+		}
+	}
+
+	/// The signing input begins with the schema's length, and the reserved third name changes it.
+	///
+	/// The §18 property, and the reason a third schema name can be reserved without touching a byte
+	/// of anything already signed: the schema reaches the signing input length-prefixed (§1.3), so
+	/// a name that did not exist when a post was signed cannot change how that post's preimage is
+	/// read.
+	///
+	/// **What this test does and does not prove.** It proves the prefix is written, and written
+	/// correctly, which is falsifiable: remove the prefix from `signing_input` and this fails. It
+	/// does NOT exhibit a collision, and an honest note about that is worth more than a test that
+	/// pretends to. In v0 the schema and the hash are not adjacent — the two scheme ids and the
+	/// time sit between them — and a schema is a `String`, so for a schema to swallow the bytes
+	/// that follow it, those bytes would have to be valid UTF-8. The v0 signature scheme id begins
+	/// `0xF5`, which is not. So the ambiguity is unreachable in v0 by accident of the constants,
+	/// and the prefix is what makes it unreachable by design: change a scheme id, add a schema
+	/// whose name is a prefix of another, or move a field, and the accident evaporates while the
+	/// prefix does not.
+	#[test]
+	fn test_the_schema_is_length_prefixed_23() -> Outcome<()> {
+		let env = |schema: &str| Envelope {
+			schema:	schema.to_string(),
+			author:	vec![0u8; 32],
+			sig_scheme:	envelope::SIG_SCHEME_ED25519,
+			hash_scheme:	envelope::HASH_SCHEME_SHA3_256,
+			time:	TIME,
+			hash:	vec![b'A'; 32],
+			sig:	Vec::new(),
+			tree_len:	1,
+		};
+		for schema in [SCHEMA_POST, SCHEMA_CARD, crate::SCHEMA_SHARE, crate::SCHEMA_DOC] {
+			let input = env(schema).signing_input();
+			assert!(input.len() > 4, "The signing input of '{}' is too short to hold a length.",
+				schema);
+			let declared = u32::from_be_bytes([input[0], input[1], input[2], input[3]]);
+			assert_eq!(declared as usize, schema.len(),
+				"The signing input of '{}' does not begin with the schema's length. Without it, \
+				`schema` and `hash` are two variable-length fields with only fixed-width ones \
+				between them, and where a field ends stops being a fact about the bytes.", schema);
+			assert_eq!(&input[4..4 + schema.len()], schema.as_bytes(),
+				"The schema does not follow its own length.");
+		}
+
+		// And the reserved name is a distinct preimage from the two that are implemented, so an
+		// artefact of a schema that does not exist yet cannot be read as one that does.
+		let post = env(SCHEMA_POST).signing_input();
+		for other in [SCHEMA_CARD, crate::SCHEMA_SHARE, crate::SCHEMA_DOC] {
+			assert_ne!(post, env(other).signing_input());
+		}
+		Ok(())
+	}
+
 	/// An author key of the wrong width is refused before an artefact is built around it.
 	#[test]
 	fn test_an_author_key_has_one_width_21() -> Outcome<()> {
