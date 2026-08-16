@@ -48,6 +48,14 @@ pub const fn scheme_id(namex: [u8; 32]) -> u32 {
 /// The v0 signature scheme id, Ed25519. See `scheme_id`.
 pub const SIG_SCHEME_ED25519: u32 = scheme_id(NAMEX_ED25519);
 
+/// The width of an Ed25519 signature, which is what a v0 envelope's `sig` carries.
+///
+/// Here rather than taken from the signing crate, which publishes its key widths and not this one.
+/// The envelope names the scheme, so the envelope knows the width that scheme writes, and a `sig`
+/// of any other width is refused with a message about this format before the signing crate is asked
+/// to make sense of it.
+pub const SIG_LEN_ED25519: usize = 64;
+
 /// The v0 hash scheme id, SHA3-256. See `scheme_id`.
 pub const HASH_SCHEME_SHA3_256: u32 = scheme_id(NAMEX_SHA3_256);
 

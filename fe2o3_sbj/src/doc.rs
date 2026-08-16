@@ -12,14 +12,19 @@
 
 use crate::{
 	canon,
+	card::Card,
 	envelope::{
 		self,
 		Envelope,
 	},
 	index,
+	kinds::Schema,
 	limit,
+	post::Post,
 	validate,
 	HEADER_LEN,
+	SCHEMA_CARD,
+	SCHEMA_POST,
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -113,6 +118,140 @@ impl Doc {
 	}
 }
 
+/// What the payload region of an artefact holds, and the one place a schema name chooses a
+/// validator.
+///
+/// The container carries any schema (§1.2), and the schemas it carries are no longer one shape. An
+/// oxeweb document is a tree of typed nodes, so it is validated by walking that tree against the
+/// vocabulary its schema admits; a post and a card are flat canonical maps whose whole validity is
+/// their own field rules, and the node vocabulary has nothing to say about either. Putting them
+/// through [`validate::validate`] would mean teaching a tree walker two schemas with no tree in
+/// them, and teaching [`Schema`] — whose stated job is to fix a vocabulary of node kinds and a
+/// vocabulary of style properties — two members that have neither.
+///
+/// An enum instead, so that the dispatch is exhaustive: a sixth schema cannot be added without the
+/// compiler naming every place that must learn about it. The variant carries the schema for a tree,
+/// where three names share one shape, and fixes it for a post and a card, where the name and the
+/// shape are the same fact.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Payload {
+	/// An oxeweb node tree, under whichever of the three `oxeweb/*` schemas admits its vocabulary.
+	Tree {
+		/// The schema the envelope declares.
+		schema:	Schema,
+		/// The node tree.
+		tree:	Dat,
+	},
+	/// A `daimond/post/0` message.
+	Post(Post),
+	/// A `daimond/card/0` identity card.
+	Card(Card),
+}
+
+impl Payload {
+
+	/// The schema name the envelope declares for this payload.
+	pub fn schema(&self) -> &'static str {
+		match self {
+			Self::Tree { schema, .. }	=> schema.name(),
+			Self::Post(_)	=> SCHEMA_POST,
+			Self::Card(_)	=> SCHEMA_CARD,
+		}
+	}
+
+	/// Validates this payload against its own rules, then encodes it canonically.
+	///
+	/// Nothing this crate would refuse to read is ever given a signature and an address, which for
+	/// a tree means the schema walk of §4 and for a record means its own field rules. Each arm
+	/// validates before it encodes.
+	pub fn encode(&self) -> Outcome<Vec<u8>> {
+		let bytes = match self {
+			Self::Tree { schema, tree }	=> res!(encode_tree(tree, schema.name())),
+			Self::Post(p)	=> res!(p.encode()),
+			Self::Card(c)	=> res!(c.encode()),
+		};
+		// Checked here as well as inside the arms that check it, so that the container's own limit
+		// is not something a payload kind added later can be written without meeting.
+		if bytes.len() > limit::TREE_BYTES {
+			return Err(err!(
+				"The {} payload encodes to {} bytes, exceeding the limit of {} bytes (SPEC.md §5).",
+				self.schema(), bytes.len(), limit::TREE_BYTES;
+			Invalid, Input, TooBig, LimitReached));
+		}
+		Ok(bytes)
+	}
+
+	/// Decodes and validates a payload region under the schema the envelope declared.
+	///
+	/// The bytes must already have been hashed and the hash found to be the one the author signed,
+	/// which is why this is not public: the only caller is [`read_artefact`], and reaching it any
+	/// other way would be parsing content nobody vouched for.
+	fn decode(
+		schema:	&str,
+		bytes:	&[u8],
+	)
+		-> Outcome<Self>
+	{
+		match schema {
+			SCHEMA_POST	=> Ok(Self::Post(res!(Post::decode(bytes)))),
+			SCHEMA_CARD	=> Ok(Self::Card(res!(Card::decode(bytes)))),
+			other	=> {
+				let schema = res!(Schema::from_name(other));
+				// `canon::decode` enforces the depth limit as it descends, and checks every rule of
+				// §3 that survives a decode, so `canon::check` is not repeated here.
+				let tree = res!(canon::decode(bytes));
+				res!(validate::validate(&tree, schema.name()));
+				Ok(Self::Tree {
+					schema,
+					tree,
+				})
+			},
+		}
+	}
+}
+
+/// A verified artefact: holding one *is* holding a file whose header, envelope, hash, signature,
+/// canonical encoding and schema all checked out, because [`read_artefact`] is the only way to
+/// obtain one.
+///
+/// The same guarantee [`Doc`] carries, over the whole set of schemas rather than the three that are
+/// node trees, and for the same reason: the fields are private, there is no public constructor, and
+/// no `&mut` is handed out, so a verified envelope cannot be paired with a payload its author never
+/// signed.
+#[derive(Clone, Debug)]
+pub struct Artefact {
+	/// The signed envelope.
+	env:	Envelope,
+	/// The decoded, validated payload.
+	payload:	Payload,
+}
+
+impl Artefact {
+
+	/// The envelope the author signed: the schema, the author, the schemes, the time, the address.
+	pub fn env(&self) -> &Envelope {
+		&self.env
+	}
+
+	/// The payload, which hashes to the address the envelope carries.
+	pub fn payload(&self) -> &Payload {
+		&self.payload
+	}
+
+	/// Takes the payload, for a caller that owns the artefact and wants only what is in it.
+	pub fn into_payload(self) -> Payload {
+		self.payload
+	}
+
+	/// Takes the artefact apart, for a caller that owns it and wants both halves.
+	///
+	/// The parts carry no guarantee once separated, which is why they are only ever handed out to a
+	/// caller that already held the whole.
+	pub fn into_parts(self) -> (Envelope, Payload) {
+		(self.env, self.payload)
+	}
+}
+
 /// The regions of a file, located by the header and the envelope but not yet trusted.
 ///
 /// The tree region is exactly the `tree_len` bytes the envelope declares. Whatever follows it is
@@ -171,8 +310,11 @@ pub fn verify<'a>(buf: &'a [u8]) -> Outcome<(Envelope, &'a [u8])> {
 		Invalid, Input, Mismatch));
 	}
 
-	// Step 5: the author signed that hash.
+	// Step 5: the author signed that hash. The width is checked first, because a signature of the
+	// wrong width is not a failed verification but a malformed field, and the signing crate answers
+	// one with an error carrying nothing about this format in it.
 	let verifier = res!(verifier(env.sig_scheme, &env.author));
+	res!(check_sig_len(env.sig_scheme, env.sig.len()));
 	let input = env.signing_input();
 	if !res!(verifier.verify(&input, &env.sig)) {
 		return Err(err!(
@@ -196,10 +338,46 @@ pub fn index_region<'a>(buf: &'a [u8]) -> Outcome<&'a [u8]> {
 	Ok(regions.rest)
 }
 
+/// Reads an artefact of any schema this build carries: header, envelope, hash, signature, then the
+/// payload's own decoder and validator.
+///
+/// [`read`] is this for the three `oxeweb/*` schemas, and returns a [`Doc`] because a caller that
+/// asked for a document wants a tree rather than a match. A caller that will take whatever the file
+/// turns out to be asks here.
+pub fn read_artefact(buf: &[u8]) -> Outcome<Artefact> {
+	let (env, payload_bytes) = res!(verify(buf));
+	// Steps 6 and 7, dispatched on the schema the author signed. Nothing here runs until the bytes
+	// have hashed to the address in the envelope and that address has been found to be signed.
+	let payload = res!(Payload::decode(&env.schema, payload_bytes));
+	Ok(Artefact {
+		env,
+		payload,
+	})
+}
+
+/// Writes an artefact of any schema this build carries: validate, canonical encode, hash, sign,
+/// assemble.
+///
+/// The payload is validated against its own rules first, so that nothing this crate would refuse to
+/// read is ever given a signature and an address.
+pub fn write_artefact(
+	payload:	&Payload,
+	signer:	&SignatureScheme,
+	time:	u64,
+)
+	-> Outcome<Vec<u8>>
+{
+	let bytes = res!(payload.encode());
+	let env = res!(seal(&bytes, payload.schema(), signer, time));
+	assemble(&env, &bytes)
+}
+
 /// Writes a document: validate, canonical encode, hash, sign, assemble.
 ///
 /// The tree is validated against the schema first, so that nothing this crate would refuse to read
-/// is ever given a signature and an address.
+/// is ever given a signature and an address. The schema must be one of the three that are node
+/// trees; a post or a card is written by [`write_artefact`], which takes the payload rather than a
+/// tree because neither is one.
 pub fn write(
 	tree:	&Dat,
 	schema:	&str,
@@ -208,6 +386,9 @@ pub fn write(
 )
 	-> Outcome<Vec<u8>>
 {
+	// Written out rather than routed through `write_artefact`, which would have to be handed an
+	// owned tree: a `Dat` clone recurses as deep as the tree goes, which is the cost `validate`
+	// walks by reference to avoid. Each step below is the same function `write_artefact` calls.
 	let tree_bytes = res!(encode_tree(tree, schema));
 	let env = res!(seal(&tree_bytes, schema, signer, time));
 	assemble(&env, &tree_bytes)
@@ -307,43 +488,82 @@ fn encode_tree(
 	Ok(bytes)
 }
 
-/// Builds the envelope for an encoded tree region: hash the bytes, then sign the hash.
+/// Builds the envelope for an encoded payload, up to but not including the signature.
 ///
-/// Signing the hash rather than the tree is what binds the document's permanent address to its
+/// The half of sealing that holds no key material, so that a signer living somewhere this code
+/// cannot reach — a browser's non-extractable `CryptoKey`, a hardware token — can still produce an
+/// artefact. The caller names the author's public key, takes [`Envelope::signing_input`] away,
+/// signs it wherever the secret is, puts the signature in `sig`, and hands the envelope to
+/// [`assemble`]. The secret never crosses this boundary in either direction.
+///
+/// The returned envelope carries an empty `sig` and is not yet a sealed envelope. `assemble` will
+/// happily write one with an empty signature, and [`read`] will refuse it, which is the correct
+/// order: an unsigned artefact is a rejection at step 5 and not a special case anywhere earlier.
+pub fn envelope_for(
+	payload_bytes:	&[u8],
+	schema:	&str,
+	author:	&[u8],
+	time:	u64,
+)
+	-> Outcome<Envelope>
+{
+	// The author key is checked at its width here rather than at verification time, because a key
+	// of the wrong width names no signer and the artefact it would produce is unreadable by
+	// everybody including its writer.
+	if author.len() != SignatureScheme::ED25519_PK_LEN {
+		return Err(err!(
+			"The v0 envelope names the Ed25519 signature scheme, whose public key is {} bytes, \
+			but the author key supplied is {} bytes.",
+			SignatureScheme::ED25519_PK_LEN, author.len();
+		Invalid, Input, Mismatch));
+	}
+	let hash_scheme = envelope::HASH_SCHEME_SHA3_256;
+	Ok(Envelope {
+		schema:	schema.to_string(),
+		author:	author.to_vec(),
+		sig_scheme:	envelope::SIG_SCHEME_ED25519,
+		hash_scheme,
+		time,
+		hash:	res!(hash_tree(hash_scheme, payload_bytes)),
+		sig:	Vec::new(),
+		tree_len:	try_into!(u64, payload_bytes.len()),
+	})
+}
+
+/// Builds the envelope for an encoded payload: hash the bytes, then sign the hash.
+///
+/// Signing the hash rather than the payload is what binds the artefact's permanent address to its
 /// author, and the schema and the scheme ids go into the signing input so that neither can be
 /// re-labelled afterwards.
-fn seal(
-	tree_bytes:	&[u8],
+pub fn seal(
+	payload_bytes:	&[u8],
 	schema:		&str,
 	signer:		&SignatureScheme,
 	time:		u64,
 )
 	-> Outcome<Envelope>
 {
+	// Refused before anything is hashed: a signer whose scheme v0 cannot name in an envelope must
+	// not produce bytes at all.
 	let sig_scheme = res!(sig_scheme_id(signer));
-	let hash_scheme = envelope::HASH_SCHEME_SHA3_256;
 	let author = match res!(signer.get_public_key()) {
 		Some(pk) => pk.to_vec(),
 		None => return Err(err!(
 			"The signer holds no public key, so there is no author to name in the envelope.";
 		Missing, Configuration)),
 	};
-	let mut env = Envelope {
-		schema:	schema.to_string(),
-		author,
-		sig_scheme,
-		hash_scheme,
-		time,
-		hash:	res!(hash_tree(hash_scheme, tree_bytes)),
-		sig:	Vec::new(),
-		tree_len:	try_into!(u64, tree_bytes.len()),
-	};
+	let mut env = res!(envelope_for(payload_bytes, schema, &author, time));
+	env.sig_scheme = sig_scheme;
 	env.sig = res!(signer.sign(&env.signing_input()));
 	Ok(env)
 }
 
-/// Assembles a file: header, envelope, tree region.
-fn assemble(
+/// Assembles a file: header, envelope, payload region.
+///
+/// The envelope's signature is written as it stands and is not checked here, since this is the
+/// half of writing that a caller signing elsewhere reaches after [`envelope_for`]. What makes an
+/// artefact sound is that [`read`] accepts it, and nothing else.
+pub fn assemble(
 	env:		&Envelope,
 	tree_bytes:	&[u8],
 )
@@ -381,6 +601,38 @@ fn hasher(scheme: u32) -> Outcome<HashScheme> {
 			scheme, envelope::HASH_SCHEME_SHA3_256;
 		Invalid, Input, Unimplemented)),
 	}
+}
+
+/// Checks a signature's width against the scheme that wrote it.
+///
+/// An unsigned envelope is the case that matters: `envelope_for` builds one with an empty `sig` so
+/// that a caller signing elsewhere has something to fill in, and an artefact assembled around one
+/// before the signature arrives must be refused here, saying so, rather than deep inside a
+/// signature library that has never heard of this format.
+fn check_sig_len(
+	scheme:	u32,
+	len:	usize,
+)
+	-> Outcome<()>
+{
+	let want = match scheme {
+		envelope::SIG_SCHEME_ED25519 => envelope::SIG_LEN_ED25519,
+		// Any other scheme id was already refused by `verifier`, which runs first.
+		_ => return Ok(()),
+	};
+	if len != want {
+		return Err(err!(
+			"The envelope carries a signature of {} bytes, but the scheme it names writes \
+			signatures of {} bytes. {}",
+			len, want,
+			if len == 0 {
+				"The signature is empty, so this artefact was assembled before it was signed."
+			} else {
+				"A signature of the wrong width is a malformed field, not a failed check."
+			};
+		Invalid, Input, Mismatch));
+	}
+	Ok(())
 }
 
 /// The verifier for a scheme id and an author's public key, refusing an id v0 does not implement.
@@ -907,5 +1159,134 @@ mod tests {
 		// doc, heading, the heading's text, para, its text, the emph, and the emph's text.
 		assert_eq!(idx.len(), 7);
 		Ok(())
+	}
+
+	/// A post, for the artefact tests.
+	fn sample_post() -> Post {
+		Post {
+			body:	fmt!("The crop is in, and the second field can wait."),
+			to:	vec![0xA1; crate::post::limit::KEY_BYTES],
+			nonce:	vec![0xB2; crate::post::limit::NONCE_BYTES],
+			reply_to:	None,
+			refs:	Vec::new(),
+		}
+	}
+
+	/// A whole file carrying a post can be written and read back.
+	///
+	/// This is the gap [`Payload`] closes. Before it, [`write`] was the only writer and it routes
+	/// every schema through the node-tree validator, which admits the three `oxeweb/*` names alone,
+	/// so no path in the crate could produce or read a file carrying a message.
+	#[test]
+	fn test_a_post_is_a_whole_artefact_17() -> Outcome<()> {
+		let signer = SignatureScheme::new_ed25519();
+		let post = sample_post();
+		let buf = res!(write_artefact(&Payload::Post(post.clone()), &signer, TIME));
+		let back = res!(read_artefact(&buf));
+		assert_eq!(back.env().schema, SCHEMA_POST);
+		assert_eq!(*back.payload(), Payload::Post(post));
+
+		// The verification order is the container's, not the payload's: a payload byte the author
+		// did not sign fails at the hash, before a decoder sees it.
+		let start = res!(tree_start(&buf));
+		let mut bad = buf.clone();
+		bad[start] ^= 0x01;
+		match read_artefact(&bad) {
+			Ok(_) => return Err(err!("A tampered post was read."; Test, Invalid)),
+			Err(e) => assert!(fmt!("{}", e).contains("hashes to")),
+		}
+		Ok(())
+	}
+
+	/// A whole file carrying a card can be written and read back.
+	#[test]
+	fn test_a_card_is_a_whole_artefact_18() -> Outcome<()> {
+		let signer = SignatureScheme::new_ed25519();
+		let card = Card {
+			label:	fmt!("Jason"),
+			enc:	vec![0xE1; crate::card::limit::KEY_BYTES],
+			role:	crate::card::Role::Root,
+			prev:	None,
+		};
+		let buf = res!(write_artefact(&Payload::Card(card.clone()), &signer, TIME));
+		let back = res!(read_artefact(&buf));
+		assert_eq!(back.env().schema, SCHEMA_CARD);
+		assert_eq!(*back.payload(), Payload::Card(card));
+		Ok(())
+	}
+
+	/// A payload cannot be re-labelled into another schema after signing.
+	///
+	/// The attack the length prefix of §1.3 closes, run over the two schemas that made it possible
+	/// to attempt: a post and a card are both flat maps, so the bytes of one can be handed to the
+	/// other's decoder, and only the envelope says which it is. Re-labelling the envelope is what
+	/// the signature refuses.
+	#[test]
+	fn test_a_payload_cannot_be_relabelled_19() -> Outcome<()> {
+		let signer = SignatureScheme::new_ed25519();
+		let bytes = res!(sample_post().encode());
+		let env = res!(seal(&bytes, SCHEMA_POST, &signer, TIME));
+		res!(read_artefact(&res!(assemble(&env, &bytes))));
+
+		// The same bytes, the same hash, the same signature, one word changed in the envelope.
+		let mut relabelled = env.clone();
+		relabelled.schema = SCHEMA_CARD.to_string();
+		match read_artefact(&res!(assemble(&relabelled, &bytes))) {
+			Ok(_) => Err(err!(
+				"A post was read as a card, so the schema is not inside the signature.";
+			Test, Invalid)),
+			Err(e) => {
+				assert!(fmt!("{}", e).contains("not a signature by the author"));
+				Ok(())
+			},
+		}
+	}
+
+	/// A caller may build an envelope, sign it elsewhere, and assemble the artefact, without the
+	/// secret key ever reaching this crate.
+	///
+	/// The seam the browser uses: `envelope_for` holds no key material, `signing_input` says what
+	/// to sign, and `assemble` takes the signature back. The signer here stands in for the one that
+	/// lives outside.
+	#[test]
+	fn test_signing_happens_elsewhere_20() -> Outcome<()> {
+		let signer = SignatureScheme::new_ed25519();
+		let author = match res!(signer.get_public_key()) {
+			Some(pk) => pk.to_vec(),
+			None => return Err(err!("A fresh signer holds no public key."; Test, Bug)),
+		};
+		let bytes = res!(sample_post().encode());
+		let mut env = res!(envelope_for(&bytes, SCHEMA_POST, &author, TIME));
+
+		// Unsigned, and refused as such rather than by a special case.
+		assert!(env.sig.is_empty());
+		match read_artefact(&res!(assemble(&env, &bytes))) {
+			Ok(_) => return Err(err!("An unsigned artefact was read."; Test, Invalid)),
+			Err(e) => assert!(fmt!("{}", e).contains("assembled before it was signed")),
+		}
+
+		env.sig = res!(signer.sign(&env.signing_input()));
+		let back = res!(read_artefact(&res!(assemble(&env, &bytes))));
+		assert_eq!(back.env().schema, SCHEMA_POST);
+
+		// The same artefact the all-in-one path writes, byte for byte.
+		assert_eq!(
+			res!(assemble(&env, &bytes)),
+			res!(write_artefact(&Payload::Post(sample_post()), &signer, TIME)),
+		);
+		Ok(())
+	}
+
+	/// An author key of the wrong width is refused before an artefact is built around it.
+	#[test]
+	fn test_an_author_key_has_one_width_21() -> Outcome<()> {
+		let bytes = res!(sample_post().encode());
+		match envelope_for(&bytes, SCHEMA_POST, &[0u8; 31], TIME) {
+			Ok(_) => Err(err!("A 31 byte author key was accepted."; Test, Invalid)),
+			Err(e) => {
+				assert!(fmt!("{}", e).contains("31 bytes"));
+				Ok(())
+			},
+		}
 	}
 }

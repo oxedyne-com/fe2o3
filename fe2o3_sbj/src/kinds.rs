@@ -6,8 +6,10 @@
 
 use crate::{
 	SCHEMA_APP,
+	SCHEMA_CARD,
 	SCHEMA_CHROME,
 	SCHEMA_DOC,
+	SCHEMA_POST,
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -78,14 +80,20 @@ impl Schema {
 	/// A payload declaring a schema this build does not read is refused rather than read as though it
 	/// were one of these, since the container carries any schema at all (§1.2) and a reader that
 	/// validates three must refuse the rest.
+	///
+	/// These are the schemas whose payload is a node tree. The container carries others whose payload
+	/// is not — a post and a card are flat records — and those are reached through `doc::Payload`
+	/// rather than here, because there is no tree in them for this validator to walk.
 	pub fn from_name(name: &str) -> Outcome<Self> {
 		match name {
 			SCHEMA_DOC	=> Ok(Self::Doc),
 			SCHEMA_CHROME	=> Ok(Self::Chrome),
 			SCHEMA_APP	=> Ok(Self::App),
 			_	=> Err(err!(
-				"Schema '{}' is none of the schemas this validator reads: '{}', '{}', and '{}'.",
-				name, SCHEMA_DOC, SCHEMA_CHROME, SCHEMA_APP;
+				"Schema '{}' is none of the node-tree schemas this validator reads: '{}', '{}', \
+				and '{}'. A payload that is a record rather than a tree, such as '{}' or '{}', is \
+				read through `doc::read_artefact` and written through `doc::write_artefact`.",
+				name, SCHEMA_DOC, SCHEMA_CHROME, SCHEMA_APP, SCHEMA_POST, SCHEMA_CARD;
 			Invalid, Input, Mismatch)),
 		}
 	}
