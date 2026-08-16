@@ -153,6 +153,7 @@ pub mod comm;
 pub mod dal; // Data Abstraction Layer.
 pub mod data;
 pub mod file;
+pub mod holder; // One process at a time: refuses a store another process is using.
 pub mod test;
 
 pub mod db;
