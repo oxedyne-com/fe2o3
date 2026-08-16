@@ -254,8 +254,41 @@ impl<
                 },
                 OzoneMsg::NextLiveFile(resp) => {
                     // [4] Respond to the wbot request for the next live file in the sequence.
-                    self.fnum += 1;
-                    self.respond(Ok(OzoneMsg::UseLiveFile(self.fnum)), &resp);
+                    //
+                    // The number is claimed rather than counted to. A counter is a
+                    // statement about what this process has handed out, and a second
+                    // process running over the same zone keeps its own, so both would
+                    // name the same file and each writer would place records at offsets
+                    // predicted from its own cache of a length the other was changing.
+                    // Creating the file settles it instead: the create is atomic, so of
+                    // two writers racing for a number exactly one wins, and a writer that
+                    // holds a number is the only one appending to it.
+                    //
+                    // Numbers are therefore not contiguous where a zone is written by
+                    // more than one process, which nothing depends on: the zone's files
+                    // are found by reading the directory.
+                    let mut fnum = self.fnum;
+                    let mut claimed = false;
+                    // Bounded so that a directory in a state nobody expected stops the
+                    // bot rather than spinning it.
+                    for _ in 0..constant::LIVE_FILE_CLAIM_LIMIT {
+                        fnum += 1;
+                        match self.zdir().claim(fnum) {
+                            Ok(true) => { claimed = true; break; },
+                            Ok(false) => (),
+                            Err(e) => { self.error(e); break; },
+                        }
+                    }
+                    if claimed {
+                        self.fnum = fnum;
+                        self.respond(Ok(OzoneMsg::UseLiveFile(self.fnum)), &resp);
+                    } else {
+                        self.error(err!(
+                            "{}: No live file number could be claimed in zone {:?} within {} \
+                            attempts from {}; every number tried was already taken.",
+                            self.ozid(), self.zdir(), constant::LIVE_FILE_CLAIM_LIMIT, self.fnum;
+                        IO, File, Create, Excessive));
+                    }
                 },
                 OzoneMsg::ShardFileSize(b, size) => {
                     if b+1 > self.zone_state().files.len() {

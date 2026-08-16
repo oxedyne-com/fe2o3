@@ -106,6 +106,44 @@ impl ZoneDir {
         Ok((path, file))
     }
     
+    /// Claims a file number for this writer, by creating its files rather than by
+    /// asking whether they exist.
+    ///
+    /// Returns whether the claim was won. Creation is attempted with `create_new`,
+    /// which is one atomic operation, so of two writers racing for a number
+    /// exactly one succeeds and the loser is told at once rather than discovering
+    /// it by writing into somebody else's file.
+    ///
+    /// This is what makes a writer the sole appender to its own live files, which
+    /// is what the cached length in [`LiveFile`] depends on: a length read when a
+    /// file is opened stays true only while nobody else is adding to it. Two
+    /// writers sharing a file would each place records at offsets predicted from
+    /// their own cache, and the bytes would land correctly -- the files are opened
+    /// for append, so the kernel puts every record whole at the end -- while the
+    /// index entries pointed into the middle of each other's records.
+    ///
+    /// The data file is claimed first and the index second. A number whose data
+    /// file was won and whose index was not is abandoned rather than used, and the
+    /// data file is left behind: an empty file is inert, and removing one this
+    /// process may not own is worse than leaving it.
+    pub fn claim(&self, fnum: FileNum)
+        -> Outcome<bool>
+    {
+        let mut won = Vec::new();
+        for typ in [FileType::Data, FileType::Index] {
+            let mut path = self.dir.clone();
+            path.push(Self::relative_file_path(&typ, fnum));
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(_) => won.push(path),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+                Err(e) => return Err(err!(e,
+                    "While claiming {:?} for zone file {}.", path, fnum;
+                IO, File, Create)),
+            }
+        }
+        Ok(!won.is_empty())
+    }
+
     pub fn open_file(p: &PathBuf, access: &FileAccess) -> Outcome<File> {
         match access {
             FileAccess::Reading => match OpenOptions::new()
@@ -201,5 +239,69 @@ impl ZoneDir {
             dat,
             ind,
         })
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Returns a zone directory of its own for one test.
+    fn scratch(what: &str)
+        -> Outcome<ZoneDir>
+    {
+        let dir = std::env::temp_dir().join(fmt!(
+            "o3db_claim_{}_{}", std::process::id(), what));
+        let _ = std::fs::remove_dir_all(&dir);
+        res!(std::fs::create_dir_all(&dir));
+        Ok(ZoneDir { dir, max_size: 0 })
+    }
+
+    /// A file number goes to exactly one claimant.
+    ///
+    /// This is the whole of what makes a writer the sole appender to its own
+    /// live file, and therefore the whole of what makes the length it caches
+    /// when it opens that file stay true. Without it two writers place records
+    /// at offsets each predicted from its own cache, and the index entries name
+    /// positions inside each other's records.
+    #[test]
+    fn a_file_number_is_claimed_by_one_writer_only() -> Outcome<()> {
+        let zdir = res!(scratch("one"));
+        assert!(res!(zdir.claim(7)), "the first claim on a free number was refused");
+        assert!(!res!(zdir.claim(7)), "a number already claimed was handed out twice");
+        // And a different number is unaffected by the first one being taken.
+        assert!(res!(zdir.claim(8)), "an untouched number could not be claimed");
+        let _ = std::fs::remove_dir_all(&zdir.dir);
+        Ok(())
+    }
+
+    /// A claim leaves both of the pair behind, so that neither half of a number
+    /// can be taken by somebody else afterwards.
+    #[test]
+    fn a_claim_takes_the_data_file_and_the_index_together() -> Outcome<()> {
+        let zdir = res!(scratch("pair"));
+        assert!(res!(zdir.claim(3)), "the claim was refused");
+        for typ in [FileType::Data, FileType::Index] {
+            let mut path = zdir.dir.clone();
+            path.push(ZoneDir::relative_file_path(&typ, 3));
+            assert!(path.is_file(), "the claim left no {:?} file at {:?}", typ, path);
+        }
+        let _ = std::fs::remove_dir_all(&zdir.dir);
+        Ok(())
+    }
+
+    /// A number whose data file exists is refused even where its index does not,
+    /// which is the state a claim abandoned partway through leaves.
+    #[test]
+    fn half_a_pair_is_enough_to_refuse_a_number() -> Outcome<()> {
+        let zdir = res!(scratch("half"));
+        let mut path = zdir.dir.clone();
+        path.push(ZoneDir::relative_file_path(&FileType::Data, 5));
+        res!(std::fs::write(&path, b""));
+        assert!(!res!(zdir.claim(5)),
+            "a number whose data file was already there was claimed anyway");
+        let _ = std::fs::remove_dir_all(&zdir.dir);
+        Ok(())
     }
 }

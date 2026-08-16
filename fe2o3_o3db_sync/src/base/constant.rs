@@ -54,6 +54,13 @@ pub const CURRENT_FORMAT_VERSION:       u8 = 2;
 
 // Files.
 pub const MAX_ZONES:                    u16 = 100;
+/// How many live file numbers a zone bot will try before it gives up claiming one.
+///
+/// A claim fails only where the number is already taken, so this is reached only
+/// where a zone holds an unbroken run of files from the counter upward. Far above
+/// any real gap, and present so that a directory in an unexpected state stops the
+/// bot rather than spinning it.
+pub const LIVE_FILE_CLAIM_LIMIT:        usize = 1024;
 pub const DEFAULT_MAX_ZONE_DIR_BYTES:   u64 = 104_857_600; // 100 MiB
 pub const CONFIG_FILENAME:              &'static str = "config.jdat";
 pub const DB_UID_CHAR_LEN:              usize = 5;

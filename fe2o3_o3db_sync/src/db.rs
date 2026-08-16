@@ -1,4 +1,3 @@
-use crate::holder::Holder;
 use crate::{
     prelude::*,
     base::{
@@ -147,12 +146,6 @@ pub struct O3db<
     chan_inbox: Simplex<OzoneMsg<UIDL, UID, ENC, KH>>,
     api:        OzoneApi<UIDL, UID, ENC, KH, PR, CS>,
     closing:    Arc<Mutex<Closing>>,
-    /// This process's claim on the store, released when the last handle goes.
-    ///
-    /// Shared for the reason `closing` is: a claim per handle would be released
-    /// by the first handle dropped, leaving the store open to a second process
-    /// while this one is still writing to it.
-    _holder:    Arc<Holder>,
 }
 
 /// What one shutdown of a database needs to know, shared by every handle to it.
@@ -208,10 +201,6 @@ impl<
             info!(sync_log::stream(), "{:?} created.", db_root);
         }
 
-        // Claimed before the first write, which is the configuration file: a
-        // second process must be turned away before it has changed anything.
-        let holder = res!(Holder::take(&db_root));
-
         let cfg_path = OzoneConfig::config_path(&db_root);
         let mut cfg = if cfg_path.is_file() {
             res!(<OzoneConfig as JdatMapFile>::load(&cfg_path))
@@ -259,7 +248,6 @@ impl<
                 wg:     None,
                 done:   false,
             })),
-            _holder: Arc::new(holder),
         })
     }
 
