@@ -513,10 +513,14 @@ pub struct Meta {
 	pub hash:	Vec<u8>,
 	/// The length of the tree region, in bytes.
 	pub tree_len:	u64,
-	/// The number of nodes.
-	pub nodes:	u64,
-	/// The greatest nesting depth, the root alone being a depth of 1.
-	pub depth:	u64,
+	/// The number of nodes, for a payload that is a node tree.
+	///
+	/// Absent for a payload that is not one. A post and a card are flat records, so a node count of
+	/// zero would be a measurement rather than the absence of one, and a fixture declaring it would
+	/// be asserting something about a shape it does not have.
+	pub nodes:	Option<u64>,
+	/// The greatest nesting depth, the root alone being a depth of 1. Absent for the same reason.
+	pub depth:	Option<u64>,
 	/// Whether the file carries the optional index of §1.4.
 	pub index:	bool,
 	/// What the fixture is for.
@@ -527,16 +531,23 @@ impl Meta {
 
 	/// The expectations as a daticle.
 	pub fn to_dat(&self) -> Dat {
-		map(vec![
+		let mut kv = vec![
 			("schema",	Dat::Str(self.schema.clone())),
 			("time",	Dat::U64(self.time)),
 			("hash",	Dat::BU8(self.hash.clone())),
 			("tree_len",	Dat::U64(self.tree_len)),
-			("nodes",	Dat::U64(self.nodes)),
-			("depth",	Dat::U64(self.depth)),
-			("index",	Dat::Bool(self.index)),
-			("note",	Dat::Str(self.note.clone())),
-		])
+		];
+		// Omitted rather than written as zero, so a fixture for a payload that is not a tree makes
+		// no claim about a node count instead of making a false one.
+		if let Some(n) = self.nodes {
+			kv.push(("nodes", Dat::U64(n)));
+		}
+		if let Some(d) = self.depth {
+			kv.push(("depth", Dat::U64(d)));
+		}
+		kv.push(("index",	Dat::Bool(self.index)));
+		kv.push(("note",	Dat::Str(self.note.clone())));
+		map(kv)
 	}
 
 	/// Reads the expectations of a fixture.
@@ -546,8 +557,8 @@ impl Meta {
 			time:	res!(get_u64(d, "time")),
 			hash:	res!(get_bytes(d, "hash")),
 			tree_len:	res!(get_u64(d, "tree_len")),
-			nodes:	res!(get_u64(d, "nodes")),
-			depth:	res!(get_u64(d, "depth")),
+			nodes:	res!(get_u64_opt(d, "nodes")),
+			depth:	res!(get_u64_opt(d, "depth")),
 			index:	res!(get_bool(d, "index")),
 			note:	res!(get_str(d, "note")),
 		})

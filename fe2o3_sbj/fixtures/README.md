@@ -3,16 +3,23 @@
 The teeth of `SPEC.md` §7. Written by `examples/gen_fixtures.rs`, run by `tests/conformance.rs`, and
 regenerated rather than patched:
 
-    cargo run -p sbj --example gen_fixtures
-    cargo test -p sbj
+    cargo run -p oxedyne_fe2o3_sbj --example gen_fixtures
+    cargo test -p oxedyne_fe2o3_sbj
 
 Each fixture is a directory.
 
-**Acceptance** fixtures carry `doc.jdat`, the document in JDAT text form and the source of truth;
+**Acceptance** fixtures carry `doc.jdat`, the payload in JDAT text form and the source of truth;
 `doc.sbj`, the canonical signed artefact; and `meta.jdat`, what the artefact must turn out to be:
-its address, the length of its tree region, its node count and its depth. The suite reads
-`doc.jdat`, signs it with the committed key, and requires the bytes it gets back to be `doc.sbj`,
-byte for byte.
+its address, the length of its payload region, and -- where the payload is a node tree -- its node
+count and its depth. The suite reads `doc.jdat`, signs it with the committed key, and requires the
+bytes it gets back to be `doc.sbj`, byte for byte.
+
+**Not every payload is a node tree.** The container carries any schema (§1.2), and the fixtures
+named `post_*` and `card_*` carry `daimond/post/0` and `daimond/card/0`, which are flat canonical
+maps rather than trees. Those declare no node count and no depth, because they have neither, and
+their `doc.jdat` is written in plain JDAT with none of the `sbj_` node labels below. Everything else
+about them is identical: the same header, the same envelope, the same address, the same signature,
+and every rule of §3.
 
 **Rejection** fixtures carry `doc.sbj`, the bad artefact, and `reject.jdat`, which declares the rule
 broken, the step of §2 that must catch it, what the error must say, and the node or the byte it must

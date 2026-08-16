@@ -1,0 +1,8 @@
+{
+    "hash": (bu8|"rrxJqyDuar@hYR@GuMz@nDMqH8W6m#y0Ef*UWmY89rW=2"),
+    "index": (false),
+    "note": "A card naming the key it supersedes. It must not encode as `card_first` does: a rotated key and a first key are different facts, and a reader that could not tell them apart could not tell a replacement from a stranger.",
+    "schema": "daimond/card/0",
+    "time": (u64|1752000000000),
+    "tree_len": (u64|114),
+}

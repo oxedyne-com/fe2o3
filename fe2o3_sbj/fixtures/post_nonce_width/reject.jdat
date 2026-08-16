@@ -1,0 +1,6 @@
+{
+    "note": "A nonce of fifteen bytes. A key or a nonce of the wrong width is not a shorter one; it is a different thing, and admitting it would let a sender choose how much randomness a message carried.",
+    "rule": "The post schema fixes the nonce at 16 bytes.",
+    "says": "must carry exactly",
+    "stage": "decode",
+}

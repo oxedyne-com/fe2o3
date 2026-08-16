@@ -1,0 +1,6 @@
+{
+    "note": "A post whose map carries `to` twice on the wire. Both entries decode, and the second overwrites the first, so the decoded value is indistinguishable from a sound one: the fault exists in the bytes alone. It is caught by re-encoding what was decoded and requiring the same bytes back, which is why that comparison is not an optimisation to skip.",
+    "rule": "SPEC.md §3: a map carries each key once. A duplicate survives only in the bytes.",
+    "says": "not in canonical form",
+    "stage": "decode",
+}

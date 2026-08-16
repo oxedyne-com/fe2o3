@@ -1,0 +1,6 @@
+{
+    "note": "A message carrying `refs` as an empty list. A message with no references and a message with an empty list of them are the same message, so admitting both would give it two encodings and therefore two addresses.",
+    "rule": "SPEC.md §3 rules 4 and 8: an absent optional field is omitted, never encoded as an empty one.",
+    "says": "carries an empty \"refs\" list",
+    "stage": "decode",
+}

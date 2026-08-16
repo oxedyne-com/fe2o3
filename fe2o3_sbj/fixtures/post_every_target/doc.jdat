@@ -1,0 +1,43 @@
+{
+    "body": (bu32|"GMni86P%TN8WRs@WT6Xb87HeQMvdS-1X86rbStDXPsKWRM5v871%QMvq865qB21%RcDb86LX@sWk"),
+    "nonce": (bu8|"ihA-ihA-ihA-ihA-ihA-iW=4"),
+    "refs": [
+        {
+            "fallback": "the proposal about the panel showing nothing when signed out",
+            "target": {
+                "proposal": {
+                    "account": "oxedyne",
+                    "number": (u32|17),
+                    "repo": "daimond",
+                },
+            },
+        },
+        {
+            "fallback": "the build this was fixed in",
+            "target": {
+                "build": {
+                    "id": "f9f68b75c73b",
+                },
+            },
+        },
+        {
+            "fallback": "the Spending panel",
+            "target": {
+                "panel": {
+                    "name": "spend",
+                },
+            },
+        },
+        {
+            "fallback": "the guide section on voices",
+            "target": {
+                "guide": {
+                    "anchor": "voices",
+                    "page": "improve",
+                },
+            },
+        },
+    ],
+    "reply_to": (bu8|"myF3myF3myF3myF3myF3myF3myF3myF3myF3myF3myC=2"),
+    "to": (bu8|"eQ6XeQ6XeQ6XeQ6XeQ6XeQ6XeQ6XeQ6XeQ6XeQ6XeQ4=2"),
+}

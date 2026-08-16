@@ -1,0 +1,6 @@
+{
+    "note": "A signed post whose envelope has been re-labelled `daimond/card/0` after signing. Everything else is untouched: the payload bytes, the hash of them, and the signature over that hash. The signature covers the schema as well as the address, so the re-labelling is what breaks it. Without that, a payload could be presented to whichever validator would accept it, and an author's signature would vouch for a claim they never made.",
+    "rule": "SPEC.md §1.3: the schema is inside the signing input, and is preceded by its length.",
+    "says": "not a signature by the author",
+    "stage": "sig",
+}

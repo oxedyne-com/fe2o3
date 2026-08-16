@@ -1,0 +1,6 @@
+{
+    "note": "An envelope whose `tree_len` is written as a wider c64 than the value needs. It decodes to the same number, so nothing about where the payload is or what it says would change; only the bytes differ. Admitted, it would give one artefact more than one envelope encoding, and an envelope is what a reader identifies an artefact from. Caught by the BDAT decoder as it reads the length, which is earlier and more precise than the envelope's own re-encode comparison -- that comparison is the backstop for the faults a decode survives, such as a duplicate key, and this is not one of them.",
+    "rule": "SPEC.md §1.2 and §3: the envelope is canonical, so a length is written in as few bytes as it needs.",
+    "says": "minimally encoded",
+    "stage": "envelope",
+}

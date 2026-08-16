@@ -1,0 +1,8 @@
+{
+    "hash": (bu8|"xeTZhXLa0i5QgWkbJJVZ@x3c951cY043Ax829*H+s4G=2"),
+    "index": (false),
+    "note": "Every kind of reference once, at the limit of four, and a reply. All four referents are PUBLIC anchors: each is named globally and can be resolved by anybody holding a session. A reference to something only the sender can reach would draw a pressable chip that always fails, which is why no such kind exists.",
+    "schema": "daimond/post/0",
+    "time": (u64|1752000000000),
+    "tree_len": (u64|610),
+}

@@ -1,0 +1,6 @@
+{
+    "note": "A body one byte past the ceiling. The number is revisable on evidence; that there is one is not, since a body with no ceiling is a body that sets the relay's storage.",
+    "rule": "SPEC.md §5 and the post schema's own limits: a body is at most 8 KiB of UTF-8.",
+    "says": "exceeding the limit",
+    "stage": "decode",
+}

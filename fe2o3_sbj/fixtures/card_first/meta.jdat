@@ -1,0 +1,8 @@
+{
+    "hash": (bu8|"-CqcqFLp93t0Nu*ksEpHPz5taJ-usTyJAB4UByk4@Bq=2"),
+    "index": (false),
+    "note": "A first identity card: a display label, the sealing subkey, and the role. The SIGNING key is not a field here — it is the envelope's `author`, so a card has exactly one place that says which key composed it. Self-signed, which proves the holder of that key composed it and proves nothing whatever about who the holder is.",
+    "schema": "daimond/card/0",
+    "time": (u64|1752000000000),
+    "tree_len": (u64|73),
+}

@@ -1,0 +1,8 @@
+{
+    "hash": (bu8|"S7P5VD#y+FKJdsAVaK9ZbnhwAKU1tuz-W6YeJK%8-%G=2"),
+    "index": (false),
+    "note": "The smallest message that is still one: a body, a recipient and a nonce. Neither optional field is present, and neither is encoded as `none` — an absent field is omitted (§3 rule 4), because a message written two ways would be a message with two addresses.",
+    "schema": "daimond/post/0",
+    "time": (u64|1752000000000),
+    "tree_len": (u64|126),
+}

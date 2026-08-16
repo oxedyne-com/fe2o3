@@ -31,14 +31,30 @@ use common::{
 
 use oxedyne_fe2o3_sbj::{
 	canon,
-	doc,
+	card::{
+		self,
+		Card,
+		Role,
+	},
+	doc::{
+		self,
+		Payload,
+	},
 	envelope,
 	kinds::{
 		NodeKind,
 		ReservedKind,
 	},
+	post::{
+		self,
+		Post,
+		Reference,
+		Target,
+	},
 	validate,
+	SCHEMA_CARD,
 	SCHEMA_DOC,
+	SCHEMA_POST,
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -102,7 +118,8 @@ fn generate() -> Outcome<usize> {
 
 	res!(common::write_bytes(&root.join(README_FILE), readme().as_bytes()));
 
-	let n = res!(acceptance(&root, &keys)) + res!(rejection(&root, &keys));
+	let n = res!(acceptance(&root, &keys)) + res!(rejection(&root, &keys))
+		+ res!(payloads(&root, &keys));
 
 	// A fixture directory nothing above wrote is a fixture nobody can regenerate, and the suite will
 	// refuse to skip it, so it is caught here rather than there.
@@ -202,8 +219,8 @@ fn accept(
 		time:	env.time,
 		hash:	env.hash.clone(),
 		tree_len:	env.tree_len,
-		nodes:	try_into!(u64, stats.nodes),
-		depth:	try_into!(u64, stats.depth),
+		nodes:	Some(try_into!(u64, stats.nodes)),
+		depth:	Some(try_into!(u64, stats.depth)),
 		index,
 		note:	note.to_string(),
 	};
@@ -953,16 +970,23 @@ fn readme() -> String {
 The teeth of `SPEC.md` §7. Written by `examples/gen_fixtures.rs`, run by `tests/conformance.rs`, and
 regenerated rather than patched:
 
-    cargo run -p sbj --example gen_fixtures
-    cargo test -p sbj
+    cargo run -p oxedyne_fe2o3_sbj --example gen_fixtures
+    cargo test -p oxedyne_fe2o3_sbj
 
 Each fixture is a directory.
 
-**Acceptance** fixtures carry `doc.jdat`, the document in JDAT text form and the source of truth;
+**Acceptance** fixtures carry `doc.jdat`, the payload in JDAT text form and the source of truth;
 `doc.sbj`, the canonical signed artefact; and `meta.jdat`, what the artefact must turn out to be:
-its address, the length of its tree region, its node count and its depth. The suite reads
-`doc.jdat`, signs it with the committed key, and requires the bytes it gets back to be `doc.sbj`,
-byte for byte.
+its address, the length of its payload region, and -- where the payload is a node tree -- its node
+count and its depth. The suite reads `doc.jdat`, signs it with the committed key, and requires the
+bytes it gets back to be `doc.sbj`, byte for byte.
+
+**Not every payload is a node tree.** The container carries any schema (§1.2), and the fixtures
+named `post_*` and `card_*` carry `daimond/post/0` and `daimond/card/0`, which are flat canonical
+maps rather than trees. Those declare no node count and no depth, because they have neither, and
+their `doc.jdat` is written in plain JDAT with none of the `sbj_` node labels below. Everything else
+about them is identical: the same header, the same envelope, the same address, the same signature,
+and every rule of §3.
 
 **Rejection** fixtures carry `doc.sbj`, the bad artefact, and `reject.jdat`, which declares the rule
 broken, the step of §2 that must catch it, what the error must say, and the node or the byte it must
@@ -993,4 +1017,395 @@ kinds 1 to 13 and no others. All three are refused, and the third carries a vali
 refused anyway, which is the point of it: a fallback admits a code the reader has never heard of,
 and never one the reader knows a document may not carry.
 ", KEY_FILE, ALIEN_CODE, ReservedKind::Edit.code(), ReservedKind::Surface.code())
+}
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ THE SCHEMAS THAT ARE NOT NODE TREES                                       │
+// └───────────────────────────────────────────────────────────────────────────┘
+//
+// A post and a card are flat canonical maps, so none of §4 applies to them and the fixtures below
+// carry no node count and no depth. Everything else is the same file in the same container, which
+// is the point: the envelope, the address, the signature and every rule of §3 are the container's
+// and do not change with the payload.
+
+/// A recipient's key, fixed so a fixture written twice is written the same.
+const TO_KEY: [u8; post::limit::KEY_BYTES] = [0xA1; post::limit::KEY_BYTES];
+
+/// A message's nonce, fixed for the same reason.
+const NONCE: [u8; post::limit::NONCE_BYTES] = [0xB2; post::limit::NONCE_BYTES];
+
+/// A sealing subkey, fixed for the same reason.
+const ENC_KEY: [u8; card::limit::KEY_BYTES] = [0xE1; card::limit::KEY_BYTES];
+
+/// The smallest message that is still a message.
+fn post_minimal() -> Post {
+	Post {
+		body:	"The crop is in, and the second field can wait.".to_string(),
+		to:	TO_KEY.to_vec(),
+		nonce:	NONCE.to_vec(),
+		reply_to:	None,
+		refs:	Vec::new(),
+	}
+}
+
+/// The fixtures of the post and card schemas, and the count of them.
+fn payloads(
+	root:	&Path,
+	keys:	&Keys,
+)
+	-> Outcome<usize>
+{
+	let author = res!(keys.author.signer());
+
+	// -- What a reader must accept. -------------------------------------------------------------
+
+	res!(accept_payload(root, &author, "post_minimal", &Payload::Post(post_minimal()),
+		"The smallest message that is still one: a body, a recipient and a nonce. Neither optional \
+		field is present, and neither is encoded as `none` — an absent field is omitted (§3 rule \
+		4), because a message written two ways would be a message with two addresses."));
+
+	res!(accept_payload(root, &author, "post_every_target", &Payload::Post(Post {
+		body:	"All four of the things a message may point at, once each.".to_string(),
+		to:	TO_KEY.to_vec(),
+		nonce:	NONCE.to_vec(),
+		reply_to:	Some(vec![0xC3; post::limit::ADDR_BYTES]),
+		refs:	vec![
+			Reference {
+				target:	Target::Proposal {
+					account:	"oxedyne".to_string(),
+					repo:	"daimond".to_string(),
+					number:	17,
+				},
+				fallback:	"the proposal about the panel showing nothing when signed out"
+					.to_string(),
+			},
+			Reference {
+				target:	Target::Build { id: "f9f68b75c73b".to_string() },
+				fallback:	"the build this was fixed in".to_string(),
+			},
+			Reference {
+				target:	Target::Panel { name: "spend".to_string() },
+				fallback:	"the Spending panel".to_string(),
+			},
+			Reference {
+				target:	Target::Guide {
+					page:	"improve".to_string(),
+					anchor:	Some("voices".to_string()),
+				},
+				fallback:	"the guide section on voices".to_string(),
+			},
+		],
+	}),
+		"Every kind of reference once, at the limit of four, and a reply. All four referents are \
+		PUBLIC anchors: each is named globally and can be resolved by anybody holding a session. A \
+		reference to something only the sender can reach would draw a pressable chip that always \
+		fails, which is why no such kind exists."));
+
+	res!(accept_payload(root, &author, "card_first", &Payload::Card(Card {
+		label:	"Jason".to_string(),
+		enc:	ENC_KEY.to_vec(),
+		role:	Role::Root,
+		prev:	None,
+	}),
+		"A first identity card: a display label, the sealing subkey, and the role. The SIGNING key \
+		is not a field here — it is the envelope's `author`, so a card has exactly one place that \
+		says which key composed it. Self-signed, which proves the holder of that key composed it \
+		and proves nothing whatever about who the holder is."));
+
+	res!(accept_payload(root, &author, "card_rotated", &Payload::Card(Card {
+		label:	"Jason".to_string(),
+		enc:	ENC_KEY.to_vec(),
+		role:	Role::Root,
+		prev:	Some(vec![0xD4; card::limit::KEY_BYTES]),
+	}),
+		"A card naming the key it supersedes. It must not encode as `card_first` does: a rotated \
+		key and a first key are different facts, and a reader that could not tell them apart could \
+		not tell a replacement from a stranger."));
+
+	// -- What a reader must refuse. -------------------------------------------------------------
+
+	// The re-labelling attack, which is the whole reason §1.3 length-prefixes the schema. The bytes,
+	// the hash and the signature are untouched; one word of the envelope is changed. Both payloads
+	// are flat maps, so the card's decoder would happily be handed the post's bytes -- the envelope
+	// is the only thing that says which this is, and the envelope is signed.
+	let bytes = res!(post_minimal().encode());
+	let mut env = res!(common::seal(&bytes, SCHEMA_POST, &author, TIME));
+	env.schema = SCHEMA_CARD.to_string();
+	res!(reject(root, "post_relabelled_as_card", &res!(common::assemble(&env, &bytes)), None,
+		Reject {
+			stage:	Stage::Sig,
+			rule:	"SPEC.md §1.3: the schema is inside the signing input, and is preceded by its \
+				length.".to_string(),
+			says:	"not a signature by the author".to_string(),
+			node:	None,
+			offset:	None,
+			note:	"A signed post whose envelope has been re-labelled `daimond/card/0` after \
+				signing. Everything else is untouched: the payload bytes, the hash of them, and \
+				the signature over that hash. The signature covers the schema as well as the \
+				address, so the re-labelling is what breaks it. Without that, a payload could be \
+				presented to whichever validator would accept it, and an author's signature would \
+				vouch for a claim they never made.".to_string(),
+		}));
+
+	// A body one byte past the limit. A rejection and never a truncation: a message silently cut
+	// short is a message whose sender and reader disagree about what was said.
+	let mut long = post_minimal();
+	long.body = "x".repeat(post::limit::BODY_BYTES + 1);
+	res!(payload_reject(root, &author, "post_body_over_limit", SCHEMA_POST,
+		&res!(long.to_dat()),
+		"exceeding the limit",
+		"SPEC.md §5 and the post schema's own limits: a body is at most 8 KiB of UTF-8."
+			.to_string(),
+		"A body one byte past the ceiling. The number is revisable on evidence; that there is one \
+		is not, since a body with no ceiling is a body that sets the relay's storage.".to_string()));
+
+	// A nonce of the wrong width. Not a shorter nonce: a different thing.
+	let short_nonce = {
+		let mut m = DaticleMap::new();
+		m.insert(dat!(post::KEY_BODY), Dat::BU32(post_minimal().body.into_bytes()));
+		m.insert(dat!(post::KEY_NONCE), Dat::BU8(vec![0xB2; post::limit::NONCE_BYTES - 1]));
+		m.insert(dat!(post::KEY_TO), Dat::BU8(TO_KEY.to_vec()));
+		Dat::Map(m)
+	};
+	res!(payload_reject(root, &author, "post_nonce_width", SCHEMA_POST, &short_nonce,
+		"must carry exactly",
+		"The post schema fixes the nonce at 16 bytes.".to_string(),
+		"A nonce of fifteen bytes. A key or a nonce of the wrong width is not a shorter one; it \
+		is a different thing, and admitting it would let a sender choose how much randomness a \
+		message carried.".to_string()));
+
+	// A sealing subkey of the wrong width, for the same reason on the card's side.
+	let short_enc = {
+		let mut m = DaticleMap::new();
+		m.insert(dat!(card::KEY_ENC), Dat::BU8(vec![0xE1; card::limit::KEY_BYTES - 1]));
+		m.insert(dat!(card::KEY_LABEL), Dat::Str("Jason".to_string()));
+		m.insert(dat!(card::KEY_ROLE), Dat::Str(Role::Root.as_str().to_string()));
+		Dat::Map(m)
+	};
+	res!(payload_reject(root, &author, "card_enc_width", SCHEMA_CARD, &short_enc,
+		"must carry exactly",
+		"The card schema fixes the sealing subkey at 32 bytes.".to_string(),
+		"A sealing subkey of thirty-one bytes. A card is what a correspondent reads a sealing key \
+		OFF, so a key of the wrong width here is a key nothing can seal to.".to_string()));
+
+	// A list that is present and empty. Two encodings of one message, and so two addresses.
+	let empty_refs = {
+		let mut m = DaticleMap::new();
+		m.insert(dat!(post::KEY_BODY), Dat::BU32(post_minimal().body.into_bytes()));
+		m.insert(dat!(post::KEY_NONCE), Dat::BU8(NONCE.to_vec()));
+		m.insert(dat!(post::KEY_REFS), Dat::List(Vec::new()));
+		m.insert(dat!(post::KEY_TO), Dat::BU8(TO_KEY.to_vec()));
+		Dat::Map(m)
+	};
+	res!(payload_reject(root, &author, "post_refs_empty_list", SCHEMA_POST, &empty_refs,
+		"carries an empty \"refs\" list",
+		"SPEC.md §3 rules 4 and 8: an absent optional field is omitted, never encoded as an empty \
+		one.".to_string(),
+		"A message carrying `refs` as an empty list. A message with no references and a message \
+		with an empty list of them are the same message, so admitting both would give it two \
+		encodings and therefore two addresses.".to_string()));
+
+	// A duplicate key, which survives only in the bytes: a decoding map collapses it into one entry,
+	// so nothing but re-encoding and comparing can catch it.
+	res!(reject(root, "post_duplicate_key",
+		&res!(payload_file(&author, SCHEMA_POST, &res!(post_duplicate_key_bytes()))), None,
+		Reject {
+			stage:	Stage::Decode,
+			rule:	"SPEC.md §3: a map carries each key once. A duplicate survives only in the \
+				bytes.".to_string(),
+			says:	"not in canonical form".to_string(),
+			node:	None,
+			offset:	None,
+			note:	"A post whose map carries `to` twice on the wire. Both entries decode, and the \
+				second overwrites the first, so the decoded value is indistinguishable from a \
+				sound one: the fault exists in the bytes alone. It is caught by re-encoding what \
+				was decoded and requiring the same bytes back, which is why that comparison is \
+				not an optimisation to skip.".to_string(),
+		}));
+
+	// A non-minimal length in the ENVELOPE, over a post. The envelope obeys §3 like everything else
+	// the hash is read from, and `tree_len` is the one field written as a variable-width c64.
+	res!(reject(root, "envelope_nonminimal_c64",
+		&res!(nonminimal_tree_len(&author)), None,
+		Reject {
+			stage:	Stage::Envelope,
+			rule:	"SPEC.md §1.2 and §3: the envelope is canonical, so a length is written in as \
+				few bytes as it needs.".to_string(),
+			says:	"minimally encoded".to_string(),
+			node:	None,
+			offset:	None,
+			note:	"An envelope whose `tree_len` is written as a wider c64 than the value needs. \
+				It decodes to the same number, so nothing about where the payload is or what it \
+				says would change; only the bytes differ. Admitted, it would give one artefact \
+				more than one envelope encoding, and an envelope is what a reader identifies an \
+				artefact from. Caught by the BDAT decoder as it reads the length, which is earlier \
+				and more precise than the envelope's own re-encode comparison -- that comparison \
+				is the backstop for the faults a decode survives, such as a duplicate key, and \
+				this is not one of them.".to_string(),
+		}));
+
+	Ok(11)
+}
+
+/// Writes an acceptance fixture for a payload that is not a node tree.
+fn accept_payload(
+	root:	&Path,
+	author:	&SignatureScheme,
+	name:	&str,
+	payload:	&Payload,
+	note:	&str,
+)
+	-> Outcome<()>
+{
+	let dir = res!(fresh_dir(root, name));
+	let buf = res!(doc::write_artefact(payload, author, TIME));
+	let env = res!(doc::verify_only(&buf));
+	let meta = Meta {
+		schema:	env.schema.clone(),
+		time:	env.time,
+		hash:	env.hash.clone(),
+		tree_len:	env.tree_len,
+		// A flat record has no nodes and no depth, so it declares neither.
+		nodes:	None,
+		depth:	None,
+		index:	false,
+		note:	note.to_string(),
+	};
+	let as_dat = match payload {
+		Payload::Post(p)	=> res!(p.to_dat()),
+		Payload::Card(c)	=> res!(c.to_dat()),
+		Payload::Tree { .. }	=> return Err(err!(
+			"The fixture '{}' is a node tree, which `accept` writes and this does not.", name;
+		Bug, Invalid)),
+	};
+	res!(common::write_bytes(&dir.join(DOC_JDAT), res!(common::to_jdat_plain(&as_dat)).as_bytes()));
+	res!(common::write_bytes(&dir.join(DOC_SBJ), &buf));
+	res!(common::write_bytes(
+		&dir.join(META_JDAT),
+		res!(common::to_jdat_plain(&meta.to_dat())).as_bytes(),
+	));
+	Ok(())
+}
+
+/// Writes a rejection fixture whose payload is a canonical map breaking one of its schema's rules.
+///
+/// The map is encoded without being checked, so the fixture isolates the rule: the container is
+/// sound, the bytes hash to what the envelope says, the signature verifies, and the payload's own
+/// decoder is what refuses it.
+fn payload_reject(
+	root:	&Path,
+	author:	&SignatureScheme,
+	name:	&str,
+	schema:	&str,
+	payload:	&Dat,
+	says:	&str,
+	rule:	String,
+	note:	String,
+)
+	-> Outcome<()>
+{
+	let bytes = res!(payload.to_bytes(Vec::new()));
+	let bad = res!(payload_file(author, schema, &bytes));
+	let dir = res!(fresh_dir(root, name));
+	res!(common::write_bytes(&dir.join(DOC_SBJ), &bad));
+	res!(common::write_bytes(
+		&dir.join(REJECT_JDAT),
+		res!(common::to_jdat_plain(&Reject {
+			stage:	Stage::Decode,
+			rule,
+			says:	says.to_string(),
+			node:	None,
+			offset:	None,
+			note,
+		}.to_dat())).as_bytes(),
+	));
+	// Written plain, with none of the `sbj_` node labels: there are no `usr` daticles in a record.
+	res!(common::write_bytes(&dir.join(DOC_JDAT), res!(common::to_jdat_plain(payload)).as_bytes()));
+	Ok(())
+}
+
+/// A whole file around payload bytes, correctly hashed and correctly signed.
+fn payload_file(
+	author:	&SignatureScheme,
+	schema:	&str,
+	bytes:	&[u8],
+)
+	-> Outcome<Vec<u8>>
+{
+	common::assemble(&res!(common::seal(bytes, schema, author, TIME)), bytes)
+}
+
+/// The bytes of a post whose map carries the key `to` twice.
+///
+/// A map is a `BTreeMap` once decoded, so a duplicate key exists only on the wire. The bytes are
+/// therefore written entry by entry, in the order a `BTreeMap` puts them in, with one written twice.
+fn post_duplicate_key_bytes() -> Outcome<Vec<u8>> {
+	let p = post_minimal();
+	let mut inner = Vec::new();
+	inner = res!(Dat::Str(post::KEY_BODY.to_string()).to_bytes(inner));
+	inner = res!(Dat::BU32(p.body.into_bytes()).to_bytes(inner));
+	inner = res!(Dat::Str(post::KEY_NONCE.to_string()).to_bytes(inner));
+	inner = res!(Dat::BU8(NONCE.to_vec()).to_bytes(inner));
+	for _ in 0..2 { // The duplicate.
+		inner = res!(Dat::Str(post::KEY_TO.to_string()).to_bytes(inner));
+		inner = res!(Dat::BU8(TO_KEY.to_vec()).to_bytes(inner));
+	}
+	map_bytes(&inner)
+}
+
+/// A sound post in a file whose envelope writes `tree_len` in more bytes than it needs.
+fn nonminimal_tree_len(author: &SignatureScheme) -> Outcome<Vec<u8>> {
+	let bytes = res!(post_minimal().encode());
+	let env = res!(common::seal(&bytes, SCHEMA_POST, author, TIME));
+	let env_dat = res!(env.to_dat());
+	let map = match &env_dat {
+		Dat::Map(m) => m,
+		other => return Err(err!(
+			"An envelope encodes as a map, and this is a {:?}.", other.kind(); Bug, Invalid)),
+	};
+	// Every entry as the encoder writes it, except `tree_len`, which is written at a wider c64.
+	let mut inner = Vec::new();
+	for (k, v) in map.iter() {
+		inner = res!(k.to_bytes(inner));
+		if *k == dat!(envelope::KEY_TREE_LEN) {
+			inner.extend_from_slice(&wide_c64(env.tree_len));
+		} else {
+			inner = res!(v.to_bytes(inner));
+		}
+	}
+	let env_bytes = res!(map_bytes(&inner));
+	let mut buf = res!(envelope::write_header(env_bytes.len()));
+	buf.extend_from_slice(&env_bytes);
+	buf.extend_from_slice(&bytes);
+	Ok(buf)
+}
+
+/// A BDAT map around already-encoded entries: the map code, the byte length, then the entries.
+///
+/// Written by hand because every fixture that reaches for it is a fixture whose entries a `Dat`
+/// cannot hold -- a duplicate key, or a value written at a width the encoder would never choose.
+fn map_bytes(inner: &[u8]) -> Outcome<Vec<u8>> {
+	let mut buf = vec![Dat::MAP_CODE];
+	buf = res!(Dat::C64(try_into!(u64, inner.len())).to_bytes(buf));
+	buf.extend_from_slice(inner);
+	Ok(buf)
+}
+
+/// A `c64` written in one more byte than the value needs.
+///
+/// A `c64` is a code byte carrying the number of value bytes that follow, so the same number has as
+/// many encodings as there are widths that hold it. Canonical form is the narrowest (§3); this is
+/// the next one up, which decodes to exactly the same number and differs only in the bytes.
+fn wide_c64(v: u64) -> Vec<u8> {
+	let be = v.to_be_bytes();
+	// The minimal width, then one more. A zero needs no value bytes, so the wide form of it is one.
+	let narrow = be.iter().position(|b| *b != 0).map_or(0, |i| 8 - i);
+	// `min(8)` rather than a check: eight is the widest a c64 has, so a value already at it has no
+	// wider form and is written as it stands. No caller reaches that, since `tree_len` is capped at
+	// four mebibytes by §5.
+	let width = (narrow + 1).min(8);
+	let mut out = vec![Dat::C64_CODE_START + width as u8];
+	out.extend_from_slice(&be[8 - width..]);
+	out
 }

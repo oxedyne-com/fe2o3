@@ -1,0 +1,6 @@
+{
+    "note": "A sealing subkey of thirty-one bytes. A card is what a correspondent reads a sealing key OFF, so a key of the wrong width here is a key nothing can seal to.",
+    "rule": "The card schema fixes the sealing subkey at 32 bytes.",
+    "says": "must carry exactly",
+    "stage": "decode",
+}

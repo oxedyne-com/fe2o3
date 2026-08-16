@@ -30,9 +30,18 @@ use common::{
 };
 
 use oxedyne_fe2o3_sbj::{
-	doc,
+	card::Card,
+	doc::{
+		self,
+		Payload,
+	},
+	envelope,
 	index,
+	post::Post,
 	validate,
+	HEADER_LEN,
+	SCHEMA_CARD,
+	SCHEMA_POST,
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -238,38 +247,56 @@ fn accept(
 			"The fixture '{}' does not verify.", name;
 		Test, Invalid)),
 	};
-	let doc = match doc::read(&buf) {
-		Ok(doc) => doc,
+	let art = match doc::read_artefact(&buf) {
+		Ok(art) => art,
 		Err(e) => return Err(err!(e,
 			"The fixture '{}' does not read.", name;
 		Test, Invalid)),
 	};
-	res!(req(name, "the envelope of verify_only is the envelope of read", &env, doc.env()));
+	res!(req(name, "the envelope of verify_only is the envelope of read", &env, art.env()));
 
 	// The envelope says what `meta.jdat` says it says.
-	res!(req(name, "schema", &doc.env().schema, &meta.schema));
-	res!(req(name, "time", &doc.env().time, &meta.time));
-	res!(req(name, "hash", &doc.env().hash, &meta.hash));
-	res!(req(name, "tree_len", &doc.env().tree_len, &meta.tree_len));
-	res!(req(name, "author", &doc.env().author, &keys.author.pk));
-
-	// The tree is the shape `meta.jdat` says it is.
-	let stats = res!(validate::validate(doc.tree(), &doc.env().schema));
-	res!(req(name, "node count", &try_into!(u64, stats.nodes), &meta.nodes));
-	res!(req(name, "depth", &try_into!(u64, stats.depth), &meta.depth));
+	res!(req(name, "schema", &art.env().schema, &meta.schema));
+	res!(req(name, "time", &art.env().time, &meta.time));
+	res!(req(name, "hash", &art.env().hash, &meta.hash));
+	res!(req(name, "tree_len", &art.env().tree_len, &meta.tree_len));
+	res!(req(name, "author", &art.env().author, &keys.author.pk));
 
 	// The hash in the envelope is the hash of the region, and the region is the length declared.
 	let (_, region) = res!(doc::verify(&buf));
 	res!(req(name, "tree region length", &try_into!(u64, region.len()), &meta.tree_len));
-	let hash = res!(doc::hash_tree(doc.env().hash_scheme, region));
-	res!(req(name, "the hash of the tree region", &hash, &meta.hash));
+	let hash = res!(doc::hash_tree(art.env().hash_scheme, region));
+	res!(req(name, "the hash of the payload region", &hash, &meta.hash));
 
-	// `doc.jdat` is the document, and the document is `doc.sbj`.
-	let tree = res!(read_tree(&dir.join(DOC_JDAT), name));
-	res!(req(name, "the tree of doc.jdat against the tree of doc.sbj", &tree, doc.tree()));
-
+	// `doc.jdat` is the payload, and the payload is `doc.sbj`. What the payload IS decides how it
+	// is read back and how it is rebuilt: a node tree carries `usr` nodes and is written by
+	// `doc::write`, while a post and a card are flat maps with no node labels in them at all.
 	let signer = res!(keys.author.signer());
-	let rebuilt = res!(rewrite(&tree, &meta, &signer));
+	let rebuilt = match art.payload() {
+		Payload::Tree { tree, .. } => {
+			// The tree is the shape `meta.jdat` says it is.
+			let stats = res!(validate::validate(tree, &art.env().schema));
+			res!(req(name, "node count", &Some(try_into!(u64, stats.nodes)), &meta.nodes));
+			res!(req(name, "depth", &Some(try_into!(u64, stats.depth)), &meta.depth));
+			let from_text = res!(read_tree(&dir.join(DOC_JDAT), name));
+			res!(req(name, "the tree of doc.jdat against the tree of doc.sbj", &from_text, tree));
+			res!(rewrite(&from_text, &meta, &signer))
+		},
+		Payload::Post(post) => {
+			res!(req(name, "node count", &None, &meta.nodes));
+			let from_text = res!(read_payload(&dir.join(DOC_JDAT), name));
+			let back = res!(Post::from_dat(&from_text));
+			res!(req(name, "the post of doc.jdat against the post of doc.sbj", &back, post));
+			res!(doc::write_artefact(&Payload::Post(back), &signer, meta.time))
+		},
+		Payload::Card(card) => {
+			res!(req(name, "node count", &None, &meta.nodes));
+			let from_text = res!(read_payload(&dir.join(DOC_JDAT), name));
+			let back = res!(Card::from_dat(&from_text));
+			res!(req(name, "the card of doc.jdat against the card of doc.sbj", &back, card));
+			res!(doc::write_artefact(&Payload::Card(back), &signer, meta.time))
+		},
+	};
 	if rebuilt != buf {
 		return Err(err!(
 			"The fixture '{}' does not rebuild: writing the document of '{}' with the committed \
@@ -295,7 +322,7 @@ fn accept(
 		}
 		let idx = res!(index::parse(rest));
 		res!(index::check(region, &idx));
-		res!(req(name, "the entries of the index", &try_into!(u64, idx.len()), &meta.nodes));
+		res!(req(name, "the entries of the index", &Some(try_into!(u64, idx.len())), &meta.nodes));
 	} else if !rest.is_empty() {
 		return Err(err!(
 			"The fixture '{}' declares no index, and carries {} trailing bytes.",
@@ -355,7 +382,7 @@ fn reject(
 		_ => (),
 	}
 
-	let msg = match doc::read(&buf) {
+	let msg = match doc::read_artefact(&buf) {
 		Ok(_) => return Err(err!(
 			"The fixture '{}' was read. It breaks {} A document that fails at any step renders as \
 			an error card and is never partially displayed.", name, dec.rule;
@@ -396,8 +423,16 @@ fn reject(
 	// tree it carries is the one in the artefact.
 	let jdat = dir.join(DOC_JDAT);
 	if jdat.is_file() {
-		let tree = res!(read_tree(&jdat, name));
-		let bytes = res!(common::encode_unchecked(&tree));
+		// A node tree is written with the `sbj_` node labels and a record without them, so which
+		// codec reads it back is decided by what the envelope says the payload is -- read here
+		// WITHOUT verifying, since a fixture that fails at the header has no readable envelope and
+		// carries no `doc.jdat` either.
+		let payload = match envelope_schema(&buf) {
+			Some(schema) if schema == SCHEMA_POST || schema == SCHEMA_CARD =>
+				res!(read_payload(&jdat, name)),
+			_ => res!(read_tree(&jdat, name)),
+		};
+		let bytes = res!(common::encode_unchecked(&payload));
 		let start = res!(common::tree_start(&buf));
 		if bytes.as_slice() != &buf[start..] {
 			return Err(err!(
@@ -412,6 +447,46 @@ fn reject(
 		}
 	}
 	Ok(())
+}
+
+/// Reads the flat payload a fixture's `doc.jdat` carries, for a schema that is not a node tree.
+///
+/// Plain JDAT, with none of the `sbj_` node labels: a post and a card carry no `usr` daticles, so
+/// the codec that knows the node vocabulary has nothing to do here and reading with it would only
+/// make a fixture depend on a table it does not use.
+fn read_payload(
+	path:	&Path,
+	name:	&str,
+)
+	-> Outcome<Dat>
+{
+	let s = res!(common::read_text(path));
+	match common::from_jdat_plain(&s) {
+		Ok(d) => Ok(d),
+		Err(e) => Err(err!(e,
+			"The '{}' of the fixture '{}' is not readable JDAT.", DOC_JDAT, name;
+		Test, Invalid)),
+	}
+}
+
+/// The schema a file's envelope declares, or `None` if the file has no readable envelope.
+///
+/// Deliberately UNVERIFIED, and used for nothing but choosing which text codec reads a fixture's
+/// `doc.jdat`. A rejection fixture is a file with something wrong with it, so the envelope may be
+/// the wrong thing about it; nothing here believes what it says beyond picking a reader.
+fn envelope_schema(buf: &[u8]) -> Option<String> {
+	let hdr = match envelope::read_header(buf) {
+		Ok(h)  => h,
+		Err(_) => return None,
+	};
+	let end = HEADER_LEN + hdr.env_len as usize;
+	if buf.len() < end {
+		return None;
+	}
+	match envelope::Envelope::decode(&buf[HEADER_LEN..end]) {
+		Ok(env) => Some(env.schema),
+		Err(_)  => None,
+	}
 }
 
 /// Reads the tree a fixture's `doc.jdat` carries, naming the fixture if it will not read.

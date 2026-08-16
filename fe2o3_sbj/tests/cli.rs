@@ -80,6 +80,8 @@ fn round_trip() -> Outcome<()> {
 	let root = common::fixtures_dir();
 	let keys = res!(Keys::load(&root));
 	let mut run = 0;
+	// Acceptance fixtures the compiler has no business with, counted so the number can be asserted.
+	let mut skipped = 0;
 
 	for entry in res!(fs::read_dir(&root), IO, File) {
 		let entry = res!(entry, IO, File);
@@ -99,6 +101,33 @@ fn round_trip() -> Outcome<()> {
 		))));
 		let committed = res!(common::read_bytes(&dir.join(DOC_SBJ)));
 
+		// The compiler is a DOCUMENT tool: it reads the JDAT text of a node tree and writes an
+		// oxeweb document. A post and a card travel in the same container and are not node trees,
+		// so there is nothing here for it to compile and this is not the suite that tests them.
+		//
+		// Excluded by an assertion rather than by a `continue`, because a fixture skipped in
+		// silence is a fixture that could stop being run without anybody noticing. Every fixture
+		// this loop meets is either compiled or is required to be one the compiler refuses.
+		if meta.schema != SCHEMA_DOC {
+			// The claim is not that the TEXT is unreadable: a flat record is perfectly good JDAT,
+			// and the decoder parses it happily into a map. The claim is that the compiler cannot
+			// WRITE it. `doc::write` puts every schema through the node-tree validator, so the one
+			// route this tool has to an artefact is closed to a record, and it says so.
+			let src = res!(common::read_text(&dir.join(DOC_JDAT)));
+			let parsed = res!(text::decode(&src, &alien()));
+			match compile(&parsed, &meta, &keys) {
+				Ok(_) => return Err(err!(
+					"The fixture '{}' declares the schema '{}', which is not a node tree, and the \
+					document compiler wrote an artefact for it anyway. A record put through the \
+					tree writer is a document nobody wrote.", name, meta.schema;
+				Test, Invalid, Unexpected)),
+				Err(_) => (),
+			}
+			res!(eq(&name, "the node count of a payload that is not a tree", &meta.nodes, &None));
+			skipped += 1;
+			continue;
+		}
+
 		// The text form of the document is its source: it compiles to the artefact that was
 		// committed, byte for byte, or the compiler is not the writer the fixtures were written by.
 		let src = res!(common::read_text(&dir.join(DOC_JDAT)));
@@ -115,8 +144,8 @@ fn round_trip() -> Outcome<()> {
 		let read = res!(doc::read(&built));
 		res!(eq(&name, "the tree that was compiled", read.tree(), &tree));
 		let stats = res!(validate::validate(read.tree(), &read.env().schema));
-		res!(eq(&name, "the node count", &try_into!(u64, stats.nodes), &meta.nodes));
-		res!(eq(&name, "the depth", &try_into!(u64, stats.depth), &meta.depth));
+		res!(eq(&name, "the node count", &Some(try_into!(u64, stats.nodes)), &meta.nodes));
+		res!(eq(&name, "the depth", &Some(try_into!(u64, stats.depth)), &meta.depth));
 		res!(eq(&name, "the address", &read.env().hash, &meta.hash));
 
 		// Dumped back to text, the document is the document: the tree survives, and the text it is
@@ -145,6 +174,14 @@ fn round_trip() -> Outcome<()> {
 			"No acceptance fixture was found in {}, so nothing was round tripped.",
 			common::fixtures_dir().display();
 		Test, Missing));
+	}
+	// The four fixtures of the two record schemas. Named as a number rather than left open, so that
+	// a fixture which quietly stopped being a document -- or a document that quietly stopped being
+	// compiled -- shows up here instead of passing as an exclusion.
+	if skipped != 4 {
+		return Err(err!(
+			"{} acceptance fixtures were excluded from the compiler, and four are expected: the 			two posts and the two cards. A different number means a fixture changed schema, or one 			was added without this count being thought about.", skipped;
+		Test, Invalid, Mismatch));
 	}
 	Ok(())
 }
