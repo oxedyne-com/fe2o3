@@ -12,6 +12,7 @@
 //! with different payloads and different validators.
 
 pub mod canon;
+pub mod card;
 pub mod doc;
 pub mod envelope;
 pub mod import;
@@ -49,6 +50,14 @@ pub const SCHEMA_APP: &'static str = "oxeweb/app/0";
 /// inside the signing input: a message and a document are the same artefact with different
 /// payloads and different validators, and neither can be re-labelled as the other after signing.
 pub const SCHEMA_POST: &'static str = "daimond/post/0";
+
+/// Schema identifier for a self-signed identity card.
+///
+/// A card is what a QR code and a paste carry, where a bare public key cannot: it says which key
+/// seals and which signs, carries a display label, and names the key it supersedes. It verifies
+/// under the key it carries, which proves the holder composed it and proves nothing at all about
+/// who the holder is.
+pub const SCHEMA_CARD: &'static str = "daimond/card/0";
 
 /// Limits enforced before a document is trusted. See `SPEC.md` §5.
 pub mod limit {

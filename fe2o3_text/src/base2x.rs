@@ -105,6 +105,31 @@ pub const fn hematite32() -> Base2x<32, 5> {
     }
 }
 
+/// Douglas Crockford's base 32, for identifiers a person reads aloud and types back.
+///
+/// The digits come first, then the letters with `I`, `L`, `O` and `U` left out: the first three
+/// because they are misread as `1`, `1` and `0`, and `U` so that no accidental obscenity appears in
+/// a generated identifier. It is the alphabet to reach for when the output will be spoken over a
+/// telephone or copied off a screen by hand, which is a different job from [`HEMATITE32`], whose
+/// alphabet is mixed case and denser.
+pub const CROCKFORD32_ALPHABET: [char; 32] = [
+    '0', '1', '2', '3', '4', '5', '6', '7',
+    '8', '9', 'A', 'B', 'C', 'D', 'E', 'F',
+    'G', 'H', 'J', 'K', 'M', 'N', 'P', 'Q',
+    'R', 'S', 'T', 'V', 'W', 'X', 'Y', 'Z',
+];
+
+/// Crockford base 32. See [`CROCKFORD32_ALPHABET`].
+pub const CROCKFORD32: Base2x<32, 5> = crockford32();
+
+/// Builds the Crockford base 32 codec.
+pub const fn crockford32() -> Base2x<32, 5> {
+    Base2x::<32, 5>{
+        alphabet: CROCKFORD32_ALPHABET,
+        padding: Some(('=', ['1', '2', '3', '4', '_' ])),
+    }
+}
+
 pub const BINHEX4_ALPHABET: &'static str =
     // Removes '7', 'O', 'g', 'n', 'o', "stuvwxyz"
     "!\"#$%&'()*+,-012345689@ABCDEFGHIJKLMNPQRSTUVXYZ[`abcdefhijklmpqr";
