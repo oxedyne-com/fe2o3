@@ -14,7 +14,10 @@
 use crate::op::Record;
 
 use oxedyne_fe2o3_core::prelude::*;
-use oxedyne_fe2o3_iop_crypto::sign::Signer;
+use oxedyne_fe2o3_iop_crypto::sign::{
+	BatchItem,
+	Signer,
+};
 use oxedyne_fe2o3_jdat::prelude::*;
 
 
@@ -84,6 +87,38 @@ impl Envelope {
 	{
 		let bound = res!(scheme.clone_with_keys(Some(&self.signer), None));
 		bound.verify(&self.payload, &self.sig)
+	}
+
+	/// Verifies many envelopes at once, reporting whether every one of them
+	/// holds.
+	///
+	/// Where the scheme has a batch verification equation this costs far less
+	/// than checking them one at a time, which is what makes it worth having:
+	/// replaying a history means verifying every operation in it, and that is
+	/// the largest single cost of reading a repository.
+	///
+	/// # A `false` does not name the culprit, and the caller must
+	///
+	/// A batch says the set does not hold. It cannot say which member of it
+	/// failed, because it never checked them separately. A caller refusing a
+	/// history owes the reader the name of the operation that failed, so it must
+	/// fall back to [`Envelope::verify`] over the same envelopes to find it. The
+	/// same applies to an error, which says the set could not be checked without
+	/// saying which envelope could not be.
+	///
+	/// The set accepted is the set [`Envelope::verify`] accepts, envelope for
+	/// envelope; a scheme that cannot promise that should not offer a batch.
+	pub fn verify_all<'a, S: Signer>(scheme: &S, envs: &[&'a Self])
+		-> Outcome<bool>
+	{
+		let items: Vec<BatchItem<'a>> = envs.iter()
+			.map(|env| BatchItem {
+				public:	&env.signer,
+				msg:	&env.payload,
+				sig:	&env.sig,
+			})
+			.collect();
+		scheme.verify_batch(&items)
 	}
 
 	/// Verifies the envelope and, if it checks out, returns the record it
@@ -398,6 +433,61 @@ mod tests {
 		assert!(forged.open_record(&s).is_err());
 		// Peeking still works, for a caller that knows it is not trusting the result.
 		assert_eq!(res!(forged.peek_record()).id(), rec.id());
+		Ok(())
+	}
+
+	/// A batch of sound envelopes holds, and an empty batch holds vacuously.
+	#[test]
+	fn a_batch_of_sound_envelopes_holds() -> Outcome<()> {
+		let a = StubSigner::with_seed(3);
+		let b = StubSigner::with_seed(200);
+		let envs = vec![
+			res!(Envelope::seal_record(&a, &res!(sample_record(oid(4, 1))))),
+			res!(Envelope::seal_record(&b, &res!(sample_record(oid(2, 1))))),
+			res!(Envelope::seal_record(&a, &res!(sample_record(oid(4, 2))))),
+		];
+		let refs: Vec<&Envelope> = envs.iter().collect();
+		assert!(res!(Envelope::verify_all(&a, &refs)));
+		// The scheme supplies the algorithm only, so a bystander's copy agrees.
+		assert!(res!(Envelope::verify_all(&b, &refs)));
+		assert!(res!(Envelope::verify_all(&a, &[])), "an empty batch holds vacuously");
+		Ok(())
+	}
+
+	/// One bad envelope anywhere in a batch fails the batch, and checking the
+	/// same envelopes one at a time then names which one it was.
+	///
+	/// This is the property the whole batch arrangement rests on: the batch is
+	/// allowed to be silent about which member failed only because the fallback
+	/// is guaranteed to find it. A batch that failed while every member passed
+	/// singly would leave a caller with nothing to report.
+	#[test]
+	fn a_bad_envelope_fails_the_batch_and_is_found_singly() -> Outcome<()> {
+		let s = StubSigner::with_seed(3);
+		for spoiled in 0..3 {
+			let mut envs = Vec::new();
+			for i in 0..3u64 {
+				let env = res!(Envelope::seal_record(&s, &res!(sample_record(oid(3, i + 1)))));
+				envs.push(if i == spoiled {
+					let mut sig = env.signature().to_vec();
+					sig[0] ^= 0xff;
+					Envelope::new(env.payload().to_vec(), env.signer().to_vec(), sig)
+				} else {
+					env
+				});
+			}
+			let refs: Vec<&Envelope> = envs.iter().collect();
+			assert!(!res!(Envelope::verify_all(&s, &refs)),
+				"the batch holding a spoiled envelope at {} was accepted", spoiled);
+			// The fallback finds it, and finds only it.
+			let mut bad = Vec::new();
+			for (i, env) in envs.iter().enumerate() {
+				if !res!(env.verify(&s)) {
+					bad.push(i);
+				}
+			}
+			assert_eq!(bad, vec![spoiled as usize]);
+		}
 		Ok(())
 	}
 

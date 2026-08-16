@@ -13,11 +13,24 @@ build = "build.rs"
 crate-type = ["lib", "cdylib"]
 
 [features]
-default = [ "mode2", "pq" ]
+default = [ "mode2", "pq", "batch" ]
 mode0 = []
 mode1 = []
 mode2 = []
 mode3 = []
+
+# Ed25519 batch verification, which checks a whole set of signatures for far
+# less than the sum of the parts. It adds one dependency, `merlin`, from which
+# the batch draws its challenge scalars by hashing the inputs themselves rather
+# than by asking the operating system for randomness. That is what makes it safe
+# here: `merlin` is pure Rust with no `getrandom` beneath it, so this compiles to
+# wasm32 along with the rest of the pure-Rust subset, and a reader in a browser
+# verifies a history rather than trusting a server to have done it.
+#
+# Turn it off and `SignatureScheme::verify_batch` still deduplicates public key
+# decompression and then checks the set one signature at a time. The set of
+# signatures accepted is the same either way; only the cost differs.
+batch = [ "ed25519-dalek/batch" ]
 
 # The post-quantum schemes that rest on C: the SABER key exchange, whose reference implementation
 # this crate compiles and binds with bindgen, and the C wrapper behind `SignatureScheme::Dilithium2`.

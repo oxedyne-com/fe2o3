@@ -13,6 +13,22 @@ use oxedyne_fe2o3_namex::id::{
     NamexId,
 };
 
+/// One signature to check, in the form a batch wants it.
+///
+/// Each item carries its own public key, because a batch is not a batch of one
+/// signer: a version control history is signed by everyone who has written to
+/// it, and the point of checking many at once is lost if they must first be
+/// sorted by author.
+#[derive(Clone, Copy, Debug)]
+pub struct BatchItem<'a> {
+    /// The public key of whoever signed, as the scheme encodes it.
+    pub public: &'a [u8],
+    /// The bytes that were signed.
+    pub msg:    &'a [u8],
+    /// The detached signature over `msg`.
+    pub sig:    &'a [u8],
+}
+
 pub trait Signer:
     KeyManager
     + Clone
@@ -23,8 +39,52 @@ pub trait Signer:
 {
     /// Return a detached signature for the given message.
     fn sign(&self, msg: &[u8]) -> Outcome<Vec<u8>>;
-    /// Verify the validity of the given detached signature for the given message. 
+    /// Verify the validity of the given detached signature for the given message.
     fn verify(&self, msg: &[u8], sig: &[u8]) -> Outcome<bool>;
+
+    /// Verify many signatures, each against the public key its item carries,
+    /// and report whether every one of them holds.
+    ///
+    /// This is an optimisation and nothing more. A scheme that has a batch
+    /// verification equation may check the whole set for far less than the sum
+    /// of the parts; the default here simply checks them one at a time, so an
+    /// implementation that has nothing better to offer need do nothing.
+    ///
+    /// # What a `false` does and does not tell the caller
+    ///
+    /// It says that the set does not hold. It does not say which member of it
+    /// failed, and a scheme verifying the set as a whole cannot say. A caller
+    /// that must name the culprit -- and one refusing a history should -- falls
+    /// back to [`Signer::verify`] over the items to find it. The same goes for
+    /// an error: a batch that could not be attempted says so without saying
+    /// which item could not be attempted.
+    ///
+    /// # An empty batch
+    ///
+    /// Holds, vacuously. There is nothing in it that does not verify.
+    fn verify_batch(&self, items: &[BatchItem<'_>])
+        -> Outcome<bool>
+        where Self: Sized
+    {
+        verify_each(self, items)
+    }
+}
+
+/// Verifies the items one at a time, stopping at the first that does not hold.
+///
+/// The body of [`Signer::verify_batch`]'s default, exposed so that an
+/// implementation which is faster for some of its schemes and not for others
+/// can hand the rest here rather than writing the loop again.
+pub fn verify_each<S: Signer>(scheme: &S, items: &[BatchItem<'_>])
+    -> Outcome<bool>
+{
+    for item in items {
+        let bound = res!(scheme.clone_with_keys(Some(item.public), None));
+        if !res!(bound.verify(item.msg, item.sig)) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -139,6 +199,22 @@ impl<
         match &self.0 {
             DefAlt::Default(inner) => inner.verify(msg, sig),
             DefAlt::Given(inner) => inner.verify(msg, sig),
+            DefAlt::None => Err(err!(
+                "Can't verify, signature not specified.";
+            Configuration, Missing)),
+        }
+    }
+
+    /// Hands the batch to whichever scheme is in force, rather than taking the
+    /// default, so that an inner scheme's batch equation is not lost behind the
+    /// wrapper.
+    fn verify_batch(&self, items: &[BatchItem<'_>])
+        -> Outcome<bool>
+        where Self: Sized
+    {
+        match &self.0 {
+            DefAlt::Default(inner) => inner.verify_batch(items),
+            DefAlt::Given(inner) => inner.verify_batch(items),
             DefAlt::None => Err(err!(
                 "Can't verify, signature not specified.";
             Configuration, Missing)),

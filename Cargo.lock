@@ -884,6 +884,7 @@ checksum = "4a3daa8e81a3963a60642bcc1f90a670680bd4a77535faa384e9d1c79d620871"
 dependencies = [
  "curve25519-dalek",
  "ed25519",
+ "merlin",
  "rand_core 0.6.4",
  "serde",
  "sha2",
@@ -1733,6 +1734,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "merlin"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "58c38e2799fc0978b65dfff8023ec7843e2330bb462f19198840b34b6582397d"
+dependencies = [
+ "byteorder",
+ "keccak",
+ "rand_core 0.6.4",
+ "zeroize",
+]
+
+[[package]]
 name = "miette"
 version = "7.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2017,6 +2030,7 @@ dependencies = [
  "oxedyne_fe2o3_num",
  "oxedyne_fe2o3_o3db_sync",
  "oxedyne_fe2o3_ore",
+ "oxedyne_fe2o3_sbj",
  "oxedyne_fe2o3_shield",
  "oxedyne_fe2o3_stds",
  "oxedyne_fe2o3_steel",
@@ -2318,6 +2332,19 @@ dependencies = [
  "oxedyne_fe2o3_iop_crypto",
  "oxedyne_fe2o3_iop_hash",
  "oxedyne_fe2o3_jdat",
+]
+
+[[package]]
+name = "oxedyne_fe2o3_sbj"
+version = "0.5.0"
+dependencies = [
+ "oxedyne_fe2o3_core",
+ "oxedyne_fe2o3_crypto",
+ "oxedyne_fe2o3_hash",
+ "oxedyne_fe2o3_iop_crypto",
+ "oxedyne_fe2o3_iop_hash",
+ "oxedyne_fe2o3_jdat",
+ "oxedyne_fe2o3_text",
 ]
 
 [[package]]
