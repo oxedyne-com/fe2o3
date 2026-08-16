@@ -1,0 +1,7 @@
+{
+    "node": (u64|1),
+    "note": "The heading carries an empty children list rather than omitting the key, which gives a childless heading two encodings.",
+    "rule": "SPEC.md §3 rule 4: no redundant wrappers, and a node with no children omits the key.",
+    "says": "rule 4",
+    "stage": "decode",
+}

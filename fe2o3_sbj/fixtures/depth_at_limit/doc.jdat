@@ -1,0 +1,255 @@
+(sbj_doc|(map|{
+    (str|"children"): (list|[
+        (sbj_box|(map|{
+            (str|"children"): (list|[
+                (sbj_box|(map|{
+                    (str|"children"): (list|[
+                        (sbj_box|(map|{
+                            (str|"children"): (list|[
+                                (sbj_box|(map|{
+                                    (str|"children"): (list|[
+                                        (sbj_box|(map|{
+                                            (str|"children"): (list|[
+                                                (sbj_box|(map|{
+                                                    (str|"children"): (list|[
+                                                        (sbj_box|(map|{
+                                                            (str|"children"): (list|[
+                                                                (sbj_box|(map|{
+                                                                    (str|"children"): (list|[
+                                                                        (sbj_box|(map|{
+                                                                            (str|"children"): (list|[
+                                                                                (sbj_box|(map|{
+                                                                                    (str|"children"): (list|[
+                                                                                        (sbj_box|(map|{
+                                                                                            (str|"children"): (list|[
+                                                                                                (sbj_box|(map|{
+                                                                                                    (str|"children"): (list|[
+                                                                                                        (sbj_box|(map|{
+                                                                                                            (str|"children"): (list|[
+                                                                                                                (sbj_box|(map|{
+                                                                                                                    (str|"children"): (list|[
+                                                                                                                        (sbj_box|(map|{
+                                                                                                                            (str|"children"): (list|[
+                                                                                                                                (sbj_box|(map|{
+                                                                                                                                    (str|"children"): (list|[
+                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                            (str|"children"): (list|[
+                                                                                                                                                (sbj_box|(map|{
+                                                                                                                                                    (str|"children"): (list|[
+                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                            (str|"children"): (list|[
+                                                                                                                                                                (sbj_box|(map|{
+                                                                                                                                                                    (str|"children"): (list|[
+                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                            (str|"children"): (list|[
+                                                                                                                                                                                (sbj_box|(map|{
+                                                                                                                                                                                    (str|"children"): (list|[
+                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                            (str|"children"): (list|[
+                                                                                                                                                                                                (sbj_box|(map|{
+                                                                                                                                                                                                    (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{
+                                                                                                                                                                                                        (str|"children"): (list|[
+                                                                                                                                                                                                        (sbj_box|(map|{})),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                        ]),
+                                                                                                                                                                                                        })),
+                                                                                                                                                                                                    ]),
+                                                                                                                                                                                                })),
+                                                                                                                                                                                            ]),
+                                                                                                                                                                                        })),
+                                                                                                                                                                                    ]),
+                                                                                                                                                                                })),
+                                                                                                                                                                            ]),
+                                                                                                                                                                        })),
+                                                                                                                                                                    ]),
+                                                                                                                                                                })),
+                                                                                                                                                            ]),
+                                                                                                                                                        })),
+                                                                                                                                                    ]),
+                                                                                                                                                })),
+                                                                                                                                            ]),
+                                                                                                                                        })),
+                                                                                                                                    ]),
+                                                                                                                                })),
+                                                                                                                            ]),
+                                                                                                                        })),
+                                                                                                                    ]),
+                                                                                                                })),
+                                                                                                            ]),
+                                                                                                        })),
+                                                                                                    ]),
+                                                                                                })),
+                                                                                            ]),
+                                                                                        })),
+                                                                                    ]),
+                                                                                })),
+                                                                            ]),
+                                                                        })),
+                                                                    ]),
+                                                                })),
+                                                            ]),
+                                                        })),
+                                                    ]),
+                                                })),
+                                            ]),
+                                        })),
+                                    ]),
+                                })),
+                            ]),
+                        })),
+                    ]),
+                })),
+            ]),
+        })),
+    ]),
+    (str|"lang"): (str|"en"),
+    (str|"title"): (str|"A document"),
+}))

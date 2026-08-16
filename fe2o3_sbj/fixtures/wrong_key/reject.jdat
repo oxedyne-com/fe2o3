@@ -1,0 +1,6 @@
+{
+    "note": "A sound signature over the right signing input, made by a key that is not the author the envelope names. A signature nobody checks against a key is not a signature.",
+    "rule": "SPEC.md §2 step 5: the signature must be the author's.",
+    "says": "not a signature by the author",
+    "stage": "sig",
+}

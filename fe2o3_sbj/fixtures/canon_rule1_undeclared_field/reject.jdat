@@ -1,0 +1,7 @@
+{
+    "node": (u64|1),
+    "note": "The heading carries a field the schema does not declare. A reader that ignored it would accept two byte strings for one document.",
+    "rule": "SPEC.md §3 rule 1: field types are fixed by the schema.",
+    "says": "rule 1",
+    "stage": "decode",
+}

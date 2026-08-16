@@ -1,0 +1,7 @@
+{
+    "node": (u64|1),
+    "note": "A document carrying a `surface` that also carries a valid, non-empty fallback of known nodes. A fallback is forward compatibility for an unknown code, and code 15 is not unknown: the reader knows exactly what it has been handed, and knows a document may not carry it, so it refuses it with the fallback and without.",
+    "rule": "SPEC.md §4.5: a fallback admits a kind the reader has never heard of, and never one the reader knows the document schema does not admit.",
+    "says": "whether or not it carries a fallback",
+    "stage": "validate",
+}

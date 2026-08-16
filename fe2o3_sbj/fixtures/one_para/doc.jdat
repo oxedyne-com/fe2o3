@@ -1,0 +1,11 @@
+(sbj_doc|(map|{
+    (str|"children"): (list|[
+        (sbj_para|(map|{
+            (str|"children"): (list|[
+                (sbj_text|(str|"The web gave that up in 1993 and spent thirty years paying for it.")),
+            ]),
+        })),
+    ]),
+    (str|"lang"): (str|"en"),
+    (str|"title"): (str|"A document"),
+}))

@@ -1,0 +1,21 @@
+(sbj_doc|(map|{
+    (str|"children"): (list|[
+        (sbj_box|(map|{
+            (str|"children"): (list|[
+                (sbj_para|(map|{
+                    (str|"children"): (list|[
+                        (sbj_text|(str|"The oxeweb replaces the web's cascade with locality, so that a style error cannot escape the node that made it, and no rule reaches across a document to touch what it never named.")),
+                    ]),
+                })),
+            ]),
+            (str|"style"): (str|"flush"),
+        })),
+    ]),
+    (str|"lang"): (str|"en"),
+    (str|"styles"): (map|{
+        (str|"flush"): (map|{
+            (str|"align"): (str|"justify"),
+        }),
+    }),
+    (str|"title"): (str|"An alignment that stays where it is put"),
+}))

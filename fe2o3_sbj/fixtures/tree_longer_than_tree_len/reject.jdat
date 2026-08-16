@@ -1,0 +1,6 @@
+{
+    "note": "'tree_len' understates the tree by one byte, and the author has hashed and signed the region it declares, so the file verifies. The declared region holds a tree cut off one byte from its end, and the decoder says so.",
+    "rule": "SPEC.md §2: a tree region that does not hold a whole tree is a rejection.",
+    "says": "Not enough bytes",
+    "stage": "decode",
+}

@@ -1,0 +1,9 @@
+(sbj_doc|(map|{
+    (str|"children"): (list|[
+        (sbj_alien|(map|{
+            (str|"rows"): (str|"no fallback here"),
+        })),
+    ]),
+    (str|"lang"): (str|"en"),
+    (str|"title"): (str|"A document"),
+}))

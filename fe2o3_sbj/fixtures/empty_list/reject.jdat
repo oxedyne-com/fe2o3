@@ -1,0 +1,7 @@
+{
+    "node": (u64|1),
+    "note": "A list with an ordered field but no items. A document or section may be empty, but an empty list is a construction error rather than intent.",
+    "rule": "SPEC.md §4.2: a list is marked `+` and carries at least one item.",
+    "says": "must carry at least one",
+    "stage": "validate",
+}

@@ -1,0 +1,7 @@
+{
+    "node": (u64|64),
+    "note": "A doc at the head of a chain of boxes 65 nodes deep, correctly hashed and correctly signed. A tiny file describing a deep nest is the cheapest attack there is against a recursive decoder, so the depth limit is the decoder's rather than the validator's.",
+    "rule": "SPEC.md §5: the nesting depth limit is 64, enforced during decoding.",
+    "says": "past the limit of 64",
+    "stage": "decode",
+}

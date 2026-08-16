@@ -1,0 +1,4 @@
+(sbj_doc|(map|{
+    (str|"lang"): (str|"en"),
+    (str|"title"): (str|"An empty document"),
+}))

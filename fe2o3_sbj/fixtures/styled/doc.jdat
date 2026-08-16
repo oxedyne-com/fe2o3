@@ -1,0 +1,26 @@
+(sbj_doc|(map|{
+    (str|"children"): (list|[
+        (sbj_box|(map|{
+            (str|"children"): (list|[
+                (sbj_para|(map|{
+                    (str|"children"): (list|[
+                        (sbj_text|(str|"A lede paragraph in a callout box.")),
+                    ]),
+                    (str|"style"): (str|"lede"),
+                })),
+            ]),
+            (str|"style"): (str|"callout"),
+        })),
+    ]),
+    (str|"lang"): (str|"en"),
+    (str|"styles"): (map|{
+        (str|"callout"): (map|{
+            (str|"bg"): (str|"muted"),
+            (str|"pad"): (u8|3),
+        }),
+        (str|"lede"): (map|{
+            (str|"size"): (i8|1),
+        }),
+    }),
+    (str|"title"): (str|"Style without a cascade"),
+}))

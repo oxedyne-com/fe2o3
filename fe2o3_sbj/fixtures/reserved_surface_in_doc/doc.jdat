@@ -1,0 +1,9 @@
+(sbj_doc|(map|{
+    (str|"children"): (list|[
+        (sbj_k15|(map|{
+            (str|"app"): (str|"app.modeller"),
+        })),
+    ]),
+    (str|"lang"): (str|"en"),
+    (str|"title"): (str|"A document"),
+}))

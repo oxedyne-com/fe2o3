@@ -1,0 +1,6 @@
+{
+    "note": "Valid BDAT: the encoded tree of a real document, with no SBJ header in front of it. Nothing about a bare daticle says which format it belongs to, so the magic is what says so, and its absence is a rejection rather than a guess.",
+    "rule": "SPEC.md §1.1: a reader that does not recognise the magic stops.",
+    "says": "Not an SBJ file",
+    "stage": "header",
+}

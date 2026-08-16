@@ -1,0 +1,6 @@
+{
+    "note": "One bit of one byte of the tree region is flipped. The hash is the document's address, so a tree that does not hash to it is not this document.",
+    "rule": "SPEC.md §2 step 4: the tree region hashes to what the envelope declares.",
+    "says": "hashes to",
+    "stage": "hash",
+}

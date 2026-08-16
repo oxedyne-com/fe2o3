@@ -1,0 +1,7 @@
+{
+    "note": "The doc's payload map carries the key 'lang' twice. The tree it decodes to is perfectly canonical, since a BTreeMap cannot hold a duplicate, so the duplicate survives only in the bytes: one tree, two byte strings, two addresses. The offset is the first byte at which the bytes differ from the canonical encoding of the tree they decode to.",
+    "offset": (u64|6),
+    "rule": "SPEC.md §3 rule 3: no map key may appear twice.",
+    "says": "rule 3",
+    "stage": "decode",
+}

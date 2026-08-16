@@ -1,0 +1,75 @@
+(sbj_doc|(map|{
+    (str|"children"): (list|[
+        (sbj_heading|(map|{
+            (str|"children"): (list|[
+                (sbj_text|(str|"Style without a cascade")),
+            ]),
+            (str|"level"): (u8|2),
+        })),
+        (sbj_section|(map|{
+            (str|"children"): (list|[
+                (sbj_para|(map|{
+                    (str|"children"): (list|[
+                        (sbj_text|(str|"A run\twith a tab\nand a newline, ")),
+                        (sbj_emph|(map|{
+                            (str|"children"): (list|[
+                                (sbj_text|(str|"loud")),
+                            ]),
+                            (str|"strong"): (true),
+                        })),
+                        (sbj_link|(map|{
+                            (str|"children"): (list|[
+                                (sbj_text|(str|"and a link")),
+                            ]),
+                            (str|"to"): (map|{
+                                (str|"name"): (str|"news.cricket"),
+                            }),
+                        })),
+                    ]),
+                })),
+                (sbj_para|(map|{})),
+                (sbj_code|(map|{
+                    (str|"lang"): (str|"rust"),
+                    (str|"text"): (str|"fn main() {}"),
+                })),
+                (sbj_quote|(map|{
+                    (str|"children"): (list|[
+                        (sbj_para|(map|{
+                            (str|"children"): (list|[
+                                (sbj_text|(str|"A quoted line.")),
+                            ]),
+                        })),
+                    ]),
+                    (str|"cite"): (str|"A. Author"),
+                })),
+                (sbj_list|(map|{
+                    (str|"children"): (list|[
+                        (sbj_item|(map|{
+                            (str|"children"): (list|[
+                                (sbj_para|(map|{
+                                    (str|"children"): (list|[
+                                        (sbj_text|(str|"An item.")),
+                                    ]),
+                                })),
+                            ]),
+                        })),
+                    ]),
+                    (str|"ordered"): (false),
+                })),
+                (sbj_box|(map|{
+                    (str|"children"): (list|[
+                        (sbj_image|(map|{
+                            (str|"alt"): (str|"A diagram of a tree"),
+                            (str|"h"): (u32|480),
+                            (str|"hash"): (b32|"0G410G410G410G410G410G410G410G410G410G410G4=2"),
+                            (str|"w"): (u32|640),
+                        })),
+                    ]),
+                })),
+            ]),
+            (str|"title"): (str|"A section"),
+        })),
+    ]),
+    (str|"lang"): (str|"en"),
+    (str|"title"): (str|"Style without a cascade"),
+}))

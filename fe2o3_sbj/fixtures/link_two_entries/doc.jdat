@@ -1,0 +1,19 @@
+(sbj_doc|(map|{
+    (str|"children"): (list|[
+        (sbj_para|(map|{
+            (str|"children"): (list|[
+                (sbj_link|(map|{
+                    (str|"children"): (list|[
+                        (sbj_text|(str|"a link")),
+                    ]),
+                    (str|"to"): (map|{
+                        (str|"hash"): (b32|"dv+Vdv+Vdv+Vdv+Vdv+Vdv+Vdv+Vdv+Vdv+Vdv+Vdvy=2"),
+                        (str|"name"): (str|"news.cricket"),
+                    }),
+                })),
+            ]),
+        })),
+    ]),
+    (str|"lang"): (str|"en"),
+    (str|"title"): (str|"A document"),
+}))

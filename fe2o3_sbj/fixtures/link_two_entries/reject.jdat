@@ -1,0 +1,7 @@
+{
+    "node": (u64|2),
+    "note": "The link's 'to' address carries both a name and a hash. A typed address selects one kind, so two entries is not an address at all, and the reader refuses it at the door rather than letting the renderer choose.",
+    "rule": "SPEC.md §4.3: a link address is a map with exactly one entry.",
+    "says": "not a valid link address",
+    "stage": "validate",
+}

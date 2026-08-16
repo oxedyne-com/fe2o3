@@ -1,0 +1,10 @@
+{
+    "depth": (u64|4),
+    "hash": (bu8|"eRJEVcz+NEvDb7dKCHFFq@ij@vF+z#h3dsFm+z+i2w4=2"),
+    "index": (false),
+    "nodes": (u64|4),
+    "note": "A box naming `align: justify`, holding a paragraph that names nothing. `align` is self-only (§4.4), so it aligns the lines of the node that named it, and the box has none: the paragraph inside must be set exactly as it would be with no style at all. The property inherits in CSS and does not in the format, so a reader built on a browser will justify the paragraph unless it is stopped, and then one document says two things.",
+    "schema": "oxeweb/doc/0",
+    "time": (u64|1752000000000),
+    "tree_len": (u64|369),
+}

@@ -1,0 +1,10 @@
+{
+    "depth": (u64|3),
+    "hash": (bu8|"h-Bhfm%2hk6KAjy3-J%9B+wNizh%T5UfE2LBt%rkU7m=2"),
+    "index": (false),
+    "nodes": (u64|3),
+    "note": "One paragraph of one text run.",
+    "schema": "oxeweb/doc/0",
+    "time": (u64|1752000000000),
+    "tree_len": (u64|148),
+}

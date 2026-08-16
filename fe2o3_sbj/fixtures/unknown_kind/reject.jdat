@@ -1,0 +1,7 @@
+{
+    "node": (u64|1),
+    "note": "The document's one child declares a kind code that names no v0 node kind and carries no fallback. The bytes are canonical, so the file verifies and decodes; the vocabulary rule of §4.5 is what refuses it, naming the node and the missing fallback.",
+    "rule": "SPEC.md §4.5: an unknown kind code 99 is permitted only with a non-empty fallback of known nodes.",
+    "says": "fallback",
+    "stage": "validate",
+}

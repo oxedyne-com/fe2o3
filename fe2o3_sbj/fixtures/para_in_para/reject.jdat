@@ -1,0 +1,7 @@
+{
+    "node": (u64|2),
+    "note": "A paragraph inside a paragraph. The tree is canonical and the file verifies; the vocabulary is what refuses it.",
+    "rule": "SPEC.md §4.2: a para takes inline content.",
+    "says": "admits inline content only",
+    "stage": "validate",
+}

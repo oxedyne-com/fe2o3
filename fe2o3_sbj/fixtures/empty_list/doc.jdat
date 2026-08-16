@@ -1,0 +1,9 @@
+(sbj_doc|(map|{
+    (str|"children"): (list|[
+        (sbj_list|(map|{
+            (str|"ordered"): (false),
+        })),
+    ]),
+    (str|"lang"): (str|"en"),
+    (str|"title"): (str|"A document"),
+}))

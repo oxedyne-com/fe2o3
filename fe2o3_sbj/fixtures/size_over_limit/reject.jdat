@@ -1,0 +1,6 @@
+{
+    "note": "A tree region of 4 MiB and one byte, correctly hashed and correctly signed. The limit is enforced on the envelope's word alone, before a byte of the region is hashed, let alone decoded.",
+    "rule": "SPEC.md §5: the tree region size limit is 4 MiB, enforced before decoding.",
+    "says": "exceeding the limit",
+    "stage": "region",
+}

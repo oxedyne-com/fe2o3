@@ -1,0 +1,6 @@
+{
+    "note": "One bit of the signature is flipped. The hash is right, so the document is at the address it claims to be at; nobody has vouched for it.",
+    "rule": "SPEC.md §2 step 5: the signature is verified over the signing input, under the author's key.",
+    "says": "not a signature by the author",
+    "stage": "sig",
+}

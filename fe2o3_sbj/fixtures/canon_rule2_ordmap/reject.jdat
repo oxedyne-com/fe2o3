@@ -1,0 +1,7 @@
+{
+    "node": (u64|1),
+    "note": "The heading's payload is an OrdMap, whose order follows the author's typing rather than its keys, so the same heading typed in another order is a different byte string.",
+    "rule": "SPEC.md §3 rule 2: maps are Dat::Map, never Dat::OrdMap.",
+    "says": "rule 2",
+    "stage": "decode",
+}

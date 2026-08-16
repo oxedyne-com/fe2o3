@@ -1,0 +1,16 @@
+(sbj_doc|(map|{
+    (str|"children"): (list|[
+        (sbj_k15|(map|{
+            (str|"app"): (str|"app.modeller"),
+            (str|"fallback"): (list|[
+                (sbj_para|(map|{
+                    (str|"children"): (list|[
+                        (sbj_text|(str|"A picture of a teapot, rendered by nobody.")),
+                    ]),
+                })),
+            ]),
+        })),
+    ]),
+    (str|"lang"): (str|"en"),
+    (str|"title"): (str|"A document"),
+}))

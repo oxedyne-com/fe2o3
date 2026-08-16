@@ -1,0 +1,7 @@
+{
+    "node": (u64|1),
+    "note": "A heading of level 7, one past the deepest heading the format has.",
+    "rule": "SPEC.md §4.2: a heading's level runs from 1 to 6.",
+    "says": "1..=6",
+    "stage": "validate",
+}

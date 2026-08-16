@@ -1,0 +1,7 @@
+{
+    "node": (u64|0),
+    "note": "The style 'callout' declares a background of 'purple', which is not a palette name. The style table is validated at the doc, so the rejection names node 0 and the offending style.",
+    "rule": "SPEC.md §4.4: a palette property carries a palette name; the palette is ink, muted, accent, bg.",
+    "says": "purple",
+    "stage": "validate",
+}

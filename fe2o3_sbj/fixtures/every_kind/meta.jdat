@@ -1,0 +1,10 @@
+{
+    "depth": (u64|6),
+    "hash": (bu8|"%3daFTUCC4whQi3iLM@2g2sXZFinz8nUaCQPJGY%KL4=2"),
+    "index": (false),
+    "nodes": (u64|21),
+    "note": "Every v0 node kind once, including code and quote, a link by the typed address form and an image by content hash, an optional field present, another absent, and a node carrying no children.",
+    "schema": "oxeweb/doc/0",
+    "time": (u64|1752000000000),
+    "tree_len": (u64|677),
+}

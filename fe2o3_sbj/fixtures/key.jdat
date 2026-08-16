@@ -1,0 +1,11 @@
+{
+    "author": {
+        "pk": (bu8|"j7aYC9vheyMhZypd+2WaXxTGWfVMt5sDQkSDazGD7i0=2"),
+        "sk": (bu8|"Crh-9M8r9%-T-jJwfUXnkphL7SALXCE22Vdy#t5iNQK=2"),
+    },
+    "impostor": {
+        "pk": (bu8|"UKmi3g-++Z0#VaSzU#*hzcJbdeN5mgUkJFf4JPUJE3y=2"),
+        "sk": (bu8|"5SUMeEKg4L#En08Rh-andWYh5aR7K7C3QjrXL@XGfrW=2"),
+    },
+    "scheme": "ed25519",
+}

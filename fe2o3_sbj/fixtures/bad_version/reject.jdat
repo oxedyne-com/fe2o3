@@ -1,0 +1,6 @@
+{
+    "note": "The major version is 1, and this reads version 0. It does not guess.",
+    "rule": "SPEC.md §1.1: a reader that reads a major version it does not implement stops.",
+    "says": "not implemented here",
+    "stage": "header",
+}

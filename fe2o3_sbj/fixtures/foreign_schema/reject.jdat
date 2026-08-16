@@ -1,0 +1,6 @@
+{
+    "note": "A sound envelope over a sound tree, declaring a schema this build does not validate. The container carries any schema, and a reader that validates one refuses the others rather than reading them as though they were documents.",
+    "rule": "SPEC.md §1.2: the envelope declares the schema of its payload.",
+    "says": "oxeweb/cmd/0",
+    "stage": "validate",
+}

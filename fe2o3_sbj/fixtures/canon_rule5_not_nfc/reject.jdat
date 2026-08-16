@@ -1,0 +1,7 @@
+{
+    "node": (u64|2),
+    "note": "The text run spells café with a combining acute accent rather than the composed letter. It displays identically to the composed form and hashes differently, so the one document would have two addresses.",
+    "rule": "SPEC.md §3 rule 5: strings are in Unicode NFC.",
+    "says": "rule 5",
+    "stage": "decode",
+}

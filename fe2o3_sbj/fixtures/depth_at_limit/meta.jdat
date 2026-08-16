@@ -1,0 +1,10 @@
+{
+    "depth": (u64|64),
+    "hash": (bu8|"ty2V6dQsnHS@P%W*-tDJG@5WmXLV5NpqzfTFgGsCpNS=2"),
+    "index": (false),
+    "nodes": (u64|64),
+    "note": "Nesting at the depth limit of §5: a doc at the head of a chain of boxes, 256 nodes deep.",
+    "schema": "oxeweb/doc/0",
+    "time": (u64|1752000000000),
+    "tree_len": (u64|1464),
+}

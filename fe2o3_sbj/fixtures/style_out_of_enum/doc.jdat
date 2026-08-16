@@ -1,0 +1,16 @@
+(sbj_doc|(map|{
+    (str|"children"): (list|[
+        (sbj_para|(map|{
+            (str|"children"): (list|[
+                (sbj_text|(str|"a paragraph")),
+            ]),
+        })),
+    ]),
+    (str|"lang"): (str|"en"),
+    (str|"styles"): (map|{
+        (str|"callout"): (map|{
+            (str|"bg"): (str|"purple"),
+        }),
+    }),
+    (str|"title"): (str|"A colour off the palette"),
+}))

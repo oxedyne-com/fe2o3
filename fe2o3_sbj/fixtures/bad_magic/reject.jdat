@@ -1,0 +1,6 @@
+{
+    "note": "Byte 1 of the magic is flipped. Everything after it is a valid document.",
+    "rule": "SPEC.md §1.1: the magic is 'SBJ\\0'.",
+    "says": "Not an SBJ file",
+    "stage": "header",
+}

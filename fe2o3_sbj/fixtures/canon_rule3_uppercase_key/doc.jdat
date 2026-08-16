@@ -1,0 +1,12 @@
+(sbj_doc|(map|{
+    (str|"children"): (list|[
+        (sbj_heading|(map|{
+            (str|"Level"): (u8|2),
+            (str|"children"): (list|[
+                (sbj_text|(str|"A heading")),
+            ]),
+        })),
+    ]),
+    (str|"lang"): (str|"en"),
+    (str|"title"): (str|"A document"),
+}))

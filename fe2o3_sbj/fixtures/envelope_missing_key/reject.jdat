@@ -1,0 +1,6 @@
+{
+    "note": "The 'time' key is gone from the envelope map. The tree behind it is a good document, and is never reached.",
+    "rule": "SPEC.md §1.2: the envelope carries exactly these keys, all required.",
+    "says": "missing the required key \"time\"",
+    "stage": "envelope",
+}

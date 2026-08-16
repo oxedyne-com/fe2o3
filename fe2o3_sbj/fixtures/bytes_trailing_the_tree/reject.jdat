@@ -1,0 +1,6 @@
+{
+    "note": "The tree region carries the tree and one byte more, all of it hashed and signed. A byte the tree does not need gives the document a second address, so it is no part of a canonical encoding.",
+    "rule": "SPEC.md §3: a document encodes to exactly one byte string.",
+    "says": "canonical",
+    "stage": "decode",
+}

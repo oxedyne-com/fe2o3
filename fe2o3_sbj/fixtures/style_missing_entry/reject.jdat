@@ -1,0 +1,7 @@
+{
+    "node": (u64|1),
+    "note": "A box names the style 'ghost', which the document's style table, defining only 'callout', does not. A style error cannot escape the node that made it, and this one is named at the box.",
+    "rule": "SPEC.md §4.4: a node's style field must name an entry the document's style table defines.",
+    "says": "ghost",
+    "stage": "validate",
+}

@@ -1,0 +1,7 @@
+{
+    "node": (u64|2),
+    "note": "The text run carries a carriage return, so one line ending would have two encodings.",
+    "rule": "SPEC.md §3 rule 5: strings carry no C0 or C1 control characters other than tab and newline.",
+    "says": "rule 5",
+    "stage": "decode",
+}

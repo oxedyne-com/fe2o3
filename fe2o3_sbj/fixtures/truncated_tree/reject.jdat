@@ -1,0 +1,6 @@
+{
+    "note": "The last byte of the tree region is gone. The envelope still declares the length the region had, and the reader believes neither the bytes nor the envelope: it refuses the file.",
+    "rule": "SPEC.md §2 step 3: a tree region shorter than declared is a rejection, not a truncation.",
+    "says": "shorter than declared",
+    "stage": "region",
+}

@@ -1,0 +1,10 @@
+{
+    "depth": (u64|1),
+    "hash": (bu8|"%2Wg9pyNmX-98B6UynJUBEUqP2YiZB7FgvZBsd8QUpS=2"),
+    "index": (false),
+    "nodes": (u64|1),
+    "note": "A document with no content at all: the smallest thing that is still a document.",
+    "schema": "oxeweb/doc/0",
+    "time": (u64|1752000000000),
+    "tree_len": (u64|47),
+}

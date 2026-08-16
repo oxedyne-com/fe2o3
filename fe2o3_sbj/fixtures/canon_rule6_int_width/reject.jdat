@@ -1,0 +1,7 @@
+{
+    "node": (u64|1),
+    "note": "The heading's level is a u32 where the schema declares a u8. Both decode to the number 2, and they are different byte strings, so they are two addresses for one document.",
+    "rule": "SPEC.md §3 rule 6: integers are exactly the declared width, with no promotion and no demotion.",
+    "says": "rules 1 and 6",
+    "stage": "decode",
+}

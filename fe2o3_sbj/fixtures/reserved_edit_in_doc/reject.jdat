@@ -1,0 +1,7 @@
+{
+    "node": (u64|1),
+    "note": "A document carrying an editable text field. An `edit` is a facility of the engine, reached by the chrome's address bar and by an application's own form fields, and a document may not ask for one. The refusal names the kind and says that a document may not carry it.",
+    "rule": "SPEC.md §4.2: the kind code 14, `edit`, is reserved to the chrome and to applications, and the document schema admits the kinds 1 to 13 and no others.",
+    "says": "may not carry an edit node",
+    "stage": "validate",
+}

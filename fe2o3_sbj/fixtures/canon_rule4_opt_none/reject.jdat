@@ -1,0 +1,7 @@
+{
+    "node": (u64|1),
+    "note": "The section's optional title is written as a none rather than left out, so an untitled section has two encodings.",
+    "rule": "SPEC.md §3 rule 4: an absent optional field is omitted, not encoded as a none.",
+    "says": "rule 4",
+    "stage": "decode",
+}

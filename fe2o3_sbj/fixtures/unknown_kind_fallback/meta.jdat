@@ -1,0 +1,10 @@
+{
+    "depth": (u64|6),
+    "hash": (bu8|"5R1Nx3PiETZVcb4F0@xBrX0T2G#euPtwjt36iApWzBS=2"),
+    "index": (false),
+    "nodes": (u64|9),
+    "note": "An unknown node kind carrying a non-empty fallback of known nodes (§4.5), which a reader that does not implement the kind renders and validates in its place, so the document is accepted. The unknown node also carries an uninterpreted field, held only to §3.",
+    "schema": "oxeweb/doc/0",
+    "time": (u64|1752000000000),
+    "tree_len": (u64|304),
+}

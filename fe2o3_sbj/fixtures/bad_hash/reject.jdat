@@ -1,0 +1,6 @@
+{
+    "note": "The hash in the envelope is corrupted, and the author has signed the corrupted hash, so the signature is sound and only the hash is wrong. The reader hashes the region itself rather than taking the envelope's word for it.",
+    "rule": "SPEC.md §2 step 4: a hash that is not the hash of the tree region is a rejection.",
+    "says": "hashes to",
+    "stage": "hash",
+}

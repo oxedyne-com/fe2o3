@@ -1,0 +1,10 @@
+{
+    "depth": (u64|4),
+    "hash": (bu8|"MrEGLAitT#Gb1wS#5EkZyaeNjzp4cv*AmLQTFsKdFR0=2"),
+    "index": (false),
+    "nodes": (u64|4),
+    "note": "A link whose typed address (§4.3) is a NAMES name.",
+    "schema": "oxeweb/doc/0",
+    "time": (u64|1752000000000),
+    "tree_len": (u64|149),
+}

@@ -1,0 +1,10 @@
+{
+    "depth": (u64|4),
+    "hash": (bu8|"046Vu7r2-k5@Wi8bxxePF5vHa+-RZvM3sE08N8e%Vh8=2"),
+    "index": (false),
+    "nodes": (u64|4),
+    "note": "A document exercising the style table of §4.4: an inherited property (size) and a self-only property (bg), a box naming one style and a paragraph within it naming another, each resolving to a table entry.",
+    "schema": "oxeweb/doc/0",
+    "time": (u64|1752000000000),
+    "tree_len": (u64|248),
+}

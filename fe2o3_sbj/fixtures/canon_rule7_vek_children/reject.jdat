@@ -1,0 +1,7 @@
+{
+    "node": (u64|1),
+    "note": "The heading's children sit in a Vek. Every child of a heading is a node, so a Vek is always available, and always a second encoding of the same list.",
+    "rule": "SPEC.md §3 rule 7: lists are Dat::List, not Dat::Vek, even where every element shares a kind.",
+    "says": "rule 7",
+    "stage": "decode",
+}

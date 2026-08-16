@@ -1,0 +1,7 @@
+{
+    "node": (u64|1),
+    "note": "The heading's level is spelled 'Level'. A key that may be spelled two ways is a document with two addresses.",
+    "rule": "SPEC.md §3 rule 3: map keys are strings, lowercase ASCII.",
+    "says": "rule 3",
+    "stage": "decode",
+}

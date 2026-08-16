@@ -1,0 +1,10 @@
+{
+    "depth": (u64|3),
+    "hash": (bu8|"h-Bhfm%2hk6KAjy3-J%9B+wNizh%T5UfE2LBt%rkU7m=2"),
+    "index": (true),
+    "nodes": (u64|3),
+    "note": "The document of the one_para fixture, written with the optional index of §1.4 appended. The index lies outside the hash, so this is the same document at the same address, and its hash is the hash of one_para.",
+    "schema": "oxeweb/doc/0",
+    "time": (u64|1752000000000),
+    "tree_len": (u64|148),
+}

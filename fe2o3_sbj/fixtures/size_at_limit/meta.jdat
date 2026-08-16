@@ -1,0 +1,10 @@
+{
+    "depth": (u64|3),
+    "hash": (bu8|"hT9TPrDvd2hY@xRPWYVvVLEFteUcxYCavcPwj4SRSRy=2"),
+    "index": (false),
+    "nodes": (u64|3),
+    "note": "A tree region of exactly the size limit of §5, to the byte.",
+    "schema": "oxeweb/doc/0",
+    "time": (u64|1752000000000),
+    "tree_len": (u64|4194304),
+}

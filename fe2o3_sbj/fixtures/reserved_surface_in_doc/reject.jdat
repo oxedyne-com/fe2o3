@@ -1,0 +1,7 @@
+{
+    "node": (u64|1),
+    "note": "A document carrying a pane for an application to paint. A `surface` is the one place anything but the author's own data reaches the screen, so a document that could name one would be a program, and the whole design turns on a document never being one.",
+    "rule": "SPEC.md §4.2: the kind code 15, `surface`, is reserved to applications, and the document schema admits the kinds 1 to 13 and no others.",
+    "says": "may not carry a surface node",
+    "stage": "validate",
+}
