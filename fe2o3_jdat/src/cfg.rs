@@ -1,3 +1,11 @@
+//! What a configuration is, and how a value in one is allowed to point
+//! somewhere else.
+//!
+//! [`Config`] is the trait a configuration type implements. [`resolve`] and
+//! [`resolve_dat`] are the indirection every Oxedyne configuration file has: a
+//! value that must not sit in the file itself is written `{file:secret}` or
+//! `{env:VAR}` and is fetched when the file is read.
+
 use crate::{
     prelude::*,
     file::JdatMapFile,
@@ -6,6 +14,8 @@ use crate::{
 use oxedyne_fe2o3_core::{
     prelude::*,
 };
+
+use std::path::Path;
 
 
 pub trait Config:
@@ -36,3 +46,169 @@ pub trait Config:
 }
 
 impl<T: Config> JdatMapFile for T {}
+
+
+/// Expands `{file:path}` and `{env:VAR}` references in a configuration value.
+///
+/// * `{env:VAR}` becomes the environment variable's value, and fails where the
+///   variable is unset or empty and no default is given.
+/// * `{env:VAR:default}` falls back to `default` instead of failing.
+/// * `{file:path}` becomes the trimmed contents of the file, read relative to
+///   `root`, and fails where the file cannot be read.
+///
+/// Environment references are expanded first, so one may name the file another
+/// reads and a deployment can parameterise where its secrets live.
+///
+/// # Why it is here
+///
+/// Because it is what a configuration value is, and it belongs beside the
+/// configuration trait rather than inside any one application. It was an
+/// associated function of a web server's route type, which meant that an
+/// application wanting one string substitution had to take a web server with it;
+/// the second caller wrote its own copy instead, which is exactly the outcome a
+/// shared home prevents.
+///
+/// # What is not attempted
+///
+/// The expansion is not recursive. A file whose contents themselves hold
+/// `{file:...}` is substituted verbatim, and a reference the substitution
+/// happens to create is expanded, since the scan restarts from the beginning of
+/// the value. That is the behaviour callers already had, and a configuration
+/// whose values quote each other is a configuration in need of a rethink rather
+/// than of a fixed point.
+pub fn resolve(value: &str, root: &Path)
+    -> Outcome<String>
+{
+    // The environment first, so an environment value may name a file.
+    let named = res!(resolve_env(value));
+    resolve_files(&named, value, root)
+}
+
+/// Expands every `{env:VAR}` and `{env:VAR:default}` reference of a value.
+///
+/// `whole` is only ever the original value, so a message names what the author
+/// wrote rather than a half-expanded intermediate they never saw.
+fn resolve_env(whole: &str)
+    -> Outcome<String>
+{
+    let mut out = fmt!("{}", whole);
+    while let Some(start) = out.find("{env:") {
+        let end = match out[start..].find('}') {
+            Some(i) => start + i,
+            None => return Err(err!(
+                "The configuration value {:?} opens an {{env: reference and does not \
+                close it.", whole;
+            Invalid, Input)),
+        };
+        let inner = fmt!("{}", &out[start + 5..end]);
+        let (name, fallback) = match inner.find(':') {
+            Some(i) => (&inner[..i], Some(&inner[i + 1..])),
+            None    => (inner.as_str(), None),
+        };
+        let got = match std::env::var(name) {
+            Ok(v) if !v.is_empty() => v,
+            _ => match fallback {
+                Some(d) => fmt!("{}", d),
+                None => return Err(err!(
+                    "The configuration names the environment variable {:?}, which is \
+                    not set, and gives no default.", name;
+                Invalid, Input, Missing)),
+            },
+        };
+        out.replace_range(start..=end, &got);
+    }
+    Ok(out)
+}
+
+/// Expands every `{file:path}` reference of a value, reading each file relative
+/// to `root`.
+fn resolve_files(value: &str, whole: &str, root: &Path)
+    -> Outcome<String>
+{
+    let mut out = fmt!("{}", value);
+    while let Some(start) = out.find("{file:") {
+        let end = match out[start..].find('}') {
+            Some(i) => start + i,
+            None => return Err(err!(
+                "The configuration value {:?} opens a {{file: reference and does not \
+                close it.", whole;
+            Invalid, Input)),
+        };
+        let rel = fmt!("{}", &out[start + 6..end]);
+        let path = root.join(&rel);
+        let held = match std::fs::read_to_string(&path) {
+            Ok(t) => fmt!("{}", t.trim()),
+            Err(e) => return Err(err!(e,
+                "The configuration reads {{file:{}}}, and {:?} could not be read.",
+                rel, path;
+            IO, File, Read)),
+        };
+        out.replace_range(start..=end, &held);
+    }
+    Ok(out)
+}
+
+/// Expands every string of a daticle, wherever in the structure it sits.
+///
+/// Map keys are expanded as well as map values, since a key is a daticle here
+/// and there is no reason a configuration should not name one indirectly.
+pub fn resolve_dat(dat: &Dat, root: &Path)
+    -> Outcome<Dat>
+{
+    Ok(match dat {
+        Dat::Str(s) => Dat::Str(res!(resolve(s, root))),
+        Dat::List(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                out.push(res!(resolve_dat(item, root)));
+            }
+            Dat::List(out)
+        },
+        Dat::Map(map) => {
+            let mut out = DaticleMap::new();
+            for (k, v) in map {
+                out.insert(res!(resolve_dat(k, root)), res!(resolve_dat(v, root)));
+            }
+            Dat::Map(out)
+        },
+        other => other.clone(),
+    })
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An environment reference is expanded, a missing one without a default is
+    /// refused, and a default is taken where the variable is not set.
+    #[test]
+    fn a_reference_is_expanded_or_refused() -> Outcome<()> {
+        let root = Path::new(".");
+        std::env::set_var("FE2O3_JDAT_CFG_TEST_VALUE", "expanded");
+        assert_eq!(res!(resolve("{env:FE2O3_JDAT_CFG_TEST_VALUE}", root)), "expanded");
+        assert_eq!(res!(resolve("a {env:FE2O3_JDAT_CFG_TEST_VALUE} b", root)),
+            "a expanded b");
+        assert_eq!(res!(resolve("{env:FE2O3_JDAT_CFG_TEST_ABSENT:fallback}", root)),
+            "fallback");
+        assert!(resolve("{env:FE2O3_JDAT_CFG_TEST_ABSENT}", root).is_err(),
+            "a reference with no value and no default is refused");
+        assert!(resolve("{env:unclosed", root).is_err());
+        assert_eq!(res!(resolve("nothing to expand", root)), "nothing to expand");
+        Ok(())
+    }
+
+    /// A value that names nothing comes back as itself, whatever it holds, and a
+    /// daticle that is not a string is left alone.
+    #[test]
+    fn what_names_nothing_is_untouched() -> Outcome<()> {
+        let root = Path::new(".");
+        let dat = Dat::List(vec![
+            Dat::Str(fmt!("plain")),
+            Dat::U8(42),
+        ]);
+        let out = res!(resolve_dat(&dat, root));
+        assert_eq!(out, dat);
+        Ok(())
+    }
+}
