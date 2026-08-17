@@ -194,7 +194,6 @@ impl<
                     }
                     match self.survey_files() {
                         Ok(shards) => {
-                            //// Initialise WriterBot live files.
                             //let n_w = self.cfg().num_wbots_per_zone;
                             //let result = self.init_writer_live_files(n_w);
                             //self.result(&result);

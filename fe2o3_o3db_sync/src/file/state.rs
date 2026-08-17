@@ -11,12 +11,9 @@ use std::{
     collections::BTreeMap,
 };
 
-/// Whether a file is present as one of a data/index pair or on its own.
 #[derive(Clone, Debug)]
 pub enum Present {
-    /// Only one file of the pair is present, of the given type.
     Solo(FileType),
-    /// Both the data file and its index file are present.
     Pair,
 }
 
@@ -26,8 +23,6 @@ impl Default for Present {
     }
 }
 
-/// The liveness of a stored value: whether it is the current version for its
-/// key or has been superseded and awaits garbage collection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataState {
     Cur, // Current version of value for this key.
@@ -43,10 +38,6 @@ impl std::fmt::Display for DataState {
     }
 }
 
-/// The bookkeeping the database keeps for one on-disk file: its sizes, whether
-/// it is the live (currently-appended) file, how many records within it are old,
-/// where each record starts, any pending garbage-collection moves, and the
-/// current reader count.
 #[derive(Clone, Debug, Default)]
 pub struct FileState {
     present:    Present,
@@ -64,30 +55,19 @@ pub struct FileState {
 impl FileState {
 
     // Getters.
-    /// Returns whether the file is present solo or as a pair.
     pub fn present(&self)               -> &Present                         { &self.present }
-    /// Returns the data file size in bytes.
     pub fn get_data_file_size(&self)    -> usize                            { self.dat_size }
-    /// Returns the index file size in bytes.
     pub fn get_index_file_size(&self)   -> usize                            { self.ind_size }
-    /// Returns whether this is the live file currently being appended to.
     pub fn is_live(&self)               -> bool                             { self.live }
-    /// Returns the total size in bytes of old (superseded) records in the file.
     pub fn get_old_sum(&self)           -> u64                              { self.oldsum }
     /// Returns the number of old (superseded) records in the file.
     pub fn get_old_count(&self)         -> usize                            { self.oldcnt }
-    /// Returns the map of record start positions to their liveness state.
     pub fn data_map(&self)              -> &BTreeMap<u64, DataState>        { &self.dmap }
-    /// Returns a mutable reference to the record start-position map.
     pub fn data_map_mut(&mut self)      -> &mut BTreeMap<u64, DataState>    { &mut self.dmap }
-    /// Returns whether garbage collection is currently active on the file.
     pub fn gc_active(&self)             -> bool                             { self.gc_active }
-    /// Returns the current number of active readers of the file.
     pub fn readers(&self)               -> usize                            { self.readers }
-    /// Returns whether the file has no active readers.
     pub fn no_readers(&self)            -> bool                             { self.readers == 0 }
 
-    /// Returns the liveness state of the record starting at the given offset.
     pub fn get_data_state(&self, start: u64) -> Option<&DataState> {
         self.dmap.get(&start)
     }
@@ -96,8 +76,6 @@ impl FileState {
     pub fn get_data_state_mut(&mut self, start: u64) -> Option<&mut DataState> {
         self.dmap.get_mut(&start)
     }
-    /// Returns every record start position, terminated by the data file size,
-    /// so consecutive pairs bound each record.
     pub fn get_data_start_positions(&self) -> Outcome<Vec<u64>> {
         let mut starts = Vec::new();
         for start in self.dmap.keys() {
@@ -107,7 +85,6 @@ impl FileState {
         Ok(starts)
     }
 
-    /// Returns whether every record in the file is old (none current).
     pub fn is_all_old(&self) -> bool {
         for (_, dstat) in &self.dmap {
             if *dstat == DataState::Cur {
@@ -118,11 +95,9 @@ impl FileState {
     }
 
     // Setters.
-    /// Replaces the record start-position map.
     pub fn set_data_map(&mut self, dmap: BTreeMap<u64, DataState>) {
         self.dmap = dmap;
     }
-    /// Sets the data file size in bytes directly.
     pub fn set_data_file_size(&mut self, size: usize) {
         self.dat_size = size;
     }
@@ -132,19 +107,15 @@ impl FileState {
     pub fn set_index_file_size(&mut self, size: usize) {
         self.ind_size = size;
     }
-    /// Sets whether this is the live file.
     pub fn set_live(&mut self, live: bool) {
         self.live = live;
     }
-    /// Sets the present (solo or pair) status.
     pub fn set_present(&mut self, present: Present) {
         self.present = present;
     }
-    /// Sets whether garbage collection is active on the file.
     pub fn set_gc(&mut self, active: bool) {
         self.gc_active = active;
     }
-    /// Increments the reader count, erroring on overflow.
     pub fn inc_readers(&mut self) -> Outcome<()> {
         let (new, oflow) = self.readers().overflowing_add(1);
         if oflow {
@@ -157,7 +128,6 @@ impl FileState {
             Ok(())
         }
     }
-    /// Decrements the reader count, erroring on underflow.
     pub fn dec_readers(&mut self) -> Outcome<()> {
         let (new, uflow) = self.readers().overflowing_sub(1);
         if uflow {
@@ -171,7 +141,6 @@ impl FileState {
         }
     }
 
-    /// Clears all sizes, old-data accounting and record maps back to empty.
     pub fn reset(&mut self) {
         self.dat_size   = 0;
         self.ind_size   = 0;
@@ -181,54 +150,44 @@ impl FileState {
         self.mmap       = BTreeMap::new();
     }
 
-    /// Zeroes the data file size, returning its previous value.
     pub fn reset_data_file_size(&mut self) -> usize {
         let dat_size = self.dat_size;
         self.dat_size = 0;
         dat_size
     }
-    /// Zeroes the index file size, returning its previous value.
     pub fn reset_index_file_size(&mut self) -> usize {
         let ind_size = self.ind_size;
         self.ind_size = 0;
         ind_size
     }
-    /// Zeroes the old-data sum and count.
     pub fn reset_old_accounting(&mut self) {
         self.oldsum = 0;
         self.oldcnt = 0;
     }
 
     // Queries.
-    /// Returns whether every record is accounted old (count matches map size).
     pub fn is_all_data_old(&self) -> bool {
         self.oldcnt == self.dmap.len()
     }
 
-    /// Returns whether there are no pending garbage-collection moves.
     pub fn no_pending_moves(&self) -> bool {
         self.mmap.len() == 0
     }
 
-    /// Returns whether the record map is empty.
     pub fn data_map_empty(&self) -> bool {
         self.dmap.len() == 0
     }
 
-    /// Returns the number of records tracked in the file.
     pub fn data_map_len(&self) -> usize {
         self.dmap.len()
     }
 
-    /// Returns the number of pending garbage-collection moves.
     pub fn move_map_len(&self) -> usize {
         self.mmap.len()
     }
 
     // Data map mutation - this is where the size of old data and the file are modified.
 
-    /// Records a newly written record at its location, growing the tracked data
-    /// and index file sizes, and returns the combined byte growth.
     pub fn insert_new(
         &mut self,
         floc:   &FileLocation,
@@ -271,7 +230,6 @@ impl FileState {
         }
     }
 
-    /// Grows the tracked index file size by `len` bytes, erroring on overflow.
     pub fn inc_index_file_size(
         &mut self,
         len: usize,
@@ -293,8 +251,6 @@ impl FileState {
         Ok(len)
     }
 
-    /// Records that a record has been relocated during garbage collection,
-    /// mapping its old start to its new one and removing the old record entry.
     pub fn update_moved(
         &mut self,
         dloc:       &DataLocation,
@@ -304,8 +260,6 @@ impl FileState {
         self.dmap.remove(&dloc.start);
     }
 
-    /// Marks a current record as old, updating the old-data sum and count,
-    /// erroring if it was already old or is not present.
     pub fn register_old(
         &mut self,
         dloc: &DataLocation,
@@ -354,8 +308,6 @@ impl FileState {
         Ok(())
     }
 
-    /// Removes an old record once its bytes have been reclaimed, shrinking the
-    /// data file size and old-data accounting, and returns the reclaimed length.
     pub fn retire_old(
         &mut self,
         dloc: &DataLocation,
@@ -402,8 +354,6 @@ impl FileState {
         self.mmap.remove(&dloc.start)
     }
 
-    /// Consumes a pending move: removes the old->new entry and reinstates the
-    /// record as current at its new start, returning that new start if present.
     pub fn map_and_remove(
         &mut self,
         dloc: &DataLocation,
@@ -427,12 +377,9 @@ pub struct FileStateMap {
 }
 
 impl FileStateMap {
-    /// Returns the map of file numbers to their states.
     pub fn map(&self) -> &BTreeMap<FileNum, FileState> { &self.map }
-    /// Returns a mutable reference to the file-number-to-state map.
     pub fn map_mut(&mut self) -> &mut BTreeMap<FileNum, FileState> { &mut self.map }
 
-    /// Returns the state of the given file, erroring if absent.
     pub fn get_state(&self, fnum: FileNum) -> Outcome<&FileState> {
         match self.map.get(&fnum) {
             Some(fstat) => Ok(fstat),
@@ -442,7 +389,6 @@ impl FileStateMap {
         }
     }
 
-    /// Returns a mutable reference to the given file's state, erroring if absent.
     pub fn get_state_mut(&mut self, fnum: FileNum) -> Outcome<&mut FileState> {
         match self.map.get_mut(&fnum) {
             Some(fstat) => Ok(fstat),
@@ -452,26 +398,20 @@ impl FileStateMap {
         }
     }
 
-    /// Sets the total tracked byte size of the shard.
     pub fn set_size(&mut self, size: usize) { self.size = size; }
-    /// Grows the total tracked byte size by `len`, erroring on overflow.
     pub fn inc_size(&mut self, len: usize) -> Outcome<()> {
         self.size = try_add!(&self.size, len);
         Ok(())
     }
-    /// Shrinks the total tracked byte size by `len`, erroring on underflow.
     pub fn dec_size(&mut self, len: usize) -> Outcome<()> {
         self.size = try_sub!(&self.size, len);
         Ok(())
     }
-    /// Returns the total tracked byte size of the shard.
     pub fn get_size(&self) -> usize { self.size }
 
-    /// Returns the shard index a file number falls into, given `nf` shards.
     #[inline]
     pub fn shard_index(fnum: FileNum, nf: usize) -> usize { (fnum as usize) % nf }
 
-    /// Inserts a state entry for the given file number.
     pub fn new_file_state(&mut self, fnum: FileNum, fs: FileState) {
         self.map.insert(fnum, fs);
     }
@@ -500,8 +440,6 @@ impl FileStateMap {
         }
     }
 
-    /// Records a newly written record into the appropriate file's state,
-    /// creating the state if needed, and grows the shard's total size.
     pub fn insert_new(
         &mut self,
         floc:   &FileLocation,

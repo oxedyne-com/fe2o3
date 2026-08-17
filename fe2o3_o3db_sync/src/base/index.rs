@@ -25,7 +25,6 @@ impl Debug for ZoneInd {
 }
     
 impl ZoneInd {
-    /// Creates a zone index from any value convertible to `usize`.
     pub fn new<I: Into<usize>>(i: I) -> Self {
         Self(i.into())
     }
@@ -48,18 +47,14 @@ impl Debug for BotPoolInd {
 }
     
 impl BotPoolInd {
-    /// Creates a bot-pool index from any value convertible to `usize`.
     pub fn new<I: Into<usize>>(i: I) -> Self {
         Self(i.into())
     }
 }
 
-/// The full location of a worker bot: its pool position within its zone.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct WorkerInd {
-    /// Position within the zone's bot pool.
     pub pool: BotPoolInd,
-    /// Zone the bot belongs to.
     pub zone: ZoneInd,
 }
 
@@ -71,7 +66,6 @@ impl Display for WorkerInd {
     
 impl WorkerInd {
     
-    /// Creates a worker index from a zone and a pool position.
     pub fn new(zone: ZoneInd, pool: BotPoolInd) -> Self {
         Self {
             zone,
@@ -79,13 +73,9 @@ impl WorkerInd {
         }
     }
 
-    /// Returns the zone index.
     pub fn zind(&self)  -> &ZoneInd     { &self.zone }
-    /// Returns the bot-pool index.
     pub fn bpind(&self) -> &BotPoolInd  { &self.pool }
-    /// Returns the zone index as a `usize`.
     pub fn z(&self)     -> usize        { *self.zone }
-    /// Returns the bot-pool index as a `usize`.
     pub fn b(&self)     -> usize        { *self.pool }
 
 }

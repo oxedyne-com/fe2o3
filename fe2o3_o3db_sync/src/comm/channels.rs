@@ -35,25 +35,16 @@ use std::{
 use rand::Rng;
 
 
-/// Identifies a pool of channels by the kind of bot it feeds. Extends the
-/// worker roles with the zone and server pools, which are not per-worker.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PoolType {
-    /// Cache-bot pool.
     Cache,
-    /// File-bot pool.
     File,
-    /// Init-garbage-bot pool.
     InitGarbage,
-    /// Reader-bot pool.
     Reader,
     /// Scan-bot pool.
     Scan,
-    /// Writer-bot pool.
     Writer,
-    /// Zone-bot pool.
     Zone,
-    /// Server-bot pool.
     Server,
 }
 
@@ -70,17 +61,12 @@ impl From<&WorkerType> for PoolType {
     }
 }
 
-/// Strategy for picking one bot from a pool.
 #[derive(Clone, Debug)]
 pub enum ChooseBot {
-    /// Pick a bot uniformly at random.
     Randomly,
-    /// Pick the bot deterministically from a file number (modulo pool size).
     ByFile(u32),
 }
 
-/// A pool of message channels to the bots of one type, with helpers for
-/// selecting, broadcasting to and measuring the queues of its members.
 #[derive(Clone, Debug)]
 pub struct ChannelPool<
     const UIDL: usize,
@@ -100,7 +86,6 @@ impl<
 >
     ChannelPool<UIDL, UID, ENC, KH>
 {
-    /// Creates a pool of `n` fresh channels of the given type.
     pub fn new(typ: &PoolType, n: usize) -> Self {
         let mut pool = Vec::new();
         for _ in 0..n {
@@ -112,7 +97,6 @@ impl<
         }
     }
 
-    /// Creates a pool of the given type wrapping an existing set of channels.
     pub fn make(typ: &PoolType, pool: Vec<Simplex<OzoneMsg<UIDL, UID, ENC, KH>>>) -> Self {
         Self {
             typ: typ.clone(),
@@ -127,17 +111,13 @@ impl<
         Ok(())
     }
 
-    /// Returns the number of bots in the pool.
     pub fn len(&self) -> usize { self.pool.len() }
 
-    /// Returns the channel of the bot at the given pool index.
     pub fn get_bot(&self, ind: usize) -> Outcome<&Simplex<OzoneMsg<UIDL, UID, ENC, KH>>> {
         res!(self.check_index(ind));
         Ok(&self.pool[ind])
     }
 
-    /// Selects one bot from the pool according to the given strategy, returning
-    /// its channel and pool index.
     pub fn choose_bot(
         &self,
         how: &ChooseBot,
@@ -155,14 +135,12 @@ impl<
         (&self.pool[i], BotPoolInd::new(i))
     }
 
-    /// Replaces the channel of the bot at the given pool index.
     pub fn set_bot(&mut self, ind: usize, chan: Simplex<OzoneMsg<UIDL, UID, ENC, KH>>) -> Outcome<()> {
         res!(self.check_index(ind));
         self.pool[ind] = chan;
         Ok(())
     }
 
-    /// Sends a `Finish` message to every bot in the pool.
     pub fn finish_all(&self) -> Outcome<()> {
         for chan in &self.pool {
             res!(chan.send(OzoneMsg::Finish));
@@ -170,7 +148,6 @@ impl<
         Ok(())
     }
 
-    /// Returns the pending message-queue length of each bot in the pool.
     pub fn msg_count(&self) -> Vec<usize> {
         let mut queues = Vec::new();
         for chan in &self.pool {
@@ -179,7 +156,6 @@ impl<
         queues
     }
 
-    /// Returns the total pending message count across the whole pool.
     pub fn msg_count_total(&self) -> usize {
         let mut total: usize = 0;
         for chan in &self.pool {
@@ -188,7 +164,6 @@ impl<
         total
     }
 
-    /// Returns `true` if any bot in the pool has pending messages.
     pub fn msg_count_non_zero(&self) -> bool {
         let mut pending = false;
         for chan in &self.pool {
@@ -197,7 +172,6 @@ impl<
         pending
     }
 
-    /// Drains and logs every bot's pending messages, labelled for diagnostics.
     pub fn dump_pending_messages(&self, label: &str, z: Option<usize>) {
         for b in 0..self.pool.len() {
             let lines = self.pool[b].drain_messages();
@@ -226,7 +200,6 @@ pub struct ZoneMsgCount {
 }
 
 impl ZoneMsgCount {
-    /// Returns the total pending message count across all worker pools in the zone.
     pub fn total(&self) -> usize {
         let mut total = 0;
         total += self.cbots.iter().sum::<usize>();
@@ -331,7 +304,6 @@ impl<
         self.wbots.msg_count_non_zero()
     }
 
-    /// Drains and logs pending messages for every worker pool in the zone.
     pub fn dump_pending_messages(&self, zopt: Option<usize>) {
         self.cbots.dump_pending_messages("cbot", zopt);
         self.fbots.dump_pending_messages("fbot", zopt);
@@ -341,7 +313,6 @@ impl<
         self.wbots.dump_pending_messages("wbot", zopt);
     }
 
-    /// Sends a `Finish` message to every worker bot in the zone.
     pub fn finish_all(&self) -> Outcome<()> {
         res!(self.cbots.finish_all());
         res!(self.fbots.finish_all());
@@ -352,7 +323,6 @@ impl<
         Ok(())
     }
 
-    /// Returns the per-pool pending message counts for the zone.
     pub fn msg_count(&self) -> ZoneMsgCount {
         ZoneMsgCount {
             cbots:  self.cbots.msg_count(),
@@ -364,7 +334,6 @@ impl<
         }
     }
 
-    /// Returns the total number of worker bots in the zone.
     pub fn total_bot_count(&self) -> usize {
         let mut count = 0;
         count += self.cbots.len();
@@ -376,7 +345,6 @@ impl<
         count
     }
 
-    /// Broadcasts a message to every worker bot in the zone, returning the count sent.
     pub fn send_to_all(&self, msg: OzoneMsg<UIDL, UID, ENC, KH>) -> Outcome<usize> {
         let mut count = 0;
         count += res!(self.cbots.send_to_all(msg.clone()));
@@ -402,7 +370,6 @@ pub struct OzoneMsgCount {
 
 impl OzoneMsgCount {
 
-    /// Returns the total pending message count across every channel in the database.
     pub fn total(&self) -> usize {
         let mut total = 0;
         self.zwbots.iter().for_each(|x| total += x.total());
@@ -413,7 +380,6 @@ impl OzoneMsgCount {
         total
     }
 
-    /// Returns the total pending message count across the zone worker and zone-bot channels only.
     pub fn total_zone(&self) -> usize {
         let mut total = 0;
         self.zwbots.iter().for_each(|x| total += x.total());
@@ -500,28 +466,20 @@ impl<
         pools
     }
 
-    /// Returns the per-zone worker channel sets.
     pub fn all_zwbots(&self)    -> &Vec<ZoneWorkerChannels<UIDL, UID, ENC, KH>>  { &self.zwbots }
-    /// Returns the zone-bot channel pool.
     pub fn all_zbots(&self)     -> &ChannelPool<UIDL, UID, ENC, KH>              { &self.zbots }
-    /// Returns the config-bot channel.
     pub fn cfg(&self)           -> &Simplex<OzoneMsg<UIDL, UID, ENC, KH>>        { &self.cfg }
-    /// Returns the server-bot channel pool.
     pub fn all_sbots(&self)     -> &ChannelPool<UIDL, UID, ENC, KH>              { &self.sbots }
-    /// Returns the supervisor channel.
     pub fn sup(&self)           -> &Simplex<OzoneMsg<UIDL, UID, ENC, KH>>        { &self.sup }
 
-    /// Returns the channel of the server bot at the given pool index.
     pub fn get_sbot(&self, sind: &BotPoolInd) -> Outcome<&Simplex<OzoneMsg<UIDL, UID, ENC, KH>>> {
         self.sbots.get_bot(**sind)
     }
 
-    /// Returns the channel of the zone bot for the given zone.
     pub fn get_zbot(&self, zind: &ZoneInd) -> Outcome<&Simplex<OzoneMsg<UIDL, UID, ENC, KH>>> {
         self.zbots.get_bot(**zind)
     }
 
-    /// Returns the worker channel set for the given zone.
     pub fn get_zwbots(&self, zind: &ZoneInd) -> Outcome<&ZoneWorkerChannels<UIDL, UID, ENC, KH>> {
         if **zind > self.zwbots.len() {
             return Err(err!(
@@ -531,8 +489,6 @@ impl<
         Ok(&self.zwbots[**zind])
     }
 
-    /// Resolves the channel for any bot from its identifier, dispatching on the
-    /// variant to the appropriate solo channel or worker pool.
     pub fn get_bot(
         &self,
         ozid: &OzoneBotId,
@@ -564,16 +520,11 @@ impl<
     }
 
     // Mutate
-    /// Returns a mutable reference to the zone-bot channel pool.
     pub fn zbots_mut(&mut self) -> &mut ChannelPool<UIDL, UID, ENC, KH>          { &mut self.zbots }
-    /// Returns a mutable reference to the config-bot channel.
     pub fn cfg_mut(&mut self)   -> &mut Simplex<OzoneMsg<UIDL, UID, ENC, KH>>    { &mut self.cfg }
-    /// Returns a mutable reference to the server-bot channel pool.
     pub fn sbots_mut(&mut self) -> &mut ChannelPool<UIDL, UID, ENC, KH>          { &mut self.sbots }
-    /// Returns a mutable reference to the supervisor channel.
     pub fn sup_mut(&mut self)   -> &mut Simplex<OzoneMsg<UIDL, UID, ENC, KH>>    { &mut self.sup }
 
-    /// Replaces the channel of the server bot at the given pool index.
     pub fn set_sbot(
         &mut self,
         bpind:  &BotPoolInd,
@@ -584,7 +535,6 @@ impl<
         self.sbots.set_bot(**bpind, chan)
     }
 
-    /// Replaces the channel of the zone bot for the given zone.
     pub fn set_zbot(
         &mut self,
         zind: &ZoneInd,
@@ -595,12 +545,9 @@ impl<
         self.zbots.set_bot(**zind, chan)
     }
 
-    /// Replaces the config-bot channel.
     pub fn set_cfg(&mut self, chan: Simplex<OzoneMsg<UIDL, UID, ENC, KH>>)   { self.cfg = chan; }
-    /// Replaces the supervisor channel.
     pub fn set_sup(&mut self, chan: Simplex<OzoneMsg<UIDL, UID, ENC, KH>>)   { self.sup = chan; }
 
-    /// Replaces the channel of the worker bot of the given type at the given index.
     pub fn set_worker_bot(
         &mut self,
         wtyp:   &WorkerType,
@@ -660,13 +607,10 @@ impl<
         Ok(())
     }
 
-    /// Forwards a message to every zone bot, returning the count sent.
     pub fn fwd_to_all_zones(&self, msg: OzoneMsg<UIDL, UID, ENC, KH>) -> Outcome<usize> {
         self.zbots.send_to_all(msg)
     }
 
-    /// Broadcasts a message to every bot in the database, including the config
-    /// bot and supervisor, returning the total count sent.
     pub fn send_to_all(&self, msg: OzoneMsg<UIDL, UID, ENC, KH>) -> Outcome<usize> {
         let mut count = 0;
         for zwbot in &self.zwbots {
@@ -685,7 +629,6 @@ impl<
         Ok(count)
     }
 
-    /// Gathers the pending message counts for every channel in the database.
     pub fn msg_count(&self) -> OzoneMsgCount {
         let mut zone_counts = Vec::new();
         for zone in &self.zwbots {
@@ -701,8 +644,6 @@ impl<
         }
     }
 
-    /// Logs a bot's drained pending messages, labelled with optional zone and
-    /// bot indices for diagnostics.
     pub fn dump_pending_messages(
         lines:  Vec<String>, // obtain using drain_messages
         label:  &str,
