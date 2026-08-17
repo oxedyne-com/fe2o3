@@ -46,5 +46,6 @@ pub mod table;
 
 pub mod fmt;
 pub mod unicode;
+pub mod xml;
 
 pub use core::Text;

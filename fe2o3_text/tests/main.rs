@@ -2,6 +2,7 @@ mod base2x;
 mod highlight;
 mod pattern;
 mod string;
+mod xml;
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -29,6 +30,7 @@ fn run_tests() -> Outcome<()> {
     res!(highlight::test_highlight(filter));
     res!(pattern::test_pattern(filter));
     res!(string::test_string(filter));
+    res!(xml::test_xml(filter));
 
     Ok(())
 }
