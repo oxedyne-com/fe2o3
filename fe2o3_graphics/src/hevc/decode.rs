@@ -42,6 +42,9 @@
 //! and produces a picture with a plausible-looking grid of darker blocks. What is kept here is one
 //! flag per four-by-four block, set as that block is written, which is exactly the question being
 //! asked and is impossible to get subtly wrong.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::hevc::{
 	filter,
@@ -67,17 +70,13 @@ use oxedyne_fe2o3_core::prelude::*;
 /// One component's samples.
 #[derive(Clone, Debug)]
 pub struct Plane {
-	/// Width in samples.
-	pub w:	usize,
-	/// Height in samples.
-	pub h:	usize,
-	/// The samples, row by row.
-	pub px:	Vec<u16>,
+	pub w:	usize,		// width in samples
+	pub h:	usize,		// height in samples
+	pub px:	Vec<u16>,	// row by row
 }
 
 impl Plane {
 
-	/// A plane of nothing.
 	fn new(w: usize, h: usize) -> Self {
 		Self { w, h, px: vec![0; w * h] }
 	}
@@ -87,7 +86,6 @@ impl Plane {
 		Self::new(w, h)
 	}
 
-	/// One sample, or `None` outside the plane.
 	pub fn at(&self, x: usize, y: usize) -> Option<u16> {
 		if x < self.w && y < self.h {
 			self.px.get(y * self.w + x).copied()
@@ -132,14 +130,10 @@ impl Plane {
 /// A decoded picture, before it is turned into anything anybody can look at.
 #[derive(Clone, Debug)]
 pub struct Picture {
-	/// Brightness.
-	pub y:	Plane,
-	/// The two colour difference planes, at half the width and half the height.
-	pub cb:	Plane,
-	/// The other one.
-	pub cr:	Plane,
-	/// Bits a sample.
-	pub depth:	u32,
+	pub y:	Plane,		// brightness
+	pub cb:	Plane,		// colour difference, at half the width and half the height
+	pub cr:	Plane,		// the other one
+	pub depth:	u32,	// bits a sample
 }
 
 impl Picture {
@@ -193,27 +187,20 @@ impl Picture {
 /// samples the block after this one will write.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Sao {
-	/// Nought for nothing, one for a band offset, two for an edge offset, per component.
-	pub kind:	[u8; 3],
-	/// The four offsets, already signed.
-	pub offset:	[[i32; 4]; 3],
-	/// Which band the four offsets start at, where the kind is a band offset.
-	pub band:	[u8; 3],
-	/// Which direction the edge is looked for in, where the kind is an edge offset.
-	pub class:	[u8; 3],
+	pub kind:	[u8; 3],		// per component: 0 nothing, 1 a band offset, 2 an edge offset
+	pub offset:	[[i32; 4]; 3],	// the four offsets, already signed
+	pub band:	[u8; 3],		// which band the offsets start at, for a band offset
+	pub class:	[u8; 3],		// which direction the edge is looked for in
 }
 
 /// The arithmetic decoder and the contexts it reads against, which travel together.
 struct Ent<'a> {
-	/// The arithmetic decoder over this row's piece of the data.
-	cabac:	Cabac<'a>,
-	/// The context variables, which carry over between rows.
-	ctxs:	Contexts,
+	cabac:	Cabac<'a>,	// over this row's piece of the data
+	ctxs:	Contexts,	// the context variables, which carry over between rows
 }
 
 impl<'a> Ent<'a> {
 
-	/// One bin against a context of `set`.
 	fn bin(&mut self, set: Set, inc: usize) -> Outcome<u32> {
 		let ctx = res!(self.ctxs.at(set, inc));
 		Ok(self.cabac.bin(ctx))
@@ -246,72 +233,42 @@ impl<'a> Ent<'a> {
 struct Frame<'a> {
 	sps:	&'a Sps,
 	pps:	&'a Pps,
-	/// The slice being read now, which changes as the walk crosses from one to the next.
-	slice:	&'a Slice,
-	/// Which slice each coding tree block belongs to, for the availability rule.
-	slice_at:	Vec<u16>,
-	/// The samples, filled in as the walk goes.
-	pic:	Picture,
-	/// The scan orders, worked out once.
-	scans:	Scans,
-	/// The weights each block is quantised against, or `None` where the sequence quantises flat.
-	weights:	Option<crate::hevc::Scaling>,
+	slice:	&'a Slice,							// the slice being read now
+	slice_at:	Vec<u16>,						// which slice each block is in
+	pic:	Picture,							// the samples, filled in as the walk goes
+	scans:	Scans,								// the scan orders, worked out once
+	weights:	Option<crate::hevc::Scaling>,	// None where the sequence quantises flat
 
-	/// The width of the four-by-four grid the per-block records are kept on.
-	gw:	usize,
-	/// Its height.
-	gh:	usize,
-	/// How deep in the quadtree the coding unit covering each block sits.
-	ct_depth:	Vec<u8>,
-	/// The luma prediction mode of the block covering each.
-	mode:	Vec<u8>,
-	/// The luma quantisation parameter of the coding unit covering each.
-	qp:	Vec<i8>,
-	/// Whether each four-sample block has a transform boundary on its left, and on its top.
-	///
-	/// Every prediction boundary in an intra picture is a transform boundary too -- a coding unit
-	/// split into four prediction blocks has its transform tree forced down to match -- so
-	/// recording the transform blocks records both.
-	edge_v:	Vec<bool>,
-	/// The same for the top of each.
-	edge_h:	Vec<bool>,
+	gw:	usize,									// the grid the per-block records sit on
+	gh:	usize,									// and its height
+	ct_depth:	Vec<u8>,						// quadtree depth of the covering coding unit
+	mode:	Vec<u8>,							// luma prediction mode of the covering block
+	qp:	Vec<i8>,								// luma quantisation parameter of the covering unit
+	// Every prediction boundary in an intra picture is a transform boundary too -- a coding unit
+	// split into four prediction blocks has its transform tree forced down to match -- so
+	// recording the transform blocks records both.
+	edge_v:	Vec<bool>,							// a transform boundary on each block's left?
+	edge_h:	Vec<bool>,							// and on its top?
 
-	/// The filter settings of each coding tree block, for the pass at the end.
-	sao:	Vec<Sao>,
-	/// Coding tree blocks across the picture.
-	ctbs_w:	usize,
-	/// And down.
-	ctbs_h:	usize,
+	sao:	Vec<Sao>,							// filter settings, for the pass at the end
+	ctbs_w:	usize,								// coding tree blocks across the picture
+	ctbs_h:	usize,								// and down
 
-	/// The parameter the next quantisation group predicts from.
-	qp_prev:	i32,
-	/// What the current group's syntax added to it.
-	qp_delta:	i32,
-	/// Whether that delta has been read yet in this group.
-	qp_coded:	bool,
-	/// The parameter in force for the coding unit being decoded.
-	qp_now:	i32,
+	qp_prev:	i32,							// what the next quantisation group predicts from
+	qp_delta:	i32,							// what the current group's syntax added to it
+	qp_coded:	bool,							// has the delta been read in this group?
+	qp_now:	i32,								// in force for the coding unit being decoded
 
-	/// Whether the current coding unit skips the transform and the quantiser.
-	bypass:	bool,
-	/// Whether it is split into four prediction blocks, which forces the transform tree one deep.
-	split_intra:	bool,
-	/// Its luma prediction modes, one or four.
-	pred_y:	[u8; 4],
-	/// Its chroma prediction mode.
-	pred_c:	u8,
-	/// Whether each depth of the transform tree has a chroma residual, for the two components.
-	cbf_cb:	[bool; 6],
-	/// The other one.
-	cbf_cr:	[bool; 6],
-	/// Whether the block being read now was coded without its transform.
-	skip_tr:	bool,
-	/// Where the coding unit being decoded starts, for the modes its blocks look up.
-	cu_x:	usize,
-	/// And down.
-	cu_y:	usize,
-	/// How wide it is.
-	cu_size:	usize,
+	bypass:	bool,								// skips the transform and the quantiser?
+	split_intra:	bool,						// four prediction blocks, forcing the tree one deep
+	pred_y:	[u8; 4],							// its luma prediction modes, one or four
+	pred_c:	u8,									// its chroma prediction mode
+	cbf_cb:	[bool; 6],							// a chroma residual at each transform tree depth?
+	cbf_cr:	[bool; 6],							// the other component
+	skip_tr:	bool,							// was this block coded without its transform?
+	cu_x:	usize,								// where the coding unit starts
+	cu_y:	usize,								// and down
+	cu_size:	usize,							// how wide it is
 }
 
 /// Decodes one intra picture out of its single slice.
@@ -561,7 +518,6 @@ pub fn picture_of(sps: &Sps, pps: &Pps, parts: &[(&Slice, &[u8])]) -> Outcome<Pi
 	Ok(frame.pic)
 }
 
-/// Says plainly what this decoder does not do, rather than doing it wrongly.
 fn refuse_what_is_not_built(sps: &Sps, pps: &Pps) -> Outcome<()> {
 	if sps.chroma != 1 {
 		return Err(err!(
@@ -1257,7 +1213,6 @@ impl<'a> Frame<'a> {
 		chroma_qp((self.qp_now + offset).clamp(0, 57))
 	}
 
-	/// One component's samples.
 	fn plane(&self, cidx: usize) -> &Plane {
 		match cidx {
 			0	=> &self.pic.y,
@@ -1266,7 +1221,6 @@ impl<'a> Frame<'a> {
 		}
 	}
 
-	/// The same, to write to.
 	fn plane_mut(&mut self, cidx: usize) -> &mut Plane {
 		match cidx {
 			0	=> &mut self.pic.y,

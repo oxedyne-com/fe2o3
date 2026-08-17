@@ -13,6 +13,9 @@
 //! The two properties this can be held to before any picture exists are asserted in `mod.rs`'s
 //! tests: every context starts in a state the probability tables actually have, and the coding
 //! interval stays between 256 and 510 after every bin, whatever is fed in.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -55,8 +58,8 @@ impl Ctx {
 	}
 }
 
-/// How the range is narrowed for the less probable symbol, indexed by state and by the two bits
-/// the current range contributes (§9.3.4.3.2.1, Table 9-46).
+// How the range is narrowed for the less probable symbol, indexed by state and by the two bits
+// the current range contributes (§9.3.4.3.2.1, Table 9-46).
 const LPS: [[u8; 4]; 64] = [
 	[128, 176, 208, 240], [128, 167, 197, 227], [128, 158, 187, 216], [123, 150, 178, 205],
 	[116, 142, 169, 195], [111, 135, 160, 185], [105, 128, 152, 175], [100, 122, 144, 166],
@@ -76,7 +79,7 @@ const LPS: [[u8; 4]; 64] = [
 	[6, 8, 9, 11],        [6, 7, 9, 10],        [6, 7, 8, 9],         [2, 2, 2, 2],
 ];
 
-/// The state to move to after coding the more probable symbol (Table 9-47).
+// The state to move to after coding the more probable symbol (Table 9-47).
 const NEXT_MPS: [u8; 64] = [
 	1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
 	17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32,
@@ -84,7 +87,7 @@ const NEXT_MPS: [u8; 64] = [
 	49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 62, 63,
 ];
 
-/// The state to move to after coding the less probable symbol (Table 9-47).
+// The state to move to after coding the less probable symbol (Table 9-47).
 const NEXT_LPS: [u8; 64] = [
 	0, 0, 1, 2, 2, 4, 4, 5, 6, 7, 8, 9, 9, 11, 11, 12,
 	13, 13, 15, 15, 16, 16, 18, 18, 19, 19, 21, 21, 22, 22, 23, 24,
@@ -100,16 +103,11 @@ const NEXT_LPS: [u8; 64] = [
 /// parts of a value that carry no useful correlation; and **terminating**, which is how the end of
 /// a slice or a piece of one is found.
 pub struct Cabac<'a> {
-	/// The bytes being read.
 	buf:	&'a [u8],
-	/// The next byte to be taken into the window.
-	at:	usize,
-	/// The current interval's width.
-	range:	u32,
-	/// Where in the interval the coded value sits.
-	offset:	u32,
-	/// How many bits of the window have been used.
-	bits:	i32,
+	at:	usize,			// the next byte to be taken into the window
+	range:	u32,		// the current interval's width
+	offset:	u32,		// where in the interval the coded value sits
+	bits:	i32,		// bits of the window used so far
 }
 
 impl<'a> Cabac<'a> {
@@ -254,47 +252,29 @@ impl<'a> Cabac<'a> {
 /// published table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Set {
-	/// Whether this block reuses the block to its left's or above's sample adaptive offset.
-	SaoMerge,
-	/// Which kind of sample adaptive offset a block has.
-	SaoType,
-	/// Whether a block of the coding quadtree splits into four.
-	SplitCu,
-	/// Whether a coding unit skips the transform and the quantiser entirely.
-	TransquantBypass,
-	/// How a coding unit is divided into prediction units.
-	PartMode,
-	/// Whether a block's intra mode is one of the three its neighbours suggest.
-	PrevIntraLumaPred,
-	/// Which intra mode the chroma blocks take.
-	IntraChromaPredMode,
-	/// Whether a block of the transform tree splits into four.
-	SplitTransform,
-	/// Whether a luma transform block has any coefficient in it at all.
-	CbfLuma,
-	/// The same for the two chroma blocks.
-	CbfChroma,
-	/// How far this block's quantisation parameter is from the one predicted for it.
-	CuQpDeltaAbs,
-	/// Whether a transform block is coded without its transform.
-	TransformSkip,
-	/// Where the last coefficient of a block sits, across.
-	LastSigX,
-	/// And down.
-	LastSigY,
-	/// Whether a four-by-four group within a transform block holds anything.
-	CodedSubBlock,
-	/// Whether one coefficient is not zero.
-	SigCoeff,
-	/// Whether a coefficient's magnitude is more than one.
-	Greater1,
-	/// Whether it is more than two.
-	Greater2,
+	SaoMerge,				// reuse the left or upper block's sample adaptive offset?
+	SaoType,				// which kind of sample adaptive offset a block has
+	SplitCu,				// does a block of the coding quadtree split into four?
+	TransquantBypass,		// a coding unit skipping the transform and quantiser entirely
+	PartMode,				// how a coding unit is divided into prediction units
+	PrevIntraLumaPred,		// is the intra mode one of the three its neighbours suggest?
+	IntraChromaPredMode,	// which intra mode the chroma blocks take
+	SplitTransform,			// does a block of the transform tree split into four?
+	CbfLuma,				// has a luma transform block any coefficient at all?
+	CbfChroma,				// the same for the two chroma blocks
+	CuQpDeltaAbs,			// how far the block's quantisation parameter is from its prediction
+	TransformSkip,			// a transform block coded without its transform
+	LastSigX,				// where the last coefficient of a block sits, across
+	LastSigY,				// and down
+	CodedSubBlock,			// does a four-by-four group hold anything?
+	SigCoeff,				// is one coefficient not zero?
+	Greater1,				// is a coefficient's magnitude more than one?
+	Greater2,				// and more than two?
 }
 
 impl Set {
 
-	/// Every set, in the order their context variables are laid out.
+	// Every set, in the order their context variables are laid out.
 	pub const ALL: [Self; 18] = [
 		Self::SaoMerge,
 		Self::SaoType,
@@ -363,12 +343,10 @@ impl Set {
 		}
 	}
 
-	/// How many context variables the set holds.
 	pub const fn len(self) -> usize {
 		self.init().len()
 	}
 
-	/// Whether it holds none, which none of these do.
 	pub const fn is_empty(self) -> bool {
 		self.len() == 0
 	}
@@ -445,7 +423,7 @@ impl Set {
 	}
 }
 
-/// How many context variables a picture's decoder carries altogether.
+// How many context variables a picture's decoder carries altogether.
 pub const CONTEXTS: usize = {
 	let mut at = 0;
 	let mut i = 0;
@@ -515,10 +493,8 @@ impl Contexts {
 /// wants it.
 #[derive(Clone, Copy, Debug)]
 pub struct Rows {
-	/// What a slice starts from, for the first row, which has nothing above it.
-	qp:	i32,
-	/// What was saved after the second block of the row above.
-	saved:	Option<Contexts>,
+	qp:	i32,					// what a slice starts from, the first row having nothing above
+	saved:	Option<Contexts>,	// what was saved after the second block of the row above
 }
 
 impl Rows {

@@ -34,6 +34,9 @@
 //! seen. Two pieces that lie over each other along the union's own boundary would sum to two there,
 //! and a pixel half covered would come out fully inked: a bright bead at every join. Cutting the
 //! pieces to meet is what buys clean edges, and it costs nothing.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::path::{
 	Path,
@@ -46,71 +49,60 @@ use crate::transform::Transform;
 
 use oxedyne_fe2o3_core::prelude::*;
 
-/// The most straight segments one round join or cap may be flattened into, however large the pen.
-const MAX_ARC_STEPS: usize = 256;
+const MAX_ARC_STEPS: usize = 256;	// however large the pen
 
-/// The most dashes one contour may be cut into: a ceiling against a pattern so fine, on a path so
-/// long, that the outline would swallow the memory of the machine.
+// The most dashes one contour may be cut into: a ceiling against a pattern so fine, on a path so
+// long, that the outline would swallow the memory of the machine.
 pub const MAX_DASHES: usize = 1 << 16;
 
-/// Below this a cross product counts as zero and two directions as parallel. Both are unit vectors,
-/// so this is the sine of the angle between them, and an angle this small bends nothing a pixel can
-/// show.
+// Below this a cross product counts as zero and two directions as parallel. Both are unit vectors,
+// so this is the sine of the angle between them, and an angle this small bends nothing a pixel can
+// show.
 const EPS_TURN: f32 = 1e-5;
 
-/// Below this two points count as one, and a run of pen between them as having no length and so no
-/// direction to be offset along.
+// Below this two points count as one, and a run of pen between them as having no length and so no
+// direction to be offset along.
 const EPS_LEN: f32 = 1e-6;
 
-/// The default miter limit, as SVG and PostScript both have it: a corner whose miter would reach
-/// more than four line widths past it is bevelled instead.
+// The default miter limit, as SVG and PostScript both have it: a corner whose miter would reach
+// more than four line widths past it is bevelled instead.
 pub const MITER_LIMIT: f32 = 4.0;
 
 /// How a stroke finishes at the loose end of an open contour.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Cap {
-	/// Stops dead on the end point. A contour with no length is left undrawn, since a butt cap
-	/// reaches nowhere and there is nothing else to reach.
 	#[default]
-	Butt,
-	/// A half disc past the end point, so a contour with no length comes out as a dot.
-	Round,
-	/// A half square past the end point, reaching out by half the line width.
-	Square,
+	Butt,	// stops dead on the end point, so a contour with no length is left undrawn
+	Round,	// a half disc past the end point, so a contour with no length comes out as a dot
+	Square,	// a half square past the end point, reaching out by half the line width
 }
 
 /// How a stroke turns a corner.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Join {
-	/// Carries the two outer edges on until they meet in a point, unless that point would reach
-	/// further past the corner than the miter limit allows, in which case the corner is bevelled.
 	#[default]
-	Miter,
-	/// A wedge of a disc, rounding the corner off.
-	Round,
-	/// A straight cut across the corner, from one outer edge to the other.
-	Bevel,
+	Miter,	// the outer edges carry on until they meet, or bevel where the limit is passed
+	Round,	// a wedge of a disc, rounding the corner off
+	Bevel,	// a straight cut across the corner, from one outer edge to the other
 }
 
 /// A dash pattern: alternating lengths of ink and gap, walked round and round along the contour.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Dash {
-	/// Lengths of ink and gap in turn, beginning with ink. A pattern of odd length is walked twice
-	/// over, so that ink and gap trade places on the second pass and the pattern only truly repeats
-	/// after both, which is the rule SVG and PostScript share.
-	pub pattern:	Vec<f32>,
-	/// How far into the pattern the contour's first point already stands.
-	pub offset:	f32,
+	// A pattern of odd length is walked twice over, so that ink and gap trade places on the second
+	// pass and the pattern only truly repeats after both, which is the rule SVG and PostScript
+	// share.
+	pub pattern:	Vec<f32>,	// lengths of ink and gap in turn, beginning with ink
+	pub offset:	f32,		// how far into the pattern the contour's first point stands
 }
 
 impl Dash {
 
-	/// Creates a dash pattern that begins at the start of its first length of ink.
+	/// Creates a pattern that begins at the start of its first length of ink.
 	pub fn new(pattern: Vec<f32>) -> Self {
 		Self { pattern, offset: 0.0 }
 	}
 
-	/// Sets how far into the pattern the contour begins.
 	pub fn with_offset(mut self, offset: f32) -> Self {
 		self.offset = offset;
 		self
@@ -120,24 +112,19 @@ impl Dash {
 /// The pen: everything that decides what ink a path leaves.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Stroke {
-	/// The width of the pen, in the coordinates the path is expressed in. Must be positive.
-	pub width:	f32,
-	/// How the loose ends of an open contour are finished. A closed contour has none.
-	pub cap:	Cap,
-	/// How the corners are turned.
+	pub width:	f32,	// in the coordinates the path is expressed in; must be positive
+	pub cap:	Cap,	// only an open contour has loose ends to finish
 	pub join:	Join,
-	/// The furthest a miter may reach past a corner, as a multiple of the line width. A corner
-	/// sharper than this is bevelled instead, which is what stops a path that nearly doubles back
-	/// from throwing a spike clear across the page. Must be at least one, since even a right angle
-	/// mitres to more than one line width.
+	// The furthest a miter may reach past a corner, as a multiple of the line width. A corner
+	// sharper than this is bevelled instead, which is what stops a path that nearly doubles back
+	// from throwing a spike clear across the page. Must be at least one, since even a right angle
+	// mitres to more than one line width.
 	pub miter_limit: f32,
-	/// The dash pattern, if the line is to be broken.
-	pub dash:	Option<Dash>,
-	/// The flattening tolerance, in the coordinates the path is expressed in: the furthest a
-	/// straight segment may stray from the curve or the arc it stands in for. A caller who will
-	/// then scale the stroked path up tenfold should divide this by ten, as [`Path::flatten`] does
-	/// with its own tolerance, and as [`crate::pixmap::Pixmap::stroke_path`] does on the caller's
-	/// behalf.
+	pub dash:	Option<Dash>,	// set where the line is to be broken
+	// The flattening tolerance, in the coordinates the path is expressed in: the furthest a
+	// straight segment may stray from the curve or the arc it stands in for. A caller who will
+	// then scale the stroked path up tenfold should divide this by ten, as Path::flatten does with
+	// its own tolerance, and as Pixmap::stroke_path does on the caller's behalf.
 	pub tol:	f32,
 }
 
@@ -156,38 +143,34 @@ impl Default for Stroke {
 
 impl Stroke {
 
-	/// Creates a pen of the given width, refusing a width that cannot draw.
+	/// Creates a pen, refusing a width that cannot draw.
 	pub fn new(width: f32) -> Outcome<Self> {
 		let s = Self { width, ..Self::default() };
 		res!(s.check());
 		Ok(s)
 	}
 
-	/// Sets how the loose ends are finished.
 	pub fn with_cap(mut self, cap: Cap) -> Self {
 		self.cap = cap;
 		self
 	}
 
-	/// Sets how the corners are turned.
 	pub fn with_join(mut self, join: Join) -> Self {
 		self.join = join;
 		self
 	}
 
-	/// Sets the furthest a miter may reach past a corner, as a multiple of the line width.
+	/// The limit is a multiple of the line width.
 	pub fn with_miter_limit(mut self, limit: f32) -> Self {
 		self.miter_limit = limit;
 		self
 	}
 
-	/// Sets the dash pattern.
 	pub fn with_dash(mut self, dash: Dash) -> Self {
 		self.dash = Some(dash);
 		self
 	}
 
-	/// Sets the flattening tolerance.
 	pub fn with_tolerance(mut self, tol: f32) -> Self {
 		self.tol = tol;
 		self
@@ -248,17 +231,12 @@ impl Stroke {
 
 impl Path {
 
-	/// Strokes the path with a pen, returning the ink it leaves as a new path.
+	/// The ink the pen leaves, as a new path.
 	///
 	/// The result is a union of convex pieces all wound the same way, so it must be filled under
 	/// [`crate::raster::FillRule::NonZero`] -- which is the default, and what
 	/// [`crate::pixmap::Pixmap::fill_path`] uses. Filling it even-odd would open a hole wherever two
 	/// pieces overlap.
-	///
-	/// # Errors
-	///
-	/// A pen that cannot draw is refused: see [`Stroke::check`]. A dash pattern fine enough to cut a
-	/// contour into more than [`MAX_DASHES`] runs is refused too.
 	pub fn stroke(&self, pen: &Stroke) -> Outcome<Self> {
 		res!(pen.check());
 		let r = 0.5 * pen.width; // Half the width: how far the pen reaches to either side.
@@ -277,7 +255,6 @@ impl Path {
 	}
 }
 
-/// Strokes one flattened contour into the outline being built.
 fn stroke_contour(pb: &mut PathBuilder, pl: &Polyline, pen: &Stroke, r: f32) {
 	let pts = dedup(&pl.pts, pl.closed);
 	if pts.is_empty() {
@@ -617,22 +594,18 @@ fn dir(a: Pt, b: Pt) -> Option<Pt> {
 	Some(mul(d, 1.0 / len))
 }
 
-/// The sum of two points, taken as vectors.
 fn add(a: Pt, b: Pt) -> Pt {
 	Pt::new(a.x + b.x, a.y + b.y)
 }
 
-/// The difference of two points, taken as vectors.
 fn sub(a: Pt, b: Pt) -> Pt {
 	Pt::new(a.x - b.x, a.y - b.y)
 }
 
-/// A point scaled, taken as a vector.
 fn mul(a: Pt, s: f32) -> Pt {
 	Pt::new(a.x * s, a.y * s)
 }
 
-/// A point a fraction of the way from `a` to `b`.
 fn lerp(a: Pt, b: Pt, s: f32) -> Pt {
 	Pt::new(a.x + (b.x - a.x) * s, a.y + (b.y - a.y) * s)
 }
@@ -647,7 +620,6 @@ fn right(d: Pt) -> Pt {
 	Pt::new(d.y, -d.x)
 }
 
-/// A vector turned through an angle.
 fn rot(v: Pt, a: f32) -> Pt {
 	let (s, c) = a.sin_cos();
 	Pt::new(v.x * c - v.y * s, v.x * s + v.y * c)
@@ -689,7 +661,6 @@ mod tests {
 		None
 	}
 
-	/// A straight line, as an open contour.
 	fn line(a: Pt, b: Pt) -> Outcome<Path> {
 		let mut pb = PathBuilder::new();
 		pb.move_to(a);
@@ -697,7 +668,6 @@ mod tests {
 		pb.finish()
 	}
 
-	/// A square, as a closed contour, with the option of leaving it open.
 	fn square(x0: f32, y0: f32, x1: f32, y1: f32, closed: bool) -> Outcome<Path> {
 		let mut pb = PathBuilder::new();
 		pb.move_to(Pt::new(x0, y0));

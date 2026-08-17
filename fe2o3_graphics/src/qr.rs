@@ -27,24 +27,23 @@
 //! 	assert!(qr.size() >= 21); // Version 1 is 21 by 21, and larger versions only grow.
 //! }
 //! ```
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 
-/// The four error-correction levels a QR Code may carry, from the least redundancy to the most.
+/// The four error-correction levels, from the least redundancy to the most.
 ///
 /// A higher level survives more damage to the printed symbol but leaves fewer bits for the
 /// payload at a given version, so the encoder may have to step up to a larger version to fit the
 /// same data.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum QrEcc {
-	/// Tolerates about 7% of the codewords being corrupted.
-	Low,
-	/// Tolerates about 15% of the codewords being corrupted.
-	Medium,
-	/// Tolerates about 25% of the codewords being corrupted.
-	Quartile,
-	/// Tolerates about 30% of the codewords being corrupted.
-	High,
+	Low,		// tolerates about 7% of the codewords corrupted
+	Medium,		// about 15%
+	Quartile,	// about 25%
+	High,		// about 30%
 }
 
 impl QrEcc {
@@ -72,23 +71,18 @@ impl QrEcc {
 	}
 }
 
-/// The smallest QR Code version, a 21 by 21 grid.
-pub const MIN_VERSION: u8 = 1;
-/// The largest QR Code version, a 177 by 177 grid.
-pub const MAX_VERSION: u8 = 40;
+pub const MIN_VERSION: u8 = 1;	// a 21 by 21 grid
+pub const MAX_VERSION: u8 = 40;	// a 177 by 177 grid
 
-/// Penalty weight for a run of five or more same-coloured modules in a line.
-const PENALTY_N1: i32 = 3;
-/// Penalty weight for a two-by-two block of one colour.
-const PENALTY_N2: i32 = 3;
-/// Penalty weight for a finder-like 1:1:3:1:1 pattern in a line.
-const PENALTY_N3: i32 = 40;
-/// Penalty weight for each 5% the dark-module proportion strays from one half.
-const PENALTY_N4: i32 = 10;
+// The mask-penalty weights, one per rule.
+const PENALTY_N1: i32 = 3;	// a run of five or more same-coloured modules in a line
+const PENALTY_N2: i32 = 3;	// a two-by-two block of one colour
+const PENALTY_N3: i32 = 40;	// a finder-like 1:1:3:1:1 pattern in a line
+const PENALTY_N4: i32 = 10;	// each 5% the dark-module proportion strays from one half
 
-/// Number of error-correction codewords in each block, indexed by `[ecc ordinal][version]`, with
-/// version 0 unused and set to an illegal value so a stray index is caught rather than silently
-/// wrong.
+// Number of error-correction codewords in each block, indexed by [ecc ordinal][version], with
+// version 0 unused and set to an illegal value so a stray index is caught rather than silently
+// wrong.
 static ECC_CODEWORDS_PER_BLOCK: [[i8; 41]; 4] = [
 	// 0   1   2   3   4   5   6   7   8   9  10  11  12  13  14  15  16  17  18  19  20  21  22  23  24  25  26  27  28  29  30  31  32  33  34  35  36  37  38  39  40
 	[-1,  7, 10, 15, 20, 26, 18, 20, 24, 30, 18, 20, 24, 26, 30, 22, 24, 28, 30, 28, 28, 28, 28, 30, 30, 26, 28, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30], // Low
@@ -97,7 +91,7 @@ static ECC_CODEWORDS_PER_BLOCK: [[i8; 41]; 4] = [
 	[-1, 17, 28, 22, 16, 22, 28, 26, 26, 24, 28, 24, 28, 22, 24, 24, 30, 28, 28, 26, 28, 30, 24, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30], // High
 ];
 
-/// Number of error-correction blocks, indexed by `[ecc ordinal][version]`, with version 0 unused.
+// Number of error-correction blocks, indexed by [ecc ordinal][version], with version 0 unused.
 static NUM_ERROR_CORRECTION_BLOCKS: [[i8; 41]; 4] = [
 	// 0  1  2  3  4  5  6  7  8  9 10  11  12  13  14  15  16  17  18  19  20  21  22  23  24  25  26  27  28  29  30  31  32  33  34  35  36  37  38  39  40
 	[-1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 4,  4,  4,  4,  4,  6,  6,  6,  6,  7,  8,  8,  9,  9, 10, 12, 12, 12, 13, 14, 15, 16, 17, 18, 19, 19, 20, 21, 22, 24, 25], // Low
@@ -106,26 +100,22 @@ static NUM_ERROR_CORRECTION_BLOCKS: [[i8; 41]; 4] = [
 	[-1, 1, 1, 2, 4, 4, 4, 5, 6, 8, 8, 11, 11, 16, 16, 18, 16, 19, 21, 25, 25, 25, 34, 30, 32, 35, 37, 40, 42, 45, 48, 51, 54, 57, 60, 63, 66, 70, 74, 77, 81], // High
 ];
 
-/// A finished QR Code as a square grid of modules, each either dark (true) or light (false).
+/// A finished QR Code as a square grid of modules.
 ///
 /// The grid alone is deliberately all this exposes: it is what a renderer needs, and everything
 /// used to build it (function-pattern bookkeeping, the codeword stream) is discarded once the
 /// modules are fixed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QrMatrix {
-	/// The side length in modules, always odd and in the range 21 to 177.
-	size:	usize,
-	/// The modules in row-major order, `size * size` of them, true meaning dark.
-	mods:	Vec<bool>,
-	/// The version, 1 to 40.
-	ver:	u8,
-	/// The error-correction level actually used, which may exceed the one requested.
-	ecc:	QrEcc,
+	size:	usize,		// side length in modules, always odd, 21 to 177
+	mods:	Vec<bool>,	// row-major, size * size of them, true meaning dark
+	ver:	u8,		// 1 to 40
+	ecc:	QrEcc,		// the level actually used, which may exceed the one requested
 }
 
 impl QrMatrix {
 
-	/// The side length of the grid in modules.
+	/// The side length in modules.
 	pub fn size(&self) -> usize {
 		self.size
 	}
@@ -135,14 +125,13 @@ impl QrMatrix {
 		self.ver
 	}
 
-	/// The error-correction level the symbol carries, which may be higher than the one asked for
-	/// when the chosen version had spare capacity.
+	/// May be higher than the level asked for, when the chosen version had spare capacity.
 	pub fn ecc(&self) -> QrEcc {
 		self.ecc
 	}
 
-	/// Returns whether the module at column `x`, row `y` is dark. Coordinates outside the grid
-	/// are light, matching the quiet zone a decoder assumes surrounds the symbol.
+	/// Is the module at column `x`, row `y` dark? Coordinates outside the grid are light,
+	/// matching the quiet zone a decoder assumes surrounds the symbol.
 	pub fn get(&self, x: usize, y: usize) -> bool {
 		if x >= self.size || y >= self.size {
 			return false;
@@ -157,20 +146,12 @@ impl QrMatrix {
 /// The text is taken as its UTF-8 bytes. The error-correction level is a floor, not an exact
 /// setting: when the chosen version leaves room, the level is raised for free, so the returned
 /// [`QrMatrix::ecc`] may exceed `ecc`.
-///
-/// # Errors
-///
-/// Fails if the byte length does not fit in even a version-40 symbol at the requested level.
 pub fn encode(text: &str, ecc: QrEcc) -> Outcome<QrMatrix> {
 	encode_bytes(text.as_bytes(), ecc)
 }
 
 /// Encodes arbitrary bytes as a QR Code in byte mode. See [`encode`] for the version and mask
 /// selection, which is identical; this is the entry point when the payload is not text.
-///
-/// # Errors
-///
-/// Fails if the byte length does not fit in even a version-40 symbol at the requested level.
 pub fn encode_bytes(data: &[u8], ecc: QrEcc) -> Outcome<QrMatrix> {
 	encode_bytes_advanced(data, ecc, MIN_VERSION, MAX_VERSION, None, true)
 }
@@ -182,10 +163,6 @@ pub fn encode_bytes(data: &[u8], ecc: QrEcc) -> Outcome<QrMatrix> {
 /// * `mask` forces one of the eight masks (0 to 7) when `Some`, or asks for automatic selection
 ///   when `None`.
 /// * `boost` raises the error-correction level to fill spare capacity when true.
-///
-/// # Errors
-///
-/// Fails on an out-of-range argument, or if the data does not fit within `maxver`.
 pub fn encode_bytes_advanced(
 	data:	&[u8],
 	ecc:	QrEcc,
@@ -273,7 +250,7 @@ pub fn encode_bytes_advanced(
 	build(ver, ecc, &codewords, mask)
 }
 
-/// Appends the low `len` bits of `val`, most-significant first, to a bit vector.
+/// Appends the low `len` bits of `val`, most-significant first.
 fn append_bits(bits: &mut Vec<bool>, val: u32, len: u8) {
 	let n = len as i32;
 	for i in (0 .. n).rev() {
@@ -281,7 +258,6 @@ fn append_bits(bits: &mut Vec<bool>, val: u32, len: u8) {
 	}
 }
 
-/// Returns bit `i` of `x`.
 fn get_bit(x: u32, i: i32) -> bool {
 	(x >> i) & 1 != 0
 }
@@ -302,8 +278,7 @@ fn segment_bits(len: usize, ver: u8) -> Option<usize> {
 	Some(4 + usize::from(ccbits) + len * 8)
 }
 
-/// Reads a per-version table value, returning it as a `usize`. The version is assumed valid, and
-/// the illegal padding entries are never reached on a valid version.
+/// The version is assumed valid, so the illegal padding entries are never reached.
 fn table_get(table: &[[i8; 41]; 4], ver: u8, ecc: QrEcc) -> usize {
 	let v = table[ecc.ordinal()][ver as usize];
 	if v < 0 { 0 } else { v as usize }
@@ -397,17 +372,14 @@ fn rs_remainder(data: &[u8], divisor: &[u8]) -> Vec<u8> {
 /// The working grid during construction: the modules plus a parallel record of which cells are
 /// function patterns and so must not carry data or be masked.
 struct Grid {
-	/// Side length in modules.
-	size:	i32,
-	/// Modules in row-major order, true meaning dark.
-	mods:	Vec<bool>,
-	/// Whether each cell is a function module, in the same order as `mods`.
-	func:	Vec<bool>,
+	size:	i32,		// side length in modules
+	mods:	Vec<bool>,	// row-major, true meaning dark
+	func:	Vec<bool>,	// function module?  same order as mods
 }
 
 impl Grid {
 
-	/// Creates an all-light grid of the given side length with no function modules yet.
+	/// Creates an all-light grid with no function modules yet.
 	fn new(size: i32) -> Self {
 		let n = (size * size) as usize;
 		Self {
@@ -436,7 +408,7 @@ impl Grid {
 		self.func[i] = is_func;
 	}
 
-	/// Whether a cell is a function module, treating anything outside the grid as one.
+	/// Is this cell a function module?  Anything outside the grid counts as one.
 	fn is_func(&self, x: i32, y: i32) -> bool {
 		if x < 0 || y < 0 || x >= self.size || y >= self.size {
 			return true;
@@ -796,15 +768,12 @@ fn penalty_score(g: &Grid) -> i32 {
 /// A sliding record of the last seven run lengths along a line, used to detect the finder-like
 /// 1:1:3:1:1 pattern that rule three penalises.
 struct FinderRun {
-	/// The grid side length, added as the light border a decoder sees around the symbol.
-	size:	i32,
-	/// The seven most recent run lengths, most recent first.
-	hist:	[i32; 7],
+	size:	i32,		// grid side length, added as the light border around the symbol
+	hist:	[i32; 7],	// the seven most recent run lengths, most recent first
 }
 
 impl FinderRun {
 
-	/// Creates an empty history for a line of the given length.
 	fn new(size: i32) -> Self {
 		Self { size, hist: [0i32; 7] }
 	}

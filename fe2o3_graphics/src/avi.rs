@@ -30,43 +30,35 @@
 //! Microsoft's AVI RIFF File Reference for `avih` (`AVIMAINHEADER`) and `strh`
 //! (`AVISTREAMHEADER`), and the OpenDML AVI File Format Extensions v1.02 for why
 //! the main header's frame count is not to be trusted on its own.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 
-/// The four-character code naming a video stream in a `strh`.
-const VIDEO: &[u8; 4] = b"vids";
+const VIDEO: &[u8; 4] = b"vids"; // a strh's stream type, for video
 
-/// The most chunks walked before a file is given up on.
-///
-/// The header list is at the front, so a file that has not shown it by here is
-/// not one this reader understands. Without a bound, a length field of nought --
-/// which a truncated or malformed file readily supplies -- is an endless walk.
+// The header list is at the front, so a file that has not shown it by here is
+// not one this reader understands. Without a bound, a length field of nought --
+// which a truncated or malformed file readily supplies -- is an endless walk.
 const CHUNK_LIMIT: usize = 64;
 
 /// What a film's header says about it.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Avi {
-	/// The width of the picture, in pixels.
-	w:		u32,
-	/// The height of the picture, in pixels.
-	h:		u32,
-	/// Microseconds each frame is shown, from the main header.
-	micros:	u32,
-	/// How many frames the main header claims.
-	frames:	u32,
-	/// The video stream's rate and scale, whose quotient is the frame rate.
-	rate:	u32,
+	w:		u32,		// picture width, pixels
+	h:		u32,		// picture height, pixels
+	micros:	u32,		// microseconds a frame is shown, from the main header
+	frames:	u32,		// frame count the main header claims
+	// Frame rate, as the video stream header gives it
+	rate:	u32,		// quotient with scale is frames a second
 	scale:	u32,
-	/// How many frames the video stream's own header claims.
-	length:	u32,
-	/// The codec the video stream carries, as its four-character code.
-	codec:	[u8; 4],
+	length:	u32,		// frame count the video stream's own header claims
+	codec:	[u8; 4],	// four-character code of the video stream's codec
 }
 
 impl Avi {
 
-	/// Reads what the header list says, from the front of a file.
-	///
 	/// The buffer need not be the whole film -- the header list is at the front
 	/// -- and a chunk running past the end of what is in hand simply ends the
 	/// walk, so a caller holding a sniffing buffer gets the same answer as one
@@ -88,10 +80,9 @@ impl Avi {
 		Ok(out)
 	}
 
-	/// Walks a run of chunks, descending into every `LIST`.
-	///
-	/// `depth` bounds the descent: a `LIST` claiming to contain itself is a file
-	/// that would otherwise be walked for ever.
+	/// Every `LIST` is descended into, and `depth` bounds that descent: a `LIST`
+	/// claiming to contain itself is a file that would otherwise be walked for
+	/// ever.
 	fn walk(&mut self, mut at: &[u8], depth: usize) -> Outcome<()> {
 		if depth > 3 {
 			return Ok(());
@@ -148,13 +139,10 @@ impl Avi {
 		self.length = u32_at(body, 32);
 	}
 
-	/// The size of the picture, in pixels.
 	pub fn size(&self) -> (u32, u32) {
 		(self.w, self.h)
 	}
 
-	/// The codec the video stream carries, as its four-character code.
-	///
 	/// `MJPG` and `dvsd` are what a camera of this era writes. The code is not
 	/// interpreted here; a caller deciding whether it can draw a frame is the
 	/// one that knows.
@@ -162,8 +150,6 @@ impl Avi {
 		self.codec
 	}
 
-	/// How long the film runs, in milliseconds, where the header says enough.
-	///
 	/// The stream's own header is preferred over the main one. The main header's
 	/// frame count is a single 32-bit field written before the file was
 	/// finished, and the OpenDML extensions leave it nought on a file that grew
@@ -187,7 +173,7 @@ impl Avi {
 	}
 }
 
-/// Whether a head begins a RIFF file whose form type is `AVI `.
+/// Does a head begin a RIFF file whose form type is `AVI `?
 ///
 /// The trailing space is part of the code. `RIFF....WEBP` is the other RIFF form
 /// a photo library meets, so the form type is what tells them apart and the

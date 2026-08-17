@@ -20,20 +20,20 @@
 //! A block coded without a transform at all (`transform_skip_flag`) takes a rotation and a shift
 //! instead, and one coded without the quantiser either (`cu_transquant_bypass_flag`) is the
 //! residual already.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 
-/// The largest transform this decoder will do, in samples each way.
-pub const MAX_TB: usize = 32;
+pub const MAX_TB: usize = 32; // the largest transform this decoder will do, samples each way
 
-/// What multiplies a coefficient before the shift, by the quantisation parameter's remainder on
-/// division by six (§8.6.3).
-///
-/// The six of them span one doubling: 40, 45, 51, 57, 64 and 72 are the sixth powers of two to
-/// within a per cent, so six steps of the parameter double the step size exactly.
+// What multiplies a coefficient before the shift, by the quantisation parameter's remainder on
+// division by six (§8.6.3). The six of them span one doubling: 40, 45, 51, 57, 64 and 72 are the
+// sixth powers of two to within a per cent, so six steps of the parameter double the step size.
 const LEVEL_SCALE: [i32; 6] = [40, 45, 51, 57, 64, 72];
 
-/// The four-point sine transform, for the luma of an intra block of four (equation 8-316).
+// The four-point sine transform, for the luma of an intra block of four (equation 8-316).
 const DST_4: [[i16; 4]; 4] = [
 	[29, 55, 74, 84],
 	[74, 74, 0, -74],
@@ -41,12 +41,12 @@ const DST_4: [[i16; 4]; 4] = [
 	[55, -84, 74, -29],
 ];
 
-/// Columns 0 to 15 of the transform matrix (§8.6.4.2, equation 8-319).
-///
-/// **The published table is transposed against the way the equation indexes it**: a printed row is
-/// the matrix's *second* subscript and a printed column its first, so `transMatrix[m][n]` is this
-/// array's `[n][m]`. [`matrix`] is the only place that knows it, and a check against the four-point
-/// inverse everybody knows by heart is what settles that it is the right way round.
+// Columns 0 to 15 of the transform matrix (§8.6.4.2, equation 8-319).
+//
+// The published table is transposed against the way the equation indexes it: a printed row is the
+// matrix's second subscript and a printed column its first, so transMatrix[m][n] is this array's
+// [n][m]. matrix() is the only place that knows it, and a check against the four-point inverse
+// everybody knows by heart is what settles that it is the right way round.
 const DCT_COL_0_15: [[i16; 16]; 32] = [
 	[64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64],
 	[90, 90, 88, 85, 82, 78, 73, 67, 61, 54, 46, 38, 31, 22, 13, 4],
@@ -82,7 +82,7 @@ const DCT_COL_0_15: [[i16; 16]; 32] = [
 	[4, -13, 22, -31, 38, -46, 54, -61, 67, -73, 78, -82, 85, -88, 90, -90],
 ];
 
-/// Columns 16 to 31 of the same matrix (equation 8-321), indexed the same way.
+// Columns 16 to 31 of the same matrix (equation 8-321), indexed the same way.
 const DCT_COL_16_31: [[i16; 16]; 32] = [
 	[64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64],
 	[-4, -13, -22, -31, -38, -46, -54, -61, -67, -73, -78, -82, -85, -88, -90, -90],
@@ -131,15 +131,12 @@ fn matrix(m: usize, n: usize) -> i32 {
 /// Which transform a block takes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
-	/// The four-point sine transform: intra luma, four by four, and nothing else (§8.6.4.1).
-	Sine,
-	/// The cosine transform, at whatever size the block is.
-	Cosine,
+	Sine,		// four-point sine: intra luma, four by four, nothing else (§8.6.4.1)
+	Cosine,		// the cosine transform, at whatever size the block is
 }
 
 impl Kind {
 
-	/// Which one a block of this description takes.
 	pub fn of(intra: bool, size: usize, chroma: bool) -> Self {
 		if intra && size == 4 && !chroma {
 			Self::Sine
@@ -170,18 +167,18 @@ pub fn scale(coeffs: &mut [i32], size: usize, qp: i32, depth: u32, m: &[i32]) {
 	}
 }
 
-/// The default scaling lists (§7.4.5, Table 7-6), which is what a sequence that turns the lists on
-/// without carrying any of its own means.
-///
-/// Sixty-four values for an eight-by-eight block, in the diagonal scan's order; the sixteen and
-/// thirty-two sample matrices are this one with each value covering two or four samples each way,
-/// and the four-sample matrix is flat. The numbers climb away from the corner because the eye
-/// notices an error in the coarse detail of a block more than in the fine, so the fine detail is
-/// quantised harder.
-///
-/// The first row is for a block predicted from within the picture and the second for one predicted
-/// from another picture, which a still photograph never is -- it is here because the two are one
-/// table in the document and splitting them would invite the wrong one being used.
+// The default scaling lists (§7.4.5, Table 7-6), which is what a sequence that turns the lists on
+// without carrying any of its own means.
+//
+// Sixty-four values for an eight-by-eight block, in the diagonal scan's order; the sixteen and
+// thirty-two sample matrices are this one with each value covering two or four samples each way,
+// and the four-sample matrix is flat. The numbers climb away from the corner because the eye
+// notices an error in the coarse detail of a block more than in the fine, so the fine detail is
+// quantised harder.
+//
+// The first row is for a block predicted from within the picture and the second for one predicted
+// from another picture, which a still photograph never is -- it is here because the two are one
+// table in the document and splitting them would invite the wrong one being used.
 pub const DEFAULT_LIST: [[u8; 64]; 2] = [
 	[
 		16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 17, 16, 17, 16, 17, 18,

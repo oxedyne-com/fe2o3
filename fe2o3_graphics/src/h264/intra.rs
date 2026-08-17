@@ -25,6 +25,9 @@
 //! about it predicts from samples that are still nought and produces a picture with a plausible
 //! grid of dark blocks -- which is why availability is carried here as explicit flags on
 //! [`Edges`] rather than inferred from whether a sample happens to be zero.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -35,20 +38,13 @@ use oxedyne_fe2o3_core::prelude::*;
 /// right where the mode reaches for them. `left` runs downwards from the block's top edge.
 #[derive(Clone, Debug)]
 pub struct Edges {
-	/// `p[x, −1]` for `x` from nought.
-	pub top:	[i32; 16],
-	/// Whether the samples directly above the block may be predicted from.
-	pub top_ok:	bool,
-	/// Whether the samples above and to the right of it may be.
-	pub right_ok:	bool,
-	/// `p[−1, y]` for `y` from nought.
-	pub left:	[i32; 16],
-	/// Whether the column to the left may be predicted from.
-	pub left_ok:	bool,
-	/// `p[−1, −1]`, the sample diagonally above and left.
-	pub corner:	i32,
-	/// Whether that one may be.
-	pub corner_ok:	bool,
+	pub top:	[i32; 16],	// p[x, −1] for x from nought
+	pub top_ok:	bool,		// may the samples directly above the block be predicted from?
+	pub right_ok:	bool,		// may those above and to the right of it be?
+	pub left:	[i32; 16],	// p[−1, y] for y from nought
+	pub left_ok:	bool,		// may the column to the left be predicted from?
+	pub corner:	i32,		// p[−1, −1], the sample diagonally above and left
+	pub corner_ok:	bool,		// may that one be?
 }
 
 impl Edges {
@@ -86,7 +82,6 @@ impl Edges {
 	}
 }
 
-/// Clips a sample into the range the picture's bit depth allows.
 fn clip(v: i32, bit_depth: u32) -> i32 {
 	v.clamp(0, (1i32 << bit_depth) - 1)
 }
@@ -102,29 +97,19 @@ fn mid(bit_depth: u32) -> i32 {
 /// in §8.3.1.1 compares these numbers directly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
-	/// Straight down from the row above.
-	Vertical,
-	/// Straight across from the column to the left.
-	Horizontal,
-	/// The mean of whichever neighbours there are.
-	Dc,
-	/// Down and to the left, at forty-five degrees.
-	DiagonalDownLeft,
-	/// Down and to the right.
+	Vertical,			// straight down from the row above
+	Horizontal,			// straight across from the column to the left
+	Dc,				// the mean of whichever neighbours there are
+	DiagonalDownLeft,		// at forty-five degrees
 	DiagonalDownRight,
-	/// Steeply down and right.
-	VerticalRight,
-	/// Shallowly down and right.
-	HorizontalDown,
-	/// Steeply down and left.
-	VerticalLeft,
-	/// Shallowly up and right.
-	HorizontalUp,
+	VerticalRight,			// steeply down and right
+	HorizontalDown,			// shallowly down and right
+	VerticalLeft,			// steeply down and left
+	HorizontalUp,			// shallowly up and right
 }
 
 impl Mode {
 
-	/// The mode a number names.
 	pub fn of(n: u32) -> Outcome<Self> {
 		Ok(match n {
 			0	=> Self::Vertical,
@@ -142,7 +127,6 @@ impl Mode {
 		})
 	}
 
-	/// The number this mode is coded as.
 	pub fn number(self) -> u32 {
 		match self {
 			Self::Vertical			=> 0,
@@ -482,19 +466,14 @@ pub fn pred_8x8(mode: Mode, e: &Edges, bit_depth: u32) -> [i32; 64] {
 /// One of the four ways a whole macroblock's luma may be predicted (§8.3.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode16 {
-	/// Straight down.
 	Vertical,
-	/// Straight across.
 	Horizontal,
-	/// The mean.
-	Dc,
-	/// A tilted plane fitted to the row above and the column to the left.
-	Plane,
+	Dc,		// the mean
+	Plane,		// a tilted plane fitted to the row above and the column to the left
 }
 
 impl Mode16 {
 
-	/// The mode a number names.
 	pub fn of(n: u32) -> Outcome<Self> {
 		Ok(match n {
 			0	=> Self::Vertical,
@@ -563,19 +542,14 @@ pub fn pred_16x16(mode: Mode16, e: &Edges, bit_depth: u32) -> [i32; 256] {
 /// picture's horizontal and vertical gradients, which is the kind of fault that looks almost right.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModeC {
-	/// The mean, taken separately over each four-by-four quarter.
-	Dc,
-	/// Straight across.
+	Dc,		// the mean, taken separately over each four-by-four quarter
 	Horizontal,
-	/// Straight down.
 	Vertical,
-	/// A tilted plane.
 	Plane,
 }
 
 impl ModeC {
 
-	/// The mode a number names.
 	pub fn of(n: u32) -> Outcome<Self> {
 		Ok(match n {
 			0	=> Self::Dc,

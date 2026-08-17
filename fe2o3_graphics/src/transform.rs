@@ -1,4 +1,7 @@
 //! Affine transforms in two dimensions.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::path::Pt;
 
@@ -15,18 +18,12 @@ use crate::path::Pt;
 /// which maps a point `(x, y)` to `(a·x + c·y + e, b·x + d·y + f)`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Transform {
-	/// Horizontal scale.
-	pub a:	f32,
-	/// Vertical shear.
-	pub b:	f32,
-	/// Horizontal shear.
-	pub c:	f32,
-	/// Vertical scale.
-	pub d:	f32,
-	/// Horizontal translation.
-	pub e:	f32,
-	/// Vertical translation.
-	pub f:	f32,
+	pub a:	f32,	// horizontal scale
+	pub b:	f32,	// vertical shear
+	pub c:	f32,	// horizontal shear
+	pub d:	f32,	// vertical scale
+	pub e:	f32,	// horizontal translation
+	pub f:	f32,	// vertical translation
 }
 
 impl Default for Transform {
@@ -37,29 +34,25 @@ impl Default for Transform {
 
 impl Transform {
 
-	/// The transform that changes nothing.
 	pub const IDENTITY: Self = Self { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 };
 
-	/// A translation by `(tx, ty)`.
 	pub const fn translate(tx: f32, ty: f32) -> Self {
 		Self { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: tx, f: ty }
 	}
 
-	/// A scaling by `sx` horizontally and `sy` vertically, about the origin.
+	/// Scales about the origin.
 	pub const fn scale(sx: f32, sy: f32) -> Self {
 		Self { a: sx, b: 0.0, c: 0.0, d: sy, e: 0.0, f: 0.0 }
 	}
 
-	/// A rotation about the origin, anticlockwise in a y-up frame, by an angle in radians.
+	/// Rotates about the origin, anticlockwise in a y-up frame, by an angle in radians.
 	pub fn rotate(radians: f32) -> Self {
 		let (s, c) = radians.sin_cos();
 		Self { a: c, b: s, c: -s, d: c, e: 0.0, f: 0.0 }
 	}
 
-	/// Returns the transform that applies `self` first and then `next`.
-	///
-	/// The order is the one a caller means when they say "scale it, then move it", which is the
-	/// reverse of the order the matrices multiply in.
+	/// Applies `self` first and then `next`.  That is the order a caller means when they say "scale
+	/// it, then move it", which is the reverse of the order the matrices multiply in.
 	pub fn then(&self, next: &Self) -> Self {
 		Self {
 			a: next.a * self.a + next.c * self.b,
@@ -71,7 +64,6 @@ impl Transform {
 		}
 	}
 
-	/// Applies this transform to a point.
 	pub fn apply(&self, p: Pt) -> Pt {
 		Pt {
 			x: self.a * p.x + self.c * p.y + self.e,
@@ -79,8 +71,7 @@ impl Transform {
 		}
 	}
 
-	/// The factor by which this transform stretches lengths, taken as the square root of the
-	/// absolute determinant.
+	/// The square root of the absolute determinant, which is the factor by which lengths stretch.
 	///
 	/// A curve is flattened in the space it is defined in, but the tolerance that matters is the
 	/// one measured in pixels, so the tolerance is divided by this before flattening.
@@ -88,13 +79,11 @@ impl Transform {
 		(self.a * self.d - self.b * self.c).abs().sqrt()
 	}
 
-	/// Whether this transform is the identity, and so may be skipped.
+	/// Is this the identity, and so skippable?
 	pub fn is_identity(&self) -> bool {
 		*self == Self::IDENTITY
 	}
 
-	/// The transform that undoes this one, or `None` where there is none.
-	///
 	/// A transform with a zero determinant has collapsed the plane onto a line or a point and
 	/// cannot be undone, since everything on that line came from somewhere different. A caller
 	/// carrying a pixel back into the coordinates a shape was defined in -- to read a gradient, a

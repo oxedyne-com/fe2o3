@@ -23,6 +23,9 @@
 //! throughout, and differ by at most one otherwise: `v/256 - v/257` is under one for every `v` a
 //! `u16` can hold. The fixtures deliberately carry samples that are *not* multiples of 257, so this
 //! tolerance is exercised rather than merely allowed for.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_graphics::png;
@@ -39,11 +42,9 @@ use std::{
 /// must be interlaced.
 type Case = (&'static str, usize, usize, u8, u8, bool);
 
-/// Every fixture `gen.sh` writes.
-///
-/// The names say what they hold: `g` greyscale, `p` palette, `pt` palette with a `tRNS` chunk, `ga`
-/// greyscale with alpha, `rgb` truecolour, `rgba` truecolour with alpha, followed by the bit depth,
-/// the size, and `i` for interlaced or `n` for not.
+// Every fixture gen.sh writes. The names say what they hold: g greyscale, p palette, pt palette
+// with a tRNS chunk, ga greyscale with alpha, rgb truecolour, rgba truecolour with alpha, followed
+// by the bit depth, the size, and i for interlaced or n for not.
 const CASES: &[Case] = &[
 	// One bit of greyscale, at every size, which is the narrowest sample the format has and the
 	// one whose row padding is widest.
@@ -123,7 +124,6 @@ const CASES: &[Case] = &[
 	("rgba16_17x13_n",	17, 13, 16, 6, false),
 ];
 
-/// The fixture directory.
 fn dir() -> PathBuf {
 	PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("png")
 }

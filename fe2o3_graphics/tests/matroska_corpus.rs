@@ -17,6 +17,9 @@
 //! is needed is itself measured: a file that put its cover art before its
 //! tracks needs more than a scanner's usual sniffing buffer, and the number of
 //! files that do is the thing a scanner's buffer size should be chosen from.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_graphics::matroska::{Matroska, TrackKind};
@@ -30,18 +33,15 @@ use std::{
 	process::Command,
 };
 
-/// The head a scanner would hold, and the first thing the reader is given.
-const HEAD: usize = 64 * 1024;
+const HEAD: usize = 64 * 1024;	// the head a scanner would hold, and all the reader is first given
 
-/// The larger head tried where the first found no tracks.
-///
-/// A file may carry a poster, a font for its subtitles, or a long seek index
-/// before the track list. Reading a megabyte of a four-gigabyte film is still
-/// cheap; the point of measuring is to find out how often it is needed.
+// The larger head tried where the first found no tracks. A file may carry a
+// poster, a font for its subtitles, or a long seek index before the track list.
+// Reading a megabyte of a four-gigabyte film is still cheap; the point of
+// measuring is to find out how often it is needed.
 const DEEP: usize = 1024 * 1024;
 
-/// How far a running time may differ from the player's and still agree.
-const SLACK_MS: i64 = 100;
+const SLACK_MS: i64 = 100;	// how far a running time may differ from the player's and still agree
 
 /// What a Matroska codec identifier is called by the player.
 ///
@@ -104,7 +104,6 @@ fn films(dir: &Path, out: &mut Vec<PathBuf>) {
 	out.extend(here);
 }
 
-/// The first `n` bytes of a file.
 fn head_of(path: &Path, n: usize) -> Option<Vec<u8>> {
 	let mut f = match File::open(path) {
 		Ok(f) => f,

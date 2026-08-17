@@ -2,57 +2,51 @@
 //!
 //! A path is a sequence of contours, each a run of lines and Bezier curves. Glyph outlines arrive
 //! in exactly this form, and so do boxes, rules and borders, so one type serves both.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::transform::Transform;
 
 use oxedyne_fe2o3_core::prelude::*;
 
-/// The default flattening tolerance, in pixels: the furthest a straight segment may stray from the
-/// curve it stands in for.
-///
-/// A tenth of a pixel is below what an eye can resolve at any sane size, and well below what the
-/// anti-aliasing can express.
+// The default flattening tolerance, in pixels: the furthest a straight segment may stray from the
+// curve it stands in for. A tenth of a pixel is below what an eye can resolve at any sane size,
+// and well below what the anti-aliasing can express.
 pub const TOLERANCE: f32 = 0.1;
 
-/// The most straight segments a single curve may be flattened into, however cruel its control
-/// points. A curve needing more than this has been given nonsense coordinates.
+// The most straight segments a single curve may be flattened into, however cruel its control
+// points. A curve needing more than this has been given nonsense coordinates.
 const MAX_STEPS: usize = 1_000;
 
-/// How far along each tangent a control point sits, for a cubic bézier that meets a quarter arc.
-///
-/// The magic constant `4/3 * (sqrt(2) - 1)`, which makes a bézier hug a quarter circle to about one
-/// part in a thousand of the radius. Every arc this module draws is built from it.
+// How far along each tangent a control point sits, for a cubic bézier that meets a quarter arc:
+// the magic constant 4/3 * (sqrt(2) - 1), which makes a bézier hug a quarter circle to about one
+// part in a thousand of the radius. Every arc this module draws is built from it.
 const KAPPA: f32 = 0.552_284_75;
 
-/// A point in two dimensions.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Pt {
-	/// Horizontal coordinate.
 	pub x:	f32,
-	/// Vertical coordinate.
 	pub y:	f32,
 }
 
 impl Pt {
 
-	/// Creates a point.
 	pub const fn new(x: f32, y: f32) -> Self {
 		Self { x, y }
 	}
 
-	/// The point midway between this point and another.
 	pub fn midpoint(&self, other: Self) -> Self {
 		Self::new(0.5 * (self.x + other.x), 0.5 * (self.y + other.y))
 	}
 
-	/// The straight-line distance from this point to another.
 	pub fn distance(&self, other: Self) -> f32 {
 		let dx = other.x - self.x;
 		let dy = other.y - self.y;
 		(dx * dx + dy * dy).sqrt()
 	}
 
-	/// Whether both coordinates are finite, which every point reaching the rasteriser must be.
+	/// Are both coordinates finite? Every point reaching the rasteriser must be.
 	pub fn is_finite(&self) -> bool {
 		self.x.is_finite() && self.y.is_finite()
 	}
@@ -61,29 +55,20 @@ impl Pt {
 /// One step of a path.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Seg {
-	/// Begins a new contour at a point.
-	MoveTo(Pt),
-	/// A straight line to a point.
-	LineTo(Pt),
-	/// A quadratic Bezier: one control point, then the end point. TrueType outlines are these.
-	QuadTo(Pt, Pt),
-	/// A cubic Bezier: two control points, then the end point. PostScript outlines are these.
-	CubicTo(Pt, Pt, Pt),
-	/// Closes the current contour, returning to where it began.
-	Close,
+	MoveTo(Pt),				// begins a new contour at a point
+	LineTo(Pt),				// a straight line to a point
+	QuadTo(Pt, Pt),			// quadratic bézier, one control point; TrueType outlines are these
+	CubicTo(Pt, Pt, Pt),	// cubic bézier, two; PostScript outlines are these
+	Close,					// back to where the contour began
 }
 
 /// An axis-aligned bounding box.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Bounds {
-	/// Left edge.
-	pub x0:	f32,
-	/// Top edge.
-	pub y0:	f32,
-	/// Right edge, exclusive.
-	pub x1:	f32,
-	/// Bottom edge, exclusive.
-	pub y1:	f32,
+	pub x0:	f32,	// left edge
+	pub y0:	f32,	// top edge
+	pub x1:	f32,	// right edge, exclusive
+	pub y1:	f32,	// bottom edge, exclusive
 }
 
 impl Bounds {
@@ -98,12 +83,10 @@ impl Bounds {
 		}
 	}
 
-	/// Whether the box encloses nothing.
 	pub fn is_empty(&self) -> bool {
 		self.x1 <= self.x0 || self.y1 <= self.y0
 	}
 
-	/// The overlap of this box with another, which may be empty.
 	pub fn intersect(&self, other: Self) -> Self {
 		Self {
 			x0: self.x0.max(other.x0),
@@ -161,10 +144,8 @@ impl Bounds {
 /// ends, so the two give different ink.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Polyline {
-	/// The points, in order. The closing point of a closed contour is not repeated.
-	pub pts:	Vec<Pt>,
-	/// Whether the contour closes back onto its first point.
-	pub closed:	bool,
+	pub pts:	Vec<Pt>,	// in order; a closed contour's closing point is not repeated
+	pub closed:	bool,		// does the contour close back onto its first point?
 }
 
 /// A shape: a sequence of contours built from lines and curves.
@@ -175,12 +156,10 @@ pub struct Path {
 
 impl Path {
 
-	/// The steps of the path.
 	pub fn segs(&self) -> &[Seg] {
 		&self.segs
 	}
 
-	/// Whether the path has no steps, and so paints nothing.
 	pub fn is_empty(&self) -> bool {
 		self.segs.is_empty()
 	}
@@ -509,7 +488,6 @@ pub struct PathBuilder {
 
 impl PathBuilder {
 
-	/// Creates an empty builder.
 	pub fn new() -> Self {
 		Self::default()
 	}
@@ -531,7 +509,6 @@ impl PathBuilder {
 		false
 	}
 
-	/// Begins a new contour at a point.
 	pub fn move_to(&mut self, p: Pt) {
 		if self.check(p, "move_to") {
 			self.segs.push(Seg::MoveTo(p));
@@ -539,7 +516,6 @@ impl PathBuilder {
 		}
 	}
 
-	/// Draws a straight line to a point.
 	pub fn line_to(&mut self, p: Pt) {
 		if !self.open {
 			self.fault(fmt!("A line_to at ({}, {}) precedes any move_to.", p.x, p.y));
@@ -550,7 +526,6 @@ impl PathBuilder {
 		}
 	}
 
-	/// Draws a quadratic Bezier through one control point to an end point.
 	pub fn quad_to(&mut self, c: Pt, p: Pt) {
 		if !self.open {
 			self.fault(fmt!("A quad_to at ({}, {}) precedes any move_to.", p.x, p.y));
@@ -561,7 +536,6 @@ impl PathBuilder {
 		}
 	}
 
-	/// Draws a cubic Bezier through two control points to an end point.
 	pub fn cubic_to(&mut self, c0: Pt, c1: Pt, p: Pt) {
 		if !self.open {
 			self.fault(fmt!("A cubic_to at ({}, {}) precedes any move_to.", p.x, p.y));
@@ -575,7 +549,6 @@ impl PathBuilder {
 		}
 	}
 
-	/// Closes the current contour.
 	pub fn close(&mut self) {
 		if self.open {
 			self.segs.push(Seg::Close);

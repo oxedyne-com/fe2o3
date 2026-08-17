@@ -15,6 +15,9 @@
 //! a check nobody ran.
 //!
 //! `H264_LIMIT` caps how many films are read, for a quick pass; `H264_ONE` names a single file.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_graphics::{
 	h264,
@@ -437,9 +440,8 @@ fn ffmpeg_frame(path: &std::path::Path, skip_filter: bool) -> Outcome<Vec<u8>> {
 	Ok(out.stdout)
 }
 
-/// Compares one decoded plane against the matching run of FFmpeg's output.
-///
-/// Returns the number of samples that differ and the worst difference, plus where the first one is.
+/// Compares one decoded plane against the matching run of FFmpeg's output, giving the count that
+/// differ, the worst difference, and where the first one is.
 fn compare(mine: &[u8], theirs: &[u8], w: usize) -> (usize, i32, Option<(usize, usize)>) {
 	let mut wrong = 0usize;
 	let mut worst = 0i32;

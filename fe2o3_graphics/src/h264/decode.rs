@@ -44,6 +44,9 @@
 //! `mb_qp_delta` the neighbour is the macroblock decoded before this one rather than either of
 //! those. Getting one of these wrong does not stop the decode; it feeds the right bins to the wrong
 //! probability, and the picture comes out plausible and wrong.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::h264::{
 	cabac::{
@@ -78,22 +81,17 @@ use oxedyne_fe2o3_core::prelude::*;
 /// One component's samples.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Plane {
-	/// Width in samples.
-	pub w:	usize,
-	/// Height in samples.
-	pub h:	usize,
-	/// The samples, row by row.
-	pub px:	Vec<u8>,
+	pub w:	usize,		// width in samples
+	pub h:	usize,		// height in samples
+	pub px:	Vec<u8>,	// row by row
 }
 
 impl Plane {
 
-	/// A plane of nothing.
 	fn new(w: usize, h: usize) -> Self {
 		Self { w, h, px: vec![0; w * h] }
 	}
 
-	/// One sample, or `None` outside the plane.
 	pub fn at(&self, x: usize, y: usize) -> Option<u8> {
 		if x < self.w && y < self.h {
 			self.px.get(y * self.w + x).copied()
@@ -126,32 +124,23 @@ impl Plane {
 /// A decoded picture, before it is turned into anything anybody can look at.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Picture {
-	/// Brightness.
-	pub y:	Plane,
-	/// The two colour difference planes, at half the width and half the height.
-	pub cb:	Plane,
-	/// The other one.
-	pub cr:	Plane,
+	pub y:	Plane,	// brightness
+	pub cb:	Plane,	// colour difference, at half the width and half the height
+	pub cr:	Plane,	// the other one
 }
 
 /// How a macroblock is predicted (§7.4.5, Table 7-11).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
-	/// Sixteen four-by-four blocks, each with its own direction.
-	I4x4,
-	/// Four eight-by-eight blocks, each with its own direction.
-	I8x8,
-	/// One prediction over the whole macroblock, with the sixteen blocks' direct current terms
-	/// transformed together.
-	I16x16,
-	/// Raw samples, carried uncompressed.
-	Pcm,
-	/// A macroblock that has not been decoded, or is in another slice.
-	Absent,
+	I4x4,		// sixteen four-by-four blocks, each with its own direction
+	I8x8,		// four eight-by-eight blocks, each with its own direction
+	I16x16,		// one prediction over the whole macroblock, the sixteen DC terms together
+	Pcm,		// raw samples, carried uncompressed
+	Absent,		// not decoded, or in another slice
 }
 
-/// The mapping from `coded_block_pattern`'s code number to its value, for an intra macroblock in a
-/// picture with colour (Table 9-4(a), the `Intra_4x4, Intra_8x8` column).
+// The mapping from coded_block_pattern's code number to its value, for an intra macroblock in a
+// picture with colour (Table 9-4(a), the Intra_4x4, Intra_8x8 column).
 const CBP_INTRA: [u8; 48] = [
 	47, 31, 15, 0, 23, 27, 29, 30, 7, 11, 13, 14, 39, 43, 45, 46,
 	16, 3, 5, 10, 12, 19, 21, 26, 28, 35, 37, 42, 44, 1, 2, 4,
@@ -177,66 +166,38 @@ const fn blk_xy(i: usize) -> (usize, usize) {
 /// discarded with the block.
 #[derive(Clone, Copy, Debug, Default)]
 struct Cbf {
-	/// The block of direct current terms a macroblock predicted whole carries.
-	luma_dc:	bool,
-	/// The sixteen four-by-four luma blocks, in the macroblock's own block order.
-	luma4:		[bool; 16],
-	/// The four eight-by-eight ones, where the macroblock uses that transform.
-	luma8:		[bool; 4],
-	/// Each colour difference component's block of direct current terms.
-	chroma_dc:	[bool; 2],
-	/// Their four alternating current blocks each.
-	chroma_ac:	[[bool; 4]; 2],
+	luma_dc:	bool,				// the DC block a macroblock predicted whole carries
+	luma4:		[bool; 16],			// the four-by-four luma blocks, in the macroblock's own order
+	luma8:		[bool; 4],			// the eight-by-eight ones, where that transform is used
+	chroma_dc:	[bool; 2],			// each colour difference component's DC block
+	chroma_ac:	[[bool; 4]; 2],		// their four alternating current blocks each
 }
 
 /// Everything a picture's decoder carries from one macroblock to the next.
 struct Frame<'a> {
-	/// The sequence parameter set in force.
-	sps:	&'a Sps,
-	/// The picture parameter set in force.
-	pps:	&'a Pps,
-	/// The picture being built.
+	sps:	&'a Sps,					// the sequence parameter set in force
+	pps:	&'a Pps,					// the picture parameter set in force
 	pic:	Picture,
-	/// The picture's width in macroblocks.
-	mbs_w:	usize,
-	/// Its height in macroblocks.
-	mbs_h:	usize,
-	/// Which slice each macroblock belongs to, or `None` where none has been decoded.
-	slice_of:	Vec<Option<usize>>,
-	/// How each macroblock is predicted.
-	kind:	Vec<Kind>,
-	/// Each macroblock's quantisation parameter, for the deblocking filter.
-	qp:	Vec<i32>,
-	/// Whether each macroblock is coded with the eight-by-eight transform, which says which of its
-	/// internal edges the deblocking filter visits.
-	big:	Vec<bool>,
-	/// The intra prediction mode of each four-by-four luma block, in the macroblock's own order.
-	modes:	Vec<[u8; 16]>,
-	/// How many coefficients each four-by-four block holds, for CAVLC's neighbour counts: sixteen
-	/// luma then four of each colour difference.
-	counts:	Vec<[u8; 24]>,
-	/// Each macroblock's luma coded block pattern, which CABAC's neighbour contexts ask about.
-	cbp_luma:	Vec<u8>,
-	/// The same for the colour difference planes.
-	cbp_chroma:	Vec<u8>,
-	/// Each macroblock's chroma prediction mode, which is one of CABAC's contexts too.
-	chroma_mode:	Vec<u8>,
-	/// Whether each macroblock's quantisation parameter moved, which chooses the context the next
-	/// one's delta is read against.
-	qp_moved:	Vec<bool>,
-	/// Which of each macroblock's transform blocks hold a coefficient.
-	cbf:	Vec<Cbf>,
-	/// The luma weights, already scanned.
-	w_luma:	Weights,
-	/// The Cb weights.
+	mbs_w:	usize,						// the picture's width in macroblocks
+	mbs_h:	usize,						// and its height
+	slice_of:	Vec<Option<usize>>,		// None where no macroblock has been decoded there
+	kind:	Vec<Kind>,					// how each macroblock is predicted
+	qp:	Vec<i32>,						// quantisation parameter, for the filter
+	big:	Vec<bool>,					// eight-by-eight transform, which sets the filter's edges
+	modes:	Vec<[u8; 16]>,				// each luma block's intra mode, in block order
+	counts:	Vec<[u8; 24]>,				// coefficients a block holds, for CAVLC's counts
+	cbp_luma:	Vec<u8>,				// luma coded block pattern, for CABAC's neighbours
+	cbp_chroma:	Vec<u8>,				// the same for the colour difference planes
+	chroma_mode:	Vec<u8>,			// chroma prediction mode, one of CABAC's contexts too
+	qp_moved:	Vec<bool>,				// did it move? this picks the next delta's context
+	cbf:	Vec<Cbf>,					// which transform blocks hold a coefficient
+	w_luma:	Weights,					// the luma weights, already scanned
 	w_cb:	Weights,
-	/// The Cr weights.
 	w_cr:	Weights,
 }
 
 impl<'a> Frame<'a> {
 
-	/// A picture with nothing decoded into it.
 	fn new(sps: &'a Sps, pps: &'a Pps) -> Outcome<Self> {
 		let mbs_w = sps.mbs_w as usize;
 		let mbs_h = sps.map_units_h as usize;
@@ -272,7 +233,7 @@ impl<'a> Frame<'a> {
 		})
 	}
 
-	/// Whether a macroblock has been decoded and belongs to the given slice.
+	/// Has a macroblock been decoded, and does it belong to the given slice?
 	fn available(&self, mb: i64, slice: usize) -> bool {
 		if mb < 0 || mb as usize >= self.slice_of.len() {
 			return false;
@@ -301,12 +262,9 @@ impl<'a> Frame<'a> {
 
 /// The state one slice's decoder carries between macroblocks.
 struct SliceRun {
-	/// Which slice this is, counted from nought within the picture.
-	index:	usize,
-	/// The running quantisation parameter.
-	qp:	i32,
-	/// Whether the picture parameter set allows the eight-by-eight transform.
-	transform_8x8:	bool,
+	index:	usize,			// which slice this is, from nought within the picture
+	qp:	i32,				// the running quantisation parameter
+	transform_8x8:	bool,	// does the picture parameter set allow the big transform?
 }
 
 /// Decodes the first coded picture of a film.
@@ -329,7 +287,6 @@ pub fn picture_undeblocked(config: &[u8], sample: &[u8]) -> Outcome<Picture> {
 	whole(config, sample, false)
 }
 
-/// Decodes one access unit, with or without the filter that finishes it.
 fn whole(config: &[u8], sample: &[u8], deblock: bool) -> Outcome<Picture> {
 	let cfg = res!(crate::h264::config(config));
 	let mut sets = Vec::new();
@@ -344,7 +301,6 @@ fn whole(config: &[u8], sample: &[u8], deblock: bool) -> Outcome<Picture> {
 	decode(&units, &mut sets, &mut pics, deblock)
 }
 
-/// Decodes one access unit's NAL units into a picture.
 pub fn decode(units: &[Unit], sets: &mut Vec<Sps>, pics: &mut Vec<Pps>, deblock: bool)
 	-> Outcome<Picture>
 {
@@ -438,7 +394,6 @@ pub fn decode(units: &[Unit], sets: &mut Vec<Sps>, pics: &mut Vec<Pps>, deblock:
 	Ok(crop(&frame))
 }
 
-/// Refuses, by name, everything the corpus does not contain and this decoder does not read.
 fn refuse_what_is_not_read(sps: &Sps, pps: &Pps) -> Outcome<()> {
 	if sps.chroma != 1 {
 		return Err(err!(
@@ -706,17 +661,11 @@ fn pcm(f: &mut Frame, run: &mut SliceRun, b: &mut Bits, mb: usize) -> Outcome<()
 
 /// The arithmetic coder's state for one slice.
 struct Entropy<'a> {
-	/// The slice's payload, from the first bit of the NAL unit's own body.
-	body:	&'a [u8],
-	/// Where in that payload the decoding engine's own buffer begins, in bytes. It moves only for a
-	/// raw-sample macroblock, after which the engine is started afresh.
-	base:	usize,
-	/// The decoding engine.
-	c:	cabac::Cabac<'a>,
-	/// The context variables.
-	x:	cabac::Contexts,
-	/// The macroblock decoded immediately before this one **in this slice**, where there was one.
-	prev:	Option<usize>,
+	body:	&'a [u8],		// from the first bit of the NAL unit's own body
+	base:	usize,			// where the engine's buffer begins, bytes; moves only for a PCM macroblock
+	c:	cabac::Cabac<'a>,	// the decoding engine
+	x:	cabac::Contexts,	// the context variables
+	prev:	Option<usize>,	// the macroblock decoded before this one in this slice
 }
 
 impl<'a> Entropy<'a> {
@@ -747,7 +696,6 @@ impl<'a> Entropy<'a> {
 		})
 	}
 
-	/// One bin against the context at a `ctxIdx`.
 	fn bin(&mut self, ctx_idx: usize) -> Outcome<u32> {
 		self.x.bin(&mut self.c, ctx_idx)
 	}
@@ -779,14 +727,10 @@ impl<'a> Entropy<'a> {
 /// the answer for "not yet decoded", which decodes the first block of each macroblock correctly and
 /// the rest wrongly.
 struct Partial {
-	/// How the macroblock is predicted.
-	kind:	Kind,
-	/// Its luma coded block pattern, as far as it has been read.
-	cbp_luma:	u8,
-	/// Its chroma one.
-	cbp_chroma:	u8,
-	/// Which of its transform blocks have been read, and what they held.
-	cbf:	Cbf,
+	kind:	Kind,		// how the macroblock is predicted
+	cbp_luma:	u8,		// its luma coded block pattern, as far as it has been read
+	cbp_chroma:	u8,		// its chroma one
+	cbf:	Cbf,		// which transform blocks have been read, and what they held
 }
 
 /// The macroblock to the left and the macroblock above, where each is available (§6.4.11.1).
@@ -1642,38 +1586,24 @@ fn reconstruct(f: &mut Frame, run: &SliceRun, mb: usize, kind: Kind, qp: i32, pr
 /// What one slice asks of the deblocking filter (§7.4.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Filter {
-	/// 0 to filter everything, 1 to filter nothing, 2 to filter everything but the edges between
-	/// this slice and another.
-	pub idc:	u32,
-	/// The offset added to the filter's first threshold.
-	pub alpha:	i32,
-	/// The offset added to its second.
-	pub beta:	i32,
+	pub idc:	u32,	// 0 filters everything, 1 nothing, 2 all but the slice edges
+	pub alpha:	i32,	// offset added to the filter's first threshold
+	pub beta:	i32,	// and to its second
 }
 
 /// A borrow of the frame's fields the deblocking filter needs.
 pub struct View<'a> {
-	/// The picture being filtered.
 	pub pic:	&'a mut Picture,
-	/// The width in macroblocks.
-	pub mbs_w:	usize,
-	/// The height in macroblocks.
-	pub mbs_h:	usize,
-	/// Each macroblock's quantisation parameter.
-	pub qp:		&'a [i32],
-	/// Which slice each macroblock belongs to.
-	pub slice_of:	&'a [Option<usize>],
-	/// Whether each macroblock is coded with the eight-by-eight transform.
-	pub big:	&'a [bool],
-	/// What each slice asks of the deblocking filter, in the order the slices were decoded.
-	pub filters:	&'a [Filter],
-	/// The offset applied to the Cb quantisation parameter.
-	pub cb_qp_offset:	i32,
-	/// The same for Cr.
-	pub cr_qp_offset:	i32,
+	pub mbs_w:	usize,						// the width in macroblocks
+	pub mbs_h:	usize,						// and the height
+	pub qp:		&'a [i32],					// each macroblock's quantisation parameter
+	pub slice_of:	&'a [Option<usize>],	// which slice each macroblock belongs to
+	pub big:	&'a [bool],					// is it coded with the eight-by-eight transform?
+	pub filters:	&'a [Filter],			// what each slice asks, in the order the slices were decoded
+	pub cb_qp_offset:	i32,				// offset applied to the Cb quantisation parameter
+	pub cr_qp_offset:	i32,				// and to Cr
 }
 
-/// Hands the deblocking filter what it needs out of a frame.
 fn frame_view<'b>(f: &'b mut Frame) -> View<'b> {
 	View {
 		mbs_w:		f.mbs_w,

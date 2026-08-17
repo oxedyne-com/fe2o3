@@ -14,6 +14,9 @@
 //! roundings are legal. In practice this decoder uses the same integer transform, colour transform
 //! and chroma filter libjpeg does, so most fixtures agree to the last bit; the test prints the worst
 //! divergence it saw so that a drift towards the tolerance is visible before it crosses it.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_graphics::{
@@ -30,11 +33,10 @@ use std::{
 	process::Command,
 };
 
-/// How far a channel may differ from the reference before the test fails.
-const TOL: i32 = 2;
+const TOL: i32 = 2;	// how far a channel may differ from the reference before the test fails
 
-/// Every fixture: its name, the size it should decode to, and whether its chrominance is carried at
-/// full resolution, which decides how closely a block's mean can be expected to survive subsampling.
+// Every fixture: its name, the size it should decode to, and whether its chrominance is carried at
+// full resolution, which decides how closely a block's mean can be expected to survive subsampling.
 const CASES: &[(&str, usize, usize, bool)] = &[
 	("gradient_q90_444",	64, 48,	true),
 	("gradient_q75_420",	64, 48,	false),
@@ -58,7 +60,6 @@ const CASES: &[(&str, usize, usize, bool)] = &[
 	("ramp_q90_prog",	40, 24,	true),
 ];
 
-/// The fixture directory.
 fn dir() -> PathBuf {
 	PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("jpeg")
 }
@@ -245,7 +246,7 @@ fn test_the_eighth_scale_decode_holds_each_blocks_mean() -> Outcome<()> {
 // │ THE ENCODER                                                                │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Whether ImageMagick is on the path, since the encoder's oracle is its decoder.
+/// Is ImageMagick on the path?  The encoder's oracle is its decoder.
 fn have_convert() -> bool {
 	Command::new("convert")
 		.arg("-version")

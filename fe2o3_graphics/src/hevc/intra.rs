@@ -24,39 +24,31 @@
 //! Every one of those has a "not for chroma" or "not at thirty-two" or "not at four" attached to it,
 //! and getting one wrong produces a picture that is *almost* right -- which then predicts the next
 //! block, and the next.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 
-/// The largest block predicted at once, in samples each way.
-pub const MAX_TB: usize = 32;
+pub const MAX_TB: usize = 32;	// the largest block predicted at once, samples each way
+pub const DC: u8 = 1;			// the flat prediction: the average of the boundary
+pub const PLANAR: u8 = 0;		// the plane through the boundary
+pub const VERTICAL: u8 = 26;	// straight down from the row above
+pub const HORIZONTAL: u8 = 10;	// straight across from the column to the left
 
-/// The flat prediction: the average of the boundary.
-pub const DC: u8 = 1;
-
-/// The plane through the boundary.
-pub const PLANAR: u8 = 0;
-
-/// Straight down from the row above.
-pub const VERTICAL: u8 = 26;
-
-/// Straight across from the column to the left.
-pub const HORIZONTAL: u8 = 10;
-
-/// How far each direction moves, in thirty-seconds of a sample per row (§8.4.4.2.6, Table 8-5).
-///
-/// Indexed by the prediction mode. Modes 0 and 1 are planar and flat and have no angle; 10 and 26
-/// are exactly horizontal and vertical and so have an angle of nought.
+// How far each direction moves, in thirty-seconds of a sample per row (§8.4.4.2.6, Table 8-5),
+// indexed by the prediction mode. Modes 0 and 1 are planar and flat and have no angle; 10 and 26
+// are exactly horizontal and vertical and so have an angle of nought.
 const ANGLE: [i32; 35] = [
 	0, 0,
 	32, 26, 21, 17, 13, 9, 5, 2, 0, -2, -5, -9, -13, -17, -21, -26,
 	-32, -26, -21, -17, -13, -9, -5, -2, 0, 2, 5, 9, 13, 17, 21, 26, 32,
 ];
 
-/// The reciprocal of the angle, in two hundred and fifty-sixths (Table 8-6).
-///
-/// Only the modes whose angle is negative need it, which is 11 to 25; it is what projects the
-/// *other* boundary into the reference array, so that a direction pointing up and to the left can
-/// still be followed past the corner. Nought where it does not apply.
+// The reciprocal of the angle, in two hundred and fifty-sixths (Table 8-6). Only the modes whose
+// angle is negative need it, which is 11 to 25; it is what projects the other boundary into the
+// reference array, so that a direction pointing up and to the left can still be followed past the
+// corner. Nought where it does not apply.
 const INV_ANGLE: [i32; 35] = [
 	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 	-4096, -1638, -910, -630, -482, -390, -315, -256, -315, -390, -482, -630, -910, -1638, -4096,
@@ -84,14 +76,10 @@ fn smoothing_threshold(size: usize) -> Option<i32> {
 /// they are three runs in one array, because that is what they are.
 #[derive(Clone, Debug)]
 pub struct Around {
-	/// The block's side.
-	size:	usize,
-	/// `p[-1][-1]`, the corner.
-	corner:	i32,
-	/// `p[-1][y]` for `y` = 0 to `2 * size - 1`, going down.
-	left:	[i32; MAX_TB * 2],
-	/// `p[x][-1]` for `x` = 0 to `2 * size - 1`, going right.
-	top:	[i32; MAX_TB * 2],
+	size:	usize,				// the block's side
+	corner:	i32,				// p[-1][-1]
+	left:	[i32; MAX_TB * 2],	// p[-1][y] for y = 0 to 2 * size - 1, going down
+	top:	[i32; MAX_TB * 2],	// p[x][-1] for x = 0 to 2 * size - 1, going right
 }
 
 impl Around {

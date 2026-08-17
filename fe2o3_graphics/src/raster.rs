@@ -36,6 +36,9 @@
 //! a shape running off the left of the screen still fills the pixels that remain. Geometry off the
 //! right is clamped into two slack columns past the right edge, where it lands harmlessly, because
 //! a running sum that moves left to right can never be reached by anything to its right.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::path::Pt;
 
@@ -47,13 +50,9 @@ use crate::path::Pt;
 /// [`FillRule::EvenOdd`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum FillRule {
-	/// A point is inside when the winding number is not zero. The default, and what an outline
-	/// font means.
 	#[default]
-	NonZero,
-	/// A point is inside when the winding number is odd, so a second layer of winding takes the
-	/// paint back off.
-	EvenOdd,
+	NonZero,	// inside where the winding number is not zero, as an outline font means
+	EvenOdd,	// inside where it is odd, so a second layer of winding takes the paint back off
 }
 
 impl FillRule {
@@ -79,17 +78,13 @@ impl FillRule {
 /// Accumulates the signed area of a set of edges over a rectangular window of pixels.
 #[derive(Clone, Debug)]
 pub struct Raster {
-	/// Window width, in pixels.
-	w:	usize,
-	/// Window height, in pixels.
-	h:	usize,
-	/// The accumulation buffer, `(w + 2) * h`. See the module docs for the two slack columns.
-	a:	Vec<f32>,
+	w:	usize,		// window width, in pixels
+	h:	usize,		// window height, in pixels
+	a:	Vec<f32>,	// accumulation buffer, (w + 2) * h; see the module docs on the slack
 }
 
 impl Raster {
 
-	/// Creates a rasteriser over a window of the given size, in pixels.
 	pub fn new(w: usize, h: usize) -> Self {
 		Self {
 			w,
@@ -98,12 +93,10 @@ impl Raster {
 		}
 	}
 
-	/// The window width, in pixels.
 	pub fn width(&self) -> usize {
 		self.w
 	}
 
-	/// The window height, in pixels.
 	pub fn height(&self) -> usize {
 		self.h
 	}
@@ -207,8 +200,7 @@ impl Raster {
 		self.coverage_with(FillRule::NonZero)
 	}
 
-	/// Resolves the accumulated areas into per-pixel coverage under a fill rule, from 0 to 1,
-	/// row-major, `w * h`.
+	/// As [`Raster::coverage`], under a chosen fill rule.
 	///
 	/// The running sum restarts on every row. A closed contour makes each row sum back to zero, so
 	/// restarting costs nothing and stops any drift from crossing into the row below.
@@ -232,7 +224,6 @@ impl Raster {
 mod tests {
 	use super::*;
 
-	/// A square covering exactly the middle four pixels of an 8x8 window.
 	fn square(x0: f32, y0: f32, x1: f32, y1: f32) -> Vec<Pt> {
 		vec![
 			Pt::new(x0, y0),

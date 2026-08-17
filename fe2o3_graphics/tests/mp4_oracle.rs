@@ -36,6 +36,9 @@
 //! neither is used; ExifTool and GStreamer stand in their place, and both are independent of
 //! FFmpeg. A missing tool is a failure here rather than a skip: an oracle that quietly does not run
 //! is an oracle that is not there.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_graphics::mp4::{
@@ -50,22 +53,19 @@ use std::{
 	process::Command,
 };
 
-/// The clip FFmpeg is asked for: a test pattern, small enough to decode in a moment and large
-/// enough that a plane comparison means something.
+// The clip FFmpeg is asked for: a test pattern, small enough to decode in a moment and large
+// enough that a plane comparison means something.
 const W: u16 = 64;
 const H: u16 = 48;
 const FPS: u32 = 10;
 const FRAMES: usize = 10;
 
-/// The track's timescale, in ticks a second. Ninety thousand is the MPEG transport clock, and is
-/// chosen here because it is nothing like the frame rate: a writer that quietly used one where it
-/// meant the other would be caught by it.
+// The track's timescale, in ticks a second. Ninety thousand is the MPEG transport clock, and is
+// chosen here because it is nothing like the frame rate: a writer that quietly used one where it
+// meant the other would be caught by it.
 const TIMESCALE: u32 = 90_000;
+const TICKS: u32 = TIMESCALE / FPS;	// one sample's duration in that timescale
 
-/// The duration of one sample in that timescale.
-const TICKS: u32 = TIMESCALE / FPS;
-
-/// Where the fixtures are written.
 fn tmp(name: &str) -> PathBuf {
 	PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name)
 }

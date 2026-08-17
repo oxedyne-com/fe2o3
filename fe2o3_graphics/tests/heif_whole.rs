@@ -23,6 +23,9 @@
 //! assembled transposed or one tile out of place: the count of tiles is the same either way, so the
 //! check that a grid names as many tiles as rows times columns passes regardless -- which is how a
 //! reader that had the rows and columns the wrong way round survived until this test existed.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_graphics::heif;
@@ -35,13 +38,10 @@ use std::{
 	process::Command,
 };
 
-/// How many photographs a run reads unless it is told otherwise.
-const FILES: usize = 3;
+const FILES: usize = 3;	// photographs a run reads unless it is told otherwise
 
-/// The mean difference a channel may show against the other decoder.
-///
-/// Measured across the corpus at well under two; the bound is where a fault would have to be
-/// visible to exceed it.
+// The mean difference a channel may show against the other decoder. Measured across the corpus at
+// well under two; the bound is where a fault would have to be visible to exceed it.
 const MEAN_BOUND: f64 = 4.0;
 
 #[test]
@@ -163,7 +163,6 @@ fn test_a_whole_photograph_is_the_photograph_00() -> Outcome<()> {
 	Ok(())
 }
 
-/// Every file under a directory.
 fn walk(dir: &Path) -> Vec<PathBuf> {
 	let mut out = Vec::new();
 	let mut stack = vec![dir.to_path_buf()];

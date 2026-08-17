@@ -15,6 +15,9 @@
 //!
 //! `HEVC_FILES` caps how many are read, for a quick run. Nothing here writes anywhere but a
 //! scratch directory under the cache.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_graphics::{
@@ -33,8 +36,7 @@ use std::{
 	process::Command,
 };
 
-/// How many photographs a run reads unless it is told otherwise.
-const FILES: usize = 3;
+const FILES: usize = 3;	// photographs a run reads unless it is told otherwise
 
 /// Where the reference pictures are written.
 fn scratch() -> PathBuf {
@@ -44,7 +46,6 @@ fn scratch() -> PathBuf {
 	}
 }
 
-/// A reference picture's brightness plane.
 struct Rgb {
 	w:	usize,
 	h:	usize,
@@ -67,14 +68,10 @@ fn read_png(path: &Path) -> Outcome<Rgb> {
 
 /// What one photograph's comparison came to.
 struct Verdict {
-	/// How many samples were compared.
-	samples:	usize,
-	/// How many differed at all.
-	differing:	usize,
-	/// The largest difference in any one sample.
-	worst:		i32,
-	/// The mean absolute difference.
-	mean:		f64,
+	samples:	usize,	// how many were compared
+	differing:	usize,	// how many differed at all
+	worst:		i32,	// the largest difference in any one sample
+	mean:		f64,	// the mean absolute difference
 }
 
 /// Decodes one tile with each decoder and compares the brightness plane.
@@ -290,7 +287,6 @@ fn test_a_decoded_tile_is_the_tile_another_decoder_makes_00() -> Outcome<()> {
 	Ok(())
 }
 
-/// Every file under a directory, depth first.
 fn walk(dir: &Path) -> Vec<PathBuf> {
 	let mut out = Vec::new();
 	let mut stack = vec![dir.to_path_buf()];
@@ -312,7 +308,6 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
 	out
 }
 
-/// Writes a brightness plane where it can be looked at.
 fn write_pgm(path: &Path, px: &[u16], w: usize, h: usize) -> Outcome<()> {
 	let mut out = fmt!("P5\n{} {}\n255\n", w, h).into_bytes();
 	out.extend(px.iter().take(w * h).map(|v| *v as u8));

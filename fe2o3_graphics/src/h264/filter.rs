@@ -29,6 +29,9 @@
 //! every horizontal one, top to bottom**, one macroblock at a time in raster order, each working on
 //! samples the macroblocks before it have already filtered. Filtering all the vertical edges of the
 //! picture and then all the horizontal ones gives a different answer.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::h264::decode::{
 	Filter,
@@ -37,7 +40,7 @@ use crate::h264::decode::{
 
 use oxedyne_fe2o3_core::prelude::*;
 
-/// The first threshold, α′, indexed by `indexA` (Table 8-16).
+// The first threshold, α′, indexed by indexA (Table 8-16).
 const ALPHA: [i32; 52] = [
 	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 	4, 4, 5, 6, 7, 8, 9, 10, 12, 13, 15, 17, 20, 22, 25, 28,
@@ -45,7 +48,7 @@ const ALPHA: [i32; 52] = [
 	203, 226, 255, 255,
 ];
 
-/// The second threshold, β′, indexed by `indexB` (Table 8-16).
+// The second threshold, β′, indexed by indexB (Table 8-16).
 const BETA: [i32; 52] = [
 	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 	2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 6, 6, 7, 7, 8, 8,
@@ -53,7 +56,7 @@ const BETA: [i32; 52] = [
 	17, 17, 18, 18,
 ];
 
-/// The clipping limit t′C0, by boundary strength (1, 2 or 3) and `indexA` (Table 8-17).
+// The clipping limit t′C0, by boundary strength (1, 2 or 3) and indexA (Table 8-17).
 const TC0: [[i32; 52]; 3] = [
 	[
 		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -75,8 +78,6 @@ const TC0: [[i32; 52]; 3] = [
 	],
 ];
 
-/// Runs the deblocking filter over a whole picture.
-///
 /// Every macroblock in this decoder is intra, which fixes the boundary strength: 4 at a macroblock
 /// edge and 3 within one. The strengths that depend on motion vectors and reference pictures do not
 /// arise, and are not implemented rather than being implemented and unreachable.
@@ -268,7 +269,7 @@ fn one_chroma(v: &mut View, c: usize, x: usize, y: usize, vertical: bool, bs: i3
 
 /// The filter itself, over one set of eight samples: `p3..p0` then `q0..q3`.
 ///
-/// Returns whether anything changed, so that a caller need not write back a set the thresholds
+/// Whether anything changed, so that a caller need not write back a set the thresholds
 /// rejected.
 fn filter(s: &mut [i32; 8], bs: i32, qp_p: i32, qp_q: i32, off_a: i32, off_b: i32,
 	chroma_style: bool) -> bool

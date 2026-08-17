@@ -1,4 +1,7 @@
 //! The types a caller almost always wants.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 pub use crate::{
 	blur::Shadow,

@@ -9,6 +9,9 @@
 //! Only the front of each file is given to the reader -- the same sniffing
 //! buffer a scanner would hold -- because answering from a head is the property
 //! that makes this usable during a walk.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_graphics::avi::Avi;
@@ -21,15 +24,13 @@ use std::{
 	process::Command,
 };
 
-/// The head a scanner holds, and all this reader is given.
-const HEAD: usize = 64 * 1024;
+const HEAD: usize = 64 * 1024;	// the head a scanner holds, and all this reader is given
 
-/// How far a running time may differ from the player's and still agree.
-///
-/// A tenth of a second, or one part in a hundred, whichever is larger. The
-/// container states a frame count and a rate; a player may also consult the
-/// index and the last frame's timestamp, so the two need not agree to the
-/// millisecond and a disagreement that matters is far larger than this.
+// How far a running time may differ from the player's and still agree: a tenth
+// of a second, or one part in a hundred, whichever is larger. The container
+// states a frame count and a rate; a player may also consult the index and the
+// last frame's timestamp, so the two need not agree to the millisecond and a
+// disagreement that matters is far larger than this.
 const SLACK_MS: i64 = 100;
 
 fn films(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -50,7 +51,6 @@ fn films(dir: &Path, out: &mut Vec<PathBuf>) {
 	out.extend(here);
 }
 
-/// The head of a file, which is all the reader is entitled to.
 fn head_of(path: &Path) -> Option<Vec<u8>> {
 	let mut f = match File::open(path) {
 		Ok(f) => f,

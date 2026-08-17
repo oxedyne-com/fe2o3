@@ -83,6 +83,9 @@
 //! contrast ratio a design is checked for legibility against, and a simulation of the three
 //! dichromacies for checking that a palette does not lean on a colour distinction a
 //! colour-blind viewer cannot see.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 #![forbid(unsafe_code)]
 
 pub mod avi;

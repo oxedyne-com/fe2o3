@@ -1,4 +1,7 @@
 //! Colours and alpha compositing.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -9,31 +12,22 @@ use oxedyne_fe2o3_core::prelude::*;
 /// belongs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Rgba {
-	/// Red.
 	pub r:	u8,
-	/// Green.
 	pub g:	u8,
-	/// Blue.
 	pub b:	u8,
-	/// Alpha, from 0 transparent to 255 opaque.
-	pub a:	u8,
+	pub a:	u8,		// 0 transparent to 255 opaque
 }
 
 impl Rgba {
 
-	/// Fully transparent.
 	pub const TRANSPARENT:	Self = Self { r: 0,	g: 0,	b: 0,	a: 0	};
-	/// Opaque black.
 	pub const BLACK:	Self = Self { r: 0,	g: 0,	b: 0,	a: 255	};
-	/// Opaque white.
 	pub const WHITE:	Self = Self { r: 255,	g: 255,	b: 255,	a: 255	};
 
-	/// Creates a colour from its four channels.
 	pub const fn new(r: u8, g: u8, b: u8, a: u8) -> Self {
 		Self { r, g, b, a }
 	}
 
-	/// Creates an opaque colour from its three colour channels.
 	pub const fn opaque(r: u8, g: u8, b: u8) -> Self {
 		Self { r, g, b, a: 255 }
 	}
@@ -90,20 +84,16 @@ impl Rgba {
 		}
 	}
 
-	/// Whether this colour is fully transparent, and so paints nothing.
 	pub fn is_transparent(&self) -> bool {
 		self.a == 0
 	}
 
-	/// Whether this colour is fully opaque, and so needs no compositing.
 	pub fn is_opaque(&self) -> bool {
 		self.a == 255
 	}
 
-	/// Returns this colour with its alpha scaled by a coverage from 0 to 1.
-	///
-	/// This is how the rasteriser's anti-aliasing reaches the pixel: a pixel the shape half covers
-	/// is painted with a colour of half the alpha.
+	/// The coverage runs from 0 to 1. This is how the rasteriser's anti-aliasing reaches the
+	/// pixel: a pixel the shape half covers is painted with a colour of half the alpha.
 	pub fn with_coverage(&self, cov: f32) -> Self {
 		let c = cov.clamp(0.0, 1.0);
 		Self {
@@ -207,15 +197,12 @@ impl Rgba {
 /// One colour of a gradient, at a position along it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Stop {
-	/// Where along the gradient this colour sits, from zero at the start to one at the end.
-	pub at:	f32,
-	/// The colour there.
+	pub at:	f32,		// zero at the start of the gradient, one at the end
 	pub colour: Rgba,
 }
 
 impl Stop {
 
-	/// A stop of a colour at a position.
 	pub fn new(at: f32, colour: Rgba) -> Self {
 		Self { at, colour }
 	}
@@ -229,23 +216,15 @@ impl Stop {
 /// takes the last's, which is the padding an SVG gradient does unless it is told otherwise.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Gradient {
-	/// A gradient along the line from one point to another, in the path's own coordinates.
-	Linear {
-		/// Where the gradient starts.
-		from:	(f32, f32),
-		/// Where it ends.
-		to:	(f32, f32),
-		/// The colours along it, which need not be sorted.
-		stops:	Vec<Stop>,
+	Linear {	// along the line from one point to another, in the path's own coordinates
+		from:	(f32, f32),		// where the gradient starts
+		to:	(f32, f32),			// and where it ends
+		stops:	Vec<Stop>,		// the colours along it, which need not be sorted
 	},
-	/// A gradient outwards from a centre, in the path's own coordinates.
-	Radial {
-		/// The centre, which is position zero.
-		centre:	(f32, f32),
-		/// The distance at which position one is reached. Must be positive.
-		radius:	f32,
-		/// The colours along it, which need not be sorted.
-		stops:	Vec<Stop>,
+	Radial {	// outwards from a centre, in the path's own coordinates
+		centre:	(f32, f32),		// position zero
+		radius:	f32,			// where position one is reached; must be positive
+		stops:	Vec<Stop>,		// the colours along it, which need not be sorted
 	},
 }
 
@@ -371,12 +350,9 @@ impl Gradient {
 /// blue-yellow kind, is rare.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ColourVision {
-	/// Red-blind: the long-wavelength cone is missing.
-	Protanopia,
-	/// Green-blind: the medium-wavelength cone is missing.
-	Deuteranopia,
-	/// Blue-blind: the short-wavelength cone is missing.
-	Tritanopia,
+	Protanopia,		// red-blind: the long-wavelength cone is missing
+	Deuteranopia,	// green-blind: the medium-wavelength cone is missing
+	Tritanopia,		// blue-blind: the short-wavelength cone is missing
 }
 
 impl ColourVision {

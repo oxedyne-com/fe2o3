@@ -23,6 +23,9 @@
 //! The first test **reports rather than asserts**: how many films can be drawn today is a
 //! measurement and not a promise, and a number that is asserted stops being measured. The tests
 //! after it assert, because agreeing with another decoder is not a matter of degree.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_graphics::{
 	h264,
@@ -238,7 +241,6 @@ fn test_how_many_films_get_a_poster_00() -> Outcome<()> {
 	Ok(())
 }
 
-/// The file's name, for a refusal that has to say which film.
 fn name(path: &Path) -> String {
 	path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
 }

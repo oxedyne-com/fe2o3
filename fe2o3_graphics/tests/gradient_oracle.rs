@@ -18,6 +18,9 @@
 //! tolerance is visible before it crosses it.
 //!
 //! To regenerate the PNGs: see `tests/gradient/gen.sh`.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_graphics::{
@@ -41,11 +44,8 @@ use std::{
 	path::PathBuf,
 };
 
-/// The side of every fixture, in pixels. `gen.sh` renders at this size.
-const SIZE: usize = 256;
-
-/// The furthest a channel may differ from the browser's.
-const TOL: i32 = 2;
+const SIZE: usize = 256;	// the side of every fixture, in pixels; gen.sh renders at this size
+const TOL: i32 = 2;		// the furthest a channel may differ from the browser's
 
 const CASES: &[&str] = &["linear_v", "linear_diag", "linear_pad", "radial", "linear_alpha"];
 
@@ -63,10 +63,8 @@ fn premul(c: Rgba) -> (u8, u8, u8) {
 
 /// A fixture, read from its `.grad` file.
 struct Case {
-	/// The gradient it describes.
 	grad:	Gradient,
-	/// The rectangle it fills.
-	rect:	Bounds,
+	rect:	Bounds,	// the rectangle it fills
 }
 
 /// Reads a `.grad` fixture. The format is described in `gen.sh`, and both read it.

@@ -32,16 +32,18 @@
 //! transcription shifted by one place in one column is a picture that is right until it meets a
 //! busy block. The tests re-read the same tables out of the specification and, separately, assert
 //! that every column is a prefix code -- which a misread codeword almost always breaks.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::h264::Bits;
 
 use oxedyne_fe2o3_core::prelude::*;
 
-/// `coeff_token`, as `(bits, code)` by column of Table 9-5, trailing ones and total.
-///
-/// The six columns are the six ranges of `nC`: below two, below four, below eight, eight
-/// and over, and the two chroma direct-current tables at −1 and −2. An entry of no bits is a
-/// combination the table does not code.
+// coeff_token, as (bits, code) by column of Table 9-5, trailing ones and total.
+// The six columns are the six ranges of nC: below two, below four, below eight, eight
+// and over, and the two chroma direct-current tables at −1 and −2. An entry of no bits is a
+// combination the table does not code.
 pub const COEFF_TOKEN: [[[(u8, u16); 17]; 4]; 6] = [
 	[
 		[(1, 0b1), (6, 0b000101), (8, 0b00000111), (9, 0b000000111), (10, 0b0000000111), (11, 0b00000000111), (13, 0b0000000001111), (13, 0b0000000001011), (13, 0b0000000001000), (14, 0b00000000001111), (14, 0b00000000001011), (15, 0b000000000001111), (15, 0b000000000001011), (16, 0b0000000000001111), (16, 0b0000000000001011), (16, 0b0000000000000111), (16, 0b0000000000000100)],
@@ -81,8 +83,8 @@ pub const COEFF_TOKEN: [[[(u8, u16); 17]; 4]; 6] = [
 	],
 ];
 
-/// `total_zeros` for a block of sixteen coefficients, by `tzVlcIndex` and by the count
-/// (Tables 9-7 and 9-8).
+// total_zeros for a block of sixteen coefficients, by tzVlcIndex and by the count
+// (Tables 9-7 and 9-8).
 pub const TOTAL_ZEROS: [[(u8, u16); 16]; 15] = [
 	[(1, 0b1), (3, 0b011), (3, 0b010), (4, 0b0011), (4, 0b0010), (5, 0b00011), (5, 0b00010), (6, 0b000011), (6, 0b000010), (7, 0b0000011), (7, 0b0000010), (8, 0b00000011), (8, 0b00000010), (9, 0b000000011), (9, 0b000000010), (9, 0b000000001)],
 	[(3, 0b111), (3, 0b110), (3, 0b101), (3, 0b100), (3, 0b011), (4, 0b0101), (4, 0b0100), (4, 0b0011), (4, 0b0010), (5, 0b00011), (5, 0b00010), (6, 0b000011), (6, 0b000010), (6, 0b000001), (6, 0b000000), (0, 0)],
@@ -101,17 +103,16 @@ pub const TOTAL_ZEROS: [[(u8, u16); 16]; 15] = [
 	[(1, 0b0), (1, 0b1), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0)],
 ];
 
-/// `total_zeros` for a 4:2:0 chroma direct-current block of four (Table 9-9(a)).
+// total_zeros for a 4:2:0 chroma direct-current block of four (Table 9-9(a)).
 pub const TOTAL_ZEROS_CHROMA: [[(u8, u16); 4]; 3] = [
 	[(1, 0b1), (2, 0b01), (3, 0b001), (3, 0b000)],
 	[(1, 0b1), (2, 0b01), (2, 0b00), (0, 0)],
 	[(1, 0b1), (1, 0b0), (0, 0), (0, 0)],
 ];
 
-/// `run_before`, by how many zeroes are left and by the run (Table 9-10).
-///
-/// The seventh row serves every `zerosLeft` above six, which is why it runs to fourteen
-/// where the others stop at their own count.
+// run_before, by how many zeroes are left and by the run (Table 9-10).
+// The seventh row serves every zerosLeft above six, which is why it runs to fourteen
+// where the others stop at their own count.
 pub const RUN_BEFORE: [[(u8, u16); 15]; 7] = [
 	[(1, 0b1), (1, 0b0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0)],
 	[(1, 0b1), (2, 0b01), (2, 0b00), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0)],
@@ -122,13 +123,10 @@ pub const RUN_BEFORE: [[(u8, u16); 15]; 7] = [
 	[(3, 0b111), (3, 0b110), (3, 0b101), (3, 0b100), (3, 0b011), (3, 0b010), (3, 0b001), (4, 0b0001), (5, 0b00001), (6, 0b000001), (7, 0b0000001), (8, 0b00000001), (9, 0b000000001), (10, 0b0000000001), (11, 0b00000000001)],
 ];
 
-/// The result of reading one block's coefficients.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Block {
-	/// The coefficients in scan order, from the direct current term upward, zeroes and all.
-	pub levels:	Vec<i32>,
-	/// How many of them are not zero, which the next block's `nC` is derived from.
-	pub total:	usize,
+	pub levels:	Vec<i32>,	// scan order, from the direct current term upward, zeroes and all
+	pub total:	usize,		// how many are not zero, which the next block's nC is derived from
 }
 
 /// Reads a value out of a code table, given the table's entries as `(bits, code)`.

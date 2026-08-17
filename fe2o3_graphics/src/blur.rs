@@ -50,6 +50,9 @@
 //! the inner loop and still guesses. The sample at the edge is repeated instead, which is the guess
 //! that a field flat at its edge stays flat past it, and so leaves a flat field exactly as it found
 //! it.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::{
 	colour::Rgba,
@@ -66,8 +69,7 @@ use crate::{
 
 use oxedyne_fe2o3_core::prelude::*;
 
-/// How many box passes make one blur, along each axis. See the module docs for why three.
-pub const BOX_PASSES: usize = 3;
+pub const BOX_PASSES: usize = 3; // along each axis; the module docs say why three
 
 /// A drop shadow: where a shape's silhouette falls, and how far it is softened.
 ///
@@ -76,19 +78,13 @@ pub const BOX_PASSES: usize = 3;
 /// reason a pen does not hold one -- it is the painting that has a colour, not the tool.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Shadow {
-	/// How far right the silhouette stands from the shape, in pixels. Negative throws it left.
-	pub dx:	f32,
-	/// How far down the silhouette stands from the shape, in pixels. Negative throws it up.
-	pub dy:	f32,
-	/// The blur radius, in pixels. Zero throws a hard-edged silhouette, which is a shape in its own
-	/// right and not a mistake.
-	pub radius:	usize,
+	pub dx:	f32,		// pixels right of the shape; negative throws it left
+	pub dy:	f32,		// pixels down from the shape; negative throws it up
+	pub radius:	usize,	// blur radius, pixels; zero throws a hard-edged silhouette
 }
 
 impl Shadow {
 
-	/// Creates a shadow standing `(dx, dy)` pixels from its shape and softened by a blur of
-	/// `radius` pixels.
 	pub fn new(dx: f32, dy: f32, radius: usize) -> Self {
 		Self { dx, dy, radius }
 	}
@@ -298,11 +294,6 @@ impl Pixmap {
 	/// hand back a shadow cut off square at the edges, which is precisely the shape a shadow must
 	/// not have. It is trimmed to what the pixmap and the clip could show, grown by the same reach,
 	/// since silhouette rasterised beyond that can reach no pixel anyone will see.
-	///
-	/// # Errors
-	///
-	/// Refuses an offset that is not finite, and a radius so large that the scratch the shadow needs
-	/// is bigger than a pixmap may be.
 	pub fn shadow_path(
 		&mut self,
 		path:	&Path,

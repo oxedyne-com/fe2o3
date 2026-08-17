@@ -44,32 +44,31 @@
 //!
 //! IETF RFC 8794 for EBML, and the Matroska specification (RFC 9559) for the
 //! element identifiers and the meaning of `TimestampScale`.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 
-/// The first four bytes of every EBML file: the `EBML` element's identifier.
+// the first four bytes of every EBML file: the EBML element's identifier
 const MAGIC: [u8; 4] = [0x1A, 0x45, 0xDF, 0xA3];
 
-/// The most elements walked at one level before a file is given up on.
-///
-/// Without a bound, a length of nought -- which a truncated or malformed file
-/// readily supplies -- is an endless walk. A `Segment` holds thousands of
-/// clusters, so this must be generous enough that `Tracks` is still reached in a
-/// file that puts clusters before it.
+// The most elements walked at one level before a file is given up on. Without a
+// bound, a length of nought -- which a truncated or malformed file readily
+// supplies -- is an endless walk. A Segment holds thousands of clusters, so this
+// must be generous enough that Tracks is still reached in a file that puts
+// clusters before it.
 const ELEMENT_LIMIT: usize = 4096;
 
-/// The deepest the walk descends.
-///
-/// `Segment` → `Tracks` → `TrackEntry` → `Video` is four, and nothing wanted
-/// here is deeper. A file claiming an element contains itself is one that would
-/// otherwise be walked for ever.
+// The deepest the walk descends. Segment → Tracks → TrackEntry → Video is four,
+// and nothing wanted here is deeper. A file claiming an element contains itself
+// is one that would otherwise be walked for ever.
 const DEPTH_LIMIT: usize = 6;
 
-/// The default `TimestampScale`, in nanoseconds, where a file states none.
-///
-/// A million nanoseconds is a millisecond, so a duration in scale units is a
-/// duration in milliseconds unless the file says otherwise. Nearly every file
-/// leaves it at this and states it anyway.
+// The default TimestampScale, in nanoseconds, where a file states none. A
+// million nanoseconds is a millisecond, so a duration in scale units is a
+// duration in milliseconds unless the file says otherwise. Nearly every file
+// leaves it at this and states it anyway.
 const DEFAULT_SCALE: u64 = 1_000_000;
 
 const ID_EBML:				u64 = 0x1A45DFA3;
@@ -106,10 +105,9 @@ const ID_BLOCK_GROUP:		u64 = 0xA0;
 const ID_BLOCK:				u64 = 0xA1;
 const ID_REFERENCE_BLOCK:	u64 = 0xFB;
 
-/// The widest element header: a four-byte identifier and an eight-byte length.
-///
-/// What a caller must have in hand before [`Clusters::feed`] can say anything
-/// about the element in front of it, and therefore the smallest useful window.
+// The widest element header: a four-byte identifier and an eight-byte length.
+// What a caller must have in hand before Clusters::feed can say anything about
+// the element in front of it, and therefore the smallest useful window.
 const HEADER_MAX: usize = 12;
 
 /// What a stream is for.
@@ -122,8 +120,7 @@ pub enum TrackKind {
 	Video,
 	Audio,
 	Subtitle,
-	/// Logos, buttons, control and metadata tracks, and anything later.
-	Other(u64),
+	Other(u64),	// logos, buttons, control and metadata tracks, and anything later
 }
 
 impl TrackKind {
@@ -152,50 +149,36 @@ impl TrackKind {
 /// One stream, as its `TrackEntry` describes it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Track {
-	/// The file's own number for the stream, which its blocks are keyed by.
-	number:		u64,
-	/// What the stream is for; absent until the file says.
-	kind:		Option<TrackKind>,
-	/// The codec, as the file names it: `V_MPEG4/ISO/AVC`, `A_AC3`, `S_TEXT/UTF8`.
-	codec:		String,
-	/// The codec's own configuration -- an `avcC` or `hvcC` record for a
-	/// picture. Kept because it is what a caller repackaging the stream into
-	/// another container must copy across, and it is tens of bytes.
+	number:		u64,				// the file's own, which its blocks are keyed by
+	kind:		Option<TrackKind>,	// absent until the file says
+	codec:		String,				// as the file names it: V_MPEG4/ISO/AVC, A_AC3
+	// The codec's own configuration -- an avcC or hvcC record for a picture.
+	// Kept because it is what a caller repackaging the stream into another
+	// container must copy across, and it is tens of bytes.
 	private:	Vec<u8>,
-	/// Pixel size of the picture, nought on a stream that is not one.
-	w:			u32,
+	w:			u32,				// pixel size, nought if not a picture
 	h:			u32,
-	/// The shape the picture is meant to be shown at, where it differs.
-	dw:			u32,
+	dw:			u32,				// the shape to show it at, if it differs
 	dh:			u32,
-	/// How many channels the audio carries.
-	channels:	u64,
-	/// Samples a second, which a caller repackaging the sound must state.
-	rate:		f64,
-	/// The language, as the file states it, preferring a BCP 47 tag.
-	lang:		String,
-	/// The name a player shows for the stream, where it has one.
-	name:		String,
-	/// Whether a player should choose this stream without being asked.
-	default:	bool,
-	/// Whether a player must show it whatever the viewer asked for.
-	forced:		bool,
-	/// Nanoseconds one frame of this stream lasts, where the file says.
-	///
-	/// Wanted for one reason and it is not decorative: **the frames of a laced
-	/// block are spaced by it**. A block carrying six frames of sound states one
-	/// timestamp, and the five after the first are that stamp plus one, two,
-	/// three of these. Without it they all appear at the same instant and a
-	/// repackaged film's sound walks away from its picture.
+	channels:	u64,				// how many channels the audio carries
+	rate:		f64,				// samples a second, which a repackager must state
+	lang:		String,				// as the file states it, preferring a BCP 47 tag
+	name:		String,				// what a player shows for the stream
+	default:	bool,				// should a player choose it unasked?
+	forced:		bool,				// must a player show it whatever was asked for?
+	// Nanoseconds one frame of this stream lasts, wanted for one reason and it
+	// is not decorative: the frames of a laced block are spaced by it. A block
+	// carrying six frames of sound states one timestamp, and the five after
+	// the first are that stamp plus one, two, three of these. Without it they
+	// all appear at the same instant and a repackaged film's sound walks away
+	// from its picture.
 	frame_ns:	u64,
 }
 
 impl Track {
 
-	/// The file's own number for the stream.
 	pub fn number(&self) -> u64 { self.number }
 
-	/// What the stream is for, where the file said.
 	pub fn kind(&self) -> Option<TrackKind> { self.kind }
 
 	/// The codec, as the file names it.
@@ -232,10 +215,10 @@ impl Track {
 	/// The name a player shows for the stream, empty where it has none.
 	pub fn name(&self) -> &str { &self.name }
 
-	/// Whether a player should choose this stream without being asked.
+	/// Should a player choose this stream without being asked?
 	pub fn is_default(&self) -> bool { self.default }
 
-	/// Whether a player must show it whatever the viewer asked for.
+	/// Must a player show it whatever the viewer asked for?
 	pub fn is_forced(&self) -> bool { self.forced }
 
 	/// Nanoseconds one frame lasts, nought where the file states none.
@@ -247,16 +230,11 @@ impl Track {
 /// What a film's header says about it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Matroska {
-	/// `matroska` or `webm`; the two share this structure exactly.
-	doctype:	String,
-	/// The title the file carries, where it carries one.
-	title:		String,
-	/// Nanoseconds a timestamp unit stands for.
-	scale:		u64,
-	/// The running time, in scale units. A float, and the file's own word.
-	duration:	f64,
-	/// Every stream the `Tracks` element described, in the order it did.
-	tracks:		Vec<Track>,
+	doctype:	String,			// matroska or webm; the two share this structure
+	title:		String,			// the title the file carries, where it carries one
+	scale:		u64,			// nanoseconds a timestamp unit stands for
+	duration:	f64,			// in scale units; a float, and the file's own word
+	tracks:		Vec<Track>,		// in the order the Tracks element described them
 }
 
 impl Matroska {
@@ -361,7 +339,7 @@ impl Matroska {
 	/// `matroska` or `webm`.
 	pub fn doctype(&self) -> &str { &self.doctype }
 
-	/// Whether the file calls itself WebM, the subset a browser plays natively.
+	/// Does the file call itself WebM, the subset a browser plays natively?
 	pub fn is_webm(&self) -> bool { self.doctype == "webm" }
 
 	/// The title the file carries, empty where it carries none.
@@ -392,12 +370,10 @@ impl Matroska {
 		first
 	}
 
-	/// Every sound stream.
 	pub fn audio(&self) -> Vec<&Track> {
 		self.tracks.iter().filter(|t| t.kind == Some(TrackKind::Audio)).collect()
 	}
 
-	/// Every subtitle stream.
 	pub fn subtitles(&self) -> Vec<&Track> {
 		self.tracks.iter().filter(|t| t.kind == Some(TrackKind::Subtitle)).collect()
 	}
@@ -438,20 +414,15 @@ impl Matroska {
 /// decoder.
 #[derive(Clone, Copy, Debug)]
 pub struct Frame<'a> {
-	/// Which stream it belongs to, matching [`Track::number`].
-	pub track:		u64,
-	/// When it is shown, in timestamp scale units from the start of the film.
-	///
-	/// Signed because a block states its own time as a *difference* from its
-	/// cluster's, and the difference is signed -- a cluster may carry a frame
-	/// shown fractionally before the cluster's own stamp.
+	pub track:		u64,		// which stream it belongs to, matching Track::number
+	// When it is shown, in timestamp scale units from the start of the film.
+	// Signed because a block states its own time as a difference from its
+	// cluster's, and the difference is signed -- a cluster may carry a frame
+	// shown fractionally before the cluster's own stamp.
 	pub time:		i64,
-	/// Whether decoding may begin here.
-	pub key:		bool,
-	/// Whether the file asks for it to be decoded but not shown.
-	pub invisible:	bool,
-	/// The coded bytes.
-	pub data:		&'a [u8],
+	pub key:		bool,		// may decoding begin here?
+	pub invisible:	bool,		// decode it but do not show it
+	pub data:		&'a [u8],	// the coded bytes
 }
 
 /// What one feed of bytes yielded.
@@ -460,15 +431,11 @@ pub struct Frame<'a> {
 /// [`Clusters::feed`] for the loop they are meant to drive.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Fed {
-	/// How many bytes from the front of the window were dealt with and may now
-	/// be dropped.
-	pub used:	usize,
-	/// How many bytes must be in hand, counting from the new front, before the
-	/// next element can be read.
-	///
-	/// Nought means the window merely ran out between elements and any further
-	/// bytes at all will make progress. A caller that cannot supply `want` --
-	/// because the file ended -- has a truncated file.
+	pub used:	usize,	// bytes from the front dealt with, which may now be dropped
+	// How many bytes must be in hand, counting from the new front, before the
+	// next element can be read. Nought means the window merely ran out between
+	// elements and any further bytes at all will make progress. A caller that
+	// cannot supply want -- because the file ended -- has a truncated file.
 	pub want:	usize,
 }
 
@@ -504,18 +471,15 @@ pub struct Fed {
 /// ```
 #[derive(Clone, Debug, Default)]
 pub struct Clusters {
-	/// The timestamp of the cluster being read, in scale units.
-	now:	i64,
-	/// Bytes still to be passed over before an element begins again.
-	///
-	/// Kept as a count rather than by holding the bytes, so that skipping a
-	/// large element costs nothing and needs no window.
+	now:	i64,				// the timestamp of the cluster being read, in scale units
+	// Bytes still to be passed over before an element begins again, kept as a
+	// count rather than by holding the bytes, so that skipping a large element
+	// costs nothing and needs no window.
 	skip:	u64,
-	/// Nanoseconds a timestamp unit stands for.
-	scale:	u64,
-	/// How long one frame of each stream lasts, in nanoseconds, by track
-	/// number. A short list walked linearly, because a film has a handful of
-	/// streams and a map would cost more than it saved.
+	scale:	u64,				// nanoseconds a timestamp unit stands for
+	// How long one frame of each stream lasts, in nanoseconds, by track number.
+	// A short list walked linearly, because a film has a handful of streams and
+	// a map would cost more than it saved.
 	frames:	Vec<(u64, u64)>,
 }
 
@@ -1019,7 +983,7 @@ fn each(mut b: &[u8], depth: usize, f: &mut dyn FnMut(u64, &[u8])) -> Outcome<()
 	Ok(())
 }
 
-/// Whether a head begins an EBML file.
+/// Does a head begin an EBML file?
 ///
 /// This does not say the file is Matroska rather than WebM, or that it is
 /// either: both, and any other EBML document, open the same way. The `DocType`

@@ -16,6 +16,9 @@
 //! ```
 //!
 //! Absent, it says so rather than passing quietly. `H264_FILMS_MAX` caps how many films are read.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_graphics::{
 	h264,

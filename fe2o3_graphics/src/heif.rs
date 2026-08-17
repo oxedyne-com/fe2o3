@@ -48,6 +48,9 @@
 //! items, properties and the `grid` derivation are ISO/IEC 23008-12 (§6 for the item structure,
 //! §6.5 for the properties, §6.6.2.3 for the grid). The decoder configuration record `hvcC` carries
 //! is ISO/IEC 14496-15 §8.3.3. Each non-obvious constant below names the clause it comes from.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::{
 	hevc,
@@ -58,16 +61,13 @@ use oxedyne_fe2o3_core::prelude::*;
 
 use std::collections::BTreeMap;
 
-/// The most items one file may hold.
-///
-/// A photograph cut into tiles of five hundred and twelve pixels needs one item a tile, so a very
-/// large picture can reach a few hundred; sixty-five thousand is a ceiling against a length that is
-/// a mistake rather than a limit anything real approaches.
+// The most items one file may hold. A photograph cut into tiles of five hundred and twelve pixels
+// needs one item a tile, so a very large picture can reach a few hundred; sixty-five thousand is a
+// ceiling against a length that is a mistake rather than a limit anything real approaches.
 pub const MAX_ITEMS: usize = 65_536;
 
-/// How deep the box tree may nest before it is treated as malformed.
-///
-/// The deepest legal path here is `meta` > `iprp` > `ipco` > a property, which is three.
+// How deep the box tree may nest before it is treated as malformed. The deepest legal path here
+// is meta > iprp > ipco > a property, which is three.
 pub const MAX_DEPTH: usize = 8;
 
 /// A run of bytes belonging to one item.
@@ -76,10 +76,8 @@ pub const MAX_DEPTH: usize = 8;
 /// list of these rather than one offset and one length.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Extent {
-	/// Where the run starts, as an offset into whatever [`Where`] says it is in.
-	pub off:	u64,
-	/// How long the run is, in bytes.
-	pub len:	u64,
+	pub off:	u64,	// offset into whatever Where says it is in
+	pub len:	u64,	// bytes
 }
 
 /// What an item's extents are offsets into.
@@ -89,28 +87,19 @@ pub struct Extent {
 /// saying so, and refused rather than guessed at.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Where {
-	/// Offsets into the file, which is where a coded picture lives.
-	File,
-	/// Offsets into the `idat` box, which is where a small derivation like a `grid` lives.
-	Idat,
-	/// Offsets into another item, which this reader refuses.
-	Item,
+	File,	// offsets into the file, where a coded picture lives
+	Idat,	// into the idat box, where a small derivation like a grid lives
+	Item,	// into another item, which this reader refuses
 }
 
 /// One item: what it is, and where its bytes are.
 #[derive(Clone, Debug)]
 pub struct Item {
-	/// The identifier `iinf`, `iref`, `ipma` and `iloc` all name it by.
-	pub id:		u32,
-	/// Its four-character type: `hvc1` for a coded picture, `grid` for a derivation, `Exif` for the
-	/// camera's block, `mime` for XMP.
-	pub kind:	[u8; 4],
-	/// Whether `pitm` named this one.
-	pub primary:	bool,
-	/// What its extents are offsets into.
-	pub place:	Where,
-	/// Where its bytes are, in order.
-	pub extents:	Vec<Extent>,
+	pub id:		u32,				// what iinf, iref, ipma and iloc all name it by
+	pub kind:	[u8; 4],			// hvc1 a coded picture, grid a derivation, Exif, mime for XMP
+	pub primary:	bool,			// did pitm name this one?
+	pub place:	Where,				// what its extents are offsets into
+	pub extents:	Vec<Extent>,	// where its bytes are, in order
 }
 
 /// A picture assembled out of tiles, ISO/IEC 23008-12 §6.6.2.3.
@@ -121,14 +110,10 @@ pub struct Item {
 /// twelve square.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Grid {
-	/// How many tiles down.
-	pub rows:	u16,
-	/// How many tiles across.
-	pub cols:	u16,
-	/// The assembled picture's width in pixels, after cropping.
-	pub width:	u32,
-	/// Its height in pixels, after cropping.
-	pub height:	u32,
+	pub rows:	u16,	// tiles down
+	pub cols:	u16,	// tiles across
+	pub width:	u32,	// the assembled picture's width in pixels, after cropping
+	pub height:	u32,	// and its height
 }
 
 /// One property out of `ipco`, in the order the box holds them.
@@ -138,21 +123,14 @@ pub struct Grid {
 /// having an opinion about colour management.
 #[derive(Clone, Debug)]
 pub enum Prop {
-	/// `ispe`: the item's extent in pixels, before any rotation.
-	Extent {
-		/// Width in pixels.
+	Extent {			// ispe: the item's extent in pixels, before any rotation
 		w: u32,
-		/// Height in pixels.
 		h: u32,
 	},
-	/// `hvcC`: the HEVC decoder configuration record, as a span of the file.
-	Config(Extent),
-	/// `irot`: a rotation the viewer applies, in quarter turns anticlockwise (0 to 3).
-	Rotation(u8),
-	/// `pixi`: how many bits each channel carries.
-	Depth(Vec<u8>),
-	/// Anything else, as its type and the span of its body.
-	Other([u8; 4], Extent),
+	Config(Extent),			// hvcC: the HEVC decoder configuration record, as a span of the file
+	Rotation(u8),			// irot: quarter turns anticlockwise the viewer applies, 0 to 3
+	Depth(Vec<u8>),			// pixi: how many bits each channel carries
+	Other([u8; 4], Extent),		// anything else, as its type and the span of its body
 }
 
 /// A HEIF file's metadata, read whole.
@@ -161,50 +139,33 @@ pub enum Prop {
 /// copied.
 #[derive(Clone, Debug)]
 pub struct Heif<'a> {
-	/// The bytes the boxes were read out of.
-	bytes:		&'a [u8],
-	/// The brand from `ftyp`, which says whether the pictures inside are HEVC or AV1.
-	brand:		[u8; 4],
-	/// Every item, in the order `iinf` listed them.
-	items:		Vec<Item>,
-	/// The identifier `pitm` named.
-	primary:	u32,
-	/// The properties in `ipco`, indexed from one by `ipma`.
-	props:		Vec<Prop>,
-	/// Which properties belong to which item, by `ipco` index.
-	owned:		BTreeMap<u32, Vec<u16>>,
-	/// What each item derives from, in order, out of the `dimg` references.
-	derived:	BTreeMap<u32, Vec<u32>>,
-	/// What each item describes, out of the `cdsc` references.
-	describes:	BTreeMap<u32, Vec<u32>>,
-	/// The span of `idat`, where a derivation's bytes live.
-	idat:		Option<Extent>,
+	bytes:		&'a [u8],					// the bytes the boxes were read out of
+	brand:		[u8; 4],					// from ftyp: HEVC or AV1
+	items:		Vec<Item>,					// in the order iinf listed them
+	primary:	u32,						// the identifier pitm named
+	props:		Vec<Prop>,					// the properties in ipco, indexed from one by ipma
+	owned:		BTreeMap<u32, Vec<u16>>,	// which properties belong to which item
+	derived:	BTreeMap<u32, Vec<u32>>,	// what each item derives from, out of dimg
+	describes:	BTreeMap<u32, Vec<u32>>,	// what each item describes, out of cdsc
+	idat:		Option<Extent>,				// the span where a derivation's bytes live
 }
 
 /// What the primary item turned out to be.
 #[derive(Clone, Debug)]
 pub enum Picture {
-	/// One coded picture: its bytes, and the decoder configuration that reads them.
-	One {
-		/// The item holding the coded picture.
+	One {				// one coded picture, and the configuration that reads it
 		item:	u32,
-		/// Its extent in pixels.
-		size:	(u32, u32),
+		size:	(u32, u32),	// its extent in pixels
 	},
-	/// A picture cut into tiles, in raster order from the top left.
-	Tiled {
-		/// The assembled geometry.
+	Tiled {				// cut into tiles, in raster order from the top left
 		grid:	Grid,
-		/// The items holding the tiles, row by row.
-		tiles:	Vec<u32>,
+		tiles:	Vec<u32>,	// the items holding the tiles, row by row
 	},
-	/// A picture in a codec this container reader identifies but does not describe further, which
-	/// is how a JPEG inside a HEIF wrapper arrives.
+	// A codec this container reader identifies but does not describe further, which is how a
+	// JPEG inside a HEIF wrapper arrives.
 	Foreign {
-		/// The item holding it.
 		item:	u32,
-		/// Its four-character type.
-		kind:	[u8; 4],
+		kind:	[u8; 4],	// its four-character type
 	},
 }
 
@@ -295,12 +256,10 @@ impl<'a> Heif<'a> {
 		self.brand
 	}
 
-	/// Every item, in the order the file listed them.
 	pub fn items(&self) -> &[Item] {
 		&self.items
 	}
 
-	/// The item `pitm` named.
 	pub fn primary(&self) -> Outcome<&Item> {
 		match self.items.iter().find(|i| i.id == self.primary) {
 			Some(item) => Ok(item),
@@ -676,10 +635,8 @@ impl<'a> Heif<'a> {
 
 /// What a walker wants done with the box it was just handed.
 enum Walk {
-	/// Step over it, whatever it holds.
-	Over,
-	/// Walk its children, after the given number of bytes of its own header.
-	Into(usize),
+	Over,		// step over it, whatever it holds
+	Into(usize),	// walk its children, after this many bytes of its own header
 }
 
 /// Walks a run of boxes, handing each one's type and the span of its body to a visitor.
@@ -776,18 +733,13 @@ where
 
 /// A reader of a box body, which refuses to run off its end rather than returning a short answer.
 struct Body<'a> {
-	/// The bytes.
 	buf:	&'a [u8],
-	/// Where the file the span came from starts, so that a span read out of this can be reported
-	/// in the file's own coordinates.
-	base:	u64,
-	/// How far along.
-	at:	usize,
+	base:	u64,		// where the file the span came from starts, for reporting spans
+	at:	usize,			// how far along
 }
 
 impl<'a> Body<'a> {
 
-	/// A reader over one box's body.
 	fn new(bytes: &'a [u8], span: Extent) -> Outcome<Self> {
 		let off = span.off as usize;
 		let end = match off.checked_add(span.len as usize) {
@@ -800,7 +752,6 @@ impl<'a> Body<'a> {
 		Ok(Self { buf: &bytes[off..end], base: span.off, at: 0 })
 	}
 
-	/// How many bytes are left.
 	fn left(&self) -> usize {
 		self.buf.len().saturating_sub(self.at)
 	}
@@ -830,7 +781,6 @@ impl<'a> Body<'a> {
 		Ok(((v >> 24) as u8, (v & 0x00ff_ffff) as u32))
 	}
 
-	/// The next four bytes as a box type.
 	fn kind(&mut self) -> Outcome<[u8; 4]> {
 		let v = res!(self.num(4));
 		Ok((v as u32).to_be_bytes())

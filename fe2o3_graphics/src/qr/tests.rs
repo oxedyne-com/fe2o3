@@ -6,6 +6,9 @@
 //! grid means the whole pipeline (segment packing, Reed-Solomon, block interleaving, function
 //! patterns, and mask selection) agrees with an independent, widely used implementation of the
 //! same frozen standard, not merely with itself.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use super::*;
 
@@ -23,8 +26,6 @@ fn rows_of(qr: &QrMatrix) -> String {
 	s
 }
 
-/// Encodes text in byte mode and checks the version, side length, and every module against a
-/// golden matrix from the oracle.
 fn check(text: &str, ecc: QrEcc, ver: u8, size: usize, golden: &str) {
 	let qr = match encode(text, ecc) {
 		Ok(q) => q,

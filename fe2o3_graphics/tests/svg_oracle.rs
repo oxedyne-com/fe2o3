@@ -21,6 +21,9 @@
 //! conversion in between.
 //!
 //! To regenerate the PNGs: see `tests/svg/gen.sh`.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_graphics::{
@@ -36,32 +39,27 @@ use std::{
 	path::PathBuf,
 };
 
-/// The side of every fixture, in pixels. `gen.sh` renders at this size.
-const SIZE: usize = 256;
+const SIZE: usize = 256;	// the side of every fixture, in pixels; gen.sh renders at this size
 
-/// How far a pixel's coverage may sit from Chromium's before it is counted as disagreeing.
-///
-/// Two rasterisers will never agree to the bit along an edge: they weigh a partly covered pixel
+// How far a pixel's coverage may sit from Chromium's before it is counted as disagreeing.
+//
+// Two rasterisers will never agree to the bit along an edge: they weigh a partly covered pixel
 /// differently, and a half-covered pixel is genuinely ambiguous. A quarter of full coverage is well
 /// inside that noise and far outside anything a geometry error could hide in -- a wrong centre or a
-/// reversed sweep moves whole regions from 0 to 1, not by a fifth.
+// reversed sweep moves whole regions from 0 to 1, not by a fifth.
 const NEAR: f32 = 0.25;
 
-/// How much of the frame may disagree by more than [`NEAR`].
-///
-/// Disagreement is confined to the anti-aliased band along an edge, which for these shapes runs to
-/// a few hundred pixels of the 65536. One percent leaves room for a longer edge without leaving
-/// room for a shape in the wrong place.
+// How much of the frame may disagree by more than NEAR. Disagreement is confined to the
+// anti-aliased band along an edge, which for these shapes runs to a few hundred pixels of the
+// 65536. One percent leaves room for a longer edge without leaving room for a shape in the wrong
+// place.
 const MAX_OFF: f32 = 0.01;
 
-/// The mean absolute difference across the whole frame.
-///
-/// This is the guard that a small, systematic shift cannot pass: an edge band contributes almost
-/// nothing to a mean over the whole frame, but a shape displaced by a pixel contributes everywhere
-/// along its perimeter.
+// The mean absolute difference across the whole frame may not pass this. It is the guard a small,
+// systematic shift cannot get past: an edge band contributes almost nothing to a mean over the
+// whole frame, but a shape displaced by a pixel contributes everywhere along its perimeter.
 const MAX_MEAN: f32 = 0.004;
 
-/// Every fixture in `tests/svg/`.
 const CASES: &[&str] = &[
 	// The four paths of one drawing program's output, verbatim.
 	"mark_cross",
@@ -80,7 +78,6 @@ const CASES: &[&str] = &[
 	"compact",
 ];
 
-/// Where the fixtures live.
 fn dir() -> PathBuf {
 	PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("svg")
 }

@@ -18,6 +18,9 @@
 //! Point `MKV_CORPUS` at a directory of films. `MKV_FRAMES` caps how many frames
 //! of each are compared, because a two-hour film holds two hundred thousand and
 //! the disease this catches shows itself in the first thousand.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_graphics::matroska::{Clusters, Matroska, TrackKind};
@@ -30,22 +33,16 @@ use std::{
 	process::Command,
 };
 
-/// How much of a film is given to the header reader before the clusters.
-const HEAD: usize = 1024 * 1024;
+const HEAD: usize = 1024 * 1024;	// read before the clusters, to find the tracks
 
-/// The window the streaming reader is held to, in bytes.
-///
-/// Deliberately small -- far smaller than a cluster, which is megabytes -- so
-/// that the test fails if the reader ever needs a whole cluster in hand. A
-/// window this size passing is the evidence that a four-gigabyte film can be
-/// repackaged without being held.
+// The window the streaming reader is held to, in bytes. Deliberately small --
+// far smaller than a cluster, which is megabytes -- so that the test fails if
+// the reader ever needs a whole cluster in hand. A window this size passing is
+// the evidence that a four-gigabyte film can be repackaged without being held.
 const WINDOW: usize = 256 * 1024;
 
-/// How many frames of each film are compared unless `MKV_FRAMES` says otherwise.
-const FRAMES: usize = 4000;
-
-/// How many films are read unless `MKV_FILES` says otherwise.
-const FILES: usize = 8;
+const FRAMES: usize = 4000;	// frames of each film compared unless MKV_FRAMES says otherwise
+const FILES: usize = 8;		// films read unless MKV_FILES says otherwise
 
 /// One frame, as either implementation describes it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -284,7 +281,6 @@ fn read_theirs(path: &Path, want: usize, pick: &str) -> Option<Vec<Packet>> {
 	Some(packets)
 }
 
-/// Every `.mkv` under a directory, following no symbolic link twice.
 fn gather(dir: &Path, out: &mut Vec<PathBuf>) -> Outcome<()> {
 	let entries = match fs::read_dir(dir) {
 		Ok(e) => e,
@@ -308,7 +304,6 @@ fn gather(dir: &Path, out: &mut Vec<PathBuf>) -> Outcome<()> {
 	Ok(())
 }
 
-/// A count from the environment, or the given default.
 fn num_from_env(key: &str, or: usize) -> usize {
 	match env::var(key) {
 		Ok(v) => v.parse::<usize>().unwrap_or(or),

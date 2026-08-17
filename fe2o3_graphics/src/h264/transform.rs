@@ -22,6 +22,9 @@
 //! like a failure: the picture comes out, and it is the wrong picture. The norm adjustment table is
 //! parsed out of the published specification by the tests rather than checked against the decoder
 //! that uses it.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::h264::{
 	Scaling,
@@ -30,14 +33,13 @@ use crate::h264::{
 
 use oxedyne_fe2o3_core::prelude::*;
 
-/// Where the four-by-four zig-zag scan puts each coefficient, as a raster index (Table 8-13).
-///
-/// The list is `idx` to `c_ij`, and `c_ij` is row `i` and column `j`, so the entry is `i * 4 + j`.
+// Where the four-by-four zig-zag scan puts each coefficient, as a raster index (Table 8-13).
+// The list is idx to c_ij, and c_ij is row i and column j, so the entry is i * 4 + j.
 pub const ZIGZAG_4X4: [usize; 16] = [
 	0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15,
 ];
 
-/// The same for the eight-by-eight scan (Table 8-14).
+// The same for the eight-by-eight scan (Table 8-14).
 pub const ZIGZAG_8X8: [usize; 64] = [
 	 0,  1,  8, 16,  9,  2,  3, 10,
 	17, 24, 32, 25, 18, 11,  4,  5,
@@ -49,11 +51,10 @@ pub const ZIGZAG_8X8: [usize; 64] = [
 	53, 60, 61, 54, 47, 55, 62, 63,
 ];
 
-/// The norm adjustment for the four-by-four transform, `v` of equation 8-315.
-///
-/// Six rows, one for each quantisation parameter modulo six, and three columns: the value for a
-/// coefficient at an even row and even column, the value for an odd row and odd column, and the
-/// value for everything else.
+// The norm adjustment for the four-by-four transform, v of equation 8-315.
+// Six rows, one for each quantisation parameter modulo six, and three columns: the value for a
+// coefficient at an even row and even column, the value for an odd row and odd column, and the
+// value for everything else.
 pub const NORM_4X4: [[i32; 3]; 6] = [
 	[10, 16, 13],
 	[11, 18, 14],
@@ -63,9 +64,8 @@ pub const NORM_4X4: [[i32; 3]; 6] = [
 	[18, 29, 23],
 ];
 
-/// The norm adjustment for the eight-by-eight transform, `v` of equation 8-318.
-///
-/// Six rows again, and six columns for the six cases equation 8-317 distinguishes.
+// The norm adjustment for the eight-by-eight transform, v of equation 8-318.
+// Six rows again, and six columns for the six cases equation 8-317 distinguishes.
 pub const NORM_8X8: [[i32; 6]; 6] = [
 	[20, 18, 32, 19, 25, 24],
 	[22, 19, 35, 21, 28, 26],
@@ -75,10 +75,9 @@ pub const NORM_8X8: [[i32; 6]; 6] = [
 	[36, 32, 58, 34, 46, 43],
 ];
 
-/// The chroma quantisation parameter for each luma one from 30 upward (Table 8-15).
-///
-/// Below 30 the two are equal; from 30 the chroma parameter climbs more slowly, so that chroma is
-/// quantised less harshly than luma where luma is already coarse.
+// The chroma quantisation parameter for each luma one from 30 upward (Table 8-15).
+// Below 30 the two are equal; from 30 the chroma parameter climbs more slowly, so that chroma is
+// quantised less harshly than luma where luma is already coarse.
 const CHROMA_QP: [i32; 22] = [
 	29, 30, 31, 32, 32, 33, 34, 34, 35, 35, 36,
 	36, 37, 37, 37, 38, 38, 38, 39, 39, 39, 39,
@@ -101,16 +100,12 @@ pub fn chroma_qp(luma_qp: i32, offset: i32) -> i32 {
 /// for every coefficient of a block and the inverse scan is not free.
 #[derive(Clone, Debug)]
 pub struct Weights {
-	/// `LevelScale4x4[m][i * 4 + j]`, for the six quantisation residues and the sixteen positions.
-	pub l4:	[[i32; 16]; 6],
-	/// `LevelScale8x8[m][i * 8 + j]`.
-	pub l8:	[[i32; 64]; 6],
+	pub l4:	[[i32; 16]; 6],	// LevelScale4x4[m][i * 4 + j], six residues by sixteen positions
+	pub l8:	[[i32; 64]; 6],	// LevelScale8x8[m][i * 8 + j]
 }
 
 impl Weights {
 
-	/// The weights for one colour component of an intra macroblock.
-	///
 	/// `component` is 0 for luma, 1 for Cb and 2 for Cr, which is the `iYCbCr` of §8.5.9. Only the
 	/// intra lists are read, because every macroblock this decoder meets is intra.
 	pub fn intra(scaling: &Scaling, component: usize) -> Self {
@@ -357,22 +352,19 @@ pub fn chroma_dc(c: &[i32; 4], w: &Weights, qp: i32) -> [i32; 4] {
 	out
 }
 
-/// The default weights an intra picture uses when nothing else applies.
-///
 /// Kept beside the transforms because a caller assembling a picture wants the flat case without
 /// building a whole [`Scaling`] to get it.
 pub fn flat_intra_weights() -> Weights {
 	Weights::intra(&Scaling::flat(), 0)
 }
 
-/// Whether a set of weights is the flat one, which is what most films quantise against.
+/// Is a set of weights the flat one, which is what most films quantise against?
 pub fn is_flat(scaling: &Scaling) -> bool {
 	scaling.l4.iter().all(|l| l.iter().all(|v| *v == 16))
 		&& scaling.l8.iter().all(|l| l.iter().all(|v| *v == 16))
 }
 
-/// A reminder that the default intra list is not flat, used by the tests.
-pub const DEFAULT_IS_NOT_FLAT: [u8; 16] = DEFAULT_4X4_INTRA;
+pub const DEFAULT_IS_NOT_FLAT: [u8; 16] = DEFAULT_4X4_INTRA; // the tests lean on this
 
 #[cfg(test)]
 mod tests {

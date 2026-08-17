@@ -114,6 +114,9 @@
 //! §9.2 and CABAC §9.3. The `avcC` record the parameter sets arrive in is ISO/IEC 14496-15 §5.3.3.1.
 //! Every constant below names the clause it comes from, and the tests read the tables back out of a
 //! text rendering of the specification where `H264_SPEC_TEXT` points at one.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 pub mod cabac;
 pub mod cavlc;
@@ -124,41 +127,29 @@ pub mod transform;
 
 use oxedyne_fe2o3_core::prelude::*;
 
-/// The largest picture this decoder will describe, in luma samples each way.
-///
-/// Sixteen thousand is past every camera and well inside what the level limits allow; it is a
-/// ceiling against a parameter set that is a mistake, not a limit on real films.
+// The largest picture this decoder will describe, in luma samples each way. Sixteen thousand is
+// past every camera and well inside what the level limits allow; it is a ceiling against a
+// parameter set that is a mistake, not a limit on real films.
 pub const MAX_SIDE: u32 = 16_384;
 
 /// NAL unit types this decoder cares about (Table 7-1).
 pub mod nal {
-	/// A coded slice of a picture that is not an IDR.
-	pub const SLICE: u8 = 1;
-	/// A coded slice of an IDR picture, which is what the first frame of a film is.
-	pub const IDR: u8 = 5;
-	/// Supplemental enhancement information, which changes no sample.
-	pub const SEI: u8 = 6;
-	/// A sequence parameter set.
+	pub const SLICE: u8 = 1;		// a coded slice of a picture that is not an IDR
+	pub const IDR: u8 = 5;			// a coded slice of an IDR picture, the first frame of a film
+	pub const SEI: u8 = 6;			// supplemental enhancement information, which changes no sample
 	pub const SPS: u8 = 7;
-	/// A picture parameter set.
 	pub const PPS: u8 = 8;
-	/// An access unit delimiter.
-	pub const AUD: u8 = 9;
-	/// A prefix NAL unit, which precedes a slice in a scalable stream.
-	pub const PREFIX: u8 = 14;
-	/// A subset sequence parameter set, for a scalable or multiview layer this decoder ignores.
-	pub const SUBSET_SPS: u8 = 15;
+	pub const AUD: u8 = 9;			// an access unit delimiter
+	pub const PREFIX: u8 = 14;		// precedes a slice in a scalable stream
+	pub const SUBSET_SPS: u8 = 15;	// for a scalable or multiview layer this decoder ignores
 }
 
 /// One NAL unit: what it is, and its payload with the emulation prevention undone.
 #[derive(Clone, Debug)]
 pub struct Unit {
-	/// The type, from the low five bits of the one-byte NAL unit header (§7.3.1).
-	pub kind:	u8,
-	/// `nal_ref_idc`: nought where nothing refers to this unit.
-	pub ref_idc:	u8,
-	/// The payload, after the header and with every emulation prevention byte removed.
-	pub body:	Vec<u8>,
+	pub kind:	u8,			// the type, from the low five bits of the NAL unit header (§7.3.1)
+	pub ref_idc:	u8,		// nal_ref_idc: nought where nothing refers to this unit
+	pub body:	Vec<u8>,	// after the header, every emulation prevention byte removed
 }
 
 /// Which kind of slice this is (§7.4.3, Table 7-6).
@@ -168,16 +159,11 @@ pub struct Unit {
 /// refusal can say what it met.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SliceType {
-	/// Predicted from one earlier picture.
-	P,
-	/// Predicted from two.
-	B,
-	/// Intra: predicted only from this picture.
-	I,
-	/// A switching P slice.
-	Sp,
-	/// A switching I slice.
-	Si,
+	P,		// predicted from one earlier picture
+	B,		// predicted from two
+	I,		// intra: predicted only from this picture
+	Sp,		// a switching P slice
+	Si,		// a switching I slice
 }
 
 impl SliceType {
@@ -196,7 +182,7 @@ impl SliceType {
 		})
 	}
 
-	/// Whether every macroblock of the slice is coded without reference to another picture.
+	/// Is every macroblock of the slice coded without reference to another picture?
 	pub fn is_intra(self) -> bool {
 		matches!(self, Self::I | Self::Si)
 	}
@@ -209,109 +195,62 @@ impl SliceType {
 /// skipping to a field without decoding everything in front of it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Sps {
-	/// Which set this is, as a picture parameter set names it.
-	pub id:		u8,
-	/// The profile, as `profile_idc`.
-	pub profile:	u8,
-	/// The level, as `level_idc`.
-	pub level:	u8,
-	/// The chroma sampling: 0 monochrome, 1 for 4:2:0, 2 for 4:2:2, 3 for 4:4:4.
-	pub chroma:	u8,
-	/// Whether the three colour planes are coded as separate monochrome pictures.
-	pub separate_planes:	bool,
-	/// Bits a luma sample.
-	pub luma_bits:	u8,
-	/// Bits a chroma sample.
-	pub chroma_bits:	u8,
-	/// Whether a lossless macroblock skips the transform when its quantisation parameter is nought.
-	pub qpprime_bypass:	bool,
-	/// The picture's width in macroblocks.
-	pub mbs_w:	u32,
-	/// The height of the picture in map units, which for a frame-coded stream is macroblock rows.
-	pub map_units_h:	u32,
-	/// Whether every picture is a frame rather than a field.
-	pub frame_mbs_only:	bool,
-	/// Whether a macroblock pair may be coded as two fields.
-	pub mbaff:	bool,
-	/// How many bits `frame_num` occupies in a slice header.
-	pub frame_num_bits:	u32,
-	/// Which of the three picture order count schemes is in use.
-	pub poc_type:	u32,
-	/// How many bits the picture order count's low half occupies, where the scheme has one.
-	pub poc_lsb_bits:	u32,
-	/// Whether the picture order count's deltas are all nought, under scheme one.
-	pub delta_poc_always_zero:	bool,
-	/// The cropping window, in the units §7.4.2.1.1 counts it in: left, right, top, bottom.
-	pub crop:	[u32; 4],
-	/// The scaling lists this sequence carries, where it carries any.
-	pub scaling:	Option<Scaling>,
-	/// The coded width in luma samples, before cropping.
-	pub coded_w:	u32,
-	/// The coded height, likewise.
-	pub coded_h:	u32,
-	/// The width of the picture as it is meant to be shown.
-	pub width:	u32,
-	/// The height as shown.
-	pub height:	u32,
+	pub id:		u8,						// which set this is, as a picture parameter set names it
+	pub profile:	u8,					// profile_idc
+	pub level:	u8,						// level_idc
+	pub chroma:	u8,						// 0 monochrome, 1 for 4:2:0, 2 for 4:2:2, 3 for 4:4:4
+	pub separate_planes:	bool,		// the three planes coded as separate monochrome pictures
+	pub luma_bits:	u8,					// bits a luma sample
+	pub chroma_bits:	u8,				// bits a chroma sample
+	pub qpprime_bypass:	bool,			// a lossless macroblock skips the transform at qp nought
+	pub mbs_w:	u32,					// the picture's width in macroblocks
+	pub map_units_h:	u32,			// height in map units, macroblock rows for a frame stream
+	pub frame_mbs_only:	bool,			// is every picture a frame rather than a field?
+	pub mbaff:	bool,					// may a macroblock pair be coded as two fields?
+	pub frame_num_bits:	u32,			// bits frame_num occupies in a slice header
+	pub poc_type:	u32,				// which of the three picture order count schemes is in use
+	pub poc_lsb_bits:	u32,			// bits the count's low half occupies, where it has one
+	pub delta_poc_always_zero:	bool,	// are the deltas all nought, under scheme one?
+	pub crop:	[u32; 4],				// left, right, top, bottom, in the units §7.4.2.1.1 counts
+	pub scaling:	Option<Scaling>,	// the scaling lists this sequence carries, if any
+	pub coded_w:	u32,				// coded width in luma samples, before cropping
+	pub coded_h:	u32,				// and coded height
+	pub width:	u32,					// the width the picture is meant to be shown at
+	pub height:	u32,					// and the height as shown
 }
 
 /// What a picture parameter set says about the slices that reference it (§7.3.2.2).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pps {
-	/// Which set this is, as a slice header names it.
-	pub id:		u8,
-	/// Which sequence parameter set it belongs to.
-	pub sps_id:	u8,
-	/// Whether the slice data is coded with the arithmetic coder rather than the length tables.
-	pub cabac:	bool,
-	/// Whether a slice header carries a second picture order count delta.
-	pub bottom_field_order:	bool,
-	/// How many slice groups the picture is cut into.
-	pub slice_groups:	u32,
-	/// The starting quantisation parameter, already offset by the 26 the syntax subtracts.
-	pub init_qp:	i32,
-	/// The offset applied to the luma quantisation parameter to get the Cb one.
-	pub cb_qp_offset:	i32,
-	/// The same for Cr, which defaults to the Cb one where the set does not carry it.
-	pub cr_qp_offset:	i32,
-	/// Whether a slice header carries its own deblocking settings.
-	pub deblocking_control:	bool,
-	/// Whether an intra macroblock may predict from an inter-coded neighbour.
-	pub constrained_intra:	bool,
-	/// Whether a slice header carries a redundant picture count.
-	pub redundant_pic_cnt:	bool,
-	/// Whether a macroblock may use the eight-by-eight transform.
-	pub transform_8x8:	bool,
-	/// The scaling lists this picture carries, where it carries any.
-	pub scaling:	Option<Scaling>,
+	pub id:		u8,						// which set this is, as a slice header names it
+	pub sps_id:	u8,						// which sequence parameter set it belongs to
+	pub cabac:	bool,					// the arithmetic coder rather than the length tables
+	pub bottom_field_order:	bool,		// a slice header carries a second order count delta
+	pub slice_groups:	u32,			// how many slice groups the picture is cut into
+	pub init_qp:	i32,				// already offset by the 26 the syntax subtracts
+	pub cb_qp_offset:	i32,			// luma quantisation parameter to the Cb one
+	pub cr_qp_offset:	i32,			// the same for Cr, defaulting to the Cb one
+	pub deblocking_control:	bool,		// a slice header carries its own deblocking settings
+	pub constrained_intra:	bool,		// may an intra macroblock predict from an inter one?
+	pub redundant_pic_cnt:	bool,		// a slice header carries a redundant picture count
+	pub transform_8x8:	bool,			// may a macroblock use the eight-by-eight transform?
+	pub scaling:	Option<Scaling>,	// the scaling lists this picture carries, if any
 }
 
 /// What one slice header says (§7.3.3).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Slice {
-	/// The first macroblock of the picture this slice codes, in raster order.
-	pub first_mb:	u32,
-	/// Which kind of slice this is.
+	pub first_mb:	u32,		// the first macroblock this slice codes, in raster order
 	pub kind:	SliceType,
-	/// Whether every slice of the picture is of that kind, which the second range of `slice_type`
-	/// codes.
-	pub all_same:	bool,
-	/// Which picture parameter set it references.
-	pub pps_id:	u8,
-	/// Whether this slice belongs to an IDR picture.
-	pub idr:	bool,
-	/// The quantisation parameter the slice starts at, already summed with the set's.
-	pub qp:		i32,
-	/// Which of the three deblocking dispositions applies: 0 on, 1 off, 2 off across slice edges.
-	pub deblocking:	u32,
-	/// The offset added to the deblocking filter's first threshold.
-	pub alpha_offset:	i32,
-	/// The offset added to its second.
-	pub beta_offset:	i32,
-	/// Which context initialisation table a non-intra slice's arithmetic coder starts from.
-	pub cabac_init_idc:	u32,
-	/// Where the slice's entropy-coded data begins, in bits from the start of the unescaped payload.
-	pub data_bit:	usize,
+	pub all_same:	bool,		// every slice of the picture is of that kind
+	pub pps_id:	u8,				// which picture parameter set it references
+	pub idr:	bool,			// does this slice belong to an IDR picture?
+	pub qp:		i32,			// where the slice starts, already summed with the set's
+	pub deblocking:	u32,		// 0 on, 1 off, 2 off across slice edges
+	pub alpha_offset:	i32,	// added to the deblocking filter's first threshold
+	pub beta_offset:	i32,	// and to its second
+	pub cabac_init_idc:	u32,	// which table a non-intra slice's coder starts from
+	pub data_bit:	usize,		// where the entropy-coded data begins, bits into the payload
 }
 
 /// A set of quantisation weights (§7.4.2.1.1.1, §8.5.9).
@@ -321,24 +260,21 @@ pub struct Slice {
 /// weight matrix where they are used, in [`transform`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Scaling {
-	/// `ScalingList4x4[0..6]`, for intra and inter Y, Cb and Cr in that order.
-	pub l4:	[[u8; 16]; 6],
-	/// `ScalingList8x8[0..6]`, in the same order. Only the first and second are used by a 4:2:0
-	/// picture, and only the first by an intra one.
-	pub l8:	[[u8; 64]; 6],
+	pub l4:	[[u8; 16]; 6],	// ScalingList4x4[0..6], intra then inter Y, Cb, Cr
+	pub l8:	[[u8; 64]; 6],	// ScalingList8x8[0..6], the same order
 }
 
-/// The default four-by-four weights for an intra macroblock (Table 7-3).
+// The default four-by-four weights for an intra macroblock (Table 7-3).
 pub const DEFAULT_4X4_INTRA: [u8; 16] = [
 	6, 13, 13, 20, 20, 20, 28, 28, 28, 28, 32, 32, 32, 37, 37, 42,
 ];
 
-/// The default four-by-four weights for an inter macroblock (Table 7-3).
+// The default four-by-four weights for an inter macroblock (Table 7-3).
 pub const DEFAULT_4X4_INTER: [u8; 16] = [
 	10, 14, 14, 20, 20, 20, 24, 24, 24, 24, 27, 27, 27, 30, 30, 34,
 ];
 
-/// The default eight-by-eight weights for an intra macroblock (Table 7-4).
+// The default eight-by-eight weights for an intra macroblock (Table 7-4).
 pub const DEFAULT_8X8_INTRA: [u8; 64] = [
 	6, 10, 10, 13, 11, 13, 16, 16, 16, 16, 18, 18, 18, 18, 18, 23,
 	23, 23, 23, 23, 23, 25, 25, 25, 25, 25, 25, 25, 27, 27, 27, 27,
@@ -346,7 +282,7 @@ pub const DEFAULT_8X8_INTRA: [u8; 64] = [
 	31, 33, 33, 33, 33, 33, 36, 36, 36, 36, 38, 38, 38, 40, 40, 42,
 ];
 
-/// The default eight-by-eight weights for an inter macroblock (Table 7-4).
+// The default eight-by-eight weights for an inter macroblock (Table 7-4).
 pub const DEFAULT_8X8_INTER: [u8; 64] = [
 	9, 13, 13, 15, 13, 15, 17, 17, 17, 17, 19, 19, 19, 19, 19, 21,
 	21, 21, 21, 21, 21, 22, 22, 22, 22, 22, 22, 22, 24, 24, 24, 24,
@@ -460,11 +396,8 @@ fn read_list(b: &mut Bits, list: &mut [u8]) -> Outcome<bool> {
 /// The parameter sets carried in an `avcC` decoder configuration record (ISO/IEC 14496-15 §5.3.3.1).
 #[derive(Clone, Debug)]
 pub struct Config {
-	/// How many bytes prefix each NAL unit in the film's own samples.
-	pub length_size:	usize,
-	/// The sequence parameter sets.
+	pub length_size:	usize,	// bytes prefixing each NAL unit in the film's own samples
 	pub sps:	Vec<Unit>,
-	/// The picture parameter sets.
 	pub pps:	Vec<Unit>,
 }
 
@@ -642,30 +575,24 @@ pub fn rbsp(nal: &[u8]) -> Vec<u8> {
 
 /// A reader of the bits of an RBSP, most significant first.
 pub struct Bits<'a> {
-	/// The bytes being read.
 	buf:	&'a [u8],
-	/// The next bit, counted from the first bit of the first byte.
-	pos:	usize,
+	pos:	usize,		// the next bit, counted from the first bit of the first byte
 }
 
 impl<'a> Bits<'a> {
 
-	/// A reader positioned at the first bit.
 	pub fn new(buf: &'a [u8]) -> Self {
 		Self { buf, pos: 0 }
 	}
 
-	/// A reader positioned at a given bit.
 	pub fn at(buf: &'a [u8], pos: usize) -> Self {
 		Self { buf, pos }
 	}
 
-	/// How many bits are left.
 	pub fn left(&self) -> usize {
 		(self.buf.len() * 8).saturating_sub(self.pos)
 	}
 
-	/// How many bits have been read.
 	pub fn consumed(&self) -> usize {
 		self.pos
 	}
@@ -690,7 +617,6 @@ impl<'a> Bits<'a> {
 		Ok(v)
 	}
 
-	/// The next bit as a flag.
 	pub fn flag(&mut self) -> Outcome<bool> {
 		Ok(res!(self.u(1)) == 1)
 	}
@@ -756,7 +682,7 @@ impl<'a> Bits<'a> {
 		Ok(if k % 2 == 1 { m } else { -m })
 	}
 
-	/// Whether any syntax remains before the trailing bits (§7.2, `more_rbsp_data`).
+	/// Does any syntax remain before the trailing bits (§7.2, `more_rbsp_data`)?
 	///
 	/// The payload ends with a one bit and then zeroes to the byte boundary, so what is left is
 	/// syntax only if there is a set bit somewhere after the current position other than that one.

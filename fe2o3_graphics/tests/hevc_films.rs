@@ -9,6 +9,9 @@
 //! This test asks that question of the real corpus and reports the answer rather
 //! than asserting one, because "how many films can be drawn today" is a
 //! measurement and not a promise. Point `HEVC_FILMS` at a directory of films.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_graphics::{

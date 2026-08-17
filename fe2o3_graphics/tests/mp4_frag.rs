@@ -75,6 +75,9 @@
 //! Point `MKV_CORPUS` at a directory of films. Output goes under
 //! `~/.cache/ochre-remux-probe`, **never `/tmp`**, which is a tmpfs here and is
 //! charged to the memory budget of whoever writes to it.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_graphics::{
@@ -90,35 +93,26 @@ use std::{
 	process::Command,
 };
 
-/// How much of a film is read before the clusters, to find the tracks.
-const HEAD: usize = 1024 * 1024;
+const HEAD: usize = 1024 * 1024;	// read before the clusters, to find the tracks
+const WINDOW: usize = 256 * 1024;	// the window the frame reader is held to
+const FRAMES: usize = 300;		// pictures repackaged, deciding how long the written film is
 
-/// The window the frame reader is held to.
-const WINDOW: usize = 256 * 1024;
-
-/// How many pictures are repackaged, which decides how long the written film is.
-const FRAMES: usize = 300;
-
-/// How many fragments the film is cut into.
-///
-/// More than a handful, because one fragment carrying everything would exercise
-/// none of the bookkeeping that runs between them, which is the whole subject.
+// How many fragments the film is cut into: more than a handful, because one
+// fragment carrying everything would exercise none of the bookkeeping that runs
+// between them, which is the whole subject.
 const FRAGS: usize = 6;
+const MIN_FRAGS: usize = 4;	// fewer and fragmentation is not being tested, so the film is skipped
 
-/// Fewer than this and fragmentation is not being tested, so the film is skipped.
-const MIN_FRAGS: usize = 4;
-
-/// The timescale both tracks are written in: ticks a second.
-///
-/// Milliseconds, matching the unit Matroska stamps its frames in, so no time is
-/// rescaled and no rounding is introduced anywhere between the source and the
-/// comparison. A sound track is more usually written on its sampling rate, and
-/// a remuxer in earnest should be; here the point is to compare times exactly,
-/// and a rate of 44100 does not divide a millisecond.
+// The timescale both tracks are written in, in ticks a second. Milliseconds,
+// matching the unit Matroska stamps its frames in, so no time is rescaled and no
+// rounding is introduced anywhere between the source and the comparison. A sound
+// track is more usually written on its sampling rate, and a remuxer in earnest
+// should be; here the point is to compare times exactly, and a rate of 44100
+// does not divide a millisecond.
 const SCALE: u32 = 1000;
 
-/// How far `sound-delayed` moves the sound, in ticks -- glaring to a viewer and
-/// invisible to every check but the last.
+// How far sound-delayed moves the sound, in ticks -- glaring to a viewer and
+// invisible to every check but the last.
 const DELAY: i32 = 200;
 
 #[test]
@@ -335,26 +329,17 @@ struct Made {
 	bytes:	Vec<u8>,
 	w:		u16,
 	h:		u16,
-	/// Channels of sound, as the source states them.
-	chans:	u16,
-	/// The presentation times written for the picture, in decode order, on the
-	/// picture track's own timeline.
-	vid:	Vec<i64>,
-	/// The same for the sound, on the sound track's own timeline.
-	aud:	Vec<i64>,
-	/// Where each fragment begins: the index of its first picture sample and of
-	/// its first sound sample.
-	starts:	Vec<(usize, usize)>,
-	/// How far the whole picture track is delayed by its composition offsets.
-	shift:	i64,
-	/// How far the first sound sample sits after the first picture sample on the
-	/// source's clock.
-	///
-	/// The one misalignment this test introduces itself, and it is under a frame
-	/// of sound: each track begins at its own decode time nought, and the sound
-	/// frame nearest the first picture is rarely on the same instant. It is
-	/// carried here because the expectations are built with it and check 5
-	/// therefore holds regardless of it.
+	chans:	u16,			// channels of sound, as the source states them
+	vid:	Vec<i64>,		// picture times written, in decode order, on its own timeline
+	aud:	Vec<i64>,		// the same for the sound, on the sound track's own timeline
+	starts:	Vec<(usize, usize)>,	// each fragment's first picture and first sound sample
+	shift:	i64,			// how far the picture track is delayed by its offsets
+	// How far the first sound sample sits after the first picture sample on the
+	// source's clock. The one misalignment this test introduces itself, and it is
+	// under a frame of sound: each track begins at its own decode time nought, and
+	// the sound frame nearest the first picture is rarely on the same instant. It
+	// is carried here because the expectations are built with it and check 5
+	// therefore holds regardless of it.
 	lead:	i64,
 }
 
@@ -784,7 +769,6 @@ fn number(fields: &[(String, String)], key: &str) -> Outcome<i64> {
 	}
 }
 
-/// How many streams the written film holds.
 fn stream_count(path: &Path) -> Outcome<usize> {
 	let out = res!(Command::new("ffprobe")
 		.args([
@@ -873,7 +857,6 @@ fn times_of(path: &Path, select: &str, film: &Path) -> Outcome<Vec<i64>> {
 
 // --------------------------------------------------------------- the corpus
 
-/// Every `.mkv` under a directory.
 fn gather(dir: &Path, out: &mut Vec<PathBuf>) -> Outcome<()> {
 	let entries = match fs::read_dir(dir) {
 		Ok(e) => e,
@@ -896,7 +879,6 @@ fn gather(dir: &Path, out: &mut Vec<PathBuf>) -> Outcome<()> {
 	Ok(())
 }
 
-/// A count from the environment, or the given default.
 fn num_from_env(key: &str, or: usize) -> usize {
 	match env::var(key) {
 		Ok(v) => v.parse::<usize>().unwrap_or(or),

@@ -40,6 +40,9 @@
 //! libjpeg calls `islow`, at the same fixed-point precision and with the same rounding. The colour
 //! transform and the chroma upsampler are likewise the fixed-point forms libjpeg uses. Two decoders
 //! of the same file are not obliged to agree to the last bit, but these choices mean this one does.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::pixmap::{
 	Pixmap,
@@ -54,46 +57,27 @@ use std::num::Wrapping;
 // │ MARKERS                                                                    │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Start of image.
-const SOI:	u8 = 0xD8;
-/// End of image.
-const EOI:	u8 = 0xD9;
-/// Start of scan.
-const SOS:	u8 = 0xDA;
-/// Define quantisation tables.
-const DQT:	u8 = 0xDB;
-/// Define number of lines.
-const DNL:	u8 = 0xDC;
-/// Define restart interval.
-const DRI:	u8 = 0xDD;
-/// Define Huffman tables.
-const DHT:	u8 = 0xC4;
-/// Define arithmetic coding conditioning.
-const DAC:	u8 = 0xCC;
-/// The first restart marker; there are eight, consecutive.
-const RST0:	u8 = 0xD0;
-/// The last restart marker.
-const RST7:	u8 = 0xD7;
-/// The first application segment; there are sixteen, consecutive.
-const APP0:	u8 = 0xE0;
-/// The last application segment.
-const APP15:	u8 = 0xEF;
-/// The application segment an ICC colour profile travels in.
-const ICC_APP2:	u8 = 0xE2;
-/// The application segment Adobe uses to declare a colour transform.
-const ADOBE_APP14: u8 = 0xEE;
-/// A comment.
-const COM:	u8 = 0xFE;
-/// A temporary marker used only by arithmetic coding, and carrying no length.
-const TEM:	u8 = 0x01;
+const SOI:	u8 = 0xD8;			// start of image
+const EOI:	u8 = 0xD9;			// end of image
+const SOS:	u8 = 0xDA;			// start of scan
+const DQT:	u8 = 0xDB;			// define quantisation tables
+const DNL:	u8 = 0xDC;			// define number of lines
+const DRI:	u8 = 0xDD;			// define restart interval
+const DHT:	u8 = 0xC4;			// define Huffman tables
+const DAC:	u8 = 0xCC;			// define arithmetic coding conditioning
+const RST0:	u8 = 0xD0;			// the first restart marker; there are eight, consecutive
+const RST7:	u8 = 0xD7;			// the last
+const APP0:	u8 = 0xE0;			// the first application segment; there are sixteen
+const APP15:	u8 = 0xEF;		// the last
+const ICC_APP2:	u8 = 0xE2;		// where an ICC colour profile travels
+const ADOBE_APP14: u8 = 0xEE;	// where Adobe declares a colour transform
+const COM:	u8 = 0xFE;			// a comment
+const TEM:	u8 = 0x01;			// arithmetic coding only, and carries no length
 
-/// The side of a DCT block, in samples.
-const DCTSIZE: usize = 8;
+const DCTSIZE: usize = 8;	// the side of a DCT block, in samples
+const DCTSIZE2: usize = 64;	// and its coefficient count
 
-/// The number of coefficients in a DCT block.
-const DCTSIZE2: usize = 64;
-
-/// The natural (row-major) position each zigzag position maps to.
+// The natural (row-major) position each zigzag position maps to.
 const NATURAL: [usize; DCTSIZE2] = [
 	 0,  1,  8, 16,  9,  2,  3, 10,
 	17, 24, 32, 25, 18, 11,  4,  5,
@@ -105,8 +89,7 @@ const NATURAL: [usize; DCTSIZE2] = [
 	53, 60, 61, 54, 47, 55, 62, 63,
 ];
 
-/// How many bits of a Huffman code the lookahead table resolves in one step.
-const LOOKAHEAD: usize = 8;
+const LOOKAHEAD: usize = 8; // bits of a Huffman code the lookahead table resolves in one step
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ HUFFMAN TABLES                                                             │
@@ -115,17 +98,11 @@ const LOOKAHEAD: usize = 8;
 /// A Huffman table, derived from the counts and values a DHT segment carries.
 #[derive(Clone, Debug)]
 struct Huff {
-	/// The largest code of each length, or -1 where that length has no codes.
-	maxcode:	[i32; 18],
-	/// The smallest code of each length.
-	mincode:	[i32; 17],
-	/// Where each length's values begin in `vals`.
-	valptr:		[usize; 17],
-	/// The symbols, in canonical code order.
-	vals:		Vec<u8>,
-	/// For each possible next [`LOOKAHEAD`] bits, the code length and symbol, or a length of zero
-	/// where no code that short begins with them.
-	look:		Vec<(u8, u8)>,
+	maxcode:	[i32; 18],		// largest code of each length, -1 where there are none
+	mincode:	[i32; 17],		// and the smallest
+	valptr:		[usize; 17],	// where each length's values begin in vals
+	vals:		Vec<u8>,		// the symbols, in canonical code order
+	look:		Vec<(u8, u8)>,	// by the next LOOKAHEAD bits: code length and symbol, 0 if none
 }
 
 impl Huff {
@@ -220,24 +197,16 @@ impl Huff {
 /// zero bits rather than reading past it, which is what a decoder must do with a truncated file if
 /// it is to show the part that did arrive.
 struct Bits<'a> {
-	/// The whole file.
-	buf:	&'a [u8],
-	/// The next byte to read.
-	pos:	usize,
-	/// The bit buffer, whose lowest `cnt` bits are the ones not yet consumed.
-	acc:	u32,
-	/// How many bits of `acc` are valid.
-	cnt:	u32,
-	/// Set once a marker or the end of the file has been met, after which the reader pads.
-	hit:	bool,
-	/// How many of the `cnt` bits are padding rather than data, which is how the reader knows the
-	/// difference between reading ahead over the end and having genuinely run out.
-	pad:	u32,
+	buf:	&'a [u8],	// the whole file
+	pos:	usize,		// the next byte to read
+	acc:	u32,		// the bit buffer; its lowest cnt bits are unconsumed
+	cnt:	u32,		// how many bits of acc are valid
+	hit:	bool,		// a marker or the end was met, so the reader now pads
+	pad:	u32,		// how many of the cnt bits are padding rather than data
 }
 
 impl<'a> Bits<'a> {
 
-	/// Starts reading entropy-coded data at an offset.
 	fn new(buf: &'a [u8], pos: usize) -> Self {
 		Self { buf, pos, acc: 0, cnt: 0, hit: false, pad: 0 }
 	}
@@ -292,7 +261,6 @@ impl<'a> Bits<'a> {
 		self.hit && self.pad >= self.cnt
 	}
 
-	/// The next bit.
 	fn bit(&mut self) -> u32 {
 		if self.cnt == 0 {
 			self.fill();
@@ -315,7 +283,6 @@ impl<'a> Bits<'a> {
 		(self.acc >> self.cnt) & ((1u32 << n) - 1)
 	}
 
-	/// Decodes one Huffman symbol.
 	fn huff(&mut self, t: &Huff) -> Outcome<u8> {
 		self.fill();
 		if self.cnt >= LOOKAHEAD as u32 {
@@ -405,40 +372,26 @@ fn extend(v: u32, n: u32) -> i32 {
 /// An integer that wraps rather than trapping, so a hostile coefficient cannot panic the decoder.
 type W = Wrapping<i32>;
 
-/// Wraps an integer for the fixed-point arithmetic below.
 const fn w(v: i32) -> W {
 	Wrapping(v)
 }
 
-/// The number of fractional bits the constants carry.
-const CONST_BITS: usize = 13;
+const CONST_BITS: usize = 13;	// fractional bits the constants below carry
+const PASS1_BITS: usize = 2;	// extra fractional bits carried between the two passes
 
-/// The number of extra fractional bits carried between the two passes.
-const PASS1_BITS: usize = 2;
-
-/// 0.541196100, the cosine difference the even part's rotation uses.
+//// The rotation constants of the even and odd parts, named for the value each stands for and
+//// held at CONST_BITS fractional bits. The first three belong to the even part.
 const FIX_0_541196100: W = w(4433);
-/// 0.765366865.
 const FIX_0_765366865: W = w(6270);
-/// 1.847759065.
 const FIX_1_847759065: W = w(15137);
-/// 0.298631336.
 const FIX_0_298631336: W = w(2446);
-/// 2.053119869.
 const FIX_2_053119869: W = w(16819);
-/// 3.072711026.
 const FIX_3_072711026: W = w(25172);
-/// 1.501321110.
 const FIX_1_501321110: W = w(12299);
-/// 0.899976223.
 const FIX_0_899976223: W = w(7373);
-/// 2.562915447.
 const FIX_2_562915447: W = w(20995);
-/// 1.961570560.
 const FIX_1_961570560: W = w(16069);
-/// 0.390180644.
 const FIX_0_390180644: W = w(3196);
-/// 1.175875602.
 const FIX_1_175875602: W = w(9633);
 
 /// Rounds a fixed-point value down by `n` bits, to nearest.
@@ -446,7 +399,6 @@ fn descale(x: W, n: usize) -> W {
 	(x + w(1 << (n - 1))) >> n
 }
 
-/// Clamps an integer into a sample.
 fn clamp8(v: i32) -> u8 {
 	if v < 0 {
 		0
@@ -551,19 +503,14 @@ fn idct_dc(coef: &[i16], q: &[u16; DCTSIZE2]) -> u8 {
 
 /// The fixed-point tables the YCbCr to RGB transform uses, at sixteen fractional bits.
 struct YccTab {
-	/// The red contribution of Cr, already descaled.
-	cr_r:	[i32; 256],
-	/// The blue contribution of Cb, already descaled.
-	cb_b:	[i32; 256],
-	/// The green contribution of Cr, still scaled.
-	cr_g:	[i32; 256],
-	/// The green contribution of Cb, still scaled, carrying the rounding term.
-	cb_g:	[i32; 256],
+	cr_r:	[i32; 256],		// the red contribution of Cr, already descaled
+	cb_b:	[i32; 256],		// the blue contribution of Cb, already descaled
+	cr_g:	[i32; 256],		// the green contribution of Cr, still scaled
+	cb_g:	[i32; 256],		// the same for Cb, carrying the rounding term
 }
 
 impl YccTab {
 
-	/// Builds the tables.
 	fn new() -> Self {
 		let half = 1i32 << 15;
 		let mut t = Self {
@@ -600,43 +547,27 @@ impl YccTab {
 /// How the samples of a frame's components are to be read as colour.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Space {
-	/// One component: luminance.
-	Grey,
-	/// Three components: luminance and two chrominances.
-	Ycc,
-	/// Three components already in red, green and blue.
-	Rgb,
-	/// Four components: cyan, magenta, yellow and black, stored inverted where Adobe says so.
-	Cmyk,
-	/// Four components: the first three a YCbCr encoding of inverted CMY, the fourth black.
-	Ycck,
+	Grey,	// one component: luminance
+	Ycc,	// three: luminance and two chrominances
+	Rgb,	// three, already red, green and blue
+	Cmyk,	// four: cyan, magenta, yellow, black, inverted where Adobe says
+	Ycck,	// four: a YCbCr encoding of inverted CMY, then black
 }
 
 /// One component of a frame.
 #[derive(Clone, Debug)]
 struct Comp {
-	/// The identifier a scan header names it by.
-	id:	u8,
-	/// Horizontal sampling factor.
-	h:	usize,
-	/// Vertical sampling factor.
-	v:	usize,
-	/// Which of the four quantisation table slots it uses.
-	tq:	usize,
-	/// Width in samples, before upsampling.
-	dw:	usize,
-	/// Height in samples, before upsampling.
-	dh:	usize,
-	/// Width in blocks, of the samples that carry image.
-	bw:	usize,
-	/// Height in blocks, of the samples that carry image.
-	bh:	usize,
-	/// Width in blocks of the allocation, which the MCU grid rounds up.
-	bwp:	usize,
-	/// Height in blocks of the allocation.
-	bhp:	usize,
-	/// The coefficients, natural order within each block, row-major across blocks.
-	coef:	Vec<i16>,
+	id:	u8,				// the identifier a scan header names it by
+	h:	usize,			// horizontal sampling factor
+	v:	usize,			// vertical sampling factor
+	tq:	usize,			// which of the four quantisation table slots it uses
+	dw:	usize,			// width in samples, before upsampling
+	dh:	usize,			// and height
+	bw:	usize,			// width in blocks, of the samples that carry image
+	bh:	usize,			// and height
+	bwp:	usize,		// width in blocks of the allocation, which the MCU grid rounds up
+	bhp:	usize,		// and height
+	coef:	Vec<i16>,	// natural order within a block, row-major across blocks
 }
 
 impl Comp {
@@ -649,28 +580,19 @@ impl Comp {
 
 /// A frame, and everything the scans within it have filled in.
 struct Frame {
-	/// Whether the coefficients arrive over several scans, each refining the last.
-	prog:	bool,
-	/// Width in pixels.
-	w:	usize,
-	/// Height in pixels.
-	h:	usize,
-	/// The largest horizontal sampling factor across the components.
-	hmax:	usize,
-	/// The largest vertical sampling factor.
-	vmax:	usize,
-	/// MCUs across.
-	mcux:	usize,
-	/// MCUs down.
-	mcuy:	usize,
-	/// The components, in the order the frame header gives them.
-	comps:	Vec<Comp>,
-	/// For each component, the successive-approximation bit at which each coefficient was last
-	/// received, or -1 for a coefficient no scan ever carried.
+	prog:	bool,					// do the coefficients arrive over several scans, each refining?
+	w:	usize,						// width in pixels
+	h:	usize,						// height in pixels
+	hmax:	usize,					// the largest horizontal sampling factor across the components
+	vmax:	usize,					// and vertical
+	mcux:	usize,					// MCUs across
+	mcuy:	usize,					// and down
+	comps:	Vec<Comp>,				// in the order the frame header gives them
+	// Per component, the successive-approximation bit at which each coefficient was last
+	// received, or -1 for a coefficient no scan ever carried.
 	seen:	Vec<[i8; DCTSIZE2]>,
 }
 
-/// Rounds a division up.
 fn ceil_div(a: usize, b: usize) -> usize {
 	if b == 0 {
 		0
@@ -685,20 +607,13 @@ fn ceil_div(a: usize, b: usize) -> usize {
 
 /// The tables and frame a file has declared so far.
 struct Reader {
-	/// The four quantisation table slots, in natural order.
-	quant:	[Option<[u16; DCTSIZE2]>; 4],
-	/// The four DC Huffman table slots.
-	dc:	[Option<Huff>; 4],
-	/// The four AC Huffman table slots.
-	ac:	[Option<Huff>; 4],
-	/// The restart interval in MCUs, or zero for none.
-	ri:	usize,
-	/// Whether a JFIF APP0 segment was seen, which by itself makes a three-component frame YCbCr.
-	jfif:	bool,
-	/// The colour transform an Adobe APP14 segment declared, if there was one.
-	adobe:	Option<u8>,
-	/// The frame, once its header has been read.
-	frame:	Option<Frame>,
+	quant:	[Option<[u16; DCTSIZE2]>; 4],	// the four slots, in natural order
+	dc:	[Option<Huff>; 4],					// the four DC Huffman table slots
+	ac:	[Option<Huff>; 4],					// and the four AC ones
+	ri:	usize,								// the restart interval in MCUs, or zero for none
+	jfif:	bool,							// a JFIF APP0 alone makes a three-component frame YCbCr
+	adobe:	Option<u8>,						// the colour transform an Adobe APP14 declared
+	frame:	Option<Frame>,					// the frame, once its header has been read
 }
 
 /// Removes the metadata a JPEG carries, without touching the image itself.
@@ -715,10 +630,6 @@ struct Reader {
 ///
 /// Kept, because dropping them changes how the file decodes or renders: JFIF (APP0), an ICC colour
 /// profile (APP2), and the Adobe colour transform (APP14).
-///
-/// # Errors
-///
-/// Fails if the input is not a JPEG, or if a segment runs past the end of the buffer.
 pub fn strip_metadata(buf: &[u8]) -> Outcome<Vec<u8>> {
 	if buf.len() < 2 || buf[0] != 0xFF || buf[1] != SOI {
 		return Err(err!("The data does not begin with a JPEG start-of-image marker."; 
@@ -1070,30 +981,20 @@ fn read_huff(
 /// One component of a scan: which component of the frame, and which two table slots it reads with.
 #[derive(Clone, Copy, Debug)]
 struct ScanComp {
-	/// The index of the component within the frame.
-	ci:	usize,
-	/// The DC table slot.
-	td:	usize,
-	/// The AC table slot.
-	ta:	usize,
+	ci:	usize,	// the index of the component within the frame
+	td:	usize,	// the DC table slot
+	ta:	usize,	// and the AC one
 }
 
-/// A scan header.
 #[derive(Clone, Debug)]
 struct Scan {
-	/// The components the scan carries, in the order it gives them.
-	comps:	Vec<ScanComp>,
-	/// The first coefficient of the spectral band, in zigzag order.
-	ss:	usize,
-	/// The last coefficient of the spectral band.
-	se:	usize,
-	/// The bit position the previous scan of this band reached, or zero for the first.
-	ah:	u32,
-	/// The bit position this scan reaches.
-	al:	u32,
+	comps:	Vec<ScanComp>,	// in the order the scan gives them
+	ss:	usize,				// first coefficient of the spectral band, zigzag order
+	se:	usize,				// and the last
+	ah:	u32,				// bit position the previous scan of this band reached
+	al:	u32,				// and the one this scan reaches
 }
 
-/// Reads a scan header.
 fn read_scan(data: &[u8], frame: &Frame, at: usize) -> Outcome<Scan> {
 	if data.is_empty() {
 		return Err(err!("The scan header at offset {} is empty.", at; Invalid, Input, Decode));
@@ -1170,21 +1071,17 @@ fn read_scan(data: &[u8], frame: &Frame, at: usize) -> Outcome<Scan> {
 
 /// A borrowed pair of Huffman tables, one for each class.
 struct Tables<'a> {
-	/// The DC table, absent for a scan that reads no DC coefficients.
-	dc:	Option<&'a Huff>,
-	/// The AC table, absent for a scan that reads no AC coefficients.
-	ac:	Option<&'a Huff>,
+	dc:	Option<&'a Huff>,	// absent for a scan that reads no DC coefficients
+	ac:	Option<&'a Huff>,	// absent for a scan that reads no AC coefficients
 }
 
 /// The state a scan carries from one block to the next.
 struct ScanState {
-	/// The DC predictor of each scan component.
-	pred:	Vec<i32>,
-	/// How many end-of-band runs remain.
-	eobrun:	u32,
+	pred:	Vec<i32>,	// the DC predictor of each scan component
+	eobrun:	u32,		// how many end-of-band runs remain
 }
 
-/// Decodes the entropy-coded data of one scan, and returns the offset it ended at.
+/// Decodes the entropy-coded data of one scan; the offset it ended at comes back.
 fn decode_scan(
 	buf:	&[u8],
 	start:	usize,
@@ -1313,7 +1210,6 @@ fn need_ac<'a>(tabs: &'a Tables) -> Outcome<&'a Huff> {
 	}
 }
 
-/// The DC table a scan needs.
 fn need_dc<'a>(tabs: &'a Tables) -> Outcome<&'a Huff> {
 	match tabs.dc {
 		Some(t) => Ok(t),
@@ -1523,14 +1419,10 @@ fn block_ac_refine(
 
 /// One component's samples, after the inverse DCT and before upsampling.
 struct Plane {
-	/// The samples, row-major.
-	data:	Vec<u8>,
-	/// The distance between rows, which the MCU grid may round up beyond `dw`.
-	stride:	usize,
-	/// The width that carries image; the rest of each row is padding.
-	dw:	usize,
-	/// The height that carries image.
-	dh:	usize,
+	data:	Vec<u8>,	// the samples, row-major
+	stride:	usize,		// row distance, which the MCU grid may round up beyond dw
+	dw:	usize,			// the width that carries image; the rest of a row is padding
+	dh:	usize,			// and the height
 }
 
 impl Plane {
@@ -1747,8 +1639,8 @@ fn colourise(
 // smooth surface fitted through the block means, and libjpeg applies it by default. A file whose
 // scans all completed is untouched, because there is then nothing to estimate.
 
-/// The five coefficients an estimate may fill in: their zigzag position, their natural position, and
-/// the multiplier and neighbour combination Annex K.8 gives each.
+// The five coefficients an estimate may fill in: their zigzag position, their natural position,
+// and the multiplier and neighbour combination Annex K.8 gives each.
 const SMOOTH: [(usize, usize, i64); 5] = [
 	(1, 1, 36),	// One cycle across.
 	(2, 8, 36),	// One cycle down.
@@ -1757,7 +1649,7 @@ const SMOOTH: [(usize, usize, i64); 5] = [
 	(5, 2, 9),	// Two cycles across.
 ];
 
-/// Whether a frame is one block smoothing has anything to say about.
+/// Is this a frame block smoothing has anything to say about?
 ///
 /// Every component's DC must have arrived, since the estimates are built from it, and at least one
 /// of the five estimated coefficients must be inexact somewhere.
@@ -1983,8 +1875,6 @@ fn quant_of(r: &Reader, c: &Comp) -> Outcome<[u16; DCTSIZE2]> {
 	}
 }
 
-/// Decodes a JPEG into a pixmap, at its full size.
-///
 /// The pixels come out opaque: JPEG carries no alpha channel.
 pub fn decode(buf: &[u8]) -> Outcome<Pixmap> {
 	let mut r = res!(parse(buf));
@@ -2119,12 +2009,9 @@ pub fn dimensions(buf: &[u8]) -> Outcome<(usize, usize)> {
 /// How much the two chrominance channels are reduced against the luminance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Chroma {
-	/// 4:4:4 -- a chrominance sample for every pixel.
-	Full,
-	/// 4:2:2 -- a chrominance sample for every two pixels across.
-	Half,
-	/// 4:2:0 -- a chrominance sample for every two pixels across and two down.
-	Quarter,
+	Full,		// 4:4:4 -- a chrominance sample for every pixel
+	Half,		// 4:2:2 -- one for every two pixels across
+	Quarter,	// 4:2:0 -- one for every two across and two down
 }
 
 impl Chroma {
@@ -2142,12 +2029,9 @@ impl Chroma {
 /// What an encoder is asked for.
 #[derive(Clone, Copy, Debug)]
 pub struct Options {
-	/// Quality from 1 to 100, scaling the quantisation tables the way libjpeg's does.
-	pub quality:	u8,
-	/// How much the chrominance is reduced; ignored for a greyscale image.
-	pub chroma:	Chroma,
-	/// Whether to write one luminance component rather than three.
-	pub grey:	bool,
+	pub quality:	u8,		// 1 to 100, scaling the tables the way libjpeg's does
+	pub chroma:	Chroma,		// ignored for a greyscale image
+	pub grey:	bool,		// write one luminance component rather than three
 }
 
 impl Default for Options {
@@ -2162,7 +2046,7 @@ impl Default for Options {
 	}
 }
 
-/// The luminance quantisation table of the specification's Annex K, in natural order.
+// The luminance quantisation table of the specification's Annex K, in natural order.
 const QUANT_LUMA: [u16; DCTSIZE2] = [
 	16, 11, 10, 16,  24,  40,  51,  61,
 	12, 12, 14, 19,  26,  58,  60,  55,
@@ -2174,7 +2058,7 @@ const QUANT_LUMA: [u16; DCTSIZE2] = [
 	72, 92, 95, 98, 112, 100, 103,  99,
 ];
 
-/// The chrominance quantisation table of the specification's Annex K, in natural order.
+// The chrominance quantisation table of the specification's Annex K, in natural order.
 const QUANT_CHROMA: [u16; DCTSIZE2] = [
 	17, 18, 24, 47, 99, 99, 99, 99,
 	18, 21, 26, 66, 99, 99, 99, 99,
@@ -2186,17 +2070,14 @@ const QUANT_CHROMA: [u16; DCTSIZE2] = [
 	99, 99, 99, 99, 99, 99, 99, 99,
 ];
 
-/// The code counts of the Annex K DC luminance table, indexed by code length.
+//// The Annex K Huffman tables. A BITS array is the count of codes at each length, indexed by that
+//// length; a VALS array is the symbols those codes name, in canonical code order.
 const DC_LUMA_BITS: [u8; 17] = [0, 0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0];
-/// The code counts of the Annex K DC chrominance table.
 const DC_CHROMA_BITS: [u8; 17] = [0, 0, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0];
-/// The symbols of both Annex K DC tables: the twelve magnitude categories.
-const DC_VALS: [u8; 12] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+const DC_VALS: [u8; 12] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]; // the magnitude categories
 
-/// The code counts of the Annex K AC luminance table.
 const AC_LUMA_BITS: [u8; 17] = [0, 0, 2, 1, 3, 3, 2, 4, 3, 5, 5, 4, 4, 0, 0, 1, 0x7D];
 
-/// The symbols of the Annex K AC luminance table, in canonical code order.
 const AC_LUMA_VALS: [u8; 162] = [
 	0x01, 0x02, 0x03, 0x00, 0x04, 0x11, 0x05, 0x12,
 	0x21, 0x31, 0x41, 0x06, 0x13, 0x51, 0x61, 0x07,
@@ -2221,10 +2102,8 @@ const AC_LUMA_VALS: [u8; 162] = [
 	0xF9, 0xFA,
 ];
 
-/// The code counts of the Annex K AC chrominance table.
 const AC_CHROMA_BITS: [u8; 17] = [0, 0, 2, 1, 2, 4, 4, 3, 4, 7, 5, 4, 4, 0, 1, 2, 0x77];
 
-/// The symbols of the Annex K AC chrominance table, in canonical code order.
 const AC_CHROMA_VALS: [u8; 162] = [
 	0x00, 0x01, 0x02, 0x03, 0x11, 0x04, 0x05, 0x21,
 	0x31, 0x06, 0x12, 0x41, 0x51, 0x07, 0x61, 0x71,
@@ -2251,10 +2130,8 @@ const AC_CHROMA_VALS: [u8; 162] = [
 
 /// A Huffman table in the form an encoder wants: a code and a length for each symbol.
 struct Codes {
-	/// The code of each symbol, or zero where the table has none.
-	code:	[u16; 256],
-	/// The length of each symbol's code, zero where the table has none.
-	len:	[u8; 256],
+	code:	[u16; 256],		// the code of each symbol, zero where the table has none
+	len:	[u8; 256],		// and its length
 }
 
 impl Codes {
@@ -2285,17 +2162,13 @@ impl Codes {
 
 /// A writer of the bits of an entropy-coded segment, stuffing a zero after every 0xFF it emits.
 struct BitWriter {
-	/// The bytes written so far.
-	out:	Vec<u8>,
-	/// The bits not yet whole, in the low `cnt` positions.
-	acc:	u32,
-	/// How many bits of `acc` are pending.
-	cnt:	u32,
+	out:	Vec<u8>,	// the bytes written so far
+	acc:	u32,		// the bits not yet whole, in the low cnt positions
+	cnt:	u32,		// how many bits of acc are pending
 }
 
 impl BitWriter {
 
-	/// A writer over a fresh buffer.
 	fn new() -> Self {
 		Self { out: Vec::new(), acc: 0, cnt: 0 }
 	}
@@ -2430,18 +2303,12 @@ fn seg(out: &mut Vec<u8>, marker: u8, body: &[u8]) {
 
 /// One component being encoded: its samples, padded out to whole MCUs.
 struct EncComp {
-	/// The component identifier, 1 for luminance and 2 and 3 for the chrominances.
-	id:	u8,
-	/// Horizontal sampling factor.
-	h:	usize,
-	/// Vertical sampling factor.
-	v:	usize,
-	/// Which quantisation and Huffman table pair it uses: 0 for luminance, 1 for chrominance.
-	tbl:	usize,
-	/// The samples, `bw * 8` to a row.
-	data:	Vec<u8>,
-	/// The distance between rows.
-	stride:	usize,
+	id:	u8,				// 1 for luminance, 2 and 3 for the chrominances
+	h:	usize,			// horizontal sampling factor
+	v:	usize,			// vertical sampling factor
+	tbl:	usize,		// table pair: 0 for luminance, 1 for chrominance
+	data:	Vec<u8>,	// the samples, bw * 8 to a row
+	stride:	usize,		// the distance between rows
 }
 
 /// Encodes a pixmap as a baseline JPEG at the default quality.

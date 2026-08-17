@@ -11,6 +11,9 @@
 //! its eight-bit samples into the sixteen-bit ones a picture of any depth needs. Nothing here is a
 //! second implementation of anything: the type and the conversion are `hevc`'s, and this is where
 //! they are named as belonging to neither codec.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 pub use crate::hevc::{
 	colour::{
@@ -30,8 +33,6 @@ use crate::{
 
 impl From<&h264::decode::Picture> for hevc::decode::Picture {
 
-	/// Widens an H.264 picture into the shared form.
-	///
 	/// H.264 as this crate reads it is eight bits a sample and the shared plane holds sixteen, so
 	/// the samples are widened and the depth is stated rather than assumed. The numbers do not
 	/// change: a sample of 235 is 235 at either width, and the studio range [`rgb`] undoes is the
@@ -57,7 +58,6 @@ mod tests {
 
 	use oxedyne_fe2o3_core::prelude::*;
 
-	/// An H.264 picture of one colour throughout.
 	fn flat(w: usize, h: usize, y: u8, cb: u8, cr: u8) -> h264::decode::Picture {
 		let plane = |w: usize, h: usize, v: u8| h264::decode::Plane { w, h, px: vec![v; w * h] };
 		h264::decode::Picture {

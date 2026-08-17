@@ -1,4 +1,7 @@
 //! A buffer of pixels, and the painting done onto it.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::{
 	colour::{
@@ -25,8 +28,8 @@ use oxedyne_fe2o3_core::prelude::*;
 
 use std::path::Path as FilePath;
 
-/// The most pixels a pixmap may hold, a ceiling against a size that is a mistake or an attack.
-/// A 16k by 16k image sits just under it.
+// The most pixels a pixmap may hold, a ceiling against a size that is a mistake or an attack.
+// A 16k by 16k image sits just under it.
 pub const MAX_PIXELS: usize = 1 << 28;
 
 /// A rectangular buffer of RGBA pixels, eight bits per channel, with straight alpha.
@@ -35,12 +38,9 @@ pub const MAX_PIXELS: usize = 1 << 28;
 /// window surface will take without a further copy.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Pixmap {
-	/// Width in pixels.
-	w:	usize,
-	/// Height in pixels.
-	h:	usize,
-	/// RGBA bytes, `w * h * 4` of them.
-	data:	Vec<u8>,
+	w:	usize,			// width in pixels
+	h:	usize,			// height in pixels
+	data:	Vec<u8>,	// RGBA bytes, w * h * 4 of them
 }
 
 impl Pixmap {
@@ -89,44 +89,36 @@ impl Pixmap {
 		Ok(Self { w, h, data })
 	}
 
-	/// Creates a pixmap of the given size, filled with a colour.
 	pub fn filled(w: usize, h: usize, colour: Rgba) -> Outcome<Self> {
 		let mut pm = res!(Self::new(w, h));
 		pm.fill(colour);
 		Ok(pm)
 	}
 
-	/// The width in pixels.
 	pub fn width(&self) -> usize {
 		self.w
 	}
 
-	/// The height in pixels.
 	pub fn height(&self) -> usize {
 		self.h
 	}
 
-	/// The raw RGBA bytes.
 	pub fn data(&self) -> &[u8] {
 		&self.data
 	}
 
-	/// The raw RGBA bytes, mutably.
 	pub fn data_mut(&mut self) -> &mut [u8] {
 		&mut self.data
 	}
 
-	/// Consumes the pixmap, yielding its bytes.
 	pub fn into_data(self) -> Vec<u8> {
 		self.data
 	}
 
-	/// The whole pixmap as a bounding box.
 	pub fn bounds(&self) -> Bounds {
 		Bounds { x0: 0.0, y0: 0.0, x1: self.w as f32, y1: self.h as f32 }
 	}
 
-	/// Replaces every pixel with a colour.
 	pub fn fill(&mut self, colour: Rgba) {
 		for px in self.data.chunks_exact_mut(4) {
 			px[0] = colour.r;
@@ -136,7 +128,6 @@ impl Pixmap {
 		}
 	}
 
-	/// The colour at a pixel, or `None` if the coordinates fall outside.
 	pub fn pixel(&self, x: usize, y: usize) -> Option<Rgba> {
 		if x >= self.w || y >= self.h {
 			return None;
@@ -386,49 +377,40 @@ impl Pixmap {
 		}
 	}
 
-	/// Encodes the pixmap as a PNG.
 	pub fn to_png(&self) -> Outcome<Vec<u8>> {
 		png::encode(self)
 	}
 
-	/// Decodes a PNG into a pixmap.
 	pub fn from_png(buf: &[u8]) -> Outcome<Self> {
 		png::decode(buf)
 	}
 
-	/// Writes the pixmap to a file as a PNG.
 	pub fn save_png<P: AsRef<FilePath>>(&self, path: P) -> Outcome<()> {
 		let buf = res!(self.to_png());
 		res!(std::fs::write(path.as_ref(), &buf));
 		Ok(())
 	}
 
-	/// Reads a PNG file into a pixmap.
 	pub fn load_png<P: AsRef<FilePath>>(path: P) -> Outcome<Self> {
 		let buf = res!(std::fs::read(path.as_ref()));
 		Self::from_png(&buf)
 	}
 
-	/// Encodes the pixmap as a baseline JPEG at the default quality.
-	///
 	/// JPEG carries no alpha channel, so a pixel that is not opaque is composited over white.
 	pub fn to_jpeg(&self) -> Outcome<Vec<u8>> {
 		jpeg::encode(self)
 	}
 
-	/// Decodes a JPEG into a pixmap.
 	pub fn from_jpeg(buf: &[u8]) -> Outcome<Self> {
 		jpeg::decode(buf)
 	}
 
-	/// Writes the pixmap to a file as a baseline JPEG at the default quality.
 	pub fn save_jpeg<P: AsRef<FilePath>>(&self, path: P) -> Outcome<()> {
 		let buf = res!(self.to_jpeg());
 		res!(std::fs::write(path.as_ref(), &buf));
 		Ok(())
 	}
 
-	/// Reads a JPEG file into a pixmap.
 	pub fn load_jpeg<P: AsRef<FilePath>>(path: P) -> Outcome<Self> {
 		let buf = res!(std::fs::read(path.as_ref()));
 		Self::from_jpeg(&buf)

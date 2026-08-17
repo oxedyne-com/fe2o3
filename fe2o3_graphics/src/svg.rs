@@ -20,6 +20,9 @@
 //! Every command in the grammar is read, including elliptical arcs. An arc has no [`crate::path::Seg`]
 //! of its own, so it is converted to cubic béziers on the way in and no caller has to know it was
 //! ever an arc.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::colour::Rgba;
 use crate::path::{
@@ -38,10 +41,8 @@ use oxedyne_fe2o3_core::prelude::*;
 
 use std::f64::consts::PI;
 
-/// The most cubic segments one elliptical arc becomes.
-///
-/// An arc is cut at quadrant boundaries and its sweep cannot exceed a full turn, so four pieces
-/// always suffice.
+// The most cubic segments one elliptical arc becomes. An arc is cut at quadrant boundaries and its
+// sweep cannot exceed a full turn, so four pieces always suffice.
 const ARC_SEGS: usize = 4;
 
 /// The ellipse an arc travels on, and which of the four arcs between the endpoints to take.
@@ -50,16 +51,11 @@ const ARC_SEGS: usize = 4;
 /// because they mean nothing apart: a radius without its flags does not pick out an arc.
 #[derive(Clone, Copy)]
 struct Arc {
-	/// Horizontal radius. Its sign is ignored, and a radius too small to span the ends is grown.
-	rx: f32,
-	/// Vertical radius.
-	ry: f32,
-	/// The ellipse's x-axis rotation, in degrees.
-	rot: f32,
-	/// Take the sweep greater than a half turn.
-	large: bool,
-	/// Take the sweep in the direction of increasing angle.
-	sweep: bool,
+	rx: f32,	// horizontal radius; the sign is ignored, and one too small to span is grown
+	ry: f32,	// vertical radius
+	rot: f32,	// the ellipse's x-axis rotation, in degrees
+	large: bool,	// take the sweep greater than a half turn
+	sweep: bool,	// take the sweep in the direction of increasing angle
 }
 
 /// The last curve's trailing control point, which `S` and `T` reflect.
@@ -69,25 +65,12 @@ struct Arc {
 /// so a bare [`Self::None`] is not enough and the kind must be carried.
 #[derive(Clone, Copy)]
 enum Last {
-	/// The previous command was not a curve, or was a curve of the other kind.
-	None,
-	/// The previous command was `C`, `c`, `S` or `s`, carrying its second control point.
-	Cubic(Pt),
-	/// The previous command was `Q`, `q`, `T` or `t`, carrying its control point.
-	Quad(Pt),
+	None,		// not a curve, or a curve of the other kind
+	Cubic(Pt),	// after C, c, S or s, carrying its second control point
+	Quad(Pt),	// after Q, q, T or t, carrying its control point
 }
 
 /// Reads SVG path data -- the `d` attribute of a `<path>` element -- into a [`Path`].
-///
-/// # Arguments
-/// * `d` - The path data, as it appears in the attribute.
-///
-/// # Returns
-/// The path the data describes, or an error naming the byte the data went wrong at.
-///
-/// # Errors
-/// Data that does not begin with a command, names a command outside the grammar, ends partway
-/// through a command's arguments, or holds an arc flag that is not `0` or `1`.
 pub fn path_data(d: &str) -> Outcome<Path> {
 	let mut sc = Scan::new(d);
 	let mut pb = PathBuilder::new();
@@ -233,11 +216,7 @@ fn reflect(p: Pt, q: Pt) -> Pt {
 /// The arithmetic runs in `f64` though the path is `f32`: the centre falls out of a difference of
 /// squares that cancels badly near the degenerate cases, and the wider type costs nothing here.
 ///
-/// # Arguments
-/// * `pb` - The builder to append to. The pen is assumed to be at `p0`.
-/// * `p0` - Where the arc starts.
-/// * `a` - The ellipse to travel on, and which arc of it to take.
-/// * `p1` - Where the arc ends.
+/// The pen is assumed to be at `p0`.
 fn arc(pb: &mut PathBuilder, p0: Pt, a: Arc, p1: Pt) {
 	// An arc whose ends coincide is dropped, and one with no radius is a straight line. Both are
 	// what the specification asks for, and both would otherwise divide by zero below.
@@ -352,13 +331,7 @@ fn angle(ux: f64, uy: f64, vx: f64, vy: f64) -> f64 {
 /// The commands are separated by spaces, and the two coordinates of a point by a comma, which is the
 /// form drawing programs write and the eye reads most easily. No document, element or attribute is
 /// written -- only the path data -- for the reason [`path_data`] reads only the same: the structure
-/// above a `<path>` is the caller's format, not this crate's.
-///
-/// # Arguments
-/// * `path` - The path to write.
-///
-/// # Returns
-/// The path data, as it would appear in the attribute. An empty path writes an empty string.
+/// above a `<path>` is the caller's format, not this crate's. An empty path writes an empty string.
 pub fn write_path_data(path: &Path) -> String {
 	let mut out = String::new();
 	for seg in path.segs() {
@@ -491,14 +464,11 @@ fn join(j: Join) -> &'static str {
 
 /// A cursor over path data.
 struct Scan<'a> {
-	/// The data. ASCII throughout, so a byte index is always a character boundary.
-	s: &'a [u8],
-	/// How far in the cursor has reached.
-	i: usize,
+	s: &'a [u8],	// ASCII throughout, so a byte index is always a character boundary
+	i: usize,	// how far in the cursor has reached
 }
 
 impl<'a> Scan<'a> {
-	/// Opens a cursor at the start of the data.
 	fn new(s: &'a str) -> Self {
 		Self { s: s.as_bytes(), i: 0 }
 	}
@@ -513,7 +483,7 @@ impl<'a> Scan<'a> {
 		}
 	}
 
-	/// Whether the data is spent.
+	/// Is the data spent?  Any separators are stepped over first.
 	fn done(&mut self) -> bool {
 		self.sep();
 		self.i >= self.s.len()

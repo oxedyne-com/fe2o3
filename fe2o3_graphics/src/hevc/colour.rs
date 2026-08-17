@@ -9,6 +9,9 @@
 //! The matrix is the other half. Two are in wide use -- the older one from standard-definition
 //! television and the one from high definition -- and a photograph out of a phone is coded against
 //! the second. They differ by a few per cent in the green channel, which is enough to shift a face.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::{
 	hevc::decode::Picture,
@@ -20,10 +23,8 @@ use oxedyne_fe2o3_core::prelude::*;
 /// Which set of weights turns colour difference back into red, green and blue.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Matrix {
-	/// Rec. 601, from standard-definition television.
-	Sd,
-	/// Rec. 709, which is what a photograph out of a phone is coded against.
-	Hd,
+	Sd,	// Rec. 601, from standard-definition television
+	Hd,	// Rec. 709, what a photograph out of a phone is coded against
 }
 
 impl Matrix {
@@ -38,8 +39,6 @@ impl Matrix {
 	}
 }
 
-/// Turns a decoded picture into eight-bit RGBA.
-///
 /// The colour planes are half size, so each of their samples covers four of the brightness plane's;
 /// they are stretched by **bilinear interpolation between sample centres**, which for 4:2:0 means
 /// the chroma sample sits a quarter of a pixel up and to the left of the luma one it is named for.

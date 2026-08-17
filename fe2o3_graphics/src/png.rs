@@ -37,6 +37,9 @@
 //! that decompresses to anything other than the exact size the header implies.
 //!
 //! The encoder writes one form only: eight-bit truecolour with alpha, not interlaced.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::{
 	colour::Rgba,
@@ -59,22 +62,17 @@ use flate2::{
 	Compression,
 };
 
-/// The eight bytes that begin every PNG.
+// the eight bytes that begin every PNG
 const SIG: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
 
 /// How a PNG says what each pixel carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ColourType {
-	/// One channel: luminance.
-	Grey,
-	/// Three channels: red, green, blue.
-	Rgb,
-	/// One channel: an index into the palette.
-	Palette,
-	/// Two channels: luminance and alpha.
-	GreyAlpha,
-	/// Four channels: red, green, blue, alpha.
-	Rgba,
+	Grey,		// one channel: luminance
+	Rgb,		// three: red, green, blue
+	Palette,	// one: an index into the palette
+	GreyAlpha,	// two: luminance and alpha
+	Rgba,		// four: red, green, blue, alpha
 }
 
 impl ColourType {
@@ -94,7 +92,6 @@ impl ColourType {
 		}
 	}
 
-	/// The number of samples each pixel carries.
 	fn channels(&self) -> usize {
 		match self {
 			Self::Grey		=> 1,
@@ -126,28 +123,19 @@ impl ColourType {
 /// depth, because that is what they are compared against.
 #[derive(Clone, Debug)]
 enum Trns {
-	/// One alpha byte per palette entry, in palette order. It may be shorter than the palette, and
-	/// every entry beyond its end is opaque.
-	Palette(Vec<u8>),
-	/// The one luminance that is fully transparent. Every other luminance is opaque.
-	Grey(u16),
-	/// The one colour that is fully transparent. Every other colour is opaque.
-	Rgb(u16, u16, u16),
+	Palette(Vec<u8>),		// one alpha byte an entry; short of the palette means opaque
+	Grey(u16),				// the one transparent luminance; every other is opaque
+	Rgb(u16, u16, u16),		// the one transparent colour; every other is opaque
 }
 
 /// A PNG's image header, once believed.
 #[derive(Clone, Copy, Debug)]
 struct Header {
-	/// Width in pixels.
-	w:	usize,
-	/// Height in pixels.
-	h:	usize,
-	/// What each pixel carries.
-	ct:	ColourType,
-	/// Bits per sample: 1, 2, 4, 8 or 16.
-	depth:	u8,
-	/// Whether the image data is Adam7 interlaced.
-	laced:	bool,
+	w:	usize,			// width in pixels
+	h:	usize,			// height in pixels
+	ct:	ColourType,		// what each pixel carries
+	depth:	u8,			// bits per sample: 1, 2, 4, 8 or 16
+	laced:	bool,		// is the image data Adam7 interlaced?
 }
 
 /// One pass of image data: where its pixels begin, how far apart they sit, and how many there are.
@@ -156,21 +144,15 @@ struct Header {
 /// non-interlaced cases share every line of the decoding below.
 #[derive(Clone, Copy, Debug)]
 struct Pass {
-	/// Column of the pass's first pixel.
-	x0:	usize,
-	/// Row of the pass's first pixel.
-	y0:	usize,
-	/// Columns between one of the pass's pixels and the next.
-	dx:	usize,
-	/// Rows between one of the pass's scanlines and the next.
-	dy:	usize,
-	/// Pixels across the pass.
-	w:	usize,
-	/// Scanlines down the pass.
-	h:	usize,
+	x0:	usize,	// column of the pass's first pixel
+	y0:	usize,	// and its row
+	dx:	usize,	// columns between one of the pass's pixels and the next
+	dy:	usize,	// rows between one of its scanlines and the next
+	w:	usize,	// pixels across the pass
+	h:	usize,	// scanlines down it
 }
 
-/// The seven Adam7 passes, as the offset and step at which each lays its pixels into the image.
+// The seven Adam7 passes, as the offset and step at which each lays its pixels into the image.
 const ADAM7: [(usize, usize, usize, usize); 7] = [
 	(0, 0, 8, 8),
 	(4, 0, 8, 8),
@@ -211,9 +193,6 @@ fn crc32(bytes: &[u8]) -> u32 {
 ///
 /// The header is validated exactly as [`decode`] validates it, so a size this returns is a size
 /// the decoder would also accept.
-///
-/// # Arguments
-/// * `buf` - The PNG file's bytes, from the signature.
 pub fn dimensions(buf: &[u8]) -> Outcome<(usize, usize)> {
 	if buf.len() < SIG.len() || buf[..SIG.len()] != SIG {
 		return Err(err!(
@@ -377,10 +356,9 @@ fn paeth(a: u8, b: u8, c: u8) -> u8 {
 // │ ANIMATION                                                                  │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// The most frames one animation may hold, a ceiling against a length that is a mistake.
-///
-/// A hundred thousand frames is about fifty-five minutes at thirty a second, which is longer than
-/// anything this format is the right container for.
+// The most frames one animation may hold, a ceiling against a length that is a mistake. A hundred
+// thousand frames is about fifty-five minutes at thirty a second, which is longer than anything
+// this format is the right container for.
 pub const MAX_FRAMES: u32 = 100_000;
 
 /// How long a frame is shown, as the exact rational a frame control chunk carries.
@@ -391,10 +369,8 @@ pub const MAX_FRAMES: u32 = 100_000;
 /// does not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Delay {
-	/// The numerator of the delay in seconds.
-	pub num: u16,
-	/// The denominator of the delay in seconds.
-	pub den: u16,
+	pub num: u16,	// numerator of the delay in seconds
+	pub den: u16,	// and its denominator
 }
 
 impl Delay {
@@ -407,12 +383,10 @@ impl Delay {
 		Ok(Self { num: 1, den: rate })
 	}
 
-	/// A delay of a whole number of milliseconds.
 	pub fn ms(ms: u16) -> Self {
 		Self { num: ms, den: 1000 }
 	}
 
-	/// The delay in seconds.
 	pub fn seconds(&self) -> f64 {
 		if self.den == 0 {
 			0.0
@@ -444,20 +418,13 @@ impl Delay {
 /// sequence will be many times the size of the same sequence in a video container. Line drawing,
 /// flat colour and text -- which is what a vector document rasterises to -- is what it is good at.
 pub struct Animation {
-	/// Canvas width in pixels.
-	w:	usize,
-	/// Canvas height in pixels.
-	h:	usize,
-	/// How many times to play; zero is forever.
-	plays:	u32,
-	/// The previous frame, against which the next one is differenced.
-	prev:	Option<Pixmap>,
-	/// The frame chunks written so far, in order.
-	body:	Vec<u8>,
-	/// The next APNG sequence number.
-	seq:	u32,
-	/// How many frames have been pushed.
-	n:	u32,
+	w:	usize,					// canvas width in pixels
+	h:	usize,					// canvas height in pixels
+	plays:	u32,				// how many times to play; zero is forever
+	prev:	Option<Pixmap>,		// the frame the next one is differenced against
+	body:	Vec<u8>,			// the frame chunks written so far, in order
+	seq:	u32,				// the next APNG sequence number
+	n:	u32,					// how many frames have been pushed
 }
 
 impl Animation {
@@ -484,7 +451,6 @@ impl Animation {
 		self
 	}
 
-	/// The number of frames pushed so far.
 	pub fn frames(&self) -> u32 {
 		self.n
 	}
@@ -557,7 +523,6 @@ impl Animation {
 		Ok(())
 	}
 
-	/// Finishes the animation and gives the file's bytes.
 	pub fn finish(self) -> Outcome<Vec<u8>> {
 		if self.n == 0 {
 			return Err(err!(
@@ -701,8 +666,6 @@ fn expected_size(hdr: &Header, passes: &[Pass]) -> Outcome<usize> {
 	Ok(total)
 }
 
-/// Decodes a PNG into a pixmap.
-///
 /// Every length is checked against the bytes actually present, every chunk's CRC is verified, and
 /// the decompressed stream is refused the moment it exceeds the size the header implies, so a small
 /// file cannot expand into a large allocation.

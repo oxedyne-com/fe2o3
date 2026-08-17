@@ -56,6 +56,9 @@
 //! §7.3.2.2, the picture parameter set §7.3.2.3, the profile-tier-level structure §7.3.3, and the
 //! short-term reference picture sets §7.3.7. The `hvcC` record the parameter sets arrive in is
 //! ISO/IEC 14496-15 §8.3.3. Every constant below names the clause it comes from.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 pub mod cabac;
 pub mod colour;
@@ -76,42 +79,32 @@ pub use cabac::{
 
 use oxedyne_fe2o3_core::prelude::*;
 
-/// The largest picture this decoder will describe, in luma samples each way.
-///
-/// Sixteen thousand is past every camera and well inside what the level limits allow; it is a
-/// ceiling against a parameter set that is a mistake, not a limit on real photographs.
+// The largest picture this decoder will describe, in luma samples each way. Sixteen thousand is
+// past every camera and well inside what the level limits allow; it is a ceiling against a
+// parameter set that is a mistake, not a limit on real photographs.
 pub const MAX_SIDE: u32 = 16_384;
 
 /// NAL unit types this decoder cares about (H.265 Table 7-1).
 pub mod nal {
-	/// A coded slice of an IDR picture with no leading pictures, which is what a still is.
-	pub const IDR_W_RADL: u8 = 19;
-	/// The other IDR form.
-	pub const IDR_N_LP: u8 = 20;
-	/// A video parameter set.
+	pub const IDR_W_RADL: u8 = 19;	// an IDR picture with no leading pictures, which a still is
+	pub const IDR_N_LP: u8 = 20;	// the other IDR form
 	pub const VPS: u8 = 32;
-	/// A sequence parameter set.
 	pub const SPS: u8 = 33;
-	/// A picture parameter set.
 	pub const PPS: u8 = 34;
 }
 
 /// One NAL unit: what it is, and its payload with the emulation prevention undone.
 #[derive(Clone, Debug)]
 pub struct Unit {
-	/// The type, from the two-byte NAL unit header.
-	pub kind:	u8,
-	/// The temporal sub-layer, plus one as the header codes it.
-	pub layer:	u8,
-	/// The payload, after the header and with every emulation prevention byte removed.
-	pub body:	Vec<u8>,
-	/// The same payload as it arrived, escaping and all.
-	///
-	/// Kept because the entry point offsets in a slice header are counted in **escaped** bytes:
-	/// "emulation prevention bytes that appear in the slice segment data portion of the coded
-	/// slice segment NAL unit are counted as part of the slice segment data for purposes of subset
-	/// identification" (§7.4.7.1). Splitting the unescaped payload at those offsets puts every row
-	/// of blocks after the first escaped byte in the wrong place.
+	pub kind:	u8,			// the type, from the two-byte NAL unit header
+	pub layer:	u8,			// temporal sub-layer, plus one as the header codes it
+	pub body:	Vec<u8>,	// after the header, every emulation prevention byte removed
+	// The payload as it arrived, escaping and all, because the entry point offsets in a slice
+	// header are counted in escaped bytes: "emulation prevention bytes that appear in the slice
+	// segment data portion of the coded slice segment NAL unit are counted as part of the slice
+	// segment data for purposes of subset identification" (§7.4.7.1). Splitting the unescaped
+	// payload at those offsets puts every row of blocks after the first escaped byte in the
+	// wrong place.
 	pub raw:	Vec<u8>,
 }
 
@@ -122,134 +115,80 @@ pub struct Unit {
 /// decoding everything before it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Sps {
-	/// Which set this is, as a picture parameter set names it.
-	pub id:		u8,
-	/// The chroma sampling: 0 monochrome, 1 for 4:2:0, 2 for 4:2:2, 3 for 4:4:4.
-	pub chroma:	u8,
-	/// The coded width in luma samples, before the conformance window is applied.
-	pub coded_w:	u32,
-	/// The coded height, likewise.
-	pub coded_h:	u32,
-	/// The width of the picture as it is meant to be shown.
-	pub width:	u32,
-	/// The height as shown.
-	pub height:	u32,
-	/// Bits a luma sample.
-	pub luma_bits:	u8,
-	/// Bits a chroma sample.
-	pub chroma_bits:	u8,
-	/// The size of a coding tree block, in luma samples: 16, 32 or 64.
-	pub ctb_size:	u32,
-	/// The smallest coding block, in luma samples.
-	pub min_cb:	u32,
-	/// The smallest transform block, in luma samples.
-	pub min_tb:	u32,
-	/// The largest transform block.
-	pub max_tb:	u32,
-	/// How deep the transform tree may go inside an intra coding unit.
-	pub max_depth_intra:	u8,
-	/// Whether the sample adaptive offset filter is on.
-	pub sao:	bool,
-	/// Whether coding units may carry raw samples.
-	pub pcm:	bool,
-	/// Whether the stronger of the two intra smoothing filters may be used at 32 by 32.
-	pub strong_smoothing:	bool,
-	/// Whether the scaling lists are in use at all.
-	///
-	/// **On does not mean bespoke.** Every photograph in the corpus turns them on and carries none
-	/// of its own, which means the *default* lists apply -- and those are not flat, so a decoder
-	/// that reads this as "no scaling" quantises every block wrongly and produces a picture that is
-	/// recognisable and wrong.
-	pub scaling_lists:	bool,
-	/// The weights themselves, where the lists are in use: this sequence's own where it carries
-	/// them, and the default ones where it does not.
-	pub weights:	Option<Scaling>,
-	/// Where the shown picture begins inside the coded one, in luma samples.
-	///
-	/// Both windows may sit off the top left corner: the conformance window usually does not and
-	/// the default display window of a stabilised film always does, since it is centred in a
-	/// picture coded larger than it shows. Cropping from the corner instead moves the whole
-	/// picture by that offset.
-	pub show_x0:	u32,
-	/// The same downwards.
-	pub show_y0:	u32,
-	/// Whether the samples run the full range rather than the studio one.
-	///
-	/// Out of the video usability information, where a stream says how it is to be shown. A
-	/// conversion into red, green and blue that guesses this wrong makes a photograph with no real
-	/// black in it, or one whose blacks are crushed.
-	pub full_range:	bool,
-	/// Which matrix the colour difference was coded against, as ISO/IEC 23091-2 numbers them: 1 is
-	/// the high-definition one, 5 and 6 the standard-definition ones, and 2 is "unspecified".
-	pub matrix:	u8,
-	/// How many bits the picture order count's lower part is coded in.
-	///
-	/// Kept because a slice header carries one -- for every picture except an IDR, which has no
-	/// order count to state. A film's first frame is very often a clean random access picture
-	/// rather than an IDR, and a header read as though it were an IDR's is a header read out of
-	/// step from this field on.
-	pub poc_bits:	u8,
-	/// How many pictures each short-term reference picture set names, negative and positive.
-	///
-	/// A still picture references nothing and needs none of them; what this is for is the slice
-	/// header, which may name one of these sets or write a new one predicted from them, and either
-	/// way the bits cannot be stepped over without knowing how large the set referred to is.
-	pub st_sets:	Vec<(u32, u32)>,
-	/// Whether a slice header may name long-term reference pictures.
-	pub long_term:	bool,
-	/// Whether a slice header carries the temporal motion vector predictor flag.
-	pub temporal_mvp:	bool,
+	pub id:		u8,						// which set this is, as a picture parameter set names it
+	pub chroma:	u8,						// 0 monochrome, 1 for 4:2:0, 2 for 4:2:2, 3 for 4:4:4
+	pub coded_w:	u32,				// coded width in luma samples, before the conformance window
+	pub coded_h:	u32,				// and coded height
+	pub width:	u32,					// the width the picture is meant to be shown at
+	pub height:	u32,					// and the height as shown
+	pub luma_bits:	u8,					// bits a luma sample
+	pub chroma_bits:	u8,				// bits a chroma sample
+	pub ctb_size:	u32,				// a coding tree block, in luma samples: 16, 32 or 64
+	pub min_cb:	u32,					// the smallest coding block, in luma samples
+	pub min_tb:	u32,					// the smallest transform block, in luma samples
+	pub max_tb:	u32,					// and the largest
+	pub max_depth_intra:	u8,			// how deep the transform tree may go in an intra unit
+	pub sao:	bool,					// is the sample adaptive offset filter on?
+	pub pcm:	bool,					// may coding units carry raw samples?
+	pub strong_smoothing:	bool,		// the stronger intra smoothing filter, at 32 by 32
+	// On does not mean bespoke. Every photograph in the corpus turns the scaling lists on and
+	// carries none of its own, which means the default lists apply -- and those are not flat, so
+	// a decoder that reads this as "no scaling" quantises every block wrongly and produces a
+	// picture that is recognisable and wrong.
+	pub scaling_lists:	bool,			// are the scaling lists in use at all?
+	pub weights:	Option<Scaling>,	// this sequence's own lists, or the default ones
+	// Both windows may sit off the top left corner: the conformance window usually does not and
+	// the default display window of a stabilised film always does, since it is centred in a
+	// picture coded larger than it shows. Cropping from the corner instead moves the whole
+	// picture by that offset.
+	pub show_x0:	u32,				// where the shown picture begins, in luma samples
+	pub show_y0:	u32,				// the same downwards
+	// Out of the video usability information, where a stream says how it is to be shown. A
+	// conversion into red, green and blue that guesses this wrong makes a photograph with no
+	// real black in it, or one whose blacks are crushed.
+	pub full_range:	bool,				// full range rather than the studio one
+	pub matrix:	u8,						// ISO/IEC 23091-2: 1 high definition, 5 and 6 standard
+	// A slice header carries the picture order count for every picture except an IDR, which has
+	// none to state. A film's first frame is very often a clean random access picture rather
+	// than an IDR, and a header read as though it were an IDR's is read out of step from this
+	// field on.
+	pub poc_bits:	u8,					// bits the count's lower part is coded in
+	// A still picture references nothing and needs none of these sets; what they are for is the
+	// slice header, which may name one or write a new one predicted from them, and either way
+	// the bits cannot be stepped over without knowing how large the set referred to is.
+	pub st_sets:	Vec<(u32, u32)>,	// pictures each short-term set names, negative and positive
+	pub long_term:	bool,				// may a slice header name long-term reference pictures?
+	pub temporal_mvp:	bool,			// does a slice header carry the temporal predictor flag?
 }
 
 /// What a picture parameter set says about the slices that reference it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pps {
-	/// Which set this is, as a slice header names it.
-	pub id:		u8,
-	/// Which sequence parameter set it belongs to.
-	pub sps_id:	u8,
-	/// The starting quantisation parameter, already offset by the 26 the syntax subtracts.
-	pub init_qp:	i32,
-	/// Whether a coding unit may carry its own quantisation delta.
-	pub cu_qp_delta:	bool,
-	/// How far down the coding quadtree a quantisation delta may be sent.
-	pub qp_delta_depth:	u8,
-	/// The chroma quantisation offsets.
-	pub cb_qp_offset:	i32,
-	/// The same for the other chroma channel.
-	pub cr_qp_offset:	i32,
-	/// Whether a transform block may skip the transform entirely.
-	pub transform_skip:	bool,
-	/// Whether the sign of the last coefficient is inferred rather than coded.
-	pub sign_hiding:	bool,
-	/// Whether the residual of an intra block is coded across the transform tree.
-	pub transquant_bypass:	bool,
-	/// Whether the picture is cut into tiles.
-	pub tiles:	bool,
-	/// Whether entropy coding is synchronised at the start of each row of blocks.
-	pub wavefront:	bool,
-	/// Whether the deblocking filter runs.
-	pub deblocking:	bool,
-	/// Whether a slice header may carry a further quantisation offset for chroma.
-	pub slice_chroma_qp:	bool,
-	/// How many reserved flags a slice header carries before anything else.
-	///
-	/// Kept because the slice header cannot be read without it: they are bits to be stepped over,
-	/// and stepping over the wrong number puts every field after them one place out.
-	pub extra_header_bits:	u8,
-	/// Whether a slice header carries a picture output flag.
-	pub output_flag:	bool,
-	/// Whether a slice header may override the deblocking settings.
-	pub deblocking_override:	bool,
-	/// Whether the loop filter runs across slice boundaries, and therefore whether a slice header
-	/// carries a flag of its own about it.
-	pub filter_across_slices:	bool,
-	/// Whether a slice segment may continue the header of the one before it.
-	///
-	/// Kept because the slice header cannot be read without it: a segment that is not the first of
-	/// its picture carries a flag saying whether it is such a continuation, and only where this
-	/// says one may.
-	pub dependent_slices:	bool,
+	pub id:		u8,						// which set this is, as a slice header names it
+	pub sps_id:	u8,						// which sequence parameter set it belongs to
+	pub init_qp:	i32,				// already offset by the 26 the syntax subtracts
+	pub cu_qp_delta:	bool,			// may a coding unit carry its own quantisation delta?
+	pub qp_delta_depth:	u8,				// how far down the quadtree a delta may be sent
+	pub cb_qp_offset:	i32,			// the chroma quantisation offsets
+	pub cr_qp_offset:	i32,			// and for the other chroma channel
+	pub transform_skip:	bool,			// may a block skip the transform entirely?
+	pub sign_hiding:	bool,			// the last coefficient's sign inferred rather than coded
+	pub transquant_bypass:	bool,		// an intra residual coded across the transform tree
+	pub tiles:	bool,					// is the picture cut into tiles?
+	pub wavefront:	bool,				// entropy coding synchronised at each row of blocks
+	pub deblocking:	bool,				// does the deblocking filter run?
+	pub slice_chroma_qp:	bool,		// may a slice header carry a further chroma offset?
+	// The slice header cannot be read without the count of reserved flags: they are bits to be
+	// stepped over, and stepping over the wrong number puts every field after them one place
+	// out.
+	pub extra_header_bits:	u8,			// reserved flags a slice header carries first
+	pub output_flag:	bool,			// does a slice header carry a picture output flag?
+	pub deblocking_override:	bool,	// may a slice header override the settings?
+	pub filter_across_slices:	bool,	// and therefore whether a slice carries its own flag
+	// The slice header cannot be read without this either: a segment that is not the first of
+	// its picture carries a flag saying whether it continues the header before it, and only
+	// where this says one may.
+	pub dependent_slices:	bool,		// may a segment continue the header before it?
 }
 
 /// Splits a byte-stream of length-prefixed NAL units, as `hvcC` and `mdat` carry them.
@@ -394,10 +333,8 @@ pub fn escaped_at(nal: &[u8], unescaped: usize) -> usize {
 /// arrays at the end carry the parameter sets themselves, as Annex B payloads without start codes.
 #[derive(Clone, Debug)]
 pub struct Config {
-	/// How many bytes prefix each NAL unit in the picture's own data.
-	pub length_size:	usize,
-	/// Every parameter set the record carries, in the order it carries them.
-	pub sets:	Vec<Unit>,
+	pub length_size:	usize,	// bytes prefixing each NAL unit in the picture's own data
+	pub sets:	Vec<Unit>,		// every parameter set, in the order the record carries them
 }
 
 /// Reads an `hvcC` record.
@@ -450,20 +387,16 @@ pub fn config(bytes: &[u8]) -> Outcome<Config> {
 
 /// A reader of the bits of an RBSP, most significant first.
 pub struct Bits<'a> {
-	/// The bytes being read.
 	buf:	&'a [u8],
-	/// The next bit, counted from the first bit of the first byte.
-	pos:	usize,
+	pos:	usize,		// the next bit, counted from the first bit of the first byte
 }
 
 impl<'a> Bits<'a> {
 
-	/// A reader positioned at the first bit.
 	pub fn new(buf: &'a [u8]) -> Self {
 		Self { buf, pos: 0 }
 	}
 
-	/// How many bits are left.
 	pub fn left(&self) -> usize {
 		(self.buf.len() * 8).saturating_sub(self.pos)
 	}
@@ -488,17 +421,14 @@ impl<'a> Bits<'a> {
 		Ok(v)
 	}
 
-	/// The next bit as a flag.
 	pub fn flag(&mut self) -> Outcome<bool> {
 		Ok(res!(self.u(1)) == 1)
 	}
 
-	/// How many bits have been read.
 	pub fn consumed(&self) -> Outcome<usize> {
 		Ok(self.pos)
 	}
 
-	/// Steps over `n` bits.
 	pub fn skip(&mut self, n: usize) -> Outcome<()> {
 		for _ in 0..n / 32 {
 			let _ = res!(self.u(32));
@@ -589,11 +519,8 @@ fn profile_tier_level(b: &mut Bits, profile_present: bool, max_sub_layers: usize
 /// picture that is recognisable and wrong.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Scaling {
-	/// `ScalingList[sizeId][matrixId][i]`, in the diagonal scan's order. Sixteen entries are used
-	/// at the smallest size and sixty-four at the other three.
-	pub list:	[[[u8; 64]; 6]; 4],
-	/// What sits in the corner at the two largest sizes, which is coded on its own.
-	pub dc:		[[u8; 6]; 2],
+	pub list:	[[[u8; 64]; 6]; 4],		// ScalingList[sizeId][matrixId][i], in diagonal scan order
+	pub dc:		[[u8; 6]; 2],			// the corner at the two largest sizes, coded on its own
 }
 
 impl Scaling {
@@ -1085,43 +1012,23 @@ pub fn pps(body: &[u8]) -> Outcome<Pps> {
 /// a header read one bit short starts the whole of the rest of the decode in the wrong place.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Slice {
-	/// Whether this segment is the first of its picture.
-	pub first:	bool,
-	/// The coding tree block this segment begins at, counted in raster order from nought.
-	///
-	/// Nought for the first segment of a picture, which is every segment of a picture that is one
-	/// slice -- which every photograph is and many films are not.
-	pub address:	u32,
-	/// Whether the loop filters run across this slice's boundaries with its neighbours.
-	///
-	/// Where the header does not carry it, it is the picture parameter set's answer (§7.4.7.1).
-	pub across_slices:	bool,
-	/// Which picture parameter set the slice references.
-	pub pps_id:	u8,
-	/// The slice type: 2 is intra, and this decoder reads no other.
-	pub kind:	u8,
-	/// The quantisation parameter this slice starts at.
-	pub qp:		i32,
-	/// Whether the sample adaptive offset filter runs on luma in this slice.
-	pub sao_luma:	bool,
-	/// Whether it runs on chroma.
-	pub sao_chroma:	bool,
-	/// Where the entropy-coded data begins, as a byte offset into the payload.
-	///
-	/// This is the header's own end rounded up to a byte, which is where §9.3.1 says the
-	/// arithmetic decoder is initialised from.
-	pub data_at:	usize,
-	/// Whether the deblocking filter runs on this slice.
-	pub deblocking:	bool,
-	/// What this slice adds to the picture's own chroma quantisation offsets.
-	pub cb_qp_offset:	i32,
-	/// The same for the other chroma component.
-	pub cr_qp_offset:	i32,
-	/// Where each piece after the first begins, as the length in bytes of the piece before it.
-	///
-	/// One a row of coding tree blocks, under wavefront coding, which is what every photograph
-	/// measured uses.
-	pub entries:	Vec<u64>,
+	pub first:	bool,			// is this segment the first of its picture?
+	// Nought for the first segment of a picture, which is every segment of a picture that is
+	// one slice -- which every photograph is and many films are not.
+	pub address:	u32,		// the coding tree block it begins at, raster order from nought
+	pub across_slices:	bool,	// the picture parameter set's answer where absent (§7.4.7.1)
+	pub pps_id:	u8,				// which picture parameter set the slice references
+	pub kind:	u8,				// 2 is intra, and this decoder reads no other
+	pub qp:		i32,			// the quantisation parameter this slice starts at
+	pub sao_luma:	bool,		// does the sample adaptive offset run on luma here?
+	pub sao_chroma:	bool,		// and on chroma?
+	pub data_at:	usize,		// the header's end rounded up to a byte, where §9.3.1 starts
+	pub deblocking:	bool,		// does the deblocking filter run on this slice?
+	pub cb_qp_offset:	i32,	// what this slice adds to the picture's chroma offsets
+	pub cr_qp_offset:	i32,	// and for the other chroma component
+	// One a row of coding tree blocks, under wavefront coding, which is what every photograph
+	// measured uses.
+	pub entries:	Vec<u64>,	// where each piece begins, as the length of the one before
 }
 
 /// Which picture parameter set a slice names, read without the set itself.

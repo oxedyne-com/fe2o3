@@ -39,6 +39,9 @@
 //! 9-25 to 9-33 are absent: they serve motion vectors, field coding, and the Cb and Cr blocks of a
 //! 4:4:4 picture. An 8x8 luma block in 4:2:0 carries no `coded_block_flag` at all (§7.3.5.3.3), so
 //! Table 9-33 is not needed either.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -79,8 +82,8 @@ impl Ctx {
 	}
 }
 
-/// How the range is narrowed for the less probable symbol, by state and by the two bits the current
-/// range contributes (§9.3.3.2.1, Table 9-44).
+// How the range is narrowed for the less probable symbol, by state and by the two bits the current
+// range contributes (§9.3.3.2.1, Table 9-44).
 const LPS: [[u8; 4]; 64] = [
 	[128, 176, 208, 240],	[128, 167, 197, 227],	[128, 158, 187, 216],	[123, 150, 178, 205],
 	[116, 142, 169, 195],	[111, 135, 160, 185],	[105, 128, 152, 175],	[100, 122, 144, 166],
@@ -100,7 +103,7 @@ const LPS: [[u8; 4]; 64] = [
 	[6, 8, 9, 11],		[6, 7, 9, 10],		[6, 7, 8, 9],		[2, 2, 2, 2],
 ];
 
-/// The state to move to after decoding the more probable symbol (Table 9-45, `transIdxMPS`).
+// The state to move to after decoding the more probable symbol (Table 9-45, transIdxMPS).
 const NEXT_MPS: [u8; 64] = [
 	1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
 	17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32,
@@ -108,7 +111,7 @@ const NEXT_MPS: [u8; 64] = [
 	49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 62, 63,
 ];
 
-/// The state to move to after decoding the less probable symbol (Table 9-45, `transIdxLPS`).
+// The state to move to after decoding the less probable symbol (Table 9-45, transIdxLPS).
 const NEXT_LPS: [u8; 64] = [
 	0, 0, 1, 2, 2, 4, 4, 5, 6, 7, 8, 9, 9, 11, 11, 12,
 	13, 13, 15, 15, 16, 16, 18, 18, 19, 19, 21, 21, 22, 22, 23, 24,
@@ -121,16 +124,11 @@ const NEXT_LPS: [u8; 64] = [
 /// It reads bits and answers questions of the form "was the next bin a one?", where the odds are
 /// carried by whichever context variable the syntax says applies.
 pub struct Cabac<'a> {
-	/// The bytes being read, from the first byte of the slice's entropy-coded data.
-	buf:	&'a [u8],
-	/// The next byte to be taken into the window.
-	at:	usize,
-	/// The current interval's width, `codIRange`.
-	range:	u32,
-	/// Where in the interval the coded value sits, `codIOffset`, shifted up by [`Cabac::bits`].
-	offset:	u32,
-	/// How many bits of the window are pre-read and not yet part of `codIOffset`.
-	bits:	i32,
+	buf:	&'a [u8],	// from the first byte of the slice's entropy-coded data
+	at:	usize,		// the next byte to be taken into the window
+	range:	u32,		// codIRange, the current interval's width
+	offset:	u32,		// codIOffset, shifted up by bits
+	bits:	i32,		// bits of the window pre-read and not yet part of codIOffset
 }
 
 impl<'a> Cabac<'a> {
@@ -264,43 +262,33 @@ impl<'a> Cabac<'a> {
 
 // ------------------------------------------------------- the context variables themselves
 
-/// How many context variables the syntax numbers, `ctxIdx` running 0 to 1023 (§9.3.3.1).
-pub const CONTEXTS: usize = 1024;
+pub const CONTEXTS: usize = 1024; // ctxIdx runs 0 to 1023 (§9.3.3.1)
 
-/// The `ctxIdx` of `end_of_slice_flag`, and of the `mb_type` bin that names a raw-sample macroblock.
-///
-/// It carries no context variable at all: both are decoded by the terminating process.
+// The ctxIdx of end_of_slice_flag, and of the mb_type bin that names a raw-sample macroblock. It
+// carries no context variable at all: both are decoded by the terminating process.
 pub const TERMINATE: usize = 276;
 
 /// The `ctxIdxOffset` of each syntax element an intra 4:2:0 slice codes (Table 9-34).
 pub mod offset {
-	/// `mb_type` in an I slice.
-	pub const MB_TYPE: usize = 3;
-	/// `mb_qp_delta`.
+	pub const MB_TYPE: usize = 3;		// mb_type in an I slice
 	pub const MB_QP_DELTA: usize = 60;
-	/// `intra_chroma_pred_mode`.
-	pub const CHROMA_PRED: usize = 64;
-	/// `prev_intra4x4_pred_mode_flag` and `prev_intra8x8_pred_mode_flag`.
-	pub const PREV_PRED: usize = 68;
-	/// `rem_intra4x4_pred_mode` and `rem_intra8x8_pred_mode`.
-	pub const REM_PRED: usize = 69;
-	/// The luma part of `coded_block_pattern`.
-	pub const CBP_LUMA: usize = 73;
-	/// Its chroma part.
-	pub const CBP_CHROMA: usize = 77;
-	/// `transform_size_8x8_flag`.
+	pub const CHROMA_PRED: usize = 64;	// intra_chroma_pred_mode
+	pub const PREV_PRED: usize = 68;	// prev_intra4x4_pred_mode_flag, prev_intra8x8_pred_mode_flag
+	pub const REM_PRED: usize = 69;		// rem_intra4x4_pred_mode, rem_intra8x8_pred_mode
+	pub const CBP_LUMA: usize = 73;		// the luma part of coded_block_pattern
+	pub const CBP_CHROMA: usize = 77;	// its chroma part
 	pub const TRANSFORM_8X8: usize = 399;
 }
 
-/// The initialisation pairs an **intra** slice's context variables start from, as runs of
-/// `(first ctxIdx, table number within clause 9, [(m, n), ...])`.
-///
-/// The table number is kept so that the transcription can be checked against the document rather
-/// than against itself; this module's tests do exactly that where a text rendering of the
-/// specification is to hand. Each run is the whole of that table's I-slice column, even where an
-/// intra 4:2:0 decoder reads only part of it -- `mb_field_decoding_flag` at 70 to 72 is never coded
-/// in a frame-only stream, and `significant_coeff_flag` stops at 151 rather than 165 -- because a
-/// partial run would be a second place to make a mistake.
+// The initialisation pairs an intra slice's context variables start from, as runs of
+// (first ctxIdx, table number within clause 9, [(m, n), ...]).
+//
+// The table number is kept so that the transcription can be checked against the document rather
+// than against itself; this module's tests do exactly that where a text rendering of the
+// specification is to hand. Each run is the whole of that table's I-slice column, even where an
+// intra 4:2:0 decoder reads only part of it -- mb_field_decoding_flag at 70 to 72 is never coded
+// in a frame-only stream, and significant_coeff_flag stops at 151 rather than 165 -- because a
+// partial run would be a second place to make a mistake.
 pub const INIT_I: [(usize, usize, &[(i8, i8)]); 8] = [
 	// Table 9-12 gives ctxIdx 0 to 10 and has no cabac_init_idc column at all; 0 to 2 belong to
 	// mb_type in an SI slice, so an I slice starts at 3.
@@ -395,10 +383,8 @@ pub const INIT_I: [(usize, usize, &[(i8, i8)]); 8] = [
 /// gained by grouping them.
 #[derive(Clone)]
 pub struct Contexts {
-	/// The state of each context variable.
 	v:	Vec<Ctx>,
-	/// Whether the intra tables carry an initialisation value for it.
-	known:	Vec<bool>,
+	known:	Vec<bool>,	// do the intra tables carry an initialisation value for it?
 }
 
 impl Contexts {
@@ -434,7 +420,6 @@ impl Contexts {
 		}
 	}
 
-	/// One bin against the context at a `ctxIdx`.
 	pub fn bin(&mut self, c: &mut Cabac, ctx_idx: usize) -> Outcome<u32> {
 		let ctx = res!(self.at(ctx_idx));
 		Ok(c.bin(ctx))
@@ -449,18 +434,12 @@ impl Contexts {
 /// which this decoder refuses where the chroma format is read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cat {
-	/// The sixteen direct current terms of a macroblock predicted whole (`ctxBlockCat` 0).
-	LumaDc,
-	/// The fifteen alternating current terms of one of its blocks (1).
-	LumaAc,
-	/// A whole four-by-four luma block (2).
-	Luma4x4,
-	/// The four direct current terms of one colour difference component (3).
-	ChromaDc,
-	/// The fifteen alternating current terms of one of its blocks (4).
-	ChromaAc,
-	/// A whole eight-by-eight luma block (5).
-	Luma8x8,
+	LumaDc,		// sixteen direct current terms of a macroblock predicted whole, ctxBlockCat 0
+	LumaAc,		// fifteen alternating current terms of one of its blocks (1)
+	Luma4x4,	// a whole four-by-four luma block (2)
+	ChromaDc,	// four direct current terms of one colour difference component (3)
+	ChromaAc,	// fifteen alternating current terms of one of its blocks (4)
+	Luma8x8,	// a whole eight-by-eight luma block (5)
 }
 
 impl Cat {
@@ -558,11 +537,10 @@ impl Cat {
 	}
 }
 
-/// The context increment for the significance of each scan position of a frame-coded eight-by-eight
-/// block (Table 9-43, the first of its three columns).
-///
-/// Sixty-four positions share fifteen contexts, and not in scan order: the mapping is a published
-/// table because it groups positions by how likely a coefficient there is, which the scan does not.
+// The context increment for the significance of each scan position of a frame-coded eight-by-eight
+// block (Table 9-43, the first of its three columns). Sixty-four positions share fifteen contexts,
+// and not in scan order: the mapping is a published table because it groups positions by how likely
+// a coefficient there is, which the scan does not.
 pub const SIG_8X8: [u8; 63] = [
 	0, 1, 2, 3, 4, 5, 5, 4,
 	4, 3, 3, 4, 4, 4, 5, 5,
@@ -574,7 +552,7 @@ pub const SIG_8X8: [u8; 63] = [
 	11, 12, 13, 11, 14, 10, 12,
 ];
 
-/// The same for whether the coefficient there is the last one (Table 9-43, the third column).
+// The same for whether the coefficient there is the last one (Table 9-43, the third column).
 pub const LAST_8X8: [u8; 63] = [
 	0, 1, 1, 1, 1, 1, 1, 1,
 	1, 1, 1, 1, 1, 1, 1, 1,
@@ -586,8 +564,8 @@ pub const LAST_8X8: [u8; 63] = [
 	7, 7, 7, 7, 8, 8, 8,
 ];
 
-/// How far the unary prefix of a coefficient's magnitude runs before the Exp-Golomb suffix begins
-/// (Table 9-34, `uCoff` of the UEG0 binarisation).
+// How far the unary prefix of a coefficient's magnitude runs before the Exp-Golomb suffix begins
+// (Table 9-34, uCoff of the UEG0 binarisation).
 const LEVEL_PREFIX_MAX: usize = 14;
 
 /// Reads one block of transform coefficient levels (§7.3.5.3.3).
@@ -597,7 +575,7 @@ const LEVEL_PREFIX_MAX: usize = 14;
 /// is what an eight-by-eight luma block in 4:2:0 does. `levels` is filled in scan order and must be
 /// as long as the category says the block is.
 ///
-/// Returns whether the block holds anything, which the neighbours of the *next* block ask about.
+/// Whether the block holds anything is what the neighbours of the *next* block ask about.
 pub fn residual(c: &mut Cabac, x: &mut Contexts, cat: Cat, cbf_inc: Option<u32>, levels: &mut [i32])
 	-> Outcome<bool>
 {

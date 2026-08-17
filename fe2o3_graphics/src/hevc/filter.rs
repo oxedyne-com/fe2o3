@@ -22,6 +22,9 @@
 //! Both run over the whole picture rather than block by block. The specification allows either --
 //! and says so -- and over a picture is what makes the ordering obvious: every vertical edge, then
 //! every horizontal one, then the offsets, each pass reading what the one before it wrote.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::hevc::decode::{
 	Picture,
@@ -29,13 +32,13 @@ use crate::hevc::decode::{
 	Sao,
 };
 
-/// How far a sample may move, and how flat a boundary has to be before it is filtered at all
-/// (§8.7.2.5.3, Table 8-12), indexed by the quantisation parameter.
-///
-/// `β` is the flatness bar: a boundary whose second differences add up to less than this is taken
-/// to be flat, and therefore a place where a step is an artefact rather than a subject. `tC` is how
-/// far any one sample may be moved. Both are nought below a parameter of sixteen, which is why a
-/// finely quantised picture is not filtered at all.
+// How far a sample may move, and how flat a boundary has to be before it is filtered at all
+// (§8.7.2.5.3, Table 8-12), indexed by the quantisation parameter.
+//
+// β is the flatness bar: a boundary whose second differences add up to less than this is taken to
+// be flat, and therefore a place where a step is an artefact rather than a subject. tC is how far
+// any one sample may be moved. Both are nought below a parameter of sixteen, which is why a finely
+// quantised picture is not filtered at all.
 const BETA: [i32; 52] = [
 	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 	6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20, 22, 24,
@@ -43,8 +46,8 @@ const BETA: [i32; 52] = [
 	58, 60, 62, 64,
 ];
 
-/// The companion table, which runs two entries longer because the boundary strength adds to its
-/// index.
+// The companion table, which runs two entries longer because the boundary strength adds to its
+// index.
 const TC: [i32; 54] = [
 	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 	1, 1, 1, 1, 1, 1, 1, 1, 1,
@@ -57,26 +60,18 @@ const TC: [i32; 54] = [
 /// Where a boundary sits, and what a filter reads across it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Edge {
-	/// A boundary between a block and the one to its left.
-	Vertical,
-	/// Between a block and the one above it.
-	Horizontal,
+	Vertical,		// a block and the one to its left
+	Horizontal,		// a block and the one above it
 }
 
 /// What the deblocking filter needs to know about a picture beyond its samples.
 pub struct Edges<'a> {
-	/// The picture's width in four-sample blocks.
-	pub gw:	usize,
-	/// And its height.
-	pub gh:	usize,
-	/// Whether each four-sample block has a transform or prediction boundary on its left.
-	pub vertical:	&'a [bool],
-	/// The same for its top.
-	pub horizontal:	&'a [bool],
-	/// The luma quantisation parameter of the coding unit covering each.
-	pub qp:	&'a [i8],
-	/// What the picture adds to the chroma parameter, per component.
-	pub chroma_offset:	[i32; 2],
+	pub gw:	usize,					// the picture's width in four-sample blocks
+	pub gh:	usize,					// and its height
+	pub vertical:	&'a [bool],		// a transform or prediction boundary on each block's left?
+	pub horizontal:	&'a [bool],		// the same for its top
+	pub qp:	&'a [i8],				// luma quantisation parameter of the covering coding unit
+	pub chroma_offset:	[i32; 2],	// what the picture adds to the chroma parameter
 }
 
 /// Runs the deblocking filter over a whole picture (§8.7.2).
@@ -95,7 +90,7 @@ pub fn deblock(pic: &mut Picture, edges: &Edges<'_>, depth: u32) {
 	}
 }
 
-/// Whether a boundary of the given kind sits at a luma position.
+/// Does a boundary of the given kind sit at a luma position?
 fn boundary(edges: &Edges<'_>, kind: Edge, x: usize, y: usize) -> bool {
 	let (gx, gy) = (x / 4, y / 4);
 	if gx >= edges.gw || gy >= edges.gh {
@@ -317,9 +312,8 @@ fn chroma(pic: &mut Picture, edges: &Edges<'_>, kind: Edge, depth: u32) {
 	}
 }
 
-/// Which two neighbours an edge offset compares a sample with (§8.7.3.2, Table 8-13).
-///
-/// Across, down, and the two diagonals.
+// Which two neighbours an edge offset compares a sample with (§8.7.3.2, Table 8-13): across,
+// down, and the two diagonals.
 const NEIGHBOURS: [[(i32, i32); 2]; 4] = [
 	[(-1, 0), (1, 0)],
 	[(0, -1), (0, 1)],

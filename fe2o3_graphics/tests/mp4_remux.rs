@@ -16,6 +16,9 @@
 //! Point `MKV_CORPUS` at a directory of films. Output goes under
 //! `~/.cache/ochre-remux-probe`, **never `/tmp`**, which is a tmpfs here and is
 //! charged to the memory budget of whoever writes to it.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_graphics::{
@@ -31,14 +34,9 @@ use std::{
 	process::Command,
 };
 
-/// How much of a film is read before the clusters, to find the tracks.
-const HEAD: usize = 1024 * 1024;
-
-/// The window the frame reader is held to.
-const WINDOW: usize = 256 * 1024;
-
-/// How many frames are repackaged, which decides how big the written film is.
-const FRAMES: usize = 300;
+const HEAD: usize = 1024 * 1024;	// read before the clusters, to find the tracks
+const WINDOW: usize = 256 * 1024;	// the window the frame reader is held to
+const FRAMES: usize = 300;		// repackaged, which decides how big the written film is
 
 #[test]
 fn a_repackaged_film_plays() -> Outcome<()> {
@@ -177,10 +175,8 @@ struct Made {
 	w:		u16,
 	h:		u16,
 	count:	usize,
-	/// The presentation times the source stated, in decode order.
-	times:	Vec<i64>,
-	/// What a player should call the coding of what was written.
-	coding:	&'static str,
+	times:	Vec<i64>,	// the presentation times the source stated, in decode order
+	coding:	&'static str,	// what a player should call the coding of what was written
 }
 
 /// Reads a film's picture frames and writes them into an MP4, decoding nothing.
@@ -409,7 +405,6 @@ fn times_of(path: &Path) -> Option<Vec<i64>> {
 	Some(times)
 }
 
-/// Every `.mkv` under a directory.
 fn gather(dir: &Path, out: &mut Vec<PathBuf>) -> Outcome<()> {
 	let entries = match fs::read_dir(dir) {
 		Ok(e) => e,
@@ -432,7 +427,6 @@ fn gather(dir: &Path, out: &mut Vec<PathBuf>) -> Outcome<()> {
 	Ok(())
 }
 
-/// A count from the environment, or the given default.
 fn num_from_env(key: &str, or: usize) -> usize {
 	match env::var(key) {
 		Ok(v) => v.parse::<usize>().unwrap_or(or),

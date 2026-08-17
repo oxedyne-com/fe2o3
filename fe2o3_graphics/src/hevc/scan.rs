@@ -8,16 +8,16 @@
 //!
 //! Every scan runs **backwards** in the bitstream: the coefficient furthest from the corner is coded
 //! first and the direct one last, which is why the syntax begins by saying where the last one is.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 /// Which way a block is read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Order {
-	/// Up the diagonals from the top left, which is what all but the smallest blocks use.
-	Diagonal,
-	/// Along the rows, for a block predicted from nearly vertical.
-	Horizontal,
-	/// Down the columns, for one predicted from nearly horizontal.
-	Vertical,
+	Diagonal,	// up from the top left, which all but the smallest blocks use
+	Horizontal,	// along the rows, for a block predicted from nearly vertical
+	Vertical,	// down the columns, for one predicted from nearly horizontal
 }
 
 impl Order {
@@ -39,8 +39,6 @@ impl Order {
 	}
 }
 
-/// The scan positions of a square of `size`, in the given order.
-///
 /// Position `i` of the result is where the `i`th coefficient in coding order sits, as `(x, y)`.
 /// Sizes are 1, 2, 4 and 8 for the sub-block grid and always 4 for the coefficients within one.
 pub fn positions(size: usize, order: Order) -> Vec<(u8, u8)> {
@@ -88,13 +86,11 @@ pub fn positions(size: usize, order: Order) -> Vec<(u8, u8)> {
 /// is eight by eight of them -- in three orders each.
 #[derive(Clone, Debug)]
 pub struct Scans {
-	/// Indexed by the base-two logarithm of the grid's side, then by the order.
-	grids:	[[Vec<(u8, u8)>; 3]; 4],
+	grids:	[[Vec<(u8, u8)>; 3]; 4], // by base-two logarithm of the grid's side, then by order
 }
 
 impl Scans {
 
-	/// Works them all out.
 	pub fn new() -> Self {
 		let orders = [Order::Diagonal, Order::Horizontal, Order::Vertical];
 		let grids = std::array::from_fn(|log2| {

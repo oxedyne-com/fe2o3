@@ -16,6 +16,9 @@
 //! restores the first, so the canvas has to be repainted where the block was.
 //!
 //! Both readers are optional. A machine without them skips its half and says so.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_graphics::{
@@ -34,15 +37,15 @@ use std::{
 	process::Command,
 };
 
-/// The canvas the fixtures are drawn on.
+// The canvas the fixtures are drawn on.
 const W: usize = 24;
 const H: usize = 16;
 
-/// The ground colour, and the block that moves onto it.
+// The ground colour, and the block that moves onto it.
 const GROUND: Rgba = Rgba { r: 220, g: 30, b: 40, a: 255 };
 const BLOCK: Rgba = Rgba { r: 0, g: 0, b: 255, a: 255 };
 
-/// The block's rectangle: from (5, 3) to (11, 9), so six wide and six high.
+// The block's rectangle: from (5, 3) to (11, 9), so six wide and six high.
 const BX0: f32 = 5.0;
 const BY0: f32 = 3.0;
 const BX1: f32 = 11.0;
@@ -65,7 +68,6 @@ fn expected(frame: usize, x: usize, y: usize) -> Rgba {
 	if inside { BLOCK } else { GROUND }
 }
 
-/// Writes the animation and gives the path it was written to.
 fn write_fixture() -> Outcome<PathBuf> {
 	let mut anim = res!(Animation::new(W, H)).plays(0);
 	for pm in res!(frames()) {
@@ -77,8 +79,8 @@ fn write_fixture() -> Outcome<PathBuf> {
 	Ok(path)
 }
 
-/// Whether a program is on the path. Both spellings of the flag are tried, since FFmpeg takes one
-/// and Python the other.
+/// Is the program on the path?  Both spellings of the flag are tried, since FFmpeg takes one and
+/// Python the other.
 fn have(prog: &str) -> bool {
 	for flag in ["-version", "--version"] {
 		let ok = Command::new(prog)

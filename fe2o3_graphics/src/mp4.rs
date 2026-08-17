@@ -44,6 +44,9 @@
 //! §8.3 and §8.4. The sequence parameter set whose geometry is checked against the caller's
 //! declared dimensions is ITU-T H.264 §7.3.2.1.1 for AVC and ITU-T H.265 §7.3.2.2 for HEVC, the
 //! latter read by [`crate::hevc`]. Each non-obvious constant below names the clause it comes from.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::hevc;
 
@@ -58,41 +61,37 @@ use std::{
 	},
 };
 
-/// The most samples one track may hold, a ceiling against a length that is a mistake.
-///
-/// A million frames is about eleven and a half hours at twenty-four a second, which is longer than
-/// anything a single non-fragmented file is the right shape for.
+// The most samples one track may hold, a ceiling against a length that is a mistake. A million
+// frames is about eleven and a half hours at twenty-four a second, which is longer than anything
+// a single non-fragmented file is the right shape for.
 pub const MAX_SAMPLES: usize = 1_000_000;
 
-/// The timescale of the movie header, in ticks a second.
-///
-/// The movie has a timescale of its own, separate from each track's, and every duration in `mvhd`
-/// and `tkhd` is expressed in it while every duration in `mdhd` and `stts` is expressed in the
-/// track's. A thousand -- milliseconds -- is the conventional choice and is what makes the movie
-/// header readable when a second track arrives on a different timescale from the first.
+// The timescale of the movie header, in ticks a second. The movie has a timescale of its own,
+// separate from each track's, and every duration in mvhd and tkhd is expressed in it while every
+// duration in mdhd and stts is expressed in the track's. A thousand -- milliseconds -- is the
+// conventional choice and is what makes the movie header readable when a second track arrives on
+// a different timescale from the first.
 pub const MOVIE_TIMESCALE: u32 = 1000;
 
-/// The unity transformation a `tkhd` and an `mvhd` carry.
-///
-/// Nine values in the order `a`, `b`, `u`, `c`, `d`, `v`, `x`, `y`, `w` (ISO/IEC 14496-12 §8.2.2.3
-/// for `mvhd` and §8.3.2.3 for `tkhd`). The six that scale and rotate are 16.16 fixed point, so one
-/// is `0x00010000`; the three of the projection column are 2.30, so one is `0x40000000`. Written
-/// as unity because a track that is played the way it was drawn needs no transformation, and a
-/// non-unity matrix here is how a video ends up rotated in one player and not another.
+// The unity transformation a tkhd and an mvhd carry: nine values in the order a, b, u, c, d, v,
+// x, y, w (ISO/IEC 14496-12 §8.2.2.3 for mvhd and §8.3.2.3 for tkhd). The six that scale and
+// rotate are 16.16 fixed point, so one is 0x00010000; the three of the projection column are 2.30,
+// so one is 0x40000000. Written as unity because a track that is played the way it was drawn needs
+// no transformation, and a non-unity matrix here is how a video ends up rotated in one player and
+// not another.
 const UNITY: [u32; 9] = [
 	0x0001_0000,	0,		0,
 	0,		0x0001_0000,	0,
 	0,		0,		0x4000_0000,
 ];
 
-/// The language of the media, packed as three five-bit letters offset from `0x60`, per ISO/IEC
-/// 14496-12 §8.4.2.3: `und`, undetermined, which is what a video track without speech in it is.
-///
-/// `u` is 21, `n` is 14 and `d` is 4, so the packed value is `(21 << 10) | (14 << 5) | 4`.
+// The language of the media, packed as three five-bit letters offset from 0x60, per ISO/IEC
+// 14496-12 §8.4.2.3: und, undetermined, which is what a video track without speech in it is.
+// u is 21, n is 14 and d is 4, so the packed value is (21 << 10) | (14 << 5) | 4.
 const LANG_UND: u16 = 0x55C4;
 
-/// The horizontal and vertical resolution of a visual sample entry, in 16.16 fixed point dots an
-/// inch: 72, which ISO/IEC 14496-12 §8.5.2.3 gives as the value to write.
+// The horizontal and vertical resolution of a visual sample entry, in 16.16 fixed point dots an
+// inch: 72, which ISO/IEC 14496-12 §8.5.2.3 gives as the value to write.
 const RESOLUTION_72: u32 = 0x0048_0000;
 
 /// A sample of an encoded track: the bytes of one access unit, how long it is shown, and whether a
@@ -104,21 +103,16 @@ const RESOLUTION_72: u32 = 0x0048_0000;
 /// stores.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Sample {
-	/// The coded bytes, as a chain of length-prefixed NAL units.
-	pub data:	Vec<u8>,
-	/// How long the sample is shown, in the track's timescale.
-	pub dur:	u32,
-	/// Whether decoding may begin here: a sync sample, which is an IDR picture for AVC and an IRAP
-	/// picture -- an IDR, a broken link, or a clean random access picture -- for HEVC.
-	pub sync:	bool,
-	/// How far after its decoding time this sample is shown, in the track's timescale.
-	///
-	/// Nought for a stream whose pictures are shown in the order they are decoded, which is what a
-	/// screen recording or a poster is. **A film is not such a stream.** Where B-pictures are used a
-	/// picture is decoded before the ones it is shown between, so the two orders differ and the
-	/// container has to state both: `stts` gives the decoding times and this gives the difference.
-	/// Writing a reordered stream with this left at nought produces a file that opens, reports the
-	/// right number of frames, and plays them in the wrong order.
+	pub data:	Vec<u8>,	// the coded bytes, as a chain of length-prefixed NAL units
+	pub dur:	u32,		// how long it is shown, in the track's timescale
+	pub sync:	bool,		// may decoding begin here? an IDR for AVC, an IRAP for HEVC
+	// How far after its decoding time this sample is shown, in the track's timescale. Nought for
+	// a stream whose pictures are shown in the order they are decoded, which is what a screen
+	// recording or a poster is. A film is not such a stream. Where B-pictures are used a picture
+	// is decoded before the ones it is shown between, so the two orders differ and the container
+	// has to state both: stts gives the decoding times and this gives the difference. Writing a
+	// reordered stream with this left at nought produces a file that opens, reports the right
+	// number of frames, and plays them in the wrong order.
 	pub off:	i32,
 }
 
@@ -143,12 +137,11 @@ impl Sample {
 		self
 	}
 
-	/// The size of the sample in bytes.
 	pub fn len(&self) -> usize {
 		self.data.len()
 	}
 
-	/// Whether the sample carries no bytes, which no legal coded picture does.
+	/// Does the sample carry no bytes? No legal coded picture does.
 	pub fn is_empty(&self) -> bool {
 		self.data.is_empty()
 	}
@@ -161,16 +154,14 @@ impl Sample {
 /// things about one track believes whichever it reads last.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Media {
-	/// Moving pictures of the given size.
-	Picture {
+	Picture {		// moving pictures of the given size
 		w:	u16,
 		h:	u16,
 	},
-	/// Sound of the given channel count, sampled at the given rate.
-	Sound {
+	Sound {			// sound of the given channel count and rate
 		channels:	u16,
-		/// Samples a second. A track's timescale is usually this same number, so that a sample's
-		/// duration is a count of sound samples and no rounding enters.
+		// Samples a second. A track's timescale is usually this same number, so that a
+		// sample's duration is a count of sound samples and no rounding enters.
 		rate:		u32,
 	},
 }
@@ -178,25 +169,21 @@ pub enum Media {
 /// One stream of a film, as its header describes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stream {
-	/// What it carries.
-	pub media:		Media,
-	/// Ticks a second the stream's own durations are counted in.
-	///
-	/// Not required to be the sampling rate of a sound stream, though it often is. A repackaging
-	/// keeps the source's unit so that no time is rescaled between the two containers, and a
-	/// millisecond timescale against a 44,100 Hz stream is therefore ordinary rather than wrong.
+	pub media:		Media,	// what it carries
+	// Ticks a second the stream's own durations are counted in. Not required to be the sampling
+	// rate of a sound stream, though it often is. A repackaging keeps the source's unit so that
+	// no time is rescaled between the two containers, and a millisecond timescale against a
+	// 44,100 Hz stream is therefore ordinary rather than wrong.
 	pub timescale:	u32,
-	/// How the samples are coded, and the configuration a decoder needs.
-	pub codec:		Codec,
-	/// The decode time the stream's first sample lands at, in this stream's own timescale.
-	///
-	/// Nearly always nought, and it exists for the case that is not: **the streams of a film do not
-	/// begin together.** A film's first sound frame is rarely on the same instant as its first
-	/// picture, and a picture track shifted so that none of its composition offsets is negative has
-	/// moved relative to sound that was not shifted with it. Without this the two are nailed to a
-	/// common zero and the film carries an offset between picture and sound that no caller can
-	/// remove -- which is the characteristic fault of a bad repackaging and the one nobody notices
-	/// until the film is being watched.
+	pub codec:		Codec,	// how the samples are coded, and what a decoder needs
+	// The decode time the stream's first sample lands at, in this stream's own timescale. Nearly
+	// always nought, and it exists for the case that is not: the streams of a film do not begin
+	// together. A film's first sound frame is rarely on the same instant as its first picture,
+	// and a picture track shifted so that none of its composition offsets is negative has moved
+	// relative to sound that was not shifted with it. Without this the two are nailed to a common
+	// zero and the film carries an offset between picture and sound that no caller can remove --
+	// which is the characteristic fault of a bad repackaging and the one nobody notices until the
+	// film is being watched.
 	pub start:		u64,
 }
 
@@ -208,26 +195,26 @@ pub struct Stream {
 /// added must be considered at every site rather than take whatever the last one does.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Codec {
-	/// H.264, carrying the `AVCDecoderConfigurationRecord` of ISO/IEC 14496-15 §5.3.3.1 verbatim:
-	/// the bytes a `VideoEncoder` hands back as its output's description, or the `avcC` box body
-	/// lifted out of another file.
+	// H.264, carrying the AVCDecoderConfigurationRecord of ISO/IEC 14496-15 §5.3.3.1 verbatim:
+	// the bytes a VideoEncoder hands back as its output's description, or the avcC box body
+	// lifted out of another file.
 	Avc(Vec<u8>),
-	/// HEVC, carrying the `HEVCDecoderConfigurationRecord` of ISO/IEC 14496-15 §8.3.3.1
-	/// verbatim -- the `hvcC` box body lifted out of another file.
+	// HEVC, carrying the HEVCDecoderConfigurationRecord of ISO/IEC 14496-15 §8.3.3.1 verbatim --
+	// the hvcC box body lifted out of another file.
 	Hevc(Vec<u8>),
-	/// AAC, carrying the `AudioSpecificConfig` of ISO/IEC 14496-3 §1.6.2.1 verbatim: two bytes for
-	/// the common profiles, naming the object type, the sampling frequency and the channel
-	/// configuration. It is what a Matroska track entry's `CodecPrivate` holds for `A_AAC`, so a
-	/// repackaging copies it across exactly as the picture's record is copied.
-	///
-	/// The sample bytes are **raw AAC frames, not ADTS**: an ADTS header states again, once a
-	/// frame, what this record states once for the track, and a decoder handed both refuses.
+	// AAC, carrying the AudioSpecificConfig of ISO/IEC 14496-3 §1.6.2.1 verbatim: two bytes for
+	// the common profiles, naming the object type, the sampling frequency and the channel
+	// configuration. It is what a Matroska track entry's CodecPrivate holds for A_AAC, so a
+	// repackaging copies it across exactly as the picture's record is copied.
+	//
+	// The sample bytes are raw AAC frames, not ADTS: an ADTS header states again, once a frame,
+	// what this record states once for the track, and a decoder handed both refuses.
 	Aac(Vec<u8>),
 }
 
 impl Codec {
 
-	/// Whether the stream is a picture, which decides the boxes its track is described by.
+	/// Is the stream a picture? That decides the boxes its track is described by.
 	pub fn is_picture(&self) -> bool {
 		match self {
 			Self::Avc(_)	=> true,
@@ -542,20 +529,13 @@ impl Codec {
 /// itself is. Holding the samples is what buys an exact table and a `moov` that precedes the media,
 /// which is the layout a reader can start playing before the download finishes.
 pub struct Track {
-	/// Frame width in pixels.
-	w:		u16,
-	/// Frame height in pixels.
-	h:		u16,
-	/// Ticks a second, in which every sample duration is expressed.
-	timescale:	u32,
-	/// The codec and its decoder configuration.
-	codec:		Codec,
-	/// The samples, in decode order, which for a track without B-pictures is also display order.
-	samples:	Vec<Sample>,
-	/// The total size of the samples in bytes, kept as they arrive.
-	bytes:		u64,
-	/// The total duration in the track's timescale, kept as they arrive.
-	ticks:		u64,
+	w:		u16,				// frame width in pixels
+	h:		u16,				// frame height in pixels
+	timescale:	u32,			// ticks a second, in which every sample duration is expressed
+	codec:		Codec,			// the codec and its decoder configuration
+	samples:	Vec<Sample>,	// decode order, which without B-pictures is display order
+	bytes:		u64,			// the samples' total size, kept as they arrive
+	ticks:		u64,			// and their total duration, in the track's timescale
 }
 
 impl Track {
@@ -595,7 +575,6 @@ impl Track {
 		})
 	}
 
-	/// Adds a sample to the end of the track.
 	pub fn push(&mut self, s: Sample) -> Outcome<()> {
 		let i = self.samples.len();
 		if i >= MAX_SAMPLES {
@@ -619,12 +598,10 @@ impl Track {
 		Ok(())
 	}
 
-	/// The number of samples pushed so far.
 	pub fn samples(&self) -> usize {
 		self.samples.len()
 	}
 
-	/// Whether no sample has been pushed.
 	pub fn is_empty(&self) -> bool {
 		self.samples.is_empty()
 	}
@@ -634,12 +611,10 @@ impl Track {
 		self.ticks
 	}
 
-	/// The total size of the samples so far, in bytes.
 	pub fn media_bytes(&self) -> u64 {
 		self.bytes
 	}
 
-	/// Finishes the track and gives the file's bytes.
 	pub fn finish(self) -> Outcome<Vec<u8>> {
 		if self.samples.is_empty() {
 			return Err(err!(
@@ -1005,16 +980,15 @@ impl Track {
 
 // ------------------------------------------------------------------------- a fragmented film
 
-/// The flags a sync sample carries in a track run: `sample_depends_on` = 2, meaning it refers to no
-/// other picture, and `sample_is_non_sync_sample` = 0. ISO/IEC 14496-12 §8.8.3.1.
+// The flags a sync sample carries in a track run: sample_depends_on = 2, meaning it refers to no
+// other picture, and sample_is_non_sync_sample = 0. ISO/IEC 14496-12 §8.8.3.1.
 const SAMPLE_SYNC: u32 = 0x0200_0000;
 
-/// The flags a sample that is not a sync sample carries: `sample_depends_on` = 1, meaning it refers
-/// to other pictures, and `sample_is_non_sync_sample` = 1.
-///
-/// Both halves are stated. A reader deciding where it may begin reads one or the other, and not
-/// always the same one, so a sample that says it depends on nothing while also saying it is not a
-/// sync sample is a contradiction each reader settles its own way.
+// The flags a sample that is not a sync sample carries: sample_depends_on = 1, meaning it refers
+// to other pictures, and sample_is_non_sync_sample = 1. Both halves are stated: a reader deciding
+// where it may begin reads one or the other, and not always the same one, so a sample that says it
+// depends on nothing while also saying it is not a sync sample is a contradiction each reader
+// settles its own way.
 const SAMPLE_DELTA: u32 = 0x0101_0000;
 
 /// A film written as a header followed by fragments.
@@ -1029,16 +1003,13 @@ const SAMPLE_DELTA: u32 = 0x0101_0000;
 /// table, so a reader seeking into one walks the fragments to find where it is going. What it buys
 /// is that the writer never holds the film, and that a film of unknown length can be written.
 pub struct Fragments {
-	/// The streams, in the order given, whose track ids are their positions plus one.
-	streams:	Vec<Stream>,
-	/// Each stream's next decode time, in that stream's own timescale.
-	///
-	/// Kept here because a fragment states the decode time of its first sample outright, and
-	/// nothing in the fragments before it says where that time has got to: a reader handed only
-	/// fragment fifty must be able to place it, which is the whole point of the field.
+	streams:	Vec<Stream>,	// in the order given; track ids are positions plus one
+	// Each stream's next decode time, in that stream's own timescale. Kept here because a
+	// fragment states the decode time of its first sample outright, and nothing in the fragments
+	// before it says where that time has got to: a reader handed only fragment fifty must be
+	// able to place it, which is the whole point of the field.
 	times:		Vec<u64>,
-	/// The sequence number the next fragment carries, counting from one.
-	seq:		u32,
+	seq:		u32,			// the sequence number the next fragment carries, from one
 }
 
 impl Fragments {
@@ -1995,15 +1966,12 @@ fn rbsp(nal: &[u8]) -> Vec<u8> {
 /// A reader of the bits of an RBSP, most significant first, which is how H.264 codes its syntax
 /// elements.
 struct Bits<'a> {
-	/// The bytes being read.
 	buf:	&'a [u8],
-	/// The next bit, counted from the first bit of the first byte.
-	pos:	usize,
+	pos:	usize,		// the next bit, counted from the first bit of the first byte
 }
 
 impl<'a> Bits<'a> {
 
-	/// A reader positioned at the first bit.
 	fn new(buf: &'a [u8]) -> Self {
 		Self { buf, pos: 0 }
 	}
@@ -2029,7 +1997,6 @@ impl<'a> Bits<'a> {
 		Ok(v)
 	}
 
-	/// The next bit as a flag.
 	fn flag(&mut self) -> Outcome<bool> {
 		Ok(res!(self.u(1)) == 1)
 	}
@@ -2223,8 +2190,7 @@ fn sps_geometry(sps: &[u8]) -> Outcome<(u16, u16)> {
 
 // ------------------------------------------------------------------------- reading a film
 
-/// The deepest a box tree may nest before it is called a mistake.
-const MAX_DEPTH: usize = 16;
+const MAX_DEPTH: usize = 16; // the deepest a box tree may nest before it is called a mistake
 
 /// Which codec a track's samples are coded in, as its sample entry names it.
 ///
@@ -2232,14 +2198,10 @@ const MAX_DEPTH: usize = 16;
 /// already recognised rather than on a byte string of its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
-	/// H.264, described by an `avcC` record.
-	Avc,
-	/// HEVC, described by an `hvcC` record.
-	Hevc,
-	/// Motion JPEG: every sample is a whole JPEG and there is no configuration record at all.
-	Mjpeg,
-	/// Something else, carrying its four-character code so that a refusal can name it.
-	Other([u8; 4]),
+	Avc,				// H.264, described by an avcC record
+	Hevc,				// HEVC, described by an hvcC record
+	Mjpeg,				// every sample a whole JPEG, with no configuration record at all
+	Other([u8; 4]),		// carries its code so that a refusal can name it
 }
 
 impl Kind {
@@ -2267,25 +2229,17 @@ impl Kind {
 /// they name are the caller's to fetch.
 #[derive(Clone, Debug)]
 pub struct Film {
-	/// Which codec the track is coded in.
-	kind:	Kind,
-	/// The configuration record out of the sample entry, where the codec has one.
-	config:	Vec<u8>,
-	/// The coded width the sample entry declares.
-	width:	u16,
-	/// The coded height it declares.
-	height:	u16,
-	/// How far the picture is to be turned before it is shown, in degrees clockwise.
-	rotation:	u16,
-	/// The rectangle of the coded picture that is the picture: left, top, width and height.
-	aperture:	Option<(u32, u32, u32, u32)>,
-	/// Each sample's offset in the file and its length.
-	samples:	Vec<(u64, u32)>,
-	/// Which samples a reader may begin decoding at, as `stss` lists them, counted from nought.
-	///
-	/// Empty means the box was absent, which per ISO/IEC 14496-12 §8.6.2 means **every** sample is
-	/// a sync sample -- the opposite of what an empty list would otherwise suggest, and the reason
-	/// this is not an `Option` the caller has to remember to check.
+	kind:	Kind,								// which codec the track is coded in
+	config:	Vec<u8>,							// the configuration record, where the codec has one
+	width:	u16,								// the coded width the sample entry declares
+	height:	u16,								// and the coded height
+	rotation:	u16,							// how far to turn the picture, degrees clockwise
+	aperture:	Option<(u32, u32, u32, u32)>,	// left, top, width, height of the real picture
+	samples:	Vec<(u64, u32)>,				// each sample's offset in the file and its length
+	// Which samples a reader may begin decoding at, as stss lists them, counted from nought.
+	// Empty means the box was absent, which per ISO/IEC 14496-12 §8.6.2 means every sample is a
+	// sync sample -- the opposite of what an empty list would otherwise suggest, and the reason
+	// this is not an Option the caller has to remember to check.
 	sync:	Vec<u32>,
 }
 
@@ -2331,7 +2285,6 @@ impl Film {
 		}
 	}
 
-	/// Which codec the track is coded in.
 	pub fn kind(&self) -> Kind {
 		self.kind
 	}
@@ -2368,7 +2321,6 @@ impl Film {
 		self.aperture
 	}
 
-	/// How many samples the track holds.
 	pub fn samples(&self) -> usize {
 		self.samples.len()
 	}
@@ -2458,24 +2410,21 @@ impl Film {
 
 // ------------------------------------------------------------- a film's index, out of a file
 
-/// The most bytes a movie box may occupy before the file is called a mistake.
-///
-/// A `moov` is an index and not media: the sample tables of a track at this reader's ceiling of a
-/// million samples come to a few tens of megabytes, and anything past this is a length field read
-/// out of the wrong place rather than a film.
+// The most bytes a movie box may occupy before the file is called a mistake. A moov is an index
+// and not media: the sample tables of a track at this reader's ceiling of a million samples come
+// to a few tens of megabytes, and anything past this is a length field read out of the wrong place
+// rather than a film.
 pub const MOOV_MAX: u64 = 64 * 1024 * 1024;
 
-/// The most bytes one sample may occupy.
-///
-/// One coded picture. A 4K intra frame is a few megabytes; this is a ceiling against a length that
-/// is a mistake, since the length is what a buffer is sized from.
+// The most bytes one sample may occupy: one coded picture. A 4K intra frame is a few megabytes;
+// this is a ceiling against a length that is a mistake, since the length is what a buffer is sized
+// from.
 pub const SAMPLE_MAX: u32 = 64 * 1024 * 1024;
 
-/// How much of a movie header is read back, which is more than either version of the box occupies.
+// how much of a movie header is read back, more than either version of the box occupies
 pub const MVHD_BYTES: u64 = 256;
 
-/// The most boxes walked at one level looking for one of them.
-const MAX_BOXES: usize = 4096;
+const MAX_BOXES: usize = 4096; // the most boxes walked at one level looking for one of them
 
 /// The body of the first box of a given type between two offsets in a file, as its offset and its
 /// length.
@@ -2716,28 +2665,17 @@ fn be64(bytes: &[u8], at: usize) -> Outcome<u64> {
 /// The tables one track's sample table holds, before they are turned into sample positions.
 #[derive(Default)]
 struct Tables {
-	/// The handler type: `vide` for a video track.
-	handler:	[u8; 4],
-	/// Where the sample description sits, to be read once the handler says this is video.
-	stsd:		Option<(usize, usize)>,
-	/// The codec, from the sample entry.
-	kind:		Option<Kind>,
-	/// The configuration record's span in the file.
-	config:		Option<(usize, usize)>,
-	/// The clean aperture, as its box states it: width, height, and the offsets of its centre.
-	clap:		Option<(f64, f64, f64, f64)>,
-	/// The coded size the sample entry declares.
-	size:		(u16, u16),
-	/// Each sample's length in bytes, from `stsz`.
-	sizes:		Vec<u32>,
-	/// The runs of `(first_chunk, samples_per_chunk)` from `stsc`, first chunk counted from one.
-	runs:		Vec<(u32, u32)>,
-	/// Each chunk's offset in the file, from `stco` or `co64`.
-	chunks:		Vec<u64>,
-	/// The sync sample numbers, counted from one as `stss` writes them.
-	sync:		Vec<u32>,
-	/// The rotation the track header's matrix codes, in degrees clockwise.
-	rotation:	u16,
+	handler:	[u8; 4],						// vide for a video track
+	stsd:		Option<(usize, usize)>,			// read once the handler says this is video
+	kind:		Option<Kind>,					// the codec, from the sample entry
+	config:		Option<(usize, usize)>,			// the configuration record's span in the file
+	clap:		Option<(f64, f64, f64, f64)>,	// width, height, offsets of the centre
+	size:		(u16, u16),						// the coded size the sample entry declares
+	sizes:		Vec<u32>,						// each sample's length in bytes, from stsz
+	runs:		Vec<(u32, u32)>,				// (first_chunk, samples_per_chunk) from stsc
+	chunks:		Vec<u64>,						// each chunk's offset, from stco or co64
+	sync:		Vec<u32>,						// sync sample numbers, from one as stss writes them
+	rotation:	u16,							// from the track header's matrix, degrees clockwise
 }
 
 /// Reads the first video track out of a `moov` box.
