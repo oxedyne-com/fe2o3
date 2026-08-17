@@ -25,6 +25,9 @@
 //! can place (see the policy's reasoning), and no identifier stored about who *read* a thread. A
 //! commenter's address, where they give one, is stored and **never rendered and never returned by
 //! any endpoint** -- it exists to notify them of a reply and for nothing else.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::srv::publish::{
 	Markup,
@@ -54,53 +57,42 @@ use std::sync::{
 use tokio_rustls::rustls::ClientConfig;
 
 
-/// The key every comment's key begins with.
-///
-/// A comment's key carries its post's slug, so every comment on a post is one prefix scan and a read
-/// per comment -- the shape the posts themselves take, and for the same reason: nothing walks the
-/// whole database to draw one page.
+// A comment's key carries its post's slug, so every comment on a post is one prefix scan and a
+// read per comment -- the shape the posts themselves take, and for the same reason: nothing walks
+// the whole database to draw one page.
 pub const KEY_PREFIX: &str = "publish/comment/";
 
-/// The key every commenter record begins with.
-///
-/// A commenter is remembered only so that somebody already approved is not made to wait again. See
-/// [`Commenter`].
+// A commenter is remembered only so that somebody already approved is not made to wait again. See
+// `Commenter`.
 pub const AUTHOR_PREFIX: &str = "publish/commenter/";
 
-/// The longest a comment may be, in bytes of source.
-///
-/// Long enough for a considered reply and short enough that a page of them is a page. A limit that
-/// exists at all is the point; the number is a judgement.
+// The longest a comment may be, in bytes of source. Long enough for a considered reply and short
+// enough that a page of them is a page. A limit that exists at all is the point; the number is a
+// judgement.
 pub const BODY_MAX: usize = 8_000;
 
-/// The longest a display name may be.
 pub const NAME_MAX: usize = 64;
 
-/// How deep a reply may nest.
-///
-/// Three is the depth at which a thread is still a conversation and not a staircase. A reply deeper
-/// than this attaches to its grandparent instead of being refused: the person meant to reply to
-/// something, and losing their words to a structural rule would be the wrong answer.
+// How deep a reply may nest. Three is the depth at which a thread is still a conversation and not
+// a staircase. A reply deeper than this attaches to its grandparent instead of being refused: the
+// person meant to reply to something, and losing their words to a structural rule would be the
+// wrong answer.
 pub const DEPTH_MAX: usize = 3;
 
-/// How many comments may be waiting on one post before it stops taking more.
-///
-/// The bound on what an unauthenticated write can cost. A comment that is held is storage somebody
-/// else chose to spend, and without a ceiling a machine that ignores the proof-of-work can spend it
-/// without limit. Once a post's queue is this full it takes nothing further until a person clears
-/// some -- which is a visible, recoverable state, unlike a disk that filled overnight.
-///
-/// Approved comments are deliberately **not** counted: those are storage the site's own admin chose.
+// How many comments may be waiting on one post before it stops taking more: the bound on what an
+// unauthenticated write can cost. A comment that is held is storage somebody else chose to spend,
+// and without a ceiling a machine that ignores the proof-of-work can spend it without limit. Once
+// a post's queue is this full it takes nothing further until a person clears some -- a visible,
+// recoverable state, unlike a disk that filled overnight. Approved comments are deliberately not
+// counted: those are storage the site's own admin chose.
 pub const PENDING_MAX: usize = 50;
 
-/// How many comments one post will hold, in any state.
-///
-/// Every comment on a post is read back whenever the post is viewed, so the store is not merely disk:
-/// it is work done on behalf of every reader, for ever. A thousand is far past any conversation worth
-/// having and well short of a page that will not serve.
+// How many comments one post will hold, in any state. Every comment on a post is read back
+// whenever the post is viewed, so the store is not merely disk: it is work done on behalf of every
+// reader, for ever. A thousand is far past any conversation worth having and well short of a page
+// that will not serve.
 pub const POST_MAX: usize = 1_000;
 
-/// The alphabet and length a comment's id is minted from.
 const ID_LEN: usize = 16;
 const ID_ALPHABET: &str = "abcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -112,16 +104,13 @@ const ID_ALPHABET: &str = "abcdefghijklmnopqrstuvwxyz0123456789";
 /// Where a comment stands.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum CommentState {
-	/// Waiting on a human. What every comment by an unknown author is.
 	#[default]
-	Pending,
-	/// Published, and visible to a reader.
-	Approved,
-	/// Judged spam. Kept rather than deleted, so a wrong judgement is recoverable and so a record of
-	/// what arrives exists.
+	Pending,	// waiting on a human, which every comment by an unknown author is
+	Approved,	// published, and visible to a reader
+	// Judged spam. Kept rather than deleted, so a wrong judgement is recoverable and so a record of
+	// what arrives exists.
 	Spam,
-	/// Taken down after having been published, by the author of the site or the commenter.
-	Removed,
+	Removed,	// taken down after publication, by the site's author or the commenter
 }
 
 impl CommentState {
@@ -151,7 +140,7 @@ impl CommentState {
 		}
 	}
 
-	/// Whether a comment in this state is shown to a reader.
+	/// Is a comment in this state shown to a reader?
 	pub fn is_public(&self) -> bool {
 		matches!(self, Self::Approved)
 	}
@@ -165,23 +154,19 @@ impl CommentState {
 /// keeping it there is what lets a new arm arrive without touching the pipeline.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Identity {
-	/// A name, and an address they chose to give. The address is never shown.
+	// A name, and an address they chose to give. The address is never shown.
 	Local {
-		/// What the reader sees.
-		name:	String,
-		/// Where a reply notification would go, if they asked for one. Never rendered, never
-		/// returned by an endpoint, never given to a third party.
+		name:	String,		// what the reader sees
+		// Where a reply notification would go, if they asked for one. Never rendered, never
+		// returned by an endpoint, never given to a third party.
 		email:	Option<String>,
 	},
-	/// No name given. Shown as the site's word for a stranger.
-	Anon,
-	/// An identity a network vouches for. **Not yet issued by anything** -- the arm exists so that
-	/// storage, moderation and rendering already handle it when it is.
+	Anon,		// no name given; shown as the site's word for a stranger
+	// An identity a network vouches for. Not yet issued by anything -- the arm exists so that
+	// storage, moderation and rendering already handle it when it is.
 	Vouched {
-		/// The identifier the network knows them by.
-		id:	String,
-		/// What the reader sees.
-		name:	String,
+		id:	String,		// the identifier the network knows them by
+		name:	String,		// what the reader sees
 	},
 }
 
@@ -191,7 +176,6 @@ impl Default for Identity {
 
 impl Identity {
 
-	/// The name a reader sees.
 	pub fn display_name(&self) -> &str {
 		match self {
 			Self::Local { name, .. }	=> name,
@@ -200,7 +184,6 @@ impl Identity {
 		}
 	}
 
-	/// The address to reach them at, where there is one.
 	pub fn email(&self) -> Option<&str> {
 		match self {
 			Self::Local { email, .. }	=> email.as_deref(),
@@ -226,7 +209,6 @@ impl Identity {
 		}
 	}
 
-	/// The identity as a daticle.
 	pub fn to_dat(&self) -> Dat {
 		let mut m = DaticleMap::new();
 		match self {
@@ -277,38 +259,30 @@ impl Identity {
 /// One comment, as the store keeps it.
 #[derive(Clone, Debug, Default)]
 pub struct Comment {
-	/// The comment's own name, unguessable, minted once.
-	pub id:		String,
-	/// The post it is attached to.
-	pub slug:	String,
-	/// The comment it replies to, where it replies to one.
-	pub parent:	Option<String>,
-	/// Who wrote it.
+	pub id:		String,		// the comment's own name, unguessable, minted once
+	pub slug:	String,		// the post it is attached to
+	pub parent:	Option<String>,	// the comment it replies to, where it replies to one
 	pub author:	Identity,
-	/// What they wrote, as written. The source is kept and never the rendering, for the same reason
-	/// a post's is: the renderer improves, and a stored rendering is a photograph of an older one.
+	// What they wrote, as written. The source is kept and never the rendering, for the same reason
+	// a post's is: the renderer improves, and a stored rendering is a photograph of an older one.
 	pub body:	String,
-	/// When it arrived, as an ISO timestamp.
-	pub created:	String,
-	/// Where it stands.
+	pub created:	String,		// ISO timestamp
 	pub state:	CommentState,
-	/// Why it stands there, where something decided: the moderator's own words. Shown to the site's
-	/// admin in the queue and never to a reader.
+	// Why it stands there, where something decided: the moderator's own words. Shown to the site's
+	// admin in the queue and never to a reader.
 	pub reason:	Option<String>,
-	/// Whether the site's own admin wrote this, rather than a visitor claiming to be them.
-	///
-	/// A display name is whatever somebody typed, so it can never distinguish the site's author from
-	/// a stranger who typed their name. This can: it is set only by the console, never by anything a
-	/// form carries, and it is what the page marks.
+	// Whether the site's own admin wrote this, rather than a visitor claiming to be them. A display
+	// name is whatever somebody typed, so it can never distinguish the site's author from a stranger
+	// who typed their name. This can: it is set only by the console, never by anything a form
+	// carries, and it is what the page marks.
 	pub by_site_author:	bool,
-	/// A salted hash of the address it came from. **Not the address**: enough to recognise a
-	/// returning nuisance, not enough to reconstruct who they are, and never shown.
+	// A salted hash of the address it came from -- not the address: enough to recognise a returning
+	// nuisance, not enough to reconstruct who they are, and never shown.
 	pub from:	Option<String>,
 }
 
 impl Comment {
 
-	/// The comment as a daticle.
 	pub fn to_dat(&self) -> Dat {
 		let mut m = DaticleMap::new();
 		m.insert(dat!("id"),		dat!(self.id.clone()));
@@ -334,7 +308,6 @@ impl Comment {
 		Dat::Map(m)
 	}
 
-	/// The comment from a daticle.
 	pub fn from_dat(d: &Dat) -> Outcome<Self> {
 		let m = match d {
 			Dat::Map(m)	=> m,
@@ -389,27 +362,22 @@ impl Comment {
 /// beyond the handle that is already derived from one.
 #[derive(Clone, Debug, Default)]
 pub struct Commenter {
-	/// The handle, from [`Identity::handle`].
-	pub handle:	String,
-	/// The salted address hash trust was granted to, where trust has been granted.
-	///
-	/// An address in a form is not proof of anything: anyone may type an approved commenter's
-	/// address and inherit their approval. Recording where the approved comment came from, and
-	/// requiring a later comment to match it, makes that forgery cost the attacker the same
-	/// vantage point as well as the address. Not proof either -- it is one more thing to have.
+	pub handle:	String,		// from `Identity::handle`
+	// The salted address hash trust was granted to, where trust has been granted. An address in a
+	// form is not proof of anything: anyone may type an approved commenter's address and inherit
+	// their approval. Recording where the approved comment came from, and requiring a later comment
+	// to match it, makes that forgery cost the attacker the same vantage point as well as the
+	// address. Not proof either -- it is one more thing to have.
 	pub from:	Option<String>,
-	/// Whether an admin has approved something of theirs.
-	pub trusted:	bool,
-	/// Whether an admin has decided the opposite. A blocked commenter's comments go straight to spam
-	/// without troubling anybody.
+	pub trusted:	bool,		// whether an admin has approved something of theirs
+	// Whether an admin has decided the opposite. A blocked commenter's comments go straight to spam
+	// without troubling anybody.
 	pub blocked:	bool,
-	/// When they were first seen.
-	pub first_seen:	String,
+	pub first_seen:	String,		// when they were first seen
 }
 
 impl Commenter {
 
-	/// The record as a daticle.
 	pub fn to_dat(&self) -> Dat {
 		let mut m = DaticleMap::new();
 		m.insert(dat!("handle"),	dat!(self.handle.clone()));
@@ -422,7 +390,6 @@ impl Commenter {
 		Dat::Map(m)
 	}
 
-	/// The record from a daticle.
 	pub fn from_dat(d: &Dat) -> Outcome<Self> {
 		let m = match d {
 			Dat::Map(m)	=> m,
@@ -462,7 +429,6 @@ pub fn valid_name(s: &str) -> bool {
 		&& !t.chars().any(|c| c.is_control())
 }
 
-/// Whether a body is one the store will take.
 pub fn valid_body(s: &str) -> bool {
 	let t = s.trim();
 	!t.is_empty() && t.len() <= BODY_MAX
@@ -474,22 +440,18 @@ pub fn valid_id(s: &str) -> bool {
 	t.len() == ID_LEN && t.chars().all(|c| ID_ALPHABET.contains(c))
 }
 
-/// Mints a comment's name.
 pub fn mint_id() -> String {
 	Rand::generate_random_string(ID_LEN, ID_ALPHABET)
 }
 
-/// The key a comment is stored under: its post, then its own name.
 fn key_of(slug: &str, id: &str) -> Dat {
 	dat!(fmt!("{}{}/{}", KEY_PREFIX, slug, id))
 }
 
-/// The prefix every comment on one post shares.
 fn post_prefix(slug: &str) -> String {
 	fmt!("{}{}/", KEY_PREFIX, slug)
 }
 
-/// The key a commenter is remembered under.
 fn author_key(handle: &str) -> Dat {
 	dat!(fmt!("{}{}", AUTHOR_PREFIX, handle))
 }
@@ -499,12 +461,11 @@ fn author_key(handle: &str) -> Dat {
 // │ PROOF OF WORK                                                             │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// How many leading zero bits a comment's proof must show.
-///
-/// The cost is paid by the sender's browser, once, in about a second at this width, and by a spammer
-/// once per attempt. It is not a wall -- anyone determined pays it -- it is a tax that makes posting
-/// ten thousand comments cost ten thousand seconds instead of nothing. Raise it if that stops being
-/// enough; every extra bit doubles the price.
+// How many leading zero bits a comment's proof must show. The cost is paid by the sender's
+// browser, once, in about a second at this width, and by a spammer once per attempt. It is not a
+// wall -- anyone determined pays it -- it is a tax that makes posting ten thousand comments cost
+// ten thousand seconds instead of nothing. Raise it if that stops being enough; every extra bit
+// doubles the price.
 pub const POW_BITS: u32 = 18;
 
 /// What a proof is computed over: the challenge the form was given, and the nonce the browser found.
@@ -518,8 +479,8 @@ pub fn pow_challenge(slug: &str, secret: &[u8]) -> String {
 	pow_challenge_at(slug, secret, &pow_window(0))
 }
 
-/// How long a challenge stands. An hour: long enough that a reader may write at length and still
-/// post, short enough that a solved nonce is not a permanent licence.
+// How long a challenge stands. An hour: long enough that a reader may write at length and still
+// post, short enough that a solved nonce is not a permanent licence.
 pub const POW_WINDOW_SECS: u64 = 3600;
 
 /// The window identifier, `back` windows ago.
@@ -534,7 +495,6 @@ pub fn pow_window(back: u64) -> String {
 	fmt!("{}", now.saturating_sub(back * POW_WINDOW_SECS) / POW_WINDOW_SECS)
 }
 
-/// The challenge for a named window.
 pub fn pow_challenge_at(slug: &str, secret: &[u8], window: &str) -> String {
 	let h = HashScheme::new_sha256().hash(&[slug.as_bytes(), b"comment-pow", secret, window.as_bytes()], []);
 	hex(&h.as_hashform().as_vec())
@@ -557,7 +517,6 @@ pub fn pow_verify(challenge: &str, nonce: &str, bits: u32) -> bool {
 	leading_zero_bits(&h.as_hashform().as_vec()) >= bits
 }
 
-/// The leading zero bits of a digest.
 fn leading_zero_bits(bytes: &[u8]) -> u32 {
 	let mut n = 0;
 	for b in bytes {
@@ -571,7 +530,6 @@ fn leading_zero_bits(bytes: &[u8]) -> u32 {
 	n
 }
 
-/// Hex, as the console renders it.
 fn hex(bytes: &[u8]) -> String {
 	let mut s = String::with_capacity(bytes.len() * 2);
 	for b in bytes {
@@ -610,17 +568,13 @@ pub fn hash_with(addr: &str, domain: &[u8], salt: &[u8]) -> String {
 /// defer to a person, or bin. It may not delete, and it may not edit.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Verdict {
-	/// Publish it.
-	Allow,
-	/// A person should look. The reason is shown to that person, never to the commenter.
-	Hold(String),
-	/// Bin it, recoverably.
-	Spam(String),
+	Allow,			// publish it
+	Hold(String),		// a person should look; the reason is for them, never for the commenter
+	Spam(String),		// bin it, recoverably
 }
 
 impl Verdict {
 
-	/// The state this verdict puts a comment in.
 	pub fn state(&self) -> CommentState {
 		match self {
 			Self::Allow	=> CommentState::Approved,
@@ -629,7 +583,6 @@ impl Verdict {
 		}
 	}
 
-	/// The reason, where there is one.
 	pub fn reason(&self) -> Option<String> {
 		match self {
 			Self::Allow		=> None,
@@ -655,12 +608,10 @@ impl Verdict {
 	}
 }
 
-/// Why a comment claiming a known commenter from a new place is held.
-///
-/// A const rather than a literal at the one place it is used, because a reason is shown to a person:
-/// it is worth being able to test that it reads as a sentence, which the wrapped literal it replaces
-/// did not -- the source indentation was inside the string, and the queue said "commented from
-/// &#x9;&#x9;&#x9;before".
+// Why a comment claiming a known commenter from a new place is held. A const rather than a literal
+// at the one place it is used, because a reason is shown to a person: it is worth being able to
+// test that it reads as a sentence, which the wrapped literal it replaces did not -- the source
+// indentation was inside the string, and the queue said "commented from			before".
 pub const REASON_MISMATCH: &str = "claims a commenter this site knows, but from somewhere they have \
 	not commented from before -- worth checking it is them";
 
@@ -671,8 +622,7 @@ pub const REASON_MISMATCH: &str = "claims a commenter this site knows, but from 
 /// moderator is an arm here rather than a change to the pipeline.
 #[derive(Clone, Debug)]
 pub enum Moderator {
-	/// Arithmetic: what the sender proved, what they wrote, and whether the site already knows them.
-	Rules(Rules),
+	Rules(Rules),	// what the sender proved, what they wrote, whether the site knows them
 }
 
 impl Default for Moderator {
@@ -681,7 +631,6 @@ impl Default for Moderator {
 
 impl Moderator {
 
-	/// Judges a comment.
 	pub fn judge(&self, c: &Comment, known: Option<&Commenter>) -> Verdict {
 		match self {
 			Self::Rules(r)	=> r.judge(c, known),
@@ -692,10 +641,9 @@ impl Moderator {
 /// The arithmetic moderator.
 #[derive(Clone, Debug)]
 pub struct Rules {
-	/// How many links a comment may carry before it is held. A comment is prose with the occasional
-	/// reference; a list of links is an advertisement.
+	// How many links a comment may carry before it is held. A comment is prose with the occasional
+	// reference; a list of links is an advertisement.
 	pub link_limit:		usize,
-	/// Whether a commenter the site has approved before skips the queue.
 	pub trust_returning:	bool,
 }
 
@@ -763,16 +711,13 @@ pub fn count_links(body: &str) -> usize {
 /// weighs a comment by something other than when it arrived is the shape of what may come.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Ranker {
-	/// Oldest first, which is the order a conversation happened in.
 	#[default]
-	Chronological,
-	/// Newest first.
-	Recent,
+	Chronological,	// oldest first, the order a conversation happened in
+	Recent,		// newest first
 }
 
 impl Ranker {
 
-	/// Orders a run of comments in place.
 	pub fn rank(&self, items: &mut [Comment]) {
 		match self {
 			Self::Chronological	=> items.sort_by(|a, b| a.created.cmp(&b.created)),
@@ -786,7 +731,6 @@ impl Ranker {
 // │ STORE                                                                     │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Writes a comment.
 pub fn put<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -805,7 +749,6 @@ pub fn put<
 	Ok(())
 }
 
-/// Reads one comment by post and name.
 pub fn get<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -952,7 +895,6 @@ pub fn queue<
 	Ok(out)
 }
 
-/// How many comments a post has that a reader may see.
 pub fn count_public<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -1037,7 +979,6 @@ pub fn erase<
 // │ COMMENTERS                                                                │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Reads what is remembered about a commenter.
 pub fn commenter<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -1097,7 +1038,6 @@ pub fn set_trust<
 	Ok(())
 }
 
-/// Blocks or unblocks a commenter.
 pub fn set_blocked<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -1137,10 +1077,8 @@ pub fn set_blocked<
 /// A comment and the replies beneath it.
 #[derive(Clone, Debug)]
 pub struct Thread {
-	/// The comment at this node.
 	pub comment:	Comment,
-	/// Its replies, in the same order the ranker gave.
-	pub replies:	Vec<Thread>,
+	pub replies:	Vec<Thread>,	// in the same order the ranker gave
 }
 
 /// Arranges a flat run of comments into threads.
@@ -1173,7 +1111,6 @@ pub fn thread(items: Vec<Comment>) -> Vec<Thread> {
 	roots.into_iter().map(|r| build(r, &mut children, 0)).collect()
 }
 
-/// One node and everything under it, to the depth the module allows.
 fn build(
 	c:		Comment,
 	children:	&mut std::collections::HashMap<String, Vec<Comment>>,
@@ -1215,10 +1152,9 @@ fn drain(
 	out
 }
 
-/// How many top-level threads a page of a conversation shows.
-///
-/// Counted in threads rather than comments: a reply belongs with what it answers, and splitting a
-/// thread across a page boundary would leave an answer on one page and its question on another.
+// How many top-level threads a page of a conversation shows. Counted in threads rather than
+// comments: a reply belongs with what it answers, and splitting a thread across a page boundary
+// would leave an answer on one page and its question on another.
 pub const PAGE_THREADS: usize = 25;
 
 /// One page of a threaded conversation, and how many pages there are.
@@ -1230,7 +1166,6 @@ pub fn page_of(threads: Vec<Thread>, page: usize) -> (Vec<Thread>, usize, usize)
 	(threads[from..upto].to_vec(), at, pages)
 }
 
-/// How many comments a run of threads holds, at every depth.
 pub fn count_threads(threads: &[Thread]) -> usize {
 	threads.iter().map(|t| 1 + count_threads(&t.replies)).sum()
 }
@@ -1859,12 +1794,9 @@ mod tests {
 /// refused, deliberately: a spammer tuning against a precise reason is being given a test suite, and a
 /// reader who wrote something ordinary does not need to know the machinery.
 pub enum Received {
-	/// Stored and published at once, because the site already knows the commenter.
-	Published,
-	/// Stored and waiting for the author to see it.
-	Held,
-	/// Not stored. The reader is told the same thing as `Held` -- see below.
-	Refused(String),
+	Published,		// stored and published at once, because the site already knows the commenter
+	Held,			// stored and waiting for the author to see it
+	Refused(String),	// not stored; the reader is told the same thing as `Held`
 }
 
 impl Received {
@@ -1887,26 +1819,16 @@ impl Received {
 
 /// Everything a submitted comment arrives with.
 pub struct Submission<'a> {
-	/// The post being commented on.
-	pub slug:	&'a str,
-	/// The comment being replied to, where one is.
-	pub parent:	Option<String>,
-	/// The name given.
-	pub name:	String,
-	/// The address given, where one was.
-	pub email:	Option<String>,
-	/// The prose.
-	pub body:	String,
-	/// The honeypot field. Anything in it and the sender is not a person.
-	pub honeypot:	String,
-	/// The challenge the form carried.
-	pub challenge:	String,
-	/// The nonce the browser found, where it found one.
-	pub nonce:	String,
-	/// Who sent it, for the salted hash.
-	pub from:	Option<String>,
-	/// When it arrived.
-	pub now:	String,
+	pub slug:	&'a str,	// the post being commented on
+	pub parent:	Option<String>,	// the comment being replied to, where one is
+	pub name:	String,		// the name given
+	pub email:	Option<String>,	// the address given, where one was
+	pub body:	String,		// the prose
+	pub honeypot:	String,		// anything in it and the sender is not a person
+	pub challenge:	String,		// the challenge the form carried
+	pub nonce:	String,		// the nonce the browser found, where it found one
+	pub from:	Option<String>,	// who sent it, for the salted hash
+	pub now:	String,		// when it arrived
 }
 
 /// Renders a comment's prose as the reader would see it, storing nothing.
@@ -2156,10 +2078,8 @@ pub async fn receive<
 }
 
 
-/// How long a commenter may correct what they just wrote.
-///
-/// Long enough to notice a typo and fix it, short enough that the right to edit does not outlive the
-/// moment of writing.
+// How long a commenter may correct what they just wrote. Long enough to notice a typo and fix it,
+// short enough that the right to edit does not outlive the moment of writing.
 pub const EDIT_WINDOW_SECS: u64 = 900;
 
 /// A token proving the holder wrote a particular comment.
@@ -2280,7 +2200,6 @@ pub fn edit<
 	Ok(true)
 }
 
-/// The key the site's own comments-open switch lives under.
 const OPEN_KEY: &str = "publish/comments-open";
 
 /// Whether this site is taking comments, as the site itself has decided.
@@ -2318,7 +2237,6 @@ pub fn comments_open<
 	}
 }
 
-/// Records whether the site is taking comments.
 pub fn set_comments_open<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -2337,11 +2255,8 @@ pub fn set_comments_open<
 	Ok(())
 }
 
-/// The key a sender's rate record lives under.
 const RATE_PREFIX: &str = "publish/comment-rate/";
 
-/// The least time between two comments from one sender.
-/// See [`PublishConfig::comment_rate_secs`](crate::srv::publish::PublishConfig::comment_rate_secs).
 
 /// Whether a sender may comment now, and the record of their having done so.
 ///
@@ -2441,10 +2356,8 @@ pub fn rate_allows_at<
 	Ok(true)
 }
 
-/// The key the site's comment secret lives under.
 const SECRET_KEY: &str = "publish/comment-secret";
 
-/// How many bytes of secret.
 const SECRET_LEN: usize = 32;
 
 /// The site's own comment secret, made once and kept.

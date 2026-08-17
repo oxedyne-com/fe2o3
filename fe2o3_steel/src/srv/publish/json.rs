@@ -8,6 +8,9 @@
 //! Served from the same prefix as everything else here, because the prefix is the module's and a post
 //! is a post however it is asked for. A slug cannot collide with this: `index.json` is not a name a
 //! slug may wear, punctuation not being allowed in one.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::srv::cache;
 use crate::srv::publish::{

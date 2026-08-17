@@ -28,6 +28,9 @@
 //!   in `ServerContext::vhost_dbs` (in iteration order) as the
 //!   default for `/admin/database`. Operators who want a specific
 //!   vhost's ozone use the public path.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::srv::{
     admin::{
@@ -94,10 +97,8 @@ impl<
 >
     ServerContext<UIDL, UID, ENC, KH, DB, WH, WSH>
 {
-    /// Run the localhost plain-HTTP admin listener accept loop on
-    /// `127.0.0.1:<port>`. Returns only on a fatal bind error;
-    /// per-connection failures are logged and the loop keeps
-    /// running.
+    /// Returns only on a fatal bind error; per-connection failures are logged
+    /// and the loop keeps running.
     pub async fn run_admin_local_listener(self, port: u16) -> Outcome<()> {
         let addr: SocketAddr = SocketAddr::new(
             std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
@@ -130,10 +131,8 @@ impl<
         }
     }
 
-    /// Drive a single localhost admin connection: read HTTP
-    /// requests, dispatch `/admin/*` to the dashboard handler,
-    /// return 404 for everything else, record traffic for each
-    /// completed request.
+    /// Dispatches `/admin/*` to the dashboard handler and returns 404 for
+    /// everything else.
     async fn handle_admin_local_connection(
         self,
         mut stream: TcpStream,

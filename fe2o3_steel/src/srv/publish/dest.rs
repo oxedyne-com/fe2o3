@@ -21,6 +21,9 @@
 //! [`DeliveryState::Sent`] with the moment and the permalink the remote returned; the worker consults
 //! [`DeliveryState::backoff_secs`] against a clock it owns. Keeping the model clock-free is what lets
 //! it be tested without either.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_jdat::prelude::*;
@@ -32,25 +35,20 @@ use oxedyne_fe2o3_jdat::prelude::*;
 /// `Destination` is always a remote, and always something that can be slow, refuse, or vanish.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Destination {
-	/// Subscribers, reached through the site's own DKIM sender.
-	Email,
-	/// A Mastodon server, by a static bearer token.
-	Mastodon,
-	/// A Bluesky PDS, by an app password exchanged for a session.
-	Bluesky,
-	/// A Substack publication. Per-post has no sanctioned API and rides an unofficial one; the
-	/// supported path is a bulk feed import, so this is named but not wired.
+	Email,		// subscribers, through the site's own DKIM sender
+	Mastodon,	// a static bearer token
+	Bluesky,	// an app password exchanged for a session
+	// Per-post has no sanctioned API and rides an unofficial one; the supported path is a bulk feed
+	// import, so this is named but not wired.
 	Substack,
-	/// X, pay-per-use, behind an OAuth 2.0 client.
-	X,
-	/// Threads, behind Meta's OAuth and app review.
-	Threads,
+	X,		// pay-per-use, behind an OAuth 2.0 client
+	Threads,	// behind Meta's OAuth and app review
 }
 
 impl Destination {
 
-	/// Every destination the module names, in the order a picker shows them: the free and wired first,
-	/// the costed and the unbuilt after.
+	// Every destination the module names, in the order a picker shows them: the free and wired
+	// first, the costed and the unbuilt after.
 	pub const ALL: [Self; 6] = [
 		Self::Email,
 		Self::Mastodon,
@@ -90,7 +88,6 @@ impl Destination {
 		}
 	}
 
-	/// What this destination will take, and what it costs.
 	pub fn capability(&self) -> Capability {
 		match self {
 			// The newsletter is the whole post, not a blurb, so it has no length worth enforcing here.
@@ -168,22 +165,16 @@ impl Destination {
 /// site's.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Capability {
-	/// The name a picker shows.
-	pub name:		&'static str,
-	/// The longest body the remote accepts, in characters, or nothing where the limit is not worth
-	/// enforcing here (an email carries the whole post).
+	pub name:		&'static str,	// what a picker shows
+	// The longest body the remote accepts, in characters. Nothing where the limit is not worth
+	// enforcing here: an email carries the whole post.
 	pub max_chars:		Option<usize>,
-	/// Whether a link in the body is carried as written, rather than stripped or charged extra for.
-	pub links:		bool,
-	/// Whether an image can ride along with the words.
-	pub media:		bool,
-	/// What a post costs, in millionths of a US dollar. Zero for the free remotes.
-	pub cost_micros:	u64,
-	/// What a post costs *extra* when its body carries a link, in the same millionths. Zero where a
-	/// link is free.
-	pub link_micros:	u64,
-	/// Whether this module can actually deliver to the remote yet, or only names it. A picker greys out
-	/// what is not wired rather than offering a post that will never go.
+	pub links:		bool,		// carried as written, not stripped or surcharged
+	pub media:		bool,		// an image can ride along with the words
+	pub cost_micros:	u64,		// millionths of a US dollar; zero for the free remotes
+	pub link_micros:	u64,		// extra millionths where the body carries a link
+	// Whether this module can actually deliver to the remote yet, or only names it. A picker greys
+	// out what is not wired rather than offering a post that will never go.
 	pub wired:		bool,
 }
 
@@ -209,11 +200,10 @@ impl Capability {
 /// the next automatic pass.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Rendition {
-	/// The body this destination is sent.
-	pub text:	String,
-	/// Whether this is still the derived default (`true`) or has been edited by hand (`false`). The
-	/// distinction is the whole reason renditions are remembered: an automatic pass may replace an
-	/// automatic rendition and must never replace a hand-written one.
+	pub text:	String,		// the body this destination is sent
+	// Whether this is still the derived default (`true`) or has been edited by hand (`false`). The
+	// distinction is the whole reason renditions are remembered: an automatic pass may replace an
+	// automatic rendition and must never replace a hand-written one.
 	pub auto:	bool,
 }
 
@@ -269,7 +259,6 @@ impl Rendition {
 		Self { text, auto: true }
 	}
 
-	/// The rendition as a daticle.
 	pub fn to_dat(&self) -> Dat {
 		let mut m = DaticleMap::new();
 		m.insert(dat!("text"), dat!(self.text.clone()));
@@ -298,18 +287,14 @@ impl Rendition {
 }
 
 
-/// The most times a failed delivery is retried before it is left alone.
-///
-/// A remote that has refused this many times is not going to take the post because it was asked once
-/// more, and a queue that retries for ever is a queue that never drains. The number is arbitrary;
-/// having one, so the queue is bounded, is not.
+// A remote that has refused this many times is not going to take the post because it was asked
+// once more, and a queue that retries for ever is a queue that never drains. The number is
+// arbitrary; having one, so the queue is bounded, is not.
 pub const MAX_RETRIES: u32 = 5;
 
-/// The first wait after a failure, in seconds. Each further failure doubles it, to [`BACKOFF_CAP_SECS`].
+// The wait after a failure doubles each time until it stops at the cap, so a remote briefly down
+// is retried soon and a stubborn one hourly rather than never.
 pub const BACKOFF_BASE_SECS: u64 = 60;
-
-/// The longest wait between retries, in seconds. Doubling stops here, so a stubborn remote is retried
-/// hourly rather than never.
 pub const BACKOFF_CAP_SECS: u64 = 3600;
 
 
@@ -320,24 +305,18 @@ pub const BACKOFF_CAP_SECS: u64 = 3600;
 /// calls live: the two states are about different places and do not track each other.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DeliveryState {
-	/// Waiting for the worker to try it, or to try it again.
-	Queued,
-	/// Taken. `at` is the moment the remote confirmed it, `permalink` the address it gave back -- kept
-	/// so the site can say "also on Mastodon" and link to where the post actually landed.
+	Queued,		// waiting for the worker to try it, or to try it again
+	// Taken. `at` is the moment the remote confirmed it, `permalink` the address it gave back --
+	// kept so the site can say "also on Mastodon" and link to where the post actually landed.
 	Sent {
-		/// When the remote confirmed the post, as the sender recorded it.
 		at:		String,
-		/// Where the remote put it, for a backlink.
 		permalink:	String,
 	},
-	/// Refused. `at` is when, `err` is what the remote or the wire said, `retries` how many attempts
-	/// have failed. At [`MAX_RETRIES`] the worker stops trying and the failure stands.
+	// Refused. `at` is when, `err` is what the remote or the wire said, `retries` how many attempts
+	// have failed. At MAX_RETRIES the worker stops trying and the failure stands.
 	Failed {
-		/// When the attempt failed.
 		at:		String,
-		/// What went wrong, for the author to read.
 		err:		String,
-		/// How many attempts have failed.
 		retries:	u32,
 	},
 }
@@ -363,7 +342,6 @@ impl DeliveryState {
 		}
 	}
 
-	/// The word a record stores for which state this is.
 	fn tag(&self) -> &'static str {
 		match self {
 			Self::Queued		=> "queued",
@@ -372,7 +350,6 @@ impl DeliveryState {
 		}
 	}
 
-	/// The state as a daticle.
 	pub fn to_dat(&self) -> Dat {
 		let mut m = DaticleMap::new();
 		m.insert(dat!("state"), dat!(self.tag().to_string()));
@@ -442,22 +419,17 @@ impl DeliveryState {
 /// One post's delivery to one remote: where it goes, in what words, and how far it has got.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Delivery {
-	/// The remote.
 	pub dest:	Destination,
-	/// The words that remote is sent.
 	pub rendition:	Rendition,
-	/// How far the delivery has got.
 	pub state:	DeliveryState,
 }
 
 impl Delivery {
 
-	/// A fresh delivery to a remote, queued and not yet tried.
 	pub fn new(dest: Destination, rendition: Rendition) -> Self {
 		Self { dest, rendition, state: DeliveryState::Queued }
 	}
 
-	/// The delivery as a daticle.
 	pub fn to_dat(&self) -> Dat {
 		let mut m = DaticleMap::new();
 		m.insert(dat!("dest"),		dat!(self.dest.as_str().to_string()));

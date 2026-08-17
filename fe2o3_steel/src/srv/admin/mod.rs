@@ -43,6 +43,9 @@
 //!   served as the dashboard front end.
 //! - [`handler`] -- HTTP dispatcher that maps `/admin/*` request paths
 //!   to the appropriate view or action.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 pub mod assets;
 pub mod audit;
@@ -62,22 +65,10 @@ pub mod traffic;
 // │ SCOPE CONSTANTS                                                           │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Wildcard scope that matches every verb. Mirrors the CLI's
-/// wildcard-matching logic in `AdminUser::has_scope`.
-pub const SCOPE_WILDCARD: &str = "*";
-
-/// Legacy CLI scope that authorises managing other admin entries.
-/// Required, in addition to a dashboard scope, for the dashboard's
-/// admin-management UI to become visible.
-pub const SCOPE_ADMIN: &str = "admin";
-
-/// Read-only dashboard access. Grants login plus traffic and ozone
-/// browsing; no mutations.
-pub const SCOPE_DASHBOARD_VIEW: &str = "dashboard.view";
-
-/// Full dashboard access. Grants everything in [`SCOPE_DASHBOARD_VIEW`]
-/// plus future v2 mutations (e.g. edit ozone values).
-pub const SCOPE_DASHBOARD_ADMIN: &str = "dashboard.admin";
+pub const SCOPE_WILDCARD:           &str = "*";
+pub const SCOPE_ADMIN:              &str = "admin";
+pub const SCOPE_DASHBOARD_VIEW:     &str = "dashboard.view";
+pub const SCOPE_DASHBOARD_ADMIN:    &str = "dashboard.admin";
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ ADMIN PRINCIPAL                                                           │
@@ -85,51 +76,33 @@ pub const SCOPE_DASHBOARD_ADMIN: &str = "dashboard.admin";
 
 /// Identity and authorisation carried with every authenticated
 /// dashboard request.
-///
-/// Built by [`auth`] on successful login and encoded into the signed
-/// session cookie by [`session`]. Handlers in [`handler`] extract it
-/// from the request and consult its methods to gate individual views
-/// and actions.
 #[derive(Clone, Debug)]
 pub struct AdminPrincipal {
-    /// Name of the wallet admin that unlocked the session. Copied
-    /// from `AdminUser::name` at login time.
-    pub name:       String,
-    /// Snapshot of the wallet admin's scope list at login time.
-    /// Not refreshed across the life of the session -- rotating an
-    /// admin's scopes takes effect on their next login.
+    pub name:       String,     // wallet admin that unlocked the session
+    // Snapshot taken at login and never refreshed, so rotating an admin's scopes
+    // takes effect only on their next login.
     pub scopes:     Vec<String>,
-    /// Unix seconds at which the session expires.
-    pub expires_at: u64,
+    pub expires_at: u64,        // unix seconds
 }
 
 impl AdminPrincipal {
-    /// Returns `true` if this principal is authorised for `verb`.
-    /// The wildcard scope `"*"` matches every verb.
     pub fn has_scope(&self, verb: &str) -> bool {
         self.scopes.iter().any(|s| s == SCOPE_WILDCARD || s == verb)
     }
 
-    /// Returns `true` if this principal can log into the dashboard
-    /// at all. Either of the two dashboard scopes (or the wildcard)
-    /// suffices.
     pub fn can_view_dashboard(&self) -> bool {
         self.has_scope(SCOPE_DASHBOARD_VIEW)
             || self.has_scope(SCOPE_DASHBOARD_ADMIN)
     }
 
-    /// Returns `true` if this principal can perform dashboard
-    /// mutations. In v1 this gates nothing -- the v1 dashboard is
-    /// read-only -- but handlers consult it so v2 write actions fall
-    /// into place without a second auth pass.
+    /// Gates dashboard mutations, such as the address-guard whitelist and
+    /// blacklist actions.
     pub fn can_admin_dashboard(&self) -> bool {
         self.has_scope(SCOPE_DASHBOARD_ADMIN)
     }
 
-    /// Returns `true` if this principal can manage other wallet admin
-    /// entries. Requires the legacy CLI `admin` scope in addition to
-    /// a dashboard scope, so that granting dashboard login does not
-    /// automatically grant the power to enrol more admins.
+    /// Requires the CLI `admin` scope on top of a dashboard scope, so granting
+    /// dashboard login does not also grant the power to enrol more admins.
     pub fn can_manage_admins(&self) -> bool {
         self.has_scope(SCOPE_ADMIN) && self.can_view_dashboard()
     }

@@ -13,6 +13,9 @@
 //! `(t_secs: u64, cpu_pct: f64, mem_pct: f64, disk_bps: f64, net_bps: f64)`,
 //! stored under a fixed string key with a version suffix so future format
 //! changes can migrate gracefully.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::srv::admin::host_sampler::DerivedHostPoint;
 
@@ -27,13 +30,8 @@ use oxedyne_fe2o3_jdat::{
     tup5dat,
 };
 
-/// Ozone key under which derived host-sampler points are persisted.
-/// The `.v1` suffix exists so a future format change can be picked
-/// up by bumping to `.v2` without colliding with old entries.
-pub const HOST_HISTORY_KEY: &str = "admin.history.host.v1";
+pub const HOST_HISTORY_KEY: &str = "admin.history.host.v1"; // bump to .v2 on a format change
 
-/// Encode a slice of derived points as a `Dat::Vek` of five-tuples,
-/// suitable for writing via [`Database::insert`].
 pub fn encode_host_points(points: &[DerivedHostPoint]) -> Dat {
     let mut v = Vec::with_capacity(points.len());
     for p in points {
@@ -48,9 +46,8 @@ pub fn encode_host_points(points: &[DerivedHostPoint]) -> Dat {
     Dat::Vek(Vek(v))
 }
 
-/// Decode a stored `Dat::Vek<Dat::Tup5>` back into a vector of derived
-/// points. Malformed entries are skipped so a stale or partially valid
-/// payload degrades to a shorter history rather than a hard load failure.
+/// Malformed rows are skipped, so a stale or partially valid payload degrades to
+/// a shorter history rather than a hard load failure.
 pub fn decode_host_points(dat: Dat) -> Outcome<Vec<DerivedHostPoint>> {
     let vek = try_extract_dat!(dat, Vek);
     let mut out = Vec::with_capacity(vek.len());
@@ -84,9 +81,6 @@ pub fn decode_host_points(dat: Dat) -> Outcome<Vec<DerivedHostPoint>> {
     Ok(out)
 }
 
-/// Write the supplied derived points to `db` under [`HOST_HISTORY_KEY`].
-/// The write is attributed to `user`; callers typically pass the same
-/// admin/system user they use for dashboard writes.
 pub fn save_host_points<
     const UIDL: usize,
     UID: NumIdDat<UIDL>,
@@ -106,9 +100,8 @@ pub fn save_host_points<
     Ok(())
 }
 
-/// Read the derived points previously saved under [`HOST_HISTORY_KEY`].
-/// Returns an empty vector when the key is missing, which happens on the
-/// first run after the persistence feature ships.
+/// A missing key yields an empty vector, which is what the first run after this
+/// feature shipped sees.
 pub fn load_host_points<
     const UIDL: usize,
     UID: NumIdDat<UIDL>,

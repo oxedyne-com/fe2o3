@@ -1,3 +1,6 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use crate::srv::{
     constant,
     publish::PublishConfig,
@@ -54,16 +57,12 @@ use std::{
 /// How a redirect rule's `match_path` is tested against an incoming request path.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RedirectMatch {
-    /// Exact path match, e.g. `/admin`.
-    Exact,
-    /// Path prefix match; matches any request whose path starts with `match_path`.
-    Prefix,
-    /// Matches any path on the vhost, typically used for "www → canonical" redirects.
-    All,
+    Exact,      // e.g. `/admin`
+    Prefix,     // any request whose path starts with `match_path`
+    All,        // any path on the vhost, typically for a www -> canonical redirect
 }
 
 impl RedirectMatch {
-    /// Parse a redirect match kind from its string form.
     pub fn from_str(s: &str) -> Outcome<Self> {
         match s {
             "exact"     => Ok(Self::Exact),
@@ -79,20 +78,15 @@ impl RedirectMatch {
 /// A single redirect rule applied by a vhost before static file resolution.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RedirectRule {
-    /// How `match_path` is matched against the incoming URL path.
     pub match_kind: RedirectMatch,
-    /// The path pattern to match. Ignored when `match_kind` is `All`.
-    pub match_path: String,
-    /// Target URL to redirect to. May contain the literal string `{uri}`, which
-    /// is replaced by the matched request path + query string at redirect time.
+    pub match_path: String,         // ignored when `match_kind` is `All`
+    // May contain the literal `{uri}`, which is replaced by the matched request path and query
+    // string at redirect time.
     pub target:     String,
-    /// HTTP status code, normally `301` for permanent or `302` for temporary.
-    pub status:     u16,
+    pub status:     u16,            // normally 301 permanent or 302 temporary
 }
 
 impl RedirectRule {
-    /// Resolve the target URL for a given incoming request path, expanding the
-    /// `{uri}` placeholder if present.
     pub fn resolve_target(&self, request_uri: &str) -> String {
         if self.target.contains("{uri}") {
             self.target.replace("{uri}", request_uri)
@@ -101,7 +95,6 @@ impl RedirectRule {
         }
     }
 
-    /// Returns `true` if this rule matches the given request path.
     pub fn matches(&self, request_path: &str) -> bool {
         match self.match_kind {
             RedirectMatch::Exact    => request_path == self.match_path,
@@ -110,7 +103,6 @@ impl RedirectRule {
         }
     }
 
-    /// Parse a redirect rule from a `DaticleMap`.
     pub fn from_datmap(m: &DaticleMap) -> Outcome<Self> {
         let match_kind_str = match m.get(&dat!("match_kind")) {
             Some(Dat::Str(s)) => s.clone(),
@@ -163,42 +155,23 @@ impl RedirectRule {
 /// route either has `upstream*` set or `handler` set, never both.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApiRoute {
-    /// Local path to match (e.g. `/api/payments/checkout`).
-    pub path:           String,
-    /// Upstream hostname (e.g. `api.example.com`, `127.0.0.1`). `None`
-    /// when the route is served by an in-process handler.
-    pub upstream_host:  Option<String>,
-    /// Upstream port (defaults to 443 for `https://`, 80 for `http://`).
-    /// `None` when handler-served.
-    pub upstream_port:  Option<u16>,
-    /// Upstream request path (e.g. `/v1/checkout/sessions`). `None`
-    /// when handler-served.
-    pub upstream_path:  Option<String>,
-    /// `true` when the upstream URL used `https://`. Proxy dispatch
-    /// opens a TLS connection when this is set and a plain TCP
-    /// connection otherwise. Defaults to `true` so third-party API
-    /// proxying keeps the pre-feature semantics; the new
-    /// `http://` form is reserved for loopback app binaries where
-    /// TLS is unnecessary.
+    pub path:           String,                     // e.g. `/api/payments/checkout`
+    pub upstream_host:  Option<String>,             // `None` when served by a handler
+    pub upstream_port:  Option<u16>,                // 443 for `https://`, 80 for `http://`
+    pub upstream_path:  Option<String>,             // e.g. `/v1/checkout/sessions`
+    // True when the upstream URL used `https://`: dispatch opens a TLS connection when it is set
+    // and a plain TCP connection otherwise. Defaults to true, so third-party API proxying keeps
+    // the pre-feature semantics; the `http://` form is reserved for loopback app binaries where
+    // TLS is unnecessary.
     pub upstream_tls:   bool,
-    /// Headers injected into the upstream request. Values have already been
-    /// resolved (any `{file:...}` references expanded at config load time).
-    pub headers:        Vec<(String, String)>,
-    /// Name of an in-process API handler registered via `AppExtension`.
-    /// `None` when the route is a proxy.
-    pub handler:        Option<String>,
-    /// Handler-specific configuration key-value pairs. Values support
-    /// `{file:}` and `{env:}` placeholders, resolved at startup.
-    /// Empty when the route is a proxy.
-    pub config:         Vec<(String, String)>,
+    pub headers:        Vec<(String, String)>,      // `{file:...}` expanded at load time
+    pub handler:        Option<String>,             // in-process; `None` for a proxy route
+    pub config:         Vec<(String, String)>,      // handler config, `{file:}`/`{env:}` resolved
 }
 
 impl ApiRoute {
-    /// Parse an API route from a `DaticleMap`.
-    ///
-    /// Header values are stored as-is and may contain `{file:path}`
-    /// placeholders. Call `resolve_headers` with the app root to expand
-    /// them before use.
+    /// Header values are stored as-is and may contain `{file:path}` placeholders. Call
+    /// `resolve_headers` with the app root to expand them before use.
     pub fn from_datmap(m: &DaticleMap) -> Outcome<Self> {
         // Path (required).
         let path = match m.get(&dat!("path")) {
@@ -301,14 +274,12 @@ impl ApiRoute {
         })
     }
 
-    /// Look up a handler-config value by key.
     pub fn get_config(&self, key: &str) -> Option<&str> {
         self.config.iter()
             .find(|(k, _)| k == key)
             .map(|(_, v)| v.as_str())
     }
 
-    /// Parse an `https://host[:port]/path` URL into components.
     /// Parse an upstream URL into `(host, port, path, tls)`. Accepts
     /// both `https://` and `http://`; the former sets `tls = true` and
     /// defaults the port to 443, the latter sets `tls = false` and
@@ -462,25 +433,13 @@ impl ApiRoute {
 /// API routes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WebhookRoute {
-    /// Local path to match (e.g. `/webhook/payments`).
-    pub path:           String,
-    /// In-process handler name (e.g. `payments_forwarder`). `None`
-    /// when the route forwards to an upstream URL instead.
-    pub handler:        Option<String>,
-    /// Upstream hostname when the route forwards instead of
-    /// dispatching in-process. Mutually exclusive with `handler`.
-    pub upstream_host:  Option<String>,
-    /// Upstream port when forwarding.
+    pub path:           String,                     // e.g. `/webhook/payments`
+    pub handler:        Option<String>,             // `None` when the route forwards upstream
+    pub upstream_host:  Option<String>,             // mutually exclusive with `handler`
     pub upstream_port:  Option<u16>,
-    /// Upstream request path when forwarding (the hook payload is
-    /// POSTed here verbatim).
-    pub upstream_path:  Option<String>,
-    /// `true` when the upstream URL used `https://`; `false` for
-    /// plain HTTP loopback upstreams. Default `true` mirrors the
-    /// `ApiRoute` conservative default.
-    pub upstream_tls:   bool,
-    /// Handler-specific configuration (in-process mode only).
-    pub config:         Vec<(String, String)>,
+    pub upstream_path:  Option<String>,             // the payload is POSTed here verbatim
+    pub upstream_tls:   bool,                       // `https://`; false for loopback HTTP
+    pub config:         Vec<(String, String)>,      // in-process mode only
 }
 
 impl WebhookRoute {
@@ -562,7 +521,6 @@ impl WebhookRoute {
         })
     }
 
-    /// Expand `{file:path}` placeholders in all config values.
     pub fn resolve_config(&mut self, root: &Path) -> Outcome<()> {
         for (_name, value) in &mut self.config {
             *value = res!(ApiRoute::resolve_file_refs(value, root));
@@ -570,7 +528,6 @@ impl WebhookRoute {
         Ok(())
     }
 
-    /// Look up a config value by key.
     pub fn get_config(&self, key: &str) -> Option<&str> {
         self.config.iter()
             .find(|(k, _)| k == key)
@@ -611,25 +568,17 @@ impl WebhookRoute {
 /// prefix wins.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProxyRoute {
-    /// Path prefix to match (e.g. `/` matches everything, `/api/` matches
-    /// all paths starting with `/api/`).
-    pub path_prefix:    String,
-    /// Upstream hostname or IP address (e.g. `127.0.0.1`, `localhost`).
-    pub upstream_host:  String,
-    /// Upstream TCP port (e.g. 3000).
+    pub path_prefix:    String,                     // `/` matches everything, `/api/` a subtree
+    pub upstream_host:  String,                     // e.g. `127.0.0.1`, `localhost`
     pub upstream_port:  u16,
-    /// Whether to use TLS when connecting to the upstream.  Default false
-    /// — loopback proxies typically do not need TLS.
-    pub upstream_tls:   bool,
-    /// Whether to strip the path prefix before forwarding.  When true,
-    /// a request for `/chat/api/v1/users` with prefix `/chat` is
-    /// forwarded as `/api/v1/users`.  When false, the full original
-    /// path is forwarded verbatim.
+    pub upstream_tls:   bool,                       // default false; loopback rarely needs it
+    // Whether to strip the path prefix before forwarding. When true, a request for
+    // `/chat/api/v1/users` with prefix `/chat` is forwarded as `/api/v1/users`; when false the
+    // full original path goes verbatim.
     pub strip_prefix:   bool,
 }
 
 impl ProxyRoute {
-    /// Parse a proxy route from a `DaticleMap`.
     pub fn from_datmap(m: &DaticleMap) -> Outcome<Self> {
         let path_prefix = match m.get(&dat!("path_prefix")) {
             Some(Dat::Str(s)) => s.clone(),
@@ -679,13 +628,10 @@ impl ProxyRoute {
         })
     }
 
-    /// Returns `true` if the given request path matches this proxy route's
-    /// prefix.
     pub fn matches(&self, request_path: &str) -> bool {
         request_path.starts_with(&self.path_prefix)
     }
 
-    /// Compute the upstream request path, stripping the prefix if configured.
     pub fn upstream_path_for(&self, request_path: &str) -> String {
         if self.strip_prefix {
             if let Some(stripped) = request_path.strip_prefix(&self.path_prefix) {
@@ -738,20 +684,13 @@ impl ProxyRoute {
 /// [`ProxyRoute`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WsRoute {
-    /// Local path whose upgrades this route claims, matched exactly
-    /// (e.g. `/ws`).
-    pub path:           String,
-    /// Upstream hostname or IP address (e.g. `127.0.0.1`).
-    pub upstream_host:  String,
-    /// Upstream TCP port. Defaults to 80 when the URL gives none.
-    pub upstream_port:  u16,
-    /// Path requested of the upstream, which need not be the local one.
-    pub upstream_path:  String,
+    pub path:           String,                     // matched exactly, e.g. `/ws`
+    pub upstream_host:  String,                     // e.g. `127.0.0.1`
+    pub upstream_port:  u16,                        // 80 where the URL gives none
+    pub upstream_path:  String,                     // need not be the local one
 }
 
 impl WsRoute {
-    /// Parse a WebSocket route from a `DaticleMap`.
-    ///
     /// Both fields are required: `path` is the local path, `upstream` the
     /// `ws://host[:port]/path` URL to forward it to.
     pub fn from_datmap(m: &DaticleMap) -> Outcome<Self> {
@@ -822,7 +761,6 @@ impl WsRoute {
         Ok((host, port, path.to_string()))
     }
 
-    /// Returns `true` when `request_path` is the path this route claims.
     pub fn matches(&self, request_path: &str) -> bool {
         self.path == request_path
     }
@@ -844,10 +782,8 @@ impl WsRoute {
 /// plus a binary WS endpoint for terminal I/O bridging.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TermConfig {
-    /// Prefix for tmux session names (e.g. "goose-").
-    pub session_prefix:     String,
-    /// Command to launch in new sessions (e.g. "goose session").
-    pub launch_command:     String,
+    pub session_prefix:     String,                 // e.g. "goose-"
+    pub launch_command:     String,                 // e.g. "goose session"
 }
 
 impl TermConfig {
@@ -882,93 +818,62 @@ impl TermConfig {
 /// is the primary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VhostConfig {
-    /// Hostnames answered by this vhost. The first entry is the canonical name.
-    pub hostnames:              Vec<String>,
-    /// Webroot directory for static file serving, relative to the app root.
-    /// `None` for pure-redirect vhosts that never serve a file.
-    pub public_dir_rel:         Option<String>,
-    /// Named route overrides mapping URL paths to files or directories.
-    pub static_route_paths_rel: DaticleMap,
-    /// Default index files, tried in order when a directory is requested.
-    pub default_index_files:    Vec<String>,
-    /// Ordered list of redirect rules evaluated before static file resolution.
-    pub redirects:              Vec<RedirectRule>,
-    /// Database directory for this vhost's Ozone instance, relative to the
-    /// app root. `None` means the vhost has no backing database (typical for
-    /// pure-redirect vhosts). When set, Steel opens and starts a dedicated
-    /// Ozone instance rooted here at server start-up.
+    pub hostnames:              Vec<String>,            // the first is canonical
+    pub public_dir_rel:         Option<String>,         // `None` for a pure-redirect vhost
+    pub static_route_paths_rel: DaticleMap,             // URL path -> file or directory
+    pub default_index_files:    Vec<String>,            // tried in order for a directory
+    pub redirects:              Vec<RedirectRule>,      // before static file resolution
+    // Relative to the app root. `None` means the vhost has no backing database, which is typical
+    // for a pure-redirect vhost. When set, Steel opens and starts a dedicated Ozone instance
+    // rooted here at server start-up.
     pub db_dir_rel:             Option<String>,
-    /// Outbound API proxy routes. Each route maps a local POST path to an
-    /// upstream HTTPS URL with injected headers (typically secret credentials).
-    pub api_routes:             Vec<ApiRoute>,
-    /// Incoming webhook routes. Each route maps a local POST path to a
-    /// named handler with handler-specific configuration.
-    pub webhook_routes:         Vec<WebhookRoute>,
-    /// Optional allow-list of outbound egress targets. When
-    /// non-empty, every `api_routes` upstream must match at
-    /// least one entry or the server refuses to start. Entries
-    /// are `host` or `host:port` strings; `host` alone matches
-    /// any port. Empty list (the default) means "no allow-list
-    /// configured" and every upstream is permitted, matching the
-    /// pre-feature behaviour. Populating this field on a vhost is
-    /// a defence against a compromised app config exfiltrating
-    /// via an arbitrary upstream URL.
+    pub api_routes:             Vec<ApiRoute>,          // local POST path -> upstream URL
+    pub webhook_routes:         Vec<WebhookRoute>,      // local POST path -> named handler
+    // Optional allow-list of outbound egress targets. When non-empty, every `api_routes` upstream
+    // must match at least one entry or the server refuses to start. Entries are `host` or
+    // `host:port`; `host` alone matches any port. An empty list -- the default -- means no
+    // allow-list is configured and every upstream is permitted. Populating this on a vhost is a
+    // defence against a compromised app config exfiltrating via an arbitrary upstream URL.
     pub egress_allowed:         Vec<String>,
-    /// Authorised signing keys for the signed-admin-login flow.
-    /// Each entry binds a named operator to a public key and a
-    /// scope list; a #raw("SignedCommand") with #raw("cmd") =
-    /// `"admin_login"` and #raw("signer_id") matching one of these
-    /// entries' public keys issues a dashboard session cookie
-    /// without a wallet passphrase. Empty list means the feature
-    /// is disabled for this vhost and the classical
-    /// passphrase-form login is the only admin entry.
+    // Authorised signing keys for the signed-admin-login flow. Each entry binds a named operator
+    // to a public key and a scope list; a SignedCommand with cmd = `"admin_login"` and a
+    // signer_id matching one of these entries' public keys issues a dashboard session cookie
+    // without a wallet passphrase. An empty list disables the feature for this vhost, leaving the
+    // passphrase form as the only admin entry.
     pub admin_keys:             Vec<AdminKey>,
-    /// Optional URL of a script or stylesheet resource to inject
-    /// into the `<head>` of every admin-served page. An operator
-    /// uses this to plug an Oxegen-style header bar or similar
-    /// cross-app chrome onto a Steel deployment without touching
-    /// the Steel source. `None` leaves the default `<head>`
-    /// untouched. Interpreted as a raw URL, rendered as
-    /// `<script src="{url}" defer></script>`.
+    // Optional URL of a script or stylesheet to inject into the `<head>` of every admin-served
+    // page, so an operator can plug cross-app chrome onto a deployment without touching the Steel
+    // source. `None` leaves the default `<head>` untouched. Taken as a raw URL and rendered as
+    // `<script src="{url}" defer></script>`.
     pub head_injection_url:     Option<String>,
-    /// Reverse-proxy routes.  Each route forwards all requests under
-    /// a path prefix to an upstream server, with WebSocket tunneling
-    /// and streaming response support.  Checked after redirects but
-    /// before static files and API routes; longest prefix wins.
+    // Each route forwards every request under a path prefix to an upstream server, with WebSocket
+    // tunnelling and streaming responses. Checked after redirects but before static files and API
+    // routes; the longest prefix wins.
     pub proxy_routes:           Vec<ProxyRoute>,
-    /// WebSocket routes. Each hands the upgrades arriving on one exact
-    /// path to an upstream WebSocket server on loopback, relaying the
-    /// handshake and then the bytes. Checked before proxy routes, and
-    /// only for a request that is an upgrade. Empty by default, which
-    /// is what every config written before the field existed says.
+    // Each hands the upgrades arriving on one exact path to an upstream WebSocket server on
+    // loopback, relaying the handshake and then the bytes. Checked before proxy routes, and only
+    // for a request that is an upgrade. Empty by default, which is what every config written
+    // before the field existed says.
     pub ws_routes:              Vec<WsRoute>,
-    /// Terminal session configuration.  When present, enables the
-    /// `term_new`, `term_list`, `term_close` and `term_set_name`
-    /// WS commands and the `/term/<session>` binary WS endpoint
-    /// for this vhost.  `None` disables terminal features.
+    // Terminal session configuration. When present, enables the `term_new`, `term_list`,
+    // `term_close` and `term_set_name` WS commands and the `/term/<session>` binary WS endpoint
+    // for this vhost. `None` disables terminal features.
     pub term_config:            Option<TermConfig>,
-    /// The prose this vhost publishes: a directory of Markdown served
-    /// as pages, a feed and a JSON list, under a prefix of the site's
-    /// choosing. `None` publishes nothing and serves none of those
-    /// paths, which is what a config with no `publish` block means and
-    /// what every config written before the block existed says.
+    // The prose this vhost publishes: a directory of Markdown served as pages, a feed and a JSON
+    // list, under a prefix of the site's choosing. `None` publishes nothing and serves none of
+    // those paths, which is what a config with no `publish` block means and what every config
+    // written before the block existed says.
     pub publish:                Option<PublishConfig>,
-    /// Who may administer this site from within it, at `/manage`.
-    ///
-    /// Each entry is a member's username -- the same identifier the
-    /// site's own login issues, which is the SHA-256 of the member's
-    /// passphrase. A member whose username is in this list, and who is
-    /// signed in, reaches the site console; everyone else is turned
-    /// away from it.
-    ///
-    /// This is the operator's grant, and it lives here rather than in
-    /// the site's database on purpose. The operator owns the host and
-    /// decides who runs each site; a site's own database, which a
-    /// content bug could reach, cannot mint its own administrators, so
-    /// the blast radius of such a bug stays content and never becomes
-    /// authority. Empty (the default, and what every config written
-    /// before this existed says) means the site has no console and
-    /// `/manage` means whatever it meant before.
+    // Who may administer this site from within it, at `/manage`. Each entry is a member's
+    // username -- the same identifier the site's own login issues, which is the SHA-256 of the
+    // member's passphrase. A member whose username is in this list, and who is signed in, reaches
+    // the site console; everyone else is turned away from it.
+    //
+    // This is the operator's grant, and it lives here rather than in the site's database on
+    // purpose. The operator owns the host and decides who runs each site; a site's own database,
+    // which a content bug could reach, cannot mint its own administrators, so the blast radius of
+    // such a bug stays content and never becomes authority. Empty -- the default, and what every
+    // config written before this existed says -- means the site has no console.
     pub site_admins:            Vec<String>,
 }
 
@@ -984,21 +889,10 @@ pub struct VhostConfig {
 /// the admin authenticated via passphrase or signature.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdminKey {
-    /// Human-readable identity for the key's holder. Used in audit
-    /// log output and the dashboard's admin view.
-    pub name:           String,
-    /// Raw public key bytes. Encoded as lowercase hex in the config
-    /// file for human-readability; parsed into bytes at load time.
-    pub public_key:     Vec<u8>,
-    /// Signature scheme name, matching one of
-    /// [`SignatureScheme`](oxedyne_fe2o3_crypto::sign::SignatureScheme)'s
-    /// `Debug` output strings (`"Ed25519"`, `"Dilithium2"`,
-    /// `"Dilithium2_fe2o3"`).
-    pub scheme:         String,
-    /// Scopes granted to a session authenticated with this key. Uses
-    /// the same vocabulary as the wallet's admin entries; `"*"` is
-    /// the wildcard.
-    pub scopes:         Vec<String>,
+    pub name:           String,     // used in audit output and the dashboard's admin view
+    pub public_key:     Vec<u8>,    // lowercase hex in the config file, bytes here
+    pub scheme:         String,     // "Ed25519", "Dilithium2" or "Dilithium2_fe2o3"
+    pub scopes:         Vec<String>,    // the wallet's own vocabulary; `"*"` is the wildcard
 }
 
 impl Default for VhostConfig {
@@ -1030,7 +924,6 @@ impl Default for VhostConfig {
 }
 
 impl VhostConfig {
-    /// Primary (canonical) hostname.
     pub fn primary_hostname(&self) -> &str {
         self.hostnames.first().map(|s| s.as_str()).unwrap_or("")
     }
@@ -1052,7 +945,6 @@ impl VhostConfig {
         self.db_dir_rel.is_some()
     }
 
-    /// Parse a vhost configuration from a `DaticleMap`.
     pub fn from_datmap(m: &DaticleMap) -> Outcome<Self> {
         // Hostnames.
         let hostnames = match m.get(&dat!("hostnames")) {
@@ -1487,7 +1379,6 @@ impl VhostConfig {
         Ok(Some(path))
     }
 
-    /// Validate and materialise the vhost's static route map.
     pub fn get_static_route_paths<M: MapMut<String, OsPath>>(
         &self,
         root:       &NormPathBuf,
@@ -1543,7 +1434,6 @@ impl VhostConfig {
         Ok(map)
     }
 
-    /// Validate the `default_index_files` list.
     pub fn get_default_index_files(&self) -> Outcome<Vec<String>> {
         if self.default_index_files.is_empty() {
             warn!("VhostConfig: No default index files specified, using '{}'.",
@@ -1569,7 +1459,6 @@ impl VhostConfig {
         Ok(out)
     }
 
-    /// Validate all `hostnames` as FQDNs.
     pub fn get_hostnames_fqdn(&self) -> Outcome<Vec<Fqdn>> {
         let mut out = Vec::new();
         for name in &self.hostnames {
@@ -1604,26 +1493,17 @@ impl VhostConfig {
 /// `extra_domains`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AcmeConfig {
-    /// Master switch for ACME. When `false`, certificates are loaded from disk.
-    pub enabled:        bool,
-    /// Contact email registered with the ACME account (e.g. for expiry notices).
-    pub contact_email:  String,
-    /// ACME directory URL. Defaults to the Let's Encrypt staging endpoint to
-    /// prevent accidental rate-limit burns during development.
-    pub directory_url:  String,
-    /// Directory where the account key and issued certificates are persisted,
-    /// relative to the app root.
-    pub cache_dir_rel:  String,
-    /// Additional hostnames to name in the certificate, beyond the vhost
-    /// hostnames and the mail listener.
-    ///
-    /// Steel can only issue for a name that resolves to it, but it need not be
-    /// the service that ultimately *serves* that name. Where another daemon on
-    /// the same host terminates TLS for a hostname Steel does not route -- an
-    /// MTA, say -- listing it here puts it in the certificate Steel already
-    /// renews, and that daemon can be pointed at the result. Without it such a
-    /// name has no renewal path at all, and the failure is silent until the
-    /// certificate expires.
+    pub enabled:        bool,               // false loads certificates from disk instead
+    pub contact_email:  String,             // registered with the ACME account, for notices
+    pub directory_url:  String,             // defaults to the Let's Encrypt staging endpoint
+    pub cache_dir_rel:  String,             // account key and certificates, from the app root
+    // Additional hostnames to name in the certificate, beyond the vhost hostnames and the mail
+    // listener. Steel can only issue for a name that resolves to it, but it need not be the
+    // service that ultimately serves that name: where another daemon on the same host terminates
+    // TLS for a hostname Steel does not route -- an MTA, say -- listing it here puts it in the
+    // certificate Steel already renews, and that daemon can be pointed at the result. Without it
+    // such a name has no renewal path at all, and the failure is silent until the certificate
+    // expires.
     pub extra_domains:  Vec<String>,
 }
 
@@ -1642,7 +1522,6 @@ impl Default for AcmeConfig {
 }
 
 impl AcmeConfig {
-    /// Parse an ACME configuration from a `DaticleMap`.
     pub fn from_datmap(m: &DaticleMap) -> Outcome<Self> {
         let mut out = Self::default();
         if let Some(Dat::Bool(b)) = m.get(&dat!("enabled")) {
@@ -1677,7 +1556,6 @@ impl AcmeConfig {
         Ok(out)
     }
 
-    /// Convert the config to its `DaticleMap` representation.
     pub fn to_datmap(&self) -> DaticleMap {
         let mut m = DaticleMap::new();
         m.insert(dat!("enabled"),       dat!(self.enabled));
@@ -1690,7 +1568,6 @@ impl AcmeConfig {
         m
     }
 
-    /// Resolve the ACME cache directory to an absolute validated path.
     pub fn get_cache_dir(
         &self,
         root: &NormPathBuf,
@@ -1723,30 +1600,16 @@ impl AcmeConfig {
 /// HTTPS so a single ACME-issued cert covers every protocol.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MailConfig {
-    /// Master switch. When `false`, the mail server is not started.
-    pub enabled:            bool,
-    /// Hostname the SMTP and IMAP servers advertise in their
-    /// greetings. Should be the public MX hostname.
-    pub hostname:           String,
-    /// MX-receive port. Standard 25.
-    pub smtp_port:          u16,
-    /// Submission port. Standard 587.
-    pub submission_port:    u16,
-    /// Implicit-TLS IMAP port. Standard 993.
-    pub imap_port:          u16,
-    /// Maildir storage root. Per-user trees live underneath as
-    /// `<root>/<delivery_dir>/`.
-    pub maildir_root:       String,
-    /// Path to the JDAT user file (passwords + delivery dirs).
-    pub users_file_rel:     String,
-    /// Path to the outbound spool directory.
-    pub spool_dir_rel:      String,
-    /// Path to the DKIM private key file (PKCS#8 DER form). Empty
-    /// disables DKIM signing.
-    pub dkim_key_file:      String,
-    /// DKIM selector to publish under
-    /// `<selector>._domainkey.<dkim_domain>`.
-    pub dkim_selector:      String,
+    pub enabled:            bool,           // false leaves the mail server unstarted
+    pub hostname:           String,         // advertised in the greetings; the public MX name
+    pub smtp_port:          u16,            // MX receive, standard 25
+    pub submission_port:    u16,            // standard 587
+    pub imap_port:          u16,            // implicit TLS, standard 993
+    pub maildir_root:       String,         // per-user trees live at `<root>/<delivery_dir>/`
+    pub users_file_rel:     String,         // JDAT user file: passwords and delivery dirs
+    pub spool_dir_rel:      String,         // the outbound spool
+    pub dkim_key_file:      String,         // PKCS#8 DER; empty disables DKIM signing
+    pub dkim_selector:      String,         // published at `<selector>._domainkey.<domain>`
     /// Path to an RSA DKIM private key (PKCS#8 or PKCS#1 DER). Empty
     /// disables RSA signing.
     ///
@@ -1764,15 +1627,9 @@ pub struct MailConfig {
     ///     -outform DER -out mail/dkim_rsa.key
     /// ```
     pub dkim_rsa_key_file:  String,
-    /// Selector for the RSA key. Must differ from `dkim_selector`, since the
-    /// two keys are published as two records. Defaults to `"rsa"`.
-    pub dkim_rsa_selector:  String,
-    /// Domain to sign for. May differ from `hostname` if mail is
-    /// sent on behalf of a user-facing domain via a separate MX.
-    pub dkim_domain:        String,
-    /// Domains the receive path will accept mail for. Recipients
-    /// outside this set are rejected at `RCPT TO` time.
-    pub local_domains:      Vec<String>,
+    pub dkim_rsa_selector:  String,         // must differ from `dkim_selector`; default "rsa"
+    pub dkim_domain:        String,         // may differ from `hostname`
+    pub local_domains:      Vec<String>,    // recipients outside this set are refused at RCPT TO
 }
 
 impl Default for MailConfig {
@@ -1797,7 +1654,6 @@ impl Default for MailConfig {
 }
 
 impl MailConfig {
-    /// Parse a `MailConfig` from a `DaticleMap`.
     pub fn from_datmap(m: &DaticleMap) -> Outcome<Self> {
         let mut out = Self::default();
         if let Some(Dat::Bool(b)) = m.get(&dat!("enabled")) {
@@ -1892,18 +1748,13 @@ impl MailConfig {
 /// into `config.jdat` in the clear.
 #[derive(Clone, Debug)]
 pub struct AlertSubmission {
-    /// The provider's submission host. Also the name its certificate is
-    /// validated against.
-    pub host:       String,
-    /// Conventionally 587 (STARTTLS) or 465 (implicit TLS).
-    pub port:       u16,
-    /// `"starttls"`, `"implicit"`, or `"plain"` (loopback test servers only).
-    pub security:   String,
-    /// The account to authenticate as.
-    pub user:       String,
-    /// That account's password. Supply as `{file:path}`; a provider with
-    /// two-factor authentication wants an application password here, not the
-    /// one a human types into a browser.
+    pub host:       String,         // also the name its certificate is validated against
+    pub port:       u16,            // conventionally 587 (STARTTLS) or 465 (implicit TLS)
+    pub security:   String,         // "starttls", "implicit", or "plain" (loopback only)
+    pub user:       String,         // the account to authenticate as
+    // That account's password. Supply as `{file:path}`; a provider with two-factor
+    // authentication wants an application password here, not the one a human types into a
+    // browser.
     pub password:   String,
 }
 
@@ -1917,35 +1768,23 @@ pub struct AlertSubmission {
 /// provider, which authenticates it. See [`AlertSubmission`].
 #[derive(Clone, Debug)]
 pub struct AlertConfig {
-    /// Master switch. When `false`, no alert is ever sent.
-    pub enabled:                bool,
-    /// Envelope and header sender. Use a domain whose SPF record names
-    /// this host.
-    pub from:                   String,
-    /// Post through a provider rather than direct to the recipient's MX.
-    pub submission:             Option<AlertSubmission>,
-    /// Recipients. Address these *off* this machine: an alert delivered to
-    /// a mailbox on the host it is warning about is one the operator cannot
-    /// read precisely when they need to.
+    pub enabled:                bool,                   // false sends no alert, ever
+    pub from:                   String,                 // use a domain whose SPF names this host
+    pub submission:             Option<AlertSubmission>,    // a provider, not the MX direct
+    // Recipients. Address these off this machine: an alert delivered to a mailbox on the host it
+    // is warning about is one the operator cannot read precisely when they need to.
     pub to:                     Vec<String>,
-    /// Hostname sent in `EHLO`. Defaults to the server's own hostname.
-    /// Should be the name whose PTR record matches the sending IP.
-    pub ehlo_hostname:          String,
-    /// Failed passphrase attempts within `failed_window_secs` before an
-    /// alert is raised.
-    pub failed_threshold:       u32,
-    /// Window over which failures are counted. Failures further apart than
-    /// this start a fresh count, so a slow trickle does not eventually add
-    /// up to something that reads as an attack.
+    pub ehlo_hostname:          String,                 // the name whose PTR matches the IP
+    pub failed_threshold:       u32,                    // failures in the window before alerting
+    // Window over which failures are counted. Failures further apart than this start a fresh
+    // count, so a slow trickle does not eventually add up to something that reads as an attack.
     pub failed_window_secs:     u64,
-    /// Minimum gap between two failed-attempt alerts, so a sustained
-    /// campaign produces a sustained defence rather than a sustained
-    /// mailbox.
+    // Minimum gap between two failed-attempt alerts, so a sustained campaign produces a
+    // sustained defence rather than a sustained mailbox.
     pub failed_cooldown_secs:   u64,
-    /// Where to send the text-message half, when there is one.
-    ///
-    /// Absent on most hosts. It belongs on whichever machines do the watching,
-    /// because a machine that has died cannot text anybody about it.
+    // Where to send the text-message half, when there is one. Absent on most hosts: it belongs
+    // on whichever machines do the watching, because a machine that has died cannot text
+    // anybody about it.
     pub sms:                    Option<SmsAlertConfig>,
 }
 
@@ -1964,20 +1803,14 @@ pub struct AlertConfig {
 /// an environment variable is none of those things by default.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SmsAlertConfig {
-    /// Master switch for this leg alone. Mail is unaffected.
-    pub enabled:    bool,
-    /// Which gateway.
-    pub provider:   SmsProvider,
-    /// Recipients, in E.164 with the leading `+`.
-    pub to:         Vec<String>,
-    /// Sender, as the gateway wants it. Empty asks the gateway for its default,
-    /// which is what an account with one number should do rather than repeat
-    /// itself in configuration.
+    pub enabled:    bool,               // this leg alone; mail is unaffected
+    pub provider:   SmsProvider,        // which gateway
+    pub to:         Vec<String>,        // E.164, with the leading `+`
+    // Sender, as the gateway wants it. Empty asks the gateway for its default, which is what an
+    // account with one number should do rather than repeat itself in configuration.
     pub from:       String,
-    /// Environment variable holding the gateway account identifier.
-    pub user_env:   String,
-    /// Environment variable holding the gateway secret.
-    pub secret_env: String,
+    pub user_env:   String,             // env var holding the gateway account identifier
+    pub secret_env: String,             // env var holding the gateway secret
 }
 
 impl Default for SmsAlertConfig {
@@ -1996,11 +1829,10 @@ impl Default for SmsAlertConfig {
 /// One machine this node watches, and where to ask.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WatchPeer {
-    /// What to call it in an alert. A person's name for the machine, not a
-    /// hostname: the alert is read on a phone in the dark.
+    // What to call it in an alert: a person's name for the machine, not a hostname, since the
+    // alert is read on a phone in the dark.
     pub name: String,
-    /// The health URL, which must be `https`.
-    pub url:  String,
+    pub url:  String,   // the health URL, which must be `https`
 }
 
 /// Watching the other machines in the estate.
@@ -2010,28 +1842,20 @@ pub struct WatchPeer {
 /// else anywhere.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WatchConfig {
-    /// Master switch.
     pub enabled:        bool,
-    /// The machines this node watches. Not including itself: a node cannot
-    /// report its own death, which is the whole premise.
+    // The machines this node watches, not including itself: a node cannot report its own death,
+    // which is the whole premise.
     pub peers:          Vec<WatchPeer>,
-    /// Seconds between rounds.
-    pub interval_secs:  u64,
-    /// Consecutive failures before a peer is called down. Above one, so a
-    /// single dropped packet does not wake anybody.
-    pub fail_threshold: u32,
-    /// Seconds to wait for a health answer.
-    pub timeout_secs:   u64,
-    /// Seconds between reminders while a peer stays down. An alarm that fires
-    /// every round is an alarm that gets silenced, and the text leg costs money
-    /// per message.
+    pub interval_secs:  u64,                // seconds between rounds
+    pub fail_threshold: u32,                // consecutive failures before a peer is called down
+    pub timeout_secs:   u64,                // seconds to wait for a health answer
+    // Seconds between reminders while a peer stays down. An alarm that fires every round is an
+    // alarm that gets silenced, and the text leg costs money per message.
     pub repeat_secs:    u64,
-    /// Seconds between proof-of-life messages. Zero switches them off.
-    ///
-    /// The alerting path is used rarely by design, and a path used rarely is
-    /// broken when it is needed -- an expired credential, a rotated key, a
-    /// changed number, a lapsed verification. This exercises every leg on a
-    /// schedule so the failure is found on an ordinary afternoon.
+    // Seconds between proof-of-life messages; zero switches them off. The alerting path is used
+    // rarely by design, and a path used rarely is broken when it is needed -- an expired
+    // credential, a rotated key, a changed number, a lapsed verification. This exercises every
+    // leg on a schedule, so the failure is found on an ordinary afternoon.
     pub heartbeat_secs: u64,
 }
 
@@ -2221,7 +2045,6 @@ impl Default for AlertConfig {
 }
 
 impl AlertConfig {
-    /// Parse an `AlertConfig` from a `DaticleMap`.
     pub fn from_datmap(m: &DaticleMap) -> Outcome<Self> {
         let mut out = Self::default();
         if let Some(Dat::Bool(b)) = m.get(&dat!("enabled")) {
@@ -2320,86 +2143,68 @@ impl AlertConfig {
 #[derive(Clone, Debug, Eq, PartialEq, FromDatMap, ToDatMap)]
 pub struct ServerConfig {
     // --- TLS fallback (only used when acme.enabled = false) -----------------
-    /// Directory holding per-vhost certificates when ACME is disabled,
-    /// relative to the app root. Each vhost's certs live in the subdirectory
-    /// `{tls_dir_rel}/{dev|prod}/{primary_hostname}/fullchain.pem` and
-    /// `privkey.pem`.
+    // Directory holding per-vhost certificates when ACME is disabled, relative to the app root.
+    // Each vhost's certs live in `{tls_dir_rel}/{dev|prod}/{primary_hostname}/fullchain.pem` and
+    // `privkey.pem`.
     pub tls_dir_rel:                    String,
 
     // --- Server bind and policy (shared) ------------------------------------
-    /// Logging level used by the server once running.
-    pub log_level:                      String,
-    /// Number of server bot workers.
-    pub num_server_bots:                u16,
-    /// IP address to bind to, typically `"0.0.0.0"`.
-    pub server_address:                 String,
-    /// Primary TCP port for HTTPS traffic.
-    pub server_port_tcp:                u16,
-    /// Optional plaintext HTTP listener port. When non-zero, Steel binds
-    /// this port too and responds to every incoming HTTP request with a
-    /// `301 Moved Permanently` redirect to the equivalent HTTPS URL on
-    /// the primary port. Typically set to `80` in production and `0`
-    /// (disabled) in local development. Defaults to `0`.
+    pub log_level:                      String,         // used by the server once running
+    pub num_server_bots:                u16,            // how many server bot workers
+    pub server_address:                 String,         // typically "0.0.0.0"
+    pub server_port_tcp:                u16,            // the primary HTTPS port
+    // Optional plaintext HTTP listener port. When non-zero, Steel binds this port too and
+    // answers every incoming HTTP request with a `301 Moved Permanently` to the equivalent HTTPS
+    // URL on the primary port. Typically 80 in production and 0 in local development. Defaults
+    // to 0.
     pub server_port_tcp_plaintext:      u16,
-    /// `Strict-Transport-Security` `max-age` in seconds, injected into
-    /// every HTTPS response when non-zero. A value of `31536000` (one
-    /// year) is conventional for production. Defaults to `0` (no HSTS).
+    // `Strict-Transport-Security` `max-age` in seconds, injected into every HTTPS response when
+    // non-zero. 31536000, one year, is conventional for production. Defaults to 0, no HSTS.
     pub hsts_max_age_secs:              u32,
-    /// `Cache-Control` `max-age` in seconds for static assets, which is how
-    /// long a browser may reuse one without asking. Entry documents are
-    /// excluded and always revalidate, since a deploy that changes one is
-    /// invisible to anyone still holding the old copy. Raise this above zero
-    /// only when asset filenames carry a content hash: an asset cached under a
-    /// stable name outlives the deploy that replaced it. Defaults to `0`, which
-    /// revalidates everything -- cheap, because the entity tag turns an
-    /// unchanged asset into a bodiless `304`.
+    // `Cache-Control` `max-age` in seconds for static assets, which is how long a browser may
+    // reuse one without asking. Entry documents are excluded and always revalidate, since a
+    // deploy that changes one is invisible to anyone still holding the old copy. Raise this above
+    // zero only when asset filenames carry a content hash: an asset cached under a stable name
+    // outlives the deploy that replaced it. Defaults to 0, which revalidates everything -- cheap,
+    // because the entity tag turns an unchanged asset into a bodiless 304.
     #[optional]
     pub static_max_age_secs:            u32,
-    /// `Cache-Control` `max-age` in seconds for an asset whose filename carries
-    /// a content hash, which is a promise that the file cannot change under that
-    /// name. Such a response also says `immutable`, so a browser does not
-    /// revalidate it even on a manual reload. Entry documents are excluded
-    /// whatever their name. Defaults to one year, the conventional value and the
-    /// longest RFC 9111 §5.2.2.1 suggests anyone use. Set to `0` if a build here
-    /// emits hash-shaped names that it then overwrites in place, which would
-    /// otherwise leave a browser holding a stale copy for a year.
+    // `Cache-Control` `max-age` in seconds for an asset whose filename carries a content hash,
+    // which is a promise that the file cannot change under that name. Such a response also says
+    // `immutable`, so a browser does not revalidate it even on a manual reload. Entry documents
+    // are excluded whatever their name. Defaults to one year, the conventional value and the
+    // longest RFC 9111 5.2.2.1 suggests anyone use. Set to 0 if a build here emits hash-shaped
+    // names that it then overwrites in place, which would otherwise leave a browser holding a
+    // stale copy for a year.
     #[optional]
     pub fingerprint_max_age_secs:       u32,
-    /// Whether to encode eligible responses with gzip when the client says it
-    /// will accept one. Markup, script, stylesheets, JSON, SVG and WebAssembly
-    /// typically go out at a third to a half of their raw weight; formats that
-    /// carry their own compression are never encoded twice. Defaults to `true`.
+    // Whether to encode eligible responses with gzip when the client says it will accept one.
+    // Markup, script, stylesheets, JSON, SVG and WebAssembly typically go out at a third to a half
+    // of their raw weight; formats that carry their own compression are never encoded twice.
+    // Defaults to true.
     #[optional]
     pub compression_enabled:            bool,
-    /// Smallest response body, in bytes, worth encoding. A gzip member costs
-    /// eighteen bytes of framing before it encodes anything, so under about a
-    /// kilobyte the saving is noise. Defaults to `1024`.
+    // Smallest response body, in bytes, worth encoding. A gzip member costs eighteen bytes of
+    // framing before it encodes anything, so under about a kilobyte the saving is noise. Defaults
+    // to 1024.
     #[optional]
     pub compression_min_bytes:          u64,
-    /// Optional plaintext HTTP listener bound to `127.0.0.1` for the
-    /// admin dashboard only. When non-zero, Steel binds this port on
-    /// the loopback interface and serves the `/admin/*` routes
-    /// without TLS. Use case: SSH-tunnel to the host and reach the
-    /// dashboard locally without going through the public TLS chain
-    /// (useful when a cert has expired, when ACME is broken, or when
-    /// the operator wants emergency access). Anything other than
-    /// `/admin*` returns 404. Defaults to `0` (disabled).
+    // Optional plaintext HTTP listener bound to `127.0.0.1` for the admin dashboard only. When
+    // non-zero, Steel binds this port on the loopback interface and serves the `/admin/*` routes
+    // without TLS: SSH-tunnel to the host and reach the dashboard without going through the
+    // public TLS chain, which is what an expired cert, a broken ACME or an emergency needs.
+    // Anything other than `/admin*` returns 404. Defaults to 0, disabled.
     #[optional]
     pub admin_local_port:               u16,
-    /// Default session lifetime in seconds.
-    pub session_expiry_default_secs:    u32,
-    /// WebSocket ping interval in seconds.
-    pub ws_ping_interval_secs:          u8,
-    /// Maximum consecutive errors allowed on a single connection.
-    pub server_max_errors_allowed:      u8,
-    /// Whether to issue a session cookie to unauthenticated clients on
-    /// first contact. When `true`, Steel generates a fresh session id for
-    /// any incoming request that does not already carry one and attaches
-    /// it as an `HttpOnly`, `Secure`, `SameSite=Lax` cookie. This makes
-    /// session-scoped WebSocket commands work for anonymous browsers.
-    /// When `false`, requests without a session cookie are still served
-    /// but session-scoped commands will reject until the client obtains
-    /// a session id through some other mechanism.
+    pub session_expiry_default_secs:    u32,            // seconds
+    pub ws_ping_interval_secs:          u8,             // seconds
+    pub server_max_errors_allowed:      u8,             // consecutive, on one connection
+    // Whether to issue a session cookie to unauthenticated clients on first contact. When true,
+    // Steel generates a fresh session id for any incoming request that does not already carry
+    // one and attaches it as an `HttpOnly`, `Secure`, `SameSite=Lax` cookie, which is what makes
+    // session-scoped WebSocket commands work for anonymous browsers. When false, requests
+    // without a session cookie are still served, but session-scoped commands reject until the
+    // client obtains a session id some other way.
     pub allow_anonymous_sessions:       bool,
     // ── Hardening knobs ───────────────────────────────────────────────────
     //
@@ -2409,114 +2214,96 @@ pub struct ServerConfig {
     // "permissive" behaviour for each: no size/time limits, headers
     // enabled, empty CSP, empty guard block).
 
-    /// Maximum bytes accepted in the HTTP request header block before
-    /// the reader returns `413 Content Too Large`. A value of `0`
-    /// disables the limit.
+    // Maximum bytes accepted in the HTTP request header block before the reader returns `413
+    // Content Too Large`. Zero disables the limit.
     #[optional]
     pub http_max_header_bytes:          u64,
-    /// Maximum bytes accepted in the HTTP request body before the
-    /// reader returns `413 Content Too Large`. A value of `0`
-    /// disables the limit.
+    // Maximum bytes accepted in the HTTP request body before the reader returns `413 Content Too
+    // Large`. Zero disables the limit.
     #[optional]
     pub http_max_body_bytes:            u64,
-    /// Wall-clock budget for the HTTP header read phase, in
-    /// milliseconds. A slow client that fails to finish sending its
-    /// header block within this window is disconnected with a
-    /// `Timeout` error. A value of `0` disables the deadline.
+    // Wall-clock budget for the HTTP header read phase, in milliseconds. A slow client that fails
+    // to finish sending its header block within this window is disconnected with a `Timeout`
+    // error. Zero disables the deadline.
     #[optional]
     pub http_header_read_timeout_ms:    u64,
-    /// When `true`, Steel injects a baseline set of security
-    /// response headers into every HTTPS response: `X-Content-Type-Options`,
-    /// `X-Frame-Options`, `Referrer-Policy`, `Permissions-Policy`.
+    // When true, Steel injects a baseline set of security response headers into every HTTPS
+    // response: `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`,
+    // `Permissions-Policy`.
     #[optional]
     pub security_headers_enabled:       bool,
-    /// Optional `Content-Security-Policy` header value.
     #[optional]
-    pub content_security_policy:        String,
-    /// Per-IP address guard tuning. Empty map restores defaults.
+    pub content_security_policy:        String,         // empty sends no CSP header
     #[optional]
-    pub addr_guard:                     DaticleMap,
-    /// URL path prefixes routed through the tighter auth-path
-    /// rate limiter.
+    pub addr_guard:                     DaticleMap,     // empty map restores the defaults
+    // URL path prefixes routed through the tighter auth-path rate limiter.
     #[optional]
     pub auth_path_prefixes:             Vec<String>,
-    /// Maximum average requests per second permitted against the
-    /// auth path prefixes.
+    // Maximum average requests per second permitted against the auth path prefixes.
     #[optional]
     pub auth_rps_max:                   u64,
-    /// The immediate peers entitled to speak the forwarding headers --
-    /// `X-Forwarded-For`, `X-Forwarded-Proto`, `X-Forwarded-Host` and RFC 7239
-    /// `Forwarded` -- written either as a bare address, `198.51.100.7`, or as a
-    /// prefix, `198.51.100.0/24`.
-    ///
-    /// **Empty means trust nobody, which means a caller's copies of those
-    /// headers are stripped before Steel appends its own.** That is the default,
-    /// and it is the correct setting for a host facing the public directly:
-    /// nothing sits in front of Steel there, so nothing in front of Steel is
-    /// entitled to name the client.
-    ///
-    /// **Deleting this field, or emptying a populated one, is not tidying.** It
-    /// reads like hardening a later reader can drop, and it is the opposite. A
-    /// forged `X-Forwarded-For` copied through arrives ahead of Steel's own, and
-    /// the obvious way to read a repeated header -- `HeaderFields::get_one` --
-    /// returns the first. An upstream address guard keyed on that counts a fresh
-    /// allowance for every fresh invented address, so it is not a weaker limit
-    /// but no limit at all, while looking configured. A forged
-    /// `X-Forwarded-Proto: http` read the same way tells an upstream that a TLS
-    /// request arrived in plaintext, and an upstream that redirects plaintext to
-    /// HTTPS on that basis loops.
-    ///
-    /// Populate it only when something really does sit in front -- a CDN, a load
-    /// balancer -- naming that thing's egress addresses. Stripping
-    /// unconditionally would then discard the real client address rather than
-    /// preserve it, replacing every client with the CDN's egress, which is the
-    /// same bug wearing a safer face. When the peer is named here the caller's
-    /// chain is preserved and Steel's value appended to it; Steel's own value is
-    /// last in either case, which is why an upstream should read these headers
-    /// with `HeaderFields::get_last`.
-    ///
-    /// Entries are parsed at start-up, so a typo is a start-up failure rather
-    /// than a silently empty allow-list. The policy itself lives in
-    /// [`oxedyne_fe2o3_net::http::fwd`]; what stays here is the configuration.
+    // The immediate peers entitled to speak the forwarding headers -- `X-Forwarded-For`,
+    // `X-Forwarded-Proto`, `X-Forwarded-Host` and RFC 7239 `Forwarded` -- written either as a
+    // bare address, `198.51.100.7`, or as a prefix, `198.51.100.0/24`.
+    //
+    // Empty means trust nobody, which means a caller's copies of those headers are stripped
+    // before Steel appends its own. That is the default, and it is the correct setting for a host
+    // facing the public directly: nothing sits in front of Steel there, so nothing in front of
+    // Steel is entitled to name the client.
+    //
+    // Deleting this field, or emptying a populated one, is not tidying. It reads like hardening a
+    // later reader can drop, and it is the opposite. A forged `X-Forwarded-For` copied through
+    // arrives ahead of Steel's own, and the obvious way to read a repeated header --
+    // `HeaderFields::get_one` -- returns the first. An upstream address guard keyed on that
+    // counts a fresh allowance for every fresh invented address, so it is not a weaker limit but
+    // no limit at all, while looking configured. A forged `X-Forwarded-Proto: http` read the same
+    // way tells an upstream that a TLS request arrived in plaintext, and an upstream that
+    // redirects plaintext to HTTPS on that basis loops.
+    //
+    // Populate it only when something really does sit in front -- a CDN, a load balancer --
+    // naming that thing's egress addresses. Stripping unconditionally would then discard the real
+    // client address rather than preserve it, replacing every client with the CDN's egress, which
+    // is the same bug wearing a safer face. When the peer is named here the caller's chain is
+    // preserved and Steel's value appended to it; Steel's own value is last in either case, which
+    // is why an upstream should read these headers with `HeaderFields::get_last`.
+    //
+    // Entries are parsed at start-up, so a typo is a start-up failure rather than a silently
+    // empty allow-list. The policy itself lives in `oxedyne_fe2o3_net::http::fwd`; what stays
+    // here is the configuration.
     #[optional]
     pub trusted_proxies:                Vec<String>,
 
     // --- Virtual hosts ------------------------------------------------------
-    /// Ordered list of virtual host configurations, stored as a `Dat::List`
-    /// of `Dat::Map` entries and parsed via `get_vhosts()`.
+    // Stored as a `Dat::List` of `Dat::Map` entries and parsed via `get_vhosts()`.
     pub vhosts:                         Dat,
 
     // --- ACME ---------------------------------------------------------------
-    /// ACME client configuration (as a daticle map, parsed via `get_acme()`).
-    pub acme:                           DaticleMap,
+    pub acme:                           DaticleMap,     // parsed via `get_acme()`
 
     // --- Mail ---------------------------------------------------------------
-    /// Mail listener configuration (as a daticle map, parsed via `get_mail()`).
-    /// Empty map disables the mail server entirely.
+    // Parsed via `get_mail()`. An empty map disables the mail server entirely.
     pub mail:                           DaticleMap,
 
     // --- Alerts -------------------------------------------------------------
-    /// Operator alerting configuration (as a daticle map, parsed via
-    /// `get_alerts()`). Absent, or an empty map, disables alerting entirely.
-    ///
-    /// `#[optional]` because a config block for a feature nobody has switched
-    /// on must not be mandatory. Without it, `from_datmap` treats the field as
-    /// required and every existing `config.jdat` in the world becomes invalid
-    /// the moment a new block is added to this struct -- which is a fine way
-    /// to take a production server down while adding a feature it does not
-    /// even use. Any block added here in future should be `#[optional]` too.
+    // Operator alerting, parsed via `get_alerts()`. Absent, or an empty map, disables alerting
+    // entirely.
+    //
+    // `#[optional]` because a config block for a feature nobody has switched on must not be
+    // mandatory. Without it, `from_datmap` treats the field as required and every existing
+    // `config.jdat` in the world becomes invalid the moment a new block is added to this struct
+    // -- which is a fine way to take a production server down while adding a feature it does not
+    // even use. Any block added here in future should be `#[optional]` too.
     #[optional]
     pub alerts:                         DaticleMap,
 
     // --- Watch --------------------------------------------------------------
-    /// The other machines this node watches (as a daticle map, parsed via
-    /// `get_watch()`). Absent, or an empty map, means this node watches
-    /// nobody -- which is the right default, since most hosts in an estate are
-    /// watched rather than watching.
-    ///
-    /// `#[optional]`, per the note above, and this block is the reason that
-    /// note was worth writing down: it was added to a struct backing two live
-    /// production configurations that had never heard of it.
+    // The other machines this node watches, parsed via `get_watch()`. Absent, or an empty map,
+    // means this node watches nobody -- which is the right default, since most hosts in an estate
+    // are watched rather than watching.
+    //
+    // `#[optional]`, per the note above, and this block is the reason that note was worth writing
+    // down: it was added to a struct backing two live production configurations that had never
+    // heard of it.
     #[optional]
     pub watch:                          DaticleMap,
 }
@@ -2632,7 +2419,6 @@ impl ServerConfig {
         ForwardedPolicy::new(&self.trusted_proxies)
     }
 
-    /// Parse and return all configured vhosts.
     pub fn get_vhosts(&self) -> Outcome<Vec<VhostConfig>> {
         let list = match &self.vhosts {
             Dat::List(items) => items,
@@ -2653,7 +2439,6 @@ impl ServerConfig {
         Ok(out)
     }
 
-    /// Parse and return the ACME configuration.
     pub fn get_acme(&self) -> Outcome<AcmeConfig> {
         AcmeConfig::from_datmap(&self.acme)
     }
@@ -2685,8 +2470,6 @@ impl ServerConfig {
         Ok(Some(res!(MailConfig::from_datmap(&self.mail))))
     }
 
-    /// Parse the `alerts` block. An empty map, or an `enabled: false`
-    /// map, disables alerting.
     /// The watch block, parsed, or `None` when this node watches nobody.
     ///
     /// See [`crate::srv::watch`]: most hosts in an estate are watched rather
@@ -2702,6 +2485,7 @@ impl ServerConfig {
         Ok(Some(cfg))
     }
 
+    /// Parse the `alerts` block. An empty map, or an `enabled: false` map, disables alerting.
     pub fn get_alerts(&self) -> Outcome<Option<AlertConfig>> {
         if self.alerts.is_empty() {
             return Ok(None);
@@ -2751,7 +2535,6 @@ impl ServerConfig {
         s
     }
 
-    /// Build a default session cookie for the given session id string.
     pub fn session_cookie_default(&self, sid: String) -> Cookie {
         let session_cookie_attrs = [
             SetCookieAttributes::HttpOnly,
@@ -2769,12 +2552,10 @@ impl ServerConfig {
         }
     }
 
-    /// Session lifetime as a `Duration`.
     pub fn session_expiry(&self) -> Duration {
         Duration::from_secs(self.session_expiry_default_secs as u64)
     }
 
-    /// Parse `log_level` into a `LogLevel` enum.
     pub fn log_level(&self) -> Outcome<LogLevel> {
         LogLevel::from_str(&self.log_level)
     }

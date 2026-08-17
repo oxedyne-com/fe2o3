@@ -9,6 +9,9 @@
 //!
 //! The client that makes the call lives upstream in [`oxedyne_fe2o3_net::llm`]; this module is the
 //! settings around it, and the two prompts a site sends with its two kinds of request.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::srv::publish::subscribe;
 
@@ -34,16 +37,14 @@ use std::sync::{
 use tokio_rustls::rustls::ClientConfig;
 
 
-/// The key a vhost's AI settings live under in its store.
 pub const AI_KEY: &str = "publish/ai";
 
-/// The instruction sent with a post the author asks to fix, where the operator has set none.
-///
-/// Deliberately narrow. These blogs are written by hand for their own sake, so the one job this prompt
-/// gives the model is to correct what is plainly wrong -- spelling, grammar, punctuation -- and to
-/// leave the voice, the word choice and the argument exactly as they were. The author reviews the
-/// result before it replaces anything, so the prompt errs towards doing too little rather than too
-/// much: a fix that changed the meaning is a worse failure than a typo it left alone.
+// The instruction sent with a post the author asks to fix, where the operator has set none.
+// Deliberately narrow. These blogs are written by hand for their own sake, so the one job this
+// prompt gives the model is to correct what is plainly wrong -- spelling, grammar, punctuation --
+// and to leave the voice, the word choice and the argument exactly as they were. The author reviews
+// the result before it replaces anything, so the prompt errs towards doing too little rather than
+// too much: a fix that changed the meaning is a worse failure than a typo it left alone.
 pub const FIX_PROMPT_DEFAULT: &str =
 	"You are a meticulous copy-editor for a personal blog. Correct only clear errors of spelling, \
 	grammar and punctuation in the text below. Do not change the author's wording, voice, tone, \
@@ -51,12 +52,11 @@ pub const FIX_PROMPT_DEFAULT: &str =
 	passage is already correct, leave it untouched. Return only the corrected text, with no preamble, \
 	no explanation and no markup you were not given.";
 
-/// The instruction sent with a comment being judged, where the operator has set none.
-///
-/// One word out, so the reply maps cleanly to a verdict. The three words are the three a moderator can
-/// reach: publish it, bin it, or hold it for a person. The prompt is told to prefer holding when
-/// unsure, because the cost of holding a good comment is a short wait and the cost of publishing a bad
-/// one is a bad comment on the page.
+// The instruction sent with a comment being judged, where the operator has set none. One word out,
+// so the reply maps cleanly to a verdict. The three words are the three a moderator can reach:
+// publish it, bin it, or hold it for a person. The prompt is told to prefer holding when unsure,
+// because the cost of holding a good comment is a short wait and the cost of publishing a bad one
+// is a bad comment on the page.
 pub const COMMENT_PROMPT_DEFAULT: &str =
 	"You are moderating reader comments on a personal blog. Judge only the comment text below. Reply \
 	with exactly one word and nothing else: APPROVE if it is a genuine, civil, on-topic comment; SPAM \
@@ -71,24 +71,18 @@ pub const COMMENT_PROMPT_DEFAULT: &str =
 /// site that has cleared its settings read the same, which is what they mean.
 #[derive(Clone, Debug, Default)]
 pub struct AiSettings {
-	/// The provider word: `""` (unset), `openrouter`, `fireworks` or `mistral`.
-	pub provider:	String,
-	/// The model, in the provider's own naming.
-	pub model:	String,
-	/// The bearer key. Write-only from the console, never logged.
-	pub api_key:	String,
-	/// The fix instruction. Empty means [`FIX_PROMPT_DEFAULT`].
-	pub fix_prompt:	String,
-	/// The comment instruction. Empty means [`COMMENT_PROMPT_DEFAULT`].
-	pub comment_prompt:	String,
-	/// The addresses emailed when a comment is held for a human. Empty means nobody is told, and the
-	/// comment simply waits in the console queue.
+	pub provider:	String,			// `""` unset, `openrouter`, `fireworks` or `mistral`
+	pub model:	String,			// in the provider's own naming
+	pub api_key:	String,			// write-only from the console, never logged
+	pub fix_prompt:	String,			// empty means FIX_PROMPT_DEFAULT
+	pub comment_prompt:	String,		// empty means COMMENT_PROMPT_DEFAULT
+	// The addresses emailed when a comment is held for a human. Empty means nobody is told, and the
+	// comment simply waits in the console queue.
 	pub alert_emails:	Vec<String>,
 }
 
 impl AiSettings {
 
-	/// The record as a daticle.
 	pub fn to_dat(&self) -> Dat {
 		let mut m = DaticleMap::new();
 		m.insert(dat!("provider"),	dat!(self.provider.clone()));
@@ -101,7 +95,7 @@ impl AiSettings {
 		Dat::Map(m)
 	}
 
-	/// The record from a daticle, tolerant of a missing field so an older record still reads.
+	/// Tolerant of a missing field, so an older record still reads.
 	pub fn from_dat(d: &Dat) -> Self {
 		let s = |m: &DaticleMap, k: &str| match m.get(&dat!(k)) {
 			Some(Dat::Str(v))	=> v.clone(),
@@ -138,7 +132,6 @@ impl AiSettings {
 		if self.fix_prompt.trim().is_empty() { FIX_PROMPT_DEFAULT } else { &self.fix_prompt }
 	}
 
-	/// The comment instruction to send.
 	pub fn comment_prompt(&self) -> &str {
 		if self.comment_prompt.trim().is_empty() { COMMENT_PROMPT_DEFAULT } else { &self.comment_prompt }
 	}
@@ -165,11 +158,8 @@ impl AiSettings {
 /// of a model's reply lives beside the prompt that asked for it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CommentVerdict {
-	/// Publish it.
 	Approve,
-	/// Bin it.
 	Spam,
-	/// A person should look.
 	Hold,
 }
 

@@ -21,6 +21,9 @@
 //! [`SIGNED_LOGIN_FRESHNESS_SECS`] (120 s by default); a command
 //! whose timestamp is outside this window is rejected up front
 //! by [`SignedCommand::verify_fresh`].
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::srv::{
     admin::{
@@ -60,31 +63,18 @@ use std::{
 };
 
 
-/// Freshness window for a signed-admin-login envelope. A command
-/// whose timestamp sits more than this many seconds away from the
-/// server's clock is rejected as stale.
 pub const SIGNED_LOGIN_FRESHNESS_SECS: u64 = 120;
+pub const CMD_ADMIN_LOGIN:             &str = "admin_login";
 
-/// Command name the handler requires in the inbound envelope.
-/// Other commands delivered to this endpoint are rejected.
-pub const CMD_ADMIN_LOGIN: &str = "admin_login";
-
-
-/// Session duration granted to a signed-login principal.
-///
-/// Matches the passphrase flow's default (one hour). The caller
-/// refreshes by issuing a new SignedCommand when this expires; the
-/// handler does not auto-renew.
-pub const SIGNED_LOGIN_SESSION_SECS: u64 = 3600;
+// The signed-login session does not auto-renew: the caller presents a new
+// SignedCommand once it expires.
+pub const SIGNED_LOGIN_SESSION_SECS:   u64 = 3600;
 
 
-/// Small in-memory replay-window tracker.
-///
-/// Records the timestamp of every inbound `(signer_id, nonce)` pair
-/// and rejects a re-presentation of the same pair. Lazily evicts
-/// entries older than `window` on each insert. Suitable for the
-/// single-process admin-login rate (one login per operator per
-/// restart); not suitable as a general-purpose rate limiter.
+/// Records the timestamp of every inbound `(signer_id, nonce)` pair and rejects
+/// a re-presentation of the same pair, lazily evicting entries older than
+/// `window` on each insert. Sized for the admin-login rate, not a
+/// general-purpose rate limiter.
 #[derive(Debug)]
 pub struct NonceTracker {
     seen:   HashMap<(Vec<u8>, [u8; 32]), u64>,
@@ -92,7 +82,6 @@ pub struct NonceTracker {
 }
 
 impl NonceTracker {
-    /// Constructs a tracker with the given eviction window.
     pub fn new(window: Duration) -> Self {
         Self {
             seen:   HashMap::new(),
@@ -100,9 +89,6 @@ impl NonceTracker {
         }
     }
 
-    /// Records `(signer_id, nonce)` as seen at `now`. Returns
-    /// `Ok(())` if the pair was not previously seen inside the
-    /// current window, or an error otherwise.
     pub fn record(
         &mut self,
         signer_id:  &[u8],
@@ -123,7 +109,6 @@ impl NonceTracker {
         Ok(())
     }
 
-    /// Returns the current number of tracked entries. Diagnostic only.
     pub fn len(&self) -> usize {
         self.seen.len()
     }
@@ -135,19 +120,17 @@ impl NonceTracker {
 }
 
 
-/// Builds a [`SignedCommand`]-flow challenge. The response body is
-/// a JDAT map carrying:
+/// Builds the challenge response, a JDAT map carrying:
 ///
-/// - `server_timestamp`: the server's current unix seconds, for
-///   clients that want to align their SignedCommand timestamp with
-///   the server's clock.
+/// - `server_timestamp`: the server's current unix seconds, for clients that
+///   want to align their SignedCommand timestamp with the server's clock.
 /// - `freshness_secs`: the size of the freshness window.
-/// - `accept_cmd`: the string the inbound command must carry as its
-///   `cmd` field (`"admin_login"`).
+/// - `accept_cmd`: the string the inbound command must carry as its `cmd`
+///   field (`"admin_login"`).
 ///
-/// The endpoint does *not* issue a nonce -- nonces are client-
-/// generated and carried in the SignedCommand itself. Replay
-/// protection happens at verify time.
+/// The endpoint does *not* issue a nonce -- nonces are client-generated and
+/// carried in the SignedCommand itself, so replay protection happens at verify
+/// time.
 pub fn handle_challenge(_state: &AdminState) -> HttpMessage {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -177,32 +160,20 @@ pub fn handle_challenge(_state: &AdminState) -> HttpMessage {
 }
 
 
-/// Outcome of [`verify_signed_login`].
 #[derive(Debug)]
 pub enum SignedLoginOutcome {
-    /// Verified; the caller should issue a session cookie for this
-    /// principal.
     Ok(AdminPrincipal),
-    /// Request body failed to parse as a JDAT [`SignedCommand`].
-    MalformedBody { reason: String },
-    /// The envelope's `cmd` is not `"admin_login"`.
-    WrongCmd { got: String },
-    /// Envelope signer not listed in this vhost's `admin_keys`.
-    UnknownSigner,
-    /// Signature did not verify, or fell outside the freshness
-    /// window.
-    BadSignature { reason: String },
-    /// Nonce already presented inside the replay window.
-    ReplayedNonce,
-    /// Signer is known and signature valid, but the configured
-    /// scopes do not include a dashboard scope.
-    NoDashboardScope { name: String },
+    MalformedBody { reason: String },   // body did not parse as a JDAT SignedCommand
+    WrongCmd { got: String },           // `cmd` is not `admin_login`
+    UnknownSigner,                      // signer not in this vhost's `admin_keys`
+    BadSignature { reason: String },    // bad signature, or outside the freshness window
+    ReplayedNonce,                      // nonce already seen inside the replay window
+    NoDashboardScope { name: String },  // signature valid, no dashboard scope configured
 }
 
 
-/// Verifies a signed-admin-login envelope against the configured
-/// `admin_keys` and nonce tracker. Stateless apart from the nonce
-/// tracker update on success.
+/// Verifies a signed-admin-login envelope against the configured `admin_keys`.
+/// Stateless apart from recording the nonce.
 pub fn verify_signed_login(
     state:  &AdminState,
     body:   &[u8],
@@ -281,9 +252,8 @@ pub fn verify_signed_login(
 }
 
 
-/// Matches an envelope's `signer_id` (expected to be the public key
-/// bytes) against the configured `admin_keys` list. Returns the
-/// first matching entry.
+/// The envelope's `signer_id` is expected to be the public key bytes; the first
+/// matching entry wins.
 fn match_admin_key<'a>(
     admin_keys: &'a [AdminKey],
     signer_id:  &[u8],
@@ -294,8 +264,8 @@ fn match_admin_key<'a>(
 }
 
 
-/// Logs the signed-login outcome to the admin audit log with a short
-/// reason tag, matching the passphrase flow's audit line format.
+/// Writes the outcome to the admin audit log with a short reason tag, in the
+/// passphrase flow's line format.
 pub fn audit_signed_login(outcome: &SignedLoginOutcome) {
     match outcome {
         SignedLoginOutcome::Ok(principal) => audit::append(

@@ -12,6 +12,9 @@
 //! one of the dashboard scopes. An admin whose scope list gates
 //! CLI-only verbs is therefore still recognised by the wallet but
 //! refused by the dashboard.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::srv::{
     admin::{
@@ -33,25 +36,20 @@ use std::net::SocketAddr;
 // │ LOGIN OUTCOME                                                             │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Result of a dashboard login attempt.
-///
 /// Distinct from a plain `Outcome` so the handler can distinguish
 /// "wrong password" (re-prompt with a generic error) from "correct
 /// password but no dashboard scope" (explicit refusal with operator
 /// guidance).
 #[derive(Debug)]
 pub enum LoginOutcome {
-    /// Login succeeded; principal is ready for session encoding.
     Ok(AdminPrincipal),
-    /// No admin entry unwrapped with the supplied passphrase. The
-    /// message is intentionally generic so the response to the
-    /// client does not leak whether any admin exists.
+    // No admin entry unwrapped with the supplied passphrase. The message stays
+    // generic so the response cannot leak whether any admin exists.
     BadCredentials,
-    /// An admin entry unwrapped, but the matched entry holds
-    /// neither `dashboard.view` nor `dashboard.admin`. The wallet
-    /// accepts the passphrase; the dashboard refuses the session.
-    /// The name is returned for audit-log purposes; handlers must
-    /// not echo it to the client.
+    // An admin entry unwrapped, but it holds neither `dashboard.view` nor
+    // `dashboard.admin`: the wallet accepts the passphrase, the dashboard refuses
+    // the session. The name is for the audit log and must not be echoed to the
+    // client.
     NoDashboardScope { name: String },
 }
 
@@ -59,14 +57,12 @@ pub enum LoginOutcome {
 // │ LOGIN                                                                     │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Verify a passphrase against the wallet and, on success, build an
+/// Verifies a passphrase against the wallet and, on success, builds an
 /// [`AdminPrincipal`] with a fresh sliding-TTL expiry.
 ///
-/// Returns a [`LoginOutcome`] describing the high-level result.
-/// Structural errors (poisoned lock, wallet corruption) propagate
-/// as `Err(_)`; user-visible refusals are conveyed through the
-/// enum variants so the caller can respond and audit-log them
-/// differently.
+/// Structural errors (poisoned lock, wallet corruption) propagate as `Err(_)`;
+/// user-visible refusals arrive as [`LoginOutcome`] variants so the caller can
+/// respond to and audit-log them differently.
 pub fn verify_passphrase(
     state:      &AdminState,
     passphrase: &[u8],

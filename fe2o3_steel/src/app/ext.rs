@@ -1,3 +1,6 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 /// App extension surface.
 ///
 /// Steel is a server framework used by concrete applications. Each
@@ -42,29 +45,15 @@ use oxedyne_fe2o3_tui::lib_tui::repl::{
 // └───────────────────────────────────────────────────────────────────────────┘
 
 /// Extension surface an app binary hands to Steel at startup.
-///
-/// All four methods have sensible defaults -- an extension can
-/// implement only the parts it needs (e.g. CLI-only, or
-/// API-handlers-only).
 pub trait AppExtension: Send + Sync + 'static {
 
-    /// Contribute commands to the shell Syntax tree.
-    ///
-    /// Called once at shell startup, after Steel has built its own
-    /// built-in commands. The extension adds its commands via
-    /// `s.add_cmd(...)` and returns the augmented tree. Commands
-    /// added here show up in `./steel help` automatically.
+    /// Called once at shell startup, after Steel's own built-ins are in place.
     fn extend_syntax(&self, s: Syntax) -> Outcome<Syntax> {
         Ok(s)
     }
 
-    /// Dispatch a parsed shell command.
-    ///
-    /// Called by Steel's REPL loop when a parsed command name does
-    /// not match any built-in. Return `Ok(None)` if the extension
-    /// does not own this command (Steel will then log "command not
-    /// implemented"). Return `Ok(Some(Evaluation))` if the extension
-    /// handled the command.
+    /// Called when a parsed command name matches no built-in. `Ok(None)` means
+    /// the extension does not own the command.
     fn dispatch_cmd(
         &self,
         _cmd_name:  &str,
@@ -76,21 +65,15 @@ pub trait AppExtension: Send + Sync + 'static {
         Ok(None)
     }
 
-    /// Webhook handlers this extension wants registered at startup.
-    ///
-    /// Each `(name, handler)` pair populates the server-wide webhook
-    /// registry so that `webhook_routes` entries with a matching
-    /// `handler` name dispatch to the handler.
+    /// Each `(name, handler)` pair is reached by the `handler` name in a
+    /// `webhook_routes` entry.
     fn webhook_handlers(&self) -> Vec<(String, Box<dyn WebhookHandler>)> {
         Vec::new()
     }
 
-    /// API handlers this extension wants registered at startup.
-    ///
-    /// Each `(name, handler)` pair populates the server-wide API
-    /// handler registry so that `api_routes` entries with a matching
-    /// `handler` name dispatch to the handler instead of being
-    /// proxied to `upstream`.
+    /// Each `(name, handler)` pair is reached by the `handler` name in an
+    /// `api_routes` entry, which dispatches in process instead of proxying to
+    /// `upstream`.
     fn api_handlers(&self) -> Vec<(String, Box<dyn ApiHandler>)> {
         Vec::new()
     }
@@ -101,12 +84,6 @@ pub trait AppExtension: Send + Sync + 'static {
 // │ NO-OP EXTENSION                                                           │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Placeholder extension that contributes nothing.
-///
-/// Used by the stock `steel` binary (no app crate) and as the base
-/// type for `run()`. Apps that build on Steel provide their own
-/// type implementing `AppExtension` and pass it to
-/// `run_with_extension`.
 pub struct NoExtension;
 
 impl AppExtension for NoExtension {}

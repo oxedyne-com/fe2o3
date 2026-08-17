@@ -26,6 +26,9 @@
 //! read does not *look* broken, which is what makes it worse than no mark. So a mark drawn below
 //! [`MARK_MIN_PX`] carries its declaration in words beside it, and [`Size::alone`] will not return a
 //! wordless mark below that size however small a caller asks for.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::srv::cache;
 
@@ -47,23 +50,20 @@ use oxedyne_fe2o3_text::doc::html::{
 use std::collections::BTreeMap;
 
 
-/// The smallest a mark may be drawn without its words, in CSS pixels.
-///
-/// Below this the pins are no longer countable, so the level is no longer readable, so the words come
-/// with it. See the module note: this is the one number in the scheme that a renderer must not treat
-/// as advice.
+// The smallest a mark may be drawn without its words, in CSS pixels. Below this the pins are no
+// longer countable, so the level is no longer readable, so the words come with it. See the module
+// note: this is the one number in the scheme that a renderer must not treat as advice.
 pub const MARK_MIN_PX: u32 = 40;
 
-/// The height a mark is drawn at, in CSS pixels, wherever this module draws one.
-///
-/// Above [`MARK_MIN_PX`] on purpose. The floor is where a level stops being readable at all, which is
-/// a bad place to sit: it leaves nothing for a cheap screen, a low zoom or a reader who is not
-/// looking closely. One size everywhere also means a mark is the same object on a card, on a post and
-/// in a footer, rather than a family of sizes to be judged one placement at a time.
+// The height a mark is drawn at, in CSS pixels, wherever this module draws one. Above MARK_MIN_PX
+// on purpose: the floor is where a level stops being readable at all, which is a bad place to sit,
+// leaving nothing for a cheap screen, a low zoom or a reader who is not looking closely. One size
+// everywhere also means a mark is the same object on a card, on a post and in a footer, rather
+// than a family of sizes to be judged one placement at a time.
 pub const MARK_SIZE_PX: u32 = 48;
 
-/// The file extension the artwork is kept in. The marks are line drawings, and a line drawing that
-/// has to sit at a byline and on a poster is a vector.
+// The marks are line drawings, and a line drawing that has to sit at a byline and on a poster is a
+// vector.
 const MARK_EXT: &str = ".svg";
 
 
@@ -74,21 +74,16 @@ const MARK_EXT: &str = ".svg";
 /// person needed to produce it rather than to direct it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Level {
-	/// None was used.
-	No,
-	/// It helped, but the declarer could have done this without it.
-	Some,
-	/// Parts of this could not have been done without it.
-	With,
-	/// Without AI there would be no work at all.
-	Mostly,
-	/// No person was needed to produce it.
-	Entirely,
+	No,		// none was used
+	Some,		// it helped, but the declarer could have done this without it
+	With,		// parts of this could not have been done without it
+	Mostly,		// without AI there would be no work at all
+	Entirely,	// no person was needed to produce it
 }
 
 impl Level {
 
-	/// Every rung, in order, weakest claim on AI first. What a chooser offers and what a test walks.
+	// Every rung, in order, weakest claim on AI first. What a chooser offers and what a test walks.
 	pub const ALL: [Self; 5] = [Self::No, Self::Some, Self::With, Self::Mostly, Self::Entirely];
 
 	/// The word a record stores and a URL carries.
@@ -137,23 +132,17 @@ impl Level {
 /// exception is [`Whole`](Self::Whole), for a work that sits at one level throughout.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Medium {
-	/// The work entire, at one level. The scheme's umbrella mark.
-	Whole,
-	/// Written prose: a post, a chapter, a document.
-	Doc,
-	/// Software.
-	Code,
-	/// A still picture.
-	Image,
-	/// Sound.
-	Audio,
-	/// Moving picture.
-	Video,
+	Whole,		// the work entire, at one level; the scheme's umbrella mark
+	Doc,		// written prose: a post, a chapter, a document
+	Code,		// software
+	Image,		// a still picture
+	Audio,		// sound
+	Video,		// moving picture
 }
 
 impl Medium {
 
-	/// Every kind, the whole work first. What a config chooser offers and what a test walks.
+	// Every kind, the whole work first. What a config chooser offers and what a test walks.
 	pub const ALL: [Self; 6] =
 		[Self::Whole, Self::Doc, Self::Code, Self::Image, Self::Audio, Self::Video];
 
@@ -179,15 +168,12 @@ impl Medium {
 /// A declaration: a rung of the ladder, and the part of the work it speaks for.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Declaration {
-	/// How much this needed AI.
 	pub level:	Level,
-	/// Which part of the work says so.
 	pub medium:	Medium,
 }
 
 impl Declaration {
 
-	/// A declaration of a level about a kind of work.
 	pub fn new(level: Level, medium: Medium) -> Self {
 		Self { level, medium }
 	}
@@ -224,12 +210,9 @@ impl Declaration {
 /// only somewhere to keep the one field, and a place for an admin to set it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Declarable {
-	/// What the site calls it, in the store and in the JSON a page reads. Never shown.
-	pub key:	String,
-	/// What an admin sees when choosing its level.
-	pub name:	String,
-	/// The kind of work it is, which decides which mark it wears.
-	pub medium:	Medium,
+	pub key:	String,		// what the site calls it, in the store and in JSON; never shown
+	pub name:	String,		// what an admin sees when choosing its level
+	pub medium:	Medium,		// decides which mark it wears
 }
 
 /// A site's declaration settings: the scheme it speaks, where its artwork is, what the site says
@@ -241,26 +224,22 @@ pub struct Declarable {
 /// nothing.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DeclareConfig {
-	/// The scheme's own site, e.g. `https://example.org`, without a trailing slash. What a mark links
-	/// to, with the declaration's own path after it.
-	pub url:	String,
-	/// Where the artwork is served from, e.g. `/assets/marks`, without a trailing slash.
-	pub marks:	String,
-	/// What the site says about itself, drawn in its footer. Nothing where the site declares nothing
-	/// about itself, which is not the same as declaring that it used none.
+	// The scheme's own site and where the artwork is served from, both without a trailing slash. A
+	// mark links to the first, with the declaration's own path after it.
+	pub url:	String,		// e.g. `https://example.org`
+	pub marks:	String,		// e.g. `/assets/marks`
+	// What the site says about itself, drawn in its footer. Nothing where the site declares nothing
+	// about itself, which is not the same as declaring that it used none.
 	pub site:	Option<Declaration>,
-	/// The things on this site an admin may set a level for, in the order they are offered.
-	pub items:	Vec<Declarable>,
+	pub items:	Vec<Declarable>,	// what an admin may set a level for, in the order offered
 }
 
 impl DeclareConfig {
 
-	/// Whether this site declares at all.
 	pub fn is_on(&self) -> bool {
 		!self.url.is_empty() && !self.marks.is_empty()
 	}
 
-	/// The declarable of a given key, where the site has one.
 	pub fn item(&self, key: &str) -> Option<&Declarable> {
 		self.items.iter().find(|i| i.key == key)
 	}
@@ -345,7 +324,6 @@ fn slug_list() -> String {
 	Level::ALL.iter().map(|l| l.slug()).collect::<Vec<_>>().join(", ")
 }
 
-/// The declarable things in a config list.
 fn declarables(items: &[Dat]) -> Outcome<Vec<Declarable>> {
 	let mut out = Vec::new();
 	for item in items {
@@ -390,13 +368,11 @@ fn declarables(items: &[Dat]) -> Outcome<Vec<Declarable>> {
 /// The two are not interchangeable and the difference is not taste: see [`MARK_MIN_PX`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Size {
-	/// The mark by itself, at the given size in CSS pixels, which is at least [`MARK_MIN_PX`].
-	Alone(u32),
-	/// The mark at the given size with its declaration in words beside it.
-	///
-	/// Words are not only for a mark too small to read. A footer saying what a whole site is has room
-	/// for the sentence and a reason to spell it out; a mark beside a reading time does not, and the
-	/// words there would say the same thing on every card.
+	Alone(u32),	// CSS pixels, at least MARK_MIN_PX
+	// The mark at the given size with its declaration in words beside it. Words are not only for a
+	// mark too small to read: a footer saying what a whole site is has room for the sentence and a
+	// reason to spell it out; a mark beside a reading time does not, and the words there would say
+	// the same thing on every card.
 	WithWords(u32),
 }
 

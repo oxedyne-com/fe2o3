@@ -16,71 +16,52 @@
 //! Palette and typography are defined in the CSS file. Headers
 //! are deliberately text-only and minimal -- no logo, no brand
 //! mark, no placeholder artwork.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::srv::admin::AdminPrincipal;
 
 use oxedyne_fe2o3_core::prelude::*;
 
-/// Stylesheet inlined into every dashboard response. Read at
-/// compile time from `assets/style.css` next to this file.
 pub const STYLE_CSS: &str = include_str!("assets/style.css");
 
-/// Minified uPlot JavaScript (https://github.com/leeoniya/uPlot,
-/// MIT licensed, v1.6.32 vendored). Inlined into pages that draw
-/// time-series charts. About 51 KB of source, perhaps half that
-/// over the wire when the response is compressed; trivial
-/// compared to a framework runtime.
+// uPlot (https://github.com/leeoniya/uPlot), MIT licensed, v1.6.32 vendored.
+// About 51 KB of source, perhaps half that over the wire once compressed --
+// trivial compared with a framework runtime. The companion CSS covers axis
+// styling, crosshair rendering and legend layout.
 pub const UPLOT_JS: &str = include_str!("assets/uplot.js");
-
-/// Companion CSS shipped with uPlot. Covers axis styling,
-/// crosshair rendering and legend layout.
 pub const UPLOT_CSS: &str = include_str!("assets/uplot.css");
 
-/// fe2o3 logo (SVG, ~3 KB), copied verbatim from the Hematite
-/// asset tree. Text-right layout. Inlined into the sidebar
-/// banner of every authenticated dashboard page and into the
-/// login card. Dark mode recolours the wordmark via an SVG-
-/// targeting CSS override in `style.css`.
+// Inlined marks: fe2o3 in the sidebar banner of every authenticated page and
+// in the login card, Oxedyne in the page header brand area, Ozone beside the
+// `Database` page heading. Dark mode recolours the fe2o3 wordmark through an
+// SVG-targeting override in `style.css`.
 pub const FE2O3_LOGO_SVG: &str = include_str!("assets/fe2o3_logo.svg");
 
-/// Oxedyne umbrella logo (SVG, ~3 KB). Text-below-mark layout.
-/// Inlined into the page header brand area as the top-left
-/// chrome on every authenticated dashboard page.
 pub const OXEDYNE_LOGO_SVG: &str = include_str!("assets/oxedyne_logo.svg");
 
-/// Ozone database logo (SVG, ~3 KB). Text-right layout. Used
-/// inline beside the `Database` page heading so the browser view
-/// is visually identified with the underlying store.
 pub const OZONE_LOGO_SVG: &str = include_str!("assets/ozone_logo.svg");
 
-/// Oxanium variable font (TTF, ~43 KB). Served under
-/// `/admin/assets/oxanium.ttf` so the browser caches it between
-/// pages. CSS `@font-face` in `style.css` points at the same
-/// route.
+// Served under `/admin/assets/oxanium.ttf` so the browser caches it between
+// pages; the `@font-face` rule in `style.css` points at the same route.
 pub const FONT_OXANIUM_TTF: &[u8] = include_bytes!("assets/oxanium.ttf");
 
-/// Inline SVG icons used by the header chrome. Kept tiny --
-/// they are 20 x 20 glyphs, one path each, no fills that could
-/// be theme-dependent. The sun and moon icons share outer
-/// geometry so the theme toggle button animates cleanly.
+// Header-chrome icons: 20 x 20 glyphs, one path each, no fills that could be
+// theme-dependent. Sun and moon share outer geometry so the theme toggle
+// animates cleanly. The moon shows while dark mode is active, so the toggle
+// reads "switch to light mode".
 pub const ICON_SUN_SVG: &str = r#"<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>"#;
 
-/// Moon icon, used when dark mode is active so the toggle
-/// clearly says "switch to light mode".
 pub const ICON_MOON_SVG: &str = r#"<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>"#;
 
-/// Inline JavaScript rendered by the Overview page. Fetches the
-/// host-sampler JSON at `/admin/host.json`, builds four small
-/// uPlot sparklines against the four `<div class="spark-plot">`
-/// placeholders, and updates the four current-value labels.
-///
-/// Runs once on `DOMContentLoaded`, and is re-entered by the
-/// auto-refresh polling loop (task #4) which pokes a second
-/// function exposed on `window` so the chart and headline value
-/// both update without a full page reload. The auto-refresh
-/// hook degrades gracefully if uPlot or the JSON feed returns an
-/// empty payload -- the sparkline shows its placeholder and the
-/// headline stays at its previous value.
+// Fetches the host-sampler JSON at `/admin/host.json`, builds four small uPlot
+// sparklines against the four `<div class="spark-plot">` placeholders and
+// updates the four current-value labels. Runs once on `DOMContentLoaded`, then
+// again whenever the auto-refresh loop pokes the function it exposes on
+// `window`, so chart and headline update without a full page reload. An empty
+// payload degrades gracefully: the sparkline keeps its placeholder and the
+// headline its previous value.
 pub const OVERVIEW_SPARKLINE_JS: &str = r#"
 (function() {
     var charts = {};
@@ -163,13 +144,12 @@ pub const OVERVIEW_SPARKLINE_JS: &str = r#"
 })();
 "#;
 
-/// Shared auto-refresh driver. Sets up a 5-second polling interval
-/// that calls whichever refresh function the current page exposed
-/// on `window` -- `steelSparkRefresh` for the Overview host strip,
-/// `steelTrafficRefresh` for the Traffic view -- and pauses when
-/// the browser tab is hidden so a background tab does not burn
-/// bandwidth. Every page can include this script unconditionally;
-/// if no refresh function is defined the loop is a no-op.
+// A five-second polling interval that calls whichever refresh function the
+// current page exposed on `window` -- `steelSparkRefresh` for the Overview host
+// strip, `steelTrafficRefresh` for the Traffic view -- and pauses while the
+// browser tab is hidden, so a background tab does not burn bandwidth. Any page
+// can include it unconditionally: with no refresh function defined the loop is
+// a no-op.
 pub const AUTO_REFRESH_JS: &str = r#"
 (function() {
     var INTERVAL_MS = 5000;
@@ -189,12 +169,10 @@ pub const AUTO_REFRESH_JS: &str = r#"
 })();
 "#;
 
-/// Inline JavaScript that reads the persisted theme preference
-/// from `localStorage` on page load and applies the `dark` class
-/// to `<html>`. Hooked to the theme toggle button by id. Runs
-/// synchronously in `<head>` so the dark class is applied
-/// before first paint -- no flash of light theme when the user
-/// has dark saved.
+// Reads the persisted theme preference from `localStorage` and applies the
+// `dark` class to `<html>`, hooked to the theme toggle button by id. Runs
+// synchronously in `<head>`, so the class lands before first paint and a user
+// with dark saved sees no flash of the light theme.
 pub const THEME_JS: &str = r#"
 (function() {
     var KEY = 'steelAdminTheme';
@@ -219,11 +197,8 @@ pub const THEME_JS: &str = r#"
 })();
 "#;
 
-/// Ready-made `head_extra` fragment that pulls the uPlot
-/// library and its stylesheet into a page. Pass to
-/// [`render_layout`] when the body renders a chart. Inlined as
-/// `<style>` and `<script>` tags so no extra asset route is
-/// required.
+/// Pass to [`render_layout`] when the body renders a chart. Inlined as `<style>`
+/// and `<script>` tags, so no extra asset route is required.
 pub fn upload_head_html() -> String {
     fmt!(
         "<style>{css}</style>\n\
@@ -237,17 +212,12 @@ pub fn upload_head_html() -> String {
 // │ NAV ENTRIES                                                               │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// One sidebar navigation entry. The `current` flag highlights
-/// the entry corresponding to the currently rendered page.
 pub struct NavEntry {
     pub label:  &'static str,
     pub href:   &'static str,
     pub group:  Option<&'static str>,
 }
 
-/// Standard nav layout for the dashboard. Sub-pages adjust the
-/// `current` URL via [`render_layout`] to highlight the active
-/// entry.
 pub const NAV: &[NavEntry] = &[
     NavEntry { label: "Overview",   href: "/admin",             group: Some("Dashboard") },
     NavEntry { label: "Database",   href: "/admin/database",    group: None },
@@ -261,16 +231,14 @@ pub const NAV: &[NavEntry] = &[
 // │ LAYOUT                                                                    │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Wrap a body fragment in the standard authenticated dashboard
-/// layout: header bar with the current page label and signed-in
-/// user, sidebar with nav entries, main content panel.
+/// Wraps a body fragment in the standard authenticated dashboard layout: header
+/// bar with the current page label and signed-in user, sidebar with nav
+/// entries, main content panel.
 ///
-/// `current_path` is matched against each nav entry's `href` to
-/// highlight the active link. `body_html` is the inner HTML for
-/// the main content panel; callers are responsible for escaping
-/// untrusted content within it. `head_extra` lets a specific page
-/// inject extra `<script>` or `<link>` tags, used by the traffic
-/// view to load the charting library.
+/// `current_path` is matched against each nav entry's `href` to highlight the
+/// active link. Callers are responsible for escaping untrusted content inside
+/// `body_html`. `head_extra` lets a page inject extra `<script>` or `<link>`
+/// tags.
 pub fn render_layout(
     title:        &str,
     current_path: &str,
@@ -334,9 +302,8 @@ pub fn render_layout(
     )
 }
 
-/// Standalone layout for unauthenticated pages (login form). No
-/// sidebar, no header bar, just a centred card with the fe2o3
-/// logo above the form.
+/// No sidebar and no header bar: a centred card with the fe2o3 logo above the
+/// form.
 pub fn render_login_layout(
     title:     &str,
     body_html: &str,
@@ -374,12 +341,6 @@ pub fn render_login_layout(
 // │ FRAGMENTS                                                                 │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Render the sidebar nav entry list from [`NAV`]. Called from
-/// [`render_layout`] which supplies the surrounding `<nav>`
-/// wrapper and the sidebar brand block above the entries.
-/// Entries whose `href` matches `current_path` (or for which
-/// the current path is a sub-path) are highlighted via the
-/// `current` CSS class.
 pub fn render_nav(current_path: &str) -> String {
     let mut out = String::new();
     let mut last_group: Option<&'static str> = None;
@@ -408,10 +369,9 @@ pub fn render_nav(current_path: &str) -> String {
     out
 }
 
-/// Decide whether a given nav entry should be highlighted as the
-/// current page. The home entry (`/admin`) only matches an exact
-/// `/admin`; every other entry matches its prefix so sub-pages
-/// like `/admin/database?prefix=user:` still highlight `Database`.
+/// The home entry (`/admin`) matches only an exact `/admin`; every other entry
+/// matches its prefix, so a sub-page like `/admin/database?prefix=user:` still
+/// highlights `Database`.
 fn is_current(current_path: &str, entry_href: &str) -> bool {
     if entry_href == "/admin" {
         current_path == "/admin"
@@ -426,9 +386,8 @@ fn is_current(current_path: &str, entry_href: &str) -> bool {
 // │ HTML ESCAPE                                                               │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Escape a string for safe inclusion in an HTML text node or
-/// attribute value. Replaces the five characters that can break
-/// out of a text node into markup: `&`, `<`, `>`, `"`, `'`.
+/// Replaces the five characters that can break out of a text node or attribute
+/// value into markup: `&`, `<`, `>`, `"`, `'`.
 pub fn html_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {

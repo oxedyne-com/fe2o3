@@ -38,6 +38,9 @@
 //! not fail because the audit log is unavailable. A dashboard login
 //! that succeeds against a healthy wallet should still let the
 //! operator in even if the disk holding the audit log is full.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -53,21 +56,18 @@ use std::{
     },
 };
 
-/// File name of the admin audit log, relative to the app working
-/// directory. Hosted here (rather than in `app::constant`) so the
-/// dashboard handler in the `srv` layer does not have to import
-/// from `app`.
+// Hosted here rather than in `app::constant` so the dashboard handler in the
+// `srv` layer does not have to import from `app`.
 pub const ADMIN_AUDIT_LOG_NAME: &str = "admin-audit.log";
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ VERBS                                                                     │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Verb constants for the dashboard-side audit events. CLI-side
-/// verbs (`admin.add`, `admin.remove`, `admin.passwd`, `admin.list`,
-/// `wallet.migrate`) live as inline strings in `app/repl.rs` so
-/// the original call sites remain stable; new dashboard verbs are
-/// declared here so handler call sites cannot drift on spelling.
+// CLI-side verbs (`admin.add`, `admin.remove`, `admin.passwd`, `admin.list`,
+// `wallet.migrate`) stay as inline strings in `app/repl.rs` so the original call
+// sites remain stable; dashboard verbs are declared here so handler call sites
+// cannot drift on spelling.
 pub const VERB_DASHBOARD_LOGIN:             &str = "dashboard.login";
 pub const VERB_DASHBOARD_LOGOUT:            &str = "dashboard.logout";
 pub const VERB_DASHBOARD_ADMIN_ADD:         &str = "dashboard.admin.add";
@@ -76,26 +76,14 @@ pub const VERB_DASHBOARD_GUARD_WHITELIST:   &str = "dashboard.guard.whitelist";
 pub const VERB_DASHBOARD_GUARD_BLACKLIST:   &str = "dashboard.guard.blacklist";
 pub const VERB_DASHBOARD_GUARD_UNBLOCK:     &str = "dashboard.guard.unblock";
 
-/// Sentinel admin name used when an unauthenticated visitor hits a
-/// dashboard endpoint -- e.g. a failed login attempt where no
-/// identity has been established yet.
-pub const ADMIN_ANON: &str = "(anon)";
+pub const ADMIN_ANON: &str = "(anon)"; // unauthenticated visitor, e.g. a failed login
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ APPEND                                                                    │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Append a single audit entry to `./admin-audit.log`.
-///
-/// `admin` may be the actor's name, `(anon)` for unauthenticated
-/// events, or `(unknown)` when an authenticated event happens but
-/// the actor's identity is not available for some reason. `verb`
-/// is the dotted action name. `result` is `ok` or `err`. `detail`
-/// is free-form key=value content; callers should not include
-/// newlines.
-///
-/// Failures are logged at `warn!` level and swallowed. The audit
-/// log is never allowed to break the action it is recording.
+/// Failures are logged at `warn!` and swallowed. The audit log is never allowed
+/// to break the action it is recording.
 pub fn append(admin: &str, verb: &str, result: &str, detail: &str) {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)

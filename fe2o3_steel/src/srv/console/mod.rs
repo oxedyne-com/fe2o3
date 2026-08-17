@@ -37,6 +37,9 @@
 //! else -- which is why the first cut of the composer was trapped under `/admin`. The member's
 //! session cookie is `Path=/`, so it is already sent to `/manage` and every other site path. The
 //! console lives where the credential that opens it is actually presented.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 pub mod publish;
 pub mod session;
@@ -92,38 +95,31 @@ use std::{
 };
 
 
-/// The console's root.
 pub const PATH_ROOT: &str = "/manage";
 
-/// Whether the signed-in member may reach the console, as JSON, for the site's own chrome to ask
-/// before it offers a way in. A read, so it is a GET, and it answers for anyone -- signed in or not,
-/// admin or not -- rather than turning a non-admin away, because a page asking "should I show the
-/// door" is not itself the door.
+// Whether the signed-in member may reach the console, as JSON, for the site's own chrome to ask
+// before it offers a way in. A read, so it is a GET, and it answers for anyone -- signed in or
+// not, admin or not -- rather than turning a non-admin away, because a page asking "should I show
+// the door" is not itself the door.
 pub const PATH_STATUS: &str = "/manage/status";
 
-/// Where a signed-in member posts to become the site's first admin.
-///
-/// The self-bootstrap: open only while the site has no admins at all, so a member can make themselves
-/// the first one without a config edit and a restart, and closed the moment there is one, so it cannot
-/// take a site that is already owned.
+// Where a signed-in member posts to become the site's first admin. The self-bootstrap: open only
+// while the site has no admins at all, so a member can make themselves the first one without a
+// config edit and a restart, and closed the moment there is one, so it cannot take a site that is
+// already owned.
 pub const PATH_CLAIM: &str = "/manage/claim";
 
-/// The admin-management page, and where its add and remove forms post.
-///
-/// A GET lists the site's admins; a POST adds one by id-hash or removes a database-granted one. Both
-/// are gated on an existing admin, so this is how a second admin is granted once the first has claimed.
+// The admin-management page, and where its add and remove forms post. A GET lists the site's
+// admins; a POST adds one by id-hash or removes a database-granted one. Both are gated on an
+// existing admin, so this is how a second admin is granted once the first has claimed.
 pub const PATH_ADMINS: &str = "/manage/admins";
 
-/// Where a passphrase sign-in posts, and where a `GET` renders the themed login
-/// form.
-///
-/// The generic way in: a site owner types the operator's wallet passphrase --
-/// the same one the `/admin` dashboard verifies -- and is given a site-admin
-/// session ([`session`]) that opens this console and nothing else. No member
-/// account, no separate password, no redirect to `/admin`.
+// Where a passphrase sign-in posts, and where a GET renders the themed login form. The generic
+// way in: a site owner types the operator's wallet passphrase -- the same one the `/admin`
+// dashboard verifies -- and is given a site-admin session that opens this console and nothing
+// else. No member account, no separate password, no redirect to `/admin`.
 pub const PATH_LOGIN: &str = "/manage/login";
 
-/// Where a site-admin session is cleared.
 pub const PATH_LOGOUT: &str = "/manage/logout";
 
 
@@ -133,13 +129,11 @@ pub const PATH_LOGOUT: &str = "/manage/logout";
 /// the list said they may.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SiteAdmin {
-	/// The member's username -- the site login's own identifier, which is the SHA-256 of their
-	/// passphrase.
+	// The site login's own identifier, which is the SHA-256 of their passphrase.
 	pub username:	String,
 }
 
 
-/// Whether a path belongs to the console.
 pub fn owns(path: &str) -> bool {
 	path == PATH_ROOT
 		|| (path.starts_with(PATH_ROOT)
@@ -328,7 +322,6 @@ fn valid_id_hash(s: &str) -> bool {
 // │ GET                                                                       │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Serves the console's pages.
 pub async fn handle_get<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -1016,17 +1009,13 @@ fn login_page(theme: &Theme, error: Option<&str>) -> HttpMessage {
 /// manage it. A site with a console but no publish block gets a plain page that still works -- the
 /// look is a courtesy, the function is not.
 pub struct Theme {
-	/// The site's name, for the tab and the header.
-	pub site_name:	String,
-	/// The site's own stylesheets, linked so the console inherits its palette and fonts.
-	pub css:	Vec<String>,
-	/// Where "View site" goes.
-	pub home:	String,
+	pub site_name:	String,		// for the tab and the header
+	pub css:	Vec<String>,	// the site's own stylesheets, so the console inherits its palette
+	pub home:	String,		// where "View site" goes
 }
 
 impl Theme {
 
-	/// The theme a site's publish block gives its console.
 	fn of(publish: Option<&PublishConfig>) -> Self {
 		match publish {
 			Some(p)	=> Self {
@@ -1043,7 +1032,6 @@ impl Theme {
 	}
 }
 
-/// Where a turned-away visitor is sent.
 fn home_of(publish: Option<&PublishConfig>) -> String {
 	match publish {
 		Some(p) if !p.base_url.is_empty()	=> p.base_url.clone(),
@@ -1196,11 +1184,11 @@ fn not_yet_admin(theme: &Theme, username: &str, claimable: bool, csrf: &str) -> 
 		.with_body(s.into_bytes()))
 }
 
-/// The console's own styling, consuming the site's custom properties where they are set.
-///
-/// Every colour and font falls back to a neutral default, so a site that defines none still gets a
-/// legible page; a site that defines the Elearnity-style tokens gets its own palette. Kept small and
-/// inline: it is chrome for a handful of pages, not a stylesheet worth a request.
+// The console's own styling, consuming the site's custom properties where they are set.
+//
+// Every colour and font falls back to a neutral default, so a site that defines none still gets a
+// legible page; a site that defines the Elearnity-style tokens gets its own palette. Kept small and
+// inline: it is chrome for a handful of pages, not a stylesheet worth a request.
 const CONSOLE_CSS: &str = "\
 /* The console's surface. \
 \
@@ -1525,7 +1513,6 @@ fn status_json(
 		.with_body(body.into_bytes()))
 }
 
-/// A redirect, for turning a visitor away or sending them back after a write.
 pub fn redirect(to: &str) -> HttpMessage {
 	HttpMessage::new_response(HttpStatus::SeeOther)
 		.with_field(
@@ -1534,7 +1521,6 @@ pub fn redirect(to: &str) -> HttpMessage {
 		)
 }
 
-/// A plain JSON yes, for a fetch caller whose write went through.
 fn json_ok() -> HttpMessage {
 	cache::generated(HttpMessage::new_response(HttpStatus::OK)
 		.with_field(
@@ -1651,11 +1637,10 @@ fn csrf_ok(sid: &str, sent: &str) -> bool {
 	!sent.is_empty() && sent == csrf_token(sid)
 }
 
-/// The domain-separator for the CSRF hash, so the token can never be some other digest of the same
-/// session put to a different use.
+// The domain-separator for the CSRF hash, so the token can never be some other digest of the same
+// session put to a different use.
 const CSRF_DOMAIN: &[u8] = b"steel-site-console-csrf-v1";
 
-/// Lowercase hex of some bytes.
 fn hex(bytes: &[u8]) -> String {
 	let mut s = String::with_capacity(bytes.len() * 2);
 	for b in bytes {
@@ -1719,7 +1704,6 @@ fn form_decode(s: &str) -> String {
 	String::from_utf8_lossy(&out).into_owned()
 }
 
-/// One hex digit's value.
 fn nibble(b: u8) -> Option<u8> {
 	match b {
 		b'0'..=b'9'	=> Some(b - b'0'),
@@ -1854,17 +1838,14 @@ mod tests {
 		)
 	}
 
-	/// The loopback peer the login path is told the attempt came from.
 	fn peer() -> SocketAddr {
 		SocketAddr::from(([127, 0, 0, 1], 0))
 	}
 
-	/// Empty request headers -- no session of any kind.
 	fn no_headers() -> Arc<HeaderFields> {
 		Arc::new(HeaderFields::default())
 	}
 
-	/// Request headers carrying one cookie, `key=val`.
 	fn cookie_headers(key: &str, val: &str) -> Arc<HeaderFields> {
 		let mut h = HeaderFields::default();
 		h.insert(
@@ -1879,7 +1860,6 @@ mod tests {
 		Arc::new(h)
 	}
 
-	/// Request headers a fetch caller sends: a manage cookie and `Accept: json`.
 	fn json_headers(manage: &str) -> Arc<HeaderFields> {
 		let mut h = HeaderFields::default();
 		h.insert(
@@ -1912,7 +1892,6 @@ mod tests {
 		>(&[], state, None, headers)
 	}
 
-	/// The response's status, if it is a response.
 	fn status_of(resp: &HttpMessage) -> Option<HttpStatus> {
 		match &resp.header.headline {
 			HttpHeadline::Response { status }	=> Some(*status),
@@ -1920,7 +1899,6 @@ mod tests {
 		}
 	}
 
-	/// The `Set-Cookie` the response carries, if any.
 	fn set_cookie_of(resp: &HttpMessage) -> Option<Cookie> {
 		match resp.header.fields.get_one(&HeaderName::SetCookie) {
 			Some(HeaderFieldValue::SetCookie(c))	=> Some(c.clone()),

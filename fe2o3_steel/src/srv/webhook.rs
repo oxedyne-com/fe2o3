@@ -1,3 +1,6 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 /// Webhook handler infrastructure.
 ///
 /// Steel provides the trait and registry; apps implement their own
@@ -28,26 +31,11 @@ use tokio_rustls::rustls::ClientConfig;
 // │ WEBHOOK HANDLER TRAIT                                                     │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Trait for handling incoming webhook requests.
-///
-/// Apps implement this trait for each webhook integration they need
-/// (e.g. a payment provider forwarding a purchase confirmation to a
-/// fulfilment upstream, or a notification service relaying an event)
-/// and register instances with a [`WebhookRegistry`] before starting
-/// Steel.
+/// Apps implement this trait for each webhook integration they need -- a payment
+/// provider forwarding a purchase confirmation to a fulfilment upstream, a
+/// notification service relaying an event -- and register instances with a
+/// [`WebhookRegistry`] before starting Steel.
 pub trait WebhookHandler: Send + Sync + 'static {
-    /// Handle an incoming webhook POST body and return an HTTP response.
-    ///
-    /// # Arguments
-    /// * `route` -- the matched webhook route config (path, handler
-    ///   name, resolved config key-value pairs).
-    /// * `body` -- the raw request body bytes.
-    /// * `req_headers` -- the incoming request header fields, so
-    ///   handlers can inspect signature headers (e.g. `Stripe-Signature`)
-    ///   or content-type headers without a separate side channel.
-    /// * `tls_client` -- shared TLS client config for outbound HTTPS
-    ///   calls.
-    /// * `id` -- connection identifier for logging.
     fn handle<'a>(
         &'a self,
         route:          &'a WebhookRoute,
@@ -63,38 +51,30 @@ pub trait WebhookHandler: Send + Sync + 'static {
 // │ WEBHOOK REGISTRY                                                          │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// A registry mapping handler names (from config) to handler implementations.
-///
-/// Built by the app before server startup. The stock `steel` binary creates
-/// an empty registry; apps that need webhook handling register their handlers.
+/// Maps handler names, as written in config, to handler implementations. Built
+/// by the app before server startup; the stock `steel` binary creates an empty
+/// one.
 #[derive(Default)]
 pub struct WebhookRegistry {
     handlers: HashMap<String, Box<dyn WebhookHandler>>,
 }
 
 impl WebhookRegistry {
-    /// Create an empty registry.
     pub fn new() -> Self {
         Self {
             handlers: HashMap::new(),
         }
     }
 
-    /// Register a handler under the given name.
-    ///
     /// The name must match the `handler` field in the webhook route config.
     pub fn register<H: WebhookHandler>(&mut self, name: &str, handler: H) {
         self.handlers.insert(name.to_string(), Box::new(handler));
     }
 
-    /// Insert a handler already boxed (used by `AppExtension` wiring,
-    /// which produces `Box<dyn WebhookHandler>` from its trait method
-    /// rather than handing over concrete handler types).
     pub fn insert_boxed(&mut self, name: String, handler: Box<dyn WebhookHandler>) {
         self.handlers.insert(name, handler);
     }
 
-    /// Returns `true` if a handler is registered for the given name.
     pub fn has(&self, name: &str) -> bool {
         self.handlers.contains_key(name)
     }
@@ -114,9 +94,8 @@ impl std::fmt::Debug for WebhookRegistry {
 // │ DISPATCH                                                                  │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Dispatch an incoming webhook to the appropriate registered handler.
-/// Only called for handler-mode webhook routes; upstream-mode routes
-/// are forwarded directly from the HTTPS dispatcher.
+/// Called only for handler-mode webhook routes; upstream-mode routes are
+/// forwarded directly from the HTTPS dispatcher.
 pub async fn dispatch(
     registry:       &WebhookRegistry,
     route:          &WebhookRoute,
@@ -156,7 +135,7 @@ pub async fn dispatch(
 // │ HELPER UTILITIES (re-exported for app handlers)                           │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Percent-encode a string for use in application/x-www-form-urlencoded.
+/// Percent-encodes for `application/x-www-form-urlencoded`.
 pub fn url_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 2);
     for b in s.bytes() {
@@ -175,11 +154,8 @@ pub fn url_encode(s: &str) -> String {
     out
 }
 
-/// Extract a JSON string value for a given key within a text block.
-///
-/// Looks for `"key": "value"` and returns the value. Handles `null`
-/// as an empty string. No full JSON parser — just enough for extracting
-/// fields from webhook payloads.
+/// Looks for `"key": "value"` and returns the value, treating `null` as an empty
+/// string. No full JSON parser -- just enough for a webhook payload.
 pub fn extract_value(block: &str, key: &str) -> Option<String> {
     let key_pos = ok!(block.find(key));
     let after_key = &block[key_pos + key.len()..];
@@ -198,8 +174,7 @@ pub fn extract_value(block: &str, key: &str) -> Option<String> {
     }
 }
 
-/// Extract a JSON string value for `key` within a section starting at
-/// `section_key`.
+/// As `extract_value`, but only within the section starting at `section_key`.
 pub fn extract_json_string(json: &str, section_key: &str, key: &str) -> Option<String> {
     let section_start = ok!(json.find(section_key));
     let block = &json[section_start..json.len().min(section_start + 3000)];
@@ -265,38 +240,22 @@ pub fn extract_top_level_value(block: &str, key: &str) -> Option<String> {
 // │ STRIPE WEBHOOK SIGNATURE VERIFICATION                                     │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Default clock-skew tolerance, in seconds, for a Stripe webhook
-/// timestamp. Stripe's own libraries default to five minutes.
+// Stripe's own libraries default to five minutes.
 pub const STRIPE_SIG_TOLERANCE_SECS: u64 = 300;
 
-/// Verify a Stripe webhook signature.
+/// Stripe signs each webhook with the endpoint's signing secret (`whsec_...`)
+/// and sends the result in a `Stripe-Signature` header of the form
+/// `t=<unix_ts>,v1=<hex_hmac>[,v1=<hex_hmac>...]` -- there may be several `v1`
+/// schemes during a secret rotation, and other schemes such as `v0`, which are
+/// ignored. The signed payload is the ASCII string `"<t>.<raw request body>"`,
+/// and the tag is `HMAC-SHA256` of that payload under the signing secret, taken
+/// over the whole `whsec_...` string as configured.
 ///
-/// Stripe signs each webhook with the endpoint's signing secret
-/// (`whsec_...`) and sends the result in a `Stripe-Signature` header of
-/// the form `t=<unix_ts>,v1=<hex_hmac>[,v1=<hex_hmac>...]` (there may be
-/// several `v1` schemes during a secret rotation, and other schemes such
-/// as `v0` which we ignore). The signed payload is the ASCII string
-/// `"<t>.<raw request body>"`, and the tag is `HMAC-SHA256` of that
-/// payload under the signing secret.
-///
-/// Verification succeeds when the recomputed HMAC matches any supplied
-/// `v1` value (constant-time) **and** the timestamp is within
-/// `tolerance_secs` of `now_secs`. The current time is passed in rather
-/// than read from a clock so the check is deterministic and testable;
-/// callers supply the wall-clock Unix seconds.
-///
-/// # Arguments
-/// * `secret` -- the endpoint signing secret (the whole `whsec_...`
-///   string as configured; Stripe HMACs against these raw bytes).
-/// * `body` -- the exact raw request body bytes, unmodified.
-/// * `sig_header` -- the value of the incoming `Stripe-Signature` header.
-/// * `now_secs` -- the current time as Unix seconds.
-/// * `tolerance_secs` -- the maximum allowed absolute difference between
-///   `now_secs` and the header timestamp (see [`STRIPE_SIG_TOLERANCE_SECS`]).
-///
-/// # Returns
-/// `Ok(())` when the signature is valid and fresh; otherwise a tagged
-/// error describing the failure (never the signing secret).
+/// Verification succeeds when the recomputed HMAC matches any supplied `v1`
+/// value, compared in constant time, **and** the timestamp is within
+/// `tolerance_secs` of `now_secs`. The current time is passed in rather than
+/// read from a clock, so the check is deterministic and testable. The error
+/// never carries the signing secret.
 pub fn verify_stripe_signature(
     secret:         &str,
     body:           &[u8],
@@ -380,8 +339,7 @@ pub fn verify_stripe_signature(
         Invalid, Input, Security))
 }
 
-/// Decode a lowercase or uppercase hex string into bytes. Returns
-/// `None` on odd length or a non-hex character.
+/// `None` on an odd length or a non-hex character.
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
     let bytes = s.as_bytes();
     if bytes.len() % 2 != 0 {
@@ -412,7 +370,6 @@ mod tests {
     use super::*;
     use oxedyne_fe2o3_net::hmac::hmac_sha256;
 
-    /// Hex-encode bytes for building a synthetic Stripe-Signature.
     fn hex_encode(bytes: &[u8]) -> String {
         let mut out = String::with_capacity(bytes.len() * 2);
         for b in bytes {
@@ -447,7 +404,6 @@ mod tests {
         assert_eq!(extract_top_level_value(valueish, "\"type\""), Some(fmt!("real")));
     }
 
-    /// Build a valid Stripe-Signature header for a body at time `t`.
     fn sign(secret: &str, body: &[u8], t: u64) -> String {
         let mut signed = Vec::new();
         signed.extend_from_slice(t.to_string().as_bytes());

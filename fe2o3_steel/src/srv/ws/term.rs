@@ -34,6 +34,9 @@
 //!
 //! This is the only place in the crate that reaches for `nix`, which is why it
 //! is the whole of the Windows task for the server.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_jdat::{
@@ -66,19 +69,14 @@ use tokio::{
 
 /// Manages terminal sessions via tmux.
 ///
-/// All management methods are synchronous because they are called
-/// from the sync `handle_text` WS handler.  The tmux CLI calls are
-/// quick (list/create/kill sessions) so blocking briefly is
-/// acceptable.
-///
-/// The terminal I/O bridge (`handle_terminal_websocket`) is async
-/// and runs in a separate WS connection.
+/// All management methods are synchronous because they are called from the sync
+/// `handle_text` WS handler. The tmux CLI calls are quick, so blocking briefly
+/// is acceptable. The terminal I/O bridge (`handle_terminal_websocket`) is
+/// async and runs on a separate WS connection.
 #[derive(Clone, Debug)]
 pub struct TerminalManager {
-    /// Prefix for tmux session names (e.g. "goose-").
-    session_prefix:   String,
-    /// Command to launch in new sessions (e.g. "goose session").
-    launch_command:   String,
+    session_prefix:   String,   // e.g. "goose-"
+    launch_command:   String,   // e.g. "goose session"
 }
 
 impl TerminalManager {
@@ -90,8 +88,7 @@ impl TerminalManager {
         }
     }
 
-    /// Create a new tmux session running the launch command.
-    /// Returns the session name (e.g. "goose-3").
+    /// Runs the launch command in a new tmux session, named like "goose-3".
     pub fn new_session(&self) -> Outcome<String> {
         let max = ok!(self.list_session_nums()).iter().max().copied().unwrap_or(0);
         let name = fmt!("{}{}", self.session_prefix, max + 1);
@@ -110,8 +107,7 @@ impl TerminalManager {
         Ok(name)
     }
 
-    /// List active tmux sessions with our prefix.
-    /// Returns a JDAT map: { "sessions": [{ "name": "goose-1" }, ...] }
+    /// The JDAT map is `{ "sessions": [{ "name": "goose-1" }, ...] }`.
     pub fn list_sessions_dat(&self) -> Outcome<Dat> {
         let names = res!(self.list_session_names());
         let mut arr = Vec::new();
@@ -125,7 +121,6 @@ impl TerminalManager {
         Ok(Dat::Map(out))
     }
 
-    /// Close (kill) a tmux session by name.
     pub fn close_session(&self, name: &str) -> Outcome<()> {
         let status = res!(Command::new("tmux")
             .arg("kill-session")
@@ -140,7 +135,6 @@ impl TerminalManager {
         Ok(())
     }
 
-    /// Rename a tmux session.
     pub fn set_session_name(&self, old: &str, new: &str) -> Outcome<()> {
         let status = res!(Command::new("tmux")
             .arg("rename-session")
@@ -158,7 +152,6 @@ impl TerminalManager {
 
     // ── Internal helpers ──────────────────────────────────────
 
-    /// List tmux session names matching our prefix.
     fn list_session_names(&self) -> Outcome<Vec<String>> {
         let output = match Command::new("tmux")
             .arg("list-sessions")
@@ -180,7 +173,6 @@ impl TerminalManager {
         Ok(names)
     }
 
-    /// List session numbers (e.g. [1, 2, 3] for goose-1, goose-2, goose-3).
     fn list_session_nums(&self) -> Outcome<Vec<u32>> {
         let names = res!(self.list_session_names());
         let nums: Vec<u32> = names
@@ -199,17 +191,16 @@ impl TerminalManager {
 // │ Terminal I/O bridge — PTY ↔ WebSocket                         │
 // └───────────────────────────────────────────────────────────────┘
 
-/// Bridge a WebSocket connection to a tmux session via a PTY.
+/// Bridges a WebSocket connection to a tmux session via a PTY.
 ///
-/// Creates a PTY pair, spawns `tmux attach -t <session>` with the
-/// slave end as stdin/stdout/stderr (so tmux sees a real terminal),
-/// and bridges bytes between the PTY master and the WebSocket:
+/// Creates a PTY pair, spawns `tmux attach -t <session>` with the slave end as
+/// stdin/stdout/stderr, so tmux sees a real terminal, and bridges bytes between
+/// the PTY master and the WebSocket: client keystrokes arrive as binary frames
+/// and are written to the master, and what the master reads is pushed back as
+/// binary frames.
 ///
-/// - Client keystrokes (binary WS) → PTY master write
-/// - PTY master read → terminal output (binary WS)
-///
-/// The tmux session persists after the WebSocket disconnects;
-/// reconnecting with the same session name reattaches.
+/// The tmux session persists after the WebSocket disconnects; reconnecting with
+/// the same session name reattaches.
 #[cfg(unix)]
 pub async fn handle_terminal_websocket<
     const UIDL: usize,

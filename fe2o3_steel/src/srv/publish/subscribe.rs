@@ -19,6 +19,9 @@
 //! address is on the list. And the reads mirror [`super::store`]: the emails live in one index under
 //! [`INDEX_KEY`], a subscriber under its own key, and nothing walks the whole database -- a token is
 //! matched by reading the index and a record per entry, the same cost a listing already pays.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::srv::publish::{
 	PublishConfig,
@@ -51,29 +54,21 @@ use std::sync::{
 };
 
 
-/// The key every subscriber's key begins with.
 pub const KEY_PREFIX: &str = "publish/subscriber/";
 
-/// The key the list of subscriber emails lives under.
 pub const INDEX_KEY: &str = "publish/subscribers";
 
-/// The longest an address the form will take may be.
-///
-/// A generous ceiling: the number is arbitrary, having one -- so a form cannot hand the store an
-/// unbounded key -- is not.
+// The longest an address the form will take may be. A generous ceiling: the number is arbitrary,
+// having one -- so a form cannot hand the store an unbounded key -- is not.
 pub const EMAIL_MAX: usize = 254;
 
-/// How many characters an opt-in token carries.
-///
-/// Drawn from [`TOKEN_ALPHABET`], so 32 characters of a 36-symbol alphabet is a little over 165 bits:
-/// far past guessing. The token is the only thing that confirms or unsubscribes an address, so it is
-/// the one field here that must be unguessable.
+// How many characters an opt-in token carries. Drawn from TOKEN_ALPHABET, so 32 characters of a
+// 36-symbol alphabet is a little over 165 bits: far past guessing. The token is the only thing
+// that confirms or unsubscribes an address, so it is the one field here that must be unguessable.
 pub const TOKEN_LEN: usize = 32;
 
-/// The alphabet an opt-in token is drawn from: lowercase letters and digits.
-///
-/// Deliberately URL-safe and needing no encoding, so the token sits in a `?token=` query and in a
-/// database key as itself, exactly as a slug's small alphabet does.
+// Deliberately URL-safe and needing no encoding, so the token sits in a `?token=` query and in a
+// database key as itself, exactly as a slug's small alphabet does.
 const TOKEN_ALPHABET: &str = "abcdefghijklmnopqrstuvwxyz0123456789";
 
 
@@ -87,16 +82,13 @@ const TOKEN_ALPHABET: &str = "abcdefghijklmnopqrstuvwxyz0123456789";
 /// it again.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum SubState {
-	/// Signed up, sent a confirmation link, not yet confirmed. Receives nothing but that one link.
 	#[default]
-	Pending,
-	/// Followed the confirmation link. The one state that receives the newsletter.
-	Confirmed,
-	/// Asked to stop. Kept as a record, so re-subscribing opts in afresh rather than resurrecting.
-	Unsubscribed,
-	/// Suppressed after a permanent delivery failure -- a 5xx, an unknown mailbox. Kept as a record and
-	/// never sent to again: a re-subscribe does not resurrect it, since the address bounced for a reason
-	/// no opt-in changes.
+	Pending,	// signed up and sent a confirmation link; receives nothing but that one link
+	Confirmed,	// followed the link; the one state that receives the newsletter
+	Unsubscribed,	// asked to stop; kept as a record, so re-subscribing opts in afresh
+	// Suppressed after a permanent delivery failure -- a 5xx, an unknown mailbox. Kept as a record
+	// and never sent to again: a re-subscribe does not resurrect it, since the address bounced for
+	// a reason no opt-in changes.
 	Bounced,
 }
 
@@ -129,14 +121,10 @@ impl SubState {
 /// One subscriber, as the store keeps them.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Subscriber {
-	/// The address, normalised: trimmed and lowercased, so one address is one row.
-	pub email:	String,
-	/// Where they are in the double opt-in.
-	pub state:	SubState,
-	/// The unguessable token that confirms or unsubscribes them. Minted fresh on each sign-up.
-	pub token:	String,
-	/// When they signed up, as an ISO timestamp, where it is known.
-	pub created:	Option<String>,
+	pub email:	String,		// normalised: trimmed and lowercased, so one address is one row
+	pub state:	SubState,	// where they are in the double opt-in
+	pub token:	String,		// unguessable, and minted fresh on each sign-up
+	pub created:	Option<String>,	// ISO timestamp, where it is known
 }
 
 impl Subscriber {
@@ -158,7 +146,6 @@ impl Subscriber {
 		Dat::Map(m)
 	}
 
-	/// The subscriber from a daticle.
 	pub fn from_dat(d: &Dat) -> Outcome<Self> {
 		let m = match d {
 			Dat::Map(m)	=> m,
@@ -192,7 +179,6 @@ impl Subscriber {
 }
 
 
-/// A subscriber's key.
 fn key_of(email: &str) -> Dat {
 	let mut s = String::from(KEY_PREFIX);
 	s.push_str(email);
@@ -249,15 +235,12 @@ pub fn mint_token() -> String {
 	Rand::generate_random_string(TOKEN_LEN, TOKEN_ALPHABET)
 }
 
-/// The name of the field no person fills in.
-///
-/// `website` because that is what a form-filler expects to find on a form, and filling it is the
-/// tell. The form must place it out of view without `display: none` or `hidden`, which the better
-/// form-fillers skip.
+// The name of the field no person fills in. `website`, because that is what a form-filler expects
+// to find on a form, and filling it is the tell. The form must place it out of view without
+// `display: none` or `hidden`, which the better form-fillers skip.
 pub const TRAP_FIELD: &str = "website";
 
-/// The key a sign-up's rate record lives under, kept apart from the comment counter.
-const RATE_PREFIX: &str = "publish/subscribe-rate/";
+const RATE_PREFIX: &str = "publish/subscribe-rate/";	// apart from the comment counter
 
 /// Whether a submission filled in the field no person sees.
 ///
@@ -281,7 +264,6 @@ fn from_hash(addr: &str, salt: &[u8]) -> String {
 // │ STORE                                                                     │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Reads one subscriber by address.
 pub fn get<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -328,7 +310,6 @@ fn put<
 	Ok(())
 }
 
-/// The index: every subscriber's address.
 fn index<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -363,7 +344,6 @@ fn index<
 	Ok(out)
 }
 
-/// Writes the index.
 fn put_index<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -569,17 +549,15 @@ pub fn add_pending<
 /// What a confirmation link found when it was followed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConfirmOutcome {
-	/// A pending subscriber was promoted to confirmed: the newsletter now reaches them.
-	Confirmed,
-	/// The token named a subscriber already confirmed. The safe, idempotent answer to a link followed
-	/// twice: they are on the list, said so, and nothing changed.
+	Confirmed,	// promoted from pending: the newsletter now reaches them
+	// The token named a subscriber already confirmed. The safe, idempotent answer to a link
+	// followed twice: they are on the list, said so, and nothing changed.
 	Already,
-	/// The token named nobody: it is malformed, expired by a re-subscribe that minted a new one, or
-	/// never existed.
+	// The token named nobody: it is malformed, expired by a re-subscribe that minted a new one, or
+	// never existed.
 	Unknown,
 }
 
-/// Promotes a pending subscriber to confirmed, by their token.
 pub fn confirm<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -611,10 +589,8 @@ pub fn confirm<
 /// What an unsubscribe link found when it was followed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UnsubOutcome {
-	/// A subscriber was set unsubscribed, or was already, so no more mail reaches them either way.
-	Done,
-	/// The token named nobody.
-	Unknown,
+	Done,		// set unsubscribed, or already was, so no more mail reaches them either way
+	Unknown,	// the token named nobody
 }
 
 /// Sets a subscriber unsubscribed, by their token.

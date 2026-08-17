@@ -23,6 +23,9 @@
 //! even though both are sealed under the same key. The credential opens the
 //! console -- the site's content -- and carries no operator scope: it can never
 //! stand in for an `/admin` session.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::srv::admin::{
 	session::now_secs,
@@ -40,26 +43,17 @@ use oxedyne_fe2o3_text::base2x;
 
 use std::sync::Arc;
 
-/// Name of the cookie carrying a signed site-admin session.
-///
-/// Distinct from the operator session cookie so neither can ever be presented
-/// where the other is expected.
+// Distinct from the operator session cookie, so neither can ever be presented where the other is
+// expected. The lifetime matches the operator session's default.
 pub const MANAGE_COOKIE_NAME: &str = "manage_session";
-
-/// How long a site-admin session lives before it must be re-established, in
-/// seconds. Matches the operator session's default lifetime.
 pub const MANAGE_SESSION_TTL_SECS: u64 = 30 * 60;
+pub const MANAGE_FORMAT_VERSION: &str = "m1";	// bump on an incompatible record layout
 
-/// Wire-format version prefix. Bumped when the record layout changes
-/// incompatibly.
-pub const MANAGE_FORMAT_VERSION: &str = "m1";
-
-/// The record's leading tag, so a blob from any other use of the same session
-/// key cannot be mistaken for a site-admin session.
+// The record's leading tag, so a blob from any other use of the same session key cannot be
+// mistaken for a site-admin session.
 const KIND_TAG: &[u8] = b"steel-site-admin-v1";
 
-/// The greatest admin-name length the record will carry, in bytes.
-const MAX_NAME_LEN: usize = 64;
+const MAX_NAME_LEN: usize = 64;			// bytes
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ ENCODE                                                                    │
@@ -78,8 +72,6 @@ pub fn encode(state: &AdminState, name: &str) -> Outcome<String> {
 	Ok(fmt!("{}.{}", MANAGE_FORMAT_VERSION, blob))
 }
 
-/// Serialise the tagged, length-prefixed plaintext record: the kind tag, the
-/// name, and the expiry.
 fn encode_record(name: &str) -> Outcome<Vec<u8>> {
 	let nb = name.as_bytes();
 	if nb.len() > MAX_NAME_LEN {
@@ -126,8 +118,7 @@ pub fn decode(state: &AdminState, cookie: &str) -> Outcome<String> {
 	decode_record(&plain)
 }
 
-/// Parse the tagged, length-prefixed plaintext record back into the admin's
-/// name, refusing an expired record.
+/// Refuses an expired record.
 fn decode_record(bytes: &[u8]) -> Outcome<String> {
 	// The tag first: a record that does not open with it is not a site-admin
 	// session, whatever else it might decrypt to.
@@ -235,7 +226,6 @@ mod tests {
 		sync::RwLock,
 	};
 
-	/// An unsealed admin state, mirroring the one the session tests use.
 	fn mkstate() -> AdminState {
 		AdminState::new(
 			Arc::new(RwLock::new(Wallet::default())),

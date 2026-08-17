@@ -1,3 +1,6 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 /// API handler infrastructure.
 ///
 /// Mirrors the webhook handler pattern but for general-purpose API
@@ -35,34 +38,14 @@ use tokio_rustls::rustls::ClientConfig;
 // │ API HANDLER TRAIT                                                         │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Trait for handling incoming API requests.
+/// Apps implement this trait for each custom API endpoint they need -- a
+/// checkout builder that validates a cart and proxies to a payment provider, a
+/// geolocation lookup -- and register instances via an `AppExtension` before
+/// starting Steel.
 ///
-/// Apps implement this trait for each custom API endpoint they need
-/// -- for example a checkout builder that validates a cart and
-/// proxies to a payment provider, or a geolocation lookup -- and
-/// register instances via an `AppExtension` before starting Steel.
-///
-/// The handler receives the full incoming request so it can inspect
-/// method, query string, headers and body, and must always return a
-/// response.
+/// The handler receives the full incoming request, so it can inspect method,
+/// query string, headers and body, and must always return a response.
 pub trait ApiHandler: Send + Sync + 'static {
-    /// Handle an incoming API request and return an HTTP response.
-    ///
-    /// # Arguments
-    /// * `route`       -- the matched API route config (path,
-    ///                    handler name, resolved handler-config
-    ///                    key-value pairs).
-    /// * `method`      -- the HTTP method of the incoming request.
-    /// * `loc`         -- the parsed request location (path, query
-    ///                    string, parsed fields).
-    /// * `body`        -- the raw request body bytes.
-    /// * `req_headers` -- the incoming request header fields, so
-    ///                    handlers can inspect values like
-    ///                    `Accept-Language`, `User-Agent`,
-    ///                    `Authorization`, or custom headers.
-    /// * `tls_client`  -- shared TLS client config for outbound
-    ///                    HTTPS calls the handler may need to make.
-    /// * `id`          -- connection identifier for logging.
     fn handle<'a>(
         &'a self,
         route:          &'a ApiRoute,
@@ -80,44 +63,35 @@ pub trait ApiHandler: Send + Sync + 'static {
 // │ API HANDLER REGISTRY                                                      │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// A registry mapping handler names (from config) to API handler
-/// implementations.
-///
-/// Built by the app, usually via an `AppExtension::api_handlers`
-/// return value, before server startup. Stock Steel starts with an
-/// empty registry.
+/// Maps handler names, as written in config, to API handler implementations.
+/// Built by the app, usually from `AppExtension::api_handlers`, before server
+/// startup. Stock Steel starts with an empty registry.
 #[derive(Default)]
 pub struct ApiHandlerRegistry {
     handlers: HashMap<String, Box<dyn ApiHandler>>,
 }
 
 impl ApiHandlerRegistry {
-    /// Create an empty registry.
     pub fn new() -> Self {
         Self {
             handlers: HashMap::new(),
         }
     }
 
-    /// Register a handler under the given name.
-    ///
-    /// The name must match the `handler` field in the corresponding
-    /// `api_routes` entry of `config.jdat`.
+    /// The name must match the `handler` field in the corresponding `api_routes`
+    /// entry of `config.jdat`.
     pub fn register<H: ApiHandler>(&mut self, name: &str, handler: H) {
         self.handlers.insert(name.to_string(), Box::new(handler));
     }
 
-    /// Insert a handler already boxed (used by `AppExtension` wiring).
     pub fn insert_boxed(&mut self, name: String, handler: Box<dyn ApiHandler>) {
         self.handlers.insert(name, handler);
     }
 
-    /// Returns `true` if a handler is registered for the given name.
     pub fn has(&self, name: &str) -> bool {
         self.handlers.contains_key(name)
     }
 
-    /// Look up a handler by name.
     pub fn get(&self, name: &str) -> Option<&dyn ApiHandler> {
         self.handlers.get(name).map(|b| b.as_ref())
     }
@@ -137,12 +111,9 @@ impl std::fmt::Debug for ApiHandlerRegistry {
 // │ DISPATCH                                                                  │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Dispatch an incoming API request to the appropriate registered
-/// handler.
-///
-/// Called from the HTTPS server when an `ApiRoute` has its `handler`
-/// field set (meaning the route should be served by an in-process
-/// handler rather than proxied to a remote upstream).
+/// Called from the HTTPS server when an `ApiRoute` has its `handler` field set,
+/// meaning the route is served by an in-process handler rather than proxied to a
+/// remote upstream.
 pub async fn dispatch(
     registry:       &ApiHandlerRegistry,
     route:          &ApiRoute,

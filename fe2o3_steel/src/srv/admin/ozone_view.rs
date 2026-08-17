@@ -19,6 +19,9 @@
 //! request must carry a valid session cookie whose principal
 //! holds either `dashboard.view` or `dashboard.admin`. Failures
 //! 303-redirect to `/admin/login`.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::srv::admin::{
     AdminPrincipal,
@@ -60,48 +63,37 @@ use std::sync::{
     RwLock,
 };
 
-/// Default cap on the number of keys returned by a single list
-/// request. Bounds the wire response when the operator does not
-/// supply an explicit `?limit=` parameter.
-pub const DEFAULT_LIST_LIMIT: usize = 500;
-
-/// Hard upper bound on the limit the operator can request. Stops
-/// a malicious or accidental `?limit=999999999` from materialising
-/// the whole database into memory at once.
-pub const MAX_LIST_LIMIT: usize = 5_000;
+// The default bounds the wire response when the operator supplies no explicit
+// `?limit=`; the maximum stops a malicious or accidental `?limit=999999999`
+// from materialising the whole database into memory at once.
+pub const DEFAULT_LIST_LIMIT:   usize = 500;
+pub const MAX_LIST_LIMIT:       usize = 5_000;
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ QUERY AND DETAIL STATE                                                    │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Parsed query string: scan options plus optional detail selector.
 struct ListQuery {
-    /// Scan parameters forwarded to `Database::scan`.
-    scan:   ScanOpts,
-    /// Key to fetch for the detail panel, if `?key=` was supplied.
-    detail: Option<String>,
+    scan:   ScanOpts,           // forwarded to `Database::scan`
+    detail: Option<String>,     // key to fetch for the detail panel, from `?key=`
 }
 
-/// Non-generic snapshot of one key's detail, produced inside the
-/// generic `handle_get` and passed to the non-generic renderer.
+/// Non-generic snapshot of one key's detail, produced inside the generic
+/// `handle_get` and passed to the non-generic renderer.
 struct DetailView {
-    /// The key string that was requested.
     key:     String,
-    /// Fetch outcome rendered verbatim into the detail panel.
-    outcome: DetailOutcome,
+    outcome: DetailOutcome,     // rendered verbatim into the detail panel
 }
 
 enum DetailOutcome {
-    /// `Database::get` returned `Some` -- render value + meta.
     Found {
         value_jdat: String,
         meta_time:  u64,
         meta_user:  String,
     },
-    /// `Database::get` returned `None`.
     Missing,
-    /// `Database::get` returned `Err`. The structural error itself
-    /// is logged; only a short user-facing message is shown.
+    // The structural error itself is logged; only a short user-facing message
+    // reaches the page.
     Error(String),
 }
 
@@ -109,14 +101,9 @@ enum DetailOutcome {
 // │ GET                                                                       │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Dispatch a `GET` request against an `/admin/database*` path.
-///
-/// Generic over the database scheme so this function can run
-/// against whatever ozone configuration the caller's vhost
-/// happens to use. The trait bound is `Database<UIDL, UID, ENC, KH>`
-/// so the call sites in `app/https.rs` (which already carry these
-/// generics through `WebHandler::handle_get`) can pass `_db`
-/// straight in.
+/// Generic over the database scheme, so the call sites in `app/https.rs` --
+/// which already carry these generics through `WebHandler::handle_get` -- can
+/// pass `_db` straight in.
 pub async fn handle_get<
     const UIDL: usize,
     UID:    NumIdDat<UIDL>,
@@ -223,10 +210,8 @@ pub async fn handle_get<
 // │ QUERY PARSING                                                             │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Parse the query string of a list request into a [`ListQuery`].
-/// Recognises `prefix=<str>`, `limit=<u32>`, and `key=<str>` for
-/// the detail panel. Unknown keys are ignored; malformed limits
-/// fall back to the default.
+/// Recognises `prefix=<str>`, `limit=<u32>` and `key=<str>`. Unknown keys are
+/// ignored; a malformed limit falls back to the default.
 fn parse_query(query: &str) -> ListQuery {
     let mut scan = ScanOpts::default();
     scan.limit = Some(DEFAULT_LIST_LIMIT);
@@ -266,12 +251,10 @@ fn parse_query(query: &str) -> ListQuery {
 // │ RENDER                                                                    │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Render the key list plus an optional detail panel.
-///
-/// Each row in the key table is a link to `?prefix=...&limit=...
-/// &key=<urlencoded>` so clicking a key refreshes the same page
-/// with the detail panel populated. The prefix and limit inputs
-/// are preserved so the list context survives a selection.
+/// Each row in the key table links to `?prefix=...&limit=...&key=<urlencoded>`,
+/// so clicking a key refreshes the same page with the detail panel populated.
+/// The prefix and limit inputs are preserved, so the list context survives a
+/// selection.
 fn render_list_page(
     principal: &AdminPrincipal,
     parsed:    &ListQuery,
@@ -338,8 +321,6 @@ fn render_list_page(
     html_response(html)
 }
 
-/// Render the key list table. Each row is a link back to the
-/// list view carrying the selected key in the query string.
 fn render_key_table(
     keys:         &[Dat],
     prefix_raw:   &str,
@@ -384,7 +365,6 @@ fn render_key_table(
     )
 }
 
-/// Render the right-hand detail panel for a selected key.
 fn render_detail_panel(d: &DetailView) -> String {
     match &d.outcome {
         DetailOutcome::Found { value_jdat, meta_time, meta_user } => fmt!(
@@ -420,15 +400,12 @@ fn render_detail_panel(d: &DetailView) -> String {
     }
 }
 
-/// Render the placeholder shown when no key has been selected yet.
 fn render_detail_placeholder() -> String {
     "<h3>Selected key</h3>\n\
     <p class=\"notice empty\">Pick a key from the list to see its \
     value and metadata.</p>\n".to_string()
 }
 
-/// Render the empty-state page returned when this vhost has no
-/// configured ozone database (typical for pure-redirect vhosts).
 fn render_no_db_page(principal: &AdminPrincipal) -> HttpMessage {
     let body = fmt!(
         "<h1><span class=\"heading-logo\">{}</span>Database</h1>\n\
@@ -449,9 +426,8 @@ fn render_no_db_page(principal: &AdminPrincipal) -> HttpMessage {
     html_response(html)
 }
 
-/// Render the error page returned when scan itself fails. Keeps
-/// the structural error out of the response body; the operator
-/// reads the server log for the underlying cause.
+/// Keeps the structural error out of the response body; the operator reads the
+/// server log for the underlying cause.
 fn render_error_page(principal: &AdminPrincipal, message: &str) -> HttpMessage {
     let body = fmt!(
         "<h1><span class=\"heading-logo\">{}</span>Database</h1>\n\
@@ -469,9 +445,6 @@ fn render_error_page(principal: &AdminPrincipal, message: &str) -> HttpMessage {
     html_response(html)
 }
 
-/// Build a 200 OK HTML response. Mirrors the helper in
-/// `handler.rs`; copied locally so each render module can build
-/// responses without re-importing the same helper.
 fn html_response(body: String) -> HttpMessage {
     HttpMessage::new_response(HttpStatus::OK)
         .with_field(
@@ -485,9 +458,8 @@ fn html_response(body: String) -> HttpMessage {
 // │ HELPERS                                                                   │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// URL-encode a string for use in a query parameter. Percent-
-/// escapes every byte that is not an unreserved ASCII character
-/// per RFC 3986 section 2.3.
+/// Percent-escapes every byte that is not an unreserved ASCII character, per
+/// RFC 3986 section 2.3.
 fn url_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.as_bytes().iter() {
@@ -500,7 +472,6 @@ fn url_encode(s: &str) -> String {
     out
 }
 
-/// URL-decode a query parameter value.
 fn url_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());

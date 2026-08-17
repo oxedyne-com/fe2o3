@@ -22,6 +22,9 @@
 //!
 //! Unix only. Windows has no `kill` and no signals; the three console events the
 //! same listener answers there cannot be sent from here.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 #![cfg(unix)]
 
@@ -72,20 +75,15 @@ use std::{
 
 use secrecy::ExposeSecret;
 
-/// The wallet passphrase, in the clear and on purpose.
-///
-/// It protects a wallet that exists for a few seconds in a scratch directory and
-/// holds one key to one empty database. The rig beside this one says the same
-/// thing for the same reason.
+// The wallet passphrase, in the clear and on purpose: it protects a wallet that exists for a few
+// seconds in a scratch directory and holds one key to one empty database. The rig beside this one
+// says the same thing for the same reason.
 const PASS: &str = "steel-stop-test-passphrase-not-a-secret"; // allowlist secret
 
-/// The app name, and so the stem of every log file the fixture writes.
 const APP: &str = "stopsig";
 
-/// How long to wait for the server to bind and open its database.
 const START_SECS: u64 = 120;
 
-/// How long to wait for it to go once it has been asked.
 const STOP_SECS: u64 = 120;
 
 /// Where a fixture goes.
@@ -114,7 +112,6 @@ fn free_port() -> Outcome<u16> {
     Ok(port)
 }
 
-/// Whether anything is listening on a port of this machine.
 fn in_use(port: u16) -> bool {
     TcpStream::connect_timeout(
         &SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
@@ -271,7 +268,6 @@ fn send(signal: &str, child: &Child) -> Outcome<()> {
     Ok(())
 }
 
-/// Waits for the child to end, and says what it ended as.
 fn wait_for_end(child: &mut Child) -> Outcome<ExitStatus> {
     let began = Instant::now();
     while began.elapsed() < Duration::from_secs(STOP_SECS) {

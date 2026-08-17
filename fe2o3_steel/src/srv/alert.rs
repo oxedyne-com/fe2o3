@@ -25,6 +25,9 @@
 //! from health. That is why the alert is addressed *off* the network -- an
 //! external mailbox at least survives the host -- and why alerting is a
 //! complement to external monitoring, not a substitute for it.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::srv::cfg::AlertConfig;
 
@@ -62,75 +65,58 @@ use std::{
 /// Something worth waking an operator for.
 #[derive(Clone, Debug)]
 pub enum AlertEvent {
-    /// Steel started with databases configured but no master key, so
-    /// DB-backed routes are answering 503 until somebody unseals.
-    ///
-    /// The one that matters most: the websites are up, so nothing else
-    /// looks wrong, and without this the operator learns about it from a
-    /// user complaint.
+    // Started with databases configured but no master key, so DB-backed routes
+    // answer 503 until somebody unseals. The one that matters most: the
+    // websites are up, so nothing else looks wrong, and without this the
+    // operator learns about it from a user complaint.
     SealedStart {
-        /// Databases waiting on the key.
-        db_count: usize,
+        db_count: usize,        // databases waiting on the key
     },
-    /// An admin lifted the seal. Rare by construction, and the audit trail
-    /// an operator wants: who, when, from where.
+    // Rare by construction, and the audit trail an operator wants: who, when,
+    // from where.
     Unsealed {
         admin: String,
         peer:  SocketAddr,
     },
-    /// Repeated failures to unwrap the wallet at the dashboard login.
-    ///
-    /// Coalesced: one message per burst, not one per attempt. The login
-    /// form unseals, so it is worth guessing at, and an alerter that sent
-    /// a message per guess would be an amplifier pointed at the operator's
-    /// mailbox.
+    // Repeated failures to unwrap the wallet at the dashboard login, coalesced
+    // into one message per burst rather than one per attempt. The login form
+    // unseals, so it is worth guessing at, and an alerter that sent a message
+    // per guess would be an amplifier pointed at the operator's mailbox.
     FailedUnseals {
         count:       u32,
         window_secs: u64,
         last_peer:   SocketAddr,
     },
-    /// Another machine in the estate stopped answering.
-    ///
-    /// The one event this host can raise about somebody else, and the reason
-    /// [`crate::srv::watch`] exists: a dead machine sends nothing, so the alarm
-    /// has to come from a live one.
+    // The one event this host can raise about somebody else, and the reason
+    // crate::srv::watch exists: a dead machine sends nothing, so the alarm has
+    // to come from a live one.
     PeerDown {
-        /// The peer's name, as configured.
-        peer:       String,
-        /// What was probed.
-        url:        String,
-        /// Consecutive failed probes.
-        failures:   u32,
-        /// How long it has been failing.
+        peer:       String,     // as configured
+        url:        String,     // what was probed
+        failures:   u32,        // consecutive failed probes
         down_secs:  u64,
-        /// Which machine noticed. Two watchers see one outage and send two
-        /// messages; without this they read as one message sent twice.
+        // Which machine noticed. Two watchers see one outage and send two
+        // messages; without this they read as one message sent twice.
         noticed_by: String,
     },
-    /// A machine that was down is answering again.
-    ///
-    /// Sent because an operator who was woken is owed the end of the story, and
-    /// because a recovery nobody announced is one somebody drives to the office
-    /// for.
+    // Sent because an operator who was woken is owed the end of the story, and
+    // because a recovery nobody announced is one somebody drives to the office
+    // for.
     PeerRecovered {
         peer:       String,
         url:        String,
-        /// How long it was away.
         away_secs:  u64,
         noticed_by: String,
     },
-    /// Proof that the alerting path itself still works.
-    ///
-    /// **The point of this event is that it is boring.** A path used twice a
-    /// year is broken when it is needed -- an expired credential, a rotated
-    /// key, a changed number, a dormant account -- and it is discovered during
-    /// the incident. This exercises every leg on a schedule, so the failure is
-    /// found on an ordinary afternoon instead.
+    // Proof that the alerting path itself still works, and the point of it is
+    // that it is boring. A path used twice a year is broken when it is needed
+    // -- an expired credential, a rotated key, a changed number, a dormant
+    // account -- and it is discovered during the incident. This exercises every
+    // leg on a schedule, so the failure is found on an ordinary afternoon
+    // instead.
     Heartbeat {
-        /// How long this node has been up.
         uptime_secs: u64,
-        /// How many peers it is watching, and how many are answering.
-        peers_ok:    usize,
+        peers_ok:    usize,     // of `peers_total`, how many are answering
         peers_total: usize,
     },
 }
@@ -144,16 +130,11 @@ pub enum AlertEvent {
 /// makes for keeping the event set small.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Severity {
-    /// Worth interrupting a person for. Every channel, including the ones that
-    /// cost money and wake somebody.
-    Critical,
-    /// Worth a record. Mail only.
-    Notice,
+    Critical,   // every channel, including the ones that cost money and wake somebody
+    Notice,     // worth a record; mail only
 }
 
 impl AlertEvent {
-    /// How loudly this event should be delivered. See [`Severity`].
-    ///
     /// A peer going down is the only thing here that reaches a phone, plus the
     /// heartbeat that proves a phone still can be reached. Everything else is
     /// about this machine, and this machine can only report it while it is
@@ -172,17 +153,12 @@ impl AlertEvent {
     /// The whole event in one line, for a channel that has no subject and no
     /// body and charges by the segment.
     ///
-    /// Written separately rather than trimmed from [`Self::body`], because a
-    /// text message is read on a lock screen in the dark: it leads with the
-    /// machine and the verdict, and every word after that is optional.
-    /// The whole event in one line, for a channel that has no subject and no
-    /// body and charges by the segment.
-    ///
-    /// BLUNT ON PURPOSE. This is read on a lock screen in the dark, by somebody
-    /// who wants to know whether to get up. How long it has been down, which
-    /// machine noticed and what was probed are all in the email, which costs
-    /// nothing to make longer; here they are noise in front of the one word
-    /// that matters.
+    /// Blunt on purpose, and written separately rather than trimmed from
+    /// [`Self::body`]. It is read on a lock screen in the dark by somebody who
+    /// wants to know whether to get up, so it leads with the machine and the
+    /// verdict. How long it has been down, which machine noticed and what was
+    /// probed are all in the email, which costs nothing to make longer; here
+    /// they are noise in front of the one word that matters.
     pub fn short(&self, host: &str) -> String {
         match self {
             Self::PeerDown { peer, .. }         => fmt!("{} is DOWN", peer),
@@ -288,15 +264,10 @@ impl AlertEvent {
 /// Coalescing state for failed passphrase attempts.
 #[derive(Debug)]
 struct FailureWindow {
-    /// Failures counted since the window opened.
-    count:  u32,
-    /// When the first uncounted failure arrived.
-    opened: Instant,
-    /// Most recent source.
+    count:  u32,                 // failures since the window opened
+    opened: Instant,             // when the first uncounted failure arrived
     last:   Option<SocketAddr>,
-    /// When an alert was last sent, so a persistent attacker does not
-    /// produce a persistent stream of email.
-    sent:   Option<Instant>,
+    sent:   Option<Instant>,     // so a persistent attacker is not a stream of email
 }
 
 /// Sends [`AlertEvent`]s by email.
@@ -306,24 +277,21 @@ struct FailureWindow {
 pub struct Alerter {
     cfg:     Arc<AlertConfig>,
     client:  Arc<OutboundClient>,
-    /// Where to post, when posting through a provider rather than delivering
-    /// straight to the recipient's MX. Built once, at start-up.
+    // Where to post, when posting through a provider rather than delivering
+    // straight to the recipient's MX. Built once, at start-up.
     submission: Option<Arc<SubmissionConfig>>,
-    /// DKIM identities to sign the alert with, when the host is configured to
-    /// sign its mail at all.
-    ///
-    /// An unsigned message from a domain that signs everything else is exactly
-    /// what a spam filter is entitled to distrust -- and the alert is the one
-    /// message that has to arrive. The alerter posts straight through the SMTP
-    /// client rather than through the mail handler, so it has to sign for
-    /// itself.
+    // DKIM identities to sign the alert with, when the host is configured to
+    // sign its mail at all. An unsigned message from a domain that signs
+    // everything else is exactly what a spam filter is entitled to distrust --
+    // and the alert is the one message that has to arrive. The alerter posts
+    // straight through the SMTP client rather than through the mail handler, so
+    // it has to sign for itself.
     dkim:       Vec<Arc<DkimSigner>>,
-    /// Public hostname, used in subject lines and in the `/admin` link.
-    host:    Arc<String>,
+    host:    Arc<String>,   // public, used in subject lines and the `/admin` link
     failures: Arc<Mutex<FailureWindow>>,
-    /// Outbound TLS, for the SMS gateway. Absent on a host with no outbound
-    /// client, in which case the mail leg still works and the text leg says so
-    /// rather than failing silently.
+    // Outbound TLS, for the SMS gateway. Absent on a host with no outbound
+    // client, in which case the mail leg still works and the text leg says so
+    // rather than failing silently.
     tls:     Option<Arc<ClientConfig>>,
 }
 

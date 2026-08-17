@@ -11,6 +11,9 @@
 //! rate-limiting and blacklist transitions. Counters are therefore
 //! updated on the hot path under a short write lock; snapshots for
 //! the dashboard copy out once under a read lock.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -33,139 +36,88 @@ use std::{
     },
 };
 
-/// Default ring buffer capacity -- 10k entries, roughly 1-2 MiB of
-/// live memory at typical sizes. Tunable via `AdminConfig` once the
-/// admin config block lands.
-pub const DEFAULT_RING_CAPACITY: usize = 10_000;
-
-/// Upper bound on the number of distinct paths a single vhost may
-/// keep individual counters for. Beyond this, further paths fold
-/// into a single `_other` bucket. Bounds worst-case memory when a
-/// caller probes unique URLs.
-pub const MAX_PATHS_PER_VHOST: usize = 256;
-
-/// Bucket name used when a vhost's distinct-path count exceeds
-/// `MAX_PATHS_PER_VHOST`.
-pub const OTHER_PATH_BUCKET: &str = "_other";
-
-/// Default number of periodic samples the sampler keeps. At the
-/// default sample interval this works out to one hour of history.
-pub const DEFAULT_HISTORY_CAPACITY: usize = 720;
-
-/// Default interval between counter samples. Five seconds is a
-/// reasonable trade-off between chart smoothness and CPU cost on
-/// a quiet host.
+pub const DEFAULT_RING_CAPACITY:        usize = 10_000; // roughly 1-2 MiB live
+// Past this many distinct paths, a vhost's further paths fold into the
+// `_other` bucket, bounding worst-case memory when a caller probes unique URLs.
+pub const MAX_PATHS_PER_VHOST:          usize = 256;
+pub const OTHER_PATH_BUCKET:            &str = "_other";
+// At the default sample interval the history spans one hour. Five seconds
+// trades chart smoothness against CPU cost on a quiet host.
+pub const DEFAULT_HISTORY_CAPACITY:     usize = 720;
 pub const DEFAULT_SAMPLE_INTERVAL_SECS: u64 = 5;
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ REQUEST RECORD                                                            │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Snapshot of a single request as it leaves the handler pipeline.
-///
-/// All fields owned so the record can outlive the request without
-/// keeping borrows alive.
+/// Snapshot of a single request as it leaves the handler pipeline. All fields
+/// are owned, so the record can outlive the request without keeping borrows
+/// alive.
 #[derive(Clone, Debug)]
 pub struct RequestRecord {
-    /// Unix nanoseconds at which the request completed.
-    pub when_ns:        u64,
-    /// Vhost the request was routed to. Lowercased hostname,
-    /// matches the key used in `ServerContext::vhost_dbs`.
-    pub vhost:          String,
-    /// HTTP method ("GET", "POST", ...).
+    pub when_ns:        u64,            // unix nanoseconds at completion
+    pub vhost:          String,         // lowercased hostname, as keyed in vhost_dbs
     pub method:         String,
-    /// Request path, including query string.
-    pub path:           String,
-    /// Final response status code.
+    pub path:           String,         // includes the query string
     pub status:         u16,
-    /// Remote peer's IP address and port as a string.
-    pub peer:           String,
-    /// Response body length in bytes, if known.
-    pub bytes:          Option<u64>,
-    /// Wall-clock duration from accept to final write, in
-    /// microseconds.
-    pub duration_us:    u64,
+    pub peer:           String,         // IP and port
+    pub bytes:          Option<u64>,    // response body length, when known
+    pub duration_us:    u64,            // accept to final write, microseconds
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ COUNTERS                                                                  │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Per-vhost counters, aggregated since the recorder was created
-/// (i.e. since Steel started). Counts never decrement, so these
-/// are suitable for rate-of-change computation by the dashboard
-/// (sample-then-subtract across two fetches).
+/// Per-vhost counters, aggregated since the recorder was created, i.e. since
+/// Steel started. Counts never decrement, so the dashboard can compute a rate
+/// of change by sampling and subtracting across two fetches.
 #[derive(Clone, Debug, Default)]
 pub struct VhostCounters {
-    /// Total requests that hit this vhost.
     pub total:      u64,
-    /// Per-status breakdown: `{200 => 1234, 404 => 12, ...}`.
-    pub by_status:  HashMap<u16, u64>,
-    /// Per-path breakdown, capped at [`MAX_PATHS_PER_VHOST`]
-    /// entries. Overflow folds into [`OTHER_PATH_BUCKET`].
-    pub by_path:    HashMap<String, u64>,
+    pub by_status:  HashMap<u16, u64>,      // `{200 => 1234, 404 => 12, ...}`
+    pub by_path:    HashMap<String, u64>,   // capped, overflow into `_other`
 }
 
-/// Snapshot of counter state at a moment in time. Returned by
-/// [`TrafficRecorder::counters_snapshot`].
 #[derive(Clone, Debug, Default)]
 pub struct CountersSnapshot {
-    /// Total requests across every vhost.
     pub total:      u64,
-    /// Overall per-status breakdown.
     pub by_status:  HashMap<u16, u64>,
-    /// Per-vhost counters.
     pub by_vhost:   HashMap<String, VhostCounters>,
 }
 
-/// One point in the bounded traffic history. Captures the
-/// monotonic totals at a particular unix second so the dashboard
-/// can compute deltas between adjacent samples and draw a
-/// requests-per-interval chart.
+/// One point in the bounded traffic history: the monotonic totals at a
+/// particular unix second, so the dashboard can difference adjacent samples and
+/// draw a requests-per-interval chart.
 #[derive(Clone, Debug)]
 pub struct TrafficSample {
-    /// Unix seconds at which the sample was taken.
-    pub when_secs:  u64,
-    /// Cumulative total requests across every vhost.
-    pub total:      u64,
-    /// Cumulative per-status breakdown at this instant.
-    pub by_status:  HashMap<u16, u64>,
+    pub when_secs:  u64,                // unix seconds
+    pub total:      u64,                // cumulative across every vhost
+    pub by_status:  HashMap<u16, u64>,  // cumulative at this instant
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ TRAFFIC RECORDER                                                          │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Thread-safe ring buffer plus counters.
-///
-/// Cheaply cloneable via `Arc`. A typical deployment constructs
-/// one and stores it both in the request pipeline (via
-/// `ServerContext`) and in the admin state (for the dashboard).
+/// Thread-safe ring buffer plus counters, cheaply cloneable via `Arc`. A typical
+/// deployment constructs one and stores it both in the request pipeline (via
+/// `ServerContext`) and in the admin state, for the dashboard.
 #[derive(Debug)]
 pub struct TrafficRecorder {
-    /// Fixed ring buffer capacity. Older entries are dropped when
-    /// a new entry arrives at capacity.
-    capacity:           usize,
-    /// Recent request records, newest-last. Length never exceeds
-    /// `capacity`.
-    ring:               RwLock<VecDeque<RequestRecord>>,
-    /// Rolling counter state. Distinct lock from the ring so that
-    /// dashboard reads of counters and records do not contend on
-    /// the same lock.
+    capacity:           usize,          // older entries drop once at capacity
+    ring:               RwLock<VecDeque<RequestRecord>>,   // newest last
+    // A distinct lock from the ring, so dashboard reads of counters and of
+    // records do not contend on the same lock.
     counters:           RwLock<CountersSnapshot>,
-    /// Monotonic total, also visible via `counters`, but kept as
-    /// an atomic so lock-free reads stay cheap.
-    total:              AtomicU64,
-    /// Bounded ring of periodic counter samples, newest-last.
-    /// Populated by a background sampling task; read by the
-    /// dashboard traffic view to draw time-series charts.
+    total:              AtomicU64,      // also in `counters`; atomic for cheap reads
+    // Periodic counter samples, newest last, populated by a background sampling
+    // task and read by the dashboard when drawing time-series charts.
     history:            RwLock<VecDeque<TrafficSample>>,
-    /// Maximum number of samples kept in `history`.
     history_capacity:   usize,
 }
 
 impl TrafficRecorder {
-    /// Construct a fresh recorder with the given ring capacity.
     /// A zero capacity is treated as [`DEFAULT_RING_CAPACITY`].
     pub fn new(capacity: usize) -> Self {
         let cap = if capacity == 0 {
@@ -185,35 +137,25 @@ impl TrafficRecorder {
         }
     }
 
-    /// Shortcut that wraps a fresh recorder in an `Arc`. Most
-    /// call sites share the recorder between the request pipeline
-    /// and the dashboard so the `Arc` saves a wrap later.
     pub fn new_shared(capacity: usize) -> Arc<Self> {
         Arc::new(Self::new(capacity))
     }
 
-    /// Capacity of the ring buffer.
     pub fn capacity(&self) -> usize {
         self.capacity
     }
 
-    /// Maximum number of periodic samples kept in history.
     pub fn history_capacity(&self) -> usize {
         self.history_capacity
     }
 
-    /// Monotonic total request count since the recorder was
-    /// created. Lock-free.
     pub fn total(&self) -> u64 {
         self.total.load(Ordering::Relaxed)
     }
 
-    /// Record a single completed request.
-    ///
-    /// Takes two short write locks -- one on the ring and one on
-    /// the counters. Any lock poisoning surfaces as an error; the
-    /// hot-path call site logs and continues rather than
-    /// aborting the request.
+    /// Takes two short write locks, one on the ring and one on the counters. Any
+    /// lock poisoning surfaces as an error; the hot-path call site logs it and
+    /// continues rather than aborting the request.
     pub fn record(&self, rec: RequestRecord) -> Outcome<()> {
         // Counters first so a poisoned ring does not leave us
         // with a stale count.
@@ -246,8 +188,8 @@ impl TrafficRecorder {
         Ok(())
     }
 
-    /// Return up to `limit` most recent records, newest first.
-    /// `limit` of zero returns everything currently in the ring.
+    /// Up to `limit` most recent records, newest first. A `limit` of zero returns
+    /// everything currently in the ring.
     pub fn recent(&self, limit: usize) -> Outcome<Vec<RequestRecord>> {
         let ring = lock_read!(self.ring);
         let take = if limit == 0 { ring.len() } else { limit.min(ring.len()) };
@@ -259,17 +201,13 @@ impl TrafficRecorder {
         Ok(out)
     }
 
-    /// Clone the current counter state for the dashboard to read.
     pub fn counters_snapshot(&self) -> Outcome<CountersSnapshot> {
         let ctr = lock_read!(self.counters);
         Ok(ctr.clone())
     }
 
-    /// Record a periodic sample of the current counter state into
-    /// the history ring. Intended to be called from a background
-    /// task at a fixed interval; the dashboard reads from the
-    /// history when drawing time-series charts. Trims the oldest
-    /// entry when the ring reaches `history_capacity`.
+    /// Meant for a background task on a fixed interval. Trims the oldest entry
+    /// when the ring reaches `history_capacity`.
     pub fn sample_now(&self) -> Outcome<()> {
         let ctr = lock_read!(self.counters);
         let sample = TrafficSample {
@@ -289,9 +227,7 @@ impl TrafficRecorder {
         Ok(())
     }
 
-    /// Clone the full history ring in chronological order
-    /// (oldest first). Cheap: one short read lock plus a
-    /// per-sample clone.
+    /// Chronological order, oldest first.
     pub fn history_snapshot(&self) -> Outcome<Vec<TrafficSample>> {
         let hist = lock_read!(self.history);
         let mut out = Vec::with_capacity(hist.len());
@@ -312,8 +248,7 @@ impl Default for TrafficRecorder {
 // │ HELPERS                                                                   │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Current unix time in nanoseconds, clamped to zero on clock
-/// error. Call-site helper for the request pipeline.
+/// Current unix time in nanoseconds, clamped to zero on clock error.
 pub fn now_ns() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

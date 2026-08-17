@@ -1,3 +1,6 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 /// Plaintext HTTP listener.
 ///
 /// Steel's primary listener is HTTPS on port 443 (or a development
@@ -24,18 +27,17 @@ use tokio::{
 };
 
 
-/// Maximum bytes read from a plaintext HTTP request before giving up.
-/// We only need the request line and the `Host` header, so a small buffer
-/// is plenty and bounds the damage from malicious clients.
+// Only the request line and the `Host` header are needed, so a small buffer is
+// plenty and bounds the damage from a malicious client.
 const MAX_REQUEST_BYTES: usize = 8192;
 
 
-/// Bind `server_address:port` and accept plaintext HTTP connections,
-/// responding to each with a 301 redirect to the HTTPS equivalent.
+/// Binds `server_address:port` and accepts plaintext HTTP connections,
+/// answering each with a 301 redirect to the HTTPS equivalent.
 ///
-/// This function loops forever and is intended to be spawned as a
-/// background Tokio task alongside the main HTTPS accept loop. Per-
-/// connection errors are logged but do not terminate the listener.
+/// Loops forever, and is meant to be spawned as a background Tokio task
+/// alongside the main HTTPS accept loop. Per-connection errors are logged but do
+/// not terminate the listener.
 pub async fn run_redirect_listener(
     server_address: String,
     http_port:      u16,
@@ -74,18 +76,15 @@ pub async fn run_redirect_listener(
     }
 }
 
-/// Handle a single plaintext HTTP connection by parsing just enough of
-/// the request to extract the `Host` header and request target, then
-/// writing a 301 response with a `Location` header pointing at the HTTPS
+/// Parses just enough of the request to extract the `Host` header and request
+/// target, then writes a 301 with a `Location` header pointing at the HTTPS
 /// equivalent.
 ///
-/// If the request is malformed the handler still replies with a safe
-/// 301 to the root of whatever host it could identify, or an explanatory
-/// plain-text 400 if nothing could be salvaged.
+/// A malformed request still gets a safe 301 to the root of whatever host could
+/// be identified, or an explanatory plain-text 400 if nothing could be salvaged.
 ///
-/// This is also used by the HTTPS listener when it detects plaintext
-/// traffic on the TLS port (someone pasting `http://` into a browser
-/// that does not upgrade automatically).
+/// Also used by the HTTPS listener when it detects plaintext traffic on the TLS
+/// port -- someone pasting `http://` into a browser that does not upgrade.
 pub async fn handle_redirect(
     mut stream: TcpStream,
     _src_addr:  SocketAddr,

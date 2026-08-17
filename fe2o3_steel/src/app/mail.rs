@@ -4,6 +4,9 @@
 //! Maildir + passwd-file implementations in `oxedyne_fe2o3_mail` and
 //! drives a small background worker that flushes the outbound spool
 //! through the SMTP client.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_mail::{
@@ -36,18 +39,13 @@ use std::{
 /// Cloneable handler shared across every SMTP listener.
 #[derive(Clone)]
 pub struct AppMailHandler {
-    /// Maildir mailbox store.
     pub store:          MaildirStore,
-    /// User authentication backend.
     pub users:          PasswdFileUserStore,
-    /// Outbound delivery spool.
     pub spool:          OutboundSpool,
-    /// DKIM signer, if a key is configured.
-    /// DKIM signing identities. Each prepends its own `DKIM-Signature`
-    /// header; a receiver verifies whichever it understands and ignores the
-    /// rest. Empty means outbound mail goes unsigned.
+    // Each signer prepends its own `DKIM-Signature` header; a receiver verifies
+    // whichever it understands and ignores the rest. Empty means outbound mail
+    // goes unsigned.
     pub dkim:           Vec<Arc<DkimSigner>>,
-    /// Domains the receive path will accept mail for.
     pub local_domains:  Arc<Vec<String>>,
 }
 
@@ -203,8 +201,8 @@ impl SmtpHandler for AppMailHandler {
 }
 
 
-/// Background worker that polls the spool and pushes each message
-/// through the outbound SMTP client. Runs forever.
+/// Polls the spool and pushes each message through the outbound SMTP client.
+/// Runs forever.
 pub async fn run_outbound_worker(
     spool:      OutboundSpool,
     client:     OutboundClient,

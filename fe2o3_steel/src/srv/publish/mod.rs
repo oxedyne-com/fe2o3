@@ -30,6 +30,9 @@
 //! and is handed the database already, so the move is a store behind [`read_all`] rather than a
 //! rearrangement. A directory of Markdown is not a stand-in meanwhile: it is a real way to write, and
 //! the file is the source either way.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 pub mod ai;
 pub mod comment;
@@ -73,28 +76,24 @@ use std::{
 };
 
 
-/// Directory holding the posts, where the config names no other.
 pub const DIR_DEFAULT: &str = "./www/public/content/posts";
 
-/// URL prefix the posts are served under, where the config names no other.
 pub const PATH_DEFAULT: &str = "/posts";
 
-/// The categories a site starts with where its config names none: a small, thematic taxonomy of the
-/// kind a general blog keeps, the defined counterpart to the free-form tags. An operator narrows,
-/// renames or empties this in one place. In config order, which is the order the filter draws them.
+// The categories a site starts with where its config names none: a small, thematic taxonomy of
+// the kind a general blog keeps, the defined counterpart to the free-form tags. An operator
+// narrows, renames or empties this in one place. In config order, which is the order the filter
+// draws them.
 pub const CATEGORIES_DEFAULT: [&str; 6] =
 	["Personal", "Technical", "Ideas", "Reviews", "Projects", "Announcements"];
 
-/// The extension a post wears.
 const EXT: &str = "md";
 
-/// How much of a post's opening stands in for it in a card and a feed.
-const EXCERPT_LEN: usize = 200;
+const EXCERPT_LEN: usize = 200;	// characters of a post's opening, for a card and a feed
 
-/// Words a minute, for a post's reading time.
-///
-/// Two hundred is the low end of the range measured for silent reading of English prose, so the
-/// estimate errs towards telling a reader a piece is longer than they will find it.
+// Words a minute, for a post's reading time. Two hundred is the low end of the range measured for
+// silent reading of English prose, so the estimate errs towards telling a reader a piece is longer
+// than they will find it.
 pub const READ_WPM: usize = 200;
 
 /// How long a post of the given length takes to read, in whole minutes.
@@ -112,17 +111,15 @@ pub fn read_mins(words: usize) -> usize {
 /// Both produce the same [`Post`], so nothing downstream of the read knows which it was.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Source {
-	/// A directory of Markdown. What a text editor writes, and where prose that already exists is.
 	#[default]
-	Dir,
-	/// The vhost's database. What the composer writes, and the only source a draft can live in --
-	/// a directory on a server holds no drafts, since putting one there would publish it.
+	Dir,		// a directory of Markdown: what an editor writes, and where prose already is
+	// The vhost's database. What the composer writes, and the only source a draft can live in -- a
+	// directory on a server holds no drafts, since putting one there would publish it.
 	Store,
 }
 
 impl Source {
 
-	/// The source a word names.
 	pub fn of(s: &str) -> Outcome<Self> {
 		match s {
 			"dir"	=> Ok(Self::Dir),
@@ -144,92 +141,80 @@ impl Source {
 /// to load -- the shape of a config is not the place to discover a typo in a path.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PublishConfig {
-	/// URL prefix the posts are served under, without a trailing slash.
-	pub path:	String,
-	/// Directory holding the Markdown, absolute or relative to the app root. Read when the source is
-	/// a directory, and the place an import reads from when it is the store.
+	pub path:	String,		// URL prefix, without a trailing slash
+	// Directory holding the Markdown, absolute or relative to the app root. Read when the source is
+	// a directory, and the place an import reads from when it is the store.
 	pub dir:	String,
-	/// Where the posts are kept.
 	pub source:	Source,
-	/// What the site calls its posts, as the index's heading and the feed's name.
-	pub title:	String,
-	/// The site's own name, for the card a shared link makes.
-	pub site_name:	String,
-	/// The site's canonical origin, e.g. `https://example.com`, without a trailing slash.
-	///
-	/// Needed rather than derived from the request, because a card's URLs and a feed's must be
-	/// absolute, and a `Host` header is the client's word for where it thinks it is.
+	pub title:	String,		// what the site calls its posts: index heading and feed name
+	pub site_name:	String,		// the site's own name, for the card a shared link makes
+	// The site's canonical origin, e.g. `https://example.com`, without a trailing slash. Needed
+	// rather than derived from the request, because a card's URLs and a feed's must be absolute,
+	// and a `Host` header is the client's word for where it thinks it is.
 	pub base_url:	String,
-	/// Stylesheets a page links, in order. A page carries no styling of its own: what prose should
-	/// look like is the site's business, not the server's.
+	// Stylesheets a page links, in order. A page carries no styling of its own: what prose should
+	// look like is the site's business, not the server's.
 	pub css:	Vec<String>,
-	/// The remotes this site is configured to post to, and the credentials to reach them. Empty where
-	/// the site publishes only to its own pages, which is the default.
+	// The remotes this site is configured to post to, and the credentials to reach them. Empty
+	// where the site publishes only to its own pages, which is the default.
 	pub creds:	send::DestCreds,
-	/// The least seconds between two comments from one sender. `0` turns the interval off.
-	///
-	/// **Operational policy, not a constant**, because the thing being counted is an address and an
-	/// address is not a person: a household, an office and a university share one. A site whose
-	/// readers are behind shared addresses wants this low or off; one being flooded wants it high.
-	/// It also does nothing useful where the server sits behind a proxy that does not pass the
-	/// client's address through, since then every reader is one address.
+	// The least seconds between two comments from one sender; `0` turns the interval off.
+	// Operational policy, not a constant, because the thing being counted is an address and an
+	// address is not a person: a household, an office and a university share one. A site whose
+	// readers are behind shared addresses wants this low or off; one being flooded wants it high.
+	// It also does nothing useful where the server sits behind a proxy that does not pass the
+	// client's address through, since then every reader is one address.
 	pub comment_rate_secs:		u64,
-	/// How many comments one sender may leave in an hour. `0` turns the count off.
-	pub comment_rate_hourly:	u32,
-	/// The least seconds between two newsletter sign-ups from one address. `0` turns the interval
-	/// off.
-	///
-	/// **A sign-up is not a comment, and is worth limiting harder.** A comment costs a row; a
-	/// sign-up costs a piece of outbound mail to an address the sender chose, which is the whole of
-	/// a mail-bombing tool and lands the cost on this host's sending reputation rather than on its
-	/// disk. Double opt-in caps the damage at one message per address; it does not cap how many
-	/// addresses a script may name.
+	pub comment_rate_hourly:	u32,	// comments one sender may leave in an hour; `0` is off
+	// The least seconds between two newsletter sign-ups from one address; `0` turns the interval
+	// off. A sign-up is not a comment, and is worth limiting harder: a comment costs a row, while
+	// a sign-up costs a piece of outbound mail to an address the sender chose, which is the whole
+	// of a mail-bombing tool and lands the cost on this host's sending reputation rather than on
+	// its disk. Double opt-in caps the damage at one message per address; it does not cap how many
+	// addresses a script may name.
 	pub subscribe_rate_secs:	u64,
-	/// How many sign-ups one address may make in an hour. `0` turns the count off.
-	///
-	/// Deliberately small. A person signs up once, mistypes it, and signs up again; a handful an
-	/// hour covers that and nothing else. An office behind one address that genuinely needs more
-	/// raises it, the same operational judgement
-	/// [`comment_rate_secs`](Self::comment_rate_secs) documents.
+	// How many sign-ups one address may make in an hour; `0` turns the count off. Deliberately
+	// small: a person signs up once, mistypes it, and signs up again, and a handful an hour covers
+	// that and nothing else. An office behind one address that genuinely needs more raises it, the
+	// same operational judgement `comment_rate_secs` documents.
 	pub subscribe_rate_hourly:	u32,
-	/// Whether this site takes comments on its posts.
-	///
-	/// **Off unless a site asks for it.** A comment endpoint is an unauthenticated public write, and
-	/// turning one on for every site that happens to publish prose -- which is what a default of `true`
-	/// would do -- is not a decision this module gets to make on an operator's behalf. A `publish` block
-	/// that names nothing takes no comments and serves no form.
+	// Whether this site takes comments on its posts. Off unless a site asks for it: a comment
+	// endpoint is an unauthenticated public write, and turning one on for every site that happens
+	// to publish prose -- which is what a default of `true` would do -- is not a decision this
+	// module gets to make on an operator's behalf. A `publish` block that names nothing takes no
+	// comments and serves no form.
 	pub comments:	bool,
-	/// The address the newsletter is sent from, e.g. `README <news@oxedyne.com>`. Empty falls back to
-	/// the mail configuration's derived default (`news@<mail-domain>`), which is aligned with the DKIM
-	/// signing domain so the signature authenticates. A `#[optional]` field: a `publish` block that
-	/// names none still loads, and the newsletter takes the default.
+	// The address the newsletter is sent from, e.g. `README <news@oxedyne.com>`. Empty falls back
+	// to the mail configuration's derived default (`news@<mail-domain>`), which is aligned with the
+	// DKIM signing domain so the signature authenticates. A `#[optional]` field: a `publish` block
+	// that names none still loads, and the newsletter takes the default.
 	pub newsletter_from:	String,
-	/// The categories a post may sit in: the site's defined taxonomy, the checkbox counterpart to the
-	/// free-form tags. Drawn as the filter's category row and offered in the composer. An optional
-	/// field: a `publish` block naming none takes [`CATEGORIES_DEFAULT`], so a site gets a sensible set
-	/// without configuring one, and an operator narrows or renames it in one place.
+	// The categories a post may sit in: the site's defined taxonomy, the checkbox counterpart to
+	// the free-form tags. Drawn as the filter's category row and offered in the composer. An
+	// optional field: a `publish` block naming none takes CATEGORIES_DEFAULT, so a site gets a
+	// sensible set without configuring one, and an operator narrows or renames it in one place.
 	pub categories:	Vec<String>,
-	/// The author a post carries when its own source names none -- chiefly a directory post, which has
-	/// no front matter to hold one. Empty leaves such a post unattributed. A member's site-login
-	/// username. An optional field.
+	// The author a post carries when its own source names none -- chiefly a directory post, which
+	// has no front matter to hold one. A member's site-login username; empty leaves such a post
+	// unattributed. An optional field.
 	pub default_author:	String,
-	/// The site's mark, drawn at the top of every page: a URL the served pages can reach, e.g.
-	/// `/assets/logo.svg`. Empty draws [`Self::title`] as a word instead, which is what a site that
-	/// configures no mark has always had. An optional field.
+	// The site's mark, drawn at the top of every page: a URL the served pages can reach, e.g.
+	// `/assets/logo.svg`. Empty draws the title as a word instead, which is what a site that
+	// configures no mark has always had. An optional field.
 	pub logo:	String,
-	/// Where the mark at the top of a page leads: the site's own front page, e.g. `https://example.com`
-	/// or `/`. Empty leads back to the index of the posts, which is right for a site whose posts are
-	/// all there is of it, and wrong for a blog that is one part of a larger site. An optional field.
+	// Where the mark at the top of a page leads: the site's own front page, e.g.
+	// `https://example.com` or `/`. Empty leads back to the index of the posts, which is right for
+	// a site whose posts are all there is of it, and wrong for a blog that is one part of a larger
+	// site. An optional field.
 	pub home:	String,
-	/// What this site declares about its use of AI, and where the scheme it declares under lives. A
-	/// site configuring none declares nothing and draws no marks, which is not the same as declaring
-	/// that it used none. An optional field.
+	// What this site declares about its use of AI, and where the scheme it declares under lives. A
+	// site configuring none declares nothing and draws no marks, which is not the same as declaring
+	// that it used none. An optional field.
 	pub declare:	declare::DeclareConfig,
 }
 
 impl PublishConfig {
 
-	/// Parses a vhost's `publish` block.
 	pub fn from_datmap(m: &DaticleMap) -> Outcome<Self> {
 		let get_str = |key: &str, default: &str| -> Outcome<String> {
 			match m.get(&dat!(key)) {
@@ -414,14 +399,12 @@ impl PublishConfig {
 		}
 	}
 
-	/// The absolute URL of a path under this site.
 	pub fn url_of(&self, path: &str) -> String {
 		let mut s = self.base_url.clone();
 		s.push_str(path);
 		s
 	}
 
-	/// The URL path of a post.
 	pub fn path_of(&self, slug: &str) -> String {
 		let mut s = self.path.clone();
 		s.push('/');
@@ -429,14 +412,12 @@ impl PublishConfig {
 		s
 	}
 
-	/// The URL path of the feed.
 	pub fn feed_path(&self) -> String {
 		let mut s = self.path.clone();
 		s.push_str("/feed.xml");
 		s
 	}
 
-	/// The URL path of the JSON list.
 	pub fn json_path(&self) -> String {
 		let mut s = self.path.clone();
 		s.push_str("/index.json");
@@ -454,14 +435,12 @@ impl PublishConfig {
 		s
 	}
 
-	/// The URL path a sign-up posts to, and the themed form is served at.
 	pub fn subscribe_path(&self) -> String {
 		let mut s = self.path.clone();
 		s.push_str("/subscribe");
 		s
 	}
 
-	/// The URL path an edit to a comment is posted to.
 	pub fn comment_edit_path(&self, slug: &str) -> String {
 		let mut s = self.path.clone();
 		s.push('/');
@@ -470,7 +449,6 @@ impl PublishConfig {
 		s
 	}
 
-	/// The slug an edit path names, where it names one.
 	pub fn comment_edit_slug<'a>(&self, path: &'a str) -> Option<&'a str> {
 		let rest = path.strip_prefix(&self.path)?.strip_prefix('/')?;
 		let slug = rest.strip_suffix("/comment/edit")?;
@@ -480,7 +458,6 @@ impl PublishConfig {
 		Some(slug)
 	}
 
-	/// The URL path a comment preview is asked for.
 	pub fn comment_preview_path(&self, slug: &str) -> String {
 		let mut s = self.path.clone();
 		s.push('/');
@@ -489,7 +466,6 @@ impl PublishConfig {
 		s
 	}
 
-	/// The slug a preview path names, where it names one.
 	pub fn comment_preview_slug<'a>(&self, path: &'a str) -> Option<&'a str> {
 		let rest = path.strip_prefix(&self.path)?.strip_prefix('/')?;
 		let slug = rest.strip_suffix("/comment/preview")?;
@@ -519,7 +495,6 @@ impl PublishConfig {
 		s
 	}
 
-	/// The URL prefix a member's uploaded picture is served under.
 	pub fn avatar_prefix(&self) -> String {
 		let mut s = self.path.clone();
 		s.push_str("/avatar/");
@@ -548,7 +523,6 @@ impl PublishConfig {
 		s
 	}
 
-	/// The slug a comment-posting path names, where it names one.
 	pub fn comment_slug<'a>(&self, path: &'a str) -> Option<&'a str> {
 		let rest = path.strip_prefix(&self.path)?.strip_prefix('/')?;
 		let slug = rest.strip_suffix("/comment")?;
@@ -592,14 +566,12 @@ impl PublishConfig {
 		}
 	}
 
-	/// The confirm endpoint's path without its query.
 	fn confirm_bare_path(&self) -> String {
 		let mut s = self.path.clone();
 		s.push_str("/confirm");
 		s
 	}
 
-	/// The unsubscribe endpoint's path without its query.
 	fn unsubscribe_bare_path(&self) -> String {
 		let mut s = self.path.clone();
 		s.push_str("/unsubscribe");
@@ -614,19 +586,14 @@ impl PublishConfig {
 /// a match and a new endpoint is a new arm.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Subscription {
-	/// `{path}/subscribe`: the sign-up form (GET) and where it posts (POST).
-	Subscribe,
-	/// `{path}/confirm`: a confirmation link followed.
-	Confirm,
-	/// `{path}/unsubscribe`: an unsubscribe link followed.
-	Unsubscribe,
+	Subscribe,	// `{path}/subscribe`: the sign-up form (GET) and where it posts (POST)
+	Confirm,	// `{path}/confirm`: a confirmation link followed
+	Unsubscribe,	// `{path}/unsubscribe`: an unsubscribe link followed
 }
 
 
-/// The longest a slug may be.
-///
-/// A key and a URL both hold one, and neither has a natural limit worth relying on. The number is
-/// arbitrary; having one is not.
+// The longest a slug may be. A key and a URL both hold one, and neither has a natural limit worth
+// relying on. The number is arbitrary; having one is not.
 pub const SLUG_MAX: usize = 128;
 
 /// Whether a word may be a post's name.
@@ -646,12 +613,10 @@ pub fn valid_slug(s: &str) -> bool {
 		&& s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
-/// The marks in a user-agent that name a thing which is not a reader.
-///
-/// A substring list is a poor way to identify a browser and an adequate way to discard the obvious
-/// machines, which is all this is for. It will miss a crawler that lies, and that is tolerable: a
-/// tally is a rough shape, not a headcount, and a bot pretending to be Chrome will not be caught by
-/// any list at all.
+// The marks in a user-agent that name a thing which is not a reader. A substring list is a poor
+// way to identify a browser and an adequate way to discard the obvious machines, which is all this
+// is for. It will miss a crawler that lies, and that is tolerable: a tally is a rough shape, not a
+// headcount, and a bot pretending to be Chrome will not be caught by any list at all.
 const BOT_MARKS: &[&str] = &[
 	"bot", "crawl", "spider", "slurp", "archiver", "curl", "wget", "python-requests",
 	"headlesschrome", "facebookexternalhit", "embedly", "preview", "monitor", "uptime",
@@ -690,10 +655,8 @@ pub fn counts_as_read(has_manage_session: bool, user_agent: Option<&str>, head_o
 	!head_only && !has_manage_session && !looks_automated(user_agent)
 }
 
-/// The longest a tag may be, once normalised.
-///
-/// A tag is a facet in a URL and a word on a card, neither with a natural limit worth relying on.
-/// The number is arbitrary; having one is not.
+// The longest a tag may be, once normalised. A tag is a facet in a URL and a word on a card,
+// neither with a natural limit worth relying on. The number is arbitrary; having one is not.
 pub const TAG_MAX: usize = 32;
 
 /// Whether a word may be a tag, once normalised.
@@ -741,11 +704,8 @@ pub fn parse_tags(s: &str) -> Vec<String> {
 	out
 }
 
-/// The length of a date that names a day.
-pub const DATE_LEN: usize = 10;
-
-/// The length of a date that names a minute.
-pub const STAMP_LEN: usize = 16;
+pub const DATE_LEN: usize = 10;		// `YYYY-MM-DD`
+pub const STAMP_LEN: usize = 16;	// `YYYY-MM-DDTHH:MM`
 
 /// Whether a word may be a post's date.
 ///
@@ -861,11 +821,9 @@ pub fn date_text(date: &str) -> String {
 /// is so the two can sit side by side in one store, each read by its own front-end.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Markup {
-	/// Markdown -- the form most prose is already written in, and the default.
 	#[default]
-	Markdown,
-	/// Djot -- for prose that wants to name a box or a style.
-	Djot,
+	Markdown,	// the form most prose is already written in, and the default
+	Djot,		// for prose that wants to name a box or a style
 }
 
 impl Markup {
@@ -892,11 +850,9 @@ impl Markup {
 /// Whether a post is anybody's business but its author's.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum PostState {
-	/// Written, not published. Served to nobody.
 	#[default]
-	Draft,
-	/// Published.
-	Live,
+	Draft,		// written, not published; served to nobody
+	Live,		// published
 }
 
 impl PostState {
@@ -936,19 +892,18 @@ impl PostState {
 /// posts that name them.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Author {
-	/// The login username a post stores. Matched against a post's `author` **on the server**, and
-	/// never rendered, emitted or put in a path. See the note above.
+	// The login username a post stores. Matched against a post's `author` on the server, and never
+	// rendered, emitted or put in a path. See the note above.
 	pub username:	String,
-	/// The name this author wears in public: the profile's handle, or a name made for the page where
-	/// the member has no profile yet. What a page matches a post to an author by.
+	// The name this author wears in public: the profile's handle, or a name made for the page where
+	// the member has no profile yet. What a page matches a post to an author by.
 	pub handle:	String,
-	/// The name a reader sees. The profile's name, or `Anonymous` where the profile named none --
-	/// never the username, which is not a name and is not for showing.
+	// The name a reader sees: the profile's name, or `Anonymous` where the profile named none --
+	// never the username, which is not a name and is not for showing.
 	pub name:	String,
-	/// A path or URL to the avatar image. Empty draws an initial from the name instead.
-	pub avatar:	String,
-	/// What the author says they write about. Shown above the posts and under a byline; empty shows
-	/// nothing, rather than an empty box where a description would be.
+	pub avatar:	String,		// path or URL; empty draws an initial from the name instead
+	// What the author says they write about. Shown above the posts and under a byline; empty shows
+	// nothing, rather than an empty box where a description would be.
 	pub bio:	String,
 }
 
@@ -979,8 +934,7 @@ impl Author {
 		}
 	}
 
-	/// The initial a reader draws where the author has no avatar: the first character of the display
-	/// name, upper-cased, or `?` where even that is empty.
+	/// The first character of the display name, upper-cased, or `?` where even that is empty.
 	pub fn initial(&self) -> String {
 		self.name.chars().next()
 			.map(|c| c.to_uppercase().to_string())
@@ -992,36 +946,32 @@ impl Author {
 /// One post, as a reader gets it.
 #[derive(Clone, Debug)]
 pub struct Post {
-	/// The post's name in a URL.
-	pub slug:	String,
-	/// The post's own most prominent heading, or its slug where it has none.
-	pub title:	String,
-	/// The member who wrote it, by their site-login username. Empty where none is named. Resolved to a
-	/// display name and avatar through the member's profile at the point it is drawn.
+	pub slug:	String,		// the post's name in a URL
+	pub title:	String,		// its own most prominent heading, or the slug where it has none
+	// The member who wrote it, by their site-login username. Empty where none is named. Resolved to
+	// a display name and avatar through the member's profile at the point it is drawn.
 	pub author:	String,
-	/// The categories the post sits in, from the site's configured set. Empty for an uncategorised
-	/// post. The free-form counterpart is [`tags`](Post::tags).
+	// The categories the post sits in, from the site's configured set. Empty for an uncategorised
+	// post. The free-form counterpart is `tags`.
 	pub categories:	Vec<String>,
-	/// The date it was given, where it was given one.
 	pub date:	Option<String>,
-	/// The opening of the prose, flattened, for a card and a feed.
-	pub excerpt:	String,
-	/// The prose, rendered.
-	pub html:	String,
-	/// How many words the prose runs to, for the reading time shown above it. Counted from the tree
-	/// rather than the rendered HTML, so no tag or attribute is mistaken for a word.
+	pub excerpt:	String,		// the opening of the prose, flattened, for a card and a feed
+	pub html:	String,		// the prose, rendered
+	// How many words the prose runs to, for the reading time shown above it. Counted from the tree
+	// rather than the rendered HTML, so no tag or attribute is mistaken for a word.
 	pub words:	usize,
-	/// Where else the post has been published, as a destination and the permalink it landed at. Drawn
-	/// on the page as "also on …", so a reader can follow the post to where the conversation is. Empty
-	/// for a post read from a directory, which records no deliveries, and for one sent nowhere.
+	// Where else the post has been published, as a destination and the permalink it landed at.
+	// Drawn on the page as "also on …", so a reader can follow the post to where the conversation
+	// is. Empty for a post read from a directory, which records no deliveries, and for one sent
+	// nowhere.
 	pub also_on:	Vec<(dest::Destination, String)>,
-	/// The tags the post carries, normalised. Drawn on the page and the card as tag links, one per
-	/// entry in the feed. Empty for a post with none, and for one read from a directory.
+	// The tags the post carries, normalised. Drawn on the page and the card as tag links, one per
+	// entry in the feed. Empty for a post with none, and for one read from a directory.
 	pub tags:	Vec<String>,
-	/// How much the writing of this post needed AI, where its author said. Nothing where they said
-	/// nothing, which every post written before the field existed reads as, and every post read from a
-	/// directory -- a file on disk carries no field to hold one. **Undeclared draws no mark**: a
-	/// declaration nobody made is not this module's to invent.
+	// How much the writing of this post needed AI, where its author said. Nothing where they said
+	// nothing, which every post written before the field existed reads as, and every post read from
+	// a directory -- a file on disk carries no field to hold one. Undeclared draws no mark: a
+	// declaration nobody made is not this module's to invent.
 	pub ai_level:	Option<declare::Level>,
 }
 

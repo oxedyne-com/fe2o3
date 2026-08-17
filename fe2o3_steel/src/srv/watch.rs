@@ -43,6 +43,9 @@
 //! It does not restart anything. A watcher that repairs is a watcher that can flap a service in
 //! a loop at three in the morning and hide the fault it was built to reveal; and a decision to
 //! restart a payments process belongs to a person who has read why it stopped.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::srv::{
     alert::{
@@ -77,21 +80,17 @@ use tokio_rustls::rustls::ClientConfig;
 /// What this node currently believes about one peer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Health {
-    /// Answering. The count is consecutive failures seen since the last success, which is not
-    /// yet enough to call it down.
+    // The count on `Up` is consecutive failures seen since the last success, which is not yet
+    // enough to call the peer down.
     Up { failures: u32 },
-    /// Not answering, and said so.
     Down,
 }
 
 /// One peer's running state.
 struct PeerState {
     health:      Health,
-    /// When it was first seen to be failing, so a recovery can say how long it was away.
-    failing_at:  Option<Instant>,
-    /// When the operator was last told, so a machine that stays down produces a reminder rather
-    /// than a stream.
-    told_at:     Option<Instant>,
+    failing_at:  Option<Instant>,   // first seen to be failing, so a recovery can say how long
+    told_at:     Option<Instant>,   // last told, so a lasting outage is a reminder not a stream
 }
 
 impl Default for PeerState {
@@ -112,8 +111,8 @@ pub struct Watcher {
     cfg:        Arc<WatchConfig>,
     alerter:    Arc<Alerter>,
     tls:        Arc<ClientConfig>,
-    /// This node's own name, so an alert says who noticed as well as what happened. Two nodes
-    /// watching a third send two messages, and without this they are indistinguishable.
+    // This node's own name, so an alert says who noticed as well as what happened. Two nodes
+    // watching a third send two messages, and without this they are indistinguishable.
     whoami:     String,
     state:      HashMap<String, PeerState>,
 }
@@ -121,9 +120,8 @@ pub struct Watcher {
 impl Watcher {
     /// Build a watcher over a peer list.
     ///
-    /// # Errors
-    /// A peer whose URL cannot be parsed, or one that is not `https`. Refused at start-up rather
-    /// than at the first poll, because a watcher that silently watches nothing is the failure
+    /// A peer whose URL cannot be parsed, or one that is not `https`, is refused at start-up
+    /// rather than at the first poll: a watcher that silently watches nothing is the failure
     /// this module exists to prevent, and start-up is when somebody is looking.
     pub fn new(
         cfg:     Arc<WatchConfig>,

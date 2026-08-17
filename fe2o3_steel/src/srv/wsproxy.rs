@@ -9,6 +9,9 @@
 //! frames on it are between the client and the upstream: this module never parses one. It copies
 //! bytes in both directions until an end closes, which is also why nothing here needs to know
 //! which sub-protocol, extensions or message sizes the two ends agreed on.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_net::http::{
@@ -33,8 +36,7 @@ use tokio::{
 };
 
 
-/// Largest upstream response header block accepted while waiting for the `101`.
-const MAX_RESPONSE_HEADER_BYTES: usize = 64 * 1024;
+const MAX_RESPONSE_HEADER_BYTES: usize = 64 * 1024; // upstream block awaiting the `101`
 
 /// The upstream path a request is forwarded to, query included.
 ///

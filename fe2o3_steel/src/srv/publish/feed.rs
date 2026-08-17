@@ -19,6 +19,9 @@
 //! A post dated to the minute is published at that minute, and needs no fiction. Both are read as
 //! UTC, because a post carries no zone and inventing one from where the server happens to be would
 //! make the same post's feed entry move when the server did.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::srv::cache;
 use crate::srv::publish::{
@@ -45,14 +48,12 @@ use oxedyne_fe2o3_text::doc::html::{
 };
 
 
-/// The instant an undated post, or an empty feed, claims.
-///
-/// A feed must say when it was last updated, and one with nothing in it has never been. The epoch says
-/// that plainly and never looks like a real time that happens to be wrong.
+// The instant an undated post, or an empty feed, claims. A feed must say when it was last updated,
+// and one with nothing in it has never been. The epoch says that plainly and never looks like a real
+// time that happens to be wrong.
 const EPOCH: &str = "1970-01-01T00:00:00Z";
 
 
-/// Serves the feed.
 pub fn serve(cfg: &PublishConfig, posts: &[Post], id: &str) -> Outcome<HttpMessage> {
 	let self_url = cfg.url_of(&cfg.feed_path());
 	let index_url = cfg.url_of(&cfg.path);

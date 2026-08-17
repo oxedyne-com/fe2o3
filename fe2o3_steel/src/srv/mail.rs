@@ -4,6 +4,9 @@
 //! IMAP (port 993) listeners alongside the HTTPS server, sharing the
 //! same rustls server config so a single ACME-issued certificate
 //! covers every protocol.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::app::mail::AppMailHandler;
 
@@ -26,9 +29,8 @@ use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
 
-/// Bind a single TCP listener to `addr` and run an SMTP server accept
-/// loop on it forever. Errors on individual accepts are logged and
-/// swallowed so a single bad connection cannot kill the whole port.
+/// Runs the accept loop forever. An error on an individual accept is logged and
+/// swallowed, so a single bad connection cannot kill the whole port.
 pub async fn run_smtp_listener(
     addr:   SocketAddr,
     server: SmtpServer<AppMailHandler, PasswdFileUserStore>,
@@ -63,9 +65,8 @@ pub async fn run_smtp_listener(
     }
 }
 
-/// Bind a single TCP listener to `addr` and run an IMAP server with
-/// implicit TLS. Each accepted connection performs a TLS handshake
-/// before entering the IMAP state machine.
+/// Implicit TLS: each accepted connection completes a TLS handshake before
+/// entering the IMAP state machine.
 pub async fn run_imap_listener(
     addr:           SocketAddr,
     tls_acceptor:   TlsAcceptor,
@@ -111,20 +112,17 @@ pub async fn run_imap_listener(
     }
 }
 
-/// Marker trait alias to keep the function signatures readable. Not
-/// strictly necessary, but it shortens the SMTP listener type.
 pub type AppSmtpServer = SmtpServer<AppMailHandler, PasswdFileUserStore>;
 
-/// Marker alias for the IMAP listener.
 pub type AppImapServer = ImapServer<
     oxedyne_fe2o3_mail::maildir::MaildirStore,
     PasswdFileUserStore,
 >;
 
-/// Build both SMTP servers (receive on 25, submission on 587) sharing
-/// one handler. The submission server gets a TLS acceptor for the
-/// STARTTLS upgrade; the receive server gets the same one so a
-/// modern peer can opportunistically encrypt.
+/// Builds both SMTP servers -- receive on 25, submission on 587 -- sharing one
+/// handler. Both get the TLS acceptor: submission needs it for the STARTTLS
+/// upgrade, and the receive server offers it so a modern peer can
+/// opportunistically encrypt.
 pub fn build_smtp_servers(
     handler:        AppMailHandler,
     users:          PasswdFileUserStore,

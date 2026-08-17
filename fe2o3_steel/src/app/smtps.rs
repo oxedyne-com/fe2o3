@@ -2,3 +2,6 @@
 //! path. The real SMTP handler now lives in [`crate::app::mail`] and
 //! is wired into the runtime via the listener spawner in
 //! [`crate::srv::mail`].
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude

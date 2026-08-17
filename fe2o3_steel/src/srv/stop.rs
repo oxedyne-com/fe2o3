@@ -28,6 +28,9 @@
 //! not catching it at all -- the process would ignore a `SIGTERM` it used to
 //! obey. So [`listen`] ends such a process itself, once the log has been
 //! flushed. [`serving`] is what tells the two cases apart.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -49,10 +52,8 @@ use std::{
 
 use tokio::sync::Notify;
 
-/// How many times this process has been asked to stop.
 static ASKS: AtomicUsize = AtomicUsize::new(0);
 
-/// Whether something is running that will wind itself up when asked.
 static SERVING: AtomicBool = AtomicBool::new(false);
 
 /// The bell an accept loop waits on, rung once per ask.
@@ -65,13 +66,10 @@ fn bell() -> &'static Notify {
     BELL.get_or_init(Notify::new)
 }
 
-/// Whether this process has been asked to stop.
 pub fn asked() -> bool {
     ASKS.load(Ordering::SeqCst) > 0
 }
 
-/// How many times this process has been asked to stop.
-///
 /// More than one means somebody asked again while the first ask was still being
 /// obeyed, which is worth saying out loud even though Steel answers both the
 /// same way; see [`listen`].
@@ -121,7 +119,6 @@ pub fn serving(now: bool) {
     SERVING.store(now, Ordering::SeqCst);
 }
 
-/// Whether something is running that will wind itself up when asked.
 pub fn is_serving() -> bool {
     SERVING.load(Ordering::SeqCst)
 }
@@ -133,11 +130,9 @@ pub fn is_serving() -> bool {
 /// [`crate::app::tui::run_with_extension`], which is the real `main` of every
 /// Steel application, stock or extended.
 ///
-/// # Errors
-///
-/// Returns an error if a listener is already installed, or if its thread cannot
-/// be spawned. Neither is fatal to a server -- it will simply be killed rather
-/// than asked when the machine goes -- so the caller logs and carries on.
+/// A listener already installed, or a thread that cannot be spawned, is not
+/// fatal to a server -- it will simply be killed rather than asked when the
+/// machine goes -- so the caller logs and carries on.
 pub fn listen() -> Outcome<()> {
     res!(oxedyne_fe2o3_core::stop::on_stop_request(|| {
         let n = ask();

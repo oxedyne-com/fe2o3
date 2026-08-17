@@ -1,4 +1,7 @@
 //! Shared test scaffolding.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_crypto::enc::EncryptionScheme;
@@ -28,7 +31,6 @@ use std::{
     time::Duration,
 };
 
-/// The database type a Steel vhost holds.
 pub type TestDb = O3db<
     { id::UID_LEN },
     id::Uid,
@@ -47,15 +49,15 @@ impl Drop for TmpDir {
     }
 }
 
-/// A started Ozone database in a temporary directory, and the user id to write under.
-///
-/// The directory goes when the returned `TmpDir` does, so a test leaves nothing behind and two runs
-/// of the same test do not see each other's posts. The name carries a per-call counter as well as the
-/// process id, because two tests in one binary run in parallel by default: keyed on the process alone
-/// they would share a directory, and each call's `remove_dir_all` would wipe the other's database
-/// mid-test.
 static DB_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// A started Ozone database in a temporary directory, and the user id to write under.
+///
+/// The directory goes when the returned `TmpDir` does, so a test leaves nothing behind and two
+/// runs of the same test do not see each other's posts. The name carries a per-call counter as
+/// well as the process id, because two tests in one binary run in parallel by default: keyed on
+/// the process alone they would share a directory, and each call's `remove_dir_all` would wipe
+/// the other's database mid-test.
 pub fn test_db() -> Outcome<(Arc<RwLock<TestDb>>, id::Uid, TmpDir)> {
     let seq = DB_SEQ.fetch_add(1, Ordering::Relaxed);
     let root = std::env::temp_dir()

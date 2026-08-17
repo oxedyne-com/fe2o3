@@ -8,6 +8,9 @@
 //! The same dispatcher is reused by the loopback plaintext listener
 //! added in task #8 -- localhost gets the same routes, the same
 //! login gate, and the same session cookie format.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::srv::admin::{
     AdminPrincipal,
@@ -77,50 +80,24 @@ use std::{
 // │ ROUTE PATHS                                                               │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Dashboard root. Authenticated landing page.
-pub const PATH_ROOT:    &str = "/admin";
-/// Login form (GET) and login submission (POST).
-pub const PATH_LOGIN:   &str = "/admin/login";
-/// Logout (GET): clears the session cookie and redirects to login.
-pub const PATH_LOGOUT:  &str = "/admin/logout";
-/// Traffic view (GET): renders recent requests and per-vhost
-/// counters from the shared `TrafficRecorder`.
-pub const PATH_TRAFFIC: &str = "/admin/traffic";
-/// JSON feed for the Overview sparkline strip. Emits host
-/// sampler history as four aligned series (CPU, memory, disk,
-/// network). Used by the inline Overview JavaScript and by the
-/// auto-refresh polling loop.
-pub const PATH_HOST_JSON: &str = "/admin/host.json";
-/// JSON feed for the Traffic view. Emits counters, chart series,
-/// and recent requests so the auto-refresh loop can update the
-/// chip row, chart, and table without reloading the page.
-pub const PATH_TRAFFIC_JSON: &str = "/admin/traffic.json";
-/// Security view (GET): renders the address guard counts and a
-/// table of per-address entries with whitelist / blacklist /
-/// unblock controls. POST performs the selected action.
-pub const PATH_SECURITY: &str = "/admin/security";
-/// Admin management view (GET): lists wallet admins and renders
-/// add / remove forms.
-/// (POST): performs the requested mutation.
-pub const PATH_ADMINS:  &str = "/admin/admins";
-/// Oxanium variable font. Served unauthenticated so the login
-/// page can use it for headings before the visitor has a session.
+pub const PATH_ROOT:          &str = "/admin";
+pub const PATH_LOGIN:         &str = "/admin/login";
+pub const PATH_LOGOUT:        &str = "/admin/logout";
+pub const PATH_TRAFFIC:       &str = "/admin/traffic";
+pub const PATH_HOST_JSON:     &str = "/admin/host.json";
+pub const PATH_TRAFFIC_JSON:  &str = "/admin/traffic.json";
+pub const PATH_SECURITY:      &str = "/admin/security";
+pub const PATH_ADMINS:        &str = "/admin/admins";
+// Served unauthenticated, so the login page can use the font for headings
+// before the visitor has a session.
 pub const PATH_ASSET_OXANIUM: &str = "/admin/assets/oxanium.ttf";
-/// Signed-admin-login challenge (GET): returns a JDAT body
-/// describing the expected command name and the server's current
-/// timestamp so a client can align its SignedCommand envelope.
-pub const PATH_CHALLENGE: &str = "/admin/challenge";
-/// Signed-admin-login submission (POST): accepts a JDAT-encoded
-/// [`SignedCommand`] with `cmd = "admin_login"`, verifies it
-/// against the vhost's configured `admin_keys`, and issues the
-/// same admin session cookie the passphrase flow does.
-pub const PATH_SIGNED_LOGIN: &str = "/admin/signed-login";
+pub const PATH_CHALLENGE:     &str = "/admin/challenge";
+pub const PATH_SIGNED_LOGIN:  &str = "/admin/signed-login";
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ GET                                                                       │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Dispatch a `GET` request against a `/admin/*` path.
 pub async fn handle_get(
     state:   &AdminState,
     path:    &str,
@@ -157,8 +134,8 @@ pub async fn handle_get(
     }
 }
 
-/// Serve the Oxanium variable font with a long-cache header so
-/// the browser keeps one copy across dashboard navigations.
+/// Carries a long-cache header so the browser keeps one copy across dashboard
+/// navigations.
 fn serve_font_oxanium() -> HttpMessage {
     HttpMessage::new_response(HttpStatus::OK)
         .with_field(
@@ -176,7 +153,6 @@ fn serve_font_oxanium() -> HttpMessage {
 // │ POST                                                                      │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Dispatch a `POST` request against a `/admin/*` path.
 pub async fn handle_post(
     state:    &AdminState,
     path:     &str,
@@ -201,11 +177,10 @@ pub async fn handle_post(
     }
 }
 
-/// Verifies a signed-admin-login envelope and, on success, issues
-/// the same admin session cookie the passphrase flow issues. A
-/// failure returns a short JDAT error body rather than re-rendering
-/// the passphrase login form -- the client is a programmatic caller,
-/// not a browser form submission.
+/// Verifies a signed-admin-login envelope and, on success, issues the same admin
+/// session cookie the passphrase flow issues. A failure returns a short JDAT
+/// error body rather than re-rendering the passphrase login form: the client is
+/// a programmatic caller, not a browser form submission.
 fn handle_signed_login(
     state: &AdminState,
     body:  &[u8],
@@ -234,19 +209,16 @@ fn handle_signed_login(
 // │ LOGIN                                                                     │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Process a login form submission. Body is
-/// `application/x-www-form-urlencoded` carrying a single `passphrase`
-/// field. On success, set the session cookie and 303-redirect to
-/// `/admin`. On failure, re-render the login form with a generic
-/// error message.
+/// Processes a login form submission. On success, sets the session cookie and
+/// 303-redirects to `/admin`; on failure, re-renders the login form with a
+/// generic error message.
 ///
-/// Every outcome -- success, bad credentials, missing dashboard
-/// scope, structural error -- writes one line to the admin audit
-/// log. The actor name is the unlocked admin where known and
-/// `(anon)` otherwise; the response to the client is deliberately
-/// generic regardless of outcome so the audit log is the only
-/// place where "wrong passphrase" and "no dashboard scope" can
-/// be told apart.
+/// Every outcome -- success, bad credentials, missing dashboard scope,
+/// structural error -- writes one line to the admin audit log, under the
+/// unlocked admin's name where known and `(anon)` otherwise. The response to
+/// the client is deliberately generic regardless of outcome, so the audit log
+/// is the only place where "wrong passphrase" and "no dashboard scope" can be
+/// told apart.
 fn handle_login(
     state: &AdminState,
     body:  &[u8],
@@ -320,10 +292,6 @@ fn handle_login(
     }
 }
 
-/// Build the success response: set the session cookie and redirect
-/// to the dashboard root. The cookie is `HttpOnly`, `SameSite=Strict`
-/// and `Secure` so it cannot be read by page JavaScript or sent on
-/// cross-site requests.
 fn issue_session_cookie(
     state:     &AdminState,
     principal: &AdminPrincipal,
@@ -347,13 +315,10 @@ fn issue_session_cookie(
         .set_cookie(cookie)
 }
 
-/// Build a `Set-Cookie` value carrying `cookie_value` under
-/// [`SESSION_COOKIE_NAME`]. The cookie is constrained to the
-/// `/admin` path, marked `HttpOnly`, `Secure` and `SameSite=Strict`
-/// so page JavaScript cannot read it and cross-site requests
-/// cannot present it. Setting `clear` to `true` produces a
-/// `Max-Age=0` cookie used by the logout flow to evict the
-/// browser's stored copy.
+/// The cookie is constrained to the `/admin` path and marked `HttpOnly`,
+/// `Secure` and `SameSite=Strict`, so page JavaScript cannot read it and
+/// cross-site requests cannot present it. `clear` produces a `Max-Age=0`
+/// cookie, which is how the logout flow evicts the browser's stored copy.
 fn build_session_cookie(cookie_value: String, clear: bool) -> Cookie {
     let mut attrs: BTreeSet<SetCookieAttributes> = BTreeSet::new();
     attrs.insert(SetCookieAttributes::Path("/admin".to_string()));
@@ -374,15 +339,12 @@ fn build_session_cookie(cookie_value: String, clear: bool) -> Cookie {
 // │ LOGOUT                                                                    │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Clear the session cookie by setting it to an empty value with a
-/// `Max-Age=0`, then redirect to the login form. Stateless logout:
-/// because sessions are not stored server-side, dropping the cookie
-/// is sufficient.
+/// Stateless logout: sessions are not stored server-side, so setting the cookie
+/// empty with `Max-Age=0` and redirecting to the login form is sufficient.
 ///
-/// Audits the logout under the actor's name when a valid session
-/// cookie is present, and as `(anon)` otherwise. This lets the
-/// audit log distinguish "Alice signed out" from "an unauthorised
-/// visitor hit /admin/logout while not signed in".
+/// Audits the logout under the actor's name when a valid session cookie is
+/// present and as `(anon)` otherwise, so the log distinguishes "Alice signed
+/// out" from "an unauthorised visitor hit /admin/logout".
 fn handle_logout(
     state:   &AdminState,
     headers: &Arc<HeaderFields>,
@@ -407,11 +369,8 @@ fn handle_logout(
 // │ HOME                                                                      │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Authenticated landing page. Validates the session cookie, and on
-/// failure (no cookie / tampered / expired / unknown version) sends
-/// the visitor to the login form. Shows a four-card sparkline strip
-/// fed by `/admin/host.json`, a welcome line, and a list of the
-/// other live views.
+/// Validates the session cookie and, on any failure -- no cookie, tampered,
+/// expired, unknown version -- sends the visitor to the login form.
 fn render_home(
     state:   &AdminState,
     headers: &Arc<HeaderFields>,
@@ -459,9 +418,8 @@ fn render_home(
     html_response(html)
 }
 
-/// Emit the four-card sparkline placeholder block. The inline JS
-/// shipped alongside in `head_extra` fetches `/admin/host.json` and
-/// populates each card's headline value and uPlot chart.
+/// The inline JS shipped alongside in `head_extra` fetches `/admin/host.json`
+/// and populates each card's headline value and uPlot chart.
 fn render_host_sparkline_strip() -> String {
     "<h2>Host resources</h2>\n\
     <p class=\"meta\">Last hour, sampled every 5 s. \
@@ -498,12 +456,12 @@ fn render_host_sparkline_strip() -> String {
     </div>\n".to_string()
 }
 
-/// Serialise the host sampler history as four time-aligned series.
+/// Serialises the host sampler history as four time-aligned series.
 ///
-/// The series are computed at the later-of-pair timestamp because
-/// the rate-based figures (CPU busy, disk throughput, network
-/// throughput) require two snapshots. Memory is a level metric and
-/// is emitted at the same later-of-pair timestamp for alignment.
+/// The series are computed at the later-of-pair timestamp because the
+/// rate-based figures (CPU busy, disk throughput, network throughput) need two
+/// snapshots. Memory is a level metric, emitted at the same later-of-pair
+/// timestamp for alignment.
 fn render_host_json(
     state:   &AdminState,
     headers: &Arc<HeaderFields>,
@@ -593,10 +551,9 @@ fn render_host_json(
         .with_body(body.into_bytes())
 }
 
-/// Format an `f64` as a JSON number with one decimal place. Used by
-/// the host JSON emitter so the response size stays bounded and
-/// matches what uPlot will render anyway. `NaN` and infinities fall
-/// back to `0` so the emitted document is always valid JSON.
+/// One decimal place, which keeps the response bounded and matches what uPlot
+/// will render anyway. `NaN` and the infinities fall back to `0`, so the
+/// emitted document is always valid JSON.
 fn format_float(v: f64) -> String {
     if !v.is_finite() {
         return "0".to_string();
@@ -607,10 +564,8 @@ fn format_float(v: f64) -> String {
     fmt!("{}.{}", whole, frac)
 }
 
-/// JSON feed for the Traffic view. Returns counters, chart series,
-/// and the recent-requests table in a single payload that the
-/// auto-refresh client uses to update each section without
-/// reloading the page.
+/// Counters, chart series and the recent-requests table in a single payload, so
+/// the auto-refresh client can update each section without reloading the page.
 fn render_traffic_json(
     state:   &AdminState,
     headers: &Arc<HeaderFields>,
@@ -703,10 +658,8 @@ fn render_traffic_json(
         .with_body(body.into_bytes())
 }
 
-/// Escape a string for inclusion inside a JSON string literal. Only
-/// covers the characters actually reachable through `RequestRecord`
-/// (backslash, double quote, control characters). Not a general
-/// JSON encoder.
+/// Covers only the characters actually reachable through `RequestRecord`:
+/// backslash, double quote, control characters. Not a general JSON encoder.
 fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
@@ -729,20 +682,16 @@ fn json_escape(s: &str) -> String {
 // │ TRAFFIC                                                                   │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Render the live traffic view. Reads the shared
-/// `TrafficRecorder` from `AdminState` and emits:
+/// Renders the live traffic view from the shared `TrafficRecorder`:
 ///
-/// - A headline card with the monotonic total, the per-status
-///   summary, and the rate over the last sample window.
-/// - A uPlot chart drawn from the periodic sample history,
-///   showing request rate over time.
+/// - A headline card with the monotonic total, the per-status summary, and the
+///   rate over the last sample window.
+/// - A uPlot chart drawn from the periodic sample history, showing request rate
+///   over time.
 /// - The most recent 50 request records as a table.
 ///
-/// The chart is drawn client-side by a small inline JavaScript
-/// fragment that reads a JSON blob embedded in the page. No
-/// polling or auto-refresh yet -- the view is a synchronous
-/// snapshot of whatever the recorder contains at the moment of
-/// the request.
+/// The chart is drawn client-side by a small inline JavaScript fragment that
+/// reads a JSON blob embedded in the page.
 fn render_traffic(
     state:   &AdminState,
     headers: &Arc<HeaderFields>,
@@ -893,11 +842,10 @@ fn render_traffic(
     html_response(html)
 }
 
-/// Client-side glue that reads the chart JSON blob embedded in
-/// the page and draws a stacked requests-per-interval chart
-/// with uPlot. Exposes `window.steelTrafficRefresh()` so the
-/// auto-refresh polling loop can repaint the chip row, chart
-/// and recent-requests table without reloading the page.
+// Reads the chart JSON blob embedded in the page and draws a stacked
+// requests-per-interval chart with uPlot. Exposes `window.steelTrafficRefresh()`
+// so the auto-refresh polling loop can repaint the chip row, chart and
+// recent-requests table without reloading the page.
 const TRAFFIC_CHART_JS: &str = r#"
 (function() {
     var el = document.getElementById('traffic-chart');
@@ -1058,9 +1006,8 @@ const TRAFFIC_CHART_JS: &str = r#"
 })();
 "#;
 
-/// Compute the requests-per-second rate over the last sample
-/// interval in `history`. Returns 0.0 when there are fewer than
-/// two samples.
+/// Requests per second over the last sample interval in `history`, or zero when
+/// there are fewer than two samples.
 fn compute_rate_last(history: &[crate::srv::admin::traffic::TrafficSample]) -> f64 {
     if history.len() < 2 {
         return 0.0;
@@ -1075,11 +1022,9 @@ fn compute_rate_last(history: &[crate::srv::admin::traffic::TrafficSample]) -> f
     if dt == 0.0 { 0.0 } else { dn / dt }
 }
 
-/// Serialise the traffic history into the JSON shape the chart
-/// script expects: `{t: [unix_ts...], series: [{label, values}]}`
-/// where each `values` array is the delta in that status's
-/// counter since the previous sample (i.e. "requests in this
-/// sample interval").
+/// The shape the chart script expects: `{t: [unix_ts...], series: [{label,
+/// values}]}`, where each `values` array is the delta in that status's counter
+/// since the previous sample, i.e. requests in this sample interval.
 fn build_chart_json(
     history:     &[crate::srv::admin::traffic::TrafficSample],
     status_keys: &[u16],
@@ -1126,7 +1071,6 @@ fn build_chart_json(
     fmt!("{{\"t\":{},\"series\":{}}}", ts, series)
 }
 
-/// Pick a CSS class for a status chip based on the HTTP class.
 fn chip_class_for_status(status: u16) -> &'static str {
     match status {
         200..=299 => "chip-ok",
@@ -1137,7 +1081,6 @@ fn chip_class_for_status(status: u16) -> &'static str {
     }
 }
 
-/// Human-readable one-word description for a status code class.
 fn status_description(status: u16) -> &'static str {
     match status {
         200..=299 => "success",
@@ -1148,7 +1091,6 @@ fn status_description(status: u16) -> &'static str {
     }
 }
 
-/// Format a microsecond duration as a compact human string.
 fn format_duration_us(us: u64) -> String {
     if us < 1_000 {
         fmt!("{} \u{00b5}s", us)
@@ -1163,22 +1105,17 @@ fn format_duration_us(us: u64) -> String {
 // │ ADMIN MANAGEMENT                                                          │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Outcome of an admin-management mutation, threaded back into
-/// the rendered list view as a notice banner above the form.
+/// Threaded back into the rendered list view as a notice banner above the form.
 struct AdminFlash {
-    /// `true` for a green "ok" notice, `false` for a red error.
-    ok:      bool,
+    ok:      bool,      // true renders a green notice, false a red error
     message: String,
 }
 
-/// Render the admin management view: list of wallet admins and
-/// add / remove forms. Authorisation requires both a dashboard
-/// scope (so the visitor can see the dashboard at all) and the
-/// legacy `admin` scope (which gates admin enrolment in both the
-/// CLI and the dashboard). A visitor with only `dashboard.view`
-/// or only `dashboard.admin` is sent the "forbidden" flavour of
-/// the page rather than a redirect to login -- they are signed
-/// in, just not authorised for this verb.
+/// Authorisation requires both a dashboard scope, so the visitor can see the
+/// dashboard at all, and the legacy `admin` scope, which gates admin enrolment
+/// in the CLI and the dashboard alike. A visitor with only `dashboard.view` or
+/// only `dashboard.admin` gets the "forbidden" flavour of the page rather than
+/// a redirect to login: they are signed in, just not authorised for this verb.
 fn render_admins(
     state:   &AdminState,
     headers: &Arc<HeaderFields>,
@@ -1294,9 +1231,6 @@ fn render_admins(
     html_response(html)
 }
 
-/// Render the "you are signed in but not allowed here" page
-/// shown to a principal whose scopes do not include both
-/// `admin` and a dashboard scope.
 fn render_admin_forbidden(principal: &AdminPrincipal) -> HttpMessage {
     let body = "<h1>Admin management</h1>\n\
         <p class=\"notice error\">\
@@ -1318,8 +1252,6 @@ fn render_admin_forbidden(principal: &AdminPrincipal) -> HttpMessage {
     html_response(html)
 }
 
-/// Render an error variant of the admins page when the wallet
-/// itself cannot be read.
 fn render_admins_error(principal: &AdminPrincipal, message: &str) -> HttpMessage {
     let body = fmt!(
         "<h1>Admin management</h1>\n\
@@ -1336,7 +1268,6 @@ fn render_admins_error(principal: &AdminPrincipal, message: &str) -> HttpMessage
     html_response(html)
 }
 
-/// Render the flash banner above the admin list, if any.
 fn render_flash(flash: Option<&AdminFlash>) -> String {
     match flash {
         None => String::new(),
@@ -1348,9 +1279,8 @@ fn render_flash(flash: Option<&AdminFlash>) -> String {
     }
 }
 
-/// Dispatch a `POST /admin/admins` form submission. The `action`
-/// field selects between `add` and `remove`. Authorisation is the
-/// same as for the GET view: dashboard scope plus `admin`.
+/// The `action` field selects between `add` and `remove`. Authorisation is the
+/// same as for the GET view: a dashboard scope plus `admin`.
 fn handle_admins_post(
     state:   &AdminState,
     headers: &Arc<HeaderFields>,
@@ -1378,11 +1308,8 @@ fn handle_admins_post(
     render_admins(state, headers, Some(flash))
 }
 
-/// Add a new wallet admin entry from form fields. Validates the
-/// inputs, computes `expires_at` from the optional `expires_in`
-/// duration, takes a write lock on the wallet, calls
-/// `Wallet::enrol`, saves the wallet to disk, and emits an
-/// audit log line.
+/// `expires_at` is computed from the optional `expires_in` duration. The wallet
+/// is saved to disk and the change audit-logged.
 fn handle_admin_add(
     state:     &AdminState,
     principal: &AdminPrincipal,
@@ -1494,9 +1421,6 @@ fn handle_admin_add(
     }
 }
 
-/// Remove a wallet admin entry by name. Validates the input,
-/// takes a write lock, calls `Wallet::remove_by_name`, saves,
-/// and audit-logs.
 fn handle_admin_remove(
     state:     &AdminState,
     principal: &AdminPrincipal,
@@ -1568,20 +1492,17 @@ fn handle_admin_remove(
 // │ SECURITY                                                                  │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// One-shot flash banner threaded back into the security page after
-/// a POST mutation.
 struct SecurityFlash {
     ok:      bool,
     message: String,
 }
 
-/// Render the Security view: a chip row of per-state counts, a table
-/// of observed addresses with whitelist / blacklist / unblock buttons,
-/// and a manual blacklist form for operators that need to pre-block
-/// a known-bad IP.
+/// Renders the Security view: a chip row of per-state counts, a table of
+/// observed addresses with whitelist / blacklist / unblock buttons, and a manual
+/// blacklist form for operators who need to pre-block a known-bad IP.
 ///
-/// The read path only needs `dashboard.view`; any mutations from the
-/// accompanying POST handler require `dashboard.admin`.
+/// The read path needs only `dashboard.view`; mutations from the accompanying
+/// POST handler require `dashboard.admin`.
 fn render_security(
     state:   &AdminState,
     headers: &Arc<HeaderFields>,
@@ -1752,7 +1673,6 @@ fn render_security(
     html_response(html)
 }
 
-/// Render an error variant of the security page.
 fn render_security_error(principal: &AdminPrincipal, message: &str) -> HttpMessage {
     let body = fmt!(
         "<h1>Security</h1>\n\
@@ -1763,10 +1683,8 @@ fn render_security_error(principal: &AdminPrincipal, message: &str) -> HttpMessa
     html_response(html)
 }
 
-/// Dispatch a `POST /admin/security` form submission. Requires
-/// `dashboard.admin`: guard mutations are privileged. Actions are
-/// `whitelist`, `blacklist`, and `unblock`; each takes a single
-/// `ip` field.
+/// Requires `dashboard.admin`: guard mutations are privileged. The actions are
+/// `whitelist`, `blacklist` and `unblock`, each taking a single `ip` field.
 fn handle_security_post(
     state:   &AdminState,
     headers: &Arc<HeaderFields>,
@@ -1791,8 +1709,6 @@ fn handle_security_post(
     render_security(state, headers, Some(flash))
 }
 
-/// Parse the `ip` form field, apply `action_raw`, emit an audit log
-/// entry, and return a flash banner summarising the outcome.
 fn apply_security_action(
     state:      &AdminState,
     principal:  &AdminPrincipal,
@@ -1862,8 +1778,7 @@ fn apply_security_action(
     }
 }
 
-/// Map a form `action` value to the audit verb that should be
-/// recorded when parsing fails before we know which branch to take.
+/// The verb to record when parsing fails before the branch is known.
 fn audit_verb_for(action_raw: &str) -> &'static str {
     match action_raw {
         "whitelist" => VERB_DASHBOARD_GUARD_WHITELIST,
@@ -1873,8 +1788,6 @@ fn audit_verb_for(action_raw: &str) -> &'static str {
     }
 }
 
-/// Past-tense label used in the security flash banner so each
-/// successful action reads as a natural sentence.
 fn action_label(action_raw: &str) -> &'static str {
     match action_raw {
         "whitelist" => "Whitelisted",
@@ -1884,9 +1797,6 @@ fn action_label(action_raw: &str) -> &'static str {
     }
 }
 
-/// Build a 200 OK response with a UTF-8 HTML body. Centralises
-/// the content-type wiring so the per-page render functions stay
-/// concerned only with their own markup.
 fn html_response(body: String) -> HttpMessage {
     HttpMessage::new_response(HttpStatus::OK)
         .with_field(
@@ -1896,10 +1806,6 @@ fn html_response(body: String) -> HttpMessage {
         .with_body(body.into_bytes())
 }
 
-/// Build a 303 redirect to the login form. Used for any
-/// authenticated route that is hit without a valid session.
-/// `pub` so submodules can reuse this redirect without
-/// reimplementing the response shape.
 pub fn redirect_to_login() -> HttpMessage {
     HttpMessage::new_response(HttpStatus::SeeOther)
         .with_field(
@@ -1908,16 +1814,10 @@ pub fn redirect_to_login() -> HttpMessage {
         )
 }
 
-/// Extract the admin session cookie from the request header fields,
-/// decode and verify it via [`session::decode_session`], and return
-/// the embedded [`AdminPrincipal`] only if the principal is still
-/// authorised to see the dashboard. Any failure -- missing cookie,
-/// tampered cookie, expired cookie, missing dashboard scope -- is
-/// flattened to `None` so the caller can simply 303 to login.
-///
-/// `pub` so other dashboard submodules (`ozone_view`, future
-/// admin-management UI) can share the same auth gate rather than
-/// each implementing cookie verification independently.
+/// Decodes and verifies the admin session cookie, returning the embedded
+/// [`AdminPrincipal`] only if it is still authorised to see the dashboard. Any
+/// failure -- missing cookie, tampered cookie, expired cookie, missing dashboard
+/// scope -- is flattened to `None`, so the caller can simply 303 to login.
 pub fn extract_principal(
     state:   &AdminState,
     headers: &Arc<HeaderFields>,
@@ -1940,9 +1840,6 @@ pub fn extract_principal(
     Some(principal)
 }
 
-/// Walk the request's `Cookie` header and return the value of the
-/// first cookie whose key matches `name`. Returns `None` when the
-/// header is absent, has no Cookie field, or no entry matches.
 fn read_cookie(headers: &Arc<HeaderFields>, name: &str) -> Option<String> {
     if let Some(HeaderFieldValue::Cookie(cookies)) =
         headers.get_one(&HeaderName::Cookie)
@@ -1960,17 +1857,14 @@ fn read_cookie(headers: &Arc<HeaderFields>, name: &str) -> Option<String> {
 // │ LOGIN FORM                                                                │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Build the HTML login form. `error_msg`, when present, is
-/// rendered above the form -- the wording is deliberately generic
-/// to avoid leaking which axis (no admin / wrong passphrase / no
-/// dashboard scope) caused the failure.
+/// `error_msg`, when present, is rendered above the form. Its wording is
+/// deliberately generic, to avoid leaking which axis -- no admin, wrong
+/// passphrase, no dashboard scope -- caused the failure.
 ///
-/// When Steel is sealed the form says so, and says what signing in
-/// will do. This is the cold-start path: the process is up and serving
-/// its static sites, but the databases are shut until an admin's
-/// passphrase unwraps the master key. The operator needs to know that
-/// this form is the thing standing between them and their databases --
-/// otherwise a sealed Steel looks like a healthy one that has
+/// When Steel is sealed the form says so, and says what signing in will do.
+/// This is the cold-start path: the process is up and serving its static sites,
+/// but the databases are shut until an admin's passphrase unwraps the master
+/// key. Without that, a sealed Steel looks like a healthy one that has
 /// mysteriously lost its data.
 fn render_login_form(sealed: bool, error_msg: Option<&str>) -> HttpMessage {
     let error_html = match error_msg {
@@ -2012,11 +1906,8 @@ fn render_login_form(sealed: bool, error_msg: Option<&str>) -> HttpMessage {
 // │ HELPERS                                                                   │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Extract a single field value from an
-/// `application/x-www-form-urlencoded` body. Returns the first
-/// matching key's value, URL-decoded; returns `None` if the key
-/// is absent. Designed for tiny login-style bodies where one or
-/// two fields are expected.
+/// The first matching key's value, URL-decoded. Sized for tiny login-style
+/// bodies of one or two fields.
 pub(crate) fn extract_form_field(body: &[u8], key: &str) -> Option<String> {
     let s = ok!(std::str::from_utf8(body).ok());
     for pair in s.split('&') {
@@ -2030,9 +1921,8 @@ pub(crate) fn extract_form_field(body: &[u8], key: &str) -> Option<String> {
     None
 }
 
-/// Decode an `x-www-form-urlencoded` value. Replaces `+` with space
-/// and `%XX` with the corresponding byte. Invalid escapes pass
-/// through unchanged.
+/// Replaces `+` with a space and `%XX` with the corresponding byte. An invalid
+/// escape passes through unchanged.
 fn url_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());

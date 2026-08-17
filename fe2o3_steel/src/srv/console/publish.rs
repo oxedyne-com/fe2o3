@@ -18,6 +18,9 @@
 //! prose is not checked -- it is Markdown, and Markdown that will not parse is refused by the parser
 //! where it is rendered -- but it is escaped everywhere it is shown except the preview, which is the
 //! rendered HTML a reader would get.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::srv::{
 	cache,
@@ -94,124 +97,63 @@ use std::{
 use super::html_escape;
 
 
-/// The console's root, where the posts are listed.
-pub const PATH_ROOT: &str = "/manage";
+pub const PATH_ROOT:		&str = "/manage";
+pub const PATH_EDIT:		&str = "/manage/edit";
+// A member's own profile: the name, picture and description readers see, which their login
+// username cannot be.
+pub const PATH_PROFILE:		&str = "/manage/profile";
+pub const PATH_PROFILE_JSON:	&str = "/manage/profile.json";
+pub const PATH_PROFILE_SAVE:	&str = "/manage/profile/save";
+pub const PATH_TAG_DELETE:	&str = "/manage/tag/delete";
+// A draft as a reader would get it, if it were not a draft.
+pub const PATH_PREVIEW:		&str = "/manage/preview";
+pub const PATH_SAVE:		&str = "/manage/save";
+pub const PATH_DELETE:		&str = "/manage/delete";
+pub const PATH_IMPORT:		&str = "/manage/import";
+// Where the editor posts source to see it rendered, for a live preview.
+pub const PATH_RENDER:		&str = "/manage/render";
+// The posts as JSON, every state, for a front-end that renders its own list.
+pub const PATH_LIST_JSON:	&str = "/manage/list.json";
+pub const PATH_POST_JSON:	&str = "/manage/post.json";
+pub const PATH_TAGS_JSON:	&str = "/manage/tags.json";
+// A site's destination settings as JSON: the public fields and whether a secret is set, never the
+// secret itself.
+pub const PATH_CREDS_JSON:	&str = "/manage/creds.json";
+pub const PATH_CREDS:		&str = "/manage/creds";
+pub const PATH_DESTS:		&str = "/manage/destinations";
+// The AI page: the model to call, the key to call it with, the two prompts, and the addresses
+// told when a comment needs a human. `fix` is the editor's Fix button; `test` checks the key
+// reaches the model.
+pub const PATH_AI:		&str = "/manage/ai";
+pub const PATH_AI_SAVE:		&str = "/manage/ai/save";
+pub const PATH_AI_FIX:		&str = "/manage/ai/fix";
+pub const PATH_AI_TEST:		&str = "/manage/ai/test";
+pub const PATH_AI_JSON:		&str = "/manage/ai.json";
+// The declarations page: how much AI went into each of the things this site shows that are not
+// posts. A post declares in the composer, beside the prose it is a declaration about.
+pub const PATH_DECLARE:		&str = "/manage/declare";
+pub const PATH_DECLARE_SAVE:	&str = "/manage/declare/save";
+pub const PATH_DECLARE_JSON:	&str = "/manage/declare.json";
+// The moderation queue, and where its approve, spam, remove, erase and block actions post.
+pub const PATH_COMMENTS:	&str = "/manage/comments";
+pub const PATH_COMMENTS_ACTION:	&str = "/manage/comments/action";
+pub const PATH_COMMENTS_JSON:	&str = "/manage/comments.json";
+pub const PATH_SUBS_JSON:	&str = "/manage/subscribers.json";
+pub const PATH_REPORTS_JSON:	&str = "/manage/reports.json";
+pub const PATH_SUBS:		&str = "/manage/subscribers";
+pub const PATH_SUBS_CSV:	&str = "/manage/subscribers.csv";
+pub const PATH_REPORTS:		&str = "/manage/reports";
 
-/// The editor, for one post or for a new one.
-pub const PATH_EDIT: &str = "/manage/edit";
+// The bucket a report counts a record under when it carries no month to file it by.
+const UNDATED:			&str = "unknown";
 
-/// A member's own profile: the name, picture and description readers see, which their login username
-/// cannot be.
-pub const PATH_PROFILE: &str = "/manage/profile";
-
-/// A member's own profile as JSON, for an app that draws the form itself.
-pub const PATH_PROFILE_JSON: &str = "/manage/profile.json";
-
-/// Where the profile form posts.
-pub const PATH_PROFILE_SAVE: &str = "/manage/profile/save";
-
-/// Where a curator's tag deletion posts.
-pub const PATH_TAG_DELETE: &str = "/manage/tag/delete";
-
-/// A draft as a reader would get it, if it were not a draft.
-pub const PATH_PREVIEW: &str = "/manage/preview";
-
-/// Where the editor posts.
-pub const PATH_SAVE: &str = "/manage/save";
-
-/// Where a deletion posts.
-pub const PATH_DELETE: &str = "/manage/delete";
-
-/// Where an import of the directory posts.
-pub const PATH_IMPORT: &str = "/manage/import";
-
-/// Where the editor posts source to see it rendered, for a live preview.
-pub const PATH_RENDER: &str = "/manage/render";
-
-/// The posts as JSON, every state, for a front-end that renders its own list.
-pub const PATH_LIST_JSON: &str = "/manage/list.json";
-
-/// One post's source and rendering as JSON, for a front-end that edits it in place.
-pub const PATH_POST_JSON: &str = "/manage/post.json";
-
-/// The site's tag vocabulary as JSON, for the composer's palette.
-pub const PATH_TAGS_JSON: &str = "/manage/tags.json";
-
-/// A site's destination settings as JSON: the public fields and whether a secret is set, never the
-/// secret itself.
-pub const PATH_CREDS_JSON: &str = "/manage/creds.json";
-
-/// Where the destination settings form posts a remote's credentials.
-pub const PATH_CREDS: &str = "/manage/creds";
-
-/// The destinations page: the remotes a post can be sent on to, and the credentials for each.
-pub const PATH_DESTS: &str = "/manage/destinations";
-
-/// The AI page: the model to call, the key to call it with, the two prompts, and the addresses told
-/// when a comment needs a human.
-pub const PATH_AI: &str = "/manage/ai";
-
-/// Where the AI settings form posts.
-pub const PATH_AI_SAVE: &str = "/manage/ai/save";
-
-/// Where the editor's Fix button posts a post's text to be tidied.
-pub const PATH_AI_FIX: &str = "/manage/ai/fix";
-
-/// Where the AI page's Test button posts, to check the key reaches the model.
-pub const PATH_AI_TEST: &str = "/manage/ai/test";
-
-/// The AI settings as JSON, for an app that draws the panel itself.
-pub const PATH_AI_JSON: &str = "/manage/ai.json";
-
-/// The declarations page: how much AI went into each of the things this site shows that are not
-/// posts. A post declares in the composer, beside the prose it is a declaration about.
-pub const PATH_DECLARE: &str = "/manage/declare";
-
-/// Where the declarations form posts one thing's level.
-pub const PATH_DECLARE_SAVE: &str = "/manage/declare/save";
-
-/// The declarations as JSON, for an app that draws the panel itself.
-pub const PATH_DECLARE_JSON: &str = "/manage/declare.json";
-
-/// The moderation queue: what has been said and what is waiting on a decision.
-pub const PATH_COMMENTS: &str = "/manage/comments";
-
-/// Where the queue's approve, spam, remove, erase and block actions post.
-pub const PATH_COMMENTS_ACTION: &str = "/manage/comments/action";
-
-/// The moderation queue as JSON, for an app that draws it itself.
-pub const PATH_COMMENTS_JSON: &str = "/manage/comments.json";
-
-/// The subscriber list as JSON, for an app that draws the list itself.
-pub const PATH_SUBS_JSON: &str = "/manage/subscribers.json";
-
-/// The reports as JSON, for an app that draws them itself.
-pub const PATH_REPORTS_JSON: &str = "/manage/reports.json";
-
-/// The subscribers page: the newsletter's list, its count, and where a post is sent to it.
-pub const PATH_SUBS: &str = "/manage/subscribers";
-
-/// The subscriber list as CSV, for the site to keep the list it owns.
-pub const PATH_SUBS_CSV: &str = "/manage/subscribers.csv";
-
-/// The reports page: what the list is made of, and what has been sent to it.
-pub const PATH_REPORTS: &str = "/manage/reports";
-
-/// The bucket a report counts a record under when it carries no month to file it by.
-const UNDATED: &str = "unknown";
-
-/// Where the "send to subscribers" form posts a live post's slug.
-pub const PATH_NEWSLETTER: &str = "/manage/newsletter";
-
-/// Where the per-subscriber unsubscribe and remove forms post.
-///
-/// One endpoint, two actions: an `action` of `unsubscribe` sets the address [`unsubscribed`], and one of
-/// `delete` erases it outright. The target is the `email` field, exactly as the admin sees it in the
-/// list, mirroring the admin-management page's own `action` form.
-pub const PATH_SUBS_ACTION: &str = "/manage/subscribers/action";
-
-/// Where the "send a test" form posts a slug and a single recipient.
-pub const PATH_NEWSLETTER_TEST: &str = "/manage/newsletter/test";
+pub const PATH_NEWSLETTER:	&str = "/manage/newsletter";
+// Where the per-subscriber unsubscribe and remove forms post. One endpoint, two actions: an
+// `action` of `unsubscribe` sets the address unsubscribed, and one of `delete` erases it
+// outright. The target is the `email` field, exactly as the admin sees it in the list.
+pub const PATH_SUBS_ACTION:	&str = "/manage/subscribers/action";
+// Where the "send a test" form posts a slug and a single recipient.
+pub const PATH_NEWSLETTER_TEST:	&str = "/manage/newsletter/test";
 
 
 /// Whether a path is one this module writes to.
@@ -248,19 +190,6 @@ pub fn posts(path: &str) -> bool {
 // └───────────────────────────────────────────────────────────────────────────┘
 
 /// Serves the console's post pages. The gate ran before this: `admin` is a proven site admin.
-/// Whether a member may curate the shared tag vocabulary -- delete a tag across every author's posts,
-/// not merely edit their own.
-///
-/// Every site admin may, whether the operator pinned them in the vhost's `site_admins` or the site
-/// granted them from the browser. The two were held apart for a while, on the reasoning that reaching
-/// into another author's posts should want the operator's own grant; the answer is that a site admin is
-/// already trusted with the site's prose, its subscribers and its comments, and a second rank that
-/// governs one destructive act is a rank nobody can keep straight. The act is guarded where it belongs
-/// -- by the count of posts it will touch, shown before it happens -- rather than by a standing nobody
-/// remembers they have.
-///
-/// Authorship is untouched by this: every author adds tags and edits their own post's tags, admin or
-/// not. Only deletion across the site is held here.
 
 pub fn handle_get<
 	const UIDL: usize,
@@ -955,8 +884,7 @@ fn month_table(heading: &str, unit: &str, months: &[(String, usize)]) -> String 
 	s
 }
 
-/// How many rows a list page shows before it pages.
-const PAGE_SIZE: usize = 20;
+const PAGE_SIZE: usize = 20;	// rows before a list pages
 
 /// The search-and-filter row over a list of posts.
 ///
@@ -1078,16 +1006,16 @@ fn preview_script(csrf: &str) -> String {
 	)
 }
 
-/// An inline SVG icon, drawn in the current text colour at the size of the control holding it.
-///
-/// Inline rather than a file: the console is one response with no asset it can be separated from,
-/// and a stylesheet that reaches for an image is a stylesheet that can arrive without one. Unknown
-/// names give nothing, so a typo shows as a bare button rather than a broken glyph.
 /// The close icon, for the page shell, which draws the way out of the console itself.
 pub fn icon_close() -> &'static str {
 	icon("close")
 }
 
+/// An inline SVG icon, drawn in the current text colour at the size of the control holding it.
+///
+/// Inline rather than a file: the console is one response with no asset it can be separated from,
+/// and a stylesheet that reaches for an image is a stylesheet that can arrive without one. Unknown
+/// names give nothing, so a typo shows as a bare button rather than a broken glyph.
 fn icon(name: &str) -> &'static str {
 	match name {
 		"close"	=> "<svg viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\" \
@@ -1238,7 +1166,6 @@ fn test_form<
 	)
 }
 
-/// The subscriber list as a CSV download.
 fn subscribers_csv<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -1728,17 +1655,16 @@ fn profile_page<
 	Ok(page(theme, admin, "Profile", &body))
 }
 
-/// The largest picture a member may upload, before base64.
-///
-/// A quarter of a megabyte is a generous avatar and a poor way to move a photograph, which is the
-/// balance wanted: the record lives in the site's own database beside its posts.
+// The largest picture a member may upload, before base64. A quarter of a megabyte is a generous
+// avatar and a poor way to move a photograph, which is the balance wanted: the record lives in the
+// site's own database beside its posts.
 pub const AVATAR_MAX_BYTES: usize = 256 * 1024;
 
-/// Wires the profile's picker: the chosen file becomes a data URL in a hidden field, and the preview
-/// changes at once so a member sees what they are about to save.
-///
-/// Without it the form still works -- a member types an address into the field below, which is what
-/// the picker fills in for them. This is the enhancement, not the mechanism.
+// Wires the profile's picker: the chosen file becomes a data URL in a hidden field, and the preview
+// changes at once so a member sees what they are about to save.
+//
+// Without it the form still works -- a member types an address into the field below, which is what
+// the picker fills in for them. This is the enhancement, not the mechanism.
 const PROFILE_SCRIPT: &str = r#"<script>
 (function () {
 	"use strict";
@@ -2051,14 +1977,6 @@ fn tags_json<
 }
 
 
-/// The destinations page: the remotes this site can send a post on to, and what each needs to do it.
-///
-/// The server-rendered twin of the app's Destinations panel, and the only one a site without the app
-/// has. Every secret here is write-only, exactly as it is over JSON: a stored secret comes back as the
-/// word that one is held and never as its value, and a field left blank keeps what is stored, so a
-/// handle can be corrected without re-typing a password. A remote the config file also provides is
-/// named as such, because a site whose credentials come from `{env:}` or `{file:}` should not be told
-/// its destination is unset.
 /// The declarations page: a level for each thing the site shows that is not a post.
 ///
 /// A post declares in the composer, beside the prose the declaration is about. Everything else a site
@@ -2159,20 +2077,20 @@ fn declare_page<
 	Ok(page(theme, admin, "Declarations", &body))
 }
 
-/// Saves a declaration the moment it is chosen.
-///
-/// There is nothing here for a Save button to do. A row is one field with one answer, its whole
-/// state is what the select says, and a button beside each row would be a column of buttons all
-/// doing the same single thing -- which is exactly the reasoning that took the Save button off the
-/// composer ([`AUTOSAVE_SCRIPT`]) and never put one on the app's own version of this screen.
-///
-/// Static, like its siblings: the CSRF token rides in each form's hidden field and the save URL is
-/// the form's own `action`, so nothing is interpolated.
-///
-/// **Nothing is said on success.** The box already shows the answer, so a sentence repeating it
-/// states the same fact twice -- and one status line under a column of rows reads as belonging to
-/// the last row rather than to whichever was just changed. A failure still speaks: that is the one
-/// thing the select cannot show, since it goes on displaying a value the server did not take.
+// Saves a declaration the moment it is chosen.
+//
+// There is nothing here for a Save button to do. A row is one field with one answer, its whole
+// state is what the select says, and a button beside each row would be a column of buttons all
+// doing the same single thing -- which is exactly the reasoning that took the Save button off the
+// composer ([`AUTOSAVE_SCRIPT`]) and never put one on the app's own version of this screen.
+//
+// Static, like its siblings: the CSRF token rides in each form's hidden field and the save URL is
+// the form's own `action`, so nothing is interpolated.
+//
+// **Nothing is said on success.** The box already shows the answer, so a sentence repeating it
+// states the same fact twice -- and one status line under a column of rows reads as belonging to
+// the last row rather than to whichever was just changed. A failure still speaks: that is the one
+// thing the select cannot show, since it goes on displaying a value the server did not take.
 const DECLARE_SCRIPT: &str = "<script>\n(function(){\n  var status=document.getElementById('mc-declare-msg');\n  var forms=document.querySelectorAll('form.mc-declare');\n  if(!status||!forms.length){return;}\n  function say(text,bad){\n    status.className='mc-autosave'+(bad?' is-error':'');\n    status.textContent=text;\n  }\n  forms.forEach(function(form){\n    var sel=form.querySelector('select');\n    if(!sel){return;}\n    sel.addEventListener('change',function(){\n      say('',false);\n      fetch(form.action,{method:'POST',credentials:'same-origin',\n        headers:{'Content-Type':'application/x-www-form-urlencoded','Accept':'application/json'},\n        body:new URLSearchParams(new FormData(form)).toString()})\n        .then(function(r){return r.json();})\n        .then(function(d){\n          if(d&&d.said){say('',false);}\n          else{say('Not saved \\u2014 '+((d&&d.error)||'try again'),true);}\n        })\n        .catch(function(){say('Not saved \\u2014 the server did not answer',true);});\n    });\n  });\n})();\n</script>\n";
 
 /// The five rungs as options, the one in force selected.
@@ -2258,7 +2176,6 @@ fn declare_json<
 	Ok(json_body(&res!(body.encode_string_with_config(&EncoderConfig::<(), ()>::json(None)))))
 }
 
-/// Sets or clears one thing's declared level.
 async fn do_declare_save<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -2314,6 +2231,15 @@ async fn do_declare_save<
 	}
 }
 
+/// The destinations page: the remotes this site can send a post on to, and what each needs to do
+/// it.
+///
+/// The server-rendered twin of the app's Destinations panel, and the only one a site without the
+/// app has. Every secret here is write-only, exactly as it is over JSON: a stored secret comes back
+/// as the word that one is held and never as its value, and a field left blank keeps what is
+/// stored, so a handle can be corrected without re-typing a password. A remote the config file also
+/// provides is named as such, because a site whose credentials come from `{env:}` or `{file:}`
+/// should not be told its destination is unset.
 fn destinations_page<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -2468,9 +2394,9 @@ fn ai_page<
 	Ok(page(theme, admin, "AI", &body))
 }
 
-/// The AI page's Test button: it posts nothing of the operator's, asks the server to reach the model,
-/// and shows what came back beside the button. It reads the CSRF token from the settings form it sits
-/// in, so it needs nothing passed to it.
+// The AI page's Test button: it posts nothing of the operator's, asks the server to reach the model,
+// and shows what came back beside the button. It reads the CSRF token from the settings form it sits
+// in, so it needs nothing passed to it.
 const AI_TEST_SCRIPT: &str = "<script>\n\
 (function(){\n\
   var btn=document.getElementById('ai-test');\n\
@@ -2768,7 +2694,6 @@ fn reports_json<
 	Ok(json_body(&res!(body.encode_string_with_config(&EncoderConfig::<(), ()>::json(None)))))
 }
 
-/// Counts by month as a list of maps, for the JSON reports.
 fn months_dat(months: &[(String, usize)]) -> Dat {
 	Dat::List(months.iter().map(|(m, n)| {
 		let mut e = DaticleMap::new();
@@ -3169,7 +3094,6 @@ fn dests_back(json: bool) -> HttpMessage {
 	}
 }
 
-/// The answer to an AI settings write, back to its own page.
 fn ai_back(json: bool) -> HttpMessage {
 	if json {
 		json_body("{\"ok\":true}")
@@ -3178,7 +3102,6 @@ fn ai_back(json: bool) -> HttpMessage {
 	}
 }
 
-/// The answer to an AI write that did not go through, carrying the reason back to its own page.
 fn ai_back_with(why: &str, json: bool) -> HttpMessage {
 	if json {
 		json_error(why)
@@ -3366,7 +3289,6 @@ async fn do_ai_test<
 	Ok(json_body(&res!(Dat::Map(m).json())))
 }
 
-/// The answer to a destination write that did not go through, carrying the reason back to its own page.
 fn dests_back_with(why: &str, json: bool) -> HttpMessage {
 	if json {
 		json_error(why)
@@ -3629,7 +3551,6 @@ fn do_creds<
 	Ok(dests_back(json))
 }
 
-/// Deletes a post.
 /// Saves a member's own profile: the display name, picture and description readers see.
 ///
 /// A member sets only their own -- the username the profile is stored against is the signed-in one,
@@ -3788,7 +3709,6 @@ fn do_render(body: &[u8]) -> Outcome<HttpMessage> {
 	}
 }
 
-/// Reads the directory into the store.
 fn do_import<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -3865,12 +3785,10 @@ fn json_error(why: &str) -> HttpMessage {
 	}
 }
 
-/// A thing the page says.
 fn notice(html: &str) -> String {
 	fmt!("<p class=\"mc-notice\">{}</p>\n", html)
 }
 
-/// The button that reads the directory in.
 fn import_form(csrf: &str, dir: &str) -> String {
 	// Importing reads a directory of Markdown on the server into the store. It is the migration
 	// path off `source: dir`, and once a site has made that move it is a control that can only
@@ -3908,7 +3826,6 @@ fn dir_has_files(dir: &str) -> bool {
 	}
 }
 
-/// `selected`, where it is.
 fn selected(yes: bool) -> &'static str {
 	if yes { " selected" } else { "" }
 }
@@ -3940,17 +3857,17 @@ fn author_field(username: &str, name: &str, signer: &str, signer_name: &str) -> 
 	)
 }
 
-/// Takes a post over: the one way to re-attribute one from the console.
-///
-/// A post carries the username of whoever saved it, and a console that could not change that had no
-/// answer for the ordinary case of a post written under an earlier identity -- an import, a member
-/// account since retired, an operator entry renamed. Its byline then reads *Anonymous* for ever,
-/// because the name it points at has no profile and no way to acquire one.
-///
-/// Clearing the field is what does the work: the save handler attributes a post with no author named
-/// to whoever is signed in, so emptying the input and letting the ordinary autosave run is the whole
-/// mechanism. The `change` is dispatched by hand because setting a value in script fires no event,
-/// which is the same reason the chip scripts dispatch one.
+// Takes a post over: the one way to re-attribute one from the console.
+//
+// A post carries the username of whoever saved it, and a console that could not change that had no
+// answer for the ordinary case of a post written under an earlier identity -- an import, a member
+// account since retired, an operator entry renamed. Its byline then reads *Anonymous* for ever,
+// because the name it points at has no profile and no way to acquire one.
+//
+// Clearing the field is what does the work: the save handler attributes a post with no author named
+// to whoever is signed in, so emptying the input and letting the ordinary autosave run is the whole
+// mechanism. The `change` is dispatched by hand because setting a value in script fires no event,
+// which is the same reason the chip scripts dispatch one.
 const AUTHOR_SCRIPT: &str = "<script>\n(function(){\n  var btn=document.getElementById('mc-author-mine');\n  var hidden=document.getElementById('mc-author');\n  var name=document.getElementById('mc-author-name');\n  if(!btn||!hidden||!name){return;}\n  btn.addEventListener('click',function(){\n    hidden.value='';\n    name.textContent=btn.getAttribute('data-name')||'you';\n    btn.remove();\n    hidden.dispatchEvent(new Event('change',{bubbles:true}));\n  });\n})();\n</script>\n";
 
 /// The composer's AI-declaration field: how much the writing of this post needed a model.
@@ -4104,13 +4021,13 @@ fn tags_field(tags: &[String], palette: &[(String, usize, usize)], curator: bool
 	s
 }
 
-/// Moves a category chip between the two boxes on a click or a drag, and keeps the hidden `categories`
-/// input in step so the form submits the Selected set. Does nothing where it does not run: the hidden
-/// field already carries the post's categories.
-///
-/// Every selector here is qualified by `[data-cat]` and every lookup is scoped to this field's own two
-/// boxes, so the category chips and the tag chips -- which share the `mc-chip` class and so the one
-/// look -- can never be picked up by each other's script.
+// Moves a category chip between the two boxes on a click or a drag, and keeps the hidden `categories`
+// input in step so the form submits the Selected set. Does nothing where it does not run: the hidden
+// field already carries the post's categories.
+//
+// Every selector here is qualified by `[data-cat]` and every lookup is scoped to this field's own two
+// boxes, so the category chips and the tag chips -- which share the `mc-chip` class and so the one
+// look -- can never be picked up by each other's script.
 const CATS_SCRIPT: &str = "<script>\n\
 (function(){\n\
   var hidden=document.getElementById('mc-cats');\n\
@@ -4159,19 +4076,19 @@ const CATS_SCRIPT: &str = "<script>\n\
 })();\n\
 </script>\n";
 
-/// The composer's autosave: the Save button is gone, and the form writes itself as the author works.
-///
-/// The twin of the app's own composer autosave, and safe for the same reason: a draft save reaches
-/// nobody -- the server delivers nothing, mails nobody, syndicates to no one until a post is live --
-/// so persisting a draft as it is typed costs a reader nothing. Publishing stays a decision: the
-/// State selector set to Live is the one save that can reach the world, so it saves at once rather
-/// than after the usual pause, and the line says so.
-///
-/// Static, like the sibling scripts: everything it needs is in the DOM. The CSRF token rides in the
-/// form's own hidden field, and the save URL is the form's `action`, so nothing is interpolated. The
-/// save asks for JSON (`Accept`), which the handler answers with `{ok}` or `{error}` rather than the
-/// redirect a plain form post would get. A `pagehide` beacon flushes a pending edit whichever way the
-/// author leaves the page, so nothing typed is lost to the gap before the next scheduled save.
+// The composer's autosave: the Save button is gone, and the form writes itself as the author works.
+//
+// The twin of the app's own composer autosave, and safe for the same reason: a draft save reaches
+// nobody -- the server delivers nothing, mails nobody, syndicates to no one until a post is live --
+// so persisting a draft as it is typed costs a reader nothing. Publishing stays a decision: the
+// State selector set to Live is the one save that can reach the world, so it saves at once rather
+// than after the usual pause, and the line says so.
+//
+// Static, like the sibling scripts: everything it needs is in the DOM. The CSRF token rides in the
+// form's own hidden field, and the save URL is the form's `action`, so nothing is interpolated. The
+// save asks for JSON (`Accept`), which the handler answers with `{ok}` or `{error}` rather than the
+// redirect a plain form post would get. A `pagehide` beacon flushes a pending edit whichever way the
+// author leaves the page, so nothing typed is lost to the gap before the next scheduled save.
 const AUTOSAVE_SCRIPT: &str = "<script>\n\
 (function(){\n\
   var form=document.querySelector('.mc-form');\n\
@@ -4238,15 +4155,15 @@ const AUTOSAVE_SCRIPT: &str = "<script>\n\
 })();\n\
 </script>\n";
 
-/// The composer's Fix button: ask the model to tidy the post, show what it changed, and change
-/// nothing until the author says so.
-///
-/// Propose, then accept: the suggestion is shown as a line diff against the author's own text -- what
-/// the model would remove struck through, what it would add underlined -- so the author sees the
-/// change rather than a wall of text to re-read, and decides. "Use this" writes the suggestion into
-/// the editor (and dispatches an input so autosave picks it up); "Discard" leaves everything as it
-/// was. The diff is over lines, which is cheap for a post and enough to see a copy-edit; a very long
-/// post falls back to showing the suggestion plainly rather than building a table nobody waits for.
+// The composer's Fix button: ask the model to tidy the post, show what it changed, and change
+// nothing until the author says so.
+//
+// Propose, then accept: the suggestion is shown as a line diff against the author's own text -- what
+// the model would remove struck through, what it would add underlined -- so the author sees the
+// change rather than a wall of text to re-read, and decides. "Use this" writes the suggestion into
+// the editor (and dispatches an input so autosave picks it up); "Discard" leaves everything as it
+// was. The diff is over lines, which is cheap for a post and enough to see a copy-edit; a very long
+// post falls back to showing the suggestion plainly rather than building a table nobody waits for.
 const FIX_SCRIPT: &str = "<script>\n\
 (function(){\n\
   var form=document.querySelector('.mc-form');\n\
@@ -4312,8 +4229,8 @@ const FIX_SCRIPT: &str = "<script>\n\
 })();\n\
 </script>\n";
 
-/// The composer's tag script: the two boxes, the search-or-create line, and a curator's tag deletion,
-/// all kept in step with the hidden `tags` input the form submits.
+// The composer's tag script: the two boxes, the search-or-create line, and a curator's tag deletion,
+// all kept in step with the hidden `tags` input the form submits.
 const TAG_SCRIPT: &str = "<script>\n\
 (function(){\n\
   var hidden=document.getElementById('mc-tags');\n\
@@ -4473,7 +4390,6 @@ fn url_decode(s: &str) -> String {
 	String::from_utf8_lossy(&out).into_owned()
 }
 
-/// One hex digit's value.
 fn hex_nibble(b: u8) -> Option<u8> {
 	match b {
 		b'0'..=b'9'	=> Some(b - b'0'),
@@ -5144,7 +5060,6 @@ fn comment_card(c: &comment::Comment, csrf: &str) -> String {
 	s
 }
 
-/// The tag a comment's state wears in the queue.
 fn state_tag(state: comment::CommentState) -> String {
 	let (cls, word) = match state {
 		comment::CommentState::Pending	=> ("mc-tag",		"waiting"),
@@ -5192,7 +5107,6 @@ fn comments_switch(open: bool, csrf: &str) -> String {
 	)
 }
 
-/// The queue's pager, keeping the state filter across a page turn.
 fn comments_pager(want: &str, at: usize, pages: usize) -> String {
 	if pages <= 1 {
 		return String::new();
@@ -5211,7 +5125,6 @@ fn comments_pager(want: &str, at: usize, pages: usize) -> String {
 	s
 }
 
-/// The state filter over the queue.
 fn comments_filter(want: &str, total: usize) -> String {
 	fmt!(
 		"<form class=\"mc-filter mc-form\" method=\"GET\" action=\"{path}\">\n\
@@ -5362,7 +5275,6 @@ fn do_comment_action<
 	Ok(comments_back(json))
 }
 
-/// The answer to a moderation write, landing back on the queue.
 fn comments_back(json: bool) -> HttpMessage {
 	if json {
 		json_body("{\"ok\":true}")
@@ -5371,7 +5283,6 @@ fn comments_back(json: bool) -> HttpMessage {
 	}
 }
 
-/// The answer to a moderation write that did not go through.
 fn comments_back_with(why: &str, json: bool) -> HttpMessage {
 	if json {
 		json_error(why)
@@ -5480,7 +5391,6 @@ mod ui_dump {
 		c
 	}
 
-	/// Write one page, named for the screen it is.
 	fn put(dir: &str, name: &str, resp: &HttpMessage) -> Outcome<()> {
 		let path = fmt!("{}/{}.html", dir, name);
 		res!(std::fs::write(&path, &resp.body), IO, File);

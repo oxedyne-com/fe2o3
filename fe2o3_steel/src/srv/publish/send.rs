@@ -17,6 +17,9 @@
 //! The network wrappers around them are as thin as they can be, because what cannot be exercised in a
 //! test against a live remote is exactly what a test cannot catch. What *can* be pinned -- the JSON a
 //! remote is sent, the permalink pulled from what it returns -- is.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::srv::publish::{
 	Post,
@@ -93,31 +96,23 @@ use std::{
 use tokio_rustls::rustls::ClientConfig;
 
 
-/// The default Bluesky host, where a site's config names none. The public PDS, which is what an app
-/// password authenticates against unless a site runs its own.
+// The default Bluesky host, where a site's config names none: the public PDS, which is what an app
+// password authenticates against unless a site runs its own.
 pub const BLUESKY_HOST_DEFAULT: &str = "bsky.social";
 
 
-/// A Mastodon account's credentials.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MastodonCreds {
-	/// The instance the account lives on, e.g. `https://mastodon.social`. The scheme is stripped to a
-	/// host before it is dialled.
-	pub base_url:	String,
-	/// The access token, a static bearer. Resolved from a secret reference, never in the config in the
-	/// clear.
-	pub token:	String,
+	pub base_url:	String,		// e.g. `https://mastodon.social`; scheme stripped to dial
+	pub token:	String,		// a static bearer, from a secret reference
 }
 
-/// A Bluesky account's credentials.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct BlueskyCreds {
-	/// The PDS host, e.g. `bsky.social`. Defaults to [`BLUESKY_HOST_DEFAULT`].
-	pub host:		String,
-	/// The account handle, e.g. `me.bsky.social`, which is the session identifier.
-	pub handle:		String,
-	/// An app password, not the account password: Bluesky issues these precisely so a third party holds
-	/// one and it can be revoked on its own. Resolved from a secret reference.
+	pub host:		String,	// e.g. `bsky.social`; defaults to BLUESKY_HOST_DEFAULT
+	pub handle:		String,	// e.g. `me.bsky.social`, which is the session identifier
+	// An app password, not the account password: Bluesky issues these precisely so a third party
+	// holds one and it can be revoked on its own. Resolved from a secret reference.
 	pub app_password:	String,
 }
 
@@ -128,9 +123,7 @@ pub struct BlueskyCreds {
 /// *could* take, this describes which remotes *this* site actually reaches.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DestCreds {
-	/// The Mastodon account, where the site has one.
 	pub mastodon:	Option<MastodonCreds>,
-	/// The Bluesky account, where the site has one.
 	pub bluesky:	Option<BlueskyCreds>,
 }
 
@@ -163,7 +156,6 @@ impl DestCreds {
 		}
 	}
 
-	/// The credentials as a daticle, for the store.
 	pub fn to_dat(&self) -> Dat {
 		let mut m = DaticleMap::new();
 		if let Some(x) = &self.mastodon {
@@ -241,7 +233,6 @@ impl MastodonCreds {
 		Ok(())
 	}
 
-	/// The credentials as a daticle, for the store.
 	fn to_dat(&self) -> Dat {
 		let mut m = DaticleMap::new();
 		m.insert(dat!("base_url"),	dat!(self.base_url.clone()));
@@ -282,7 +273,6 @@ impl BlueskyCreds {
 		Ok(())
 	}
 
-	/// The credentials as a daticle, for the store.
 	fn to_dat(&self) -> Dat {
 		let mut m = DaticleMap::new();
 		m.insert(dat!("host"),		dat!(self.host.clone()));
@@ -304,7 +294,6 @@ impl BlueskyCreds {
 	}
 }
 
-/// A daticle as a map, or nothing.
 fn as_map(d: &Dat) -> Option<&DaticleMap> {
 	match d {
 		Dat::Map(m)	=> Some(m),
@@ -312,7 +301,6 @@ fn as_map(d: &Dat) -> Option<&DaticleMap> {
 	}
 }
 
-/// A non-empty string field of a map, or nothing.
 fn nonempty(m: &DaticleMap, key: &str) -> Option<String> {
 	match m.get(&dat!(key)) {
 		Some(Dat::Str(s)) if !s.trim().is_empty()	=> Some(s.clone()),
@@ -321,7 +309,6 @@ fn nonempty(m: &DaticleMap, key: &str) -> Option<String> {
 }
 
 
-/// The key a vhost's destination credentials live under in its store.
 pub const CREDS_KEY: &str = "publish/creds";
 
 /// The credentials a site has set from the console, from its store. An empty set where none are stored,
@@ -754,7 +741,6 @@ fn is_success(code: u16) -> bool {
 	(200..300).contains(&code)
 }
 
-/// A JSON object as a daticle map.
 fn parse_json(text: &str) -> Outcome<DaticleMap> {
 	let cfg: DecoderConfig<
 		BTreeMap<UsrKindCode, UsrKind>,
@@ -769,7 +755,6 @@ fn parse_json(text: &str) -> Outcome<DaticleMap> {
 	}
 }
 
-/// A string field of a JSON object, where it holds one.
 fn json_str(m: &DaticleMap, key: &str) -> Option<String> {
 	match m.get(&dat!(key)) {
 		Some(Dat::Str(s))	=> Some(s.clone()),
@@ -814,13 +799,13 @@ pub fn iso_of(unix_secs: i64) -> Outcome<String> {
 /// Cheap to clone: the client and the signers are shared behind `Arc`s.
 #[derive(Clone)]
 pub struct MailSender {
-	/// The SMTP client, dialling each recipient's MX directly.
-	client:		Arc<OutboundClient>,
-	/// The DKIM identities every message is signed with. Empty means unsigned, which still delivers --
-	/// a key that will not sign is skipped, not fatal, as everywhere else the domain signs its mail.
+	client:		Arc<OutboundClient>,	// dials each recipient's MX directly
+	// The DKIM identities every message is signed with. Empty means unsigned, which still delivers
+	// -- a key that will not sign is skipped, not fatal, as everywhere else the domain signs its
+	// mail.
 	dkim:		Vec<Arc<DkimSigner>>,
-	/// The address the newsletter is from where a site's `publish` block names none, derived from the
-	/// mail configuration's signing domain, e.g. `news@<domain>`.
+	// The address the newsletter is from where a site's `publish` block names none, derived from
+	// the mail configuration's signing domain, e.g. `news@<domain>`.
 	default_from:	String,
 }
 
@@ -857,7 +842,6 @@ impl MailSender {
 		})
 	}
 
-	/// The address the newsletter is from where a site names none.
 	pub fn default_from(&self) -> &str {
 		&self.default_from
 	}
@@ -975,7 +959,6 @@ impl MailSender {
 /// `newsletter_from` wins, and an empty one falls back to `news@<mail-domain>`, which is aligned with
 /// the DKIM signing domain so the signature authenticates.
 impl PublishConfig {
-	/// The newsletter's From, resolved against the mail sender's default.
 	pub fn newsletter_from(&self, sender: &MailSender) -> String {
 		if self.newsletter_from.trim().is_empty() {
 			sender.default_from().to_string()
@@ -993,14 +976,10 @@ impl PublishConfig {
 /// marked [`SubState::Bounced`](super::subscribe::SubState::Bounced) and will not be sent to again.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SendReport {
-	/// How many confirmed subscribers the send set held.
-	pub attempted:	usize,
-	/// How many the receiving server accepted.
-	pub sent:	usize,
-	/// How many failed transiently, and stay on the list to retry.
-	pub failed:	usize,
-	/// How many failed permanently and were suppressed as bounced.
-	pub suppressed:	usize,
+	pub attempted:	usize,		// confirmed subscribers in the send set
+	pub sent:	usize,		// accepted by the receiving server
+	pub failed:	usize,		// transient failures, staying on the list to retry
+	pub suppressed:	usize,		// permanent failures, suppressed as bounced
 }
 
 /// Sends a live post to every confirmed subscriber, best-effort, one message each.
@@ -1139,7 +1118,6 @@ pub async fn send_test<
 // │ SEND HISTORY                                                               │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// The key the append-only list of newsletter sends lives under.
 pub const SENDS_KEY: &str = "publish/sends";
 
 /// One newsletter send, as the history keeps it.
@@ -1149,23 +1127,16 @@ pub const SENDS_KEY: &str = "publish/sends";
 /// mailed and to how many.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SendEntry {
-	/// The post that was sent.
-	pub slug:	String,
-	/// When it was sent, as an ISO timestamp.
-	pub at:		String,
-	/// How many confirmed subscribers the send set held.
-	pub attempted:	usize,
-	/// How many the receiving servers accepted.
-	pub sent:	usize,
-	/// How many failed transiently.
-	pub failed:	usize,
-	/// How many failed permanently and were suppressed.
-	pub suppressed:	usize,
+	pub slug:	String,		// the post that was sent
+	pub at:		String,		// ISO timestamp
+	pub attempted:	usize,		// confirmed subscribers in the send set
+	pub sent:	usize,		// accepted by the receiving servers
+	pub failed:	usize,		// transient failures
+	pub suppressed:	usize,		// permanent failures, suppressed
 }
 
 impl SendEntry {
 
-	/// A history entry from a send's slug, the moment, and its [`SendReport`].
 	pub fn of(slug: &str, at: &str, report: &SendReport) -> Self {
 		Self {
 			slug:		slug.to_string(),
@@ -1177,7 +1148,6 @@ impl SendEntry {
 		}
 	}
 
-	/// The entry as a daticle.
 	pub fn to_dat(&self) -> Dat {
 		let mut m = DaticleMap::new();
 		m.insert(dat!("slug"),		dat!(self.slug.clone()));
@@ -1305,10 +1275,6 @@ pub fn send_history<
 // │ EMAIL: building the messages                                              │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// An RFC 5322 confirmation message: plain text, the confirm link, and a line saying why it arrived.
-///
-/// Pure over its strings, so what a subscriber is sent can be tested without a socket. The body is
-/// deliberately spare -- an address that never opted in gets a link and an explanation, no more.
 /// The moderation-alert message: one line, no comment text, from the site to an operator.
 fn build_moderation_alert_email(from: &str, to: &str, site_name: &str, post_slug: &str) -> String {
 	let who = if site_name.trim().is_empty() { fmt!("your site") } else { site_name.to_string() };
@@ -1378,6 +1344,11 @@ fn message_id(from: &str) -> String {
 	fmt!("<{}.{}@{}>", secs, tail, domain)
 }
 
+/// An RFC 5322 confirmation message: plain text, the confirm link, and a line saying why it
+/// arrived.
+///
+/// Pure over its strings, so what a subscriber is sent can be tested without a socket. The body is
+/// deliberately spare -- an address that never opted in gets a link and an explanation, no more.
 fn build_confirmation_email(from: &str, to: &str, confirm_url: &str, site_name: &str) -> String {
 	let who = if site_name.trim().is_empty() {
 		fmt!("this site")

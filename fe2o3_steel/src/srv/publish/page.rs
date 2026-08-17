@@ -11,6 +11,9 @@
 //! those look like comes from the stylesheets the site named in its config. A server that shipped a
 //! font would be deciding something that is not its to decide, and a site that could not restyle its
 //! own prose would not really own it.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::srv::cache;
 use crate::srv::publish::{
@@ -150,7 +153,6 @@ fn moved_to(path: &str, query: &str) -> HttpMessage {
 		.with_field(HeaderName::Location, HeaderFieldValue::Generic(to))
 }
 
-/// Whether a string is a name a post may wear.
 fn is_slug(s: &str) -> bool {
 	!s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
@@ -470,11 +472,11 @@ fn filter_shell(cfg: &PublishConfig, posts: &[Post], authors: &[Author]) -> Stri
 	s
 }
 
-/// The magnifier beside the filter's search box, drawn inline.
-///
-/// Inline rather than an `<img>` to a file, so nothing has to be shipped for it: a search box wants a
-/// glyph and a missing icon file is a broken square on a live page. `currentColor` so it takes the
-/// box's own ink.
+// The magnifier beside the filter's search box, drawn inline.
+//
+// Inline rather than an `<img>` to a file, so nothing has to be shipped for it: a search box wants a
+// glyph and a missing icon file is a broken square on a live page. `currentColor` so it takes the
+// box's own ink.
 const SEARCH_ICON: &str = "<svg class=\"aside-search-ico\" viewBox=\"0 0 24 24\" aria-hidden=\"true\" \
 	fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\">\
 	<circle cx=\"11\" cy=\"11\" r=\"7\"></circle><line x1=\"20\" y1=\"20\" x2=\"16.65\" y2=\"16.65\">\
@@ -671,7 +673,6 @@ fn strip_leading_heading(html: &str) -> &str {
 	}
 }
 
-/// One post.
 fn post_page(
 	cfg:		&PublishConfig,
 	post:		&Post,
@@ -788,16 +789,11 @@ fn not_found(cfg: &PublishConfig) -> HttpMessage {
 
 /// What a page says about itself.
 struct Head {
-	/// The page's own title, before the site's name is added.
-	title:		String,
-	/// A sentence standing in for the page, in a card and in search.
-	description:	String,
-	/// The page's canonical absolute URL.
-	url:		String,
-	/// `article` for a post, `website` for the index.
-	kind:		&'static str,
-	/// The date, for a post that has one.
-	date:		Option<String>,
+	title:		String,		// before the site's name is added
+	description:	String,		// a sentence standing in for the page, in a card and in search
+	url:		String,		// canonical, absolute
+	kind:		&'static str,	// `article` for a post, `website` for the index
+	date:		Option<String>,	// for a post that has one
 }
 
 /// The line at the top of every page: the site's mark, and the way back to the posts.
@@ -842,7 +838,6 @@ fn nav(cfg: &PublishConfig, on_index: bool) -> String {
 	s
 }
 
-/// Wraps a body in the document a browser reads.
 fn page(cfg: &PublishConfig, head: &Head, body: &str, post: Option<&Post>, on_index: bool) -> String {
 	let mut s = String::new();
 	s.push_str("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n");
@@ -1163,7 +1158,6 @@ mod tests {
 
 	use oxedyne_fe2o3_net::http::header::HttpHeadline;
 
-	/// The status a response carries.
 	fn status_of(resp: &HttpMessage) -> Option<HttpStatus> {
 		match &resp.header.headline {
 			HttpHeadline::Response { status }	=> Some(status.clone()),
@@ -2143,26 +2137,16 @@ mod tests {
 /// Assembled by the caller, which holds the database; the rendering here takes data and touches
 /// nothing, on the same terms as the rest of this module.
 pub struct CommentsView {
-	/// The approved comments, threaded and in the ranker's order.
-	pub threads:	Vec<Thread>,
-	/// How many comments that is, at every depth.
-	pub count:	usize,
-	/// Which page of the conversation is shown, from one.
-	pub page:	usize,
-	/// How many pages there are.
+	pub threads:	Vec<Thread>,	// approved, threaded, in the ranker's order
+	pub count:	usize,		// how many comments, at every depth
+	pub page:	usize,		// which page of the conversation, from one
 	pub pages:	usize,
-	/// Which order the reader asked for.
-	pub order:	&'static str,
-	/// The post's own path, for the links the pager and the ordering build.
-	pub path:	String,
-	/// The challenge a sender's proof must answer.
-	pub challenge:	String,
-	/// What the last attempt said, where the reader has just made one.
-	pub said:	Option<String>,
-	/// Whether the site is taking comments at all.
-	pub open:	bool,
-	/// The comment this reader may still correct, and the token proving they wrote it.
-	pub editable:	Option<(String, String)>,
+	pub order:	&'static str,	// which order the reader asked for
+	pub path:	String,		// the post's own path, for the pager's and the ordering's links
+	pub challenge:	String,		// what a sender's proof must answer
+	pub said:	Option<String>,	// what the last attempt said, where one has just been made
+	pub open:	bool,		// whether the site is taking comments at all
+	pub editable:	Option<(String, String)>,	// the comment this reader may correct, and its token
 }
 
 /// The conversation below a post, and the form to join it.
@@ -2237,7 +2221,6 @@ fn comments_order(view: &CommentsView) -> String {
 	s
 }
 
-/// The pager beneath a long conversation.
 fn comments_pager(view: &CommentsView) -> String {
 	if view.pages <= 1 {
 		return String::new();
@@ -2261,7 +2244,6 @@ fn comments_pager(view: &CommentsView) -> String {
 	s
 }
 
-/// One comment and its replies.
 fn thread_item(
 	t:		&Thread,
 	depth:		usize,
@@ -2340,7 +2322,6 @@ fn thread_item(
 	s
 }
 
-/// The form a comment's own author corrects it with.
 fn edit_form(path: &str, c: &crate::srv::publish::comment::Comment, token: &str) -> String {
 	let mut s = String::new();
 	s.push_str("<details class=\"comment-edit\"><summary>Correct this</summary>\n");
@@ -2492,16 +2473,16 @@ fn esc_id(s: &str) -> String {
 	s.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect()
 }
 
-/// The script the form needs: the proof, and the reply wiring.
-///
-/// Vanilla, inline, and small enough to read. It uses the browser's own SHA-256 -- the one strong
-/// digest every browser implements natively -- rather than carrying an implementation of its own,
-/// which is why the server verifies the proof with the same.
-///
-/// **The form works without it**, which is the point of doing the proof on submit rather than
-/// gating the fields: a reader with no scripting posts a comment with no nonce, and the server holds
-/// it for a person instead of refusing it. The proof buys a queue that is not full of machines; it is
-/// not a condition of being heard.
+// The script the form needs: the proof, and the reply wiring.
+//
+// Vanilla, inline, and small enough to read. It uses the browser's own SHA-256 -- the one strong
+// digest every browser implements natively -- rather than carrying an implementation of its own,
+// which is why the server verifies the proof with the same.
+//
+// **The form works without it**, which is the point of doing the proof on submit rather than
+// gating the fields: a reader with no scripting posts a comment with no nonce, and the server holds
+// it for a person instead of refusing it. The proof buys a queue that is not full of machines; it is
+// not a condition of being heard.
 const COMMENT_JS: &str = r#"(function () {
 	var form = document.getElementById('comment-form');
 	if (!form || !window.crypto || !window.crypto.subtle) return;
@@ -2593,15 +2574,15 @@ const COMMENT_JS: &str = r#"(function () {
 })();
 "#;
 
-/// The index filter. Reads the post list already in the page and shows or hides each item against the
-/// controls above it: a search box, the author faces, a facet block for each of categories and tags,
-/// and the reading-time slider. It renders nothing and fetches nothing -- every post is in the
-/// markup, and this only ever narrows what is seen.
-///
-/// The two facet families run through one rule set rather than two. What differs between a category
-/// and a tag is which attribute an item carries its values in and what those values are joined on;
-/// everything after that -- the modes, the boxes, the dragging, the deep link -- is the same code
-/// twice over, which is the only way the two stay in step as either changes.
+// The index filter. Reads the post list already in the page and shows or hides each item against the
+// controls above it: a search box, the author faces, a facet block for each of categories and tags,
+// and the reading-time slider. It renders nothing and fetches nothing -- every post is in the
+// markup, and this only ever narrows what is seen.
+//
+// The two facet families run through one rule set rather than two. What differs between a category
+// and a tag is which attribute an item carries its values in and what those values are joined on;
+// everything after that -- the modes, the boxes, the dragging, the deep link -- is the same code
+// twice over, which is the only way the two stay in step as either changes.
 const FILTER_JS: &str = r##"(function () {
 	"use strict";
 	var list = document.getElementById("aside-index-list");

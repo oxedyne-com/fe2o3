@@ -31,6 +31,9 @@
 //! which for AES-256-GCM is `ciphertext || tag || nonce`. Decoding
 //! routes the same bytes back through `decrypt`, which verifies the
 //! tag, strips the nonce, and returns the plaintext.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::srv::admin::{
     AdminPrincipal,
@@ -46,38 +49,23 @@ use std::time::{
     UNIX_EPOCH,
 };
 
-/// Name of the cookie that carries a signed dashboard session.
-pub const SESSION_COOKIE_NAME: &str = "steel_admin_sess";
-
-/// Default session lifetime. Sliding: the handler refreshes the
-/// expiry on every authenticated request so an idle session still
-/// eventually expires.
+// The TTL slides: the handler refreshes the expiry on every authenticated
+// request, so only an idle session eventually expires. The maxima bound the
+// worst-case cookie size and give the decoder a reject point before it
+// allocates.
+pub const SESSION_COOKIE_NAME:      &str = "steel_admin_sess";
 pub const DEFAULT_SESSION_TTL_SECS: u64 = 30 * 60;
-
-/// Wire-format version prefix. Bumped when the plaintext record
-/// layout changes incompatibly.
-pub const SESSION_FORMAT_VERSION: &str = "v1";
-
-/// Maximum number of scopes a single session may carry. Bounds the
-/// worst-case cookie size and gives the decoder an obvious reject
-/// point before it allocates.
-pub const MAX_SESSION_SCOPES: u8 = 32;
-
-/// Maximum length of a single scope string in the cookie, in bytes.
-pub const MAX_SCOPE_LEN: usize = 64;
-
-/// Maximum length of the admin name in the cookie, in bytes.
-pub const MAX_NAME_LEN: usize = 64;
+pub const SESSION_FORMAT_VERSION:   &str = "v1";   // bump on an incompatible record layout
+pub const MAX_SESSION_SCOPES:       u8 = 32;
+pub const MAX_SCOPE_LEN:            usize = 64;    // bytes
+pub const MAX_NAME_LEN:             usize = 64;    // bytes
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ ENCODE                                                                    │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Encode a principal into the signed cookie string.
-///
-/// The caller is responsible for setting `expires_at` on the
-/// principal; [`session::refresh_principal`] is a convenience that
-/// produces an expiry `DEFAULT_SESSION_TTL_SECS` ahead of "now".
+/// The caller sets `expires_at` on the principal; `refresh_principal` produces
+/// an expiry `DEFAULT_SESSION_TTL_SECS` ahead of now.
 pub fn encode_session(
     state:      &AdminState,
     principal:  &AdminPrincipal,
@@ -90,8 +78,8 @@ pub fn encode_session(
     Ok(fmt!("{}.{}", SESSION_FORMAT_VERSION, blob))
 }
 
-/// Serialise a principal to the length-prefixed plaintext record
-/// described in the module-level documentation.
+/// Serialises to the length-prefixed plaintext record described in the module
+/// header.
 fn encode_record(p: &AdminPrincipal) -> Outcome<Vec<u8>> {
     let name_bytes = p.name.as_bytes();
     if name_bytes.len() > MAX_NAME_LEN {
@@ -130,13 +118,12 @@ fn encode_record(p: &AdminPrincipal) -> Outcome<Vec<u8>> {
 // │ DECODE                                                                    │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Decode and verify a session cookie, returning the embedded
-/// principal if the ciphertext authenticates and the expiry has
-/// not passed.
+/// Decodes and verifies a session cookie, yielding the principal only if the
+/// ciphertext authenticates and the expiry has not passed.
 ///
-/// Returns a tagged error rather than `Option<_>` so the handler
-/// can log *why* a session was rejected (tampering, expiry, bad
-/// format) without leaking the distinction to the client.
+/// Errors are tagged rather than reduced to `Option` so the handler can log why
+/// a session was rejected -- tampering, expiry, bad format -- without leaking
+/// the distinction to the client.
 pub fn decode_session(
     state:  &AdminState,
     cookie: &str,
@@ -169,8 +156,6 @@ pub fn decode_session(
     Ok(principal)
 }
 
-/// Parse the length-prefixed plaintext record into an
-/// [`AdminPrincipal`].
 fn decode_record(bytes: &[u8]) -> Outcome<AdminPrincipal> {
     let mut p = 0usize;
     let name_len = res!(read_u16(bytes, &mut p)) as usize;
@@ -228,9 +213,8 @@ fn decode_record(bytes: &[u8]) -> Outcome<AdminPrincipal> {
 // │ PRINCIPAL REFRESH                                                         │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Produce a fresh copy of `principal` with `expires_at` advanced to
-/// `now + DEFAULT_SESSION_TTL_SECS`. Used by the handler on every
-/// authenticated request to implement sliding-expiry sessions.
+/// Advances `expires_at` to `now + DEFAULT_SESSION_TTL_SECS`. The handler calls
+/// it on every authenticated request, giving sessions a sliding expiry.
 pub fn refresh_principal(principal: &AdminPrincipal) -> AdminPrincipal {
     AdminPrincipal {
         name:       principal.name.clone(),
@@ -312,7 +296,6 @@ mod tests {
         },
     };
 
-    /// An unsealed admin state, as the server holds after an unseal.
     fn mkstate() -> AdminState {
         mkstate_with_key(Some([0u8; 32].to_vec()))
     }

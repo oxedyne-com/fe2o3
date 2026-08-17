@@ -7,6 +7,9 @@
 //!
 //! The relay is driven directly rather than through a TLS listener, because what is under test is
 //! the forwarding, and a certificate would only stand between the test and the bytes.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_jdat::prelude::*;
@@ -63,14 +66,10 @@ fn client_frame(msg: &WebSocketMessage) -> Outcome<Vec<u8>> {
 /// What the upstream saw of the request the relay forwarded to it.
 #[derive(Clone, Debug, Default)]
 struct UpstreamSaw {
-    /// Request path, as the relay asked for it.
-    path:       String,
-    /// The `Sec-WebSocket-Key` the client chose, if it survived the hop.
-    ws_key:     Option<String>,
-    /// The `X-Forwarded-For` the relay added, if it did.
-    forwarded:  Option<String>,
-    /// The `Host` header, which the relay owns.
-    host:       Option<String>,
+    path:       String,             // as the relay asked for it
+    ws_key:     Option<String>,     // the `Sec-WebSocket-Key` the client chose, if it survived
+    forwarded:  Option<String>,     // the `X-Forwarded-For` the relay added, if it did
+    host:       Option<String>,     // the `Host` header, which the relay owns
 }
 
 /// Start an echo WebSocket server on loopback.
@@ -190,7 +189,6 @@ async fn spawn_echo_upstream(saw: Arc<Mutex<UpstreamSaw>>) -> Outcome<SocketAddr
     Ok(addr)
 }
 
-/// The first value of a header, by name, as a plain string.
 fn header_of(msg: &HttpMessage, name: &str) -> Option<String> {
     for (field_name, values) in msg.header.fields.iter() {
         if fmt!("{}", field_name).eq_ignore_ascii_case(name) {
@@ -200,7 +198,6 @@ fn header_of(msg: &HttpMessage, name: &str) -> Option<String> {
     None
 }
 
-/// Read from `stream` until the end of a header block, returning it as a string.
 async fn read_header_block(stream: &mut tokio::io::DuplexStream) -> Outcome<String> {
     let mut accum: Vec<u8> = Vec::new();
     let mut buf = [0u8; 256];

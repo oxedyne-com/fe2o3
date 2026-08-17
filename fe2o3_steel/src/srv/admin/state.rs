@@ -32,6 +32,9 @@
 //! page and be issued a cookie before any master key exists. A
 //! restart consequently invalidates outstanding dashboard cookies,
 //! which is the correct behaviour anyway.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::srv::{
     admin::{
@@ -70,129 +73,92 @@ use std::{
 use secrecy::ExposeSecret;
 use tokio::sync::Notify;
 
-/// Length in bytes of the dashboard session key.
-pub const SESSION_KEY_LEN: usize = 32;
+pub const SESSION_KEY_LEN: usize = 32; // bytes
 
 /// Result of a successful passphrase unwrap against the wallet.
 #[derive(Clone, Debug)]
 pub struct Unsealed {
-    /// Name of the admin entry whose wrap the passphrase opened.
-    pub name:   String,
-    /// That admin's scope list.
+    pub name:   String,       // admin entry whose wrap the passphrase opened
     pub scopes: Vec<String>,
-    /// Whether this call is what lifted the seal, as opposed to finding
-    /// it already lifted.
-    ///
-    /// Only the first correct passphrase after a start unseals; a later
-    /// one merely re-authenticates. The distinction matters to alerting:
-    /// an unseal is a rare, notable event worth an email, and a routine
-    /// dashboard login is not. Conflating them would send an alert on
-    /// every sign-in and teach the operator to ignore the lot.
+    // True only when this call lifted the seal, rather than finding it already
+    // lifted. Only the first correct passphrase after a start unseals; a later
+    // one merely re-authenticates. Alerting turns on the distinction: an unseal
+    // is a rare, notable event worth an email, and a routine dashboard login is
+    // not.
     pub lifted: bool,
 }
 
 /// Shared dashboard runtime state.
 ///
-/// Cheaply cloneable: the wallet is behind an `Arc<RwLock<_>>` and
-/// the encryption scheme clones its key material.
+/// Cheaply cloneable: the wallet is behind an `Arc<RwLock<_>>` and the
+/// encryption scheme clones its key material.
 #[derive(Clone, Debug)]
 pub struct AdminState {
-    /// Shared wallet handle. Login reads from this; admin management
-    /// (task #11) writes through it.
     pub wallet:         Arc<RwLock<Wallet>>,
-    /// On-disk path the wallet is persisted to. Held in the admin
-    /// state so the dashboard's admin-management UI can call
-    /// `Wallet::save` without depending on `app::constant`.
+    // Held here so the dashboard's admin-management UI can call `Wallet::save`
+    // without depending on `app::constant`.
     pub wallet_path:    PathBuf,
-    /// Wallet master key, once an admin has unsealed. `None` while
-    /// the process is sealed.
-    ///
-    /// Read it through [`AdminState::master_key`], which fails with a
-    /// `Sealed` tag rather than handing back an `Option` every caller
-    /// would have to interpret for itself. The dashboard's
-    /// admin-management UI needs the key to call `Wallet::enrol`,
-    /// which wraps it under each new admin's password.
-    ///
-    /// Behind an `Arc<RwLock<_>>` because the unseal happens *after*
-    /// the listeners are up: the login handler that recovers the key
-    /// and the server task that opens the databases with it hold
-    /// different clones of this state. The key is held in clear in
-    /// process memory, in line with the wallet-v2 design -- a human
-    /// supplies the passphrase, and the unwrapped secret lives in RAM
-    /// until the process restarts. It is never written to disk.
+    // `None` while the process is sealed. Read it through
+    // `AdminState::master_key`, which fails with a `Sealed` tag rather than
+    // handing back an `Option` every caller would have to interpret for itself.
+    //
+    // Behind an `Arc<RwLock<_>>` because the unseal happens after the listeners
+    // are up: the login handler that recovers the key and the server task that
+    // opens the databases with it hold different clones of this state. The key
+    // is held in clear in process memory, in line with the wallet-v2 design --
+    // a human supplies the passphrase, and the unwrapped secret lives in RAM
+    // until the process restarts. It is never written to disk.
     master_key:         Arc<RwLock<Option<Vec<u8>>>>,
-    /// `true` until an admin supplies a passphrase that unwraps the
-    /// master key. Kept as an atomic alongside `master_key` so the
-    /// request path can test it without taking a lock.
+    // An atomic alongside `master_key` so the request path can test the seal
+    // without taking a lock.
     sealed:             Arc<AtomicBool>,
-    /// Signalled once, when the master key is installed. The database
-    /// starter task in `Server::start` waits on this; it cannot open
-    /// the Ozone instances until the key exists.
+    // Signalled once, when the master key is installed. The database starter
+    // task in `Server::start` waits on this; it cannot open the Ozone instances
+    // until the key exists.
     unseal_notify:      Arc<Notify>,
-    /// How many vhosts have a database configured. Zero is common: a
-    /// deployment serving only static sites, redirects and proxy routes
-    /// never touches Ozone.
-    ///
-    /// Held so the seal can be reported honestly. A sealed Steel with no
-    /// databases has nothing locked and nothing waiting, and saying "the
-    /// databases are shut" to an operator who has none is how a healthy
-    /// server gets mistaken for a broken one.
+    // How many vhosts have a database configured. Zero is common: a deployment
+    // serving only static sites, redirects and proxy routes never touches
+    // Ozone. The seal is reported against this count, because telling an
+    // operator who has no database that "the databases are shut" is how a
+    // healthy server gets mistaken for a broken one.
     db_count:           usize,
-    /// Operator alerting, when configured. `None` disables it.
-    ///
-    /// Lives here because the events worth alerting on -- an unseal, a run
-    /// of failed passphrase attempts -- all happen on the login path, which
-    /// is the one place that already holds this state.
+    // `None` disables alerting. It lives here because the events worth alerting
+    // on -- an unseal, a run of failed passphrase attempts -- all happen on the
+    // login path, which is the one place that already holds this state.
     alerter:            Option<Alerter>,
-    /// AES-256-GCM pre-keyed with the derived session key. Used by
-    /// [`session`](super::session) to encrypt and decrypt session
-    /// cookies.
-    pub session_enc:    EncryptionScheme,
-    /// Shared traffic recorder. The dashboard reads from this when
-    /// rendering the `/admin/traffic` view; the request pipeline
-    /// in `srv/https.rs` writes to it on every completed response.
-    /// Both sides hold the same `Arc`, so the dashboard sees live
-    /// data without any per-vhost coordination.
+    pub session_enc:    EncryptionScheme,    // AES-256-GCM
+    // The dashboard reads this when rendering `/admin/traffic`; the request
+    // pipeline in `srv/https.rs` writes to it on every completed response. Both
+    // sides hold the same `Arc`, so the dashboard sees live data without any
+    // per-vhost coordination.
     pub traffic:        Arc<TrafficRecorder>,
-    /// Shared host-resource sampler. A background task in
-    /// `Server::start` calls `HostSampler::sample_now` on a fixed
-    /// interval; the dashboard reads from the same `Arc` when
-    /// drawing the host resource strip.
+    // A background task in `Server::start` calls `HostSampler::sample_now` on a
+    // fixed interval; the dashboard reads the same `Arc` when drawing the host
+    // resource strip.
     pub host_sampler:   Arc<HostSampler>,
-    /// Shared per-IP address guard. The TCP accept loop in
-    /// `srv/server.rs` calls `check` before handing any stream to
-    /// the TLS acceptor, and the dashboard's Security view reads
-    /// snapshots and drives whitelist / blacklist / unblock
-    /// actions against the same `Arc`.
+    // The TCP accept loop in `srv/server.rs` calls `check` before handing any
+    // stream to the TLS acceptor, and the dashboard's Security view reads
+    // snapshots and drives whitelist / blacklist / unblock actions against the
+    // same `Arc`.
     pub addr_guard:     Arc<SteelAddressGuard>,
-    /// Dedicated tighter rate limiter for sensitive URL prefixes
-    /// (login forms, admin login). Consulted by the HTTPS
-    /// handler after the request line has been parsed; a block
-    /// returns 429 without reaching the application handler and
-    /// without counting against (or affecting) the general
-    /// `addr_guard`'s state for that address.
+    // A tighter limiter for sensitive URL prefixes (login forms, admin login),
+    // consulted by the HTTPS handler once the request line has been parsed. A
+    // block returns 429 without reaching the application handler and without
+    // counting against, or affecting, `addr_guard`'s state for that address.
     pub auth_guard:     Arc<SteelAddressGuard>,
-    /// Authorised public keys for the signed-admin-login flow, as
-    /// parsed from the primary vhost's `admin_keys` config block.
-    /// Empty when the feature is not configured. Shared across
-    /// clones via `Arc` so every handler holds the same list.
+    // Authorised public keys for the signed-admin-login flow, parsed from the
+    // primary vhost's `admin_keys` config block. Empty when the feature is not
+    // configured.
     pub admin_keys:     Arc<Vec<AdminKey>>,
-    /// Replay-window tracker for signed-login nonces. Rejects any
-    /// `(signer_id, nonce)` pair presented twice inside the
-    /// freshness window.
     pub nonce_tracker:  Arc<Mutex<NonceTracker>>,
-    /// Optional URL whose script tag is injected into every
-    /// admin-served page's `<head>`. Copied from the primary vhost's
-    /// `head_injection_url` field at start-up. `None` leaves the
-    /// default head untouched. Exposed as `Arc<Option<_>>` for cheap
-    /// cloning across handlers.
+    // Injected into every admin-served page's `<head>`, copied from the primary
+    // vhost's `head_injection_url` at start-up. `None` leaves the default head
+    // untouched.
     pub head_injection_url: Arc<Option<String>>,
 }
 
 impl AdminState {
-    /// Build a fresh admin state around a loaded wallet, its on-disk
-    /// path, the shared traffic recorder, the shared host sampler,
-    /// the general address guard and the auth guard.
+    /// Builds a fresh admin state around a loaded wallet.
     ///
     /// The state starts **sealed**: the wallet has been read from
     /// disk, but no passphrase has unwrapped a master key out of it
@@ -251,38 +217,34 @@ impl AdminState {
         })
     }
 
-    /// Returns `true` while no master key is known, i.e. the
-    /// databases are shut and DB-backed routes must refuse.
+    /// True while no master key is known, so the databases are shut and
+    /// DB-backed routes must refuse.
     pub fn is_sealed(&self) -> bool {
         self.sealed.load(Ordering::Acquire)
     }
 
-    /// How many vhosts have a database configured.
     pub fn db_count(&self) -> usize {
         self.db_count
     }
 
-    /// The operator alerter, when alerting is configured.
     pub fn alerter(&self) -> Option<&Alerter> {
         self.alerter.as_ref()
     }
 
-    /// Returns `true` when the seal is actually holding something shut:
-    /// no master key, and at least one database that needs it.
+    /// Is the seal actually holding something shut -- no master key, and at
+    /// least one database that needs it?
     ///
-    /// Distinct from [`Self::is_sealed`] because a deployment of static
-    /// sites, redirects and proxy routes has no database at all, and for
-    /// it the seal is inconsequential -- nothing is locked, nothing is
-    /// waiting, and there is no reason to tell an operator otherwise.
+    /// Distinct from `is_sealed` because a deployment of static sites, redirects
+    /// and proxy routes has no database at all, and for it the seal is
+    /// inconsequential: nothing is locked, nothing is waiting, and there is no
+    /// reason to tell an operator otherwise.
     pub fn seal_withholds_data(&self) -> bool {
         self.is_sealed() && self.db_count > 0
     }
 
-    /// Copy of the wallet master key.
-    ///
-    /// Fails with a `Sealed` tag while the process is sealed. Callers
-    /// that merely want to know the seal state should ask
-    /// [`AdminState::is_sealed`] instead of probing this for an error.
+    /// Fails with a `Sealed` tag while the process is sealed. Callers that merely
+    /// want the seal state should ask `is_sealed` rather than probing this for an
+    /// error.
     pub fn master_key(&self) -> Outcome<Vec<u8>> {
         // Always the message-carrying form of the lock macros on this
         // field: the bare form formats the locked value into the error
@@ -298,18 +260,16 @@ impl AdminState {
         }
     }
 
-    /// Unwrap the wallet master key with an admin's passphrase and
-    /// install it, lifting the seal.
+    /// Unwraps the wallet master key with an admin's passphrase and installs it,
+    /// lifting the seal.
     ///
-    /// Authenticates against the wallet **only** -- the wallet file is
-    /// readable while sealed, which is precisely what makes a web
-    /// unseal page possible without a database behind it. Returns the
-    /// name and scopes of the admin whose entry unwrapped.
+    /// Authenticates against the wallet **only** -- the wallet file is readable
+    /// while sealed, which is precisely what makes a web unseal page possible
+    /// without a database behind it.
     ///
-    /// Unsealing an already-unsealed process re-verifies the
-    /// passphrase and leaves the key in place, so a second admin
-    /// logging in cannot swap the key out from under the running
-    /// databases.
+    /// Unsealing an already-unsealed process re-verifies the passphrase and
+    /// leaves the key in place, so a second admin logging in cannot swap the key
+    /// out from under the running databases.
     pub fn unseal(&self, passphrase: &[u8]) -> Outcome<Unsealed> {
         let unlocked = {
             let wallet = lock_read!(self.wallet, "Reading the wallet to unseal.");
@@ -334,9 +294,8 @@ impl AdminState {
         Ok(Unsealed { name, scopes, lifted })
     }
 
-    /// Wait until an admin installs the master key, then return it.
-    ///
-    /// Returns immediately when the process is already unsealed.
+    /// Waits until an admin installs the master key, returning immediately when
+    /// the process is already unsealed.
     pub async fn await_master_key(&self) -> Outcome<Vec<u8>> {
         loop {
             if !self.is_sealed() {

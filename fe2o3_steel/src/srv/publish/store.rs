@@ -20,6 +20,9 @@
 //! read of the index and a read per post; nothing scans. The index is derived, so it can be rebuilt
 //! from a scan when it has to be ([`rebuild_index`]), but that is a repair rather than a code path
 //! anything normal takes.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::srv::publish::{
 	Author,
@@ -54,74 +57,60 @@ use std::sync::{
 };
 
 
-/// The key every post's key begins with.
 pub const KEY_PREFIX: &str = "publish/post/";
 
-/// The key the list of slugs lives under.
 pub const INDEX_KEY: &str = "publish/index";
 
-/// The key every post's read tally begins with.
-///
-/// One key per post rather than one map for the site: a read touches only the post that was read, so
-/// two posts being read at once do not contend, and a tally cannot take the whole site's counts with
-/// it when it goes wrong.
+// One key per post rather than one map for the site: a read touches only the post that was read,
+// so two posts being read at once do not contend, and a tally cannot take the whole site's counts
+// with it when it goes wrong.
 pub const READS_PREFIX: &str = "publish/reads/";
 
-/// The key the list of database-granted site admins lives under.
-///
-/// The companion to the config's [`site_admins`](crate::srv::cfg::VhostConfig::site_admins): the
-/// admins a site grants itself from the browser, kept apart from the operator's failsafe list so the
-/// two can be reasoned about separately. The functions in the ADMINS section below are its only
-/// writers.
+// The list of database-granted site admins: the companion to the config's `site_admins`, the
+// admins a site grants itself from the browser, kept apart from the operator's failsafe list so
+// the two can be reasoned about separately. The functions in the ADMINS section below are its
+// only writers.
 pub const ADMINS_KEY: &str = "publish/admins";
 
-/// A member profile's key prefix. The record at `publish/profile/<username>` holds the display name,
-/// avatar and description the author shows to readers, which their login username -- the hash of a
-/// passphrase -- cannot. A member with no profile record is drawn from their username alone.
+// The record at `publish/profile/<username>` holds the display name, avatar and description the
+// author shows to readers, which their login username -- the hash of a passphrase -- cannot. A
+// member with no profile record is drawn from their username alone.
 pub const PROFILE_PREFIX: &str = "publish/profile/";
 
-/// A member's uploaded picture, kept at `publish/avatar/<handle>`.
-///
-/// Apart from the profile because it is bytes and the profile is fields: a page drawing a byline reads
-/// the profile and wants the path, not a picture it will not show, and a browser asking for the
-/// picture wants the picture and none of the rest. A member whose avatar is a URL somewhere else has
-/// no record here at all.
-///
-/// Kept under the member's public handle rather than their username, because the path it is served at
-/// is the key: a picture asked for by URL is found without the server having to map anything back to
-/// a username, and no page ever carries one.
+// A member's uploaded picture, kept at `publish/avatar/<handle>`. Apart from the profile because
+// it is bytes and the profile is fields: a page drawing a byline reads the profile and wants the
+// path, not a picture it will not show, and a browser asking for the picture wants the picture
+// and none of the rest. A member whose avatar is a URL somewhere else has no record here at all.
+//
+// Kept under the member's public handle rather than their username, because the path it is served
+// at is the key: a picture asked for by URL is found without the server having to map anything
+// back to a username, and no page ever carries one.
 pub const AVATAR_PREFIX: &str = "publish/avatar/";
 
 
-/// A declared level's key prefix. The record at `publish/declare/<key>` holds the rung an admin chose
-/// for one of the things the site's config says may carry a declaration.
-///
-/// Apart from the posts because it is not a post: the thing being declared for lives somewhere else
-/// entirely -- a book in a catalogue, a project on a front page -- and the server holds nothing about
-/// it but this one word.
+// The record at `publish/declare/<key>` holds the rung an admin chose for one of the things the
+// site's config says may carry a declaration. Apart from the posts because it is not a post: the
+// thing being declared for lives somewhere else entirely -- a book in a catalogue, a project on a
+// front page -- and the server holds nothing about it but this one word.
 pub const DECLARE_PREFIX: &str = "publish/declare/";
 
 
-/// A declared level's key.
 fn declare_key_of(key: &str) -> Dat {
 	dat!(fmt!("{}{}", DECLARE_PREFIX, key))
 }
 
-/// A post's read-tally key.
 fn reads_key_of(slug: &str) -> Dat {
 	let mut s = String::from(READS_PREFIX);
 	s.push_str(slug);
 	dat!(s)
 }
 
-/// A member profile's key.
 fn profile_key_of(username: &str) -> Dat {
 	let mut s = String::from(PROFILE_PREFIX);
 	s.push_str(username);
 	dat!(s)
 }
 
-/// A member's uploaded picture's key, by their public handle.
 fn avatar_key_of(handle: &str) -> Dat {
 	let mut s = String::from(AVATAR_PREFIX);
 	s.push_str(handle);
@@ -137,21 +126,19 @@ fn avatar_key_of(handle: &str) -> Dat {
 /// is still an author, drawn from their username.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Profile {
-	/// The name a reader sees, e.g. `Jason Hoogland`. Empty falls back to the username.
-	pub name:	String,
-	/// A path or URL to the member's avatar image. Empty draws an initial instead.
-	pub avatar:	String,
-	/// What the author writes about, in their own words: the line a reader is met with above the
-	/// posts, and what stands as the description of a blog only one person writes. Plain text.
+	pub name:	String,		// e.g. `Jason Hoogland`; empty falls back to the username
+	pub avatar:	String,		// path or URL; empty draws an initial instead
+	// What the author writes about, in their own words: the line a reader is met with above the
+	// posts, and what stands as the description of a blog only one person writes. Plain text.
 	pub bio:	String,
-	/// The name this member wears in public: a random word minted the first time they save, and the
-	/// only identifier of theirs that ever reaches a page.
-	///
-	/// A member's login username is the SHA-256 of their passphrase. Publishing that would hand
-	/// anyone who reads the page a verifier to guess passphrases against, offline and unwatched, so
-	/// nothing public is ever derived from it -- not a prefix of it, not a hash of it, since either
-	/// is still a thing a guess can be tested against. A random word is derived from nothing and
-	/// tells a guesser nothing.
+	// The name this member wears in public: a random word minted the first time they save, and the
+	// only identifier of theirs that ever reaches a page.
+	//
+	// A member's login username is the SHA-256 of their passphrase. Publishing that would hand
+	// anyone who reads the page a verifier to guess passphrases against, offline and unwatched, so
+	// nothing public is ever derived from it -- not a prefix of it, not a hash of it, since either
+	// is still a thing a guess can be tested against. A random word is derived from nothing and
+	// tells a guesser nothing.
 	pub handle:	String,
 }
 
@@ -198,7 +185,6 @@ impl Profile {
 	}
 }
 
-/// A post's key.
 fn key_of(slug: &str) -> Dat {
 	let mut s = String::from(KEY_PREFIX);
 	s.push_str(slug);
@@ -211,33 +197,28 @@ fn key_of(slug: &str) -> Dat {
 /// what is kept; that is what is made of it.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Record {
-	/// The post's name in a URL.
-	pub slug:	String,
-	/// The member who wrote it, by their site-login username. Empty for a post with no named author,
-	/// which is what every record written before authorship was a field reads as, and what a post read
-	/// from a directory carries unless a default author is configured.
+	pub slug:	String,		// the post's name in a URL
+	// The member who wrote it, by their site-login username. Empty for a post with no named author,
+	// which is what every record written before authorship was a field reads as, and what a post
+	// read from a directory carries unless a default author is configured.
 	pub author:	String,
-	/// The categories the post sits in, from the site's configured set, in first-seen order. Empty for
-	/// an uncategorised post, which is what every record written before categories were a field reads
-	/// as. The free-form counterpart is [`tags`](Record::tags).
+	// The categories the post sits in, from the site's configured set, in first-seen order. Empty
+	// for an uncategorised post, which is what every record written before categories were a field
+	// reads as. The free-form counterpart is `tags`.
 	pub categories:	Vec<String>,
-	/// Draft or live.
 	pub state:	PostState,
-	/// Markdown or Djot.
 	pub markup:	Markup,
-	/// The date the author gave it, where they gave one.
-	pub date:	Option<String>,
-	/// The prose, as written, in whatever markup [`markup`](Record::markup) names.
-	pub source:	String,
-	/// Where this post has been sent besides the site's own pages, one entry per remote. Empty for a
-	/// post that lives only at home, which every post read from a directory does.
+	pub date:	Option<String>,	// where the author gave one
+	pub source:	String,		// the prose as written, in whatever markup `markup` names
+	// Where this post has been sent besides the site's own pages, one entry per remote. Empty for a
+	// post that lives only at home, which every post read from a directory does.
 	pub deliveries:	Vec<Delivery>,
-	/// The tags the author gave it, normalised and deduped, in first-seen order. Empty for an
-	/// untagged post, which is what every record written before tags were a field reads as.
+	// The tags the author gave it, normalised and deduped, in first-seen order. Empty for an
+	// untagged post, which is what every record written before tags were a field reads as.
 	pub tags:	Vec<String>,
-	/// How much the writing of it needed AI, where the author declared. Nothing where they declared
-	/// nothing, which is what every record written before the field existed reads as -- and what an
-	/// author who has not chosen still means.
+	// How much the writing of it needed AI, where the author declared. Nothing where they declared
+	// nothing, which is what every record written before the field existed reads as -- and what an
+	// author who has not chosen still means.
 	pub ai_level:	Option<Level>,
 }
 
@@ -289,7 +270,6 @@ impl Record {
 		Dat::Map(m)
 	}
 
-	/// The record from a daticle.
 	pub fn from_dat(d: &Dat) -> Outcome<Self> {
 		let m = match d {
 			Dat::Map(m)	=> m,
@@ -373,7 +353,6 @@ impl Record {
 		Ok(out)
 	}
 
-	/// The record as a reader gets it, "also on …" links and all.
 	pub fn render(&self) -> Outcome<Post> {
 		let mut post = res!(render_source(
 			&self.source, self.slug.clone(), self.date.clone(), self.markup));
@@ -426,7 +405,6 @@ pub fn put<
 	Ok(())
 }
 
-/// Reads one post's record.
 pub fn get<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -638,10 +616,8 @@ pub fn all_tags<
 	Ok(out)
 }
 
-/// How far a tag reaches: how many posts wear it, and how many distinct authors those posts belong
-/// to. What a curator is shown before deleting one, so the cost of the act is named before it is done.
-/// Every tag the site uses, each with how many posts wear it and how many authors those posts belong
-/// to, in the order [`all_tags`] gives.
+/// Every tag the site uses, each with how many posts wear it and how many authors those posts
+/// belong to, in the order [`all_tags`] gives.
 ///
 /// One pass over the records for the whole vocabulary, where [`tag_usage`] is one pass per tag: a
 /// console listing thirty tags should read the posts once, not thirty times. Use that one for a single
@@ -673,6 +649,9 @@ pub fn tag_counts<
 	Ok(seen.into_iter().map(|(t, (posts, authors))| (t, posts, authors.len())).collect())
 }
 
+/// How far a tag reaches: how many posts wear it, and how many distinct authors those posts belong
+/// to. What a curator is shown before deleting one, so the cost of the act is named before it is
+/// done.
 pub fn tag_usage<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -761,7 +740,6 @@ pub fn get_profile<
 	}
 }
 
-/// Writes a member's profile.
 pub fn put_profile<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -910,7 +888,6 @@ pub fn list<
 	Ok(posts)
 }
 
-/// The index: every slug the store holds.
 fn index<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -947,7 +924,6 @@ fn index<
 	Ok(out)
 }
 
-/// Writes the index.
 fn put_index<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
