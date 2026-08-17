@@ -83,6 +83,15 @@ pub fn test_xml(filter: &'static str) -> Outcome<()> {
 		Ok(())
 	}));
 
+	// THIS CHECK IS VACUOUS BY CONSTRUCTION AND IS NOT DRESSED UP AS EVIDENCE.
+	//
+	// `render` copies the source and drops the splices into it. With no splices there is nothing to
+	// drop in, so it returns the source, and no implementation of `render` that anyone would write
+	// could fail this. It is here to say what the editing model IS, not to prove that it holds.
+	//
+	// The property with teeth is the one above it: the spans TILE the source. A reader whose spans
+	// had a hole in it would pass this and fail that, and a future reader who takes a green result
+	// here as proof that editing preserves a document has been told something this cannot say.
 	res!(test_it(filter, &["A document nobody edited renders as its source 001", "all", "xml"], || {
 		for src in [MIXED, DOCUMENT] {
 			let xml = res!(Xml::parse(src));

@@ -1,4 +1,5 @@
 use oxedyne_fe2o3_file::office::docx;
+use oxedyne_fe2o3_file::office::docx::read::Undrawable;
 use oxedyne_fe2o3_file::office::opc::{
 	CT_DOCUMENT,
 	REL_DOC,
@@ -10,7 +11,10 @@ use oxedyne_fe2o3_core::{
 	prelude::*,
 	test::test_it,
 };
-use oxedyne_fe2o3_text::doc::markdown;
+use oxedyne_fe2o3_text::doc::{
+	Block,
+	markdown,
+};
 use oxedyne_fe2o3_text::xml::Xml;
 
 /// Prose exercising every block the tree has, so a created document is checked against something with
@@ -43,6 +47,16 @@ fn main() {}
 
 A closing paragraph.
 ";
+
+/// A `.docx` LibreOffice wrote from an HTML document with known content: two heading levels, a
+/// bulleted list, a numbered list, a quotation, a table with a bold first row, a link, and bold and
+/// italic runs.
+///
+/// The intent is ours and the bytes are somebody else's, which is the only useful shape for a reader
+/// test. It has already earned its place: LibreOffice gives its heading 1 style NO outline level and
+/// calls its quotation style `BlockQuotation`, and a reader written against Word's spellings alone
+/// gets both wrong.
+const RICH: &[u8] = include_bytes!("data/rich.docx");
 
 /// The parts a `.docx` cannot open without.
 const REQUIRED: [&str; 4] = [
@@ -220,6 +234,156 @@ pub fn test_office(filter: &'static str) -> Outcome<()> {
 		// And it survives the archive's own round trip, which is the property an edit will rest on.
 		let zip = res!(Zip::read(a.clone()));
 		assert_eq!(res!(zip.write()), a);
+		Ok(())
+	}));
+
+
+	res!(test_it(filter, &["A foreign document reads back as what it says 006", "all", "office"], || {
+		// Read against a document this crate did not write. Reading back our own output would prove
+		// that the writer and the reader share their assumptions, which is exactly the thing worth
+		// doubting.
+		let r = res!(docx::read(RICH));
+		let blocks = &r.doc.blocks;
+
+		// Headings, by what the style RESOLVES to. LibreOffice gives `Heading1` no outline level at
+		// all, so a reader that asked for one would find no title in this document.
+		let heads: Vec<(u8, String)> = blocks.iter().filter_map(|b| match b {
+			Block::Heading { level, content }	=> {
+				Some((*level, oxedyne_fe2o3_text::doc::text_of(content)))
+			}
+			_					=> None,
+		}).collect();
+		assert_eq!(heads, vec![
+			(1, "Quarterly Review".to_string()),
+			(2, "Findings".to_string()),
+		], "got {:?}", heads);
+
+		// Both lists, and which is which. That answer comes from word/numbering.xml through two hops:
+		// a paragraph names a w:num, which names an abstract definition, which holds the format.
+		let lists: Vec<(bool, usize)> = blocks.iter().filter_map(|b| match b {
+			Block::List { ordered, items }	=> Some((*ordered, items.len())),
+			_				=> None,
+		}).collect();
+		assert_eq!(lists, vec![(false, 2), (true, 2)], "got {:?}", lists);
+
+		// A quotation, which LibreOffice calls `BlockQuotation` and Word calls `Quote`.
+		assert!(blocks.iter().any(|b| matches!(b, Block::Quote(_))), "the quotation is a quotation");
+
+		// The table, with its bold first row read as the header.
+		let table = res!(blocks.iter().find_map(|b| match b {
+			Block::Table { head, rows, .. }	=> Some((head, rows)),
+			_				=> None,
+		}).ok_or_else(|| err!("no table"; Missing)));
+		let head = res!(table.0.as_ref().ok_or_else(|| err!("the table lost its header"; Missing)));
+		assert_eq!(head.text_of(), "Region Units");
+		assert_eq!(table.1.len(), 2);
+		assert_eq!(table.1[0].text_of(), "North 120");
+
+		// The link, and its target out of the relationships part.
+		let text = markdown::write::render(&r.doc);
+		assert!(text.contains("[a link](https://example.org/detail)"), "got {}", text);
+		// Bold and italic survive as emphasis rather than as font sizes.
+		assert!(text.contains("**bold words**"), "got {}", text);
+		assert!(text.contains("*italic ones*"), "got {}", text);
+
+		// Nothing in this document is undrawable, and it carries no macros.
+		assert!(r.undrawn.is_empty(), "got {:?}", r.undrawn);
+		assert!(r.say_undrawn().is_none());
+		assert!(!r.macros);
+		Ok(())
+	}));
+
+	res!(test_it(filter, &["What cannot be drawn is counted by kind 007", "all", "office"], || {
+		// The band in the panel header says "4 things are not drawn: 3 text boxes, 1 chart". The number
+		// and the kind are both the information: a reader told only that something is missing has been
+		// told that the reader cannot be trusted, and nothing else.
+		assert_eq!(Undrawable::TextBox.say(1), "1 text box");
+		assert_eq!(Undrawable::TextBox.say(3), "3 text boxes");
+		assert_eq!(Undrawable::Chart.say(1), "1 chart");
+		let mut r = docx::read::Reading::default();
+		assert!(r.say_undrawn().is_none(), "a document with everything drawn says nothing");
+		r.undrawn = vec![(Undrawable::Image, 2), (Undrawable::Chart, 1)];
+		assert_eq!(res!(r.say_undrawn().ok_or_else(|| err!("no phrase"; Missing))),
+			"3 things are not drawn: 2 images, 1 chart");
+		r.undrawn = vec![(Undrawable::Chart, 1)];
+		assert_eq!(res!(r.say_undrawn().ok_or_else(|| err!("no phrase"; Missing))),
+			"1 thing is not drawn: 1 chart");
+		Ok(())
+	}));
+
+	res!(test_it(filter, &["A document we wrote reads back as what we put in 008", "all", "office"], || {
+		// Weaker evidence than 006 and worth having for a different reason: it is the ROUND TRIP, and
+		// it covers the constructs the foreign fixture has none of -- a listing, a thematic break, a
+		// code span. It proves the writer and reader agree, and nothing about either being right.
+		let doc = res!(markdown::parse(SOURCE));
+		let (bytes, _) = res!(docx::write(&doc));
+		let back = res!(docx::read(&bytes));
+		let md = markdown::write::render(&back.doc);
+		for phrase in [
+			"# A Report On Something",
+			"## The second heading",
+			"**bold words**",
+			"- First bullet",
+			"1. Step one",
+			"> A quotation.",
+			"[link](https://example.com/page)",
+			"| Widget | 12 | 3.40 |",
+			"fn main() {}",
+		] {
+			assert!(md.contains(phrase), "the round trip lost {:?}\n---\n{}", phrase, md);
+		}
+		Ok(())
+	}));
+
+	res!(test_it(filter, &["An encrypted document is refused by name 009", "all", "office"], || {
+		// An encrypted Office file is an OLE compound file with the real document inside it. There is
+		// no password here, so it is refused rather than shown as the binary rubble it decodes to.
+		let ole = [
+			0xD0u8, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1,
+			0, 0, 0, 0, 0, 0, 0, 0,
+		];
+		let e = docx::read(&ole);
+		assert!(e.is_err());
+		// And something that is not a document at all is refused too, rather than read as empty.
+		assert!(docx::read(b"not a document").is_err());
+		Ok(())
+	}));
+
+	res!(test_it(filter, &["A macro project is said rather than run 010", "all", "office"], || {
+		// Never executed, never stripped: the binary travels with the file and the reader is TOLD.
+		// A reader who is not told does not know what they have been sent.
+		let doc = res!(markdown::parse("A document.\n"));
+		let (bytes, _) = res!(docx::write(&doc));
+		let mut zip = res!(Zip::read(bytes));
+		assert!(!res!(docx::read(&res!(zip.write()))).macros);
+		zip.set("word/vbaProject.bin", vec![0xCA, 0xFE], oxedyne_fe2o3_file::zip::Method::Store);
+		let with = res!(zip.write());
+		assert!(res!(docx::read(&with)).macros, "the macro project is seen");
+		// And it is still there afterwards, byte for byte.
+		let back = res!(Zip::read(with));
+		assert_eq!(res!(back.content("word/vbaProject.bin")), vec![0xCA, 0xFE]);
+		Ok(())
+	}));
+
+	res!(test_it(filter, &["Tracked changes are displayed as the document stands 011", "all", "office"], || {
+		// An insertion's text IS in the document, so it is read. A deletion's is not, so it is not.
+		// Display only: nothing here authors w:ins or w:del.
+		let doc = res!(markdown::parse("Placeholder.\n"));
+		let (bytes, _) = res!(docx::write(&doc));
+		let mut zip = res!(Zip::read(bytes));
+		let body = "<w:p><w:ins><w:r><w:t>kept </w:t></w:r></w:ins>\
+			<w:del><w:r><w:delText>gone </w:delText></w:r></w:del>\
+			<w:r><w:t>plain</w:t></w:r></w:p>";
+		let part = fmt!(
+			"<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+			<w:document xmlns:w=\"{}\"><w:body>{}</w:body></w:document>",
+			docx::NS_W, body);
+		zip.set("word/document.xml", part.into_bytes(), oxedyne_fe2o3_file::zip::Method::Deflate);
+		let r = res!(docx::read(&res!(zip.write())));
+		let text = markdown::write::render(&r.doc);
+		assert!(text.contains("kept plain"), "got {:?}", text);
+		assert!(!text.contains("gone"), "removed text is not what the document says: {:?}", text);
+		assert_eq!(r.tracked, 1, "and the insertion is counted, so a reader can be told");
 		Ok(())
 	}));
 

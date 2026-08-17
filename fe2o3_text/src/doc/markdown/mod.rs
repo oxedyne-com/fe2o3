@@ -38,6 +38,7 @@
 
 pub mod block;
 pub mod inline;
+pub mod write;
 
 use crate::doc::Doc;
 

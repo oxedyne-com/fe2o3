@@ -21,8 +21,10 @@
 //! assumptions.
 
 pub mod parts;
+pub mod read;
 pub mod write;
 
+pub use read::read;
 pub use write::write;
 
 /// The WordprocessingML namespace, which nearly every element of a document is in.

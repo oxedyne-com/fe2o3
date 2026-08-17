@@ -1,5 +1,6 @@
 mod base2x;
 mod highlight;
+mod markdown;
 mod pattern;
 mod string;
 mod xml;
@@ -28,6 +29,7 @@ fn run_tests() -> Outcome<()> {
     let filter = "all";
     res!(base2x::test_base2x(filter));
     res!(highlight::test_highlight(filter));
+    res!(markdown::test_markdown(filter));
     res!(pattern::test_pattern(filter));
     res!(string::test_string(filter));
     res!(xml::test_xml(filter));
