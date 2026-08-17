@@ -521,8 +521,12 @@ pub enum Op {
 	///
 	/// Renders nothing, claims no byte and mints no atom, which is the species
 	/// [`Op::Mark`] and [`Op::Note`] are already in.
+	///
+	/// `undone` must name something, for the reason [`Op::Note`]'s `on` must: a
+	/// revert of nothing is a mark with extra spelling, and [`Op::Mark`] already
+	/// says "about this point in history".
 	Reverts {
-		/// What is undone, in operation order.
+		/// What is undone, in operation order, and never nothing.
 		///
 		/// Held ascending and without repetition, for the reason
 		/// [`Header::parents`] is: two byte spellings of one set would both
@@ -710,14 +714,21 @@ impl Op {
 		Invalid, Input, Missing))
 	}
 
-	/// Checks the rule that a revert names what it undoes exactly once, in order.
+	/// Checks the rule that a revert names what it undoes, exactly once each and
+	/// in order.
 	///
-	/// [`Op::Reverts`] holds its list ascending and without repetition, for the
-	/// reason [`Header::from_dat`] holds the parents that way: the same set of
-	/// operations written two ways would be two byte strings, both of which a
-	/// signature would verify, and a provenance chain cannot afford a record with
-	/// two spellings. The list is refused rather than sorted, so that whoever
-	/// wrote it finds out.
+	/// [`Op::Reverts`] must name at least one operation. An empty list undoes
+	/// nothing, and a revert of nothing is a mark with extra spelling, which is
+	/// the reason [`Op::check_note`] refuses a note about nothing: there is
+	/// already an operation for saying something about a point in history, and
+	/// [`Op::Mark`] is it. Nothing would ever author one, so a decoder meeting one
+	/// has met damage rather than an intention.
+	///
+	/// The list is held ascending and without repetition, for the reason
+	/// [`Header::from_dat`] holds the parents that way: the same set of operations
+	/// written two ways would be two byte strings, both of which a signature would
+	/// verify, and a provenance chain cannot afford a record with two spellings.
+	/// It is refused rather than sorted, so that whoever wrote it finds out.
 	///
 	/// Checked on the way off the wire as well as on the way into the sequence,
 	/// for the reason [`Op::check_placement`] is.
@@ -728,6 +739,12 @@ impl Op {
 			Self::Reverts { undone }	=> undone,
 			_							=> return Ok(()),
 		};
+		if undone.is_empty() {
+			return Err(err!(
+				"A Reverts names no operation; a revert undoes something, and a Mark \
+				is what says something about a point in history.";
+			Invalid, Input, Missing));
+		}
 		for pair in undone.windows(2) {
 			if pair[1] <= pair[0] {
 				return Err(err!(
@@ -1653,10 +1670,15 @@ mod tests {
 				mark:	Some(oid(1, u64::MAX)),
 				time:	u64::MAX,
 			},
-			// A revert of one operation, of several, and of none.
+			// A revert of one operation, of several by one author, and of several
+			// spread across authors and out to the ends of the identifier space.
 			Op::Reverts { undone: vec![oid(2, 7)] },
 			Op::Reverts { undone: vec![oid(1, 1), oid(1, 2), oid(3, 1)] },
-			Op::Reverts { undone: Vec::new() },
+			Op::Reverts { undone: vec![
+				oid(0, 1),
+				oid(4, u64::MAX),
+				oid(u64::MAX, 1),
+			] },
 			// A move of one run into the middle of a file.
 			Op::Move {
 				src:	vec![range(1, 0, 40)],
@@ -2340,16 +2362,17 @@ mod tests {
 		Ok(())
 	}
 
-	/// A revert names what it undoes ascending and without repetition, and is
-	/// refused rather than sorted where it does not.
+	/// A revert names something, ascending and without repetition, and is refused
+	/// rather than sorted or excused where it does not.
 	///
-	/// The same rule as [`Header`]'s parents, for the same reason: two byte
-	/// spellings of one set would both verify against a signature.
+	/// The ordering rule is [`Header`]'s parents, for the same reason: two byte
+	/// spellings of one set would both verify against a signature. The rule that
+	/// it names anything at all is [`Op::check_note`]'s, for the same reason: a
+	/// revert of nothing is a mark with extra spelling.
 	#[test]
 	fn a_revert_names_what_it_undoes_once_in_order() -> Outcome<()> {
-		// In order, with no repetition, at every length.
+		// In order, with no repetition, at every length above nothing.
 		for undone in [
-			Vec::new(),
 			vec![oid(1, 1)],
 			vec![oid(1, 1), oid(1, 2), oid(2, 1), oid(9, u64::MAX)],
 		] {
@@ -2359,9 +2382,10 @@ mod tests {
 			assert_eq!(op, res!(Op::from_dat(&op.to_dat())));
 			assert_eq!(op, res!(Op::decode_all(&res!(op.encode()))));
 		}
-		// Out of order, and repeated, on the way into the structure and on the way
-		// off the wire alike.
+		// Naming nothing, out of order, and repeated, on the way into the structure
+		// and on the way off the wire alike.
 		for undone in [
+			Vec::new(),
 			vec![oid(2, 1), oid(1, 1)],
 			vec![oid(1, 2), oid(1, 1)],
 			vec![oid(1, 1), oid(1, 1)],
@@ -2373,6 +2397,17 @@ mod tests {
 			assert!(Op::from_dat(&op.to_dat()).is_err());
 			assert!(Op::decode_all(&res!(op.encode())).is_err());
 		}
+		// An empty list is refused for saying nothing, not for being out of order,
+		// so the message sends its author to the operation that does say something
+		// about a point in history.
+		let vacant = Op::Reverts { undone: Vec::new() };
+		let e = match vacant.check_reverts() {
+			Ok(()) => return Err(err!(
+				"A Reverts naming nothing was accepted."; Test)),
+			Err(e) => e,
+		};
+		let msg = fmt!("{}", e);
+		assert!(msg.contains("Mark"), "message was {}", msg);
 		// Every other variant is unaffected by the rule.
 		for op in samples() {
 			if matches!(op, Op::Reverts { .. }) {
