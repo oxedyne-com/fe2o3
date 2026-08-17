@@ -2,6 +2,7 @@ mod exif;
 mod glob;
 mod office;
 mod tree;
+mod pptx;
 mod xlsx;
 mod zip;
 
@@ -35,6 +36,7 @@ fn run_tests() -> Outcome<()> {
     res!(zip::test_zip(filter));
     res!(office::test_office(filter));
     res!(xlsx::test_xlsx(filter));
+    res!(pptx::test_pptx(filter));
 
     Ok(())
 }

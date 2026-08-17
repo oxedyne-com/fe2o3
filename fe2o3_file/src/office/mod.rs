@@ -32,7 +32,9 @@
 //! corrupts a legal review. No re-rendering of charts. No conversion between the two families, which
 //! is re-serialisation through a lossy model wearing the word "export".
 
+pub mod deck;
 pub mod docx;
 pub mod opc;
+pub mod pptx;
 pub mod sheet;
 pub mod xlsx;

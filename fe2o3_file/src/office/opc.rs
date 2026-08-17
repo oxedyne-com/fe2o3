@@ -63,6 +63,34 @@ pub const CT_STRINGS: &str =
 pub const CT_SHEET_STYLES: &str =
 	"application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml";
 
+/// The relationship type of a slide master.
+pub const REL_MASTER: &str =
+	"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster";
+/// The relationship type of one slide.
+pub const REL_SLIDE: &str =
+	"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide";
+/// The relationship type of a slide layout.
+pub const REL_LAYOUT: &str =
+	"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout";
+/// The relationship type of a theme.
+pub const REL_THEME: &str =
+	"http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme";
+
+/// The content type of the main part of a presentation.
+pub const CT_PRESENTATION: &str =
+	"application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml";
+/// The content type of one slide.
+pub const CT_SLIDE: &str =
+	"application/vnd.openxmlformats-officedocument.presentationml.slide+xml";
+/// The content type of a slide master.
+pub const CT_MASTER: &str =
+	"application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml";
+/// The content type of a slide layout.
+pub const CT_LAYOUT: &str =
+	"application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml";
+/// The content type of a theme.
+pub const CT_THEME: &str = "application/vnd.openxmlformats-officedocument.theme+xml";
+
 /// The content type of a `.rels` part, which is declared by extension rather than by name.
 pub const CT_RELS: &str = "application/vnd.openxmlformats-package.relationships+xml";
 

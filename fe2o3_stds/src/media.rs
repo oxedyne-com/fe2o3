@@ -145,8 +145,14 @@ pub enum Media {
 	Xlsx,
 	/// An Office Open XML presentation.
 	Pptx,
-	/// An OpenDocument file of any of its kinds.
-	OpenDocument,
+	/// An OpenDocument text document.
+	Odt,
+	/// An OpenDocument spreadsheet.
+	Ods,
+	/// An OpenDocument presentation.
+	Odp,
+	/// An OpenDocument drawing.
+	Odg,
 	/// An EPUB book.
 	Epub,
 
@@ -219,6 +225,55 @@ pub struct Identified {
 }
 
 /// Identify a file from its name and the front of its bytes.
+/// The media type an OpenDocument or EPUB package declares in its first member.
+pub const ODF_TEXT: &str = "application/vnd.oasis.opendocument.text";
+/// The media type an OpenDocument spreadsheet declares.
+pub const ODF_SHEET: &str = "application/vnd.oasis.opendocument.spreadsheet";
+/// The media type an OpenDocument presentation declares.
+pub const ODF_SLIDES: &str = "application/vnd.oasis.opendocument.presentation";
+/// The media type an OpenDocument drawing declares.
+pub const ODF_DRAWING: &str = "application/vnd.oasis.opendocument.graphics";
+
+/// The format an archive declares in a first member named `mimetype`, where it has one.
+///
+/// OpenDocument requires that member to be first in the archive and stored uncompressed, for exactly
+/// this purpose: a reader is meant to be able to name the file from its opening bytes rather than
+/// from what somebody called it. EPUB borrowed the rule. Nothing else uses it, so an archive without
+/// one is simply not one of these and is left as a ZIP.
+///
+/// Read from the local header rather than at a fixed offset, because the offset is only fixed when
+/// the extra field is empty -- which it usually is, and "usually" is not a thing to encode.
+fn odf_mimetype(b: &[u8]) -> Option<Media> {
+	// A local file header is 30 bytes, then the name, then the extra field, then the data.
+	if b.len() < 30 || &b[..4] != b"PK\x03\x04" {
+		return None;
+	}
+	// Stored, not deflated. A compressed `mimetype` is a package that has broken the rule, and
+	// inflating here to be helpful would be reading a format this function is only meant to name.
+	if u16::from_le_bytes([b[8], b[9]]) != 0 {
+		return None;
+	}
+	let size = u32::from_le_bytes([b[18], b[19], b[20], b[21]]) as usize;
+	let nlen = u16::from_le_bytes([b[26], b[27]]) as usize;
+	let elen = u16::from_le_bytes([b[28], b[29]]) as usize;
+	if nlen != 8 || b.len() < 30 + nlen || &b[30..38] != b"mimetype" {
+		return None;
+	}
+	let from = 30 + nlen + elen;
+	let to = from.checked_add(size)?;
+	if to > b.len() || size > 128 {
+		return None;
+	}
+	match core::str::from_utf8(&b[from..to]).ok()?.trim() {
+		ODF_TEXT	=> Some(Media::Odt),
+		ODF_SHEET	=> Some(Media::Ods),
+		ODF_SLIDES	=> Some(Media::Odp),
+		ODF_DRAWING	=> Some(Media::Odg),
+		"application/epub+zip"	=> Some(Media::Epub),
+		_			=> None,
+	}
+}
+
 ///
 /// The bytes win.  A name is a claim and bytes are evidence, and the one case where the name is
 /// the better answer -- a format with no magic signature, such as CSV -- is exactly the case where
@@ -242,7 +297,10 @@ pub fn identify(name: &str, prefix: &[u8]) -> Identified {
 		| (Media::Zip, Media::Xlsx)
 		| (Media::Zip, Media::Pptx)
 		| (Media::Zip, Media::Epub)
-		| (Media::Zip, Media::OpenDocument)	=> by_name,
+		| (Media::Zip, Media::Odt)
+		| (Media::Zip, Media::Ods)
+		| (Media::Zip, Media::Odp)
+		| (Media::Zip, Media::Odg)		=> by_name,
 		_					=> by_magic,
 	};
 	// Text is the weakest possible magic answer -- it means "these bytes are characters", which
@@ -294,10 +352,18 @@ impl Media {
 		if starts(b, b"\x00asm")		{ return Self::Wasm; }
 		if starts(b, b"\xca\xfe\xba\xbe")	{ return Self::JavaClass; }
 		if starts(b, b"MZ")			{ return Self::Exe; }
-		// Every ZIP-based format begins the same way; which one it is lives in a member name
-		// inside the archive, which is past what a prefix sniff can see.  The name settles it,
-		// and `identify` does that rather than this.
+		// Every ZIP-based format begins the same way, and for most of them which one it is lives
+		// in the central directory at the END of the file, past anything a prefix can see.  The
+		// name settles those, and `identify` does that rather than this.
+		//
+		// OpenDocument is the exception, and deliberately so: the format REQUIRES a member named
+		// `mimetype` to come first and to be stored uncompressed, precisely so that a reader can
+		// name the file from its opening bytes.  So that one is read rather than guessed, and a
+		// `.odt` somebody renamed is still an `.odt`.  EPUB borrowed the same rule.
 		if starts(b, b"PK\x03\x04") || starts(b, b"PK\x05\x06") || starts(b, b"PK\x07\x08") {
+			if let Some(m) = odf_mimetype(b) {
+				return m;
+			}
 			return Self::Zip;
 		}
 		// An ID3 tag is a wrapper, not a format; what follows it is MPEG audio in practice.
@@ -412,7 +478,10 @@ impl Media {
 			"docx" | "docm"				=> Self::Docx,
 			"xlsx" | "xlsm"				=> Self::Xlsx,
 			"pptx" | "pptm"				=> Self::Pptx,
-			"odt" | "ods" | "odp" | "odg"		=> Self::OpenDocument,
+			"odt" | "ott" | "fodt"			=> Self::Odt,
+			"ods" | "ots" | "fods"			=> Self::Ods,
+			"odp" | "otp" | "fodp"			=> Self::Odp,
+			"odg" | "otg" | "fodg"			=> Self::Odg,
 			"epub"					=> Self::Epub,
 
 			"mp3"					=> Self::Mp3,
@@ -464,7 +533,8 @@ impl Media {
 
 			Self::Zip | Self::Gzip | Self::Bzip2 | Self::Xz | Self::Zstd | Self::Tar
 			| Self::SevenZip | Self::Rar | Self::Docx | Self::Xlsx | Self::Pptx
-			| Self::OpenDocument | Self::Epub				=> Kind::Archive,
+			| Self::Odt | Self::Ods | Self::Odp | Self::Odg
+			| Self::Epub							=> Kind::Archive,
 
 			Self::Ttf | Self::Otf | Self::Woff | Self::Woff2		=> Kind::Font,
 
@@ -516,7 +586,10 @@ impl Media {
 				"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 			Self::Pptx		=>
 				"application/vnd.openxmlformats-officedocument.presentationml.presentation",
-			Self::OpenDocument	=> "application/vnd.oasis.opendocument.text",
+			Self::Odt		=> ODF_TEXT,
+			Self::Ods		=> ODF_SHEET,
+			Self::Odp		=> ODF_SLIDES,
+			Self::Odg		=> ODF_DRAWING,
 			Self::Epub		=> "application/epub+zip",
 
 			Self::Mp3		=> "audio/mpeg",
@@ -563,7 +636,9 @@ impl Media {
 			Self::Tar => "tar archive",		Self::SevenZip => "7-Zip archive",
 			Self::Rar => "RAR archive",		Self::Docx => "Word document",
 			Self::Xlsx => "Excel spreadsheet",	Self::Pptx => "PowerPoint presentation",
-			Self::OpenDocument => "OpenDocument",	Self::Epub => "EPUB book",
+			Self::Odt => "OpenDocument text",	Self::Ods => "OpenDocument spreadsheet",
+			Self::Odp => "OpenDocument presentation",
+			Self::Odg => "OpenDocument drawing",	Self::Epub => "EPUB book",
 			Self::Mp3 => "MP3 audio",		Self::Wav => "WAV audio",
 			Self::Flac => "FLAC audio",		Self::Ogg => "Ogg audio",
 			Self::M4a => "MPEG-4 audio",		Self::Mp4 => "MP4 video",
@@ -783,7 +858,8 @@ mod tests {
 			Media::PostScript, Media::Html, Media::Xml, Media::Markdown, Media::Json,
 			Media::Csv, Media::Tsv, Media::Zip, Media::Gzip, Media::Bzip2, Media::Xz,
 			Media::Zstd, Media::Tar, Media::SevenZip, Media::Rar, Media::Docx, Media::Xlsx,
-			Media::Pptx, Media::OpenDocument, Media::Epub, Media::Mp3, Media::Wav,
+			Media::Pptx, Media::Odt, Media::Ods, Media::Odp, Media::Odg,
+			Media::Epub, Media::Mp3, Media::Wav,
 			Media::Flac, Media::Ogg, Media::M4a, Media::Mp4, Media::Webm, Media::Matroska,
 			Media::Avi, Media::QuickTime, Media::Ttf, Media::Otf, Media::Woff, Media::Woff2,
 			Media::Elf, Media::Exe, Media::Wasm, Media::JavaClass, Media::Text,
