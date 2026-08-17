@@ -26,6 +26,8 @@ use crate::office::opc::NS_R;
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_text::xml::write::Out;
 
+const LAYOUT_TYPE: &str = "tx";	// ST_SlideLayoutType for "Title and Text"
+
 /// The twelve entries of a colour scheme, in the order the schema requires them.
 ///
 /// The order is not decoration: a reader takes the first as dark 1, the second as light 1, and so on
@@ -135,11 +137,16 @@ pub fn master() -> Outcome<String> {
 }
 
 /// The one slide layout: a title and a body, which is the only shape a generated deck needs.
+///
+/// `type="tx"` is "Title and Text", and it is the name for this shape however wrong it reads.
+/// `ST_SlideLayoutType` is a closed list of 36 tokens and `titleAndBody` -- the obvious guess, and what
+/// stood here -- is not one of them; `tx` and `obj` are the two that mean title-plus-body. LibreOffice
+/// converted the deck without a murmur, so only the schema was ever going to catch it.
 pub fn layout() -> Outcome<String> {
 	let mut out = Out::declared();
 	out.open("p:sldLayout", &[
 		("xmlns:a", NS_A), ("xmlns:r", NS_R), ("xmlns:p", NS_P),
-		("type", "titleAndBody"), ("preserve", "1"),
+		("type", LAYOUT_TYPE), ("preserve", "1"),
 	]);
 	res!(shape_tree(&mut out, false));
 	res!(out.close("p:sldLayout"));

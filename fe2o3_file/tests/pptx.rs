@@ -191,5 +191,32 @@ pub fn test_pptx(filter: &'static str) -> Outcome<()> {
 		Ok(())
 	}));
 
+	res!(test_it(filter, &["A slide layout wears a type the schema has heard of 006", "all", "pptx"], || {
+		// `titleAndBody` stood here and is not one of these. The list is `ST_SlideLayoutType` from
+		// ECMA-376 Part 1 §19.7.15, copied out in full rather than compared against the writer's own
+		// constant -- a test that read the constant would agree with any value the writer chose,
+		// including the wrong one it had. LibreOffice converted the deck without complaint.
+		const LEGAL: [&str; 36] = [
+			"title", "tx", "twoColTx", "tbl", "txAndChart", "chartAndTx", "dgm", "chart",
+			"txAndClipArt", "clipArtAndTx", "titleOnly", "blank", "txAndObj", "objAndTx",
+			"objOnly", "obj", "txAndMedia", "mediaAndTx", "objOverTx", "txOverObj",
+			"txAndTwoObj", "twoObjAndTx", "twoObjOverTx", "fourObj", "vertTx",
+			"clipArtAndVertTx", "vertTitleAndTx", "vertTitleAndTxOverChart", "twoObj",
+			"objAndTwoObj", "twoObjAndObj", "cust", "secHead", "twoTxTwoObj", "objTx", "picTx",
+		];
+		let doc = res!(markdown::parse(SOURCE));
+		let (bytes, _) = res!(pptx::write(&Deck::from_doc(&doc)));
+		let zip = res!(oxedyne_fe2o3_file::zip::Zip::read(bytes));
+		let xml = res!(zip.text("ppt/slideLayouts/slideLayout1.xml"));
+		let at = res!(xml.find("type=\"").ok_or_else(|| err!(
+			"The slide layout carries no type attribute at all."; Test, Missing))) + 6;
+		let rest = &xml[at..];
+		let kind = res!(rest.split('"').next().ok_or_else(|| err!(
+			"The type attribute is unterminated."; Test, Invalid)));
+		assert!(LEGAL.contains(&kind),
+			"the layout's type=\"{}\" is not one of ST_SlideLayoutType's 36 members", kind);
+		Ok(())
+	}));
+
 	Ok(())
 }
