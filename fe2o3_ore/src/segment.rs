@@ -6,12 +6,25 @@
 //! already written is ever revisited, so a writer needs no index and a reader
 //! needs no seek.
 //!
-//! Records come in two forms and the format carries both, tagged. A bare
-//! [`Record`] is what a replica writes for itself, where provenance is not in
-//! question; an [`Envelope`] is the same record with a public key and a
+//! Records come in three forms and the format carries all of them, tagged. A
+//! bare [`Record`] is what a replica writes for itself, where provenance is not
+//! in question; an [`Envelope`] is the same record with a public key and a
 //! signature around it, which is what crosses between parties. A segment may
 //! hold either or both, so a repository that starts unsigned and later gains
 //! signatures does not need a second format.
+//!
+//! The third form is a [`Veiled`] record, which is one of the other two
+//! encrypted whole, with its header left in clear beside the ciphertext. It
+//! exists for the case where the machine holding the bytes is not one of the
+//! parties: a carrier that has to place an operation needs its identifier and
+//! its parents and nothing else, so those are what it is given.
+//!
+//! # The caller owns the cipher too
+//!
+//! [`Entry::veil`] and [`Entry::unveil`] take an implementation of [`Encrypter`]
+//! for the same reason the digest takes a [`Hasher`]: which cipher, and whose
+//! key, are decisions this crate has no business making. It marshals bytes and
+//! asks the caller's scheme to encrypt or decrypt them.
 //!
 //! # The caller owns the hash
 //!
@@ -56,9 +69,13 @@ use crate::id::{
 	ReplicaId,
 	VARINT_MAX_LEN,
 };
-use crate::op::Record;
+use crate::op::{
+	Header,
+	Record,
+};
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_iop_crypto::enc::Encrypter;
 use oxedyne_fe2o3_iop_hash::api::Hasher;
 use oxedyne_fe2o3_jdat::prelude::*;
 
@@ -133,6 +150,16 @@ pub const fn highest_code(version: u8) -> u8 {
 pub const KIND_BARE:	u8 = 1;
 /// Kind byte of a record carrying a signed [`Envelope`].
 pub const KIND_SEALED:	u8 = 2;
+/// Kind byte of a record whose header is in clear and whose body is encrypted.
+///
+/// The kind is a separate axis from [`VERSION`], and neither moved for the
+/// other. A version says which operations the records inside a segment may be; a
+/// veiled record's operation is ciphertext, so there is no code in it for a
+/// version to bound, and a segment written at any version this reader knows may
+/// carry one. What a reader meeting a form it does not have needs to be told is
+/// the form, and the kind byte says so in the record where it is rather than in a
+/// header that would condemn every plain record beside it.
+pub const KIND_VEILED:	u8 = 3;
 
 // How much consumed prefix a reader tolerates before it moves the remainder to
 // the front of its buffer.
@@ -234,13 +261,71 @@ impl Head {
 }
 
 
-/// One record of a segment: an operation, with or without its provenance.
+/// An entry whose header can be read and whose body cannot.
+///
+/// The header is in clear because a carrier that never reads an operation still
+/// has to place one: a frontier walk follows parents, a sketch is keyed by
+/// identifiers, and a closure check wants both. None of them wants an operation
+/// body, which is what rendering wants, and a carrier does not render. So this is
+/// the whole of what a repository gives away to be carried, and the rest of it is
+/// ciphertext.
+///
+/// The signature is inside, over the plaintext record, which puts verification
+/// where decryption is: at a reader holding the key, never at the carrier. The
+/// clear header duplicates the one sealed inside, and that duplication is what
+/// makes a carrier that alters it detectable rather than merely suspected --
+/// [`Entry::unveil`] compares the two and refuses the pair if they disagree.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Veiled {
+	pub head:	Header,		// identifier and parents, in clear
+	pub body:	Vec<u8>,	// the whole entry, encrypted
+}
+
+impl Veiled {
+	/// The shape is `[head, body]`.
+	pub fn to_dat(&self) -> Dat {
+		Dat::List(vec![
+			self.head.to_dat(),
+			Dat::BU64(self.body.clone()),
+		])
+	}
+
+	pub fn from_dat(dat: &Dat)
+		-> Outcome<Self>
+	{
+		let v = match dat {
+			Dat::List(v) if v.len() == 2 => v,
+			_ => return Err(err!(
+				"A veiled record expects a 2-element Dat::List, got {:?}.", dat;
+			Decode, Input, Mismatch)),
+		};
+		let head = res!(Header::from_dat(&v[0]));
+		// One width and not the narrower ones a shorter body would also fit. Two
+		// byte spellings of one veiled entry would both decode to the same thing
+		// and hash differently, and a record whose digest depends on which
+		// spelling it arrived in is not one a carrier can pass on unaltered.
+		let body = match &v[1] {
+			Dat::BU64(b) => b.clone(),
+			other => return Err(err!(
+				"The veiled body of {} is encoded {:?}; it is written under a 64-bit \
+				length, whatever its size.", head.id(), other;
+			Decode, Input, Mismatch)),
+		};
+		Ok(Self { head, body })
+	}
+}
+
+
+/// One record of a segment: an operation, with or without its provenance, and
+/// readable or not.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Entry {
 	/// An operation written down as it stands.
 	Bare(Record),
 	/// An operation with a public key and a signature around it.
 	Sealed(Envelope),
+	/// An operation whose header is in clear and whose body is encrypted.
+	Veiled(Veiled),
 }
 
 impl Entry {
@@ -249,6 +334,7 @@ impl Entry {
 		match self {
 			Self::Bare(_)	=> KIND_BARE,
 			Self::Sealed(_)	=> KIND_SEALED,
+			Self::Veiled(_)	=> KIND_VEILED,
 		}
 	}
 
@@ -257,26 +343,137 @@ impl Entry {
 		match self {
 			Self::Bare(_)	=> "bare record",
 			Self::Sealed(_)	=> "sealed envelope",
+			Self::Veiled(_)	=> "veiled record",
 		}
+	}
+
+	pub fn is_veiled(&self) -> bool {
+		matches!(self, Self::Veiled(_))
+	}
+
+	/// The header, which every form carries in clear.
+	///
+	/// This is the one question a carrier may ask of any entry whatever, and it is
+	/// what separates carrying a history from reading one. A veiled entry answers
+	/// from the clear header beside its ciphertext and the other two from the
+	/// record they hold, so a caller that wants the graph and not the content never
+	/// wants a key.
+	pub fn head(&self)
+		-> Outcome<Header>
+	{
+		Ok(match self {
+			Self::Bare(rec)	=> rec.head.clone(),
+			Self::Sealed(e)	=> res!(e.peek_record()).head,
+			Self::Veiled(v)	=> v.head.clone(),
+		})
 	}
 
 	/// Opens a sealed record without checking its signature.
 	///
 	/// Verification is the caller's to do, with the scheme the caller holds; a
 	/// segment reader has no key material and makes no claim about provenance.
+	///
+	/// A veiled entry fails here rather than answering with a stand-in, because
+	/// every caller of this asks it in order to read an operation, and a body
+	/// nobody can read is not one. The failure names the operation, so a carrier
+	/// handed a form it was not built for says which one it was.
 	pub fn peek(&self)
 		-> Outcome<Record>
 	{
 		match self {
 			Self::Bare(rec)	=> Ok(rec.clone()),
 			Self::Sealed(e)	=> e.peek_record(),
+			Self::Veiled(v) => Err(err!(
+				"The operation {} is veiled: its body is encrypted under a key held by \
+				whoever may read this repository, and not by whoever carries it. Its \
+				header is readable with `Entry::head`, and its body with \
+				`Entry::unveil` and the key.", v.head.id();
+			Invalid, Input, Missing, Key)),
 		}
 	}
 
 	pub fn id(&self)
 		-> Outcome<OpId>
 	{
-		Ok(res!(self.peek()).head.id())
+		Ok(res!(self.head()).id())
+	}
+
+	/// Encrypts an entry whole, leaving its header in clear.
+	///
+	/// What goes under the cipher is the entry's own tagged form, so the form
+	/// travels with it: a sealed envelope unveils to a sealed envelope, signature
+	/// and public key intact, and a bare record to a bare record. Nothing about the
+	/// entry is re-encoded on the way, so a signature made before it was veiled is
+	/// the signature checked after it is unveiled.
+	///
+	/// Veiling a veiled entry is refused. A second wrapping would hide a header
+	/// that is already hidden, which is the one thing the form exists not to do.
+	pub fn veil<E: Encrypter>(&self, enc: &E)
+		-> Outcome<Self>
+	{
+		if let Self::Veiled(v) = self {
+			return Err(err!(
+				"The operation {} is veiled already, and veiling it again would hide \
+				the header a carrier places it by.", v.head.id();
+			Invalid, Input, Duplicate));
+		}
+		let head = res!(self.head());
+		let plain = res!(self.to_dat().to_bytes(Vec::new()));
+		Ok(Self::Veiled(Veiled { head, body: res!(enc.encrypt(&plain)) }))
+	}
+
+	/// Decrypts a veiled entry, and refuses one whose clear header is not the
+	/// header inside it.
+	///
+	/// The comparison is the whole of what the duplicated header buys. A carrier
+	/// cannot touch the copy inside, which is under the signature, but it can
+	/// rewrite the copy in clear, and every peer that never holds the key would
+	/// place the operation by the rewritten one. So the first reader with the key
+	/// checks the two against each other, and a disagreement is refused by name
+	/// with the signed copy named as the one to believe.
+	pub fn unveil<E: Encrypter>(&self, enc: &E)
+		-> Outcome<Self>
+	{
+		let veiled = match self {
+			Self::Veiled(v) => v,
+			other => return Err(err!(
+				"A {} is not veiled, so there is nothing to unveil.", other.name();
+			Invalid, Input, Mismatch)),
+		};
+		let plain = match enc.decrypt(&veiled.body) {
+			Ok(p) => p,
+			Err(e) => return Err(err!(e,
+				"The {} byte body of the veiled operation {} did not decrypt. Either \
+				this is not the key the repository was veiled under, or the bytes have \
+				been altered since.", veiled.body.len(), veiled.head.id();
+			Invalid, Input, Decrypt, Key)),
+		};
+		let (dat, used) = res!(Dat::from_bytes(&plain));
+		if used != plain.len() {
+			return Err(err!(
+				"The veiled operation {} decrypted to {} bytes and decoded from only {} \
+				of them.", veiled.head.id(), plain.len(), used;
+			Decode, Input, Mismatch));
+		}
+		let inner = res!(Self::from_dat(&dat));
+		if inner.is_veiled() {
+			return Err(err!(
+				"The veiled operation {} holds another veiled record.", veiled.head.id();
+			Decode, Input, Invalid));
+		}
+		let inside = res!(inner.head());
+		if inside != veiled.head {
+			return Err(err!(
+				"A veiled entry says in clear that it is {} written against {}, and the \
+				record inside it is {} written against {}. The clear header is what a \
+				carrier places an operation by, so the two disagreeing means the carrier \
+				was given one history and shown another; the record inside is the signed \
+				one and is what to believe.",
+				veiled.head.id(), said_parents(&veiled.head),
+				inside.id(), said_parents(&inside);
+			Invalid, Input, Security, Mismatch));
+		}
+		Ok(inner)
 	}
 
 	/// The shape is `[kind, body]`.
@@ -291,6 +488,7 @@ impl Entry {
 			match self {
 				Self::Bare(rec)	=> rec.to_dat(),
 				Self::Sealed(e)	=> e.to_dat(),
+				Self::Veiled(v)	=> v.to_dat(),
 			},
 		])
 	}
@@ -313,9 +511,11 @@ impl Entry {
 		match kind {
 			KIND_BARE	=> Ok(Self::Bare(res!(Record::from_dat(&v[1])))),
 			KIND_SEALED	=> Ok(Self::Sealed(res!(Envelope::from_dat(&v[1])))),
+			KIND_VEILED	=> Ok(Self::Veiled(res!(Veiled::from_dat(&v[1])))),
 			other => Err(err!(
-				"An Entry is tagged {}, which is neither {} for a bare record nor {} \
-				for a sealed envelope.", other, KIND_BARE, KIND_SEALED;
+				"An Entry is tagged {}, which is none of {} for a bare record, {} for a \
+				sealed envelope and {} for a veiled one.",
+				other, KIND_BARE, KIND_SEALED, KIND_VEILED;
 			Decode, Input, Invalid)),
 		}
 	}
@@ -327,6 +527,7 @@ impl Entry {
 		let dat = match self {
 			Self::Bare(rec)	=> rec.to_dat(),
 			Self::Sealed(e)	=> e.to_dat(),
+			Self::Veiled(v)	=> v.to_dat(),
 		};
 		Ok(res!(dat.to_bytes(Vec::new())))
 	}
@@ -344,9 +545,11 @@ impl Entry {
 		match kind {
 			KIND_BARE	=> Ok(Self::Bare(res!(Record::from_dat(&dat)))),
 			KIND_SEALED	=> Ok(Self::Sealed(res!(Envelope::from_dat(&dat)))),
+			KIND_VEILED	=> Ok(Self::Veiled(res!(Veiled::from_dat(&dat)))),
 			other => Err(err!(
-				"A segment record is tagged {}, which is neither {} for a bare record \
-				nor {} for a sealed envelope.", other, KIND_BARE, KIND_SEALED;
+				"A segment record is tagged {}, which is none of {} for a bare record, \
+				{} for a sealed envelope and {} for a veiled one.",
+				other, KIND_BARE, KIND_SEALED, KIND_VEILED;
 			Decode, Input, Invalid)),
 		}
 	}
@@ -420,10 +623,16 @@ impl<H: Hasher, const S: usize> Writer<H, S> {
 	/// subset of a newer one rather than a promise the bytes break. A caller with
 	/// such a record to write starts a segment at the current version instead;
 	/// nothing about a log says its segments share a version.
+	///
+	/// A veiled record is not asked, because nothing here can ask it: its
+	/// operation is ciphertext and carries no code for the version to bound. That
+	/// is not a hole in the claim, since the claim is about what a reader of the
+	/// segment can be handed, and what a reader is handed here is an opaque body
+	/// and the name of a key it does not have.
 	pub fn push(&mut self, entry: &Entry)
 		-> Outcome<()>
 	{
-		if self.version < VERSION {
+		if self.version < VERSION && !entry.is_veiled() {
 			let op = res!(entry.peek()).op;
 			let top = highest_code(self.version);
 			if op.code() > top {
@@ -664,6 +873,17 @@ impl<H: Hasher, const S: usize> Reader<H, S> {
 }
 
 
+/// A header's parents, named the way a reader names them.
+fn said_parents(head: &Header) -> String {
+	let said: Vec<String> = head.parents().iter().map(|p| fmt!("{}", p)).collect();
+	if said.is_empty() {
+		fmt!("nothing, as a root")
+	} else {
+		said.join(", ")
+	}
+}
+
+
 /// `None` means the bytes so far are a prefix of a varint and more are needed;
 /// an error means they are not a varint at all, whatever follows.
 fn try_varint(buf: &[u8])
@@ -732,10 +952,120 @@ mod tests {
 		StubSigner,
 	};
 
-	use oxedyne_fe2o3_iop_crypto::keys::KeyManager;
+	use oxedyne_fe2o3_iop_crypto::{
+		InNamex,
+		NamexId,
+		keys::KeyManager,
+	};
 
 	fn oid(replica: u64, counter: u64) -> OpId {
 		OpId::new(ReplicaId::new(replica), counter)
+	}
+
+	/// A stand-in cipher: the input under a keystream folded from the key, with
+	/// four bytes of tag after it.
+	///
+	/// It is not cryptography and is offered as none. What these tests need of a
+	/// cipher is three things: that the plaintext cannot be found in the output by
+	/// searching for it, that only the same key gets it back, and that a wrong key
+	/// fails rather than returning rubbish. An Ore repository veils under
+	/// AES-256-GCM from `oxedyne_fe2o3_crypto`, which is tested where it is
+	/// implemented; what is tested here is that this module puts the right bytes
+	/// in front of a cipher and does the right thing with what comes back.
+	#[derive(Clone, Debug, Default)]
+	struct StubCipher {
+		/// The shared key.
+		key: Vec<u8>,
+	}
+
+	impl StubCipher {
+		fn with_seed(seed: u8) -> Self {
+			Self { key: vec![seed; 16] }
+		}
+
+		/// The fold both the keystream and the tag are drawn from.
+		fn fold(key: &[u8], extra: &[u8]) -> u64 {
+			let mut acc: u64 = 0xcbf2_9ce4_8422_2325;
+			for b in key.iter().chain(extra.iter()) {
+				acc ^= *b as u64;
+				acc = acc.wrapping_mul(0x0000_0100_0000_01b3);
+			}
+			acc
+		}
+
+		fn stream(&self, data: &[u8]) -> Vec<u8> {
+			let mut acc = Self::fold(&self.key, &[]);
+			data.iter()
+				.map(|b| {
+					acc = acc
+						.wrapping_mul(6_364_136_223_846_793_005)
+						.wrapping_add(1_442_695_040_888_963_407);
+					b ^ (acc >> 33) as u8
+				})
+				.collect()
+		}
+	}
+
+	impl InNamex for StubCipher {
+		fn name_id(&self) -> Outcome<NamexId> {
+			Ok(NamexId::default())
+		}
+	}
+
+	impl KeyManager for StubCipher {
+		fn clone_with_keys(&self, _pk: Option<&[u8]>, sk: Option<&[u8]>)
+			-> Outcome<Self>
+		{
+			Ok(Self {
+				key: match sk {
+					Some(b)	=> b.to_vec(),
+					None	=> Vec::new(),
+				},
+			})
+		}
+
+		fn get_public_key(&self) -> Outcome<Option<&[u8]>> { Ok(None) }
+
+		fn get_secret_key(&self) -> Outcome<Option<&[u8]>> { Ok(Some(&self.key)) }
+
+		fn set_public_key(self, _pk: Option<&[u8]>) -> Outcome<Self> { Ok(self) }
+
+		fn set_secret_key(mut self, sk: Option<&[u8]>) -> Outcome<Self> {
+			self.key = match sk {
+				Some(b)	=> b.to_vec(),
+				None	=> Vec::new(),
+			};
+			Ok(self)
+		}
+	}
+
+	impl Encrypter for StubCipher {
+		fn encrypt(&self, data: &[u8])
+			-> Outcome<Vec<u8>>
+		{
+			let mut out = self.stream(data);
+			out.extend_from_slice(&Self::fold(&self.key, data).to_be_bytes()[..4]);
+			Ok(out)
+		}
+
+		fn decrypt(&self, data: &[u8])
+			-> Outcome<Vec<u8>>
+		{
+			if data.len() < 4 {
+				return Err(err!(
+					"A body of {} bytes is shorter than the tag.", data.len();
+				Decode, Input, Missing));
+			}
+			let cut = data.len() - 4;
+			let plain = self.stream(&data[..cut]);
+			if Self::fold(&self.key, &plain).to_be_bytes()[..4] != data[cut..] {
+				return Err(err!(
+					"The tag does not check out under this key."; Invalid, Input, Decrypt));
+			}
+			Ok(plain)
+		}
+
+		fn is_identity(&self) -> bool { false }
 	}
 
 	/// A handful of records spanning the vocabulary, with roots and merges among
@@ -1036,13 +1366,34 @@ mod tests {
 			Err(e) => e,
 		};
 		assert!(fmt!("{}", e).contains("version"), "message was {}", e);
-		// A record tagged with neither kind is refused.
+		// A record tagged with none of the kinds is refused, and the refusal names
+		// the ones there are. That is the mechanism by which a build made before a
+		// form existed meets it: a reader knowing only the bare and sealed kinds
+		// says so about a veiled record in exactly these words, which is the whole
+		// of what a new entry form owes an old reader.
 		let entries = res!(bare());
 		let bytes = res!(encode(&Head::new(None), &entries, (), [0u8; 0]));
 		let head_len = Head::new(None).encode().len();
+		// Under the identity hasher a record's digest is its kind byte and its body
+		// again, so the tag is put right in the digest as well. Without that the
+		// integrity check refuses the record before the tag is ever looked at,
+		// which is what this assertion was quietly testing instead.
 		let mut odd = bytes.clone();
 		odd[head_len] = 9;
-		assert!(decode(&odd, (), [0u8; 0]).is_err());
+		let (body_len, used) = res!(varint_decode(&odd[head_len + 1..]));
+		let after_body = head_len + 1 + used + body_len as usize;
+		let (digest_len, used) = res!(varint_decode(&odd[after_body..]));
+		assert_eq!(digest_len, body_len + 1, "the identity digest is the kind and the body");
+		odd[after_body + used] = 9;
+		let e = match decode(&odd, (), [0u8; 0]) {
+			Ok(_) => return Err(err!("A record tagged 9 was accepted."; Test)),
+			Err(e) => e,
+		};
+		let msg = fmt!("{}", e);
+		for named in ["bare", "sealed", "veiled"] {
+			assert!(msg.contains(named),
+				"the refusal does not name the {} form: {}", named, msg);
+		}
 		Ok(())
 	}
 
@@ -1569,6 +1920,263 @@ mod tests {
 				"Expected a sealed envelope, got a {}.", other.name(); Test, Mismatch)),
 		}
 		let _ = StubSigner::default().clone_with_keys(None, None);
+		Ok(())
+	}
+
+	/// A veiled entry hands a carrier the header and nothing else, and gives a
+	/// reader with the key back exactly what went in.
+	///
+	/// This is the whole of the form in one test. The identifier and the parents
+	/// are readable without a key, because a carrier has to place the operation;
+	/// the content is not, and is not in the segment's bytes to be found by
+	/// searching for it; and what unveils is the same sealed envelope, whose
+	/// signature still checks out, because nothing was re-encoded on the way.
+	#[test]
+	fn a_veiled_entry_carries_its_header_and_hides_the_rest() -> Outcome<()> {
+		let signer = StubSigner::with_seed(3);
+		let cipher = StubCipher::with_seed(11);
+		let secret: &[u8] = b"the merger closes on Friday";
+		let rec = Record::new(
+			res!(Header::new(oid(2, 5), vec![oid(1, 3), oid(1, 4)])),
+			Op::Splice {
+				left:	Some(Anchor::origin(oid(1, 3))),
+				right:	None,
+				remove:	Vec::new(),
+				insert:	secret.to_vec(),
+			},
+		);
+		let plain = Entry::Sealed(res!(Envelope::seal_record(&signer, &rec)));
+		let veiled = res!(plain.veil(&cipher));
+		assert!(veiled.is_veiled());
+		assert_eq!(veiled.kind(), KIND_VEILED);
+		assert_eq!(veiled.name(), "veiled record");
+
+		// What a carrier may ask, and what it may not.
+		let head = res!(veiled.head());
+		assert_eq!(head.id(), oid(2, 5));
+		assert_eq!(head.parents(), vec![oid(1, 3), oid(1, 4)]);
+		assert_eq!(res!(veiled.id()), oid(2, 5));
+		let refused = match veiled.peek() {
+			Ok(_) => return Err(err!("A veiled operation was read."; Test, Security)),
+			Err(e) => fmt!("{}", e.plain()),
+		};
+		assert!(refused.contains("r2:5"), "the refusal names the operation: {}", refused);
+		assert!(refused.contains("veiled"), "and says what it met: {}", refused);
+
+		// Through a segment, which is what a carrier keeps.
+		let bytes = res!(encode(&Head::new(None), &[veiled.clone()], Fold, [0u8; 0]));
+		assert!(
+			!bytes.windows(secret.len()).any(|w| w == secret),
+			"the segment a carrier holds contains the operation's own content",
+		);
+		let (_, got) = res!(decode(&bytes, Fold, [0u8; 0]));
+		assert_eq!(got, vec![veiled]);
+
+		// And a reader with the key gets back what was veiled, signature and all.
+		let back = res!(got[0].unveil(&cipher));
+		assert_eq!(back, plain);
+		match &back {
+			Entry::Sealed(env) => assert!(res!(env.verify(&signer)),
+				"the signature made before veiling does not check out after"),
+			other => return Err(err!(
+				"Expected a sealed envelope, got a {}.", other.name(); Test, Mismatch)),
+		}
+		assert_eq!(res!(back.peek()), rec);
+		Ok(())
+	}
+
+	/// A carrier that rewrites the clear header is caught by the first reader
+	/// holding the key, and told which copy to believe.
+	///
+	/// Rewriting it is the one thing a carrier can do to a veiled entry, and it is
+	/// not nothing: every peer that never holds the key places the operation by the
+	/// clear copy. What stops it mattering is that the copy inside is under the
+	/// signature and cannot be made to agree.
+	#[test]
+	fn a_carrier_that_rewrites_the_clear_header_is_caught() -> Outcome<()> {
+		let cipher = StubCipher::with_seed(2);
+		let rec = Record::new(
+			res!(Header::new(oid(1, 2), vec![oid(1, 1)])),
+			Op::Mark { name: fmt!("v1"), body: None, time: None },
+		);
+		let veiled = res!(Entry::Bare(rec.clone()).veil(&cipher));
+		assert_eq!(res!(veiled.unveil(&cipher)), Entry::Bare(rec), "sound as it stands");
+		// Re-parented in clear, the ciphertext untouched.
+		let lying = match &veiled {
+			Entry::Veiled(v) => Entry::Veiled(Veiled {
+				head:	Header::root(oid(1, 2)),
+				body:	v.body.clone(),
+			}),
+			other => return Err(err!(
+				"Expected a veiled record, got a {}.", other.name(); Test, Mismatch)),
+		};
+		assert!(res!(lying.head()).parents().is_empty(),
+			"which is the graph a carrier would have placed it in");
+		let caught = match lying.unveil(&cipher) {
+			Ok(_) => return Err(err!(
+				"A rewritten clear header was accepted."; Test, Security)),
+			Err(e) => fmt!("{}", e.plain()),
+		};
+		assert!(caught.contains("r1:1"),
+			"the refusal names the parent that was dropped: {}", caught);
+		assert!(caught.contains("believe"),
+			"and says which of the two copies to believe: {}", caught);
+		Ok(())
+	}
+
+	/// A key that is not the one it was veiled under fails by name rather than
+	/// returning rubbish.
+	#[test]
+	fn the_wrong_key_does_not_unveil() -> Outcome<()> {
+		let ours = StubCipher::with_seed(1);
+		let theirs = StubCipher::with_seed(2);
+		let veiled = res!(Entry::Bare(Record::root(
+			oid(1, 1),
+			Op::FileCreate { path: b"notes.md".to_vec() },
+		)).veil(&ours));
+		let refused = match veiled.unveil(&theirs) {
+			Ok(_) => return Err(err!("Another key unveiled it."; Test, Security)),
+			Err(e) => fmt!("{}", e.plain()),
+		};
+		assert!(refused.contains("r1:1"), "the refusal names the operation: {}", refused);
+		assert!(refused.contains("did not decrypt"), "and says what failed: {}", refused);
+		Ok(())
+	}
+
+	#[test]
+	fn veiling_does_not_nest_and_unveiling_wants_a_veil() -> Outcome<()> {
+		let cipher = StubCipher::with_seed(7);
+		let plain = Entry::Bare(Record::root(
+			oid(1, 1),
+			Op::Mark { name: fmt!("v1"), body: None, time: None },
+		));
+		let veiled = res!(plain.veil(&cipher));
+		assert!(veiled.veil(&cipher).is_err(), "a veil over a veil hides the header");
+		assert!(plain.unveil(&cipher).is_err(), "a bare record has nothing to unveil");
+		Ok(())
+	}
+
+	/// Veiled entries sit beside plain ones in one segment, and each comes back as
+	/// the form it went in as.
+	///
+	/// A repository does not become veiled all at once: what a replica veils is
+	/// what it hands to a carrier, and the segments either end of that hop hold
+	/// whatever they were given. So the three forms have to mix, in a segment and
+	/// in the daticle form a sync message carries.
+	#[test]
+	fn a_segment_mixes_veiled_entries_with_plain_ones() -> Outcome<()> {
+		let cipher = StubCipher::with_seed(23);
+		let (mut entries, _) = res!(sealed());
+		entries.extend(res!(bare()));
+		let mut mixed: Vec<Entry> = Vec::new();
+		for (i, entry) in entries.iter().enumerate() {
+			mixed.push(if i % 2 == 0 {
+				res!(entry.veil(&cipher))
+			} else {
+				entry.clone()
+			});
+		}
+		let bytes = res!(encode(&Head::new(None), &mixed, Fold, [0u8; 0]));
+		let (_, got) = res!(decode(&bytes, Fold, [0u8; 0]));
+		assert_eq!(got, mixed);
+		for (i, entry) in got.iter().enumerate() {
+			assert_eq!(&res!(Entry::from_dat(&entry.to_dat())), entry,
+				"entry {} did not round trip as a daticle", i);
+			assert_eq!(res!(entry.id()), res!(entries[i].id()),
+				"entry {} is not the operation it was made from", i);
+			let back = if entry.is_veiled() {
+				res!(entry.unveil(&cipher))
+			} else {
+				entry.clone()
+			};
+			assert_eq!(back, entries[i], "entry {} did not come back as itself", i);
+		}
+		Ok(())
+	}
+
+	/// The bytes of a one-record segment carrying a veiled entry, frozen.
+	///
+	/// Written under the identity encrypter, so what the array pins is the framing
+	/// and not somebody's cipher: the kind byte 3, the header in clear, and a
+	/// length prefixed body whose bytes here are the inner entry itself and can be
+	/// read in the listing. Under a real cipher everything above the body is
+	/// identical and the body is noise of the same length plus whatever the scheme
+	/// adds to it.
+	///
+	/// The inner bytes are the same ten that [`the_segment_bytes_are_frozen`] pins
+	/// for a mark, at their own offset, which is the point of veiling the tagged
+	/// form rather than a re-encoding of it: what a reader with the key gets back
+	/// is the entry that was signed, byte for byte.
+	#[test]
+	fn the_veiled_bytes_are_frozen() -> Outcome<()> {
+		let rec = Record::new(
+			res!(Header::new(oid(2, 3), vec![oid(1, 7)])),
+			Op::Mark { name: fmt!("v1"), body: None, time: None },
+		);
+		let veiled = res!(Entry::Bare(rec).veil(&()));
+		let bytes = res!(encode(&Head::new(None), &[veiled], Fold, [0u8; 0]));
+		let want: &[u8] = &[
+			// The magic, version 4, and no replica hint.
+			0x4f, 0x52, 0x45, 0x53, 0x45, 0x47,
+			0x04,
+			0x00,
+			// The record: a veiled one, and 126 bytes of body.
+			0x03,
+			0x7e,
+			// The body is a daticle list of 123 bytes: the clear header, the
+			// ciphertext.
+			0x33, 0x21, 0x7b,
+				// The header in clear, 45 bytes: the identifier r2:3 and the one
+				// parent r1:7. This is the whole of what a carrier is given.
+				0x33, 0x21, 0x2d,
+					0x33, 0x21, 0x12,
+						0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
+						0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03,
+					0x33, 0x21, 0x15,
+						0x33, 0x21, 0x12,
+							0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+							0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07,
+				// The body, as bytes under a 64-bit length: 66 of them. The length
+				// is that wide because an operation is not bounded by 255 bytes and
+				// a narrower field would decide the format by the first small one.
+				0x47,
+				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x42,
+					// Which under the identity encrypter is the inner entry itself,
+					// tagged bare and carrying the record whole: the same header
+					// again, then the mark at code 4 with the name "v1".
+					0x33, 0x21, 0x3f,
+						0x0a, 0x01,
+						0x33, 0x21, 0x3a,
+							0x33, 0x21, 0x2d,
+								0x33, 0x21, 0x12,
+									0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
+									0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03,
+								0x33, 0x21, 0x15,
+									0x33, 0x21, 0x12,
+										0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+										0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07,
+							0x33, 0x21, 0x07,
+								0x0a, 0x04,
+								0x29, 0x21, 0x02, 0x76, 0x31,
+			// The digest: eight bytes of the folding hasher, and its length.
+			0x08,
+			0xf5, 0x26, 0x35, 0x5c, 0x1f, 0x94, 0xed, 0x5a,
+		];
+		assert_eq!(bytes, want, "the veiled framing has changed");
+		// The mark's own ten bytes, sitting inside the ciphertext at their usual
+		// offset, which is what veiling the tagged form rather than a re-encoding
+		// of it buys: a signature made before the veil holds after it.
+		let mark: &[u8] = &[0x33, 0x21, 0x07, 0x0a, 0x04, 0x29, 0x21, 0x02, 0x76, 0x31];
+		assert!(
+			bytes.windows(mark.len()).any(|w| w == mark),
+			"the entry a veil is put around is no longer the entry that was written",
+		);
+		// And the frozen bytes still read, and still unveil.
+		let (_, got) = res!(decode(want, Fold, [0u8; 0]));
+		assert_eq!(got.len(), 1);
+		assert!(got[0].is_veiled());
+		assert_eq!(res!(got[0].id()), oid(2, 3));
+		assert_eq!(res!(res!(got[0].unveil(&())).peek()).head.parents(), vec![oid(1, 7)]);
 		Ok(())
 	}
 }
