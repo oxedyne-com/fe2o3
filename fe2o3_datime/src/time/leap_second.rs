@@ -430,10 +430,14 @@ mod tests {
         // Not a leap second
         assert!(!table.is_leap_second(1483228801));
         
-        // Test leap second validation
-        assert!(table.validate_leap_second(2017, 1, 1, 23, 59)); // Valid leap second
-        assert!(!table.validate_leap_second(2017, 1, 2, 23, 59)); // Not a leap second date
-        assert!(!table.validate_leap_second(2017, 1, 1, 12, 0)); // Wrong time
+        // The leap second the table records as "2017-01-01" was inserted at the
+        // end of the preceding day, as 2016-12-31T23:59:60Z, which is the instant
+        // 1483228800 the entry holds. The date carrying the sixtieth second is
+        // therefore 2016-12-31, not 2017-01-01.
+        assert!(table.validate_leap_second(2016, 12, 31, 23, 59));
+        assert!(!table.validate_leap_second(2017, 1, 1, 23, 59)); // a day too late
+        assert!(!table.validate_leap_second(2017, 1, 2, 23, 59)); // not a leap second date
+        assert!(!table.validate_leap_second(2016, 12, 31, 12, 0)); // wrong time
     }
 
     #[test]

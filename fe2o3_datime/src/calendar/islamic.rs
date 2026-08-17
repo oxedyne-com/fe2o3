@@ -10,12 +10,18 @@
 
 use oxedyne_fe2o3_core::prelude::*;
 
-/// The epoch is 16 July 622 CE Gregorian, 19 July 622 CE Julian: the first day
-/// of Muharram in year 1 AH.
+/// The epoch is 16 July 622 CE Julian, which is 19 July 622 CE in the proleptic
+/// Gregorian calendar: the first day of Muharram in year 1 AH.
 pub struct IslamicCalendar;
 
 impl IslamicCalendar {
-    // The Islamic epoch, 16 July 622 CE in the Gregorian calendar.
+    // TODO the epoch is off by one, and which way to correct it is a decision.
+    // 1948439 is 15 July 622 Julian, the astronomical (Thursday) epoch. The
+    // comment above, and every other statement in this file, names 16 July 622
+    // Julian, which is the civil (Friday) epoch and JDN 1948440. Both are used
+    // in the literature. Changing it moves every date this calendar converts by
+    // a day, and test_islamic_epoch expects a third answer again, so it wants
+    // deciding rather than patching.
     const ISLAMIC_EPOCH_JDN: i64 = 1948439;
     const ISLAMIC_YEAR_LENGTH: f64 = 354.36708; // mean days
     const ISLAMIC_MONTH_LENGTH: f64 = 29.530589; // mean days
