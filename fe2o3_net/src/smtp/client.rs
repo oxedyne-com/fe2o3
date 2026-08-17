@@ -114,6 +114,10 @@ impl SubmissionConfig {
 struct DeliveryTarget {
     host:       String,     // MX exchange
     addr:       IpAddr,
+    // Always 25 for a resolved exchange, which is the only port mail is delivered on. It is a
+    // field rather than a literal so a fixture can stand in as an exchange on a loopback port;
+    // nothing reads it from configuration and nothing should.
+    port:       u16,
     preference: u16,        // as the MX record gave it
 }
 
@@ -202,15 +206,37 @@ impl OutboundClient {
                 targets.push(DeliveryTarget {
                     host:       mx.exchange.clone(),
                     addr:       IpAddr::V4(ip),
+                    port:       25,
                     preference: pref,
                 });
             }
         }
+        self.deliver_to_exchanges(&targets, mail_from, rcpt_to, body).await
+    }
+
+    /// The delivery loop itself, given the exchanges rather than resolving them.
+    ///
+    /// Split out of [`Self::deliver`] for one reason: everything above this point needs a live MX
+    /// lookup, so the loop below -- preference order, which failures are worth another exchange, and
+    /// whether the collapsed error is permanent -- could not be exercised at all. It carries
+    /// jarrah's outbound mail and had no test until 2026-08-17. Private, and takes the exchanges as
+    /// an argument rather than reading them from anywhere: this is not a way to configure where mail
+    /// goes, it is a way for a fixture to stand in as an exchange.
+    async fn deliver_to_exchanges(
+        &self,
+        targets:    &[DeliveryTarget],
+        mail_from:  &str,
+        rcpt_to:    &[String],
+        body:       &[u8],
+    )
+        -> Outcome<String>
+    {
         if targets.is_empty() {
             return Err(err!(
                 "No reachable MX hosts for any of the configured recipients.";
                 IO, Network, Missing));
         }
+        let mut targets: Vec<DeliveryTarget> = targets.to_vec();
         targets.sort_by_key(|t| t.preference);
 
         let mut last_err: Option<String> = None;
@@ -375,7 +401,7 @@ impl OutboundClient {
     )
         -> Outcome<String>
     {
-        let addr = std::net::SocketAddr::new(tgt.addr, 25);
+        let addr = std::net::SocketAddr::new(tgt.addr, tgt.port);
         let connect = TcpStream::connect(addr);
         let plain = match timeout(SMTP_CLIENT_TIMEOUT, connect).await {
             Ok(Ok(s))  => s,
@@ -758,12 +784,22 @@ mod tests {
     const EHLO: &str = "sender.test";
 
 
-    /// What the stand-in provider does when it is spoken to.
+    /// What the stand-in server does when it is spoken to.
+    ///
+    /// It poses as a submission provider for [`OutboundClient::submit`] and as an MX exchange for
+    /// [`OutboundClient::deliver_to_exchanges`], which is honest: SMTP is the same protocol on both
+    /// sides of the difference, and the difference is entirely in what the client does with it.
     #[derive(Clone, Copy)]
     struct Provider {
         mechs:      &'static str,   // advertised after `AUTH`; empty for no `AUTH` line at all
         starttls:   bool,           // advertise `STARTTLS` in the EHLO reply
+        // Whether a `STARTTLS` command is answered 220. There is no TLS behind this fixture, so a
+        // test that advertises the extension answers 454 -- which is the opportunistic case worth
+        // covering anyway: a client offered TLS and refused it must deliver in the clear rather
+        // than give up on the exchange.
+        starttls_ok: bool,
         auth_ok:    bool,
+        banner:     u16,            // 220 is ready for mail; 421 refuses the connection
         rcpt_code:  u16,            // 250 accepts the recipient
         data_code:  u16,            // 250 accepts the message
     }
@@ -772,12 +808,20 @@ mod tests {
         /// Offers both mechanisms this client can speak, and takes everything.
         fn accepting() -> Self {
             Self {
-                mechs:      "PLAIN LOGIN",
-                starttls:   false,
-                auth_ok:    true,
-                rcpt_code:  250,
-                data_code:  250,
+                mechs:       "PLAIN LOGIN",
+                starttls:    false,
+                starttls_ok: false,
+                auth_ok:     true,
+                banner:      220,
+                rcpt_code:   250,
+                data_code:   250,
             }
+        }
+
+        /// An exchange, which advertises no `AUTH`: a delivering client is not expected to prove
+        /// anything, and must not try.
+        fn exchange() -> Self {
+            Self { mechs: "", ..Self::accepting() }
         }
 
         fn ehlo_reply(&self) -> String {
@@ -813,7 +857,8 @@ mod tests {
             let (r, mut w) = sock.into_split();
             let mut lines = BufReader::new(r).lines();
 
-            let _ = w.write_all(b"220 provider.example.com ESMTP\r\n").await;
+            let _ = w.write_all(fmt!("{} provider.example.com ESMTP\r\n",
+                p.banner).as_bytes()).await;
 
             let mut in_data    = false;
             let mut await_user = false;
@@ -851,6 +896,12 @@ mod tests {
                 let up = line.to_uppercase();
                 if up.starts_with("EHLO") {
                     let _ = w.write_all(p.ehlo_reply().as_bytes()).await;
+                } else if up.starts_with("STARTTLS") {
+                    let _ = w.write_all(if p.starttls_ok {
+                        &b"220 Go ahead\r\n"[..]
+                    } else {
+                        &b"454 4.7.0 TLS not available at the moment\r\n"[..]
+                    }).await;
                 } else if up.starts_with("AUTH PLAIN") {
                     let _ = w.write_all(verdict).await;
                 } else if up.starts_with("AUTH LOGIN") {
@@ -1393,6 +1444,203 @@ mod tests {
         req!(true, c.deliver("a@example.com",
             &[fmt!("b@one.example"), fmt!("c@two.example")], b"x").await.is_err(),
             "delivery accepted two domains in one transaction");
+        Ok(())
+    }
+
+    // ── Delivery to an exchange, which carries jarrah's outbound mail ──
+
+    /// A stand-in exchange, and the target that points at it. `preference` is what
+    /// the MX record would have said.
+    async fn exchange_at(p: Provider, preference: u16) -> Outcome<(DeliveryTarget, Transcript)> {
+        let (addr, seen) = res!(provider(p).await);
+        Ok((DeliveryTarget {
+            host:       fmt!("mx{}.example.net", preference),
+            addr:       addr.ip(),
+            port:       addr.port(),
+            preference,
+        }, seen))
+    }
+
+    /// The conversation a mail *server* has: no credential, because the receiving
+    /// exchange takes the message for being responsible for the recipient. A
+    /// delivering client that tries to log in is doing a mail client's job.
+    #[tokio::test]
+    async fn test_delivery_never_authenticates_00() -> Outcome<()> {
+        // The exchange advertises AUTH anyway, which real ones commonly do.
+        let (tgt, seen) = res!(exchange_at(Provider::accepting(), 10).await);
+        let c = res!(client().await);
+        let qid = res!(c.deliver_to_exchanges(&[tgt], "postmaster@example.com",
+            &[fmt!("bob@example.net")], &body()).await);
+        req!(true, qid.contains("STANDIN1"));
+
+        let lines = res!(lines_of(&seen));
+        req!(false, lines.iter().any(|l| l.to_uppercase().starts_with("AUTH")),
+            "a delivering client tried to authenticate: {:?}", lines);
+        req!(false, password_crossed(&lines));
+        req!(true, lines.iter().any(|l| l == "MAIL FROM:<postmaster@example.com>"));
+        req!(true, lines.iter().any(|l| l == "RCPT TO:<bob@example.net>"));
+        req!(true, lines.iter().any(|l| l == "."), "the message was never terminated");
+        // Dot-stuffing is the same on this path, and it is a different call site.
+        req!(true, lines.iter().any(|l| l.starts_with("..A line that begins")));
+        Ok(())
+    }
+
+    /// Preference order, which is the whole point of holding a list: the lowest
+    /// number is tried first.
+    ///
+    /// The preferred exchange refuses at `RCPT TO` rather than at the banner,
+    /// deliberately. A banner-refusing fixture records nothing, so "its transcript
+    /// is empty" is satisfied by *never having been dialled* as much as by having
+    /// been -- and an assertion that cannot fail proves nothing. Written that way
+    /// first, this case passed with `sort_by_key` deleted.
+    #[tokio::test]
+    async fn test_exchanges_are_tried_in_preference_order_00() -> Outcome<()> {
+        let dead = Provider { rcpt_code: 550, ..Provider::exchange() };
+        let c = res!(client().await);
+
+        // The refusing exchange is preferred, so it must be spoken to first and
+        // the message must still land on the second.
+        let (bad,  saw_bad)  = res!(exchange_at(dead, 10).await);
+        let (good, saw_good) = res!(exchange_at(Provider::exchange(), 20).await);
+        let qid = res!(c.deliver_to_exchanges(&[good.clone(), bad.clone()],
+            "a@example.com", &[fmt!("bob@example.net")], &body()).await);
+        req!(true, qid.contains("STANDIN1"));
+        req!(true, res!(lines_of(&saw_bad)).iter().any(|l| l.starts_with("RCPT TO")),
+            "the preferred exchange was skipped: it was never offered the recipient");
+        req!(true, res!(lines_of(&saw_good)).iter().any(|l| l == "."),
+            "the message did not reach the second exchange");
+
+        // With the preferences swapped the good one is used first, and the
+        // refusing one is never dialled at all.
+        let (good, saw_good) = res!(exchange_at(Provider::exchange(), 10).await);
+        let (bad,  saw_bad)  = res!(exchange_at(dead, 20).await);
+        res!(c.deliver_to_exchanges(&[bad, good], "a@example.com",
+            &[fmt!("bob@example.net")], &body()).await);
+        req!(true, res!(lines_of(&saw_good)).iter().any(|l| l == "."));
+        req!(true, res!(lines_of(&saw_bad)).is_empty(),
+            "a less-preferred exchange was used while a better one worked");
+        Ok(())
+    }
+
+    /// A 5xx recipient refusal is authoritative for the domain: it survives the
+    /// collapse of every per-exchange error into one, so the caller suppresses the
+    /// address instead of sweeping it forever. This is the path `deliver`'s own
+    /// re-tagging was written for, and which never worked.
+    #[tokio::test]
+    async fn test_a_permanent_refusal_survives_the_collapse_00() -> Outcome<()> {
+        let dead = Provider { rcpt_code: 550, ..Provider::exchange() };
+        let (a, _) = res!(exchange_at(dead, 10).await);
+        let (b, _) = res!(exchange_at(dead, 20).await);
+        let c = res!(client().await);
+        match c.deliver_to_exchanges(&[a, b], "a@example.com",
+            &[fmt!("nobody@example.net")], &body()).await
+        {
+            Ok(_)  => Err(err!("Two 550s were reported as a delivery."; Test, Invalid)),
+            Err(e) => {
+                req!(true, is_permanent(&e),
+                    "a 550 from every exchange was not permanent, so the address is \
+                    retried forever: {}", e);
+                Ok(())
+            },
+        }
+    }
+
+    /// Greylisting is the common case and must not suppress anybody: a 4xx from
+    /// every exchange collapses to a transient error.
+    #[tokio::test]
+    async fn test_a_transient_refusal_stays_transient_through_the_collapse_00() -> Outcome<()> {
+        let busy = Provider { rcpt_code: 450, ..Provider::exchange() };
+        let (a, _) = res!(exchange_at(busy, 10).await);
+        let (b, _) = res!(exchange_at(busy, 20).await);
+        let c = res!(client().await);
+        match c.deliver_to_exchanges(&[a, b], "a@example.com",
+            &[fmt!("bob@example.net")], &body()).await
+        {
+            Ok(_)  => Err(err!("Two 450s were reported as a delivery."; Test, Invalid)),
+            Err(e) => {
+                req!(false, is_permanent(&e),
+                    "greylisting was read as permanent, so a good address is \
+                    suppressed: {}", e);
+                Ok(())
+            },
+        }
+    }
+
+    /// One exchange refusing permanently is enough, even where another failed for
+    /// a reason that carries no verdict. The address is bad; which exchange said
+    /// so does not change that, and the flag must survive a later attempt.
+    #[tokio::test]
+    async fn test_one_permanent_refusal_among_failures_is_enough_00() -> Outcome<()> {
+        let (dead, _)     = res!(exchange_at(
+            Provider { rcpt_code: 550, ..Provider::exchange() }, 10).await);
+        let (refusing, _) = res!(exchange_at(
+            Provider { banner: 421, ..Provider::exchange() }, 20).await);
+        let c = res!(client().await);
+        match c.deliver_to_exchanges(&[dead, refusing], "a@example.com",
+            &[fmt!("nobody@example.net")], &body()).await
+        {
+            Ok(_)  => Err(err!("A 550 and a 421 were reported as a delivery."; Test, Invalid)),
+            Err(e) => {
+                req!(true, is_permanent(&e),
+                    "the permanent refusal was lost behind a later transient one: {}", e);
+                Ok(())
+            },
+        }
+    }
+
+    /// Opportunistic means opportunistic: an exchange that advertises `STARTTLS`
+    /// and then will not do it still gets the mail, in the clear. Delivery has no
+    /// credential to protect, and refusing here would silently stop mail to any
+    /// exchange having a bad day with its certificate.
+    #[tokio::test]
+    async fn test_a_refused_starttls_still_delivers_in_the_clear_00() -> Outcome<()> {
+        let p = Provider { starttls: true, starttls_ok: false, ..Provider::exchange() };
+        let (tgt, seen) = res!(exchange_at(p, 10).await);
+        let c = res!(client().await);
+        let qid = res!(c.deliver_to_exchanges(&[tgt], "a@example.com",
+            &[fmt!("bob@example.net")], &body()).await);
+        req!(true, qid.contains("STANDIN1"), "a refused STARTTLS stopped the delivery");
+
+        let lines = res!(lines_of(&seen));
+        req!(true, lines.iter().any(|l| l.to_uppercase() == "STARTTLS"),
+            "the offer was advertised and not taken up: {:?}", lines);
+        req!(true, lines.iter().any(|l| l == "."), "the message never arrived");
+        Ok(())
+    }
+
+    /// No exchanges is a named error, not a silent success. A resolver that found
+    /// nothing must not look like a delivery.
+    #[tokio::test]
+    async fn test_no_exchange_is_a_named_failure_00() -> Outcome<()> {
+        let c = res!(client().await);
+        let msg = match c.deliver_to_exchanges(&[], "a@example.com",
+            &[fmt!("bob@example.net")], &body()).await
+        {
+            Err(e) => fmt!("{}", e),
+            Ok(_)  => return Err(err!(
+                "Delivery with nowhere to deliver reported success."; Test, Invalid)),
+        };
+        req!(true, msg.contains("No reachable MX"), "the error did not say why: {}", msg);
+        Ok(())
+    }
+
+    /// Where every exchange failed, the caller gets the last one's words -- and
+    /// the exchange they came from, because "delivery failed" without a host is
+    /// not something an operator can act on.
+    #[tokio::test]
+    async fn test_a_collapsed_error_names_an_exchange_00() -> Outcome<()> {
+        let (a, _) = res!(exchange_at(
+            Provider { rcpt_code: 550, ..Provider::exchange() }, 10).await);
+        let host = a.host.clone();
+        let c = res!(client().await);
+        let msg = match c.deliver_to_exchanges(&[a], "a@example.com",
+            &[fmt!("nobody@example.net")], &body()).await
+        {
+            Err(e) => fmt!("{}", e),
+            Ok(_)  => return Err(err!("A 550 was a delivery."; Test, Invalid)),
+        };
+        req!(true, msg.contains(&host), "the failing exchange was not named: {}", msg);
+        req!(true, msg.contains("550"), "the server's code was dropped: {}", msg);
         Ok(())
     }
 }
