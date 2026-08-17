@@ -3,6 +3,8 @@
 //! CLI binary for formatting source files using the Wadler/Lindig
 //! layout algebra engine in `fe2o3_text::fmt`.
 //!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 #![forbid(unsafe_code)]
 
 use oxedyne_fe2o3_core::ok;
@@ -16,7 +18,6 @@ use std::path::Path;
 use std::process;
 
 
-/// Supported language identifiers.
 const LANGS: &[&str] = &["rust", "c", "cpp", "csharp", "go", "java", "javascript", "python"];
 
 fn main() {
@@ -207,7 +208,6 @@ fn main() {
 	}
 }
 
-/// Format source code for the given language.
 fn format_source(src: &str, lang: &str, spec: &FormatSpec) -> Result<String, String> {
 	match lang {
 		"rust" => fmt::format_rust(src, spec).map_err(|e| format!("{}", e)),
@@ -219,7 +219,6 @@ fn format_source(src: &str, lang: &str, spec: &FormatSpec) -> Result<String, Str
 	}
 }
 
-/// Detect language from file extension.
 fn detect_language_from_ext(path: &str) -> Option<&'static str> {
 	let ext = ok!(ok!(Path::new(path).extension()).to_str());
 	match ext {
@@ -235,7 +234,7 @@ fn detect_language_from_ext(path: &str) -> Option<&'static str> {
 	}
 }
 
-/// Recursively collect source files from paths (files or directories).
+/// A directory in `paths` is walked; a plain file is taken as given.
 fn collect_files(paths: &[String]) -> Result<Vec<String>, String> {
 	let mut result = Vec::new();
 	for path in paths {
@@ -251,7 +250,7 @@ fn collect_files(paths: &[String]) -> Result<Vec<String>, String> {
 	Ok(result)
 }
 
-/// Walk a directory tree collecting files with recognised extensions.
+/// Only files with a recognised extension are collected.
 fn walk_dir(dir: &Path, out: &mut Vec<String>) -> Result<(), String> {
 	let entries = ok!(std::fs::read_dir(dir)
 		.map_err(|e| format!("{}: {}", dir.display(), e)));
@@ -277,7 +276,6 @@ fn walk_dir(dir: &Path, out: &mut Vec<String>) -> Result<(), String> {
 	Ok(())
 }
 
-/// Print usage information.
 fn print_usage() {
 	eprintln!("annealer -- the Oxedyne code formatter");
 	eprintln!();

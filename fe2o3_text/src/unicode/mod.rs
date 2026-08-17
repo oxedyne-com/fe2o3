@@ -23,6 +23,9 @@
 //! assert_eq!(norm::nfc("e\u{0301}"), "é");
 //! assert_eq!(norm::nfd("é"), "e\u{0301}");
 //! ```
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 pub mod bidi;
 pub mod linebreak;

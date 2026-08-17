@@ -27,24 +27,23 @@
 //!
 //! A caller holding input that legitimately contains whitespace -- a PEM block,
 //! or a header value folded across lines -- must strip it before calling.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 
 
-/// The RFC 4648 §4 alphabet, in index order.
+// The RFC 4648 §4 alphabet, in index order.
 const ALPHABET: [u8; 64] =
     *b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-/// The RFC 4648 §4 padding character.
 const PAD: u8 = b'=';
 
-/// Marks a byte that is not in the alphabet, in [`DECODE`].
-const INVALID: u8 = 0xFF;
+const INVALID: u8 = 0xFF; // marks a byte that is not in the alphabet, in DECODE
 
-/// Reverse of [`ALPHABET`], indexed by input byte, built at compile time.
-const DECODE: [u8; 256] = decode_table();
+const DECODE: [u8; 256] = decode_table(); // reverse of ALPHABET, by input byte
 
-/// Builds the reverse alphabet lookup.
 const fn decode_table() -> [u8; 256] {
     let mut table = [INVALID; 256];
     let mut i = 0;
@@ -55,7 +54,7 @@ const fn decode_table() -> [u8; 256] {
     table
 }
 
-/// Returns the length of the encoding of `n` bytes, padding included.
+/// Padding is included in the count.
 pub fn encoded_len(n: usize) -> usize {
     ((n + 2) / 3) * 4
 }
@@ -194,8 +193,7 @@ pub fn decode(s: &str) -> Outcome<Vec<u8>> {
     Ok(out)
 }
 
-/// Returns the 6 bit value of the alphabet character at `i`, naming the offender
-/// when there isn't one.
+/// The 6 bit value of the alphabet character at `i`.
 fn sextet(src: &[u8], i: usize) -> Outcome<u32> {
     let c = src[i];
     let v = DECODE[c as usize];
