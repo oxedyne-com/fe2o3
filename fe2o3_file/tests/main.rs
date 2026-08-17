@@ -2,6 +2,7 @@ mod exif;
 mod glob;
 mod office;
 mod tree;
+mod xlsx;
 mod zip;
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -33,6 +34,7 @@ fn run_tests() -> Outcome<()> {
     res!(glob::test_glob(filter));
     res!(zip::test_zip(filter));
     res!(office::test_office(filter));
+    res!(xlsx::test_xlsx(filter));
 
     Ok(())
 }

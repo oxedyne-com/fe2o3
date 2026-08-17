@@ -43,6 +43,26 @@ pub const CT_STYLES: &str =
 /// The content type of a word-processing numbering part.
 pub const CT_NUMBERING: &str =
 	"application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml";
+/// The relationship type of one sheet of a workbook.
+pub const REL_SHEET: &str =
+	"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet";
+/// The relationship type of the shared string table.
+pub const REL_STRINGS: &str =
+	"http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings";
+
+/// The content type of the main part of a spreadsheet.
+pub const CT_WORKBOOK: &str =
+	"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml";
+/// The content type of one sheet.
+pub const CT_SHEET: &str =
+	"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml";
+/// The content type of the shared string table.
+pub const CT_STRINGS: &str =
+	"application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml";
+/// The content type of a spreadsheet's styles part.
+pub const CT_SHEET_STYLES: &str =
+	"application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml";
+
 /// The content type of a `.rels` part, which is declared by extension rather than by name.
 pub const CT_RELS: &str = "application/vnd.openxmlformats-package.relationships+xml";
 
