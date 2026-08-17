@@ -391,8 +391,11 @@ impl Book {
 			match block {
 				Block::Heading { content, .. }	=> title = Some(oxedyne_fe2o3_text::doc::text_of(content)),
 				Block::Table { head, rows, .. }	=> {
+					// The heading WHOLE. Cutting it to Excel's 31 here would put one format's rule
+					// into the neutral model, and would throw away the very characters that tell two
+					// long headings apart before the writer that has to tell them apart sees them.
 					let name = match title.take() {
-						Some(t) if !t.trim().is_empty()	=> tab_name(&t),
+						Some(t) if !t.trim().is_empty()	=> t.trim().to_string(),
 						_				=> fmt!("Sheet{}", out.sheets.len() + 1),
 					};
 					let mut sheet = Sheet::new(name);
@@ -422,22 +425,81 @@ fn from_text(s: &str) -> Cell {
 	}
 }
 
-/// A heading as a name a tab can wear.
+/// The longest name a tab may wear, which is Excel's limit and the one both writers keep.
+pub const MAX_TAB: usize = 31;
+
+/// Every sheet's name as a tab can actually wear it: legal, inside the limit, and DISTINCT.
 ///
-/// Excel refuses `: \ / ? * [ ]` in a sheet name and refuses one over 31 characters, and it refuses the
-/// whole FILE rather than the name -- so a workbook built from a document whose heading held a colon
-/// would not open at all.
-fn tab_name(s: &str) -> String {
+/// Three separate things make Excel refuse a workbook, and in every one of the three it refuses the
+/// FILE rather than the name: a `: \ / ? * [ ]` in a tab name, a name over [`MAX_TAB`] characters, and
+/// two tabs that share one name. The third is the one that hid, because the first two are properties
+/// of a name on its own and the third is a property of the SET -- and nothing looked at the set. Two
+/// headings as ordinary as `Q1/Q2` and `Q1:Q2` both reduce to `Q1 Q2`, and any two headings that agree
+/// for 31 characters collide after truncation.
+///
+/// **LibreOffice and openpyxl each silently rename the second sheet**, so the file opens and the user
+/// simply does not get the tab they asked for -- and an oracle that reads the file back is repairing
+/// the defect rather than reporting it. The names are corrected here instead, where the intent is
+/// still known.
+///
+/// A collision is disambiguated ` (2)`, which is what Excel itself does when you copy a sheet: a
+/// person who sees `Q1 Q2 (2)` can tell what happened to it, and one who sees `Q1 Q2_1` cannot.
+///
+/// `.ods` takes these same names even though OpenDocument's own limit is looser, so that a sheet is
+/// addressable by one name whichever format it landed in -- an edit names its sheet, and a caller
+/// should not have to know which of the two it is holding.
+pub fn tab_names(book: &Book) -> Vec<String> {
+	let mut out: Vec<String> = Vec::with_capacity(book.sheets.len());
+	for (i, s) in book.sheets.iter().enumerate() {
+		let base = tab_name(&s.name, i);
+		out.push(distinct(&base, &out));
+	}
+	out
+}
+
+/// One name, legal and short enough, but taking no account of the others.
+fn tab_name(s: &str, i: usize) -> String {
 	let cleaned: String = s.trim()
 		.chars()
 		.map(|c| match c {
 			':' | '\\' | '/' | '?' | '*' | '[' | ']'	=> ' ',
 			c						=> c,
 		})
+		.take(MAX_TAB)
 		.collect();
 	let cleaned = cleaned.trim();
-	match cleaned.chars().count() > 31 {
+	match cleaned.is_empty() {
+		true	=> fmt!("Sheet{}", i + 1),
 		false	=> cleaned.to_string(),
-		true	=> cleaned.chars().take(31).collect(),
 	}
+}
+
+/// The same name with a ` (n)` on it, where a name is already spoken for.
+///
+/// The head is cut back to leave room for the tag, so the answer is still inside [`MAX_TAB`] -- a
+/// disambiguator that pushed the name over the limit would trade one refusal for another. The
+/// comparison ignores case because Excel's does: `Sales` and `sales` are one tab name to it.
+fn distinct(base: &str, taken: &[String]) -> String {
+	let clashes = |c: &str| taken.iter().any(|t| t.eq_ignore_ascii_case(c));
+	if !clashes(base) {
+		return base.to_string();
+	}
+	// At most one candidate per name already issued can be taken, so a free one is always found
+	// inside this many tries.
+	let mut last = base.to_string();
+	for n in 2..=(taken.len() + 2) {
+		let tag = fmt!(" ({})", n);
+		let keep = MAX_TAB.saturating_sub(tag.chars().count());
+		let head: String = base.chars().take(keep).collect();
+		let head = head.trim_end();
+		let head = match head.is_empty() {
+			true	=> "Sheet",
+			false	=> head,
+		};
+		last = fmt!("{}{}", head, tag);
+		if !clashes(&last) {
+			return last;
+		}
+	}
+	last
 }

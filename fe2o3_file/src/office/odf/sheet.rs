@@ -37,6 +37,7 @@ use crate::office::sheet::{
 	Sheet,
 	Value,
 	stored,
+	tab_names,
 	typed,
 };
 use crate::zip::{
@@ -104,8 +105,11 @@ pub fn write(book: &Book) -> Outcome<Vec<u8>> {
 	res!(out.close("office:automatic-styles"));
 	out.open("office:body", &[]);
 	out.open("office:spreadsheet", &[]);
-	for s in &book.sheets {
-		out.open("table:table", &[("table:name", &s.name)]);
+	// The same tab names the `.xlsx` writer settles on, and for the same reason: two tables of one
+	// name is a document a reader silently renames. See `crate::office::sheet::tab_names`.
+	let tabs = tab_names(book);
+	for (i, s) in book.sheets.iter().enumerate() {
+		out.open("table:table", &[("table:name", &tabs[i])]);
 		let (_, cols) = s.size();
 		out.empty("table:table-column", &[
 			("table:number-columns-repeated", &fmt!("{}", cols.max(1))),

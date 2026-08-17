@@ -34,6 +34,7 @@ use crate::office::sheet::{
 	Cell,
 	Ref,
 	Value,
+	tab_names,
 };
 use crate::office::xlsx::NS_S;
 use crate::zip::{
@@ -104,9 +105,12 @@ pub fn write(book: &Book) -> Outcome<Vec<u8>> {
 	let mut wb = Out::declared();
 	wb.open("workbook", &[("xmlns", NS_S), ("xmlns:r", NS_R)]);
 	wb.open("sheets", &[]);
-	for (i, s) in book.sheets.iter().enumerate() {
+	// Every tab's name at once, because whether one is legal depends on the others: see
+	// [`crate::office::sheet::tab_names`].
+	let tabs = tab_names(book);
+	for (i, name) in tabs.iter().enumerate() {
 		wb.empty("sheet", &[
-			("name", &sheet_name(&s.name, i)),
+			("name", name),
 			("sheetId", &fmt!("{}", i + 1)),
 			("r:id", &ids[i]),
 		]);
@@ -125,22 +129,6 @@ pub fn write(book: &Book) -> Outcome<Vec<u8>> {
 	zip.set("xl/sharedStrings.xml", res!(shared(&strings)).into_bytes(), Method::Deflate);
 	zip.set("xl/styles.xml", res!(styles()).into_bytes(), Method::Deflate);
 	zip.write()
-}
-
-/// A sheet's name, made legal.
-///
-/// Excel refuses `: \ / ? * [ ]` in a tab name and refuses one over 31 characters, and refuses the
-/// whole file rather than the name. A caller's name is corrected here rather than rejected, because
-/// the name of a tab is not worth failing a document over.
-fn sheet_name(name: &str, i: usize) -> String {
-	let cleaned: String = name.chars()
-		.filter(|c| !matches!(c, ':' | '\\' | '/' | '?' | '*' | '[' | ']'))
-		.take(31)
-		.collect();
-	match cleaned.trim().is_empty() {
-		true	=> fmt!("Sheet{}", i + 1),
-		false	=> cleaned,
-	}
 }
 
 fn sheet_part(s: &crate::office::sheet::Sheet, seen: &BTreeMap<&str, usize>) -> Outcome<String> {

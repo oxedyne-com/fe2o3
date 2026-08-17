@@ -1,16 +1,21 @@
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
+use oxedyne_fe2o3_file::office::odf;
 use oxedyne_fe2o3_file::office::sheet::{
 	Book,
 	Cell,
+	MAX_TAB,
 	Range,
 	Ref,
 	Sheet,
 	Value,
 	col_name,
+	tab_names,
 };
 use oxedyne_fe2o3_file::office::xlsx;
+
+use oxedyne_fe2o3_text::doc::markdown;
 
 use oxedyne_fe2o3_core::{
 	prelude::*,
@@ -43,6 +48,34 @@ fn book() -> Book {
 	}]);
 	Book { sheets: vec![s] }
 }
+
+// Four headings that reduce to TWO tab names. `Q1/Q2` and `Q1:Q2` both lose their middle character to
+// the set Excel refuses, and the two long ones agree for the first 31 characters.
+const CLASH: &str = "\
+## Q1/Q2
+
+| A | B |
+| --- | --- |
+| 1 | 2 |
+
+## Q1:Q2
+
+| A | B |
+| --- | --- |
+| 3 | 4 |
+
+## A very long heading that runs past the thirty-one character limit, one
+
+| A | B |
+| --- | --- |
+| 5 | 6 |
+
+## A very long heading that runs past the thirty-one character limit, two
+
+| A | B |
+| --- | --- |
+| 7 | 8 |
+";
 
 pub fn test_xlsx(filter: &'static str) -> Outcome<()> {
 
@@ -223,6 +256,47 @@ pub fn test_xlsx(filter: &'static str) -> Outcome<()> {
 		let r = res!(xlsx::read(&res!(zip.write())));
 		assert_eq!(r.missing, vec!["Sales".to_string()]);
 		assert!(r.book.sheets.is_empty());
+		Ok(())
+	}));
+
+	res!(test_it(filter, &["Two headings that reduce to one tab name are told apart 008", "all", "xlsx"], || {
+		// Excel refuses a workbook with two tabs of one name, and refuses the FILE rather than the
+		// name. LibreOffice and openpyxl each silently RENAME instead, so a reader-based oracle
+		// repairs this defect rather than reporting it and the user simply does not get the tab they
+		// asked for.
+		let doc = res!(markdown::parse(CLASH));
+		let book = Book::from_doc(&doc);
+		assert_eq!(book.sheets.len(), 4, "four tables, four sheets");
+		// The MODEL keeps the heading whole. Truncating there would throw away the characters that
+		// tell the two long headings apart before anything got the chance to use them.
+		assert!(book.sheets[2].name.ends_with("one"), "{}", book.sheets[2].name);
+		assert!(book.sheets[3].name.ends_with("two"), "{}", book.sheets[3].name);
+
+		let tabs = tab_names(&book);
+		// Legal, short enough, and no two alike -- the three things Excel refuses a file over.
+		for t in &tabs {
+			assert!(t.chars().count() <= MAX_TAB, "'{}' is {} characters", t, t.chars().count());
+			assert!(!t.contains([':', '\\', '/', '?', '*', '[', ']']), "'{}' holds a refused character", t);
+		}
+		for (i, t) in tabs.iter().enumerate() {
+			assert!(!tabs[..i].iter().any(|p| p.eq_ignore_ascii_case(t)),
+				"'{}' is used twice, in {:?}", t, tabs);
+		}
+		// And the disambiguation is one a person would recognise, which is Excel's own.
+		assert_eq!(tabs[0], "Q1 Q2");
+		assert_eq!(tabs[1], "Q1 Q2 (2)");
+		assert!(tabs[3].ends_with(" (2)"), "the second long name is not marked: {}", tabs[3]);
+
+		// The names the WRITERS actually put in the file, which is the thing a reader sees. Asserting
+		// on `tab_names` alone would pass even if neither writer called it.
+		let bytes = res!(xlsx::write(&book));
+		let read = res!(xlsx::read(&bytes));
+		assert_eq!(read.book.names(), tabs, "the .xlsx does not carry the names that were settled on");
+		// The `.ods` writer had no deduplication at all, and OpenDocument requires distinct table
+		// names too. It takes the same names so one sheet answers to one name in either format.
+		let ods = res!(odf::sheet::write(&book));
+		let back = res!(odf::sheet::read(&ods));
+		assert_eq!(back.book.names(), tabs, "the .ods does not carry the same names as the .xlsx");
 		Ok(())
 	}));
 
