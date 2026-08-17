@@ -68,20 +68,13 @@ use std::{
 };
 
 
-/// Operating mode of a protocol instance, selecting production, development or
-/// test behaviour.
 #[derive(Clone, Debug)]
 pub enum ProtocolMode {
-    /// Live production deployment.
     Production,
-    /// Local development.
     Dev,
-    /// Automated testing.
     Test,
 }
 
-/// Bundles the identifier and wire-scheme type families used to parameterise a
-/// [`Protocol`].
 pub trait ProtocolTypes<
     const ML: usize,
     const SL: usize,
@@ -90,14 +83,10 @@ pub trait ProtocolTypes<
     Clone
     + fmt::Debug
 {
-    /// Identifier types for messages, sessions and users.
     type ID: IdTypes<ML, SL, UL>;
-    /// Cryptographic wire-scheme types.
     type W: WireSchemeTypes;
 }
 
-/// Default [`ProtocolTypes`] binding using the standard identifier and
-/// wire-scheme families.
 #[derive(Clone, Debug, Default)]
 pub struct DefaultProtocolTypes<
     const ML: usize,
@@ -140,15 +129,11 @@ pub struct Protocol<
     /// receiver decides what it will accept; this is what is offered.
     pub tx_zbits:       ZeroBits,
 
-    /// Operating mode of this protocol instance.
     pub mode:           ProtocolMode,
-    /// Cryptographic schemes applied to the wire.
     pub schms:          WireSchemes<P::W>,
 
-    /// Ring timer tracking recent request timestamps for rate estimation.
     pub timer:          Arc<RwLock<RingTimer<{ constant::REQ_TIMER_LEN }>>>,
     // Address protection.
-    /// Per-address guard enforcing rate limiting and blacklisting.
     pub agrd:           Arc<AddressGuard<
                             { constant::AGRD_SHARDMAP_INIT_SHARDS },
                             BTreeMap<
@@ -166,7 +151,6 @@ pub struct Protocol<
     /// Handshake request expiry window enforced by the SHIELD sequence check.
     pub hreq_exp:       Duration,
     // User protection.
-    /// Per-user guard holding trust state and key material.
     pub ugrd:           Arc<UserGuard<
                             { constant::UGRD_SHARDMAP_INIT_SHARDS },
                             BTreeMap<
@@ -178,27 +162,21 @@ pub struct Protocol<
                             UserData<SL, C, <P::ID as IdTypes<ML, SL, UL>>::S>,
                         >>,
     // Packet validation.
-    /// Validator applying proof-of-work and signature checks to packets.
     pub packval:        PacketValidator<
                             HasherDefAlt<HashScheme, <P::W as WireSchemeTypes>::POWH>,
                             SignerDefAlt<SignatureScheme, <P::W as WireSchemeTypes>::SGN>,
                         >,
-    /// Parameters governing the global proof-of-work difficulty curve.
     pub gpzparams:      DifficultyParams,
     // Message assembly.
-    /// Reassembles multi-packet messages from incoming chunks.
     pub massembler:     Arc<MsgAssembler<
                             { constant::MSG_ASSEMBLY_SHARDS },
                             BTreeMap<HashForm, MsgState>,
                             HashScheme,
                             { constant::GUARD_SHARDMAP_SALT_LEN },
                         >>,
-    /// Limits and timeouts applied during message assembly.
     pub ma_params:      MsgAssemblyParams,
     // Policy configuration.
-    /// Window, in seconds, within which a proof-of-work timestamp is valid.
     pub pow_time_horiz: u64,
-    /// Whether to accept packets from previously unknown users.
     pub accept_unknown: bool,
 }
 
@@ -211,8 +189,6 @@ impl<
 >
     Protocol<C, ML, SL, UL, P>
 {
-    /// Constructs a protocol instance from server configuration and wire
-    /// schemes, initialising the address guard, user guard, packet validator
     /// and message assembler with the crate's compile-time constants.
     ///
     /// `code` is the proof-of-work challenge code this peer builds its own

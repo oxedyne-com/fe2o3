@@ -40,8 +40,6 @@ use std::{
 };
 
 
-/// Everything a running server needs: its configuration, filesystem root,
-/// optional backing database and the protocol state machine.
 #[derive(Clone, Debug)]
 pub struct ServerContext<
     const C: usize, // Length of user secret pow code.
@@ -54,13 +52,9 @@ pub struct ServerContext<
     KH:     Hasher,         // Hashes database keys.
     DB:     Database<UL, <P::ID as IdTypes<ML, SL, UL>>::U, ENC, KH>,
 > {
-    /// Server configuration.
     pub cfg:        ServerConfig,
-    /// Normalised filesystem root for the server's data.
     pub root:       NormPathBuf,
-    /// Optional backing database with the owning user identifier.
     pub db:         Option<(Arc<RwLock<DB>>, <P::ID as IdTypes<ML, SL, UL>>::U)>,
-    /// Protocol state machine handling incoming packets.
     pub protocol:   Protocol<C, ML, SL, UL, P>,
     phantom3:       PhantomData<ENC>,
     phantom4:       PhantomData<KH>,
@@ -79,8 +73,6 @@ impl<
 >
     ServerContext<C, ML, SL, UL, P, ENC, KH, DB>
 {
-    /// Assembles a server context, wrapping any supplied database in a
-    /// shareable lock.
     pub fn new(
         cfg:        ServerConfig,
         root:       NormPathBuf,
@@ -103,14 +95,11 @@ impl<
     //    self.clone()
     //}
 
-    /// Generates a short random identifier for correlating error reports.
     pub fn err_id() -> String {
         Rand::generate_random_string(6, "abcdefghikmnpqrstuvw0123456789")
     }
 }
 
-/// Opens (or creates) an Ozone database at `db_root`, encrypted at rest with
-/// AES-256-GCM under the given key and checksummed with CRC32.
 pub fn new_db(
     db_root: &Path,
     enc_key: &[u8],

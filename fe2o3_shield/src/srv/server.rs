@@ -56,8 +56,6 @@ pub async fn answer_nothing(_payload: Vec<u8>, _src_addr: SocketAddr) -> Outcome
     Ok(Answer::Nothing)
 }
 
-/// The Shield UDP server: owns the server context and drives the receive,
-/// packet-handling, garbage-collection and command loop.
 pub struct Server<
     const C: usize,
     const ML: usize,
@@ -90,8 +88,6 @@ impl<
     Server<C, ML, SL, UL, P, ENC, KH, DB>
     where <P as ProtocolTypes<ML, SL, UL>>::W: 'static,
 {
-    /// Creates a server from a context and syntax, returning it together with a
-    /// clone of the command channel for external control.
     pub fn new(
         context: ServerContext<C, ML, SL, UL, P, ENC, KH, DB>,
         syntax: SyntaxRef,

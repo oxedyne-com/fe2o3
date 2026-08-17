@@ -94,37 +94,22 @@ pub trait ShieldCommand<
     + IdentifiedMessage
     + IntoBytes
 {
-    /// Returns the message format (syntax and encoding).
     fn fmt(&self)       -> &MsgFmt;
-    /// Returns the proof-of-work parameters.
     fn pow(&self)       -> &MsgPow;
-    /// Returns the session and user identifiers.
     fn mid(&self)       -> &MsgIds<SL, UL, ID::S, ID::U>;
-    /// Returns the syntax the message is validated against.
     fn syntax(&self)    -> &SyntaxRef   { &self.fmt().syntax }
-    /// Returns the encoding applied to the outgoing message.
     fn encoding(&self)  -> &Encoding    { &self.fmt().encoding }
-    /// Returns the originating user identifier.
     fn uid(&self)       -> ID::U        { self.mid().uid.clone() }
-    /// Returns the session identifier, if any.
     fn sid_opt(&self)   -> Option<ID::S> {
         self.mid().sid_opt.as_ref().clone().copied()
     }
-    /// Returns the proof-of-work difficulty in leading zero bits.
     fn pow_zbits(&self) -> ZeroBits { self.pow().zbits }
-    /// Whether the final chunk should be padded to the packet size.
     fn pad_last(&self)  -> bool     { true }
     //fn pow_code(&self)  -> Option<[u8; constant::POW_CODE_LEN]> { self.pow().code }
-    /// Whether to include the signature public key in the outgoing validator.
     fn inc_sigpk(&self) -> bool; // Include signature public key in outgoing validator?
-    /// Extracts command-specific fields from an incoming message command.
     fn deconstruct(&mut self, _mcmd: &mut MsgCmd) -> Outcome<()> { Ok(()) }
-    /// Builds the syntax message representing this command for transmission.
     fn construct(self)  -> Outcome<Msg>;
 
-    /// Serialises the command, computes its proof of work, splits it into
-    /// chunks and wraps each in a packet with metadata and validation
-    /// artefacts, returning the ready-to-send packet byte vectors.
     ///
     /// The message identifier is given rather than drawn here, because it is
     /// what an answer is correlated by: a caller that could not say which
@@ -257,7 +242,6 @@ pub trait ShieldCommand<
         Ok(packets)
     }
 
-    /// Sends already-built packets to a target address over a UDP socket.
     fn send_udp(
         src_sock:   &UdpSocket,
         trg_addr:   &SocketAddr,
