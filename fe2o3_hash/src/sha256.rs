@@ -2,11 +2,14 @@
 //!
 //! This exists because the Web Crypto API offers no SHA3, so a digest agreed between a browser
 //! and a Hematite server must be one of the SHA-2 family.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 
-/// The SHA-256 round constants, being the first thirty two bits of the fractional parts of the
-/// cube roots of the first sixty four primes.
+// The round constants: the first thirty two bits of the fractional parts of the cube roots of
+// the first sixty four primes.
 const K: [u32; 64] = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
     0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -26,30 +29,23 @@ const K: [u32; 64] = [
     0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
 
-/// The initial hash value, being the first thirty two bits of the fractional parts of the square
-/// roots of the first eight primes.
+// The initial hash value: the first thirty two bits of the fractional parts of the square roots
+// of the first eight primes.
 const H0: [u32; 8] = [
     0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
     0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 ];
 
-/// The SHA-256 block size in bytes.
-const BLOCK_LEN: usize = 64;
-
-/// The SHA-256 digest length in bytes.
-pub const DIGEST_LEN: usize = 32;
+const BLOCK_LEN:        usize = 64;	// bytes
+pub const DIGEST_LEN:   usize = 32;	// bytes
 
 /// An incremental SHA-256 hasher, which buffers input until a full block is available.
 #[derive(Clone, Debug)]
 pub struct Sha256 {
-    /// The running chaining value.
-    state:  [u32; 8],
-    /// Partial block awaiting compression.
-    buf:    [u8; BLOCK_LEN],
-    /// Bytes currently held in `buf`.
-    buflen: usize,
-    /// Total message length in bytes, used for the length padding.
-    total:  u64,
+    state:  [u32; 8],           // running chaining value
+    buf:    [u8; BLOCK_LEN],    // partial block awaiting compression
+    buflen: usize,              // bytes currently held in buf
+    total:  u64,                // message length, for the length padding
 }
 
 impl Default for Sha256 {
@@ -196,7 +192,6 @@ impl Sha256 {
     }
 }
 
-/// Returns the SHA-256 digest of a single message.
 pub fn digest(msg: &[u8]) -> [u8; DIGEST_LEN] {
     let mut hasher = Sha256::new();
     hasher.update(msg);

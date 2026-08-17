@@ -42,6 +42,9 @@
 //! `args_bytes` is the output of [`Dat::as_bytes`] for the envelope's
 //! [`args`] field, so the signed encoding is insensitive to map
 //! iteration order and other JDAT ambiguities.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::sign::SignatureScheme;
 
@@ -67,54 +70,36 @@ use rand_core::{
 };
 
 
-/// Current canonical-byte-encoding version. Bumped if the field set
-/// or layout changes in a way that would alter the signed bytes.
-pub const COMMAND_VERSION: u8 = 1;
-
-/// Nonce length in bytes. Fixed at 32 to match the Kademlia /
-/// RecordId / credential-identifier byte widths already in use
-/// across the distributed Hematite stack.
-pub const COMMAND_NONCE_LEN: usize = 32;
+// Bump the version if the field set or the layout changes in a way that would
+// alter the signed bytes.  The nonce is 32 bytes to match the Kademlia,
+// RecordId and credential-identifier widths already used across the stack.
+pub const COMMAND_VERSION:      u8 = 1;
+pub const COMMAND_NONCE_LEN:    usize = 32;
 
 
 /// A signed command envelope.
 ///
-/// Construct via [`SignedCommand::sign`] on the originator side and
-/// verify via [`SignedCommand::verify`] (or
-/// [`SignedCommand::verify_fresh`] for clock-bounded freshness) on
-/// the receiver side. A separate nonce tracker is responsible for
-/// rejecting duplicates within the freshness window.
+/// Signing nothing else, this envelope proves who issued a command and when.
+/// Rejecting a repeat within the freshness window is a separate nonce tracker's
+/// job, not this type's.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SignedCommand {
-    /// Opaque identifier of the signer. The verifier uses this to
-    /// look up the matching public key; the envelope itself does not
-    /// interpret the bytes.
+    // Opaque to the envelope: the verifier looks a public key up by it.
     pub signer_id:  Vec<u8>,
-    /// Signature scheme name, matching the `Debug` output of
-    /// [`SignatureScheme`] (`"Ed25519"`, `"Dilithium2"`,
-    /// `"Dilithium2_fe2o3"`).
-    pub scheme:     String,
-    /// Application-defined command name. The envelope treats this as
-    /// opaque UTF-8; verb-based authorisation and dispatch are the
-    /// caller's job.
+    pub scheme:     String,                     // SignatureScheme's Debug string
+    // Opaque UTF-8; authorisation and dispatch by verb are the caller's job.
     pub cmd:        String,
-    /// Typed argument payload. The envelope signs the JDAT binary
-    /// encoding of this value.
-    pub args:       Dat,
-    /// Unix seconds since epoch when the command was signed.
-    pub timestamp:  u64,
-    /// Fresh random nonce per command. The companion replay-window
-    /// tracker rejects duplicate `(signer_id, nonce)` pairs.
-    pub nonce:      [u8; COMMAND_NONCE_LEN],
-    /// Signature over [`Self::signed_bytes`].
+    pub args:       Dat,                        // signed as its JDAT binary encoding
+    pub timestamp:  u64,                        // seconds since epoch
+    pub nonce:      [u8; COMMAND_NONCE_LEN],    // fresh per command
     pub sig:        Vec<u8>,
 }
 
 impl SignedCommand {
 
-    /// Signs a fresh command envelope. Stamps `timestamp` from the
-    /// system clock and draws `nonce` from `OsRng`. `signer_scheme`
-    /// must carry both the signer's public and secret keys.
+    /// Signs a command, stamping the clock and drawing a nonce from `OsRng`.
+    ///
+    /// `signer_scheme` must carry the secret key as well as the public one.
     pub fn sign(
         signer_id:      Vec<u8>,
         cmd:            impl Into<String>,
@@ -139,9 +124,8 @@ impl SignedCommand {
         )
     }
 
-    /// As [`Self::sign`] but with caller-supplied `timestamp` and
-    /// `nonce`. Useful for deterministic tests and for callers whose
-    /// entropy or clock source differs from the defaults.
+    /// As [`Self::sign`], with the clock and the nonce supplied, for a
+    /// deterministic test or a caller with its own sources.
     pub fn sign_with(
         signer_id:      Vec<u8>,
         cmd:            String,
@@ -167,8 +151,8 @@ impl SignedCommand {
         Ok(env)
     }
 
-    /// Canonical byte encoding the signature covers. See the
-    /// module-level documentation for the exact layout.
+    /// The canonical encoding the signature covers; the module header gives the
+    /// layout.
     pub fn signed_bytes(&self) -> Outcome<Vec<u8>> {
         let scheme_bytes = self.scheme.as_bytes();
         let cmd_bytes = self.cmd.as_bytes();
@@ -195,9 +179,8 @@ impl SignedCommand {
         Ok(out)
     }
 
-    /// Verifies the signature against `signer_pk`. Does not check
-    /// freshness -- use [`Self::verify_fresh`] when the caller wants
-    /// a clock-bounded freshness guarantee.
+    /// Verifies the signature and **nothing else**.  A replayed command
+    /// verifies here; [`Self::verify_fresh`] is what bounds it by the clock.
     pub fn verify(&self, signer_pk: &[u8]) -> Outcome<()> {
         let scheme = res!(SignatureScheme::from_str(&self.scheme));
         let scheme = res!(scheme.clone_with_keys(Some(signer_pk), None));
@@ -212,10 +195,11 @@ impl SignedCommand {
         Ok(())
     }
 
-    /// Verifies the signature and confirms `self.timestamp` falls
-    /// within `window` of the current system time (in either
-    /// direction). The caller is responsible for checking the nonce
-    /// against its replay-window tracker separately.
+    /// Verifies the signature and that the timestamp falls within `window` of
+    /// now, in either direction.
+    ///
+    /// The nonce is still the caller's to check against its own replay tracker:
+    /// a command repeated inside the window passes this.
     pub fn verify_fresh(
         &self,
         signer_pk:  &[u8],
@@ -230,8 +214,7 @@ impl SignedCommand {
         self.verify_fresh_at(signer_pk, now, window)
     }
 
-    /// As [`Self::verify_fresh`] but against a caller-supplied `now`
-    /// in unix seconds.
+    /// As [`Self::verify_fresh`], against a supplied `now` in seconds.
     pub fn verify_fresh_at(
         &self,
         signer_pk:  &[u8],

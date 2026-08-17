@@ -49,6 +49,9 @@
 //! id fields. The leading version byte lets a future schema change
 //! surface as a verify-fails-loudly rather than a quietly-different
 //! hash.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::sign::SignatureScheme;
 
@@ -68,52 +71,32 @@ use std::{
 };
 
 
-/// Current canonical-byte-encoding version. Bumped if the field set
-/// or layout changes in a way that would alter the signed bytes.
+// Bump the version if the field set or the layout changes in a way that would
+// alter the signed bytes.
 pub const CREDENTIAL_VERSION: u8 = 1;
 
 
-/// A signed attestation that `issuer_id` vouches for `subject_pk`
-/// being bound to `subject_id` from `valid_from` to `valid_to`.
-///
-/// The signature is produced by the issuer over the canonical byte
-/// encoding ([`Self::signed_bytes`]) of the remaining fields. A
-/// verifier reconstructs the same bytes and calls
-/// [`Self::verify`] with the issuer's public key to confirm the
-/// signature and validity window.
+/// A signed attestation that `issuer_id` vouches for `subject_pk` being bound
+/// to `subject_id` for a stated time range.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SignedCredential {
-    /// Opaque identifier of the subject being vouched for. The caller
-    /// decides what an ID is (a hash of a name, a hash of a public
-    /// key, an assigned serial, etc.).
+    // Both identifiers are opaque: a hash of a name, a hash of a key, an
+    // assigned serial, whatever the caller decides.  They are equal in a
+    // self-signed credential.
     pub subject_id:     Vec<u8>,
-    /// Public key bound to the subject. Zero-length is legal and
-    /// means "this credential binds an id alone, not a key" -- useful
-    /// for pure identity assertions separate from key attestation.
+    // Zero length is legal and binds an identifier alone, with no key.
     pub subject_pk:     Vec<u8>,
-    /// Opaque identifier of the issuer. Equals `subject_id` for a
-    /// self-signed credential.
     pub issuer_id:      Vec<u8>,
-    /// Name of the signature scheme used by the issuer, matching one
-    /// of [`SignatureScheme`]'s `Debug` output strings (`"Ed25519"`,
-    /// `"Dilithium2"`, `"Dilithium2_fe2o3"`).
-    pub scheme:         String,
-    /// Unix seconds since epoch, inclusive. `0` means "valid from the
-    /// beginning of time".
-    pub valid_from:     u64,
-    /// Unix seconds since epoch, exclusive. `0` means "no expiry".
-    pub valid_to:       u64,
-    /// Signature produced by the issuer over [`Self::signed_bytes`].
+    pub scheme:         String, // SignatureScheme's Debug string
+    pub valid_from:     u64,    // seconds since epoch, inclusive; 0 for no start
+    pub valid_to:       u64,    // seconds since epoch, exclusive; 0 for no expiry
     pub sig:            Vec<u8>,
 }
 
 impl SignedCredential {
 
-    /// Produces a self-signed credential: the holder of
-    /// `subject_scheme`'s secret key declares that they are
-    /// `subject_id`. `issuer_id` is set equal to `subject_id`.
-    ///
-    /// `subject_scheme` must carry both keys (public and secret).
+    /// A self-signed credential: the holder of the secret key declares who it
+    /// is, and vouches for nothing else.  `subject_scheme` must carry both keys.
     pub fn self_sign(
         subject_id:     Vec<u8>,
         subject_scheme: &SignatureScheme,
@@ -136,13 +119,12 @@ impl SignedCredential {
         )
     }
 
-    /// Produces a third-party signed credential: `issuer_scheme`'s
-    /// holder attests that `subject_pk` belongs to `subject_id`.
+    /// A third-party credential: the issuer attests that `subject_pk` belongs
+    /// to `subject_id`.
     ///
-    /// The caller supplies the `subject_pk` independently so the
-    /// issuer does not need to hold the subject's secret key.
-    /// `issuer_scheme` must carry both the issuer's public and secret
-    /// keys.
+    /// The subject's public key is passed in rather than derived, so the issuer
+    /// never needs the subject's secret key.  `issuer_scheme` must carry both of
+    /// the issuer's.
     pub fn sign(
         subject_id:     Vec<u8>,
         subject_pk:     Vec<u8>,
@@ -174,8 +156,8 @@ impl SignedCredential {
         Ok(cred)
     }
 
-    /// Returns the canonical byte encoding that the signature covers.
-    /// See the module-level documentation for the exact layout.
+    /// The canonical encoding the signature covers; the module header gives the
+    /// layout.
     pub fn signed_bytes(&self) -> Vec<u8> {
         let scheme_bytes = self.scheme.as_bytes();
         let cap = 1
@@ -199,11 +181,10 @@ impl SignedCredential {
         out
     }
 
-    /// Verifies the signature against `issuer_pk` and confirms the
-    /// credential is valid at the current system time. Returns
-    /// `Ok(())` on a signed, in-window credential; an error otherwise.
-    /// Wrong-signature, out-of-window and unknown-scheme all surface
-    /// as distinct error tags.
+    /// Verifies the signature and that the credential is in its window now.
+    ///
+    /// A bad signature, an expired window and an unrecognised scheme each carry
+    /// their own error tag, so a caller can tell them apart.
     pub fn verify(&self, issuer_pk: &[u8]) -> Outcome<()> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -212,9 +193,7 @@ impl SignedCredential {
         self.verify_at(issuer_pk, now)
     }
 
-    /// As [`Self::verify`] but against a caller-supplied `now` in
-    /// unix seconds. Useful for deterministic tests and for clock-
-    /// skew-aware callers that have their own time source.
+    /// As [`Self::verify`], against a supplied `now` in seconds.
     pub fn verify_at(&self, issuer_pk: &[u8], now: u64) -> Outcome<()> {
         // Validity window check first -- cheap, fails fast on
         // expired credentials without wasting a signature verify.
@@ -245,8 +224,7 @@ impl SignedCredential {
         Ok(())
     }
 
-    /// Returns `true` if this credential is self-signed (the issuer
-    /// and subject identifiers are equal).
+    /// Is this credential self-signed?
     pub fn is_self_signed(&self) -> bool {
         self.issuer_id == self.subject_id
     }

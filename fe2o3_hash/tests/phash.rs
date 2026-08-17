@@ -1,3 +1,6 @@
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use oxedyne_fe2o3_hash::phash::{
     LumaGrid,
     PerceptualHash,
@@ -17,7 +20,6 @@ use std::{
 };
 
 
-/// A greyscale image read from a portable greymap.
 struct Pgm {
     dat: Vec<u8>,
     w:   usize,
@@ -78,7 +80,6 @@ fn read_pgm(path: &PathBuf) -> Outcome<Pgm> {
     Ok(Pgm { dat: raw[i..i + w * h].to_vec(), w, h })
 }
 
-/// Returns the path of a committed image fixture.
 fn fixture_path(name: &str) -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.push("test_images");
@@ -86,7 +87,6 @@ fn fixture_path(name: &str) -> PathBuf {
     p
 }
 
-/// Hashes a fixture both ways.
 fn hash_fixture(name: &str) -> Outcome<(PerceptualHash, PerceptualHash)> {
     let img = res!(read_pgm(&fixture_path(name)));
     let grid = res!(LumaGrid::new(&img.dat, img.w, img.h));
@@ -96,10 +96,9 @@ fn hash_fixture(name: &str) -> Outcome<(PerceptualHash, PerceptualHash)> {
     ))
 }
 
-/// The three synthetic subjects held in the fixture directory.
+// The synthetic subjects in the fixture directory, and the transforms an external tool applied
+// to each of them.
 const SUBJECTS: [&str; 3] = ["plasma", "gradient", "shapes"];
-
-/// The four transforms an external tool applied to each subject.
 const VARIANTS: [&str; 4] = ["half", "q40", "bright", "png2jpg"];
 
 pub fn test_phash(filter: &'static str) -> Outcome<()> {

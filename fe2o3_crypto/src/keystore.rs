@@ -30,6 +30,9 @@
 //! disk access can enumerate admins without decrypting. The threat
 //! model protects against stolen files, not against admin
 //! enumeration.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::enc::EncryptionScheme;
 
@@ -62,10 +65,8 @@ use secrecy::{
 };
 
 
-/// Length of the wallet master key in bytes. Chosen to match
-/// AES-256-GCM's key size so the master key can be handed straight
-/// to the existing [`EncryptionScheme`] without an intermediate
-/// derivation step.
+// Matches AES-256-GCM's key size, so the master key goes straight to
+// EncryptionScheme with no intermediate derivation.
 pub const WALLET_MASTER_KEY_LEN: usize = 32;
 
 
@@ -81,33 +82,25 @@ pub const WALLET_MASTER_KEY_LEN: usize = 32;
 // │ revoking a password-holder does not disturb the others.                   │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// The result of wrapping a master key under a password.
-///
-/// All four fields are plain strings so they can be serialised directly
-/// into a JDAT file alongside the rest of an admin user entry.
+/// Every field is a plain string, so a wrap serialises straight into a JDAT
+/// file beside the rest of an admin entry.
 #[derive(Clone, Debug, Default)]
 pub struct WrappedKey {
-    /// Name of the KDF scheme used to derive the KEK, e.g.
-    /// `"Argon2id_v0x13"`.
-    pub kdf_name:       String,
-    /// Encoded KDF configuration (salt + parameters, no hash). Round-
-    /// trips through `KeyDerivationScheme::decode_cfg_from_string`.
+    pub kdf_name:       String, // e.g. "Argon2id_v0x13"
+    // Salt and parameters, no hash; round-trips through
+    // KeyDerivationScheme::decode_cfg_from_string.
     pub kdf_cfg:        String,
-    /// Name of the encryption scheme used to wrap the master key
-    /// under the KEK, e.g. `"AES-256-GCM"`.
-    pub enc_name:       String,
-    /// Base2x-encoded wrap blob, using `base2x::HEMATITE64`. The
-    /// inner bytes are whatever the chosen `EncryptionScheme::encrypt`
-    /// produces: for AES-256-GCM this is ciphertext + embedded tag +
-    /// appended nonce.
+    pub enc_name:       String, // e.g. "AES-256-GCM"
+    // Base2x HEMATITE64 over whatever EncryptionScheme::encrypt produced.  For
+    // AES-256-GCM that is ciphertext with the tag embedded and the nonce
+    // appended, so the blob is self-contained.
     pub wrapped_key:    String,
 }
 
-/// Wrap `master_key` under a KEK derived from `password` via the
-/// named KDF scheme. Uses a freshly randomised salt, so every call
-/// produces a different wrap even for the same inputs. Returns the
-/// wrap plus enough metadata to unwrap it later (KDF name, KDF
-/// config, encryption scheme name).
+/// Wraps `master_key` under a key derived from `password`.
+///
+/// The salt is freshly randomised, so the same master key and the same
+/// password wrap differently every time.
 pub fn wrap_master_key(
     master_key: &[u8],
     password:   &[u8],
@@ -136,14 +129,11 @@ pub fn wrap_master_key(
     })
 }
 
-/// Attempt to unwrap a master key using `password`. Returns the
-/// recovered master key on success, or an error on either decode
-/// failure or authentication-tag mismatch (a wrong password is
-/// indistinguishable from a wrong key -- both fail the GCM tag check).
+/// Recovers a master key from a wrap.
 ///
-/// Callers that want to "try every admin entry with this password
-/// and see which one matches" should treat any error return as
-/// "this wasn't the right entry" and move on to the next one.
+/// A wrong password and a corrupt wrap both fail the GCM tag check and are
+/// indistinguishable here, so a caller trying each admin entry in turn should
+/// read any error as "not this entry" rather than as a fault.
 pub fn unwrap_master_key(
     wrapped:    &WrappedKey,
     password:   &[u8],
@@ -171,38 +161,21 @@ pub fn unwrap_master_key(
 
 /// A single administrator entry in the wallet.
 ///
-/// Binds a human-readable name, a scope list, an optional expiry and
-/// a password-wrapped copy of the wallet master key. Any admin who
-/// can supply the password that unwraps their entry has authenticated
-/// to the wallet and recovered the master key; the wallet does not
-/// care which admin it was.
-///
-/// Scopes are checked after the wrap decrypts. An admin whose scope
-/// list is empty can still unlock the wallet but cannot invoke any
-/// verb. An admin past their `expires_at` is refused regardless of
-/// password.
+/// Anyone who supplies a password that unwraps an entry has authenticated as
+/// that admin and holds the master key; the wallet does not care which entry it
+/// was.  Scope and expiry are checked only after the wrap decrypts, so an admin
+/// with no scopes still unlocks the wallet and can then invoke nothing.
 #[derive(Clone, Debug, Default)]
 pub struct AdminUser {
-    /// Display name for this admin. Used in audit log output and
-    /// the `list` subcommand; not used for lookup (lookup is by
-    /// "which wrap does this password successfully decrypt").
+    // Audit output and `list` only; lookup is by which wrap the password opens.
     pub name:       String,
-    /// Verbs this admin is authorised to invoke. The wildcard `"*"`
-    /// grants every verb. A verb named `"admin"` is required to
-    /// manage other admin entries.
-    pub scopes:     Vec<String>,
-    /// Unix timestamp (seconds since epoch) after which this entry
-    /// is refused. A value of `0` means "never expires".
-    pub expires_at: u64,
-    /// Password-derived wrap of the wallet master key.
+    pub scopes:     Vec<String>,	// verbs, or "*" for all; "admin" manages entries
+    pub expires_at: u64,		// seconds since epoch, 0 for never
     pub wrap:       WrappedKey,
 }
 
 impl AdminUser {
-    /// Construct a fresh admin entry by wrapping `master_key` with a
-    /// KEK derived from `password`. The caller is responsible for
-    /// supplying the KDF scheme name (typically read from the host
-    /// application's config file).
+    /// Creates an admin entry, wrapping `master_key` under `password`.
     pub fn new(
         name:       impl Into<String>,
         password:   &[u8],
@@ -222,10 +195,8 @@ impl AdminUser {
         })
     }
 
-    /// Attempt to unwrap the master key with `password`. Returns
-    /// `Ok(Some(master_key))` on successful wrap decryption,
-    /// `Ok(None)` if the decryption fails (wrong password), or an
-    /// error if a structural problem is encountered.
+    /// A wrong password is `Ok(None)`, not an error: trying every entry in turn
+    /// is the intended use, and a failed wrap is not a fault.
     pub fn try_unwrap(&self, password: &[u8]) -> Outcome<Option<Vec<u8>>> {
         match unwrap_master_key(&self.wrap, password) {
             Ok(k) => Ok(Some(k)),
@@ -233,9 +204,7 @@ impl AdminUser {
         }
     }
 
-    /// Returns `true` if this admin has exceeded its `expires_at`.
-    /// A zero expiry is treated as "no expiry" and always returns
-    /// `false`.
+    /// Is this admin past its expiry?
     pub fn is_expired(&self) -> bool {
         if self.expires_at == 0 { return false; }
         let now = SystemTime::now()
@@ -245,8 +214,7 @@ impl AdminUser {
         now >= self.expires_at
     }
 
-    /// Returns `true` if this admin is authorised for `verb`. The
-    /// wildcard scope `"*"` matches any verb.
+    /// Is this admin authorised for `verb`?
     pub fn has_scope(&self, verb: &str) -> bool {
         self.scopes.iter().any(|s| s == "*" || s == verb)
     }
@@ -327,22 +295,15 @@ impl FromDat for AdminUser {
 
 /// The result of successfully unlocking a wallet.
 ///
-/// Holds the recovered master key in a `Secret` so the bytes clear
-/// when the struct drops, together with a snapshot of the matched
-/// admin's name and scope list. The matched admin is captured by
-/// value rather than by reference so callers can hand the unlocked
-/// wallet around freely without borrow-checker friction.
+/// The master key sits in a `Secret` so the bytes clear when the struct drops.
+/// The matched admin is copied in by value rather than borrowed, so an unlocked
+/// wallet can be passed around freely.
 ///
-/// `Clone` is implemented manually because `secrecy::Secret<Vec<u8>>`
-/// does not implement `Clone` via derive (the `CloneableSecret`
-/// trait bound is not satisfied for `Vec<u8>`).
+/// `Clone` is written out by hand because `secrecy::Secret<Vec<u8>>` does not
+/// derive it: `CloneableSecret` is not satisfied for `Vec<u8>`.
 pub struct UnlockedWallet {
-    /// Wallet master key, 32 bytes.
-    pub master_key:     Secret<Vec<u8>>,
-    /// Name of the admin whose entry matched.
+    pub master_key:     Secret<Vec<u8>>,	// 32 bytes
     pub admin_name:     String,
-    /// Scope list of the matched admin, copied out of the wallet so
-    /// scope checks do not have to re-borrow the original.
     pub admin_scopes:   Vec<String>,
 }
 
@@ -367,7 +328,7 @@ impl fmt::Debug for UnlockedWallet {
 }
 
 impl UnlockedWallet {
-    /// Returns `true` if the matched admin is authorised for `verb`.
+    /// Is the matched admin authorised for `verb`?
     pub fn has_scope(&self, verb: &str) -> bool {
         self.admin_scopes.iter().any(|s| s == "*" || s == verb)
     }
@@ -383,18 +344,14 @@ impl UnlockedWallet {
 // │ trait.                                                                    │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Default KDF scheme name used when generating fresh admin entries.
-/// Argon2id with the 0x13 parameter set is the OWASP-recommended
-/// default.
+// Argon2id at the 0x13 parameter set, which is the OWASP recommendation.
 pub const DEFAULT_WALLET_KDF_NAME: &str = "Argon2id_v0x13";
 
 /// Multi-admin wallet: one master key, many wraps.
 ///
-/// The master key itself never lives on disk -- only its per-admin
-/// wraps do. Anyone who knows a password that unwraps one of the
-/// entries can recover the master key and use it to decrypt
-/// application secrets stored in `enc_secs` or (in the host
-/// application) to decrypt an Ozone database.
+/// The master key never lives on disk; only its per-admin wraps do.  Anyone
+/// holding a password that opens one entry recovers it, and with it every
+/// application secret in `enc_secs`.
 #[derive(Clone, Debug, Default)]
 pub struct Wallet {
     metadata:   DaticleMap,
@@ -450,9 +407,8 @@ impl FromDat for Wallet {
 impl JdatFile for Wallet {}
 
 impl Wallet {
-    /// Construct a wallet from parts. Typical callers use
-    /// [`Wallet::create_with_first_admin`] instead, which generates
-    /// a random master key and enrols the first admin in one step.
+    /// Assembles a wallet from parts.  Most callers want
+    /// [`Wallet::create_with_first_admin`], which mints the master key too.
     pub fn new(
         metadata:   DaticleMap,
         admins:     Vec<AdminUser>,
@@ -467,13 +423,11 @@ impl Wallet {
         }
     }
 
-    /// Create a brand-new wallet with one admin entry.
+    /// Creates a wallet, minting a random master key and enrolling the first
+    /// admin under `password`.
     ///
-    /// A fresh 32-byte random master key is generated, wrapped under
-    /// `password` using `kdf_name`, and stored as the first entry in
-    /// the new wallet. The returned `UnlockedWallet` holds the same
-    /// master key in memory so the caller does not have to re-prompt
-    /// for the password immediately.
+    /// The wallet comes back already unlocked, so the caller need not prompt
+    /// again for the password it has just been given.
     pub fn create_with_first_admin(
         metadata:   DaticleMap,
         admin_name: impl Into<String>,
@@ -507,16 +461,12 @@ impl Wallet {
         Ok((wallet, unlocked))
     }
 
-    /// Try every admin entry in the wallet against `password`, in
-    /// declaration order. Returns the recovered master key bundled
-    /// with the matched admin's name and scope list on first
-    /// success, or an error if every entry rejects the password.
+    /// Tries every admin entry against `password`, in declaration order.
     ///
-    /// Expiry is checked **after** the wrap decrypts, so an expired
-    /// admin with a valid password sees a clear "expired" error
-    /// rather than a generic "wrong password". This is a deliberate
-    /// choice: once you prove you hold a credential, the system
-    /// tells you why it still refused you.
+    /// Expiry is checked after the wrap decrypts, not before, so an expired
+    /// admin holding the right password is told it has expired rather than
+    /// that the password is wrong.  Once you have proved you hold a credential,
+    /// the system says why it still refused you.
     pub fn unlock(&self, password: &[u8]) -> Outcome<UnlockedWallet> {
         for admin in &self.admins {
             let key_opt = res!(admin.try_unwrap(password));
@@ -539,12 +489,10 @@ impl Wallet {
             Input, Invalid, Security, Input))
     }
 
-    /// Add a new admin entry wrapping the wallet's master key under
-    /// `new_password`. The caller must supply their own password
-    /// (`caller_password`) to prove they hold an unlocked identity
-    /// and to recover the master key that the new wrap will
-    /// protect. The caller must also have the `"admin"` scope or the
-    /// `"*"` wildcard.
+    /// Adds an admin entry, wrapping the master key under `new_password`.
+    ///
+    /// `caller_password` does double duty: it proves the caller holds an
+    /// identity, and it is how the master key to be re-wrapped is recovered.
     pub fn add_admin(
         &mut self,
         caller_password:    &[u8],
@@ -576,11 +524,7 @@ impl Wallet {
         Ok(())
     }
 
-    /// Remove the first admin entry whose name matches
-    /// `target_name`. The caller must supply their own password and
-    /// must have the `"admin"` scope or `"*"`. Refuses to remove the
-    /// last remaining admin, because a wallet with no admins is
-    /// irrecoverable.
+    /// Removes the first admin entry named `target_name`.
     pub fn remove_admin(
         &mut self,
         caller_password:    &[u8],
@@ -611,16 +555,11 @@ impl Wallet {
         Ok(())
     }
 
-    /// Enrol a new admin entry wrapping the supplied master key.
+    /// Enrols an admin entry against a master key the caller already holds.
     ///
-    /// Unlike [`Wallet::add_admin`], this method does not prompt
-    /// for or verify a caller password. It is used when the caller
-    /// is **already** authenticated -- typically because the host
-    /// application performed a `unlock` at startup and is now
-    /// carrying the recovered master key in memory. The caller is
-    /// also responsible for enforcing their own scope check (e.g.
-    /// "does the running admin hold 'admin' or '*'?") before
-    /// invoking this method.
+    /// **This authenticates nobody and checks no scope**, unlike
+    /// [`Wallet::add_admin`].  It is for a host that unlocked at startup and is
+    /// carrying the master key; that host owns the scope check.
     pub fn enrol(
         &mut self,
         master_key: &[u8],
@@ -639,17 +578,11 @@ impl Wallet {
         Ok(())
     }
 
-    /// Replace the wrap on the named admin entry with a fresh one
-    /// derived from `new_password`. The admin's `scopes` and
-    /// `expires_at` are preserved. Used to rotate an admin's
-    /// password in place without disturbing other admins' entries.
+    /// Re-wraps one admin entry under `new_password`, keeping its scopes and
+    /// expiry and leaving every other entry alone.
     ///
-    /// Does not re-authenticate the caller: the caller is expected
-    /// to hold `master_key` from a prior successful `unlock`. The
-    /// typical use is "an admin wants to change their own password
-    /// after the startup unlock", which the host application
-    /// implements by passing the already-unlocked master key back
-    /// in here.
+    /// **This re-authenticates nobody**: holding `master_key` from an earlier
+    /// unlock is the whole of the authority required.
     pub fn change_password(
         &mut self,
         admin_name:     &str,
@@ -669,13 +602,9 @@ impl Wallet {
         Ok(())
     }
 
-    /// Remove the first admin entry whose name matches `target`.
+    /// Removes the first admin entry named `target`.
     ///
-    /// Does not authenticate the caller -- analogous to
-    /// [`Wallet::enrol`], this is used when the host application
-    /// has already proven authority via a prior `unlock`. Refuses
-    /// to remove the last remaining admin because a wallet with no
-    /// admins is irrecoverable.
+    /// **This authenticates nobody**, as with [`Wallet::enrol`].
     pub fn remove_by_name(&mut self, target: &str) -> Outcome<()> {
         if self.admins.len() <= 1 {
             return Err(err!(

@@ -47,6 +47,9 @@
 //! let px = vec![0u8; 64 * 64];
 //! assert!(near_duplicate(&px, 64, 64).is_ok());
 //! ```
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -56,20 +59,14 @@ use std::{
 };
 
 
-/// Width of the reduction used by the difference hash.
+// The reduction each hash works on: nine by eight for the difference hash, a thirty two square
+// for the transform hash, of which the top left eight square is thresholded.
 pub const DHASH_W: usize = 9;
-
-/// Height of the reduction used by the difference hash.
 pub const DHASH_H: usize = 8;
-
-/// Side of the square reduction the perceptual hash transforms.
 pub const PHASH_N: usize = 32;
-
-/// Side of the low frequency block the perceptual hash thresholds.
 pub const PHASH_K: usize = 8;
 
-/// The largest grid dimension accepted, guarding against an absurd resample.
-const MAX_DIM: usize = 1 << 20;
+const MAX_DIM: usize = 1 << 20;	// guards against an absurd resample
 
 /// A borrowed greyscale grid: eight bits per pixel, row major, no row padding.
 #[derive(Clone, Copy, Debug)]
@@ -102,17 +99,14 @@ impl<'a> LumaGrid<'a> {
         Ok(Self { dat, w, h })
     }
 
-    /// Returns the grid width in pixels.
     pub fn width(&self) -> usize {
         self.w
     }
 
-    /// Returns the grid height in pixels.
     pub fn height(&self) -> usize {
         self.h
     }
 
-    /// Returns the underlying luma bytes.
     pub fn data(&self) -> &'a [u8] {
         self.dat
     }
@@ -181,10 +175,8 @@ impl<'a> LumaGrid<'a> {
 /// Two hashes are comparable only when they were produced the same way, which the tag enforces.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum PerceptualHash {
-    /// A difference hash: cheap, and the right first pass.
-    DHash(u64),
-    /// A discrete cosine transform hash: slower, and the right confirmation.
-    PHash(u64),
+    DHash(u64),	// cheap, the right first pass
+    PHash(u64),	// slower, the right confirmation
 }
 
 impl fmt::Display for PerceptualHash {
@@ -247,7 +239,6 @@ impl PerceptualHash {
         Ok(Self::PHash(bits))
     }
 
-    /// Returns the raw sixty-four bits.
     pub fn bits(&self) -> u64 {
         match self {
             Self::DHash(b)	=> *b,
@@ -255,7 +246,7 @@ impl PerceptualHash {
         }
     }
 
-    /// Returns true when both hashes were produced by the same algorithm.
+    /// Were both hashes produced by the same algorithm?
     pub fn same_kind(&self, other: &Self) -> bool {
         matches!(
             (self, other),
@@ -263,10 +254,8 @@ impl PerceptualHash {
         )
     }
 
-    /// Returns the number of differing bits, refusing a comparison across algorithms.
-    ///
-    /// The result ranges from zero, for identical hashes, to sixty-four.  Distances near
-    /// thirty-two indicate no relationship at all, since that is what a random pair gives.
+    /// The result runs from zero, for identical hashes, to sixty-four.  A distance near thirty
+    /// two means no relationship at all, since that is what a random pair gives.
     pub fn distance(&self, other: &Self) -> Outcome<u32> {
         if !self.same_kind(other) {
             return Err(err!(
