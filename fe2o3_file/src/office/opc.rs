@@ -10,9 +10,13 @@
 //! `word/_rels/document.xml.rels` have nothing to do with the ids in `_rels/.rels`, and a scheme that
 //! shared them would work until the day two parts both had one.
 
-use oxedyne_fe2o3_text::xml::write::Out;
+use crate::zip::Zip;
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_text::xml::Xml;
+use oxedyne_fe2o3_text::xml::write::Out;
+
+use std::collections::BTreeMap;
 
 /// The namespace of `[Content_Types].xml`.
 pub const NS_TYPES: &str = "http://schemas.openxmlformats.org/package/2006/content-types";
@@ -224,4 +228,73 @@ impl Types {
 		res!(out.close("Types"));
 		out.finish()
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Finding a part in a package that was read
+// ---------------------------------------------------------------------------
+
+/// The directory a part sits in, with its trailing slash, so a relative target resolves against it.
+pub fn dir_of(part: &str) -> String {
+	match part.rfind('/') {
+		Some(k)	=> part[..k + 1].to_string(),
+		None		=> String::new(),
+	}
+}
+
+/// Where a relationship target actually is within the package.
+pub fn resolve(dir: &str, target: &str) -> String {
+	match target.starts_with('/') {
+		true	=> target[1..].to_string(),
+		false	=> fmt!("{}{}", dir, target),
+	}
+}
+
+/// The relationships a part owns, by id: the type, and the resolved target.
+///
+/// A part's relationships live beside it, in a `_rels` directory, in a file named after it. The
+/// package's own are in `_rels/.rels`, which is the same rule with an empty name -- so `""` asks for
+/// them.
+///
+/// A part with no `.rels` beside it has no relationships, which is not an error: most parts have none.
+pub fn rels_of(zip: &Zip, part: &str, cap: u64) -> Outcome<BTreeMap<String, (String, String)>> {
+	let dir = dir_of(part);
+	let name = &part[dir.len()..];
+	let path = fmt!("{}_rels/{}.rels", dir, name);
+	let mut out = BTreeMap::new();
+	if !zip.has(&path) {
+		return Ok(out);
+	}
+	let text = res!(String::from_utf8(res!(zip.content_capped(&path, cap))), Decode, String);
+	let xml = res!(Xml::parse(&text));
+	for rel in res!(xml.root()).children("Relationship") {
+		let id = match rel.attr("Id") {
+			Some(id)	=> id.to_string(),
+			None		=> continue,
+		};
+		let kind = rel.attr("Type").unwrap_or("").to_string();
+		let target = rel.attr("Target").unwrap_or("").to_string();
+		let target = match rel.attr("TargetMode") {
+			Some("External")	=> target,
+			_			=> resolve(&dir, &target),
+		};
+		out.insert(id, (kind, target));
+	}
+	Ok(out)
+}
+
+/// The part that IS the document: what `_rels/.rels` points at with [`REL_DOC`].
+///
+/// Named from the package rather than guessed at, because `word/document.xml` is a convention and not a
+/// rule -- a `.docm` names `word/document.xml` too, and a document saved by a generator that used
+/// another name still opens in Word.
+pub fn main_part(zip: &Zip, cap: u64) -> Outcome<String> {
+	let rels = res!(rels_of(zip, "", cap));
+	Ok(res!(rels.values()
+		.find(|(kind, _)| kind == REL_DOC)
+		.map(|(_, t)| t.clone())
+		.filter(|t| zip.has(t))
+		.ok_or_else(|| err!(
+			"The package names no document part, so this is not an Office document. It holds: {}.",
+			zip.names().join(", "); Invalid, Input, Missing))))
 }

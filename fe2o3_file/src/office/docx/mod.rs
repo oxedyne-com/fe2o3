@@ -20,6 +20,7 @@
 //! [`crate::office`] -- and sharing code between them is how the second one gets the first one's
 //! assumptions.
 
+pub mod edit;
 pub mod parts;
 pub mod read;
 pub mod write;

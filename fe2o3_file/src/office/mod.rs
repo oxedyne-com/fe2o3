@@ -34,6 +34,7 @@
 
 pub mod deck;
 pub mod docx;
+pub mod edit;
 pub mod odf;
 pub mod opc;
 pub mod pptx;

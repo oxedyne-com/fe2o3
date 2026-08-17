@@ -8,6 +8,12 @@
 //! it is worth saying why: OpenDocument put the meaning in the element and Microsoft put it in a
 //! style, and every consequence follows from that one choice.
 
+use crate::office::edit::{
+	Find,
+	Piece,
+	Tally,
+	apply,
+};
 use crate::office::odf::{
 	NS_FO,
 	NS_OFFICE,
@@ -33,9 +39,13 @@ use oxedyne_fe2o3_text::doc::{
 };
 use oxedyne_fe2o3_text::xml::{
 	Elem,
+	Node,
 	Xml,
 };
-use oxedyne_fe2o3_text::xml::write::Out;
+use oxedyne_fe2o3_text::xml::write::{
+	Out,
+	escape,
+};
 
 use std::collections::BTreeMap;
 
@@ -719,4 +729,161 @@ fn coalesce(items: Vec<Inline>) -> Vec<Inline> {
 	}
 	out.retain(|i| !matches!(i, Inline::Text(t) if t.is_empty()));
 	out
+}
+
+// ---------------------------------------------------------------------------
+// Editing an `.odt` in place
+// ---------------------------------------------------------------------------
+
+/// What an edit of an `.odt` produced.
+#[derive(Clone, Debug, Default)]
+pub struct Edited {
+	pub bytes:	Vec<u8>,
+	pub tallies:	Vec<Tally>,	// one per edit asked for, in order
+	pub runs:	usize,	// runs of text rewritten
+}
+
+/// Replaces text in an `.odt`, leaving every other byte of the package as it arrived.
+///
+/// The counterpart of [`crate::office::docx::edit::edit`] and the same design: the text of a paragraph
+/// is the concatenation of its runs, a match is found there and pushed back down onto the runs it
+/// covered, and [`crate::zip`] copies every member nobody touched. `styles.xml`, `meta.xml`, the
+/// manifest, the macros and the pictures are never opened.
+///
+/// Only `content.xml` is searched, so a phrase in a header or a footer -- which live in `styles.xml` --
+/// reports as absent rather than being changed in one of two places.
+pub fn edit(bytes: &[u8], edits: &[Find]) -> Outcome<Edited> {
+	if edits.is_empty() {
+		return Err(err!("An edit of a document was asked for with no edits in it."; Invalid, Input));
+	}
+	let mut zip = res!(Zip::read(bytes.to_vec()));
+	let src = res!(String::from_utf8(res!(zip.content_capped("content.xml", MAX_PART))),
+		Decode, String);
+	let mut xml = res!(Xml::parse(&src));
+	let body = res!(res!(xml.root()).find(&["office:body", "office:text"]).ok_or_else(|| err!(
+		"This package has no <office:text>, so it is not a text document."; Invalid, Input, Missing)));
+	let mut groups = Vec::new();
+	edit_walk(&xml, body, &mut groups);
+	let (changes, tallies) = res!(apply(&groups, edits));
+	let runs = changes.len();
+	for c in &changes {
+		res!(xml.splice(c.piece.span.clone(), content_markup(&c.text)));
+	}
+	zip.set("content.xml", xml.render().into_bytes(), Method::Deflate);
+	Ok(Edited { bytes: res!(zip.write()), tallies, runs })
+}
+
+/// Every paragraph and heading at or below an element, as a group of text pieces each.
+///
+/// A nested paragraph -- a frame's caption inside a paragraph -- gets its own group and its text is not
+/// also in the enclosing one, for the reason `docx::edit` gives: two splices over one span is a
+/// refusal, and rightly.
+fn edit_walk(xml: &Xml, at: &Elem, out: &mut Vec<Vec<Piece>>) {
+	match at.name.qname.as_str() {
+		"text:p" | "text:h"	=> {
+			let slot = out.len();
+			out.push(Vec::new());
+			let mut group = Vec::new();
+			edit_gather(xml, at, &mut group, out);
+			out[slot] = group;
+		}
+		_	=> {
+			for kid in at.elems() {
+				edit_walk(xml, kid, out);
+			}
+		}
+	}
+}
+
+/// One paragraph's own text, run by run.
+///
+/// Character data, and the three elements that ARE text: `<text:s>` is a run of spaces, because
+/// OpenDocument collapses literal ones; `<text:tab>` is a tab; `<text:line-break>` is a newline. A
+/// reader that skipped them would match `Q1 2026` against a document holding `Q1<text:s/>2026` and
+/// report the phrase absent -- and the phrase is there, it is what a person typed.
+fn edit_gather(xml: &Xml, at: &Elem, group: &mut Vec<Piece>, out: &mut Vec<Vec<Piece>>) {
+	for kid in &at.kids {
+		match kid {
+			Node::Text(span)	=> group.push(Piece::new(span.clone(), xml.text(span))),
+			Node::Elem(e)	=> match e.name.qname.as_str() {
+				"text:p" | "text:h"	=> edit_walk(xml, e, out),
+				"text:s"	=> {
+					let n = e.attr("text:c").and_then(|v| v.parse::<usize>().ok()).unwrap_or(1);
+					group.push(Piece::new(e.span.clone(), " ".repeat(n.min(4096))));
+				}
+				"text:tab"	=> group.push(Piece::new(e.span.clone(), "\t")),
+				"text:line-break"	=> group.push(Piece::new(e.span.clone(), "\n")),
+				// A footnote's body, a comment's body and an index mark hold text that is not the
+				// paragraph's own, and replacing in them would edit two places for one phrase.
+				"text:note" | "office:annotation"	=> {}
+				_	=> edit_gather(xml, e, group, out),
+			},
+			_	=> {}
+		}
+	}
+}
+
+/// Text as OpenDocument paragraph content: the markup that means exactly these characters.
+///
+/// Three characters cannot be written literally and survive. A run of two or more spaces is collapsed
+/// to one by every reader, so it becomes `<text:s text:c="n"/>`; a space at either end of the run is
+/// collapsed for the same reason and becomes `<text:s/>`; a tab and a newline have elements of their
+/// own. Writing them literally produces a file that opens and says something slightly different from
+/// what the edit asked for, which is the worst of the available outcomes.
+pub fn content_markup(text: &str) -> String {
+	let mut out = String::with_capacity(text.len() + 16);
+	let chars: Vec<char> = text.chars().collect();
+	let mut i = 0;
+	while i < chars.len() {
+		match chars[i] {
+			' '	=> {
+				let mut n = 0;
+				while i + n < chars.len() && chars[i + n] == ' ' {
+					n += 1;
+				}
+				// A single space with a character either side of it is safe as itself, and leaving it
+				// alone keeps the markup readable. Anywhere else it is spelled out.
+				let interior = i > 0 && i + n < chars.len();
+				match n == 1 && interior {
+					true	=> out.push(' '),
+					false	=> match n {
+						1	=> out.push_str("<text:s/>"),
+						_	=> out.push_str(&fmt!("<text:s text:c=\"{}\"/>", n)),
+					},
+				}
+				i += n;
+			}
+			'\t'	=> {
+				out.push_str("<text:tab/>");
+				i += 1;
+			}
+			'\n' | '\r'	=> {
+				out.push_str("<text:line-break/>");
+				i += 1;
+			}
+			c	=> {
+				out.push_str(&escape(&c.to_string()));
+				i += 1;
+			}
+		}
+	}
+	out
+}
+
+/// The text of the body, paragraph by paragraph, as an edit sees it.
+///
+/// The strings a `find` is matched against, which is not the same as the document as prose: this is
+/// where a run split by a style, or a space written as `<text:s/>`, shows up.
+pub fn body_text(bytes: &[u8]) -> Outcome<Vec<String>> {
+	let zip = res!(Zip::read(bytes.to_vec()));
+	let src = res!(String::from_utf8(res!(zip.content_capped("content.xml", MAX_PART))),
+		Decode, String);
+	let xml = res!(Xml::parse(&src));
+	let body = res!(res!(xml.root()).find(&["office:body", "office:text"]).ok_or_else(|| err!(
+		"This package has no <office:text>, so it is not a text document."; Invalid, Input, Missing)));
+	let mut groups = Vec::new();
+	edit_walk(&xml, body, &mut groups);
+	Ok(groups.iter()
+		.map(|g| g.iter().map(|p| p.text.as_str()).collect::<Vec<_>>().concat())
+		.collect())
 }
