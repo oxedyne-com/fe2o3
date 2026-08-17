@@ -1,0 +1,6 @@
+{
+    "note": "A share with no `code` key at all. A reader that defaulted it to false would be reading \"they did not say\" as \"they said there is nothing to worry about\", which is the one reading a consent bit must never be given.",
+    "rule": "The share schema: `code` is required, and is written even when it is false.",
+    "says": "missing the required key",
+    "stage": "decode",
+}

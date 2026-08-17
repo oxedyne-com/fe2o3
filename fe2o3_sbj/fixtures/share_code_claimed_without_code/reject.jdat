@@ -1,0 +1,6 @@
+{
+    "note": "A share claiming code and carrying none. Refused rather than waved through as harmless caution: a receiver asked to consent to a program that is not there is a receiver being taught that the question does not mean anything, and the next time it is asked in earnest they will answer the same way.",
+    "rule": "The share schema: `code` is checked against the files BOTH ways.",
+    "says": "carries none",
+    "stage": "decode",
+}

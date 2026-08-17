@@ -1,0 +1,8 @@
+{
+    "hash": (bu8|"R7uktFt6@6w8yMp6jPiQNbVfXxnJPLFJ-r2NLA+82My=2"),
+    "index": (false),
+    "note": "A share carrying `crystal.html`, and therefore carrying a PROGRAM written by another person. `code` is true, it is inside the payload, and the payload is what the envelope's hash covers and the signature commits to — so a receiver can check that the SENDER marked it, which is the whole point: a flag a relay could add or strip is not a consent flag. It must not encode as `share_data` does, and it carries a covering note besides.",
+    "schema": "daimond/share/0",
+    "time": (u64|1752000000000),
+    "tree_len": (u64|366),
+}

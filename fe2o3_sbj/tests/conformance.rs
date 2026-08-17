@@ -38,10 +38,12 @@ use oxedyne_fe2o3_sbj::{
 	envelope,
 	index,
 	post::Post,
+	share::Share,
 	validate,
 	HEADER_LEN,
 	SCHEMA_CARD,
 	SCHEMA_POST,
+	SCHEMA_SHARE,
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -296,6 +298,13 @@ fn accept(
 			res!(req(name, "the card of doc.jdat against the card of doc.sbj", &back, card));
 			res!(doc::write_artefact(&Payload::Card(back), &signer, meta.time))
 		},
+		Payload::Share(share) => {
+			res!(req(name, "node count", &None, &meta.nodes));
+			let from_text = res!(read_payload(&dir.join(DOC_JDAT), name));
+			let back = res!(Share::from_dat(&from_text));
+			res!(req(name, "the share of doc.jdat against the share of doc.sbj", &back, share));
+			res!(doc::write_artefact(&Payload::Share(back), &signer, meta.time))
+		},
 	};
 	if rebuilt != buf {
 		return Err(err!(
@@ -428,7 +437,8 @@ fn reject(
 		// WITHOUT verifying, since a fixture that fails at the header has no readable envelope and
 		// carries no `doc.jdat` either.
 		let payload = match envelope_schema(&buf) {
-			Some(schema) if schema == SCHEMA_POST || schema == SCHEMA_CARD =>
+			Some(schema) if schema == SCHEMA_POST || schema == SCHEMA_CARD
+				|| schema == SCHEMA_SHARE =>
 				res!(read_payload(&jdat, name)),
 			_ => res!(read_tree(&jdat, name)),
 		};

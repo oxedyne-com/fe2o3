@@ -1,0 +1,6 @@
+{
+    "note": "The same two files, listed the other way round. They decode to the same Diamond and hash to a different address, so admitting both would give one share two addresses. It is refused rather than sorted: sorting it would be accepting a second encoding and quietly rewriting it, which is what §3 exists to stop.",
+    "rule": "The share schema: the files are ordered by path, so that one set of files has one encoding.",
+    "says": "not in path order",
+    "stage": "decode",
+}

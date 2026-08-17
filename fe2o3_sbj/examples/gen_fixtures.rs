@@ -51,10 +51,15 @@ use oxedyne_fe2o3_sbj::{
 		Reference,
 		Target,
 	},
+	share::{
+		self,
+		Share,
+	},
 	validate,
 	SCHEMA_CARD,
 	SCHEMA_DOC,
 	SCHEMA_POST,
+	SCHEMA_SHARE,
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -119,7 +124,7 @@ fn generate() -> Outcome<usize> {
 	res!(common::write_bytes(&root.join(README_FILE), readme().as_bytes()));
 
 	let n = res!(acceptance(&root, &keys)) + res!(rejection(&root, &keys))
-		+ res!(payloads(&root, &keys));
+		+ res!(payloads(&root, &keys)) + res!(shares(&root, &keys));
 
 	// A fixture directory nothing above wrote is a fixture nobody can regenerate, and the suite will
 	// refuse to skip it, so it is caught here rather than there.
@@ -982,11 +987,17 @@ count and its depth. The suite reads `doc.jdat`, signs it with the committed key
 bytes it gets back to be `doc.sbj`, byte for byte.
 
 **Not every payload is a node tree.** The container carries any schema (§1.2), and the fixtures
-named `post_*` and `card_*` carry `daimond/post/0` and `daimond/card/0`, which are flat canonical
-maps rather than trees. Those declare no node count and no depth, because they have neither, and
-their `doc.jdat` is written in plain JDAT with none of the `sbj_` node labels below. Everything else
-about them is identical: the same header, the same envelope, the same address, the same signature,
-and every rule of §3.
+named `post_*`, `card_*` and `share_*` carry `daimond/post/0`, `daimond/card/0` and
+`daimond/share/0`, which are flat canonical maps rather than trees. Those declare no node count and
+no depth, because they have neither, and their `doc.jdat` is written in plain JDAT with none of the
+`sbj_` node labels below. Everything else about them is identical: the same header, the same
+envelope, the same address, the same signature, and every rule of §3.
+
+The `share_*` fixtures carry one rule the others do not, and it is the reason that schema exists:
+`code` is the sender's SIGNED statement about whether the share carries a program, and it is
+checked against the files both ways. `share_code_hidden` is a page under a claim of no code, and
+`share_code_claimed_without_code` is the opposite. A share is a COPY the receiver comes to own, so
+there is no live view, nothing to revoke, and no third party in the middle of it.
 
 **Rejection** fixtures carry `doc.sbj`, the bad artefact, and `reject.jdat`, which declares the rule
 broken, the step of §2 that must catch it, what the error must say, and the node or the byte it must
@@ -1275,6 +1286,7 @@ fn accept_payload(
 	let as_dat = match payload {
 		Payload::Post(p)	=> res!(p.to_dat()),
 		Payload::Card(c)	=> res!(c.to_dat()),
+		Payload::Share(s)	=> res!(s.to_dat()),
 		Payload::Tree { .. }	=> return Err(err!(
 			"The fixture '{}' is a node tree, which `accept` writes and this does not.", name;
 		Bug, Invalid)),
@@ -1408,4 +1420,229 @@ fn wide_c64(v: u64) -> Vec<u8> {
 	let mut out = vec![Dat::C64_CODE_START + width as u8];
 	out.extend_from_slice(&be[8 - width..]);
 	out
+}
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ THE SHARE SCHEMA                                                          │
+// └───────────────────────────────────────────────────────────────────────────┘
+//
+// `daimond/share/0` is one person sending another a COPY of something they own, and it is the
+// third flat record in this container. Its fixtures are here rather than among the post's because
+// what they are teeth for is different: a post's rules are about one message having one address,
+// and a share's are about that plus a consent bit, which is the one field in this format whose
+// whole purpose is that a receiver can check what the SENDER marked before anything runs.
+
+/// A capp's page, standing in for the real thing: what makes a share carry code is the NAME.
+const PAGE: &'static [u8] = b"<html><body><p>A page somebody else wrote.</p></body></html>";
+
+/// A share of data alone, fixed so a fixture written twice is written the same.
+fn share_data() -> Share {
+	Share::new(
+		"Sourdough".to_string(),
+		TO_KEY.to_vec(),
+		NONCE.to_vec(),
+		None,
+		vec![
+			share::File {
+				path:	"bakes/2026.jsonl".to_string(),
+				body:	b"{\"day\":1,\"loaves\":2}\n".to_vec(),
+			},
+			share::File {
+				path:	"crystal.json".to_string(),
+				body:	b"{\"starter\":\"fed Tuesday\"}".to_vec(),
+			},
+		],
+	)
+}
+
+/// The same share, carrying a page, and therefore carrying a program.
+fn share_capp() -> Share {
+	let mut files = share_data().files;
+	files.push(share::File { path: "crystal.html".to_string(), body: PAGE.to_vec() });
+	Share::new(
+		"Life log".to_string(),
+		TO_KEY.to_vec(),
+		NONCE.to_vec(),
+		Some("The food log we talked about.".to_string()),
+		files,
+	)
+}
+
+/// The share fixtures, and the count of them.
+fn shares(
+	root:	&Path,
+	keys:	&Keys,
+)
+	-> Outcome<usize>
+{
+	let author = res!(keys.author.signer());
+
+	// -- What a reader must accept. -------------------------------------------------------------
+
+	res!(accept_payload(root, &author, "share_data", &Payload::Share(share_data()),
+		"A share of DATA alone: two files, a display name, a recipient and a nonce, and `code` \
+		written as false. The bit is present even though nothing here is code — an omitted false \
+		and a sender whose build had never heard of the field are the same bytes, and those are \
+		the two things a receiver must be able to tell apart. No note, and the absent one is \
+		omitted rather than written empty (§3 rules 4 and 8). The files are in path order, which \
+		is fixed, because a set of files written two ways would be one Diamond at two addresses."));
+
+	res!(accept_payload(root, &author, "share_capp", &Payload::Share(share_capp()),
+		"A share carrying `crystal.html`, and therefore carrying a PROGRAM written by another \
+		person. `code` is true, it is inside the payload, and the payload is what the envelope's \
+		hash covers and the signature commits to — so a receiver can check that the SENDER marked \
+		it, which is the whole point: a flag a relay could add or strip is not a consent flag. It \
+		must not encode as `share_data` does, and it carries a covering note besides."));
+
+	// -- What a reader must refuse. -------------------------------------------------------------
+
+	// The central rejection of this schema. Everything else here is a canonicalisation rule; this
+	// one is what the consent bit is for.
+	let mut hidden = share_capp();
+	hidden.code = false;
+	res!(payload_reject(root, &author, "share_code_hidden", SCHEMA_SHARE,
+		&res!(hidden.to_dat()),
+		"crystal.html",
+		"The share schema: `code` is the sender's signed claim, and it is checked against the \
+		files.".to_string(),
+		"A share carrying `crystal.html` under `code: false`. It is signed, correctly hashed and \
+		correctly addressed, so nothing in the container catches it: the payload's own decoder \
+		does, naming the file. Without that check the bit would be decoration — a sender could \
+		ship a page as data and the receiving client, believing the claim, would mount somebody \
+		else's program without asking. The refusal is what makes the claim worth reading."
+			.to_string()));
+
+	// And the other direction, which is not symmetry for its own sake.
+	let mut crying = share_data();
+	crying.code = true;
+	res!(payload_reject(root, &author, "share_code_claimed_without_code", SCHEMA_SHARE,
+		&res!(crying.to_dat()),
+		"carries none",
+		"The share schema: `code` is checked against the files BOTH ways.".to_string(),
+		"A share claiming code and carrying none. Refused rather than waved through as harmless \
+		caution: a receiver asked to consent to a program that is not there is a receiver being \
+		taught that the question does not mean anything, and the next time it is asked in earnest \
+		they will answer the same way.".to_string()));
+
+	// The bit is REQUIRED. An absent one would be read as false by any reader generous enough to
+	// default it, which is exactly the generosity a consent flag cannot afford.
+	let no_bit = {
+		let mut m = match res!(share_data().to_dat()) {
+			Dat::Map(m) => m,
+			other => return Err(err!(
+				"A share encodes as a map, and this is a {:?}.", other.kind(); Bug, Invalid)),
+		};
+		m.remove(&dat!(share::KEY_CODE));
+		Dat::Map(m)
+	};
+	res!(payload_reject(root, &author, "share_missing_code_bit", SCHEMA_SHARE, &no_bit,
+		"missing the required key",
+		"The share schema: `code` is required, and is written even when it is false.".to_string(),
+		"A share with no `code` key at all. A reader that defaulted it to false would be reading \
+		\"they did not say\" as \"they said there is nothing to worry about\", which is the one \
+		reading a consent bit must never be given.".to_string()));
+
+	// One Diamond, two addresses: the rule a message's `refs` deliberately does not have, because
+	// references are ordered by their author's meaning and a set of files is not.
+	let unsorted = {
+		let s = share_data();
+		let mut m = match res!(s.to_dat()) {
+			Dat::Map(m) => m,
+			other => return Err(err!(
+				"A share encodes as a map, and this is a {:?}.", other.kind(); Bug, Invalid)),
+		};
+		let mut list = Vec::new();
+		for f in s.files.iter().rev() {
+			list.push(res!(f.to_dat()));
+		}
+		m.insert(dat!(share::KEY_FILES), Dat::List(list));
+		Dat::Map(m)
+	};
+	res!(payload_reject(root, &author, "share_files_out_of_order", SCHEMA_SHARE, &unsorted,
+		"not in path order",
+		"The share schema: the files are ordered by path, so that one set of files has one \
+		encoding.".to_string(),
+		"The same two files, listed the other way round. They decode to the same Diamond and hash \
+		to a different address, so admitting both would give one share two addresses. It is \
+		refused rather than sorted: sorting it would be accepting a second encoding and quietly \
+		rewriting it, which is what §3 exists to stop.".to_string()));
+
+	// The three paths a share may not carry, one fixture each for the two that are about somebody
+	// else's records.
+	res!(payload_reject(root, &author, "share_carries_the_log", SCHEMA_SHARE,
+		&res!(share_with_path(".daimond/log.jsonl")),
+		".daimond/",
+		"The share schema: a share may not carry the sender's own `.daimond/` record."
+			.to_string(),
+		"A share carrying the sender's append-only log — the record of what agents did in THEIR \
+		copy. Refused in the format rather than in a client, so that every implementation refuses \
+		it: a person sending a recipe does not think to check what travels with it, and the \
+		receiver's copy is new, so its record starts empty because nothing has happened in it yet."
+			.to_string()));
+
+	res!(payload_reject(root, &author, "share_carries_capp_record", SCHEMA_SHARE,
+		&res!(share_with_path("capp.json")),
+		"capp.json",
+		"The share schema: a share may not carry a capp delivery record.".to_string(),
+		"A share carrying `capp.json`, which says which bytes were delivered to that instance and \
+		at what template version, and decides which files a future fix may replace. The receiver \
+		was never delivered to; they were handed a copy by a person. One carried across from \
+		somebody else's machine would pin their copy against updates they never chose, and a \
+		doctored one would do it on purpose. A copy with no record is a case the receiving client \
+		already knows: it asks.".to_string()));
+
+	res!(payload_reject(root, &author, "share_path_walks", SCHEMA_SHARE,
+		&res!(share_with_path("../../notes/private.md")),
+		"segment",
+		"The share schema: a path is refused rather than resolved, and never walks."
+			.to_string(),
+		"A share whose file path climbs out of the Diamond. Refused rather than normalised, which \
+		is where this parts company with the client-side path guard it otherwise matches: that one \
+		is handed an untrusted request and tidies it on the way to a real file, and this is \
+		deciding what a SIGNED artefact means, where a path that needed tidying is a path with two \
+		spellings.".to_string()));
+
+	// The re-labelling attack over the third schema. The reserved name became a real one, and this
+	// is the fixture that shows nothing already signed was weakened by it.
+	let bytes = res!(share_data().encode());
+	let mut env = res!(common::seal(&bytes, SCHEMA_SHARE, &author, TIME));
+	env.schema = SCHEMA_POST.to_string();
+	res!(reject(root, "share_relabelled_as_post", &res!(common::assemble(&env, &bytes)), None,
+		Reject {
+			stage:	Stage::Sig,
+			rule:	"SPEC.md §1.3: the schema is inside the signing input, and is preceded by its \
+				length.".to_string(),
+			says:	"not a signature by the author".to_string(),
+			node:	None,
+			offset:	None,
+			note:	"A signed share whose envelope has been re-labelled `daimond/post/0` after \
+				signing. The payload bytes, their hash and the signature over that hash are \
+				untouched. This is the same claim as `post_relabelled_as_card`, made over the \
+				schema name that was RESERVED when those were signed: the schema reaches the \
+				signing input length-prefixed, so a third name coming to exist re-addressed \
+				nothing, weakened nothing, and left every fixture already committed byte for byte \
+				the file it was.".to_string(),
+		}));
+
+	Ok(10)
+}
+
+/// A share whose one file sits at `path`, for the fixtures about paths a share may not carry.
+///
+/// Built as a daticle rather than through `Share::new`, because the point of each is a path the
+/// constructor's own validator would refuse, and a fixture that could not be written would prove
+/// nothing about what a reader does with one that was.
+fn share_with_path(path: &str) -> Outcome<Dat> {
+	let mut file = DaticleMap::new();
+	file.insert(dat!(share::KEY_BODY),	Dat::BU32(b"whatever is in it".to_vec()));
+	file.insert(dat!(share::KEY_PATH),	Dat::Str(path.to_string()));
+
+	let mut m = DaticleMap::new();
+	m.insert(dat!(share::KEY_CODE),	Dat::Bool(false));
+	m.insert(dat!(share::KEY_FILES),	Dat::List(vec![Dat::Map(file)]));
+	m.insert(dat!(share::KEY_NAME),	Dat::Str("A share reaching too far".to_string()));
+	m.insert(dat!(share::KEY_NONCE),	Dat::BU8(NONCE.to_vec()));
+	m.insert(dat!(share::KEY_TO),	Dat::BU8(TO_KEY.to_vec()));
+	Ok(Dat::Map(m))
 }

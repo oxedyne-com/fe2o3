@@ -1,0 +1,16 @@
+{
+    "code": (false),
+    "files": [
+        {
+            "body": (bu32|"U-9pT65-T6L-8ZeYPcLa85HrPNDa@NaYVG=4"),
+            "path": "crystal.json",
+        },
+        {
+            "body": (bu32|"U-9a@NaYEZ4i8cn%@NPbS-8wCdqA"),
+            "path": "bakes/2026.jsonl",
+        },
+    ],
+    "name": "Sourdough",
+    "nonce": (bu8|"ihA-ihA-ihA-ihA-ihA-iW=4"),
+    "to": (bu8|"eQ6XeQ6XeQ6XeQ6XeQ6XeQ6XeQ6XeQ6XeQ6XeQ6XeQ4=2"),
+}

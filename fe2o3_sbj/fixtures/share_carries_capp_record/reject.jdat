@@ -1,0 +1,6 @@
+{
+    "note": "A share carrying `capp.json`, which says which bytes were delivered to that instance and at what template version, and decides which files a future fix may replace. The receiver was never delivered to; they were handed a copy by a person. One carried across from somebody else's machine would pin their copy against updates they never chose, and a doctored one would do it on purpose. A copy with no record is a case the receiving client already knows: it asks.",
+    "rule": "The share schema: a share may not carry a capp delivery record.",
+    "says": "capp.json",
+    "stage": "decode",
+}

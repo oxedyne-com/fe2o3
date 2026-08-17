@@ -1,0 +1,6 @@
+{
+    "note": "A share whose file path climbs out of the Diamond. Refused rather than normalised, which is where this parts company with the client-side path guard it otherwise matches: that one is handed an untrusted request and tidies it on the way to a real file, and this is deciding what a SIGNED artefact means, where a path that needed tidying is a path with two spellings.",
+    "rule": "The share schema: a path is refused rather than resolved, and never walks.",
+    "says": "segment",
+    "stage": "decode",
+}

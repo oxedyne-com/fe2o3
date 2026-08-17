@@ -1,0 +1,6 @@
+{
+    "note": "A share carrying `crystal.html` under `code: false`. It is signed, correctly hashed and correctly addressed, so nothing in the container catches it: the payload's own decoder does, naming the file. Without that check the bit would be decoration — a sender could ship a page as data and the receiving client, believing the claim, would mount somebody else's program without asking. The refusal is what makes the claim worth reading.",
+    "rule": "The share schema: `code` is the sender's signed claim, and it is checked against the files.",
+    "says": "crystal.html",
+    "stage": "decode",
+}

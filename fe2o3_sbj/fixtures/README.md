@@ -15,11 +15,17 @@ count and its depth. The suite reads `doc.jdat`, signs it with the committed key
 bytes it gets back to be `doc.sbj`, byte for byte.
 
 **Not every payload is a node tree.** The container carries any schema (§1.2), and the fixtures
-named `post_*` and `card_*` carry `daimond/post/0` and `daimond/card/0`, which are flat canonical
-maps rather than trees. Those declare no node count and no depth, because they have neither, and
-their `doc.jdat` is written in plain JDAT with none of the `sbj_` node labels below. Everything else
-about them is identical: the same header, the same envelope, the same address, the same signature,
-and every rule of §3.
+named `post_*`, `card_*` and `share_*` carry `daimond/post/0`, `daimond/card/0` and
+`daimond/share/0`, which are flat canonical maps rather than trees. Those declare no node count and
+no depth, because they have neither, and their `doc.jdat` is written in plain JDAT with none of the
+`sbj_` node labels below. Everything else about them is identical: the same header, the same
+envelope, the same address, the same signature, and every rule of §3.
+
+The `share_*` fixtures carry one rule the others do not, and it is the reason that schema exists:
+`code` is the sender's SIGNED statement about whether the share carries a program, and it is
+checked against the files both ways. `share_code_hidden` is a page under a claim of no code, and
+`share_code_claimed_without_code` is the opposite. A share is a COPY the receiver comes to own, so
+there is no live view, nothing to revoke, and no third party in the middle of it.
 
 **Rejection** fixtures carry `doc.sbj`, the bad artefact, and `reject.jdat`, which declares the rule
 broken, the step of §2 that must catch it, what the error must say, and the node or the byte it must

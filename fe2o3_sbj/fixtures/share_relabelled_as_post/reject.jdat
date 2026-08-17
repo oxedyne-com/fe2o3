@@ -1,0 +1,6 @@
+{
+    "note": "A signed share whose envelope has been re-labelled `daimond/post/0` after signing. The payload bytes, their hash and the signature over that hash are untouched. This is the same claim as `post_relabelled_as_card`, made over the schema name that was RESERVED when those were signed: the schema reaches the signing input length-prefixed, so a third name coming to exist re-addressed nothing, weakened nothing, and left every fixture already committed byte for byte the file it was.",
+    "rule": "SPEC.md §1.3: the schema is inside the signing input, and is preceded by its length.",
+    "says": "not a signature by the author",
+    "stage": "sig",
+}

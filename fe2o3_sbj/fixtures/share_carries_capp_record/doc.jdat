@@ -1,0 +1,12 @@
+{
+    "code": (false),
+    "files": [
+        {
+            "body": (bu32|"TsXXT6LsPN8WQNCWQMuWQNG=2"),
+            "path": "capp.json",
+        },
+    ],
+    "name": "A share reaching too far",
+    "nonce": (bu8|"ihA-ihA-ihA-ihA-ihA-iW=4"),
+    "to": (bu8|"eQ6XeQ6XeQ6XeQ6XeQ6XeQ6XeQ6XeQ6XeQ6XeQ6XeQ4=2"),
+}

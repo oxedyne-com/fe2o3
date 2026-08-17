@@ -21,6 +21,7 @@ pub mod key;
 pub mod kinds;
 pub mod post;
 pub mod prelude;
+pub mod share;
 pub mod text;
 pub mod validate;
 
@@ -59,12 +60,13 @@ pub const SCHEMA_POST: &'static str = "daimond/post/0";
 /// who the holder is.
 pub const SCHEMA_CARD: &'static str = "daimond/card/0";
 
-/// Schema identifier RESERVED for one person sending another a copy of something they own.
+/// Schema identifier for one person sending another a copy of something they own.
 ///
-/// **Nothing in this build constructs or reads one.** The name is claimed here, and the reasoning
-/// written down, so that the lane which implements it does not reach for the wrong mechanism. An
-/// artefact declaring this schema is refused by this build, saying so, which is the correct answer
-/// from a reader that does not implement it.
+/// Implemented by [`share`], which carries the files, the display name, and the consent bit that
+/// says whether any of those files is a program. **A share is a COPY the receiver comes to own**:
+/// re-sealed to their key, landing in their workspace as theirs, changeable by them and never seen
+/// again by the sender. It is not a live view, so there is no content key that survives an edit,
+/// nothing to revoke, and nobody's storage to argue about but the receiver's own.
 ///
 /// # Why this is a schema and not a fifth reference kind
 ///
@@ -88,13 +90,14 @@ pub const SCHEMA_CARD: &'static str = "daimond/card/0";
 /// refuses a third. That is the argument that settles it, since the other two might be argued
 /// around and this one cannot.
 ///
-/// # Why reserving it costs nothing signed
+/// # Why adding it cost nothing signed
 ///
 /// A schema name reaches the signing input length-prefixed (§1.3), so a third name is unambiguous
 /// against every artefact already signed under the first two: no post and no card in existence is
 /// weakened, re-addressed or made forgeable by this name coming to exist. That is precisely what
-/// the length prefix bought, and it is why this can be reserved in a comment now and implemented
-/// later without a migration.
+/// the length prefix bought, and it is why this could be reserved in a comment first and
+/// implemented afterwards with no migration, and with every fixture already committed staying
+/// byte for byte the file it was.
 pub const SCHEMA_SHARE: &'static str = "daimond/share/0";
 
 /// Limits enforced before a document is trusted. See `SPEC.md` §5.

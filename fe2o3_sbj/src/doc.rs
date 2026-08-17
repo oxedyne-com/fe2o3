@@ -21,10 +21,12 @@ use crate::{
 	kinds::Schema,
 	limit,
 	post::Post,
+	share::Share,
 	validate,
 	HEADER_LEN,
 	SCHEMA_CARD,
 	SCHEMA_POST,
+	SCHEMA_SHARE,
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -146,6 +148,8 @@ pub enum Payload {
 	Post(Post),
 	/// A `daimond/card/0` identity card.
 	Card(Card),
+	/// A `daimond/share/0` copy of something one person is sending another.
+	Share(Share),
 }
 
 impl Payload {
@@ -156,6 +160,7 @@ impl Payload {
 			Self::Tree { schema, .. }	=> schema.name(),
 			Self::Post(_)	=> SCHEMA_POST,
 			Self::Card(_)	=> SCHEMA_CARD,
+			Self::Share(_)	=> SCHEMA_SHARE,
 		}
 	}
 
@@ -169,6 +174,7 @@ impl Payload {
 			Self::Tree { schema, tree }	=> res!(encode_tree(tree, schema.name())),
 			Self::Post(p)	=> res!(p.encode()),
 			Self::Card(c)	=> res!(c.encode()),
+			Self::Share(s)	=> res!(s.encode()),
 		};
 		// Checked here as well as inside the arms that check it, so that the container's own limit
 		// is not something a payload kind added later can be written without meeting.
@@ -195,6 +201,7 @@ impl Payload {
 		match schema {
 			SCHEMA_POST	=> Ok(Self::Post(res!(Post::decode(bytes)))),
 			SCHEMA_CARD	=> Ok(Self::Card(res!(Card::decode(bytes)))),
+			SCHEMA_SHARE	=> Ok(Self::Share(res!(Share::decode(bytes)))),
 			other	=> {
 				let schema = res!(Schema::from_name(other));
 				// `canon::decode` enforces the depth limit as it descends, and checks every rule of
@@ -1279,15 +1286,18 @@ mod tests {
 
 	/// A schema this build does not implement is refused, and named.
 	///
-	/// `daimond/share/0` is reserved (see [`crate::SCHEMA_SHARE`]) and nothing here reads one. The
-	/// claim is that an artefact declaring it is REFUSED rather than read as whichever schema is
-	/// nearest, and that the refusal says which schema it was handed. The day the schema is
-	/// implemented, this test is what has to be changed on purpose.
+	/// This was `daimond/share/0` while that schema was reserved and nothing read one. It is now
+	/// implemented (see [`crate::share`]), so the claim is carried by a name that really is
+	/// unimplemented: an artefact declaring one is REFUSED rather than read as whichever schema is
+	/// nearest, and the refusal says which schema it was handed.
 	#[test]
-	fn test_a_reserved_schema_is_refused_22() -> Outcome<()> {
+	fn test_an_unimplemented_schema_is_refused_22() -> Outcome<()> {
+		/// A schema no validator in this build reads, matching the `foreign_schema` fixture.
+		const SCHEMA_FOREIGN: &'static str = "oxeweb/cmd/0";
+
 		let signer = SignatureScheme::new_ed25519();
 		let bytes = res!(sample_post().encode());
-		let env = res!(seal(&bytes, crate::SCHEMA_SHARE, &signer, TIME));
+		let env = res!(seal(&bytes, SCHEMA_FOREIGN, &signer, TIME));
 		let buf = res!(assemble(&env, &bytes));
 
 		// Steps 1 to 5 touch no content, so the container is sound and the signature is the
@@ -1295,19 +1305,65 @@ mod tests {
 		res!(verify_only(&buf));
 		match read_artefact(&buf) {
 			Ok(_) => Err(err!(
-				"An artefact declaring the reserved schema '{}' was read.", crate::SCHEMA_SHARE;
+				"An artefact declaring the unimplemented schema '{}' was read.", SCHEMA_FOREIGN;
 			Test, Invalid)),
 			Err(e) => {
-				assert!(fmt!("{}", e).contains(crate::SCHEMA_SHARE),
+				assert!(fmt!("{}", e).contains(SCHEMA_FOREIGN),
 					"The refusal does not name the schema it refused: {}", e);
 				Ok(())
 			},
 		}
 	}
 
-	/// The signing input begins with the schema's length, and the reserved third name changes it.
+	/// A whole file carrying a share can be written and read back.
 	///
-	/// The §18 property, and the reason a third schema name can be reserved without touching a byte
+	/// The third payload schema through the same container, which is the claim worth making: the
+	/// envelope, the address, the signature and every rule of §3 are the container's and did not
+	/// change to admit it.
+	#[test]
+	fn test_a_share_is_a_whole_artefact_24() -> Outcome<()> {
+		let signer = SignatureScheme::new_ed25519();
+		let share = crate::share::Share::new(
+			fmt!("Life log"),
+			vec![0xA1; crate::share::limit::KEY_BYTES],
+			vec![0xB2; crate::share::limit::NONCE_BYTES],
+			None,
+			vec![
+				crate::share::File { path: fmt!("crystal.html"), body: b"<p>hi</p>".to_vec() },
+				crate::share::File { path: fmt!("crystal.json"), body: b"{}".to_vec() },
+			],
+		);
+		let buf = res!(write_artefact(&Payload::Share(share.clone()), &signer, TIME));
+		let back = res!(read_artefact(&buf));
+		assert_eq!(back.env().schema, SCHEMA_SHARE);
+		assert_eq!(*back.payload(), Payload::Share(share));
+
+		// The consent bit survives the round trip, which is the whole reason it is in the payload
+		// rather than in a wrapper: the receiver checks the SENDER's mark.
+		match back.payload() {
+			Payload::Share(s) => assert!(s.code,
+				"A share carrying a page came back saying it carries no code."),
+			other => return Err(err!(
+				"A share read back as a {}.", other.schema(); Test, Invalid)),
+		}
+
+		// And a share cannot be re-labelled as a post after signing, for the same reason a post
+		// cannot be re-labelled as a card: the schema is inside the signing input.
+		let bytes = res!(res!(match back.payload() {
+			Payload::Share(s) => Ok(s.clone()),
+			_ => Err(err!("Not a share."; Test, Bug)),
+		}).encode());
+		let mut env = res!(seal(&bytes, SCHEMA_SHARE, &signer, TIME));
+		env.schema = SCHEMA_POST.to_string();
+		match read_artefact(&res!(assemble(&env, &bytes))) {
+			Ok(_) => Err(err!("A share re-labelled as a post was read."; Test, Invalid)),
+			Err(_) => Ok(()),
+		}
+	}
+
+	/// The signing input begins with the schema's length, and each name gives a distinct preimage.
+	///
+	/// The §18 property, and the reason a third schema name could be added without touching a byte
 	/// of anything already signed: the schema reaches the signing input length-prefixed (§1.3), so
 	/// a name that did not exist when a post was signed cannot change how that post's preimage is
 	/// read.

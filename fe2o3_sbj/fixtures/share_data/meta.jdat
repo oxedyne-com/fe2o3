@@ -1,0 +1,8 @@
+{
+    "hash": (bu8|"*irgdHrQqBHjPX95K5y9G3uca4a3*+Fg3@7z1#hu4ya=2"),
+    "index": (false),
+    "note": "A share of DATA alone: two files, a display name, a recipient and a nonce, and `code` written as false. The bit is present even though nothing here is code — an omitted false and a sender whose build had never heard of the field are the same bytes, and those are the two things a receiver must be able to tell apart. No note, and the absent one is omitted rather than written empty (§3 rules 4 and 8). The files are in path order, which is fixed, because a set of files written two ways would be one Diamond at two addresses.",
+    "schema": "daimond/share/0",
+    "time": (u64|1752000000000),
+    "tree_len": (u64|230),
+}

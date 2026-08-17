@@ -1,0 +1,6 @@
+{
+    "note": "A share carrying the sender's append-only log — the record of what agents did in THEIR copy. Refused in the format rather than in a client, so that every implementation refuses it: a person sending a recipe does not think to check what travels with it, and the receiver's copy is new, so its record starts empty because nothing has happened in it yet.",
+    "rule": "The share schema: a share may not carry the sender's own `.daimond/` record.",
+    "says": ".daimond/",
+    "stage": "decode",
+}

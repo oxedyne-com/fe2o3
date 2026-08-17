@@ -178,9 +178,11 @@ fn round_trip() -> Outcome<()> {
 	// The four fixtures of the two record schemas. Named as a number rather than left open, so that
 	// a fixture which quietly stopped being a document -- or a document that quietly stopped being
 	// compiled -- shows up here instead of passing as an exclusion.
-	if skipped != 4 {
+	if skipped != 6 {
 		return Err(err!(
-			"{} acceptance fixtures were excluded from the compiler, and four are expected: the 			two posts and the two cards. A different number means a fixture changed schema, or one 			was added without this count being thought about.", skipped;
+			"{} acceptance fixtures were excluded from the compiler, and six are expected: the \
+			two posts, the two cards and the two shares. A different number means a fixture \
+			changed schema, or one was added without this count being thought about.", skipped;
 		Test, Invalid, Mismatch));
 	}
 	Ok(())

@@ -1,0 +1,21 @@
+{
+    "code": (true),
+    "files": [
+        {
+            "body": (bu32|"U-9a@NaYEZ4i8cn%@NPbS-8wCdqA"),
+            "path": "bakes/2026.jsonl",
+        },
+        {
+            "body": (bu32|"F6XqRMm+F69%P7a+F70+G#1m@MTb87D%RMLYRsHv86LiSsKWTt9%T6KkF2zmFZm%@czaUJuyBsXqRMm+"),
+            "path": "crystal.html",
+        },
+        {
+            "body": (bu32|"U-9pT65-T6L-8ZeYPcLa85HrPNDa@NaYVG=4"),
+            "path": "crystal.json",
+        },
+    ],
+    "name": "Life log",
+    "nonce": (bu8|"ihA-ihA-ihA-ihA-ihA-iW=4"),
+    "note": "The food log we talked about.",
+    "to": (bu8|"eQ6XeQ6XeQ6XeQ6XeQ6XeQ6XeQ6XeQ6XeQ6XeQ6XeQ4=2"),
+}
