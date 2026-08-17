@@ -91,20 +91,6 @@ pub fn styles_for(media: &str) -> Outcome<String> {
 		("xmlns:fo", "urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0"),
 		("office:version", VERSION),
 	]);
-	if slides {
-		out.open("office:automatic-styles", &[]);
-		out.open("style:page-layout", &[("style:name", "PM1")]);
-		out.empty("style:page-layout-properties", &[
-			("fo:page-width", "28cm"),
-			("fo:page-height", "15.75cm"),
-			("style:print-orientation", "landscape"),
-			("fo:margin-top", "0cm"), ("fo:margin-bottom", "0cm"),
-			("fo:margin-left", "0cm"), ("fo:margin-right", "0cm"),
-		]);
-		res!(out.close("style:page-layout"));
-		out.empty("style:style", &[("style:name", "dp1"), ("style:family", "drawing-page")]);
-		res!(out.close("office:automatic-styles"));
-	}
 	out.open("office:styles", &[]);
 	// A quotation is indented and italic, which is the one thing a reader has no default for that
 	// the document tree can actually carry.
@@ -153,7 +139,24 @@ pub fn styles_for(media: &str) -> Outcome<String> {
 		res!(out.close("style:style"));
 	}
 	res!(out.close("office:styles"));
+	// AFTER `office:styles`, and both before `office:master-styles`. `office:document-styles` is a
+	// SEQUENCE -- `office:font-face-decls?`, `office:styles?`, `office:automatic-styles?`,
+	// `office:master-styles?` -- so where these go is not a matter of taste. The presentation branch
+	// used to open the automatic styles first, which put the two the wrong way round; `.odt` and `.ods`
+	// take neither branch and were always in order, which is why only the deck was wrong.
 	if slides {
+		out.open("office:automatic-styles", &[]);
+		out.open("style:page-layout", &[("style:name", "PM1")]);
+		out.empty("style:page-layout-properties", &[
+			("fo:page-width", "28cm"),
+			("fo:page-height", "15.75cm"),
+			("style:print-orientation", "landscape"),
+			("fo:margin-top", "0cm"), ("fo:margin-bottom", "0cm"),
+			("fo:margin-left", "0cm"), ("fo:margin-right", "0cm"),
+		]);
+		res!(out.close("style:page-layout"));
+		out.empty("style:style", &[("style:name", "dp1"), ("style:family", "drawing-page")]);
+		res!(out.close("office:automatic-styles"));
 		out.open("office:master-styles", &[]);
 		out.empty("style:master-page", &[
 			("style:name", "Default"),

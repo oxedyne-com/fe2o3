@@ -254,5 +254,45 @@ pub fn test_odf(filter: &'static str) -> Outcome<()> {
 		Ok(())
 	}));
 
+	res!(test_it(filter, &["styles.xml puts its children in the order required 011", "all", "odf"], || {
+		// `office:document-styles` is a SEQUENCE, not a set: font-face-decls, then styles, then
+		// automatic-styles, then master-styles. The presentation branch opened automatic-styles first,
+		// so an `.odp` came out with two of them the wrong way round. `.odt` and `.ods` take neither
+		// branch and were always in order, which is why only the deck was wrong -- so all three are
+		// checked here rather than the one that broke.
+		const ORDER: [&str; 4] = ["office:font-face-decls", "office:styles",
+			"office:automatic-styles", "office:master-styles"];
+		let doc = res!(markdown::parse(SOURCE));
+		let (odt, _) = res!(odf::text::write(&doc));
+		let ods = res!(odf::sheet::write(&book()));
+		let (odp, _) = res!(odf::slides::write(&Deck::from_doc(&doc)));
+		for (what, bytes) in [("odt", &odt), ("ods", &ods), ("odp", &odp)] {
+			let zip = res!(Zip::read(bytes.clone()));
+			let styles = res!(zip.text("styles.xml"));
+			// Only the ones this document actually has, in the order it has them: the sequence permits
+			// each to be absent, so a missing element is not a fault and an out-of-order pair is.
+			let mut seen: Vec<(usize, &str)> = Vec::new();
+			for name in ORDER {
+				if let Some(at) = styles.find(&fmt!("<{}", name)) {
+					seen.push((at, name));
+				}
+			}
+			let mut sorted = seen.clone();
+			sorted.sort_by_key(|(at, _)| *at);
+			assert_eq!(sorted, seen,
+				"{}: styles.xml has its children out of order -- found {:?}, the sequence wants {:?}",
+				what, sorted.iter().map(|(_, n)| *n).collect::<Vec<_>>(),
+				seen.iter().map(|(_, n)| *n).collect::<Vec<_>>());
+		}
+		// And the deck is the one that has to have all three, since its master page is the whole reason
+		// the branch exists: a check that passed by finding only `office:styles` would prove nothing.
+		let zip = res!(Zip::read(odp.clone()));
+		let styles = res!(zip.text("styles.xml"));
+		for name in ["office:styles", "office:automatic-styles", "office:master-styles"] {
+			assert!(styles.contains(&fmt!("<{}", name)), "the .odp lost its {}", name);
+		}
+		Ok(())
+	}));
+
 	Ok(())
 }
