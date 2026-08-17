@@ -130,7 +130,7 @@ pub fn write(book: &Book) -> Outcome<Vec<u8>> {
 	let mut zip = pkg::start(MEDIA);
 	zip.set("content.xml", res!(out.finish()).into_bytes(), Method::Deflate);
 	zip.set("styles.xml", res!(pkg::styles_for(MEDIA)).into_bytes(), Method::Deflate);
-	zip.set("meta.xml", res!(pkg::meta(MEDIA)).into_bytes(), Method::Deflate);
+	zip.set("meta.xml", res!(pkg::meta()).into_bytes(), Method::Deflate);
 	res!(pkg::finish(&mut zip, MEDIA));
 	zip.write()
 }

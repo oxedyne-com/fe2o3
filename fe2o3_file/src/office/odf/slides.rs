@@ -170,7 +170,7 @@ pub fn write(deck: &Deck) -> Outcome<(Vec<u8>, Left)> {
 	let mut zip = pkg::start(MEDIA);
 	zip.set("content.xml", res!(out.finish()).into_bytes(), Method::Deflate);
 	zip.set("styles.xml", res!(pkg::styles_for(MEDIA)).into_bytes(), Method::Deflate);
-	zip.set("meta.xml", res!(pkg::meta(MEDIA)).into_bytes(), Method::Deflate);
+	zip.set("meta.xml", res!(pkg::meta()).into_bytes(), Method::Deflate);
 	res!(pkg::finish(&mut zip, MEDIA));
 	let _ = (SLIDE_W, SLIDE_H);
 	Ok((res!(zip.write()), left))

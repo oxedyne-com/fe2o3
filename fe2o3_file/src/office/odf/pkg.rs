@@ -170,13 +170,18 @@ pub fn styles_for(media: &str) -> Outcome<String> {
 ///
 /// It names the generator and nothing else. No date: a document written twice from the same source
 /// must give the same bytes, and a timestamp is the one field that guarantees it will not.
-pub fn meta(media: &str) -> Outcome<String> {
+///
+/// **No `office:mimetype` here.** The grammar defines that attribute in `office-document-attrs`, and
+/// the only element referring to those is `office:document` -- the root of the FLAT single-file form,
+/// where there is no `mimetype` member to carry the fact instead. On `office:document-meta` it is
+/// simply not allowed, and the same mistake reached all three writers because they share this
+/// function. A package says what it is in its `mimetype` member; see [`start`].
+pub fn meta() -> Outcome<String> {
 	let mut out = Out::declared();
 	out.open("office:document-meta", &[
 		("xmlns:office", NS_OFFICE),
 		("xmlns:meta", "urn:oasis:names:tc:opendocument:xmlns:meta:1.0"),
 		("office:version", VERSION),
-		("office:mimetype", media),
 	]);
 	out.open("office:meta", &[]);
 	out.leaf("meta:generator", &[], "Hematite/fe2o3_file");

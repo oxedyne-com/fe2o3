@@ -226,5 +226,33 @@ pub fn test_odf(filter: &'static str) -> Outcome<()> {
 		Ok(())
 	}));
 
+	res!(test_it(filter, &["meta.xml carries no attribute the grammar forbids 010", "all", "odf"], || {
+		// `office:mimetype` was on `office:document-meta` in all three writers, because all three go
+		// through one `pkg::meta`. The OASIS grammar defines that attribute in `office-document-attrs`
+		// and the ONLY element referring to those is `office:document`, the root of the flat
+		// single-file form -- which has no `mimetype` member to carry the fact instead. A package does
+		// have one, so the attribute is not merely forbidden here, it is redundant.
+		let doc = res!(markdown::parse(SOURCE));
+		let (odt, _) = res!(odf::text::write(&doc));
+		let ods = res!(odf::sheet::write(&book()));
+		let (odp, _) = res!(odf::slides::write(&Deck::from_doc(&doc)));
+		for (what, bytes, media) in [
+			("odt", &odt, odf::text::MEDIA),
+			("ods", &ods, odf::sheet::MEDIA),
+			("odp", &odp, odf::slides::MEDIA),
+		] {
+			let zip = res!(Zip::read(bytes.clone()));
+			let meta = res!(zip.text("meta.xml"));
+			assert!(!meta.contains("office:mimetype"),
+				"{}: meta.xml still carries office:mimetype: {}", what, meta);
+			// `office:version` is required on it and must not be lost with the other one.
+			assert!(meta.contains("office:version"), "{}: meta.xml lost its version", what);
+			// And the package still says what it is, in the member that is allowed to.
+			assert_eq!(res!(zip.text("mimetype")), media,
+				"{}: the package no longer declares its own type", what);
+		}
+		Ok(())
+	}));
+
 	Ok(())
 }
