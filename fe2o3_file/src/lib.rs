@@ -24,3 +24,4 @@
 pub mod exif;
 pub mod glob;
 pub mod tree;
+pub mod zip;

@@ -9,6 +9,14 @@ repository = "https://github.com/oxedyne-io/fe2o3"
 
 [dependencies]
 oxedyne_fe2o3_core 		   	= { path = "../fe2o3_core" }
-oxedyne_fe2o3_data 		   	= { path = "../fe2o3_data" }
+# `default-features = false` drops the rayon-backed graph search, which this crate does not use and
+# which does not build for wasm32.  `zip` is reached from the browser, so nothing here may pull in a
+# dependency that is not portable.
+oxedyne_fe2o3_data 		   	= { path = "../fe2o3_data", default-features = false }
+
+# DEFLATE, for the members of an archive.  Already a dependency of `fe2o3_core`, `fe2o3_net` and
+# `fe2o3_graphics`; its `miniz_oxide` backend is pure Rust and builds for wasm32.  It also carries
+# the CRC-32 an archive checks each member with, so there is no second implementation of one here.
+flate2 					= "1.0"
 
 [dev-dependencies]
