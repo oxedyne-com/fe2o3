@@ -50,7 +50,7 @@ pub struct Avi {
 	h:		u32,		// picture height, pixels
 	micros:	u32,		// microseconds a frame is shown, from the main header
 	frames:	u32,		// frame count the main header claims
-	// Frame rate, as the video stream header gives it
+	// Frame rate
 	rate:	u32,		// quotient with scale is frames a second
 	scale:	u32,
 	length:	u32,		// frame count the video stream's own header claims
