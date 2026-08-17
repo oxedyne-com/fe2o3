@@ -5,6 +5,9 @@
 //! that would be lost. The archive check is the load-bearing one: it compares the COMPRESSED BYTES of
 //! every member nobody touched, not their content, because two members can hold the same content and
 //! different bytes and it is the bytes a colleague's reader parses.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_file::office::docx;
 use oxedyne_fe2o3_file::office::edit::Find;
@@ -22,17 +25,17 @@ use oxedyne_fe2o3_core::{
 	test::test_it,
 };
 
-/// A `.docx` LibreOffice wrote: three paragraphs, one of which splits a sentence across four runs.
+// A `.docx` LibreOffice wrote: three paragraphs, one of which splits a sentence across four runs.
 const DOCX: &[u8] = include_bytes!("data/rich.docx");
-/// An `.odt` LibreOffice wrote, holding one of everything the tree can carry.
+// An `.odt` LibreOffice wrote, holding one of everything the tree can carry.
 const ODT: &[u8] = include_bytes!("data/foreign.odt");
-/// A `.xlsx` LibreOffice wrote: shared strings, formulas with cached values, a styled date, a boolean,
-/// an absent row and a row with a gap in it.
+// A `.xlsx` LibreOffice wrote: shared strings, formulas with cached values, a styled date, a boolean,
+// an absent row and a row with a gap in it.
 const XLSX: &[u8] = include_bytes!("data/foreign.xlsx");
-/// The same spreadsheet as an `.ods`, where the empty row is one repeated cell.
+// The same spreadsheet as an `.ods`, where the empty row is one repeated cell.
 const ODS: &[u8] = include_bytes!("data/foreign.ods");
 
-/// Which archive members differ between two packages, and which are missing from the second.
+/// Which members differ between two packages, and which are missing from the second.
 ///
 /// The comparison is of the members' own bytes rather than of their content: a member rebuilt with the
 /// same content and a different compression level is a member that was not copied, and copying is the
@@ -66,10 +69,9 @@ fn grid(bytes: &[u8], ods: bool) -> Outcome<Vec<Vec<String>>> {
 		.collect())
 }
 
-/// The two spreadsheet formats, so a test asserts the same property of both in one place.
-///
-/// One test over both rather than two tests: the answer has to be the SAME answer, and two tests
-/// would let the formats drift while each still passed.
+// The two spreadsheet formats, so a test asserts the same property of both in one place. One test
+// over both rather than two tests: the answer has to be the SAME answer, and two tests would let the
+// formats drift while each still passed.
 const FORMATS: [(bool, &str, &[u8]); 2] = [(false, "xlsx", XLSX), (true, "ods", ODS)];
 
 /// Writes cells into whichever spreadsheet format, from `(ref, value, formula)` triples.

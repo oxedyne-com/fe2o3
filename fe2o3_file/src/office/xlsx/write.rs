@@ -12,6 +12,9 @@
 //! them. A file omitting any of them opens with a repair prompt rather than an error, which is the
 //! worst kind of failure to debug: the file is "fixed" and the reason is never named. So they are all
 //! written.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::office::opc::{
 	CT_SHEET,
@@ -49,8 +52,6 @@ use std::collections::BTreeMap;
 /// must move together. There is no third place.
 const STYLE_DATE: &str = "1";
 
-/// Writes a workbook as the bytes of a `.xlsx`.
-///
 /// A book with no sheets gets one empty sheet, because a workbook with none is a file every reader
 /// refuses, and refusing to write one here would be refusing at the wrong end.
 pub fn write(book: &Book) -> Outcome<Vec<u8>> {
@@ -142,7 +143,6 @@ fn sheet_name(name: &str, i: usize) -> String {
 	}
 }
 
-/// One sheet as its part.
 fn sheet_part(s: &crate::office::sheet::Sheet, seen: &BTreeMap<&str, usize>) -> Outcome<String> {
 	let mut out = Out::declared();
 	out.open("worksheet", &[("xmlns", NS_S), ("xmlns:r", NS_R)]);
@@ -289,7 +289,6 @@ pub(crate) fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 	era * 146_097 + doe - 719_468
 }
 
-/// The shared string table.
 fn shared(strings: &[&str]) -> Outcome<String> {
 	let n = fmt!("{}", strings.len());
 	let mut out = Out::declared();

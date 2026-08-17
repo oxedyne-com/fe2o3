@@ -9,6 +9,9 @@
 //! cargo run -p oxedyne_fe2o3_file --example make_pptx -- in.md out.pptx
 //! soffice --headless --convert-to pdf out.pptx
 //! ```
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_file::office::deck::Deck;

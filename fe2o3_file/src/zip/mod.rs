@@ -38,6 +38,9 @@
 //! zip.set("word/document.xml", edited.into_bytes(), Method::Deflate);
 //! let out = res!(zip.write());	// Every other member is the bytes it was.
 //! ```
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 pub mod read;
 pub mod write;
@@ -46,11 +49,9 @@ use oxedyne_fe2o3_core::prelude::*;
 
 use std::ops::Range;
 
-/// The most a single member is inflated to before [`Zip::content`] refuses it.
-///
-/// A `.xlsx` part inflates to many times its compressed size as a matter of course, so the ceiling
-/// has to be generous; a hostile archive inflates to whatever it likes, so there has to be one. A
-/// caller with its own idea of the ceiling uses [`Zip::content_capped`] and says what it is.
+// A `.xlsx` part inflates to many times its compressed size as a matter of course, so the ceiling
+// has to be generous; a hostile archive inflates to whatever it likes, so there has to be one. A
+// caller with its own idea of the ceiling uses Zip::content_capped and says what it is.
 pub const MAX_INFLATE: u64 = 256 * 1024 * 1024;
 
 /// How a member's bytes are held in the archive.
@@ -59,17 +60,13 @@ pub const MAX_INFLATE: u64 = 256 * 1024 * 1024;
 /// its directory, still names the member, and still copies it through untouched.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Method {
-	/// Stored: the bytes in the archive are the content.
-	Store,
-	/// DEFLATE, which is what all but the smallest members of an Office document use.
-	Deflate,
-	/// A method this does not decode, by its code.
-	Other(u16),
+	Store,		// the bytes in the archive are the content
+	Deflate,	// what all but the smallest members of an Office document use
+	Other(u16),	// a method this does not decode, by its code
 }
 
 impl Method {
 
-	/// The method's code as the archive writes it.
 	pub fn code(&self) -> u16 {
 		match self {
 			Self::Store	=> 0,
@@ -78,7 +75,6 @@ impl Method {
 		}
 	}
 
-	/// The method a code names.
 	pub fn of(code: u16) -> Self {
 		match code {
 			0	=> Self::Store,
@@ -98,54 +94,40 @@ pub const EPOCH_DATE: u16 = 0x0021;
 /// Where a member's bytes come from when the archive is written.
 #[derive(Clone, Debug)]
 pub enum Body {
-	/// A member read from an archive and not since changed, as byte ranges into the source.
-	///
-	/// Writing it copies `whole` verbatim, which is what makes an untouched member survive a round
-	/// trip exactly. `data` addresses the compressed bytes alone, for reading the content.
+	// Read from an archive and not since changed, as byte ranges into the source. Writing it copies
+	// `whole` verbatim, which is what makes an untouched member survive a round trip exactly.
 	Held {
-		/// The local header, the data, and any data descriptor: everything the member occupies.
-		whole:	Range<usize>,
-		/// The compressed data alone.
-		data:	Range<usize>,
-		/// The member's entry in the central directory.
-		cen:	Range<usize>,
+		whole:	Range<usize>,		// local header, data, any data descriptor
+		data:	Range<usize>,		// the compressed bytes alone
+		cen:	Range<usize>,		// its entry in the central directory
 	},
-	/// A member this archive was given, which is written afresh from its uncompressed bytes.
+	// Given to this archive, and so written afresh from its uncompressed bytes.
 	Fresh {
-		/// The content, uncompressed.
-		data:	Vec<u8>,
-		/// The DOS time and date to stamp it with.
-		stamp:	(u16, u16),
+		data:	Vec<u8>,	// uncompressed
+		stamp:	(u16, u16),	// DOS time and date to write
 	},
 }
 
 /// One member of an archive.
 #[derive(Clone, Debug)]
 pub struct Member {
-	/// The member's name: its path within the archive, with forward slashes.
-	pub name:	String,
-	/// How its bytes are held.
+	pub name:	String,		// path within the archive, with forward slashes
 	pub method:	Method,
-	/// The CRC-32 of its uncompressed content.
-	pub crc:	u32,
-	/// The size of its uncompressed content.
-	pub size:	u64,
-	/// The size of its bytes as the archive holds them.
-	pub csize:	u64,
-	/// The general purpose bit flag the archive recorded.
-	pub flags:	u16,
-	/// Where the bytes come from.
+	pub crc:	u32,		// of the uncompressed content
+	pub size:	u64,		// uncompressed
+	pub csize:	u64,		// as the archive holds them
+	pub flags:	u16,		// general purpose bit flag, as recorded
 	pub body:	Body,
 }
 
 impl Member {
 
-	/// Whether the member is encrypted, which is bit 0 of the general purpose flag.
+	/// Is bit 0 of the general purpose flag set?
 	pub fn is_encrypted(&self) -> bool {
 		self.flags & 1 != 0
 	}
 
-	/// Whether the member is a directory entry rather than a file: a trailing slash and no content.
+	/// A directory entry is a trailing slash and no content.
 	pub fn is_dir(&self) -> bool {
 		self.name.ends_with('/') && self.size == 0
 	}
@@ -158,7 +140,7 @@ impl Member {
 		}
 	}
 
-	/// Whether the member's bytes are the ones it was read with.
+	/// Are the member's bytes the ones it was read with?
 	pub fn is_held(&self) -> bool {
 		matches!(self.body, Body::Held { .. })
 	}
@@ -182,78 +164,64 @@ impl Member {
 /// A ZIP archive held in memory, with the bytes it was read from.
 #[derive(Clone, Debug, Default)]
 pub struct Zip {
-	/// The bytes the archive was read from, which every held member addresses into.
-	pub(crate) src:		Vec<u8>,
-	/// The members, in the order they occupy the archive.
-	pub(crate) members:	Vec<Member>,
-	/// The archive comment, which the end record carries.
-	pub(crate) comment:	Vec<u8>,
-	/// Whether reading needed the ZIP64 records. Such an archive is refused on write rather than
-	/// written back without them.
-	pub(crate) zip64:	bool,
-	/// Whether any member has been added, replaced or removed.
-	pub(crate) touched:	bool,
+	pub(crate) src:		Vec<u8>,	// what every held member addresses into
+	pub(crate) members:	Vec<Member>,	// in the order they occupy the archive
+	pub(crate) comment:	Vec<u8>,	// carried by the end record
+	pub(crate) zip64:	bool,		// reading needed the ZIP64 records
+	pub(crate) touched:	bool,		// a member added, replaced or removed
 }
 
 impl Zip {
 
-	/// An empty archive.
 	pub fn new() -> Self {
 		Self::default()
 	}
 
-	/// The number of members.
 	pub fn len(&self) -> usize {
 		self.members.len()
 	}
 
-	/// Whether the archive holds nothing.
 	pub fn is_empty(&self) -> bool {
 		self.members.is_empty()
 	}
 
-	/// Whether every member is still the bytes it was read with, so writing reproduces the source.
+	/// Is every member still the bytes it was read with, so that writing reproduces the source?
 	pub fn is_pristine(&self) -> bool {
 		!self.touched
 	}
 
-	/// The members, in the order they occupy the archive.
+	/// In the order they occupy the archive.
 	pub fn members(&self) -> &[Member] {
 		&self.members
 	}
 
-	/// The bytes the archive was read from, empty where it was built rather than read.
+	/// Empty where the archive was built rather than read.
 	pub fn source(&self) -> &[u8] {
 		&self.src
 	}
 
-	/// The names of the members, in archive order.
+	/// In archive order.
 	pub fn names(&self) -> Vec<&str> {
 		self.members.iter().map(|m| m.name.as_str()).collect()
 	}
 
-	/// Where a named member sits, if the archive holds one.
 	pub fn index_of(&self, name: &str) -> Option<usize> {
 		self.members.iter().position(|m| m.name == name)
 	}
 
-	/// Whether the archive holds a member of that name.
 	pub fn has(&self, name: &str) -> bool {
 		self.index_of(name).is_some()
 	}
 
-	/// A named member.
 	pub fn member(&self, name: &str) -> Option<&Member> {
 		self.index_of(name).and_then(|i| self.members.get(i))
 	}
 
-	/// The uncompressed content of a named member, up to [`MAX_INFLATE`].
+	/// Refuses a member inflating past the 256 MiB [`MAX_INFLATE`] ceiling.
 	pub fn content(&self, name: &str) -> Outcome<Vec<u8>> {
 		self.content_capped(name, MAX_INFLATE)
 	}
 
-	/// The uncompressed content of a named member, refusing anything above the stated ceiling.
-	///
 	/// The declared size is checked against the ceiling before a byte is inflated, so a member that
 	/// claims to be enormous costs nothing to refuse, and the inflated length is checked again after,
 	/// so a member that lied about its size is refused too.
@@ -263,7 +231,6 @@ impl Zip {
 		self.content_at(i, cap)
 	}
 
-	/// The uncompressed content of the member at an index, refusing anything above the ceiling.
 	pub fn content_at(&self, i: usize, cap: u64) -> Outcome<Vec<u8>> {
 		let m = res!(self.members.get(i).ok_or_else(|| err!(
 			"The archive has {} members, so there is none at index {}.", self.members.len(), i;
@@ -308,14 +275,12 @@ impl Zip {
 		Ok(out)
 	}
 
-	/// The content of a named member as text, which it must be.
+	/// The member must be UTF-8.
 	pub fn text(&self, name: &str) -> Outcome<String> {
 		let bytes = res!(self.content(name));
 		Ok(res!(String::from_utf8(bytes), Decode, String))
 	}
 
-	/// Adds a member, or replaces the one of that name where there is one.
-	///
 	/// Replacing puts the new member where the old one was, so a caller editing one part of a
 	/// document does not reorder the archive.
 	pub fn set(&mut self, name: &str, data: Vec<u8>, method: Method) {
@@ -337,8 +302,6 @@ impl Zip {
 		}
 	}
 
-	/// Adds a member at the head of the archive, before every other.
-	///
 	/// OpenDocument needs this and needs it stored rather than compressed: a reader identifies an
 	/// `.odt` by finding `mimetype` first in the archive and uncompressed, and one written anywhere
 	/// else is a file that opens as a plain ZIP.
@@ -350,7 +313,7 @@ impl Zip {
 		}
 	}
 
-	/// Removes a named member, saying whether there was one.
+	/// Says whether there was one to remove.
 	pub fn remove(&mut self, name: &str) -> bool {
 		match self.index_of(name) {
 			Some(i)	=> {
@@ -363,8 +326,6 @@ impl Zip {
 	}
 }
 
-/// Inflates a raw DEFLATE stream, refusing to grow past the ceiling.
-///
 /// The ceiling is enforced as it goes rather than after, because a member that claims a small size
 /// and inflates without end would otherwise take the machine down before anything checked it.
 fn inflate(raw: &[u8], cap: u64, name: &str) -> Outcome<Vec<u8>> {
@@ -382,7 +343,6 @@ fn inflate(raw: &[u8], cap: u64, name: &str) -> Outcome<Vec<u8>> {
 	Ok(out)
 }
 
-/// Reads a little-endian `u16` at an offset.
 pub(crate) fn u16le(b: &[u8], i: usize) -> Outcome<u16> {
 	match b.get(i..i + 2) {
 		Some(s)	=> Ok(u16::from_le_bytes([s[0], s[1]])),
@@ -392,7 +352,6 @@ pub(crate) fn u16le(b: &[u8], i: usize) -> Outcome<u16> {
 	}
 }
 
-/// Reads a little-endian `u32` at an offset.
 pub(crate) fn u32le(b: &[u8], i: usize) -> Outcome<u32> {
 	match b.get(i..i + 4) {
 		Some(s)	=> Ok(u32::from_le_bytes([s[0], s[1], s[2], s[3]])),
@@ -402,7 +361,6 @@ pub(crate) fn u32le(b: &[u8], i: usize) -> Outcome<u32> {
 	}
 }
 
-/// Reads a little-endian `u64` at an offset.
 pub(crate) fn u64le(b: &[u8], i: usize) -> Outcome<u64> {
 	match b.get(i..i + 8) {
 		Some(s)	=> Ok(u64::from_le_bytes([

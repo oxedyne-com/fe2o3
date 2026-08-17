@@ -15,6 +15,9 @@
 //! reader, of the kind that hands over events instead of a tree, and the tree is what the editing
 //! path needs for its spans. One reader that refuses honestly above a stated ceiling beats two
 //! readers that disagree about what a document says.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::office::opc::{
 	REL_DOC,
@@ -41,10 +44,8 @@ use oxedyne_fe2o3_text::xml::{
 
 use std::collections::BTreeMap;
 
-/// The most a single part is inflated to.
-///
-/// A sheet of a hundred thousand rows is about 30 MB of XML, so this admits every spreadsheet a
-/// person keeps and refuses the ones built to exhaust a reader.
+// The most a single part is inflated to. A sheet of a hundred thousand rows is about 30 MB of XML,
+// so this admits every spreadsheet a person keeps and refuses the ones built to exhaust a reader.
 pub const MAX_PART: u64 = 96 * 1024 * 1024;
 
 /// The leading bytes of an OLE compound file: an encrypted workbook, or a `.xls` from before 2007.
@@ -53,23 +54,17 @@ const OLE_MAGIC: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
 /// A workbook read for reading, and what came with it.
 #[derive(Clone, Debug, Default)]
 pub struct Reading {
-	/// The sheets and their cells.
 	pub book:	Book,
-	/// Whether the file carries a macro project. Said, never run.
-	pub macros:	bool,
-	/// How many cells carry a formula.
-	///
-	/// Worth saying on screen, because it is the number that tells a reader whether what they are
-	/// looking at is data or the result of a calculation they cannot see.
+	pub macros:	bool,	// said, never run
+	// Worth saying on screen, because it is the number that tells a reader whether what they are
+	// looking at is data or the result of a calculation they cannot see.
 	pub formulas:	usize,
-	/// Sheets the workbook names and whose part is missing or unreadable, by name.
-	///
-	/// Named rather than dropped: a workbook that quietly came back with four of its five sheets is
-	/// worse than one that says which is absent.
+	// Sheets the workbook names and whose part is missing or unreadable, named rather than dropped:
+	// a workbook that quietly came back with four of its five sheets is worse than one that says
+	// which is absent.
 	pub missing:	Vec<String>,
 }
 
-/// Reads a `.xlsx` into the workbook it holds.
 pub fn read(bytes: &[u8]) -> Outcome<Reading> {
 	if bytes.len() >= OLE_MAGIC.len() && bytes[..OLE_MAGIC.len()] == OLE_MAGIC {
 		return Err(err!(
@@ -206,7 +201,6 @@ fn cells(
 	Ok(())
 }
 
-/// One cell: what it says, and the formula beside it where there is one.
 fn cell_of(
 	xml:	&Xml,
 	c:	&Elem,
@@ -402,7 +396,6 @@ fn strings_of(
 	Ok(res!(xml.root()).children("si").iter().map(|si| xml.text_of(si)).collect())
 }
 
-/// One part of the package, as the text it is.
 fn part_text(zip: &Zip, name: &str) -> Outcome<String> {
 	let bytes = res!(zip.content_capped(name, MAX_PART));
 	Ok(res!(String::from_utf8(bytes), Decode, String))

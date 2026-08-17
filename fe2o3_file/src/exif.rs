@@ -26,6 +26,9 @@
 //!
 //! assert!(describe("photo.jpg").is_ok());
 //! ```
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -35,13 +38,12 @@ use std::{
 };
 
 
-/// The largest number of chained IFDs followed before the chain is declared malformed.
+// Ceilings on a structure that a malformed file could otherwise make unbounded.  Crossing either
+// is an error, not a truncation.
 const MAX_IFD_CHAIN: usize = 16;
-
-/// The largest number of entries accepted in a single IFD.
 const MAX_IFD_ENTRIES: u64 = 4096;
 
-/// Size in bytes of one IFD entry.
+/// Size in bytes of one IFD entry, fixed by TIFF.
 const ENTRY_LEN: u64 = 12;
 
 /// The `Exif\0\0` signature that opens an EXIF `APP1` payload.
@@ -131,10 +133,8 @@ pub mod tag {
 /// Byte order declared by the TIFF header.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ByteOrder {
-    /// Intel ordering, least significant byte first, written `II`.
-    Little,
-    /// Motorola ordering, most significant byte first, written `MM`.
-    Big,
+    Little, // Intel, written II, least significant byte first
+    Big,    // Motorola, written MM, most significant byte first
 }
 
 impl fmt::Display for ByteOrder {
@@ -148,7 +148,6 @@ impl fmt::Display for ByteOrder {
 
 impl ByteOrder {
 
-    /// Reads a two byte unsigned integer in this order.
     pub fn u16(&self, b: [u8; 2]) -> u16 {
         match self {
             Self::Little	=> u16::from_le_bytes(b),
@@ -156,7 +155,6 @@ impl ByteOrder {
         }
     }
 
-    /// Reads a four byte unsigned integer in this order.
     pub fn u32(&self, b: [u8; 4]) -> u32 {
         match self {
             Self::Little	=> u32::from_le_bytes(b),
@@ -168,16 +166,11 @@ impl ByteOrder {
 /// The IFD in which a field was found.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum IfdKind {
-    /// The first IFD, describing the primary image.
-    Ifd0,
-    /// The EXIF sub-IFD, reached through `EXIF_IFD_POINTER`.
-    Exif,
-    /// The GPS sub-IFD, reached through `GPS_IFD_POINTER`.
-    Gps,
-    /// The interoperability sub-IFD, reached through `INTEROP_IFD_POINTER`.
-    Interop,
-    /// The second IFD, describing the thumbnail.
-    Ifd1,
+    Ifd0,       // the primary image
+    Exif,       // sub-IFD reached through EXIF_IFD_POINTER
+    Gps,        // sub-IFD reached through GPS_IFD_POINTER
+    Interop,    // sub-IFD reached through INTEROP_IFD_POINTER
+    Ifd1,       // the thumbnail
 }
 
 impl fmt::Display for IfdKind {
@@ -195,9 +188,7 @@ impl fmt::Display for IfdKind {
 /// An unsigned ratio of two 32 bit integers, the TIFF `RATIONAL` type.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Rational {
-    /// Numerator.
     pub num: u32,
-    /// Denominator.
     pub den: u32,
 }
 
@@ -208,7 +199,7 @@ impl fmt::Display for Rational {
 }
 
 impl Rational {
-    /// Returns the ratio as a float, or `None` when the denominator is zero.
+    /// `None` when the denominator is zero.
     pub fn to_f64(&self) -> Option<f64> {
         if self.den == 0 {
             None
@@ -221,9 +212,7 @@ impl Rational {
 /// A signed ratio of two 32 bit integers, the TIFF `SRATIONAL` type.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SRational {
-    /// Numerator.
     pub num: i32,
-    /// Denominator.
     pub den: i32,
 }
 
@@ -234,7 +223,7 @@ impl fmt::Display for SRational {
 }
 
 impl SRational {
-    /// Returns the ratio as a float, or `None` when the denominator is zero.
+    /// `None` when the denominator is zero.
     pub fn to_f64(&self) -> Option<f64> {
         if self.den == 0 {
             None
@@ -247,40 +236,24 @@ impl SRational {
 /// The decoded payload of one IFD entry.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
-    /// TIFF type 1, unsigned bytes.
-    Byte(Vec<u8>),
-    /// TIFF type 2, a NUL terminated string.
-    Ascii(String),
-    /// TIFF type 3, unsigned two byte integers.
-    Short(Vec<u16>),
-    /// TIFF type 4, unsigned four byte integers.
-    Long(Vec<u32>),
-    /// TIFF type 5, unsigned ratios.
-    Rational(Vec<Rational>),
-    /// TIFF type 6, signed bytes.
-    SByte(Vec<i8>),
-    /// TIFF type 7, an opaque byte run whose meaning the tag defines.
-    Undefined(Vec<u8>),
-    /// TIFF type 8, signed two byte integers.
-    SShort(Vec<i16>),
-    /// TIFF type 9, signed four byte integers.
-    SLong(Vec<i32>),
-    /// TIFF type 10, signed ratios.
-    SRational(Vec<SRational>),
-    /// TIFF type 11, single precision floats.
-    Float(Vec<f32>),
-    /// TIFF type 12, double precision floats.
-    Double(Vec<f64>),
-    /// TIFF type 13, an offset to a nested IFD.
-    Ifd(Vec<u32>),
-    /// A type this module does not know, preserved as the raw entry payload.
+    Byte(Vec<u8>),             // TIFF type 1
+    Ascii(String),             // TIFF type 2, NUL terminated
+    Short(Vec<u16>),           // TIFF type 3
+    Long(Vec<u32>),            // TIFF type 4
+    Rational(Vec<Rational>),   // TIFF type 5
+    SByte(Vec<i8>),            // TIFF type 6
+    Undefined(Vec<u8>),        // TIFF type 7, an opaque run whose meaning the tag defines
+    SShort(Vec<i16>),          // TIFF type 8
+    SLong(Vec<i32>),           // TIFF type 9
+    SRational(Vec<SRational>), // TIFF type 10
+    Float(Vec<f32>),           // TIFF type 11
+    Double(Vec<f64>),          // TIFF type 12
+    Ifd(Vec<u32>),             // TIFF type 13, an offset to a nested IFD
+    // A type this module does not know, preserved as the raw entry payload.
     Unknown {
-        /// The type code as written in the file.
-        typ: u16,
-        /// The count as written in the file.
-        count: u32,
-        /// The four raw bytes of the value or offset field.
-        raw: [u8; 4],
+        typ: u16,        // the type code as written in the file
+        count: u32,      // the count as written in the file
+        raw: [u8; 4],    // the four bytes of the value or offset field
     },
 }
 
@@ -308,7 +281,7 @@ impl fmt::Display for Value {
 
 impl Value {
 
-    /// Joins displayable items with a space, used for the ratio variants.
+    /// Joins items with a space, the separator the ratio variants display under.
     fn join<T: fmt::Display>(v: &[T]) -> String {
         let mut s = String::new();
         for (i, item) in v.iter().enumerate() {
@@ -320,7 +293,6 @@ impl Value {
         s
     }
 
-    /// Returns the number of elements the value holds.
     pub fn len(&self) -> usize {
         match self {
             Self::Byte(v)		=> v.len(),
@@ -340,12 +312,10 @@ impl Value {
         }
     }
 
-    /// Returns true when the value holds no elements.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// Returns the string payload of an ASCII value.
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Self::Ascii(s)	=> Some(s.as_str()),
@@ -353,7 +323,7 @@ impl Value {
         }
     }
 
-    /// Returns the first element widened to an unsigned integer, where that is meaningful.
+    /// Returns the first element only, where the type widens.
     pub fn as_u32(&self) -> Option<u32> {
         match self {
             Self::Byte(v)		=> v.first().map(|n| *n as u32),
@@ -366,7 +336,7 @@ impl Value {
         }
     }
 
-    /// Returns the first element as a float, where that is meaningful.
+    /// Returns the first element only, where the type converts.
     pub fn as_f64(&self) -> Option<f64> {
         match self {
             Self::Byte(v)		=> v.first().map(|n| *n as f64),
@@ -383,7 +353,7 @@ impl Value {
         }
     }
 
-    /// Returns every element as a float, where that is meaningful.
+    /// Returns every element, where the type converts.
     pub fn as_f64_vec(&self) -> Option<Vec<f64>> {
         match self {
             Self::Byte(v)		=> Some(v.iter().map(|n| *n as f64).collect()),
@@ -401,26 +371,19 @@ impl Value {
     }
 }
 
-/// One IFD entry: a tag, its decoded value, and where it was found.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Field {
-    /// The tag identifier.
     pub tag: u16,
-    /// The IFD the entry belongs to.
     pub ifd: IfdKind,
-    /// The decoded payload.
     pub value: Value,
 }
 
-/// The parsed metadata block: a byte order and the fields of every IFD reached.
+/// The fields of every IFD reached, flattened into one list.
 #[derive(Clone, Debug)]
 pub struct Exif {
-    /// Byte order declared by the TIFF header.
-    pub order: ByteOrder,
-    /// Every field found, in the order the IFDs were walked.
-    pub fields: Vec<Field>,
-    /// Offset and length of the IFD1 thumbnail within the TIFF block, when present.
-    pub thumbnail: Option<(u32, u32)>,
+    pub order: ByteOrder,                   // as declared by the TIFF header
+    pub fields: Vec<Field>,                 // in the order the IFDs were walked
+    pub thumbnail: Option<(u32, u32)>,      // IFD1 offset and length within the TIFF block
 }
 
 impl Exif {
@@ -526,38 +489,31 @@ impl Exif {
         }
     }
 
-    /// Returns the first field carrying the given tag in the given IFD.
     pub fn field(&self, ifd: IfdKind, tag: u16) -> Option<&Field> {
         Self::find(&self.fields, ifd, tag)
     }
 
-    /// Returns the first field carrying the given tag in any IFD, searching in walk order.
+    /// Searches every IFD, in walk order.
     pub fn any_field(&self, tag: u16) -> Option<&Field> {
         self.fields.iter().find(|f| f.tag == tag)
     }
 
-    /// Returns every field belonging to the given IFD.
     pub fn ifd(&self, ifd: IfdKind) -> Vec<&Field> {
         self.fields.iter().filter(|f| f.ifd == ifd).collect()
     }
 
-    /// Derives the typed view a photo application needs from the raw fields.
     pub fn meta(&self) -> PhotoMeta {
         PhotoMeta::from_exif(self)
     }
 
-    /// Returns the sub-IFD offset held by the named pointer tag, when it is present and sane.
     fn pointer(fields: &[Field], ifd: IfdKind, tag: u16) -> Option<u32> {
         Self::find(fields, ifd, tag).and_then(|f| f.value.as_u32())
     }
 
-    /// Returns the first field carrying the given tag in the given IFD.
     fn find(fields: &[Field], ifd: IfdKind, tag: u16) -> Option<&Field> {
         fields.iter().find(|f| f.ifd == ifd && f.tag == tag)
     }
 
-    /// Locates the payload of the EXIF `APP1` segment within a JPEG byte stream.
-    ///
     /// Returns the bytes following the `Exif\0\0` signature, which begin the TIFF header.  A
     /// stream with no such segment yields `None`; a stream whose marker structure is broken
     /// yields an error naming the offset.
@@ -605,19 +561,13 @@ impl Exif {
     }
 }
 
-/// One JPEG marker segment: the marker byte, where it started, and its body.
 #[derive(Clone, Copy, Debug)]
 pub struct JpegSegment<'a> {
-    /// The marker byte following `FF`.
-    pub marker: u8,
-    /// Offset of the `FF` that introduced the marker.
-    pub offset: usize,
-    /// The segment body, excluding the two byte length field itself.
-    pub body: &'a [u8],
+    pub marker: u8,         // the byte following FF
+    pub offset: usize,      // of the FF that introduced the marker
+    pub body: &'a [u8],     // excludes the two byte length field itself
 }
 
-/// An iterator over the marker segments of a JPEG byte stream.
-///
 /// Iteration stops after the start of scan marker, since entropy coded data follows it and
 /// cannot be walked as segments.
 pub struct JpegSegments<'a> {
@@ -628,7 +578,7 @@ pub struct JpegSegments<'a> {
 
 impl<'a> JpegSegments<'a> {
 
-    /// Starts an iteration, verifying the start of image marker.
+    /// Verifies the start of image marker before anything is yielded.
     pub fn new(dat: &'a [u8]) -> Outcome<Self> {
         if dat.len() < 2 {
             return Err(err!(
@@ -729,7 +679,7 @@ struct Reader<'a> {
 
 impl<'a> Reader<'a> {
 
-    /// Reads two bytes at an absolute offset within the TIFF block.
+    /// The offset is absolute within the TIFF block.
     fn u16_at(&self, off: usize, what: &str) -> Outcome<u16> {
         if off + 2 > self.dat.len() {
             return Err(err!(
@@ -740,7 +690,7 @@ impl<'a> Reader<'a> {
         Ok(self.order.u16([self.dat[off], self.dat[off + 1]]))
     }
 
-    /// Reads four bytes at an absolute offset within the TIFF block.
+    /// The offset is absolute within the TIFF block.
     fn u32_at(&self, off: usize, what: &str) -> Outcome<u32> {
         if off + 4 > self.dat.len() {
             return Err(err!(
@@ -776,7 +726,7 @@ impl<'a> Reader<'a> {
         Ok(())
     }
 
-    /// Reads one IFD at the given offset, appending its fields and returning the next pointer.
+    /// Appends the IFD's fields and returns the pointer to the next in the chain.
     fn read_ifd(
         &mut self,
         off:    u32,
@@ -869,7 +819,6 @@ impl<'a> Reader<'a> {
         Ok(Field { tag, ifd: kind, value })
     }
 
-    /// Turns a located payload into a typed value.
     #[allow(clippy::too_many_arguments)]
     fn decode(
         &self,
@@ -952,7 +901,6 @@ impl<'a> Reader<'a> {
         })
     }
 
-    /// Decodes a run of four byte unsigned integers.
     fn u32s(o: ByteOrder, body: &[u8], count: usize) -> Outcome<Vec<u32>> {
         let mut v = Vec::with_capacity(count);
         for i in 0..count {
@@ -962,7 +910,7 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// Returns the byte width of a TIFF field type, or `None` when the type is unknown.
+/// `None` for a type this module does not know, whose payload cannot then be located.
 pub fn type_size(typ: u16) -> Option<usize> {
     Some(match typ {
         1	=> 1,	// BYTE
@@ -989,53 +937,31 @@ pub fn type_size(typ: u16) -> Option<usize> {
 /// seconds rather than the recorded ratio.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PhotoMeta {
-    /// `DateTimeOriginal`, the moment the shutter opened, as `YYYY:MM:DD HH:MM:SS`.
-    pub datetime_original: Option<String>,
-    /// `CreateDate`, the moment the image was digitised.
-    pub create_date: Option<String>,
-    /// `ModifyDate` from IFD0, the moment the file was last written.
-    pub modify_date: Option<String>,
-    /// Fractional seconds belonging to `datetime_original`.
-    pub subsec_time_original: Option<String>,
-    /// Fractional seconds belonging to `create_date`.
-    pub subsec_time_digitized: Option<String>,
-    /// UTC offset belonging to `datetime_original`, such as `+10:00`.
-    pub offset_time_original: Option<String>,
-    /// Camera manufacturer.
-    pub make: Option<String>,
-    /// Camera model.
+    pub datetime_original: Option<String>,     // DateTimeOriginal, as YYYY:MM:DD HH:MM:SS
+    pub create_date: Option<String>,           // CreateDate, when the image was digitised
+    pub modify_date: Option<String>,           // ModifyDate from IFD0, the file's last write
+    pub subsec_time_original: Option<String>,  // fractional seconds of datetime_original
+    pub subsec_time_digitized: Option<String>, // fractional seconds of create_date
+    pub offset_time_original: Option<String>,  // UTC offset of datetime_original, such as +10:00
+    pub make: Option<String>,                  // camera manufacturer
     pub model: Option<String>,
-    /// Lens model.
     pub lens_model: Option<String>,
-    /// Orientation code, 1 to 8.
-    pub orientation: Option<u16>,
-    /// Image width in pixels.
-    pub width: Option<u32>,
-    /// Image height in pixels.
-    pub height: Option<u32>,
-    /// Latitude in signed decimal degrees, north positive.
-    pub gps_latitude: Option<f64>,
-    /// Longitude in signed decimal degrees, east positive.
-    pub gps_longitude: Option<f64>,
-    /// Altitude in metres, below sea level negative.
-    pub gps_altitude: Option<f64>,
-    /// UTC date of the GPS fix, as `YYYY:MM:DD`.
-    pub gps_datestamp: Option<String>,
-    /// Lens aperture as an f-number.
+    pub orientation: Option<u16>,              // 1 to 8
+    pub width: Option<u32>,                    // pixels
+    pub height: Option<u32>,                   // pixels
+    pub gps_latitude: Option<f64>,             // north positive
+    pub gps_longitude: Option<f64>,            // east positive
+    pub gps_altitude: Option<f64>,             // below sea level negative
+    pub gps_datestamp: Option<String>,         // UTC date of the fix, as YYYY:MM:DD
     pub f_number: Option<f64>,
-    /// Exposure time in seconds.
     pub exposure_time: Option<f64>,
-    /// Sensitivity as an ISO arithmetic speed.
-    pub iso: Option<u32>,
-    /// Focal length in millimetres.
-    pub focal_length: Option<f64>,
-    /// Focal length expressed for a 35 mm film frame, in millimetres.
-    pub focal_length_35mm: Option<u32>,
+    pub iso: Option<u32>,                      // arithmetic speed
+    pub focal_length: Option<f64>,             // millimetres
+    pub focal_length_35mm: Option<u32>,        // millimetres, for a 35 mm film frame
 }
 
 impl PhotoMeta {
 
-    /// Derives the typed view from parsed fields.
     pub fn from_exif(exif: &Exif) -> Self {
         let mut m = Self::default();
 
@@ -1098,7 +1024,7 @@ impl PhotoMeta {
         m
     }
 
-    /// Reads a non-empty ASCII field.
+    /// Trims, and treats an empty string as absent.
     fn text(exif: &Exif, ifd: IfdKind, tag: u16) -> Option<String> {
         exif.field(ifd, tag)
             .and_then(|f| f.value.as_str())
@@ -1106,7 +1032,6 @@ impl PhotoMeta {
             .filter(|s| !s.is_empty())
     }
 
-    /// Reads a numeric field as a float.
     fn number(exif: &Exif, ifd: IfdKind, tag: u16) -> Option<f64> {
         exif.field(ifd, tag).and_then(|f| f.value.as_f64())
     }

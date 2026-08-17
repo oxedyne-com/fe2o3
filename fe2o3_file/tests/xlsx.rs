@@ -1,3 +1,6 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use oxedyne_fe2o3_file::office::sheet::{
 	Book,
 	Cell,
@@ -14,18 +17,17 @@ use oxedyne_fe2o3_core::{
 	test::test_it,
 };
 
-/// A `.xlsx` LibreOffice wrote, holding one of everything that separates this format from a table:
-/// shared strings, a formula with the value the last calculation left beside it, a date stored as a
-/// serial under a CUSTOM number format, a boolean, an entirely absent row, and a row whose cells skip
-/// two columns.
-///
-/// Its content is ours -- LibreOffice was handed a spreadsheet this crate wrote and asked to save its
-/// own -- so the intent is known and every byte of the encoding is somebody else's. Reading back our
-/// own output would prove that the writer and the reader share their assumptions, which is precisely
-/// the thing worth doubting in a format this convention-bound.
+// A `.xlsx` LibreOffice wrote, holding one of everything that separates this format from a table:
+// shared strings, a formula with the value the last calculation left beside it, a date stored as a
+// serial under a CUSTOM number format, a boolean, an entirely absent row, and a row whose cells skip
+// two columns.
+//
+// Its content is ours -- LibreOffice was handed a spreadsheet this crate wrote and asked to save its
+// own -- so the intent is known and every byte of the encoding is somebody else's. Reading back our
+// own output would prove that the writer and the reader share their assumptions, which is precisely
+// the thing worth doubting in a format this convention-bound.
 const FOREIGN: &[u8] = include_bytes!("data/foreign.xlsx");
 
-/// The workbook the writer is tested with.
 fn book() -> Book {
 	let mut s = Sheet::new("Sales");
 	s.rows.push(vec![Cell::text("Region"), Cell::text("Units"), Cell::text("Total")]);

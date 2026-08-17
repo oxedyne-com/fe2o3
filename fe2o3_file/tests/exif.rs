@@ -1,3 +1,6 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use oxedyne_fe2o3_file::exif::{
     ByteOrder,
     Exif,
@@ -19,7 +22,6 @@ use std::{
 };
 
 
-/// Writes a two byte integer in the given order.
 fn u16b(o: ByteOrder, v: u16) -> [u8; 2] {
     match o {
         ByteOrder::Little	=> v.to_le_bytes(),
@@ -27,7 +29,6 @@ fn u16b(o: ByteOrder, v: u16) -> [u8; 2] {
     }
 }
 
-/// Writes a four byte integer in the given order.
 fn u32b(o: ByteOrder, v: u32) -> [u8; 4] {
     match o {
         ByteOrder::Little	=> v.to_le_bytes(),
@@ -35,7 +36,7 @@ fn u32b(o: ByteOrder, v: u32) -> [u8; 4] {
     }
 }
 
-/// Writes a run of unsigned ratios in the given order.
+/// A run of unsigned ratios, in the given order.
 fn rats(o: ByteOrder, pairs: &[(u32, u32)]) -> Vec<u8> {
     let mut v = Vec::new();
     for (n, d) in pairs {
@@ -55,7 +56,7 @@ struct Entry {
 
 impl Entry {
 
-    /// An ASCII entry, NUL terminated as the standard requires.
+    /// NUL terminated, as the standard requires.
     fn ascii(tag: u16, s: &str) -> Self {
         let mut dat = s.as_bytes().to_vec();
         dat.push(0);
@@ -63,38 +64,33 @@ impl Entry {
         Self { tag, typ: 2, count, dat }
     }
 
-    /// A single unsigned two byte integer.
     fn short(o: ByteOrder, tag: u16, v: u16) -> Self {
         Self { tag, typ: 3, count: 1, dat: u16b(o, v).to_vec() }
     }
 
-    /// A single unsigned four byte integer.
     fn long(o: ByteOrder, tag: u16, v: u32) -> Self {
         Self { tag, typ: 4, count: 1, dat: u32b(o, v).to_vec() }
     }
 
-    /// A single unsigned byte.
     fn byte(tag: u16, v: u8) -> Self {
         Self { tag, typ: 1, count: 1, dat: vec![v] }
     }
 
-    /// A run of unsigned ratios.
     fn rational(o: ByteOrder, tag: u16, pairs: &[(u32, u32)]) -> Self {
         Self { tag, typ: 5, count: pairs.len() as u32, dat: rats(o, pairs) }
     }
 
-    /// An entry with a type code this library does not recognise.
+    /// A type code this library does not recognise.
     fn odd_type(tag: u16, typ: u16, count: u32, raw: [u8; 4]) -> Self {
         Self { tag, typ, count, dat: raw.to_vec() }
     }
 }
 
-/// Length in bytes of an IFD holding `n` entries.
 fn ifd_len(n: usize) -> usize {
     2 + 12 * n + 4
 }
 
-/// Serialises one IFD at `off`, appending oversized payloads to `heap` which begins at `hoff`.
+/// Oversized payloads are appended to `heap`, which begins at `hoff`.
 fn write_ifd(
     o:      ByteOrder,
     ents:   &[Entry],
@@ -203,7 +199,7 @@ fn build_fixture(o: ByteOrder) -> Vec<u8> {
     out
 }
 
-/// Asserts that two floats agree to within a tolerance, naming the field on failure.
+/// Names the field on failure.
 fn near(what: &str, got: Option<f64>, want: f64, tol: f64) -> Outcome<()> {
     match got {
         Some(g) if (g - want).abs() <= tol => Ok(()),
@@ -216,7 +212,6 @@ fn near(what: &str, got: Option<f64>, want: f64, tol: f64) -> Outcome<()> {
     }
 }
 
-/// Asserts the typed view derived from the synthetic fixture.
 fn check_fixture_meta(m: &PhotoMeta) -> Outcome<()> {
     req!(m.make.as_deref(), Some("Oxide Optics"));
     req!(m.model.as_deref(), Some("Model 7 Field"));
@@ -241,7 +236,6 @@ fn check_fixture_meta(m: &PhotoMeta) -> Outcome<()> {
     Ok(())
 }
 
-/// Returns the path of a committed image fixture.
 fn fixture_path(name: &str) -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.push("test_images");

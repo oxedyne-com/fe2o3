@@ -36,6 +36,9 @@
 //! An insertion's text is in the document, so it is read. A deletion's text is not, so it is not.
 //! That is display, and display only -- nothing here authors `w:ins` or `w:del`, because getting
 //! those subtly wrong corrupts a legal review and the person who finds out is a lawyer.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::office::opc::{
 	REL_DOC,
@@ -60,10 +63,9 @@ use oxedyne_fe2o3_text::xml::{
 
 use std::collections::BTreeMap;
 
-/// The most a single part is inflated to.
-///
-/// A `word/document.xml` is XML, which compresses about ten to one, so a part this size came from an
-/// archive member of tens of megabytes. Well past any document and well short of trouble.
+// The most a single part is inflated to. A `word/document.xml` is XML, which compresses about ten to
+// one, so a part this size came from an archive member of tens of megabytes. Well past any document
+// and well short of trouble.
 pub const MAX_PART: u64 = 64 * 1024 * 1024;
 
 /// The leading bytes of an OLE compound file, which is what an encrypted Office document is.
@@ -75,24 +77,15 @@ const OLE_MAGIC: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
 /// nothing and "3 text boxes and 1 chart" tells them whether to go and open the file properly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Undrawable {
-	/// A picture.
 	Image,
-	/// A chart, which is data plus a drawing of it and is not re-rendered here.
-	Chart,
-	/// A SmartArt or other diagram.
-	Diagram,
-	/// A text box, whose words are prose sitting outside the flow of the document.
-	TextBox,
-	/// An embedded object: a spreadsheet, a slide, another program's document.
-	Object,
-	/// An equation.
+	Chart,	// data plus a drawing of it, not re-rendered here
+	Diagram,	// SmartArt or another diagram
+	TextBox,	// prose sitting outside the flow of the document
+	Object,	// a spreadsheet, a slide, another program's document
 	Equation,
-	/// A footnote, whose text is in another part.
-	Footnote,
-	/// An endnote.
+	Footnote,	// whose text is in another part
 	Endnote,
-	/// A comment, whose text is in another part.
-	Comment,
+	Comment,	// whose text is in another part
 }
 
 impl Undrawable {
@@ -123,17 +116,13 @@ impl Undrawable {
 /// A document read for reading: the prose, and an honest account of what is missing from it.
 #[derive(Clone, Debug, Default)]
 pub struct Reading {
-	/// The prose.
 	pub doc:	Doc,
-	/// What could not be drawn, by kind and count, in a fixed order.
-	pub undrawn:	Vec<(Undrawable, usize)>,
-	/// Whether the file carries a macro project.
-	///
-	/// Said, never run. A `.docm` is a `.docx` with `word/vbaProject.bin` in it, and a reader who is
-	/// not told is a reader who does not know what they have been sent.
+	pub undrawn:	Vec<(Undrawable, usize)>,	// by kind and count, in a fixed order
+	// Said, never run. A `.docm` is a `.docx` with `word/vbaProject.bin` in it, and a reader who is
+	// not told is a reader who does not know what they have been sent.
 	pub macros:	bool,
-	/// How many insertions were read as part of the text, which is what tracked changes look like
-	/// when they are displayed as accepted.
+	// Insertions read as part of the text, which is what tracked changes look like when they are
+	// displayed as accepted.
 	pub tracked:	usize,
 }
 
@@ -156,7 +145,6 @@ impl Reading {
 	}
 }
 
-/// Reads a `.docx` into the document tree.
 pub fn read(bytes: &[u8]) -> Outcome<Reading> {
 	if bytes.len() >= OLE_MAGIC.len() && bytes[..OLE_MAGIC.len()] == OLE_MAGIC {
 		return Err(err!(
@@ -207,17 +195,12 @@ pub fn read(bytes: &[u8]) -> Outcome<Reading> {
 /// What one style says about the paragraphs that wear it.
 #[derive(Clone, Debug, Default)]
 struct Style {
-	/// The built-in name, lowered: `heading 1`, `quote`.
-	name:	String,
-	/// The outline level the style itself sets, where it sets one.
-	outline:	Option<u8>,
-	/// Whether the style sets a monospaced face, which the tree carries as a code span.
-	///
-	/// A writer that marks code with a CHARACTER STYLE rather than a font -- which is the tidier way
-	/// to write one, and what this crate's own writer does -- says nothing about the face on the run
-	/// itself. A reader that looked only at the run would read every code span as ordinary prose.
+	name:	String,	// the built-in name, lowered: `heading 1`, `quote`
+	outline:	Option<u8>,	// the outline level the style itself sets
+	// A writer that marks code with a CHARACTER STYLE rather than a font -- which is the tidier way
+	// to write one, and what this crate's own writer does -- says nothing about the face on the run
+	// itself. A reader that looked only at the run would read every code span as ordinary prose.
 	mono:	bool,
-	/// The style this one is based on.
 	based_on:	Option<String>,
 }
 
@@ -226,27 +209,18 @@ type Lists = BTreeMap<String, BTreeMap<usize, bool>>;
 
 /// The state of one document being read.
 struct Read<'a> {
-	/// The document part.
-	xml:	&'a Xml,
-	/// Style id to what the style says.
-	styles:	&'a BTreeMap<String, Style>,
-	/// Numbering id to level to whether that level is ordered.
-	lists:	&'a Lists,
-	/// Relationship id to its type and target.
-	rels:	&'a BTreeMap<String, (String, String)>,
-	/// What could not be drawn.
+	xml:	&'a Xml,	// the document part
+	styles:	&'a BTreeMap<String, Style>,	// style id to what the style says
+	lists:	&'a Lists,	// numbering id to level to whether that level is ordered
+	rels:	&'a BTreeMap<String, (String, String)>,	// relationship id to its type and target
 	undrawn:	BTreeMap<Undrawable, usize>,
-	/// How many insertions were read.
-	tracked:	usize,
+	tracked:	usize,	// how many insertions were read
 }
 
 /// One paragraph that belongs to a list, on its way to being nested.
 struct Item {
-	/// How deep it sits.
-	lvl:	usize,
-	/// Whether its level is numbered rather than bulleted.
-	ordered:	bool,
-	/// What the item holds.
+	lvl:	usize,	// how deep it sits
+	ordered:	bool,	// numbered rather than bulleted
 	blocks:	Vec<Block>,
 }
 
@@ -292,7 +266,6 @@ impl<'a> Read<'a> {
 		out
 	}
 
-	/// The numbering a paragraph belongs to, where it belongs to one.
 	fn list_of(&self, p: &Elem) -> Option<(usize, bool)> {
 		let num = p.find(&["w:pPr", "w:numPr"])?;
 		let id = num.child("w:numId")?.attr("w:val")?;
@@ -314,7 +287,7 @@ impl<'a> Read<'a> {
 		Some((lvl, ordered))
 	}
 
-	/// Reads a paragraph into the blocks it makes. A list item is never a heading and never a rule.
+	/// A list item is never a heading and never a rule.
 	fn para(&mut self, p: &Elem, in_list: bool) -> Vec<Block> {
 		let style = p.find(&["w:pPr", "w:pStyle"]).and_then(|e| e.attr("w:val")).unwrap_or("");
 		let mut content = Vec::new();
@@ -342,8 +315,6 @@ impl<'a> Read<'a> {
 		vec![Block::Para(content)]
 	}
 
-	/// The heading level a paragraph carries, where it carries one.
-	///
 	/// The outline level a paragraph sets itself wins, then the one its style sets, then the style's
 	/// built-in name. Asking the id would be asking Word's spelling of a question the document
 	/// answers for itself.
@@ -456,7 +427,6 @@ impl<'a> Read<'a> {
 		}
 	}
 
-	/// Reads one run.
 	fn run(&mut self, r: &Elem, out: &mut Vec<Inline>, fmt: Fmt) {
 		let fmt = match r.child("w:rPr") {
 			Some(pr)	=> Fmt {
@@ -541,7 +511,6 @@ impl<'a> Read<'a> {
 		self.count(kind);
 	}
 
-	/// Counts one thing that is not drawn.
 	fn count(&mut self, what: Undrawable) {
 		*self.undrawn.entry(what).or_insert(0) += 1;
 	}
@@ -556,7 +525,6 @@ impl<'a> Read<'a> {
 		link.attr("w:anchor").map(|a| fmt!("#{}", a))
 	}
 
-	/// Reads a table.
 	fn table(&mut self, tbl: &Elem) -> Option<Block> {
 		let mut rows = Vec::new();
 		let mut head = None;
@@ -616,12 +584,9 @@ impl<'a> Read<'a> {
 /// What a style makes of a paragraph, beyond a heading.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Kind {
-	/// Nothing in particular.
 	Plain,
-	/// A quotation.
 	Quote,
-	/// A listing.
-	Code,
+	Code,	// a listing
 }
 
 impl Kind {
@@ -645,12 +610,9 @@ impl Kind {
 /// How a run of text is marked.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Fmt {
-	/// Bold.
 	bold:	bool,
-	/// Italic.
 	italic:	bool,
-	/// Monospaced, which the tree carries as a code span.
-	code:	bool,
+	code:	bool,	// monospaced, which the tree carries as a code span
 }
 
 /// Whether a toggle property is on.
@@ -702,7 +664,6 @@ fn holds_local(at: &Elem, local: &str) -> bool {
 	at.elems().any(|k| holds_local(k, local))
 }
 
-/// Adds text to a run of inlines, wrapped in whatever marks it.
 fn push_text(out: &mut Vec<Inline>, text: &str, fmt: Fmt) {
 	if text.is_empty() {
 		return;
@@ -801,7 +762,6 @@ fn nest(items: &[Item], depth: usize) -> Vec<Block> {
 	out
 }
 
-/// One part of the package, as the text it is.
 fn part_text(zip: &Zip, name: &str) -> Outcome<String> {
 	let bytes = res!(zip.content_capped(name, MAX_PART));
 	Ok(res!(String::from_utf8(bytes), Decode, String))

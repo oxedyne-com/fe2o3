@@ -1,3 +1,6 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use oxedyne_fe2o3_file::office::deck::{
 	Deck,
 	Slide,
@@ -13,15 +16,15 @@ use oxedyne_fe2o3_text::doc::{
 	text_of,
 };
 
-/// A `.pptx` LibreOffice wrote: it was handed a deck this crate made and asked to save its own, so
-/// the content is known and every byte of the encoding -- and of the skeleton, which is where all the
-/// risk lives -- is somebody else's.
-///
-/// Its slide relationship ids run `rId3`, `rId4`, `rId5`, which is the case that catches a reader
-/// assuming the first relationship is the first slide.
+// A `.pptx` LibreOffice wrote: it was handed a deck this crate made and asked to save its own, so
+// the content is known and every byte of the encoding -- and of the skeleton, which is where all the
+// risk lives -- is somebody else's.
+//
+// Its slide relationship ids run `rId3`, `rId4`, `rId5`, which is the case that catches a reader
+// assuming the first relationship is the first slide.
 const FOREIGN: &[u8] = include_bytes!("data/foreign.pptx");
 
-/// Prose with three headings, nested bullets and a listing.
+// Prose with three headings, nested bullets and a listing.
 const SOURCE: &str = "\
 # Quarterly Review
 
@@ -45,7 +48,7 @@ fn main() {}
 A final line.
 ";
 
-/// The parts a `.pptx` cannot open without: the chain a slide hangs from.
+// The parts a `.pptx` cannot open without: the chain a slide hangs from.
 const REQUIRED: [&str; 7] = [
 	"[Content_Types].xml",
 	"_rels/.rels",

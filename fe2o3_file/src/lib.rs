@@ -31,7 +31,7 @@
 //! tree in `fe2o3_text::doc`, where they would read more naturally, because they cannot: `fe2o3_jdat`
 //! depends on `fe2o3_text`, so `fe2o3_text` can never depend on anything that depends on `fe2o3_jdat`,
 //! and the archive does. This crate is on the other side of that line and can use both.
-//!
+
 pub mod exif;
 pub mod glob;
 pub mod office;

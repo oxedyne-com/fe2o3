@@ -8,6 +8,9 @@
 //! the start of whatever follows it, so anything the archive holds between members -- padding, an
 //! alignment gap, a data descriptor written in either of its two shapes -- travels with the member
 //! before it and survives the round trip without this having to understand it.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::zip::{
 	Body,
@@ -151,27 +154,17 @@ impl Zip {
 
 /// One central directory entry, as read.
 struct Raw {
-	/// The member's name.
 	name:	String,
-	/// The general purpose bit flag.
-	flags:	u16,
-	/// The compression method's code.
-	method:	u16,
-	/// The CRC-32 of the uncompressed content.
-	crc:	u32,
-	/// The compressed size.
-	csize:	u64,
-	/// The uncompressed size.
-	size:	u64,
-	/// Where the member's local header sits.
-	at:	u64,
-	/// Where this entry begins in the directory.
-	cen_at:	usize,
-	/// Where this entry ends.
-	cen_end:	usize,
+	flags:	u16,		// general purpose bit flag
+	method:	u16,		// the compression method's code
+	crc:	u32,		// of the uncompressed content
+	csize:	u64,		// compressed
+	size:	u64,		// uncompressed
+	at:	u64,		// where the member's local header sits
+	cen_at:	usize,		// where this entry begins in the directory
+	cen_end:	usize,	// where it ends
 }
 
-/// Reads one central directory entry.
 fn read_cen(src: &[u8], i: usize) -> Outcome<Raw> {
 	let flags	= res!(u16le(src, i + 8));
 	let method	= res!(u16le(src, i + 10));
@@ -225,7 +218,6 @@ fn read_cen(src: &[u8], i: usize) -> Outcome<Raw> {
 	})
 }
 
-/// The body of an extra field of the given id, where the run of extra fields holds one.
 fn find_extra(extra: &[u8], id: u16) -> Option<&[u8]> {
 	let mut i = 0;
 	while i + 4 <= extra.len() {
@@ -244,9 +236,7 @@ fn find_extra(extra: &[u8], id: u16) -> Option<&[u8]> {
 	None
 }
 
-/// Where the end of central directory record sits.
-///
-/// It is found by searching backwards, because the record is last and carries a comment of unknown
+/// Found by searching backwards, because the record is last and carries a comment of unknown
 /// length after it. The search is bounded by the largest comment the format allows, so a large file
 /// that is not an archive is refused after reading its tail rather than after reading all of it.
 fn find_eocd(src: &[u8]) -> Outcome<usize> {

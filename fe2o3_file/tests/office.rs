@@ -1,3 +1,6 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use oxedyne_fe2o3_file::office::docx;
 use oxedyne_fe2o3_file::office::docx::read::Undrawable;
 use oxedyne_fe2o3_file::office::opc::{
@@ -17,8 +20,8 @@ use oxedyne_fe2o3_text::doc::{
 };
 use oxedyne_fe2o3_text::xml::Xml;
 
-/// Prose exercising every block the tree has, so a created document is checked against something with
-/// more in it than paragraphs.
+// Prose exercising every block the tree has, so a created document is checked against something with
+// more in it than paragraphs.
 const SOURCE: &str = "\
 # A Report On Something
 
@@ -48,21 +51,21 @@ fn main() {}
 A closing paragraph.
 ";
 
-/// A `.docx` LibreOffice wrote from an HTML document with known content: two heading levels, a
-/// bulleted list, a numbered list, a quotation, a table with a bold first row, a link, and bold and
-/// italic runs.
-///
-/// The intent is ours and the bytes are somebody else's, which is the only useful shape for a reader
-/// test. It has already earned its place: LibreOffice gives its heading 1 style NO outline level and
-/// calls its quotation style `BlockQuotation`, and a reader written against Word's spellings alone
-/// gets both wrong.
+// A `.docx` LibreOffice wrote from an HTML document with known content: two heading levels, a
+// bulleted list, a numbered list, a quotation, a table with a bold first row, a link, and bold and
+// italic runs.
+//
+// The intent is ours and the bytes are somebody else's, which is the only useful shape for a reader
+// test. It has already earned its place: LibreOffice gives its heading 1 style NO outline level and
+// calls its quotation style `BlockQuotation`, and a reader written against Word's spellings alone
+// gets both wrong.
 const RICH: &[u8] = include_bytes!("data/rich.docx");
 
-/// A `.docx` LibreOffice wrote holding a picture, which is the one thing in this fixture set that a
-/// reading view genuinely cannot draw. The band that says so is the whole point of it.
+// A `.docx` LibreOffice wrote holding a picture, which is the one thing in this fixture set that a
+// reading view genuinely cannot draw. The band that says so is the whole point of it.
 const WITHPIC: &[u8] = include_bytes!("data/withpic.docx");
 
-/// The parts a `.docx` cannot open without.
+// The parts a `.docx` cannot open without.
 const REQUIRED: [&str; 4] = [
 	"[Content_Types].xml",
 	"_rels/.rels",
@@ -70,7 +73,7 @@ const REQUIRED: [&str; 4] = [
 	"word/_rels/document.xml.rels",
 ];
 
-/// Builds the document under test, and its archive.
+/// The document under test, and its archive.
 fn made() -> Outcome<(Vec<u8>, Zip)> {
 	let doc = res!(markdown::parse(SOURCE));
 	let (bytes, left) = res!(docx::write(&doc));

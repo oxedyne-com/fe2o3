@@ -21,6 +21,9 @@
 //! [`Ref`] and [`Range`] are the `A1` and `A1:D20` a person types, parsed and printed. They are
 //! zero-based inside and one-based on the page, because a spreadsheet counts rows from one and
 //! nothing is served by pretending otherwise at the boundary.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_text::doc::{
@@ -28,10 +31,8 @@ use oxedyne_fe2o3_text::doc::{
 	Doc,
 };
 
-/// The largest column a sheet may have: `XFD`, which is Excel's own limit of 16,384.
-pub const MAX_COL: u32 = 16_384;
-
-/// The largest row a sheet may have, which is Excel's own limit.
+//// The largest a sheet may be, which is Excel's own limit.
+pub const MAX_COL: u32 = 16_384;	// column XFD
 pub const MAX_ROW: u32 = 1_048_576;
 
 /// What one cell holds.
@@ -40,23 +41,17 @@ pub const MAX_ROW: u32 = 1_048_576;
 /// the formats is the spelling.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum Value {
-	/// Nothing at all. A cell that was never filled in, and a cell somebody emptied.
 	#[default]
-	Empty,
-	/// Text.
+	Empty,	// never filled in, or emptied
 	Text(String),
-	/// A number.
 	Number(f64),
-	/// A date or a time, as the text it was rendered to.
-	///
-	/// Held as text rather than as a number with a format beside it, because the number alone is
-	/// meaningless -- `45678` is a date only if something says so -- and the format alone cannot be
-	/// applied without a calendar. The conversion happens once, where the format is known.
+	// A date or a time, as the text it was rendered to. Held as text rather than as a number with a
+	// format beside it, because the number alone is meaningless -- `45678` is a date only if
+	// something says so -- and the format alone cannot be applied without a calendar. The conversion
+	// happens once, where the format is known.
 	Date(String),
-	/// A truth value.
 	Bool(bool),
-	/// What the last calculation left where it could not produce a value: `#DIV/0!`, `#N/A`.
-	Error(String),
+	Error(String),	// what a calculation left where it could not produce a value: `#DIV/0!`, `#N/A`
 }
 
 impl Value {
@@ -79,7 +74,6 @@ impl Value {
 		}
 	}
 
-	/// Whether the cell holds nothing.
 	pub fn is_empty(&self) -> bool {
 		matches!(self, Self::Empty)
 	}
@@ -112,34 +106,28 @@ fn show_number(n: f64) -> String {
 	}
 }
 
-/// One cell: what it holds, and the formula that produced it where there is one.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Cell {
-	/// The value the file holds. For a formula cell this is what the last calculation left, and is
-	/// never recomputed. See the module's own note.
+	// For a formula cell this is what the last calculation left, and is never recomputed. See the
+	// module's own note.
 	pub value:	Value,
-	/// The formula, without its leading `=`, where the cell carries one.
-	pub formula:	Option<String>,
+	pub formula:	Option<String>,	// without its leading `=`
 }
 
 impl Cell {
 
-	/// A cell holding nothing.
 	pub fn empty() -> Self {
 		Self::default()
 	}
 
-	/// A cell holding text.
 	pub fn text(s: impl Into<String>) -> Self {
 		Self { value: Value::Text(s.into()), formula: None }
 	}
 
-	/// A cell holding a number.
 	pub fn number(n: f64) -> Self {
 		Self { value: Value::Number(n), formula: None }
 	}
 
-	/// A cell holding a truth value.
 	pub fn bool(b: bool) -> Self {
 		Self { value: Value::Bool(b), formula: None }
 	}
@@ -155,19 +143,16 @@ impl Cell {
 	}
 }
 
-/// One sheet of a workbook.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Sheet {
-	/// The name on the tab.
-	pub name:	String,
-	/// The rows, from row 1, each a run of cells from column A. Short rows are short; a reader fills
-	/// nothing in, because a sheet of a million empty cells is a sheet nobody can hold.
+	pub name:	String,	// the name on the tab
+	// From row 1, each a run of cells from column A. Short rows are short; a reader fills nothing in,
+	// because a sheet of a million empty cells is a sheet nobody can hold.
 	pub rows:	Vec<Vec<Cell>>,
 }
 
 impl Sheet {
 
-	/// A sheet with a name and nothing in it.
 	pub fn new(name: impl Into<String>) -> Self {
 		Self { name: name.into(), rows: Vec::new() }
 	}
@@ -185,7 +170,6 @@ impl Sheet {
 		(self.rows.len(), self.rows.iter().map(|r| r.len()).max().unwrap_or(0))
 	}
 
-	/// The rectangle the sheet actually occupies, or nothing where it is empty.
 	pub fn extent(&self) -> Option<Range> {
 		let (rows, cols) = self.size();
 		if rows == 0 || cols == 0 {
@@ -214,13 +198,11 @@ impl Sheet {
 /// A workbook: the sheets it holds, in tab order.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Book {
-	/// The sheets, in the order their tabs appear.
 	pub sheets:	Vec<Sheet>,
 }
 
 impl Book {
 
-	/// A workbook with nothing in it.
 	pub fn new() -> Self {
 		Self::default()
 	}
@@ -235,7 +217,6 @@ impl Book {
 			.or_else(|| self.sheets.iter().find(|s| s.name.eq_ignore_ascii_case(name)))
 	}
 
-	/// The names on the tabs, in order.
 	pub fn names(&self) -> Vec<&str> {
 		self.sheets.iter().map(|s| s.name.as_str()).collect()
 	}
@@ -244,10 +225,8 @@ impl Book {
 /// One cell's address: a column and a row, both counted from zero.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Ref {
-	/// The column, `A` being zero.
-	pub col:	u32,
-	/// The row, row 1 being zero.
-	pub row:	u32,
+	pub col:	u32,	// `A` being zero
+	pub row:	u32,	// row 1 being zero
 }
 
 impl Ref {
@@ -298,13 +277,10 @@ impl Ref {
 	}
 }
 
-/// A rectangle of cells.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Range {
-	/// The top left.
-	pub from:	Ref,
-	/// The bottom right, inclusive.
-	pub to:	Ref,
+	pub from:	Ref,	// the top left
+	pub to:	Ref,	// the bottom right, inclusive
 }
 
 impl Range {
@@ -314,7 +290,6 @@ impl Range {
 		fmt!("{}:{}", self.from.name(), self.to.name())
 	}
 
-	/// How many cells it covers.
 	pub fn cells(&self) -> u64 {
 		let w = (self.to.col as u64 + 1).saturating_sub(self.from.col as u64);
 		let h = (self.to.row as u64 + 1).saturating_sub(self.from.row as u64);

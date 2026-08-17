@@ -1,3 +1,6 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use oxedyne_fe2o3_file::office::deck::Deck;
 use oxedyne_fe2o3_file::office::odf;
 use oxedyne_fe2o3_file::office::sheet::{
@@ -23,15 +26,13 @@ use oxedyne_fe2o3_text::doc::{
 	text_of,
 };
 
-/// Three files LibreOffice wrote: it was handed each of ours and asked to save its own, so the
-/// content is known and every byte of the encoding is somebody else's.
-const ODT: &[u8] = include_bytes!("data/foreign.odt");
-/// The spreadsheet.
-const ODS: &[u8] = include_bytes!("data/foreign.ods");
-/// The presentation.
-const ODP: &[u8] = include_bytes!("data/foreign.odp");
+// Three files LibreOffice wrote: it was handed each of ours and asked to save its own, so the
+// content is known and every byte of the encoding is somebody else's.
+const ODT: &[u8] = include_bytes!("data/foreign.odt");	// the prose
+const ODS: &[u8] = include_bytes!("data/foreign.ods");	// the spreadsheet
+const ODP: &[u8] = include_bytes!("data/foreign.odp");	// the presentation
 
-/// Prose with one of everything.
+// Prose with one of everything.
 const SOURCE: &str = "\
 # A Report
 
@@ -54,7 +55,7 @@ fn main() {
 A closing paragraph.
 ";
 
-/// A workbook holding one of everything that separates a spreadsheet from a table.
+// A workbook holding one of everything that separates a spreadsheet from a table.
 fn book() -> Book {
 	let mut s = Sheet::new("Sales");
 	s.rows.push(vec![Cell::text("Region"), Cell::text("Units"), Cell::text("Total")]);

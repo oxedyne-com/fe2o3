@@ -1,3 +1,6 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use oxedyne_fe2o3_file::zip::{
 	Method,
 	Zip,
@@ -8,14 +11,14 @@ use oxedyne_fe2o3_core::{
 	test::test_it,
 };
 
-/// An archive written by Info-ZIP, holding a deflated member, a stored member and one in a
-/// subdirectory. It carries extra fields in both its local headers and its directory entries, which
-/// is the part a rebuilt archive loses and a copied one keeps.
+// An archive written by Info-ZIP, holding a deflated member, a stored member and one in a
+// subdirectory. It carries extra fields in both its local headers and its directory entries, which
+// is the part a rebuilt archive loses and a copied one keeps.
 const FOREIGN: &[u8] = include_bytes!("data/foreign.zip");
 
-/// A `.docx` written by LibreOffice: ten members, a foreign writer, and the shape every Office
-/// document has. Nothing here reads WordprocessingML; this is an archive from somebody else's
-/// implementation, which is the only kind worth testing a round trip against.
+// A `.docx` written by LibreOffice: ten members, a foreign writer, and the shape every Office
+// document has. Nothing here reads WordprocessingML; this is an archive from somebody else's
+// implementation, which is the only kind worth testing a round trip against.
 const DOCX: &[u8] = include_bytes!("data/loffice.docx");
 
 pub fn test_zip(filter: &'static str) -> Outcome<()> {

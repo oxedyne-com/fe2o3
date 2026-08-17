@@ -19,6 +19,9 @@
 //! searched. A phrase in a header therefore reports as absent rather than being quietly changed in one
 //! of two places -- and an absence that names the string is a caller's cue to look, where a partial
 //! replacement is a document that disagrees with itself.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::office::edit::{
 	Find,

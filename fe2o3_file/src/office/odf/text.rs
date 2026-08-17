@@ -7,6 +7,9 @@
 //! need `styles.xml` before it could tell a heading from a paragraph. This is the easier direction and
 //! it is worth saying why: OpenDocument put the meaning in the element and Microsoft put it in a
 //! style, and every consequence follows from that one choice.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::office::edit::{
 	Find,
@@ -49,29 +52,27 @@ use oxedyne_fe2o3_text::xml::write::{
 
 use std::collections::BTreeMap;
 
-/// The media type an `.odt` declares in its first member.
+// Declared in the package's first member, which is what names the file.
 pub const MEDIA: &str = "application/vnd.oasis.opendocument.text";
 
-/// The most a single part is inflated to. An `.odt` is one `content.xml`, so this is the whole
-/// document rather than a piece of it.
+// The most a single part is inflated to. An `.odt` is one `content.xml`, so this is the whole
+// document rather than a piece of it.
 pub const MAX_PART: u64 = 64 * 1024 * 1024;
 
 /// What a created document could not carry.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Left {
-	/// The images whose bytes could not be reached, by the source each was written with.
-	pub images:	Vec<String>,
+	pub images:	Vec<String>,	// those whose bytes could not be reached, by source
 }
 
 impl Left {
 
-	/// Whether everything in the tree reached the document.
+	/// Did everything in the tree reach the document?
 	pub fn is_empty(&self) -> bool {
 		self.images.is_empty()
 	}
 }
 
-/// Writes a document tree as the bytes of an `.odt`.
 pub fn write(doc: &Doc) -> Outcome<(Vec<u8>, Left)> {
 	let mut left = Left::default();
 	let mut out = Out::declared();
@@ -123,8 +124,6 @@ pub fn write(doc: &Doc) -> Outcome<(Vec<u8>, Left)> {
 	Ok((res!(zip.write()), left))
 }
 
-/// Writes a run of blocks.
-///
 /// The parameter is `run` and not `blocks`: a parameter of the same name as the function shadows it,
 /// and the recursive calls below then resolve to a slice rather than to this.
 fn blocks(out: &mut Out, run: &[Block], left: &mut Left) -> Outcome<()> {
@@ -176,7 +175,7 @@ fn blocks(out: &mut Out, run: &[Block], left: &mut Left) -> Outcome<()> {
 	Ok(())
 }
 
-/// Writes a list, nesting by putting a list inside an item.
+/// Nests by putting a list inside an item.
 fn list(
 	out:	&mut Out,
 	ordered:	bool,
@@ -210,7 +209,6 @@ fn list(
 	Ok(())
 }
 
-/// Writes a table.
 fn table(
 	out:	&mut Out,
 	head:	&Option<Row>,
@@ -238,7 +236,7 @@ fn table(
 	Ok(())
 }
 
-/// One row of a table, padded to the width of the widest.
+/// Padded to the width of the widest row.
 fn row_of(out: &mut Out, r: &Row, n: usize, left: &mut Left) -> Outcome<()> {
 	let empty = Cell::default();
 	out.open("table:table-row", &[]);
@@ -253,7 +251,6 @@ fn row_of(out: &mut Out, r: &Row, n: usize, left: &mut Left) -> Outcome<()> {
 	Ok(())
 }
 
-/// Writes a run of inline content.
 fn inlines(out: &mut Out, content: &[Inline], left: &mut Left) -> Outcome<()> {
 	for item in content {
 		match item {
@@ -341,15 +338,11 @@ fn text_run(out: &mut Out, text: &str) -> Outcome<()> {
 	Ok(())
 }
 
-/// A document read for reading.
 #[derive(Clone, Debug, Default)]
 pub struct Reading {
-	/// The prose.
 	pub doc:	Doc,
-	/// How many pictures the document holds, which this does not draw.
-	pub images:	usize,
-	/// Whether the file carries a macro project. Said, never run.
-	pub macros:	bool,
+	pub images:	usize,		// pictures held, which this does not draw
+	pub macros:	bool,		// a macro project is present; said, never run
 }
 
 /// What one style says about what wears it.
@@ -362,28 +355,22 @@ pub struct Reading {
 /// would have made had it trusted style ids.
 #[derive(Clone, Debug, Default)]
 struct Style {
-	/// Bold, where the style says so itself.
-	bold:	bool,
-	/// Italic.
+	bold:	bool,		// where the style says so itself
 	italic:	bool,
-	/// A monospaced face.
-	mono:	bool,
-	/// The style this one is based on, followed for the properties it does not set itself.
-	parent:	Option<String>,
+	mono:	bool,		// a monospaced face
+	parent:	Option<String>,	// followed for the properties this one does not set
 }
 
 /// Every style a document defines, by name, and which list styles are numbered.
 #[derive(Clone, Debug, Default)]
 struct Styles {
-	/// Style name to what it says.
 	by_name:	BTreeMap<String, Style>,
-	/// List style name to whether its first level is numbered.
-	lists:	BTreeMap<String, bool>,
+	lists:	BTreeMap<String, bool>,			// whether the FIRST level is numbered
 }
 
 impl Styles {
 
-	/// Whether a style resolves to bold, italic or monospaced, following what it is based on.
+	/// Follows what the style is based on.
 	fn of(&self, name: &str) -> Style {
 		let mut out = Style::default();
 		let mut at = name.to_string();
@@ -409,8 +396,7 @@ impl Styles {
 		out
 	}
 
-	/// Whether the paragraph style resolves to a quotation or a listing, by name anywhere up the
-	/// chain it is based on.
+	/// Quotation and listing, by name anywhere up the chain the style is based on.
 	fn para_kind(&self, name: &str) -> (bool, bool) {
 		let mut at = name.to_string();
 		for _ in 0..8 {
@@ -432,7 +418,7 @@ impl Styles {
 	}
 }
 
-/// The styles a part defines, added to what is already known.
+/// Added to what is already known rather than replacing it.
 fn gather_styles(xml: &Xml, into: &mut Styles) {
 	for s in xml.all("style:style") {
 		let name = match s.attr("style:name") {
@@ -473,7 +459,6 @@ fn gather_styles(xml: &Xml, into: &mut Styles) {
 	}
 }
 
-/// Reads an `.odt` into the document tree.
 pub fn read(bytes: &[u8]) -> Outcome<Reading> {
 	let zip = res!(Zip::read(bytes.to_vec()));
 	let mut out = Reading::default();
@@ -505,7 +490,6 @@ pub fn read(bytes: &[u8]) -> Outcome<Reading> {
 	Ok(out)
 }
 
-/// Reads a run of blocks out of an element.
 fn read_blocks(xml: &Xml, at: &Elem, out: &mut Vec<Block>, images: &mut usize, st: &Styles) {
 	for kid in at.elems() {
 		match kid.name.qname.as_str() {
@@ -555,8 +539,6 @@ fn read_blocks(xml: &Xml, at: &Elem, out: &mut Vec<Block>, images: &mut usize, s
 	}
 }
 
-/// Reads a list.
-///
 /// Whether it is numbered is a property of its STYLE, which is one level of indirection rather than
 /// the two a `.xlsx` needs. A style this cannot find is read as a bullet, which says less than a
 /// wrong number would.
@@ -583,7 +565,6 @@ fn read_list(xml: &Xml, at: &Elem, images: &mut usize, st: &Styles) -> Option<Bl
 	}
 }
 
-/// Reads a table.
 fn read_table(xml: &Xml, at: &Elem, images: &mut usize, st: &Styles) -> Option<Block> {
 	let mut head = None;
 	let mut rows = Vec::new();
@@ -602,7 +583,6 @@ fn read_table(xml: &Xml, at: &Elem, images: &mut usize, st: &Styles) -> Option<B
 	Some(Block::Table { head, rows, cols: vec![Align::None; n] })
 }
 
-/// One row of a table.
 fn read_row(xml: &Xml, tr: &Elem, images: &mut usize, st: &Styles) -> Row {
 	let mut cells = Vec::new();
 	for tc in tr.elems() {
@@ -631,7 +611,6 @@ fn read_row(xml: &Xml, tr: &Elem, images: &mut usize, st: &Styles) -> Row {
 	Row(cells)
 }
 
-/// The inline content of a paragraph or a heading.
 fn read_inlines(xml: &Xml, at: &Elem, images: &mut usize, st: &Styles) -> Vec<Inline> {
 	let mut out = Vec::new();
 	for node in &at.kids {
@@ -691,8 +670,6 @@ fn read_inlines(xml: &Xml, at: &Elem, images: &mut usize, st: &Styles) -> Vec<In
 	coalesce(out)
 }
 
-/// Joins consecutive code blocks into one.
-///
 /// A listing is one paragraph per line in this format, so a program arrives as a run of one-line
 /// blocks. Left apart, every line of it renders as its own fenced block.
 fn merge_code(blocks: Vec<Block>) -> Vec<Block> {
@@ -740,7 +717,7 @@ fn coalesce(items: Vec<Inline>) -> Vec<Inline> {
 pub struct Edited {
 	pub bytes:	Vec<u8>,
 	pub tallies:	Vec<Tally>,	// one per edit asked for, in order
-	pub runs:	usize,	// runs of text rewritten
+	pub runs:	usize,		// runs of text rewritten
 }
 
 /// Replaces text in an `.odt`, leaving every other byte of the package as it arrived.

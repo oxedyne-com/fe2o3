@@ -26,32 +26,30 @@
 //! A paragraph is `<text:p>` and a heading is `<text:h text:outline-level="2">` -- the level is an
 //! attribute rather than a style name, so nothing has to resolve a style to know a heading is one.
 //! That is the reverse of WordprocessingML and it is the easier direction.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 pub mod pkg;
 pub mod sheet;
 pub mod slides;
 pub mod text;
 
-/// The `office:` namespace, which every OpenDocument part's root element is in.
+//// The namespace URIs, each fixed by the OpenDocument specification.
+//
+// A prefix does not always name its own URI: `fo:` is XSL formatting objects, `draw:` is drawing,
+// `svg:` is OpenDocument's compatible form of somebody else's, and `xlink:` is W3C's own.
 pub const NS_OFFICE: &str = "urn:oasis:names:tc:opendocument:xmlns:office:1.0";
-/// The `text:` namespace: paragraphs, headings, lists, spans.
 pub const NS_TEXT: &str = "urn:oasis:names:tc:opendocument:xmlns:text:1.0";
-/// The `table:` namespace: sheets, rows, cells.
 pub const NS_TABLE: &str = "urn:oasis:names:tc:opendocument:xmlns:table:1.0";
-/// The `style:` namespace.
 pub const NS_STYLE: &str = "urn:oasis:names:tc:opendocument:xmlns:style:1.0";
-/// The `fo:` namespace, borrowed from XSL formatting objects.
 pub const NS_FO: &str = "urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0";
-/// The `draw:` namespace: frames and shapes, which is what a slide is made of.
 pub const NS_DRAW: &str = "urn:oasis:names:tc:opendocument:xmlns:drawing:1.0";
-/// The `presentation:` namespace.
 pub const NS_PRES: &str = "urn:oasis:names:tc:opendocument:xmlns:presentation:1.0";
-/// The `svg:` namespace, which carries the geometry of a frame.
 pub const NS_SVG: &str = "urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0";
-/// The `xlink:` namespace, which carries a link's destination.
 pub const NS_XLINK: &str = "http://www.w3.org/1999/xlink";
-/// The `manifest:` namespace.
 pub const NS_MANIFEST: &str = "urn:oasis:names:tc:opendocument:xmlns:manifest:1.0";
+
 /// The `of:` namespace, which is what a formula's `of:=` prefix refers to.
 ///
 /// **A `.ods` that writes `table:formula="of:=..."` without binding this is a spreadsheet whose every
@@ -63,5 +61,5 @@ pub const NS_MANIFEST: &str = "urn:oasis:names:tc:opendocument:xmlns:manifest:1.
 /// The URI is `...xmlns:of:1.2` and not `...formula:1.0`, which is the plausible guess and is wrong.
 pub const NS_OF: &str = "urn:oasis:names:tc:opendocument:xmlns:of:1.2";
 
-/// The `number:` namespace, which carries a data style -- what makes a number a date.
+// The `number:` namespace, which carries a data style -- what makes a number a date.
 pub const NS_NUMBER: &str = "urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0";

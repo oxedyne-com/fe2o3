@@ -18,6 +18,9 @@
 //! title, and everything until the next heading becomes the bullets. That is the convention every
 //! Markdown-to-slides tool uses, and it is a convention rather than a rule because it is the one
 //! authors already write to.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_text::doc::{
 	Block,
@@ -26,33 +29,26 @@ use oxedyne_fe2o3_text::doc::{
 	text_of,
 };
 
-/// How deep a bullet may be indented. Beyond this a reader stops distinguishing levels, and a deck
-/// nested deeper than this has stopped being a deck.
+// How deep a bullet may be indented. Beyond this a reader stops distinguishing levels, and a deck
+// nested deeper than this has stopped being a deck.
 pub const MAX_LEVEL: usize = 4;
 
 /// One line of a slide's body.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Bullet {
-	/// How deep it sits, zero being the outermost.
-	pub level:	usize,
-	/// What it says.
+	pub level:	usize,	// zero being the outermost
 	pub content:	Vec<Inline>,
 }
 
-/// One slide.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Slide {
-	/// The title, where the slide has one.
 	pub title:	Option<Vec<Inline>>,
-	/// The body, as bullets.
-	pub bullets:	Vec<Bullet>,
-	/// The speaker's notes, which are not on the slide and are not lost either.
-	pub notes:	Option<String>,
+	pub bullets:	Vec<Bullet>,	// the body
+	pub notes:	Option<String>,	// the speaker's, which are not on the slide and are not lost either
 }
 
 impl Slide {
 
-	/// A slide with a title and nothing else on it.
 	pub fn titled(title: &str) -> Self {
 		Self {
 			title:	Some(vec![Inline::Text(title.to_string())]),
@@ -76,7 +72,7 @@ impl Slide {
 		out
 	}
 
-	/// Whether the slide says nothing at all.
+	/// A slide carrying only speaker's notes is empty, because nothing is on it.
 	pub fn is_empty(&self) -> bool {
 		self.title.is_none() && self.bullets.is_empty()
 	}
@@ -85,13 +81,11 @@ impl Slide {
 /// A presentation: the slides it holds, in order.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Deck {
-	/// The slides.
 	pub slides:	Vec<Slide>,
 }
 
 impl Deck {
 
-	/// A deck with nothing in it.
 	pub fn new() -> Self {
 		Self::default()
 	}

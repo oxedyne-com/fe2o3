@@ -1,3 +1,6 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use oxedyne_fe2o3_file::glob::{
     Glob,
     IgnoreFile,
@@ -9,7 +12,6 @@ use oxedyne_fe2o3_core::{
 };
 
 
-/// Compiles a pattern that must compile.
 fn glob(pattern: &str) -> Outcome<Glob> {
     Glob::new(pattern.as_bytes())
 }

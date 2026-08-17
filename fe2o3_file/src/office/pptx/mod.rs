@@ -22,6 +22,9 @@
 //! changed the words without knowing the geometry would produce a slide with text over the top of
 //! other text. That is a failure a reader sees and an editor cannot check for. A deck is also the
 //! least useful thing an agent generates, so the value on the other side of that risk is small.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 pub mod parts;
 pub mod read;
@@ -35,11 +38,8 @@ pub const NS_P: &str = "http://schemas.openxmlformats.org/presentationml/2006/ma
 /// The DrawingML namespace, which every shape and every run of text on a slide is in.
 pub const NS_A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
 
-/// The width of a slide in EMU, at sixteen by nine. An EMU is 1/914,400 of an inch.
-pub const SLIDE_W: i64 = 12_192_000;
-/// The height of a slide in EMU.
+//// Slide geometry, in EMU -- an EMU is 1/914,400 of an inch.
+pub const SLIDE_W: i64 = 12_192_000;	// sixteen by nine
 pub const SLIDE_H: i64 = 6_858_000;
-/// The margin around the content of a slide, in EMU: half an inch.
-pub const MARGIN: i64 = 457_200;
-/// How far down the slide the title ends and the body begins.
-pub const TITLE_H: i64 = 1_143_000;
+pub const MARGIN: i64 = 457_200;	// half an inch
+pub const TITLE_H: i64 = 1_143_000;	// where the title ends and the body begins

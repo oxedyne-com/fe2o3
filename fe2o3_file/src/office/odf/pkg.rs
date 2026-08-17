@@ -4,6 +4,9 @@
 //! Written once here rather than three times in the writers beside it, because the part that must not
 //! be got wrong -- `mimetype` first and stored -- is the part it would be easiest to get wrong
 //! separately in each.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::office::odf::{
 	NS_MANIFEST,
@@ -19,12 +22,8 @@ use crate::zip::{
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_text::xml::write::Out;
 
-/// The version of OpenDocument written.
-pub const VERSION: &str = "1.3";
+pub const VERSION: &str = "1.3"; // the OpenDocument version written
 
-/// Starts a package: the `mimetype` member, first and stored, and the manifest that lists what will
-/// follow.
-///
 /// **`mimetype` FIRST and STORED, and neither half is negotiable.** The format requires it so a
 /// reader can name the file from its opening bytes without inflating anything, which is exactly what
 /// `oxedyne_fe2o3_stds::media` now does. A package that deflates it, or writes it second, is a file
@@ -36,8 +35,6 @@ pub fn start(media: &str) -> Zip {
 	zip
 }
 
-/// Finishes a package: writes the manifest listing every member already in it.
-///
 /// Called last, so the manifest lists what is actually there rather than what a caller intended. A
 /// manifest naming a member the archive does not hold is the OpenDocument equivalent of a content
 /// type override with no part behind it.
@@ -68,7 +65,7 @@ pub fn finish(zip: &mut Zip, media: &str) -> Outcome<()> {
 	Ok(())
 }
 
-/// The `styles.xml` every package carries, holding the styles a document refers to by name.
+/// The `styles.xml` every package carries.
 ///
 /// Minimal on purpose. OpenDocument's own defaults are sensible and a reader applies its template
 /// where a document says nothing, so a writer that specified every font and every margin would be
@@ -77,8 +74,6 @@ pub fn styles() -> Outcome<String> {
 	styles_for("")
 }
 
-/// The `styles.xml` for a package of a given media type.
-///
 /// A presentation needs one thing the other two do not: a MASTER PAGE. Without it a reader treats
 /// every frame on a slide as a plain drawing box rather than as a placeholder, and
 /// `presentation:class="title"` becomes meaningless -- LibreOffice drops the attribute on re-save and

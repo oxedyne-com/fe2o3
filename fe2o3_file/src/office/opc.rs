@@ -9,6 +9,9 @@
 //! which is why [`Rels`] hands them out rather than a counter somewhere global: the ids in
 //! `word/_rels/document.xml.rels` have nothing to do with the ids in `_rels/.rels`, and a scheme that
 //! shared them would work until the day two parts both had one.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::zip::Zip;
 
@@ -18,81 +21,59 @@ use oxedyne_fe2o3_text::xml::write::Out;
 
 use std::collections::BTreeMap;
 
-/// The namespace of `[Content_Types].xml`.
+//// The namespaces, relationship types and content types OOXML fixes. Every
+//// value here is written into the package and read back by other programs, so
+//// none of them is ours to change.
 pub const NS_TYPES: &str = "http://schemas.openxmlformats.org/package/2006/content-types";
-/// The namespace of a `.rels` part.
 pub const NS_RELS: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
-/// The namespace an `r:id` attribute is in, which the content parts declare.
 pub const NS_R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 
-/// The relationship type of the part that is the document itself.
 pub const REL_DOC: &str =
 	"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
-/// The relationship type of a styles part.
 pub const REL_STYLES: &str =
 	"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles";
-/// The relationship type of a numbering definitions part.
 pub const REL_NUMBERING: &str =
 	"http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering";
-/// The relationship type of a link out of the document.
 pub const REL_HYPERLINK: &str =
 	"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink";
 
-/// The content type of the main part of a word-processing document.
 pub const CT_DOCUMENT: &str =
 	"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml";
-/// The content type of a word-processing styles part.
 pub const CT_STYLES: &str =
 	"application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml";
-/// The content type of a word-processing numbering part.
 pub const CT_NUMBERING: &str =
 	"application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml";
-/// The relationship type of one sheet of a workbook.
 pub const REL_SHEET: &str =
 	"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet";
-/// The relationship type of the shared string table.
 pub const REL_STRINGS: &str =
 	"http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings";
 
-/// The content type of the main part of a spreadsheet.
 pub const CT_WORKBOOK: &str =
 	"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml";
-/// The content type of one sheet.
 pub const CT_SHEET: &str =
 	"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml";
-/// The content type of the shared string table.
 pub const CT_STRINGS: &str =
 	"application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml";
-/// The content type of a spreadsheet's styles part.
 pub const CT_SHEET_STYLES: &str =
 	"application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml";
 
-/// The relationship type of a slide master.
 pub const REL_MASTER: &str =
 	"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster";
-/// The relationship type of one slide.
 pub const REL_SLIDE: &str =
 	"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide";
-/// The relationship type of a slide layout.
 pub const REL_LAYOUT: &str =
 	"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout";
-/// The relationship type of a theme.
 pub const REL_THEME: &str =
 	"http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme";
 
-/// The content type of the main part of a presentation.
 pub const CT_PRESENTATION: &str =
 	"application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml";
-/// The content type of one slide.
 pub const CT_SLIDE: &str =
 	"application/vnd.openxmlformats-officedocument.presentationml.slide+xml";
-/// The content type of a slide master.
 pub const CT_MASTER: &str =
 	"application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml";
-/// The content type of a slide layout.
 pub const CT_LAYOUT: &str =
 	"application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml";
-/// The content type of a theme.
 pub const CT_THEME: &str = "application/vnd.openxmlformats-officedocument.theme+xml";
 
 /// The content type of a `.rels` part, which is declared by extension rather than by name.
@@ -101,26 +82,20 @@ pub const CT_RELS: &str = "application/vnd.openxmlformats-package.relationships+
 /// One relationship: what it is, and what it points at.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Rel {
-	/// The id the owning part refers to it by, unique within that part.
-	pub id:	String,
-	/// The relationship type, which says what the target is *for*.
-	pub kind:	String,
-	/// Where it points: a part within the package, or a URL where it is external.
-	pub target:	String,
-	/// Whether the target is outside the package, which a link out of the document is.
+	pub id:	String,	// unique within the part that owns it
+	pub kind:	String,	// what the target is for
+	pub target:	String,	// a part within the package, or a URL where it is external
 	pub external:	bool,
 }
 
 /// The relationships one part owns, and the ids it has handed out.
 #[derive(Clone, Debug, Default)]
 pub struct Rels {
-	/// The relationships, in the order they were added.
-	items:	Vec<Rel>,
+	items:	Vec<Rel>,	// in the order they were added
 }
 
 impl Rels {
 
-	/// A part with no relationships yet.
 	pub fn new() -> Self {
 		Self::default()
 	}
@@ -135,17 +110,14 @@ impl Rels {
 		self.push(kind, target, true)
 	}
 
-	/// The relationships, in order.
 	pub fn items(&self) -> &[Rel] {
 		&self.items
 	}
 
-	/// Whether there are none.
 	pub fn is_empty(&self) -> bool {
 		self.items.is_empty()
 	}
 
-	/// Adds a relationship and gives back its id.
 	fn push(&mut self, kind: &str, target: &str, external: bool) -> String {
 		let id = fmt!("rId{}", self.items.len() + 1);
 		self.items.push(Rel {
@@ -185,10 +157,8 @@ impl Rels {
 /// ones there are not.
 #[derive(Clone, Debug, Default)]
 pub struct Types {
-	/// Extension and content type, for every part whose name ends that way.
-	defaults:	Vec<(String, String)>,
-	/// Part name and content type, for one part.
-	overrides:	Vec<(String, String)>,
+	defaults:	Vec<(String, String)>,	// extension, content type
+	overrides:	Vec<(String, String)>,	// part name, content type
 }
 
 impl Types {
@@ -202,15 +172,13 @@ impl Types {
 		t
 	}
 
-	/// Declares what parts with an extension are.
-	///
 	/// Named `by_ext` rather than `default`, which would shadow the trait method of that name on the
 	/// same type and make `Types::default()` mean two things.
 	pub fn by_ext(&mut self, ext: &str, kind: &str) {
 		self.defaults.push((ext.to_string(), kind.to_string()));
 	}
 
-	/// Declares what one named part is. The name is absolute within the package, leading slash and all.
+	/// The name is absolute within the package, leading slash and all.
 	pub fn over(&mut self, part: &str, kind: &str) {
 		self.overrides.push((part.to_string(), kind.to_string()));
 	}

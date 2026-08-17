@@ -19,6 +19,9 @@
 //! Editing a document somebody else wrote is a different problem with a different answer -- see
 //! [`crate::office`] -- and sharing code between them is how the second one gets the first one's
 //! assumptions.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 pub mod edit;
 pub mod parts;
@@ -31,14 +34,11 @@ pub use write::write;
 /// The WordprocessingML namespace, which nearly every element of a document is in.
 pub const NS_W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 
-/// The width of an A4 page in twips, which is a twentieth of a point.
+//// A4 page geometry, in twips -- a twip is a twentieth of a point.
 pub const PAGE_W: u32 = 11906;
-/// The height of an A4 page in twips.
 pub const PAGE_H: u32 = 16838;
-/// The margin on each side, in twips: two centimetres.
-pub const MARGIN: u32 = 1134;
-/// The width a table has to lay itself out in.
-pub const TEXT_W: u32 = PAGE_W - 2 * MARGIN;
+pub const MARGIN: u32 = 1134;	// on each side: two centimetres
+pub const TEXT_W: u32 = PAGE_W - 2 * MARGIN;	// what a table has to lay itself out in
 
 /// The `w:numId` of the bulleted list definition. See [`parts::numbering`].
 pub const NUM_BULLET: &str = "1";

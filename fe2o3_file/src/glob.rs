@@ -35,6 +35,9 @@
 //! not recognised, and a `/` cannot appear inside a character class or be
 //! escaped, because the pattern is split on every `/` before anything else is
 //! read. An unclosed `[` is a literal `[`, as it is a match failure in git.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -42,28 +45,21 @@ use oxedyne_fe2o3_core::prelude::*;
 /// One token of a compiled pattern, within a single path component.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Tok {
-    /// One literal byte.
-    Lit(u8),
-    /// `?`: exactly one byte.
-    Any,
-    /// `*`: any run of bytes, including none.
-    Star,
-    /// `[...]`: one byte drawn from (or kept out of) a set of ranges.
+    Lit(u8),    // one literal byte
+    Any,        // `?`: exactly one byte
+    Star,       // `*`: any run of bytes, including none
+    // `[...]`: one byte drawn from, or kept out of, a set of ranges.
     Class {
-        /// Whether the class began `[!` or `[^`.
-        negated:    bool,
-        /// Inclusive byte ranges; a lone member is a range of one.
-        ranges:     Vec<(u8, u8)>,
+        negated:    bool,             // the class began `[!` or `[^`
+        ranges:     Vec<(u8, u8)>,    // inclusive; a lone member is a range of one
     },
 }
 
 /// One component of a compiled pattern.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Comp {
-    /// A component that was exactly `**`: any number of path components.
-    Globstar,
-    /// An ordinary component, matched against exactly one path component.
-    One(Vec<Tok>),
+    Globstar,       // a component that was exactly `**`: any number of path components
+    One(Vec<Tok>),  // an ordinary component, matched against exactly one path component
 }
 
 /// One compiled ignore pattern.
@@ -73,12 +69,10 @@ enum Comp {
 /// the ordered context of an [`IgnoreFile`], which is where it is read.
 #[derive(Clone, Debug)]
 pub struct Glob {
-    /// Whether the pattern began with `!`.
-    negated:    bool,
-    /// Whether the pattern ended with `/` and so matches directories only.
-    dir_only:   bool,
-    /// The components, with a leading [`Comp::Globstar`] standing in for an
-    /// unanchored pattern's freedom to match at any depth.
+    negated:    bool,       // the pattern began with `!`
+    dir_only:   bool,       // the pattern ended with `/`, so directories only
+    // A leading Comp::Globstar stands in for an unanchored pattern's freedom to
+    // match at any depth.
     comps:      Vec<Comp>,
 }
 
@@ -130,12 +124,10 @@ impl Glob {
         Ok(Self { negated, dir_only, comps })
     }
 
-    /// Reports whether the pattern began with `!`.
     pub fn is_negated(&self) -> bool {
         self.negated
     }
 
-    /// Reports whether the pattern matches directories only.
     pub fn is_dir_only(&self) -> bool {
         self.dir_only
     }
@@ -157,7 +149,6 @@ impl Glob {
         Self::match_comps(&self.comps, &parts)
     }
 
-    /// Matches pattern components against path components, recursively.
     fn match_comps(comps: &[Comp], parts: &[&[u8]]) -> bool {
         match comps.first() {
             None => parts.is_empty(),
@@ -183,7 +174,6 @@ impl Glob {
         }
     }
 
-    /// Matches tokens against the bytes of one component, recursively.
     fn match_toks(toks: &[Tok], s: &[u8]) -> bool {
         match toks.first() {
             None => s.is_empty(),
@@ -209,7 +199,6 @@ impl Glob {
         }
     }
 
-    /// Compiles the bytes of one component into tokens.
     fn tokens(part: &[u8]) -> Vec<Tok> {
         let mut toks = Vec::new();
         let mut i = 0;
@@ -251,8 +240,8 @@ impl Glob {
         toks
     }
 
-    /// Reads one character class beginning at `[`, returning the token and how
-    /// many bytes it took, or nothing if the class never closes.
+    /// The `usize` is how many bytes the class took; nothing where it never
+    /// closes.
     fn class(s: &[u8]) -> Option<(Tok, usize)> {
         let mut i = 1; // Past the opening bracket.
         let mut negated = false;
@@ -305,8 +294,7 @@ impl Glob {
 /// inside an ignored directory can be re-included.
 #[derive(Clone, Debug, Default)]
 pub struct IgnoreFile {
-    /// The patterns, in the order the file gives them.
-    rules: Vec<Glob>,
+    rules: Vec<Glob>,   // in the order the file gives them
 }
 
 impl IgnoreFile {
@@ -340,7 +328,6 @@ impl IgnoreFile {
         Self { rules }
     }
 
-    /// Reports whether the file holds no rules at all.
     pub fn is_empty(&self) -> bool {
         self.rules.is_empty()
     }

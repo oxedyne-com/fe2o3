@@ -10,6 +10,9 @@
 //! order lives in `p:sldIdLst`, which names each slide by a relationship id, so that is what is read.
 //! A reader that walked the archive would deal a deck of more than nine slides out of order, and it
 //! would look like an authoring mistake rather than a reading one.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::office::deck::{
 	Bullet,
@@ -31,7 +34,7 @@ use oxedyne_fe2o3_text::xml::{
 
 use std::collections::BTreeMap;
 
-/// The most a single part is inflated to. A slide is small; a slide claiming otherwise is not one.
+// The most a single part is inflated to. A slide is small; a slide claiming otherwise is not one.
 pub const MAX_PART: u64 = 32 * 1024 * 1024;
 
 /// The leading bytes of an OLE compound file: an encrypted deck, or a `.ppt` from before 2007.
@@ -40,20 +43,16 @@ const OLE_MAGIC: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
 /// A deck read for reading, and what came with it.
 #[derive(Clone, Debug, Default)]
 pub struct Reading {
-	/// The slides and their words.
 	pub deck:	Deck,
-	/// Whether the file carries a macro project. Said, never run.
-	pub macros:	bool,
-	/// How many pictures, charts and other shapes hold no text and are therefore not read.
-	///
-	/// Counted rather than named by kind, because on a slide the distinction a reader cares about is
-	/// "there is something here you are not seeing", and every one of them is a rectangle of pixels.
+	pub macros:	bool,	// said, never run
+	// Pictures, charts and other shapes holding no text, counted rather than named by kind: on a
+	// slide the distinction a reader cares about is "there is something here you are not seeing",
+	// and every one of them is a rectangle of pixels.
 	pub shapes:	usize,
-	/// Slides the presentation names and whose part is missing or unreadable, by number.
+	// Slides the presentation names and whose part is missing or unreadable, by number.
 	pub missing:	Vec<usize>,
 }
 
-/// Reads a `.pptx` into the deck it holds.
 pub fn read(bytes: &[u8]) -> Outcome<Reading> {
 	if bytes.len() >= OLE_MAGIC.len() && bytes[..OLE_MAGIC.len()] == OLE_MAGIC {
 		return Err(err!(
@@ -148,7 +147,6 @@ fn slide_of(xml: &Xml, shapes: &mut usize) -> Slide {
 	slide
 }
 
-/// The inline content of one paragraph on a slide.
 fn inlines(xml: &Xml, p: &Elem) -> Vec<Inline> {
 	let mut out: Vec<Inline> = Vec::new();
 	for kid in p.elems() {
@@ -216,7 +214,6 @@ fn coalesce(items: Vec<Inline>) -> Vec<Inline> {
 	out
 }
 
-/// One part of the package, as the text it is.
 fn part_text(zip: &Zip, name: &str) -> Outcome<String> {
 	let bytes = res!(zip.content_capped(name, MAX_PART));
 	Ok(res!(String::from_utf8(bytes), Decode, String))

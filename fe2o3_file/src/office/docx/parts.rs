@@ -11,6 +11,9 @@
 //! the first time somebody opens the document and uses the navigation pane, or generates a table of
 //! contents, or applies their organisation's template: a named heading becomes their heading, and a
 //! bold run stays a bold run forever.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::office::docx::NS_W;
 use oxedyne_fe2o3_text::xml::write::Out;
@@ -20,8 +23,8 @@ use oxedyne_fe2o3_core::prelude::*;
 /// The point size, doubled as OOXML counts it, of each heading level.
 const HEADING_SIZE: [&str; 6] = ["40", "32", "28", "24", "22", "22"];
 
-/// How many levels of list nesting are defined. Word's own lists define nine and so does this: a
-/// document that nested deeper than its numbering defines would lose its bullets at the bottom.
+// How many levels of list nesting are defined. Word's own lists define nine and so does this: a
+// document that nested deeper than its numbering defines would lose its bullets at the bottom.
 const LEVELS: usize = 9;
 
 /// The bullet character and the font that draws it, at each of three levels, repeating.

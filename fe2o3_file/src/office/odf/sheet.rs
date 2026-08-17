@@ -15,6 +15,9 @@
 //!
 //! `office:value` is what the last calculation left, and nothing here recalculates. See
 //! [`crate::office::sheet`] for why that is the correct answer rather than a shortcut.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::office::odf::{
 	NS_FO,
@@ -52,15 +55,14 @@ use oxedyne_fe2o3_text::xml::write::{
 	escape_attr,
 };
 
-/// The media type an `.ods` declares in its first member.
+// Declared in the package's first member, which is what names the file.
 pub const MEDIA: &str = "application/vnd.oasis.opendocument.spreadsheet";
 
-/// The most a single part is inflated to. An `.ods` is one `content.xml` holding every sheet, so this
-/// is the whole workbook rather than a piece of it -- which is the trade OpenDocument makes for
-/// having no relationship parts.
+// The most a single part is inflated to. An `.ods` is one `content.xml` holding every sheet, so this
+// is the whole workbook rather than a piece of it -- which is the trade OpenDocument makes for
+// having no relationship parts.
 pub const MAX_PART: u64 = 96 * 1024 * 1024;
 
-/// Writes a workbook as the bytes of an `.ods`.
 pub fn write(book: &Book) -> Outcome<Vec<u8>> {
 	let mut owned;
 	let book = match book.sheets.is_empty() {
@@ -337,18 +339,13 @@ fn repr(n: f64) -> String {
 	fmt!("{}", n)
 }
 
-/// A workbook read for reading.
 #[derive(Clone, Debug, Default)]
 pub struct Reading {
-	/// The sheets and their cells.
 	pub book:	Book,
-	/// Whether the file carries a macro project. Said, never run.
-	pub macros:	bool,
-	/// How many cells carry a formula.
-	pub formulas:	usize,
+	pub macros:	bool,		// a macro project is present; said, never run
+	pub formulas:	usize,		// cells carrying a formula
 }
 
-/// Reads an `.ods` into the workbook it holds.
 pub fn read(bytes: &[u8]) -> Outcome<Reading> {
 	let zip = res!(Zip::read(bytes.to_vec()));
 	let mut out = Reading::default();
@@ -419,7 +416,6 @@ fn row_of(xml: &Xml, tr: &Elem, formulas: &mut usize) -> Vec<Cell> {
 	out
 }
 
-/// One cell.
 fn cell_of(xml: &Xml, tc: &Elem) -> Cell {
 	// The formula is read and never evaluated. The `of:=` prefix is the format's own namespace
 	// marker, not part of the expression, so it comes off.

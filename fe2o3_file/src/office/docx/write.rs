@@ -12,6 +12,9 @@
 //! the *source* an image was written with, a path or a URL, and this crate has no filesystem and no
 //! network. The alt text is written in its place and the image is counted. A caller that can resolve
 //! the source is where images will be added.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_text::doc::{
 	Align,
@@ -51,10 +54,9 @@ use crate::zip::{
 	Zip,
 };
 
-/// The deepest a list may nest before its items stop being indented further.
-///
-/// [`parts::numbering`] defines nine levels, so a tenth would name a level the document does not
-/// define and lose its bullet. Deeper items sit at the ninth rather than vanish.
+// The deepest a list may nest before its items stop being indented further. `parts::numbering`
+// defines nine levels, so a tenth would name a level the document does not define and lose its
+// bullet. Deeper items sit at the ninth rather than vanish.
 const MAX_LEVEL: usize = 8;
 
 /// What a created document could not carry.
@@ -63,8 +65,7 @@ const MAX_LEVEL: usize = 8;
 /// knows what they are looking at; a reader who is told nothing thinks the document is complete.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Left {
-	/// The images whose bytes could not be reached, by the source each was written with.
-	pub images:	Vec<String>,
+	pub images:	Vec<String>,	// by the source each was written with
 }
 
 impl Left {
@@ -121,38 +122,28 @@ pub fn write(doc: &Doc) -> Outcome<(Vec<u8>, Left)> {
 /// and a list item inside a list, and nothing about the paragraph itself says which.
 #[derive(Clone, Copy, Debug, Default)]
 struct Ctx {
-	/// The paragraph style to use where the block does not name one of its own.
-	style:	Option<&'static str>,
-	/// The list to attach a paragraph to: the `w:numId`, and how deep it sits.
-	num:	Option<(&'static str, usize)>,
+	style:	Option<&'static str>,	// where the block does not name one of its own
+	num:	Option<(&'static str, usize)>,	// the `w:numId`, and how deep it sits
 }
 
 /// How a run of text is marked.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Fmt {
-	/// Bold.
 	bold:	bool,
-	/// Italic.
 	italic:	bool,
-	/// A span of code within a line.
-	code:	bool,
-	/// Part of a link, which is what the `Hyperlink` character style is for.
-	link:	bool,
+	code:	bool,	// a span of code within a line
+	link:	bool,	// part of a link, which is what the `Hyperlink` character style is for
 }
 
 /// The state of one document being written.
 struct Build {
-	/// The document part, under construction.
-	out:	Out,
-	/// The relationships the document part refers to.
-	rels:	Rels,
-	/// What could not be carried.
-	left:	Left,
+	out:	Out,	// the document part, under construction
+	rels:	Rels,	// what the document part refers to
+	left:	Left,	// what could not be carried
 }
 
 impl Build {
 
-	/// Writes a run of blocks.
 	fn blocks(&mut self, blocks: &[Block], ctx: Ctx) -> Outcome<()> {
 		for block in blocks {
 			res!(self.block(block, ctx));
@@ -160,7 +151,6 @@ impl Build {
 		Ok(())
 	}
 
-	/// Writes one block.
 	fn block(&mut self, block: &Block, ctx: Ctx) -> Outcome<()> {
 		match block {
 			Block::Heading { level, content }	=> {
@@ -211,7 +201,6 @@ impl Build {
 		Ok(())
 	}
 
-	/// Writes a paragraph.
 	fn para(&mut self, content: &[Inline], ctx: Ctx) -> Outcome<()> {
 		self.out.open("w:p", &[]);
 		if ctx.style.is_some() || ctx.num.is_some() {
@@ -233,7 +222,6 @@ impl Build {
 		Ok(())
 	}
 
-	/// Writes a run of inline content.
 	fn inlines(&mut self, content: &[Inline], fmt: Fmt) -> Outcome<()> {
 		for item in content {
 			match item {
@@ -335,7 +323,6 @@ impl Build {
 		Ok(())
 	}
 
-	/// Writes a table.
 	fn table(&mut self, head: &Option<Row>, rows: &[Row], cols: &[Align]) -> Outcome<()> {
 		// The widest row decides the grid, because a row with fewer cells than the header is a table
 		// somebody wrote by hand and Word still has to lay it out.

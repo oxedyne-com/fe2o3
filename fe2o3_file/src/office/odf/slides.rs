@@ -25,6 +25,9 @@
 //! PresentationML writes `<a:pPr lvl="2">` on a paragraph. OpenDocument nests a `text:list` inside a
 //! `text:list-item` twice. The neutral deck carries a level either way, so the difference is confined
 //! to these two files -- which is what the neutral model is for.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::office::deck::{
 	Bullet,
@@ -56,35 +59,29 @@ use oxedyne_fe2o3_text::xml::{
 };
 use oxedyne_fe2o3_text::xml::write::Out;
 
-/// The media type an `.odp` declares in its first member.
+// Declared in the package's first member, which is what names the file.
 pub const MEDIA: &str = "application/vnd.oasis.opendocument.presentation";
 
-/// The most a single part is inflated to.
-pub const MAX_PART: u64 = 64 * 1024 * 1024;
+pub const MAX_PART: u64 = 64 * 1024 * 1024; // the most one part is inflated to
 
-/// The width of a slide, as OpenDocument writes a length: with its unit.
-const SLIDE_W: &str = "28cm";
-/// The height of a slide.
+const SLIDE_W: &str = "28cm";		// a length carries its unit
 const SLIDE_H: &str = "15.75cm";
 
 /// What a created deck could not carry.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Left {
-	/// The images whose bytes could not be reached.
-	pub images:	Vec<String>,
-	/// How many slides carried speaker's notes that were not written.
-	pub notes:	usize,
+	pub images:	Vec<String>,	// those whose bytes could not be reached
+	pub notes:	usize,		// slides carrying speaker's notes that were not written
 }
 
 impl Left {
 
-	/// Whether everything in the deck reached the file.
+	/// Did everything in the deck reach the file?
 	pub fn is_empty(&self) -> bool {
 		self.images.is_empty() && self.notes == 0
 	}
 }
 
-/// Writes a deck as the bytes of an `.odp`.
 pub fn write(deck: &Deck) -> Outcome<(Vec<u8>, Left)> {
 	let mut owned;
 	let deck = match deck.slides.is_empty() {
@@ -169,7 +166,7 @@ pub fn write(deck: &Deck) -> Outcome<(Vec<u8>, Left)> {
 	Ok((res!(zip.write()), left))
 }
 
-/// Writes a slide's bullets, nesting a list inside an item for each level of depth.
+/// Nests a list inside an item for each level of depth.
 fn bullets(out: &mut Out, items: &[Bullet], left: &mut Left) -> Outcome<()> {
 	res!(at_level(out, items, 0, &mut 0, left));
 	Ok(())
@@ -221,7 +218,6 @@ fn at_level(
 	Ok(())
 }
 
-/// Writes a run of inline content.
 fn inlines(out: &mut Out, content: &[Inline], left: &mut Left) -> Outcome<()> {
 	for item in content {
 		match item {
@@ -256,18 +252,13 @@ fn inlines(out: &mut Out, content: &[Inline], left: &mut Left) -> Outcome<()> {
 	Ok(())
 }
 
-/// A deck read for reading.
 #[derive(Clone, Debug, Default)]
 pub struct Reading {
-	/// The slides and their words.
 	pub deck:	Deck,
-	/// Whether the file carries a macro project. Said, never run.
-	pub macros:	bool,
-	/// How many pictures the deck holds, which this does not draw.
-	pub images:	usize,
+	pub macros:	bool,		// a macro project is present; said, never run
+	pub images:	usize,		// pictures held, which this does not draw
 }
 
-/// Reads an `.odp` into the deck it holds.
 pub fn read(bytes: &[u8]) -> Outcome<Reading> {
 	let zip = res!(Zip::read(bytes.to_vec()));
 	let mut out = Reading::default();
@@ -287,7 +278,6 @@ pub fn read(bytes: &[u8]) -> Outcome<Reading> {
 	Ok(out)
 }
 
-/// One slide.
 fn slide_of(xml: &Xml, page: &Elem, images: &mut usize) -> Slide {
 	let mut slide = Slide::default();
 	// Where NO frame claims to be the title, the first one is taken as it. A deck whose frames were
@@ -355,7 +345,6 @@ fn gather(
 	}
 }
 
-/// The inline content of one paragraph.
 fn read_inlines(xml: &Xml, at: &Elem, images: &mut usize) -> Vec<Inline> {
 	let mut out = Vec::new();
 	for node in &at.kids {

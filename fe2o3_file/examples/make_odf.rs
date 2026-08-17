@@ -5,6 +5,9 @@
 //! cargo run -p oxedyne_fe2o3_file --example make_odf -- in.md out_prefix
 //! soffice --headless --convert-to txt out_prefix.odt
 //! ```
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_file::office::deck::Deck;

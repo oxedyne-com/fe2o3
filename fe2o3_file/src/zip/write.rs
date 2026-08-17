@@ -8,6 +8,9 @@
 //! The one field a copied directory entry has patched is the offset of the member's local header,
 //! because inserting or removing a member moves everything after it. Where nothing moved, nothing is
 //! patched, and the bytes out are the bytes in.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::zip::{
 	Body,
@@ -33,8 +36,6 @@ const FLAG_UTF8:	u16 = 0x0800;
 
 impl Zip {
 
-	/// Writes the archive out.
-	///
 	/// An archive read and written straight back gives the bytes it was read from. That is a property
 	/// callers should check rather than take on trust: it is what says this build understood the file
 	/// well enough to be handed somebody's document.
@@ -191,8 +192,6 @@ fn pack(m: &Member, data: &[u8]) -> Outcome<Vec<u8>> {
 	}
 }
 
-/// The general purpose flag a fresh member carries.
-///
 /// Bit 11 is set only where the name needs it. Setting it on an ASCII name would be legal and would
 /// still change the bytes of every archive written here, for nothing.
 fn flags(name: &str) -> u16 {

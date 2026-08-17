@@ -25,6 +25,9 @@
 //! formula goes in with no `<v>` beside it and the reader computes it on open. The alternative would be
 //! to leave the value that was there, which is the value of the OLD formula, and a cell showing a
 //! number that does not follow from the expression above it is worse than one showing nothing.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::office::opc;
 use crate::office::sheet::{

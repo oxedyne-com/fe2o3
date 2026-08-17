@@ -10,6 +10,9 @@
 //! level and nothing else, so a bullet three deep is `<a:pPr lvl="2">` and the layout decides what
 //! that looks like. That is the whole mapping, and it is small because [`crate::office::deck`] is
 //! small on purpose.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::office::deck::{
 	Deck,
@@ -51,12 +54,10 @@ use oxedyne_fe2o3_text::xml::write::Out;
 /// What a created deck could not carry.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Left {
-	/// The images whose bytes could not be reached, by the source each was written with.
-	pub images:	Vec<String>,
-	/// How many slides carried speaker's notes that were not written.
-	///
-	/// A notes slide needs a notes master and a notes layout, which is the whole skeleton again for
-	/// content nobody sees on screen. Counted and said rather than written or silently dropped.
+	pub images:	Vec<String>,	// by the source each was written with
+	// Slides carrying speaker's notes that were not written. A notes slide needs a notes master and a
+	// notes layout, which is the whole skeleton again for content nobody sees on screen. Counted and
+	// said rather than written or silently dropped.
 	pub notes:	usize,
 }
 
@@ -155,7 +156,6 @@ pub fn write(deck: &Deck) -> Outcome<(Vec<u8>, Left)> {
 	Ok((res!(zip.write()), left))
 }
 
-/// One slide.
 fn slide_part(slide: &crate::office::deck::Slide, left: &mut Left) -> Outcome<String> {
 	let mut out = Out::declared();
 	out.open("p:sld", &[("xmlns:a", NS_A), ("xmlns:r", NS_R), ("xmlns:p", NS_P)]);
@@ -268,17 +268,12 @@ fn para(out: &mut Out, content: &[Inline], level: usize, left: &mut Left) -> Out
 /// How a run of text on a slide is marked.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Fmt {
-	/// Bold.
 	bold:	bool,
-	/// Italic.
 	italic:	bool,
-	/// A span of code, which on a slide is a monospaced run.
-	code:	bool,
-	/// Where the run links to, if it links anywhere.
-	link:	bool,
+	code:	bool,	// a span of code, which on a slide is a monospaced run
+	link:	bool,	// part of a link
 }
 
-/// The runs a piece of inline content makes.
 fn runs(out: &mut Out, content: &[Inline], fmt: Fmt, left: &mut Left) -> Outcome<()> {
 	for item in content {
 		match item {
@@ -309,7 +304,6 @@ fn runs(out: &mut Out, content: &[Inline], fmt: Fmt, left: &mut Left) -> Outcome
 	Ok(())
 }
 
-/// One run of text.
 fn run(out: &mut Out, text: &str, fmt: Fmt) -> Outcome<()> {
 	if text.is_empty() {
 		return Ok(());
