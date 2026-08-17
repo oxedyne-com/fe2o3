@@ -4,7 +4,7 @@ version = "0.5.0"
 authors = ["h00gs <hello@oxedyne.io>"]
 edition = "2021"
 license = "BSD-2-Clause/Apache-2.0"
-description = "Hematite file system utilities."
+description = "Hematite file system, archive and document format utilities."
 repository = "https://github.com/oxedyne-io/fe2o3"
 
 [dependencies]
@@ -13,6 +13,10 @@ oxedyne_fe2o3_core 		   	= { path = "../fe2o3_core" }
 # which does not build for wasm32.  `zip` is reached from the browser, so nothing here may pull in a
 # dependency that is not portable.
 oxedyne_fe2o3_data 		   	= { path = "../fe2o3_data", default-features = false }
+# The neutral document tree and the span-preserving XML reader, both of which the Office formats in
+# `office` are built on.  This crate already depended on `fe2o3_text` transitively, through
+# `fe2o3_data` and `fe2o3_jdat`; naming it here adds no crate to the graph.
+oxedyne_fe2o3_text 		   	= { path = "../fe2o3_text" }
 
 # DEFLATE, for the members of an archive.  Already a dependency of `fe2o3_core`, `fe2o3_net` and
 # `fe2o3_graphics`; its `miniz_oxide` backend is pure Rust and builds for wasm32.  It also carries

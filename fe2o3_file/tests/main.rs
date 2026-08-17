@@ -1,5 +1,6 @@
 mod exif;
 mod glob;
+mod office;
 mod tree;
 mod zip;
 
@@ -31,6 +32,7 @@ fn run_tests() -> Outcome<()> {
     res!(exif::test_exif(filter));
     res!(glob::test_glob(filter));
     res!(zip::test_zip(filter));
+    res!(office::test_office(filter));
 
     Ok(())
 }

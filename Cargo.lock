@@ -2138,6 +2138,7 @@ dependencies = [
  "flate2",
  "oxedyne_fe2o3_core",
  "oxedyne_fe2o3_data",
+ "oxedyne_fe2o3_text",
 ]
 
 [[package]]
