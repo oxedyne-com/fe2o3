@@ -26,7 +26,12 @@ fn main() -> Outcome<()> {
 
 fn run_tests() -> Outcome<()> {
 
-    let filter = "dns";
+    // Every case here is tagged "all", so this runs them. It was "dns" until
+    // 2026-08-17, which ran the one DNS case and silently skipped the rest --
+    // `test_it` matches a tag by prefix, and no other tag begins with "dns".
+    // The suite still printed "running 1 test ... ok" in 0.00s, so a filter that
+    // switched off four SMTP submission cases read exactly like a passing one.
+    let filter = "all";
 
     res!(dns::test_dns(filter));
     res!(email::test_email(filter));
