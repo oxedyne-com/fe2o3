@@ -139,9 +139,25 @@ fn main() {
 	let mut would_change: Vec<String> = Vec::new();
 
 	for path in &files {
-		let detected = lang.as_deref().unwrap_or_else(
-			|| detect_language_from_ext(path).unwrap_or("rust")
-		);
+		// An unrecognised extension is not Rust. Assuming it was meant
+		// a named .css or .html file is lexed as Rust and rewritten:
+		// `'Oxanium'` becomes `'Oxanium '` because the Rust lexer reads
+		// the opening quote as a lifetime. Say so and skip it instead.
+		let detected = match lang.as_deref() {
+			Some(l) => l,
+			None => match detect_language_from_ext(path) {
+				Some(l) => l,
+				None => {
+					eprintln!(
+						"error: {}: unrecognised extension; pass --lang to \
+						say what it is",
+						path,
+					);
+					failures += 1;
+					continue;
+				}
+			},
+		};
 
 		let src = match std::fs::read_to_string(path) {
 			Ok(s)  => s,
