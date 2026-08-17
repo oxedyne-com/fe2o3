@@ -26,6 +26,9 @@
 //! Out of scope for the MVP and not implemented: `IDLE`, `CONDSTORE`,
 //! `QRESYNC`, `BINARY`, `LITERAL+` quirks beyond plain pass-through,
 //! ACLs, quotas, namespace, sort, thread.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 pub mod client;
 pub mod server;

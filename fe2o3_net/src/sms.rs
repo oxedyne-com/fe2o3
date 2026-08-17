@@ -42,6 +42,9 @@
 //! alert is sent and forgotten; whether it arrived is answered by the person's phone buzzing,
 //! and a delivery-receipt webhook is a second service to run on the host that may be the one in
 //! trouble.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_jdat::{
@@ -63,12 +66,10 @@ use crate::http::{
 };
 
 
-/// The longest body a single call will carry.
-///
-/// Not a protocol limit -- a gateway will happily accept more and bill it as many segments --
-/// but an alert that runs past this has stopped being an alert. The number is ten segments of
-/// plain GSM text, which is far more than a sentence naming a host and a fault, and the refusal
-/// is louder than a silent truncation would be.
+// The longest body a single call will carry. Not a protocol limit -- a gateway will happily
+// accept more and bill it as many segments -- but an alert that runs past this has stopped
+// being an alert. Ten segments of plain GSM text is far more than a sentence naming a host and
+// a fault, and the refusal is louder than a silent truncation would be.
 pub const MAX_BODY_LEN: usize = 1530;
 
 /// The account and secret a gateway authenticates with.
@@ -81,22 +82,17 @@ pub const MAX_BODY_LEN: usize = 1530;
 /// both only in the `Authorization` header. See the module documentation for why that is a
 /// requirement rather than a habit.
 pub struct Credential<'a> {
-	/// The account identifier. The vendor's own name for it varies: a username, an account
-	/// identifier, an authentication identifier.
-	pub user:	&'a str,
-	/// The secret half. An API key, an auth token.
-	pub secret:	&'a str,
+	pub user:	&'a str,	// a username, an account identifier, an authentication identifier
+	pub secret:	&'a str,	// an API key, an auth token
 }
 
 /// One message to one number.
 pub struct Message<'a> {
-	/// The recipient, in E.164 with the leading `+`.
-	pub to:		&'a str,
-	/// The sender, as the vendor wants it: a number the account owns, or an alphanumeric
-	/// identifier where the destination permits one. Empty asks the vendor for its default,
-	/// which is what an account with a single number should do rather than repeat itself.
+	pub to:		&'a str,	// E.164, with the leading `+`
+	// As the vendor wants it: a number the account owns, or an alphanumeric identifier where
+	// the destination permits one. Empty asks the vendor for its default, which is what an
+	// account with a single number should do rather than repeat itself.
 	pub from:	&'a str,
-	/// The text.
 	pub body:	&'a str,
 }
 
@@ -104,17 +100,11 @@ pub struct Message<'a> {
 ///
 /// The caller owns the socket. See the module documentation.
 pub struct SmsCall {
-	/// The host to dial and to validate the certificate against.
-	pub host:	String,
-	/// The port, always 443 for these vendors, but carried rather than assumed.
-	pub port:	u16,
-	/// The request path, with any account identifier already escaped into it.
-	pub path:	String,
-	/// The request method.
+	pub host:	String,			// dialled, and the name the certificate is validated against
+	pub port:	u16,			// always 443 for these vendors, carried rather than assumed
+	pub path:	String,			// with any account identifier already escaped into it
 	pub method:	HttpMethod,
-	/// The headers, including the credential under `Authorization`.
-	pub headers:	Vec<(String, String)>,
-	/// The request body.
+	pub headers:	Vec<(String, String)>,	// including the credential under `Authorization`
 	pub body:	Vec<u8>,
 }
 
@@ -128,16 +118,13 @@ pub struct SmsCall {
 /// claiming to understand.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Receipt {
-	/// The vendor's identifier for the message, for a support ticket.
-	pub id:		String,
-	/// What the vendor called the outcome. Not normalised: `SUCCESS`, `queued` and
-	/// `message(s) queued` all mean accepted, and flattening them into one word would throw
-	/// away the only text a person can quote back to the vendor.
+	pub id:		String,		// the vendor's own, for a support ticket
+	// What the vendor called the outcome, not normalised: `SUCCESS`, `queued` and
+	// `message(s) queued` all mean accepted, and flattening them into one word would throw away
+	// the only text a person can quote back to the vendor.
 	pub status:	String,
-	/// Segments billed, or zero where the vendor did not say.
-	pub parts:	u32,
-	/// What it cost, verbatim and unparsed, or empty where the vendor did not say.
-	pub price:	String,
+	pub parts:	u32,		// segments billed, or zero where the vendor did not say
+	pub price:	String,		// verbatim and unparsed, or empty where the vendor did not say
 }
 
 /// An SMS gateway.
@@ -146,20 +133,15 @@ pub struct Receipt {
 /// that is the entry requirement and which vendor it excludes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Provider {
-	/// Australian, billing in Australian dollars, JSON body, no account identifier in the path.
-	ClickSend,
-	/// Form-encoded body, account identifier in the path.
-	Twilio,
-	/// JSON body, account identifier in the path.
-	Plivo,
+	ClickSend,	// Australian, billing in Australian dollars, JSON body, no account in the path
+	Twilio,		// form-encoded body, account identifier in the path
+	Plivo,		// JSON body, account identifier in the path
 }
 
 impl Provider {
-	/// Every provider there is.
-	///
-	/// A list rather than a `match`, so a variant added and not listed here is unreachable
-	/// through [`Self::from_id`] -- which is the safe direction for a set whose members each
-	/// carry a credential.
+	// A list rather than a `match`, so a variant added and not listed here is unreachable
+	// through `Self::from_id` -- the safe direction for a set whose members each carry a
+	// credential.
 	pub const ALL: [Self; 3] = [Self::ClickSend, Self::Twilio, Self::Plivo];
 
 	/// The id, one spelling everywhere: this enum, a configuration value, a log line.
@@ -171,13 +153,12 @@ impl Provider {
 		}
 	}
 
-	/// The provider an id names.
 	pub fn from_id(s: &str) -> Option<Self> {
 		let s = s.trim().to_lowercase();
 		Self::ALL.into_iter().find(|p| p.id() == s)
 	}
 
-	/// The host this provider's API lives on.
+	/// Dialled, and the name the certificate is validated against.
 	pub fn host(&self) -> &'static str {
 		match self {
 			Self::ClickSend	=> "rest.clicksend.com",
@@ -196,9 +177,6 @@ impl Provider {
 
 	/// Host, path, method, headers and body for one message. **Not a request that is sent**:
 	/// the caller owns the transport, the address check and the TLS.
-	///
-	/// # Errors
-	/// A recipient that is not E.164, an empty body, or a body past [`MAX_BODY_LEN`].
 	pub fn request(&self, cred: &Credential, m: &Message) -> Outcome<SmsCall> {
 		// Checked here rather than left to the vendor, because a malformed number comes back as
 		// a 400 with a vendor-specific code at the far end of a socket, and this is an alerting
@@ -286,12 +264,8 @@ impl Provider {
 		}
 	}
 
-	/// The gateway's answer as the common receipt.
-	///
-	/// # Errors
-	/// A body that is not text, not a JSON object, or an error document -- in which case the
-	/// error names the provider and repeats what the provider said, since that text is where a
-	/// vendor explains a rejected credential or an unfunded account.
+	/// An error document is surfaced with the provider's own words rather than a summary, since
+	/// that text is where a vendor explains a rejected credential or an unfunded account.
 	pub fn parse(&self, body: &[u8]) -> Outcome<Receipt> {
 		let txt = match std::str::from_utf8(body) {
 			Ok(s) => s,
@@ -371,7 +345,6 @@ pub fn is_e164(s: &str) -> bool {
 	digits >= 8 && digits <= 15 && it.all(|c| c.is_ascii_digit())
 }
 
-/// The decoder configuration for a gateway's JSON reply.
 fn json_decoder() -> DecoderConfig<
 	BTreeMap<UsrKindCode, UsrKind>,
 	BTreeMap<String, UsrKindId>,
@@ -414,14 +387,14 @@ fn scalar_text(d: &Dat) -> String {
 	}
 }
 
-/// A named string from a map, empty when absent.
+/// Empty when absent.
 fn text(map: &DaticleMap, key: &str) -> String {
 	map.get(&dat!(key)).map(scalar_text).unwrap_or_default()
 }
 
-/// A named count from a map, zero when absent or unreadable.
+/// Zero when absent or unreadable. Both shapes are read, because one vendor quotes its segment
+/// count and another sends it as a number.
 ///
-/// Both shapes, because one vendor quotes its segment count and another sends it as a number.
 /// The widths are listed rather than parsed back out of a rendered daticle: a daticle prints its
 /// own width, so `parse::<u32>()` over `Display` silently returned zero for every integer reply.
 fn number(map: &DaticleMap, key: &str) -> u32 {

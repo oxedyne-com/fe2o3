@@ -7,6 +7,9 @@
 //! [`encode_component`] escapes what JavaScript's `encodeURIComponent` escapes, and nothing else.
 //! That is a deliberate match: a value a browser wrote and a peer reads has to survive the round
 //! trip byte for byte, and the browser's rule is the one that is not ours to choose.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 

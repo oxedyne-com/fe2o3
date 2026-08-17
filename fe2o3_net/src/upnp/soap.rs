@@ -18,6 +18,9 @@
 //! that binds `s` to something else entirely is misunderstood. No control point
 //! does the second. Attributes on argument elements are ignored, and so is
 //! anything outside `<s:Body>`.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::upnp::{
     escape,
@@ -32,22 +35,15 @@ use oxedyne_fe2o3_core::prelude::*;
 use std::collections::BTreeMap;
 
 
-/// One invocation: what service, what action, and what it was given.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Action {
-    /// The service type the `SOAPACTION` field named, where the caller supplied
-    /// that field. Empty when the action was read from the body alone.
-    pub service:    String,
-    /// The action's name, e.g. `Browse`.
-    pub name:       String,
-    /// Its arguments, by name, unescaped.
-    pub args:       BTreeMap<String, String>,
+    pub service:    String,                     // service type, empty where `SOAPACTION` was absent
+    pub name:       String,                     // e.g. `Browse`
+    pub args:       BTreeMap<String, String>,   // by name, unescaped
 }
 
 impl Action {
 
-    /// Read an invocation from a `SOAPACTION` field value and a request body.
-    ///
     /// The header is advisory: the body is what says which action to run, and a
     /// control point whose header disagrees with its body is answered from the
     /// body. Pass `None` where the field was absent.
@@ -64,8 +60,6 @@ impl Action {
         })
     }
 
-    /// One argument, or an error naming the one that is missing.
-    ///
     /// UPnP answers a missing argument with error 402, and a caller that wants
     /// that spelling wraps this in [`SoapError::InvalidArgs`].
     pub fn need(&self, arg: &str) -> Outcome<&str> {
@@ -77,11 +71,9 @@ impl Action {
         }
     }
 
-    /// One argument as a number, treating an absent or unreadable one as zero.
-    ///
-    /// Every numeric argument in ContentDirectory:1 is an unsigned index or
-    /// count, and a control point that writes an empty `StartingIndex` means the
-    /// beginning rather than an error.
+    /// An absent or unreadable argument reads as zero. Every numeric argument in
+    /// ContentDirectory:1 is an unsigned index or count, and a control point that
+    /// writes an empty `StartingIndex` means the beginning rather than an error.
     pub fn count(&self, arg: &str) -> u64 {
         match self.args.get(arg) {
             Some(v) => v.trim().parse::<u64>().unwrap_or(0),
@@ -90,10 +82,8 @@ impl Action {
     }
 }
 
-/// Split a `SOAPACTION` field value into its service type and action name.
-///
 /// The value is `"urn:schemas-upnp-org:service:ContentDirectory:1#Browse"`, with
-/// the quotation marks part of the field.
+/// the quotation marks part of the field, and it splits at the `#`.
 pub fn parse_action_field(value: &str) -> Outcome<(String, String)> {
     let trimmed = value.trim().trim_matches('"');
     match trimmed.rsplit_once('#') {
@@ -104,7 +94,6 @@ pub fn parse_action_field(value: &str) -> Outcome<(String, String)> {
     }
 }
 
-/// Read the action name and its arguments out of an envelope's body.
 pub fn parse_body(body: &str) -> Outcome<(String, BTreeMap<String, String>)> {
     let inner = match element_body(body, "Body") {
         Some(inner) => inner,
@@ -127,10 +116,9 @@ pub fn parse_body(body: &str) -> Outcome<(String, BTreeMap<String, String>)> {
     Ok((name.to_string(), args))
 }
 
-/// The text between one element's tags, by local name, ignoring any prefix.
-///
-/// Answers `None` for an element that is not there, and for one written as an
-/// empty tag, which for a SOAP body means the same thing.
+/// Matched on local name, ignoring any prefix. `None` for an element that is not
+/// there, and for one written as an empty tag, which for a SOAP body means the
+/// same thing.
 fn element_body<'a>(xml: &'a str, local: &str) -> Option<&'a str> {
     let mut from = 0usize;
     while let Some(open) = xml[from..].find('<') {
@@ -166,10 +154,9 @@ fn element_body<'a>(xml: &'a str, local: &str) -> Option<&'a str> {
     None
 }
 
-/// The first element in a fragment: its local name, its text, and what follows it.
-///
-/// An empty element (`<Filter/>`) yields an empty value, which is what a control
-/// point asking for every field sends.
+/// Its local name, its text, and what follows it. An empty element (`<Filter/>`)
+/// yields an empty value, which is what a control point asking for every field
+/// sends.
 fn first_element(xml: &str) -> Option<(&str, (&str, &str))> {
     let open = match xml.find('<') {
         Some(at) => at,
@@ -216,8 +203,7 @@ fn first_element(xml: &str) -> Option<(&str, (&str, &str))> {
     }
 }
 
-/// A tag's local name: what is left after any namespace prefix and before any
-/// attribute.
+/// What is left after any namespace prefix and before any attribute.
 fn local_name(tag: &str) -> &str {
     let name = match tag.find(|c: char| c.is_whitespace()) {
         Some(at) => &tag[..at],
@@ -230,8 +216,6 @@ fn local_name(tag: &str) -> &str {
     }
 }
 
-/// Build the envelope answering an action.
-///
 /// `service` is the service *type*, which the response element carries as its
 /// namespace, and the arguments go out in the order given: ContentDirectory:1
 /// specifies an order for them and some control points read them positionally.
@@ -259,18 +243,12 @@ pub fn response(service: &str, action: &str, args: &[(&str, String)]) -> String 
 /// whose two halves disagree is worse than no fault at all.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SoapError {
-    /// 401: this service has no such action.
-    InvalidAction,
-    /// 402: an argument is missing, misnamed or unreadable.
-    InvalidArgs,
-    /// 501: the action is understood and could not be carried out.
-    ActionFailed,
-    /// 701: the `ObjectID` names nothing.
-    NoSuchObject,
-    /// 709: the `SortCriteria` names a property this server cannot sort on.
-    UnsupportedSort,
-    /// 720: the request could not be processed.
-    CannotProcess,
+    InvalidAction,      // this service has no such action
+    InvalidArgs,        // an argument is missing, misnamed or unreadable
+    ActionFailed,       // understood, and could not be carried out
+    NoSuchObject,       // the `ObjectID` names nothing
+    UnsupportedSort,    // the `SortCriteria` names a property this server cannot sort on
+    CannotProcess,      // no reason of its own, so the last resort
 }
 
 impl SoapError {
@@ -299,8 +277,6 @@ impl SoapError {
         }
     }
 
-    /// The envelope refusing an action.
-    ///
     /// A SOAP fault goes back with HTTP status 500, which is the caller's to set:
     /// a control point that receives a fault under a 200 discards it.
     pub fn envelope(&self) -> String {
@@ -328,8 +304,8 @@ impl SoapError {
 mod tests {
     use super::*;
 
-    /// A `Browse` as a control point sends one: prefixed envelope, unprefixed
-    /// arguments, and an escaped filter.
+    // A `Browse` as a control point sends one: prefixed envelope, unprefixed
+    // arguments, and an escaped filter.
     const A_BROWSE: &str = "<?xml version=\"1.0\"?>\
         <s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" \
         s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">\

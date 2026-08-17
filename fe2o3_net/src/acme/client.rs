@@ -37,6 +37,9 @@
 //! also used for any other outbound HTTPS call in `fe2o3_net`. The caller
 //! supplies an `Arc<ClientConfig>` that pins the Let's Encrypt root
 //! anchors; see [`crate::acme::trust::letsencrypt_client_config`].
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::{
     acme::{
@@ -105,28 +108,23 @@ use tokio_rustls::rustls::ClientConfig;
 /// ergonomic friction of `async fn` in traits.
 pub trait ChallengeInstaller: Send + Sync {
 
-    /// Install `cert` as the ALPN-gated challenge certificate for
-    /// `hostname`. By the time this method returns, any incoming TLS
-    /// handshake for `hostname` that advertises the `acme-tls/1` ALPN
-    /// protocol must be answered with `cert`.
+    /// By the time this returns, any incoming TLS handshake for `hostname` that
+    /// advertises the `acme-tls/1` ALPN protocol must be answered with `cert`.
     fn install(&self, hostname: &str, cert: &ChallengeCert) -> Outcome<()>;
 
-    /// Remove the challenge certificate previously installed for
-    /// `hostname`. Called after the CA has validated (or given up on)
-    /// the challenge, regardless of outcome.
+    /// Called once the CA has validated the challenge or given up on it, either
+    /// way.
     fn remove(&self, hostname: &str) -> Outcome<()>;
 }
 
 /// A freshly-issued certificate chain plus its matching private key.
+///
+/// The key is **not** the ACME account key: it is the fresh P-256 pair rcgen
+/// minted while building the CSR, whose public half the CA therefore knows.
 #[derive(Clone, Debug)]
 pub struct IssuedCertificate {
-    /// PEM-encoded certificate chain exactly as the CA sent it.
-    pub cert_pem:   Vec<u8>,
-    /// PKCS#8 DER-encoded private key matching the leaf cert. This is
-    /// **not** the ACME account key -- it is a fresh P-256 key pair that
-    /// rcgen generated while building the CSR and which the CA therefore
-    /// knows the public half of.
-    pub key_pkcs8:  Vec<u8>,
+    pub cert_pem:   Vec<u8>,    // PEM chain, exactly as the CA sent it
+    pub key_pkcs8:  Vec<u8>,    // PKCS#8 DER, matching the leaf cert
 }
 
 
@@ -141,28 +139,18 @@ pub struct IssuedCertificate {
 /// matches the protocol -- which is intrinsically serial because of the
 /// nonce chain -- and avoids any need for locks inside the client.
 pub struct AcmeClient {
-    /// Full URL of the CA directory endpoint.
-    directory_url:  String,
-    /// Contact email the account will be registered with.
-    contact_email:  String,
-    /// rustls client config trusting the CA's root anchors.
-    tls_config:     Arc<ClientConfig>,
-    /// Persistent account signing key. Generated fresh or loaded from the
-    /// disk cache by the caller before construction.
-    signer:         JwsSigner,
-    /// Directory document, cached after the first fetch.
-    directory:      Option<Directory>,
-    /// Account URL (the `kid`), set once `register_account` has returned.
-    kid:            Option<String>,
-    /// Most recent `Replay-Nonce` header value, to be consumed on the
-    /// next POST.
-    nonce:          Option<String>,
+    directory_url:  String,               // full URL of the CA directory endpoint
+    contact_email:  String,               // the account is registered with this
+    tls_config:     Arc<ClientConfig>,    // trusts the CA's root anchors
+    signer:         JwsSigner,            // account key, minted or loaded by the caller
+    directory:      Option<Directory>,    // cached after the first fetch
+    kid:            Option<String>,       // account URL, set by register_account
+    nonce:          Option<String>,       // latest Replay-Nonce, spent on the next POST
 }
 
 impl AcmeClient {
 
-    /// Build a new client. Does no I/O; the directory and nonce are
-    /// fetched lazily on first use.
+    /// Does no I/O; the directory and the first nonce are fetched lazily.
     pub fn new(
         directory_url:  impl Into<String>,
         contact_email:  impl Into<String>,
@@ -182,22 +170,17 @@ impl AcmeClient {
         }
     }
 
-    /// Borrow the underlying account signer so the caller can persist the
-    /// PKCS#8 bytes to disk via [`crate::acme::cache::AcmeDiskCache`].
     pub fn signer(&self) -> &JwsSigner {
         &self.signer
     }
 
-    /// Return the account URL assigned by the CA during
-    /// `register_account`, or `None` if registration has not yet run.
+    /// The account URL the CA assigned, `None` until `register_account` has run.
     pub fn kid(&self) -> Option<&str> {
         self.kid.as_deref()
     }
 
     // ---- low-level helpers -----------------------------------------------
 
-    /// Fetch the CA directory if not already cached, then return a
-    /// reference to it.
     async fn ensure_directory(&mut self) -> Outcome<&Directory> {
         if self.directory.is_none() {
             let dir = res!(self.fetch_directory().await);
@@ -211,7 +194,6 @@ impl AcmeClient {
         }
     }
 
-    /// GET the directory document.
     async fn fetch_directory(&self) -> Outcome<Directory> {
         let (host, port, path) = res!(split_https_url(&self.directory_url));
         let msg = res!(https_request(
@@ -227,9 +209,8 @@ impl AcmeClient {
         parse_json_response(&msg.body)
     }
 
-    /// GET the new-nonce endpoint to obtain a fresh nonce. RFC 8555 §7.2
-    /// permits either GET or HEAD; GET is simpler because our HTTP
-    /// reader always expects a body frame (possibly empty).
+    /// RFC 8555 §7.2 permits GET or HEAD on the new-nonce endpoint. GET is used
+    /// because the HTTP reader here always expects a body frame, possibly empty.
     async fn refresh_nonce(&mut self) -> Outcome<()> {
         let new_nonce_url = {
             let dir = res!(self.ensure_directory().await);
@@ -250,9 +231,8 @@ impl AcmeClient {
         Ok(())
     }
 
-    /// Consume the stashed nonce. If none is cached, fetch a fresh one
-    /// first. The fresh one is stashed into `self.nonce` by the underlying
-    /// HTTP reply and then immediately taken.
+    /// Fetches one first where none is stashed, the reply stashing it into
+    /// `self.nonce` for this call to take straight back out.
     async fn take_nonce(&mut self) -> Outcome<String> {
         if self.nonce.is_none() {
             res!(self.refresh_nonce().await);
@@ -266,8 +246,8 @@ impl AcmeClient {
         }
     }
 
-    /// Sign a payload with a `jwk` protected header. Used only for the
-    /// new-account request, where the CA does not yet know the account URL.
+    /// Only the new-account request signs under `jwk`, the CA knowing no account
+    /// URL for it yet.
     fn sign_with_jwk(
         &self,
         url:        &str,
@@ -288,8 +268,7 @@ impl AcmeClient {
         Ok(res!(jws.json()).into_bytes())
     }
 
-    /// Sign a payload with a `kid` protected header. Used for every
-    /// authenticated request after `register_account` has run.
+    /// Every authenticated request after `register_account` signs under `kid`.
     fn sign_with_kid(
         &self,
         url:        &str,
@@ -316,8 +295,7 @@ impl AcmeClient {
         Ok(res!(jws.json()).into_bytes())
     }
 
-    /// Sign an empty-payload request in POST-as-GET style (RFC 8555 §6.3)
-    /// using a `kid` header.
+    /// The empty-payload POST-as-GET of RFC 8555 §6.3, under a `kid` header.
     fn sign_post_as_get(
         &self,
         url:        &str,
@@ -341,11 +319,9 @@ impl AcmeClient {
         Ok(res!(jws.json()).into_bytes())
     }
 
-    /// Low-level JOSE POST. Signs `payload` either with `jwk` (when
-    /// `use_jwk` is true -- first contact, new-account case) or with `kid`
-    /// (every other request), POSTs the result to `url` with the correct
-    /// `Content-Type`, updates the stashed nonce from the response, and
-    /// transparently retries once on a `badNonce` server error.
+    /// `use_jwk` picks the `jwk` header of first contact over the `kid` of every
+    /// later request. The stashed nonce is updated from the reply, and a
+    /// `badNonce` from the server is retried once with the nonce it returned.
     async fn post_jose(
         &mut self,
         url:        &str,
@@ -399,8 +375,7 @@ impl AcmeClient {
         }
     }
 
-    /// Same as `post_jose` but for POST-as-GET style requests (empty
-    /// payload), still using the `kid` authentication mode.
+    /// `post_jose` with an empty payload, still under `kid`.
     async fn post_as_get(
         &mut self,
         url:    &str,
@@ -446,8 +421,8 @@ impl AcmeClient {
 
     // ---- protocol steps --------------------------------------------------
 
-    /// Register or recover the ACME account for our signer key. On
-    /// success, stores the `Location` header as `self.kid`.
+    /// Registers or recovers the account belonging to the signer key, storing
+    /// the reply's `Location` header as the `kid`.
     pub async fn register_account(&mut self) -> Outcome<()> {
         let new_account_url = {
             let dir = res!(self.ensure_directory().await);
@@ -461,9 +436,8 @@ impl AcmeClient {
         Ok(())
     }
 
-    /// Submit a new order for the given DNS identifiers. Returns the
-    /// order's `Location` URL (which the client must POST-as-GET to poll
-    /// the status) and the parsed `Order`.
+    /// The string is the order's `Location` URL, which is POST-as-GET'd to poll
+    /// the status.
     pub async fn new_order(
         &mut self,
         dns_names:  &[String],
@@ -482,7 +456,6 @@ impl AcmeClient {
         Ok((order_url, order))
     }
 
-    /// Fetch an authorisation object in POST-as-GET style.
     pub async fn fetch_authorization(
         &mut self,
         authz_url:  &str,
@@ -493,8 +466,7 @@ impl AcmeClient {
         parse_json_response(&msg.body)
     }
 
-    /// POST `{}` to a challenge URL to tell the CA we are ready to be
-    /// validated.
+    /// POSTs `{}` to the challenge URL, which is how readiness is signalled.
     pub async fn signal_challenge_ready(
         &mut self,
         challenge_url:  &str,
@@ -506,7 +478,6 @@ impl AcmeClient {
         parse_json_response(&msg.body)
     }
 
-    /// POST-as-GET an order URL to read its current status.
     pub async fn poll_order(
         &mut self,
         order_url:  &str,
@@ -517,7 +488,6 @@ impl AcmeClient {
         parse_json_response(&msg.body)
     }
 
-    /// POST the CSR to the order's finalise URL.
     pub async fn finalize_order(
         &mut self,
         finalize_url:   &str,
@@ -531,9 +501,7 @@ impl AcmeClient {
         parse_json_response(&msg.body)
     }
 
-    /// POST-as-GET the issued certificate URL. Returns the raw response
-    /// body, which is a PEM-encoded certificate chain
-    /// (`application/pem-certificate-chain`).
+    /// The body verbatim, an `application/pem-certificate-chain` PEM chain.
     pub async fn download_certificate(
         &mut self,
         cert_url:   &str,
@@ -546,9 +514,8 @@ impl AcmeClient {
 
     // ---- high-level driver -----------------------------------------------
 
-    /// Drive the full RFC 8555 issuance cycle for the given DNS names,
-    /// installing challenge certs via `installer` at the appropriate
-    /// moments and removing them afterwards.
+    /// Drives the whole RFC 8555 cycle, installing challenge certs through
+    /// `installer` and removing every one of them afterwards, success or not.
     pub async fn issue_certificate<I: ChallengeInstaller>(
         &mut self,
         dns_names:  &[String],
@@ -703,8 +670,6 @@ impl AcmeClient {
         Ok(())
     }
 
-    /// Poll an authorisation URL until its status is no longer `pending`.
-    /// Returns the terminal authorisation object.
     async fn poll_authorisation_until_final(
         &mut self,
         authz_url:  &str,
@@ -727,8 +692,8 @@ impl AcmeClient {
             IO, Network, Timeout))
     }
 
-    /// Poll an order URL until it is ready to be finalised. Used after the
-    /// challenges are satisfied, before the finalise POST.
+    /// `valid` returns as well as `ready`: an order the CA finalised while this
+    /// was polling is past ready, not short of it.
     async fn poll_until_ready(
         &mut self,
         order_url:  &str,
@@ -756,8 +721,6 @@ impl AcmeClient {
             IO, Network, Timeout))
     }
 
-    /// Poll an order URL until its status is `valid`. Used after the
-    /// finalise POST to wait for the CA to issue the certificate.
     async fn poll_until_valid(
         &mut self,
         order_url:  &str,
@@ -794,24 +757,20 @@ impl AcmeClient {
 // │ CONSTANTS                                                                 │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Interval between successive authorisation / order polls.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-/// Maximum number of polls before giving up on a single order or
-/// authorisation transition. Combined with `POLL_INTERVAL`, this gives a
-/// total budget of roughly one minute.
-const POLL_MAX_ATTEMPTS: u32 = 30;
+const POLL_MAX_ATTEMPTS: u32 = 30; // 30 x 2 s, about a minute per transition
 
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ HELPERS                                                                   │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Split an `https://host[:port]/path...` URL into its three components.
+/// Splits `https://host[:port]/path...` into host, port and path.
 ///
-/// IPv6 literal hosts (`https://[::1]/path`) are not supported because
-/// ACME traffic goes to DNS names in practice, and handling the bracketed
-/// form would significantly complicate the parser.
+/// An IPv6 literal host, `https://[::1]/path`, is not supported: ACME traffic
+/// goes to DNS names in practice, and the bracketed form costs more parser than
+/// it is worth.
 pub(super) fn split_https_url(url: &str) -> Outcome<(String, u16, String)> {
     let rest = match url.strip_prefix("https://") {
         Some(r) => r,
@@ -844,8 +803,6 @@ pub(super) fn split_https_url(url: &str) -> Outcome<(String, u16, String)> {
     Ok((host.to_string(), port, path.to_string()))
 }
 
-/// Extract the current HTTP status code from a response message as a
-/// plain `u16`.
 fn http_status_code(msg: &HttpMessage) -> u16 {
     match &msg.header.headline {
         crate::http::header::HttpHeadline::Response { status } => *status as u16,
@@ -853,8 +810,6 @@ fn http_status_code(msg: &HttpMessage) -> u16 {
     }
 }
 
-/// Read the `Replay-Nonce` header off a response, returning it as an
-/// owned string.
 fn read_replay_nonce(msg: &HttpMessage, context: &str) -> Outcome<String> {
     match msg.header.get_a_field_value(&HeaderName::ReplayNonce) {
         Some(HeaderFieldValue::Generic(s)) => Ok(s.clone()),
@@ -868,8 +823,6 @@ fn read_replay_nonce(msg: &HttpMessage, context: &str) -> Outcome<String> {
     }
 }
 
-/// Read the `Location` header off a response, returning it as an owned
-/// string.
 fn read_location(msg: &HttpMessage, context: &str) -> Outcome<String> {
     match msg.header.get_a_field_value(&HeaderName::Location) {
         Some(HeaderFieldValue::Generic(s)) => Ok(s.clone()),
@@ -883,8 +836,8 @@ fn read_location(msg: &HttpMessage, context: &str) -> Outcome<String> {
     }
 }
 
-/// Ensure an HTTP response carries a 2xx status, otherwise turn it into
-/// an Outcome error with any embedded ACME problem document folded in.
+/// Anything but a 2xx becomes an error with the embedded ACME problem document
+/// folded into its message.
 fn require_success(msg: &HttpMessage, context: &str) -> Outcome<()> {
     let status = http_status_code(msg);
     if status / 100 == 2 {
@@ -893,8 +846,8 @@ fn require_success(msg: &HttpMessage, context: &str) -> Outcome<()> {
     Err(res!(acme_error_from_response(msg, context)))
 }
 
-/// Build an error from a non-2xx ACME response. If the body parses as a
-/// Problem document, include the `type` and `detail` in the error text.
+/// A body that parses as a Problem document contributes its `type` and `detail`
+/// to the error text.
 fn acme_error_from_response(
     msg:        &HttpMessage,
     context:    &str,
@@ -915,8 +868,8 @@ fn acme_error_from_response(
     Ok(err!(message.clone(); IO, Network, Unknown))
 }
 
-/// Try to parse the body as an RFC 7807 Problem document. Returns
-/// `Ok(None)` if the body is empty or clearly not a JSON object.
+/// RFC 7807. `Ok(None)` where the body is empty or is not a JSON object, since a
+/// missing problem document is not itself a failure.
 fn parse_problem_body(body: &[u8]) -> Outcome<Option<Problem>> {
     if body.is_empty() {
         return Ok(None);
@@ -941,27 +894,19 @@ fn parse_problem_body(body: &[u8]) -> Outcome<Option<Problem>> {
 /// What the client must do with a single authorisation.
 #[derive(Clone, Debug)]
 pub(super) enum AuthzStep {
-    /// The CA has already validated this identifier, so there is nothing to
-    /// prove. POSTing the challenge anyway is what Boulder rejects with
-    /// `400 malformed`.
-    Skip,
-    /// Install the challenge cert and POST the challenge to signal readiness.
-    Prove(Challenge),
-    /// Readiness has already been signalled and the CA is validating: keep the
-    /// challenge cert up and poll, but do not POST the challenge again.
-    AwaitValidation(Challenge),
+    Skip,                          // already validated, nothing left to prove
+    Prove(Challenge),              // install the cert, then POST the challenge
+    AwaitValidation(Challenge),    // keep the cert up and poll, but do not re-POST
 }
 
 /// What the client must do with a freshly-created order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum OrderStep {
-    /// Authorisations are outstanding and must be satisfied first.
-    Authorise,
-    /// Every authorisation is already valid; go straight to the CSR.
-    Finalise,
+    Authorise,    // authorisations are outstanding and must be satisfied first
+    Finalise,     // every authorisation is already valid, go straight to the CSR
 }
 
-/// Decide what to do with `authz`, per RFC 8555 §7.1.4 and §7.1.6.
+/// RFC 8555 §7.1.4 and §7.1.6.
 ///
 /// The `valid` arm is the one that matters: a CA caches successful validations
 /// (Let's Encrypt for roughly 30 days), so any order placed after an issuance
@@ -1054,7 +999,7 @@ pub(super) fn authz_step(
     }
 }
 
-/// Decide what to do with a freshly-created order, per RFC 8555 §7.1.3.
+/// RFC 8555 §7.1.3.
 ///
 /// `pending` and `ready` are the two states a `newOrder` reply can legitimately
 /// arrive in. The other three are handled explicitly rather than swept into a
@@ -1099,8 +1044,8 @@ pub(super) fn order_step(
     }
 }
 
-/// Build the error for an order that has gone `invalid`, folding in the CA's
-/// problem document when one is attached (RFC 8555 §7.1.3 puts it on `error`).
+/// Folds in the CA's problem document where one is attached; RFC 8555 §7.1.3
+/// puts it on `error`.
 fn order_invalid_error(
     order:      &Order,
     order_url:  &str,
@@ -1124,7 +1069,8 @@ fn order_invalid_error(
     Ok(err!(msg.clone(); IO, Network, Invalid))
 }
 
-/// Extract the DNS name from an authorisation's `identifier` field.
+/// Errors unless the identifier is of type `dns`, which is the only kind this
+/// client can satisfy.
 fn dns_identifier(authz: &Authorization) -> Outcome<String> {
     match &authz.identifier {
         Dat::Map(m) => {
@@ -1152,18 +1098,14 @@ fn dns_identifier(authz: &Authorization) -> Outcome<String> {
     }
 }
 
-/// Build a CSR for the given DNS names using a fresh P-256 key pair.
-/// Returns `(csr_der, key_pkcs8_der)`.
+/// A CSR over a fresh P-256 key pair, returned as `(csr_der, key_pkcs8_der)`.
 ///
-/// `rcgen::CertificateParams::new` defaults the distinguished name's
-/// CommonName to the literal string `"rcgen self signed cert"`, which
-/// Let's Encrypt rejects at the finalise step with `rejectedIdentifier:
-/// Domain name contains an invalid character` because LE interprets the
-/// CN as a candidate domain identifier and the default string contains
-/// spaces. We replace the distinguished name with one whose CN is the
-/// first DNS name being requested; this matches the CN to a valid SAN
-/// and satisfies every CA we care about without producing a CN that the
-/// CA would reject.
+/// `rcgen::CertificateParams::new` defaults the distinguished name's CommonName
+/// to the literal `"rcgen self signed cert"`, which Let's Encrypt rejects at the
+/// finalise step with `rejectedIdentifier: Domain name contains an invalid
+/// character`: LE reads the CN as a candidate domain identifier and that string
+/// has spaces in it. The distinguished name is replaced with one whose CN is the
+/// first DNS name requested, matching the CN to a valid SAN.
 fn build_csr(dns_names: &[String]) -> Outcome<(Vec<u8>, Vec<u8>)> {
     let mut params = CertificateParams::new(dns_names.to_vec());
     let mut dn = DistinguishedName::new();

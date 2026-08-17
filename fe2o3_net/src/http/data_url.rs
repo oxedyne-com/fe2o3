@@ -8,6 +8,9 @@
 //!
 //! The size ceiling is the caller's and is checked against the decoded length, since base64 inflates
 //! by a third and a caller means the bytes it will store, not the string it was sent.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -15,15 +18,13 @@ use oxedyne_fe2o3_core::prelude::*;
 /// What a `data:` URL carries: what the bytes are, and the bytes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DataUrl {
-	/// The media type, e.g. `image/png`. `text/plain` where the URL named none, as the syntax says.
-	pub media_type:	String,
-	/// The payload, decoded.
-	pub bytes:	Vec<u8>,
+	pub media_type:	String,		// `text/plain` where the URL named none
+	pub bytes:	Vec<u8>,	// decoded
 }
 
 impl DataUrl {
 
-	/// Whether the payload calls itself an image of one of the types a browser draws everywhere.
+	/// Does the payload call itself an image of a type a browser draws everywhere?
 	///
 	/// A caller storing a picture should ask this and refuse the rest: the media type is a claim by
 	/// whoever sent it, so it decides what will be served back with the bytes, and serving arbitrary
@@ -38,7 +39,7 @@ impl DataUrl {
 			"image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/svg+xml")
 	}
 
-	/// Whether the payload calls itself an image made of pixels rather than of markup.
+	/// Does the payload call itself an image made of pixels rather than of markup?
 	///
 	/// The same question as [`is_web_image`](DataUrl::is_web_image) without SVG, for a caller that
 	/// would rather not think about serving a document it was handed. A raster carries no script and

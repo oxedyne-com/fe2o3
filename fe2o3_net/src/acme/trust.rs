@@ -24,6 +24,9 @@
 //! leave the old one in place long enough to cover the rollover window.
 //! Both anchors are advertised to `rustls` at every ACME startup, so
 //! having multiple active is harmless.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -37,7 +40,7 @@ use tokio_rustls::rustls::{
 };
 
 
-/// ISRG Root X1, DER body encoded as base64. Valid through 2035-06-04.
+// ISRG Root X1, DER body encoded as base64.  Valid through 2035-06-04.
 const ISRG_ROOT_X1_B64: &str = "\
 MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw\
 TzELMAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2Vh\
@@ -69,7 +72,7 @@ oyi3B43njTOQ5yOf+1CceWxG1bQVs5ZufpsMljq4Ui0/1lvh+wjChP4kqKOJ2qxq\
 mRGunUHBcnWEvgJBQl9nJEiU0Zsnvgc/ubhPgXRR4Xq37Z0j4r7g1SgEEzwxA57d\
 emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=";
 
-/// ISRG Root X2, DER body encoded as base64. Valid through 2040-09-17.
+// ISRG Root X2, DER body encoded as base64.  Valid through 2040-09-17.
 const ISRG_ROOT_X2_B64: &str = "\
 MIICGzCCAaGgAwIBAgIQQdKd0XLq7qeAwSxs6S+HUjAKBggqhkjOPQQDAzBPMQsw\
 CQYDVQQGEwJVUzEpMCcGA1UEChMgSW50ZXJuZXQgU2VjdXJpdHkgUmVzZWFyY2gg\
@@ -89,13 +92,9 @@ tL4ndQavEi51mI38AjEAi/V3bNTIZargCyzuFJ0nN6T5U6VR5CmD1/iQMVtCnwr1\
 // │ CLIENT CONFIG BUILDER                                                     │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Build a `rustls::ClientConfig` that trusts only the Let's Encrypt root
-/// anchors compiled into this module.
-///
-/// The returned `Arc<ClientConfig>` is suitable to hand directly to
-/// [`crate::http::client::https_request`] when talking to an ACME
-/// directory URL. Callers typically build it once at service startup and
-/// reuse it for every ACME request.
+/// Trusts only the two roots pinned above, no other CA, and is handed straight
+/// to [`crate::http::client::https_request`] for an ACME directory URL. Built
+/// once at service startup and reused for every request.
 pub fn letsencrypt_client_config() -> Outcome<Arc<ClientConfig>> {
     let mut store = RootCertStore::empty();
     for (label, b64) in [
@@ -119,10 +118,8 @@ pub fn letsencrypt_client_config() -> Outcome<Arc<ClientConfig>> {
     Ok(Arc::new(config))
 }
 
-/// Strip whitespace from a multi-line base64 body and decode to bytes.
-///
-/// `label` is used only to make the error message point at the right
-/// constant if decoding fails.
+/// Whitespace is stripped first, so a body may be kept in PEM line-break form.
+/// `label` only points the error at the right constant.
 fn decode_pem_body(label: &str, body: &str) -> Outcome<Vec<u8>> {
     let cleaned: String = body.chars().filter(|c| !c.is_whitespace()).collect();
     match base64::decode(&cleaned) {

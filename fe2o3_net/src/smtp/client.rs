@@ -15,6 +15,9 @@
 //! expected to drive retries itself by enqueueing the message in a
 //! spool directory and re-invoking the client. Keeps the abstraction
 //! useful for both a "fire and forget" path and a real queue runner.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::{
     dns_resolver,
@@ -45,9 +48,7 @@ use tokio::{
 use tokio_rustls::rustls::ClientConfig;
 
 
-/// Default per-IO timeout for outbound SMTP. Chosen generously because
-/// some receiving MX hosts greylist or impose multi-second waits before
-/// 220.
+// Generous, because some receiving MX hosts greylist or impose multi-second waits before 220.
 pub const SMTP_CLIENT_TIMEOUT: Duration = Duration::from_secs(60);
 
 
@@ -58,35 +59,23 @@ pub const SMTP_CLIENT_TIMEOUT: Duration = Duration::from_secs(60);
 /// upgrades with `STARTTLS`; port 465 is TLS from the first byte.
 #[derive(Clone, Debug)]
 pub struct SubmissionConfig {
-    /// Submission host. Also the name the certificate is validated against.
-    pub host:       String,
-    /// Submission port, conventionally 587 (STARTTLS) or 465 (implicit TLS).
-    pub port:       u16,
-    /// Transport protection.
+    pub host:       String,     // also the name the certificate is validated against
+    pub port:       u16,        // conventionally 587 (STARTTLS) or 465 (implicit TLS)
     pub security:   Security,
-    /// The account to authenticate as. Usually, but not always, the address being sent from.
-    pub user:       String,
-    /// The account's password. For a provider with two-factor authentication this is an
-    /// application password, not the password the human types into a browser.
+    pub user:       String,     // usually, but not always, the address being sent from
+    // For a provider with two-factor authentication this is an application password, not the
+    // password the human types into a browser.
     pub password:   String,
-    /// Per-IO deadline.
-    pub timeout:    Duration,
-    /// Connect to this address instead of resolving `host`. The certificate is still validated
-    /// against `host`, so pinning the address weakens nothing -- and a server connecting on behalf
-    /// of a user must vet the address it dials rather than hand the name to the resolver twice.
+    pub timeout:    Duration,   // per IO
+    // Dialled instead of resolving `host`. The certificate is still validated against `host`, so
+    // pinning the address weakens nothing -- and a server connecting on behalf of a user must vet
+    // the address it dials rather than hand the name to the resolver twice.
     pub addr:       Option<SocketAddr>,
 }
 
 impl SubmissionConfig {
 
-    /// A submission target with the conventional deadline and no pinned address.
-    ///
-    /// # Arguments
-    /// * `host` - The provider's submission host.
-    /// * `port` - The submission port.
-    /// * `security` - How the connection is protected.
-    /// * `user` - The account to authenticate as.
-    /// * `password` - That account's password.
+    /// The conventional deadline, and no pinned address.
     pub fn new(
         host:       impl Into<String>,
         port:       u16,
@@ -107,13 +96,11 @@ impl SubmissionConfig {
         }
     }
 
-    /// Dial this address rather than resolving the host.
     pub fn with_addr(mut self, addr: SocketAddr) -> Self {
         self.addr = Some(addr);
         self
     }
 
-    /// Use this per-IO deadline.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
@@ -121,16 +108,13 @@ impl SubmissionConfig {
 }
 
 
-/// One outbound delivery target after MX resolution. Sorted in
-/// preference order by [`OutboundClient::deliver`].
+/// One outbound delivery target after MX resolution, sorted into preference order by
+/// [`OutboundClient::deliver`].
 #[derive(Clone, Debug)]
 struct DeliveryTarget {
-    /// MX exchange host name.
-    host:       String,
-    /// Resolved IP address.
+    host:       String,     // MX exchange
     addr:       IpAddr,
-    /// Original MX preference.
-    preference: u16,
+    preference: u16,        // as the MX record gave it
 }
 
 /// Per-process outbound SMTP client.
@@ -140,20 +124,16 @@ struct DeliveryTarget {
 /// clone -- the inner config is in an `Arc`.
 #[derive(Clone)]
 pub struct OutboundClient {
-    /// Hostname to send in EHLO. Should be the public hostname of the
-    /// sending server (the one that owns the IP whose PTR lines up).
+    // Sent in EHLO. Should be the public hostname of the sending server, the one that owns the
+    // IP whose PTR lines up.
     pub hostname:       Arc<String>,
-    /// Rustls config used for STARTTLS. Built once via
-    /// [`OutboundClient::default_tls_config`].
-    pub tls_config:     Arc<ClientConfig>,
+    pub tls_config:     Arc<ClientConfig>,  // for STARTTLS, built once
 }
 
 impl OutboundClient {
 
-    /// Build an outbound client whose STARTTLS validation uses the
-    /// system CA bundle. Convenience wrapper -- callers that need a
-    /// custom root store should construct the `ClientConfig`
-    /// themselves.
+    /// STARTTLS validation goes against the system CA bundle. A caller needing a custom root
+    /// store builds the `ClientConfig` itself.
     pub fn with_system_roots(hostname: impl Into<String>) -> Outcome<Self> {
         let cfg = res!(Self::default_tls_config());
         Ok(Self {
@@ -162,17 +142,14 @@ impl OutboundClient {
         })
     }
 
-    /// Load the host's CA bundle into a fresh rustls `ClientConfig`.
-    /// Delegates to [`crate::tls::default_client_config`], which every
-    /// protocol client in this crate shares.
+    /// The host's CA bundle, through [`crate::tls::default_client_config`], which every protocol
+    /// client in this crate shares.
     pub fn default_tls_config() -> Outcome<ClientConfig> {
         tls::default_client_config()
     }
 
-    /// Resolve the recipient domain's MX records, then attempt
-    /// delivery against each in preference order until one succeeds.
-    /// Returns the queue id assigned by the first server that accepted
-    /// the message, or the last error if every host failed.
+    /// Each MX in preference order until one succeeds. The queue id is the first accepting
+    /// server's; where every host failed, the error is the last one's.
     pub async fn deliver(
         &self,
         mail_from:  &str,
@@ -269,23 +246,15 @@ impl OutboundClient {
         }
     }
 
-    /// Post a message through the account holder's own provider, authenticating first.
-    ///
-    /// This is the conversation a mail client has, not the one a mail server has: the provider
+    /// The conversation a mail client has, not the one a mail server has: the provider
     /// carries the message because the sender proved they hold the account, so the credential is
     /// not optional and neither is the encryption under it. The client refuses to send the password
     /// over a connection it could not secure -- a provider that offers no TLS on its submission
     /// port is not one a password may be spoken to, and failing loudly is the only safe answer.
     ///
-    /// # Arguments
-    /// * `cfg` - The provider, the port, and the credential.
-    /// * `mail_from` - The envelope sender.
-    /// * `rcpt_to` - The envelope recipients. Unlike delivery, these may span any number of
-    ///   domains: the provider, not this client, works out where each one goes.
-    /// * `body` - The RFC 5322 message.
-    ///
-    /// # Returns
-    /// Whatever the provider said when it accepted the message, which usually carries its queue id.
+    /// Unlike delivery, `rcpt_to` may span any number of domains: the provider, not this client,
+    /// works out where each one goes. What comes back is whatever the provider said on accepting
+    /// the message, which usually carries its queue id.
     pub async fn submit(
         &self,
         cfg:        &SubmissionConfig,
@@ -386,7 +355,6 @@ impl OutboundClient {
         Ok(queue_id)
     }
 
-    /// Greet the server and return what it says it can do.
     async fn ehlo(&self, stream: &mut ClientStream) -> Outcome<SmtpResponse> {
         res!(write_command(stream, &fmt!("EHLO {}", self.hostname)).await);
         let resp = res!(read_smtp_response(stream).await);
@@ -473,12 +441,6 @@ impl OutboundClient {
 /// authenticated. Delivery and submission differ in how they reach this point and not at all in
 /// what they do once they are here, so they share the transaction rather than each keeping a copy
 /// of it -- the second copy is where the dot-stuffing gets forgotten.
-///
-/// # Arguments
-/// * `stream` - The open conversation.
-/// * `mail_from` - The envelope sender.
-/// * `rcpt_to` - The envelope recipients.
-/// * `body` - The RFC 5322 message.
 async fn transact(
     stream:     &mut ClientStream,
     mail_from:  &str,
@@ -558,8 +520,8 @@ async fn transact(
     Ok(resp.text)
 }
 
-/// Whether a delivery error is a permanent rejection -- a 5xx from the receiving server -- that
-/// retrying will not cure.
+/// Is this a permanent rejection -- a 5xx from the receiving server -- that retrying will not
+/// cure?
 ///
 /// The one predicate a caller needs to tell "this address is bad, suppress it" from "the network
 /// hiccupped, try again later". A permanent failure is tagged [`ErrTag::Permanent`] where the 5xx is
@@ -575,13 +537,8 @@ pub fn is_permanent(e: &Error<ErrTag>) -> bool {
 /// `PLAIN` is preferred and `LOGIN` accepted, because between them they are what every provider
 /// worth submitting through offers. Both hand over the password in base64, which is an encoding and
 /// not a protection -- the only thing keeping it safe is the TLS underneath, which is why the
-/// caller establishes that first and refuses to proceed without it.
-///
-/// # Arguments
-/// * `stream` - The open, secured conversation.
-/// * `ehlo` - The extension list the server advertised inside TLS.
-/// * `user` - The account to authenticate as.
-/// * `password` - That account's password.
+/// caller establishes that first and refuses to proceed without it. `ehlo` is the extension list
+/// the server advertised inside TLS.
 async fn authenticate(
     stream:     &mut ClientStream,
     ehlo:       &SmtpResponse,
@@ -662,17 +619,14 @@ fn check_auth(resp: &SmtpResponse) -> Outcome<()> {
         IO, Network, Wire))
 }
 
-/// One parsed SMTP server response (potentially multi-line).
+/// One parsed SMTP server response, potentially multi-line.
 #[derive(Clone, Debug)]
 struct SmtpResponse {
-    /// Numeric code.
     code: u16,
-    /// Concatenated text lines, joined by '\n'.
-    text: String,
+    text: String,   // the text lines, joined by '\n'
 }
 
-/// Read one full multi-line SMTP response (terminated by a line whose
-/// fourth byte is a space rather than a hyphen).
+/// A response ends at the line whose fourth byte is a space rather than a hyphen.
 async fn read_smtp_response(stream: &mut ClientStream) -> Outcome<SmtpResponse> {
     let mut text = String::new();
     let mut code: u16 = 0;
@@ -715,7 +669,7 @@ async fn read_smtp_response(stream: &mut ClientStream) -> Outcome<SmtpResponse> 
     Ok(SmtpResponse { code, text })
 }
 
-/// Write one CRLF-terminated SMTP command.
+/// CRLF-terminated, and flushed.
 async fn write_command(stream: &mut ClientStream, cmd: &str) -> Outcome<()> {
     let line = fmt!("{}\r\n", cmd);
     if let Err(e) = stream.write_all(line.as_bytes()).await {
@@ -727,10 +681,8 @@ async fn write_command(stream: &mut ClientStream, cmd: &str) -> Outcome<()> {
     Ok(())
 }
 
-/// Apply RFC 5321 §4.5.2 dot stuffing to a raw RFC 5322 message.
-///
-/// Any line whose first character is `.` gets a second `.` prepended
-/// so the receiver does not mistake it for the message terminator.
+/// RFC 5321 §4.5.2: any line whose first character is `.` gets a second one prepended, so the
+/// receiver does not mistake it for the message terminator.
 fn dot_stuff(body: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(body.len() + body.len() / 64);
     let mut at_line_start = true;
@@ -744,7 +696,7 @@ fn dot_stuff(body: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Extract the domain part of an `local@domain` address.
+/// Lowercased, from the last `@`.
 fn extract_domain(addr: &str) -> Outcome<String> {
     match addr.rfind('@') {
         Some(i) => Ok(addr[i + 1..].to_lowercase()),

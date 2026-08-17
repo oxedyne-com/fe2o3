@@ -8,6 +8,9 @@
 //! The motivation is to keep Hematite free of a third-party resolver
 //! crate. Outbound SMTP needs MX lookups and `std::net` does not expose
 //! them; rather than add `hickory-resolver` we own the ~250 lines.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -25,14 +28,12 @@ use std::{
 /// One MX record returned by [`lookup_mx`].
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct MxRecord {
-    /// Preference value (lower = preferred).
-    pub preference: u16,
-    /// Exchange host name. Trailing dot stripped.
-    pub exchange:   String,
+    pub preference: u16,       // lower is preferred
+    pub exchange:   String,    // host name, trailing dot stripped
 }
 
-/// Read `/etc/resolv.conf` and return the first listed nameserver, or
-/// `8.8.8.8` if the file is missing/unreadable.
+/// The first nameserver listed in `/etc/resolv.conf`, or `8.8.8.8` where the
+/// file is missing or unreadable.
 pub fn system_resolver() -> SocketAddr {
     let fallback = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 53);
     let contents = match std::fs::read_to_string("/etc/resolv.conf") {
@@ -54,10 +55,9 @@ pub fn system_resolver() -> SocketAddr {
     fallback
 }
 
-/// Resolve MX records for `domain`. Returns the records sorted in
-/// preference order (lowest first). On a successful query that returns
-/// no records, falls back to a synthetic MX pointing at `domain` itself
-/// per RFC 5321 §5.1.
+/// Sorted into preference order, lowest first. A successful query that returns
+/// no records falls back to a synthetic MX pointing at `domain` itself, per
+/// RFC 5321 §5.1.
 pub fn lookup_mx(domain: &str) -> Outcome<Vec<MxRecord>> {
     let resolver = system_resolver();
     let response = res!(query(domain, QTYPE_MX, resolver));
@@ -72,8 +72,7 @@ pub fn lookup_mx(domain: &str) -> Outcome<Vec<MxRecord>> {
     Ok(records)
 }
 
-/// Resolve an A record for `host`. Returns every IPv4 answer in the
-/// order the server sent them, after CNAME chasing.
+/// Every IPv4 answer, in the order the server sent them.
 pub fn lookup_a(host: &str) -> Outcome<Vec<Ipv4Addr>> {
     let resolver = system_resolver();
     let response = res!(query(host, QTYPE_A, resolver));
@@ -96,9 +95,7 @@ const RTYPE_NS:     u16 = 2;
 const RTYPE_CNAME:  u16 = 5;
 const RTYPE_MX:     u16 = 15;
 
-/// Build a DNS query packet for `name` of type `qtype` and send it to
-/// `resolver`, returning the raw response bytes. Single retry on
-/// timeout.
+/// The raw response bytes.  One retry on timeout, and no more.
 fn query(name: &str, qtype: u16, resolver: SocketAddr) -> Outcome<Vec<u8>> {
     let id: u16 = (std::process::id() as u16) ^ (qtype as u16);
     let mut packet = Vec::with_capacity(64);
@@ -146,8 +143,7 @@ fn query(name: &str, qtype: u16, resolver: SocketAddr) -> Outcome<Vec<u8>> {
     Ok(buf[..n].to_vec())
 }
 
-/// Encode a DNS name as a sequence of length-prefixed labels followed
-/// by a zero terminator.
+/// Length-prefixed labels, then a zero terminator.
 fn encode_qname(name: &str, out: &mut Vec<u8>) {
     for label in name.trim_end_matches('.').split('.') {
         let bytes = label.as_bytes();
@@ -157,7 +153,6 @@ fn encode_qname(name: &str, out: &mut Vec<u8>) {
     out.push(0);
 }
 
-/// Parse the entire DNS response and return every MX answer.
 fn parse_mx_response(buf: &[u8]) -> Outcome<Vec<MxRecord>> {
     let (_id, ancount, mut pos) = res!(parse_response_header(buf));
     let mut out = Vec::new();
@@ -184,7 +179,6 @@ fn parse_mx_response(buf: &[u8]) -> Outcome<Vec<MxRecord>> {
     Ok(out)
 }
 
-/// Parse the entire DNS response and return every A answer.
 fn parse_a_response(buf: &[u8]) -> Outcome<Vec<Ipv4Addr>> {
     let (_id, ancount, mut pos) = res!(parse_response_header(buf));
     let mut out = Vec::new();
@@ -213,8 +207,8 @@ fn parse_a_response(buf: &[u8]) -> Outcome<Vec<Ipv4Addr>> {
     Ok(out)
 }
 
-/// Parse the 12-byte DNS header and the question section, returning
-/// `(transaction_id, ancount, position_of_first_answer)`.
+/// `(transaction_id, ancount, position_of_first_answer)`, having read the
+/// 12-byte header and the question section.
 fn parse_response_header(buf: &[u8]) -> Outcome<(u16, u16, usize)> {
     if buf.len() < 12 {
         return Err(err!(
@@ -240,7 +234,7 @@ fn parse_response_header(buf: &[u8]) -> Outcome<(u16, u16, usize)> {
     Ok((id, ancount, pos))
 }
 
-/// Parse one resource record header at `pos`. Returns
+/// One resource record header at `pos`, as
 /// `(rtype, rdlength, rdata_position, position_after_rdata)`.
 fn parse_rr(buf: &[u8], pos: usize) -> Outcome<(u16, u16, usize, usize)> {
     let (_name, after_name) = res!(read_name(buf, pos));
@@ -268,10 +262,9 @@ fn parse_rr(buf: &[u8], pos: usize) -> Outcome<(u16, u16, usize, usize)> {
     Ok((rtype, rdlength, rdata_pos, after_rdata))
 }
 
-/// Decode a DNS name starting at `pos`, following compression pointers
-/// (RFC 1035 §4.1.4). Returns the decoded name and the position
-/// immediately after the *uncompressed* part of the name (i.e. the
-/// position the caller should resume reading at).
+/// Follows the compression pointers of RFC 1035 §4.1.4. The position returned is
+/// the one after the *uncompressed* part of the name, which is where the caller
+/// resumes reading.
 fn read_name(buf: &[u8], start: usize) -> Outcome<(String, usize)> {
     let mut name = String::new();
     let mut pos = start;

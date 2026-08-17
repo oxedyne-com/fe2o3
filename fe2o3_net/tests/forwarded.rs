@@ -10,6 +10,9 @@
 //! parser makes of those bytes. Asserting on the string alone would prove what was written;
 //! asserting through the parser proves what a reader of it actually gets, which is the property an
 //! upstream depends on.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_net::http::{
@@ -30,10 +33,8 @@ use std::{
 use tokio::io::AsyncWriteExt;
 
 
-/// Parse raw request bytes into an `HttpMessage` through the real wire parser.
-///
-/// Building the message rather than parsing it would skip the name normalisation the parser does,
-/// and the point of these tests is what happens to bytes that arrived from outside.
+/// Through the real wire parser: building the message instead would skip the name normalisation the
+/// parser does, and the point of these tests is what happens to bytes that arrived from outside.
 async fn parse_request(raw: &str) -> Outcome<HttpMessage> {
     let (mut near, mut far) = tokio::io::duplex(8192);
     let bytes = raw.as_bytes().to_vec();

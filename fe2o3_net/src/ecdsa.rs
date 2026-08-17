@@ -22,6 +22,9 @@
 //! - Message: the raw bytes as signed. It must NOT be pre-hashed --
 //!   `ECDSA_P256_SHA256_FIXED` hashes the message with SHA-256 internally,
 //!   matching WebCrypto's `hash: 'SHA-256'`.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -37,20 +40,10 @@ use ring::{
 };
 
 
-/// Verify an ECDSA P-256 signature over `msg` under `pubkey`.
-///
-/// Returns `true` when the signature is valid. A public key or signature of
-/// the wrong length, or an ill-formed point, simply fails to verify -- the
-/// call never panics, since `ring` reports every malformed input as an
-/// ordinary verification failure.
-///
-/// # Arguments
-/// * `pubkey` -- the 65-byte uncompressed SEC1 point `0x04 || X || Y`
-///   (WebCrypto `exportKey('raw')`).
-/// * `msg` -- the raw message bytes as signed; NOT pre-hashed, as SHA-256 is
-///   applied internally.
-/// * `sig` -- the 64-byte fixed-length `r || s` signature (IEEE P1363, the
-///   form WebCrypto ECDSA signing emits).
+/// `pubkey` is the 65-byte uncompressed SEC1 point, `sig` the 64-byte `r || s`,
+/// and `msg` the raw message rather than a digest, SHA-256 being applied within.
+/// A wrong length or an ill-formed point fails to verify rather than panicking,
+/// `ring` reporting every malformed input as an ordinary verification failure.
 pub fn verify_p256_sha256_fixed(pubkey: &[u8], msg: &[u8], sig: &[u8]) -> bool {
     let key = UnparsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, pubkey);
     key.verify(msg, sig).is_ok()
@@ -66,16 +59,12 @@ pub fn verify_p256_sha256_fixed(pubkey: &[u8], msg: &[u8], sig: &[u8]) -> bool {
 /// The PKCS#8 bytes are retained so the key can be written to disk and reloaded: `ring` consumes
 /// them at load time and does not hand them back.
 pub struct P256KeyPair {
-    /// PKCS#8 serialisation of the private key, kept for persistence.
-    pkcs8:      Vec<u8>,
-    /// The live `ring` key pair.
-    key_pair:   EcdsaKeyPair,
-    /// Random source `ring` requires for each signature.
-    rng:        SystemRandom,
+    pkcs8:      Vec<u8>,        // kept for persistence
+    key_pair:   EcdsaKeyPair,   // ring's live key pair
+    rng:        SystemRandom,   // ring wants one per signature
 }
 
 impl P256KeyPair {
-    /// Generate a fresh P-256 key pair.
     pub fn generate() -> Outcome<Self> {
         let rng = SystemRandom::new();
         let pkcs8 = match EcdsaKeyPair::generate_pkcs8(
@@ -91,7 +80,6 @@ impl P256KeyPair {
         Ok(Self { pkcs8, key_pair, rng })
     }
 
-    /// Load an existing P-256 key pair from its PKCS#8 encoding.
     pub fn from_pkcs8(pkcs8: &[u8]) -> Outcome<Self> {
         let rng = SystemRandom::new();
         let key_pair = res!(Self::load_pair(pkcs8, &rng));
@@ -102,8 +90,7 @@ impl P256KeyPair {
         })
     }
 
-    /// The PKCS#8 serialisation of the private key, for on-disk persistence. The bytes round-trip
-    /// through [`P256KeyPair::from_pkcs8`].
+    /// The bytes round-trip through [`P256KeyPair::from_pkcs8`].
     pub fn pkcs8_bytes(&self) -> &[u8] {
         &self.pkcs8
     }
@@ -114,9 +101,8 @@ impl P256KeyPair {
         self.key_pair.public_key().as_ref().to_vec()
     }
 
-    /// Sign `msg` and return the 64-byte fixed-length `r || s` signature.
-    ///
-    /// `msg` is the raw message, not a digest: SHA-256 is applied internally, matching WebCrypto's
+    /// The 64-byte fixed-length `r || s` form. `msg` is the raw message, not a
+    /// digest: SHA-256 is applied within, matching WebCrypto's
     /// `sign({ name: 'ECDSA', hash: 'SHA-256' })`.
     pub fn sign(&self, msg: &[u8]) -> Outcome<Vec<u8>> {
         match self.key_pair.sign(&self.rng, msg) {

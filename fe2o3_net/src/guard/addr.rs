@@ -10,6 +10,9 @@
 //! SHIELD's handshake-sequence check) are layered on top via the low-level
 //! [`AddressGuard::update_log`] helper, which exposes the per-address log under the same
 //! shard lock acquired by the rate-limit check.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::{
     prelude::*,
@@ -39,28 +42,18 @@ use std::{
 /// Per-address state in the guard state machine.
 #[derive(Clone, Debug)]
 pub enum AddressState<const N: usize> {
-    /// Passively observing request rate; nothing dropped.
-    Monitor(RingTimer<N>),
-    /// Actively throttling; requests closer than `tint_min` apart are dropped.
-    Throttle {
-        /// Ring of throttled request timestamps.
+    Monitor(RingTimer<N>),    // watching the rate only, nothing dropped
+    Throttle {    // a request closer than `tint_min` to the last is dropped
         reqs:       RingTimer<N>,
-        /// Minimum interval between allowed requests.
         tint_min:   Duration,
-        /// When the throttle episode began.
         start:      SystemTime,
-        /// Cooldown after which the address returns to `Monitor`.
-        sunset:     Duration,
+        sunset:     Duration,    // cooldown, after which the address returns to Monitor
     },
-    /// Address is blocked outright.
-    Blacklist {
-        /// When the address was blacklisted.
+    Blacklist {    // blocked outright
         since:  SystemTime,
-        /// Why the address was blacklisted.
         reason: BlacklistReason,
     },
-    /// Address is always allowed through.
-    Whitelist,
+    Whitelist,    // always allowed through
 }
 
 impl<const N: usize> Default for AddressState<N> {
@@ -70,7 +63,7 @@ impl<const N: usize> Default for AddressState<N> {
 }
 
 impl<const N: usize> AddressState<N> {
-    /// Short label used by dashboards, logs and snapshot listings.
+    /// One of "monitor", "throttle", "blacklist" or "whitelist".
     pub fn label(&self) -> &'static str {
         match self {
             Self::Monitor(_)    => "monitor",
@@ -84,10 +77,8 @@ impl<const N: usize> AddressState<N> {
 /// Reason an address is in the `Blacklist` state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BlacklistReason {
-    /// Guard state machine transitioned the address automatically after sustained rate abuse.
-    AutoRateLimit,
-    /// Administrator action.
-    Manual,
+    AutoRateLimit,    // the state machine moved it there after sustained abuse
+    Manual,           // administrator action
 }
 
 /// Per-address log: state, counters, and caller-supplied extension data `D`.
@@ -96,21 +87,13 @@ pub struct AddressLog<
     const N: usize,
     D: Clone + Debug + Default,
 > {
-    /// The IP this log belongs to, stored here so snapshots can emit human-readable rows
-    /// without reverse-resolving hashed shard keys.
-    pub ip:             Option<IpAddr>,
-    /// Guard state machine state.
+    pub ip:             Option<IpAddr>,     // held so a snapshot need not reverse a shard key
     pub state:          AddressState<N>,
-    /// Number of throttling episodes this address has been through.
-    pub throttle_cnt:   u16,
-    /// When the address was first observed.
+    pub throttle_cnt:   u16,                // throttling episodes so far
     pub first_seen:     SystemTime,
-    /// When the address was most recently observed.
     pub last_seen:      SystemTime,
-    /// Total requests observed for this address.
     pub total_reqs:     u64,
-    /// Caller-supplied extension payload.
-    pub data:           D,
+    pub data:           D,                  // caller-supplied extension payload
 }
 
 impl<
@@ -136,16 +119,12 @@ impl<
 /// Decision returned by the guard check APIs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GuardDecision {
-    /// Let the request through.
     Allow,
-    /// Request is within an active throttle window; drop it.
-    Throttled,
-    /// Address is blacklisted; drop the request.
+    Throttled,                   // inside an active throttle window
     Blocked(BlacklistReason),
 }
 
 impl GuardDecision {
-    /// True if the guard says the request must be dropped.
     pub fn should_drop(&self) -> bool {
         !matches!(self, Self::Allow)
     }
@@ -154,44 +133,30 @@ impl GuardDecision {
 /// Aggregate tallies across all known addresses, suitable for a dashboard chip row.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct GuardCounts {
-    /// Addresses currently in the Monitor state.
     pub monitor:        usize,
-    /// Addresses currently in the Throttle state.
     pub throttle:       usize,
-    /// Addresses currently in the Blacklist state.
     pub blacklist:      usize,
-    /// Addresses currently in the Whitelist state.
     pub whitelist:      usize,
-    /// Total distinct addresses observed.
-    pub total:          usize,
-    /// Total requests recorded across all addresses.
-    pub total_reqs:     u64,
+    pub total:          usize,    // distinct addresses observed
+    pub total_reqs:     u64,      // across every address
 }
 
 /// One row in a guard snapshot table.
 #[derive(Clone, Debug)]
 pub struct GuardEntry {
-    /// IP address (only emitted when the log stored one).
-    pub ip:             IpAddr,
-    /// State label ("monitor" / "throttle" / "blacklist" / "whitelist").
-    pub state:          &'static str,
-    /// Number of throttling episodes this address has been through.
+    pub ip:             IpAddr,          // a row appears only where the log stored one
+    pub state:          &'static str,    // "monitor", "throttle", "blacklist" or "whitelist"
     pub throttle_cnt:   u16,
-    /// Total requests for this address.
     pub total_reqs:     u64,
-    /// First time the address was observed.
     pub first_seen:     SystemTime,
-    /// Most recent observation.
     pub last_seen:      SystemTime,
 }
 
 /// Snapshot of the guard: counts plus up to `max` per-address entries.
 #[derive(Clone, Debug, Default)]
 pub struct GuardSnapshot {
-    /// Aggregate tallies.
     pub counts:     GuardCounts,
-    /// Per-address rows, capped by the caller.
-    pub entries:    Vec<GuardEntry>,
+    pub entries:    Vec<GuardEntry>,    // capped by the caller
 }
 
 /// Generic per-address guard.
@@ -204,18 +169,13 @@ pub struct AddressGuard<
     const N: usize, // Request timer ring length.
     D: Clone + Debug + Default,
 > {
-    /// Shard map of per-address logs keyed by a hash of the IP octets.
+    // Per-address logs, keyed by a hash of the IP octets.
     pub amap:           ShardMap<C, S, AddressLog<N, D>, M, H>,
-    /// Maximum average requests per second permitted in `Monitor` state.
-    pub arps_max:       u64,
-    /// Minimum interval between allowed requests in `Throttle` state.
-    pub tint_min:       Duration,
-    /// Base throttle cooldown duration.
-    pub tsunset_base:   Duration,
-    /// Upper bound on jitter added to `tsunset_base` to spread cooldown expiries.
-    pub tsunset_spread: Duration,
-    /// Number of throttling episodes after which the address is blacklisted.
-    pub blist_cnt:      u16,
+    pub arps_max:       u64,         // maximum average requests per second in Monitor
+    pub tint_min:       Duration,    // minimum interval between requests in Throttle
+    pub tsunset_base:   Duration,    // base throttle cooldown
+    pub tsunset_spread: Duration,    // jitter ceiling on it, to spread the expiries
+    pub blist_cnt:      u16,         // throttling episodes before blacklisting
 }
 
 impl<
@@ -228,7 +188,6 @@ impl<
 >
     AddressGuard<C, M, H, S, N, D>
 {
-    /// Convert an IP address to its raw octets as a byte vector.
     fn ip_bytes(addr: &IpAddr) -> Vec<u8> {
         match addr {
             IpAddr::V4(a) => a.octets().to_vec(),
@@ -236,9 +195,8 @@ impl<
         }
     }
 
-    /// Compute a sunset duration with coarse, deterministic jitter derived from the system
-    /// clock. The purpose is anti-coordination of cooldown expiries; cryptographic randomness
-    /// is unnecessary.
+    /// The jitter is coarse and deterministic, taken from the system clock: its
+    /// purpose is to stop cooldowns expiring together, not to be unguessable.
     fn sunset(&self) -> Duration {
         if self.tsunset_spread.is_zero() {
             return self.tsunset_base;
@@ -251,20 +209,15 @@ impl<
         self.tsunset_base + Duration::from_nanos(now % spread)
     }
 
-    /// Check an IP against the guard and update its log. If the address is unknown it is
-    /// inserted in the `Monitor` state and `Allow` is returned.
+    /// An address not seen before is inserted in `Monitor` and allowed through.
     pub fn check(&self, addr: &IpAddr) -> Outcome<GuardDecision> {
         let (decision, _) = res!(self.update_log(addr, |_log, _new| Ok(())));
         Ok(decision)
     }
 
-    /// Low-level primitive: resolve the per-address log, run the state-machine step, and
-    /// invoke `extra` while still holding the shard write lock so callers can compose their
-    /// own checks on top of the generic rate-limit. Returns the state-machine decision plus
-    /// whatever `extra` returned.
-    ///
-    /// `extra` is passed a mutable reference to the log and a boolean indicating whether the
-    /// log was newly created by this call.
+    /// `extra` runs while the shard write lock is still held, so a caller can
+    /// compose its own check on top of the generic rate limit without a second
+    /// acquisition. Its boolean argument says whether this call created the log.
     pub fn update_log<F, T>(
         &self,
         addr:   &IpAddr,
@@ -317,7 +270,7 @@ impl<
         Ok((decision, extra_val))
     }
 
-    /// Run the Monitor -> Throttle -> Blacklist state-machine step for a known entry.
+    /// One Monitor -> Throttle -> Blacklist step, for an entry already present.
     fn evaluate(
         &self,
         log:    &mut AddressLog<N, D>,
@@ -372,8 +325,8 @@ impl<
         }
     }
 
-    /// Acquire the shard lock and key for a socket address. Kept for callers that want to
-    /// drive the map themselves without going through `update_log`.
+    /// For a caller that wants to drive the map itself rather than go through
+    /// `update_log`.
     pub fn get_locked_map(
         &self,
         addr: &SocketAddr,
@@ -386,7 +339,7 @@ impl<
         Ok((key, locked_map))
     }
 
-    /// Force an IP into the Whitelist state. Creates the log if missing.
+    /// Creates the log where the address has not been seen before.
     pub fn whitelist(&self, addr: &IpAddr) -> Outcome<()> {
         let key = self.amap.key(&Self::ip_bytes(addr));
         let locked_map = res!(self.amap.get_shard_using_hash(&key));
@@ -403,7 +356,8 @@ impl<
         Ok(())
     }
 
-    /// Force an IP into the Blacklist state with `BlacklistReason::Manual`.
+    /// The reason recorded is `Manual`, and the log is created where the address
+    /// has not been seen before.
     pub fn blacklist(&self, addr: &IpAddr) -> Outcome<()> {
         let key = self.amap.key(&Self::ip_bytes(addr));
         let locked_map = res!(self.amap.get_shard_using_hash(&key));
@@ -424,7 +378,8 @@ impl<
         Ok(())
     }
 
-    /// Reset an IP to the default Monitor state and zero its throttle count.
+    /// Back to `Monitor`, with the throttle count zeroed, so the address starts
+    /// again from nothing.
     pub fn unblock(&self, addr: &IpAddr) -> Outcome<()> {
         let key = self.amap.key(&Self::ip_bytes(addr));
         let locked_map = res!(self.amap.get_shard_using_hash(&key));
@@ -436,8 +391,8 @@ impl<
         Ok(())
     }
 
-    /// Lookup the current state label for an address, without mutation. Returns `None` if
-    /// the address has never been observed.
+    /// Reads without mutating, unlike `check`. `None` where the address has never
+    /// been observed.
     pub fn peek(&self, addr: &IpAddr) -> Outcome<Option<&'static str>> {
         let key = self.amap.key(&Self::ip_bytes(addr));
         let locked_map = res!(self.amap.get_shard_using_hash(&key));
@@ -445,7 +400,7 @@ impl<
         Ok(unlocked_map.get(&key).map(|l| l.state.label()))
     }
 
-    /// Aggregate tallies across all known addresses. O(number of addresses).
+    /// Walks every address, so the cost is linear in the number of them.
     pub fn counts(&self) -> Outcome<GuardCounts> {
         let mut c = GuardCounts::default();
         for i in 0..self.amap.n {
@@ -466,9 +421,8 @@ impl<
         Ok(c)
     }
 
-    /// Snapshot of counts plus up to `max` per-address entries. Entries are emitted in no
-    /// particular order; callers that want a stable view should sort on the returned
-    /// `Vec<GuardEntry>` themselves.
+    /// Counts plus up to `max` per-address entries, in no particular order: a
+    /// caller wanting a stable view sorts the entries itself.
     pub fn snapshot(&self, max: usize) -> Outcome<GuardSnapshot> {
         let mut snap = GuardSnapshot::default();
         for i in 0..self.amap.n {

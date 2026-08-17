@@ -4,6 +4,9 @@
 //! [`crate::smtp`] and [`crate::imap`] depend on to persist messages and
 //! authenticate users. Concrete implementations (Maildir on disk, a
 //! `passwd`-style file, an Ozone-backed store) live in `fe2o3_mail`.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 pub mod store;
 pub mod user;

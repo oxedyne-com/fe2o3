@@ -26,6 +26,9 @@
 //! `ECDSA_P256_SHA256_FIXED_SIGNING`, which emits the IEEE P1363 fixed-width
 //! form (64 bytes: `r || s`) that JWS requires. No ASN.1 to P1363 conversion
 //! is needed on our side.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_jdat::prelude::*;
@@ -53,17 +56,13 @@ use ring::{
 
 /// An ES256 JWS signer.
 ///
-/// Holds a live `ring::signature::EcdsaKeyPair` for signing plus a retained
-/// copy of the original PKCS#8 bytes so the key can be persisted to disk and
-/// reloaded via [`JwsSigner::from_pkcs8`]. `ring` consumes the PKCS#8 bytes
-/// during load and does not expose them afterwards, so we keep our own copy.
+/// `ring` consumes the PKCS#8 bytes during load and does not expose them
+/// afterwards, so a copy is retained here to persist the key to disk and reload
+/// it via [`JwsSigner::from_pkcs8`].
 pub struct JwsSigner {
-    /// PKCS#8 serialised private key, retained for persistence.
-    pkcs8:      Vec<u8>,
-    /// Live ECDSA P-256 signing handle, tied to `ring`.
-    key_pair:   EcdsaKeyPair,
-    /// RNG used for the non-deterministic part of ECDSA signing.
-    rng:        SystemRandom,
+    pkcs8:      Vec<u8>,         // retained for persistence
+    key_pair:   EcdsaKeyPair,    // ring's live signing handle
+    rng:        SystemRandom,    // for the non-deterministic part of ECDSA
 }
 
 impl fmt::Debug for JwsSigner {
@@ -78,7 +77,6 @@ impl fmt::Debug for JwsSigner {
 
 impl JwsSigner {
 
-    /// Generate a fresh ES256 key pair.
     pub fn new_es256() -> Outcome<Self> {
         let rng = SystemRandom::new();
         let pkcs8 = match EcdsaKeyPair::generate_pkcs8(
@@ -109,7 +107,6 @@ impl JwsSigner {
         })
     }
 
-    /// Load an existing ES256 key pair from its PKCS#8 encoding.
     pub fn from_pkcs8(pkcs8: &[u8]) -> Outcome<Self> {
         let rng = SystemRandom::new();
         let key_pair = match EcdsaKeyPair::from_pkcs8(
@@ -130,19 +127,14 @@ impl JwsSigner {
         })
     }
 
-    /// Return the retained PKCS#8 serialisation of the private key for on-disk
-    /// persistence. The bytes round-trip through [`JwsSigner::from_pkcs8`].
+    /// The bytes round-trip through [`JwsSigner::from_pkcs8`].
     pub fn pkcs8_bytes(&self) -> &[u8] {
         &self.pkcs8
     }
 
-    /// Return the public key as a JWK, shaped as a `Dat::Map` with the keys
-    /// `kty`, `crv`, `x` and `y`.
-    ///
-    /// The resulting `Dat` can be embedded directly into a JWS protected
-    /// header when a new ACME account is being registered (RFC 8555 §6.2
-    /// requires `jwk` on those requests; authenticated follow-up requests use
-    /// `kid` instead).
+    /// A `Dat::Map` with the keys `kty`, `crv`, `x` and `y`, ready to embed in a
+    /// JWS protected header. RFC 8555 §6.2 requires `jwk` when registering a new
+    /// account; authenticated follow-up requests carry `kid` instead.
     pub fn public_jwk(&self) -> Outcome<Dat> {
         let (x, y) = res!(self.public_key_xy());
         Ok(mapdat!{
@@ -153,12 +145,10 @@ impl JwsSigner {
         })
     }
 
-    /// Compute the RFC 7638 §3 thumbprint of the public JWK using SHA-256.
-    ///
-    /// The required members of an EC key are `crv`, `kty`, `x` and `y`. They
-    /// are handed to [`jwk_thumbprint_sha256_of`] deliberately out of
-    /// lexicographic order, so that the canonicalisation -- not the caller --
-    /// is what puts them in the order RFC 7638 §3 mandates.
+    /// The required members of an EC key are `crv`, `kty`, `x` and `y`. They go
+    /// to [`jwk_thumbprint_sha256_of`] deliberately out of lexicographic order,
+    /// so that the canonicalisation -- not the caller -- is what puts them in
+    /// the order RFC 7638 §3 mandates.
     pub fn jwk_thumbprint_sha256(&self) -> Outcome<[u8; 32]> {
         let (x, y) = res!(self.public_key_xy());
         let x_b64 = base64url_encode(&x);
@@ -171,20 +161,14 @@ impl JwsSigner {
         ])
     }
 
-    /// Produce a JWS in the flattened JSON serialisation form defined in RFC
-    /// 7515 §7.2.2.
+    /// The flattened JSON serialisation of RFC 7515 §7.2.2.
     ///
-    /// `protected_header` must be a `Dat::Map` holding the ACME-required
-    /// fields (`alg`, `url`, `nonce`, and either `jwk` or `kid`). This
-    /// function serialises it to compact JSON, base64url-encodes it, and signs
-    /// the `"<b64 header>.<b64 payload>"` signing input per RFC 7515 §5.1.
-    ///
-    /// `payload_bytes` may be empty, which ACME RFC 8555 §6.3 uses to mark a
-    /// request as "POST-as-GET".
-    ///
-    /// The returned `Dat::Map` has the keys `protected`, `payload` and
-    /// `signature`, each a base64url-encoded string, and is ready to be
-    /// serialised into the HTTP request body with `.json()`.
+    /// `protected_header` must be a `Dat::Map` holding `alg`, `url`, `nonce` and
+    /// either `jwk` or `kid`; it is serialised to compact JSON, base64url-encoded
+    /// and signed as the `"<b64 header>.<b64 payload>"` input of RFC 7515 §5.1.
+    /// An empty `payload_bytes` is the "POST-as-GET" of RFC 8555 §6.3. The map
+    /// returned holds `protected`, `payload` and `signature`, each base64url, and
+    /// goes into the request body through `.json()`.
     pub fn sign_flattened(
         &self,
         protected_header:   &Dat,
@@ -211,11 +195,9 @@ impl JwsSigner {
         })
     }
 
-    /// Extract the raw `(x, y)` coordinates of the public key. Each is 32 bytes.
-    ///
     /// `ring` exposes the public key as an uncompressed SEC1 point
-    /// `0x04 || x || y`, a total of 65 bytes for P-256. We split and validate
-    /// the shape here so callers can treat the coordinates as plain byte arrays.
+    /// `0x04 || x || y`, 65 bytes for P-256. The shape is checked here so that
+    /// callers see two plain 32-byte arrays.
     fn public_key_xy(&self) -> Outcome<([u8; 32], [u8; 32])> {
         let pk = self.key_pair.public_key().as_ref();
         if pk.len() != 65 || pk[0] != 0x04 {
@@ -239,10 +221,7 @@ impl JwsSigner {
 // │ HELPERS                                                                   │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Build the RFC 7638 §3 canonical JSON form of a JWK from its required
-/// members.
-///
-/// The canonical form is defined as an exact byte sequence, not merely a
+/// The RFC 7638 §3 canonical form is defined as an exact byte sequence, not merely a
 /// structurally equivalent JSON document: the **required** members only (for
 /// an EC key `crv`, `kty`, `x` and `y`; for an RSA key `e`, `kty` and `n`),
 /// lexicographically ordered by member name, with no whitespace and no line
@@ -290,18 +269,15 @@ pub fn jwk_canonical_string(members: &[(&str, &str)]) -> Outcome<String> {
     Ok(out)
 }
 
-/// Compute the RFC 7638 §3 SHA-256 thumbprint of a JWK given its required
-/// members, which are canonicalised by [`jwk_canonical_string`] first.
+/// RFC 7638 §3; the members are canonicalised by [`jwk_canonical_string`] first.
 pub fn jwk_thumbprint_sha256_of(members: &[(&str, &str)]) -> Outcome<[u8; 32]> {
     let canonical = res!(jwk_canonical_string(members));
     Ok(sha256(canonical.as_bytes()))
 }
 
-/// Escape a string for inclusion in a JSON string literal, per RFC 8259 §7.
-///
-/// Base64url payloads and the short ASCII tokens RFC 7638 uses as member
-/// names never need escaping, so in practice this is the identity function;
-/// it exists so that the canonical form stays valid JSON no matter what it is
+/// RFC 8259 §7. Base64url payloads and the short ASCII tokens RFC 7638 uses as
+/// member names never need escaping, so in practice this is the identity
+/// function; it exists so the canonical form stays valid JSON whatever it is
 /// handed.
 fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -334,7 +310,6 @@ pub fn base64url_decode(s: &str) -> Outcome<Vec<u8>> {
     }
 }
 
-/// SHA-256 hash of the input, returned as a 32-byte array.
 fn sha256(data: &[u8]) -> [u8; 32] {
     let mut ctx = Context::new(&SHA256);
     ctx.update(data);
@@ -428,17 +403,17 @@ mod tests {
 
     // ---- RFC 7638 external oracles ---------------------------------------
 
-    /// The RSA key from the RFC 7638 §3.1 worked example. `e`, `kty` and `n`
-    /// are the required members of an RSA JWK; everything else in the RFC's
-    /// example JWK (`alg`, `kid`, `use`) is excluded from the canonical form
-    /// by §3, and this vector is precisely what proves we exclude them.
+    // The RSA key from the RFC 7638 §3.1 worked example.  `e`, `kty` and `n`
+    // are the required members of an RSA JWK; everything else in the RFC's
+    // example JWK (`alg`, `kid`, `use`) is excluded from the canonical form by
+    // §3, and this vector is precisely what proves we exclude them.
     const RFC7638_RSA_N: &str = "0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4\
         cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5Js\
         GY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZg\
         nYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lF\
         d2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw";
 
-    /// The canonical string RFC 7638 §3.1 prints for that key, byte for byte.
+    // The canonical string RFC 7638 §3.1 prints for that key, byte for byte.
     const RFC7638_RSA_CANONICAL: &str = "{\"e\":\"AQAB\",\"kty\":\"RSA\",\"n\":\"0vx7\
         agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1\
         L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6C\
@@ -446,7 +421,7 @@ mod tests {
         n1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw\
         0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw\"}";
 
-    /// The thumbprint RFC 7638 §3.1 publishes for that key.
+    // The thumbprint RFC 7638 §3.1 publishes for that key.
     const RFC7638_RSA_THUMBPRINT_B64: &str = "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs";
 
     /// **External oracle, RFC 7638 §3.1.** The canonical string we build for

@@ -32,6 +32,9 @@
 //! `age` is passed through exactly as the engine wrote it and is never parsed into a timestamp. The
 //! engines disagree about what it measures -- when a page was published, when it was last crawled,
 //! how long ago either was -- and a confidently wrong date is worse than an honest blank.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_jdat::{
@@ -58,13 +61,10 @@ use crate::http::{
 /// kind or it does not, and [`Engine::supports`] can only answer a closed question.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Kind {
-	/// The open web, and the default when a caller says nothing.
 	#[default]
-	Web,
-	/// Recent journalism, from whichever corner of the engine's index holds it.
-	News,
-	/// Scholarly work: papers, preprints, journal articles. Not every engine has any.
-	Academic,
+	Web,		// the open web, and the default when a caller says nothing
+	News,		// recent journalism, from whichever corner of the index holds it
+	Academic,	// papers, preprints, journal articles; not every engine has any
 }
 
 impl Kind {
@@ -95,19 +95,15 @@ impl Kind {
 /// A search engine, which is to say a request shape and a reply shape that go together.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Engine {
-	/// `api.search.brave.com` -- its own crawler, keyed by a subscription-token header.
-	Brave,
-	/// `api.exa.ai` -- neural retrieval over an embedding index.
-	Exa,
-	/// `api.tavily.com` -- a retrieval API built for agents, bearer-authenticated.
-	Tavily,
-	/// `google.serper.dev` -- another engine's results, resold as JSON.
-	Serper,
+	Brave,	// its own crawler, keyed by a subscription-token header
+	Exa,	// neural retrieval over an embedding index
+	Tavily,	// a retrieval API built for agents, bearer-authenticated
+	Serper,	// another engine's results, resold as JSON
 }
 
 impl Engine {
 
-	/// Every engine, in a fixed order, so a caller listing them need not keep its own copy in step.
+	// In a fixed order, so a caller listing them need not keep its own copy in step.
 	pub const ALL: [Self; 4] = [Self::Brave, Self::Exa, Self::Tavily, Self::Serper];
 
 	/// The word an engine is named by: in a request, in a stored setting, and in a ledger line.
@@ -144,7 +140,7 @@ impl Engine {
 		}
 	}
 
-	/// Whether this engine can answer this kind at all.
+	/// Can this engine answer this kind at all?
 	///
 	/// Two of the four have no scholarly index and say so here, so a caller can offer a kind the
 	/// configured engine can actually serve rather than discovering it in a rejected request.
@@ -161,9 +157,6 @@ impl Engine {
 	///
 	/// **Not a request that is sent.** The caller owns the transport, the address check and the TLS;
 	/// see the module documentation for why that division is deliberate.
-	///
-	/// # Errors
-	/// An empty query, an empty key, or a kind this engine cannot answer.
 	pub fn request(&self, key: &str, q: &SearchQuery) -> Outcome<SearchCall> {
 		if q.query.trim().is_empty() {
 			return Err(err!(
@@ -245,10 +238,6 @@ impl Engine {
 	/// The engine's answer, whatever its shape, as the common list.
 	///
 	/// Forgiving by the row and strict by the document: see the module documentation.
-	///
-	/// # Errors
-	/// A body that is not text, not a JSON object, an error document, or an answer carrying no
-	/// results array where this engine puts one.
 	pub fn parse(&self, body: &[u8]) -> Outcome<Vec<SearchResult>> {
 		let txt = match std::str::from_utf8(body) {
 			Ok(t)	=> t,
@@ -437,26 +426,20 @@ impl Engine {
 /// missing either never becomes one of these.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SearchResult {
-	/// The heading the engine gave the result.
 	pub title:	String,
-	/// The address, as the engine wrote it.
 	pub url:	String,
-	/// The engine's excerpt, which may be empty.
-	pub snippet:	String,
-	/// Whatever freshness the engine reported, verbatim and unparsed. Never a timestamp this
-	/// module worked out.
+	pub snippet:	String,		// the engine's excerpt, which may be empty
+	// Whatever freshness the engine reported, verbatim and unparsed. Never a timestamp this
+	// module worked out.
 	pub age:	String,
 }
 
 /// What is being asked for, before any engine has been chosen.
 #[derive(Clone, Copy, Debug)]
 pub struct SearchQuery<'a> {
-	/// The words to search for.
 	pub query:	&'a str,
-	/// Which corner of the index to search.
-	pub kind:	Kind,
-	/// How many results are wanted, clamped by the engine's own maximum. Nought is read as one.
-	pub limit:	usize,
+	pub kind:	Kind,		// which corner of the index to search
+	pub limit:	usize,		// clamped by the engine's own maximum; nought is read as one
 }
 
 /// The parts of one call, for a caller that will make it.
@@ -465,21 +448,14 @@ pub struct SearchQuery<'a> {
 /// documentation for why this type exists instead of a function that sends.
 #[derive(Clone, Debug)]
 pub struct SearchCall {
-	/// The host to dial and to validate the certificate against.
-	pub host:	String,
-	/// The port, always 443 for these vendors, but carried rather than assumed.
-	pub port:	u16,
-	/// The request path, with any query string already escaped into it.
-	pub path:	String,
-	/// The request method.
+	pub host:	String,			// dialled, and the name the certificate is validated against
+	pub port:	u16,			// always 443 for these vendors, carried rather than assumed
+	pub path:	String,			// with any query string already escaped into it
 	pub method:	HttpMethod,
-	/// The headers, including the key under whichever name the vendor reads it.
-	pub headers:	Vec<(String, String)>,
-	/// The request body, empty for a `GET`.
-	pub body:	Vec<u8>,
+	pub headers:	Vec<(String, String)>,	// the key among them, named as this vendor names it
+	pub body:	Vec<u8>,		// empty for a `GET`
 }
 
-/// The decoder configuration for an engine's JSON reply.
 fn json_decoder() -> DecoderConfig<
 	BTreeMap<UsrKindCode, UsrKind>,
 	BTreeMap<String, UsrKindId>,
@@ -587,8 +563,8 @@ mod tests {
 	// Sample bodies, written to the shapes the four vendors publish. Values are invented; the field
 	// names, their nesting and their spelling are the point.
 
-	/// A web answer, nesting its list under `web`, with one row dated relatively, one only by its
-	/// crawl stamp, and one not at all.
+	// A web answer, nesting its list under `web`, with one row dated relatively, one only by its
+	// crawl stamp, and one not at all.
 	const BRAVE_WEB: &str = r#"{
 		"query": {"original": "iron oxide", "more_results_available": true},
 		"web": {"results": [
@@ -603,7 +579,7 @@ mod tests {
 		]}
 	}"#;
 
-	/// A news answer, which puts its list at the top level instead.
+	// A news answer, which puts its list at the top level instead.
 	const BRAVE_NEWS: &str = r#"{
 		"type": "news",
 		"results": [
@@ -614,7 +590,7 @@ mod tests {
 		]
 	}"#;
 
-	/// Two results, one carrying a highlight and a null author, one carrying neither.
+	// Two results, one carrying a highlight and a null author, one carrying neither.
 	const EXA: &str = r#"{
 		"requestId": "req-1",
 		"results": [
@@ -629,7 +605,7 @@ mod tests {
 		"costDollars": {"total": 0.005}
 	}"#;
 
-	/// Two results, the second dated in the way a news answer dates them.
+	// Two results, the second dated in the way a news answer dates them.
 	const TAVILY: &str = r#"{
 		"query": "iron oxide",
 		"results": [
@@ -642,7 +618,7 @@ mod tests {
 		"response_time": 1.2
 	}"#;
 
-	/// A web answer, whose list is `organic` and whose address field is `link`.
+	// A web answer, whose list is `organic` and whose address field is `link`.
 	const SERPER_WEB: &str = r#"{
 		"searchParameters": {"q": "iron oxide", "type": "search"},
 		"organic": [
@@ -654,7 +630,7 @@ mod tests {
 		"credits": 1
 	}"#;
 
-	/// A news answer, whose list is `news` instead.
+	// A news answer, whose list is `news` instead.
 	const SERPER_NEWS: &str = r#"{
 		"news": [
 			{"title": "Foundry reopens", "link": "https://news.example.org/foundry",
@@ -662,7 +638,7 @@ mod tests {
 		]
 	}"#;
 
-	/// A scholarly answer: no snippet, a venue line instead, and a bare year for a date.
+	// A scholarly answer: no snippet, a venue line instead, and a bare year for a date.
 	const SERPER_SCHOLAR: &str = r#"{
 		"organic": [
 			{"title": "Attention is all you need", "link": "https://p.example.org/7181",
@@ -826,7 +802,7 @@ mod tests {
 	/// nothing still asks for something.
 	#[test]
 	fn test_the_limit_is_held_within_the_ceiling_04() -> Outcome<()> {
-		/// The number of results a call asks for, wherever that engine writes it.
+		// The number of results a call asks for, wherever that engine writes it.
 		fn asked(e: Engine, c: &SearchCall) -> Outcome<usize> {
 			match e {
 				Engine::Brave => {

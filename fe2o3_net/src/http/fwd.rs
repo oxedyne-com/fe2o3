@@ -27,6 +27,9 @@
 //! correct instruction for an upstream whatever the policy says.
 //!
 //! [`HeaderFields::get_one`]: crate::http::fields::HeaderFields::get_one
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::http::msg::HttpMessage;
 
@@ -38,10 +41,9 @@ use std::net::{
 };
 
 
-/// The forwarding headers a hop owns, lowercased for comparison.
-///
-/// A caller's copy of any of these is dropped unless the peer is trusted, because each is a claim
-/// about the hop the request took and only the hop can make it honestly.
+// The forwarding headers a hop owns, lowercased for comparison.  A caller's copy
+// of any of them is dropped unless the peer is trusted, because each is a claim
+// about the hop the request took and only the hop can make it honestly.
 pub const FORWARDED_HEADERS: [&str; 4] = [
     "x-forwarded-for",
     "x-forwarded-proto",
@@ -49,12 +51,12 @@ pub const FORWARDED_HEADERS: [&str; 4] = [
     "forwarded",
 ];
 
-/// The headers a hop rewrites for itself, lowercased for comparison.
-///
-/// `Host` names the upstream rather than the caller's original; `Connection` and
-/// `Transfer-Encoding` are hop-by-hop; `Content-Length` is recomputed from the body actually sent.
-/// Passing a caller's `Transfer-Encoding` across a hop that does not re-chunk is a request
-/// smuggling primitive, which is why it is on this list rather than left to each call site.
+// The headers a hop rewrites for itself, lowercased for comparison.  `Host` names
+// the upstream rather than the caller's original; `Connection` and
+// `Transfer-Encoding` are hop-by-hop; `Content-Length` is recomputed from the body
+// actually sent.  Passing a caller's `Transfer-Encoding` across a hop that does not
+// re-chunk is a request smuggling primitive, which is why it is on this list
+// rather than left to each call site.
 pub const MANAGED_HEADERS: [&str; 4] = [
     "host",
     "connection",
@@ -84,19 +86,15 @@ pub fn is_managed_header(name: &str) -> bool {
 /// only accepts single addresses would need hundreds of lines to express one CDN.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TrustedPeer {
-    /// One exact address.
-    Addr(IpAddr),
-    /// Every address sharing the leading `bits` of `base`.
-    Prefix {
-        /// The network address as written.
+    Addr(IpAddr),    // one exact address
+    Prefix {         // every address sharing the leading `bits` of `base`
         base: IpAddr,
-        /// Number of leading bits that must match.
         bits: u8,
     },
 }
 
 impl TrustedPeer {
-    /// Parse one configuration entry, either `addr` or `addr/bits`.
+    /// One configuration entry, written either `addr` or `addr/bits`.
     pub fn parse(entry: &str) -> Outcome<Self> {
         let entry = entry.trim();
         match entry.rsplit_once('/') {
@@ -177,8 +175,7 @@ fn prefix_covers(
 /// egress -- a security fix turned into a quieter bug. Hence the policy rather than a constant.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ForwardedPolicy {
-    /// Peers whose forwarding headers are preserved.
-    trusted: Vec<TrustedPeer>,
+    trusted: Vec<TrustedPeer>,    // their forwarding headers are preserved
 }
 
 impl ForwardedPolicy {

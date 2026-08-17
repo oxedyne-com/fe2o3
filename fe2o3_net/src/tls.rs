@@ -11,6 +11,9 @@
 //! Server-side TLS is a different concrete type -- `tokio_rustls`
 //! distinguishes the client and server halves of a `TlsStream` -- so the
 //! SMTP and IMAP servers keep their own `MaybeTls` and are unaffected.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -49,16 +52,13 @@ use tokio_rustls::{
 /// A protocol client holds one of these and can replace a `Plain` with a
 /// `Tls` in place, which is exactly what a STARTTLS upgrade is.
 pub enum ClientStream {
-    /// Plain TCP, before any TLS handshake.
     Plain(TcpStream),
-    /// Client-side TLS wrap.
     Tls(Box<tokio_rustls::client::TlsStream<TcpStream>>),
 }
 
 impl ClientStream {
 
-    /// Consume the wrapper and return the inner plain stream, if it has
-    /// not already been wrapped in TLS.
+    /// `None` once TLS has wrapped it, there being nothing plain left to take.
     pub fn into_plain(self) -> Option<TcpStream> {
         match self {
             Self::Plain(s) => Some(s),
@@ -66,7 +66,6 @@ impl ClientStream {
         }
     }
 
-    /// Whether the connection is protected.
     pub fn is_tls(&self) -> bool {
         matches!(self, Self::Tls(_))
     }
@@ -126,8 +125,7 @@ impl AsyncWrite for ClientStream {
     }
 }
 
-/// Wrap an established plain stream in client-side TLS, validating the
-/// peer certificate against `cfg` for the name `host`.
+/// The peer certificate is validated against `cfg` for the name `host`.
 pub async fn upgrade(
     plain:  TcpStream,
     host:   &str,
@@ -171,11 +169,9 @@ pub fn ensure_crypto_provider() {
         .install_default();
 }
 
-/// Load the host's CA bundle into a fresh rustls `ClientConfig`.
-///
-/// Callers needing a custom root store should build the `ClientConfig`
-/// themselves; this is the "trust what the operating system trusts"
-/// default that every public-internet client wants.
+/// The host's CA bundle, and nothing else: the "trust what the operating system
+/// trusts" default every public-internet client wants. A caller needing its own
+/// root store builds the `ClientConfig` itself.
 pub fn default_client_config() -> Outcome<ClientConfig> {
     ensure_crypto_provider();
     let ca_paths = [
@@ -213,10 +209,8 @@ pub fn default_client_config() -> Outcome<ClientConfig> {
         .with_no_client_auth())
 }
 
-/// Iterate over every `-----BEGIN CERTIFICATE-----` block in `pem`,
-/// returning the decoded DER bytes for each one. A tiny in-tree
-/// substitute for `rustls_pemfile::certs` so the crate does not need the
-/// extra dependency.
+/// The decoded DER of every `-----BEGIN CERTIFICATE-----` block. A tiny in-tree
+/// substitute for `rustls_pemfile::certs`, so the crate need not carry it.
 pub fn parse_pem_certificates(pem: &[u8]) -> Vec<Vec<u8>> {
     const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
     const END:   &str = "-----END CERTIFICATE-----";
@@ -419,21 +413,17 @@ const TAG_OID:          u8 = 0x06;
 const TAG_SEQUENCE:     u8 = 0x30;
 const TAG_UTCTIME:      u8 = 0x17;
 const TAG_GENTIME:      u8 = 0x18;
-/// `[0] EXPLICIT`, the context-specific constructed tag the version carries.
-const TAG_VERSION:      u8 = 0xa0;
-/// `[1]` and `[2] IMPLICIT`, the deprecated unique identifiers.
+const TAG_VERSION:      u8 = 0xa0;    // `[0] EXPLICIT`, which the version carries
+// `[1]` and `[2] IMPLICIT`, the deprecated unique identifiers.
 const TAG_ISSUER_UID:   u8 = 0x81;
 const TAG_SUBJECT_UID:  u8 = 0x82;
-/// `[3] EXPLICIT Extensions`.
-const TAG_EXTENSIONS:   u8 = 0xa3;
-/// `[2] IMPLICIT IA5String` -- the dNSName form of a GeneralName.
-const TAG_DNS_NAME:     u8 = 0x82;
-/// OID 2.5.29.17, subjectAltName.
-const OID_SUBJECT_ALT_NAME: &[u8] = &[0x55, 0x1d, 0x11];
+const TAG_EXTENSIONS:   u8 = 0xa3;    // `[3] EXPLICIT Extensions`
+const TAG_DNS_NAME:     u8 = 0x82;    // `[2] IMPLICIT IA5String`, a dNSName GeneralName
+const OID_SUBJECT_ALT_NAME: &[u8] = &[0x55, 0x1d, 0x11];    // subjectAltName, 2.5.29.17
 
-/// Read the DER element at `pos`: return its contents and the offset just past
-/// it. Only the length encodings a certificate actually uses are handled --
-/// indefinite lengths are not legal in DER.
+/// The element's contents, and the offset just past it. Only the length
+/// encodings a certificate actually uses are handled -- an indefinite length is
+/// not legal in DER anyway.
 fn der_element(buf: &[u8], pos: usize) -> Outcome<(&[u8], usize)> {
     if pos + 2 > buf.len() {
         return Err(err!(

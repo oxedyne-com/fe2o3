@@ -35,6 +35,9 @@
 //! message shapes and a thread that blocks on a read, and pulling in an executor
 //! to run it is a poor trade. Neither is a wrapper around the other; they share
 //! the messages above, which is where the protocol actually is.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::time::Time;
 
@@ -59,24 +62,22 @@ use std::{
 use tokio::net::UdpSocket;
 
 
-/// The IPv4 group every SSDP message is sent to (UPnP DA 2.0 §1.1.1).
+//// The group, and the port that goes with it (UPnP DA 2.0 §1.1.1).
 pub const MULTICAST_ADDR: Ipv4Addr = Ipv4Addr::new(239, 255, 255, 250);
-
-/// The port that goes with it.
 pub const PORT: u16 = 1900;
 
-/// The value of `MAN` on a search, quotes included -- the quotes are part of the
-/// field, and a searcher that leaves them off is ignored by conforming devices.
+// The value of `MAN` on a search. The quotes are part of the field, and a
+// searcher that leaves them off is ignored by conforming devices.
 pub const DISCOVER: &str = "\"ssdp:discover\"";
 
-/// The largest datagram this reader will accept. A conforming SSDP message is a
-/// few hundred bytes; the rest of the space is for the long `SERVER` and
-/// vendor-extension fields that real devices send.
+// The largest datagram this reader will accept. A conforming SSDP message is a
+// few hundred bytes; the rest of the space is for the long `SERVER` and
+// vendor-extension fields that real devices send.
 pub const MAX_DATAGRAM: usize = 2048;
 
-/// How long an announcement stands before it must be renewed, in seconds. The
-/// specification requires at least 1800.
-pub const DEFAULT_MAX_AGE: u32 = 1800;
+// How long an announcement stands before it must be renewed. The specification
+// requires at least 1800.
+pub const DEFAULT_MAX_AGE: u32 = 1800;  // seconds
 
 
 /// What a message is about: a device type, a service type, a particular device by
@@ -87,17 +88,11 @@ pub const DEFAULT_MAX_AGE: u32 = 1800;
 /// one of those cases quietly stops being answered.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum Target {
-    /// `ssdp:all`: every device and service, answered once per thing.
-    All,
-    /// `upnp:rootdevice`: the root device only.
-    RootDevice,
-    /// `uuid:...`: one particular device.
-    Uuid(String),
-    /// `urn:...`: a device or service type, e.g.
-    /// `urn:schemas-upnp-org:device:MediaServer:1`.
-    Urn(String),
-    /// Anything else a device chose to name itself by.
-    Other(String),
+    All,            // `ssdp:all`, answered once per thing
+    RootDevice,     // `upnp:rootdevice`
+    Uuid(String),   // `uuid:...`, one particular device
+    Urn(String),    // `urn:...`, a device or service type
+    Other(String),  // anything else a device chose to name itself by
 }
 
 impl fmt::Display for Target {
@@ -130,9 +125,8 @@ impl FromStr for Target {
 }
 
 impl Target {
-    /// Whether an announcement of `self` answers a search for `wanted`.
-    ///
-    /// `ssdp:all` matches everything, and everything else matches only itself.
+    /// Does an announcement of `self` answer a search for `wanted`? `ssdp:all`
+    /// matches everything, and everything else matches only itself.
     pub fn answers(&self, wanted: &Target) -> bool {
         match wanted {
             Target::All => true,
@@ -144,12 +138,9 @@ impl Target {
 /// What a `NOTIFY` is saying, carried in its `NTS` field.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Nts {
-    /// The device is here, and stays here for its `CACHE-CONTROL` lifetime.
-    Alive,
-    /// The device is going, now.
-    ByeBye,
-    /// The device is still here, on a new boot identifier (UPnP DA 2.0 §1.2.4).
-    Update,
+    Alive,      // here, and stays for its `CACHE-CONTROL` lifetime
+    ByeBye,     // going, now
+    Update,     // still here, on a new boot identifier, UPnP DA 2.0 §1.2.4
 }
 
 impl fmt::Display for Nts {
@@ -180,19 +171,16 @@ impl FromStr for Nts {
 /// A search: `M-SEARCH * HTTP/1.1`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Search {
-    /// What is being looked for.
     pub target:     Target,
-    /// `MX`: the largest number of seconds a responder should wait before
-    /// answering, so a hundred devices do not answer at the same instant.
+    // `MX`: the largest number of seconds a responder should wait before
+    // answering, so a hundred devices do not answer at the same instant.
     pub mx:         u8,
-    /// Who asked, and what they call themselves. Optional.
-    pub user_agent: Option<String>,
-    /// Fields carried that this crate does not model.
-    pub extra:      BTreeMap<String, String>,
+    pub user_agent: Option<String>,             // who asked, and what they call themselves
+    pub extra:      BTreeMap<String, String>,   // fields this crate does not model
 }
 
 impl Search {
-    /// A search for the given target, with the customary two second spread.
+    /// The customary two second spread.
     pub fn new(target: Target) -> Self {
         Self {
             target,
@@ -206,49 +194,33 @@ impl Search {
 /// A unicast answer to a search: `HTTP/1.1 200 OK`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SearchResponse {
-    /// How long the answer stands, in seconds.
-    pub max_age:    u32,
-    /// When it was sent, as an HTTP date. Optional, and generated by
-    /// [`Responder`] when it is not given.
-    pub date:       Option<String>,
-    /// Where the device description document is.
-    pub location:   String,
-    /// What the responder calls itself: OS, UPnP version, product.
-    pub server:     String,
-    /// What was searched for, echoed back.
-    pub target:     Target,
-    /// Which particular thing is answering.
-    pub usn:        String,
-    /// `BOOTID.UPNP.ORG`, which changes when the device restarts.
+    pub max_age:    u32,                        // seconds the answer stands
+    pub date:       Option<String>,             // HTTP date, generated by Responder when absent
+    pub location:   String,                     // the device description document
+    pub server:     String,                     // OS, UPnP version, product
+    pub target:     Target,                     // echoed back from the search
+    pub usn:        String,                     // which particular thing is answering
+    // `BOOTID.UPNP.ORG` changes when the device restarts, `CONFIGID.UPNP.ORG`
+    // when its description does.
     pub boot_id:    Option<u32>,
-    /// `CONFIGID.UPNP.ORG`, which changes when its description does.
     pub config_id:  Option<u32>,
-    /// Fields carried that this crate does not model.
-    pub extra:      BTreeMap<String, String>,
+    pub extra:      BTreeMap<String, String>,   // fields this crate does not model
 }
 
 /// An announcement: `NOTIFY * HTTP/1.1`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Notify {
-    /// What is being announced.
     pub target:     Target,
-    /// Whether it is arriving, leaving, or renewing.
-    pub nts:        Nts,
-    /// Which particular thing.
-    pub usn:        String,
-    /// How long the announcement stands, in seconds. Absent on a `byebye`,
-    /// which stands until contradicted.
-    pub max_age:    Option<u32>,
-    /// Where the description document is. Absent on a `byebye`.
-    pub location:   Option<String>,
-    /// What the announcer calls itself.
+    pub nts:        Nts,                        // arriving, leaving, or renewing
+    pub usn:        String,                     // which particular thing
+    // A `byebye` carries neither of these: there is nothing left to fetch, and
+    // the announcement stands until contradicted.
+    pub max_age:    Option<u32>,                // seconds
+    pub location:   Option<String>,             // the description document
     pub server:     Option<String>,
-    /// `BOOTID.UPNP.ORG`.
-    pub boot_id:    Option<u32>,
-    /// `CONFIGID.UPNP.ORG`.
-    pub config_id:  Option<u32>,
-    /// Fields carried that this crate does not model.
-    pub extra:      BTreeMap<String, String>,
+    pub boot_id:    Option<u32>,                // `BOOTID.UPNP.ORG`
+    pub config_id:  Option<u32>,                // `CONFIGID.UPNP.ORG`
+    pub extra:      BTreeMap<String, String>,   // fields this crate does not model
 }
 
 impl Notify {
@@ -267,11 +239,9 @@ impl Notify {
         }
     }
 
-    /// An `ssdp:byebye` for a thing that is going.
-    ///
-    /// It carries neither a lifetime nor a location: there is nothing left to
-    /// fetch, and saying otherwise leaves a control point holding a URL that has
-    /// stopped answering.
+    /// Carries neither a lifetime nor a location: there is nothing left to fetch,
+    /// and saying otherwise leaves a control point holding a URL that has stopped
+    /// answering.
     pub fn byebye(target: Target, usn: String) -> Self {
         Self {
             target,
@@ -290,18 +260,13 @@ impl Notify {
 /// One SSDP datagram.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SsdpMessage {
-    /// Somebody is looking.
     Search(Search),
-    /// Somebody answered a search.
     Response(SearchResponse),
-    /// Somebody announced themselves.
     Notify(Notify),
 }
 
 impl SsdpMessage {
 
-    /// Parse a received datagram.
-    ///
     /// Real networks carry SSDP from devices that get the details wrong, so this
     /// is forgiving about spacing, field name case and line endings, and strict
     /// only about the things that decide what the message means: the start line,
@@ -355,7 +320,6 @@ impl SsdpMessage {
         IO, Network, Input, Invalid))
     }
 
-    /// The datagram to send.
     pub fn as_bytes(&self) -> Vec<u8> {
         self.to_string().into_bytes()
     }
@@ -381,7 +345,6 @@ fn take(fields: &mut BTreeMap<String, String>, name: &str) -> Option<String> {
     fields.remove(name)
 }
 
-/// Take a field that must be there.
 fn need(fields: &mut BTreeMap<String, String>, name: &str, what: &str) -> Outcome<String> {
     match fields.remove(name) {
         Some(v) => Ok(v),
@@ -403,7 +366,7 @@ fn max_age_of(value: &str) -> Option<u32> {
     None
 }
 
-/// Render the fields this crate does not model, in a stable order.
+/// In a stable order, so a message written twice is the same bytes twice.
 fn extra_lines(extra: &BTreeMap<String, String>) -> String {
     let mut out = String::new();
     for (name, value) in extra {
@@ -435,7 +398,6 @@ impl Search {
         })
     }
 
-    /// The datagram, as text.
     pub fn as_text(&self) -> String {
         let mut out = String::new();
         out.push_str("M-SEARCH * HTTP/1.1\r\n");
@@ -480,8 +442,6 @@ impl SearchResponse {
         })
     }
 
-    /// The datagram, as text.
-    ///
     /// `EXT:` is an empty field that means nothing and is required anyway
     /// (UPnP DA 2.0 §1.3.3): a control point that does not see it discards the
     /// answer.
@@ -536,7 +496,6 @@ impl Notify {
         })
     }
 
-    /// The datagram, as text.
     pub fn as_text(&self) -> String {
         let mut out = String::new();
         out.push_str("NOTIFY * HTTP/1.1\r\n");
@@ -593,14 +552,11 @@ impl Notify {
 #[derive(Debug)]
 pub struct Responder {
     socket: UdpSocket,
-    /// The local address the responder is bound to and announces on.
-    iface:  Ipv4Addr,
+    iface:  Ipv4Addr,   // bound to, and announced on
 }
 
 impl Responder {
 
-    /// Bind the SSDP port and join the group on the given interface.
-    ///
     /// `iface` is the local IPv4 address of the interface to speak on;
     /// `Ipv4Addr::UNSPECIFIED` lets the kernel choose, which is right on a machine
     /// with one network and wrong on a machine with two.
@@ -608,8 +564,6 @@ impl Responder {
         Self::bind_to_port(iface, PORT).await
     }
 
-    /// The same, on a port of the caller's choosing.
-    ///
     /// A test wants an ephemeral port; a real responder wants 1900, because that
     /// is where searches are sent.
     pub async fn bind_to_port(iface: Ipv4Addr, port: u16) -> Outcome<Self> {
@@ -634,19 +588,15 @@ impl Responder {
         })
     }
 
-    /// The address this responder is bound to.
     pub fn local_addr(&self) -> Outcome<SocketAddr> {
         let result = self.socket.local_addr();
         Ok(res!(result, IO, Network))
     }
 
-    /// The interface this responder speaks on.
     pub fn interface(&self) -> Ipv4Addr {
         self.iface
     }
 
-    /// Wait for the next datagram, and say what it was and who sent it.
-    ///
     /// A datagram that does not parse is not an error the caller can do anything
     /// about -- the network carries plenty of them -- so it is logged and the wait
     /// resumes.
@@ -668,15 +618,12 @@ impl Responder {
         }
     }
 
-    /// Send a message to the group, where everyone hears it.
     pub async fn multicast(&self, msg: &SsdpMessage) -> Outcome<()> {
         let to = SocketAddrV4::new(MULTICAST_ADDR, PORT);
         res!(self.send_to(msg, SocketAddr::V4(to)).await);
         Ok(())
     }
 
-    /// Send a message to one address, as an answer to a search goes back to
-    /// whoever asked.
     pub async fn send_to(&self, msg: &SsdpMessage, to: SocketAddr) -> Outcome<()> {
         let bytes = msg.as_bytes();
         let result = self.socket.send_to(&bytes, to).await;
@@ -689,11 +636,10 @@ impl Responder {
         Ok(())
     }
 
-    /// Answer a search, back to the address it came from.
-    ///
-    /// The `ST` of the answer is the target actually being announced, not the
-    /// `ssdp:all` that may have been asked: a control point matches the two, and an
-    /// answer that echoes `ssdp:all` is discarded.
+    /// Goes back to the address the search came from. The `ST` of the answer is
+    /// the target actually being announced, not the `ssdp:all` that may have been
+    /// asked: a control point matches the two, and an answer that echoes
+    /// `ssdp:all` is discarded.
     pub async fn answer(
         &self,
         to:         SocketAddr,
@@ -749,13 +695,12 @@ impl Responder {
 #[derive(Debug)]
 pub struct SyncResponder {
     socket: std::net::UdpSocket,
-    /// The interfaces the group was successfully joined on.
-    joined: Vec<Ipv4Addr>,
+    joined: Vec<Ipv4Addr>,  // the interfaces the group was successfully joined on
 }
 
 impl SyncResponder {
 
-    /// Bind the SSDP port on every address, joining no group yet.
+    /// On every address, and joining no group yet.
     pub fn bind() -> Outcome<Self> {
         Self::bind_to_port(PORT)
     }
@@ -782,9 +727,8 @@ impl SyncResponder {
         })
     }
 
-    /// Join the group on one interface, named by its local IPv4 address.
-    ///
-    /// Joining the same interface twice is an error from the kernel and is
+    /// `iface` is the interface's local IPv4 address. Joining the same interface
+    /// twice is an error from the kernel and is
     /// reported as one; [`Self::join_every_interface`] is the call that tolerates
     /// it, since it does not know what is already joined.
     pub fn join(&mut self, iface: Ipv4Addr) -> Outcome<()> {
@@ -794,9 +738,6 @@ impl SyncResponder {
         Ok(())
     }
 
-    /// Join the group on every interface this machine appears to have, and say how
-    /// many were joined.
-    ///
     /// Best effort by design: an interface that refuses the join is skipped rather
     /// than failing the lot, because one unusable interface on a machine with three
     /// must not stop a television on the other two from finding anything. An answer
@@ -815,12 +756,10 @@ impl SyncResponder {
         Ok(joined)
     }
 
-    /// The interfaces the group is joined on.
     pub fn interfaces(&self) -> &[Ipv4Addr] {
         &self.joined
     }
 
-    /// The address this responder is bound to.
     pub fn local_addr(&self) -> Outcome<SocketAddr> {
         let result = self.socket.local_addr();
         Ok(res!(result, IO, Network))
@@ -845,8 +784,6 @@ impl SyncResponder {
         })
     }
 
-    /// Wait for the next datagram this crate understands.
-    ///
     /// `Ok(None)` means the read timed out, which is how a shutdown flag gets
     /// looked at. A datagram that does not parse is not an error the caller can do
     /// anything about -- the network carries plenty of them -- so it is logged and
@@ -878,15 +815,12 @@ impl SyncResponder {
         }
     }
 
-    /// Send a message to the group, where everyone hears it.
     pub fn multicast(&self, msg: &SsdpMessage) -> Outcome<()> {
         let to = SocketAddrV4::new(MULTICAST_ADDR, PORT);
         res!(self.send_to(msg, SocketAddr::V4(to)));
         Ok(())
     }
 
-    /// Send a message to one address, as an answer to a search goes back to
-    /// whoever asked.
     pub fn send_to(&self, msg: &SsdpMessage, to: SocketAddr) -> Outcome<()> {
         let bytes = msg.as_bytes();
         let result = self.socket.send_to(&bytes, to);
@@ -899,11 +833,10 @@ impl SyncResponder {
         Ok(())
     }
 
-    /// Answer a search, back to the address it came from.
-    ///
-    /// The `ST` of the answer is the target actually being announced, not the
-    /// `ssdp:all` that may have been asked: a control point matches the two, and an
-    /// answer that echoes `ssdp:all` is discarded.
+    /// Goes back to the address the search came from. The `ST` of the answer is
+    /// the target actually being announced, not the `ssdp:all` that may have been
+    /// asked: a control point matches the two, and an answer that echoes
+    /// `ssdp:all` is discarded.
     pub fn answer(
         &self,
         to:         SocketAddr,
@@ -1024,7 +957,7 @@ fn http_date() -> Outcome<String> {
 mod tests {
     use super::*;
 
-    /// A search as a real control point sends one, line endings and all.
+    // A search as a real control point sends one, line endings and all.
     const A_SEARCH: &str = "M-SEARCH * HTTP/1.1\r\n\
         HOST: 239.255.255.250:1900\r\n\
         MAN: \"ssdp:discover\"\r\n\

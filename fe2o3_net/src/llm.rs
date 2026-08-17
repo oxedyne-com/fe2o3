@@ -23,6 +23,9 @@
 //! have, and what it cannot reach it cannot catch. What it *can* pin -- the JSON a provider is sent,
 //! the text pulled from what it returns, the error surfaced rather than swallowed -- it does. The
 //! network wrapper [`complete`] is as thin as the send seam it borrows from [`crate::http::client`].
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_jdat::{
@@ -57,26 +60,18 @@ use crate::http::{
 /// speaks the same dialect, so a new endpoint needs no new code here.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Provider {
-	/// `openrouter.ai` -- a router in front of many models.
-	OpenRouter,
-	/// `api.fireworks.ai`.
+	OpenRouter,	// a router in front of many models
 	Fireworks,
-	/// `api.mistral.ai`.
 	Mistral,
-	/// Any other host and path that speaks the same dialect. Host without a scheme, path with a
-	/// leading slash.
+	// Any other host and path speaking the same dialect.
 	Custom {
-		/// The host to dial and validate the certificate for, e.g. `api.example.com`.
-		host: String,
-		/// The request path, e.g. `/v1/chat/completions`.
-		path: String,
+		host: String, // dialled and certificate-checked, no scheme, e.g. `api.example.com`
+		path: String, // leading slash, e.g. `/v1/chat/completions`
 	},
 }
 
 impl Provider {
 
-	/// The provider a stored word names.
-	///
 	/// Not a lenient default: a config that meant `mistral` and typed `mistrral` should hear about it
 	/// rather than quietly reach a host that does not exist.
 	pub fn of(s: &str) -> Outcome<Self> {
@@ -90,8 +85,8 @@ impl Provider {
 		}
 	}
 
-	/// The word a provider is stored and configured as. [`Provider::Custom`] has none, since it is
-	/// named by its own host and path rather than by a key in this enum.
+	/// [`Provider::Custom`] has no stored word, since it is named by its own host and path rather than
+	/// by a key in this enum.
 	pub fn as_str(&self) -> Option<&'static str> {
 		match self {
 			Self::OpenRouter	=> Some("openrouter"),
@@ -101,7 +96,7 @@ impl Provider {
 		}
 	}
 
-	/// The host to dial and to validate the TLS certificate against.
+	/// Dialled, and the name the TLS certificate is validated against.
 	pub fn host(&self) -> &str {
 		match self {
 			Self::OpenRouter		=> "openrouter.ai",
@@ -111,7 +106,6 @@ impl Provider {
 		}
 	}
 
-	/// The path the chat-completions endpoint answers on.
 	pub fn path(&self) -> &str {
 		match self {
 			Self::OpenRouter		=> "/api/v1/chat/completions",
@@ -122,22 +116,15 @@ impl Provider {
 	}
 }
 
-/// Everything a call needs but its words: which provider, which model, and the key that pays for it.
-///
-/// The key is a secret and is never logged; a caller storing one gives it the same at-rest protection
-/// its other secrets get. Held here only for the moment of a call.
+/// Everything a call needs but its words. The key is a secret and is never logged; a caller storing one
+/// gives it the same at-rest protection its other secrets get. Held here only for the moment of a call.
 #[derive(Clone, Debug)]
 pub struct LlmConfig {
-	/// The provider to reach.
 	pub provider:	Provider,
-	/// The model to ask for, in the provider's own naming, e.g. `mistralai/mistral-large-latest` or
-	/// `accounts/fireworks/models/llama-v3p1-70b-instruct`.
-	pub model:	String,
-	/// The bearer key. Never logged.
-	pub api_key:	String,
+	pub model:	String,		// the provider's own naming, e.g. `mistralai/mistral-large-latest`
+	pub api_key:	String,		// bearer key, never logged
 }
 
-/// The decoder configuration for a provider's JSON reply.
 fn json_decoder() -> DecoderConfig<
 	BTreeMap<UsrKindCode, UsrKind>,
 	BTreeMap<String, UsrKindId>,
@@ -223,8 +210,6 @@ pub fn chat_reply(json: &str) -> Outcome<String> {
 	}
 }
 
-/// Makes one completion call and returns the assistant's text.
-///
 /// The thin wrapper around the two pure functions: build the body, `POST` it bearer-authenticated over
 /// TLS, read the reply. A non-2xx status is surfaced with the body the provider sent, since that body
 /// is where a provider says what was wrong with a key or a model name.

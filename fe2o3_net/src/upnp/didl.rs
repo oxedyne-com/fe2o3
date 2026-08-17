@@ -18,6 +18,9 @@
 //! it fails in stranger ways still. [`ProtocolInfo`] therefore holds the pieces
 //! apart, so that a caller trying profile strings against a real television
 //! changes one table rather than a dozen format strings.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::upnp::{
     escape,
@@ -32,26 +35,18 @@ use oxedyne_fe2o3_core::prelude::*;
 use std::fmt;
 
 
-/// The `upnp:class` values a photograph library needs.
-///
-/// A control point decides how to *treat* an object from its class, not from what
-/// is in it: a set that is showing a slideshow looks for `imageItem`, and one
+/// A control point decides how to *treat* an object from its `upnp:class`, not
+/// from what is in it: a set showing a slideshow looks for `imageItem`, and one
 /// browsing for something to play looks for `videoItem`. Held as an enum so that
 /// a class cannot be misspelled at one call site out of six.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Class {
-    /// A plain container, when nothing more specific is true.
-    Container,
-    /// A folder of anything, which is what a filesystem tree becomes.
-    StorageFolder,
-    /// A container of photographs, which is what an album becomes.
-    PhotoAlbum,
-    /// A still photograph.
+    Container,              // nothing more specific is true
+    StorageFolder,          // what a filesystem tree becomes
+    PhotoAlbum,             // what an album becomes
     Photo,
-    /// A film.
     Movie,
-    /// A container or item this crate does not model.
-    Other(&'static str),
+    Other(&'static str),    // a class this crate does not model
 }
 
 impl fmt::Display for Class {
@@ -75,33 +70,24 @@ impl fmt::Display for Class {
 /// shown no profile at all either plays the file or does not.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DlnaExtras {
-    /// `DLNA.ORG_PN`: the profile name, e.g. `JPEG_LRG`.
-    pub profile:    Option<String>,
-    /// `DLNA.ORG_OP`: two flags, time-seek then byte-seek. `01` is what a server
-    /// answering HTTP byte ranges and nothing else advertises.
-    pub operations: Option<&'static str>,
-    /// `DLNA.ORG_CI`: whether the bytes were converted from the original. A
-    /// rendition made by the server is a 1; an original served as it lies is a 0.
-    pub converted:  Option<bool>,
-    /// `DLNA.ORG_FLAGS`: the thirty-two hexadecimal digits saying what transfer
-    /// modes the resource supports. See [`FLAGS_IMAGE`] and [`FLAGS_STREAMING`].
-    pub flags:      Option<&'static str>,
+    pub profile:    Option<String>,         // `DLNA.ORG_PN`, e.g. `JPEG_LRG`
+    pub operations: Option<&'static str>,   // `DLNA.ORG_OP`, time-seek then byte-seek
+    pub converted:  Option<bool>,           // `DLNA.ORG_CI`, 1 where the server made the bytes
+    pub flags:      Option<&'static str>,   // `DLNA.ORG_FLAGS`, see FLAGS_IMAGE and FLAGS_STREAMING
 }
 
-/// `DLNA.ORG_OP=01`: byte-range seeking, no time-based seeking.
+//// `DLNA.ORG_OP` values.
+// Two flags, time-seek then byte-seek. A server answering HTTP byte ranges and
+// nothing else advertises the first of these.
 pub const OP_BYTE_RANGE: &str = "01";
-
-/// `DLNA.ORG_OP=00`: no seeking of any kind, for a resource served whole.
 pub const OP_NONE: &str = "00";
 
-/// The flags an image carries: interactive transfer, HTTP stalling, DLNA v1.5.
-///
-/// The value is one thirty-two digit hexadecimal number whose meaning is all in
-/// its first eight digits; the rest are reserved and are zero.
+//// `DLNA.ORG_FLAGS` values.
+// One thirty-two digit hexadecimal number whose meaning is all in its first
+// eight digits; the rest are reserved and are zero. Both declare DLNA v1.5 and
+// HTTP stalling; the image value is interactive transfer, and the film value
+// adds streaming and background transfer.
 pub const FLAGS_IMAGE: &str = "00D00000000000000000000000000000";
-
-/// The flags a film carries: streaming transfer, background transfer, HTTP
-/// stalling, DLNA v1.5.
 pub const FLAGS_STREAMING: &str = "01700000000000000000000000000000";
 
 impl DlnaExtras {
@@ -128,10 +114,8 @@ impl DlnaExtras {
 }
 
 impl fmt::Display for DlnaExtras {
-    /// The fourth field, in the order the DLNA guidelines write it.
-    ///
-    /// An entirely empty set of extras is written as `*`, which is the field's
-    /// way of saying nothing is claimed.
+    /// In the order the DLNA guidelines write it. An entirely empty set of
+    /// extras goes out as `*`, the field's way of saying nothing is claimed.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut parts: Vec<String> = Vec::with_capacity(4);
         if let Some(pn) = &self.profile {
@@ -157,19 +141,14 @@ impl fmt::Display for DlnaExtras {
 /// and what DLNA says about it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProtocolInfo {
-    /// The transport. `http-get` for everything a media server offers over HTTP.
-    pub protocol:   String,
-    /// The network. `*` everywhere, and a field only because the syntax has four.
-    pub network:    String,
-    /// The content type, e.g. `image/jpeg`.
-    pub content:    String,
-    /// The DLNA extras.
+    pub protocol:   String,     // `http-get` for everything served over HTTP
+    pub network:    String,     // `*` everywhere, a field only because the syntax has four
+    pub content:    String,     // content type, e.g. `image/jpeg`
     pub extras:     DlnaExtras,
 }
 
 impl ProtocolInfo {
 
-    /// A resource fetched over HTTP.
     pub fn http_get<S: Into<String>>(content: S, extras: DlnaExtras) -> Self {
         Self {
             protocol:   "http-get".to_string(),
@@ -186,30 +165,22 @@ impl fmt::Display for ProtocolInfo {
     }
 }
 
-/// One `<res>`: a way of getting at an object's bytes.
-///
-/// An object may carry several, and a control point picks whichever it likes the
-/// look of, which is why a thumbnail and a full-size rendition of the same
-/// photograph are two resources on one item rather than two items.
+/// One `<res>`. An object may carry several, and a control point picks whichever
+/// it likes the look of, which is why a thumbnail and a full-size rendition of
+/// the same photograph are two resources on one item rather than two items.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Resource {
-    /// Where the bytes are.
     pub uri:        String,
-    /// What they are and how they may be fetched.
     pub info:       ProtocolInfo,
-    /// How many bytes, where that is known without reading them.
-    pub size:       Option<u64>,
-    /// Pixels, as width and height.
-    pub resolution: Option<(u32, u32)>,
-    /// Running time, as `H:MM:SS.mmm`.
-    pub duration:   Option<String>,
-    /// Bits per pixel, which a few sets read and none require.
-    pub depth:      Option<u32>,
+    pub size:       Option<u64>,        // where it is known without reading the bytes
+    pub resolution: Option<(u32, u32)>, // width then height, in pixels
+    pub duration:   Option<String>,     // running time, as `H:MM:SS.mmm`
+    pub depth:      Option<u32>,        // bits per pixel, which a few sets read and none require
 }
 
 impl Resource {
 
-    /// A resource with only the two things every resource must have.
+    /// The `uri` and the `info` are the two things every resource must have.
     pub fn new<S: Into<String>>(uri: S, info: ProtocolInfo) -> Self {
         Self {
             uri:        uri.into(),
@@ -221,19 +192,17 @@ impl Resource {
         }
     }
 
-    /// Says how many bytes it is.
     pub fn sized(mut self, bytes: u64) -> Self {
         self.size = Some(bytes);
         self
     }
 
-    /// Says how many pixels it is.
     pub fn at(mut self, w: u32, h: u32) -> Self {
         self.resolution = Some((w, h));
         self
     }
 
-    /// The element, escaped.
+    /// Every value written here is escaped, attributes included.
     fn write(&self, out: &mut String) {
         out.push_str(&fmt!("<res protocolInfo=\"{}\"", escape(&fmt!("{}", self.info))));
         if let Some(size) = self.size {
@@ -252,25 +221,17 @@ impl Resource {
     }
 }
 
-/// A container: something a control point can browse into.
+/// Something a control point can browse into.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Container {
-    /// This container's object identifier.
     pub id:         String,
-    /// The identifier of whatever holds it. The root's parent is `-1`.
-    pub parent:     String,
-    /// What it is called.
+    pub parent:     String,                 // the root's parent is `-1`
     pub title:      String,
-    /// What kind of container it is.
     pub class:      Class,
-    /// How many objects are directly inside it, where that is cheap to know. A
-    /// control point draws a count from it and some will not descend without one.
-    pub children:   Option<u64>,
-    /// Whether a control point may add to it or change it. A served library is
-    /// restricted, which is what `1` means.
-    pub restricted: bool,
-    /// Whether `Search` may be run against it.
-    pub searchable: bool,
+    // A control point draws a count from this, and some will not descend without one.
+    pub children:   Option<u64>,            // direct children, where that is cheap to know
+    pub restricted: bool,                   // a served library is restricted, going out as `1`
+    pub searchable: bool,                   // whether `Search` may be run against it
 }
 
 impl Container {
@@ -294,7 +255,6 @@ impl Container {
         }
     }
 
-    /// Says how many objects are directly inside it.
     pub fn holding(mut self, n: u64) -> Self {
         self.children = Some(n);
         self
@@ -313,28 +273,19 @@ impl Container {
     }
 }
 
-/// An item: something a control point can play or show.
+/// Something a control point can play or show.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Item {
-    /// This item's object identifier.
     pub id:         String,
-    /// The identifier of the container it was browsed from.
-    pub parent:     String,
-    /// What it is called.
+    pub parent:     String,                 // the container it was browsed from
     pub title:      String,
-    /// What kind of item it is.
     pub class:      Class,
-    /// When it was taken, as `YYYY-MM-DDTHH:MM:SS`. A television that groups or
-    /// sorts by date reads this and nothing else.
-    pub date:       Option<String>,
-    /// A thumbnail to draw beside the title, which most sets use and none need.
-    pub art:        Option<String>,
-    /// The profile of the thumbnail, written as `dlna:profileID`.
-    pub art_profile: Option<String>,
-    /// Whether a control point may change it.
+    // A television that groups or sorts by date reads this and nothing else.
+    pub date:       Option<String>,         // `YYYY-MM-DDTHH:MM:SS`
+    pub art:        Option<String>,         // thumbnail, which most sets use and none need
+    pub art_profile: Option<String>,        // goes out as `dlna:profileID`
     pub restricted: bool,
-    /// The ways of getting at its bytes, best first.
-    pub resources:  Vec<Resource>,
+    pub resources:  Vec<Resource>,          // best first
 }
 
 impl Item {
@@ -359,19 +310,16 @@ impl Item {
         }
     }
 
-    /// Adds a way of getting at the bytes.
     pub fn with(mut self, res: Resource) -> Self {
         self.resources.push(res);
         self
     }
 
-    /// Says when it was taken.
     pub fn taken<S: Into<String>>(mut self, when: S) -> Self {
         self.date = Some(when.into());
         self
     }
 
-    /// Says where a thumbnail of it can be had, and what profile that is.
     pub fn thumbnail<S: Into<String>>(mut self, uri: S, profile: &str) -> Self {
         self.art = Some(uri.into());
         self.art_profile = Some(profile.to_string());
@@ -402,20 +350,16 @@ impl Item {
     }
 }
 
-/// One object in a listing.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Object {
-    /// Something to browse into.
     Container(Container),
-    /// Something to show or play.
     Item(Item),
 }
 
 /// A DIDL-Lite document: the objects, and the four namespaces they are spelled in.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Didl {
-    /// What is in it, in the order it is to be shown.
-    pub objects: Vec<Object>,
+    pub objects: Vec<Object>,   // in the order they are to be shown
 }
 
 impl Didl {
@@ -425,28 +369,23 @@ impl Didl {
         Self { objects: Vec::new() }
     }
 
-    /// Adds a container.
     pub fn container(&mut self, c: Container) {
         self.objects.push(Object::Container(c));
     }
 
-    /// Adds an item.
     pub fn item(&mut self, i: Item) {
         self.objects.push(Object::Item(i));
     }
 
-    /// How many objects it holds, which is a browse's `NumberReturned`.
+    /// A browse's `NumberReturned`.
     pub fn len(&self) -> usize {
         self.objects.len()
     }
 
-    /// Whether it holds nothing.
     pub fn is_empty(&self) -> bool {
         self.objects.is_empty()
     }
 
-    /// The document.
-    ///
     /// No XML declaration: the string goes inside a SOAP argument, where a second
     /// declaration would be in the middle of a document and make it unparseable.
     pub fn to_xml(&self) -> String {

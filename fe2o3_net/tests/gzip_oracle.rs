@@ -8,6 +8,9 @@
 //! and what `gzip` writes, this crate must read.
 //!
 //! [RFC 1952]: https://www.rfc-editor.org/rfc/rfc1952
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_net::http::encoding;
@@ -111,10 +114,8 @@ fn this_crate_reads_what_gzip_wrote() -> Outcome<()> {
     Ok(())
 }
 
-/// A whole response, encoded as the server would encode it, put to `gunzip`.
-///
-/// This is the case that matters: the framing fields must describe the encoded
-/// body, and the encoded body must be a stream a client can actually read.
+/// The case that matters: the framing fields must describe the encoded body,
+/// and the encoded body must be a stream a client can actually read.
 #[test]
 fn an_encoded_response_carries_a_stream_gunzip_accepts() -> Outcome<()> {
     use oxedyne_fe2o3_net::http::{

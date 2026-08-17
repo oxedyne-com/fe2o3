@@ -9,6 +9,9 @@
 //! The server here is a stand-in, spoken to over loopback in the clear, because what is under test
 //! is the client's half of the exchange: does it read the mechanism list, choose one it can speak,
 //! encode the credential correctly, and refuse to go on when the login is rejected.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::{
     prelude::*,
@@ -41,16 +44,13 @@ use tokio::{
 };
 
 
-/// What the stand-in provider will accept.
+// What the stand-in provider will accept.
 const USER: &str = "alice@example.com";
 const PASS: &str = "app-password-not-the-real-one";
 
 
 /// A provider that demands a login, and remembers the conversation so the test can read it back.
-///
-/// # Arguments
-/// * `mechanisms` - What to advertise after `AUTH`, e.g. `"PLAIN LOGIN"`.
-/// * `accept` - Whether to accept the credential when it arrives.
+/// `mechanisms` is advertised after `AUTH` in the `EHLO` reply, e.g. `"PLAIN LOGIN"`.
 async fn fake_provider(
     mechanisms: &'static str,
     accept:     bool,
@@ -138,7 +138,7 @@ async fn fake_provider(
     Ok((addr, seen))
 }
 
-/// The message a test submits.
+/// One body line deliberately begins with a full stop, so dot-stuffing is under test on every case.
 fn body() -> Vec<u8> {
     let mut s = String::new();
     s.push_str("From: Alice <alice@example.com>\r\n");

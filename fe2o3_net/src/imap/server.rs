@@ -4,6 +4,9 @@
 //! defined in [`crate::imap`]. The session is parameterised over a
 //! `MailStore` and `UserStore` so the same loop serves any Hematite
 //! mailbox backend.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::mail::{
     store::{
@@ -38,32 +41,23 @@ use tokio::{
 };
 
 
-/// How often an idling session looks at the mailbox.
-///
-/// A Maildir folder status is a directory listing, so this is cheap; the cost
-/// is one stat per idle connection per interval, against a client that would
-/// otherwise poll every ten minutes and be told nothing.
+//// IDLE.
+// A Maildir folder status is a directory listing, so the poll is cheap: one stat
+// per idle connection per interval, against a client that would otherwise ask
+// every ten minutes and be told nothing. RFC 2177 tells clients to re-issue
+// `IDLE` at least every 29 minutes, and ending a little earlier refreshes a
+// connection a NAT was about to drop silently. Only `DONE` is legal from an
+// idling client, so a partial line approaching the line cap is not a client to
+// indulge.
 pub const IDLE_POLL_INTERVAL: Duration = Duration::from_secs(5);
-
-/// How long the server idles before asking the client to renew.
-///
-/// RFC 2177 tells clients to re-issue `IDLE` at least every 29 minutes.
-/// Ending it a little earlier means a connection a NAT was about to drop
-/// silently is refreshed deliberately instead.
 pub const IDLE_MAX_DURATION: Duration = Duration::from_secs(28 * 60);
+pub const IDLE_MAX_LINE: usize = 1024;                  // bytes
 
-/// Longest partial line the server will buffer from an idling client. Only
-/// `DONE` is legal, so anything approaching this is not a client to indulge.
-pub const IDLE_MAX_LINE: usize = 1024;
-
-/// Maximum line length the server will accept for a command. IMAP
-/// itself imposes no formal limit, but capping protects us from a
-/// runaway client.
-pub const IMAP_MAX_LINE: usize = 8 * 1024;
-
-/// Maximum literal size accepted on `APPEND` (mirrors the SMTP
-/// message size limit).
-pub const IMAP_MAX_LITERAL: usize = 20_480_000;
+//// Session ceilings.
+// IMAP imposes no formal line limit; the cap is against a runaway client. The
+// literal cap mirrors the SMTP message size limit.
+pub const IMAP_MAX_LINE: usize = 8 * 1024;              // bytes per command line
+pub const IMAP_MAX_LITERAL: usize = 20_480_000;         // bytes per `APPEND`
 
 
 /// One IMAP listener configuration.
@@ -77,24 +71,17 @@ pub const IMAP_MAX_LITERAL: usize = 20_480_000;
 /// listener, a plain socket on loopback, or an in-memory pipe in a test.
 #[derive(Clone)]
 pub struct ImapServer<M: MailStore, U: UserStore> {
-    /// Mailbox storage backend.
     pub store:      M,
-    /// User authentication backend.
     pub users:      U,
-    /// Hostname to advertise in the greeting and BYE messages.
-    pub hostname:   Arc<String>,
+    pub hostname:   Arc<String>,    // advertised in the greeting and in BYE
 }
 
 /// Per-connection IMAP session state.
 struct ImapSession {
-    /// Authenticated user, populated on successful LOGIN.
-    user:           Option<MailUser>,
-    /// Currently SELECTed folder, if any.
+    user:           Option<MailUser>,       // set on a successful LOGIN
     selected:       Option<FolderName>,
-    /// `true` if the current selection is read-only (EXAMINE).
-    read_only:      bool,
-    /// Cached message metadata for the selected folder, in UID order.
-    /// Refreshed on SELECT / EXAMINE / NOOP and after STORE / EXPUNGE.
+    read_only:      bool,                   // the selection came from EXAMINE
+    // In UID order, refreshed on SELECT, EXAMINE and NOOP, and after STORE and EXPUNGE.
     messages:       Vec<MessageMeta>,
 }
 
@@ -112,9 +99,7 @@ impl ImapSession {
 
 impl<M: MailStore, U: UserStore> ImapServer<M, U> {
 
-    /// Drive one IMAP session to completion over an established TLS
-    /// stream. Returns when the client logs out or the connection
-    /// drops.
+    /// Runs until the client logs out or the connection drops.
     pub async fn run<S: AsyncRead + AsyncWrite + Unpin + Send>(
         &self,
         mut stream: S,
@@ -169,8 +154,7 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
         Ok(())
     }
 
-    /// Dispatch one parsed command. Returns `Ok(true)` to terminate
-    /// the session (LOGOUT or fatal protocol error).
+    /// `Ok(true)` ends the session: a LOGOUT, or a fatal protocol error.
     async fn dispatch<S: AsyncRead + AsyncWrite + Unpin + Send>(
         &self,
         stream:     &mut S,
@@ -595,8 +579,6 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
         }
     }
 
-    /// Refresh the cached message list from the backing store and
-    /// optionally clear the `\Recent` flag (SELECT vs EXAMINE).
     /// RFC 2177 `IDLE`: hold the connection open and tell the client the
     /// moment the mailbox changes, instead of making it ask.
     ///
@@ -734,9 +716,8 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
         Ok(())
     }
 
-    /// Send the untagged status responses required after SELECT or
-    /// EXAMINE: EXISTS, RECENT, UIDVALIDITY, UIDNEXT, FLAGS,
-    /// PERMANENTFLAGS, [UNSEEN N].
+    /// EXISTS, RECENT, UIDVALIDITY, UIDNEXT, FLAGS, PERMANENTFLAGS and [UNSEEN N],
+    /// all of which SELECT and EXAMINE are required to send.
     async fn write_select_status<S: AsyncRead + AsyncWrite + Unpin + Send>(
         &self,
         stream:     &mut S,
@@ -1167,8 +1148,7 @@ fn parse_command(line: &str) -> Option<ParsedCommand> {
 struct ArgIter<'a> {
     s:      &'a str,
     pos:    usize,
-    /// Set after `next_literal_marker` if the marker had a `+` suffix
-    /// (LITERAL+ extension).
+    // Set by next_literal_marker where the marker carried a `+` suffix, the LITERAL+ extension.
     literal_is_non_sync: bool,
 }
 
@@ -1198,8 +1178,8 @@ impl<'a> ArgIter<'a> {
         if start == self.pos { None } else { Some(self.s[start..self.pos].to_string()) }
     }
 
-    /// Read either a quoted string (`"..."`) or an atom; intended for
-    /// folder names and other simple string arguments.
+    /// A quoted string (`"..."`) or an atom, which is what a folder name and other simple
+    /// string arguments arrive as.
     fn next_string(&mut self) -> Option<String> {
         self.skip_whitespace();
         if self.peek() == Some('"') {
@@ -1230,7 +1210,7 @@ impl<'a> ArgIter<'a> {
         }
     }
 
-    /// Read a parenthesised flag list, returning the inner text.
+    /// The inner text of a parenthesised flag list, without the parentheses.
     fn next_paren_list(&mut self) -> Option<String> {
         self.skip_whitespace();
         if self.peek() != Some('(') { return None; }
@@ -1250,8 +1230,7 @@ impl<'a> ArgIter<'a> {
         Some(self.s[start..self.pos].to_string())
     }
 
-    /// Read a literal marker `{N}` or `{N+}`. Sets
-    /// `literal_is_non_sync` for the LITERAL+ form.
+    /// `{N}` or `{N+}`; the second form sets `literal_is_non_sync`.
     fn next_literal_marker(&mut self) -> Option<usize> {
         self.skip_whitespace();
         if self.peek() != Some('{') { return None; }
@@ -1532,9 +1511,8 @@ fn nstring(s: Option<&String>) -> String {
     }
 }
 
-/// Render an address list as a parenthesised list of address triples,
-/// `((name nil mailbox host) ...)`. The MVP parser only handles the
-/// simple `local@domain` and `Name <local@domain>` forms.
+/// `((name nil mailbox host) ...)`, which is the ENVELOPE form. The MVP parser handles only the
+/// simple `local@domain` and `Name <local@domain>` inputs.
 fn address_list(s: Option<&String>) -> String {
     let s = match s { Some(s) => s.as_str(), None => return "NIL".to_string() };
     let mut entries: Vec<String> = Vec::new();
@@ -1580,10 +1558,8 @@ fn escape_quoted(s: &str) -> String {
 // │ SET RESOLUTION                                                            │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Resolve an IMAP message set (`1`, `1:5`, `*`, `1,3,5:7`) to a list
-/// of indices into the cached message list. When `by_uid` is true the
-/// set is interpreted as a UID range, otherwise as a sequence-number
-/// range.
+/// A message set is `1`, `1:5`, `*` or `1,3,5:7`, and resolves to indices into the cached
+/// message list. `by_uid` reads it as a UID range rather than a sequence-number range.
 fn resolve_set(set: &str, msgs: &[MessageMeta], by_uid: bool) -> Vec<usize> {
     let mut out: Vec<usize> = Vec::new();
     if msgs.is_empty() { return out; }
@@ -1679,10 +1655,9 @@ fn capability_list() -> &'static str {
     "IMAP4rev1 LITERAL+ AUTH=PLAIN AUTH=LOGIN SPECIAL-USE IDLE"
 }
 
-/// Return the RFC 6154 SPECIAL-USE attribute (with leading backslash
-/// and no trailing space) for a well-known folder name, plus the
-/// `\HasNoChildren` hint that most clients rely on. Returns just
-/// `\HasNoChildren` for ordinary folders.
+/// The RFC 6154 SPECIAL-USE attribute of a well-known folder name, with its leading backslash
+/// and no trailing space, alongside the `\HasNoChildren` hint most clients rely on. An ordinary
+/// folder gets `\HasNoChildren` alone.
 fn special_use_attrs(name: &str) -> String {
     let su = match name {
         "Sent"      => Some("\\Sent"),
@@ -1698,10 +1673,8 @@ fn special_use_attrs(name: &str) -> String {
     }
 }
 
-/// Match an IMAP `LIST` mailbox pattern against a folder name. `*`
-/// matches any number of characters (including the hierarchy
-/// separator), `%` matches any number of characters except `/`. An
-/// empty pattern matches everything.
+/// In a `LIST` pattern, `*` matches any number of characters, the hierarchy separator included,
+/// and `%` matches any number except `/`. An empty pattern matches everything.
 fn match_imap_pattern(pattern: &str, name: &str) -> bool {
     if pattern.is_empty() { return true; }
     pattern_recurse(pattern.as_bytes(), name.as_bytes())
@@ -1738,8 +1711,7 @@ fn pattern_recurse(p: &[u8], n: &[u8]) -> bool {
     }
 }
 
-/// Format a SystemTime as an IMAP INTERNALDATE string, e.g.
-/// `13-Apr-2026 10:00:00 +0000`. Fixed UTC offset.
+/// The INTERNALDATE form, e.g. `13-Apr-2026 10:00:00 +0000`, always at a UTC offset.
 fn format_internal_date(t: SystemTime) -> String {
     let secs = t.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let (y, mo, d, h, mi, s) = unix_to_civil(secs);
@@ -1751,7 +1723,7 @@ fn format_internal_date(t: SystemTime) -> String {
     fmt!("{:02}-{}-{:04} {:02}:{:02}:{:02} +0000", d, mon, y, h, mi, s)
 }
 
-/// Parse an IMAP date-time string back into a SystemTime. Tolerant.
+/// Tolerant: what a client sends here varies more than the grammar says it should.
 fn parse_internal_date(s: &str) -> Option<SystemTime> {
     // Format: "13-Apr-2026 10:00:00 +0000"
     let parts: Vec<&str> = s.split_whitespace().collect();
@@ -1774,8 +1746,7 @@ fn parse_internal_date(s: &str) -> Option<SystemTime> {
     Some(UNIX_EPOCH + std::time::Duration::from_secs(secs))
 }
 
-/// Convert Unix seconds to (year, month, day, hour, minute, second)
-/// using Howard Hinnant's date algorithm (proleptic Gregorian, UTC).
+/// Howard Hinnant's date algorithm, proleptic Gregorian and UTC.
 fn unix_to_civil(secs: u64) -> (i32, u32, u32, u32, u32, u32) {
     let days = (secs / 86_400) as i64;
     let rem = (secs % 86_400) as u32;
@@ -1810,10 +1781,9 @@ fn civil_to_unix(y: i32, m: u32, d: u32, h: u32, mi: u32, s: u32) -> u64 {
     secs
 }
 
-/// One emitted FETCH response component. Text segments are joined
-/// with a SP separator inside the parenthesised FETCH response;
-/// literal segments contain raw bytes that must be written byte-for-
-/// byte after a `prefix{N}\r\n` header.
+/// One emitted FETCH response component. A text segment is joined to its neighbours by a SP
+/// inside the parenthesised response; a literal segment is raw bytes that must be written
+/// byte-for-byte after a `prefix{N}\r\n` header.
 enum FetchSegment {
     Text(String),
     Literal { prefix: String, payload: Vec<u8> },

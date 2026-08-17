@@ -27,6 +27,9 @@
 //! helper that parses them on demand. This mirrors the pattern used by
 //! `fe2o3_steel::srv::cfg::ServerConfig` where `vhosts: Dat` is extracted
 //! via a dedicated `get_vhosts()` method.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::acme::jose;
 
@@ -53,7 +56,6 @@ use ring::digest::{
 // │ HELPERS                                                                   │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// SHA-256 of the input, returned as a 32-byte array.
 fn sha256(data: &[u8]) -> [u8; 32] {
     let mut ctx = Context::new(&SHA256);
     ctx.update(data);
@@ -68,11 +70,8 @@ fn sha256(data: &[u8]) -> [u8; 32] {
 // │ RESPONSE PARSING                                                          │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Parse an HTTP response body as a JSON object and deserialise it into a
-/// typed ACME struct via [`FromDatMap`].
-///
-/// The JSON decoder is configured in strict mode (no comments, no trailing
-/// commas) so we accept only standards-compliant CA output.
+/// The decoder runs in strict JSON mode, no comments and no trailing commas, so
+/// only standards-compliant CA output is accepted.
 pub fn parse_json_response<T: FromDatMap>(body: &[u8]) -> Outcome<T> {
     let s = match std::str::from_utf8(body) {
         Ok(s) => s.to_string(),
@@ -110,21 +109,15 @@ pub fn parse_json_response<T: FromDatMap>(body: &[u8]) -> Outcome<T> {
 /// Order lifecycle status, RFC 8555 §7.1.6.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OrderStatus {
-    /// Authorisations are outstanding.
-    Pending,
-    /// Every authorisation is valid; the order awaits a CSR.
-    Ready,
-    /// The CSR has been accepted and the CA is issuing.
-    Processing,
-    /// The certificate has been issued.
-    Valid,
-    /// The order has failed and cannot be recovered.
-    Invalid,
+    Pending,        // authorisations are outstanding
+    Ready,          // every authorisation is valid, awaiting a CSR
+    Processing,     // the CSR is accepted and the CA is issuing
+    Valid,          // the certificate has been issued
+    Invalid,        // failed, and cannot be recovered
 }
 
 impl OrderStatus {
 
-    /// Parse the `status` member of an order as it appears on the wire.
     pub fn from_wire(s: &str) -> Outcome<Self> {
         match s {
             "pending"       => Ok(Self::Pending),
@@ -139,7 +132,6 @@ impl OrderStatus {
         }
     }
 
-    /// The wire form of this status.
     pub fn as_wire(&self) -> &'static str {
         match self {
             Self::Pending       => "pending",
@@ -153,30 +145,23 @@ impl OrderStatus {
 
 /// Authorisation status, RFC 8555 §7.1.6.
 ///
-/// Note there is no `processing` state: an authorisation goes straight from
-/// `pending` to `valid` or `invalid` once its challenge is decided.
+/// There is no `processing` state: an authorisation goes straight from
+/// `pending` to `valid` or `invalid` once its challenge is decided. The CA
+/// caches validations -- Let's Encrypt for around 30 days -- so a freshly
+/// created order can legitimately carry authorisations that are already
+/// `valid`, with nothing left for the client to prove.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AuthorizationStatus {
-    /// A challenge still has to be satisfied.
-    Pending,
-    /// The CA has validated the identifier. Validations are cached by the CA
-    /// (Let's Encrypt for around 30 days), so a freshly-created order can
-    /// legitimately carry authorisations that are already `valid`, with
-    /// nothing left for the client to prove.
-    Valid,
-    /// A challenge was attempted and failed.
-    Invalid,
-    /// The client deactivated the authorisation.
-    Deactivated,
-    /// The authorisation passed its `expires` time.
-    Expired,
-    /// The CA revoked the authorisation.
-    Revoked,
+    Pending,        // a challenge still has to be satisfied
+    Valid,          // the CA has validated the identifier
+    Invalid,        // a challenge was attempted and failed
+    Deactivated,    // deactivated by the client
+    Expired,        // past its `expires` time
+    Revoked,        // revoked by the CA
 }
 
 impl AuthorizationStatus {
 
-    /// Parse the `status` member of an authorisation as it appears on the wire.
     pub fn from_wire(s: &str) -> Outcome<Self> {
         match s {
             "pending"       => Ok(Self::Pending),
@@ -193,7 +178,6 @@ impl AuthorizationStatus {
         }
     }
 
-    /// The wire form of this status.
     pub fn as_wire(&self) -> &'static str {
         match self {
             Self::Pending       => "pending",
@@ -209,19 +193,14 @@ impl AuthorizationStatus {
 /// Challenge status, RFC 8555 §7.1.6.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChallengeStatus {
-    /// The client has not yet signalled that it is ready to be validated.
-    Pending,
-    /// The client has signalled readiness and the CA is validating.
-    Processing,
-    /// The CA validated the challenge.
-    Valid,
-    /// The CA could not validate the challenge.
-    Invalid,
+    Pending,        // the client has not yet signalled readiness
+    Processing,     // readiness signalled, the CA is validating
+    Valid,          // the CA validated it
+    Invalid,        // the CA could not validate it
 }
 
 impl ChallengeStatus {
 
-    /// Parse the `status` member of a challenge as it appears on the wire.
     pub fn from_wire(s: &str) -> Outcome<Self> {
         match s {
             "pending"       => Ok(Self::Pending),
@@ -235,7 +214,6 @@ impl ChallengeStatus {
         }
     }
 
-    /// The wire form of this status.
     pub fn as_wire(&self) -> &'static str {
         match self {
             Self::Pending       => "pending",
@@ -251,9 +229,9 @@ impl ChallengeStatus {
 // │ DIRECTORY (RFC 8555 §7.1.1)                                               │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// The ACME directory document returned by a `GET {directory_url}`. Each
-/// field is a fully-qualified URL that the client uses as the target for
-/// subsequent requests.
+/// The ACME directory document a `GET {directory_url}` returns. Every field but
+/// `meta` is a fully-qualified URL the client uses as the target of a subsequent
+/// request.
 #[derive(Clone, Debug, Default, FromDatMap)]
 pub struct Directory {
     #[rename(name = "newNonce")]
@@ -268,11 +246,8 @@ pub struct Directory {
     #[rename(name = "keyChange")]
     #[optional]
     pub key_change:     String,
-    /// Free-form metadata (terms of service URL, external account binding
-    /// requirement, etc.). Kept as a raw `Dat` because we do not parse any
-    /// of it in Steel today.
     #[optional]
-    pub meta:           Dat,
+    pub meta:           Dat,    // terms of service URL, external account binding
 }
 
 
@@ -280,9 +255,8 @@ pub struct Directory {
 // │ ACCOUNT (RFC 8555 §7.3)                                                   │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Account object returned by `POST {new_account}` and subsequent account
-/// management requests. We care only about `status`; the rest is kept so
-/// callers can log it if useful.
+/// The account object a `POST {new_account}` and every later account management
+/// request returns. Only `status` is acted on; the rest is kept for logging.
 #[derive(Clone, Debug, Default, FromDatMap)]
 pub struct Account {
     pub status:     String,
@@ -301,34 +275,24 @@ pub struct Account {
 /// an order URL while issuance is in flight.
 #[derive(Clone, Debug, Default, FromDatMap)]
 pub struct Order {
-    /// Order lifecycle status: `pending`, `ready`, `processing`, `valid` or
-    /// `invalid`. Compared as a plain string against RFC 8555 §7.1.6.
-    pub status:             String,
+    pub status:             String,         // RFC 8555 §7.1.6, see typed_status
     #[optional]
     pub expires:            String,
-    /// List of `{"type":"dns","value":"<name>"}` maps.
     #[optional]
-    pub identifiers:        Vec<Dat>,
-    /// URLs of the authorisations the client must satisfy before the order
-    /// can be finalised.
-    pub authorizations:     Vec<String>,
-    /// URL for the final CSR POST.
-    pub finalize:           String,
-    /// URL of the issued certificate. Absent until `status == "valid"`.
+    pub identifiers:        Vec<Dat>,       // `{"type":"dns","value":"<name>"}` maps
+    pub authorizations:     Vec<String>,    // all to be satisfied before finalising
+    pub finalize:           String,         // where the CSR is POSTed
     #[optional]
-    pub certificate:        String,
-    /// RFC 7807 problem document attached by the CA when `status == "invalid"`.
+    pub certificate:        String,         // absent until `status` is `valid`
     #[optional]
-    pub error:              Dat,
+    pub error:              Dat,            // RFC 7807, set when `status` is `invalid`
 }
 
 impl Order {
-    /// Parse the `status` string into a typed [`OrderStatus`].
     pub fn typed_status(&self) -> Outcome<OrderStatus> {
         OrderStatus::from_wire(&self.status)
     }
 
-    /// Parse the nested `error` field into a typed [`Problem`], if present.
     pub fn typed_error(&self) -> Outcome<Option<Problem>> {
         match &self.error {
             Dat::Empty => Ok(None),
@@ -354,23 +318,17 @@ pub struct Authorization {
     pub status:         String,
     #[optional]
     pub expires:        String,
-    /// `{"type":"dns","value":"<name>"}`.
-    pub identifier:     Dat,
-    /// Challenges the CA is willing to accept.
-    pub challenges:     Vec<Dat>,
-    /// Present when the authorisation is for a wildcard identifier.
+    pub identifier:     Dat,         // `{"type":"dns","value":"<name>"}`
+    pub challenges:     Vec<Dat>,    // those the CA is willing to accept
     #[optional]
-    pub wildcard:       bool,
+    pub wildcard:       bool,        // set for a wildcard identifier
 }
 
 impl Authorization {
-    /// Parse the `status` string into a typed [`AuthorizationStatus`].
     pub fn typed_status(&self) -> Outcome<AuthorizationStatus> {
         AuthorizationStatus::from_wire(&self.status)
     }
 
-    /// Parse each entry in [`Authorization::challenges`] into a typed
-    /// [`Challenge`].
     pub fn typed_challenges(&self) -> Outcome<Vec<Challenge>> {
         let mut out = Vec::with_capacity(self.challenges.len());
         for (i, dat) in self.challenges.iter().enumerate() {
@@ -385,7 +343,6 @@ impl Authorization {
         Ok(out)
     }
 
-    /// Return the `tls-alpn-01` challenge in this authorisation, if any.
     pub fn tls_alpn_01_challenge(&self) -> Outcome<Option<Challenge>> {
         for chall in res!(self.typed_challenges()) {
             if chall.typ == "tls-alpn-01" {
@@ -403,15 +360,12 @@ impl Authorization {
 
 /// A single challenge on an authorisation.
 ///
-/// Note on optional fields: both `url` and `token` are marked `#[optional]`
-/// because Let's Encrypt's current staging responses sometimes contain
-/// challenges with neither field (for challenge types Steel does not
-/// participate in). Marking them optional makes `FromDatMap` default them
-/// to empty strings rather than failing the whole authorisation parse.
-/// Steel only ever reads `token` on `tls-alpn-01` challenges, so an empty
-/// default on other variants is operationally harmless. This reproduces, in
-/// the existing jdat derive, the effect of the `#[serde(default)]` attributes
-/// that the vendored `rustls-acme` patch applied on top of upstream.
+/// `url` and `token` are `#[optional]` because Let's Encrypt's staging responses
+/// sometimes carry challenges with neither, for challenge types this client does
+/// not participate in; without the marking the derive fails the whole
+/// authorisation parse. `token` is only ever read on a `tls-alpn-01` challenge,
+/// so an empty default elsewhere is harmless. This reproduces, in the jdat
+/// derive, what the `#[serde(default)]` in the vendored `rustls-acme` patch did.
 #[derive(Clone, Debug, Default, FromDatMap)]
 pub struct Challenge {
     #[rename(name = "type")]
@@ -428,34 +382,27 @@ pub struct Challenge {
 }
 
 impl Challenge {
-    /// Parse the `status` string into a typed [`ChallengeStatus`].
     pub fn typed_status(&self) -> Outcome<ChallengeStatus> {
         ChallengeStatus::from_wire(&self.status)
     }
 
-    /// Compute the key authorisation string for this challenge as defined in
-    /// RFC 8555 §8.1: `token || '.' || base64url(SHA-256(JWK))`. The account
-    /// JWK thumbprint is supplied by the caller (typically
-    /// [`crate::acme::jose::JwsSigner::jwk_thumbprint_sha256`]).
+    /// RFC 8555 §8.1: `token || '.' || base64url(SHA-256(JWK))`. The account JWK
+    /// thumbprint comes from the caller, normally
+    /// [`crate::acme::jose::JwsSigner::jwk_thumbprint_sha256`].
     pub fn key_authorization(&self, jwk_thumbprint: &[u8; 32]) -> String {
         fmt!("{}.{}", self.token, jose::base64url_encode(jwk_thumbprint))
     }
 
-    /// Compute the `dns-01` TXT record value for this challenge as defined in
-    /// RFC 8555 §8.4: the base64url encoding of the SHA-256 **digest of the
-    /// key authorisation string**, not of the token and not of the raw
-    /// thumbprint.
-    ///
-    /// The record is published at `_acme-challenge.<domain>`. Note the
-    /// prehash: the digest is taken over the key authorisation's UTF-8 bytes,
-    /// and the digest -- not the string -- is what gets base64url-encoded.
+    /// RFC 8555 §8.4: base64url of the SHA-256 **digest of the key authorisation
+    /// string**, not of the token and not of the raw thumbprint. The digest is
+    /// taken over the key authorisation's UTF-8 bytes and the digest -- not the
+    /// string -- is what gets encoded. Published at `_acme-challenge.<domain>`.
     pub fn dns_01_txt_value(&self, jwk_thumbprint: &[u8; 32]) -> String {
         let key_auth = self.key_authorization(jwk_thumbprint);
         let digest = sha256(key_auth.as_bytes());
         jose::base64url_encode(&digest)
     }
 
-    /// Parse the nested `error` field into a typed [`Problem`], if present.
     pub fn typed_error(&self) -> Outcome<Option<Problem>> {
         match &self.error {
             Dat::Empty => Ok(None),
@@ -494,11 +441,8 @@ pub struct Problem {
 // │ REQUEST BUILDERS                                                          │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Build the payload for `POST {new_account}`.
-///
-/// `contact_mailto` is an email address (no `mailto:` prefix -- the helper
-/// adds it). `terms_agreed` must be set to `true` to accept the CA's terms
-/// of service, which is a requirement of every public CA we target.
+/// `contact_mailto` is a bare email address; the `mailto:` prefix is added here.
+/// `terms_agreed` must be `true`, which every public CA targeted requires.
 pub fn new_account_request(
     contact_mailto:     &str,
     terms_agreed:       bool,
@@ -511,10 +455,8 @@ pub fn new_account_request(
     }
 }
 
-/// Build the payload for `POST {new_order}`.
-///
 /// Each entry in `dns_names` becomes an RFC 8555 §7.1.3 identifier of type
-/// `"dns"`. The CA will mint one authorisation per distinct identifier.
+/// `"dns"`, and the CA mints one authorisation per distinct identifier.
 pub fn new_order_request(dns_names: &[String]) -> Dat {
     let identifiers: Vec<Dat> = dns_names
         .iter()
@@ -528,8 +470,8 @@ pub fn new_order_request(dns_names: &[String]) -> Dat {
     }
 }
 
-/// Build the payload for `POST {finalize_url}` once every authorisation is
-/// satisfied. `csr_der_b64url` is the base64url-encoded DER of the CSR.
+/// For `POST {finalize_url}`, once every authorisation is satisfied.
+/// `csr_der_b64url` is the CSR's DER, base64url-encoded.
 pub fn finalize_request(csr_der_b64url: &str) -> Dat {
     mapdat!{
         "csr" => csr_der_b64url.to_string(),

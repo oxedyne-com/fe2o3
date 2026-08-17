@@ -20,6 +20,9 @@
 //! All writes go through an atomic write-then-rename helper so a crashed
 //! or killed process cannot leave a partial file behind that the next
 //! start-up would read as truncated garbage.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::acme::jose::JwsSigner;
 
@@ -39,8 +42,8 @@ use std::{
 // │ CACHE                                                                     │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// An on-disk cache for an ACME client's account key and last-issued
-/// certificate. All paths are rooted at `root`.
+/// An ACME client's account key and last-issued certificate, under one root
+/// directory.
 #[derive(Clone, Debug)]
 pub struct AcmeDiskCache {
     root: PathBuf,
@@ -48,8 +51,7 @@ pub struct AcmeDiskCache {
 
 impl AcmeDiskCache {
 
-    /// Create a cache rooted at `root`. The directory is created if it
-    /// does not already exist.
+    /// Creates the root directory if it is not already there.
     pub fn new<P: AsRef<Path>>(root: P) -> Outcome<Self> {
         let root = root.as_ref().to_path_buf();
         if let Err(e) = fs::create_dir_all(&root) {
@@ -60,26 +62,22 @@ impl AcmeDiskCache {
         Ok(Self { root })
     }
 
-    /// Absolute path of the cache root directory.
     pub fn root(&self) -> &Path {
         &self.root
     }
 
-    /// Absolute path of the cached certificate PEM file, whether or not
-    /// it currently exists. Callers can use this to probe mtime, delete
-    /// the file directly, or feed the path to another tool.
+    /// Named whether or not the file exists, so a caller may probe its mtime or
+    /// delete it.
     pub fn certificate_path(&self) -> PathBuf {
         self.root.join(CERT_PEM_FILE)
     }
 
-    /// Absolute path of the cached account key file, whether or not it
-    /// currently exists.
+    /// Named whether or not the file exists.
     pub fn account_key_path(&self) -> PathBuf {
         self.root.join(ACCOUNT_KEY_FILE)
     }
 
-    /// Load the cached ACME account key, returning `Ok(None)` when the
-    /// file is not present yet (first-run case).
+    /// `Ok(None)` where no key has been stored yet, which is the first run.
     pub fn load_account_key(&self) -> Outcome<Option<JwsSigner>> {
         let path = self.root.join(ACCOUNT_KEY_FILE);
         if !path.exists() {
@@ -94,20 +92,16 @@ impl AcmeDiskCache {
         Ok(Some(res!(JwsSigner::from_pkcs8(&bytes))))
     }
 
-    /// Atomically store the given ACME account key, overwriting any
-    /// existing file.
+    /// The write is atomic and replaces any existing key.
     pub fn store_account_key(&self, signer: &JwsSigner) -> Outcome<()> {
         let path = self.root.join(ACCOUNT_KEY_FILE);
         res!(write_atomic(&path, signer.pkcs8_bytes()));
         Ok(())
     }
 
-    /// Load the cached issued certificate and its private key, returning
-    /// `Ok(None)` when either file is missing.
-    ///
-    /// The returned pair is `(cert_pem, key_pkcs8_der)`. Both blobs are
-    /// returned verbatim as stored; it is the caller's job to parse the
-    /// PEM chain and/or hand the key to `rustls`.
+    /// The pair is `(cert_pem, key_pkcs8_der)`, verbatim as stored; parsing the
+    /// chain and handing the key to `rustls` is the caller's job. `Ok(None)` where
+    /// either file is missing, so a half-populated cache reads as no cache.
     pub fn load_certificate(&self) -> Outcome<Option<(Vec<u8>, Vec<u8>)>> {
         let cert_path = self.root.join(CERT_PEM_FILE);
         let key_path  = self.root.join(CERT_KEY_FILE);
@@ -129,8 +123,8 @@ impl AcmeDiskCache {
         Ok(Some((cert, key)))
     }
 
-    /// Atomically store the issued certificate chain (PEM) and its
-    /// matching private key (PKCS#8 DER).
+    /// Each file is written atomically, but the pair is not: an interruption
+    /// between the two leaves a new certificate beside the old key.
     pub fn store_certificate(
         &self,
         cert_pem:   &[u8],
@@ -158,9 +152,8 @@ const CERT_KEY_FILE:    &str = "cert_key.pkcs8";
 // │ ATOMIC WRITE                                                              │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Atomic file write. Writes `data` to `<path>.tmp`, fsyncs, then renames
-/// `<path>.tmp` to `<path>`, so an interrupted or crashed writer can never
-/// leave a half-written file under the real name.
+/// Writes to `<path>.tmp`, fsyncs, then renames, so an interrupted writer never
+/// leaves a half-written file under the real name.
 fn write_atomic(path: &Path, data: &[u8]) -> Outcome<()> {
     let file_name = match path.file_name() {
         Some(n) => n.to_os_string(),
@@ -212,9 +205,8 @@ mod tests {
         Ordering,
     };
 
-    /// Monotonic counter used to hand each test a unique cache
-    /// directory. Combined with the PID it gives a per-test path that
-    /// cannot collide even when the suite runs with multiple threads.
+    // Combined with the PID this gives each test a path that cannot collide,
+    // even when the suite runs across threads.
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
     /// A cache directory under `/tmp` that is unique per test run and per

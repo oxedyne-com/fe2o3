@@ -10,6 +10,9 @@
 //! `user::UserGuard` is the per-user counterpart: a sharded map of trust state (Unknown /
 //! Blacklist / Whitelist) with a caller-supplied data payload, likewise lifted out of
 //! `fe2o3_shield` so any protocol can classify users, not only addresses.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 pub mod addr;
 pub mod user;

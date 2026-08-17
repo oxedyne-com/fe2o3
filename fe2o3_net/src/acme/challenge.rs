@@ -28,6 +28,9 @@
 //! it just executes the TLS handshake, checks the `acmeIdentifier`
 //! extension, tears down and moves on -- and the resulting artefact is
 //! never persisted to disk.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -50,26 +53,17 @@ use ring::digest::{
 /// to a rustls cert resolver when the CA opens a `tls-alpn-01` handshake.
 #[derive(Clone, Debug)]
 pub struct ChallengeCert {
-    /// Self-signed certificate in DER (one entry in the chain).
-    pub cert_der:   Vec<u8>,
-    /// Matching PKCS#8 private key in DER.
-    pub key_der:    Vec<u8>,
+    pub cert_der:   Vec<u8>,    // self-signed, one entry in the chain
+    pub key_der:    Vec<u8>,    // PKCS#8
 }
 
-/// Build a `tls-alpn-01` challenge certificate for a single DNS name.
+/// `hostname` must match the SNI the CA sends on its validation handshake, and
+/// becomes the cert's single `dNSName` subject alternative name.
 ///
-/// `hostname` is the DNS name the CA is attempting to validate. It must
-/// match the SNI the CA sends on its validation handshake, so it is placed
-/// in the cert as a single `dNSName` subject alternative name.
-///
-/// `key_authorization` is the full ACME key authorisation string for the
-/// challenge: `<challenge-token>.<base64url(SHA-256(JWK))>`. The caller
-/// typically obtains this by calling
-/// [`crate::acme::rfc8555::Challenge::key_authorization`]. This function
-/// takes the string rather than a pre-computed digest because RFC 8737 §3
-/// is specified in terms of the key authorisation's SHA-256, and threading
-/// the untrimmed input through the whole module is easier to audit than
-/// passing a raw 32-byte digest.
+/// `key_authorization` is `<challenge-token>.<base64url(SHA-256(JWK))>`, as
+/// [`crate::acme::rfc8555::Challenge::key_authorization`] builds it. RFC 8737 §3
+/// specifies the extension in terms of that string's SHA-256, so the string is
+/// taken here rather than a digest already computed elsewhere.
 pub fn build_tls_alpn_01_cert(
     hostname:           &str,
     key_authorization:  &str,
@@ -110,8 +104,8 @@ pub fn build_tls_alpn_01_cert(
 // │ HELPERS                                                                   │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// SHA-256 of the input, returned as a 32-byte array. Local to this module
-/// so `challenge` remains independent of [`crate::acme::jose`].
+/// Local to this module so `challenge` stays independent of
+/// [`crate::acme::jose`].
 fn sha256(data: &[u8]) -> [u8; 32] {
     let mut ctx = Context::new(&SHA256);
     ctx.update(data);
@@ -133,13 +127,9 @@ mod tests {
     use crate::acme::rfc8555::Challenge;
     use oxedyne_fe2o3_jdat::prelude::*;
 
-    /// OID for id-pe-acmeIdentifier as listed in RFC 8737 §3.
-    /// Encoded on the wire as the component sequence 1.3.6.1.5.5.7.1.31.
-    /// In DER that's the byte sequence `06 08 2B 06 01 05 05 07 01 1F`:
-    /// - `06` = OBJECT IDENTIFIER tag
-    /// - `08` = length (8 bytes)
-    /// - `2B` = 40*1 + 3
-    /// - `06 01 05 05 07 01 1F` = 6, 1, 5, 5, 7, 1, 31 (base-128 varints)
+    // OID for id-pe-acmeIdentifier, RFC 8737 §3: the component sequence
+    // 1.3.6.1.5.5.7.1.31, which in DER is `06` OBJECT IDENTIFIER tag, `08`
+    // length, `2B` = 40*1 + 3, then 6, 1, 5, 5, 7, 1, 31 as base-128 varints.
     const ACME_OID_DER: [u8; 10] = [
         0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x01, 0x1f,
     ];

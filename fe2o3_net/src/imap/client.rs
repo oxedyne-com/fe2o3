@@ -46,6 +46,9 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::tls::{
     self,
@@ -74,13 +77,12 @@ use tokio::{
 use tokio_rustls::rustls::ClientConfig;
 
 
-/// Default per-IO deadline. Generous: a large `UID FETCH` against a slow
-/// mailbox is a legitimate multi-second read.
+// Generous, because a large `UID FETCH` against a slow mailbox is a legitimate
+// multi-second read.
 pub const IMAP_CLIENT_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Refuse a literal larger than this. A server that announces a 4 GB
-/// literal is either broken or hostile, and either way the client should
-/// not try to allocate for it.
+// A server announcing a 4 GB literal is either broken or hostile, and either way
+// the client should not try to allocate for it.
 pub const MAX_LITERAL_BYTES: usize = 64 * 1024 * 1024;
 
 
@@ -91,41 +93,31 @@ pub const MAX_LITERAL_BYTES: usize = 64 * 1024 * 1024;
 /// How the connection is protected.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Security {
-    /// TLS from the first byte. The usual case, on port 993.
-    ImplicitTls,
-    /// Connect in the clear, then `STARTTLS` before authenticating. Port
-    /// 143. The client refuses to send credentials if the upgrade fails.
+    ImplicitTls,    // TLS from the first byte, the usual case on port 993
+    // In the clear, then `STARTTLS` before authenticating, on port 143. Where the
+    // upgrade fails the client refuses to send the credential.
     StartTls,
-    /// No TLS. For a test server on loopback, and nothing else.
-    Plain,
+    Plain,          // a test server on loopback, and nothing else
 }
 
 /// Where to connect and how.
 #[derive(Clone, Debug)]
 pub struct ImapConfig {
-    /// Server hostname. Also the name the certificate is validated against.
-    pub host:       String,
-    /// Server port, conventionally 993 (implicit TLS) or 143 (STARTTLS).
-    pub port:       u16,
-    /// Transport protection.
+    pub host:       String,     // also the name the certificate is validated against
+    pub port:       u16,        // conventionally 993 (implicit TLS) or 143 (STARTTLS)
     pub security:   Security,
-    /// Per-IO deadline.
-    pub timeout:    Duration,
-    /// Connect to this address instead of resolving `host`. The
-    /// certificate is still validated against `host`, so pinning the
-    /// address weakens nothing.
-    ///
-    /// A server that connects to a host its *user* named must resolve the
-    /// name, satisfy itself that the answer is somewhere it is willing to
-    /// go (see [`crate::addr::resolve_public`]), and then connect to that
-    /// address -- not re-resolve the name and hope for the same answer
-    /// twice. This field is how it does the last part.
+    pub timeout:    Duration,   // per IO
+    // Dialled instead of resolving `host`; the certificate is still validated against `host`, so
+    // pinning the address weakens nothing. A server connecting to a host its *user* named must
+    // resolve the name, satisfy itself the answer is somewhere it is willing to go (see
+    // crate::addr::resolve_public), and then connect to that address -- not re-resolve the name
+    // and hope for the same answer twice. This field is how it does the last part.
     pub addr:       Option<SocketAddr>,
 }
 
 impl ImapConfig {
 
-    /// Build a configuration with the default timeout.
+    /// The default timeout, and no pinned address.
     pub fn new<S: Into<String>>(host: S, port: u16, security: Security) -> Self {
         Self {
             host:     host.into(),
@@ -136,13 +128,11 @@ impl ImapConfig {
         }
     }
 
-    /// Override the per-IO deadline.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
 
-    /// Pin the address to connect to, bypassing name resolution.
     pub fn with_addr(mut self, addr: SocketAddr) -> Self {
         self.addr = Some(addr);
         self
@@ -157,24 +147,19 @@ impl ImapConfig {
 /// One mailbox as reported by `LIST`.
 #[derive(Clone, Debug)]
 pub struct MailboxInfo {
-    /// Mailbox name, as the server spells it.
-    pub name:       String,
-    /// Hierarchy delimiter, or `None` for a flat namespace.
-    pub delimiter:  Option<char>,
-    /// Attributes, e.g. `\HasChildren`, `\Noselect`, `\Sent`.
-    pub attrs:      Vec<String>,
+    pub name:       String,         // as the server spells it
+    pub delimiter:  Option<char>,   // `None` for a flat namespace
+    pub attrs:      Vec<String>,    // e.g. `\HasChildren`, `\Noselect`, `\Sent`
 }
 
 impl MailboxInfo {
-    /// Whether the mailbox cannot itself be selected (it exists only to
-    /// hold children).
+    /// A mailbox that exists only to hold children cannot itself be selected.
     pub fn selectable(&self) -> bool {
         !self.attrs.iter().any(|a| a.eq_ignore_ascii_case("\\Noselect"))
     }
 
-    /// The RFC 6154 special-use role, if the server declared one.
-    ///
-    /// This is how a client recognises the Sent folder on a mailbox whose
+    /// The RFC 6154 special-use role, where the server declared one. This is how a client
+    /// recognises the Sent folder on a mailbox whose
     /// names are localised -- Gmail spells it "[Gmail]/Gesendet" for a German
     /// account, but the attribute is `\Sent` everywhere.
     pub fn special_use(&self) -> Option<SpecialUse> {
@@ -200,20 +185,13 @@ impl MailboxInfo {
 /// The special-use roles of RFC 6154, one per mailbox at most.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpecialUse {
-    /// Sent messages land here.
     Sent,
-    /// Unfinished drafts.
     Drafts,
-    /// Deleted messages await expunge.
-    Trash,
-    /// Spam.
-    Junk,
-    /// Messages filed out of the inbox.
-    Archive,
-    /// Every message, however filed (Gmail's "All Mail").
-    All,
-    /// Messages the user has starred or flagged.
-    Flagged,
+    Trash,      // deleted messages await expunge
+    Junk,       // spam
+    Archive,    // filed out of the inbox
+    All,        // every message however filed, Gmail's "All Mail"
+    Flagged,    // starred or flagged
 }
 
 /// The state of a mailbox after `SELECT` or `EXAMINE`.
@@ -223,39 +201,26 @@ pub enum SpecialUse {
 /// must be re-read from scratch.
 #[derive(Clone, Debug, Default)]
 pub struct MailboxStatus {
-    /// The selected mailbox.
     pub name:           String,
-    /// Message count.
-    pub exists:         u32,
-    /// Messages flagged recent.
-    pub recent:         u32,
-    /// UID namespace generation. A change invalidates every cached UID.
-    pub uid_validity:   u32,
-    /// The UID the next arriving message will be given.
-    pub uid_next:       u32,
-    /// Flags defined in this mailbox.
-    pub flags:          Vec<String>,
-    /// Whether the mailbox was opened read-only (`EXAMINE`, or a server
-    /// that downgraded the `SELECT`).
-    pub read_only:      bool,
+    pub exists:         u32,            // messages present
+    pub recent:         u32,            // messages flagged `\Recent`
+    pub uid_validity:   u32,            // UID namespace generation
+    pub uid_next:       u32,            // the UID the next arrival will be given
+    pub flags:          Vec<String>,    // defined in this mailbox
+    pub read_only:      bool,           // `EXAMINE`, or a server that downgraded the `SELECT`
 }
 
 /// How much of each message to pull down.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FetchWhat {
-    /// Metadata only: UID, flags, internal date, size. No body at all.
-    Meta,
-    /// Metadata plus the RFC 5322 header block.
-    Headers,
-    /// Metadata plus the whole message.
-    Full,
+    Meta,       // UID, flags, internal date, size; no body at all
+    Headers,    // and the RFC 5322 header block
+    Full,       // and the whole message
 }
 
 impl FetchWhat {
-    /// The FETCH data items this fetch asks for. `BODY.PEEK` rather than
-    /// `BODY`, so reading a message does not silently mark it `\Seen` --
-    /// a sync should be invisible to whoever is reading the mailbox
-    /// elsewhere.
+    /// `BODY.PEEK` rather than `BODY`, so reading a message does not silently mark it `\Seen` --
+    /// a sync should be invisible to whoever is reading the mailbox elsewhere.
     fn items(&self) -> &'static str {
         match self {
             Self::Meta    => "(UID FLAGS INTERNALDATE RFC822.SIZE)",
@@ -268,37 +233,27 @@ impl FetchWhat {
 /// One message returned by `UID FETCH`.
 #[derive(Clone, Debug, Default)]
 pub struct FetchedMessage {
-    /// Message sequence number in the current mailbox view.
-    pub seq:            u32,
-    /// Stable UID within the mailbox's current `uid_validity`.
-    pub uid:            u32,
-    /// IMAP flags, e.g. `\Seen`, `\Answered`.
-    pub flags:          Vec<String>,
-    /// `INTERNALDATE` exactly as the server gave it, e.g.
-    /// `01-Jan-2026 09:15:00 +0000`. Left as the server's string because
-    /// only the caller knows what calendar it wants it in.
+    pub seq:            u32,            // sequence number in the current mailbox view
+    pub uid:            u32,            // stable within the mailbox's current `uid_validity`
+    pub flags:          Vec<String>,    // e.g. `\Seen`, `\Answered`
+    // `INTERNALDATE` exactly as the server gave it, e.g. `01-Jan-2026 09:15:00 +0000`. Left as
+    // the server's string, because only the caller knows what calendar it wants it in.
     pub internal_date:  String,
-    /// `RFC822.SIZE` as reported by the server, which may exceed
-    /// `body.len()` when only the headers were fetched.
-    pub size:           u32,
-    /// The raw bytes fetched: the whole message, the header block, or
-    /// empty, according to the [`FetchWhat`] asked for.
-    pub body:           Vec<u8>,
+    pub size:           u32,            // `RFC822.SIZE`, which may exceed `body.len()`
+    pub body:           Vec<u8>,        // whole message, header block, or empty, per FetchWhat
 }
 
 /// What a `UID STORE` does to the named flags.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FlagOp {
-    /// Add the flags, leaving others alone.
-    Add,
-    /// Remove the flags, leaving others alone.
-    Remove,
-    /// Replace the flag set entirely.
-    Set,
+    Add,        // leaving the others alone
+    Remove,     // leaving the others alone
+    Set,        // replacing the flag set entirely
 }
 
 impl FlagOp {
-    /// The IMAP `STORE` data item name.
+    /// `.SILENT` throughout: the client already knows what it asked for, and the untagged FETCH
+    /// the server would otherwise send back is a round trip spent on nothing.
     fn item(&self) -> &'static str {
         match self {
             Self::Add    => "+FLAGS.SILENT",
@@ -311,22 +266,17 @@ impl FlagOp {
 /// The completion status of a tagged command.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Status {
-    /// The command succeeded.
     Ok,
-    /// The server refused the command.
-    No,
-    /// The server did not understand the command.
-    Bad,
+    No,     // refused
+    Bad,    // not understood
 }
 
 /// One logical response line: the text, with every literal lifted out
 /// into `literals` in the order it appeared.
 #[derive(Clone, Debug)]
 struct RawLine {
-    /// The line text. Each literal appears here only as its `{n}` marker.
-    text:       String,
-    /// The literal payloads, in order.
-    literals:   Vec<Vec<u8>>,
+    text:       String,         // each literal appears only as its `{n}` marker
+    literals:   Vec<Vec<u8>>,   // the payloads, in order
 }
 
 /// Everything one tagged command produced. Only a successful command
@@ -334,10 +284,8 @@ struct RawLine {
 /// own words, so there is no status to carry here.
 #[derive(Clone, Debug)]
 struct Response {
-    /// The untagged (`*`) lines that arrived before completion.
-    untagged:   Vec<RawLine>,
-    /// The text on the completion line, which may carry a response code.
-    text:       String,
+    untagged:   Vec<RawLine>,   // the `*` lines that arrived before completion
+    text:       String,         // the completion line, which may carry a response code
 }
 
 
@@ -348,25 +296,19 @@ struct Response {
 /// A connected IMAP client. One connection, one mailbox selected at a
 /// time, exactly as the protocol is.
 pub struct ImapClient {
-    /// The wire, buffered because literal reads need byte precision. An
-    /// `Option` only so that a STARTTLS upgrade can move the socket out,
-    /// wrap it, and put it back; it is `None` for no other reason, and any
-    /// use of a `None` stream is a failed upgrade and a dead connection.
+    // Buffered, because literal reads need byte precision. An `Option` only so that a STARTTLS
+    // upgrade can move the socket out, wrap it and put it back; it is `None` for no other reason,
+    // and any use of a `None` stream is a failed upgrade and a dead connection.
     stream:     Option<BufReader<ClientStream>>,
-    /// Monotonic command tag counter.
-    tag:        u32,
-    /// Capabilities the server last advertised, upper-cased.
-    caps:       Vec<String>,
-    /// Per-IO deadline, from the config.
-    timeout:    Duration,
-    /// The host, retained for error messages and the TLS upgrade.
-    host:       String,
+    tag:        u32,            // monotonic, never reused
+    caps:       Vec<String>,    // as last advertised, upper-cased
+    timeout:    Duration,       // per IO, from the config
+    host:       String,         // kept for error messages and the TLS upgrade
 }
 
 impl ImapClient {
 
-    /// Connect, protect the connection as configured, and read the
-    /// greeting. Does not authenticate.
+    /// Protects the connection as configured and reads the greeting. Does not authenticate.
     pub async fn connect(cfg: &ImapConfig) -> Outcome<Self> {
         let tls_cfg = Arc::new(res!(tls::default_client_config()));
         Self::connect_with(cfg, tls_cfg).await
@@ -497,7 +439,6 @@ impl ImapClient {
         }
     }
 
-    /// Ask the server what it can do, replacing the cached capabilities.
     /// A refresh replaces rather than accumulates: the set a server offers
     /// legitimately changes across a STARTTLS or a login, and a stale
     /// entry left in the list is a capability the client believes in and
@@ -514,14 +455,13 @@ impl ImapClient {
         Ok(&self.caps)
     }
 
-    /// Whether the server advertises a capability (case-insensitive).
+    /// Does the server advertise this capability? Compared case-insensitively.
     pub fn has_cap(&self, cap: &str) -> bool {
         let want = cap.to_uppercase();
         self.caps.iter().any(|c| *c == want)
     }
 
-    /// Authenticate with a username and password. For a consumer mailbox
-    /// this is an app password, not the account password.
+    /// For a consumer mailbox the password is an app password, not the account password.
     pub async fn login(&mut self, user: &str, pass: &str) -> Outcome<()> {
         if self.has_cap("LOGINDISABLED") {
             return Err(err!(
@@ -539,8 +479,7 @@ impl ImapClient {
         Ok(())
     }
 
-    /// Authenticate with an OAuth 2.0 bearer token (SASL `XOAUTH2`), the
-    /// mechanism the large providers require of a registered application.
+    /// SASL `XOAUTH2`, the mechanism the large providers require of a registered application.
     pub async fn authenticate_xoauth2(&mut self, user: &str, token: &str) -> Outcome<()> {
         if !self.has_cap("AUTH=XOAUTH2") {
             return Err(err!(
@@ -578,14 +517,12 @@ impl ImapClient {
         Ok(out)
     }
 
-    /// Select a mailbox for reading and writing.
     pub async fn select(&mut self, mailbox: &str) -> Outcome<MailboxStatus> {
         self.select_impl(mailbox, false).await
     }
 
-    /// Select a mailbox read-only, so nothing the client does can change
-    /// a flag. The safe choice for a sync that must not disturb the
-    /// mailbox.
+    /// Read-only, so nothing the client does can change a flag. The safe choice for a sync that
+    /// must not disturb the mailbox.
     pub async fn examine(&mut self, mailbox: &str) -> Outcome<MailboxStatus> {
         self.select_impl(mailbox, true).await
     }
@@ -611,8 +548,7 @@ impl ImapClient {
         Ok(st)
     }
 
-    /// Search the selected mailbox, returning UIDs. The criteria are the
-    /// raw IMAP search key, e.g. `ALL`, `UID 1234:*`, `UNSEEN`, or
+    /// `criteria` is the raw IMAP search key, e.g. `ALL`, `UID 1234:*`, `UNSEEN`, or
     /// `SINCE 01-Jan-2026`.
     pub async fn uid_search(&mut self, criteria: &str) -> Outcome<Vec<u32>> {
         let cmd  = fmt!("UID SEARCH {}", criteria);
@@ -632,9 +568,8 @@ impl ImapClient {
         Ok(uids)
     }
 
-    /// Fetch messages by UID. An empty `uids` is a no-op rather than a
-    /// command, because `UID FETCH ` with no set is a syntax error and a
-    /// caller passing an empty search result is not doing anything wrong.
+    /// An empty `uids` is a no-op rather than a command, because `UID FETCH ` with no set is a
+    /// syntax error and a caller passing an empty search result is not doing anything wrong.
     pub async fn uid_fetch(
         &mut self,
         uids:   &[u32],
@@ -656,16 +591,13 @@ impl ImapClient {
         Ok(out)
     }
 
-    /// Fetch one UID's whole message, or `None` if the server does not
-    /// return it (it was expunged between the search and the fetch, which
-    /// is a race the caller cannot prevent and should not treat as an
-    /// error).
+    /// `None` where the server does not return it: expunged between the search and the fetch,
+    /// which is a race the caller cannot prevent and should not treat as an error.
     pub async fn uid_fetch_one(&mut self, uid: u32) -> Outcome<Option<FetchedMessage>> {
         let mut msgs = res!(self.uid_fetch(&[uid], FetchWhat::Full).await);
         Ok(if msgs.is_empty() { None } else { Some(msgs.remove(0)) })
     }
 
-    /// Change flags on messages by UID.
     pub async fn uid_store_flags(
         &mut self,
         uids:   &[u32],
@@ -683,8 +615,8 @@ impl ImapClient {
         Ok(())
     }
 
-    /// Append a raw RFC 5322 message to a mailbox, e.g. filing a sent
-    /// message in `Sent` after SMTP has delivered it.
+    /// `body` is a raw RFC 5322 message: this is how a sent message is filed in `Sent` after
+    /// SMTP has delivered it.
     pub async fn append(
         &mut self,
         mailbox:    &str,
@@ -719,7 +651,6 @@ impl ImapClient {
         Ok(())
     }
 
-    /// Say goodbye and close the connection.
     pub async fn logout(&mut self) -> Outcome<()> {
         res!(self.command("LOGOUT").await);
         if let Some(s) = self.stream.as_mut() {
@@ -730,15 +661,13 @@ impl ImapClient {
 
     // ── Command plumbing ─────────────────────────────────────────
 
-    /// The next command tag. Tags are per-connection and never reused.
     fn next_tag(&mut self) -> String {
         self.tag += 1;
         fmt!("a{:04}", self.tag)
     }
 
-    /// Send a command and read to its completion. A `NO` or `BAD` is an
-    /// error, carrying the server's own words -- which are usually the
-    /// most useful thing anyone will say about the failure.
+    /// A `NO` or a `BAD` is an error carrying the server's own words, which are usually the most
+    /// useful thing anyone will say about the failure.
     async fn command(&mut self, cmd: &str) -> Outcome<Response> {
         let verb = cmd.split_whitespace().next().unwrap_or(cmd).to_string();
         self.command_hushed(cmd, &verb).await
@@ -874,7 +803,7 @@ impl ImapClient {
         Ok(RawLine { text, literals })
     }
 
-    /// Read one CRLF-terminated line, returned without its terminator.
+    /// Without its terminator.
     async fn read_crlf_line(&mut self) -> Outcome<String> {
         let mut buf: Vec<u8> = Vec::with_capacity(256);
         let host     = self.host.clone();
@@ -912,18 +841,14 @@ impl ImapClient {
 /// One element of an IMAP response.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Tok {
-    /// A bare word: a number, a flag, `NIL`, a `BODY[...]` item name.
-    Atom(String),
-    /// A quoted string, unescaped.
-    Quoted(String),
-    /// A literal's payload, spliced back in from the reader's side queue.
-    Literal(Vec<u8>),
-    /// A parenthesised list.
-    List(Vec<Tok>),
+    Atom(String),       // a bare word: a number, a flag, `NIL`, a `BODY[...]` item name
+    Quoted(String),     // unescaped
+    Literal(Vec<u8>),   // the payload, spliced back in from the reader's side queue
+    List(Vec<Tok>),     // parenthesised
 }
 
 impl Tok {
-    /// The token's text, for an atom or a quoted string.
+    /// An atom or a quoted string only.
     fn as_str(&self) -> Option<&str> {
         match self {
             Self::Atom(s) | Self::Quoted(s) => Some(s),
@@ -931,8 +856,8 @@ impl Tok {
         }
     }
 
-    /// The token's bytes, whether it arrived as a literal or a string.
-    /// `NIL` is empty, which is what a server means by it here.
+    /// Whether it arrived as a literal or a string. `NIL` comes back empty, which is what a
+    /// server means by it here.
     fn as_bytes(&self) -> Vec<u8> {
         match self {
             Self::Literal(b)  => b.clone(),
@@ -1075,8 +1000,7 @@ fn trailing_literal_len(line: &str) -> Option<usize> {
     digits.parse::<usize>().ok()
 }
 
-/// Split a completion line (`OK ...`, `NO ...`, `BAD ...`) into its
-/// status and its text.
+/// A completion line is `OK ...`, `NO ...` or `BAD ...`.
 fn parse_completion(rest: &str) -> Outcome<(Status, String)> {
     let mut it = rest.splitn(2, char::is_whitespace);
     let word = it.next().unwrap_or("");
@@ -1110,8 +1034,8 @@ fn parse_capabilities(text: &str) -> Vec<String> {
     body.split_whitespace().map(|s| s.to_string()).collect()
 }
 
-/// Parse `* LIST (\HasNoChildren) "/" "INBOX"`. Returns `None` for an
-/// untagged line that is not a `LIST` reply.
+/// Reads `* LIST (\HasNoChildren) "/" "INBOX"`; `None` for an untagged line that is not a
+/// `LIST` reply.
 fn parse_list_line(line: &RawLine) -> Outcome<Option<MailboxInfo>> {
     let up = line.text.to_uppercase();
     if !up.starts_with("* LIST") && !up.starts_with("* LSUB") {
@@ -1188,8 +1112,8 @@ fn bracket_value(up: &str, name: &str) -> Option<u32> {
     up[start..start + end].trim().parse::<u32>().ok()
 }
 
-/// Parse `* 12 FETCH (UID 345 FLAGS (\Seen) ... BODY[] {4523}...)`.
-/// Returns `None` for an untagged line that is not a `FETCH` reply.
+/// Reads `* 12 FETCH (UID 345 FLAGS (\Seen) ... BODY[] {4523}...)`; `None` for an untagged line
+/// that is not a `FETCH` reply.
 fn parse_fetch_line(line: &RawLine) -> Outcome<Option<FetchedMessage>> {
     let toks = res!(tokenise(&line.text, &line.literals));
     if toks.len() < 3 {
@@ -1304,8 +1228,7 @@ fn uid_set(uids: &[u32]) -> String {
     out
 }
 
-/// Quote a string as an IMAP quoted-string, escaping the two characters
-/// that need it.
+/// An IMAP quoted-string, with the two characters that need escaping escaped.
 fn quoted(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');

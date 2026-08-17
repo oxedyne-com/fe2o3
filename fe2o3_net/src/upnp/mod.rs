@@ -27,6 +27,9 @@
 //! says which one it is on this device. A description that swaps them is accepted
 //! by some control points and silently ignored by others, which is the failure
 //! that eats an afternoon.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 pub mod device;
 pub mod didl;
@@ -34,63 +37,47 @@ pub mod soap;
 
 use oxedyne_fe2o3_core::prelude::*;
 
-/// The namespace of a device description document (UPnP DA 2.0 §2.3).
+//// Description namespaces.
+// UPnP DA 2.0 §2.3 and §2.5.
 pub const NS_DEVICE: &str = "urn:schemas-upnp-org:device-1-0";
-
-/// The namespace of a service description document (UPnP DA 2.0 §2.5).
 pub const NS_SERVICE: &str = "urn:schemas-upnp-org:service-1-0";
-
-/// The DLNA device namespace, carried on `<dlna:X_DLNADOC>`.
+// The DLNA device namespace goes on `<dlna:X_DLNADOC>`, the metadata one on
+// DIDL-Lite documents.
 pub const NS_DLNA_DEVICE: &str = "urn:schemas-dlna-org:device-1-0";
-
-/// The DLNA metadata namespace, carried on DIDL-Lite documents.
 pub const NS_DLNA_METADATA: &str = "urn:schemas-dlna-org:metadata-1-0/";
 
-/// The DIDL-Lite namespace (ContentDirectory:1 §2.8).
+//// Content namespaces.
+// DIDL-Lite (ContentDirectory:1 §2.8), and the two vocabularies its elements
+// draw on: Dublin Core for a title and a date, UPnP metadata for an object
+// class.
 pub const NS_DIDL: &str = "urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/";
-
-/// Dublin Core, which is where a DIDL-Lite title and date come from.
 pub const NS_DC: &str = "http://purl.org/dc/elements/1.1/";
-
-/// The UPnP metadata namespace, which is where an object class comes from.
 pub const NS_UPNP: &str = "urn:schemas-upnp-org:metadata-1-0/upnp/";
 
-/// The SOAP 1.1 envelope namespace, which is the one UPnP uses.
+//// SOAP namespaces.
+// SOAP 1.1 is the version UPnP speaks. The encoding style is required verbatim
+// on the envelope, and the control namespace appears inside a fault.
 pub const NS_SOAP_ENVELOPE: &str = "http://schemas.xmlsoap.org/soap/envelope/";
-
-/// The SOAP 1.1 encoding style, required verbatim on the envelope.
 pub const SOAP_ENCODING: &str = "http://schemas.xmlsoap.org/soap/encoding/";
-
-/// The UPnP control error namespace, carried inside a SOAP fault.
 pub const NS_UPNP_CONTROL: &str = "urn:schemas-upnp-org:control-1-0";
 
-/// `urn:schemas-upnp-org:device:MediaServer:1`.
+//// Device and service names.
+// The type and the identifier of a service are the pair the header describes,
+// and each `SERVICE_` here has to be used with the `ID_` beside it.
 pub const DEVICE_MEDIA_SERVER: &str = "urn:schemas-upnp-org:device:MediaServer:1";
-
-/// `urn:schemas-upnp-org:service:ContentDirectory:1`.
 pub const SERVICE_CONTENT_DIRECTORY: &str =
     "urn:schemas-upnp-org:service:ContentDirectory:1";
-
-/// `urn:schemas-upnp-org:service:ConnectionManager:1`.
 pub const SERVICE_CONNECTION_MANAGER: &str =
     "urn:schemas-upnp-org:service:ConnectionManager:1";
-
-/// The service identifier that goes with [`SERVICE_CONTENT_DIRECTORY`].
 pub const ID_CONTENT_DIRECTORY: &str = "urn:upnp-org:serviceId:ContentDirectory";
-
-/// The service identifier that goes with [`SERVICE_CONNECTION_MANAGER`].
 pub const ID_CONNECTION_MANAGER: &str = "urn:upnp-org:serviceId:ConnectionManager";
 
-/// The `<dlna:X_DLNADOC>` value a media server declares, saying it speaks DLNA
-/// version 1.50 as a Digital Media Server.
+// DLNA version 1.50 as a Digital Media Server, which is what the value spells.
 pub const DLNA_DOC_DMS: &str = "DMS-1.50";
-
-/// The content type every UPnP document goes out under.
+// The quoting of the charset is part of what UPnP asks for.
 pub const XML_CONTENT_TYPE: &str = "text/xml; charset=\"utf-8\"";
 
 
-/// Escape text for an XML element body or an attribute value.
-///
 /// All five predefined entities are written, including the two that only matter
 /// inside an attribute, because the same title goes into both places and a
 /// separate attribute escaper is one more thing to forget to call.

@@ -14,6 +14,9 @@
 //! client waits for bytes that never come.
 //!
 //! [RFC 9110 §12.5.3]: https://www.rfc-editor.org/rfc/rfc9110#section-12.5.3
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::{
     http::{
@@ -41,22 +44,19 @@ use flate2::{
 };
 
 
-/// Compression level used for the gzip stream.
-///
-/// Level 6 is zlib's own default and the knee of the curve. Measured over a
-/// megabyte of base64-heavy markup, a WebAssembly module and a script bundle:
-/// level 9 costs about half as much time again for two parts in a thousand more
-/// saving, and level 1 runs in a third of the time but gives up something like a
-/// sixth of the saving. The encoding is the reason the response is smaller, so
-/// the saving is what is being bought.
+// Level 6 is zlib's own default and the knee of the curve.  Measured over a
+// megabyte of base64-heavy markup, a WebAssembly module and a script bundle:
+// level 9 costs about half as much time again for two parts in a thousand more
+// saving, and level 1 runs in a third of the time but gives up something like a
+// sixth of the saving.  The encoding is the reason the response is smaller, so
+// the saving is what is being bought.
 const GZIP_LEVEL: u32 = 6;
 
-/// The default below which a body is sent as it is.
-///
-/// A gzip member costs eighteen bytes of framing before it encodes anything, and
-/// the round trip through the encoder and the client's decoder is not free
-/// either. Under about a kilobyte the saving is noise, and on the smallest
-/// bodies the encoded form is the larger of the two.
+// The default below which a body is sent as it is.  A gzip member costs eighteen
+// bytes of framing before it encodes anything, and the round trip through the
+// encoder and the client's decoder is not free either.  Under about a kilobyte
+// the saving is noise, and on the smallest bodies the encoded form is the larger
+// of the two.
 pub const MIN_BYTES_DEFAULT: usize = 1024;
 
 
@@ -71,10 +71,8 @@ pub const MIN_BYTES_DEFAULT: usize = 1024;
 /// [RFC 1952]: https://www.rfc-editor.org/rfc/rfc1952
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ContentCoding {
-    /// The representation as it stands, carrying no `Content-Encoding`.
-    Identity,
-    /// A gzip member, as `Content-Encoding: gzip`.
-    Gzip,
+    Identity,    // the representation as it stands, carrying no `Content-Encoding`
+    Gzip,        // a gzip member, as `Content-Encoding: gzip`
 }
 
 impl ContentCoding {
@@ -114,10 +112,8 @@ impl ContentCoding {
 /// integer arithmetic and no two weights ever compare equal by rounding.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Preference {
-    /// The token as written, lowercased; `*` is kept as itself.
-    token:  String,
-    /// Weight in thousandths, `0` meaning "not acceptable".
-    weight: u16,
+    token:  String,    // as written, lowercased; `*` is kept as itself
+    weight: u16,       // thousandths, `0` meaning "not acceptable"
 }
 
 /// Split an `Accept-Encoding` field value into its entries.
@@ -247,7 +243,6 @@ pub fn negotiate(accept_encoding: Option<&str>) -> ContentCoding {
     }
 }
 
-/// Read the `Accept-Encoding` field, if the request carried one.
 pub fn accept_encoding(fields: &HeaderFields) -> Option<String> {
     fields.get_one(&HeaderName::AcceptEncoding).map(|val| fmt!("{}", val))
 }

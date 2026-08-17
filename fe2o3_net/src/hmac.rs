@@ -10,21 +10,17 @@
 //! an attacker-supplied one with an ordinary byte comparison leaks the
 //! length of the matching prefix through timing, so verification must
 //! use `ring::hmac::verify`, never `==`.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 
 use ring::hmac as ring_hmac;
 
 
-/// Compute the HMAC-SHA256 tag of `msg` under `key`.
-///
-/// Returns the 32-byte tag. The operation is infallible for any key
-/// and message length, so no `Outcome` wrapper is needed.
-///
-/// # Arguments
-/// * `key` -- the secret key bytes (any length; `ring` handles the
-///   RFC 2104 key padding/hashing internally).
-/// * `msg` -- the message to authenticate.
+/// A key of any length is legal, `ring` doing the RFC 2104 padding, and the
+/// operation cannot fail, so there is no `Outcome` wrapper.
 pub fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
     let k = ring_hmac::Key::new(ring_hmac::HMAC_SHA256, key);
     let tag = ring_hmac::sign(&k, msg);
@@ -34,17 +30,11 @@ pub fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
     out
 }
 
-/// Verify, in constant time, that `tag` is the HMAC-SHA256 of `msg`
-/// under `key`.
+/// Is `tag` the HMAC-SHA256 of `msg` under `key`?
 ///
-/// Returns `true` when the tag matches. Uses `ring`'s constant-time
-/// comparison so no timing side channel reveals how much of the tag
-/// was correct. A `tag` of the wrong length simply fails to verify.
-///
-/// # Arguments
-/// * `key` -- the secret key bytes.
-/// * `msg` -- the authenticated message.
-/// * `tag` -- the candidate tag to check against a freshly computed one.
+/// The comparison is `ring`'s constant-time one, so no timing side channel
+/// reveals how much of the tag was correct. A tag of the wrong length fails to
+/// verify rather than panicking.
 pub fn verify_hmac_sha256(key: &[u8], msg: &[u8], tag: &[u8]) -> bool {
     let k = ring_hmac::Key::new(ring_hmac::HMAC_SHA256, key);
     ring_hmac::verify(&k, msg, tag).is_ok()

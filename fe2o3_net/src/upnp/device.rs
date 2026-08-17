@@ -16,6 +16,9 @@
 //! asked is answerable with a constant, which is why
 //! [`connection_manager_scpd`] exists and why a server that skips it is refused
 //! by sets that would otherwise have worked.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::upnp::{
     escape,
@@ -31,18 +34,13 @@ use oxedyne_fe2o3_core::prelude::*;
 /// One service on a device, as the description lists it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Service {
-    /// The service *type*, e.g. `urn:schemas-upnp-org:service:ContentDirectory:1`.
+    // The type says what the service is, the identifier which one it is on this
+    // device; the two look alike and are not interchangeable.
     pub service_type:   String,
-    /// The service *identifier*, e.g. `urn:upnp-org:serviceId:ContentDirectory`.
-    /// Not the same thing as the type, and not interchangeable with it.
     pub service_id:     String,
-    /// Where the service description document is.
-    pub scpd_url:       String,
-    /// Where SOAP actions are posted.
-    pub control_url:    String,
-    /// Where a control point subscribes for events. Required in the document even
-    /// by a device that never sends any.
-    pub event_url:      String,
+    pub scpd_url:       String,     // the service description document
+    pub control_url:    String,     // where SOAP actions are posted
+    pub event_url:      String,     // subscriptions, required even where none is sent
 }
 
 impl Service {
@@ -73,15 +71,10 @@ impl Service {
 /// A picture of the device, which a control point shows beside its name.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Icon {
-    /// The content type, e.g. `image/png`.
-    pub mimetype:   String,
-    /// Its width in pixels.
-    pub width:      u32,
-    /// Its height in pixels.
-    pub height:     u32,
-    /// Bits per pixel.
-    pub depth:      u32,
-    /// Where to fetch it.
+    pub mimetype:   String,     // e.g. `image/png`
+    pub width:      u32,        // pixels
+    pub height:     u32,        // pixels
+    pub depth:      u32,        // bits per pixel
     pub url:        String,
 }
 
@@ -101,45 +94,33 @@ impl Icon {
 /// A root device, and everything its description document says about it.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Device {
-    /// The device type, e.g. [`crate::upnp::DEVICE_MEDIA_SERVER`].
-    pub device_type:    String,
-    /// The name a television puts on the screen. This is the one field a person
-    /// ever sees, so it is the one worth choosing.
+    pub device_type:    String,     // e.g. crate::upnp::DEVICE_MEDIA_SERVER
+    // The name a television puts on the screen, and the one field a person ever
+    // sees, so it is the one worth choosing.
     pub friendly_name:  String,
-    /// Who made it.
     pub manufacturer:   String,
-    /// Their address on the web.
     pub manufacturer_url: Option<String>,
-    /// A sentence about it.
     pub model_description: Option<String>,
-    /// What it is called.
     pub model_name:     String,
-    /// Which version of it.
     pub model_number:   Option<String>,
-    /// Its address on the web.
     pub model_url:      Option<String>,
-    /// A serial number, where there is one.
     pub serial_number:  Option<String>,
-    /// The unique device name, `uuid:...`, which must be the same string SSDP
-    /// announces and must not change between restarts.
+    // The unique device name, `uuid:...`. It must be the same string SSDP
+    // announces, and must not change between restarts.
     pub udn:            String,
-    /// A page a person could open in a browser.
     pub presentation_url: Option<String>,
-    /// The `<dlna:X_DLNADOC>` values, saying which DLNA device classes are
-    /// claimed. [`DLNA_DOC_DMS`] is the one a media server declares.
+    // The `<dlna:X_DLNADOC>` values, saying which DLNA device classes are claimed;
+    // DLNA_DOC_DMS is the one a media server declares.
     pub dlna_docs:      Vec<String>,
-    /// Pictures of it.
     pub icons:          Vec<Icon>,
-    /// What it can do.
     pub services:       Vec<Service>,
 }
 
 impl Device {
 
-    /// A media server with the two services one must carry.
-    ///
-    /// `base` is the path prefix the service URLs sit under, e.g. `/dlna`; `udn`
-    /// is the full `uuid:...` string.
+    /// Carries the two services a media server must. `base` is the path prefix
+    /// the service URLs sit under, e.g. `/dlna`; `udn` is the full `uuid:...`
+    /// string.
     pub fn media_server(friendly_name: &str, udn: &str, base: &str) -> Self {
         Self {
             device_type:    super::DEVICE_MEDIA_SERVER.to_string(),
@@ -170,8 +151,6 @@ impl Device {
         }
     }
 
-    /// The description document.
-    ///
     /// `config_id` is what SSDP announces as `CONFIGID.UPNP.ORG`, and must change
     /// whenever this document does; a control point that has cached the old one
     /// otherwise never fetches the new.
@@ -228,8 +207,7 @@ impl Device {
     }
 }
 
-/// The service description for ContentDirectory:1, listing the four actions a
-/// browsable server implements.
+/// The four actions a browsable server implements, and no more.
 ///
 /// `Search` is deliberately absent: a service that lists an action must implement
 /// it, and a control point that finds `Search` here and gets a 401 back has been
@@ -305,8 +283,6 @@ pub fn content_directory_scpd() -> String {
 </scpd>", NS_SERVICE)
 }
 
-/// The service description for ConnectionManager:1.
-///
 /// Every action here is answerable with a constant on a server that streams over
 /// HTTP and holds no connections, which is why the service is a stub. It is not
 /// optional: a MediaServer without it is refused by sets that check.

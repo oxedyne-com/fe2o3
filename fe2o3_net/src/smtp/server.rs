@@ -9,6 +9,9 @@
 //! The session loop runs over an enum-based `MaybeTls` stream so that a
 //! plain TCP connection can be transparently swapped to TLS in response
 //! to `STARTTLS` without duplicating the rest of the state machine.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::{
     smtp::{
@@ -52,18 +55,13 @@ use tokio_rustls::{
 };
 
 
-/// Maximum number of bytes the server is willing to read inside the
-/// `DATA` phase of a single transaction. Mirrors Postfix's
-/// `message_size_limit = 20480000` default.
-pub const SMTP_MESSAGE_SIZE_LIMIT: usize = 20_480_000;
-
-/// Maximum number of recipients accepted in one transaction.
-pub const SMTP_MAX_RCPT: usize = 100;
-
-/// Per-line read budget used when reading wire commands. SMTP lines
-/// must not exceed 1000 bytes including CRLF (RFC 5321 §4.5.3.1.6),
-/// 512 for command lines; we add some slack for safety.
-pub const SMTP_MAX_LINE: usize = 4_096;
+//// Session ceilings.
+// The size limit mirrors Postfix's `message_size_limit = 20480000` default. A wire line must not
+// exceed 1000 bytes including CRLF (RFC 5321 §4.5.3.1.6), and 512 for a command line, so the read
+// budget carries slack over both.
+pub const SMTP_MESSAGE_SIZE_LIMIT: usize = 20_480_000;  // bytes, inside `DATA`
+pub const SMTP_MAX_RCPT: usize = 100;                   // recipients per transaction
+pub const SMTP_MAX_LINE: usize = 4_096;                 // bytes per line read
 
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
@@ -80,21 +78,16 @@ pub const SMTP_MAX_LINE: usize = 4_096;
 /// single `S: AsyncRead + AsyncWrite` and dynamically swap in a TLS
 /// upgrade in response to STARTTLS.
 pub enum MaybeTls {
-    /// Plain TCP, used before STARTTLS or when TLS is not negotiated.
-    Plain(TcpStream),
-    /// TLS-wrapped TCP, used after STARTTLS or on implicit-TLS ports.
-    Tls(Box<TlsStream<TcpStream>>),
+    Plain(TcpStream),                   // before STARTTLS, or where TLS is not negotiated
+    Tls(Box<TlsStream<TcpStream>>),     // after STARTTLS, or on an implicit-TLS port
 }
 
 impl MaybeTls {
-    /// Returns `true` when the underlying transport is TLS-wrapped.
     pub fn is_tls(&self) -> bool {
         matches!(self, MaybeTls::Tls(_))
     }
 
-    /// Consume the wrapper and return the inner plain stream, if any.
-    /// Returns `None` if the connection has already been upgraded to
-    /// TLS, which is what we want for STARTTLS handling.
+    /// `None` once the connection has been upgraded, which is what the STARTTLS path wants.
     pub fn into_plain(self) -> Option<TcpStream> {
         match self {
             MaybeTls::Plain(s) => Some(s),
@@ -166,17 +159,10 @@ impl AsyncWrite for MaybeTls {
 // └───────────────────────────────────────────────────────────────────────────┘
 
 /// Which port and policy this listener is serving.
-///
-/// Receive listens on 25 and accepts only mail bound for local users,
-/// without authentication. Submission listens on 587, requires STARTTLS
-/// before AUTH, and lets authenticated users relay to anywhere.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SmtpMode {
-    /// MX inbound (port 25). No `AUTH`, recipients must resolve locally.
-    Receive,
-    /// MSA submission (port 587). `AUTH` required, recipients are not
-    /// constrained to local mailboxes.
-    Submission,
+    Receive,        // MX inbound on 25: no `AUTH`, recipients must resolve locally
+    Submission,     // MSA on 587: STARTTLS then `AUTH`, and relay anywhere
 }
 
 
@@ -184,17 +170,14 @@ pub enum SmtpMode {
 // │ SESSION STATE                                                             │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Where in the SMTP transaction we currently are.
+/// Where in the SMTP transaction we currently are; each variant names what has arrived, and so
+/// what may arrive next.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum SmtpPhase {
-    /// Just connected; expecting HELO or EHLO.
-    Greeted,
-    /// EHLO received; ready for `MAIL FROM` (or other extensions).
-    Ehlo,
-    /// `MAIL FROM` received; expecting `RCPT TO`.
-    MailFrom,
-    /// At least one `RCPT TO` received; expecting more or `DATA`.
-    Rcpt,
+    Greeted,    // just connected, expecting HELO or EHLO
+    Ehlo,       // ready for `MAIL FROM`, or another extension
+    MailFrom,   // expecting `RCPT TO`
+    Rcpt,       // one recipient at least, expecting more or `DATA`
 }
 
 /// Per-connection mutable state. Reset by `RSET` and after a successful
@@ -218,8 +201,7 @@ impl SmtpSession {
         }
     }
 
-    /// Reset transaction-scoped state (envelope), keeping the HELO
-    /// domain and authenticated identity.
+    /// The envelope goes; the HELO domain and the authenticated identity stay.
     fn reset_transaction(&mut self) {
         if !self.helo_domain.is_empty() {
             self.phase = SmtpPhase::Ehlo;
@@ -243,24 +225,19 @@ impl SmtpSession {
 /// listener can fan out across every accept loop.
 #[derive(Clone)]
 pub struct SmtpServer<H: SmtpHandler, U: UserStore> {
-    /// Application hook for completed transactions.
     pub handler:        H,
-    /// User store used by the AUTH path.
-    pub users:          U,
-    /// TLS acceptor for STARTTLS upgrades. `None` disables STARTTLS;
-    /// submission listeners must always have one.
+    pub users:          U,                      // read by the AUTH path
+    // `None` disables STARTTLS; a submission listener must always have one.
     pub tls_acceptor:   Option<TlsAcceptor>,
-    /// Hostname to advertise in the 220 banner and the `Received:`
-    /// header. Should be the public MX hostname.
+    // Advertised in the 220 banner and the `Received:` header, so it should be the public MX
+    // hostname.
     pub hostname:       Arc<String>,
-    /// Receive vs submission policy.
     pub mode:           SmtpMode,
 }
 
 impl<H: SmtpHandler, U: UserStore> SmtpServer<H, U> {
 
-    /// Drive one accepted TCP connection through a complete SMTP
-    /// session, including any in-session STARTTLS upgrade.
+    /// Runs to the end of the session, an in-session STARTTLS upgrade included.
     pub async fn run(
         &self,
         plain:  TcpStream,
@@ -745,14 +722,12 @@ impl<H: SmtpHandler, U: UserStore> SmtpServer<H, U> {
 }
 
 
-/// Parsed result of the inner read loop: the client either disconnected
-/// or asked us to upgrade to TLS.
+/// The two ways the inner read loop ends.
 #[derive(Clone, Copy, Debug)]
 enum LoopExit {
-    /// The client sent QUIT or the connection was closed cleanly.
-    Quit,
-    /// STARTTLS was issued; the caller must perform a TLS handshake on
-    /// the underlying TCP stream and re-enter the read loop.
+    Quit,       // QUIT, or a clean close
+    // STARTTLS was issued: the caller handshakes on the underlying TCP stream and re-enters the
+    // read loop.
     StartTls,
 }
 
@@ -761,7 +736,7 @@ enum LoopExit {
 // │ WIRE HELPERS                                                              │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Write one single-line SMTP response as `NNN<space>text<CRLF>`.
+/// `NNN<space>text<CRLF>`, which is the single-line form.
 pub async fn write_response<S: AsyncWrite + Unpin>(
     stream:     &mut S,
     code:       SmtpResponseCode,
@@ -779,9 +754,8 @@ pub async fn write_response<S: AsyncWrite + Unpin>(
     Ok(())
 }
 
-/// Read one CRLF-terminated line, returning `None` on a clean EOF and
-/// trimming the trailing `\r\n` (or bare `\n`). Caps the line at
-/// `SMTP_MAX_LINE` bytes.
+/// `None` on a clean EOF. The trailing `\r\n`, or a bare `\n`, is trimmed, and the line is capped
+/// at [`SMTP_MAX_LINE`] bytes.
 pub async fn read_line<S: AsyncRead + Unpin>(
     stream: &mut S,
 )
@@ -817,11 +791,9 @@ pub async fn read_line<S: AsyncRead + Unpin>(
     Ok(Some(String::from_utf8_lossy(&buf).into_owned()))
 }
 
-/// Read the body of a `DATA` command: every byte up to and excluding
-/// the terminating `<CRLF>.<CRLF>`, with dot-unstuffing applied (any
-/// line whose first character is `.` has that dot stripped, RFC 5321
-/// §4.5.2). CR/LF are preserved as `\r\n` so downstream consumers see
-/// canonical RFC 5322 line endings.
+/// Every byte up to and excluding the terminating `<CRLF>.<CRLF>`, dot-unstuffed: a line whose
+/// first character is `.` loses that dot, RFC 5321 §4.5.2. CR/LF is preserved as `\r\n`, so what
+/// comes out has canonical RFC 5322 line endings.
 pub async fn read_data<S: AsyncRead + Unpin>(
     stream: &mut S,
 )
@@ -919,8 +891,7 @@ pub async fn read_data<S: AsyncRead + Unpin>(
     }
 }
 
-/// Parse the SASL PLAIN payload (`authzid \0 authcid \0 passwd`) into
-/// `(authcid, passwd)`. `authzid` is ignored.
+/// The payload is `authzid \0 authcid \0 passwd`, and the `authzid` is ignored.
 fn parse_plain(raw: &[u8]) -> Option<(String, String)> {
     let mut nuls = raw.iter().enumerate().filter_map(|(i, b)| {
         if *b == 0u8 { Some(i) } else { None }

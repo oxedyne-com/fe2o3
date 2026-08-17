@@ -23,6 +23,9 @@
 //!   chunk sizes from `fe2o3_net::constant`. Chunked transfer encoding is
 //!   not supported: ACME API responses always carry a `Content-Length`
 //!   header, and that is the only production caller for now.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::{
     constant,
@@ -64,16 +67,11 @@ use tokio_rustls::{
 // │ REQUEST FORMATTING                                                        │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Format an HTTP/1.1 request as wire bytes.
+/// `host` goes into the `Host:` header and `path` is the request target, query
+/// string included. `Host`, `Content-Length` and `Connection: close` are always
+/// written here, so a caller must not repeat them in `headers`.
 ///
-/// The caller supplies the method, the target server's host (which is written
-/// into the `Host:` header), the request-target path (e.g. `/acme/new-nonce`
-/// including any query string), a list of extra header name/value pairs, and
-/// the request body. The function always emits `Host`, `Content-Length` and
-/// `Connection: close` itself; callers should not include those in `headers`.
-///
-/// This is factored out so the request byte layout can be tested without
-/// bringing up a TLS socket.
+/// Factored out so the byte layout can be tested without a TLS socket.
 pub fn format_request(
     method:     HttpMethod,
     host:       &str,
@@ -102,9 +100,7 @@ pub fn format_request(
 // │ THE EXCHANGE                                                              │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Write one formatted request to an open stream and read one response back.
-///
-/// The half of a request that does not care whether the stream underneath it is
+/// The half of a request that does not care whether the stream beneath it is
 /// TLS-wrapped, and so is shared by all four entry points below.
 async fn exchange<S>(
     stream:         &mut S,
@@ -158,19 +154,11 @@ where
 // │ HTTP REQUEST (PLAIN)                                                      │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Perform a single plain-HTTP request/response cycle against a remote server.
-///
-/// Sibling of [`https_request`] for callers that need to talk to an upstream
-/// over loopback or another trusted network segment where TLS is unnecessary.
-/// The canonical use case is an in-tree Steel deployment that proxies
-/// per-vhost application endpoints to a local app binary bound to
-/// `127.0.0.1:<port>`: the app does not need to present a certificate for
-/// traffic that never leaves the host, and forcing TLS on loopback would
-/// complicate operations (rotating an internal CA, distrust after restart,
-/// timing cost on every hit).
-///
-/// Shape mirrors `https_request` exactly except for the absence of a
-/// `tls_config` parameter.
+/// The sibling of [`https_request`] for an upstream over loopback or another
+/// trusted segment, where TLS buys nothing: a proxied app binding
+/// `127.0.0.1:<port>` need not present a certificate for traffic that never
+/// leaves the host, and insisting on one would mean an internal CA to rotate and
+/// a handshake on every hit.
 pub async fn http_request(
     host:           &str,
     port:           u16,
@@ -194,8 +182,8 @@ pub async fn http_request(
     exchange(&mut stream, &request_bytes, &peer, None).await
 }
 
-/// Perform a plain-HTTP request against an address the caller has already
-/// vetted, rather than a host name this function would resolve for itself.
+/// Dials an address the caller has already vetted, rather than a host name this
+/// would resolve for itself.
 ///
 /// The distinction is the whole point. A server that connects somewhere its
 /// user named must check the address first (see
@@ -236,21 +224,13 @@ pub async fn http_request_at(
 // │ HTTPS REQUEST                                                             │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Perform a single HTTPS request/response cycle against a remote server.
+/// The request is formed as [`format_request`] describes, and `tls_config` is
+/// the rustls configuration the caller built, normally a trust store of root CAs
+/// and no client auth.
 ///
-/// `host` / `port` identify the TCP endpoint. `method` / `path` / `headers` /
-/// `body` form the request as described on [`format_request`]. `tls_config`
-/// is the rustls client configuration the caller has built (typically
-/// carrying a trust store of root CAs and no client auth).
-///
-/// The function opens a TCP connection, completes a TLS handshake using the
-/// supplied config, writes the formatted request, reads one response from
-/// the peer via [`HttpMessage::read`], and returns the parsed message.
-///
-/// Errors at each step are wrapped with `IO`, `Network` and (where
-/// appropriate) `Wire` tags so callers can distinguish connect failures
-/// from handshake failures from response-parse failures without text
-/// inspection.
+/// Each step's error is tagged `IO`, `Network` and, where it applies, `Wire`, so
+/// a caller can tell a connect failure from a handshake failure from a
+/// response-parse failure without reading the text.
 pub async fn https_request(
     host:           &str,
     port:           u16,
@@ -279,8 +259,6 @@ pub async fn https_request(
     exchange(&mut stream, &request_bytes, &peer, None).await
 }
 
-/// Perform an HTTPS request against an address the caller has already vetted.
-///
 /// The TLS sibling of [`http_request_at`], and vetted for the same reason: the
 /// address is dialled as given, while `host` names the certificate that must
 /// validate and fills the `Host` header. Pinning the address does not weaken
@@ -312,10 +290,8 @@ pub async fn https_request_at(
     exchange(&mut stream, &request_bytes, &peer, limits).await
 }
 
-/// Complete the TLS handshake over an open TCP stream.
-///
-/// rustls needs the host name as a validated `ServerName` so it can send the
-/// right SNI and check the server certificate's SANs against it.
+/// rustls needs the host name as a validated `ServerName`, so that it can send
+/// the right SNI and check the server certificate's SANs against it.
 async fn tls_wrap(
     tcp:            TcpStream,
     host:           &str,
@@ -365,7 +341,6 @@ mod tests {
         (header, body)
     }
 
-    /// Count how many times `needle` appears in `haystack`.
     fn count_occurrences(haystack: &str, needle: &str) -> usize {
         haystack.matches(needle).count()
     }

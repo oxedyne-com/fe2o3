@@ -25,6 +25,9 @@
 //! `b=` tag arrives folded across lines, so anything read back out of a header
 //! must be unfolded before it is handed over. The signer itself only ever
 //! encodes.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_text::base64;
@@ -46,16 +49,6 @@ use ring::{
 
 /// The signing algorithm behind a [`DkimSigner`].
 ///
-/// # Why both
-///
-/// ed25519 signatures (RFC 8463) are small and the key generation is in
-/// tree, but verification of them is still patchy in the wild -- Microsoft
-/// notably. A receiver that cannot verify the signature sees an *unsigned*
-/// message, and DMARC then rests entirely on SPF. RSA is verified by
-/// everybody. RFC 8463 §5 says a signer SHOULD publish both and sign with
-/// both, and that is what Steel does: two selectors, two signatures, and a
-/// receiver takes whichever it understands.
-///
 /// # Why RSA is loaded, never generated
 ///
 /// `ring` deliberately refuses to *generate* RSA keys -- it takes the view
@@ -75,10 +68,8 @@ use ring::{
 /// compromise of the no-dependency rule: `ring` is already in the tree, and
 /// is where every other primitive here comes from.
 pub enum DkimKey {
-    /// ed25519-sha256 (RFC 8463). Generated in tree.
-    Ed25519(Ed25519KeyPair),
-    /// rsa-sha256 (RFC 6376). Loaded; see the type documentation.
-    Rsa(Box<RsaKeyPair>),
+    Ed25519(Ed25519KeyPair),    // ed25519-sha256, RFC 8463; generated in tree
+    Rsa(Box<RsaKeyPair>),       // rsa-sha256, RFC 6376; loaded, never generated
 }
 
 impl DkimKey {
@@ -100,9 +91,8 @@ impl DkimKey {
 }
 
 
-/// Default header set the signer covers, in the order listed by
-/// [`DkimSigner::sign`]. Mirrors the "well-known" minimum every
-/// reputable DKIM implementation oversigns.
+// The headers covered when the caller names none.  It mirrors the "well-known"
+// minimum every reputable DKIM implementation oversigns.
 pub const DEFAULT_SIGNED_HEADERS: &[&str] = &[
     "From",
     "To",
@@ -117,12 +107,9 @@ pub const DEFAULT_SIGNED_HEADERS: &[&str] = &[
 ];
 
 
-/// One DKIM signing identity.
-///
-/// Owns a live `Ed25519KeyPair` plus the PKCS#8 bytes the key was
-/// loaded from (so the signer can be persisted and reloaded), the
-/// signing domain, and the selector under which the corresponding
-/// public key is published in DNS.
+/// One DKIM signing identity: the key, the PKCS#8 bytes it was loaded from so
+/// that it can be persisted and reloaded, the signing domain, and the selector
+/// under which the matching public key is published in DNS.
 pub struct DkimSigner {
     pkcs8:      Vec<u8>,
     key:        DkimKey,
@@ -199,7 +186,6 @@ impl DkimSigner {
         })
     }
 
-    /// PKCS#8 serialisation of the private key, for on-disk persistence.
     pub fn pkcs8_bytes(&self) -> &[u8] { &self.pkcs8 }
 
     /// The same key and selector, signing for another domain.
@@ -216,19 +202,16 @@ impl DkimSigner {
         Self::from_pkcs8(&self.pkcs8, domain, self.selector.clone())
     }
 
-    /// Domain this signer signs for.
     pub fn domain(&self) -> &str { &self.domain }
 
-    /// Selector under which the public key is (or should be) published
-    /// at `<selector>._domainkey.<domain>` in DNS.
+    /// The public key is published at `<selector>._domainkey.<domain>` in DNS.
     pub fn selector(&self) -> &str { &self.selector }
 
-    /// The signing algorithm, as it appears in the `a=` tag.
+    /// As it appears in the `a=` tag.
     pub fn algorithm(&self) -> &'static str { self.key.algorithm() }
 
-    /// Render the DNS TXT record value to publish at
-    /// `<selector>._domainkey.<domain>`. The result is the full
-    /// `v=DKIM1; k=<type>; p=<base64>` string (no quoting).
+    /// The value to publish at `<selector>._domainkey.<domain>`: the whole
+    /// `v=DKIM1; k=<type>; p=<base64>` string, unquoted.
     ///
     /// For RSA the published key is a `SubjectPublicKeyInfo`, which is what
     /// RFC 6376 calls for and what `openssl rsa -pubout` emits. `ring` hands
@@ -247,9 +230,6 @@ impl DkimSigner {
         fmt!("v=DKIM1; k={}; p={}", k, p)
     }
 
-    /// Sign the canonicalised header block with whichever key this signer
-    /// holds.
-    ///
     /// # The two algorithms want different things, and it matters
     ///
     /// RFC 6376 §3.7 defines *the message hash*: SHA-256 over the
@@ -288,10 +268,6 @@ impl DkimSigner {
         }
     }
 
-    /// Sign `message` and return a fresh buffer with the
-    /// `DKIM-Signature:` header prepended. The original message is not
-    /// mutated. `headers_to_sign` is the ordered list of header field
-    /// names to cover; if empty, [`DEFAULT_SIGNED_HEADERS`] is used.
     /// The exact bytes this signer will sign: the canonicalised header block
     /// with the `DKIM-Signature` field appended, its `b=` tag empty.
     ///
@@ -366,6 +342,10 @@ impl DkimSigner {
         Ok((canon, (bh_b64, h_tag)))
     }
 
+    /// A fresh buffer with the `DKIM-Signature:` header prepended; `message`
+    /// itself is not mutated. An empty `headers_to_sign` means
+    /// [`DEFAULT_SIGNED_HEADERS`], otherwise the names are covered in the order
+    /// given.
     pub fn sign(
         &self,
         message:            &[u8],
@@ -413,10 +393,9 @@ impl DkimSigner {
 // │ MESSAGE PARSING + CANONICALISATION                                        │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Split a raw RFC 5322 message at the first blank line. Returns
-/// `(headers, body)`. The `headers` slice excludes the blank line that
-/// terminates the header block; the `body` slice is the rest of the
-/// buffer untouched.
+/// Splits an RFC 5322 message at the first blank line. The headers exclude the
+/// blank line that terminates the block; the body is the rest of the buffer,
+/// untouched.
 fn split_headers_body(message: &[u8]) -> Outcome<(&[u8], &[u8])> {
     // Look for "\r\n\r\n" first; tolerate "\n\n" as a fallback.
     if let Some(i) = find_subseq(message, b"\r\n\r\n") {
@@ -429,7 +408,6 @@ fn split_headers_body(message: &[u8]) -> Outcome<(&[u8], &[u8])> {
     Ok((message, &[]))
 }
 
-/// Naive substring search.
 fn find_subseq(hay: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || needle.len() > hay.len() { return None; }
     for i in 0..=hay.len() - needle.len() {
@@ -440,10 +418,9 @@ fn find_subseq(hay: &[u8], needle: &[u8]) -> Option<usize> {
     None
 }
 
-/// Parse a header block into `(name, unfolded_value)` pairs in the
-/// order they appeared. Continuation lines (starting with WSP) are
-/// joined onto the previous value with their leading WSP preserved --
-/// canonicalisation collapses it later.
+/// `(name, unfolded_value)` pairs, in the order they appeared. A continuation
+/// line, one starting with WSP, is joined onto the previous value with its
+/// leading WSP kept -- canonicalisation collapses that later.
 fn parse_header_block(headers: &[u8]) -> Vec<(String, String)> {
     let text = String::from_utf8_lossy(headers);
     let mut out: Vec<(String, String)> = Vec::new();
@@ -481,7 +458,7 @@ fn parse_header_block(headers: &[u8]) -> Vec<(String, String)> {
     out
 }
 
-/// Apply relaxed body canonicalisation (RFC 6376 §3.4.4).
+/// RFC 6376 §3.4.4.
 fn canonicalise_body_relaxed(body: &[u8]) -> Vec<u8> {
     let text = String::from_utf8_lossy(body);
     let mut out: Vec<String> = Vec::new();
@@ -524,15 +501,13 @@ fn canonicalise_body_relaxed(body: &[u8]) -> Vec<u8> {
     bytes
 }
 
-/// Canonicalise one header field as `lcname:relaxedvalue\r\n` per
-/// RFC 6376 §3.4.2 relaxed.
+/// RFC 6376 §3.4.2 relaxed: `lcname:relaxedvalue\r\n`.
 fn relaxed_header(name: &str, value: &str) -> String {
     fmt!("{}:{}\r\n", name.to_lowercase(), relaxed_value(value))
 }
 
-/// Apply the relaxed value transform (collapse WSP, strip leading and
-/// trailing WSP, unfold). Returns the canonicalised value with no
-/// leading or trailing whitespace.
+/// Unfolds, collapses every run of WSP to one SP, and strips the leading and
+/// trailing WSP.
 fn relaxed_value(value: &str) -> String {
     // Unfold: replace every CRLF (or bare LF) followed by WSP with a
     // single SP, then collapse all runs of WSP to one SP.
@@ -565,8 +540,8 @@ fn relaxed_value(value: &str) -> String {
 // │ RSA PUBLIC KEY ENCODING                                                   │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// DER `AlgorithmIdentifier` for `rsaEncryption` with the ASN.1 NULL
-/// parameter: `SEQUENCE { OID 1.2.840.113549.1.1.1, NULL }`. Fixed bytes.
+// DER `AlgorithmIdentifier` for `rsaEncryption` with the ASN.1 NULL parameter:
+// `SEQUENCE { OID 1.2.840.113549.1.1.1, NULL }`.
 const RSA_ALG_ID_DER: [u8; 15] = [
     0x30, 0x0d,                                             // SEQUENCE, 13 bytes
     0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d,         // OID rsaEncryption
@@ -637,10 +612,9 @@ fn der_write_len(out: &mut Vec<u8>, len: usize) {
 mod tests {
     use super::*;
 
-    /// A 2048-bit RSA key in PKCS#8 DER, generated once with:
-    /// `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
-    ///     -outform DER | base64 -w0`
-    /// A test key and nothing else: it signs nothing that exists.
+    // A 2048-bit RSA key in PKCS#8 DER, generated once with `openssl genpkey
+    // -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -outform DER | base64 -w0`.
+    // A test key and nothing else: it signs nothing that exists.
     const TEST_RSA_PKCS8_B64: &str = include_str!("../tests/data/dkim_rsa_test_key.b64");
 
     fn rsa_signer() -> DkimSigner {
@@ -939,15 +913,15 @@ mod tests {
     // verifier computes. Gmail said `dkim=fail` for three months and nobody
     // asked it.
 
-    /// Ed25519 private key seed from RFC 8463 §A.1.
+    // Ed25519 private key seed from RFC 8463 §A.1.
     const RFC8463_SEED_B64: &str = "nWGxne/9WmC6hEr0kuwsxERJxWl7MmkZcDusAxyuf2A=";
-    /// The matching public key, RFC 8463 §A.2.
+    // The matching public key, RFC 8463 §A.2.
     const RFC8463_PUB_B64: &str = "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=";
-    /// The signature the RFC says a correct signer produces, §A.3.
+    // The signature the RFC says a correct signer produces, §A.3.
     const RFC8463_SIG_B64: &str =
         "/gCrinpcQOoIfuHNQIbq4pgh9kyIK3AQUdt9OdqQehSwhEIug4D11Bus\
          Fa3bT3FY5OsU7ZbnKELq+eXdp1Q1Dw==";
-    /// The body hash the RFC says relaxed body canonicalisation yields, §A.3.
+    // The body hash the RFC says relaxed body canonicalisation yields, §A.3.
     const RFC8463_BH_B64: &str = "2jUSOH9NhtVGCQWNr9BrIAPreKQjO6Sn7XIkfJVOzv8=";
 
     /// The canonicalised header block for the RFC's ed25519 signature, built
@@ -974,9 +948,9 @@ mod tests {
         b"Hi.\r\n\r\nWe lost the game.  Are you hungry yet?\r\n\r\nJoe.\r\n"
     }
 
-    /// The message RFC 6376 §3.4.5 canonicalises as its worked example.  Note the space before
-    /// the colon in `B`, the tab-folded continuation, and the trailing empty lines -- every one
-    /// of them is a rule under test.
+    // The message RFC 6376 §3.4.5 canonicalises as its worked example.  Note the
+    // space before the colon in `B`, the tab-folded continuation, and the trailing
+    // empty lines -- every one of them is a rule under test.
     const RFC6376_EXAMPLE: &[u8] = b"A: X\r\nB : Y\t\r\n\tZ  \r\n\r\n C \r\nD \t E\r\n\r\n\r\n";
 
     /// Relaxed *header* canonicalisation, driven through the real code path, must reproduce the

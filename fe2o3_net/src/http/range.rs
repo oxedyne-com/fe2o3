@@ -37,6 +37,9 @@
 //! not a refusal. Only a well-formed byte range that falls entirely outside the
 //! representation earns a `416`, which is a statement about the representation
 //! rather than about the syntax.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::http::{
     fields::{
@@ -52,36 +55,26 @@ use crate::http::{
 use oxedyne_fe2o3_core::prelude::*;
 
 
-/// The only range unit anyone implements (RFC 9110 §14.1).
-pub const BYTES_UNIT: &str = "bytes";
+pub const BYTES_UNIT: &str = "bytes";    // the only unit anyone implements, RFC 9110 §14.1
 
-/// The value a resource that can be asked for in byte ranges advertises.
-pub const ACCEPT_RANGES_BYTES: &str = "bytes";
+pub const ACCEPT_RANGES_BYTES: &str = "bytes";    // what a range-answering resource advertises
 
 
 /// One byte-range specifier, as written in a `Range` field and before it has met
 /// the representation it names (RFC 9110 §14.1.1).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ByteRangeSpec {
-    /// `bytes=s-e`: from `s` to `e`, both inclusive.
-    FromTo(u64, u64),
-    /// `bytes=s-`: from `s` to the last byte.
-    From(u64),
-    /// `bytes=-n`: the last `n` bytes.
-    Suffix(u64),
+    FromTo(u64, u64),    // `bytes=s-e`, both ends inclusive
+    From(u64),           // `bytes=s-`, on to the last byte
+    Suffix(u64),         // `bytes=-n`, the last n bytes
 }
 
 /// What a `Range` field asked for.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RangeRequest {
-    /// One window, which is what every media player and download manager sends.
-    Single(ByteRangeSpec),
-    /// Several windows at once, answered with the whole representation. See the
-    /// module documentation for why this is not a `multipart/byteranges` body.
-    Multiple,
-    /// A unit this server does not implement, or a field that did not parse. The
-    /// field is ignored and the whole representation is sent (RFC 9110 §14.2).
-    Ignored,
+    Single(ByteRangeSpec),    // one window, what every player and download manager sends
+    Multiple,                 // several at once, answered whole; see the module header
+    Ignored,                  // an unimplemented unit, or a field that did not parse
 }
 
 impl RangeRequest {
@@ -231,12 +224,9 @@ impl ByteRangeSpec {
 /// the wire.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ByteWindow {
-    /// First byte sent.
     pub start:  u64,
-    /// Last byte sent, inclusive.
-    pub end:    u64,
-    /// Length of the whole representation the window was cut from.
-    pub total:  u64,
+    pub end:    u64,    // inclusive
+    pub total:  u64,    // length of the whole representation it was cut from
 }
 
 impl ByteWindow {
@@ -247,7 +237,7 @@ impl ByteWindow {
         self.end - self.start + 1
     }
 
-    /// Whether the window covers the whole representation.
+    /// Does the window cover the whole representation?
     pub fn is_whole(&self) -> bool {
         self.start == 0 && self.len() == self.total
     }
@@ -261,12 +251,9 @@ impl ByteWindow {
 /// What answering a `Range` field comes to, once the representation is known.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RangeOutcome {
-    /// Send the whole representation, `200`.
-    Whole,
-    /// Send this window, `206`, with a `Content-Range` naming it.
-    Partial(ByteWindow),
-    /// Send `416` with a `Content-Range` of `bytes */total`.
-    NotSatisfiable,
+    Whole,                  // send the whole representation, `200`
+    Partial(ByteWindow),    // send this window, `206`, with a `Content-Range` naming it
+    NotSatisfiable,         // send `416` with a `Content-Range` of `bytes */total`
 }
 
 /// Read a request's `Range` field and resolve it against a representation of
