@@ -22,8 +22,9 @@
 //!
 //! - [`SCOPE_DASHBOARD_VIEW`] -- read-only access; traffic and ozone
 //!   browsing only.
-//! - [`SCOPE_DASHBOARD_ADMIN`] -- full dashboard access; enables
-//!   mutations in a future v2 (edit ozone values).
+//! - [`SCOPE_DASHBOARD_ADMIN`] -- full dashboard access; required to
+//!   mutate the address guard's whitelist and blacklist, which is the
+//!   only mutation the dashboard performs.
 //! - [`SCOPE_ADMIN`] -- the existing CLI scope; required *in addition*
 //!   to one of the dashboard scopes to see the admin-management UI.
 //!

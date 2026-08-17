@@ -177,7 +177,7 @@ impl<
         self.csizes.mloc
     }
 
-    /// Returns the cache size in Mebibytes (1 [MiB] = 1024^2 bytes).
+    /// The cache size in mebibytes, one of which is 1024^2 bytes.
     pub fn size_mb(&self) -> f64 { (self.size as f64) / 1_048_576.0 }
 
     pub fn lim_size_mb(&self) -> f64 { (self.lim as f64) / 1_048_576.0 }

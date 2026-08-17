@@ -1982,7 +1982,8 @@ fn tags_json<
 /// A post declares in the composer, beside the prose the declaration is about. Everything else a site
 /// puts in front of a reader -- a book in a catalogue, a project on a front page -- is authored
 /// somewhere else entirely, so this is where its one field lives. What may be declared for is the
-/// config's business ([`DeclareConfig::items`]); what it says is this page's.
+/// config's business ([`crate::srv::publish::declare::DeclareConfig::items`]); what it says is
+/// this page's.
 fn declare_page<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -3877,7 +3878,8 @@ const AUTHOR_SCRIPT: &str = "<script>\n(function(){\n  var btn=document.getEleme
 /// must be able to say nothing, and saying nothing has to be as easy as saying anything, or the field
 /// quietly pressures an author into a claim to be rid of it.
 ///
-/// Drawn only where the site declares ([`DeclareConfig::is_on`]). A site not in a scheme has nothing
+/// Drawn only where the site declares
+/// ([`crate::srv::publish::declare::DeclareConfig::is_on`]). A site not in a scheme has nothing
 /// to put in the box and no page that would draw the answer.
 fn declare_field(cfg: &PublishConfig, on: Option<declare::Level>) -> String {
 	if !cfg.declare.is_on() {

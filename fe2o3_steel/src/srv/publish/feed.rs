@@ -142,7 +142,7 @@ pub fn serve(cfg: &PublishConfig, posts: &[Post], id: &str) -> Outcome<HttpMessa
 ///
 /// Anything else is passed through as the epoch rather than emitted malformed: a feed that will not
 /// parse is worse than one that admits it does not know. **That fallback is silent**, which is why
-/// the length is tested against the shapes [`valid_date`] admits rather than against a bare `10` --
+/// the length is tested against the shapes [`super::valid_date`] admits rather than a bare `10` --
 /// a date the store accepts and the feed quietly dates to 1970 is the kind of wrong nobody sees
 /// until a reader's feed reader has already sorted it to the bottom for a year.
 fn instant(date: &str) -> String {

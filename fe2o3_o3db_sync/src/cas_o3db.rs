@@ -13,7 +13,7 @@
 //!   caller has encrypted before storing.
 //!
 //! Deletes are tombstones flowing through the ordinary store path, matching
-//! [`O3dbStorage`](super::dist::o3db_storage) so a subsequent `get` sees the
+//! `O3dbStorage`, behind the `dist` feature, so a subsequent `get` sees the
 //! tombstone on its first read rather than racing a direct-to-disk delete. The
 //! log-structured engine reclaims the space on compaction.
 //!
@@ -56,7 +56,7 @@ const CHUNK_PREFIX: &str = "chunk:";
 ///
 /// Generic over the six O3db type parameters so a caller plugs its chosen
 /// crypto, hash and checksum schemes in directly, exactly as
-/// [`O3dbStorage`](super::dist::o3db_storage::O3dbStorage) does. Most callers
+/// `O3dbStorage`, behind the `dist` feature, does. Most callers
 /// construct one at start-up with concrete types.
 pub struct O3dbCas<
 	const UIDL: usize,

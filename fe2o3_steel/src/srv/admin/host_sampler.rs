@@ -5,7 +5,7 @@
 //! reads the ring to draw host-resource charts (CPU, memory,
 //! disk, network, load average).
 //!
-//! The sampler is parallel to [`traffic::TrafficRecorder`]: same
+//! The sampler is parallel to [`super::traffic::TrafficRecorder`]: same
 //! bounded-ring shape, same fixed-interval sampler task, same
 //! `Arc`-shared ownership between the server and the dashboard.
 //! Constructed once in the TUI startup path and carried through
@@ -61,7 +61,7 @@ pub struct DerivedHostPoint {
 }
 
 /// Bounded ring of host snapshots, cheaply cloneable via `Arc` and shared
-/// between the periodic sampler task spawned in [`Server::start`] and every
+/// between the periodic sampler task spawned in [`crate::srv::server::Server::start`] and every
 /// dashboard request handler.
 #[derive(Debug)]
 pub struct HostSampler {
