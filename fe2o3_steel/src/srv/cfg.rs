@@ -829,11 +829,12 @@ pub struct VhostConfig {
     pub db_dir_rel:             Option<String>,
     pub api_routes:             Vec<ApiRoute>,          // local POST path -> upstream URL
     pub webhook_routes:         Vec<WebhookRoute>,      // local POST path -> named handler
-    // Optional allow-list of outbound egress targets. When non-empty, every `api_routes` upstream
-    // must match at least one entry or the server refuses to start. Entries are `host` or
-    // `host:port`; `host` alone matches any port. An empty list -- the default -- means no
-    // allow-list is configured and every upstream is permitted. Populating this on a vhost is a
-    // defence against a compromised app config exfiltrating via an arbitrary upstream URL.
+    // Optional allow-list of outbound egress targets. When non-empty, every upstream this vhost
+    // can reach -- an api route, a forwarded webhook route, a ws route or a proxy route -- must
+    // match at least one entry or the server refuses to start. Entries are `host` or `host:port`;
+    // `host` alone matches any port. An empty list -- the default -- means no allow-list is
+    // configured and every upstream is permitted. Populating this on a vhost is a defence against
+    // a compromised app config exfiltrating via an arbitrary upstream URL.
     pub egress_allowed:         Vec<String>,
     // Authorised signing keys for the signed-admin-login flow. Each entry binds a named operator
     // to a public key and a scope list; a SignedCommand with cmd = `"admin_login"` and a
@@ -1272,42 +1273,82 @@ impl VhostConfig {
         })
     }
 
-    /// Check every `api_routes` upstream against the `egress_allowed`
-    /// list. Returns `Ok(())` when the allow-list is empty (no
-    /// enforcement) or when every upstream matches at least one
-    /// entry. Entries are compared as `host` or `host:port`: a
-    /// bare-host entry matches any port for that host, and a
-    /// `host:port` entry requires an exact match.
+    /// Every upstream this vhost's configuration can reach outward to, as
+    /// `(kind, local path, host, port)`, where the kind and path name the
+    /// route in an error message. A route served by an in-process handler
+    /// reaches nothing and does not appear.
+    ///
+    /// This is the list `egress_allowed` is enforced against, and it is the
+    /// only such list: a route kind added to [`VhostConfig`] without a line
+    /// here is outside the allow-list, so add the line with the field.
+    pub fn egress_targets(&self) -> Vec<(&'static str, &str, &str, u16)> {
+        let mut out = Vec::new();
+        for r in &self.api_routes {
+            if let (Some(h), Some(p)) = (&r.upstream_host, &r.upstream_port) {
+                out.push(("api route", r.path.as_str(), h.as_str(), *p));
+            }
+        }
+        // A webhook route in forwarding mode POSTs the payload onward, so it carries a body out.
+        for r in &self.webhook_routes {
+            if let (Some(h), Some(p)) = (&r.upstream_host, &r.upstream_port) {
+                out.push(("webhook route", r.path.as_str(), h.as_str(), *p));
+            }
+        }
+        // Ws and proxy routes always name an upstream; there is no handler form to skip.
+        for r in &self.ws_routes {
+            out.push(("ws route", r.path.as_str(), r.upstream_host.as_str(), r.upstream_port));
+        }
+        for r in &self.proxy_routes {
+            out.push((
+                "proxy route",
+                r.path_prefix.as_str(),
+                r.upstream_host.as_str(),
+                r.upstream_port,
+            ));
+        }
+        out
+    }
+
+    /// Does `egress_allowed` permit a connection to this host and port?
+    ///
+    /// Entries are compared as `host` or `host:port`: a bare-host entry
+    /// matches any port for that host, and a `host:port` entry requires an
+    /// exact match. An empty list permits everything, since it means no
+    /// allow-list was configured. The port is taken from the last colon and
+    /// only when what follows it parses as one, so a bracketed IPv6 literal
+    /// is read as the bare host it is rather than split down the middle.
+    pub fn egress_permits(&self, host: &str, port: u16) -> bool {
+        if self.egress_allowed.is_empty() {
+            return true;
+        }
+        for entry in &self.egress_allowed {
+            match entry.rsplit_once(':') {
+                Some((eh, ep)) => match ep.parse::<u16>() {
+                    Ok(n)  => if eh == host && n == port { return true; },
+                    Err(_) => if entry == host { return true; },
+                },
+                None => if entry == host { return true; },
+            }
+        }
+        false
+    }
+
+    /// Check every upstream this vhost can reach against the `egress_allowed`
+    /// list, refusing the first that no entry permits. A no-op when the
+    /// allow-list is empty, which is what a config that configures no
+    /// allow-list means. See [`egress_targets`](Self::egress_targets) for
+    /// what is covered and [`egress_permits`](Self::egress_permits) for how
+    /// an entry is matched.
     pub fn validate_egress(&self) -> Outcome<()> {
         if self.egress_allowed.is_empty() {
             return Ok(());
         }
-        for route in &self.api_routes {
-            let (h, p) = match (&route.upstream_host, &route.upstream_port) {
-                (Some(h), Some(p)) => (h.clone(), *p),
-                _ => continue, // handler-served route; no outbound
-            };
-            let mut ok = false;
-            for entry in &self.egress_allowed {
-                if let Some((eh, ep)) = entry.split_once(':') {
-                    if eh == h.as_str() {
-                        if let Ok(ep_n) = ep.parse::<u16>() {
-                            if ep_n == p {
-                                ok = true;
-                                break;
-                            }
-                        }
-                    }
-                } else if entry == h.as_str() {
-                    ok = true;
-                    break;
-                }
-            }
-            if !ok {
+        for (kind, path, host, port) in self.egress_targets() {
+            if !self.egress_permits(host, port) {
                 return Err(err!(
-                    "VhostConfig '{}': api route '{}' upstream {}:{} is not \
+                    "VhostConfig '{}': {} '{}' upstream {}:{} is not \
                     in the configured egress_allowed list ({:?}).",
-                    self.primary_hostname(), route.path, h, p,
+                    self.primary_hostname(), kind, path, host, port,
                     self.egress_allowed;
                     Invalid, Input, Security, Configuration));
             }
@@ -2397,10 +2438,10 @@ impl ServerConfig {
             let _ = res!(vh.get_static_route_paths(root, ()));
             let _ = res!(vh.get_default_index_files());
             let _ = res!(vh.get_hostnames_fqdn());
-            // Egress allow-list check: a vhost whose API proxy
-            // routes target an upstream outside its configured
-            // allow-list is refused at start-up. The check is a
-            // no-op when the allow-list is empty.
+            // Egress allow-list check: a vhost naming an upstream
+            // outside its configured allow-list is refused at
+            // start-up, whichever kind of route names it. The check
+            // is a no-op when the allow-list is empty.
             res!(vh.validate_egress());
         }
         let _ = res!(self.get_acme());
@@ -2727,5 +2768,197 @@ mod tests {
         assert!(vh.uses_sessions(), "the default vhost is configured with a database");
         vh.db_dir_rel = None;
         assert!(!vh.uses_sessions(), "a static vhost has nowhere to keep a session");
+    }
+
+    fn vh(allowed: &[&str]) -> VhostConfig {
+        let mut vh = VhostConfig::default();
+        vh.egress_allowed = allowed.iter().map(|s| s.to_string()).collect();
+        vh
+    }
+
+    fn api_up(path: &str, host: &str, port: u16) -> ApiRoute {
+        ApiRoute {
+            path:           path.to_string(),
+            upstream_host:  Some(host.to_string()),
+            upstream_port:  Some(port),
+            upstream_path:  Some(fmt!("/")),
+            upstream_tls:   true,
+            headers:        Vec::new(),
+            handler:        None,
+            config:         Vec::new(),
+        }
+    }
+
+    fn api_handler(path: &str) -> ApiRoute {
+        ApiRoute {
+            path:           path.to_string(),
+            upstream_host:  None,
+            upstream_port:  None,
+            upstream_path:  None,
+            upstream_tls:   true,
+            headers:        Vec::new(),
+            handler:        Some(fmt!("some_handler")),
+            config:         Vec::new(),
+        }
+    }
+
+    fn hook_up(path: &str, host: &str, port: u16) -> WebhookRoute {
+        WebhookRoute {
+            path:           path.to_string(),
+            handler:        None,
+            upstream_host:  Some(host.to_string()),
+            upstream_port:  Some(port),
+            upstream_path:  Some(fmt!("/")),
+            upstream_tls:   true,
+            config:         Vec::new(),
+        }
+    }
+
+    fn hook_handler(path: &str) -> WebhookRoute {
+        WebhookRoute {
+            path:           path.to_string(),
+            handler:        Some(fmt!("some_handler")),
+            upstream_host:  None,
+            upstream_port:  None,
+            upstream_path:  None,
+            upstream_tls:   true,
+            config:         Vec::new(),
+        }
+    }
+
+    fn ws_up(path: &str, host: &str, port: u16) -> WsRoute {
+        WsRoute {
+            path:           path.to_string(),
+            upstream_host:  host.to_string(),
+            upstream_port:  port,
+            upstream_path:  fmt!("/"),
+        }
+    }
+
+    fn proxy_up(prefix: &str, host: &str, port: u16) -> ProxyRoute {
+        ProxyRoute {
+            path_prefix:    prefix.to_string(),
+            upstream_host:  host.to_string(),
+            upstream_port:  port,
+            upstream_tls:   false,
+            strip_prefix:   false,
+        }
+    }
+
+    /// The route kind whose enforcement has always worked, kept here so a
+    /// rewrite of the check cannot quietly drop it.
+    #[test]
+    fn an_api_route_outside_the_allowlist_is_refused() {
+        let mut v = vh(&["127.0.0.1"]);
+        v.api_routes = vec![api_up("/api/pay", "evil.example.com", 443)];
+        assert!(v.validate_egress().is_err(),
+            "an api_route to a host the operator did not name must be refused");
+    }
+
+    /// A ws_route dials an upstream of its own, so an operator's allow-list
+    /// that does not name that upstream must refuse it.
+    #[test]
+    fn a_ws_route_outside_the_allowlist_is_refused() -> Outcome<()> {
+        let mut v = vh(&["127.0.0.1"]);
+        v.ws_routes = vec![ws_up("/ws", "evil.example.com", 9000)];
+        let e = res!(v.validate_egress().err().ok_or_else(|| err!(
+            "a ws_route to a host the operator did not name must be refused"; Test)));
+        let msg = fmt!("{}", e);
+        assert!(msg.contains("evil.example.com"),
+            "the refusal must name the host it refused, got: {}", msg);
+        Ok(())
+    }
+
+    /// A proxy_route forwards a whole path prefix to its own upstream, which
+    /// is the broadest outward reach a vhost has.
+    #[test]
+    fn a_proxy_route_outside_the_allowlist_is_refused() {
+        let mut v = vh(&["127.0.0.1"]);
+        v.proxy_routes = vec![proxy_up("/chat/", "evil.example.com", 8080)];
+        assert!(v.validate_egress().is_err(),
+            "a proxy_route to a host the operator did not name must be refused");
+    }
+
+    /// A webhook route in forwarding mode POSTs the payload onward, which is
+    /// egress carrying a body.
+    #[test]
+    fn a_forwarded_webhook_outside_the_allowlist_is_refused() {
+        let mut v = vh(&["127.0.0.1"]);
+        v.webhook_routes = vec![hook_up("/webhook/pay", "evil.example.com", 443)];
+        assert!(v.validate_egress().is_err(),
+            "a forwarded webhook to a host the operator did not name must be refused");
+    }
+
+    /// A refusal that catches a legitimate configuration is a refusal an
+    /// operator switches off, so a vhost with no allow-list at all keeps
+    /// reaching every upstream it names.
+    #[test]
+    fn no_allowlist_permits_every_upstream() -> Outcome<()> {
+        let mut v = vh(&[]);
+        v.api_routes     = vec![api_up("/api/pay", "api.example.com", 443)];
+        v.webhook_routes = vec![hook_up("/webhook/pay", "hooks.example.com", 443)];
+        v.ws_routes      = vec![ws_up("/ws", "ws.example.com", 9000)];
+        v.proxy_routes   = vec![proxy_up("/chat/", "chat.example.com", 8080)];
+        res!(v.validate_egress());
+        Ok(())
+    }
+
+    /// An allow-list that names every upstream permits them all, in both
+    /// entry forms: a bare host for any port, and `host:port` for one.
+    #[test]
+    fn a_correct_allowlist_permits_every_upstream() -> Outcome<()> {
+        let mut v = vh(&["127.0.0.1", "api.example.com", "ws.example.com:9000"]);
+        v.api_routes     = vec![
+            api_up("/api/pay", "api.example.com", 443),
+            api_handler("/api/local"),
+        ];
+        v.webhook_routes = vec![
+            hook_up("/webhook/pay", "127.0.0.1", 7000),
+            hook_handler("/webhook/local"),
+        ];
+        v.ws_routes      = vec![ws_up("/ws", "ws.example.com", 9000)];
+        v.proxy_routes   = vec![proxy_up("/chat/", "127.0.0.1", 8080)];
+        res!(v.validate_egress());
+        Ok(())
+    }
+
+    /// A `host:port` entry is the operator saying one port and not another.
+    #[test]
+    fn a_port_specific_entry_refuses_another_port() {
+        let mut v = vh(&["ws.example.com:9000"]);
+        v.ws_routes = vec![ws_up("/ws", "ws.example.com", 9001)];
+        assert!(v.validate_egress().is_err(),
+            "an entry naming port 9000 must not permit port 9001");
+    }
+
+    /// Every outward reach the configuration has, so a route kind added later
+    /// without a line in `egress_targets` is a failing test rather than a
+    /// silent hole in the allow-list.
+    #[test]
+    fn the_enumeration_covers_all_four_route_kinds() {
+        let mut v = vh(&[]);
+        v.api_routes     = vec![api_up("/api/pay", "a.example.com", 443), api_handler("/api/x")];
+        v.webhook_routes = vec![hook_up("/webhook/pay", "b.example.com", 443), hook_handler("/w")];
+        v.ws_routes      = vec![ws_up("/ws", "c.example.com", 9000)];
+        v.proxy_routes   = vec![proxy_up("/chat/", "d.example.com", 8080)];
+        let hosts: Vec<&str> = v.egress_targets().iter().map(|t| t.2).collect();
+        assert_eq!(
+            hosts,
+            vec!["a.example.com", "b.example.com", "c.example.com", "d.example.com"],
+            "every route with an upstream must be enumerated, and only those");
+    }
+
+    /// An IPv6 upstream is written bracketed, and the brackets contain colons:
+    /// an allow-list entry read as `host:port` at the first colon it finds
+    /// never matches one, which is an allow-list that silently allows nothing.
+    #[test]
+    fn a_bracketed_ipv6_entry_is_a_host_not_a_host_and_port() -> Outcome<()> {
+        let mut v = vh(&["[::1]"]);
+        v.ws_routes = vec![ws_up("/ws", "[::1]", 9000)];
+        res!(v.validate_egress());
+        v.ws_routes = vec![ws_up("/ws", "[2001:db8::1]", 9000)];
+        assert!(v.validate_egress().is_err(),
+            "an entry naming the loopback must not permit another address");
+        Ok(())
     }
 }
