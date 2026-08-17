@@ -128,6 +128,55 @@ pub const CODE_SETTLED:		u8 = 12;
 pub const CODE_REVERTS:		u8 = 13;
 
 
+/// The character beginning the name of an [`Op::Mark`] a tool wrote rather than
+/// a person, and which a person's mark may not begin with.
+///
+/// One character is the whole of the convention. It is here rather than in
+/// whichever tool authors the marks because every reader of a history has to
+/// apply it and they are not all the same program: a command line tool offering
+/// somebody the points they named, a forge listing them in a view, an exporter
+/// deciding which of them deserves a tag. Two copies of a rule like this in two
+/// crates is the seam where each side is honestly correct in isolation and the
+/// two disagree at the boundary.
+///
+/// What it is for: a tool that names a point at the end of every command writes
+/// a great many marks, and they are recovery points rather than statements of
+/// intent. Telling them apart by name is what lets a reader be shown the handful
+/// somebody chose without being shown the several hundred nobody did. See
+/// [`is_auto_mark`].
+pub const AUTO_MARK_PREFIX: char = '@';
+
+/// Reports whether a mark's name is one a tool wrote rather than one a person
+/// chose.
+///
+/// Takes the name rather than the [`Op`], because a caller that has an operation
+/// has its name in a line and a caller that has only a name -- reading a
+/// reference somebody typed, or a tag -- has nothing to hand it otherwise:
+///
+/// ```
+/// use oxedyne_fe2o3_ore::op::{is_auto_mark, Op};
+///
+/// let op = Op::Mark {
+///     name: String::from("@2026-08-17T04:12:09.482913Z"),
+///     body: None,
+///     time: Some(1_755_403_929),
+/// };
+/// assert!(match &op {
+///     Op::Mark { name, .. }	=> is_auto_mark(name),
+///     _						=> false,
+/// });
+/// assert!(!is_auto_mark("release 1.0"));
+/// ```
+///
+/// It says nothing about whether the name is a datetime, and deliberately so.
+/// What a tool spells after the prefix is that tool's business and may differ
+/// between them; what every reader has to agree on is which marks are somebody's
+/// own, and that is one character.
+pub fn is_auto_mark(name: &str) -> bool {
+	name.starts_with(AUTO_MARK_PREFIX)
+}
+
+
 /// Wire code for [`Mode::Normal`].
 pub const MODE_NORMAL:		u8 = 0;
 /// Wire code for [`Mode::Executable`].
@@ -389,6 +438,19 @@ pub enum Op {
 	/// shows a mark by its time and decides by [`crate::seq::OpOrder`]; sorting
 	/// or arbitrating by the time would let a machine set to next year win every
 	/// contest it entered.
+	///
+	/// # Two kinds of mark, told apart by one character
+	///
+	/// A tool that names the point it reached at the end of every command writes
+	/// far more marks than a person does, and they mean a different thing: a
+	/// recovery point rather than a statement of intent. The convention that
+	/// separates them is the name, and it is [`AUTO_MARK_PREFIX`] -- a name
+	/// beginning with it was written by a tool, a person's may not begin with it,
+	/// and [`is_auto_mark`] is the question. It lives here rather than in whoever
+	/// authors the marks because every reader of a history has to apply it, and
+	/// they are not all the same program.
+	///
+	/// The rest of the name is not specified, and the engine reads none of it.
 	Mark {
 		/// The name given to this point.
 		name: String,
@@ -2773,6 +2835,43 @@ mod tests {
 			at += used;
 		}
 		assert_eq!(at, buf.len());
+		Ok(())
+	}
+
+	/// A mark a tool wrote is told from a mark a person chose by one character,
+	/// and by nothing else.
+	///
+	/// The rest of the name is deliberately not a subject here. What a tool
+	/// spells after the prefix is that tool's business and two of them may spell
+	/// it differently; what every reader has to agree on is which marks are
+	/// somebody's own.
+	#[test]
+	fn a_mark_a_tool_wrote_is_known_by_its_first_character() -> Outcome<()> {
+		assert!(is_auto_mark("@2026-08-17T04:12:09.482913Z"));
+		assert!(is_auto_mark("@"), "the prefix alone is still the prefix");
+		assert!(is_auto_mark("@whatever a tool likes to spell"),
+			"nothing after the prefix is read");
+
+		assert!(!is_auto_mark("release 1.0"));
+		assert!(!is_auto_mark(""), "a nameless mark is nobody's automatic one");
+		assert!(!is_auto_mark("2026-08-17T04:12:09Z"),
+			"a datetime is not the convention; the prefix is");
+		assert!(!is_auto_mark(" @2026-08-17T04:12:09Z"),
+			"the character begins the name or it does not count");
+
+		// And through an operation, which is how every consumer meets one.
+		let op = Op::Mark {
+			name:	fmt!("{}2026-08-17T04:12:09.482913Z", AUTO_MARK_PREFIX),
+			body:	None,
+			time:	Some(1_755_403_929),
+		};
+		match &op {
+			Op::Mark { name, .. }	=> assert!(is_auto_mark(name)),
+			other					=> return Err(err!(
+				"A mark decoded as {}.", other.name(); Test, Mismatch)),
+		}
+		// It carries a time, so it is the four element spelling.
+		assert_eq!(op.code(), CODE_MARK_TIMED);
 		Ok(())
 	}
 }
