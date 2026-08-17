@@ -1214,6 +1214,32 @@ impl<
             limits: Some(limits),
         }
     }
+
+    /// The bytes taken off the stream past the end of the last message.
+    ///
+    /// A reader in a `keep-alive` loop needs no accessor: the remnant is the
+    /// front of the next message and the next [`AsyncReadIterator::next`]
+    /// consumes it. A caller that stops reading HTTP and takes the raw socket
+    /// does need one -- a protocol upgrade, where the `101` is the last HTTP on
+    /// the connection and everything after it belongs to another protocol.
+    ///
+    /// Without this the remnant is dropped with the reader. That is invisible
+    /// almost always, because a client waits for the `101` before it frames
+    /// anything, and it is a truncated stream on the occasion the client
+    /// pipelines its first frame or the network delivers both in one segment.
+    /// Occasional silent truncation in a byte pipe is the shape of bug nobody
+    /// can report usefully, so the bytes are made reachable rather than left to
+    /// each caller to notice.
+    pub fn remnant(&self) -> &[u8] {
+        &self.buffer
+    }
+
+    /// The remnant, taken. For a caller that is finished with the reader, which
+    /// is the usual case at an upgrade: the socket outlives the reader and the
+    /// bytes have to go with the socket.
+    pub fn into_remnant(self) -> Vec<u8> {
+        self.buffer
+    }
 }
 
 impl<
@@ -1250,5 +1276,93 @@ impl<
                 Err(e) => Some(Err(e)),
             }
         })
+    }
+}
+
+
+#[cfg(test)]
+mod reader_tests {
+    use super::*;
+
+    use crate::conc::AsyncReadIterator;
+
+    /// A WebSocket upgrade with the client's first frame already behind it in the
+    /// same buffer, which is what a pipelining client or one obliging TCP segment
+    /// delivers.
+    fn upgrade_then_frame() -> (Vec<u8>, Vec<u8>) {
+        let head = "GET /api/mail/tunnel?host=imap.example.com&port=993 HTTP/1.1\r\n\
+            Host: example.com\r\n\
+            Upgrade: websocket\r\n\
+            Connection: Upgrade\r\n\
+            Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+            Sec-WebSocket-Version: 13\r\n\r\n";
+        // A masked binary frame of four bytes, as a client must send.
+        let frame: Vec<u8> = vec![
+            0x82, 0x84, 0x01, 0x02, 0x03, 0x04,
+            0x16, 0x03, 0x04, 0x05,
+        ];
+        let mut wire = head.as_bytes().to_vec();
+        wire.extend_from_slice(&frame);
+        (wire, frame)
+    }
+
+    /// The bytes past the header block survive the read, so a caller taking the
+    /// raw socket at an upgrade can go on where the reader stopped.
+    ///
+    /// The reader fills a header-sized chunk in one go, so those bytes have
+    /// already left the stream by the time the request is parsed. Dropped, they
+    /// are the front of the next protocol's first message -- and a stream missing
+    /// its first frame does not fail, it decodes to nonsense.
+    #[test]
+    fn test_the_bytes_after_an_upgrade_survive_the_read() -> Outcome<()> {
+        let (wire, frame) = upgrade_then_frame();
+        let mut stream = std::io::Cursor::new(wire);
+        let rt = res!(tokio::runtime::Runtime::new());
+        let mut reader: HttpMessageReader<
+            '_,
+            { constant::HTTP_DEFAULT_HEADER_CHUNK_SIZE },
+            { constant::HTTP_DEFAULT_BODY_CHUNK_SIZE },
+            _,
+        > = HttpMessageReader::new(Pin::new(&mut stream));
+
+        let msg = match rt.block_on(reader.next()) {
+            Some(Ok(m)) => m,
+            Some(Err(e)) => return Err(err!(e, "The upgrade request did not parse."; Test)),
+            None => return Err(err!("The reader found no request at all."; Test, Missing)),
+        };
+        assert!(msg.is_websocket_upgrade(), "the request was not read as an upgrade");
+        assert_eq!(reader.remnant(), &frame[..],
+            "the frame behind the header block was dropped by the reader");
+        assert_eq!(reader.into_remnant(), frame,
+            "the taken remnant differs from the borrowed one");
+        Ok(())
+    }
+
+    /// A request with nothing behind it leaves an empty remnant, not a stray
+    /// byte: the accessor must not turn the usual case into a corrupted stream.
+    #[test]
+    fn test_a_request_with_nothing_behind_it_leaves_nothing() -> Outcome<()> {
+        let (wire, _) = upgrade_then_frame();
+        let head_end = match wire.windows(4).position(|w| w == b"\r\n\r\n") {
+            Some(i) => i + 4,
+            None    => return Err(err!("The fixture has no header terminator."; Test, Missing)),
+        };
+        let mut stream = std::io::Cursor::new(wire[..head_end].to_vec());
+        let rt = res!(tokio::runtime::Runtime::new());
+        let mut reader: HttpMessageReader<
+            '_,
+            { constant::HTTP_DEFAULT_HEADER_CHUNK_SIZE },
+            { constant::HTTP_DEFAULT_BODY_CHUNK_SIZE },
+            _,
+        > = HttpMessageReader::new(Pin::new(&mut stream));
+        match rt.block_on(reader.next()) {
+            Some(Ok(_))  => (),
+            Some(Err(e)) => return Err(err!(e, "The upgrade request did not parse."; Test)),
+            None         => return Err(err!("The reader found no request."; Test, Missing)),
+        }
+        assert!(reader.remnant().is_empty(),
+            "a request with nothing behind it left {} byte(s) of remnant",
+            reader.remnant().len());
+        Ok(())
     }
 }
