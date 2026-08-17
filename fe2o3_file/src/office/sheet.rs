@@ -181,7 +181,10 @@ impl Sheet {
 		})
 	}
 
-	/// The cells of a rectangle, row by row, clipped to what the sheet holds.
+	/// The cells of a rectangle, row by row.  The rectangle asked for is the
+	/// rectangle returned: a position the sheet does not hold comes back as an
+	/// empty cell rather than being clipped away, so a caller drawing a grid gets
+	/// the shape it asked for.
 	pub fn window(&self, range: &Range) -> Vec<Vec<Cell>> {
 		let mut out = Vec::new();
 		for row in range.from.row..=range.to.row {
