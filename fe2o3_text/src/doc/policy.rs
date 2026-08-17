@@ -130,15 +130,24 @@ impl Policy {
 	/// Leading whitespace and control characters are stripped before the test: `\tjavascript:` and
 	/// `java\0script:` are destinations browsers have historically honoured, and a check that looked
 	/// only at the string as given would pass them.
+	///
+	/// A backslash is read as a separator, because that is what a browser reads it as. The URL
+	/// standard's relative states treat `\` as `/` for every special scheme, so `\\host/x` resolves
+	/// against an `http` or `https` page exactly as `//host/x` does and goes straight off-site. A
+	/// check that looked only for `//` would let the same destination through under a different
+	/// spelling, which is the whole of what an allowlist is for.
 	pub fn permits_url(&self, url: &str) -> bool {
 		if self.permits_every_scheme() {
 			return true;
 		}
 		// Control characters and whitespace anywhere in the scheme portion are removed rather than
-		// merely trimmed: a browser ignores them, so a comparison must too.
+		// merely trimmed: a browser ignores them, so a comparison must too. A backslash becomes the
+		// separator a browser reads it as, for the reason given above; this is the string the test
+		// is made against and never the string that is written out.
 		let cleaned: String = url
 			.chars()
 			.filter(|c| !c.is_whitespace() && !c.is_control())
+			.map(|c| if c == '\\' { '/' } else { c })
 			.collect();
 		let scheme_end = cleaned.find(':');
 		let scheme = match scheme_end {
@@ -174,6 +183,116 @@ impl Policy {
 pub fn apply(doc: &Doc, policy: &Policy) -> Doc {
 	Doc { blocks: blocks(&doc.blocks, policy, 0) }
 }
+
+/// Returns the document with every destination rewritten by the caller.
+///
+/// The companion to [`apply`], and the other half of publishing prose somebody else wrote. A policy
+/// decides *whether* a destination may be written; this decides *what* is written instead. The two
+/// are separate because they answer to different things: the allowlist is a property of the site's
+/// safety, and the rewriting is a property of where the prose is being shown.
+///
+/// # Why a caller wants this rather than the destination as written
+///
+/// A relative destination in an untrusted document is resolved by the browser against the address of
+/// the page that carries it, which is almost never the place the author meant. A README written to be
+/// read beside its own files says `[the parser](src/parse.rs)`, and a site that drops that string into
+/// a page at `/thing/files` sends the reader to `/thing/src/parse.rs`. Worse, a destination is free to
+/// climb: `../../elsewhere` reaches whatever the site keeps at that address, so a document can point
+/// at parts of the site nobody offered it. Mapping every destination through a function the site owns
+/// puts both under the site's control in one place.
+///
+/// `map` returns the destination to write, or nothing to drop the link and keep its words -- which is
+/// exactly what [`apply`] does with a destination its policy refuses, so a reader meets one behaviour
+/// however a link came to be dropped.
+///
+/// Order does not matter and applying both is the ordinary case: run this and then [`apply`], or the
+/// reverse, and the surviving set is the same, since neither invents a destination the other has not
+/// seen.
+pub fn retarget<F>(doc: &Doc, map: F) -> Doc
+where
+	F: Fn(&str) -> Option<String>,
+{
+	Doc { blocks: retarget_blocks(&doc.blocks, &map) }
+}
+
+/// The blocks, their destinations rewritten.
+fn retarget_blocks<F>(items: &[Block], map: &F) -> Vec<Block>
+where
+	F: Fn(&str) -> Option<String>,
+{
+	let mut out = Vec::with_capacity(items.len());
+	for item in items {
+		out.push(match item {
+			Block::Heading { level, content } => Block::Heading {
+				level:		*level,
+				content:	retarget_inlines(content, map),
+			},
+			Block::Para(content)	=> Block::Para(retarget_inlines(content, map)),
+			Block::List { ordered, items } => Block::List {
+				ordered:	*ordered,
+				items:		items.iter().map(|it| retarget_blocks(it, map)).collect(),
+			},
+			Block::Quote(inner)		=> Block::Quote(retarget_blocks(inner, map)),
+			Block::Table { head, rows, cols } => Block::Table {
+				head:	head.as_ref().map(|h| retarget_row(h, map)),
+				rows:	rows.iter().map(|r| retarget_row(r, map)).collect(),
+				cols:	cols.clone(),
+			},
+			Block::Div { attrs, content } => Block::Div {
+				attrs:		attrs.clone(),
+				content:	retarget_blocks(content, map),
+			},
+			// A code block and a rule hold no destination, so there is nothing here to rewrite.
+			Block::Code { .. } | Block::Rule	=> item.clone(),
+		});
+	}
+	out
+}
+
+/// A row, its cells' destinations rewritten.
+fn retarget_row<F>(r: &Row, map: &F) -> Row
+where
+	F: Fn(&str) -> Option<String>,
+{
+	Row(r.0.iter().map(|c| Cell(retarget_inlines(&c.0, map))).collect())
+}
+
+/// The inlines, their destinations rewritten.
+fn retarget_inlines<F>(items: &[Inline], map: &F) -> Vec<Inline>
+where
+	F: Fn(&str) -> Option<String>,
+{
+	let mut out = Vec::with_capacity(items.len());
+	for item in items {
+		match item {
+			Inline::Link { to, content } => {
+				let kept = retarget_inlines(content, map);
+				match map(to) {
+					Some(there)	=> out.push(Inline::Link { to: there, content: kept }),
+					// The words stay and the destination goes, which is what a refused
+					// destination already does. See [`retarget`].
+					None		=> out.extend(kept),
+				}
+			}
+			Inline::Image { src, alt } => match map(src) {
+				Some(there)	=> out.push(Inline::Image { src: there, alt: alt.clone() }),
+				None if !alt.trim().is_empty()	=> out.push(Inline::Text(alt.clone())),
+				None		=> {},
+			},
+			Inline::Emph { strong, content } => out.push(Inline::Emph {
+				strong:		*strong,
+				content:	retarget_inlines(content, map),
+			}),
+			Inline::Span { attrs, content } => out.push(Inline::Span {
+				attrs:		attrs.clone(),
+				content:	retarget_inlines(content, map),
+			}),
+			Inline::Text(_) | Inline::Code(_) | Inline::Break	=> out.push(item.clone()),
+		}
+	}
+	out
+}
+
 
 /// The blocks that survive, at a given depth.
 fn blocks(items: &[Block], policy: &Policy, depth: usize) -> Vec<Block> {
@@ -375,6 +494,80 @@ mod tests {
 			let html = html::render(&apply(&link(good), &p));
 			assert!(html.contains("<a href="), "'{}' lost its link: {}", good, html);
 		}
+		Ok(())
+	}
+
+	/// A backslash is a separator to a browser, so a destination that spells `//` with one does not
+	/// pass as relative.
+	///
+	/// The URL standard's relative states treat `\` as `/` for every special scheme, so each of
+	/// these resolves off-site from an `https` page exactly as `//host/x` does. The check read
+	/// them as relative and permitted every one, which walked past the allowlist by spelling.
+	#[test]
+	fn test_a_backslash_does_not_smuggle_a_host_09() -> Outcome<()> {
+		let p = Policy::default();
+		for bad in [
+			"\\\\evil.example/x",
+			"\\/evil.example/x",
+			"/\\evil.example/x",
+			"\\\\evil.example",
+			"\t\\\\evil.example/x",
+		] {
+			assert!(!p.permits_url(bad), "'{}' passed as a relative destination", bad);
+			let html = html::render(&apply(&link(bad), &p));
+			assert!(!html.contains("<a "), "'{}' kept its link: {}", bad, html);
+			assert!(html.contains("here"), "'{}' lost the words too: {}", bad, html);
+		}
+		// A backslash that is not a separator is still not a way to a scheme: a Windows path
+		// names `c:` and `c` is not on the list.
+		assert!(!p.permits_url("C:\\Windows\\System32"));
+		// And an ordinary relative destination is unaffected.
+		assert!(p.permits_url("src/parse.rs"));
+		assert!(p.permits_url("/posts/a"));
+		Ok(())
+	}
+
+	/// A destination the caller rewrites is written as the caller wrote it, and one the caller
+	/// declines to rewrite loses its link and keeps its words.
+	///
+	/// This is the containment a site publishing somebody else's prose needs: a relative
+	/// destination resolves against the *page*, not against wherever the document came from, and
+	/// one that climbs reaches whatever the site keeps up there. Mapping every destination through
+	/// the site's own function is what stops both.
+	#[test]
+	fn test_a_destination_can_be_rewritten_10() -> Outcome<()> {
+		let doc = Doc { blocks: vec![Block::Para(vec![
+			Inline::Link {
+				to:			fmt!("src/parse.rs"),
+				content:	vec![Inline::Text(fmt!("the parser"))],
+			},
+			Inline::Link {
+				to:			fmt!("../../elsewhere"),
+				content:	vec![Inline::Text(fmt!("up and out"))],
+			},
+			Inline::Image { src: fmt!("logo.png"), alt: fmt!("a logo") },
+		])] };
+		let out = retarget(&doc, |to: &str| {
+			if to.starts_with("..") {
+				return None;
+			}
+			Some(fmt!("/repo/files/{}", to))
+		});
+		let html = html::render(&out);
+		assert!(html.contains("href=\"/repo/files/src/parse.rs\""),
+			"the destination was not rewritten: {}", html);
+		assert!(html.contains("src=\"/repo/files/logo.png\""),
+			"an image's source was not rewritten: {}", html);
+		assert!(!html.contains("elsewhere"),
+			"a destination the caller declined survived: {}", html);
+		assert!(html.contains("up and out"),
+			"and it took its words with it: {}", html);
+		// A code block holds no destination and comes through as it was.
+		let code = Doc { blocks: vec![Block::Code {
+			lang:	Some(fmt!("rust")),
+			text:	fmt!("let a = 1;"),
+		}] };
+		assert_eq!(retarget(&code, |to: &str| Some(fmt!("{}", to))), code);
 		Ok(())
 	}
 
