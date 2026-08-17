@@ -16,8 +16,17 @@
 //! `xl/calcChain.xml` is Excel's record of what order to recalculate in, and it names cells by
 //! position. A formula written into a cell the chain does not know about makes the chain wrong, and
 //! Excel's response to a wrong chain is a repair prompt -- which "fixes" the file and never says why.
-//! So the part is DELETED whenever a formula is written, along with its content-type override and its
-//! relationship, and Excel rebuilds it. LibreOffice never reads it at all.
+//! So the part is DELETED, along with its content-type override and its relationship, and Excel
+//! rebuilds it. LibreOffice never reads it at all.
+//!
+//! **The chain goes wrong in BOTH directions and both of them drop it.** A formula WRITTEN leaves the
+//! chain short of a cell. A formula DESTROYED -- a plain value put over a cell that held an `<f>`,
+//! which is one call to this module and no formula anywhere in it -- leaves the chain naming a cell
+//! that has none, and ECMA-376 Part 1 §18.6.1 says a `c` in the chain is "a single cell, which shall
+//! contain a formula". The second case is not a lesser version of the first; it is a spec violation
+//! where the first is only a stale hint, and it went unnoticed until the ECMA-376 schemas were pointed
+//! at the output, because no reader on this machine reads the part. An EMPTY `<calcChain/>` would be no
+//! better -- `CT_CalcChain` requires at least one `c` -- so the part is removed rather than emptied.
 //!
 //! # A written formula carries no cached value unless the caller supplies one
 //!
@@ -142,26 +151,30 @@ pub fn edit(bytes: &[u8], sets: &[Set]) -> Outcome<Edited> {
 		}
 	}
 
-	let mut formulas = false;
+	let mut formulas = false;	// a formula was written
+	let mut razed = false;	// a formula that was there is not any more
 	let mut touched = Vec::new();
 	let mut cells = 0usize;
 	for (name, part, sets) in &jobs {
 		let src = res!(String::from_utf8(res!(zip.content_capped(part, cap))), Decode, String);
 		let mut xml = res!(Xml::parse(&src));
-		res!(write_cells(&mut xml, sets));
+		razed = res!(write_cells(&mut xml, sets)) || razed;
 		zip.set(part, xml.render().into_bytes(), Method::Deflate);
 		touched.push(name.clone());
 		cells += sets.len();
 		formulas = formulas || sets.iter().any(|s| s.formula.is_some());
 	}
-	if formulas {
+	if formulas || razed {
 		res!(drop_calc_chain(&mut zip, &dir, &wb_part, cap));
 	}
 	Ok(Edited { bytes: res!(zip.write()), cells, sheets: touched })
 }
 
 /// Puts every cell of one sheet where it belongs, as splices into the part's own bytes.
-fn write_cells(xml: &mut Xml, sets: &[&Set]) -> Outcome<()> {
+///
+/// The answer says whether a cell that held an `<f>` was replaced by one that does not, which the
+/// caller needs because it is the other half of what makes `xl/calcChain.xml` wrong.
+fn write_cells(xml: &mut Xml, sets: &[&Set]) -> Outcome<bool> {
 	let root = res!(xml.root()).clone();
 	let data = res!(root.child("sheetData").cloned().ok_or_else(|| err!(
 		"This sheet has no <sheetData>, so it is not a worksheet."; Invalid, Input, Missing)));
@@ -185,6 +198,7 @@ fn write_cells(xml: &mut Xml, sets: &[&Set]) -> Outcome<()> {
 	}
 
 	let mut splices: Vec<(Span, String)> = Vec::new();
+	let mut razed = false;
 	for (at_row, group) in &by_row {
 		let row = rows.iter().find(|r| {
 			r.attr("r").and_then(|v| v.parse::<u32>().ok()) == Some(at_row + 1)
@@ -235,8 +249,12 @@ fn write_cells(xml: &mut Xml, sets: &[&Set]) -> Outcome<()> {
 			match existing {
 				// The style stays on the cell. It is the user's formatting, and a value written over
 				// a number with a currency format is still money.
-				Some(c)	=> splices.push((
-					c.span.clone(), cell_markup(&set.at, c.attr("s"), set))),
+				Some(c)	=> {
+					// The whole `<c>` is replaced, so a formula on the old one is gone unless the
+					// new one carries its own. This is the only place a formula can be destroyed.
+					razed = razed || (c.child("f").is_some() && set.formula.is_none());
+					splices.push((c.span.clone(), cell_markup(&set.at, c.attr("s"), set)));
+				}
 				None		=> {
 					let after = cells.iter().find(|c| {
 						c.attr("r").and_then(|a| Ref::parse(a).ok())
@@ -262,7 +280,7 @@ fn write_cells(xml: &mut Xml, sets: &[&Set]) -> Outcome<()> {
 	for (span, text) in splices {
 		res!(xml.splice(span, text));
 	}
-	Ok(())
+	Ok(razed)
 }
 
 /// The `<dimension>`'s new `ref` value, where a cell was written outside the rectangle it claims.

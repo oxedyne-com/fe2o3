@@ -18,7 +18,10 @@ use oxedyne_fe2o3_file::office::sheet::{
 	typed,
 };
 use oxedyne_fe2o3_file::office::xlsx;
-use oxedyne_fe2o3_file::zip::Zip;
+use oxedyne_fe2o3_file::zip::{
+	Method,
+	Zip,
+};
 
 use oxedyne_fe2o3_core::{
 	prelude::*,
@@ -34,6 +37,52 @@ const ODT: &[u8] = include_bytes!("data/foreign.odt");
 const XLSX: &[u8] = include_bytes!("data/foreign.xlsx");
 // The same spreadsheet as an `.ods`, where the empty row is one repeated cell.
 const ODS: &[u8] = include_bytes!("data/foreign.ods");
+
+// The chain a real Excel would have written for sheet 1 of `foreign.xlsx`: the five cells that hold
+// an `<f>`, the two products first, the boolean pair next, and the SUM that depends on the products
+// last.
+const CHAIN: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n\
+	<calcChain xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">\
+	<c r=\"D2\" i=\"1\"/><c r=\"D3\"/><c r=\"F2\"/><c r=\"F3\"/><c r=\"D5\" l=\"1\"/></calcChain>";
+
+const CT_CHAIN: &str =
+	"application/vnd.openxmlformats-officedocument.spreadsheetml.calcChain+xml";
+const REL_CHAIN: &str =
+	"http://schemas.openxmlformats.org/officeDocument/2006/relationships/calcChain";
+
+/// `foreign.xlsx` with a calculation chain grafted on, which is the ONLY way this code path gets
+/// exercised at all.
+///
+/// **LibreOffice does not write `xl/calcChain.xml`**, so every `.xlsx` fixture on the machine lacked
+/// one and `drop_calc_chain` had never once had a chain to drop -- a removal proved by never being
+/// invoked. The chain is grafted rather than invented so the workbook around it stays a real reader's
+/// output and the only novel bytes are the part under test. All THREE declarations go in; a chain
+/// declared in two places out of three would be a broken package testing the wrong thing.
+fn with_chain() -> Outcome<Vec<u8>> {
+	let mut zip = res!(Zip::read(XLSX.to_vec()));
+	zip.set("xl/calcChain.xml", CHAIN.as_bytes().to_vec(), Method::Deflate);
+	let types = res!(zip.text("[Content_Types].xml"));
+	let over = fmt!("<Override PartName=\"/xl/calcChain.xml\" ContentType=\"{}\"/></Types>", CT_CHAIN);
+	let types = res!(types.rsplit_once("</Types>").ok_or_else(|| err!(
+		"The fixture's [Content_Types].xml has no </Types>."; Test, Invalid))).0.to_string() + &over;
+	zip.set("[Content_Types].xml", types.into_bytes(), Method::Deflate);
+	let rels = res!(zip.text("xl/_rels/workbook.xml.rels"));
+	let one = fmt!(
+		"<Relationship Id=\"rId9\" Type=\"{}\" Target=\"calcChain.xml\"/></Relationships>", REL_CHAIN);
+	let rels = res!(rels.rsplit_once("</Relationships>").ok_or_else(|| err!(
+		"The fixture's workbook rels has no </Relationships>."; Test, Invalid))).0.to_string() + &one;
+	zip.set("xl/_rels/workbook.xml.rels", rels.into_bytes(), Method::Deflate);
+	zip.write()
+}
+
+/// The three places a calculation chain is declared, as this package has them.
+fn chain_state(bytes: &[u8]) -> Outcome<(bool, bool, bool)> {
+	let zip = res!(Zip::read(bytes.to_vec()));
+	let part = zip.has("xl/calcChain.xml");
+	let over = res!(zip.text("[Content_Types].xml")).contains("calcChain.xml");
+	let rel = res!(zip.text("xl/_rels/workbook.xml.rels")).contains("calcChain.xml");
+	Ok((part, over, rel))
+}
 
 /// Which members differ between two packages, and which are missing from the second.
 ///
@@ -325,6 +374,77 @@ pub fn test_edit(filter: &'static str) -> Outcome<()> {
 		let moved = res!(differs(XLSX, &out.bytes));
 		assert!(moved.iter().all(|n| n.contains("sheet")),
 			"a cell edit rewrote parts of the package it had no business in: {:?}", moved);
+		Ok(())
+	}));
+
+	res!(test_it(filter, &["A calculation chain goes when a formula is DESTROYED 095", "all", "edit"], || {
+		// FIRST that the fixture has a chain at all, because every assertion below is about a part
+		// being removed and a fixture without one would pass all of them by having nothing to remove.
+		let src = res!(with_chain());
+		assert_eq!(res!(chain_state(&src)), (true, true, true),
+			"the grafted fixture has no chain, so nothing below is testing anything");
+
+		// A formula WRITTEN, which is the case the module always covered.
+		let out = res!(xlsx::edit::edit(&src, &[xlsx::edit::Set {
+			sheet:	None,
+			at:	res!(Ref::parse("D6")),
+			value:	None,
+			formula:	Some("B2+B3".to_string()),
+		}]));
+		assert_eq!(res!(chain_state(&out.bytes)), (false, false, false),
+			"a written formula left the chain, or one of its two declarations, behind");
+
+		// A plain value over a cell that HELD a formula, which is the case it did not. D2 holds
+		// `<f>B2*C2</f>` and the chain names it; ECMA-376 §18.6.1 says a `c` in the chain "shall
+		// contain a formula", so a chain that survives this edit is a SPEC VIOLATION and not a stale
+		// hint. There is no formula anywhere in the call.
+		let out = res!(xlsx::edit::edit(&src, &[xlsx::edit::Set {
+			sheet:	None,
+			at:	res!(Ref::parse("D2")),
+			value:	Some("999".to_string()),
+			formula:	None,
+		}]));
+		assert_eq!(res!(chain_state(&out.bytes)), (false, false, false),
+			"a plain value written over a formula cell left the chain naming a cell with no <f>");
+		let book = res!(xlsx::read(&out.bytes)).book;
+		let cell = res!(book.sheets.first().ok_or_else(|| err!("no sheets"; Missing)))
+			.at(&res!(Ref::parse("D2")));
+		assert!(cell.formula.is_none(),
+			"D2 kept its formula, so the premise of this test is wrong: {:?}", cell);
+
+		// EMPTYING a formula cell destroys the formula just as thoroughly, and by a different route
+		// through `cell_markup` -- the element comes out `<c r="D2"/>` with no body at all.
+		let out = res!(xlsx::edit::edit(&src, &[xlsx::edit::Set {
+			sheet:	None,
+			at:	res!(Ref::parse("D3")),
+			value:	Some(String::new()),
+			formula:	None,
+		}]));
+		assert_eq!(res!(chain_state(&out.bytes)), (false, false, false),
+			"emptying a formula cell left the chain naming it");
+
+		// AND IT REDDENS ONLY WHAT IT SHOULD. B2 holds a plain 120 and no `<f>`, so the chain is still
+		// true after writing over it and dropping it would be a needless rewrite of somebody else's
+		// bytes. A flag that fired here would be "drop it always" wearing a narrower name.
+		let out = res!(xlsx::edit::edit(&src, &[xlsx::edit::Set {
+			sheet:	None,
+			at:	res!(Ref::parse("B2")),
+			value:	Some("999".to_string()),
+			formula:	None,
+		}]));
+		assert_eq!(res!(chain_state(&out.bytes)), (true, true, true),
+			"the chain was dropped for a plain write over a plain cell, which breaks nothing");
+
+		// A formula written OVER a formula: destroyed and replaced, so the chain still goes -- but for
+		// the writing and not the razing, and the cell still has an `<f>` afterwards.
+		let out = res!(xlsx::edit::edit(&src, &[xlsx::edit::Set {
+			sheet:	None,
+			at:	res!(Ref::parse("D5")),
+			value:	None,
+			formula:	Some("SUM(D2:D4)".to_string()),
+		}]));
+		assert_eq!(res!(chain_state(&out.bytes)), (false, false, false),
+			"a formula written over a formula left the chain behind");
 		Ok(())
 	}));
 
