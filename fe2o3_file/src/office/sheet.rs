@@ -23,6 +23,10 @@
 //! nothing is served by pretending otherwise at the boundary.
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_text::doc::{
+	Block,
+	Doc,
+};
 
 /// The largest column a sheet may have: `XFD`, which is Excel's own limit of 16,384.
 pub const MAX_COL: u32 = 16_384;
@@ -349,4 +353,113 @@ pub fn col_name(col: u32) -> String {
 	}
 	out.reverse();
 	String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The value a typed string stands for, the way a spreadsheet decides it.
+///
+/// This is the rule a person meets when they type into a cell, and it has one subtlety worth stating:
+/// a string is a number only where it is EXACTLY how that number prints. `007` and `1,000` and `+3`
+/// and ` 4 ` therefore stay text, which is what a person typing a part number or an account code
+/// wants, and `3.5` becomes 3.5, which is what a person typing a price wants. A rule that parsed
+/// anything parseable would silently turn `007` into `7`.
+pub fn typed(s: &str) -> Value {
+	if s.is_empty() {
+		return Value::Empty;
+	}
+	if s.eq_ignore_ascii_case("true") {
+		return Value::Bool(true);
+	}
+	if s.eq_ignore_ascii_case("false") {
+		return Value::Bool(false);
+	}
+	match s.parse::<f64>() {
+		Ok(n) if n.is_finite() && stored(n) == s	=> Value::Number(n),
+		_					=> Value::Text(s.to_string()),
+	}
+}
+
+/// A number as a file stores it, which is not how a person reads it.
+///
+/// The shortest text that reads back as the same `f64`, so nothing the caller handed over is lost.
+/// [`Value::show`] is what a person sees, and it rounds; this does not.
+pub fn stored(n: f64) -> String {
+	if !n.is_finite() {
+		return "0".to_string();
+	}
+	if n == n.trunc() && n.abs() < 1e15 {
+		return fmt!("{}", n as i64);
+	}
+	fmt!("{}", n)
+}
+
+impl Book {
+
+	/// The workbook a document's tables make: one sheet per table, named by the heading above it.
+	///
+	/// The counterpart of [`crate::office::deck::Deck::from_doc`] and the same bargain. A model writes
+	/// Markdown well and a file format badly, so the way to have it produce a spreadsheet is to have it
+	/// produce a table; the conversion from there is code that cannot get the format wrong.
+	///
+	/// A cell's text becomes a number where it is exactly how that number prints -- see [`typed`], which
+	/// is what stops a column of part numbers being renumbered. A cell beginning `=` becomes a formula
+	/// with no value beside it, because nothing here calculates and the reader will.
+	///
+	/// A document with no table in it gives a workbook with one empty sheet, not an error: an empty
+	/// spreadsheet is a spreadsheet.
+	pub fn from_doc(doc: &Doc) -> Self {
+		let mut out = Self::new();
+		let mut title: Option<String> = None;
+		for block in &doc.blocks {
+			match block {
+				Block::Heading { content, .. }	=> title = Some(oxedyne_fe2o3_text::doc::text_of(content)),
+				Block::Table { head, rows, .. }	=> {
+					let name = match title.take() {
+						Some(t) if !t.trim().is_empty()	=> tab_name(&t),
+						_				=> fmt!("Sheet{}", out.sheets.len() + 1),
+					};
+					let mut sheet = Sheet::new(name);
+					// The header row is a row of the sheet and not a property of it. A spreadsheet has
+					// no header row; it has a first row that people read as one.
+					for row in head.iter().chain(rows.iter()) {
+						sheet.rows.push(row.0.iter().map(|c| from_text(&c.text_of())).collect());
+					}
+					out.sheets.push(sheet);
+				}
+				_	=> {}
+			}
+		}
+		if out.sheets.is_empty() {
+			out.sheets.push(Sheet::new("Sheet1"));
+		}
+		out
+	}
+}
+
+/// The cell a run of text stands for, a leading `=` making it a formula.
+fn from_text(s: &str) -> Cell {
+	let s = s.trim();
+	match s.strip_prefix('=') {
+		Some(f) if !f.is_empty()	=> Cell { value: Value::Empty, formula: Some(f.to_string()) },
+		_			=> Cell { value: typed(s), formula: None },
+	}
+}
+
+/// A heading as a name a tab can wear.
+///
+/// Excel refuses `: \ / ? * [ ]` in a sheet name and refuses one over 31 characters, and it refuses the
+/// whole FILE rather than the name -- so a workbook built from a document whose heading held a colon
+/// would not open at all.
+fn tab_name(s: &str) -> String {
+	let cleaned: String = s.trim()
+		.chars()
+		.map(|c| match c {
+			':' | '\\' | '/' | '?' | '*' | '[' | ']'	=> ' ',
+			c						=> c,
+		})
+		.collect();
+	let cleaned = cleaned.trim();
+	match cleaned.chars().count() > 31 {
+		false	=> cleaned.to_string(),
+		true	=> cleaned.chars().take(31).collect(),
+	}
 }
