@@ -1,5 +1,6 @@
 mod exif;
 mod glob;
+mod odf;
 mod office;
 mod tree;
 mod pptx;
@@ -37,6 +38,7 @@ fn run_tests() -> Outcome<()> {
     res!(office::test_office(filter));
     res!(xlsx::test_xlsx(filter));
     res!(pptx::test_pptx(filter));
+    res!(odf::test_odf(filter));
 
     Ok(())
 }

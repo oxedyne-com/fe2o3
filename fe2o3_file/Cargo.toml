@@ -24,3 +24,7 @@ oxedyne_fe2o3_text 		   	= { path = "../fe2o3_text" }
 flate2 					= "1.0"
 
 [dev-dependencies]
+# `Media`, so the tests can check that an OpenDocument package is named from its own opening bytes
+# rather than from what somebody called the file.  A dev-dependency: nothing in the crate itself
+# needs to identify a format.
+oxedyne_fe2o3_stds 		   	= { path = "../fe2o3_stds" }
