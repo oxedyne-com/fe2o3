@@ -36,19 +36,6 @@ use std::{
     },
 };
 
-/// Run the combined rate-limit + handshake-sequence check for an incoming SHIELD packet.
-///
-/// Returns `true` if the packet must be dropped. The generic guard decides on rate-limit
-/// and blacklist grounds; this function adds the SHIELD-specific constraint that the first
-/// packet from a new address must be an `HReq1` and that subsequent packets must follow the
-/// recorded handshake sequence within `hreq_exp`.
-///
-/// Every packet goes through the rate limiter, whatever its message type. A packet that is
-/// not part of the handshake sequence -- an application payload, say -- has no sequence to
-/// be checked against, and skipping the sequence check is not the same as skipping the
-/// guard: an address that floods a peer with payloads is an address the guard exists for.
-/// It is also what creates the address log the proof-of-work difficulty is read from a few
-/// lines later, so a packet type that bypassed the guard could not be validated at all.
 pub fn drop_packet<
     const C: usize,
     M: MapMut<HashForm, AddressLog<N, AddressData>> + Clone + Debug,

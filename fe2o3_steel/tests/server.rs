@@ -42,13 +42,6 @@ use std::{
 };
 
 
-/// Minimal smoke test exercising the multi-vhost server bring-up path.
-///
-/// Spins up a single-vhost `Protocol::Web` with an empty webroot and no
-/// redirect rules, just to verify that the refactored `ServerContext` and
-/// `Server::start()` path compile and accept a start call under the current
-/// API. This is a compile-time regression guard; end-to-end behaviour is
-/// verified separately against a live deployment.
 pub async fn test_server(filter: &'static str) -> Outcome<()> {
 
     match filter {

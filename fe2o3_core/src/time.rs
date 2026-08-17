@@ -39,9 +39,6 @@ pub fn wait_for_true(
     }
 }
 
-/// Blocking-wait shim for `wasm32`, where a browser thread cannot sleep.  There
-/// is no cooperative point at which the given function could become true, so the
-/// call returns an error rather than spinning the single event-loop thread.
 #[cfg(target_arch = "wasm32")]
 pub fn wait_for_true(
     _check_interval: Duration,
@@ -59,8 +56,6 @@ pub fn wait_for_true(
 /// A simple system clock stopwatch.
 #[derive(Debug, PartialEq, Copy, Clone)]
 pub struct Timer {
-    /// Start reference: an `Instant` natively, or a `Date.now()` millisecond
-    /// reading (`f64`) on wasm where no monotonic clock exists.
     #[cfg(not(target_arch = "wasm32"))]
     t0:     Instant,
     #[cfg(target_arch = "wasm32")]
@@ -77,7 +72,6 @@ impl Timer {
         }
     }
 
-    /// Wasm constructor using the `Date.now()` millisecond clock.
     #[cfg(target_arch = "wasm32")]
     pub fn new() -> Self {
         Self {
@@ -92,7 +86,6 @@ impl Timer {
         self.last = 0;
     }
 
-    /// Wasm reset using the `Date.now()` millisecond clock.
     #[cfg(target_arch = "wasm32")]
     pub fn reset(&mut self) {
         self.t0 = crate::wasm::now_ms();
@@ -105,7 +98,6 @@ impl Timer {
         Ok(self.last)
     }
 
-    /// Wasm split, deriving microseconds from the `Date.now()` millisecond clock.
     #[cfg(target_arch = "wasm32")]
     pub fn split_micros(&mut self) -> Outcome<usize> {
         let elapsed = ((crate::wasm::now_ms() - self.t0) * 1_000.0) as usize;

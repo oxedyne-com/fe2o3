@@ -85,12 +85,6 @@ pub struct AppStatus {
     pub web:    State,
 }
 
-/// Start the Steel application with no app extension.
-///
-/// This is the entry point for the stock `steel` binary. Apps that
-/// need custom webhook handlers, API handlers or shell commands
-/// should implement `AppExtension` and call [`run_with_extension`]
-/// instead.
 pub fn run() -> Outcome<()> {
     run_with_extension(NoExtension)
 }
@@ -464,20 +458,6 @@ pub fn run_with_extension<E: AppExtension>(extension: E) -> Outcome<()> {
 }
 
 
-/// One-shot migration of a legacy (pre-admin-user) wallet file to
-/// the new multi-admin layout.
-///
-/// Called by the `wallet --migrate` bootstrap bypass in [`run`],
-/// before the normal wallet unlock step. Reads the existing wallet
-/// file as raw `Dat`, pulls the legacy `wallet_pass_hashes` (for
-/// passphrase verification) and `app_hashes.default.kdf_cfg` (for
-/// deriving the database encryption key) out of it, verifies the
-/// passphrase, derives the current database encryption key -- which
-/// becomes the new wallet's master key `K` unchanged, so no Ozone
-/// re-encryption is required -- and rewrites the wallet with a
-/// single admin entry named "operator" (override via prompt)
-/// wrapping the same `K`. The old wallet file is preserved as
-/// `wallet.jdat.pre-admins` for rollback.
 fn migrate_legacy_wallet_inline(_cfg: &AppConfig) -> Outcome<()> {
     use std::io::Write;
     use oxedyne_fe2o3_core::mem::Extract;

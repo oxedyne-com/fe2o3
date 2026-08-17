@@ -148,25 +148,9 @@ pub struct O3db<
     closing:    Arc<Mutex<Closing>>,
 }
 
-/// What one shutdown of a database needs to know, shared by every handle to it.
-///
-/// `O3db` is `Clone`, and both fields here are the reason this sits behind an
-/// `Arc` rather than in the struct itself:
-///
-/// - A `WaitGroup` counts its clones, and `WaitGroup::wait` blocks until every
-///   *other* clone has been dropped. A copy per database handle therefore makes
-///   a shutdown wait for handles that are still alive and never returns. Exactly
-///   one clone lives here, however many handles share it, so the wait answers
-///   the question it was meant to: have the bot threads ended?
-/// - Two threads may both notice that the program has been asked to stop. The
-///   second must not send a second shutdown request to a supervisor that has
-///   already gone, so what has been done is recorded where both can see it.
 #[derive(Debug)]
 struct Closing {
-    /// The wait group the bot threads hold the other end of, taken by whichever
-    /// shutdown gets there first and waited on exactly once.
     wg:     Option<WaitGroup>,
-    /// Whether the supervisor has already been asked to stop, and answered.
     done:   bool,
 }
 
@@ -278,12 +262,6 @@ impl<
         Self::drain(&self.chan_inbox, &ozid, &mut self.api.chans, &mut self.api.cfg)
     }
 
-    /// The body of [`Self::update`], over whichever channel set and
-    /// configuration the caller offers.
-    ///
-    /// Split out so that [`Self::close`], which takes `&self` and therefore
-    /// cannot write anything back into the handle, still finds the latest
-    /// supervisor channel to send its shutdown request down.
     fn drain(
         inbox:  &Simplex<OzoneMsg<UIDL, UID, ENC, KH>>,
         ozid:   &OzoneBotId,
@@ -444,24 +422,6 @@ impl<
         self.close()
     }
 
-    /// Gracefully shut down the database, including the supervisor, through a
-    /// shared handle.
-    ///
-    /// **Closing twice is safe.** The first call stops the supervisor and waits
-    /// for every bot thread to end; any call after it returns `Ok(())` at once,
-    /// having done nothing, and a call arriving while the first is still working
-    /// waits for it and then returns the same way. Two threads noticing at the
-    /// same moment that the program has been asked to stop is the ordinary case,
-    /// not a mistake, and neither of them should have to find out whether it was
-    /// first.
-    ///
-    /// `&self` rather than `self` because `O3db` is `Clone` and the thing worth
-    /// closing is usually shared. A consuming shutdown cannot be reached through
-    /// an `Arc` that a scanner and a worker thread both hold, and
-    /// `Arc::try_unwrap` on a live handle never succeeds; and a shutdown called
-    /// on one clone of a database used to wait for its own siblings to be
-    /// dropped, which never happened either. See `Closing` for why the wait
-    /// group now lives behind one shared lock.
     pub fn close(&self) -> Outcome<()> {
         // Held for the whole of the shutdown, so that a second caller waits
         // here and finds the work already done rather than doing it again.

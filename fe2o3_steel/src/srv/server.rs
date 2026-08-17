@@ -57,32 +57,11 @@ use std::{
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
-/// Interval between dashboard-state persistence writes. A restart or
-/// crash can lose at most one tick's worth of derived history, which is
-/// a reasonable trade-off against ozone write load.
 pub const PERSIST_INTERVAL_SECS: u64 = 60;
 
-/// How long a stopping server waits for connections already in flight
-/// before it closes its stores anyway.
-///
-/// A response being written, a file being read off disk and a proxied
-/// request all finish in milliseconds, so this is generous for what it
-/// is for. It is a bound rather than a wait because a connection is
-/// counted for as long as it is *open*, not only while it is being
-/// answered, and plenty of open connections are not waiting on the
-/// server at all: an idle keep-alive sits there until its header read
-/// times out, which is longer than this, and a WebSocket sits there
-/// until the browser tab holding it closes, which could be tomorrow. A
-/// busy server will therefore usually wait the whole five seconds, and
-/// that is the price of not cutting off the one connection in the set
-/// that was mid-answer. Five seconds is also comfortably inside a
-/// service manager's own patience -- systemd's default `TimeoutStopSec`
-/// is ninety -- so it is never this wait that turns a stop into a
-/// `SIGKILL`.
 pub const DRAIN_SECS: u64 = 5;
 
 
-/// The Steel TCP/TLS server, wrapping a `ServerContext`.
 pub struct Server<
     const UIDL: usize,
     UID:    NumIdDat<UIDL> + 'static,
@@ -106,7 +85,6 @@ impl<
 >
     Server<UIDL, UID, ENC, KH, DB, WH, WSH>
 {
-    /// Construct a new server from a pre-built context.
     pub fn new(
         context: ServerContext<UIDL, UID, ENC, KH, DB, WH, WSH>,
     )
@@ -115,9 +93,6 @@ impl<
         Self { context }
     }
 
-    /// Resolve the database handle associated with the primary vhost.
-    /// Used by admin-state persistence to settle on a single database
-    /// for dashboard-wide state without a second configuration knob.
     fn primary_db_handle(&self) -> Option<(Arc<std::sync::RwLock<DB>>, UID)> {
         let default_vhost = match &self.context.protocol {
             Protocol::Web { default_vhost, .. } => default_vhost.clone(),
@@ -125,9 +100,6 @@ impl<
         self.context.db_for_vhost(&default_vhost)
     }
 
-    /// Bind the configured address and port, perform TLS + vhost dispatch
-    /// in an accept loop, and hand each accepted connection off to the
-    /// `handle_https` method on a fresh Tokio task.
     pub async fn start(&self) -> Outcome<()> {
 
         let dev_mode = match &self.context.protocol {
@@ -516,11 +488,6 @@ impl<
 }
 
 
-/// Build and spawn the SMTP and IMAP listeners + outbound worker.
-///
-/// Resolves every relative path under the steel app root, opens (or
-/// generates) the DKIM key, and binds three TCP listeners that share
-/// the same TLS acceptor as the HTTPS server.
 async fn spawn_mail_listeners(
     cfg:            &MailConfig,
     root:           &oxedyne_fe2o3_core::path::NormPathBuf,
@@ -650,16 +617,6 @@ async fn spawn_mail_listeners(
     Ok(())
 }
 
-/// Load the DKIM signing identities named in a `MailConfig`.
-///
-/// Shared by the mail listeners and by the operator alerter, so an alert is
-/// signed with the same keys as everything else the domain sends.
-///
-/// RFC 8463 says a signer SHOULD publish and sign with both an ed25519 and an
-/// RSA key. The reason is practical: ed25519 verification is still patchy in
-/// the wild, and a receiver that cannot verify a signature sees an *unsigned*
-/// message, leaving DMARC to rest on SPF alone. Two signatures cost a few
-/// hundred bytes and let each receiver take whichever it understands.
 pub fn load_dkim_signers(
     cfg:    &MailConfig,
     root:   &oxedyne_fe2o3_core::path::NormPathBuf,

@@ -74,17 +74,12 @@ impl ZoneDir {
         result
     }
     
-    /// Returns the path, relative to the zone directory, of the temporary file written
-    /// while the given file's garbage is collected.
     pub fn relative_gc_temp_path(typ: &FileType, n: FileNum) -> PathBuf {
         let mut result = PathBuf::from(constant::GC_TEMP_FILE_PREFIX);
         result.set_extension(Self::relative_file_path(typ, n));
         result
     }
 
-    /// Returns whether the path names a garbage collection temporary.  Such a file is an
-    /// abandoned transcription left by a collection that did not finish; the data file it
-    /// was copied from is untouched, so the temporary can simply be removed.
     pub fn is_gc_temp_file(p: &Path) -> bool {
         match p.file_name().and_then(|s| s.to_str()) {
             Some(name) => name.starts_with(constant::GC_TEMP_FILE_PREFIX),
@@ -106,25 +101,6 @@ impl ZoneDir {
         Ok((path, file))
     }
     
-    /// Claims a file number for this writer, by creating its files rather than by
-    /// asking whether they exist.
-    ///
-    /// Returns whether the claim was won. Creation is attempted with `create_new`,
-    /// which is one atomic operation, so of two writers racing for a number
-    /// exactly one succeeds and the loser is told at once rather than discovering
-    /// it by writing into somebody else's file.
-    ///
-    /// A writer is handed its own live pair by `ZoneBot::survey_files` and is the
-    /// only bot appending to it, which is what the cached length in [`LiveFile`]
-    /// rests on: a length read when a file is opened stays true only while nobody
-    /// else adds to it. Claiming rather than counting is what keeps that true
-    /// however the number was arrived at, and what makes a zone written by two
-    /// processes safe, each having seeded its counter from the same disk.
-    ///
-    /// The data file is claimed first and the index second. A number whose data
-    /// file was won and whose index was not is abandoned rather than used, and the
-    /// data file is left behind: an empty file is inert, and removing one this
-    /// process may not own is worse than leaving it.
     pub fn claim(&self, fnum: FileNum)
         -> Outcome<bool>
     {
@@ -246,7 +222,6 @@ impl ZoneDir {
 mod tests {
     use super::*;
 
-    /// Returns a zone directory of its own for one test.
     fn scratch(what: &str)
         -> Outcome<ZoneDir>
     {
@@ -257,13 +232,6 @@ mod tests {
         Ok(ZoneDir { dir, max_size: 0 })
     }
 
-    /// A file number goes to exactly one claimant.
-    ///
-    /// This is the whole of what makes a writer the sole appender to its own
-    /// live file, and therefore the whole of what makes the length it caches
-    /// when it opens that file stay true. Without it two writers place records
-    /// at offsets each predicted from its own cache, and the index entries name
-    /// positions inside each other's records.
     #[test]
     fn a_file_number_is_claimed_by_one_writer_only() -> Outcome<()> {
         let zdir = res!(scratch("one"));
@@ -275,8 +243,6 @@ mod tests {
         Ok(())
     }
 
-    /// A claim leaves both of the pair behind, so that neither half of a number
-    /// can be taken by somebody else afterwards.
     #[test]
     fn a_claim_takes_the_data_file_and_the_index_together() -> Outcome<()> {
         let zdir = res!(scratch("pair"));
@@ -290,8 +256,6 @@ mod tests {
         Ok(())
     }
 
-    /// A number whose data file exists is refused even where its index does not,
-    /// which is the state a claim abandoned partway through leaves.
     #[test]
     fn half_a_pair_is_enough_to_refuse_a_number() -> Outcome<()> {
         let zdir = res!(scratch("half"));

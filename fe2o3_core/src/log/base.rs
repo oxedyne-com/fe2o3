@@ -68,10 +68,6 @@ impl<ETAG: GenTag> Logger<ETAG>
         }
     }
 
-    /// On wasm there is no logging thread to drain the channel, so the message
-    /// is level-filtered, formatted and emitted to the browser console
-    /// synchronously.  Non-`Log` control messages (finish, update, stream
-    /// management) have no effect in this single-threaded path.
     #[cfg(target_arch = "wasm32")]
     pub fn send_in(&self, msg: Msg<ETAG>) {
         if let Msg::Log { level, src, erropt, msg, stream: _ } = msg {
@@ -153,12 +149,6 @@ pub static LOG: Lazy<Logger<ErrTag>> = Lazy::new(|| {
     }
 });
 
-/// The browser build runs on a single thread: no `LogBot` thread and no console
-/// thread are spawned (real wasm threads need `SharedArrayBuffer` with COOP/COEP
-/// headers, which we avoid).  Messages are formatted and emitted straight to the
-/// JavaScript console in [`Logger::send_in`].  The channels below exist only to
-/// satisfy the shared `Logger` type and the configuration macros; nothing drains
-/// them.
 #[cfg(target_arch = "wasm32")]
 pub static LOG: Lazy<Logger<ErrTag>> = Lazy::new(|| {
     let console_chan = simplex::<Msg<ErrTag>>();

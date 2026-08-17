@@ -59,7 +59,6 @@ pub trait WorkerBot<
     fn igbots(&self) -> Outcome<ChannelPool<UIDL, UID, ENC, KH>> {
         self.chans().get_workers_of_type_in_zone(&WorkerType::InitGarbage, self.wind().zind())
     }
-    /// Returns the scan-bot channel pool for this bot's zone.
     fn scbots(&self) -> Outcome<ChannelPool<UIDL, UID, ENC, KH>> {
         self.chans().get_workers_of_type_in_zone(&WorkerType::Scan, self.wind().zind())
     }
@@ -82,15 +81,6 @@ pub enum WorkerType {
     File,
     InitGarbage,
     Reader,
-    /// Walks the zone's index files to answer scans.
-    ///
-    /// Scanning has a pool of its own because it is the only user
-    /// request whose cost is the whole zone rather than one record. On
-    /// the collector's queue it waited for background work and died at
-    /// the request deadline; on the reader's queue it would have made
-    /// every `get` behind it wait for a walk of the zone instead. A
-    /// queue that carries nothing but whole-zone reads keeps each kind
-    /// of work clear of the others.
     Scan,
     Writer,
 }

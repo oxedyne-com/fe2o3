@@ -84,23 +84,12 @@ pub const MSG_TYPE_BYTE_LEN:                usize = mem::size_of::<MsgType>();
 // Discriminants below `MSG_TYPE_USER_START` belong to the protocol. Two of them
 // carry a library user's own bytes, which the protocol chunks, proofs, signs
 // and reassembles without reading.
-/// Message type carrying an opaque application payload sent to a peer.
 pub const MSG_TYPE_APP_REQUEST:             MsgType = 1_024;
-/// Message type carrying the answer to an application payload, under the
-/// message identifier that asked for it.
 pub const MSG_TYPE_APP_REPLY:               MsgType = 1_025;
-/// First message type a library user may define for messages of their own.
-/// Everything below it is the protocol's.
 pub const MSG_TYPE_USER_START:              MsgType = 2_048;
-/// Syntax command name carrying an application request.
 pub const MSG_CMD_APP_REQUEST:              &'static str = "app";
-/// Syntax command name carrying an application reply.
 pub const MSG_CMD_APP_REPLY:                &'static str = "appr";
-/// Default time a peer waits for the answer to a request before giving up.
 pub const APP_REPLY_WAIT:                   Duration = Duration::from_secs(20);
-/// Least number of proof-of-work zero bits a peer will put into its own
-/// packets. The search refuses to run for zero, so a peer that asks for none
-/// still does one bit's worth.
 pub const POW_TX_MIN_ZERO_BITS:             u16 = 1;
 
 pub const SERVER_INT_CHANNEL_CHECK_INTERVAL:    Duration = Duration::from_nanos(1_000);

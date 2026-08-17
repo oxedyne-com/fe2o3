@@ -50,7 +50,6 @@ pub struct AppLoggerConsole<ETAG: GenTag>
 impl<ETAG: GenTag + fmt::Debug + Send + Sync + 'static> AppLoggerConsole<ETAG>
     where oxedyne_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
-    /// Creates a new app logger console sharing the supplied app log buffer.
     pub fn new(
         app_log: Arc<RwLock<TextLines<TextType, HighlightType>>>,
     )
@@ -62,7 +61,6 @@ impl<ETAG: GenTag + fmt::Debug + Send + Sync + 'static> AppLoggerConsole<ETAG>
         }
     }
 
-    /// Spawns the listener thread and returns a controller that owns its channel and handle.
     pub fn go(&mut self) -> ThreadController<Msg<ETAG>> {
         // Logger console thread.  Listens for messages from the LogBot.
         let (semaphore, _sentinel) = thread_channel();
@@ -79,7 +77,6 @@ impl<ETAG: GenTag + fmt::Debug + Send + Sync + 'static> AppLoggerConsole<ETAG>
         )
     }
 
-    /// Drains the log channel, appending each message to the shared app log.
     pub fn listen(&self) {
         while let Ok(msg) = self.log_chan.recv() {
             match msg {
@@ -110,7 +107,6 @@ impl<ETAG: GenTag + fmt::Debug + Send + Sync + 'static> AppLoggerConsole<ETAG>
         }
     }
 
-    /// Appends a pre-formatted line to the shared app log, or reports a lock failure via `msg!`.
     fn append_to_log(&self, line: String) {
         match self.app_log.write() {
             Ok(mut unlocked) => {

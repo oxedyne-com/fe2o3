@@ -41,7 +41,6 @@ pub enum PoolType {
     File,
     InitGarbage,
     Reader,
-    /// Scan-bot pool.
     Scan,
     Writer,
     Zone,

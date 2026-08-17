@@ -72,41 +72,19 @@ use tokio::io::{
 // │ serve that specific site: handlers, hostnames for validation, redirects.  │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Runtime data for a single virtual host.
-///
-/// Instances are built once at startup from `VhostConfig` entries and stored
-/// in `Protocol::Web::vhosts`, keyed by every alias hostname.
 #[derive(Clone, Debug)]
 pub struct VhostRuntime<
     WH:     WebHandler,
     WSH:    WebSocketHandler,
 > {
-    /// All hostnames this vhost answers to. The first is the canonical one.
     pub hostnames:      Vec<String>,
-    /// Static file request handler for this vhost.
     pub web_handler:    WH,
-    /// WebSocket request handler (may be shared across vhosts in practice).
     pub ws_handler:     WSH,
-    /// WebSocket protocol syntax.
     pub ws_syntax:      SyntaxRef,
-    /// Ordered redirect rules evaluated before the static file router.
     pub redirects:      Vec<RedirectRule>,
-    /// Reverse-proxy routes, checked after redirects but before static
-    /// files.  Longest matching prefix wins.
     pub proxy_routes:   Vec<ProxyRoute>,
-    /// WebSocket routes, checked before proxy routes and only for a
-    /// request that is an upgrade. Each claims one exact path.
     pub ws_routes:      Vec<WsRoute>,
-    /// Terminal session manager, when terminal features are enabled
-    /// for this vhost.  `None` disables term_* commands and the
-    /// /term/<session> WS endpoint.
     pub term_manager:   Option<Arc<crate::srv::ws::term::TerminalManager>>,
-    /// Whether this vhost has anywhere to keep a session, which is to say
-    /// whether it was configured with a database. Taken from
-    /// [`VhostConfig::uses_sessions`](crate::srv::cfg::VhostConfig::uses_sessions)
-    /// at start-up. A vhost that answers `false` issues no anonymous session
-    /// cookie, because a session identifier is a key prefix into a database it
-    /// does not have.
     pub uses_sessions:  bool,
 }
 
@@ -116,13 +94,10 @@ impl<
 >
     VhostRuntime<WH, WSH>
 {
-    /// Returns the canonical (primary) hostname of this vhost.
     pub fn primary_hostname(&self) -> &str {
         self.hostnames.first().map(|s| s.as_str()).unwrap_or("")
     }
 
-    /// Returns `true` if `host` matches any hostname registered for this vhost.
-    /// Comparison is case-insensitive.
     pub fn accepts_host(&self, host: &str) -> bool {
         let host_lc = host.to_lowercase();
         // Strip any :port suffix.
@@ -139,20 +114,14 @@ impl<
 // │ PROTOCOL                                                                  │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// The protocol dialect the server is speaking. Currently only `Web`.
 #[derive(Clone, Debug)]
 pub enum Protocol<
     WH:     WebHandler,
     WSH:    WebSocketHandler,
 > {
-    /// HTTPS + WebSocket, multi-vhost.
     Web {
-        /// Map from hostname (lower case) to the runtime for that vhost.
-        /// Every alias hostname has its own entry pointing at the same Arc.
         vhosts:         Arc<HashMap<String, Arc<VhostRuntime<WH, WSH>>>>,
-        /// Primary hostname of the vhost used when SNI is absent or unknown.
         default_vhost:  String,
-        /// Global development mode flag.
         dev_mode:       bool,
     },
 }
@@ -162,31 +131,15 @@ pub enum Protocol<
 // │ SERVER CONTEXT                                                            │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Per-vhost database map, keyed by canonical hostname in lowercase.
-///
-/// Shared behind an `Arc<RwLock<_>>` so databases opened at unseal time --
-/// after the server is already accepting connections -- become visible to
-/// every connection task without rebuilding the context. Cloning a
-/// `ServerContext` therefore bumps a refcount rather than deep-copying the
-/// map, which it did when the map was owned.
 pub type VhostDbs<const UIDL: usize, UID, DB> =
     Arc<RwLock<HashMap<String, (Arc<RwLock<DB>>, UID)>>>;
 
-/// What a vhost needs in order to have its database opened later.
-///
-/// Recorded at start-up, when the configuration is parsed, and consumed at
-/// unseal, when the master key finally exists. Deliberately free of the
-/// database type parameters so it can be held by non-generic state.
 #[derive(Clone, Debug)]
 pub struct VhostDbSpec {
-    /// Canonical (primary) hostname of the vhost, lowercased. The key this
-    /// vhost's database is filed under in [`VhostDbs`].
     pub vhost_key:  String,
-    /// Directory the Ozone instance lives in.
     pub db_dir:     std::path::PathBuf,
 }
 
-/// Shared state threaded through the server. Cheaply cloneable.
 pub struct ServerContext<
     const UIDL: usize,
     UID:    NumIdDat<UIDL> + 'static,
@@ -198,39 +151,10 @@ pub struct ServerContext<
 > {
     pub cfg:        ServerConfig,
     pub root:       NormPathBuf,
-    /// Per-vhost Ozone databases, keyed by the canonical (primary) hostname
-    /// of each vhost in lowercase. A vhost that has no database configured
-    /// (typical for pure-redirect vhosts) has no entry here. All alias
-    /// hostnames resolve to the primary via `vhost_for()` first, then use
-    /// the primary as the lookup key into this map.
-    ///
-    /// Shared and interior-mutable because the map is populated *after*
-    /// the listeners bind. Steel starts sealed, with no master key and so
-    /// no open databases; when an admin unseals, the databases are opened
-    /// and inserted here, and every connection task already holding a
-    /// clone of this context sees them at once. Until then the map is
-    /// empty and `db_for_vhost` returns `None`, exactly as it does for a
-    /// vhost that has no database configured at all.
     pub vhost_dbs:  VhostDbs<UIDL, UID, DB>,
     pub protocol:   Protocol<WH, WSH>,
-    /// Optional shared traffic recorder. When present, every request
-    /// that reaches the HTTPS handler emits a `RequestRecord` to this
-    /// recorder once the response has been written. Lives at server
-    /// scope (not per-vhost) because the dashboard wants a single
-    /// host-wide traffic view; per-vhost filtering happens at query
-    /// time using the `vhost` field on each record.
     pub traffic:    Option<Arc<TrafficRecorder>>,
-    /// Optional shared admin dashboard runtime. The same `Arc` held
-    /// by `AppWebHandler` so that the dashboard handler called from
-    /// the HTTPS pipeline and the dashboard handler called from the
-    /// localhost plain-HTTP listener (when configured) both see the
-    /// same wallet, sessions and traffic counters. It also carries the
-    /// seal, and so is what a request path consults to learn whether a
-    /// database can be expected to exist yet.
     pub admin_state: Option<Arc<AdminState>>,
-    /// Databases that are configured but not yet open. Populated at
-    /// start-up from the vhost configuration and consumed once, when an
-    /// admin unseals and the master key becomes available.
     pub db_specs:   Vec<VhostDbSpec>,
     phantom3:       PhantomData<ENC>,
     phantom4:       PhantomData<KH>,
@@ -273,12 +197,6 @@ impl<
 >
     ServerContext<UIDL, UID, ENC, KH, DB, WH, WSH>
 {
-    /// Create a new server context.
-    ///
-    /// `vhost_dbs` maps the canonical (primary) hostname of each vhost, in
-    /// lowercase, to its Ozone database handle and the user id under which
-    /// database writes will be attributed. It is empty while Steel is
-    /// sealed; `db_specs` says what belongs in it once an admin unseals.
     pub fn new(
         cfg:            ServerConfig,
         root:           NormPathBuf,
@@ -303,15 +221,6 @@ impl<
         }
     }
 
-    /// Resolve the Ozone database for a given vhost. `vhost_key` is the
-    /// canonical (primary) hostname of the vhost in lowercase, as returned
-    /// by `VhostRuntime::primary_hostname()`.
-    ///
-    /// Returns `None` when the vhost has no database configured, and also
-    /// while Steel is sealed -- the databases are not open yet. Callers on
-    /// the request path distinguish the two through [`Self::is_sealed`]:
-    /// "this site has no database" is a 404, "the database is not unlocked
-    /// yet" is a 503.
     pub fn db_for_vhost(
         &self,
         vhost_key: &str,
@@ -333,11 +242,6 @@ impl<
         guard.get(&vhost_key.to_lowercase()).cloned()
     }
 
-    /// Returns `true` while Steel is sealed: no wallet master key is
-    /// loaded, so the per-vhost databases have not been opened.
-    ///
-    /// A context with no admin state cannot be sealed -- there is nothing
-    /// holding a wallet to unseal against -- so this reports `false`.
     pub fn is_sealed(&self) -> bool {
         match &self.admin_state {
             Some(state) => state.is_sealed(),
@@ -345,9 +249,6 @@ impl<
         }
     }
 
-    /// Returns `true` when `vhost_key` is configured to have a database
-    /// that is not open yet, i.e. a DB-backed route on this vhost should
-    /// answer 503 rather than behave as though the site has no database.
     pub fn db_pending_for_vhost(&self, vhost_key: &str) -> bool {
         if !self.is_sealed() {
             return false;
@@ -356,14 +257,10 @@ impl<
         self.db_specs.iter().any(|spec| spec.vhost_key == key)
     }
 
-    /// Clone the context (explicit alias for situations where type inference
-    /// on the derived impl causes issues).
     pub fn clone_self(&self) -> Self {
         self.clone()
     }
 
-    /// Look up the vhost runtime for a given SNI hostname. Returns the default
-    /// vhost when SNI is absent or the name is not registered.
     pub fn vhost_for(&self, sni: Option<&str>) -> Arc<VhostRuntime<WH, WSH>> {
         match &self.protocol {
             Protocol::Web { vhosts, default_vhost, .. } => {
@@ -389,12 +286,10 @@ impl<
         }
     }
 
-    /// Generate a short random identifier for error messages.
     pub fn err_id() -> String {
         Rand::generate_random_string(6, "abcdefghikmnpqrstuvw0123456789")
     }
 
-    /// Extract the session id cookie from an HTTP message, if valid.
     pub fn get_session_id(
         msg:        &HttpMessage,
         src_addr:   &SocketAddr,
@@ -416,7 +311,6 @@ impl<
     }
 }
 
-/// Construct a fresh Ozone database handle for a Steel application.
 pub fn new_db(
     db_root: &Path,
     enc_key: &[u8],
@@ -468,9 +362,6 @@ pub fn new_db(
     )
 }
 
-/// Return an empty per-vhost database map matching the database type
-/// parameters used by Steel. Useful in tests that build a `ServerContext`
-/// without any backing storage.
 pub fn no_db()
     -> Outcome<HashMap<String, (Arc<RwLock<O3db<
         { id::UID_LEN },
@@ -486,7 +377,6 @@ pub fn no_db()
     Ok(HashMap::new())
 }
 
-/// Construct a WebSocket client helper without a database handle.
 pub fn new_ws_no_db<
     'a,
     S:      AsyncRead + AsyncWrite + Unpin,

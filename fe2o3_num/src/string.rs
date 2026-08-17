@@ -59,9 +59,6 @@ impl fmt::Display for Float64 {
     }
 }
 
-/// Converts a string of decimal digit characters into a vector of their
-/// numeric values (`0..=9`). Returns an error if any character is not a
-/// decimal digit, rather than panicking on malformed input.
 pub fn string_to_digit_vec(input: &str) -> Outcome<Vec<u8>> {
     let mut digits = Vec::with_capacity(input.len());
     for c in input.chars() {

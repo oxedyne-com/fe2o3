@@ -186,11 +186,6 @@ pub struct ErrMsg<T: GenTag> {
     pub tags:   &'static [T],
 }
 
-/// A message with the source location the `errmsg!` macro puts in front of it taken off again.
-///
-/// The macro writes `file.rs:123: the words`, or `file.rs:123` alone where it was given no words, so
-/// what is left after the location is what somebody meant to say. A message that begins with no
-/// location is returned whole, since it was written by something else and is not ours to trim.
 fn without_location(msg: &str) -> &str {
     match msg.split_once(": ") {
         Some((head, tail)) if is_location(head) => tail,
@@ -200,10 +195,6 @@ fn without_location(msg: &str) -> &str {
     }
 }
 
-/// Whether a string is a `file:line` of the shape `errmsg!` writes.
-///
-/// The test is that what follows the last colon is a line number. A message of somebody's own that
-/// happened to hold a colon has words after it, not digits, and is left alone.
 fn is_location(s: &str) -> bool {
     match s.rsplit_once(':') {
         Some((file, line)) => {
@@ -215,7 +206,6 @@ fn is_location(s: &str) -> bool {
     }
 }
 
-/// Adds a message to the list, unless it has nothing in it.
 fn push_words(out: &mut Vec<String>, msg: &str) {
     let msg = msg.trim();
     if !msg.is_empty() {
@@ -256,19 +246,12 @@ impl<T: GenTag> Error<T> where Error<T>: std::error::Error {
         }
     }
 
-    /// The words the error carries, outermost first, with nothing in them but words.
-    ///
-    /// The `err!` macro writes the file and the line in front of every message it is given, and an
-    /// error that wraps another keeps a frame for each. That is what a developer wants and it is not
-    /// what anybody else wants, so this gives the messages alone: no source locations, no frame
-    /// names, no tags, and nothing from a frame that carried no words of its own.
     pub fn msgs(&self) -> Vec<String> {
         let mut out = Vec::new();
         self.gather(&mut out);
         out
     }
 
-    /// Walks the error and its causes, appending the words each carries.
     fn gather(&self, out: &mut Vec<String>) {
         match self {
             Error::Local(ErrMsg { msg: m, .. }) |
@@ -291,12 +274,6 @@ impl<T: GenTag> Error<T> where Error<T>: std::error::Error {
         }
     }
 
-    /// The error as a person should read it: what went wrong, in the words the code chose.
-    ///
-    /// `Debug` is the developer's form and names the file and the line of every frame; `Display` is
-    /// the console's and carries ANSI colour. Neither belongs in a browser, a log field, or anything
-    /// a user will read, and this is the form for those. The outermost words come first, since they
-    /// are the context, and the innermost last, since they are the detail.
     pub fn plain(&self) -> String {
         let msgs = self.msgs();
         if msgs.is_empty() {
@@ -348,12 +325,6 @@ impl<T: GenTag> Error<T> where Error<T>: std::error::Error {
         )
     }
 
-    /// The upstream error is one of ours, so it is printed as one: with `Debug`, which is plain.
-    ///
-    /// Printing it with `Display` would recurse into the console form, and every frame below the
-    /// first would carry ANSI colour codes. That is invisible in a terminal, where they are what is
-    /// wanted, and it is why it went unnoticed. Anywhere else -- a browser, a log file, a JSON
-    /// field -- the escapes are rubbish in the middle of the message.
     fn fmt_debug_upstream_specific(
         f: &mut fmt::Formatter<'_>,
         e: &Self,
@@ -669,12 +640,6 @@ mod tests {
         Ok(42)
     }
 
-    /// The `Debug` form must be plain to the bottom of the chain, not merely at the top.
-    ///
-    /// `Display` is for a console and colours itself with ANSI escapes. `Debug` is what a caller
-    /// reaches for when the message is going somewhere that is not a console -- a browser, a log
-    /// file, a JSON field -- and an escape code in the middle of it is rubbish. A nested error is
-    /// still one of ours, so it must be printed as one.
     #[test]
     fn test_debug_carries_no_terminal_escapes() -> Outcome<()> {
         // Three deep: a local error, wrapped, wrapped again.
@@ -708,11 +673,6 @@ mod tests {
         Ok(())
     }
 
-    /// `plain` is what a person reads, so it must hold the words and nothing else.
-    ///
-    /// `Debug` names the file and the line of every frame, which is right for a developer and wrong
-    /// for a browser: a reader told a document was refused wants to know why, not which line of
-    /// which file noticed. The words are all that crosses.
     #[test]
     fn test_plain_is_words_and_nothing_else() -> Outcome<()> {
         // The shape of a real rejection: a detailed innermost error, wrapped by frames that add

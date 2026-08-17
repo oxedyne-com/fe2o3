@@ -92,9 +92,6 @@ impl<
 >
     ServerContext<UIDL, UID, ENC, KH, DB, WH, WSH>
 {
-    /// Handle one established TLS connection: perform vhost dispatch based on
-    /// the SNI hostname, apply redirect rules, validate the `Host` header,
-    /// and drive the selected vhost's HTTP or WebSocket handler.
     pub async fn handle_https(
         self,
         mut stream: TlsStream<TcpStream>,
@@ -847,8 +844,6 @@ impl<
         Ok(())
     }
 
-    /// Find the first redirect rule, if any, that matches the given request
-    /// path. Rules are tried in declaration order.
     fn match_redirect<'a>(
         rules:          &'a [RedirectRule],
         request_path:   &str,
@@ -863,15 +858,6 @@ impl<
         None
     }
 
-    /// Forward a regular (non-WebSocket) HTTP request to the upstream
-    /// proxy target and stream the response back to the client.
-    ///
-    /// The request is forwarded with `Connection: close` to the
-    /// upstream so the response termination is unambiguous.  The
-    /// response is streamed in chunks — not buffered — so SSE and
-    /// other streaming responses work correctly.
-    ///
-    /// Returns `(status_code, body_byte_count)` for traffic recording.
     async fn handle_proxy_http<W>(
         &self,
         request:    HttpMessage,
@@ -1043,11 +1029,6 @@ impl<
         Ok((status_code, Some(total_body_bytes)))
     }
 
-    /// Tunnel a WebSocket upgrade request to the upstream proxy target.
-    ///
-    /// The relay itself lives in [`crate::srv::wsproxy`], which a `ws_route`
-    /// uses too: the two kinds of route differ in how they match a request,
-    /// not in what forwarding a handshake means.
     async fn handle_proxy_websocket<S>(
         self,
         client:     &mut S,
@@ -1082,11 +1063,6 @@ impl<
         ).await
     }
 
-    /// Hand the upgrade on this path to the WebSocket server the route names.
-    ///
-    /// Unlike a proxy route there is no prefix to strip and no application
-    /// behind it: one path, one upstream, and the upstream's own path taken
-    /// from the configured URL.
     async fn handle_ws_route<S>(
         self,
         client:     &mut S,

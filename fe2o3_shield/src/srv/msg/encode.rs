@@ -110,11 +110,6 @@ pub trait ShieldCommand<
     fn deconstruct(&mut self, _mcmd: &mut MsgCmd) -> Outcome<()> { Ok(()) }
     fn construct(self)  -> Outcome<Msg>;
 
-    ///
-    /// The message identifier is given rather than drawn here, because it is
-    /// what an answer is correlated by: a caller that could not say which
-    /// identifier its question went out under would have no way of recognising
-    /// the reply.
     fn build<
         const C: usize,
         // Proof of work validator.
@@ -255,9 +250,6 @@ pub trait ShieldCommand<
         Ok(())
     }
 
-    /// Builds this command into packets using the crate's standard
-    /// proof-of-work parameters, saving every caller from repeating the
-    /// const-generic arithmetic that binds the pristine to the hash input.
     fn build_standard<
         const C: usize,
         W: WireSchemeTypes + 'static,
@@ -291,8 +283,6 @@ pub trait ShieldCommand<
         )
     }
 
-    /// Builds this command into packets using the standard proof-of-work
-    /// parameters and sends them to the target address.
     fn send<
         const C: usize,
         W: WireSchemeTypes + 'static,
@@ -330,13 +320,6 @@ impl<
     Protocol<C, ML, SL, UL, P>
     where <P as ProtocolTypes<ML, SL, UL>>::W: 'static,
 {
-    /// Build the packets carrying an opaque application payload, ready to be
-    /// put on a socket.
-    ///
-    /// Both halves of an exchange come through here, and the only difference
-    /// between them is `kind` and where `mid` came from: a question draws a
-    /// fresh identifier, and an answer travels under the one the question
-    /// arrived with, because that is the whole of the correlation.
     pub fn build_app(
         &self,
         syntax:     SyntaxRef,

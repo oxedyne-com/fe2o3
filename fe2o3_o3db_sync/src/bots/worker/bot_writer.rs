@@ -508,21 +508,6 @@ impl<
         }
     }
 
-    /// Evaluate the configured durability policy and, when a sync is
-    /// due, call `sync_data` on the data file and the index file.
-    ///
-    /// Policies are evaluated in strict priority order:
-    /// 1. `sync_on_write` — sync after every write, ignoring counters
-    /// 2. `sync_every_n_writes` — group commit on write count
-    /// 3. `sync_interval_ms` — group commit on elapsed time
-    /// 4. Otherwise — no sync (current ozone default; fastest)
-    ///
-    /// `sync_data` (fdatasync on Linux) is used instead of `sync_all`
-    /// because the ozone file format does not rely on the file's
-    /// metadata (mtime, length on-disk as reported by the directory
-    /// entry) for recovery, only on its byte contents. Skipping the
-    /// metadata sync is a measurable throughput win on rotational
-    /// media and does not weaken the durability contract.
     fn maybe_sync_files(&mut self) -> Outcome<()> {
         let cfg = self.cfg();
         let sync_on_write = cfg.sync_on_write;

@@ -247,14 +247,6 @@ impl<const N: usize> RingTimer<N> {
         self.last_duration()
     }
 
-    /// The oldest and newest timestamps held, and how many there are.
-    ///
-    /// Scans the slots rather than trusting the write pointer. `set_and_adv`
-    /// advances *past* the slot it wrote, so `curr` addresses the slot due to
-    /// be overwritten next -- the oldest entry, not the newest. Reading the
-    /// ring through `get()` as though it were the newest inverts the interval
-    /// and yields `Err` from `duration_since`, which is how the durations
-    /// below used to collapse to zero even when the ring did hold data.
     fn extent(&self) -> (Option<SystemTime>, Option<SystemTime>, usize) {
         let mut oldest: Option<SystemTime> = None;
         let mut newest: Option<SystemTime> = None;
@@ -277,21 +269,15 @@ impl<const N: usize> RingTimer<N> {
         (oldest, newest, count)
     }
 
-    /// Number of timestamps held, up to `N`.
     pub fn count(&self) -> usize {
         let (_, _, count) = self.extent();
         count
     }
 
-    /// Whether every slot in the ring holds a timestamp.
     pub fn is_full(&self) -> bool {
         self.count() == N
     }
 
-    /// Duration between the two most recent timestamps.
-    ///
-    /// `Duration::ZERO` when fewer than two have been recorded. Callers read a
-    /// zero gap as "too soon", which is the safe reading of "cannot tell".
     pub fn last_duration(&self) -> Duration {
         let newest_i = RingBuffer::<N, SystemTime>::prev_index(self.0.curr);
         let prev_i = RingBuffer::<N, SystemTime>::prev_index(newest_i);
@@ -307,7 +293,6 @@ impl<const N: usize> RingTimer<N> {
         }
     }
 
-    /// Duration spanned by the timestamps held: newest minus oldest.
     pub fn total_duration(&self) -> Duration {
         let (oldest, newest, count) = self.extent();
         if count < 2 {
@@ -322,18 +307,6 @@ impl<const N: usize> RingTimer<N> {
         }
     }
 
-    /// Average rate, in requests per second, across the whole ring.
-    ///
-    /// Zero until the ring has filled. A rate taken from two or three samples
-    /// is mostly noise -- a browser opening a couple of connections a
-    /// millisecond apart would read as a thousand requests a second -- and the
-    /// ring exists precisely to average that away. `N` samples must accumulate
-    /// before the average means anything, so callers see no rate until they do.
-    ///
-    /// The span is measured in milliseconds. Whole-second arithmetic truncated
-    /// any burst shorter than a second to a span of zero and reported a rate of
-    /// *zero* for it, inverting the measure exactly where it mattered: the
-    /// faster the flood, the smaller the number it produced.
     pub fn avg_rps(&self) -> u64 {
         if !self.is_full() {
             return 0;
@@ -365,12 +338,6 @@ impl<const N: usize> RingTimer<N> {
 mod tests {
     use super::*;
 
-    /// The regression that matters: `update` must actually write to the ring.
-    ///
-    /// `RingBuffer` is `Copy`, so `let mut inner = self.0` bound a temporary,
-    /// wrote the timestamp into it, and dropped it. The ring stayed empty for
-    /// ever, every duration read as zero, and the rate limiter built on this
-    /// type never fired once.
     #[test]
     fn test_update_records_a_timestamp_00() {
         let mut timer = RingTimer::<4>::default();
@@ -394,8 +361,6 @@ mod tests {
         assert_eq!(timer.count(), 4);
     }
 
-    /// A rate needs a full ring: two samples a microsecond apart are noise,
-    /// not a flood, and must not throttle an ordinary client.
     #[test]
     fn test_avg_rps_is_zero_until_the_ring_fills_00() {
         let mut timer = RingTimer::<8>::default();
@@ -406,9 +371,6 @@ mod tests {
         }
     }
 
-    /// The truncation bug: a burst inside one second used to measure as a span
-    /// of zero whole seconds and therefore a rate of *zero*, so the faster the
-    /// attack, the lower the number the limiter saw.
     #[test]
     fn test_a_fast_burst_reports_a_high_rate_00() {
         let mut timer = RingTimer::<8>::default();
@@ -423,7 +385,6 @@ mod tests {
             "a sub-second burst must report a high rate, got {}", rps);
     }
 
-    /// A slow caller must stay under a modest limit.
     #[test]
     fn test_a_slow_caller_reports_a_low_rate_00() {
         let mut timer = RingTimer::<4>::default();

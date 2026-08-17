@@ -10,11 +10,6 @@ use oxedyne_fe2o3_num::float::{
 };
 
 
-/// The error raised when a kind reaches an encoding frame that is not the one it belongs to.
-///
-/// The dispatch in [`Dat::to_bytes`] sends every kind to its own frame, so this is unreachable
-/// unless the dispatch and the frames disagree, which is a fault in this file rather than in
-/// anything given to it.
 fn wrong_frame(dat: &Dat) -> Error<ErrTag> {
     err!(
         "The daticle kind {:?} was encoded in a frame that does not encode it.  The dispatch in \
@@ -63,7 +58,6 @@ impl ToBytes for Dat {
 
 impl Dat {
 
-    /// Encodes a user-defined kind: the kind code, then the payload it carries, if any.
     #[inline(never)]
     fn to_bytes_usr(&self, mut buf: Vec<u8>) -> Outcome<Vec<u8>> {
         match self {
@@ -83,7 +77,6 @@ impl Dat {
         }
     }
 
-    /// Encodes an optional value: the code alone when it is none, the value when it is some.
     #[inline(never)]
     fn to_bytes_opt(&self, mut buf: Vec<u8>) -> Outcome<Vec<u8>> {
         match self {
@@ -98,7 +91,6 @@ impl Dat {
         }
     }
 
-    /// Encodes a boxed value.
     #[inline(never)]
     fn to_bytes_box(&self, mut buf: Vec<u8>) -> Outcome<Vec<u8>> {
         match self {
@@ -110,7 +102,6 @@ impl Dat {
         }
     }
 
-    /// Encodes an annotated box: its configuration, the value, then the note.
     #[inline(never)]
     fn to_bytes_abox(&self, mut buf: Vec<u8>) -> Outcome<Vec<u8>> {
         match self {
@@ -127,7 +118,6 @@ impl Dat {
         }
     }
 
-    /// Encodes a list or a vek: the code, the byte length, then the items.
     #[inline(never)]
     fn to_bytes_list(&self, mut buf: Vec<u8>) -> Outcome<Vec<u8>> {
         match self {
@@ -143,7 +133,6 @@ impl Dat {
         }
     }
 
-    /// Encodes a tuple of daticles.
     #[inline(never)]
     fn to_bytes_tuple(&self, buf: Vec<u8>) -> Outcome<Vec<u8>> {
         match self {
@@ -160,10 +149,6 @@ impl Dat {
         }
     }
 
-    /// Encodes a map or an ordered map: the code, the byte length, then the entries.
-    ///
-    /// The two are kept apart because their keys are of different types, an ordered map keying by
-    /// insertion rather than by the key itself.
     #[inline(never)]
     fn to_bytes_map(&self, mut buf: Vec<u8>) -> Outcome<Vec<u8>> {
         let mut buf2 = Vec::new();
@@ -188,10 +173,6 @@ impl Dat {
         Ok(buf)
     }
 
-    /// Encodes every kind that encloses no other kind.
-    ///
-    /// The arms here are many, and in a debug build each keeps its own slot in the frame, so this
-    /// is the frame that must not be the one nesting repeats.
     #[inline(never)]
     fn to_bytes_atomic(&self, mut buf: Vec<u8>) -> Outcome<Vec<u8>> {
         match self {

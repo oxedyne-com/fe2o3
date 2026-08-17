@@ -24,10 +24,6 @@ use oxedyne_fe2o3_syntax::{
 };
 
 
-/// Builds the base Shield message syntax, defining the shared arguments, the
-/// handshake commands (`hreq1`, `hresp1`, `hreq2`, `hresp2`) and the two
-/// application payload commands (`app`, `appr`) that incoming and outgoing
-/// messages are validated against.
 pub fn base_msg() -> Outcome<SyntaxRef> {
 
     let mut s = Syntax::from(SyntaxConfig {

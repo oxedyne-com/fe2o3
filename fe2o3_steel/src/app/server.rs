@@ -88,14 +88,6 @@ use std::{
 use tokio;
 
 
-/// How long a stopping server waits for the tokio runtime's blocking pool
-/// before leaving it behind.
-///
-/// Short on purpose. Every blocking task worth waiting for has already been
-/// waited for by this point -- the connections in flight, inside
-/// [`Server::start`] -- and the one that is left in dev mode is a file watcher
-/// that never returns at all. This is the grace given to a database opener that
-/// happens to be part way through, and no more.
 pub const RUNTIME_STOP_SECS: u64 = 2;
 
 
@@ -796,13 +788,6 @@ impl AppShellContext {
 
 }
 
-/// Build a `rustls::ClientConfig` for outbound HTTPS requests by
-/// reading the system CA certificate bundle. Returns an error if the
-/// bundle cannot be found or contains no usable certificates.
-///
-/// Used internally by `start_server` for the API proxy and exposed
-/// so that app extensions can use the same CA store for one-shot
-/// CLI subcommands that need to make outbound HTTPS calls.
 pub fn build_outbound_tls_client()
     -> Outcome<Arc<tokio_rustls::rustls::ClientConfig>>
 {
@@ -873,8 +858,6 @@ pub fn build_outbound_tls_client()
 // │ DATABASE OPENER AND CLOSER                                                │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// The Ozone instance a Steel vhost holds. One per vhost that configures a
-/// `db_dir_rel`; a pure-redirect vhost has none.
 type VhostDb = O3db<
     { id::UID_LEN },
     id::Uid,
@@ -884,22 +867,6 @@ type VhostDb = O3db<
     ChecksumScheme,
 >;
 
-/// Close every database this server holds, returning how many were shut.
-///
-/// A Steel process holds one Ozone instance per vhost that configures one, so
-/// this walks the map rather than assuming a single store: a host serving three
-/// sites has three, and closing the first and killing the other two would be the
-/// same fault in two thirds of the places it mattered.
-///
-/// Nothing here can fail the shutdown. A store that will not close is reported
-/// and the next one is tried, because one bad store is a poor reason to kill the
-/// others; and a poisoned lock is recovered from rather than propagated, since
-/// the alternative is to walk away from an open database because a thread
-/// panicked somewhere else.
-///
-/// Closing twice is harmless -- [`O3db::close`] takes `&self`, records that it
-/// has been done, and makes a second caller wait for the first rather than shut
-/// anything again -- so this may be reached by a path that has already run.
 fn close_vhost_dbs(
     vhost_dbs: &VhostDbs<{ id::UID_LEN }, id::Uid, VhostDb>,
 ) -> usize {
@@ -929,20 +896,6 @@ fn close_vhost_dbs(
     closed
 }
 
-/// Wait for an admin to unseal, then open every configured database and
-/// attach it to the live server context.
-///
-/// Steel serves while sealed, so this runs concurrently with the accept
-/// loop rather than before it. Until it completes, `db_for_vhost` returns
-/// `None` for every vhost and DB-backed routes answer 503.
-///
-/// Opening Ozone is blocking work -- it starts a bot fleet, sleeps, and
-/// pings -- so it runs on a blocking thread. On a single-core host, doing
-/// this on an async worker would starve the accept loop for the duration.
-///
-/// A failure to open leaves Steel sealed and serving. That is deliberate:
-/// a database that will not open is a bad reason to take the websites down
-/// with it, and the operator can retry by unsealing again.
 async fn open_dbs_on_unseal(
     admin_state:    Arc<AdminState>,
     vhost_dbs:      VhostDbs<{ id::UID_LEN }, id::Uid, O3db<

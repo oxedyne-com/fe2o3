@@ -40,12 +40,6 @@ impl FromBytes for Dat {
 
 impl Dat {
 
-    /// Read the `Dat` from the buffer under the given limits, and include the number of bytes
-    /// required in the return tuple.
-    ///
-    /// The decoding is that of [`Dat::from_bytes`], except that a buffer longer than
-    /// `lims.max_bytes`, or a value nested deeper than `lims.max_depth`, is refused with an error
-    /// naming the byte offset and the limit broken.
     pub fn from_bytes_limited(
         buf:    &[u8],
         lims:   &DecodeLimits,
@@ -56,8 +50,6 @@ impl Dat {
         Self::from_bytes_depth(buf, lims, 1, 0)
     }
 
-    /// Read the `Dat` beginning at `pos` bytes into the original input, where `depth` counts the
-    /// values enclosing it, the root value being at depth 1.
     fn from_bytes_depth(
         buf:    &[u8],
         lims:   &DecodeLimits,
@@ -98,11 +90,6 @@ impl Dat {
         }
     }
 
-    /// Read a user-defined kind from the start of the buffer, `pos` bytes into the original input and
-    /// enclosed by `depth` values.
-    ///
-    /// Kept out of the dispatch above so that its locals sit in a frame of their own,
-    /// rather than in the frame that nesting repeats.
     #[inline(never)]
     fn from_bytes_usr(
         buf:    &[u8],
@@ -162,11 +149,6 @@ impl Dat {
         }
     }
 
-    /// Read a boxed value from the start of the buffer, `pos` bytes into the original input and
-    /// enclosed by `depth` values.
-    ///
-    /// Kept out of the dispatch above so that its locals sit in a frame of their own,
-    /// rather than in the frame that nesting repeats.
     #[inline(never)]
     fn from_bytes_box(
         buf:    &[u8],
@@ -196,11 +178,6 @@ impl Dat {
         }
     }
 
-    /// Read a present optional value from the start of the buffer, `pos` bytes into the original input and
-    /// enclosed by `depth` values.
-    ///
-    /// Kept out of the dispatch above so that its locals sit in a frame of their own,
-    /// rather than in the frame that nesting repeats.
     #[inline(never)]
     fn from_bytes_opt_some(
         buf:    &[u8],
@@ -230,11 +207,6 @@ impl Dat {
         }
     }
 
-    /// Read an annotated boxed value from the start of the buffer, `pos` bytes into the original input and
-    /// enclosed by `depth` values.
-    ///
-    /// Kept out of the dispatch above so that its locals sit in a frame of their own,
-    /// rather than in the frame that nesting repeats.
     #[inline(never)]
     fn from_bytes_abox(
         buf:    &[u8],
@@ -314,11 +286,6 @@ impl Dat {
         }
     }
 
-    /// Read a list or a vek from the start of the buffer, `pos` bytes into the original input and
-    /// enclosed by `depth` values.
-    ///
-    /// Kept out of the dispatch above so that its locals sit in a frame of their own,
-    /// rather than in the frame that nesting repeats.
     #[inline(never)]
     fn from_bytes_list(
         buf:    &[u8],
@@ -389,11 +356,6 @@ impl Dat {
         }
     }
 
-    /// Read a map from the start of the buffer, `pos` bytes into the original input and
-    /// enclosed by `depth` values.
-    ///
-    /// Kept out of the dispatch above so that its locals sit in a frame of their own,
-    /// rather than in the frame that nesting repeats.
     #[inline(never)]
     fn from_bytes_map(
         buf:    &[u8],
@@ -472,11 +434,6 @@ impl Dat {
         }
     }
 
-    /// Read an ordered map from the start of the buffer, `pos` bytes into the original input and
-    /// enclosed by `depth` values.
-    ///
-    /// Kept out of the dispatch above so that its locals sit in a frame of their own,
-    /// rather than in the frame that nesting repeats.
     #[inline(never)]
     fn from_bytes_ordmap(
         buf:    &[u8],
@@ -554,11 +511,6 @@ impl Dat {
         }
     }
 
-    /// Read a heterogenous tuple from the start of the buffer, `pos` bytes into the original
-    /// input and enclosed by `depth` values.
-    ///
-    /// The arrays these arms build are the decoder's largest locals, so they are kept out of
-    /// the dispatch above.
     #[inline(never)]
     fn from_bytes_tuple(
         buf:    &[u8],
@@ -800,9 +752,6 @@ impl Dat {
         }
     }
 
-    /// Read an atomic `Dat`, one enclosing no other `Dat`, from the start of the buffer.
-    ///
-    /// No arm here recurses, so this frame is entered once, at the foot of the recursion.
     #[inline(never)]
     fn from_bytes_atomic(buf: &[u8]) -> Outcome<(Self, usize)> {
         match buf[0] {

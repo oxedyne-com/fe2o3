@@ -36,71 +36,23 @@ use std::{
     time::Duration,
 };
 
-/// Number of passes a scan makes before it declares an index file short of its data file.
-///
-/// Measuring the data file on both sides of the walk (see `ScanBot::scan_pass`) accounts for
-/// a record appended during the walk and for a garbage collection landing during it.  What it
-/// does not cover is a walk that begins after a collection has renamed its rebuilt index into
-/// place and ends before that same collection renames the transcribed data file over the old
-/// one -- one statement apart, so the walk would have to be shorter than the gap between two
-/// renames.  That is vanishingly unlikely and it is not impossible, and the difference between
-/// vanishingly unlikely and impossible is what a retry is for.
-///
-/// Repeating the pass separates a momentary shortfall from a permanent one without taking a
-/// lock that a collection would then have to wait on, and it costs nothing on the ordinary
-/// path, because a scan that adds up never repeats.
 const SCAN_COVERAGE_ATTEMPTS: usize = 3;
 
-/// Pause between those passes.  Long enough that an in-flight record has certainly landed,
-/// short enough that the caller waiting on a scan does not notice it.
 const SCAN_COVERAGE_SETTLE: Duration = Duration::from_millis(20);
 
-/// Which of a file number's two files were in the zone directory when it was listed.
 #[derive(Clone, Copy, Debug, Default)]
 struct ZoneFilePresence {
-    /// Whether a data file was there.
     dat: bool,
-    /// Whether an index file was there.
     ind: bool,
 }
 
-/// An index file that accounts for less than its data file holds.
-///
-/// The scan of that file is short by the difference, so the answer the caller would have been
-/// given is missing records without being wrong in any way the caller could detect.
 #[derive(Clone, Copy, Debug)]
 struct Shortfall {
-    /// The file number whose index came up short.
     fnum:       FileNum,
-    /// Bytes of key-value data in the data file.
     dat_len:    u64,
-    /// Bytes of key-value data the index file accounts for.
     covered:    u64,
 }
 
-/// Answers scans for one zone by walking its index files.
-///
-/// A scan is the only user request whose cost is the whole zone rather
-/// than a single record, and it is the reason this bot exists. The walk
-/// used to run on the init-garbage bot, sharing a queue with garbage
-/// collection: a scan arriving while a collection was under way waited
-/// for it, and on a store with a real collection backlog it waited past
-/// `USER_REQUEST_TIMEOUT` and the caller was told only that a channel
-/// had timed out. Reads and writes kept working throughout, which is
-/// the signature of starvation rather than damage.
-///
-/// Putting the walk on its own queue means a scan's latency depends on
-/// the size of the zone and on nothing else. The reader bots were the
-/// other obvious home, and were rejected: a scan on that queue would
-/// have made every `get` behind it wait for a walk of the whole zone,
-/// trading a broken view for slow reads.
-///
-/// This bot only reads. It opens index files, decodes keys and metadata
-/// and returns them; it never writes, never touches file state, and
-/// holds no lock any other bot waits on. A scan can therefore run at
-/// the same time as a collection without either having to know about
-/// the other, which is safe because a collection replaces an index file
-/// in one step rather than rewriting it in place.
 pub struct ScanBot<
     const UIDL: usize,
     UID:    NumIdDat<UIDL>,
@@ -214,7 +166,6 @@ impl<
 >
     ScanBot<UIDL, UID, ENC, KH, PR, CS>
 {
-    /// Creates a scan bot from the standard zone worker arguments.
     pub fn new(
         args: ZoneWorkerInitArgs<UIDL, UID, ENC, KH, PR, CS>,
     )
@@ -239,48 +190,6 @@ impl<
         }
     }
 
-    /// Walk every index file in this bot's zone and return the live
-    /// user-visible `(key, value, meta)` entries that satisfy `opts`.
-    ///
-    /// Deduplication keeps the newest entry per raw key-bytes: index
-    /// files are walked in ascending file-number order, and within a
-    /// file in position order, so a later write of the same key
-    /// naturally overwrites the earlier one in the local map.
-    ///
-    /// Internal chunk entries (`cind >= 1`) are elided; only the
-    /// user-visible main keys are returned.
-    ///
-    /// Values are deferred to a later revision of scan: this handler
-    /// returns `Dat::Empty` as the value for every entry. Callers
-    /// that need the value fetch it with a separate `get()` call
-    /// once the operator has chosen a specific key.
-    ///
-    /// Prefix and limit filters are applied per zone before the
-    /// result ships to the coordinator, so the wire message stays
-    /// bounded even when the caller sets a small limit against a
-    /// large database. The filters do not make the walk any cheaper:
-    /// every index record in the zone is read and checksummed
-    /// whatever the caller asked for.
-    ///
-    /// **A walk that cannot see everything fails rather than
-    /// answering short.** Every index record names the length of the
-    /// key and value it points at, so the records of one index file
-    /// add up to exactly the length of its data file. When they add
-    /// up to less, the index does not account for everything the
-    /// data file holds and the answer would be missing records --
-    /// with nothing in it to say so. That is not a hypothetical: an
-    /// index file left at zero bytes beside a data file full of
-    /// records makes this walk return an empty list, successfully,
-    /// while `get()` on those same records goes on working. The
-    /// gateway then read a limit through a scan, was told there was
-    /// no override set, answered the operator `200` for the change,
-    /// and enforced the old value for the life of the process.
-    ///
-    /// The caller is told, rather than the log, because a caller has
-    /// no way to distinguish "nothing there" from "I could not look"
-    /// and the log is not on the path of anyone waiting for the
-    /// answer. A scan that cannot report an under-count is the same
-    /// failure class as a check that cannot fail.
     fn scan_zone(
         &mut self,
         opts: &ScanOpts,
@@ -348,28 +257,6 @@ impl<
         Ok(out)
     }
 
-    /// One walk of every index file in the zone, in ascending file-number
-    /// order, reporting any file whose index does not account for its data
-    /// file.
-    ///
-    /// Each data file is measured on **both** sides of the walk of its index,
-    /// and the smaller of the two lengths is what the index has to account
-    /// for. Measuring once is not enough, and neither single choice is safe:
-    ///
-    /// - Measure before, and a garbage collection that lands during the walk
-    ///   makes an intact index look short. The collection replaces the index
-    ///   with one describing the smaller transcribed data file, and the
-    ///   earlier, larger measurement is then compared against it. Under a
-    ///   backlog a collection lands during almost every walk, so this is not
-    ///   a corner: it would be the ordinary case.
-    /// - Measure after, and a record appended during the walk makes an intact
-    ///   index look short, because the data file has grown past the point the
-    ///   walk read up to.
-    ///
-    /// Both movements are in a known direction -- a collection only shrinks a
-    /// data file, an append only grows one -- so the smaller of the two
-    /// measurements is below the index's coverage in either case, and a
-    /// genuine shortfall is below both.
     fn scan_pass(
         &mut self,
         live: &mut HashMap<Vec<u8>, (Dat, Meta<UIDL, UID>)>,
@@ -404,10 +291,6 @@ impl<
         Ok(short)
     }
 
-    /// The length in bytes of one data file, or `None` if it is not there.
-    ///
-    /// A file that has gone is not an error: a collection deletes a data file
-    /// whose records have all been superseded.
     fn data_file_len(&self, fnum: FileNum) -> Option<u64> {
         let mut path = self.zdir().dir.clone();
         path.push(ZoneDir::relative_file_path(&FileType::Data, fnum));
@@ -417,13 +300,6 @@ impl<
         }
     }
 
-    /// Enumerate this bot's zone directory, ascending by file number, noting
-    /// which of the two files each number has.
-    ///
-    /// Unparseable or foreign files are skipped silently; the zone survey
-    /// at startup already rejects structurally invalid directories, and a
-    /// garbage collection temporary carries a name that does not parse, so
-    /// a rebuild in progress is passed over rather than read.
     fn list_zone_files(&self) -> Outcome<BTreeMap<FileNum, ZoneFilePresence>> {
         let mut files: BTreeMap<FileNum, ZoneFilePresence> = BTreeMap::new();
         for entry in res!(fs::read_dir(&self.zdir().dir)) {
@@ -448,22 +324,6 @@ impl<
         Ok(files)
     }
 
-    /// Walk a single index file, populating `live` with the
-    /// user-visible entries it contains. Skips internal chunk
-    /// entries. A later call with a higher `fnum` for the same key
-    /// bytes overwrites the entry inserted here, which is the
-    /// correct stale-filtering behaviour for an append-only store.
-    ///
-    /// A file that disappears between the directory listing and the
-    /// open is not an error: garbage collection deletes a file whose
-    /// records have all been superseded, and every key that file held
-    /// has a newer copy elsewhere in the zone.
-    ///
-    /// Returns the number of bytes of key-value data the index file
-    /// accounts for, which for an intact index is exactly the length
-    /// of its data file. The caller compares the two; that comparison
-    /// is the only thing standing between a short walk and an answer
-    /// that looks complete.
     fn scan_walk_ind_file(
         &mut self,
         fnum: FileNum,
@@ -568,11 +428,6 @@ impl<
     }
 }
 
-/// Return `true` if `kdat` satisfies the optional `prefix` filter.
-/// When the prefix is a `Dat::Str`, the comparison is a string
-/// prefix match against `kdat` if it is also a `Dat::Str`. For
-/// every other prefix variant the comparison is strict equality.
-/// A `None` prefix matches everything.
 fn scan_matches_prefix(kdat: &Dat, prefix: Option<&Dat>) -> bool {
     match prefix {
         None => true,

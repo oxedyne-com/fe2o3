@@ -83,40 +83,12 @@ pub struct AppShellContext {
     pub app_cfg:            AppConfig,
     pub syntax:             SyntaxRef,
     pub ws:                 BTreeMap<Dat, Dat>,
-    /// Default database encryption key -- the wallet master key. The
-    /// `server` command uses it to open one Ozone instance per
-    /// configured vhost.
-    ///
-    /// `None` until an admin supplies a passphrase. Steel no longer
-    /// demands one at start-up: the shell opens sealed, and a command
-    /// that genuinely needs the key calls [`Self::require_master_key`],
-    /// which prompts at that point. Starting the server while sealed is
-    /// legitimate and expected -- see `srv::admin::state`.
     pub db_enc_key:         Option<Vec<u8>>,
-    /// The wallet is shared via `Arc<RwLock<_>>` so that the admin
-    /// dashboard handler (running inside the HTTPS server task) can
-    /// hold a clone of the same wallet that the REPL mutates from
-    /// the operator's terminal. CLI admin verbs and dashboard admin
-    /// verbs therefore observe each other's changes without any
-    /// reload-from-disk dance.
     pub wallet:             Arc<RwLock<Wallet>>,
-    /// Name of the admin whose password unlocked the wallet at
-    /// start-up. Empty when the wallet was just created. Threaded
-    /// through so privileged subcommands do not have to re-prompt
-    /// the caller for a password they have already proven once.
     pub unlocked_admin_name:    String,
-    /// Scope list of the unlocking admin. Checked by privileged
-    /// subcommands to enforce verb-level authorisation.
     pub unlocked_admin_scopes:  Vec<String>,
-    /// App-registered webhook handlers, dispatched by name from the
-    /// webhook route config.
     pub webhook_registry:   Arc<WebhookRegistry>,
-    /// App-registered API handlers, dispatched by name from any
-    /// `api_routes` entry that has its `handler` field set.
     pub api_handler_registry: Arc<ApiHandlerRegistry>,
-    /// App extension that contributed shell commands and handlers.
-    /// Held so the REPL dispatch loop can route unknown commands
-    /// through `AppExtension::dispatch_cmd`.
     pub extension:          Arc<dyn AppExtension>,
 }
 
@@ -429,19 +401,6 @@ impl AppShellContext {
         Ok(Evaluation::None)
     }
 
-    /// `wallet --migrate`: one-shot migrate a pre-admin-user wallet
-    /// into the multi-admin layout.
-    ///
-    /// Reads the existing wallet file as raw `Dat`, extracts the
-    /// legacy `wallet_pass_hashes` (for passphrase verification) and
-    /// `app_hashes.default.kdf_cfg` (for deriving the database
-    /// encryption key), verifies the current passphrase, derives the
-    /// current database encryption key -- which becomes the new
-    /// wallet's master key `K` unchanged, so no Ozone re-encryption is
-    /// required -- and rewrites the wallet with a single admin entry
-    /// named "jason" (override via prompt) wrapping the same `K`. The
-    /// old wallet file is preserved as `wallet.jdat.pre-admins` for
-    /// rollback.
     pub fn manage_wallet(
         &mut self,
         _shell_cfg: &ShellConfig,
@@ -590,9 +549,6 @@ impl AppShellContext {
         )))
     }
 
-    /// `admin --add NAME --scopes ... --expires-in N`,
-    /// `admin --remove NAME`,
-    /// `admin --list`.
     pub fn manage_admin(
         &mut self,
         _shell_cfg: &ShellConfig,
@@ -649,12 +605,6 @@ impl AppShellContext {
             "No recognised 'admin' subcommand argument supplied.")))
     }
 
-    /// `unseal`: unwrap the wallet master key with an admin passphrase.
-    ///
-    /// Optional. Steel serves perfectly well sealed; this is for the
-    /// operator who is already at the shell and would rather have the
-    /// databases open before the listeners bind than unseal from the
-    /// dashboard afterwards.
     pub fn unseal(
         &mut self,
         _shell_cfg: &ShellConfig,
@@ -674,18 +624,6 @@ impl AppShellContext {
         )))
     }
 
-    /// The wallet master key, prompting for a passphrase if the shell is
-    /// still sealed.
-    ///
-    /// Steel defers the wallet unlock: the shell starts without a
-    /// passphrase so that `server` can bind and serve with the databases
-    /// shut. A command that actually needs the key -- opening a database,
-    /// enrolling an admin -- calls this, and the prompt happens then,
-    /// rather than as a toll on every invocation.
-    ///
-    /// `STEEL_ADMIN_PASS` is honoured first, for scripted and test use.
-    /// On success the caller's identity and scopes are cached, so a run
-    /// of several privileged subcommands prompts once.
     pub fn require_master_key(&mut self) -> Outcome<Vec<u8>> {
         if let Some(key) = &self.db_enc_key {
             return Ok(key.clone());
@@ -708,13 +646,6 @@ impl AppShellContext {
         Ok(key)
     }
 
-    /// `admin --passwd`: rotate the caller's own password in place.
-    ///
-    /// The caller is whichever admin unlocked the wallet (captured in
-    /// `self.unlocked_admin_name`). Scopes and expiry are preserved;
-    /// only the wrap is replaced. The cached master key from the unlock
-    /// is reused, so the caller does not need to re-type their current
-    /// password.
     fn admin_passwd(&mut self) -> Outcome<Evaluation> {
         let master = res!(self.require_master_key());
         let caller_name = self.unlocked_admin_name.clone();
@@ -783,8 +714,6 @@ impl AppShellContext {
         Ok(Evaluation::Output(lines.join("\n")))
     }
 
-    /// Return `true` if the admin who unlocked the wallet at start
-    /// holds the `"admin"` scope or the `"*"` wildcard.
     fn unlocked_has_admin_scope(&self) -> bool {
         self.unlocked_admin_scopes.iter()
             .any(|s| s == "*" || s == "admin")
@@ -915,16 +844,6 @@ impl AppShellContext {
         Ok(Evaluation::None)
     }
 
-    /// `acme` shell command: inspect the configured ACME state.
-    ///
-    /// Currently supports:
-    ///   - `acme -s` / `acme --status` — print the configured vhost hostnames
-    ///     and the ACME directory URL that will be used on next start-up.
-    ///   - `acme -r` / `acme --renew` — schedule a forced renewal by clearing
-    ///     the ACME cache directory. Steel re-issues on next start-up.
-    ///
-    /// Live inspection and renewal of a running ACME state is a follow-up;
-    /// for now the shell only inspects and resets cached state.
     pub fn manage_acme(
         &mut self,
         _shell_cfg: &ShellConfig,
@@ -982,11 +901,6 @@ impl AppShellContext {
     }
 }
 
-/// Extract the "current" passhash from a legacy `wallet_pass_hashes`
-/// ring buffer `Dat`. The ring buffer is a 2-tuple of `(list, index)`
-/// where `list` holds N optional timestamped entries and `index`
-/// points at the active one. Used by the one-shot `wallet migrate`
-/// flow to recover the pre-admin-user passphrase verification hash.
 fn extract_legacy_current_passhash(ring: Dat) -> Outcome<Dat> {
     // Tuples round-trip as `Dat::Tup2` values that we destructure
     // with `try_extract_tup2dat`. The first element is the slot

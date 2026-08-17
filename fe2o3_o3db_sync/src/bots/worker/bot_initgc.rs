@@ -217,13 +217,6 @@ impl<
         }
     }
 
-    /// Decide how to cache the file, and repair the index file if it cannot be read.
-    ///
-    /// An empty index file beside a data file that holds records is not a curiosity: until the
-    /// index is rebuilt, `scan` walks that file and finds nothing, so a caller asking what the
-    /// zone holds is told "nothing" over a store that holds the answer.  Keyed `get()` is
-    /// unaffected, which is what makes it hard to see.  Both fallback paths below therefore
-    /// rebuild the index from the data file rather than only priming the cache from it.
     fn cache_file(
         &mut self,
         fnum:       FileNum,

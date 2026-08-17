@@ -457,11 +457,6 @@ impl<
         Ok(buf)
     }
 
-    /// Whether a packet of this message type may carry the public key its signature is to
-    /// be checked against.
-    ///
-    /// It may where the receiver has no way of already holding one: the opening handshake
-    /// request, and an application payload, which travels outside any session.
     pub fn may_carry_signing_key(msg_typ: MsgType) -> bool {
         if HandshakeType::from(msg_typ) == HandshakeType::Req1 {
             return true;

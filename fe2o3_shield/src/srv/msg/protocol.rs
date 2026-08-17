@@ -121,12 +121,8 @@ pub struct Protocol<
     _mid_template:      <P::ID as IdTypes<ML, SL, UL>>::M,
     _sid_template:      <P::ID as IdTypes<ML, SL, UL>>::S,
 
-    /// Proof-of-work challenge code this peer builds its own packets against.
     pub code:           [u8; C],
-    /// Identifier this peer sends its own messages under.
     pub uid:            <P::ID as IdTypes<ML, SL, UL>>::U,
-    /// Proof-of-work difficulty this peer puts into its own packets. The
-    /// receiver decides what it will accept; this is what is offered.
     pub tx_zbits:       ZeroBits,
 
     pub mode:           ProtocolMode,
@@ -148,7 +144,6 @@ pub struct Protocol<
                             { constant::REQ_TIMER_LEN },
                             AddressData,
                         >>,
-    /// Handshake request expiry window enforced by the SHIELD sequence check.
     pub hreq_exp:       Duration,
     // User protection.
     pub ugrd:           Arc<UserGuard<
@@ -189,12 +184,6 @@ impl<
 >
     Protocol<C, ML, SL, UL, P>
 {
-    /// and message assembler with the crate's compile-time constants.
-    ///
-    /// `code` is the proof-of-work challenge code this peer builds its own
-    /// packets against, and `uid` is the identifier it sends them under. The
-    /// message and session identifier arguments are templates, present only to
-    /// fix the concrete generic types.
     pub fn new(
         cfg:            &ServerConfig,
         schms_input:    WireSchemesInput<P::W>,

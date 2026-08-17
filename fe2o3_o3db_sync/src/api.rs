@@ -616,20 +616,6 @@ impl<
         })
     }
 
-    /// Delete the value held under a key, by appending a tombstone under that same key.
-    ///
-    /// A deletion is a write like any other, and must be framed exactly as an insertion is: the
-    /// cache hash in front of the key, a checksum behind the key and behind the value.  The reader
-    /// that replays a data file to rebuild its index cannot tell a tombstone from an insertion --
-    /// it reads every record the same way -- so a tombstone that is framed differently
-    /// desynchronises the replay at the point it appears, and every record after it is lost.  The
-    /// message is therefore packaged by the one encoder both paths share, never by hand.
-    ///
-    /// # Arguments
-    /// * `k` - The key whose value is to be deleted.
-    /// * `user` - The user the deletion is stamped with.
-    /// * `schms2` - Scheme overrides, if any.
-    /// * `resp` - The channel the writer bot replies on.
     pub fn delete_using_responder(
         &self,
         k:          &Dat,
@@ -1033,31 +1019,6 @@ impl<
         }
     }
 
-    /// Walk every zone and collect the live `(key, value, meta)`
-    /// entries that satisfy `opts`.
-    ///
-    /// Dispatches one `ScanRequest` per zone to one of that zone's
-    /// scan bots, waits for every zone's `ScanEntries` response,
-    /// merges the vectors and applies the global `limit` (per-zone
-    /// limits have already been applied inside each scan bot before
-    /// response).
-    ///
-    /// Scans have a bot pool of their own so that a scan waits only
-    /// on other scans. They were formerly answered by the zone's
-    /// init-garbage bot, where a scan issued while that bot was
-    /// collecting garbage waited for the collection to finish and,
-    /// on a store with a real backlog, failed at
-    /// `USER_REQUEST_TIMEOUT` with nothing to show the caller but a
-    /// channel error.
-    ///
-    /// Scan v1 does not read value payloads: every returned tuple
-    /// has `Dat::Empty` as the value. Callers fetch a value via
-    /// [`OzoneApi::get_wait`] or the generic `Database::get` once
-    /// the operator has chosen a specific key.
-    ///
-    /// `schms2` is threaded through to the per-zone handlers so a
-    /// future value-reading revision can honour per-call scheme
-    /// overrides without a protocol change.
     pub fn scan(
         &self,
         opts:   &ScanOpts,
@@ -1281,7 +1242,6 @@ impl<
         }
     }
 
-    /// Gathers the file state map held by every file bot in every zone, keyed by worker index.
     pub fn collect_file_states(
         &self,
         wait: Wait,
@@ -1373,8 +1333,6 @@ impl<
         resp.recv_number(n, wait)
     }
 
-    /// Pings every bot and returns the total number of errors they have logged, together
-    /// with the number that reported.
     pub fn bot_error_count(&self, wait: Wait) -> Outcome<(usize, usize)> {
         let (_, msgs) = res!(self.ping_bots(wait));
         let mut nbots: usize    = 0;

@@ -77,32 +77,16 @@ use rcgen;
 // │ map on those connections.                                                 │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// ALPN protocol name for ACME TLS-ALPN-01 challenge handshakes (RFC 8737).
 const ACME_TLS_ALPN_NAME: &[u8] = b"acme-tls/1";
 
-/// Maps TLS SNI hostnames to their corresponding `CertifiedKey` plus a
-/// separate challenge-cert map used exclusively on incoming `acme-tls/1`
-/// handshakes. Falls back to a "default" certificate (the first vhost) for
-/// regular handshakes when no SNI is present or no SNI match is found.
-///
-/// All three inner maps are behind `RwLock` so the ACME renewer running in
-/// a background task can swap cert contents under a live resolver without
-/// stopping the main accept loop.
 #[derive(Debug)]
 pub struct SteelCertResolver {
-    /// Regular per-vhost certificate store, keyed by lowercase hostname.
     by_hostname:        RwLock<HashMap<String, Arc<CertifiedKey>>>,
-    /// Default cert served when SNI is absent or unmatched. Pinned to the
-    /// first cert inserted so legacy clients and debug tools still get a
-    /// valid handshake.
     default_cert:       RwLock<Option<Arc<CertifiedKey>>>,
-    /// Throwaway challenge certificates, keyed by lowercase hostname,
-    /// served only on handshakes whose sole ALPN offer is `acme-tls/1`.
     challenge_certs:    RwLock<HashMap<String, Arc<CertifiedKey>>>,
 }
 
 impl SteelCertResolver {
-    /// Create a new, empty resolver.
     pub fn new() -> Self {
         Self {
             by_hostname:        RwLock::new(HashMap::new()),
@@ -111,9 +95,6 @@ impl SteelCertResolver {
         }
     }
 
-    /// Insert a `CertifiedKey` under one or more hostnames in the main
-    /// vhost map. If no default cert has been set yet, the first
-    /// inserted cert becomes the default.
     pub fn insert_vhost_cert(&self, hostnames: &[String], cert: Arc<CertifiedKey>) {
         {
             let mut default = lock_write_or_recover!(self.default_cert,
@@ -185,17 +166,8 @@ impl ChallengeInstaller for SteelCertResolver {
 // │ LOADED TLS STATE                                                          │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Result of loading TLS state.
-///
-/// `server_config` is ready to hand to `TlsAcceptor`. `acme_renewer` is
-/// `Some(..)` when ACME is enabled, in which case the caller must spawn
-/// a background task that calls [`AcmeRenewer::run_forever`] for the
-/// lifetime of the server.
 pub struct LoadedTls {
-    /// Rustls server configuration to install on the listener.
     pub server_config:  rustls::server::ServerConfig,
-    /// When ACME is active, the renewer that drives issuance and
-    /// periodic renewal on a background task.
     pub acme_renewer:   Option<AcmeRenewer>,
 }
 
@@ -210,29 +182,15 @@ pub struct LoadedTls {
 // │ once issuance completes.                                                  │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Background driver for the ACME issuance + renewal state machine.
 pub struct AcmeRenewer {
-    /// ACME client holding the account key, directory cache, and nonce
-    /// state.
     client:     AcmeClient,
-    /// Disk cache for the account key and issued cert/key pair.
     cache:      AcmeDiskCache,
-    /// Shared resolver that both the live accept loop and the renewer
-    /// write into.
     resolver:   Arc<SteelCertResolver>,
-    /// DNS names to issue a single multi-SAN certificate for.
     dns_names:  Vec<String>,
 }
 
 impl AcmeRenewer {
 
-    /// Run the renewer forever: attempt any needed initial issuance, then
-    /// loop with a 24-hour sleep between expiry checks.
-    ///
-    /// Returns an error only if the initial issuance fails. Errors on
-    /// subsequent renewal attempts are logged and swallowed; the loop
-    /// keeps running so transient failures (CA outage, DNS hiccup) do not
-    /// permanently shut down the renewer.
     pub async fn run_forever(mut self) -> Outcome<()> {
         // Initial issuance on startup if the cache is empty or its cert is
         // older than the renewal threshold.
@@ -267,26 +225,6 @@ impl AcmeRenewer {
         }
     }
 
-    /// Return `true` if the cached certificate is missing, unreadable, or
-    /// close enough to expiry to be worth replacing.
-    ///
-    /// The question is asked of the *certificate*, not of the file holding it.
-    /// This used to compare the file's mtime against a 60-day threshold, which
-    /// is right only while the file and the certificate share a history. They
-    /// come apart the moment a certificate is restored from a backup or copied
-    /// from another host: the mtime is minutes old, the certificate has weeks
-    /// left, and the server sails past the expiry serving a dead certificate
-    /// and never asking why. Reading the expiry out of the certificate cannot
-    /// be fooled that way.
-    ///
-    /// A certificate that cannot be read or parsed is treated as expiring: a
-    /// server that does not know should renew rather than gamble.
-    ///
-    /// Age is not the only thing that can make a certificate useless. One that
-    /// does not *name* a virtual host cannot serve it, however new it is -- so
-    /// adding a host must force a reissue too. Without that check, a new vhost is
-    /// served under the old certificate, the name does not match, and every
-    /// browser refuses the connection while the server reports nothing wrong.
     fn needs_renewal(&self) -> Outcome<bool> {
         let cert_path = self.cache.certificate_path();
         if !cert_path.exists() {
@@ -322,8 +260,6 @@ impl AcmeRenewer {
         Ok(false)
     }
 
-    /// Drive one full issuance through `AcmeClient`, persist the result
-    /// to the disk cache, and swap the new cert into the live resolver.
     async fn issue_and_install(&mut self) -> Outcome<()> {
         let issued: IssuedCertificate = res!(self.client.issue_certificate(
             &self.dns_names,
@@ -349,13 +285,8 @@ impl AcmeRenewer {
 // │ CONSTANTS                                                                 │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Interval between renewal-needed checks inside [`AcmeRenewer::run_forever`].
 const RENEWAL_POLL_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// Cached cert age beyond which a renewal is triggered. Let's Encrypt
-/// issues 90-day certs; renewing once a month of life remains gives a
-/// generous window to notice and fix a failing renewal, and matches the
-/// community convention.
 const RENEWAL_LEAD_SECS: i64 = 30 * 24 * 60 * 60;
 
 
@@ -363,12 +294,10 @@ const RENEWAL_LEAD_SECS: i64 = 30 * 24 * 60 * 60;
 // │ CERTIFICATE                                                               │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Namespace for TLS certificate helpers.
 pub struct Certificate;
 
 impl Certificate {
 
-    /// Compute an absolute path beneath a config-relative TLS directory.
     pub fn filepath(
         root:       &NormPathBuf,
         dir_root:   &String,
@@ -386,7 +315,6 @@ impl Certificate {
         root.clone().join(relpath).absolute().into_inner()
     }
 
-    /// Atomically write a blob to disk, logging on success.
     pub fn write_to_file<
         P: AsRef<Path> + std::fmt::Debug,
     >(
@@ -402,19 +330,6 @@ impl Certificate {
         Ok(())
     }
 
-    /// Load the TLS state for the current configuration.
-    ///
-    /// When `acme.enabled == true`, this function builds an
-    /// `fe2o3_net::acme::AcmeClient`, loads the cached account key from
-    /// disk (or generates a fresh one), and returns an `AcmeRenewer` for
-    /// the caller to spawn on a background task. The returned
-    /// [`SteelCertResolver`] starts out with any cached certificate
-    /// already installed; the renewer fills it in on its first pass if
-    /// there is nothing cached.
-    ///
-    /// When `acme.enabled == false`, this function loads per-vhost PEM
-    /// files from disk (or a single self-signed certificate in dev mode)
-    /// and builds a [`SteelCertResolver`] that selects the right one by SNI.
     pub fn load(
         cfg:        &ServerConfig,
         root:       &NormPathBuf,
@@ -435,7 +350,6 @@ impl Certificate {
         }
     }
 
-    /// Load certificates from PEM files on disk and build a SteelCertResolver.
     fn load_static(
         cfg:        &ServerConfig,
         vhosts:     &[VhostConfig],
@@ -499,18 +413,6 @@ impl Certificate {
         })
     }
 
-    /// Build an in-tree `fe2o3_net::acme::AcmeClient`-driven TLS state.
-    ///
-    /// This function is cheap: it constructs the ACME client, sets up the
-    /// disk cache, pre-loads any cached certificate into the resolver, and
-    /// returns immediately. The first issuance (if the cache is empty) or
-    /// any periodic renewal runs on the background task that
-    /// [`AcmeRenewer::run_forever`] provides.
-    ///
-    /// The certificate names every vhost hostname, the hostname of an enabled
-    /// mail listener, and every `acme.extra_domains` entry. A name absent from
-    /// that set has no renewal path, so leaving one out does not degrade
-    /// gracefully -- it works until the certificate expires and then fails.
     fn load_acme(
         cfg:        &ServerConfig,
         vhosts:     &[VhostConfig],
@@ -632,8 +534,6 @@ impl Certificate {
         })
     }
 
-    /// Read a PEM cert chain and its private key from disk, returning a
-    /// `CertifiedKey`.
     fn read_cert_and_key(
         cert_path:  &Path,
         key_path:   &Path,
@@ -669,10 +569,6 @@ impl Certificate {
         Ok(CertifiedKey::new(certs, signing_key))
     }
 
-    /// Generate a self-signed development certificate covering localhost.
-    ///
-    /// The certificate is written to `{tls_dir_rel}/dev/fullchain.pem`, keyed
-    /// by `{tls_dir_rel}/dev/privkey.pem`. Used only when running in dev mode.
     pub fn new_dev(
         cfg:        &ServerConfig,
         root:       &NormPathBuf,
@@ -731,9 +627,6 @@ impl Certificate {
 // │ PEM / DER DECODING                                                        │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Parse a PEM-encoded certificate chain plus a PKCS#8 DER-encoded
-/// private key into a rustls `CertifiedKey`, as produced by
-/// `fe2o3_net::acme::AcmeClient::issue_certificate`.
 fn pem_to_certified_key(
     cert_pem:   &[u8],
     key_pkcs8:  &[u8],
@@ -760,9 +653,6 @@ fn pem_to_certified_key(
     Ok(CertifiedKey::new(certs, signing_key))
 }
 
-/// Build a rustls `CertifiedKey` from a self-signed challenge cert's
-/// raw DER bytes (as produced by
-/// [`oxedyne_fe2o3_net::acme::challenge::build_tls_alpn_01_cert`]).
 fn der_to_certified_key(
     cert_der:   &[u8],
     key_pkcs8:  &[u8],

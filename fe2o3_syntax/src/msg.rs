@@ -193,18 +193,6 @@ impl Msg {
         Missing))
     }
 
-    /// The one name an argument is filed under, whichever of its names the
-    /// caller wrote.
-    ///
-    /// A syntax gives every argument a canonical name and one or two hyphenated
-    /// aliases, and a message read off the wire is filed under the canonical
-    /// one. A message built by hand used to be filed under whatever the caller
-    /// happened to type, so the same argument had two names depending on which
-    /// way it was travelling: a required argument added as `-zb` failed
-    /// validation for being absent, and one that arrived as `PowZeroBits` could
-    /// not be read back as `-zb`. An argument the syntax does not know keeps
-    /// the name it was given, so a lookup of something that is not there still
-    /// answers `None` rather than failing.
     fn arg_key<S: Into<String>>(&self, arg_name: S) -> String {
         let arg_name = arg_name.into();
         match self.syntax().args.get_recursive(&Key::Str(arg_name.clone())) {
@@ -213,8 +201,6 @@ impl Msg {
         }
     }
 
-    /// The short, hyphenated name an argument is written with, for a message
-    /// printing itself.
     fn arg_short_name<S: Into<String>>(&self, arg_name: S) -> String {
         let arg_name = arg_name.into();
         match self.syntax().args.get_recursive(&Key::Str(arg_name.clone())) {
@@ -1991,8 +1977,6 @@ impl MsgCmd {
             Invalid, Mismatch))
     }
 
-    /// The one name a command argument is filed under, whichever of its names
-    /// the caller wrote. See [`Msg::arg_key`] for why there has to be one.
     fn arg_key<S: Into<String>>(&self, arg_name: S) -> String {
         let arg_name = arg_name.into();
         match self.get_syntax_cmd() {
@@ -2004,8 +1988,6 @@ impl MsgCmd {
         }
     }
 
-    /// The short, hyphenated name a command argument is written with, for a
-    /// command printing itself.
     fn arg_short_name<S: Into<String>>(&self, arg_name: S) -> String {
         let arg_name = arg_name.into();
         match self.get_syntax_cmd() {

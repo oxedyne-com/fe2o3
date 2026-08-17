@@ -13,17 +13,6 @@ pub trait PrimitiveFloat: Sized + string::ToString {}
 impl PrimitiveFloat for f32 {}
 impl PrimitiveFloat for f64 {}
 
-/// Rounds a number to the given count of significant figures, taking a tie
-/// away from zero.
-///
-/// The count is taken from the leading digit of the magnitude, so a sign makes
-/// no difference to which digits survive: -0.475 to two figures is -0.48, just
-/// as 0.475 is 0.48. A tie is settled away from zero, matching
-/// [`f64::round`], though a tie only truly arises where the halfway value is
-/// exactly representable, as 0.125 is.
-///
-/// A zero, a value that is not finite, a figure count of zero, or a value so
-/// large that rounding up would overflow, is returned unchanged.
 pub fn round_to_sf(n: f64, sf: u8) -> f64 {
     if sf == 0 || n == 0.0 || !n.is_finite() {
         return n;
@@ -59,15 +48,6 @@ pub fn round_to_sf(n: f64, sf: u8) -> f64 {
     if out.is_finite() { out } else { n }
 }
 
-/// Multiplies a number by ten raised to `exp`.
-///
-/// The factor is always formed as a positive power of ten and then multiplied
-/// or divided by, so it is exact wherever a power of ten is itself exactly
-/// representable, which is up to the twenty-second, and within a unit in the
-/// last place beyond that. The factor is split in two when a single power
-/// would overflow, so a small number can be scaled up by more than the type's
-/// own exponent range without passing through infinity on the way. A plain
-/// `n * 10f64.powi(exp)` does neither.
 pub fn mul_pow10(n: f64, exp: i32) -> f64 {
     if exp.abs() <= 300 {
         let p = 10.0f64.powi(exp.abs());
@@ -194,10 +174,6 @@ impl Float64 {
 mod round_to_sf_tests {
     use super::*;
 
-    /// Every expected value below is worked out by hand from the decimal
-    /// digits, not read off the implementation: write the number in the form
-    /// d.ddd x 10^k, keep sf digits of the significand, and round the last one
-    /// half away from zero.
 
     // Values of one and above, which the function has always handled. These
     // pin the behaviour that must not change. //
@@ -258,8 +234,6 @@ mod round_to_sf_tests {
         assert_eq!(round_to_sf(-0.0999, 2), -0.1);
     }
 
-    /// The two readings that exposed the defect: a slope of -0.475 to two
-    /// figures is -0.48, and -0.5496 is -0.55.
     #[test]
     fn test_round_to_sf_reported_slopes_01() {
         assert_eq!(round_to_sf(-0.475, 2), -0.48);
@@ -267,8 +241,6 @@ mod round_to_sf_tests {
         assert_eq!(round_to_sf(-0.055, 2), -0.055);
     }
 
-    /// A tie is decided away from zero, so 0.125 to two figures is 0.13 and
-    /// 2.5 to one figure is 3.
     #[test]
     fn test_round_to_sf_ties_go_away_from_zero_01() {
         assert_eq!(round_to_sf(0.125, 2), 0.13);
@@ -281,8 +253,6 @@ mod round_to_sf_tests {
         assert_eq!(round_to_sf(-0.25, 1), -0.3);
     }
 
-    /// An exact power of ten is already at one significant figure, so it comes
-    /// back unchanged whatever count is asked for and whatever its sign.
     #[test]
     fn test_round_to_sf_powers_of_ten_01() {
         for exp in -320i32..=308 {
@@ -297,8 +267,6 @@ mod round_to_sf_tests {
         }
     }
 
-    /// Rounding is symmetric about zero, so the result for a negative value is
-    /// the negation of the result for its magnitude.
     #[test]
     fn test_round_to_sf_sign_symmetry_01() {
         let mut v = 3.0e-7;
@@ -310,8 +278,6 @@ mod round_to_sf_tests {
         }
     }
 
-    /// A zero, a non-finite value, or a figure count of zero is returned
-    /// unchanged rather than producing a not-a-number.
     #[test]
     fn test_round_to_sf_degenerate_01() {
         assert_eq!(round_to_sf(0.0, 3), 0.0);
@@ -322,7 +288,6 @@ mod round_to_sf_tests {
         assert_eq!(round_to_sf(f64::NEG_INFINITY, 3), f64::NEG_INFINITY);
     }
 
-    /// The extremes of the range stay finite and keep their magnitude.
     #[test]
     fn test_round_to_sf_extremes_01() {
         assert_eq!(round_to_sf(1.0e300, 3), 1.0e300);
@@ -332,8 +297,6 @@ mod round_to_sf_tests {
         assert!(round_to_sf(1.0e-320, 3) > 0.0);
     }
 
-    /// A significand of 1.2345 rounds to 1.23 at every decade the type can
-    /// hold, to within a unit in the last place.
     #[test]
     fn test_round_to_sf_across_decades_01() {
         for exp in -300i32..=300 {
@@ -356,8 +319,6 @@ mod round_to_sf_tests {
 mod mul_pow10_tests {
     use super::*;
 
-    /// A power of ten up to the twenty-second is exactly representable, so
-    /// scaling one by it must give the literal back bit for bit.
     #[test]
     fn test_mul_pow10_exact_range_01() {
         for exp in -22i32..=22 {
@@ -371,10 +332,6 @@ mod mul_pow10_tests {
         assert_eq!(mul_pow10(1.234, 0), 1.234);
     }
 
-    /// The factor is split where a single power of ten would overflow, so a
-    /// small number can be scaled up by more than the type's own exponent
-    /// range without passing through infinity on the way. A plain
-    /// `n * 10f64.powi(320)` gives infinity here.
     #[test]
     fn test_mul_pow10_beyond_a_single_power_01() {
         assert_eq!(1.0e-300 * 10.0f64.powi(320), f64::INFINITY);
@@ -384,9 +341,6 @@ mod mul_pow10_tests {
         assert!(((got - 1.0e-20) / 1.0e-20).abs() < 1.0e-15, "got {:e}", got);
     }
 
-    /// Scaling up and back down again returns the value it started from, bit
-    /// for bit while the power of ten is exact and to within a unit in the
-    /// last place beyond that.
     #[test]
     fn test_mul_pow10_round_trip_01() {
         let v = 1.234567;

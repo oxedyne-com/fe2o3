@@ -48,14 +48,6 @@ pub struct DifficultyParams {
 }
 
 impl DifficultyParams {
-    ///
-    /// The rate is taken as a `u64` because that is what the request timer
-    /// measures, and a burst measured inside one millisecond reports a rate of
-    /// `u64::MAX`. Narrowing that to a `u16` first turned an unmeasurably fast
-    /// burst into an arbitrary number, and the arithmetic that followed
-    /// overflowed on the way to demanding more zero bits than the hash has.
-    /// The curve saturates at [`Self::max`] instead: an attacker can raise the
-    /// difficulty to the configured ceiling, and no further.
     #[inline(always)]
     pub fn required_global_zbits(&self, rps: u64) -> Outcome<ZeroBits> {
         if self.max < self.min {

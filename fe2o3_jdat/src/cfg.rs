@@ -48,34 +48,6 @@ pub trait Config:
 impl<T: Config> JdatMapFile for T {}
 
 
-/// Expands `{file:path}` and `{env:VAR}` references in a configuration value.
-///
-/// * `{env:VAR}` becomes the environment variable's value, and fails where the
-///   variable is unset or empty and no default is given.
-/// * `{env:VAR:default}` falls back to `default` instead of failing.
-/// * `{file:path}` becomes the trimmed contents of the file, read relative to
-///   `root`, and fails where the file cannot be read.
-///
-/// Environment references are expanded first, so one may name the file another
-/// reads and a deployment can parameterise where its secrets live.
-///
-/// # Why it is here
-///
-/// Because it is what a configuration value is, and it belongs beside the
-/// configuration trait rather than inside any one application. It was an
-/// associated function of a web server's route type, which meant that an
-/// application wanting one string substitution had to take a web server with it;
-/// the second caller wrote its own copy instead, which is exactly the outcome a
-/// shared home prevents.
-///
-/// # What is not attempted
-///
-/// The expansion is not recursive. A file whose contents themselves hold
-/// `{file:...}` is substituted verbatim, and a reference the substitution
-/// happens to create is expanded, since the scan restarts from the beginning of
-/// the value. That is the behaviour callers already had, and a configuration
-/// whose values quote each other is a configuration in need of a rethink rather
-/// than of a fixed point.
 pub fn resolve(value: &str, root: &Path)
     -> Outcome<String>
 {
@@ -84,10 +56,6 @@ pub fn resolve(value: &str, root: &Path)
     resolve_files(&named, value, root)
 }
 
-/// Expands every `{env:VAR}` and `{env:VAR:default}` reference of a value.
-///
-/// `whole` is only ever the original value, so a message names what the author
-/// wrote rather than a half-expanded intermediate they never saw.
 fn resolve_env(whole: &str)
     -> Outcome<String>
 {
@@ -120,8 +88,6 @@ fn resolve_env(whole: &str)
     Ok(out)
 }
 
-/// Expands every `{file:path}` reference of a value, reading each file relative
-/// to `root`.
 fn resolve_files(value: &str, whole: &str, root: &Path)
     -> Outcome<String>
 {
@@ -148,10 +114,6 @@ fn resolve_files(value: &str, whole: &str, root: &Path)
     Ok(out)
 }
 
-/// Expands every string of a daticle, wherever in the structure it sits.
-///
-/// Map keys are expanded as well as map values, since a key is a daticle here
-/// and there is no reason a configuration should not name one indirectly.
 pub fn resolve_dat(dat: &Dat, root: &Path)
     -> Outcome<Dat>
 {
@@ -180,8 +142,6 @@ pub fn resolve_dat(dat: &Dat, root: &Path)
 mod tests {
     use super::*;
 
-    /// An environment reference is expanded, a missing one without a default is
-    /// refused, and a default is taken where the variable is not set.
     #[test]
     fn a_reference_is_expanded_or_refused() -> Outcome<()> {
         let root = Path::new(".");
@@ -198,8 +158,6 @@ mod tests {
         Ok(())
     }
 
-    /// A value that names nothing comes back as itself, whatever it holds, and a
-    /// daticle that is not a string is left alone.
     #[test]
     fn what_names_nothing_is_untouched() -> Outcome<()> {
         let root = Path::new(".");

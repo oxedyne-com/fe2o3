@@ -115,13 +115,7 @@ impl<
 #[derive(Clone, Debug)]
 pub struct AppWebSocketHandler {
     dev_manager: Option<Arc<DevRefreshManager>>,
-    /// Session id of the browser that opened this WebSocket, as read from
-    /// the HttpOnly session cookie at the upgrade request. Populated via
-    /// `with_sid()` before the handshake. `None` means the client sent no
-    /// session cookie; session-scoped commands will then reject.
     sid: Option<String>,
-    /// Terminal session manager for term_* commands.  `None` when
-    /// terminal features are not configured for this vhost.
     term_manager: Option<Arc<TerminalManager>>,
 }
 
@@ -135,35 +129,27 @@ impl AppWebSocketHandler {
         }
     }
 
-    /// Attach a terminal manager to enable term_* commands.
     pub fn with_term_manager(mut self, tm: Arc<TerminalManager>) -> Self {
         self.term_manager = Some(tm);
         self
     }
 
-    /// Build the scoped database key used by session-scoped commands, of
-    /// the form `sess:<sid>:<user_key>`. Returns `None` when this handler
-    /// has no session id attached.
     fn scoped_sess_key(&self, user_key: &str) -> Option<Dat> {
         self.sid.as_ref().map(|sid| {
             Dat::Str(fmt!("sess:{}:{}", sid, user_key))
         })
     }
 
-    /// Build the session-metadata key `sess_meta:<sid>`. Returns `None`
-    /// when this handler has no session id attached.
     fn sess_meta_key(&self) -> Option<Dat> {
         self.sid.as_ref().map(|sid| {
             Dat::Str(fmt!("sess_meta:{}", sid))
         })
     }
 
-    /// Build the user record key `user:<username>`.
     fn user_key(username: &str) -> Dat {
         Dat::Str(fmt!("user:{}", username))
     }
 
-    /// Current unix seconds, or zero if the clock is before the epoch.
     fn unix_secs_now() -> u64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -171,9 +157,6 @@ impl AppWebSocketHandler {
             .unwrap_or(0)
     }
 
-    /// Default KDF name used for user passphrase hashing. Hardcoded to
-    /// match the wallet kdf for now; will be promoted to a per-app config
-    /// value when the shell command surface grows a setting for it.
     const AUTH_KDF_NAME: &'static str = "Argon2id_v0x13";
 
     fn response_text(
@@ -1211,19 +1194,6 @@ impl WebSocketHandler for AppWebSocketHandler {
     }
 }
 
-/// The answer to `whoami`, as JSON held in a jdat string.
-///
-/// Every other value this protocol returns is JSON inside a jdat string, and not by accident: the
-/// client puts JSON in with `sess_put`, and `sess_get` hands the same string back untouched. The
-/// server is keeping a string, so a string is what comes out.
-///
-/// `whoami` is the one answer the server composes itself, and that is what made it the exception.
-/// A bare jdat map is a form the only client of this wire cannot read: jdat writes a bool as
-/// `(true)`, which is not JSON, and a browser carries no jdat reader. The map went out, the client
-/// read `undefined` off a string, and every session looked signed out to the page that asked. So
-/// the answer keeps the convention the rest of the wire already keeps.
-///
-/// [`Dat::json`] does the rendering, so nothing here writes JSON by hand.
 fn whoami_dat(user_opt: Option<String>) -> Outcome<Dat> {
     let mut m = DaticleMap::new();
     m.insert(dat!("authenticated"), Dat::Bool(user_opt.is_some()));
@@ -1248,7 +1218,6 @@ mod whoami_tests {
 
     use std::collections::BTreeMap;
 
-    /// A signed-in session says so, and says who, in JSON a browser can read.
     #[test]
     fn test_a_signed_in_session_is_json_00() -> Outcome<()> {
         let user = "eb00b174d02fc1ad";
@@ -1267,7 +1236,6 @@ mod whoami_tests {
         Ok(())
     }
 
-    /// A session with nobody in it says so, and names no user.
     #[test]
     fn test_a_signed_out_session_names_nobody_01() -> Outcome<()> {
         let dat = res!(whoami_dat(None));
@@ -1283,10 +1251,6 @@ mod whoami_tests {
         Ok(())
     }
 
-    /// The answer reads back as JSON, which is the whole point of it.
-    ///
-    /// jdat's own decoder in JSON mode stands in for the browser here: it accepts JSON and
-    /// nothing else, so a reply it can read is a reply `JSON.parse` can read.
     #[test]
     fn test_the_answer_parses_as_json_02() -> Outcome<()> {
         for user_opt in [Some("abc123".to_string()), None] {
@@ -1321,24 +1285,6 @@ mod whoami_tests {
     }
 }
 
-/// A message as it may be written to a log.
-///
-/// `register` and `login` carry a passphrase as their second argument, in the
-/// clear, because the wire is TLS and the server needs the passphrase to hash
-/// it. That is fine on the wire and not fine in a journal, which is plain text,
-/// is read by anyone who can read the host, and outlives the request by however
-/// long the log is kept.
-///
-/// So those two keep their command name and lose their arguments. Everything
-/// else is logged whole: a key or a value is not a secret in the way a
-/// passphrase is, and a debug log that hid them would not be worth turning on.
-///
-/// **The test is the command, not the shape of the argument.** A redactor that
-/// tried to spot something secret-looking would be wrong the first time somebody
-/// added a command with a secret in a new position, and wrong silently. A
-/// command this does not know is logged whole, which is the right default for a
-/// vocabulary where the two exceptions are named -- but it does mean a new
-/// command carrying a secret must be added here, and this comment is the notice.
 fn redact(txt: &str) -> String {
     let name = match txt.split_whitespace().next() {
         Some(n) => n,
@@ -1354,7 +1300,6 @@ fn redact(txt: &str) -> String {
 mod redact_tests {
     use super::*;
 
-    /// A passphrase does not reach the log, whatever it looks like.
     #[test]
     fn test_a_passphrase_is_not_logged_00() -> Outcome<()> {
         let secret = "correct horse battery staple";
@@ -1368,7 +1313,6 @@ mod redact_tests {
         Ok(())
     }
 
-    /// Everything else is logged whole, or the log is not worth having.
     #[test]
     fn test_the_rest_is_logged_whole_01() -> Outcome<()> {
         for line in [
@@ -1382,7 +1326,6 @@ mod redact_tests {
         Ok(())
     }
 
-    /// Nothing here panics on what a hostile client may send.
     #[test]
     fn test_odd_input_is_survived_02() -> Outcome<()> {
         assert_eq!(redact(""), "");

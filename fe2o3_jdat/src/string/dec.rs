@@ -76,7 +76,6 @@ pub struct DecoderConfig<
     pub ukinds_opt:             Option<UsrKinds<M1, M2>>,
     pub omap_start:             u64,
     pub omap_delta:             u64,
-    /// Bounds on the length and the nesting depth of the text the decoder will accept.
     pub limits:                 DecodeLimits,
 }
 
@@ -128,7 +127,6 @@ impl<
         }
     }
 
-    /// Returns the configuration with the decoding limits replaced.
     pub fn with_limits(mut self, limits: DecodeLimits) -> Self {
         self.limits = limits;
         self
@@ -193,32 +191,6 @@ pub enum CommentCapture {
     Type2,
 }
 
-/// Per-character state machine for decoding RFC 8259 §7 string
-/// escapes inside a quoted string literal.
-///
-/// * `None`          -- normal: characters are pushed verbatim
-///                      into the slurp, except `\` which
-///                      transitions into `Backslash`.
-/// * `Backslash`     -- the previous character was a backslash
-///                      and the current character is the escape
-///                      type: `"`, `\`, `/`, `b`, `f`, `n`, `r`,
-///                      `t`, or `u`. The first eight translate
-///                      to a single character; `u` transitions
-///                      into `Unicode`.
-/// * `Unicode`       -- collecting four hex digits for a
-///                      `\uXXXX` code point. On completion the
-///                      code point is pushed if it is in the BMP
-///                      and not a surrogate half, the high half
-///                      of a surrogate pair transitions into
-///                      `SurrogateBackslash`, and a bare low
-///                      surrogate is a decode error.
-/// * `SurrogateBackslash` -- after a high surrogate; expecting
-///                           `\` to start the low half.
-/// * `SurrogateU`    -- after `SurrogateBackslash`; expecting `u`.
-/// * `LowSurrogate`  -- collecting four hex digits for the low
-///                      half; on completion the pair is combined
-///                      into a supplementary plane code point
-///                      and pushed.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum StringEscape {
     #[default]
@@ -235,7 +207,6 @@ pub struct DecoderState {
     // Data
     //pub cursor:             Cursor,
     pub kind_outer:         Kind,
-    /// Nesting depth of the value being decoded, the root value sitting at depth 1.
     pub depth:              usize,
     // Switches
     pub explicit_kind:      bool, // The kind was defined explicitly.
@@ -279,7 +250,6 @@ impl fmt::Display for DecoderState {
 }
 
 impl DecoderState {
-    /// Returns the state for the next level down, one deeper than the present one.
     pub fn recurse(&self) -> Self {
         Self {
             kind_outer: self.kind_outer.clone(),
@@ -339,26 +309,16 @@ pub enum MolecularCapture {
     Map,
 }
 
-/// What the decoder does with the daticle returned by the level below.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Descent {
-    /// The level was opened by a kindicle, e.g. `(u8|42)`, and may complete this one.
     Kindicle,
-    /// The level was opened by a `[` or a `{`, so it is one item of the molecule being gathered.
     Molecule,
 }
 
-/// What reading one character asks of the level that character belongs to.
-///
-/// The descent is asked for rather than taken, so that the locals of the character-reading code are
-/// off the stack before the decoder enters the level below.
 #[derive(Debug)]
 enum Step {
-    /// Read the next character at this level.
     Continue,
-    /// The daticle at this level is complete.
     Done(Dat),
-    /// Open a level below this one, decoding it under the given state.
     Descend(DecoderState, Descent),
 }
 
@@ -598,11 +558,6 @@ impl Slurp {
         self.s.len()
     }
 
-    /// Whether this slurp has captured anything at all. An empty
-    /// quoted string (e.g. `""`) has zero characters but is still
-    /// content -- it decodes to `Dat::Str("")` -- so `len()` alone
-    /// is not enough to decide whether a pending value is waiting
-    /// to be processed at a `,`, `}` or `]` boundary.
     fn has_content(&self) -> bool {
         self.is_string || !self.s.is_empty()
     }
@@ -953,8 +908,6 @@ impl Kind {
 
 impl Dat {
 
-    /// Decodes JDAT text under the default limits, which refuse text that is too long or nested too
-    /// deep.
     pub fn decode_string<
         S: Into<String>,
     >(
@@ -970,8 +923,6 @@ impl Dat {
         Self::decode_string_with_config(s, &dec_cfg)
     }
 
-    /// Decodes JDAT text under the given limits, which refuse text that is too long or nested too
-    /// deep.
     pub fn decode_string_limited<
         S: Into<String>,
     >(
@@ -988,8 +939,6 @@ impl Dat {
         Self::decode_string_with_config(s, &dec_cfg)
     }
 
-    /// Decodes JDAT text using the given configuration, whose limits refuse text that is too long
-    /// or nested too deep.
     pub fn decode_string_with_config<
         S: Into<String>,
         M1: MapMut<UsrKindCode, UsrKind> + Clone + fmt::Debug + Default,
@@ -1085,7 +1034,6 @@ impl Dat {
         Self::finish(&state, &mut store)
     }
 
-    /// Whether a kindicled daticle, e.g. the `42` of `(u8|42)`, is the whole of this level.
     #[inline(never)]
     fn kindicle_completes(state: &DecoderState) -> bool {
         if state.kind_outer == Kind::Unknown {
@@ -1095,12 +1043,6 @@ impl Dat {
         }
     }
 
-    /// Reads one character, returning what the level it belongs to should do next.
-    ///
-    /// Every arm of the match lives here rather than in [`Self::recursive_decode`], and the descent
-    /// is handed back to the caller rather than taken here, so that none of this function's locals
-    /// are on the stack while the decoder is inside a nested level.  That is what makes the cost of
-    /// a level of nesting a fixed few hundred bytes.
     #[inline(never)]
     fn step<
         M1: MapMut<UsrKindCode, UsrKind> + Clone + fmt::Debug + Default,
@@ -1315,8 +1257,6 @@ impl Dat {
         Ok(Step::Continue)
     }
 
-    /// Concludes a level whose text ran out before a closing bracket did, which is legal only for
-    /// an atom.
     #[inline(never)]
     fn finish(
         state:  &DecoderState,
@@ -1340,7 +1280,6 @@ impl Dat {
         }
     }
 
-    /// Reports a `(` which repeats a kind that has already been given.
     #[inline(never)]
     fn open_paren_err(
         state:  &DecoderState,
@@ -1361,7 +1300,6 @@ impl Dat {
         }
     }
 
-    /// Reports a `|` separating a kind that carries no data, e.g. `(true|)`.
     #[inline(never)]
     fn superfluous_bar_err(
         kind_inner: &Kind,
@@ -1375,7 +1313,6 @@ impl Dat {
         String, Input, Decode, Invalid)
     }
 
-    /// Reports a `[` opening a molecule that the outer kind cannot hold.
     #[inline(never)]
     fn open_bracket_err(
         state:  &DecoderState,
@@ -1394,8 +1331,6 @@ impl Dat {
         }
     }
 
-    /// Consumes a character while a comment is being captured, closing the comment at the end
-    /// character or the end of the line.
     #[inline(never)]
     fn capture_comment<
         M1: MapMut<UsrKindCode, UsrKind> + Clone + fmt::Debug + Default,
@@ -1480,8 +1415,6 @@ impl Dat {
         Ok(())
     }
 
-    /// Concludes a `)`, returning the completed daticle, or `None` if the level continues because
-    /// the daticle may yet be one item of a molecule.
     #[inline(never)]
     fn close_paren<
         M1: MapMut<UsrKindCode, UsrKind> + Clone + fmt::Debug + Default,
@@ -1639,7 +1572,6 @@ impl Dat {
         Ok(None)
     }
 
-    /// Converts the daticles gathered between round brackets into a tuple, e.g. `(1, 2)`.
     #[inline(never)]
     fn implicit_tuple(
         mut list:   Vec<Dat>,
@@ -1702,7 +1634,6 @@ impl Dat {
         }
     }
 
-    /// Concludes a `]`, completing the list, vector, byte string or tuple at this level.
     #[inline(never)]
     fn close_bracket(
         mut state:  DecoderState,
@@ -1863,7 +1794,6 @@ impl Dat {
         }
     }
 
-    /// Concludes a `:`, taking the daticle just gathered as the key of a map entry.
     #[inline(never)]
     fn colon(
         state:  &DecoderState,
@@ -1912,7 +1842,6 @@ impl Dat {
         Ok(())
     }
 
-    /// Concludes a `}`, completing the map at this level.
     #[inline(never)]
     fn close_brace<
         M1: MapMut<UsrKindCode, UsrKind> + Clone + fmt::Debug + Default,
@@ -2131,26 +2060,6 @@ impl Dat {
         Ok(())
     }
 
-    /// Advance the string-escape state machine by one character.
-    ///
-    /// Called from the top of the decoder's outer loop whenever
-    /// we are inside a quoted string. Returns `Ok(true)` if the
-    /// character was consumed by the escape state machine and
-    /// the outer loop should `continue`; returns `Ok(false)` if
-    /// the character is an ordinary literal character and the
-    /// outer loop should fall through to its normal handling
-    /// (including the `"` / `'` string-terminator branches).
-    ///
-    /// Decodes RFC 8259 §7 escapes:
-    ///
-    /// * `\"` `\\` `\/` `\b` `\f` `\n` `\r` `\t` -- one-char
-    ///   translations, pushed into the slurp.
-    /// * `\uXXXX` -- four hex digits forming a 16-bit code unit.
-    ///   A BMP code point is pushed directly; a high surrogate
-    ///   must be followed immediately by `\uYYYY` with a low
-    ///   surrogate, which is combined into a supplementary
-    ///   plane code point; a bare low surrogate is a decode
-    ///   error.
     #[inline(never)]
     fn handle_string_escape(
         c:      char,
@@ -2305,9 +2214,6 @@ impl Dat {
         }
     }
 
-    /// Convert a single ASCII hex digit to its numeric value.
-    /// Rejects anything else with a clear error message tagged
-    /// for the decoder's error chain.
     fn hex_digit_value(c: char) -> Outcome<u32> {
         match c {
             '0'..='9'   => Ok((c as u32) - ('0' as u32)),
@@ -2499,16 +2405,8 @@ mod tests {
 
     use std::thread;
 
-    /// The stack Rust gives a spawned thread, and the stack the default depth limit is sized
-    /// against.
     const SPAWNED_THREAD_STACK: usize = 2 * 1024 * 1024;
 
-    /// Nests `levels` lists around nothing, e.g. `[[[]]]`, which the decoder reads at depth
-    /// `levels + 1`, the root sitting at depth 1.
-    ///
-    /// This is the bomb: a few characters per level, describing a nesting deep enough to exhaust
-    /// the stack of whoever reads it.  It is written rather than encoded, since the encoder recurses
-    /// as the decoder does, and an attacker is under no obligation to use it.
     fn nested_lists(levels: usize) -> String {
         let mut s = String::with_capacity(2 * levels);
         for _ in 0..levels {
@@ -2520,8 +2418,6 @@ mod tests {
         s
     }
 
-    /// Nests `levels` maps around a scalar, e.g. `{a:{a:1}}`, which the decoder reads at depth
-    /// `levels`, since the outermost brace opens the root rather than a level below it.
     fn nested_maps(levels: usize) -> String {
         let mut s = String::with_capacity(4 * levels);
         for _ in 0..levels {
@@ -2534,12 +2430,6 @@ mod tests {
         s
     }
 
-    /// Decodes on a thread with the stack a spawned thread gets, which is the stack the default
-    /// limit is sized against.
-    ///
-    /// A decoder that overflows this stack aborts the process, taking the whole test run with it,
-    /// which is precisely the failure these tests exist to catch: the abort cannot be caught, so it
-    /// must not happen.
     fn decode_on_a_small_stack(s: String) -> Outcome<Outcome<Dat>> {
         let builder = thread::Builder::new().stack_size(SPAWNED_THREAD_STACK);
         let handle = match builder.spawn(move || Dat::decode_string(s)) {

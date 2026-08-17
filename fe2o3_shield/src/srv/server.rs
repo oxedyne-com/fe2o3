@@ -47,11 +47,6 @@ use std::{
 use tokio::net::UdpSocket;
 
 
-/// A handler for a peer that hears application payloads and answers none of
-/// them.
-///
-/// Useful as the handler for a server whose only job is the handshake, and as
-/// the thing a caller passes while they work out what their own answer is.
 pub async fn answer_nothing(_payload: Vec<u8>, _src_addr: SocketAddr) -> Outcome<Answer> {
     Ok(Answer::Nothing)
 }
@@ -109,12 +104,6 @@ impl<
         )
     }
 
-    /// Binds the UDP socket the configuration asks for, and hands it back
-    /// before anything is run on it.
-    ///
-    /// A caller that wants to know where the server landed -- a test asking for
-    /// an ephemeral port, or an operator logging it -- has to be able to ask
-    /// before the loop starts, because once it starts it does not return.
     pub async fn bind(&self) -> Outcome<Arc<UdpSocket>> {
         let port = self.context.cfg.server_port_udp;
         let ip = res!(self.context.cfg.bind_ip());
@@ -142,7 +131,6 @@ impl<
         }
     }
 
-    /// Binds the socket and runs the main server loop.
     pub async fn start<H, F>(&mut self, handler: H) -> Outcome<()>
     where
         H: Fn(Vec<u8>, SocketAddr) -> F,
@@ -152,15 +140,6 @@ impl<
         self.run(trg, handler).await
     }
 
-    /// Runs the main server loop on an already-bound socket: hears packets,
-    /// answers the ones a handler has something to say about, periodically
-    /// collects message-assembly garbage, and processes control commands until
-    /// a `Finish` is received.
-    ///
-    /// A packet is handled to completion before the next is read. Doing them
-    /// one at a time is what keeps the guards' accounting honest under load,
-    /// and a handler that wants concurrency can have it by spawning inside
-    /// itself, where it knows what it is doing.
     pub async fn run<H, F>(
         &mut self,
         trg:        Arc<UdpSocket>,
@@ -225,8 +204,6 @@ impl<
         Ok(())
     }
 
-    /// Guard, validate and assemble one packet, and act on the message when the
-    /// packet completed one.
     async fn serve<H, F>(
         &self,
         buf:        &[u8],

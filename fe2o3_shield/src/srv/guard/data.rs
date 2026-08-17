@@ -29,8 +29,6 @@ use std::{
     time::SystemTime,
 };
 
-/// Just a namespace for some functions to interchange between a string and a
-/// [`std::net::SocketAddress`].
 pub struct Address;
 
 impl Address {
@@ -52,20 +50,10 @@ impl Address {
     }
 }
 
-/// SHIELD-specific extension payload attached to each generic
-/// [`oxedyne_fe2o3_net::guard::addr::AddressLog`].
-///
-/// Carries proof-of-work difficulty targets negotiated with the peer, plus the pending
-/// handshake request that allows the shield wrapper to enforce the HReq1 then HReq2 then
-/// HReq3 sequence on top of the generic rate-limit state machine.
 #[derive(Clone, Debug, Default)]
 pub struct AddressData {
-    /// The difficulty I require of your POW.
     pub my_zbits:   ZeroBits,
-    /// The difficulty you require of my POW.
     pub your_zbits: ZeroBits,
-    /// Pending handshake step for this address, if any. The timestamp marks when the step
-    /// was recorded so expired handshakes can be discarded.
     pub pending:    Option<(HandshakeType, SystemTime)>,
 }
 
@@ -75,8 +63,6 @@ impl AsMut<AddressData> for AddressData {
     }
 }
 
-/// Used by [`oxedyne_fe2o3_shield::srv::guard::user::UserGuard`] to store information relating
-/// to a user.
 #[derive(Clone, Debug, Default)]
 pub struct UserData<
     const SIDL: usize,

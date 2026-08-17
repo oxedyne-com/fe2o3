@@ -125,8 +125,6 @@ impl Dat {
         }
     }
 
-    /// Look up a required key and return a cloned `String`. The value at
-    /// the key must be a `Dat::Str`.
     pub fn map_get_string(&self, key: &Self) -> Outcome<String> {
         let val = res!(self.map_get_must(key));
         match val.get_string() {
@@ -138,8 +136,6 @@ impl Dat {
         }
     }
 
-    /// Look up a required key and return its value coerced to `i64`.
-    /// Any of the signed or unsigned integer variants will convert.
     pub fn map_get_i64(&self, key: &Self) -> Outcome<i64> {
         let val = res!(self.map_get_must(key));
         match val.get_i64() {
@@ -151,10 +147,6 @@ impl Dat {
         }
     }
 
-    /// Look up a required key and return its value coerced to `u64`.
-    /// Any of the unsigned integer variants will convert. A signed variant
-    /// will not, so a count stored as a signed number is an error here
-    /// rather than a silent reinterpretation of its sign bit.
     pub fn map_get_u64(&self, key: &Self) -> Outcome<u64> {
         let val = res!(self.map_get_must(key));
         match val.get_u64() {
@@ -166,8 +158,6 @@ impl Dat {
         }
     }
 
-    /// Look up a required key and return its value coerced to `f64`.
-    /// Any numeric variant will convert.
     pub fn map_get_f64(&self, key: &Self) -> Outcome<f64> {
         let val = res!(self.map_get_must(key));
         match val.get_float64() {
@@ -179,9 +169,6 @@ impl Dat {
         }
     }
 
-    /// Look up a required key whose value is itself a map. Returns a
-    /// reference into the parent so callers can navigate deeper
-    /// without cloning.
     pub fn map_get_map(&self, key: &Self) -> Outcome<&Self> {
         let val = res!(self.map_get_must(key));
         match val {
@@ -193,8 +180,6 @@ impl Dat {
         }
     }
 
-    /// Look up a required key whose value is a list and return a
-    /// reference to the backing `Vec<Dat>`.
     pub fn map_get_list(&self, key: &Self) -> Outcome<&Vec<Dat>> {
         let val = res!(self.map_get_must(key));
         match val {
@@ -206,12 +191,6 @@ impl Dat {
         }
     }
 
-    /// Insert or update `(key, val)` in a `Dat::Map` or
-    /// `Dat::OrdMap`, returning any previous value at that key. In
-    /// an `OrdMap` an existing entry is replaced in place so that
-    /// the original insertion order is preserved; a new entry is
-    /// appended at the end using the next available order
-    /// slot. Errors if `self` is neither a map variant.
     pub fn map_put(&mut self, key: Self, val: Self) -> Outcome<Option<Self>> {
         match self {
             Dat::Map(m) => Ok(m.insert(key, val)),

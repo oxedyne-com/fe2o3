@@ -134,16 +134,6 @@ impl ServerConfig {
         Ok(Self::default())
     }
 
-    /// The IP address the server binds its UDP socket to.
-    ///
-    /// The empty setting, and the word `local`, both mean whatever address this
-    /// machine has on its network, which is what a peer meant to be reachable
-    /// from elsewhere wants. Anything else is read as an address and used as
-    /// written, so a peer that wants loopback -- a development machine, a peer
-    /// behind a front-end, two peers in one test -- can have it. The server
-    /// used to take the machine's network address whatever the configuration
-    /// said, which made loopback unaskable-for and `server_address` a setting
-    /// that did nothing.
     pub fn bind_ip(&self) -> Outcome<IpAddr> {
         let raw = self.server_address.trim();
         if raw.is_empty() || raw.eq_ignore_ascii_case("local") {

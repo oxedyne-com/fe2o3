@@ -57,9 +57,6 @@ impl<
 /// `FromDatMap` and `ToDatMap` currently do not handle recursion.
 #[derive(Clone, Debug, Eq, PartialEq, FromDatMap, ToDatMap)]
 pub struct OzoneConfig {
-    /// On-disk format version. Verified against
-    /// `constant::CURRENT_FORMAT_VERSION` at load time; a mismatch
-    /// causes `check_and_fix` to refuse the config.
     pub format_version:                 u8,
     // Key hashing
     pub bytes_before_hashing:           u64, // applies only to keys
@@ -78,13 +75,6 @@ pub struct OzoneConfig {
     pub num_rbots_per_zone:             u16, // reader bots
     pub num_wbots_per_zone:             u16, // writer bots
     pub num_sbots:                      u16, // server bots
-    /// Number of scan bots per zone.
-    ///
-    /// `#[optional]` so a config written before scanning had a pool of
-    /// its own still loads; a missing field falls through to the
-    /// `Default` impl below. A zone needs at least one, and
-    /// `check_and_fix` raises a zero to one rather than leaving a store
-    /// that cannot answer a scan at all.
     #[optional]
     pub num_scbots_per_zone:            u16, // scan bots
     // Zones
@@ -100,22 +90,10 @@ pub struct OzoneConfig {
     // by editing the on-disk file or by letting Steel rewrite it on
     // next clean start.
 
-    /// If `true`, issue an fsync on the data and index files after every
-    /// successful key+value write. Strongest durability, lowest throughput
-    /// (every write waits for the disk). Use on hosts where a power loss
-    /// or kernel panic must not cost the acknowledged write.
     #[optional]
     pub sync_on_write:                  bool,
-    /// If non-zero, issue an fsync on the data and index files after
-    /// every `N`-th write. A group-commit policy: `N` acknowledged
-    /// writes become durable in one fsync call, amortising the cost.
-    /// Ignored when `sync_on_write` is `true`.
     #[optional]
     pub sync_every_n_writes:            u32,
-    /// If non-zero, issue an fsync on the data and index files whenever
-    /// at least this many milliseconds have elapsed since the last
-    /// fsync on the bot. Time-based group commit. Ignored when
-    /// `sync_on_write` or `sync_every_n_writes` are active.
     #[optional]
     pub sync_interval_ms:               u64,
 }
@@ -181,12 +159,6 @@ impl Default for OzoneConfig {
 }
 
 impl OzoneConfig {
-    /// Refuse the configuration if its `format_version` does not
-    /// match the constant the current binary was compiled with.
-    /// A mismatch means the on-disk database was written by a
-    /// different ozone version; ozone does not auto-migrate, so
-    /// the operator must either recreate the database or run a
-    /// version of the binary that matches the file.
     pub fn check_format_version(&self) -> Outcome<()> {
         if self.format_version != constant::CURRENT_FORMAT_VERSION {
             return Err(err!(
@@ -200,13 +172,6 @@ impl OzoneConfig {
         Ok(())
     }
 
-    /// Raises a scan-bot count of zero to one.
-    ///
-    /// A zone with no scan bot cannot answer a scan at all, and a
-    /// config file written by hand, or one that simply predates the
-    /// pool, can easily carry a zero. Refusing the config would take a
-    /// working store offline over a field that has an obvious right
-    /// answer, so the count is corrected and the operator told.
     pub fn fix_scan_bot_count(&mut self) {
         if self.num_scbots_per_zone == 0 {
             warn!(sync_log::stream(),
@@ -421,11 +386,6 @@ pub struct ZoneConfig {
 mod tests {
     use super::*;
 
-    /// A config file written before scanning had a bot pool of its own
-    /// carries no `num_scbots_per_zone`, and every ozone store on disk
-    /// is in that state until its server rewrites its config. Refusing
-    /// such a file, or loading it with a zero count, would take a
-    /// working store offline over a field with an obvious right answer.
     #[test]
     fn config_without_scan_bot_count_loads_with_one() -> Outcome<()> {
         let mut map = match OzoneConfig::to_datmap(OzoneConfig::default()) {
@@ -455,8 +415,6 @@ mod tests {
         Ok(())
     }
 
-    /// An explicit zero is corrected rather than obeyed, for the same
-    /// reason.
     #[test]
     fn zero_scan_bot_count_is_raised_to_one() -> Outcome<()> {
         let mut cfg = OzoneConfig::default();

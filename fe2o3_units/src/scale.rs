@@ -225,10 +225,6 @@ impl Scale {
         }
     }
 
-    /// Returns the scale of this basis whose decimal exponent is `exp`, and
-    /// errors where the prefix table has no entry for it. The decimal table
-    /// runs from atto to exa and the binary one from one to exbi, so an
-    /// exponent outside that span, or one that is not a prefix's, has no name.
     pub fn dec_exp_lookup(&self, exp: i32) -> Outcome<Self> {
         Ok(match self.basis() {
             ScaleBasis::Decimal => {
@@ -328,13 +324,6 @@ impl Mag {
         })
     }
 
-    /// Builds a magnitude that inherits this one's significant figure count.
-    ///
-    /// The count came through [`Mag::new`] and so is already known to be
-    /// greater than zero, which is the only thing that constructor checks.
-    /// Deriving rather than reconstructing is therefore how a method that
-    /// returns a magnitude rather than an [`Outcome`] stays free of a
-    /// panicking unwrap.
     fn derived(&self, val: f64, scale: Scale) -> Self {
         Self {
             val,
@@ -435,21 +424,6 @@ impl Mag {
 
 }
 
-/// Two magnitudes are equal when they denote the same quantity, to the coarser
-/// of the two significant figure counts.
-///
-/// It is the quantity that is compared and not the number written on it, so a
-/// mega and a giga carrying the same significand are a thousand apart and
-/// differ, while one mega and a thousand kilo are one quantity and match. Each
-/// side is therefore reduced to a scale-free value first, and only then to a
-/// decimal exponent and a significand; both must agree.
-///
-/// The coarser count governs so that the answer does not depend on which side
-/// of the operator a magnitude sits.
-///
-/// Zero is zero whatever prefix it wears, and is no other quantity. A value
-/// that is not a number equals nothing, itself included, as [`f64`] has it, so
-/// this is [`PartialEq`] and not [`Eq`].
 impl PartialEq for Mag {
     fn eq(&self, other: &Self) -> bool {
         // Fold each prefix into its value, which is the only way a mega and a
@@ -478,9 +452,6 @@ impl PartialEq for Mag {
     }
 }
 
-/// Reduces a finite, non-zero value to the decimal exponent of its leading digit
-/// and its significand rounded to `sf` figures, which is what "the same quantity
-/// at this precision" comes down to. The sign is the caller's business.
 fn significand(val: f64, sf: u8) -> (i32, i64) {
     let mag = val.abs();
     let mut exp = mag.log10().floor() as i32;
@@ -570,10 +541,6 @@ mod tests {
         Ok(())
     }
 
-    /// The same significand under two prefixes is two different quantities, and
-    /// the arithmetic is not in dispute: 1.234 mega is 1 234 000 and 1.234 giga
-    /// is 1 234 000 000, a thousand apart. Equality compared the significands
-    /// alone and called them the same number.
     #[test]
     fn test_a_prefix_apart_is_not_the_same_quantity_00() -> Outcome<()> {
         assert_ne!(res!(Mag::mega(1.234, 4)), res!(Mag::giga(1.234, 4)));
@@ -582,7 +549,6 @@ mod tests {
         Ok(())
     }
 
-    /// One mega is a thousand kilo is a million, written three ways.
     #[test]
     fn test_one_quantity_under_three_prefixes_is_one_quantity_00() -> Outcome<()> {
         let m = res!(Mag::mega(1.0, 4));
@@ -592,9 +558,6 @@ mod tests {
         Ok(())
     }
 
-    /// Zero is zero whatever prefix it wears. The old comparison took the
-    /// logarithm of it, got minus infinity, and made every zero unequal to
-    /// itself.
     #[test]
     fn test_zero_equals_zero_00() -> Outcome<()> {
         assert_eq!(res!(Mag::one_decimal(0.0, 3)), res!(Mag::one_decimal(0.0, 3)));
@@ -603,10 +566,6 @@ mod tests {
         Ok(())
     }
 
-    /// A logarithm has nothing to say about a negative number, so the old
-    /// comparison divided by ten to the power of a not-a-number cast to zero
-    /// and compared the raw values. Two magnitudes below zero compare like
-    /// their magnitudes, and a sign is a difference.
     #[test]
     fn test_negatives_compare_by_magnitude_00() -> Outcome<()> {
         assert_eq!(res!(Mag::milli(-5.0, 3)), res!(Mag::milli(-5.0, 3)));
@@ -616,9 +575,6 @@ mod tests {
         Ok(())
     }
 
-    /// Precision belongs to the comparison, not to the left-hand side: the
-    /// coarser of the two counts governs, so the answer is the same either way
-    /// round. 1.04 kilo and 1.0 kilo are one figure apart and agree at one.
     #[test]
     fn test_the_comparison_is_symmetric_00() -> Outcome<()> {
         let coarse = res!(Mag::kilo(1.0, 1));
@@ -631,9 +587,6 @@ mod tests {
         Ok(())
     }
 
-    /// Rounding carries into the next decade: 9.99 kilo to two figures is ten
-    /// thousand, and an exponent that does not follow the carry would call it
-    /// nine thousand nine hundred.
     #[test]
     fn test_a_rounding_carry_moves_the_exponent_00() -> Outcome<()> {
         assert_eq!(res!(Mag::kilo(9.99, 2)), res!(Mag::kilo(10.0, 2)));
@@ -641,9 +594,6 @@ mod tests {
         Ok(())
     }
 
-    /// The fields are public, so a count of zero can be built around the
-    /// constructor that refuses it. Subtracting one from it used to wrap a `u8`
-    /// to 255.
     #[test]
     fn test_a_zero_figure_count_does_not_wrap_00() -> Outcome<()> {
         let mut a = res!(Mag::kilo(1.234, 4));
@@ -655,7 +605,6 @@ mod tests {
         Ok(())
     }
 
-    /// A value that is not a number equals nothing, itself included.
     #[test]
     fn test_a_value_that_is_not_a_number_equals_nothing_00() -> Outcome<()> {
         let nan = res!(Mag::one_decimal(f64::NAN, 3));

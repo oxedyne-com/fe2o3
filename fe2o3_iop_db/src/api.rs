@@ -20,13 +20,6 @@ use oxedyne_fe2o3_jdat::{
 use oxedyne_fe2o3_namex::id::InNamex;
 
 
-/// Placeholder for the native `oxedyne_fe2o3_crypto::enc::EncryptionScheme` on
-/// `wasm32` targets, where the C-linked cryptographic backend cannot be built.
-///
-/// It occupies the default-scheme slot of [`RestSchemesOverride`] so the public
-/// type shape is identical across native and browser builds.  The type is
-/// uninhabited: a browser build performs no encryption at rest, so the
-/// [`Override::Default`] variant carrying it can never be constructed.
 #[cfg(target_arch = "wasm32")]
 #[derive(Clone, Debug)]
 pub enum EncryptionScheme {}
@@ -167,44 +160,18 @@ impl<
     }
 }
 
-/// Options controlling a [`Database::scan`] invocation.
-///
-/// All fields have sensible defaults via [`Default`], so the common case
-/// "give me every entry" is `ScanOpts::default()`.
-///
-/// # Semantics
-///
-/// - `prefix`: restrict the returned entries to those whose key matches
-///   the given `Dat`. For `Dat::Str(s)` prefixes the match is a string
-///   prefix. For other `Dat` variants the match is equality. `None`
-///   returns every entry.
-/// - `limit`: cap the returned vector at this many entries. `None` means
-///   no cap; callers that don't trust the database size should always
-///   set a bound.
-/// - `include_values`: when `true` the scan reads each value payload
-///   from disk (and decrypts if the database is encrypted). When
-///   `false` the returned values are `Dat::Empty`, but keys and `Meta`
-///   are still populated; this mode is much cheaper and is the right
-///   choice when the caller is paginating keys for display and will
-///   fetch values individually on demand.
 #[derive(Clone, Debug, Default)]
 pub struct ScanOpts {
-    /// Optional key prefix filter.
     pub prefix:         Option<Dat>,
-    /// Optional hard cap on the returned entry count.
     pub limit:          Option<usize>,
-    /// Whether to read and decrypt value payloads.
     pub include_values: bool,
 }
 
 impl ScanOpts {
-    /// Construct a scan-everything options value.
     pub fn all() -> Self {
         Self::default()
     }
 
-    /// Shorthand for "scan every entry whose key is a `Dat::Str` starting
-    /// with `prefix`".
     pub fn with_str_prefix(prefix: impl Into<String>) -> Self {
         Self {
             prefix:         Some(Dat::Str(prefix.into())),
@@ -213,13 +180,11 @@ impl ScanOpts {
         }
     }
 
-    /// Fluent setter for `include_values`.
     pub fn include_values(mut self, yes: bool) -> Self {
         self.include_values = yes;
         self
     }
 
-    /// Fluent setter for `limit`.
     pub fn limit(mut self, n: usize) -> Self {
         self.limit = Some(n);
         self
@@ -267,28 +232,6 @@ pub trait Database<
     )
         -> Outcome<bool>;
 
-    /// Walk the database, returning `(key, value, meta)` triples for
-    /// every entry that satisfies `opts`.
-    ///
-    /// The scan is a best-effort point-in-time snapshot: entries
-    /// written after the scan begins may or may not appear; entries
-    /// deleted or overwritten mid-scan return their latest live state
-    /// (stale versions are filtered via the database's own
-    /// reconciliation -- implementations must not return superseded
-    /// values).
-    ///
-    /// `or` behaves as for [`Database::get`], supplying a per-call
-    /// override of the encryption and hashing schemes. Scans with
-    /// `include_values == true` use it to decrypt each value; scans
-    /// with `include_values == false` leave the `or` argument alone.
-    ///
-    /// # Cost and scale
-    ///
-    /// Scan is expected to be O(database size); it is not a
-    /// low-latency operation. Callers that only need a handful of
-    /// entries matching a tight prefix should still bound the scan
-    /// via `opts.limit` because implementations are free to evaluate
-    /// the prefix filter after the walk rather than during it.
     fn scan(
         &self,
         opts:   &ScanOpts,
@@ -297,17 +240,6 @@ pub trait Database<
         -> Outcome<Vec<(Dat, Dat, Meta<UIDL, UID>)>>;
 }
 
-/// A database that is not there.
-///
-/// Plenty of things are parameterised by a [`Database`] because they *may* hold
-/// one -- a server that persists what it hears, say -- and are perfectly usable
-/// without. Before this, such a caller had to name a real database type it
-/// never intended to instantiate, which meant taking a dependency on an
-/// implementation in order to pass `None`.
-///
-/// Every operation refuses rather than pretending to succeed, so a caller that
-/// reaches for a database it does not have is told so at the call rather than
-/// finding an empty answer later.
 #[derive(Debug)]
 pub struct NoDatabase<
     const UIDL: usize,

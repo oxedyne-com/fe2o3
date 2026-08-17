@@ -20,12 +20,6 @@ use oxedyne_fe2o3_syntax::{
 };
 
 
-/// Build the shell Syntax tree wrapped in a `SyntaxRef`.
-///
-/// Most callers want this. App binaries that need to inject their
-/// own commands through `AppExtension::extend_syntax` go through
-/// `new_shell_raw` instead so they can mutate the tree before it is
-/// shared.
 pub fn new_shell(
     name:   &str,
     ver:    &SemVer,
@@ -37,9 +31,6 @@ pub fn new_shell(
     Ok(SyntaxRef::new(s))
 }
 
-/// Build the shell Syntax tree without wrapping it in a `SyntaxRef`,
-/// so the caller can hand it to `AppExtension::extend_syntax` for
-/// further population before sharing.
 pub fn new_shell_raw(
     name:   &str,
     ver:    &SemVer,

@@ -60,7 +60,6 @@ impl FileState {
     pub fn get_index_file_size(&self)   -> usize                            { self.ind_size }
     pub fn is_live(&self)               -> bool                             { self.live }
     pub fn get_old_sum(&self)           -> u64                              { self.oldsum }
-    /// Returns the number of old (superseded) records in the file.
     pub fn get_old_count(&self)         -> usize                            { self.oldcnt }
     pub fn data_map(&self)              -> &BTreeMap<u64, DataState>        { &self.dmap }
     pub fn data_map_mut(&mut self)      -> &mut BTreeMap<u64, DataState>    { &mut self.dmap }
@@ -416,13 +415,6 @@ impl FileStateMap {
         self.map.insert(fnum, fs);
     }
 
-    /// Marks the given file as the live file, creating its state with the given initial
-    /// sizes if the file is new to this shard.
-    ///
-    /// A file already known to the shard keeps its record map and its accounting: replacing
-    /// the state of a file that already holds records would discard the record start
-    /// positions, after which no record in that file could be flagged old and its garbage
-    /// would never be reclaimed.
     pub fn new_live_file(
         &mut self,
         num:        FileNum,

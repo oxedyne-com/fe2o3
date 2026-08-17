@@ -63,7 +63,6 @@ pub enum OzoneBotId {
     InitGarbageBot(Bid, ZoneInd, BotPoolInd),
     Master(Bid),
     ReaderBot(Bid, ZoneInd, BotPoolInd),
-    /// A scan bot, in a given zone and pool position.
     ScanBot(Bid, ZoneInd, BotPoolInd),
     ServerBot(Bid, BotPoolInd),
     Supervisor(Bid),

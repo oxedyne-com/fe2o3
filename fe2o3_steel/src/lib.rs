@@ -92,11 +92,6 @@
 pub mod srv;
 pub mod app;
 
-/// Public API for apps that build on Steel.
-///
-/// Apps that need custom webhook handlers, in-process API handlers
-/// or shell commands depend on `fe2o3_steel` as a library, implement
-/// the `AppExtension` trait, and call `run_with_extension`.
 pub mod prelude {
     pub use crate::app::ext::{
         AppExtension,

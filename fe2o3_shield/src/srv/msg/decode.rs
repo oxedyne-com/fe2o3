@@ -55,12 +55,6 @@ use std::net::{
 };
 
 
-/// A message that arrived whole, together with the header of the packet that
-/// completed it.
-///
-/// The header is kept because the parts of it that matter outside the packet
-/// layer -- which message this was, who sent it, and what kind of message it
-/// claims to be -- are exactly what an answer has to be addressed with.
 #[derive(Clone, Debug)]
 pub struct Accepted<
     const MIDL: usize,
@@ -68,13 +62,10 @@ pub struct Accepted<
     MID: oxedyne_fe2o3_jdat::id::NumIdDat<MIDL>,
     UID: oxedyne_fe2o3_jdat::id::NumIdDat<UIDL>,
 > {
-    /// Header of the packet that completed the message.
     pub meta:   PacketMeta<MIDL, UIDL, MID, UID>,
-    /// The assembled message bytes, ready to be parsed against a syntax.
     pub byts:   Vec<u8>,
 }
 
-/// A message parsed against the syntax, with the parts every command needs.
 #[derive(Clone, Debug)]
 pub struct Received<
     const SL: usize,
@@ -82,13 +73,9 @@ pub struct Received<
     SID: oxedyne_fe2o3_jdat::id::NumIdDat<SL>,
     UID: oxedyne_fe2o3_jdat::id::NumIdDat<UL>,
 > {
-    /// Syntax the message was validated against, and the outgoing encoding.
     pub fmt:    MsgFmt,
-    /// Proof-of-work parameters the sender declared.
     pub pow:    MsgPow,
-    /// Session and user identifiers.
     pub ids:    MsgIds<SL, UL, SID, UID>,
-    /// The parsed message, whose commands the caller dispatches.
     pub msg:    Msg,
 }
 
@@ -101,18 +88,6 @@ impl<
 >
     Protocol<C, ML, SL, UL, P>
 {
-    /// Guard, validate and assemble one incoming packet.
-    ///
-    /// Returns the whole message when this packet was the one that completed
-    /// it, and `None` whenever there is nothing yet to hand on: a packet
-    /// dropped by a guard, a packet whose validation failed, or a chunk of a
-    /// message still missing others. A dropped packet is not an error, because
-    /// most of what arrives at a public UDP port is not addressed to anybody
-    /// in good faith, and a loop that errored on each one would be a loop an
-    /// attacker could fill with logging.
-    ///
-    /// `trg_ip` is the address the packet was received on, which the proof of
-    /// work is bound to at both ends.
     pub fn accept(
         mut self,
         buf:        &[u8],
@@ -406,8 +381,6 @@ impl<
         }
     }
 
-    /// Parse an assembled message against the syntax, gathering the identifiers
-    /// and proof-of-work parameters every command shares.
     pub fn read(
         &self,
         accepted:   &Accepted<
