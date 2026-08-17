@@ -15,14 +15,10 @@ use oxedyne_fe2o3_core::prelude::*;
 pub struct IslamicCalendar;
 
 impl IslamicCalendar {
-    // TODO the epoch is off by one, and which way to correct it is a decision.
-    // 1948439 is 15 July 622 Julian, the astronomical (Thursday) epoch. The
-    // comment above, and every other statement in this file, names 16 July 622
-    // Julian, which is the civil (Friday) epoch and JDN 1948440. Both are used
-    // in the literature. Changing it moves every date this calendar converts by
-    // a day, and test_islamic_epoch expects a third answer again, so it wants
-    // deciding rather than patching.
-    const ISLAMIC_EPOCH_JDN: i64 = 1948439;
+    // The civil (Friday) epoch, 16 July 622 Julian. The astronomical variant is
+    // a day earlier at 1948439; this crate uses the civil one, as calendar.rs
+    // does, and the two must not drift apart again.
+    const ISLAMIC_EPOCH_JDN: i64 = 1948440;
     const ISLAMIC_YEAR_LENGTH: f64 = 354.36708; // mean days
     const ISLAMIC_MONTH_LENGTH: f64 = 29.530589; // mean days
     const ISLAMIC_MONTHS: [&'static str; 12] = [
@@ -66,19 +62,29 @@ impl IslamicCalendar {
             return Err(err!("Islamic day must be between 1 and 30, got {}", islamic_day; Invalid, Input));
         }
         
-        // Calculate total days since Islamic epoch
-        let years_since_epoch = islamic_year - 1;
-        let _months_since_epoch = years_since_epoch * 12 + (islamic_month as i32 - 1);
-        
-        // Calculate days for complete years
-        let days_for_years = ((years_since_epoch as f64) * Self::ISLAMIC_YEAR_LENGTH).floor() as i64;
-        
-        // Calculate days for complete months in current year
-        let days_for_months = ((islamic_month as f64 - 1.0) * Self::ISLAMIC_MONTH_LENGTH).floor() as i64;
-        
-        // Add current day (minus 1 since we're counting from day 1)
+        if islamic_year < 1 {
+            return Err(err!("Islamic year must be 1 or later, got {}", islamic_year; Invalid, Input));
+        }
+
+        // Days in the complete years before this one, counted by the thirty-year
+        // cycle the calendar is actually defined on: 11 leap years of 355 days
+        // and 19 common ones of 354, which is 10,631 days a cycle. Counting them
+        // off a mean year length instead drifts by a day at a time, and
+        // disagrees with is_islamic_leap_year, which decides the length of Dhu
+        // al-Hijjah a few lines below from the same cycle.
+        let years_before = (islamic_year - 1) as i64;
+        let mut days_for_years = (years_before / 30) * (30 * 354 + 11);
+        for year in 1..=(years_before % 30) {
+            days_for_years += if Self::is_islamic_leap_year(year as i32) { 355 } else { 354 };
+        }
+
+        // Months alternate 30 and 29 days from Muharram, so the months before
+        // this one hold 29 each plus one more for every odd-numbered one.
+        let month = islamic_month as i64;
+        let days_for_months = 29 * (month - 1) + month / 2;
+
         let total_days = days_for_years + days_for_months + (islamic_day as i64 - 1);
-        
+
         Ok(Self::ISLAMIC_EPOCH_JDN + total_days)
     }
     
@@ -285,11 +291,12 @@ mod tests {
         assert_eq!(res!(IslamicCalendar::days_in_islamic_month(1445, 2)), 29); // Safar
         assert_eq!(res!(IslamicCalendar::days_in_islamic_month(1445, 4)), 29); // Rabi' al-thani
         
-        // Test Dhu al-Hijjah in normal year
-        assert_eq!(res!(IslamicCalendar::days_in_islamic_month(1445, 12)), 29);
-        
-        // Test Dhu al-Hijjah in leap year
-        assert_eq!(res!(IslamicCalendar::days_in_islamic_month(1446, 12)), 30); // 1446 % 30 = 26, which is a leap year
+        // Dhu al-Hijjah takes a thirtieth day in a leap year of the cycle. The
+        // cycle position is ((year - 1) % 30) + 1, so 1445 sits at 5 and is a
+        // leap year, and 1446 sits at 6 and is not -- the other way round from
+        // how this read before, which had 1446 at 26.
+        assert_eq!(res!(IslamicCalendar::days_in_islamic_month(1445, 12)), 30);
+        assert_eq!(res!(IslamicCalendar::days_in_islamic_month(1446, 12)), 29);
         
         Ok(())
     }
@@ -318,14 +325,15 @@ mod tests {
 
     #[test]
     fn test_islamic_epoch() -> Outcome<()> {
-        // Test that Islamic year 1, month 1, day 1 converts to the correct Gregorian date
         let (greg_year, greg_month, greg_day) = res!(IslamicCalendar::islamic_to_gregorian(1, 1, 1));
-        
-        // Islamic epoch should be July 16, 622 CE (Gregorian)
-        assert_eq!(greg_year, 622);
-        assert_eq!(greg_month, 7);
-        assert!(greg_day >= 15 && greg_day <= 17); // Allow small variation
-        
+
+        // 1 Muharram 1 AH is 16 July 622 in the Julian calendar, which is where
+        // the epoch is always quoted from. This function answers in the proleptic
+        // Gregorian calendar, and the two are three days apart in the seventh
+        // century, so the answer is the 19th. It is exact, not approximate: both
+        // are the same instant, JDN 1948440.
+        assert_eq!((greg_year, greg_month, greg_day), (622, 7, 19));
+
         Ok(())
     }
 
