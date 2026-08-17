@@ -87,6 +87,7 @@ use crate::id::{
 	varint_decode,
 	varint_encode,
 	Anchor,
+	ContentId,
 	ContentRange,
 	OpId,
 	Side,
@@ -362,6 +363,71 @@ impl std::fmt::Display for Settled {
 	}
 }
 
+
+/// The one thing an operation's inverse needs that the operation does not say,
+/// and which only the state it was written against holds.
+///
+/// An operation records an intent and not the state it displaced, so undoing the
+/// three that assert a value has to read the value they replaced from somewhere.
+/// That somewhere is a render at the operation's parents, which the engine does
+/// not have and every caller does. This says which question to ask; asking it is
+/// the caller's.
+///
+/// Note what is **not** here: rendering the operation set *without* the operation
+/// is not the way to answer any of these, and cannot be made to work. Removing an
+/// operation from the middle of a history leaves anchors naming atoms nothing
+/// created, which `Sequence::render_with` refuses rather than guesses at. A render
+/// at the parents holds every operation its author could see and is causally
+/// closed by construction.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Prior {
+	/// The path a file had before an [`Op::FileRename`] moved it.
+	Path {
+		/// The file whose path is wanted.
+		file: OpId,
+	},
+	/// What a file was before an [`Op::FileMode`] asserted otherwise.
+	Mode {
+		/// The file whose mode is wanted.
+		file: OpId,
+	},
+	/// Where content sat before an [`Op::Move`] took it, one gap per run, in the
+	/// order the runs are named.
+	Place {
+		/// The runs whose former neighbours are wanted.
+		src: Vec<ContentRange>,
+	},
+}
+
+/// What undoing an operation amounts to, as far as the operation itself can say.
+///
+/// It is here rather than in whichever tool authors a revert for the reason
+/// [`AUTO_MARK_PREFIX`] is here: more than one program will offer to undo an
+/// operation -- a command line tool, a forge page reviewing a contribution -- and
+/// two tables of what an inverse is would be two tables that could disagree about
+/// a history they both write into. What each program still owns is the state it
+/// reads and the words it says.
+///
+/// The three fields are three different kinds of answer, and a caller that
+/// serves only the first is a caller that silently half-undoes a splice:
+///
+/// - [`Undoing::written`] is the part the operation is enough for, exactly.
+/// - [`Undoing::copies`] is content the operation killed, which comes back only
+///   as a **copy** under a new identity, because nothing here un-buries: the
+///   tombstone set is grow-only and is recomputed from the operation set on every
+///   render. See [`Op::restoring`].
+/// - [`Undoing::prior`] is a question for the state the operation was written
+///   against.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Undoing {
+	/// Inverse operations the reverted operation said enough to write outright.
+	pub written:	Vec<Op>,
+	/// Content the operation killed, which an inverse can only put back as a
+	/// copy, one restoring splice per run.
+	pub copies:		Vec<ContentRange>,
+	/// What has to be read out of the state the operation was written against.
+	pub prior:		Option<Prior>,
+}
 
 /// A single unit of history: one whole edit.
 ///
@@ -816,6 +882,208 @@ impl Op {
 			}
 		}
 		Ok(())
+	}
+
+	/// Returns why nothing in the vocabulary undoes this operation, or `None`
+	/// where something does.
+	///
+	/// The sentence is here, and not in whoever refuses, so that a person told no
+	/// by a command and a person told no by a forge are told the same thing. Each
+	/// of them says *why*, because every one of these looks at first like an
+	/// omission and none of them is:
+	///
+	/// - A file's deletion holds its content back rather than destroying it, and
+	///   there is no operation that revives a file. A new file with the old bytes
+	///   is a different file, which is what `undo` already does and says.
+	/// - A mark, a proposal, a remark and a settlement are things somebody said.
+	///   The record grows and nothing retracts an utterance; a proposal's standing
+	///   is changed by writing another [`Op::Settled`], which is what that
+	///   operation is for.
+	/// - A note follows content and is not content. Nothing un-says it, and it
+	///   already reports itself as a note on dead content when what it was about
+	///   goes.
+	/// - A [`Op::Reverts`] names what some edits were for. Undoing the label would
+	///   leave the edits in place and take away the only record saying what they
+	///   were; whoever means to put the work back reverts those edits.
+	pub fn no_inverse(&self) -> Option<&'static str> {
+		match self {
+			Self::FileDelete { .. } => Some(
+				"a file's deletion holds its content back rather than destroying it, and \
+				no operation revives a file; a file with those bytes written again is a \
+				new file, which is what `undo` does and says"),
+			Self::Mark { .. } => Some(
+				"a mark says where somebody was at a point in the history, and the \
+				history only grows; there is nothing about it to take back"),
+			Self::Note { .. } => Some(
+				"a note is something somebody said about content, and nothing un-says \
+				it; when the content it is about goes, the note reports itself as a note \
+				on dead content"),
+			Self::Proposal { .. } => Some(
+				"a proposal is something somebody asked for, and the record of the \
+				asking grows rather than retracts; what became of it is said by writing \
+				a Settled"),
+			Self::Said { .. } => Some(
+				"a remark is something somebody said, and nothing un-says it"),
+			Self::Settled { .. } => Some(
+				"a settlement asserts what a proposal now is, and is superseded by \
+				writing another rather than undone"),
+			Self::Reverts { .. } => Some(
+				"this names what some edits were written to undo; taking the name away \
+				would leave the edits and lose the only record of what they were for, so \
+				it is those edits that are reverted"),
+			_ => None,
+		}
+	}
+
+	/// Returns what undoing this operation amounts to, `id` being the identity
+	/// the operation was recorded under.
+	///
+	/// The identity is asked for rather than carried because an operation does not
+	/// hold one -- the same edit written by two authors is two operations -- and an
+	/// inverse needs it: what a splice inserted is named by the splice, so undoing
+	/// the insertion is a removal naming that identity and nothing else, exact and
+	/// costing no render.
+	///
+	/// Fails where [`Op::no_inverse`] says there is none, with that sentence.
+	///
+	/// # A splice has two halves and they are not alike
+	///
+	/// The half that inserted is undone exactly: the bytes are named by the
+	/// operation that made them, so the inverse removes them under their own
+	/// identity and every note, every anchor and every later edit inside them
+	/// keeps meaning what it meant.
+	///
+	/// The half that removed is not. Nothing here un-buries, so what comes back is
+	/// a copy under a new identity, and [`Undoing::copies`] says which runs. That
+	/// is the whole of the difference between this and a system that relabels a
+	/// dead edge live, and a caller must say so rather than report a clean
+	/// restoration.
+	pub fn undoing(&self, id: OpId)
+		-> Outcome<Undoing>
+	{
+		if let Some(why) = self.no_inverse() {
+			return Err(err!(
+				"Nothing undoes the {} {}: {}.", self.name(), id, why;
+			Invalid, Input, Unimplemented));
+		}
+		match self {
+			// The file did not exist before, so there is nothing to look up and the
+			// inverse is the one operation that retires it. Note what follows: a
+			// deletion has no inverse of its own, so this is the one undoing in the
+			// vocabulary that cannot itself be undone.
+			Self::FileCreate { .. } => Ok(Undoing {
+				written:	vec![Self::FileDelete { file: id }],
+				..Undoing::default()
+			}),
+			Self::FileRename { file, .. } => Ok(Undoing {
+				prior:	Some(Prior::Path { file: *file }),
+				..Undoing::default()
+			}),
+			Self::FileMode { file, .. } => Ok(Undoing {
+				prior:	Some(Prior::Mode { file: *file }),
+				..Undoing::default()
+			}),
+			Self::Splice { remove, insert, .. } => {
+				let mut written = Vec::new();
+				if !insert.is_empty() {
+					written.push(Self::Splice {
+						left:	None,
+						right:	None,
+						remove:	vec![res!(ContentRange::new(id, 0, insert.len() as u64))],
+						insert:	Vec::new(),
+					});
+				}
+				Ok(Undoing {
+					written,
+					copies:	remove.iter().filter(|r| !r.is_empty()).copied().collect(),
+					prior:	None,
+				})
+			},
+			Self::Move { src, .. } => Ok(Undoing {
+				prior:	Some(Prior::Place {
+					src: src.iter().filter(|r| !r.is_empty()).copied().collect(),
+				}),
+				..Undoing::default()
+			}),
+			// Everything left is refused above, and the arm is here so that a
+			// variant added later fails loudly rather than being quietly undoable
+			// by nothing.
+			other => Err(err!(
+				"The {} {} is neither undone nor refused; a new operation belongs in \
+				one of the two.", other.name(), id;
+			Bug, Missing)),
+		}
+	}
+
+	/// Builds the splice that puts a copy of dead content back where it was.
+	///
+	/// The anchor is the whole of the design and it is fixed here so that two
+	/// authors of a revert produce the same shape: the copy binds **after the last
+	/// byte of the run it restores**. An anchor names content and content is named
+	/// whether it is alive or dead, so this lands the copy exactly where the
+	/// original is buried, however much of what surrounded it has gone since --
+	/// which no other anchor can promise, the neighbours being the very thing a
+	/// deletion took away.
+	///
+	/// It is also what makes the copy readable afterwards. [`Op::restored`] takes
+	/// that anchor and the length back apart, so a reader accounting for a file can
+	/// say whose writing it is looking at rather than crediting the person who
+	/// reverted; nothing else in the record connects the two, the bytes having a
+	/// new identity from the moment they come back.
+	///
+	/// Fails on an empty run, there being no such thing as a copy of nothing.
+	pub fn restoring(was: &ContentRange, bytes: Vec<u8>)
+		-> Outcome<Self>
+	{
+		if was.is_empty() {
+			return Err(err!(
+				"The content {} names no byte, so there is nothing to restore.", was;
+			Invalid, Input, Missing));
+		}
+		if bytes.len() as u64 != was.len() {
+			return Err(err!(
+				"A copy of {} bytes was offered for the content {}, which is {} bytes; a \
+				restoration puts back what was there.", bytes.len(), was, was.len();
+			Invalid, Input, Mismatch));
+		}
+		Ok(Self::Splice {
+			left:	Some(Anchor::after(ContentId::new(was.op(), was.to() - 1))),
+			right:	None,
+			remove:	Vec::new(),
+			insert:	bytes,
+		})
+	}
+
+	/// Returns the content this operation is a copy of, where it has the shape
+	/// [`Op::restoring`] gives one.
+	///
+	/// The shape is a splice that removes nothing, ends nothing, and binds after a
+	/// byte: the anchored byte is the last of the run restored, and the insertion's
+	/// length says where that run began. `None` for anything else.
+	///
+	/// **This shape is not unique and is not evidence on its own.** An ordinary
+	/// insertion at the end of a file has it too. What makes a copy a copy is that
+	/// an [`Op::Reverts`] vouches for it -- the record naming what was undone, with
+	/// the copies authored against it -- and a reader that skips that check will
+	/// credit an author for text somebody merely appended.
+	pub fn restored(&self) -> Option<ContentRange> {
+		let (left, right, remove, insert) = match self {
+			Self::Splice { left, right, remove, insert }	=> (left, right, remove, insert),
+			_											=> return None,
+		};
+		if right.is_some() || !remove.is_empty() || insert.is_empty() {
+			return None;
+		}
+		let anchor = match left {
+			Some(a) if a.side == Side::After	=> a,
+			_									=> return None,
+		};
+		// The anchored byte is the last of the run, so the run began that many
+		// bytes earlier. A run reaching back past the start of its own atom is not
+		// one this ever wrote.
+		let to = anchor.content.off + 1;
+		let from = to.checked_sub(insert.len() as u64)?;
+		ContentRange::new(anchor.content.op, from, to).ok()
 	}
 
 	/// Checks the operation is one the sequence structure can resolve.
@@ -2872,6 +3140,220 @@ mod tests {
 		}
 		// It carries a time, so it is the four element spelling.
 		assert_eq!(op.code(), CODE_MARK_TIMED);
+		Ok(())
+	}
+
+	/// Every variant either has an inverse or says why it has none, and no
+	/// variant does both or neither.
+	///
+	/// This is what stops a new operation joining the vocabulary and being
+	/// silently undoable by nothing: [`Op::undoing`] ends on an arm that fails,
+	/// so the pair of answers has to stay exhaustive.
+	#[test]
+	fn every_operation_is_undone_or_says_why_not() -> Outcome<()> {
+		let refused = [
+			CODE_FILE_DELETE, CODE_MARK, CODE_MARK_TIMED, CODE_NOTE,
+			CODE_PROPOSAL, CODE_SAID, CODE_SETTLED, CODE_REVERTS,
+		];
+		for op in samples() {
+			let id = oid(77, 3);
+			match op.no_inverse() {
+				Some(why) => {
+					assert!(refused.contains(&op.code()),
+						"the {} at code {} refuses an inverse", op.name(), op.code());
+					// The refusal says why, and the sentence reaches whoever asked.
+					assert!(why.len() > 20, "the {} gives no reason", op.name());
+					let e = match op.undoing(id) {
+						Ok(_) => return Err(err!(
+							"The {} was undone though nothing undoes it.", op.name(); Test)),
+						Err(e) => e,
+					};
+					assert!(fmt!("{}", e).contains(why),
+						"the {} refuses without saying why", op.name());
+				},
+				None => {
+					assert!(!refused.contains(&op.code()),
+						"the {} at code {} has an inverse", op.name(), op.code());
+					let undoing = res!(op.undoing(id));
+					// An inverse that is nothing at all would be a silent refusal,
+					// which is the failure this pair of answers exists to prevent.
+					assert!(
+						!undoing.written.is_empty()
+							|| !undoing.copies.is_empty()
+							|| undoing.prior.is_some(),
+						"the {} is undone by nothing at all", op.name());
+					for inverse in &undoing.written {
+						res!(inverse.validate());
+					}
+				},
+			}
+		}
+		Ok(())
+	}
+
+	/// A splice is undone in two halves, and only one of them is exact.
+	///
+	/// The insertion is named by the operation that made it, so its inverse names
+	/// that identity and no render is needed. What the splice removed can come
+	/// back only as a copy, and [`Undoing::copies`] is where a caller is told so.
+	#[test]
+	fn a_splice_is_undone_in_two_halves() -> Outcome<()> {
+		let id = oid(5, 12);
+		// A replacement: it inserted five bytes and killed two runs.
+		let op = Op::Splice {
+			left:	Some(Anchor::after(content(1, 3))),
+			right:	None,
+			remove:	vec![range(1, 4, 9), range(2, 0, 2)],
+			insert:	b"hello".to_vec(),
+		};
+		let undoing = res!(op.undoing(id));
+		assert_eq!(undoing.prior, None, "a splice records everything its inverse needs");
+		assert_eq!(undoing.copies, vec![range(1, 4, 9), range(2, 0, 2)]);
+		// The insertion half names the atom the splice minted, whole, and inserts
+		// nothing, so it carries no origin and needs none.
+		assert_eq!(undoing.written, vec![Op::Splice {
+			left:	None,
+			right:	None,
+			remove:	vec![res!(ContentRange::new(id, 0, 5))],
+			insert:	Vec::new(),
+		}]);
+		res!(undoing.written[0].validate());
+
+		// A pure insertion has an exact inverse and nothing to copy.
+		let op = Op::Splice {
+			left:	Some(Anchor::origin(oid(1, 1))),
+			right:	None,
+			remove:	Vec::new(),
+			insert:	b"abc".to_vec(),
+		};
+		let undoing = res!(op.undoing(id));
+		assert!(undoing.copies.is_empty(), "an insertion buried nothing");
+		assert_eq!(undoing.written.len(), 1);
+
+		// A pure deletion minted no atom, so there is nothing to remove and the
+		// whole of its inverse is copies.
+		let op = Op::Splice {
+			left:	None,
+			right:	None,
+			remove:	vec![range(1, 4, 9)],
+			insert:	Vec::new(),
+		};
+		let undoing = res!(op.undoing(id));
+		assert!(undoing.written.is_empty(), "a deletion minted nothing to take back");
+		assert_eq!(undoing.copies, vec![range(1, 4, 9)]);
+
+		// An empty run in a remove list names no byte, so it is not a copy owed.
+		let op = Op::Splice {
+			left:	None,
+			right:	None,
+			remove:	vec![range(1, 4, 4), range(1, 6, 8)],
+			insert:	Vec::new(),
+		};
+		assert_eq!(res!(op.undoing(id)).copies, vec![range(1, 6, 8)]);
+		Ok(())
+	}
+
+	/// The three that assert a value say where to go and ask for it, rather than
+	/// pretending to know it.
+	#[test]
+	fn undoing_an_assertion_asks_the_state_it_replaced() -> Outcome<()> {
+		let file = oid(2, 5);
+		let undoing = res!(Op::FileRename { file, path: b"b.txt".to_vec() }
+			.undoing(oid(3, 1)));
+		assert_eq!(undoing.prior, Some(Prior::Path { file }));
+		assert!(undoing.written.is_empty() && undoing.copies.is_empty());
+
+		let undoing = res!(Op::FileMode { file, mode: Mode::Executable }
+			.undoing(oid(3, 2)));
+		assert_eq!(undoing.prior, Some(Prior::Mode { file }));
+
+		let undoing = res!(Op::Move {
+			src:	vec![range(1, 0, 4), range(1, 9, 9), range(2, 2, 6)],
+			left:	Some(Anchor::after(content(3, 0))),
+			right:	None,
+		}.undoing(oid(3, 3)));
+		// The empty run is dropped: it names no byte, so it has no former place.
+		assert_eq!(undoing.prior, Some(Prior::Place {
+			src: vec![range(1, 0, 4), range(2, 2, 6)],
+		}));
+
+		// A file's creation is the one that needs nothing looked up, the file
+		// having had no prior state at all. It is also the one undoing that cannot
+		// itself be undone, a deletion having no inverse.
+		let made = oid(4, 1);
+		let undoing = res!(Op::FileCreate { path: b"a.txt".to_vec() }.undoing(made));
+		assert_eq!(undoing.prior, None);
+		assert_eq!(undoing.written, vec![Op::FileDelete { file: made }]);
+		assert!(undoing.written[0].no_inverse().is_some(),
+			"undoing a creation is a one way journey and the vocabulary should say so");
+		Ok(())
+	}
+
+	/// A restored copy binds after the last byte of what it restores, and says
+	/// so afterwards.
+	///
+	/// The anchor is the only record connecting a copy to the writing it is a copy
+	/// of: the bytes take a new identity the moment they come back, so an
+	/// accounting that read only the identity would credit whoever reverted.
+	#[test]
+	fn a_copy_says_what_it_is_a_copy_of() -> Outcome<()> {
+		for was in [range(1, 0, 5), range(1, 4, 9), range(7, 0, 1)] {
+			let bytes = vec![b'x'; was.len() as usize];
+			let op = res!(Op::restoring(&was, bytes.clone()));
+			res!(op.validate());
+			// It binds after the last byte of the run, which is where the run is
+			// buried, whatever became of what used to surround it.
+			assert_eq!(op.origins().0, Some(Anchor::after(
+				ContentId::new(was.op(), was.to() - 1))));
+			assert_eq!(op.origins().1, None);
+			assert!(op.regions().is_empty(), "a restoration kills nothing");
+			assert_eq!(op.restored(), Some(was), "the range {}", was);
+			// And it survives the wire, which is where a reader meets it.
+			assert_eq!(res!(Op::from_dat(&op.to_dat())).restored(), Some(was));
+		}
+		// A copy of nothing, and a copy of the wrong length, are refused: a
+		// restoration puts back what was there.
+		assert!(Op::restoring(&range(1, 4, 4), Vec::new()).is_err());
+		assert!(Op::restoring(&range(1, 4, 9), b"abc".to_vec()).is_err());
+		assert!(Op::restoring(&range(1, 4, 9), Vec::new()).is_err());
+
+		// Nothing else answers. A splice that removes, one bounded on the right,
+		// and one anchored before a byte are all ordinary edits.
+		for op in [
+			Op::Splice {
+				left:	Some(Anchor::after(content(1, 4))),
+				right:	None,
+				remove:	vec![range(2, 0, 1)],
+				insert:	b"ab".to_vec(),
+			},
+			Op::Splice {
+				left:	Some(Anchor::after(content(1, 4))),
+				right:	Some(Anchor::before(content(2, 0))),
+				remove:	Vec::new(),
+				insert:	b"ab".to_vec(),
+			},
+			Op::Splice {
+				left:	None,
+				right:	Some(Anchor::before(content(2, 0))),
+				remove:	Vec::new(),
+				insert:	b"ab".to_vec(),
+			},
+		] {
+			assert_eq!(op.restored(), None, "the {} answered", op.name());
+		}
+		for op in samples() {
+			if !matches!(op, Op::Splice { .. }) {
+				assert_eq!(op.restored(), None, "the {} answered", op.name());
+			}
+		}
+		// A copy longer than the offset it is anchored at names a run reaching
+		// back past the start of its own atom, which nothing ever wrote.
+		assert_eq!(Op::Splice {
+			left:	Some(Anchor::after(content(1, 1))),
+			right:	None,
+			remove:	Vec::new(),
+			insert:	b"abcdef".to_vec(),
+		}.restored(), None);
 		Ok(())
 	}
 }

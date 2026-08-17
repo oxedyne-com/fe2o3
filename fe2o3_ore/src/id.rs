@@ -245,6 +245,58 @@ impl fmt::Display for OpId {
 	}
 }
 
+impl std::str::FromStr for OpId {
+	type Err = Error<ErrTag>;
+
+	/// Reads back exactly what [`fmt::Display`] wrote: `r<replica>:<counter>`.
+	///
+	/// It is here because an identifier is the one thing in this vocabulary a
+	/// person is ever asked to type. Every command and every page that lets
+	/// somebody name an operation -- reverting one, marking a flag reviewed,
+	/// settling a proposal -- has to turn that text back into an [`OpId`], and a
+	/// reader that each of them wrote for itself is a reader that accepts a
+	/// different set of spellings in each of them.
+	///
+	/// ```
+	/// use oxedyne_fe2o3_ore::id::{OpId, ReplicaId};
+	///
+	/// let id = OpId::new(ReplicaId::new(3065315576), 4);
+	/// assert_eq!(format!("{}", id), "r3065315576:4");
+	/// assert_eq!("r3065315576:4".parse::<OpId>().unwrap(), id);
+	/// ```
+	///
+	/// The `r` is required, and so is the colon. Both are refused rather than
+	/// forgiven, because what a person typed is nearly always what a command
+	/// printed, and quietly accepting a second spelling would let one identifier
+	/// be written two ways in the very sidecars and messages that exist to be
+	/// compared with each other.
+	fn from_str(text: &str)
+		-> Outcome<Self>
+	{
+		let body = res!(text.strip_prefix('r').ok_or_else(|| err!(
+			"An operation identifier is written {:?}, and {:?} does not begin with \
+			{:?}.", "r<replica>:<counter>", text, "r";
+		Invalid, Input, Mismatch)));
+		let (replica, counter) = res!(body.split_once(':').ok_or_else(|| err!(
+			"An operation identifier is written {:?}, and {:?} holds no colon \
+			separating the replica from the counter.", "r<replica>:<counter>", text;
+		Invalid, Input, Missing)));
+		let replica = match replica.parse::<u64>() {
+			Ok(n) => n,
+			Err(e) => return Err(err!(e,
+				"The replica of the operation identifier {:?} is not a number.", text;
+			Invalid, Input, Mismatch)),
+		};
+		let counter = match counter.parse::<u64>() {
+			Ok(n) => n,
+			Err(e) => return Err(err!(e,
+				"The counter of the operation identifier {:?} is not a number.", text;
+			Invalid, Input, Mismatch)),
+		};
+		Ok(Self::new(ReplicaId::new(replica), counter))
+	}
+}
+
 
 /// Names one byte of content: the operation that created the run it belongs to,
 /// and the byte's offset within that run.
@@ -956,6 +1008,56 @@ mod tests {
 		assert_eq!(fmt!("{}", cid), "r3:9+4");
 		assert_eq!(fmt!("{}", res!(ContentRange::new(an_op(), 4, 7))), "r3:9+4..7");
 		assert_eq!(fmt!("{}", Anchor::after(cid)), "after r3:9+4");
+		Ok(())
+	}
+
+	/// An operation identifier reads back exactly as it was written, and refuses
+	/// every spelling it was not.
+	///
+	/// The round trip is the whole of the contract: what a person types is what
+	/// some command printed, so the reader is judged against the writer and not
+	/// against a grammar written out beside it. The values include the ones a
+	/// digest-minted replica actually produces, which are ten digits long, and the
+	/// extremes, where a lenient parser would silently wrap.
+	#[test]
+	fn an_operation_identifier_reads_back_as_it_was_written() -> Outcome<()> {
+		use std::str::FromStr;
+
+		for (replica, counter) in [
+			(1u64, 1u64),
+			(3_065_315_576, 4),
+			(2_215_465_083, 5),
+			(u64::MAX, u64::MAX),
+			(1, u64::MAX),
+		] {
+			let id = OpId::new(ReplicaId::new(replica), counter);
+			let text = fmt!("{}", id);
+			assert_eq!(text, fmt!("r{}:{}", replica, counter));
+			assert_eq!(res!(OpId::from_str(&text)), id, "the text {:?}", text);
+			// And through the trait, which is how a caller reaches it.
+			let parsed: OpId = res!(text.parse());
+			assert_eq!(parsed, id);
+		}
+		// Everything the writer never wrote is refused rather than forgiven. A
+		// second accepted spelling of one identifier would let the same operation
+		// be written two ways in the very records that exist to be compared.
+		for bad in [
+			"",
+			"3:4",					// The r is not decoration.
+			"r3",					// No counter.
+			"r:4",					// No replica.
+			"r3:",					// An empty counter.
+			"R3:4",					// The prefix is one character and it is lower case.
+			" r3:4",				// Nothing is trimmed.
+			"r3:4 ",
+			"r3:4:5",				// A counter is a number, and 4:5 is not one.
+			"r-3:4",				// A replica is not negative.
+			"r3:-4",
+			"r3.4",					// The separator is a colon, which is what Display writes.
+			"r18446744073709551616:1",	// One past a u64, refused rather than wrapped.
+		] {
+			assert!(OpId::from_str(bad).is_err(), "the text {:?} was accepted", bad);
+		}
 		Ok(())
 	}
 }
