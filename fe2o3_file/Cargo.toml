@@ -7,6 +7,17 @@ license = "BSD-2-Clause/Apache-2.0"
 description = "Hematite file system, archive and document format utilities."
 repository = "https://github.com/oxedyne-io/fe2o3"
 
+[features]
+default = ["deck-write"]
+# Generating a `.pptx` or an `.odp` from `office::deck`.  READING one is unconditional and stays so:
+# a reading view offers six formats and dropping one of them would change shipped behaviour.  What
+# this turns off is the slide master, the slide layout and the theme a PresentationML package cannot
+# open without, plus the OpenDocument presentation writer -- generated code that no other verb calls,
+# and the only Office capability with no edit path behind it.  A caller does not change either way:
+# `pptx::write` and `odf::slides::write` keep one signature and, built without the feature, return an
+# error naming the feature.
+deck-write = []
+
 [dependencies]
 oxedyne_fe2o3_core 		   	= { path = "../fe2o3_core" }
 # `default-features = false` drops the rayon-backed graph search, which this crate does not use and

@@ -14,10 +14,11 @@
 //! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
-use crate::office::deck::{
-	Deck,
-	MAX_LEVEL,
-};
+use crate::office::deck::Deck;
+
+#[cfg(feature = "deck-write")]
+use crate::office::deck::MAX_LEVEL;
+#[cfg(feature = "deck-write")]
 use crate::office::opc::{
 	CT_LAYOUT,
 	CT_MASTER,
@@ -33,6 +34,7 @@ use crate::office::opc::{
 	Rels,
 	Types,
 };
+#[cfg(feature = "deck-write")]
 use crate::office::pptx::{
 	MARGIN,
 	NS_A,
@@ -42,13 +44,16 @@ use crate::office::pptx::{
 	TITLE_H,
 	parts,
 };
+#[cfg(feature = "deck-write")]
 use crate::zip::{
 	Method,
 	Zip,
 };
 
 use oxedyne_fe2o3_core::prelude::*;
+#[cfg(feature = "deck-write")]
 use oxedyne_fe2o3_text::doc::Inline;
+#[cfg(feature = "deck-write")]
 use oxedyne_fe2o3_text::xml::write::Out;
 
 /// What a created deck could not carry.
@@ -70,6 +75,11 @@ impl Left {
 }
 
 /// Writes a deck as the bytes of a `.pptx`, and says what did not fit.
+///
+/// Behind the `deck-write` feature, which is on by default. Compiled without it the signature is
+/// unchanged and the call returns an error naming the feature, so a caller neither changes nor
+/// silently gets an empty file.
+#[cfg(feature = "deck-write")]
 pub fn write(deck: &Deck) -> Outcome<(Vec<u8>, Left)> {
 	let mut owned;
 	// A presentation with no slides is a file PowerPoint opens and shows nothing in, which reads as
@@ -156,6 +166,16 @@ pub fn write(deck: &Deck) -> Outcome<(Vec<u8>, Left)> {
 	Ok((res!(zip.write()), left))
 }
 
+/// The same function, in a build compiled without `deck-write`.
+#[cfg(not(feature = "deck-write"))]
+pub fn write(_deck: &Deck) -> Outcome<(Vec<u8>, Left)> {
+	Err(err!("This build cannot write a .pptx. Creating one needs a slide master, a slide layout \
+		and a theme, which are generated behind the 'deck-write' feature of \
+		oxedyne_fe2o3_file, and that feature is off here. Reading a .pptx is unaffected.";
+		Unimplemented))
+}
+
+#[cfg(feature = "deck-write")]
 fn slide_part(slide: &crate::office::deck::Slide, left: &mut Left) -> Outcome<String> {
 	let mut out = Out::declared();
 	out.open("p:sld", &[("xmlns:a", NS_A), ("xmlns:r", NS_R), ("xmlns:p", NS_P)]);
@@ -205,6 +225,7 @@ fn slide_part(slide: &crate::office::deck::Slide, left: &mut Left) -> Outcome<St
 }
 
 /// One placeholder shape on a slide, with its body written by the caller.
+#[cfg(feature = "deck-write")]
 fn shape<F>(
 	out:	&mut Out,
 	id:	u32,
@@ -252,6 +273,7 @@ where
 }
 
 /// One paragraph of a text body, at an indent level.
+#[cfg(feature = "deck-write")]
 fn para(out: &mut Out, content: &[Inline], level: usize, left: &mut Left) -> Outcome<()> {
 	match level {
 		0	=> out.open("a:p", &[]),
@@ -266,6 +288,7 @@ fn para(out: &mut Out, content: &[Inline], level: usize, left: &mut Left) -> Out
 }
 
 /// How a run of text on a slide is marked.
+#[cfg(feature = "deck-write")]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Fmt {
 	bold:	bool,
@@ -274,6 +297,7 @@ struct Fmt {
 	link:	bool,	// part of a link
 }
 
+#[cfg(feature = "deck-write")]
 fn runs(out: &mut Out, content: &[Inline], fmt: Fmt, left: &mut Left) -> Outcome<()> {
 	for item in content {
 		match item {
@@ -304,6 +328,7 @@ fn runs(out: &mut Out, content: &[Inline], fmt: Fmt, left: &mut Left) -> Outcome
 	Ok(())
 }
 
+#[cfg(feature = "deck-write")]
 fn run(out: &mut Out, text: &str, fmt: Fmt) -> Outcome<()> {
 	if text.is_empty() {
 		return Ok(());

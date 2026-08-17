@@ -32,9 +32,12 @@
 use crate::office::deck::{
 	Bullet,
 	Deck,
-	MAX_LEVEL,
 	Slide,
 };
+
+#[cfg(feature = "deck-write")]
+use crate::office::deck::MAX_LEVEL;
+#[cfg(feature = "deck-write")]
 use crate::office::odf::{
 	NS_DRAW,
 	NS_FO,
@@ -46,10 +49,9 @@ use crate::office::odf::{
 	NS_XLINK,
 	pkg,
 };
-use crate::zip::{
-	Method,
-	Zip,
-};
+#[cfg(feature = "deck-write")]
+use crate::zip::Method;
+use crate::zip::Zip;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_text::doc::Inline;
@@ -57,6 +59,7 @@ use oxedyne_fe2o3_text::xml::{
 	Elem,
 	Xml,
 };
+#[cfg(feature = "deck-write")]
 use oxedyne_fe2o3_text::xml::write::Out;
 
 // Declared in the package's first member, which is what names the file.
@@ -64,7 +67,9 @@ pub const MEDIA: &str = "application/vnd.oasis.opendocument.presentation";
 
 pub const MAX_PART: u64 = 64 * 1024 * 1024; // the most one part is inflated to
 
+#[cfg(feature = "deck-write")]
 const SLIDE_W: &str = "28cm";		// a length carries its unit
+#[cfg(feature = "deck-write")]
 const SLIDE_H: &str = "15.75cm";
 
 /// What a created deck could not carry.
@@ -82,6 +87,11 @@ impl Left {
 	}
 }
 
+/// Writes a deck as the bytes of an `.odp`, and says what did not fit.
+///
+/// Behind the `deck-write` feature, which is on by default. Compiled without it the signature is
+/// unchanged and the call returns an error naming the feature.
+#[cfg(feature = "deck-write")]
 pub fn write(deck: &Deck) -> Outcome<(Vec<u8>, Left)> {
 	let mut owned;
 	let deck = match deck.slides.is_empty() {
@@ -166,7 +176,16 @@ pub fn write(deck: &Deck) -> Outcome<(Vec<u8>, Left)> {
 	Ok((res!(zip.write()), left))
 }
 
+/// The same function, in a build compiled without `deck-write`.
+#[cfg(not(feature = "deck-write"))]
+pub fn write(_deck: &Deck) -> Outcome<(Vec<u8>, Left)> {
+	Err(err!("This build cannot write an .odp. The OpenDocument presentation writer sits behind \
+		the 'deck-write' feature of oxedyne_fe2o3_file, and that feature is off here. Reading \
+		an .odp is unaffected."; Unimplemented))
+}
+
 /// Nests a list inside an item for each level of depth.
+#[cfg(feature = "deck-write")]
 fn bullets(out: &mut Out, items: &[Bullet], left: &mut Left) -> Outcome<()> {
 	res!(at_level(out, items, 0, &mut 0, left));
 	Ok(())
@@ -176,6 +195,7 @@ fn bullets(out: &mut Out, items: &[Bullet], left: &mut Left) -> Outcome<()> {
 ///
 /// The index is carried by reference because a nested call consumes items the caller must not write
 /// again -- which is the whole difficulty of turning a flat list of levels back into a tree.
+#[cfg(feature = "deck-write")]
 fn at_level(
 	out:	&mut Out,
 	items:	&[Bullet],
@@ -218,6 +238,7 @@ fn at_level(
 	Ok(())
 }
 
+#[cfg(feature = "deck-write")]
 fn inlines(out: &mut Out, content: &[Inline], left: &mut Left) -> Outcome<()> {
 	for item in content {
 		match item {

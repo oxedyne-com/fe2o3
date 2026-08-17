@@ -23,9 +23,15 @@
 //! other text. That is a failure a reader sees and an editor cannot check for. A deck is also the
 //! least useful thing an agent generates, so the value on the other side of that risk is small.
 //!
+//! That last sentence is why [`write`] is the one Office verb behind a cargo feature, `deck-write`,
+//! which is on by default. [`read`] is not behind it: a reading view offers six formats, and losing
+//! one of them would change what a user already has.
+//!
 //! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
+// The skeleton generator serves `write` and nothing else, so it goes with the feature.
+#[cfg(feature = "deck-write")]
 pub mod parts;
 pub mod read;
 pub mod write;
