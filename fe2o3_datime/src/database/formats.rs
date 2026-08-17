@@ -1,3 +1,11 @@
+//! SQL and NoSQL projections of the datetime types.
+//!
+//! Schema generation, INSERT values and query fragments for relational stores,
+//! and document projections for MongoDB or CouchDB style stores.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use crate::{
     time::{CalClock, CalClockZone},
     clock::ClockTime,
@@ -10,21 +18,16 @@ use oxedyne_fe2o3_jdat::prelude::*;
 
 use std::collections::HashMap;
 
-/// SQL-compatible format methods for database schema generation and queries.
 pub trait SqlCompatible {
-    /// Returns the SQL data type definition for storing this type.
     fn sql_data_type(format: StorageFormat) -> &'static str;
     
-    /// Returns the SQL CREATE TABLE statement for this type.
     fn sql_create_table(table_name: &str, format: StorageFormat) -> String;
     
-    /// Returns SQL to create indexes for efficient queries.
     fn sql_create_indexes(table_name: &str) -> Vec<String>;
     
-    /// Converts to SQL-compatible values for INSERT/UPDATE statements.
     fn to_sql_values(&self, format: StorageFormat) -> Outcome<HashMap<String, String>>;
     
-    /// Returns SQL WHERE clause fragments for common queries.
+    /// Each pair is a name and a WHERE clause using positional $1, $2 placeholders.
     fn sql_query_fragments() -> Vec<(&'static str, &'static str)>;
 }
 
@@ -444,20 +447,15 @@ impl SqlCompatible for CalendarDate {
     }
 }
 
-/// NoSQL document format methods for document databases.
 pub trait NoSqlDocument {
-    /// Converts to a document format suitable for MongoDB, CouchDB, etc.
     fn to_document(&self) -> HashMap<String, Dat>;
     
-    /// Creates from a document format.
     fn from_document(doc: &HashMap<String, Dat>) -> Outcome<Self>
     where
         Self: Sized;
     
-    /// Returns field names that should be indexed in document databases.
     fn index_fields() -> Vec<&'static str>;
     
-    /// Returns compound index definitions for efficient queries.
     fn compound_indexes() -> Vec<Vec<&'static str>>;
 }
 

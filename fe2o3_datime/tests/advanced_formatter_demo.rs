@@ -1,11 +1,14 @@
-/// Comprehensive demonstration of advanced formatter capabilities.
-/// 
-/// This test demonstrates the enhanced formatting features including:
-/// - Locale-specific formatting
-/// - Custom month and day names
-/// - Ordinal suffixes (1st, 2nd, 3rd)
-/// - Week of year and era formatting
-/// - AM/PM customization
+//! Comprehensive demonstration of advanced formatter capabilities.
+//!
+//! This test demonstrates the enhanced formatting features including:
+//! - Locale-specific formatting
+//! - Custom month and day names
+//! - Ordinal suffixes (1st, 2nd, 3rd)
+//! - Week of year and era formatting
+//! - AM/PM customization
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_datime::{

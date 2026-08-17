@@ -1,27 +1,11 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use oxedyne_fe2o3_core::prelude::*;
 
-/// Mutable container for clock arithmetic operations.
-///
-/// ClockFields provides a working space for performing time arithmetic operations
-/// that may require normalisation across multiple time units. This type handles
-/// carry and borrow operations between nanoseconds, seconds, minutes, hours, and
-/// days, ensuring that intermediate calculations maintain mathematical correctness.
-///
-/// # Usage
-///
-/// This type is primarily used internally by ClockTime and related types for
-/// implementing arithmetic operations such as addition and subtraction of durations.
-/// The mutable design allows for efficient in-place normalisation without
-/// requiring multiple allocations.
-///
-/// # Normalisation
-///
-/// The normalise() method ensures that all fields are within their valid ranges:
-/// - nanoseconds: 0-999,999,999
-/// - seconds: 0-59
-/// - minutes: 0-59
-/// - hours: 0-23
-/// - day_carry: accumulated overflow days
+/// A mutable working space for time arithmetic. Fields may hold out-of-range
+/// values until normalise() carries the excess upwards, with whole days landing
+/// in day_carry.
 #[derive(Clone, Debug, Default)]
 pub struct ClockFields {
 	pub hour:		i64,
@@ -32,21 +16,10 @@ pub struct ClockFields {
 }
 
 impl ClockFields {
-	/// Creates a new ClockFields with all fields initialised to zero.
-	///
-	/// This provides a neutral starting point for time arithmetic operations.
 	pub fn new() -> Self {
 		Self::default()
 	}
 	
-	/// Creates ClockFields from individual time components.
-	///
-	/// # Arguments
-	///
-	/// * `hour` - Hour component (0-24)
-	/// * `minute` - Minute component (0-60)
-	/// * `second` - Second component (0-60)
-	/// * `nanosecond` - Nanosecond component (0-999,999,999)
 	pub fn from_time(hour: u8, minute: u8, second: u8, nanosecond: u32) -> Self {
 		Self {
 			hour:		hour as i64,
@@ -57,16 +30,7 @@ impl ClockFields {
 		}
 	}
 	
-	/// Normalises the fields, handling carry and borrow between time units.
-	///
-	/// This method ensures that all time components are within their valid ranges
-	/// by propagating overflow and underflow between adjacent units. The process
-	/// continues until all components are properly normalised.
-	///
-	/// # Returns
-	///
-	/// Returns `true` if any normalisation was performed, `false` if all fields
-	/// were already within valid ranges.
+	/// Carries overflow upwards until every field is back in range.
 	pub fn normalize(&mut self) -> bool {
 		let mut changed = false;
 		
@@ -125,14 +89,7 @@ impl ClockFields {
 		changed
 	}
 	
-	/// Adds another ClockFields to this one.
-	///
-	/// This performs component-wise addition without normalisation.
-	/// Call normalise() afterwards if needed.
-	///
-	/// # Arguments
-	///
-	/// * `other` - ClockFields to add to this one
+	/// Component-wise, and left unnormalised: call normalise afterwards.
 	pub fn add(&mut self, other: &ClockFields) {
 		self.hour += other.hour;
 		self.minute += other.minute;
@@ -141,14 +98,6 @@ impl ClockFields {
 		self.day_carry += other.day_carry;
 	}
 	
-	/// Subtracts another ClockFields from this one.
-	///
-	/// This performs component-wise subtraction without normalisation.
-	/// Call normalise() afterwards if needed.
-	///
-	/// # Arguments
-	///
-	/// * `other` - ClockFields to subtract from this one
 	pub fn subtract(&mut self, other: &ClockFields) {
 		self.hour -= other.hour;
 		self.minute -= other.minute;
@@ -157,14 +106,7 @@ impl ClockFields {
 		self.day_carry -= other.day_carry;
 	}
 	
-	/// Multiplies all time fields by a scalar factor.
-	///
-	/// The day_carry field is not multiplied as it represents derived overflow
-	/// from the normalisation process.
-	///
-	/// # Arguments
-	///
-	/// * `factor` - Multiplication factor
+	/// day_carry is left alone, being derived rather than held.
 	pub fn multiply(&mut self, factor: i64) {
 		self.hour *= factor;
 		self.minute *= factor;
@@ -173,16 +115,7 @@ impl ClockFields {
 		// day_carry is not multiplied as it's derived from normalization
 	}
 	
-	/// Converts to individual time components after normalisation.
-	///
-	/// This method first normalises the fields, then attempts to convert them
-	/// to individual time components. If any component remains outside its
-	/// valid range after normalisation, None is returned.
-	///
-	/// # Returns
-	///
-	/// Returns `Some((hour, minute, second, nanosecond, day_carry))` if all
-	/// components are valid after normalisation, otherwise returns `None`.
+	/// None when a field is still out of range after normalisation.
 	pub fn to_time_components(&mut self) -> Option<(u8, u8, u8, u32, i32)> {
 		self.normalize();
 		
@@ -202,10 +135,6 @@ impl ClockFields {
 		))
 	}
 	
-	/// Checks if all fields represent a valid time after normalisation.
-	///
-	/// This is a convenience method equivalent to checking if
-	/// `to_time_components()` returns `Some`.
 	pub fn is_valid_time(&mut self) -> bool {
 		self.to_time_components().is_some()
 	}

@@ -1,3 +1,31 @@
+//! RFC 9557 Internet Extended Date/Time Format (IXDTF) serialisation capabilities.
+//!
+//! This module implements timezone-preserving serialisation according to RFC 9557,
+//! which extends RFC 3339 timestamps with additional timezone information.
+//!
+//! RFC 9557 allows timestamps to include both UTC offset and IANA timezone identifier,
+//! enabling proper handling of daylight saving transitions and timezone-aware calculations.
+//!
+//! # Examples
+//!
+//! ```ignore
+//! use oxedyne_fe2o3_datime::{CalClock, CalClockZone, format::rfc9557::Rfc9557Format};
+//!
+//! let zone = res!(CalClockZone::new("America/New_York"));
+//! let calclock = res!(CalClock::new(2024, 6, 15, 14, 30, 0, 0, zone));
+//!
+//! // Standard RFC 3339 format
+//! let rfc3339 = res!(calclock.to_rfc9557_basic());
+//! // "2024-06-15T14:30:00.000000000-04:00"
+//!
+//! // Extended RFC 9557 format with timezone preservation
+//! let rfc9557 = res!(calclock.to_rfc9557_extended());
+//! // "2024-06-15T14:30:00.000000000-04:00[America/New_York]"
+//! ```
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use crate::{
 	time::{CalClock, CalClockZone},
 	clock::ClockTime,
@@ -6,63 +34,23 @@ use crate::{
 
 use oxedyne_fe2o3_core::prelude::*;
 
-/// RFC 9557 Internet Extended Date/Time Format (IXDTF) serialisation capabilities.
-///
-/// This module implements timezone-preserving serialisation according to RFC 9557,
-/// which extends RFC 3339 timestamps with additional timezone information.
-///
-/// RFC 9557 allows timestamps to include both UTC offset and IANA timezone identifier,
-/// enabling proper handling of daylight saving transitions and timezone-aware calculations.
-///
-/// # Examples
-///
-/// ```ignore
-/// use oxedyne_fe2o3_datime::{CalClock, CalClockZone, format::rfc9557::Rfc9557Format};
-///
-/// let zone = res!(CalClockZone::new("America/New_York"));
-/// let calclock = res!(CalClock::new(2024, 6, 15, 14, 30, 0, 0, zone));
-/// 
-/// // Standard RFC 3339 format
-/// let rfc3339 = res!(calclock.to_rfc9557_basic());
-/// // "2024-06-15T14:30:00.000000000-04:00"
-///
-/// // Extended RFC 9557 format with timezone preservation
-/// let rfc9557 = res!(calclock.to_rfc9557_extended());
-/// // "2024-06-15T14:30:00.000000000-04:00[America/New_York]"
-/// ```
-
-/// Configuration options for RFC 9557 serialisation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Rfc9557Config {
-	/// Include IANA timezone identifier in square brackets.
-	pub include_timezone_name: bool,
-	
-	/// Include nanoseconds even if they are zero.
-	pub always_include_nanoseconds: bool,
-	
-	/// Use Z notation for UTC instead of +00:00.
-	pub use_z_for_utc: bool,
-	
-	/// Include precision indicators for approximate times.
+	pub include_timezone_name:        bool,              // IANA name in square brackets
+	pub always_include_nanoseconds:   bool,              // even when zero
+	pub use_z_for_utc:                bool,              // Z rather than +00:00
 	pub include_precision_indicators: bool,
-	
-	/// Precision level when using precision indicators.
-	pub precision_level: PrecisionLevel,
+	pub precision_level:              PrecisionLevel,
 }
 
-/// Precision levels for RFC 9557 timestamps.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PrecisionLevel {
-	/// Exact time (no precision indicator).
-	Exact,
-	/// Approximate time (~).
-	Approximate,
-	/// Uncertain time (%).
-	Uncertain,
-	/// Around a specific time (@).
-	Around,
-	/// Between two times (*).
-	Between,
+	// The indicator character each level writes.
+	Exact,          // none
+	Approximate,    // ~
+	Uncertain,      // %
+	Around,         // @
+	Between,        // *
 }
 
 impl Default for Rfc9557Config {
@@ -78,7 +66,6 @@ impl Default for Rfc9557Config {
 }
 
 impl PrecisionLevel {
-	/// Returns the RFC 9557 precision indicator character.
 	pub fn indicator(&self) -> Option<char> {
 		match self {
 			Self::Exact => None,
@@ -90,21 +77,17 @@ impl PrecisionLevel {
 	}
 }
 
-/// RFC 9557 formatting capabilities for datetime types.
 pub trait Rfc9557Format {
-	/// Serializes to RFC 9557 format with default configuration.
 	fn to_rfc9557(&self) -> Outcome<String>;
 	
-	/// Serializes to RFC 9557 format with custom configuration.
 	fn to_rfc9557_with_config(&self, config: &Rfc9557Config) -> Outcome<String>;
 	
-	/// Serializes to basic RFC 3339 format (no timezone name).
+	/// RFC 3339 only, with no timezone name.
 	fn to_rfc9557_basic(&self) -> Outcome<String>;
 	
-	/// Serializes to extended RFC 9557 format (with timezone name).
+	/// Appends the IANA timezone name in square brackets.
 	fn to_rfc9557_extended(&self) -> Outcome<String>;
 	
-	/// Parses an RFC 9557 formatted string.
 	fn from_rfc9557(input: &str) -> Outcome<Self>
 	where
 		Self: Sized;
@@ -483,11 +466,9 @@ impl Rfc9557Format for CalendarDate {
 	}
 }
 
-/// Utility functions for RFC 9557 operations.
 pub mod utils {
 	use super::*;
 	
-	/// Validates an RFC 9557 timestamp string.
 	pub fn validate_rfc9557(input: &str) -> Outcome<()> {
 		// Try to parse as CalClock to validate format.
 		match CalClock::from_rfc9557(input) {
@@ -496,7 +477,6 @@ pub mod utils {
 		}
 	}
 	
-	/// Extracts the timezone name from an RFC 9557 string if present.
 	pub fn extract_timezone_name(input: &str) -> Option<&str> {
 		if let Some(bracket_start) = input.rfind('[') {
 			if let Some(bracket_end) = input.rfind(']') {
@@ -508,7 +488,6 @@ pub mod utils {
 		None
 	}
 	
-	/// Extracts precision indicators from an RFC 9557 string.
 	pub fn extract_precision_indicator(input: &str) -> Option<PrecisionLevel> {
 		if input.ends_with('~') {
 			Some(PrecisionLevel::Approximate)

@@ -1,3 +1,6 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 pub mod time;
 pub mod hour;
 pub mod minute;
@@ -22,7 +25,6 @@ pub use interval::ClockInterval;
 pub use fields::ClockFields;
 pub use periods::{HourPeriod, MinutePeriod, SecondPeriod};
 
-/// Trait for components that can express rate per second.
 pub trait PerSecondRated {
 	fn per_second(&self) -> u64;
 }

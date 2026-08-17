@@ -1,8 +1,12 @@
+//! Days of the week, numbered Monday 1 through Sunday 7.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use oxedyne_fe2o3_core::prelude::*;
 
 use std::fmt::{self, Display};
 
-/// Days of the week.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum DayOfWeek {
     Monday,
@@ -15,7 +19,7 @@ pub enum DayOfWeek {
 }
 
 impl DayOfWeek {
-    /// Get the numeric value of the day (Monday = 1, Sunday = 7).
+    /// Monday is 1 and Sunday 7.
     pub fn of(&self) -> u8 {
         match self {
             Self::Monday	=> 1,
@@ -28,7 +32,6 @@ impl DayOfWeek {
         }
     }
     
-    /// Create from numeric value (1-7).
     pub fn from_number(n: u8) -> Outcome<Self> {
         match n {
             1 => Ok(Self::Monday),
@@ -44,7 +47,6 @@ impl DayOfWeek {
         }
     }
     
-    /// Get the next day of the week.
     pub fn next(&self) -> Self {
         match self {
             Self::Monday	=> Self::Tuesday,
@@ -57,7 +59,6 @@ impl DayOfWeek {
         }
     }
     
-    /// Get the previous day of the week.
     pub fn previous(&self) -> Self {
         match self {
             Self::Monday	=> Self::Sunday,
@@ -70,7 +71,6 @@ impl DayOfWeek {
         }
     }
     
-    /// Get abbreviated name (Mon, Tue, etc).
     pub fn abbrev(&self) -> &'static str {
         match self {
             Self::Monday	=> "Mon",
@@ -83,7 +83,6 @@ impl DayOfWeek {
         }
     }
     
-    /// Get full name.
     pub fn name(&self) -> &'static str {
         match self {
             Self::Monday	=> "Monday",
@@ -96,27 +95,23 @@ impl DayOfWeek {
         }
     }
     
-    /// Check if this is a weekend day.
     pub fn is_weekend(&self) -> bool {
         matches!(self, Self::Saturday | Self::Sunday)
     }
     
-    /// Check if this is a weekday.
     pub fn is_weekday(&self) -> bool {
         !self.is_weekend()
     }
     
-    /// Get short name (alias for abbrev).
     pub fn short_name(&self) -> &'static str {
         self.abbrev()
     }
     
-    /// Get long name (alias for name).
     pub fn long_name(&self) -> &'static str {
         self.name()
     }
     
-    /// Parse from a string name (case insensitive).
+    /// Matches full names and abbreviations, case insensitively.
     pub fn from_name(name: &str) -> Option<Self> {
         let name = name.to_lowercase();
         match name.as_str() {
@@ -131,7 +126,7 @@ impl DayOfWeek {
         }
     }
     
-    /// Calculate days until another day of week (0-6).
+    /// Zero when the two days are the same, never seven.
     pub fn days_until(&self, target: &Self) -> u8 {
         let current = self.of();
         let target = target.of();

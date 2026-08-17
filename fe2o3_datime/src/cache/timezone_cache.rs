@@ -1,7 +1,10 @@
-/// Timezone calculation caching for performance optimisation.
-///
-/// This module provides efficient caching for expensive timezone operations
-/// like offset calculations and DST transitions to avoid repeated computations.
+//! Timezone calculation caching for performance optimisation.
+//!
+//! Offset calculations and DST transitions are expensive, and the same values
+//! are asked for repeatedly.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::{
 	cache::LruCache,
@@ -15,14 +18,12 @@ use std::{
 	collections::HashMap,
 };
 
-/// Cache key for timezone offset calculations.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct TimezoneOffsetKey {
 	timezone_id: String,
 	timestamp_millis: i64,
 }
 
-/// Cache key for DST calculations.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct DstCalculationKey {
 	timezone_id: String,
@@ -30,26 +31,16 @@ struct DstCalculationKey {
 	timestamp_millis: i64,
 }
 
-/// Global timezone calculation cache.
-///
-/// This cache stores expensive timezone calculations to avoid repeated
-/// computation of the same values. It's designed to be thread-safe and
-/// efficient for high-frequency operations.
 #[derive(Debug, Clone)]
 pub struct TimezoneCache {
-	/// Cache for timezone offset calculations.
 	offset_cache: LruCache<TimezoneOffsetKey, i32>,
-	/// Cache for DST transition calculations.
 	dst_cache: LruCache<DstCalculationKey, bool>,
-	/// Cache for timezone name lookups.
 	name_cache: Arc<HashMap<String, String>>,
 }
 
-/// Global timezone cache instance.
 static TIMEZONE_CACHE: OnceLock<TimezoneCache> = OnceLock::new();
 
 impl TimezoneCache {
-	/// Creates a new timezone cache with default settings.
 	fn new() -> Self {
 		Self {
 			offset_cache: LruCache::new(1000), // Cache up to 1000 offset calculations
@@ -58,12 +49,10 @@ impl TimezoneCache {
 		}
 	}
 	
-	/// Gets the global timezone cache instance.
 	pub fn global() -> &'static TimezoneCache {
 		TIMEZONE_CACHE.get_or_init(|| TimezoneCache::new())
 	}
 	
-	/// Builds the timezone name cache with common abbreviations.
 	fn build_name_cache() -> HashMap<String, String> {
 		let mut cache = HashMap::new();
 		
@@ -84,7 +73,6 @@ impl TimezoneCache {
 		cache
 	}
 	
-	/// Gets a cached timezone offset or computes it if not cached.
 	pub fn get_timezone_offset_cached<F>(&self, zone: &CalClockZone, timestamp_millis: i64, compute_fn: F) -> i32
 	where 
 		F: FnOnce() -> i32,
@@ -103,7 +91,6 @@ impl TimezoneCache {
 		}
 	}
 	
-	/// Gets a cached DST calculation or computes it if not cached.
 	pub fn get_dst_cached<F>(&self, zone: &CalClockZone, year: i32, timestamp_millis: i64, compute_fn: F) -> bool
 	where 
 		F: FnOnce() -> bool,
@@ -123,12 +110,10 @@ impl TimezoneCache {
 		}
 	}
 	
-	/// Gets a cached timezone name abbreviation.
 	pub fn get_timezone_name(&self, timezone_id: &str) -> Option<String> {
 		self.name_cache.get(timezone_id).cloned()
 	}
 	
-	/// Returns cache statistics for monitoring performance.
 	pub fn stats(&self) -> TimezoneStats {
 		let (offset_hits, offset_misses, offset_ratio) = self.offset_cache.stats();
 		let (dst_hits, dst_misses, dst_ratio) = self.dst_cache.stats();
@@ -144,13 +129,11 @@ impl TimezoneCache {
 		}
 	}
 	
-	/// Clears all caches.
 	pub fn clear(&self) {
 		self.offset_cache.clear();
 		self.dst_cache.clear();
 	}
 	
-	/// Preloads common timezone calculations for better performance.
 	pub fn preload_common_timezones(&self) {
 		// This could be enhanced to preload common timezone calculations
 		// for the current year and next year during application startup
@@ -158,7 +141,6 @@ impl TimezoneCache {
 	}
 }
 
-/// Statistics about timezone cache performance.
 #[derive(Debug, Clone)]
 pub struct TimezoneStats {
 	pub offset_cache_hits: u64,
@@ -171,7 +153,7 @@ pub struct TimezoneStats {
 }
 
 impl TimezoneStats {
-	/// Returns the overall cache efficiency as a percentage.
+	/// A percentage, not a ratio.
 	pub fn overall_efficiency(&self) -> f64 {
 		let total_hits = self.offset_cache_hits + self.dst_cache_hits;
 		let total_requests = total_hits + self.offset_cache_misses + self.dst_cache_misses;
@@ -183,21 +165,17 @@ impl TimezoneStats {
 		}
 	}
 	
-	/// Returns true if the cache is performing well (>= 80% hit rate).
+	/// Well means a hit rate of 80% or better.
 	pub fn is_performing_well(&self) -> bool {
 		self.overall_efficiency() >= 80.0
 	}
 }
 
-/// Extension trait to add caching to CalClockZone operations.
 pub trait CalClockZoneCached {
-	/// Gets timezone offset with caching.
 	fn offset_millis_at_time_cached(&self, timestamp_millis: i64) -> Outcome<i32>;
 	
-	/// Checks if time is in daylight saving time with caching.
 	fn in_daylight_time_cached(&self, timestamp_millis: i64) -> Outcome<bool>;
 	
-	/// Gets timezone name abbreviation with caching.
 	fn name_cached(&self) -> Option<String>;
 }
 

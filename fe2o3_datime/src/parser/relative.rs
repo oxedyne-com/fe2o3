@@ -1,12 +1,15 @@
-/// Comprehensive relative date parsing for natural language expressions.
-/// 
-/// This module handles complex relative date expressions such as:
-/// - "next Tuesday", "last Friday", "this Monday"
-/// - "in 2 weeks", "in 3 days", "2 months ago"
-/// - "next month", "last year", "this week"
-/// - "3 days from now", "2 weeks from today"
-/// - "end of this month", "beginning of next year"
-/// - "this coming Monday", "the Tuesday after next"
+//! Comprehensive relative date parsing for natural language expressions.
+//!
+//! This module handles complex relative date expressions such as:
+//! - "next Tuesday", "last Friday", "this Monday"
+//! - "in 2 weeks", "in 3 days", "2 months ago"
+//! - "next month", "last year", "this week"
+//! - "3 days from now", "2 weeks from today"
+//! - "end of this month", "beginning of next year"
+//! - "this coming Monday", "the Tuesday after next"
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::{
     calendar::CalendarDate,
@@ -18,41 +21,27 @@ use oxedyne_fe2o3_core::prelude::*;
 
 use std::collections::HashMap;
 
-/// Types of relative date references.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RelativeReference {
-    /// Next occurrence of something (next Tuesday, next month, next year).
+    // The word the expression opened with.
     Next,
-    /// Previous occurrence of something (last Tuesday, last month, last year).
     Last,
-    /// Current occurrence (this Tuesday, this month, this year).
     This,
-    /// Coming/upcoming occurrence (this coming Tuesday, upcoming Monday).
-    Coming,
-    /// After next (the Tuesday after next, month after next).
-    AfterNext,
-    /// Before last (the Tuesday before last).
-    BeforeLast,
+    Coming,     // "this coming", "upcoming"
+    AfterNext,  // "the Tuesday after next"
+    BeforeLast, // "the Tuesday before last"
 }
 
-/// Units for relative date calculations.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RelativeUnit {
-    /// Day units (day, days).
     Day,
-    /// Week units (week, weeks).
     Week,
-    /// Month units (month, months).
     Month,
-    /// Year units (year, years).
     Year,
-    /// Specific day of week (Monday, Tuesday, etc.).
     DayOfWeek(DayOfWeek),
-    /// Beginning or end of period.
-    PeriodBoundary(PeriodType, BoundaryType),
+    PeriodBoundary(PeriodType, BoundaryType),   // "end of month"
 }
 
-/// Types of periods for boundary calculations.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PeriodType {
     Week,
@@ -61,7 +50,6 @@ pub enum PeriodType {
     Year,
 }
 
-/// Types of boundaries within periods.
 #[derive(Clone, Debug, PartialEq)]
 pub enum BoundaryType {
     Beginning,
@@ -69,39 +57,27 @@ pub enum BoundaryType {
     Middle,
 }
 
-/// Direction of relative movement (forward or backward in time).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Direction {
     Forward,
     Backward,
 }
 
-/// A complete relative date expression parsed from natural language.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RelativeExpression {
-    /// The relative reference type (next, last, this, etc.).
-    pub reference: RelativeReference,
-    /// The unit being referenced (day, week, Monday, etc.).
-    pub unit: RelativeUnit,
-    /// Optional quantity (2 days, 3 weeks, etc.).
-    pub quantity: Option<i32>,
-    /// Direction of movement.
-    pub direction: Direction,
-    /// Optional additional context ("from now", "from today", etc.).
-    pub context: Option<String>,
+    pub reference:  RelativeReference,
+    pub unit:       RelativeUnit,
+    pub quantity:   Option<i32>,        // the 2 in "2 weeks"
+    pub direction:  Direction,
+    pub context:    Option<String>,     // "from now", "from today"
 }
 
-/// Comprehensive relative date parser.
 pub struct RelativeDateParser {
-    /// Day of week name mappings.
+    // The vocabularies, each mapping a word to the thing it means.
     day_names: HashMap<String, DayOfWeek>,
-    /// Month name mappings.
     month_names: HashMap<String, MonthOfYear>,
-    /// Relative reference word mappings.
     reference_words: HashMap<String, RelativeReference>,
-    /// Unit word mappings.
     unit_words: HashMap<String, RelativeUnit>,
-    /// Direction word mappings.
     direction_words: HashMap<String, Direction>,
 }
 
@@ -112,7 +88,6 @@ impl Default for RelativeDateParser {
 }
 
 impl RelativeDateParser {
-    /// Creates a new relative date parser with comprehensive vocabularies.
     pub fn new() -> Self {
         let mut parser = Self {
             day_names: HashMap::new(),
@@ -126,7 +101,6 @@ impl RelativeDateParser {
         parser
     }
     
-    /// Initialises all vocabulary mappings.
     fn initialise_vocabularies(&mut self) {
         self.initialise_day_names();
         self.initialise_month_names();
@@ -135,7 +109,6 @@ impl RelativeDateParser {
         self.initialise_direction_words();
     }
     
-    /// Initialises day of week name mappings.
     fn initialise_day_names(&mut self) {
         let days = [
             (DayOfWeek::Sunday, vec!["sunday", "sun"]),
@@ -154,7 +127,6 @@ impl RelativeDateParser {
         }
     }
     
-    /// Initialises month name mappings.
     fn initialise_month_names(&mut self) {
         let months = [
             (MonthOfYear::January, vec!["january", "jan"]),
@@ -178,7 +150,6 @@ impl RelativeDateParser {
         }
     }
     
-    /// Initialises relative reference word mappings.
     fn initialise_reference_words(&mut self) {
         let references = [
             (RelativeReference::Next, vec!["next", "following", "upcoming"]),
@@ -196,7 +167,6 @@ impl RelativeDateParser {
         }
     }
     
-    /// Initialises unit word mappings.
     fn initialise_unit_words(&mut self) {
         let units = [
             (RelativeUnit::Day, vec!["day", "days"]),
@@ -215,7 +185,6 @@ impl RelativeDateParser {
         // not individual token parsing, so we don't add them to unit_words.
     }
     
-    /// Initialises direction word mappings.
     fn initialise_direction_words(&mut self) {
         let directions = [
             (Direction::Forward, vec!["from", "after", "hence", "later"]),
@@ -229,8 +198,6 @@ impl RelativeDateParser {
         }
     }
     
-    /// Parses a relative date expression from natural language.
-    /// 
     /// # Examples
     /// 
     /// ```ignore
@@ -257,7 +224,6 @@ impl RelativeDateParser {
         self.parse_tokens(&tokens)
     }
     
-    /// Normalizes input by converting to lowercase and handling common variations.
     fn normalize_input(&self, input: &str) -> String {
         input
             .to_lowercase()
@@ -268,7 +234,6 @@ impl RelativeDateParser {
             .to_string()
     }
     
-    /// Tokenizes the normalized input into words.
     fn tokenize(&self, input: &str) -> Vec<String> {
         input
             .split_whitespace()
@@ -278,7 +243,6 @@ impl RelativeDateParser {
             .collect()
     }
     
-    /// Parses tokens into a relative expression.
     fn parse_tokens(&self, tokens: &[String]) -> Outcome<RelativeExpression> {
         if tokens.is_empty() {
             return Err(err!("Empty input for relative date parsing"; Invalid, Input));
@@ -378,7 +342,6 @@ impl RelativeDateParser {
         Ok(expression)
     }
     
-    /// Parses period boundary expressions like "end of month", "beginning of year".
     pub fn parse_period_boundary(&self, boundary_word: &str, period_word: &str) -> Option<RelativeUnit> {
         let boundary_type = match boundary_word {
             "beginning" | "start" => BoundaryType::Beginning,
@@ -398,7 +361,6 @@ impl RelativeDateParser {
         Some(RelativeUnit::PeriodBoundary(period_type, boundary_type))
     }
     
-    /// Validates and adjusts the parsed expression for consistency.
     fn validate_and_adjust_expression(&self, expr: &mut RelativeExpression) -> Outcome<()> {
         // If we have a quantity but no clear direction, infer from context.
         if expr.quantity.is_some() {
@@ -441,17 +403,6 @@ impl RelativeDateParser {
         Ok(())
     }
     
-    /// Calculates the actual date from a relative expression.
-    /// 
-    /// # Arguments
-    /// 
-    /// * `expr` - The relative expression to calculate
-    /// * `base_date` - The base date to calculate from (usually today)
-    /// * `zone` - The timezone for the calculation
-    /// 
-    /// # Returns
-    /// 
-    /// The calculated CalendarDate
     pub fn calculate_date(&self, expr: &RelativeExpression, base_date: &CalendarDate, zone: CalClockZone) -> Outcome<CalendarDate> {
         match &expr.unit {
             RelativeUnit::Day => self.calculate_day_offset(expr, base_date),
@@ -463,7 +414,6 @@ impl RelativeDateParser {
         }
     }
     
-    /// Calculates date with day offset.
     fn calculate_day_offset(&self, expr: &RelativeExpression, base_date: &CalendarDate) -> Outcome<CalendarDate> {
         let quantity = expr.quantity.unwrap_or(1);
         let offset = match expr.direction {
@@ -474,7 +424,6 @@ impl RelativeDateParser {
         base_date.add_days(offset)
     }
     
-    /// Calculates date with week offset.
     fn calculate_week_offset(&self, expr: &RelativeExpression, base_date: &CalendarDate) -> Outcome<CalendarDate> {
         let quantity = expr.quantity.unwrap_or(1);
         let offset = match expr.direction {
@@ -485,7 +434,6 @@ impl RelativeDateParser {
         base_date.add_days(offset)
     }
     
-    /// Calculates date with month offset.
     fn calculate_month_offset(&self, expr: &RelativeExpression, base_date: &CalendarDate) -> Outcome<CalendarDate> {
         let quantity = expr.quantity.unwrap_or(1);
         let offset = match expr.direction {
@@ -496,7 +444,6 @@ impl RelativeDateParser {
         base_date.add_months(offset)
     }
     
-    /// Calculates date with year offset.
     fn calculate_year_offset(&self, expr: &RelativeExpression, base_date: &CalendarDate) -> Outcome<CalendarDate> {
         let quantity = expr.quantity.unwrap_or(1);
         let offset = match expr.direction {
@@ -507,7 +454,9 @@ impl RelativeDateParser {
         base_date.add_years(offset)
     }
     
-    /// Calculates specific day of week relative to base date.
+    /// "This Tuesday" can land in the past, since it means the Tuesday of the
+    /// current week. "Next" and "last" never return the base date itself,
+    /// even when it falls on the target day.
     fn calculate_day_of_week(&self, expr: &RelativeExpression, base_date: &CalendarDate, target_day: DayOfWeek, _zone: CalClockZone) -> Outcome<CalendarDate> {
         let current_day = base_date.day_of_week();
         let current_day_num = current_day.of() as i32;
@@ -555,7 +504,6 @@ impl RelativeDateParser {
         base_date.add_days(days_to_target)
     }
     
-    /// Calculates period boundary dates (beginning/end of month, etc.).
     fn calculate_period_boundary(&self, expr: &RelativeExpression, base_date: &CalendarDate, period: &PeriodType, boundary: &BoundaryType, zone: CalClockZone) -> Outcome<CalendarDate> {
         match period {
             PeriodType::Week => self.calculate_week_boundary(expr, base_date, boundary),
@@ -565,7 +513,6 @@ impl RelativeDateParser {
         }
     }
     
-    /// Calculates week boundary (beginning/end of week).
     fn calculate_week_boundary(&self, expr: &RelativeExpression, base_date: &CalendarDate, boundary: &BoundaryType) -> Outcome<CalendarDate> {
         let current_day_num = base_date.day_of_week().of() as i32;
         
@@ -595,7 +542,6 @@ impl RelativeDateParser {
         }
     }
     
-    /// Calculates month boundary (beginning/end of month).
     fn calculate_month_boundary(&self, expr: &RelativeExpression, base_date: &CalendarDate, boundary: &BoundaryType, zone: CalClockZone) -> Outcome<CalendarDate> {
         let (target_year, target_month) = match expr.reference {
             RelativeReference::This => (base_date.year(), base_date.month()),
@@ -634,7 +580,6 @@ impl RelativeDateParser {
         }
     }
     
-    /// Calculates quarter boundary.
     fn calculate_quarter_boundary(&self, expr: &RelativeExpression, base_date: &CalendarDate, boundary: &BoundaryType, zone: CalClockZone) -> Outcome<CalendarDate> {
         let current_quarter = ((base_date.month() - 1) / 3) + 1;
         
@@ -675,7 +620,6 @@ impl RelativeDateParser {
         }
     }
     
-    /// Calculates year boundary.
     fn calculate_year_boundary(&self, expr: &RelativeExpression, base_date: &CalendarDate, boundary: &BoundaryType, zone: CalClockZone) -> Outcome<CalendarDate> {
         let target_year = match expr.reference {
             RelativeReference::This => base_date.year(),
@@ -699,18 +643,6 @@ impl RelativeDateParser {
         }
     }
     
-    /// Convenience method to parse and calculate a relative date in one step.
-    /// 
-    /// # Arguments
-    /// 
-    /// * `input` - The natural language relative date expression
-    /// * `base_date` - The base date to calculate from (usually today)
-    /// * `zone` - The timezone for the calculation
-    /// 
-    /// # Returns
-    /// 
-    /// The calculated CalendarDate
-    /// 
     /// # Examples
     /// 
     /// ```ignore

@@ -1,7 +1,10 @@
-/// Range-based indexing for efficient temporal range queries
-/// 
-/// This module provides specialized indexing for time ranges and intervals,
-/// optimized for overlapping range queries and interval operations.
+//! Range-based indexing for temporal range queries.
+//!
+//! Ranges are indexed at both ends, so a query can find the ranges that
+//! overlap it, sit inside it, or contain it without scanning them all.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use crate::{
@@ -13,23 +16,17 @@ use std::{
     fmt,
 };
 
-/// Query parameters for range-based searches
 #[derive(Debug, Clone)]
 pub struct RangeQuery {
-    /// Start time of the query range
-    pub start: CalClock,
-    /// End time of the query range
-    pub end: CalClock,
-    /// Whether to include ranges that partially overlap
-    pub include_partial_overlaps: bool,
-    /// Whether to include ranges that are completely contained within the query
-    pub include_contained: bool,
-    /// Whether to include ranges that completely contain the query
-    pub include_containing: bool,
+    pub start:                      CalClock,
+    pub end:                        CalClock,
+    // Which kinds of overlap count as a match.
+    pub include_partial_overlaps:   bool,
+    pub include_contained:          bool,     // range inside the query
+    pub include_containing:         bool,     // query inside the range
 }
 
 impl RangeQuery {
-    /// Creates a new range query
     pub fn new(start: CalClock, end: CalClock) -> Self {
         RangeQuery {
             start,
@@ -40,7 +37,6 @@ impl RangeQuery {
         }
     }
 
-    /// Creates a query that only finds exact overlaps
     pub fn exact_overlaps(start: CalClock, end: CalClock) -> Self {
         RangeQuery {
             start,
@@ -51,7 +47,6 @@ impl RangeQuery {
         }
     }
 
-    /// Creates a query that only finds contained ranges
     pub fn contained_ranges(start: CalClock, end: CalClock) -> Self {
         RangeQuery {
             start,
@@ -62,7 +57,6 @@ impl RangeQuery {
         }
     }
 
-    /// Creates a query that only finds containing ranges
     pub fn containing_ranges(start: CalClock, end: CalClock) -> Self {
         RangeQuery {
             start,
@@ -74,59 +68,42 @@ impl RangeQuery {
     }
 }
 
-/// Result of a range query
 #[derive(Debug, Clone)]
 pub struct RangeResult<T> {
-    /// The indexed range
-    pub range: CalClockRange,
-    /// The associated data
-    pub data: T,
-    /// Type of overlap with the query
-    pub overlap_type: OverlapType,
-    /// Percentage of overlap (0.0 to 1.0)
-    pub overlap_percentage: f64,
+    pub range:              CalClockRange,
+    pub data:               T,
+    pub overlap_type:       OverlapType,
+    pub overlap_percentage: f64,            // 0.0 to 1.0, not 0 to 100
 }
 
-/// Type of overlap between ranges
 #[derive(Debug, Clone, PartialEq)]
 pub enum OverlapType {
-    /// Query range is completely contained within this range
-    QueryContained,
-    /// This range is completely contained within query range
-    RangeContained,
-    /// Ranges partially overlap at the start
+    // Named for whichever side is the smaller of the two.
+    QueryContained,     // query sits inside the indexed range
+    RangeContained,     // indexed range sits inside the query
     PartialStart,
-    /// Ranges partially overlap at the end
     PartialEnd,
-    /// Ranges are identical
     Identical,
-    /// No overlap
     NoOverlap,
 }
 
-/// Indexed range entry
 #[derive(Debug, Clone)]
 pub struct RangeEntry<T> {
-    /// The time range
-    pub range: CalClockRange,
-    /// Associated data
-    pub data: T,
-    /// Entry ID for tracking
-    pub id: usize,
+    pub range:  CalClockRange,
+    pub data:   T,
+    pub id:     usize,
 }
 
 impl<T> RangeEntry<T> {
-    /// Creates a new range entry
     pub fn new(range: CalClockRange, data: T, id: usize) -> Self {
         RangeEntry { range, data, id }
     }
 
-    /// Checks if this range overlaps with another range
     pub fn overlaps_with(&self, other_range: &CalClockRange) -> Outcome<bool> {
         self.range.overlaps(other_range)
     }
 
-    /// Calculates the overlap type and percentage with a query range
+    /// The overlap type, then the fraction of the query the range covers.
     pub fn calculate_overlap(&self, query: &RangeQuery) -> Outcome<(OverlapType, f64)> {
         let query_start_ts = res!(query.start.to_millis());
         let query_end_ts = res!(query.end.to_millis());
@@ -190,24 +167,19 @@ impl<T> RangeEntry<T> {
     }
 }
 
-/// Range index for efficient range-based queries
 #[derive(Debug)]
 pub struct RangeIndex<T> {
-    /// Index by start time for efficient range queries
+    // Two ordered indexes, one on each end of the range, both holding
+    // positions into `entries`.
     start_index: BTreeMap<i64, Vec<usize>>,
-    /// Index by end time
     end_index: BTreeMap<i64, Vec<usize>>,
-    /// All indexed ranges
     entries: Vec<RangeEntry<T>>,
-    /// Time zone for calculations
     #[allow(dead_code)]
     zone: CalClockZone,
-    /// Next ID for entries
     next_id: usize,
 }
 
 impl<T> RangeIndex<T> {
-    /// Creates a new range index
     pub fn new(zone: CalClockZone) -> Self {
         RangeIndex {
             start_index: BTreeMap::new(),
@@ -218,7 +190,7 @@ impl<T> RangeIndex<T> {
         }
     }
 
-    /// Adds a range to the index
+    /// Returns the entry id, which is not the position in the entry list.
     pub fn insert(&mut self, range: CalClockRange, data: T) -> Outcome<usize> {
         let entry_id = self.next_id;
         self.next_id += 1;
@@ -245,7 +217,6 @@ impl<T> RangeIndex<T> {
         Ok(entry_id)
     }
 
-    /// Queries ranges that overlap with the given query
     pub fn query(&self, query: &RangeQuery) -> Outcome<Vec<RangeResult<&T>>> {
         let query_start_ts = res!(query.start.to_millis());
         let query_end_ts = res!(query.end.to_millis());
@@ -301,7 +272,6 @@ impl<T> RangeIndex<T> {
         Ok(results)
     }
 
-    /// Finds all ranges that start within a time period
     pub fn find_starting_in_range(&self, start: &CalClock, end: &CalClock) -> Outcome<Vec<&RangeEntry<T>>> {
         let start_ts = res!(start.to_millis());
         let end_ts = res!(end.to_millis());
@@ -319,7 +289,6 @@ impl<T> RangeIndex<T> {
         Ok(results)
     }
 
-    /// Finds all ranges that end within a time period
     pub fn find_ending_in_range(&self, start: &CalClock, end: &CalClock) -> Outcome<Vec<&RangeEntry<T>>> {
         let start_ts = res!(start.to_millis());
         let end_ts = res!(end.to_millis());
@@ -337,22 +306,18 @@ impl<T> RangeIndex<T> {
         Ok(results)
     }
 
-    /// Gets the total number of indexed ranges
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
-    /// Checks if the index is empty
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
-    /// Gets all entries
     pub fn all_entries(&self) -> &[RangeEntry<T>] {
         &self.entries
     }
 
-    /// Removes an entry by ID
     pub fn remove(&mut self, entry_id: usize) -> Outcome<Option<RangeEntry<T>>> {
         if let Some(pos) = self.entries.iter().position(|e| e.id == entry_id) {
             let entry = self.entries.remove(pos);
@@ -366,7 +331,6 @@ impl<T> RangeIndex<T> {
         }
     }
 
-    /// Rebuilds the indexes from current entries
     fn rebuild_indexes(&mut self) -> Outcome<()> {
         self.start_index.clear();
         self.end_index.clear();

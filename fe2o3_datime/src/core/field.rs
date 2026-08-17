@@ -1,6 +1,8 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use oxedyne_fe2o3_core::prelude::*;
 
-/// Enumeration of time field types.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum TimeField {
     Year,
@@ -15,7 +17,6 @@ pub enum TimeField {
     WeekOfYear,
 }
 
-/// Holder for parsed time field values.
 #[derive(Clone, Debug, Default)]
 pub struct TimeFieldHolder {
     pub year:		Option<i32>,

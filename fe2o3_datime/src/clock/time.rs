@@ -1,3 +1,6 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use crate::{
 	core::Time,
 	clock::{
@@ -15,17 +18,9 @@ use oxedyne_fe2o3_core::prelude::*;
 
 use std::fmt;
 
-/// Represents a time of day with nanosecond precision.
-///
-/// This type provides immutable time-of-day representation supporting times from
-/// 00:00:00.000000000 through 24:00:00.000000000 (inclusive). The value 24:00:00.000000000
-/// represents the end of day and is equivalent to 00:00:00.000000000 of the following day.
-///
-/// All arithmetic operations return new instances, maintaining immutability. Time zone
-/// information is preserved but time arithmetic is performed in a time zone agnostic manner
-/// since no date context is available.
-///
-/// # Examples
+/// 00:00:00.000000000 through 24:00:00.000000000 inclusive, the last being the
+/// end of the day rather than a time within it. The zone is carried but not
+/// applied: with no date there is nothing for its rules to act on.
 ///
 /// ```ignore
 /// use oxedyne_fe2o3_datime::{
@@ -48,20 +43,6 @@ pub struct ClockTime {
 }
 
 impl ClockTime {
-	/// Creates a new ClockTime from individual components.
-	///
-	/// # Arguments
-	///
-	/// * `hour` - Hour of day (0-23)
-	/// * `minute` - Minute within hour (0-59)
-	/// * `second` - Second within minute (0-59)
-	/// * `nanosecond` - Nanosecond within second (0-999,999,999)
-	/// * `zone` - Time zone for this time
-	///
-	/// # Returns
-	///
-	/// Returns `Ok(ClockTime)` if all components are valid, otherwise returns an error
-	/// describing the invalid component.
 	pub fn new(
 		hour: u8,
 		minute: u8,
@@ -102,24 +83,8 @@ impl ClockTime {
 		})
 	}
 	
-	/// Creates a new ClockTime with leap second support.
-	///
-	/// This method allows creation of times with second=60 (leap seconds) when
-	/// the leap second configuration allows it and validates against the leap second table.
-	///
-	/// # Arguments
-	///
-	/// * `hour` - Hour of day (0-23)
-	/// * `minute` - Minute within hour (0-59)
-	/// * `second` - Second within minute (0-60)
-	/// * `nanosecond` - Nanosecond within second (0-999,999,999)
-	/// * `zone` - Time zone for this time
-	/// * `config` - Leap second configuration
-	///
-	/// # Returns
-	///
-	/// Returns `Ok(ClockTime)` if the time is valid according to the leap second
-	/// configuration, otherwise returns an error.
+	/// Second 60 is accepted only where the configuration allows it and the leap
+	/// second table agrees.
 	pub fn new_with_leap_seconds(
 		hour: u8,
 		minute: u8,
@@ -192,10 +157,6 @@ impl ClockTime {
 		})
 	}
 
-	/// Creates a new ClockTime from pre-validated components.
-	///
-	/// This method accepts component objects that have already been validated,
-	/// avoiding the need for additional validation.
 	pub fn from_components(
 		hour: ClockHour,
 		minute: ClockMinute,
@@ -206,24 +167,14 @@ impl ClockTime {
 		Self { hour, minute, second, nanosecond, zone }
 	}
 	
-	/// Creates a ClockTime representing midnight (00:00:00.000000000).
-	///
-	/// This is a convenience method for creating the start of day.
 	pub fn midnight(zone: CalClockZone) -> Outcome<Self> {
 		Self::new(0, 0, 0, 0, zone)
 	}
 	
-	/// Creates a ClockTime representing noon (12:00:00.000000000).
-	///
-	/// This is a convenience method for creating the middle of day.
 	pub fn noon(zone: CalClockZone) -> Outcome<Self> {
 		Self::new(12, 0, 0, 0, zone)
 	}
 	
-	/// Creates a ClockTime representing end of day (24:00:00.000000000).
-	///
-	/// This represents the conceptual end of day, equivalent to 00:00:00.000000000 of the
-	/// following day. This value is primarily useful for interval endpoints.
 	pub fn end_of_day(zone: CalClockZone) -> Outcome<Self> {
 		// Special case: create end-of-day time with hour 24
 		// This bypasses normal validation since 24:00:00 is conceptually valid as end-of-day
@@ -236,7 +187,6 @@ impl ClockTime {
 		})
 	}
 	
-	/// Creates a ClockTime from total nanoseconds elapsed since midnight.\n\t///\n\t/// # Arguments\n\t///\n\t/// * `nanos` - Nanoseconds since midnight (0 to just under 24 hours)\n\t/// * `zone` - Time zone for the resulting time\n\t///\n\t/// # Returns\n\t///\n\t/// Returns `Ok(ClockTime)` if the nanosecond count represents a valid time\n\t/// within a single day, otherwise returns an error."
 	pub fn from_nanos_of_day(nanos: u64, zone: CalClockZone) -> Outcome<Self> {
 		const NANOS_PER_DAY: u64 = 24 * 60 * 60 * 1_000_000_000;
 		
@@ -267,32 +217,26 @@ impl ClockTime {
 		)
 	}
 	
-	/// Returns the hour component.
 	pub fn hour(&self) -> ClockHour {
 		self.hour
 	}
 	
-	/// Returns the minute component.
 	pub fn minute(&self) -> ClockMinute {
 		self.minute
 	}
 	
-	/// Returns the second component.
 	pub fn second(&self) -> ClockSecond {
 		self.second
 	}
 	
-	/// Returns the nanosecond component.
 	pub fn nanosecond(&self) -> ClockNanoSecond {
 		self.nanosecond
 	}
 	
-	/// Returns the time zone.
 	pub fn zone(&self) -> &CalClockZone {
 		&self.zone
 	}
 	
-	/// Converts to total nanoseconds since midnight.
 	pub fn to_nanos_of_day(&self) -> u64 {
 		let hour_nanos = self.hour.of() as u64 * ClockHour::NANOS_PER_HOUR;
 		let minute_nanos = self.minute.of() as u64 * ClockMinute::NANOS_PER_MINUTE;
@@ -302,28 +246,15 @@ impl ClockTime {
 		hour_nanos + minute_nanos + second_nanos + nanos
 	}
 	
-	/// Alias for to_nanos_of_day() for API compatibility.
 	pub fn nanos_of_day(&self) -> u64 {
 		self.to_nanos_of_day()
 	}
 	
-	/// Converts to total milliseconds since midnight.
 	pub fn millis_of_day(&self) -> u32 {
 		let nanos = self.to_nanos_of_day();
 		(nanos / 1_000_000) as u32
 	}
 	
-	/// Creates a ClockTime from total milliseconds elapsed since midnight.
-	///
-	/// # Arguments
-	///
-	/// * `millis` - Milliseconds since midnight (0 to just under 24 hours)
-	/// * `zone` - Time zone for the resulting time
-	///
-	/// # Returns
-	///
-	/// Returns `Ok(ClockTime)` if the millisecond count represents a valid time
-	/// within a single day, otherwise returns an error.
 	pub fn from_millis_of_day(millis: u32, zone: CalClockZone) -> Outcome<Self> {
 		const MILLIS_PER_DAY: u32 = 24 * 60 * 60 * 1_000;
 		
@@ -341,12 +272,10 @@ impl ClockTime {
 		Self::from_nanos_of_day(nanos, zone)
 	}
 	
-	/// Returns true if this represents a valid time of day (hour < 24).
 	pub fn is_valid_day_time(&self) -> bool {
 		self.hour.is_valid_day_hour()
 	}
 	
-	/// Returns true if this represents end of day (24:00:00.000000000).
 	pub fn is_end_of_day(&self) -> bool {
 		self.hour.is_end_of_day() &&
 		self.minute.of() == 0 &&
@@ -354,23 +283,16 @@ impl ClockTime {
 		self.nanosecond.of() == 0
 	}
 
-	/// Returns true if this time represents a leap second (second=60).
 	pub fn is_leap_second(&self) -> bool {
 		self.second.is_leap_second()
 	}
 
-	/// Returns true if this time could potentially be a valid leap second.
-	///
-	/// This checks if the time is 23:59:60, which is the only time format
-	/// where leap seconds can occur in UTC.
+	/// 23:59:60 is the only time at which a UTC leap second can fall.
 	pub fn is_potential_leap_second(&self) -> bool {
 		self.hour.of() == 23 && self.minute.of() == 59 && self.second.of() == 60
 	}
 
-	/// Normalises a leap second time to the next minute.
-	///
-	/// Converts 23:59:60 to 00:00:00 of the next day, which is how leap seconds
-	/// are typically handled in calculations.
+	/// 23:59:60 becomes 00:00:00 of the next day.
 	pub fn normalize_leap_second(&self) -> Outcome<(Self, bool)> {
 		if !self.is_leap_second() {
 			return Ok((self.clone(), false));
@@ -386,27 +308,22 @@ impl ClockTime {
 		}
 	}
 	
-	/// Returns true if this time is before another time.
 	pub fn is_before(&self, other: &Self) -> bool {
 		self.to_nanos_of_day() < other.to_nanos_of_day()
 	}
 	
-	/// Returns true if this time is after another time.
 	pub fn is_after(&self, other: &Self) -> bool {
 		self.to_nanos_of_day() > other.to_nanos_of_day()
 	}
 	
-	/// Returns true if this time is before or equal to another time.
 	pub fn or_earlier(&self, other: &Self) -> bool {
 		self.to_nanos_of_day() <= other.to_nanos_of_day()
 	}
 	
-	/// Returns true if this time is after or equal to another time.
 	pub fn or_later(&self, other: &Self) -> bool {
 		self.to_nanos_of_day() >= other.to_nanos_of_day()
 	}
 	
-	/// Adds a duration, returning (new_time, day_overflow).
 	pub fn plus(&self, duration: &ClockDuration) -> Outcome<(Self, i32)> {
 		let mut fields = ClockFields::from_time(
 			self.hour.of(),
@@ -427,7 +344,6 @@ impl ClockTime {
 		Ok((new_time, day_carry))
 	}
 	
-	/// Subtracts a duration, returning (new_time, day_underflow).
 	pub fn minus(&self, duration: &ClockDuration) -> Outcome<(Self, i32)> {
 		let mut fields = ClockFields::from_time(
 			self.hour.of(),
@@ -448,7 +364,6 @@ impl ClockTime {
 		Ok((new_time, day_carry))
 	}
 	
-	/// Calculates the duration between this time and another.
 	pub fn duration_until(&self, other: &Self) -> ClockDuration {
 		let self_nanos = self.to_nanos_of_day() as i64;
 		let other_nanos = other.to_nanos_of_day() as i64;
@@ -457,19 +372,16 @@ impl ClockTime {
 		ClockDuration::from_nanos(diff_nanos)
 	}
 	
-	/// Converts to 12-hour format string (e.g., "3:45:30 PM").
 	pub fn to_twelve_hour_string(&self) -> String {
 		let (hour, is_pm) = self.hour.to_twelve_hour();
 		let ampm = if is_pm { "PM" } else { "AM" };
 		fmt!("{}:{:02}:{:02} {}", hour, self.minute.of(), self.second.of(), ampm)
 	}
 	
-	/// Converts to 24-hour format string (e.g., "15:45:30").
 	pub fn to_twenty_four_hour_string(&self) -> String {
 		fmt!("{}:{}:{}", self.hour, self.minute, self.second)
 	}
 	
-	/// Converts to ISO 8601 time format with nanoseconds (e.g., "15:45:30.123456789").
 	pub fn to_iso_string(&self) -> String {
 		if self.nanosecond.of() == 0 {
 			fmt!("{}:{}:{}", self.hour, self.minute, self.second)
@@ -531,7 +443,6 @@ impl Time for ClockTime {
 
 // Validation methods
 impl ClockTime {
-	/// Returns true if all components are valid.
 	pub fn is_valid(&self) -> bool {
 		self.hour.of() <= 24 &&
 		self.minute.of() <= 60 &&
@@ -539,19 +450,12 @@ impl ClockTime {
 		self.nanosecond.of() <= 999_999_999
 	}
 	
-	/// Adds a ClockDuration to this time, ignoring day overflow.
-	///
-	/// This method is primarily used by higher-level types like CalClock
-	/// that handle day overflow separately.
+	/// Day overflow is dropped here, because CalClock carries it.
 	pub fn add_duration(&self, duration: &ClockDuration) -> Outcome<Self> {
 		let (new_time, _day_overflow) = res!(self.plus(duration));
 		Ok(new_time)
 	}
 	
-	/// Subtracts a ClockDuration from this time, ignoring day underflow.
-	///
-	/// This method is primarily used by higher-level types like CalClock
-	/// that handle day underflow separately.
 	pub fn subtract_duration(&self, duration: &ClockDuration) -> Outcome<Self> {
 		let (new_time, _day_underflow) = res!(self.minus(duration));
 		Ok(new_time)
@@ -561,9 +465,7 @@ impl ClockTime {
 	// String Formatting Implementation (ported from Java original)
 	// ========================================================================
 	
-	/// Formats the time according to the stencil pattern.
-	/// 
-	/// Format scheme from original Java implementation:
+	/// The stencil characters, from the Java implementation:
 	/// - h hh                   Hour (12hr)     4 04
 	/// - H HH                   Hour (24hr)     16 16
 	/// - m mm                   Minute          5 05
@@ -600,7 +502,6 @@ impl ClockTime {
 		output
 	}
 	
-	/// Processes a single format token (ported from Java switchOnFormatChar)
 	fn switch_on_format_char(&self, c: char, n: usize, sb: &mut String) {
 		match c {
 			'h' => self.format_hour_12(n, sb, self.hour.of() as i32),
@@ -615,7 +516,6 @@ impl ClockTime {
 		}
 	}
 	
-	/// Formats 12-hour hour component
 	fn format_hour_12(&self, n: usize, sb: &mut String, val: i32) {
 		let hour_12 = if val == 0 { 12 } else if val > 12 { val - 12 } else { val };
 		match n {
@@ -624,7 +524,6 @@ impl ClockTime {
 		}
 	}
 	
-	/// Formats 24-hour hour component
 	fn format_hour_24(&self, n: usize, sb: &mut String, val: i32) {
 		match n {
 			1 => sb.push_str(&val.to_string()),
@@ -632,7 +531,6 @@ impl ClockTime {
 		}
 	}
 	
-	/// Formats minute component
 	fn format_minute(&self, n: usize, sb: &mut String, val: i32) {
 		match n {
 			1 => sb.push_str(&val.to_string()),
@@ -640,7 +538,6 @@ impl ClockTime {
 		}
 	}
 	
-	/// Formats second component
 	fn format_second(&self, n: usize, sb: &mut String, val: i32) {
 		match n {
 			1 => sb.push_str(&val.to_string()),
@@ -648,7 +545,6 @@ impl ClockTime {
 		}
 	}
 	
-	/// Formats fractional seconds (nanoseconds)
 	fn format_fraction(&self, n: usize, sb: &mut String, nanos: u32, suppress_trailing_zeros: bool) {
 		let fraction_str = fmt!("{:09}", nanos);
 		let mut result = if n <= 9 {
@@ -667,7 +563,6 @@ impl ClockTime {
 		sb.push_str(&result);
 	}
 	
-	/// Formats AM/PM indicator
 	fn format_am_pm(&self, n: usize, sb: &mut String, hour: i32) {
 		let is_pm = hour >= 12;
 		match n {
@@ -676,7 +571,6 @@ impl ClockTime {
 		}
 	}
 	
-	/// Formats timezone component
 	fn format_timezone(&self, n: usize, sb: &mut String) {
 		match n {
 			1 => sb.push_str(self.zone.id()), // Simple ID

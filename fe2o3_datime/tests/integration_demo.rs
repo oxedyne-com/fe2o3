@@ -1,3 +1,6 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use oxedyne_fe2o3_core::{
     prelude::*,
     test::test_it,
@@ -15,7 +18,6 @@ use oxedyne_fe2o3_datime::{
     },
 };
 
-/// Demonstrates the complete IANA TZif integration with a realistic timezone example
 pub fn test_integration_demo(filter: &str) -> Outcome<()> {
     
     res!(test_it(filter, &["complete_iana_integration_demo", "all", "integration", "demo"], || {

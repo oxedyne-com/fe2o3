@@ -1,8 +1,10 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use oxedyne_fe2o3_core::prelude::*;
 
 use std::fmt::Debug;
 
-/// Trait for types representing a duration of time.
 pub trait Duration: Debug + Clone {
     fn to_nanos(&self) -> Outcome<i64>;
     fn to_seconds(&self) -> Outcome<i64>;
@@ -10,7 +12,6 @@ pub trait Duration: Debug + Clone {
     fn is_negative(&self) -> bool;
 }
 
-/// Abstract base for duration types.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AbstractDuration;
 

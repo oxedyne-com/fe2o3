@@ -1,3 +1,6 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use crate::{
     calendar::{
         CalendarDate,
@@ -10,7 +13,6 @@ use oxedyne_fe2o3_core::prelude::*;
 
 use std::fmt::{self, Display};
 
-/// An interval between two calendar dates.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CalendarInterval {
     start:	CalendarDate,

@@ -1,4 +1,7 @@
-/// Task execution engine for the scheduling system
+//! Task execution engine for the scheduling system.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use crate::{
@@ -10,49 +13,35 @@ use std::{
     thread,
 };
 
-/// Result of task execution
 #[derive(Debug, Clone)]
 pub struct ExecutionResult {
-    /// Whether execution was successful
-    pub success: bool,
-    /// Duration in milliseconds
-    pub duration_millis: u64,
-    /// Error message if failed
-    pub error_message: Option<String>,
-    /// Action execution result
-    pub action_result: Option<ActionResult>,
+    pub success:            bool,
+    pub duration_millis:    u64,
+    pub error_message:      Option<String>,
+    pub action_result:      Option<ActionResult>,
 }
 
-/// Statistics for task execution
 #[derive(Debug, Clone, Default)]
 pub struct ExecutionStats {
-    /// Total executions attempted
-    pub total_executions: u64,
-    /// Successful executions
-    pub successful_executions: u64,
-    /// Failed executions
-    pub failed_executions: u64,
-    /// Average execution time in milliseconds
-    pub avg_execution_time_millis: u64,
-    /// Total execution time for calculating averages
-    total_execution_time_millis: u64,
+    pub total_executions:           u64,
+    pub successful_executions:      u64,
+    pub failed_executions:          u64,
+    pub avg_execution_time_millis:  u64,
+    total_execution_time_millis:    u64,    // the running sum behind the average
 }
 
-/// Task executor for running scheduled tasks with real execution capabilities
 #[derive(Debug)]
 pub struct TaskExecutor {
     stats: ExecutionStats,
 }
 
 impl TaskExecutor {
-    /// Creates a new task executor
     pub fn new() -> Self {
         TaskExecutor {
             stats: ExecutionStats::default(),
         }
     }
 
-    /// Executes a task with full action execution and timeout handling
     pub fn execute(&mut self, task: &Task) -> Outcome<ExecutionResult> {
         let start_time = Instant::now();
         let execution_time = res!(CalClock::now_utc());
@@ -130,7 +119,8 @@ impl TaskExecutor {
         })
     }
 
-    /// Executes an action with timeout protection
+    /// The action is run to completion, so a timeout is reported after the
+    /// fact rather than cutting the action short.
     fn execute_with_timeout(
         &self, 
         action: &dyn crate::schedule::Action, 
@@ -155,7 +145,6 @@ impl TaskExecutor {
         }
     }
 
-    /// Executes a task with retry logic
     pub fn execute_with_retry(&mut self, task: &mut Task) -> Outcome<ExecutionResult> {
         let mut last_result = None;
         let max_retries = task.config.max_retries;
@@ -213,7 +202,6 @@ impl TaskExecutor {
         }))
     }
 
-    /// Records a task execution in the task's history
     fn record_task_execution(&self, task: &mut Task, result: &ExecutionResult, retry_count: u32) {
         let started_at = CalClock::now_utc()
             .or_else(|_| CalClock::new(2024, 1, 1, 0, 0, 0, 0, crate::time::CalClockZone::utc()))
@@ -242,17 +230,15 @@ impl TaskExecutor {
         task.record_execution(execution);
     }
 
-    /// Gets execution statistics
     pub fn stats(&self) -> &ExecutionStats {
         &self.stats
     }
 
-    /// Resets execution statistics
     pub fn reset_stats(&mut self) {
         self.stats = ExecutionStats::default();
     }
 
-    /// Gets success rate as a percentage
+    /// A percentage.
     pub fn success_rate(&self) -> f64 {
         if self.stats.total_executions == 0 {
             0.0

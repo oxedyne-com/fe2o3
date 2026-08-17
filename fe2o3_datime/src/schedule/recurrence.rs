@@ -1,8 +1,10 @@
-/// Recurrence patterns and scheduling rules for recurring tasks
-/// 
-/// This module provides comprehensive support for defining when and how
-/// often scheduled tasks should recur, including cron-style expressions
-/// and business calendar integration.
+//! Recurrence patterns and rules for recurring tasks.
+//!
+//! A pattern says how often. A rule wraps a pattern with the dates it must
+//! skip, the dates it must keep, and whether the business calendar applies.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use crate::{
@@ -12,39 +14,25 @@ use crate::{
 };
 use std::collections::HashSet;
 
-/// Predefined recurrence patterns for common scheduling needs
 #[derive(Debug, Clone, PartialEq)]
 pub enum RecurrencePattern {
-    /// Execute once every N minutes
     EveryMinutes(u32),
-    /// Execute once every N hours
     EveryHours(u32),
-    /// Execute once every day at the same time
-    Daily,
-    /// Execute once every N days
+    Daily,                          // same time each day
     EveryDays(u32),
-    /// Execute on specific days of the week
-    Weekly(HashSet<DayOfWeek>),
-    /// Execute once every N weeks on the same day
-    EveryWeeks(u32),
-    /// Execute on a specific day of each month
-    Monthly(u8), // Day of month (1-31)
-    /// Execute once every N months
+    Weekly(HashSet<DayOfWeek>),     // the days it lands on
+    EveryWeeks(u32),                // same weekday
+    Monthly(u8),                    // day of month, 1-31
     EveryMonths(u32),
-    /// Execute on specific months of the year
-    Yearly(HashSet<MonthOfYear>),
-    /// Execute based on business days (excludes weekends and holidays)
-    BusinessDaily,
-    /// Execute on the first/last/nth occurrence of a weekday in a month
+    Yearly(HashSet<MonthOfYear>),   // the months it lands on
+    BusinessDaily,                  // weekends and holidays skipped
     MonthlyWeekday {
         week: WeekOccurrence,
         day: DayOfWeek,
     },
-    /// Custom cron-style expression
     Cron(CronExpression),
 }
 
-/// Week occurrence in a month (first, second, last, etc.)
 #[derive(Debug, Clone, PartialEq)]
 pub enum WeekOccurrence {
     First,
@@ -55,7 +43,6 @@ pub enum WeekOccurrence {
 }
 
 impl RecurrencePattern {
-    /// Calculates the next execution time based on the current time
     pub fn next_execution(&self, current_time: &CalClock, zone: &CalClockZone) -> Outcome<Option<CalClock>> {
         match self {
             RecurrencePattern::EveryMinutes(minutes) => {
@@ -103,7 +90,6 @@ impl RecurrencePattern {
         }
     }
 
-    /// Calculates next weekly execution
     fn next_weekly_execution(&self, current_time: &CalClock, target_days: &HashSet<DayOfWeek>) -> Outcome<Option<CalClock>> {
         let current_day = current_time.day_of_week();
         let current_day_num = current_day.of() as i32;
@@ -122,7 +108,6 @@ impl RecurrencePattern {
         Ok(None) // Should not happen if target_days is not empty
     }
 
-    /// Calculates next monthly execution on a specific day
     fn next_monthly_execution(&self, current_time: &CalClock, target_day: u8) -> Outcome<Option<CalClock>> {
         let current_day = current_time.day();
         let current_month = current_time.month();
@@ -160,7 +145,6 @@ impl RecurrencePattern {
         Ok(Some(next_time))
     }
 
-    /// Calculates next yearly execution
     fn next_yearly_execution(&self, current_time: &CalClock, target_months: &HashSet<MonthOfYear>) -> Outcome<Option<CalClock>> {
         let _current_month = current_time.month_of_year();
         let current_year = current_time.year();
@@ -196,7 +180,6 @@ impl RecurrencePattern {
         Ok(None)
     }
 
-    /// Calculates next business day execution
     fn next_business_day_execution(&self, current_time: &CalClock, _zone: &CalClockZone) -> Outcome<Option<CalClock>> {
         let mut candidate = res!(current_time.add_days(1));
         
@@ -213,7 +196,6 @@ impl RecurrencePattern {
         Err(err!("Could not find next business day within 10 days"; Invalid, Range))
     }
 
-    /// Calculates next monthly weekday execution (e.g., "first Monday of month")
     fn next_monthly_weekday_execution(
         &self, 
         current_time: &CalClock, 
@@ -245,7 +227,6 @@ impl RecurrencePattern {
         }
     }
 
-    /// Finds a specific weekday occurrence in a month
     fn find_monthly_weekday(
         &self,
         year: i32,
@@ -302,38 +283,27 @@ impl RecurrencePattern {
     }
 }
 
-/// Simplified cron expression support
 #[derive(Debug, Clone, PartialEq)]
 pub struct CronExpression {
-    /// Minute (0-59)
-    pub minute: CronField,
-    /// Hour (0-23)
-    pub hour: CronField,
-    /// Day of month (1-31)
-    pub day: CronField,
-    /// Month (1-12)
-    pub month: CronField,
-    /// Day of week (0-6, Sunday = 0)
-    pub day_of_week: CronField,
+    pub minute:         CronField,  // 0-59
+    pub hour:           CronField,  // 0-23
+    pub day:            CronField,  // 1-31
+    pub month:          CronField,  // 1-12
+    pub day_of_week:    CronField,  // 0-6, Sunday is 0
 }
 
-/// Cron field specification
 #[derive(Debug, Clone, PartialEq)]
 pub enum CronField {
-    /// Any value (*)
-    Any,
-    /// Specific value
-    Value(u8),
-    /// List of values
-    List(Vec<u8>),
-    /// Range of values
-    Range(u8, u8),
-    /// Step values (e.g., */5)
-    Step(u8),
+    // What each piece of cron syntax parses to.
+    Any,                // *
+    Value(u8),          // 7
+    List(Vec<u8>),      // 1,3,5
+    Range(u8, u8),      // 1-5
+    Step(u8),           // */5
 }
 
 impl CronExpression {
-    /// Creates a new cron expression from string (simplified parser)
+    /// A subset of cron: five fields, and no names for months or weekdays.
     pub fn parse(expr: &str) -> Outcome<Self> {
         let parts: Vec<&str> = expr.split_whitespace().collect();
         if parts.len() != 5 {
@@ -349,7 +319,6 @@ impl CronExpression {
         })
     }
 
-    /// Creates a cron expression for daily execution at a specific time
     pub fn daily(hour: u8, minute: u8) -> Self {
         CronExpression {
             minute: CronField::Value(minute),
@@ -360,7 +329,6 @@ impl CronExpression {
         }
     }
 
-    /// Creates a cron expression for weekly execution
     pub fn weekly(day_of_week: DayOfWeek, hour: u8, minute: u8) -> Self {
         CronExpression {
             minute: CronField::Value(minute),
@@ -371,7 +339,6 @@ impl CronExpression {
         }
     }
 
-    /// Calculates the next execution time
     pub fn next_execution(&self, current_time: &CalClock) -> Outcome<Option<CalClock>> {
         // Simplified implementation - finds next matching minute
         let mut candidate = res!(current_time.add_minutes(1));
@@ -387,7 +354,6 @@ impl CronExpression {
         Err(err!("Could not find next cron execution within 32 days"; Invalid, Range))
     }
 
-    /// Checks if a time matches the cron expression
     fn matches_time(&self, time: &CalClock) -> bool {
         self.field_matches(&self.minute, time.minute()) &&
         self.field_matches(&self.hour, time.hour()) &&
@@ -396,7 +362,6 @@ impl CronExpression {
         self.field_matches(&self.day_of_week, time.day_of_week().of() % 7)
     }
 
-    /// Checks if a field matches the current value
     fn field_matches(&self, field: &CronField, value: u8) -> bool {
         match field {
             CronField::Any => true,
@@ -407,7 +372,6 @@ impl CronExpression {
         }
     }
 
-    /// Parses a single cron field
     fn parse_field(field: &str) -> Outcome<CronField> {
         if field == "*" {
             Ok(CronField::Any)
@@ -435,23 +399,16 @@ impl CronExpression {
     }
 }
 
-/// Rule-based recurrence for complex scheduling scenarios
 #[derive(Debug, Clone)]
 pub struct RecurrenceRule {
-    /// Base recurrence pattern
-    pub pattern: RecurrencePattern,
-    /// Exceptions - dates when the rule should not apply
-    pub exceptions: HashSet<CalClock>,
-    /// Overrides - specific dates when the rule should apply regardless
-    pub overrides: HashSet<CalClock>,
-    /// Business calendar integration
-    pub respect_business_calendar: bool,
-    /// Time zone for calculations
-    pub zone: CalClockZone,
+    pub pattern:                    RecurrencePattern,
+    pub exceptions:                 HashSet<CalClock>,  // dates the rule skips
+    pub overrides:                  HashSet<CalClock>,  // dates it runs regardless
+    pub respect_business_calendar:  bool,
+    pub zone:                       CalClockZone,
 }
 
 impl RecurrenceRule {
-    /// Creates a new recurrence rule
     pub fn new(pattern: RecurrencePattern, zone: CalClockZone) -> Self {
         RecurrenceRule {
             pattern,
@@ -462,25 +419,23 @@ impl RecurrenceRule {
         }
     }
 
-    /// Adds an exception date
     pub fn add_exception(mut self, date: CalClock) -> Self {
         self.exceptions.insert(date);
         self
     }
 
-    /// Adds an override date
     pub fn add_override(mut self, date: CalClock) -> Self {
         self.overrides.insert(date);
         self
     }
 
-    /// Enables business calendar integration
     pub fn with_business_calendar(mut self) -> Self {
         self.respect_business_calendar = true;
         self
     }
 
-    /// Calculates the next execution time considering all rules
+    /// An override wins outright. Otherwise the pattern proposes a time and
+    /// the exceptions and business calendar may push it later.
     pub fn next_execution(&self, current_time: &CalClock) -> Outcome<Option<CalClock>> {
         // Check for immediate overrides
         for override_date in &self.overrides {

@@ -1,8 +1,10 @@
-/// Batch operations for improved performance.
-///
-/// This module provides efficient batch processing capabilities for common
-/// date/time operations, allowing multiple calculations to be performed
-/// with reduced overhead and better cache utilisation.
+//! Batch operations for improved performance.
+//!
+//! Processing many date/time operations together shares calculations between
+//! them, cutting per-call overhead and improving cache utilisation.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::{
     calendar::CalendarDate,
@@ -17,23 +19,15 @@ use std::collections::HashMap;
 
 pub mod operations;
 
-/// Batch processor for date/time operations.
-///
-/// This provides efficient processing of multiple similar operations
-/// by sharing calculations and reducing overhead.
 #[derive(Debug, Clone)]
 pub struct BatchProcessor {
-    /// Shared timezone for batch operations.
-    default_zone: CalClockZone,
-    /// Pre-allocated buffers for string operations.
+    default_zone:   CalClockZone,
     #[allow(dead_code)]
-    string_buffer: String,
-    /// Shared formatter for batch formatting operations.
-    formatter: CalClockFormatter,
+    string_buffer:  String,         // pre-allocated
+    formatter:      CalClockFormatter,
 }
 
 impl BatchProcessor {
-    /// Creates a new batch processor with the specified default timezone.
     pub fn new(default_zone: CalClockZone) -> Self {
         Self {
             default_zone,
@@ -42,15 +36,10 @@ impl BatchProcessor {
         }
     }
     
-    /// Creates a batch processor with UTC timezone.
     pub fn new_utc() -> Self {
         Self::new(CalClockZone::utc())
     }
     
-    /// Processes multiple timezone conversions efficiently.
-    ///
-    /// This method converts multiple CalClock instances to a target timezone
-    /// with shared calculations and reduced overhead.
     pub fn convert_timezones(&self, calclocks: &[CalClock], target_zone: &CalClockZone) -> Outcome<Vec<CalClock>> {
         let mut results = Vec::with_capacity(calclocks.len());
         
@@ -62,10 +51,6 @@ impl BatchProcessor {
         Ok(results)
     }
     
-    /// Formats multiple CalClock instances with the same pattern efficiently.
-    ///
-    /// This method formats multiple dates/times with a shared pattern,
-    /// reducing pattern parsing overhead.
     pub fn format_batch(&self, calclocks: &[CalClock], pattern: &FormatPattern) -> Outcome<Vec<String>> {
         let mut results = Vec::with_capacity(calclocks.len());
         
@@ -77,10 +62,6 @@ impl BatchProcessor {
         Ok(results)
     }
     
-    /// Performs arithmetic operations on multiple CalClock instances.
-    ///
-    /// This method applies the same duration addition/subtraction to
-    /// multiple CalClock instances efficiently.
     pub fn add_duration_batch(&self, calclocks: &[CalClock], duration: &CalClockDuration) -> Outcome<Vec<CalClock>> {
         let mut results = Vec::with_capacity(calclocks.len());
         
@@ -92,28 +73,16 @@ impl BatchProcessor {
         Ok(results)
     }
     
-    /// Calculates day of week for multiple dates efficiently.
-    ///
-    /// This method calculates the day of week for multiple CalendarDate
-    /// instances, potentially using lookup tables for common date ranges.
     pub fn day_of_week_batch(&self, dates: &[CalendarDate]) -> Vec<DayOfWeek> {
         dates.iter().map(|date| date.day_of_week()).collect()
     }
     
-    /// Validates multiple dates efficiently.
-    ///
-    /// This method validates multiple date/time combinations with
-    /// shared validation logic and reduced overhead.
     pub fn validate_dates_batch(&self, dates: &[(i32, MonthOfYear, u8)]) -> Vec<Outcome<()>> {
         dates.iter().map(|(year, month, day)| {
             CalendarDate::from_ymd(*year, *month, *day, self.default_zone.clone()).map(|_| ())
         }).collect()
     }
     
-    /// Creates multiple CalClock instances from timestamps efficiently.
-    ///
-    /// This method creates multiple CalClock instances from Unix timestamps
-    /// with shared timezone calculations.
     pub fn from_timestamps_batch(&self, timestamps_millis: &[i64], zone: &CalClockZone) -> Outcome<Vec<CalClock>> {
         let mut results = Vec::with_capacity(timestamps_millis.len());
         
@@ -125,10 +94,6 @@ impl BatchProcessor {
         Ok(results)
     }
     
-    /// Calculates durations between pairs of CalClock instances efficiently.
-    ///
-    /// This method calculates durations between multiple pairs of CalClock
-    /// instances with optimised calculations.
     pub fn duration_between_batch(&self, pairs: &[(CalClock, CalClock)]) -> Outcome<Vec<CalClockDuration>> {
         let mut results = Vec::with_capacity(pairs.len());
         
@@ -140,9 +105,6 @@ impl BatchProcessor {
         Ok(results)
     }
     
-    /// Sorts multiple CalClock instances efficiently.
-    ///
-    /// This method sorts CalClock instances with optimised comparisons.
     pub fn sort_calclocks(&self, calclocks: Vec<CalClock>) -> Outcome<Vec<CalClock>> {
         // Convert to timestamps for efficient sorting
         let mut indexed_clocks: Vec<(i64, CalClock)> = Vec::with_capacity(calclocks.len());
@@ -159,10 +121,7 @@ impl BatchProcessor {
         Ok(indexed_clocks.into_iter().map(|(_, calclock)| calclock).collect())
     }
     
-    /// Finds CalClock instances within a time range efficiently.
-    ///
-    /// This method filters CalClock instances within a specified range
-    /// with optimised range checking.
+    /// Both bounds are inclusive.
     pub fn filter_by_range(&self, calclocks: &[CalClock], start: &CalClock, end: &CalClock) -> Outcome<Vec<CalClock>> {
         let start_millis = res!(start.to_millis());
         let end_millis = res!(end.to_millis());
@@ -179,10 +138,7 @@ impl BatchProcessor {
         Ok(results)
     }
     
-    /// Groups CalClock instances by day efficiently.
-    ///
-    /// This method groups CalClock instances by their date component
-    /// with optimised grouping logic.
+    /// Keys are YYYY-MM-DD.
     pub fn group_by_day(&self, calclocks: &[CalClock]) -> HashMap<String, Vec<CalClock>> {
         let mut groups: HashMap<String, Vec<CalClock>> = HashMap::new();
         
@@ -194,7 +150,7 @@ impl BatchProcessor {
         groups
     }
     
-    /// Returns statistics about batch operations performance.
+    /// Nothing is tracked yet, so every field reads zero.
     pub fn stats(&self) -> BatchStats {
         // This would be enhanced with actual performance tracking
         BatchStats {
@@ -205,7 +161,6 @@ impl BatchProcessor {
     }
 }
 
-/// Statistics about batch operation performance.
 #[derive(Debug, Clone)]
 pub struct BatchStats {
     pub operations_processed: u64,
@@ -214,7 +169,6 @@ pub struct BatchStats {
 }
 
 impl BatchStats {
-    /// Returns the operations per second rate.
     pub fn operations_per_second(&self) -> f64 {
         if self.average_operation_time_nanos > 0 {
             1_000_000_000.0 / self.average_operation_time_nanos as f64
@@ -224,7 +178,6 @@ impl BatchStats {
     }
 }
 
-/// Builder for configuring batch operations.
 #[derive(Debug)]
 pub struct BatchBuilder {
     zone: Option<CalClockZone>,
@@ -233,7 +186,6 @@ pub struct BatchBuilder {
 }
 
 impl BatchBuilder {
-    /// Creates a new batch builder.
     pub fn new() -> Self {
         Self {
             zone: None,
@@ -242,25 +194,21 @@ impl BatchBuilder {
         }
     }
     
-    /// Sets the default timezone for batch operations.
     pub fn with_zone(mut self, zone: CalClockZone) -> Self {
         self.zone = Some(zone);
         self
     }
     
-    /// Sets the formatter for batch operations.
     pub fn with_formatter(mut self, formatter: CalClockFormatter) -> Self {
         self.formatter = Some(formatter);
         self
     }
     
-    /// Sets the buffer size for string operations.
     pub fn with_buffer_size(mut self, size: usize) -> Self {
         self.buffer_size = Some(size);
         self
     }
     
-    /// Builds the batch processor.
     pub fn build(self) -> BatchProcessor {
         let zone = self.zone.unwrap_or_else(|| CalClockZone::utc());
         let formatter = self.formatter.unwrap_or_else(|| CalClockFormatter::new());

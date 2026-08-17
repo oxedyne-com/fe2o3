@@ -1,3 +1,6 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use crate::{
 	calendar::{Calendar, CalendarDate},
 	clock::{
@@ -12,7 +15,6 @@ use crate::{
 
 use oxedyne_fe2o3_core::prelude::*;
 
-/// Represents a specific hour within a specific day.
 #[derive(Clone, Debug, PartialEq)]
 pub struct HourPeriod {
 	date:	CalendarDate,
@@ -20,12 +22,10 @@ pub struct HourPeriod {
 }
 
 impl HourPeriod {
-	/// Creates a new HourPeriod.
 	pub fn new(date: CalendarDate, hour: ClockHour) -> Self {
 		Self { date, hour }
 	}
 	
-	/// Creates a HourPeriod from components.
 	pub fn from_components(
 		year: i32,
 		month: u8,
@@ -39,28 +39,23 @@ impl HourPeriod {
 		Ok(Self::new(date, hour))
 	}
 	
-	/// Returns the calendar date.
 	pub fn date(&self) -> &CalendarDate {
 		&self.date
 	}
 	
-	/// Returns the hour.
 	pub fn hour(&self) -> ClockHour {
 		self.hour
 	}
 	
-	/// Returns the start time of this hour.
 	pub fn start_time(&self) -> Outcome<ClockTime> {
 		ClockTime::new(self.hour.of(), 0, 0, 0, self.date.zone().clone())
 	}
 	
-	/// Returns the end time of this hour (start of next hour).
 	pub fn end_time(&self) -> Outcome<ClockTime> {
 		let next_hour = self.hour.add_hours(1);
 		ClockTime::new(next_hour.of(), 0, 0, 0, self.date.zone().clone())
 	}
 	
-	/// Returns this hour period as a time interval.
 	pub fn to_interval(&self) -> Outcome<ClockInterval> {
 		let start = res!(self.start_time());
 		let end = res!(self.end_time());
@@ -68,7 +63,6 @@ impl HourPeriod {
 	}
 }
 
-/// Represents a specific minute within a specific day.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MinutePeriod {
 	date:	CalendarDate,
@@ -77,12 +71,10 @@ pub struct MinutePeriod {
 }
 
 impl MinutePeriod {
-	/// Creates a new MinutePeriod.
 	pub fn new(date: CalendarDate, hour: ClockHour, minute: ClockMinute) -> Self {
 		Self { date, hour, minute }
 	}
 	
-	/// Creates a MinutePeriod from components.
 	pub fn from_components(
 		year: i32,
 		month: u8,
@@ -98,27 +90,22 @@ impl MinutePeriod {
 		Ok(Self::new(date, hour, minute))
 	}
 	
-	/// Returns the calendar date.
 	pub fn date(&self) -> &CalendarDate {
 		&self.date
 	}
 	
-	/// Returns the hour.
 	pub fn hour(&self) -> ClockHour {
 		self.hour
 	}
 	
-	/// Returns the minute.
 	pub fn minute(&self) -> ClockMinute {
 		self.minute
 	}
 	
-	/// Returns the start time of this minute.
 	pub fn start_time(&self) -> Outcome<ClockTime> {
 		ClockTime::new(self.hour.of(), self.minute.of(), 0, 0, self.date.zone().clone())
 	}
 	
-	/// Returns the end time of this minute (start of next minute).
 	pub fn end_time(&self) -> Outcome<ClockTime> {
 		let (next_minute, hour_carry) = self.minute.add_minutes(1);
 		let next_hour = if hour_carry > 0 {
@@ -129,7 +116,6 @@ impl MinutePeriod {
 		ClockTime::new(next_hour.of(), next_minute.of(), 0, 0, self.date.zone().clone())
 	}
 	
-	/// Returns this minute period as a time interval.
 	pub fn to_interval(&self) -> Outcome<ClockInterval> {
 		let start = res!(self.start_time());
 		let end = res!(self.end_time());
@@ -137,7 +123,6 @@ impl MinutePeriod {
 	}
 }
 
-/// Represents a specific second within a specific day.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SecondPeriod {
 	date:	CalendarDate,
@@ -147,7 +132,6 @@ pub struct SecondPeriod {
 }
 
 impl SecondPeriod {
-	/// Creates a new SecondPeriod.
 	pub fn new(
 		date: CalendarDate, 
 		hour: ClockHour, 
@@ -157,7 +141,6 @@ impl SecondPeriod {
 		Self { date, hour, minute, second }
 	}
 	
-	/// Creates a SecondPeriod from components.
 	pub fn from_components(
 		year: i32,
 		month: u8,
@@ -175,27 +158,22 @@ impl SecondPeriod {
 		Ok(Self::new(date, hour, minute, second))
 	}
 	
-	/// Returns the calendar date.
 	pub fn date(&self) -> &CalendarDate {
 		&self.date
 	}
 	
-	/// Returns the hour.
 	pub fn hour(&self) -> ClockHour {
 		self.hour
 	}
 	
-	/// Returns the minute.
 	pub fn minute(&self) -> ClockMinute {
 		self.minute
 	}
 	
-	/// Returns the second.
 	pub fn second(&self) -> ClockSecond {
 		self.second
 	}
 	
-	/// Returns the start time of this second.
 	pub fn start_time(&self) -> Outcome<ClockTime> {
 		ClockTime::new(
 			self.hour.of(), 
@@ -206,7 +184,6 @@ impl SecondPeriod {
 		)
 	}
 	
-	/// Returns the end time of this second (start of next second).
 	pub fn end_time(&self) -> Outcome<ClockTime> {
 		let (next_second, minute_carry) = self.second.add_seconds(1);
 		let (next_minute, hour_carry) = if minute_carry > 0 {
@@ -229,7 +206,6 @@ impl SecondPeriod {
 		)
 	}
 	
-	/// Returns this second period as a time interval.
 	pub fn to_interval(&self) -> Outcome<ClockInterval> {
 		let start = res!(self.start_time());
 		let end = res!(self.end_time());

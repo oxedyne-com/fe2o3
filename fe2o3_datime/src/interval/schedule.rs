@@ -1,3 +1,9 @@
+//! Schedules: named collections of events, each an interval with an optional
+//! recurrence, that can be searched by date and checked for conflicts.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use crate::{
     calendar::CalendarDate,
     interval::{CalClockRange, RecurrencePattern},
@@ -7,27 +13,18 @@ use crate::{
 use oxedyne_fe2o3_core::prelude::*;
 
 
-/// An event in a schedule.
 #[derive(Clone, Debug)]
 pub struct ScheduleEvent {
-    /// Unique identifier for the event.
-    id: String,
-    /// The time range for this event.
-    range: CalClockRange,
-    /// Title or description of the event.
-    title: String,
-    /// Optional detailed description.
-    description: Option<String>,
-    /// Optional recurrence pattern.
-    recurrence: Option<RecurrencePattern>,
-    /// Priority of the event (higher number = higher priority).
-    priority: u8,
-    /// Whether this event can be moved if there are conflicts.
-    flexible: bool,
+    id:             String,
+    range:          CalClockRange,
+    title:          String,
+    description:    Option<String>,
+    recurrence:     Option<RecurrencePattern>,
+    priority:       u8,                         // higher number wins
+    flexible:       bool,                       // may be moved to clear a conflict
 }
 
 impl ScheduleEvent {
-    /// Creates a new schedule event.
     pub fn new<S: Into<String>>(
         id: S,
         range: CalClockRange,
@@ -44,66 +41,54 @@ impl ScheduleEvent {
         }
     }
     
-    /// Sets the description for this event.
     pub fn description<S: Into<String>>(mut self, description: S) -> Self {
         self.description = Some(description.into());
         self
     }
     
-    /// Sets the recurrence pattern for this event.
     pub fn recurrence(mut self, pattern: RecurrencePattern) -> Self {
         self.recurrence = Some(pattern);
         self
     }
     
-    /// Sets the priority for this event.
     pub fn priority(mut self, priority: u8) -> Self {
         self.priority = priority;
         self
     }
     
-    /// Sets whether this event is flexible (can be moved to resolve conflicts).
     pub fn flexible(mut self, flexible: bool) -> Self {
         self.flexible = flexible;
         self
     }
     
-    /// Returns the event ID.
     pub fn id(&self) -> &str {
         &self.id
     }
     
-    /// Returns the time range for this event.
     pub fn range(&self) -> &CalClockRange {
         &self.range
     }
     
-    /// Returns the title of this event.
     pub fn title(&self) -> &str {
         &self.title
     }
     
-    /// Returns the description of this event.
     pub fn get_description(&self) -> Option<&str> {
         self.description.as_deref()
     }
     
-    /// Returns the recurrence pattern for this event.
     pub fn get_recurrence(&self) -> Option<&RecurrencePattern> {
         self.recurrence.as_ref()
     }
     
-    /// Returns the priority of this event.
     pub fn get_priority(&self) -> u8 {
         self.priority
     }
     
-    /// Returns whether this event is flexible.
     pub fn is_flexible(&self) -> bool {
         self.flexible
     }
     
-    /// Generates all occurrences of this event within a date range.
     pub fn occurrences_in_range(
         &self,
         start_date: &CalendarDate,
@@ -131,17 +116,13 @@ impl ScheduleEvent {
     }
 }
 
-/// A schedule manages multiple events and can detect conflicts.
 #[derive(Debug)]
 pub struct Schedule {
-    /// All events in the schedule.
     events: Vec<ScheduleEvent>,
-    /// Name of the schedule.
-    name: String,
+    name:   String,
 }
 
 impl Schedule {
-    /// Creates a new empty schedule.
     pub fn new<S: Into<String>>(name: S) -> Self {
         Self {
             events: Vec::new(),
@@ -149,17 +130,14 @@ impl Schedule {
         }
     }
     
-    /// Returns the name of this schedule.
     pub fn name(&self) -> &str {
         &self.name
     }
     
-    /// Adds an event to the schedule.
     pub fn add_event(&mut self, event: ScheduleEvent) {
         self.events.push(event);
     }
     
-    /// Removes an event by ID.
     pub fn remove_event(&mut self, event_id: &str) -> bool {
         if let Some(pos) = self.events.iter().position(|e| e.id() == event_id) {
             self.events.remove(pos);
@@ -169,22 +147,18 @@ impl Schedule {
         }
     }
     
-    /// Returns a reference to all events.
     pub fn events(&self) -> &[ScheduleEvent] {
         &self.events
     }
     
-    /// Finds an event by ID.
     pub fn find_event(&self, event_id: &str) -> Option<&ScheduleEvent> {
         self.events.iter().find(|e| e.id() == event_id)
     }
     
-    /// Finds a mutable reference to an event by ID.
     pub fn find_event_mut(&mut self, event_id: &str) -> Option<&mut ScheduleEvent> {
         self.events.iter_mut().find(|e| e.id() == event_id)
     }
     
-    /// Returns all events occurring within a date range.
     pub fn events_in_range(
         &self,
         start_date: &CalendarDate,
@@ -205,12 +179,12 @@ impl Schedule {
         Ok(result)
     }
     
-    /// Returns all events occurring on a specific date.
     pub fn events_on_date(&self, date: &CalendarDate) -> Outcome<Vec<(String, CalClockRange)>> {
         self.events_in_range(date, date)
     }
     
-    /// Detects conflicts between events.
+    /// Overlapping events are gathered into groups, so three events that all
+    /// clash appear once rather than as three pairs.
     pub fn detect_conflicts(&self, start_date: &CalendarDate, end_date: &CalendarDate) -> Outcome<Vec<ConflictGroup>> {
         let events_in_range = res!(self.events_in_range(start_date, end_date));
         let mut conflicts: Vec<ConflictGroup> = Vec::new();
@@ -246,38 +220,31 @@ impl Schedule {
         Ok(conflicts)
     }
     
-    /// Returns the total number of events.
     pub fn event_count(&self) -> usize {
         self.events.len()
     }
     
-    /// Returns true if the schedule is empty.
     pub fn is_empty(&self) -> bool {
         self.events.is_empty()
     }
     
-    /// Clears all events from the schedule.
     pub fn clear(&mut self) {
         self.events.clear();
     }
 }
 
-/// Represents a group of conflicting events.
 #[derive(Debug)]
 pub struct ConflictGroup {
-    /// Events and their ranges that conflict with each other.
-    events: Vec<(String, CalClockRange)>,
+    events: Vec<(String, CalClockRange)>,   // id and range of each
 }
 
 impl ConflictGroup {
-    /// Creates a new empty conflict group.
     pub fn new() -> Self {
         Self {
             events: Vec::new(),
         }
     }
     
-    /// Adds an event to this conflict group.
     pub fn add_event(&mut self, event_id: String, range: CalClockRange) {
         // Only add if not already present
         if !self.events.iter().any(|(id, _)| id == &event_id) {
@@ -285,22 +252,18 @@ impl ConflictGroup {
         }
     }
     
-    /// Returns true if this group contains the specified event.
     pub fn contains_event(&self, event_id: &str) -> bool {
         self.events.iter().any(|(id, _)| id == event_id)
     }
     
-    /// Returns all events in this conflict group.
     pub fn events(&self) -> &[(String, CalClockRange)] {
         &self.events
     }
     
-    /// Returns the number of conflicting events.
     pub fn event_count(&self) -> usize {
         self.events.len()
     }
     
-    /// Returns the overall time range covered by all conflicting events.
     pub fn overall_range(&self) -> Outcome<Option<CalClockRange>> {
         if self.events.is_empty() {
             return Ok(None);
@@ -328,27 +291,23 @@ impl Default for ConflictGroup {
     }
 }
 
-/// Builder for creating schedules with a fluent interface.
 #[derive(Debug)]
 pub struct ScheduleBuilder {
     schedule: Schedule,
 }
 
 impl ScheduleBuilder {
-    /// Creates a new schedule builder.
     pub fn new<S: Into<String>>(name: S) -> Self {
         Self {
             schedule: Schedule::new(name),
         }
     }
     
-    /// Adds an event to the schedule being built.
     pub fn add_event(mut self, event: ScheduleEvent) -> Self {
         self.schedule.add_event(event);
         self
     }
     
-    /// Adds a simple event with just time range and title.
     pub fn add_simple_event<S: Into<String>>(
         mut self,
         id: S,
@@ -360,7 +319,6 @@ impl ScheduleBuilder {
         self
     }
     
-    /// Adds a recurring event.
     pub fn add_recurring_event<S: Into<String>>(
         mut self,
         id: S,
@@ -373,7 +331,6 @@ impl ScheduleBuilder {
         self
     }
     
-    /// Builds the final schedule.
     pub fn build(self) -> Schedule {
         self.schedule
     }
@@ -384,7 +341,6 @@ impl ScheduleBuilder {
 // ========================================================================
 
 impl Schedule {
-    /// Creates a work schedule (Monday-Friday, 9 AM - 5 PM).
     pub fn work_schedule(name: String, start_date: CalendarDate) -> Outcome<Self> {
         use crate::interval::RecurrenceRule;
         use std::collections::HashSet;
@@ -429,7 +385,6 @@ impl Schedule {
         Ok(schedule)
     }
     
-    /// Creates a class schedule with multiple subjects.
     pub fn class_schedule(name: String, start_date: CalendarDate) -> Outcome<Self> {
         let mut schedule = Schedule::new(name);
         

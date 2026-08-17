@@ -1,8 +1,11 @@
-/// Advanced business day calculation engine with sophisticated rules.
-/// 
-/// This module provides comprehensive business day calculation capabilities,
-/// including custom business week definitions, holiday following rules,
-/// and complex date adjustment algorithms commonly used in financial systems.
+//! Advanced business day calculation engine with sophisticated rules.
+//!
+//! This module provides comprehensive business day calculation capabilities,
+//! including custom business week definitions, holiday following rules,
+//! and complex date adjustment algorithms commonly used in financial systems.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::{
     calendar::{CalendarDate, holiday_engines::HolidayEngine},
@@ -12,45 +15,32 @@ use crate::{
 use oxedyne_fe2o3_core::prelude::*;
 use std::collections::HashSet;
 
-/// Defines which days of the week are considered business days.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BusinessWeek {
-    /// Set of days that are considered business days.
     business_days: HashSet<DayOfWeek>,
 }
 
-/// Rules for adjusting dates when they fall on non-business days.
+/// How a date landing on a non-business day is moved.
 #[derive(Clone, Debug, PartialEq)]
 pub enum BusinessDayAdjustment {
-    /// No adjustment - return the date as-is.
     None,
-    /// Move to the following business day.
     Following,
-    /// Move to the preceding business day.
     Preceding,
-    /// Move to the nearest business day (prefer following if equidistant).
     ModifiedFollowing,
-    /// Same as Following, but if that moves to the next month, use Preceding instead.
     ModifiedPreceding,
-    /// Same as Preceding, but if that moves to the previous month, use Following instead.
     EndOfMonth,
 }
 
-/// Comprehensive business day calculation engine.
 #[derive(Clone, Debug)]
 pub struct BusinessDayEngine {
-    /// Definition of which days constitute a business week.
     business_week: BusinessWeek,
-    /// Holiday engine for determining non-business days.
     holiday_engine: Option<HolidayEngine>,
-    /// Additional non-business dates (ad-hoc holidays).
     additional_holidays: HashSet<CalendarDate>,
-    /// Default adjustment rule.
     default_adjustment: BusinessDayAdjustment,
 }
 
 impl Default for BusinessWeek {
-    /// Standard Monday-Friday business week.
+    /// Monday to Friday.
     fn default() -> Self {
         let mut business_days = HashSet::new();
         business_days.insert(DayOfWeek::Monday);
@@ -64,17 +54,14 @@ impl Default for BusinessWeek {
 }
 
 impl BusinessWeek {
-    /// Creates a new business week definition.
     pub fn new() -> Self {
         Self { business_days: HashSet::new() }
     }
 
-    /// Creates a standard Monday-Friday business week.
     pub fn monday_to_friday() -> Self {
         Self::default()
     }
 
-    /// Creates a Sunday-Thursday business week (common in Middle East).
     pub fn sunday_to_thursday() -> Self {
         let mut business_days = HashSet::new();
         business_days.insert(DayOfWeek::Sunday);
@@ -86,30 +73,25 @@ impl BusinessWeek {
         Self { business_days }
     }
 
-    /// Creates a custom business week.
     pub fn custom(days: Vec<DayOfWeek>) -> Self {
         let business_days = days.into_iter().collect();
         Self { business_days }
     }
 
-    /// Adds a day to the business week.
     pub fn add_day(mut self, day: DayOfWeek) -> Self {
         self.business_days.insert(day);
         self
     }
 
-    /// Removes a day from the business week.
     pub fn remove_day(mut self, day: DayOfWeek) -> Self {
         self.business_days.remove(&day);
         self
     }
 
-    /// Checks if a day of the week is a business day.
     pub fn is_business_day(&self, day: DayOfWeek) -> bool {
         self.business_days.contains(&day)
     }
 
-    /// Gets all business days in the week.
     pub fn business_days(&self) -> Vec<DayOfWeek> {
         let mut days: Vec<_> = self.business_days.iter().cloned().collect();
         // Sort by weekday order (Sunday = 0, Monday = 1, etc.).
@@ -117,14 +99,12 @@ impl BusinessWeek {
         days
     }
 
-    /// Gets the number of business days per week.
     pub fn business_days_per_week(&self) -> usize {
         self.business_days.len()
     }
 }
 
 impl BusinessDayEngine {
-    /// Creates a new business day engine with standard Monday-Friday week.
     pub fn new() -> Self {
         Self {
             business_week: BusinessWeek::default(),
@@ -134,31 +114,26 @@ impl BusinessDayEngine {
         }
     }
 
-    /// Creates a business day engine with a specific business week.
     pub fn with_business_week(mut self, business_week: BusinessWeek) -> Self {
         self.business_week = business_week;
         self
     }
 
-    /// Sets the holiday engine for determining holidays.
     pub fn with_holiday_engine(mut self, holiday_engine: HolidayEngine) -> Self {
         self.holiday_engine = Some(holiday_engine);
         self
     }
 
-    /// Sets the default adjustment rule.
     pub fn with_default_adjustment(mut self, adjustment: BusinessDayAdjustment) -> Self {
         self.default_adjustment = adjustment;
         self
     }
 
-    /// Adds an additional holiday date.
     pub fn add_holiday(mut self, date: CalendarDate) -> Self {
         self.additional_holidays.insert(date);
         self
     }
 
-    /// Checks if a date is a business day.
     pub fn is_business_day(&self, date: &CalendarDate) -> Outcome<bool> {
         // Check if the day of week is a business day.
         if !self.business_week.is_business_day(date.day_of_week()) {
@@ -180,12 +155,10 @@ impl BusinessDayEngine {
         Ok(true)
     }
 
-    /// Adjusts a date to be a business day using the default adjustment rule.
     pub fn adjust_date(&self, date: &CalendarDate) -> Outcome<CalendarDate> {
         self.adjust_date_with_rule(date, &self.default_adjustment)
     }
 
-    /// Adjusts a date to be a business day using a specific adjustment rule.
     pub fn adjust_date_with_rule(&self, date: &CalendarDate, adjustment: &BusinessDayAdjustment) -> Outcome<CalendarDate> {
         match adjustment {
             BusinessDayAdjustment::None => Ok(date.clone()),
@@ -197,7 +170,6 @@ impl BusinessDayEngine {
         }
     }
 
-    /// Finds the next business day on or after the given date.
     pub fn following_business_day(&self, date: &CalendarDate) -> Outcome<CalendarDate> {
         let mut current = date.clone();
         
@@ -212,7 +184,6 @@ impl BusinessDayEngine {
         Err(err!("Could not find business day within 14 days of {}", date; Invalid, Input))
     }
 
-    /// Finds the previous business day on or before the given date.
     pub fn preceding_business_day(&self, date: &CalendarDate) -> Outcome<CalendarDate> {
         let mut current = date.clone();
         
@@ -261,7 +232,6 @@ impl BusinessDayEngine {
         }
     }
 
-    /// Checks if a date is the last business day of its month.
     pub fn is_last_business_day_of_month(&self, date: &CalendarDate) -> Outcome<bool> {
         // Check if the current date is a business day.
         if !res!(self.is_business_day(date)) {
@@ -286,7 +256,7 @@ impl BusinessDayEngine {
         Ok(true)
     }
 
-    /// Adds business days to a date (can be negative to subtract).
+    /// A negative count subtracts.
     pub fn add_business_days(&self, date: &CalendarDate, business_days: i32) -> Outcome<CalendarDate> {
         let mut current = date.clone();
         let mut remaining = business_days.abs();
@@ -312,7 +282,7 @@ impl BusinessDayEngine {
         Ok(current)
     }
 
-    /// Counts business days between two dates (exclusive of start, inclusive of end).
+    /// Excludes the start date and includes the end.
     pub fn business_days_between(&self, start: &CalendarDate, end: &CalendarDate) -> Outcome<i32> {
         if start > end {
             return Ok(-res!(self.business_days_between(end, start)));
@@ -341,7 +311,6 @@ impl BusinessDayEngine {
         Ok(count)
     }
 
-    /// Gets the last business day of a month.
     pub fn last_business_day_of_month(&self, year: i32, month: u8, zone: CalClockZone) -> Outcome<CalendarDate> {
         use crate::constant::MonthOfYear;
         
@@ -359,7 +328,6 @@ impl BusinessDayEngine {
         Err(err!("No business day found in {} {}", month_enum, year; Invalid, Input))
     }
 
-    /// Gets the first business day of a month.
     pub fn first_business_day_of_month(&self, year: i32, month: u8, zone: CalClockZone) -> Outcome<CalendarDate> {
         use crate::constant::MonthOfYear;
         
@@ -377,7 +345,6 @@ impl BusinessDayEngine {
         Err(err!("No business day found in {} {}", month_enum, year; Invalid, Input))
     }
 
-    /// Gets all business days in a given month.
     pub fn business_days_in_month(&self, year: i32, month: u8, zone: CalClockZone) -> Outcome<Vec<CalendarDate>> {
         use crate::constant::MonthOfYear;
         
@@ -395,7 +362,6 @@ impl BusinessDayEngine {
         Ok(business_days)
     }
 
-    /// Calculates business day statistics for a month.
     pub fn month_business_day_stats(&self, year: i32, month: u8, zone: CalClockZone) -> Outcome<BusinessDayStats> {
         use crate::constant::MonthOfYear;
         
@@ -416,31 +382,22 @@ impl BusinessDayEngine {
         })
     }
 
-    /// Gets the business week definition.
     pub fn business_week(&self) -> &BusinessWeek {
         &self.business_week
     }
 
-    /// Checks if the engine has a holiday engine configured.
     pub fn has_holiday_engine(&self) -> bool {
         self.holiday_engine.is_some()
     }
 }
 
-/// Statistics about business days in a month.
 #[derive(Clone, Debug)]
 pub struct BusinessDayStats {
-    /// Total calendar days in the month.
     pub total_days: u8,
-    /// Number of business days in the month.
     pub business_days_count: u8,
-    /// Number of weekend/non-business days.
     pub weekend_days: u8,
-    /// First business day of the month.
     pub first_business_day: Option<CalendarDate>,
-    /// Last business day of the month.
     pub last_business_day: Option<CalendarDate>,
-    /// All business days in the month.
     pub business_days: Vec<CalendarDate>,
 }
 

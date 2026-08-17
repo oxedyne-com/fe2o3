@@ -1,7 +1,10 @@
-/// Action system for scheduled tasks
-/// 
-/// This module defines the Action trait and various implementations for
-/// executing different types of scheduled actions.
+//! Actions a scheduled task can carry out.
+//!
+//! An action is anything implementing the Action trait; a callback, a system
+//! command, a log line, an HTTP request, or a composite of several.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use crate::time::CalClock;
@@ -10,46 +13,29 @@ use std::{
     sync::Arc,
 };
 
-/// Context information passed to actions during execution
 #[derive(Debug, Clone)]
 pub struct ActionContext {
-    /// The scheduled execution time
     pub scheduled_time: CalClock,
-    /// The actual execution time
-    pub execution_time: CalClock,
-    /// Task name
-    pub task_name: String,
-    /// Number of previous executions
-    pub execution_count: u32,
-    /// Whether this is a retry attempt
-    pub is_retry: bool,
-    /// Retry attempt number (0 for first execution)
-    pub retry_count: u32,
+    pub execution_time: CalClock,   // when it actually ran
+    pub task_name:      String,
+    pub execution_count: u32,       // previous runs
+    pub is_retry:       bool,
+    pub retry_count:    u32,        // zero on the first attempt
 }
 
-/// Result of action execution
 #[derive(Debug, Clone)]
 pub enum ActionResult {
-    /// Action completed successfully
     Success,
-    /// Action completed with a warning message
-    Warning(String),
-    /// Action failed with an error
+    Warning(String),    // completed, with something to say
     Error(ActionError),
 }
 
-/// Error types for action execution
 #[derive(Debug, Clone)]
 pub enum ActionError {
-    /// Execution timeout
     Timeout,
-    /// Invalid configuration or parameters
     InvalidConfig(String),
-    /// External dependency failure
     ExternalFailure(String),
-    /// Action was cancelled
     Cancelled,
-    /// Generic execution error
     ExecutionError(String),
 }
 
@@ -65,34 +51,29 @@ impl fmt::Display for ActionError {
     }
 }
 
-/// Trait for executable actions in the scheduling system
 pub trait Action: Send + Sync + fmt::Debug {
-    /// Executes the action with the given context
     fn execute(&self, context: &ActionContext) -> Outcome<ActionResult>;
     
-    /// Returns a human-readable description of the action
     fn description(&self) -> &str;
     
-    /// Creates a clone of this action (for task cloning)
+    /// Action is not Clone, so cloning a task goes through this.
     fn box_clone(&self) -> Box<dyn Action>;
     
-    /// Validates the action configuration
+    // validate runs when the task is built, prepare before each execution and
+    // cleanup after it. All three do nothing unless overridden.
     fn validate(&self) -> Outcome<()> {
         Ok(())
     }
     
-    /// Called before execution to prepare the action
     fn prepare(&self, _context: &ActionContext) -> Outcome<()> {
         Ok(())
     }
     
-    /// Called after execution for cleanup
     fn cleanup(&self, _context: &ActionContext, _result: &ActionResult) -> Outcome<()> {
         Ok(())
     }
 }
 
-/// Action that executes a closure/callback function
 #[derive(Clone)]
 pub struct CallbackAction {
     callback: Arc<dyn Fn() -> Outcome<()> + Send + Sync>,
@@ -109,7 +90,6 @@ impl fmt::Debug for CallbackAction {
 }
 
 impl CallbackAction {
-    /// Creates a new callback action
     pub fn new<F>(callback: F) -> Self 
     where 
         F: Fn() -> Outcome<()> + Send + Sync + 'static
@@ -120,7 +100,6 @@ impl CallbackAction {
         }
     }
     
-    /// Creates a new callback action with description
     pub fn with_description<F, S>(callback: F, description: S) -> Self 
     where 
         F: Fn() -> Outcome<()> + Send + Sync + 'static,
@@ -150,7 +129,6 @@ impl Action for CallbackAction {
     }
 }
 
-/// Action that executes a system command
 #[derive(Debug, Clone)]
 pub struct CommandAction {
     command: String,
@@ -161,7 +139,6 @@ pub struct CommandAction {
 }
 
 impl CommandAction {
-    /// Creates a new command action
     pub fn new<S: Into<String>>(command: S) -> Self {
         let cmd = command.into();
         CommandAction {
@@ -173,7 +150,6 @@ impl CommandAction {
         }
     }
     
-    /// Adds arguments to the command
     pub fn args<I, S>(mut self, args: I) -> Self 
     where 
         I: IntoIterator<Item = S>,
@@ -183,13 +159,11 @@ impl CommandAction {
         self
     }
     
-    /// Sets the working directory
     pub fn working_dir<S: Into<String>>(mut self, dir: S) -> Self {
         self.working_dir = Some(dir.into());
         self
     }
     
-    /// Adds environment variables
     pub fn env<K, V>(mut self, key: K, value: V) -> Self 
     where 
         K: Into<String>,
@@ -249,7 +223,6 @@ impl Action for CommandAction {
     }
 }
 
-/// Action that writes to a log file
 #[derive(Debug, Clone)]
 pub struct LogAction {
     message: String,
@@ -258,7 +231,7 @@ pub struct LogAction {
 }
 
 impl LogAction {
-    /// Creates a new log action that writes to stdout
+    /// Writes to stdout.
     pub fn new<S: Into<String>>(message: S) -> Self {
         LogAction {
             message: message.into(),
@@ -267,7 +240,6 @@ impl LogAction {
         }
     }
     
-    /// Creates a new log action that writes to a file
     pub fn to_file<M, F>(message: M, file_path: F) -> Self 
     where 
         M: Into<String>,
@@ -323,7 +295,6 @@ impl Action for LogAction {
     }
 }
 
-/// Action that sends an HTTP request
 #[derive(Debug, Clone)]
 pub struct HttpAction {
     url: String,
@@ -335,7 +306,6 @@ pub struct HttpAction {
 }
 
 impl HttpAction {
-    /// Creates a new HTTP GET action
     pub fn get<S: Into<String>>(url: S) -> Self {
         let url_str = url.into();
         HttpAction {
@@ -347,7 +317,6 @@ impl HttpAction {
         }
     }
     
-    /// Creates a new HTTP POST action
     pub fn post<S: Into<String>>(url: S) -> Self {
         let url_str = url.into();
         HttpAction {
@@ -359,7 +328,6 @@ impl HttpAction {
         }
     }
     
-    /// Adds a header to the request
     pub fn header<K, V>(mut self, key: K, value: V) -> Self 
     where 
         K: Into<String>,
@@ -369,7 +337,6 @@ impl HttpAction {
         self
     }
     
-    /// Sets the request body
     pub fn body<S: Into<String>>(mut self, body: S) -> Self {
         self.body = Some(body.into());
         self
@@ -418,7 +385,7 @@ impl Action for HttpAction {
     }
 }
 
-/// Composite action that executes multiple actions in sequence
+/// Runs its actions in the order they were added.
 #[derive(Debug)]
 pub struct CompositeAction {
     actions: Vec<Box<dyn Action>>,
@@ -437,7 +404,6 @@ impl Clone for CompositeAction {
 }
 
 impl CompositeAction {
-    /// Creates a new composite action
     pub fn new<S: Into<String>>(description: S) -> Self {
         CompositeAction {
             actions: Vec::new(),
@@ -446,13 +412,11 @@ impl CompositeAction {
         }
     }
     
-    /// Adds an action to the sequence
     pub fn add_action<A: Action + 'static>(mut self, action: A) -> Self {
         self.actions.push(Box::new(action));
         self
     }
     
-    /// Sets whether to stop execution on first failure
     pub fn stop_on_failure(mut self, stop: bool) -> Self {
         self.stop_on_failure = stop;
         self

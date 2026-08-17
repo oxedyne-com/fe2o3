@@ -1,7 +1,11 @@
-/// Primary time indexing structure for fast temporal lookups
-/// 
-/// This module provides the main TimeIndex structure for indexing
-/// time-based data with efficient lookup and range query capabilities.
+//! Primary time indexing structure for fast temporal lookups.
+//!
+//! A TimeIndex stores entries in chronological order and maintains secondary
+//! indexes at coarser granularities, so a lookup by year or by day of week
+//! costs no scan.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use crate::time::{CalClock, CalClockZone};
@@ -11,33 +15,23 @@ use std::{
     hash::Hash,
 };
 
-/// Key used for indexing time-based data
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum IndexKey {
-    /// Unix timestamp in milliseconds
-    Timestamp(i64),
-    /// Year-month-day key for daily indexing
-    Date(i32, u8, u8),
-    /// Year-month key for monthly indexing
-    Month(i32, u8),
-    /// Year key for yearly indexing
+    Timestamp(i64),     // Unix milliseconds
+    Date(i32, u8, u8),  // year, month, day
+    Month(i32, u8),     // year, month
     Year(i32),
-    /// Hour-minute key for time-of-day indexing
-    TimeOfDay(u8, u8),
-    /// Day of week (1=Monday, 7=Sunday)
-    DayOfWeek(u8),
-    /// Custom string key
+    TimeOfDay(u8, u8),  // hour, minute
+    DayOfWeek(u8),      // 1 is Monday, 7 is Sunday
     Custom(String),
 }
 
 impl IndexKey {
-    /// Creates a timestamp key from CalClock
     pub fn from_timestamp(calclock: &CalClock) -> Outcome<Self> {
         let timestamp = res!(calclock.to_millis());
         Ok(IndexKey::Timestamp(timestamp))
     }
 
-    /// Creates a date key from CalClock
     pub fn from_date(calclock: &CalClock) -> Self {
         IndexKey::Date(
             calclock.year(),
@@ -46,22 +40,18 @@ impl IndexKey {
         )
     }
 
-    /// Creates a month key from CalClock
     pub fn from_month(calclock: &CalClock) -> Self {
         IndexKey::Month(calclock.year(), calclock.month())
     }
 
-    /// Creates a year key from CalClock
     pub fn from_year(calclock: &CalClock) -> Self {
         IndexKey::Year(calclock.year())
     }
 
-    /// Creates a time-of-day key from CalClock
     pub fn from_time_of_day(calclock: &CalClock) -> Self {
         IndexKey::TimeOfDay(calclock.hour(), calclock.minute())
     }
 
-    /// Creates a day-of-week key from CalClock
     pub fn from_day_of_week(calclock: &CalClock) -> Self {
         IndexKey::DayOfWeek(calclock.day_of_week().of())
     }
@@ -81,22 +71,17 @@ impl fmt::Display for IndexKey {
     }
 }
 
-/// Entry in the time index containing the indexed data
 #[derive(Debug, Clone)]
 pub struct TimeIndexEntry<T> 
 where 
     T: Clone,
 {
-    /// The time this entry represents
-    pub time: CalClock,
-    /// The indexed data
-    pub data: T,
-    /// Additional metadata
-    pub metadata: HashMap<String, String>,
+    pub time:       CalClock,
+    pub data:       T,
+    pub metadata:   HashMap<String, String>,
 }
 
 impl<T: Clone> TimeIndexEntry<T> {
-    /// Creates a new time index entry
     pub fn new(time: CalClock, data: T) -> Self {
         TimeIndexEntry {
             time,
@@ -105,7 +90,6 @@ impl<T: Clone> TimeIndexEntry<T> {
         }
     }
 
-    /// Creates a new entry with metadata
     pub fn with_metadata(time: CalClock, data: T, metadata: HashMap<String, String>) -> Self {
         TimeIndexEntry {
             time,
@@ -114,40 +98,34 @@ impl<T: Clone> TimeIndexEntry<T> {
         }
     }
 
-    /// Adds metadata to the entry
     pub fn add_metadata(mut self, key: String, value: String) -> Self {
         self.metadata.insert(key, value);
         self
     }
 
-    /// Gets metadata value by key
     pub fn get_metadata(&self, key: &str) -> Option<&String> {
         self.metadata.get(key)
     }
 }
 
-/// Multi-level time index for efficient temporal data storage and retrieval
 #[derive(Debug)]
 pub struct TimeIndex<T: Clone> {
-    /// Primary timestamp-based index for chronological ordering
+    // The timestamp index owns clones of the entries and keeps them in
+    // chronological order. Every other index holds positions into `entries`
+    // instead, so a coarser granularity costs one usize per entry.
     timestamp_index: BTreeMap<i64, Vec<TimeIndexEntry<T>>>,
-    /// Secondary indexes for different time granularities
     date_index: HashMap<IndexKey, Vec<usize>>,
     month_index: HashMap<IndexKey, Vec<usize>>,
     year_index: HashMap<IndexKey, Vec<usize>>,
     time_of_day_index: HashMap<IndexKey, Vec<usize>>,
     day_of_week_index: HashMap<IndexKey, Vec<usize>>,
-    /// Custom indexes
     custom_indexes: HashMap<String, HashMap<IndexKey, Vec<usize>>>,
-    /// All entries for index mapping
     entries: Vec<TimeIndexEntry<T>>,
-    /// Time zone for calculations
     #[allow(dead_code)]
     zone: CalClockZone,
 }
 
 impl<T: Clone> TimeIndex<T> {
-    /// Creates a new time index
     pub fn new(zone: CalClockZone) -> Self {
         TimeIndex {
             timestamp_index: BTreeMap::new(),
@@ -162,7 +140,7 @@ impl<T: Clone> TimeIndex<T> {
         }
     }
 
-    /// Adds an entry to the index
+    /// Returns the position of the new entry, which every secondary index uses to refer to it.
     pub fn insert(&mut self, entry: TimeIndexEntry<T>) -> Outcome<usize> {
         let index_id = self.entries.len();
         
@@ -184,7 +162,6 @@ impl<T: Clone> TimeIndex<T> {
         Ok(index_id)
     }
 
-    /// Adds entry to all secondary indexes
     fn add_to_secondary_indexes(&mut self, index_id: usize, entry: &TimeIndexEntry<T>) {
         // Date index
         let date_key = IndexKey::from_date(&entry.time);
@@ -222,7 +199,6 @@ impl<T: Clone> TimeIndex<T> {
             .push(index_id);
     }
 
-    /// Finds entries by exact timestamp
     pub fn find_by_timestamp(&self, timestamp: i64) -> Vec<&TimeIndexEntry<T>> {
         self.timestamp_index
             .get(&timestamp)
@@ -230,37 +206,31 @@ impl<T: Clone> TimeIndex<T> {
             .unwrap_or_default()
     }
 
-    /// Finds entries by date
     pub fn find_by_date(&self, year: i32, month: u8, day: u8) -> Vec<&TimeIndexEntry<T>> {
         let key = IndexKey::Date(year, month, day);
         self.find_by_secondary_index(&self.date_index, &key)
     }
 
-    /// Finds entries by month
     pub fn find_by_month(&self, year: i32, month: u8) -> Vec<&TimeIndexEntry<T>> {
         let key = IndexKey::Month(year, month);
         self.find_by_secondary_index(&self.month_index, &key)
     }
 
-    /// Finds entries by year
     pub fn find_by_year(&self, year: i32) -> Vec<&TimeIndexEntry<T>> {
         let key = IndexKey::Year(year);
         self.find_by_secondary_index(&self.year_index, &key)
     }
 
-    /// Finds entries by time of day
     pub fn find_by_time_of_day(&self, hour: u8, minute: u8) -> Vec<&TimeIndexEntry<T>> {
         let key = IndexKey::TimeOfDay(hour, minute);
         self.find_by_secondary_index(&self.time_of_day_index, &key)
     }
 
-    /// Finds entries by day of week
     pub fn find_by_day_of_week(&self, day_of_week: u8) -> Vec<&TimeIndexEntry<T>> {
         let key = IndexKey::DayOfWeek(day_of_week);
         self.find_by_secondary_index(&self.day_of_week_index, &key)
     }
 
-    /// Helper method to find entries using secondary indexes
     fn find_by_secondary_index(&self, index: &HashMap<IndexKey, Vec<usize>>, key: &IndexKey) -> Vec<&TimeIndexEntry<T>> {
         index
             .get(key)
@@ -273,7 +243,6 @@ impl<T: Clone> TimeIndex<T> {
             .unwrap_or_default()
     }
 
-    /// Finds entries within a timestamp range
     pub fn find_in_range(&self, start_timestamp: i64, end_timestamp: i64) -> Vec<&TimeIndexEntry<T>> {
         self.timestamp_index
             .range(start_timestamp..=end_timestamp)
@@ -281,14 +250,12 @@ impl<T: Clone> TimeIndex<T> {
             .collect()
     }
 
-    /// Finds entries within a time range
     pub fn find_in_time_range(&self, start: &CalClock, end: &CalClock) -> Outcome<Vec<&TimeIndexEntry<T>>> {
         let start_ts = res!(start.to_millis());
         let end_ts = res!(end.to_millis());
         Ok(self.find_in_range(start_ts, end_ts))
     }
 
-    /// Creates a custom index
     pub fn create_custom_index<F>(&mut self, name: String, key_extractor: F) -> Outcome<()>
     where
         F: Fn(&TimeIndexEntry<T>) -> Vec<IndexKey>,
@@ -309,7 +276,6 @@ impl<T: Clone> TimeIndex<T> {
         Ok(())
     }
 
-    /// Finds entries using a custom index
     pub fn find_by_custom_index(&self, index_name: &str, key: &IndexKey) -> Vec<&TimeIndexEntry<T>> {
         self.custom_indexes
             .get(index_name)
@@ -323,24 +289,20 @@ impl<T: Clone> TimeIndex<T> {
             .unwrap_or_default()
     }
 
-    /// Gets the total number of indexed entries
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
-    /// Checks if the index is empty
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
-    /// Gets all entries in chronological order
     pub fn iter_chronological(&self) -> impl Iterator<Item = &TimeIndexEntry<T>> {
         self.timestamp_index
             .values()
             .flat_map(|entries| entries.iter())
     }
 
-    /// Gets statistics about the index
     pub fn statistics(&self) -> IndexStatistics {
         IndexStatistics {
             total_entries: self.entries.len(),
@@ -354,7 +316,6 @@ impl<T: Clone> TimeIndex<T> {
     }
 }
 
-/// Statistics about the time index
 #[derive(Debug, Clone)]
 pub struct IndexStatistics {
     pub total_entries: usize,

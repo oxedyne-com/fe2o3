@@ -1,8 +1,10 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use crate::time::CalClockZone;
 
 use oxedyne_fe2o3_core::prelude::*;
 
-/// Abstract base for period types (periods of time like a specific month or year).
 #[derive(Clone, Debug, PartialEq)]
 pub struct AbstractPeriod {
     zone: CalClockZone,

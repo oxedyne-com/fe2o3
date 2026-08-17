@@ -1,3 +1,11 @@
+//! Database index definitions and generation for the datetime types.
+//!
+//! Emits CREATE INDEX statements for SQL stores and index specifications for
+//! MongoDB.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use crate::{
     time::{CalClock, CalClockZone},
     clock::ClockTime,
@@ -9,42 +17,27 @@ use oxedyne_fe2o3_jdat::prelude::*;
 
 use std::collections::HashMap;
 
-/// Represents different types of database indexes for datetime optimization.
 #[derive(Clone, Debug, PartialEq)]
 pub enum IndexType {
-    /// B-tree index for range queries and ordering
-    BTree,
-    /// Hash index for exact equality lookups
-    Hash,
-    /// Partial index with conditional WHERE clause
-    Partial(String),
-    /// Composite index spanning multiple columns
-    Composite(Vec<String>),
-    /// Functional index on computed expressions
-    Functional(String),
-    /// Full-text search index for text fields
+    BTree,                  // range queries and ordering
+    Hash,                   // exact equality only
+    Partial(String),        // WHERE clause
+    Composite(Vec<String>), // column names
+    Functional(String),     // computed expression
     FullText,
 }
 
-/// Database index definition for datetime types.
 #[derive(Clone, Debug)]
 pub struct DatabaseIndex {
-    /// Index name
-    pub name: String,
-    /// Fields included in the index
-    pub fields: Vec<String>,
-    /// Type of index
+    pub name:       String,
+    pub fields:     Vec<String>,
     pub index_type: IndexType,
-    /// Optional WHERE condition for partial indexes
-    pub condition: Option<String>,
-    /// Whether this index is unique
-    pub unique: bool,
-    /// Index priority (higher = more important)
-    pub priority: u8,
+    pub condition:  Option<String>,     // partial indexes only
+    pub unique:     bool,
+    pub priority:   u8,                 // higher is more important
 }
 
 impl DatabaseIndex {
-    /// Creates a new database index.
     pub fn new(name: &str, fields: Vec<String>, index_type: IndexType) -> Self {
         Self {
             name: name.to_string(),
@@ -56,25 +49,21 @@ impl DatabaseIndex {
         }
     }
     
-    /// Sets the index as unique.
     pub fn unique(mut self) -> Self {
         self.unique = true;
         self
     }
     
-    /// Sets the index priority.
     pub fn priority(mut self, priority: u8) -> Self {
         self.priority = priority;
         self
     }
     
-    /// Sets a condition for partial indexes.
     pub fn condition(mut self, condition: &str) -> Self {
         self.condition = Some(condition.to_string());
         self
     }
     
-    /// Generates SQL CREATE INDEX statement.
     pub fn to_sql(&self, table_name: &str) -> String {
         let unique_clause = if self.unique { "UNIQUE " } else { "" };
         let fields_clause = self.fields.join(", ");
@@ -100,7 +89,7 @@ impl DatabaseIndex {
         )
     }
     
-    /// Generates MongoDB index specification.
+    /// The key specification first, then the options map.
     pub fn to_mongodb(&self) -> (HashMap<String, i32>, HashMap<String, Dat>) {
         let mut index_spec = HashMap::new();
         let mut options = HashMap::new();
@@ -134,15 +123,12 @@ impl DatabaseIndex {
     }
 }
 
-/// Trait for generating optimal database indexes for datetime types.
 pub trait IndexGenerator {
-    /// Generates recommended indexes for this type.
     fn generate_indexes(&self, table_name: &str) -> Vec<DatabaseIndex>;
     
-    /// Generates indexes optimised for specific query patterns.
     fn generate_query_specific_indexes(&self, table_name: &str, query_patterns: &[&str]) -> Vec<DatabaseIndex>;
     
-    /// Returns the most critical indexes (should be created first).
+    /// Create these before the rest.
     fn critical_indexes(&self, table_name: &str) -> Vec<DatabaseIndex>;
 }
 
@@ -542,11 +528,9 @@ impl IndexGenerator for CalendarDate {
     }
 }
 
-/// Utility functions for database index management.
 pub mod index_utils {
     use super::*;
     
-    /// Generates SQL script to create all indexes for a datetime table.
     pub fn generate_create_indexes_sql(table_name: &str, datetime_type: &str) -> Outcome<String> {
         let mut sql = String::new();
         sql.push_str(&format!("-- Database indexes for {} table\n", table_name));
@@ -581,7 +565,6 @@ pub mod index_utils {
         Ok(sql)
     }
     
-    /// Generates MongoDB index creation commands.
     pub fn generate_mongodb_indexes(collection_name: &str, datetime_type: &str) -> Outcome<String> {
         let indexes = match datetime_type {
             "CalClock" => {

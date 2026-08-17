@@ -1,3 +1,6 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use crate::{
     calendar::CalendarDate,
     constant::{DayOfWeek, OrdinalEnglish},
@@ -6,15 +9,9 @@ use crate::{
 
 use oxedyne_fe2o3_core::prelude::*;
 
-/// Represents an abstract incremental day descriptor.
-///
-/// For example:
-/// - "second business day"
-/// - "3rd Monday"
-/// - "4th weekday"
-/// 
-/// This is a port of the Java DayIncrementor system to support
-/// complex relative date parsing like "second business day after the 1st Monday".
+/// A day named by description rather than number -- "second business day",
+/// "3rd Monday", "4th weekday" -- and composable, as in "second business day
+/// after the 1st Monday".
 #[derive(Clone, Debug, PartialEq)]
 pub struct DayIncrementor {
     value: i32,
@@ -24,28 +21,19 @@ pub struct DayIncrementor {
     next_inc: Option<Box<DayIncrementor>>,
 }
 
-/// Types of days that can be referenced in relative date expressions.
 #[derive(Clone, Debug, PartialEq)]
 pub enum DayType {
-    /// Any weekday (Monday-Friday)
-    Weekday,
-    /// Work/business day (Monday-Friday, excluding holidays)
-    Workday,
-    /// Specific day of the week (Monday, Tuesday, etc.)
+    Weekday, // Monday-Friday
+    Workday, // Monday-Friday, excluding holidays
     DayOfWeek,
-    /// Any day
     OrdinaryDay,
-    /// Day of month counting from start (1st, 2nd, etc.)
     DayOfMonthFromStart,
-    /// Day of month counting from end (last day, 2nd last, etc.)
-    DayOfMonthFromEnd,
+    DayOfMonthFromEnd, // counts back from the last day
 }
 
-/// Special token for end-of-month references
 pub const END_OF_MONTH_TOKEN: &str = "END_OF_MONTH_TOKEN";
 
 impl DayIncrementor {
-    /// Create a blank DayIncrementor.
     pub fn new() -> Self {
         Self {
             value: 0,
@@ -56,7 +44,6 @@ impl DayIncrementor {
         }
     }
 
-    /// Create a DayIncrementor with a next incrementor.
     pub fn with_next(next_inc: DayIncrementor) -> Self {
         Self {
             value: 0,
@@ -67,7 +54,6 @@ impl DayIncrementor {
         }
     }
 
-    /// Day of week constructor - sets the incrementor to the nth occurrence of the given day.
     pub fn with_day_of_week(value: i32, day_of_week: DayOfWeek) -> Self {
         let mut inc = Self::new();
         inc.value = value.abs();
@@ -76,7 +62,6 @@ impl DayIncrementor {
         inc
     }
 
-    /// Day of month constructor - sets the incrementor to a day of the month.
     pub fn with_day_of_month(value: i32) -> Self {
         let mut inc = Self::new();
         inc.value = value.abs();
@@ -85,9 +70,7 @@ impl DayIncrementor {
         inc
     }
 
-    /// Parse a DayIncrementor from a string input.
-    /// 
-    /// Examples:
+    /// Accepts, among others:
     /// - "3rd Monday"
     /// - "second business day"
     /// - "last Sunday"
@@ -170,7 +153,6 @@ impl DayIncrementor {
         Ok(main_inc)
     }
 
-    /// Lexically analyze a single word and update the incrementor state.
     fn lex_word(&mut self, word: &str) -> Outcome<()> {
         // Try to parse as ordinal
         if let Some(ordinal) = OrdinalEnglish::from_name(word) {
@@ -208,7 +190,6 @@ impl DayIncrementor {
         Ok(())
     }
 
-    /// Parse qualifier words (before, after, prior, following).
     fn lex_qualifier(&mut self, word: &str) -> Outcome<()> {
         match word {
             "before" | "prior" => {
@@ -224,19 +205,16 @@ impl DayIncrementor {
         Ok(())
     }
 
-    /// Set the day of week and automatically set day type.
     pub fn set_day_of_week(&mut self, day_of_week: DayOfWeek) {
         self.day_of_week = Some(day_of_week);
         self.day_type = Some(DayType::DayOfWeek);
     }
 
-    /// Check if this incrementor is complete (has all required fields).
     pub fn is_complete(&self) -> bool {
         (self.is_value_defined() && self.is_day_type_defined()) ||
         (self.day_type == Some(DayType::DayOfMonthFromEnd))
     }
 
-    /// Get the last incrementor in the chain.
     pub fn last(&self) -> &DayIncrementor {
         let mut current = self;
         while let Some(ref next) = current.next_inc {
@@ -278,12 +256,6 @@ impl DayIncrementor {
         self.next_inc = Some(Box::new(next_inc));
     }
 
-    /// Calculate the actual date from this DayIncrementor expression.
-    /// 
-    /// Examples:
-    /// - "3rd Monday" in June 2024 -> June 17, 2024
-    /// - "2nd business day after the 15th" in June 2024 -> June 18, 2024
-    /// - "last Sunday" in June 2024 -> June 30, 2024
     pub fn calculate_date(&self, year: i32, month: u8, zone: CalClockZone) -> Outcome<CalendarDate> {
         use crate::calendar::CalendarDate;
         use crate::constant::MonthOfYear;
@@ -347,7 +319,6 @@ impl DayIncrementor {
         self.apply_incrementor_to_date(&base_date)
     }
     
-    /// Apply this incrementor's logic to a base date.
     fn apply_incrementor_to_date(&self, base_date: &CalendarDate) -> Outcome<CalendarDate> {
         use crate::calendar::CalendarDate;
         
@@ -432,7 +403,6 @@ impl DayIncrementor {
         }
     }
     
-    /// Find the last occurrence of a specific day of the week in a given month.
     fn find_last_day_of_week_in_month(&self, year: i32, month: u8, target_dow: DayOfWeek, zone: CalClockZone) -> Outcome<CalendarDate> {
         use crate::calendar::CalendarDate;
         use crate::constant::MonthOfYear;
@@ -451,7 +421,6 @@ impl DayIncrementor {
         Err(err!("No {} found in {}/{}", target_dow, month, year; Invalid, Input, Range))
     }
 
-    /// Find the nth occurrence of a specific day of the week in a given month.
     fn find_nth_day_of_week(&self, year: i32, month: u8, target_dow: DayOfWeek, n: i32, zone: CalClockZone) -> Outcome<CalendarDate> {
         use crate::calendar::CalendarDate;
         use crate::constant::MonthOfYear;
@@ -478,7 +447,6 @@ impl DayIncrementor {
         CalendarDate::from_ymd(year, month_enum, target_day as u8, zone)
     }
     
-    /// Find the nth weekday (Monday-Friday) in a given month.
     fn find_nth_weekday(&self, year: i32, month: u8, n: i32, zone: CalClockZone) -> Outcome<CalendarDate> {
         use crate::calendar::CalendarDate;
         use crate::constant::MonthOfYear;
@@ -501,7 +469,6 @@ impl DayIncrementor {
         Err(err!("Only {} weekdays in {}/{}, cannot find {}", weekday_count, month, year, n; Invalid, Input, Range))
     }
     
-    /// Find the nth business day in a given month.
     fn find_nth_business_day(&self, year: i32, month: u8, n: i32, zone: CalClockZone) -> Outcome<CalendarDate> {
         use crate::calendar::CalendarDate;
         use crate::constant::MonthOfYear;
@@ -524,7 +491,6 @@ impl DayIncrementor {
         Err(err!("Only {} business days in {}/{}, cannot find {}", business_day_count, month, year, n; Invalid, Input, Range))
     }
     
-    /// Calculate a specific day of the month.
     fn calculate_day_of_month(&self, year: i32, month: u8, zone: CalClockZone) -> Outcome<CalendarDate> {
         use crate::calendar::CalendarDate;
         use crate::constant::MonthOfYear;
@@ -540,7 +506,6 @@ impl DayIncrementor {
         CalendarDate::from_ymd(year, month_enum, day, zone)
     }
     
-    /// Find the next occurrence of a specific day of the week after the given date.
     fn find_next_day_of_week(&self, date: &CalendarDate, target_dow: DayOfWeek) -> Outcome<CalendarDate> {
         let mut current = date.clone();
         let target_dow_num = target_dow.of();
@@ -553,7 +518,6 @@ impl DayIncrementor {
         }
     }
     
-    /// Find the previous occurrence of a specific day of the week before the given date.
     fn find_previous_day_of_week(&self, date: &CalendarDate, target_dow: DayOfWeek) -> Outcome<CalendarDate> {
         let mut current = date.clone();
         let target_dow_num = target_dow.of();
@@ -566,7 +530,6 @@ impl DayIncrementor {
         }
     }
     
-    /// Find the next weekday (Monday-Friday) after the given date.
     fn find_next_weekday(&self, date: &CalendarDate) -> Outcome<CalendarDate> {
         let mut current = date.clone();
         
@@ -578,7 +541,6 @@ impl DayIncrementor {
         }
     }
     
-    /// Find the previous weekday (Monday-Friday) before the given date.
     fn find_previous_weekday(&self, date: &CalendarDate) -> Outcome<CalendarDate> {
         let mut current = date.clone();
         
@@ -590,7 +552,6 @@ impl DayIncrementor {
         }
     }
     
-    /// Find the next business day after the given date.
     fn find_next_business_day(&self, date: &CalendarDate) -> Outcome<CalendarDate> {
         let mut current = date.clone();
         
@@ -602,7 +563,6 @@ impl DayIncrementor {
         }
     }
     
-    /// Find the previous business day before the given date.
     fn find_previous_business_day(&self, date: &CalendarDate) -> Outcome<CalendarDate> {
         let mut current = date.clone();
         
@@ -614,14 +574,12 @@ impl DayIncrementor {
         }
     }
     
-    /// Check if a date is a weekday (Monday-Friday).
     fn is_weekday(&self, date: &CalendarDate) -> bool {
         let dow_num = date.day_of_week().of();
         dow_num >= 1 && dow_num <= 5 // Monday=1 to Friday=5
     }
     
-    /// Check if a date is a business day.
-    /// Uses the BusinessDayEngine for proper holiday integration.
+    /// Holidays come from the BusinessDayEngine, so this is narrower than "not a weekend".
     pub fn is_business_day(&self, date: &CalendarDate) -> bool {
         use crate::calendar::business_day_engine::BusinessDayEngine;
         

@@ -1,3 +1,12 @@
+//! Validation that branches on a condition.
+//!
+//! A conditional rule holds a condition and a rule for each way it can go,
+//! which is how "extended hours at the weekend" or "holiday rules in
+//! December" are expressed.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use crate::{
     calendar::CalendarDate,
     clock::ClockTime,
@@ -10,13 +19,6 @@ use oxedyne_fe2o3_core::prelude::*;
 
 use std::collections::HashSet;
 
-/// Advanced conditional validation rule system.
-///
-/// ConditionalRule allows complex validation logic with conditions, branches,
-/// and context-aware rules. This enables sophisticated validation scenarios
-/// like "if it's a weekend, allow extended hours" or "if it's December,
-/// require holiday scheduling rules".
-///
 /// # Examples
 ///
 /// ```ignore
@@ -30,20 +32,14 @@ use std::collections::HashSet;
 /// ```
 #[derive(Debug)]
 pub struct ConditionalRule {
-    /// Name of this conditional rule.
-    name: String,
-    /// The condition to evaluate.
-    condition: ValidationCondition,
-    /// Rule to apply if condition is true.
-    true_rule: Option<ValidationRule>,
-    /// Rule to apply if condition is false.
-    false_rule: Option<ValidationRule>,
-    /// Rules to apply regardless of condition.
-    always_rules: Vec<ValidationRule>,
+    name:           String,
+    condition:      ValidationCondition,
+    true_rule:      Option<ValidationRule>,
+    false_rule:     Option<ValidationRule>,
+    always_rules:   Vec<ValidationRule>,    // run whichever way it goes
 }
 
 impl ConditionalRule {
-    /// Creates a new conditional rule.
     pub fn new<S: Into<String>>(name: S) -> Self {
         Self {
             name: name.into(),
@@ -54,31 +50,28 @@ impl ConditionalRule {
         }
     }
 
-    /// Sets the condition for this rule.
     pub fn condition(mut self, condition: ValidationCondition) -> Self {
         self.condition = condition;
         self
     }
 
-    /// Sets the rule to apply when condition is true.
     pub fn if_true(mut self, rule: ValidationRule) -> Self {
         self.true_rule = Some(rule);
         self
     }
 
-    /// Sets the rule to apply when condition is false.
     pub fn if_false(mut self, rule: ValidationRule) -> Self {
         self.false_rule = Some(rule);
         self
     }
 
-    /// Adds a rule that always applies regardless of condition.
     pub fn always(mut self, rule: ValidationRule) -> Self {
         self.always_rules.push(rule);
         self
     }
 
-    /// Converts this conditional rule into a standard ValidationRule.
+    /// The always rules run first, then whichever branch the condition
+    /// selects, and the errors of both are returned together.
     pub fn into_rule(self) -> ValidationRule {
         let name = self.name.clone();
         let condition = self.condition;
@@ -120,49 +113,30 @@ impl ConditionalRule {
             })
     }
 
-    /// Gets the name of this rule.
     pub fn name(&self) -> &str {
         &self.name
     }
 }
 
-/// Validation conditions for conditional rules.
 pub enum ValidationCondition {
-    /// Always true.
     Always,
-    /// Never true.
     Never,
-    /// True if date is a weekend.
     IsWeekend,
-    /// True if date is a business day.
     IsBusinessDay,
-    /// True if date is a specific day of week.
     IsDayOfWeek(DayOfWeek),
-    /// True if date is in a specific month.
     IsMonth(MonthOfYear),
-    /// True if date is in a set of months.
     IsMonthIn(HashSet<MonthOfYear>),
-    /// True if hour is in a specific range.
+    // Ranges are inclusive at both ends.
     IsHourInRange(u8, u8),
-    /// True if year is in a specific range.
     IsYearInRange(i32, i32),
-    /// True if day of month is in a specific range.
     IsDayInRange(u8, u8),
-    /// True if date is a leap year.
     IsLeapYear,
-    /// True if date is after a specific date.
     IsAfterDate(i32, u8, u8), // year, month, day
-    /// True if date is before a specific date.
     IsBeforeDate(i32, u8, u8), // year, month, day
-    /// True if time has fractional seconds.
     HasFractionalSeconds,
-    /// True if all specified conditions are true (AND).
     And(Vec<ValidationCondition>),
-    /// True if any specified condition is true (OR).
     Or(Vec<ValidationCondition>),
-    /// True if the specified condition is false (NOT).
     Not(Box<ValidationCondition>),
-    /// Custom condition with user-defined logic.
     Custom(Box<dyn Fn(&CalClock) -> bool + Send + Sync>),
 }
 
@@ -220,7 +194,6 @@ impl std::fmt::Debug for ValidationCondition {
 }
 
 impl ValidationCondition {
-    /// Evaluates this condition against a CalClock.
     pub fn evaluate_calclock(&self, calclock: &CalClock) -> bool {
         match self {
             ValidationCondition::Always => true,
@@ -271,7 +244,8 @@ impl ValidationCondition {
         }
     }
 
-    /// Evaluates this condition against a CalendarDate.
+    /// The date is given midnight so that time conditions can be evaluated;
+    /// a condition on the clock will read as if it were midnight.
     pub fn evaluate_date(&self, date: &CalendarDate) -> bool {
         // For date-only evaluation, we create a minimal CalClock
         // In a real implementation, you might want date-specific conditions
@@ -284,7 +258,8 @@ impl ValidationCondition {
         false
     }
 
-    /// Evaluates this condition against a ClockTime.
+    /// The time is given 2024-01-01 for the same reason, so a condition on
+    /// the date says nothing useful here.
     pub fn evaluate_time(&self, time: &ClockTime) -> bool {
         // For time-only evaluation, we create a minimal CalClock with today's date
         let zone = time.zone().clone();
@@ -297,26 +272,22 @@ impl ValidationCondition {
     }
 }
 
-/// Builder for complex conditional validation rules.
 pub struct ConditionalRuleBuilder {
     rules: Vec<ConditionalRule>,
 }
 
 impl ConditionalRuleBuilder {
-    /// Creates a new builder.
     pub fn new() -> Self {
         Self {
             rules: Vec::new(),
         }
     }
 
-    /// Adds a conditional rule.
     pub fn rule(mut self, rule: ConditionalRule) -> Self {
         self.rules.push(rule);
         self
     }
 
-    /// Builds a combined validation rule from all conditional rules.
     pub fn build(self, name: &str) -> ValidationRule {
         // Convert all conditional rules to validation rules first
         let rules: Vec<ValidationRule> = self.rules
@@ -351,7 +322,6 @@ impl Default for ConditionalRuleBuilder {
 
 // Helper functions for creating common conditional rules
 impl ConditionalRule {
-    /// Creates a rule for business hours that varies by day type.
     pub fn business_hours_by_day() -> Self {
         use crate::validation::ValidationRules;
         
@@ -361,7 +331,6 @@ impl ConditionalRule {
             .if_false(ValidationRules::hour_range(10, 14)) // 10 AM - 2 PM on weekends
     }
 
-    /// Creates a rule for holiday scheduling.
     pub fn holiday_scheduling() -> Self {
         use crate::validation::ValidationRules;
         
@@ -378,7 +347,6 @@ impl ConditionalRule {
             .if_false(ValidationRules::not_too_future(365)) // 1 year max normally
     }
 
-    /// Creates a rule for seasonal time restrictions.
     pub fn seasonal_hours() -> Self {
         use crate::validation::ValidationRules;
         
@@ -397,7 +365,6 @@ impl ConditionalRule {
             .if_false(ValidationRules::hour_range(9, 18)) // 9 AM - 6 PM otherwise
     }
 
-    /// Creates a rule for leap year handling.
     pub fn leap_year_aware() -> Self {
         ConditionalRule::new("leap_year_aware")
             .condition(ValidationCondition::And(vec![
@@ -416,7 +383,6 @@ impl ConditionalRule {
             }))
     }
 
-    /// Creates a rule for maintenance windows.
     pub fn maintenance_window() -> Self {
         // Sunday 2 AM - 4 AM maintenance window
         ConditionalRule::new("maintenance_window")

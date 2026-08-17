@@ -1,19 +1,16 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use oxedyne_fe2o3_core::prelude::*;
 
 use std::cmp::Ordering;
 
-/// Represents a leap second transition in the TAI-UTC conversion table.
-///
-/// Leap seconds are additions or subtractions of one second to UTC to keep it
-/// synchronised with Earth's rotation. They are announced by IERS and require
-/// separate tracking from timezone data.
+/// Leap seconds are announced by the IERS and are not carried in timezone data,
+/// so the table is kept separately from the zone rules.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LeapSecondEntry {
-    /// UTC timestamp when the leap second takes effect (seconds since Unix epoch)
-    pub utc_timestamp: i64,
-    /// Total TAI-UTC offset after this leap second (in seconds)
-    pub tai_utc_offset: i32,
-    /// Description of this leap second event
+    pub utc_timestamp: i64, // seconds since the Unix epoch
+    pub tai_utc_offset: i32, // seconds, after this leap second
     pub description: String,
 }
 
@@ -29,12 +26,8 @@ impl Ord for LeapSecondEntry {
     }
 }
 
-/// Comprehensive leap second table for TAI-UTC conversion.
-///
-/// This table contains all leap seconds from 1972 to present, allowing
-/// accurate conversion between UTC and TAI (International Atomic Time).
-///
-/// # Examples
+/// Every leap second from 1972 onwards, which is what a UTC to TAI conversion
+/// needs.
 ///
 /// ```ignore
 /// use oxedyne_fe2o3_datime::time::LeapSecondTable;
@@ -46,14 +39,11 @@ impl Ord for LeapSecondEntry {
 /// ```
 #[derive(Clone, Debug)]
 pub struct LeapSecondTable {
-    /// Sorted list of leap second entries
-    entries: Vec<LeapSecondEntry>,
-    /// Whether to handle leap seconds at all (can be disabled)
+    entries: Vec<LeapSecondEntry>, // ascending by utc_timestamp
     enabled: bool,
 }
 
 impl LeapSecondTable {
-    /// Creates a new empty leap second table.
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
@@ -61,10 +51,8 @@ impl LeapSecondTable {
         }
     }
 
-    /// Creates the standard leap second table with all historical leap seconds.
-    ///
-    /// This includes all leap seconds from 1972 through 2017 (the most recent).
-    /// The table should be updated when new leap seconds are announced by IERS.
+    /// Every leap second from 1972 to 2017, which is all of them so far. The table
+    /// needs extending whenever the IERS announces another.
     pub fn standard() -> Self {
         let mut table = Self::new();
         
@@ -101,10 +89,7 @@ impl LeapSecondTable {
         table
     }
 
-    /// Creates a leap second table with leap second handling disabled.
-    ///
-    /// When disabled, all TAI-UTC conversions return 0 offset, effectively
-    /// treating TAI and UTC as identical.
+    /// Every TAI-UTC offset then reads zero, so the two scales coincide.
     pub fn disabled() -> Self {
         Self {
             entries: Vec::new(),
@@ -112,7 +97,6 @@ impl LeapSecondTable {
         }
     }
 
-    /// Adds a leap second entry to the table.
     pub fn add_entry(&mut self, utc_timestamp: i64, tai_utc_offset: i32, description: &str) {
         self.entries.push(LeapSecondEntry {
             utc_timestamp,
@@ -124,10 +108,7 @@ impl LeapSecondTable {
         self.entries.sort();
     }
 
-    /// Returns the TAI-UTC offset at the given UTC timestamp.
-    ///
-    /// This is the number of seconds to add to UTC to get TAI time.
-    /// Returns 0 if leap seconds are disabled or if the timestamp is before 1972.
+    /// Seconds to add to UTC to reach TAI. Zero before 1972, or when handling is off.
     pub fn tai_utc_offset_at(&self, utc_timestamp: i64) -> i32 {
         if !self.enabled {
             return 0;
@@ -151,19 +132,12 @@ impl LeapSecondTable {
         }
     }
 
-    /// Converts UTC timestamp to TAI timestamp.
-    ///
-    /// TAI (International Atomic Time) is a continuous time scale that doesn't
-    /// have leap seconds, making it useful for precise time calculations.
     pub fn utc_to_tai(&self, utc_timestamp: i64) -> i64 {
         utc_timestamp + self.tai_utc_offset_at(utc_timestamp) as i64
     }
 
-    /// Converts TAI timestamp to UTC timestamp.
-    ///
-    /// This is more complex than UTC→TAI because leap seconds can create
-    /// ambiguity (during a positive leap second, the same UTC time can
-    /// correspond to two different TAI times).
+    /// Harder than the other direction: during a positive leap second, one UTC time
+    /// answers to two TAI times.
     pub fn tai_to_utc(&self, tai_timestamp: i64) -> Outcome<i64> {
         if !self.enabled {
             return Ok(tai_timestamp);
@@ -186,7 +160,6 @@ impl LeapSecondTable {
         }
     }
 
-    /// Handles TAI to UTC conversion at leap second boundaries.
     fn handle_leap_second_boundary(&self, tai_timestamp: i64, initial_utc: i64) -> Outcome<i64> {
         // Check timestamps within ±2 seconds to handle leap second ambiguity
         for offset in -2..=2 {
@@ -199,35 +172,27 @@ impl LeapSecondTable {
         Err(err!("Cannot convert TAI timestamp {} to UTC: ambiguous leap second boundary", tai_timestamp; Invalid, Input))
     }
 
-    /// Returns true if leap second handling is enabled.
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }
 
-    /// Enables or disables leap second handling.
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
     }
 
-    /// Returns the number of leap seconds in the table.
     pub fn leap_second_count(&self) -> usize {
         self.entries.len()
     }
 
-    /// Returns information about the most recent leap second.
     pub fn latest_leap_second(&self) -> Option<&LeapSecondEntry> {
         self.entries.last()
     }
 
-    /// Returns all leap seconds in chronological order.
+    /// In chronological order.
     pub fn all_leap_seconds(&self) -> &[LeapSecondEntry] {
         &self.entries
     }
 
-    /// Checks if a UTC timestamp falls exactly on a leap second.
-    ///
-    /// This is useful for determining if second=60 should be allowed
-    /// in time parsing/formatting.
     pub fn is_leap_second(&self, utc_timestamp: i64) -> bool {
         if !self.enabled {
             return false;
@@ -236,7 +201,6 @@ impl LeapSecondTable {
         self.entries.iter().any(|entry| entry.utc_timestamp == utc_timestamp)
     }
 
-    /// Returns the leap second entry for a specific UTC timestamp, if any.
     pub fn leap_second_at(&self, utc_timestamp: i64) -> Option<&LeapSecondEntry> {
         if !self.enabled {
             return None;
@@ -245,10 +209,6 @@ impl LeapSecondTable {
         self.entries.iter().find(|entry| entry.utc_timestamp == utc_timestamp)
     }
 
-    /// Validates that a time with second=60 is actually a valid leap second.
-    ///
-    /// This should be used when parsing times to determine if second=60
-    /// is allowed for a specific date/time.
     pub fn validate_leap_second(&self, year: i32, month: u8, day: u8, hour: u8, minute: u8) -> bool {
         if !self.enabled || hour != 23 || minute != 59 {
             return false; // Leap seconds only occur at 23:59:60 UTC
@@ -263,7 +223,6 @@ impl LeapSecondTable {
         self.is_leap_second(utc_timestamp)
     }
     
-    /// Converts date/time components to UTC timestamp using proper calendar arithmetic.
     fn date_to_utc_timestamp(&self, year: i32, month: u8, day: u8, hour: u8, minute: u8, second: u8) -> Result<i64, &'static str> {
         // Validate input parameters
         if month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 60 {
@@ -282,7 +241,6 @@ impl LeapSecondTable {
         Ok(timestamp)
     }
     
-    /// Calculates days since Unix epoch (January 1, 1970) using proper calendar arithmetic.
     fn calculate_days_since_epoch(&self, year: i32, month: u8, day: u8) -> Result<i32, &'static str> {
         // Validate month and day ranges
         if month < 1 || month > 12 || day < 1 {
@@ -311,7 +269,6 @@ impl LeapSecondTable {
         Ok(days_since_epoch as i32)
     }
     
-    /// Converts Gregorian date to Julian Day Number.
     fn gregorian_to_jdn(&self, year: i32, month: u8, day: u8) -> i64 {
         let (y, m) = if month <= 2 {
             (year - 1, month as i32 + 12)
@@ -329,7 +286,6 @@ impl LeapSecondTable {
         jdn
     }
     
-    /// Returns the number of days in a given month/year.
     fn days_in_month(&self, year: i32, month: u8) -> u8 {
         match month {
             1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
@@ -339,12 +295,10 @@ impl LeapSecondTable {
         }
     }
     
-    /// Checks if a year is a leap year.
     fn is_leap_year(&self, year: i32) -> bool {
         (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
     }
 
-    /// Returns leap second statistics.
     pub fn statistics(&self) -> LeapSecondStatistics {
         LeapSecondStatistics {
             total_leap_seconds: self.entries.len(),
@@ -362,32 +316,21 @@ impl Default for LeapSecondTable {
     }
 }
 
-/// Statistics about the leap second table.
 #[derive(Clone, Debug)]
 pub struct LeapSecondStatistics {
-    /// Total number of leap seconds in the table
     pub total_leap_seconds: usize,
-    /// Whether leap second handling is enabled
     pub enabled: bool,
-    /// UTC timestamp of the first leap second (if any)
     pub first_leap_second: Option<i64>,
-    /// UTC timestamp of the most recent leap second (if any)
     pub latest_leap_second: Option<i64>,
-    /// Current TAI-UTC offset in seconds
-    pub current_tai_utc_offset: i32,
+    pub current_tai_utc_offset: i32, // seconds
 }
 
-/// Configuration for leap second support in the datetime library.
 #[derive(Clone, Debug)]
 pub struct LeapSecondConfig {
-    /// Whether to enable leap second support
     pub enabled: bool,
-    /// Whether to allow parsing second=60 in time strings
     pub allow_leap_second_parsing: bool,
-    /// Whether to validate leap seconds against the official table
     pub validate_leap_seconds: bool,
-    /// Custom leap second table (if None, uses standard table)
-    pub custom_table: Option<LeapSecondTable>,
+    pub custom_table: Option<LeapSecondTable>, // None uses the standard table
 }
 
 impl Default for LeapSecondConfig {
@@ -402,7 +345,6 @@ impl Default for LeapSecondConfig {
 }
 
 impl LeapSecondConfig {
-    /// Creates a configuration with leap seconds disabled.
     pub fn disabled() -> Self {
         Self {
             enabled: false,
@@ -412,9 +354,7 @@ impl LeapSecondConfig {
         }
     }
 
-    /// Creates a configuration with leap second support enabled but no validation.
-    ///
-    /// This allows second=60 parsing but doesn't check if it's a real leap second.
+    /// Second 60 parses, but is not checked against the table.
     pub fn permissive() -> Self {
         Self {
             enabled: true,
@@ -424,7 +364,6 @@ impl LeapSecondConfig {
         }
     }
 
-    /// Gets the leap second table to use.
     pub fn get_table(&self) -> LeapSecondTable {
         if !self.enabled {
             LeapSecondTable::disabled()

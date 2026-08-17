@@ -1,17 +1,16 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use crate::{
 	calendar::CalendarDate,
 };
 use oxedyne_fe2o3_core::prelude::*;
 
-/// Hebrew calendar implementation.
-///
-/// The Hebrew calendar is a lunisolar calendar used for Jewish religious observances.
-/// It has 12 months in common years and 13 months in leap years, with months having
-/// either 29 or 30 days. Years can be deficient, regular, or abundant.
+/// A lunisolar calendar: 12 months in a common year and 13 in a leap year, of
+/// 29 or 30 days each, so a year may be deficient, regular or abundant.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HebrewCalendar;
 
-/// Hebrew months enumeration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HebrewMonth {
 	Tishrei = 1,
@@ -30,7 +29,6 @@ pub enum HebrewMonth {
 }
 
 impl HebrewMonth {
-	/// Returns the month number for regular years.
 	pub fn number(&self, is_leap_year: bool) -> u8 {
 		match (self, is_leap_year) {
 			(Self::Tishrei, _) => 1,
@@ -57,7 +55,6 @@ impl HebrewMonth {
 		}
 	}
 	
-	/// Creates a Hebrew month from its number.
 	pub fn from_number(month: u8, is_leap_year: bool) -> Outcome<Self> {
 		match (month, is_leap_year) {
 			(1, _) => Ok(Self::Tishrei),
@@ -84,7 +81,6 @@ impl HebrewMonth {
 		}
 	}
 	
-	/// Returns the English name of the month.
 	pub fn name(&self) -> &'static str {
 		match self {
 			Self::Tishrei => "Tishrei",
@@ -105,18 +101,15 @@ impl HebrewMonth {
 }
 
 impl HebrewCalendar {
-	/// Creates a new Hebrew calendar instance.
 	pub fn new() -> Self {
 		Self
 	}
 	
-	/// Checks if a Hebrew year is a leap year.
-	/// Hebrew leap years occur 7 times in a 19-year cycle.
+	/// Seven leap years fall in each 19-year cycle.
 	pub fn is_hebrew_leap_year(year: i32) -> bool {
 		((year * 7 + 1) % 19) < 7
 	}
 	
-	/// Returns the number of months in a Hebrew year.
 	pub fn months_in_hebrew_year(year: i32) -> u8 {
 		if Self::is_hebrew_leap_year(year) {
 			13
@@ -125,7 +118,6 @@ impl HebrewCalendar {
 		}
 	}
 	
-	/// Returns the number of days in a Hebrew month.
 	pub fn days_in_hebrew_month(year: i32, month: u8) -> Outcome<u8> {
 		let is_leap = Self::is_hebrew_leap_year(year);
 		
@@ -168,13 +160,11 @@ impl HebrewCalendar {
 		}
 	}
 	
-	/// Returns the number of days in a Hebrew year.
 	pub fn days_in_hebrew_year(year: i32) -> i32 {
 		Self::hebrew_elapsed_days(year + 1) - Self::hebrew_elapsed_days(year)
 	}
 	
-	/// Calculates elapsed days since Hebrew epoch (1 Tishrei year 1).
-	/// Uses Gauss's algorithm for Hebrew calendar calculations.
+	/// Gauss's algorithm, counting from 1 Tishrei of year 1.
 	pub fn hebrew_elapsed_days(year: i32) -> i32 {
 		let months_elapsed = (235 * ((year - 1) / 19)) + // Complete cycles of 19 years
 		                    (12 * ((year - 1) % 19)) +   // Regular months in incomplete cycle
@@ -202,7 +192,6 @@ impl HebrewCalendar {
 		alternative_day
 	}
 	
-	/// Converts a Gregorian date to Hebrew date.
 	pub fn from_gregorian(year: i32, month: u8, day: u8) -> Outcome<(i32, u8, u8)> {
 		// Convert Gregorian to Julian Day Number
 		let jdn = Self::gregorian_to_jdn(year, month, day);
@@ -211,7 +200,6 @@ impl HebrewCalendar {
 		Self::jdn_to_hebrew(jdn)
 	}
 	
-	/// Converts a Hebrew date to Gregorian date.
 	pub fn to_gregorian(hebrew_year: i32, hebrew_month: u8, hebrew_day: u8) -> Outcome<(i32, u8, u8)> {
 		// Validate Hebrew date
 		res!(Self::validate_hebrew_date(hebrew_year, hebrew_month, hebrew_day));
@@ -223,7 +211,6 @@ impl HebrewCalendar {
 		Ok(Self::jdn_to_gregorian(jdn))
 	}
 	
-	/// Converts a Gregorian date to Julian Day Number.
 	pub fn gregorian_to_jdn(year: i32, month: u8, day: u8) -> i64 {
 		let (y, m) = if month <= 2 {
 			(year - 1, month as i32 + 12)
@@ -241,7 +228,6 @@ impl HebrewCalendar {
 		jdn
 	}
 	
-	/// Converts Julian Day Number to Gregorian date.
 	fn jdn_to_gregorian(jdn: i64) -> (i32, u8, u8) {
 		let a = jdn + 32044;
 		let b = (4 * a + 3) / 146097;
@@ -257,7 +243,6 @@ impl HebrewCalendar {
 		(year, month, day)
 	}
 	
-	/// Returns days in a Gregorian month.
 	fn gregorian_month_days(year: i32, month: u8) -> u8 {
 		match month {
 			1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
@@ -273,7 +258,6 @@ impl HebrewCalendar {
 		}
 	}
 	
-	/// Converts Hebrew date to Julian Day Number.
 	fn hebrew_to_jdn(year: i32, month: u8, day: u8) -> Outcome<i64> {
 		// Calculate days elapsed from 1 Tishrei year 1
 		let mut days = Self::hebrew_elapsed_days(year) + day as i32 - 1;
@@ -290,7 +274,6 @@ impl HebrewCalendar {
 		Ok(days as i64 + hebrew_epoch_jdn)
 	}
 	
-	/// Converts Julian Day Number to Hebrew date.
 	fn jdn_to_hebrew(jdn: i64) -> Outcome<(i32, u8, u8)> {
 		// Convert JDN to Hebrew days since epoch
 		let hebrew_epoch_jdn = 347997i64;
@@ -340,7 +323,6 @@ impl HebrewCalendar {
 		Err(err!("Failed to convert JDN {} to Hebrew date (year {}, day_of_year {})", jdn, year, day_of_year; Invalid))
 	}
 	
-	/// Validates a Hebrew date.
 	pub fn validate_hebrew_date(year: i32, month: u8, day: u8) -> Outcome<()> {
 		if year < 1 || year > 9999 {
 			return Err(err!("Hebrew year {} out of range", year; Invalid, Input));
@@ -361,12 +343,10 @@ impl HebrewCalendar {
 }
 
 impl HebrewCalendar {
-	/// Returns the name of this calendar.
 	pub fn calendar_name(&self) -> &'static str {
 		"Hebrew"
 	}
 	
-	/// Checks if a year is a leap year in the context of a CalendarDate.
 	pub fn is_leap_year_for_date(&self, date: &CalendarDate) -> bool {
 		// Convert to Hebrew year first
 		match Self::from_gregorian(date.year(), date.month_of_year().of(), date.day()) {
@@ -375,7 +355,6 @@ impl HebrewCalendar {
 		}
 	}
 	
-	/// Returns days in month for a CalendarDate.
 	pub fn days_in_month_for_date(&self, date: &CalendarDate) -> Outcome<u8> {
 		// Convert to Hebrew date first
 		let (hebrew_year, hebrew_month, _) = res!(Self::from_gregorian(
@@ -387,7 +366,6 @@ impl HebrewCalendar {
 		Self::days_in_hebrew_month(hebrew_year, hebrew_month)
 	}
 	
-	/// Returns months in year for a CalendarDate.
 	pub fn months_in_year_for_date(&self, date: &CalendarDate) -> u8 {
 		// Convert to Hebrew year first
 		match Self::from_gregorian(date.year(), date.month_of_year().of(), date.day()) {
@@ -396,7 +374,6 @@ impl HebrewCalendar {
 		}
 	}
 	
-	/// Returns days in year for a CalendarDate.
 	pub fn days_in_year_for_date(&self, date: &CalendarDate) -> u16 {
 		// Convert to Hebrew year first
 		match Self::from_gregorian(date.year(), date.month_of_year().of(), date.day()) {
@@ -405,7 +382,6 @@ impl HebrewCalendar {
 		}
 	}
 	
-	/// Validates a Gregorian date for Hebrew calendar conversion.
 	pub fn validate_gregorian_date(&self, year: i32, month: u8, day: u8) -> Outcome<()> {
 		// This validates Gregorian dates that will be converted to Hebrew
 		if year < 1 || year > 9999 {
@@ -425,7 +401,6 @@ impl HebrewCalendar {
 		Ok(())
 	}
 	
-	/// Formats a CalendarDate as a Hebrew date.
 	pub fn format_calendar_date(&self, date: &CalendarDate) -> String {
 		// Convert to Hebrew date and format
 		match Self::from_gregorian(date.year(), date.month_of_year().of(), date.day()) {

@@ -28,6 +28,8 @@
 //! let calclock = res!(CalClock::from_date_time(date, time));
 //! ```
 //!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 #![forbid(unsafe_code)]
 
 pub mod batch;

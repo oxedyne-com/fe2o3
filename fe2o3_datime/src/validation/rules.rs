@@ -1,3 +1,11 @@
+//! Validation rules, and a library of ready-made ones.
+//!
+//! A rule is a name and up to three closures, one each for a CalClock, a
+//! CalendarDate and a ClockTime. Rules combine with all_rules and any_rule.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use crate::{
     calendar::{Calendar, CalendarDate},
     clock::ClockTime,
@@ -12,12 +20,6 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-/// A custom validation rule that can be applied to CalClock components.
-///
-/// ValidationRule provides a flexible way to define custom validation logic
-/// for dates, times, and combined CalClock instances. Rules can be composed
-/// and applied in sequence to implement complex validation requirements.
-///
 /// # Examples
 ///
 /// ```ignore
@@ -44,15 +46,12 @@ use std::{
 /// validator.add_rule(business_hours_rule)res!();
 /// ```
 pub struct ValidationRule {
-    /// Name of this validation rule.
     name: String,
-    /// Optional description of what this rule validates.
     description: Option<String>,
-    /// Custom CalClock validation function.
+    // A rule may carry any combination of the three, and only the ones set
+    // are consulted.
     calclock_validator: Option<Box<dyn Fn(&CalClock) -> ValidationResult + Send + Sync>>,
-    /// Custom CalendarDate validation function.
     date_validator: Option<Box<dyn Fn(&CalendarDate) -> ValidationResult + Send + Sync>>,
-    /// Custom ClockTime validation function.
     time_validator: Option<Box<dyn Fn(&ClockTime) -> ValidationResult + Send + Sync>>,
 }
 
@@ -69,7 +68,6 @@ impl std::fmt::Debug for ValidationRule {
 }
 
 impl ValidationRule {
-    /// Creates a new validation rule with the given name.
     pub fn new<S: Into<String>>(name: S) -> Self {
         Self {
             name: name.into(),
@@ -80,13 +78,11 @@ impl ValidationRule {
         }
     }
     
-    /// Sets the description for this rule.
     pub fn description<S: Into<String>>(mut self, description: S) -> Self {
         self.description = Some(description.into());
         self
     }
     
-    /// Sets a custom CalClock validator function.
     pub fn with_calclock_validator<F>(mut self, validator: F) -> Self
     where
         F: Fn(&CalClock) -> ValidationResult + Send + Sync + 'static,
@@ -95,7 +91,6 @@ impl ValidationRule {
         self
     }
     
-    /// Sets a custom CalendarDate validator function.
     pub fn with_date_validator<F>(mut self, validator: F) -> Self
     where
         F: Fn(&CalendarDate) -> ValidationResult + Send + Sync + 'static,
@@ -104,7 +99,6 @@ impl ValidationRule {
         self
     }
     
-    /// Sets a custom ClockTime validator function.
     pub fn with_time_validator<F>(mut self, validator: F) -> Self
     where
         F: Fn(&ClockTime) -> ValidationResult + Send + Sync + 'static,
@@ -113,17 +107,14 @@ impl ValidationRule {
         self
     }
     
-    /// Returns the name of this rule.
     pub fn name(&self) -> &str {
         &self.name
     }
     
-    /// Returns the description of this rule.
     pub fn get_description(&self) -> Option<&str> {
         self.description.as_deref()
     }
     
-    /// Validates a CalClock using this rule.
     pub fn validate_calclock(&self, calclock: &CalClock) -> ValidationResult {
         let mut errors = Vec::new();
         
@@ -155,7 +146,6 @@ impl ValidationRule {
         }
     }
     
-    /// Validates a CalendarDate using this rule.
     pub fn validate_date(&self, date: &CalendarDate) -> ValidationResult {
         if let Some(ref validator) = self.date_validator {
             validator(date)
@@ -164,7 +154,6 @@ impl ValidationRule {
         }
     }
     
-    /// Validates a ClockTime using this rule.
     pub fn validate_time(&self, time: &ClockTime) -> ValidationResult {
         if let Some(ref validator) = self.time_validator {
             validator(time)
@@ -174,15 +163,10 @@ impl ValidationRule {
     }
 }
 
-/// A collection of commonly used validation rules.
-///
-/// ValidationRules provides pre-built validation rules for common scenarios
-/// such as business hours, holidays, weekends, and date ranges. These rules
-/// can be used directly or serve as examples for creating custom rules.
 pub struct ValidationRules;
 
 impl ValidationRules {
-    /// Creates a rule that only allows business hours (9 AM - 5 PM, Monday-Friday).
+    /// 9 AM to 5 PM, Monday to Friday.
     pub fn business_hours() -> ValidationRule {
         ValidationRule::new("business_hours")
             .description("Only allows times during standard business hours (9 AM - 5 PM, Monday-Friday)")
@@ -210,7 +194,6 @@ impl ValidationRules {
             })
     }
     
-    /// Creates a rule that only allows weekend dates.
     pub fn weekends_only() -> ValidationRule {
         ValidationRule::new("weekends_only")
             .description("Only allows weekend dates (Saturday and Sunday)")
@@ -228,7 +211,6 @@ impl ValidationRules {
             })
     }
     
-    /// Creates a rule that excludes common holidays.
     pub fn no_holidays() -> ValidationRule {
         ValidationRule::new("no_holidays")
             .description("Excludes common holidays")
@@ -251,7 +233,6 @@ impl ValidationRules {
             })
     }
     
-    /// Creates a rule that only allows specific days of the week.
     pub fn allowed_weekdays(allowed_days: HashSet<crate::constant::DayOfWeek>) -> ValidationRule {
         ValidationRule::new("allowed_weekdays")
             .description("Only allows specific days of the week")
@@ -274,7 +255,7 @@ impl ValidationRules {
             })
     }
     
-    /// Creates a rule that only allows times within a specific hour range.
+    /// Both hours are inclusive.
     pub fn hour_range(min_hour: u8, max_hour: u8) -> ValidationRule {
         ValidationRule::new("hour_range")
             .description(format!("Only allows times between {} and {} hours", min_hour, max_hour))
@@ -293,7 +274,6 @@ impl ValidationRules {
             })
     }
     
-    /// Creates a rule that only allows dates after a minimum date.
     pub fn min_date(min_date: CalendarDate) -> ValidationRule {
         ValidationRule::new("min_date")
             .description(format!("Only allows dates on or after {}", min_date))
@@ -311,7 +291,6 @@ impl ValidationRules {
             })
     }
     
-    /// Creates a rule that only allows dates before a maximum date.
     pub fn max_date(max_date: CalendarDate) -> ValidationRule {
         ValidationRule::new("max_date")
             .description(format!("Only allows dates on or before {}", max_date))
@@ -329,7 +308,7 @@ impl ValidationRules {
             })
     }
     
-    /// Creates a rule that only allows dates within a specific year range.
+    /// Both years are inclusive.
     pub fn year_range(min_year: i32, max_year: i32) -> ValidationRule {
         ValidationRule::new("year_range")
             .description(format!("Only allows years between {} and {}", min_year, max_year))
@@ -348,7 +327,6 @@ impl ValidationRules {
             })
     }
     
-    /// Creates a rule that only allows specific months.
     pub fn allowed_months(allowed_months: HashSet<crate::constant::MonthOfYear>) -> ValidationRule {
         ValidationRule::new("allowed_months")
             .description("Only allows specific months")
@@ -371,7 +349,6 @@ impl ValidationRules {
             })
     }
     
-    /// Creates a rule that requires times to have zero nanoseconds (whole seconds only).
     pub fn whole_seconds_only() -> ValidationRule {
         ValidationRule::new("whole_seconds_only")
             .description("Only allows times with zero nanoseconds (whole seconds)")
@@ -389,7 +366,6 @@ impl ValidationRules {
             })
     }
     
-    /// Creates a rule that requires times to have zero seconds and nanoseconds (whole minutes only).
     pub fn whole_minutes_only() -> ValidationRule {
         ValidationRule::new("whole_minutes_only")
             .description("Only allows times with zero seconds and nanoseconds (whole minutes)")
@@ -407,7 +383,6 @@ impl ValidationRules {
             })
     }
     
-    /// Gets the current year from system time.
     fn get_current_year() -> i32 {
         let now = SystemTime::now();
         match now.duration_since(UNIX_EPOCH) {
@@ -424,7 +399,6 @@ impl ValidationRules {
         }
     }
     
-    /// Creates a rule that prevents dates too far in the past (more than specified years ago).
     pub fn not_too_old(max_years_ago: u32) -> ValidationRule {
         ValidationRule::new("not_too_old")
             .description(format!("Prevents dates more than {} years in the past", max_years_ago))
@@ -445,7 +419,6 @@ impl ValidationRules {
             })
     }
     
-    /// Creates a rule that prevents dates too far in the future (more than specified years ahead).
     pub fn not_too_future(max_years_ahead: u32) -> ValidationRule {
         ValidationRule::new("not_too_future")
             .description(format!("Prevents dates more than {} years in the future", max_years_ahead))
@@ -471,7 +444,7 @@ impl ValidationRules {
 // Rule Combinators
 // ========================================================================
 
-/// Combines multiple validation rules with AND logic.
+/// Every rule must pass, and the errors of all that fail are returned.
 pub fn all_rules(rules: Vec<ValidationRule>) -> ValidationRule {
     ValidationRule::new("combined_all")
         .description("All specified rules must pass")
@@ -492,7 +465,7 @@ pub fn all_rules(rules: Vec<ValidationRule>) -> ValidationRule {
         })
 }
 
-/// Combines multiple validation rules with OR logic.
+/// One rule passing is enough.
 pub fn any_rule(rules: Vec<ValidationRule>) -> ValidationRule {
     ValidationRule::new("combined_any")
         .description("At least one of the specified rules must pass")
@@ -515,7 +488,6 @@ pub fn any_rule(rules: Vec<ValidationRule>) -> ValidationRule {
 // ========================================================================
 
 impl ValidationRules {
-    /// Creates a comprehensive business rule (business hours + no holidays + weekdays only).
     pub fn strict_business() -> ValidationRule {
         let mut weekdays = HashSet::new();
         weekdays.insert(crate::constant::DayOfWeek::Monday);
@@ -531,7 +503,6 @@ impl ValidationRules {
         ])
     }
     
-    /// Creates a rule for scheduling appointments (business hours + whole minutes + reasonable timeframe).
     pub fn appointment_scheduling() -> ValidationRule {
         all_rules(vec![
             Self::business_hours(),
@@ -541,7 +512,6 @@ impl ValidationRules {
         ])
     }
     
-    /// Creates a rule for historical data (no future dates + reasonable past limit).
     pub fn historical_data() -> ValidationRule {
         all_rules(vec![
             Self::max_date({

@@ -1,3 +1,6 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use oxedyne_fe2o3_core::prelude::*;
 use crate::{
 	time::{CalClock, CalClockZone, CalClockDuration},
@@ -9,10 +12,8 @@ use std::{
 	time::{Duration, Instant},
 };
 
-/// Advanced NTP client with multi-server support and fault tolerance.
-/// 
-/// Implements RFC 1305 algorithms including intersection, selection,
-/// and combine algorithms for reliable network time synchronization.
+/// Polls several servers and applies the RFC 1305 intersection, selection and
+/// combine algorithms, so one bad server does not carry the answer.
 pub struct AdvancedNtpClient {
 	servers: Vec<NtpServerConnection>,
 	server_stats: HashMap<IpAddr, NtpServerStats>,
@@ -24,16 +25,12 @@ pub struct AdvancedNtpClient {
 	best_server: Option<IpAddr>,
 }
 
-/// NTP algorithm selection.
 #[derive(Debug, Clone, PartialEq)]
 pub enum NtpAlgorithm {
-	/// RFC 1305 standard algorithm.
 	Rfc1305,
-	/// Custom Prodigitum algorithm (placeholder for future).
-	Prodigitum,
+	Prodigitum, // placeholder
 }
 
-/// Individual server connection.
 #[derive(Debug, Clone)]
 struct NtpServerConnection {
 	address: IpAddr,
@@ -41,7 +38,6 @@ struct NtpServerConnection {
 	timeout: Duration,
 }
 
-/// NTP data result from a single server.
 #[derive(Debug, Clone)]
 pub struct NtpData {
 	address: IpAddr,
@@ -54,43 +50,35 @@ pub struct NtpData {
 }
 
 impl NtpData {
-	/// Returns the server address.
 	pub fn address(&self) -> IpAddr {
 		self.address
 	}
 	
-	/// Returns the clock offset.
 	pub fn offset(&self) -> &CalClockDuration {
 		&self.offset
 	}
 	
-	/// Returns the round-trip delay.
 	pub fn delay(&self) -> &CalClockDuration {
 		&self.delay
 	}
 	
-	/// Returns the root distance.
 	pub fn root_distance(&self) -> i64 {
 		self.root_distance
 	}
 	
-	/// Returns the correctness interval.
 	pub fn correctness_interval(&self) -> &TimeIndexInterval<TimeLong> {
 		&self.correctness_interval
 	}
 	
-	/// Returns the server stratum.
 	pub fn stratum(&self) -> u8 {
 		self.stratum
 	}
 	
-	/// Returns the server precision.
 	pub fn precision(&self) -> i8 {
 		self.precision
 	}
 }
 
-/// Statistical tracking for each NTP server.
 #[derive(Debug, Clone)]
 pub struct NtpServerStats {
 	#[allow(dead_code)]
@@ -121,28 +109,18 @@ pub struct NtpServerStats {
 	falseticker_count: usize,
 }
 
-/// Result from NTP polling operation.
 #[derive(Debug, Clone)]
 pub struct AdvancedNtpResult {
-	/// The synchronized network time.
 	pub network_time: CalClock,
-	/// Clock offset from local time (network_time - local_time).
-	pub offset: CalClockDuration,
-	/// Round-trip delay to the server.
+	pub offset: CalClockDuration, // network_time - local_time
 	pub delay: CalClockDuration,
-	/// Root distance (accuracy estimate).
-	pub root_distance: f64,
-	/// Number of servers used in calculation.
+	pub root_distance: f64, // accuracy estimate
 	pub servers_used: usize,
-	/// Number of servers considered.
 	pub servers_total: usize,
-	/// Best server used for final time.
 	pub best_server: Option<IpAddr>,
-	/// Jitter estimate.
 	pub jitter: f64,
 }
 
-/// Tracking statistics for historical offsets.
 #[derive(Debug, Clone)]
 pub struct NtpOffsets {
 	values: Vec<f64>,
@@ -151,7 +129,6 @@ pub struct NtpOffsets {
 }
 
 impl NtpOffsets {
-	/// Creates a new NtpOffsets tracker.
 	pub fn new() -> Self {
 		Self {
 			values: Vec::new(),
@@ -160,7 +137,6 @@ impl NtpOffsets {
 		}
 	}
 	
-	/// Adds a new offset value.
 	pub fn add(&mut self, value: f64) {
 		self.values.push(value);
 		
@@ -172,7 +148,6 @@ impl NtpOffsets {
 		self.recalculate_stats();
 	}
 	
-	/// Recalculates mean and standard deviation.
 	fn recalculate_stats(&mut self) {
 		if self.values.is_empty() {
 			return;
@@ -191,17 +166,14 @@ impl NtpOffsets {
 		}
 	}
 	
-	/// Returns the standard deviation.
 	pub fn std_dev(&self) -> f64 {
 		self.std_dev
 	}
 	
-	/// Returns the mean.
 	pub fn mean(&self) -> f64 {
 		self.mean
 	}
 	
-	/// Returns the current sample count.
 	pub fn count(&self) -> usize {
 		self.values.len()
 	}
@@ -209,7 +181,6 @@ impl NtpOffsets {
 
 
 impl AdvancedNtpClient {
-	/// Creates a new advanced NTP client.
 	pub fn new(servers: Vec<IpAddr>) -> Outcome<Self> {
 		if servers.len() < 4 {
 			return Err(err!(
@@ -240,19 +211,16 @@ impl AdvancedNtpClient {
 		})
 	}
 	
-	/// Sets the NTP algorithm to use.
 	pub fn with_algorithm(mut self, algorithm: NtpAlgorithm) -> Self {
 		self.algorithm = algorithm;
 		self
 	}
 	
-	/// Sets the minimum number of servers required.
 	pub fn with_min_servers(mut self, min_servers: usize) -> Self {
 		self.min_servers = min_servers;
 		self
 	}
 	
-	/// Sets the timeout for server connections.
 	pub fn with_timeout(mut self, timeout: Duration) -> Self {
 		self.timeout = timeout;
 		for server in &mut self.servers {
@@ -261,7 +229,6 @@ impl AdvancedNtpClient {
 		self
 	}
 	
-	/// Performs advanced NTP synchronization with fault tolerance.
 	pub fn synchronize(&mut self, zone: CalClockZone) -> Outcome<AdvancedNtpResult> {
 		// Step 1: Poll all servers
 		let data_list = res!(self.poll_all_servers());
@@ -277,7 +244,6 @@ impl AdvancedNtpClient {
 		}
 	}
 	
-	/// Polls all configured servers.
 	fn poll_all_servers(&mut self) -> Outcome<Vec<NtpData>> {
 		let mut data_list = Vec::new();
 		let servers = self.servers.clone(); // Clone to avoid borrowing issues
@@ -302,7 +268,6 @@ impl AdvancedNtpClient {
 		Ok(data_list)
 	}
 	
-	/// Polls a single NTP server.
 	fn poll_single_server(&self, server: &NtpServerConnection) -> Outcome<NtpData> {
 		// Create UDP socket
 		let socket = res!(UdpSocket::bind("0.0.0.0:0").map_err(|e| {
@@ -343,7 +308,6 @@ impl AdvancedNtpClient {
 		self.parse_ntp_response(&buffer, send_time, recv_time, server.address)
 	}
 	
-	/// Creates an NTP request packet.
 	fn create_ntp_request(&self) -> [u8; 48] {
 		let mut packet = [0u8; 48];
 		
@@ -371,7 +335,6 @@ impl AdvancedNtpClient {
 		packet
 	}
 	
-	/// Parses NTP response and calculates NTP data.
 	fn parse_ntp_response(
 		&self,
 		packet: &[u8; 48],
@@ -431,7 +394,6 @@ impl AdvancedNtpClient {
 		})
 	}
 	
-	/// Extracts NTP timestamp from 8 bytes.
 	fn extract_ntp_timestamp(&self, bytes: &[u8]) -> f64 {
 		let seconds = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as u64;
 		let fraction = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as u64;
@@ -443,7 +405,6 @@ impl AdvancedNtpClient {
 		unix_seconds as f64 + fractional_seconds
 	}
 	
-	/// Calculates jitter estimate for a server.
 	#[allow(dead_code)]
 	fn calculate_jitter(&self, server_addr: IpAddr, current_delay: f64) -> f64 {
 		if let Some(stats) = self.server_stats.get(&server_addr) {
@@ -454,7 +415,6 @@ impl AdvancedNtpClient {
 		current_delay * 0.1 // Default estimate
 	}
 	
-	/// Implements RFC 1305 algorithm.
 	fn rfc1305_algorithm(
 		&mut self,
 		data_list: Vec<NtpData>,
@@ -508,7 +468,6 @@ impl AdvancedNtpClient {
 	}
 	
 	
-	/// Marks a server as unreachable.
 	fn mark_server_unreachable(&mut self, address: &IpAddr) {
 		if let Some(stats) = self.server_stats.get_mut(address) {
 			stats.is_reachable = false;
@@ -516,17 +475,14 @@ impl AdvancedNtpClient {
 		}
 	}
 	
-	/// Returns server statistics.
 	pub fn server_statistics(&self) -> &HashMap<IpAddr, NtpServerStats> {
 		&self.server_stats
 	}
 	
-	/// Returns the best server address.
 	pub fn best_server(&self) -> Option<IpAddr> {
 		self.best_server
 	}
 	
-	/// Implements the Java-compatible intersection algorithm.
 	fn get_intersection_interval(&self, data_list: &[NtpData]) -> Outcome<TimeIndexInterval<TimeLong>> {
 		
 		let m = self.servers.len();
@@ -594,7 +550,6 @@ impl AdvancedNtpClient {
 		}
 	}
 	
-	/// Gets true chimers based on intersection interval.
 	fn get_true_chimers(&self, data_list: &[NtpData], intersection_interval: &TimeIndexInterval<TimeLong>) -> Outcome<Vec<NtpData>> {
 		let mut result = Vec::new();
 		
@@ -612,7 +567,6 @@ impl AdvancedNtpClient {
 		Ok(result)
 	}
 	
-	/// Gets survivors using selection algorithm.
 	fn get_survivors(&self, true_chimers: &[NtpData]) -> Outcome<Vec<NtpData>> {
 		let mut result = true_chimers.to_vec();
 		
@@ -665,7 +619,6 @@ impl AdvancedNtpClient {
 		Ok(result)
 	}
 	
-	/// Root mean square calculation for jitter.
 	fn rms(&self, series: &[i64]) -> f64 {
 		if series.is_empty() {
 			return 0.0;
@@ -679,7 +632,6 @@ impl AdvancedNtpClient {
 		((sum_x2 as f64) / (series.len() as f64)).sqrt()
 	}
 	
-	/// Converts NtpData to CalClock.
 	fn data_to_calclock(&self, data: &NtpData, zone: CalClockZone) -> Outcome<CalClock> {
 		let current_time = ok!(std::time::SystemTime::now()
 			.duration_since(std::time::UNIX_EPOCH)

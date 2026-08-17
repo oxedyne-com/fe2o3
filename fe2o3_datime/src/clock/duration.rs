@@ -1,22 +1,14 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use crate::core::Duration;
 
 use oxedyne_fe2o3_core::prelude::*;
 
 use std::fmt;
 
-/// Represents a duration of time with nanosecond precision.
-///
-/// ClockDuration provides high-precision time duration representation and arithmetic
-/// operations. Durations can be positive or negative, allowing for both forward and
-/// backward time calculations. All arithmetic maintains nanosecond precision whilst
-/// providing convenient access methods for larger time units.
-///
-/// # Precision
-///
-/// Internally, durations are stored as signed 64-bit nanosecond counts, providing
-/// a range of approximately ±292 years with nanosecond precision.
-///
-/// # Examples
+/// A signed count of nanoseconds, so a duration may run backwards, and the
+/// 64-bit range reaches about ±292 years.
 ///
 /// ```ignore
 /// use oxedyne_fe2o3_datime::clock::ClockDurationres!();
@@ -33,161 +25,79 @@ pub struct ClockDuration {
 }
 
 impl ClockDuration {
-	/// Creates a new ClockDuration from a nanosecond count.
-	///
-	/// # Arguments
-	///
-	/// * `nanos` - Duration in nanoseconds (positive or negative)
 	pub fn from_nanos(nanos: i64) -> Self {
 		Self { nanos }
 	}
 	
-	/// Creates a new ClockDuration from a second count.
-	///
-	/// # Arguments
-	///
-	/// * `seconds` - Duration in seconds (positive or negative)
 	pub fn from_seconds(seconds: i64) -> Self {
 		Self { nanos: seconds * 1_000_000_000 }
 	}
 	
-	/// Creates a new ClockDuration from a millisecond count.
-	///
-	/// # Arguments
-	///
-	/// * `millis` - Duration in milliseconds (positive or negative)
 	pub fn from_millis(millis: i64) -> Self {
 		Self { nanos: millis * 1_000_000 }
 	}
 	
-	/// Creates a new ClockDuration from a microsecond count.
-	///
-	/// # Arguments
-	///
-	/// * `micros` - Duration in microseconds (positive or negative)
 	pub fn from_micros(micros: i64) -> Self {
 		Self { nanos: micros * 1_000 }
 	}
 	
-	/// Creates a new ClockDuration from a minute count.
-	///
-	/// # Arguments
-	///
-	/// * `minutes` - Duration in minutes (positive or negative)
 	pub fn from_minutes(minutes: i64) -> Self {
 		Self { nanos: minutes * 60 * 1_000_000_000 }
 	}
 	
-	/// Creates a new ClockDuration from an hour count.
-	///
-	/// # Arguments
-	///
-	/// * `hours` - Duration in hours (positive or negative)
 	pub fn from_hours(hours: i64) -> Self {
 		Self { nanos: hours * 60 * 60 * 1_000_000_000 }
 	}
 	
-	/// Creates a zero duration.
-	///
-	/// This represents no elapsed time and is useful as a neutral element
-	/// for duration arithmetic.
 	pub fn zero() -> Self {
 		Self { nanos: 0 }
 	}
 	
-	/// Returns the total duration in nanoseconds.
-	///
-	/// This provides access to the full precision internal representation.
 	pub fn total_nanos(&self) -> i64 {
 		self.nanos
 	}
 	
-	/// Returns the total duration in microseconds with truncation.
-	///
-	/// Any fractional microsecond component is discarded.
+	/// Truncates rather than rounds, as do the coarser totals below.
 	pub fn total_micros(&self) -> i64 {
 		self.nanos / 1_000
 	}
 	
-	/// Returns the total duration in milliseconds with truncation.
-	///
-	/// Any fractional millisecond component is discarded.
 	pub fn total_millis(&self) -> i64 {
 		self.nanos / 1_000_000
 	}
 	
-	/// Returns the total duration in seconds with truncation.
-	///
-	/// Any fractional second component is discarded.
 	pub fn total_seconds(&self) -> i64 {
 		self.nanos / 1_000_000_000
 	}
 	
-	/// Returns the total duration in minutes with truncation.
-	///
-	/// Any fractional minute component is discarded.
 	pub fn total_minutes(&self) -> i64 {
 		self.nanos / (60 * 1_000_000_000)
 	}
 	
-	/// Returns the total duration in hours with truncation.
-	///
-	/// Any fractional hour component is discarded.
 	pub fn total_hours(&self) -> i64 {
 		self.nanos / (60 * 60 * 1_000_000_000)
 	}
 	
-	/// Returns the absolute value of this duration.
-	///
-	/// Negative durations become positive, positive durations remain unchanged.
 	pub fn abs(&self) -> Self {
 		Self { nanos: self.nanos.abs() }
 	}
 	
-	/// Returns the arithmetic negation of this duration.
-	///
-	/// Positive durations become negative and vice versa.
 	pub fn negate(&self) -> Self {
 		Self { nanos: -self.nanos }
 	}
 	
-	/// Adds another duration to this one.
-	///
-	/// # Arguments
-	///
-	/// * `other` - Duration to add to this one
 	pub fn plus(&self, other: &Self) -> Self {
 		Self { nanos: self.nanos + other.nanos }
 	}
 	
-	/// Subtracts another duration from this one.
-	///
-	/// # Arguments
-	///
-	/// * `other` - Duration to subtract from this one
 	pub fn minus(&self, other: &Self) -> Self {
 		Self { nanos: self.nanos - other.nanos }
 	}
 	
-	/// Multiplies this duration by a scalar factor.
-	///
-	/// # Arguments
-	///
-	/// * `factor` - Multiplication factor
 	pub fn multiply_by(&self, factor: i64) -> Self {
 		Self { nanos: self.nanos * factor }
 	}
 	
-	/// Divides this duration by a scalar divisor.
-	///
-	/// # Arguments
-	///
-	/// * `divisor` - Division factor
-	///
-	/// # Returns
-	///
-	/// Returns `Ok(ClockDuration)` if the divisor is non-zero, otherwise returns
-	/// an error.
 	pub fn divide_by(&self, divisor: i64) -> Outcome<Self> {
 		if divisor == 0 {
 			return Err(err!("Cannot divide duration by zero"; Invalid, Input));
@@ -195,16 +105,7 @@ impl ClockDuration {
 		Ok(Self { nanos: self.nanos / divisor })
 	}
 	
-	/// Returns the duration decomposed into time components.
-	///
-	/// The duration is broken down into hours, minutes, seconds, and nanoseconds.
-	/// For negative durations, the sign is carried in the first non-zero component
-	/// to maintain a clear representation.
-	///
-	/// # Returns
-	///
-	/// Returns a tuple containing (hours, minutes, seconds, nanoseconds) where
-	/// the sign appears in the first non-zero component.
+	/// For a negative duration the sign is carried in the first non-zero component.
 	pub fn to_components(&self) -> (i64, i64, i64, i64) {
 		let mut remaining = self.nanos.abs();
 		let negative = self.nanos < 0;

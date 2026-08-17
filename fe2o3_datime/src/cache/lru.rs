@@ -1,29 +1,23 @@
-/// Safe LRU (Least Recently Used) cache implementation.
-///
-/// This module provides a safe LRU cache implementation without unsafe code,
-/// using Vec-based storage with O(n) operations for simplicity and safety.
+//! Safe LRU (Least Recently Used) cache implementation.
+//!
+//! Storage is a plain Vec, so several operations are O(n). Safety is preferred
+//! over speed here, and no unsafe code is used.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use std::hash::Hash;
 
-/// Safe LRU cache implementation.
-///
-/// This implementation prioritises safety over performance by avoiding
-/// unsafe code. It uses Vec-based storage which results in O(n) operations
-/// for some methods, but ensures memory safety.
 #[derive(Debug)]
 pub struct LruCacheInner<K, V> 
 where 
 	K: Hash + Eq + Clone,
 	V: Clone,
 {
-	/// Storage for key-value pairs in LRU order (most recent first).
-	items: Vec<(K, V)>,
-	/// Maximum capacity of the cache.
-	capacity: usize,
-	/// Hit counter for statistics.
-	hits: u64,
-	/// Miss counter for statistics.
-	misses: u64,
+	items:      Vec<(K, V)>,    // most recent first
+	capacity:   usize,
+	hits:       u64,
+	misses:     u64,
 }
 
 impl<K, V> LruCacheInner<K, V> 
@@ -31,7 +25,6 @@ where
 	K: Hash + Eq + Clone,
 	V: Clone,
 {
-	/// Creates a new LRU cache with the specified capacity.
 	pub fn new(capacity: usize) -> Self {
 		Self {
 			items: Vec::with_capacity(capacity),
@@ -41,7 +34,6 @@ where
 		}
 	}
 	
-	/// Gets a value from the cache, moving it to the front if found.
 	pub fn get(&mut self, key: &K) -> Option<V> {
 		if let Some(pos) = self.find_key_position(key) {
 			self.hits += 1;
@@ -58,7 +50,7 @@ where
 		}
 	}
 	
-	/// Inserts a key-value pair into the cache.
+	/// Evicts the least recently used entry when the insert takes the cache over capacity.
 	pub fn insert(&mut self, key: K, value: V) {
 		// Check if key already exists
 		if let Some(pos) = self.find_key_position(&key) {
@@ -76,29 +68,25 @@ where
 		}
 	}
 	
-	/// Finds the position of a key in the items vector.
 	fn find_key_position(&self, key: &K) -> Option<usize> {
 		self.items.iter().position(|(k, _)| k == key)
 	}
 	
-	/// Returns the number of items in the cache.
 	pub fn len(&self) -> usize {
 		self.items.len()
 	}
 	
-	/// Returns true if the cache is empty.
 	pub fn is_empty(&self) -> bool {
 		self.items.is_empty()
 	}
 	
-	/// Clears all items from the cache.
 	pub fn clear(&mut self) {
 		self.items.clear();
 		self.hits = 0;
 		self.misses = 0;
 	}
 	
-	/// Returns cache statistics (hits, misses, hit ratio).
+	/// Hits, misses and hit ratio, in that order.
 	pub fn stats(&self) -> (u64, u64, f64) {
 		let total = self.hits + self.misses;
 		let hit_ratio = if total > 0 { 
@@ -109,17 +97,14 @@ where
 		(self.hits, self.misses, hit_ratio)
 	}
 	
-	/// Returns an iterator over the cache items in LRU order.
 	pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
 		self.items.iter().map(|(k, v)| (k, v))
 	}
 	
-	/// Returns true if the cache contains the specified key.
 	pub fn contains_key(&self, key: &K) -> bool {
 		self.find_key_position(key).is_some()
 	}
 	
-	/// Removes a key from the cache if present.
 	pub fn remove(&mut self, key: &K) -> Option<V> {
 		if let Some(pos) = self.find_key_position(key) {
 			let (_, value) = self.items.remove(pos);
@@ -129,12 +114,11 @@ where
 		}
 	}
 	
-	/// Returns the capacity of the cache.
 	pub fn capacity(&self) -> usize {
 		self.capacity
 	}
 	
-	/// Resizes the cache capacity.
+	/// Shrinking discards the least recently used entries.
 	pub fn resize(&mut self, new_capacity: usize) {
 		self.capacity = new_capacity;
 		
@@ -144,18 +128,16 @@ where
 		}
 	}
 	
-	/// Peek at a value without updating LRU order.
+	/// Reads without promoting the entry.
 	pub fn peek(&self, key: &K) -> Option<&V> {
 		self.find_key_position(key)
 			.map(|pos| &self.items[pos].1)
 	}
 	
-	/// Gets the least recently used item without removing it.
 	pub fn peek_lru(&self) -> Option<(&K, &V)> {
 		self.items.last().map(|(k, v)| (k, v))
 	}
 	
-	/// Gets the most recently used item without removing it.
 	pub fn peek_mru(&self) -> Option<(&K, &V)> {
 		self.items.first().map(|(k, v)| (k, v))
 	}

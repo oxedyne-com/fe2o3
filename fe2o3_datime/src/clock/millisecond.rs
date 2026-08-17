@@ -1,3 +1,6 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use crate::clock::{
 	PerSecondRated,
 	ClockNanoSecond,
@@ -7,20 +10,8 @@ use oxedyne_fe2o3_core::prelude::*;
 
 use std::fmt;
 
-/// Represents a millisecond as a convenience wrapper around ClockNanoSecond.
-///
-/// This type provides millisecond-precision timing by internally storing nanoseconds
-/// but exposing a millisecond-oriented interface. All operations are performed at
-/// nanosecond precision internally, with results converted back to millisecond
-/// precision as needed.
-///
-/// # Precision
-///
-/// One millisecond represents one thousandth (10^-3) of a second. This type is
-/// suitable for applications requiring moderate sub-second precision without the
-/// complexity of full nanosecond handling.
-///
-/// # Examples
+/// A millisecond face over ClockNanoSecond: the arithmetic happens in
+/// nanoseconds and is converted back on the way out.
 ///
 /// ```ignore
 /// use oxedyne_fe2o3_datime::clock::ClockMilliSecondres!();
@@ -35,24 +26,9 @@ pub struct ClockMilliSecond {
 }
 
 impl ClockMilliSecond {
-	/// Maximum valid millisecond value.
-	/// 
-	/// This represents 999 milliseconds, just under one full second.
 	pub const MAX_VALUE: u32 = 999;
-	
-	/// Nanoseconds per millisecond.
 	pub const NANOS_PER_MILLI: u32 = 1_000_000;
 
-	/// Creates a new ClockMilliSecond from the given millisecond value.
-	///
-	/// # Arguments
-	///
-	/// * `millis` - Millisecond value within the second (0-999)
-	///
-	/// # Returns
-	///
-	/// Returns `Ok(ClockMilliSecond)` if the millisecond is valid, otherwise returns
-	/// an error describing the validation failure.
 	pub fn new(millis: u32) -> Outcome<Self> {
 		if millis > Self::MAX_VALUE {
 			return Err(err!(
@@ -66,66 +42,31 @@ impl ClockMilliSecond {
 		Ok(Self { nanos })
 	}
 	
-	/// Creates a new ClockMilliSecond without validation.
-	///
-	/// This method is intended for internal use where the millisecond value is already
-	/// known to be valid. Using this with invalid values will result in undefined
-	/// behaviour.
 	pub(crate) fn new_unchecked(millis: u32) -> Self {
 		let nanos = ClockNanoSecond::new_unchecked(millis * Self::NANOS_PER_MILLI);
 		Self { nanos }
 	}
 	
-	/// Returns the millisecond value within the second.
 	pub fn of(&self) -> u32 {
 		self.nanos.to_millis()
 	}
 	
-	/// Returns the underlying nanosecond representation.
-	///
-	/// This provides access to the internal nanosecond storage for high-precision
-	/// operations or conversions.
 	pub fn as_nanos(&self) -> ClockNanoSecond {
 		self.nanos
 	}
 	
-	/// Creates a ClockMilliSecond from nanoseconds with truncation.
-	///
-	/// The nanosecond value is truncated to millisecond precision, discarding
-	/// any fractional millisecond component.
+	/// Truncates the sub-millisecond part.
 	pub fn from_nanos(nanos: ClockNanoSecond) -> Self {
 		let millis = nanos.to_millis();
 		Self::new_unchecked(millis)
 	}
 	
-	/// Adds the specified number of milliseconds with carry handling.
-	///
-	/// # Arguments
-	///
-	/// * `millis` - Number of milliseconds to add
-	///
-	/// # Returns
-	///
-	/// Returns a tuple containing:
-	/// - `new_millisecond` - The resulting millisecond (normalised to 0-999)
-	/// - `second_carry` - Number of seconds to carry to the next higher unit
 	pub fn add_millis(&self, millis: u32) -> (Self, u32) {
 		let nanos_to_add = millis as u64 * Self::NANOS_PER_MILLI as u64;
 		let (new_nanos, second_carry) = self.nanos.add_nanos(nanos_to_add);
 		(Self::from_nanos(new_nanos), second_carry)
 	}
 	
-	/// Subtracts the specified number of milliseconds with borrow handling.
-	///
-	/// # Arguments
-	///
-	/// * `millis` - Number of milliseconds to subtract
-	///
-	/// # Returns
-	///
-	/// Returns a tuple containing:
-	/// - `new_millisecond` - The resulting millisecond (normalised to 0-999)
-	/// - `second_borrow` - Number of seconds to borrow from the next higher unit
 	pub fn sub_millis(&self, millis: u32) -> (Self, u32) {
 		let nanos_to_sub = millis as u64 * Self::NANOS_PER_MILLI as u64;
 		let (new_nanos, second_borrow) = self.nanos.sub_nanos(nanos_to_sub);
@@ -135,9 +76,6 @@ impl ClockMilliSecond {
 
 // Validation methods.
 impl ClockMilliSecond {
-	/// Returns true if the millisecond value is within the valid range.
-	///
-	/// Valid milliseconds are in the range 0-999 inclusive.
 	pub fn is_valid(&self) -> bool {
 		self.of() <= Self::MAX_VALUE
 	}

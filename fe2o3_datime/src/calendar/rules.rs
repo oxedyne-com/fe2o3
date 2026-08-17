@@ -1,3 +1,6 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use crate::{
     calendar::{CalendarDate, DayIncrementor, holiday_engines::HolidayEngine, business_day_engine::BusinessDayEngine},
     constant::MonthOfYear,
@@ -8,91 +11,63 @@ use oxedyne_fe2o3_core::prelude::*;
 
 use std::collections::HashSet;
 
-/// Types of calendar rules supported by the rules engine.
-/// Based on Java calclock CalendarRule.RuleType enum.
+/// Follows the Java calclock CalendarRule.RuleType enum.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RuleType {
-    /// Anniversary-style rules (yearly recurrence, e.g., every 2 years from start date)
     ByYears,
-    /// Monthly rules with explicitly specified months (e.g., January, April, July, October)
     ByExplicitMonths,
-    /// Monthly rules with regular intervals (e.g., every 3 months)
     ByRegularMonths,
-    /// Daily rules with simple day intervals (e.g., every 7 days)
     ByDays,
 }
 
-/// A comprehensive calendar rule that can generate complex recurrence patterns.
-/// This is the core engine for business rules, holiday calculations, and scheduling.
-/// 
-/// Based on Java calclock CalendarRule class with Rust-specific enhancements.
-/// 
-/// # Examples
-/// 
+/// A recurrence pattern, built up by chained with_ methods and then asked for
+/// its dates. Follows the Java calclock CalendarRule class.
+///
 /// ```ignore
 /// use oxedyne_fe2o3_datime::calendar::rules::{CalendarRule, RuleType};
 /// use oxedyne_fe2o3_datime::calendar::CalendarDate;
 /// use oxedyne_fe2o3_datime::time::CalClockZone;
-/// 
+///
 /// let zone = CalClockZone::utc();
 /// let start_date = CalendarDate::from_ymd(2024, 1, 15, zone.clone()).unwrap();
-/// 
+///
 /// // Create a rule for "2nd Tuesday of every quarter"
 /// let rule = CalendarRule::new(RuleType::ByExplicitMonths)
 ///     .with_months(vec![1, 4, 7, 10])  // Quarterly
 ///     .with_day_incrementor("2nd Tuesday")
 ///     .with_start_date(start_date);
-/// 
+///
 /// let dates = rule.generate_dates(10, zone).unwrap();  // Generate 10 occurrences
 /// ```
 #[derive(Clone, Debug)]
 pub struct CalendarRule {
-    /// Type of rule (years, explicit months, regular months, days)
     rule_type: RuleType,
-    /// Starting date for rule generation
     start_date: Option<CalendarDate>,
-    /// Ending date for rule generation (optional)
     end_date: Option<CalendarDate>,
-    /// Interval value (e.g., every 2 years, every 3 months, every 7 days)
     interval: u32,
-    /// Explicitly specified months (for ByExplicitMonths)
     explicit_months: Option<HashSet<u8>>,
-    /// Day incrementor for complex day finding ("3rd Monday", "last business day", etc.)
     day_incrementor: Option<DayIncrementor>,
-    /// Holiday intervals to exclude from business day calculations
     holidays: Option<HolidaySet>,
-    /// Advanced holiday engine for sophisticated holiday calculations
     holiday_engine: Option<HolidayEngine>,
-    /// Business day engine for complex business day rules
     business_day_engine: Option<BusinessDayEngine>,
-    /// Maximum number of occurrences to generate
     max_occurrences: Option<u32>,
 }
 
-/// Represents a set of holidays as date intervals for business day calculations.
-/// Integrates with CalendarRule to provide holiday-aware scheduling.
 #[derive(Clone, Debug)]
 pub struct HolidaySet {
-    /// Set of holiday dates
     holidays: HashSet<CalendarDate>,
-    /// Holiday intervals (for multi-day holidays)
     intervals: Vec<HolidayInterval>,
 }
 
-/// Represents a holiday interval (e.g., Christmas break, spring break)
 #[derive(Clone, Debug)]
 pub struct HolidayInterval {
-    /// Start date of holiday interval
     start: CalendarDate,
-    /// End date of holiday interval (inclusive)
-    end: CalendarDate,
-    /// Name/description of the holiday
+    end: CalendarDate, // inclusive
     #[allow(dead_code)]
     name: String,
 }
 
 impl CalendarRule {
-    /// Creates a new calendar rule with the specified type.
     pub fn new(rule_type: RuleType) -> Self {
         Self {
             rule_type,
@@ -108,25 +83,21 @@ impl CalendarRule {
         }
     }
     
-    /// Sets the start date for rule generation.
     pub fn with_start_date(mut self, start_date: CalendarDate) -> Self {
         self.start_date = Some(start_date);
         self
     }
     
-    /// Sets the end date for rule generation.
     pub fn with_end_date(mut self, end_date: CalendarDate) -> Self {
         self.end_date = Some(end_date);
         self
     }
     
-    /// Sets the interval for regular recurrence (e.g., every 2 years, every 3 months).
     pub fn with_interval(mut self, interval: u32) -> Self {
         self.interval = interval.max(1);
         self
     }
     
-    /// Sets explicit months for ByExplicitMonths rules.
     pub fn with_months(mut self, months: Vec<u8>) -> Self {
         let mut month_set = HashSet::new();
         for month in months {
@@ -138,53 +109,37 @@ impl CalendarRule {
         self
     }
     
-    /// Sets a day incrementor for complex day finding.
     pub fn with_day_incrementor_string(mut self, incrementor_str: &str) -> Outcome<Self> {
         let incrementor = res!(DayIncrementor::from_string(incrementor_str));
         self.day_incrementor = Some(incrementor);
         Ok(self)
     }
     
-    /// Sets a day incrementor for complex day finding.
     pub fn with_day_incrementor(mut self, incrementor: DayIncrementor) -> Self {
         self.day_incrementor = Some(incrementor);
         self
     }
     
-    /// Sets the holiday set for business day calculations.
     pub fn with_holidays(mut self, holidays: HolidaySet) -> Self {
         self.holidays = Some(holidays);
         self
     }
     
-    /// Sets the maximum number of occurrences to generate.
     pub fn with_max_occurrences(mut self, max: u32) -> Self {
         self.max_occurrences = Some(max);
         self
     }
     
-    /// Sets an advanced holiday engine for sophisticated holiday calculations.
     pub fn with_holiday_engine(mut self, engine: HolidayEngine) -> Self {
         self.holiday_engine = Some(engine);
         self
     }
     
-    /// Sets a business day engine for complex business day rules.
     pub fn with_business_day_engine(mut self, engine: BusinessDayEngine) -> Self {
         self.business_day_engine = Some(engine);
         self
     }
     
-    /// Generates a sequence of dates according to this rule.
-    /// 
-    /// # Arguments
-    /// 
-    /// * `count` - Maximum number of dates to generate
-    /// * `zone` - Time zone for date calculations
-    /// 
-    /// # Returns
-    /// 
-    /// A vector of CalendarDate instances matching the rule
     pub fn generate_dates(&self, count: usize, zone: CalClockZone) -> Outcome<Vec<CalendarDate>> {
         let max_count = self.max_occurrences
             .map(|max| max as usize)
@@ -203,7 +158,6 @@ impl CalendarRule {
         }
     }
     
-    /// Generates yearly recurrence dates (anniversary-style).
     fn generate_yearly_dates(&self, count: usize, start_date: &CalendarDate, zone: CalClockZone) -> Outcome<Vec<CalendarDate>> {
         let mut dates = Vec::new();
         let mut current_year = start_date.year();
@@ -235,7 +189,6 @@ impl CalendarRule {
         Ok(dates)
     }
     
-    /// Generates monthly recurrence dates with explicitly specified months.
     fn generate_explicit_monthly_dates(&self, count: usize, start_date: &CalendarDate, zone: CalClockZone) -> Outcome<Vec<CalendarDate>> {
         let explicit_months = ok!(self.explicit_months
             .as_ref()
@@ -289,7 +242,6 @@ impl CalendarRule {
         Ok(dates)
     }
     
-    /// Generates monthly recurrence dates with regular intervals.
     fn generate_regular_monthly_dates(&self, count: usize, start_date: &CalendarDate, zone: CalClockZone) -> Outcome<Vec<CalendarDate>> {
         let mut dates = Vec::new();
         let mut current_date = start_date.clone();
@@ -321,7 +273,6 @@ impl CalendarRule {
         Ok(dates)
     }
     
-    /// Generates daily recurrence dates with simple intervals.
     fn generate_daily_dates(&self, count: usize, start_date: &CalendarDate, _zone: CalClockZone) -> Outcome<Vec<CalendarDate>> {
         let mut dates = Vec::new();
         let mut current_date = start_date.clone();
@@ -346,7 +297,6 @@ impl CalendarRule {
         Ok(dates)
     }
     
-    /// Checks whether a date should be included based on holiday and business day rules.
     fn should_include_date(&self, date: &CalendarDate) -> bool {
         // Check advanced holiday engine first
         if let Some(ref engine) = self.holiday_engine {
@@ -379,7 +329,6 @@ impl CalendarRule {
 }
 
 impl HolidaySet {
-    /// Creates a new empty holiday set.
     pub fn new() -> Self {
         Self {
             holidays: HashSet::new(),
@@ -387,17 +336,14 @@ impl HolidaySet {
         }
     }
     
-    /// Adds a single holiday date.
     pub fn add_holiday(&mut self, date: CalendarDate) {
         self.holidays.insert(date);
     }
     
-    /// Adds a holiday interval (multi-day holiday).
     pub fn add_interval(&mut self, start: CalendarDate, end: CalendarDate, name: String) {
         self.intervals.push(HolidayInterval { start, end, name });
     }
     
-    /// Checks if a given date is a holiday.
     pub fn is_holiday(&self, date: &CalendarDate) -> bool {
         // Check single-day holidays
         if self.holidays.contains(date) {
@@ -414,7 +360,6 @@ impl HolidaySet {
         false
     }
     
-    /// Checks if a given date is a business day (weekday and not a holiday).
     pub fn is_business_day(&self, date: &CalendarDate) -> bool {
         // Must be a weekday
         if !date.is_weekday() {
@@ -425,7 +370,6 @@ impl HolidaySet {
         !self.is_holiday(date)
     }
     
-    /// Returns all holidays in the set as a vector.
     pub fn get_holidays(&self) -> Vec<CalendarDate> {
         let mut all_holidays = Vec::new();
         
@@ -458,32 +402,24 @@ impl Default for HolidaySet {
 
 // Convenience constructors for common rule patterns
 impl CalendarRule {
-    /// Creates a rule for annual recurrence (anniversary-style).
-    /// Example: Every year on the same date.
     pub fn annually(start_date: CalendarDate) -> Self {
         Self::new(RuleType::ByYears)
             .with_start_date(start_date)
             .with_interval(1)
     }
     
-    /// Creates a rule for quarterly recurrence (every 3 months).
-    /// Example: Every quarter starting from the start date.
     pub fn quarterly(start_date: CalendarDate) -> Self {
         Self::new(RuleType::ByRegularMonths)
             .with_start_date(start_date)
             .with_interval(3)
     }
     
-    /// Creates a rule for specific months each year.
-    /// Example: Every January, April, July, and October.
     pub fn monthly_explicit(start_date: CalendarDate, months: Vec<u8>) -> Self {
         Self::new(RuleType::ByExplicitMonths)
             .with_start_date(start_date)
             .with_months(months)
     }
     
-    /// Creates a rule for business day patterns.
-    /// Example: "2nd Tuesday of every quarter"
     pub fn business_day_pattern(start_date: CalendarDate, pattern: &str, months: Vec<u8>) -> Outcome<Self> {
         let rule = Self::new(RuleType::ByExplicitMonths)
             .with_start_date(start_date)
@@ -491,16 +427,13 @@ impl CalendarRule {
         rule.with_day_incrementor_string(pattern)
     }
     
-    /// Creates a rule for weekly recurrence.
-    /// Example: Every 2 weeks.
     pub fn weekly(start_date: CalendarDate, interval_weeks: u32) -> Self {
         Self::new(RuleType::ByDays)
             .with_start_date(start_date)
             .with_interval(interval_weeks * 7)
     }
     
-    /// Creates a rule for US federal business days.
-    /// Example: "2nd Tuesday of every quarter" excluding US federal holidays.
+    /// Excludes US federal holidays.
     pub fn us_business_pattern(start_date: CalendarDate, pattern: &str, months: Vec<u8>) -> Outcome<Self> {
         use crate::calendar::holiday_engines::HolidayEngine;
         use crate::calendar::business_day_engine::BusinessDayEngine;
@@ -517,8 +450,7 @@ impl CalendarRule {
         rule.with_day_incrementor_string(pattern)
     }
     
-    /// Creates a rule for UK business days.
-    /// Example: "Last Monday of every month" excluding UK holidays.
+    /// Excludes UK holidays.
     pub fn uk_business_pattern(start_date: CalendarDate, pattern: &str, months: Vec<u8>) -> Outcome<Self> {
         use crate::calendar::holiday_engines::HolidayEngine;
         use crate::calendar::business_day_engine::BusinessDayEngine;
@@ -535,8 +467,7 @@ impl CalendarRule {
         rule.with_day_incrementor_string(pattern)
     }
     
-    /// Creates a rule for ECB business days.
-    /// Example: "First business day of each month" excluding ECB holidays.
+    /// Excludes ECB holidays.
     pub fn ecb_business_pattern(start_date: CalendarDate, pattern: &str, months: Vec<u8>) -> Outcome<Self> {
         use crate::calendar::holiday_engines::HolidayEngine;
         use crate::calendar::business_day_engine::BusinessDayEngine;
@@ -553,8 +484,7 @@ impl CalendarRule {
         rule.with_day_incrementor_string(pattern)
     }
     
-    /// Creates a rule for Middle East business days (Sunday-Thursday).
-    /// Example: "2nd business day of every month" with Sunday-Thursday business week.
+    /// A Sunday to Thursday business week.
     pub fn middle_east_business_pattern(start_date: CalendarDate, pattern: &str, months: Vec<u8>) -> Outcome<Self> {
         use crate::calendar::business_day_engine::{BusinessDayEngine, BusinessWeek};
         

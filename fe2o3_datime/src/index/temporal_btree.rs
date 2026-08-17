@@ -1,8 +1,11 @@
-/// High-performance temporal B-tree for advanced time-based operations
-/// 
-/// This module provides a specialized B-tree structure optimized for temporal data,
-/// supporting efficient time-based range queries, temporal joins, and complex
-/// temporal operations with advanced indexing strategies.
+//! Temporal B-tree for time-based data.
+//!
+//! Entries are held in timestamp order with secondary indexes on category,
+//! recurrence, business day and priority, so a query filtered on any of those
+//! can start from the most selective index rather than scanning.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use crate::time::{CalClock, CalClockZone};
@@ -12,37 +15,25 @@ use std::{
     cmp::Ordering,
 };
 
-/// Entry in the temporal B-tree
 #[derive(Debug, Clone)]
 pub struct TemporalEntry<T> 
 where 
     T: Clone,
 {
-    /// Primary temporal key
-    pub timestamp: i64,
-    /// The actual time object
-    pub time: CalClock,
-    /// Associated data
-    pub data: T,
-    /// Secondary temporal attributes for advanced queries
+    pub timestamp:      i64,            // Unix milliseconds
+    pub time:           CalClock,
+    pub data:           T,
     pub temporal_attrs: TemporalAttributes,
 }
 
-/// Additional temporal attributes for sophisticated indexing
 #[derive(Debug, Clone)]
 pub struct TemporalAttributes {
-    /// Duration if this represents a time range (None for point-in-time)
-    pub duration_millis: Option<i64>,
-    /// Recurrence pattern identifier
-    pub recurrence_id: Option<String>,
-    /// Temporal category for grouping
-    pub category: Option<String>,
-    /// Business day marker
-    pub is_business_day: bool,
-    /// Holiday marker
-    pub is_holiday: bool,
-    /// Priority for temporal ordering
-    pub priority: u8,
+    pub duration_millis:    Option<i64>,    // None means a point in time
+    pub recurrence_id:      Option<String>,
+    pub category:           Option<String>,
+    pub is_business_day:    bool,
+    pub is_holiday:         bool,
+    pub priority:           u8,
 }
 
 impl Default for TemporalAttributes {
@@ -59,7 +50,6 @@ impl Default for TemporalAttributes {
 }
 
 impl<T: Clone> TemporalEntry<T> {
-    /// Creates a new temporal entry
     pub fn new(time: CalClock, data: T) -> Outcome<Self> {
         let timestamp = res!(time.to_millis());
         Ok(TemporalEntry {
@@ -70,7 +60,6 @@ impl<T: Clone> TemporalEntry<T> {
         })
     }
 
-    /// Creates a new entry with temporal attributes
     pub fn with_attributes(time: CalClock, data: T, attrs: TemporalAttributes) -> Outcome<Self> {
         let timestamp = res!(time.to_millis());
         Ok(TemporalEntry {
@@ -81,48 +70,41 @@ impl<T: Clone> TemporalEntry<T> {
         })
     }
 
-    /// Sets the duration for range-based entries
     pub fn with_duration(mut self, duration_millis: i64) -> Self {
         self.temporal_attrs.duration_millis = Some(duration_millis);
         self
     }
 
-    /// Sets the recurrence pattern
     pub fn with_recurrence(mut self, recurrence_id: String) -> Self {
         self.temporal_attrs.recurrence_id = Some(recurrence_id);
         self
     }
 
-    /// Sets the temporal category
     pub fn with_category(mut self, category: String) -> Self {
         self.temporal_attrs.category = Some(category);
         self
     }
 
-    /// Sets business day flag
     pub fn with_business_day(mut self, is_business_day: bool) -> Self {
         self.temporal_attrs.is_business_day = is_business_day;
         self
     }
 
-    /// Sets holiday flag
     pub fn with_holiday(mut self, is_holiday: bool) -> Self {
         self.temporal_attrs.is_holiday = is_holiday;
         self
     }
 
-    /// Sets priority
     pub fn with_priority(mut self, priority: u8) -> Self {
         self.temporal_attrs.priority = priority;
         self
     }
 
-    /// Gets the end timestamp if this entry has a duration
     pub fn end_timestamp(&self) -> Option<i64> {
         self.temporal_attrs.duration_millis.map(|d| self.timestamp + d)
     }
 
-    /// Checks if this entry overlaps with a time range
+    /// A point entry matches either bound, a range entry treats its own end as exclusive.
     pub fn overlaps_range(&self, start_ts: i64, end_ts: i64) -> bool {
         if let Some(end_timestamp) = self.end_timestamp() {
             // Range-based entry
@@ -134,39 +116,24 @@ impl<T: Clone> TemporalEntry<T> {
     }
 }
 
-/// Query parameters for temporal B-tree searches
 #[derive(Debug, Clone)]
 pub struct TemporalQuery {
-    /// Start time for range queries
-    pub start_time: Option<CalClock>,
-    /// End time for range queries
-    pub end_time: Option<CalClock>,
-    /// Filter by category
-    pub category_filter: Option<String>,
-    /// Filter by recurrence pattern
-    pub recurrence_filter: Option<String>,
-    /// Include only business days
+    pub start_time:         Option<CalClock>,
+    pub end_time:           Option<CalClock>,
+    pub category_filter:    Option<String>,
+    pub recurrence_filter:  Option<String>,
     pub business_days_only: bool,
-    /// Exclude holidays
-    pub exclude_holidays: bool,
-    /// Minimum priority level
-    pub min_priority: Option<u8>,
-    /// Maximum number of results
-    pub limit: Option<usize>,
-    /// Sort order
-    pub sort_order: SortOrder,
+    pub exclude_holidays:   bool,
+    pub min_priority:       Option<u8>,     // inclusive floor
+    pub limit:              Option<usize>,
+    pub sort_order:         SortOrder,
 }
 
-/// Sort order for query results
 #[derive(Debug, Clone, PartialEq)]
 pub enum SortOrder {
-    /// Sort by timestamp ascending (chronological)
-    TimeAscending,
-    /// Sort by timestamp descending (reverse chronological)
+    TimeAscending,      // chronological
     TimeDescending,
-    /// Sort by priority then timestamp
     PriorityThenTime,
-    /// Sort by category then timestamp
     CategoryThenTime,
 }
 
@@ -187,83 +154,69 @@ impl Default for TemporalQuery {
 }
 
 impl TemporalQuery {
-    /// Creates a new temporal query
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Sets the time range for the query
     pub fn time_range(mut self, start: CalClock, end: CalClock) -> Self {
         self.start_time = Some(start);
         self.end_time = Some(end);
         self
     }
 
-    /// Sets the category filter
     pub fn category(mut self, category: String) -> Self {
         self.category_filter = Some(category);
         self
     }
 
-    /// Sets the recurrence filter
     pub fn recurrence(mut self, recurrence_id: String) -> Self {
         self.recurrence_filter = Some(recurrence_id);
         self
     }
 
-    /// Filters to business days only
     pub fn business_days_only(mut self) -> Self {
         self.business_days_only = true;
         self
     }
 
-    /// Excludes holidays
     pub fn exclude_holidays(mut self) -> Self {
         self.exclude_holidays = true;
         self
     }
 
-    /// Sets minimum priority filter
     pub fn min_priority(mut self, priority: u8) -> Self {
         self.min_priority = Some(priority);
         self
     }
 
-    /// Limits the number of results
     pub fn limit(mut self, limit: usize) -> Self {
         self.limit = Some(limit);
         self
     }
 
-    /// Sets the sort order
     pub fn sort_by(mut self, order: SortOrder) -> Self {
         self.sort_order = order;
         self
     }
 }
 
-/// High-performance temporal B-tree for time-based data
 #[derive(Debug)]
 pub struct TemporalBTree<T: Clone> {
-    /// Primary timestamp-based tree
+    // The primary tree owns clones of the entries. Each secondary index is
+    // keyed by its attribute and then by timestamp, and holds positions into
+    // `all_entries`, so a query can pick whichever index narrows the search
+    // most and still come out in time order.
     primary_tree: BTreeMap<i64, Vec<TemporalEntry<T>>>,
-    /// Secondary index by category
     category_index: BTreeMap<String, BTreeMap<i64, Vec<usize>>>,
-    /// Secondary index by recurrence pattern
     recurrence_index: BTreeMap<String, BTreeMap<i64, Vec<usize>>>,
-    /// Business days index
     business_day_index: BTreeMap<i64, Vec<usize>>,
-    /// Priority index
     priority_index: BTreeMap<u8, BTreeMap<i64, Vec<usize>>>,
-    /// All entries for index mapping
     all_entries: Vec<TemporalEntry<T>>,
-    /// Time zone for operations
     #[allow(dead_code)]
     zone: CalClockZone,
 }
 
 impl<T: Clone> TemporalBTree<T> {
-    /// Creates a new temporal B-tree
     pub fn new(zone: CalClockZone) -> Self {
         TemporalBTree {
             primary_tree: BTreeMap::new(),
@@ -276,7 +229,7 @@ impl<T: Clone> TemporalBTree<T> {
         }
     }
 
-    /// Inserts a temporal entry into the B-tree
+    /// Returns the position of the new entry, which the secondary indexes use to refer to it.
     pub fn insert(&mut self, entry: TemporalEntry<T>) -> Outcome<usize> {
         let entry_index = self.all_entries.len();
         let timestamp = entry.timestamp;
@@ -296,7 +249,6 @@ impl<T: Clone> TemporalBTree<T> {
         Ok(entry_index)
     }
 
-    /// Adds entry to all secondary indexes
     fn add_to_secondary_indexes(&mut self, entry_index: usize, entry: &TemporalEntry<T>) {
         let timestamp = entry.timestamp;
 
@@ -337,7 +289,6 @@ impl<T: Clone> TemporalBTree<T> {
             .push(entry_index);
     }
 
-    /// Queries the temporal B-tree
     pub fn query(&self, query: &TemporalQuery) -> Outcome<Vec<&TemporalEntry<T>>> {
         let mut results = Vec::new();
 
@@ -375,7 +326,7 @@ impl<T: Clone> TemporalBTree<T> {
         Ok(results)
     }
 
-    /// Gets candidate entry indices based on the most selective index
+    /// Picks whichever index narrows the search most.
     fn get_candidate_indices(&self, query: &TemporalQuery, start_ts: i64, end_ts: i64) -> Outcome<Vec<usize>> {
         let mut candidates = Vec::new();
 
@@ -421,7 +372,6 @@ impl<T: Clone> TemporalBTree<T> {
         Ok(candidates)
     }
 
-    /// Checks if an entry matches the query criteria
     fn matches_query(&self, entry: &TemporalEntry<T>, query: &TemporalQuery, start_ts: i64, end_ts: i64) -> bool {
         // Time range check
         if !entry.overlaps_range(start_ts, end_ts) {
@@ -462,7 +412,6 @@ impl<T: Clone> TemporalBTree<T> {
         true
     }
 
-    /// Sorts results according to the specified order
     fn sort_results(&self, results: &mut Vec<&TemporalEntry<T>>, sort_order: &SortOrder) {
         match sort_order {
             SortOrder::TimeAscending => {
@@ -490,7 +439,7 @@ impl<T: Clone> TemporalBTree<T> {
         }
     }
 
-    /// Finds the nearest entry to a given time
+    /// Nearest in either direction.
     pub fn find_nearest(&self, target: &CalClock) -> Outcome<Option<&TemporalEntry<T>>> {
         let target_ts = res!(target.to_millis());
         
@@ -519,7 +468,6 @@ impl<T: Clone> TemporalBTree<T> {
         Ok(nearest)
     }
 
-    /// Gets entries within a specific duration from a target time
     pub fn find_within_duration(&self, target: &CalClock, duration_millis: i64) -> Outcome<Vec<&TemporalEntry<T>>> {
         let target_ts = res!(target.to_millis());
         let start_ts = target_ts - duration_millis;
@@ -534,7 +482,6 @@ impl<T: Clone> TemporalBTree<T> {
         Ok(results)
     }
 
-    /// Gets temporal statistics
     pub fn statistics(&self) -> TemporalStatistics {
         TemporalStatistics {
             total_entries: self.all_entries.len(),
@@ -546,18 +493,15 @@ impl<T: Clone> TemporalBTree<T> {
         }
     }
 
-    /// Gets the total number of entries
     pub fn len(&self) -> usize {
         self.all_entries.len()
     }
 
-    /// Checks if the tree is empty
     pub fn is_empty(&self) -> bool {
         self.all_entries.is_empty()
     }
 }
 
-/// Statistics about the temporal B-tree
 #[derive(Debug, Clone)]
 pub struct TemporalStatistics {
     pub total_entries: usize,

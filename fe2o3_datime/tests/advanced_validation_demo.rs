@@ -1,11 +1,15 @@
-/// Comprehensive demonstration of the advanced validation framework features.
-/// 
-/// This test showcases all the new advanced validation capabilities including:
-/// - Performance analytics and metrics
-/// - High-performance caching
-/// - Conditional validation rules
-/// - Parallel batch processing
-/// - Validation profiles and registry
+//! Comprehensive demonstration of the advanced validation framework features.
+//!
+//! This test showcases all the new advanced validation capabilities including:
+//! - Performance analytics and metrics
+//! - High-performance caching
+//! - Conditional validation rules
+//! - Parallel batch processing
+//! - Validation profiles and registry
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use oxedyne_fe2o3_datime::prelude::*;
 use oxedyne_fe2o3_core::prelude::*;
 

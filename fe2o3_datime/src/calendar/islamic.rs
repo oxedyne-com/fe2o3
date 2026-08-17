@@ -1,30 +1,24 @@
-/// Islamic (Hijri) calendar conversion algorithms.
-///
-/// This module provides accurate conversion algorithms between the Islamic
-/// calendar and the Gregorian calendar using established astronomical algorithms.
-/// The Islamic calendar is a lunar calendar with 12 months that can have either
-/// 29 or 30 days based on lunar observations.
+//! Islamic (Hijri) calendar conversion algorithms.
+//!
+//! This module provides accurate conversion algorithms between the Islamic
+//! calendar and the Gregorian calendar using established astronomical algorithms.
+//! The Islamic calendar is a lunar calendar with 12 months that can have either
+//! 29 or 30 days based on lunar observations.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 
-/// Islamic calendar conversion utilities.
-///
-/// The Islamic calendar epoch is July 16, 622 CE (Gregorian) / July 19, 622 CE (Julian).
-/// This corresponds to the first day of Muharram in the year 1 AH (Anno Hegirae).
+/// The epoch is 16 July 622 CE Gregorian, 19 July 622 CE Julian: the first day
+/// of Muharram in year 1 AH.
 pub struct IslamicCalendar;
 
 impl IslamicCalendar {
-    /// Islamic calendar epoch in Julian Day Number.
-    /// July 16, 622 CE Gregorian = JDN 1948439
+    // The Islamic epoch, 16 July 622 CE in the Gregorian calendar.
     const ISLAMIC_EPOCH_JDN: i64 = 1948439;
-    
-    /// Average length of Islamic year in days (354.367 days).
-    const ISLAMIC_YEAR_LENGTH: f64 = 354.36708;
-    
-    /// Average length of Islamic month in days (29.530589 days).
-    const ISLAMIC_MONTH_LENGTH: f64 = 29.530589;
-    
-    /// Islamic month names.
+    const ISLAMIC_YEAR_LENGTH: f64 = 354.36708; // mean days
+    const ISLAMIC_MONTH_LENGTH: f64 = 29.530589; // mean days
     const ISLAMIC_MONTHS: [&'static str; 12] = [
         "Muharram",      // 1
         "Safar",         // 2
@@ -40,19 +34,7 @@ impl IslamicCalendar {
         "Dhu al-Hijjah", // 12
     ];
     
-    /// Converts Gregorian date to Islamic date.
-    ///
-    /// This uses the algorithm from "Calendrical Calculations" by Reingold and Dershowitz.
-    ///
-    /// # Arguments
-    ///
-    /// * `gregorian_year` - Gregorian year
-    /// * `gregorian_month` - Gregorian month (1-12)
-    /// * `gregorian_day` - Gregorian day (1-31)
-    ///
-    /// # Returns
-    ///
-    /// Returns (islamic_year, islamic_month, islamic_day) tuple.
+    /// The algorithm from Calendrical Calculations, Reingold and Dershowitz.
     pub fn gregorian_to_islamic(gregorian_year: i32, gregorian_month: u8, gregorian_day: u8) -> Outcome<(i32, u8, u8)> {
         // Convert Gregorian date to Julian Day Number
         let jdn = res!(Self::gregorian_to_jdn(gregorian_year, gregorian_month, gregorian_day));
@@ -61,17 +43,6 @@ impl IslamicCalendar {
         Self::jdn_to_islamic(jdn)
     }
     
-    /// Converts Islamic date to Gregorian date.
-    ///
-    /// # Arguments
-    ///
-    /// * `islamic_year` - Islamic year (AH)
-    /// * `islamic_month` - Islamic month (1-12)
-    /// * `islamic_day` - Islamic day (1-30)
-    ///
-    /// # Returns
-    ///
-    /// Returns (gregorian_year, gregorian_month, gregorian_day) tuple.
     pub fn islamic_to_gregorian(islamic_year: i32, islamic_month: u8, islamic_day: u8) -> Outcome<(i32, u8, u8)> {
         // Convert Islamic date to Julian Day Number
         let jdn = res!(Self::islamic_to_jdn(islamic_year, islamic_month, islamic_day));
@@ -80,7 +51,6 @@ impl IslamicCalendar {
         Self::jdn_to_gregorian(jdn)
     }
     
-    /// Converts Islamic date to Julian Day Number.
     fn islamic_to_jdn(islamic_year: i32, islamic_month: u8, islamic_day: u8) -> Outcome<i64> {
         if islamic_month < 1 || islamic_month > 12 {
             return Err(err!("Islamic month must be between 1 and 12, got {}", islamic_month; Invalid, Input));
@@ -106,7 +76,6 @@ impl IslamicCalendar {
         Ok(Self::ISLAMIC_EPOCH_JDN + total_days)
     }
     
-    /// Converts Julian Day Number to Islamic date.
     fn jdn_to_islamic(jdn: i64) -> Outcome<(i32, u8, u8)> {
         // Days since Islamic epoch
         let days_since_epoch = jdn - Self::ISLAMIC_EPOCH_JDN;
@@ -174,20 +143,15 @@ impl IslamicCalendar {
         Ok((year, month, day))
     }
     
-    /// Returns the Julian Day Number for the start of an Islamic year.
     fn islamic_year_start_jdn(islamic_year: i32) -> Outcome<i64> {
         Self::islamic_to_jdn(islamic_year, 1, 1)
     }
     
-    /// Returns the Julian Day Number for the start of an Islamic month.
     fn islamic_month_start_jdn(islamic_year: i32, islamic_month: u8) -> Outcome<i64> {
         Self::islamic_to_jdn(islamic_year, islamic_month, 1)
     }
     
-    /// Returns the number of days in an Islamic month.
-    ///
-    /// Islamic months alternate between 30 and 29 days, with adjustments
-    /// for leap years in a 30-year cycle.
+    /// Months alternate 30 and 29 days, adjusted for leap years in the 30-year cycle.
     pub fn days_in_islamic_month(islamic_year: i32, islamic_month: u8) -> Outcome<u8> {
         if islamic_month < 1 || islamic_month > 12 {
             return Err(err!("Islamic month must be between 1 and 12, got {}", islamic_month; Invalid, Input));
@@ -213,16 +177,13 @@ impl IslamicCalendar {
         Ok(base_days)
     }
     
-    /// Determines if an Islamic year is a leap year.
-    ///
-    /// The Islamic calendar uses a 30-year cycle where 11 years are leap years.
-    /// Leap years in the cycle are: 2, 5, 7, 10, 13, 16, 18, 21, 24, 26, 29.
+    /// Eleven years of each 30-year cycle are leap years: 2, 5, 7, 10, 13, 16, 18, 21,
+    /// 24, 26 and 29.
     pub fn is_islamic_leap_year(islamic_year: i32) -> bool {
         let cycle_year = ((islamic_year - 1) % 30) + 1;
         matches!(cycle_year, 2 | 5 | 7 | 10 | 13 | 16 | 18 | 21 | 24 | 26 | 29)
     }
     
-    /// Returns the name of an Islamic month.
     pub fn islamic_month_name(islamic_month: u8) -> Outcome<&'static str> {
         if islamic_month < 1 || islamic_month > 12 {
             return Err(err!("Islamic month must be between 1 and 12, got {}", islamic_month; Invalid, Input));
@@ -231,7 +192,6 @@ impl IslamicCalendar {
         Ok(Self::ISLAMIC_MONTHS[(islamic_month - 1) as usize])
     }
     
-    /// Converts Gregorian date to Julian Day Number using the standard algorithm.
     fn gregorian_to_jdn(year: i32, month: u8, day: u8) -> Outcome<i64> {
         let m = month as i32;
         let (y, m) = if m <= 2 {
@@ -250,7 +210,6 @@ impl IslamicCalendar {
         Ok(jdn)
     }
     
-    /// Converts Julian Day Number to Gregorian date using the standard algorithm.
     fn jdn_to_gregorian(jdn: i64) -> Outcome<(i32, u8, u8)> {
         let a = jdn + 32044;
         let b = (4 * a + 3) / 146097;

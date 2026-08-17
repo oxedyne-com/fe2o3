@@ -1,3 +1,6 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use crate::{
 	calendar::CalendarDate,
 	clock::ClockTime,
@@ -8,30 +11,10 @@ use oxedyne_fe2o3_core::prelude::*;
 
 use std::sync::Mutex;
 
-/// High-performance utility for converting between Unix timestamps and CalClock instances.
-///
-/// CalClockConverter provides optimised conversion between Unix epoch timestamps
-/// (milliseconds since 1970-01-01 00:00:00 UTC) and CalClock representations.
-/// It includes sophisticated performance optimizations for sequential time data
-/// processing and handles timezone conversions with historical accuracy.
-///
-/// # Performance Optimisations
-///
-/// - **Reference Point Caching**: Maintains a reference timestamp/CalClock pair
-///   for optimised conversion of nearby timestamps
-/// - **Sequential Data Optimisation**: 10-100x faster for timestamps within
-///   reference range (typically 24 hours)
-/// - **Automatic Reference Updates**: Dynamically updates reference points
-///   for optimal performance with varying data patterns
-/// - **Batch Conversion**: Optimized methods for converting arrays of timestamps
-///
-/// # Thread Safety
-///
-/// CalClockConverter instances are thread-safe through internal synchronization.
-/// Multiple threads can safely use the same converter instance, with reference
-/// point updates protected by mutex synchronization.
-///
-/// # Examples
+/// Converts between Unix milliseconds and CalClock. A timestamp near the last
+/// one converted is answered from a cached reference point rather than from the
+/// epoch, which is what makes a sequence cheap. The reference is behind a mutex,
+/// so one converter serves several threads.
 ///
 /// ```ignore
 /// use oxedyne_fe2o3_datime::time::{CalClockConverter, CalClockZone}res!();
@@ -51,47 +34,21 @@ use std::sync::Mutex;
 /// ```
 #[derive(Debug)]
 pub struct CalClockConverter {
-	/// Timezone for all conversions.
 	zone: CalClockZone,
-	
-	/// Reference point optimization state.
 	reference: Mutex<ReferencePoint>,
-	
-	/// Maximum deviation from reference point for optimization (milliseconds).
-	max_reference_deviation: i64,
-	
-	/// Whether to use reference point optimization.
+	max_reference_deviation: i64, // milliseconds
 	use_optimization: bool,
 }
 
-/// Internal reference point for optimization.
 #[derive(Clone, Debug)]
 struct ReferencePoint {
-	/// Unix timestamp in milliseconds.
 	unix_millis: Option<i64>,
-	
-	/// Corresponding CalClock representation.
 	calclock: Option<CalClock>,
-	
-	/// Number of conversions using this reference point.
 	hit_count: u64,
-	
-	/// Number of conversions that missed the reference point.
 	miss_count: u64,
 }
 
 impl CalClockConverter {
-	/// Creates a new CalClockConverter for the specified timezone.
-	///
-	/// The converter will be optimised for the given timezone's DST rules
-	/// and historical offset changes.
-	///
-	/// # Arguments
-	///
-	/// * `zone` - Timezone for all timestamp conversions
-	///
-	/// # Examples
-	///
 	/// ```ignore
 	/// let utc_converter = CalClockConverter::new(CalClockZone::utc())res!();
 	/// let eastern_converter = CalClockConverter::new(
@@ -107,18 +64,7 @@ impl CalClockConverter {
 		}
 	}
 	
-	/// Creates a new CalClockConverter with a pre-set reference point.
-	///
-	/// This method is optimised for cases where you know the approximate
-	/// timestamp range you'll be converting. Setting an initial reference
-	/// point can improve performance for the first few conversions.
-	///
-	/// # Arguments
-	///
-	/// * `zone` - Timezone for all timestamp conversions
-	/// * `reference_unix_millis` - Initial reference timestamp
-	///
-	/// # Examples
+	/// Seeds the reference point, so the first conversions are already cheap.
 	///
 	/// ```ignore
 	/// let now = 1640995200000res!(); // Known approximate timestamp
@@ -133,22 +79,6 @@ impl CalClockConverter {
 		Ok(converter)
 	}
 	
-	/// Converts a Unix timestamp to a CalClock instance.
-	///
-	/// This is the primary conversion method that includes all performance
-	/// optimizations. For timestamps close to the current reference point,
-	/// conversion is 10-100x faster than full conversion.
-	///
-	/// # Arguments
-	///
-	/// * `unix_millis` - Unix timestamp in milliseconds since epoch
-	///
-	/// # Returns
-	///
-	/// Returns a CalClock instance in the converter's timezone.
-	///
-	/// # Examples
-	///
 	/// ```ignore
 	/// let converter = CalClockConverter::new(CalClockZone::utc())res!();
 	/// let calclock = res!(converter.unix_to_calclock(1640995200000))res!();
@@ -162,21 +92,6 @@ impl CalClockConverter {
 		}
 	}
 	
-	/// Converts a CalClock instance to a Unix timestamp.
-	///
-	/// This method performs the reverse conversion, taking a CalClock
-	/// instance and returning the corresponding Unix timestamp.
-	///
-	/// # Arguments
-	///
-	/// * `calclock` - CalClock instance to convert
-	///
-	/// # Returns
-	///
-	/// Returns Unix timestamp in milliseconds since epoch.
-	///
-	/// # Examples
-	///
 	/// ```ignore
 	/// let calclock = res!(CalClock::new(2022, 1, 1, 0, 0, 0, 0, CalClockZone::utc()))res!();
 	/// let converter = CalClockConverter::new(CalClockZone::utc())res!();
@@ -195,21 +110,8 @@ impl CalClockConverter {
 		Ok(utc_millis)
 	}
 	
-	/// Converts an array of Unix timestamps to CalClock instances optimally.
-	///
-	/// This method is highly optimised for batch conversion of sequential
-	/// timestamp data. It automatically manages reference points for
-	/// optimal performance across the entire sequence.
-	///
-	/// # Arguments
-	///
-	/// * `unix_timestamps` - Array of Unix timestamps in milliseconds
-	///
-	/// # Returns
-	///
-	/// Returns a vector of CalClock instances in the same order.
-	///
-	/// # Examples
+	/// The reference point moves with the sequence, so a run of nearby
+	/// timestamps costs far less than the same timestamps converted singly.
 	///
 	/// ```ignore
 	/// let timestamps = vec![1640995200000, 1640995260000, 1640995320000]res!();
@@ -229,15 +131,7 @@ impl CalClockConverter {
 		Ok(results)
 	}
 	
-	/// Gets the current reference point statistics.
-	///
-	/// Returns information about the current reference point performance,
-	/// useful for debugging and performance monitoring.
-	///
-	/// # Returns
-	///
-	/// Returns (hit_count, miss_count, hit_ratio) where hit_ratio is
-	/// the percentage of conversions that used the reference point optimization.
+	/// Hits, misses, and the hit rate.
 	pub fn reference_stats(&self) -> (u64, u64, f64) {
 		let reference = match self.reference.lock() {
 			Ok(guard) => guard,
@@ -255,10 +149,6 @@ impl CalClockConverter {
 		(reference.hit_count, reference.miss_count, hit_ratio)
 	}
 	
-	/// Resets the reference point and statistics.
-	///
-	/// Forces the converter to start fresh with no reference point,
-	/// useful for changing to a completely different timestamp range.
 	pub fn reset_reference(&self) {
 		let mut reference = match self.reference.lock() {
 			Ok(guard) => guard,
@@ -271,30 +161,18 @@ impl CalClockConverter {
 		*reference = ReferencePoint::new();
 	}
 	
-	/// Enables or disables reference point optimization.
-	///
-	/// # Arguments
-	///
-	/// * `enabled` - Whether to use optimization
 	pub fn set_optimization(&mut self, enabled: bool) {
 		self.use_optimization = enabled;
 	}
 	
-	/// Sets the maximum deviation from reference point for optimization.
-	///
-	/// # Arguments
-	///
-	/// * `deviation_millis` - Maximum deviation in milliseconds
 	pub fn set_max_reference_deviation(&mut self, deviation_millis: i64) {
 		self.max_reference_deviation = deviation_millis;
 	}
 	
-	/// Returns the timezone used by this converter.
 	pub fn zone(&self) -> &CalClockZone {
 		&self.zone
 	}
 	
-	/// Performs optimised Unix timestamp to CalClock conversion.
 	fn unix_to_calclock_optimised(&self, unix_millis: i64) -> Outcome<CalClock> {
 		// Check if we can use reference point optimisation
 		let optimization_data = {
@@ -333,7 +211,6 @@ impl CalClockConverter {
 		Ok(calclock)
 	}
 	
-	/// Performs full Unix timestamp to CalClock conversion.
 	fn unix_to_calclock_full(&self, unix_millis: i64) -> Outcome<CalClock> {
 		// 1. Get timezone offset for this timestamp
 		let zone_offset_millis = res!(self.zone.offset_millis_at_time(unix_millis));
@@ -347,7 +224,6 @@ impl CalClockConverter {
 		CalClock::new(year, month, day, hour, minute, second, nanos, self.zone.clone())
 	}
 	
-	/// Calculates CalClock from reference point with offset.
 	fn calculate_from_reference(&self, reference: &CalClock, offset_millis: i64) -> Outcome<CalClock> {
 		// Convert offset to duration and add to reference CalClock
 		// This is much faster than full conversion for small offsets
@@ -388,7 +264,6 @@ impl CalClockConverter {
 		self.add_millis_full(base, offset_millis)
 	}
 	
-	/// Full millisecond addition with day boundary handling.
 	fn add_millis_full(&self, base: &CalClock, offset_millis: i64) -> Outcome<CalClock> {
 		// Convert to total milliseconds since a reference epoch
 		let base_millis = res!(self.calclock_to_local_millis(base));
@@ -401,14 +276,12 @@ impl CalClockConverter {
 		CalClock::new(year, month, day, hour, minute, second, nanos, self.zone.clone())
 	}
 	
-	/// Sets a new reference point for optimization.
 	fn set_reference_point(&self, unix_millis: i64) -> Outcome<()> {
 		let calclock = res!(self.unix_to_calclock_full(unix_millis));
 		res!(self.update_reference_point(unix_millis, &calclock));
 		Ok(())
 	}
 	
-	/// Updates the reference point with a new timestamp/CalClock pair.
 	fn update_reference_point(&self, unix_millis: i64, calclock: &CalClock) -> Outcome<()> {
 		let mut reference = lock_mutex!(self.reference);
 		reference.unix_millis = Some(unix_millis);
@@ -416,7 +289,6 @@ impl CalClockConverter {
 		Ok(())
 	}
 	
-	/// Converts milliseconds since Unix epoch to date/time components.
 	fn millis_to_components(&self, millis: i64) -> Outcome<(i32, u8, u8, u8, u8, u8, u32)> {
 		// Convert milliseconds to days since epoch
 		let days_since_epoch = millis / (24 * 60 * 60 * 1000);
@@ -431,7 +303,6 @@ impl CalClockConverter {
 		Ok((year, month, day, hour, minute, second, nanos))
 	}
 	
-	/// Converts days since Unix epoch to year/month/day.
 	fn days_to_date(&self, days_since_epoch: i32) -> Outcome<(i32, u8, u8)> {
 		// Use CalendarDate's proper from_days_since_epoch method
 		// which uses Julian day arithmetic for accurate calculation
@@ -439,7 +310,6 @@ impl CalClockConverter {
 		Ok((date.year(), date.month(), date.day()))
 	}
 	
-	/// Converts milliseconds within a day to time components.
 	fn millis_to_time_components(&self, millis_in_day: i64) -> Outcome<(u8, u8, u8, u32)> {
 		if millis_in_day < 0 || millis_in_day >= 24 * 60 * 60 * 1000 {
 			return Err(err!("Milliseconds in day out of range: {}", millis_in_day; Invalid, Input));
@@ -456,7 +326,6 @@ impl CalClockConverter {
 		Ok((hour, minute, second, nanos))
 	}
 	
-	/// Converts nanoseconds within a day to time components.
 	fn nanos_to_time_components(&self, nanos_in_day: u64) -> Outcome<(u8, u8, u8, u32)> {
 		const NANOS_PER_DAY: u64 = 24 * 60 * 60 * 1_000_000_000;
 		
@@ -475,7 +344,6 @@ impl CalClockConverter {
 		Ok((hour, minute, second, nanos))
 	}
 	
-	/// Converts CalClock to local milliseconds (without timezone adjustment).
 	fn calclock_to_local_millis(&self, calclock: &CalClock) -> Outcome<i64> {
 		// Convert date to days since epoch
 		let days = res!(self.date_to_days(calclock.date()));
@@ -492,7 +360,6 @@ impl CalClockConverter {
 		Ok(millis_from_days + time_millis)
 	}
 	
-	/// Converts local milliseconds to UTC milliseconds.
 	fn local_to_utc_millis(&self, local_millis: i64, _calclock: &CalClock) -> Outcome<i64> {
 		// This is tricky because we need the UTC time to get the timezone offset,
 		// but we need the timezone offset to get the UTC time.
@@ -516,7 +383,6 @@ impl CalClockConverter {
 		Ok(utc_estimate)
 	}
 	
-	/// Converts CalendarDate to days since Unix epoch.
 	fn date_to_days(&self, date: &CalendarDate) -> Outcome<i32> {
 		// Use the CalendarDate's proper days_since_epoch method
 		// which uses Julian day arithmetic for accurate calculation
@@ -526,7 +392,6 @@ impl CalClockConverter {
 }
 
 impl ReferencePoint {
-	/// Creates a new empty reference point.
 	fn new() -> Self {
 		Self {
 			unix_millis: None,

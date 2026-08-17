@@ -1,3 +1,6 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use oxedyne_fe2o3_core::{
     prelude::*,
     test::test_it,
@@ -13,7 +16,6 @@ use oxedyne_fe2o3_datime::{
     },
 };
 
-/// Test comprehensive IANA TZif integration
 pub fn test_iana_integration(filter: &str) -> Outcome<()> {
     
     res!(test_it(filter, &["tzif_parser_creation", "all", "iana", "tzif"], || {

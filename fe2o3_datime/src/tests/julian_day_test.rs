@@ -1,3 +1,8 @@
+//! Julian day number conversion tests.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use crate::{
     calendar::CalendarDate,
     time::CalClockZone,

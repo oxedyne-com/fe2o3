@@ -1,8 +1,10 @@
-/// Performance optimisation caching infrastructure.
-///
-/// This module provides efficient caching mechanisms to improve performance
-/// across the fe2o3_datime library. It includes LRU caches for timezone
-/// calculations, string interning for format patterns, and result memoisation.
+//! Performance optimisation caching infrastructure.
+//!
+//! LRU caches for timezone calculations, string interning for format patterns,
+//! and result memoisation.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -16,10 +18,6 @@ pub mod lru;
 pub mod string_intern;
 pub mod timezone_cache;
 
-/// A thread-safe LRU cache implementation.
-///
-/// This cache provides O(1) access time for cached values and automatically
-/// evicts least recently used entries when capacity is exceeded.
 #[derive(Debug)]
 pub struct LruCache<K, V> 
 where 
@@ -34,14 +32,12 @@ where
 	K: Hash + Eq + Clone,
 	V: Clone,
 {
-	/// Creates a new LRU cache with the specified capacity.
 	pub fn new(capacity: usize) -> Self {
 		Self {
 			inner: Arc::new(RwLock::new(lru::LruCacheInner::new(capacity))),
 		}
 	}
 	
-	/// Gets a value from the cache if present.
 	pub fn get(&self, key: &K) -> Option<V> {
 		if let Ok(mut cache) = self.inner.write() {
 			cache.get(key)
@@ -50,14 +46,12 @@ where
 		}
 	}
 	
-	/// Inserts a value into the cache.
 	pub fn insert(&self, key: K, value: V) {
 		if let Ok(mut cache) = self.inner.write() {
 			cache.insert(key, value);
 		}
 	}
 	
-	/// Returns the current size of the cache.
 	pub fn len(&self) -> usize {
 		if let Ok(cache) = self.inner.read() {
 			cache.len()
@@ -66,19 +60,17 @@ where
 		}
 	}
 	
-	/// Returns true if the cache is empty.
 	pub fn is_empty(&self) -> bool {
 		self.len() == 0
 	}
 	
-	/// Clears all entries from the cache.
 	pub fn clear(&self) {
 		if let Ok(mut cache) = self.inner.write() {
 			cache.clear();
 		}
 	}
 	
-	/// Returns cache statistics (hits, misses, hit ratio).
+	/// Hits, misses and hit ratio, in that order.
 	pub fn stats(&self) -> (u64, u64, f64) {
 		if let Ok(cache) = self.inner.read() {
 			cache.stats()
@@ -100,24 +92,18 @@ where
 	}
 }
 
-/// A thread-safe string interning system.
-///
-/// String interning reduces memory usage and improves performance by
-/// ensuring that equal strings share the same memory allocation.
 #[derive(Debug, Clone)]
 pub struct StringInterner {
 	inner: Arc<RwLock<HashMap<String, Arc<String>>>>,
 }
 
 impl StringInterner {
-	/// Creates a new string interner.
 	pub fn new() -> Self {
 		Self {
 			inner: Arc::new(RwLock::new(HashMap::new())),
 		}
 	}
 	
-	/// Interns a string, returning a reference-counted handle.
 	pub fn intern(&self, s: &str) -> Arc<String> {
 		if let Ok(cache) = self.inner.read() {
 			if let Some(interned) = cache.get(s) {
@@ -141,7 +127,6 @@ impl StringInterner {
 		}
 	}
 	
-	/// Returns the number of interned strings.
 	pub fn len(&self) -> usize {
 		if let Ok(cache) = self.inner.read() {
 			cache.len()
@@ -150,12 +135,10 @@ impl StringInterner {
 		}
 	}
 	
-	/// Returns true if no strings are interned.
 	pub fn is_empty(&self) -> bool {
 		self.len() == 0
 	}
 	
-	/// Clears all interned strings.
 	pub fn clear(&self) {
 		if let Ok(mut cache) = self.inner.write() {
 			cache.clear();
@@ -169,10 +152,6 @@ impl Default for StringInterner {
 	}
 }
 
-/// A memoisation cache for expensive function results.
-///
-/// This cache stores the results of expensive computations to avoid
-/// recalculating them for the same inputs.
 #[derive(Debug)]
 pub struct MemoCache<K, V> 
 where 
@@ -189,7 +168,6 @@ where
 	K: Hash + Eq + Clone,
 	V: Clone,
 {
-	/// Creates a new memoisation cache with the specified capacity.
 	pub fn new(capacity: usize) -> Self {
 		Self {
 			cache: LruCache::new(capacity),
@@ -198,7 +176,6 @@ where
 		}
 	}
 	
-	/// Gets a cached result or computes it using the provided function.
 	pub fn get_or_compute<F>(&self, key: K, compute_fn: F) -> V 
 	where 
 		F: FnOnce() -> V,
@@ -220,7 +197,7 @@ where
 		}
 	}
 	
-	/// Returns cache statistics (hits, misses, hit ratio).
+	/// Hits, misses and hit ratio, in that order.
 	pub fn stats(&self) -> (u64, u64, f64) {
 		let hits = if let Ok(h) = self.hits.read() { *h } else { 0 };
 		let misses = if let Ok(m) = self.misses.read() { *m } else { 0 };
@@ -229,7 +206,6 @@ where
 		(hits, misses, hit_ratio)
 	}
 	
-	/// Clears the cache and resets statistics.
 	pub fn clear(&self) {
 		self.cache.clear();
 		if let Ok(mut hits) = self.hits.write() {

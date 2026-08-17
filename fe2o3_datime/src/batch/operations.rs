@@ -1,7 +1,10 @@
-/// Optimised batch operations for common date/time calculations.
-///
-/// This module provides vectorised and optimised implementations of
-/// frequently used date/time operations for improved performance.
+//! Optimised batch operations for common date/time calculations.
+//!
+//! Vectorised implementations of the date/time operations that are called
+//! most often.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::{
     calendar::CalendarDate,
@@ -11,14 +14,9 @@ use crate::{
 
 use oxedyne_fe2o3_core::prelude::*;
 
-/// Efficient batch operations for date arithmetic.
 pub struct DateArithmetic;
 
 impl DateArithmetic {
-    /// Adds the same number of days to multiple dates efficiently.
-    ///
-    /// This uses optimised algorithms that can share calculations
-    /// across multiple dates when possible.
     pub fn add_days_batch(dates: &[CalendarDate], days: i32) -> Outcome<Vec<CalendarDate>> {
         let mut results = Vec::with_capacity(dates.len());
         
@@ -30,9 +28,6 @@ impl DateArithmetic {
         Ok(results)
     }
     
-    /// Calculates the day of year for multiple dates efficiently.
-    ///
-    /// This method can optimise calculations for dates in the same year.
     pub fn day_of_year_batch(dates: &[CalendarDate]) -> Outcome<Vec<u16>> {
         let mut results = Vec::with_capacity(dates.len());
         let mut cached_year: Option<(i32, bool)> = None; // (year, is_leap)
@@ -60,10 +55,7 @@ impl DateArithmetic {
         Ok(results)
     }
     
-    /// Calculates the week of year for multiple dates efficiently.
-    ///
-    /// This method optimises ISO 8601 week calculations by sharing
-    /// year-specific calculations when possible.
+    /// ISO 8601 week numbering.
     pub fn week_of_year_batch(dates: &[CalendarDate]) -> Outcome<Vec<u8>> {
         let mut results = Vec::with_capacity(dates.len());
         
@@ -75,10 +67,6 @@ impl DateArithmetic {
         Ok(results)
     }
     
-    /// Finds all dates within a specific month efficiently.
-    ///
-    /// This method filters dates to find all instances within
-    /// a specified year and month.
     pub fn filter_by_month(dates: &[CalendarDate], year: i32, month: MonthOfYear) -> Vec<CalendarDate> {
         dates.iter()
             .filter(|date| date.year() == year && date.month_of_year() == month)
@@ -86,10 +74,8 @@ impl DateArithmetic {
             .collect()
     }
     
-    /// Calculates business days between pairs of dates efficiently.
-    ///
-    /// This method calculates business days (excluding weekends) between
-    /// multiple pairs of dates with shared weekend calculations.
+    /// Weekends are excluded but holidays are not, and a start on or after
+    /// the end gives zero.
     pub fn business_days_between_batch(pairs: &[(CalendarDate, CalendarDate)]) -> Outcome<Vec<i32>> {
         let mut results = Vec::with_capacity(pairs.len());
         
@@ -101,7 +87,6 @@ impl DateArithmetic {
         Ok(results)
     }
     
-    /// Helper method to calculate business days between two dates.
     fn calculate_business_days(start_date: &CalendarDate, end_date: &CalendarDate) -> Outcome<i32> {
         let start_day_num = res!(start_date.to_day_number());
         let end_day_num = res!(end_date.to_day_number());
@@ -129,7 +114,6 @@ impl DateArithmetic {
         Ok(business_days)
     }
     
-    /// Helper method to advance day of week by a number of days.
     fn advance_day_of_week(start: DayOfWeek, days: i32) -> DayOfWeek {
         let start_num = match start {
             DayOfWeek::Monday => 0,
@@ -155,14 +139,9 @@ impl DateArithmetic {
     }
 }
 
-/// Efficient batch operations for time arithmetic.
 pub struct TimeArithmetic;
 
 impl TimeArithmetic {
-    /// Adds the same duration to multiple CalClock instances efficiently.
-    ///
-    /// This method optimises duration arithmetic by sharing calculations
-    /// when possible, especially for same-timezone operations.
     pub fn add_duration_batch(calclocks: &[CalClock], duration: &CalClockDuration) -> Outcome<Vec<CalClock>> {
         let mut results = Vec::with_capacity(calclocks.len());
         
@@ -185,10 +164,6 @@ impl TimeArithmetic {
         Ok(results)
     }
     
-    /// Converts multiple timestamps to CalClock instances efficiently.
-    ///
-    /// This method optimises timestamp conversion by sharing timezone
-    /// calculations when multiple timestamps use the same timezone.
     pub fn from_timestamps_batch(timestamps: &[i64], zone: &CalClockZone) -> Outcome<Vec<CalClock>> {
         let mut results = Vec::with_capacity(timestamps.len());
         
@@ -200,10 +175,6 @@ impl TimeArithmetic {
         Ok(results)
     }
     
-    /// Calculates time differences between pairs efficiently.
-    ///
-    /// This method calculates durations between multiple pairs of CalClock
-    /// instances with optimised difference calculations.
     pub fn duration_between_batch(pairs: &[(CalClock, CalClock)]) -> Outcome<Vec<CalClockDuration>> {
         let mut results = Vec::with_capacity(pairs.len());
         
@@ -215,10 +186,7 @@ impl TimeArithmetic {
         Ok(results)
     }
     
-    /// Rounds multiple times to the nearest interval efficiently.
-    ///
-    /// This method rounds CalClock instances to the nearest specified
-    /// interval (e.g., nearest 15 minutes) with shared calculations.
+    /// An exact half interval rounds up.
     pub fn round_to_interval_batch(calclocks: &[CalClock], interval_minutes: u32) -> Outcome<Vec<CalClock>> {
         let mut results = Vec::with_capacity(calclocks.len());
         let interval_millis = interval_minutes as i64 * 60 * 1000;
@@ -243,14 +211,9 @@ impl TimeArithmetic {
     }
 }
 
-/// Efficient batch operations for comparisons and sorting.
 pub struct ComparisonOps;
 
 impl ComparisonOps {
-    /// Sorts multiple CalClock instances efficiently.
-    ///
-    /// This method sorts CalClock instances by converting to timestamps
-    /// for faster comparison.
     pub fn sort_calclocks(calclocks: Vec<CalClock>) -> Outcome<Vec<CalClock>> {
         // Create vector of (timestamp, original_index) for stable sorting
         let mut indexed_timestamps: Vec<(i64, usize)> = Vec::with_capacity(calclocks.len());
@@ -272,10 +235,6 @@ impl ComparisonOps {
         Ok(sorted_calclocks)
     }
     
-    /// Finds the minimum and maximum CalClock in a batch efficiently.
-    ///
-    /// This method finds the earliest and latest CalClock instances
-    /// with optimised comparison.
     pub fn min_max_calclocks(calclocks: &[CalClock]) -> Outcome<Option<(CalClock, CalClock)>> {
         if calclocks.is_empty() {
             return Ok(None);
@@ -303,10 +262,6 @@ impl ComparisonOps {
         Ok(Some((min_calclock.clone(), max_calclock.clone())))
     }
     
-    /// Filters CalClock instances by time range efficiently.
-    ///
-    /// This method filters CalClock instances to find all instances
-    /// within a specified time range with optimised range checking.
     pub fn filter_by_time_range(calclocks: &[CalClock], start: &CalClock, end: &CalClock) -> Outcome<Vec<CalClock>> {
         let start_timestamp = res!(start.to_millis());
         let end_timestamp = res!(end.to_millis());

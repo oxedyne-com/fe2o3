@@ -1,3 +1,12 @@
+//! Database storage and retrieval for the datetime types.
+//!
+//! Several storage formats are offered because their strengths differ: binary
+//! for time-ordered queries, ISO 8601 for readability, components for partial
+//! queries, and Unix timestamps for existing systems.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use crate::{
     time::{CalClock, CalClockZone},
     clock::ClockTime,
@@ -9,48 +18,26 @@ use oxedyne_fe2o3_jdat::{prelude::*, tup2dat};
 
 use std::collections::{HashMap, BTreeMap};
 
-/// Represents different storage formats optimised for database usage.
 #[derive(Clone, Debug, PartialEq)]
 pub enum StorageFormat {
-    /// Binary format: Most efficient for storage and time-based queries
-    /// CalClock: (nanoseconds_since_epoch: i64, timezone: String)
-    /// ClockTime: (nanoseconds_of_day: u64, timezone: String)
-    /// CalendarDate: (julian_day_number: i64, timezone: String)
+    // Each variant pairs its value with the timezone id. Binary counts
+    // nanoseconds: since the epoch for a CalClock, within the day for a
+    // ClockTime, and as a Julian day number for a CalendarDate.
     Binary,
-    
-    /// ISO 8601 string format: Human-readable and standard-compliant
-    /// CalClock: "2024-06-15T14:30:00.123456789Z"
-    /// ClockTime: "14:30:00.123456789"
-    /// CalendarDate: "2024-06-15"
-    Iso8601,
-    
-    /// Component format: Optimal for partial queries and calendar operations
-    /// Stores individual year, month, day, hour, minute, second, nanosecond
-    Component,
-    
-    /// Unix timestamp: Compatible with existing systems
-    /// Millisecond precision for compatibility
-    UnixTimestamp,
+    Iso8601,        // "2024-06-15T14:30:00.123456789Z"
+    Component,      // year, month, day, hour, minute, second, nanosecond apart
+    UnixTimestamp,  // milliseconds
 }
 
-/// Database record containing datetime data in various formats.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DatabaseRecord {
-    /// Primary storage data (format depends on storage_format)
-    pub primary_data: Dat,
-    
-    /// Storage format used for primary_data
+    pub primary_data:   Dat,                        // shape set by storage_format
     pub storage_format: StorageFormat,
-    
-    /// Secondary indexes for query optimization
-    pub indexes: HashMap<String, Dat>,
-    
-    /// Metadata about the record
-    pub metadata: HashMap<String, String>,
+    pub indexes:        HashMap<String, Dat>,       // secondary
+    pub metadata:       HashMap<String, String>,
 }
 
 impl DatabaseRecord {
-    /// Creates a new database record with the specified format.
     pub fn new(primary_data: Dat, storage_format: StorageFormat) -> Self {
         Self {
             primary_data,
@@ -60,41 +47,32 @@ impl DatabaseRecord {
         }
     }
     
-    /// Adds an index entry for query optimization.
     pub fn add_index(&mut self, key: &str, value: Dat) {
         self.indexes.insert(key.to_string(), value);
     }
     
-    /// Adds metadata to the record.
     pub fn add_metadata(&mut self, key: &str, value: &str) {
         self.metadata.insert(key.to_string(), value.to_string());
     }
     
-    /// Gets an index value by key.
     pub fn get_index(&self, key: &str) -> Option<&Dat> {
         self.indexes.get(key)
     }
     
-    /// Gets metadata by key.
     pub fn get_metadata(&self, key: &str) -> Option<&String> {
         self.metadata.get(key)
     }
 }
 
-/// Trait for types that can be stored in and retrieved from databases.
 pub trait DatabaseStorable {
-    /// Converts to a database record using the specified storage format.
     fn to_database_record(&self, format: StorageFormat) -> Outcome<DatabaseRecord>;
     
-    /// Creates an instance from a database record.
     fn from_database_record(record: &DatabaseRecord) -> Outcome<Self>
     where
         Self: Sized;
     
-    /// Returns the recommended storage format for this type.
     fn recommended_storage_format() -> StorageFormat;
     
-    /// Creates query indexes for efficient database operations.
     fn create_indexes(&self) -> HashMap<String, Dat>;
 }
 

@@ -1,3 +1,6 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use crate::{
     time::tzif::{TZifData, TZifParser, LocalTimeResult},
 };
@@ -12,29 +15,9 @@ use std::{
 	sync::OnceLock,
 };
 
-/// Represents a time zone with historical DST support and offset calculations.
-///
-/// CalClockZone provides comprehensive time zone functionality including:
-/// - Historical timezone offset calculations with DST support
-/// - Time zone conversions between arbitrary zones
-/// - Integration with system timezone detection
-/// - Support for both fixed offset and rule-based timezones
-///
-/// # Design Philosophy
-///
-/// This implementation follows the fe2o3 principle of minimal external dependencies
-/// whilst providing sophisticated timezone functionality. It includes a built-in
-/// timezone database for major timezones and DST rules, avoiding dependency on
-/// external timezone libraries.
-///
-/// # Time Zone Types
-///
-/// - **UTC/GMT**: Coordinated Universal Time with zero offset
-/// - **Fixed Offset**: Timezones with constant offset from UTC
-/// - **DST Zones**: Timezones with daylight saving time transitions
-/// - **System Local**: Detected from system settings
-///
-/// # Examples
+/// A zone is UTC, a fixed offset, or a set of DST rules. The rules for the
+/// major zones are embedded rather than taken from a timezone crate, with the
+/// host's own zoneinfo tree as the fallback for everything else.
 ///
 /// ```ignore
 /// use oxedyne_fe2o3_datime::time::CalClockZoneres!();
@@ -55,65 +38,44 @@ pub struct CalClockZone {
 	tzif_data: Option<TZifData>,
 }
 
-/// Internal timezone data structure.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 enum TimezoneData {
-	/// UTC/GMT timezone (zero offset).
 	Utc,
-	/// Fixed offset timezone in seconds from UTC.
-	Fixed(i32),
-	/// Rule-based timezone with DST transitions.
+	Fixed(i32), // seconds east of UTC
 	RuleBased {
-		base_offset: i32,
+		base_offset: i32, // seconds east of UTC, before DST
 		dst_rules: Vec<DstRule>,
 	},
-	/// System local timezone (platform-dependent).
 	#[allow(dead_code)]
 	Local,
 }
 
-/// Daylight Saving Time rule definition.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct DstRule {
-	/// Year when this rule starts applying.
 	start_year: i32,
-	/// Year when this rule stops applying (None = ongoing).
-	end_year: Option<i32>,
-	/// DST start specification.
+	end_year: Option<i32>, // None while the rule is still in force
 	dst_start: DstTransition,
-	/// DST end specification.
 	dst_end: DstTransition,
-	/// Additional offset during DST (typically 3600 seconds).
-	dst_offset: i32,
+	dst_offset: i32, // seconds, usually 3600
 }
 
-/// DST transition specification.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct DstTransition {
-	/// Month of transition (1-12).
-	month: u8,
-	/// Day specification.
+	month: u8, // 1-12
 	day_spec: DaySpec,
-	/// Hour of transition (0-23).
-	hour: u8,
+	hour: u8, // 0-23
 }
 
-/// Day specification for DST transitions.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 enum DaySpec {
-	/// Specific day of month.
 	#[allow(dead_code)]
-	Day(u8),
-	/// Last occurrence of weekday in month.
+	Day(u8), // day of month
 	LastWeekday(u8), // 0=Sunday, 1=Monday, etc.
-	/// First occurrence of weekday on or after day.
 	WeekdayOnOrAfter { weekday: u8, day: u8 },
 }
 
-/// Static timezone database.
 static TIMEZONE_DB: OnceLock<HashMap<String, TimezoneData>> = OnceLock::new();
 
-/// Initialises the built-in timezone database.
 fn init_timezone_db() -> HashMap<String, TimezoneData> {
 	let mut db = HashMap::new();
 	
@@ -199,34 +161,14 @@ fn init_timezone_db() -> HashMap<String, TimezoneData> {
 	db
 }
 
-/// Gets the timezone database, initialising it if necessary.
 fn get_timezone_db() -> &'static HashMap<String, TimezoneData> {
 	TIMEZONE_DB.get_or_init(init_timezone_db)
 }
 
 impl CalClockZone {
-	/// Creates a new CalClockZone with the specified identifier.
-	///
-	/// This method attempts to resolve the timezone identifier using the built-in
-	/// timezone database. If the identifier is not recognised, it attempts to
-	/// parse it as a fixed offset (e.g., "GMT+5", "UTC-3").
-	///
-	/// # Arguments
-	///
-	/// * `zone_id` - String identifier for the timezone
-	///
-	/// # Supported Formats
-	///
-	/// - Standard identifiers: "UTC", "GMT", "America/New_York", "Europe/London"
-	/// - Fixed offsets: "GMT+5", "GMT-3", "UTC+2"
-	/// - Numeric offsets: "+0500", "-0300"
-	///
-	/// # Returns
-	///
-	/// Returns `Ok(CalClockZone)` if the identifier is valid, otherwise returns
-	/// an error describing why the timezone could not be created.
-	///
-	/// # Examples
+	/// Accepts a standard identifier, a named offset such as "GMT+5", or a
+	/// numeric one such as "+0530". An unrecognised name resolves to UTC rather
+	/// than failing, which is what the Java original does.
 	///
 	/// ```ignore
 	/// let utc = res!(CalClockZone::new("UTC"))res!();
@@ -276,10 +218,6 @@ impl CalClockZone {
 		})
 	}
 	
-	/// Creates a CalClockZone representing Coordinated Universal Time (UTC).
-	///
-	/// This is a convenience method for creating the most commonly used timezone.
-	/// UTC has zero offset and no daylight saving time transitions.
 	pub fn utc() -> Self {
 		Self {
 			id: "UTC".to_string(),
@@ -288,9 +226,7 @@ impl CalClockZone {
 		}
 	}
 	
-	/// Creates a CalClockZone representing Greenwich Mean Time (GMT).
-	///
-	/// GMT is functionally equivalent to UTC in this implementation.
+	/// GMT is held as UTC here: zero offset, no transitions.
 	pub fn gmt() -> Self {
 		Self {
 			id: "GMT".to_string(),
@@ -299,13 +235,8 @@ impl CalClockZone {
 		}
 	}
 
-	/// Creates a CalClockZone using only embedded timezone data, bypassing system integration.
-	///
-	/// This method forces the use of embedded timezone data and will not attempt to
-	/// load from system timezone databases. This is useful for:
-	/// - Security-conscious applications that want deterministic behaviour
-	/// - Testing with known timezone data
-	/// - Applications that don't want to depend on system timezone data
+	/// As new, but never consults the system timezone database, so the result
+	/// does not vary with the host.
 	pub fn new_embedded<S: Into<String>>(zone_id: S) -> Outcome<Self> {
 		let id = zone_id.into();
 		
@@ -343,17 +274,8 @@ impl CalClockZone {
 		})
 	}
 	
-	/// Creates a CalClockZone representing the system's local timezone.
-	///
-	/// This method attempts to detect the system's local timezone using
-	/// platform-specific mechanisms. On Unix systems, it reads the TZ
-	/// environment variable or /etc/localtime. On Windows, it uses system APIs.
-	///
-	/// # Returns
-	///
-	/// Returns the detected local timezone, or UTC if detection fails.
-	///
-	/// # Examples
+	/// The host's own zone, read from TZ, /etc/localtime or /etc/timezone, and
+	/// UTC when none of them answer.
 	///
 	/// ```ignore
 	/// let local = CalClockZone::here()res!();
@@ -369,27 +291,10 @@ impl CalClockZone {
 		Self::utc()
 	}
 	
-	/// Alias for here() - creates a CalClockZone representing the system's local timezone.
-	///
-	/// This provides API compatibility with systems that expect a `local()` method.
 	pub fn local() -> Self {
 		Self::here()
 	}
 
-	/// Creates a CalClockZone from parsed TZif data.
-	///
-	/// This method creates a timezone using IANA TZif format data, providing
-	/// full historical accuracy and DST transition support.
-	///
-	/// # Arguments
-	///
-	/// * `zone_id` - String identifier for the timezone
-	/// * `tzif_data` - Parsed TZif timezone data
-	///
-	/// # Returns
-	///
-	/// Returns a CalClockZone that uses the TZif data for accurate timezone
-	/// calculations including historical transitions and DST rules.
 	pub fn from_tzif_data<S: Into<String>>(zone_id: S, tzif_data: TZifData) -> Outcome<Self> {
 		let id = zone_id.into();
 		
@@ -415,29 +320,12 @@ impl CalClockZone {
 		})
 	}
 	
-	/// Returns the string identifier for this timezone.
 	pub fn id(&self) -> &str {
 		&self.id
 	}
 	
-	/// Returns the offset from UTC in milliseconds for a given UTC timestamp.
-	///
-	/// This method provides historical accuracy by calculating the exact offset
-	/// at the specified time, including daylight saving time transitions.
-	///
-	/// For better performance, consider using `offset_millis_at_time_cached()` from
-	/// the `CalClockZoneCached` trait which provides automatic caching.
-	///
-	/// # Arguments
-	///
-	/// * `utc_millis` - UTC timestamp in milliseconds since Unix epoch
-	///
-	/// # Returns
-	///
-	/// Returns the offset in milliseconds east of UTC. Positive values indicate
-	/// timezones ahead of UTC, negative values indicate timezones behind UTC.
-	///
-	/// # Examples
+	/// Milliseconds east of UTC at that instant, so the DST rules in force then
+	/// are the ones applied. `CalClockZoneCached` has a caching form.
 	///
 	/// ```ignore
 	/// let eastern = res!(CalClockZone::new("America/New_York"))res!();
@@ -475,15 +363,8 @@ impl CalClockZone {
 		}
 	}
 	
-	/// Returns the raw timezone offset in milliseconds (without DST).
-	///
-	/// This method returns the base timezone offset without considering
-	/// daylight saving time transitions. It's equivalent to the Java
-	/// TimeZone.getRawOffset() method.
-	///
-	/// # Returns
-	///
-	/// Returns the raw offset in milliseconds east of UTC.
+	/// Milliseconds east of UTC ignoring any DST in force, as Java's
+	/// TimeZone.getRawOffset does.
 	pub fn raw_offset_millis(&self) -> i32 {
 		match &self.zone_data {
 			TimezoneData::Utc => 0,
@@ -493,33 +374,11 @@ impl CalClockZone {
 		}
 	}
 	
-	/// Returns the offset from UTC in seconds for compatibility.
-	///
-	/// This method provides compatibility with the existing API whilst
-	/// maintaining millisecond precision internally.
-	///
-	/// # Arguments
-	///
-	/// * `timestamp_secs` - Unix timestamp in seconds
-	///
-	/// # Returns
-	///
-	/// Returns the offset in seconds east of UTC.
 	pub fn offset_seconds(&self, timestamp_secs: i64) -> Outcome<i32> {
 		let offset_millis = res!(self.offset_millis_at_time(timestamp_secs * 1000));
 		Ok(offset_millis / 1000)
 	}
 	
-	/// Determines if the timezone is in daylight saving time at the given timestamp.
-	///
-	/// # Arguments
-	///
-	/// * `utc_millis` - UTC timestamp in milliseconds
-	///
-	/// # Returns
-	///
-	/// Returns `true` if the timezone is observing daylight saving time
-	/// at the specified time, `false` otherwise.
 	pub fn in_daylight_time(&self, utc_millis: i64) -> Outcome<bool> {
 		// Use TZif data if available for accurate DST detection
 		if let Some(ref tzif_data) = self.tzif_data {
@@ -538,20 +397,8 @@ impl CalClockZone {
 		}
 	}
 	
-	/// Converts UTC time to local time, handling DST transition ambiguity.
-	///
-	/// This method provides comprehensive DST transition handling:
-	/// - Single: Unambiguous conversion
-	/// - Ambiguous: During "fall back" when clocks go backward (returns both times)
-	/// - None: During "spring forward" when clocks skip ahead
-	///
-	/// # Arguments
-	///
-	/// * `utc_millis` - UTC timestamp in milliseconds
-	///
-	/// # Returns
-	///
-	/// Returns a LocalTimeResult indicating the conversion outcome.
+	/// Ambiguous covers the autumn fold, where the local time is reached twice
+	/// and both are returned; None the spring gap, where it is never reached.
 	pub fn utc_to_local(&self, utc_millis: i64) -> LocalTimeResult<i64> {
 		if let Some(ref tzif_data) = self.tzif_data {
 			let utc_seconds = utc_millis / 1000;
@@ -573,20 +420,8 @@ impl CalClockZone {
 		}
 	}
 
-	/// Converts local time to UTC, handling DST transition ambiguity.
-	///
-	/// This method handles the complexities of local time conversion:
-	/// - Single: Unambiguous conversion
-	/// - Ambiguous: During "fall back" when local time occurs twice
-	/// - None: During "spring forward" when local time doesn't exist
-	///
-	/// # Arguments
-	///
-	/// * `local_millis` - Local timestamp in milliseconds
-	///
-	/// # Returns
-	///
-	/// Returns a LocalTimeResult indicating the conversion outcome.
+	/// The inverse of utc_to_local, and ambiguous or absent over the same two
+	/// transitions.
 	pub fn local_to_utc(&self, local_millis: i64) -> LocalTimeResult<i64> {
 		if let Some(ref tzif_data) = self.tzif_data {
 			let local_seconds = local_millis / 1000;
@@ -609,23 +444,15 @@ impl CalClockZone {
 		}
 	}
 
-	/// Returns the TZif data if this zone was created from IANA data.
-	///
-	/// This provides access to the underlying TZif timezone data for
-	/// applications that need detailed timezone information.
+	/// None unless the zone came from IANA data.
 	pub fn tzif_data(&self) -> Option<&TZifData> {
 		self.tzif_data.as_ref()
 	}
 
-	/// Returns the long display name for this timezone.
-	///
-	/// This provides a human-readable description of the timezone,
-	/// equivalent to Java's TimeZone.getDisplayName().
 	pub fn display_name(&self) -> &str {
 		&self.id
 	}
 
-	/// Parses a fixed offset string like "GMT+5" or "+0500".
 	fn parse_fixed_offset(offset_str: &str) -> Outcome<i32> {
 		// Handle GMT+N or GMT-N format
 		if let Some(offset_part) = offset_str.strip_prefix("GMT") {
@@ -645,7 +472,6 @@ impl CalClockZone {
 		Err(err!("Invalid offset format: {}", offset_str; Invalid, Input))
 	}
 	
-	/// Parses the numeric part of an offset string.
 	fn parse_offset_value(offset_str: &str) -> Outcome<i32> {
 		if offset_str.is_empty() {
 			return Ok(0);
@@ -678,7 +504,6 @@ impl CalClockZone {
 		Ok(sign * offset_seconds)
 	}
 	
-	/// Detects the system timezone using platform-specific methods.
 	fn detect_system_timezone() -> Outcome<Self> {
 		// TZ first, as POSIX says: an optional leading colon, then either a
 		// zone name or a path to a TZif file.
@@ -729,7 +554,6 @@ impl CalClockZone {
 		Err(err!("Could not detect system timezone"; System))
 	}
 
-	/// Builds a zone from a TZif file on disk, carrying the file's rules.
 	fn from_tzif_file(id: &str, path: &Path) -> Outcome<Self> {
 		let mut parser = TZifParser::new();
 		res!(parser.load_from_file(path));
@@ -741,8 +565,6 @@ impl CalClockZone {
 		}
 	}
 
-	/// Resolves a zone name through the system zoneinfo tree, where there is
-	/// one.
 	fn from_zoneinfo_name(name: &str) -> Outcome<Self> {
 		// The name may have come from the environment; keep it inside the
 		// tree.
@@ -783,7 +605,6 @@ impl CalClockZone {
 		}
 	}
 	
-	/// Calculates DST offset at a specific time.
 	fn dst_offset_at_time(&self, utc_millis: i64, dst_rules: &[DstRule]) -> Outcome<Option<i32>> {
 		// Convert UTC milliseconds to a date for rule evaluation
 		let utc_date = res!(self.millis_to_date(utc_millis));
@@ -810,7 +631,6 @@ impl CalClockZone {
 		}
 	}
 	
-	/// Converts UTC milliseconds to a simplified date structure.
 	fn millis_to_date(&self, utc_millis: i64) -> Outcome<SimpleDate> {
 		// Convert milliseconds to seconds
 		let seconds = utc_millis / 1000;
@@ -844,12 +664,10 @@ impl CalClockZone {
 		Ok(SimpleDate { year: year as i32 })
 	}
 	
-	/// Checks if a year is a leap year.
 	fn is_leap_year(year: i64) -> bool {
 		(year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 	}
 	
-	/// Calculates the exact UTC timestamp for a DST transition.
 	fn calculate_transition_time(&self, transition: &DstTransition, year: i32) -> Outcome<i64> {
 		// Calculate the day of the transition
 		let day = res!(self.calculate_transition_day(&transition.day_spec, transition.month, year));
@@ -861,7 +679,6 @@ impl CalClockZone {
 		Ok(transition_millis)
 	}
 	
-	/// Calculates the actual day of month for a DST transition based on day specification.
 	fn calculate_transition_day(&self, day_spec: &DaySpec, month: u8, year: i32) -> Outcome<u8> {
 		match day_spec {
 			DaySpec::Day(day) => Ok(*day),
@@ -900,7 +717,6 @@ impl CalClockZone {
 		}
 	}
 	
-	/// Calculates days since Unix epoch for a given date.
 	fn days_since_epoch(&self, year: i32, month: u8, day: u8) -> Outcome<i64> {
 		let mut days = 0i64;
 		
@@ -920,7 +736,6 @@ impl CalClockZone {
 		Ok(days)
 	}
 	
-	/// Returns the number of days in a given month/year.
 	fn days_in_month(&self, month: u8, year: i32) -> u8 {
 		match month {
 			1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
@@ -930,7 +745,7 @@ impl CalClockZone {
 		}
 	}
 	
-	/// Calculates the day of week for a given date (0=Sunday, 1=Monday, etc.).
+	/// 0 = Sunday.
 	fn day_of_week(&self, year: i32, month: u8, day: u8) -> u8 {
 		// Use Zeller's congruence algorithm
 		let (q, m, k, j) = if month < 3 {
@@ -945,7 +760,6 @@ impl CalClockZone {
 		((h + 5) % 7) as u8
 	}
 	
-	/// Gets system timezone offset using platform APIs.
 	fn system_offset_at_time(&self, _utc_millis: i64) -> Outcome<i32> {
 		// Try to get system offset using standard library SystemTime
 		
@@ -971,7 +785,6 @@ impl CalClockZone {
 		Ok(0)
 	}
 	
-	/// Parses simple timezone offset formats like "GMT+5", "UTC-3".
 	fn parse_simple_offset(&self, tz: &str) -> Outcome<i32> {
 		if tz.starts_with("GMT") || tz.starts_with("UTC") {
 			let offset_part = &tz[3..];
@@ -997,7 +810,6 @@ impl CalClockZone {
 	}
 }
 
-/// Simplified date structure for DST calculations.
 #[derive(Debug)]
 struct SimpleDate {
 	year: i32,

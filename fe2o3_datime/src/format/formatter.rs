@@ -1,3 +1,11 @@
+//! Formatting of CalClock, CalendarDate and ClockTime values.
+//!
+//! A formatter walks a parsed pattern, and may carry a locale together with
+//! overrides for month names, day names and the AM/PM markers.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use crate::{
     cache::string_intern::convenience as intern,
     calendar::CalendarDate,
@@ -11,7 +19,6 @@ use oxedyne_fe2o3_core::prelude::*;
 
 use std::{fmt, collections::HashMap};
 
-/// Error type for formatting operations.
 #[derive(Clone, Debug)]
 pub enum FormattingError {
     InvalidPattern(String),
@@ -29,11 +36,6 @@ impl fmt::Display for FormattingError {
     }
 }
 
-/// A comprehensive formatter for CalClock, CalendarDate, and ClockTime.
-///
-/// The CalClockFormatter provides flexible formatting capabilities with support
-/// for custom patterns, predefined formats, and locale-aware formatting.
-///
 /// # Examples
 ///
 /// ```ignore
@@ -55,21 +57,15 @@ impl fmt::Display for FormattingError {
 /// ```
 #[derive(Debug, Clone)]
 pub struct CalClockFormatter {
-    /// The locale for formatting (affects month/day names, date order, etc.).
     #[allow(dead_code)]
-    locale: Option<Locale>,
-    /// Custom month names override (for localization).
-    month_names: Option<HashMap<MonthOfYear, (String, String)>>, // (short, long)
-    /// Custom day names override (for localization).
-    day_names: Option<HashMap<DayOfWeek, (String, String)>>, // (short, long)
-    /// Custom AM/PM markers.
-    am_pm_markers: Option<(String, String)>, // (AM, PM)
-    /// Whether to use ordinal suffixes (1st, 2nd, 3rd).
-    use_ordinals: bool,
+    locale:         Option<Locale>,                                  // sets names and date order
+    month_names:    Option<HashMap<MonthOfYear, (String, String)>>,  // (short, long)
+    day_names:      Option<HashMap<DayOfWeek, (String, String)>>,    // (short, long)
+    am_pm_markers:  Option<(String, String)>,                        // (AM, PM)
+    use_ordinals:   bool,                                            // 1st, 2nd, 3rd
 }
 
 impl CalClockFormatter {
-    /// Creates a new formatter with default settings.
     pub fn new() -> Self {
         Self {
             locale: None,
@@ -80,7 +76,6 @@ impl CalClockFormatter {
         }
     }
     
-    /// Creates a new formatter with the specified locale.
     pub fn with_locale(locale: Locale) -> Self {
         Self {
             locale: Some(locale),
@@ -91,31 +86,26 @@ impl CalClockFormatter {
         }
     }
     
-    /// Sets custom month names for localization.
     pub fn set_month_names(mut self, names: HashMap<MonthOfYear, (String, String)>) -> Self {
         self.month_names = Some(names);
         self
     }
     
-    /// Sets custom day names for localization.
     pub fn set_day_names(mut self, names: HashMap<DayOfWeek, (String, String)>) -> Self {
         self.day_names = Some(names);
         self
     }
     
-    /// Sets custom AM/PM markers.
     pub fn set_am_pm_markers(mut self, am: String, pm: String) -> Self {
         self.am_pm_markers = Some((am, pm));
         self
     }
     
-    /// Enables ordinal suffixes (1st, 2nd, 3rd) for day formatting.
     pub fn enable_ordinals(mut self) -> Self {
         self.use_ordinals = true;
         self
     }
     
-    /// Formats a CalClock using the specified pattern.
     pub fn format_with_pattern(&self, calclock: &CalClock, pattern: &FormatPattern) -> Outcome<String> {
         let mut result = String::new();
         
@@ -127,7 +117,6 @@ impl CalClockFormatter {
         Ok(result)
     }
     
-    /// Formats a CalendarDate using the specified pattern.
     pub fn format_date_with_pattern(&self, date: &CalendarDate, pattern: &FormatPattern) -> Outcome<String> {
         let mut result = String::new();
         
@@ -139,7 +128,6 @@ impl CalClockFormatter {
         Ok(result)
     }
     
-    /// Formats a ClockTime using the specified pattern.
     pub fn format_time_with_pattern(&self, time: &ClockTime, pattern: &FormatPattern) -> Outcome<String> {
         let mut result = String::new();
         
@@ -151,34 +139,28 @@ impl CalClockFormatter {
         Ok(result)
     }
     
-    /// Formats a CalClock using a pattern string.
     pub fn format(&self, calclock: &CalClock, pattern_string: &str) -> Outcome<String> {
         let pattern = res!(FormatPattern::new(pattern_string));
         self.format_with_pattern(calclock, &pattern)
     }
     
-    /// Formats a CalClock using a locale's default datetime pattern.
     pub fn format_with_locale(&self, calclock: &CalClock, locale: &Locale) -> Outcome<String> {
         self.format_with_pattern(calclock, locale.datetime_pattern())
     }
     
-    /// Formats a CalClock date using a locale's default date pattern.
     pub fn format_date_with_locale(&self, calclock: &CalClock, locale: &Locale) -> Outcome<String> {
         self.format_with_pattern(calclock, locale.date_pattern())
     }
     
-    /// Formats a CalClock time using a locale's default time pattern.
     pub fn format_time_with_locale(&self, calclock: &CalClock, locale: &Locale) -> Outcome<String> {
         self.format_with_pattern(calclock, locale.time_pattern())
     }
     
-    /// Formats a CalendarDate using a pattern string.
     pub fn format_date(&self, date: &CalendarDate, pattern_string: &str) -> Outcome<String> {
         let pattern = res!(FormatPattern::new(pattern_string));
         self.format_date_with_pattern(date, &pattern)
     }
     
-    /// Formats a ClockTime using a pattern string.
     pub fn format_time(&self, time: &ClockTime, pattern_string: &str) -> Outcome<String> {
         let pattern = res!(FormatPattern::new(pattern_string));
         self.format_time_with_pattern(time, &pattern)
@@ -188,7 +170,6 @@ impl CalClockFormatter {
     // Token Formatting Implementation
     // ========================================================================
     
-    /// Formats a single token for a CalClock.
     fn format_token(&self, token: &FormatToken, calclock: &CalClock) -> Outcome<String> {
         match token {
             // Date tokens
@@ -243,7 +224,6 @@ impl CalClockFormatter {
         }
     }
     
-    /// Formats a single token for a CalendarDate.
     fn format_date_token(&self, token: &FormatToken, date: &CalendarDate) -> Outcome<String> {
         match token {
             FormatToken::Year(style) => self.format_year(date.year(), style),
@@ -277,7 +257,6 @@ impl CalClockFormatter {
         }
     }
     
-    /// Formats a single token for a ClockTime.
     fn format_time_token(&self, token: &FormatToken, time: &ClockTime) -> Outcome<String> {
         match token {
             FormatToken::Hour12(style) => {

@@ -1,3 +1,6 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use crate::time::{CalClockZone, tzif::{TZifParser, TZifData}};
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -11,23 +14,13 @@ use std::{
     time::SystemTime,
 };
 
-/// Configuration for system timezone database integration.
 #[derive(Clone, Debug)]
 pub struct SystemTimezoneConfig {
-    /// Whether to use system timezone data automatically.
     pub use_system_data: bool,
-    
-    /// Whether to require user consent before accessing system data.
     pub require_consent: bool,
-    
-    /// Paths to search for timezone data.
     pub search_paths: Vec<PathBuf>,
-    
-    /// Whether to detect timezone rule conflicts.
     pub detect_conflicts: bool,
-    
-    /// Maximum age of cached timezone data in seconds.
-    pub cache_max_age: u64,
+    pub cache_max_age: u64, // seconds
 }
 
 impl Default for SystemTimezoneConfig {
@@ -43,7 +36,6 @@ impl Default for SystemTimezoneConfig {
 }
 
 impl SystemTimezoneConfig {
-    /// Creates a new configuration optimised for automatic updates (Jiff-style).
     pub fn automatic() -> Self {
         Self {
             use_system_data: true,
@@ -53,7 +45,6 @@ impl SystemTimezoneConfig {
         }
     }
 
-    /// Creates a new configuration that requires explicit user consent.
     pub fn with_consent() -> Self {
         Self {
             use_system_data: true,
@@ -63,7 +54,6 @@ impl SystemTimezoneConfig {
         }
     }
 
-    /// Returns default search paths for timezone data based on platform.
     pub fn default_search_paths() -> Vec<PathBuf> {
         let mut paths = Vec::new();
 
@@ -106,18 +96,15 @@ impl SystemTimezoneConfig {
         paths
     }
 
-    /// Adds a custom search path.
     pub fn add_search_path(&mut self, path: PathBuf) {
         self.search_paths.push(path);
     }
 
-    /// Removes a search path.
     pub fn remove_search_path(&mut self, path: &Path) {
         self.search_paths.retain(|p| p != path);
     }
 }
 
-/// Manager for system timezone database integration.
 pub struct SystemTimezoneManager {
     config: SystemTimezoneConfig,
     consent_given: Mutex<bool>,
@@ -146,12 +133,10 @@ struct CachedTimezoneData {
 static TIMEZONE_MANAGER: OnceLock<SystemTimezoneManager> = OnceLock::new();
 
 impl SystemTimezoneManager {
-    /// Gets the global timezone manager instance.
     pub fn global() -> &'static Self {
         TIMEZONE_MANAGER.get_or_init(|| Self::new(SystemTimezoneConfig::default()))
     }
 
-    /// Creates a new timezone manager with the given configuration.
     pub fn new(config: SystemTimezoneConfig) -> Self {
         Self {
             config,
@@ -165,7 +150,6 @@ impl SystemTimezoneManager {
         }
     }
 
-    /// Configures the global timezone manager.
     pub fn configure(config: SystemTimezoneConfig) -> Outcome<()> {
         if TIMEZONE_MANAGER.get().is_some() {
             return Err(err!("Timezone manager already initialised"; Invalid, Init));
@@ -178,7 +162,6 @@ impl SystemTimezoneManager {
         Ok(())
     }
 
-    /// Requests user consent for system timezone data access.
     pub fn request_consent(&self) -> Outcome<bool> {
         if !self.config.require_consent {
             let mut consent = lock_mutex!(self.consent_given);
@@ -197,7 +180,6 @@ impl SystemTimezoneManager {
         }
     }
 
-    /// Returns true if user has given consent for system timezone access.
     pub fn has_consent(&self) -> bool {
         if !self.config.require_consent {
             return true;
@@ -213,7 +195,6 @@ impl SystemTimezoneManager {
         }
     }
 
-    /// Attempts to load a timezone from system data.
     pub fn load_system_timezone(&self, zone_id: &str) -> Outcome<Option<CalClockZone>> {
         if !self.config.use_system_data {
             return Ok(None);
@@ -243,7 +224,6 @@ impl SystemTimezoneManager {
         Ok(None)
     }
 
-    /// Loads timezone data from a specific path using TZif parser.
     fn load_timezone_from_path(&self, base_path: &Path, zone_id: &str) -> Outcome<CalClockZone> {
         let zone_path = base_path.join(zone_id);
         
@@ -264,7 +244,6 @@ impl SystemTimezoneManager {
         }
     }
 
-    /// Gets cached timezone data.
     fn get_cached_timezone(&self, zone_id: &str) -> Option<CachedTimezoneData> {
         let mut cache = match self.cache.lock() {
             Ok(guard) => guard,
@@ -282,7 +261,6 @@ impl SystemTimezoneManager {
         }
     }
 
-    /// Checks if cached timezone data is still valid.
     fn is_cache_valid(&self, cached: &CachedTimezoneData) -> bool {
         // Check if cache has expired
         if let Ok(elapsed) = cached.last_modified.elapsed() {
@@ -301,7 +279,6 @@ impl SystemTimezoneManager {
         true
     }
 
-    /// Caches timezone data with TZif information.
     fn cache_timezone(&self, zone_id: &str, zone: CalClockZone, source_path: PathBuf) -> Outcome<()> {
         let mut cache = lock_mutex!(self.cache);
         
@@ -343,7 +320,6 @@ impl SystemTimezoneManager {
         Ok(())
     }
 
-    /// Detects conflicts between system and embedded timezone data.
     pub fn detect_timezone_conflicts(&self, zone_id: &str, embedded_zone: &CalClockZone) -> Outcome<Vec<TimezoneConflict>> {
         if !self.config.detect_conflicts {
             return Ok(Vec::new());
@@ -397,7 +373,6 @@ impl SystemTimezoneManager {
         Ok(conflicts)
     }
 
-    /// Clears the timezone cache.
     pub fn clear_cache(&self) {
         let mut cache = match self.cache.lock() {
             Ok(guard) => guard,
@@ -410,7 +385,6 @@ impl SystemTimezoneManager {
         cache.last_updated = SystemTime::UNIX_EPOCH;
     }
 
-    /// Returns statistics about cached timezone data.
     pub fn cache_stats(&self) -> TimezoneStats {
         let cache = match self.cache.lock() {
             Ok(guard) => guard,
@@ -437,7 +411,6 @@ impl SystemTimezoneManager {
         }
     }
 
-    /// Lists available timezone IDs from system data.
     pub fn list_system_timezones(&self) -> Outcome<Vec<String>> {
         if !self.config.use_system_data || (self.config.require_consent && !self.has_consent()) {
             return Ok(Vec::new());
@@ -456,7 +429,6 @@ impl SystemTimezoneManager {
         Ok(zone_ids)
     }
 
-    /// Scans a directory for timezone files.
     fn scan_timezone_directory(&self, dir: &Path) -> Outcome<Vec<String>> {
         let mut zones = Vec::new();
         
@@ -468,7 +440,6 @@ impl SystemTimezoneManager {
         Ok(zones)
     }
 
-    /// Recursively scans directories for timezone files.
     fn scan_directory_recursive(&self, base_dir: &Path, current_dir: &Path, zones: &mut Vec<String>) -> Outcome<()> {
         for entry in res!(fs::read_dir(current_dir)) {
             let entry = res!(entry);
@@ -499,7 +470,6 @@ impl SystemTimezoneManager {
         Ok(())
     }
     
-    /// Generates test timestamps for conflict detection throughout the year.
     fn generate_test_timestamps(&self) -> Vec<i64> {
         let current_year = 2024; // Could be made dynamic
         let mut timestamps = Vec::new();
@@ -522,7 +492,6 @@ impl SystemTimezoneManager {
         timestamps
     }
     
-    /// Extracts DST transition timestamps from a timezone.
     fn get_dst_transitions(&self, _zone: &CalClockZone) -> Outcome<Vec<i64>> {
         // This is a simplified implementation that would need to be
         // expanded based on the actual timezone implementation
@@ -536,23 +505,19 @@ impl SystemTimezoneManager {
     }
 }
 
-/// Represents a conflict between system and embedded timezone data.
 #[derive(Clone, Debug)]
 pub enum TimezoneConflict {
-    /// The timezone ID differs between system and embedded data.
     IdMismatch {
         zone_id: String,
         system_id: String,
         embedded_id: String,
     },
-    /// The offset rules differ for a specific datetime.
     OffsetMismatch {
         zone_id: String,
         timestamp: i64,
         system_offset: i32,
         embedded_offset: i32,
     },
-    /// DST transition dates differ.
     DstMismatch {
         zone_id: String,
         system_transitions: Vec<i64>,
@@ -560,7 +525,6 @@ pub enum TimezoneConflict {
     },
 }
 
-/// Statistics about timezone cache usage.
 #[derive(Clone, Debug)]
 pub struct TimezoneStats {
     pub cached_zones: usize,
@@ -568,15 +532,12 @@ pub struct TimezoneStats {
     pub cache_hit_rate: f64,
 }
 
-/// Extension trait for CalClockZone to integrate with system timezone data.
 pub trait SystemTimezoneExt {
     /// Attempts to load this timezone from system data, falling back to embedded data.
     fn from_system_or_embedded(zone_id: &str) -> Outcome<CalClockZone>;
     
-    /// Detects conflicts between this zone and system timezone data.
     fn detect_conflicts(&self) -> Outcome<Vec<TimezoneConflict>>;
     
-    /// Returns true if this zone was loaded from system data.
     fn is_from_system(&self) -> bool;
 }
 
@@ -604,32 +565,16 @@ impl SystemTimezoneExt for CalClockZone {
     }
 }
 
-/// Leap second handling capability assessment.
-/// 
-/// This determines whether the system timezone integration handles leap seconds.
-/// Based on research, most timezone databases (including IANA) do NOT handle leap seconds
-/// directly - they use UTC time which doesn't account for leap seconds.
-///
-/// Leap seconds are typically handled at a different layer (TAI-UTC conversion).
+/// Timezone databases, IANA included, do not carry leap seconds: they work in
+/// UTC, which does not account for them. Leap seconds belong to the TAI-UTC
+/// layer instead.
 pub struct LeapSecondCapability;
 
 impl LeapSecondCapability {
-    /// Returns true if the system timezone integration handles leap seconds.
-    ///
-    /// **Answer: NO** - Standard timezone databases (including Jiff's approach) do NOT handle leap seconds.
-    /// Timezone databases handle DST transitions and timezone rule changes, but leap seconds
-    /// are handled separately through TAI-UTC conversion tables.
-    ///
-    /// Leap seconds:
-    /// - Are added/removed from UTC at the atomic clock level
-    /// - Are announced by IERS (International Earth Rotation and Reference Systems Service)
-    /// - Require separate leap second tables (not timezone data)
-    /// - Must be handled by converting between UTC and TAI (International Atomic Time)
     pub fn handles_leap_seconds() -> bool {
         false
     }
 
-    /// Returns a description of leap second handling in timezone systems.
     pub fn leap_second_explanation() -> &'static str {
         "Timezone databases (including IANA and Jiff-style integration) do NOT handle leap seconds. \
          Leap seconds are handled separately through TAI-UTC conversion tables. Timezone data \
@@ -637,7 +582,6 @@ impl LeapSecondCapability {
          leap second table that tracks UTC-TAI differences over time."
     }
 
-    /// Returns true if leap second support should be implemented separately.
     pub fn requires_separate_implementation() -> bool {
         true
     }

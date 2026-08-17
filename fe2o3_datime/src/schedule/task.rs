@@ -1,7 +1,11 @@
-/// Task definitions and management for the scheduling system
-/// 
-/// This module defines the core Task structure and related types for
-/// representing scheduled actions and their execution parameters.
+//! Task definitions for the scheduling system.
+//!
+//! A task pairs an action with a time to run it, a priority, a retry policy
+//! and, for recurring tasks, a pattern. Each run is recorded, and the recent
+//! records are what the success rate and average duration are drawn from.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use crate::{
@@ -13,7 +17,6 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-/// Unique identifier for tasks
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TaskId(u64);
 
@@ -30,24 +33,16 @@ impl fmt::Display for TaskId {
     }
 }
 
-/// Task execution status
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskStatus {
-    /// Task is scheduled and waiting to execute
     Pending,
-    /// Task is currently executing
     Running,
-    /// Task completed successfully
     Completed,
-    /// Task failed with an error
-    Failed(String),
-    /// Task was cancelled before execution
-    Cancelled,
-    /// Task was skipped (e.g., due to schedule conflict)
-    Skipped,
+    Failed(String),     // reason
+    Cancelled,          // never started
+    Skipped,            // its turn came and went
 }
 
-/// Task execution priority
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TaskPriority {
     Low = 1,
@@ -62,19 +57,13 @@ impl Default for TaskPriority {
     }
 }
 
-/// Configuration options for task execution
 #[derive(Debug, Clone)]
 pub struct TaskConfig {
-    /// Maximum execution time before timeout
-    pub timeout_millis: Option<u64>,
-    /// Number of retry attempts on failure
-    pub max_retries: u32,
-    /// Delay between retry attempts in milliseconds
-    pub retry_delay_millis: u64,
-    /// Whether to continue scheduling if execution fails
-    pub continue_on_failure: bool,
-    /// Whether task can be executed concurrently with other instances
-    pub allow_concurrent: bool,
+    pub timeout_millis:         Option<u64>,
+    pub max_retries:            u32,
+    pub retry_delay_millis:     u64,
+    pub continue_on_failure:    bool,   // keep scheduling after a failure
+    pub allow_concurrent:       bool,   // more than one instance at a time
 }
 
 impl Default for TaskConfig {
@@ -89,37 +78,22 @@ impl Default for TaskConfig {
     }
 }
 
-/// A scheduled task with execution parameters and timing information
 #[derive(Debug)]
 pub struct Task {
-    /// Unique identifier for this task
-    pub id: TaskId,
-    /// Human-readable name for the task
-    pub name: String,
-    /// Task description
-    pub description: Option<String>,
-    /// Time zone for scheduling calculations
-    pub zone: CalClockZone,
-    /// Scheduled execution time
-    pub scheduled_time: CalClock,
-    /// Recurrence pattern (None for one-time tasks)
-    pub recurrence: Option<RecurrencePattern>,
-    /// Task execution priority
-    pub priority: TaskPriority,
-    /// Task configuration options
-    pub config: TaskConfig,
-    /// Current execution status
-    pub status: TaskStatus,
-    /// Action to execute
-    pub action: Box<dyn Action>,
-    /// Number of times this task has been executed
-    pub execution_count: u32,
-    /// Last execution time
-    pub last_execution: Option<CalClock>,
-    /// Next scheduled execution time (for recurring tasks)
-    pub next_execution: Option<CalClock>,
-    /// Execution history (limited to recent executions)
-    pub execution_history: Vec<TaskExecution>,
+    pub id:                 TaskId,
+    pub name:               String,
+    pub description:        Option<String>,
+    pub zone:               CalClockZone,
+    pub scheduled_time:     CalClock,
+    pub recurrence:         Option<RecurrencePattern>,   // None means one-time
+    pub priority:           TaskPriority,
+    pub config:             TaskConfig,
+    pub status:             TaskStatus,
+    pub action:             Box<dyn Action>,
+    pub execution_count:    u32,
+    pub last_execution:     Option<CalClock>,
+    pub next_execution:     Option<CalClock>,
+    pub execution_history:  Vec<TaskExecution>,          // recent only
 }
 
 impl Clone for Task {
@@ -143,30 +117,21 @@ impl Clone for Task {
     }
 }
 
-/// Record of a task execution
 #[derive(Debug, Clone)]
 pub struct TaskExecution {
-    /// When the execution started
-    pub started_at: CalClock,
-    /// When the execution completed (None if still running)
-    pub completed_at: Option<CalClock>,
-    /// Execution duration in milliseconds
+    pub started_at:     CalClock,
+    pub completed_at:   Option<CalClock>,   // None while still running
     pub duration_millis: Option<u64>,
-    /// Execution result
-    pub status: TaskStatus,
-    /// Error message if execution failed
-    pub error_message: Option<String>,
-    /// Number of retry attempts made
-    pub retry_count: u32,
+    pub status:         TaskStatus,
+    pub error_message:  Option<String>,
+    pub retry_count:    u32,
 }
 
 impl Task {
-    /// Creates a new task with the given name and timezone
     pub fn new<S: Into<String>>(name: S, zone: CalClockZone) -> TaskBuilder {
         TaskBuilder::new(name.into(), zone)
     }
 
-    /// Checks if the task is ready to execute at the given time
     pub fn is_ready_to_execute(&self, current_time: &CalClock) -> bool {
         match self.status {
             TaskStatus::Pending => current_time >= &self.scheduled_time,
@@ -174,7 +139,6 @@ impl Task {
         }
     }
 
-    /// Calculates the next execution time for recurring tasks
     pub fn calculate_next_execution(&self) -> Outcome<Option<CalClock>> {
         if let Some(ref pattern) = self.recurrence {
             pattern.next_execution(&self.scheduled_time, &self.zone)
@@ -183,7 +147,6 @@ impl Task {
         }
     }
 
-    /// Updates the task for the next execution (for recurring tasks)
     pub fn advance_to_next_execution(&mut self) -> Outcome<()> {
         if let Some(next_time) = res!(self.calculate_next_execution()) {
             self.scheduled_time = next_time;
@@ -193,7 +156,6 @@ impl Task {
         Ok(())
     }
 
-    /// Records a new execution in the task's history
     pub fn record_execution(&mut self, execution: TaskExecution) {
         const MAX_HISTORY: usize = 10; // Keep last 10 executions
         
@@ -207,7 +169,7 @@ impl Task {
         }
     }
 
-    /// Gets the average execution duration in milliseconds
+    /// Over the retained history only.
     pub fn average_execution_duration(&self) -> Option<u64> {
         let completed: Vec<_> = self.execution_history.iter()
             .filter_map(|exec| exec.duration_millis)
@@ -220,7 +182,7 @@ impl Task {
         }
     }
 
-    /// Gets the success rate as a percentage
+    /// A percentage, over the retained history only.
     pub fn success_rate(&self) -> f64 {
         if self.execution_history.is_empty() {
             0.0
@@ -233,7 +195,6 @@ impl Task {
     }
 }
 
-/// Builder for creating tasks with fluent API
 pub struct TaskBuilder {
     name: String,
     description: Option<String>,
@@ -246,7 +207,6 @@ pub struct TaskBuilder {
 }
 
 impl TaskBuilder {
-    /// Creates a new task builder
     pub fn new(name: String, zone: CalClockZone) -> Self {
         TaskBuilder {
             name,
@@ -260,13 +220,11 @@ impl TaskBuilder {
         }
     }
 
-    /// Sets the task description
     pub fn description<S: Into<String>>(mut self, desc: S) -> Self {
         self.description = Some(desc.into());
         self
     }
 
-    /// Sets the scheduled execution time
     pub fn at_time(mut self, hour: u8, minute: u8, second: u8) -> Self {
         if let Ok(time) = CalClock::new(2024, 1, 1, hour, minute, second, 0, self.zone.clone()) {
             self.scheduled_time = Some(time);
@@ -274,7 +232,6 @@ impl TaskBuilder {
         self
     }
 
-    /// Sets the scheduled execution date and time
     pub fn on_date(mut self, year: i32, month: u8, day: u8) -> Self {
         if let Some(existing_time) = self.scheduled_time.take() {
             if let Ok(time) = CalClock::new(
@@ -293,37 +250,31 @@ impl TaskBuilder {
         self
     }
 
-    /// Sets the scheduled execution time using CalClock
     pub fn at(mut self, time: CalClock) -> Self {
         self.scheduled_time = Some(time);
         self
     }
 
-    /// Sets the recurrence pattern for the task
     pub fn recurrence(mut self, pattern: RecurrencePattern) -> Self {
         self.recurrence = Some(pattern);
         self
     }
 
-    /// Sets the task priority
     pub fn priority(mut self, priority: TaskPriority) -> Self {
         self.priority = priority;
         self
     }
 
-    /// Sets the task configuration
     pub fn config(mut self, config: TaskConfig) -> Self {
         self.config = config;
         self
     }
 
-    /// Sets the action to execute
     pub fn with_action<A: Action + 'static>(mut self, action: A) -> Self {
         self.action = Some(Box::new(action));
         self
     }
 
-    /// Builds the final task
     pub fn build(self) -> Outcome<Task> {
         let scheduled_time = res!(self.scheduled_time
             .ok_or_else(|| err!("Task scheduled time is required"; Invalid, Input)));

@@ -1,4 +1,11 @@
-/// Main scheduler implementation for managing and executing scheduled tasks with real-time processing
+//! The scheduler itself.
+//!
+//! Tasks sit in a priority queue, highest score first and FIFO within a score.
+//! A background thread moves them to worker threads as their time arrives, or
+//! the caller can drive the whole thing by hand with process_pending.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use crate::{
@@ -13,21 +20,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Configuration for the scheduler
 #[derive(Debug, Clone)]
 pub struct SchedulerConfig {
-    /// Maximum number of concurrent task executions
-    pub max_concurrent_tasks: usize,
-    /// Check interval in milliseconds
-    pub check_interval_millis: u64,
-    /// Whether to continue running after task failures
-    pub continue_on_failure: bool,
-    /// Size of the task queue (0 for unlimited)
-    pub queue_size: usize,
-    /// Number of worker threads
-    pub worker_threads: usize,
-    /// Enable real-time background processing
-    pub enable_background_processing: bool,
+    pub max_concurrent_tasks:           usize,
+    pub check_interval_millis:          u64,
+    pub continue_on_failure:            bool,
+    pub queue_size:                     usize,  // zero means unlimited
+    pub worker_threads:                 usize,
+    pub enable_background_processing:   bool,
 }
 
 impl Default for SchedulerConfig {
@@ -43,26 +43,17 @@ impl Default for SchedulerConfig {
     }
 }
 
-/// Scheduler statistics
 #[derive(Debug, Clone, Default)]
 pub struct SchedulerStats {
-    /// Number of tasks currently scheduled
-    pub scheduled_tasks: usize,
-    /// Number of tasks currently running
-    pub running_tasks: usize,
-    /// Number of tasks in queue
-    pub queued_tasks: usize,
-    /// Total number of completed tasks
-    pub completed_tasks: u64,
-    /// Total number of failed tasks
-    pub failed_tasks: u64,
-    /// Average task execution time in milliseconds
-    pub avg_execution_time_millis: u64,
-    /// Current uptime in seconds
-    pub uptime_seconds: u64,
+    pub scheduled_tasks:            usize,
+    pub running_tasks:              usize,
+    pub queued_tasks:               usize,
+    pub completed_tasks:            u64,
+    pub failed_tasks:               u64,
+    pub avg_execution_time_millis:  u64,
+    pub uptime_seconds:             u64,
 }
 
-/// Task queue entry with priority ordering
 #[derive(Debug)]
 struct QueuedTask {
     task: Task,
@@ -142,7 +133,6 @@ impl QueuedTask {
     }
 }
 
-/// Message types for background processing
 #[derive(Debug)]
 enum SchedulerMessage {
     Stop,
@@ -154,7 +144,6 @@ enum SchedulerMessage {
     GetStats,
 }
 
-/// Main scheduler for managing scheduled tasks with real-time background processing
 pub struct Scheduler {
     config: SchedulerConfig,
     tasks: HashMap<TaskId, Task>,
@@ -182,12 +171,10 @@ impl std::fmt::Debug for Scheduler {
 }
 
 impl Scheduler {
-    /// Creates a new scheduler with default configuration
     pub fn new() -> Self {
         Self::with_config(SchedulerConfig::default())
     }
 
-    /// Creates a new scheduler with custom configuration
     pub fn with_config(config: SchedulerConfig) -> Self {
         Scheduler {
             config,
@@ -203,7 +190,6 @@ impl Scheduler {
         }
     }
 
-    /// Starts the real-time background processing system
     pub fn start(&mut self) -> Outcome<()> {
         if *lock_mutex!(self.is_running) {
             return Err(err!("Scheduler is already running"; Invalid, Input));
@@ -245,7 +231,6 @@ impl Scheduler {
         Ok(())
     }
 
-    /// Stops the background processing system
     pub fn stop(&mut self) -> Outcome<()> {
         *lock_mutex!(self.is_running) = false;
 
@@ -268,7 +253,6 @@ impl Scheduler {
         Ok(())
     }
 
-    /// Schedules a new task for execution
     pub fn schedule(&mut self, task: Task) -> Outcome<TaskId> {
         let task_id = task.id;
         
@@ -298,7 +282,6 @@ impl Scheduler {
         Ok(task_id)
     }
 
-    /// Removes a scheduled task
     pub fn unschedule(&mut self, task_id: TaskId) -> Outcome<()> {
         self.tasks.remove(&task_id);
         
@@ -311,7 +294,8 @@ impl Scheduler {
         Ok(())
     }
 
-    /// Processes pending tasks (for manual execution when background processing is disabled)
+    /// The manual alternative to background processing, for callers that
+    /// would rather drive the scheduler themselves.
     pub fn process_pending(&mut self) -> Outcome<()> {
         if self.config.enable_background_processing {
             return Err(err!("Cannot manually process when background processing is enabled"; Invalid, Input));
@@ -360,7 +344,6 @@ impl Scheduler {
         Ok(())
     }
 
-    /// Main scheduler loop for background processing
     fn scheduler_loop(
         rx: mpsc::Receiver<SchedulerMessage>,
         queue: Arc<Mutex<BinaryHeap<QueuedTask>>>,
@@ -411,7 +394,6 @@ impl Scheduler {
         }
     }
 
-    /// Worker thread loop for executing tasks
     fn worker_loop(
         _worker_id: usize,
         queue: Arc<Mutex<BinaryHeap<QueuedTask>>>,
@@ -502,7 +484,6 @@ impl Scheduler {
         }
     }
 
-    /// Gets current scheduler statistics
     pub fn stats(&self) -> SchedulerStats {
         let mut stats = match self.stats.lock() {
             Ok(guard) => guard.clone(),
@@ -516,17 +497,14 @@ impl Scheduler {
         stats
     }
 
-    /// Gets a specific task by ID
     pub fn get_task(&self, task_id: TaskId) -> Option<&Task> {
         self.tasks.get(&task_id)
     }
 
-    /// Lists all scheduled tasks
     pub fn list_tasks(&self) -> Vec<&Task> {
         self.tasks.values().collect()
     }
 
-    /// Gets the current queue size
     pub fn queue_size(&self) -> usize {
         match self.task_queue.lock() {
             Ok(guard) => guard.len(),
@@ -537,7 +515,6 @@ impl Scheduler {
         }
     }
 
-    /// Checks if the scheduler is currently running
     pub fn is_running(&self) -> bool {
         match self.is_running.lock() {
             Ok(guard) => *guard,

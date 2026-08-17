@@ -1,3 +1,11 @@
+//! Spans of time, in three flavours: a CalClockRange between two instants, a
+//! DateRange over whole days, and a TimeRange within a day.
+//!
+//! They do not agree on their end bounds, so check each one.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use crate::{
     calendar::CalendarDate,
     clock::ClockTime,
@@ -7,7 +15,6 @@ use crate::{
 
 use oxedyne_fe2o3_core::prelude::*;
 
-/// A range representing a span of time between two CalClock instances.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CalClockRange {
     start: CalClock,
@@ -15,16 +22,7 @@ pub struct CalClockRange {
 }
 
 impl CalClockRange {
-    /// Creates a new CalClockRange.
-    ///
-    /// # Arguments
-    ///
-    /// * `start` - The start of the range (inclusive)
-    /// * `end` - The end of the range (exclusive)
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if start is after end.
+    /// The start is inclusive and the end exclusive.
     pub fn new(start: CalClock, end: CalClock) -> Outcome<Self> {
         if start > end {
             return Err(err!("Start time cannot be after end time"; Invalid, Input));
@@ -32,38 +30,31 @@ impl CalClockRange {
         Ok(Self { start, end })
     }
     
-    /// Creates a CalClockRange from a start time and duration.
     pub fn from_start_and_duration(start: CalClock, duration: CalClockDuration) -> Outcome<Self> {
         let end = res!(start.add_duration(&duration));
         Self::new(start, end)
     }
     
-    /// Returns the start of the range.
     pub fn start(&self) -> &CalClock {
         &self.start
     }
     
-    /// Returns the end of the range.
     pub fn end(&self) -> &CalClock {
         &self.end
     }
     
-    /// Returns the duration of this range.
     pub fn duration(&self) -> Outcome<CalClockDuration> {
         self.start.duration_until(&self.end)
     }
     
-    /// Returns true if the given CalClock falls within this range.
     pub fn contains(&self, time: &CalClock) -> Outcome<bool> {
         Ok(time >= &self.start && time < &self.end)
     }
     
-    /// Returns true if this range overlaps with another range.
     pub fn overlaps(&self, other: &Self) -> Outcome<bool> {
         Ok(!(self.end <= other.start || other.end <= self.start))
     }
     
-    /// Returns the intersection of this range with another, if any.
     pub fn intersection(&self, other: &Self) -> Outcome<Option<Self>> {
         if !res!(self.overlaps(other)) {
             return Ok(None);
@@ -75,7 +66,7 @@ impl CalClockRange {
         Ok(Some(res!(Self::new(start, end))))
     }
     
-    /// Returns the union of this range with another, if they overlap or are adjacent.
+    /// Adjacent ranges unite; disjoint ones give None.
     pub fn union(&self, other: &Self) -> Outcome<Option<Self>> {
         // Check if ranges overlap or are adjacent
         let gap_duration = if self.end <= other.start {
@@ -98,7 +89,8 @@ impl CalClockRange {
         Ok(Some(res!(Self::new(start, end))))
     }
     
-    /// Splits this range at the given time, returning up to two ranges.
+    /// A split point outside the range is an error, and one at either end
+    /// gives a single range rather than two.
     pub fn split_at(&self, split_time: &CalClock) -> Outcome<Vec<Self>> {
         if !res!(self.contains(split_time)) {
             return Err(err!("Split time is not within the range"; Invalid, Input));
@@ -119,12 +111,10 @@ impl CalClockRange {
         Ok(result)
     }
     
-    /// Returns true if this range is empty (start equals end).
     pub fn is_empty(&self) -> bool {
         self.start == self.end
     }
     
-    /// Extends this range to include the given time.
     pub fn extend_to_include(&mut self, time: &CalClock) -> Outcome<()> {
         if time < &self.start {
             self.start = time.clone();
@@ -135,7 +125,6 @@ impl CalClockRange {
     }
 }
 
-/// A range representing a span of dates.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DateRange {
     start: CalendarDate,
@@ -143,7 +132,7 @@ pub struct DateRange {
 }
 
 impl DateRange {
-    /// Creates a new DateRange.
+    /// Both ends are inclusive, unlike CalClockRange.
     pub fn new(start: CalendarDate, end: CalendarDate) -> Outcome<Self> {
         if start > end {
             return Err(err!("Start date cannot be after end date"; Invalid, Input));
@@ -151,34 +140,28 @@ impl DateRange {
         Ok(Self { start, end })
     }
     
-    /// Returns the start date of the range.
     pub fn start(&self) -> &CalendarDate {
         &self.start
     }
     
-    /// Returns the end date of the range.
     pub fn end(&self) -> &CalendarDate {
         &self.end
     }
     
-    /// Returns the number of days in this range.
     pub fn days(&self) -> Outcome<i32> {
         let start_day_number = res!(self.start.to_day_number());
         let end_day_number = res!(self.end.to_day_number());
         Ok((end_day_number - start_day_number + 1) as i32)
     }
     
-    /// Returns true if the given date falls within this range.
     pub fn contains(&self, date: &CalendarDate) -> bool {
         date >= &self.start && date <= &self.end
     }
     
-    /// Returns true if this range overlaps with another range.
     pub fn overlaps(&self, other: &Self) -> bool {
         !(self.end < other.start || other.end < self.start)
     }
     
-    /// Returns all dates in this range.
     pub fn all_dates(&self) -> Outcome<Vec<CalendarDate>> {
         let mut dates = Vec::new();
         let mut current = self.start.clone();
@@ -191,20 +174,17 @@ impl DateRange {
         Ok(dates)
     }
     
-    /// Returns all business days in this range.
     pub fn business_days(&self) -> Outcome<Vec<CalendarDate>> {
         let all_dates = res!(self.all_dates());
         Ok(all_dates.into_iter().filter(|date| date.is_business_day()).collect())
     }
     
-    /// Returns all weekends in this range.
     pub fn weekends(&self) -> Outcome<Vec<CalendarDate>> {
         let all_dates = res!(self.all_dates());
         Ok(all_dates.into_iter().filter(|date| date.is_weekend()).collect())
     }
 }
 
-/// A range representing a span of times within a day.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TimeRange {
     start: ClockTime,
@@ -212,28 +192,25 @@ pub struct TimeRange {
 }
 
 impl TimeRange {
-    /// Creates a new TimeRange.
+    /// Both ends are inclusive, and an end at or before the start means the
+    /// range wraps midnight.
     pub fn new(start: ClockTime, end: ClockTime) -> Outcome<Self> {
         // Allow ranges that span midnight (end < start)
         Ok(Self { start, end })
     }
     
-    /// Returns the start time of the range.
     pub fn start(&self) -> &ClockTime {
         &self.start
     }
     
-    /// Returns the end time of the range.
     pub fn end(&self) -> &ClockTime {
         &self.end
     }
     
-    /// Returns true if this range spans midnight.
     pub fn spans_midnight(&self) -> bool {
         self.end <= self.start
     }
     
-    /// Returns true if the given time falls within this range.
     pub fn contains(&self, time: &ClockTime) -> bool {
         if self.spans_midnight() {
             // Range spans midnight, so time is either >= start OR <= end
@@ -244,7 +221,6 @@ impl TimeRange {
         }
     }
     
-    /// Returns the duration of this time range.
     pub fn duration(&self) -> Outcome<crate::clock::ClockDuration> {
         use crate::clock::ClockDuration;
         
@@ -261,7 +237,6 @@ impl TimeRange {
         }
     }
     
-    /// Splits this time range at the given time.
     pub fn split_at(&self, split_time: &ClockTime) -> Outcome<Vec<Self>> {
         if !self.contains(split_time) {
             return Err(err!("Split time is not within the range"; Invalid, Input));
@@ -301,21 +276,18 @@ impl TimeRange {
 // Range Collection Operations
 // ========================================================================
 
-/// A collection of CalClockRanges with operations for merging, gaps, etc.
 #[derive(Clone, Debug)]
 pub struct CalClockRangeSet {
     ranges: Vec<CalClockRange>,
 }
 
 impl CalClockRangeSet {
-    /// Creates a new empty range set.
     pub fn new() -> Self {
         Self {
             ranges: Vec::new(),
         }
     }
     
-    /// Creates a range set from a vector of ranges.
     pub fn from_ranges(ranges: Vec<CalClockRange>) -> Outcome<Self> {
         let mut set = Self::new();
         for range in ranges {
@@ -324,7 +296,8 @@ impl CalClockRangeSet {
         Ok(set)
     }
     
-    /// Adds a range to the set, merging overlapping ranges.
+    /// Overlapping and adjacent ranges are merged on the way in, so the set
+    /// never holds two ranges that touch.
     pub fn add_range(&mut self, new_range: CalClockRange) -> Outcome<()> {
         // Find overlapping ranges
         let mut merged = new_range;
@@ -351,12 +324,10 @@ impl CalClockRangeSet {
         Ok(())
     }
     
-    /// Returns all ranges in the set.
     pub fn ranges(&self) -> &[CalClockRange] {
         &self.ranges
     }
     
-    /// Returns true if the given time is contained in any range.
     pub fn contains(&self, time: &CalClock) -> Outcome<bool> {
         for range in &self.ranges {
             if res!(range.contains(time)) {
@@ -366,7 +337,6 @@ impl CalClockRangeSet {
         Ok(false)
     }
     
-    /// Returns the gaps between ranges in this set.
     pub fn gaps(&self) -> Outcome<Vec<CalClockRange>> {
         if self.ranges.len() <= 1 {
             return Ok(Vec::new());
@@ -386,7 +356,6 @@ impl CalClockRangeSet {
         Ok(gaps)
     }
     
-    /// Returns the total duration covered by all ranges.
     pub fn total_duration(&self) -> Outcome<CalClockDuration> {
         let mut total_nanos = 0i64;
         
@@ -398,7 +367,6 @@ impl CalClockRangeSet {
         Ok(CalClockDuration::from_nanos(total_nanos))
     }
     
-    /// Returns the intersection of this range set with another.
     pub fn intersection(&self, other: &Self) -> Outcome<Self> {
         let mut result = Self::new();
         
@@ -413,12 +381,10 @@ impl CalClockRangeSet {
         Ok(result)
     }
     
-    /// Returns true if this range set is empty.
     pub fn is_empty(&self) -> bool {
         self.ranges.is_empty()
     }
     
-    /// Returns the number of ranges in this set.
     pub fn len(&self) -> usize {
         self.ranges.len()
     }

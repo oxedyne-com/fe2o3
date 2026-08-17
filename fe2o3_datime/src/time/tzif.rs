@@ -1,3 +1,6 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use oxedyne_fe2o3_core::prelude::*;
 
 use std::{
@@ -6,85 +9,47 @@ use std::{
     path::Path,
 };
 
-/// TZif file format parser for IANA timezone database.
-/// 
-/// Implements RFC 8536 - The Time Zone Information Format (TZif)
-/// Supports versions 1, 2, and 3 of the TZif format.
-///
-/// # Format Overview
-///
-/// TZif files contain timezone transition history and rules in a binary format:
-/// - Header with metadata and counts
-/// - Transition times (when timezone rules change)
-/// - Transition types (which rule applies after each transition)
-/// - Local time type records (UTC offset, DST flag, abbreviation)
-/// - Time zone abbreviations (strings like "EST", "EDT")
-/// - Leap second records (optional)
-/// - Future rule specification (POSIX TZ string)
+/// RFC 8536, versions 1 to 3.
 pub struct TZifParser {
-    /// Raw file data
     data: Vec<u8>,
-    /// Parsed timezone data
     timezone_data: Option<TZifData>,
 }
 
-/// Parsed TZif timezone data
 #[derive(Clone, Debug)]
 pub struct TZifData {
-    /// TZif format version (1, 2, or 3)
-    pub version: u8,
-    /// Transition times in UTC (seconds since Unix epoch)
-    pub transition_times: Vec<i64>,
-    /// Transition type indices (maps to local_time_types)
-    pub transition_types: Vec<u8>,
-    /// Local time type definitions
+    pub version: u8, // 1, 2 or 3
+    pub transition_times: Vec<i64>, // UTC seconds since the Unix epoch
+    pub transition_types: Vec<u8>, // indices into local_time_types
     pub local_time_types: Vec<LocalTimeType>,
-    /// Time zone abbreviations
     pub abbreviations: String,
-    /// Leap second records
     pub leap_seconds: Vec<LeapSecond>,
-    /// Standard/wall time indicators
     pub standard_wall_indicators: Vec<bool>,
-    /// UT/local time indicators  
     pub ut_local_indicators: Vec<bool>,
-    /// POSIX TZ string for future transitions (version 2+)
-    pub posix_tz_string: Option<String>,
+    pub posix_tz_string: Option<String>, // version 2 and later
 }
 
-/// Local time type definition
 #[derive(Clone, Debug, PartialEq)]
 pub struct LocalTimeType {
-    /// UTC offset in seconds (east of UTC is positive)
-    pub utc_offset: i32,
-    /// True if this is daylight saving time
+    pub utc_offset: i32, // seconds east of UTC
     pub is_dst: bool,
-    /// Index into abbreviations string
-    pub abbreviation_index: usize,
+    pub abbreviation_index: usize, // into abbreviations
 }
 
-/// Leap second record
 #[derive(Clone, Debug, PartialEq)]
 pub struct LeapSecond {
-    /// Time when leap second occurs (UTC seconds since Unix epoch)
-    pub transition_time: i64,
-    /// Total leap seconds at this point
-    pub correction: i32,
+    pub transition_time: i64, // UTC seconds since the Unix epoch
+    pub correction: i32, // cumulative, not the step
 }
 
-/// Result of local time conversion, handling DST transition ambiguity
+/// A local time may be reached twice or not at all across a DST transition.
 #[derive(Clone, Debug, PartialEq)]
 pub enum LocalTimeResult<T> {
-    /// Unambiguous result - exactly one valid conversion
     Single(T),
-    /// Ambiguous result - during DST "fall back" when clocks go backward
-    /// Contains (standard_time, daylight_time)
-    Ambiguous(T, T),
-    /// No valid result - during DST "spring forward" when clocks skip ahead
-    None,
+    Ambiguous(T, T), // the autumn fold: (standard, daylight)
+    None, // the spring gap, where the local time never occurs
 }
 
 impl TZifParser {
-    /// Creates a new TZif parser
     pub fn new() -> Self {
         Self {
             data: Vec::new(),
@@ -92,25 +57,21 @@ impl TZifParser {
         }
     }
 
-    /// Loads TZif data from a file path
     pub fn load_from_file<P: AsRef<Path>>(&mut self, path: P) -> Outcome<()> {
         self.data = res!(fs::read(path.as_ref()).map_err(|e| 
             err!("Failed to read TZif file {:?}: {}", path.as_ref(), e; IO, File)));
         self.parse()
     }
 
-    /// Loads TZif data from byte slice
     pub fn load_from_bytes(&mut self, data: &[u8]) -> Outcome<()> {
         self.data = data.to_vec();
         self.parse()
     }
 
-    /// Gets the parsed timezone data
     pub fn timezone_data(&self) -> Option<&TZifData> {
         self.timezone_data.as_ref()
     }
 
-    /// Parses the loaded TZif data
     fn parse(&mut self) -> Outcome<()> {
         if self.data.len() < 44 {
             return Err(err!("TZif file too short: {} bytes", self.data.len(); Invalid, Input));
@@ -148,7 +109,6 @@ impl TZifParser {
         Ok(())
     }
 
-    /// Parses TZif file header
     fn parse_header(&self, cursor: &mut Cursor<&Vec<u8>>) -> Outcome<TZifHeader> {
         let mut magic = [0u8; 4];
         res!(cursor.read_exact(&mut magic).map_err(|e| 
@@ -193,7 +153,6 @@ impl TZifParser {
         })
     }
 
-    /// Parses a data block (version 1 uses 32-bit, version 2+ uses 64-bit timestamps)
     fn parse_data_block(&self, cursor: &mut Cursor<&Vec<u8>>, header: &TZifHeader, is_64bit: bool) -> Outcome<TZifData> {
         // Parse transition times
         let mut transition_times = Vec::with_capacity(header.tzh_timecnt as usize);
@@ -286,7 +245,6 @@ impl TZifParser {
         })
     }
 
-    /// Parses POSIX TZ string footer (version 2+ only)
     fn parse_posix_footer(&self, cursor: &mut Cursor<&Vec<u8>>) -> Outcome<String> {
         // Skip newline
         let mut newline = [0u8; 1];
@@ -317,7 +275,6 @@ impl TZifParser {
     }
 }
 
-/// TZif file header structure
 #[derive(Debug)]
 struct TZifHeader {
     version: u8,
@@ -330,7 +287,6 @@ struct TZifHeader {
 }
 
 impl TZifData {
-    /// Gets the timezone abbreviation for a local time type
     pub fn get_abbreviation(&self, local_time_type: &LocalTimeType) -> Outcome<&str> {
         if local_time_type.abbreviation_index >= self.abbreviations.len() {
             return Err(err!(
@@ -349,7 +305,6 @@ impl TZifData {
         Ok(&self.abbreviations[abbrev_start..abbrev_end])
     }
 
-    /// Converts UTC timestamp to local time, handling DST transitions
     pub fn utc_to_local(&self, utc_timestamp: i64) -> LocalTimeResult<(i64, &LocalTimeType)> {
         // Find the applicable transition
         let transition_index = self.transition_times
@@ -374,7 +329,6 @@ impl TZifData {
         LocalTimeResult::Single((local_timestamp, local_time_type))
     }
 
-    /// Converts local time to UTC, handling DST transition ambiguity
     pub fn local_to_utc(&self, local_timestamp: i64) -> LocalTimeResult<(i64, &LocalTimeType)> {
         // This is more complex due to DST transitions creating ambiguous or invalid times
         let mut candidates = Vec::new();
@@ -417,7 +371,6 @@ impl TZifData {
         }
     }
 
-    /// Gets the timezone offset at a specific UTC time
     pub fn get_offset_at_utc(&self, utc_timestamp: i64) -> Outcome<i32> {
         match self.utc_to_local(utc_timestamp) {
             LocalTimeResult::Single((_, local_time_type)) => Ok(local_time_type.utc_offset),
@@ -425,7 +378,6 @@ impl TZifData {
         }
     }
 
-    /// Checks if the timezone is in daylight saving time at a specific UTC time
     pub fn is_dst_at_utc(&self, utc_timestamp: i64) -> Outcome<bool> {
         match self.utc_to_local(utc_timestamp) {
             LocalTimeResult::Single((_, local_time_type)) => Ok(local_time_type.is_dst),

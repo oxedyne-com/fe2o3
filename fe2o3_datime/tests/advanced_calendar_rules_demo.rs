@@ -1,10 +1,13 @@
-/// Comprehensive demonstration of advanced calendar rules system
-/// 
-/// This test demonstrates the complete integration of:
-/// - Complex day incrementors ("3rd Monday", "last business day", etc.)
-/// - Holiday engines (US Federal, UK, ECB with Easter calculations)
-/// - Business day engines (custom business weeks, holiday integration)
-/// - Calendar rules (quarterly patterns, business day scheduling)
+//! Comprehensive demonstration of advanced calendar rules system
+//!
+//! This test demonstrates the complete integration of:
+//! - Complex day incrementors ("3rd Monday", "last business day", etc.)
+//! - Holiday engines (US Federal, UK, ECB with Easter calculations)
+//! - Business day engines (custom business weeks, holiday integration)
+//! - Calendar rules (quarterly patterns, business day scheduling)
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_datime::{

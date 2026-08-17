@@ -1,3 +1,6 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 // Tests for full Java calclock parser compatibility
 // Based on Java TestTime.java and Parser.java test cases
 
@@ -9,7 +12,6 @@ use oxedyne_fe2o3_datime::{
     constant::{DayOfWeek, MonthOfYear},
 };
 
-/// Test basic parsing compatibility with Java calclock TestTime_parseInput()
 #[test]
 fn test_java_calclock_basic_parsing() {
     let zone = CalClockZone::utc();
@@ -36,7 +38,6 @@ fn test_java_calclock_basic_parsing() {
     assert_eq!(result2.second(), expected2.second());
 }
 
-/// Test day-of-week parsing from Java TestTime_parseInputUnvalidated()
 #[test]
 fn test_java_calclock_day_of_week_parsing() {
     let zone = CalClockZone::utc();
@@ -56,7 +57,6 @@ fn test_java_calclock_day_of_week_parsing() {
     assert_eq!(result2.nanosecond().of(), 3450000);
 }
 
-/// Test ISO-style date formats from Java Parser.java documentation
 #[test]
 fn test_java_calclock_iso_formats() {
     let zone = CalClockZone::utc();
@@ -77,7 +77,6 @@ fn test_java_calclock_iso_formats() {
     assert_eq!(result2.second(), 0);
 }
 
-/// Test fractional seconds parsing from Java Parser.java examples
 #[test]
 fn test_java_calclock_fractional_seconds() {
     let zone = CalClockZone::utc();
@@ -101,7 +100,6 @@ fn test_java_calclock_fractional_seconds() {
     assert_eq!(result2.day(), 1);
 }
 
-/// Test natural language parsing from Java Parser.java examples
 #[test]
 fn test_java_calclock_natural_language() {
     let zone = CalClockZone::utc();
@@ -129,7 +127,6 @@ fn test_java_calclock_natural_language() {
     assert_eq!(result3.minute(), 3);
 }
 
-/// Test various date formats from Java Parser.java examples
 #[test]
 fn test_java_calclock_various_date_formats() {
     let zone = CalClockZone::utc();
@@ -147,7 +144,6 @@ fn test_java_calclock_various_date_formats() {
     assert_eq!(result2.day(), 3);
 }
 
-/// Test AM/PM parsing compatibility
 #[test]
 fn test_java_calclock_am_pm_parsing() {
     let zone = CalClockZone::utc();
@@ -173,7 +169,6 @@ fn test_java_calclock_am_pm_parsing() {
     assert_eq!(result4.minute().of(), 0);
 }
 
-/// Test month name parsing (short and long forms)
 #[test]
 fn test_java_calclock_month_names() {
     let zone = CalClockZone::utc();
@@ -227,7 +222,6 @@ fn test_java_calclock_month_names() {
     }
 }
 
-/// Test ordinal parsing (1st, 2nd, 3rd, etc.)
 #[test]
 fn test_java_calclock_ordinal_parsing() {
     let zone = CalClockZone::utc();
@@ -252,7 +246,6 @@ fn test_java_calclock_ordinal_parsing() {
     }
 }
 
-/// Test edge cases and boundary values
 #[test]
 fn test_java_calclock_edge_cases() {
     let zone = CalClockZone::utc();
@@ -277,7 +270,6 @@ fn test_java_calclock_edge_cases() {
 }
 
 
-/// Test case sensitivity
 #[test]
 fn test_java_calclock_case_insensitive() {
     let zone = CalClockZone::utc();
@@ -303,7 +295,6 @@ fn test_java_calclock_case_insensitive() {
     assert_eq!(result6.hour().of(), 14);
 }
 
-/// Test complex format combinations
 #[test]
 fn test_java_calclock_complex_combinations() {
     let zone = CalClockZone::utc();

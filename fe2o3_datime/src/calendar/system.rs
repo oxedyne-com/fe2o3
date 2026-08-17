@@ -1,3 +1,6 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use crate::{
     calendar::CalendarDate,
     constant::MonthOfYear,
@@ -8,13 +11,10 @@ use oxedyne_fe2o3_core::prelude::*;
 
 use std::fmt;
 
-/// Represents different calendar systems.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum CalendarSystem {
-    /// Gregorian calendar (default) - modern international standard
     Gregorian,
-    /// Julian calendar - used before Gregorian reform
-    Julian,
+    Julian, // used before the Gregorian reform
 }
 
 impl Default for CalendarSystem {
@@ -33,7 +33,6 @@ impl fmt::Display for CalendarSystem {
 }
 
 impl CalendarSystem {
-    /// Returns the name of this calendar system.
     pub fn name(&self) -> &'static str {
         match self {
             Self::Gregorian => "Gregorian",
@@ -41,17 +40,14 @@ impl CalendarSystem {
         }
     }
 
-    /// Returns true if this is the Gregorian calendar system.
     pub fn is_gregorian(&self) -> bool {
         matches!(self, Self::Gregorian)
     }
 
-    /// Returns true if this is the Julian calendar system.
     pub fn is_julian(&self) -> bool {
         matches!(self, Self::Julian)
     }
 
-    /// Determines if a year is a leap year in this calendar system.
     pub fn is_leap_year(&self, year: i32) -> bool {
         match self {
             Self::Gregorian => {
@@ -62,7 +58,6 @@ impl CalendarSystem {
         }
     }
 
-    /// Returns the number of days in a month for this calendar system.
     pub fn days_in_month(&self, year: i32, month: MonthOfYear) -> u8 {
         match month {
             MonthOfYear::January => 31,
@@ -82,12 +77,10 @@ impl CalendarSystem {
         }
     }
 
-    /// Returns the number of days in a year for this calendar system.
     pub fn days_in_year(&self, year: i32) -> u16 {
         if self.is_leap_year(year) { 366 } else { 365 }
     }
 
-    /// Validates a date in this calendar system.
     pub fn validate_date(&self, year: i32, month: MonthOfYear, day: u8) -> Outcome<()> {
         if day == 0 {
             return Err(err!("Day cannot be 0"; Invalid, Input));
@@ -105,7 +98,6 @@ impl CalendarSystem {
         Ok(())
     }
 
-    /// Converts a Julian day number to a date in this calendar system.
     pub fn from_julian_day_number(&self, jdn: i64, zone: CalClockZone) -> Outcome<CalendarDate> {
         let (year, month, day) = match self {
             Self::Gregorian => res!(self.jdn_to_gregorian(jdn)),
@@ -115,7 +107,6 @@ impl CalendarSystem {
         CalendarDate::new_with_system(year, month.of(), day, zone, self.clone())
     }
 
-    /// Converts a date in this calendar system to a Julian day number.
     pub fn to_julian_day_number(&self, year: i32, month: MonthOfYear, day: u8) -> Outcome<i64> {
         match self {
             Self::Gregorian => self.gregorian_to_jdn(year, month, day),
@@ -123,7 +114,6 @@ impl CalendarSystem {
         }
     }
 
-    /// Converts Julian day number to Gregorian calendar date.
     fn jdn_to_gregorian(&self, jdn: i64) -> Outcome<(i32, MonthOfYear, u8)> {
         let a = jdn + 32044;
         let b = (4 * a + 3) / 146097;
@@ -140,7 +130,6 @@ impl CalendarSystem {
         Ok((year, month, day))
     }
 
-    /// Converts Julian day number to Julian calendar date.
     fn jdn_to_julian(&self, jdn: i64) -> Outcome<(i32, MonthOfYear, u8)> {
         let a = jdn + 1402;
         let b = (a - 1) / 1461;
@@ -157,7 +146,6 @@ impl CalendarSystem {
         Ok((year, month, day))
     }
 
-    /// Converts Gregorian calendar date to Julian day number.
     fn gregorian_to_jdn(&self, year: i32, month: MonthOfYear, day: u8) -> Outcome<i64> {
         let m = month.of() as i32;
         let (y, m) = if m <= 2 {
@@ -176,7 +164,6 @@ impl CalendarSystem {
         Ok(jdn)
     }
 
-    /// Converts Julian calendar date to Julian day number.
     fn julian_to_jdn(&self, year: i32, month: MonthOfYear, day: u8) -> Outcome<i64> {
         let m = month.of() as i32;
         let (y, m) = if m <= 2 {
@@ -192,7 +179,6 @@ impl CalendarSystem {
         Ok(jdn)
     }
 
-    /// Converts a date from this calendar system to another calendar system.
     pub fn convert_to(&self, 
         other: &CalendarSystem, 
         year: i32, 
@@ -210,17 +196,12 @@ impl CalendarSystem {
         other.from_julian_day_number(jdn, zone)
     }
 
-    /// Returns the date of the Gregorian calendar reform for comparison purposes.
-    /// 
-    /// The Gregorian calendar was adopted on October 15, 1582 (Gregorian) / October 4, 1582 (Julian).
-    /// However, different countries adopted it at different times.
+    /// The reform took effect on 15 October 1582 Gregorian, which was 4 October 1582
+    /// Julian, but countries adopted it at widely different dates.
     pub fn gregorian_reform_date() -> (i32, u8, u8) {
         (1582, 10, 15) // October 15, 1582 (Gregorian)
     }
 
-    /// Returns true if the given date would be affected by calendar reform.
-    /// 
-    /// This is primarily useful for historical date validation and conversion.
     pub fn is_reform_period(&self, year: i32, month: u8, day: u8) -> bool {
         let (reform_year, reform_month, _reform_day) = Self::gregorian_reform_date();
         
@@ -228,12 +209,10 @@ impl CalendarSystem {
         (day >= 5 && day <= 14) // The "lost days" October 5-14, 1582
     }
 
-    /// Returns an iterator over all supported calendar systems.
     pub fn all() -> impl Iterator<Item = CalendarSystem> {
         [Self::Gregorian, Self::Julian].into_iter()
     }
 
-    /// Parses a calendar system from a string.
     pub fn from_str(s: &str) -> Outcome<Self> {
         match s.to_lowercase().as_str() {
             "gregorian" | "greg" | "g" => Ok(Self::Gregorian),

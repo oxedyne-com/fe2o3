@@ -1,7 +1,10 @@
-/// String interning system for performance optimisation.
-///
-/// This module provides efficient string interning to reduce memory usage
-/// and improve performance by ensuring equal strings share the same allocation.
+//! String interning system for performance optimisation.
+//!
+//! Equal strings share one allocation, which cuts memory use and the cost of
+//! repeated comparison.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -10,29 +13,18 @@ use std::{
 	sync::{Arc, RwLock, OnceLock},
 };
 
-/// Global string interner for commonly used strings in datetime formatting.
-///
-/// This includes month names, day names, timezone abbreviations, format patterns,
-/// and other frequently repeated strings to reduce memory allocations.
 #[derive(Debug)]
 pub struct GlobalStringInterner {
-	/// Cache for month names (short and long).
 	month_names: RwLock<HashMap<String, Arc<String>>>,
-	/// Cache for day names (short and long).
 	day_names: RwLock<HashMap<String, Arc<String>>>,
-	/// Cache for timezone names and abbreviations.
 	timezone_names: RwLock<HashMap<String, Arc<String>>>,
-	/// Cache for format patterns.
 	format_patterns: RwLock<HashMap<String, Arc<String>>>,
-	/// Cache for general strings.
 	general_strings: RwLock<HashMap<String, Arc<String>>>,
 }
 
-/// Global interner instance.
 static GLOBAL_INTERNER: OnceLock<GlobalStringInterner> = OnceLock::new();
 
 impl GlobalStringInterner {
-	/// Creates a new global string interner with preloaded common strings.
 	fn new() -> Self {
 		let mut interner = Self {
 			month_names: RwLock::new(HashMap::new()),
@@ -46,12 +38,10 @@ impl GlobalStringInterner {
 		interner
 	}
 	
-	/// Gets the global string interner instance.
 	pub fn global() -> &'static GlobalStringInterner {
 		GLOBAL_INTERNER.get_or_init(|| GlobalStringInterner::new())
 	}
 	
-	/// Preloads commonly used strings to improve performance.
 	fn preload_common_strings(&mut self) {
 		// Preload month names
 		let month_names = [
@@ -120,32 +110,26 @@ impl GlobalStringInterner {
 		}
 	}
 	
-	/// Interns a month name string.
 	pub fn intern_month_name(&self, name: &str) -> Arc<String> {
 		self.intern_in_cache(&self.month_names, name)
 	}
 	
-	/// Interns a day name string.
 	pub fn intern_day_name(&self, name: &str) -> Arc<String> {
 		self.intern_in_cache(&self.day_names, name)
 	}
 	
-	/// Interns a timezone name string.
 	pub fn intern_timezone_name(&self, name: &str) -> Arc<String> {
 		self.intern_in_cache(&self.timezone_names, name)
 	}
 	
-	/// Interns a format pattern string.
 	pub fn intern_format_pattern(&self, pattern: &str) -> Arc<String> {
 		self.intern_in_cache(&self.format_patterns, pattern)
 	}
 	
-	/// Interns a general string.
 	pub fn intern_general(&self, s: &str) -> Arc<String> {
 		self.intern_in_cache(&self.general_strings, s)
 	}
 	
-	/// Generic intern function for a specific cache.
 	fn intern_in_cache(&self, cache: &RwLock<HashMap<String, Arc<String>>>, s: &str) -> Arc<String> {
 		// Try read lock first for common case
 		if let Ok(read_cache) = cache.read() {
@@ -170,7 +154,6 @@ impl GlobalStringInterner {
 		}
 	}
 	
-	/// Returns statistics about interned strings.
 	pub fn stats(&self) -> InternerStats {
 		let month_count = if let Ok(cache) = self.month_names.read() { cache.len() } else { 0 };
 		let day_count = if let Ok(cache) = self.day_names.read() { cache.len() } else { 0 };
@@ -188,7 +171,6 @@ impl GlobalStringInterner {
 		}
 	}
 	
-	/// Clears all interned strings (useful for testing).
 	pub fn clear_all(&self) {
 		let _ = self.month_names.write().map(|mut cache| cache.clear());
 		let _ = self.day_names.write().map(|mut cache| cache.clear());
@@ -198,7 +180,6 @@ impl GlobalStringInterner {
 	}
 }
 
-/// Statistics about string interning performance.
 #[derive(Debug, Clone)]
 pub struct InternerStats {
 	pub month_names_count: usize,
@@ -210,7 +191,6 @@ pub struct InternerStats {
 }
 
 impl InternerStats {
-	/// Returns the estimated memory saved by interning (rough estimate).
 	pub fn estimated_memory_saved_bytes(&self) -> usize {
 		// Rough estimate: each interned string saves about 24 bytes
 		// (String overhead) per duplicate reference
@@ -218,31 +198,25 @@ impl InternerStats {
 	}
 }
 
-/// Convenience functions for interning commonly used strings.
 pub mod convenience {
 	use super::*;
 	
-	/// Interns a month name.
 	pub fn intern_month(name: &str) -> Arc<String> {
 		GlobalStringInterner::global().intern_month_name(name)
 	}
 	
-	/// Interns a day name.
 	pub fn intern_day(name: &str) -> Arc<String> {
 		GlobalStringInterner::global().intern_day_name(name)
 	}
 	
-	/// Interns a timezone name.
 	pub fn intern_timezone(name: &str) -> Arc<String> {
 		GlobalStringInterner::global().intern_timezone_name(name)
 	}
 	
-	/// Interns a format pattern.
 	pub fn intern_pattern(pattern: &str) -> Arc<String> {
 		GlobalStringInterner::global().intern_format_pattern(pattern)
 	}
 	
-	/// Interns a general string.
 	pub fn intern(s: &str) -> Arc<String> {
 		GlobalStringInterner::global().intern_general(s)
 	}

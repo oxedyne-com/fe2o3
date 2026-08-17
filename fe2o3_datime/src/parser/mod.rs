@@ -1,3 +1,13 @@
+//! Natural language date and time parsing.
+//!
+//! Parsing runs in two passes: a lexer turns the input into tokens, then a
+//! semantic parser interprets the sequence. The second pass is where the
+//! interesting decisions are made, since the same number can be a day, a month
+//! or an hour depending on what surrounds it.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use crate::{
 	calendar::{Calendar, CalendarDate, DayIncrementor},
 	clock::ClockTime,
@@ -16,13 +26,6 @@ use std::{
 	str::CharIndices,
 };
 
-/// Comprehensive natural language date/time parser with sophisticated parsing capabilities.
-///
-/// The Parser provides advanced parsing functionality for converting string representations
-/// of dates and times into their corresponding fe2o3_calclock types. This implementation
-/// uses a two-pass architecture (lexical analysis + semantic interpretation) to handle
-/// a wide variety of input formats including natural language expressions.
-///
 /// # Supported Formats
 ///
 /// ## Date Formats
@@ -79,7 +82,6 @@ pub struct Parser {
 	semantic_parser: SemanticParser,
 }
 
-/// Token types for lexical analysis - comprehensive set supporting advanced natural language parsing.
 #[derive(Clone, Debug, PartialEq)]
 pub enum TokenType {
 	// Numeric tokens
@@ -168,7 +170,6 @@ pub enum TokenType {
 	Unknown,
 }
 
-/// Individual token from lexical analysis.
 #[derive(Clone, Debug)]
 pub struct Token {
 	pub token_type: TokenType,
@@ -176,7 +177,6 @@ pub struct Token {
 	pub position: usize,
 }
 
-/// Lexical analyser for tokenising input strings.
 #[derive(Debug)]
 pub struct Lexer {
 	month_names: HashMap<String, u8>,
@@ -184,7 +184,6 @@ pub struct Lexer {
 	timezone_abbrevs: HashMap<String, String>,
 }
 
-/// Format pattern for semantic parsing.
 #[derive(Clone, Debug)]
 pub struct FormatPattern {
 	pub name: String,
@@ -192,20 +191,17 @@ pub struct FormatPattern {
 	pub priority: u8, // Higher priority patterns are tried first
 }
 
-/// Semantic parser for interpreting token sequences with sophisticated validation and field swapping.
 #[derive(Debug)]
 pub struct SemanticParser {
 	format_patterns: Vec<FormatPattern>,
 }
 
-/// Score for date format detection.
 #[derive(Debug, Clone)]
 struct DateFormatScore {
 	confidence: f64,
 	format_name: String,
 }
 
-/// Advanced field holder with validation and disambiguation capabilities.
 #[derive(Debug, Clone)]
 struct AdvancedTimeFieldHolder {
 	// Date fields
@@ -249,8 +245,6 @@ impl AdvancedTimeFieldHolder {
 		}
 	}
 
-	/// Attempts to validate and disambiguate date fields using intelligent swapping.
-	/// Implements comprehensive Java-style context-aware logic with sophisticated field swapping.
 	fn validate_and_disambiguate(&mut self) -> Outcome<()> {
 		if self.has_attempted_validation {
 			return Ok(());
@@ -284,7 +278,6 @@ impl AdvancedTimeFieldHolder {
 		Ok(())
 	}
 
-	/// Validates and intelligently swaps date fields using Java calclock logic.
 	fn validate_and_swap_date_fields(&mut self) -> Outcome<()> {
 		
 		// Handle year/day/month ambiguity with sophisticated swapping
@@ -355,7 +348,6 @@ impl AdvancedTimeFieldHolder {
 		Ok(())
 	}
 	
-	/// Scores a date format to determine confidence and format type.
 	fn score_date_format(&self, year: i32, month: u8, day: u8) -> DateFormatScore {
 		let mut score = DateFormatScore {
 			confidence: 0.0,
@@ -402,7 +394,6 @@ impl AdvancedTimeFieldHolder {
 		score
 	}
 	
-	/// Generates candidate date arrangements prioritized by likelihood.
 	fn generate_date_candidates(&self, year: i32, month: u8, day: u8) -> Vec<(i32, u8, u8)> {
 		let mut candidates = Vec::new();
 		
@@ -431,7 +422,6 @@ impl AdvancedTimeFieldHolder {
 		candidates
 	}
 
-	/// Validates time fields with context-aware interpretation.
 	fn validate_time_fields(&mut self) -> Outcome<()> {
 		// Validate hour range
 		if let Some(hour) = self.hour {
@@ -463,7 +453,6 @@ impl AdvancedTimeFieldHolder {
 		Ok(())
 	}
 
-	/// Applies context-sensitive defaults based on Java calclock behaviour.
 	fn apply_context_defaults(&mut self) -> Outcome<()> {
 		// If we have date fields but no time, default time to start of day
 		if (self.year.is_some() || self.month.is_some() || self.day.is_some()) &&
@@ -487,7 +476,6 @@ impl AdvancedTimeFieldHolder {
 		Ok(())
 	}
 
-	/// Enhanced date validation using proper calendar rules.
 	fn is_valid_date(&self, year: i32, month: u8, day: u8) -> bool {
 		use crate::constant::MonthOfYear;
 		
@@ -512,7 +500,6 @@ impl AdvancedTimeFieldHolder {
 		year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
 	}
 
-	/// Resolves a DayIncrementor to actual date fields.
 	fn resolve_day_incrementor(&mut self, incrementor: &DayIncrementor) -> Outcome<()> {
 		use crate::time::CalClockZone;
 		
@@ -546,7 +533,6 @@ impl AdvancedTimeFieldHolder {
 		Ok(())
 	}
 
-	/// Resolves relative day expressions like "today", "tomorrow", "yesterday".
 	fn resolve_relative_day(&mut self, relative: &str) -> Outcome<()> {
 		use std::time::{SystemTime, UNIX_EPOCH};
 		
@@ -659,7 +645,6 @@ mod debug_tests {
 }
 
 impl Parser {
-	/// Creates a new Parser with full natural language parsing capabilities.
 	pub fn new() -> Self {
 		Self {
 			lexer: Lexer::new(),
@@ -667,21 +652,6 @@ impl Parser {
 		}
 	}
 	
-	/// Parses a date string into a CalendarDate.
-	///
-	/// This method supports a wide variety of date formats including ISO 8601,
-	/// natural language expressions, and numeric formats with various separators.
-	///
-	/// # Arguments
-	///
-	/// * `input` - String representation of the date to parse
-	/// * `zone` - Time zone to apply to the parsed date
-	///
-	/// # Returns
-	///
-	/// Returns `Ok(CalendarDate)` if parsing succeeds, otherwise returns an error
-	/// describing the parsing failure.
-	///
 	/// # Examples
 	///
 	/// ```ignore
@@ -703,20 +673,6 @@ impl Parser {
 		parser.build_calendar_date(field_holder, zone)
 	}
 	
-	/// Parses a time string into a ClockTime.
-	///
-	/// Supports 24-hour format, 12-hour format with AM/PM, special time words
-	/// (noon, midnight), and nanosecond precision.
-	///
-	/// # Arguments
-	///
-	/// * `input` - String representation of the time to parse
-	/// * `zone` - Time zone to apply to the parsed time
-	///
-	/// # Returns
-	///
-	/// Returns `Ok(ClockTime)` if parsing succeeds, otherwise returns an error.
-	///
 	/// # Examples
 	///
 	/// ```ignore
@@ -732,21 +688,6 @@ impl Parser {
 		parser.build_clock_time(field_holder, zone)
 	}
 	
-	/// Parses a combined date/time string into a CalClock.
-	///
-	/// This is the main parsing method that handles both date and time components
-	/// in a single input string. It supports all date and time formats, plus
-	/// combined formats with various separators and conjunctions.
-	///
-	/// # Arguments
-	///
-	/// * `input` - String representation of the date/time to parse
-	/// * `zone` - Time zone to apply to the parsed date/time
-	///
-	/// # Returns
-	///
-	/// Returns `Ok(CalClock)` if parsing succeeds, otherwise returns an error.
-	///
 	/// # Examples
 	///
 	/// ```ignore
@@ -769,7 +710,6 @@ impl Parser {
 		parser.build_calclock(field_holder, zone)
 	}
 	
-	/// Builds a CalendarDate from parsed time fields.
 	fn build_calendar_date(&self, holder: TimeFieldHolder, zone: CalClockZone) -> Outcome<CalendarDate> {
 		let year = match holder.year {
 			Some(y) => y,
@@ -788,7 +728,6 @@ impl Parser {
 		calendar.date(year, month, day, zone)
 	}
 	
-	/// Builds a ClockTime from parsed time fields.
 	fn build_clock_time(&self, holder: TimeFieldHolder, zone: CalClockZone) -> Outcome<ClockTime> {
 		let hour = holder.hour.unwrap_or(0);
 		let minute = holder.minute.unwrap_or(0);
@@ -798,7 +737,6 @@ impl Parser {
 		ClockTime::new(hour, minute, second, nanosecond, zone)
 	}
 	
-	/// Builds a CalClock from parsed date and time fields.
 	fn build_calclock(&self, holder: TimeFieldHolder, zone: CalClockZone) -> Outcome<CalClock> {
 		// Only use current year as default if no year provided and no date context
 		let year = match holder.year {
@@ -823,14 +761,8 @@ impl Parser {
 		CalClock::new(year, month, day, hour, minute, second, nanosecond, zone)
 	}
 	
-	/// Attempts to parse input as a relative date expression.
-	/// 
-	/// This method handles natural language relative date expressions such as:
-	/// - "next Tuesday", "last Friday", "this Monday"
-	/// - "in 2 weeks", "3 days ago", "2 months from now"
-	/// - "end of this month", "beginning of next year"
-	/// 
-	/// Returns the calculated date if the input is recognized as a relative expression.
+	/// Handles expressions like "next Tuesday", "3 days ago" and
+	/// "end of this month".
 	fn try_parse_relative_date(input: &str, zone: CalClockZone) -> Outcome<CalendarDate> {
 		use self::relative::RelativeDateParser;
 		
@@ -849,10 +781,7 @@ impl Parser {
 		parser.parse_and_calculate(input, &base_date, zone)
 	}
 	
-	/// Checks if input looks like a relative date expression.
-	/// 
-	/// This method uses heuristics to quickly determine if the input contains
-	/// keywords commonly used in relative date expressions.
+	/// A keyword test only, cheap enough to run before the real parse.
 	fn looks_like_relative_date(input: &str) -> bool {
 		let input_lower = input.to_lowercase();
 		
@@ -895,19 +824,7 @@ impl Parser {
 		false
 	}
 	
-	/// Parses a relative date expression and returns both the expression and calculated date.
-	/// 
-	/// This is a convenience method that provides access to both the parsed expression
-	/// structure and the final calculated date.
-	/// 
-	/// # Arguments
-	/// 
-	/// * `input` - The natural language relative date expression
-	/// * `zone` - The timezone for the calculation
-	/// 
-	/// # Returns
-	/// 
-	/// A tuple containing the parsed RelativeExpression and the calculated CalendarDate
+	/// The parsed expression as well as the date it works out to.
 	/// 
 	/// # Examples
 	/// 
@@ -936,16 +853,7 @@ impl Parser {
 		Ok((expression, calculated_date))
 	}
 	
-	/// Parses a relative date expression with a custom base date.
-	/// 
-	/// This method allows you to specify a custom base date for relative calculations
-	/// instead of using the current system date.
-	/// 
-	/// # Arguments
-	/// 
-	/// * `input` - The natural language relative date expression
-	/// * `base_date` - The base date to calculate from
-	/// * `zone` - The timezone for the calculation
+	/// Counts from the given base date rather than from today.
 	/// 
 	/// # Examples
 	/// 
@@ -968,7 +876,6 @@ impl Parser {
 }
 
 impl Lexer {
-	/// Creates a new Lexer with comprehensive language support.
 	pub fn new() -> Self {
 		Self {
 			month_names: Self::build_month_names(),
@@ -977,7 +884,6 @@ impl Lexer {
 		}
 	}
 	
-	/// Tokenizes input string into a sequence of tokens.
 	pub fn tokenize(&self, input: &str) -> Outcome<Vec<Token>> {
 		let mut tokens = Vec::new();
 		let mut chars = input.char_indices().peekable();
@@ -1080,7 +986,6 @@ impl Lexer {
 		self.post_process_tokens(tokens)
 	}
 
-	/// Post-processes tokens to identify complex patterns like DayIncrementor expressions.
 	fn post_process_tokens(&self, tokens: Vec<Token>) -> Outcome<Vec<Token>> {
 		let mut processed_tokens = Vec::new();
 		let mut i = 0;
@@ -1099,7 +1004,6 @@ impl Lexer {
 		Ok(processed_tokens)
 	}
 
-	/// Attempts to parse a DayIncrementor sequence starting at the given position.
 	fn try_parse_day_incrementor_sequence(&self, tokens: &[Token], start: usize) -> Outcome<Option<(Token, usize)>> {
 		if start >= tokens.len() {
 			return Ok(None);
@@ -1220,7 +1124,6 @@ impl Lexer {
 		Ok(None)
 	}
 	
-	/// Parses a numeric token, detecting ordinals and special numeric patterns.
 	fn parse_number(&self, chars: &mut Peekable<CharIndices>, start_pos: usize, first_char: char) -> Outcome<Token> {
 		let mut number_str = String::from(first_char);
 		
@@ -1297,7 +1200,6 @@ impl Lexer {
 		})
 	}
 	
-	/// Parses a word token, classifying it by type with sophisticated natural language support.
 	fn parse_word(&self, chars: &mut Peekable<CharIndices>, start_pos: usize, first_char: char) -> Outcome<Token> {
 		let mut word = String::from(first_char);
 		
@@ -1381,7 +1283,6 @@ impl Lexer {
 		})
 	}
 
-	/// Attempts to parse multi-word tokens like "end of month", "this week", etc.
 	fn try_parse_multi_word_token(&self, chars: &mut Peekable<CharIndices>, first_word: &str) -> Option<TokenType> {
 		// Look ahead to see what words follow
 		let peek_ahead: Vec<char> = chars.clone()
@@ -1428,7 +1329,6 @@ impl Lexer {
 		}
 	}
 	
-	/// Attempts to parse an ordinal suffix (st, nd, rd, th).
 	fn try_parse_ordinal_suffix(&self, chars: &mut Peekable<CharIndices>) -> String {
 		let mut suffix = String::new();
 		
@@ -1451,7 +1351,6 @@ impl Lexer {
 		suffix
 	}
 	
-	/// Checks if the upcoming characters look like an ISO date pattern.
 	fn looks_like_iso_date(&self, chars: &Peekable<CharIndices>) -> bool {
 		let peek_ahead: Vec<char> = chars.clone()
 			.take(6) // Look for "-MM-DD" pattern
@@ -1470,8 +1369,6 @@ impl Lexer {
 		}
 	}
 	
-	/// Checks if the upcoming characters look like an ISO datetime pattern.
-	/// Looks for patterns like "YYYY-MM-DDTHH:MM:SS" or "YYYY-MM-DD HH:MM:SS".
 	fn looks_like_iso_datetime(&self, chars: &Peekable<CharIndices>) -> bool {
 		let peek_ahead: Vec<char> = chars.clone()
 			.take(20) // Look for full datetime pattern
@@ -1512,7 +1409,6 @@ impl Lexer {
 		false
 	}
 	
-	/// Parses a complete ISO date pattern starting with year.
 	fn parse_iso_date_pattern(&self, chars: &mut Peekable<CharIndices>, year: &str) -> Outcome<String> {
 		let mut iso_date = year.to_string();
 		
@@ -1534,8 +1430,6 @@ impl Lexer {
 		Ok(iso_date)
 	}
 	
-	/// Parses a complete ISO datetime pattern starting with year.
-	/// Handles patterns like "YYYY-MM-DDTHH:MM:SS" or "YYYY-MM-DD HH:MM:SS".
 	fn parse_iso_datetime_pattern(&self, chars: &mut Peekable<CharIndices>, year: &str) -> Outcome<String> {
 		let mut iso_datetime = year.to_string();
 		
@@ -1633,8 +1527,8 @@ impl Lexer {
 		Ok(iso_datetime)
 	}
 	
-	/// Checks if the upcoming characters look like fractional seconds.
-	/// This method now uses context to distinguish between fractional seconds and time expressions.
+	/// A dot is only fractional seconds when the context rules it out as a
+	/// time separator.
 	fn looks_like_fractional_seconds(&self, chars: &Peekable<CharIndices>) -> bool {
 		// First, check if there are digits after the decimal point
 		let has_digits_after_dot = chars.clone()
@@ -1720,8 +1614,8 @@ impl Lexer {
 		true
 	}
 	
-	/// Checks if a '.' character should be treated as a time separator.
-	/// This detects patterns like "1.12 pm" where the dot separates hours and minutes.
+	/// In "1.12 pm" the dot separates hours from minutes, not seconds from
+	/// their fraction.
 	fn looks_like_time_separator(&self, chars: &Peekable<CharIndices>) -> bool {
 		// Look ahead to see if this is followed by digits and then AM/PM
 		let mut ahead_chars = chars.clone();
@@ -1756,7 +1650,6 @@ impl Lexer {
 		next_chars == "am" || next_chars == "pm"
 	}
 
-	/// Checks if the upcoming characters look like a timezone offset.
 	fn looks_like_timezone_offset(&self, chars: &mut Peekable<CharIndices>) -> bool {
 		chars.clone()
 			.take(4)
@@ -1766,7 +1659,6 @@ impl Lexer {
 			.all(|ch| ch.is_ascii_digit())
 	}
 	
-	/// Parses a timezone offset like "+0500" or "-0300".
 	fn parse_timezone_offset(&self, chars: &mut Peekable<CharIndices>, start_pos: usize, sign: char) -> Outcome<Token> {
 		let mut offset = String::from(sign);
 		
@@ -1790,7 +1682,6 @@ impl Lexer {
 		})
 	}
 	
-	/// Builds the month name lookup table.
 	fn build_month_names() -> HashMap<String, u8> {
 		let mut months = HashMap::new();
 		
@@ -1815,7 +1706,6 @@ impl Lexer {
 		months
 	}
 	
-	/// Builds the day name lookup table.
 	fn build_day_names() -> HashMap<String, u8> {
 		let mut days = HashMap::new();
 		
@@ -1837,7 +1727,6 @@ impl Lexer {
 		days
 	}
 	
-	/// Builds the timezone abbreviation lookup table.
 	fn build_timezone_abbrevs() -> HashMap<String, String> {
 		let mut zones = HashMap::new();
 		
@@ -1856,14 +1745,12 @@ impl Lexer {
 }
 
 impl SemanticParser {
-	/// Creates a new SemanticParser with comprehensive format patterns.
 	pub fn new() -> Self {
 		Self {
 			format_patterns: Self::build_format_patterns(),
 		}
 	}
 	
-	/// Parses tokens representing a date using sophisticated natural language processing.
 	pub fn parse_date_tokens(&self, tokens: Vec<Token>) -> Outcome<TimeFieldHolder> {
 		// First try pattern matching
 		if let Ok(result) = self.try_patterns(&tokens, |pattern| pattern.name.contains("DATE") || pattern.name.contains("_DAY")) {
@@ -1888,7 +1775,6 @@ impl SemanticParser {
 		self.convert_advanced_to_standard_fields(fields)
 	}
 	
-	/// Parses tokens representing a time.
 	pub fn parse_time_tokens(&self, tokens: Vec<Token>) -> Outcome<TimeFieldHolder> {
 		// First try pattern matching
 		if let Ok(result) = self.try_patterns(&tokens, |pattern| pattern.name.contains("TIME") || pattern.name.contains("HOUR")) {
@@ -1913,7 +1799,6 @@ impl SemanticParser {
 		self.convert_advanced_to_standard_fields(fields)
 	}
 	
-	/// Parses tokens representing a combined date/time.
 	pub fn parse_datetime_tokens(&self, tokens: Vec<Token>) -> Outcome<TimeFieldHolder> {
 		// First try combined datetime patterns
 		if let Ok(result) = self.try_patterns(&tokens, |pattern| pattern.name.contains("DATETIME")) {
@@ -1924,7 +1809,6 @@ impl SemanticParser {
 		self.parse_split_datetime(&tokens)
 	}
 	
-	/// Attempts to match patterns against tokens, using a filter predicate.
 	fn try_patterns<F>(&self, tokens: &[Token], filter: F) -> Outcome<TimeFieldHolder>
 	where
 		F: Fn(&FormatPattern) -> bool,
@@ -1945,7 +1829,6 @@ impl SemanticParser {
 		self.intelligent_parse(tokens)
 	}
 	
-	/// Attempts to match a specific pattern against tokens.
 	fn try_pattern(&self, pattern: &FormatPattern, tokens: &[Token]) -> Outcome<TimeFieldHolder> {
 		if self.matches_pattern(&pattern.pattern, tokens) {
 			self.parse_with_pattern(pattern, tokens)
@@ -1954,7 +1837,6 @@ impl SemanticParser {
 		}
 	}
 	
-	/// Checks if a pattern matches the token sequence.
 	fn matches_pattern(&self, pattern: &[TokenType], tokens: &[Token]) -> bool {
 		if pattern.len() != tokens.len() {
 			return false;
@@ -1965,7 +1847,6 @@ impl SemanticParser {
 			.all(|(expected, actual)| self.token_matches_type(actual, expected))
 	}
 	
-	/// Checks if a token matches an expected type (with some flexibility).
 	fn token_matches_type(&self, token: &Token, expected: &TokenType) -> bool {
 		match (expected, &token.token_type) {
 			// Exact matches
@@ -1981,7 +1862,6 @@ impl SemanticParser {
 		}
 	}
 	
-	/// Parses tokens using a specific pattern.
 	fn parse_with_pattern(&self, pattern: &FormatPattern, tokens: &[Token]) -> Outcome<TimeFieldHolder> {
 		match pattern.name.as_str() {
 			"ISO_DATE" => self.parse_iso_date(tokens),
@@ -1998,7 +1878,6 @@ impl SemanticParser {
 		}
 	}
 	
-	/// Performs intelligent parsing when no pattern matches.
 	fn intelligent_parse(&self, tokens: &[Token]) -> Outcome<TimeFieldHolder> {
 		let mut holder = TimeFieldHolder::new();
 		
@@ -2009,7 +1888,6 @@ impl SemanticParser {
 		Ok(holder)
 	}
 	
-	/// Applies context-sensitive parsing rules.
 	fn apply_context_rules(&self, tokens: &[Token], holder: &mut TimeFieldHolder) -> Outcome<()> {
 		for i in 0..tokens.len() {
 			match &tokens[i].token_type {
@@ -2156,7 +2034,8 @@ impl SemanticParser {
 		Ok(())
 	}
 	
-	/// Applies automatic validation-based field swapping.
+	/// Where the fields as read do not make a real date, the day, month and
+	/// year are tried in other arrangements.
 	fn apply_validation_swapping(&self, holder: &mut TimeFieldHolder) -> Outcome<()> {
 		// Day/year swapping when validation fails
 		if let (Some(day), Some(year)) = (holder.day, holder.year) {
@@ -2215,7 +2094,6 @@ impl SemanticParser {
 		Ok(())
 	}
 
-	/// Processes a single token with sophisticated context awareness.
 	fn process_sophisticated_token(
 		&self,
 		token: &Token,
@@ -2274,7 +2152,6 @@ impl SemanticParser {
 		Ok(())
 	}
 
-	/// Processes a numeric token with sophisticated context-aware interpretation.
 	fn process_sophisticated_number_token(
 		&self,
 		token: &Token,
@@ -2346,7 +2223,6 @@ impl SemanticParser {
 		Ok(())
 	}
 
-	/// Processes an ordinal number token (like "15th").
 	fn process_sophisticated_ordinal_number_token(&self, token: &Token, fields: &mut AdvancedTimeFieldHolder) -> Outcome<()> {
 		// Extract the numeric part
 		let numeric_part = token.value.chars()
@@ -2364,7 +2240,6 @@ impl SemanticParser {
 		Ok(())
 	}
 
-	/// Processes an ordinal word token (like "third").
 	fn process_sophisticated_ordinal_word_token(&self, token: &Token, fields: &mut AdvancedTimeFieldHolder) -> Outcome<()> {
 		if let Some(ordinal) = OrdinalEnglish::from_name(&token.value.to_lowercase()) {
 			let value = ordinal.value();
@@ -2378,7 +2253,6 @@ impl SemanticParser {
 		Ok(())
 	}
 
-	/// Processes a month name token.
 	fn process_sophisticated_month_token(&self, token: &Token, fields: &mut AdvancedTimeFieldHolder) -> Outcome<()> {
 		if let Some(month_num) = MonthOfYear::from_name(&token.value.to_lowercase()) {
 			fields.month = Some(month_num.of());
@@ -2387,7 +2261,6 @@ impl SemanticParser {
 		Ok(())
 	}
 
-	/// Processes a day name token.
 	fn process_sophisticated_day_name_token(&self, token: &Token, fields: &mut AdvancedTimeFieldHolder) -> Outcome<()> {
 		if let Some(day_of_week) = DayOfWeek::from_name(&token.value.to_lowercase()) {
 			fields.day_of_week = Some(day_of_week);
@@ -2396,7 +2269,8 @@ impl SemanticParser {
 		Ok(())
 	}
 
-	/// Processes an AM/PM token.
+	/// 12 PM stays as it is and 12 AM becomes zero. If the hour has not been
+	/// seen yet, the conversion waits until the fields are converted.
 	fn process_sophisticated_ampm_token(&self, token: &Token, fields: &mut AdvancedTimeFieldHolder) -> Outcome<()> {
 		let is_pm = token.value.to_lowercase().starts_with('p');
 		println!("DEBUG: Processing AM/PM token '{}', is_pm={}, current hour={:?}", token.value, is_pm, fields.hour);
@@ -2429,8 +2303,6 @@ impl SemanticParser {
 		Ok(())
 	}
 
-	/// Processes a nanosecond token (fractional seconds) with advanced precision support.
-	/// Supports full nanosecond precision as per Java calclock specifications.
 	fn process_sophisticated_nanosecond_token(&self, token: &Token, fields: &mut AdvancedTimeFieldHolder) -> Outcome<()> {
 		// Parse fractional seconds like "14.123456789", "2.5", "30.00456"
 		if let Some(dot_pos) = token.value.find('.') {
@@ -2488,7 +2360,6 @@ impl SemanticParser {
 		Ok(())
 	}
 
-	/// Converts advanced fields to standard TimeFieldHolder.
 	fn convert_advanced_to_standard_fields(&self, fields: AdvancedTimeFieldHolder) -> Outcome<TimeFieldHolder> {
 		let mut holder = TimeFieldHolder::new();
 		
@@ -2546,7 +2417,6 @@ impl SemanticParser {
 		Ok(holder)
 	}
 	
-	/// Interprets a number based on its context within the token sequence.
 	fn interpret_number_in_context(&self, num: i64, pos: usize, tokens: &[Token], holder: &mut TimeFieldHolder) -> Outcome<()> {
 		// Check surrounding tokens for context clues
 		let prev_token = if pos > 0 { Some(&tokens[pos - 1]) } else { None };
@@ -2650,7 +2520,6 @@ impl SemanticParser {
 		Ok(())
 	}
 	
-	/// Parses a split date/time string (date part + time part).
 	fn parse_split_datetime(&self, tokens: &[Token]) -> Outcome<TimeFieldHolder> {
 		// Find potential split points (keywords like "at", "T", or significant separators)
 		let split_point = self.find_datetime_split_point(tokens);
@@ -2690,7 +2559,6 @@ impl SemanticParser {
 		}
 	}
 	
-	/// Finds the optimal split point between date and time components.
 	fn find_datetime_split_point(&self, tokens: &[Token]) -> Option<usize> {
 		// Look for explicit separators like "at", "T", comma, etc.
 		for (i, token) in tokens.iter().enumerate() {
@@ -2726,7 +2594,6 @@ impl SemanticParser {
 		None
 	}
 	
-	/// Checks if a token sequence looks like the start of a time.
 	fn looks_like_time_start(&self, tokens: &[Token]) -> bool {
 		if tokens.is_empty() {
 			return false;
@@ -2750,7 +2617,6 @@ impl SemanticParser {
 		false
 	}
 	
-	/// Checks if a token sequence looks like time tokens.
 	fn looks_like_time_tokens(&self, tokens: &[Token]) -> bool {
 		if tokens.is_empty() {
 			return false;
@@ -2778,7 +2644,6 @@ impl SemanticParser {
 		false
 	}
 	
-	/// Merges time fields from one holder into another.
 	fn merge_time_fields(&self, target: &mut TimeFieldHolder, source: TimeFieldHolder) -> Outcome<()> {
 		if let Some(hour) = source.hour {
 			res!(target.set_field(TimeField::Hour, hour as i64));
@@ -2796,14 +2661,12 @@ impl SemanticParser {
 		Ok(())
 	}
 	
-	/// Extracts numeric value from ordinal number (e.g., "3rd" -> 3).
 	fn extract_ordinal_number(&self, ordinal: &str) -> Outcome<u8> {
 		let number_part = ordinal.trim_end_matches(|c: char| c.is_alphabetic());
 		number_part.parse().map_err(|_| 
 			err!("Invalid ordinal number: {}", ordinal; Invalid, Input))
 	}
 	
-	/// Converts month name to numeric value.
 	fn month_name_to_number(&self, month_name: &str) -> Outcome<u8> {
 		let lexer = Lexer::new();
 		lexer.month_names.get(&month_name.to_lowercase())
@@ -3118,7 +2981,6 @@ impl SemanticParser {
 		Ok(holder)
 	}
 	
-	/// Builds the comprehensive set of format patterns.
 	fn build_format_patterns() -> Vec<FormatPattern> {
 		vec![
 			// High priority patterns (specific formats)
@@ -3222,8 +3084,6 @@ impl Default for Parser {
 		Self::new()
 	}
 }
-
-/// 
 
 #[cfg(test)]
 mod tests {

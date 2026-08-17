@@ -1,4 +1,7 @@
-/// Demonstration of the real-time scheduling system with background processing
+//! Demonstration of the real-time scheduling system with background processing
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_datime::{

@@ -1,20 +1,23 @@
-/// Network Time Protocol (NTP) implementation for fe2o3_datime
-/// 
-/// This module provides functionality to synchronise time with NTP servers,
-/// query network time, and calculate clock offset and drift.
-/// 
-/// NTP Protocol Reference: RFC 5905
-/// 
-/// # Examples
-/// 
-/// ```ignore
-/// use oxedyne_fe2o3_datime::time::ntp::NtpClient;
-/// 
-/// let client = NtpClient::new("pool.ntp.org", 123)?;
-/// let ntp_time = client.query_time()?;
-/// println!("Network time: {}", ntp_time.network_time);
-/// println!("Offset: {} ms", ntp_time.offset_millis);
-/// ```
+//! Network Time Protocol (NTP) implementation for fe2o3_datime
+//!
+//! This module provides functionality to synchronise time with NTP servers,
+//! query network time, and calculate clock offset and drift.
+//!
+//! NTP Protocol Reference: RFC 5905
+//!
+//! # Examples
+//!
+//! ```ignore
+//! use oxedyne_fe2o3_datime::time::ntp::NtpClient;
+//!
+//! let client = NtpClient::new("pool.ntp.org", 123)?;
+//! let ntp_time = client.query_time()?;
+//! println!("Network time: {}", ntp_time.network_time);
+//! println!("Offset: {} ms", ntp_time.offset_millis);
+//! ```
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use std::{
@@ -24,36 +27,24 @@ use std::{
     sync::mpsc,
 };
 
-/// NTP packet format as defined in RFC 5905
+/// The RFC 5905 packet layout.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct NtpPacket {
-    /// Leap Indicator (2 bits), Version Number (3 bits), Mode (3 bits)
-    li_vn_mode: u8,
-    /// Stratum level of the local clock
+    li_vn_mode: u8, // 2-bit leap indicator, 3-bit version, 3-bit mode
     stratum: u8,
-    /// Maximum interval between successive messages
     poll: i8,
-    /// Precision of the local clock
     precision: i8,
-    /// Total roundtrip delay to primary reference source
     root_delay: u32,
-    /// Maximum error due to clock frequency tolerance
     root_dispersion: u32,
-    /// Reference clock identifier
     ref_id: u32,
-    /// Reference timestamp
     ref_timestamp: u64,
-    /// Origin timestamp (T1)
-    origin_timestamp: u64,
-    /// Receive timestamp (T2)
-    receive_timestamp: u64,
-    /// Transmit timestamp (T3)
-    transmit_timestamp: u64,
+    origin_timestamp: u64, // T1
+    receive_timestamp: u64, // T2
+    transmit_timestamp: u64, // T3
 }
 
 impl NtpPacket {
-    /// Creates a new NTP request packet
     fn new_request() -> Self {
         NtpPacket {
             li_vn_mode: 0x1B, // Version 3, Mode 3 (client)
@@ -70,7 +61,6 @@ impl NtpPacket {
         }
     }
 
-    /// Converts to byte array for network transmission
     fn to_bytes(&self) -> [u8; 48] {
         let mut bytes = [0u8; 48];
         bytes[0] = self.li_vn_mode;
@@ -87,7 +77,6 @@ impl NtpPacket {
         bytes
     }
 
-    /// Creates from byte array received from network
     fn from_bytes(bytes: &[u8; 48]) -> Self {
         NtpPacket {
             li_vn_mode: bytes[0],
@@ -117,24 +106,16 @@ impl NtpPacket {
     }
 }
 
-/// NTP time query result containing network time and offset information
 #[derive(Debug, Clone)]
 pub struct NtpTimeResult {
-    /// The network time from the NTP server
     pub network_time: SystemTime,
-    /// Local system time when the response was received
     pub local_time: SystemTime,
-    /// Clock offset in milliseconds (positive means local clock is ahead)
-    pub offset_millis: i64,
-    /// Round-trip delay in milliseconds
+    pub offset_millis: i64, // positive when the local clock is ahead
     pub delay_millis: u64,
-    /// Stratum level of the NTP server
     pub stratum: u8,
-    /// Reference identifier of the server
     pub reference_id: u32,
 }
 
-/// NTP client for querying network time servers
 #[derive(Debug)]
 pub struct NtpClient {
     server_addr: String,
@@ -143,7 +124,6 @@ pub struct NtpClient {
 }
 
 impl NtpClient {
-    /// Creates a new NTP client for the specified server and port
     pub fn new(server: &str, port: u16) -> Self {
         NtpClient {
             server_addr: server.to_string(),
@@ -152,18 +132,15 @@ impl NtpClient {
         }
     }
 
-    /// Creates an NTP client with default settings (port 123)
     pub fn default(server: &str) -> Self {
         Self::new(server, 123)
     }
 
-    /// Sets the timeout for NTP queries
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
 
-    /// Queries the NTP server for current time
     pub fn query_time(&self) -> Outcome<NtpTimeResult> {
         // Resolve server address
         let server_addr = format!("{}:{}", self.server_addr, self.port);
@@ -204,7 +181,6 @@ impl NtpClient {
         self.calculate_time_result(request, response, send_time, receive_time)
     }
 
-    /// Queries multiple NTP servers and returns the best result
     pub fn query_multiple_servers(servers: &[&str], max_concurrent: usize) -> Outcome<NtpTimeResult> {
         if servers.is_empty() {
             return Err(err!("No NTP servers provided"; Invalid, Input));
@@ -266,7 +242,6 @@ impl NtpClient {
         }
     }
 
-    /// Calculates time result from NTP packet exchange
     fn calculate_time_result(
         &self,
         _request: NtpPacket,
@@ -305,11 +280,9 @@ impl NtpClient {
     }
 }
 
-/// Default NTP server pool for quick access
 pub struct NtpPool;
 
 impl NtpPool {
-    /// Public NTP server pool
     pub const PUBLIC: &'static [&'static str] = &[
         "pool.ntp.org",
         "time.nist.gov",
@@ -317,12 +290,10 @@ impl NtpPool {
         "time.cloudflare.com",
     ];
 
-    /// Queries the public NTP pool for current time
     pub fn query_time() -> Outcome<NtpTimeResult> {
         NtpClient::query_multiple_servers(Self::PUBLIC, 4)
     }
 
-    /// Queries a specific subset of reliable NTP servers
     pub fn query_reliable() -> Outcome<NtpTimeResult> {
         let reliable_servers = &[
             "time.google.com",
@@ -333,9 +304,6 @@ impl NtpPool {
     }
 }
 
-/// Utility functions for NTP timestamp conversion
-
-/// Converts SystemTime to NTP timestamp (seconds since 1900-01-01)
 fn system_time_to_ntp_timestamp(time: SystemTime) -> u64 {
     const NTP_EPOCH_OFFSET: u64 = 2_208_988_800; // Seconds from 1900 to 1970
     
@@ -350,7 +318,6 @@ fn system_time_to_ntp_timestamp(time: SystemTime) -> u64 {
     }
 }
 
-/// Converts NTP timestamp to SystemTime
 fn ntp_timestamp_to_system_time(ntp_timestamp: u64) -> SystemTime {
     const NTP_EPOCH_OFFSET: u64 = 2_208_988_800;
     
@@ -361,7 +328,6 @@ fn ntp_timestamp_to_system_time(ntp_timestamp: u64) -> SystemTime {
     UNIX_EPOCH + Duration::new(seconds, nanos as u32)
 }
 
-/// Converts NTP timestamp to milliseconds
 fn ntp_timestamp_to_millis(ntp_timestamp: u64) -> u64 {
     let seconds = ntp_timestamp >> 32;
     let fraction = ntp_timestamp & 0xFFFFFFFF;

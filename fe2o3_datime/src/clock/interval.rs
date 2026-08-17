@@ -1,3 +1,6 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use crate::{
 	core::{
 		Interval,
@@ -14,22 +17,8 @@ use oxedyne_fe2o3_core::prelude::*;
 
 use std::fmt;
 
-/// Represents a time interval between two ClockTime instances within a single day.
-///
-/// A ClockInterval defines a span of time from a start time to a finish time, where both
-/// times occur within the same conceptual day. The interval maintains chronological order
-/// (start ≤ finish) and provides operations for duration calculation, containment testing,
-/// and interval arithmetic.
-///
-/// The interval is inclusive of both endpoints, meaning that a time exactly equal to either
-/// the start or finish time is considered to be contained within the interval.
-///
-/// # Chronological Ordering
-///
-/// All ClockInterval instances maintain the invariant that start ≤ finish. This is enforced
-/// during construction and maintained through all operations.
-///
-/// # Examples
+/// A span within one day, inclusive of both endpoints, and holding start ≤ finish
+/// from construction onwards.
 ///
 /// ```ignore
 /// use oxedyne_fe2o3_datime::{
@@ -40,7 +29,7 @@ use std::fmt;
 /// let zone = CalClockZone::utc()res!();
 /// let start = ClockTime::new(10, 30, 0, 0, zone.clone())?res!();
 /// let finish = ClockTime::new(14, 45, 30, 0, zone)?res!();
-/// 
+///
 /// let interval = ClockInterval::new(start, finish)?res!();
 /// assert_eq!(interval.duration().total_hours(), 4)res!();
 /// ```
@@ -51,19 +40,6 @@ pub struct ClockInterval {
 }
 
 impl ClockInterval {
-	/// Creates a new ClockInterval from start and finish times.
-	///
-	/// This constructor validates that the start time does not occur after the finish time,
-	/// ensuring chronological order is maintained.
-	///
-	/// # Arguments
-	///
-	/// * `start` - The beginning time of the interval
-	/// * `finish` - The ending time of the interval
-	///
-	/// # Returns
-	///
-	/// Returns `Ok(ClockInterval)` if start ≤ finish, otherwise returns an error.
 	pub fn new(start: ClockTime, finish: ClockTime) -> Outcome<Self> {
 		if start.is_after(&finish) {
 			return Err(err!(
@@ -76,13 +52,10 @@ impl ClockInterval {
 		Ok(Self { start, finish })
 	}
 	
-	/// Creates a ClockInterval without validating chronological order.
-	/// Use only when you're certain the order is correct.
 	pub fn new_unchecked(start: ClockTime, finish: ClockTime) -> Self {
 		Self { start, finish }
 	}
 	
-	/// Creates an interval from a start time and duration.
 	pub fn from_start_and_duration(
 		start: ClockTime, 
 		duration: &ClockDuration
@@ -99,7 +72,6 @@ impl ClockInterval {
 		Self::new(start, finish)
 	}
 	
-	/// Creates an interval from a finish time and duration (going backwards).
 	pub fn from_finish_and_duration(
 		finish: ClockTime, 
 		duration: &ClockDuration
@@ -116,32 +88,26 @@ impl ClockInterval {
 		Self::new(start, finish)
 	}
 	
-	/// Returns the start time.
 	pub fn start(&self) -> &ClockTime {
 		&self.start
 	}
 	
-	/// Returns the finish time.
 	pub fn finish(&self) -> &ClockTime {
 		&self.finish
 	}
 	
-	/// Returns the duration of this interval.
 	pub fn duration(&self) -> ClockDuration {
 		self.start.duration_until(&self.finish)
 	}
 	
-	/// Returns true if this interval contains the given time.
 	pub fn contains_time(&self, time: &ClockTime) -> bool {
 		time.or_later(&self.start) && time.or_earlier(&self.finish)
 	}
 	
-	/// Returns true if this interval overlaps with another interval.
 	pub fn overlaps_with(&self, other: &Self) -> bool {
 		self.start.is_before(&other.finish) && other.start.is_before(&self.finish)
 	}
 	
-	/// Returns the intersection of this interval with another, if any.
 	pub fn intersect_with(&self, other: &Self) -> Option<Self> {
 		if !self.overlaps_with(other) {
 			return None;
@@ -162,7 +128,6 @@ impl ClockInterval {
 		Some(Self::new_unchecked(start, finish))
 	}
 	
-	/// Returns the union of this interval with another, if they're contiguous or overlapping.
 	pub fn union_with(&self, other: &Self) -> Option<Self> {
 		// Check if intervals are contiguous or overlapping
 		if !self.overlaps_with(other) && 
@@ -186,17 +151,14 @@ impl ClockInterval {
 		Some(Self::new_unchecked(start, finish))
 	}
 	
-	/// Returns true if this is an instant (start == finish).
 	pub fn is_instant(&self) -> bool {
 		self.start.eq(&self.finish)
 	}
 	
-	/// Returns true if this interval is valid (start <= finish).
 	pub fn is_valid(&self) -> bool {
 		self.start.or_earlier(&self.finish)
 	}
 	
-	/// Converts the interval to a different time zone.
 	pub fn to_zone(&self, zone: CalClockZone) -> Outcome<Self> {
 		// For clock intervals, this is administrative conversion
 		// (no actual time transformation since we don't have date context)

@@ -1,7 +1,10 @@
-/// Time indexing and lookup system for efficient time-based queries
-/// 
-/// This module provides indexing structures for fast time-based lookups,
-/// range queries, and temporal data organization.
+//! Time indexing and lookup system for efficient time-based queries.
+//!
+//! This module provides indexing structures for fast time-based lookups,
+//! range queries, and temporal data organisation.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 pub mod time_index;
 pub mod range_index;

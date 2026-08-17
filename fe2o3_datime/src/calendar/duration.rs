@@ -1,10 +1,13 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use crate::core::Duration;
 
 use oxedyne_fe2o3_core::prelude::*;
 
 use std::fmt::{self, Display};
 
-/// A duration measured in calendar units (years, months, days).
+/// Calendar units, whose length in days depends on where they are applied.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CalendarDuration {
     years:	i32,
@@ -45,33 +48,27 @@ impl CalendarDuration {
         }
     }
     
-    /// Get the number of years.
     pub fn years(&self) -> i32 {
         self.years
     }
     
-    /// Get the number of months.
     pub fn months(&self) -> i32 {
         self.months
     }
     
-    /// Get the number of days.
     pub fn days(&self) -> i32 {
         self.days
     }
     
-    /// Get total days (approximate, as months have variable lengths).
     pub fn in_days(&self) -> i32 {
         // Approximate: 365.25 days per year, 30.44 days per month
         (self.years as f64 * 365.25 + self.months as f64 * 30.44 + self.days as f64) as i32
     }
     
-    /// Check if the duration is negative.
     pub fn is_negative(&self) -> bool {
         self.years < 0 || self.months < 0 || self.days < 0
     }
     
-    /// Negate the duration.
     pub fn negate(&self) -> Self {
         Self {
             years: -self.years,
@@ -80,7 +77,6 @@ impl CalendarDuration {
         }
     }
     
-    /// Add another duration.
     pub fn plus(&self, other: &Self) -> Self {
         Self {
             years: self.years + other.years,
@@ -89,7 +85,6 @@ impl CalendarDuration {
         }
     }
     
-    /// Subtract another duration.
     pub fn minus(&self, other: &Self) -> Self {
         Self {
             years: self.years - other.years,

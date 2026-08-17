@@ -1,3 +1,9 @@
+//! Metrics for validation: how often it runs, how often it passes, how long
+//! it takes, and which rules do the rejecting.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use crate::{
     validation::ValidationResult,
 };
@@ -9,12 +15,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Comprehensive validation analytics and metrics collection.
-///
-/// ValidationAnalytics tracks detailed metrics about validation operations,
-/// including performance, success rates, error patterns, and trends over time.
-/// This is essential for understanding validation behaviour in production systems.
-///
 /// # Examples
 ///
 /// ```ignore
@@ -34,26 +34,17 @@ use std::{
 /// ```
 #[derive(Debug, Clone)]
 pub struct ValidationAnalytics {
-    /// Total number of validation operations performed.
     total_validations: u64,
-    /// Number of successful validations.
     successful_validations: u64,
-    /// Number of failed validations.
     failed_validations: u64,
-    /// Total time spent on validation operations.
     total_validation_time: Duration,
-    /// Error frequency by rule name.
     error_frequency: HashMap<String, u64>,
-    /// Performance metrics by rule type.
     rule_performance: HashMap<String, RulePerformance>,
-    /// Recent validation history for trend analysis.
     recent_validations: Vec<ValidationRecord>,
-    /// Maximum number of recent validations to keep.
     max_history: usize,
 }
 
 impl ValidationAnalytics {
-    /// Creates a new analytics instance.
     pub fn new() -> Self {
         Self {
             total_validations: 0,
@@ -67,7 +58,6 @@ impl ValidationAnalytics {
         }
     }
 
-    /// Creates a new analytics instance with custom history size.
     pub fn with_history_size(max_history: usize) -> Self {
         Self {
             max_history,
@@ -75,7 +65,6 @@ impl ValidationAnalytics {
         }
     }
 
-    /// Tracks a validation operation and collects metrics.
     pub fn track_validation<F, T>(&mut self, operation: F) -> T
     where
         F: FnOnce() -> T,
@@ -102,7 +91,6 @@ impl ValidationAnalytics {
         result
     }
 
-    /// Tracks a validation result and updates metrics.
     pub fn track_validation_result(&mut self, result: &ValidationResult, rule_name: &str, duration: Duration) {
         self.total_validations += 1;
         self.total_validation_time += duration;
@@ -138,12 +126,10 @@ impl ValidationAnalytics {
         }
     }
 
-    /// Records an error for a specific rule.
     pub fn record_error(&mut self, rule_name: &str) {
         *self.error_frequency.entry(rule_name.to_string()).or_insert(0) += 1;
     }
 
-    /// Gets comprehensive validation metrics.
     pub fn get_metrics(&self) -> ValidationMetrics {
         ValidationMetrics {
             total_validations: self.total_validations,
@@ -156,13 +142,11 @@ impl ValidationAnalytics {
         }
     }
 
-    /// Generates a detailed validation report.
     pub fn generate_report(&self) -> ValidationReport {
         let metrics = self.get_metrics();
         ValidationReport::new(metrics)
     }
 
-    /// Resets all analytics data.
     pub fn reset(&mut self) {
         self.total_validations = 0;
         self.successful_validations = 0;
@@ -173,7 +157,6 @@ impl ValidationAnalytics {
         self.recent_validations.clear();
     }
 
-    /// Calculates trend from recent validations.
     fn calculate_recent_trend(&self) -> ValidationTrend {
         if self.recent_validations.len() < 10 {
             return ValidationTrend::Insufficient;
@@ -203,23 +186,16 @@ impl Default for ValidationAnalytics {
     }
 }
 
-/// Performance metrics for a specific validation rule.
 #[derive(Debug, Clone)]
 pub struct RulePerformance {
-    /// Total number of times this rule was executed.
     pub execution_count: u64,
-    /// Total time spent executing this rule.
     pub total_time: Duration,
-    /// Number of successful executions.
     pub success_count: u64,
-    /// Minimum execution time observed.
     pub min_time: Option<Duration>,
-    /// Maximum execution time observed.
     pub max_time: Option<Duration>,
 }
 
 impl RulePerformance {
-    /// Creates a new performance tracker.
     pub fn new() -> Self {
         Self {
             execution_count: 0,
@@ -230,7 +206,6 @@ impl RulePerformance {
         }
     }
 
-    /// Adds a new measurement.
     pub fn add_measurement(&mut self, duration: Duration, success: bool) {
         self.execution_count += 1;
         self.total_time += duration;
@@ -252,7 +227,6 @@ impl RulePerformance {
         }
     }
 
-    /// Gets the average execution time.
     pub fn average_time(&self) -> Duration {
         if self.execution_count == 0 {
             Duration::new(0, 0)
@@ -261,7 +235,7 @@ impl RulePerformance {
         }
     }
 
-    /// Gets the success rate.
+    /// A fraction between zero and one, not a percentage.
     pub fn success_rate(&self) -> f64 {
         if self.execution_count == 0 {
             0.0
@@ -277,38 +251,26 @@ impl Default for RulePerformance {
     }
 }
 
-/// Individual validation record for trend analysis.
 #[derive(Debug, Clone)]
 pub struct ValidationRecord {
-    /// When this validation occurred.
     pub timestamp: Instant,
-    /// How long the validation took.
     pub duration: Duration,
-    /// Whether the validation succeeded.
     pub success: bool,
 }
 
-/// Comprehensive validation metrics.
 #[derive(Debug, Clone)]
 pub struct ValidationMetrics {
-    /// Total number of validation operations.
     pub total_validations: u64,
-    /// Number of successful validations.
     pub successful_validations: u64,
-    /// Number of failed validations.
     pub failed_validations: u64,
-    /// Total time spent on validation.
     pub total_validation_time: Duration,
-    /// Error frequency by rule name.
     pub error_frequency: HashMap<String, u64>,
-    /// Performance metrics by rule type.
     pub rule_performance: HashMap<String, RulePerformance>,
-    /// Recent validation trend.
     pub recent_trend: ValidationTrend,
 }
 
 impl ValidationMetrics {
-    /// Gets the overall success rate.
+    /// A fraction between zero and one, not a percentage.
     pub fn success_rate(&self) -> f64 {
         if self.total_validations == 0 {
             0.0
@@ -317,7 +279,6 @@ impl ValidationMetrics {
         }
     }
 
-    /// Gets the average validation time.
     pub fn average_validation_time(&self) -> Duration {
         if self.total_validations == 0 {
             Duration::new(0, 0)
@@ -326,7 +287,6 @@ impl ValidationMetrics {
         }
     }
 
-    /// Gets the most frequent error rule.
     pub fn most_frequent_error(&self) -> Option<(String, u64)> {
         self.error_frequency
             .iter()
@@ -334,7 +294,6 @@ impl ValidationMetrics {
             .map(|(rule, count)| (rule.clone(), *count))
     }
 
-    /// Gets the slowest performing rule.
     pub fn slowest_rule(&self) -> Option<(String, Duration)> {
         self.rule_performance
             .iter()
@@ -343,36 +302,25 @@ impl ValidationMetrics {
     }
 }
 
-/// Validation trend analysis.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ValidationTrend {
-    /// Insufficient data for trend analysis.
-    Insufficient,
-    /// Excellent validation performance (>95% success).
-    Excellent,
-    /// Good validation performance (90-95% success).
-    Good,
-    /// Moderate validation performance (80-90% success).
-    Moderate,
-    /// Poor validation performance (<80% success).
-    Poor,
+    // Banded by success rate over the recent history.
+    Insufficient,   // too few records to say
+    Excellent,      // above 95%
+    Good,           // 90 to 95%
+    Moderate,       // 80 to 90%
+    Poor,           // below 80%
 }
 
-/// Detailed validation report with analysis and recommendations.
 #[derive(Debug, Clone)]
 pub struct ValidationReport {
-    /// The metrics this report is based on.
     pub metrics: ValidationMetrics,
-    /// Analysis summary.
     pub summary: String,
-    /// Performance recommendations.
     pub recommendations: Vec<String>,
-    /// Error analysis.
     pub error_analysis: Vec<String>,
 }
 
 impl ValidationReport {
-    /// Creates a new validation report from metrics.
     pub fn new(metrics: ValidationMetrics) -> Self {
         let mut report = Self {
             metrics: metrics.clone(),
@@ -388,7 +336,6 @@ impl ValidationReport {
         report
     }
 
-    /// Generates a human-readable summary.
     fn generate_summary(&mut self) {
         let success_rate = self.metrics.success_rate() * 100.0;
         let avg_time = self.metrics.average_validation_time();
@@ -403,7 +350,6 @@ impl ValidationReport {
         );
     }
 
-    /// Generates performance recommendations.
     fn generate_recommendations(&mut self) {
         // Performance recommendations
         if let Some((rule, duration)) = self.metrics.slowest_rule() {
@@ -438,7 +384,6 @@ impl ValidationReport {
         }
     }
 
-    /// Generates error analysis.
     fn generate_error_analysis(&mut self) {
         if let Some((rule, count)) = self.metrics.most_frequent_error() {
             self.error_analysis.push(format!(
@@ -456,7 +401,6 @@ impl ValidationReport {
         }
     }
 
-    /// Formats the report as a human-readable string.
     pub fn format(&self) -> String {
         let mut output = String::new();
         

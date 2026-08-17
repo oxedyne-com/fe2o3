@@ -1,3 +1,8 @@
+//! Validation of large batches across several threads.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use crate::{
     calendar::CalendarDate,
     clock::ClockTime,
@@ -13,13 +18,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// High-performance parallel validator for batch validation operations.
-///
-/// ParallelValidator distributes validation work across multiple threads
-/// to maximise throughput when validating large collections of CalClocks.
-/// This is particularly beneficial for data import, batch processing, and
-/// high-volume validation scenarios.
-///
 /// # Examples
 ///
 /// ```ignore
@@ -35,16 +33,12 @@ use std::{
 /// ```
 #[derive(Debug)]
 pub struct ParallelValidator {
-    /// The base validator to use.
-    validator: Arc<CalClockValidator>,
-    /// Number of worker threads.
-    thread_count: usize,
-    /// Work chunk size for optimal load balancing.
-    chunk_size: usize,
+    validator:      Arc<CalClockValidator>,
+    thread_count:   usize,
+    chunk_size:     usize,      // items handed to a thread at a time
 }
 
 impl ParallelValidator {
-    /// Creates a new parallel validator with the specified thread count.
     pub fn new(validator: CalClockValidator, thread_count: usize) -> Self {
         Self {
             validator: Arc::new(validator),
@@ -53,13 +47,11 @@ impl ParallelValidator {
         }
     }
 
-    /// Creates a new parallel validator with custom chunk size.
     pub fn with_chunk_size(mut self, chunk_size: usize) -> Self {
         self.chunk_size = std::cmp::max(1, chunk_size);
         self
     }
 
-    /// Validates a batch of CalClocks in parallel.
     pub fn validate_batch(&self, calclocks: &[CalClock]) -> BatchValidationResult {
         let _start_time = Instant::now();
         
@@ -166,7 +158,6 @@ impl ParallelValidator {
         }
     }
 
-    /// Validates CalendarDates in parallel.
     pub fn validate_dates_batch(&self, dates: &[CalendarDate]) -> BatchValidationResult {
         let _start_time = Instant::now();
         
@@ -198,7 +189,6 @@ impl ParallelValidator {
         self.validate_batch(&calclocks)
     }
 
-    /// Validates ClockTimes in parallel.
     pub fn validate_times_batch(&self, times: &[ClockTime]) -> BatchValidationResult {
         let _start_time = Instant::now();
         
@@ -230,7 +220,6 @@ impl ParallelValidator {
         self.validate_batch(&calclocks)
     }
 
-    /// Filters a collection to return only valid CalClocks using parallel processing.
     pub fn filter_valid_parallel(&self, calclocks: Vec<CalClock>) -> Vec<CalClock> {
         let results = self.validate_batch(&calclocks);
         
@@ -244,38 +233,28 @@ impl ParallelValidator {
             .collect()
     }
 
-    /// Gets the configured thread count.
     pub fn thread_count(&self) -> usize {
         self.thread_count
     }
 
-    /// Gets the configured chunk size.
     pub fn chunk_size(&self) -> usize {
         self.chunk_size
     }
 }
 
-/// Result of a batch validation operation.
 #[derive(Debug, Clone)]
 pub struct BatchValidationResult {
-    /// Total number of items validated.
-    pub total_items: usize,
-    /// Number of valid items.
-    pub valid_items: usize,
-    /// Number of invalid items.
-    pub invalid_items: usize,
-    /// Detailed validation errors.
-    pub validation_errors: Vec<ValidationItemError>,
-    /// Total execution time.
-    pub execution_time: Duration,
-    /// Number of threads used.
-    pub thread_count: usize,
-    /// Chunk size used for processing.
-    pub chunk_size: usize,
+    pub total_items:        usize,
+    pub valid_items:        usize,
+    pub invalid_items:      usize,
+    pub validation_errors:  Vec<ValidationItemError>,
+    pub execution_time:     Duration,
+    pub thread_count:       usize,
+    pub chunk_size:         usize,
 }
 
 impl BatchValidationResult {
-    /// Gets the success rate as a percentage.
+    /// A fraction between zero and one, not a percentage.
     pub fn success_rate(&self) -> f64 {
         if self.total_items == 0 {
             0.0
@@ -284,7 +263,6 @@ impl BatchValidationResult {
         }
     }
 
-    /// Gets the validation throughput (items per second).
     pub fn throughput(&self) -> f64 {
         if self.execution_time.as_secs_f64() == 0.0 {
             0.0
@@ -293,7 +271,6 @@ impl BatchValidationResult {
         }
     }
 
-    /// Gets the average time per item.
     pub fn average_time_per_item(&self) -> Duration {
         if self.total_items == 0 {
             Duration::new(0, 0)
@@ -302,12 +279,10 @@ impl BatchValidationResult {
         }
     }
 
-    /// Checks if all items passed validation.
     pub fn all_valid(&self) -> bool {
         self.invalid_items == 0
     }
 
-    /// Gets a summary of error types.
     pub fn error_summary(&self) -> std::collections::HashMap<String, usize> {
         let mut summary = std::collections::HashMap::new();
         
@@ -320,7 +295,6 @@ impl BatchValidationResult {
         summary
     }
 
-    /// Formats the result as a human-readable string.
     pub fn format(&self) -> String {
         format!(
             "Batch Validation Result:\n\
@@ -344,29 +318,20 @@ impl BatchValidationResult {
     }
 }
 
-/// Validation error for a specific item in a batch.
 #[derive(Debug, Clone)]
 pub struct ValidationItemError {
-    /// Index of the item in the original batch.
-    pub index: usize,
-    /// The CalClock that failed validation.
-    pub calclock: CalClock,
-    /// The validation errors.
-    pub errors: Vec<ValidationError>,
+    pub index:      usize,      // position in the original batch
+    pub calclock:   CalClock,
+    pub errors:     Vec<ValidationError>,
 }
 
-/// Internal result for a single validation item.
 #[derive(Debug, Clone)]
 struct ValidationItemResult {
-    /// Index in the batch.
-    index: usize,
-    /// The CalClock being validated.
-    calclock: CalClock,
-    /// Validation result.
-    result: ValidationResult,
+    index:      usize,
+    calclock:   CalClock,
+    result:     ValidationResult,
 }
 
-/// Automatic thread count detection based on system capabilities.
 pub fn optimal_thread_count() -> usize {
     // Use number of logical CPUs, but cap at reasonable limits
     let cpu_count = std::thread::available_parallelism()
@@ -377,7 +342,6 @@ pub fn optimal_thread_count() -> usize {
     std::cmp::min(16, std::cmp::max(2, cpu_count))
 }
 
-/// Creates a parallel validator with optimal settings for the current system.
 pub fn create_optimal_parallel_validator(validator: CalClockValidator) -> ParallelValidator {
     let thread_count = optimal_thread_count();
     ParallelValidator::new(validator, thread_count)

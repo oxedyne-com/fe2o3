@@ -1,3 +1,6 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use oxedyne_fe2o3_core::{
     prelude::*,
     test::test_it,
@@ -7,7 +10,6 @@ use oxedyne_fe2o3_datime::{
     time::{CalClock, CalClockZone},
 };
 
-/// Tests locale-based formatting functionality
 pub fn test_format_locale(filter: &str) -> Outcome<()> {
     
     res!(test_it(filter, &["locale_basic", "all", "format", "locale"], || {

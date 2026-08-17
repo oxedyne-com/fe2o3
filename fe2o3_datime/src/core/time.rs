@@ -1,10 +1,12 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use crate::time::CalClockZone;
 
 use oxedyne_fe2o3_core::prelude::*;
 
 use std::fmt::Debug;
 
-/// Represents a moment or period of time.
 pub trait Time: Debug + Clone + PartialEq {
     fn get_zone(&self) -> &CalClockZone;
     
@@ -23,11 +25,8 @@ pub trait Time: Debug + Clone + PartialEq {
     fn or_later(&self, other: &Self) -> Self;
 }
 
-/// Represents a fundamental moment of time.
-///
-/// The fundamental moments of time are a CalClock, a ClockTime
-/// defining a time of day, and a CalendarDate defining a day
-/// of year.
+/// The fundamental moments are a CalClock, a ClockTime naming a time of day,
+/// and a CalendarDate naming a day of the year.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AbstractTime {
     zone:	CalClockZone,
@@ -44,9 +43,6 @@ impl AbstractTime {
         }
     }
     
-    /// Provide sorting order for compareTo in children.
-    ///
-    /// The natural order is already defined by is_before and equals.
     pub fn compare_time<T: Time>(&self, this: &T, other: &T) -> Outcome<std::cmp::Ordering> {
         if this.is_before(other) {
             Ok(std::cmp::Ordering::Less)

@@ -1,3 +1,11 @@
+//! Validation of CalClock, CalendarDate and ClockTime values.
+//!
+//! A validator carries a set of rules and a strictness setting, and reports
+//! every failure it finds rather than stopping at the first.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use crate::{
     calendar::CalendarDate,
     clock::ClockTime,
@@ -9,23 +17,16 @@ use oxedyne_fe2o3_core::prelude::*;
 
 use std::fmt;
 
-/// Represents a validation error with detailed context.
 #[derive(Clone, Debug)]
 pub struct ValidationError {
-    /// The type of validation that failed.
-    pub rule: String,
-    /// Human-readable error message.
-    pub message: String,
-    /// The field that failed validation.
-    pub field: Option<String>,
-    /// The invalid value.
-    pub value: Option<String>,
-    /// Expected value or range.
-    pub expected: Option<String>,
+    pub rule:       String,             // which rule rejected it
+    pub message:    String,
+    pub field:      Option<String>,
+    pub value:      Option<String>,     // what was given
+    pub expected:   Option<String>,     // what would have been accepted
 }
 
 impl ValidationError {
-    /// Creates a new validation error.
     pub fn new<S: Into<String>>(rule: S, message: S) -> Self {
         Self {
             rule: rule.into(),
@@ -36,19 +37,16 @@ impl ValidationError {
         }
     }
     
-    /// Sets the field that failed validation.
     pub fn field<S: Into<String>>(mut self, field: S) -> Self {
         self.field = Some(field.into());
         self
     }
     
-    /// Sets the invalid value.
     pub fn value<S: Into<String>>(mut self, value: S) -> Self {
         self.value = Some(value.into());
         self
     }
     
-    /// Sets the expected value or range.
     pub fn expected<S: Into<String>>(mut self, expected: S) -> Self {
         self.expected = Some(expected.into());
         self
@@ -75,15 +73,8 @@ impl fmt::Display for ValidationError {
     }
 }
 
-/// Result type for validation operations.
 pub type ValidationResult = Result<(), Vec<ValidationError>>;
 
-/// Comprehensive validator for CalClock, CalendarDate, and ClockTime.
-///
-/// The CalClockValidator provides detailed validation with contextual error
-/// messages for all date and time components. It supports custom validation
-/// rules and provides both quick validation and detailed error reporting.
-///
 /// # Examples
 ///
 /// ```ignore
@@ -112,14 +103,13 @@ pub type ValidationResult = Result<(), Vec<ValidationError>>;
 /// ```
 #[derive(Debug)]
 pub struct CalClockValidator {
-    /// Custom validation rules.
-    rules: Vec<ValidationRule>,
-    /// Whether to enforce strict validation.
+    rules:  Vec<ValidationRule>,
+    // Strict adds two checks the lenient mode allows: a year outside
+    // -9999 to 9999, and a leap second.
     strict: bool,
 }
 
 impl CalClockValidator {
-    /// Creates a new validator with default settings.
     pub fn new() -> Self {
         Self {
             rules: Vec::new(),
@@ -127,7 +117,6 @@ impl CalClockValidator {
         }
     }
     
-    /// Creates a new strict validator that enforces all validation rules.
     pub fn strict() -> Self {
         Self {
             rules: Vec::new(),
@@ -135,12 +124,10 @@ impl CalClockValidator {
         }
     }
     
-    /// Adds a custom validation rule.
     pub fn add_rule(&mut self, rule: ValidationRule) {
         self.rules.push(rule);
     }
     
-    /// Sets strict validation mode.
     pub fn set_strict(&mut self, strict: bool) {
         self.strict = strict;
     }
@@ -149,7 +136,6 @@ impl CalClockValidator {
     // CalClock Validation
     // ========================================================================
     
-    /// Validates a CalClock and returns detailed errors if invalid.
     pub fn validate_calclock(&self, calclock: &CalClock) -> ValidationResult {
         let mut errors = Vec::new();
         
@@ -185,7 +171,6 @@ impl CalClockValidator {
         }
     }
     
-    /// Quick validation check for CalClock.
     pub fn is_valid_calclock(&self, calclock: &CalClock) -> bool {
         self.validate_calclock(calclock).is_ok()
     }
@@ -194,7 +179,6 @@ impl CalClockValidator {
     // CalendarDate Validation
     // ========================================================================
     
-    /// Validates a CalendarDate and returns detailed errors if invalid.
     pub fn validate_date(&self, date: &CalendarDate) -> ValidationResult {
         let mut errors = Vec::new();
         
@@ -265,7 +249,6 @@ impl CalClockValidator {
         }
     }
     
-    /// Quick validation check for CalendarDate.
     pub fn is_valid_date(&self, date: &CalendarDate) -> bool {
         self.validate_date(date).is_ok()
     }
@@ -274,7 +257,6 @@ impl CalClockValidator {
     // ClockTime Validation
     // ========================================================================
     
-    /// Validates a ClockTime and returns detailed errors if invalid.
     pub fn validate_time(&self, time: &ClockTime) -> ValidationResult {
         let mut errors = Vec::new();
         
@@ -342,7 +324,6 @@ impl CalClockValidator {
         }
     }
     
-    /// Quick validation check for ClockTime.
     pub fn is_valid_time(&self, time: &ClockTime) -> bool {
         self.validate_time(time).is_ok()
     }
@@ -351,7 +332,6 @@ impl CalClockValidator {
     // Batch Validation
     // ========================================================================
     
-    /// Validates multiple CalClocks and returns all errors.
     pub fn validate_many_calclocks(&self, calclocks: &[CalClock]) -> ValidationResult {
         let mut all_errors = Vec::new();
         
@@ -373,14 +353,12 @@ impl CalClockValidator {
         }
     }
     
-    /// Returns the number of valid CalClocks in a collection.
     pub fn count_valid_calclocks(&self, calclocks: &[CalClock]) -> usize {
         calclocks.iter()
             .filter(|calclock| self.is_valid_calclock(calclock))
             .count()
     }
     
-    /// Filters a collection to return only valid CalClocks.
     pub fn filter_valid_calclocks(&self, calclocks: Vec<CalClock>) -> Vec<CalClock> {
         calclocks.into_iter()
             .filter(|calclock| self.is_valid_calclock(calclock))
@@ -391,7 +369,6 @@ impl CalClockValidator {
     // Range Validation
     // ========================================================================
     
-    /// Validates that a date falls within a specified range.
     pub fn validate_date_range(
         &self,
         date: &CalendarDate,
@@ -425,7 +402,6 @@ impl CalClockValidator {
         }
     }
     
-    /// Validates that a time falls within a specified range.
     pub fn validate_time_range(
         &self,
         time: &ClockTime,
@@ -470,37 +446,30 @@ impl Default for CalClockValidator {
 // Convenience Functions
 // ========================================================================
 
-/// Quick validation function for CalClock.
 pub fn validate_calclock(calclock: &CalClock) -> ValidationResult {
     CalClockValidator::new().validate_calclock(calclock)
 }
 
-/// Quick validation function for CalendarDate.
 pub fn validate_date(date: &CalendarDate) -> ValidationResult {
     CalClockValidator::new().validate_date(date)
 }
 
-/// Quick validation function for ClockTime.
 pub fn validate_time(time: &ClockTime) -> ValidationResult {
     CalClockValidator::new().validate_time(time)
 }
 
-/// Strict validation function for CalClock.
 pub fn validate_calclock_strict(calclock: &CalClock) -> ValidationResult {
     CalClockValidator::strict().validate_calclock(calclock)
 }
 
-/// Checks if a CalClock is valid.
 pub fn is_valid_calclock(calclock: &CalClock) -> bool {
     validate_calclock(calclock).is_ok()
 }
 
-/// Checks if a CalendarDate is valid.
 pub fn is_valid_date(date: &CalendarDate) -> bool {
     validate_date(date).is_ok()
 }
 
-/// Checks if a ClockTime is valid.
 pub fn is_valid_time(time: &ClockTime) -> bool {
     validate_time(time).is_ok()
 }

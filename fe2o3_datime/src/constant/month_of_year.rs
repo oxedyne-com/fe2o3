@@ -1,8 +1,12 @@
+//! Months of the year, numbered January 1 through December 12.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use oxedyne_fe2o3_core::prelude::*;
 
 use std::fmt::{self, Display};
 
-/// Months of the year.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum MonthOfYear {
     January,
@@ -20,7 +24,7 @@ pub enum MonthOfYear {
 }
 
 impl MonthOfYear {
-    /// Get the numeric value of the month (January = 1, December = 12).
+    /// January is 1 and December 12.
     pub fn of(&self) -> u8 {
         match self {
             Self::January	=> 1,
@@ -38,7 +42,6 @@ impl MonthOfYear {
         }
     }
     
-    /// Create from numeric value (1-12).
     pub fn from_number(n: u8) -> Outcome<Self> {
         match n {
             1	=> Ok(Self::January),
@@ -59,7 +62,6 @@ impl MonthOfYear {
         }
     }
     
-    /// Get the next month.
     pub fn next(&self) -> Self {
         match self {
             Self::January	=> Self::February,
@@ -77,7 +79,6 @@ impl MonthOfYear {
         }
     }
     
-    /// Get the previous month.
     pub fn previous(&self) -> Self {
         match self {
             Self::January	=> Self::December,
@@ -95,7 +96,6 @@ impl MonthOfYear {
         }
     }
     
-    /// Get abbreviated name (Jan, Feb, etc).
     pub fn abbrev(&self) -> &'static str {
         match self {
             Self::January	=> "Jan",
@@ -113,7 +113,6 @@ impl MonthOfYear {
         }
     }
     
-    /// Get full name.
     pub fn name(&self) -> &'static str {
         match self {
             Self::January	=> "January",
@@ -131,8 +130,7 @@ impl MonthOfYear {
         }
     }
     
-    /// Get the number of days in this month for a given year.
-    /// Takes leap years into account.
+    /// February follows the Gregorian leap year rule.
     pub fn days_in_month(&self, year: i32) -> u8 {
         match self {
             Self::January	=> 31,
@@ -154,7 +152,6 @@ impl MonthOfYear {
         }
     }
     
-    /// Get the quarter this month belongs to (1-4).
     pub fn quarter(&self) -> u8 {
         match self {
             Self::January | Self::February | Self::March		=> 1,
@@ -164,17 +161,15 @@ impl MonthOfYear {
         }
     }
     
-    /// Get short name (alias for abbrev).
     pub fn short_name(&self) -> &'static str {
         self.abbrev()
     }
     
-    /// Get long name (alias for name).
     pub fn long_name(&self) -> &'static str {
         self.name()
     }
 
-    /// Parse from a string name (case insensitive).
+    /// Matches full names and abbreviations, case insensitively.
     pub fn from_name(name: &str) -> Option<Self> {
         let name = name.to_lowercase();
         match name.as_str() {

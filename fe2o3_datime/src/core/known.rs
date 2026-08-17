@@ -1,6 +1,8 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use oxedyne_fe2o3_core::prelude::*;
 
-/// Represents a known year value.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, PartialOrd, Ord)]
 pub struct KnownYear(pub i32);
 
@@ -14,7 +16,6 @@ impl KnownYear {
     }
 }
 
-/// Represents a known month value.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, PartialOrd, Ord)]
 pub struct KnownMonth(pub u8);
 
@@ -31,7 +32,6 @@ impl KnownMonth {
     }
 }
 
-/// Represents a known day value.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, PartialOrd, Ord)]
 pub struct KnownDay(pub u8);
 
@@ -48,7 +48,6 @@ impl KnownDay {
     }
 }
 
-/// Represents a known hour value.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, PartialOrd, Ord)]
 pub struct KnownHour(pub u8);
 
@@ -65,7 +64,6 @@ impl KnownHour {
     }
 }
 
-/// Represents a known minute value.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, PartialOrd, Ord)]
 pub struct KnownMinute(pub u8);
 
@@ -82,7 +80,6 @@ impl KnownMinute {
     }
 }
 
-/// Represents a known second value.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, PartialOrd, Ord)]
 pub struct KnownSecond(pub u8);
 
@@ -99,7 +96,6 @@ impl KnownSecond {
     }
 }
 
-/// Represents a known nanosecond value.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, PartialOrd, Ord)]
 pub struct KnownNanoSecond(pub u32);
 

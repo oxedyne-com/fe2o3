@@ -1,8 +1,12 @@
+//! SI (Système International) unit prefixes.
+//!
+//! Refer to https://en.wikipedia.org/wiki/Metric_prefix
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use oxedyne_fe2o3_core::prelude::*;
 
-/// SI (Système International) unit prefixes.
-/// 
-/// Refer to https://en.wikipedia.org/wiki/Metric_prefix
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SIPrefix {
 	Yotta,
@@ -28,7 +32,6 @@ pub enum SIPrefix {
 }
 
 impl SIPrefix {
-	/// Returns the symbol for this prefix.
 	pub fn to_symbol(&self) -> &'static str {
 		match self {
 			Self::Yotta => "Y",
@@ -54,7 +57,6 @@ impl SIPrefix {
 		}
 	}
 	
-	/// Returns the power of 10 for this prefix.
 	pub fn to_log10(&self) -> i8 {
 		match self {
 			Self::Yotta => 24,
@@ -80,7 +82,7 @@ impl SIPrefix {
 		}
 	}
 	
-	/// Returns the short name (American English).
+	/// Short scale, as used in American English.
 	pub fn to_short_name(&self) -> &'static str {
 		match self {
 			Self::Yotta => "septillion",
@@ -106,7 +108,7 @@ impl SIPrefix {
 		}
 	}
 	
-	/// Returns the long name (European English).
+	/// Long scale, as used in European English.
 	pub fn to_long_name(&self) -> &'static str {
 		match self {
 			Self::Yotta => "quadrillion",
@@ -132,7 +134,6 @@ impl SIPrefix {
 		}
 	}
 	
-	/// Get prefix by symbol.
 	pub fn get_using_symbol(symbol: &str) -> Option<Self> {
 		let symbol = symbol.trim();
 		match symbol {
@@ -160,7 +161,6 @@ impl SIPrefix {
 		}
 	}
 	
-	/// Get prefix by power of 10.
 	pub fn get_using_log10(log10: i8) -> Option<Self> {
 		match log10 {
 			24 => Some(Self::Yotta),
@@ -187,7 +187,6 @@ impl SIPrefix {
 		}
 	}
 	
-	/// Get prefix by short name.
 	pub fn get_using_short_name(name: &str) -> Option<Self> {
 		let name = name.trim().to_lowercase();
 		match name.as_str() {
@@ -215,7 +214,6 @@ impl SIPrefix {
 		}
 	}
 	
-	/// Get prefix by long name.
 	pub fn get_using_long_name(name: &str) -> Option<Self> {
 		let name = name.trim().to_lowercase();
 		match name.as_str() {

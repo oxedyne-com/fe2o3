@@ -1,100 +1,77 @@
+//! Time represented as an abstract integer, so that arithmetic on it can be
+//! done without reference to a calendar.
+//!
+//! Two implementations are offered: TimeLong over an i64, and TimeBigInt over
+//! an arbitrary precision integer.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use oxedyne_fe2o3_core::prelude::*;
 use num_bigint::BigInt;
 use num_traits::Zero;
 use std::str::FromStr;
 
-/// Trait for time-based integer representations with arithmetic operations.
-/// 
-/// This trait provides the foundation for representing time as abstract
-/// numerical values that can be manipulated mathematically.
 pub trait TimeInteger: Clone + PartialEq + Eq + PartialOrd + Ord + std::fmt::Debug {
-	/// Returns true if this value is zero.
 	fn is_zero(&self) -> bool;
 	
-	/// Returns true if this value is positive.
 	fn is_positive(&self) -> bool;
 	
-	/// Returns the negation of this value.
 	fn negate(self) -> Self;
 	
-	/// Returns this value as an i64 (may truncate for large values).
+	/// May truncate a value too large for an i64.
 	fn long_value(&self) -> i64;
 	
-	/// Returns the number of bytes needed to represent this value.
 	fn num_bytes(&self) -> usize;
 	
 	// Arithmetic operations
-	/// Adds another TimeInteger to this one.
+	// The paired forms differ in how they fail. Those taking Self report
+	// overflow and division by zero as errors; those taking an i64 saturate,
+	// and give zero where the divisor is zero.
 	fn add_to(self, other: Self) -> Outcome<Self>;
-	
-	/// Adds an i64 value to this TimeInteger.
 	fn add_to_long(self, other: i64) -> Self;
-	
-	/// Subtracts another TimeInteger from this one.
 	fn subtract_it(self, other: Self) -> Outcome<Self>;
-	
-	/// Subtracts an i64 value from this TimeInteger.
 	fn subtract_it_long(self, other: i64) -> Self;
-	
-	/// Multiplies this TimeInteger by another.
 	fn multiply_by(self, other: Self) -> Outcome<Self>;
-	
-	/// Multiplies this TimeInteger by an i64 value.
 	fn multiply_by_long(self, other: i64) -> Self;
-	
-	/// Divides this TimeInteger by another.
 	fn divide_by(self, other: Self) -> Outcome<Self>;
-	
-	/// Divides this TimeInteger by an i64 value.
 	fn divide_by_long(self, other: i64) -> Self;
-	
-	/// Returns the remainder when dividing by another TimeInteger.
 	fn remainder_by(self, other: Self) -> Outcome<Self>;
-	
-	/// Returns the remainder when dividing by an i64 value.
 	fn remainder_by_long(self, other: i64) -> Self;
 	
 	// Serialization
-	/// Converts to a byte array for file storage.
+	/// Big endian.
 	fn to_file_byte_array(&self) -> Vec<u8>;
 	
-	/// Converts to a fixed-size byte array.
+	/// Padded and truncated at the tail, not the head.
 	fn to_fixed_byte_array(&self, n: usize) -> Vec<u8>;
 	
-	/// Converts to a string with comma separators.
 	fn to_string_with_commas(&self) -> String;
 	
-	/// Creates a new instance from bytes.
 	fn from_bytes(bytes: &[u8]) -> Outcome<Self> where Self: Sized;
 	
-	/// Creates a new instance from a string.
 	fn from_string(s: &str) -> Outcome<Self> where Self: Sized;
 }
 
-/// 64-bit integer implementation of TimeInteger.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TimeLong {
 	value: i64,
 }
 
 impl TimeLong {
-	/// Creates a new TimeLong with the specified value.
 	pub fn new(value: i64) -> Self {
 		Self { value }
 	}
 	
-	/// Returns the underlying i64 value.
 	pub fn value(&self) -> i64 {
 		self.value
 	}
 	
-	/// Creates a TimeLong from 8 bytes.
 	pub fn from_bytes_array(bytes: &[u8; 8]) -> Self {
 		let value = i64::from_be_bytes(*bytes);
 		Self::new(value)
 	}
 	
-	/// Converts to 8 bytes.
 	pub fn to_bytes_array(&self) -> [u8; 8] {
 		self.value.to_be_bytes()
 	}
@@ -236,29 +213,24 @@ impl From<TimeLong> for i64 {
 	}
 }
 
-/// Arbitrary precision integer implementation of TimeInteger.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TimeBigInt {
 	value: BigInt,
 }
 
 impl TimeBigInt {
-	/// Creates a new TimeBigInt with the specified value.
 	pub fn new(value: BigInt) -> Self {
 		Self { value }
 	}
 	
-	/// Creates a TimeBigInt from an i64 value.
 	pub fn from_i64(value: i64) -> Self {
 		Self::new(BigInt::from(value))
 	}
 	
-	/// Returns the underlying BigInt value.
 	pub fn value(&self) -> &BigInt {
 		&self.value
 	}
 	
-	/// Creates the maximum positive value that can fit in n bytes.
 	pub fn max_positive(n_bytes: usize) -> Outcome<Self> {
 		if n_bytes == 0 {
 			return Err(err!("Cannot create max positive value with 0 bytes"; Invalid, Input));
@@ -421,7 +393,6 @@ impl From<BigInt> for TimeBigInt {
 	}
 }
 
-/// Helper function to add commas to number strings.
 fn add_commas_to_number(s: &str) -> String {
 	if s.is_empty() {
 		return s.to_string();

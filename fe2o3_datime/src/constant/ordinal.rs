@@ -1,6 +1,10 @@
+//! English ordinal numbers, first through thirty-first.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use oxedyne_fe2o3_core::prelude::*;
 
-/// English ordinal numbers.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum OrdinalEnglish {
     First,
@@ -110,7 +114,7 @@ impl OrdinalEnglish {
         }
     }
 
-    /// Parse from a string name (case insensitive).
+    /// Accepts words and numeric forms alike, case insensitively.
     pub fn from_name(name: &str) -> Option<Self> {
         let name = name.to_lowercase();
         
@@ -156,7 +160,7 @@ impl OrdinalEnglish {
         }
     }
 
-    /// Parse numeric ordinals like "1st", "2nd", "3rd", "4th", etc.
+    /// Accepts "st", "nd", "rd" and "th" suffixes only.
     fn parse_numeric_ordinal(name: &str) -> Option<Self> {
         if name.len() < 3 {
             return None;
@@ -182,7 +186,7 @@ impl OrdinalEnglish {
         }
     }
     
-    /// Returns the long name (Java-compatible method).
+    /// Upper case, matching the Java original.
     pub fn to_long_name(&self) -> &'static str {
         match self {
             Self::First => "FIRST",
@@ -219,7 +223,6 @@ impl OrdinalEnglish {
         }
     }
     
-    /// Returns the short name (Java-compatible method).
     pub fn to_short_name(&self) -> String {
         let num = self.value();
         let suffix = match num {
@@ -231,23 +234,20 @@ impl OrdinalEnglish {
         format!("{}{}", num, suffix)
     }
     
-    /// Java-compatible method name.
+    // Java-compatible aliases, carried over from the CalClock port.
     pub fn of(&self) -> u8 {
         self.value()
     }
     
-    /// Java-compatible lookup by value.
     pub fn get(val: u8) -> Option<Self> {
         Self::from_number(val).ok()
     }
     
-    /// Java-compatible lookup using short name.
     pub fn get_using_short_name(name: &str) -> Option<Self> {
         let name = name.replace(" ", "").to_uppercase();
         Self::parse_numeric_ordinal(&name.to_lowercase())
     }
     
-    /// Java-compatible lookup using long name.
     pub fn get_using_long_name(name: &str) -> Option<Self> {
         let name = name.replace(" ", "").to_uppercase();
         match name.as_str() {
@@ -286,13 +286,11 @@ impl OrdinalEnglish {
         }
     }
     
-    /// Java-compatible convenience method.
     pub fn get_using_name(name: &str) -> Option<Self> {
         Self::get_using_short_name(name)
             .or_else(|| Self::get_using_long_name(name))
     }
     
-    /// Used by parser - checks if string is ordinal suffix.
     pub fn is_ordinal_suffix(s: &str) -> bool {
         let s = s.to_uppercase();
         matches!(s.as_str(), "ST" | "ND" | "RD" | "TH")

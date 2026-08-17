@@ -1,3 +1,6 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use oxedyne_fe2o3_core::prelude::*;
 use crate::{
 	calendar::{CalendarDate, CalendarDuration, CalendarMonth, CalendarYear, CalendarDay, DayIncrementor, MonthPeriod},
@@ -6,20 +9,14 @@ use crate::{
 };
 use std::collections::BTreeSet;
 
-/// Types of calendar rules for recurring date patterns.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RuleType {
-	/// Rule recurring by years (anniversaries).
 	ByYears,
-	/// Rule with explicitly specified months.
 	ByExplicitMonths,
-	/// Rule with regular monthly intervals.
 	ByRegularMonths,
-	/// Rule recurring by days.
 	ByDays,
 }
 
-/// Internal generator tasks for rule processing.
 #[derive(Clone, Debug, PartialEq)]
 enum GeneratorTask {
 	All,
@@ -29,12 +26,6 @@ enum GeneratorTask {
 	NOnOrAfter,
 }
 
-/// Represents a rule for specifying recurring dates.
-/// 
-/// Supports three categories of rules:
-/// - By years (anniversaries with skip patterns)
-/// - By months (explicit months or regular intervals)
-/// - By days (daily recurring patterns)
 #[derive(Clone, Debug)]
 pub struct CalendarRule {
 	rule_type: RuleType,
@@ -56,7 +47,6 @@ pub struct CalendarRule {
 }
 
 impl CalendarRule {
-	/// Creates a new calendar rule with the specified type.
 	pub fn new(rule_type: RuleType) -> Self {
 		Self {
 			rule_type,
@@ -72,7 +62,6 @@ impl CalendarRule {
 		}
 	}
 	
-	/// Creates a comprehensive calendar rule with all parameters.
 	pub fn new_comprehensive(
 		rule_type: RuleType,
 		duration: Option<CalendarDuration>,
@@ -103,7 +92,6 @@ impl CalendarRule {
 		Ok(rule)
 	}
 	
-	/// Validates the rule configuration.
 	fn validate(&self) -> Outcome<()> {
 		match self.rule_type {
 			RuleType::ByYears => {
@@ -130,98 +118,81 @@ impl CalendarRule {
 		Ok(())
 	}
 	
-	/// Builder method to set duration.
 	pub fn with_duration(mut self, duration: CalendarDuration) -> Self {
 		self.duration = Some(duration);
 		self
 	}
 	
-	/// Builder method to set count limit.
 	pub fn with_count_limit(mut self, count_limit: i32) -> Self {
 		self.count_limit = Some(count_limit);
 		self
 	}
 	
-	/// Builder method to set start date.
 	pub fn with_start_date(mut self, start_date: CalendarDate) -> Self {
 		self.start_date = Some(start_date);
 		self
 	}
 	
-	/// Builder method to set skip years for by-years rules.
 	pub fn with_skip_years(mut self, skip_years: CalendarYear) -> Self {
 		self.skip_years = Some(skip_years);
 		self
 	}
 	
-	/// Builder method to set day incrementor for by-months rules.
 	pub fn with_day_incrementor(mut self, day_incrementor: DayIncrementor) -> Self {
 		self.day_incrementor = Some(day_incrementor);
 		self
 	}
 	
-	/// Builder method to set explicit months for by-explicit-months rules.
 	pub fn with_month_set(mut self, month_set: BTreeSet<MonthOfYear>) -> Self {
 		self.month_set = Some(month_set);
 		self
 	}
 	
-	/// Builder method to set start month for by-months rules.
 	pub fn with_start_month(mut self, start_month: MonthPeriod) -> Self {
 		self.start_month = Some(start_month);
 		self
 	}
 	
-	/// Builder method to set skip months for by-regular-months rules.
 	pub fn with_skip_months(mut self, skip_months: CalendarMonth) -> Self {
 		self.skip_months = Some(skip_months);
 		self
 	}
 	
-	/// Builder method to set skip days for by-days rules.
 	pub fn with_skip_days(mut self, skip_days: CalendarDay) -> Self {
 		self.skip_days = Some(skip_days);
 		self
 	}
 	
-	/// Generates all dates matching this rule within the given duration.
 	pub fn to_dates(&self, from_date: &CalendarDate, duration: &CalendarDuration) -> Outcome<Vec<CalendarDate>> {
 		self.generate_dates(GeneratorTask::All, from_date, Some(duration), None, None)
 	}
 	
-	/// Generates all dates matching this rule before the specified date.
 	pub fn to_dates_before(&self, before_date: &CalendarDate) -> Outcome<Vec<CalendarDate>> {
 		self.generate_dates(GeneratorTask::AllOnOrBefore, before_date, None, None, None)
 	}
 	
-	/// Generates all dates matching this rule after the specified date.
 	pub fn to_dates_after(&self, after_date: &CalendarDate) -> Outcome<Vec<CalendarDate>> {
 		self.generate_dates(GeneratorTask::AllOnOrAfter, after_date, None, None, None)
 	}
 	
-	/// Generates the next N dates matching this rule after the specified date.
 	pub fn next_n_dates(&self, after_date: &CalendarDate, n: i32) -> Outcome<Vec<CalendarDate>> {
 		self.generate_dates(GeneratorTask::NOnOrAfter, after_date, None, Some(n), None)
 	}
 	
-	/// Generates the previous N dates matching this rule before the specified date.
 	pub fn previous_n_dates(&self, before_date: &CalendarDate, n: i32) -> Outcome<Vec<CalendarDate>> {
 		self.generate_dates(GeneratorTask::NOnOrBefore, before_date, None, Some(n), None)
 	}
 	
-	/// Gets the next date matching this rule after the specified date.
 	pub fn next(&self, after_date: &CalendarDate) -> Outcome<Option<CalendarDate>> {
 		let dates = res!(self.next_n_dates(after_date, 1));
 		Ok(dates.first().cloned())
 	}
 	
-	/// Gets the previous date matching this rule before the specified date.
 	pub fn previous(&self, before_date: &CalendarDate) -> Outcome<Option<CalendarDate>> {
 		let dates = res!(self.previous_n_dates(before_date, 1));
 		Ok(dates.first().cloned())
 	}
 	
-	/// Internal method to generate dates based on the task type.
 	fn generate_dates(
 		&self,
 		task: GeneratorTask,
@@ -255,7 +226,6 @@ impl CalendarRule {
 		Ok(results)
 	}
 	
-	/// Generates dates for by-years rules.
 	fn generate_by_years(
 		&self,
 		results: &mut Vec<CalendarDate>,
@@ -340,7 +310,6 @@ impl CalendarRule {
 		Ok(())
 	}
 	
-	/// Generates dates for by-explicit-months rules.
 	fn generate_by_explicit_months(
 		&self,
 		results: &mut Vec<CalendarDate>,
@@ -408,7 +377,6 @@ impl CalendarRule {
 		Ok(())
 	}
 	
-	/// Generates dates for by-regular-months rules.
 	fn generate_by_regular_months(
 		&self,
 		results: &mut Vec<CalendarDate>,
@@ -485,7 +453,6 @@ impl CalendarRule {
 		Ok(())
 	}
 	
-	/// Generates dates for by-days rules.
 	fn generate_by_days(
 		&self,
 		results: &mut Vec<CalendarDate>,
@@ -549,22 +516,18 @@ impl CalendarRule {
 		Ok(())
 	}
 	
-	/// Returns the rule type.
 	pub fn rule_type(&self) -> &RuleType {
 		&self.rule_type
 	}
 	
-	/// Returns the duration limit, if any.
 	pub fn duration(&self) -> Option<&CalendarDuration> {
 		self.duration.as_ref()
 	}
 	
-	/// Returns the count limit, if any.
 	pub fn count_limit(&self) -> Option<i32> {
 		self.count_limit
 	}
 	
-	/// Returns the start date, if any.
 	pub fn start_date(&self) -> Option<&CalendarDate> {
 		self.start_date.as_ref()
 	}

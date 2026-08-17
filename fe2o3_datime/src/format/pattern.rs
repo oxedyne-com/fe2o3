@@ -1,23 +1,23 @@
+//! Format patterns and the tokens they are built from.
+//!
+//! A pattern string is parsed once into a token sequence, which the formatter
+//! then walks.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use oxedyne_fe2o3_core::prelude::*;
 
-/// Formatting styles for different components.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum FormatStyle {
-    /// Short format (e.g., "Jan", "Mon", "1")
-    Short,
-    /// Medium format (e.g., "Jan 15", "Monday")  
-    Medium,
-    /// Long format (e.g., "January", "Monday")
-    Long,
-    /// Full format (e.g., "January 15, 2024", "Monday, January 15, 2024")
-    Full,
-    /// Numeric format (e.g., "01", "15")
-    Numeric,
-    /// Custom padding and width
+    Short,      // "Jan", "Mon", "1"
+    Medium,     // "Jan 15", "Monday"
+    Long,       // "January", "Monday"
+    Full,       // "Monday, January 15, 2024"
+    Numeric,    // "01", "15"
     Custom { width: usize, pad_char: char },
 }
 
-/// Individual format tokens that make up a pattern.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum FormatToken {
     // Date tokens
@@ -59,7 +59,6 @@ pub enum FormatToken {
     Period,
 }
 
-/// A complete format pattern composed of multiple tokens.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FormatPattern {
     tokens: Vec<FormatToken>,
@@ -67,8 +66,6 @@ pub struct FormatPattern {
 }
 
 impl FormatPattern {
-    /// Creates a new format pattern from a pattern string.
-    ///
     /// # Pattern Syntax
     ///
     /// ## Date Patterns
@@ -126,17 +123,14 @@ impl FormatPattern {
         })
     }
     
-    /// Returns the tokens that make up this pattern.
     pub fn tokens(&self) -> &[FormatToken] {
         &self.tokens
     }
     
-    /// Returns the original pattern string.
     pub fn pattern_string(&self) -> &str {
         &self.pattern_string
     }
     
-    /// Parses a pattern string into format tokens.
     fn parse_pattern(pattern: &str) -> Outcome<Vec<FormatToken>> {
         let mut tokens = Vec::new();
         let mut chars = pattern.chars().peekable();
@@ -358,7 +352,6 @@ impl FormatPattern {
         Ok(tokens)
     }
     
-    /// Counts consecutive occurrences of a character and consumes them.
     fn count_consecutive(chars: &mut std::iter::Peekable<std::str::Chars>, target: char) -> usize {
         let mut count = 0;
         while chars.peek() == Some(&target) {
@@ -368,7 +361,6 @@ impl FormatPattern {
         count
     }
     
-    /// Returns true if the character is a format pattern character.
     fn is_pattern_char(ch: char) -> bool {
         matches!(ch, 'y' | 'M' | 'd' | 'E' | 'D' | 'Q' | 'w' | 'G' | 'H' | 'h' | 'm' | 's' | 'S' | 'a' | 'z' | 'Z' | 'v' | ' ' | ':' | '-' | '/' | ',' | '.')
     }
@@ -377,68 +369,55 @@ impl FormatPattern {
     // Predefined Common Patterns
     // ========================================================================
     
-    /// ISO 8601 date format: "2024-01-15"
     pub fn iso_date() -> Self {
-        Self::new("yyyy-MM-dd").unwrap()
+        Self::new("yyyy-MM-dd").unwrap()                // 2024-01-15
     }
     
-    /// ISO 8601 time format: "14:30:45"
     pub fn iso_time() -> Self {
-        Self::new("HH:mm:ss").unwrap()
+        Self::new("HH:mm:ss").unwrap()                  // 14:30:45
     }
     
-    /// ISO 8601 datetime format: "2024-01-15T14:30:45"
     pub fn iso_datetime() -> Self {
-        Self::new("yyyy-MM-dd'T'HH:mm:ss").unwrap()
+        Self::new("yyyy-MM-dd'T'HH:mm:ss").unwrap()     // 2024-01-15T14:30:45
     }
     
-    /// ISO 8601 datetime with timezone: "2024-01-15T14:30:45Z"
     pub fn iso_datetime_utc() -> Self {
-        Self::new("yyyy-MM-dd'T'HH:mm:ss'Z'").unwrap()
+        Self::new("yyyy-MM-dd'T'HH:mm:ss'Z'").unwrap()  // 2024-01-15T14:30:45Z
     }
     
-    /// US date format: "01/15/2024"
     pub fn us_date() -> Self {
-        Self::new("MM/dd/yyyy").unwrap()
+        Self::new("MM/dd/yyyy").unwrap()                // 01/15/2024
     }
     
-    /// European date format: "15/01/2024"
     pub fn european_date() -> Self {
-        Self::new("dd/MM/yyyy").unwrap()
+        Self::new("dd/MM/yyyy").unwrap()                // 15/01/2024
     }
     
-    /// Long date format: "January 15, 2024"
     pub fn long_date() -> Self {
-        Self::new("MMMM d, yyyy").unwrap()
+        Self::new("MMMM d, yyyy").unwrap()              // January 15, 2024
     }
     
-    /// Full date format: "Monday, January 15, 2024"
     pub fn full_date() -> Self {
-        Self::new("EEEE, MMMM d, yyyy").unwrap()
+        Self::new("EEEE, MMMM d, yyyy").unwrap()        // Monday, January 15, 2024
     }
     
-    /// 12-hour time format: "2:30:45 PM"
     pub fn time_12h() -> Self {
-        Self::new("h:mm:ss a").unwrap()
+        Self::new("h:mm:ss a").unwrap()                 // 2:30:45 PM
     }
     
-    /// 24-hour time format: "14:30:45"
     pub fn time_24h() -> Self {
-        Self::new("HH:mm:ss").unwrap()
+        Self::new("HH:mm:ss").unwrap()                  // 14:30:45
     }
     
-    /// Short time format: "2:30 PM"
     pub fn time_short() -> Self {
-        Self::new("h:mm a").unwrap()
+        Self::new("h:mm a").unwrap()                    // 2:30 PM
     }
     
-    /// RFC 2822 format: "Mon, 15 Jan 2024 14:30:45 +0000"
     pub fn rfc2822() -> Self {
-        Self::new("EEE, d MMM yyyy HH:mm:ss Z").unwrap()
+        Self::new("EEE, d MMM yyyy HH:mm:ss Z").unwrap() // Mon, 15 Jan 2024 14:30:45 +0000
     }
     
-    /// Common log format: "15/Jan/2024:14:30:45 +0000"
     pub fn common_log() -> Self {
-        Self::new("dd/MMM/yyyy:HH:mm:ss Z").unwrap()
+        Self::new("dd/MMM/yyyy:HH:mm:ss Z").unwrap()    // 15/Jan/2024:14:30:45 +0000
     }
 }

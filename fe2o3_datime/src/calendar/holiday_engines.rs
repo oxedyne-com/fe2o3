@@ -1,8 +1,11 @@
-/// Advanced holiday calculation engines for different jurisdictions.
-/// 
-/// This module provides sophisticated holiday engines that can automatically
-/// calculate complex holidays like Easter, Thanksgiving, and other date-based
-/// holidays for various countries and jurisdictions.
+//! Advanced holiday calculation engines for different jurisdictions.
+//!
+//! This module provides sophisticated holiday engines that can automatically
+//! calculate complex holidays like Easter, Thanksgiving, and other date-based
+//! holidays for various countries and jurisdictions.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::{
     calendar::CalendarDate,
@@ -12,62 +15,41 @@ use crate::{
 use oxedyne_fe2o3_core::prelude::*;
 use std::collections::HashMap;
 
-/// Represents different types of holiday calculation methods.
 #[derive(Clone, Debug, PartialEq)]
 pub enum HolidayType {
-    /// Fixed date holiday (e.g., Christmas on December 25).
     Fixed { month: u8, day: u8 },
-    /// Easter-based holiday (offset from Easter Sunday).
     EasterBased { offset_days: i32 },
-    /// Relative holiday (e.g., "3rd Monday in February").
     Relative { month: u8, weekday: DayOfWeek, occurrence: i32 },
-    /// Last occurrence of a weekday in a month (e.g., "last Monday in May").
     LastWeekday { month: u8, weekday: DayOfWeek },
-    /// First occurrence of a weekday after a specific date.
     FirstWeekdayAfter { month: u8, day: u8, weekday: DayOfWeek },
 }
 
-/// Represents a holiday with its calculation method and metadata.
 #[derive(Clone, Debug)]
 pub struct HolidayDefinition {
-    /// Name of the holiday.
     pub name: String,
-    /// How to calculate the holiday date.
     pub holiday_type: HolidayType,
-    /// Whether this holiday is observed if it falls on a weekend.
     pub weekend_adjustment: WeekendAdjustment,
-    /// Optional description.
     pub description: Option<String>,
 }
 
-/// Defines how holidays are adjusted when they fall on weekends.
+/// How a holiday landing on a weekend is observed.
 #[derive(Clone, Debug, PartialEq)]
 pub enum WeekendAdjustment {
-    /// No adjustment - holiday is observed on the actual date.
     None,
-    /// If holiday falls on Saturday, observe on Friday; if Sunday, observe on Monday.
-    Nearest,
-    /// Always observe on the following Monday if weekend.
-    Monday,
-    /// Always observe on the preceding Friday if weekend.
-    Friday,
-    /// Custom adjustment rules.
+    Nearest, // Saturday to Friday, Sunday to Monday
+    Monday, // the following Monday, from either weekend day
+    Friday, // the preceding Friday, from either weekend day
     Custom { saturday_shift: i32, sunday_shift: i32 },
 }
 
-/// A comprehensive holiday engine for calculating holidays in specific jurisdictions.
 #[derive(Clone, Debug)]
 pub struct HolidayEngine {
-    /// Name of the jurisdiction (e.g., "United States", "United Kingdom").
     jurisdiction: String,
-    /// Map of holiday definitions by name.
     holidays: HashMap<String, HolidayDefinition>,
-    /// Default weekend adjustment policy.
     default_weekend_adjustment: WeekendAdjustment,
 }
 
 impl HolidayEngine {
-    /// Creates a new holiday engine for a specific jurisdiction.
     pub fn new<S: Into<String>>(jurisdiction: S) -> Self {
         Self {
             jurisdiction: jurisdiction.into(),
@@ -76,19 +58,16 @@ impl HolidayEngine {
         }
     }
 
-    /// Sets the default weekend adjustment policy.
     pub fn with_default_weekend_adjustment(mut self, adjustment: WeekendAdjustment) -> Self {
         self.default_weekend_adjustment = adjustment;
         self
     }
 
-    /// Adds a holiday definition to the engine.
     pub fn add_holiday(mut self, holiday: HolidayDefinition) -> Self {
         self.holidays.insert(holiday.name.clone(), holiday);
         self
     }
 
-    /// Calculates all holidays for a given year.
     pub fn calculate_holidays(&self, year: i32, zone: CalClockZone) -> Outcome<Vec<(String, CalendarDate)>> {
         let mut holidays = Vec::new();
 
@@ -102,7 +81,6 @@ impl HolidayEngine {
         Ok(holidays)
     }
 
-    /// Calculates a specific holiday for a given year.
     pub fn calculate_holiday(&self, definition: &HolidayDefinition, year: i32, zone: CalClockZone) -> Outcome<CalendarDate> {
         let base_date = match &definition.holiday_type {
             HolidayType::Fixed { month, day } => {
@@ -128,7 +106,6 @@ impl HolidayEngine {
         self.apply_weekend_adjustment(&base_date, &definition.weekend_adjustment)
     }
 
-    /// Applies weekend adjustment rules to a date.
     fn apply_weekend_adjustment(&self, date: &CalendarDate, adjustment: &WeekendAdjustment) -> Outcome<CalendarDate> {
         let dow = date.day_of_week();
         
@@ -179,8 +156,7 @@ impl HolidayEngine {
         }
     }
 
-    /// Calculates Easter Sunday for a given year using the Western (Gregorian) algorithm.
-    /// This implements the algorithm used by most Western churches.
+    /// The Western computus, as used by most Western churches.
     pub fn calculate_easter(year: i32, zone: CalClockZone) -> Outcome<CalendarDate> {
         // Use the algorithm from Oudin (1940) for Gregorian calendar Easter.
         let a = year % 19;
@@ -202,8 +178,6 @@ impl HolidayEngine {
         CalendarDate::from_ymd(year, month_enum, day as u8, zone)
     }
 
-    /// Calculates the nth occurrence of a weekday in a given month.
-    /// For example, the 3rd Monday in February.
     fn calculate_nth_weekday(year: i32, month: u8, weekday: DayOfWeek, occurrence: i32, zone: CalClockZone) -> Outcome<CalendarDate> {
         let month_enum = res!(MonthOfYear::from_number(month));
         let first_of_month = res!(CalendarDate::from_ymd(year, month_enum, 1, zone.clone()));
@@ -234,8 +208,6 @@ impl HolidayEngine {
         CalendarDate::from_ymd(year, month_enum, target_day as u8, zone)
     }
 
-    /// Calculates the last occurrence of a weekday in a given month.
-    /// For example, the last Monday in May.
     fn calculate_last_weekday(year: i32, month: u8, weekday: DayOfWeek, zone: CalClockZone) -> Outcome<CalendarDate> {
         let month_enum = res!(MonthOfYear::from_number(month));
         let days_in_month = month_enum.days_in_month(year);
@@ -251,8 +223,6 @@ impl HolidayEngine {
         Err(err!("No {} found in {} {}", weekday, month_enum, year; Invalid, Input))
     }
 
-    /// Calculates the first occurrence of a weekday after a specific date.
-    /// For example, the first Monday after March 15th.
     fn calculate_first_weekday_after(year: i32, month: u8, day: u8, weekday: DayOfWeek, zone: CalClockZone) -> Outcome<CalendarDate> {
         let month_enum = res!(MonthOfYear::from_number(month));
         let start_date = res!(CalendarDate::from_ymd(year, month_enum, day, zone.clone()));
@@ -269,7 +239,6 @@ impl HolidayEngine {
         Err(err!("Could not find {} after {} {} {}", weekday, month_enum, day, year; Invalid, Input))
     }
 
-    /// Checks if a given date is a holiday according to this engine.
     pub fn is_holiday(&self, date: &CalendarDate) -> Outcome<bool> {
         let year = date.year();
         let holidays = res!(self.calculate_holidays(year, date.zone().clone()));
@@ -283,20 +252,17 @@ impl HolidayEngine {
         Ok(false)
     }
 
-    /// Gets the name of the jurisdiction.
     pub fn jurisdiction(&self) -> &str {
         &self.jurisdiction
     }
 
-    /// Gets all holiday names.
     pub fn holiday_names(&self) -> Vec<String> {
         self.holidays.keys().cloned().collect()
     }
 }
 
-/// Pre-built holiday engines for common jurisdictions.
+// Pre-built engines for common jurisdictions.
 impl HolidayEngine {
-    /// Creates a United States federal holiday engine.
     pub fn us_federal() -> Self {
         Self::new("United States Federal")
             .with_default_weekend_adjustment(WeekendAdjustment::Nearest)
@@ -385,7 +351,6 @@ impl HolidayEngine {
             })
     }
 
-    /// Creates a United Kingdom holiday engine.
     pub fn uk() -> Self {
         Self::new("United Kingdom")
             .with_default_weekend_adjustment(WeekendAdjustment::Monday)
@@ -449,7 +414,6 @@ impl HolidayEngine {
             })
     }
 
-    /// Creates a European Central Bank holiday engine.
     pub fn ecb() -> Self {
         Self::new("European Central Bank")
             .with_default_weekend_adjustment(WeekendAdjustment::None)

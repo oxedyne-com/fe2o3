@@ -1,3 +1,6 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use crate::core::{
     Duration,
     Time,
@@ -10,19 +13,14 @@ use std::{
     vec::Vec,
 };
 
-/// Trait for types representing an interval between two times.
 pub trait Interval<D: Duration>: Debug + Clone {
-    /// Returns the duration of this interval.
     fn get_duration(&self) -> Outcome<D>;
     
-    /// Returns true if this interval contains the given time.
     fn contains<T: Time>(&self, time: &T) -> bool;
     
-    /// Returns true if this interval overlaps with another interval.
     fn overlaps(&self, other: &Self) -> bool;
 }
 
-/// Abstract base for interval types.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AbstractInterval;
 
@@ -32,7 +30,6 @@ impl AbstractInterval {
     }
 }
 
-/// A list of intervals.
 #[derive(Clone, Debug)]
 pub struct IntervalList<I> {
     intervals: Vec<I>,

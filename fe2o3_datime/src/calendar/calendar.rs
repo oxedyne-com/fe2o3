@@ -1,3 +1,6 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use crate::{
     calendar::{CalendarDate, system::CalendarSystem, era::JapaneseEraRegistry, hebrew::HebrewCalendar},
     constant::MonthOfYear,
@@ -12,12 +15,8 @@ use oxedyne_fe2o3_namex::{
 
 use std::fmt;
 
-/// Comprehensive calendar system enum supporting all major calendar types.
-///
-/// This enum serves as the primary entry point for date creation in fe2o3_calclock.
-/// All calendars support conversion to and from each other via Julian Day Numbers.
-///
-/// # Usage
+/// Every calendar converts to and from every other through the Julian Day
+/// Number, so no pair needs its own conversion.
 ///
 /// ```ignore
 /// use oxedyne_fe2o3_datime::calendar::Calendarres!();
@@ -39,43 +38,14 @@ use std::fmt;
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Calendar {
-    /// Gregorian calendar - modern international standard (ISO 8601)
-    /// Used worldwide since 1582 reform, leap year every 4 years except centuries not divisible by 400
-    Gregorian,
-    
-    /// Julian calendar - used before Gregorian reform  
-    /// Simple leap year rule: every 4 years, no exceptions
-    Julian,
-    
-    /// Islamic/Hijri calendar - lunar calendar starting from the Hijra (622 CE)
-    /// 12 lunar months, approximately 354 days per year, no leap seconds
-    /// Used primarily in Islamic countries for religious purposes
-    Islamic,
-    
-    /// Hebrew/Jewish calendar - lunisolar calendar starting from creation (3761 BCE)
-    /// 12 or 13 months per year (leap years), used for Jewish religious observances
-    /// Months alternate between 29 and 30 days, years can be deficient, regular, or abundant
-    Hebrew,
-    
-    /// Japanese Imperial calendar - based on imperial eras (nengō)
-    /// Uses Gregorian calendar structure but years reset with each emperor
-    /// Current era: Reiwa (started May 1, 2019)
-    Japanese,
-    
-    /// Thai Buddhist calendar - Gregorian calendar + 543 years
-    /// Year 1 corresponds to 544 BCE (traditional date of Buddha's death)
-    /// Used officially in Thailand alongside Gregorian calendar
-    Thai,
-    
-    /// Minguo/Republic of China calendar - Gregorian calendar with different epoch
-    /// Year 1 corresponds to 1912 CE (establishment of Republic of China)
-    /// Used in Taiwan and formerly in mainland China
-    Minguo,
-    
-    /// Holocene calendar - Gregorian calendar + 10,000 years
-    /// Year 1 corresponds to 10,001 BCE (roughly start of Holocene epoch)
-    /// Proposed by Cesare Emiliani to have a more scientific epoch
-    Holocene,
+    Gregorian, // ISO 8601, leap year every 4 except centuries not divisible by 400
+    Julian, // leap year every 4, no exceptions
+    Islamic, // lunar, 12 months, about 354 days, epoch 622 CE
+    Hebrew, // lunisolar, 12 or 13 months, epoch 3761 BCE
+    Japanese, // Gregorian months, years reset with each emperor
+    Thai, // Gregorian + 543 years
+    Minguo, // Gregorian, year 1 = 1912 CE
+    Holocene, // Gregorian + 10,000 years
 }
 
 impl Default for Calendar {
@@ -91,12 +61,10 @@ impl fmt::Display for Calendar {
 }
 
 impl Calendar {
-    /// Creates a new Calendar instance, defaulting to Gregorian.
     pub fn new() -> Self {
         Self::default()
     }
     
-    /// Returns the name of this calendar system.
     pub fn name(&self) -> &'static str {
         match self {
             Self::Gregorian => "Gregorian",
@@ -110,7 +78,6 @@ impl Calendar {
         }
     }
     
-    /// Returns a short identifier for this calendar system.
     pub fn id(&self) -> &'static str {
         match self {
             Self::Gregorian => "gregorian",
@@ -124,20 +91,8 @@ impl Calendar {
         }
     }
     
-    /// Creates a date in this calendar system.
-    ///
-    /// # Arguments
-    ///
-    /// * `year` - Year in this calendar system
-    /// * `month` - Month (1-12 for most calendars)
-    /// * `day` - Day of month
-    /// * `zone` - Timezone for the date
-    ///
-    /// # Returns
-    ///
-    /// Returns a CalendarDate in this calendar system.
-    ///
-    /// # Examples
+    /// The year, month and day are read in this calendar's own reckoning, not
+    /// the Gregorian one.
     ///
     /// ```ignore
     /// let gregorian = Calendar::Gregorianres!();
@@ -153,13 +108,10 @@ impl Calendar {
         CalendarDate::new_with_system(internal_year, internal_month, internal_day, zone, calendar_system)
     }
     
-    /// Creates a date using MonthOfYear enum.
     pub fn date_from_ymd(&self, year: i32, month: MonthOfYear, day: u8, zone: CalClockZone) -> Outcome<CalendarDate> {
         self.date(year, month.of(), day, zone)
     }
     
-    /// Creates a date in this calendar system from a Gregorian date.
-    /// This is used for calendar conversions.
     pub fn date_from_gregorian(&self, gregorian_year: i32, gregorian_month: u8, gregorian_day: u8, zone: CalClockZone) -> Outcome<CalendarDate> {
         // Convert Gregorian date to this calendar's year/month/day representation
         let (cal_year, cal_month, cal_day) = self.from_internal_date(gregorian_year, gregorian_month, gregorian_day);
@@ -169,16 +121,6 @@ impl Calendar {
         self.date(cal_year, cal_month, cal_day, zone)
     }
     
-    /// Converts a date from this calendar to another calendar system.
-    ///
-    /// # Arguments
-    ///
-    /// * `date` - The date to convert (must be in this calendar system)
-    /// * `target_calendar` - The target calendar system
-    ///
-    /// # Returns
-    ///
-    /// Returns a new CalendarDate in the target calendar system.
     pub fn convert_date(&self, date: &CalendarDate, target_calendar: &Calendar) -> Outcome<CalendarDate> {
         if self == target_calendar {
             return Ok(date.clone());
@@ -194,7 +136,6 @@ impl Calendar {
         target_calendar.date_from_gregorian(gregorian_year, gregorian_month, gregorian_day, date.zone().clone())
     }
     
-    /// Determines if a year is a leap year in this calendar system.
     pub fn is_leap_year(&self, year: i32) -> bool {
         match self {
             Self::Gregorian | Self::Japanese | Self::Thai | Self::Minguo | Self::Holocene => {
@@ -220,7 +161,6 @@ impl Calendar {
         }
     }
     
-    /// Returns the number of days in a month for this calendar system.
     pub fn days_in_month(&self, year: i32, month: u8) -> Outcome<u8> {
         match self {
             Self::Islamic => {
@@ -266,7 +206,6 @@ impl Calendar {
         }
     }
     
-    /// Returns the number of days in a year for this calendar system.
     pub fn days_in_year(&self, year: i32) -> u16 {
         match self {
             Self::Islamic => {
@@ -281,7 +220,6 @@ impl Calendar {
         }
     }
     
-    /// Validates a date in this calendar system.
     pub fn validate_date(&self, year: i32, month: u8, day: u8) -> Outcome<()> {
         if day == 0 {
             return Err(err!("Day cannot be 0"; Invalid, Input));
@@ -333,7 +271,6 @@ impl Calendar {
         Ok(())
     }
     
-    /// Converts calendar-specific date to internal representation (Gregorian).
     fn to_internal_date(&self, year: i32, month: u8, day: u8) -> Outcome<(i32, u8, u8)> {
         res!(self.validate_date(year, month, day));
         
@@ -383,7 +320,6 @@ impl Calendar {
         }
     }
     
-    /// Converts internal representation (Gregorian) to calendar-specific date.
     fn from_internal_date(&self, gregorian_year: i32, month: u8, day: u8) -> (i32, u8, u8) {
         match self {
             Self::Gregorian => (gregorian_year, month, day),
@@ -439,7 +375,6 @@ impl Calendar {
         }
     }
     
-    /// Converts a year in this calendar to Gregorian year.
     pub fn to_gregorian_year(&self, year: i32) -> i32 {
         match self {
             Self::Gregorian | Self::Julian => year,
@@ -477,7 +412,6 @@ impl Calendar {
         }
     }
     
-    /// Converts a Gregorian year to this calendar's year.
     #[allow(dead_code)]
     fn from_gregorian_year(&self, gregorian_year: i32) -> (i32, u8, u8) {
         let calendar_year = match self {
@@ -510,7 +444,6 @@ impl Calendar {
     }
     
     
-    /// Converts this calendar to the underlying CalendarSystem for storage.
     fn to_calendar_system(&self) -> CalendarSystem {
         match self {
             Self::Gregorian | Self::Islamic | Self::Hebrew | Self::Japanese | Self::Thai | Self::Minguo | Self::Holocene => {
@@ -525,7 +458,6 @@ impl Calendar {
     // ========================================================================
     
     
-    /// Converts Islamic date to Julian Day Number.
     #[allow(dead_code)]
     fn islamic_to_jdn(&self, year: i32, month: u8, day: u8) -> Outcome<i64> {
         // Islamic calendar algorithm
@@ -543,7 +475,6 @@ impl Calendar {
         Ok(epoch + total_days)
     }
     
-    /// Converts Julian Day Number to Gregorian date.
     #[allow(dead_code)]
     fn jdn_to_gregorian(&self, jdn: i64) -> Outcome<(i32, u8, u8)> {
         let a = jdn + 32044;
@@ -561,7 +492,6 @@ impl Calendar {
     }
     
     
-    /// Parses a calendar from a string identifier.
     pub fn from_str(s: &str) -> Outcome<Self> {
         match s.to_lowercase().as_str() {
             "gregorian" | "greg" | "g" => Ok(Self::Gregorian),
@@ -576,7 +506,6 @@ impl Calendar {
         }
     }
     
-    /// Returns an iterator over all supported calendar systems.
     pub fn all() -> impl Iterator<Item = Calendar> {
         [
             Self::Gregorian,
@@ -590,7 +519,6 @@ impl Calendar {
         ].into_iter()
     }
     
-    /// Returns the epoch year for this calendar in Gregorian calendar terms.
     pub fn epoch_year(&self) -> i32 {
         match self {
             Self::Gregorian | Self::Julian => 1,
@@ -603,7 +531,6 @@ impl Calendar {
         }
     }
     
-    /// Returns a description of this calendar system.
     pub fn description(&self) -> &'static str {
         match self {
             Self::Gregorian => "Modern international standard calendar, reformed in 1582",
@@ -623,10 +550,7 @@ impl Calendar {
 // ============================================================================
 
 impl InNamex for Calendar {
-    /// Returns the universal 256-bit identifier for this calendar system.
-    /// 
-    /// These IDs are permanent and globally unique across all fe2o3 
-    /// systems and deployments.
+    /// Permanent and globally unique across fe2o3 systems.
     fn name_id(&self) -> Outcome<NamexId> {
         let id_str = match self {
             Self::Gregorian => "cal_gregorian_0123456789abcdef0123456789abcd=",
@@ -641,10 +565,7 @@ impl InNamex for Calendar {
         NamexId::try_from(id_str)
     }
 
-    /// Returns the efficient local identifier for internal operations.
-    /// 
-    /// These 8-bit IDs are used for compact binary serialization and
-    /// high-performance internal operations.
+    /// An 8-bit id, for compact binary forms.
     fn local_id(&self) -> LocalId {
         match self {
             Self::Gregorian => LocalId(1),
@@ -658,7 +579,6 @@ impl InNamex for Calendar {
         }
     }
 
-    /// Returns associated names and IDs for namex database population.
     fn assoc_names_base64(gname: &'static str) -> Outcome<Option<Vec<(&'static str, &'static str)>>> {
         let ids = match gname {
             "calendars" => vec![
@@ -681,19 +601,13 @@ impl InNamex for Calendar {
 // ============================================================================
 
 impl ToDat for Calendar {
-    /// Converts Calendar to JDAT using string representation.
-    /// 
-    /// For text serialization, we use the existing string representation
-    /// which is human-readable and leverages the proven parser.
     fn to_dat(&self) -> Outcome<Dat> {
         Ok(Dat::Str(self.id().to_string()))
     }
 }
 
 impl FromDat for Calendar {
-    /// Creates Calendar from JDAT representation.
-    /// 
-    /// Supports both string and structured formats for maximum compatibility.
+    /// Accepts either the string or the structured form.
     fn from_dat(dat: Dat) -> Outcome<Self> {
         match dat {
             // String format - use existing parser
@@ -720,18 +634,11 @@ impl FromDat for Calendar {
 }
 
 impl Calendar {
-    /// Efficient binary serialization using LocalId.
-    /// 
-    /// This method produces the most compact representation for storage
-    /// and network transmission - just 1 byte per calendar reference.
+    /// One byte per calendar, being the local id.
     pub fn to_dat_binary(&self) -> Outcome<Dat> {
         Ok(Dat::U8(self.local_id().0))
     }
     
-    /// Structured serialization for configuration and metadata.
-    /// 
-    /// This format includes rich metadata and is ideal for user-facing
-    /// configuration files and debugging.
     pub fn to_dat_structured(&self) -> Outcome<Dat> {
         Ok(mapdat! {
             "id" => self.id(),

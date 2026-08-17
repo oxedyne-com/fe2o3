@@ -1,10 +1,12 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use crate::{
 	core::{Interval, Time},
 	time::{CalClock, CalClockDuration},
 };
 use oxedyne_fe2o3_core::prelude::*;
 
-/// Interval between two CalClock instances.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CalClockInterval {
 	start: CalClock,
@@ -12,7 +14,6 @@ pub struct CalClockInterval {
 }
 
 impl CalClockInterval {
-	/// Creates a new CalClockInterval.
 	pub fn new(start: CalClock, finish: CalClock) -> Outcome<Self> {
 		// Validate that start is before or equal to finish
 		if start <= finish {
@@ -22,33 +23,27 @@ impl CalClockInterval {
 		}
 	}
 	
-	/// Returns the start time.
 	pub fn start(&self) -> &CalClock {
 		&self.start
 	}
 	
-	/// Returns the finish time.
 	pub fn finish(&self) -> &CalClock {
 		&self.finish
 	}
 	
-	/// Returns the duration of this interval.
 	pub fn duration(&self) -> Outcome<CalClockDuration> {
 		self.start.duration_until(&self.finish)
 	}
 	
-	/// Checks if this interval contains the specified time.
 	pub fn contains_time(&self, time: &CalClock) -> bool {
 		time >= &self.start && time <= &self.finish
 	}
 	
-	/// Checks if this interval overlaps with another interval.
 	pub fn overlaps_with(&self, other: &Self) -> bool {
 		// Intervals overlap if one starts before the other ends
 		self.start <= other.finish && other.start <= self.finish
 	}
 	
-	/// Returns the intersection of this interval with another.
 	pub fn intersection(&self, other: &Self) -> Option<Self> {
 		if !self.overlaps_with(other) {
 			return None;
@@ -69,7 +64,6 @@ impl CalClockInterval {
 		Self::new(intersection_start, intersection_finish).ok()
 	}
 	
-	/// Returns the union of this interval with another if they overlap.
 	pub fn union(&self, other: &Self) -> Option<Self> {
 		if !self.overlaps_with(other) {
 			return None;
@@ -90,29 +84,24 @@ impl CalClockInterval {
 		Self::new(union_start, union_finish).ok()
 	}
 	
-	/// Checks if this interval is adjacent to another (touching but not overlapping).
 	pub fn is_adjacent_to(&self, other: &Self) -> bool {
 		self.finish == other.start || other.finish == self.start
 	}
 	
-	/// Checks if this interval is entirely before another.
 	pub fn is_before(&self, other: &Self) -> bool {
 		self.finish < other.start
 	}
 	
-	/// Checks if this interval is entirely after another.
 	pub fn is_after(&self, other: &Self) -> bool {
 		self.start > other.finish
 	}
 	
-	/// Expands this interval by the specified duration on both ends.
 	pub fn expand(&self, duration: &CalClockDuration) -> Outcome<Self> {
 		let new_start = res!(self.start.subtract_duration(duration));
 		let new_finish = res!(self.finish.add_duration(duration));
 		Self::new(new_start, new_finish)
 	}
 	
-	/// Contracts this interval by the specified duration from both ends.
 	pub fn contract(&self, duration: &CalClockDuration) -> Outcome<Self> {
 		let new_start = res!(self.start.add_duration(duration));
 		let new_finish = res!(self.finish.subtract_duration(duration));
@@ -124,14 +113,12 @@ impl CalClockInterval {
 		}
 	}
 	
-	/// Shifts this interval by the specified duration.
 	pub fn shift(&self, duration: &CalClockDuration) -> Outcome<Self> {
 		let new_start = res!(self.start.add_duration(duration));
 		let new_finish = res!(self.finish.add_duration(duration));
 		Self::new(new_start, new_finish)
 	}
 	
-	/// Splits this interval at the specified time.
 	pub fn split_at(&self, split_time: &CalClock) -> Outcome<(Self, Self)> {
 		if !self.contains_time(split_time) {
 			return Err(err!("Split time {} is not within interval", split_time; Invalid, Input));
@@ -143,19 +130,16 @@ impl CalClockInterval {
 		Ok((first_interval, second_interval))
 	}
 	
-	/// Returns the midpoint of this interval.
 	pub fn midpoint(&self) -> Outcome<CalClock> {
 		let duration = res!(self.duration());
 		let half_duration = res!(duration.divide_by(2));
 		self.start.add_duration(&half_duration)
 	}
 	
-	/// Checks if this interval completely contains another interval.
 	pub fn contains_interval(&self, other: &Self) -> bool {
 		self.start <= other.start && other.finish <= self.finish
 	}
 	
-	/// Returns a list of non-overlapping intervals from a collection.
 	pub fn merge_overlapping(intervals: Vec<Self>) -> Vec<Self> {
 		if intervals.is_empty() {
 			return Vec::new();

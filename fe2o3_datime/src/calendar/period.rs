@@ -1,3 +1,6 @@
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 use crate::{
     calendar::DayIncrementor,
     core::IntervalList,
@@ -10,7 +13,6 @@ use crate::{
 
 use oxedyne_fe2o3_core::prelude::*;
 
-/// Represents a specific month period.
 #[derive(Clone, Debug)]
 pub struct MonthPeriod {
     year:	i32,
@@ -52,7 +54,6 @@ impl MonthPeriod {
         }
     }
     
-    /// Find a specific day in this month period using the day incrementor.
     pub fn find(
         &self, 
         day_incrementor: &DayIncrementor, 
@@ -174,7 +175,6 @@ impl MonthPeriod {
     }
 }
 
-/// Represents a specific year period.
 #[derive(Clone, Debug)]
 pub struct YearPeriod {
     year: i32,

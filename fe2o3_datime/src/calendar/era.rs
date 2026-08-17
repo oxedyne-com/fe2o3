@@ -1,36 +1,29 @@
-/// Japanese Imperial Era (Nengō) system for accurate Japanese calendar calculations.
-///
-/// This module provides comprehensive support for Japanese imperial eras,
-/// including historical eras and proper era transition logic.
-///
-/// The Japanese calendar uses the same month/day structure as the Gregorian calendar
-/// but years are counted from the beginning of each emperor's reign.
+//! Japanese Imperial Era (Nengō) system for accurate Japanese calendar calculations.
+//!
+//! This module provides comprehensive support for Japanese imperial eras,
+//! including historical eras and proper era transition logic.
+//!
+//! The Japanese calendar uses the same month/day structure as the Gregorian calendar
+//! but years are counted from the beginning of each emperor's reign.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 
-/// Represents a Japanese imperial era (nengō).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JapaneseEra {
-    /// Name of the era in Japanese
     pub name_japanese: &'static str,
-    /// Name of the era in romanized form
     pub name_romaji: &'static str,
-    /// Gregorian year when this era started
-    pub start_year: i32,
-    /// Month when this era started (1-12)
-    pub start_month: u8,
-    /// Day when this era started
+    pub start_year: i32, // Gregorian
+    pub start_month: u8, // 1-12
     pub start_day: u8,
-    /// Gregorian year when this era ended (None for current era)
-    pub end_year: Option<i32>,
-    /// Month when this era ended (1-12, None for current era)
+    pub end_year: Option<i32>, // None for the current era
     pub end_month: Option<u8>,
-    /// Day when this era ended (None for current era)
     pub end_day: Option<u8>,
 }
 
 impl JapaneseEra {
-    /// Returns true if this era contains the given Gregorian date.
     pub fn contains_date(&self, year: i32, month: u8, day: u8) -> bool {
         // Check if date is after era start
         if year < self.start_year {
@@ -64,7 +57,6 @@ impl JapaneseEra {
         true
     }
     
-    /// Converts a Gregorian date to Japanese era year.
     pub fn gregorian_to_era_year(&self, gregorian_year: i32) -> Outcome<i32> {
         // Check if the year falls within this era
         if gregorian_year < self.start_year {
@@ -84,7 +76,6 @@ impl JapaneseEra {
         Ok(gregorian_year - self.start_year + 1)
     }
     
-    /// Converts a Japanese era year to Gregorian year.
     pub fn era_year_to_gregorian(&self, era_year: i32) -> Outcome<i32> {
         if era_year < 1 {
             return Err(err!("Era year must be positive, got {}", era_year; Invalid, Input));
@@ -105,13 +96,11 @@ impl JapaneseEra {
     }
 }
 
-/// Japanese era registry with all historical and current eras.
 pub struct JapaneseEraRegistry {
     eras: Vec<JapaneseEra>,
 }
 
 impl JapaneseEraRegistry {
-    /// Creates a new era registry with all known Japanese eras.
     pub fn new() -> Self {
         Self {
             eras: vec![
@@ -170,7 +159,6 @@ impl JapaneseEraRegistry {
         }
     }
     
-    /// Finds the era that contains the given Gregorian date.
     pub fn find_era_for_date(&self, year: i32, month: u8, day: u8) -> Outcome<&JapaneseEra> {
         for era in &self.eras {
             if era.contains_date(year, month, day) {
@@ -181,24 +169,21 @@ impl JapaneseEraRegistry {
         Err(err!("No Japanese era found for date {}-{:02}-{:02}", year, month, day; Invalid, Input))
     }
     
-    /// Finds an era by its romanized name.
     pub fn find_era_by_name(&self, name: &str) -> Option<&JapaneseEra> {
         let name_lower = name.to_lowercase();
         self.eras.iter().find(|era| era.name_romaji.to_lowercase() == name_lower)
     }
     
-    /// Returns the current era (Reiwa).
     pub fn current_era(&self) -> &JapaneseEra {
         // Current era is always the first in our list
         &self.eras[0]
     }
     
-    /// Returns all available eras in chronological order (newest first).
+    /// Newest first.
     pub fn all_eras(&self) -> &[JapaneseEra] {
         &self.eras
     }
     
-    /// Converts a Gregorian date to Japanese calendar format.
     pub fn gregorian_to_japanese(&self, gregorian_year: i32, month: u8, day: u8) -> Outcome<(String, i32, u8, u8)> {
         let era = res!(self.find_era_for_date(gregorian_year, month, day));
         let era_year = res!(era.gregorian_to_era_year(gregorian_year));
@@ -206,7 +191,6 @@ impl JapaneseEraRegistry {
         Ok((era.name_romaji.to_string(), era_year, month, day))
     }
     
-    /// Converts Japanese calendar format to Gregorian date.
     pub fn japanese_to_gregorian(&self, era_name: &str, era_year: i32, month: u8, day: u8) -> Outcome<(i32, u8, u8)> {
         let era = ok!(self.find_era_by_name(era_name)
             .ok_or_else(|| err!("Unknown Japanese era: {}", era_name; Invalid, Input)));
