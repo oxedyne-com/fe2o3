@@ -73,16 +73,32 @@ pub const MAGIC: [u8; 6] = *b"ORESEG";
 /// Raised to 3 when the vocabulary gained [`crate::op::Op::FileMode`] at wire
 /// code 8. The framing did not move a byte; what the version declares is which
 /// operations the records inside may be.
-pub const VERSION: u8 = 3;
+///
+/// Raised to 4 when the vocabulary gained five codes at once: wire code 9, the
+/// second spelling of [`crate::op::Op::Mark`], for a mark carrying what was said
+/// and when; and wire codes 10 to 13 for [`crate::op::Op::Proposal`],
+/// [`crate::op::Op::Said`], [`crate::op::Op::Settled`] and
+/// [`crate::op::Op::Reverts`], which put a proposal, its discussion, its outcome
+/// and what a revert undoes into history rather than beside it. The framing did
+/// not move a byte this time either, and neither did a mark that carries neither
+/// a body nor a time: it is still written at wire code 4 with the two elements it
+/// always had, so every mark ever signed still verifies.
+pub const VERSION: u8 = 4;
 
 /// The oldest format version this module reads.
 ///
-/// Version 2 stays readable because version 3 is a strict superset of it: the
-/// framing is identical and the vocabulary only grew, so every version 2 segment
-/// ever written means in version 3 exactly what it meant in version 2. That is
-/// what the bump buys -- a reader meeting a version it does not know says which
+/// Version 2 stays readable because each version since has been a strict
+/// superset of it: the framing is identical and the vocabulary has only ever
+/// grown upwards, so every version 2 segment ever written means in version 4
+/// exactly what it meant in version 2, and so does every version 3 one. That is
+/// what a bump buys -- a reader meeting a version it does not know says which
 /// version it met, rather than reporting an operation code it cannot place --
-/// and it is why the bump costs a repository nothing.
+/// and it is why a bump costs a repository nothing.
+///
+/// The rule the vocabulary grows by is what keeps that true, and it is not open
+/// to reinterpretation: a new code goes strictly above the existing ones,
+/// [`VERSION`] rises by one, [`highest_code`] gains a branch, and this constant
+/// stays where it is.
 ///
 /// Version 1 is not read. Its operations spelled a file as a path and a path as
 /// a string, so its records are not the same records under another number.
@@ -93,14 +109,22 @@ pub const VERSION_MIN: u8 = 2;
 ///
 /// Version 2 was frozen with [`crate::op::CODE_NOTE`] at the top of the
 /// vocabulary; version 3 added [`crate::op::Op::FileMode`] above it and nothing
-/// else. A writer continuing a segment somebody else wrote asks this rather than
-/// assuming, so that "version 2 is a strict subset of version 3" stays true of
-/// the bytes and not only of the intention.
+/// else; version 4 added the five codes from [`crate::op::CODE_MARK_TIMED`] up to
+/// [`crate::op::CODE_REVERTS`]. A writer continuing a segment somebody else wrote
+/// asks this rather than assuming, so that "an older version is a strict subset
+/// of a newer one" stays true of the bytes and not only of the intention.
+///
+/// This is the whole mechanism the additive design rests on. A version 3 segment
+/// handed an [`crate::op::Op::Reverts`] refuses it here, and the caller starts a
+/// segment at the current version instead, which is why nothing already written
+/// has to be rewritten and why nothing already written can be misread.
 pub const fn highest_code(version: u8) -> u8 {
 	if version <= VERSION_MIN {
 		crate::op::CODE_NOTE
-	} else {
+	} else if version == 3 {
 		crate::op::CODE_FILE_MODE
+	} else {
+		crate::op::CODE_REVERTS
 	}
 }
 
@@ -804,7 +828,7 @@ mod tests {
 			),
 			Record::new(
 				res!(Header::new(oid(3, 13), vec![oid(3, 12)])),
-				Op::Mark { name: fmt!("release-caf\u{e9}") },
+				Op::Mark { name: fmt!("release-caf\u{e9}"), body: None, time: None },
 			),
 			Record::new(
 				res!(Header::new(oid(4, 14), vec![oid(3, 13)])),
@@ -1126,13 +1150,14 @@ mod tests {
 	#[test]
 	fn an_old_segment_refuses_a_newer_operation() -> Outcome<()> {
 		assert_eq!(highest_code(VERSION_MIN), crate::op::CODE_NOTE);
-		assert_eq!(highest_code(VERSION), crate::op::CODE_FILE_MODE);
+		assert_eq!(highest_code(3), crate::op::CODE_FILE_MODE);
+		assert_eq!(highest_code(VERSION), crate::op::CODE_REVERTS);
 		let old = Head { version: VERSION_MIN, replica: None };
 		let mode = Entry::Bare(Record::root(
 			oid(1, 1),
 			Op::FileMode { file: oid(1, 1), mode: Mode::Symlink },
 		));
-		let mark = Entry::Bare(Record::root(oid(1, 2), Op::Mark { name: fmt!("v1") }));
+		let mark = Entry::Bare(Record::root(oid(1, 2), Op::Mark { name: fmt!("v1"), body: None, time: None }));
 		// Starting one.
 		let mut writer: Writer<Fold, 0> = Writer::new(&old, Fold, [0u8; 0]);
 		assert_eq!(writer.version(), VERSION_MIN);
@@ -1158,11 +1183,98 @@ mod tests {
 		Ok(())
 	}
 
+	/// A version 3 segment refuses every operation version 4 added, and takes
+	/// every operation version 3 spelled.
+	///
+	/// This is the mechanism the whole additive design rests on, at the boundary
+	/// it was built for. Version 3 is the version every repository written before
+	/// this change is sitting in, so what a version 3 segment does when it is
+	/// handed a code above 8 is what decides whether the change costs a store a
+	/// migration. It does not: the operation is refused, and the caller starts a
+	/// segment at the current version rather than writing bytes into a file whose
+	/// header promises a smaller vocabulary.
+	#[test]
+	fn a_version_three_segment_refuses_the_version_four_vocabulary() -> Outcome<()> {
+		let v3 = Head { version: 3, replica: None };
+		let newer = [
+			// A mark carrying a time is the second spelling, at code 9.
+			Op::Mark {
+				name:	fmt!("v1"),
+				body:	None,
+				time:	Some(1_755_000_000),
+			},
+			Op::Proposal {
+				title:	fmt!("Carry a body on a mark"),
+				body:	b"the case".to_vec(),
+				voice:	fmt!("someone"),
+				time:	1_755_000_001,
+			},
+			Op::Said {
+				on:		oid(1, 1),
+				text:	b"agreed".to_vec(),
+				voice:	fmt!("someone else"),
+				time:	1_755_000_002,
+			},
+			Op::Settled {
+				on:		oid(1, 1),
+				state:	crate::op::Settled::Accepted,
+				mark:	None,
+				time:	1_755_000_003,
+			},
+			Op::Reverts { undone: vec![oid(1, 1), oid(2, 1)] },
+		];
+		for (i, op) in newer.iter().enumerate() {
+			let code = op.code();
+			assert!(code > highest_code(3), "{} is at code {}", op.name(), code);
+			let entry = Entry::Bare(Record::root(oid(1, i as u64 + 1), op.clone()));
+			let mut writer: Writer<Fold, 0> = Writer::new(&v3, Fold, [0u8; 0]);
+			let e = match writer.push(&entry) {
+				Ok(()) => return Err(err!(
+					"A {} at code {} was written into a version 3 segment.",
+					op.name(), code; Test)),
+				Err(e) => e,
+			};
+			let msg = fmt!("{}", e);
+			assert!(msg.contains(op.name()), "message was {}", msg);
+			assert!(msg.contains(&fmt!("{}", code)), "message was {}", msg);
+			// And a segment at the current version takes it.
+			let mut writer: Writer<Fold, 0> = Writer::new(&Head::new(None), Fold, [0u8; 0]);
+			res!(writer.push(&entry));
+		}
+		// The code the whole design turns on, said plainly: an operation at 13 in
+		// a segment declaring 3.
+		let reverts = Entry::Bare(Record::root(
+			oid(9, 1),
+			Op::Reverts { undone: vec![oid(1, 1)] },
+		));
+		assert_eq!(res!(reverts.peek()).op.code(), 13);
+		let mut writer: Writer<Fold, 0> = Writer::new(&v3, Fold, [0u8; 0]);
+		assert!(writer.push(&reverts).is_err());
+		// A mark carrying neither a body nor a time is version 2 vocabulary and
+		// goes into a version 3 segment, and a version 2 one, exactly as before.
+		let plain = Entry::Bare(Record::root(
+			oid(9, 2),
+			Op::Mark { name: fmt!("v1"), body: None, time: None },
+		));
+		assert_eq!(res!(plain.peek()).op.code(), crate::op::CODE_MARK);
+		let mut writer: Writer<Fold, 0> = Writer::new(&v3, Fold, [0u8; 0]);
+		res!(writer.push(&plain));
+		let old = Head { version: VERSION_MIN, replica: None };
+		let mut writer: Writer<Fold, 0> = Writer::new(&old, Fold, [0u8; 0]);
+		res!(writer.push(&plain));
+		Ok(())
+	}
+
 	/// The bytes of a one-record segment carrying a FileMode, frozen.
 	///
 	/// The operation that the version 3 bump exists for, pinned in the encoding
 	/// it was added in on 12026-07-30. It is shaped like a FileRename -- a code,
 	/// an identifier, a field -- and the field is a single tagged byte.
+	///
+	/// The version 4 bump moved the version byte here and nothing else, which is
+	/// the point: the operation this test pins was written in version 3 and is
+	/// spelled in version 4 by the same bytes, so a segment full of them needs no
+	/// migration.
 	#[test]
 	fn the_file_mode_bytes_are_frozen() -> Outcome<()> {
 		let rec = Record::root(oid(1, 1), Op::FileMode {
@@ -1171,9 +1283,9 @@ mod tests {
 		});
 		let bytes = res!(encode(&Head::new(None), &[Entry::Bare(rec)], Fold, [0u8; 0]));
 		let want: &[u8] = &[
-			// The magic, version 3, and no replica hint.
+			// The magic, version 4, and no replica hint.
 			0x4f, 0x52, 0x45, 0x53, 0x45, 0x47,
-			0x03,
+			0x04,
 			0x00,
 			// The record: a bare one, and 57 bytes of body.
 			0x01,
@@ -1364,7 +1476,7 @@ mod tests {
 				let anchored = Some(Anchor::origin(oid((next() % 5) as u64 + 1, 1)));
 				let op = match next() % 8 {
 					0 => Op::FileCreate { path: fmt!("f{}", next() % 100).into_bytes() },
-					1 => Op::Mark { name: fmt!("m{}", next() % 100) },
+					1 => Op::Mark { name: fmt!("m{}", next() % 100), body: None, time: None },
 					2 => Op::FileRename {
 						file:	oid((next() % 5) as u64 + 1, 1),
 						path:	vec![(next() % 256) as u8; next() % 40],
@@ -1439,18 +1551,25 @@ mod tests {
 	/// and decodes with the same code. This one is the fixed point. If it fails
 	/// and the change was deliberate, the version byte is the thing to raise.
 	///
-	/// It was raised to 2 for file identity, and to 3 on 12026-07-30 for
-	/// [`crate::op::Op::FileMode`]. The record below carries a mark, whose
-	/// encoding did not change either time, so the only byte that has ever moved
-	/// here is the version itself. That is the whole of the version 3 event as
-	/// the framing sees it: what changed is which operations may appear inside,
-	/// and a version 2 segment stays readable because its operations are a subset
-	/// of version 3's.
+	/// It was raised to 2 for file identity, to 3 on 12026-07-30 for
+	/// [`crate::op::Op::FileMode`], and to 4 on 12026-08-17 for the mark's second
+	/// spelling and the proposal operations. The record below carries a mark with
+	/// neither a body nor a time, whose encoding did not change on any of those
+	/// occasions, so the only byte that has ever moved here is the version itself.
+	/// That is the whole of each event as the framing sees it: what changed is
+	/// which operations may appear inside, and an older segment stays readable
+	/// because its operations are a subset of a newer one's.
+	///
+	/// The seven operation bytes below are therefore the test on the version 4
+	/// design rather than a chore it creates. A mark saying nothing beyond its
+	/// name is written at code 4 with two elements, as it always was; if it were
+	/// re-spelled at code 9, those bytes would move and every mark ever signed
+	/// would stop verifying.
 	#[test]
 	fn the_segment_bytes_are_frozen() -> Outcome<()> {
 		let rec = Record::new(
 			res!(Header::new(oid(2, 3), vec![oid(1, 7)])),
-			Op::Mark { name: fmt!("v1") },
+			Op::Mark { name: fmt!("v1"), body: None, time: None },
 		);
 		let bytes = res!(encode(
 			&Head::new(Some(ReplicaId::new(2))),
@@ -1462,7 +1581,7 @@ mod tests {
 			// The segment header: the magic, the version, a hint follows, and the
 			// replica it names.
 			0x4f, 0x52, 0x45, 0x53, 0x45, 0x47,
-			0x03,
+			0x04,
 			0x01,
 			0x02,
 			// The record: a bare one, and 61 bytes of body.
@@ -1490,6 +1609,16 @@ mod tests {
 			0x1e, 0x1a, 0xbf, 0xae, 0x11, 0xf1, 0xa0, 0xe5,
 		];
 		assert_eq!(bytes, want, "the segment format has changed");
+		// Said again on its own: the mark's ten bytes, a three-byte list header
+		// then the code 4 and the name, sitting where they have always sat. The
+		// assertion above would catch them moving, but it would report a segment
+		// that had changed rather than the thing that had actually gone wrong.
+		let mark: &[u8] = &[0x33, 0x21, 0x07, 0x0a, 0x04, 0x29, 0x21, 0x02, 0x76, 0x31];
+		assert!(
+			bytes.windows(mark.len()).any(|w| w == mark),
+			"a mark with neither a body nor a time is no longer written at code 4 \
+			with two elements, so every mark ever signed has stopped verifying",
+		);
 		// And the frozen bytes still read.
 		let (_, got) = res!(decode(want, Fold, [0u8; 0]));
 		assert_eq!(got.len(), 1);

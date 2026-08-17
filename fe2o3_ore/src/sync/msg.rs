@@ -360,7 +360,7 @@ mod tests {
 		);
 		let sealed = res!(Envelope::seal_record(
 			&StubSigner::with_seed(3),
-			&Record::root(oid(1, 1), Op::Mark { name: fmt!("start") }),
+			&Record::root(oid(1, 1), Op::Mark { name: fmt!("start"), body: None, time: None }),
 		));
 		Ok(vec![
 			Message::hello(vec![oid(3, 9), oid(1, 2)]),
@@ -499,7 +499,7 @@ mod tests {
 		let msg = Message::Send {
 			entries: vec![Entry::Bare(Record::new(
 				res!(Header::new(oid(2, 3), vec![oid(1, 7)])),
-				Op::Mark { name: fmt!("v1") },
+				Op::Mark { name: fmt!("v1"), body: None, time: None },
 			))],
 		};
 		let want: &[u8] = &[

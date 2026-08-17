@@ -457,7 +457,7 @@ mod tests {
 
 	/// A distinguishable operation, for tests that only need entries to differ.
 	fn mark(name: &str) -> Op {
-		Op::Mark { name: fmt!("{}", name) }
+		Op::Mark { name: fmt!("{}", name), body: None, time: None }
 	}
 
 	/// An operation identifier.

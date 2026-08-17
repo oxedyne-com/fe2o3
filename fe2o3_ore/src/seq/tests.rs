@@ -906,7 +906,7 @@ fn every_operation_crosses_into_the_repository() -> Outcome<()> {
 		(Header::root(file), Op::FileCreate { path: b"f".to_vec() }),
 		(
 			res!(Header::new(OpId::new(ReplicaId::new(1), 2), vec![file])),
-			Op::Mark { name: fmt!("v1") },
+			Op::Mark { name: fmt!("v1"), body: None, time: None },
 		),
 		(
 			res!(Header::new(OpId::new(ReplicaId::new(1), 3), vec![

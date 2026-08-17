@@ -49,6 +49,26 @@
 //! the render does with it is resolve it into spans; see
 //! [`crate::seq::render::Note`].
 //!
+//! # Some operations are about the history and not about the bytes
+//!
+//! [`Op::Mark`] names a point in history; [`Op::Proposal`], [`Op::Said`] and
+//! [`Op::Settled`] carry an argument about what the bytes ought to become; and
+//! [`Op::Reverts`] says what a set of edits was written to undo. None of them
+//! mints an atom, claims a byte or renders one, and the sequence keeps them for
+//! the reason it keeps a note: the causal graph has to be whole.
+//!
+//! They are operations rather than records kept beside the repository because a
+//! clone that arrives without them arrives without the reasons. A proposal held
+//! in a forge's own store is readable only through that forge; a revert that
+//! leaves no trace is an unexplained deletion by a stranger when it reaches
+//! somebody else's machine, and the author of the work being undone has nothing
+//! to read and nothing to be credited by.
+//!
+//! What is deliberately *not* here is a ballot. An operation is signed by its
+//! author, so a vote written into the log would name its voter permanently and
+//! irrevocably; tallies are published and voters are not, and that promise
+//! cannot be kept by a format that records the votes.
+//!
 //! # Every operation carries its parents
 //!
 //! An operation records the frontier its author could see when they wrote it,
@@ -57,7 +77,11 @@
 //! complete, and [`crate::seq`] can say whether two operations that touched the
 //! same bytes were concurrent or merely consecutive. Parents live on the header
 //! and not on the variants, because causality is a property of every operation
-//! alike and duplicating it eight times would let the eight drift.
+//! alike and duplicating it once per variant would let the copies drift.
+//!
+//! A time is not the same thing and is not on the header. Only the operations
+//! that carry one have one, it is the author's own clock rather than a position
+//! in the order, and nothing decides anything by it: see [`Op::Mark`].
 
 use crate::id::{
 	varint_decode,
@@ -92,6 +116,16 @@ pub const CODE_MOVE:		u8 = 6;
 pub const CODE_NOTE:		u8 = 7;
 /// Wire code for [`Op::FileMode`].
 pub const CODE_FILE_MODE:	u8 = 8;
+/// Wire code for an [`Op::Mark`] carrying a body, a time, or both.
+pub const CODE_MARK_TIMED:	u8 = 9;
+/// Wire code for [`Op::Proposal`].
+pub const CODE_PROPOSAL:	u8 = 10;
+/// Wire code for [`Op::Said`].
+pub const CODE_SAID:		u8 = 11;
+/// Wire code for [`Op::Settled`].
+pub const CODE_SETTLED:		u8 = 12;
+/// Wire code for [`Op::Reverts`].
+pub const CODE_REVERTS:		u8 = 13;
 
 
 /// Wire code for [`Mode::Normal`].
@@ -100,6 +134,16 @@ pub const MODE_NORMAL:		u8 = 0;
 pub const MODE_EXECUTABLE:	u8 = 1;
 /// Wire code for [`Mode::Symlink`].
 pub const MODE_SYMLINK:		u8 = 2;
+
+
+/// Wire code for [`Settled::Open`].
+pub const SETTLED_OPEN:		u8 = 0;
+/// Wire code for [`Settled::Accepted`].
+pub const SETTLED_ACCEPTED:	u8 = 1;
+/// Wire code for [`Settled::Declined`].
+pub const SETTLED_DECLINED:	u8 = 2;
+/// Wire code for [`Settled::Done`].
+pub const SETTLED_DONE:		u8 = 3;
 
 
 /// What a file is, over and above the bytes in it.
@@ -184,6 +228,92 @@ impl std::fmt::Display for Mode {
 }
 
 
+/// What became of a proposal. Four states and no workflow.
+///
+/// Shaped like [`Mode`], and for the same reason: a state outside the set is not
+/// a state a proposal can be in, and a reader should not have to guess what one
+/// would mean. There is no transition table beside it, because a state is
+/// asserted rather than stepped to -- an author says what a proposal now is, and
+/// the assertion stands until another one is written.
+///
+/// [`Settled::Open`] is the default, so an [`Op::Proposal`] that nothing has
+/// settled yet is open without anything having had to say so.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum Settled {
+	/// Still being asked for, which is what a proposal is until something says
+	/// otherwise.
+	#[default]
+	Open,
+	/// Agreed to.
+	Accepted,
+	/// Refused.
+	Declined,
+	/// Agreed to and carried out.
+	Done,
+}
+
+impl Settled {
+	/// Returns the wire code identifying the state.
+	pub const fn code(&self) -> u8 {
+		match self {
+			Self::Open		=> SETTLED_OPEN,
+			Self::Accepted	=> SETTLED_ACCEPTED,
+			Self::Declined	=> SETTLED_DECLINED,
+			Self::Done		=> SETTLED_DONE,
+		}
+	}
+
+	/// Returns the state's name, for messages and logs.
+	pub const fn name(&self) -> &'static str {
+		match self {
+			Self::Open		=> "open",
+			Self::Accepted	=> "accepted",
+			Self::Declined	=> "declined",
+			Self::Done		=> "done",
+		}
+	}
+
+	/// Reports whether the proposal is still being asked for.
+	pub const fn is_open(&self) -> bool {
+		matches!(self, Self::Open)
+	}
+
+	/// Serialises the state as the single [`Dat::U8`] it is spelled as.
+	pub const fn to_dat(&self) -> Dat {
+		Dat::U8(self.code())
+	}
+
+	/// Reconstructs a state from a [`Dat`] produced by [`Settled::to_dat`].
+	pub fn from_dat(dat: &Dat)
+		-> Outcome<Self>
+	{
+		let code = match dat {
+			Dat::U8(c) => *c,
+			other => return Err(err!(
+				"A settled state expects Dat::U8, got {:?}.", other;
+			Decode, Input, Mismatch)),
+		};
+		match code {
+			SETTLED_OPEN		=> Ok(Self::Open),
+			SETTLED_ACCEPTED	=> Ok(Self::Accepted),
+			SETTLED_DECLINED	=> Ok(Self::Declined),
+			SETTLED_DONE		=> Ok(Self::Done),
+			other => Err(err!(
+				"Settled state {} is not one of {} for open, {} for accepted, {} for \
+				declined and {} for done.",
+				other, SETTLED_OPEN, SETTLED_ACCEPTED, SETTLED_DECLINED, SETTLED_DONE;
+			Decode, Input, Invalid)),
+		}
+	}
+}
+
+impl std::fmt::Display for Settled {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "{}", self.name())
+	}
+}
+
+
 /// A single unit of history: one whole edit.
 ///
 /// The vocabulary is an enum rather than a trait object, so a reader can
@@ -242,10 +372,31 @@ pub enum Op {
 		/// What the file is from here on.
 		mode: Mode,
 	},
-	/// Names a point in history, so that it can be referred to later.
+	/// Names a point in history, so that it can be referred to later, and says
+	/// what was going on when it was named.
+	///
+	/// The body and the time joined the operation after it had already been
+	/// written a great many times, so both are optional and the wire carries two
+	/// spellings of the one variant: a mark with neither is [`CODE_MARK`] with
+	/// the two elements it has always had, and a mark with either is
+	/// [`CODE_MARK_TIMED`] with four. Spelling the old marks the new way would
+	/// have changed the bytes under every signature ever put on one, and
+	/// splitting the type in two would have pushed a distinction that is only a
+	/// spelling into every consumer that reads a mark.
+	///
+	/// The time is the author's own clock at the moment of writing, and it
+	/// **orders nothing**. A clock that is wrong is still a clock, so a reader
+	/// shows a mark by its time and decides by [`crate::seq::OpOrder`]; sorting
+	/// or arbitrating by the time would let a machine set to next year win every
+	/// contest it entered.
 	Mark {
 		/// The name given to this point.
 		name: String,
+		/// What was said about it, as bytes, or nothing where nothing was said.
+		body: Option<Vec<u8>>,
+		/// When it was made, in seconds since the Unix epoch, or nothing for a
+		/// mark written before the log carried a clock.
+		time: Option<u64>,
 	},
 	/// Puts bytes in a gap and kills runs of existing content, which is the
 	/// single primitive from which insertion, deletion and replacement all
@@ -301,24 +452,117 @@ pub enum Op {
 		/// What it says, as bytes: a note is not this crate's to decode.
 		text: Vec<u8>,
 	},
+	/// Asks for something that is not yet in the bytes.
+	///
+	/// A proposal is history rather than a record beside history, so it travels
+	/// the way every other operation travels: it is signed by whoever wrote it,
+	/// it carries the frontier they could see, and a replica that has the
+	/// operations has the discussion. Kept in a forge's own store instead, it
+	/// would be readable only through that forge, and a clone would arrive with
+	/// the argument for the change missing.
+	///
+	/// What is *not* here is a ballot. A vote in the log would name its voter
+	/// permanently and irrevocably, under a signature, and the guarantee that
+	/// tallies are published and voters are not could then never be given again.
+	Proposal {
+		/// What is being asked for, in one line.
+		title: String,
+		/// The case for it, as bytes.
+		body: Vec<u8>,
+		/// The forge name the author was writing under.
+		voice: String,
+		/// When it was opened, in seconds since the Unix epoch.
+		time: u64,
+	},
+	/// One remark in a proposal's discussion.
+	///
+	/// It names the proposal by that operation's identity, not by a title and
+	/// not by a number, so a remark still finds what it is about after the two
+	/// have crossed between replicas in either order.
+	Said {
+		/// The proposal spoken about.
+		on: OpId,
+		/// What was said, as bytes.
+		text: Vec<u8>,
+		/// The forge name the author was writing under.
+		voice: String,
+		/// When it was said, in seconds since the Unix epoch.
+		time: u64,
+	},
+	/// States what became of a proposal, from this point on.
+	///
+	/// Shaped like [`Op::FileMode`]: it names a thing by identity and asserts
+	/// one piece of that thing's state, so the assertion survives everything
+	/// said about the proposal afterwards. Two of these on one proposal settle
+	/// the way two concurrent renames settle -- the later in operation order is
+	/// the one a reader reports -- and that is the only concurrency rule these
+	/// operations need.
+	Settled {
+		/// The proposal settled.
+		on: OpId,
+		/// What it became.
+		state: Settled,
+		/// The mark that closed it, where one did.
+		///
+		/// An identifier, never a mark's name: a name does not pick out the same
+		/// operation on two replicas, and this has to.
+		mark: Option<OpId>,
+		/// When it was settled, in seconds since the Unix epoch.
+		time: u64,
+	},
+	/// Says that operations undo others, so that a revert is not an unexplained
+	/// deletion by a stranger when it reaches somebody else's machine.
+	///
+	/// The inverse edits are ordinary operations authored beside this one, and
+	/// nothing here does the undoing; what this adds is the record of what they
+	/// are for. Without it the bytes say only that somebody deleted work, and
+	/// whoever wrote that work first has no way to see that it was reverted
+	/// rather than lost, nor to be credited for it when it comes back.
+	///
+	/// Renders nothing, claims no byte and mints no atom, which is the species
+	/// [`Op::Mark`] and [`Op::Note`] are already in.
+	Reverts {
+		/// What is undone, in operation order.
+		///
+		/// Held ascending and without repetition, for the reason
+		/// [`Header::parents`] is: two byte spellings of one set would both
+		/// verify against a signature.
+		undone: Vec<OpId>,
+	},
 }
 
 impl Op {
 	/// Returns the wire code identifying the variant.
+	///
+	/// A mark answers with the code it is written at, which is a function of
+	/// what it carries rather than of the variant: see [`Op::Mark`]. That is what
+	/// [`crate::segment::highest_code`] reads, so a bodyless, timeless mark goes
+	/// into a segment of any version this crate reads, and a mark carrying
+	/// either does not go into one written before the fields existed.
 	pub fn code(&self) -> u8 {
 		match self {
 			Self::FileCreate { .. }	=> CODE_FILE_CREATE,
 			Self::FileDelete { .. }	=> CODE_FILE_DELETE,
 			Self::FileRename { .. }	=> CODE_FILE_RENAME,
 			Self::FileMode { .. }	=> CODE_FILE_MODE,
-			Self::Mark { .. }		=> CODE_MARK,
+			Self::Mark { body: None, time: None, .. }
+									=> CODE_MARK,
+			Self::Mark { .. }		=> CODE_MARK_TIMED,
 			Self::Splice { .. }		=> CODE_SPLICE,
 			Self::Move { .. }		=> CODE_MOVE,
 			Self::Note { .. }		=> CODE_NOTE,
+			Self::Proposal { .. }	=> CODE_PROPOSAL,
+			Self::Said { .. }		=> CODE_SAID,
+			Self::Settled { .. }	=> CODE_SETTLED,
+			Self::Reverts { .. }	=> CODE_REVERTS,
 		}
 	}
 
 	/// Returns the variant name, for messages and logs.
+	///
+	/// One name for both of a mark's spellings, since the two are one operation
+	/// and a reader told otherwise would go looking for a variant that is not
+	/// there.
 	pub fn name(&self) -> &'static str {
 		match self {
 			Self::FileCreate { .. }	=> "FileCreate",
@@ -329,6 +573,10 @@ impl Op {
 			Self::Splice { .. }		=> "Splice",
 			Self::Move { .. }		=> "Move",
 			Self::Note { .. }		=> "Note",
+			Self::Proposal { .. }	=> "Proposal",
+			Self::Said { .. }		=> "Said",
+			Self::Settled { .. }	=> "Settled",
+			Self::Reverts { .. }	=> "Reverts",
 		}
 	}
 
@@ -462,6 +710,35 @@ impl Op {
 		Invalid, Input, Missing))
 	}
 
+	/// Checks the rule that a revert names what it undoes exactly once, in order.
+	///
+	/// [`Op::Reverts`] holds its list ascending and without repetition, for the
+	/// reason [`Header::from_dat`] holds the parents that way: the same set of
+	/// operations written two ways would be two byte strings, both of which a
+	/// signature would verify, and a provenance chain cannot afford a record with
+	/// two spellings. The list is refused rather than sorted, so that whoever
+	/// wrote it finds out.
+	///
+	/// Checked on the way off the wire as well as on the way into the sequence,
+	/// for the reason [`Op::check_placement`] is.
+	pub fn check_reverts(&self)
+		-> Outcome<()>
+	{
+		let undone = match self {
+			Self::Reverts { undone }	=> undone,
+			_							=> return Ok(()),
+		};
+		for pair in undone.windows(2) {
+			if pair[1] <= pair[0] {
+				return Err(err!(
+					"A Reverts lists {} after {}; what a revert undoes is named \
+					ascending and without repetition.", pair[1], pair[0];
+				Decode, Input, Order));
+			}
+		}
+		Ok(())
+	}
+
 	/// Checks the operation is one the sequence structure can resolve.
 	///
 	/// A left origin binds after a byte and a right origin before one; a move may
@@ -505,6 +782,7 @@ impl Op {
 		}
 		res!(self.check_placement());
 		res!(self.check_note());
+		res!(self.check_reverts());
 		Ok(())
 	}
 
@@ -535,9 +813,20 @@ impl Op {
 				file.to_dat(),
 				mode.to_dat(),
 			]),
-			Self::Mark { name } => Dat::List(vec![
+			// Two spellings of one variant, chosen by what the mark carries: the
+			// short one is what every mark written before the fields existed
+			// says, byte for byte, and the long one is what a mark carrying
+			// either of them says. Which is written is not the author's choice,
+			// so the encoding stays canonical and a mark has one signature.
+			Self::Mark { name, body: None, time: None } => Dat::List(vec![
 				Dat::U8(CODE_MARK),
 				Dat::Str(name.clone()),
+			]),
+			Self::Mark { name, body, time } => Dat::List(vec![
+				Dat::U8(CODE_MARK_TIMED),
+				Dat::Str(name.clone()),
+				opt_bytes_to_dat(body),
+				opt_u64_to_dat(time),
 			]),
 			Self::Splice { left, right, remove, insert } => Dat::List(vec![
 				Dat::U8(CODE_SPLICE),
@@ -557,6 +846,31 @@ impl Op {
 				Dat::List(on.iter().map(|r| r.to_dat()).collect()),
 				Dat::BU64(text.clone()),
 			]),
+			Self::Proposal { title, body, voice, time } => Dat::List(vec![
+				Dat::U8(CODE_PROPOSAL),
+				Dat::Str(title.clone()),
+				Dat::BU64(body.clone()),
+				Dat::Str(voice.clone()),
+				Dat::U64(*time),
+			]),
+			Self::Said { on, text, voice, time } => Dat::List(vec![
+				Dat::U8(CODE_SAID),
+				on.to_dat(),
+				Dat::BU64(text.clone()),
+				Dat::Str(voice.clone()),
+				Dat::U64(*time),
+			]),
+			Self::Settled { on, state, mark, time } => Dat::List(vec![
+				Dat::U8(CODE_SETTLED),
+				on.to_dat(),
+				state.to_dat(),
+				opt_id_to_dat(mark),
+				Dat::U64(*time),
+			]),
+			Self::Reverts { undone } => Dat::List(vec![
+				Dat::U8(CODE_REVERTS),
+				Dat::List(undone.iter().map(|u| u.to_dat()).collect()),
+			]),
 		}
 	}
 
@@ -566,7 +880,8 @@ impl Op {
 	/// because an operation that places bytes and names no origin belongs to no
 	/// file and no later stage could decide one for it. [`Op::check_note`] is
 	/// checked here for the same reason: a note about nothing resolves to nothing,
-	/// wherever it is read.
+	/// wherever it is read. So is [`Op::check_reverts`], since a list that arrives
+	/// out of order is a second byte spelling of a set that has one.
 	pub fn from_dat(dat: &Dat)
 		-> Outcome<Self>
 	{
@@ -609,10 +924,37 @@ impl Op {
 					mode:	res!(Mode::from_dat(&v[2])),
 				}
 			},
+			// Both spellings decode to the one variant, so nothing downstream has
+			// to know which of them it was read from.
 			CODE_MARK => {
 				res!(expect_len(v, 2, "Mark"));
 				Self::Mark {
-					name: res!(as_str(&v[1], "Mark name")),
+					name:	res!(as_str(&v[1], "Mark name")),
+					body:	None,
+					time:	None,
+				}
+			},
+			CODE_MARK_TIMED => {
+				res!(expect_len(v, 4, "Mark"));
+				let body = res!(as_opt_bytes(&v[2], "Mark body"));
+				let time = res!(as_opt_u64(&v[3], "Mark time"));
+				// The long spelling is refused where it says nothing the short one
+				// could not, rather than being quietly read as the short one.
+				// Otherwise a mark would have two encodings, both verifying against
+				// a signature, which is the thing [`Header::from_dat`] refuses for
+				// the same reason.
+				if body.is_none() && time.is_none() {
+					return Err(err!(
+						"A Mark named {:?} is written at wire code {} carrying neither a \
+						body nor a time; a mark with neither is written at code {}, and \
+						an operation has one encoding.",
+						res!(as_str(&v[1], "Mark name")), CODE_MARK_TIMED, CODE_MARK;
+					Decode, Input, Invalid));
+				}
+				Self::Mark {
+					name:	res!(as_str(&v[1], "Mark name")),
+					body,
+					time,
 				}
 			},
 			CODE_SPLICE => {
@@ -639,12 +981,46 @@ impl Op {
 					text:	res!(as_bytes(&v[2], "Note text")),
 				}
 			},
+			CODE_PROPOSAL => {
+				res!(expect_len(v, 5, "Proposal"));
+				Self::Proposal {
+					title:	res!(as_str(&v[1], "Proposal title")),
+					body:	res!(as_bytes(&v[2], "Proposal body")),
+					voice:	res!(as_str(&v[3], "Proposal voice")),
+					time:	res!(as_u64(&v[4], "Proposal time")),
+				}
+			},
+			CODE_SAID => {
+				res!(expect_len(v, 5, "Said"));
+				Self::Said {
+					on:		res!(OpId::from_dat(&v[1])),
+					text:	res!(as_bytes(&v[2], "Said text")),
+					voice:	res!(as_str(&v[3], "Said voice")),
+					time:	res!(as_u64(&v[4], "Said time")),
+				}
+			},
+			CODE_SETTLED => {
+				res!(expect_len(v, 5, "Settled"));
+				Self::Settled {
+					on:		res!(OpId::from_dat(&v[1])),
+					state:	res!(Settled::from_dat(&v[2])),
+					mark:	res!(as_opt_id(&v[3], "Settled mark")),
+					time:	res!(as_u64(&v[4], "Settled time")),
+				}
+			},
+			CODE_REVERTS => {
+				res!(expect_len(v, 2, "Reverts"));
+				Self::Reverts {
+					undone: res!(as_ids(&v[1], "Reverts undone")),
+				}
+			},
 			other => return Err(err!(
 				"Op code {} is not recognised.", other;
 			Decode, Input, Invalid)),
 		};
 		res!(op.check_placement());
 		res!(op.check_note());
+		res!(op.check_reverts());
 		Ok(op)
 	}
 
@@ -1029,6 +1405,104 @@ fn as_bytes(dat: &Dat, what: &str)
 	}
 }
 
+/// Extracts a list of operation identifiers, naming it if the kind is wrong.
+fn as_ids(dat: &Dat, what: &str)
+	-> Outcome<Vec<OpId>>
+{
+	match dat {
+		Dat::List(v) => {
+			let mut out = Vec::with_capacity(v.len());
+			for item in v {
+				out.push(res!(OpId::from_dat(item)));
+			}
+			Ok(out)
+		},
+		other => Err(err!(
+			"An Op {} expects Dat::List, got {:?}.", what, other;
+		Decode, Input, Mismatch)),
+	}
+}
+
+/// Extracts a 64-bit unsigned field, naming it if the kind is wrong.
+///
+/// A time is exactly this and nothing wider: seconds since the Unix epoch, in
+/// UTC, read by whoever wrote the operation and never recomputed afterwards,
+/// since a second reading would be a different operation under the same
+/// signature.
+fn as_u64(dat: &Dat, what: &str)
+	-> Outcome<u64>
+{
+	match dat {
+		Dat::U64(n) => Ok(*n),
+		other => Err(err!(
+			"An Op {} expects Dat::U64, got {:?}.", what, other;
+		Decode, Input, Mismatch)),
+	}
+}
+
+/// Serialises an optional byte payload, absence being that nothing was said.
+fn opt_bytes_to_dat(body: &Option<Vec<u8>>) -> Dat {
+	Dat::Opt(Box::new(body.as_ref().map(|b| Dat::BU64(b.clone()))))
+}
+
+/// Reconstructs an optional byte payload from a [`Dat`] produced by
+/// [`opt_bytes_to_dat`].
+fn as_opt_bytes(dat: &Dat, what: &str)
+	-> Outcome<Option<Vec<u8>>>
+{
+	match dat {
+		Dat::Opt(boxed) => match boxed.as_ref() {
+			Some(inner)	=> Ok(Some(res!(as_bytes(inner, what)))),
+			None		=> Ok(None),
+		},
+		other => Err(err!(
+			"An optional Op {} expects Dat::Opt, got {:?}.", what, other;
+		Decode, Input, Mismatch)),
+	}
+}
+
+/// Serialises an optional time, absence being that none was recorded.
+fn opt_u64_to_dat(time: &Option<u64>) -> Dat {
+	Dat::Opt(Box::new(time.map(Dat::U64)))
+}
+
+/// Reconstructs an optional time from a [`Dat`] produced by [`opt_u64_to_dat`].
+fn as_opt_u64(dat: &Dat, what: &str)
+	-> Outcome<Option<u64>>
+{
+	match dat {
+		Dat::Opt(boxed) => match boxed.as_ref() {
+			Some(inner)	=> Ok(Some(res!(as_u64(inner, what)))),
+			None		=> Ok(None),
+		},
+		other => Err(err!(
+			"An optional Op {} expects Dat::Opt, got {:?}.", what, other;
+		Decode, Input, Mismatch)),
+	}
+}
+
+/// Serialises an optional operation identifier, absence being that none was
+/// named.
+fn opt_id_to_dat(id: &Option<OpId>) -> Dat {
+	Dat::Opt(Box::new(id.as_ref().map(|i| i.to_dat())))
+}
+
+/// Reconstructs an optional operation identifier from a [`Dat`] produced by
+/// [`opt_id_to_dat`].
+fn as_opt_id(dat: &Dat, what: &str)
+	-> Outcome<Option<OpId>>
+{
+	match dat {
+		Dat::Opt(boxed) => match boxed.as_ref() {
+			Some(inner)	=> Ok(Some(res!(OpId::from_dat(inner)))),
+			None		=> Ok(None),
+		},
+		other => Err(err!(
+			"An optional Op {} expects Dat::Opt, got {:?}.", what, other;
+		Decode, Input, Mismatch)),
+	}
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -1103,7 +1577,86 @@ mod tests {
 			// vocabulary could not spell.
 			Op::FileCreate { path: Vec::new() },
 			Op::FileCreate { path: vec![0xff, 0xfe, 0x2f, 0x00, 0x80] },
-			Op::Mark { name: fmt!("release-caf\u{e9}") },
+			Op::Mark { name: fmt!("release-caf\u{e9}"), body: None, time: None },
+			// Every combination the mark's two spellings cover: the short one,
+			// then a body alone, a time alone, and both. A body longer than a
+			// single byte length field could hold, and one that is not UTF-8,
+			// since a mark's body is no more this crate's to decode than a note's
+			// text is.
+			Op::Mark {
+				name:	fmt!("v2"),
+				body:	Some(b"what this release is for".to_vec()),
+				time:	None,
+			},
+			Op::Mark {
+				name:	fmt!("v3"),
+				body:	None,
+				time:	Some(1_755_400_329),
+			},
+			Op::Mark {
+				name:	fmt!("v4"),
+				body:	Some(vec![0xc3; 900]),
+				time:	Some(u64::MAX),
+			},
+			Op::Mark {
+				name:	String::new(),
+				body:	Some(Vec::new()),
+				time:	Some(0),
+			},
+			// A proposal, its discussion and its outcome.
+			Op::Proposal {
+				title:	fmt!("Carry a body on a mark"),
+				body:	b"A mark names a point and says nothing about it.".to_vec(),
+				voice:	fmt!("wren"),
+				time:	1_755_400_000,
+			},
+			Op::Proposal {
+				title:	String::new(),
+				body:	vec![0xff; 700],
+				voice:	String::new(),
+				time:	0,
+			},
+			Op::Said {
+				on:		oid(3, 4),
+				text:	b"Agreed, provided the old bytes do not move.".to_vec(),
+				voice:	fmt!("caf\u{e9}"),
+				time:	1_755_400_100,
+			},
+			Op::Said {
+				on:		oid(u64::MAX, u64::MAX),
+				text:	Vec::new(),
+				voice:	String::new(),
+				time:	u64::MAX,
+			},
+			// Every state, and both spellings of the mark that closed it.
+			Op::Settled {
+				on:		oid(3, 4),
+				state:	Settled::Open,
+				mark:	None,
+				time:	1_755_400_200,
+			},
+			Op::Settled {
+				on:		oid(3, 4),
+				state:	Settled::Accepted,
+				mark:	Some(oid(9, 2)),
+				time:	1_755_400_201,
+			},
+			Op::Settled {
+				on:		oid(3, 4),
+				state:	Settled::Declined,
+				mark:	None,
+				time:	1_755_400_202,
+			},
+			Op::Settled {
+				on:		oid(3, 4),
+				state:	Settled::Done,
+				mark:	Some(oid(1, u64::MAX)),
+				time:	u64::MAX,
+			},
+			// A revert of one operation, of several, and of none.
+			Op::Reverts { undone: vec![oid(2, 7)] },
+			Op::Reverts { undone: vec![oid(1, 1), oid(1, 2), oid(3, 1)] },
+			Op::Reverts { undone: Vec::new() },
 			// A move of one run into the middle of a file.
 			Op::Move {
 				src:	vec![range(1, 0, 40)],
@@ -1285,7 +1838,7 @@ mod tests {
 		);
 		assert_eq!(Op::FileCreate { path: b"c.txt".to_vec() }.names_file(), None,
 			"a file's creation is its identity, so it names nothing else");
-		assert_eq!(Op::Mark { name: fmt!("v1") }.names_file(), None);
+		assert_eq!(Op::Mark { name: fmt!("v1"), body: None, time: None }.names_file(), None);
 		assert_eq!(Op::Note {
 			on:		vec![range(1, 0, 2)],
 			text:	b"x".to_vec(),
@@ -1403,7 +1956,7 @@ mod tests {
 			left:	Some(Anchor::origin(oid(9, 1))),
 			right:	None,
 		}.note_on().is_empty());
-		assert!(Op::Mark { name: fmt!("v1") }.note_on().is_empty());
+		assert!(Op::Mark { name: fmt!("v1"), body: None, time: None }.note_on().is_empty());
 		Ok(())
 	}
 
@@ -1525,6 +2078,352 @@ mod tests {
 			Dat::Str(fmt!("src/lib.rs")),
 			Dat::U8(MODE_EXECUTABLE),
 		])).is_err());
+		Ok(())
+	}
+
+	/// A mark is one variant with two spellings, and which one it is written in
+	/// is decided by what it carries rather than by the author.
+	///
+	/// The short spelling is the whole of the compatibility claim: a mark saying
+	/// nothing beyond its name is [`CODE_MARK`] with two elements, byte for byte
+	/// what was written before the fields existed, so every mark already signed
+	/// still verifies. The long one is [`CODE_MARK_TIMED`] with four. Both arrive
+	/// as [`Op::Mark`], and nothing downstream can tell which it was read from
+	/// except by asking what the mark carries.
+	#[test]
+	fn a_mark_has_two_spellings_and_one_variant() -> Outcome<()> {
+		// The short spelling, pinned as a daticle and as bytes.
+		let plain = Op::Mark { name: fmt!("v1"), body: None, time: None };
+		assert_eq!(plain.code(), CODE_MARK);
+		assert_eq!(plain.code(), 4, "the wire code a mark has always had");
+		assert_eq!(plain.name(), "Mark");
+		assert_eq!(plain.to_dat(), Dat::List(vec![
+			Dat::U8(CODE_MARK),
+			Dat::Str(fmt!("v1")),
+		]));
+		assert_eq!(
+			res!(plain.encode()),
+			vec![0x0a, 0x33, 0x21, 0x07, 0x0a, 0x04, 0x29, 0x21, 0x02, 0x76, 0x31],
+			"the bytes of a bodyless, timeless mark have moved",
+		);
+		// The long spelling, at every combination that reaches it.
+		for (body, time) in [
+			(Some(b"why".to_vec()), None),
+			(None, Some(1_755_400_329u64)),
+			(Some(Vec::new()), Some(0)),
+		] {
+			let op = Op::Mark { name: fmt!("v1"), body: body.clone(), time };
+			assert_eq!(op.code(), CODE_MARK_TIMED, "body {:?} time {:?}", body, time);
+			assert_eq!(op.code(), 9);
+			assert_eq!(op.name(), "Mark", "one variant, so one name");
+			match op.to_dat() {
+				Dat::List(v) => assert_eq!(v.len(), 4, "the long spelling is four"),
+				other => return Err(err!(
+					"A Mark encodes to {:?}.", other; Test, Mismatch)),
+			}
+			// And back, through both round trips.
+			assert_eq!(op, res!(Op::from_dat(&op.to_dat())));
+			assert_eq!(op, res!(Op::decode_all(&res!(op.encode()))));
+		}
+		// A code 4 mark and a code 9 mark decode to the same variant.
+		let short = res!(Op::from_dat(&Dat::List(vec![
+			Dat::U8(CODE_MARK),
+			Dat::Str(fmt!("v1")),
+		])));
+		let long = res!(Op::from_dat(&Dat::List(vec![
+			Dat::U8(CODE_MARK_TIMED),
+			Dat::Str(fmt!("v1")),
+			Dat::Opt(Box::new(None)),
+			Dat::Opt(Box::new(Some(Dat::U64(9)))),
+		])));
+		assert!(matches!(short, Op::Mark { .. }));
+		assert!(matches!(long, Op::Mark { .. }));
+		assert_eq!(short.name(), long.name());
+		assert_eq!(short, plain);
+		match (&short, &long) {
+			(
+				Op::Mark { name: a, body: None, time: None },
+				Op::Mark { name: b, body: None, time: Some(9) },
+			) => assert_eq!(a, b),
+			_ => return Err(err!(
+				"The two spellings did not read back as one variant."; Test, Mismatch)),
+		}
+		// The arity of each spelling is exact, as it is everywhere else.
+		assert!(Op::from_dat(&Dat::List(vec![
+			Dat::U8(CODE_MARK),
+			Dat::Str(fmt!("v1")),
+			Dat::Opt(Box::new(None)),
+			Dat::Opt(Box::new(None)),
+		])).is_err(), "code 4 takes two elements");
+		assert!(Op::from_dat(&Dat::List(vec![
+			Dat::U8(CODE_MARK_TIMED),
+			Dat::Str(fmt!("v1")),
+		])).is_err(), "code 9 takes four elements");
+		// A body is bytes and a time is a number, not the other way about.
+		assert!(Op::from_dat(&Dat::List(vec![
+			Dat::U8(CODE_MARK_TIMED),
+			Dat::Str(fmt!("v1")),
+			Dat::Opt(Box::new(Some(Dat::Str(fmt!("not bytes"))))),
+			Dat::Opt(Box::new(None)),
+		])).is_err());
+		assert!(Op::from_dat(&Dat::List(vec![
+			Dat::U8(CODE_MARK_TIMED),
+			Dat::Str(fmt!("v1")),
+			Dat::Opt(Box::new(None)),
+			Dat::Opt(Box::new(Some(Dat::U8(9)))),
+		])).is_err(), "a time is a Dat::U64 and nothing narrower");
+		// A bare field where an optional one belongs.
+		assert!(Op::from_dat(&Dat::List(vec![
+			Dat::U8(CODE_MARK_TIMED),
+			Dat::Str(fmt!("v1")),
+			Dat::BU64(b"why".to_vec()),
+			Dat::Opt(Box::new(None)),
+		])).is_err());
+		// And the long spelling is refused where it says nothing the short one
+		// could not: an operation has one encoding.
+		assert!(Op::from_dat(&Dat::List(vec![
+			Dat::U8(CODE_MARK_TIMED),
+			Dat::Str(fmt!("v1")),
+			Dat::Opt(Box::new(None)),
+			Dat::Opt(Box::new(None)),
+		])).is_err(), "code 9 carrying neither is code 4 spelled twice");
+		// A body beyond what a single byte length field could hold keeps its
+		// length, which is why it is a BU64.
+		for len in [255usize, 256, 70_000] {
+			let op = Op::Mark {
+				name:	fmt!("v1"),
+				body:	Some(vec![0x5a; len]),
+				time:	Some(1),
+			};
+			match res!(Op::decode_all(&res!(op.encode()))) {
+				Op::Mark { body: Some(b), .. }	=> assert_eq!(b.len(), len),
+				other => return Err(err!(
+					"Expected a Mark with a body, got {}.", other.name();
+				Test, Mismatch)),
+			}
+		}
+		Ok(())
+	}
+
+	/// A proposal, a remark upon it and its outcome each carry their fields
+	/// through both round trips, at the codes the format change fixed.
+	#[test]
+	fn the_proposal_operations_round_trip() -> Outcome<()> {
+		let prop = Op::Proposal {
+			title:	fmt!("Carry a body on a mark"),
+			body:	b"the case for it".to_vec(),
+			voice:	fmt!("wren"),
+			time:	1_755_400_000,
+		};
+		let said = Op::Said {
+			on:		oid(3, 4),
+			text:	b"agreed".to_vec(),
+			voice:	fmt!("caf\u{e9}"),
+			time:	1_755_400_100,
+		};
+		let settled = Op::Settled {
+			on:		oid(3, 4),
+			state:	Settled::Accepted,
+			mark:	Some(oid(9, 2)),
+			time:	1_755_400_200,
+		};
+		let reverts = Op::Reverts { undone: vec![oid(1, 1), oid(2, 9)] };
+		for (op, code, name) in [
+			(&prop,		CODE_PROPOSAL,	"Proposal"),
+			(&said,		CODE_SAID,		"Said"),
+			(&settled,	CODE_SETTLED,	"Settled"),
+			(&reverts,	CODE_REVERTS,	"Reverts"),
+		] {
+			assert_eq!(op.code(), code, "variant {}", name);
+			assert_eq!(op.name(), name);
+			res!(op.validate());
+			assert_eq!(*op, res!(Op::from_dat(&op.to_dat())));
+			assert_eq!(*op, res!(Op::decode_all(&res!(op.encode()))));
+		}
+		// The codes are pinned: they are on the wire.
+		assert_eq!(CODE_PROPOSAL, 10);
+		assert_eq!(CODE_SAID, 11);
+		assert_eq!(CODE_SETTLED, 12);
+		assert_eq!(CODE_REVERTS, 13);
+		// Every settled state survives, alongside both spellings of the mark that
+		// closed the proposal.
+		for state in [Settled::Open, Settled::Accepted, Settled::Declined, Settled::Done] {
+			for mark in [None, Some(oid(9, 2))] {
+				let op = Op::Settled { on: oid(3, 4), state, mark, time: 7 };
+				assert_eq!(op, res!(Op::decode_all(&res!(op.encode()))), "state {}", state);
+			}
+		}
+		// The arities are exact.
+		assert!(Op::from_dat(&Dat::List(vec![
+			Dat::U8(CODE_PROPOSAL),
+			Dat::Str(fmt!("t")),
+			Dat::BU64(Vec::new()),
+			Dat::Str(fmt!("v")),
+		])).is_err());
+		assert!(Op::from_dat(&Dat::List(vec![
+			Dat::U8(CODE_REVERTS),
+			Dat::List(Vec::new()),
+			Dat::U64(0),
+		])).is_err());
+		// A body is bytes and a title is a string, not the other way about.
+		assert!(Op::from_dat(&Dat::List(vec![
+			Dat::U8(CODE_PROPOSAL),
+			Dat::BU64(b"t".to_vec()),
+			Dat::BU64(Vec::new()),
+			Dat::Str(fmt!("v")),
+			Dat::U64(0),
+		])).is_err());
+		// A time is a Dat::U64 and nothing narrower.
+		assert!(Op::from_dat(&Dat::List(vec![
+			Dat::U8(CODE_SAID),
+			oid(3, 4).to_dat(),
+			Dat::BU64(Vec::new()),
+			Dat::Str(fmt!("v")),
+			Dat::U8(0),
+		])).is_err());
+		// A proposal is named by an identifier, never by a title.
+		assert!(Op::from_dat(&Dat::List(vec![
+			Dat::U8(CODE_SAID),
+			Dat::Str(fmt!("Carry a body on a mark")),
+			Dat::BU64(Vec::new()),
+			Dat::Str(fmt!("v")),
+			Dat::U64(0),
+		])).is_err());
+		// A mark is named by an identifier too, and optionally.
+		assert!(Op::from_dat(&Dat::List(vec![
+			Dat::U8(CODE_SETTLED),
+			oid(3, 4).to_dat(),
+			Dat::U8(SETTLED_DONE),
+			Dat::Str(fmt!("v1")),
+			Dat::U64(0),
+		])).is_err());
+		assert!(Op::from_dat(&Dat::List(vec![
+			Dat::U8(CODE_SETTLED),
+			oid(3, 4).to_dat(),
+			Dat::U8(SETTLED_DONE),
+			oid(9, 2).to_dat(),
+			Dat::U64(0),
+		])).is_err(), "a bare identifier where an optional one belongs");
+		Ok(())
+	}
+
+	/// A proposal's outcome is one of four states and says which, on the wire and
+	/// in a message, and a proposal nothing has settled is open.
+	#[test]
+	fn a_settled_state_is_one_of_four_things() -> Outcome<()> {
+		assert_eq!(Settled::default(), Settled::Open, "silence means still asking");
+		assert!(Settled::Open.is_open());
+		assert!(!Settled::Accepted.is_open());
+		for state in [Settled::Open, Settled::Accepted, Settled::Declined, Settled::Done] {
+			assert_eq!(state, res!(Settled::from_dat(&state.to_dat())), "state {}", state);
+			assert_eq!(fmt!("{}", state), state.name());
+		}
+		// The codes are distinct, and pinned: they are on the wire.
+		assert_eq!(Settled::Open.code(), 0);
+		assert_eq!(Settled::Accepted.code(), 1);
+		assert_eq!(Settled::Declined.code(), 2);
+		assert_eq!(Settled::Done.code(), 3);
+		// A fifth state is refused rather than guessed at, and so is a spelling
+		// that is not a number at all.
+		assert!(Settled::from_dat(&Dat::U8(4)).is_err());
+		assert!(Settled::from_dat(&Dat::U8(255)).is_err());
+		assert!(Settled::from_dat(&Dat::Str(fmt!("accepted"))).is_err());
+		assert!(Settled::from_dat(&Dat::U64(1)).is_err());
+		// And an operation carrying one is refused with it.
+		assert!(Op::from_dat(&Dat::List(vec![
+			Dat::U8(CODE_SETTLED),
+			oid(3, 4).to_dat(),
+			Dat::U8(4),
+			Dat::Opt(Box::new(None)),
+			Dat::U64(0),
+		])).is_err());
+		Ok(())
+	}
+
+	/// A revert names what it undoes ascending and without repetition, and is
+	/// refused rather than sorted where it does not.
+	///
+	/// The same rule as [`Header`]'s parents, for the same reason: two byte
+	/// spellings of one set would both verify against a signature.
+	#[test]
+	fn a_revert_names_what_it_undoes_once_in_order() -> Outcome<()> {
+		// In order, with no repetition, at every length.
+		for undone in [
+			Vec::new(),
+			vec![oid(1, 1)],
+			vec![oid(1, 1), oid(1, 2), oid(2, 1), oid(9, u64::MAX)],
+		] {
+			let op = Op::Reverts { undone: undone.clone() };
+			res!(op.check_reverts());
+			res!(op.validate());
+			assert_eq!(op, res!(Op::from_dat(&op.to_dat())));
+			assert_eq!(op, res!(Op::decode_all(&res!(op.encode()))));
+		}
+		// Out of order, and repeated, on the way into the structure and on the way
+		// off the wire alike.
+		for undone in [
+			vec![oid(2, 1), oid(1, 1)],
+			vec![oid(1, 2), oid(1, 1)],
+			vec![oid(1, 1), oid(1, 1)],
+			vec![oid(1, 1), oid(2, 1), oid(2, 1)],
+		] {
+			let op = Op::Reverts { undone: undone.clone() };
+			assert!(op.check_reverts().is_err(), "list {:?}", undone);
+			assert!(op.validate().is_err());
+			assert!(Op::from_dat(&op.to_dat()).is_err());
+			assert!(Op::decode_all(&res!(op.encode())).is_err());
+		}
+		// Every other variant is unaffected by the rule.
+		for op in samples() {
+			if matches!(op, Op::Reverts { .. }) {
+				continue;
+			}
+			res!(op.check_reverts());
+		}
+		// What it names are identifiers, not names.
+		assert!(Op::from_dat(&Dat::List(vec![
+			Dat::U8(CODE_REVERTS),
+			Dat::List(vec![Dat::Str(fmt!("v1"))]),
+		])).is_err());
+		assert!(Op::from_dat(&Dat::List(vec![
+			Dat::U8(CODE_REVERTS),
+			Dat::Str(fmt!("not a list")),
+		])).is_err());
+		Ok(())
+	}
+
+	/// The operations that speak about history rather than about bytes claim
+	/// nothing, refer to nothing, place nothing and name no file.
+	///
+	/// This is what puts them in the same species as [`Op::Mark`] and
+	/// [`Op::Note`], and it is what every catch-all arm in [`crate::seq`] is
+	/// relying on: an operation that mints no atom and claims no byte is carried
+	/// for the sake of the causal graph and does nothing to the render.
+	#[test]
+	fn the_history_operations_touch_no_bytes() -> Outcome<()> {
+		for op in samples() {
+			match op {
+				Op::Mark { .. }
+				| Op::Note { .. }
+				| Op::Proposal { .. }
+				| Op::Said { .. }
+				| Op::Settled { .. }
+				| Op::Reverts { .. } => (),
+				_ => continue,
+			}
+			assert_eq!(op.origins(), (None, None), "variant {}", op.name());
+			assert!(op.regions().is_empty(), "variant {} claims content", op.name());
+			assert_eq!(op.placed_len(), 0, "variant {} places bytes", op.name());
+			assert!(!op.is_move());
+			assert_eq!(op.names_file(), None, "variant {} names a file", op.name());
+			res!(op.check_placement());
+			// Only a note refers to content, and it is the one that resolves into
+			// spans; the rest refer to operations or to nothing.
+			if !matches!(op, Op::Note { .. }) {
+				assert!(op.note_on().is_empty(), "variant {} refers to content", op.name());
+				res!(op.check_note());
+			}
+		}
 		Ok(())
 	}
 
@@ -1718,7 +2617,7 @@ mod tests {
 	fn header_round_trips_at_every_arity() -> Outcome<()> {
 		for head in res!(sample_heads()) {
 			assert_eq!(head, res!(Header::from_dat(&head.to_dat())));
-			let rec = Record::new(head.clone(), Op::Mark { name: fmt!("m") });
+			let rec = Record::new(head.clone(), Op::Mark { name: fmt!("m"), body: None, time: None });
 			assert_eq!(rec, res!(Record::decode_all(&res!(rec.encode()))));
 		}
 		Ok(())
@@ -1790,7 +2689,7 @@ mod tests {
 	/// hashes differently.
 	#[test]
 	fn the_parents_are_covered_by_the_hash() -> Outcome<()> {
-		let op = Op::Mark { name: fmt!("v1") };
+		let op = Op::Mark { name: fmt!("v1"), body: None, time: None };
 		let one = Record::new(res!(Header::new(oid(1, 5), vec![oid(2, 1)])), op.clone());
 		let two = Record::new(res!(Header::new(oid(1, 5), vec![oid(2, 2)])), op);
 		assert!(

@@ -202,7 +202,7 @@ mod tests {
 	{
 		Ok(Record::new(
 			res!(Header::new(id, parents)),
-			Op::Mark { name: fmt!("{}", name) },
+			Op::Mark { name: fmt!("{}", name), body: None, time: None },
 		))
 	}
 
@@ -217,7 +217,7 @@ mod tests {
 		-> Outcome<OpLog>
 	{
 		let mut log = OpLog::new();
-		res!(log.append(Record::root(oid(1, 1), Op::Mark { name: fmt!("a") })));
+		res!(log.append(Record::root(oid(1, 1), Op::Mark { name: fmt!("a"), body: None, time: None })));
 		res!(log.append(res!(rec(oid(1, 2), vec![oid(1, 1)], "b"))));
 		res!(log.append(res!(rec(oid(2, 3), vec![oid(1, 1)], "c"))));
 		res!(log.append(res!(rec(oid(1, 4), vec![oid(1, 2), oid(2, 3)], "d"))));

@@ -169,7 +169,7 @@ fn write(log: &mut OpLog, replica: u64, n: usize, tag: &str)
 {
 	let r = ReplicaId::new(replica);
 	for i in 0..n {
-		res!(log.author(r, Op::Mark { name: fmt!("{}{}", tag, i) }));
+		res!(log.author(r, Op::Mark { name: fmt!("{}{}", tag, i), body: None, time: None }));
 	}
 	Ok(())
 }
@@ -179,7 +179,7 @@ fn write(log: &mut OpLog, replica: u64, n: usize, tag: &str)
 fn merge(log: &mut OpLog, replica: u64, tag: &str)
 	-> Outcome<()>
 {
-	res!(log.author(ReplicaId::new(replica), Op::Mark { name: fmt!("{}", tag) }));
+	res!(log.author(ReplicaId::new(replica), Op::Mark { name: fmt!("{}", tag), body: None, time: None }));
 	Ok(())
 }
 
@@ -196,13 +196,13 @@ fn diverged(prefix: usize, left: usize, right: usize)
 	if left > 1 {
 		res!(a.append(Record::new(
 			res!(Header::new(a.next_id(ReplicaId::new(3)), a.frontier())),
-			Op::Mark { name: fmt!("merge-a") },
+			Op::Mark { name: fmt!("merge-a"), body: None, time: None },
 		)));
 	}
 	if right > 1 {
 		res!(b.append(Record::new(
 			res!(Header::new(b.next_id(ReplicaId::new(4)), b.frontier())),
-			Op::Mark { name: fmt!("merge-b") },
+			Op::Mark { name: fmt!("merge-b"), body: None, time: None },
 		)));
 	}
 	Ok((a, b))
@@ -553,7 +553,7 @@ fn a_soak_of_random_divergences_converges() -> Outcome<()> {
 			if rng.below(4) == 0 && !a.is_empty() {
 				res!(a.append(Record::new(
 					res!(Header::new(a.next_id(ReplicaId::new(5)), a.frontier())),
-					Op::Mark { name: fmt!("ma{}", i) },
+					Op::Mark { name: fmt!("ma{}", i), body: None, time: None },
 				)));
 			} else {
 				res!(write(&mut a, 1 + rng.below(2) as u64, 1, &fmt!("a{}", i)));
@@ -563,7 +563,7 @@ fn a_soak_of_random_divergences_converges() -> Outcome<()> {
 			if rng.below(4) == 0 && !b.is_empty() {
 				res!(b.append(Record::new(
 					res!(Header::new(b.next_id(ReplicaId::new(6)), b.frontier())),
-					Op::Mark { name: fmt!("mb{}", i) },
+					Op::Mark { name: fmt!("mb{}", i), body: None, time: None },
 				)));
 			} else {
 				res!(write(&mut b, 3 + rng.below(2) as u64, 1, &fmt!("b{}", i)));

@@ -292,7 +292,7 @@ mod tests {
 		let mut log = OpLog::new();
 		let r = ReplicaId::new(replica);
 		for i in 0..n {
-			res!(log.author(r, Op::Mark { name: fmt!("m{}", i) }));
+			res!(log.author(r, Op::Mark { name: fmt!("m{}", i), body: None, time: None }));
 		}
 		Ok(log)
 	}
@@ -346,8 +346,8 @@ mod tests {
 		let mut only_a = Vec::new();
 		let mut only_b = Vec::new();
 		for i in 0..3 {
-			only_a.push(res!(a.author(r1, Op::Mark { name: fmt!("a{}", i) })).id());
-			only_b.push(res!(b.author(r2, Op::Mark { name: fmt!("b{}", i) })).id());
+			only_a.push(res!(a.author(r1, Op::Mark { name: fmt!("a{}", i), body: None, time: None })).id());
+			only_b.push(res!(b.author(r2, Op::Mark { name: fmt!("b{}", i), body: None, time: None })).id());
 		}
 		let from_b = res!(sketch_bytes(&b, 8, SEED));
 		match res!(reconcile(&a, &from_b)) {
@@ -413,7 +413,7 @@ mod tests {
 	fn a_receiver_adopts_the_arriving_shape() -> Outcome<()> {
 		let mut a = res!(chain(1, 40));
 		let b = a.clone();
-		res!(a.author(ReplicaId::new(1), Op::Mark { name: fmt!("extra") }));
+		res!(a.author(ReplicaId::new(1), Op::Mark { name: fmt!("extra"), body: None, time: None }));
 		// B sketches generously; A would have sketched tightly.
 		let from_b = res!(sketch_bytes(&b, 500, SEED));
 		assert!(res!(Iblt::from_bytes(&from_b)).config().num_cells == 750);
@@ -479,17 +479,17 @@ mod tests {
 		let r1 = ReplicaId::new(1);
 		let r2 = ReplicaId::new(2);
 		for i in 0..6 {
-			res!(a.author(r1, Op::Mark { name: fmt!("shared{}", i) }));
+			res!(a.author(r1, Op::Mark { name: fmt!("shared{}", i), body: None, time: None }));
 		}
 		let mut b = a.clone();
 		// A merge on each side, so the divergence is not a straight line.
 		for i in 0..3 {
-			res!(a.author(r1, Op::Mark { name: fmt!("a{}", i) }));
-			res!(b.author(r2, Op::Mark { name: fmt!("b{}", i) }));
+			res!(a.author(r1, Op::Mark { name: fmt!("a{}", i), body: None, time: None }));
+			res!(b.author(r2, Op::Mark { name: fmt!("b{}", i), body: None, time: None }));
 		}
 		res!(a.append(Record::new(
 			res!(Header::new(oid(1, 20), a.frontier())),
-			Op::Mark { name: fmt!("merge") },
+			Op::Mark { name: fmt!("merge"), body: None, time: None },
 		)));
 		let local_only = match res!(reconcile(&a, &res!(sketch_bytes(&b, 16, SEED)))) {
 			Diff::Decoded { local_only, .. } => local_only,
