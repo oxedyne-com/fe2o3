@@ -13,6 +13,9 @@
 //! ```text
 //! cargo test -p oxedyne_fe2o3_ore --test fastexport_git -- --ignored --nocapture
 //! ```
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_ore::fastexport::{
@@ -39,19 +42,14 @@ use std::{
 };
 
 
-/// The binary file's contents: NUL bytes, a bare line feed and a byte no text
-/// encoding will leave alone.
+// NUL bytes, a bare line feed and a byte no text encoding will leave alone.
 const BINARY: &[u8] = b"\x00\x01\n\x02binary\x00\xff\n";
 
-/// A fixed timestamp, so the identity lines are predictable.
-const WHEN: &str = "1700000000 +1000";
+const WHEN: &str = "1700000000 +1000";	// fixed, so identity lines are predictable
 
 
-/// Runs git in `dir`, returning its standard output.
-///
-/// The environment is stripped of the caller's git configuration so that a
-/// developer's global settings, hooks or signing keys cannot change what the
-/// stream says.
+/// The caller's git configuration is stripped, so that a developer's global
+/// settings, hooks or signing keys cannot change what the stream says.
 fn git(dir: &Path, args: &[&str])
 	-> Outcome<Vec<u8>>
 {
@@ -76,7 +74,6 @@ fn git(dir: &Path, args: &[&str])
 	Ok(out.stdout)
 }
 
-/// Returns a directory of its own for this test run.
 fn scratch_dir()
 	-> Outcome<PathBuf>
 {
@@ -90,8 +87,7 @@ fn scratch_dir()
 	Ok(dir)
 }
 
-/// Builds a repository holding a rename, a binary file, a merge and an
-/// annotated tag, and returns the stream git writes for it.
+/// The repository holds a rename, a binary file, a merge and an annotated tag.
 fn build_repo_and_export(dir: &Path)
 	-> Outcome<Vec<u8>>
 {
@@ -124,7 +120,7 @@ fn build_repo_and_export(dir: &Path)
 	git(dir, &["fast-export", "--all", "-M"])
 }
 
-/// Feeds a stream to the parser in awkward chunks, as a pipe would deliver it.
+/// The chunks are awkward on purpose, as a pipe would deliver them.
 fn parse_in_chunks(stream: &[u8])
 	-> Outcome<Vec<Event>>
 {
@@ -143,8 +139,6 @@ fn parse_in_chunks(stream: &[u8])
 	Ok(events)
 }
 
-/// A stream written by git, for a repository with a rename, a binary file, a
-/// merge and an annotated tag, parses into the shape the repository had.
 #[test]
 #[ignore = "needs a git binary and a writable temporary directory"]
 fn parses_a_stream_written_by_git() -> Outcome<()> {
@@ -155,8 +149,7 @@ fn parses_a_stream_written_by_git() -> Outcome<()> {
 	outcome
 }
 
-/// The body of the test, kept separate so the scratch directory is removed
-/// however it ends.
+/// Kept out of the test so the scratch directory is removed however it ends.
 fn run_against_git(dir: &Path)
 	-> Outcome<()>
 {

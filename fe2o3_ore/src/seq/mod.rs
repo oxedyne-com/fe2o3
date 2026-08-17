@@ -103,6 +103,9 @@
 //! the replica has seen. [`crate::log::OpLog::next_counter`] mints exactly that,
 //! so an author who takes identifiers from the log gets the intuition for
 //! nothing; an author minting its own is responsible for the same rule.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 pub mod atom;
 pub mod claim;
@@ -161,14 +164,11 @@ use std::ops::Range;
 /// edit wins" mean what it says.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct OpOrder {
-	/// The Lamport counter, which decides.
-	pub counter:	u64,
-	/// The authoring replica, which breaks the tie.
-	pub replica:	u64,
+	pub counter:	u64,	// which decides
+	pub replica:	u64,	// which breaks the tie
 }
 
 impl OpOrder {
-	/// Returns the position of an operation in op order.
 	pub fn of(id: &OpId) -> Self {
 		Self {
 			counter:	id.counter,
@@ -182,9 +182,7 @@ impl OpOrder {
 /// seen when they said it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Applied {
-	/// The author's frontier when the operation was written.
-	parents:	Vec<OpId>,
-	/// What the operation says.
+	parents:	Vec<OpId>,	// the author's frontier when it was written
 	op:			Op,
 }
 
@@ -192,12 +190,9 @@ struct Applied {
 /// What the lifecycle operations say about one file.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct FileInfo {
-	/// Where the file sits, after every rename the set holds.
-	path:	Vec<u8>,
-	/// What the file is, after every mode assertion the set holds.
-	mode:	Mode,
-	/// Whether it still exists.
-	live:	bool,
+	path:	Vec<u8>,	// after every rename the set holds
+	mode:	Mode,		// after every mode assertion the set holds
+	live:	bool,		// whether it still exists
 }
 
 
@@ -211,13 +206,11 @@ struct FileInfo {
 /// forest is laid out.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Sequence {
-	/// The operations, by identity.
-	ops: BTreeMap<OpId, Applied>,
+	ops: BTreeMap<OpId, Applied>, // by identity
 }
 
 impl Sequence {
 
-	/// Constructs an empty repository.
 	pub fn new() -> Self {
 		Self { ops: BTreeMap::new() }
 	}
@@ -312,29 +305,24 @@ impl Sequence {
 		self.apply(rec.head.clone(), rec.op.clone())
 	}
 
-	/// Returns the number of operations applied.
 	pub fn len(&self) -> usize {
 		self.ops.len()
 	}
 
-	/// Reports whether no operation has been applied.
 	pub fn is_empty(&self) -> bool {
 		self.ops.is_empty()
 	}
 
-	/// Reports whether the operation has been applied.
 	pub fn contains(&self, id: &OpId) -> bool {
 		self.ops.contains_key(id)
 	}
 
-	/// Returns the operation of that identity, if it has been applied.
 	pub fn get(&self, id: &OpId)
 		-> Option<&Op>
 	{
 		self.ops.get(id).map(|a| &a.op)
 	}
 
-	/// Returns the parents of an operation that has been applied.
 	pub fn parents_of(&self, id: &OpId)
 		-> Option<&[OpId]>
 	{
@@ -348,15 +336,14 @@ impl Sequence {
 		self.ops.iter().map(|(id, a)| (id, &a.op))
 	}
 
-	/// Returns the causal graph over the operations applied.
 	pub fn causality(&self)
 		-> Causality<'_>
 	{
 		Causality::new(self.ops.iter().map(|(id, a)| (*id, a.parents.as_slice())))
 	}
 
-	/// Returns the operations in op order, which is the order every stage of the
-	/// render reads them in.
+	/// The operations in op order, which is the order every stage of the render
+	/// reads them in.
 	fn in_op_order(&self) -> Vec<(OpId, &Op)> {
 		let mut ops: Vec<(OpId, &Op)> = self.ops.iter()
 			.map(|(id, a)| (*id, &a.op))
@@ -740,7 +727,7 @@ impl Sequence {
 		Some(Flag::CrossedFile { op, sub, from, to })
 	}
 
-	/// Returns the files a flag concerns, so that each file keeps its own.
+	/// The files a flag concerns, so that each file keeps its own.
 	fn flag_files(flag: &Flag, index: &BTreeMap<OpId, OpId>) -> Vec<OpId> {
 		let mut out: Vec<OpId> = Vec::new();
 		match flag {
@@ -1316,24 +1303,17 @@ impl Sequence {
 /// What the overlap arbitration decided about one splice.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Yield {
-	/// The group's op-order maximum, which prevailed.
-	to:			OpId,
-	/// The group, in ascending op order, so that the last of it is the winner.
-	group:		Vec<OpId>,
-	/// The buried insertion this splice sits inside, where it yielded for that
-	/// reason rather than for having contended itself.
-	through:	Option<OpId>,
+	to:			OpId,			// the op-order maximum, which prevailed
+	group:		Vec<OpId>,		// ascending, so that the last of it is the winner
+	through:	Option<OpId>,	// the buried insertion this splice sits inside
 }
 
 
 /// What the overlap arbitration decided about a whole operation set.
 #[derive(Clone, Debug, Default)]
 struct Yields {
-	/// Every yielding splice, and what it yielded to.
-	map:	BTreeMap<OpId, Yield>,
-	/// The same operations as a set, which is what the tombstones are built
-	/// against.
-	buried:	BTreeSet<OpId>,
+	map:	BTreeMap<OpId, Yield>,	// every yielding splice, and what it yielded to
+	buried:	BTreeSet<OpId>,			// the same, as the tombstones want it
 }
 
 
@@ -1352,7 +1332,6 @@ fn find(up: &mut [usize], i: usize) -> usize {
 	r
 }
 
-/// Joins two disjoint sets.
 fn join(up: &mut [usize], a: usize, b: usize) {
 	let (ra, rb) = (find(up, a), find(up, b));
 	if ra != rb {
@@ -1363,12 +1342,9 @@ fn join(up: &mut [usize], a: usize, b: usize) {
 
 /// One trial layout of the repository, kept only to be asked where things are.
 struct Layout {
-	/// The slots it placed.
 	slots:	Slots,
-	/// The register they were laid out against.
-	claims:	Claims,
-	/// The file each slot ended up in.
-	owner:	Vec<Option<OpId>>,
+	claims:	Claims,				// the register they were laid out against
+	owner:	Vec<Option<OpId>>,	// the file each slot ended up in
 }
 
 impl Layout {
@@ -1385,27 +1361,19 @@ impl Layout {
 
 /// What arbitrating one cycle decided.
 struct Decision {
-	/// The move that won the cycle outright, where the arbitration names one.
-	winner:	Option<OpId>,
-	/// The moves confined: each with the file its content stays in and the file
-	/// it was denied.
-	losers:	Vec<(OpId, OpId, OpId)>,
+	winner:	Option<OpId>,				// where the arbitration names one
+	losers:	Vec<(OpId, OpId, OpId)>,	// each with its home and denied files
 }
 
 
 /// What deciding a cycle takes: the operation set, the two structures a trial
 /// layout needs, where every byte was written, and what each author had seen.
 struct Arbiter<'a> {
-	/// The operations, in op order.
-	ops:	&'a [(OpId, &'a Op)],
-	/// The tombstones, which a trial layout needs and does not change.
-	dead:	&'a Dead,
-	/// The atoms, likewise.
-	atoms:	&'a Atoms,
-	/// The file every atom was written into.
-	birth:	&'a BTreeMap<OpId, OpId>,
-	/// The causal graph, which is what tells a race from a sequence.
-	cause:	&'a Causality<'a>,
+	ops:	&'a [(OpId, &'a Op)],		// in op order
+	dead:	&'a Dead,					// which a trial layout needs
+	atoms:	&'a Atoms,					// likewise
+	birth:	&'a BTreeMap<OpId, OpId>,	// the file every atom was written into
+	cause:	&'a Causality<'a>,			// what tells a race from a sequence
 }
 
 impl Arbiter<'_> {
@@ -1571,7 +1539,6 @@ impl Arbiter<'_> {
 		Ok(Some(Decision { winner, losers }))
 	}
 
-	/// The operation of that identity, if the set holds it.
 	fn op(&self, id: &OpId) -> Option<&Op> {
 		self.ops.iter().find(|(i, _)| i == id).map(|(_, op)| *op)
 	}

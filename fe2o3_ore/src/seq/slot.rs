@@ -28,6 +28,9 @@
 //! Demotion is the answer for a cycle inside one file, and only for that. A cycle
 //! that crosses a file boundary is arbitrated instead, by the render, and
 //! [`Slots::cycles`] is what tells it where the cycles are.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::id::{
 	Anchor,
@@ -52,14 +55,11 @@ use std::fmt;
 /// Which of a slot's two origins is meant.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Origin {
-	/// The origin naming what the slot follows.
-	Left,
-	/// The origin naming what the slot precedes.
-	Right,
+	Left,	// what the slot follows
+	Right,	// what the slot precedes
 }
 
 impl Origin {
-	/// Returns the wire code for the origin.
 	pub const fn code(&self) -> u8 {
 		match self {
 			Self::Left	=> 0,
@@ -67,7 +67,6 @@ impl Origin {
 		}
 	}
 
-	/// Reconstructs an origin from its wire code.
 	pub fn from_code(code: u8)
 		-> Outcome<Self>
 	{
@@ -100,25 +99,17 @@ impl fmt::Display for Origin {
 /// points compose.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Slot {
-	/// The operation that placed the slot.
-	pub place:	OpId,
-	/// Byte offset of this piece within its placement.
-	pub sub:	u64,
-	/// The content the slot shows.
-	pub claim:	ContentRange,
-	/// Left origin as recorded, or `None` where the operation named none.
-	pub left:	Option<Anchor>,
-	/// Right origin as recorded, or `None` where the operation named none.
-	pub right:	Option<Anchor>,
-	/// Whether the slot is a file's origin anchor, in which case its placing
-	/// operation is that file's identity and the slot is a root child of the
-	/// forest.
-	pub seed:	bool,
+	pub place:	OpId,				// the operation that placed the slot
+	pub sub:	u64,				// byte offset within its placement
+	pub claim:	ContentRange,		// the content the slot shows
+	pub left:	Option<Anchor>,		// left origin as recorded
+	pub right:	Option<Anchor>,		// right origin as recorded
+	pub seed:	bool,				// a file's origin anchor, and a root child
 }
 
 impl Slot {
-	/// Returns the key by which same-side siblings are ordered: op order of the
-	/// placing operation, then offset within that placement.
+	/// The key by which same-side siblings are ordered: op order of the placing
+	/// operation, then offset within that placement.
 	pub fn order_key(&self) -> (OpOrder, u64) {
 		(OpOrder::of(&self.place), self.sub)
 	}
@@ -128,14 +119,10 @@ impl Slot {
 /// Every slot an operation set places, divided at every anchor's cut point.
 #[derive(Clone, Debug, Default)]
 pub struct Slots {
-	/// The slots, in the order they were placed and divided.
-	slots:		Vec<Slot>,
-	/// Slot indices by placing operation, each sorted by claimed content.
-	by_place:	BTreeMap<OpId, Vec<usize>>,
-	/// For a piece that is not the first of its placement, the piece before it.
-	prev:		Vec<Option<usize>>,
-	/// How many slots were placed before dividing.
-	placed:		usize,
+	slots:		Vec<Slot>,					// in placement and division order
+	by_place:	BTreeMap<OpId, Vec<usize>>,	// indices by placer, sorted by claim
+	prev:		Vec<Option<usize>>,			// the preceding piece of a placement
+	placed:		usize,						// slots placed before dividing
 }
 
 impl Slots {
@@ -280,12 +267,11 @@ impl Slots {
 		Ok(Self { slots, by_place, prev, placed })
 	}
 
-	/// Returns the slots, in no particular order.
+	/// The slots, in no particular order.
 	pub fn all(&self) -> &[Slot] {
 		&self.slots
 	}
 
-	/// Returns one slot.
 	pub fn get(&self, i: usize)
 		-> Outcome<&Slot>
 	{
@@ -297,27 +283,23 @@ impl Slots {
 		}
 	}
 
-	/// Returns the number of slots after dividing.
+	/// The number of slots after dividing.
 	pub fn len(&self) -> usize {
 		self.slots.len()
 	}
 
-	/// Reports whether there are no slots.
 	pub fn is_empty(&self) -> bool {
 		self.slots.is_empty()
 	}
 
-	/// Returns the number of slots placed before dividing, which is one per
-	/// splice and one per source run of a move.
+	/// The number of slots placed before dividing, which is one per splice and one
+	/// per source run of a move.
 	pub fn placed(&self) -> usize {
 		self.placed
 	}
 
-	/// Returns the slot a placing operation put at an offset within its
-	/// placement, if there is one.
-	///
-	/// This is how a flag raised against `(operation, offset)` finds the slot it
-	/// is about, the pair being what the flags name and what a reader can act on.
+	/// How a flag raised against `(operation, offset)` finds the slot it is about,
+	/// the pair being what the flags name and what a reader can act on.
 	pub fn find(&self, place: &OpId, sub: u64)
 		-> Option<usize>
 	{
@@ -325,15 +307,14 @@ impl Slots {
 			.and_then(|idxs| idxs.iter().copied().find(|i| self.slots[*i].sub == sub))
 	}
 
-	/// Returns the piece preceding this one within its placement, if it is not
-	/// the first.
+	/// The preceding piece of this placement, if this is not the first.
 	pub fn prev(&self, i: usize)
 		-> Option<usize>
 	{
 		self.prev.get(i).copied().flatten()
 	}
 
-	/// Returns the slot that currently shows the named byte.
+	/// The slot that currently shows the named byte.
 	///
 	/// With `demoted` set, the claim register is ignored and the slot placed by
 	/// the splice that created the byte is returned instead, which is the
@@ -400,7 +381,7 @@ impl Slots {
 		Ok((left, right))
 	}
 
-	/// Returns the cycles of the anchor graph, before anything is demoted.
+	/// The cycles of the anchor graph, before anything is demoted.
 	///
 	/// The graph is the one [`Slots::order`] builds on its first pass, and a cycle
 	/// is a strongly connected component with more than one member, or one member
@@ -430,8 +411,8 @@ impl Slots {
 		Ok(self.components(&deps))
 	}
 
-	/// Returns the strongly connected components of a dependency graph that are
-	/// cycles, each sorted by op order, by Tarjan's algorithm run iteratively.
+	/// The strongly connected components of a dependency graph that are cycles,
+	/// each sorted by op order, by Tarjan's algorithm run iteratively.
 	fn components(&self, deps: &[Vec<usize>]) -> Vec<Vec<usize>> {
 		let n = deps.len();
 		// Depth-first index and low link of each slot, and whether it is on the
@@ -652,15 +633,11 @@ impl Slots {
 /// against.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Order {
-	/// Slot indices, every slot after the slots its origins resolved to.
-	pub order:		Vec<usize>,
-	/// The slot each slot's left origin resolved to, if any.
-	pub left:		Vec<Option<usize>>,
-	/// The slot each slot's right origin resolved to, if any.
-	pub right:		Vec<Option<usize>>,
-	/// Origins demoted to their creating splice to break a cycle, named by
-	/// placing operation, offset within that placement, and which origin.
-	pub demoted:	Vec<(OpId, u64, Origin)>,
-	/// Origins dropped because demotion did not break the cycle.
-	pub dropped:	Vec<(OpId, u64, Origin)>,
+	pub order:		Vec<usize>,					// each after its origins
+	pub left:		Vec<Option<usize>>,			// resolved left origins
+	pub right:		Vec<Option<usize>>,			// resolved right origins
+	// Origins given up to break a cycle, named by placing operation, offset
+	// within that placement, and which of the two origins.
+	pub demoted:	Vec<(OpId, u64, Origin)>,	// demoted to the creating splice
+	pub dropped:	Vec<(OpId, u64, Origin)>,	// dropped where demotion failed
 }

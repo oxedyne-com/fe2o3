@@ -28,6 +28,9 @@
 //! content too, and a reader of one wants the file and the offset rather than an
 //! offset into an operation. Content that renders nowhere is answered with no
 //! place, which is the truth about it.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::id::{
 	Anchor,
@@ -58,30 +61,19 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 
 
-/// Wire code for [`Flag::Torn`].
-pub const CODE_TORN:		u8 = 1;
-/// Wire code for [`Flag::Demoted`].
-pub const CODE_DEMOTED:		u8 = 2;
-/// Wire code for [`Flag::Dropped`].
-pub const CODE_DROPPED:		u8 = 3;
-/// Wire code for [`Flag::Overlap`].
-pub const CODE_OVERLAP:		u8 = 4;
-/// Wire code for [`Flag::CrossedFile`].
-pub const CODE_CROSSED_FILE:	u8 = 5;
-/// Wire code for [`Flag::MovedIntoDeleted`].
-pub const CODE_MOVED_INTO_DELETED: u8 = 6;
-/// Wire code for [`Flag::Orphaned`].
-pub const CODE_ORPHANED:	u8 = 7;
-/// Wire code for [`Flag::Confined`].
-pub const CODE_CONFINED:	u8 = 8;
-/// Wire code for [`Flag::Won`].
-pub const CODE_WON:		u8 = 9;
-/// Wire code for [`Flag::Stranded`].
-pub const CODE_STRANDED:	u8 = 10;
-/// Wire code for [`Flag::SplicedIntoDeleted`].
-pub const CODE_SPLICED_INTO_DELETED: u8 = 11;
-/// Wire code for [`Flag::Yielded`].
-pub const CODE_YIELDED:		u8 = 12;
+//// Flag wire codes.
+pub const CODE_TORN:					u8 = 1;
+pub const CODE_DEMOTED:					u8 = 2;
+pub const CODE_DROPPED:					u8 = 3;
+pub const CODE_OVERLAP:					u8 = 4;
+pub const CODE_CROSSED_FILE:			u8 = 5;
+pub const CODE_MOVED_INTO_DELETED:		u8 = 6;
+pub const CODE_ORPHANED:				u8 = 7;
+pub const CODE_CONFINED:				u8 = 8;
+pub const CODE_WON:						u8 = 9;
+pub const CODE_STRANDED:				u8 = 10;
+pub const CODE_SPLICED_INTO_DELETED:	u8 = 11;
+pub const CODE_YIELDED:					u8 = 12;
 
 
 /// Something the renderer noticed that the reader should be told.
@@ -91,233 +83,114 @@ pub const CODE_YIELDED:		u8 = 12;
 /// render made a choice that a person might want to revisit.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum Flag {
-	/// A move whose source was taken from it by a **concurrent** move: the block
-	/// tore at the overlap and its pieces render in two places.
-	///
-	/// Concurrency is decided from the operations' own parents. A move superseded
-	/// by a later move of the same content, by the same author or any other, is a
-	/// sequence of two decisions rather than a race, and raises nothing; the
-	/// earlier move's intent was overtaken on purpose and there is nothing for a
-	/// reader to reconcile.
+	// A concurrent move took this move's source: the block tore at the overlap and
+	// its pieces render in two places.  A move superseded on purpose, by a later
+	// move of the same content, is a sequence of two decisions rather than a race,
+	// and raises nothing.
 	Torn {
-		/// The move that lost ground.
 		op:		OpId,
-		/// The content it named and no longer shows.
-		lost:	Vec<ContentRange>,
+		lost:	Vec<ContentRange>,	// content it named and no longer shows
 	},
-	/// An origin resolved against the splice that created its content rather
-	/// than against the slot that now shows it, to break a cycle.
-	///
-	/// The consequence is that the placement landed where its anchor content was
-	/// originally written rather than where it now lives, which is deterministic
-	/// and surprising in equal measure.
+	// An origin resolved against the splice that created its content rather than
+	// against the slot that now shows it, to break a cycle.  The placement lands
+	// where its anchor content was written rather than where it now lives, which
+	// is deterministic and surprising in equal measure.
 	Demoted {
-		/// The operation whose origin was demoted.
 		op:		OpId,
-		/// Offset within that operation's placement.
-		sub:	u64,
-		/// Which of the two origins.
+		sub:	u64,	// offset within that operation's placement
 		origin:	Origin,
 	},
-	/// An origin dropped entirely because demotion did not break the cycle, so
-	/// the placement fell back to whatever the partially built tree gave it.
+	// An origin dropped entirely because demotion did not break the cycle, so the
+	// placement fell back to whatever the partly built tree gave it.
 	Dropped {
-		/// The operation whose origin was dropped.
 		op:		OpId,
-		/// Offset within that operation's placement.
-		sub:	u64,
-		/// Which of the two origins.
+		sub:	u64,	// offset within that operation's placement
 		origin:	Origin,
 	},
-	/// Two concurrent operations named overlapping content: both removed it,
-	/// both moved it, or one removed what the other moved.
-	///
-	/// Concurrency is decided from the operations' own parents, so the flag means
-	/// what its name says: neither author could see what the other was doing. Two
-	/// operations touching the same bytes where one was written in knowledge of
-	/// the other are a sequence of edits and not a conflict, and raise nothing.
-	///
-	/// **This is the raw fact beneath the arbitration**, in the relation
-	/// [`Flag::Demoted`] has to [`Flag::Confined`]: it says two operations raced
-	/// over some content, and [`Flag::Yielded`] says what the renderer then did
-	/// about it. It is kept for two reasons the implementation made plain. It is
-	/// pair-wise and edge-shaped, and the arbitration is component-shaped, so it is
-	/// the only flag that says *which* two operations actually met -- the yield
-	/// flag names a group and its maximum, and its maximum routinely never named a
-	/// byte the yielder named. And it fires over a move as well as a splice, where
-	/// the arbitration is deliberately confined to splices, so a race between a
-	/// deletion and a move is reported here and nowhere else.
+	// Two concurrent operations named overlapping content: both removed it, both
+	// moved it, or one removed what the other moved.  This is the raw fact beneath
+	// the arbitration, and the only flag that says which two operations actually
+	// met; it fires over a move as well as a splice, where the arbitration is
+	// confined to splices.
 	Overlap {
-		/// The operations involved, in ascending order of identifier.
-		ops:	Vec<OpId>,
-		/// The content they have in common.
+		ops:	Vec<OpId>,	// ascending by identifier
 		region:	ContentRange,
 	},
-	/// Breaking a cycle carried content across a file boundary: the placement was
-	/// demoted, and what it holds was written into one file and now renders in
-	/// another.
-	///
-	/// In one file a demoted origin lands at a stale position, which is bad
-	/// enough and is what [`Flag::Demoted`] says. Across two it lands in another
-	/// *file*, and a reader who sees a file go from four bytes to none will not
-	/// read that as a stale anchor, so this names both files and says so in those
-	/// terms.
-	///
-	/// A cross-file *cycle* no longer reaches demotion at all: it is arbitrated,
-	/// and [`Flag::Confined`] is what the losers are told. What still reaches this
-	/// flag is a demotion inside one file whose content had legitimately changed
-	/// files earlier, and it is then telling the truth about where the content was
-	/// written and where it now renders.
+	// Breaking a cycle carried content across a file boundary: the placement was
+	// demoted, and what it holds was written into one file and renders in another.
+	// A cross-file cycle is arbitrated rather than demoted, so what still reaches
+	// this is a demotion inside one file whose content had changed files earlier.
 	CrossedFile {
-		/// The operation whose origin was demoted.
 		op:		OpId,
-		/// Offset within that operation's placement.
-		sub:	u64,
-		/// The file the content it holds was written into.
-		from:	OpId,
-		/// The file it renders in instead.
-		to:		OpId,
+		sub:	u64,	// offset within that operation's placement
+		from:	OpId,	// the file the content it holds was written into
+		to:		OpId,	// the file it renders in instead
 	},
-	/// A move landed content in a file that has been deleted, so the content is
-	/// held by a slot and named by the log but rendered nowhere a reader looks.
-	///
-	/// Nothing is lost: the file's render still holds the bytes, and a verb that
-	/// recovers them is design work owed. What is lost is visibility, and this is
-	/// what says so.
+	// A move landed content in a file that has been deleted, so the content is
+	// held by a slot and named by the log but rendered nowhere a reader looks.
+	// Nothing is lost; what is lost is visibility.
 	MovedIntoDeleted {
-		/// The move.
 		op:		OpId,
-		/// The file it landed in, which is not live.
-		file:	OpId,
+		file:	OpId,	// which is not live
 	},
-	/// A slot ended up in no file at all, its origins having been dropped, so
-	/// the bytes it owns render nowhere.
-	///
-	/// This is the last resort of the cycle rule showing through, and it is a
-	/// fault rather than a choice; it is reported rather than hidden because
-	/// conservation must account for the bytes either way.
+	// A slot ended up in no file at all, its origins having been dropped, so the
+	// bytes it owns render nowhere.  A fault rather than a choice, and reported
+	// rather than hidden because conservation must account for the bytes.
 	Orphaned {
-		/// The operation whose placement fell out of every file.
 		op:		OpId,
-		/// Offset within that operation's placement.
-		sub:	u64,
+		sub:	u64,	// offset within that operation's placement
 	},
-	/// A move that lost a cross-file cycle: it did not happen, and its content is
-	/// where it was before.
-	///
-	/// A cycle in the anchor graph that crosses a file boundary is arbitrated as
-	/// one concurrent group. The member highest in op order completes; every other
-	/// member is confined, which is to say its claims are not written, so its bytes
-	/// stay with whoever owned them before it and its slots place nothing. Nothing
-	/// has to be undone, because nothing was done, and re-issuing the move is one
-	/// operation.
-	///
-	/// Both files are told, since the flag is about the pair of them.
+	// A move that lost a cross-file cycle: it did not happen, and its content is
+	// where it was before.  The cycle is arbitrated as one concurrent group, the
+	// member highest in op order completes, and the rest write no claims at all,
+	// so nothing has to be undone.
 	Confined {
-		/// The move that did not happen.
 		op:		OpId,
-		/// The file its content stays in.
-		home:	OpId,
-		/// The file it was aimed at and did not reach.
-		denied:	OpId,
+		home:	OpId,	// the file its content stays in
+		denied:	OpId,	// the file it was aimed at and did not reach
 	},
-	/// A move that won a cross-file cycle outright and completed.
-	///
-	/// Derivable from the [`Flag::Confined`] flags and the operation set, and kept
-	/// anyway: the loser's flag reads badly alone, and the two together are the
-	/// whole story of what the arbitration did.
+	// A move that won a cross-file cycle outright and completed.  Derivable from
+	// the confinements and kept anyway: the loser's flag reads badly alone, and
+	// the two together are the whole story of what the arbitration did.
 	Won {
-		/// The move that won.
 		op:		OpId,
 	},
-	/// A splice whose insertion anchored into content a **concurrent** operation
-	/// deleted: every neighbour the insertion was written beside is a tombstone,
-	/// so the inserted bytes render as a fragment at the deletion site rather
-	/// than inside the context their author saw.
-	///
-	/// This is what a capture-side "move" -- a deletion in one file and a fresh
-	/// insertion in another, with no [`crate::op::Op::Move`] to say so -- does to
-	/// a concurrent edit inside the block: the edit's anchors die with the block,
-	/// and its bytes are left stranded where the block used to be. Had the move
-	/// been recorded as a move, the edit would have followed it and there would
-	/// be nothing to flag.
-	///
-	/// Concurrency is decided from the operations' own parents. A deletion
-	/// causally ordered against the splice raises nothing: an author who deleted
-	/// a region knowing the insertion was in it made a decision rather than
-	/// losing a race, and so did an author who inserted knowing the region was
-	/// gone. The flag fires only where no anchored neighbour survives, since an
-	/// insertion still touching living context renders beside it, where its
-	/// author put it; and it names one concurrent deleter per flag, so both
-	/// authors are answerable from the pair.
+	// A splice whose insertion anchored into content a concurrent operation
+	// deleted: every neighbour it was written beside is a tombstone, so the bytes
+	// render as a fragment at the deletion site.  This is what a capture-side
+	// "move" -- a deletion in one file and a fresh insertion in another -- does to
+	// a concurrent edit inside the block.  It fires only where no anchored
+	// neighbour survives, and names one concurrent deleter per flag.
 	Stranded {
-		/// The splice whose insertion lost its context.
 		op:		OpId,
-		/// The concurrent operation that deleted the content it anchored into.
-		by:		OpId,
+		by:		OpId,	// the concurrent operation that deleted the context
 	},
-	/// A splice that placed content in a file a **concurrent**
-	/// [`crate::op::Op::FileDelete`] retired: the edit is durable in the log and
-	/// renders only into the deleted file, where no reader looks.
-	///
-	/// The moved twin of this is [`Flag::MovedIntoDeleted`], which fires however
-	/// the move and the deletion were ordered, because relocating content into a
-	/// dead file hides it whoever knew what. An edit is different: every edit
-	/// ever made becomes invisible when its file is deliberately deleted, and
-	/// flagging all of them would bury the one fact worth raising -- an edit and
-	/// a deletion that raced, neither author able to see the other's decision.
-	/// Only that race is flagged, from the operations' own parents, and both
-	/// operations are named.
+	// A splice that placed content in a file a concurrent Op::FileDelete retired.
+	// Every edit ever made goes dark when its file is deliberately deleted, and
+	// flagging all of them would bury the one fact worth raising: an edit and a
+	// deletion that raced, neither author able to see the other's decision.
 	SplicedIntoDeleted {
-		/// The splice whose content renders only in the deleted file.
 		op:		OpId,
-		/// The file it placed content in, which is not live.
-		file:	OpId,
-		/// The concurrent deletion the splice did not see.
-		del:	OpId,
+		file:	OpId,	// which is not live
+		del:	OpId,	// the concurrent deletion the splice did not see
 	},
-	/// A splice that lost an overlap arbitration: its removals did not bury and its
-	/// insertion is buried whole, so the edit is in the log and not in the file.
-	///
-	/// Concurrent splices whose named content overlaps form one group -- the
-	/// connected components of the overlap graph, with components contended by the
-	/// same replicas over the same files taken together -- and the member highest in
-	/// op order prevails. Every member concurrent with it yields; a member in its
-	/// causal past does not, which is what keeps a winner's own earlier hunks. A
-	/// splice anchored wholly inside a buried insertion yields too, or it would
-	/// render as a fragment at a dead site.
-	///
-	/// **The decision is the group's, not a pair's.** A group is a connected
-	/// component, so a yielding operation routinely never named a byte the
-	/// prevailing one named: three authors in a chain, where the first overlaps the
-	/// second and the second the third, put the first and the third in one group
-	/// although they are disjoint. Anything said of this flag has to say that the
-	/// *group* prevailed and name its maximum, or it says something false about
-	/// roughly three yields in ten.
-	///
-	/// **What the region then reads as.** Whole hunks, never an interleave. It is
-	/// not a promise of one author: where a member is in the winner's causal past
-	/// the exemption keeps it, so a third party who synced with one side of a
-	/// collision and not the other leaves the region composed of two authors' whole
-	/// hunks. That is a consequence of the exemption, which is load-bearing, and not
-	/// a defect.
+	// A splice that lost an overlap arbitration: its removals did not bury and its
+	// insertion is buried whole, so the edit is in the log and not in the file.
+	// The decision is the group's and not a pair's, a group being a connected
+	// component of the overlap graph, so a yielder routinely never named a byte
+	// the prevailing operation named.  The region then reads as whole hunks, never
+	// an interleave, though not always as one author's: a member in the winner's
+	// causal past keeps its work.
 	Yielded {
-		/// The splice that yielded.
 		op:		OpId,
-		/// The group's op-order maximum, which prevailed.
-		to:		OpId,
-		/// The group, in ascending op order, so that the last is `to`. A yielder
-		/// that reached the group transitively is not itself in it.
-		group:	Vec<OpId>,
-		/// For a transitive yield, the buried insertion this edit sits inside;
-		/// `None` where the operation was a member of the group itself.
-		through: Option<OpId>,
+		to:		OpId,			// the group's op-order maximum, which prevailed
+		group:	Vec<OpId>,		// ascending op order, so that the last is `to`
+		through: Option<OpId>,	// the buried insertion this one sits inside
 	},
 }
 
 
 impl Flag {
-	/// Returns the wire code identifying the variant.
 	pub fn code(&self) -> u8 {
 		match self {
 			Self::Torn { .. }				=> CODE_TORN,
@@ -335,7 +208,6 @@ impl Flag {
 		}
 	}
 
-	/// Returns the variant name, for messages.
 	pub fn name(&self) -> &'static str {
 		match self {
 			Self::Torn { .. }				=> "Torn",
@@ -353,7 +225,7 @@ impl Flag {
 		}
 	}
 
-	/// Returns the operation the flag is chiefly about.
+	/// The operation the flag is chiefly about.
 	pub fn op(&self) -> Option<OpId> {
 		match self {
 			Self::Torn { op, .. }				=> Some(*op),
@@ -371,8 +243,7 @@ impl Flag {
 		}
 	}
 
-	/// Serialises the flag to a [`Dat`]. The shape is `[code, field, ...]`, the
-	/// fields in declaration order.
+	/// The wire shape is `[code, field, ...]`, the fields in declaration order.
 	pub fn to_dat(&self) -> Dat {
 		match self {
 			Self::Torn { op, lost } => Dat::List(vec![
@@ -445,7 +316,6 @@ impl Flag {
 		}
 	}
 
-	/// Reconstructs a flag from a [`Dat`] produced by [`Flag::to_dat`].
 	pub fn from_dat(dat: &Dat)
 		-> Outcome<Self>
 	{
@@ -586,7 +456,6 @@ impl Flag {
 	}
 }
 
-/// Checks that a decoded flag list has exactly the expected length.
 fn flag_len(v: &[Dat], want: usize, what: &str)
 	-> Outcome<()>
 {
@@ -598,7 +467,6 @@ fn flag_len(v: &[Dat], want: usize, what: &str)
 	Ok(())
 }
 
-/// Extracts an unsigned field, naming it if the kind is wrong.
 fn flag_u64(dat: &Dat, what: &str, field: &str)
 	-> Outcome<u64>
 {
@@ -610,7 +478,6 @@ fn flag_u64(dat: &Dat, what: &str, field: &str)
 	}
 }
 
-/// Extracts an origin field, naming it if the kind or the code is wrong.
 fn flag_origin(dat: &Dat, what: &str)
 	-> Outcome<Origin>
 {
@@ -622,7 +489,6 @@ fn flag_origin(dat: &Dat, what: &str)
 	}
 }
 
-/// Extracts a list of content ranges, naming it if the kind is wrong.
 fn flag_ranges(dat: &Dat, what: &str)
 	-> Outcome<Vec<ContentRange>>
 {
@@ -647,52 +513,32 @@ fn flag_ranges(dat: &Dat, what: &str)
 /// forest is laid out and walked, and a file is a subtree of it.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Stats {
-	/// Operations in the set.
-	pub ops:			usize,
-	/// Files created, deleted ones included.
-	pub files:			usize,
-	/// Atoms created, one per file's origin anchor and one per inserting splice.
-	pub atoms:			usize,
-	/// Bytes held in atoms, alive or dead, origin anchors included.
-	pub atom_bytes:		u64,
-	/// Slots placed: one per file, one per splice and one per source run of a
-	/// move.
-	pub slots_placed:	usize,
-	/// Slots after dividing at anchors.
-	pub slots_divided:	usize,
-	/// Intervals in the claim register, which is the standing cost of every move
-	/// ever made.
-	pub claim_intervals:	usize,
-	/// Intervals in the tombstone set.
-	pub dead_intervals:	usize,
-	/// Notes the operation set holds, resolved ones and notes on dead content
-	/// alike.
-	pub notes:			usize,
-	/// Deepest path in the Fugue forest.
-	pub max_depth:		u32,
-	/// Bytes rendered anywhere, in live files and deleted ones alike.
-	pub rendered:		u64,
-	/// Bytes rendered into files that have been deleted, which a reader does not
-	/// see.
-	pub withheld:		u64,
-	/// Live bytes owned by a slot that belongs to no file, which render nowhere
-	/// at all. Anything but zero is a fault, and is flagged.
-	pub orphaned:		u64,
+	pub ops:				usize,	// operations in the set
+	pub files:				usize,	// created, deleted ones included
+	pub atoms:				usize,	// one per file, one per inserting splice
+	pub atom_bytes:			u64,	// alive or dead, origin anchors included
+	pub slots_placed:		usize,	// one per file, splice and move source run
+	pub slots_divided:		usize,	// after dividing at anchors
+	pub claim_intervals:	usize,	// the standing cost of every move made
+	pub dead_intervals:		usize,	// in the tombstone set
+	pub notes:				usize,	// resolved and on dead content alike
+	pub max_depth:			u32,	// deepest path in the Fugue forest
+	pub rendered:			u64,	// live files and deleted ones alike
+	pub withheld:			u64,	// rendered into deleted files
+	pub orphaned:			u64,	// in no file at all; not zero is a fault
 }
 
 
 /// A run of rendered bytes, and the content it shows.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Run {
-	/// Offset in the rendered bytes at which the run begins.
-	pub at:			u64,
-	/// The content the run shows.
+	pub at:			u64,			// offset in the render at which it begins
 	pub content:	ContentRange,
 }
 
 
 impl Run {
-	/// Serialises the run to a [`Dat`]. The shape is `[at, content]`.
+	/// The wire shape is `[at, content]`.
 	pub fn to_dat(&self) -> Dat {
 		Dat::List(vec![
 			Dat::U64(self.at),
@@ -700,7 +546,6 @@ impl Run {
 		])
 	}
 
-	/// Reconstructs a run from a [`Dat`] produced by [`Run::to_dat`].
 	pub fn from_dat(dat: &Dat)
 		-> Outcome<Self>
 	{
@@ -732,24 +577,21 @@ impl Run {
 /// under a span asks [`Rendered::span`] for it.
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Span {
-	/// Offset in the rendered bytes at which the span begins.
-	pub at:		u64,
-	/// How many bytes it covers.
+	pub at:		u64,	// offset in the render at which it begins
 	pub len:	u64,
 }
 
 impl Span {
-	/// Constructs a span.
 	pub const fn new(at: u64, len: u64) -> Self {
 		Self { at, len }
 	}
 
-	/// Returns the offset just past the span.
+	/// The offset just past the span.
 	pub const fn end(&self) -> u64 {
 		self.at + self.len
 	}
 
-	/// Serialises the span to a [`Dat`]. The shape is `[at, len]`.
+	/// The wire shape is `[at, len]`.
 	pub fn to_dat(&self) -> Dat {
 		Dat::List(vec![
 			Dat::U64(self.at),
@@ -757,7 +599,6 @@ impl Span {
 		])
 	}
 
-	/// Reconstructs a span from a [`Dat`] produced by [`Span::to_dat`].
 	pub fn from_dat(dat: &Dat)
 		-> Outcome<Self>
 	{
@@ -790,53 +631,44 @@ impl Span {
 /// nothing here is not reported here at all.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Note {
-	/// The operation that wrote the note.
-	note:	OpId,
-	/// What it says, as bytes.
-	text:	Vec<u8>,
-	/// Where its content renders in this file, ascending.
-	spans:	Vec<Span>,
+	note:	OpId,		// the operation that wrote it
+	text:	Vec<u8>,	// what it says, as bytes
+	spans:	Vec<Span>,	// where its content renders here, ascending
 }
 
 impl Note {
-	/// Assembles a resolved note from its parts.
 	pub fn new(note: OpId, text: Vec<u8>, spans: Vec<Span>) -> Self {
 		Self { note, text, spans }
 	}
 
-	/// Returns the operation that wrote the note.
 	pub const fn note(&self) -> OpId {
 		self.note
 	}
 
-	/// Returns what the note says, as bytes.
 	pub fn text(&self) -> &[u8] {
 		&self.text
 	}
 
-	/// Returns what the note says as a string, with anything that is not valid
-	/// UTF-8 replaced. For messages and tests; the bytes themselves are the record.
+	/// For messages and tests; the bytes themselves are the record.
 	pub fn text_lossy(&self) -> String {
 		String::from_utf8_lossy(&self.text).into_owned()
 	}
 
-	/// Returns where the note's content renders in this file, ascending.
 	pub fn spans(&self) -> &[Span] {
 		&self.spans
 	}
 
-	/// Returns the number of bytes the note's content occupies in this file.
+	/// The number of bytes the note's content occupies in this file.
 	pub fn len(&self) -> u64 {
 		self.spans.iter().map(|s| s.len).sum()
 	}
 
-	/// Reports whether the note covers no bytes of this file, which a resolved
-	/// note never does.
+	/// A resolved note never covers no bytes of this file.
 	pub fn is_empty(&self) -> bool {
 		self.spans.is_empty()
 	}
 
-	/// Serialises the note to a [`Dat`]. The shape is `[note, text, [span, ...]]`.
+	/// The wire shape is `[note, text, [span, ...]]`.
 	///
 	/// The text is a [`Dat::BU64`] for the reason a file's bytes are: a note may
 	/// be longer than the 255 bytes a [`Dat::BU8`] length field can express, and a
@@ -849,7 +681,6 @@ impl Note {
 		])
 	}
 
-	/// Reconstructs a note from a [`Dat`] produced by [`Note::to_dat`].
 	pub fn from_dat(dat: &Dat)
 		-> Outcome<Self>
 	{
@@ -888,10 +719,8 @@ impl Note {
 /// content and wants to say where a reader will find it; see [`Placement`].
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Place {
-	/// The file.
 	pub file:	OpId,
-	/// Where the content renders in it, ascending.
-	pub spans:	Vec<Span>,
+	pub spans:	Vec<Span>,	// ascending
 }
 
 
@@ -909,9 +738,9 @@ pub struct Place {
 /// reached no file, which is the truthful answer to "where is it" and not a fault.
 #[derive(Clone, Debug, Default)]
 pub struct Placement {
-	/// For each atom, the offsets of it that render, the file showing them, and
-	/// the rendered offset the run begins at. Ascending, and disjoint by
-	/// conservation, so a range is found by binary search.
+	// For each atom, the offsets of it that render, the file showing them, and the
+	// rendered offset the run begins at.  Ascending and disjoint, so a range is
+	// found by binary search.
 	shown:	BTreeMap<OpId, Vec<(Range<u64>, OpId, u64)>>,
 }
 
@@ -939,8 +768,8 @@ impl Placement {
 		Self { shown }
 	}
 
-	/// Returns where the content the ranges name renders, one entry per file,
-	/// ascending by file identity.
+	/// Where the content the ranges name renders, one entry per file, ascending
+	/// by file identity.
 	///
 	/// Abutting spans are merged, because what a reader wants is the region and
 	/// not the seams a later edit left in it, and a range that renders nowhere
@@ -1005,45 +834,34 @@ impl Placement {
 /// storing a join.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RepoNote {
-	/// The operation that wrote the note.
-	note:		OpId,
-	/// What it says, as bytes.
-	text:		Vec<u8>,
-	/// The files its content reaches, in ascending order of identity.
-	files:		Vec<Place>,
-	/// Whether none of the content it names renders anywhere at all.
-	on_dead:	bool,
+	note:		OpId,			// the operation that wrote it
+	text:		Vec<u8>,		// what it says, as bytes
+	files:		Vec<Place>,		// ascending by identity
+	on_dead:	bool,			// nothing it names renders anywhere
 }
 
 impl RepoNote {
-	/// Assembles a repository-wide resolved note from its parts.
 	pub(super) fn new(note: OpId, text: Vec<u8>, files: Vec<Place>) -> Self {
 		let on_dead = files.is_empty();
 		Self { note, text, files, on_dead }
 	}
 
-	/// Returns the operation that wrote the note.
 	pub const fn note(&self) -> OpId {
 		self.note
 	}
 
-	/// Returns what the note says, as bytes.
 	pub fn text(&self) -> &[u8] {
 		&self.text
 	}
 
-	/// Returns what the note says as a string, with anything that is not valid
-	/// UTF-8 replaced.
 	pub fn text_lossy(&self) -> String {
 		String::from_utf8_lossy(&self.text).into_owned()
 	}
 
-	/// Returns the files the note's content reaches, ascending by identity.
 	pub fn files(&self) -> &[Place] {
 		&self.files
 	}
 
-	/// Returns where the note's content renders in one file.
 	pub fn spans_in(&self, file: OpId) -> &[Span] {
 		self.files
 			.iter()
@@ -1052,8 +870,8 @@ impl RepoNote {
 			.unwrap_or(&[])
 	}
 
-	/// Reports whether every byte the note is about has been deleted, so that the
-	/// note renders nowhere.
+	/// Has every byte the note is about been deleted, so that the note renders
+	/// nowhere?
 	///
 	/// A note in this state is not lost and is not a fault: the log still holds
 	/// what it says and what it was about, and this is what says a reader will not
@@ -1076,27 +894,18 @@ impl RepoNote {
 /// working copy materialises under the shared name is a policy the caller owns.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Rendered {
-	/// The file's identity, which is the identity of its creating operation.
-	file:	OpId,
-	/// Where the file sits, as bytes.
-	path:	Vec<u8>,
-	/// What the file is, after every [`Op::FileMode`] the set holds.
-	mode:	Mode,
-	/// Whether the file still exists.
-	live:	bool,
-	/// The rendered bytes.
+	file:	OpId,			// the identity of its creating operation
+	path:	Vec<u8>,		// where the file sits, as bytes
+	mode:	Mode,			// after every Op::FileMode the set holds
+	live:	bool,			// whether the file still exists
 	bytes:	Vec<u8>,
-	/// Provenance, in render order and coalesced.
-	runs:	Vec<Run>,
-	/// What the renderer noticed that concerns this file.
-	flags:	Vec<Flag>,
-	/// The notes whose content renders here, in render order.
-	notes:	Vec<Note>,
+	runs:	Vec<Run>,		// provenance, in render order and coalesced
+	flags:	Vec<Flag>,		// what the renderer noticed about this file
+	notes:	Vec<Note>,		// whose content renders here, in render order
 }
 
 impl Rendered {
 
-	/// Assembles a file's render from its parts.
 	#[allow(clippy::too_many_arguments)]
 	pub(super) fn new(
 		file:	OpId,
@@ -1113,54 +922,45 @@ impl Rendered {
 		Self { file, path, mode, live, bytes, runs, flags, notes }
 	}
 
-	/// Returns the file's identity.
 	pub const fn file(&self) -> OpId {
 		self.file
 	}
 
-	/// Returns the file's path, as bytes.
 	pub fn path(&self) -> &[u8] {
 		&self.path
 	}
 
-	/// Returns the path as a string, with anything that is not valid UTF-8
-	/// replaced. For messages and tests; the bytes themselves are the record.
+	/// For messages and tests; the bytes themselves are the record.
 	pub fn path_lossy(&self) -> String {
 		String::from_utf8_lossy(&self.path).into_owned()
 	}
 
-	/// Returns what the file is, which is [`Mode::Normal`] unless an
-	/// [`Op::FileMode`] said otherwise.
+	/// [`Mode::Normal`] unless an [`Op::FileMode`] said otherwise.
 	pub const fn mode(&self) -> Mode {
 		self.mode
 	}
 
-	/// Reports whether the file still exists.
 	pub const fn is_live(&self) -> bool {
 		self.live
 	}
 
-	/// Returns the rendered bytes.
 	pub fn bytes(&self) -> &[u8] {
 		&self.bytes
 	}
 
-	/// Returns the provenance of the rendered bytes, in render order.
-	///
 	/// Runs are maximal: a run continues for as long as the content it shows is
 	/// contiguous, whatever the slot structure underneath.
 	pub fn runs(&self) -> &[Run] {
 		&self.runs
 	}
 
-	/// Returns what the renderer noticed that concerns this file.
 	pub fn flags(&self) -> &[Flag] {
 		&self.flags
 	}
 
-	/// Returns the notes whose content renders in this file, in the order a
-	/// margin would draw them: by where each note's first span begins, and then by
-	/// the identity of the note.
+	/// The notes whose content renders in this file, in the order a margin would
+	/// draw them: by where each note's first span begins, and then by the identity
+	/// of the note.
 	///
 	/// A note appears here for every file its content reaches, which is more than
 	/// one where a later move split that content across two; the whole of it is
@@ -1170,32 +970,25 @@ impl Rendered {
 		&self.notes
 	}
 
-	/// Returns one note by the identity of the operation that wrote it, if its
-	/// content renders here.
 	pub fn note(&self, note: OpId)
 		-> Option<&Note>
 	{
 		self.notes.iter().find(|n| n.note == note)
 	}
 
-	/// Returns the number of bytes rendered.
 	pub fn len(&self) -> usize {
 		self.bytes.len()
 	}
 
-	/// Reports whether nothing was rendered.
 	pub fn is_empty(&self) -> bool {
 		self.bytes.is_empty()
 	}
 
-	/// Returns the rendered bytes as a string, with anything that is not valid
-	/// UTF-8 replaced. For messages and tests; the bytes themselves are the
-	/// record.
+	/// For messages and tests; the bytes themselves are the record.
 	pub fn text_lossy(&self) -> String {
 		String::from_utf8_lossy(&self.bytes).into_owned()
 	}
 
-	/// Returns the content identifier of the byte at a rendered index.
 	pub fn content_at(&self, index: usize)
 		-> Outcome<ContentId>
 	{
@@ -1212,8 +1005,7 @@ impl Rendered {
 		Invalid, Input, Range))
 	}
 
-	/// Returns the content a rendered span is made of, as the fewest runs that
-	/// name it.
+	/// The content a rendered span is made of, as the fewest runs that name it.
 	pub fn span(&self, at: usize, len: usize)
 		-> Outcome<Vec<ContentRange>>
 	{
@@ -1262,7 +1054,7 @@ impl Rendered {
 		Ok(out)
 	}
 
-	/// Returns the two origins bracketing the gap at a rendered index.
+	/// The two origins bracketing the gap at a rendered index.
 	///
 	/// The left origin binds after the byte before the gap; at the start of the
 	/// file there is no such byte in the render, and the origin is the file's
@@ -1366,21 +1158,15 @@ impl Rendered {
 /// work done.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Repo {
-	/// Every file, in ascending order of identity, deleted ones included.
-	files:	Vec<Rendered>,
-	/// Everything the renderer noticed, sorted and without repetition.
-	flags:	Vec<Flag>,
-	/// Every note the operation set holds, in ascending order of identity.
-	notes:	Vec<RepoNote>,
-	/// Which file each placing operation landed in.
-	index:	BTreeMap<OpId, OpId>,
-	/// What the render cost.
-	stats:	Stats,
+	files:	Vec<Rendered>,			// ascending by identity, deleted included
+	flags:	Vec<Flag>,				// sorted and without repetition
+	notes:	Vec<RepoNote>,			// ascending by identity
+	index:	BTreeMap<OpId, OpId>,	// which file each placer landed in
+	stats:	Stats,					// what the render cost
 }
 
 impl Repo {
 
-	/// Assembles a repository render from its parts.
 	pub(super) fn new(
 		files:	Vec<Rendered>,
 		flags:	Vec<Flag>,
@@ -1393,12 +1179,10 @@ impl Repo {
 		Self { files, flags, notes, index, stats }
 	}
 
-	/// Returns every file, in ascending order of identity, deleted ones included.
 	pub fn files(&self) -> &[Rendered] {
 		&self.files
 	}
 
-	/// Returns one file by identity.
 	pub fn file(&self, file: OpId)
 		-> Option<&Rendered>
 	{
@@ -1408,14 +1192,14 @@ impl Repo {
 			.and_then(|i| self.files.get(i))
 	}
 
-	/// Returns the live files, in ascending order of path and then of identity.
+	/// The live files, ascending by path and then by identity.
 	pub fn live(&self) -> Vec<&Rendered> {
 		let mut v: Vec<&Rendered> = self.files.iter().filter(|f| f.live).collect();
 		v.sort_by(|a, b| a.path.cmp(&b.path).then(a.file.cmp(&b.file)));
 		v
 	}
 
-	/// Returns the live files at a path, in ascending order of identity.
+	/// The live files at a path, in ascending order of identity.
 	///
 	/// More than one is legal: two branches that independently created a path
 	/// minted two files, both of which exist and both of which keep their bytes.
@@ -1427,8 +1211,8 @@ impl Repo {
 		v
 	}
 
-	/// Returns the paths more than one live file is claiming, each with those
-	/// files in ascending order of identity.
+	/// The paths more than one live file is claiming, each with those files in
+	/// ascending order of identity.
 	///
 	/// Which of them a working copy writes under the shared name is a policy for
 	/// the caller: the repository's answer is that both files exist.
@@ -1446,14 +1230,12 @@ impl Repo {
 			.collect()
 	}
 
-	/// Returns everything the renderer noticed, over the whole repository.
 	pub fn flags(&self) -> &[Flag] {
 		&self.flags
 	}
 
-	/// Returns every note the operation set holds, in ascending order of
-	/// identity, each listed once however many files its content is scattered
-	/// over.
+	/// Every note the operation set holds, in ascending order of identity, each
+	/// listed once however many files its content is scattered over.
 	///
 	/// A note whose content has been deleted entirely is here too, saying so; see
 	/// [`RepoNote::on_dead`].
@@ -1461,7 +1243,6 @@ impl Repo {
 		&self.notes
 	}
 
-	/// Returns one note by the identity of the operation that wrote it.
 	pub fn note(&self, note: OpId)
 		-> Option<&RepoNote>
 	{
@@ -1471,29 +1252,25 @@ impl Repo {
 			.and_then(|i| self.notes.get(i))
 	}
 
-	/// Returns the notes whose content renders nowhere at all, in ascending order
-	/// of identity.
 	pub fn dead_notes(&self) -> Vec<&RepoNote> {
 		self.notes.iter().filter(|n| n.on_dead).collect()
 	}
 
-	/// Returns what the render cost.
 	pub fn stats(&self) -> &Stats {
 		&self.stats
 	}
 
-	/// Returns the number of files, deleted ones included.
+	/// The number of files, deleted ones included.
 	pub fn len(&self) -> usize {
 		self.files.len()
 	}
 
-	/// Reports whether the repository holds no files.
 	pub fn is_empty(&self) -> bool {
 		self.files.is_empty()
 	}
 
-	/// Returns the file an operation's placement landed in, if it placed
-	/// anything that reached a file.
+	/// The file an operation's placement landed in, if it placed anything that
+	/// reached a file.
 	///
 	/// This is the derived association a wire field would have asserted. It is
 	/// computed by the render and may be cached beside the log, which is what a
@@ -1504,14 +1281,12 @@ impl Repo {
 		self.index.get(op).copied()
 	}
 
-	/// Returns the whole operation-to-file association, in ascending order of
-	/// operation.
+	/// Which file each placing operation landed in.
 	pub fn index(&self) -> &BTreeMap<OpId, OpId> {
 		&self.index
 	}
 
-	/// Returns the render read backwards, which answers where named content
-	/// ended up.
+	/// The render read backwards, which answers where named content ended up.
 	///
 	/// [`Repo::file_of`] answers the coarser question, which file an operation's
 	/// placement reached; this answers where in that file, and it answers it for
@@ -1527,25 +1302,18 @@ impl Repo {
 /// Which side of its parent a node sits on.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ChildSide {
-	/// Visited before the parent.
-	Left,
-	/// Visited after the parent.
-	Right,
+	Left,	// visited before the parent
+	Right,	// visited after the parent
 }
 
 
 /// The bytes a traversal produced, where they went, and what it cost.
 pub(super) struct Traversal {
-	/// Rendered bytes and provenance, by file identity.
 	pub files:		BTreeMap<OpId, (Vec<u8>, Vec<Run>)>,
-	/// The file each slot ended up in, absent for a slot that reached none.
-	pub owner:		Vec<Option<OpId>>,
-	/// Slots that belong to no file, by placing operation and offset.
-	pub orphans:	Vec<(OpId, u64)>,
-	/// Live bytes owned by those slots, which render nowhere.
-	pub orphaned:	u64,
-	/// Deepest path in the forest.
-	pub max_depth:	u32,
+	pub owner:		Vec<Option<OpId>>,	// the file each slot ended up in
+	pub orphans:	Vec<(OpId, u64)>,	// by placing operation and offset
+	pub orphaned:	u64,				// live bytes owned by those slots
+	pub max_depth:	u32,				// deepest path in the forest
 }
 
 /// Builds the Fugue forest in topological order and walks it in order, emitting
@@ -1761,7 +1529,7 @@ pub(super) fn notes(
 	(per_file, repo)
 }
 
-/// Returns the in-order successor of `v` among the nodes placed so far.
+/// The in-order successor of `v` among the nodes placed so far.
 fn successor(
 	v:		usize,
 	kids_l:	&[Vec<usize>],
@@ -1792,8 +1560,8 @@ fn successor(
 	}
 }
 
-/// Reports whether `r` lies in the right subtree of `l`, by climbing `r`'s
-/// ancestors in powers of two.
+/// Does `r` lie in the right subtree of `l`? Found by climbing `r`'s ancestors
+/// in powers of two.
 fn in_right_subtree(
 	l:		usize,
 	r:		usize,

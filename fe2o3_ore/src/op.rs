@@ -82,6 +82,9 @@
 //! A time is not the same thing and is not on the header. Only the operations
 //! that carry one have one, it is the author's own clock rather than a position
 //! in the order, and nothing decides anything by it: see [`Op::Mark`].
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::id::{
 	varint_decode,
@@ -101,58 +104,36 @@ use oxedyne_fe2o3_iop_hash::api::{
 use oxedyne_fe2o3_jdat::prelude::*;
 
 
-/// Wire code for [`Op::FileCreate`].
+//// Operation wire codes.
 pub const CODE_FILE_CREATE:	u8 = 1;
-/// Wire code for [`Op::FileDelete`].
 pub const CODE_FILE_DELETE:	u8 = 2;
-/// Wire code for [`Op::FileRename`].
 pub const CODE_FILE_RENAME:	u8 = 3;
-/// Wire code for [`Op::Mark`].
 pub const CODE_MARK:		u8 = 4;
-/// Wire code for [`Op::Splice`].
 pub const CODE_SPLICE:		u8 = 5;
-/// Wire code for [`Op::Move`].
 pub const CODE_MOVE:		u8 = 6;
-/// Wire code for [`Op::Note`].
 pub const CODE_NOTE:		u8 = 7;
-/// Wire code for [`Op::FileMode`].
 pub const CODE_FILE_MODE:	u8 = 8;
-/// Wire code for an [`Op::Mark`] carrying a body, a time, or both.
-pub const CODE_MARK_TIMED:	u8 = 9;
-/// Wire code for [`Op::Proposal`].
+pub const CODE_MARK_TIMED:	u8 = 9;	// a mark carrying a body, a time, or both
 pub const CODE_PROPOSAL:	u8 = 10;
-/// Wire code for [`Op::Said`].
 pub const CODE_SAID:		u8 = 11;
-/// Wire code for [`Op::Settled`].
 pub const CODE_SETTLED:		u8 = 12;
-/// Wire code for [`Op::Reverts`].
 pub const CODE_REVERTS:		u8 = 13;
 
 
 /// The character beginning the name of an [`Op::Mark`] a tool wrote rather than
 /// a person, and which a person's mark may not begin with.
 ///
-/// One character is the whole of the convention. It is here rather than in
+/// One character is the whole of the convention, and it is here rather than in
 /// whichever tool authors the marks because every reader of a history has to
-/// apply it and they are not all the same program: a command line tool offering
-/// somebody the points they named, a forge listing them in a view, an exporter
-/// deciding which of them deserves a tag. Two copies of a rule like this in two
-/// crates is the seam where each side is honestly correct in isolation and the
-/// two disagree at the boundary.
-///
-/// What it is for: a tool that names a point at the end of every command writes
-/// a great many marks, and they are recovery points rather than statements of
-/// intent. Telling them apart by name is what lets a reader be shown the handful
-/// somebody chose without being shown the several hundred nobody did. See
-/// [`is_auto_mark`].
+/// apply it and they are not all the same program. A tool that names a point at
+/// the end of every command writes a great many marks, and telling them apart by
+/// name is what lets a reader be shown the handful somebody chose.
 pub const AUTO_MARK_PREFIX: char = '@';
 
-/// Reports whether a mark's name is one a tool wrote rather than one a person
-/// chose.
+/// Is this the name of a mark a tool wrote rather than one a person chose?
 ///
-/// Takes the name rather than the [`Op`], because a caller that has an operation
-/// has its name in a line and a caller that has only a name -- reading a
-/// reference somebody typed, or a tag -- has nothing to hand it otherwise:
+/// Takes the name rather than the [`Op`], since a caller reading a reference
+/// somebody typed has nothing else to hand it.
 ///
 /// ```
 /// use oxedyne_fe2o3_ore::op::{is_auto_mark, Op};
@@ -178,49 +159,36 @@ pub fn is_auto_mark(name: &str) -> bool {
 }
 
 
-/// Wire code for [`Mode::Normal`].
+//// File mode wire codes.
 pub const MODE_NORMAL:		u8 = 0;
-/// Wire code for [`Mode::Executable`].
 pub const MODE_EXECUTABLE:	u8 = 1;
-/// Wire code for [`Mode::Symlink`].
 pub const MODE_SYMLINK:		u8 = 2;
 
 
-/// Wire code for [`Settled::Open`].
+//// Proposal state wire codes.
 pub const SETTLED_OPEN:		u8 = 0;
-/// Wire code for [`Settled::Accepted`].
 pub const SETTLED_ACCEPTED:	u8 = 1;
-/// Wire code for [`Settled::Declined`].
 pub const SETTLED_DECLINED:	u8 = 2;
-/// Wire code for [`Settled::Done`].
 pub const SETTLED_DONE:		u8 = 3;
 
 
 /// What a file is, over and above the bytes in it.
 ///
-/// A working copy records exactly one bit of metadata about an ordinary file --
-/// whether it may be run -- and one further kind of thing that lives at a path
-/// and holds bytes, which is a symbolic link. So this is a three-value enum and
-/// not a number: a mode outside the set is not a state a working copy can be
-/// in, and a reader should not have to guess what one would mean.
-///
-/// [`Mode::Normal`] is the default, and that is what makes the operation
-/// additive: a file no [`Op::FileMode`] ever named is a normal file, so every
+/// A three-value enum and not a number: a mode outside the set is not a state a
+/// working copy can be in, and a reader should not have to guess what one would
+/// mean. [`Mode::Normal`] is the default, and that is what makes the operation
+/// additive -- a file no [`Op::FileMode`] ever named is a normal file, so every
 /// history written before the operation existed means today what it meant
 /// yesterday.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Mode {
-	/// An ordinary file, which is what a file is until something says otherwise.
 	#[default]
 	Normal,
-	/// A file a working copy marks executable.
 	Executable,
-	/// A symbolic link, whose bytes are the path it points at.
-	Symlink,
+	Symlink,	// whose bytes are the path it points at
 }
 
 impl Mode {
-	/// Returns the wire code identifying the mode.
 	pub const fn code(&self) -> u8 {
 		match self {
 			Self::Normal		=> MODE_NORMAL,
@@ -229,7 +197,6 @@ impl Mode {
 		}
 	}
 
-	/// Returns the mode's name, for messages and logs.
 	pub const fn name(&self) -> &'static str {
 		match self {
 			Self::Normal		=> "normal",
@@ -238,17 +205,14 @@ impl Mode {
 		}
 	}
 
-	/// Reports whether the mode is the one a file has said nothing about.
 	pub const fn is_normal(&self) -> bool {
 		matches!(self, Self::Normal)
 	}
 
-	/// Serialises the mode as the single [`Dat::U8`] it is spelled as.
 	pub const fn to_dat(&self) -> Dat {
 		Dat::U8(self.code())
 	}
 
-	/// Reconstructs a mode from a [`Dat`] produced by [`Mode::to_dat`].
 	pub fn from_dat(dat: &Dat)
 		-> Outcome<Self>
 	{
@@ -280,30 +244,21 @@ impl std::fmt::Display for Mode {
 
 /// What became of a proposal. Four states and no workflow.
 ///
-/// Shaped like [`Mode`], and for the same reason: a state outside the set is not
-/// a state a proposal can be in, and a reader should not have to guess what one
-/// would mean. There is no transition table beside it, because a state is
-/// asserted rather than stepped to -- an author says what a proposal now is, and
-/// the assertion stands until another one is written.
-///
-/// [`Settled::Open`] is the default, so an [`Op::Proposal`] that nothing has
-/// settled yet is open without anything having had to say so.
+/// There is no transition table beside it, because a state is asserted rather
+/// than stepped to: an author says what a proposal now is, and the assertion
+/// stands until another one is written. [`Settled::Open`] is the default, so an
+/// [`Op::Proposal`] that nothing has settled yet is open without anything having
+/// had to say so.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Settled {
-	/// Still being asked for, which is what a proposal is until something says
-	/// otherwise.
 	#[default]
 	Open,
-	/// Agreed to.
 	Accepted,
-	/// Refused.
 	Declined,
-	/// Agreed to and carried out.
-	Done,
+	Done,		// agreed to and carried out
 }
 
 impl Settled {
-	/// Returns the wire code identifying the state.
 	pub const fn code(&self) -> u8 {
 		match self {
 			Self::Open		=> SETTLED_OPEN,
@@ -313,7 +268,6 @@ impl Settled {
 		}
 	}
 
-	/// Returns the state's name, for messages and logs.
 	pub const fn name(&self) -> &'static str {
 		match self {
 			Self::Open		=> "open",
@@ -323,17 +277,14 @@ impl Settled {
 		}
 	}
 
-	/// Reports whether the proposal is still being asked for.
 	pub const fn is_open(&self) -> bool {
 		matches!(self, Self::Open)
 	}
 
-	/// Serialises the state as the single [`Dat::U8`] it is spelled as.
 	pub const fn to_dat(&self) -> Dat {
 		Dat::U8(self.code())
 	}
 
-	/// Reconstructs a state from a [`Dat`] produced by [`Settled::to_dat`].
 	pub fn from_dat(dat: &Dat)
 		-> Outcome<Self>
 	{
@@ -373,28 +324,20 @@ impl std::fmt::Display for Settled {
 /// not have and every caller does. This says which question to ask; asking it is
 /// the caller's.
 ///
-/// Note what is **not** here: rendering the operation set *without* the operation
-/// is not the way to answer any of these, and cannot be made to work. Removing an
-/// operation from the middle of a history leaves anchors naming atoms nothing
-/// created, which `Sequence::render_with` refuses rather than guesses at. A render
-/// at the parents holds every operation its author could see and is causally
-/// closed by construction.
+/// Rendering the operation set *without* the operation is not the way to answer
+/// any of these, and cannot be made to work: removing an operation from the
+/// middle of a history leaves anchors naming atoms nothing created, which
+/// `Sequence::render_with` refuses rather than guesses at.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Prior {
-	/// The path a file had before an [`Op::FileRename`] moved it.
 	Path {
-		/// The file whose path is wanted.
 		file: OpId,
 	},
-	/// What a file was before an [`Op::FileMode`] asserted otherwise.
 	Mode {
-		/// The file whose mode is wanted.
 		file: OpId,
 	},
-	/// Where content sat before an [`Op::Move`] took it, one gap per run, in the
-	/// order the runs are named.
+	// One gap per run, in the order the runs are named.
 	Place {
-		/// The runs whose former neighbours are wanted.
 		src: Vec<ContentRange>,
 	},
 }
@@ -403,10 +346,8 @@ pub enum Prior {
 ///
 /// It is here rather than in whichever tool authors a revert for the reason
 /// [`AUTO_MARK_PREFIX`] is here: more than one program will offer to undo an
-/// operation -- a command line tool, a forge page reviewing a contribution -- and
-/// two tables of what an inverse is would be two tables that could disagree about
-/// a history they both write into. What each program still owns is the state it
-/// reads and the words it says.
+/// operation, and two tables of what an inverse is would be two tables that
+/// could disagree about a history they both write into.
 ///
 /// The three fields are three different kinds of answer, and a caller that
 /// serves only the first is a caller that silently half-undoes a splice:
@@ -420,12 +361,8 @@ pub enum Prior {
 ///   against.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Undoing {
-	/// Inverse operations the reverted operation said enough to write outright.
 	pub written:	Vec<Op>,
-	/// Content the operation killed, which an inverse can only put back as a
-	/// copy, one restoring splice per run.
-	pub copies:		Vec<ContentRange>,
-	/// What has to be read out of the state the operation was written against.
+	pub copies:		Vec<ContentRange>,	// one restoring splice per run
 	pub prior:		Option<Prior>,
 }
 
@@ -445,229 +382,80 @@ pub struct Undoing {
 /// one file or across two.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Op {
-	/// Brings a file into existence, empty.
-	///
-	/// The operation's own identity is the file's identity, for as long as the
-	/// history lasts and through any number of renames. It also mints the file's
-	/// origin anchor, one byte of content born dead and named
-	/// [`crate::id::ContentId::origin`] of that identity, which is what a splice
-	/// into the empty file binds after.
 	FileCreate {
-		/// Where the file sits, as bytes rather than as a string.
 		path: Vec<u8>,
 	},
-	/// Retires a file. Its content is held back rather than destroyed, so
-	/// whatever moved out of it before it went still renders where it went.
+	// A file's content is held back rather than destroyed, so whatever moved out
+	// of it before it went still renders where it went.
 	FileDelete {
-		/// The file, named by the operation that created it.
 		file: OpId,
 	},
-	/// Moves a file to another path, leaving its contents untouched.
 	FileRename {
-		/// The file, named by the operation that created it.
 		file: OpId,
-		/// Where it moves to.
 		path: Vec<u8>,
 	},
-	/// Asserts what a file is, from this point on, leaving its contents
-	/// untouched.
-	///
-	/// Shaped like [`Op::FileRename`], and for the same reason: it names a file
-	/// by identity and states a piece of that file's metadata, so the assertion
-	/// survives every rename and every edit the file goes on to have. A file no
-	/// such operation names is [`Mode::Normal`], which is why the operation could
-	/// join the vocabulary without disturbing a byte of what was written before
-	/// it.
-	///
-	/// Two of these written concurrently settle the way two concurrent renames
-	/// settle: the later in operation order is the one the render reports.
+	// A file no such operation names is normal, and two of these written
+	// concurrently settle the way two concurrent renames do: the later in
+	// operation order is the one the render reports.
 	FileMode {
-		/// The file, named by the operation that created it.
 		file: OpId,
-		/// What the file is from here on.
 		mode: Mode,
 	},
-	/// Names a point in history, so that it can be referred to later, and says
-	/// what was going on when it was named.
-	///
-	/// The body and the time joined the operation after it had already been
-	/// written a great many times, so both are optional and the wire carries two
-	/// spellings of the one variant: a mark with neither is [`CODE_MARK`] with
-	/// the two elements it has always had, and a mark with either is
-	/// [`CODE_MARK_TIMED`] with four. Spelling the old marks the new way would
-	/// have changed the bytes under every signature ever put on one, and
-	/// splitting the type in two would have pushed a distinction that is only a
-	/// spelling into every consumer that reads a mark.
-	///
-	/// The time is the author's own clock at the moment of writing, and it
-	/// **orders nothing**. A clock that is wrong is still a clock, so a reader
-	/// shows a mark by its time and decides by [`crate::seq::OpOrder`]; sorting
-	/// or arbitrating by the time would let a machine set to next year win every
-	/// contest it entered.
-	///
-	/// # Two kinds of mark, told apart by one character
-	///
-	/// A tool that names the point it reached at the end of every command writes
-	/// far more marks than a person does, and they mean a different thing: a
-	/// recovery point rather than a statement of intent. The convention that
-	/// separates them is the name, and it is [`AUTO_MARK_PREFIX`] -- a name
-	/// beginning with it was written by a tool, a person's may not begin with it,
-	/// and [`is_auto_mark`] is the question. It lives here rather than in whoever
-	/// authors the marks because every reader of a history has to apply it, and
-	/// they are not all the same program.
-	///
-	/// The rest of the name is not specified, and the engine reads none of it.
+	// Two wire spellings of the one variant, chosen by what it carries: see
+	// Op::code.
 	Mark {
-		/// The name given to this point.
 		name: String,
-		/// What was said about it, as bytes, or nothing where nothing was said.
 		body: Option<Vec<u8>>,
-		/// When it was made, in seconds since the Unix epoch, or nothing for a
-		/// mark written before the log carried a clock.
-		time: Option<u64>,
+		time: Option<u64>,				// unix epoch seconds, and it orders nothing
 	},
-	/// Puts bytes in a gap and kills runs of existing content, which is the
-	/// single primitive from which insertion, deletion and replacement all
-	/// follow: an insertion removes nothing, a deletion inserts nothing, and a
-	/// replacement does both in one operation.
-	///
-	/// The gap is named by the content either side of it and the removed runs
-	/// are named by their content, so neither half carries a position, and
-	/// neither names a file.
+	// The single primitive insertion, deletion and replacement all follow from:
+	// an insertion removes nothing, a deletion inserts nothing, a replacement
+	// does both at once.
 	Splice {
-		/// Left origin of the inserted bytes, binding after a byte.
-		left: Option<Anchor>,
-		/// Right origin of the inserted bytes, binding before a byte.
-		right: Option<Anchor>,
-		/// What dies.
+		left: Option<Anchor>,			// binds after a byte
+		right: Option<Anchor>,			// binds before a byte
 		remove: Vec<ContentRange>,
-		/// What is inserted.
 		insert: Vec<u8>,
 	},
-	/// Relocates runs of existing content, which keep their identity, to a
-	/// position named by the content already there.
-	///
-	/// The source names bytes, and a byte's identity is repository-wide, so one
-	/// operation moves a run within a file or from one file to another with
-	/// nothing in it saying which case it is. The destination anchor is what
-	/// decides.
 	Move {
-		/// What moves, in the order it lands in.
-		src: Vec<ContentRange>,
-		/// The gap the content lands in, on its left.
+		src: Vec<ContentRange>,			// in the order it lands in
 		left: Option<Anchor>,
-		/// The gap the content lands in, on its right.
 		right: Option<Anchor>,
 	},
-	/// Says something about content, and goes on saying it about that same
-	/// content wherever the content ends up.
-	///
-	/// A note names bytes, not a line and not an offset, so the machinery that
-	/// carries an anchor through an edit carries the note with it for nothing: the
-	/// content is edited around and the note narrows to what survived; the content
-	/// is moved, within a file or into another, and the note goes with it.
-	///
-	/// It is history and not sequence content. A note mints no atom, claims no
-	/// byte and renders no byte; the sequence keeps it so that the causal graph is
-	/// whole, exactly as it keeps a [`Op::Mark`], and the render resolves it into
-	/// the spans a margin can be drawn against.
-	///
-	/// `on` must name something. A note about nothing is a mark with extra
-	/// spelling, and [`Op::Mark`] already says "about this point in history".
 	Note {
-		/// The content the note is about.
 		on: Vec<ContentRange>,
-		/// What it says, as bytes: a note is not this crate's to decode.
-		text: Vec<u8>,
+		text: Vec<u8>,					// not this crate's to decode
 	},
-	/// Asks for something that is not yet in the bytes.
-	///
-	/// A proposal is history rather than a record beside history, so it travels
-	/// the way every other operation travels: it is signed by whoever wrote it,
-	/// it carries the frontier they could see, and a replica that has the
-	/// operations has the discussion. Kept in a forge's own store instead, it
-	/// would be readable only through that forge, and a clone would arrive with
-	/// the argument for the change missing.
-	///
-	/// What is *not* here is a ballot. A vote in the log would name its voter
-	/// permanently and irrevocably, under a signature, and the guarantee that
-	/// tallies are published and voters are not could then never be given again.
 	Proposal {
-		/// What is being asked for, in one line.
 		title: String,
-		/// The case for it, as bytes.
 		body: Vec<u8>,
-		/// The forge name the author was writing under.
-		voice: String,
-		/// When it was opened, in seconds since the Unix epoch.
-		time: u64,
+		voice: String,					// the forge name the author wrote under
+		time: u64,						// unix epoch seconds
 	},
-	/// One remark in a proposal's discussion.
-	///
-	/// It names the proposal by that operation's identity, not by a title and
-	/// not by a number, so a remark still finds what it is about after the two
-	/// have crossed between replicas in either order.
 	Said {
-		/// The proposal spoken about.
-		on: OpId,
-		/// What was said, as bytes.
+		on: OpId,						// the proposal spoken about
 		text: Vec<u8>,
-		/// The forge name the author was writing under.
 		voice: String,
-		/// When it was said, in seconds since the Unix epoch.
 		time: u64,
 	},
-	/// States what became of a proposal, from this point on.
-	///
-	/// Shaped like [`Op::FileMode`]: it names a thing by identity and asserts
-	/// one piece of that thing's state, so the assertion survives everything
-	/// said about the proposal afterwards. Two of these on one proposal settle
-	/// the way two concurrent renames settle -- the later in operation order is
-	/// the one a reader reports -- and that is the only concurrency rule these
-	/// operations need.
+	// Later in operation order wins, as with a rename.
 	Settled {
-		/// The proposal settled.
 		on: OpId,
-		/// What it became.
 		state: Settled,
-		/// The mark that closed it, where one did.
-		///
-		/// An identifier, never a mark's name: a name does not pick out the same
-		/// operation on two replicas, and this has to.
-		mark: Option<OpId>,
-		/// When it was settled, in seconds since the Unix epoch.
+		mark: Option<OpId>,				// an identifier, never a mark's name
 		time: u64,
 	},
-	/// Says that operations undo others, so that a revert is not an unexplained
-	/// deletion by a stranger when it reaches somebody else's machine.
-	///
-	/// The inverse edits are ordinary operations authored beside this one, and
-	/// nothing here does the undoing; what this adds is the record of what they
-	/// are for. Without it the bytes say only that somebody deleted work, and
-	/// whoever wrote that work first has no way to see that it was reverted
-	/// rather than lost, nor to be credited for it when it comes back.
-	///
-	/// Renders nothing, claims no byte and mints no atom, which is the species
-	/// [`Op::Mark`] and [`Op::Note`] are already in.
-	///
-	/// `undone` must name something, for the reason [`Op::Note`]'s `on` must: a
-	/// revert of nothing is a mark with extra spelling, and [`Op::Mark`] already
-	/// says "about this point in history".
 	Reverts {
-		/// What is undone, in operation order, and never nothing.
-		///
-		/// Held ascending and without repetition, for the reason
-		/// [`Header::parents`] is: two byte spellings of one set would both
-		/// verify against a signature.
-		undone: Vec<OpId>,
+		undone: Vec<OpId>,				// ascending, without repetition, never empty
 	},
 }
 
 impl Op {
-	/// Returns the wire code identifying the variant.
-	///
 	/// A mark answers with the code it is written at, which is a function of
-	/// what it carries rather than of the variant: see [`Op::Mark`]. That is what
+	/// what it carries rather than of the variant: a mark with neither a body
+	/// nor a time is [`CODE_MARK`] with the two elements it has always had, so
+	/// every mark already signed still verifies, and a mark with either is
+	/// [`CODE_MARK_TIMED`] with four. That is what
 	/// [`crate::segment::highest_code`] reads, so a bodyless, timeless mark goes
 	/// into a segment of any version this crate reads, and a mark carrying
 	/// either does not go into one written before the fields existed.
@@ -690,8 +478,6 @@ impl Op {
 		}
 	}
 
-	/// Returns the variant name, for messages and logs.
-	///
 	/// One name for both of a mark's spellings, since the two are one operation
 	/// and a reader told otherwise would go looking for a variant that is not
 	/// there.
@@ -712,13 +498,9 @@ impl Op {
 		}
 	}
 
-	/// Returns the file an operation names by identity, which only a lifecycle
-	/// change does.
-	///
-	/// A content operation gives `None`, and that is the whole of candidate B: it
-	/// names content, and the file follows from the content. A file's creation
-	/// gives `None` too, because the file it names is itself, and the identity is
-	/// the operation's own.
+	/// Only a lifecycle change names a file. A content operation gives `None`
+	/// because it names content and the file follows from that; a file's
+	/// creation gives `None` because the file it names is itself.
 	pub fn names_file(&self) -> Option<OpId> {
 		match self {
 			Self::FileDelete { file }		=> Some(*file),
@@ -728,8 +510,6 @@ impl Op {
 		}
 	}
 
-	/// Returns the operation's two origins, absent for anything that places
-	/// nothing.
 	pub fn origins(&self) -> (Option<Anchor>, Option<Anchor>) {
 		match self {
 			Self::Splice { left, right, .. }	=> (*left, *right),
@@ -738,14 +518,12 @@ impl Op {
 		}
 	}
 
-	/// Returns the content the operation **acts on**: what a splice removes, or
-	/// what a move takes with it.
+	/// The content the operation **acts on**, which is what decides whether two
+	/// operations were in conflict.
 	///
-	/// A note is not here, although it names content too. What this answers is
-	/// which bytes an operation asserts something about -- which is what decides
-	/// whether two operations were in conflict -- and a note asserts nothing: it
-	/// neither kills content nor takes it anywhere, so a note and a concurrent
-	/// deletion of the same run are not two authors disagreeing. See
+	/// A note is not here, although it names content too: it asserts nothing,
+	/// neither killing content nor taking it anywhere, so a note and a
+	/// concurrent deletion of the same run are not two authors disagreeing. See
 	/// [`Op::note_on`] for the other reading.
 	pub fn regions(&self) -> &[ContentRange] {
 		match self {
@@ -755,12 +533,6 @@ impl Op {
 		}
 	}
 
-	/// Returns the content a note is about, empty for everything else.
-	///
-	/// Kept apart from [`Op::regions`] because the two are asked different
-	/// questions: what an operation claims, and what an operation refers to. Both
-	/// have to exist for the render to resolve them, which is the one place the two
-	/// are read together.
 	pub fn note_on(&self) -> &[ContentRange] {
 		match self {
 			Self::Note { on, .. }	=> on,
@@ -768,13 +540,10 @@ impl Op {
 		}
 	}
 
-	/// Reports whether the operation is a move.
 	pub fn is_move(&self) -> bool {
 		matches!(self, Self::Move { .. })
 	}
 
-	/// Returns the number of bytes the operation places, which is what a splice
-	/// inserts or what a move brings with it.
 	pub fn placed_len(&self) -> u64 {
 		match self {
 			Self::Splice { insert, .. }	=> insert.len() as u64,
@@ -783,16 +552,13 @@ impl Op {
 		}
 	}
 
-	/// Checks the rule that replaces the file field.
+	/// Checks the rule that replaces the file field: an operation that places
+	/// anything must carry at least one origin, that origin being what says
+	/// which file it lands in.
 	///
-	/// An operation that places anything -- a splice with a non-empty `insert`,
-	/// or any move -- must carry at least one origin, because that origin is what
-	/// says which file it lands in. A splice that only removes places nothing and
-	/// needs none: it names the content it kills, and content is repository-wide.
-	///
-	/// This is enforced on the way off the wire as well as on the way into the
-	/// sequence, because an operation that satisfies neither origin belongs to no
-	/// file and there is nowhere for a reader to put it.
+	/// Enforced on the way off the wire as well as on the way into the sequence,
+	/// because an operation satisfying neither origin belongs to no file and
+	/// there is nowhere for a reader to put it.
 	pub fn check_placement(&self)
 		-> Outcome<()>
 	{
@@ -814,17 +580,12 @@ impl Op {
 		}
 	}
 
-	/// Checks the rule that a note is about something.
+	/// Checks the rule that a note is about something: [`Op::Note`] must name at
+	/// least one byte, an empty list and a list of empty ranges naming none.
 	///
-	/// [`Op::Note`] must name at least one byte. An empty list names nothing, and
-	/// a list of empty ranges names nothing either, so both are refused: such a
-	/// note could never resolve to a span and would be reported forever as a note
-	/// on dead content, which is not what "dead" is for. An author wanting to say
-	/// something about a point in history rather than about content writes an
-	/// [`Op::Mark`].
-	///
-	/// Checked on the way off the wire as well as on the way into the sequence,
-	/// for the reason [`Op::check_placement`] is.
+	/// Such a note could never resolve to a span and would be reported forever
+	/// as a note on dead content, which is not what "dead" is for. Checked on
+	/// the way off the wire too, for the reason [`Op::check_placement`] is.
 	pub fn check_note(&self)
 		-> Outcome<()>
 	{
@@ -845,21 +606,11 @@ impl Op {
 	/// Checks the rule that a revert names what it undoes, exactly once each and
 	/// in order.
 	///
-	/// [`Op::Reverts`] must name at least one operation. An empty list undoes
-	/// nothing, and a revert of nothing is a mark with extra spelling, which is
-	/// the reason [`Op::check_note`] refuses a note about nothing: there is
-	/// already an operation for saying something about a point in history, and
-	/// [`Op::Mark`] is it. Nothing would ever author one, so a decoder meeting one
-	/// has met damage rather than an intention.
-	///
 	/// The list is held ascending and without repetition, for the reason
-	/// [`Header::from_dat`] holds the parents that way: the same set of operations
-	/// written two ways would be two byte strings, both of which a signature would
-	/// verify, and a provenance chain cannot afford a record with two spellings.
-	/// It is refused rather than sorted, so that whoever wrote it finds out.
-	///
-	/// Checked on the way off the wire as well as on the way into the sequence,
-	/// for the reason [`Op::check_placement`] is.
+	/// [`Header::from_dat`] holds the parents that way: the same set written two
+	/// ways would be two byte strings, both of which a signature would verify,
+	/// and a provenance chain cannot afford a record with two spellings. It is
+	/// refused rather than sorted, so that whoever wrote it finds out.
 	pub fn check_reverts(&self)
 		-> Outcome<()>
 	{
@@ -884,27 +635,11 @@ impl Op {
 		Ok(())
 	}
 
-	/// Returns why nothing in the vocabulary undoes this operation, or `None`
-	/// where something does.
+	/// Why nothing in the vocabulary undoes this operation, or `None` where
+	/// something does.
 	///
-	/// The sentence is here, and not in whoever refuses, so that a person told no
-	/// by a command and a person told no by a forge are told the same thing. Each
-	/// of them says *why*, because every one of these looks at first like an
-	/// omission and none of them is:
-	///
-	/// - A file's deletion holds its content back rather than destroying it, and
-	///   there is no operation that revives a file. A new file with the old bytes
-	///   is a different file, which is what `undo` already does and says.
-	/// - A mark, a proposal, a remark and a settlement are things somebody said.
-	///   The record grows and nothing retracts an utterance; a proposal's standing
-	///   is changed by writing another [`Op::Settled`], which is what that
-	///   operation is for.
-	/// - A note follows content and is not content. Nothing un-says it, and it
-	///   already reports itself as a note on dead content when what it was about
-	///   goes.
-	/// - A [`Op::Reverts`] names what some edits were for. Undoing the label would
-	///   leave the edits in place and take away the only record saying what they
-	///   were; whoever means to put the work back reverts those edits.
+	/// The sentence is here, and not in whoever refuses, so that a person told
+	/// no by a command and a person told no by a forge are told the same thing.
 	pub fn no_inverse(&self) -> Option<&'static str> {
 		match self {
 			Self::FileDelete { .. } => Some(
@@ -935,29 +670,19 @@ impl Op {
 		}
 	}
 
-	/// Returns what undoing this operation amounts to, `id` being the identity
-	/// the operation was recorded under.
+	/// What undoing this operation amounts to, `id` being the identity the
+	/// operation was recorded under.
 	///
-	/// The identity is asked for rather than carried because an operation does not
-	/// hold one -- the same edit written by two authors is two operations -- and an
-	/// inverse needs it: what a splice inserted is named by the splice, so undoing
-	/// the insertion is a removal naming that identity and nothing else, exact and
-	/// costing no render.
+	/// The identity is asked for rather than carried because an operation does
+	/// not hold one -- the same edit written by two authors is two operations --
+	/// and an inverse needs it: what a splice inserted is named by the splice,
+	/// so undoing the insertion is a removal naming that identity and nothing
+	/// else, exact and costing no render.
 	///
-	/// Fails where [`Op::no_inverse`] says there is none, with that sentence.
-	///
-	/// # A splice has two halves and they are not alike
-	///
-	/// The half that inserted is undone exactly: the bytes are named by the
-	/// operation that made them, so the inverse removes them under their own
-	/// identity and every note, every anchor and every later edit inside them
-	/// keeps meaning what it meant.
-	///
-	/// The half that removed is not. Nothing here un-buries, so what comes back is
-	/// a copy under a new identity, and [`Undoing::copies`] says which runs. That
-	/// is the whole of the difference between this and a system that relabels a
-	/// dead edge live, and a caller must say so rather than report a clean
-	/// restoration.
+	/// A splice's two halves are not alike. The half that inserted is undone
+	/// exactly. The half that removed is not: nothing here un-buries, so what
+	/// comes back is a copy under a new identity, [`Undoing::copies`] says which
+	/// runs, and a caller must say so rather than report a clean restoration.
 	pub fn undoing(&self, id: OpId)
 		-> Outcome<Undoing>
 	{
@@ -1017,21 +742,17 @@ impl Op {
 
 	/// Builds the splice that puts a copy of dead content back where it was.
 	///
-	/// The anchor is the whole of the design and it is fixed here so that two
-	/// authors of a revert produce the same shape: the copy binds **after the last
-	/// byte of the run it restores**. An anchor names content and content is named
-	/// whether it is alive or dead, so this lands the copy exactly where the
-	/// original is buried, however much of what surrounded it has gone since --
-	/// which no other anchor can promise, the neighbours being the very thing a
-	/// deletion took away.
+	/// The anchor is fixed here so that two authors of a revert produce the same
+	/// shape: the copy binds **after the last byte of the run it restores**. An
+	/// anchor names content whether it is alive or dead, so this lands the copy
+	/// exactly where the original is buried, however much of what surrounded it
+	/// has gone since -- which no other anchor can promise, the neighbours being
+	/// the very thing a deletion took away.
 	///
-	/// It is also what makes the copy readable afterwards. [`Op::restored`] takes
-	/// that anchor and the length back apart, so a reader accounting for a file can
-	/// say whose writing it is looking at rather than crediting the person who
-	/// reverted; nothing else in the record connects the two, the bytes having a
-	/// new identity from the moment they come back.
-	///
-	/// Fails on an empty run, there being no such thing as a copy of nothing.
+	/// It is also what makes the copy readable afterwards, [`Op::restored`]
+	/// taking the anchor and the length back apart. Nothing else in the record
+	/// connects the two, the bytes having a new identity from the moment they
+	/// come back.
 	pub fn restoring(was: &ContentRange, bytes: Vec<u8>)
 		-> Outcome<Self>
 	{
@@ -1054,18 +775,14 @@ impl Op {
 		})
 	}
 
-	/// Returns the content this operation is a copy of, where it has the shape
-	/// [`Op::restoring`] gives one.
-	///
-	/// The shape is a splice that removes nothing, ends nothing, and binds after a
-	/// byte: the anchored byte is the last of the run restored, and the insertion's
-	/// length says where that run began. `None` for anything else.
+	/// The content this operation is a copy of, where it has the shape
+	/// [`Op::restoring`] gives one: a splice that removes nothing, ends nothing,
+	/// and binds after the last byte of the run restored.
 	///
 	/// **This shape is not unique and is not evidence on its own.** An ordinary
-	/// insertion at the end of a file has it too. What makes a copy a copy is that
-	/// an [`Op::Reverts`] vouches for it -- the record naming what was undone, with
-	/// the copies authored against it -- and a reader that skips that check will
-	/// credit an author for text somebody merely appended.
+	/// insertion at the end of a file has it too. What makes a copy a copy is
+	/// that an [`Op::Reverts`] vouches for it, and a reader that skips that
+	/// check will credit an author for text somebody merely appended.
 	pub fn restored(&self) -> Option<ContentRange> {
 		let (left, right, remove, insert) = match self {
 			Self::Splice { left, right, remove, insert }	=> (left, right, remove, insert),
@@ -1086,11 +803,10 @@ impl Op {
 		ContentRange::new(anchor.content.op, from, to).ok()
 	}
 
-	/// Checks the operation is one the sequence structure can resolve.
-	///
-	/// A left origin binds after a byte and a right origin before one; a move may
-	/// not name the same byte twice, since a byte has exactly one owning slot and
-	/// could not otherwise be shown once; and [`Op::check_placement`] must hold.
+	/// Checks the operation is one the sequence structure can resolve: a left
+	/// origin binds after a byte and a right origin before one, a move may not
+	/// name the same byte twice since a byte has one owning slot, and
+	/// [`Op::check_placement`] must hold.
 	pub fn validate(&self)
 		-> Outcome<()>
 	{
@@ -1133,8 +849,7 @@ impl Op {
 		Ok(())
 	}
 
-	/// Serialises the operation to a [`Dat`]. The shape is
-	/// `[code, field, ...]`, the fields in declaration order.
+	/// The shape is `[code, field, ...]`, the fields in declaration order.
 	///
 	/// Byte payloads use [`Dat::BU64`] rather than [`Dat::BU8`], whose length
 	/// field is a single byte and so keeps only the low eight bits of the
@@ -1221,8 +936,6 @@ impl Op {
 		}
 	}
 
-	/// Reconstructs an operation from a [`Dat`] produced by [`Op::to_dat`].
-	///
 	/// The placement rule is checked here rather than left to the sequence,
 	/// because an operation that places bytes and names no origin belongs to no
 	/// file and no later stage could decide one for it. [`Op::check_note`] is
@@ -1371,11 +1084,9 @@ impl Op {
 		Ok(op)
 	}
 
-	/// Appends the byte encoding of the operation to `buf`, as a varint length
-	/// followed by the binary daticle form.
-	///
-	/// The length prefix lets a consumer skip an operation it does not need to
-	/// read, and lets several be laid end to end in one buffer.
+	/// A varint length followed by the binary daticle form. The prefix lets a
+	/// consumer skip an operation it does not need to read, and lets several be
+	/// laid end to end in one buffer.
 	pub fn encode_into(&self, buf: &mut Vec<u8>)
 		-> Outcome<()>
 	{
@@ -1385,7 +1096,6 @@ impl Op {
 		Ok(())
 	}
 
-	/// Returns the byte encoding of the operation.
 	pub fn encode(&self)
 		-> Outcome<Vec<u8>>
 	{
@@ -1394,8 +1104,6 @@ impl Op {
 		Ok(buf)
 	}
 
-	/// Decodes an operation from the front of `buf`, returning it and the
-	/// number of bytes consumed.
 	pub fn decode(buf: &[u8])
 		-> Outcome<(Self, usize)>
 	{
@@ -1403,13 +1111,10 @@ impl Op {
 		Ok((res!(Self::from_dat(&dat)), end))
 	}
 
-	/// Hashes the operation's canonical encoding under a hasher the caller
-	/// supplies.
-	///
-	/// The choice of hash function is deliberately not made here. Which
-	/// function is right depends on what else has to compute the same value --
-	/// a browser limited to what its platform offers, a peer group that has
-	/// already agreed on one -- so the caller brings it.
+	/// Hashes the canonical encoding. The choice of hash function is deliberately
+	/// not made here: which one is right depends on what else has to compute the
+	/// same value -- a browser limited to what its platform offers, a peer group
+	/// that has already agreed on one -- so the caller brings it.
 	pub fn hash<H: Hasher, const S: usize>(&self, hasher: H, salt: [u8; S])
 		-> Outcome<Hash<S>>
 	{
@@ -1417,7 +1122,6 @@ impl Op {
 		Ok(hasher.hash(&[&bytes], salt))
 	}
 
-	/// Decodes an operation that must occupy the whole of `buf`.
 	pub fn decode_all(buf: &[u8])
 		-> Outcome<Self>
 	{
@@ -1445,24 +1149,17 @@ impl Op {
 ///
 /// Both fields are private, because the canonical form is an invariant and not a
 /// convention: parents are held sorted and without repetition, and an operation
-/// is never its own parent. A public field would let a struct literal build a
-/// header that breaks all three, and two byte spellings of one frontier would
-/// both verify against a signature, which is not a property a provenance chain
-/// can afford. [`Header::new`] establishes the invariant and
-/// [`Header::from_dat`] refuses anything that arrives without it.
+/// is never its own parent. Two byte spellings of one frontier would both verify
+/// against a signature, which is not a property a provenance chain can afford.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Header {
-	/// The operation's own name.
 	id:			OpId,
-	/// The author's frontier when the operation was written, ascending.
-	parents:	Vec<OpId>,
+	parents:	Vec<OpId>,	// ascending, without repetition
 }
 
 impl Header {
-	/// Constructs a header, sorting the parents and dropping repetitions.
-	///
-	/// Fails if the operation names itself as its own parent, which no frontier
-	/// can contain.
+	/// Sorts the parents and drops repetitions, which is where the canonical
+	/// form is established.
 	pub fn new(id: OpId, parents: Vec<OpId>)
 		-> Outcome<Self>
 	{
@@ -1477,29 +1174,26 @@ impl Header {
 		Ok(Self { id, parents })
 	}
 
-	/// Constructs the header of a root operation, one written against nothing.
+	/// A root operation is one written against nothing.
 	pub fn root(id: OpId) -> Self {
 		Self { id, parents: Vec::new() }
 	}
 
-	/// Returns the operation's own name.
 	pub const fn id(&self) -> OpId {
 		self.id
 	}
 
-	/// Returns the author's frontier when the operation was written, ascending
-	/// and without repetition.
+	/// The author's frontier when the operation was written, ascending and
+	/// without repetition.
 	pub fn parents(&self) -> &[OpId] {
 		&self.parents
 	}
 
-	/// Reports whether the operation was written against nothing, which is what
-	/// the first operation of a history looks like.
 	pub fn is_root(&self) -> bool {
 		self.parents.is_empty()
 	}
 
-	/// Serialises the header to a [`Dat`]. The shape is `[id, [parent, ...]]`.
+	/// The shape is `[id, [parent, ...]]`.
 	pub fn to_dat(&self) -> Dat {
 		Dat::List(vec![
 			self.id.to_dat(),
@@ -1507,8 +1201,6 @@ impl Header {
 		])
 	}
 
-	/// Reconstructs a header from a [`Dat`] produced by [`Header::to_dat`].
-	///
 	/// Parents out of order, repeated, or naming the operation itself are
 	/// refused rather than normalised, so that the encoding stays canonical.
 	pub fn from_dat(dat: &Dat)
@@ -1559,34 +1251,28 @@ impl Header {
 /// should not have to say so six times over.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Record {
-	/// Who this operation is and what it was written against.
 	pub head:	Header,
-	/// What it says.
 	pub op:		Op,
 }
 
 impl Record {
-	/// Constructs a record from a header and an operation.
 	pub fn new(head: Header, op: Op) -> Self {
 		Self { head, op }
 	}
 
-	/// Constructs a record of an operation written against nothing.
 	pub fn root(id: OpId, op: Op) -> Self {
 		Self { head: Header::root(id), op }
 	}
 
-	/// Returns the operation's name.
 	pub fn id(&self) -> OpId {
 		self.head.id()
 	}
 
-	/// Returns the author's frontier when the operation was written.
 	pub fn parents(&self) -> &[OpId] {
 		self.head.parents()
 	}
 
-	/// Serialises the record to a [`Dat`]. The shape is `[head, op]`.
+	/// The shape is `[head, op]`.
 	pub fn to_dat(&self) -> Dat {
 		Dat::List(vec![
 			self.head.to_dat(),
@@ -1594,7 +1280,6 @@ impl Record {
 		])
 	}
 
-	/// Reconstructs a record from a [`Dat`] produced by [`Record::to_dat`].
 	pub fn from_dat(dat: &Dat)
 		-> Outcome<Self>
 	{
@@ -1610,8 +1295,6 @@ impl Record {
 		})
 	}
 
-	/// Appends the byte encoding of the record to `buf`, as a varint length
-	/// followed by the binary daticle form.
 	pub fn encode_into(&self, buf: &mut Vec<u8>)
 		-> Outcome<()>
 	{
@@ -1621,7 +1304,6 @@ impl Record {
 		Ok(())
 	}
 
-	/// Returns the byte encoding of the record.
 	pub fn encode(&self)
 		-> Outcome<Vec<u8>>
 	{
@@ -1630,8 +1312,6 @@ impl Record {
 		Ok(buf)
 	}
 
-	/// Decodes a record from the front of `buf`, returning it and the number of
-	/// bytes consumed.
 	pub fn decode(buf: &[u8])
 		-> Outcome<(Self, usize)>
 	{
@@ -1639,7 +1319,6 @@ impl Record {
 		Ok((res!(Self::from_dat(&dat)), end))
 	}
 
-	/// Decodes a record that must occupy the whole of `buf`.
 	pub fn decode_all(buf: &[u8])
 		-> Outcome<Self>
 	{
@@ -1653,8 +1332,7 @@ impl Record {
 		Ok(rec)
 	}
 
-	/// Hashes the record's canonical encoding under a hasher the caller
-	/// supplies, so that the parents are covered along with the operation.
+	/// Covers the parents along with the operation.
 	///
 	/// This value is not the digest a segment stores for the record: a segment
 	/// digests the record's kind byte and unframed body, while this hashes the
@@ -1669,8 +1347,6 @@ impl Record {
 }
 
 
-/// Reads a varint length prefix and the daticle it frames, returning the
-/// daticle and the offset just past it.
 fn decode_framed(buf: &[u8], what: &str)
 	-> Outcome<(Dat, usize)>
 {
@@ -1698,7 +1374,6 @@ fn decode_framed(buf: &[u8], what: &str)
 	Ok((dat, end))
 }
 
-/// Checks that a decoded operation list has exactly the expected length.
 fn expect_len(v: &[Dat], want: usize, what: &str)
 	-> Outcome<()>
 {
@@ -1710,7 +1385,6 @@ fn expect_len(v: &[Dat], want: usize, what: &str)
 	Ok(())
 }
 
-/// Extracts a string field, naming it if the kind is wrong.
 fn as_str(dat: &Dat, what: &str)
 	-> Outcome<String>
 {
@@ -1722,7 +1396,6 @@ fn as_str(dat: &Dat, what: &str)
 	}
 }
 
-/// Extracts a list of content ranges, naming it if the kind is wrong.
 fn as_ranges(dat: &Dat, what: &str)
 	-> Outcome<Vec<ContentRange>>
 {
@@ -1740,7 +1413,6 @@ fn as_ranges(dat: &Dat, what: &str)
 	}
 }
 
-/// Extracts a byte vector field, naming it if the kind is wrong.
 fn as_bytes(dat: &Dat, what: &str)
 	-> Outcome<Vec<u8>>
 {
@@ -1752,7 +1424,6 @@ fn as_bytes(dat: &Dat, what: &str)
 	}
 }
 
-/// Extracts a list of operation identifiers, naming it if the kind is wrong.
 fn as_ids(dat: &Dat, what: &str)
 	-> Outcome<Vec<OpId>>
 {
@@ -1770,9 +1441,7 @@ fn as_ids(dat: &Dat, what: &str)
 	}
 }
 
-/// Extracts a 64-bit unsigned field, naming it if the kind is wrong.
-///
-/// A time is exactly this and nothing wider: seconds since the Unix epoch, in
+/// A time is exactly this and nothing narrower: seconds since the Unix epoch, in
 /// UTC, read by whoever wrote the operation and never recomputed afterwards,
 /// since a second reading would be a different operation under the same
 /// signature.
@@ -1787,13 +1456,10 @@ fn as_u64(dat: &Dat, what: &str)
 	}
 }
 
-/// Serialises an optional byte payload, absence being that nothing was said.
 fn opt_bytes_to_dat(body: &Option<Vec<u8>>) -> Dat {
 	Dat::Opt(Box::new(body.as_ref().map(|b| Dat::BU64(b.clone()))))
 }
 
-/// Reconstructs an optional byte payload from a [`Dat`] produced by
-/// [`opt_bytes_to_dat`].
 fn as_opt_bytes(dat: &Dat, what: &str)
 	-> Outcome<Option<Vec<u8>>>
 {
@@ -1808,12 +1474,10 @@ fn as_opt_bytes(dat: &Dat, what: &str)
 	}
 }
 
-/// Serialises an optional time, absence being that none was recorded.
 fn opt_u64_to_dat(time: &Option<u64>) -> Dat {
 	Dat::Opt(Box::new(time.map(Dat::U64)))
 }
 
-/// Reconstructs an optional time from a [`Dat`] produced by [`opt_u64_to_dat`].
 fn as_opt_u64(dat: &Dat, what: &str)
 	-> Outcome<Option<u64>>
 {
@@ -1828,14 +1492,10 @@ fn as_opt_u64(dat: &Dat, what: &str)
 	}
 }
 
-/// Serialises an optional operation identifier, absence being that none was
-/// named.
 fn opt_id_to_dat(id: &Option<OpId>) -> Dat {
 	Dat::Opt(Box::new(id.as_ref().map(|i| i.to_dat())))
 }
 
-/// Reconstructs an optional operation identifier from a [`Dat`] produced by
-/// [`opt_id_to_dat`].
 fn as_opt_id(dat: &Dat, what: &str)
 	-> Outcome<Option<OpId>>
 {
@@ -1860,22 +1520,19 @@ mod tests {
 		ReplicaId,
 	};
 
-	/// A content range of the given replica's first operation.
-	///
-	/// The bounds are put in order before the constructor sees them, so the
-	/// helper is total and can be called from the fixtures that return an
-	/// operation rather than an [`Outcome`].
+	/// A content range of the given replica's first operation. The bounds are put
+	/// in order before the constructor sees them, so the helper is total and can
+	/// be called from fixtures that return an operation rather than an
+	/// [`Outcome`].
 	fn range(replica: u64, from: u64, to: u64) -> ContentRange {
 		let op = OpId::new(ReplicaId::new(replica), 1);
 		ContentRange::new(op, from.min(to), from.max(to)).unwrap_or_default()
 	}
 
-	/// A content identifier of the given replica's first operation.
 	fn content(replica: u64, off: u64) -> ContentId {
 		ContentId::new(OpId::new(ReplicaId::new(replica), 1), off)
 	}
 
-	/// An operation identifier.
 	fn oid(replica: u64, counter: u64) -> OpId {
 		OpId::new(ReplicaId::new(replica), counter)
 	}
@@ -2080,7 +1737,6 @@ mod tests {
 		])
 	}
 
-	/// Every variant survives a [`Dat`] round trip.
 	#[test]
 	fn op_dat_round_trip() -> Outcome<()> {
 		for op in samples() {
@@ -2090,7 +1746,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// Every variant survives a byte round trip.
 	#[test]
 	fn op_byte_round_trip() -> Outcome<()> {
 		for op in samples() {
@@ -2101,8 +1756,8 @@ mod tests {
 		Ok(())
 	}
 
-	/// A payload longer than 255 bytes keeps its full length, which a
-	/// `Dat::BU8` length field could not express. The same goes for a path.
+	/// A payload longer than 255 bytes keeps its full length, which a `Dat::BU8`
+	/// length field could not express.
 	#[test]
 	fn payloads_survive_beyond_a_byte_length() -> Outcome<()> {
 		for len in [255usize, 256, 257, 4096, 70_000] {
@@ -2137,8 +1792,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// Operations laid end to end each decode in turn, consuming only their
-	/// own bytes.
 	#[test]
 	fn ops_decode_back_to_back() -> Outcome<()> {
 		let ops = samples();
@@ -2156,7 +1809,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// Wire codes are distinct and match the variants they name.
 	#[test]
 	fn codes_are_distinct() -> Outcome<()> {
 		let mut seen = Vec::new();
@@ -2178,9 +1830,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// Only a rename and a delete name a file, and they name it by identity. A
-	/// content operation names content and nothing else, which is the whole of
-	/// what file identity changed here.
 	#[test]
 	fn only_a_lifecycle_change_names_a_file() -> Outcome<()> {
 		assert_eq!(Op::FileDelete { file: oid(3, 1) }.names_file(), Some(oid(3, 1)));
@@ -2209,8 +1858,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// An operation that places bytes names at least one origin, and one that
-	/// places nothing need not.
 	#[test]
 	fn a_placement_names_where_it_lands() -> Outcome<()> {
 		// A splice inserting bytes with neither origin belongs to no file.
@@ -2254,8 +1901,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A note is about something: a note naming no byte is refused, on the way
-	/// into the structure and on the way off the wire alike.
 	#[test]
 	fn a_note_is_about_something() -> Outcome<()> {
 		// An empty list names nothing.
@@ -2288,8 +1933,7 @@ mod tests {
 		Ok(())
 	}
 
-	/// A note names content and claims none: it is not among the regions two
-	/// operations could be in conflict over, and it places nothing.
+	/// A note is not among the regions two operations could be in conflict over.
 	#[test]
 	fn a_note_refers_without_claiming() -> Outcome<()> {
 		let note = Op::Note {
@@ -2312,8 +1956,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// The origins an operation carries and the content it names read back
-	/// whatever the variant, and a lifecycle change names neither.
 	#[test]
 	fn an_operation_reports_its_origins_and_its_content() -> Outcome<()> {
 		let mv = Op::Move {
@@ -2333,8 +1975,7 @@ mod tests {
 		Ok(())
 	}
 
-	/// An operation the structure cannot resolve is refused: an origin on the
-	/// wrong side, or a move naming one byte twice.
+	/// An origin on the wrong side, or a move naming one byte twice.
 	#[test]
 	fn validate_refuses_what_cannot_be_resolved() -> Outcome<()> {
 		let cid = content(1, 0);
@@ -2358,8 +1999,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A mode is one of three things and says which, on the wire and in a
-	/// message, and a file that has said nothing about its mode is normal.
 	#[test]
 	fn a_mode_is_one_of_three_things() -> Outcome<()> {
 		assert_eq!(Mode::default(), Mode::Normal, "silence means an ordinary file");
@@ -2384,8 +2023,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// The mode operation names a file by identity, carries the code the
-	/// vocabulary event gave it, and survives both round trips at every mode.
 	#[test]
 	fn a_mode_operation_names_a_file() -> Outcome<()> {
 		for mode in [Mode::Normal, Mode::Executable, Mode::Symlink] {
@@ -2433,15 +2070,10 @@ mod tests {
 		Ok(())
 	}
 
-	/// A mark is one variant with two spellings, and which one it is written in
-	/// is decided by what it carries rather than by the author.
-	///
 	/// The short spelling is the whole of the compatibility claim: a mark saying
 	/// nothing beyond its name is [`CODE_MARK`] with two elements, byte for byte
 	/// what was written before the fields existed, so every mark already signed
-	/// still verifies. The long one is [`CODE_MARK_TIMED`] with four. Both arrive
-	/// as [`Op::Mark`], and nothing downstream can tell which it was read from
-	/// except by asking what the mark carries.
+	/// still verifies.
 	#[test]
 	fn a_mark_has_two_spellings_and_one_variant() -> Outcome<()> {
 		// The short spelling, pinned as a daticle and as bytes.
@@ -2557,8 +2189,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A proposal, a remark upon it and its outcome each carry their fields
-	/// through both round trips, at the codes the format change fixed.
 	#[test]
 	fn the_proposal_operations_round_trip() -> Outcome<()> {
 		let prop = Op::Proposal {
@@ -2659,8 +2289,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A proposal's outcome is one of four states and says which, on the wire and
-	/// in a message, and a proposal nothing has settled is open.
 	#[test]
 	fn a_settled_state_is_one_of_four_things() -> Outcome<()> {
 		assert_eq!(Settled::default(), Settled::Open, "silence means still asking");
@@ -2692,9 +2320,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A revert names something, ascending and without repetition, and is refused
-	/// rather than sorted or excused where it does not.
-	///
 	/// The ordering rule is [`Header`]'s parents, for the same reason: two byte
 	/// spellings of one set would both verify against a signature. The rule that
 	/// it names anything at all is [`Op::check_note`]'s, for the same reason: a
@@ -2757,13 +2382,9 @@ mod tests {
 		Ok(())
 	}
 
-	/// The operations that speak about history rather than about bytes claim
-	/// nothing, refer to nothing, place nothing and name no file.
-	///
-	/// This is what puts them in the same species as [`Op::Mark`] and
-	/// [`Op::Note`], and it is what every catch-all arm in [`crate::seq`] is
-	/// relying on: an operation that mints no atom and claims no byte is carried
-	/// for the sake of the causal graph and does nothing to the render.
+	/// This is what every catch-all arm in [`crate::seq`] is relying on: an
+	/// operation that mints no atom and claims no byte is carried for the sake
+	/// of the causal graph and does nothing to the render.
 	#[test]
 	fn the_history_operations_touch_no_bytes() -> Outcome<()> {
 		for op in samples() {
@@ -2792,7 +2413,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// An unrecognised code, a wrong shape or a wrong field kind is refused.
 	#[test]
 	fn op_from_dat_rejects_rubbish() -> Outcome<()> {
 		assert!(Op::from_dat(&Dat::U8(CODE_MARK)).is_err());
@@ -2862,8 +2482,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A move carrying many source runs keeps every one of them, in order,
-	/// through both round trips.
 	#[test]
 	fn move_keeps_its_source_runs_in_order() -> Outcome<()> {
 		let src: Vec<ContentRange> = (0..300u64)
@@ -2887,8 +2505,8 @@ mod tests {
 		Ok(())
 	}
 
-	/// Both destination anchors keep their side, which decides whether an
-	/// insertion abutting the moved run travels with it.
+	/// The side decides whether an insertion abutting the moved run travels with
+	/// it.
 	#[test]
 	fn move_anchors_keep_their_side() -> Outcome<()> {
 		let cid = content(2, 11);
@@ -2922,9 +2540,7 @@ mod tests {
 		Ok(())
 	}
 
-	/// Hashing goes through the canonical encoding: under the identity hasher
-	/// the result is exactly those bytes, and equal operations hash equal while
-	/// differing ones do not.
+	/// Under the identity hasher the result is exactly the canonical encoding.
 	#[test]
 	fn op_hashes_its_canonical_encoding() -> Outcome<()> {
 		let op = sample_op_for_hashing();
@@ -2942,7 +2558,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// The operation used by the hashing test.
 	fn sample_op_for_hashing() -> Op {
 		Op::Splice {
 			left:	None,
@@ -2952,7 +2567,6 @@ mod tests {
 		}
 	}
 
-	/// A truncated byte encoding is refused rather than half read.
 	#[test]
 	fn op_decode_rejects_truncation() -> Outcome<()> {
 		let op = Op::Splice {
@@ -2976,8 +2590,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A header survives both round trips with no parents, with one, and with
-	/// many.
 	#[test]
 	fn header_round_trips_at_every_arity() -> Outcome<()> {
 		for head in res!(sample_heads()) {
@@ -2988,9 +2600,7 @@ mod tests {
 		Ok(())
 	}
 
-	/// Parents are sorted and deduplicated on construction, so the same frontier
-	/// given in any order has one encoding, and nothing outside the module can
-	/// build a header that says otherwise.
+	/// The same frontier given in any order has one encoding.
 	#[test]
 	fn parents_are_canonical() -> Outcome<()> {
 		let a = res!(Header::new(oid(9, 1), vec![oid(1, 2), oid(3, 1), oid(1, 2)]));
@@ -3013,7 +2623,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// An operation may not be its own parent, on the way in or on the way out.
 	#[test]
 	fn an_operation_is_not_its_own_parent() -> Outcome<()> {
 		assert!(Header::new(oid(1, 4), vec![oid(2, 1), oid(1, 4)]).is_err());
@@ -3025,7 +2634,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A root header carries no parents and says so.
 	#[test]
 	fn a_root_header_has_no_parents() -> Outcome<()> {
 		let head = Header::root(oid(1, 1));
@@ -3035,8 +2643,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A record round trips whatever operation it carries, and a malformed one
-	/// is refused.
 	#[test]
 	fn record_round_trips_every_variant() -> Outcome<()> {
 		let head = res!(Header::new(oid(5, 7), vec![oid(1, 1), oid(2, 2)]));
@@ -3050,8 +2656,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// The parents are inside what a record hashes, so an operation re-parented
-	/// hashes differently.
 	#[test]
 	fn the_parents_are_covered_by_the_hash() -> Outcome<()> {
 		let op = Op::Mark { name: fmt!("v1"), body: None, time: None };
@@ -3064,7 +2668,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A truncated record is refused at every cut.
 	#[test]
 	fn record_decode_rejects_truncation() -> Outcome<()> {
 		let rec = Record::new(
@@ -3083,7 +2686,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// Records laid end to end each decode in turn.
 	#[test]
 	fn records_decode_back_to_back() -> Outcome<()> {
 		let heads = res!(sample_heads());
@@ -3106,13 +2708,8 @@ mod tests {
 		Ok(())
 	}
 
-	/// A mark a tool wrote is told from a mark a person chose by one character,
-	/// and by nothing else.
-	///
-	/// The rest of the name is deliberately not a subject here. What a tool
-	/// spells after the prefix is that tool's business and two of them may spell
-	/// it differently; what every reader has to agree on is which marks are
-	/// somebody's own.
+	/// By one character and by nothing else: what a tool spells after the prefix
+	/// is that tool's business, and two of them may spell it differently.
 	#[test]
 	fn a_mark_a_tool_wrote_is_known_by_its_first_character() -> Outcome<()> {
 		assert!(is_auto_mark("@2026-08-17T04:12:09.482913Z"));
@@ -3143,9 +2740,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// Every variant either has an inverse or says why it has none, and no
-	/// variant does both or neither.
-	///
 	/// This is what stops a new operation joining the vocabulary and being
 	/// silently undoable by nothing: [`Op::undoing`] ends on an arm that fails,
 	/// so the pair of answers has to stay exhaustive.
@@ -3191,11 +2785,9 @@ mod tests {
 		Ok(())
 	}
 
-	/// A splice is undone in two halves, and only one of them is exact.
-	///
-	/// The insertion is named by the operation that made it, so its inverse names
-	/// that identity and no render is needed. What the splice removed can come
-	/// back only as a copy, and [`Undoing::copies`] is where a caller is told so.
+	/// Only one half is exact. The insertion is named by the operation that made
+	/// it, so its inverse names that identity and no render is needed; what the
+	/// splice removed can come back only as a copy.
 	#[test]
 	fn a_splice_is_undone_in_two_halves() -> Outcome<()> {
 		let id = oid(5, 12);
@@ -3253,8 +2845,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// The three that assert a value say where to go and ask for it, rather than
-	/// pretending to know it.
 	#[test]
 	fn undoing_an_assertion_asks_the_state_it_replaced() -> Outcome<()> {
 		let file = oid(2, 5);
@@ -3289,11 +2879,8 @@ mod tests {
 		Ok(())
 	}
 
-	/// A restored copy binds after the last byte of what it restores, and says
-	/// so afterwards.
-	///
-	/// The anchor is the only record connecting a copy to the writing it is a copy
-	/// of: the bytes take a new identity the moment they come back, so an
+	/// The anchor is the only record connecting a copy to the writing it is a
+	/// copy of: the bytes take a new identity the moment they come back, so an
 	/// accounting that read only the identity would credit whoever reverted.
 	#[test]
 	fn a_copy_says_what_it_is_a_copy_of() -> Outcome<()> {

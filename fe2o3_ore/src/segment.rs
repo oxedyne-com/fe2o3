@@ -44,6 +44,9 @@
 //! by writing at the end. Resuming reads the existing bytes first, under the
 //! hasher and salt it is given, so a segment that a later reader could not get
 //! to the end of is refused before anything is added to it.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::envelope::Envelope;
 use crate::id::{
@@ -60,8 +63,7 @@ use oxedyne_fe2o3_iop_hash::api::Hasher;
 use oxedyne_fe2o3_jdat::prelude::*;
 
 
-/// The bytes every segment begins with.
-pub const MAGIC: [u8; 6] = *b"ORESEG";
+pub const MAGIC: [u8; 6] = *b"ORESEG"; // the bytes every segment begins with
 
 /// The format version this module writes.
 ///
@@ -104,8 +106,7 @@ pub const VERSION: u8 = 4;
 /// a string, so its records are not the same records under another number.
 pub const VERSION_MIN: u8 = 2;
 
-/// Returns the highest operation code a segment of the given format version is
-/// allowed to carry.
+/// The highest operation code a segment of the given format version may carry.
 ///
 /// Version 2 was frozen with [`crate::op::CODE_NOTE`] at the top of the
 /// vocabulary; version 3 added [`crate::op::Op::FileMode`] above it and nothing
@@ -133,8 +134,8 @@ pub const KIND_BARE:	u8 = 1;
 /// Kind byte of a record carrying a signed [`Envelope`].
 pub const KIND_SEALED:	u8 = 2;
 
-/// How much consumed prefix a reader tolerates before it moves the remainder to
-/// the front of its buffer.
+// How much consumed prefix a reader tolerates before it moves the remainder to
+// the front of its buffer.
 const COMPACT_THRESHOLD: usize = 1 << 16;
 
 
@@ -146,10 +147,8 @@ const COMPACT_THRESHOLD: usize = 1 << 16;
 /// out rather than lying.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Head {
-	/// The format version the segment was written in.
-	pub version:	u8,
-	/// Who was writing, where one replica wrote all of it.
-	pub replica:	Option<ReplicaId>,
+	pub version:	u8,					// format version the segment was written in
+	pub replica:	Option<ReplicaId>,	// who was writing, where one replica wrote all of it
 }
 
 impl Head {
@@ -158,8 +157,6 @@ impl Head {
 		Self { version: VERSION, replica }
 	}
 
-	/// Appends the encoding of the header to `buf`.
-	///
 	/// The shape is the magic, the version, a byte saying whether a replica hint
 	/// follows, and the hint if it does.
 	pub fn encode_into(&self, buf: &mut Vec<u8>) {
@@ -174,18 +171,15 @@ impl Head {
 		}
 	}
 
-	/// Returns the encoding of the header.
 	pub fn encode(&self) -> Vec<u8> {
 		let mut buf = Vec::with_capacity(MAGIC.len() + 2 + VARINT_MAX_LEN);
 		self.encode_into(&mut buf);
 		buf
 	}
 
-	/// Decodes a header from the front of `buf`, returning it and the number of
-	/// bytes consumed.
-	///
-	/// `None` means the bytes so far are a prefix of a header and more are
-	/// needed; an error means they are not a header at all.
+	/// Yields the header and how many bytes it took. `None` means the bytes so
+	/// far are a prefix of a header and more are needed; an error means they are
+	/// not a header at all.
 	pub fn decode(buf: &[u8])
 		-> Outcome<Option<(Self, usize)>>
 	{
@@ -258,7 +252,7 @@ impl Entry {
 		}
 	}
 
-	/// Returns the form's name, for messages.
+	/// The form's name, for messages.
 	pub fn name(&self) -> &'static str {
 		match self {
 			Self::Bare(_)	=> "bare record",
@@ -266,7 +260,7 @@ impl Entry {
 		}
 	}
 
-	/// Returns the record, opening a sealed one without checking its signature.
+	/// Opens a sealed record without checking its signature.
 	///
 	/// Verification is the caller's to do, with the scheme the caller holds; a
 	/// segment reader has no key material and makes no claim about provenance.
@@ -279,15 +273,13 @@ impl Entry {
 		}
 	}
 
-	/// Returns the operation's identifier, where the record can be read.
 	pub fn id(&self)
 		-> Outcome<OpId>
 	{
 		Ok(res!(self.peek()).head.id())
 	}
 
-	/// Serialises the entry to a [`Dat`], tagged with its kind. The shape is
-	/// `[kind, body]`.
+	/// The shape is `[kind, body]`.
 	///
 	/// This is the form for a carrier that is itself a daticle, such as a sync
 	/// message. A segment does not use it: there the kind is a byte of the frame
@@ -303,7 +295,6 @@ impl Entry {
 		])
 	}
 
-	/// Reconstructs an entry from a [`Dat`] produced by [`Entry::to_dat`].
 	pub fn from_dat(dat: &Dat)
 		-> Outcome<Self>
 	{
@@ -329,8 +320,7 @@ impl Entry {
 		}
 	}
 
-	/// Returns the body bytes, which are the daticle form of whichever shape the
-	/// entry holds.
+	/// The daticle form of whichever shape the entry holds.
 	fn body(&self)
 		-> Outcome<Vec<u8>>
 	{
@@ -341,7 +331,6 @@ impl Entry {
 		Ok(res!(dat.to_bytes(Vec::new())))
 	}
 
-	/// Reconstructs an entry from a kind byte and a body.
 	fn from_body(kind: u8, body: &[u8])
 		-> Outcome<Self>
 	{
@@ -378,17 +367,11 @@ impl Entry {
 /// bytes they continue.
 #[derive(Clone, Debug)]
 pub struct Writer<H: Hasher, const S: usize> {
-	/// The hash function each record's digest is computed with.
-	hasher:		H,
-	/// The salt each digest is computed under.
-	salt:		[u8; S],
-	/// The format version the segment declares, which bounds the vocabulary its
-	/// records may be drawn from.
-	version:	u8,
-	/// The bytes written so far.
-	buf:		Vec<u8>,
-	/// How many records the segment holds, those resumed from included.
-	count:		usize,
+	hasher:		H,			// hash function each record's digest is computed with
+	salt:		[u8; S],	// salt each digest is computed under
+	version:	u8,			// declared format version, which bounds the vocabulary
+	buf:		Vec<u8>,	// bytes written so far
+	count:		usize,		// records held, those resumed from included
 }
 
 impl<H: Hasher, const S: usize> Writer<H, S> {
@@ -400,9 +383,6 @@ impl<H: Hasher, const S: usize> Writer<H, S> {
 		Self { hasher, salt, version: head.version, buf, count: 0 }
 	}
 
-	/// Continues a segment already written, so that records can be appended to
-	/// it without rewriting what is there.
-	///
 	/// The bytes handed back afterwards are the new records alone, which a caller
 	/// appends to the segment they were resumed from; the header is not emitted a
 	/// second time. [`Writer::count`] carries on from the records already there.
@@ -431,13 +411,10 @@ impl<H: Hasher, const S: usize> Writer<H, S> {
 		Ok(Self { hasher, salt, version, buf: Vec::new(), count: reader.count() })
 	}
 
-	/// Returns the format version the segment declares.
 	pub const fn version(&self) -> u8 {
 		self.version
 	}
 
-	/// Appends a record.
-	///
 	/// A record is refused where the segment's declared version has no code for
 	/// the operation it carries, which is what keeps an older version a genuine
 	/// subset of a newer one rather than a promise the bytes break. A caller with
@@ -470,7 +447,6 @@ impl<H: Hasher, const S: usize> Writer<H, S> {
 		Ok(())
 	}
 
-	/// Appends every record of an iterator.
 	pub fn extend<'a, I>(&mut self, entries: I)
 		-> Outcome<()>
 	where
@@ -482,20 +458,18 @@ impl<H: Hasher, const S: usize> Writer<H, S> {
 		Ok(())
 	}
 
-	/// Returns how many records the segment holds, counting those a resumed
-	/// writer was given as well as those it has written.
+	/// Counting the records a resumed writer was given as well as those it has
+	/// written.
 	pub fn count(&self) -> usize {
 		self.count
 	}
 
-	/// Returns the bytes written so far, which for a resumed writer are the new
-	/// records alone.
+	/// For a resumed writer, the new records alone.
 	pub fn bytes(&self) -> &[u8] {
 		&self.buf
 	}
 
-	/// Returns the finished segment, or, where the writer was resumed, the bytes
-	/// to append to the segment it continues.
+	/// For a resumed writer, the bytes to append to the segment it continues.
 	pub fn finish(self) -> Vec<u8> {
 		self.buf
 	}
@@ -511,25 +485,17 @@ impl<H: Hasher, const S: usize> Writer<H, S> {
 /// finished, and a record left half-written is an error.
 #[derive(Clone, Debug)]
 pub struct Reader<H: Hasher, const S: usize> {
-	/// The hash function each record's digest is checked with.
-	hasher:	H,
-	/// The salt each digest is checked under.
-	salt:	[u8; S],
-	/// Bytes fed but not yet turned into records, including a consumed prefix.
-	buf:	Vec<u8>,
-	/// How much of `buf` has been consumed.
-	pos:	usize,
-	/// Whether the caller has declared the segment complete.
-	eof:	bool,
-	/// The header, once it has been read.
-	head:	Option<Head>,
-	/// How many records have been handed over.
-	count:	usize,
+	hasher:	H,				// hash function each record's digest is checked with
+	salt:	[u8; S],		// salt each digest is checked under
+	buf:	Vec<u8>,		// bytes fed but not turned into records, consumed prefix included
+	pos:	usize,			// how much of `buf` has been consumed
+	eof:	bool,			// whether the caller has declared the segment complete
+	head:	Option<Head>,	// the header, once it has been read
+	count:	usize,			// records handed over
 }
 
 impl<H: Hasher, const S: usize> Reader<H, S> {
 
-	/// Constructs a reader holding no bytes.
 	pub fn new(hasher: H, salt: [u8; S]) -> Self {
 		Self {
 			hasher,
@@ -542,8 +508,6 @@ impl<H: Hasher, const S: usize> Reader<H, S> {
 		}
 	}
 
-	/// Adds bytes to the reader's buffer.
-	///
 	/// Chunk boundaries carry no meaning: a record may be split anywhere, and
 	/// the same segment delivered in different chunkings yields the same
 	/// records.
@@ -556,32 +520,26 @@ impl<H: Hasher, const S: usize> Reader<H, S> {
 		self.eof = true;
 	}
 
-	/// Returns the segment header, once enough bytes have arrived for it to be
-	/// read.
+	/// `None` until enough bytes have arrived for the header to be read.
 	pub fn head(&self)
 		-> Option<&Head>
 	{
 		self.head.as_ref()
 	}
 
-	/// Returns how many records have been handed over.
 	pub fn count(&self) -> usize {
 		self.count
 	}
 
-	/// Returns the bytes fed but not yet consumed.
 	pub fn remaining(&self) -> &[u8] {
 		&self.buf[self.pos..]
 	}
 
-	/// Returns true once the segment has ended and every byte of it has been
-	/// turned into a record.
+	/// Has the segment ended with every byte of it turned into a record?
 	pub fn is_exhausted(&self) -> bool {
 		self.eof && self.pos >= self.buf.len()
 	}
 
-	/// Returns the next complete record.
-	///
 	/// `None` means that the next record is not yet complete, or, once
 	/// [`Reader::end`] has been called, that the segment is finished. An error
 	/// names the record that could not be read.
@@ -631,7 +589,7 @@ impl<H: Hasher, const S: usize> Reader<H, S> {
 		}
 	}
 
-	/// Reads one record from the unconsumed bytes, if a whole one is there.
+	/// `None` unless a whole record is there.
 	fn read_entry(&self)
 		-> Outcome<Option<(Entry, usize)>>
 	{
@@ -706,8 +664,6 @@ impl<H: Hasher, const S: usize> Reader<H, S> {
 }
 
 
-/// Reads a varint that may not have arrived in full.
-///
 /// `None` means the bytes so far are a prefix of a varint and more are needed;
 /// an error means they are not a varint at all, whatever follows.
 fn try_varint(buf: &[u8])
@@ -778,7 +734,6 @@ mod tests {
 
 	use oxedyne_fe2o3_iop_crypto::keys::KeyManager;
 
-	/// An operation identifier.
 	fn oid(replica: u64, counter: u64) -> OpId {
 		OpId::new(ReplicaId::new(replica), counter)
 	}
@@ -811,7 +766,7 @@ mod tests {
 					left:	Some(Anchor::after(ContentId::new(oid(1, 2), 0))),
 					right:	Some(Anchor::before(ContentId::new(oid(1, 2), 1))),
 					remove:	vec![res!(ContentRange::new(oid(1, 2), 10, 15))],
-					insert:	vec![0x2a; 900],	// Beyond a single byte length.
+					insert:	vec![0x2a; 900],	// beyond a single byte length
 				},
 			),
 			Record::new(
@@ -840,7 +795,6 @@ mod tests {
 		])
 	}
 
-	/// Those records as bare entries.
 	fn bare() -> Outcome<Vec<Entry>> {
 		Ok(res!(records()).into_iter().map(Entry::Bare).collect())
 	}
@@ -857,7 +811,6 @@ mod tests {
 		Ok((out, s))
 	}
 
-	/// A segment of bare records survives the round trip, header and all.
 	#[test]
 	fn bare_records_round_trip() -> Outcome<()> {
 		let entries = res!(bare());
@@ -869,8 +822,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A segment of sealed envelopes survives the round trip, and every envelope
-	/// still verifies afterwards.
 	#[test]
 	fn sealed_records_round_trip_and_still_verify() -> Outcome<()> {
 		let (entries, signer) = res!(sealed());
@@ -892,7 +843,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// The two forms mix in one segment, each tagged, and come back in order.
 	#[test]
 	fn both_forms_mix_in_one_segment() -> Outcome<()> {
 		let (mut entries, _) = res!(sealed());
@@ -921,7 +871,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// An empty segment is a header and nothing else, and reads back as such.
 	#[test]
 	fn an_empty_segment_is_just_a_header() -> Outcome<()> {
 		let head = Head::new(Some(ReplicaId::new(0)));
@@ -933,8 +882,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// Feeding a segment one byte at a time yields exactly what feeding it whole
-	/// yields.
 	#[test]
 	fn a_byte_at_a_time_reads_the_same() -> Outcome<()> {
 		let entries = res!(bare());
@@ -957,8 +904,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A reader hands over the header as soon as it has arrived, before any
-	/// record has.
 	#[test]
 	fn the_header_arrives_before_the_records() -> Outcome<()> {
 		let head = Head::new(Some(ReplicaId::new(300)));
@@ -1009,8 +954,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A record whose body has been damaged fails its integrity check, and the
-	/// error names the record and the operation it carries.
 	#[test]
 	fn a_damaged_record_is_named() -> Outcome<()> {
 		let entries = res!(bare());
@@ -1037,7 +980,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A digest damaged rather than a body is caught just the same.
 	#[test]
 	fn a_damaged_digest_is_caught() -> Outcome<()> {
 		let entries = res!(bare());
@@ -1080,8 +1022,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// Rubbish where a segment should be is refused rather than parsed, however
-	/// little of it there is.
 	#[test]
 	fn a_segment_that_is_not_one_is_refused() -> Outcome<()> {
 		assert!(decode(b"not a segment at all", Fold, [0u8; 0]).is_err());
@@ -1345,8 +1285,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// Records encoded one at a time through a writer are the bytes the
-	/// convenience function produces.
 	#[test]
 	fn the_writer_and_the_convenience_agree() -> Outcome<()> {
 		let entries = res!(bare());
@@ -1360,8 +1298,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A segment written in two goes is the segment written in one, and every
-	/// record is there afterwards.
 	#[test]
 	fn a_segment_resumes_where_it_left_off() -> Outcome<()> {
 		let entries = res!(bare());
@@ -1385,8 +1321,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// An empty segment is a header and nothing else, and resuming one appends
-	/// its first record.
 	#[test]
 	fn an_empty_segment_resumes() -> Outcome<()> {
 		let head = Head::new(None);
@@ -1444,8 +1378,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A segment of randomised operation sets survives the round trip, whatever
-	/// the shapes and sizes in it.
 	#[test]
 	fn random_segments_round_trip() -> Outcome<()> {
 		// A small linear congruential generator, so a failure can be reproduced.

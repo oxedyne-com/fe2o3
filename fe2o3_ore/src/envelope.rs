@@ -10,6 +10,9 @@
 //! the algorithm is decided; this module only marshals bytes and asks that
 //! implementation to sign or verify. That keeps the crate free of key handling
 //! and free of any particular algorithm's baggage.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::op::Record;
 
@@ -29,27 +32,19 @@ use oxedyne_fe2o3_jdat::prelude::*;
 /// re-labelled or re-parented will not verify.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Envelope {
-	/// The signed bytes, exactly as they were presented to the signer.
-	payload:	Vec<u8>,
-	/// The author's public key, as the signature scheme encodes it.
-	signer:		Vec<u8>,
-	/// The detached signature over `payload`.
-	sig:		Vec<u8>,
+	payload:	Vec<u8>,	// signed bytes, exactly as presented to the signer
+	signer:		Vec<u8>,	// author's key, as the signature scheme encodes it
+	sig:		Vec<u8>,	// detached, over the payload
 }
 
 impl Envelope {
-	/// Constructs an envelope from parts already in hand, as when one arrives
-	/// over a wire.
-	///
 	/// Nothing is verified here; call [`Envelope::verify`] for that.
 	pub fn new(payload: Vec<u8>, signer: Vec<u8>, sig: Vec<u8>) -> Self {
 		Self { payload, signer, sig }
 	}
 
-	/// Seals arbitrary payload bytes, taking the public key from the scheme.
-	///
-	/// Fails if the scheme has no public key set, since an envelope whose
-	/// signature no one can attribute is of no use.
+	/// The public key comes from the scheme, which must have one: an envelope
+	/// nobody can attribute is of no use.
 	pub fn seal<S: Signer>(scheme: &S, payload: Vec<u8>)
 		-> Outcome<Self>
 	{
@@ -64,8 +59,6 @@ impl Envelope {
 		Ok(Self { payload, signer, sig })
 	}
 
-	/// Seals a record, header and operation together.
-	///
 	/// The record is encoded in binary daticle form, so the identifier and the
 	/// parents are covered by the signature along with the operation.
 	pub fn seal_record<S: Signer>(scheme: &S, rec: &Record)
@@ -74,14 +67,10 @@ impl Envelope {
 		Self::seal(scheme, res!(rec.to_dat().to_bytes(Vec::new())))
 	}
 
-	/// Verifies the signature against the payload, using the enclosed public
-	/// key.
-	///
 	/// `scheme` supplies the algorithm only; its own keys are set aside and the
 	/// envelope's public key is used, so a caller cannot accidentally check a
-	/// signature against the wrong key. Returns `false` for a signature that
-	/// does not check out, and an error only where verification could not be
-	/// attempted.
+	/// signature against the wrong key. `false` is a signature that does not
+	/// check out, and an error is a check that could not be made.
 	pub fn verify<S: Signer>(&self, scheme: &S)
 		-> Outcome<bool>
 	{
@@ -89,25 +78,18 @@ impl Envelope {
 		bound.verify(&self.payload, &self.sig)
 	}
 
-	/// Verifies many envelopes at once, reporting whether every one of them
-	/// holds.
-	///
 	/// Where the scheme has a batch verification equation this costs far less
 	/// than checking them one at a time, which is what makes it worth having:
 	/// replaying a history means verifying every operation in it, and that is
 	/// the largest single cost of reading a repository.
 	///
-	/// # A `false` does not name the culprit, and the caller must
-	///
-	/// A batch says the set does not hold. It cannot say which member of it
-	/// failed, because it never checked them separately. A caller refusing a
-	/// history owes the reader the name of the operation that failed, so it must
-	/// fall back to [`Envelope::verify`] over the same envelopes to find it. The
-	/// same applies to an error, which says the set could not be checked without
-	/// saying which envelope could not be.
-	///
-	/// The set accepted is the set [`Envelope::verify`] accepts, envelope for
-	/// envelope; a scheme that cannot promise that should not offer a batch.
+	/// A `false` says the set does not hold and cannot say which member failed,
+	/// because it never checked them separately, so a caller that owes its
+	/// reader the name of the operation falls back to [`Envelope::verify`] over
+	/// the same envelopes to find it; an error says as much about a set that
+	/// could not be checked. The set accepted is the set [`Envelope::verify`]
+	/// accepts, envelope for envelope; a scheme that cannot promise that should
+	/// not offer a batch.
 	pub fn verify_all<'a, S: Signer>(scheme: &S, envs: &[&'a Self])
 		-> Outcome<bool>
 	{
@@ -121,10 +103,7 @@ impl Envelope {
 		scheme.verify_batch(&items)
 	}
 
-	/// Verifies the envelope and, if it checks out, returns the record it
-	/// carries.
-	///
-	/// Fails rather than returning anything if the signature does not verify,
+	/// Fails rather than returning anything where the signature does not verify,
 	/// so a caller cannot use the contents by mistake.
 	pub fn open_record<S: Signer>(&self, scheme: &S)
 		-> Outcome<Record>
@@ -138,37 +117,30 @@ impl Envelope {
 		decode_record(&self.payload)
 	}
 
-	/// Returns the record without checking the signature.
-	///
-	/// For a caller that has already verified, or that is inspecting something
-	/// it does not intend to trust. Prefer [`Envelope::open_record`].
+	/// The signature is not checked, so this is for a caller that has already
+	/// verified or that is inspecting something it does not intend to trust.
+	/// Prefer [`Envelope::open_record`].
 	pub fn peek_record(&self)
 		-> Outcome<Record>
 	{
 		decode_record(&self.payload)
 	}
 
-	/// Returns the signed bytes.
 	pub fn payload(&self) -> &[u8] {
 		&self.payload
 	}
 
-	/// Returns the author's public key.
 	pub fn signer(&self) -> &[u8] {
 		&self.signer
 	}
 
-	/// Returns the detached signature.
 	pub fn signature(&self) -> &[u8] {
 		&self.sig
 	}
 
-	/// Serialises the envelope to a [`Dat`]. The shape is
-	/// `[payload, signer, signature]`.
-	///
-	/// All three are [`Dat::BU64`]: keys and signatures readily exceed the 255
-	/// bytes a [`Dat::BU8`] length field can express, and a truncated length
-	/// there would corrupt silently.
+	/// The shape is `[payload, signer, signature]`, all three [`Dat::BU64`]:
+	/// keys and signatures readily exceed the 255 bytes a [`Dat::BU8`] length
+	/// field can express, and a truncated length there would corrupt silently.
 	pub fn to_dat(&self) -> Dat {
 		Dat::List(vec![
 			Dat::BU64(self.payload.clone()),
@@ -177,8 +149,6 @@ impl Envelope {
 		])
 	}
 
-	/// Reconstructs an envelope from a [`Dat`] produced by
-	/// [`Envelope::to_dat`].
 	pub fn from_dat(dat: &Dat)
 		-> Outcome<Self>
 	{
@@ -195,7 +165,6 @@ impl Envelope {
 		})
 	}
 
-	/// Appends the byte encoding of the envelope to `buf`.
 	pub fn encode_into(&self, buf: &mut Vec<u8>)
 		-> Outcome<()>
 	{
@@ -204,7 +173,6 @@ impl Envelope {
 		Ok(())
 	}
 
-	/// Returns the byte encoding of the envelope.
 	pub fn encode(&self)
 		-> Outcome<Vec<u8>>
 	{
@@ -213,8 +181,8 @@ impl Envelope {
 		Ok(buf)
 	}
 
-	/// Decodes an envelope from the front of `buf`, returning it and the number
-	/// of bytes consumed.
+	/// Reads from the front of `buf`, so the count is the bytes consumed and the
+	/// rest is the caller's.
 	pub fn decode(buf: &[u8])
 		-> Outcome<(Self, usize)>
 	{
@@ -224,7 +192,6 @@ impl Envelope {
 }
 
 
-/// Extracts a byte field, naming it if the kind is wrong.
 fn field_bytes(dat: &Dat, what: &str)
 	-> Outcome<Vec<u8>>
 {
@@ -236,7 +203,7 @@ fn field_bytes(dat: &Dat, what: &str)
 	}
 }
 
-/// Decodes a record from a signable byte string.
+/// The whole payload must decode, so trailing bytes are a fault and not slack.
 fn decode_record(buf: &[u8])
 	-> Outcome<Record>
 {
@@ -268,22 +235,19 @@ mod tests {
 
 	use oxedyne_fe2o3_iop_crypto::keys::KeyManager;
 
-	/// An operation identifier.
 	fn oid(replica: u64, counter: u64) -> OpId {
 		OpId::new(ReplicaId::new(replica), counter)
 	}
 
-	/// A representative operation.
 	fn sample_op() -> Outcome<Op> {
 		Ok(Op::Splice {
 			left:	Some(Anchor::origin(oid(1, 1))),
 			right:	None,
 			remove:	vec![res!(ContentRange::new(oid(1, 1), 12, 15))],
-			insert:	vec![0x7e; 900],	// Beyond what a BU8 length could hold.
+			insert:	vec![0x7e; 900],	// beyond what a BU8 length could hold
 		})
 	}
 
-	/// A representative record, carrying two parents.
 	fn sample_record(id: OpId) -> Outcome<Record> {
 		Ok(Record::new(
 			res!(Header::new(id, vec![oid(1, 1), oid(2, 4)])),
@@ -300,7 +264,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A sealed envelope verifies, and carries the signer's public key.
 	#[test]
 	fn sealed_envelope_verifies() -> Outcome<()> {
 		let s = StubSigner::with_seed(3);
@@ -311,8 +274,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// Verification uses the envelope's key, not the scheme's, so a scheme
-	/// holding a different key still checks the envelope correctly.
 	#[test]
 	fn verification_uses_the_enclosed_key() -> Outcome<()> {
 		let author = StubSigner::with_seed(3);
@@ -323,7 +284,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// An envelope whose public key has been swapped for another's fails.
 	#[test]
 	fn a_substituted_key_fails() -> Outcome<()> {
 		let author = StubSigner::with_seed(3);
@@ -338,7 +298,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// Tampering with the payload invalidates the signature.
 	#[test]
 	fn a_tampered_payload_fails() -> Outcome<()> {
 		let s = StubSigner::with_seed(3);
@@ -352,7 +311,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// Tampering with the signature invalidates it.
 	#[test]
 	fn a_tampered_signature_fails() -> Outcome<()> {
 		let s = StubSigner::with_seed(3);
@@ -364,8 +322,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// Sealing without a public key is refused, since the result could not be
-	/// attributed.
 	#[test]
 	fn sealing_without_a_public_key_is_refused() -> Outcome<()> {
 		let s = StubSigner::with_seed(3);
@@ -374,7 +330,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A whole record survives sealing and opening.
 	#[test]
 	fn a_record_survives_seal_and_open() -> Outcome<()> {
 		let s = StubSigner::with_seed(11);
@@ -384,8 +339,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// The identifier is covered by the signature: relabelling an operation
-	/// breaks it.
 	#[test]
 	fn the_identifier_is_covered_by_the_signature() -> Outcome<()> {
 		let s = StubSigner::with_seed(11);
@@ -401,8 +354,7 @@ mod tests {
 		Ok(())
 	}
 
-	/// The parents are covered too: re-parenting an operation breaks the
-	/// signature, so a causal claim cannot be forged from a genuine edit.
+	/// So a causal claim cannot be forged from a genuine edit.
 	#[test]
 	fn the_parents_are_covered_by_the_signature() -> Outcome<()> {
 		let s = StubSigner::with_seed(11);
@@ -421,7 +373,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// Opening refuses to hand back contents whose signature does not verify.
 	#[test]
 	fn open_refuses_an_unverified_envelope() -> Outcome<()> {
 		let s = StubSigner::with_seed(11);
@@ -436,7 +387,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A batch of sound envelopes holds, and an empty batch holds vacuously.
 	#[test]
 	fn a_batch_of_sound_envelopes_holds() -> Outcome<()> {
 		let a = StubSigner::with_seed(3);
@@ -454,12 +404,9 @@ mod tests {
 		Ok(())
 	}
 
-	/// One bad envelope anywhere in a batch fails the batch, and checking the
-	/// same envelopes one at a time then names which one it was.
-	///
-	/// This is the property the whole batch arrangement rests on: the batch is
-	/// allowed to be silent about which member failed only because the fallback
-	/// is guaranteed to find it. A batch that failed while every member passed
+	/// The property the whole batch arrangement rests on: the batch is allowed to
+	/// be silent about which member failed only because the fallback is
+	/// guaranteed to find it. A batch that failed while every member passed
 	/// singly would leave a caller with nothing to report.
 	#[test]
 	fn a_bad_envelope_fails_the_batch_and_is_found_singly() -> Outcome<()> {
@@ -491,7 +438,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// An envelope survives a [`Dat`] round trip, keys and signatures intact.
 	#[test]
 	fn envelope_dat_round_trip() -> Outcome<()> {
 		let s = StubSigner::with_seed(11);
@@ -502,8 +448,7 @@ mod tests {
 		Ok(())
 	}
 
-	/// An envelope survives a byte round trip, including a payload longer than
-	/// a single byte length field could express.
+	/// Including a payload longer than a single byte length field could express.
 	#[test]
 	fn envelope_byte_round_trip() -> Outcome<()> {
 		let s = StubSigner::with_seed(11);
@@ -517,7 +462,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A malformed [`Dat`] is refused.
 	#[test]
 	fn envelope_from_dat_rejects_rubbish() -> Outcome<()> {
 		assert!(Envelope::from_dat(&Dat::U64(1)).is_err());
@@ -533,7 +477,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A payload that is not a record is refused.
 	#[test]
 	fn a_payload_that_is_not_a_record_is_refused() -> Outcome<()> {
 		let s = StubSigner::with_seed(11);

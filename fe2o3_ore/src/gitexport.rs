@@ -63,6 +63,9 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::fastexport::{
 	show,
@@ -80,8 +83,8 @@ use std::collections::{
 };
 
 
-/// The bytes a ref name may not contain, beyond the shapes `check_refname`
-/// refuses outright.
+// Bytes a ref name may not contain, beyond the shapes `check_refname` refuses
+// outright.
 const REF_FORBIDDEN: &[u8] = b" ~^:?*[\\";
 
 
@@ -96,23 +99,17 @@ const REF_FORBIDDEN: &[u8] = b" ~^:?*[\\";
 /// path holds, so those are not spelled here.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Change {
-	/// Sets the content and mode of a path, `M`.
-	Modify {
-		/// The mode the path takes.
+	Modify {	// `M`, sets the content and mode of a path
 		mode:	FileMode,
-		/// Where the content comes from.
 		data:	BlobRef,
-		/// The path affected.
 		path:	Vec<u8>,
 	},
-	/// Removes a path, `D`. Removing a path that names a directory removes
-	/// everything under it, which is git's own rule.
+	// `D`. Removing a path that names a directory removes everything under it,
+	// which is git's own rule.
 	Delete {
-		/// The path removed.
 		path:	Vec<u8>,
 	},
-	/// Empties the tree before the remaining changes apply, `deleteall`.
-	DeleteAll,
+	DeleteAll,	// `deleteall`, emptying the tree before the rest apply
 }
 
 
@@ -120,13 +117,11 @@ pub enum Change {
 ///
 /// Content may be given a mark here and referred to by that mark from any
 /// number of later commits, which is what a stream does when one blob appears in
-/// many trees. Content named once is simpler given inline; see
-/// [`BlobRef::Inline`].
+/// many trees. Content named once is simpler given inline, as
+/// [`BlobRef::Inline`], whose bytes follow the file command as a `data` payload.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Blob {
-	/// The mark this content takes, if it is to be referred to later.
 	pub mark:	Option<u64>,
-	/// The payload, raw.
 	pub data:	Vec<u8>,
 }
 
@@ -134,31 +129,21 @@ pub struct Blob {
 /// A `commit` command, complete with its file changes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Commit {
-	/// The reference the commit is written to, such as `refs/heads/main`.
 	pub refname:	String,
-	/// The mark this commit takes, if it is to be referred to later.
-	pub mark:		Option<u64>,
-	/// The author, omitted where it is the committer.
-	pub author:		Option<Person>,
-	/// The committer, which the stream always requires.
+	pub mark:	Option<u64>,
+	pub author:	Option<Person>,	// absent where it is the committer
 	pub committer:	Person,
-	/// The commit message, raw.
 	pub message:	Vec<u8>,
-	/// The first parent, absent for a root commit.
-	pub from:		Option<ObjRef>,
-	/// The remaining parents, in order.
-	pub merges:		Vec<ObjRef>,
-	/// The changes the commit makes, in the order they are applied.
-	pub changes:	Vec<Change>,
+	pub from:	Option<ObjRef>,	// first parent, absent for a root commit
+	pub merges:	Vec<ObjRef>,	// the rest, in order
+	pub changes:	Vec<Change>,	// in the order they are applied
 }
 
 
 /// One entry of a tree: what a path holds, and what it is.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Entry {
-	/// What the path is.
 	pub mode:	FileMode,
-	/// What it holds.
 	pub data:	Vec<u8>,
 }
 
@@ -174,41 +159,34 @@ pub type Tree = BTreeMap<Vec<u8>, Entry>;
 /// A fast-import stream under construction.
 #[derive(Clone, Debug, Default)]
 pub struct Stream {
-	/// What has been emitted.
 	out:	Vec<u8>,
-	/// Whether `done` has been written, after which nothing more may be.
-	ended:	bool,
+	ended:	bool,		// after `done`, nothing more may be written
 }
 
 impl Stream {
 
-	/// Constructs an empty stream.
 	pub fn new() -> Self {
 		Self::default()
 	}
 
-	/// Returns what has been emitted.
 	pub fn bytes(&self) -> &[u8] {
 		&self.out
 	}
 
-	/// Takes the emitted bytes, leaving the stream empty and unfinished.
+	/// Leaves the stream empty and unfinished.
 	pub fn take(&mut self) -> Vec<u8> {
 		self.ended = false;
 		std::mem::take(&mut self.out)
 	}
 
-	/// Returns how many bytes have been emitted.
 	pub fn len(&self) -> usize {
 		self.out.len()
 	}
 
-	/// Reports whether nothing has been emitted.
 	pub fn is_empty(&self) -> bool {
 		self.out.is_empty()
 	}
 
-	/// Writes a `blob` command.
 	pub fn blob(&mut self, blob: &Blob)
 		-> Outcome<()>
 	{
@@ -329,7 +307,6 @@ impl Stream {
 		Ok(())
 	}
 
-	/// Writes a `mark` line.
 	fn mark(&mut self, mark: u64)
 		-> Outcome<()>
 	{
@@ -401,8 +378,6 @@ impl Stream {
 // From one tree to the next.
 // ---------------------------------------------------------------------------
 
-/// Returns the changes that turn `prev` into `next`.
-///
 /// A commit's changes are applied over its first parent's tree, so what a commit
 /// has to say is the difference and not the whole. Removals come first, so that a
 /// path which was a file and is now a directory, or the reverse, is emptied
@@ -442,7 +417,6 @@ pub fn changes(prev: &Tree, next: &Tree)
 // What git will hold.
 // ---------------------------------------------------------------------------
 
-/// Checks a change is one git can apply.
 fn check_change(change: &Change)
 	-> Outcome<()>
 {
@@ -463,8 +437,6 @@ fn check_change(change: &Change)
 	}
 }
 
-/// Checks a path is one git will hold in a tree.
-///
 /// Git's own refusals are fatal and part way through: a path holding `.git`
 /// aborts the import with a crash report and whatever was already applied left
 /// behind. Refusing here instead costs nothing and leaves the repository
@@ -516,8 +488,6 @@ pub fn check_path(path: &[u8])
 	Ok(())
 }
 
-/// Checks a set of paths is a tree git can hold.
-///
 /// Git names a path either a file or a directory and never both. Handed both it
 /// keeps the directory and drops the file, saying nothing, so a caller that
 /// might hold such a state asks here first.
@@ -551,7 +521,6 @@ where
 	Ok(())
 }
 
-/// Checks an identity line's parts are ones the format can spell.
 fn check_identity(who: &Person)
 	-> Outcome<()>
 {
@@ -576,8 +545,6 @@ fn check_identity(who: &Person)
 	Ok(())
 }
 
-/// Checks a reference name is one git will accept.
-///
 /// The rules are `git-check-ref-format(1)`'s, less the ones that concern a
 /// reference spelled on a command line rather than in a stream.
 pub fn check_refname(name: &str)
@@ -719,7 +686,6 @@ mod test {
 		When,
 	};
 
-	/// Returns a person to write identity lines with.
 	fn ada() -> Person {
 		Person {
 			name:	b"Ada Lovelace".to_vec(),
@@ -728,7 +694,6 @@ mod test {
 		}
 	}
 
-	/// Returns a commit with one file in it.
 	fn one_file(path: &[u8], data: &[u8]) -> Commit {
 		Commit {
 			refname:	fmt!("refs/heads/main"),
@@ -746,7 +711,7 @@ mod test {
 		}
 	}
 
-	/// Reads a stream back through the parser, returning the commands it holds.
+	/// Reads a stream back through the parser.
 	///
 	/// The `done` the emitter ends with is checked for and then dropped, so a
 	/// caller counts the commands it wrote rather than the commands plus one.
@@ -813,8 +778,6 @@ mod test {
 		Ok(())
 	}
 
-	/// Every path a git tree permits survives the quoting and comes back the
-	/// same bytes.
 	#[test]
 	fn odd_paths_round_trip() -> Outcome<()> {
 		let paths: Vec<Vec<u8>> = vec![
@@ -881,8 +844,6 @@ mod test {
 		Ok(())
 	}
 
-	/// A deeper file-and-directory clash is found even where the two paths do
-	/// not sort next to each other.
 	#[test]
 	fn a_clash_is_found_across_intervening_paths() -> Outcome<()> {
 		let mut next = Tree::new();
@@ -912,7 +873,6 @@ mod test {
 		Ok(())
 	}
 
-	/// A mode naming something that is not a file with bytes is refused.
 	#[test]
 	fn a_mode_with_no_content_is_refused() -> Outcome<()> {
 		for mode in [FileMode::Gitlink, FileMode::Subdirectory] {
@@ -930,8 +890,6 @@ mod test {
 		Ok(())
 	}
 
-	/// An identity whose parts hold the punctuation the line is built from is
-	/// refused rather than written into a line nothing can read back.
 	#[test]
 	fn an_identity_that_would_not_parse_is_refused() -> Outcome<()> {
 		for (name, email) in [
@@ -984,7 +942,6 @@ mod test {
 		Ok(())
 	}
 
-	/// A mode changing on its own is a change, the content being unmoved.
 	#[test]
 	fn a_mode_alone_is_a_change() -> Outcome<()> {
 		let mut prev = Tree::new();
@@ -1002,7 +959,6 @@ mod test {
 		Ok(())
 	}
 
-	/// A reference name git will not take is refused.
 	#[test]
 	fn reference_names_are_checked() -> Outcome<()> {
 		for name in [
@@ -1018,7 +974,6 @@ mod test {
 		Ok(())
 	}
 
-	/// A name is made into one git will take, and the result is checkable.
 	#[test]
 	fn names_are_made_usable() -> Outcome<()> {
 		for name in [
@@ -1033,7 +988,6 @@ mod test {
 		Ok(())
 	}
 
-	/// Nothing may be written after the stream has said done.
 	#[test]
 	fn nothing_follows_done() -> Outcome<()> {
 		let mut stream = Stream::new();
@@ -1125,7 +1079,6 @@ mod test {
 		Ok(())
 	}
 
-	/// An empty tree is a commit with nothing in it rather than a failure.
 	#[test]
 	fn an_empty_tree_is_a_commit_with_no_changes() -> Outcome<()> {
 		let got = res!(changes(&Tree::new(), &Tree::new()));

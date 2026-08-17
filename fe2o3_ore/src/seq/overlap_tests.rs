@@ -17,6 +17,9 @@
 //! homeless, and the conservation check runs inside every delivery order of every
 //! case. And both sides are told, by one flag that names the group and the
 //! operation that prevailed rather than a pair that may never have met.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::id::{
 	OpId,
@@ -36,7 +39,7 @@ use crate::seq::Sequence;
 use oxedyne_fe2o3_core::prelude::*;
 
 
-/// The trial's own `src/util.rs`, which is round 3's base.
+// The trial's own `src/util.rs`, which is round 3's base.
 const PARSE: &str = "\
 /// Parses a decimal string, treating anything malformed as zero.
 pub fn parse_or_zero(s: &str) -> i64 {
@@ -47,7 +50,7 @@ pub fn parse_or_zero(s: &str) -> i64 {
 }
 ";
 
-/// Two functions in one file, which is what a two-component collision needs.
+// Two functions in one file, which is what a two-component collision needs.
 const TWO: &str = "\
 pub fn parse_or_zero(s: &str) -> i64 {
 \tmatch s.trim().parse::<i64>() {
@@ -62,15 +65,15 @@ pub fn twice(n: i64) -> i64 {
 }
 ";
 
-/// A paragraph, for the containment, chain and partial-sync cases.
+// A paragraph, for the containment, chain and partial-sync cases.
 const PROSE: &str = "The renderer places every run against the anchors it was \
 written at, and the result is convergent, conserved and attributed. It is not a \
 text.\n";
 
-/// The body of the parser, which several cases replace whole.
+// The body of the parser, which several cases replace whole.
 const BODY: &str = "\tmatch s.trim().parse::<i64>() {\n\t\tOk(v) => v,\n\t\tErr(_) => 0,\n\t}\n";
 
-/// What the parser reads as once one author has had it.
+// What the parser reads as once one author has had it.
 const REWRITTEN: &str = "\
 /// Parses a decimal string, treating anything malformed as zero.
 pub fn parse_or_zero(s: &str) -> i64 {
@@ -83,23 +86,19 @@ pub fn parse_or_zero(s: &str) -> i64 {
 /// One replica of a repository holding one file: the frontend that turns editing
 /// intent into content-anchored operations, which is what an editor would be.
 struct Replica {
-	/// The replica number every operation of this replica is named by.
-	id:		u64,
-	/// The operations it holds.
+	id:		u64,			// every operation of this replica is named by it
 	seq:	Sequence,
-	/// The file it is editing.
-	file:	OpId,
+	file:	OpId,			// the file being edited
 }
 
 impl Replica {
 
-	/// Constructs a replica holding nothing, editing the named file.
 	fn new(id: u64, file: OpId) -> Self {
 		Self { id, seq: Sequence::new(), file }
 	}
 
-	/// Mints the next header: a Lamport counter, and everything this replica can
-	/// see as the operation's parents.
+	/// A Lamport counter, and everything this replica can see as the operation's
+	/// parents.
 	fn next_head(&self)
 		-> Outcome<Header>
 	{
@@ -110,14 +109,12 @@ impl Replica {
 		)
 	}
 
-	/// Receives an operation from another replica.
 	fn recv(&mut self, op: (Header, Op))
 		-> Outcome<()>
 	{
 		self.seq.apply(op.0, op.1)
 	}
 
-	/// Renders the replica's own view of its file.
 	fn view(&self)
 		-> Outcome<Rendered>
 	{
@@ -128,7 +125,6 @@ impl Replica {
 		}
 	}
 
-	/// Records an operation of this replica's own, and applies it.
 	fn author(&mut self, op: Op)
 		-> Outcome<(Header, Op)>
 	{
@@ -149,8 +145,7 @@ impl Replica {
 		}
 	}
 
-	/// Replaces the first occurrence of some text, in one splice, which is the
-	/// shape a capture emits for one hunk.
+	/// One splice, which is the shape a capture emits for one hunk.
 	fn rep(&mut self, find: &str, with: &str)
 		-> Outcome<(Header, Op)>
 	{
@@ -159,7 +154,6 @@ impl Replica {
 		self.author(op)
 	}
 
-	/// Deletes the first occurrence of some text.
 	fn del(&mut self, find: &str)
 		-> Outcome<(Header, Op)>
 	{
@@ -168,7 +162,7 @@ impl Replica {
 		self.author(op)
 	}
 
-	/// Inserts bytes immediately after the first occurrence of some text.
+	/// Immediately after the first occurrence.
 	fn ins(&mut self, find: &str, with: &str)
 		-> Outcome<(Header, Op)>
 	{
@@ -201,7 +195,6 @@ fn seed(text: &str, n: u64)
 	Ok((reps, ops, file))
 }
 
-/// Generates every permutation of `idx`.
 fn permute(idx: &mut Vec<usize>, k: usize, out: &mut Vec<Vec<usize>>) {
 	if k == idx.len() {
 		out.push(idx.clone());
@@ -291,8 +284,8 @@ fn converge(ops: &[(Header, Op)])
 	}
 }
 
-/// Runs an operation set under every delivery order and checks the file's render
-/// against the answer the case prescribes.
+/// Checks the file's render against the answer the case prescribes, under every
+/// delivery order.
 fn case(file: OpId, expect: &str, ops: &[(Header, Op)])
 	-> Outcome<Repo>
 {
@@ -305,7 +298,6 @@ fn case(file: OpId, expect: &str, ops: &[(Header, Op)])
 	Ok(repo)
 }
 
-/// An operation identifier, written as the sweep writes one.
 fn id(replica: u64, counter: u64) -> OpId {
 	OpId::new(ReplicaId::new(replica), counter)
 }
@@ -321,7 +313,6 @@ fn yields(repo: &Repo) -> Vec<(OpId, OpId, Vec<OpId>, Option<OpId>)> {
 		.collect()
 }
 
-/// What one operation yielded to, if it yielded.
 fn yielded_to(repo: &Repo, op: OpId) -> Option<OpId> {
 	yields(repo).into_iter().find(|(o, ..)| *o == op).map(|(_, to, ..)| to)
 }
@@ -334,7 +325,6 @@ fn overlapped(repo: &Repo, a: OpId, b: OpId) -> bool {
 	})
 }
 
-/// Counts the flags of one kind.
 fn count(repo: &Repo, kind: fn(&Flag) -> bool) -> usize {
 	repo.flags().iter().filter(|f| kind(f)).count()
 }
@@ -649,9 +639,6 @@ fn an_edit_inside_a_buried_insertion_yields_with_it() -> Outcome<()> {
 	Ok(())
 }
 
-/// The winner's own earlier hunk is in its causal past, and the exemption keeps
-/// it.
-///
 /// A capture that emits two hunks authors the second with the first as its
 /// parent, so without the exemption a winner would void its own other hunk every
 /// time a diff produced more than one. Replica 2 rewrites the head of the body and
@@ -681,9 +668,6 @@ pub fn parse_or_zero(s: &str) -> i64 {
 	Ok(())
 }
 
-/// The merge changes a winner, and a changed winner can revive work that separate
-/// components would have buried.
-///
 /// This is the shape the sweep found the merge worse in, five trials in 3,252,
 /// and it is expected rather than a defect. Two components are contended by the
 /// same pair of replicas and merge; the merged group's maximum is replica 1's

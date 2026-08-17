@@ -12,6 +12,9 @@
 //! and a splice into that file anchors after its origin anchor rather than after
 //! nothing, and none of the ten answers moves. The multi-file cases are beside
 //! this file in `file_tests.rs`.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::id::{
 	Anchor,
@@ -42,11 +45,10 @@ use oxedyne_fe2o3_core::prelude::*;
 use std::collections::BTreeMap;
 
 
-/// The shopping list of the published worked case, with plain hyphens so that
-/// byte offsets and character offsets coincide.
+// Plain hyphens, so that byte offsets and character offsets coincide.
 const LIST: &[u8] = b"- Eggs\n- Milk\n- Cheese\n";
 
-/// Twenty bytes whose order is easy to read off a rendered string.
+// Twenty bytes whose order is easy to read off a rendered string.
 const ALPHA: &[u8] = b"0123456789ABCDEFGHIJ";
 
 
@@ -54,23 +56,19 @@ const ALPHA: &[u8] = b"0123456789ABCDEFGHIJ";
 /// index-based editing intent into content-anchored operations, which is what a
 /// real editor would be.
 struct Replica {
-	/// The replica number every operation of this replica is named by.
-	id:		u64,
-	/// The operations it holds.
+	id:		u64,			// every operation of this replica is named by it
 	seq:	Sequence,
-	/// The file it is editing.
-	file:	OpId,
+	file:	OpId,			// the file being edited
 }
 
 impl Replica {
 
-	/// Constructs a replica holding nothing, editing the named file.
 	fn new(id: u64, file: OpId) -> Self {
 		Self { id, seq: Sequence::new(), file }
 	}
 
-	/// Mints the next header: a Lamport counter, and everything this replica can
-	/// see as the operation's parents.
+	/// A Lamport counter, and everything this replica can see as the operation's
+	/// parents.
 	fn next_head(&self)
 		-> Outcome<Header>
 	{
@@ -81,14 +79,12 @@ impl Replica {
 		)
 	}
 
-	/// Receives an operation from another replica.
 	fn recv(&mut self, op: (Header, Op))
 		-> Outcome<()>
 	{
 		self.seq.apply(op.0, op.1)
 	}
 
-	/// Renders the replica's own view of its file.
 	fn view(&self)
 		-> Outcome<Rendered>
 	{
@@ -100,7 +96,6 @@ impl Replica {
 		}
 	}
 
-	/// Records an operation of this replica's own, and applies it.
 	fn author(&mut self, op: Op)
 		-> Outcome<(Header, Op)>
 	{
@@ -109,7 +104,6 @@ impl Replica {
 		Ok((head, op))
 	}
 
-	/// Inserts bytes at a rendered index.
 	fn insert(&mut self, at: usize, bytes: &[u8])
 		-> Outcome<(Header, Op)>
 	{
@@ -117,7 +111,6 @@ impl Replica {
 		self.author(op)
 	}
 
-	/// Deletes a run at a rendered index.
 	fn delete(&mut self, at: usize, len: usize)
 		-> Outcome<(Header, Op)>
 	{
@@ -125,7 +118,7 @@ impl Replica {
 		self.author(op)
 	}
 
-	/// Replaces a run at a rendered index, in one operation.
+	/// One operation, not a deletion and an insertion.
 	fn replace(&mut self, at: usize, len: usize, bytes: &[u8])
 		-> Outcome<(Header, Op)>
 	{
@@ -133,7 +126,6 @@ impl Replica {
 		self.author(op)
 	}
 
-	/// Moves a rendered run to a rendered index.
 	fn move_range(&mut self, at: usize, len: usize, to: usize)
 		-> Outcome<(Header, Op)>
 	{
@@ -141,7 +133,6 @@ impl Replica {
 		self.author(op)
 	}
 
-	/// Writes a note about a rendered run.
 	fn note(&mut self, at: usize, len: usize, text: &[u8])
 		-> Outcome<(Header, Op)>
 	{
@@ -154,14 +145,10 @@ impl Replica {
 /// A repository staged with one file carrying some initial text, and the
 /// replicas that have seen it.
 struct Stage {
-	/// The replicas, each holding everything staged.
-	reps:	Vec<Replica>,
-	/// The staging operations: the file's creation, then the seeding splice.
-	ops:	Vec<(Header, Op)>,
-	/// The file's identity.
+	reps:	Vec<Replica>,			// each holding everything staged
+	ops:	Vec<(Header, Op)>,		// the file's creation, then the seeding splice
 	file:	OpId,
-	/// The identity of the splice that wrote the initial text.
-	seed:	OpId,
+	seed:	OpId,					// the splice that wrote the initial text
 }
 
 /// Creates one file, writes `text` into it, and hands out `replicas` replicas
@@ -188,7 +175,6 @@ fn seed(text: &[u8], replicas: u64)
 	Ok(Stage { reps: out, ops, file, seed: seed_id })
 }
 
-/// Generates every permutation of `idx`.
 fn permute(idx: &mut Vec<usize>, k: usize, out: &mut Vec<Vec<usize>>) {
 	if k == idx.len() {
 		out.push(idx.clone());
@@ -293,22 +279,18 @@ fn case(file: OpId, expect: &str, ops: &[(Header, Op)])
 	Ok(got)
 }
 
-/// Counts the flags of one kind, over the whole repository.
 fn count(repo: &Rendered, kind: fn(&Flag) -> bool) -> usize {
 	repo.flags().iter().filter(|f| kind(f)).count()
 }
 
-/// Whether a flag reports a torn move.
 fn is_torn(flag: &Flag) -> bool {
 	matches!(flag, Flag::Torn { .. })
 }
 
-/// Whether a flag reports a demoted origin.
 fn is_demoted(flag: &Flag) -> bool {
 	matches!(flag, Flag::Demoted { .. })
 }
 
-/// Whether a flag reports a dropped origin.
 fn is_dropped(flag: &Flag) -> bool {
 	matches!(flag, Flag::Dropped { .. })
 }
@@ -351,8 +333,8 @@ fn two_moves_of_one_run_leave_one_copy() -> Outcome<()> {
 	let mut st = res!(seed(LIST, 2));
 	let seed_id = st.seed;
 	let (r1, r2) = st.reps.split_at_mut(1);
-	let lost = res!(r1[0].move_range(7, 7, 0));		// Replica 1 loses.
-	let won = res!(r2[0].move_range(7, 7, 23));		// Replica 2 wins.
+	let lost = res!(r1[0].move_range(7, 7, 0));		// replica 1 loses
+	let won = res!(r2[0].move_range(7, 7, 23));		// replica 2 wins
 	st.ops.push(lost.clone());
 	st.ops.push(won);
 	let out = res!(case(st.file, "- Eggs\n- Cheese\n- Milk\n", &st.ops));
@@ -376,8 +358,8 @@ fn overlapping_moves_tear_at_the_overlap() -> Outcome<()> {
 	let mut st = res!(seed(ALPHA, 2));
 	let seed_id = st.seed;
 	let (r1, r2) = st.reps.split_at_mut(1);
-	let torn = res!(r1[0].move_range(0, 10, 20));	// Replica 1 loses the overlap.
-	let won = res!(r2[0].move_range(5, 10, 0));		// Replica 2 wins it.
+	let torn = res!(r1[0].move_range(0, 10, 20));	// replica 1 loses the overlap
+	let won = res!(r2[0].move_range(5, 10, 0));		// replica 2 wins it
 	st.ops.push(torn.clone());
 	st.ops.push(won);
 	let out = res!(case(st.file, "FGHIJ56789ABCDE01234", &st.ops));
@@ -417,8 +399,6 @@ fn mutually_nested_destinations_break_the_cycle_without_loss() -> Outcome<()> {
 	Ok(())
 }
 
-/// An insertion strictly inside a concurrently moved run lands inside the run at
-/// its destination.
 #[test]
 fn an_insertion_inside_a_moved_run_goes_with_it() -> Outcome<()> {
 	let mut st = res!(seed(LIST, 2));
@@ -429,9 +409,8 @@ fn an_insertion_inside_a_moved_run_goes_with_it() -> Outcome<()> {
 	Ok(())
 }
 
-/// Three replicas write runs at one point. The runs stay whole and follow op
-/// order; interleaving them would be the failure most published algorithms
-/// exhibit.
+/// The runs stay whole and follow op order; interleaving them is the failure most
+/// published algorithms exhibit.
 #[test]
 fn three_concurrent_runs_at_one_point_do_not_interleave() -> Outcome<()> {
 	let mut st = res!(seed(b"AB", 3));
@@ -550,8 +529,7 @@ fn a_move_superseded_on_purpose_does_not_tear() -> Outcome<()> {
 	Ok(())
 }
 
-/// The same two moves written concurrently do tear, so the fix narrows the flag
-/// rather than removing it.
+/// The fix narrows the flag rather than removing it.
 #[test]
 fn genuinely_concurrent_moves_still_tear() -> Outcome<()> {
 	let mut st = res!(seed(LIST, 2));
@@ -576,16 +554,14 @@ fn genuinely_concurrent_moves_still_tear() -> Outcome<()> {
 // │ PROPERTIES                                                                │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Every delivery order of a set mixing all three kinds of edit renders the same
-/// bytes and raises the same flags.
 #[test]
 fn every_delivery_order_of_a_mixed_set_agrees() -> Outcome<()> {
 	let mut st = res!(seed(b"alpha beta gamma", 3));
 	let (r1, rest) = st.reps.split_at_mut(1);
 	let (r2, r3) = rest.split_at_mut(1);
-	st.ops.push(res!(r1[0].move_range(0, 6, 16)));	// "alpha " to the end.
-	st.ops.push(res!(r2[0].insert(11, b"very ")));	// Before "gamma".
-	st.ops.push(res!(r3[0].delete(6, 4)));			// "beta".
+	st.ops.push(res!(r1[0].move_range(0, 6, 16)));	// "alpha " to the end
+	st.ops.push(res!(r2[0].insert(11, b"very ")));	// before "gamma"
+	st.ops.push(res!(r3[0].delete(6, 4)));			// "beta"
 	let out = res!(converge(&st.ops));
 	assert_eq!(out.stats().ops, 5);
 	let file = match out.file(st.file) {
@@ -596,10 +572,6 @@ fn every_delivery_order_of_a_mixed_set_agrees() -> Outcome<()> {
 	Ok(())
 }
 
-/// Three replicas editing and moving at random, exchanging operations at
-/// random, agree on the bytes and on the flags however the operations are
-/// shuffled, and conserve every byte they wrote.
-///
 /// Convergence is nearly free here, since the state is the operation set; what
 /// this earns is the breadth. It walks the renderer over operation sets nobody
 /// wrote by hand, including the ones that tear, cycle and anchor into
@@ -683,9 +655,8 @@ fn random_operation_sets_render_alike_and_conserve() -> Outcome<()> {
 	Ok(())
 }
 
-/// Conservation holds where it is hardest: a torn move, a cycle and a deletion
-/// in one operation set. Every byte created is either rendered exactly once or
-/// dead.
+/// Every byte created is either rendered exactly once or dead, where that is
+/// hardest to hold: a torn move, a cycle and a deletion in one operation set.
 #[test]
 fn conservation_holds_through_a_tear_and_a_cycle() -> Outcome<()> {
 	let mut st = res!(seed(ALPHA, 3));
@@ -751,8 +722,7 @@ fn conservation_notices_a_missing_byte() -> Outcome<()> {
 	Ok(())
 }
 
-/// An operation set missing what its operations were written against cannot be
-/// resolved, and says which operation named what rather than guessing.
+/// The refusal says which operation named what rather than guessing.
 #[test]
 fn a_causally_incomplete_set_is_refused() -> Outcome<()> {
 	let mut st = res!(seed(LIST, 1));
@@ -780,8 +750,7 @@ fn a_causally_incomplete_set_is_refused() -> Outcome<()> {
 	Ok(())
 }
 
-/// A file's origin anchor is content the set has to hold like any other, so an
-/// operation anchored at the start of a file nobody created is refused.
+/// A file's origin anchor is content the set has to hold like any other.
 #[test]
 fn an_operation_anchored_in_an_absent_file_is_refused() -> Outcome<()> {
 	let ghost = OpId::new(ReplicaId::new(9), 1);
@@ -806,9 +775,8 @@ fn an_operation_anchored_in_an_absent_file_is_refused() -> Outcome<()> {
 	Ok(())
 }
 
-/// The causal precondition is read off the parents, so an operation delivered
-/// ahead of one it was written against is refused even where every byte it names
-/// is present.
+/// The causal precondition is read off the parents, so it is refused even where
+/// every byte it names is present.
 #[test]
 fn an_operation_ahead_of_its_parent_is_refused() -> Outcome<()> {
 	let mut st = res!(seed(LIST, 1));
@@ -832,8 +800,7 @@ fn an_operation_ahead_of_its_parent_is_refused() -> Outcome<()> {
 	Ok(())
 }
 
-/// An anchor reaching past the end of an atom it does name is refused for the
-/// same reason: the set does not hold the byte.
+/// For the same reason as the last: the set does not hold the byte.
 #[test]
 fn an_anchor_past_the_end_of_its_atom_is_refused() -> Outcome<()> {
 	let st = res!(seed(b"abc", 0));
@@ -1019,8 +986,6 @@ fn absorbing_a_clashing_identity_is_refused() -> Outcome<()> {
 	Ok(())
 }
 
-/// A repository of two files, replayed out of the log into one sequence.
-///
 /// There is no routing step: every record goes to the same place, and which file
 /// each operation landed in is what the render works out and reports, which is
 /// the association a wire field would have asserted.
@@ -1184,7 +1149,7 @@ fn a_move_into_its_own_source_keeps_its_bytes() -> Outcome<()> {
 	Ok(())
 }
 
-/// The render reports what it cost in the terms the cost model is stated in.
+/// In the terms the cost model is stated in.
 #[test]
 fn the_render_reports_what_it_cost() -> Outcome<()> {
 	let mut st = res!(seed(LIST, 2));
@@ -1215,8 +1180,8 @@ fn the_render_reports_what_it_cost() -> Outcome<()> {
 	Ok(())
 }
 
-/// Provenance survives a move: the rendered runs still name the content that
-/// made them, so an index in the render can be turned back into a name.
+/// The rendered runs still name the content that made them, so an index in the
+/// render can be turned back into a name.
 #[test]
 fn provenance_follows_the_bytes() -> Outcome<()> {
 	let mut st = res!(seed(LIST, 1));
@@ -1244,8 +1209,7 @@ fn provenance_follows_the_bytes() -> Outcome<()> {
 	Ok(())
 }
 
-/// A note follows the content it is about through a move: the run is taken to
-/// the front of the file, and the note's spans move with it.
+/// The run is taken to the front of the file, and the note's spans move with it.
 ///
 /// Nothing was written to make this happen. A note names bytes, the render says
 /// where each byte is, and the move had already changed the answer.
@@ -1280,8 +1244,7 @@ fn a_note_follows_a_move() -> Outcome<()> {
 	Ok(())
 }
 
-/// An edit inside a noted run narrows the note to what survived: the note is
-/// about content, and some of that content is gone.
+/// The note is about content, and some of that content is gone.
 #[test]
 fn a_note_narrows_to_the_surviving_content() -> Outcome<()> {
 	let mut st = res!(seed(ALPHA, 1));
@@ -1334,8 +1297,7 @@ fn a_note_on_deleted_content_says_so() -> Outcome<()> {
 	Ok(())
 }
 
-/// A note on a run that is later torn in two shows two spans, because that is
-/// where its content is.
+/// Two spans, because that is where its content is.
 #[test]
 fn a_note_tears_with_its_content() -> Outcome<()> {
 	let mut st = res!(seed(ALPHA, 1));

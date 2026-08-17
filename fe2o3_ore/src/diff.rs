@@ -88,6 +88,9 @@
 //! encoding this module has never heard of costs it nothing, and no route is
 //! chosen by guessing what the content is: the question asked is only whether the
 //! newlines are frequent enough to cut on, which is a fact about the bytes.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -95,98 +98,79 @@ use std::collections::HashMap;
 use std::ops::Range;
 
 
-/// Greatest piece level edit script the diff will compute on one route before
-/// handing on to the next.
-///
-/// A piece is a line on one route and a content-defined chunk on the other, and
-/// the cap is the same for both: what it bounds is the working memory of the
-/// Myers pass, which does not care what it is comparing.
+// Greatest piece level edit script the diff will compute on one route before
+// handing on to the next. A piece is a line on one route and a content-defined
+// chunk on the other, and the cap is the same for both: what it bounds is the
+// working memory of the Myers pass, which does not care what it is comparing.
 pub const MAX_PIECE_SCRIPT: usize = 1024;
 
-/// Greatest byte level edit script the refinement of one changed run will
-/// compute before leaving the run as a single splice.
+// Greatest byte level edit script the refinement of one changed run will
+// compute before leaving the run as a single splice.
 pub const MAX_BYTE_SCRIPT: usize = 256;
 
-/// Greatest changed run, in bytes on either side, the byte level refinement is
-/// attempted on at all.
+// Greatest changed run, in bytes on either side, the byte level refinement is
+// attempted on at all.
 pub const MAX_REFINE_LEN: usize = 4096;
 
-/// Fewest unchanged bytes that may separate two splices.
-///
-/// Two operations each carry their own identity, parents and origins, which
-/// costs more than a handful of bytes that did not change; splices closer
-/// together than this are merged into one. Keeping the gap non-zero is also
-/// what stops one splice anchoring on content that another removes.
+// Fewest unchanged bytes that may separate two splices. Two operations each
+// carry their own identity, parents and origins, which costs more than a
+// handful of bytes that did not change; splices closer together than this are
+// merged into one. Keeping the gap non-zero is also what stops one splice
+// anchoring on content that another removes.
 pub const MIN_SPLICE_GAP: usize = 16;
 
-/// Smallest content-defined chunk, 2 KiB.
-///
-/// A floor stops a run of unlucky hash hits producing a swarm of tiny pieces,
-/// each of which costs an entry in the sequence Myers runs over.
+// A floor stops a run of unlucky hash hits producing a swarm of tiny pieces,
+// each of which costs an entry in the sequence Myers runs over.
 pub const MIN_CHUNK: usize = 2 * 1024;
 
-/// Target average content-defined chunk, 8 KiB.
-///
-/// This is the granularity at which an edit is localised before the byte level
-/// refinement narrows it further, so it is the bound on what a diff re-stores
-/// when the refinement declines. A storage layer chunks an order of magnitude
-/// larger, because its cost is one address per chunk in every manifest; here the
-/// cost is one integer per chunk in one comparison, which buys the finer cut.
+// The granularity at which an edit is localised before the byte level
+// refinement narrows it further, so it is the bound on what a diff re-stores
+// when the refinement declines. A storage layer chunks an order of magnitude
+// larger, because its cost is one address per chunk in every manifest; here the
+// cost is one integer per chunk in one comparison, which buys the finer cut.
 pub const AVG_CHUNK: usize = 8 * 1024;
 
-/// Largest content-defined chunk, 64 KiB.
-///
-/// A ceiling bounds the damage where the hash finds no boundary at all, which is
-/// what a long run of identical bytes does to it.
+// A ceiling bounds the damage where the hash finds no boundary at all, which is
+// what a long run of identical bytes does to it.
 pub const MAX_CHUNK: usize = 64 * 1024;
 
-/// Shortest input the chunk route is used on, 16 KiB.
-///
-/// Below this a single splice covering everything between the shared prefix and
-/// the shared suffix stores at most sixteen kilobytes, which is of the same order
-/// as the operations that would replace it, so there is nothing to win.
+// Shortest input the chunk route is used on. Below this a single splice
+// covering everything between the shared prefix and the shared suffix stores at
+// most sixteen kilobytes, which is of the same order as the operations that
+// would replace it, so there is nothing to win.
 pub const MIN_CHUNKED_LEN: usize = 16 * 1024;
 
-/// Longest average line at which the line route is still worth taking, 1 KiB.
-///
-/// Above it the newlines are too sparse to cut on: the pieces are so long that a
-/// changed piece is most of the file, which is the trimmed splice with extra
-/// steps.
+// Longest average line at which the line route is still worth taking. Above it
+// the newlines are too sparse to cut on: the pieces are so long that a changed
+// piece is most of the file, which is the trimmed splice with extra steps.
 pub const MAX_TEXT_LINE: usize = 1024;
 
-/// Seed for the gear table's generator.
-///
-/// The table has to be the same in every build, because a changed table changes
-/// every boundary and so which bytes a diff decides to re-store. Nothing here is
-/// content-addressed, so a changed table would cost efficiency rather than
-/// correctness -- the applier checks the answer either way -- but a diff that
-/// depends on which binary produced it is not a diff anyone can reason about.
-/// Fixing the seed here, and deriving the table from it rather than shipping a
-/// literal, is what pins it. The value is the golden-ratio constant splitmix64
-/// conventionally uses.
+// Seed for the gear table's generator. The table has to be the same in every
+// build, because a changed table changes every boundary and so which bytes a
+// diff decides to re-store. Nothing here is content-addressed, so a changed
+// table would cost efficiency rather than correctness -- the applier checks the
+// answer either way -- but a diff that depends on which binary produced it is
+// not a diff anyone can reason about. Fixing the seed here, and deriving the
+// table from it rather than shipping a literal, is what pins it. The value is
+// the golden-ratio constant splitmix64 conventionally uses.
 const GEAR_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
 
-/// Normalisation level: how many bits the mask tightens below the average chunk
-/// size and loosens above it.
-///
-/// Plain gear chunking gives an exponential spread of chunk sizes, so short
-/// chunks dominate and the tail is long. Cutting less readily before the average
-/// and more readily after it pulls the spread in towards the average without
-/// forcing boundaries at fixed offsets. Two is the level the FastCDC paper
-/// settles on.
+// Normalisation level: how many bits the mask tightens below the average chunk
+// size and loosens above it. Plain gear chunking gives an exponential spread of
+// chunk sizes, so short chunks dominate and the tail is long. Cutting less
+// readily before the average and more readily after it pulls the spread in
+// towards the average without forcing boundaries at fixed offsets. Two is the
+// level the FastCDC paper settles on.
 const NORM_LEVEL: u32 = 2;
 
-/// The 256-entry gear table, one pseudorandom `u64` per byte value.
-///
-/// Generated at compile time from [`GEAR_SEED`] by splitmix64, so there is no
-/// dependency to pull in and no table to keep in the source.
+// The 256-entry gear table, one pseudorandom `u64` per byte value, generated at
+// compile time from `GEAR_SEED` by splitmix64 so there is no dependency to pull
+// in and no table to keep in the source.
 static GEAR: [u64; 256] = gear_table();
 
-/// The mask a boundary must hit below the average chunk size, which is the
-/// stricter of the two.
+// The masks a boundary must hit: the stricter below the average chunk size, the
+// looser at and above it.
 const MASK_S: u64 = high_mask(log2_floor(AVG_CHUNK) + NORM_LEVEL);
-
-/// The mask a boundary must hit at and above the average chunk size.
 const MASK_L: u64 = high_mask(log2_floor(AVG_CHUNK) - NORM_LEVEL);
 
 
@@ -197,20 +181,13 @@ const MASK_L: u64 = high_mask(log2_floor(AVG_CHUNK) - NORM_LEVEL);
 /// answer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Route {
-	/// The two versions are the same bytes and there is nothing to do.
-	Same,
-	/// Pieces cut at the newlines, then bytes within each changed run.
-	Line,
-	/// Pieces cut where a gear hash says the content changes, then bytes within
-	/// each changed run.
-	Chunk,
-	/// One splice covering everything between the shared prefix and the shared
-	/// suffix, which is where both piece routes give up.
-	Whole,
+	Same,	// the two versions are the same bytes and there is nothing to do
+	Line,	// pieces cut at the newlines, then bytes within each changed run
+	Chunk,	// pieces cut where a gear hash says the content changes, then bytes
+	Whole,	// between the shared prefix and the shared suffix, where both give up
 }
 
 impl Route {
-	/// Returns the route's name, for messages and tests.
 	pub fn name(&self) -> &'static str {
 		match self {
 			Self::Same	=> "Same",
@@ -231,32 +208,26 @@ impl Route {
 /// with is the file, and [`apply`] is what says whether they do.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Splice {
-	/// Offset into the old bytes at which the edit begins.
 	pub at:		usize,
-	/// Number of old bytes the edit removes.
 	pub delete:	usize,
-	/// Bytes the edit puts in their place.
 	pub insert:	Vec<u8>,
 }
 
 impl Splice {
-	/// Returns the number of bytes the edit inserts.
 	pub fn insert_len(&self) -> usize {
 		self.insert.len()
 	}
 }
 
 
-/// Returns the ordered splices that turn `old` into `new`.
-///
 /// The list is ascending by offset and non-overlapping, and is empty when the
 /// two are already the same.
 pub fn diff(old: &[u8], new: &[u8]) -> Vec<Splice> {
 	diff_with_budget(old, new, MAX_PIECE_SCRIPT)
 }
 
-/// Returns the ordered splices that turn `old` into `new`, with the piece level
-/// edit script capped at `budget` rather than at [`MAX_PIECE_SCRIPT`].
+/// As [`diff`], with the piece level edit script capped at `budget` rather than
+/// at [`MAX_PIECE_SCRIPT`].
 ///
 /// A budget of zero forces the single trimmed splice: no piece route can produce
 /// a script of no steps for two versions that differ, so both give up and the
@@ -265,9 +236,6 @@ pub fn diff_with_budget(old: &[u8], new: &[u8], budget: usize) -> Vec<Splice> {
 	diff_routed(old, new, budget).0
 }
 
-/// Returns the ordered splices that turn `old` into `new`, and which route
-/// produced them.
-///
 /// The routes are tried in the order the content deserves. Where the newlines
 /// are frequent enough to cut on, lines are tried first, because a line is the
 /// unit an author edits in and cutting there gives the finest changed runs. Where
@@ -302,8 +270,6 @@ pub fn diff_routed(old: &[u8], new: &[u8], budget: usize)
 	(vec![trimmed_splice(old, new)], Route::Whole)
 }
 
-/// Applies splices to `old` and returns the bytes that result.
-///
 /// Fails where the list is not ascending, where two splices overlap, or where
 /// one reaches past the end of the file: all three mean the list was not
 /// produced against these bytes, and a caller had better hear so rather than
@@ -336,7 +302,6 @@ pub fn apply(old: &[u8], splices: &[Splice])
 }
 
 
-/// Returns the number of leading bytes two slices share.
 fn common_prefix(a: &[u8], b: &[u8]) -> usize {
 	let limit = a.len().min(b.len());
 	let mut n = 0;
@@ -346,8 +311,7 @@ fn common_prefix(a: &[u8], b: &[u8]) -> usize {
 	n
 }
 
-/// Returns the number of trailing bytes two slices share, without running back
-/// past the `floor` bytes already accounted for at the front.
+/// The `floor` bytes already accounted for at the front are never run back past.
 fn common_suffix(a: &[u8], b: &[u8], floor: usize) -> usize {
 	let limit = (a.len() - floor).min(b.len() - floor);
 	let mut n = 0;
@@ -357,8 +321,8 @@ fn common_suffix(a: &[u8], b: &[u8], floor: usize) -> usize {
 	n
 }
 
-/// Returns the single splice covering everything between the shared prefix and
-/// the shared suffix, which is what a frontend with no diff at all records.
+/// The single splice covering everything between the shared prefix and the
+/// shared suffix, which is what a frontend with no diff at all records.
 fn trimmed_splice(old: &[u8], new: &[u8]) -> Splice {
 	let front = common_prefix(old, new);
 	let back = common_suffix(old, new, front);
@@ -404,8 +368,8 @@ fn diff_over(
 	Some(out)
 }
 
-/// Reports whether the newlines are frequent enough for the line route to have
-/// anything to cut on.
+/// Are the newlines frequent enough for the line route to have anything to cut
+/// on?
 ///
 /// An empty side is no obstacle: it has no lines, and it is the other side that
 /// decides. A side of one line has nothing for the pass to match against, and a
@@ -465,12 +429,12 @@ fn chunk_starts(bytes: &[u8]) -> Vec<usize> {
 fn cut(data: &[u8]) -> usize {
 	let n = data.len();
 	if n <= MIN_CHUNK {
-		return n;	// Too short to cut: the whole remainder is one chunk.
+		return n;	// too short to cut: the whole remainder is one chunk
 	}
-	let end = MAX_CHUNK.min(n);		// Forced boundary.
-	let mid = AVG_CHUNK.min(end);	// Where the mask loosens.
-	let mut fp = 0u64;				// The rolling gear hash.
-	let mut i = MIN_CHUNK;			// Skip: no boundary may land below.
+	let end = MAX_CHUNK.min(n);		// forced boundary
+	let mid = AVG_CHUNK.min(end);	// where the mask loosens
+	let mut fp = 0u64;				// the rolling gear hash
+	let mut i = MIN_CHUNK;			// skip: no boundary may land below
 	while i < mid {
 		fp = (fp << 1).wrapping_add(GEAR[data[i] as usize]);
 		if fp & MASK_S == 0 {
@@ -488,8 +452,6 @@ fn cut(data: &[u8]) -> usize {
 	end
 }
 
-/// Generates the gear table by running splitmix64 from [`GEAR_SEED`].
-///
 /// Splitmix64 is a handful of multiplies and shifts, which is why it can run in
 /// a `const` context and save the crate a dependency and a 2 KiB literal.
 const fn gear_table() -> [u64; 256] {
@@ -545,10 +507,8 @@ fn piece_ids<'a>(bytes: &'a [u8], starts: &[usize], names: &mut HashMap<&'a [u8]
 /// non-empty.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Change {
-	/// What the run was, in the old sequence.
-	a:	Range<usize>,
-	/// What it has become, in the new sequence.
-	b:	Range<usize>,
+	a:	Range<usize>,	// what the run was, in the old sequence
+	b:	Range<usize>,	// what it has become, in the new sequence
 }
 
 
@@ -587,7 +547,6 @@ fn changed_runs<T: PartialEq>(a: &[T], b: &[T], budget: usize)
 	Some(runs_between(&matched, an - head, bn - head, head))
 }
 
-/// Turns the matched pairs into the runs that lie between them.
 fn runs_between(matched: &[(usize, usize)], n: usize, m: usize, off: usize)
 	-> Vec<Change>
 {
@@ -764,8 +723,7 @@ mod tests {
 	use super::*;
 
 	/// Asserts the property everything else here rests on: the splices, applied
-	/// to the old bytes, produce the new bytes exactly. Returns them so a test
-	/// can go on to say something about their shape.
+	/// to the old bytes, produce the new bytes exactly.
 	fn diffed(old: &[u8], new: &[u8])
 		-> Outcome<Vec<Splice>>
 	{
@@ -791,17 +749,14 @@ mod tests {
 		}
 	}
 
-	/// Sums what a list of splices inserts.
 	fn inserted(splices: &[Splice]) -> usize {
 		splices.iter().map(|s| s.insert_len()).sum()
 	}
 
-	/// Sums what a list of splices removes.
 	fn deleted(splices: &[Splice]) -> usize {
 		splices.iter().map(|s| s.delete).sum()
 	}
 
-	/// Identical inputs, of every shape, are no edit at all.
 	#[test]
 	fn identical_inputs_diff_to_nothing() -> Outcome<()> {
 		for s in [&b""[..], b"a", b"a\n", b"one\ntwo\nthree\n", b"no trailing newline"] {
@@ -810,7 +765,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// An empty file on either side is one splice covering everything.
 	#[test]
 	fn empty_sides_are_one_splice() -> Outcome<()> {
 		let text = b"one\ntwo\nthree\n";
@@ -829,7 +783,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A line inserted in the middle costs exactly that line.
 	#[test]
 	fn an_inserted_line_costs_one_line() -> Outcome<()> {
 		let old = b"alpha\nbeta\ngamma\n";
@@ -842,7 +795,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A line deleted from the middle removes exactly that line.
 	#[test]
 	fn a_deleted_line_costs_one_line() -> Outcome<()> {
 		let old = b"alpha\nbeta\ngamma\n";
@@ -855,7 +807,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A change within a line stores the changed bytes, not the line.
 	#[test]
 	fn an_edit_within_a_line_costs_the_changed_bytes() -> Outcome<()> {
 		let old = b"alpha\nthe quick brown fox\ngamma\n";
@@ -867,8 +818,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// Two changes in one line, far enough apart, stay two splices; brought
-	/// close together they become one.
 	#[test]
 	fn nearby_changes_merge_and_distant_ones_do_not() -> Outcome<()> {
 		let old = b"X-------------------------X\n";
@@ -884,10 +833,8 @@ mod tests {
 		Ok(())
 	}
 
-	/// A move shaped edit -- one line taken from the top of a file to the
-	/// bottom -- is described as a deletion and an insertion. The module makes
-	/// no claim to notice a move; the operation vocabulary has one, and finding
-	/// it is not this module's business.
+	/// The module makes no claim to notice a move; the operation vocabulary has
+	/// one, and finding it is not this module's business.
 	#[test]
 	fn a_move_shaped_edit_becomes_a_delete_and_an_insert() -> Outcome<()> {
 		let old = b"moved\nalpha\nbeta\ngamma\ndelta\nepsilon\n";
@@ -902,7 +849,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A file with nothing in common with its successor is replaced wholesale.
 	#[test]
 	fn a_whole_file_rewrite_is_one_splice() -> Outcome<()> {
 		let old = b"alpha\nbeta\ngamma\n";
@@ -916,7 +862,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A missing trailing newline, gained or lost, is one byte either way.
 	#[test]
 	fn a_trailing_newline_is_one_byte() -> Outcome<()> {
 		let bare = b"alpha\nbeta";
@@ -934,8 +879,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// Content with no newline in it at all is one line, and comes out as the
-	/// single trimmed splice.
 	#[test]
 	fn newline_free_content_is_one_trimmed_splice() -> Outcome<()> {
 		let old: Vec<u8> = (0u8..=255).chain(0u8..=255).collect();
@@ -976,8 +919,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A budget too small for the edit script falls back to the single trimmed
-	/// splice rather than computing a longer one.
 	#[test]
 	fn an_exhausted_budget_falls_back_to_one_splice() -> Outcome<()> {
 		let mut old = String::new();
@@ -1005,9 +946,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// The refinement inside a changed run is bounded too: a run longer than
-	/// the refinement limit is left as one splice rather than diffed byte by
-	/// byte.
 	#[test]
 	fn a_long_changed_run_is_left_whole() -> Outcome<()> {
 		// One line, longer than the refinement limit, differing in two places
@@ -1023,7 +961,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// The applier refuses a list that was not produced against these bytes.
 	#[test]
 	fn apply_refuses_a_list_that_does_not_fit() -> Outcome<()> {
 		let old = b"alpha\nbeta\n";
@@ -1237,8 +1174,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A texty file whose line script will not fit the budget hands on to the
-	/// chunk route rather than giving up on the spot.
 	#[test]
 	fn an_exhausted_line_budget_hands_on_to_the_chunks() -> Outcome<()> {
 		// Every other line changes, over enough lines that a small budget cannot
@@ -1266,9 +1201,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A boundary follows the content, so an insertion near the front leaves
-	/// every boundary past it where it was.
-	///
 	/// This is the property the whole route rests on, and it is the one thing a
 	/// fixed-size chunker cannot do: there, one inserted byte shifts every
 	/// boundary after it and nothing downstream matches anything.
@@ -1294,10 +1226,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// Three single-byte edits scattered through four megabytes of binary cost
-	/// three small regions, not the four megabytes between the first and the
-	/// last.
-	///
 	/// This is the claim the feature table makes, measured. The comparison is
 	/// against what the same pair costs without the chunk route, which is the
 	/// whole span between the outermost edits.

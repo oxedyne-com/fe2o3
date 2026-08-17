@@ -9,6 +9,9 @@
 //! sent and decoded where it arrives, so the codec is exercised by every test
 //! and the byte counts the mode comparison rests on are the bytes that would
 //! cross a wire.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::id::{
 	OpId,
@@ -36,12 +39,10 @@ use oxedyne_fe2o3_core::prelude::*;
 struct Rng(u64);
 
 impl Rng {
-	/// Seeds the generator.
 	fn new(seed: u64) -> Self {
 		Self(seed ^ 0x9e37_79b9_7f4a_7c15)
 	}
 
-	/// Returns the next value.
 	fn next(&mut self) -> usize {
 		self.0 = self.0
 			.wrapping_mul(6_364_136_223_846_793_005)
@@ -49,7 +50,6 @@ impl Rng {
 		(self.0 >> 33) as usize
 	}
 
-	/// Returns the next value below `n`.
 	fn below(&mut self, n: usize) -> usize {
 		if n == 0 { 0 } else { self.next() % n }
 	}
@@ -59,20 +59,13 @@ impl Rng {
 /// What one exchange cost and how it went.
 #[derive(Debug, Default)]
 struct Tally {
-	/// Bytes put on the wire, both directions.
-	bytes:		usize,
-	/// Messages put on the wire, both directions.
-	messages:	usize,
-	/// Operations handed over, both directions.
-	ops:		usize,
-	/// Whether either side fell back to the walk.
-	fell_back:	Option<Fallback>,
+	bytes:		usize,					// on the wire, both directions
+	messages:	usize,					// on the wire, both directions
+	ops:		usize,					// handed over, both directions
+	fell_back:	Option<Fallback>,		// either side falling back to the walk
 }
 
 
-/// Runs two sessions against each other over an in-memory pipe until both have
-/// converged, and returns what it cost.
-///
 /// Both peers open at once, which is the harder case: neither has heard anything
 /// when it works out what to say. A caller whose transport has a caller and a
 /// callee simply does not call `open` on the callee's side.
@@ -163,7 +156,6 @@ fn agree(a: &OpLog, b: &OpLog)
 	Ok(())
 }
 
-/// Appends `n` marks authored by `replica`.
 fn write(log: &mut OpLog, replica: u64, n: usize, tag: &str)
 	-> Outcome<()>
 {
@@ -174,8 +166,8 @@ fn write(log: &mut OpLog, replica: u64, n: usize, tag: &str)
 	Ok(())
 }
 
-/// Appends an operation naming the whole frontier, which is a merge wherever the
-/// frontier is wider than one.
+/// An operation naming the whole frontier, which is a merge wherever the frontier
+/// is wider than one.
 fn merge(log: &mut OpLog, replica: u64, tag: &str)
 	-> Outcome<()>
 {
@@ -209,7 +201,6 @@ fn diverged(prefix: usize, left: usize, right: usize)
 }
 
 
-/// A populated log and an empty one converge: the clone.
 #[test]
 fn a_fresh_peer_takes_the_whole_history() -> Outcome<()> {
 	for mode in [Mode::Walk, Mode::sketch(64)] {
@@ -225,7 +216,6 @@ fn a_fresh_peer_takes_the_whole_history() -> Outcome<()> {
 	Ok(())
 }
 
-/// Two histories with no operation in common converge to the union of both.
 #[test]
 fn disjoint_histories_join() -> Outcome<()> {
 	for mode in [Mode::Walk, Mode::sketch(64)] {
@@ -242,9 +232,6 @@ fn disjoint_histories_join() -> Outcome<()> {
 	Ok(())
 }
 
-/// One side far ahead of the other converges, and the side that is ahead sends
-/// exactly the news.
-///
 /// The peer that is behind is the loose direction: it cannot subtract a head it
 /// has never seen, so it offers its whole log back, all five operations of which
 /// are dropped on arrival. That is the walk's cost, and the reason for the other
@@ -280,8 +267,7 @@ fn one_sided_divergence_converges() -> Outcome<()> {
 	Ok(())
 }
 
-/// Both sides ahead of each other converge, whichever mode is used, and the
-/// result does not depend on the mode.
+/// The result does not depend on the mode.
 #[test]
 fn a_symmetric_divergence_converges_either_way() -> Outcome<()> {
 	let (mut wa, mut wb) = res!(diverged(20, 4, 5));
@@ -297,8 +283,7 @@ fn a_symmetric_divergence_converges_either_way() -> Outcome<()> {
 	Ok(())
 }
 
-/// A log that is already up to date converges in one exchange and sends no
-/// operations.
+/// One exchange, and no operations.
 #[test]
 fn logs_that_already_agree_send_nothing() -> Outcome<()> {
 	for mode in [Mode::Walk, Mode::sketch(4)] {
@@ -313,8 +298,7 @@ fn logs_that_already_agree_send_nothing() -> Outcome<()> {
 	Ok(())
 }
 
-/// Two empty logs converge, which is the degenerate case and must not be a
-/// special one.
+/// The degenerate case must not be a special one.
 #[test]
 fn two_empty_logs_converge() -> Outcome<()> {
 	for mode in [Mode::Walk, Mode::sketch(0)] {
@@ -328,8 +312,7 @@ fn two_empty_logs_converge() -> Outcome<()> {
 	Ok(())
 }
 
-/// A sketch sized far below the difference stalls, the walk answers in the same
-/// turn, and the logs converge anyway.
+/// The walk answers in the same turn.
 #[test]
 fn an_undersized_sketch_falls_back_and_still_converges() -> Outcome<()> {
 	// Two hundred apiece with nothing in common: four hundred of difference,
@@ -352,7 +335,6 @@ fn an_undersized_sketch_falls_back_and_still_converges() -> Outcome<()> {
 	Ok(())
 }
 
-/// A session says it fell back, and says so still once it has converged.
 #[test]
 fn a_fallback_is_reported_and_remembered() -> Outcome<()> {
 	let mut a = OpLog::new();
@@ -385,11 +367,9 @@ fn a_fallback_is_reported_and_remembered() -> Outcome<()> {
 }
 
 /// Everything that arrives closes causally against what the receiver already
-/// holds, checked before a single operation is absorbed.
-///
-/// This is the property the whole protocol exists to preserve, so it is asserted
-/// against the receiver's log at the moment of arrival rather than inferred from
-/// the outcome.
+/// holds. This is the property the whole protocol exists to preserve, so it is
+/// asserted against the receiver's log at the moment of arrival rather than
+/// inferred from the outcome.
 #[test]
 fn every_batch_closes_on_arrival() -> Outcome<()> {
 	use crate::sync::walk::arrival_gap;
@@ -433,7 +413,7 @@ fn every_batch_closes_on_arrival() -> Outcome<()> {
 	Ok(())
 }
 
-/// A batch with a hole in it is refused whole, and the log is untouched.
+/// Refused whole: the log is untouched.
 #[test]
 fn a_batch_with_a_hole_is_refused() -> Outcome<()> {
 	let mut a = OpLog::new();
@@ -464,8 +444,8 @@ fn a_batch_with_a_hole_is_refused() -> Outcome<()> {
 	Ok(())
 }
 
-/// Operations the receiver already holds are dropped rather than refused, which
-/// is what makes a loose owed set cost bytes and not correctness.
+/// Dropped rather than refused, which is what makes a loose owed set cost bytes
+/// and not correctness.
 #[test]
 fn repeated_operations_are_dropped() -> Outcome<()> {
 	let mut a = OpLog::new();
@@ -496,9 +476,7 @@ fn repeated_operations_are_dropped() -> Outcome<()> {
 	Ok(())
 }
 
-/// A sketch exchange over two large logs that differ by a little costs bytes in
-/// proportion to the difference; the walk costs bytes in proportion to the
-/// history. That ratio is the whole reason the sketch mode exists.
+/// That ratio is the whole reason the sketch mode exists.
 ///
 /// Two logs of 204 operations differing by eight, both peers speaking: the walk
 /// spends 29,608 bytes and moves 408 operations, the sketch spends 2,142 and
@@ -537,7 +515,6 @@ fn the_sketch_costs_the_difference_and_the_walk_costs_the_log() -> Outcome<()> {
 	Ok(())
 }
 
-/// Many small random divergences, in both modes, always converge.
 #[test]
 fn a_soak_of_random_divergences_converges() -> Outcome<()> {
 	let mut rng = Rng::new(0x5e_ed_50_ac);
@@ -595,8 +572,7 @@ fn a_soak_of_random_divergences_converges() -> Outcome<()> {
 	Ok(())
 }
 
-/// Whichever side speaks first, and whether or not both do, the exchange
-/// converges: there is no client and no server.
+/// There is no client and no server.
 #[test]
 fn either_side_may_open() -> Outcome<()> {
 	// Only A opens; B answers what it was sent and opens in the same turn.
@@ -621,7 +597,6 @@ fn either_side_may_open() -> Outcome<()> {
 	Ok(())
 }
 
-/// A session tallies what it handed over and what it took in.
 #[test]
 fn a_session_counts_what_it_moved() -> Outcome<()> {
 	let mut a = OpLog::new();
@@ -652,15 +627,6 @@ fn a_session_counts_what_it_moved() -> Outcome<()> {
 	Ok(())
 }
 
-/// The mode two peers should open in, judged from nothing but the shapes of the
-/// two logs.
-///
-/// The cases the rule exists for: a clone, where one log is empty and a sketch
-/// would be sized for the whole history; a small divergence over a large shared
-/// history, which is what the sketch is for; and a difference guessed to be as
-/// large as the smaller log, where a sketch costs more than the history it would
-/// save.
-///
 /// The rule is judged on shapes alone and cannot see overlap, so two logs of a
 /// size that in fact share nothing are still offered a sketch. That is exactly
 /// the bad estimate the fallback exists for, and it costs no round trip.

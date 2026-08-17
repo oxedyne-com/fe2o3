@@ -38,6 +38,9 @@
 //!
 //! As everywhere else in the crate: bytes in, bytes out, and where they live is
 //! the caller's business.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::id::OpId;
 use crate::op::Mode;
@@ -52,8 +55,7 @@ use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_jdat::prelude::*;
 
 
-/// The bytes every snapshot begins with.
-pub const MAGIC: [u8; 6] = *b"ORESNP";
+pub const MAGIC: [u8; 6] = *b"ORESNP"; // the bytes every snapshot begins with
 
 /// The format version this module writes.
 ///
@@ -75,33 +77,15 @@ pub const VERSION: u8 = 4;
 /// One file, as it stood.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct FileState {
-	/// The file's identity, which is the identity of the operation that created
-	/// it and is what a snapshot keys by.
-	pub file:	OpId,
-	/// Where the file sat, as bytes: metadata, and not a name for it.
-	pub path:	Vec<u8>,
-	/// What the file was: an ordinary file unless an [`crate::op::Op::FileMode`]
-	/// said otherwise.
-	///
-	/// Here for the reason the path is here. A checkout reads a snapshot instead
-	/// of replaying the log, and a checkout that could not tell an executable
-	/// script from a normal file would write out a tree the history does not
-	/// describe.
-	pub mode:	Mode,
-	/// The rendered bytes.
-	pub bytes:	Vec<u8>,
-	/// What those bytes are made of, in render order and coalesced.
-	pub runs:	Vec<Run>,
-	/// What the renderer noticed while producing them.
-	pub flags:	Vec<Flag>,
-	/// The notes whose content renders here, resolved into spans of those bytes.
-	///
-	/// Carried for the reason the provenance is carried: without it the bytes are
-	/// dumb, and a frontend that means to show a margin against a snapshot would
-	/// have to replay the log to find out where the margins go. A note whose
-	/// content has been deleted renders in no file and so appears in no state,
-	/// exactly as a flag that names no file appears in none.
-	pub notes:	Vec<Note>,
+	pub file:	OpId,		// identity of the creating operation, and the key
+	pub path:	Vec<u8>,	// where the file sat: metadata, not a name for it
+	pub mode:	Mode,		// ordinary unless a FileMode said otherwise
+	pub bytes:	Vec<u8>,	// the rendered bytes
+	pub runs:	Vec<Run>,	// what the bytes are made of, in render order
+	pub flags:	Vec<Flag>,	// what the renderer noticed
+	// A note whose content has been deleted renders in no file and so appears in
+	// no state, exactly as a flag that names no file appears in none.
+	pub notes:	Vec<Note>,	// resolved into spans of the rendered bytes
 }
 
 impl FileState {
@@ -118,17 +102,13 @@ impl FileState {
 		}
 	}
 
-	/// Returns the path as a string, with anything that is not valid UTF-8
-	/// replaced. For messages; the bytes themselves are the record.
+	/// For messages; the bytes themselves are the record.
 	pub fn path_lossy(&self) -> String {
 		String::from_utf8_lossy(&self.path).into_owned()
 	}
 
-	/// Serialises the state to a [`Dat`]. The shape is
+	/// The shape is
 	/// `[file, path, mode, bytes, [run, ...], [flag, ...], [note, ...]]`.
-	///
-	/// The mode sits beside the path because the two are the same kind of thing:
-	/// what a working copy has to know about a file over and above its bytes.
 	///
 	/// Both the path and the bytes are a [`Dat::BU64`]: a file is routinely
 	/// longer than the 255 bytes a [`Dat::BU8`] length field can express, and a
@@ -145,7 +125,6 @@ impl FileState {
 		])
 	}
 
-	/// Reconstructs a state from a [`Dat`] produced by [`FileState::to_dat`].
 	pub fn from_dat(dat: &Dat)
 		-> Outcome<Self>
 	{
@@ -212,15 +191,13 @@ impl FileState {
 /// produce the same bytes.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Snapshot {
-	/// The operations the state includes everything up to, ascending.
-	frontier:	Vec<OpId>,
-	/// The files, in ascending order of identity.
-	files:		Vec<FileState>,
+	frontier:	Vec<OpId>,		// what the state includes everything up to, ascending
+	files:		Vec<FileState>,	// ascending by identity
 }
 
 impl Snapshot {
 
-	/// Constructs a snapshot, sorting both lists.
+	/// Sorts both lists.
 	///
 	/// Fails where two states name one file, since which of them the file was is
 	/// then unanswerable. Two states at one *path* are legal and no longer a
@@ -245,17 +222,14 @@ impl Snapshot {
 		Ok(Self { frontier, files })
 	}
 
-	/// Returns the frontier the state was rendered at.
 	pub fn frontier(&self) -> &[OpId] {
 		&self.frontier
 	}
 
-	/// Returns the files, in ascending order of identity.
 	pub fn files(&self) -> &[FileState] {
 		&self.files
 	}
 
-	/// Returns the state of one file, if the snapshot holds it.
 	pub fn file(&self, file: OpId)
 		-> Option<&FileState>
 	{
@@ -265,7 +239,7 @@ impl Snapshot {
 			.and_then(|i| self.files.get(i))
 	}
 
-	/// Returns the states at a path, in ascending order of identity.
+	/// In ascending order of identity.
 	///
 	/// More than one is legal, and is what two branches creating one path leaves
 	/// behind; which of them a working copy writes under that name is a policy the
@@ -274,18 +248,15 @@ impl Snapshot {
 		self.files.iter().filter(|f| f.path == path).collect()
 	}
 
-	/// Returns the number of files.
 	pub fn len(&self) -> usize {
 		self.files.len()
 	}
 
-	/// Reports whether the snapshot holds no files.
 	pub fn is_empty(&self) -> bool {
 		self.files.is_empty()
 	}
 
-	/// Serialises the snapshot to a [`Dat`]. The shape is
-	/// `[[op, ...], [file, ...]]`.
+	/// The shape is `[[op, ...], [file, ...]]`.
 	pub fn to_dat(&self) -> Dat {
 		Dat::List(vec![
 			Dat::List(self.frontier.iter().map(|id| id.to_dat()).collect()),
@@ -293,8 +264,6 @@ impl Snapshot {
 		])
 	}
 
-	/// Reconstructs a snapshot from a [`Dat`] produced by [`Snapshot::to_dat`].
-	///
 	/// Either list out of order, or repeated, is refused rather than normalised,
 	/// so that the encoding stays canonical.
 	pub fn from_dat(dat: &Dat)
@@ -348,8 +317,7 @@ impl Snapshot {
 		Ok(Self { frontier, files })
 	}
 
-	/// Appends the byte encoding of the snapshot to `buf`: the magic, the
-	/// version, and the binary daticle form.
+	/// The magic, the version, and the binary daticle form.
 	pub fn encode_into(&self, buf: &mut Vec<u8>)
 		-> Outcome<()>
 	{
@@ -360,7 +328,6 @@ impl Snapshot {
 		Ok(())
 	}
 
-	/// Returns the byte encoding of the snapshot.
 	pub fn encode(&self)
 		-> Outcome<Vec<u8>>
 	{
@@ -369,7 +336,6 @@ impl Snapshot {
 		Ok(buf)
 	}
 
-	/// Decodes a snapshot that must occupy the whole of `buf`.
 	pub fn decode(buf: &[u8])
 		-> Outcome<Self>
 	{
@@ -429,7 +395,6 @@ mod tests {
 	use crate::seq::slot::Origin;
 	use crate::seq::Sequence;
 
-	/// An operation identifier.
 	fn oid(replica: u64, counter: u64) -> OpId {
 		OpId::new(ReplicaId::new(replica), counter)
 	}
@@ -481,8 +446,6 @@ mod tests {
 		Ok((out, create, vec![oid(2, 3), oid(3, 3), oid(4, 3)]))
 	}
 
-	/// A snapshot of a rendered file survives the round trip with its identity,
-	/// its path, its bytes, its provenance and its flags.
 	#[test]
 	fn a_rendered_file_round_trips() -> Outcome<()> {
 		let (repo, file, frontier) = res!(rendered());
@@ -655,8 +618,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A snapshot of several files keeps them apart and in order of identity,
-	/// whatever order they were given in.
 	#[test]
 	fn files_are_sorted_by_identity_and_kept_apart() -> Outcome<()> {
 		let files = vec![
@@ -678,7 +639,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// One identity may not name two states, and one path may.
 	#[test]
 	fn identity_is_unique_and_a_path_is_not() -> Outcome<()> {
 		let twice = vec![
@@ -710,8 +670,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// An empty snapshot -- an empty repository at an empty frontier -- is legal
-	/// and round trips.
 	#[test]
 	fn an_empty_snapshot_round_trips() -> Outcome<()> {
 		let snap = res!(Snapshot::new(Vec::new(), Vec::new()));
@@ -769,8 +727,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// Rubbish where a snapshot should be is refused, and an unknown version says
-	/// so rather than being parsed.
 	#[test]
 	fn a_snapshot_that_is_not_one_is_refused() -> Outcome<()> {
 		assert!(Snapshot::decode(b"").is_err());
@@ -822,7 +778,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A malformed part is refused and named.
 	#[test]
 	fn a_malformed_part_is_refused() -> Outcome<()> {
 		assert!(Snapshot::from_dat(&Dat::U8(1)).is_err());
@@ -937,8 +892,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// Randomised snapshots, of any number of files carrying any mixture of runs
-	/// and flags, come back exactly as they went in.
 	#[test]
 	fn random_snapshots_round_trip() -> Outcome<()> {
 		// A small linear congruential generator, so a failure can be reproduced.

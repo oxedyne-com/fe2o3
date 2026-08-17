@@ -42,6 +42,9 @@
 //! hands back what it could not. That is the whole of the buffering story: the
 //! log holds nothing it has not accepted, and a caller that wants a pending
 //! queue keeps the leftovers and offers them again.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::id::{
 	OpId,
@@ -73,13 +76,11 @@ use std::collections::{
 /// path a replica writes.
 #[derive(Clone, Debug, Default)]
 pub struct Causality<'a> {
-	/// Each operation's parents, by operation.
-	parents: BTreeMap<OpId, &'a [OpId]>,
+	parents: BTreeMap<OpId, &'a [OpId]>, // each operation's parents, by operation
 }
 
 impl<'a> Causality<'a> {
 
-	/// Builds the graph from operations and their parents.
 	pub fn new<I>(ops: I) -> Self
 	where
 		I: IntoIterator<Item = (OpId, &'a [OpId])>,
@@ -87,30 +88,25 @@ impl<'a> Causality<'a> {
 		Self { parents: ops.into_iter().collect() }
 	}
 
-	/// Returns the number of operations in the graph.
 	pub fn len(&self) -> usize {
 		self.parents.len()
 	}
 
-	/// Reports whether the graph holds no operations.
 	pub fn is_empty(&self) -> bool {
 		self.parents.is_empty()
 	}
 
-	/// Reports whether the graph holds the operation.
 	pub fn contains(&self, id: &OpId) -> bool {
 		self.parents.contains_key(id)
 	}
 
-	/// Returns the parents of an operation the graph holds.
 	pub fn parents_of(&self, id: &OpId)
 		-> Option<&'a [OpId]>
 	{
 		self.parents.get(id).copied()
 	}
 
-	/// Returns the first parent the graph does not hold, together with the
-	/// operation that named it.
+	/// The first parent the graph does not hold, and the operation that named it.
 	///
 	/// `None` means the set is causally closed: nothing in it points outside
 	/// itself.
@@ -127,12 +123,11 @@ impl<'a> Causality<'a> {
 		None
 	}
 
-	/// Reports whether the set is causally closed.
 	pub fn is_closed(&self) -> bool {
 		self.gap().is_none()
 	}
 
-	/// Returns the heads: the operations nobody in the set names as a parent.
+	/// The operations nobody in the set names as a parent.
 	///
 	/// This is the frontier an author writes against, in ascending order of
 	/// identifier.
@@ -146,8 +141,8 @@ impl<'a> Causality<'a> {
 		self.parents.keys().filter(|id| !named.contains(id)).copied().collect()
 	}
 
-	/// Reports whether `target` is `from` or one of its ancestors, which is to
-	/// say whether `from` was written in knowledge of `target`.
+	/// Is `target` either `from` itself or one of its ancestors -- was `from`
+	/// written in knowledge of `target`?
 	///
 	/// A parent the graph does not hold ends that branch of the walk; the answer
 	/// is then only as good as the set, which is why a caller that needs it to
@@ -175,8 +170,7 @@ impl<'a> Causality<'a> {
 		false
 	}
 
-	/// Reports whether two operations are concurrent: distinct, and neither
-	/// written in knowledge of the other.
+	/// Distinct, and neither written in knowledge of the other?
 	pub fn concurrent(&self, a: &OpId, b: &OpId) -> bool {
 		a != b && !self.reaches(a, b) && !self.reaches(b, a)
 	}
@@ -192,42 +186,29 @@ impl<'a> Causality<'a> {
 /// order.
 #[derive(Clone, Debug, Default)]
 pub struct OpLog {
-	/// Entries in the order they were appended.
-	entries:	Vec<Record>,
-	/// Position in `entries` of each identifier.
-	index:		HashMap<OpId, usize>,
-	/// Highest counter accepted so far for each replica.
-	counters:	HashMap<ReplicaId, u64>,
-	/// Highest counter accepted so far from any replica, which is the Lamport
-	/// clock the next operation is minted against.
-	top:		u64,
-	/// Every identifier some entry names as a parent.
-	named:		HashSet<OpId>,
+	entries:	Vec<Record>,				// in append order
+	index:		HashMap<OpId, usize>,		// position of each identifier
+	counters:	HashMap<ReplicaId, u64>,	// highest counter per replica
+	top:		u64,						// greatest counter seen anywhere
+	named:		HashSet<OpId>,				// identifiers named as a parent
 }
 
 impl OpLog {
-	/// Constructs an empty log.
 	pub fn new() -> Self {
 		Self::default()
 	}
 
-	/// Returns the number of operations in the log.
 	pub fn len(&self) -> usize {
 		self.entries.len()
 	}
 
-	/// Reports whether the log holds no operations.
 	pub fn is_empty(&self) -> bool {
 		self.entries.is_empty()
 	}
 
-	/// Appends a record.
-	///
-	/// Fails if the counter is zero, if the identifier is already present, if
-	/// the counter does not exceed the highest already accepted for that
-	/// replica, or if any parent is absent. The last of those is what keeps the
-	/// log causally closed at every moment, and the error names the operation
-	/// that is missing so a caller can go and fetch it.
+	/// Refusing a record whose parents are absent is what keeps the log causally
+	/// closed at every moment, and the error names the operation that is missing
+	/// so a caller can go and fetch it.
 	pub fn append(&mut self, rec: Record)
 		-> Outcome<()>
 	{
@@ -268,9 +249,6 @@ impl OpLog {
 		Ok(())
 	}
 
-	/// Appends everything in a batch that can be placed, in any order, and
-	/// returns what could not.
-	///
 	/// A record is placed as soon as its parents are present, so a batch that is
 	/// causally closed within itself is absorbed whole however it was shuffled.
 	/// What comes back names operations the batch and the log between them do
@@ -302,62 +280,54 @@ impl OpLog {
 		}
 	}
 
-	/// Returns the record named by `id`, if the log holds it.
 	pub fn get(&self, id: &OpId)
 		-> Option<&Record>
 	{
 		self.index.get(id).and_then(|i| self.entries.get(*i))
 	}
 
-	/// Returns the operation named by `id`, if the log holds it.
 	pub fn op(&self, id: &OpId)
 		-> Option<&Op>
 	{
 		self.get(id).map(|rec| &rec.op)
 	}
 
-	/// Reports whether the log holds the operation named by `id`.
 	pub fn contains(&self, id: &OpId) -> bool {
 		self.index.contains_key(id)
 	}
 
-	/// Returns the entry at the given append position.
 	pub fn at(&self, pos: usize)
 		-> Option<&Record>
 	{
 		self.entries.get(pos)
 	}
 
-	/// Returns the append position of the operation named by `id`.
 	pub fn position(&self, id: &OpId) -> Option<usize> {
 		self.index.get(id).copied()
 	}
 
-	/// Iterates over the entries in append order.
+	/// In append order.
 	pub fn iter(&self) -> impl Iterator<Item = &Record> {
 		self.entries.iter()
 	}
 
-	/// Iterates over the entries authored by one replica, in append order.
+	/// In append order.
 	pub fn iter_replica(&self, replica: ReplicaId) -> impl Iterator<Item = &Record> {
 		self.entries.iter().filter(move |rec| rec.head.id().replica == replica)
 	}
 
-	/// Returns the highest counter accepted for `replica`, if it has authored
-	/// anything the log has seen.
+	/// `None` where the replica has authored nothing the log has seen.
 	pub fn head(&self, replica: ReplicaId) -> Option<u64> {
 		self.counters.get(&replica).copied()
 	}
 
-	/// Returns the greatest counter the log has seen, from any replica.
-	///
 	/// Zero means the log is empty, since counters start at one.
 	pub fn max_counter(&self) -> u64 {
 		self.top
 	}
 
-	/// Returns the counter the next operation should carry, whoever authors it,
-	/// which is one past the greatest the log has seen from any replica.
+	/// One past the greatest counter the log has seen from any replica, whoever
+	/// authors next.
 	///
 	/// This is the Lamport clock: an operation minted here is later, in op order,
 	/// than everything its author could see when it was minted.
@@ -365,8 +335,6 @@ impl OpLog {
 		self.top + 1
 	}
 
-	/// Returns the identifier a replica should use for its next operation.
-	///
 	/// The counter is [`OpLog::next_counter`] and not one past the replica's own
 	/// head, so a replica's counters are strictly increasing but not
 	/// consecutive.
@@ -374,8 +342,8 @@ impl OpLog {
 		OpId::new(replica, self.next_counter())
 	}
 
-	/// Returns the highest counter seen per replica, which is what a peer needs
-	/// in order to work out what to send.
+	/// The highest counter seen per replica, which is what a peer needs in order
+	/// to work out what to send.
 	pub fn counters(&self) -> Vec<(ReplicaId, u64)> {
 		let mut v: Vec<(ReplicaId, u64)> = self.counters
 			.iter()
@@ -385,8 +353,8 @@ impl OpLog {
 		v
 	}
 
-	/// Returns the frontier: the operations nobody in the log names as a parent,
-	/// in ascending order of identifier.
+	/// The operations nobody in the log names as a parent, in ascending order of
+	/// identifier.
 	///
 	/// This is what an author writes against, and what the log's causal graph
 	/// terminates at.
@@ -400,15 +368,14 @@ impl OpLog {
 		v
 	}
 
-	/// Returns the causal graph over the whole log.
 	pub fn causality(&self)
 		-> Causality<'_>
 	{
 		Causality::new(self.entries.iter().map(|rec| (rec.head.id(), rec.parents())))
 	}
 
-	/// Reports whether a set of identifiers is causally closed: every operation
-	/// named is present, and so is every parent any of them names.
+	/// Causally closed: every operation named is present, and so is every parent
+	/// any of them names.
 	///
 	/// Fails if the log does not hold one of the identifiers, since a set the
 	/// log cannot see is a question it cannot answer.
@@ -438,9 +405,7 @@ impl OpLog {
 		Ok(true)
 	}
 
-	/// Appends an operation authored by `replica`, minting the next identifier
-	/// for it and taking the log's frontier as its parents, and returns the
-	/// header it was given.
+	/// Mints the next identifier and takes the log's frontier as the parents.
 	pub fn author(&mut self, replica: ReplicaId, op: Op)
 		-> Outcome<Header>
 	{
@@ -460,24 +425,20 @@ mod tests {
 		Op::Mark { name: fmt!("{}", name), body: None, time: None }
 	}
 
-	/// An operation identifier.
 	fn oid(replica: u64, counter: u64) -> OpId {
 		OpId::new(ReplicaId::new(replica), counter)
 	}
 
-	/// A record of a mark, with the given parents.
 	fn rec(id: OpId, parents: Vec<OpId>, name: &str)
 		-> Outcome<Record>
 	{
 		Ok(Record::new(res!(Header::new(id, parents)), mark(name)))
 	}
 
-	/// A root record of a mark.
 	fn root(id: OpId, name: &str) -> Record {
 		Record::root(id, mark(name))
 	}
 
-	/// A fresh log is empty and knows nothing of any replica.
 	#[test]
 	fn empty_log_is_empty() -> Outcome<()> {
 		let log = OpLog::new();
@@ -492,7 +453,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// Appended operations are retrievable by identifier and in append order.
 	#[test]
 	fn append_then_look_up() -> Outcome<()> {
 		let mut log = OpLog::new();
@@ -511,7 +471,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// An identifier the log has never seen is absent, not an error.
 	#[test]
 	fn lookup_of_an_absent_id_is_none() -> Outcome<()> {
 		let mut log = OpLog::new();
@@ -524,8 +483,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// Counters must strictly increase per replica; repeating or going
-	/// backwards is refused.
 	#[test]
 	fn counters_must_increase_per_replica() -> Outcome<()> {
 		let mut log = OpLog::new();
@@ -544,8 +501,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// The counter guard is per replica: one replica's counters do not constrain
-	/// another's.
 	#[test]
 	fn counters_are_independent_across_replicas() -> Outcome<()> {
 		let mut log = OpLog::new();
@@ -567,7 +522,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A rejected append leaves the log exactly as it was.
 	#[test]
 	fn a_rejected_append_changes_nothing() -> Outcome<()> {
 		let mut log = OpLog::new();
@@ -667,7 +621,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// An operation authored after a merge names every head it merged.
 	#[test]
 	fn authoring_after_a_merge_names_every_head() -> Outcome<()> {
 		let mut log = OpLog::new();
@@ -684,8 +637,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// An operation whose parent has not arrived is refused, and the error says
-	/// which one is missing.
 	#[test]
 	fn an_operation_before_its_parent_is_refused() -> Outcome<()> {
 		let mut log = OpLog::new();
@@ -731,7 +682,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// Per-replica iteration returns only that replica's entries, in order.
 	#[test]
 	fn iter_replica_filters() -> Outcome<()> {
 		let mut log = OpLog::new();
@@ -746,7 +696,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// The counter list reports one head per replica, sorted by replica.
 	#[test]
 	fn counters_report_one_head_per_replica() -> Outcome<()> {
 		let mut log = OpLog::new();
@@ -760,8 +709,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// The frontier is every operation nobody names as a parent, which for two
-	/// unrelated roots is both of them.
 	#[test]
 	fn the_frontier_is_what_nobody_names() -> Outcome<()> {
 		let mut log = OpLog::new();
@@ -773,7 +720,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// Causal closure is a question about a subset, and the log answers it.
 	#[test]
 	fn closure_is_decided_over_a_subset() -> Outcome<()> {
 		let mut log = OpLog::new();
@@ -789,7 +735,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// The causal graph distinguishes concurrency from succession.
 	#[test]
 	fn concurrency_is_read_off_the_parents() -> Outcome<()> {
 		let mut log = OpLog::new();
@@ -809,8 +754,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A graph missing a parent says which operation named it, and is not
-	/// closed.
 	#[test]
 	fn a_graph_with_a_gap_names_it() -> Outcome<()> {
 		let parents = vec![oid(1, 1)];
@@ -820,7 +763,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// Entries are addressable by append position.
 	#[test]
 	fn entries_are_addressable_by_position() -> Outcome<()> {
 		let mut log = OpLog::new();

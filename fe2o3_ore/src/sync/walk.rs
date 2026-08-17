@@ -38,6 +38,9 @@
 //! rather than trusting it ([`arrival_gap`]). The first is a proof obligation
 //! discharged where the information is; the second is what stops a peer that got
 //! it wrong from leaving a hole in someone else's history.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::id::OpId;
 use crate::log::OpLog;
@@ -49,10 +52,8 @@ use std::collections::BTreeSet;
 
 
 /// The operations of `log` that a peer whose frontier is `heads` demonstrably
-/// holds.
-///
-/// Heads the log does not hold are skipped: they are operations the peer has and
-/// we do not, and they say nothing about what we hold.
+/// holds. Heads the log does not hold are skipped: they are operations the peer
+/// has and we do not, and they say nothing about what we hold.
 pub fn covered(log: &OpLog, heads: &[OpId]) -> BTreeSet<OpId> {
 	let mut seen: BTreeSet<OpId> = BTreeSet::new();
 	let mut stack: Vec<OpId> = heads
@@ -77,13 +78,10 @@ pub fn covered(log: &OpLog, heads: &[OpId]) -> BTreeSet<OpId> {
 	seen
 }
 
-/// The operations a peer whose frontier is `heads` is owed, in the log's append
-/// order.
-///
-/// Append order is a linear extension of the causal order, so a receiver places
-/// the whole batch in one pass; nothing depends on it, since
-/// [`OpLog::absorb`](crate::log::OpLog::absorb) takes a batch however it is
-/// shuffled.
+/// In the log's append order, which is a linear extension of the causal order,
+/// so a receiver places the whole batch in one pass; nothing depends on it,
+/// since [`OpLog::absorb`](crate::log::OpLog::absorb) takes a batch however it
+/// is shuffled.
 pub fn owed(log: &OpLog, heads: &[OpId]) -> Vec<OpId> {
 	let held = covered(log, heads);
 	log.iter()
@@ -124,10 +122,8 @@ pub fn close(log: &OpLog, send: &[OpId], held: &BTreeSet<OpId>) -> BTreeSet<OpId
 	out
 }
 
-/// Returns the records named by `ids`, in the log's append order.
-///
-/// Fails where the log does not hold one of them, which would mean the sender
-/// had worked out a set it cannot deliver.
+/// In the log's append order. Fails where the log does not hold one of them,
+/// which would mean the sender had worked out a set it cannot deliver.
 pub fn entries_for(log: &OpLog, ids: &BTreeSet<OpId>)
 	-> Outcome<Vec<Entry>>
 {
@@ -172,7 +168,6 @@ pub fn arrival_gap(log: &OpLog, entries: &[Entry])
 	Ok(None)
 }
 
-/// Reports whether a batch closes causally against the log.
 pub fn closes(log: &OpLog, entries: &[Entry])
 	-> Outcome<bool>
 {
@@ -191,12 +186,10 @@ mod tests {
 		Record,
 	};
 
-	/// An operation identifier.
 	fn oid(replica: u64, counter: u64) -> OpId {
 		OpId::new(ReplicaId::new(replica), counter)
 	}
 
-	/// A record of a mark, with the given parents.
 	fn rec(id: OpId, parents: Vec<OpId>, name: &str)
 		-> Outcome<Record>
 	{
@@ -224,8 +217,7 @@ mod tests {
 		Ok(log)
 	}
 
-	/// A peer at a head we hold is owed everything that head does not cover, and
-	/// the ancestors of that head are subtracted whichever branch they sit on.
+	/// The ancestors of a head are subtracted whichever branch they sit on.
 	#[test]
 	fn a_head_we_hold_covers_its_ancestors() -> Outcome<()> {
 		let log = res!(forked());
@@ -241,8 +233,7 @@ mod tests {
 		Ok(())
 	}
 
-	/// A peer with no history at all is owed the whole log, which is the clone
-	/// case, and the answer is exactly the log.
+	/// The clone case, and the answer is exactly the log.
 	#[test]
 	fn an_empty_peer_is_owed_everything() -> Outcome<()> {
 		let log = res!(forked());
@@ -251,9 +242,8 @@ mod tests {
 		Ok(())
 	}
 
-	/// A head we have never seen covers nothing: it is news for us, and says
-	/// nothing about what the peer holds. The owed set is loose in that case and
-	/// never wrong.
+	/// It is news for us, and says nothing about what the peer holds, so the owed
+	/// set is loose in that case and never wrong.
 	#[test]
 	fn a_head_we_do_not_hold_covers_nothing() -> Outcome<()> {
 		let log = res!(forked());
@@ -264,8 +254,7 @@ mod tests {
 		Ok(())
 	}
 
-	/// The owed set is causally closed against what the peer holds, which is what
-	/// makes it safe to send in any order.
+	/// Which is what makes it safe to send in any order.
 	#[test]
 	fn the_owed_set_closes_against_the_peer() -> Outcome<()> {
 		let log = res!(forked());
@@ -304,8 +293,7 @@ mod tests {
 		Ok(())
 	}
 
-	/// Closing a set that is *not* closed pulls in what it is missing, which is
-	/// what the step is for.
+	/// Pulling in what it is missing, which is what the step is for.
 	#[test]
 	fn closing_repairs_a_hole() -> Outcome<()> {
 		let log = res!(forked());
@@ -327,8 +315,8 @@ mod tests {
 		Ok(())
 	}
 
-	/// A batch closes against a log that already holds the parents, and does not
-	/// when it does not; the gap names both operations.
+	/// The gap names both operations, the one that arrived and the parent nobody
+	/// holds.
 	#[test]
 	fn arrival_names_the_hole() -> Outcome<()> {
 		let log = res!(forked());
@@ -344,8 +332,8 @@ mod tests {
 		Ok(())
 	}
 
-	/// The entries a send set names come back in append order, and a set naming
-	/// what the log does not hold is refused rather than half delivered.
+	/// And a set naming what the log does not hold is refused rather than half
+	/// delivered.
 	#[test]
 	fn entries_follow_the_append_order() -> Outcome<()> {
 		let log = res!(forked());

@@ -14,6 +14,9 @@
 //! ```text
 //! cargo test -p oxedyne_fe2o3_ore --test gitexport_git -- --ignored --nocapture
 //! ```
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_ore::fastexport::{
@@ -53,16 +56,13 @@ use std::time::{
 };
 
 
-/// A payload no text encoding leaves alone: NUL bytes, a bare line feed and a
-/// byte that is not valid UTF-8.
+// NUL bytes, a bare line feed and a byte that is not valid UTF-8.
 const BINARY: &[u8] = b"\x00\x01\n\x02binary\x00\xff\n";
 
-/// A fixed moment, so a run is the same run every time.
+// Fixed, so a run is the same run every time.
 const WHEN: When = When { secs: 1_700_000_000, tz: TzOffset { mins: 600, neg: false } };
 
 
-/// Runs git in `dir`, returning its standard output.
-///
 /// The caller's git configuration, hooks and signing keys are all fenced off, so
 /// that nothing on the developer's machine can change what git does here.
 fn git(dir: &Path, args: &[&str])
@@ -83,7 +83,6 @@ fn git(dir: &Path, args: &[&str])
 	Ok(out.stdout)
 }
 
-/// Returns a directory of its own for this test run.
 fn scratch_dir(what: &str)
 	-> Outcome<PathBuf>
 {
@@ -95,8 +94,6 @@ fn scratch_dir(what: &str)
 	Ok(dir)
 }
 
-/// Builds a bare repository from a stream, and returns where it is.
-///
 /// Git is run with `--done`, so a stream cut short is refused rather than half
 /// applied: what comes back is either the whole history or an error.
 fn build(dir: &Path, stream: &[u8])
@@ -127,8 +124,7 @@ fn build(dir: &Path, stream: &[u8])
 	Ok(repo)
 }
 
-/// Checks a reference of a bare repository out into a working tree, and returns
-/// every file it holds, by the bytes of its path.
+/// Every file of a checkout, keyed by the bytes of its path.
 fn checkout(dir: &Path, repo: &Path, refname: &str, what: &str)
 	-> Outcome<BTreeMap<Vec<u8>, Entry>>
 {
@@ -142,7 +138,6 @@ fn checkout(dir: &Path, repo: &Path, refname: &str, what: &str)
 	Ok(out)
 }
 
-/// Reads one directory of a checkout, recursing, with names as bytes.
 fn collect(dir: &Path, prefix: &[u8], out: &mut BTreeMap<Vec<u8>, Entry>)
 	-> Outcome<()>
 {
@@ -182,7 +177,6 @@ fn collect(dir: &Path, prefix: &[u8], out: &mut BTreeMap<Vec<u8>, Entry>)
 	Ok(())
 }
 
-/// Returns an identity to write commits under.
 fn ada() -> Person {
 	Person {
 		name:	b"Ada Lovelace".to_vec(),
@@ -191,7 +185,6 @@ fn ada() -> Person {
 	}
 }
 
-/// Returns a tree entry.
 fn entry(mode: FileMode, data: &[u8]) -> Entry {
 	Entry { mode, data: data.to_vec() }
 }
@@ -232,8 +225,6 @@ fn same(got: &BTreeMap<Vec<u8>, Entry>, want: &Tree, what: &str)
 }
 
 
-/// A tree emitted is the tree git checks out, byte for byte and mode for mode.
-///
 /// The tree holds everything the emitter has to survive: a binary file, an
 /// executable one, a path holding a space, a path holding bytes that are not
 /// UTF-8, a path holding a line feed, and a deep directory.
@@ -270,9 +261,8 @@ fn a_tree_emitted_is_the_tree_git_holds() -> Outcome<()> {
 	outcome
 }
 
-/// A history emitted is a history git holds: each commit's tree is what was
-/// asked for, a merge has two parents in the order given, and a lightweight tag
-/// names the commit it was pointed at.
+/// Each commit's tree is what was asked for, a merge has two parents in the order
+/// given, and a lightweight tag names the commit it was pointed at.
 #[test]
 #[ignore = "needs a git binary and a writable temporary directory"]
 fn a_history_emitted_is_the_history_git_holds() -> Outcome<()> {
@@ -351,14 +341,10 @@ fn a_history_emitted_is_the_history_git_holds() -> Outcome<()> {
 	outcome
 }
 
-/// The same content gives the same tree object however the commit around it
-/// differs, which is what makes a mirror checkable against the repository it
-/// mirrors.
-///
-/// This is the round-trip bar stated as an assertion: git's blob and tree names
-/// are hashes of content alone, so an exported tree can be compared with the
-/// original's by name and not merely by walking it. Commit names cannot, and the
-/// second half says so.
+/// This is what makes a mirror checkable against the repository it mirrors: git's
+/// blob and tree names are hashes of content alone, so an exported tree can be
+/// compared with the original's by name and not merely by walking it. Commit names
+/// cannot, and the second half says so.
 #[test]
 #[ignore = "needs a git binary and a writable temporary directory"]
 fn a_tree_object_is_a_function_of_its_content_alone() -> Outcome<()> {
@@ -410,11 +396,9 @@ fn a_tree_object_is_a_function_of_its_content_alone() -> Outcome<()> {
 	outcome
 }
 
-/// Git takes a stream naming a path as both a file and a directory and drops
-/// the file without a word, so the emitter refuses it first.
-///
-/// The half of this test that matters is the second: git's own behaviour is
-/// measured rather than assumed, so the refusal is answering something real.
+/// Git drops the file without a word. The half of this test that matters is the
+/// second: git's own behaviour is measured rather than assumed, so the emitter's
+/// refusal is answering something real.
 #[test]
 #[ignore = "needs a git binary and a writable temporary directory"]
 fn git_would_drop_a_file_the_emitter_refuses_to_write() -> Outcome<()> {
@@ -464,8 +448,7 @@ fn git_would_drop_a_file_the_emitter_refuses_to_write() -> Outcome<()> {
 	outcome
 }
 
-/// A symbolic link is a mode and a blob whose bytes are the target, and git
-/// checks one out as a link.
+/// A symbolic link is a mode and a blob whose bytes are the target.
 #[test]
 #[ignore = "needs a git binary and a writable temporary directory"]
 fn a_symlink_is_checked_out_as_a_link() -> Outcome<()> {
@@ -493,8 +476,7 @@ fn a_symlink_is_checked_out_as_a_link() -> Outcome<()> {
 	outcome
 }
 
-/// A stream cut short is refused rather than half applied, which is what `done`
-/// and git's own `--done` are for.
+/// This is what `done` and git's own `--done` are for.
 #[test]
 #[ignore = "needs a git binary and a writable temporary directory"]
 fn a_stream_that_never_says_done_is_refused() -> Outcome<()> {

@@ -21,6 +21,9 @@
 //! byte on one side of it. Because a byte's name says what created it rather
 //! than where it sits, the name survives the byte being moved, and an edit
 //! anchored to it travels with the content it was written against.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_jdat::prelude::*;
@@ -29,12 +32,9 @@ use std::fmt;
 use std::ops::Range;
 
 
-/// Maximum number of bytes the varint encoding of a `u64` occupies.
-pub const VARINT_MAX_LEN: usize = 10;
+pub const VARINT_MAX_LEN: usize = 10; // bytes a u64 varint may occupy
 
 
-/// Appends the LEB128-style varint encoding of `n` to `buf`.
-///
 /// Each byte carries seven value bits, least significant group first, with the
 /// high bit set on every byte but the last.
 pub fn varint_encode(n: u64, buf: &mut Vec<u8>) {
@@ -50,8 +50,7 @@ pub fn varint_encode(n: u64, buf: &mut Vec<u8>) {
 	}
 }
 
-/// Decodes an LEB128-style varint from the front of `buf`, returning the value
-/// and the number of bytes consumed.
+/// Yields the value and how many bytes it took.
 ///
 /// Overlong encodings are rejected so that every value has exactly one byte
 /// spelling. Two spellings of one value would otherwise both verify against a
@@ -106,30 +105,24 @@ pub fn varint_decode(buf: &[u8])
 pub struct ReplicaId(u64);
 
 impl ReplicaId {
-	/// Constructs a replica identifier from its numeric value.
 	pub const fn new(id: u64) -> Self {
 		Self(id)
 	}
 
-	/// Returns the numeric value.
 	pub const fn inner(&self) -> u64 {
 		self.0
 	}
 
-	/// Appends the varint encoding of the identifier to `buf`.
 	pub fn encode_into(&self, buf: &mut Vec<u8>) {
 		varint_encode(self.0, buf)
 	}
 
-	/// Returns the varint encoding of the identifier.
 	pub fn encode(&self) -> Vec<u8> {
 		let mut buf = Vec::with_capacity(VARINT_MAX_LEN);
 		self.encode_into(&mut buf);
 		buf
 	}
 
-	/// Decodes an identifier from the front of `buf`, returning it and the
-	/// number of bytes consumed.
 	pub fn decode(buf: &[u8])
 		-> Outcome<(Self, usize)>
 	{
@@ -154,34 +147,27 @@ impl fmt::Display for ReplicaId {
 /// is.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct OpId {
-	/// The replica that authored the operation.
-	pub replica:	ReplicaId,
-	/// That replica's own count, starting at one.
-	pub counter:	u64,
+	pub replica:	ReplicaId,	// the replica that authored the operation
+	pub counter:	u64,		// that replica's own count, from one
 }
 
 impl OpId {
-	/// Constructs an operation identifier.
 	pub const fn new(replica: ReplicaId, counter: u64) -> Self {
 		Self { replica, counter }
 	}
 
-	/// Appends the encoding of the identifier to `buf`, as replica then
-	/// counter, each a varint.
+	/// Replica then counter, each a varint.
 	pub fn encode_into(&self, buf: &mut Vec<u8>) {
 		self.replica.encode_into(buf);
 		varint_encode(self.counter, buf);
 	}
 
-	/// Returns the encoding of the identifier.
 	pub fn encode(&self) -> Vec<u8> {
 		let mut buf = Vec::with_capacity(2 * VARINT_MAX_LEN);
 		self.encode_into(&mut buf);
 		buf
 	}
 
-	/// Decodes an identifier from the front of `buf`, returning it and the
-	/// number of bytes consumed.
 	pub fn decode(buf: &[u8])
 		-> Outcome<(Self, usize)>
 	{
@@ -190,7 +176,6 @@ impl OpId {
 		Ok((Self { replica, counter }, n1 + n2))
 	}
 
-	/// Decodes an identifier that must occupy the whole of `buf`.
 	pub fn decode_all(buf: &[u8])
 		-> Outcome<Self>
 	{
@@ -204,8 +189,7 @@ impl OpId {
 		Ok(id)
 	}
 
-	/// Serialises the identifier to a [`Dat`]. The shape is
-	/// `[replica, counter]`.
+	/// The shape is `[replica, counter]`.
 	pub fn to_dat(&self) -> Dat {
 		Dat::List(vec![
 			Dat::U64(self.replica.inner()),
@@ -213,7 +197,6 @@ impl OpId {
 		])
 	}
 
-	/// Reconstructs an identifier from a [`Dat`] produced by [`OpId::to_dat`].
 	pub fn from_dat(dat: &Dat)
 		-> Outcome<Self>
 	{
@@ -307,14 +290,11 @@ impl std::str::FromStr for OpId {
 /// history does, wherever the byte is later placed.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ContentId {
-	/// The operation that created the byte.
-	pub op:		OpId,
-	/// Offset of the byte within that operation's inserted run.
-	pub off:	u64,
+	pub op:		OpId,	// the operation that created the byte
+	pub off:	u64,	// offset of the byte within that operation's inserted run
 }
 
 impl ContentId {
-	/// Constructs a content identifier.
 	pub const fn new(op: OpId, off: u64) -> Self {
 		Self { op, off }
 	}
@@ -331,7 +311,7 @@ impl ContentId {
 		Self { op: file, off: 0 }
 	}
 
-	/// Serialises the identifier to a [`Dat`]. The shape is `[op, off]`.
+	/// The shape is `[op, off]`.
 	pub fn to_dat(&self) -> Dat {
 		Dat::List(vec![
 			self.op.to_dat(),
@@ -339,8 +319,6 @@ impl ContentId {
 		])
 	}
 
-	/// Reconstructs an identifier from a [`Dat`] produced by
-	/// [`ContentId::to_dat`].
 	pub fn from_dat(dat: &Dat)
 		-> Outcome<Self>
 	{
@@ -386,17 +364,12 @@ impl fmt::Display for ContentId {
 /// the constructor.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ContentRange {
-	/// The operation that created the bytes.
-	op:		OpId,
-	/// First offset, inclusive.
-	from:	u64,
-	/// Last offset, exclusive.
-	to:		u64,
+	op:		OpId,	// the operation that created the bytes
+	from:	u64,	// first offset, inclusive
+	to:		u64,	// last offset, exclusive
 }
 
 impl ContentRange {
-	/// Constructs a content range, refusing one whose end precedes its start.
-	///
 	/// An empty range is allowed, because splitting a run at its own edge is
 	/// arithmetic that should not have to be special-cased; a reversed one names
 	/// nothing and is a mistake.
@@ -412,23 +385,18 @@ impl ContentRange {
 		Ok(Self { op, from, to })
 	}
 
-	/// Returns the operation that created the bytes.
 	pub const fn op(&self) -> OpId {
 		self.op
 	}
 
-	/// Returns the first offset, inclusive.
 	pub const fn from(&self) -> u64 {
 		self.from
 	}
 
-	/// Returns the last offset, exclusive.
 	pub const fn to(&self) -> u64 {
 		self.to
 	}
 
-	/// Moves the end of the range, refusing an end that precedes the start.
-	///
 	/// This is how a caller coalescing abutting runs grows one without rebuilding
 	/// it, and the only way the end moves from outside this module.
 	pub fn set_to(&mut self, to: u64)
@@ -444,32 +412,27 @@ impl ContentRange {
 		Ok(())
 	}
 
-	/// Returns the number of bytes the range names.
 	pub const fn len(&self) -> u64 {
 		self.to - self.from
 	}
 
-	/// Reports whether the range names no bytes.
 	pub const fn is_empty(&self) -> bool {
 		self.to == self.from
 	}
 
-	/// Returns the offsets as a half-open range, for interval bookkeeping.
 	pub const fn offsets(&self) -> Range<u64> {
 		self.from..self.to
 	}
 
-	/// Reports whether the range names the given byte.
 	pub fn contains(&self, cid: &ContentId) -> bool {
 		cid.op == self.op && cid.off >= self.from && cid.off < self.to
 	}
 
-	/// Reports whether two ranges name at least one byte in common.
+	/// Ranges over different creating operations never intersect.
 	pub fn intersects(&self, other: &Self) -> bool {
 		self.op == other.op && self.from < other.to && other.from < self.to
 	}
 
-	/// Returns the bytes two ranges have in common, if any.
 	pub fn intersection(&self, other: &Self)
 		-> Option<Self>
 	{
@@ -483,7 +446,7 @@ impl ContentRange {
 		})
 	}
 
-	/// Serialises the range to a [`Dat`]. The shape is `[op, from, to]`.
+	/// The shape is `[op, from, to]`.
 	pub fn to_dat(&self) -> Dat {
 		Dat::List(vec![
 			self.op.to_dat(),
@@ -492,7 +455,6 @@ impl ContentRange {
 		])
 	}
 
-	/// Reconstructs a range from a [`Dat`] produced by [`ContentRange::to_dat`].
 	pub fn from_dat(dat: &Dat)
 		-> Outcome<Self>
 	{
@@ -525,14 +487,11 @@ impl fmt::Display for ContentRange {
 /// Which side of a byte a gap lies on.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Side {
-	/// The gap immediately preceding the byte.
 	Before,
-	/// The gap immediately following the byte.
 	After,
 }
 
 impl Side {
-	/// Returns the wire code for the side.
 	pub const fn code(&self) -> u8 {
 		match self {
 			Self::Before	=> 0,
@@ -540,7 +499,6 @@ impl Side {
 		}
 	}
 
-	/// Reconstructs a side from its wire code.
 	pub fn from_code(code: u8)
 		-> Outcome<Self>
 	{
@@ -575,26 +533,21 @@ impl fmt::Display for Side {
 /// end of the file, which no byte names.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Anchor {
-	/// The byte the gap is named by.
-	pub content:	ContentId,
-	/// Which side of that byte the gap lies on.
-	pub side:		Side,
+	pub content:	ContentId,	// the byte the gap is named by
+	pub side:		Side,		// which side of that byte the gap lies on
 }
 
 impl Anchor {
-	/// Constructs an anchor.
 	pub const fn new(content: ContentId, side: Side) -> Self {
 		Self { content, side }
 	}
 
-	/// Constructs the anchor immediately following a byte, which is the form a
-	/// left origin takes.
+	/// The form a left origin takes.
 	pub const fn after(content: ContentId) -> Self {
 		Self { content, side: Side::After }
 	}
 
-	/// Constructs the anchor immediately preceding a byte, which is the form a
-	/// right origin takes.
+	/// The form a right origin takes.
 	pub const fn before(content: ContentId) -> Self {
 		Self { content, side: Side::Before }
 	}
@@ -609,7 +562,7 @@ impl Anchor {
 		Self::after(ContentId::origin(file))
 	}
 
-	/// Serialises the anchor to a [`Dat`]. The shape is `[content, side]`.
+	/// The shape is `[content, side]`.
 	pub fn to_dat(&self) -> Dat {
 		Dat::List(vec![
 			self.content.to_dat(),
@@ -617,7 +570,6 @@ impl Anchor {
 		])
 	}
 
-	/// Reconstructs an anchor from a [`Dat`] produced by [`Anchor::to_dat`].
 	pub fn from_dat(dat: &Dat)
 		-> Outcome<Self>
 	{
@@ -639,14 +591,11 @@ impl Anchor {
 		})
 	}
 
-	/// Serialises an optional anchor to a [`Dat`], absence being the start or
-	/// the end of the file.
+	/// Absence is the start or the end of the file.
 	pub fn opt_to_dat(anchor: &Option<Self>) -> Dat {
 		Dat::Opt(Box::new(anchor.as_ref().map(|a| a.to_dat())))
 	}
 
-	/// Reconstructs an optional anchor from a [`Dat`] produced by
-	/// [`Anchor::opt_to_dat`].
 	pub fn opt_from_dat(dat: &Dat)
 		-> Outcome<Option<Self>>
 	{
@@ -679,8 +628,8 @@ mod tests {
 		let mut v = vec![
 			0,
 			1,
-			127,			// Largest single byte value.
-			128,			// Smallest two byte value.
+			127,			// largest single byte value
+			128,			// smallest two byte value
 			u64::MAX,
 			u64::MAX - 1,
 			u64::MAX / 2,
@@ -694,8 +643,6 @@ mod tests {
 		v
 	}
 
-	/// Every boundary value survives a varint round trip and consumes exactly
-	/// the bytes it wrote.
 	#[test]
 	fn varint_round_trip() -> Outcome<()> {
 		for n in boundary_values() {
@@ -744,7 +691,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A truncated varint is an error, not a silent short read.
 	#[test]
 	fn varint_rejects_truncation() -> Outcome<()> {
 		assert!(varint_decode(&[]).is_err());
@@ -757,13 +703,12 @@ mod tests {
 	/// one spelling.
 	#[test]
 	fn varint_rejects_overlong_encodings() -> Outcome<()> {
-		assert!(varint_decode(&[0x80, 0x00]).is_err());			// Overlong zero.
-		assert!(varint_decode(&[0x81, 0x00]).is_err());			// Overlong one.
-		assert!(varint_decode(&[0xff, 0x80, 0x00]).is_err());	// Overlong 127.
+		assert!(varint_decode(&[0x80, 0x00]).is_err());			// overlong zero
+		assert!(varint_decode(&[0x81, 0x00]).is_err());			// overlong one
+		assert!(varint_decode(&[0xff, 0x80, 0x00]).is_err());	// overlong 127
 		Ok(())
 	}
 
-	/// A varint too large for a `u64` is rejected rather than wrapped.
 	#[test]
 	fn varint_rejects_overflow() -> Outcome<()> {
 		// Ten bytes whose final byte carries more than the one remaining bit.
@@ -775,7 +720,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// The maximal `u64` occupies ten bytes with a final byte of one.
 	#[test]
 	fn varint_encodes_the_maximum() -> Outcome<()> {
 		let mut buf = Vec::new();
@@ -787,8 +731,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// Every combination of boundary replica and counter survives the byte
-	/// round trip.
 	#[test]
 	fn op_id_byte_round_trip() -> Outcome<()> {
 		for r in boundary_values() {
@@ -802,8 +744,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// An identifier decodes from the front of a longer buffer, consuming only
-	/// its own bytes, and `decode_all` refuses the same buffer.
 	#[test]
 	fn op_id_decodes_as_a_prefix() -> Outcome<()> {
 		let id = OpId::new(ReplicaId::new(300), 70_000);
@@ -817,8 +757,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// Every combination of boundary replica and counter survives the [`Dat`]
-	/// round trip.
 	#[test]
 	fn op_id_dat_round_trip() -> Outcome<()> {
 		for r in boundary_values() {
@@ -831,7 +769,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A malformed [`Dat`] is refused.
 	#[test]
 	fn op_id_from_dat_rejects_rubbish() -> Outcome<()> {
 		assert!(OpId::from_dat(&Dat::U64(7)).is_err());
@@ -847,7 +784,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// Identifiers order by replica first, then by counter.
 	#[test]
 	fn op_id_orders_by_replica_then_counter() -> Outcome<()> {
 		let a = OpId::new(ReplicaId::new(1), 9);
@@ -859,7 +795,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// The display form names both parts.
 	#[test]
 	fn op_id_displays_both_parts() -> Outcome<()> {
 		let id = OpId::new(ReplicaId::new(4), 17);
@@ -867,13 +802,10 @@ mod tests {
 		Ok(())
 	}
 
-	/// A sample operation identifier, for the content identifier tests.
 	fn an_op() -> OpId {
 		OpId::new(ReplicaId::new(3), 9)
 	}
 
-	/// Content identifiers survive a [`Dat`] round trip at the boundaries of the
-	/// offset.
 	#[test]
 	fn content_id_dat_round_trip() -> Outcome<()> {
 		for off in boundary_values() {
@@ -883,8 +815,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// Content ranges survive a [`Dat`] round trip, and a malformed one is
-	/// refused.
 	#[test]
 	fn content_range_dat_round_trip() -> Outcome<()> {
 		for (from, to) in [(0u64, 0u64), (0, 1), (7, 9), (0, u64::MAX)] {
@@ -905,7 +835,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A reversed range is refused, and an empty one is not.
 	#[test]
 	fn content_range_refuses_only_reversal() -> Outcome<()> {
 		assert!(ContentRange::new(an_op(), 5, 4).is_err());
@@ -968,8 +897,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// Anchors, present and absent, survive a [`Dat`] round trip, and a side is
-	/// not invented from an unknown code.
 	#[test]
 	fn anchor_dat_round_trip() -> Outcome<()> {
 		let cid = ContentId::new(an_op(), 4);
@@ -1001,7 +928,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// The display forms name the operation, the offset and the side.
 	#[test]
 	fn content_names_display_readably() -> Outcome<()> {
 		let cid = ContentId::new(an_op(), 4);
@@ -1043,18 +969,18 @@ mod tests {
 		// be written two ways in the very records that exist to be compared.
 		for bad in [
 			"",
-			"3:4",					// The r is not decoration.
-			"r3",					// No counter.
-			"r:4",					// No replica.
-			"r3:",					// An empty counter.
-			"R3:4",					// The prefix is one character and it is lower case.
-			" r3:4",				// Nothing is trimmed.
+			"3:4",					// the r is not decoration
+			"r3",					// no counter
+			"r:4",					// no replica
+			"r3:",					// an empty counter
+			"R3:4",					// the prefix is one character and it is lower case
+			" r3:4",				// nothing is trimmed
 			"r3:4 ",
-			"r3:4:5",				// A counter is a number, and 4:5 is not one.
-			"r-3:4",				// A replica is not negative.
+			"r3:4:5",				// a counter is a number, and 4:5 is not one
+			"r-3:4",				// a replica is not negative
 			"r3:-4",
-			"r3.4",					// The separator is a colon, which is what Display writes.
-			"r18446744073709551616:1",	// One past a u64, refused rather than wrapped.
+			"r3.4",					// the separator is a colon, which is what Display writes
+			"r18446744073709551616:1",	// one past a u64, refused rather than wrapped
 		] {
 			assert!(OpId::from_str(bad).is_err(), "the text {:?} was accepted", bad);
 		}

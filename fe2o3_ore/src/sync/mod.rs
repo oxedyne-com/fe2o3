@@ -51,6 +51,9 @@
 //!   name is keyed, how the table is sized, and what a decode yields.
 //! - [`session`] is the driver: feed it a message, take the messages it hands
 //!   back, and read the outcome.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 pub mod msg;
 pub mod session;

@@ -7,6 +7,9 @@
 //! and does the right thing with what comes back, which is all it is
 //! responsible for; the strength of a real scheme is tested where it is
 //! implemented.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::alt::Gnomon;
 use oxedyne_fe2o3_core::prelude::*;
@@ -77,9 +80,7 @@ impl Hasher for Fold {
 /// it is implemented.
 #[derive(Clone, Debug, Default)]
 pub struct StubSigner {
-	/// Public key bytes.
 	pub pk: Vec<u8>,
-	/// Secret key bytes.
 	pub sk: Vec<u8>,
 }
 
@@ -87,7 +88,7 @@ impl StubSigner {
 	/// Constructs a key pair from a seed byte.
 	pub fn with_seed(seed: u8) -> Self {
 		Self {
-			pk: vec![seed; 40],					// Longer than a BU8 length would matter.
+			pk: vec![seed; 40],					// longer than a BU8 length would matter
 			sk: vec![seed.wrapping_add(1); 40],
 		}
 	}
@@ -104,8 +105,8 @@ impl StubSigner {
 		acc
 	}
 
-	/// The public key a given secret key corresponds to, under the
-	/// stand-in's trivial relation.
+	/// The public key a given secret key corresponds to, under the stand-in's
+	/// trivial relation.
 	pub fn public_of(sk: &[u8]) -> Vec<u8> {
 		sk.iter().map(|b| b.wrapping_sub(1)).collect()
 	}

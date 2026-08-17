@@ -44,6 +44,9 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::op::Mode;
 
@@ -52,12 +55,8 @@ use oxedyne_fe2o3_core::prelude::*;
 use std::fmt;
 
 
-/// Number of consumed bytes tolerated at the front of the buffer before it is
-/// compacted.
-const COMPACT_THRESHOLD: usize = 64 * 1024;
-
-/// Longest run of a stream line quoted back in an error message.
-const SHOW_LIMIT: usize = 120;
+const COMPACT_THRESHOLD: usize = 64 * 1024;	// consumed prefix tolerated
+const SHOW_LIMIT: usize = 120;			// bytes of a line quoted in an error
 
 
 // ---------------------------------------------------------------------------
@@ -72,11 +71,8 @@ const SHOW_LIMIT: usize = 120;
 /// which the stream mints itself, is unambiguous.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ObjRef {
-	/// A mark minted earlier in this stream, written `:N`.
-	Mark(u64),
-	/// An object name: a hex object identifier, a branch name, or a revision
-	/// expression.
-	Name(String),
+	Mark(u64),	// `:N`
+	Name(String),	// hex oid, branch name, or revision expression
 }
 
 impl fmt::Display for ObjRef {
@@ -95,13 +91,9 @@ impl fmt::Display for ObjRef {
 /// the bytes in line with the file command.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BlobRef {
-	/// A mark minted earlier in this stream, written `:N`.
-	Mark(u64),
-	/// An object name: a hex object identifier or a revision expression.
-	Name(String),
-	/// The bytes themselves, which followed the file command as a `data`
-	/// payload.
-	Inline(Vec<u8>),
+	Mark(u64),		// `:N`
+	Name(String),		// hex oid or revision expression
+	Inline(Vec<u8>),	// bytes that followed the file command as a `data` payload
 }
 
 
@@ -111,21 +103,15 @@ pub enum BlobRef {
 /// outside the set is a stream this parser will not guess at.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum FileMode {
-	/// A normal, non-executable file, `100644`.
-	Normal,
-	/// An executable file, `100755`.
-	Executable,
-	/// A symbolic link, `120000`.
-	Symlink,
-	/// A commit of another repository, `160000`.
-	Gitlink,
-	/// A subdirectory, `040000`.
-	Subdirectory,
+	Normal,		// 100644
+	Executable,	// 100755
+	Symlink,	// 120000
+	Gitlink,	// 160000, a commit of another repository
+	Subdirectory,	// 040000, a directory entry
 }
 
 impl FileMode {
-	/// Parses a mode as the stream spells it, accepting both the six digit
-	/// form and the shortened form git also permits.
+	/// Accepts both the six digit form and the shortened form git also permits.
 	pub fn from_bytes(bytes: &[u8])
 		-> Outcome<Self>
 	{
@@ -141,9 +127,6 @@ impl FileMode {
 		}
 	}
 
-	/// Returns what the vocabulary calls this mode, where the mode names
-	/// something the vocabulary can hold.
-	///
 	/// `None` is a gitlink or a directory entry: both are things a tree can point
 	/// at and neither is a file with bytes, so there is nothing for
 	/// [`crate::op::Op::FileMode`] to say about them. A consumer that meets one
@@ -159,7 +142,6 @@ impl FileMode {
 		}
 	}
 
-	/// Returns the six digit form of the mode.
 	pub const fn as_str(&self) -> &'static str {
 		match self {
 			Self::Normal		=> "100644",
@@ -181,21 +163,15 @@ impl fmt::Display for FileMode {
 /// An offset from UTC, as an identity line carries it.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct TzOffset {
-	/// The offset in minutes, positive east of UTC.
-	pub mins:	i32,
-	/// Whether the offset was written with a leading minus. This carries
-	/// information only for `-0000`, which git writes to mean that the
-	/// timezone is unknown; everywhere else it follows the sign of `mins`.
-	pub neg:	bool,
+	pub mins:	i32,	// minutes, positive east of UTC
+	pub neg:	bool,	// minus as written; only `-0000`, the unknown zone, needs it
 }
 
 impl TzOffset {
-	/// Constructs an offset from a signed number of minutes.
 	pub const fn new(mins: i32) -> Self {
 		Self { mins, neg: mins < 0 }
 	}
 
-	/// Returns the offset in seconds, positive east of UTC.
 	pub const fn secs(&self) -> i32 {
 		self.mins * 60
 	}
@@ -212,9 +188,7 @@ impl fmt::Display for TzOffset {
 /// The moment an identity line records.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct When {
-	/// Seconds since the Unix epoch, which git allows to be negative.
-	pub secs:	i64,
-	/// The offset from UTC that the author's clock was showing.
+	pub secs:	i64,	// since the Unix epoch, which git allows to be negative
 	pub tz:		TzOffset,
 }
 
@@ -232,21 +206,16 @@ impl fmt::Display for When {
 /// the kind that has a Latin-1 name in it.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Person {
-	/// The name, which the stream permits to be empty.
-	pub name:	Vec<u8>,
-	/// The email, without its surrounding angle brackets.
-	pub email:	Vec<u8>,
-	/// When the line was written.
+	pub name:	Vec<u8>,	// may be empty
+	pub email:	Vec<u8>,	// without its angle brackets
 	pub when:	When,
 }
 
 impl Person {
-	/// Returns the name, with any byte that is not valid UTF-8 replaced.
 	pub fn name_lossy(&self) -> String {
 		String::from_utf8_lossy(&self.name).into_owned()
 	}
 
-	/// Returns the email, with any byte that is not valid UTF-8 replaced.
 	pub fn email_lossy(&self) -> String {
 		String::from_utf8_lossy(&self.email).into_owned()
 	}
@@ -256,12 +225,9 @@ impl Person {
 /// A commit signature carried verbatim through the stream.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GpgSig {
-	/// The object hash the signature was made over, `sha1` or `sha256`.
-	pub algo:	String,
-	/// The signature format, such as `openpgp`, `x509` or `ssh`.
-	pub format:	String,
-	/// The signature itself, unexamined.
-	pub sig:	Vec<u8>,
+	pub algo:	String,		// `sha1` or `sha256`
+	pub format:	String,		// `openpgp`, `x509`, `ssh`
+	pub sig:	Vec<u8>,	// unexamined
 }
 
 
@@ -273,41 +239,25 @@ pub struct GpgSig {
 /// the path itself.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FileChange {
-	/// Sets the content and mode of a path, `M`.
-	Modify {
-		/// The mode the path takes.
+	Modify {	// `M`, sets the content and mode of a path
 		mode:	FileMode,
-		/// Where the content comes from.
 		data:	BlobRef,
-		/// The path affected.
 		path:	Vec<u8>,
 	},
-	/// Removes a path, `D`.
-	Delete {
-		/// The path removed.
+	Delete {	// `D`
 		path:	Vec<u8>,
 	},
-	/// Copies a path, leaving the source in place, `C`.
-	Copy {
-		/// The path copied from.
+	Copy {		// `C`, leaving the source in place
 		src:	Vec<u8>,
-		/// The path copied to.
 		dst:	Vec<u8>,
 	},
-	/// Moves a path, `R`.
-	Rename {
-		/// The path moved from.
+	Rename {	// `R`
 		src:	Vec<u8>,
-		/// The path moved to.
 		dst:	Vec<u8>,
 	},
-	/// Empties the tree before the remaining changes apply, `deleteall`.
-	DeleteAll,
-	/// Attaches a note to a commit, `N`.
-	Note {
-		/// Where the note content comes from.
+	DeleteAll,	// `deleteall`, emptying the tree before the rest apply
+	Note {		// `N`, annotating a commit
 		data:	BlobRef,
-		/// The commit annotated.
 		commit:	ObjRef,
 	},
 }
@@ -316,13 +266,10 @@ pub enum FileChange {
 /// A `blob` command and its payload.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Blob {
-	/// The mark the stream assigns, if any.
 	pub mark:		Option<u64>,
-	/// The name this object had in the exporting repository, if the stream
-	/// says.
-	pub original_oid:	Option<String>,
-	/// The payload, raw. It is never line-parsed, so a blob holding NUL bytes
-	/// or bare line feeds survives untouched.
+	pub original_oid:	Option<String>,	// its name in the exporting repository
+	// The payload is never line-parsed, so a blob holding NUL bytes or bare
+	// line feeds survives untouched.
 	pub data:		Vec<u8>,
 }
 
@@ -330,48 +277,30 @@ pub struct Blob {
 /// A `commit` command, complete with its file changes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Commit {
-	/// The reference the commit is written to, such as `refs/heads/main`.
 	pub refname:		String,
-	/// The mark the stream assigns, if any.
 	pub mark:		Option<u64>,
-	/// The name this commit had in the exporting repository, if the stream
-	/// says.
 	pub original_oid:	Option<String>,
-	/// The author, which the stream may omit when it matches the committer.
-	pub author:		Option<Person>,
-	/// The committer, which the stream always gives.
+	pub author:		Option<Person>,		// absent where it is the committer
 	pub committer:		Person,
-	/// The character encoding of the message, if the stream declares one.
-	pub encoding:		Option<Vec<u8>>,
-	/// The commit signature, if the stream carries one.
+	pub encoding:		Option<Vec<u8>>,	// of the message
 	pub gpgsig:		Option<GpgSig>,
-	/// The commit message, raw.
 	pub message:		Vec<u8>,
-	/// The first parent, absent for a root commit or when the branch already
-	/// stands where the commit builds on.
+	// Parents. `from` is absent for a root commit, and where the branch
+	// already stands where the commit builds on.
 	pub from:		Option<ObjRef>,
-	/// The remaining parents, in order.
-	pub merges:		Vec<ObjRef>,
-	/// The changes the commit makes, in stream order, which is the order they
-	/// must be applied in.
-	pub changes:		Vec<FileChange>,
+	pub merges:		Vec<ObjRef>,		// the rest, in order
+	pub changes:		Vec<FileChange>,	// stream order is apply order
 }
 
 
 /// A `tag` command.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Tag {
-	/// The tag's short name, without the `refs/tags/` prefix.
-	pub name:		String,
-	/// The mark the stream assigns, if any.
+	pub name:		String,		// short, without the `refs/tags/` prefix
 	pub mark:		Option<u64>,
-	/// The name this tag had in the exporting repository, if the stream says.
 	pub original_oid:	Option<String>,
-	/// The object tagged.
-	pub from:		ObjRef,
-	/// Who made the tag, which a stream from an older repository may omit.
-	pub tagger:		Option<Person>,
-	/// The tag message, raw.
+	pub from:		ObjRef,		// the object tagged
+	pub tagger:		Option<Person>,	// an older repository's stream may omit it
 	pub message:		Vec<u8>,
 }
 
@@ -383,46 +312,27 @@ pub struct Tag {
 /// whole for the same reason: its payload is what the consumer wanted.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Event {
-	/// A `blob` command.
 	Blob(Blob),
-	/// A `commit` command.
 	Commit(Commit),
-	/// A `tag` command.
 	Tag(Tag),
-	/// A `reset` command, which points a reference somewhere.
+	// A `reset` points a reference somewhere. Without `from` the reference
+	// is only declared, and the commit that follows defines it.
 	Reset {
-		/// The reference set.
 		refname:	String,
-		/// Where it is set to. Absent, the reference is only declared, and
-		/// the commit that follows will define it.
 		from:		Option<ObjRef>,
 	},
-	/// A `progress` command, whose text is for the operator and means nothing
-	/// to the import.
-	Progress(Vec<u8>),
-	/// A `checkpoint` command, asking the consumer to make its work durable.
-	Checkpoint,
-	/// An `alias` command, giving a second mark to an object already named.
-	Alias {
-		/// The new mark.
+	Progress(Vec<u8>),	// text for the operator; means nothing to the import
+	Checkpoint,		// asks the consumer to make its work durable
+	Alias {			// a second mark for an object already named
 		mark:	u64,
-		/// The object it now also names.
 		to:	ObjRef,
 	},
-	/// A `feature` command, declaring what the stream requires of its
-	/// consumer.
-	Feature {
-		/// The feature named.
+	Feature {		// what the stream requires of its consumer
 		name:	String,
-		/// Its argument, where the feature takes one.
 		arg:	Option<String>,
 	},
-	/// An `option` command, which a consumer is free to ignore when the option
-	/// is not one it knows.
-	Opt(Vec<u8>),
-	/// A `done` command, declaring that the stream is complete and was not
-	/// merely cut off.
-	Done,
+	Opt(Vec<u8>),		// an `option`, which a consumer may ignore
+	Done,			// the stream is complete, not merely cut off
 }
 
 
@@ -439,22 +349,16 @@ pub enum Event {
 /// stream is finished.
 #[derive(Debug, Default)]
 pub struct Parser {
-	/// Bytes fed but not yet turned into events, including a consumed prefix.
-	buf:	Vec<u8>,
-	/// How much of `buf` has been consumed.
-	pos:	usize,
-	/// Whether the caller has declared the stream complete.
+	buf:	Vec<u8>,	// fed but not yet turned into events, prefix included
+	pos:	usize,		// how much of `buf` has been consumed
 	eof:	bool,
 }
 
 impl Parser {
-	/// Constructs a parser with an empty buffer.
 	pub fn new() -> Self {
 		Self::default()
 	}
 
-	/// Adds bytes to the parser's buffer.
-	///
 	/// Chunk boundaries carry no meaning: a command may be split anywhere, and
 	/// the same stream delivered in different chunkings yields the same
 	/// events.
@@ -467,27 +371,21 @@ impl Parser {
 		self.buf.extend_from_slice(chunk);
 	}
 
-	/// Declares that no further bytes will be fed.
-	///
 	/// After this, a command that is still incomplete is an error rather than
 	/// a request for more input, which is how a truncated stream is caught.
 	pub fn end(&mut self) {
 		self.eof = true;
 	}
 
-	/// Returns true once the stream has ended and every byte of it has been
-	/// turned into an event.
+	/// Has the stream ended and every byte of it become an event?
 	pub fn is_exhausted(&self) -> bool {
 		self.eof && self.remaining().iter().all(|b| *b == b'\n')
 	}
 
-	/// Returns the bytes fed but not yet consumed.
 	pub fn remaining(&self) -> &[u8] {
 		&self.buf[self.pos..]
 	}
 
-	/// Returns the next complete event.
-	///
 	/// `None` means that the next command is not yet complete, or, once
 	/// [`Parser::end`] has been called, that the stream is finished. An error
 	/// names the offending line.
@@ -533,10 +431,8 @@ impl Parser {
 	}
 }
 
-/// Parses a whole stream held in memory.
-///
-/// This is the convenience form of [`Parser`] for a stream small enough to
-/// have already been read, and is used mostly in tests.
+/// The convenience form of [`Parser`] for a stream small enough to have
+/// already been read, used mostly in tests.
 pub fn parse_all(bytes: &[u8])
 	-> Outcome<Vec<Event>>
 {
@@ -557,12 +453,9 @@ pub fn parse_all(bytes: &[u8])
 
 /// The result of asking for the next line.
 enum Line<'a> {
-	/// A whole line, and the offset just past its line feed.
-	Got(&'a [u8], usize),
-	/// No bytes remain and none are coming.
-	End,
-	/// More input is needed before the line can be read.
-	Need,
+	Got(&'a [u8], usize),	// the line, and the offset just past its line feed
+	End,			// no bytes remain and none are coming
+	Need,			// more input is needed before the line can be read
 }
 
 /// Reads the line beginning at `pos`, without its line feed.
@@ -590,7 +483,6 @@ fn read_line(src: &[u8], pos: usize, eof: bool)
 	}
 }
 
-/// Returns the first line of `src`, for quoting in an error message.
 fn first_line(src: &[u8]) -> &[u8] {
 	match src.iter().position(|b| *b == b'\n') {
 		Some(i) => &src[..i],
@@ -621,10 +513,8 @@ pub(crate) fn show(bytes: &[u8]) -> String {
 // Command parsing.
 // ---------------------------------------------------------------------------
 
-/// Parses one command from the front of `src`.
-///
-/// Returns the event and the number of bytes it occupied, or `None` when the
-/// command is not yet complete.
+/// Parses one command from the front of `src`, giving the event and the bytes
+/// it occupied. `None` where the command is not yet complete.
 fn parse_command(src: &[u8], eof: bool)
 	-> Outcome<Option<(Event, usize)>>
 {
@@ -674,7 +564,6 @@ fn parse_command(src: &[u8], eof: bool)
 	}
 }
 
-/// Returns what follows `prefix` in `line`, if `line` begins with it.
 fn after<'a>(line: &'a [u8], prefix: &[u8]) -> Option<&'a [u8]> {
 	if line.starts_with(prefix) {
 		Some(&line[prefix.len()..])
@@ -683,7 +572,7 @@ fn after<'a>(line: &'a [u8], prefix: &[u8]) -> Option<&'a [u8]> {
 	}
 }
 
-/// Parses a `blob` command, whose introducing line has already been consumed.
+/// The `blob` line has already been consumed.
 fn parse_blob(src: &[u8], mut p: usize, eof: bool)
 	-> Outcome<Option<(Event, usize)>>
 {
@@ -719,8 +608,7 @@ fn parse_blob(src: &[u8], mut p: usize, eof: bool)
 	Ok(Some((Event::Blob(Blob { mark, original_oid, data }), p)))
 }
 
-/// Parses a `commit` command, whose introducing line has already been
-/// consumed.
+/// The `commit` line has already been consumed.
 fn parse_commit(src: &[u8], mut p: usize, refname: &[u8], eof: bool)
 	-> Outcome<Option<(Event, usize)>>
 {
@@ -845,8 +733,6 @@ fn parse_commit(src: &[u8], mut p: usize, refname: &[u8], eof: bool)
 	}), p)))
 }
 
-/// Parses one file command.
-///
 /// The outer `Option` is `None` when more input is needed. The inner `Option`
 /// is `None` when the line is not a file command at all, which is how a commit
 /// ends.
@@ -905,7 +791,7 @@ fn parse_file_change<'a>(src: &'a [u8], line: &'a [u8], next: usize, eof: bool)
 	}
 }
 
-/// Parses a `tag` command, whose introducing line has already been consumed.
+/// The `tag` line has already been consumed.
 fn parse_tag(src: &[u8], mut p: usize, name: &[u8], eof: bool)
 	-> Outcome<Option<(Event, usize)>>
 {
@@ -963,7 +849,7 @@ fn parse_tag(src: &[u8], mut p: usize, name: &[u8], eof: bool)
 	}), p)))
 }
 
-/// Parses a `reset` command, whose introducing line has already been consumed.
+/// The `reset` line has already been consumed.
 fn parse_reset(src: &[u8], p: usize, refname: &[u8], eof: bool)
 	-> Outcome<Option<(Event, usize)>>
 {
@@ -983,8 +869,7 @@ fn parse_reset(src: &[u8], p: usize, refname: &[u8], eof: bool)
 	}
 }
 
-/// Parses an `alias` command, whose introducing line has already been
-/// consumed.
+/// The `alias` line has already been consumed.
 fn parse_alias(src: &[u8], p: usize, eof: bool)
 	-> Outcome<Option<(Event, usize)>>
 {
@@ -1019,7 +904,6 @@ fn parse_alias(src: &[u8], p: usize, eof: bool)
 	Ok(Some((Event::Alias { mark, to }, p)))
 }
 
-/// Parses a `feature` command's argument.
 fn parse_feature(rest: &[u8])
 	-> Outcome<Event>
 {
@@ -1294,7 +1178,6 @@ fn parse_tz(bytes: &[u8], what: &str)
 	Ok(TzOffset { mins: if neg { -total } else { total }, neg })
 }
 
-/// Converts stream bytes that must be text into a string.
 fn parse_ascii(bytes: &[u8], what: &str)
 	-> Outcome<String>
 {
@@ -1433,9 +1316,6 @@ fn unquote_path(line: &[u8], pos: usize)
 mod test {
 	use super::*;
 
-	/// Parses a stream twice, once whole and once one byte at a time, and
-	/// requires both to give the same events.
-	///
 	/// This is where a boundary bug shows: a parser that peeks past what it has
 	/// been given behaves differently when the bytes trickle in.
 	fn parse_both_ways(stream: &[u8])
@@ -1481,7 +1361,6 @@ mod test {
 		Ok(whole)
 	}
 
-	/// Returns the person git would write for the fixtures below.
 	fn ada() -> Person {
 		Person {
 			name:	b"Ada Lovelace".to_vec(),
@@ -1490,7 +1369,6 @@ mod test {
 		}
 	}
 
-	/// A blob with a mark and a counted payload parses.
 	#[test]
 	fn blob_with_mark() -> Outcome<()> {
 		let events = res!(parse_both_ways(b"blob\nmark :1\ndata 5\nhello\n"));
@@ -1522,7 +1400,6 @@ mod test {
 		Ok(())
 	}
 
-	/// A payload of no bytes is a payload.
 	#[test]
 	fn empty_payload() -> Outcome<()> {
 		let events = res!(parse_both_ways(b"blob\ndata 0\n"));
@@ -1547,8 +1424,6 @@ mod test {
 		Ok(())
 	}
 
-	/// A commit with an author, a committer, a message and two file changes
-	/// parses into typed fields.
 	#[test]
 	fn commit_with_changes() -> Outcome<()> {
 		let stream: &[u8] = b"commit refs/heads/main\n\
@@ -1646,7 +1521,6 @@ mod test {
 		Ok(())
 	}
 
-	/// Inline file content is read as a payload and attached to the change.
 	#[test]
 	fn inline_file_content() -> Outcome<()> {
 		let stream: &[u8] = b"commit refs/heads/main\n\
@@ -1678,8 +1552,6 @@ mod test {
 		Ok(())
 	}
 
-	/// Every escape class a quoted path may use is decoded back to the bytes it
-	/// stands for.
 	#[test]
 	fn quoted_paths_unquote() -> Outcome<()> {
 		let stream: &[u8] = b"commit refs/heads/main\n\
@@ -1758,7 +1630,6 @@ mod test {
 		Ok(())
 	}
 
-	/// An escape the format does not define is refused rather than guessed at.
 	#[test]
 	fn unknown_escape_is_refused() -> Outcome<()> {
 		let stream: &[u8] = b"commit refs/heads/main\n\
@@ -1792,7 +1663,6 @@ mod test {
 		Ok(())
 	}
 
-	/// A delimited payload of no bytes parses.
 	#[test]
 	fn delimited_data_empty() -> Outcome<()> {
 		let events = res!(parse_both_ways(b"blob\ndata <<EOF\nEOF\n"));
@@ -1804,7 +1674,6 @@ mod test {
 		Ok(())
 	}
 
-	/// A tag parses with its tagger, its target and its message.
 	#[test]
 	fn tag_parses() -> Outcome<()> {
 		let stream: &[u8] = b"tag v1\n\
@@ -1887,7 +1756,6 @@ mod test {
 		Ok(())
 	}
 
-	/// Every mode git records parses, and one it does not is refused.
 	#[test]
 	fn file_modes() -> Outcome<()> {
 		let cases: [(&[u8], FileMode); 8] = [
@@ -1948,7 +1816,6 @@ mod test {
 		Ok(())
 	}
 
-	/// A name that is not UTF-8 survives as the bytes it is.
 	#[test]
 	fn non_utf8_name_survives() -> Outcome<()> {
 		let mut line = Vec::new();
@@ -1959,7 +1826,6 @@ mod test {
 		Ok(())
 	}
 
-	/// A commit signature is carried through without being examined.
 	#[test]
 	fn gpgsig_is_carried() -> Outcome<()> {
 		let stream: &[u8] = b"commit refs/heads/main\n\
@@ -1985,7 +1851,6 @@ mod test {
 		Ok(())
 	}
 
-	/// A note attached to a commit parses as a change.
 	#[test]
 	fn notemodify_parses() -> Outcome<()> {
 		let stream: &[u8] = b"commit refs/notes/commits\n\
@@ -2013,8 +1878,6 @@ mod test {
 		Ok(())
 	}
 
-	/// An unrecognised command names the offending line rather than being
-	/// skipped.
 	#[test]
 	fn unknown_command_names_the_line() -> Outcome<()> {
 		match parse_all(b"blob\ndata 0\nfrobnicate everything\n") {

@@ -15,6 +15,9 @@
 //! The ten single-file cases are beside this file in `tests.rs`, and they run
 //! through this same engine: file identity must not perturb single-file
 //! semantics, and that they are unchanged is the instrument for saying so.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::id::{
 	Anchor,
@@ -42,7 +45,7 @@ use crate::seq::{
 use oxedyne_fe2o3_core::prelude::*;
 
 
-/// The shopping list of the published worked case.
+// The shopping list of the published worked case.
 const LIST: &[u8] = b"- Eggs\n- Milk\n- Cheese\n";
 
 
@@ -54,21 +57,18 @@ const LIST: &[u8] = b"- Eggs\n- Milk\n- Cheese\n";
 /// except which render the destination gap is read from. That is the claim the
 /// whole exercise was to test, stated as code.
 struct Replica {
-	/// The replica number every operation of this replica is named by.
-	id:		u64,
-	/// The operations it holds.
+	id:		u64,			// every operation of this replica is named by it
 	seq:	Sequence,
 }
 
 impl Replica {
 
-	/// Constructs a replica holding nothing.
 	fn new(id: u64) -> Self {
 		Self { id, seq: Sequence::new() }
 	}
 
-	/// Mints the next header: a Lamport counter, and everything this replica can
-	/// see as the operation's parents.
+	/// A Lamport counter, and everything this replica can see as the operation's
+	/// parents.
 	fn next_head(&self)
 		-> Outcome<Header>
 	{
@@ -79,14 +79,12 @@ impl Replica {
 		)
 	}
 
-	/// Receives an operation from another replica.
 	fn recv(&mut self, op: (Header, Op))
 		-> Outcome<()>
 	{
 		self.seq.apply(op.0, op.1)
 	}
 
-	/// Renders the replica's view of one file.
 	fn view(&self, file: OpId)
 		-> Outcome<Rendered>
 	{
@@ -97,7 +95,6 @@ impl Replica {
 		}
 	}
 
-	/// Records an operation of this replica's own, and applies it.
 	fn author(&mut self, op: Op)
 		-> Outcome<(Header, Op)>
 	{
@@ -106,7 +103,6 @@ impl Replica {
 		Ok((head, op))
 	}
 
-	/// Creates a file, returning the operation and the file's identity.
 	fn create(&mut self, path: &[u8])
 		-> Outcome<((Header, Op), OpId)>
 	{
@@ -115,28 +111,24 @@ impl Replica {
 		Ok((made, id))
 	}
 
-	/// Renames a file.
 	fn rename(&mut self, file: OpId, path: &[u8])
 		-> Outcome<(Header, Op)>
 	{
 		self.author(Op::FileRename { file, path: path.to_vec() })
 	}
 
-	/// Deletes a file.
 	fn remove(&mut self, file: OpId)
 		-> Outcome<(Header, Op)>
 	{
 		self.author(Op::FileDelete { file })
 	}
 
-	/// Says what a file is.
 	fn set_mode(&mut self, file: OpId, mode: Mode)
 		-> Outcome<(Header, Op)>
 	{
 		self.author(Op::FileMode { file, mode })
 	}
 
-	/// Inserts bytes at an index of a file.
 	fn insert(&mut self, file: OpId, at: usize, bytes: &[u8])
 		-> Outcome<(Header, Op)>
 	{
@@ -144,7 +136,6 @@ impl Replica {
 		self.author(op)
 	}
 
-	/// Deletes a run at an index of a file.
 	fn delete(&mut self, file: OpId, at: usize, len: usize)
 		-> Outcome<(Header, Op)>
 	{
@@ -152,7 +143,7 @@ impl Replica {
 		self.author(op)
 	}
 
-	/// Replaces a run at an index of a file, in one splice.
+	/// One splice, not a deletion and an insertion.
 	fn replace(&mut self, file: OpId, at: usize, len: usize, bytes: &[u8])
 		-> Outcome<(Header, Op)>
 	{
@@ -160,7 +151,7 @@ impl Replica {
 		self.author(op)
 	}
 
-	/// Moves a run out of one file and into another, at an index of each.
+	/// At an index of each file.
 	fn move_across(
 		&mut self,
 		from:	OpId,
@@ -177,7 +168,6 @@ impl Replica {
 		self.author(op)
 	}
 
-	/// Writes a note about a run of a file.
 	fn note(&mut self, file: OpId, at: usize, len: usize, text: &[u8])
 		-> Outcome<(Header, Op)>
 	{
@@ -214,7 +204,6 @@ fn stage(files: &[(&[u8], &[u8])], n: u64)
 	Ok((reps, ops, ids))
 }
 
-/// Generates every permutation of `idx`.
 fn permute(idx: &mut Vec<usize>, k: usize, out: &mut Vec<Vec<usize>>) {
 	if k == idx.len() {
 		out.push(idx.clone());
@@ -384,7 +373,6 @@ fn a_cross_file_move_carries_a_concurrent_edit_with_it() -> Outcome<()> {
 	Ok(())
 }
 
-/// A cross-file move racing an in-file insertion at the same destination gap.
 #[test]
 fn a_cross_file_move_arbitrates_against_an_edit_at_its_destination() -> Outcome<()> {
 	let (mut reps, mut ops, ids) = res!(stage(
@@ -402,8 +390,6 @@ fn a_cross_file_move_arbitrates_against_an_edit_at_its_destination() -> Outcome<
 	Ok(())
 }
 
-/// Two branches independently create the same path and splice into it.
-///
 /// A walk that reconstructs the association from a path decides this by arrival
 /// order: the later creation takes the path, and the earlier file keeps its
 /// operations and its bytes and renders nowhere. Under identity both files exist,
@@ -525,8 +511,8 @@ fn a_cross_file_cycle_lets_the_later_move_win() -> Outcome<()> {
 	Ok(())
 }
 
-/// The same two-file cycle with a third replica editing inside one of the cycling
-/// blocks: the edit survives, and stays with its block wherever the block ends up.
+/// The same two-file cycle, with a third replica editing inside one of the
+/// cycling blocks.
 ///
 /// The composition question the arbitration has to answer. The edit's origin names
 /// content, the content is owned by whoever owns it after the arbitration, and the
@@ -634,7 +620,6 @@ fn an_informed_re_move_wins_its_cycle() -> Outcome<()> {
 	Ok(())
 }
 
-/// A move out of a file racing that file's deletion. What left survives.
 #[test]
 fn a_move_out_of_a_file_survives_its_deletion() -> Outcome<()> {
 	let (mut reps, mut ops, ids) = res!(stage(
@@ -648,8 +633,6 @@ fn a_move_out_of_a_file_survives_its_deletion() -> Outcome<()> {
 	Ok(())
 }
 
-/// An insertion into an empty file racing that file's rename.
-///
 /// Neither is difficult now, and the case is here because the vocabulary this
 /// replaces could not do it at all: a splice that names no existing content
 /// could only be routed by the path it recorded, and the rename had just made
@@ -768,8 +751,6 @@ fn an_in_file_cycle_is_still_demoted() -> Outcome<()> {
 	Ok(())
 }
 
-/// Content moved into a file that is concurrently deleted.
-///
 /// The bytes are not lost -- a slot owns them and the log holds them -- but
 /// nothing a reader looks at renders them. That is a hazard the design note did
 /// not name until the oracle found it, and it is what the flag exists for.
@@ -854,9 +835,6 @@ fn moving_a_files_origin_anchor_concatenates_the_files() -> Outcome<()> {
 // │ PROPERTIES ACROSS FILES                                                   │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Three replicas editing, moving within files and moving between them at
-/// random, agree on every file and conserve every byte the repository holds.
-///
 /// What this earns is not convergence, which is nearly free where the state is
 /// the operation set, but the repository-wide conservation invariant over
 /// operation sets nobody wrote by hand: no byte in two files, and no live byte
@@ -1067,9 +1045,6 @@ fn a_cycle_with_one_move_in_it_confines_that_move() -> Outcome<()> {
 	Ok(())
 }
 
-/// Every operation that placed anything landed in exactly one file, and the
-/// derived index says which.
-///
 /// This is the association a recorded file field would have asserted on the
 /// wire, computed by the render instead. A lazy fetcher wanting one file's
 /// operations reads it and caches it beside the log; an index that is wrong can
@@ -1159,9 +1134,6 @@ fn an_empty_file_is_not_empty_in_identifier_space() -> Outcome<()> {
 }
 
 
-/// A note crosses a file boundary with the content it is about: the run is moved
-/// into another file, and the note is now that file's to show.
-///
 /// This is the claim the whole vocabulary rests on, stated for notes: a note
 /// names content, content is repository-wide, and nothing in the note ever
 /// mentioned a file.
@@ -1204,9 +1176,8 @@ fn a_note_crosses_a_file_boundary_with_its_content() -> Outcome<()> {
 	Ok(())
 }
 
-/// A note whose content is torn across two files is reported in both and listed
-/// once: each file says where its share of the content is, and the repository
-/// says the note is in two places.
+/// Each file says where its share of the content is, and the repository says the
+/// note is in two places.
 #[test]
 fn a_note_torn_across_two_files_is_listed_once() -> Outcome<()> {
 	let (mut reps, mut ops, ids) = res!(stage(&[
@@ -1259,9 +1230,8 @@ fn a_note_torn_across_two_files_is_listed_once() -> Outcome<()> {
 	Ok(())
 }
 
-/// A note on content that was moved into a deleted file is not a note on dead
-/// content: the bytes still render, into a file no reader looks at, and that is
-/// what the flag beside it says.
+/// The bytes still render, into a file no reader looks at, and that is what the
+/// flag beside it says.
 #[test]
 fn a_note_in_a_deleted_file_is_not_a_note_on_dead_content() -> Outcome<()> {
 	let (mut reps, mut ops, ids) = res!(stage(&[
@@ -1520,8 +1490,6 @@ fn a_mode_survives_a_rename_and_an_edit() -> Outcome<()> {
 	Ok(())
 }
 
-/// A file nothing has spoken about is a normal file, whatever else the history
-/// did to it.
 #[test]
 fn a_file_nobody_named_is_normal() -> Outcome<()> {
 	let (mut reps, mut ops, ids) = res!(stage(&[(b"a.txt", b"hello\n")], 1));
@@ -1568,8 +1536,7 @@ fn concurrent_modes_settle_by_op_order() -> Outcome<()> {
 	Ok(())
 }
 
-/// A mode named against a file no operation in the set created is refused, and
-/// the message says the set is not causally complete.
+/// The message says the set is not causally complete.
 ///
 /// The same refusal a rename and a delete get, for the same reason: the render
 /// cannot say what it does not hold.
@@ -1591,8 +1558,8 @@ fn a_mode_of_an_absent_file_is_refused() -> Outcome<()> {
 	Ok(())
 }
 
-/// A file's mode goes into a snapshot and comes back out of it, which is the
-/// point of carrying it there: a checkout reads a snapshot instead of the log.
+/// The point of carrying it there: a checkout reads a snapshot instead of the
+/// log.
 #[test]
 fn a_mode_rides_the_snapshot() -> Outcome<()> {
 	use crate::snapshot::{

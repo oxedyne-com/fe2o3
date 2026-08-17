@@ -42,6 +42,9 @@
 //! table under the shape the arriving one declares. Both sides do it, so two
 //! peers that estimated differently still reconcile -- each answering under the
 //! other's shape -- and there is no configuration to get wrong.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::id::{
 	OpId,
@@ -57,53 +60,44 @@ use oxedyne_fe2o3_data::iblt::{
 };
 
 
-/// The length of the fixed-length key an operation name takes in a sketch.
+/// The bytes an operation name takes as a sketch key, which is what the table
+/// is keyed on and what a peer's table must agree with.
 pub const KEY_LEN: usize = 16;
 
-/// The number of hashes each key is placed under, which the sizing rule below
-/// is stated at.
-pub const HASHES: usize = 3;
+pub const HASHES: usize = 3;		// hashes per key, what the sizing rule assumes
 
-/// The fewest cells a sketch is built with, whatever the estimate.
-pub const MIN_CELLS: usize = 16;
+pub const MIN_CELLS: usize = 16;	// fewest cells, whatever the estimate
 
-/// The most cells a sketch may declare before a receiver answers with the walk
-/// instead.
-///
-/// A peer that genuinely expects a difference this large wants a bulk transfer,
-/// which is what the walk is, so the cap costs nothing that was worth having.
+// The most cells a sketch may declare before a receiver answers with the walk
+// instead.  A peer that genuinely expects a difference this large wants a bulk
+// transfer, which is what the walk is, so the cap costs nothing that was worth
+// having.
 pub const MAX_CELLS: usize = 1 << 20;
 
-/// The seed a sketch is built under where the caller has no reason to choose
-/// another.
-///
 /// Two peers must sketch under the same seed to subtract at all, and they do:
 /// the seed travels in the table's own serialised form, and a receiver adopts
-/// it.
+/// it. This one is for a caller with no reason to choose another.
 pub const SEED: u64 = 0x4f52_4553_594e_4331;
 
 
 /// Why a sketch could not be turned into a difference.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Fallback {
-	/// The peeling decoder stalled: the difference was larger than the table was
-	/// sized for.
+	// The peeling decoder stalled: the difference was larger than the table was
+	// sized for.  What it recovered before stopping is discarded, since a part of
+	// a difference is not a difference.
 	Incomplete {
-		/// Cells still holding state when peeling stopped.
-		remaining:	usize,
-		/// Names recovered before it stopped, which are discarded: a part of a
-		/// difference is not a difference.
-		recovered:	usize,
+		remaining:	usize,	// cells still holding state when peeling stopped
+		recovered:	usize,	// names recovered before it stopped
 	},
-	/// The table declares more cells than [`MAX_CELLS`].
+	// The table declares more cells than MAX_CELLS.
 	Oversized {
-		/// The cell count declared.
-		cells: usize,
+		cells: usize,		// the cell count declared
 	},
 }
 
 impl Fallback {
-	/// Returns a short account of the reason, for a caller that logs one.
+	/// For a caller that logs the reason.
 	pub fn why(&self) -> String {
 		match self {
 			Self::Incomplete { remaining, recovered } => fmt!(
@@ -123,19 +117,17 @@ impl Fallback {
 /// What subtracting two sketches yielded.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Diff {
-	/// The difference, whole.
+	// The difference, whole, both halves ascending.
 	Decoded {
-		/// Operations only the remote peer holds, ascending.
-		remote_only:	Vec<OpId>,
-		/// Operations only this log holds, ascending, which is what is owed.
-		local_only:		Vec<OpId>,
+		remote_only:	Vec<OpId>,	// held only by the remote peer
+		local_only:		Vec<OpId>,	// held only here, which is what is owed
 	},
-	/// The difference could not be recovered, and why.
-	Undecodable(Fallback),
+	Undecodable(Fallback),	// not recovered, and why
 }
 
 
-/// Returns the sixteen-byte sketch key of an operation name.
+/// The replica in eight big-endian bytes, then the counter in eight more, so
+/// that the byte order of the keys is the order of the identifiers.
 pub fn key(id: &OpId) -> [u8; KEY_LEN] {
 	let mut out = [0u8; KEY_LEN];
 	out[..8].copy_from_slice(&id.replica.inner().to_be_bytes());
@@ -143,7 +135,6 @@ pub fn key(id: &OpId) -> [u8; KEY_LEN] {
 	out
 }
 
-/// Reconstructs an operation name from a sketch key.
 pub fn key_id(bytes: &[u8])
 	-> Outcome<OpId>
 {
@@ -162,16 +153,14 @@ pub fn key_id(bytes: &[u8])
 	))
 }
 
-/// Returns the number of cells a sketch is given for an expected difference of
-/// `estimate` names: one and a half per name, and never fewer than
-/// [`MIN_CELLS`].
+/// One and a half cells per expected name, floored at [`MIN_CELLS`] and capped
+/// at [`MAX_CELLS`].
 pub fn cells_for(estimate: usize) -> usize {
 	// Three halves, rounded up, without leaving the integers.
 	let want = estimate.saturating_mul(3).saturating_add(1) / 2;
 	want.max(MIN_CELLS).min(MAX_CELLS)
 }
 
-/// Returns the table shape for an expected difference of `estimate` names.
 pub fn config(estimate: usize, seed: u64) -> IbltConfig {
 	IbltConfig {
 		num_cells:	cells_for(estimate),
@@ -182,7 +171,6 @@ pub fn config(estimate: usize, seed: u64) -> IbltConfig {
 	}
 }
 
-/// Builds a sketch of every operation name the log holds.
 pub fn sketch(log: &OpLog, cfg: IbltConfig)
 	-> Outcome<Iblt>
 {
@@ -194,16 +182,13 @@ pub fn sketch(log: &OpLog, cfg: IbltConfig)
 	Ok(table)
 }
 
-/// Builds a sketch of every operation name the log holds, sized from an
-/// estimate of the difference, and returns its bytes.
+/// Sized from an estimate of the difference, not from the log.
 pub fn sketch_bytes(log: &OpLog, estimate: usize, seed: u64)
 	-> Outcome<Vec<u8>>
 {
 	Ok(res!(sketch(log, config(estimate, seed))).to_bytes())
 }
 
-/// Subtracts this log's sketch from an arriving one and peels the result.
-///
 /// The arriving table's shape is adopted, so peers that estimated differently
 /// still reconcile. A shape that is not a sketch of operation names at all is an
 /// error; a shape that is one but too large to work with is a fallback, since
@@ -258,7 +243,6 @@ fn check(cfg: &IbltConfig)
 	Ok(())
 }
 
-/// Turns recovered keys into operation names.
 fn names(recovered: &[(Vec<u8>, Vec<u8>)])
 	-> Outcome<Vec<OpId>>
 {
@@ -280,7 +264,6 @@ mod tests {
 		Record,
 	};
 
-	/// An operation identifier.
 	fn oid(replica: u64, counter: u64) -> OpId {
 		OpId::new(ReplicaId::new(replica), counter)
 	}
@@ -297,7 +280,6 @@ mod tests {
 		Ok(log)
 	}
 
-	/// The key is the replica and the counter, big-endian, and round trips.
 	#[test]
 	fn the_key_is_sixteen_fixed_bytes() -> Outcome<()> {
 		let id = oid(1, 7);
@@ -317,7 +299,7 @@ mod tests {
 		Ok(())
 	}
 
-	/// Sizing follows the rule, with a floor under it and a ceiling over it.
+	/// With a floor under it and a ceiling over it.
 	#[test]
 	fn sizing_is_three_halves_of_the_estimate() -> Outcome<()> {
 		assert_eq!(cells_for(0), MIN_CELLS);
@@ -334,8 +316,7 @@ mod tests {
 		Ok(())
 	}
 
-	/// Two logs that differ by a little reconcile to exactly that difference,
-	/// both halves of it, whichever side is asking.
+	/// Both halves of it, whichever side is asking.
 	#[test]
 	fn a_small_difference_decodes_whole() -> Outcome<()> {
 		// A shared prefix, then each side writes its own.
@@ -371,7 +352,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// Identical logs decode to no difference at all, in either direction.
 	#[test]
 	fn no_difference_decodes_to_nothing() -> Outcome<()> {
 		let a = res!(chain(1, 30));
@@ -387,8 +367,7 @@ mod tests {
 		Ok(())
 	}
 
-	/// A table sized for far less than the difference stalls, and says so rather
-	/// than handing back the part of the difference it got to.
+	/// Rather than handing back the part of the difference it got to.
 	#[test]
 	fn an_undersized_sketch_stalls_and_says_so() -> Outcome<()> {
 		let a = res!(chain(1, 200));
@@ -407,8 +386,7 @@ mod tests {
 		Ok(())
 	}
 
-	/// Peers that estimated differently still reconcile, because a receiver
-	/// answers under the shape it was sent.
+	/// Which is what lets peers that estimated differently still reconcile.
 	#[test]
 	fn a_receiver_adopts_the_arriving_shape() -> Outcome<()> {
 		let mut a = res!(chain(1, 40));
@@ -431,8 +409,8 @@ mod tests {
 		Ok(())
 	}
 
-	/// A table that is not a sketch of operation names is an error, and one that
-	/// is but is too big to work with is a fallback.
+	/// A table that is not a sketch of operation names is an error; one that is,
+	/// but is too big to work with, is a fallback.
 	#[test]
 	fn a_table_of_the_wrong_shape_is_refused() -> Outcome<()> {
 		let log = res!(chain(1, 5));
@@ -454,8 +432,7 @@ mod tests {
 		Ok(())
 	}
 
-	/// The bytes a sketch costs are set by the estimate and not by the log, which
-	/// is the whole reason to send one.
+	/// Which is the whole reason to send one.
 	#[test]
 	fn the_cost_follows_the_estimate_not_the_log() -> Outcome<()> {
 		let small = res!(chain(1, 10));
@@ -468,8 +445,7 @@ mod tests {
 		Ok(())
 	}
 
-	/// The difference a full decode yields is causally closed against what the
-	/// peer holds, because it is the complement of what both hold.
+	/// Because it is the complement of what both hold.
 	#[test]
 	fn a_decoded_difference_is_already_closed() -> Outcome<()> {
 		use crate::sync::walk::close;

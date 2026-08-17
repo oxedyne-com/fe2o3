@@ -45,6 +45,9 @@
 //! caller's behalf. That discipline is also what keeps the crate portable: it
 //! compiles for `wasm32-unknown-unknown` unchanged, so the same history logic
 //! runs in a browser and on a server without a second implementation.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 #![forbid(unsafe_code)]
 

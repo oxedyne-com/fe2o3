@@ -16,6 +16,9 @@
 //! move. A dead byte renders as nothing wherever it is, which is why move
 //! against delete needs no tie-break: the bytes move, and they are dead, and
 //! both are true at once.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::id::{
 	ContentId,
@@ -41,14 +44,11 @@ use std::ops::Range;
 /// a move of a contiguous run costs one interval however long the run is.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Claims {
-	/// Claims over each atom's offsets, by creating operation.
-	map: BTreeMap<OpId, IntervalMap<OpId>>,
+	map: BTreeMap<OpId, IntervalMap<OpId>>, // claimed offsets, by creating operation
 }
 
 impl Claims {
 
-	/// Constructs an empty register, in which every byte is still shown by the
-	/// splice that created it.
 	pub fn new() -> Self {
 		Self { map: BTreeMap::new() }
 	}
@@ -93,8 +93,6 @@ impl Claims {
 		Ok(Self { map })
 	}
 
-	/// Returns the operation whose slot owns the byte.
-	///
 	/// A byte no move has claimed is owned by the splice that created it.
 	pub fn owner(&self, cid: &ContentId) -> OpId {
 		self.map.get(&cid.op)
@@ -103,8 +101,7 @@ impl Claims {
 			.unwrap_or(cid.op)
 	}
 
-	/// Returns the maximal runs of `range` and their owners, in ascending order
-	/// of offset.
+	/// The maximal runs of `range` and their owners, in ascending order of offset.
 	///
 	/// Runs are maximal because a gap between claims is owned by the creating
 	/// splice, which is never a mover, so no two neighbouring runs can share an
@@ -133,8 +130,7 @@ impl Claims {
 		out
 	}
 
-	/// Returns the number of intervals the register holds, which is the cost of
-	/// every move ever made and of nothing else.
+	/// The cost of every move ever made, and of nothing else.
 	pub fn intervals(&self) -> usize {
 		self.map.values().map(|m| m.len()).sum()
 	}
@@ -149,13 +145,11 @@ impl Claims {
 /// name dead content and routinely does.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Dead {
-	/// Dead offsets of each atom, by creating operation.
-	map: BTreeMap<OpId, IntervalMap<()>>,
+	map: BTreeMap<OpId, IntervalMap<()>>, // dead offsets, by creating operation
 }
 
 impl Dead {
 
-	/// Constructs an empty tombstone set.
 	pub fn new() -> Self {
 		Self { map: BTreeMap::new() }
 	}
@@ -219,13 +213,11 @@ impl Dead {
 		Ok(Self { map })
 	}
 
-	/// Reports whether the byte has been deleted.
 	pub fn is_dead(&self, cid: &ContentId) -> bool {
 		self.map.get(&cid.op).map(|m| m.contains(cid.off)).unwrap_or(false)
 	}
 
-	/// Returns the live sub-runs of `span` within the atom created by `op`, in
-	/// ascending order.
+	/// The live sub-runs of `span` within the atom created by `op`, ascending.
 	pub fn live_runs(&self, op: &OpId, span: Range<u64>)
 		-> Vec<Range<u64>>
 	{
@@ -247,8 +239,7 @@ impl Dead {
 		out
 	}
 
-	/// Returns the number of dead bytes that lie within an atom the operation
-	/// set holds.
+	/// The number of dead bytes lying within an atom the operation set holds.
 	///
 	/// A tombstone naming content beyond the end of its atom, or naming an atom
 	/// that is not present, is not counted: it describes bytes this set cannot
@@ -267,7 +258,6 @@ impl Dead {
 		total
 	}
 
-	/// Returns the number of intervals the set holds.
 	pub fn intervals(&self) -> usize {
 		self.map.values().map(|m| m.len()).sum()
 	}

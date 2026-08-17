@@ -14,6 +14,9 @@
 //! is for is that an empty file then has a byte in it, so a splice into an empty
 //! file anchors after a byte like every other splice, and every operation without
 //! exception is placed by the content it names rather than by a file it asserts.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::id::{
 	ContentRange,
@@ -26,24 +29,20 @@ use oxedyne_fe2o3_core::prelude::*;
 use std::collections::BTreeMap;
 
 
-/// The byte a file's origin anchor holds.
-///
-/// It is born dead and never renders, so its value is arbitrary and nothing
-/// reads it; it is here so that the atom has a length of one and the offset zero
-/// names something.
+// The byte a file's origin anchor holds.  It is born dead and never renders, so
+// its value is arbitrary and nothing reads it; it is here so that the atom has a
+// length of one and the offset zero names something.
 pub const ORIGIN: u8 = 0;
 
 
 /// Every atom an operation set creates, keyed by the operation that created it.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Atoms {
-	/// Inserted bytes, by creating operation.
-	map: BTreeMap<OpId, Vec<u8>>,
+	map: BTreeMap<OpId, Vec<u8>>, // inserted bytes, by creating operation
 }
 
 impl Atoms {
 
-	/// Constructs an empty content layer.
 	pub fn new() -> Self {
 		Self { map: BTreeMap::new() }
 	}
@@ -73,41 +72,36 @@ impl Atoms {
 		Ok(Self { map })
 	}
 
-	/// Returns the bytes an operation created, if it created any.
 	pub fn get(&self, id: &OpId)
 		-> Option<&[u8]>
 	{
 		self.map.get(id).map(|v| v.as_slice())
 	}
 
-	/// Returns the length of the run an operation created, zero if it created
-	/// none.
+	/// An operation that inserted nothing creates no atom, so its run is zero
+	/// rather than absent.
 	pub fn run_len(&self, id: &OpId) -> u64 {
 		self.map.get(id).map(|v| v.len() as u64).unwrap_or(0)
 	}
 
-	/// Returns the number of atoms.
 	pub fn count(&self) -> usize {
 		self.map.len()
 	}
 
-	/// Returns the total number of bytes held.
+	/// Bytes held, across every atom.
 	pub fn total(&self) -> u64 {
 		self.map.values().map(|v| v.len() as u64).sum()
 	}
 
-	/// Iterates the atoms in ascending order of creating operation.
+	/// In ascending order of creating operation.
 	pub fn iter(&self)
 		-> impl Iterator<Item = (&OpId, &[u8])>
 	{
 		self.map.iter().map(|(id, v)| (id, v.as_slice()))
 	}
 
-	/// Returns the bytes a content range names.
-	///
-	/// Fails when the range names an atom the operation set does not hold, or
-	/// reaches past the end of one it does, either of which means the set is not
-	/// causally complete.
+	/// Fails when the range names an atom the set does not hold, or reaches past
+	/// the end of one it does; either means the set is not causally complete.
 	pub fn slice(&self, range: &ContentRange)
 		-> Outcome<&[u8]>
 	{

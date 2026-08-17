@@ -14,6 +14,9 @@
 //! carrier already answers -- a datagram has a length, a stream has whatever
 //! framing it was given -- and answering it twice is how the two answers come to
 //! disagree.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::id::OpId;
 use crate::segment::Entry;
@@ -28,13 +31,10 @@ pub const MAGIC: [u8; 6] = *b"ORESYN";
 /// The format version this module writes.
 pub const VERSION: u8 = 1;
 
-/// Kind code of a [`Message::Hello`].
+// The kind byte each message is tagged with on the wire.
 pub const KIND_HELLO:	u8 = 1;
-/// Kind code of a [`Message::Sketch`].
 pub const KIND_SKETCH:	u8 = 2;
-/// Kind code of a [`Message::Send`].
 pub const KIND_SEND:	u8 = 3;
-/// Kind code of a [`Message::Done`].
 pub const KIND_DONE:	u8 = 4;
 
 
@@ -47,54 +47,42 @@ pub const KIND_DONE:	u8 = 4;
 /// without repetition, and a decoder refuses anything else.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Message {
-	/// The frontier the speaker holds, opening a frontier walk.
+	// Opens a frontier walk.
 	Hello {
-		/// The speaker's frontier.
-		heads: Vec<OpId>,
+		heads: Vec<OpId>,	// the speaker's frontier
 	},
-	/// A sketch of every operation name the speaker holds, opening a
-	/// reconciliation.
-	///
-	/// The frontier rides along so that a receiver whose decode stalls can
-	/// answer with the walk in the same turn, rather than spending a round trip
-	/// asking for what it was already told.
+	// Opens a reconciliation.  The frontier rides along so that a receiver whose
+	// decode stalls can answer with the walk in the same turn, rather than
+	// spending a round trip asking for what it was already told.  The count is
+	// advisory: it lets a peer judge whether the estimate the table was sized
+	// from was sensible, and nothing is decided by it.
 	Sketch {
-		/// The speaker's frontier.
-		heads:	Vec<OpId>,
-		/// The serialised table, as [`crate::sync::sketch::sketch`] built it.
-		cells:	Vec<u8>,
-		/// How many operations the speaker's log holds. Advisory: it lets a peer
-		/// judge whether the estimate the table was sized from was sensible, and
-		/// nothing is decided by it.
-		count:	u64,
+		heads:	Vec<OpId>,	// the speaker's frontier
+		cells:	Vec<u8>,	// the serialised table
+		count:	u64,		// operations the speaker's log holds
 	},
-	/// Operations the speaker owes, causally closed against what the receiver
-	/// holds.
-	///
-	/// Order carries no meaning -- [`crate::log::OpLog::absorb`] places a batch
-	/// however it is shuffled -- but the sender writes them in a causal order
-	/// anyway, so that one pass places them all.
+	// Operations the speaker owes, causally closed against what the receiver
+	// holds.  Order carries no meaning -- OpLog::absorb places a batch however it
+	// is shuffled -- but the sender writes them in a causal order anyway, so that
+	// one pass places them all.
 	Send {
-		/// The operations, bare or sealed.
-		entries: Vec<Entry>,
+		entries: Vec<Entry>,	// bare or sealed
 	},
-	/// The speaker owes nothing further.
 	Done,
 }
 
 impl Message {
 
-	/// Constructs a hello, putting the frontier in canonical order.
+	/// Puts the frontier in canonical order.
 	pub fn hello(heads: Vec<OpId>) -> Self {
 		Self::Hello { heads: canonical(heads) }
 	}
 
-	/// Constructs a sketch message, putting the frontier in canonical order.
+	/// Puts the frontier in canonical order.
 	pub fn sketch(heads: Vec<OpId>, cells: Vec<u8>, count: u64) -> Self {
 		Self::Sketch { heads: canonical(heads), cells, count }
 	}
 
-	/// Returns the kind code identifying the message.
 	pub fn kind(&self) -> u8 {
 		match self {
 			Self::Hello { .. }	=> KIND_HELLO,
@@ -104,7 +92,7 @@ impl Message {
 		}
 	}
 
-	/// Returns the message's name, for messages about messages.
+	/// For messages about messages.
 	pub fn name(&self) -> &'static str {
 		match self {
 			Self::Hello { .. }	=> "hello",
@@ -114,14 +102,12 @@ impl Message {
 		}
 	}
 
-	/// Reports whether the message opens an exchange, which is what a peer
-	/// answers.
+	/// Does the message open an exchange, which is what a peer answers?
 	pub fn is_opening(&self) -> bool {
 		matches!(self, Self::Hello { .. } | Self::Sketch { .. })
 	}
 
-	/// Returns the frontier the message carries, which is empty for those that
-	/// carry none.
+	/// Empty for the messages that carry no frontier.
 	pub fn heads(&self) -> &[OpId] {
 		match self {
 			Self::Hello { heads }			=> heads,
@@ -130,11 +116,8 @@ impl Message {
 		}
 	}
 
-	/// Returns the operations the message carries, which is empty for those that
-	/// carry none.
-	///
-	/// This is where a caller that requires provenance does its checking, before
-	/// the message reaches a session: every [`Entry::Sealed`] can be put to
+	/// Where a caller that requires provenance does its checking, before the
+	/// message reaches a session: every [`Entry::Sealed`] can be put to
 	/// [`crate::envelope::Envelope::verify`] under whatever scheme the caller
 	/// holds. No scheme is chosen here and none is assumed.
 	pub fn entries(&self) -> &[Entry] {
@@ -144,11 +127,9 @@ impl Message {
 		}
 	}
 
-	/// Serialises the message to a [`Dat`]. The shape is `[kind, body]`.
-	///
-	/// The table of a sketch is a [`Dat::BU64`]: it readily exceeds the 255 bytes
-	/// a [`Dat::BU8`] length field can express, and a truncated length there
-	/// would corrupt silently.
+	/// The shape is `[kind, body]`. The table of a sketch is a [`Dat::BU64`]: it
+	/// readily exceeds the 255 bytes a [`Dat::BU8`] length field can express, and
+	/// a truncated length there would corrupt silently.
 	pub fn to_dat(&self) -> Dat {
 		let body = match self {
 			Self::Hello { heads } => Dat::List(
@@ -167,7 +148,6 @@ impl Message {
 		Dat::List(vec![Dat::U8(self.kind()), body])
 	}
 
-	/// Reconstructs a message from a [`Dat`] produced by [`Message::to_dat`].
 	pub fn from_dat(dat: &Dat)
 		-> Outcome<Self>
 	{
@@ -239,8 +219,7 @@ impl Message {
 		}
 	}
 
-	/// Appends the byte encoding of the message to `buf`: the magic, the
-	/// version, and the daticle form.
+	/// The magic, then the version, then the daticle form.
 	pub fn encode_into(&self, buf: &mut Vec<u8>)
 		-> Outcome<()>
 	{
@@ -251,7 +230,6 @@ impl Message {
 		Ok(())
 	}
 
-	/// Returns the byte encoding of the message.
 	pub fn encode(&self)
 		-> Outcome<Vec<u8>>
 	{
@@ -260,7 +238,8 @@ impl Message {
 		Ok(buf)
 	}
 
-	/// Decodes a message that must occupy the whole of `buf`.
+	/// The message must occupy the whole of `buf`; where one ends is the
+	/// transport's question.
 	pub fn decode(buf: &[u8])
 		-> Outcome<Self>
 	{
@@ -296,8 +275,7 @@ impl Message {
 }
 
 
-/// Puts a frontier in the order the encoding spells it: ascending, without
-/// repetition.
+/// The order the encoding spells a frontier in: ascending, without repetition.
 fn canonical(heads: Vec<OpId>) -> Vec<OpId> {
 	let mut heads = heads;
 	heads.sort();
@@ -305,7 +283,7 @@ fn canonical(heads: Vec<OpId>) -> Vec<OpId> {
 	heads
 }
 
-/// Reads a frontier, refusing one that is not in canonical order.
+/// Refuses a frontier that is not in canonical order, rather than sorting it.
 fn heads_from_dat(dat: &Dat, what: &str)
 	-> Outcome<Vec<OpId>>
 {
@@ -345,7 +323,6 @@ mod tests {
 	};
 	use crate::test_support::StubSigner;
 
-	/// An operation identifier.
 	fn oid(replica: u64, counter: u64) -> OpId {
 		OpId::new(ReplicaId::new(replica), counter)
 	}
@@ -375,7 +352,6 @@ mod tests {
 		])
 	}
 
-	/// Every message survives the daticle round trip and the byte round trip.
 	#[test]
 	fn messages_round_trip() -> Outcome<()> {
 		for msg in res!(samples()) {
@@ -444,8 +420,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// Rubbish where a message should be is refused, and an unknown version is
-	/// refused by name.
 	#[test]
 	fn a_message_that_is_not_one_is_refused() -> Outcome<()> {
 		assert!(Message::decode(b"").is_err());
@@ -470,7 +444,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// The accessors say what each message carries and what it does not.
 	#[test]
 	fn accessors_report_what_is_there() -> Outcome<()> {
 		let msgs = res!(samples());
@@ -487,8 +460,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// The bytes of one message, frozen.
-	///
 	/// A format that changes by accident leaves two versions of this crate unable
 	/// to speak to each other, and every other test in this file would pass
 	/// regardless: they all encode and decode with the same code. This one is the
