@@ -20,6 +20,9 @@
 //! Every wait in this file is bounded and reported as a failure. A test for a
 //! deadlock that deadlocks says nothing except that somebody has to press
 //! Ctrl-C.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_hash::{
@@ -49,19 +52,16 @@ use std::{
     time::Duration,
 };
 
-/// How long a close may take before it is called a deadlock.
-///
-/// A shutdown of an idle database is a message and a thread join, and takes
-/// well under a second. Thirty seconds is not a measurement, it is the
-/// difference between a failing test and a hung one.
+// How long a close may take before it is called a deadlock. A shutdown of an
+// idle database is a message and a thread join, and takes well under a second.
+// Thirty seconds is not a measurement, it is the difference between a failing
+// test and a hung one.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The key this test writes, reads back, and expects to find again.
 fn the_key() -> Dat {
     dat!("a value that has to survive a shared close")
 }
 
-/// The value it is written with.
 fn the_value() -> Dat {
     dat!(42u8)
 }
@@ -164,8 +164,8 @@ fn run() -> Outcome<()> {
     Ok(())
 }
 
-/// The fixture database's type: no encryption, so that the second opening reads
-/// what the first one wrote without a key having to be carried between them.
+/// No encryption, so that the second opening reads what the first one wrote
+/// without a key having to be carried between them.
 type TestDb = O3db<
     { UID_LEN },
     Uid,
@@ -175,7 +175,7 @@ type TestDb = O3db<
     ChecksumScheme,
 >;
 
-/// Opens the fixture database, keeping whatever is already in it.
+/// Keeps whatever is already in the store.
 fn open(db_root: &PathBuf) -> Outcome<TestDb> {
     let schms_input = RestSchemesInput::new(
         None::<()>,

@@ -41,6 +41,9 @@
 //! is the refinement the fixed chunker was a first cut for, and it arrived
 //! without changing [`Manifest`] or [`Cas`] -- both chunkers return the same
 //! manifest shape, and a store cannot tell which produced what it holds.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_hash::sha256;
@@ -53,24 +56,19 @@ use std::collections::{
 use std::sync::Mutex;
 
 
-/// Length in bytes of a content address, a SHA-256 digest.
-pub const ADDR_LEN: usize = 32;
+pub const ADDR_LEN: usize = 32;	// SHA-256 digest
 
-/// Default chunk size, 256 KiB. Large enough that the per-chunk manifest
-/// overhead stays a small fraction of a multi-megabyte payload, small enough
-/// that an edit confined to one region re-uploads little.
+// Large enough that the per-chunk manifest overhead stays a small fraction of a
+// multi-megabyte payload, small enough that an edit confined to one region
+// re-uploads little.
 pub const DEFAULT_CHUNK_SIZE: usize = 256 * 1024;
 
-/// Default minimum content-defined chunk size, 64 KiB.
-///
-/// A floor stops a run of unlucky hash hits producing a swarm of tiny chunks,
-/// each of which costs an address in every manifest that names it.
+// A floor stops a run of unlucky hash hits producing a swarm of tiny chunks,
+// each of which costs an address in every manifest that names it.
 pub const DEFAULT_MIN_CHUNK_SIZE: usize = 64 * 1024;
 
-/// Default maximum content-defined chunk size, 1 MiB.
-///
-/// A ceiling bounds the damage when the hash finds no boundary at all, which is
-/// what happens across a long run of identical bytes.
+// A ceiling bounds the damage when the hash finds no boundary at all, which is
+// what happens across a long run of identical bytes.
 pub const DEFAULT_MAX_CHUNK_SIZE: usize = 1024 * 1024;
 
 /// Seed for the gear table's generator.
@@ -82,20 +80,16 @@ pub const DEFAULT_MAX_CHUNK_SIZE: usize = 1024 * 1024;
 /// the golden-ratio constant splitmix64 conventionally uses.
 const GEAR_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
 
-/// Normalisation level: how many bits the mask tightens below the average chunk
-/// size and loosens above it.
-///
-/// Plain gear chunking gives an exponential spread of chunk sizes, so short
-/// chunks dominate and the tail is long. Cutting less readily before the average
-/// and more readily after it pulls the spread in towards the average without
-/// forcing boundaries at fixed offsets. Two is the level the FastCDC paper
-/// settles on.
+// How many bits the mask tightens below the average chunk size and loosens
+// above it. Plain gear chunking gives an exponential spread of chunk sizes, so
+// short chunks dominate and the tail is long. Cutting less readily before the
+// average and more readily after it pulls the spread in towards the average
+// without forcing boundaries at fixed offsets. Two is the level the FastCDC
+// paper settles on.
 const NORM_LEVEL: u32 = 2;
 
-/// The 256-entry gear table, one random u64 per byte value.
-///
-/// Generated at compile time from [`GEAR_SEED`] by splitmix64, so there is no
-/// dependency to pull in and no table to keep in the source.
+// One random u64 per byte value, generated at compile time from GEAR_SEED by
+// splitmix64, so there is no dependency to pull in and no table in the source.
 static GEAR: [u64; 256] = gear_table();
 
 
@@ -109,18 +103,15 @@ static GEAR: [u64; 256] = gear_table();
 pub struct ContentId([u8; ADDR_LEN]);
 
 impl ContentId {
-	/// Computes the content address of a byte slice.
 	pub fn of(bytes: &[u8]) -> Self {
 		Self(sha256::digest(bytes))
 	}
 
-	/// Constructs an address from a raw 32-byte digest.
 	pub const fn from_bytes(bytes: [u8; ADDR_LEN]) -> Self {
 		Self(bytes)
 	}
 
-	/// Constructs an address from a byte slice, which must be exactly
-	/// [`ADDR_LEN`] bytes.
+	/// The slice must be exactly [`ADDR_LEN`] bytes.
 	pub fn from_slice(bytes: &[u8]) -> Outcome<Self> {
 		if bytes.len() != ADDR_LEN {
 			return Err(err!(
@@ -133,18 +124,17 @@ impl ContentId {
 		Ok(Self(arr))
 	}
 
-	/// Returns the address as a byte slice.
 	pub fn as_bytes(&self) -> &[u8; ADDR_LEN] {
 		&self.0
 	}
 
-	/// Reports whether `bytes` hash to this address. Used by a store to reject
-	/// a chunk whose claimed address does not match its content.
+	/// Do these bytes hash to this address? A store uses this to reject a chunk
+	/// whose claimed address does not match its content.
 	pub fn verifies(&self, bytes: &[u8]) -> bool {
 		self.0 == sha256::digest(bytes)
 	}
 
-	/// Lowercase-hex rendering of the address, for logs and keys.
+	/// Lowercase hex, for logs and keys.
 	pub fn to_hex(&self) -> String {
 		let mut s = String::with_capacity(ADDR_LEN * 2);
 		for b in &self.0 {
@@ -154,8 +144,7 @@ impl ContentId {
 		s
 	}
 
-	/// Parses a lowercase- or uppercase-hex address of exactly `2 * ADDR_LEN`
-	/// characters.
+	/// Accepts either case, and exactly `2 * ADDR_LEN` characters.
 	pub fn from_hex(s: &str) -> Outcome<Self> {
 		let bytes = s.as_bytes();
 		if bytes.len() != ADDR_LEN * 2 {
@@ -181,17 +170,13 @@ impl std::fmt::Display for ContentId {
 }
 
 
-/// A single content-addressed chunk: its address and its bytes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Chunk {
-	/// The chunk's content address.
 	pub id:		ContentId,
-	/// The chunk's bytes.
 	pub bytes:	Vec<u8>,
 }
 
 impl Chunk {
-	/// Constructs a chunk, computing its address from its bytes.
 	pub fn new(bytes: Vec<u8>) -> Self {
 		let id = ContentId::of(&bytes);
 		Self { id, bytes }
@@ -206,9 +191,7 @@ impl Chunk {
 /// the manifest self-checking.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ChunkRef {
-	/// The chunk's content address.
 	pub id:		ContentId,
-	/// The chunk's length in bytes.
 	pub len:	usize,
 }
 
@@ -221,31 +204,24 @@ pub struct ChunkRef {
 /// caller must keep to recover a payload from a content-addressed store.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Manifest {
-	/// The reconstructed payload's total length, the sum of the chunk lengths.
-	pub total_len:	usize,
-	/// The chunk references, in payload order.
-	pub chunks:		Vec<ChunkRef>,
+	pub total_len:	usize,			// sum of the chunk lengths
+	pub chunks:		Vec<ChunkRef>,	// in payload order
 }
 
 impl Manifest {
-	/// Reports whether the manifest describes an empty payload.
 	pub fn is_empty(&self) -> bool {
 		self.chunks.is_empty()
 	}
 
-	/// Returns the number of chunks.
 	pub fn len(&self) -> usize {
 		self.chunks.len()
 	}
 
-	/// Iterates the chunk addresses in payload order.
+	/// Chunk addresses in payload order.
 	pub fn addrs(&self) -> impl Iterator<Item = &ContentId> {
 		self.chunks.iter().map(|c| &c.id)
 	}
 
-	/// Reconstructs the payload, fetching each chunk through `fetch` and
-	/// verifying it against the manifest.
-	///
 	/// Each fetched chunk is checked for the expected length and re-hashed to
 	/// confirm it matches the address the manifest names, so a corrupted or
 	/// substituted chunk is rejected rather than returned. The final length is
@@ -281,8 +257,7 @@ impl Manifest {
 		Ok(out)
 	}
 
-	/// Serialises the manifest to a [`Dat`] for storage or transport. The shape
-	/// is `[total_len, [[addr, len], ...]]`.
+	/// The serialised shape is `[total_len, [[addr, len], ...]]`.
 	pub fn to_dat(&self) -> Dat {
 		let mut list = Vec::with_capacity(self.chunks.len());
 		for cref in &self.chunks {
@@ -297,7 +272,6 @@ impl Manifest {
 		])
 	}
 
-	/// Reconstructs a manifest from a [`Dat`] produced by [`Manifest::to_dat`].
 	pub fn from_dat(dat: &Dat) -> Outcome<Self> {
 		let top = match dat {
 			Dat::List(v) if v.len() == 2 => v,
@@ -348,8 +322,7 @@ impl Manifest {
 /// Splits a payload into fixed-size, content-addressed chunks.
 #[derive(Clone, Copy, Debug)]
 pub struct Chunker {
-	/// Target chunk size in bytes; the final chunk may be shorter.
-	chunk_size:	usize,
+	chunk_size:	usize,	// the final chunk may be shorter
 }
 
 impl Default for Chunker {
@@ -359,7 +332,7 @@ impl Default for Chunker {
 }
 
 impl Chunker {
-	/// Constructs a chunker with the given chunk size, which must be non-zero.
+	/// The chunk size must be non-zero.
 	pub fn new(chunk_size: usize) -> Outcome<Self> {
 		if chunk_size == 0 {
 			return Err(err!(
@@ -369,14 +342,10 @@ impl Chunker {
 		Ok(Self { chunk_size })
 	}
 
-	/// Returns the configured chunk size.
 	pub fn chunk_size(&self) -> usize {
 		self.chunk_size
 	}
 
-	/// Splits `payload` into chunks, returning the ordered [`Manifest`] and the
-	/// chunk bytes.
-	///
 	/// A payload shorter than one chunk yields a single chunk; an empty payload
 	/// yields an empty manifest and no chunks. Byte-identical chunks share an
 	/// address, so the returned `Vec<Chunk>` may contain duplicates that a
@@ -411,21 +380,13 @@ impl Chunker {
 /// stricter, above it a couple of bits looser. The bytes before `min` are not
 /// hashed at all -- no boundary could be accepted there -- which is the
 /// cut-point skipping that makes the scan cheap.
-///
-/// The manifest it produces is the same [`Manifest`] the fixed-size [`Chunker`]
-/// produces, and reassembles the same way.
 #[derive(Clone, Copy, Debug)]
 pub struct CdcChunker {
-	/// Smallest permitted chunk, except for a payload shorter than this.
-	min:	usize,
-	/// Target average chunk size, the point at which the mask loosens.
-	avg:	usize,
-	/// Largest permitted chunk; a boundary is forced here.
-	max:	usize,
-	/// Strict mask, applied below `avg`.
-	mask_s:	u64,
-	/// Loose mask, applied at and above `avg`.
-	mask_l:	u64,
+	min:	usize,	// except for a payload shorter than this
+	avg:	usize,	// where the mask loosens
+	max:	usize,	// a boundary is forced here
+	mask_s:	u64,	// applied below avg
+	mask_l:	u64,	// applied at and above avg
 }
 
 impl Default for CdcChunker {
@@ -439,8 +400,7 @@ impl Default for CdcChunker {
 }
 
 impl CdcChunker {
-	/// Constructs a chunker with the given minimum, average and maximum chunk
-	/// sizes, which must satisfy `0 < min <= avg <= max`.
+	/// The sizes must satisfy `0 < min <= avg <= max`.
 	pub fn new(min: usize, avg: usize, max: usize)
 		-> Outcome<Self>
 	{
@@ -458,7 +418,7 @@ impl CdcChunker {
 		Ok(Self::sizes(min, avg, max))
 	}
 
-	/// Builds a chunker from already-valid sizes, deriving the two masks.
+	/// The sizes are assumed already valid; derives the two masks.
 	fn sizes(min: usize, avg: usize, max: usize) -> Self {
 		let bits = log2_floor(avg);				// Mask width for the average.
 		let strict = (bits + NORM_LEVEL).min(63);
@@ -472,24 +432,18 @@ impl CdcChunker {
 		}
 	}
 
-	/// Returns the minimum chunk size.
 	pub fn min_size(&self) -> usize {
 		self.min
 	}
 
-	/// Returns the target average chunk size.
 	pub fn avg_size(&self) -> usize {
 		self.avg
 	}
 
-	/// Returns the maximum chunk size.
 	pub fn max_size(&self) -> usize {
 		self.max
 	}
 
-	/// Splits `payload` into chunks, returning the ordered [`Manifest`] and the
-	/// chunk bytes.
-	///
 	/// The contract matches [`Chunker::split`]: an empty payload yields an empty
 	/// manifest and no chunks, a payload shorter than the minimum chunk size
 	/// yields a single chunk, and byte-identical chunks share an address, so the
@@ -511,8 +465,8 @@ impl CdcChunker {
 		(Manifest { total_len: payload.len(), chunks: refs }, chunks)
 	}
 
-	/// Returns the length of the first chunk of `data`, always at least one byte
-	/// so that [`CdcChunker::split`] terminates.
+	/// The length of the first chunk of `data`, always at least one byte so that
+	/// [`CdcChunker::split`] terminates.
 	fn cut(&self, data: &[u8]) -> usize {
 		let n = data.len();
 		if n <= self.min {
@@ -554,19 +508,16 @@ pub trait Cas {
 	/// by definition), so writes are idempotent.
 	fn put(&self, chunk: &Chunk) -> Outcome<()>;
 
-	/// Fetches a chunk's bytes by address, or `None` if absent.
 	fn get(&self, id: &ContentId) -> Outcome<Option<Vec<u8>>>;
 
-	/// Reports whether the store holds a chunk at this address.
 	fn has(&self, id: &ContentId) -> Outcome<bool>;
 
-	/// Removes a chunk by address, returning `true` if one was present.
+	/// The bool reports whether a chunk was present to remove.
 	fn delete(&self, id: &ContentId) -> Outcome<bool>;
 
-	/// Enumerates every address the store holds.
 	fn ids(&self) -> Outcome<Vec<ContentId>>;
 
-	/// Convenience: chunks `bytes` and stores it, returning its address.
+	/// Stores `bytes` whole, as a single chunk.
 	fn put_bytes(&self, bytes: Vec<u8>)
 		-> Outcome<ContentId>
 	{
@@ -576,9 +527,7 @@ pub trait Cas {
 		Ok(id)
 	}
 
-	/// Deletes every chunk not in `live`, returning the number removed.
-	///
-	/// This is mark-and-sweep garbage collection: the caller assembles the set
+	/// Mark-and-sweep garbage collection: the caller assembles the set
 	/// of addresses reachable from every manifest it still holds and hands it
 	/// in; everything else is unreferenced and freed. Deleting only the
 	/// unreferenced set is what lets a lapse evict overflow without disturbing
@@ -605,18 +554,16 @@ pub struct MemoryCas {
 }
 
 impl MemoryCas {
-	/// Constructs an empty in-memory store.
 	pub fn new() -> Self {
 		Self { inner: Mutex::new(HashMap::new()) }
 	}
 
-	/// Returns the number of distinct chunks held.
+	/// Distinct chunks held, so duplicates count once.
 	pub fn len(&self) -> Outcome<usize> {
 		let guard = lock_mutex!(self.inner);
 		Ok(guard.len())
 	}
 
-	/// Reports whether the store is empty.
 	pub fn is_empty(&self) -> Outcome<bool> {
 		Ok(res!(self.len()) == 0)
 	}
@@ -663,8 +610,6 @@ impl Cas for MemoryCas {
 }
 
 
-/// Generates the gear table by running splitmix64 from [`GEAR_SEED`].
-///
 /// Splitmix64 is a handful of multiplies and shifts, which is why it can run in
 /// a `const` context and save the crate a dependency and a 2 KiB literal.
 const fn gear_table() -> [u64; 256] {
@@ -682,7 +627,7 @@ const fn gear_table() -> [u64; 256] {
 	table
 }
 
-/// Builds a mask over the top `bits` bits of a `u64`, for `1 <= bits <= 63`.
+/// A mask over the top `bits` bits of a `u64`, for `1 <= bits <= 63`.
 ///
 /// The top bits are the ones to test. A gear hash shifts left by one per byte,
 /// so bit `k` of the hash depends on the last `k + 1` bytes; testing the high
@@ -692,12 +637,11 @@ const fn high_mask(bits: u32) -> u64 {
 	((1u64 << bits) - 1) << (64 - bits)
 }
 
-/// Floor of the base-2 logarithm of a non-zero value.
+/// The value must be non-zero.
 fn log2_floor(n: usize) -> u32 {
 	(usize::BITS - 1) - n.leading_zeros()
 }
 
-/// Converts a 4-bit nibble to its lowercase hex character.
 fn hex_char(nib: u8) -> char {
 	match nib {
 		0..=9	=> (b'0' + nib) as char,
@@ -706,7 +650,6 @@ fn hex_char(nib: u8) -> char {
 	}
 }
 
-/// Converts a hex character byte to its 4-bit nibble.
 fn nibble(b: u8)
 	-> Outcome<u8>
 {
@@ -725,7 +668,6 @@ fn nibble(b: u8)
 mod tests {
 	use super::*;
 
-	/// A content address is deterministic and distinguishes distinct inputs.
 	#[test]
 	fn content_id_deterministic_and_verifies() -> Outcome<()> {
 		let a = ContentId::of(b"hello");
@@ -738,7 +680,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A hex address round-trips through parse and render.
 	#[test]
 	fn content_id_hex_round_trip() -> Outcome<()> {
 		let id = ContentId::of(b"some bytes");
@@ -749,8 +690,8 @@ mod tests {
 		Ok(())
 	}
 
-	/// Chunking then reassembling recovers the payload, for an empty payload,
-	/// one shorter than a chunk, an exact multiple, and one with a remainder.
+	/// An empty payload, one shorter than a chunk, an exact multiple, and one
+	/// with a remainder.
 	#[test]
 	fn chunk_reassemble_round_trip() -> Outcome<()> {
 		let chunker = res!(Chunker::new(4));
@@ -777,7 +718,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// Identical chunks collapse to one stored entry.
 	#[test]
 	fn identical_chunks_deduplicate() -> Outcome<()> {
 		let chunker = res!(Chunker::new(4));
@@ -792,7 +732,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A manifest survives a Dat round trip.
 	#[test]
 	fn manifest_dat_round_trip() -> Outcome<()> {
 		let chunker = res!(Chunker::new(3));
@@ -803,7 +742,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// Reassembly rejects a chunk whose bytes have been tampered with.
 	#[test]
 	fn reassemble_rejects_tampered_chunk() -> Outcome<()> {
 		let chunker = res!(Chunker::new(4));
@@ -814,7 +752,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A store refuses a chunk whose address does not match its bytes.
 	#[test]
 	fn put_rejects_mislabelled_chunk() -> Outcome<()> {
 		let store = MemoryCas::new();
@@ -826,7 +763,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// The store round-trips a chunk and reports presence and deletion.
 	#[test]
 	fn memory_cas_put_get_has_delete() -> Outcome<()> {
 		let store = MemoryCas::new();
@@ -839,7 +775,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A sweep frees exactly the chunks no live manifest references.
 	#[test]
 	fn sweep_frees_unreferenced_chunks() -> Outcome<()> {
 		let store = MemoryCas::new();
@@ -855,8 +790,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A deterministic pseudorandom byte stream.
-	///
 	/// Splitmix64 again, seeded separately from the gear table, so a test needs
 	/// no `rand` crate and produces the same payload on every machine and every
 	/// run -- a shift-resistance figure is only worth quoting if it is stable.
@@ -880,8 +813,8 @@ mod tests {
 	}
 
 	/// The fraction of `edited`'s chunks whose addresses also occur in `orig`,
-	/// counting multiplicity. This is the quantity that matters: it is the share
-	/// of the edited payload a store already holds, and so need not be sent.
+	/// counting multiplicity: the share of the edited payload a store already
+	/// holds, and so need not be sent.
 	fn shared_fraction(orig: &Manifest, edited: &Manifest) -> f64 {
 		let mut have: HashMap<ContentId, usize> = HashMap::new();
 		for cref in &orig.chunks {
@@ -899,15 +832,13 @@ mod tests {
 		shared as f64 / edited.chunks.len() as f64
 	}
 
-	/// Inserts one byte at `at`, the smallest edit that shifts everything after
-	/// it.
+	/// One inserted byte is the smallest edit that shifts everything after it.
 	fn insert_byte(payload: &[u8], at: usize) -> Vec<u8> {
 		let mut out = payload.to_vec();
 		out.insert(at, 0x5a);
 		out
 	}
 
-	/// The size triple is validated, and the accessors report it back.
 	#[test]
 	fn cdc_validates_its_sizes() -> Outcome<()> {
 		assert!(CdcChunker::new(0, 16, 64).is_err());		// Zero minimum.
@@ -924,8 +855,7 @@ mod tests {
 		Ok(())
 	}
 
-	/// The same payload and the same configuration give the same manifest, and
-	/// the degenerate payloads behave as the fixed chunker's do.
+	/// The degenerate payloads behave as the fixed chunker's do.
 	#[test]
 	fn cdc_split_is_deterministic() -> Outcome<()> {
 		let cdc = res!(CdcChunker::new(64, 256, 1024));
@@ -949,9 +879,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// An insertion near the front of a payload disturbs only the chunks around
-	/// it; the rest keep their addresses.
-	///
 	/// The fixed-size chunker is measured on the same payload for contrast. It
 	/// cuts at offsets, so one inserted byte shifts every boundary after it and
 	/// almost nothing survives, which is the whole reason for the
@@ -983,7 +910,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// An edit in the middle of a payload leaves both halves alone.
 	#[test]
 	fn cdc_survives_an_insertion_in_the_middle() -> Outcome<()> {
 		let payload = pseudorandom(4 * 1024 * 1024, 0x0da7_a5ee_d2);
@@ -1001,8 +927,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// Every chunk lands inside the configured bounds, and the mean sits near
-	/// the requested average.
 	#[test]
 	fn cdc_chunk_sizes_stay_within_bounds() -> Outcome<()> {
 		let cdc = CdcChunker::default();
@@ -1031,7 +955,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A content-defined split reassembles byte for byte through a store.
 	#[test]
 	fn cdc_reassembles_byte_for_byte() -> Outcome<()> {
 		let cdc = res!(CdcChunker::new(1024, 4096, 16384));
@@ -1059,8 +982,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// The gear table is fully populated and free of duplicates, which a broken
-	/// generator would not manage.
 	#[test]
 	fn gear_table_is_distinct() -> Outcome<()> {
 		let seen: HashSet<u64> = GEAR.iter().copied().collect();

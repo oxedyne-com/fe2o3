@@ -18,6 +18,9 @@
 //! property an operator cares about: that acknowledged writes are
 //! readable through a fresh live file pair after each policy's sync
 //! cadence has fired at least once.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::{
     prelude::*,
@@ -108,8 +111,6 @@ pub fn test_durability(_filter: &'static str) -> Outcome<()> {
     Ok(())
 }
 
-/// Run one sub-test with the given policy setter, writing `count`
-/// key/value pairs and reading them back.
 fn run_with_policy<F>(
     label:       &str,
     db_root:     &std::path::PathBuf,

@@ -10,6 +10,9 @@
 //! `basic` already deletes the index files and restarts, but it never deletes a *key* first, so a
 //! tombstone never reached the replay under test.  This test writes on both sides of a deletion,
 //! forces the rebuild, and insists that everything except the deleted key comes back.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::{
     prelude::*,
@@ -44,11 +47,12 @@ use std::{
 };
 
 
-/// Keys written before the deletion.
+// Keys written before the deletion.
 const BEFORE: [&str; 3] = ["before:1", "before:2", "before:3"];
-/// The key that is deleted.
+// The key that is deleted.
 const DOOMED: &str = "doomed:1";
-/// Keys written after the deletion.  These are the ones a badly framed tombstone loses.
+// Keys written after the deletion.  These are the ones a badly framed tombstone
+// loses.
 const AFTER: [&str; 3] = ["after:1", "after:2", "after:3"];
 
 pub fn test_delete_replay(_filter: &'static str) -> Outcome<()> {

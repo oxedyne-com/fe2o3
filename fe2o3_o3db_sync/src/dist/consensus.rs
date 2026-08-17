@@ -15,7 +15,10 @@
 //! [`fe2o3_hotstuff::replica::Command`] list back out into
 //! [`crate::transport::Envelope`]s.
 //!
-//! [c]: crate::config::Consistency::Cohort
+//! [c]: crate::dist::config::Consistency::Cohort
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use super::cohort::Cohort;
 use super::hotstuff::{
@@ -38,8 +41,6 @@ use oxedyne_fe2o3_core::prelude::*;
 use crate::kademlia::id::NodeId;
 
 
-/// The number of Byzantine members a cohort of the given size can tolerate.
-///
 /// `f = floor((lambda - 1) / 3)`, matching the Hematite spec and the
 /// requirement that HotStuff sees `cohort_size >= 3f + 1`.
 pub fn faults_tolerated(lambda: u64) -> usize {
@@ -53,23 +54,16 @@ pub fn faults_tolerated(lambda: u64) -> usize {
 /// [`Replica`] inside drives the three-phase protocol; the cohort membership
 /// is a snapshot of the deterministic selection at creation time. Members are
 /// indexed `0..cohort_size` in the order produced by
-/// [`cohort::select`](crate::cohort::select), so every peer's instance uses
+/// [`cohort::select`](crate::dist::cohort::select), so every peer's instance uses
 /// the same mapping without exchanging it on the wire.
 pub struct CohortInstance {
-	/// The underlying HotStuff state machine.
-	pub replica:	Replica,
-	/// The cohort members, indexed by [`ReplicaId`]. Deterministically
-	/// ordered by XOR distance to the cohort seed, matching
-	/// [`Cohort::members`].
-	pub members:	Vec<NodeId>,
-	/// The block hash that consensus has committed (`Some` only after a
-	/// successful Decide). Kept so a duplicate Decide observation is a no-op.
+	pub replica:		Replica,
+	pub members:		Vec<NodeId>,		// indexed by ReplicaId, as Cohort::members
+	// Some only after Decide, which makes a duplicate Decide a no-op.
 	pub decided_hash:	Option<BlockHash>,
 }
 
 impl CohortInstance {
-	/// Constructs a new instance for a local peer that is a cohort member.
-	///
 	/// Rejects cohorts the local peer does not appear in -- such a peer has
 	/// no role in the consensus and should never hold an instance.
 	pub fn new(cohort: Cohort, local_id: &NodeId, lambda: u64) -> Outcome<Self> {
@@ -99,21 +93,16 @@ impl CohortInstance {
 		})
 	}
 
-	/// Returns the cohort-local [`ReplicaId`] for a peer, or `None` if the
-	/// peer is not a cohort member.
 	pub fn replica_id(&self, node: &NodeId) -> Option<ReplicaId> {
 		self.members.iter()
 			.position(|m| m == node)
 			.map(|i| i as ReplicaId)
 	}
 
-	/// Returns the [`NodeId`] for the given cohort-local [`ReplicaId`], or
-	/// `None` if the id is out of range.
 	pub fn node_id(&self, rid: ReplicaId) -> Option<NodeId> {
 		self.members.get(rid as usize).copied()
 	}
 
-	/// Returns the [`NodeId`] of the leader of the current HotStuff view.
 	pub fn current_leader(&self) -> Outcome<NodeId> {
 		let cfg = self.replica.config();
 		let leader_rid = cfg.leader_for(self.replica.view());
@@ -126,9 +115,8 @@ impl CohortInstance {
 		}
 	}
 
-	/// Marks the instance as decided on the given block hash. Idempotent: a
-	/// duplicate Decide on the same hash is accepted silently; a Decide on a
-	/// different hash is a bug and is rejected.
+	/// Idempotent: a duplicate Decide on the same hash is accepted silently; a
+	/// Decide on a different hash is a bug and is rejected.
 	pub fn mark_decided(&mut self, hash: BlockHash) -> Outcome<()> {
 		match self.decided_hash {
 			Some(prev) if prev == hash => Ok(()),
@@ -143,8 +131,7 @@ impl CohortInstance {
 		}
 	}
 
-	/// Returns `true` if this instance has already reached Decide. New wire
-	/// messages for a decided instance are dropped by the engine.
+	/// New wire messages for a decided instance are dropped by the engine.
 	pub fn has_decided(&self) -> bool {
 		self.decided_hash.is_some()
 	}
@@ -175,8 +162,7 @@ pub fn encode_record(record: &Record) -> Vec<u8> {
 }
 
 
-/// Decodes a block payload produced by [`encode_record`] back into a
-/// [`Record`]. Validates the declared lengths fit in the buffer.
+/// Validates that the declared lengths fit the buffer.
 pub fn decode_record(bytes: &[u8]) -> Outcome<Record> {
 	if bytes.len() < 32 + 4 {
 		return Err(err!(

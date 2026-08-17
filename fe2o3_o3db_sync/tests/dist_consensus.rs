@@ -17,6 +17,9 @@
 //!     drives the round.
 //!   * Persistence: every cohort member ends up with the record in its
 //!     local storage; non-members do not.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_o3db_sync::kademlia::id::NodeId;
@@ -69,9 +72,7 @@ impl Rng {
 }
 
 
-/// Build a cluster of `n` engines sharing a single cohort-backed table
-/// `table_name` with the given `lambda`. Returns one engine per peer,
-/// keyed by the peer's [`NodeId`], along with the vector of ids in
+/// One engine per peer, keyed by the peer's [`NodeId`], plus the ids in
 /// creation order.
 fn build_cluster(
 	n:			usize,
@@ -101,9 +102,9 @@ fn build_cluster(
 }
 
 
-/// Drives a synchronous envelope dispatch loop until no new envelopes
-/// are produced or `max_rounds` is exceeded (failsafe). Collects every
-/// `completed_consensus_put` observed along the way.
+/// Dispatches synchronously until no new envelopes are produced, or
+/// `max_rounds` is exceeded as a failsafe. Collects every
+/// `completed_consensus_put` seen along the way.
 fn drive(
 	engines:	&HashMap<NodeId, DistOzone<MemoryStorage>>,
 	outbound:	Vec<Envelope>,
@@ -140,9 +141,8 @@ fn drive(
 }
 
 
-/// Computes the cohort for `(table, record_id)` among `ids`, using the
-/// same selection logic the engine uses internally. Returns the leader
-/// and the sorted member list.
+/// Uses the same selection logic the engine uses internally, so the test does
+/// not get to invent its own answer.
 fn cohort_for(
 	ids:		&[NodeId],
 	table:		&str,
@@ -166,9 +166,7 @@ fn cohort_for(
 }
 
 
-/// The happy path: a 5-peer cluster, lambda = 5, every peer is a cohort
-/// member. A put issued on the leader opens a round; after the dispatch
-/// loop settles, every engine has the record.
+/// A 5-peer cluster with lambda = 5, so every peer is a cohort member.
 #[test]
 fn leader_initiated_put_reaches_decide_on_every_member() -> Outcome<()> {
 	let (ids, engines) = res!(build_cluster(5, 5, "treasury", 1));

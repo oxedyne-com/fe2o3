@@ -10,16 +10,17 @@
 //!
 //! All three reduce to XOR distance comparisons between 256-bit identifiers.
 //! None of them take locks, issue I/O, or spawn tasks.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use super::threshold::Threshold;
 
 use crate::kademlia::id::NodeId;
 
 
-/// Returns `true` if the peer holds the record under the given threshold.
-///
-/// Evaluation is a single XOR-distance computation followed by a bytewise
-/// comparison against the stored 256-bit threshold.
+/// A single XOR-distance computation followed by a bytewise comparison against
+/// the stored 256-bit threshold.
 pub fn is_holder(
 	peer_id:		&NodeId,
 	record_hash:	&NodeId,
@@ -31,9 +32,6 @@ pub fn is_holder(
 	threshold.contains(&d)
 }
 
-/// Returns references to those peers, from the given slice, that hold the
-/// record under the given threshold.
-///
 /// The return order mirrors the input order. Duplicates in the input produce
 /// duplicates in the output: callers that keep a canonical peer set should
 /// deduplicate before calling in.
@@ -52,8 +50,8 @@ pub fn holders<'a>(
 	}
 }
 
-/// Returns references to the `count` peers closest to the record hash by
-/// XOR distance, regardless of the OAM threshold.
+/// The `count` peers closest to the record hash by XOR distance, regardless of
+/// the OAM threshold.
 ///
 /// Useful when the local peer is not itself a holder but needs to read the
 /// record: the closest peers are, under a well-mixed hash, the ones most

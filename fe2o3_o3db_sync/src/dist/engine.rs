@@ -26,6 +26,9 @@
 //! [`GetRequest`](crate::transport::MsgKind::GetRequest) envelopes to
 //! dispatch. The caller polls [`DistOzone::poll_get`] to learn when a
 //! response has landed.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use super::cohort;
 use super::config::{
@@ -80,24 +83,20 @@ use std::sync::{
 };
 
 
-/// Fixed key and value lengths used by the anti-entropy IBLT sketches.
-///
-/// The key is a 32-byte [`RecordId`] and the value is the 32-byte content
-/// hash produced by [`Storage::digests`]. Matching lengths across peers is
-/// mandatory for IBLT subtraction; callers cannot override.
+// Fixed key and value lengths for the anti-entropy IBLT sketches. The key is a
+// 32-byte RecordId and the value is the 32-byte content hash produced by
+// Storage::digests. Matching lengths across peers is mandatory for IBLT
+// subtraction; callers cannot override.
 const ANTI_ENTROPY_KEY_LEN:		usize = ID_LEN;
 const ANTI_ENTROPY_VALUE_LEN:	usize = 32;
 
 
-/// The default number of peers to which a remote read request is dispatched.
-///
-/// Choosing more than one protects against a single straggler; choosing many
-/// wastes bandwidth. Three is the operating-point default referenced in the
-/// spec ("an OAM holder" -- plural in realistic deployments).
+// Choosing more than one peer protects against a single straggler; choosing
+// many wastes bandwidth. Three is the operating-point default referenced in the
+// spec ("an OAM holder" -- plural in realistic deployments).
 pub const DEFAULT_READ_FANOUT: usize = 3;
 
 
-/// The distributed-Ozone engine.
 pub struct DistOzone<S: Storage> {
 	cfg:			DistOzoneConfig,
 	placement:		Placement,
@@ -106,10 +105,8 @@ pub struct DistOzone<S: Storage> {
 	next_rid:		AtomicU64,
 	pending_gets:	Mutex<HashMap<RequestId, PendingGet>>,
 	read_fanout:	usize,
-	/// Per-`(table, record_id)` HotStuff state for cohort-backed writes.
-	/// An entry is created lazily on the first message (either a local
-	/// `put` on a cohort table or an inbound cohort envelope) and kept
-	/// after Decide so duplicate late messages are silently absorbed.
+	// An entry is created lazily on the first message, and kept after Decide so
+	// duplicate late messages are silently absorbed.
 	cohorts:		Mutex<HashMap<(String, RecordId), CohortInstance>>,
 }
 
@@ -126,8 +123,6 @@ struct PendingGet {
 }
 
 impl<S: Storage> DistOzone<S> {
-	/// Constructs a new engine from the configuration and a storage backend.
-	///
 	/// The bootstrap peer list is filtered to exclude the local peer, and the
 	/// placement service's threshold is precomputed.
 	pub fn new(cfg: DistOzoneConfig, storage: S) -> Outcome<Self> {
@@ -148,34 +143,29 @@ impl<S: Storage> DistOzone<S> {
 		})
 	}
 
-	/// Overrides the default read fanout. One is the minimum; values above
-	/// the peer-set size are clamped automatically at request time.
+	/// One is the minimum; values above the peer-set size are clamped
+	/// automatically at request time.
 	pub fn set_read_fanout(&mut self, fanout: usize) {
 		self.read_fanout = fanout.max(1);
 	}
 
-	/// Returns the configuration.
 	pub fn config(&self) -> &DistOzoneConfig {
 		&self.cfg
 	}
 
-	/// Returns the current peer set.
 	pub fn peer_set(&self) -> &PeerSet {
 		&self.peer_set
 	}
 
-	/// Returns the placement service.
 	pub fn placement(&self) -> &Placement {
 		&self.placement
 	}
 
-	/// Returns the storage backend.
 	pub fn storage(&self) -> &S {
 		&self.storage
 	}
 
-	/// Inserts a peer into the rolling peer set. Returns `true` if the peer
-	/// was new.
+	/// Ignores the local peer; true if the peer was new.
 	pub fn insert_peer(&mut self, peer: NodeId) -> bool {
 		if peer == self.cfg.local_peer_id {
 			return false;
@@ -183,14 +173,12 @@ impl<S: Storage> DistOzone<S> {
 		self.peer_set.insert(peer)
 	}
 
-	/// Removes a peer from the rolling peer set. Returns `true` if the peer
-	/// was present.
 	pub fn remove_peer(&mut self, peer: &NodeId) -> bool {
 		self.peer_set.remove(peer)
 	}
 
-	/// Updates the OAM network-size estimate (typically from a HyperLogLog
-	/// merge) and recomputes the cached placement threshold.
+	/// Recomputes the cached placement threshold. The estimate typically comes
+	/// from a HyperLogLog merge.
 	pub fn update_network_size(&mut self, network_size: u64) -> Outcome<()> {
 		let oam = res!(OamConfig::new(self.cfg.oam.replication, network_size));
 		self.cfg.oam = oam;
@@ -198,8 +186,6 @@ impl<S: Storage> DistOzone<S> {
 		Ok(())
 	}
 
-	/// Looks up a table config by name, or returns an error if the table is
-	/// not declared in the configuration.
 	fn table_or_err(&self, name: &str) -> Outcome<&TableConfig> {
 		match self.cfg.table(name) {
 			Some(t) => Ok(t),
@@ -209,10 +195,6 @@ impl<S: Storage> DistOzone<S> {
 		}
 	}
 
-	/// Writes a record, dispatching to either the eventual-consistency
-	/// replication path or the cohort-consensus path based on the table's
-	/// declared [`Consistency`].
-	///
 	/// On an eventual table the record is persisted locally if the local
 	/// peer is a holder and a [`MsgKind::ReplicatePut`] envelope is emitted
 	/// for every remote holder.
@@ -225,8 +207,6 @@ impl<S: Storage> DistOzone<S> {
 	/// cases [`PutOutcome::consensus_pending`] is set; the caller learns
 	/// when consensus completes through
 	/// [`InboundOutcome::completed_consensus_put`].
-	///
-	/// Rejects unknown table names.
 	pub fn put(&self, record: Record) -> Outcome<PutOutcome> {
 		let tc = res!(self.table_or_err(&record.table));
 		match tc.consistency {
@@ -236,8 +216,6 @@ impl<S: Storage> DistOzone<S> {
 		}
 	}
 
-	/// Eventual-consistency write path -- replicate to the OAM holders and
-	/// persist locally if the local peer is one of them.
 	fn put_eventual(&self, record: Record) -> Outcome<PutOutcome> {
 		let decision = self.placement.decide(&record.id, &self.peer_set);
 		let local_persisted = decision.local_is_holder;
@@ -260,13 +238,6 @@ impl<S: Storage> DistOzone<S> {
 		})
 	}
 
-	/// Cohort-consensus write path.
-	///
-	/// Selects the cohort deterministically from `(table, record_id)`, and:
-	/// - if the local peer is the initial leader, opens a HotStuff round
-	///   and returns the broadcast envelopes;
-	/// - otherwise, emits a [`MsgKind::CohortSubmit`] envelope targeting
-	///   the leader.
 	fn put_cohort(&self, record: Record, lambda: u64) -> Outcome<PutOutcome> {
 		let table = record.table.clone();
 		let id = record.id;
@@ -300,8 +271,6 @@ impl<S: Storage> DistOzone<S> {
 		}
 	}
 
-	/// Leader-side: create the HotStuff instance (if one does not already
-	/// exist) and open a Prepare round for the given record.
 	fn leader_open_round(
 		&self,
 		sel:	cohort::Cohort,
@@ -336,9 +305,7 @@ impl<S: Storage> DistOzone<S> {
 		Ok(outbound)
 	}
 
-	/// Translates a list of HotStuff [`Command`](HsCommand)s emitted by a
-	/// per-record replica into wire envelopes, applying local side effects
-	/// (persistence on Decide) along the way.
+	/// Applies the local side effects -- persistence on Decide -- as it goes.
 	fn translate_commands(
 		&self,
 		table:		&str,
@@ -457,10 +424,9 @@ impl<S: Storage> DistOzone<S> {
 		Ok(out)
 	}
 
-	/// Drives a local timeout for a per-record HotStuff instance. The
-	/// caller owns the timer; on timer expiry it calls this method and
-	/// dispatches the returned envelopes. Returns an empty vec if the
-	/// instance is absent (already decided or never created).
+	/// The caller owns the timer; on expiry it calls this and dispatches the
+	/// returned envelopes. Empty if the instance is absent -- already decided,
+	/// or never created.
 	pub fn cohort_timeout(
 		&self,
 		table:	&str,
@@ -480,9 +446,9 @@ impl<S: Storage> DistOzone<S> {
 		self.translate_commands(table, id, instance, cmds)
 	}
 
-	/// Reads a record. Returns immediately from local storage if the local
-	/// peer is a holder; otherwise dispatches a request to the nearest
-	/// peers and returns the in-flight request handle.
+	/// Reads from local storage if the local peer is a holder; otherwise
+	/// dispatches a request to the nearest peers and returns the in-flight
+	/// request handle.
 	pub fn get(
 		&self,
 		table:	&str,
@@ -532,9 +498,6 @@ impl<S: Storage> DistOzone<S> {
 		Ok(GetOutcome::Remote { request_id, outbound })
 	}
 
-	/// Handles an incoming envelope, returning any outbound envelopes the
-	/// handling produced and, for responses, the request id that was
-	/// resolved.
 	pub fn handle_envelope(&self, env: Envelope) -> Outcome<InboundOutcome> {
 		if env.to != self.cfg.local_peer_id {
 			// An envelope addressed to somebody else; ignore. This is mostly
@@ -632,14 +595,6 @@ impl<S: Storage> DistOzone<S> {
 		}
 	}
 
-	/// Reports on the state of a pending remote read.
-	///
-	/// Returns:
-	/// - `PollOutcome::Pending` if the request is still in flight,
-	/// - `PollOutcome::Record(r)` if at least one holder returned the record,
-	/// - `PollOutcome::NotFound` if every holder reported no record,
-	/// - `PollOutcome::Unknown` if the request id is not (or is no longer)
-	///   known to the engine.
 	pub fn poll_get(&self, request_id: RequestId) -> Outcome<PollOutcome> {
 		let pending = lock_mutex!(self.pending_gets);
 		let Some(slot) = pending.get(&request_id) else {
@@ -654,8 +609,6 @@ impl<S: Storage> DistOzone<S> {
 		Ok(PollOutcome::Pending)
 	}
 
-	/// Discards the bookkeeping for a pending remote read.
-	///
 	/// Late responses that arrive after cancellation are ignored by the next
 	/// [`handle_envelope`](Self::handle_envelope) call.
 	pub fn cancel_get(&self, request_id: RequestId) -> Outcome<()> {
@@ -664,17 +617,11 @@ impl<S: Storage> DistOzone<S> {
 		Ok(())
 	}
 
-	/// Builds an anti-entropy digest envelope for the given eventual-
-	/// consistency table, addressed to a randomly- or caller-chosen target
-	/// peer.
-	///
 	/// The envelope carries a serialised IBLT built from the local storage's
 	/// [`Storage::digests`] enumeration for that table. The recipient
 	/// subtracts it against its own sketch, decodes the symmetric difference
-	/// and answers with [`MsgKind::AntiEntropyReply`].
-	///
-	/// Rejects unknown tables and cohort-backed tables (those reconcile
-	/// through consensus, not anti-entropy).
+	/// and answers with [`MsgKind::AntiEntropyReply`]. Cohort-backed tables
+	/// reconcile through consensus rather than anti-entropy, and are rejected.
 	pub fn build_anti_entropy_request(
 		&self,
 		table:	&str,
@@ -701,9 +648,8 @@ impl<S: Storage> DistOzone<S> {
 		))
 	}
 
-	/// Builds an IBLT sketch of the entire contents of a table from the
-	/// local storage backend. Factored out so both the request builder and
-	/// the inbound digest handler use the same sketch shape.
+	/// Factored out so both the request builder and the inbound digest handler
+	/// use the same sketch shape.
 	fn build_table_iblt(&self, tc: &TableConfig) -> Outcome<Iblt> {
 		let cfg = IbltConfig {
 			num_cells:	tc.iblt_cells,
@@ -720,12 +666,11 @@ impl<S: Storage> DistOzone<S> {
 		Ok(iblt)
 	}
 
-	/// Handles an incoming anti-entropy digest: decodes the symmetric
-	/// difference against the local sketch and returns an
-	/// [`AntiEntropyReply`][ar] envelope carrying records the sender lacks
-	/// and a list of record identifiers the recipient lacks. On sketch
-	/// overload falls back to a bulk reply of every record the recipient
-	/// holds for the table.
+	/// Decodes the symmetric difference against the local sketch and returns an
+	/// [`AntiEntropyReply`][ar] envelope carrying records the sender lacks and
+	/// a list of record identifiers the recipient lacks. On sketch overload it
+	/// falls back to a bulk reply of every record the recipient holds for the
+	/// table.
 	///
 	/// [ar]: MsgKind::AntiEntropyReply
 	fn handle_anti_entropy_digest(
@@ -810,10 +755,8 @@ impl<S: Storage> DistOzone<S> {
 		})
 	}
 
-	/// Handles an incoming anti-entropy reply: applies the records the
-	/// recipient was missing, and builds an
-	/// [`AntiEntropyPush`][ap] envelope for any records the recipient
-	/// requested in return.
+	/// Applies the records the recipient was missing, and builds an
+	/// [`AntiEntropyPush`][ap] envelope for any records requested in return.
 	///
 	/// [ap]: MsgKind::AntiEntropyPush
 	fn handle_anti_entropy_reply(
@@ -865,15 +808,10 @@ impl<S: Storage> DistOzone<S> {
 		})
 	}
 
-	/// Handles an inbound [`MsgKind::CohortSubmit`].
-	///
-	/// Validates that the local peer is the initial leader for the
-	/// `(table, record_id)` pair and opens (or re-opens, if the current
-	/// view has progressed but this is the first submit the leader has
-	/// seen) a HotStuff round. If the local peer is not the leader the
-	/// submission is dropped silently -- this is almost always a
-	/// stale-cohort race (the submitter's view of the peer set differed
-	/// from the leader's at the moment of submission).
+	/// Opens a HotStuff round if the local peer is the initial leader for the
+	/// `(table, record_id)` pair. If it is not, the submission is dropped
+	/// silently -- almost always a stale-cohort race, where the submitter's
+	/// view of the peer set differed from the leader's.
 	fn handle_cohort_submit(
 		&self,
 		record:	Record,
@@ -907,10 +845,8 @@ impl<S: Storage> DistOzone<S> {
 		})
 	}
 
-	/// Handles an inbound [`MsgKind::CohortPropose`]: feeds the proposal
-	/// into the per-record HotStuff replica, creating a fresh instance if
-	/// one does not yet exist. Proposals addressed to a peer that is not a
-	/// cohort member are dropped silently.
+	/// Creates a fresh per-record replica if one does not yet exist. A proposal
+	/// addressed to a peer that is not a cohort member is dropped silently.
 	fn handle_cohort_propose(
 		&self,
 		from:		NodeId,
@@ -979,9 +915,8 @@ impl<S: Storage> DistOzone<S> {
 		})
 	}
 
-	/// Handles an inbound [`MsgKind::CohortVote`]: feeds the vote into the
-	/// per-record HotStuff replica (leader-only; non-leader replicas
-	/// silently ignore per the HotStuff spec).
+	/// Leader-only: a non-leader replica silently ignores a vote, per the
+	/// HotStuff spec.
 	fn handle_cohort_vote(
 		&self,
 		table:	String,
@@ -1021,8 +956,6 @@ impl<S: Storage> DistOzone<S> {
 		})
 	}
 
-	/// Handles an inbound [`MsgKind::CohortNewView`]: feeds the view-
-	/// change message into the per-record HotStuff replica.
 	fn handle_cohort_new_view(
 		&self,
 		table:		String,
@@ -1049,9 +982,7 @@ impl<S: Storage> DistOzone<S> {
 		})
 	}
 
-	/// Handles an incoming anti-entropy push: applies the records the
-	/// originator sent in response to our request list. Each record is
-	/// placement-checked before persistence.
+	/// Each record is placement-checked before persistence.
 	fn handle_anti_entropy_push(
 		&self,
 		table:		String,
@@ -1076,22 +1007,11 @@ impl<S: Storage> DistOzone<S> {
 /// The result of a [`DistOzone::put`] call.
 #[derive(Clone, Debug)]
 pub struct PutOutcome {
-	/// `true` if the record was persisted to local storage by this call.
-	/// Always `false` for cohort-backed writes -- those persist when the
-	/// HotStuff round reaches `Decide`, which is signalled through
-	/// [`InboundOutcome::completed_consensus_put`].
+	// Always false for a cohort-backed write, which persists on Decide and is
+	// signalled through InboundOutcome::completed_consensus_put.
 	pub local_persisted:	bool,
-	/// The envelopes the caller should dispatch. For eventual writes these
-	/// are [`MsgKind::ReplicatePut`]s to remote holders. For cohort writes
-	/// these are either [`MsgKind::CohortPropose`] envelopes (when the
-	/// local peer is the initial leader) or a single
-	/// [`MsgKind::CohortSubmit`] (otherwise).
 	pub outbound:			Vec<Envelope>,
-	/// `Some((table, record_id))` when this put entered a HotStuff
-	/// consensus round. Callers that need to know when the record lands in
-	/// storage across the cohort can watch
-	/// [`InboundOutcome::completed_consensus_put`] for a matching
-	/// `(table, record_id)`.
+	// Set when the put entered a HotStuff consensus round.
 	pub consensus_pending:	Option<(String, RecordId)>,
 }
 
@@ -1099,39 +1019,27 @@ pub struct PutOutcome {
 /// The result of a [`DistOzone::get`] call.
 #[derive(Clone, Debug)]
 pub enum GetOutcome {
-	/// The record was read from local storage.
 	Local(Record),
-	/// The local peer is a holder but has no record at that id.
-	LocalMiss,
-	/// The local peer is not a holder; a remote read has been initiated
-	/// and the returned envelopes should be dispatched. Completion is
-	/// reported through [`DistOzone::poll_get`].
+	LocalMiss,	// a holder, but no record at that id
+	// A remote read has been initiated; completion is reported through
+	// DistOzone::poll_get.
 	Remote {
-		/// Correlation identifier for the outstanding request.
 		request_id:	RequestId,
-		/// The envelopes to dispatch.
 		outbound:	Vec<Envelope>,
 	},
-	/// The local peer is not a holder and no remote targets are known
-	/// (empty peer set, or a freshly-constructed engine).
-	NoTargets,
+	NoTargets,	// not a holder, and no remote targets are known
 }
 
 
 /// The result of a [`DistOzone::handle_envelope`] call.
 #[derive(Clone, Debug)]
 pub struct InboundOutcome {
-	/// Envelopes the caller should dispatch.
 	pub outbound:		Vec<Envelope>,
-	/// If this envelope completed a pending remote read, the request id of
-	/// that read. The caller polls [`DistOzone::poll_get`] to collect the
-	/// record itself.
+	// Set when this envelope completed a pending remote read; the caller polls
+	// DistOzone::poll_get to collect the record itself.
 	pub completed_get:	Option<RequestId>,
-	/// If this envelope caused a HotStuff cohort round to reach `Decide`
-	/// and the resulting record to be persisted to local storage, the
-	/// `(table, record_id)` identifying that commit. The caller can use
-	/// this to ack the originating submitter or to drive application-level
-	/// post-commit work.
+	// Set when this envelope drove a cohort round to Decide and the record was
+	// persisted locally.
 	pub completed_consensus_put:	Option<(String, RecordId)>,
 }
 
@@ -1149,12 +1057,8 @@ impl InboundOutcome {
 /// The result of a [`DistOzone::poll_get`] query.
 #[derive(Clone, Debug)]
 pub enum PollOutcome {
-	/// The request is still outstanding.
 	Pending,
-	/// A response has landed carrying the record.
 	Record(Record),
-	/// Every outstanding holder has replied that the record is not present.
-	NotFound,
-	/// The request id is unknown or has been cancelled.
-	Unknown,
+	NotFound,	// every outstanding holder replied that the record is absent
+	Unknown,	// unknown, or cancelled
 }

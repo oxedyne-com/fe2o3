@@ -9,6 +9,9 @@
 //! is constructed; runtime mutation (peers joining, leaving, network size
 //! re-estimated) flows through the engine's own methods rather than through
 //! the config.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use crate::kademlia::id::NodeId;
@@ -24,17 +27,10 @@ use std::time::Duration;
 /// consensus cohort and reach strict consistency after three message rounds.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Consistency {
-	/// Writes land locally and at every OAM holder; concurrent writes
-	/// reconcile via IBLT anti-entropy. Suitable for append-only or
-	/// monotonic-only tables.
-	Eventual,
-	/// Writes serialise through a consensus cohort of the given size `lambda`,
-	/// tolerating up to `floor((lambda - 1) / 3)` Byzantine members. Values
-	/// are restricted to `{5, 7, 9}` in the Hematite spec; other values are
-	/// rejected by [`TableConfig::new`].
+	Eventual,	// writes land locally and at every OAM holder
+	// Tolerates up to floor((lambda - 1) / 3) Byzantine members.
 	Cohort {
-		/// Cohort size. Must be in `{5, 7, 9}`.
-		lambda:	u64,
+		lambda:	u64,	// 5, 7 or 9
 	},
 }
 
@@ -44,36 +40,22 @@ pub enum Consistency {
 /// anti-entropy reconciliation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TableConfig {
-	/// The application-visible table name. Must be unique within a
-	/// [`DistOzoneConfig`].
-	pub name:				String,
-	/// The consistency guarantee.
+	pub name:				String,			// unique within a DistOzoneConfig
 	pub consistency:		Consistency,
-	/// How often a peer initiates an IBLT anti-entropy round for this table.
-	/// Ignored for [`Consistency::Cohort`] tables, which reconcile through
-	/// consensus rather than anti-entropy.
-	pub anti_entropy:		Duration,
-	/// Number of IBLT cells used in anti-entropy digests for this table.
-	/// Spec rule of thumb: `1.5 × d` cells with three hash functions, where
-	/// `d` is the maximum symmetric-difference size the sketch must decode.
-	/// Oversized sketches waste bandwidth; undersized sketches force a
-	/// bulk-transfer fallback.
-	pub iblt_cells:			usize,
+	pub anti_entropy:		Duration,		// ignored for Cohort tables
+	pub iblt_cells:			usize,			// 1.5 x d cells decode a difference of d
 }
 
 impl TableConfig {
-	/// Default anti-entropy cadence for a non-trivial eventual-consistency
-	/// table -- identity directory, oxedation log, name claims.
+	// Identity directory, oxedation log, name claims.
 	pub const DEFAULT_AE: Duration = Duration::from_secs(30);
 
-	/// Cadence for small high-value tables -- the peer set, the revocation
-	/// list.
+	// Small high-value tables -- the peer set, the revocation list.
 	pub const HIGH_VALUE_AE: Duration = Duration::from_secs(3);
 
-	/// Default IBLT cell count. Tuned for a steady-state symmetric
-	/// difference of up to ~160 records (`256 / 1.5`). Larger differences
-	/// overload the sketch; the anti-entropy handler falls back to a bulk
-	/// transfer when decoding fails.
+	// Tuned for a steady-state symmetric difference of up to ~160 records
+	// (256 / 1.5). Larger differences overload the sketch; the anti-entropy
+	// handler falls back to a bulk transfer when decoding fails.
 	pub const DEFAULT_IBLT_CELLS: usize = 256;
 
 	/// The number of hash functions the anti-entropy IBLT uses. Fixed at
@@ -81,13 +63,6 @@ impl TableConfig {
 	/// `fe2o3_data::iblt`.
 	pub const IBLT_NUM_HASHES: usize = 3;
 
-	/// Constructs a table config, validating the consistency model and the
-	/// sketch dimensions.
-	///
-	/// Rejects:
-	/// - an empty `name`;
-	/// - a [`Consistency::Cohort`] `lambda` outside `{5, 7, 9}`;
-	/// - `iblt_cells == 0`.
 	pub fn new<S: Into<String>>(
 		name:			S,
 		consistency:	Consistency,
@@ -117,8 +92,6 @@ impl TableConfig {
 		Ok(Self { name, consistency, anti_entropy, iblt_cells })
 	}
 
-	/// Convenience: an eventual-consistency table at the default cadence
-	/// and the default IBLT cell count.
 	pub fn eventual<S: Into<String>>(name: S) -> Outcome<Self> {
 		Self::new(
 			name,
@@ -128,7 +101,7 @@ impl TableConfig {
 		)
 	}
 
-	/// Convenience: a cohort-backed table with lambda = 5.
+	/// Cohort size 5.
 	pub fn cohort_default<S: Into<String>>(name: S) -> Outcome<Self> {
 		Self::new(
 			name,
@@ -138,9 +111,8 @@ impl TableConfig {
 		)
 	}
 
-	/// A deterministic 64-bit seed derived from the table name, used as
-	/// the IBLT's splitmix64 salt so that different tables have different
-	/// hash functions.
+	/// The IBLT's splitmix64 salt, derived from the table name so that
+	/// different tables have different hash functions.
 	pub fn iblt_seed(&self) -> u64 {
 		let mut state: u64 = 0x9E3779B97F4A7C15;
 		for byte in self.name.as_bytes() {
@@ -157,25 +129,13 @@ impl TableConfig {
 /// Top-level configuration for distributed Ozone mode.
 #[derive(Clone, Debug)]
 pub struct DistOzoneConfig {
-	/// The local peer's 256-bit identifier.
-	pub local_peer_id:	NodeId,
-	/// The initial peer set. Does not need to include the local peer -- it
-	/// is filtered out automatically by
-	/// [`DistOzone::new`](crate::dist::DistOzone::new).
-	pub bootstrap_peers:	Vec<NodeId>,
-	/// OAM placement parameters. `network_size` is the *initial* value;
-	/// the engine's HyperLogLog estimator updates it at runtime.
-	pub oam:				OamConfig,
-	/// The table schemas. Must have unique names.
-	pub tables:				Vec<TableConfig>,
+	pub local_peer_id:		NodeId,
+	pub bootstrap_peers:	Vec<NodeId>,		// the local peer is filtered out
+	pub oam:				OamConfig,			// network_size is the initial value only
+	pub tables:				Vec<TableConfig>,	// unique names
 }
 
 impl DistOzoneConfig {
-	/// Constructs and validates a config.
-	///
-	/// Rejects:
-	/// - duplicate table names;
-	/// - an empty table list (distributed mode requires at least one table).
 	pub fn new(
 		local_peer_id:		NodeId,
 		bootstrap_peers:	Vec<NodeId>,
@@ -205,7 +165,6 @@ impl DistOzoneConfig {
 		Ok(Self { local_peer_id, bootstrap_peers, oam, tables })
 	}
 
-	/// Returns the table config for the given name, if present.
 	pub fn table(&self, name: &str) -> Option<&TableConfig> {
 		self.tables.iter().find(|t| t.name == name)
 	}

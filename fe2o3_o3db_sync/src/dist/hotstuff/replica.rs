@@ -19,6 +19,9 @@
 //! Not yet in scope: checkpointing of multiple decisions, Byzantine-fault
 //! simulation tests, signature aggregation (we pass individual signatures
 //! through the QC).
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use super::types::{
 	BLOCK_HASH_LEN,
@@ -43,12 +46,8 @@ use std::collections::{
 /// Per-replica configuration.
 #[derive(Clone, Copy, Debug)]
 pub struct Config {
-	/// Number of replicas in the cohort, i.e. `λ` in the spec.
-	pub cohort_size:	usize,
-	/// Maximum tolerated Byzantine members, i.e. `z = floor((λ - 1) / 3)`
-	/// in the spec.
-	pub f:				usize,
-	/// This replica's identifier.
+	pub cohort_size:	usize,		// λ in the spec
+	pub f:				usize,		// z = floor((λ - 1) / 3)
 	pub self_id:		ReplicaId,
 }
 
@@ -58,19 +57,17 @@ impl Config {
 		self.cohort_size - self.f
 	}
 
-	/// The leader of `view`, under round-robin rotation. View 1's leader is
-	/// replica 0, view 2's is replica 1, and so on.
+	/// Round-robin rotation: view 1's leader is replica 0, view 2's is replica
+	/// 1, and so on.
 	pub fn leader_for(&self, view: ViewId) -> ReplicaId {
 		let idx = (view.saturating_sub(1) as usize) % self.cohort_size;
 		idx as ReplicaId
 	}
 
-	/// Returns `true` if this replica is the leader for `view`.
 	pub fn is_leader_for(&self, view: ViewId) -> bool {
 		self.self_id == self.leader_for(view)
 	}
 
-	/// Validates the configuration is internally consistent.
 	pub fn validate(&self) -> Outcome<()> {
 		if self.cohort_size == 0 {
 			return Err(err!(
@@ -97,31 +94,23 @@ impl Config {
 /// A command the state machine asks the caller to perform.
 #[derive(Clone, Debug)]
 pub enum Command {
-	/// Broadcast a proposal to every replica in the cohort (including the
-	/// leader itself, so that the leader's own [`Replica::on_proposal`]
-	/// records its vote consistently).
+	// Goes to every replica including the leader, whose own vote is recorded
+	// through Replica::on_proposal.
 	BroadcastProposal(Proposal),
-	/// Send a vote to a single recipient, normally the current leader.
+	// Normally to the current leader.
 	SendVote {
-		/// Recipient replica id.
 		to:		ReplicaId,
-		/// The vote to deliver.
 		vote:	Vote,
 	},
-	/// Send a view-change message to a single recipient, normally the
-	/// incoming leader.
+	// Normally to the incoming leader.
 	SendNewView {
-		/// Recipient replica id.
 		to:			ReplicaId,
-		/// The `NewView` payload.
 		new_view:	NewView,
 	},
-	/// The replica has committed to a decision. The caller hands the block
-	/// back to the application; the state machine becomes inert.
+	// The caller hands the block back to the application; the state machine
+	// is inert afterwards.
 	Decide {
-		/// View in which the decision was reached.
 		view:	ViewId,
-		/// The decided block payload.
 		block:	Vec<u8>,
 	},
 }
@@ -130,35 +119,23 @@ pub enum Command {
 /// A pure HotStuff replica state machine (three-phase, with view change).
 pub struct Replica {
 	cfg:		Config,
-	/// Current view. Starts at 1; advances on [`Replica::on_timeout`].
-	view:		ViewId,
-	/// Blocks observed by this replica, keyed by hash. Populated when a
-	/// Prepare proposal arrives and consulted when emitting a Decide.
+	view:		ViewId,	// starts at 1, advances on on_timeout
 	blocks:		HashMap<BlockHash, Vec<u8>>,
-	/// Leader-side vote aggregation for the *current* view, keyed by
-	/// `(phase, block_hash)`. `BTreeMap<ReplicaId, _>` keeps voters in
-	/// ascending-unique order for the QC.
+	// Leader-side aggregation for the current view. The BTreeMap keeps voters
+	// in ascending-unique order, which is what the QC requires.
 	gathered:	HashMap<(Phase, BlockHash), BTreeMap<ReplicaId, Vote>>,
-	/// Leader-side NewView aggregation for the *current* view.
 	new_views:	BTreeMap<ReplicaId, NewView>,
-	/// Most recent phase this replica has voted in for the current view.
 	last_voted:	Option<Phase>,
-	/// Highest prepare QC this replica has observed. Carried forward across
-	/// views and included in outgoing NewView messages.
+	// Carried forward across views and included in outgoing NewView messages.
 	prepare_qc:	Option<Qc>,
-	/// Highest locked QC (pre-commit QC) this replica has observed. Gates
-	/// the safety predicate on Prepare proposals and is carried forward.
+	// The highest pre-commit QC seen; gates safeBlock on Prepare proposals.
 	locked_qc:	Option<Qc>,
-	/// `true` after a Decide has been emitted. The state machine is inert
-	/// thereafter.
-	decided:	bool,
-	/// `true` once this leader has opened a Prepare proposal in the current
-	/// view (so a later NewView quorum doesn't re-open one).
+	decided:	bool,	// the state machine is inert once set
+	// Stops a later NewView quorum re-opening a Prepare in the same view.
 	prepared_this_view:	bool,
 }
 
 impl Replica {
-	/// Constructs a replica. Validates the configuration.
 	pub fn new(cfg: Config) -> Outcome<Self> {
 		res!(cfg.validate());
 		Ok(Self {
@@ -175,37 +152,30 @@ impl Replica {
 		})
 	}
 
-	/// Returns the configuration.
 	pub fn config(&self) -> Config {
 		self.cfg
 	}
 
-	/// Returns the current view.
 	pub fn view(&self) -> ViewId {
 		self.view
 	}
 
-	/// Returns `true` if the replica has decided.
 	pub fn has_decided(&self) -> bool {
 		self.decided
 	}
 
-	/// Returns a reference to the locked QC, if any.
 	pub fn locked_qc(&self) -> Option<&Qc> {
 		self.locked_qc.as_ref()
 	}
 
-	/// Returns a reference to the prepare QC, if any.
 	pub fn prepare_qc(&self) -> Option<&Qc> {
 		self.prepare_qc.as_ref()
 	}
 
-	/// Leader-only: propose an initial block for the current view.
-	///
-	/// Valid in view 1 (no previous state) or after a NewView quorum in
-	/// view > 1 where no replica reported a prepare QC (otherwise the
-	/// leader must propose the block already pinned by the highest
-	/// prepare QC). Caller supplies the block bytes and hash.
+	/// Leader-only. Valid in view 1, which has no previous state, or after a
+	/// NewView quorum in view > 1 where no replica reported a prepare QC --
+	/// otherwise the leader must propose the block the highest prepare QC
+	/// already pinned.
 	pub fn propose(&mut self, block: Vec<u8>, block_hash: BlockHash) -> Outcome<Vec<Command>> {
 		if !self.cfg.is_leader_for(self.view) {
 			return Err(err!(
@@ -235,7 +205,6 @@ impl Replica {
 		Ok(vec![Command::BroadcastProposal(proposal)])
 	}
 
-	/// Consumes an incoming proposal from the leader of its view.
 	pub fn on_proposal(&mut self, proposal: Proposal) -> Outcome<Vec<Command>> {
 		if self.decided {
 			return Ok(Vec::new());
@@ -398,7 +367,7 @@ impl Replica {
 		Ok(vec![Command::SendVote { to: leader, vote }])
 	}
 
-	/// Leader-only: consumes an incoming vote. Non-leaders ignore votes.
+	/// Leader-only; a non-leader ignores votes.
 	pub fn on_vote(&mut self, vote: Vote) -> Outcome<Vec<Command>> {
 		if !self.cfg.is_leader_for(self.view) {
 			return Ok(Vec::new());
@@ -574,10 +543,9 @@ impl Replica {
 		}
 	}
 
-	/// Returns `true` if this replica is currently expecting the leader
-	/// to supply a fresh block via [`Replica::propose`] -- i.e. it is the
-	/// leader, a NewView quorum has been accumulated, and no prior
-	/// prepare QC pinned a block.
+	/// Is this replica the leader, holding a NewView quorum in which no prior
+	/// prepare QC pinned a block? If so it must supply a fresh block through
+	/// [`Replica::propose`].
 	pub fn awaiting_fresh_block(&self) -> bool {
 		self.cfg.is_leader_for(self.view)
 			&& !self.decided

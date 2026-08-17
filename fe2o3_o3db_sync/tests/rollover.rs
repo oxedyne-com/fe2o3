@@ -27,6 +27,9 @@
 //! The remaining phases cover a restart, which takes over the incomplete live
 //! file left behind and rebuilds the caches from the index files, and garbage
 //! collection, measured against the same churn run with collection disabled.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::{
     prelude::*,
@@ -68,12 +71,9 @@ use std::{
     time::Duration,
 };
 
-/// Number of distinct keys churned through the rollover.
-const NKEYS:     usize = 40;
-/// Number of times each key is overwritten after its first write.
-const NOVER:     usize = 12;
-/// Number of overwrite rounds in the garbage collection phase.
-const GC_ROUNDS: usize = 40;
+const NKEYS:     usize = 40;    // distinct keys churned through the rollover
+const NOVER:     usize = 12;    // overwrites of each key after its first write
+const GC_ROUNDS: usize = 40;    // overwrite rounds in the collection phase
 
 pub fn test_rollover(_filter: &'static str) -> Outcome<()> {
 
@@ -137,8 +137,8 @@ pub fn test_rollover(_filter: &'static str) -> Outcome<()> {
     Ok(())
 }
 
-/// Build the shared test configuration: tiny data files so rollovers happen
-/// every few records, and garbage collection under the caller's control.
+/// Tiny data files, so rollovers happen every few records, and garbage
+/// collection under the caller's control.
 fn rollover_cfg(nwbots: u16) -> Outcome<OzoneConfig> {
     let mut cfg = res!(setup::default_cfg());
     cfg.num_zones               = 1;
@@ -349,7 +349,6 @@ fn restart_keeps_file_numbers_unique(
     Ok(())
 }
 
-/// Writes `NKEYS` keys `rounds` times each, returning the number of writes.
 fn churn<
     ENC:    oxedyne_fe2o3_iop_crypto::enc::Encrypter + 'static,
     KH:     oxedyne_fe2o3_iop_hash::api::Hasher + 'static,
@@ -424,8 +423,8 @@ fn gc_reclaims_sealed_files(
     Ok(())
 }
 
-/// Runs the overwrite churn on a freshly wiped database and returns the total
-/// size in bytes of the data files it leaves behind.
+/// The database is freshly wiped first, so the returned byte total covers only
+/// this run's churn.
 fn churn_and_measure(
     db_root:     &PathBuf,
     schms_input: &RestSchemesInput<
@@ -520,8 +519,8 @@ fn assert_no_bot_errors<
     Ok(())
 }
 
-/// Sums the tracked record counts across every file bot in every zone,
-/// returning the number of tracked files and the current and old record counts.
+/// Across every file bot in every zone: the number of tracked files, the
+/// current and old record counts, and the old count the file states track.
 fn count_data_states(
     states: &BTreeMap<WorkerInd, FileStateMap>,
 )
@@ -546,14 +545,12 @@ fn count_data_states(
     (nfiles, ncur, nold, noldcnt)
 }
 
-/// Total size in bytes of the data files under the database root.
 fn zone_data_bytes(db_root: &Path) -> Outcome<u64> {
     let mut total = 0u64;
     res!(walk_data_files(db_root, &mut total));
     Ok(total)
 }
 
-/// Recursively sums the size of every `.dat` file beneath `dir`.
 fn walk_data_files(dir: &Path, total: &mut u64) -> Outcome<()> {
     for entry in res!(fs::read_dir(dir)) {
         let entry = res!(entry);
@@ -568,7 +565,7 @@ fn walk_data_files(dir: &Path, total: &mut u64) -> Outcome<()> {
     Ok(())
 }
 
-/// Canonicalise a directory path, creating it if it does not exist.
+/// Creates the directory if it does not exist.
 fn canonical_dir(p: &str) -> Outcome<PathBuf> {
     match Path::new(p).canonicalize() {
         Ok(path) => Ok(path),

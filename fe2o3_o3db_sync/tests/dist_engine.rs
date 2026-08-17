@@ -6,6 +6,9 @@
 //! decisions, write-path outbound construction, read-path local/remote
 //! branching, inbound handling, response correlation, and peer-set / OAM
 //! mutation.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_o3db_sync::kademlia::id::NodeId;

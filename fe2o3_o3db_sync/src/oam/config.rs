@@ -4,6 +4,9 @@
 //! factor `n` and the current estimated network size `N`. It is held by every
 //! peer and refreshed when either input changes -- `n` on a configuration
 //! reload, `N` on a HyperLogLog-driven estimate update.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use super::threshold::Threshold;
 
@@ -24,23 +27,18 @@ use oxedyne_fe2o3_core::prelude::*;
 /// replicas on nothing" as if it were a routine state.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct OamConfig {
-	/// Target replication factor, `n` in the specification.
-	pub replication:	u64,
-	/// Current estimated network size, `N` in the specification.
-	pub network_size:	u64,
+	pub replication:	u64,	// n in the specification
+	pub network_size:	u64,	// N in the specification
 }
 
 impl OamConfig {
-	/// The default replication factor used by the Oxegen reference peer and
-	/// quoted in the Hematite specification.
+	// The figure quoted in the Hematite specification.
 	pub const DEFAULT_REPLICATION: u64 = 20;
 
-	/// Constructs a configuration, rejecting the empty-network case when
-	/// replication is non-zero.
-	///
-	/// The spec allows `replication == 0` (no peer holds anything) as a
-	/// well-defined limit; `network_size == 0` with a non-zero replication is
-	/// an operator mistake, not a valid operating point, and is flagged here.
+	/// The spec allows `replication == 0` -- no peer holds anything -- as a
+	/// well-defined limit. `network_size == 0` with a non-zero replication is
+	/// an operator mistake rather than a valid operating point, and is
+	/// rejected.
 	pub fn new(replication: u64, network_size: u64) -> Outcome<Self> {
 		if replication > 0 && network_size == 0 {
 			return Err(err!(
@@ -55,22 +53,17 @@ impl OamConfig {
 		})
 	}
 
-	/// Constructs a configuration with [`Self::DEFAULT_REPLICATION`] and the
-	/// given network size.
 	pub fn default_replication(network_size: u64) -> Outcome<Self> {
 		Self::new(Self::DEFAULT_REPLICATION, network_size)
 	}
 
-	/// Computes the 256-bit placement threshold for this configuration.
-	///
-	/// The threshold is a pure function of `(replication, network_size)` and
-	/// is worth caching when a peer checks placement against many records.
+	/// A pure function of `(replication, network_size)`, and worth caching when
+	/// a peer checks placement against many records.
 	pub fn threshold(&self) -> Threshold {
 		Threshold::from_params(self.replication, self.network_size)
 	}
 
-	/// Returns the expected number of holders per record under this
-	/// configuration, clamped to `min(replication, network_size)`.
+	/// Per record, clamped to `min(replication, network_size)`.
 	pub fn expected_holders(&self) -> u64 {
 		self.replication.min(self.network_size)
 	}

@@ -6,6 +6,9 @@
 //! rotation live one layer up -- in fe2o3_crypto and the distributed Ozone
 //! layer on top of this crate -- because routing itself does not authenticate
 //! anything.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use super::id::NodeId;
 
@@ -24,20 +27,17 @@ use std::{
 pub struct Capabilities(pub u64);
 
 impl Capabilities {
-	/// The empty capability set.
 	pub const NONE: Self = Self(0);
 
-	/// Returns `true` if every bit of `mask` is set in `self`.
+	/// Are all of the mask's bits set?
 	pub fn has(&self, mask: Capabilities) -> bool {
 		self.0 & mask.0 == mask.0
 	}
 
-	/// Sets every bit of `mask` in `self`.
 	pub fn set(&mut self, mask: Capabilities) {
 		self.0 |= mask.0;
 	}
 
-	/// Clears every bit of `mask` from `self`.
 	pub fn clear(&mut self, mask: Capabilities) {
 		self.0 &= !mask.0;
 	}
@@ -51,25 +51,17 @@ impl Capabilities {
 /// `Arc` because they are small and mutated only through the table's own API.
 #[derive(Clone, Debug)]
 pub struct Contact {
-	/// The peer's 256-bit identifier.
 	pub node_id:		NodeId,
-	/// One or more socket addresses the peer is known to accept traffic on.
-	/// The first entry is treated as the primary by higher layers.
-	pub addresses:		Vec<SocketAddr>,
-	/// Ticks since some epoch the caller chose, supplied at insertion or
-	/// touch time. Opaque to this crate.
-	pub last_seen:		u64,
-	/// Smoothed round-trip time, or `None` if no probe has succeeded yet.
-	pub rtt:			Option<Duration>,
-	/// Opaque capability bitfield.
+	pub addresses:		Vec<SocketAddr>,	// the first is the primary
+	pub last_seen:		u64,				// caller's own epoch, opaque here
+	pub rtt:			Option<Duration>,	// None until a probe succeeds
 	pub capabilities:	Capabilities,
 }
 
 impl Contact {
-	/// Builds a new contact with `last_seen = 0`, no RTT sample and no
-	/// capabilities. Callers are expected to update `last_seen` immediately
-	/// on insertion via [`Contact::touch`] or the routing table's insert
-	/// path.
+	/// `last_seen` starts at 0, with no RTT sample and no capabilities. The
+	/// caller is expected to set `last_seen` at once, through
+	/// [`Contact::touch`] or the routing table's insert path.
 	pub fn new(node_id: NodeId, addresses: Vec<SocketAddr>) -> Self {
 		Self {
 			node_id,
@@ -80,14 +72,11 @@ impl Contact {
 		}
 	}
 
-	/// Updates `last_seen` to `now`.
 	pub fn touch(&mut self, now: u64) {
 		self.last_seen = now;
 	}
 
-	/// Blends a fresh RTT sample into the smoothed estimate.
-	///
-	/// Uses a simple exponentially weighted moving average with α = 1/8, the
+	/// An exponentially weighted moving average with α = 1/8, the
 	/// TCP Jacobson smoothing constant. The first sample becomes the initial
 	/// estimate unchanged.
 	pub fn record_rtt(&mut self, sample: Duration) {

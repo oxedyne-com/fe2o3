@@ -8,6 +8,9 @@
 //! crates take pre-computed [`NodeId`]s.
 //!
 //! [`NodeId`]: crate::kademlia::id::NodeId
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use crate::kademlia::id::{
@@ -27,12 +30,11 @@ use crate::kademlia::id::{
 pub struct RecordId(pub [u8; ID_LEN]);
 
 impl RecordId {
-	/// Constructs a record identifier from a raw 32-byte array.
 	pub const fn from_bytes(bytes: [u8; ID_LEN]) -> Self {
 		Self(bytes)
 	}
 
-	/// Constructs a record identifier from a byte slice.
+	/// The slice must be exactly [`ID_LEN`] bytes.
 	pub fn from_slice(bytes: &[u8]) -> Outcome<Self> {
 		if bytes.len() != ID_LEN {
 			return Err(err!(
@@ -45,13 +47,10 @@ impl RecordId {
 		Ok(Self(arr))
 	}
 
-	/// Reinterprets the record identifier as a [`NodeId`] for XOR-distance
-	/// comparisons.
 	pub fn as_node_id(&self) -> NodeId {
 		NodeId::from_bytes(self.0)
 	}
 
-	/// Returns the identifier as a byte slice.
 	pub fn as_bytes(&self) -> &[u8; ID_LEN] {
 		&self.0
 	}
@@ -75,16 +74,12 @@ impl From<RecordId> for NodeId {
 /// application is responsible for serialisation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Record {
-	/// The 256-bit identifier used for OAM placement.
 	pub id:		RecordId,
-	/// The table the record belongs to. Matched against a [`TableConfig`].
-	pub table:	String,
-	/// The application-opaque value bytes.
+	pub table:	String,		// matched against a TableConfig
 	pub value:	Vec<u8>,
 }
 
 impl Record {
-	/// Constructs a record from its parts.
 	pub fn new<S: Into<String>>(
 		id:		RecordId,
 		table:	S,
@@ -100,10 +95,7 @@ impl Record {
 /// replication decisions that do not need to carry the full value payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RecordDigest {
-	/// The 256-bit identifier used for OAM placement.
 	pub id:			RecordId,
-	/// A content hash of the value bytes, used to detect divergent copies at
-	/// the same id. Caller-supplied so distributed Ozone is not tied to a
-	/// particular hash function.
-	pub content:	[u8; 32],
+	// Caller-supplied, so distributed Ozone is tied to no particular hash.
+	pub content:	[u8; 32],	// detects divergent copies at the same id
 }

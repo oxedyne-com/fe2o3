@@ -10,6 +10,9 @@
 //!   recipient of the reply lacks them.
 //! - Bulk-reply fallback when the sketch is overloaded.
 //! - End-to-end convergence across a three-message round.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_o3db_sync::kademlia::id::NodeId;
@@ -50,9 +53,9 @@ fn record_id_from_u8(b: u8) -> RecordId {
 	RecordId::from_bytes(bytes)
 }
 
-/// Builds two engines, each considering itself the sole holder of
-/// everything in its tables. Replication factor equals network size so
-/// placement re-checks never drop a record.
+/// Each considers itself the sole holder of everything in its tables:
+/// replication factor equals network size, so a placement re-check never drops
+/// a record.
 fn build_two_engines(
 	a: NodeId,
 	b: NodeId,

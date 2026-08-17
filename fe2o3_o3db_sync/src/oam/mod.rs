@@ -55,6 +55,10 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
 pub mod config;
 pub mod placement;
 pub mod threshold;

@@ -50,6 +50,9 @@
 //! This module is compiled only when the crate is built with the `dist`
 //! feature. Local-only callers pay no compile cost for the distributed
 //! primitive graph.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 pub mod cohort;
 pub mod config;

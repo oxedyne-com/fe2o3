@@ -9,6 +9,9 @@
 //! [`MemoryStorage`], an in-memory `HashMap`-backed adapter, and exercise the
 //! full engine without touching disk. A later commit wires the
 //! `fe2o3_o3db_sync` adapter in an integration crate.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use super::record::{
 	Record,
@@ -22,25 +25,19 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 
-/// Distributed Ozone's storage contract.
-///
 /// Implementations must be internally thread-safe: distributed Ozone holds
 /// one `Storage` handle per engine and may access it from multiple threads
 /// (the write path, the anti-entropy loop, the consensus cohort driver, and
 /// the inbound envelope dispatcher).
 pub trait Storage {
-	/// Persist or overwrite a record in the given table.
+	/// Overwrites any record already at the same identifier.
 	fn put(&self, record: &Record) -> Outcome<()>;
 
-	/// Read a record by identifier.
 	fn get(&self, table: &str, id: &RecordId) -> Outcome<Option<Record>>;
 
-	/// Remove a record by identifier. Returns `true` if a record was
-	/// removed, `false` if no such record existed.
+	/// The bool reports whether a record was there to remove.
 	fn delete(&self, table: &str, id: &RecordId) -> Outcome<bool>;
 
-	/// Enumerate every record in a table as a digest.
-	///
 	/// Used by the IBLT anti-entropy layer to build a symmetric-difference
 	/// sketch against a peer's view of the same table. The `content` hash
 	/// on each digest must be deterministic: two peers that hold the same
@@ -60,12 +57,11 @@ pub struct MemoryStorage {
 }
 
 impl MemoryStorage {
-	/// Constructs an empty memory-backed storage adapter.
 	pub fn new() -> Self {
 		Self { inner: Mutex::new(HashMap::new()) }
 	}
 
-	/// Returns the total number of records across all tables.
+	/// Across all tables.
 	pub fn len(&self) -> Outcome<usize> {
 		let guard = lock_mutex!(self.inner);
 		Ok(guard.len())
@@ -116,8 +112,7 @@ impl Storage for MemoryStorage {
 }
 
 
-/// Deterministic 256-bit content hash of a byte slice, used by the in-memory
-/// storage adapter to produce [`RecordDigest::content`] values.
+/// The deterministic 256-bit hash behind [`RecordDigest::content`].
 ///
 /// This is *not* a cryptographic hash -- it is splitmix64-based and intended
 /// only for test adapters. Production storage backends should use a proper

@@ -33,6 +33,9 @@
 //! The sharpest assertion here is the last: after the recovery, the index file on disk must
 //! GROW when a record is written. That one does not go through the scan at all, so it cannot
 //! be satisfied by the scan being fixed.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::{
     prelude::*,
@@ -67,19 +70,17 @@ use std::{
     time::Duration,
 };
 
-/// Records written before the index is emptied.
+// Records written before the index is emptied.
 const KEYS: usize = 40;
 
-/// The key written after the recovery, whose index record is the one that used to go into an
-/// unlinked file.
+// The key written after the recovery, whose index record is the one that used
+// to go into an unlinked file.
 const AFTER: &str = "blind:after-recovery";
 
-/// The key of record `i`.
 fn key(i: usize) -> Dat {
     dat!(fmt!("blind:{:04}", i))
 }
 
-/// The value of record `i`.
 fn val(i: usize) -> Dat {
     dat!(fmt!("value of blind record {:04}", i))
 }
@@ -115,8 +116,6 @@ fn zone_bytes(zdirs: &BTreeMap<ZoneInd, ZoneDir>) -> Outcome<(u64, u64)> {
 /// The files are truncated rather than deleted, because a missing index file and an empty one
 /// are surveyed differently: a missing one is `Present::Solo(Data)` and an empty one is
 /// `Present::Pair`, and it is the second that occurred in production.
-///
-/// Returns how many index files were emptied.
 fn empty_all_index_files(zdirs: &BTreeMap<ZoneInd, ZoneDir>) -> Outcome<usize> {
     let mut n = 0;
     for (_zind, zdir) in zdirs {

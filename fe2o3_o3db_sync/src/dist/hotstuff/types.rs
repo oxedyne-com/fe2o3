@@ -5,6 +5,9 @@
 //! expected to produce and verify outside of this crate; the state machine
 //! trusts that any vote it receives has already been checked by its caller
 //! before being handed in.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -13,10 +16,9 @@ use oxedyne_fe2o3_core::prelude::*;
 /// values; an id at or above `cohort_size` is an error when encountered.
 pub type ReplicaId = u16;
 
-/// A view identifier. Basic HotStuff advances a view per failed leader; the
-/// happy-path skeleton in this crate only ever uses a single view (1), but
-/// the field is carried end-to-end so the deferred view-change work can slot
-/// in without a breaking schema change.
+/// A view identifier, starting at 1. Basic HotStuff advances a view per failed
+/// leader; [`Replica::on_timeout`](super::replica::Replica::on_timeout) is what
+/// advances it here.
 pub type ViewId = u64;
 
 /// The fixed hash length used by this primitive. 32 bytes accommodates
@@ -24,7 +26,6 @@ pub type ViewId = u64;
 /// compute block hashes itself -- the caller supplies them.
 pub const BLOCK_HASH_LEN: usize = 32;
 
-/// A block hash, sized for standard 256-bit digests.
 pub type BlockHash = [u8; BLOCK_HASH_LEN];
 
 
@@ -32,23 +33,13 @@ pub type BlockHash = [u8; BLOCK_HASH_LEN];
 /// marker. Each is visited in order and does not revisit.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Phase {
-	/// The first round of voting; establishes that a quorum have seen the
-	/// leader's proposal.
-	Prepare,
-	/// The second round; establishes that a quorum know a prepare QC exists.
-	PreCommit,
-	/// The third round; establishes that a quorum know a pre-commit QC
-	/// exists. After the commit QC is broadcast as a `Decide` message every
-	/// honest replica outputs the block.
-	Commit,
-	/// Terminal marker -- the block has been decided. Never associated with a
-	/// vote or a proposal directly; callers observe it through
-	/// [`crate::replica::Command::Decide`].
-	Decide,
+	Prepare,	// a quorum have seen the leader's proposal
+	PreCommit,	// a quorum know a prepare QC exists
+	Commit,		// a quorum know a pre-commit QC exists
+	Decide,		// terminal, and observed through Command::Decide
 }
 
 impl Phase {
-	/// Returns the phase that follows this one, or `None` after [`Phase::Decide`].
 	pub fn next(self) -> Option<Self> {
 		match self {
 			Self::Prepare	=> Some(Self::PreCommit),
@@ -66,22 +57,12 @@ impl Phase {
 /// justifying QC since the block was pinned by `Prepare`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Proposal {
-	/// The view this proposal belongs to.
 	pub view:		ViewId,
-	/// The phase this proposal is intended to open. Replicas reply with a
-	/// [`Vote`] whose `phase` matches.
-	pub phase:		Phase,
-	/// The hash of the block under consideration.
+	pub phase:		Phase,				// a Vote replies with a matching phase
 	pub block_hash:	BlockHash,
-	/// The block payload. `Some` on the `Prepare` proposal to seed the block
-	/// into every replica; `None` on subsequent proposals within the same
-	/// view (replicas already have the block cached by hash).
-	pub block:		Option<Vec<u8>>,
-	/// The quorum certificate justifying this proposal. `None` only for the
-	/// opening `Prepare` proposal; required for `PreCommit`, `Commit` and
-	/// `Decide`. Its `phase` must be the phase that immediately precedes this
-	/// proposal's phase -- i.e. `Prepare` for a `PreCommit` proposal, and so
-	/// on.
+	pub block:		Option<Vec<u8>>,	// Some only on the Prepare proposal
+	// None only for the opening Prepare proposal. Otherwise its phase must be
+	// the one immediately preceding this proposal's phase.
 	pub justify:	Option<Qc>,
 }
 
@@ -91,17 +72,11 @@ pub struct Proposal {
 /// and verify it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Vote {
-	/// View the vote belongs to.
 	pub view:		ViewId,
-	/// Phase the vote is for.
 	pub phase:		Phase,
-	/// Block hash the vote endorses.
 	pub block_hash:	BlockHash,
-	/// Voting replica identifier. Must be less than `cohort_size`.
-	pub voter:		ReplicaId,
-	/// Opaque signature bytes produced by the caller. Ride-along data,
-	/// aggregated into the resulting [`Qc`] without inspection.
-	pub signature:	Vec<u8>,
+	pub voter:		ReplicaId,	// must be less than cohort_size
+	pub signature:	Vec<u8>,	// opaque, aggregated into the Qc uninspected
 }
 
 
@@ -109,15 +84,11 @@ pub struct Vote {
 /// same `(view, phase, block_hash)`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Qc {
-	/// View the QC belongs to.
 	pub view:		ViewId,
-	/// Phase the QC endorses.
 	pub phase:		Phase,
-	/// Block hash the QC endorses.
 	pub block_hash:	BlockHash,
-	/// Per-voter signatures, in ascending `voter` order. The primitive
-	/// guarantees there are no duplicate voters; it does not verify the
-	/// signatures -- that is the caller's job before the QC is used.
+	// In ascending voter order with no duplicates. The primitive does not
+	// verify the signatures -- that is the caller's job.
 	pub signatures:	Vec<(ReplicaId, Vec<u8>)>,
 }
 
@@ -129,26 +100,19 @@ pub struct Qc {
 /// `prepare_qc = None`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NewView {
-	/// The view the sender is entering. The new leader is
-	/// `leader_for(view)`; it accumulates messages whose `view` equals its
-	/// own current view.
-	pub view:		ViewId,
-	/// Replica identifier of the sender.
+	pub view:		ViewId,		// the view the sender is entering
 	pub sender:		ReplicaId,
-	/// The sender's highest prepare QC, if any.
 	pub prepare_qc:	Option<Qc>,
 }
 
 
 impl Qc {
-	/// Returns the number of distinct voters in the QC.
 	pub fn voter_count(&self) -> usize {
 		self.signatures.len()
 	}
 
-	/// Checks that the QC endorses the expected `(view, phase, block_hash)`
-	/// triple and contains at least `quorum` distinct voters, each in the
-	/// replica-id range `0..cohort_size`.
+	/// The QC must endorse the expected `(view, phase, block_hash)` triple and
+	/// carry at least `quorum` distinct voters, each in `0..cohort_size`.
 	pub fn validate(
 		&self,
 		view:			ViewId,

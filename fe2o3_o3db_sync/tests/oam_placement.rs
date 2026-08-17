@@ -1,4 +1,7 @@
 //! Integration tests for the OAM placement primitive.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 #![cfg(feature = "dist")]
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -13,11 +16,8 @@ use oxedyne_fe2o3_o3db_sync::oam::{
 };
 
 
-/// Deterministic pseudo-random 32-byte generator based on splitmix64.
-///
-/// Integration tests need a reproducible source of "random-looking" 256-bit
-/// identifiers without depending on any particular RNG crate; splitmix64 is
-/// compact and well-behaved for this.
+/// A reproducible source of "random-looking" 256-bit identifiers, without
+/// depending on any particular RNG crate.
 struct Rng { state: u64 }
 
 impl Rng {

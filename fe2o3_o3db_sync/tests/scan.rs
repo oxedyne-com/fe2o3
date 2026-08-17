@@ -4,6 +4,9 @@
 //! exercises [`Database::scan`] through several option shapes
 //! (all, prefix, limit, overwrite) and verifies the expected
 //! entries come back.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::{
     prelude::*,

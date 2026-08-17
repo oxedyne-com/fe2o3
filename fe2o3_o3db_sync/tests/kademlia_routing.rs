@@ -1,4 +1,7 @@
 //! Integration tests for the Kademlia routing-table primitive.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 #![cfg(feature = "dist")]
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -21,8 +24,7 @@ use oxedyne_fe2o3_o3db_sync::kademlia::{
 use std::net::SocketAddr;
 
 
-/// Helper -- builds a NodeId with a single bit set at `bit` (counted from
-/// the LSB).
+/// The bit is counted from the LSB.
 fn id_with_bit(bit: usize) -> NodeId {
 	let mut bytes = [0u8; ID_LEN];
 	let byte_from_msb = ID_LEN - 1 - bit / 8;
@@ -31,14 +33,12 @@ fn id_with_bit(bit: usize) -> NodeId {
 	NodeId::from_bytes(bytes)
 }
 
-/// Helper -- builds a NodeId from a u64 suffix in the low bytes.
 fn id_from_u64(suffix: u64) -> NodeId {
 	let mut bytes = [0u8; ID_LEN];
 	bytes[ID_LEN - 8 ..].copy_from_slice(&suffix.to_be_bytes());
 	NodeId::from_bytes(bytes)
 }
 
-/// Helper -- socket address for contact construction.
 fn loopback(port: u16) -> SocketAddr {
 	let s = format!("127.0.0.1:{}", port);
 	s.parse().expect("test loopback addr parses")

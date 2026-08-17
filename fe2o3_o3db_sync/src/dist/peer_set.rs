@@ -13,6 +13,9 @@
 //! across peers for debugging. The insert / remove cost is `O(log n)` for the
 //! search and `O(n)` for the shift, which is appropriate for the expected
 //! peer counts (tens to low thousands, updated infrequently).
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::kademlia::id::NodeId;
 
@@ -20,20 +23,18 @@ use crate::kademlia::id::NodeId;
 /// A rolling, sorted, deduplicated view of known peers.
 ///
 /// The local peer is always excluded from the set -- distributed Ozone never
-/// asks itself to be a holder via [`placement::holders`][crate::placement].
+/// asks itself to be a holder via [`placement::holders`][crate::dist::placement].
 #[derive(Clone, Debug, Default)]
 pub struct PeerSet {
 	peers:	Vec<NodeId>,
 }
 
 impl PeerSet {
-	/// Constructs an empty peer set.
 	pub fn new() -> Self {
 		Self { peers: Vec::new() }
 	}
 
-	/// Constructs a peer set from an unordered collection, excluding the
-	/// local peer and deduplicating. Runs in `O(n log n)`.
+	/// Excludes the local peer and deduplicates. Runs in `O(n log n)`.
 	pub fn from_bootstrap(
 		local_peer_id:	&NodeId,
 		candidates:		impl IntoIterator<Item = NodeId>,
@@ -48,8 +49,8 @@ impl PeerSet {
 		Self { peers }
 	}
 
-	/// Inserts a peer, maintaining sorted-deduplicated order. Returns `true`
-	/// if the peer was added, `false` if it was already present.
+	/// Maintains sorted-deduplicated order; false if the peer was already
+	/// present.
 	pub fn insert(&mut self, peer: NodeId) -> bool {
 		match self.peers.binary_search_by(|p| p.as_bytes().cmp(peer.as_bytes())) {
 			Ok(_) => false,
@@ -60,8 +61,6 @@ impl PeerSet {
 		}
 	}
 
-	/// Removes a peer. Returns `true` if the peer was present, `false` if
-	/// it was not.
 	pub fn remove(&mut self, peer: &NodeId) -> bool {
 		match self.peers.binary_search_by(|p| p.as_bytes().cmp(peer.as_bytes())) {
 			Ok(idx) => {
@@ -72,22 +71,19 @@ impl PeerSet {
 		}
 	}
 
-	/// Returns `true` if the set contains the given peer.
 	pub fn contains(&self, peer: &NodeId) -> bool {
 		self.peers.binary_search_by(|p| p.as_bytes().cmp(peer.as_bytes())).is_ok()
 	}
 
-	/// Returns the peers in sorted order.
+	/// Sorted order.
 	pub fn as_slice(&self) -> &[NodeId] {
 		&self.peers
 	}
 
-	/// Returns the number of peers.
 	pub fn len(&self) -> usize {
 		self.peers.len()
 	}
 
-	/// Returns `true` if the set is empty.
 	pub fn is_empty(&self) -> bool {
 		self.peers.is_empty()
 	}

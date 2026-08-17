@@ -16,6 +16,9 @@
 //! [`O3dbStorage`](super::dist::o3db_storage) so a subsequent `get` sees the
 //! tombstone on its first read rather than racing a direct-to-disk delete. The
 //! log-structured engine reclaims the space on compaction.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use crate::cas::{
 	Cas,
@@ -45,8 +48,7 @@ use oxedyne_fe2o3_jdat::{
 use std::sync::Arc;
 
 
-/// The key prefix under which every chunk is stored. A `scan` on this prefix
-/// enumerates the store.
+// A scan on this prefix enumerates the store.
 const CHUNK_PREFIX: &str = "chunk:";
 
 
@@ -78,8 +80,6 @@ impl<
 >
 	O3dbCas<UIDL, UID, ENC, KH, PR, CS>
 {
-	/// Constructs a new chunk store over a shared [`O3db`] handle.
-	///
 	/// `user` is the caller identity every write is stamped with; the chunk
 	/// store does not model per-chunk authorship beyond this.
 	pub fn new(db: Arc<O3db<UIDL, UID, ENC, KH, PR, CS>>, user: UID) -> Self {
@@ -94,7 +94,6 @@ impl<
 		Dat::Str(s)
 	}
 
-	/// Parses a key produced by [`encode_key`] back to a [`ContentId`].
 	fn parse_key(dat: &Dat) -> Outcome<ContentId> {
 		let s = match dat {
 			Dat::Str(s) => s,
@@ -136,8 +135,8 @@ impl<
 		}
 	}
 
-	/// Extracts chunk bytes from a fetched `Dat`, handling the unsigned-bytes
-	/// family (the store path always writes `Dat::BU8`).
+	/// Accepts the whole unsigned-bytes family; the store path always writes
+	/// `Dat::BU8`.
 	fn extract_bytes(dat: &Dat) -> Outcome<Vec<u8>> {
 		match dat {
 			Dat::BU8(b) | Dat::BU16(b) | Dat::BU32(b) | Dat::BU64(b) =>
@@ -148,8 +147,7 @@ impl<
 		}
 	}
 
-	/// Reads a chunk's stored bytes, returning `None` for an absent key or a
-	/// deletion tombstone.
+	/// `None` for an absent key or a deletion tombstone.
 	fn read(&self, id: &ContentId)
 		-> Outcome<Option<Vec<u8>>>
 	{
@@ -235,7 +233,6 @@ impl<
 mod tests {
 	use super::*;
 
-	/// The chunk key round-trips through encode and parse.
 	#[test]
 	fn key_round_trips() -> Outcome<()> {
 		let id = ContentId::of(b"a chunk of bytes");
@@ -253,7 +250,6 @@ mod tests {
 		Ok(())
 	}
 
-	/// A key without the chunk prefix is refused.
 	#[test]
 	fn parse_key_rejects_wrong_prefix() {
 		let dat = Dat::Str("other:deadbeef".to_string());

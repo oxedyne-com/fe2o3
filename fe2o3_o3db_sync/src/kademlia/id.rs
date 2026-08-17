@@ -5,6 +5,9 @@
 //! in its binary expansion -- specifically the index of the most-significant
 //! set bit -- selects which k-map in the routing table is responsible for a
 //! given peer.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -14,10 +17,7 @@ use std::{
 };
 
 
-/// The identifier length in bytes. // 256 bits.
-pub const ID_LEN: usize = 32;
-
-/// The identifier length in bits.
+pub const ID_LEN: usize = 32;	// 256 bits
 pub const ID_BITS: usize = ID_LEN * 8;
 
 
@@ -32,14 +32,11 @@ pub const ID_BITS: usize = ID_LEN * 8;
 pub struct NodeId(pub [u8; ID_LEN]);
 
 impl NodeId {
-	/// Constructs an identifier from a raw 32-byte array.
 	pub const fn from_bytes(bytes: [u8; ID_LEN]) -> Self {
 		Self(bytes)
 	}
 
-	/// Constructs an identifier from a byte slice.
-	///
-	/// Returns an error if the slice is not exactly [`ID_LEN`] bytes.
+	/// The slice must be exactly [`ID_LEN`] bytes.
 	pub fn from_slice(bytes: &[u8]) -> Outcome<Self> {
 		if bytes.len() != ID_LEN {
 			return Err(err!(
@@ -51,7 +48,6 @@ impl NodeId {
 		Ok(Self(arr))
 	}
 
-	/// Returns the identifier as a byte slice.
 	pub fn as_bytes(&self) -> &[u8; ID_LEN] {
 		&self.0
 	}
@@ -65,8 +61,7 @@ impl NodeId {
 		Distance(out)
 	}
 
-	/// The index of the k-map that holds peers at the XOR distance between
-	/// `self` and `other`.
+	/// The index of the k-map holding peers at this XOR distance.
 	///
 	/// The index is the bit-position of the distance's most-significant set
 	/// bit, counted from the least-significant bit (so index `0` is the
@@ -105,10 +100,8 @@ impl fmt::Display for NodeId {
 pub struct Distance(pub [u8; ID_LEN]);
 
 impl Distance {
-	/// The zero distance. Two equal identifiers.
-	pub const ZERO: Self = Self([0u8; ID_LEN]);
+	pub const ZERO: Self = Self([0u8; ID_LEN]);	// two equal identifiers
 
-	/// Returns `true` if the distance is zero.
 	pub fn is_zero(&self) -> bool {
 		self.0.iter().all(|b| *b == 0)
 	}

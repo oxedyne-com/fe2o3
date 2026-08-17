@@ -6,6 +6,9 @@
 //! LRU-biased: a live LRU is retained (the incoming contact is discarded) and
 //! only a confirmed-dead LRU is evicted. The bias reduces churn and raises
 //! the cost of eclipse attacks.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use super::{
 	contact::Contact,
@@ -17,24 +20,17 @@ use oxedyne_fe2o3_core::prelude::*;
 use std::collections::VecDeque;
 
 
-/// The outcome of attempting to insert a [`Contact`] into a [`KMap`].
 #[derive(Clone, Debug)]
 pub enum InsertOutcome {
-	/// The contact is new and was placed at the front of the k-map.
-	Inserted,
-	/// The contact was already present; its existing entry was moved to the
-	/// front and its mutable metadata (`last_seen`, `rtt`, `capabilities`,
-	/// `addresses`) was overwritten from the incoming copy.
+	Inserted,	// placed at the front
+	// The existing entry moved to the front, and its last_seen, rtt,
+	// capabilities and addresses were overwritten from the incoming copy.
 	Refreshed,
-	/// The k-map is full. The contained [`Contact`] is the current LRU and
-	/// should be probed by the caller. On a live response call
-	/// [`KMap::keep_lru`]; on a confirmed-dead response call
-	/// [`KMap::evict_and_insert`] with the new contact.
+	// The k-map is full, and candidate is the current LRU standing in the way.
+	// Probe it: call KMap::keep_lru if it answers, KMap::evict_and_insert with
+	// pending if it does not.
 	Full {
-		/// The LRU that stands in the way of the new contact.
 		candidate:	Contact,
-		/// The new contact that prompted the overflow, to be re-supplied to
-		/// [`KMap::evict_and_insert`] once the LRU is confirmed dead.
 		pending:	Contact,
 	},
 }
@@ -47,14 +43,11 @@ pub enum InsertOutcome {
 /// is MRU first.
 #[derive(Clone, Debug)]
 pub struct KMap {
-	/// The bucket's capacity.
 	k:			usize,
-	/// The bucket's entries, MRU at the front, LRU at the back.
-	entries:	VecDeque<Contact>,
+	entries:	VecDeque<Contact>,	// MRU at the front, LRU at the back
 }
 
 impl KMap {
-	/// Builds an empty k-map with capacity `k`.
 	pub fn new(k: usize) -> Outcome<Self> {
 		if k == 0 {
 			return Err(err!(
@@ -67,33 +60,27 @@ impl KMap {
 		})
 	}
 
-	/// The bucket's capacity `k`.
 	pub fn capacity(&self) -> usize {
 		self.k
 	}
 
-	/// The number of contacts currently held.
 	pub fn len(&self) -> usize {
 		self.entries.len()
 	}
 
-	/// Returns `true` if the bucket holds no contacts.
 	pub fn is_empty(&self) -> bool {
 		self.entries.is_empty()
 	}
 
-	/// Returns `true` if the bucket is at capacity.
 	pub fn is_full(&self) -> bool {
 		self.entries.len() >= self.k
 	}
 
-	/// Iterates contacts in MRU-first order.
+	/// MRU-first order.
 	pub fn iter(&self) -> impl Iterator<Item = &Contact> {
 		self.entries.iter()
 	}
 
-	/// Attempts to insert a contact.
-	///
 	/// Behaviour by case:
 	///
 	/// - Not present, bucket has room: inserted at the front, returns
@@ -132,11 +119,10 @@ impl KMap {
 		InsertOutcome::Inserted
 	}
 
-	/// Confirms the LRU is still live after an external probe.
-	///
-	/// Moves the contact at the tail to the front (so it becomes the
-	/// most-recently-seen), updates its `last_seen` and discards any pending
-	/// contact the caller was holding. No-op on an empty bucket.
+	/// Call this once an external probe has confirmed the LRU is still live.
+	/// The tail contact moves to the front and its `last_seen` is updated; any
+	/// pending contact the caller was holding is discarded. No-op on an empty
+	/// bucket.
 	pub fn keep_lru(&mut self, now: u64) {
 		if let Some(mut lru) = self.entries.pop_back() {
 			lru.touch(now);
@@ -144,30 +130,25 @@ impl KMap {
 		}
 	}
 
-	/// Replaces the LRU with `new` after an external probe confirmed the LRU
-	/// is dead.
-	///
-	/// The dead contact is dropped, `new` is inserted at the front. Returns
-	/// the evicted contact.
+	/// Call this once an external probe has confirmed the LRU is dead. The
+	/// dead contact is dropped and returned; `new` goes to the front.
 	pub fn evict_and_insert(&mut self, new: Contact) -> Option<Contact> {
 		let evicted = self.entries.pop_back();
 		self.entries.push_front(new);
 		evicted
 	}
 
-	/// Removes a contact by id, if present, and returns it.
 	pub fn remove(&mut self, id: &NodeId) -> Option<Contact> {
 		let pos = ok!(self.position(id));
 		self.entries.remove(pos)
 	}
 
-	/// Returns a reference to the contact with the given id, if present.
 	pub fn get(&self, id: &NodeId) -> Option<&Contact> {
 		self.entries.iter().find(|c| c.node_id == *id)
 	}
 
 	/// Records a liveness observation by moving an existing contact to the
-	/// front. Returns `true` if the contact was present and refreshed.
+	/// front. False if the contact was not there.
 	pub fn touch(&mut self, id: &NodeId, now: u64) -> bool {
 		let Some(pos) = self.position(id) else { return false; };
 		if let Some(mut c) = self.entries.remove(pos) {

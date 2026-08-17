@@ -21,8 +21,11 @@
 //! [`fe2o3_hotstuff`][hs]); this module provides only the *membership*
 //! decision and the *initial* leader (round zero) for convenience.
 //!
-//! [c]: crate::config::Consistency::Cohort
+//! [c]: crate::dist::config::Consistency::Cohort
 //! [hs]: https://github.com/oxedyne-io/fe2o3/tree/main/fe2o3_hotstuff
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use super::peer_set::PeerSet;
 use super::record::RecordId;
@@ -34,16 +37,10 @@ use crate::kademlia::id::NodeId;
 /// A cohort's membership for a specific record.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Cohort {
-	/// The cohort members in ascending XOR-distance order from the seed.
-	/// First member is the closest to the seed (and the initial leader).
-	/// Length equals `min(lambda, peers.len() + 1)`.
-	pub members:			Vec<NodeId>,
-	/// `true` if the local peer is one of the cohort members.
+	pub members:			Vec<NodeId>,	// ascending XOR distance from the seed
 	pub local_is_member:	bool,
-	/// `true` if the local peer is the initial (round-zero) leader.
-	pub local_is_leader:	bool,
-	/// The initial (round-zero) leader.
-	pub leader:				NodeId,
+	pub local_is_leader:	bool,			// round zero
+	pub leader:				NodeId,			// round zero
 }
 
 impl Cohort {
@@ -54,8 +51,6 @@ impl Cohort {
 }
 
 
-/// Selects the HotStuff cohort for a given `(table_name, record_id)` pair.
-///
 /// The cohort is the `lambda` peers closest in XOR distance to the seed
 /// `H(table_name) XOR record_id`, where `H(table_name)` is the deterministic
 /// 32-byte splitmix64-derived hash of the table name used by
@@ -70,8 +65,8 @@ impl Cohort {
 /// Returns an empty cohort if `lambda == 0`, which corresponds to the
 /// degenerate "no consensus" case.
 ///
-/// [ts]: crate::config::TableConfig::iblt_seed
-/// [tc]: crate::config::TableConfig::new
+/// [ts]: crate::dist::config::TableConfig::iblt_seed
+/// [tc]: crate::dist::config::TableConfig::new
 pub fn select(
 	table_name:	&str,
 	record_id:	&RecordId,
@@ -133,7 +128,7 @@ pub fn select(
 /// 256 bits by successive mixing so the seed lives in the same identifier
 /// space as the record id.
 ///
-/// [ts]: crate::config::TableConfig::iblt_seed
+/// [ts]: crate::dist::config::TableConfig::iblt_seed
 fn seed_for(table_name: &str, record_id: &RecordId) -> NodeId {
 	let mut state: u64 = 0x9E3779B97F4A7C15;
 	for byte in table_name.as_bytes() {

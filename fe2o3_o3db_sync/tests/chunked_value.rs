@@ -15,6 +15,9 @@
 //! append-only list, a document -- which is to say the ones a caller least expects to lose.  This
 //! test stores each of the kinds a caller actually stores, at a size that forces chunking, and
 //! insists on getting back what it put in.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::{
     prelude::*,
@@ -47,8 +50,8 @@ use std::{
 };
 
 
-/// Enough records that the encoded list comfortably exceeds any chunk size the database is
-/// configured with, so the write path is certain to have split it.
+// Enough records that the encoded list comfortably exceeds any chunk size the
+// database is configured with, so the write path is certain to have split it.
 const RECORDS: usize = 400;
 
 

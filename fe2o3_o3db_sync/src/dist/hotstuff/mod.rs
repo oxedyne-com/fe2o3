@@ -42,6 +42,9 @@
 //! - Signature aggregation (we pass individual signatures through the QC;
 //!   callers implementing threshold signatures can swap the aggregation
 //!   logic at their integration layer).
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 pub mod replica;
 pub mod types;

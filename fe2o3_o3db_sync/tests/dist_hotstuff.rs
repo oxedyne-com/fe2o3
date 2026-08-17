@@ -1,5 +1,8 @@
 #![cfg(feature = "dist")]
 //! Integration tests for the HotStuff primitive.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -24,7 +27,6 @@ use oxedyne_fe2o3_o3db_sync::dist::hotstuff::{
 use std::collections::VecDeque;
 
 
-/// A pending delivery in the in-memory simulation.
 #[derive(Clone, Debug)]
 enum Delivery {
 	Proposal(Proposal),
@@ -32,8 +34,8 @@ enum Delivery {
 	NewView		{ to: ReplicaId, new_view:	NewView },
 }
 
-/// In-memory driver. Routes each emitted command into a FIFO and runs until
-/// the queue drains or every replica has decided.
+/// Routes each emitted command into a FIFO and runs until the queue drains or
+/// every replica has decided.
 struct Driver {
 	replicas:	Vec<Replica>,
 	queue:		VecDeque<Delivery>,
@@ -116,9 +118,8 @@ impl Driver {
 		Ok(())
 	}
 
-	/// Fires a timeout on every replica that has not yet decided, routing
-	/// the resulting NewView commands into the queue. Simulates a cohort-
-	/// wide timeout event.
+	/// Simulates a cohort-wide timeout: every replica that has not yet decided
+	/// fires, and the resulting NewView commands go into the queue.
 	fn timeout_all(&mut self) -> Outcome<()> {
 		let cohort = self.replicas.len();
 		for id in 0..cohort {

@@ -18,6 +18,9 @@
 //!   holder, independent of the XOR distance. Treated as "threshold equals
 //!   `2^256`", which would not fit in a 256-bit word, so it is held as a
 //!   sentinel instead.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
 use crate::kademlia::id::{
@@ -27,8 +30,8 @@ use crate::kademlia::id::{
 };
 
 
-/// Number of 64-bit limbs used to represent the 256-bit threshold during
-/// computation. Big-endian; limb index `0` is most-significant.
+// 64-bit limbs of the 256-bit threshold during computation. Big-endian, so
+// limb index 0 is the most significant.
 const LIMBS: usize = 4;
 
 
@@ -38,25 +41,15 @@ const LIMBS: usize = 4;
 /// inequality in the Ozone chapter of the Hematite specification.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Threshold {
-	/// `n = 0`. No peer holds any record.
-	None,
-	/// `0 < n < N`. A peer holds the record if its XOR distance to the record
-	/// hash is strictly less than the wrapped 256-bit value.
-	Bounded([u8; ID_LEN]),
-	/// `n >= N` (or `N = 0`). Every peer holds every record.
-	All,
+	None,					// n = 0, so no peer holds any record
+	Bounded([u8; ID_LEN]),	// 0 < n < N, and the XOR distance must be under it
+	All,					// n >= N, or N = 0, so every peer holds every record
 }
 
 impl Threshold {
-	/// Computes `T = floor(2^256 * n / network_size)` for the standard case
-	/// `0 < n < network_size`.
-	///
-	/// The two boundary cases are encoded explicitly:
-	///
-	/// - `n == 0` -- returns [`Threshold::None`]. The probability of any peer
-	///   holding any record is zero.
-	/// - `network_size == 0` or `n >= network_size` -- returns
-	///   [`Threshold::All`]. Every peer holds every record.
+	/// `T = floor(2^256 * n / network_size)` for the standard case
+	/// `0 < n < network_size`; the two boundary cases saturate to
+	/// [`Threshold::None`] and [`Threshold::All`].
 	pub fn from_params(n: u64, network_size: u64) -> Self {
 		if n == 0 {
 			return Self::None;
@@ -92,8 +85,7 @@ impl Threshold {
 		Self::Bounded(out)
 	}
 
-	/// Returns `true` if a peer at the given XOR distance from the record hash
-	/// is a holder under this threshold.
+	/// Is a peer at this XOR distance from the record hash a holder?
 	pub fn contains(&self, distance: &Distance) -> bool {
 		match self {
 			Self::None => false,
@@ -102,10 +94,8 @@ impl Threshold {
 		}
 	}
 
-	/// Returns the stored 256-bit threshold value in the `Bounded` case.
-	///
-	/// Returns `None` for the saturation boundaries `None` and `All`, which
-	/// have no finite 256-bit representation.
+	/// `None` at the saturation boundaries, which have no finite 256-bit
+	/// representation.
 	pub fn as_bytes(&self) -> Option<&[u8; ID_LEN]> {
 		match self {
 			Self::Bounded(t) => Some(t),
@@ -113,9 +103,8 @@ impl Threshold {
 		}
 	}
 
-	/// Returns the threshold as a [`NodeId`]-shaped value when bounded. Handy
-	/// for callers that want to drive iterator comparisons against XOR
-	/// distances without rewrapping the bytes.
+	/// For a caller driving iterator comparisons against XOR distances without
+	/// rewrapping the bytes.
 	pub fn as_node_id(&self) -> Option<NodeId> {
 		self.as_bytes().map(|b| NodeId::from_bytes(*b))
 	}

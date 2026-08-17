@@ -19,6 +19,9 @@
 //!
 //! [`OamConfig`]: crate::oam::config::OamConfig
 //! [`Threshold`]: crate::oam::threshold::Threshold
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use super::peer_set::PeerSet;
 use super::record::RecordId;
@@ -41,36 +44,31 @@ pub struct Placement {
 }
 
 impl Placement {
-	/// Constructs a placement service for the given local peer and OAM
-	/// configuration, precomputing the 256-bit threshold.
+	/// Precomputes the 256-bit threshold.
 	pub fn new(local_peer_id: NodeId, oam: OamConfig) -> Self {
 		let threshold = oam.threshold();
 		Self { local_peer_id, oam, threshold }
 	}
 
-	/// Returns the local peer identifier.
 	pub fn local_peer_id(&self) -> &NodeId {
 		&self.local_peer_id
 	}
 
-	/// Returns the current OAM configuration.
 	pub fn oam(&self) -> &OamConfig {
 		&self.oam
 	}
 
-	/// Returns the cached 256-bit placement threshold.
 	pub fn threshold(&self) -> &Threshold {
 		&self.threshold
 	}
 
-	/// Updates the OAM configuration (typically after a HyperLogLog estimate
-	/// refresh revises `N`) and recomputes the cached threshold.
+	/// Recomputes the cached threshold. Typically called after a HyperLogLog
+	/// estimate refresh revises `N`.
 	pub fn update_oam(&mut self, oam: OamConfig) {
 		self.threshold = oam.threshold();
 		self.oam = oam;
 	}
 
-	/// Returns `true` if the local peer is a holder of the given record.
 	pub fn i_am_holder(&self, record: &RecordId) -> bool {
 		oam::is_holder(
 			&self.local_peer_id,
@@ -79,9 +77,8 @@ impl Placement {
 		)
 	}
 
-	/// Returns the peers (other than the local peer) that hold the record
-	/// under the cached threshold. The local peer is never included in the
-	/// result -- distributed Ozone handles the local replica separately.
+	/// The local peer is never included -- distributed Ozone handles the local
+	/// replica separately.
 	pub fn remote_holders<'a>(
 		&self,
 		record:	&RecordId,
@@ -92,10 +89,9 @@ impl Placement {
 		oam::holders(&record.as_node_id(), peers.as_slice(), &self.threshold)
 	}
 
-	/// Returns up to `count` read targets -- the peers nearest the record
-	/// hash by XOR distance, regardless of the cached threshold. Used when
-	/// the local peer is not a holder and must fetch the record from the
-	/// network.
+	/// Up to `count` peers nearest the record hash by XOR distance, regardless
+	/// of the cached threshold. Used when the local peer is not a holder and
+	/// must fetch the record from the network.
 	pub fn read_targets<'a>(
 		&self,
 		record:	&RecordId,
@@ -107,9 +103,8 @@ impl Placement {
 		oam::closest_holders(&record.as_node_id(), peers.as_slice(), count)
 	}
 
-	/// Summarises the placement decision for a record: is the local peer a
-	/// holder, which remote peers hold it, and how many targets are there
-	/// in total. Convenience for call sites that need all three.
+	/// Convenience for a call site that needs the local answer and the remote
+	/// holders together.
 	pub fn decide<'a>(
 		&self,
 		record:	&RecordId,
@@ -130,14 +125,12 @@ impl Placement {
 /// The result of a placement decision for one record.
 #[derive(Clone, Debug)]
 pub struct PlacementDecision<'a> {
-	/// `true` if the local peer is a holder of the record.
 	pub local_is_holder:	bool,
-	/// The remote peers that hold the record.
 	pub remote_holders:		Vec<&'a NodeId>,
 }
 
 impl<'a> PlacementDecision<'a> {
-	/// The total number of holders (local + remote).
+	/// Local plus remote.
 	pub fn holder_count(&self) -> usize {
 		self.remote_holders.len() + usize::from(self.local_is_holder)
 	}

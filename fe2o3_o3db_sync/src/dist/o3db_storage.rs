@@ -31,6 +31,9 @@
 //!   [`MemoryStorage`](super::storage::MemoryStorage) so that a mixed
 //!   cluster (in-memory peer + O3db-backed peer) converges. A
 //!   cryptographic replacement can slot in without touching the trait.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use super::record::{
 	Record,
@@ -89,8 +92,6 @@ impl<
 >
 	O3dbStorage<UIDL, UID, ENC, KH, PR, CS>
 {
-	/// Constructs a new adapter over a shared [`O3db`] handle.
-	///
 	/// `user` is the caller identity under which every distributed-mode
 	/// write is stamped -- distributed Ozone does not model per-write
 	/// authorship beyond this. Applications that need finer-grained
@@ -111,8 +112,7 @@ impl<
 		Dat::Str(s)
 	}
 
-	/// Parses a key produced by [`encode_key`] back to a [`RecordId`],
-	/// asserting the expected table prefix along the way.
+	/// Asserts the expected table prefix along the way.
 	fn parse_key(dat: &Dat, table: &str) -> Outcome<RecordId> {
 		let s = match dat {
 			Dat::Str(s) => s,
@@ -143,9 +143,8 @@ impl<
 		Ok(RecordId::from_bytes(arr))
 	}
 
-	/// Drains the two-message acknowledgement a successful store emits.
-	/// Returns `Ok(())` on `Chunks(_)` + `KeyExists(_)`; surfaces any
-	/// `Error` variant as an [`Outcome`] error.
+	/// Drains the two-message acknowledgement a successful store emits:
+	/// `Chunks(_)` then `KeyExists(_)`.
 	fn drain_store_ack(
 		resp:	&crate::comm::response::Responder<UIDL, UID, ENC, KH>,
 	)
@@ -172,10 +171,9 @@ impl<
 		}
 	}
 
-	/// Extracts the record value bytes from a fetched `Dat`, handling
-	/// the unsigned-bytes family (the store path always writes
-	/// `Dat::BU8`; the other widths show up if a caller had pre-existing
-	/// data under a different width).
+	/// Accepts the whole unsigned-bytes family: the store path always writes
+	/// `Dat::BU8`, but the other widths show up where a caller had
+	/// pre-existing data under a different width.
 	fn extract_value(dat: &Dat) -> Outcome<Vec<u8>> {
 		match dat {
 			Dat::BU8(b)	 | Dat::BU16(b) | Dat::BU32(b) | Dat::BU64(b) =>
@@ -277,12 +275,9 @@ impl<
 }
 
 
-/// Deterministic splitmix64-widened 32-byte content hash of a byte
-/// slice. Matches the hash used by
-/// [`MemoryStorage`](super::storage::MemoryStorage) so that a mixed
-/// cluster (in-memory peer and O3db-backed peer) reconciles via
-/// anti-entropy without the two adapters disagreeing on digests.
-///
+/// A splitmix64-widened 32-byte hash, matching the one
+/// [`MemoryStorage`](super::storage::MemoryStorage) uses so that a mixed
+/// cluster of in-memory and O3db-backed peers does not disagree on digests.
 /// Not cryptographic; see the module doc comment.
 fn content_hash(bytes: &[u8]) -> [u8; 32] {
 	let mut state: u64 = 0x9E3779B97F4A7C15;
@@ -304,7 +299,6 @@ fn content_hash(bytes: &[u8]) -> [u8; 32] {
 }
 
 
-/// Converts a 4-bit nibble to its lowercase hex character.
 fn hex_char(nib: u8) -> char {
 	match nib {
 		0..=9	=> (b'0' + nib) as char,
@@ -313,7 +307,6 @@ fn hex_char(nib: u8) -> char {
 	}
 }
 
-/// Converts a hex character byte to its 4-bit nibble.
 fn nibble(b: u8) -> Outcome<u8> {
 	match b {
 		b'0'..=b'9' => Ok(b - b'0'),

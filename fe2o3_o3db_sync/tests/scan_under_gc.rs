@@ -37,6 +37,9 @@
 //! rate, and it serves that work about as fast as several writers can
 //! produce it -- so a queue forms only by luck, and the test would then
 //! measure the machine rather than the database.
+//!
+//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
 
 use oxedyne_fe2o3_core::{
     prelude::*,
@@ -69,18 +72,15 @@ use std::{
 
 /// The dimensions of one run.
 struct Shape {
-    /// Directory name for this run's store.
-    dir:        &'static str,
-    /// Number of distinct keys held in the store.
-    keys:       usize,
-    /// Size in bytes of each value payload, before encoding. Large, so
-    /// that a collection moves far more than a scan reads.
+    dir:        &'static str,   // directory name for this run's store
+    keys:       usize,          // distinct keys held in the store
+    // Value payload size in bytes, before encoding. Large, so that a
+    // collection moves far more than a scan reads.
     val_bytes:  usize,
-    /// Maximum data file size, and so the size of one collection's work.
-    file_bytes: u64,
+    file_bytes: u64,            // and so the size of one collection's work
 }
 
-/// The store the crate's own test suite can afford.
+// The store the crate's own test suite can afford.
 const QUICK: Shape = Shape {
     dir:        "./test_db_scan_under_gc",
     keys:       6_000,
@@ -88,9 +88,9 @@ const QUICK: Shape = Shape {
     file_bytes: 8_000_000,
 };
 
-/// A store several times larger, where the backlog is deep enough to
-/// cost more than the user request deadline outright rather than only
-/// running late. Writes some hundreds of megabytes.
+// A store several times larger, where the backlog is deep enough to cost more
+// than the user request deadline outright rather than only running late. Writes
+// some hundreds of megabytes.
 const DEEP: Shape = Shape {
     dir:        "./test_db_scan_stall",
     keys:       30_000,
@@ -98,19 +98,16 @@ const DEEP: Shape = Shape {
     file_bytes: 8_000_000,
 };
 
-/// Fraction of the keys superseded before collection is switched on.
-/// It has to clear `OLD_DATA_PERCENT_GC_TRIGGER`, which is measured
-/// against the maximum data file size rather than the file's own size.
+// Fraction of the keys superseded before collection is switched on. It has to
+// clear OLD_DATA_PERCENT_GC_TRIGGER, which is measured against the maximum data
+// file size rather than the file's own size.
 const OLD_FRAC:     f64 = 0.5;
 
-/// Number of quiet scans used to establish the latency baseline.
-const NUM_BASELINE: usize = 3;
+const NUM_BASELINE: usize = 3;  // quiet scans establishing the latency baseline
+const NUM_LOADED:   usize = 5;  // scans issued while the backlog is worked off
 
-/// Number of scans issued while the backlog is being worked through.
-const NUM_LOADED:   usize = 5;
-
-/// Returns the spacing of the keys superseded to set the backlog going:
-/// about two per file, which reaches every file holding original
+/// The spacing of the keys superseded to set the backlog going: about two per
+/// file, which reaches every file holding original
 /// records while keeping the burst far shorter than the collection work
 /// it dispatches. A finer stride lets the collector work the queue down
 /// as fast as it is filled, and the test then measures nothing.
