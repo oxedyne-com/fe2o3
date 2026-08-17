@@ -778,6 +778,34 @@ mod tests {
 		}
 	}
 
+	/// The bit is IN THE BYTES the address is taken over, so changing it changes the address.
+	///
+	/// This is the payload half of "a flag a relay could add or strip is not a consent flag". The
+	/// artefact half is in `doc.rs`: the signature covers the address, so a carrier that changed
+	/// the bit would have to forge a signature to go with it.
+	///
+	/// The bytes are built by hand rather than through `encode`, because the whole point is a
+	/// payload this schema would refuse to write: a `code` that disagrees with the files. A
+	/// carrier is not held to the schema, so the test must not be either.
+	#[test]
+	fn test_flipping_the_code_bit_changes_the_address() -> Outcome<()> {
+		let honest = res!(sample().encode());
+		let mut m = match res!(sample().to_dat()) {
+			Dat::Map(m) => m,
+			other => return Err(err!(
+				"A share encodes as a map, and this is a {:?}.", other.kind(); Test, Bug)),
+		};
+		m.insert(dat!(KEY_CODE), Dat::Bool(true));
+		let tampered = res!(Dat::Map(m).to_bytes(Vec::new()));
+		assert_ne!(tampered, honest,
+			"Setting the consent bit did not change a byte, so nothing signed covers it.");
+		// And the tampered bytes are refused on the way in, so a carrier gains nothing even where
+		// the container is not consulted.
+		assert!(Share::decode(&tampered).is_err(),
+			"A share whose consent bit was set by somebody other than its author was read.");
+		Ok(())
+	}
+
 	/// A code suffix in capitals is still a code suffix.
 	#[test]
 	fn test_the_suffix_check_ignores_case() -> Outcome<()> {

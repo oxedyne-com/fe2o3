@@ -1347,6 +1347,42 @@ mod tests {
 				"A share read back as a {}.", other.schema(); Test, Invalid)),
 		}
 
+		// THE CONSENT BIT CANNOT BE SET BY WHATEVER CARRIES THE SHARE. The payload is what the
+		// hash covers and the signature commits to, so a relay that set `code` on a share whose
+		// author said there was none would have to forge a signature to go with it. Built by hand,
+		// because a payload whose bit disagrees with its files is one the schema refuses to WRITE
+		// and a carrier is not held to the schema.
+		let plain = crate::share::Share::new(
+			fmt!("Sourdough"),
+			vec![0xA1; crate::share::limit::KEY_BYTES],
+			vec![0xB2; crate::share::limit::NONCE_BYTES],
+			None,
+			vec![crate::share::File { path: fmt!("crystal.json"), body: b"{}".to_vec() }],
+		);
+		assert!(!plain.code, "A share of one data file claims to carry code.");
+		let good = res!(plain.encode());
+		let signed = res!(write_artefact(&Payload::Share(plain.clone()), &signer, TIME));
+		let mut m = match res!(plain.to_dat()) {
+			Dat::Map(m) => m,
+			other => return Err(err!(
+				"A share encodes as a map, and this is a {:?}.", other.kind(); Test, Bug)),
+		};
+		m.insert(dat!(crate::share::KEY_CODE), Dat::Bool(true));
+		let lied = res!(Dat::Map(m).to_bytes(Vec::new()));
+		assert_eq!(lied.len(), good.len(),
+			"The tampered payload is a different length, so this would be testing the length \
+			rather than the bit.");
+		let mut carried = signed.clone();
+		let start = carried.len() - good.len();
+		carried[start..].copy_from_slice(&lied);
+		match read_artefact(&carried) {
+			Ok(_) => return Err(err!(
+				"A share whose consent bit was set after signing was read, so the bit is \
+				something its carrier can decide."; Test, Invalid)),
+			Err(e) => assert!(fmt!("{}", e).contains("hashes to"),
+				"The refusal is not the address's: {}", e),
+		}
+
 		// And a share cannot be re-labelled as a post after signing, for the same reason a post
 		// cannot be re-labelled as a card: the schema is inside the signing input.
 		let bytes = res!(res!(match back.payload() {
